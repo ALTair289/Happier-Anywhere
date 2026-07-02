@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { delimiter, join, resolve } from 'node:path';
@@ -8,7 +8,7 @@ import { createTestAuth } from '../../src/testkit/auth';
 import { seedCliAuthForServer } from '../../src/testkit/cliAuth';
 import { daemonControlPostJson } from '../../src/testkit/daemon/controlServerClient';
 import { startTestDaemon, type StartedDaemon } from '../../src/testkit/daemon/daemon';
-import { fakeClaudeFixturePath, waitForFakeClaudeUserText } from '../../src/testkit/fakeClaude';
+import { fakeClaudeFixturePath } from '../../src/testkit/fakeClaude';
 import { decryptLegacyBase64 } from '../../src/testkit/messageCrypto';
 import { listPendingQueueV2 } from '../../src/testkit/pendingQueueV2';
 import { repoRootDir } from '../../src/testkit/paths';
@@ -22,6 +22,7 @@ import { postEncryptedUiTextMessage } from '../../src/testkit/uiMessages';
 const run = createRunDirs({ runLabel: 'core' });
 
 type WakeSubmitPath = 'pending_queue' | 'direct_commit';
+type FakeClaudePromptEventType = 'sdk_stdin' | 'local_stdin_turn_completed';
 
 type WakeProviderCase = Readonly<{
   backend: 'fake-claude' | 'fake-gemini-acp';
@@ -99,6 +100,10 @@ function readUserText(value: unknown): string | null {
   return typeof content.text === 'string' ? content.text : null;
 }
 
+function sha256Text(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
 async function readJsonlEvents(path: string): Promise<unknown[]> {
   if (!existsSync(path)) return [];
   const raw = await readFile(path, 'utf8').catch(() => '');
@@ -115,13 +120,39 @@ async function readJsonlEvents(path: string): Promise<unknown[]> {
     });
 }
 
-async function countFakeClaudeUserTextOccurrences(logPath: string, text: string): Promise<number> {
+async function countFakeClaudeUserTextOccurrences(
+  logPath: string,
+  text: string,
+  opts?: { eventType?: FakeClaudePromptEventType },
+): Promise<number> {
   const events = await readJsonlEvents(logPath);
+  const digest = sha256Text(text);
   return events.filter((event) => {
     if (!isRecord(event)) return false;
-    if (event.type !== 'sdk_stdin' || event.hasUserText !== true) return false;
-    return typeof event.userTextPreview === 'string' && event.userTextPreview.includes(text);
+    const type = typeof event.type === 'string' ? event.type : '';
+    if (opts?.eventType && type !== opts.eventType) return false;
+    if (!opts?.eventType && type !== 'sdk_stdin' && type !== 'local_stdin_turn_completed') return false;
+    if (type === 'sdk_stdin' && event.hasUserText !== true) return false;
+    return event.userTextSha256 === digest;
   }).length;
+}
+
+async function waitForFakeClaudeUserTextSha256(
+  logPath: string,
+  text: string,
+  opts?: { timeoutMs?: number; pollMs?: number; eventType?: FakeClaudePromptEventType },
+): Promise<void> {
+  const timeoutMs = opts?.timeoutMs ?? 60_000;
+  const pollMs = opts?.pollMs ?? 150;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const count = await countFakeClaudeUserTextOccurrences(logPath, text, { eventType: opts?.eventType });
+    if (count > 0) return;
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+
+  throw new Error(`Timed out waiting for fake Claude prompt digest in ${logPath}`);
 }
 
 async function readFakeGeminiEvents(path: string): Promise<FakeGeminiEvent[]> {
@@ -406,11 +437,13 @@ async function waitForProviderPromptText(params: {
   providerCase: WakeProviderCase;
   prompt: string;
   timeoutMs: number;
+  fakeClaudeEventType?: FakeClaudePromptEventType;
 }): Promise<void> {
   if (params.providerCase.backend === 'fake-claude') {
-    await waitForFakeClaudeUserText(params.harness.fakeClaudeLogPath, (text) => text.includes(params.prompt), {
+    await waitForFakeClaudeUserTextSha256(params.harness.fakeClaudeLogPath, params.prompt, {
       timeoutMs: params.timeoutMs,
       pollMs: 150,
+      eventType: params.fakeClaudeEventType,
     });
     return;
   }
@@ -425,9 +458,12 @@ async function countProviderPromptTextOccurrences(params: {
   harness: RunningWakeHarness;
   providerCase: WakeProviderCase;
   prompt: string;
+  fakeClaudeEventType?: FakeClaudePromptEventType;
 }): Promise<number> {
   if (params.providerCase.backend === 'fake-claude') {
-    return await countFakeClaudeUserTextOccurrences(params.harness.fakeClaudeLogPath, params.prompt);
+    return await countFakeClaudeUserTextOccurrences(params.harness.fakeClaudeLogPath, params.prompt, {
+      eventType: params.fakeClaudeEventType,
+    });
   }
 
   return await countFakeGeminiPromptTextOccurrences(params.harness.fakeGeminiLogPath, params.prompt);
@@ -467,6 +503,7 @@ async function enqueueWakePrompt(params: {
   sessionId: string;
   prompt: string;
   submitPath: WakeSubmitPath;
+  meta?: Record<string, unknown>;
 }): Promise<number | undefined> {
   if (params.submitPath === 'pending_queue') {
     await enqueueSessionPromptForScenario({
@@ -475,6 +512,7 @@ async function enqueueWakePrompt(params: {
       sessionId: params.sessionId,
       secret: params.harness.secret,
       text: params.prompt,
+      meta: params.meta,
     });
     await waitFor(async () => {
       const pending = await listPendingQueueV2({
@@ -532,30 +570,49 @@ async function assertWakePromptProcessedExactlyOnce(params: {
   sessionId: string;
   prompt: string;
   afterSeqStart: number;
+  fakeClaudeEventType?: FakeClaudePromptEventType;
+  assistantSubstring?: string;
+}): Promise<void> {
+  await assertWakePromptProcessedOccurrenceCount({
+    ...params,
+    expectedOccurrences: 1,
+  });
+}
+
+async function assertWakePromptProcessedOccurrenceCount(params: {
+  harness: RunningWakeHarness;
+  providerCase: WakeProviderCase;
+  sessionId: string;
+  prompt: string;
+  afterSeqStart: number;
+  expectedOccurrences: number;
+  fakeClaudeEventType?: FakeClaudePromptEventType;
+  assistantSubstring?: string;
 }): Promise<void> {
   await waitForProviderPromptText({
     harness: params.harness,
     providerCase: params.providerCase,
     prompt: params.prompt,
     timeoutMs: 90_000,
+    fakeClaudeEventType: params.fakeClaudeEventType,
   });
   await waitForAssistantMessageContaining({
     baseUrl: params.harness.server.baseUrl,
     token: params.harness.authToken,
     sessionId: params.sessionId,
     secret: params.harness.secret,
-    requiredSubstring: params.providerCase.assistantSubstring,
+    requiredSubstring: params.assistantSubstring ?? params.providerCase.assistantSubstring,
     afterSeqStart: params.afterSeqStart,
     timeoutMs: 120_000,
   });
 
   await waitFor(async () => {
     const count = await countProviderPromptTextOccurrences(params);
-    return count >= 1;
-  }, { timeoutMs: 10_000, context: `${params.providerCase.backend} observed wake prompt` });
+    return count >= params.expectedOccurrences;
+  }, { timeoutMs: 10_000, context: `${params.providerCase.backend} observed wake prompt ${params.expectedOccurrences} time(s)` });
 
   const fakeOccurrences = await countProviderPromptTextOccurrences(params);
-  expect(fakeOccurrences).toBe(1);
+  expect(fakeOccurrences).toBe(params.expectedOccurrences);
 
   const transcriptOccurrences = await readTranscriptUserTextMatches({
     baseUrl: params.harness.server.baseUrl,
@@ -564,7 +621,7 @@ async function assertWakePromptProcessedExactlyOnce(params: {
     secret: params.harness.secret,
     text: params.prompt,
   });
-  expect(transcriptOccurrences).toHaveLength(1);
+  expect(transcriptOccurrences).toHaveLength(params.expectedOccurrences);
 
   const pending = await listPendingQueueV2({
     baseUrl: params.harness.server.baseUrl,
@@ -630,4 +687,110 @@ describe('wake/resume: first message processed', () => {
     },
     360_000,
   );
+
+  it('processes a multiline attachment-scaffold wake prompt exactly once through fake Claude', async () => {
+    const testDir = run.testDir('wake-first-message-fake-claude-multiline-attachment-scaffold');
+    const harness = await startWakeHarness({ testDir });
+    server = harness.server;
+    daemon = harness.daemon;
+
+    const providerCase = WAKE_PROVIDER_CASES.find((item) =>
+      item.backend === 'fake-claude' && item.submitPath === 'pending_queue'
+    );
+    if (!providerCase) throw new Error('Missing fake Claude pending-queue wake provider case');
+
+    const sessionId = await spawnProviderSession({ harness, agentId: 'claude' });
+    const baselinePrompt = `E2E_WAKE_BASELINE_MULTILINE_${randomBytes(8).toString('hex')}`;
+    await seedBaselineTurn({ harness, providerCase, sessionId, prompt: baselinePrompt });
+
+    await stopSession({ harness, sessionId });
+
+    const beforeWakeRows = await fetchAllMessages(harness.server.baseUrl, harness.authToken, sessionId);
+    const beforeWakeSeq = beforeWakeRows.length > 0
+      ? Math.max(...beforeWakeRows.map((row) => row.seq))
+      : 0;
+    const sentinel = `E2E_WAKE_MULTILINE_ATTACHMENT_${randomBytes(8).toString('hex')}`;
+    const filler = Array.from({ length: 24 }, (_, index) =>
+      `detail line ${String(index + 1).padStart(2, '0')} ${sentinel} ${'x'.repeat(72)}`
+    );
+    const wakePrompt = [
+      `${sentinel}: please continue from the current implementation state.`,
+      '',
+      'This prompt intentionally spans several lines to match the incident-shaped payload.',
+      'It also includes a textual Happier attachment scaffold at the end.',
+      ...filler,
+      '',
+      '[attachments]',
+      `- .happier/uploads/messages/${sentinel}/parallax_block.png (parallax_block.png, image/png, 262290 bytes)`,
+      '[/attachments]',
+    ].join('\n');
+    expect(wakePrompt.length).toBeGreaterThan(2_000);
+
+    await enqueueWakePrompt({
+      harness,
+      sessionId,
+      prompt: wakePrompt,
+      submitPath: 'pending_queue',
+      meta: {
+        claudeRemoteAgentSdkEnabled: false,
+        claudeUnifiedTerminalEnabled: true,
+        claudeUnifiedTerminalHost: 'auto',
+        claudeUnifiedTerminalResumeChoice: 'resume_full_session',
+      },
+    });
+
+    const resumedSessionId = await spawnProviderSession({
+      harness,
+      agentId: 'claude',
+      existingSessionId: sessionId,
+    });
+    expect(resumedSessionId).toBe(sessionId);
+
+    await assertWakePromptProcessedExactlyOnce({
+      harness,
+      providerCase,
+      sessionId,
+      prompt: wakePrompt,
+      afterSeqStart: beforeWakeSeq,
+      fakeClaudeEventType: 'local_stdin_turn_completed',
+      assistantSubstring: 'FAKE_CLAUDE_LOCAL_OK_',
+    });
+
+    await stopSession({ harness, sessionId });
+
+    const beforeSecondRows = await fetchAllMessages(harness.server.baseUrl, harness.authToken, sessionId);
+    const beforeSecondSeq = beforeSecondRows.length > 0
+      ? Math.max(...beforeSecondRows.map((row) => row.seq))
+      : 0;
+    await enqueueWakePrompt({
+      harness,
+      sessionId,
+      prompt: wakePrompt,
+      submitPath: 'pending_queue',
+      meta: {
+        claudeRemoteAgentSdkEnabled: false,
+        claudeUnifiedTerminalEnabled: true,
+        claudeUnifiedTerminalHost: 'auto',
+        claudeUnifiedTerminalResumeChoice: 'resume_full_session',
+      },
+    });
+
+    const resumedAgainSessionId = await spawnProviderSession({
+      harness,
+      agentId: 'claude',
+      existingSessionId: sessionId,
+    });
+    expect(resumedAgainSessionId).toBe(sessionId);
+
+    await assertWakePromptProcessedOccurrenceCount({
+      harness,
+      providerCase,
+      sessionId,
+      prompt: wakePrompt,
+      afterSeqStart: beforeSecondSeq,
+      expectedOccurrences: 2,
+      fakeClaudeEventType: 'local_stdin_turn_completed',
+      assistantSubstring: 'FAKE_CLAUDE_LOCAL_OK_',
+    });
+  }, 900_000);
 });

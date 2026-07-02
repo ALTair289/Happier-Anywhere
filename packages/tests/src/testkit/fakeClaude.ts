@@ -179,6 +179,52 @@ export async function waitForFakeClaudeUserText(
   throw new Error(`Timed out waiting for fake Claude user text in ${logPath}`);
 }
 
+export async function waitForFakeClaudeLocalStdinText(
+  logPath: string,
+  predicate: (text: string) => boolean,
+  opts?: { timeoutMs?: number; pollMs?: number },
+): Promise<string> {
+  const timeoutMs = opts?.timeoutMs ?? 60_000;
+  const pollMs = opts?.pollMs ?? 100;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const events = await readJsonlFile(logPath);
+    for (const event of events) {
+      if (event?.type !== 'local_stdin_turn_completed') continue;
+      if (typeof event.userTextPreview !== 'string') continue;
+      if (predicate(event.userTextPreview)) return event.userTextPreview;
+    }
+    await sleep(pollMs);
+  }
+
+  throw new Error(`Timed out waiting for fake Claude local stdin text in ${logPath}`);
+}
+
+/**
+ * Wait until the fake Claude local/unified-terminal session has rendered its idle
+ * composer at least once. This is the readiness signal that the interactive PTY
+ * session is fully up — including the goal runtime-control registration that the
+ * unified-terminal runner performs as part of session setup — so a live
+ * `SESSION_GOAL_SET` RPC will not race ahead of that registration.
+ */
+export async function waitForFakeClaudeLocalIdleComposer(
+  logPath: string,
+  opts?: { timeoutMs?: number; pollMs?: number },
+): Promise<void> {
+  const timeoutMs = opts?.timeoutMs ?? 60_000;
+  const pollMs = opts?.pollMs ?? 100;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const events = await readJsonlFile(logPath);
+    if (events.some((event) => event?.type === 'local_idle_composer_rendered')) return;
+    await sleep(pollMs);
+  }
+
+  throw new Error(`Timed out waiting for fake Claude local idle composer in ${logPath}`);
+}
+
 export async function waitForFakeClaudeNativeAuthContract(
   logPath: string,
   predicate: (event: FakeClaudeNativeAuthContract) => boolean = () => true,

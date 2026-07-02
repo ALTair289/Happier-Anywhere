@@ -354,6 +354,7 @@ export type SessionV2 = {
   active: boolean;
   activeAt: number;
   pendingCount?: number;
+  pendingBlockedCount?: number;
   pendingVersion?: number;
   latestTurnStatus: PrimaryTurnStatusV1 | null;
   lastRuntimeIssue: SessionRuntimeIssueV1 | null;
@@ -378,6 +379,7 @@ function parseSessionV2Common(value: unknown, context: string): SessionV2 {
   const active = value.active;
   const activeAt = value.activeAt;
   const pendingCount = value.pendingCount;
+  const pendingBlockedCount = value.pendingBlockedCount;
   const pendingVersion = value.pendingVersion;
   const latestTurnStatus = parseLatestTurnStatus(value.latestTurnStatus, context);
   const lastRuntimeIssue = parseLastRuntimeIssue(value.lastRuntimeIssue, context);
@@ -406,6 +408,12 @@ function parseSessionV2Common(value: unknown, context: string): SessionV2 {
     throw new Error(`Invalid v2 session pendingCount (${context})`);
   }
   if (
+    pendingBlockedCount !== undefined &&
+    (typeof pendingBlockedCount !== 'number' || !Number.isInteger(pendingBlockedCount) || pendingBlockedCount < 0)
+  ) {
+    throw new Error(`Invalid v2 session pendingBlockedCount (${context})`);
+  }
+  if (
     pendingVersion !== undefined &&
     (typeof pendingVersion !== 'number' || !Number.isInteger(pendingVersion) || pendingVersion < 0)
   ) {
@@ -425,6 +433,7 @@ function parseSessionV2Common(value: unknown, context: string): SessionV2 {
     active,
     activeAt,
     ...(typeof pendingCount === 'number' ? { pendingCount } : {}),
+    ...(typeof pendingBlockedCount === 'number' ? { pendingBlockedCount } : {}),
     ...(typeof pendingVersion === 'number' ? { pendingVersion } : {}),
     latestTurnStatus,
     lastRuntimeIssue,

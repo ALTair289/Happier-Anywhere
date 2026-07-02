@@ -4,6 +4,8 @@ export type PendingQueueV2Row = {
   localId: string;
   content: { t: 'encrypted'; c: string };
   status: 'queued' | 'discarded';
+  deliveryState?: string;
+  deliveryBlockedReason?: string;
   position: number;
   createdAt: number;
   updatedAt: number;
