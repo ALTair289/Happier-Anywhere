@@ -1,6 +1,5 @@
 import { parseClaudeScreenState, type ClaudeScreenState } from './tuiControls/screenState';
-import { isClaudeComposerCaptureStyleUnavailablePlaceholderCandidate } from './tuiControls/composerCaptureClassification';
-import { isControllerTypedSlashCommandResidue } from './tuiControls/slashControls';
+import { classifyClaudeOwnComposerDraft } from './ownComposerDraftClassification';
 
 const DEFAULT_DRAFT_CLEAR_SETTLE_MS = 250;
 // Same bounded semantics as the slash-control leftover clear (lane U): one clear key can leave the
@@ -58,21 +57,12 @@ export async function clearOwnLeftoverComposerDraft(opts: Readonly<{
     }
   }
 
-  function classify(captureResult: Readonly<{ screen: ClaudeScreenState; rawText: string }>): 'empty' | 'own' | 'foreign' | 'capture_style_unavailable' | 'generating' {
-    const { screen, rawText } = captureResult;
-    const content = screen.composerContent ?? '';
-    if (content.length === 0) return 'empty';
-    if (screen.generating) return 'generating';
-    if (opts.ownComposerTexts.matches(content)) return 'own';
-    // RESUME2 respawn gap (A2-HIGH-1): controller-typed slash commands are echo-suppressed out
-    // of the persisted transcript, so a respawned registry can never exact-match their residue.
-    // The finite controller vocabulary (/model, /effort) is still OUR OWN text and stays
-    // clearable; everything else (incl. user-typed slash drafts like /compact …) stays foreign.
-    if (isControllerTypedSlashCommandResidue(content)) return 'own';
-    if (isClaudeComposerCaptureStyleUnavailablePlaceholderCandidate(rawText, screen)) {
-      return 'capture_style_unavailable';
-    }
-    return 'foreign';
+  function classify(captureResult: Readonly<{ screen: ClaudeScreenState; rawText: string }>) {
+    return classifyClaudeOwnComposerDraft({
+      screen: captureResult.screen,
+      rawText: captureResult.rawText,
+      ownComposerTexts: opts.ownComposerTexts,
+    });
   }
 
   let captured = await capture();

@@ -32,11 +32,18 @@ import {
 } from './createClaudeUnifiedTerminalReadinessBridge';
 import { createClaudeUnifiedHostLivenessBridge } from './createClaudeUnifiedHostLivenessBridge';
 import { createClaudeUnifiedInputArbiter } from './createClaudeUnifiedInputArbiter';
+import {
+  createClaudeGoalRuntimeControls,
+  type ClaudeGoalCommandDelivery,
+  type ClaudeGoalRuntimeControls,
+} from '../goalControl/claudeGoalRuntimeControl';
+import { buildClaudeGoalCommand } from '../goalControl/claudeGoalCommand';
 import { createClaudeUnifiedPendingQueuePump } from './createClaudeUnifiedPendingQueuePump';
 import {
   createClaudeUnifiedPromptInjector,
   type ClaudeUnifiedDraftGuardStarvationInfo,
 } from './createClaudeUnifiedPromptInjector';
+import { createClaudePromptSubmitVerificationPolicy } from './claudePromptSubmitVerification';
 import { clearOwnLeftoverComposerDraft } from './ownComposerDraftGuard';
 import {
   createClaudeUnifiedInFlightSteerEvaluator,
@@ -46,6 +53,7 @@ import { createClaudeOwnComposerTextLog, type ClaudeOwnComposerTextLog } from '.
 import { createClaudeUnifiedAcceptedPromptTranscriptDiscovery } from './acceptedPromptTranscriptDiscovery';
 import { doesClaudeUnifiedPromptBatchMatchAcceptedTranscript } from './acceptedPromptDeliveryIdentity';
 import { ClaudeUnifiedTerminalInjectionFailureError } from './terminalInjectionFailureError';
+import type { ClaudeProviderRuntimeActivityPublisher } from '../providerActivity/createClaudeProviderActivityLedger';
 import {
   buildClaudeUnifiedRuntimeControlDisabledOutcomeEvents,
   createBlockedApplyStarvationTracker,
@@ -200,7 +208,17 @@ export type ClaudeUnifiedTerminalSessionOptions<Mode extends EnhancedMode = Enha
   onRuntimeAuthFailureEvent?: ((error: unknown) => void | Promise<void>) | undefined;
   onProviderPromptStarted?: (() => void | Promise<void>) | undefined;
   onPromptTurnTerminal?: ((event: ClaudeUnifiedPromptTurnTerminalEvent) => void | Promise<void>) | undefined;
+  runtimeActivityPublisher?: ClaudeProviderRuntimeActivityPublisher | null | undefined;
   onMessage?: ((message: RawJSONLines) => void) | undefined;
+  /**
+   * Raw transcript channel (plan H7): every parsed JSONL value BEFORE the scanner's
+   * visible-transcript filtering. Native Claude `/goal` state is a `goal_status`
+   * ATTACHMENT (and `/goal` capability rides the system/init `slash_commands`); the
+   * scanner drops both before `onMessage` (F2 visible-transcript gate), so launchers
+   * feed the centralized goal source from THIS channel instead. Never emit these to
+   * the visible transcript.
+   */
+  onRawTranscriptValue?: ((value: unknown) => void) | undefined;
   /**
    * Invoked for every transcript row the runner suppresses from `onMessage` (controller-typed
    * slash-command echoes, L3). Launchers must persist a consumed marker
@@ -264,8 +282,44 @@ export type ClaudeUnifiedTerminalSessionOptions<Mode extends EnhancedMode = Enha
       request: Readonly<SessionTerminalComposerClearRequestV1>,
     ) => Promise<SessionTerminalComposerClearResultV1>,
   ) => (() => void) | void) | undefined;
+  /**
+   * Registers the Claude `/goal` effector as live session runtime controls (P1-E3). For an active
+   * session the goal router prefers the live RPC, which calls these controls to inject a literal
+   * `/goal` user turn into the arbiter. For SET the emitted `goal_status` attachment is the source of
+   * truth (no metadata write here); for CLEAR there is no echoed status, so the control additionally
+   * removes the goal work-state item via `clearGoalWorkState`.
+   */
+  registerGoalRuntimeControl?: ((
+    controls: ClaudeGoalRuntimeControls,
+  ) => (() => void) | void) | undefined;
+  /**
+   * Removes the published Claude goal work-state item (used by the live clear effector, since Claude
+   * emits no `goal_status` for `/goal clear`). Provided by the launcher that owns the goal source.
+   */
+  clearGoalWorkState?: (() => void) | undefined;
+  /**
+   * Records a goal-control SET intent (used by the live set effector once the `/goal <objective>`
+   * inject reaches the terminal), so re-setting the same objective after a clear is accepted instead
+   * of being suppressed as a stale post-clear replay (G2). Provided by the launcher that owns the
+   * goal source.
+   */
+  recordGoalSetIntent?: (() => void) | undefined;
+  /**
+   * Initial goal objective to pursue on (re)launch (P1-E4). When set, a single `/goal <objective>`
+   * is injected once the arbiter is ready (mirrors Codex's initial `thread/goal/set`).
+   */
+  initialGoalObjective?: string | undefined;
   onTerminalPromptInjected?: ((input: ClaudeUnifiedTerminalAcceptedInput<Mode>) => void | Promise<void>) | undefined;
-  onTerminalInjectionFailure?: ((error: ClaudeUnifiedTerminalInjectionFailureError) => void | Promise<void>) | undefined;
+  onTerminalInjectionFailure?: ((error: ClaudeUnifiedTerminalInjectionFailureError) =>
+    void
+    | Readonly<{ action: 'claimed_pending_delivery' }>
+    | Readonly<{ action: 'surfaced_runtime_issue' }>
+    | Promise<
+      | void
+      | Readonly<{ action: 'claimed_pending_delivery' }>
+      | Readonly<{ action: 'surfaced_runtime_issue' }>
+    >
+  ) | undefined;
   onTerminalHostReady?: ((params: Readonly<{
     handle: TerminalHostHandle;
     terminal: NonNullable<Metadata['terminal']>;
@@ -335,6 +389,7 @@ export type ClaudeUnifiedTuiRuntimeControlOptions<Mode extends EnhancedMode = En
 }>;
 
 const DEFAULT_RUNTIME_CONTROL_BLOCKED_INJECTION_RETRY_MS = 250;
+const MAX_RECENT_ACCEPTED_TRANSCRIPT_CANDIDATES = 64;
 
 function sanitizeSessionName(value: string): string {
   const sanitized = value.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
@@ -364,11 +419,15 @@ async function resolveDefaultHostAdapter(
   preference: ClaudeUnifiedTerminalHostPreference,
   telemetry: ClaudeUnifiedTelemetrySink,
 ): Promise<TerminalHostResolution> {
+  const promptSubmitVerification = createClaudePromptSubmitVerificationPolicy();
+  const windowsConsolePromptSubmitVerification = createClaudePromptSubmitVerificationPolicy({
+    verifySingleLineAfterSubmit: true,
+  });
   const tmuxAvailable = shouldProbeTmuxForClaudeUnifiedDefaultHost()
     ? await isTmuxAvailable()
     : false;
   const windowsConsoleAdapter = process.platform === 'win32'
-    ? createPtyTerminalHostAdapter()
+    ? createPtyTerminalHostAdapter({ promptSubmitVerification: windowsConsolePromptSubmitVerification })
     : null;
   const shouldConfigureZellij = process.platform !== 'win32' || preference === 'zellij' || !windowsConsoleAdapter;
   const zellijBinary = shouldConfigureZellij ? await resolveZellijRuntimeBinary() : null;
@@ -395,12 +454,13 @@ async function resolveDefaultHostAdapter(
   const resolvedZellijWindowsGuard = zellijWindowsGuard.status === 'ok' ? zellijWindowsGuard : null;
   const adapters = createTerminalHostRegistry([
     ...(windowsConsoleAdapter ? [windowsConsoleAdapter] : []),
-    ...(tmuxAvailable ? [createTmuxTerminalHostAdapter()] : []),
+    ...(tmuxAvailable ? [createTmuxTerminalHostAdapter({ promptSubmitVerification })] : []),
     ...(zellijBinary
       ? [
           createZellijTerminalHostAdapter({
             zellijBinary,
             happyHomeDir: configuration.happyHomeDir,
+            promptSubmitVerification,
             defaultShell: resolvedZellijWindowsGuard?.shell,
             ...(resolvedZellijWindowsGuard?.launchStrategy === 'foreground_windows_terminal'
               ? {
@@ -537,6 +597,12 @@ function normalizeMessageBatch<Mode>(input: ClaudeUnifiedTerminalQueuedInput<Mod
 
 function isCompactBoundaryTranscriptMessage(message: RawJSONLines): boolean {
   return message.type === 'system' && (message as Record<string, unknown>).subtype === 'compact_boundary';
+}
+
+function isAcceptedPromptTranscriptCandidate(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const type = (value as Record<string, unknown>).type;
+  return type === 'user' || type === 'queue-operation' || type === 'attachment';
 }
 
 function isCompactSlashCommandPrompt(message: string): boolean {
@@ -761,6 +827,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
   let unregisterStatuslineRuntimeReconciler: (() => void) | null = null;
   let unregisterMetadataRuntimeModeApplier: (() => void) | null = null;
   let unregisterTerminalComposerClearRuntimeControl: (() => void) | null = null;
+  let unregisterGoalRuntimeControl: (() => void) | null = null;
   let inFlightSteerWiring: ClaudeUnifiedInFlightSteerWiring<Mode> | null = null;
   let notifyTerminalComposerCleared: (() => void) | null = null;
   let terminalComposerClearedWakePending = false;
@@ -1038,6 +1105,11 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
         // can be exact-match classified as OUR OWN residue (vs an untouchable genuine user draft).
         ownComposerTextLog.record(input.text);
         const result = await hostResolution.adapter.injectUserPrompt(activeHandle, input);
+        if (result.status === 'failed'
+          && result.phase === 'during_write'
+          && result.duplicateRisk !== 'none') {
+          ownComposerTextLog.recordPossiblePartialResidue(input.text);
+        }
         return result;
       },
     };
@@ -1153,8 +1225,16 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
         onSteerAcceptanceArmed: steerWiring.onSteerAcceptanceArmed,
         isCanonicalTurnActive: opts.isCanonicalTurnActive,
         isPromptDeliveryAccepted: opts.isPromptDeliveryAccepted,
-        onInjectionFailure: (failure) => {
+        onInjectionFailure: async (failure) => {
           const error = new ClaudeUnifiedTerminalInjectionFailureError(failure);
+          const notifyTerminalInjectionFailure = async (logContext: string) => {
+            try {
+              return await opts.onTerminalInjectionFailure?.(error);
+            } catch (notifyError) {
+              logger.debug(logContext, notifyError);
+              return undefined;
+            }
+          };
           if (failure.failureState === 'failed_terminal') {
             if (isDeterministicInvalidPromptTextFailure(failure)) {
               opts.onPromptTerminallyRejectedBeforeProvider?.({
@@ -1163,18 +1243,16 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
                 userMessageLocalIds: failure.batch.userMessageLocalIds ?? [],
                 reason: 'invalid_prompt_text',
               });
-              void Promise.resolve().then(() => opts.onTerminalInjectionFailure?.(error)).catch((notifyError) => {
-                logger.debug('[unified]: failed to surface Claude unified terminal invalid prompt text (non-fatal)', notifyError);
-              });
-              return;
+              return await notifyTerminalInjectionFailure('[unified]: failed to surface Claude unified terminal invalid prompt text (non-fatal)');
+            }
+            if (failure.result.recoverable) {
+              return await notifyTerminalInjectionFailure('[unified]: failed to surface Claude unified terminal recoverable injection failure (non-fatal)');
             }
             fatalRuntimeError ??= error;
             runtimeAbortController.abort(error);
             return;
           }
-          void Promise.resolve().then(() => opts.onTerminalInjectionFailure?.(error)).catch((notifyError) => {
-            logger.debug('[unified]: failed to surface Claude unified terminal injection failure (non-fatal)', notifyError);
-          });
+          return await notifyTerminalInjectionFailure('[unified]: failed to surface Claude unified terminal injection failure (non-fatal)');
         },
         onPromptInjected: (batch, acceptance, result) => {
           steerWiring.observeInjectedPrompt(batch, acceptance);
@@ -1186,6 +1264,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
               userMessageSeq: batch.maxUserMessageSeq ?? null,
             },
           });
+          replayRecentAcceptedTranscriptCandidates();
           if (batch.mode === undefined) return undefined;
           endStartupHostLivenessGrace();
           return opts.onTerminalPromptInjected?.({
@@ -1234,15 +1313,84 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
         notifyTerminalComposerCleared();
       }
       arbiterForPromptCustody = arbiter;
+      // Claude `/goal` injection seam (P1-E3/P1-E4): a goal command becomes a literal user turn
+      // injected through the same arbiter as any prompt; the emitted `goal_status` attachment is
+      // the source of truth, so nothing here writes goal state into metadata. `currentInjectionMode`
+      // is read at injection time so the goal turn carries the live permission/plan mode.
+      const injectGoalCommand = async (message: string): Promise<ClaudeGoalCommandDelivery> => {
+        await arbiter.enqueueUiMessage({ message, mode: currentInjectionMode, origin: { kind: 'rpc' } });
+        await arbiter.drainWhenSafe();
+        // The strongest delivery state the arbiter can PROVE: the command was drained from the queue
+        // and written to the terminal. It cannot prove provider acceptance, so we never claim more.
+        return { kind: 'sent-to-terminal' };
+      };
+      if (opts.registerGoalRuntimeControl) {
+        const unregister = opts.registerGoalRuntimeControl(
+          createClaudeGoalRuntimeControls({
+            injectGoalCommand,
+            ...(opts.clearGoalWorkState ? { clearGoalWorkState: opts.clearGoalWorkState } : {}),
+            ...(opts.recordGoalSetIntent ? { recordGoalSetIntent: opts.recordGoalSetIntent } : {}),
+          }),
+        );
+        unregisterGoalRuntimeControl = typeof unregister === 'function' ? unregister : null;
+      }
+      const initialGoalObjective = opts.initialGoalObjective?.trim();
+      if (initialGoalObjective) {
+        // H4-CLI: a failed initial `/goal` injection must be SURFACED as a structured
+        // runtime issue (the same seam prompt-injection failures use), not silently
+        // swallowed. The goal_status attachment remains the source of truth, so a
+        // failed inject never seeds a decorative goal — it just means Claude did not
+        // start pursuing the requested objective, which the user must be told.
+        void injectGoalCommand(buildClaudeGoalCommand({ type: 'set', objective: initialGoalObjective }))
+          .catch(async (error) => {
+            logger.debug('[unified]: failed to inject initial Claude goal', error);
+            try {
+              await opts.onTerminalInjectionFailure?.(error);
+            } catch (surfaceError) {
+              logger.debug('[unified]: failed to surface initial Claude goal injection failure (non-fatal)', surfaceError);
+            }
+          });
+      }
+      const recentAcceptedTranscriptCandidates: unknown[] = [];
+      const rememberAcceptedTranscriptCandidates = (messages: readonly unknown[]): void => {
+        for (const message of messages) {
+          if (!isAcceptedPromptTranscriptCandidate(message)) continue;
+          recentAcceptedTranscriptCandidates.push(message);
+          while (recentAcceptedTranscriptCandidates.length > MAX_RECENT_ACCEPTED_TRANSCRIPT_CANDIDATES) {
+            recentAcceptedTranscriptCandidates.shift();
+          }
+        }
+      };
       let acceptedTranscriptConfirmationTail = Promise.resolve();
       const pendingAcceptedTranscriptMatchKeys = new Set<string>();
       const buildAcceptedTranscriptMatchKey = (match: Readonly<{
         acceptedPromptId: string;
         transcriptKey?: string | null | undefined;
       }>): string => `${match.acceptedPromptId}:${match.transcriptKey ?? 'unkeyed'}`;
-      const confirmPromptAcceptedFromTranscript = (messages: readonly unknown[]): boolean => {
+      let confirmPromptAcceptedFromTranscript = (
+        messages: readonly unknown[],
+        confirmOpts?: Readonly<{ rememberUnmatched?: boolean | undefined }> | undefined,
+      ): boolean => {
+        if (confirmOpts?.rememberUnmatched !== false) {
+          rememberAcceptedTranscriptCandidates(messages);
+        }
+        return false;
+      };
+      const replayRecentAcceptedTranscriptCandidates = (): boolean => (
+        recentAcceptedTranscriptCandidates.length > 0
+        && confirmPromptAcceptedFromTranscript([...recentAcceptedTranscriptCandidates], { rememberUnmatched: false })
+      );
+      confirmPromptAcceptedFromTranscript = (
+        messages: readonly unknown[],
+        confirmOpts?: Readonly<{ rememberUnmatched?: boolean | undefined }> | undefined,
+      ): boolean => {
         const match = acceptedPromptTranscriptDiscovery.findMatchingTranscript(messages);
-        if (!match) return false;
+        if (!match) {
+          if (confirmOpts?.rememberUnmatched !== false) {
+            rememberAcceptedTranscriptCandidates(messages);
+          }
+          return false;
+        }
         const matchKey = buildAcceptedTranscriptMatchKey(match);
         if (pendingAcceptedTranscriptMatchKeys.has(matchKey)) return true;
         pendingAcceptedTranscriptMatchKeys.add(matchKey);
@@ -1282,6 +1430,9 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
             userMessageLocalIds: batch.userMessageLocalIds ?? [],
           });
         },
+        onProviderAcceptancePendingPrompt: (batch) => {
+          ownComposerTextLog.record(batch.message);
+        },
       });
       const observeMetadataApplySafeBoundary = async (): Promise<void> => {
         await observeSafeRuntimeBoundaryForMetadataApply?.();
@@ -1309,6 +1460,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
               await observeMetadataApplySafeBoundary();
               await opts.onPromptTurnTerminal?.(event);
             },
+            runtimeActivityPublisher: opts.runtimeActivityPublisher ?? null,
             onSessionEnd: (event) => {
               if (isClaudePromptInputExit(event)) {
                 expectedPromptInputExit = true;
@@ -1336,6 +1488,11 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
             },
             onRawTranscriptValue: (value) => {
               confirmPromptAcceptedFromTranscript([value]);
+              // Native Claude `/goal` source (plan H7): the goal_status attachment +
+              // system/init slash_commands survive only on this raw channel (the
+              // scanner drops them before `onMessage`). Forward to the launcher so it
+              // feeds the centralized goal source; never reaches the visible transcript.
+              opts.onRawTranscriptValue?.(value);
             },
             onSessionFound: opts.onSessionFound,
             loadCommittedClaudeJsonlMessageBaseline: opts.loadCommittedClaudeJsonlMessageBaseline,
@@ -1448,6 +1605,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
     unregisterStatuslineRuntimeReconciler?.();
     unregisterMetadataRuntimeModeApplier?.();
     unregisterTerminalComposerClearRuntimeControl?.();
+    unregisterGoalRuntimeControl?.();
     notifyTerminalComposerCleared = null;
     terminalComposerClearedWakePending = false;
     if (runtimeControlBridge) {

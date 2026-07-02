@@ -3,7 +3,6 @@ import type { ManagedConnectionSupervisor } from '@happier-dev/connection-superv
 import { fetchChanges } from '../changes';
 import { serializeAxiosErrorForLog } from '../client/serializeAxiosErrorForLog';
 import { handleRequestAuthenticationFailure } from '@/api/connection/requestSupervision/reportRequestOutcomeToSupervisor';
-import { readLastChangesCursor, writeLastChangesCursor } from '@/persistence';
 import { readKnownPendingQueueState, type KnownPendingQueueState } from './pendingQueueState';
 import type { SessionSnapshotRefreshReasonInput } from './sessionSnapshotRefreshReason';
 
@@ -44,6 +43,8 @@ export async function runSessionChangesSyncOnConnect(params: {
     sessionId: string;
     lastObservedMessageSeq: number;
     getAccountId: () => Promise<string | null>;
+    readChangesCursor: (accountId: string) => Promise<number>;
+    writeChangesCursor: (accountId: string, cursor: number) => Promise<void>;
     catchUpSessionMessages: (afterSeq: number) => Promise<void>;
     syncSessionSnapshotFromServer: (opts: { reason: SessionSnapshotRefreshReasonInput }) => Promise<void>;
     applyPendingQueueState?: (state: KnownPendingQueueState) => void;
@@ -54,10 +55,10 @@ export async function runSessionChangesSyncOnConnect(params: {
     if (!accountId) return;
 
     const CHANGES_PAGE_LIMIT = 200;
-    const after = await readLastChangesCursor(accountId);
+    const after = await params.readChangesCursor(accountId);
     const result = await fetchChanges({ token: params.token, after, limit: CHANGES_PAGE_LIMIT });
     if (result.status === 'cursor-gone') {
-        await writeLastChangesCursor(accountId, result.currentCursor);
+        await params.writeChangesCursor(accountId, result.currentCursor);
         // If the server indicates the cursor is invalid (future cursor or pruned floor),
         // force a snapshot rebuild so we don't miss deletion signals.
         if (params.reason === 'reconnect') {
@@ -140,7 +141,7 @@ export async function runSessionChangesSyncOnConnect(params: {
         }
         void params.syncSessionSnapshotFromServer({ reason: snapshotReasonForChangesFallback(params.reason) });
         if (!transcriptCatchUpFailed) {
-            await writeLastChangesCursor(accountId, nextCursor);
+            await params.writeChangesCursor(accountId, nextCursor);
         }
         return;
     }
@@ -157,7 +158,7 @@ export async function runSessionChangesSyncOnConnect(params: {
     }
 
     if (!transcriptCatchUpFailed) {
-        await writeLastChangesCursor(accountId, nextCursor);
+        await params.writeChangesCursor(accountId, nextCursor);
     }
 }
 

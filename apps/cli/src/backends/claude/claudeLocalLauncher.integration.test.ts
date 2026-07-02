@@ -560,6 +560,43 @@ describe('claudeLocalLauncher', () => {
     expect(agentTypes.filter((type) => type === 'task_complete')).toHaveLength(1);
   });
 
+  it('ignores fd3 busy fallback after the hook-driven foreground turn has completed', async () => {
+    vi.useFakeTimers();
+    const { session, client } = createLocalHarness();
+    const localStarted = createDeferred<void>();
+    const releaseLocal = createDeferred<void>();
+    const capturedOptions: { current: LocalLaunchOptions | null } = { current: null };
+
+    mockClaudeLocal.mockImplementationOnce(async (opts) => {
+      capturedOptions.current = opts;
+      localStarted.resolve(undefined);
+      await releaseLocal.promise;
+    });
+
+    const { claudeLocalLauncher } = await import('./claudeLocalLauncher');
+    const launcherPromise = claudeLocalLauncher(session);
+
+    await localStarted.promise;
+    session.onClaudeSessionHook({ session_id: 'sid1', hook_event_name: 'UserPromptSubmit' });
+    session.onClaudeSessionHook({ session_id: 'sid1', hook_event_name: 'Stop' });
+    await vi.advanceTimersByTimeAsync(500);
+
+    const beforeFd3BusyFallback = (client.sendAgentMessage as ReturnType<typeof vi.fn>).mock.calls
+      .map((call) => call[1]?.type);
+    expect(beforeFd3BusyFallback.filter((type) => type === 'task_started')).toHaveLength(1);
+    expect(beforeFd3BusyFallback.filter((type) => type === 'task_complete')).toHaveLength(1);
+
+    capturedOptions.current?.onThinkingChange?.(true);
+
+    const afterFd3BusyFallback = (client.sendAgentMessage as ReturnType<typeof vi.fn>).mock.calls
+      .map((call) => call[1]?.type);
+    expect(afterFd3BusyFallback.filter((type) => type === 'task_started')).toHaveLength(1);
+    expect(afterFd3BusyFallback.filter((type) => type === 'task_complete')).toHaveLength(1);
+
+    releaseLocal.resolve(undefined);
+    await expect(launcherPromise).resolves.toEqual({ type: 'exit', code: 0 });
+  });
+
   it('surfaces local StopFailure rate-limit hooks as runtime issues', async () => {
     const { session, client } = createLocalHarness();
     const localStarted = createDeferred<void>();

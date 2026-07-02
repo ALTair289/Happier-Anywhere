@@ -3,6 +3,7 @@ import { basename, dirname, join } from 'node:path';
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { PassThrough } from 'node:stream';
+import { logger } from '@/ui/logger';
 import { claudeLocal } from './claudeLocal';
 
 async function withPlatform<T>(platform: NodeJS.Platform, run: () => Promise<T>): Promise<T> {
@@ -312,6 +313,36 @@ describe('claudeLocal --continue handling', () => {
         const idx = spawnArgs.indexOf('--mcp-config');
         expect(idx).toBeGreaterThan(-1);
         expect(spawnArgs[idx + 1]).toBe(mcpJson);
+    });
+
+    it('redacts MCP config payloads from Claude argument debug logs', async () => {
+        const userMcp = JSON.stringify({
+            mcpServers: { user: { command: 'node', env: { USER_TOKEN: 'user-secret-token' } } },
+        });
+        const inlineMcp = JSON.stringify({
+            mcpServers: { inline: { command: 'node', env: { INLINE_TOKEN: 'inline-secret-token' } } },
+        });
+        const happierMcp = JSON.stringify({
+            mcpServers: { happier: { command: 'node', env: { HAPPIER_TOKEN: 'happier-secret-token' } } },
+        });
+
+        await claudeLocal({
+            abort: new AbortController().signal,
+            sessionId: null,
+            path: '/tmp',
+            onSessionFound,
+            claudeArgs: ['--mcp-config', userMcp, `--mcp-config=${inlineMcp}`],
+            happierMcpConfigJson: happierMcp,
+        } as any);
+
+        const debugMessages = vi.mocked(logger.debug).mock.calls
+            .map((call) => call.map((value) => String(value)).join(' '))
+            .join('\n');
+
+        expect(debugMessages).not.toContain('user-secret-token');
+        expect(debugMessages).not.toContain('inline-secret-token');
+        expect(debugMessages).not.toContain('happier-secret-token');
+        expect(debugMessages).toContain('[redacted-mcp-config]');
     });
 
     it('appends Happier --mcp-config after any user --mcp-config flags (last-wins on collisions)', async () => {

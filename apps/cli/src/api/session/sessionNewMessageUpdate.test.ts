@@ -882,6 +882,97 @@ describe('handleSessionNewMessageUpdate', () => {
       expect(seqs).toEqual([7, 9, null]);
     });
 
+    it('delivers provider-claim pending materializations even when local queue markers already exist', () => {
+      const delivered: unknown[] = [];
+      const deliveredSeqs: number[] = [];
+      const localId = 'pending-provider-claim-local';
+
+      const update = {
+        id: 'pending-materialized-pending-provider-claim-local',
+        createdAt: Date.now(),
+        body: {
+          t: 'new-message',
+          sid: 'sess_1',
+          message: {
+            id: 'pending-claim-message',
+            seq: null,
+            content: {
+              t: 'plain',
+              v: {
+                role: 'user',
+                content: { type: 'text', text: 'provider claim prompt' },
+                localId,
+                meta: { source: 'ui', sentFrom: 'web' },
+              },
+            },
+            localId,
+            createdAt: 1_000,
+            updatedAt: 1_000,
+          },
+        },
+      } as unknown as Update;
+
+      runWithDeliveredHook(update, {
+        hasAgentQueueEchoSuppressedLocalId: (candidateLocalId: string) => candidateLocalId === localId,
+        hasAgentQueueDeliveredLocalId: (candidateLocalId: string) => candidateLocalId === localId,
+        hasPendingQueueMaterializedLocalId: (candidateLocalId: string) => candidateLocalId === localId,
+        pendingMessageCallback: (message) => {
+          delivered.push(message);
+        },
+        pendingMessages: [],
+        onUserMessageDeliveredToAgentQueue: (seq) => {
+          deliveredSeqs.push(seq);
+        },
+      });
+
+      expect(delivered).toHaveLength(1);
+      expect(deliveredSeqs).toEqual([]);
+    });
+
+    it('keeps pending-queue materialized markers until provider acceptance owns cleanup', () => {
+      const delivered: unknown[] = [];
+      const deleteMaterializedLocalId = vi.fn();
+      const localId = 'pending-materialized-committed-local';
+
+      runWithDeliveredHook(
+        {
+          id: 'pending-materialized-committed',
+          createdAt: Date.now(),
+          body: {
+            t: 'new-message',
+            sid: 'sess_1',
+            message: {
+              id: 'pending-materialized-message',
+              seq: 10,
+              content: {
+                t: 'plain',
+                v: {
+                  role: 'user',
+                  content: { type: 'text', text: 'pending materialized prompt' },
+                  localId,
+                  meta: { source: 'ui', sentFrom: 'web' },
+                },
+              },
+              localId,
+              createdAt: 1_000,
+              updatedAt: 1_000,
+            },
+          },
+        } as unknown as Update,
+        {
+          hasPendingQueueMaterializedLocalId: (candidateLocalId: string) => candidateLocalId === localId,
+          deleteMaterializedLocalId,
+          pendingMessageCallback: (message) => {
+            delivered.push(message);
+          },
+          pendingMessages: [],
+        },
+      );
+
+      expect(delivered).toHaveLength(1);
+      expect(deleteMaterializedLocalId).not.toHaveBeenCalled();
+    });
+
     it('routes a self-echo CLI transcript write to the echo-proof hook, NOT the queue-handoff hook', () => {
       const update = {
         id: 'u-cli-echo',

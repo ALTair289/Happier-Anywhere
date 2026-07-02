@@ -15,6 +15,23 @@ export function buildStreamedTranscriptSegmentSnapshotBody(segment: StreamedTran
       };
 }
 
+export function buildStreamedTranscriptSegmentDeltaBody(
+  segment: StreamedTranscriptSegmentRuntime,
+  deltaText: string,
+): ACPMessageData {
+  return segment.kind === 'assistant'
+    ? {
+        type: 'message',
+        message: deltaText,
+        ...(segment.sidechainId ? { sidechainId: segment.sidechainId } : {}),
+      }
+    : {
+        type: 'thinking',
+        text: deltaText,
+        ...(segment.sidechainId ? { sidechainId: segment.sidechainId } : {}),
+      };
+}
+
 export function buildStreamedTranscriptSegmentSnapshotMeta(params: {
   segment: StreamedTranscriptSegmentRuntime;
   state: StreamedTranscriptSegmentState;

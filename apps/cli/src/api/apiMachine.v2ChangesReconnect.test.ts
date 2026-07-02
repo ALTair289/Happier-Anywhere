@@ -6,12 +6,12 @@ import { encodeBase64, encrypt } from '@/api/encryption';
 import { bindApiSessionSocketMock, createApiSessionSocketStub } from '@/testkit/backends/apiSessionSocketHarness';
 import { ApiMachineClient } from './apiMachine';
 
-const { mockIo, axiosGet, readLastChangesCursor, writeLastChangesCursor } = vi.hoisted(() => {
+const { mockIo, axiosGet, readAccountChangesCursor, writeAccountChangesCursor } = vi.hoisted(() => {
     return {
         mockIo: vi.fn(),
         axiosGet: vi.fn(),
-        readLastChangesCursor: vi.fn(async () => 0),
-        writeLastChangesCursor: vi.fn(async () => {}),
+        readAccountChangesCursor: vi.fn(async () => 0),
+        writeAccountChangesCursor: vi.fn(async () => {}),
     };
 });
 
@@ -27,8 +27,8 @@ vi.mock('axios', () => ({
 }));
 
 vi.mock('@/persistence', () => ({
-    readLastChangesCursor,
-    writeLastChangesCursor,
+    readAccountChangesCursor,
+    writeAccountChangesCursor,
 }));
 
 vi.mock('@/ui/logger', () => ({
@@ -172,8 +172,8 @@ describe('ApiMachineClient /v2/changes reconnect', () => {
         });
 
         axiosGet.mockClear();
-        writeLastChangesCursor.mockClear();
-        readLastChangesCursor.mockClear();
+        writeAccountChangesCursor.mockClear();
+        readAccountChangesCursor.mockClear();
 
         const client = new ApiMachineClient('token', machine);
         client.connect();
@@ -194,7 +194,7 @@ describe('ApiMachineClient /v2/changes reconnect', () => {
                 platform: 'p',
             }),
         );
-        expect(writeLastChangesCursor).toHaveBeenCalledWith('acc-1', 1);
+        expect(writeAccountChangesCursor).toHaveBeenCalledWith('acc-1', 1);
     });
 
     it('reports account settings version hints from /v2/changes to the refresh callback', async () => {
@@ -228,8 +228,8 @@ describe('ApiMachineClient /v2/changes reconnect', () => {
         });
 
         axiosGet.mockClear();
-        writeLastChangesCursor.mockClear();
-        readLastChangesCursor.mockClear();
+        writeAccountChangesCursor.mockClear();
+        readAccountChangesCursor.mockClear();
 
         const onAccountSettingsVersionHint = vi.fn(async () => {});
         const client = new ApiMachineClient('token', machine);
@@ -241,7 +241,7 @@ describe('ApiMachineClient /v2/changes reconnect', () => {
             settingsVersion: 5,
             source: 'changes',
         });
-        expect(writeLastChangesCursor).toHaveBeenCalledWith('acc-1', 2);
+        expect(writeAccountChangesCursor).toHaveBeenCalledWith('acc-1', 2);
     });
 
     it('advances the changes cursor when account settings refresh for a hint fails', async () => {
@@ -274,8 +274,8 @@ describe('ApiMachineClient /v2/changes reconnect', () => {
         });
 
         axiosGet.mockClear();
-        writeLastChangesCursor.mockClear();
-        readLastChangesCursor.mockClear();
+        writeAccountChangesCursor.mockClear();
+        readAccountChangesCursor.mockClear();
 
         const client = new ApiMachineClient('token', machine);
         client.onAccountSettingsVersionHint(async () => {
@@ -289,7 +289,7 @@ describe('ApiMachineClient /v2/changes reconnect', () => {
             settingsVersion: 5,
             source: 'changes',
         });
-        expect(writeLastChangesCursor).toHaveBeenCalledWith('acc-1', 1);
+        expect(writeAccountChangesCursor).toHaveBeenCalledWith('acc-1', 1);
     });
 
     it('does not surface an unhandled rejection when a background changes sync fails on connect', async () => {
@@ -324,8 +324,8 @@ describe('ApiMachineClient /v2/changes reconnect', () => {
         });
 
         axiosGet.mockClear();
-        writeLastChangesCursor.mockClear();
-        readLastChangesCursor.mockClear();
+        writeAccountChangesCursor.mockClear();
+        readAccountChangesCursor.mockClear();
 
         const unhandledRejections: unknown[] = [];
         const onUnhandledRejection = (reason: unknown) => {
@@ -345,7 +345,7 @@ describe('ApiMachineClient /v2/changes reconnect', () => {
             await new Promise((resolve) => setImmediate(resolve));
 
             expect(unhandledRejections).toEqual([]);
-            expect(writeLastChangesCursor).toHaveBeenCalledWith('acc-1', 1);
+            expect(writeAccountChangesCursor).toHaveBeenCalledWith('acc-1', 1);
         } finally {
             process.off('unhandledRejection', onUnhandledRejection);
         }
@@ -382,8 +382,8 @@ describe('ApiMachineClient /v2/changes reconnect', () => {
         });
 
         axiosGet.mockClear();
-        writeLastChangesCursor.mockClear();
-        readLastChangesCursor.mockClear();
+        writeAccountChangesCursor.mockClear();
+        readAccountChangesCursor.mockClear();
 
         const onAccountSettingsVersionHint = vi.fn(async () => {});
         const client = new ApiMachineClient('token', machine);
@@ -395,7 +395,7 @@ describe('ApiMachineClient /v2/changes reconnect', () => {
             settingsVersion: null,
             source: 'cursor-gone',
         });
-        expect(writeLastChangesCursor).toHaveBeenCalledWith('acc-1', 9);
+        expect(writeAccountChangesCursor).toHaveBeenCalledWith('acc-1', 9);
     });
 
     it('advances a cursor-gone cursor when conservative account settings refresh fails', async () => {
@@ -429,8 +429,8 @@ describe('ApiMachineClient /v2/changes reconnect', () => {
         });
 
         axiosGet.mockClear();
-        writeLastChangesCursor.mockClear();
-        readLastChangesCursor.mockClear();
+        writeAccountChangesCursor.mockClear();
+        readAccountChangesCursor.mockClear();
 
         const client = new ApiMachineClient('token', machine);
         client.onAccountSettingsVersionHint(async () => {
@@ -438,7 +438,7 @@ describe('ApiMachineClient /v2/changes reconnect', () => {
         });
 
         await (client as any).syncChangesOnConnect({ reason: 'reconnect' });
-        expect(writeLastChangesCursor).toHaveBeenCalledWith('acc-1', 9);
+        expect(writeAccountChangesCursor).toHaveBeenCalledWith('acc-1', 9);
     });
 
     it('refreshes machine snapshot when /v2/changes is missing (e.g. old server 404) on reconnect', async () => {
@@ -493,8 +493,8 @@ describe('ApiMachineClient /v2/changes reconnect', () => {
         });
 
         axiosGet.mockClear();
-        writeLastChangesCursor.mockClear();
-        readLastChangesCursor.mockClear();
+        writeAccountChangesCursor.mockClear();
+        readAccountChangesCursor.mockClear();
 
         const client = new ApiMachineClient('token', machine);
         await (client as any).syncChangesOnConnect({ reason: 'reconnect' });
@@ -505,7 +505,7 @@ describe('ApiMachineClient /v2/changes reconnect', () => {
                 platform: 'p',
             }),
         );
-        expect(writeLastChangesCursor).not.toHaveBeenCalled();
+        expect(writeAccountChangesCursor).not.toHaveBeenCalled();
     });
 
     it.each([401, 403] as const)('reports /v2/changes auth status %i to the machine supervisor without snapshot fallback', async (status) => {
@@ -533,8 +533,8 @@ describe('ApiMachineClient /v2/changes reconnect', () => {
         });
 
         axiosGet.mockClear();
-        writeLastChangesCursor.mockClear();
-        readLastChangesCursor.mockClear();
+        writeAccountChangesCursor.mockClear();
+        readAccountChangesCursor.mockClear();
 
         const client = new ApiMachineClient('token', machine);
         const reportProbeResult = vi.fn();
@@ -562,7 +562,7 @@ describe('ApiMachineClient /v2/changes reconnect', () => {
             errorMessage: expect.any(String),
         } satisfies ReadinessProbeResult);
         expect(axiosGet.mock.calls.some(([url]) => String(url).includes('/v1/machines/machine-1'))).toBe(false);
-        expect(writeLastChangesCursor).not.toHaveBeenCalled();
+        expect(writeAccountChangesCursor).not.toHaveBeenCalled();
     });
 
     it.each([401, 403] as const)('reports profile auth status %i to the machine supervisor before /v2/changes sync', async (status) => {
@@ -587,8 +587,8 @@ describe('ApiMachineClient /v2/changes reconnect', () => {
         });
 
         axiosGet.mockClear();
-        writeLastChangesCursor.mockClear();
-        readLastChangesCursor.mockClear();
+        writeAccountChangesCursor.mockClear();
+        readAccountChangesCursor.mockClear();
 
         const client = new ApiMachineClient('token', machine);
         const reportProbeResult = vi.fn();
@@ -617,7 +617,7 @@ describe('ApiMachineClient /v2/changes reconnect', () => {
         } satisfies ReadinessProbeResult);
         expect(axiosGet.mock.calls.some(([url]) => String(url).includes('/v2/changes'))).toBe(false);
         expect(axiosGet.mock.calls.some(([url]) => String(url).includes('/v1/machines/machine-1'))).toBe(false);
-        expect(writeLastChangesCursor).not.toHaveBeenCalled();
+        expect(writeAccountChangesCursor).not.toHaveBeenCalled();
     });
 
     it.each([401, 403] as const)('throws /v2/changes auth status %i without a machine supervisor instead of snapshot fallback', async (status) => {
@@ -645,8 +645,8 @@ describe('ApiMachineClient /v2/changes reconnect', () => {
         });
 
         axiosGet.mockClear();
-        writeLastChangesCursor.mockClear();
-        readLastChangesCursor.mockClear();
+        writeAccountChangesCursor.mockClear();
+        readAccountChangesCursor.mockClear();
 
         const client = new ApiMachineClient('token', machine);
         Object.defineProperty(client, 'connectionSupervisor', {
@@ -660,7 +660,7 @@ describe('ApiMachineClient /v2/changes reconnect', () => {
         });
 
         expect(axiosGet.mock.calls.some(([url]) => String(url).includes('/v1/machines/machine-1'))).toBe(false);
-        expect(writeLastChangesCursor).not.toHaveBeenCalled();
+        expect(writeAccountChangesCursor).not.toHaveBeenCalled();
     });
 
     it.each([401, 403] as const)('reports machine snapshot refresh auth status %i to the machine supervisor', async (status) => {

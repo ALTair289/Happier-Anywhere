@@ -534,7 +534,9 @@ export function createSessionMutationOutbox(params: CreateSessionMutationOutboxP
 
     return {
         async enqueueSessionTurn(mutation) {
-            await enqueue(createQueuedSessionTurn(mutation));
+            await enqueue(createQueuedSessionTurn(mutation), {
+                awaitFlush: mutation.action === 'fail' || mutation.action === 'cancel',
+            });
         },
         async enqueueSessionEnd(mutation) {
             await enqueue(createQueuedSessionEnd(mutation));

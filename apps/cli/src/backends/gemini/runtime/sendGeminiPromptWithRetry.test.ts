@@ -27,6 +27,47 @@ describe('sendGeminiPromptWithRetry', () => {
     expect(session.sendAgentMessage).not.toHaveBeenCalled();
   });
 
+  it('notifies provider prompt acceptance after sendPrompt resolves before response completion', async () => {
+    let resolveResponseComplete!: () => void;
+    const responseComplete = new Promise<void>((resolve) => {
+      resolveResponseComplete = resolve;
+    });
+    const backend = {
+      sendPrompt: vi.fn().mockResolvedValue(undefined),
+      waitForResponseComplete: vi.fn(async () => await responseComplete),
+    } as any;
+    const messageBuffer = { addMessage: vi.fn() } as any;
+    const session = { sendAgentMessage: vi.fn() } as any;
+    const onDebug = vi.fn();
+    const onProviderPromptAccepted = vi.fn();
+
+    let settled = false;
+    const promptPromise = sendGeminiPromptWithRetry({
+      backend,
+      acpSessionId: 'session-1',
+      prompt: 'hello',
+      messageBuffer,
+      session,
+      onDebug,
+      onProviderPromptAccepted,
+    }).finally(() => {
+      settled = true;
+    });
+
+    try {
+      await vi.waitFor(() => {
+        expect(backend.waitForResponseComplete).toHaveBeenCalledTimes(1);
+      });
+      await Promise.resolve();
+
+      expect(onProviderPromptAccepted).toHaveBeenCalledTimes(1);
+      expect(settled).toBe(false);
+    } finally {
+      resolveResponseComplete();
+      await promptPromise;
+    }
+  });
+
   it('does not pass a bounded response wait timeout by default', async () => {
     const backend = {
       sendPrompt: vi.fn().mockResolvedValue(undefined),
@@ -92,17 +133,16 @@ describe('sendGeminiPromptWithRetry', () => {
     expect(result).toEqual(outcome);
   });
 
-  it('retries timed-out ACP turn outcomes before succeeding', async () => {
+  it('does not retry timed-out ACP turn outcomes after provider acceptance', async () => {
+    const outcome = { kind: 'timed_out' as const, capMs: 120_000 };
     const backend = {
       sendPrompt: vi.fn().mockResolvedValue(undefined),
-      waitForResponseComplete: vi
-        .fn()
-        .mockResolvedValueOnce({ kind: 'timed_out', capMs: 120_000 })
-        .mockResolvedValueOnce({ kind: 'completed', stopReason: 'end_turn' }),
+      waitForResponseComplete: vi.fn().mockResolvedValue(outcome),
     } as any;
     const messageBuffer = { addMessage: vi.fn() } as any;
     const session = { sendAgentMessage: vi.fn() } as any;
     const onDebug = vi.fn();
+    const onProviderPromptAccepted = vi.fn();
 
     const result = await sendGeminiPromptWithRetry({
       backend,
@@ -111,25 +151,30 @@ describe('sendGeminiPromptWithRetry', () => {
       messageBuffer,
       session,
       onDebug,
+      onProviderPromptAccepted,
       maxRetries: 2,
       retryDelayMs: 1,
     });
 
-    expect(result).toEqual({ kind: 'completed', stopReason: 'end_turn' });
-    expect(backend.sendPrompt).toHaveBeenCalledTimes(2);
+    expect(result).toEqual(outcome);
+    expect(onProviderPromptAccepted).toHaveBeenCalledTimes(1);
+    expect(backend.sendPrompt).toHaveBeenCalledTimes(1);
+    expect(messageBuffer.addMessage).not.toHaveBeenCalledWith(
+      expect.stringContaining('retrying'),
+      expect.anything(),
+    );
   });
 
-  it('retries ACP max-turn stop outcomes before succeeding', async () => {
+  it('does not retry ACP max-turn stop outcomes after provider acceptance', async () => {
+    const outcome = { kind: 'completed' as const, stopReason: 'max_turn_requests' as const };
     const backend = {
       sendPrompt: vi.fn().mockResolvedValue(undefined),
-      waitForResponseComplete: vi
-        .fn()
-        .mockResolvedValueOnce({ kind: 'completed', stopReason: 'max_turn_requests' })
-        .mockResolvedValueOnce({ kind: 'completed', stopReason: 'end_turn' }),
+      waitForResponseComplete: vi.fn().mockResolvedValue(outcome),
     } as any;
     const messageBuffer = { addMessage: vi.fn() } as any;
     const session = { sendAgentMessage: vi.fn() } as any;
     const onDebug = vi.fn();
+    const onProviderPromptAccepted = vi.fn();
 
     const result = await sendGeminiPromptWithRetry({
       backend,
@@ -138,39 +183,51 @@ describe('sendGeminiPromptWithRetry', () => {
       messageBuffer,
       session,
       onDebug,
+      onProviderPromptAccepted,
       maxRetries: 2,
       retryDelayMs: 1,
     });
 
-    expect(result).toEqual({ kind: 'completed', stopReason: 'end_turn' });
-    expect(backend.sendPrompt).toHaveBeenCalledTimes(2);
+    expect(result).toEqual(outcome);
+    expect(onProviderPromptAccepted).toHaveBeenCalledTimes(1);
+    expect(backend.sendPrompt).toHaveBeenCalledTimes(1);
+    expect(messageBuffer.addMessage).not.toHaveBeenCalledWith(
+      expect.stringContaining('retrying'),
+      expect.anything(),
+    );
   });
 
-  it('retries stall timeout failures before succeeding', async () => {
+  it('does not retry stall timeout failures after provider acceptance', async () => {
+    const stallError = new Error('Timeout waiting for response to complete');
     const backend = {
       sendPrompt: vi.fn().mockResolvedValue(undefined),
-      waitForResponseComplete: vi
-        .fn()
-        .mockRejectedValueOnce(new Error('Timeout waiting for response to complete'))
-        .mockResolvedValueOnce({ kind: 'completed', stopReason: 'end_turn' }),
+      waitForResponseComplete: vi.fn().mockRejectedValue(stallError),
     } as any;
     const messageBuffer = { addMessage: vi.fn() } as any;
     const session = { sendAgentMessage: vi.fn() } as any;
     const onDebug = vi.fn();
+    const onProviderPromptAccepted = vi.fn();
 
-    const result = await sendGeminiPromptWithRetry({
-      backend,
-      acpSessionId: 'session-1',
-      prompt: 'hello',
-      messageBuffer,
-      session,
-      onDebug,
-      maxRetries: 2,
-      retryDelayMs: 1,
-    });
+    await expect(
+      sendGeminiPromptWithRetry({
+        backend,
+        acpSessionId: 'session-1',
+        prompt: 'hello',
+        messageBuffer,
+        session,
+        onDebug,
+        onProviderPromptAccepted,
+        maxRetries: 2,
+        retryDelayMs: 1,
+      }),
+    ).rejects.toBe(stallError);
 
-    expect(result).toEqual({ kind: 'completed', stopReason: 'end_turn' });
-    expect(backend.sendPrompt).toHaveBeenCalledTimes(2);
+    expect(onProviderPromptAccepted).toHaveBeenCalledTimes(1);
+    expect(backend.sendPrompt).toHaveBeenCalledTimes(1);
+    expect(messageBuffer.addMessage).not.toHaveBeenCalledWith(
+      expect.stringContaining('retrying'),
+      expect.anything(),
+    );
   });
 
   it('does not retry aborted ACP turn outcomes', async () => {

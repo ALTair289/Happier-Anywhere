@@ -498,6 +498,20 @@ describe('createClaudeUnifiedInFlightSteerEvaluator — user_draft starvation (l
     expect(harness.starvations).toEqual([]);
   });
 
+  it('clears controller slash-command residue even when the own-text registry cannot match it', async () => {
+    const harness = starvationHarness({
+      initialScreen: idleScreenWithDraft('/effort max/effort ultracode'),
+      ownTexts: [ownLeftoverText],
+      onClear: () => harness.setScreen(idleInteractiveScreen),
+    });
+
+    const decision = await harness.wiring.evaluateInFlightSteer(pendingBatch('steer me'));
+
+    expect(harness.clearOwnLeftoverDraft).toHaveBeenCalledTimes(1);
+    expect(decision).toEqual({ steer: true, turnLikelyEnded: true });
+    expect(harness.starvations).toEqual([]);
+  });
+
   it('clear attempts are bounded; a surviving own draft falls back to the veto', async () => {
     const harness = starvationHarness({
       initialScreen: idleScreenWithDraft(ownLeftoverText),

@@ -8,8 +8,12 @@ import { isFeatureId } from '@happier-dev/protocol';
 import { resolveCliFeatureDecision } from '@/features/featureDecisionService';
 import { normalizeClaudeRemoteMode } from './normalizeClaudeRemoteMode';
 import { resolveClaudeRemoteSessionStartPlan } from './sessionStartPlan';
+import type {
+    ClaudeRemoteProviderAcceptedPrompt,
+    ClaudeRemoteProviderPromptAcceptedHandler,
+} from './providerPromptAcceptance';
 
-type NextMessage = () => Promise<{ message: string; mode: EnhancedMode } | null>;
+type NextMessage = () => Promise<ClaudeRemoteProviderAcceptedPrompt<EnhancedMode> | null>;
 type ClaudeUnifiedTerminalFeatureDecision = Readonly<{ state: 'enabled' | 'disabled' | 'unsupported' | 'unknown' }>;
 
 type ClaudeRemoteDispatchDependencies = Readonly<{
@@ -103,6 +107,7 @@ export async function claudeRemoteDispatch<T extends { nextMessage: NextMessage 
     opts: T & {
         onResumeSessionAtRejected?: ResumeSessionAtRejectedHandler | null;
         onRunnerSelected?: ((runner: ClaudeRemoteRunnerKind) => void) | null;
+        onPromptAcceptedByProvider?: ClaudeRemoteProviderPromptAcceptedHandler | null;
         resumeSessionAt?: string | null;
     },
     deps?: Partial<ClaudeRemoteDispatchDependencies>,

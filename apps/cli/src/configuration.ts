@@ -8,10 +8,11 @@
 import { spawnSync } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { join, isAbsolute, resolve as resolvePath } from 'node:path'
-import { isServerIdFilesystemSafe, sanitizeServerIdForFilesystem } from '@/server/serverId'
+import { deriveServerIdFromUrl, isServerIdFilesystemSafe, sanitizeServerIdForFilesystem } from '@/server/serverId'
 import { isLocalishServerUrl } from '@/server/serverUrlClassification'
 import { normalizeCliArgv } from '@/cli/parseArgs'
 import { expandHomeDirPath } from '@/utils/path/expandHomeDirPath'
+import { TERMINAL_INPUT_MAX_PROVIDER_ACCEPTANCE_TIMEOUT_MS } from '@/agent/runtime/terminal/injection/promptWriteTimeout'
 import {
   resolveManagedCliReleaseChannelSync,
 } from '@happier-dev/cli-common/firstPartyRuntime'
@@ -219,7 +220,7 @@ class Configuration {
   public readonly sessionKeepAliveIdleMs: number
   public readonly sessionKeepAliveThinkingMs: number
 
-  // Pending queue V2: idle wake polling (ensures queued prompts are materialized even if socket wakeups are missed).
+  // Pending queue V2: optional idle wake polling fallback for suspected missed socket wakeups.
   public readonly pendingQueueIdleWakePollIntervalMs: number
   public readonly pendingQueueStateReconcileThrottleMs: number
   public readonly sessionSocketStaleSafetyIntervalMs: number
@@ -342,6 +343,10 @@ class Configuration {
     // Check if we're running as daemon based on process args
     const args = normalizeCliArgv(process.argv.slice(2))
     this.isDaemonProcess = isDaemonProcessArgv(args)
+    normalizeDaemonProcessInheritedEnv({
+      env: process.env,
+      isDaemonProcess: this.isDaemonProcess,
+    })
     this.publicReleaseRing = resolveManagedCliReleaseChannelSync({ processEnv: process.env, argv: process.argv }).ringId
 
     // Directory configuration - Priority: HAPPIER_HOME_DIR env > default home dir
@@ -556,16 +561,16 @@ class Configuration {
 
     const pendingWakeRaw = String(process.env.HAPPIER_PENDING_QUEUE_IDLE_WAKE_POLL_INTERVAL_MS ?? '').trim();
     const pendingWakeMs = Number.parseInt(pendingWakeRaw, 10);
-    // Default: prompt defensive wake. Real pending queue wakeups should arrive via
-    // server pending-changed updates and reconnect catch-up, but lost nudges must
-    // not leave a user-visible prompt waiting on the long idle path. Repeated
-    // snapshot reads remain bounded by pendingQueueStateReconcileThrottleMs.
+    // Default: disabled. Pending queue wakeups should arrive via server
+    // pending-changed updates and reconnect catch-up; periodic idle polling is an
+    // explicit opt-in diagnostic/self-healing fallback for environments where
+    // those nudges are suspected to be unreliable.
     this.pendingQueueIdleWakePollIntervalMs =
       pendingWakeRaw === '0'
         ? 0
         : (Number.isFinite(pendingWakeMs) && pendingWakeMs >= 50
             ? Math.min(pendingWakeMs, 60_000)
-            : 5_000);
+            : 0);
 
     this.pendingQueueStateReconcileThrottleMs = resolveIntEnvWithBounds(
       'HAPPIER_PENDING_QUEUE_STATE_RECONCILE_THROTTLE_MS',
@@ -769,7 +774,7 @@ class Configuration {
     );
     this.claudeUnifiedTerminalProviderAcceptanceTimeoutMs = resolveIntEnvWithBounds(
       'HAPPIER_CLAUDE_UNIFIED_TERMINAL_PROVIDER_ACCEPTANCE_TIMEOUT_MS',
-      { min: 1, max: 120_000, default: 5_000 },
+      { min: 1, max: TERMINAL_INPUT_MAX_PROVIDER_ACCEPTANCE_TIMEOUT_MS, default: 5_000 },
     );
 
     // Default: 250ms. Best-effort grace window for the transcript to settle and for tool_use/tool_result
@@ -1060,19 +1065,6 @@ function readActiveServerFromSettingsFile(path: string): PersistedServerSettings
   }
 }
 
-function deriveServerIdFromUrl(url: string): string {
-  // Deterministic, filesystem-safe id for ad-hoc server URLs (used when env overrides are set).
-  // Not cryptographic; intended only for local directory names.
-  const comparableKey = safeCreateComparableServerUrlKey(url)
-  const value = comparableKey || url
-  let h = 2166136261;
-  for (let i = 0; i < value.length; i += 1) {
-    h ^= value.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return `env_${(h >>> 0).toString(16)}`;
-}
-
 function normalizeServerUrl(url: string): string {
   return String(url ?? '').trim().replace(/\/+$/, '');
 }
@@ -1084,6 +1076,26 @@ function safeCreateComparableServerUrlKey(url: string | null | undefined): strin
     return createServerUrlComparableKey(value);
   } catch {
     return '';
+  }
+}
+
+function normalizeDaemonProcessInheritedEnv(params: Readonly<{
+  env: NodeJS.ProcessEnv;
+  isDaemonProcess: boolean;
+}>): void {
+  if (!params.isDaemonProcess) return;
+
+  const hasStackContext =
+    Boolean(String(params.env.HAPPIER_STACK_STACK ?? '').trim()) ||
+    Boolean(String(params.env.HAPPIER_STACK_ENV_FILE ?? '').trim()) ||
+    Boolean(String(params.env.HAPPIER_STACK_REPO_DIR ?? '').trim());
+  if (hasStackContext) {
+    params.env.HAPPIER_STACK_PROCESS_KIND = 'daemon';
+    return;
+  }
+
+  if (String(params.env.HAPPIER_STACK_PROCESS_KIND ?? '').trim() === 'session') {
+    delete params.env.HAPPIER_STACK_PROCESS_KIND;
   }
 }
 
@@ -1105,12 +1117,36 @@ function resolveServerSelection(params: Readonly<{
     const out = normalizeServerUrl(value ?? '');
     return out ? out : null;
   };
+  const matchesUrl = (server: Readonly<{ serverUrl: string; localServerUrl?: string | null }>, url: string): boolean => {
+    const targetComparableKey = safeCreateComparableServerUrlKey(url);
+    const serverComparableKey = safeCreateComparableServerUrlKey(server.serverUrl);
+    if (targetComparableKey && serverComparableKey && targetComparableKey === serverComparableKey) return true;
+    if (normalizeServerUrl(server.serverUrl) === url) return true;
+    const local = normalizeServerUrl(server.localServerUrl ?? '');
+    if (local && local === url) return true;
+    const localComparableKey = safeCreateComparableServerUrlKey(server.localServerUrl ?? '');
+    return Boolean(targetComparableKey && localComparableKey && targetComparableKey === localComparableKey);
+  };
 
   // Env override semantics (compat):
   // - If HAPPIER_PUBLIC_SERVER_URL is set: treat it as canonical serverUrl and use HAPPIER_LOCAL_SERVER_URL/HAPPIER_SERVER_URL for apiServerUrl.
   // - Else: treat HAPPIER_SERVER_URL as canonical serverUrl (legacy), and use HAPPIER_LOCAL_SERVER_URL as apiServerUrl override if provided.
   const envCanonicalServerUrl = normalizeUrl(params.envPublicServerUrl) ?? normalizeUrl(params.envServerUrl);
   if (envCanonicalServerUrl) {
+    const envActivePersisted = params.envActiveServerId && params.persisted
+      ? params.persisted.servers[params.envActiveServerId] ?? null
+      : null;
+    if (envActivePersisted && !matchesUrl(envActivePersisted, envCanonicalServerUrl)) {
+      const canonical = normalizeServerUrl(envActivePersisted.serverUrl);
+      const apiServerUrl = normalizeServerUrl(envActivePersisted.localServerUrl ?? '') || canonical;
+      return {
+        activeServerId: resolveActiveServerId(envActivePersisted.id),
+        serverUrl: canonical,
+        apiServerUrl,
+        webappUrl: envActivePersisted.webappUrl,
+      };
+    }
+
     const envPublicServerUrl = normalizeUrl(params.envPublicServerUrl);
     const envLocalServerUrl = normalizeUrl(params.envLocalServerUrl);
     const ignoreStaleLocalOverride =
@@ -1125,17 +1161,6 @@ function resolveServerSelection(params: Readonly<{
 
     const persistedMatch = params.persisted
       ? (() => {
-          const matchesUrl = (server: Readonly<{ serverUrl: string; localServerUrl?: string | null }>, url: string): boolean => {
-            const targetComparableKey = safeCreateComparableServerUrlKey(url);
-            const serverComparableKey = safeCreateComparableServerUrlKey(server.serverUrl);
-            if (targetComparableKey && serverComparableKey && targetComparableKey === serverComparableKey) return true;
-            if (normalizeServerUrl(server.serverUrl) === url) return true;
-            const local = normalizeServerUrl(server.localServerUrl ?? '');
-            if (local && local === url) return true;
-            const localComparableKey = safeCreateComparableServerUrlKey(server.localServerUrl ?? '');
-            return Boolean(targetComparableKey && localComparableKey && targetComparableKey === localComparableKey);
-          };
-
           const envActive = params.envActiveServerId
             ? params.persisted.servers[params.envActiveServerId] ?? null
             : null;

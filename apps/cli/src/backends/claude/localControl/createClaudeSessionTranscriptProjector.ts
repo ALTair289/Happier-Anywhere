@@ -8,6 +8,13 @@ import type { RawJSONLines } from '../types';
 import { createClaudeRawMessageTurnDiffBridge } from '../utils/createClaudeRawMessageTurnDiffBridge';
 import { isClaudeInternalTranscriptMessage } from '../utils/isClaudeInternalTranscriptMessage';
 import { buildClaudeTodoWriteWorkState, createClaudeTaskToolWorkStateTracker } from '../workState/claudeWorkState';
+import { createClaudeGoalWorkStateSource } from '../workState/claudeGoalSource';
+import {
+  CLAUDE_GOAL_WORK_STATE_ITEM_ID,
+  CLAUDE_GOAL_WORK_STATE_SOURCE_FAMILY,
+} from '../workState/claudeGoalStatus';
+import type { ClaudeWorkflowActivitySource } from '../workflows/claudeWorkflowActivitySource';
+import { filterWorkflowOwnedWorkStateItems } from '../workflows/claudeWorkflowOwnedWorkState';
 import { mapClaudeRateLimitEventToUsageDetails, type NormalizedProviderUsageLimitDetailsV1 } from '../connectedServices/mapClaudeRateLimitEventToUsageDetails';
 import { surfaceClaudeRateLimitRuntimeIssue } from '../connectedServices/surfaceClaudeRuntimeIssues';
 import {
@@ -28,6 +35,16 @@ function readRecord(value: unknown): Record<string, unknown> | null {
 
 function readString(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+}
+
+/**
+ * The CLAUDE transcript session id for this session, read from the metadata snapshot (set from the
+ * Claude `system.session_id`). This — NOT the Happier `session.sessionId` — is what `goal_status`
+ * attachments are matched against. May be null early (before the snapshot populates); the goal
+ * source then self-learns it from the observed transcript records.
+ */
+function readClaudeSessionIdFromSession(session: Session): string | null {
+  return readString(session.client.getMetadataSnapshot?.()?.claudeSessionId);
 }
 
 type CompactCommandMarkerKind = 'local-command' | 'plain';
@@ -72,10 +89,33 @@ function readMainChainAssistantModelId(message: RawJSONLines): string | null {
 export function createClaudeSessionTranscriptProjector(params: Readonly<{
   session: Session;
   logPrefix: string;
+  /**
+   * Centralized Claude Dynamic Workflow ACTIVITY source (CWF2/CWF3/CWF4), wired by the launcher with
+   * the session credentials + stored-content encryption it needs for durable `activity/workflow_run.v1`
+   * records. The projector feeds it the SAME raw transcript channel that drives the goal source
+   * (`observeRaw`), and applies its CWF4 owned-id filter at the work-state merge chokepoint so
+   * workflow agents do not ALSO render as top-level task/todo rows. Optional: when absent (e.g. no
+   * credentials yet) the goal/work-state path is unchanged.
+   */
+  workflowActivitySource?: ClaudeWorkflowActivitySource | null;
 }>): Readonly<{
   observe(message: RawJSONLines): void;
+  observeRaw(value: unknown): void;
+  /**
+   * Remove the published Claude goal work-state item (used by the active-session clear effector,
+   * since Claude's `/goal clear` emits no `goal_status`). Idempotent.
+   */
+  clearGoalWorkState(): void;
+  /**
+   * Record a goal-control SET intent (used by the active-session set effector) so re-setting the same
+   * objective after a clear is accepted instead of suppressed as a stale post-clear replay (G2).
+   */
+  recordGoalSetIntent(): void;
+  /** Drain pending workflow-activity writes immediately (turn end / stream close / finalize). No-op without a source. */
+  flushWorkflowActivity(): Promise<void>;
   reset(): void;
 }> {
+  const workflowActivitySource = params.workflowActivitySource ?? null;
   const turnDiffBridge = createClaudeRawMessageTurnDiffBridge({
     getSessionId: () => params.session.sessionId ?? params.session.client.sessionId ?? 'unknown',
     sendMessage: (message) => {
@@ -83,12 +123,27 @@ export function createClaudeSessionTranscriptProjector(params: Readonly<{
     },
   });
   const publishWorkStateSnapshot = (snapshot: ClaudeLocalWorkStateSnapshot): void => {
+    // CWF4 coherence: a canonical Workflow run's agents live in the durable `activity/workflow_run.v1`
+    // record + workflow UI surfaces. Drop any work-state rows the workflow normalizer marked
+    // workflow-owned BEFORE the merge, so they do not ALSO render as top-level task/todo rows. The
+    // pure filter preserves the snapshot's extra fields (e.g. `ownedSourceFamilies`) and is a no-op
+    // when no source is wired or it owns nothing.
+    const filtered = (workflowActivitySource
+      ? filterWorkflowOwnedWorkStateItems(snapshot, workflowActivitySource.getWorkflowOwnedAgentToolUseIds())
+      : snapshot) as ClaudeLocalWorkStateSnapshot;
+    // The Claude goal item id (`goal:claude`) is NOT namespaced under its source family, so
+    // source-family ownership alone cannot REMOVE it on an empty (clear) snapshot. Declare the goal
+    // item id explicitly so a clear (empty goal snapshot) actually drops the existing goal item.
+    const ownedItemIds = (filtered.ownedSourceFamilies ?? []).includes(CLAUDE_GOAL_WORK_STATE_SOURCE_FAMILY)
+      ? [CLAUDE_GOAL_WORK_STATE_ITEM_ID]
+      : undefined;
     updateMetadataBestEffort(
       params.session.client,
       (metadata) => mergeSessionWorkStateMetadataV1({
         metadata,
-        nextOwned: snapshot,
-        ownedSourceFamilies: snapshot.ownedSourceFamilies,
+        nextOwned: filtered,
+        ownedSourceFamilies: filtered.ownedSourceFamilies,
+        ...(ownedItemIds ? { ownedItemIds } : {}),
       }) as unknown as Metadata,
       params.logPrefix,
       'claude_terminal_work_state',
@@ -97,6 +152,26 @@ export function createClaudeSessionTranscriptProjector(params: Readonly<{
   const taskToolWorkStateTracker = createClaudeTaskToolWorkStateTracker({
     backendId: 'claude',
     agentId: 'claude',
+  });
+  // Centralized Claude native `/goal` source (plan H6/H7). The `goal_status`
+  // attachment and the system/init `slash_commands` records are control
+  // bookkeeping the session scanner DROPS before the post-strip `onMessage`
+  // channel (`isClaudeInternalTranscriptMessage` → true for `type:'attachment'`
+  // and side-channels `system` rows — the F2 "keep attachments out of the visible
+  // transcript" gate). They survive ONLY on the scanner's RAW channel, so the
+  // goal source is fed from `observeRaw` (the raw transcript value), NOT from
+  // `observe` — which would never see a goal_status anyway. Every Claude launcher
+  // wires the raw transcript channel into `observeRaw`, so there is ONE goal-source
+  // implementation observing ONE channel, not per-launcher routing.
+  const goalWorkStateSource = createClaudeGoalWorkStateSource({
+    backendId: 'claude',
+    agentId: 'claude',
+    publishWorkStateSnapshot: (snapshot) => publishWorkStateSnapshot(snapshot),
+    // The CLAUDE transcript session id (NOT the Happier `session.sessionId`) — the goal source
+    // matches `goal_status` attachments against it. Null until known; the source then self-learns it
+    // from the observed transcript records.
+    getCurrentClaudeSessionId: () => readClaudeSessionIdFromSession(params.session),
+    logPrefix: params.logPrefix,
   });
   const maybeProjectWorkState = (message: RawJSONLines): void => {
     const updatedAt = Date.now();
@@ -195,8 +270,35 @@ export function createClaudeSessionTranscriptProjector(params: Readonly<{
         turnDiffBridge.flushAfterForwardIfNeeded();
       }
     },
+    // Raw transcript channel (plan H7): the scanner forwards every parsed JSONL
+    // value here BEFORE its visible-transcript filtering, so `attachment`
+    // (`goal_status`) and `system` (`slash_commands`) records — dropped from
+    // `observe` — reach the goal source. `routeClaudeAttachment` + the source
+    // already tolerate raw objects. This NEVER emits to the visible transcript.
+    observeRaw(value) {
+      goalWorkStateSource.observeTranscriptMessage(value);
+      // The Claude workflow ACTIVITY source rides the SAME raw transcript channel as the goal source
+      // (workflow `task_started`/`task_progress`/`task_completed` rows). One wiring, one channel.
+      workflowActivitySource?.observeTranscriptMessage(value);
+    },
+    clearGoalWorkState() {
+      goalWorkStateSource.clearGoalWorkState();
+    },
+    recordGoalSetIntent() {
+      goalWorkStateSource.recordGoalSetIntent();
+    },
+    async flushWorkflowActivity() {
+      if (!workflowActivitySource) return;
+      try {
+        await workflowActivitySource.flush();
+      } catch (error) {
+        logger.debug(`${params.logPrefix}: failed to flush Claude workflow activity (non-fatal)`, error);
+      }
+    },
     reset() {
       turnDiffBridge.reset();
+      // Stop scheduling pending workflow-activity writes on session teardown/reset.
+      workflowActivitySource?.dispose();
     },
   };
 }

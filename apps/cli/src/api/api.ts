@@ -22,6 +22,7 @@ import { Credentials } from '@/persistence';
 import { resolveMachineEncryptionContext, resolveSessionEncryptionContext } from './client/encryptionKey';
 import { openSessionDataEncryptionKey } from './client/openSessionDataEncryptionKey';
 import { serializeAxiosErrorForLog } from './client/serializeAxiosErrorForLog';
+import { logServerEndpointFailure } from './client/serverEndpointFailureLog';
 import { HttpStatusError } from './client/httpStatusError';
 import { resolveServerHttpBaseUrl } from './client/serverHttpBaseUrl';
 import {
@@ -30,6 +31,7 @@ import {
   type ConnectedServiceAuthGroupApi,
   type ConnectedServiceCredentialApi,
 } from './connectedServices/connectedServiceCredentialApi';
+import { resolveConnectedServicesServerApiTimeoutMs } from './connectedServices/serverApiTimeout';
 import {
   ConnectedServiceQuotaApiError,
   createConnectedServiceQuotaApiError,
@@ -41,13 +43,19 @@ import {
   shouldTreatGetOrCreateSessionErrorAsOffline,
 } from './client/offlineErrors';
 import {
+  buildProviderAccountUsageRecordId,
   ConnectedServiceAuthGroupErrorResponseV1Schema,
   ConnectedServiceAuthGroupResponseV1Schema,
   ConnectedServiceCredentialHealthV1Schema,
   ConnectedServiceCredentialHealthStatusV1Schema,
   ConnectedServiceIdSchema,
+  ConnectedServiceUsageSourceV1Schema,
   ConnectedServiceQuotaSnapshotV1Schema,
+  ProviderAccountUsageRecordIdSchema,
+  ProviderAccountUsageRecordKeyV1Schema,
+  ProviderAccountUsageSnapshotV1Schema,
   SealedConnectedServiceQuotaSnapshotV1Schema,
+  SealedProviderAccountUsageSnapshotV1Schema,
   StoredJsonContentEnvelopeSchema,
 } from '@happier-dev/protocol';
 import type {
@@ -58,8 +66,13 @@ import type {
   ConnectedServiceCredentialHealthStatusV1,
   ConnectedServiceId,
   ConnectedServiceQuotaSnapshotV1,
+  ConnectedServiceUsageSourceV1,
+  ProviderAccountUsageRecordId,
+  ProviderAccountUsageRecordKeyV1,
+  ProviderAccountUsageSnapshotV1,
   SealedConnectedServiceCredentialV1,
   SealedConnectedServiceQuotaSnapshotV1,
+  SealedProviderAccountUsageSnapshotV1,
 } from '@happier-dev/protocol';
 import { resolveSessionCreateEncryptionMode } from '@/api/session/resolveSessionCreateEncryptionMode';
 import { createScmConnectedAccountCredentialResolver } from './connectedServices/scmConnectedAccountCredentialResolver';
@@ -73,6 +86,15 @@ export {
 
 const CONNECTED_SERVICE_PROFILE_LIST_CACHE_TTL_MS = 10_000;
 const ACCOUNT_ENCRYPTION_MODE_CACHE_TTL_MS = 10_000;
+const ProviderAccountUsageResponseSourcesSchema = z.array(ConnectedServiceUsageSourceV1Schema).optional();
+
+function parseProviderAccountUsageResponseSources(raw: Readonly<Record<string, unknown>>): ConnectedServiceUsageSourceV1[] | undefined {
+  const parsed = ProviderAccountUsageResponseSourcesSchema.safeParse(raw.sources);
+  if (!parsed.success) {
+    throw createConnectedServiceQuotaProtocolError('Invalid provider account usage snapshot response', parsed.error);
+  }
+  return parsed.data;
+}
 
 type ConnectedServiceProfileListResult = Readonly<{
   serviceId: ConnectedServiceId;
@@ -666,7 +688,7 @@ export class ApiClient {
             'Authorization': `Bearer ${this.credential.token}`,
             'Content-Type': 'application/json'
           },
-          timeout: 5000
+          timeout: resolveConnectedServicesServerApiTimeoutMs()
         }
       );
 
@@ -677,7 +699,11 @@ export class ApiClient {
       logger.debug(`[API] Vendor token for ${vendor} registered successfully`);
     } catch (error) {
       // Never log raw Axios errors: they can contain bearer tokens or vendor keys.
-      logger.debug(`[API] [ERROR] Failed to register vendor token:`, serializeAxiosErrorForLog(error));
+      logServerEndpointFailure({
+        logger,
+        operation: 'Failed to register vendor token',
+        error,
+      });
       throw new Error(`Failed to register vendor token: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
@@ -714,7 +740,7 @@ export class ApiClient {
             'Authorization': `Bearer ${this.credential.token}`,
             'Content-Type': 'application/json',
           },
-          timeout: 5000,
+          timeout: resolveConnectedServicesServerApiTimeoutMs(),
         },
       );
 
@@ -729,7 +755,11 @@ export class ApiClient {
       });
     } catch (error) {
       // Never log raw Axios errors: they can contain bearer tokens or provider secrets.
-      logger.debug(`[API] [ERROR] Failed to register connected service credential:`, serializeAxiosErrorForLog(error));
+      logServerEndpointFailure({
+        logger,
+        operation: 'Failed to register connected service credential',
+        error,
+      });
       throw new Error(`Failed to register connected service credential: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
@@ -788,7 +818,7 @@ export class ApiClient {
           'Authorization': `Bearer ${this.credential.token}`,
           'Content-Type': 'application/json',
         },
-        timeout: 5000,
+        timeout: resolveConnectedServicesServerApiTimeoutMs(),
       },
     );
     if (response.status !== 200) {
@@ -858,7 +888,7 @@ export class ApiClient {
             'Authorization': `Bearer ${this.credential.token}`,
             'Content-Type': 'application/json',
           },
-          timeout: 5000,
+          timeout: resolveConnectedServicesServerApiTimeoutMs(),
         },
       );
       if (response.status !== 200) {
@@ -876,7 +906,11 @@ export class ApiClient {
           throw new ConnectedServiceAuthGroupGenerationConflictError(parsed.data.generation);
         }
       }
-      logger.debug(`[API] [ERROR] Failed to update connected service auth group active profile:`, serializeAxiosErrorForLog(error));
+      logServerEndpointFailure({
+        logger,
+        operation: 'Failed to update connected service auth group active profile',
+        error,
+      });
       throw new Error(`Failed to update connected service auth group active profile: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
@@ -913,7 +947,7 @@ export class ApiClient {
             'Authorization': `Bearer ${this.credential.token}`,
             'Content-Type': 'application/json',
           },
-          timeout: 5000,
+          timeout: resolveConnectedServicesServerApiTimeoutMs(),
         },
       );
       if (response.status !== 200) {
@@ -931,7 +965,11 @@ export class ApiClient {
           throw new ConnectedServiceAuthGroupGenerationConflictError(parsed.data.generation);
         }
       }
-      logger.debug(`[API] [ERROR] Failed to update connected service auth group runtime state:`, serializeAxiosErrorForLog(error));
+      logServerEndpointFailure({
+        logger,
+        operation: 'Failed to update connected service auth group runtime state',
+        error,
+      });
       throw new Error(`Failed to update connected service auth group runtime state: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
@@ -966,7 +1004,7 @@ export class ApiClient {
             'Authorization': `Bearer ${this.credential.token}`,
             'Content-Type': 'application/json',
           },
-          timeout: 5000,
+          timeout: resolveConnectedServicesServerApiTimeoutMs(),
         },
       );
       if (response.status !== 200) {
@@ -984,7 +1022,11 @@ export class ApiClient {
           throw new ConnectedServiceAuthGroupGenerationConflictError(parsed.data.generation);
         }
       }
-      logger.debug(`[API] [ERROR] Failed to create connected service auth group member:`, serializeAxiosErrorForLog(error));
+      logServerEndpointFailure({
+        logger,
+        operation: 'Failed to create connected service auth group member',
+        error,
+      });
       throw new Error(`Failed to create connected service auth group member: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
@@ -1019,7 +1061,7 @@ export class ApiClient {
             'Authorization': `Bearer ${this.credential.token}`,
             'Content-Type': 'application/json',
           },
-          timeout: 5000,
+          timeout: resolveConnectedServicesServerApiTimeoutMs(),
         },
       );
       if (response.status !== 200) {
@@ -1037,7 +1079,11 @@ export class ApiClient {
           throw new ConnectedServiceAuthGroupGenerationConflictError(parsed.data.generation);
         }
       }
-      logger.debug(`[API] [ERROR] Failed to update connected service auth group member:`, serializeAxiosErrorForLog(error));
+      logServerEndpointFailure({
+        logger,
+        operation: 'Failed to update connected service auth group member',
+        error,
+      });
       throw new Error(`Failed to update connected service auth group member: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
@@ -1066,7 +1112,7 @@ export class ApiClient {
             'Content-Type': 'application/json',
           },
           params: { expectedGeneration },
-          timeout: 5000,
+          timeout: resolveConnectedServicesServerApiTimeoutMs(),
         },
       );
       if (response.status !== 200) {
@@ -1084,7 +1130,11 @@ export class ApiClient {
           throw new ConnectedServiceAuthGroupGenerationConflictError(parsed.data.generation);
         }
       }
-      logger.debug(`[API] [ERROR] Failed to delete connected service auth group member:`, serializeAxiosErrorForLog(error));
+      logServerEndpointFailure({
+        logger,
+        operation: 'Failed to delete connected service auth group member',
+        error,
+      });
       throw new Error(`Failed to delete connected service auth group member: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
@@ -1146,7 +1196,7 @@ export class ApiClient {
             'Authorization': `Bearer ${this.credential.token}`,
             'Content-Type': 'application/json',
           },
-          timeout: 5000,
+          timeout: resolveConnectedServicesServerApiTimeoutMs(),
         },
       );
 
@@ -1166,7 +1216,11 @@ export class ApiClient {
           throw new ConnectedServiceAuthGroupGenerationConflictError(parsed.data.generation);
         }
       }
-      logger.debug(`[API] [ERROR] Failed to register connected service credential (v3):`, serializeAxiosErrorForLog(error));
+      logServerEndpointFailure({
+        logger,
+        operation: 'Failed to register connected service credential',
+        error,
+      });
       throw new Error(`Failed to register connected service credential: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
@@ -1193,7 +1247,7 @@ export class ApiClient {
             'Authorization': `Bearer ${this.credential.token}`,
             'Content-Type': 'application/json',
           },
-          timeout: 5000,
+          timeout: resolveConnectedServicesServerApiTimeoutMs(),
         },
       );
       if (response.status !== 200) {
@@ -1207,20 +1261,20 @@ export class ApiClient {
           throw new ConnectedServiceAuthGroupGenerationConflictError(parsed.data.generation);
         }
       }
-      logger.debug(`[API] [ERROR] Failed to update connected service credential health:`, serializeAxiosErrorForLog(error));
+      logServerEndpointFailure({
+        logger,
+        operation: 'Failed to update connected service credential health',
+        error,
+      });
       throw new Error(`Failed to update connected service credential health: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
-  /**
-   * Register a sealed connected service quota snapshot (v2).
-   *
-   * The server stores the ciphertext as-is and only keeps non-secret metadata for UX.
-   */
-  async registerConnectedServiceQuotaSnapshotSealed(params: {
-    serviceId: ConnectedServiceId;
-    profileId: string;
-    sealed: SealedConnectedServiceQuotaSnapshotV1;
+  async registerProviderAccountUsageSnapshotSealed(params: {
+    recordId: ProviderAccountUsageRecordId;
+    recordKey: ProviderAccountUsageRecordKeyV1;
+    source?: ConnectedServiceUsageSourceV1;
+    sealed: SealedProviderAccountUsageSnapshotV1;
     metadata: {
       fetchedAt: number;
       staleAfterMs: number;
@@ -1229,35 +1283,130 @@ export class ApiClient {
     };
   }): Promise<void> {
     const serverUrl = resolveServerHttpBaseUrl();
-    const serviceId = encodeURIComponent(params.serviceId);
-    const profileId = encodeURIComponent(params.profileId);
+    const parsedRecordId = ProviderAccountUsageRecordIdSchema.parse(params.recordId);
+    const recordKey = ProviderAccountUsageRecordKeyV1Schema.parse(params.recordKey);
+    if (buildProviderAccountUsageRecordId(recordKey) !== parsedRecordId) {
+      throw createConnectedServiceQuotaProtocolError('Provider account usage record key does not match record id');
+    }
+    const recordId = encodeURIComponent(parsedRecordId);
+    const sealed = SealedProviderAccountUsageSnapshotV1Schema.parse(params.sealed);
+    const source = params.source ? ConnectedServiceUsageSourceV1Schema.parse(params.source) : undefined;
 
     try {
       const response = await axios.post(
-        `${serverUrl}/v2/connect/${serviceId}/profiles/${profileId}/quotas`,
+        `${serverUrl}/v2/connect/provider-account-usage/${recordId}`,
         {
-          sealed: params.sealed,
+          recordKey,
+          sealed,
           metadata: params.metadata,
+          ...(source ? { source } : {}),
         },
         {
           headers: {
             'Authorization': `Bearer ${this.credential.token}`,
             'Content-Type': 'application/json',
           },
-          timeout: 5000,
+          timeout: resolveConnectedServicesServerApiTimeoutMs(),
         },
       );
 
       if (response.status !== 200 && response.status !== 201) {
         throw createConnectedServiceQuotaHttpStatusError({
           status: response.status,
-          message: `Connected service quota snapshot write failed with status ${response.status}`,
+          message: `Provider account usage snapshot write failed with status ${response.status}`,
         });
       }
     } catch (error) {
-      logger.debug(`[API] [ERROR] Failed to register connected service quota snapshot:`, serializeAxiosErrorForLog(error));
+      logServerEndpointFailure({
+        logger,
+        operation: 'Failed to register provider account usage snapshot',
+        error,
+      });
       throw createConnectedServiceQuotaApiError({
-        message: 'Failed to register connected service quota snapshot',
+        message: 'Failed to register provider account usage snapshot',
+        cause: error,
+      });
+    }
+  }
+
+  async getProviderAccountUsageSnapshotSealed(params: {
+    recordId: ProviderAccountUsageRecordId;
+  }): Promise<{
+    sealed: SealedProviderAccountUsageSnapshotV1;
+    sources?: ConnectedServiceUsageSourceV1[];
+    metadata: {
+      fetchedAt: number;
+      staleAfterMs: number;
+      status: 'ok' | 'unavailable' | 'estimated' | 'error';
+      refreshRequestedAt?: number;
+    };
+  } | null> {
+    const serverUrl = resolveServerHttpBaseUrl();
+    const recordId = encodeURIComponent(ProviderAccountUsageRecordIdSchema.parse(params.recordId));
+
+    try {
+      const response = await axios.get(
+        `${serverUrl}/v2/connect/provider-account-usage/${recordId}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${this.credential.token}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: resolveConnectedServicesServerApiTimeoutMs(),
+        },
+      );
+      if (response.status !== 200) {
+        throw createConnectedServiceQuotaHttpStatusError({
+          status: response.status,
+          message: `Provider account usage snapshot read failed with status ${response.status}`,
+        });
+      }
+      const raw = response.data;
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+        throw createConnectedServiceQuotaProtocolError('Invalid provider account usage snapshot response');
+      }
+      const rawRecord = raw as Record<string, unknown>;
+
+      const sealedParsed = SealedProviderAccountUsageSnapshotV1Schema.safeParse(rawRecord.sealed);
+      if (!sealedParsed.success) {
+        throw createConnectedServiceQuotaProtocolError('Invalid provider account usage snapshot response', sealedParsed.error);
+      }
+
+      const metadataParsed = z.object({
+        fetchedAt: z.number(),
+        staleAfterMs: z.number(),
+        status: z.enum(['ok', 'unavailable', 'estimated', 'error']),
+        refreshRequestedAt: z.number().optional(),
+      }).safeParse(rawRecord.metadata);
+      if (!metadataParsed.success) {
+        throw createConnectedServiceQuotaProtocolError('Invalid provider account usage snapshot response', metadataParsed.error);
+      }
+      const sources = parseProviderAccountUsageResponseSources(rawRecord);
+
+      return {
+        sealed: sealedParsed.data,
+        metadata: metadataParsed.data,
+        ...(sources !== undefined ? { sources } : {}),
+      };
+    } catch (error: unknown) {
+      if (error instanceof ConnectedServiceQuotaApiError) {
+        logServerEndpointFailure({
+          logger,
+          operation: 'Failed to get provider account usage snapshot',
+          error,
+        });
+        throw error;
+      }
+      const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+      if (status === 404) return null;
+
+      logServerEndpointFailure({
+        logger,
+        operation: 'Failed to get provider account usage snapshot',
+        error,
+      });
+      throw createConnectedServiceQuotaApiError({
+        message: 'Failed to get provider account usage snapshot',
         cause: error,
       });
     }
@@ -1286,7 +1435,7 @@ export class ApiClient {
             'Authorization': `Bearer ${this.credential.token}`,
             'Content-Type': 'application/json',
           },
-          timeout: 5000,
+          timeout: resolveConnectedServicesServerApiTimeoutMs(),
         },
       );
       if (response.status !== 200) {
@@ -1319,7 +1468,11 @@ export class ApiClient {
       return { sealed: sealedParsed.data, metadata: metadataParsed.data };
     } catch (error: unknown) {
       if (error instanceof ConnectedServiceQuotaApiError) {
-        logger.debug(`[API] [ERROR] Failed to get connected service quota snapshot:`, serializeAxiosErrorForLog(error));
+        logServerEndpointFailure({
+          logger,
+          operation: 'Failed to get connected service quota snapshot',
+          error,
+        });
         throw error;
       }
       if (axios.isAxiosError(error) && error.response?.status === 409) {
@@ -1331,7 +1484,11 @@ export class ApiClient {
       const status = axios.isAxiosError(error) ? error.response?.status : undefined;
       if (status === 404) return null;
 
-      logger.debug(`[API] [ERROR] Failed to get connected service quota snapshot:`, serializeAxiosErrorForLog(error));
+      logServerEndpointFailure({
+        logger,
+        operation: 'Failed to get connected service quota snapshot',
+        error,
+      });
       throw createConnectedServiceQuotaApiError({
         message: 'Failed to get connected service quota snapshot',
         cause: error,
@@ -1339,10 +1496,10 @@ export class ApiClient {
     }
   }
 
-  async registerConnectedServiceQuotaSnapshotPlain(params: {
-    serviceId: ConnectedServiceId;
-    profileId: string;
-    content: { t: 'plain'; v: ConnectedServiceQuotaSnapshotV1 };
+  async registerProviderAccountUsageSnapshotPlain(params: {
+    recordId: ProviderAccountUsageRecordId;
+    source?: ConnectedServiceUsageSourceV1;
+    content: { t: 'plain'; v: ProviderAccountUsageSnapshotV1 };
     metadata: {
       fetchedAt: number;
       staleAfterMs: number;
@@ -1351,35 +1508,135 @@ export class ApiClient {
     };
   }): Promise<void> {
     const serverUrl = resolveServerHttpBaseUrl();
-    const serviceId = encodeURIComponent(params.serviceId);
-    const profileId = encodeURIComponent(params.profileId);
+    const recordId = ProviderAccountUsageRecordIdSchema.parse(params.recordId);
+    const snapshot = ProviderAccountUsageSnapshotV1Schema.parse(params.content.v);
+    const source = params.source ? ConnectedServiceUsageSourceV1Schema.parse(params.source) : undefined;
 
     try {
       const response = await axios.post(
-        `${serverUrl}/v3/connect/${serviceId}/profiles/${profileId}/quotas`,
+        `${serverUrl}/v3/connect/provider-account-usage/${encodeURIComponent(recordId)}`,
         {
-          content: params.content,
+          content: { t: 'plain', v: snapshot },
           metadata: params.metadata,
+          ...(source ? { source } : {}),
         },
         {
           headers: {
             'Authorization': `Bearer ${this.credential.token}`,
             'Content-Type': 'application/json',
           },
-          timeout: 5000,
+          timeout: resolveConnectedServicesServerApiTimeoutMs(),
         },
       );
 
       if (response.status !== 200 && response.status !== 201) {
         throw createConnectedServiceQuotaHttpStatusError({
           status: response.status,
-          message: `Connected service quota snapshot write failed with status ${response.status}`,
+          message: `Provider account usage snapshot write failed with status ${response.status}`,
         });
       }
     } catch (error) {
-      logger.debug(`[API] [ERROR] Failed to register connected service quota snapshot (v3):`, serializeAxiosErrorForLog(error));
+      logServerEndpointFailure({
+        logger,
+        operation: 'Failed to register provider account usage snapshot (v3)',
+        error,
+      });
       throw createConnectedServiceQuotaApiError({
-        message: 'Failed to register connected service quota snapshot',
+        message: 'Failed to register provider account usage snapshot',
+        cause: error,
+      });
+    }
+  }
+
+  async getProviderAccountUsageSnapshotPlain(params: {
+    recordId: ProviderAccountUsageRecordId;
+  }): Promise<{
+    content: { t: 'plain'; v: ProviderAccountUsageSnapshotV1 };
+    sources?: ConnectedServiceUsageSourceV1[];
+    metadata: {
+      fetchedAt: number;
+      staleAfterMs: number;
+      status: 'ok' | 'unavailable' | 'estimated' | 'error';
+      refreshRequestedAt?: number;
+    };
+  } | null> {
+    const serverUrl = resolveServerHttpBaseUrl();
+    const recordId = ProviderAccountUsageRecordIdSchema.parse(params.recordId);
+
+    try {
+      const response = await axios.get(
+        `${serverUrl}/v3/connect/provider-account-usage/${encodeURIComponent(recordId)}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${this.credential.token}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: resolveConnectedServicesServerApiTimeoutMs(),
+        },
+      );
+      if (response.status !== 200) {
+        throw createConnectedServiceQuotaHttpStatusError({
+          status: response.status,
+          message: `Provider account usage snapshot read failed with status ${response.status}`,
+        });
+      }
+      const raw = response.data;
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+        throw createConnectedServiceQuotaProtocolError('Invalid provider account usage snapshot response');
+      }
+      const rawRecord = raw as Record<string, unknown>;
+
+      const contentParsed = StoredJsonContentEnvelopeSchema.safeParse(rawRecord.content);
+      if (!contentParsed.success || contentParsed.data.t !== 'plain') {
+        throw createConnectedServiceQuotaProtocolError(
+          'Invalid provider account usage snapshot response',
+          contentParsed.success ? undefined : contentParsed.error,
+        );
+      }
+
+      const snapshotParsed = ProviderAccountUsageSnapshotV1Schema.safeParse(contentParsed.data.v);
+      if (!snapshotParsed.success || snapshotParsed.data.recordId !== recordId) {
+        throw createConnectedServiceQuotaProtocolError(
+          'Invalid provider account usage snapshot response',
+          snapshotParsed.success ? undefined : snapshotParsed.error,
+        );
+      }
+
+      const metadataParsed = z.object({
+        fetchedAt: z.number(),
+        staleAfterMs: z.number(),
+        status: z.enum(['ok', 'unavailable', 'estimated', 'error']),
+        refreshRequestedAt: z.number().optional(),
+      }).safeParse(rawRecord.metadata);
+      if (!metadataParsed.success) {
+        throw createConnectedServiceQuotaProtocolError('Invalid provider account usage snapshot response', metadataParsed.error);
+      }
+      const sources = parseProviderAccountUsageResponseSources(rawRecord);
+
+      return {
+        content: { t: 'plain', v: snapshotParsed.data },
+        metadata: metadataParsed.data,
+        ...(sources !== undefined ? { sources } : {}),
+      };
+    } catch (error: unknown) {
+      if (error instanceof ConnectedServiceQuotaApiError) {
+        logServerEndpointFailure({
+          logger,
+          operation: 'Failed to get provider account usage snapshot (v3)',
+          error,
+        });
+        throw error;
+      }
+      const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+      if (status === 404) return null;
+
+      logServerEndpointFailure({
+        logger,
+        operation: 'Failed to get provider account usage snapshot (v3)',
+        error,
+      });
+      throw createConnectedServiceQuotaApiError({
+        message: 'Failed to get provider account usage snapshot',
         cause: error,
       });
     }
@@ -1409,7 +1666,7 @@ export class ApiClient {
             'Authorization': `Bearer ${this.credential.token}`,
             'Content-Type': 'application/json',
           },
-          timeout: 5000,
+          timeout: resolveConnectedServicesServerApiTimeoutMs(),
         },
       );
       if (response.status !== 200) {
@@ -1450,7 +1707,11 @@ export class ApiClient {
       return { content: { t: 'plain', v: snapshotParsed.data }, metadata: metadataParsed.data };
     } catch (error: unknown) {
       if (error instanceof ConnectedServiceQuotaApiError) {
-        logger.debug(`[API] [ERROR] Failed to get connected service quota snapshot (v3):`, serializeAxiosErrorForLog(error));
+        logServerEndpointFailure({
+          logger,
+          operation: 'Failed to get connected service quota snapshot (v3)',
+          error,
+        });
         throw error;
       }
       if (axios.isAxiosError(error) && error.response?.status === 409) {
@@ -1462,7 +1723,11 @@ export class ApiClient {
       const status = axios.isAxiosError(error) ? error.response?.status : undefined;
       if (status === 404) return null;
 
-      logger.debug(`[API] [ERROR] Failed to get connected service quota snapshot (v3):`, serializeAxiosErrorForLog(error));
+      logServerEndpointFailure({
+        logger,
+        operation: 'Failed to get connected service quota snapshot (v3)',
+        error,
+      });
       throw createConnectedServiceQuotaApiError({
         message: 'Failed to get connected service quota snapshot',
         cause: error,
@@ -1492,7 +1757,7 @@ export class ApiClient {
           'Authorization': `Bearer ${this.credential.token}`,
           'Content-Type': 'application/json',
         },
-        timeout: 5000,
+        timeout: resolveConnectedServicesServerApiTimeoutMs(),
       },
     );
     if (response.status !== 200) {

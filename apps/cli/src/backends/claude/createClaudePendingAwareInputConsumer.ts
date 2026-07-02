@@ -1,20 +1,13 @@
 import { createSessionProviderInputConsumer } from '@/agent/runtime/sessionInput/SessionProviderInputConsumer';
-import type {
-    PendingMaterializationActiveTurnPolicy,
-    SessionProviderInputConsumer,
-} from '@/agent/runtime/sessionInput/types';
-import { resolveSessionPendingQueueMaxPopPerWake } from '@/agent/runtime/sessionInput/pendingQueueDrainPolicy';
+import type { SessionProviderInputConsumer } from '@/agent/runtime/sessionInput/types';
+import {
+    resolveSessionPendingActiveTurnDeliveryPolicy,
+    resolveSessionPendingQueueDeliveryTiming,
+    resolveSessionPendingQueueMaxPopPerWake,
+} from '@/agent/runtime/sessionInput/pendingQueueDrainPolicy';
 
 import type { EnhancedMode } from './loop';
 import type { Session } from './session';
-
-function resolveClaudePendingActiveTurnDeliveryPolicy(
-    accountSettings: Session['accountSettings'],
-): PendingMaterializationActiveTurnPolicy | undefined {
-    return accountSettings?.sessionBusySteerSendPolicy === 'server_pending'
-        ? undefined
-        : 'allow_live_delivery';
-}
 
 /**
  * Canonical Claude session input consumer: local agent queue + daemon-owned
@@ -68,7 +61,8 @@ export function createClaudePendingAwareInputConsumer(
             waitForMetadataUpdate: (signal) => session.client.waitForMetadataUpdate(signal),
         },
         pendingDrainMaxPopPerWake: resolveSessionPendingQueueMaxPopPerWake(session.accountSettings ?? null),
-        resolveActiveTurnDeliveryPolicy: () => resolveClaudePendingActiveTurnDeliveryPolicy(session.accountSettings),
+        resolvePendingQueueDeliveryTiming: () => resolveSessionPendingQueueDeliveryTiming(session.accountSettings ?? null),
+        resolveActiveTurnDeliveryPolicy: () => resolveSessionPendingActiveTurnDeliveryPolicy(session.accountSettings),
         ...(opts?.onMetadataUpdate ? { onMetadataUpdate: opts.onMetadataUpdate } : {}),
     });
 }

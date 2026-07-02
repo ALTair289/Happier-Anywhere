@@ -19,6 +19,7 @@ import {
   runClaudeUnifiedTerminalSession,
   shouldProbeTmuxForClaudeUnifiedDefaultHost,
 } from './runClaudeUnifiedTerminalSession';
+import { surfaceClaudeUnifiedTerminalRuntimeIssue } from './surfaceClaudeUnifiedTerminalRuntimeIssue';
 import type {
   ClaudeUnifiedRuntimeConfigOutcomeEvent,
   ClaudeUnifiedRuntimeControlApplyResult,
@@ -169,6 +170,7 @@ describe('runClaudeUnifiedTerminalSession', () => {
       dispose: vi.fn(async () => {}),
     };
 
+    let nextMessageCallCount = 0;
     let consumed = false;
     await runClaudeUnifiedTerminalSession({
       path: '/workspace/project',
@@ -213,6 +215,77 @@ describe('runClaudeUnifiedTerminalSession', () => {
         reason: 'test',
       },
     });
+  });
+
+  it('marks risky during-write failures as possible short own composer residue', async () => {
+    const abortController = createAbortableSignal();
+    const telemetry = { emit: vi.fn() };
+    const ownComposerTexts = {
+      record: vi.fn(),
+      matches: vi.fn(() => false),
+      recordPossiblePartialResidue: vi.fn(),
+    };
+    const handle: TerminalHostHandle = {
+      kind: 'tmux',
+      sessionName: 'happier-claude-session-test',
+      paneId: '%1',
+      attachMetadata: {
+        attachStrategy: 'terminal_host',
+        topology: 'shared',
+        locality: 'same_machine',
+        liveProbe: 'required',
+      },
+    };
+    const attemptedPrompt = `please produce the full report ${'x'.repeat(320)}`;
+    const adapter: TerminalHostAdapter = {
+      kind: 'tmux',
+      createOrAttachHost: vi.fn(async () => handle),
+      injectUserPrompt: vi.fn(async () => ({
+        status: 'failed',
+        reason: 'timeout',
+        phase: 'during_write',
+        duplicateRisk: 'possible',
+        recoverable: true,
+      }) as const),
+      evaluateLiveness: vi.fn(async () => ({ paneAlive: true, observedAt: 1 })),
+      captureInputState: vi.fn(async () => ({ stable: true, currentInput: interactiveClaudeScreen, observedAt: Date.now() })),
+      interruptTurn: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    };
+
+    let consumed = false;
+    const sessionPromise = runClaudeUnifiedTerminalSession({
+      path: '/workspace/project',
+      signal: abortController.signal,
+      nextMessage: async () => {
+        if (consumed) return null;
+        consumed = true;
+        return {
+          message: attemptedPrompt,
+          mode: {
+            permissionMode: 'default',
+            claudeUnifiedTerminalHost: 'tmux',
+          },
+        };
+      },
+      ownComposerTexts: ownComposerTexts as unknown as ReturnType<typeof createClaudeOwnComposerTextLog>,
+      resolveHostAdapter: async () => ({ status: 'resolved', adapter, reason: 'test' }),
+      buildSpawn: async () => ({
+        spawnArgv: ['/bin/claude'],
+        spawnEnv: {},
+      }),
+      createSessionName: () => 'happier-claude-session-test',
+      telemetry,
+    });
+
+    try {
+      await waitUntil(() => ownComposerTexts.recordPossiblePartialResidue.mock.calls.length === 1, 5_000);
+      expect(ownComposerTexts.record).toHaveBeenCalledWith(attemptedPrompt);
+      expect(ownComposerTexts.recordPossiblePartialResidue).toHaveBeenCalledWith(attemptedPrompt);
+    } finally {
+      abortController.abort();
+      await sessionPromise.catch(() => undefined);
+    }
   });
 
   it('normalizes native Windows tmux preference to auto before resolving a host', async () => {
@@ -932,6 +1005,210 @@ describe('runClaudeUnifiedTerminalSession', () => {
         maxUserMessageSeq: 2039,
         userMessageLocalIds: ['known-resume-local-id'],
       });
+    } finally {
+      abortController.abort();
+      await sessionPromise.catch(() => undefined);
+    }
+  });
+
+  it('confirms provider acceptance when the transcript row appears before terminal injection returns', async () => {
+    const abortController = createAbortableSignal();
+    const dir = await mkdtemp(join(tmpdir(), 'happier-claude-unified-early-transcript-'));
+    tempDirs.push(dir);
+    const workspaceDir = join(dir, 'workspace');
+    await mkdir(workspaceDir, { recursive: true });
+    const prompt = [
+      'please add support for opencode and claude oauth/setup-token',
+      '',
+      'Then proceed with the complete implementation plan.',
+    ].join('\r\n');
+    const persistedPrompt = prompt.replace(/\r\n/g, '\n');
+    const claudeSessionId = '55555555-5555-4555-8555-555555555555';
+    const transcriptPath = join(dir, `${claudeSessionId}.jsonl`);
+    await writeFile(transcriptPath, '');
+
+    const injected: string[] = [];
+    const onPromptAcceptedByProvider = vi.fn();
+    const handle: TerminalHostHandle = {
+      kind: 'tmux',
+      sessionName: 'happier-claude-session-test',
+      paneId: '%1',
+      attachMetadata: {
+        attachStrategy: 'terminal_host',
+        topology: 'shared',
+        locality: 'same_machine',
+        liveProbe: 'required',
+      },
+    };
+    const adapter: TerminalHostAdapter = {
+      kind: 'tmux',
+      createOrAttachHost: vi.fn(async () => handle),
+      injectUserPrompt: vi.fn(async (_handle, input) => {
+        injected.push(input.text);
+        await appendFile(transcriptPath, `${JSON.stringify({
+          type: 'user',
+          uuid: 'early-transcript-accepted-user-row',
+          sessionId: claudeSessionId,
+          timestamp: new Date().toISOString(),
+          message: {
+            role: 'user',
+            content: persistedPrompt,
+          },
+        })}\n`);
+        await new Promise((resolve) => setTimeout(resolve, 75));
+        return { status: 'injected', at: Date.now(), bytesWritten: input.text.length } as const;
+      }),
+      evaluateLiveness: vi.fn(async () => ({ paneAlive: true, observedAt: Date.now() })),
+      captureInputState: vi.fn(async () => ({ stable: true, currentInput: interactiveClaudeScreen, observedAt: Date.now() })),
+      interruptTurn: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    };
+    let subscribedHook: ((data: SessionHookData) => void) | undefined;
+    let consumed = false;
+    const sessionPromise = runClaudeUnifiedTerminalSession({
+      path: workspaceDir,
+      sessionId: claudeSessionId,
+      transcriptPath,
+      signal: abortController.signal,
+      nextMessage: async () => {
+        if (consumed) return await new Promise(() => undefined);
+        consumed = true;
+        return {
+          message: prompt,
+          mode: { permissionMode: 'default', claudeUnifiedTerminalHost: 'tmux' },
+          maxUserMessageSeq: 971,
+          userMessageLocalIds: ['early-transcript-local-id'],
+        };
+      },
+      onMessage: vi.fn(),
+      onPromptAcceptedByProvider,
+      resolveHostAdapter: async () => ({ status: 'resolved', adapter, reason: 'test' }),
+      buildSpawn: async () => ({
+        spawnArgv: ['/bin/claude'],
+        spawnEnv: {},
+      }),
+      createSessionName: () => 'happier-claude-session-test',
+      subscribeClaudeSessionHooks: (callback) => {
+        subscribedHook = callback;
+        return () => {
+          subscribedHook = undefined;
+        };
+      },
+    });
+
+    try {
+      await waitUntil(() => typeof subscribedHook === 'function', 5_000);
+      await waitUntil(() => injected.length === 1, 5_000);
+      await waitUntil(() => onPromptAcceptedByProvider.mock.calls.length === 1, 2_000);
+      expect(onPromptAcceptedByProvider).toHaveBeenCalledWith({
+        message: prompt,
+        maxUserMessageSeq: 971,
+        userMessageLocalIds: ['early-transcript-local-id'],
+      });
+    } finally {
+      abortController.abort();
+      await sessionPromise.catch(() => undefined);
+    }
+  });
+
+  it('does not retry a seqless pending prompt when the provider transcript row arrives after injection', async () => {
+    const abortController = createAbortableSignal();
+    const dir = await mkdtemp(join(tmpdir(), 'happier-claude-unified-seqless-pending-transcript-'));
+    tempDirs.push(dir);
+    const workspaceDir = join(dir, 'workspace');
+    await mkdir(workspaceDir, { recursive: true });
+    const prompt = 'Reply with exactly: QA_DUP_FIX_AFTER_LINE_CLEAR_20260626';
+    const claudeSessionId = '66666666-6666-4666-8666-666666666666';
+    const transcriptPath = join(dir, `${claudeSessionId}.jsonl`);
+    await writeFile(transcriptPath, '');
+
+    const injected: string[] = [];
+    const onPromptAcceptedByProvider = vi.fn();
+    const onTerminalInjectionFailure = vi.fn();
+    const handle: TerminalHostHandle = {
+      kind: 'tmux',
+      sessionName: 'happier-claude-session-test',
+      paneId: '%1',
+      attachMetadata: {
+        attachStrategy: 'terminal_host',
+        topology: 'shared',
+        locality: 'same_machine',
+        liveProbe: 'required',
+      },
+    };
+    const adapter: TerminalHostAdapter = {
+      kind: 'tmux',
+      createOrAttachHost: vi.fn(async () => handle),
+      injectUserPrompt: vi.fn(async (_handle, input) => {
+        injected.push(input.text);
+        setTimeout(() => {
+          void appendFile(transcriptPath, `${JSON.stringify({
+            type: 'user',
+            uuid: `seqless-pending-accepted-user-row-${injected.length}`,
+            promptId: `seqless-pending-prompt-${injected.length}`,
+            sessionId: claudeSessionId,
+            timestamp: new Date().toISOString(),
+            message: {
+              role: 'user',
+              content: input.text,
+            },
+          })}\n`);
+        }, 25).unref?.();
+        return { status: 'injected', at: Date.now(), bytesWritten: input.text.length } as const;
+      }),
+      evaluateLiveness: vi.fn(async () => ({ paneAlive: true, observedAt: Date.now() })),
+      captureInputState: vi.fn(async () => ({ stable: true, currentInput: interactiveClaudeScreen, observedAt: Date.now() })),
+      interruptTurn: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    };
+    let subscribedHook: ((data: SessionHookData) => void) | undefined;
+    let consumed = false;
+    const sessionPromise = runClaudeUnifiedTerminalSession({
+      path: workspaceDir,
+      sessionId: claudeSessionId,
+      transcriptPath,
+      signal: abortController.signal,
+      nextMessage: async () => {
+        if (consumed) return await new Promise(() => undefined);
+        consumed = true;
+        return {
+          message: prompt,
+          mode: { permissionMode: 'default', claudeUnifiedTerminalHost: 'tmux' },
+          maxUserMessageSeq: null,
+          userMessageLocalIds: ['seqless-pending-local-id'],
+        };
+      },
+      onMessage: vi.fn(),
+      onPromptAcceptedByProvider,
+      onTerminalInjectionFailure,
+      resolveHostAdapter: async () => ({ status: 'resolved', adapter, reason: 'test' }),
+      buildSpawn: async () => ({
+        spawnArgv: ['/bin/claude'],
+        spawnEnv: {},
+      }),
+      createSessionName: () => 'happier-claude-session-test',
+      subscribeClaudeSessionHooks: (callback) => {
+        subscribedHook = callback;
+        return () => {
+          subscribedHook = undefined;
+        };
+      },
+      providerAcceptanceTimeoutMs: 100,
+    });
+
+    try {
+      await waitUntil(() => typeof subscribedHook === 'function', 5_000);
+      await waitUntil(() => injected.length === 1, 5_000);
+      await waitUntil(() => onPromptAcceptedByProvider.mock.calls.length === 1, 2_000);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+
+      expect(injected).toEqual([prompt]);
+      expect(onPromptAcceptedByProvider).toHaveBeenCalledWith({
+        message: prompt,
+        maxUserMessageSeq: null,
+        userMessageLocalIds: ['seqless-pending-local-id'],
+      });
+      expect(onTerminalInjectionFailure).not.toHaveBeenCalled();
     } finally {
       abortController.abort();
       await sessionPromise.catch(() => undefined);
@@ -3984,6 +4261,7 @@ describe('runClaudeUnifiedTerminalSession', () => {
       permissionMode: 'default',
       claudeUnifiedTerminalHost: 'zellij',
     } as const;
+    let nextMessageCallCount = 0;
     let consumed = false;
     let resolveSecondMessage!: (value: { message: string; mode: typeof mode }) => void;
     const secondMessage = new Promise<{ message: string; mode: typeof mode }>((resolve) => {
@@ -3994,6 +4272,7 @@ describe('runClaudeUnifiedTerminalSession', () => {
       path: '/workspace/project',
       signal: abortController.signal,
       nextMessage: async () => {
+        nextMessageCallCount += 1;
         if (!consumed) {
           consumed = true;
           return { message: 'hello', mode };
@@ -4018,23 +4297,18 @@ describe('runClaudeUnifiedTerminalSession', () => {
       });
 
       // The injected-but-never-provider-accepted batch is handed back by the arbiter on the
-      // unwind (F-1: duplicate-attempt is the safe direction; dedupe absorbs it), and a message
-      // that races into the dead session's stale input wait must be handed back by the pump —
-      // neither may be silently consumed.
+      // unwind (F-1: duplicate-attempt is the safe direction; dedupe absorbs it). If the pump
+      // has not prefetched the next message yet, it remains owner-held instead of needing a
+      // second handback.
       resolveSecondMessage({ message: 'arrived during unwind', mode });
-      await waitUntil(() => returnUnconsumedMessage.mock.calls.length === 2);
+      await waitUntil(() => returnUnconsumedMessage.mock.calls.length === 1);
       expect(returnUnconsumedMessage).toHaveBeenNthCalledWith(1, {
         message: 'hello',
         mode,
         maxUserMessageSeq: null,
         userMessageLocalIds: [],
       });
-      expect(returnUnconsumedMessage).toHaveBeenNthCalledWith(2, {
-        message: 'arrived during unwind',
-        mode,
-        maxUserMessageSeq: null,
-        userMessageLocalIds: [],
-      });
+      expect(nextMessageCallCount).toBe(1);
     } finally {
       abortController.abort();
       await sessionPromise.catch(() => undefined);
@@ -4460,13 +4734,426 @@ describe('runClaudeUnifiedTerminalSession', () => {
     }
   });
 
-  it('rejects with the classified injection-failure error when provider acceptance never arrives and the ambiguous retry is exhausted (failed_terminal exit contract, incident pid-82626)', async () => {
-    // The runner-killing escape route: an injected ui_pending prompt whose provider acceptance
-    // times out, retries once (failed_ambiguous), and times out again escalates to
-    // `failed_terminal`. The session MUST exit by rejecting with the CLASSIFIED
-    // ClaudeUnifiedTerminalInjectionFailureError so launchers can surface a structured runtime
-    // issue and park for the next message — never an unclassified error that becomes a
-    // process-killing `[claude] Fatal command error`.
+  it('surfaces an injected pending prompt when the terminal turn fails before provider confirmation', async () => {
+    const abortController = createAbortableSignal();
+    const injected: string[] = [];
+    const onTerminalInjectionFailure = vi.fn(async () => ({ action: 'claimed_pending_delivery' as const }));
+    const returnUnconsumedMessage = vi.fn();
+    let subscribedHook: ((data: SessionHookData) => void) | undefined;
+    const handle: TerminalHostHandle = {
+      kind: 'windows_console',
+      sessionName: 'happier-claude-session-test',
+      attachMetadata: {
+        attachStrategy: 'terminal_host',
+        topology: 'shared',
+        locality: 'same_machine',
+        liveProbe: 'required',
+      },
+    };
+    const adapter: TerminalHostAdapter = {
+      kind: 'windows_console',
+      createOrAttachHost: vi.fn(async () => handle),
+      injectUserPrompt: vi.fn(async (_handle, input) => {
+        injected.push(input.text);
+        return { status: 'injected', at: Date.now(), bytesWritten: input.text.length } as const;
+      }),
+      evaluateLiveness: vi.fn(async () => ({ paneAlive: true, observedAt: Date.now() })),
+      captureInputState: vi.fn(async () => ({ stable: true, currentInput: interactiveClaudeScreen, observedAt: Date.now() })),
+      interruptTurn: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    };
+    let consumed = false;
+    let settlement: { kind: 'resolved' } | { kind: 'rejected'; error: unknown } | null = null;
+    const sessionPromise = runClaudeUnifiedTerminalSession({
+      path: '/workspace/project',
+      signal: abortController.signal,
+      nextMessage: async () => {
+        if (consumed) return null;
+        consumed = true;
+        return {
+          message: 'terminal failed before provider confirmation',
+          mode: {
+            permissionMode: 'default',
+            claudeUnifiedTerminalHost: 'auto',
+          },
+          maxUserMessageSeq: 984,
+          userMessageLocalIds: ['pending-local-terminal-end-failed'],
+        };
+      },
+      resolveHostAdapter: async () => ({ status: 'resolved' as const, adapter, reason: 'test' }),
+      buildSpawn: async () => ({
+        spawnArgv: ['claude.exe'],
+        spawnEnv: {},
+      }),
+      createSessionName: () => 'happier-claude-session-test',
+      providerAcceptanceTimeoutMs: 60_000,
+      onTerminalInjectionFailure,
+      returnUnconsumedMessage,
+      subscribeClaudeSessionHooks: (callback) => {
+        subscribedHook = callback;
+        return () => {
+          subscribedHook = undefined;
+        };
+      },
+    })
+      .then(() => {
+        settlement = { kind: 'resolved' };
+      })
+      .catch((error: unknown) => {
+        settlement = { kind: 'rejected', error };
+      });
+
+    try {
+      await waitUntil(() => typeof subscribedHook === 'function', 5_000);
+      subscribedHook?.({
+        hook_event_name: 'SessionStart',
+        session_id: 'claude-session-id',
+      });
+      await waitUntil(() => injected.length === 1, 5_000);
+
+      subscribedHook?.({
+        hook_event_name: 'StopFailure',
+        session_id: 'claude-session-id',
+      });
+
+      await waitUntil(() => onTerminalInjectionFailure.mock.calls.length === 1 || settlement !== null, 500);
+      expect(settlement).toBeNull();
+      expect(onTerminalInjectionFailure).toHaveBeenCalledWith(expect.objectContaining({
+        code: 'claude_unified_terminal_injection_failed',
+        failureState: 'failed_terminal',
+        reason: 'timeout',
+        phase: 'after_enter_unknown',
+        duplicateRisk: 'likely',
+        recoverable: true,
+        maxUserMessageSeq: 984,
+        userMessageLocalIds: ['pending-local-terminal-end-failed'],
+      }));
+      expect(adapter.dispose).not.toHaveBeenCalled();
+      expect(returnUnconsumedMessage).not.toHaveBeenCalled();
+    } finally {
+      abortController.abort();
+      await sessionPromise.catch(() => undefined);
+    }
+  });
+
+  it('surfaces an injected Windows-console pending prompt when the failed terminal boundary arrives after pending delivery drains', async () => {
+    const abortController = createAbortableSignal();
+    const injected: string[] = [];
+    const onTerminalInjectionFailure = vi.fn(async () => ({ action: 'claimed_pending_delivery' as const }));
+    const onPromptAcceptedByProvider = vi.fn();
+    const returnUnconsumedMessage = vi.fn();
+    let subscribedHook: ((data: SessionHookData) => void) | undefined;
+    let pendingDeliveryDrainedWithoutProviderAcceptance = false;
+    const handle: TerminalHostHandle = {
+      kind: 'windows_console',
+      sessionName: 'happier-claude-session-test',
+      attachMetadata: {
+        attachStrategy: 'terminal_host',
+        topology: 'shared',
+        locality: 'same_machine',
+        liveProbe: 'required',
+      },
+    };
+    const adapter: TerminalHostAdapter = {
+      kind: 'windows_console',
+      createOrAttachHost: vi.fn(async () => handle),
+      injectUserPrompt: vi.fn(async (_handle, input) => {
+        injected.push(input.text);
+        return { status: 'injected', at: Date.now(), bytesWritten: input.text.length } as const;
+      }),
+      evaluateLiveness: vi.fn(async () => ({ paneAlive: true, observedAt: Date.now() })),
+      captureInputState: vi.fn(async () => ({ stable: true, currentInput: interactiveClaudeScreen, observedAt: Date.now() })),
+      interruptTurn: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    };
+    let consumed = false;
+    let settlement: { kind: 'resolved' } | { kind: 'rejected'; error: unknown } | null = null;
+    const sessionPromise = runClaudeUnifiedTerminalSession({
+      path: '/workspace/project',
+      signal: abortController.signal,
+      nextMessage: async () => {
+        if (consumed) return null;
+        consumed = true;
+        return {
+          message: 'terminal failed after pending delivery drained',
+          mode: {
+            permissionMode: 'default',
+            claudeUnifiedTerminalHost: 'auto',
+          },
+          maxUserMessageSeq: 985,
+          userMessageLocalIds: ['pending-local-terminal-end-drained'],
+        };
+      },
+      resolveHostAdapter: async () => ({ status: 'resolved' as const, adapter, reason: 'test' }),
+      buildSpawn: async () => ({
+        spawnArgv: ['claude.exe'],
+        spawnEnv: {},
+      }),
+      createSessionName: () => 'happier-claude-session-test',
+      providerAcceptanceTimeoutMs: 60_000,
+      isPromptDeliveryAccepted: () => pendingDeliveryDrainedWithoutProviderAcceptance,
+      onPromptAcceptedByProvider,
+      onTerminalInjectionFailure,
+      returnUnconsumedMessage,
+      subscribeClaudeSessionHooks: (callback) => {
+        subscribedHook = callback;
+        return () => {
+          subscribedHook = undefined;
+        };
+      },
+    })
+      .then(() => {
+        settlement = { kind: 'resolved' };
+      })
+      .catch((error: unknown) => {
+        settlement = { kind: 'rejected', error };
+      });
+
+    try {
+      await waitUntil(() => typeof subscribedHook === 'function', 5_000);
+      subscribedHook?.({
+        hook_event_name: 'SessionStart',
+        session_id: 'claude-session-id',
+      });
+      await waitUntil(() => injected.length === 1, 5_000);
+
+      pendingDeliveryDrainedWithoutProviderAcceptance = true;
+      subscribedHook?.({
+        hook_event_name: 'StopFailure',
+        session_id: 'claude-session-id',
+      });
+
+      await waitUntil(() => onTerminalInjectionFailure.mock.calls.length === 1 || settlement !== null, 500);
+      expect(settlement).toBeNull();
+      expect(onPromptAcceptedByProvider).not.toHaveBeenCalled();
+      expect(onTerminalInjectionFailure).toHaveBeenCalledWith(expect.objectContaining({
+        code: 'claude_unified_terminal_injection_failed',
+        failureState: 'failed_terminal',
+        reason: 'timeout',
+        phase: 'after_enter_unknown',
+        duplicateRisk: 'likely',
+        recoverable: true,
+        maxUserMessageSeq: 985,
+        userMessageLocalIds: ['pending-local-terminal-end-drained'],
+      }));
+      expect(adapter.dispose).not.toHaveBeenCalled();
+      expect(returnUnconsumedMessage).not.toHaveBeenCalled();
+    } finally {
+      abortController.abort();
+      await sessionPromise.catch(() => undefined);
+    }
+  });
+
+  it('surfaces Windows-console host loss after Enter when the injection outcome is recorded', async () => {
+    const abortController = createAbortableSignal();
+    const telemetry = { emit: vi.fn() };
+    const onTerminalInjectionFailure = vi.fn();
+    const handle: TerminalHostHandle = {
+      kind: 'windows_console',
+      sessionName: 'happier-claude-session-test',
+      attachMetadata: {
+        attachStrategy: 'terminal_host',
+        topology: 'shared',
+        locality: 'same_machine',
+        liveProbe: 'required',
+      },
+    };
+    const injectUserPrompt = vi.fn(async () => ({
+      status: 'failed' as const,
+      reason: 'host_unreachable' as const,
+      phase: 'after_enter_unknown' as const,
+      duplicateRisk: 'possible' as const,
+      recoverable: true,
+    }));
+    const adapter: TerminalHostAdapter = {
+      kind: 'windows_console',
+      createOrAttachHost: vi.fn(async () => handle),
+      injectUserPrompt,
+      evaluateLiveness: vi.fn(async () => ({ paneAlive: true, observedAt: Date.now() })),
+      captureInputState: vi.fn(async () => ({ stable: true, currentInput: interactiveClaudeScreen, observedAt: Date.now() })),
+      interruptTurn: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    };
+    let consumed = false;
+    let settlement: { kind: 'resolved' } | { kind: 'rejected'; error: unknown } | null = null;
+    const sessionPromise = runClaudeUnifiedTerminalSession({
+      path: '/workspace/project',
+      signal: abortController.signal,
+      nextMessage: async () => {
+        if (consumed) return null;
+        consumed = true;
+        return {
+          message: 'windows console submit failure should be surfaced',
+          mode: {
+            permissionMode: 'default',
+            claudeUnifiedTerminalHost: 'auto',
+          },
+          maxUserMessageSeq: 971,
+          userMessageLocalIds: ['windows-submit-failure-local-id'],
+        };
+      },
+      resolveHostAdapter: async () => ({ status: 'resolved' as const, adapter, reason: 'test' }),
+      buildSpawn: async () => ({
+        spawnArgv: ['claude.exe'],
+        spawnEnv: {},
+      }),
+      createSessionName: () => 'happier-claude-session-test',
+      providerAcceptanceTimeoutMs: 5_000,
+      telemetry,
+      onTerminalInjectionFailure,
+    })
+      .then(() => {
+        settlement = { kind: 'resolved' };
+      })
+      .catch((error: unknown) => {
+        settlement = { kind: 'rejected', error };
+      });
+
+    try {
+      await waitUntil(() => injectUserPrompt.mock.calls.length === 1, 5_000);
+      await waitUntil(() => telemetry.emit.mock.calls.some((call) => call[0]?.name === 'unified.injection.outcome'), 1_000);
+
+      expect(telemetry.emit).toHaveBeenCalledWith({
+        name: 'unified.injection.outcome',
+        properties: expect.objectContaining({
+          status: 'failed',
+          reason: 'host_unreachable',
+          phase: 'after_enter_unknown',
+          duplicateRisk: 'possible',
+          hostKind: 'windows_console',
+          originKind: 'ui_pending',
+        }),
+      });
+      await waitUntil(() => onTerminalInjectionFailure.mock.calls.length === 1 || settlement !== null, 500);
+
+      expect(settlement).toBeNull();
+      expect(onTerminalInjectionFailure).toHaveBeenCalledWith(expect.objectContaining({
+        code: 'claude_unified_terminal_injection_failed',
+        failureState: 'failed_ambiguous',
+        reason: 'host_unreachable',
+        phase: 'after_enter_unknown',
+        duplicateRisk: 'possible',
+        recoverable: true,
+        userMessageLocalIds: ['windows-submit-failure-local-id'],
+      }));
+      expect(injectUserPrompt).toHaveBeenCalledTimes(1);
+    } finally {
+      abortController.abort();
+      await sessionPromise.catch(() => undefined);
+    }
+  });
+
+  it('surfaces Windows-console host loss after Enter as a runtime issue without handing the failed batch back', async () => {
+    const abortController = createAbortableSignal();
+    const telemetry = { emit: vi.fn() };
+    const failTurn = vi.fn(async () => {});
+    const returnUnconsumedMessage = vi.fn();
+    const handle: TerminalHostHandle = {
+      kind: 'windows_console',
+      sessionName: 'happier-claude-session-test',
+      attachMetadata: {
+        attachStrategy: 'terminal_host',
+        topology: 'shared',
+        locality: 'same_machine',
+        liveProbe: 'required',
+      },
+    };
+    const injectUserPrompt = vi.fn(async () => ({
+      status: 'failed' as const,
+      reason: 'host_unreachable' as const,
+      phase: 'after_enter_unknown' as const,
+      duplicateRisk: 'possible' as const,
+      recoverable: true,
+    }));
+    const adapter: TerminalHostAdapter = {
+      kind: 'windows_console',
+      createOrAttachHost: vi.fn(async () => handle),
+      injectUserPrompt,
+      evaluateLiveness: vi.fn(async () => ({ paneAlive: true, observedAt: Date.now() })),
+      captureInputState: vi.fn(async () => ({ stable: true, currentInput: interactiveClaudeScreen, observedAt: Date.now() })),
+      interruptTurn: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    };
+    const sessionForRuntimeIssue = {
+      sessionTurnLifecycle: {
+        beginTurn: vi.fn(async () => ({ turnId: 'turn-1' })),
+        completeTurn: vi.fn(async () => {}),
+        cancelTurn: vi.fn(async () => {}),
+        failTurn,
+      },
+    } as unknown as Parameters<typeof surfaceClaudeUnifiedTerminalRuntimeIssue>[0]['session'];
+    let consumed = false;
+    let settlement: { kind: 'resolved' } | { kind: 'rejected'; error: unknown } | null = null;
+    const sessionPromise = runClaudeUnifiedTerminalSession({
+      path: '/workspace/project',
+      signal: abortController.signal,
+      nextMessage: async () => {
+        if (consumed) return null;
+        consumed = true;
+        return {
+          message: 'windows console submit failure should fail the visible turn once',
+          mode: {
+            permissionMode: 'default',
+            claudeUnifiedTerminalHost: 'auto',
+          },
+          maxUserMessageSeq: 972,
+          userMessageLocalIds: ['windows-submit-failure-runtime-local-id'],
+        };
+      },
+      resolveHostAdapter: async () => ({ status: 'resolved' as const, adapter, reason: 'test' }),
+      buildSpawn: async () => ({
+        spawnArgv: ['claude.exe'],
+        spawnEnv: {},
+      }),
+      createSessionName: () => 'happier-claude-session-test',
+      providerAcceptanceTimeoutMs: 5_000,
+      telemetry,
+      returnUnconsumedMessage,
+      onTerminalInjectionFailure: async (error) => {
+        await surfaceClaudeUnifiedTerminalRuntimeIssue({
+          error,
+          session: sessionForRuntimeIssue,
+        });
+      },
+    })
+      .then(() => {
+        settlement = { kind: 'resolved' };
+      })
+      .catch((error: unknown) => {
+        settlement = { kind: 'rejected', error };
+      });
+
+    try {
+      await waitUntil(() => injectUserPrompt.mock.calls.length === 1, 5_000);
+      await waitUntil(() => failTurn.mock.calls.length === 1 || settlement !== null, 1_000);
+
+      expect(settlement).toBeNull();
+      expect(failTurn).toHaveBeenCalledWith({
+        provider: 'claude',
+        issue: expect.objectContaining({
+          code: 'provider_session_error',
+          source: 'provider_session_error',
+          provider: 'claude',
+        }),
+        allocateWhenIdle: true,
+      });
+      expect(injectUserPrompt).toHaveBeenCalledTimes(1);
+
+      abortController.abort();
+      await sessionPromise.catch(() => undefined);
+
+      expect(returnUnconsumedMessage).not.toHaveBeenCalled();
+    } finally {
+      abortController.abort();
+      await sessionPromise.catch(() => undefined);
+    }
+  });
+
+  it('surfaces exhausted ambiguous provider acceptance without aborting the live terminal runtime', async () => {
+    // A live host with an injected ui_pending prompt whose provider acceptance times out twice is
+    // unresolved delivery debt, not a terminal/process death. Surface the classified failure so the
+    // pending-delivery owner can block or retry safely, but keep the runtime alive until explicitly
+    // stopped.
     const abortController = createAbortableSignal();
     const injected: string[] = [];
     const onTerminalInjectionFailure = vi.fn();
@@ -4529,27 +5216,27 @@ describe('runClaudeUnifiedTerminalSession', () => {
 
     try {
       await waitUntil(() => injected.length >= 1);
-      await waitUntil(() => settlement !== null, 6_000);
+      await waitUntil(
+        () => onTerminalInjectionFailure.mock.calls.some((call) => call[0]?.failureState === 'failed_terminal') || settlement !== null,
+        6_000,
+      );
 
-      expect(settlement).toMatchObject({
-        kind: 'rejected',
-        error: expect.objectContaining({
-          code: 'claude_unified_terminal_injection_failed',
-          failureState: 'failed_terminal',
-          reason: 'timeout',
-        }),
-      });
-      // The first acceptance timeout stays ambiguous + recoverable (one retry), the second
-      // escalates to the terminal exit above instead of notifying again.
-      expect(injected.length).toBe(2);
+      expect(settlement).toBeNull();
+      expect(adapter.dispose).not.toHaveBeenCalled();
       expect(onTerminalInjectionFailure).toHaveBeenCalledWith(expect.objectContaining({
         code: 'claude_unified_terminal_injection_failed',
         failureState: 'failed_ambiguous',
       }));
+      expect(onTerminalInjectionFailure).toHaveBeenCalledWith(expect.objectContaining({
+          code: 'claude_unified_terminal_injection_failed',
+          failureState: 'failed_terminal',
+          reason: 'timeout',
+      }));
+      expect(injected.length).toBe(2);
       expect(returnUnconsumedMessage).not.toHaveBeenCalled();
     } finally {
       abortController.abort();
-      await sessionPromise;
+      await sessionPromise.catch(() => undefined);
     }
   });
 
@@ -4557,6 +5244,7 @@ describe('runClaudeUnifiedTerminalSession', () => {
     const abortController = createAbortableSignal();
     const injected: string[] = [];
     const telemetry = { emit: vi.fn() };
+    const onTerminalInjectionFailure = vi.fn();
     let subscribedHook: ((data: SessionHookData) => void) | undefined;
     let currentScreen = interactiveClaudeScreen;
     const handle: TerminalHostHandle = {
@@ -4616,6 +5304,7 @@ describe('runClaudeUnifiedTerminalSession', () => {
       lifecycleCompletionQuiescenceMs: 0,
       providerAcceptanceTimeoutMs: 20,
       telemetry,
+      onTerminalInjectionFailure,
       subscribeClaudeSessionHooks: (callback) => {
         subscribedHook = callback;
         return () => {
@@ -4665,21 +5354,23 @@ describe('runClaudeUnifiedTerminalSession', () => {
         transcript_path: '/tmp/claude-session.jsonl',
       });
 
-      await waitUntil(() => settlement !== null, 1_000);
-      expect(settlement).toMatchObject({
-        kind: 'rejected',
-        error: expect.objectContaining({
+      await waitUntil(
+        () => onTerminalInjectionFailure.mock.calls.some((call) => call[0]?.failureState === 'failed_terminal') || settlement !== null,
+        1_000,
+      );
+      expect(settlement).toBeNull();
+      expect(adapter.dispose).not.toHaveBeenCalled();
+      expect(onTerminalInjectionFailure).toHaveBeenCalledWith(expect.objectContaining({
           code: 'claude_unified_terminal_injection_failed',
           failureState: 'failed_terminal',
           reason: 'timeout',
           phase: 'after_enter_unknown',
           duplicateRisk: 'likely',
           recoverable: true,
-        }),
-      });
+      }));
     } finally {
       abortController.abort();
-      await sessionPromise;
+      await sessionPromise.catch(() => undefined);
     }
   });
 

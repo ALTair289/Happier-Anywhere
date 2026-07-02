@@ -1,4 +1,4 @@
-import { delayUnref } from '@/utils/time';
+import { waitForSessionMetadataRetryBackoff } from '@/agent/runtime/sessionMetadataWaitRetryBackoff';
 
 export async function runMetadataOverridesWatcherLoop(args: Readonly<{
   shouldExit: () => boolean;
@@ -7,18 +7,18 @@ export async function runMetadataOverridesWatcherLoop(args: Readonly<{
   onUpdate: () => void | Promise<void>;
   abortedBackoffMs?: number;
 }>): Promise<void> {
-  const abortedBackoffMs =
-    typeof args.abortedBackoffMs === 'number' && Number.isFinite(args.abortedBackoffMs) && args.abortedBackoffMs > 0
-      ? Math.floor(args.abortedBackoffMs)
-      : 25;
-
   while (!args.shouldExit()) {
     const signal = args.getAbortSignal();
+    const backoff = () => waitForSessionMetadataRetryBackoff({
+      backoffMs: args.abortedBackoffMs,
+      defaultMs: 25,
+      minMs: 1,
+    });
     let didUpdate = false;
     try {
       didUpdate = await args.waitForMetadataUpdate(signal);
     } catch {
-      await delayUnref(abortedBackoffMs);
+      await backoff();
       continue;
     }
     if (!didUpdate) {
@@ -26,13 +26,13 @@ export async function runMetadataOverridesWatcherLoop(args: Readonly<{
       if (args.shouldExit()) {
         break;
       }
-      await delayUnref(abortedBackoffMs);
+      await backoff();
       continue;
     }
     try {
       await args.onUpdate();
     } catch {
-      await delayUnref(abortedBackoffMs);
+      await backoff();
     }
   }
 }

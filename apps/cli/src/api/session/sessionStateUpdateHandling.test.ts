@@ -89,8 +89,51 @@ describe('handleSessionStateUpdate', () => {
     } as any);
 
     expect(result.pendingWakeSeq).toBe(1);
-    expect((result as any).pendingQueueState).toEqual({ known: true, pendingCount: 2, pendingVersion: 7 });
+    expect((result as any).pendingQueueState).toEqual({
+      known: true,
+      pendingCount: 2,
+      pendingBlockedCount: 0,
+      pendingVersion: 7,
+    });
     expect(onMetadataUpdated).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves the complete runtime activity projection from update-session events', () => {
+    const result = handleSessionStateUpdate({
+      update: {
+        id: 'u1',
+        seq: 1,
+        createdAt: Date.now(),
+        body: {
+          t: 'update-session',
+          sid: 's1',
+          runtimeActivityActiveCount: 1,
+          runtimeActivityObservedAt: 1_000,
+          runtimeActivityExpiresAt: 2_000,
+          runtimeActivitySourceClass: 'provider_detached_task',
+        },
+      } as any,
+      updateSource: 'session-scoped',
+      sessionId: 's1',
+      sessionEncryptionMode: 'e2ee',
+      metadata: null,
+      metadataVersion: 0,
+      agentState: null,
+      agentStateVersion: 0,
+      pendingWakeSeq: 0,
+      pendingQueueState: { known: false },
+      encryptionKey: new Uint8Array(),
+      encryptionVariant: 'dataKey',
+      onMetadataUpdated: () => {},
+      onWarning: () => {},
+    } as any);
+
+    expect(result.runtimeActivityProjection).toEqual({
+      runtimeActivityActiveCount: 1,
+      runtimeActivityObservedAt: 1_000,
+      runtimeActivityExpiresAt: 2_000,
+      runtimeActivitySourceClass: 'provider_detached_task',
+    });
   });
 
   it('warns when session-scoped socket receives update-machine', () => {

@@ -71,7 +71,12 @@ describe('snapshotSync.fetchSessionSnapshotUpdateFromServer', () => {
       currentAgentStateVersion: 0,
     });
 
-    expect((res as any).pendingQueueState).toEqual({ known: true, pendingCount: 3, pendingVersion: 9 });
+    expect((res as any).pendingQueueState).toEqual({
+      known: true,
+      pendingCount: 3,
+      pendingBlockedCount: 0,
+      pendingVersion: 9,
+    });
   });
 
   it('coalesces concurrent reads of the same raw session snapshot', async () => {
@@ -149,7 +154,14 @@ describe('snapshotSync.fetchSessionSnapshotUpdateFromServer', () => {
       currentAgentStateVersion: 0,
     });
 
-    expect(res).toEqual({ pendingQueueState: { known: true, pendingCount: 0, pendingVersion: 0 } });
+    expect(res).toEqual({
+      pendingQueueState: {
+        known: true,
+        pendingCount: 0,
+        pendingBlockedCount: 0,
+        pendingVersion: 0,
+      },
+    });
   });
 
   it('falls back to scanning /v2/sessions when the single-session route is missing (404 Not found)', async () => {
@@ -177,7 +189,14 @@ describe('snapshotSync.fetchSessionSnapshotUpdateFromServer', () => {
             currentAgentStateVersion: 999,
         });
 
-        expect(res).toEqual({ pendingQueueState: { known: true, pendingCount: 0, pendingVersion: 0 } });
+        expect(res).toEqual({
+            pendingQueueState: {
+                known: true,
+                pendingCount: 0,
+                pendingBlockedCount: 0,
+                pendingVersion: 0,
+            },
+        });
         expect(getSpy).toHaveBeenCalledTimes(2);
         expect(String(getSpy.mock.calls[0]?.[0])).toContain('/v2/sessions/s1');
         expect(String(getSpy.mock.calls[1]?.[0])).toContain('/v2/sessions');

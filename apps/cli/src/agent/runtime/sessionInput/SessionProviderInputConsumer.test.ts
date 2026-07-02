@@ -5,7 +5,10 @@ import { HttpStatusError } from '@/api/client/httpStatusError';
 import type { MaterializeNextPendingResult } from '@/api/session/sessionClientPort';
 import { logger } from '@/ui/logger';
 
-import { createSessionProviderInputConsumer } from './SessionProviderInputConsumer';
+import {
+  createSessionProviderInputConsumer,
+  createSessionProviderPendingDrainAdapter,
+} from './SessionProviderInputConsumer';
 import type { DrainPendingOptions, DrainPendingResult } from './types';
 
 type TestMode = { id: string };
@@ -163,6 +166,42 @@ describe('SessionProviderInputConsumer drainPending', () => {
     });
   });
 
+  it('passes adapter default active-turn policy into pending materialization', async () => {
+    const shouldAttemptPendingMaterialization = vi.fn((
+      opts?: { activeTurnDeliveryPolicy?: 'block' | 'allow_live_delivery' },
+    ) => opts?.activeTurnDeliveryPolicy === 'allow_live_delivery');
+    const materializeNextPendingMessageSafely = vi
+      .fn<() => Promise<MaterializeNextPendingResult>>()
+      .mockResolvedValue({
+        type: 'materialized',
+        localId: 'local-adapter-live',
+        seq: 12,
+        content: null,
+      });
+
+    const adapter = createSessionProviderPendingDrainAdapter(
+      {
+        popPendingMessage: vi.fn(async () => false),
+        materializeNextPendingMessageSafely,
+        shouldAttemptPendingMaterialization,
+        waitForMetadataUpdate: async () => false,
+      },
+      { activeTurnDeliveryPolicy: 'allow_live_delivery' },
+    );
+
+    await expect(adapter.drainPending({ reason: 'test-adapter-live-preflight' })).resolves.toEqual({
+      materialized: 1,
+      stoppedReason: 'max_pop_per_wake',
+    });
+    expect(shouldAttemptPendingMaterialization).toHaveBeenCalledWith({
+      activeTurnDeliveryPolicy: 'allow_live_delivery',
+    });
+    expect(materializeNextPendingMessageSafely).toHaveBeenCalledWith({
+      reconcileWhenEmpty: 'force',
+      activeTurnDeliveryPolicy: 'allow_live_delivery',
+    });
+  });
+
   it('returns an error result when reconciliation fails during drain', async () => {
     const popPendingMessage = vi.fn(async () => true);
     const reconcilePendingQueueState = vi.fn(async () => {
@@ -204,7 +243,85 @@ describe('SessionProviderInputConsumer drainPending', () => {
 });
 
 describe('SessionProviderInputConsumer waitForNextInput', () => {
+  it('serializes overlapping waits without duplicating queued messages', async () => {
+    const messageQueue = new MessageQueue2<TestMode>(() => 'hash');
+    const firstAbortController = new AbortController();
+    const secondAbortController = new AbortController();
+    const materializeNextPendingMessageSafely = vi.fn(async () => ({ type: 'no_pending' as const }));
+
+    const consumer = createSessionProviderInputConsumer({
+      messageQueue,
+      session: {
+        popPendingMessage: vi.fn(async () => false),
+        materializeNextPendingMessageSafely,
+        shouldAttemptPendingMaterialization: () => false,
+        waitForMetadataUpdate: () => new Promise<boolean>(() => {}),
+      },
+      reconcileWhenEmpty: 'skip',
+      idleWakePollIntervalMs: 0,
+    });
+
+    const firstWait = consumer.waitForNextInput({ abortSignal: firstAbortController.signal });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const secondWait = consumer.waitForNextInput({ abortSignal: secondAbortController.signal });
+    const earlySecondOutcome = await Promise.race([
+      secondWait.then(
+        () => 'resolved',
+        (error: unknown) => error instanceof Error ? error.message : String(error),
+      ),
+      new Promise<string>((resolve) => setTimeout(() => resolve('pending'), 10)),
+    ]);
+
+    try {
+      expect(earlySecondOutcome).toBe('pending');
+
+      messageQueue.push('first', { id: 'mode' });
+      await expect(firstWait).resolves.toMatchObject({ message: 'first' });
+
+      messageQueue.push('second', { id: 'mode' });
+      await expect(secondWait).resolves.toMatchObject({ message: 'second' });
+    } finally {
+      firstAbortController.abort();
+      secondAbortController.abort();
+    }
+  });
+
+  it('lets a queued overlapping wait observe its own abort before the active wait completes', async () => {
+    const messageQueue = new MessageQueue2<TestMode>(() => 'hash');
+    const firstAbortController = new AbortController();
+    const secondAbortController = new AbortController();
+
+    const consumer = createSessionProviderInputConsumer({
+      messageQueue,
+      session: {
+        popPendingMessage: vi.fn(async () => false),
+        materializeNextPendingMessageSafely: vi.fn(async () => ({ type: 'no_pending' as const })),
+        shouldAttemptPendingMaterialization: () => false,
+        waitForMetadataUpdate: () => new Promise<boolean>(() => {}),
+      },
+      reconcileWhenEmpty: 'skip',
+      idleWakePollIntervalMs: 0,
+    });
+
+    const firstWait = consumer.waitForNextInput({ abortSignal: firstAbortController.signal });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const secondWait = consumer.waitForNextInput({ abortSignal: secondAbortController.signal });
+    secondAbortController.abort();
+
+    try {
+      await expect(secondWait).resolves.toBeNull();
+    } finally {
+      firstAbortController.abort();
+      await expect(firstWait).resolves.toBeNull();
+    }
+  });
+
   it('routes passive known-empty materialization through the safe materializer policy', async () => {
+    const abortController = new AbortController();
     const popPendingMessage = vi.fn(async () => true);
     const materializeNextPendingMessageSafely = vi
       .fn<() => Promise<MaterializeNextPendingResult>>()
@@ -220,19 +337,23 @@ describe('SessionProviderInputConsumer waitForNextInput', () => {
         materializeNextPendingMessageSafely,
         shouldAttemptPendingMaterialization: () => false,
         reconcilePendingQueueState,
-        waitForMetadataUpdate: async () => false,
+        waitForMetadataUpdate: async () => {
+          abortController.abort();
+          return false;
+        },
       },
       reconcileWhenEmpty: 'skip',
       idleWakePollIntervalMs: 0,
     });
 
-    await expect(consumer.waitForNextInput({ abortSignal: new AbortController().signal })).resolves.toBeNull();
+    await expect(consumer.waitForNextInput({ abortSignal: abortController.signal })).resolves.toBeNull();
     expect(materializeNextPendingMessageSafely).toHaveBeenCalledWith({ reconcileWhenEmpty: 'skip' });
     expect(reconcilePendingQueueState).not.toHaveBeenCalled();
     expect(popPendingMessage).not.toHaveBeenCalled();
   });
 
   it('logs text-free materialization decisions with delivery policy metadata', async () => {
+    const abortController = new AbortController();
     const debugSpy = vi.spyOn(logger, 'debug').mockImplementation(() => {});
     const materializeNextPendingMessageSafely = vi
       .fn<() => Promise<MaterializeNextPendingResult>>()
@@ -248,14 +369,17 @@ describe('SessionProviderInputConsumer waitForNextInput', () => {
       session: {
         popPendingMessage: vi.fn(async () => false),
         materializeNextPendingMessageSafely,
-        waitForMetadataUpdate: async () => false,
+        waitForMetadataUpdate: async () => {
+          abortController.abort();
+          return false;
+        },
       },
       activeTurnDeliveryPolicy: 'allow_live_delivery',
       reconcileWhenEmpty: 'skip',
       idleWakePollIntervalMs: 0,
     });
 
-    await expect(consumer.waitForNextInput({ abortSignal: new AbortController().signal })).resolves.toBeNull();
+    await expect(consumer.waitForNextInput({ abortSignal: abortController.signal })).resolves.toBeNull();
 
     expect(debugSpy).toHaveBeenCalledWith('[pendingQueue] input consumer materialization decision', {
       activeTurnDeliveryPolicy: 'allow_live_delivery',
@@ -328,8 +452,115 @@ describe('SessionProviderInputConsumer waitForNextInput', () => {
     expect(onMetadataUpdate).toHaveBeenCalled();
   });
 
-  it('calls metadata refresh after a non-aborted metadata wait resolves false', async () => {
+  it('keeps waiting after a transient non-aborted metadata wait failure when idle polling is disabled', async () => {
+    vi.useFakeTimers();
+    try {
+      const abortController = new AbortController();
+      const messageQueue = new MessageQueue2<TestMode>(() => 'hash');
+      const onMetadataUpdate = vi.fn(async () => {});
+      const consumer = createSessionProviderInputConsumer({
+        messageQueue,
+        session: {
+          popPendingMessage: vi.fn(async () => false),
+          materializeNextPendingMessageSafely: vi.fn(async () => ({ type: 'no_pending' as const })),
+          waitForMetadataUpdate: vi.fn(async () => false),
+        },
+        onMetadataUpdate,
+        reconcileWhenEmpty: 'skip',
+        idleWakePollIntervalMs: 0,
+      });
+
+      const waitPromise = consumer.waitForNextInput({ abortSignal: abortController.signal });
+      const settled = vi.fn();
+      void waitPromise.then(settled, settled);
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).not.toHaveBeenCalled();
+
+      messageQueue.push('after reconnect', { id: 'mode' });
+      await expect(waitPromise).resolves.toMatchObject({ message: 'after reconnect' });
+      expect(onMetadataUpdate).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps waiting after a rejected metadata wait when idle polling is disabled', async () => {
+    vi.useFakeTimers();
+    try {
+      const abortController = new AbortController();
+      const messageQueue = new MessageQueue2<TestMode>(() => 'hash');
+      const onMetadataUpdate = vi.fn(async () => {});
+      const consumer = createSessionProviderInputConsumer({
+        messageQueue,
+        session: {
+          popPendingMessage: vi.fn(async () => false),
+          materializeNextPendingMessageSafely: vi.fn(async () => ({ type: 'no_pending' as const })),
+          waitForMetadataUpdate: vi
+            .fn<() => Promise<boolean>>()
+            .mockRejectedValueOnce(new Error('metadata stream disconnected'))
+            .mockImplementation(() => new Promise<boolean>(() => {})),
+        },
+        onMetadataUpdate,
+        reconcileWhenEmpty: 'skip',
+        idleWakePollIntervalMs: 0,
+        metadataWaitRetryBackoffMs: 1,
+      });
+
+      const waitPromise = consumer.waitForNextInput({ abortSignal: abortController.signal });
+      const settled = vi.fn();
+      void waitPromise.then(settled, settled);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).not.toHaveBeenCalled();
+
+      messageQueue.push('after rejected metadata wait', { id: 'mode' });
+      await expect(waitPromise).resolves.toMatchObject({ message: 'after rejected metadata wait' });
+      expect(onMetadataUpdate).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('lets idle wakes win across repeated transient metadata wait failures', async () => {
+    vi.useFakeTimers();
+    try {
+      const abortController = new AbortController();
+      const onMetadataUpdate = vi.fn();
+      const materializeNextPendingMessageSafely = vi
+        .fn<(opts?: { reconcileWhenEmpty?: string }) => Promise<MaterializeNextPendingResult>>()
+        .mockResolvedValue({ type: 'no_pending' });
+
+      const consumer = createSessionProviderInputConsumer({
+        messageQueue: new MessageQueue2<TestMode>(() => 'hash'),
+        session: {
+          popPendingMessage: vi.fn(async () => false),
+          materializeNextPendingMessageSafely,
+          shouldAttemptPendingMaterialization: () => false,
+          waitForMetadataUpdate: vi.fn(async () => false),
+        },
+        onMetadataUpdate,
+        reconcileWhenEmpty: 'skip',
+        idleWakePollIntervalMs: 1,
+      });
+
+      const waitPromise = consumer.waitForNextInput({ abortSignal: abortController.signal });
+      await vi.advanceTimersByTimeAsync(1);
+      abortController.abort();
+      await expect(waitPromise).resolves.toBeNull();
+
+      expect(onMetadataUpdate).toHaveBeenCalled();
+      const policies = materializeNextPendingMessageSafely.mock.calls.map((call) => call[0]?.reconcileWhenEmpty);
+      expect(policies).toContain('throttled');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('returns null when an aborted metadata wait resolves false', async () => {
     const onMetadataUpdate = vi.fn(async () => {});
+    const abortController = new AbortController();
+    abortController.abort();
     const consumer = createSessionProviderInputConsumer({
       messageQueue: new MessageQueue2<TestMode>(() => 'hash'),
       session: {
@@ -342,7 +573,7 @@ describe('SessionProviderInputConsumer waitForNextInput', () => {
       idleWakePollIntervalMs: 0,
     });
 
-    await expect(consumer.waitForNextInput({ abortSignal: new AbortController().signal })).resolves.toBeNull();
-    expect(onMetadataUpdate).toHaveBeenCalledTimes(1);
+    await expect(consumer.waitForNextInput({ abortSignal: abortController.signal })).resolves.toBeNull();
+    expect(onMetadataUpdate).not.toHaveBeenCalled();
   });
 });

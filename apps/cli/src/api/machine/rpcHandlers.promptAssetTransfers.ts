@@ -16,6 +16,12 @@ import { resolvePromptAssetUploadTarget } from '@/transfers/targets/resolvePromp
 import type { RpcHandlerManager } from '../rpc/RpcHandlerManager';
 import { registerMachineDownloadTransferRpcHandlers } from './transfers/registerMachineDownloadTransferRpcHandlers';
 
+export type MachinePromptAssetTransferRpcRegistration = Readonly<{
+  transferSessionStore: TransferSessionStore;
+  downloadStore: TransferSessionStore;
+  dispose: () => Promise<void>;
+}>;
+
 type PromptAssetUploadInitResponse =
   | Readonly<{ success: true; uploadId: string; chunkSizeBytes: number; recipientPublicKeyBase64: string }>
   | Readonly<{ success: false; error: string }>;
@@ -27,7 +33,7 @@ type PromptAssetUploadFinalizeResponse =
 export function registerMachinePromptAssetTransferRpcHandlers(params: Readonly<{
   rpcHandlerManager: RpcHandlerManager;
   adapterRegistry: ReadonlyMap<string, PromptAssetAdapter>;
-}>): void {
+}>): MachinePromptAssetTransferRpcRegistration {
   const store = new TransferSessionStore({ ttlMs: configuration.filesTransferSessionTtlMs });
 
   registerMachineDownloadTransferRpcHandlers({
@@ -118,4 +124,12 @@ export function registerMachinePromptAssetTransferRpcHandlers(params: Readonly<{
     }),
     enableChunkEncryption: true,
   });
+
+  return {
+    transferSessionStore: store,
+    downloadStore: store,
+    dispose: async () => {
+      await store.dispose();
+    },
+  };
 }

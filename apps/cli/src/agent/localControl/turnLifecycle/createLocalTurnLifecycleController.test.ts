@@ -114,6 +114,47 @@ describe('createLocalTurnLifecycleController', () => {
     vi.useRealTimers();
   });
 
+  it('does not reopen a terminal turn for late completion or continuation evidence', async () => {
+    vi.useFakeTimers();
+    const observed: Array<{ active: boolean; terminal: boolean; reason: string | null; source: string }> = [];
+    const lifecycle = createLocalTurnLifecycleController({
+      completionQuiescenceMs: 500,
+      onStateChange: (snapshot, event) => {
+        observed.push({
+          active: snapshot.active,
+          terminal: snapshot.terminal,
+          reason: snapshot.lastTerminalReason,
+          source: event.source,
+        });
+      },
+    });
+
+    lifecycle.observe({ type: 'turn_started', providerTurnId: 'turn-1', source: 'start-hook' });
+    lifecycle.observe({
+      type: 'turn_terminal',
+      providerTurnId: 'turn-1',
+      reason: 'completed',
+      source: 'transcript-end-turn',
+    });
+    lifecycle.observe({ type: 'completion_candidate', providerTurnId: 'turn-1', source: 'late-stop-hook' });
+    lifecycle.observe({ type: 'continuation_detected', providerTurnId: 'turn-1', source: 'late-task-notification' });
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(lifecycle.snapshot()).toMatchObject({
+      active: false,
+      terminal: true,
+      providerTurnId: 'turn-1',
+      lastTerminalReason: 'completed',
+    });
+    expect(observed).toEqual([
+      { active: true, terminal: false, reason: null, source: 'start-hook' },
+      { active: false, terminal: true, reason: 'completed', source: 'transcript-end-turn' },
+    ]);
+
+    lifecycle.dispose();
+    vi.useRealTimers();
+  });
+
   it('treats aborted and process-exited terminal events as safe handoff boundaries', async () => {
     const aborted = createLocalTurnLifecycleController({ completionQuiescenceMs: 0 });
     aborted.observe({ type: 'turn_started', providerTurnId: 'turn-a', source: 'test' });

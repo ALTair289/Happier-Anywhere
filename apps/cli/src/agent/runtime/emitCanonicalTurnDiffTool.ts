@@ -1,8 +1,7 @@
-import { randomUUID } from 'node:crypto';
-
 import type { TurnChangeSet, ToolNormalizationProtocol } from '@happier-dev/protocol';
 
 import { buildTurnChangeSetDiffInput } from '@/agent/tools/diff/buildTurnChangeSetDiffInput';
+import { resolveCanonicalTurnDiffCallId } from '@/agent/tools/diff/canonicalTurnDiffIdentity';
 
 export function emitCanonicalTurnDiffTool(params: Readonly<{
     turnChangeSet: TurnChangeSet;
@@ -18,7 +17,7 @@ export function emitCanonicalTurnDiffTool(params: Readonly<{
             protocol: params.protocol,
             rawToolName: params.rawToolName,
         }),
-        callId: randomUUID(),
+        callId: resolveCanonicalTurnDiffCallId(params.turnChangeSet),
     });
     params.sendToolResult({
         callId,

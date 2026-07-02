@@ -1,6 +1,7 @@
 import type { MaterializeNextPendingResult } from '@/api/session/sessionClientPort';
 import type { PendingMaterializationActiveTurnPolicy } from '@/api/session/pendingMaterializationActiveTurnPolicy';
 import type { PendingQueueReconcileWhenEmpty } from '@/api/session/pendingQueueReadPolicy';
+import type { SessionPendingQueueDeliveryTiming } from '@happier-dev/protocol';
 
 export type MessageBatch<Mode, Message> = {
   message: Message;
@@ -19,12 +20,18 @@ export type MessageBatch<Mode, Message> = {
    * the server seq is assigned by a later socket echo.
    */
   userMessageLocalIds?: readonly string[];
+  /**
+   * True when the batch originated from a provider-acceptance pending handoff: the durable pending
+   * row has been claimed without a transcript commit, and provider custody still needs proof.
+   */
+  providerAcceptancePending?: boolean;
 };
 
 export type PendingMaterializationReconcileWhenEmpty = PendingQueueReconcileWhenEmpty;
 export type { PendingMaterializationActiveTurnPolicy };
 
 export type PendingMaterializationResult = MaterializeNextPendingResult;
+export type PendingQueueDeliveryTiming = SessionPendingQueueDeliveryTiming;
 
 export type DrainPendingStoppedReason =
   | 'aborted'
@@ -44,6 +51,8 @@ export type DrainPendingOptions = {
   logPrefix?: string | undefined;
   activeTurnDeliveryPolicy?: PendingMaterializationActiveTurnPolicy | undefined;
   resolveActiveTurnDeliveryPolicy?: (() => PendingMaterializationActiveTurnPolicy | undefined) | undefined;
+  pendingQueueDeliveryTiming?: PendingQueueDeliveryTiming | undefined;
+  resolvePendingQueueDeliveryTiming?: (() => PendingQueueDeliveryTiming | undefined) | undefined;
 };
 
 export type DrainPendingResult = {

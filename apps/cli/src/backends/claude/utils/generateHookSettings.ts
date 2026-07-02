@@ -34,6 +34,9 @@ import { resolveJavaScriptRuntimeExecutable } from '@/runtime/js/resolveJavaScri
 import { isBun } from '@/utils/runtime';
 import { resolveCliRuntimeAssetPath } from '@/runtime/assets/resolveCliRuntimeAssetPath';
 import { resolveReleaseRingScopedBasename } from '@/cli/runtime/publicReleaseChannel';
+import { resolveClaudePermissionHookTimeoutSeconds } from './permissionHookTimeout';
+
+export { DEFAULT_PERMISSION_HOOK_TIMEOUT_SECONDS } from './permissionHookTimeout';
 
 export interface GenerateHookSettingsOptions {
     enableLocalPermissionBridge?: boolean;
@@ -42,56 +45,12 @@ export interface GenerateHookSettingsOptions {
      * Explicit Claude command-hook `timeout` (seconds) installed on the PermissionRequest /
      * PreToolUse(AskUserQuestion) permission hooks.
      *
-     * This makes the provider-side hook ceiling explicit and aligned with the local permission bridge's
-     * own response timeout (`claudeLocalPermissionBridgeTimeoutSeconds`, default 600s), instead of silently
-     * relying on Claude's undocumented default. The bridge uses the same value as its expiry boundary so a
-     * late UI answer after the ceiling returns a typed expired result instead of a false success.
+     * This makes the provider-side hook ceiling explicit instead of silently relying on Claude's
+     * undocumented default. The shared timeout resolver is also used by the local permission bridge's
+     * expiry boundary so a late UI answer after the ceiling returns a typed expired result instead of a
+     * false success.
      */
     permissionHookTimeoutSeconds?: number;
-}
-
-/**
- * Default explicit permission-hook command timeout in seconds: 7 days.
- *
- * A permission request must survive an operator launching a session before sleeping and answering it on
- * waking, so the installed hook `timeout` is effectively unlimited. Claude honors large `timeout` values
- * without capping (probe §W: it accepts and runs values up to int32-max without error and does not kill
- * the forwarder early). The value stays FINITE on purpose so the local permission bridge can still
- * honestly expire a genuinely-dead forwarder at the same ceiling (see `DEFAULT_PROVIDER_HOOK_CEILING_MS`
- * in `localPermissionBridge.ts`) instead of approving a late answer into a dead socket.
- *
- * Kept aligned with the bridge ceiling so Lane V's answer-time expiry only ever fires on this huge
- * ceiling or a truly-dead forwarder, never an artificial short timeout.
- */
-export const DEFAULT_PERMISSION_HOOK_TIMEOUT_SECONDS = 7 * 24 * 60 * 60;
-
-/**
- * Optional environment override for the installed permission-hook `timeout` (seconds). Lets an operator
- * tune the effectively-unlimited default without threading an account setting through `runClaude`
- * (Lane T territory). An explicit `permissionHookTimeoutSeconds` option still wins over this env value.
- */
-const PERMISSION_HOOK_TIMEOUT_SECONDS_ENV_VAR = 'HAPPIER_CLAUDE_PERMISSION_HOOK_TIMEOUT_SECONDS';
-
-function readPositiveIntEnv(envVarName: string): number | null {
-    const raw = process.env[envVarName];
-    if (typeof raw !== 'string') return null;
-    const parsed = Number(raw.trim());
-    if (Number.isFinite(parsed) && parsed > 0) {
-        return Math.floor(parsed);
-    }
-    return null;
-}
-
-function resolvePermissionHookTimeoutSeconds(options: GenerateHookSettingsOptions): number {
-    const raw = options.permissionHookTimeoutSeconds;
-    if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) {
-        return Math.floor(raw);
-    }
-    const envOverride = readPositiveIntEnv(PERMISSION_HOOK_TIMEOUT_SECONDS_ENV_VAR);
-    if (envOverride !== null) {
-        return envOverride;
-    }
-    return DEFAULT_PERMISSION_HOOK_TIMEOUT_SECONDS;
 }
 
 type ClaudeSettingsOverlay = Readonly<{
@@ -248,7 +207,7 @@ export function generateHookPluginDir(port: number, options: GenerateHookSetting
         const buildPermissionCommand = (hookEventName: 'PermissionRequest' | 'PreToolUse'): string =>
             `${JSON.stringify(nodeExecutable)} ${JSON.stringify(permissionForwarderScript)} ${port} ${JSON.stringify(hookEventName)}${secretPart}`;
 
-        const permissionHookTimeoutSeconds = resolvePermissionHookTimeoutSeconds(options);
+        const permissionHookTimeoutSeconds = resolveClaudePermissionHookTimeoutSeconds(options);
 
         hooks.PermissionRequest = [
             {

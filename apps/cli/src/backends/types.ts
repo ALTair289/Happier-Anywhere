@@ -1,9 +1,11 @@
 import type { AgentBackend } from '@/agent/core';
+import type { Metadata } from '@/api/types';
 import type { ChecklistId } from '@/capabilities/checklistIds';
 import type { Capability } from '@/capabilities/service';
 import type { CommandHandler } from '@/cli/commandRegistry';
 import type { CloudConnectTarget } from '@/cloud/connectTypes';
 import type { DaemonSpawnHooks } from '@/daemon/spawnHooks';
+import type { TrackedSession } from '@/daemon/types';
 import type { DirectSessionsProviderId } from '@happier-dev/protocol';
 import type {
   BackendTargetRefV1,
@@ -23,6 +25,7 @@ import type { ConnectedServiceProviderRuntimeAuthAdapter } from '@/daemon/connec
 import type { ConnectedServiceRuntimeAuthSelectionMaterializer } from '@/daemon/connectedServices/sessionAuthSwitch/runtimeAuthSelectionMaterializerTypes';
 import type { ConnectedServicesProviderMaterializer } from '@/daemon/connectedServices/materialize/providerMaterializerTypes';
 import type { ConnectedServiceCredentialLifecycleDescriptor } from '@/daemon/connectedServices/credentials/lifecycleTypes';
+import type { ConnectedServiceQuotaFetcherDescriptor } from '@/daemon/connectedServices/quotas/types';
 import type {
   VerifyResumeReachableInput,
   VerifyResumeReachableResult,
@@ -64,6 +67,12 @@ export type VendorResumeSupportParams = Readonly<{
 export type VendorResumeSupportFn = (params: VendorResumeSupportParams) => boolean;
 
 export type HeadlessTmuxArgvTransform = (argv: string[]) => string[];
+
+export type ProviderRuntimeLocalHandoffMetadataBuilder = (params: Readonly<{
+  metadata: Readonly<Record<string, unknown>>;
+  trackedSession: TrackedSession;
+  vendorResumeId: string;
+}>) => Partial<Pick<Metadata, 'claudeSessionId' | 'codexSessionId' | 'opencodeSessionId' | 'directSessionV1'>>;
 
 export type ProviderAttachScope = 'local' | 'remote';
 
@@ -302,6 +311,13 @@ export type AgentCatalogEntry = Readonly<{
    */
   getConnectedServiceStateSharingDescriptor?: () => Promise<ConnectedServiceStateSharingDescriptor | null>;
   /**
+   * Optional provider-owned quota fetcher descriptor.
+   *
+   * Shared quota polling owns host policy such as generic stale windows; providers own private
+   * endpoint URLs, provider headers, kill switches, and service-specific placeholder behavior.
+   */
+  connectedServiceQuotaFetcherDescriptor?: ConnectedServiceQuotaFetcherDescriptor;
+  /**
    * Optional provider-owned continuity resolver for existing-session auth switches.
    *
    * Generic switch orchestration calls this hook before offering or applying a
@@ -396,6 +412,13 @@ export type AgentCatalogEntry = Readonly<{
    * through the backend catalog.
    */
   getProviderNativeForkHandler?: () => Promise<ProviderNativeForkHandler>;
+  /**
+   * Optional provider-owned runtime-local metadata builder for session handoff.
+   *
+   * Shared daemon handoff code owns export/runtime-local splitting; providers own
+   * provider-specific resume ids and direct-session source metadata.
+   */
+  buildRuntimeLocalHandoffMetadata?: ProviderRuntimeLocalHandoffMetadataBuilder;
   /**
    * Whether probe RPC handlers should load account settings before invoking probe methods.
    *

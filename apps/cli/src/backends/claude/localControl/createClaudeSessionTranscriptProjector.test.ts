@@ -4,7 +4,69 @@ import type { Metadata } from '@/api/types';
 
 import type { Session } from '../session';
 import type { RawJSONLines } from '../types';
+import type { ClaudeWorkflowActivitySource } from '../workflows/claudeWorkflowActivitySource';
 import { createClaudeSessionTranscriptProjector } from './createClaudeSessionTranscriptProjector';
+
+// Boundary fake of the centralized Claude workflow ACTIVITY source. It records the raw values fed to
+// it (to prove the projector wires `observeRaw` into the SAME channel as the goal source) and returns
+// a configurable owned-id set (to prove the CWF4 filter is applied at the publish chokepoint). The
+// durable record/headline transports are NOT exercised here — they are owned + tested by the source.
+function createWorkflowActivitySourceFake(
+  ownedToolUseIds: readonly string[] = [],
+): Readonly<{
+  source: ClaudeWorkflowActivitySource;
+  observedRaw: () => readonly unknown[];
+  flushCount: () => number;
+  disposeCount: () => number;
+}> {
+  const observed: unknown[] = [];
+  let flushCount = 0;
+  let disposeCount = 0;
+  const source: ClaudeWorkflowActivitySource = {
+    observeTranscriptMessage: (message) => {
+      observed.push(message);
+    },
+    getWorkflowOwnedAgentToolUseIds: () => new Set(ownedToolUseIds),
+    flush: async () => {
+      flushCount += 1;
+    },
+    dispose: () => {
+      disposeCount += 1;
+    },
+  };
+  return {
+    source,
+    observedRaw: () => observed,
+    flushCount: () => flushCount,
+    disposeCount: () => disposeCount,
+  };
+}
+
+function buildTaskCreateRow(params: Readonly<{ uuid: string; toolUseId: string; title: string }>): RawJSONLines {
+  return {
+    uuid: params.uuid,
+    type: 'assistant',
+    message: {
+      id: `msg_${params.uuid}`,
+      role: 'assistant',
+      content: [
+        {
+          type: 'tool_use',
+          id: params.toolUseId,
+          name: 'TaskCreate',
+          input: { subject: params.title },
+        },
+      ],
+    },
+  } as RawJSONLines;
+}
+
+function readWorkStateItems(metadata: Metadata): Array<Record<string, unknown>> {
+  const workState = (metadata as Record<string, unknown>).sessionWorkStateV1 as
+    | { items?: unknown[] }
+    | undefined;
+  return Array.isArray(workState?.items) ? (workState.items as Array<Record<string, unknown>>) : [];
+}
 
 // Boundary mock: ApiSessionClient is the server transport. updateMetadata applies the updater to
 // an in-memory metadata object so assertions target resulting state, not call wiring.
@@ -13,12 +75,16 @@ function createSessionFixture(): Readonly<{
   getMetadata: () => Metadata;
   getUpdateMetadataCallCount: () => number;
 }> {
-  let metadata: Metadata = {} as Metadata;
+  // The Claude transcript session id lives in metadata (`claudeSessionId`), mirroring production
+  // where `session.sessionId` is the HAPPIER id. The goal source matches goal_status against
+  // `metadata.claudeSessionId` (read via `getMetadataSnapshot`), so the fixture seeds it here.
+  let metadata: Metadata = { claudeSessionId: 'claude-session-id' } as Metadata;
   let updateMetadataCallCount = 0;
   const session = {
-    sessionId: 'claude-session-id',
+    sessionId: 'happy-session-id',
     client: {
       sessionId: 'happy-session-id',
+      getMetadataSnapshot: () => metadata,
       sendClaudeSessionMessage: vi.fn(),
       sendSessionEvent: vi.fn(),
       updateMetadata: (updater: (current: Metadata) => Metadata) => {
@@ -128,5 +194,281 @@ describe('createClaudeSessionTranscriptProjector model adoption', () => {
 
     expect(fixture.getMetadata().sessionModelsV1).toBeUndefined();
     expect(fixture.getUpdateMetadataCallCount()).toBe(0);
+  });
+});
+
+function buildGoalStatusAttachment(params: Readonly<{
+  uuid: string;
+  met: boolean;
+  condition: string;
+  sentinel?: boolean;
+  sessionId?: string;
+}>): RawJSONLines {
+  return {
+    type: 'attachment',
+    uuid: params.uuid,
+    sessionId: params.sessionId ?? 'claude-session-id',
+    timestamp: '2026-06-24T00:00:00.000Z',
+    attachment: {
+      type: 'goal_status',
+      met: params.met,
+      condition: params.condition,
+      ...(params.sentinel !== undefined ? { sentinel: params.sentinel } : {}),
+    },
+  } as unknown as RawJSONLines;
+}
+
+function readGoalItem(metadata: Metadata): Record<string, unknown> | null {
+  const workState = (metadata as Record<string, unknown>).sessionWorkStateV1 as
+    | { items?: unknown[] }
+    | undefined;
+  const items = Array.isArray(workState?.items) ? workState.items : [];
+  return (items.find(
+    (item) => (item as Record<string, unknown>)?.id === 'goal:claude',
+  ) as Record<string, unknown> | undefined) ?? null;
+}
+
+// Plan H6/H7: the goal SOURCE is centralized into the transcript projector — the
+// SHARED observation seam used by BOTH the local launcher (raw `claudeLocal`,
+// session scanner → projector) and the unified-terminal standalone launcher
+// (`bindClaudeUnifiedTerminalSession` → projector). The source observes the RAW
+// transcript channel (`observeRaw`), NOT the post-strip `observe` channel: the
+// session scanner drops `goal_status` attachments + side-channels `system` rows
+// before `observe` (F2 visible-transcript gate), so feeding the source from
+// `observe` would never see a goal_status (the bug H7 fixes). The end-to-end
+// scanner→raw→projector path is proven in
+// `createClaudeSessionTranscriptProjector.scannerRawChannel.test.ts`.
+describe('createClaudeSessionTranscriptProjector goal source (H6/H7)', () => {
+  it('derives an active goal work-state item from a goal_status attachment on the raw transcript channel', () => {
+    const fixture = createSessionFixture();
+    const projector = createClaudeSessionTranscriptProjector({
+      session: fixture.session,
+      logPrefix: '[test]',
+    });
+
+    projector.observeRaw(buildGoalStatusAttachment({ uuid: 'g-1', met: false, condition: 'ship the goal feature' }));
+
+    expect(readGoalItem(fixture.getMetadata())).toMatchObject({
+      id: 'goal:claude',
+      kind: 'goal',
+      status: 'active',
+      title: 'ship the goal feature',
+    });
+  });
+
+  it('does NOT derive a goal from the post-strip observe channel (attachments are dropped before it)', () => {
+    const fixture = createSessionFixture();
+    const projector = createClaudeSessionTranscriptProjector({
+      session: fixture.session,
+      logPrefix: '[test]',
+    });
+
+    // The scanner strips attachments from `onMessage` → `observe`; the source must
+    // not (and now cannot) be fed from there. This pins the H7 channel contract.
+    projector.observe(buildGoalStatusAttachment({ uuid: 'g-1', met: false, condition: 'ship the goal feature' }));
+
+    expect(readGoalItem(fixture.getMetadata())).toBeNull();
+  });
+
+  it('transitions the goal to complete on a met:true goal_status attachment', () => {
+    const fixture = createSessionFixture();
+    const projector = createClaudeSessionTranscriptProjector({
+      session: fixture.session,
+      logPrefix: '[test]',
+    });
+
+    projector.observeRaw(buildGoalStatusAttachment({ uuid: 'g-1', met: false, condition: 'ship it' }));
+    projector.observeRaw(buildGoalStatusAttachment({ uuid: 'g-2', met: true, condition: 'ship it' }));
+
+    expect(readGoalItem(fixture.getMetadata())).toMatchObject({ status: 'complete' });
+  });
+
+  it('clearGoalWorkState REMOVES the goal item from metadata (active-clear: Claude /goal clear emits no status)', () => {
+    const fixture = createSessionFixture();
+    const projector = createClaudeSessionTranscriptProjector({
+      session: fixture.session,
+      logPrefix: '[test]',
+    });
+
+    projector.observeRaw(buildGoalStatusAttachment({ uuid: 'g-1', met: false, condition: 'ship it' }));
+    expect(readGoalItem(fixture.getMetadata())).toMatchObject({ status: 'active' });
+
+    projector.clearGoalWorkState();
+
+    // The goal item is gone — proving the empty goal snapshot drops `goal:claude` via ownedItemIds,
+    // NOT just the source family (whose prefix does not match the short goal id).
+    expect(readGoalItem(fixture.getMetadata())).toBeNull();
+  });
+
+  it('does not resurrect a cleared goal that Claude re-evaluates as active (same condition)', () => {
+    const fixture = createSessionFixture();
+    const projector = createClaudeSessionTranscriptProjector({
+      session: fixture.session,
+      logPrefix: '[test]',
+    });
+
+    projector.observeRaw(buildGoalStatusAttachment({ uuid: 'g-1', met: false, condition: 'rewrite the kernel' }));
+    projector.clearGoalWorkState();
+    // Claude keeps re-publishing the un-meetable goal as active on the transcript.
+    projector.observeRaw(buildGoalStatusAttachment({ uuid: 'g-2', met: false, condition: 'rewrite the kernel' }));
+
+    expect(readGoalItem(fixture.getMetadata())).toBeNull();
+  });
+
+  it('gates /goal edit capability on the system/init slash_commands (fail-closed)', () => {
+    const fixture = createSessionFixture();
+    const projector = createClaudeSessionTranscriptProjector({
+      session: fixture.session,
+      logPrefix: '[test]',
+    });
+
+    projector.observeRaw(buildGoalStatusAttachment({ uuid: 'g-1', met: false, condition: 'ship it' }));
+    expect(readGoalItem(fixture.getMetadata())?.goalCapabilities).toBeUndefined();
+
+    projector.observeRaw({ type: 'system', subtype: 'init', slash_commands: ['goal', 'compact'] });
+    expect(readGoalItem(fixture.getMetadata())?.goalCapabilities).toMatchObject({ canEdit: true, canClear: true });
+  });
+
+  it('ignores unknown attachment subtypes (forward-compatible) and never publishes a goal for them', () => {
+    const fixture = createSessionFixture();
+    const projector = createClaudeSessionTranscriptProjector({
+      session: fixture.session,
+      logPrefix: '[test]',
+    });
+
+    projector.observeRaw({
+      type: 'attachment',
+      uuid: 's-1',
+      sessionId: 'claude-session-id',
+      attachment: { type: 'skill_listing' },
+    });
+    projector.observeRaw({
+      type: 'attachment',
+      uuid: 'h-1',
+      sessionId: 'claude-session-id',
+      attachment: { type: 'hook_success' },
+    });
+
+    expect(readGoalItem(fixture.getMetadata())).toBeNull();
+  });
+
+  it('ignores goal_status from a foreign source session (cross-session guard)', () => {
+    const fixture = createSessionFixture();
+    const projector = createClaudeSessionTranscriptProjector({
+      session: fixture.session,
+      logPrefix: '[test]',
+    });
+
+    projector.observeRaw(buildGoalStatusAttachment({
+      uuid: 'g-1',
+      met: false,
+      condition: 'ship it',
+      sessionId: 'a-different-claude-session',
+    }));
+
+    expect(readGoalItem(fixture.getMetadata())).toBeNull();
+  });
+});
+
+// CWF wiring: the workflow ACTIVITY source rides the SAME raw transcript channel as the goal source
+// (`observeRaw`), and its CWF4 owned-id filter is applied at the work-state publish chokepoint so a
+// workflow run's agents do not ALSO render as top-level task/todo rows. Lifecycle flush/dispose drain
+// pending writes on finalize/teardown. The source itself is faked here — its durable transports are
+// owned + tested in `backends/claude/workflows/**`.
+describe('createClaudeSessionTranscriptProjector workflow activity wiring (CWF3/CWF4)', () => {
+  it('feeds the workflow source from the raw transcript channel (same channel as the goal source)', () => {
+    const fixture = createSessionFixture();
+    const workflow = createWorkflowActivitySourceFake();
+    const projector = createClaudeSessionTranscriptProjector({
+      session: fixture.session,
+      logPrefix: '[test]',
+      workflowActivitySource: workflow.source,
+    });
+
+    const goalRow = buildGoalStatusAttachment({ uuid: 'g-1', met: false, condition: 'ship it' });
+    projector.observeRaw(goalRow);
+
+    // Same value reaches BOTH the goal source (item published) and the workflow source.
+    expect(readGoalItem(fixture.getMetadata())).toMatchObject({ status: 'active' });
+    expect(workflow.observedRaw()).toEqual([goalRow]);
+  });
+
+  it('does NOT feed the workflow source from the post-strip observe channel', () => {
+    const fixture = createSessionFixture();
+    const workflow = createWorkflowActivitySourceFake();
+    const projector = createClaudeSessionTranscriptProjector({
+      session: fixture.session,
+      logPrefix: '[test]',
+      workflowActivitySource: workflow.source,
+    });
+
+    projector.observe(buildAssistantRow({ uuid: 'a-1', model: 'claude-fable-5' }));
+
+    expect(workflow.observedRaw()).toEqual([]);
+  });
+
+  it('drops workflow-owned work-state rows at the publish chokepoint (CWF4 filter)', () => {
+    const fixture = createSessionFixture();
+    // The workflow source owns the TaskCreate tool_use ref, so the projected task item must be
+    // filtered out of the published work-state.
+    const workflow = createWorkflowActivitySourceFake(['tool_use:toolu_wf_agent']);
+    const projector = createClaudeSessionTranscriptProjector({
+      session: fixture.session,
+      logPrefix: '[test]',
+      workflowActivitySource: workflow.source,
+    });
+
+    projector.observe(buildTaskCreateRow({ uuid: 't-1', toolUseId: 'toolu_wf_agent', title: 'Implement parser' }));
+
+    const items = readWorkStateItems(fixture.getMetadata());
+    expect(items.some((item) => item.vendorRef === 'tool_use:toolu_wf_agent')).toBe(false);
+  });
+
+  it('keeps non-workflow-owned work-state rows (filter is targeted, not blanket)', () => {
+    const fixture = createSessionFixture();
+    // The owned set does not include this task's ref, so the item survives.
+    const workflow = createWorkflowActivitySourceFake(['tool_use:toolu_other']);
+    const projector = createClaudeSessionTranscriptProjector({
+      session: fixture.session,
+      logPrefix: '[test]',
+      workflowActivitySource: workflow.source,
+    });
+
+    projector.observe(buildTaskCreateRow({ uuid: 't-1', toolUseId: 'toolu_wf_agent', title: 'Implement parser' }));
+
+    const items = readWorkStateItems(fixture.getMetadata());
+    expect(items.some((item) => item.vendorRef === 'tool_use:toolu_wf_agent')).toBe(true);
+  });
+
+  it('flushWorkflowActivity drains the source; reset disposes it', async () => {
+    const fixture = createSessionFixture();
+    const workflow = createWorkflowActivitySourceFake();
+    const projector = createClaudeSessionTranscriptProjector({
+      session: fixture.session,
+      logPrefix: '[test]',
+      workflowActivitySource: workflow.source,
+    });
+
+    await projector.flushWorkflowActivity();
+    projector.reset();
+
+    expect(workflow.flushCount()).toBe(1);
+    expect(workflow.disposeCount()).toBe(1);
+  });
+
+  it('is a no-op without a workflow source (goal/work-state path unchanged)', async () => {
+    const fixture = createSessionFixture();
+    const projector = createClaudeSessionTranscriptProjector({
+      session: fixture.session,
+      logPrefix: '[test]',
+    });
+
+    // No source wired: TodoWrite/task projection and flush/reset must not throw.
+    projector.observe(buildTaskCreateRow({ uuid: 't-1', toolUseId: 'toolu_wf_agent', title: 'Implement parser' }));
+    await projector.flushWorkflowActivity();
+    projector.reset();
+
+    const items = readWorkStateItems(fixture.getMetadata());
+    expect(items.some((item) => item.vendorRef === 'tool_use:toolu_wf_agent')).toBe(true);
   });
 });

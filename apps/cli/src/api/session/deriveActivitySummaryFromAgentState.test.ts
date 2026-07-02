@@ -30,6 +30,8 @@ describe('deriveActivitySummaryFromAgentState', () => {
       completedRequests: {
         req_completed: {
           tool: 'Write',
+          arguments: { path: '/tmp/b.ts' },
+          createdAt: 3,
           status: 'approved',
           completedAt: 4,
         },

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import axios from 'axios';
 
@@ -63,6 +63,10 @@ describe('ApiClient connected service auth groups v3', () => {
     vi.clearAllMocks();
   });
 
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it('gets an auth group from the v3 connected services groups endpoint', async () => {
     mockGet.mockResolvedValue({ status: 200, data: authGroupResponse('primary', 1) });
     const api = await ApiClient.create({
@@ -78,6 +82,41 @@ describe('ApiClient connected service auth groups v3', () => {
       expect.stringContaining('/v3/connect/openai-codex/groups/main'),
       expect.objectContaining({
         headers: expect.objectContaining({ Authorization: 'Bearer happy-token' }),
+      }),
+    );
+  });
+
+  it('uses the connected-services server API timeout for auth group reads', async () => {
+    mockGet.mockResolvedValue({ status: 200, data: authGroupResponse('primary', 1) });
+    const api = await ApiClient.create({
+      token: 'happy-token',
+      encryption: { type: 'legacy' as const, secret: new Uint8Array(32) },
+    } as any);
+
+    await api.getConnectedServiceAuthGroup({ serviceId: 'openai-codex', groupId: 'main' });
+
+    expect(axios.get).toHaveBeenCalledWith(
+      expect.stringContaining('/v3/connect/openai-codex/groups/main'),
+      expect.objectContaining({
+        timeout: 30_000,
+      }),
+    );
+  });
+
+  it('honors a bounded connected-services server API timeout override', async () => {
+    vi.stubEnv('HAPPIER_CONNECTED_SERVICES_API_TIMEOUT_MS', '45000');
+    mockGet.mockResolvedValue({ status: 200, data: authGroupResponse('primary', 1) });
+    const api = await ApiClient.create({
+      token: 'happy-token',
+      encryption: { type: 'legacy' as const, secret: new Uint8Array(32) },
+    } as any);
+
+    await api.getConnectedServiceAuthGroup({ serviceId: 'openai-codex', groupId: 'main' });
+
+    expect(axios.get).toHaveBeenCalledWith(
+      expect.stringContaining('/v3/connect/openai-codex/groups/main'),
+      expect.objectContaining({
+        timeout: 45_000,
       }),
     );
   });

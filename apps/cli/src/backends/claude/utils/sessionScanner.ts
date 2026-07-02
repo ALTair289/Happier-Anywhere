@@ -12,10 +12,16 @@ import { readClaudeSessionJsonlMessages } from './readClaudeSessionJsonlMessages
 import { createEventShapeLoggerForLog } from '@/diagnostics/eventShapeForLog';
 import { buildClaudeJsonlMessageKey } from './claudeJsonlMessageKey';
 import { createJsonlFollowController, type JsonlFollowController } from '@/agent/localControl/jsonlFollowController';
+import type { JsonlFollowerMetricEvent } from '@/agent/localControl/jsonlFollowMetrics';
 import { INTERNAL_CLAUDE_EVENT_TYPES } from './internalClaudeEventTypes';
 import { parseRawJsonLinesObject } from './parseRawJsonLines';
 import { isClaudeInternalTranscriptMessage } from './isClaudeInternalTranscriptMessage';
 import { readClaudeControlCommandRowShape } from './controlCommandRows';
+import {
+    createClaudeJsonlResetReplaySuppressor,
+    isClaudeJsonlReplaySuppressedValue,
+    type ClaudeJsonlResetReplaySuppressor,
+} from './claudeJsonlReplaySuppression';
 
 export type SessionScannerSessionInfo = {
     sessionId: string;
@@ -141,6 +147,7 @@ export async function createSessionScanner(opts: {
     const taskToolUseIdByAgentId = new Map<string, string>();
     let invalidate: (() => void) | null = null;
     const discoveredSessions = new Set<string>();
+    const resetReplaySuppressorBySession = new Map<string, ClaudeJsonlResetReplaySuppressor>();
     /** Session JSONLs that already existed at scanner start — never discoverable (see pid-14419 guard). */
     const sessionDiscoveryBaselines = new Set<string>();
     let boundSessionId: string | null = opts.bindToFirstSession && opts.sessionId ? opts.sessionId : null;
@@ -166,8 +173,21 @@ export async function createSessionScanner(opts: {
         observeRawJsonlValue(value);
     }
 
-    function rawJsonlObserverForSession(sessionId: string): ((value: unknown) => void) | undefined {
-        return trustedRawTranscriptSessionIds.has(sessionId) ? observeRawJsonlValue : undefined;
+    function shouldSuppressReplaySideEffects(
+        value: unknown,
+        replayOpts?: Readonly<{ suppressBeforeMs?: number | null; suppressSideEffects?: boolean | undefined }>,
+    ): boolean {
+        return replayOpts?.suppressSideEffects === true
+            && isClaudeJsonlReplaySuppressedValue(value, replayOpts.suppressBeforeMs);
+    }
+
+    function observeReplayableRawJsonlValueForTrustedSession(
+        sessionId: string,
+        value: unknown,
+        replayOpts?: Readonly<{ suppressBeforeMs?: number | null; suppressSideEffects?: boolean | undefined }>,
+    ): void {
+        if (shouldSuppressReplaySideEffects(value, replayOpts)) return;
+        observeRawJsonlValueForTrustedSession(sessionId, value);
     }
 
     function isMainSessionAllowed(sessionId: string): boolean {
@@ -300,13 +320,14 @@ export async function createSessionScanner(opts: {
         return /^\s*<task-notification>/i.test(content);
     }
 
-    function extractTaskNotification(payload: string): { taskId: string; result: string } | null {
+    function extractTaskNotification(payload: string): { taskId: string; status: string | null; result: string } | null {
         const raw = String(payload ?? '');
         const taskId = raw.match(/<task-id>\s*([^<\n\r]+?)\s*<\/task-id>/i)?.[1]?.trim() ?? '';
         if (!taskId) return null;
+        const status = raw.match(/<status>\s*([^<\n\r]+?)\s*<\/status>/i)?.[1]?.trim() ?? null;
         const result = raw.match(/<result>\s*([\s\S]*?)\s*<\/result>/i)?.[1]?.trim() ?? '';
         if (!result) return null;
-        return { taskId, result };
+        return { taskId, status, result };
     }
 
     function observeTaskToolResultMapping(message: RawJSONLines): void {
@@ -345,6 +366,14 @@ export async function createSessionScanner(opts: {
         return { type: 'rewrite', message: {
             ...(message as any),
             isMeta: true,
+            origin: {
+                ...((message as any).origin && typeof (message as any).origin === 'object'
+                    ? (message as any).origin
+                    : {}),
+                kind: 'task-notification',
+                taskId: parsed.taskId,
+                ...(parsed.status ? { status: parsed.status } : {}),
+            },
             type: 'user',
             message: {
                 role: 'user',
@@ -370,10 +399,18 @@ export async function createSessionScanner(opts: {
 
     // Mark existing messages as processed and start watching the initial session
     if (opts.sessionId) {
+        const initialReplayOpts = {
+            suppressBeforeMs: opts.replaySuppressRowsBeforeMs ?? null,
+            suppressSideEffects: true,
+        };
         let messages = await readClaudeSessionJsonlMessages({
             sessionFilePath: getSessionFilePath(opts.sessionId),
             logLabel: 'SESSION_SCANNER',
-            onJsonValue: rawJsonlObserverForSession(opts.sessionId),
+            onJsonValue: (value) => observeReplayableRawJsonlValueForTrustedSession(
+                opts.sessionId!,
+                value,
+                initialReplayOpts,
+            ),
         });
         logger.debug(`[SESSION_SCANNER] Marking ${messages.length} existing messages as processed from session ${opts.sessionId}`);
         for (let m of messages) {
@@ -420,12 +457,7 @@ export async function createSessionScanner(opts: {
     }
 
     function isReplaySuppressedRow(file: RawJSONLines, suppressBeforeMs: number | null | undefined): boolean {
-        if (typeof suppressBeforeMs !== 'number') return false;
-        const rawTimestamp = (file as Record<string, unknown>).timestamp;
-        const timestampMs = typeof rawTimestamp === 'string' ? Date.parse(rawTimestamp) : Number.NaN;
-        // Fail closed: a snapshot row without a parseable timestamp cannot be proven newer than
-        // the committed baseline coverage, so it must not replay-as-new.
-        return !Number.isFinite(timestampMs) || timestampMs < suppressBeforeMs;
+        return isClaudeJsonlReplaySuppressedValue(file, suppressBeforeMs);
     }
 
     function isForeignBoundSessionRow(file: RawJSONLines): boolean {
@@ -437,12 +469,15 @@ export async function createSessionScanner(opts: {
 
     function processSessionMessage(
         file: RawJSONLines,
-        replayOpts?: Readonly<{ suppressBeforeMs?: number | null }>,
+        replayOpts?: Readonly<{ suppressBeforeMs?: number | null; suppressSideEffects?: boolean | undefined }>,
     ): boolean {
         // Hard per-row provider-session filter (incident pid-14419): once this scanner is bound
         // to a Claude session, rows belonging to ANY other session must be structurally impossible
         // to import or observe (no transcript emit, no sidechain/team-inbox collection).
         if (isForeignBoundSessionRow(file)) {
+            return false;
+        }
+        if (replayOpts?.suppressSideEffects === true && isReplaySuppressedRow(file, replayOpts.suppressBeforeMs)) {
             return false;
         }
         try {
@@ -452,15 +487,15 @@ export async function createSessionScanner(opts: {
         } catch (err) {
             logger.debug('[SESSION_SCANNER] Failed observing message:', err);
         }
+        if (isClaudeInternalTranscriptMessage(file)) {
+            return false;
+        }
         const key = messageKey(file);
         if (processedMessageKeys.has(key)) {
             return false;
         }
         processedMessageKeys.add(key);
         if (isFilteredSystemMessage(file)) {
-            return false;
-        }
-        if (isClaudeInternalTranscriptMessage(file)) {
             return false;
         }
         if (isReplaySuppressedRow(file, replayOpts?.suppressBeforeMs)) {
@@ -495,11 +530,18 @@ export async function createSessionScanner(opts: {
         }
     }
 
-    async function processSessionJsonValue(session: string, value: unknown): Promise<void> {
+    async function processSessionJsonValue(
+        session: string,
+        value: unknown,
+        replayOpts?: Readonly<{ suppressBeforeMs?: number | null; suppressSideEffects?: boolean | undefined }>,
+    ): Promise<boolean> {
+        if (shouldSuppressReplaySideEffects(value, replayOpts)) {
+            return false;
+        }
         observeRawJsonlValueForTrustedSession(session, value);
         const parsed = parseClaudeJsonlValue(value);
-        if (!parsed) return;
-        processSessionMessage(parsed);
+        if (!parsed) return false;
+        return processSessionMessage(parsed, replayOpts);
     }
 
     async function readSnapshotStartOffsetBytes(session: string): Promise<number> {
@@ -512,18 +554,24 @@ export async function createSessionScanner(opts: {
 
     async function processSessionSnapshot(session: string): Promise<number> {
         const startOffsetBytes = await readSnapshotStartOffsetBytes(session);
+        const replayOpts = {
+            suppressBeforeMs: opts.replaySuppressRowsBeforeMs ?? null,
+            suppressSideEffects: true,
+        };
         const sessionMessages = await readClaudeSessionJsonlMessages({
             sessionFilePath: getSessionFilePath(session),
             logLabel: 'SESSION_SCANNER',
-            onJsonValue: rawJsonlObserverForSession(session),
+            onJsonValue: (value) => observeReplayableRawJsonlValueForTrustedSession(
+                session,
+                value,
+                replayOpts,
+            ),
         });
         if (closed) return startOffsetBytes;
         let skipped = 0;
         let sent = 0;
         for (const file of sessionMessages) {
-            if (processSessionMessage(normalizeClaudeToolUseNamesInRawJsonLines(file), {
-                suppressBeforeMs: opts.replaySuppressRowsBeforeMs ?? null,
-            })) sent += 1;
+            if (processSessionMessage(normalizeClaudeToolUseNamesInRawJsonLines(file), replayOpts)) sent += 1;
             else skipped += 1;
         }
         if (sessionMessages.length > 0) {
@@ -544,14 +592,36 @@ export async function createSessionScanner(opts: {
         if (existing) {
             await existing.controller.stop();
             sessionFollowers.delete(session);
+            resetReplaySuppressorBySession.delete(session);
         }
 
         const startOffsetBytes = await processSessionSnapshot(session);
         if (closed) return;
+        const handleFollowerMetric = (event: JsonlFollowerMetricEvent): void => {
+            if (event.type !== 'file_reset') return;
+            let suppressor = resetReplaySuppressorBySession.get(session);
+            if (!suppressor) {
+                suppressor = createClaudeJsonlResetReplaySuppressor();
+                resetReplaySuppressorBySession.set(session, suppressor);
+            }
+            const suppressBeforeMs = suppressor.markReset({
+                baselineSuppressBeforeMs: opts.replaySuppressRowsBeforeMs ?? null,
+            });
+            logger.debug('[SESSION_SCANNER] JSONL follower reset; suppressing replay-prone rows', {
+                session,
+                reason: event.reason,
+                suppressBeforeMs,
+            });
+        };
         const controller = createJsonlFollowController({
             filePath: desiredPath,
             startOffsetBytes,
-            onJson: (value) => processSessionJsonValue(session, value),
+            metrics: { emit: handleFollowerMetric },
+            onJson: async (value) => {
+                const suppressor = resetReplaySuppressorBySession.get(session);
+                if (suppressor?.shouldSuppress(value)) return;
+                await processSessionJsonValue(session, value);
+            },
             onError: (error) => {
                 logger.debug('[SESSION_SCANNER] Follower error:', error);
             },
@@ -633,6 +703,7 @@ export async function createSessionScanner(opts: {
             pendingSessions.clear();
             finishedSessions.clear();
             discoveredSessions.clear();
+            resetReplaySuppressorBySession.clear();
             trustedRawTranscriptSessionIds.clear();
             currentSessionId = null;
             for (const timeoutId of missingTranscriptTimers.values()) {

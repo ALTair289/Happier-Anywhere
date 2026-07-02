@@ -39,10 +39,12 @@ import { createEventShapeLoggerForLog } from '@/diagnostics/eventShapeForLog';
 import { readTailTextFile } from '@/utils/fs/readTailTextFile';
 import { buildClaudeAgentSdkHooks } from './agentSdk/buildClaudeAgentSdkHooks';
 import {
+    buildClaudeProviderTaskRuntimeActivitySourceId,
+    CLAUDE_PROVIDER_TASK_RUNTIME_ACTIVITY_SOURCE_CLASS,
+    CLAUDE_RUNTIME_ACTIVITY_PROVIDER_ID,
     createClaudeProviderActivityLedger,
-    isTerminalClaudeAgentSdkProviderTaskStatus,
-    normalizeClaudeAgentSdkProviderTaskId,
-    readClaudeAgentSdkProviderTaskStatus,
+    type ClaudeProviderRuntimeActivityPublisher,
+    readClaudeProviderTaskActivity,
 } from '@/backends/claude/providerActivity/createClaudeProviderActivityLedger';
 import { repairClaudeTranscriptAfterInterrupt } from './agentSdk/repairClaudeTranscriptAfterInterrupt';
 import { parseCheckpointsCommand, parseRewindCommand } from './agentSdk/claudeAgentSdkSlashCommands';
@@ -76,6 +78,11 @@ import {
 } from './agentSdk/streamEventToolBlocks';
 import type { StreamedTranscriptFlushSummary, StreamedTranscriptWriter } from '@/api/session/streamedTranscriptWriter';
 import type { SessionWorkStateV1 } from '@/session/workState/sessionWorkStateMetadata';
+import {
+    confirmClaudeRemoteProviderPromptAccepted,
+    type ClaudeRemoteProviderAcceptedPrompt,
+    type ClaudeRemoteProviderPromptAcceptedHandler,
+} from './providerPromptAcceptance';
 
 type AgentSdkQueryFactory = (params: {
     prompt: string | AsyncIterable<SDKUserMessage>;
@@ -126,7 +133,7 @@ export async function claudeRemoteAgentSdk(opts: {
     jsRuntime?: JsRuntime;
 
     // Dynamic parameters
-    nextMessage: () => Promise<{ message: string; mode: EnhancedMode } | null>;
+    nextMessage: () => Promise<ClaudeRemoteProviderAcceptedPrompt<EnhancedMode> | null>;
     onReady: () => void | Promise<void>;
     onSubagentFlush?: () => void | Promise<void>;
     isAborted: (toolCallId: string) => boolean;
@@ -139,6 +146,7 @@ export async function claudeRemoteAgentSdk(opts: {
     onCompletionEvent?: (event: ClaudeCompletionEvent) => void;
     onSessionReset?: () => void;
     setUserMessageSender?: (sender: ((message: SDKUserMessage) => void) | null) => void;
+    onPromptAcceptedByProvider?: ClaudeRemoteProviderPromptAcceptedHandler | null;
     /**
      * Registers a best-effort interrupt handler that can stop the current turn without
      * terminating the underlying Claude Code subprocess.
@@ -151,6 +159,7 @@ export async function claudeRemoteAgentSdk(opts: {
     onWorkStateSnapshot?: (snapshot: SessionWorkStateV1) => void | Promise<void>;
     onRateLimitEvent?: (details: NormalizedProviderUsageLimitDetailsV1) => void | Promise<void>;
     onRuntimeAuthFailureEvent?: (error: unknown) => void | Promise<void>;
+    runtimeActivityPublisher?: ClaudeProviderRuntimeActivityPublisher | null;
 
     // Test seam
     createQuery?: AgentSdkQueryFactory;
@@ -291,6 +300,7 @@ export async function claudeRemoteAgentSdk(opts: {
 
 	    let mode = initial.mode;
 	    let response: any;
+        let clearClaudeRuntimeActivityForCurrentQuery: ((reason: string) => void) | null = null;
 		    let latestClaudeSessionId: string | null =
 		        typeof opts.sessionId === 'string' && opts.sessionId.trim().length > 0 ? opts.sessionId.trim() : startFrom ?? null;
 		    let latestTranscriptPath: string | null =
@@ -854,8 +864,11 @@ export async function claudeRemoteAgentSdk(opts: {
 	            prompt: messages,
 	            options: queryOptions,
 	        });
+        confirmClaudeRemoteProviderPromptAccepted(opts.onPromptAcceptedByProvider, initial);
 
-        let activeTaskId: string | null = null;
+        let foregroundTaskInterruptId: string | null = null;
+        let detachedTaskInterruptId: string | null = null;
+        let foregroundTurnInterruptActive = true;
         let deferredInterruptedReason: string | null = null;
 
 	        const interruptTurn = async (): Promise<void> => {
@@ -863,7 +876,8 @@ export async function claudeRemoteAgentSdk(opts: {
 	            try {
                     const stopTask = (response as any)?.stopTask;
                     if (typeof stopTask === 'function') {
-                        const taskId = activeTaskId;
+                        const taskId = foregroundTaskInterruptId
+                            ?? (foregroundTurnInterruptActive ? null : detachedTaskInterruptId);
                         if (typeof taskId === 'string' && taskId.trim().length > 0) {
                             didRequestTurnInterrupt = true;
                             deferredInterruptedReason = deferredInterruptedReason ?? 'turn-interrupt';
@@ -953,8 +967,62 @@ export async function claudeRemoteAgentSdk(opts: {
         let didFinalizeTurn = false;
         let awaitingNextTurnStart = false;
         let didReleaseTurnForResult = false;
-        let pendingResultReleaseForActiveProviderTasks = false;
         const providerActivityLedger = createClaudeProviderActivityLedger();
+        let didPublishClaudeRuntimeActivity = false;
+
+        const runRuntimeActivityEffect = (
+            label: string,
+            effect: () => Promise<void> | void,
+        ): void => {
+            try {
+                void Promise.resolve(effect()).catch((error) => {
+                    logger.debug(`[claudeRemoteAgentSdk] runtime activity ${label} failed (non-fatal)`, error);
+                });
+            } catch (error) {
+                logger.debug(`[claudeRemoteAgentSdk] runtime activity ${label} failed (non-fatal)`, error);
+            }
+        };
+
+        const setProviderTaskRuntimeActivityActive = (taskId: unknown): void => {
+            const sourceId = buildClaudeProviderTaskRuntimeActivitySourceId(taskId);
+            if (!sourceId || !opts.runtimeActivityPublisher) return;
+            didPublishClaudeRuntimeActivity = true;
+            runRuntimeActivityEffect('set-active', () => opts.runtimeActivityPublisher?.setSourceActive({
+                id: sourceId,
+                sourceClass: CLAUDE_PROVIDER_TASK_RUNTIME_ACTIVITY_SOURCE_CLASS,
+                providerId: CLAUDE_RUNTIME_ACTIVITY_PROVIDER_ID,
+            }));
+        };
+
+        const observeProviderTaskRuntimeActivity = (taskId: unknown): void => {
+            const sourceId = buildClaudeProviderTaskRuntimeActivitySourceId(taskId);
+            if (!sourceId || !opts.runtimeActivityPublisher) return;
+            didPublishClaudeRuntimeActivity = true;
+            runRuntimeActivityEffect('observe-source', () => opts.runtimeActivityPublisher?.setSourceActive({
+                id: sourceId,
+                sourceClass: CLAUDE_PROVIDER_TASK_RUNTIME_ACTIVITY_SOURCE_CLASS,
+                providerId: CLAUDE_RUNTIME_ACTIVITY_PROVIDER_ID,
+            }));
+        };
+
+        const clearProviderTaskRuntimeActivity = (taskId: unknown): void => {
+            const sourceId = buildClaudeProviderTaskRuntimeActivitySourceId(taskId);
+            if (!sourceId || !opts.runtimeActivityPublisher) return;
+            runRuntimeActivityEffect('clear-source', () => opts.runtimeActivityPublisher?.clearSource(
+                sourceId,
+                'claude_provider_task_terminal',
+            ));
+        };
+
+        const clearClaudeRuntimeActivity = (reason: string): void => {
+            if (!opts.runtimeActivityPublisher || !didPublishClaudeRuntimeActivity) return;
+            runRuntimeActivityEffect('clear-provider', () => opts.runtimeActivityPublisher?.clearProviderSources(
+                CLAUDE_RUNTIME_ACTIVITY_PROVIDER_ID,
+                reason,
+            ));
+            didPublishClaudeRuntimeActivity = false;
+        };
+        clearClaudeRuntimeActivityForCurrentQuery = clearClaudeRuntimeActivity;
 
         function recordCheckpointId(id: string) {
             if (checkpointIdSet.has(id)) return;
@@ -1026,53 +1094,7 @@ export async function claudeRemoteAgentSdk(opts: {
             return formatAgentSdkResultFailureText(subtype, errorParts);
         };
 
-        const readTaskId = (value: unknown): string | null => {
-            if (!value || typeof value !== 'object') return null;
-            const taskId = (value as any).task_id ?? (value as any).taskId;
-            return typeof taskId === 'string' && taskId.trim().length > 0 ? taskId : null;
-        };
-
-        const readBackgroundTaskId = (value: unknown): string | null => {
-            if (!value || typeof value !== 'object') return null;
-            const taskResult = (value as any).tool_use_result ?? (value as any).toolUseResult;
-            if (!taskResult || typeof taskResult !== 'object') return null;
-            if ((taskResult as any).assistantAutoBackgrounded !== true) return null;
-            const taskId = (taskResult as any).backgroundTaskId ?? (taskResult as any).background_task_id;
-            return typeof taskId === 'string' && taskId.trim().length > 0 ? taskId : null;
-        };
-
         const hasActiveProviderTasks = (): boolean => providerActivityLedger.hasActiveProviderTasks();
-
-        const isProviderContinuationMessageAfterResult = (message: unknown, inboundType: string): boolean => {
-            if (!didReleaseTurnForResult || pendingResultReleaseForActiveProviderTasks) return false;
-            if (!message || typeof message !== 'object') return false;
-            if (inboundType === 'assistant' || inboundType === 'user' || inboundType === 'stream_event') return true;
-            if (inboundType !== 'system') return false;
-            const subtype = (message as any).subtype;
-            return (
-                subtype === 'compact_boundary'
-                || subtype === 'compact_result'
-                || subtype === 'compact_metadata'
-                || subtype === 'task_started'
-                || subtype === 'task_progress'
-                || subtype === 'task_notification'
-            );
-        };
-
-        const markProviderContinuationAfterResult = () => {
-            didReleaseTurnForResult = false;
-            lastTurnFlushSummary = null;
-            didPublishAssistantTextThisTurn = false;
-            sidechainsWithPublishedAssistantTextThisTurn.clear();
-            resetTurnDiagnostics();
-            updateThinking(true);
-        };
-
-        const maybeCompleteDeferredResultRelease = async () => {
-            if (!pendingResultReleaseForActiveProviderTasks || hasActiveProviderTasks()) return;
-            pendingResultReleaseForActiveProviderTasks = false;
-            updateThinking(false);
-        };
 
         const markAssistantTextPublished = (text: string | null | undefined, sidechainId: string | null) => {
             if (typeof text !== 'string' || text.trim().length === 0) return;
@@ -1401,6 +1423,8 @@ export async function claudeRemoteAgentSdk(opts: {
                         didPublishAssistantTextThisTurn = false;
                         sidechainsWithPublishedAssistantTextThisTurn.clear();
                         didReleaseTurnForResult = false;
+                        foregroundTurnInterruptActive = true;
+                        foregroundTaskInterruptId = null;
                         messages.push({
                             type: 'user',
                             session_id: '',
@@ -1410,6 +1434,7 @@ export async function claudeRemoteAgentSdk(opts: {
                                 content: [{ type: 'text', text: next.message }],
                             },
                         });
+                        confirmClaudeRemoteProviderPromptAccepted(opts.onPromptAcceptedByProvider, next);
 
                         updateThinking(true);
                         return;
@@ -1424,7 +1449,8 @@ export async function claudeRemoteAgentSdk(opts: {
             if (didFinalizeTurn) return;
             didFinalizeTurn = true;
             awaitingNextTurnStart = true;
-            activeTaskId = null;
+            foregroundTurnInterruptActive = false;
+            foregroundTaskInterruptId = null;
             updateThinking(false);
             const interruptedReason = deferredInterruptedReason;
             deferredInterruptedReason = null;
@@ -1449,12 +1475,12 @@ export async function claudeRemoteAgentSdk(opts: {
         const releaseCurrentTurnForResult = async () => {
             if (didFinalizeTurn || didReleaseTurnForResult) return;
             didReleaseTurnForResult = true;
+            foregroundTurnInterruptActive = false;
+            foregroundTaskInterruptId = null;
             if (!hasActiveProviderTasks()) {
-                activeTaskId = null;
-                updateThinking(false);
-            } else {
-                pendingResultReleaseForActiveProviderTasks = true;
+                detachedTaskInterruptId = null;
             }
+            updateThinking(false);
             lastTurnFlushSummary = await flushStreamedTranscriptWriter('turn-end');
             turnDiagnostics.didDurablyFlushAssistantTextThisTurn = lastTurnFlushSummary?.assistantRoot.didDurablyFlush === true;
             logger.debug('[claudeRemoteAgentSdk] Turn result summary', {
@@ -1463,7 +1489,6 @@ export async function claudeRemoteAgentSdk(opts: {
                 resultObserved: true,
                 activeProviderTaskBlockers: providerActivityLedger.getActiveProviderTaskBlockers(),
                 activeProviderTaskCount: providerActivityLedger.getActiveProviderTaskCount(),
-                deferredCompletionForActiveProviderTasks: pendingResultReleaseForActiveProviderTasks,
             });
             resetTurnDiagnostics();
             await opts.onReady();
@@ -1480,23 +1505,24 @@ export async function claudeRemoteAgentSdk(opts: {
             await opts.onSubagentFlush?.();
         };
 
-        const noteTerminalProviderTaskStatus = async (
-            system: SDKSystemMessage,
+        const noteTerminalProviderTask = async (
+            taskId: string,
             options: { flushSubagent: boolean },
         ): Promise<boolean> => {
-            const taskId = normalizeClaudeAgentSdkProviderTaskId(readTaskId(system));
-            if (!taskId) return false;
-            const status = readClaudeAgentSdkProviderTaskStatus(system);
-            if (!isTerminalClaudeAgentSdkProviderTaskStatus(status)) return false;
-
-            if (taskId === activeTaskId) {
-                activeTaskId = null;
-            }
             providerActivityLedger.noteProviderTaskFinished(taskId);
+            if (taskId === foregroundTaskInterruptId) {
+                foregroundTaskInterruptId = null;
+            }
+            if (taskId === detachedTaskInterruptId) {
+                const activeBlockers = providerActivityLedger.getActiveProviderTaskBlockers();
+                detachedTaskInterruptId = activeBlockers.length > 0
+                    ? activeBlockers[activeBlockers.length - 1]?.taskId ?? null
+                    : null;
+            }
+            clearProviderTaskRuntimeActivity(taskId);
             if (options.flushSubagent) {
                 await finalizeSubagentTurn();
             }
-            await maybeCompleteDeferredResultRelease();
             return true;
         };
 
@@ -1545,9 +1571,6 @@ export async function claudeRemoteAgentSdk(opts: {
                 return typeof raw === 'string' && raw.trim().length > 0 ? raw.trim() : 'unknown';
             })();
             shapeLogger.log(`inbound:${inboundType}`, message);
-            if (isProviderContinuationMessageAfterResult(message, inboundType)) {
-                markProviderContinuationAfterResult();
-            }
             if (inboundType === 'stream_event') {
                 turnDiagnostics.streamEventCount += 1;
             } else if (inboundType === 'assistant') {
@@ -1866,31 +1889,36 @@ export async function claudeRemoteAgentSdk(opts: {
                 if (message && message.type === 'system') {
                     const system = message as SDKSystemMessage;
                     const subtype = (system as any).subtype;
+                    const taskActivity = readClaudeProviderTaskActivity(message);
 
-                    if (subtype === 'task_started') {
-                        const taskId = providerActivityLedger.noteProviderTaskStarted(readTaskId(system));
-                        const isTerminalTaskStatus = isTerminalClaudeAgentSdkProviderTaskStatus(
-                            readClaudeAgentSdkProviderTaskStatus(system),
-                        );
-                        if (taskId && !isTerminalTaskStatus) {
-                            activeTaskId = taskId;
+                    if (taskActivity) {
+                        if (taskActivity.type === 'started') {
+                            const taskId = providerActivityLedger.noteProviderTaskStarted(taskActivity.taskId);
+                            if (taskId) {
+                                foregroundTaskInterruptId = taskId;
+                                detachedTaskInterruptId = taskId;
+                            }
+                            setProviderTaskRuntimeActivityActive(taskActivity.taskId);
+                        } else if (taskActivity.type === 'progress') {
+                            const previousDetachedTaskId = detachedTaskInterruptId;
+                            const taskId = providerActivityLedger.noteProviderTaskProgress(taskActivity.taskId);
+                            if (taskId) {
+                                detachedTaskInterruptId = taskId;
+                            }
+                            if (
+                                foregroundTurnInterruptActive
+                                && !foregroundTaskInterruptId
+                                && taskId
+                                && taskId !== previousDetachedTaskId
+                            ) {
+                                foregroundTaskInterruptId = taskId;
+                            }
+                            observeProviderTaskRuntimeActivity(taskActivity.taskId);
+                        } else if (taskActivity.type === 'terminal') {
+                            await noteTerminalProviderTask(taskActivity.taskId, {
+                                flushSubagent: subtype === 'task_notification',
+                            });
                         }
-                        await noteTerminalProviderTaskStatus(system, { flushSubagent: false });
-                    } else if (subtype === 'task_progress') {
-                        const taskId = providerActivityLedger.noteProviderTaskProgress(readTaskId(system));
-                        const isTerminalTaskStatus = isTerminalClaudeAgentSdkProviderTaskStatus(
-                            readClaudeAgentSdkProviderTaskStatus(system),
-                        );
-                        if (!activeTaskId && taskId && !isTerminalTaskStatus) {
-                            activeTaskId = taskId;
-                        }
-                        await noteTerminalProviderTaskStatus(system, { flushSubagent: false });
-                    } else if (subtype === 'task_notification') {
-                        const taskId = normalizeClaudeAgentSdkProviderTaskId(readTaskId(system));
-                        if (taskId === activeTaskId) {
-                            activeTaskId = null;
-                        }
-                        await noteTerminalProviderTaskStatus(system, { flushSubagent: true });
                     }
 
                     if (subtype === 'init' || subtype === 'compact_boundary') {
@@ -1936,11 +1964,16 @@ export async function claudeRemoteAgentSdk(opts: {
 
             if (message && message.type === 'user') {
                 const msg = message as any;
-                const backgroundTaskId = providerActivityLedger.noteBackgroundProviderTask(readBackgroundTaskId(msg));
-                if (backgroundTaskId) {
-                    if (!activeTaskId) {
-                        activeTaskId = backgroundTaskId;
+                const taskActivity = readClaudeProviderTaskActivity(msg);
+                if (taskActivity?.type === 'background') {
+                    const backgroundTaskId = providerActivityLedger.noteBackgroundProviderTask(taskActivity.taskId);
+                    if (backgroundTaskId) {
+                        detachedTaskInterruptId = backgroundTaskId;
                     }
+                    if (foregroundTurnInterruptActive && !foregroundTaskInterruptId) {
+                        foregroundTaskInterruptId = backgroundTaskId;
+                    }
+                    setProviderTaskRuntimeActivityActive(taskActivity.taskId);
                 }
                 if (
                     enableFileCheckpointing &&
@@ -2040,6 +2073,7 @@ export async function claudeRemoteAgentSdk(opts: {
     } finally {
         opts.setUserMessageSender?.(null);
         opts.setTurnInterrupt?.(null);
+        clearClaudeRuntimeActivityForCurrentQuery?.('claude_agent_sdk_stream_finalized');
         updateThinking(false);
         cleanupBufferedAssistantMessages?.(null);
 

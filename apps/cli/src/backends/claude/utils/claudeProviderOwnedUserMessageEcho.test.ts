@@ -3,12 +3,12 @@ import { describe, expect, it } from 'vitest';
 import type { Update, UserMessage } from '@/api/types';
 import { isClaudeProviderOwnedUserMessageEcho } from './claudeProviderOwnedUserMessageEcho';
 
-function createMessage(localId: string, meta: UserMessage['meta']): UserMessage {
+function createMessage(localId: string, meta?: UserMessage['meta']): UserMessage {
   return {
     role: 'user',
     content: { type: 'text', text: 'typed in Claude TUI' },
     localId,
-    meta,
+    ...(meta ? { meta } : {}),
   } as UserMessage;
 }
 
@@ -36,6 +36,10 @@ describe('isClaudeProviderOwnedUserMessageEcho', () => {
     const localId = 'claude-jsonl:main:user:u1';
 
     expect(isClaudeProviderOwnedUserMessageEcho(
+      createMessage(localId),
+      createUpdate(localId),
+    )).toBe(true);
+    expect(isClaudeProviderOwnedUserMessageEcho(
       createMessage(localId, { source: 'cli' }),
       createUpdate(localId),
     )).toBe(true);
@@ -45,14 +49,10 @@ describe('isClaudeProviderOwnedUserMessageEcho', () => {
     )).toBe(true);
   });
 
-  it('does not classify non-Claude or non-CLI user rows as provider-owned', () => {
+  it('does not classify non-Claude user rows as provider-owned', () => {
     expect(isClaudeProviderOwnedUserMessageEcho(
       createMessage('other-provider:user:u1', { source: 'cli' }),
       createUpdate('other-provider:user:u1'),
-    )).toBe(false);
-    expect(isClaudeProviderOwnedUserMessageEcho(
-      createMessage('claude-jsonl:main:user:u1', { source: 'user' }),
-      createUpdate('claude-jsonl:main:user:u1'),
     )).toBe(false);
   });
 });

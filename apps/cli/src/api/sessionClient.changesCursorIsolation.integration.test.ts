@@ -1,9 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 
-const writeLastChangesCursor = vi.fn(async () => {});
-const readLastChangesCursor = vi.fn(async () => 0);
+const writeAccountChangesCursor = vi.fn(async () => {});
+const readAccountChangesCursor = vi.fn(async () => 0);
 
-vi.mock('@/persistence', () => ({ writeLastChangesCursor, readLastChangesCursor }));
+vi.mock('@/persistence', () => ({
+  writeAccountChangesCursor,
+  readAccountChangesCursor,
+  readCredentials: vi.fn(async () => null),
+}));
 
 class FakeSocket {
   connected = false;
@@ -37,6 +41,7 @@ vi.mock('./rpc/handlerManager', () => ({
   RpcHandlerManager: class {
     onSocketConnect() {}
     onSocketDisconnect() {}
+    async waitForIdle() {}
     async handleRequest() {
       return '';
     }
@@ -66,6 +71,29 @@ describe('ApiSessionClient changesCursor isolation', () => {
       { source: 'session-scoped' },
     );
 
-    expect(writeLastChangesCursor).not.toHaveBeenCalled();
+    expect(writeAccountChangesCursor).not.toHaveBeenCalled();
+    await client.close();
+  }, 20_000);
+
+  it('uses the session snapshot pending state even when the account changes cursor is already advanced', async () => {
+    readAccountChangesCursor.mockResolvedValueOnce(999);
+    const { ApiSessionClient } = await import('./session/sessionClient');
+
+    const client = new ApiSessionClient('tok', {
+      id: 's1',
+      metadata: { path: '/tmp' },
+      metadataVersion: 0,
+      agentState: null,
+      agentStateVersion: 0,
+      encryptionKey: new Uint8Array([1, 2, 3]),
+      encryptionVariant: 'v1',
+      pendingCount: 1,
+      pendingBlockedCount: 0,
+      pendingVersion: 12,
+    } as any);
+
+    expect(client.shouldAttemptPendingMaterialization()).toBe(true);
+    expect(writeAccountChangesCursor).not.toHaveBeenCalled();
+    await client.close();
   }, 20_000);
 });

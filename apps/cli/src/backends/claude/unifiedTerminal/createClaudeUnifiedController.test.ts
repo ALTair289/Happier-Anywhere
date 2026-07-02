@@ -3,6 +3,20 @@ import { describe, expect, it, vi } from 'vitest';
 import { createClaudeUnifiedController } from './createClaudeUnifiedController';
 import { createClaudeUnifiedPendingQueuePump } from './createClaudeUnifiedPendingQueuePump';
 
+const createIdleSnapshot = () => ({
+  queuedCount: 0,
+  pendingInjectionCount: 0,
+  terminalCustodyCount: 0,
+  providerAcceptancePendingCount: 0,
+  disposed: false,
+  turnState: 'idle' as const,
+  permissionBlocked: false,
+  userTyping: false,
+  lastDeferredReason: null,
+  lastFailureReason: null,
+  headInputState: null,
+});
+
 function createDeferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -254,6 +268,7 @@ describe('createClaudeUnifiedController', () => {
       arbiter: {
         enqueueUiMessage: vi.fn(),
         drainWhenSafe: vi.fn(),
+        snapshot: vi.fn(createIdleSnapshot),
       },
     });
     const controller = createClaudeUnifiedController({
@@ -290,6 +305,7 @@ describe('createClaudeUnifiedController', () => {
       arbiter: {
         enqueueUiMessage: vi.fn().mockResolvedValue(undefined),
         drainWhenSafe: vi.fn().mockRejectedValue(drainError),
+        snapshot: vi.fn(createIdleSnapshot),
       },
     });
     const controller = createClaudeUnifiedController({

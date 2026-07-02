@@ -2,7 +2,6 @@ import {
     normalizeCodexAppServerGoalToSessionWorkStateItem,
     type SessionWorkStateItemV1,
     type SessionWorkStateV1,
-    type SessionWorkStateWriteItemV1,
     type SessionWorkStateWriteSnapshotV1,
 } from '@happier-dev/protocol';
 
@@ -43,14 +42,6 @@ function readCurrentWorkState(metadata: unknown, backendId: string): MetadataRec
     };
 }
 
-function readItemId(item: unknown): string | null {
-    return readString(asRecord(item)?.id);
-}
-
-function isTaskOrTodo(item: MetadataRecord): boolean {
-    return item.kind === 'task' || item.kind === 'todo';
-}
-
 function isCodexGoalItem(item: MetadataRecord): boolean {
     const id = readString(item.id);
     if (id === LEGACY_CODEX_GOAL_ITEM_ID) return true;
@@ -58,51 +49,6 @@ function isCodexGoalItem(item: MetadataRecord): boolean {
     return item.kind === 'goal'
         && item.origin === 'vendor'
         && item.backendId === CODEX_BACKEND_ID;
-}
-
-function choosePrimaryItemId(
-    items: readonly SessionWorkStateWriteItemV1[],
-    currentPrimaryItemId: string | null,
-    preferredGoalItemId?: string,
-): string | null {
-    const records = items.map(asRecord).filter((item): item is MetadataRecord => Boolean(item));
-    if (currentPrimaryItemId) {
-        const current = records.find((item) => item.id === currentPrimaryItemId);
-        if (current && isTaskOrTodo(current)) {
-            return currentPrimaryItemId;
-        }
-    }
-    const activeTaskOrTodo = records.find((item) =>
-        isTaskOrTodo(item) && item.status === 'active' && typeof item.id === 'string',
-    );
-    if (typeof activeTaskOrTodo?.id === 'string') return activeTaskOrTodo.id;
-    if (preferredGoalItemId && records.some((item) => item.id === preferredGoalItemId)) {
-        return preferredGoalItemId;
-    }
-    const activeGoal = records.find((item) => item.kind === 'goal' && item.status === 'active' && typeof item.id === 'string');
-    if (typeof activeGoal?.id === 'string') return activeGoal.id;
-    return records.map(readItemId).find((id): id is string => Boolean(id)) ?? null;
-}
-
-function withPrimaryItemId(
-    snapshot: SessionWorkStateWriteSnapshotV1,
-    currentPrimaryItemId: string | null,
-    preferredGoalItemId?: string,
-): SessionWorkStateWriteSnapshotV1 {
-    return {
-        ...snapshot,
-        primaryItemId: choosePrimaryItemId(snapshot.items, currentPrimaryItemId, preferredGoalItemId),
-    };
-}
-
-function withSessionWorkStateMetadata<TMetadata extends object>(
-    metadata: TMetadata,
-    sessionWorkStateV1: SessionWorkStateWriteSnapshotV1,
-): TMetadata & { sessionWorkStateV1: SessionWorkStateWriteSnapshotV1 } {
-    return {
-        ...metadata,
-        sessionWorkStateV1,
-    };
 }
 
 export function mergeCodexGoalIntoSessionWorkStateMetadata<TMetadata extends object>(
@@ -137,17 +83,18 @@ export function mergeCodexGoalIntoSessionWorkStateMetadata<TMetadata extends obj
         items: [item],
         primaryItemId: item.id,
     };
-    const nextMetadata: MetadataRecord & Readonly<{ sessionWorkStateV1: SessionWorkStateWriteSnapshotV1 }> = mergeSessionWorkStateMetadataV1({
-        metadata,
-        nextOwned,
-        ownedItemIds: [...existingCodexGoalItemIds, item.id, LEGACY_CODEX_GOAL_ITEM_ID],
-        ownedItemIdPrefixes: [LEGACY_CODEX_GOAL_ITEM_PREFIX],
-    });
-
-    return withSessionWorkStateMetadata(
-        metadata,
-        withPrimaryItemId(nextMetadata.sessionWorkStateV1, readString(current.primaryItemId), item.id),
-    );
+    // The merge chokepoint resolves `primaryItemId` canonically over the MERGED
+    // item set (shared `resolveSessionWorkStatePrimaryItemId`), so this path no
+    // longer re-derives its own primary — one rule, no Codex-local duplicate.
+    return {
+        ...metadata,
+        ...mergeSessionWorkStateMetadataV1({
+            metadata,
+            nextOwned,
+            ownedItemIds: [...existingCodexGoalItemIds, item.id, LEGACY_CODEX_GOAL_ITEM_ID],
+            ownedItemIdPrefixes: [LEGACY_CODEX_GOAL_ITEM_PREFIX],
+        }),
+    };
 }
 
 export function removeCodexGoalFromSessionWorkStateMetadata<TMetadata extends object>(
@@ -170,15 +117,15 @@ export function removeCodexGoalFromSessionWorkStateMetadata<TMetadata extends ob
         items: [] satisfies SessionWorkStateItemV1[],
         primaryItemId: null,
     };
-    const nextMetadata: MetadataRecord & Readonly<{ sessionWorkStateV1: SessionWorkStateWriteSnapshotV1 }> = mergeSessionWorkStateMetadataV1({
-        metadata,
-        nextOwned,
-        ownedItemIds,
-        ownedItemIdPrefixes: [LEGACY_CODEX_GOAL_ITEM_PREFIX],
-    });
-
-    return withSessionWorkStateMetadata(
-        metadata,
-        withPrimaryItemId(nextMetadata.sessionWorkStateV1, readString(current.primaryItemId)),
-    );
+    // Primary is re-resolved canonically at the merge chokepoint after the Codex
+    // goal item is removed; no Codex-local primary computation here.
+    return {
+        ...metadata,
+        ...mergeSessionWorkStateMetadataV1({
+            metadata,
+            nextOwned,
+            ownedItemIds,
+            ownedItemIdPrefixes: [LEGACY_CODEX_GOAL_ITEM_PREFIX],
+        }),
+    };
 }

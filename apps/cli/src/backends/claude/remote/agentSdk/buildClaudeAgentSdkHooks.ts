@@ -111,61 +111,6 @@ export function buildClaudeAgentSdkHooks(params: Readonly<{
         ],
       },
     ],
-    PermissionRequest: [
-      {
-        hooks: [
-          async (input: any, toolUseID: string | undefined, options: { signal: AbortSignal }) => {
-            if (!input || typeof input !== 'object') {
-              return { continue: true, suppressOutput: true };
-            }
-            const toolName = typeof input.tool_name === 'string' ? input.tool_name : '';
-            const toolInput = (input as any).tool_input;
-            if (!toolName) {
-              return { continue: true, suppressOutput: true };
-            }
-
-            const result = await params.canCallTool(toolName, toolInput, params.getMode(), {
-              signal: options.signal,
-              toolUseId: typeof toolUseID === 'string' ? toolUseID : null,
-              suggestions: (input as any).permission_suggestions,
-            });
-
-            if (result.behavior === 'allow') {
-              const updatedInput =
-                result.updatedInput && typeof result.updatedInput === 'object' && !Array.isArray(result.updatedInput)
-                  ? (result.updatedInput as Record<string, unknown>)
-                  : undefined;
-              const updatedPermissions = result.updatedPermissions;
-              return {
-                continue: true,
-                suppressOutput: true,
-                hookSpecificOutput: {
-                  hookEventName: 'PermissionRequest',
-                  decision: {
-                    behavior: 'allow',
-                    ...(updatedInput ? { updatedInput } : {}),
-                    ...(typeof updatedPermissions !== 'undefined' ? { updatedPermissions } : {}),
-                  },
-                },
-              };
-            }
-
-            return {
-              continue: true,
-              suppressOutput: true,
-              hookSpecificOutput: {
-                hookEventName: 'PermissionRequest',
-                decision: {
-                  behavior: 'deny',
-                  ...(typeof result.message === 'string' && result.message.length > 0 ? { message: result.message } : {}),
-                  ...(result.interrupt !== undefined ? { interrupt: result.interrupt } : {}),
-                },
-              },
-            };
-          },
-        ],
-      },
-    ],
   };
 
   const canUseTool = async (toolName: string, input: Record<string, unknown>, options: any) => {

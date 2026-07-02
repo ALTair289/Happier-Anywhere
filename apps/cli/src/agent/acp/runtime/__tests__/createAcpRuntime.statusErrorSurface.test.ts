@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { MessageBuffer } from '@/ui/ink/messageBuffer';
+import { logger } from '@/ui/logger';
 import type { AgentMessage } from '@/agent/core/AgentMessage';
 import type { ACPMessageData } from '@/api/session/sessionMessageTypes';
 import type { SessionTurnMutationV1 } from '@/api/session/mutations/sessionMutationTypes';
@@ -12,6 +13,11 @@ import { createApprovedPermissionHandler } from '@/testkit/backends/permissionHa
 import { createBasicSessionClientWithOverrides } from '@/testkit/backends/sessionFixtures';
 
 describe('createAcpRuntime (status error surfacing)', () => {
+  afterEach(() => {
+    delete process.env.HAPPIER_ACP_FAILURE_TRACE;
+    vi.restoreAllMocks();
+  });
+
   it('surfaces non-abort status:error as sanitized primary-session failure', async () => {
     const backend = createFakeAcpRuntimeBackend({ sessionId: 'sess_main' });
 
@@ -60,6 +66,14 @@ describe('createAcpRuntime (status error surfacing)', () => {
 
     expect(sent.some((msg) => msg.type === 'message' && msg.message.includes('Model not found'))).toBe(false);
     await expect.poll(() => sent.some((msg) => msg.type === 'turn_failed')).toBe(true);
+    const turnFailed = sent.find((msg) => msg.type === 'turn_failed');
+    expect(turnFailed).toEqual(expect.objectContaining({
+      type: 'turn_failed',
+      issue: expect.objectContaining({
+        source: 'provider_status_error',
+        sanitizedPreview: 'Provider reported an error',
+      }),
+    }));
     expect(sent.some((msg) => msg.type === 'turn_aborted')).toBe(false);
     expect(failedTurns).toEqual([
       expect.objectContaining({
@@ -101,6 +115,243 @@ describe('createAcpRuntime (status error surfacing)', () => {
     await Promise.resolve();
 
     expect(flushReasons).toEqual(['ACP runtime status:error']);
+  });
+
+  it('writes opt-in sanitized Pi ACP prompt-failure traces without raw error text', async () => {
+    process.env.HAPPIER_ACP_FAILURE_TRACE = '1';
+    const debugSpy = vi.spyOn(logger, 'debug').mockImplementation(() => undefined);
+    const backend = createFakeAcpRuntimeBackend({ sessionId: 'sess_main' });
+
+    const runtime = createAcpRuntime({
+      provider: 'pi',
+      directory: '/tmp',
+      session: createBasicSessionClientWithOverrides(),
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: createApprovedPermissionHandler(),
+      onThinkingChange: () => {},
+      ensureBackend: async () => backend,
+    });
+
+    await runtime.startOrLoad({});
+    runtime.beginTurn();
+
+    await runtime.failTurn(new Error(
+      'Provider session failed while handling sensitive prompt marker sk-proj-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    ));
+
+    const tracePayloads = debugSpy.mock.calls
+      .filter(([message]) => message === '[acp] prompt failure trace')
+      .map(([, payload]) => payload);
+    expect(tracePayloads).toEqual([
+      expect.objectContaining({
+        provider: 'pi',
+        branch: 'surface_prompt_failure',
+        cause: 'session_error',
+        errorMessageKind: 'other',
+        issueSource: 'provider_session_error',
+        issueCode: 'provider_session_error',
+        compatibilityMarkerSent: false,
+      }),
+    ]);
+
+    const serialized = JSON.stringify(tracePayloads);
+    expect(serialized).not.toContain('sensitive prompt marker');
+    expect(serialized).not.toContain('sk-proj-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+    expect(serialized).not.toContain('Provider session failed while handling');
+  });
+
+  it('normalizes exact generic Pi prompt failures after prompt acceptance to a Pi diagnostic', async () => {
+    process.env.HAPPIER_ACP_FAILURE_TRACE = '1';
+    const debugSpy = vi.spyOn(logger, 'debug').mockImplementation(() => undefined);
+    const backend = createFakeAcpRuntimeBackend({ sessionId: 'sess_main' });
+    const sent: ACPMessageData[] = [];
+    const mutations: SessionTurnMutationV1[] = [];
+    const sessionTurnLifecycle = createSessionTurnLifecycle({
+      sessionId: 'happy-session-1',
+      createId: () => 'pi-acp-turn-1',
+      now: () => 123,
+      enqueueSessionTurn: async (mutation) => {
+        mutations.push(mutation);
+      },
+    });
+
+    const runtime = createAcpRuntime({
+      provider: 'pi',
+      directory: '/tmp',
+      session: {
+        ...createBasicSessionClientWithOverrides({
+          sendAgentMessage: (_provider, body) => {
+            sent.push(body);
+          },
+        }),
+        sessionTurnLifecycle,
+      },
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: createApprovedPermissionHandler(),
+      onThinkingChange: () => {},
+      ensureBackend: async () => backend,
+    });
+
+    await runtime.startOrLoad({});
+    runtime.beginTurn();
+
+    await runtime.failTurn(new Error('Provider session failed'));
+
+    expect(sent).toContainEqual(expect.objectContaining({
+      type: 'turn_failed',
+      issue: expect.objectContaining({
+        provider: 'pi',
+        source: 'provider_session_error',
+        code: 'provider_session_error',
+        sanitizedPreview: 'Pi provider reported provider session failure after prompt acceptance',
+      }),
+    }));
+    expect(mutations).toEqual([
+      expect.objectContaining({
+        action: 'begin',
+        provider: 'pi',
+      }),
+      expect.objectContaining({
+        action: 'fail',
+        provider: 'pi',
+        issue: expect.objectContaining({
+          sanitizedPreview: 'Pi provider reported provider session failure after prompt acceptance',
+        }),
+      }),
+    ]);
+    const tracePayloads = debugSpy.mock.calls
+      .filter(([message]) => message === '[acp] prompt failure trace')
+      .map(([, payload]) => payload);
+    expect(tracePayloads).toEqual([
+      expect.objectContaining({
+        provider: 'pi',
+        branch: 'surface_prompt_failure',
+        errorMessageKind: 'generic_provider_session_failed',
+        issuePreviewKind: 'pi_provider_diagnostic',
+        compatibilityMarkerSent: true,
+      }),
+    ]);
+  });
+
+  it('normalizes generic surfaced Pi prompt failures with wrapper raw errors after prompt acceptance', async () => {
+    process.env.HAPPIER_ACP_FAILURE_TRACE = '1';
+    const debugSpy = vi.spyOn(logger, 'debug').mockImplementation(() => undefined);
+    const backend = createFakeAcpRuntimeBackend({ sessionId: 'sess_main' });
+    const sent: ACPMessageData[] = [];
+    const mutations: SessionTurnMutationV1[] = [];
+    const sessionTurnLifecycle = createSessionTurnLifecycle({
+      sessionId: 'happy-session-1',
+      createId: () => 'pi-acp-turn-wrapper',
+      now: () => 123,
+      enqueueSessionTurn: async (mutation) => {
+        mutations.push(mutation);
+      },
+    });
+
+    const runtime = createAcpRuntime({
+      provider: 'pi',
+      directory: '/tmp',
+      session: {
+        ...createBasicSessionClientWithOverrides({
+          sendAgentMessage: (_provider, body) => {
+            sent.push(body);
+          },
+        }),
+        sessionTurnLifecycle,
+      },
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: createApprovedPermissionHandler(),
+      onThinkingChange: () => {},
+      ensureBackend: async () => backend,
+    });
+
+    await runtime.startOrLoad({});
+    runtime.beginTurn();
+
+    await runtime.failTurn(new Error(
+      'some wrapper text around Provider session failed that is not exact sk-proj-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    ));
+
+    expect(sent).toContainEqual(expect.objectContaining({
+      type: 'turn_failed',
+      issue: expect.objectContaining({
+        provider: 'pi',
+        source: 'provider_session_error',
+        code: 'provider_session_error',
+        sanitizedPreview: 'Pi provider reported provider session failure after prompt acceptance',
+      }),
+    }));
+    expect(mutations).toEqual([
+      expect.objectContaining({
+        action: 'begin',
+        provider: 'pi',
+      }),
+      expect.objectContaining({
+        action: 'fail',
+        provider: 'pi',
+        issue: expect.objectContaining({
+          sanitizedPreview: 'Pi provider reported provider session failure after prompt acceptance',
+        }),
+      }),
+    ]);
+
+    const tracePayloads = debugSpy.mock.calls
+      .filter(([message]) => message === '[acp] prompt failure trace')
+      .map(([, payload]) => payload);
+    expect(tracePayloads).toEqual([
+      expect.objectContaining({
+        provider: 'pi',
+        branch: 'surface_prompt_failure',
+        errorMessageKind: 'other',
+        issuePreviewKind: 'pi_provider_diagnostic',
+        compatibilityMarkerSent: true,
+      }),
+    ]);
+
+    const serializedSurface = JSON.stringify({ sent, mutations, tracePayloads });
+    expect(serializedSurface).not.toContain('some wrapper text around');
+    expect(serializedSurface).not.toContain('sk-proj-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
+  });
+
+  it('preserves Pi terminal failure diagnostics on the turn_failed issue marker', async () => {
+    const backend = createFakeAcpRuntimeBackend({ sessionId: 'sess_main' });
+    const sent: ACPMessageData[] = [];
+
+    const runtime = createAcpRuntime({
+      provider: 'pi',
+      directory: '/tmp',
+      session: createBasicSessionClientWithOverrides({
+        sendAgentMessage: (_provider, body) => {
+          sent.push(body);
+        },
+      }),
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: createApprovedPermissionHandler(),
+      onThinkingChange: () => {},
+      ensureBackend: async () => backend,
+    });
+
+    await runtime.startOrLoad({});
+    runtime.beginTurn();
+
+    backend.emit({
+      type: 'status',
+      status: 'error',
+      detail: 'Pi provider reported assistant_message_end failed without details after prompt acceptance',
+    } satisfies AgentMessage);
+
+    await expect.poll(() => sent.find((msg) => msg.type === 'turn_failed')).toEqual(expect.objectContaining({
+      type: 'turn_failed',
+      issue: expect.objectContaining({
+        provider: 'pi',
+        source: 'provider_status_error',
+        sanitizedPreview: 'Pi provider reported assistant_message_end failed without details after prompt acceptance',
+      }),
+    }));
   });
 
   it('does not surface abort-like status:error detail as a transcript message', async () => {

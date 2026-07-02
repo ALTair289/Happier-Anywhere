@@ -168,4 +168,162 @@ describe('ClaudeSdkAgentBackend runtime bootstrap', () => {
       await backend.dispose();
     }
   });
+
+  it('keeps the active cancel target when a different task reports a terminal task_updated status', async () => {
+    const interleavedTaskProcessed = createDeferred<void>();
+    const stopTask = vi.fn(async (_taskId: string) => {});
+    const interrupt = vi.fn(async () => {});
+
+    queryMock.mockImplementation((params: any) => {
+      const signal: AbortSignal | undefined = params?.options?.abort;
+      const aborted = new Promise<void>((resolve) => {
+        if (!signal) return resolve();
+        if (signal.aborted) return resolve();
+        signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+
+      return {
+        async *[Symbol.asyncIterator]() {
+          yield { type: 'system', subtype: 'init', session_id: 'sess_1' };
+          yield { type: 'system', subtype: 'task_started', task_id: 'task_1', session_id: 'sess_1' };
+          yield { type: 'system', subtype: 'task_started', task_id: 'task_2', session_id: 'sess_1' };
+          yield {
+            type: 'system',
+            subtype: 'task_updated',
+            task_id: 'task_1',
+            session_id: 'sess_1',
+            patch: { status: 'completed' },
+          };
+          interleavedTaskProcessed.resolve();
+          await aborted;
+          yield { type: 'result', subtype: 'error_during_execution', session_id: 'sess_1' };
+        },
+        stopTask,
+        interrupt,
+      };
+    });
+
+    const { ClaudeSdkAgentBackend } = await import('./ClaudeSdkAgentBackend');
+
+    const backend = new ClaudeSdkAgentBackend({
+      cwd: '/tmp',
+      modelId: 'default',
+      permissionPolicy: 'no_tools',
+    });
+
+    try {
+      const { sessionId } = await backend.startSession();
+      await interleavedTaskProcessed.promise;
+
+      await backend.sendPrompt(sessionId, 'hi');
+      await backend.cancel(sessionId);
+
+      expect(stopTask).toHaveBeenCalledWith('task_2');
+      expect(interrupt).not.toHaveBeenCalled();
+    } finally {
+      await backend.dispose();
+    }
+  });
+
+  it('keeps the backend working but accepts another prompt after a result with a background task', async () => {
+    const resultProcessed = createDeferred<void>();
+    const releaseBackgroundTask = createDeferred<void>();
+    const firstPromptAccepted = createDeferred<void>();
+    const secondPromptAccepted = createDeferred<void>();
+
+    queryMock.mockImplementation((params: any) => {
+      const prompt = params?.prompt as AsyncIterable<unknown>;
+      const promptIterator = prompt[Symbol.asyncIterator]();
+
+      return {
+        async *[Symbol.asyncIterator]() {
+          yield { type: 'system', subtype: 'init', session_id: 'sess_1' };
+          await promptIterator.next();
+          firstPromptAccepted.resolve();
+          yield { type: 'system', subtype: 'task_started', task_id: 'task_1', session_id: 'sess_1' };
+          yield {
+            type: 'user',
+            session_id: 'sess_1',
+            message: {
+              role: 'user',
+              content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'Background task started' }],
+            },
+            tool_use_result: {
+              assistantAutoBackgrounded: true,
+              backgroundTaskId: 'task_1',
+            },
+          };
+          yield {
+            type: 'result',
+            subtype: 'success',
+            num_turns: 1,
+            session_id: 'sess_1',
+            result: 'Background task is still running',
+            is_error: false,
+          };
+          resultProcessed.resolve();
+          await promptIterator.next();
+          secondPromptAccepted.resolve();
+          await releaseBackgroundTask.promise;
+          yield {
+            type: 'system',
+            subtype: 'task_notification',
+            task_id: 'task_1',
+            status: 'completed',
+            session_id: 'sess_1',
+          };
+          yield {
+            type: 'result',
+            subtype: 'success',
+            num_turns: 2,
+            session_id: 'sess_1',
+            result: 'Follow-up done',
+            is_error: false,
+          };
+        },
+        interrupt: vi.fn(async () => {}),
+      };
+    });
+
+    const { ClaudeSdkAgentBackend } = await import('./ClaudeSdkAgentBackend');
+
+    const backend = new ClaudeSdkAgentBackend({
+      cwd: '/tmp',
+      modelId: 'default',
+      permissionPolicy: 'no_tools',
+    });
+    const statuses: string[] = [];
+    backend.onMessage((message: any) => {
+      if (message?.type === 'status') statuses.push(String(message.status));
+    });
+
+    try {
+      const { sessionId } = await backend.startSession();
+      await backend.sendPrompt(sessionId, 'hi');
+      await firstPromptAccepted.promise;
+      const completion = backend.waitForResponseComplete();
+      let completed = false;
+      completion.then(() => {
+        completed = true;
+      }).catch(() => undefined);
+
+      await resultProcessed.promise;
+      await Promise.resolve();
+
+      await completion;
+      expect(completed).toBe(true);
+      expect(statuses.at(-1)).not.toBe('idle');
+
+      await backend.sendPrompt(sessionId, 'follow-up while background task is running');
+      await secondPromptAccepted.promise;
+
+      releaseBackgroundTask.resolve();
+
+      await backend.waitForResponseComplete();
+      expect(statuses.at(-1)).toBe('idle');
+    } finally {
+      releaseBackgroundTask.resolve();
+      await backend.dispose();
+    }
+  });
 });

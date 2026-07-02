@@ -4,7 +4,14 @@ import axios from 'axios';
 
 import { ApiClient } from './api';
 import { logger } from '@/ui/logger';
+import { resetServerEndpointFailureLogSamplingForTests } from './client/serverEndpointFailureLog';
 import type { Credentials } from '@/persistence';
+import {
+  buildProviderAccountUsageRecordId,
+  type ConnectedServiceUsageSourceV1,
+  type ProviderAccountUsageRecordKeyV1,
+  type ProviderAccountUsageSnapshotV1,
+} from '@happier-dev/protocol';
 
 const { mockPost, mockGet } = vi.hoisted(() => ({
   mockPost: vi.fn(),
@@ -55,9 +62,45 @@ function createAxiosResponseError(params: Readonly<{
   return error;
 }
 
+function createProviderAccountUsageSnapshot(): ProviderAccountUsageSnapshotV1 {
+  const recordKey: ProviderAccountUsageRecordKeyV1 = {
+    providerId: 'codex',
+    accountSubjectId: 'acct_live_codex',
+    subjectKind: 'account',
+    quotaScope: 'account',
+  };
+  return {
+    v: 1,
+    recordId: buildProviderAccountUsageRecordId(recordKey),
+    recordKey,
+    providerId: 'codex',
+    accountSubject: { kind: 'providerSubject', id: 'acct_live_codex' },
+    observedAtMs: 1_000,
+    fetchedAtMs: 1_000,
+    staleAfterMs: 300_000,
+    source: 'runtimeSignal',
+    confidence: 'confirmed',
+    state: 'loaded_empty',
+    planLabel: null,
+    accountLabel: null,
+    meters: [],
+  };
+}
+
+function createConnectedServiceUsageSource(): ConnectedServiceUsageSourceV1 {
+  return {
+    serviceId: 'openai-codex',
+    profileId: 'work',
+    bindingKind: 'group_member',
+    groupId: 'team',
+    groupGeneration: 4,
+  };
+}
+
 describe('ApiClient connected services quotas v3', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetServerEndpointFailureLogSamplingForTests();
   });
 
   it('gets the account encryption mode from /v1/account/encryption', async () => {
@@ -110,6 +153,34 @@ describe('ApiClient connected services quotas v3', () => {
     await expect(api.getAccountEncryptionMode()).resolves.toBe('unknown');
   });
 
+  it('samples transient account encryption mode failures without error-labeled logs', async () => {
+    mockGet.mockRejectedValue(createAxiosResponseError({
+      status: 503,
+      data: { error: 'server_unavailable' },
+      headers: { 'retry-after': '2' },
+    }));
+
+    const api = await ApiClient.create(createTestCredentials());
+
+    await expect(api.getAccountEncryptionMode()).resolves.toBe('unknown');
+    await expect(api.getAccountEncryptionMode()).resolves.toBe('unknown');
+
+    expect(mockGet).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(logger.debug)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(logger.debug).mock.calls[0]?.[0]).toBe(
+      '[API] Failed to get account encryption mode temporarily unavailable; will retry or recover when the server is ready.',
+    );
+    expect(vi.mocked(logger.debug).mock.calls[0]?.[0]).not.toContain('[ERROR]');
+    expect(vi.mocked(logger.debug).mock.calls[0]?.[1]).toMatchObject({
+      classification: {
+        kind: 'server_error',
+        retryable: true,
+        statusCode: 503,
+        retryAfterMs: 2_000,
+      },
+    });
+  });
+
   it('gets plaintext quota snapshots from the v3 connected services quotas endpoint', async () => {
     mockGet.mockResolvedValue({
       status: 200,
@@ -145,42 +216,138 @@ describe('ApiClient connected services quotas v3', () => {
     );
   });
 
-  it('posts plaintext quota snapshots to the v3 connected services quotas endpoint', async () => {
-    mockPost.mockResolvedValue({ status: 200, data: { success: true } });
+  it('samples transient plaintext quota snapshot failures without error-labeled logs', async () => {
+    const cause = createAxiosResponseError({
+      status: 429,
+      data: { error: 'rate_limited' },
+      headers: { 'retry-after': '2' },
+    });
+    mockGet.mockRejectedValue(cause);
 
     const api = await ApiClient.create(createTestCredentials());
 
-    await api.registerConnectedServiceQuotaSnapshotPlain({
+    await expect(api.getConnectedServiceQuotaSnapshotPlain({
       serviceId: 'openai-codex',
       profileId: 'work',
-      content: {
-        t: 'plain',
-        v: {
-          v: 1,
-          serviceId: 'openai-codex',
-          profileId: 'work',
-          fetchedAt: Date.now(),
-          staleAfterMs: 300_000,
-          planLabel: null,
-          accountLabel: null,
-          meters: [],
-        },
+    })).rejects.toMatchObject({
+      name: 'ConnectedServiceQuotaApiError',
+      kind: 'retryable',
+      status: 429,
+      retryable: true,
+      retryAfterMs: 2_000,
+      cause,
+    });
+    expect(vi.mocked(logger.debug)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(logger.debug).mock.calls[0]?.[0]).toContain('temporarily unavailable');
+    expect(vi.mocked(logger.debug).mock.calls[0]?.[0]).not.toContain('[ERROR]');
+    expect(vi.mocked(logger.debug).mock.calls[0]?.[1]).toMatchObject({
+      classification: {
+        kind: 'rate_limited',
+        retryable: true,
+        statusCode: 429,
+        retryAfterMs: 2_000,
       },
-      metadata: { fetchedAt: 1, staleAfterMs: 300_000, status: 'ok' },
+    });
+  });
+
+  it('does not expose the retired plaintext connected-service quota writer', async () => {
+    const api = await ApiClient.create(createTestCredentials());
+
+    expect('registerConnectedServiceQuotaSnapshotPlain' in api).toBe(false);
+    expect(mockPost).not.toHaveBeenCalled();
+  });
+
+  it('posts plaintext provider account usage snapshots to the v3 canonical endpoint by record id', async () => {
+    mockPost.mockResolvedValue({ status: 200, data: { success: true } });
+    const snapshot = createProviderAccountUsageSnapshot();
+
+    const api = await ApiClient.create(createTestCredentials());
+
+    await api.registerProviderAccountUsageSnapshotPlain({
+      recordId: snapshot.recordId,
+      content: { t: 'plain', v: snapshot },
+      metadata: { fetchedAt: 1_000, staleAfterMs: 300_000, status: 'ok', materialFingerprint: 'fingerprint' },
     });
 
     expect(axios.post).toHaveBeenCalledWith(
-      expect.stringContaining('/v3/connect/openai-codex/profiles/work/quotas'),
-      expect.any(Object),
+      expect.stringContaining(`/v3/connect/provider-account-usage/${encodeURIComponent(snapshot.recordId)}`),
+      expect.objectContaining({
+        content: { t: 'plain', v: snapshot },
+        metadata: expect.objectContaining({ materialFingerprint: 'fingerprint' }),
+      }),
       expect.objectContaining({
         headers: expect.objectContaining({
           Authorization: 'Bearer happy-token',
         }),
       }),
     );
+    expect(String(vi.mocked(axios.post).mock.calls[0]?.[0])).not.toContain('/profiles/');
+  });
 
-    const serializedLogs = JSON.stringify(vi.mocked(logger.debug).mock.calls);
-    expect(serializedLogs).not.toContain('staleAfterMs');
+  it('posts plaintext provider account usage snapshots with source context to the v3 canonical endpoint', async () => {
+    mockPost.mockResolvedValue({ status: 200, data: { success: true } });
+    const snapshot = createProviderAccountUsageSnapshot();
+
+    const api = await ApiClient.create(createTestCredentials());
+
+    await api.registerProviderAccountUsageSnapshotPlain({
+      recordId: snapshot.recordId,
+      source: {
+        serviceId: 'openai-codex',
+        profileId: 'work',
+        bindingKind: 'profile',
+      },
+      content: { t: 'plain', v: snapshot },
+      metadata: { fetchedAt: 1_000, staleAfterMs: 300_000, status: 'ok', materialFingerprint: 'fingerprint' },
+    });
+
+    expect(axios.post).toHaveBeenCalledWith(
+      expect.stringContaining(`/v3/connect/provider-account-usage/${encodeURIComponent(snapshot.recordId)}`),
+      expect.objectContaining({
+        content: { t: 'plain', v: snapshot },
+        source: {
+          serviceId: 'openai-codex',
+          profileId: 'work',
+          bindingKind: 'profile',
+        },
+        metadata: expect.objectContaining({ materialFingerprint: 'fingerprint' }),
+      }),
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: 'Bearer happy-token',
+        }),
+      }),
+    );
+    expect(String(vi.mocked(axios.post).mock.calls[0]?.[0])).not.toContain('/profiles/');
+  });
+
+  it('gets plaintext provider account usage snapshots from the v3 canonical endpoint by record id', async () => {
+    const snapshot = createProviderAccountUsageSnapshot();
+    const source = createConnectedServiceUsageSource();
+    mockGet.mockResolvedValue({
+      status: 200,
+      data: {
+        content: { t: 'plain', v: snapshot },
+        metadata: { fetchedAt: 1_000, staleAfterMs: 300_000, status: 'ok' },
+        sources: [source],
+      },
+    });
+
+    const api = await ApiClient.create(createTestCredentials());
+
+    const res = await api.getProviderAccountUsageSnapshotPlain({ recordId: snapshot.recordId });
+
+    expect(res?.content).toEqual({ t: 'plain', v: snapshot });
+    expect(res?.sources).toEqual([source]);
+    expect(axios.get).toHaveBeenCalledWith(
+      expect.stringContaining(`/v3/connect/provider-account-usage/${encodeURIComponent(snapshot.recordId)}`),
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: 'Bearer happy-token',
+        }),
+      }),
+    );
+    expect(String(vi.mocked(axios.get).mock.calls[0]?.[0])).not.toContain('/profiles/');
   });
 
   it('classifies plaintext quota read timeouts as retryable', async () => {

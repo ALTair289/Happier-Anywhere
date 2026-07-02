@@ -62,6 +62,21 @@ export const RawJSONLinesSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("progress"),
     uuid: z.string().optional(),
+  }).passthrough(),
+
+  // Attachment record - native Claude Code emits these for `/goal`, plan-mode,
+  // queued commands, agent listings, etc. (Claude Code >= 2.1.153). The parser
+  // previously dropped them; carry the envelope fields and keep the inner
+  // `attachment` object lenient/passthrough so a single router can dispatch by
+  // `attachment.type` without the schema needing to know every subtype.
+  z.object({
+    type: z.literal("attachment"),
+    uuid: z.string().optional(),
+    sessionId: z.string().optional(),
+    timestamp: z.string().optional(),
+    attachment: z.object({
+      type: z.string(),
+    }).passthrough(),
   }).passthrough()
 ]);
 

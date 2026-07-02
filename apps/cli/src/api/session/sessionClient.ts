@@ -4,7 +4,13 @@ import axios from 'axios';
 import { Socket } from 'socket.io-client'
 import { AgentState, ClientToServerEvents, MessageAckResponseSchema, MessageContent, Metadata, ServerToClientEvents, Session, SessionMessageContent, SessionMessageContentSchema, Update, UserMessage, UserMessageSchema, Usage } from '../types'
 import { decodeBase64, decrypt, encodeBase64, encrypt } from '../encryption';
-import { mergeDeliveredUserMessageSeqV1, readDeliveredUserMessageSeqV1 } from './deliveredUserMessageSeq';
+import {
+    mergeDeliveredUserMessageSeqV1,
+    mergeProviderAcceptedUserMessageSeqV1,
+    mergeUserMessageDeliveryWatermarkModeV1,
+    readDeliveredUserMessageSeqV1,
+    readProviderAcceptedUserMessageSeqV1,
+} from './deliveredUserMessageSeq';
 import { backoff } from '@/utils/time';
 import { configuration } from '@/configuration';
 import { resolveLoopbackHttpUrl } from '../client/loopbackUrl';
@@ -25,9 +31,13 @@ import type { SessionRuntimeControls } from '@/rpc/handlers/sessionControls';
 import { registerExecutionRunHandlers } from '@/rpc/handlers/executionRuns';
 import { registerEphemeralTaskHandlers } from '@/rpc/handlers/ephemeralTasks';
 import { emitSocketWithAck } from '@/session/transport/shared/socketAck';
+import {
+    fetchSessionSystemRecord as fetchSessionSystemRecordHttp,
+    upsertSessionSystemRecord as upsertSessionSystemRecordHttp,
+} from '@/session/transport/http/sessionSystemRecordsHttp';
 import { createExecutionRunBackend } from '@/agent/executionRuns/runtime/createExecutionRunBackend';
 import { ExecutionBudgetRegistry } from '@/daemon/executionBudget/ExecutionBudgetRegistry';
-import { readCredentials } from '@/persistence';
+import { readCredentials, readAccountChangesCursor } from '@/persistence';
 import { bootstrapAccountSettingsContext } from '@/settings/accountSettings/bootstrapAccountSettingsContext';
 import { getActiveAccountSettingsSnapshot } from '@/settings/accountSettings/activeAccountSettingsSnapshot';
 import { CATALOG_AGENT_IDS, type CatalogAgentId } from '@/backends/types';
@@ -35,13 +45,25 @@ import { addDiscardedCommittedMessageLocalIds } from '../queue/discardedCommitte
 import { fetchSessionSnapshotUpdateFromServer, shouldSyncSessionSnapshotOnConnect } from './snapshotSync';
 import { createUserScopedSocket } from './sockets';
 import { isToolTraceEnabled, recordAcpToolTraceEventIfNeeded, recordClaudeToolTraceEvents, recordCodexToolTraceEventIfNeeded } from './toolTrace';
-import { updateSessionAgentStateWithAck, updateSessionMetadataWithAck } from './stateUpdates';
+import {
+    updateSessionAgentStateWithAck,
+    updateSessionMetadataWithAck,
+    updateSessionRuntimeActivityProjectionWithAck,
+} from './stateUpdates';
 import { SOCKET_RPC_EVENTS } from '@happier-dev/protocol/socketRpc';
 import {
     isSessionContinuationRecoveryBlockingPendingDrain,
     readSessionUserMessageDeliveryIntentMeta,
 } from '@happier-dev/protocol';
-import type { PrimaryTurnStatusV1, SessionMessageRole } from '@happier-dev/protocol';
+import type {
+    PrimaryTurnStatusV1,
+    SessionMessageRole,
+    SessionPendingQueueDeliveryTiming,
+    SessionRuntimeActivitySourceClassV1,
+    SessionSystemRecord,
+    SessionSystemRecordNamespace,
+    SessionSystemRecordUpsertRequest,
+} from '@happier-dev/protocol';
 import { calculateCost } from '@/utils/pricing';
 import { buildAcpAgentMessageEnvelope, shouldTraceAcpMessageType } from './acpMessageEnvelope';
 import { normalizeAcpSessionMessageBody, normalizeCodexSessionMessageBody } from './sessionOutboundMessageNormalization';
@@ -58,8 +80,16 @@ import {
 } from './transcriptQueries';
 import {
     discardPendingQueueV2Messages,
+    enqueuePendingQueueV2MessageViaHttp,
     listPendingQueueV2LocalIdsFromServer,
+    listPendingQueueV2ProviderDeliveryLocalIdsFromServer,
     materializeNextPendingQueueV2Message,
+    blockPendingQueueV2Delivery,
+    blockPendingQueueV2ProviderDeliveriesOnAttach,
+    reconcileAcceptedPendingQueueV2DeliveriesThroughSeq,
+    resolveAcceptedPendingQueueV2Delivery,
+    type PendingMaterializationDeliveryState,
+    type PendingQueueDeliveryBlockedReason,
     type PendingQueueMaterializedMessage,
     type PendingQueueMaterializeNextResult,
 } from './pendingQueueV2Transport';
@@ -92,7 +122,7 @@ import {
     type TurnAssistantTextSnapshot,
 } from './turnAssistantTextSnapshot';
 import { buildDaemonInitialPromptLocalId, consumeDaemonInitialPromptFromEnv } from '@/agent/runtime/daemonInitialPrompt';
-import { resolveCliFeatureDecision } from '@/features/featureDecisionService';
+import { resolveCliFeatureDecisionForServer } from '@/features/featureDecisionService';
 import { createKeyedSingleFlightScheduler, type KeyedSingleFlightScheduler } from '../connection/scheduling';
 import {
     createManagedConnectionSupervisor,
@@ -106,6 +136,8 @@ import { createSessionSocketTransport } from './connection/createSessionSocketTr
 import { connectionState } from '@/api/offline/serverConnectionErrors';
 import { isAuthenticationError, readAuthenticationStatus } from '@/api/client/httpStatusError';
 import { serializeAxiosErrorForLog } from '@/api/client/serializeAxiosErrorForLog';
+import { resolveServerHttpBaseUrl } from '@/session/transport/http/serverHttpBaseUrl';
+import { resolveSessionControlSocketConnectTimeoutMs } from '@/session/transport/shared/sessionTimeouts';
 import {
     executeExecutionRunAction,
     getExecutionRun,
@@ -120,7 +152,13 @@ import { createEventShapeLoggerForLog } from '@/diagnostics/eventShapeForLog';
 import { runSupervisedRequest } from '@/api/connection/requestSupervision/runSupervisedRequest';
 import { updateMetadataBestEffort } from './sessionWritesBestEffort';
 import { normalizeAgentPromptPayload } from '@/agent/core/AgentPromptPayload';
-import type { MaterializeNextPendingResult, UserMessageProviderAcceptanceQuery } from './sessionClientPort';
+import type {
+    MaterializeNextPendingResult,
+    ProviderAcceptanceDeliveryOptions,
+    ProviderAcceptancePendingMaterializationPolicy,
+    SessionUserMessageDeliveryInfo,
+    UserMessageProviderAcceptanceQuery,
+} from './sessionClientPort';
 import {
     CommittedUserMessageSeqTracker,
     type CommittedUserMessageSeqWaitOptions,
@@ -140,6 +178,7 @@ import { createSessionTurnMutationWriter } from '@/agent/runtime/session/turn/wr
 import { notifyDaemonConnectedServiceTurnLifecycle, notifyDaemonConnectedServiceUsageLimitWaitResumeCancel } from '@/daemon/controlClient';
 import {
     applyKnownPendingQueueState,
+    countMaterializablePendingRows,
     derivePendingQueueStateAfterMaterializeResult,
     readKnownPendingQueueState,
     UNKNOWN_PENDING_QUEUE_STATE,
@@ -150,9 +189,24 @@ import {
     blocksPendingMaterializationDuringActiveTurn,
     type PendingMaterializationActiveTurnPolicy,
 } from './pendingMaterializationActiveTurnPolicy';
+import {
+    shouldDeferPendingQueueDrainForRuntimeActivity,
+    type PendingQueueRuntimeActivityProjection,
+} from '@/agent/runtime/sessionInput/pendingQueueDrainPolicy';
 import type { ProviderOwnedUserMessageEchoClassifier } from './providerOwnedUserMessageEcho';
 
+type RpcLifecycleRegistration = Readonly<{
+    dispose: () => Promise<void>;
+}>;
+
 type SessionRuntimeControlKey = keyof SessionRuntimeControls;
+
+function readPlannedServerRestartRetryAfterMs(payload: unknown): number | undefined {
+    if (!payload || typeof payload !== 'object') return undefined;
+    const raw = (payload as { retryAfterMs?: unknown }).retryAfterMs;
+    if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 0) return undefined;
+    return Math.trunc(raw);
+}
 
 const SESSION_RUNTIME_CONTROL_KEYS = [
     'refreshGoal',
@@ -169,6 +223,7 @@ const SESSION_RUNTIME_CONTROL_KEYS = [
     'checkUsageLimitRecoveryNow',
     'clearTerminalComposer',
     'handleUserMessage',
+    'materializeNextPendingMessageSafely',
 ] as const satisfies readonly SessionRuntimeControlKey[];
 
 function copyCallableSessionRuntimeControls(
@@ -194,7 +249,36 @@ function clearSessionRuntimeControls(target: Partial<SessionRuntimeControls>): v
 function arePendingQueueStatesEqual(left: PendingQueueState, right: PendingQueueState): boolean {
     if (left.known !== right.known) return false;
     if (!left.known || !right.known) return true;
-    return left.pendingCount === right.pendingCount && left.pendingVersion === right.pendingVersion;
+    return left.pendingCount === right.pendingCount
+        && left.pendingBlockedCount === right.pendingBlockedCount
+        && left.pendingVersion === right.pendingVersion;
+}
+
+type RuntimeActivityProjectionForPendingDrain = PendingQueueRuntimeActivityProjection & Readonly<{
+    runtimeActivityObservedAt?: unknown;
+    runtimeActivitySourceClass?: unknown;
+}>;
+
+function readRuntimeActivityProjectionForPendingDrain(value: unknown): RuntimeActivityProjectionForPendingDrain {
+    if (!value || typeof value !== 'object') {
+        return {};
+    }
+    const record = value as Record<string, unknown>;
+    return {
+        runtimeActivityActiveCount: record.runtimeActivityActiveCount,
+        runtimeActivityObservedAt: record.runtimeActivityObservedAt,
+        runtimeActivityExpiresAt: record.runtimeActivityExpiresAt,
+        runtimeActivitySourceClass: record.runtimeActivitySourceClass,
+    };
+}
+
+function hasRuntimeActivityProjectionFields(value: unknown): boolean {
+    if (!value || typeof value !== 'object') return false;
+    const record = value as Record<string, unknown>;
+    return 'runtimeActivityActiveCount' in record
+        || 'runtimeActivityObservedAt' in record
+        || 'runtimeActivityExpiresAt' in record
+        || 'runtimeActivitySourceClass' in record;
 }
 
 function resolveSessionSocketMachineIdForBootstrap(metadata: Metadata | null): string | undefined {
@@ -210,6 +294,26 @@ function readUnknownRecordProperty(value: unknown, key: string): unknown {
     return (value as Record<string, unknown>)[key];
 }
 
+function readHttpErrorResponseStatus(error: unknown): number | null {
+    const status = axios.isAxiosError(error)
+        ? error.response?.status
+        : readUnknownRecordProperty(readUnknownRecordProperty(error, 'response'), 'status');
+    return typeof status === 'number' && Number.isSafeInteger(status) ? status : null;
+}
+
+function readHttpErrorResponseErrorCode(error: unknown): string | null {
+    const data = axios.isAxiosError(error)
+        ? error.response?.data
+        : readUnknownRecordProperty(readUnknownRecordProperty(error, 'response'), 'data');
+    const raw = readUnknownRecordProperty(data, 'error');
+    return typeof raw === 'string' && raw.trim() ? raw.trim() : null;
+}
+
+function isTerminalPendingDeliveryNotFound(error: unknown): boolean {
+    return readHttpErrorResponseStatus(error) === 404
+        && readHttpErrorResponseErrorCode(error) === 'not-found';
+}
+
 export function classifySessionTransportErrorToProbeResult(
     error: unknown,
 ): Exclude<ReadinessProbeResult, Readonly<{ status: 'ready' }>> | null {
@@ -220,6 +324,41 @@ export function classifySessionTransportErrorToProbeResult(
         statusCode,
         errorMessage: error instanceof Error ? error.message : 'Authentication failed',
     };
+}
+
+const PENDING_DELIVERY_STATE_FEATURE_GATE_TIMEOUT_MS = 800;
+const SESSION_CONNECTION_STATE_EVENT = 'session-connection-state';
+
+type SessionSocketAckWriteEvent = 'update-metadata' | 'update-state' | 'update-runtime-activity';
+type SessionAliveMode = 'local' | 'remote';
+type SessionAlivePayload = Readonly<{
+    sid: string;
+    time: number;
+    thinking: boolean;
+    mode: SessionAliveMode;
+}>;
+type SessionPresenceSnapshot = Readonly<{
+    thinking: boolean;
+    mode: SessionAliveMode;
+}>;
+
+type SessionSocketNotReadyError = Error & Readonly<{
+    code: 'socket_not_connected' | 'socket_auth_failed' | 'session_closed';
+    event: SessionSocketAckWriteEvent;
+    retryable: boolean;
+}>;
+
+function createSessionSocketNotReadyError(params: Readonly<{
+    code: SessionSocketNotReadyError['code'];
+    event: SessionSocketAckWriteEvent;
+    message: string;
+    retryable: boolean;
+}>): SessionSocketNotReadyError {
+    const error = new Error(params.message) as SessionSocketNotReadyError;
+    Object.defineProperty(error, 'code', { value: params.code, enumerable: true });
+    Object.defineProperty(error, 'event', { value: params.event, enumerable: true });
+    Object.defineProperty(error, 'retryable', { value: params.retryable, enumerable: true });
+    return error;
 }
 
 export class ApiSessionClient extends EventEmitter {
@@ -234,9 +373,10 @@ export class ApiSessionClient extends EventEmitter {
     private socket!: Socket<ServerToClientEvents, ClientToServerEvents>;
     private userSocket: Socket<ServerToClientEvents, ClientToServerEvents>;
     private pendingMessages: UserMessage[] = [];
-    private pendingMessageCallback: ((message: UserMessage, info?: Readonly<{ seq: number | null }>) => void) | null = null;
+    private pendingMessageCallback: ((message: UserMessage, info?: SessionUserMessageDeliveryInfo) => void) | null = null;
     private userMessageCallbackAttachedAtMs: number | null = null;
     readonly rpcHandlerManager: RpcHandlerManager;
+    private readonly rpcLifecycleRegistrations: RpcLifecycleRegistration[] = [];
     private agentStateLock = new AsyncLock();
     private metadataLock = new AsyncLock();
     private encryptionKey: Uint8Array;
@@ -255,6 +395,7 @@ export class ApiSessionClient extends EventEmitter {
     private queuedDisconnectedSessionMessages = new Map<string, { message: string | { t: 'plain'; v: unknown }; localId: string; sidechainId: string | null; messageRole?: SessionMessageRole; sessionEventType?: 'ready' }>();
     private readonly sessionEncryptionMode: 'e2ee' | 'plain';
     private disconnectedSendLogged = false;
+    private latestSessionPresence: SessionPresenceSnapshot | null = null;
     // LocalId registries are intentionally phase-specific:
     // pendingMaterializedLocalIds: optimistic UI rows awaiting materialization.
     // committedLocalIdsAwaitingEcho: committed outbound rows awaiting socket echo.
@@ -267,9 +408,15 @@ export class ApiSessionClient extends EventEmitter {
     private readonly pendingMaterializedLocalIds = new Set<string>();
     private readonly committedLocalIdsAwaitingEcho = new Set<string>();
     private readonly pendingQueueMaterializedLocalIds = new Set<string>();
+    private readonly canonicalPendingDeliveryByLocalId = new Map<string, PendingMaterializationDeliveryState>();
     private readonly agentQueueEchoSuppressedLocalIds = new Set<string>();
     private readonly agentQueueDeliveredLocalIds = new Set<string>();
     private readonly providerAcceptedUserMessageLocalIdsAwaitingSeq = new Set<string>();
+    private readonly acceptedCanonicalPendingDeliveryRetryLocalIds = new Set<string>();
+    private readonly acceptedCanonicalPendingDeliveryResolutionWrites = new Set<Promise<void>>();
+    private readonly blockedCanonicalPendingDeliveryRetryReasonsByLocalId = new Map<string, PendingQueueDeliveryBlockedReason>();
+    private providerDeliveryAttachRecoveryCompleted = false;
+    private providerDeliveryAttachRecoveryInFlight: Promise<void> | null = null;
     private readonly passiveCommittedUserMessageLocalIds = new Set<string>();
     private readonly committedLocalIdCleanupTimers = new Map<string, ReturnType<typeof setTimeout>>();
     private readonly agentQueueEchoSuppressedLocalIdCleanupTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -281,6 +428,7 @@ export class ApiSessionClient extends EventEmitter {
     private pendingQueueStateReconcileInFlight: Promise<boolean> | null = null;
     private lastPendingQueueStateReconcileAt = 0;
     private latestTurnStatus: LatestTurnStatusSnapshot | undefined = undefined;
+    private runtimeActivityProjection: RuntimeActivityProjectionForPendingDrain = {};
     private lastTurnStatusRefreshPendingVersion: number | null = null;
     private lastBlockedTurnStatusRefreshAt = 0;
     private owedUserMessageCatchUpInFlight = false;
@@ -306,12 +454,22 @@ export class ApiSessionClient extends EventEmitter {
      * it once the provider actually accepted the batch. Failure direction stays duplicate-attempt
      * (at-least-once, deduped), never silent loss.
      */
+    private providerAcceptanceDeliveryStateRequested = false;
+    private providerAcceptanceDeliveryStateFeatureEnabled = false;
+    private providerAcceptancePendingMaterializationPolicy: ProviderAcceptancePendingMaterializationPolicy | null = null;
+    private pendingDeliveryStateFeatureProbe: Promise<void> | null = null;
     private deliveredUserMessageWatermarkDeferredToProviderAcceptance = false;
     private readonly turnAssistantTextSnapshotStore = createTurnAssistantTextSnapshotStore({
         maxTextChars: configuration.readyNotificationAssistantTextMaxChars,
     });
     private hasConnectedOnce = false;
+    /**
+     * Increments on every session socket connect. Live-stream writers use this to detect
+     * reconnects and resync receivers with a full snapshot before resuming delta emissions.
+     */
+    private ephemeralStreamConnectionEpoch = 0;
     private changesSyncInFlight: Promise<void> | null = null;
+    private readonly sessionChangesCursorByAccountId = new Map<string, number>();
     private socketStaleSafetyScheduler: SessionSocketStaleSafetyScheduler | null = null;
     private accountIdPromise: Promise<string> | null = null;
     private daemonInitialPrompt: string | null = null;
@@ -432,6 +590,85 @@ export class ApiSessionClient extends EventEmitter {
         );
     }
 
+    private isSessionSocketOnlineForAckWrite(): boolean {
+        return (this.socket as Socket<ServerToClientEvents, ClientToServerEvents> | undefined)?.connected === true
+            || this.currentConnectionState.phase === 'online';
+    }
+
+    private async waitForSessionSocketOnlineForAckWrite(event: SessionSocketAckWriteEvent): Promise<void> {
+        if (this.isSessionSocketOnlineForAckWrite()) return;
+        if (this.closed) {
+            throw createSessionSocketNotReadyError({
+                code: 'session_closed',
+                event,
+                message: `${event} session is closed`,
+                retryable: false,
+            });
+        }
+
+        const supervisor = this.sessionConnectionSupervisor;
+        if (!supervisor) return;
+
+        const timeoutMs = resolveSessionControlSocketConnectTimeoutMs();
+        await new Promise<void>((resolve, reject) => {
+            let settled = false;
+            let timer: ReturnType<typeof setTimeout> | null = null;
+            const cleanup = () => {
+                if (timer) {
+                    clearTimeout(timer);
+                    timer = null;
+                }
+                this.off(SESSION_CONNECTION_STATE_EVENT, onStateChange);
+            };
+            const settle = (fn: () => void) => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                fn();
+            };
+            const check = () => {
+                if (this.isSessionSocketOnlineForAckWrite()) {
+                    settle(resolve);
+                    return;
+                }
+                if (this.closed) {
+                    settle(() => reject(createSessionSocketNotReadyError({
+                        code: 'session_closed',
+                        event,
+                        message: `${event} session is closed`,
+                        retryable: false,
+                    })));
+                    return;
+                }
+                if (this.currentConnectionState.phase === 'auth_failed') {
+                    settle(() => reject(createSessionSocketNotReadyError({
+                        code: 'socket_auth_failed',
+                        event,
+                        message: `${event} session socket authentication failed`,
+                        retryable: false,
+                    })));
+                }
+            };
+            const onStateChange = () => check();
+
+            this.on(SESSION_CONNECTION_STATE_EVENT, onStateChange);
+            timer = setTimeout(() => {
+                settle(() => reject(createSessionSocketNotReadyError({
+                    code: 'socket_not_connected',
+                    event,
+                    message: `${event} socket is not connected`,
+                    retryable: true,
+                })));
+            }, timeoutMs);
+            timer.unref?.();
+
+            void supervisor.start().catch((error) => {
+                settle(() => reject(error));
+            });
+            check();
+        });
+    }
+
     private observeTurnAssistantTextFromSessionContent(
         content: unknown,
         params: Omit<TurnAssistantTextCandidate, 'text' | 'provider' | 'sidechainId'> & {
@@ -461,6 +698,7 @@ export class ApiSessionClient extends EventEmitter {
             this.latestTurnStatus = readLatestTurnStatusSnapshot(
                 (session as { latestTurnStatus?: unknown }).latestTurnStatus,
             );
+            this.runtimeActivityProjection = readRuntimeActivityProjectionForPendingDrain(session);
             this.lastObservedMessageSeq =
                 typeof session.seq === 'number' && Number.isFinite(session.seq) && session.seq >= 0
                     ? Math.trunc(session.seq)
@@ -513,18 +751,18 @@ export class ApiSessionClient extends EventEmitter {
         const parentProvider: CatalogAgentId =
             (CATALOG_AGENT_IDS as readonly string[]).includes(resolvedFlavor) ? (resolvedFlavor as CatalogAgentId) : 'claude';
 
-        registerSessionHandlers(this.rpcHandlerManager, this.metadata.path, {
+        this.rebuildSessionRuntimeControls();
+        this.rpcLifecycleRegistrations.push(registerSessionHandlers(this.rpcHandlerManager, this.metadata.path, {
             getSessionMetadata: () => this.getMetadataSnapshot(),
             updateSessionMetadata: (handler) => this.updateMetadata(handler),
             enqueueSessionUserMessage: (request) => this.enqueueSessionUserMessage(request),
-            materializeNextPendingMessageSafely: (opts) => this.materializeNextPendingMessageSafely(opts),
             sessionRuntimeControls: this.sessionRuntimeControls,
             // QAE-1: a user "Stop waiting" handled session-side (provider runtime
             // control or metadata fallback) must also cancel the daemon's durable
             // recovery wait state, or it resumes the session involuntarily later.
             notifyUsageLimitWaitResumeCancelled: async (request) =>
                 await notifyDaemonConnectedServiceUsageLimitWaitResumeCancel(request),
-        });
+        }));
 
         const transcriptWriter = {
             appendUserText: (text: string, meta: Record<string, unknown>) => {
@@ -567,8 +805,14 @@ export class ApiSessionClient extends EventEmitter {
                 this.enqueueAgentMessageCommitted(provider, body, opts),
             sendAgentMessageCommitted: (provider: ACPProvider, body: ACPMessageData, opts: { localId: string; meta?: Record<string, unknown> }) =>
                 this.sendAgentMessageCommitted(provider, body, opts),
-            sendAgentMessageEphemeral: (provider: ACPProvider, body: ACPMessageData, opts: { localId: string; createdAt: number; updatedAt?: number; meta?: Record<string, unknown> }) =>
+            sendAgentMessageEphemeral: (provider: ACPProvider, body: ACPMessageData, opts: { localId: string; createdAt: number; updatedAt?: number; meta?: Record<string, unknown>; tick?: number }) =>
                 this.sendAgentMessageEphemeral(provider, body, opts),
+            sendAgentMessageEphemeralDelta: (
+                provider: ACPProvider,
+                body: ACPMessageData,
+                opts: { localId: string; tick: number; baseLength: number; createdAt: number; updatedAt?: number; meta?: Record<string, unknown> },
+            ) => this.sendAgentMessageEphemeralDelta(provider, body, opts),
+            getEphemeralStreamConnectionEpoch: () => this.getEphemeralStreamConnectionEpoch(),
         };
 
         registerExecutionRunHandlers(this.rpcHandlerManager, {
@@ -685,6 +929,7 @@ export class ApiSessionClient extends EventEmitter {
             }),
             onStateChange: (state) => {
                 this.currentConnectionState = state;
+                this.emit(SESSION_CONNECTION_STATE_EVENT, state);
             },
             onConnected: async () => {
                 logger.debug('Socket connected successfully');
@@ -694,10 +939,13 @@ export class ApiSessionClient extends EventEmitter {
 
                 const isReconnect = this.hasConnectedOnce;
                 this.hasConnectedOnce = true;
+                this.ephemeralStreamConnectionEpoch += 1;
 
                 if (this.shouldKeepUserSocketConnected()) {
                     this.kickUserSocketConnect();
                 }
+
+                this.replayLatestSessionPresenceAfterReconnect();
 
                 await this.syncChangesOnConnect({ reason: isReconnect ? 'reconnect' : 'connect' }).catch((error) => {
                     logger.debug('[API] Session changes sync on connect failed (non-fatal)', {
@@ -761,6 +1009,14 @@ export class ApiSessionClient extends EventEmitter {
         for (const registration of this.sessionRuntimeControlRegistrations) {
             copyCallableSessionRuntimeControls(this.sessionRuntimeControls, registration);
         }
+        this.sessionRuntimeControls.materializeNextPendingMessageSafely = async (opts) => {
+            const result = await this.materializeNextPendingMessageSafely(opts);
+            return {
+                ok: true,
+                didMaterialize: result.type === 'materialized',
+                result,
+            };
+        };
     }
 
     setSessionRuntimeControls(controls: SessionRuntimeControls | null): void {
@@ -824,6 +1080,301 @@ export class ApiSessionClient extends EventEmitter {
         return applied.changed;
     }
 
+    private clearCanonicalPendingDeliveryLocalState(localId: string): boolean {
+        let didClear = false;
+        if (this.canonicalPendingDeliveryByLocalId.delete(localId)) didClear = true;
+        if (this.acceptedCanonicalPendingDeliveryRetryLocalIds.delete(localId)) didClear = true;
+        if (this.blockedCanonicalPendingDeliveryRetryReasonsByLocalId.delete(localId)) didClear = true;
+        const hadMaterializedLocalId = this.hasMaterializedLocalId(localId);
+        if (didClear || hadMaterializedLocalId) {
+            this.clearProviderAcceptedUserMessageLocalIdAwaitingSeq(localId);
+            this.deleteMaterializedLocalId(localId);
+        }
+        return didClear || hadMaterializedLocalId;
+    }
+
+    private clearCanonicalPendingDeliveryLocalStates(localIds: readonly string[]): boolean {
+        let didClear = false;
+        for (const localId of this.normalizeProviderAcceptedUserMessageLocalIds(localIds)) {
+            didClear = this.clearCanonicalPendingDeliveryLocalState(localId) || didClear;
+        }
+        return didClear;
+    }
+
+    private async retireStaleCanonicalPendingDeliveryAfterTerminalMiss(
+        localId: string,
+        operation: 'accepted' | 'block',
+        error: unknown,
+    ): Promise<boolean> {
+        if (!isTerminalPendingDeliveryNotFound(error)) return false;
+
+        const didClear = this.clearCanonicalPendingDeliveryLocalState(localId);
+        if (!didClear) return true;
+
+        logger.debug('[pendingQueue] retired stale provider delivery claim after server not-found', {
+            sessionId: this.sessionId,
+            localId,
+            operation,
+        });
+
+        let reconciled = false;
+        try {
+            reconciled = await this.reconcilePendingQueueState({ force: true });
+        } catch (reconcileError) {
+            logger.debug('[pendingQueue] stale provider delivery claim reconcile failed after terminal miss', {
+                sessionId: this.sessionId,
+                localId,
+                operation,
+                error: serializeAxiosErrorForLog(reconcileError),
+            });
+        }
+
+        if (!reconciled && !this.closed) {
+            this.pendingWakeSeq += 1;
+            this.emit('metadata-updated');
+        }
+        return true;
+    }
+
+    private async resolveAcceptedCanonicalPendingDeliveries(
+        localIds: readonly string[],
+        acceptedSeqByLocalId?: ReadonlyMap<string, number>,
+    ): Promise<void> {
+        if (this.closed) return;
+        const pendingLocalIds = this.normalizeProviderAcceptedUserMessageLocalIds(localIds)
+            .filter((localId) => this.canonicalPendingDeliveryByLocalId.has(localId));
+        if (pendingLocalIds.length === 0) return;
+
+        const supervisor = this.sessionConnectionSupervisor;
+        for (const localId of pendingLocalIds) {
+            try {
+                const request = () => resolveAcceptedPendingQueueV2Delivery({
+                    token: this.token,
+                    sessionId: this.sessionId,
+                    localId,
+                });
+                const result = supervisor
+                    ? await runSupervisedRequest({
+                        supervisor,
+                        requireAuth: true,
+                        requireOnline: false,
+                        request,
+                    })
+                    : await request();
+
+                if (!this.canonicalPendingDeliveryByLocalId.has(localId)) continue;
+                this.canonicalPendingDeliveryByLocalId.delete(localId);
+                this.acceptedCanonicalPendingDeliveryRetryLocalIds.delete(localId);
+                if (result.pendingQueueState) {
+                    this.applyPendingQueueState(result.pendingQueueState, { emit: true });
+                } else if (!this.closed) {
+                    this.pendingWakeSeq += 1;
+                    this.emit('metadata-updated');
+                }
+                const resolvedLocalId = result.message?.localId ?? localId;
+                const resolvedSeq = typeof result.message?.seq === 'number'
+                    ? result.message.seq
+                    : acceptedSeqByLocalId?.get(localId) ?? null;
+                this.recordCommittedUserMessageSeq(resolvedLocalId, resolvedSeq);
+            } catch (error) {
+                logger.debug('[pendingQueue] accepted provider delivery resolution failed', {
+                    sessionId: this.sessionId,
+                    localId,
+                    error: serializeAxiosErrorForLog(error),
+                });
+                if (await this.retireStaleCanonicalPendingDeliveryAfterTerminalMiss(localId, 'accepted', error)) {
+                    continue;
+                }
+                if (this.canonicalPendingDeliveryByLocalId.has(localId)) {
+                    this.acceptedCanonicalPendingDeliveryRetryLocalIds.add(localId);
+                } else {
+                    this.acceptedCanonicalPendingDeliveryRetryLocalIds.delete(localId);
+                }
+            }
+        }
+    }
+
+    private async retryAcceptedCanonicalPendingDeliveryResolutions(): Promise<void> {
+        if (this.acceptedCanonicalPendingDeliveryRetryLocalIds.size === 0) return;
+        const localIds = [...this.acceptedCanonicalPendingDeliveryRetryLocalIds]
+            .filter((localId) => this.canonicalPendingDeliveryByLocalId.has(localId));
+        for (const localId of this.acceptedCanonicalPendingDeliveryRetryLocalIds) {
+            if (!this.canonicalPendingDeliveryByLocalId.has(localId)) {
+                this.acceptedCanonicalPendingDeliveryRetryLocalIds.delete(localId);
+            }
+        }
+        if (localIds.length === 0) return;
+        await this.resolveAcceptedCanonicalPendingDeliveries(localIds);
+    }
+
+    private trackAcceptedCanonicalPendingDeliveryResolution(resolution: Promise<void>): void {
+        const tracked = resolution.catch((error) => {
+            logger.debug('[pendingQueue] accepted provider delivery resolution crashed', {
+                sessionId: this.sessionId,
+                error: serializeAxiosErrorForLog(error),
+            });
+        });
+        this.acceptedCanonicalPendingDeliveryResolutionWrites.add(tracked);
+        void tracked.finally(() => {
+            this.acceptedCanonicalPendingDeliveryResolutionWrites.delete(tracked);
+        });
+    }
+
+    private async drainAcceptedCanonicalPendingDeliveryResolutionsBeforeClose(): Promise<void> {
+        while (this.acceptedCanonicalPendingDeliveryResolutionWrites.size > 0) {
+            await Promise.all([...this.acceptedCanonicalPendingDeliveryResolutionWrites]);
+        }
+        await this.retryAcceptedCanonicalPendingDeliveryResolutions();
+    }
+
+    private async reconcileAcceptedCanonicalPendingDeliveriesThroughSeq(): Promise<void> {
+        if (this.closed) return;
+        if (this.pendingQueueState.known && this.pendingQueueState.pendingCount <= 0) return;
+        const watermarkState = this.readDeliveredUserMessageWatermarkState();
+        const maxAcceptedSeq = this.deliveredUserMessageWatermarkDeferredToProviderAcceptance
+            ? watermarkState.providerAccepted
+            : watermarkState.effective;
+        if (maxAcceptedSeq === null || maxAcceptedSeq <= 0) return;
+
+        const supervisor = this.sessionConnectionSupervisor;
+        try {
+            const request = () => reconcileAcceptedPendingQueueV2DeliveriesThroughSeq({
+                token: this.token,
+                sessionId: this.sessionId,
+                maxAcceptedSeq,
+            });
+            const result = supervisor
+                ? await runSupervisedRequest({
+                    supervisor,
+                    requireAuth: true,
+                    requireOnline: false,
+                    request,
+                })
+                : await request();
+            const didClearResolvedLocalState = this.clearCanonicalPendingDeliveryLocalStates(result.resolvedLocalIds);
+            if (result.pendingQueueState) {
+                this.applyPendingQueueState(result.pendingQueueState, { emit: true });
+            } else if (didClearResolvedLocalState && !this.closed) {
+                this.pendingWakeSeq += 1;
+                this.emit('metadata-updated');
+            }
+        } catch (error) {
+            logger.debug('[pendingQueue] accepted provider delivery seq reconciliation failed', {
+                sessionId: this.sessionId,
+                maxAcceptedSeq,
+                error: serializeAxiosErrorForLog(error),
+            });
+        }
+    }
+
+    async blockPendingMessageDelivery(params: Readonly<{
+        localIds: readonly string[] | null | undefined;
+        reason: PendingQueueDeliveryBlockedReason;
+    }>): Promise<boolean> {
+        return await this.blockCanonicalPendingDeliveries(params.localIds, params.reason);
+    }
+
+    private async blockCanonicalPendingDeliveries(
+        localIds: readonly string[] | null | undefined,
+        reason: PendingQueueDeliveryBlockedReason,
+    ): Promise<boolean> {
+        if (this.closed) return false;
+        const pendingLocalIds = this.normalizeProviderAcceptedUserMessageLocalIds(localIds)
+            .filter((localId) => this.canonicalPendingDeliveryByLocalId.has(localId));
+        if (pendingLocalIds.length === 0) return false;
+
+        let didBlock = false;
+        for (const localId of pendingLocalIds) {
+            didBlock = await this.blockPendingQueueDeliveryLocalId(localId, reason, {
+                canonicalOnly: true,
+            }) || didBlock;
+        }
+        return didBlock;
+    }
+
+    private async blockPendingQueueDeliveryLocalId(
+        localId: string,
+        reason: PendingQueueDeliveryBlockedReason,
+        opts: Readonly<{ canonicalOnly: boolean }>,
+    ): Promise<boolean> {
+        if (this.closed) return false;
+        const wasCanonical = this.canonicalPendingDeliveryByLocalId.has(localId);
+        if (opts.canonicalOnly && !wasCanonical) return false;
+
+        const supervisor = this.sessionConnectionSupervisor;
+        try {
+            const request = () => blockPendingQueueV2Delivery({
+                token: this.token,
+                sessionId: this.sessionId,
+                localId,
+                reason,
+            });
+            const result = supervisor
+                ? await runSupervisedRequest({
+                    supervisor,
+                    requireAuth: true,
+                    requireOnline: false,
+                    request,
+                })
+                : await request();
+
+            if (wasCanonical && this.canonicalPendingDeliveryByLocalId.has(localId)) {
+                this.canonicalPendingDeliveryByLocalId.delete(localId);
+                this.blockedCanonicalPendingDeliveryRetryReasonsByLocalId.delete(localId);
+            }
+            if (result.pendingQueueState) {
+                this.applyPendingQueueState(result.pendingQueueState, { emit: true });
+            } else if (!this.closed) {
+                this.pendingWakeSeq += 1;
+                this.emit('metadata-updated');
+            }
+            logger.debug('[pendingQueue] provider delivery block succeeded', {
+                sessionId: this.sessionId,
+                localId,
+                reason,
+                canonical: wasCanonical,
+                ...(result.pendingQueueState
+                    ? {
+                        pendingCount: result.pendingQueueState.pendingCount,
+                        pendingBlockedCount: result.pendingQueueState.pendingBlockedCount,
+                        pendingVersion: result.pendingQueueState.pendingVersion,
+                    }
+                    : {}),
+            });
+            return true;
+        } catch (error) {
+            logger.debug('[pendingQueue] provider delivery block failed', {
+                sessionId: this.sessionId,
+                localId,
+                reason,
+                    error: serializeAxiosErrorForLog(error),
+                });
+            if (await this.retireStaleCanonicalPendingDeliveryAfterTerminalMiss(localId, 'block', error)) {
+                return false;
+            }
+            if (opts.canonicalOnly && this.canonicalPendingDeliveryByLocalId.has(localId)) {
+                this.blockedCanonicalPendingDeliveryRetryReasonsByLocalId.set(localId, reason);
+            } else {
+                this.blockedCanonicalPendingDeliveryRetryReasonsByLocalId.delete(localId);
+            }
+            return opts.canonicalOnly && wasCanonical;
+        }
+    }
+
+    private async retryBlockedCanonicalPendingDeliveryBlocks(): Promise<void> {
+        if (this.blockedCanonicalPendingDeliveryRetryReasonsByLocalId.size === 0) return;
+        const entries = [...this.blockedCanonicalPendingDeliveryRetryReasonsByLocalId.entries()]
+            .filter(([localId]) => this.canonicalPendingDeliveryByLocalId.has(localId));
+        for (const localId of this.blockedCanonicalPendingDeliveryRetryReasonsByLocalId.keys()) {
+            if (!this.canonicalPendingDeliveryByLocalId.has(localId)) {
+                this.blockedCanonicalPendingDeliveryRetryReasonsByLocalId.delete(localId);
+            }
+        }
+        for (const [localId, reason] of entries) {
+            await this.blockCanonicalPendingDeliveries([localId], reason);
+        }
+    }
+
     async reconcilePendingQueueState(opts?: { force?: boolean }): Promise<boolean> {
         if (this.closed) return false;
         if (!opts?.force && this.pendingQueueState.known && this.pendingQueueState.pendingCount > 0) {
@@ -861,9 +1412,12 @@ export class ApiSessionClient extends EventEmitter {
 
     shouldAttemptPendingMaterialization(opts: {
         activeTurnDeliveryPolicy?: PendingMaterializationActiveTurnPolicy;
+        pendingQueueDeliveryTiming?: SessionPendingQueueDeliveryTiming;
     } = {}): boolean {
+        if (this.canonicalPendingDeliveryByLocalId.size > 0) return false;
         if (this.isPendingMaterializationBlocked(opts)) return false;
-        return this.pendingQueueState.known && this.pendingQueueState.pendingCount > 0;
+        if (this.isPendingMaterializationDeferredForRuntimeActivity(opts)) return false;
+        return countMaterializablePendingRows(this.pendingQueueState) > 0;
     }
 
     private isPendingMaterializationBlocked(opts: {
@@ -878,6 +1432,19 @@ export class ApiSessionClient extends EventEmitter {
             )
         )
             || isSessionContinuationRecoveryBlockingPendingDrain(this.metadata);
+    }
+
+    private isPendingMaterializationDeferredForRuntimeActivity(opts: {
+        pendingQueueDeliveryTiming?: SessionPendingQueueDeliveryTiming;
+    } = {}): boolean {
+        if (opts.pendingQueueDeliveryTiming !== 'after_runtime_idle') {
+            return false;
+        }
+        return shouldDeferPendingQueueDrainForRuntimeActivity({
+            settings: { sessionPendingQueueDeliveryTiming: opts.pendingQueueDeliveryTiming },
+            activity: this.runtimeActivityProjection,
+            nowMs: Date.now(),
+        });
     }
 
     /**
@@ -930,6 +1497,13 @@ export class ApiSessionClient extends EventEmitter {
             return;
         }
         this.lastOwedUserMessageCatchUpAt = now;
+        if (this.canonicalPendingDeliveryByLocalId.size > 0) {
+            logger.debug('[pendingQueue] owed user-message turn-end catch-up skipped (canonical pending delivery unresolved)', {
+                sessionId: this.sessionId,
+                unresolvedCanonicalPendingDeliveryCount: this.canonicalPendingDeliveryByLocalId.size,
+            });
+            return;
+        }
         const watermarkState = this.readDeliveredUserMessageWatermarkState();
         const afterSeq = Math.max(0, Math.min(
             watermarkState.effective ?? Number.MAX_SAFE_INTEGER,
@@ -980,7 +1554,7 @@ export class ApiSessionClient extends EventEmitter {
     private async reconcileTurnStatusBeforePendingMaterializationIfNeeded(opts: {
         activeTurnDeliveryPolicy?: PendingMaterializationActiveTurnPolicy;
     } = {}): Promise<boolean> {
-        if (!this.pendingQueueState.known || this.pendingQueueState.pendingCount <= 0) return true;
+        if (!this.pendingQueueState.known || countMaterializablePendingRows(this.pendingQueueState) <= 0) return true;
         if (this.isPendingMaterializationBlocked(opts)) {
             await this.refreshStaleBlockedTurnStatusIfNeeded();
             return true;
@@ -1047,6 +1621,10 @@ export class ApiSessionClient extends EventEmitter {
 
                 if ('latestTurnStatus' in update) {
                     this.latestTurnStatus = update.latestTurnStatus;
+                }
+
+                if (hasRuntimeActivityProjectionFields(update)) {
+                    this.applyRuntimeActivityProjectionFromServer(update);
                 }
 
                 if (update.pendingQueueState) {
@@ -1255,6 +1833,9 @@ export class ApiSessionClient extends EventEmitter {
         if (!localId || seq === null || !this.providerAcceptedUserMessageLocalIdsAwaitingSeq.has(localId)) {
             return;
         }
+        if (this.canonicalPendingDeliveryByLocalId.has(localId)) {
+            return;
+        }
         this.clearProviderAcceptedUserMessageLocalIdAwaitingSeq(localId);
         this.highestProviderAcceptedUserMessageSeq = Math.max(
             this.highestProviderAcceptedUserMessageSeq ?? -1,
@@ -1370,9 +1951,55 @@ export class ApiSessionClient extends EventEmitter {
 
         if (!update?.id?.startsWith('catchup-')) return true;
 
+        if (localId && this.canonicalPendingDeliveryByLocalId.has(localId)) {
+            logger.debug('[DELIVERY-DECISION] catch-up user-message suppressed (canonical pending delivery owns row)', {
+                sessionId: this.sessionId,
+                updateId: update?.id,
+                msgSeq,
+                messageLocalId: message.localId,
+                catchUpAfterSeq: opts.catchUpAfterSeq,
+                catchUpAfterSeqIsExplicit: opts.catchUpAfterSeqIsExplicit,
+                decision: false,
+                reason: 'canonical_pending_delivery_unresolved',
+            });
+            return false;
+        }
+
         if (message.meta?.source === 'daemon-initial-prompt') {
             const expectedLocalId = buildDaemonInitialPromptLocalId(this.sessionId);
             return Boolean(expectedLocalId && localId === expectedLocalId);
+        }
+
+        const createdAtMs =
+            typeof message.createdAt === 'number' && Number.isFinite(message.createdAt)
+                ? message.createdAt
+                : null;
+        const callbackAttachedAtMs =
+            typeof this.userMessageCallbackAttachedAtMs === 'number'
+            && Number.isFinite(this.userMessageCallbackAttachedAtMs)
+                ? this.userMessageCallbackAttachedAtMs
+                : null;
+        if (
+            msgSeq !== null
+            && localId
+            && createdAtMs !== null
+            && callbackAttachedAtMs !== null
+            && createdAtMs >= callbackAttachedAtMs
+        ) {
+            logger.debug('[DELIVERY-DECISION] catch-up user-message delivered (created after callback attachment)', {
+                sessionId: this.sessionId,
+                updateId: update?.id,
+                msgSeq,
+                messageLocalId: message.localId,
+                messageSource: message.meta?.source ?? null,
+                catchUpAfterSeq: opts.catchUpAfterSeq,
+                catchUpAfterSeqIsExplicit: opts.catchUpAfterSeqIsExplicit,
+                callbackAttachedAtMs,
+                createdAtMs,
+                decision: true,
+                reason: 'post_callback_catchup_delivery',
+            });
+            return true;
         }
 
         const rawCatchUpAfterSeq = opts.catchUpAfterSeq;
@@ -1481,6 +2108,7 @@ export class ApiSessionClient extends EventEmitter {
                 agentStateVersion: this.agentStateVersion,
                 pendingWakeSeq: this.pendingWakeSeq,
                 pendingQueueState: this.pendingQueueState,
+                runtimeActivityProjection: this.runtimeActivityProjection,
                 encryptionKey: this.encryptionKey,
                 encryptionVariant: this.encryptionVariant,
                 onMetadataUpdated: () => {
@@ -1495,6 +2123,7 @@ export class ApiSessionClient extends EventEmitter {
                 this.agentStateVersion = stateUpdateResult.agentStateVersion;
                 this.pendingWakeSeq = stateUpdateResult.pendingWakeSeq;
                 this.pendingQueueState = stateUpdateResult.pendingQueueState;
+                this.applyRuntimeActivityProjectionFromServer(stateUpdateResult.runtimeActivityProjection);
                 if (shouldEmitMetadataUpdated) {
                     this.emit('metadata-updated');
                 }
@@ -1699,6 +2328,8 @@ export class ApiSessionClient extends EventEmitter {
             sessionId: this.sessionId,
             lastObservedMessageSeq: this.lastObservedMessageSeq,
             getAccountId: () => this.getAccountId(),
+            readChangesCursor: (accountId) => this.readSessionChangesCursor(accountId),
+            writeChangesCursor: (accountId, cursor) => this.writeSessionChangesCursor(accountId, cursor),
             catchUpSessionMessages: (afterSeq) => this.catchUpSessionMessages(afterSeq),
             syncSessionSnapshotFromServer: async (syncOpts) => {
                 await this.syncSessionSnapshotFromServer(syncOpts);
@@ -1715,6 +2346,31 @@ export class ApiSessionClient extends EventEmitter {
             if (this.changesSyncInFlight === p) {
                 this.changesSyncInFlight = null;
             }
+        }
+    }
+
+    private async readSessionChangesCursor(accountId: string): Promise<number> {
+        const existing = this.sessionChangesCursorByAccountId.get(accountId);
+        if (typeof existing === 'number' && Number.isSafeInteger(existing) && existing >= 0) {
+            return existing;
+        }
+
+        let initialCursor = 0;
+        try {
+            initialCursor = await readAccountChangesCursor(accountId);
+        } catch {
+            initialCursor = 0;
+        }
+        const normalized = Number.isSafeInteger(initialCursor) && initialCursor >= 0 ? initialCursor : 0;
+        this.sessionChangesCursorByAccountId.set(accountId, normalized);
+        return normalized;
+    }
+
+    private async writeSessionChangesCursor(accountId: string, cursor: number): Promise<void> {
+        const normalized = Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : 0;
+        const existing = this.sessionChangesCursorByAccountId.get(accountId) ?? 0;
+        if (normalized > existing) {
+            this.sessionChangesCursorByAccountId.set(accountId, normalized);
         }
     }
 
@@ -1806,7 +2462,69 @@ export class ApiSessionClient extends EventEmitter {
         return true;
     }
 
-    onUserMessage(callback: (data: UserMessage, info?: Readonly<{ seq: number | null }>) => void) {
+    private readClaimedPendingQueueUserMessage(
+        message: PendingQueueMaterializedMessage | null | undefined,
+    ): UserMessage | null {
+        if (!message?.content) return null;
+        if (message.messageRole !== null && message.messageRole !== 'user') return null;
+        let body: unknown;
+        try {
+            body = this.decodeStoredSessionMessageContent(message.content);
+        } catch (error) {
+            logger.debug('[pendingQueue] failed to decode provider-claimed pending message content', {
+                sessionId: this.sessionId,
+                localId: message.localId ?? null,
+                error: serializeAxiosErrorForLog(error),
+            });
+            return null;
+        }
+
+        const bodyRecord = body && typeof body === 'object' ? body as Record<string, unknown> : {};
+        const localId = typeof message.localId === 'string' && message.localId.length > 0
+            ? message.localId
+            : null;
+        const bodyWithTransportFields = {
+            ...bodyRecord,
+            ...(localId ? { localId } : {}),
+            ...(typeof message.createdAt === 'number' ? { createdAt: message.createdAt } : {}),
+        };
+        const parsed = UserMessageSchema.safeParse(bodyWithTransportFields);
+        if (!parsed.success) {
+            logger.debug('[pendingQueue] provider-claimed pending message is not a user prompt', {
+                sessionId: this.sessionId,
+                localId,
+                issues: parsed.error.issues.map((issue) => ({
+                    code: issue.code,
+                    path: issue.path,
+                })),
+            });
+            return null;
+        }
+        return parsed.data;
+    }
+
+    private deliverClaimedPendingQueueMessage(message: PendingQueueMaterializedMessage | null | undefined): boolean {
+        const userMessage = this.readClaimedPendingQueueUserMessage(message);
+        if (!userMessage) return false;
+        const localId = typeof userMessage.localId === 'string' && userMessage.localId.length > 0
+            ? userMessage.localId
+            : null;
+        if (localId) {
+            if (this.hasAgentQueueDeliveredLocalId(localId)) {
+                return true;
+            }
+            this.markAgentQueueEchoSuppressedLocalId(localId);
+            this.markAgentQueueDeliveredLocalId(localId);
+        }
+        if (this.pendingMessageCallback) {
+            this.pendingMessageCallback(userMessage, { seq: null, providerAcceptancePending: true });
+        } else {
+            this.pendingMessages.push(userMessage);
+        }
+        return true;
+    }
+
+    onUserMessage(callback: (data: UserMessage, info?: SessionUserMessageDeliveryInfo) => void) {
         logger.debug('[API] onUserMessage callback attached', {
             sessionId: this.sessionId,
             startedByDaemonProcess: this.startedByDaemonProcess,
@@ -2315,6 +3033,56 @@ export class ApiSessionClient extends EventEmitter {
         };
     }
 
+    private buildPendingQueueUserTextMessageBody(params: {
+        text: string;
+        localId: string;
+        meta: Record<string, unknown>;
+    }): Parameters<typeof enqueuePendingQueueV2MessageViaHttp>[0]['body'] {
+        const content = this.buildUserTextMessageContent(params.text, params.meta);
+        const payload = this.buildOutboundSessionMessagePayload(content);
+        if (typeof payload === 'string') {
+            return {
+                localId: params.localId,
+                ciphertext: payload,
+                messageRole: 'user',
+            };
+        }
+        return {
+            localId: params.localId,
+            content: payload,
+            messageRole: 'user',
+        };
+    }
+
+    private async enqueueProviderAcceptedUserPrompt(params: {
+        text: string;
+        localId: string;
+        meta: Record<string, unknown>;
+    }): Promise<void> {
+        const body = this.buildPendingQueueUserTextMessageBody(params);
+        const request = () => enqueuePendingQueueV2MessageViaHttp({
+            token: this.token,
+            sessionId: this.sessionId,
+            body,
+        });
+        const supervisor = this.sessionConnectionSupervisor;
+        if (supervisor) {
+            await runSupervisedRequest({
+                supervisor,
+                requireAuth: true,
+                requireOnline: false,
+                request,
+            });
+        } else {
+            await request();
+        }
+
+        // This RPC means "send now", but provider-acceptance sessions must still commit
+        // through the pending claim/accept path. The direct materialize attempt keeps the
+        // existing immediacy while leaving the row durable if the runtime cannot accept it yet.
+        await this.runMaterializeNextPendingMessageInner();
+    }
+
     /**
      * Send message to session
      * @param body - Message body (can be MessageContent or raw content for agent messages)
@@ -2609,7 +3377,7 @@ export class ApiSessionClient extends EventEmitter {
     sendAgentMessageEphemeral(
         provider: ACPProvider,
         body: ACPMessageData,
-        opts: { localId: string; createdAt: number; updatedAt?: number; meta?: Record<string, unknown> },
+        opts: { localId: string; createdAt: number; updatedAt?: number; meta?: Record<string, unknown>; tick?: number },
     ): void {
         if (!this.socket.connected) return;
 
@@ -2653,6 +3421,9 @@ export class ApiSessionClient extends EventEmitter {
                     localId,
                     messageRole: resolveAcpSessionMessageRole(normalizedBody),
                     ...(sidechainId ? { sidechainId } : {}),
+                    ...(typeof opts.tick === 'number' && Number.isFinite(opts.tick) && opts.tick >= 0
+                        ? { tick: Math.trunc(opts.tick) }
+                        : {}),
                     content: payload,
                     createdAt,
                     updatedAt,
@@ -2661,6 +3432,63 @@ export class ApiSessionClient extends EventEmitter {
         } catch {
             // Ephemeral stream updates are best effort.
         }
+    }
+
+    /**
+     * Emit a live transcript delta tick: `body` carries ONLY the text appended since the previous
+     * live emission for this segment. Full-snapshot checkpoints still flow through
+     * `sendAgentMessageEphemeral`; receivers that cannot chain a delta drop it and resync on the
+     * next checkpoint. The delta content goes through the same envelope/encryption choke point as
+     * snapshots (`prepareAcpAgentMessage` + `buildOutboundSessionMessagePayload`).
+     */
+    sendAgentMessageEphemeralDelta(
+        provider: ACPProvider,
+        body: ACPMessageData,
+        opts: { localId: string; tick: number; baseLength: number; createdAt: number; updatedAt?: number; meta?: Record<string, unknown> },
+    ): void {
+        if (!this.socket.connected) return;
+
+        const { normalizedBody, content, localId, sidechainId } = this.prepareAcpAgentMessage({
+            provider,
+            body,
+            meta: opts.meta,
+            localId: opts.localId,
+        });
+        const payload = this.buildOutboundSessionMessagePayload(content);
+        const createdAt =
+            typeof opts.createdAt === 'number' && Number.isFinite(opts.createdAt)
+                ? Math.max(0, Math.trunc(opts.createdAt))
+                : Date.now();
+        const updatedAt =
+            typeof opts.updatedAt === 'number' && Number.isFinite(opts.updatedAt)
+                ? Math.max(createdAt, Math.trunc(opts.updatedAt))
+                : Math.max(createdAt, Date.now());
+
+        // Intentionally no observeTurnAssistantTextFromSessionContent here: delta bodies carry only
+        // appended chars, and the turn-assistant-text snapshot expects full text. Full-snapshot
+        // checkpoints (<= 1s apart) keep the turn snapshot fresh through sendAgentMessageEphemeral.
+
+        try {
+            this.socket.emit('transcript-stream-segment-delta', {
+                sid: this.sessionId,
+                message: {
+                    localId,
+                    messageRole: resolveAcpSessionMessageRole(normalizedBody),
+                    ...(sidechainId ? { sidechainId } : {}),
+                    tick: Math.max(1, Math.trunc(opts.tick)),
+                    baseLength: Math.max(0, Math.trunc(opts.baseLength)),
+                    content: payload,
+                    createdAt,
+                    updatedAt,
+                },
+            });
+        } catch {
+            // Ephemeral stream updates are best effort.
+        }
+    }
+
+    getEphemeralStreamConnectionEpoch(): number {
+        return this.ephemeralStreamConnectionEpoch;
     }
 
     sendUserTextMessage(text: string, opts?: { localId?: string; meta?: Record<string, unknown> }) {
@@ -2760,6 +3588,12 @@ export class ApiSessionClient extends EventEmitter {
 
         if (this.startedByDaemonProcess) {
             await this.notifyDaemonConnectedServiceTurnLifecycle('prompt_or_steer');
+        }
+
+        await this.ensureProviderAcceptanceDeliveryStateFeatureEnabled();
+        if (this.deliveredUserMessageWatermarkDeferredToProviderAcceptance) {
+            await this.enqueueProviderAcceptedUserPrompt({ text, localId, meta });
+            return;
         }
 
         // Deliver immediately to the agent queue: this RPC is a prompt input, not a passive transcript write.
@@ -3009,16 +3843,12 @@ export class ApiSessionClient extends EventEmitter {
     /**
      * Send a ping message to keep the connection alive
      */
-    keepAlive(thinking: boolean, mode: 'local' | 'remote') {
+    keepAlive(thinking: boolean, mode: SessionAliveMode) {
         if (process.env.DEBUG) { // too verbose for production
             logger.debug(`[API] Sending keep alive message: ${thinking}`);
         }
-        const payload = {
-            sid: this.sessionId,
-            time: Date.now(),
-            thinking,
-            mode
-        };
+        this.latestSessionPresence = { thinking, mode };
+        const payload = this.createSessionAlivePayload(this.latestSessionPresence);
 
         if (thinking) {
             void this.sessionTurnLifecycle.touchActiveTurn({ observedAt: payload.time }).catch((error) => {
@@ -3030,27 +3860,48 @@ export class ApiSessionClient extends EventEmitter {
 
         // Keep-alive/presence is ephemeral_drop_ok. Durable primary-turn status is delivered
         // through the session mutation outbox, not through session-alive.
-        if (thinking) {
-            if (!this.socket.connected) {
-                return;
-            }
+        this.emitSessionAlive(payload, { volatileWhenIdle: true });
+    }
+
+    private createSessionAlivePayload(presence: SessionPresenceSnapshot): SessionAlivePayload {
+        return {
+            sid: this.sessionId,
+            time: Date.now(),
+            thinking: presence.thinking,
+            mode: presence.mode,
+        };
+    }
+
+    private emitSessionAlive(
+        payload: SessionAlivePayload,
+        options: Readonly<{ volatileWhenIdle: boolean }>,
+    ): boolean {
+        if ((this.socket as Socket<ServerToClientEvents, ClientToServerEvents> | undefined)?.connected !== true) {
+            return false;
+        }
+
+        if (payload.thinking || !options.volatileWhenIdle) {
             this.socket.emit('session-alive', payload);
-            return;
+            return true;
         }
 
-        if (!this.socket.connected) {
-            return;
-        }
-
-        // When idle, prefer volatile to avoid any chance of backpressure.
         const volatileEmit = (this.socket as any)?.volatile?.emit;
         if (typeof volatileEmit === 'function') {
             volatileEmit.call((this.socket as any).volatile, 'session-alive', payload);
-            return;
+            return true;
         }
 
-        // Fallback for non-standard socket stubs.
         this.socket.emit('session-alive', payload);
+        return true;
+    }
+
+    private replayLatestSessionPresenceAfterReconnect(): void {
+        if (!this.latestSessionPresence) {
+            return;
+        }
+        this.emitSessionAlive(this.createSessionAlivePayload(this.latestSessionPresence), {
+            volatileWhenIdle: false,
+        });
     }
 
     /**
@@ -3135,11 +3986,124 @@ export class ApiSessionClient extends EventEmitter {
     }
 
     /**
-     * A3-HIGH-1: opt-in by launchers whose consumption path confirms provider acceptance
-     * (Claude unified terminal + remote). Without the opt-in, legacy persist-at-handoff stays.
+     * A3-HIGH-1: opt in by launchers whose consumption path confirms provider acceptance.
+     * Callers can separately choose whether pending rows stay claimed until provider acceptance
+     * (terminal/TUI paste flows) or commit at materialization time (request/response runtimes
+     * whose successful API call is provider acceptance).
      */
-    deferDeliveredUserMessageWatermarkToProviderAcceptance(): void {
+    deferDeliveredUserMessageWatermarkToProviderAcceptance(options?: ProviderAcceptanceDeliveryOptions): void {
+        const pendingMaterialization = options?.pendingMaterialization ?? 'claimUntilProviderAccept';
+        this.providerAcceptancePendingMaterializationPolicy = pendingMaterialization;
+        this.providerAcceptanceDeliveryStateRequested = pendingMaterialization === 'claimUntilProviderAccept';
+        if (this.providerAcceptanceDeliveryStateRequested) {
+            void this.ensureProviderAcceptanceDeliveryStateFeatureEnabled();
+            return;
+        }
+        this.activateProviderAcceptanceWatermarkMode();
+    }
+
+    private async ensureProviderAcceptanceDeliveryStateFeatureEnabled(): Promise<void> {
+        if (this.shouldUseProviderDeliveryStateMaterialization()) return;
+        if (!this.providerAcceptanceDeliveryStateRequested) return;
+        if (!this.pendingDeliveryStateFeatureProbe) {
+            this.pendingDeliveryStateFeatureProbe = this.activateProviderAcceptanceDeliveryStateIfSupported();
+        }
+        await this.pendingDeliveryStateFeatureProbe;
+    }
+
+    private async activateProviderAcceptanceDeliveryStateIfSupported(): Promise<void> {
+        try {
+            const resolved = await resolveCliFeatureDecisionForServer({
+                featureId: 'sharing.pendingDeliveryState',
+                env: process.env,
+                serverUrl: resolveServerHttpBaseUrl(),
+                timeoutMs: PENDING_DELIVERY_STATE_FEATURE_GATE_TIMEOUT_MS,
+            });
+            if (resolved.decision.state !== 'enabled') {
+                logger.debug('[pendingQueue] provider delivery-state feature unavailable; using legacy delivery custody', {
+                    sessionId: this.sessionId,
+                    state: resolved.decision.state,
+                });
+                return;
+            }
+        } catch (error) {
+            logger.debug('[pendingQueue] provider delivery-state feature probe failed; using legacy delivery custody', {
+                sessionId: this.sessionId,
+                error: serializeAxiosErrorForLog(error),
+            });
+            return;
+        }
+        this.providerAcceptanceDeliveryStateFeatureEnabled = true;
+        this.activateProviderAcceptanceWatermarkMode();
+        if (!this.deliveredUserMessageWatermarkDeferredToProviderAcceptance) return;
+        if (this.closed) return;
+        if (this.shouldUseProviderDeliveryStateMaterialization()) {
+            void this.blockInheritedProviderDeliveryClaimsOnAttach();
+        }
+    }
+
+    private activateProviderAcceptanceWatermarkMode(): void {
+        if (this.closed) return;
+        if (this.deliveredUserMessageWatermarkDeferredToProviderAcceptance) return;
         this.deliveredUserMessageWatermarkDeferredToProviderAcceptance = true;
+        void this.updateMetadata((metadata) =>
+            mergeUserMessageDeliveryWatermarkModeV1(metadata, 'providerAcceptance').metadata,
+        ).catch((error) => {
+            logger.debug('[API] Failed to persist user-message delivery watermark mode (best-effort)', error);
+        });
+    }
+
+    private shouldUseProviderDeliveryStateMaterialization(): boolean {
+        return this.deliveredUserMessageWatermarkDeferredToProviderAcceptance
+            && this.providerAcceptanceDeliveryStateFeatureEnabled
+            && this.providerAcceptancePendingMaterializationPolicy === 'claimUntilProviderAccept';
+    }
+
+    private async blockInheritedProviderDeliveryClaimsOnAttach(): Promise<void> {
+        if (this.closed || this.providerDeliveryAttachRecoveryCompleted) return;
+        if (this.providerDeliveryAttachRecoveryInFlight) {
+            await this.providerDeliveryAttachRecoveryInFlight;
+            return;
+        }
+        const run = async (): Promise<void> => {
+            const supervisor = this.sessionConnectionSupervisor;
+            const request = () => blockPendingQueueV2ProviderDeliveriesOnAttach({
+                token: this.token,
+                sessionId: this.sessionId,
+            });
+            const result = supervisor
+                ? await runSupervisedRequest({
+                    supervisor,
+                    requireAuth: true,
+                    requireOnline: false,
+                    request,
+                })
+                : await request();
+            if (result.pendingQueueState) {
+                this.applyPendingQueueState(result.pendingQueueState, { emit: true });
+            }
+            this.providerDeliveryAttachRecoveryCompleted = true;
+        };
+
+        const recovery = run().catch((error) => {
+            logger.debug('[pendingQueue] provider delivery attach recovery failed', {
+                sessionId: this.sessionId,
+                error: serializeAxiosErrorForLog(error),
+            });
+        }).finally(() => {
+            if (this.providerDeliveryAttachRecoveryInFlight === recovery) {
+                this.providerDeliveryAttachRecoveryInFlight = null;
+            }
+        });
+        this.providerDeliveryAttachRecoveryInFlight = recovery;
+        await recovery;
+    }
+
+    private async recoverInheritedProviderDeliveryClaimsBeforeMaterialization(): Promise<void> {
+        if (!this.shouldUseProviderDeliveryStateMaterialization()) return;
+        if (this.providerDeliveryAttachRecoveryCompleted) return;
+        if (countMaterializablePendingRows(this.pendingQueueState) <= 0) return;
+        await this.blockInheritedProviderDeliveryClaimsOnAttach();
     }
 
     private normalizeProviderAcceptedUserMessageLocalIds(localIds: readonly string[] | null | undefined): string[] {
@@ -3164,15 +4128,30 @@ export class ApiSessionClient extends EventEmitter {
         opts?: { localIds?: readonly string[] | null },
     ): void {
         const localIds = this.normalizeProviderAcceptedUserMessageLocalIds(opts?.localIds);
-        let highestAcceptedSeq = typeof seq === 'number' ? seq : null;
+        const suppliedAcceptedSeq = typeof seq === 'number' ? seq : null;
+        let highestAcceptedSeq = localIds.length === 0 ? suppliedAcceptedSeq : null;
+        const acceptedCanonicalPendingLocalIds = new Set<string>();
+        const acceptedCanonicalPendingSeqByLocalId = new Map<string, number>();
 
         for (const localId of localIds) {
             const committedSeq = this.committedUserMessageSeqTracker.get(localId);
+            if (this.canonicalPendingDeliveryByLocalId.has(localId)) {
+                acceptedCanonicalPendingLocalIds.add(localId);
+                this.markProviderAcceptedUserMessageLocalIdAwaitingSeq(localId);
+                const fallbackSeq = committedSeq ?? suppliedAcceptedSeq;
+                if (fallbackSeq !== null) {
+                    acceptedCanonicalPendingSeqByLocalId.set(localId, fallbackSeq);
+                }
+                continue;
+            }
             if (committedSeq !== null) {
                 highestAcceptedSeq = Math.max(highestAcceptedSeq ?? -1, committedSeq);
                 this.clearProviderAcceptedUserMessageLocalIdAwaitingSeq(localId);
             } else {
                 this.markProviderAcceptedUserMessageLocalIdAwaitingSeq(localId);
+                if (suppliedAcceptedSeq !== null) {
+                    highestAcceptedSeq = Math.max(highestAcceptedSeq ?? -1, suppliedAcceptedSeq);
+                }
             }
         }
 
@@ -3182,6 +4161,15 @@ export class ApiSessionClient extends EventEmitter {
                 highestAcceptedSeq,
             );
             this.persistDeliveredUserMessageWatermark(highestAcceptedSeq);
+        }
+
+        if (acceptedCanonicalPendingLocalIds.size > 0) {
+            this.trackAcceptedCanonicalPendingDeliveryResolution(
+                this.resolveAcceptedCanonicalPendingDeliveries(
+                    [...acceptedCanonicalPendingLocalIds],
+                    acceptedCanonicalPendingSeqByLocalId,
+                ),
+            );
         }
     }
 
@@ -3224,12 +4212,19 @@ export class ApiSessionClient extends EventEmitter {
         providerAccepted: number | null;
     }> {
         const persisted = readDeliveredUserMessageSeqV1(this.metadata as unknown as Record<string, unknown> | null);
+        const persistedProviderAccepted = readProviderAcceptedUserMessageSeqV1(this.metadata as unknown as Record<string, unknown> | null);
         const inMemory = this.highestDeliveredUserMessageSeq;
-        const providerAccepted = Math.max(
-            persisted ?? -1,
-            this.highestProviderAcceptedUserMessageSeq ?? -1,
-            this.deliveredUserMessageWatermarkDeferredToProviderAcceptance ? -1 : inMemory ?? -1,
-        );
+        const providerAccepted = this.deliveredUserMessageWatermarkDeferredToProviderAcceptance
+            ? Math.max(
+                persistedProviderAccepted ?? -1,
+                this.highestProviderAcceptedUserMessageSeq ?? -1,
+            )
+            : Math.max(
+                persistedProviderAccepted ?? -1,
+                persisted ?? -1,
+                this.highestProviderAcceptedUserMessageSeq ?? -1,
+                inMemory ?? -1,
+            );
         const effective = this.deliveredUserMessageWatermarkDeferredToProviderAcceptance
             ? providerAccepted
             : Math.max(persisted ?? -1, inMemory ?? -1);
@@ -3276,7 +4271,11 @@ export class ApiSessionClient extends EventEmitter {
             await this.updateMetadata((metadata) => {
                 if (!this.canPersistDeliveredUserMessageTarget(target)) return metadata;
                 persistedTarget = true;
-                return mergeDeliveredUserMessageSeqV1(metadata, target).metadata;
+                if (!this.deliveredUserMessageWatermarkDeferredToProviderAcceptance) {
+                    return mergeDeliveredUserMessageSeqV1(metadata, target).metadata;
+                }
+                const withLegacyDeliveredCursor = mergeDeliveredUserMessageSeqV1(metadata, target).metadata;
+                return mergeProviderAcceptedUserMessageSeqV1(withLegacyDeliveredCursor, target).metadata;
             });
         } catch (error) {
             logger.debug('[API] Failed to persist delivered user-message watermark (best-effort)', error);
@@ -3297,6 +4296,7 @@ export class ApiSessionClient extends EventEmitter {
 
     updateMetadata(handler: (metadata: Metadata) => Metadata): Promise<void> {
         return this.metadataLock.inLock(async () => {
+            await this.waitForSessionSocketOnlineForAckWrite('update-metadata');
             await updateSessionMetadataWithAck({
                 socket: this.socket as any,
                 sessionId: this.sessionId,
@@ -3319,6 +4319,68 @@ export class ApiSessionClient extends EventEmitter {
         });
     }
 
+    updateRuntimeActivityProjection(projection: Readonly<{
+        runtimeActivityActiveCount: number;
+        runtimeActivityObservedAt: number | null;
+        runtimeActivityExpiresAt: number | null;
+        runtimeActivitySourceClass: SessionRuntimeActivitySourceClassV1 | null;
+    }>): Promise<void> {
+        return this.waitForSessionSocketOnlineForAckWrite('update-runtime-activity').then(() => updateSessionRuntimeActivityProjectionWithAck({
+            socket: this.socket as any,
+            sessionId: this.sessionId,
+            runtimeActivityActiveCount: projection.runtimeActivityActiveCount,
+            runtimeActivityObservedAt: projection.runtimeActivityObservedAt,
+            runtimeActivityExpiresAt: projection.runtimeActivityExpiresAt,
+            runtimeActivitySourceClass: projection.runtimeActivitySourceClass,
+        })).then(() => {
+            this.runtimeActivityProjection = projection;
+        });
+    }
+
+    private applyRuntimeActivityProjectionFromServer(projectionLike: unknown): void {
+        const projection = readRuntimeActivityProjectionForPendingDrain(projectionLike);
+        this.runtimeActivityProjection = projection;
+    }
+
+    getStoredContentEncryptionContext(): Readonly<{
+        mode: 'e2ee' | 'plain';
+        ctx?: Readonly<{ encryptionKey: Uint8Array; encryptionVariant: 'legacy' | 'dataKey' }>;
+    }> {
+        if (this.sessionEncryptionMode === 'plain') {
+            return { mode: 'plain' };
+        }
+        return {
+            mode: 'e2ee',
+            ctx: {
+                encryptionKey: this.encryptionKey,
+                encryptionVariant: this.encryptionVariant,
+            },
+        };
+    }
+
+    async upsertSessionSystemRecord(request: SessionSystemRecordUpsertRequest): Promise<void> {
+        await upsertSessionSystemRecordHttp({
+            token: this.token,
+            sessionId: this.sessionId,
+            namespace: request.namespace,
+            kind: request.kind,
+            localId: request.localId,
+            content: request.content,
+        });
+    }
+
+    async fetchSessionSystemRecord(params: Readonly<{
+        namespace: SessionSystemRecordNamespace;
+        localId: string;
+    }>): Promise<SessionSystemRecord | null> {
+        return fetchSessionSystemRecordHttp({
+            token: this.token,
+            sessionId: this.sessionId,
+            namespace: params.namespace,
+            localId: params.localId,
+        });
+    }
+
     /**
      * Update session agent state
      * @param handler - Handler function that returns the updated agent state
@@ -3326,6 +4388,7 @@ export class ApiSessionClient extends EventEmitter {
     updateAgentState(handler: (metadata: AgentState) => AgentState): Promise<void> {
         logger.debugLargeJson('Updating agent state', this.agentState);
         return this.agentStateLock.inLock(async () => {
+            await this.waitForSessionSocketOnlineForAckWrite('update-state');
             await updateSessionAgentStateWithAck({
                 socket: this.socket as any,
                 sessionId: this.sessionId,
@@ -3450,7 +4513,6 @@ export class ApiSessionClient extends EventEmitter {
 
     async close() {
         logger.debug('[API] socket.close() called');
-        this.closed = true;
         this.socketStaleSafetyScheduler?.stop();
         if (this.startupMessageCatchUpRetryTimer) {
             clearTimeout(this.startupMessageCatchUpRetryTimer);
@@ -3461,13 +4523,23 @@ export class ApiSessionClient extends EventEmitter {
             this.userSocketDisconnectTimer = null;
         }
         await this.drainPendingLifecycleWritesBeforeClose();
+        await this.rpcHandlerManager.waitForIdle();
+        await this.disposeRpcLifecycleRegistrations();
+        await this.drainAcceptedCanonicalPendingDeliveryResolutionsBeforeClose();
+        await this.blockUnresolvedCanonicalPendingDeliveriesBeforeClose();
+        await this.blockDurableProviderDeliveriesBeforeClose();
+        this.closed = true;
         this.pendingMaterializedLocalIds.clear();
         this.committedLocalIdsAwaitingEcho.clear();
         this.pendingQueueMaterializedLocalIds.clear();
+        this.canonicalPendingDeliveryByLocalId.clear();
         this.committedUserMessageSeqTracker.clear();
         this.agentQueueEchoSuppressedLocalIds.clear();
         this.agentQueueDeliveredLocalIds.clear();
         this.providerAcceptedUserMessageLocalIdsAwaitingSeq.clear();
+        this.acceptedCanonicalPendingDeliveryRetryLocalIds.clear();
+        this.acceptedCanonicalPendingDeliveryResolutionWrites.clear();
+        this.blockedCanonicalPendingDeliveryRetryReasonsByLocalId.clear();
         this.passiveCommittedUserMessageLocalIds.clear();
         this.queuedDisconnectedSessionMessages.clear();
         for (const timer of this.committedLocalIdCleanupTimers.values()) {
@@ -3500,7 +4572,86 @@ export class ApiSessionClient extends EventEmitter {
         await this.sessionConnectionSupervisor?.stop();
     }
 
+    private async blockUnresolvedCanonicalPendingDeliveriesBeforeClose(): Promise<void> {
+        const localIds = [...this.canonicalPendingDeliveryByLocalId.keys()];
+        for (const localId of localIds) {
+            if (this.acceptedCanonicalPendingDeliveryRetryLocalIds.has(localId)) {
+                logger.debug('[pendingQueue] skipping provider-accepted delivery block during close after resolution retry failed', {
+                    sessionId: this.sessionId,
+                    localId,
+                });
+                continue;
+            }
+            await this.blockPendingQueueDeliveryLocalId(localId, 'runtime_disposed_before_delivery', {
+                canonicalOnly: true,
+            });
+        }
+    }
+
+    private async blockDurableProviderDeliveriesBeforeClose(): Promise<void> {
+        if (!this.deliveredUserMessageWatermarkDeferredToProviderAcceptance) return;
+        if (countMaterializablePendingRows(this.pendingQueueState) <= 0) return;
+
+        let localIds: string[];
+        const supervisor = this.sessionConnectionSupervisor;
+        try {
+            const request = () => listPendingQueueV2ProviderDeliveryLocalIdsFromServer({
+                token: this.token,
+                sessionId: this.sessionId,
+            });
+            localIds = supervisor
+                ? await runSupervisedRequest({
+                    supervisor,
+                    requireAuth: true,
+                    requireOnline: false,
+                    request,
+                })
+                : await request();
+        } catch (error) {
+            logger.debug('[pendingQueue] provider delivery close recovery lookup failed', {
+                sessionId: this.sessionId,
+                error: serializeAxiosErrorForLog(error),
+            });
+            return;
+        }
+
+        for (const localId of localIds) {
+            if (this.acceptedCanonicalPendingDeliveryRetryLocalIds.has(localId)) {
+                logger.debug('[pendingQueue] skipping durable provider delivery block during close after accepted resolution retry failed', {
+                    sessionId: this.sessionId,
+                    localId,
+                });
+                continue;
+            }
+            await this.blockPendingQueueDeliveryLocalId(localId, 'runtime_disposed_before_delivery', {
+                canonicalOnly: false,
+            });
+        }
+    }
+
+    private async disposeRpcLifecycleRegistrations(): Promise<void> {
+        const registrations = this.rpcLifecycleRegistrations.splice(0);
+        await Promise.all(registrations.map(async (registration) => {
+            try {
+                await registration.dispose();
+            } catch (error) {
+                logger.debug('[API] Failed to dispose RPC lifecycle registration', {
+                    error: serializeAxiosErrorForLog(error),
+                });
+            }
+        }));
+    }
+
     private installSessionSocketEventHandlers(socket: Socket<ServerToClientEvents, ClientToServerEvents>): void {
+        socket.on('server:restarting', (payload: unknown) => {
+            this.sessionConnectionSupervisor?.reportProbeResult?.({
+                status: 'retry_later',
+                retryAfterMs: readPlannedServerRestartRetryAfterMs(payload),
+                reason: 'server_restarting',
+                errorMessage: 'Server restart in progress',
+            });
+        });
+
         socket.on(SOCKET_RPC_EVENTS.REQUEST, async (data: { method: string, params: unknown }, callback: (response: unknown) => void) => {
             callback(await this.rpcHandlerManager.handleRequest(data));
         });
@@ -3659,14 +4810,15 @@ export class ApiSessionClient extends EventEmitter {
     }
 
     /**
-     * Materialize one server-backed queued message (pending queue V2) into the normal session transcript.
+     * Drain one server-backed queued message (pending queue V2).
      *
-     * The server atomically:
-     * - selects the next queued pending message,
-     * - commits it into SessionMessage (idempotent via (sessionId, localId)),
-     * - removes it from the pending queue.
+     * Legacy queue-handoff rows are committed into SessionMessage before delivery. Provider-
+     * acceptance rows are claimed without a transcript commit, delivered directly to the runtime,
+     * and resolved into the transcript only when the provider proves custody.
      */
-    private async runMaterializeNextPendingMessageInner(): Promise<{
+    private async runMaterializeNextPendingMessageInner(opts: {
+        pendingQueueDeliveryTiming?: SessionPendingQueueDeliveryTiming;
+    } = {}): Promise<{
         didMaterialize: boolean;
         result: MaterializeNextPendingResult;
     }> {
@@ -3685,6 +4837,8 @@ export class ApiSessionClient extends EventEmitter {
                     sessionId: this.sessionId,
                     socket: this.socket,
                     knownPendingVersion: this.pendingQueueState.known ? this.pendingQueueState.pendingVersion : undefined,
+                    deliveryStateOptIn: this.shouldUseProviderDeliveryStateMaterialization(),
+                    deliveryTiming: opts.pendingQueueDeliveryTiming,
                 }),
             });
         } catch (error) {
@@ -3708,6 +4862,9 @@ export class ApiSessionClient extends EventEmitter {
         }
 
         if (!materializeResult.didMaterialize) {
+            if (materializeResult.deferredReason === 'runtime_activity_active') {
+                return { didMaterialize: false, result: { type: 'deferred', reason: 'runtime_activity_active' } };
+            }
             logger.debug('[pendingQueue] materialize result', {
                 sessionId: this.sessionId,
                 didMaterialize: false,
@@ -3717,52 +4874,150 @@ export class ApiSessionClient extends EventEmitter {
             return { didMaterialize: false, result: { type: 'no_pending' } };
         }
 
-        const deliveredMaterializedMessage = this.deliverMaterializedPendingQueueMessage(materializeResult.message);
+        const materializedLocalId = materializeResult.message?.localId ?? materializeResult.localId ?? null;
+        const materializedMessage = materializeResult.message && !materializeResult.message.localId && materializedLocalId
+            ? { ...materializeResult.message, localId: materializedLocalId }
+            : materializeResult.message ?? null;
+        const materializedProviderClaimState =
+            materializeResult.didWrite === false
+            && materializedMessage
+            && materializedMessage.deliveryStateMalformed !== true
+            && typeof materializedMessage.localId === 'string'
+            && materializedMessage.localId.length > 0
+            && materializedMessage.seq === null
+                ? { mode: 'provider' as const, unresolved: true as const }
+                : null;
+        const explicitUnresolvedProviderDeliveryState =
+            materializedMessage?.deliveryState?.unresolved === true
+                ? materializedMessage.deliveryState
+                : null;
+        const inferredProviderDeliveryState =
+            materializedProviderClaimState
+            && !explicitUnresolvedProviderDeliveryState
+                ? materializedProviderClaimState
+                : null;
+        const unresolvedProviderDeliveryState =
+            explicitUnresolvedProviderDeliveryState
+                ? explicitUnresolvedProviderDeliveryState
+                : inferredProviderDeliveryState;
+
+        if (materializedMessage?.deliveryStateMalformed) {
+            logger.debug('[pendingQueue] materialize result ignored malformed pending delivery state', {
+                sessionId: this.sessionId,
+                localId: materializedLocalId,
+                messageSeq: materializedMessage?.seq ?? null,
+            });
+            if (materializedLocalId) {
+                await this.blockPendingQueueDeliveryLocalId(materializedLocalId, 'unknown', {
+                    canonicalOnly: false,
+                });
+            }
+            return { didMaterialize: false, result: { type: 'no_pending' } };
+        }
+
+        if (
+            materializedMessage
+            && unresolvedProviderDeliveryState
+            && materializedMessage.localId
+        ) {
+            if (this.canonicalPendingDeliveryByLocalId.has(materializedMessage.localId)) {
+                logger.debug('[pendingQueue] materialize result suppressed for already-unresolved provider delivery state', {
+                    sessionId: this.sessionId,
+                    localId: materializedMessage.localId,
+                    messageSeq: materializedMessage.seq,
+                });
+                return { didMaterialize: false, result: { type: 'no_pending' } };
+            }
+            this.canonicalPendingDeliveryByLocalId.set(
+                materializedMessage.localId,
+                unresolvedProviderDeliveryState,
+            );
+        } else if (
+            materializedMessage?.deliveryState?.unresolved === false
+            && materializedMessage.localId
+        ) {
+            this.canonicalPendingDeliveryByLocalId.delete(materializedMessage.localId);
+        }
+
+        const isProviderDeliveryHandoff =
+            unresolvedProviderDeliveryState?.unresolved === true;
+        if (materializedLocalId) {
+            this.pendingQueueMaterializedLocalIds.add(materializedLocalId);
+        }
+        const deliveredMaterializedMessage = isProviderDeliveryHandoff
+            ? this.deliverClaimedPendingQueueMessage(materializedMessage)
+            : this.deliverMaterializedPendingQueueMessage(materializedMessage);
         logger.debug('[pendingQueue] materialize result', {
             sessionId: this.sessionId,
             didMaterialize: true,
-            localId: materializeResult.localId ?? materializeResult.message?.localId ?? null,
+            localId: materializedLocalId,
             didWrite: materializeResult.didWrite,
-            messageSeq: materializeResult.message?.seq ?? null,
-            messageRole: materializeResult.message?.messageRole ?? null,
+            messageSeq: materializedMessage?.seq ?? null,
+            messageSeqKind: materializedMessage
+                ? materializedMessage.seq === null
+                    ? 'null'
+                    : typeof materializedMessage.seq
+                : 'missing',
+            messageRole: materializedMessage?.messageRole ?? null,
             deliveredMaterializedMessage,
+            providerDeliveryStateUnresolved: materializedMessage?.deliveryState?.unresolved ?? null,
+            providerDeliveryStateMalformed: materializedMessage?.deliveryStateMalformed === true,
+            providerDeliveryStateInferred: inferredProviderDeliveryState !== null,
             pendingCount: this.pendingQueueState.known ? this.pendingQueueState.pendingCount : undefined,
             pendingVersion: this.pendingQueueState.known ? this.pendingQueueState.pendingVersion : undefined,
         });
 
-        if (materializeResult.localId && !deliveredMaterializedMessage) {
+        if (
+            isProviderDeliveryHandoff
+            && materializedMessage?.localId
+            && !deliveredMaterializedMessage
+        ) {
+            await this.blockCanonicalPendingDeliveries([materializedMessage.localId], 'invalid_prompt_text');
+        }
+
+        if (materializeResult.didWrite && materializedLocalId && !deliveredMaterializedMessage) {
             // Best-effort: recover if we miss socket broadcasts for the committed transcript row.
-            this.pendingQueueMaterializedLocalIds.add(materializeResult.localId);
-            this.scheduleMaterializationRecovery(materializeResult.localId);
+            this.scheduleMaterializationRecovery(materializedLocalId);
         }
         if (
-            materializeResult.message?.messageRole === 'user'
-            && materializeResult.message.localId
+            materializeResult.didWrite
+            && materializedMessage?.messageRole === 'user'
+            && materializedMessage.localId
         ) {
             this.recordCommittedUserMessageSeq(
-                materializeResult.message.localId,
-                materializeResult.message.seq,
+                materializedMessage.localId,
+                materializedMessage.seq,
             );
         }
 
-        const message = materializeResult.message;
+        const message = materializedMessage;
         if (
             message
             && typeof message.localId === 'string'
             && message.localId.length > 0
-            && typeof message.seq === 'number'
-            && Number.isSafeInteger(message.seq)
-            && message.seq >= 0
+            && (
+                (
+                    typeof message.seq === 'number'
+                    && Number.isSafeInteger(message.seq)
+                    && message.seq >= 0
+                )
+                || (
+                    isProviderDeliveryHandoff
+                    && message.seq === null
+                    && deliveredMaterializedMessage
+                )
+            )
         ) {
             return {
                 didMaterialize: true,
                 result: {
                     type: 'materialized',
                     localId: message.localId,
-                    seq: message.seq,
+                    seq: typeof message.seq === 'number' ? message.seq : null,
                     content: message.content ?? null,
                     ...(typeof message.createdAt === 'number' ? { createdAt: message.createdAt } : {}),
                     ...(typeof message.updatedAt === 'number' ? { updatedAt: message.updatedAt } : {}),
+                    ...(unresolvedProviderDeliveryState ? { deliveryState: unresolvedProviderDeliveryState } : {}),
                 },
             };
         }
@@ -3773,6 +5028,7 @@ export class ApiSessionClient extends EventEmitter {
     async materializeNextPendingMessageSafely(opts: {
         reconcileWhenEmpty?: 'force' | 'throttled' | 'skip';
         activeTurnDeliveryPolicy?: PendingMaterializationActiveTurnPolicy;
+        pendingQueueDeliveryTiming?: SessionPendingQueueDeliveryTiming;
     } = {}): Promise<MaterializeNextPendingResult> {
         const supervisorState = this.sessionConnectionSupervisor?.getState();
         if (supervisorState?.phase === 'auth_failed') {
@@ -3793,18 +5049,26 @@ export class ApiSessionClient extends EventEmitter {
                 phase: supervisorState.phase,
             });
         }
+        await this.ensureProviderAcceptanceDeliveryStateFeatureEnabled();
+        await this.reconcileAcceptedCanonicalPendingDeliveriesThroughSeq();
+        await this.retryAcceptedCanonicalPendingDeliveryResolutions();
+        await this.retryBlockedCanonicalPendingDeliveryBlocks();
+        if (this.canonicalPendingDeliveryByLocalId.size > 0) {
+            return { type: 'no_pending' };
+        }
 
         const policy = resolvePendingQueueReconcileWhenEmpty(opts, 'skip');
         if (!this.pendingQueueState.known) {
             await this.reconcilePendingQueueState({ force: true });
-        } else if (this.pendingQueueState.pendingCount <= 0) {
+        } else if (countMaterializablePendingRows(this.pendingQueueState) <= 0) {
             if (policy === 'force') {
                 await this.reconcilePendingQueueState({ force: true });
             } else if (policy === 'throttled') {
                 await this.reconcilePendingQueueState({ force: false });
             }
         }
-        if (!this.pendingQueueState.known || this.pendingQueueState.pendingCount <= 0) {
+        await this.recoverInheritedProviderDeliveryClaimsBeforeMaterialization();
+        if (countMaterializablePendingRows(this.pendingQueueState) <= 0) {
             return { type: 'no_pending' };
         }
         const refreshedTurnStatus = await this.reconcileTurnStatusBeforePendingMaterializationIfNeeded({
@@ -3814,7 +5078,7 @@ export class ApiSessionClient extends EventEmitter {
             this.logPendingMaterializationSkip('turn_status_refresh_failed');
             return { type: 'no_pending' };
         }
-        if (!this.pendingQueueState.known || this.pendingQueueState.pendingCount <= 0) {
+        if (countMaterializablePendingRows(this.pendingQueueState) <= 0) {
             return { type: 'no_pending' };
         }
         if (this.isPendingMaterializationBlocked({ activeTurnDeliveryPolicy: opts.activeTurnDeliveryPolicy })) {
@@ -3823,8 +5087,16 @@ export class ApiSessionClient extends EventEmitter {
             });
             return { type: 'no_pending' };
         }
+        if (this.isPendingMaterializationDeferredForRuntimeActivity(opts)) {
+            this.logPendingMaterializationSkip('runtime_activity_active', {
+                activeTurnDeliveryPolicy: opts.activeTurnDeliveryPolicy,
+            });
+            return { type: 'deferred', reason: 'runtime_activity_active' };
+        }
 
-        const inner = await this.runMaterializeNextPendingMessageInner();
+        const inner = await this.runMaterializeNextPendingMessageInner({
+            pendingQueueDeliveryTiming: opts.pendingQueueDeliveryTiming,
+        });
         return inner.result;
     }
 
@@ -3834,7 +5106,7 @@ export class ApiSessionClient extends EventEmitter {
      * runner logs without instrumented builds.
      */
     private logPendingMaterializationSkip(
-        reason: 'blocked' | 'turn_status_refresh_failed',
+        reason: 'blocked' | 'runtime_activity_active' | 'turn_status_refresh_failed',
         opts: { activeTurnDeliveryPolicy?: PendingMaterializationActiveTurnPolicy } = {},
     ): void {
         logger.debug('[pendingQueue] materialization skipped', {
@@ -3850,17 +5122,23 @@ export class ApiSessionClient extends EventEmitter {
     }
 
     async popPendingMessage(): Promise<boolean> {
-        if (!this.pendingQueueState.known || this.pendingQueueState.pendingCount <= 0) {
+        await this.reconcileAcceptedCanonicalPendingDeliveriesThroughSeq();
+        await this.retryAcceptedCanonicalPendingDeliveryResolutions();
+        await this.retryBlockedCanonicalPendingDeliveryBlocks();
+        if (this.canonicalPendingDeliveryByLocalId.size > 0) {
+            return false;
+        }
+        if (countMaterializablePendingRows(this.pendingQueueState) <= 0) {
             await this.reconcilePendingQueueState({ force: !this.pendingQueueState.known });
         }
-        if (!this.pendingQueueState.known || this.pendingQueueState.pendingCount <= 0) {
+        if (countMaterializablePendingRows(this.pendingQueueState) <= 0) {
             return false;
         }
         const refreshedTurnStatus = await this.reconcileTurnStatusBeforePendingMaterializationIfNeeded();
         if (!refreshedTurnStatus) {
             return false;
         }
-        if (!this.pendingQueueState.known || this.pendingQueueState.pendingCount <= 0) {
+        if (countMaterializablePendingRows(this.pendingQueueState) <= 0) {
             return false;
         }
         if (this.isPendingMaterializationBlocked()) {

@@ -142,8 +142,9 @@ export function handleSessionNewMessageUpdate(params: {
     const isSelfEchoSuppressedLocalId = Boolean(localId && params.hasSelfEchoSuppressedLocalId(localId));
     const isAgentQueueEchoSuppressedLocalId = Boolean(localId && params.hasAgentQueueEchoSuppressedLocalId(localId));
     const isPendingQueueMaterializedLocalId = Boolean(localId && params.hasPendingQueueMaterializedLocalId(localId));
-    if (localId && (isSelfEchoSuppressedLocalId || isPendingQueueMaterializedLocalId)) {
-        // We observed the broadcast for a message we materialized; cancel any recovery path.
+    if (localId && isSelfEchoSuppressedLocalId && !isPendingQueueMaterializedLocalId) {
+        // We observed a provider-native self echo; cancel any local recovery path. Pending-queue
+        // materialized ids stay owned by provider-acceptance cleanup.
         params.deleteMaterializedLocalId(localId);
     }
 
@@ -217,12 +218,15 @@ export function handleSessionNewMessageUpdate(params: {
         const isPassiveCommittedUserMessageLocalId = Boolean(
             agentQueueLocalId && params.hasPassiveCommittedUserMessageLocalId?.(agentQueueLocalId),
         );
+        const deliverableSeq = typeof msgSeq === 'number' && Number.isFinite(msgSeq) ? msgSeq : null;
+        const isUncommittedPendingQueueMaterialization =
+            isPendingQueueMaterializedLocalId && deliverableSeq === null;
         const shouldRespectAgentQueueEchoSuppression = isAlreadyPendingAgentQueueMessage;
         const isEffectivelyAgentQueueEchoSuppressedLocalId =
             shouldRespectAgentQueueEchoSuppression
             && isAgentQueueEchoSuppressedForDelivery;
         const shouldDeliverToAgentQueue =
-            !isAgentQueueDeliveredLocalId
+            (!isAgentQueueDeliveredLocalId || isUncommittedPendingQueueMaterialization)
             && !isEffectivelyAgentQueueEchoSuppressedLocalId
             && !isAlreadyPendingAgentQueueMessage
             && !isSelfEchoSuppressedCliWrite
@@ -232,7 +236,6 @@ export function handleSessionNewMessageUpdate(params: {
             && !isPassiveCommittedUserMessageLocalId
             && (params.shouldDeliverUserMessageToAgentQueue?.(userResult.data, params.update) ?? true);
         if (shouldDeliverToAgentQueue) {
-            const deliverableSeq = typeof msgSeq === 'number' && Number.isFinite(msgSeq) ? msgSeq : null;
             if (params.pendingMessageCallback) {
                 params.pendingMessageCallback(userResult.data, { seq: deliverableSeq });
             } else {
@@ -252,12 +255,15 @@ export function handleSessionNewMessageUpdate(params: {
             // handoff and must not advance the monotonic delivered-user watermark past older owed
             // prompts.
             const isDeliveredLocalPromptEcho =
-                isAgentQueueDeliveredLocalId
-                || isEffectivelyAgentQueueEchoSuppressedLocalId
-                || isAlreadyPendingAgentQueueMessage
-                || isSelfEchoSuppressedCliWrite
-                || isAgentQueueEchoSuppressedCliWrite
-                || isDeterministicDaemonInitialPrompt;
+                !isUncommittedPendingQueueMaterialization
+                && (
+                    isAgentQueueDeliveredLocalId
+                    || isEffectivelyAgentQueueEchoSuppressedLocalId
+                    || isAlreadyPendingAgentQueueMessage
+                    || isSelfEchoSuppressedCliWrite
+                    || isAgentQueueEchoSuppressedCliWrite
+                    || isDeterministicDaemonInitialPrompt
+                );
             if (isDeliveredLocalPromptEcho && typeof msgSeq === 'number' && Number.isFinite(msgSeq)) {
                 params.onUserMessageDeliveryProvenByLocalEcho?.(msgSeq);
             }
@@ -276,6 +282,7 @@ export function handleSessionNewMessageUpdate(params: {
                 isAgentQueueEchoSuppressedCliWrite,
                 isProviderOwnedUserMessageEcho,
                 isPassiveCommittedUserMessageLocalId,
+                isUncommittedPendingQueueMaterialization,
                 shouldRespectAgentQueueEchoSuppression,
                 isDeterministicDaemonInitialPrompt,
             });
@@ -324,8 +331,11 @@ export function handleSessionNewMessageUpdate(params: {
                 const isPassiveCommittedUserMessageLocalId = Boolean(
                     agentQueueLocalId && params.hasPassiveCommittedUserMessageLocalId?.(agentQueueLocalId),
                 );
+                const deliverableSeq = typeof msgSeq === 'number' && Number.isFinite(msgSeq) ? msgSeq : null;
+                const isUncommittedPendingQueueMaterialization =
+                    isPendingQueueMaterializedLocalId && deliverableSeq === null;
                 const shouldDeliverToAgentQueue =
-                    !isAgentQueueDeliveredLocalId
+                    (!isAgentQueueDeliveredLocalId || isUncommittedPendingQueueMaterialization)
                     && !isAlreadyPendingAgentQueueMessage
                     && !isEffectivelyAgentQueueEchoSuppressedLocalId
                     && !isSelfEchoSuppressedCliWrite
@@ -335,7 +345,6 @@ export function handleSessionNewMessageUpdate(params: {
                     && !isPassiveCommittedUserMessageLocalId
                     && (params.shouldDeliverUserMessageToAgentQueue?.(parsedCandidate.data, params.update) ?? true);
                 if (shouldDeliverToAgentQueue) {
-                    const deliverableSeq = typeof msgSeq === 'number' && Number.isFinite(msgSeq) ? msgSeq : null;
                     if (params.pendingMessageCallback) {
                         params.pendingMessageCallback(parsedCandidate.data, { seq: deliverableSeq });
                     } else {
@@ -350,12 +359,15 @@ export function handleSessionNewMessageUpdate(params: {
                     }
                 } else {
                     const isDeliveredLocalPromptEcho =
-                        isAgentQueueDeliveredLocalId
-                        || isEffectivelyAgentQueueEchoSuppressedLocalId
-                        || isAlreadyPendingAgentQueueMessage
-                        || isSelfEchoSuppressedCliWrite
-                        || isAgentQueueEchoSuppressedCliWrite
-                        || isDeterministicDaemonInitialPrompt;
+                        !isUncommittedPendingQueueMaterialization
+                        && (
+                            isAgentQueueDeliveredLocalId
+                            || isEffectivelyAgentQueueEchoSuppressedLocalId
+                            || isAlreadyPendingAgentQueueMessage
+                            || isSelfEchoSuppressedCliWrite
+                            || isAgentQueueEchoSuppressedCliWrite
+                            || isDeterministicDaemonInitialPrompt
+                        );
                     if (isDeliveredLocalPromptEcho && typeof msgSeq === 'number' && Number.isFinite(msgSeq)) {
                         params.onUserMessageDeliveryProvenByLocalEcho?.(msgSeq);
                     }
@@ -371,6 +383,7 @@ export function handleSessionNewMessageUpdate(params: {
                         isDeterministicDaemonInitialPrompt,
                         isProviderOwnedUserMessageEcho,
                         isPassiveCommittedUserMessageLocalId,
+                        isUncommittedPendingQueueMaterialization,
                         source: parsedCandidate.data.meta?.source ?? null,
                         sentFrom: parsedCandidate.data.meta?.sentFrom ?? null,
                     });

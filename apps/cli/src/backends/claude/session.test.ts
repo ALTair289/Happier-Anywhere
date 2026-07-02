@@ -188,6 +188,181 @@ describe('Session', () => {
     }
   });
 
+  it('does not create runtime activity from hook-only sidechain progress at the Claude session hook boundary', async () => {
+    const updateRuntimeActivityProjection = vi.fn(async () => {});
+    const client = createSessionClientStub({ updateRuntimeActivityProjection });
+    const session = createSession(client);
+
+    try {
+      session.onClaudeSessionHook({
+        session_id: 'claude-session-1',
+        hook_event_name: 'PostToolUse',
+        agent_id: 'remote-sidechain-agent-1',
+        agent_type: 'general-purpose',
+        tool_name: 'Bash',
+      } as any);
+
+      await Promise.resolve();
+      expect(updateRuntimeActivityProjection).not.toHaveBeenCalled();
+      expect(client.sendAgentMessage).not.toHaveBeenCalled();
+    } finally {
+      session.cleanup();
+    }
+  });
+
+  it('clears sidechain hook runtime activity when the sidechain terminal hook arrives', async () => {
+    const updateRuntimeActivityProjection = vi.fn(async () => {});
+    const client = createSessionClientStub({ updateRuntimeActivityProjection });
+    const session = createSession(client);
+
+    try {
+      session.onClaudeSessionHook({
+        session_id: 'claude-session-1',
+        hook_event_name: 'Stop',
+        background_tasks: [{ id: 'remote-sidechain-agent-1', type: 'subagent', status: 'running' }],
+      } as any);
+
+      await vi.waitFor(() => {
+        expect(updateRuntimeActivityProjection).toHaveBeenCalledWith(
+          expect.objectContaining({
+            runtimeActivityActiveCount: 1,
+            runtimeActivitySourceClass: 'provider_detached_task',
+          }),
+        );
+      });
+
+      session.onClaudeSessionHook({
+        session_id: 'claude-session-1',
+        hook_event_name: 'StopFailure',
+        agent_id: 'remote-sidechain-agent-1',
+        error: 'rate_limit',
+      } as any);
+
+      await vi.waitFor(() => {
+        expect(updateRuntimeActivityProjection).toHaveBeenCalledWith({
+          runtimeActivityActiveCount: 0,
+          runtimeActivityObservedAt: null,
+          runtimeActivityExpiresAt: null,
+          runtimeActivitySourceClass: null,
+        });
+      });
+      expect(client.sendAgentMessage).not.toHaveBeenCalled();
+    } finally {
+      session.cleanup();
+    }
+  });
+
+  it('publishes main Stop hook background tasks at the Claude session hook boundary', async () => {
+    const updateRuntimeActivityProjection = vi.fn(async () => {});
+    const client = createSessionClientStub({ updateRuntimeActivityProjection });
+    const session = createSession(client);
+
+    try {
+      session.onClaudeSessionHook({
+        session_id: 'claude-session-1',
+        hook_event_name: 'Stop',
+        background_tasks: [
+          { id: 'agent-main-1', type: 'subagent', status: 'running' },
+          { task_id: 'agent-terminal-1', type: 'subagent', status: 'completed' },
+        ],
+      } as any);
+
+      await vi.waitFor(() => {
+        expect(updateRuntimeActivityProjection).toHaveBeenCalledWith(
+          expect.objectContaining({
+            runtimeActivityActiveCount: 1,
+            runtimeActivitySourceClass: 'provider_detached_task',
+          }),
+        );
+      });
+      expect(client.sendAgentMessage).not.toHaveBeenCalled();
+    } finally {
+      session.cleanup();
+    }
+  });
+
+  it('clears main Stop hook background task activity when Claude reports no active background tasks', async () => {
+    const updateRuntimeActivityProjection = vi.fn(async () => {});
+    const client = createSessionClientStub({ updateRuntimeActivityProjection });
+    const session = createSession(client);
+
+    try {
+      session.onClaudeSessionHook({
+        session_id: 'claude-session-1',
+        hook_event_name: 'Stop',
+        background_tasks: [{ id: 'agent-main-1', type: 'subagent', status: 'running' }],
+      } as any);
+
+      await vi.waitFor(() => {
+        expect(updateRuntimeActivityProjection).toHaveBeenCalledWith(
+          expect.objectContaining({
+            runtimeActivityActiveCount: 1,
+            runtimeActivitySourceClass: 'provider_detached_task',
+          }),
+        );
+      });
+
+      session.onClaudeSessionHook({
+        session_id: 'claude-session-1',
+        hook_event_name: 'Stop',
+        background_tasks: [],
+      } as any);
+
+      await vi.waitFor(() => {
+        expect(updateRuntimeActivityProjection).toHaveBeenCalledWith({
+          runtimeActivityActiveCount: 0,
+          runtimeActivityObservedAt: null,
+          runtimeActivityExpiresAt: null,
+          runtimeActivitySourceClass: null,
+        });
+      });
+      expect(client.sendAgentMessage).not.toHaveBeenCalled();
+    } finally {
+      session.cleanup();
+    }
+  });
+
+  it('clears main background task activity from task-notification hooks at the Claude session hook boundary', async () => {
+    const updateRuntimeActivityProjection = vi.fn(async () => {});
+    const client = createSessionClientStub({ updateRuntimeActivityProjection });
+    const session = createSession(client);
+
+    try {
+      session.onClaudeSessionHook({
+        session_id: 'claude-session-1',
+        hook_event_name: 'Stop',
+        background_tasks: [{ id: 'agent-main-1', type: 'subagent', status: 'running' }],
+      } as any);
+
+      await vi.waitFor(() => {
+        expect(updateRuntimeActivityProjection).toHaveBeenCalledWith(
+          expect.objectContaining({
+            runtimeActivityActiveCount: 1,
+            runtimeActivitySourceClass: 'provider_detached_task',
+          }),
+        );
+      });
+
+      session.onClaudeSessionHook({
+        session_id: 'claude-session-1',
+        hook_event_name: 'UserPromptSubmit',
+        prompt: '<task-notification><task-id>agent-main-1</task-id><status>completed</status></task-notification>',
+      } as any);
+
+      await vi.waitFor(() => {
+        expect(updateRuntimeActivityProjection).toHaveBeenCalledWith({
+          runtimeActivityActiveCount: 0,
+          runtimeActivityObservedAt: null,
+          runtimeActivityExpiresAt: null,
+          runtimeActivitySourceClass: null,
+        });
+      });
+      expect(client.sendAgentMessage).not.toHaveBeenCalled();
+    } finally {
+      session.cleanup();
+    }
+  });
+
   it('tracks changed Claude session id metadata writes as drainable critical persistence', async () => {
     const transcript = createTempClaudeTranscript('sess_critical');
     let resolveMetadataUpdate!: () => void;

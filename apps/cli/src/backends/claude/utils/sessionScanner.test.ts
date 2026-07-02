@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { createSessionScanner } from './sessionScanner'
 import { RawJSONLines } from '../types'
-import { mkdir, writeFile, appendFile, rm, readFile, utimes } from 'node:fs/promises'
+import { readClaudeTranscriptProviderActivity } from '../localControl/readClaudeTranscriptProviderActivity'
+import { mkdir, writeFile, appendFile, rm, readFile, utimes, rename } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { existsSync } from 'node:fs'
@@ -179,6 +180,43 @@ describe('sessionScanner', () => {
       expect(content).toContain('0-say-lol-session.jsonl')
       expect(content).toContain('readme.md')
     }
+  })
+
+  it('does not abort scanning when Claude emits a uuid-less attachment row', async () => {
+    scanner = await createSessionScanner({
+      sessionId: null,
+      workingDirectory: testDir,
+      onMessage: (msg) => collectedMessages.push(msg)
+    })
+
+    const sessionId = 'uuid-less-attachment-session'
+    const sessionFile = join(projectDir, `${sessionId}.jsonl`)
+    await mkdir(projectDir, { recursive: true })
+
+    await writeFile(sessionFile, [
+      JSON.stringify({
+        type: 'attachment',
+        sessionId,
+        timestamp: '2026-06-29T08:00:00.000Z',
+        attachment: { type: 'agent_listing_delta', agents: [] },
+      }),
+      JSON.stringify({
+        type: 'assistant',
+        uuid: 'assistant-after-uuid-less-attachment',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'after attachment' }] },
+      }),
+      '',
+    ].join('\n'))
+
+    scanner.onNewSession(sessionId)
+
+    await waitFor(() => collectedMessages.some((m) =>
+      m.type === 'assistant'
+      && m.message !== undefined
+      && getFirstTextFromContent(m.message.content) === 'after attachment'
+    ))
+
+    expect(collectedMessages.map((m) => m.type)).toEqual(['assistant'])
   })
 
   it('streams Claude team inbox messages into Agent sidechains', async () => {
@@ -473,6 +511,105 @@ describe('sessionScanner', () => {
 
     await waitFor(() => collectedMessages.length >= 2, 3000)
     expect(collectedMessages.map((m) => (m as { uuid?: string }).uuid)).toEqual(['genuine_backfill', 'cmd_live'])
+  })
+
+  it('does not replay historical JSONL rows as live rows after the followed file is replaced', async () => {
+    const altProjectDir = join(testDir, 'alt-project-reset-replay')
+    await mkdir(altProjectDir, { recursive: true })
+
+    const sessionId = '22222222-2222-2222-2222-222222222225'
+    const transcriptPath = join(altProjectDir, `${sessionId}.jsonl`)
+    await writeFile(transcriptPath, '')
+
+    const now = Date.now()
+    scanner = await createSessionScanner({
+      sessionId,
+      transcriptPath,
+      workingDirectory: testDir,
+      onMessage: (msg: RawJSONLines) => collectedMessages.push(msg),
+    })
+
+    await appendFile(
+      transcriptPath,
+      JSON.stringify({
+        type: 'assistant',
+        uuid: 'initial-live-row',
+        timestamp: new Date(now).toISOString(),
+        message: { role: 'assistant', content: [{ type: 'text', text: 'initial live row' }] },
+      }) + '\n',
+    )
+    await waitFor(() => collectedMessages.some((m) => (m as { uuid?: string }).uuid === 'initial-live-row'), 2000)
+
+    const replacementPath = `${transcriptPath}.replacement`
+    await writeFile(
+      replacementPath,
+      [
+        JSON.stringify({
+          type: 'assistant',
+          uuid: 'old-row-after-replacement',
+          timestamp: new Date(now - 60_000).toISOString(),
+          message: { role: 'assistant', content: [{ type: 'text', text: 'old replayed row' }] },
+        }),
+        JSON.stringify({
+          type: 'assistant',
+          uuid: 'fresh-row-after-replacement',
+          timestamp: new Date(Date.now() + 1000).toISOString(),
+          message: { role: 'assistant', content: [{ type: 'text', text: 'fresh replacement row' }] },
+        }),
+      ].join('\n') + '\n',
+    )
+    await rename(replacementPath, transcriptPath)
+
+    await waitFor(() => collectedMessages.some((m) => (m as { uuid?: string }).uuid === 'fresh-row-after-replacement'), 4000)
+    const uuids = collectedMessages.map((m) => (m as { uuid?: string }).uuid)
+    expect(uuids).toContain('initial-live-row')
+    expect(uuids).toContain('fresh-row-after-replacement')
+    expect(uuids).not.toContain('old-row-after-replacement')
+  })
+
+  it('does not observe replay-suppressed snapshot rows on the raw side-effect channel', async () => {
+    const sessionId = '22222222-2222-2222-2222-222222222226'
+    const sessionFile = join(projectDir, `${sessionId}.jsonl`)
+    const now = Date.now()
+    await writeFile(
+      sessionFile,
+      [
+        JSON.stringify({
+          type: 'attachment',
+          uuid: 'old-raw-goal-status',
+          timestamp: new Date(now - 60_000).toISOString(),
+          attachment: { type: 'goal_status', met: false, condition: 'old replayed goal' },
+        }),
+        JSON.stringify({
+          type: 'attachment',
+          uuid: 'raw-row-without-timestamp',
+          attachment: { type: 'goal_status', met: false, condition: 'unprovably live goal' },
+        }),
+        JSON.stringify({
+          type: 'attachment',
+          uuid: 'fresh-raw-goal-status',
+          timestamp: new Date(now + 1_000).toISOString(),
+          attachment: { type: 'goal_status', met: false, condition: 'fresh goal' },
+        }),
+      ].join('\n') + '\n',
+    )
+
+    const rawValues: unknown[] = []
+    scanner = await createSessionScanner({
+      sessionId: null,
+      workingDirectory: testDir,
+      onMessage: (msg) => collectedMessages.push(msg),
+      onRawJsonlValue: (value) => rawValues.push(value),
+      replayInitialMessages: true,
+      replaySuppressRowsBeforeMs: now - 30_000,
+      bindToFirstSession: true,
+    })
+    scanner.onNewSession(sessionId)
+
+    await waitFor(() => rawValues.some((value) => (value as { uuid?: string }).uuid === 'fresh-raw-goal-status'), 2000)
+
+    const rawUuids = rawValues.map((value) => (value as { uuid?: string }).uuid)
+    expect(rawUuids).toEqual(['fresh-raw-goal-status'])
   })
 
   it('normalizes Claude Agent Teams tool names to canonical tool names', async () => {
@@ -813,6 +950,16 @@ describe('sessionScanner', () => {
         (m as any).message.content.some((c: any) => c?.type === 'tool_result' && c?.tool_use_id === sidechainId),
     ) as any
     expect(rewritten).toBeTruthy()
+    expect(rewritten.origin).toEqual(expect.objectContaining({
+      kind: 'task-notification',
+      taskId: subagentId,
+      status: 'completed',
+    }))
+    expect(readClaudeTranscriptProviderActivity(rewritten)).toEqual({
+      type: 'task_notification',
+      taskId: subagentId,
+      terminal: true,
+    })
     const toolResult = rewritten.message.content.find((c: any) => c?.type === 'tool_result' && c?.tool_use_id === sidechainId)
     expect(toolResult).toBeTruthy()
     const text = getFirstTextFromContent(toolResult.content)
@@ -843,6 +990,69 @@ describe('sessionScanner', () => {
     expect(collectedMessages).toHaveLength(1)
     expect(collectedMessages[0].type).toBe('progress')
     expect((collectedMessages[0] as any).uuid).toBe('progress-1')
+  })
+
+  it('suppresses Claude attachment rows from visible transcript emission', async () => {
+    const rawValues: unknown[] = []
+    scanner = await createSessionScanner({
+      sessionId: null,
+      workingDirectory: testDir,
+      onMessage: (msg) => collectedMessages.push(msg),
+      onRawJsonlValue: (value) => rawValues.push(value),
+    })
+
+    const sessionId = '44444444-4444-4444-8444-444444444444'
+    const sessionFile = join(projectDir, `${sessionId}.jsonl`)
+    await writeFile(
+      sessionFile,
+      [
+        {
+          type: 'attachment',
+          uuid: 'tools-delta-1',
+          timestamp: new Date().toISOString(),
+          sessionId,
+          attachment: {
+            type: 'deferred_tools_delta',
+            addedNames: ['mcp__sentry_2__whoami'],
+            addedLines: [],
+            removedNames: [],
+            readdedNames: ['mcp__sentry_2__whoami'],
+            pendingMcpServers: [],
+          },
+        },
+        {
+          type: 'attachment',
+          uuid: 'task-reminder-1',
+          timestamp: new Date().toISOString(),
+          sessionId,
+          attachment: {
+            type: 'task_reminder',
+            content: [],
+            itemCount: 0,
+          },
+        },
+        {
+          type: 'assistant',
+          uuid: 'assistant-after-attachments',
+          timestamp: new Date().toISOString(),
+          sessionId,
+          message: {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'visible assistant text' }],
+          },
+        },
+      ].map((value) => JSON.stringify(value)).join('\n') + '\n',
+    )
+
+    scanner.onNewSession(sessionId)
+    await waitFor(() => collectedMessages.some((message) => (message as any).uuid === 'assistant-after-attachments'), 3000)
+
+    expect(rawValues.map((value) => (value as any)?.uuid)).toEqual([
+      'tools-delta-1',
+      'task-reminder-1',
+      'assistant-after-attachments',
+    ])
+    expect(collectedMessages.map((message) => (message as any).uuid)).toEqual(['assistant-after-attachments'])
   })
   
   it('should notify when transcript file is missing for too long', async () => {
@@ -967,18 +1177,17 @@ describe('sessionScanner', () => {
     await new Promise((resolve) => setTimeout(resolve, 1250))
     expect(rawValues).toHaveLength(0)
 
-    await writeFile(boundFile, '')
-    scanner.onNewSession({ sessionId: boundSessionId, transcriptPath: boundFile })
-    await appendFile(
+    await writeFile(
       boundFile,
       JSON.stringify({
         type: 'queue-operation',
         operation: 'enqueue',
         timestamp: new Date().toISOString(),
         sessionId: boundSessionId,
-        content: 'queued prompt for this Claude session',
+        content: 'queued prompt for this Claude session before hook binding',
       }) + '\n',
     )
+    scanner.onNewSession({ sessionId: boundSessionId, transcriptPath: boundFile })
 
     await waitFor(() => rawValues.length > 0, 3000)
     expect(rawValues).toSatisfy((values: unknown[]) =>

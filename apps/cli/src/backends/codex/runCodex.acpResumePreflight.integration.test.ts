@@ -13,6 +13,7 @@ import {
 } from '@/agent/runtime/sessionInitialGoal';
 import { HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY } from '@/daemon/connectedServices/connectedServiceChildEnvironment';
 import { createCodexPermissionHandler } from './utils/createCodexPermissionHandler';
+import { applyPermissionModeToCodexPermissionHandler } from './utils/applyPermissionModeToHandler';
 
 const modelSyncFlushPendingAfterStartSpy = vi.fn(async () => {});
 const sessionModeSyncFlushPendingAfterStartSpy = vi.fn(async () => {});
@@ -26,9 +27,11 @@ const refreshDaemonOpenAiCodexChatGptAuthTokensForBridgeSpy = vi.fn<(...args: an
   chatgptPlanType: 'plus',
 }));
 const notifyDaemonConnectedServiceRuntimeAuthFailureSpy = vi.fn<(...args: any[]) => Promise<any>>(async () => ({}));
+const notifyDaemonConnectedServiceQuotaSnapshotSpy = vi.fn<(...args: any[]) => Promise<any>>(async () => ({ ok: true }));
 
 vi.mock('@/daemon/controlClient', () => ({
   notifyDaemonConnectedServiceRuntimeAuthFailure: (...args: any[]) => notifyDaemonConnectedServiceRuntimeAuthFailureSpy(...args),
+  notifyDaemonConnectedServiceQuotaSnapshot: (...args: any[]) => notifyDaemonConnectedServiceQuotaSnapshotSpy(...args),
   refreshDaemonOpenAiCodexChatGptAuthTokensForBridge: (...args: any[]) => refreshDaemonOpenAiCodexChatGptAuthTokensForBridgeSpy(...args),
 }));
 
@@ -59,6 +62,7 @@ const createCodexAcpRuntimeSpy = vi.fn<(...args: any[]) => any>((..._args) => ({
   setSessionConfigOption: vi.fn(async () => {}),
   steerPrompt: vi.fn(async () => {}),
   sendPrompt: vi.fn(async () => {}),
+  sendPromptWithMeta: vi.fn(async () => {}),
   compactContext: vi.fn(async () => {}),
   flushTurn: vi.fn(),
   rollbackConversation: vi.fn(async () => ({ ok: false, errorCode: 'unsupported_action', errorMessage: 'unsupported' })),
@@ -135,11 +139,13 @@ const createSessionProviderInputConsumerSpy = vi.fn((opts: any) => ({
   },
   drainPending: (...args: any[]) => inputConsumerDrainPendingSpy(...args),
 }));
+const createSessionProviderPendingDrainAdapterSpy = vi.fn((_session: any, _defaults: any) => ({
+  drainPending: (...args: any[]) => inputConsumerDrainPendingSpy(...args),
+}));
 vi.mock('@/agent/runtime/sessionInput/SessionProviderInputConsumer', () => ({
   createSessionProviderInputConsumer: (opts: any) => createSessionProviderInputConsumerSpy(opts),
-  createSessionProviderPendingDrainAdapter: () => ({
-    drainPending: (...args: any[]) => inputConsumerDrainPendingSpy(...args),
-  }),
+  createSessionProviderPendingDrainAdapter: (session: any, defaults: any) =>
+    createSessionProviderPendingDrainAdapterSpy(session, defaults),
 }));
 
 vi.mock('@/agent/runtime/runtimeOverridesSynchronizer', () => ({
@@ -344,6 +350,7 @@ vi.mock('@/agent/runtime/initializeBackendApiContext', () => ({
         getLastObservedMessageSeq: vi.fn(() => 0),
         deferDeliveredUserMessageWatermarkToProviderAcceptance: vi.fn(),
         confirmUserMessageDeliveredToProvider: vi.fn(),
+        blockPendingMessageDelivery: vi.fn(async () => false),
         beginTurnAssistantTextSnapshot: vi.fn(() => ({ id: 'turn-token' })),
         materializeNextPendingMessageSafely: vi.fn(async () => ({ type: 'no_pending' })),
         sendSessionDeath: vi.fn(),
@@ -376,6 +383,7 @@ async function initializeDefaultBackendRunSession(opts: any): Promise<any> {
     getLastObservedMessageSeq: vi.fn(() => 0),
     deferDeliveredUserMessageWatermarkToProviderAcceptance: vi.fn(),
     confirmUserMessageDeliveredToProvider: vi.fn(),
+    blockPendingMessageDelivery: vi.fn(async () => false),
     beginTurnAssistantTextSnapshot: vi.fn(() => ({ id: 'turn-token' })),
     sendCodexMessage: vi.fn(),
     sendAgentMessage: vi.fn(),
@@ -408,6 +416,7 @@ function mockAttachedSessionMetadata(metadata: Record<string, unknown>): void {
       getLastObservedMessageSeq: vi.fn(() => 0),
       deferDeliveredUserMessageWatermarkToProviderAcceptance: vi.fn(),
       confirmUserMessageDeliveredToProvider: vi.fn(),
+      blockPendingMessageDelivery: vi.fn(async () => false),
       beginTurnAssistantTextSnapshot: vi.fn(() => ({ id: 'turn-token' })),
       getMetadataSnapshot: vi.fn(() => ({ ...metadata })),
     });
@@ -442,10 +451,12 @@ describe('runCodex CodexACP resume behavior', () => {
     sessionInputConsumerWaitForNextInputImpl = null;
     inputConsumerDrainPendingSpy.mockClear();
     createSessionProviderInputConsumerSpy.mockClear();
+    createSessionProviderPendingDrainAdapterSpy.mockClear();
     codexLocalLauncherSpy.mockClear();
-    codexLocalLauncherImpl = null;
-    vi.mocked(createCodexPermissionHandler).mockClear();
-    registerSessionRpcHandlerMock.mockReset();
+	    codexLocalLauncherImpl = null;
+	    vi.mocked(createCodexPermissionHandler).mockClear();
+	    vi.mocked(applyPermissionModeToCodexPermissionHandler).mockClear();
+	    registerSessionRpcHandlerMock.mockReset();
     modelSyncFlushPendingAfterStartSpy.mockClear();
     sessionModeSyncFlushPendingAfterStartSpy.mockClear();
     configOptionSyncFlushPendingAfterStartSpy.mockClear();
@@ -458,6 +469,8 @@ describe('runCodex CodexACP resume behavior', () => {
     }));
     notifyDaemonConnectedServiceRuntimeAuthFailureSpy.mockReset();
     notifyDaemonConnectedServiceRuntimeAuthFailureSpy.mockImplementation(async () => ({}));
+    notifyDaemonConnectedServiceQuotaSnapshotSpy.mockReset();
+    notifyDaemonConnectedServiceQuotaSnapshotSpy.mockImplementation(async () => ({ ok: true }));
     remoteModePublishGate = null;
     lastSessionClient = null;
     lastOnUserMessageHandler = null;
@@ -785,6 +798,86 @@ describe('runCodex CodexACP resume behavior', () => {
     expect(outcome.ok).toBe(false);
   });
 
+  it('uses ACP prompt metadata to confirm Codex provider acceptance after normal sends', async () => {
+    resolveRunnerMcpServersSpy.mockImplementationOnce(async () => ({
+      happierMcpServer: { url: 'http://127.0.0.1:0', stop: vi.fn() },
+      mcpServers: {},
+    }));
+
+    const sendPromptWithMeta = vi.fn(async (params: {
+      text: string;
+      localId?: string | null;
+      meta?: Record<string, unknown>;
+      onProviderPromptAccepted?: () => void;
+    }) => {
+      params.onProviderPromptAccepted?.();
+    });
+    createCodexAcpRuntimeSpy.mockImplementationOnce(() => ({
+      getSessionId: () => 'thread-acp',
+      supportsInFlightSteer: () => false,
+      isTurnInFlight: () => false,
+      beginTurn: vi.fn(),
+      cancel: vi.fn(async () => {}),
+      reset: vi.fn(async () => {}),
+      startOrLoad: vi.fn(async () => 'thread-acp'),
+      setSessionMode: vi.fn(async () => {}),
+      setSessionModel: vi.fn(async () => {}),
+      setSessionConfigOption: vi.fn(async () => {}),
+      steerPrompt: vi.fn(async () => {}),
+      sendPrompt: vi.fn(async () => {}),
+      sendPromptWithMeta,
+      compactContext: vi.fn(async () => {}),
+      flushTurn: vi.fn(async () => {}),
+      rollbackConversation: vi.fn(async () => ({ ok: false, errorCode: 'unsupported_action', errorMessage: 'unsupported' })),
+    }));
+
+    let waitCallCount = 0;
+    sessionInputConsumerWaitForNextInputImpl = async (opts) => {
+      waitCallCount += 1;
+      if (waitCallCount > 2) return null;
+      if (waitCallCount === 1) {
+        if (!lastOnUserMessageHandler) {
+          throw new Error('missing-onUserMessage-handler');
+        }
+        lastOnUserMessageHandler({
+          content: { text: 'accepted ACP prompt' },
+          meta: { source: 'acp-acceptance-test' },
+          localId: 'local-acp-accepted',
+        }, { seq: 92 });
+        return await opts.messageQueue.waitForMessagesAndGetAsString();
+      }
+      return null;
+    };
+
+    const { runCodex } = await import('./runCodex');
+    const outcome = await runCodex({
+      credentials: { token: 'test' } as Credentials,
+      startedBy: 'terminal',
+      startingMode: 'remote',
+      codexBackendMode: 'acp',
+      permissionMode: 'default',
+      permissionModeUpdatedAt: 1,
+    } as any)
+      .then(() => ({ ok: true as const }))
+      .catch((error: unknown) => ({ ok: false as const, error }));
+
+    if (!outcome.ok) {
+      throw outcome.error;
+    }
+
+    expect(lastSessionClient?.deferDeliveredUserMessageWatermarkToProviderAcceptance).toHaveBeenCalledWith({
+      pendingMaterialization: 'commitAtMaterialize',
+    });
+    expect(sendPromptWithMeta).toHaveBeenCalledWith(expect.objectContaining({
+      meta: { source: 'acp-acceptance-test' },
+      localId: 'local-acp-accepted',
+      onProviderPromptAccepted: expect.any(Function),
+    }));
+    expect(lastSessionClient?.confirmUserMessageDeliveredToProvider).toHaveBeenCalledWith(92, {
+      localIds: ['local-acp-accepted'],
+    });
+  });
+
   it('prefers explicit codexBackendMode=appServer over ACP-only attach behavior', async () => {
     const experiments = await import('@/backends/codex/experiments');
     (experiments.isExperimentalCodexAcpEnabled as unknown as ReturnType<typeof vi.fn>).mockReturnValue(true);
@@ -967,6 +1060,54 @@ describe('runCodex CodexACP resume behavior', () => {
       },
       chatgptPlanType: null,
     });
+  });
+
+  it('forwards app-server quota snapshot group identity to the daemon notifier', async () => {
+    resolveRunnerMcpServersSpy.mockImplementationOnce(async () => ({
+      happierMcpServer: { url: 'http://127.0.0.1:0', stop: vi.fn() },
+      mcpServers: {},
+    }));
+    process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY] = JSON.stringify([{
+      kind: 'group',
+      serviceId: 'openai-codex',
+      groupId: 'main',
+      activeProfileId: 'backup',
+      fallbackProfileId: 'work',
+      generation: 7,
+    }]);
+    const { runCodex } = await import('./runCodex');
+
+    await runCodex({
+      credentials: { token: 'test' } as Credentials,
+      startedBy: 'terminal',
+      startingMode: 'remote',
+      codexBackendMode: 'appServer',
+    } as any).catch(() => undefined);
+
+    const runtimeArgs = createCodexAppServerRuntimeSpy.mock.calls[0]?.[0] as {
+      onRateLimitSnapshot?: (rawSnapshot: unknown, context?: Readonly<{
+        activeAccountId?: string | null;
+        accountLabel?: string | null;
+      }>) => Promise<void>;
+    } | undefined;
+    expect(runtimeArgs?.onRateLimitSnapshot).toBeTypeOf('function');
+
+    await runtimeArgs!.onRateLimitSnapshot!(
+      { primary: { used_percent: 88 } },
+      { activeAccountId: 'acct_live_codex', accountLabel: 'live@example.test' },
+    );
+
+    expect(notifyDaemonConnectedServiceQuotaSnapshotSpy).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 'sess_1',
+      serviceId: 'openai-codex',
+      groupId: 'main',
+      groupGeneration: 7,
+      snapshot: expect.objectContaining({
+        profileId: 'backup',
+        activeAccountId: 'acct_live_codex',
+        accountLabel: 'live@example.test',
+      }),
+    }));
   });
 
   it('routes Codex ChatGPT refresh bridge requests through the live-applied selection after direct auth apply', async () => {
@@ -1496,7 +1637,7 @@ describe('runCodex CodexACP resume behavior', () => {
           userMessageLocalIds: ['codex-compact-63'],
         };
       }
-      return null;
+      throw new Error('stop-after-provider-local-id-test');
     };
 
     const { runCodex } = await import('./runCodex');
@@ -1511,8 +1652,9 @@ describe('runCodex CodexACP resume behavior', () => {
       .then(() => ({ ok: true as const }))
       .catch((error: unknown) => ({ ok: false as const, error }));
 
+    expect(outcome.ok).toBe(false);
     if (!outcome.ok) {
-      throw outcome.error;
+      expect(outcome.error).toEqual(expect.objectContaining({ message: 'stop-after-provider-local-id-test' }));
     }
 
     expect(startOrLoad).toHaveBeenCalledWith({});
@@ -1978,9 +2120,10 @@ describe('runCodex CodexACP resume behavior', () => {
     let observedQueuedMessageCount = 0;
     let acceptedPromptCallback: ((input: Readonly<{ localIds?: readonly string[] | null; userMessageSeq: number | null }>) => void) | null = null;
     const appServerRuntime = {
-      getSessionId: () => 'thread-app-server',
-      supportsInFlightSteer: () => true,
-      isTurnInFlight: () => true,
+	      getSessionId: () => 'thread-app-server',
+	      supportsInFlightSteer: () => true,
+	      supportsInFlightConfigApply: () => true,
+	      isTurnInFlight: () => true,
       beginTurn: vi.fn(),
       cancel: vi.fn(async () => {}),
       reset: vi.fn(async () => {}),
@@ -2057,8 +2200,93 @@ describe('runCodex CodexACP resume behavior', () => {
     });
     expect(appServerRuntime.sendPrompt).not.toHaveBeenCalled();
     expect(lastSessionClient?.updateAgentState).toHaveBeenCalled();
-    const updatedAgentState = (lastSessionClient?.updateAgentState as ReturnType<typeof vi.fn>).mock.calls[0]?.[0]?.({});
-    expect(updatedAgentState?.capabilities?.inFlightSteer).toBe(true);
+	    const updatedAgentState = (lastSessionClient?.updateAgentState as ReturnType<typeof vi.fn>).mock.calls[0]?.[0]?.({});
+	    expect(updatedAgentState?.capabilities?.inFlightSteer).toBe(true);
+	    expect(updatedAgentState?.capabilities?.inFlightConfigApplySupported).toBe(true);
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.error).toEqual(expect.objectContaining({ message: 'wait-called' }));
+    }
+  });
+
+  it('steers mid-turn app-server user messages even when they carry a permission-mode change', async () => {
+    resolveRunnerMcpServersSpy.mockImplementationOnce(async () => ({
+      happierMcpServer: { url: 'http://127.0.0.1:0', stop: vi.fn() },
+      mcpServers: {},
+    }));
+
+    let observedQueuedMessageCount = 0;
+    let acceptedPromptCallback: ((input: Readonly<{ localIds?: readonly string[] | null; userMessageSeq: number | null }>) => void) | null = null;
+    const appServerRuntime = {
+	      getSessionId: () => 'thread-app-server-mode-steer',
+	      supportsInFlightSteer: () => true,
+	      supportsInFlightConfigApply: () => true,
+	      isTurnInFlight: () => true,
+      beginTurn: vi.fn(),
+      cancel: vi.fn(async () => {}),
+      reset: vi.fn(async () => {}),
+      startOrLoad: vi.fn(async () => {}),
+      setSessionMode: vi.fn(async () => {}),
+      setSessionModel: vi.fn(async () => {}),
+      setSessionConfigOption: vi.fn(async () => {}),
+      steerPrompt: vi.fn(async (_prompt: string, options?: { localId?: string | null; userMessageSeq?: number | null }) => {
+        acceptedPromptCallback?.({
+          localIds: typeof options?.localId === 'string' ? [options.localId] : null,
+          userMessageSeq: options?.userMessageSeq ?? null,
+        });
+      }),
+      sendPrompt: vi.fn(async () => {}),
+      setOnPromptAcceptedByProvider: vi.fn((callback) => {
+        acceptedPromptCallback = callback;
+      }),
+      flushTurn: vi.fn(async () => {}),
+      rollbackConversation: vi.fn(async () => ({ ok: true as const, target: { type: 'latest_turn' }, threadId: 'thread-app-server-mode-steer' })),
+    };
+    createCodexAppServerRuntimeSpy.mockImplementationOnce(() => appServerRuntime);
+
+    sessionInputConsumerWaitForNextInputImpl = async (opts) => {
+      if (!lastOnUserMessageHandler) {
+        throw new Error('missing-onUserMessage-handler');
+      }
+      lastOnUserMessageHandler({
+        content: { text: 'steer after mode change' },
+        meta: { permissionMode: 'read-only' },
+        localId: 'local-user-message-mode-change',
+      }, { seq: 92 });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      observedQueuedMessageCount = opts.messageQueue.size();
+      throw new Error('wait-called');
+    };
+
+    const { runCodex } = await import('./runCodex');
+
+    const credentials = { token: 'test' } as Credentials;
+    const outcome = await runCodex({
+      credentials,
+      startedBy: 'terminal',
+      startingMode: 'remote',
+      codexBackendMode: 'appServer',
+      permissionMode: 'default',
+      permissionModeUpdatedAt: 1,
+    } as any)
+      .then(() => ({ ok: true as const }))
+      .catch((error: unknown) => ({ ok: false as const, error }));
+
+    expect(createCodexAppServerRuntimeSpy).toHaveBeenCalledTimes(1);
+    expect(observedQueuedMessageCount).toBe(0);
+	    expect(appServerRuntime.steerPrompt).toHaveBeenCalledWith('steer after mode change', {
+	      metadata: { permissionMode: 'read-only' },
+	      localId: 'local-user-message-mode-change',
+	      localIds: ['local-user-message-mode-change'],
+	      userMessageSeq: 92,
+	    });
+	    expect(applyPermissionModeToCodexPermissionHandler).toHaveBeenCalledWith(expect.objectContaining({
+	      permissionMode: 'read-only',
+	    }));
+	    expect(lastSessionClient?.confirmUserMessageDeliveredToProvider).toHaveBeenCalledWith(92, {
+      localIds: ['local-user-message-mode-change'],
+    });
+    expect(appServerRuntime.sendPrompt).not.toHaveBeenCalled();
     expect(outcome.ok).toBe(false);
     if (!outcome.ok) {
       expect(outcome.error).toEqual(expect.objectContaining({ message: 'wait-called' }));
@@ -2313,13 +2541,100 @@ describe('runCodex CodexACP resume behavior', () => {
       | undefined;
     expect(runtimeParams?.pendingQueue?.drainPending).toBeTypeOf('function');
     expect(runtimeParams?.pendingQueue).not.toHaveProperty('popPendingMessage');
-    const consumerOptions = createSessionProviderInputConsumerSpy.mock.calls.at(-1)?.[0] as
-      | { session?: Record<string, any> }
+    const adapterDefaults = createSessionProviderPendingDrainAdapterSpy.mock.calls.at(-1)?.[1] as
+      | { resolveActiveTurnDeliveryPolicy?: () => unknown }
       | undefined;
+    expect(adapterDefaults?.resolveActiveTurnDeliveryPolicy?.()).toBe('allow_live_delivery');
+    const consumerOptions = createSessionProviderInputConsumerSpy.mock.calls.at(-1)?.[0] as
+      | { resolveActiveTurnDeliveryPolicy?: () => unknown; session?: Record<string, any> }
+      | undefined;
+    expect(consumerOptions?.resolveActiveTurnDeliveryPolicy?.()).toBe('allow_live_delivery');
     await expect(consumerOptions?.session?.popPendingMessage?.()).resolves.toBe(false);
     expect(lastSessionClient?.materializeNextPendingMessageSafely).toHaveBeenCalledWith({ reconcileWhenEmpty: 'force' });
     expect(inputConsumerDrainPendingSpy).toHaveBeenCalled();
     expect(lastSessionClient?.popPendingMessage).not.toHaveBeenCalled();
+  });
+
+  it('preserves queued app-server pending-row local ids when confirming provider acceptance', async () => {
+    resolveRunnerMcpServersSpy.mockImplementationOnce(async () => ({
+      happierMcpServer: { url: 'http://127.0.0.1:0', stop: vi.fn() },
+      mcpServers: {},
+    }));
+
+    let acceptedPromptCallback: ((input: Readonly<{ localIds?: readonly string[] | null; userMessageSeq: number | null }>) => void) | null = null;
+    const appServerRuntime = {
+      getSessionId: () => 'thread-app-server',
+      supportsInFlightSteer: () => true,
+      isTurnInFlight: () => false,
+      beginTurn: vi.fn(),
+      cancel: vi.fn(async () => {}),
+      reset: vi.fn(async () => {}),
+      startOrLoad: vi.fn(async () => {}),
+      setSessionMode: vi.fn(async () => {}),
+      setSessionModel: vi.fn(async () => {}),
+      setSessionConfigOption: vi.fn(async () => {}),
+      steerPrompt: vi.fn(async () => {}),
+      sendPrompt: vi.fn(async (_prompt: string, options?: { localId?: string | null; localIds?: readonly string[] | null; userMessageSeq?: number | null }) => {
+        acceptedPromptCallback?.({
+          localIds: options?.localIds ?? (typeof options?.localId === 'string' ? [options.localId] : null),
+          userMessageSeq: options?.userMessageSeq ?? null,
+        });
+      }),
+      setOnPromptAcceptedByProvider: vi.fn((callback) => {
+        acceptedPromptCallback = callback;
+      }),
+      flushTurn: vi.fn(async () => {}),
+      rollbackConversation: vi.fn(async () => ({
+        ok: true as const,
+        target: { type: 'latest_turn' },
+        threadId: 'thread-app-server',
+      })),
+    };
+    createCodexAppServerRuntimeSpy.mockImplementationOnce(() => appServerRuntime);
+
+    let waitCallCount = 0;
+    sessionInputConsumerWaitForNextInputImpl = async () => {
+      waitCallCount += 1;
+      if (waitCallCount === 1) {
+        return {
+          message: 'provider-owned pending prompt',
+          mode: {
+            permissionMode: 'default',
+            permissionModeUpdatedAt: 1,
+          },
+          isolate: false,
+          hash: 'hash-provider-owned-pending',
+          maxUserMessageSeq: null,
+          userMessageLocalIds: ['pending-local-provider-claim'],
+        };
+      }
+      return null;
+    };
+
+    const { runCodex } = await import('./runCodex');
+    const outcome = await runCodex({
+      credentials: { token: 'test' } as Credentials,
+      startedBy: 'terminal',
+      startingMode: 'remote',
+      codexBackendMode: 'appServer',
+      permissionMode: 'default',
+      permissionModeUpdatedAt: 1,
+    } as any)
+      .then(() => ({ ok: true as const }))
+      .catch((error: unknown) => ({ ok: false as const, error }));
+
+    if (!outcome.ok) {
+      throw outcome.error;
+    }
+    expect(appServerRuntime.sendPrompt).toHaveBeenCalledWith('provider-owned pending prompt', {
+      metadata: undefined,
+      localId: null,
+      localIds: ['pending-local-provider-claim'],
+      userMessageSeq: null,
+    });
+    expect(lastSessionClient?.confirmUserMessageDeliveredToProvider).toHaveBeenCalledWith(null, {
+      localIds: ['pending-local-provider-claim'],
+    });
   });
 
   it.each([
@@ -2630,6 +2945,9 @@ describe('runCodex CodexACP resume behavior', () => {
     }
 
     expect(lastSessionClient?.deferDeliveredUserMessageWatermarkToProviderAcceptance).toHaveBeenCalledOnce();
+    expect(lastSessionClient?.deferDeliveredUserMessageWatermarkToProviderAcceptance).toHaveBeenCalledWith({
+      pendingMaterialization: 'commitAtMaterialize',
+    });
     expect(sendPrompt).toHaveBeenCalledWith(expect.any(String), {
       metadata: { source: 'test' },
       localId: 'local-user-message-seq',
@@ -2705,8 +3023,77 @@ describe('runCodex CodexACP resume behavior', () => {
     }
 
     expect(lastSessionClient?.deferDeliveredUserMessageWatermarkToProviderAcceptance).toHaveBeenCalledOnce();
+    expect(lastSessionClient?.deferDeliveredUserMessageWatermarkToProviderAcceptance).toHaveBeenCalledWith({
+      pendingMaterialization: 'commitAtMaterialize',
+    });
     expect(sendPrompt).toHaveBeenCalledOnce();
     expect(lastSessionClient?.confirmUserMessageDeliveredToProvider).toHaveBeenCalledWith(78);
+  });
+
+  it('reapplies app-server provider-acceptance materialization policy after session swaps', async () => {
+    resolveRunnerMcpServersSpy.mockImplementationOnce(async () => ({
+      happierMcpServer: { url: 'http://127.0.0.1:0', stop: vi.fn() },
+      mcpServers: {},
+    }));
+
+    let capturedOnSessionSwap: ((session: Record<string, any>) => void | Promise<void>) | null = null;
+    let swappedSession: Record<string, any> | null = null;
+    initializeBackendRunSessionSpy.mockImplementationOnce(async (opts: any) => {
+      const initialized = await initializeDefaultBackendRunSession(opts);
+      capturedOnSessionSwap = opts.onSessionSwap;
+      swappedSession = opts.api.sessionSyncClient({ id: 'sess_2', metadataVersion: 1 }) as Record<string, any>;
+      Object.assign(swappedSession, {
+        fetchLatestUserPermissionIntentFromTranscript: vi.fn(async () => null),
+        getLastObservedMessageSeq: vi.fn(() => 0),
+        deferDeliveredUserMessageWatermarkToProviderAcceptance: vi.fn(),
+        confirmUserMessageDeliveredToProvider: vi.fn(),
+        blockPendingMessageDelivery: vi.fn(async () => false),
+        beginTurnAssistantTextSnapshot: vi.fn(() => ({ id: 'turn-token' })),
+        sendCodexMessage: vi.fn(),
+        sendAgentMessage: vi.fn(),
+      });
+      return initialized;
+    });
+
+    createCodexAppServerRuntimeSpy.mockImplementationOnce(() => ({
+      ...createDefaultCodexAppServerRuntimeMock(),
+      getSessionId: () => 'thread-app-server',
+      startOrLoad: vi.fn(async () => {}),
+    }));
+
+    let didSwap = false;
+    sessionInputConsumerWaitForNextInputImpl = async () => {
+      if (didSwap) return null;
+      didSwap = true;
+      if (!capturedOnSessionSwap || !swappedSession) {
+        throw new Error('missing-session-swap');
+      }
+      await capturedOnSessionSwap(swappedSession);
+      return null;
+    };
+
+    const { runCodex } = await import('./runCodex');
+    const outcome = await runCodex({
+      credentials: { token: 'test' } as Credentials,
+      startedBy: 'daemon',
+      startingMode: 'remote',
+      codexBackendMode: 'appServer',
+      permissionMode: 'default',
+      permissionModeUpdatedAt: 1,
+    } as any)
+      .then(() => ({ ok: true as const }))
+      .catch((error: unknown) => ({ ok: false as const, error }));
+
+    if (!outcome.ok) {
+      throw outcome.error;
+    }
+
+    const observedSwappedSession = swappedSession as unknown as {
+      deferDeliveredUserMessageWatermarkToProviderAcceptance: ReturnType<typeof vi.fn>;
+    };
+    expect(observedSwappedSession.deferDeliveredUserMessageWatermarkToProviderAcceptance).toHaveBeenCalledWith({
+      pendingMaterialization: 'commitAtMaterialize',
+    });
   });
 
   it('requeues app-server prompts reported undeliverable before provider acceptance', async () => {
@@ -2790,6 +3177,254 @@ describe('runCodex CodexACP resume behavior', () => {
     expect(sendPrompt).toHaveBeenNthCalledWith(2, expect.any(String), expect.objectContaining({ userMessageSeq: 88 }));
     expect(lastSessionClient?.confirmUserMessageDeliveredToProvider).toHaveBeenCalledTimes(1);
     expect(lastSessionClient?.confirmUserMessageDeliveredToProvider).toHaveBeenCalledWith(88);
+  });
+
+  it('does not leave a duplicate app-server queue batch after runtime-internal retry accepts the prompt', async () => {
+    resolveRunnerMcpServersSpy.mockImplementationOnce(async () => ({
+      happierMcpServer: { url: 'http://127.0.0.1:0', stop: vi.fn() },
+      mcpServers: {},
+    }));
+
+    let acceptedCallback:
+      ((input: Readonly<{ localIds?: readonly string[] | null; userMessageSeq: number | null }>) => void)
+      | null = null;
+    let undeliverableCallback:
+      ((prompts: ReadonlyArray<Readonly<{ localIds?: readonly string[] | null; text: string; userMessageSeq: number | null }>>) => void)
+      | null = null;
+    const sendPrompt = vi.fn(async (_prompt: string, options?: {
+      localIds?: readonly string[] | null;
+      userMessageSeq?: number | null;
+    }) => {
+      const localIds = options?.localIds ?? null;
+      const userMessageSeq = options?.userMessageSeq ?? null;
+      undeliverableCallback?.([{
+        localIds,
+        text: 'not-used-for-requeue-lookup',
+        userMessageSeq,
+      }]);
+      acceptedCallback?.({ localIds, userMessageSeq });
+    });
+    createCodexAppServerRuntimeSpy.mockImplementationOnce(() => ({
+      getSessionId: () => 'thread-app-server',
+      supportsInFlightSteer: () => false,
+      isTurnInFlight: () => false,
+      beginTurn: vi.fn(),
+      cancel: vi.fn(async () => {}),
+      reset: vi.fn(async () => {}),
+      startOrLoad: vi.fn(async () => {}),
+      setSessionMode: vi.fn(async () => {}),
+      setSessionModel: vi.fn(async () => {}),
+      setSessionConfigOption: vi.fn(async () => {}),
+      steerPrompt: vi.fn(async () => {}),
+      sendPrompt,
+      setOnPromptAcceptedByProvider: vi.fn((callback) => {
+        acceptedCallback = callback;
+      }),
+      setOnUndeliverablePrompts: vi.fn((callback) => {
+        undeliverableCallback = callback;
+      }),
+      compactContext: vi.fn(async () => {}),
+      flushTurn: vi.fn(async () => {}),
+      rollbackConversation: vi.fn(async () => ({ ok: true as const, target: { type: 'latest_turn' }, threadId: 'thread-app-server' })),
+    }));
+
+    let waitCallCount = 0;
+    sessionInputConsumerWaitForNextInputImpl = async (opts) => {
+      waitCallCount += 1;
+      if (waitCallCount > 2) return null;
+      if (waitCallCount === 1) {
+        if (!lastOnUserMessageHandler) {
+          throw new Error('missing-onUserMessage-handler');
+        }
+        lastOnUserMessageHandler({
+          content: { text: 'internally retried prompt' },
+          meta: { source: 'auth-invalidation-internal-retry-test' },
+          localId: 'local-auth-invalidation-retry',
+        }, { seq: 90 });
+      }
+      if (waitCallCount === 2 && opts.messageQueue.size() === 0) {
+        return null;
+      }
+      const queued = await opts.messageQueue.waitForMessagesAndGetAsString();
+      return queued ?? null;
+    };
+
+    const { runCodex } = await import('./runCodex');
+    const outcome = await runCodex({
+      credentials: { token: 'test' } as Credentials,
+      startedBy: 'daemon',
+      startingMode: 'remote',
+      codexBackendMode: 'appServer',
+      permissionMode: 'default',
+      permissionModeUpdatedAt: 1,
+    } as any)
+      .then(() => ({ ok: true as const }))
+      .catch((error: unknown) => ({ ok: false as const, error }));
+
+    if (!outcome.ok) {
+      throw outcome.error;
+    }
+
+    expect(sendPrompt).toHaveBeenCalledOnce();
+    expect(lastSessionClient?.confirmUserMessageDeliveredToProvider).toHaveBeenCalledTimes(1);
+    expect(lastSessionClient?.confirmUserMessageDeliveredToProvider).toHaveBeenCalledWith(90, {
+      localIds: ['local-auth-invalidation-retry'],
+    });
+  });
+
+  it('blocks server-owned app-server prompts reported undeliverable before provider acceptance', async () => {
+    resolveRunnerMcpServersSpy.mockImplementationOnce(async () => ({
+      happierMcpServer: { url: 'http://127.0.0.1:0', stop: vi.fn() },
+      mcpServers: {},
+    }));
+
+    let undeliverableCallback:
+      ((prompts: ReadonlyArray<Readonly<{ localIds?: readonly string[] | null; text: string; userMessageSeq: number | null }>>) => void)
+      | null = null;
+    const sendPrompt = vi.fn(async (_prompt: string, options?: {
+      localIds?: readonly string[] | null;
+      userMessageSeq?: number | null;
+    }) => {
+      undeliverableCallback?.([{
+        localIds: options?.localIds ?? null,
+        text: 'not-used-for-pending-block',
+        userMessageSeq: options?.userMessageSeq ?? null,
+      }]);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    createCodexAppServerRuntimeSpy.mockImplementationOnce(() => ({
+      getSessionId: () => 'thread-app-server',
+      supportsInFlightSteer: () => false,
+      isTurnInFlight: () => false,
+      beginTurn: vi.fn(),
+      cancel: vi.fn(async () => {}),
+      reset: vi.fn(async () => {}),
+      startOrLoad: vi.fn(async () => {}),
+      setSessionMode: vi.fn(async () => {}),
+      setSessionModel: vi.fn(async () => {}),
+      setSessionConfigOption: vi.fn(async () => {}),
+      steerPrompt: vi.fn(async () => {}),
+      sendPrompt,
+      setOnPromptAcceptedByProvider: vi.fn(),
+      setOnUndeliverablePrompts: vi.fn((callback) => {
+        undeliverableCallback = callback;
+      }),
+      compactContext: vi.fn(async () => {}),
+      flushTurn: vi.fn(async () => {}),
+      rollbackConversation: vi.fn(async () => ({ ok: true as const, target: { type: 'latest_turn' }, threadId: 'thread-app-server' })),
+    }));
+
+    let waitCallCount = 0;
+    sessionInputConsumerWaitForNextInputImpl = async (opts) => {
+      waitCallCount += 1;
+      if (waitCallCount > 1) return null;
+      if (waitCallCount === 1) {
+        lastSessionClient!.blockPendingMessageDelivery.mockResolvedValueOnce(true);
+        if (!lastOnUserMessageHandler) {
+          throw new Error('missing-onUserMessage-handler');
+        }
+        lastOnUserMessageHandler({
+          content: { text: 'server-owned pending prompt' },
+          meta: { source: 'server-owned-undeliverable-test' },
+          localId: 'local-server-owned-undeliverable',
+        }, { seq: null });
+      }
+      const queued = await opts.messageQueue.waitForMessagesAndGetAsString();
+      return queued ?? null;
+    };
+
+    const { runCodex } = await import('./runCodex');
+    const outcome = await runCodex({
+      credentials: { token: 'test' } as Credentials,
+      startedBy: 'daemon',
+      startingMode: 'remote',
+      codexBackendMode: 'appServer',
+      permissionMode: 'default',
+      permissionModeUpdatedAt: 1,
+    } as any)
+      .then(() => ({ ok: true as const }))
+      .catch((error: unknown) => ({ ok: false as const, error }));
+
+    if (!outcome.ok) {
+      throw outcome.error;
+    }
+
+    expect(sendPrompt).toHaveBeenCalledTimes(1);
+    expect(lastSessionClient?.blockPendingMessageDelivery).toHaveBeenCalledWith({
+      localIds: ['local-server-owned-undeliverable'],
+      reason: 'provider_rejected_before_acceptance',
+    });
+    expect(lastSessionClient?.confirmUserMessageDeliveredToProvider).not.toHaveBeenCalled();
+  });
+
+  it('blocks server-owned app-server prompts when startup fails before provider send', async () => {
+    resolveRunnerMcpServersSpy.mockImplementationOnce(async () => ({
+      happierMcpServer: { url: 'http://127.0.0.1:0', stop: vi.fn() },
+      mcpServers: {},
+    }));
+
+    const sendPrompt = vi.fn(async () => {});
+    createCodexAppServerRuntimeSpy.mockImplementationOnce(() => ({
+      getSessionId: () => null,
+      supportsInFlightSteer: () => false,
+      isTurnInFlight: () => false,
+      beginTurn: vi.fn(),
+      cancel: vi.fn(async () => {}),
+      reset: vi.fn(async () => {}),
+      startOrLoad: vi.fn(async () => {
+        throw new Error('codex cli unavailable');
+      }),
+      setSessionMode: vi.fn(async () => {}),
+      setSessionModel: vi.fn(async () => {}),
+      setSessionConfigOption: vi.fn(async () => {}),
+      steerPrompt: vi.fn(async () => {}),
+      sendPrompt,
+      setOnPromptAcceptedByProvider: vi.fn(),
+      setOnUndeliverablePrompts: vi.fn(),
+      compactContext: vi.fn(async () => {}),
+      flushTurn: vi.fn(async () => {}),
+      rollbackConversation: vi.fn(async () => ({ ok: true as const, target: { type: 'latest_turn' }, threadId: 'thread-app-server' })),
+    }));
+
+    let waitCallCount = 0;
+    sessionInputConsumerWaitForNextInputImpl = async (opts) => {
+      waitCallCount += 1;
+      if (waitCallCount > 1) return null;
+      lastSessionClient!.blockPendingMessageDelivery.mockResolvedValueOnce(true);
+      if (!lastOnUserMessageHandler) {
+        throw new Error('missing-onUserMessage-handler');
+      }
+      lastOnUserMessageHandler({
+        content: { text: 'startup failure prompt' },
+        meta: { source: 'startup-failure-test' },
+        localId: 'local-startup-failure',
+      }, { seq: null });
+      const queued = await opts.messageQueue.waitForMessagesAndGetAsString();
+      return queued ?? null;
+    };
+
+    const { runCodex } = await import('./runCodex');
+    const outcome = await runCodex({
+      credentials: { token: 'test' } as Credentials,
+      startedBy: 'daemon',
+      startingMode: 'remote',
+      codexBackendMode: 'appServer',
+      permissionMode: 'default',
+      permissionModeUpdatedAt: 1,
+    } as any)
+      .then(() => ({ ok: true as const }))
+      .catch((error: unknown) => ({ ok: false as const, error }));
+
+    if (!outcome.ok) {
+      throw outcome.error;
+    }
+
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(lastSessionClient?.blockPendingMessageDelivery).toHaveBeenCalledWith({
+      localIds: ['local-startup-failure'],
+      reason: 'runtime_disposed_before_delivery',
+    });
+    expect(lastSessionClient?.confirmUserMessageDeliveredToProvider).not.toHaveBeenCalled();
   });
 
   it('requeues the resolved provider prompt when replay seed was consumed before provider acceptance', async () => {

@@ -12,6 +12,7 @@ export type MessageQueueBatch<Mode, Message> = {
    */
   maxUserMessageSeq: number | null;
   userMessageLocalIds: string[];
+  providerAcceptancePending?: boolean;
 };
 
 type QueueItem<Mode, Message> = {
@@ -21,6 +22,7 @@ type QueueItem<Mode, Message> = {
   isolate: boolean;
   userMessageSeq: number | null;
   userMessageLocalIds: string[];
+  providerAcceptancePending: boolean;
 };
 
 type MessageBatcher<Message> = (messages: Message[]) => Message;
@@ -93,6 +95,7 @@ export class MessageQueue2<Mode, Message = string> {
       userMessageSeq?: number | null;
       userMessageLocalId?: string | null;
       userMessageLocalIds?: readonly string[] | null;
+      providerAcceptancePending?: boolean | null;
     },
   ): void {
     if (this.closed) {
@@ -108,6 +111,7 @@ export class MessageQueue2<Mode, Message = string> {
       isolate: false,
       userMessageSeq: normalizeUserMessageSeq(opts?.userMessageSeq),
       userMessageLocalIds: normalizeUserMessageLocalIds(opts),
+      providerAcceptancePending: opts?.providerAcceptancePending === true,
     });
 
     if (this.onMessageHandler) {
@@ -132,6 +136,7 @@ export class MessageQueue2<Mode, Message = string> {
       userMessageSeq?: number | null;
       userMessageLocalId?: string | null;
       userMessageLocalIds?: readonly string[] | null;
+      providerAcceptancePending?: boolean | null;
     },
   ): void {
     if (this.closed) {
@@ -148,6 +153,7 @@ export class MessageQueue2<Mode, Message = string> {
       isolate: true,
       userMessageSeq: normalizeUserMessageSeq(opts?.userMessageSeq),
       userMessageLocalIds: normalizeUserMessageLocalIds(opts),
+      providerAcceptancePending: opts?.providerAcceptancePending === true,
     });
 
     if (this.onMessageHandler) {
@@ -168,6 +174,7 @@ export class MessageQueue2<Mode, Message = string> {
       userMessageSeq?: number | null;
       userMessageLocalId?: string | null;
       userMessageLocalIds?: readonly string[] | null;
+      providerAcceptancePending?: boolean | null;
     },
   ): void {
     if (this.closed) {
@@ -183,6 +190,7 @@ export class MessageQueue2<Mode, Message = string> {
       isolate: false,
       userMessageSeq: normalizeUserMessageSeq(opts?.userMessageSeq),
       userMessageLocalIds: normalizeUserMessageLocalIds(opts),
+      providerAcceptancePending: opts?.providerAcceptancePending === true,
     });
 
     if (this.onMessageHandler) {
@@ -271,6 +279,7 @@ export class MessageQueue2<Mode, Message = string> {
     let maxUserMessageSeq: number | null = null;
     const userMessageLocalIdSet = new Set<string>();
     const userMessageLocalIds: string[] = [];
+    let providerAcceptancePending = false;
     const consume = (item: QueueItem<Mode, Message>): void => {
       sameModeMessages.push(item.message);
       if (item.userMessageSeq !== null) {
@@ -281,6 +290,7 @@ export class MessageQueue2<Mode, Message = string> {
         userMessageLocalIdSet.add(localId);
         userMessageLocalIds.push(localId);
       }
+      providerAcceptancePending = providerAcceptancePending || item.providerAcceptancePending;
     };
 
     if (firstItem.isolate) {
@@ -300,6 +310,7 @@ export class MessageQueue2<Mode, Message = string> {
       isolate,
       maxUserMessageSeq,
       userMessageLocalIds,
+      providerAcceptancePending,
     };
   }
 

@@ -3,11 +3,16 @@ import { updateAgentStateBestEffort } from '@/api/session/sessionWritesBestEffor
 
 export function publishInFlightSteerCapability(opts: {
   session: { updateAgentState: (updater: (current: AgentState) => AgentState) => Promise<void> | void };
-  runtime: { supportsInFlightSteer: () => boolean; canSteerPrompt?: () => boolean };
+  runtime: {
+    supportsInFlightSteer: () => boolean;
+    supportsInFlightConfigApply?: () => boolean;
+    canSteerPrompt?: () => boolean;
+  };
   nowMs?: () => number;
 }): void {
   const supported = opts.runtime.supportsInFlightSteer() === true;
   const available = supported && (opts.runtime.canSteerPrompt?.() ?? supported) === true;
+  const configApplySupported = supported && opts.runtime.supportsInFlightConfigApply?.() === true;
   // Lane P (O-design Seam A): publish WHY steering is unavailable so the UI can stop pretending a
   // non-steerable send was delivered. Reason is null when available (back-compat by optionality).
   const unavailableReason: InFlightSteerUnavailableReason | null = !supported
@@ -27,6 +32,7 @@ export function publishInFlightSteerCapability(opts: {
         inFlightSteerAvailable: available,
         inFlightSteerUnavailableReason: unavailableReason,
         inFlightSteerStateAt: stateAt,
+        inFlightConfigApplySupported: configApplySupported,
       },
     }),
     '[codex]',

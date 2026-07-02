@@ -7,6 +7,9 @@ function readBooleanFlag(value: unknown, key: string): boolean {
 }
 
 export function isClaudeInternalTranscriptMessage(message: RawJSONLines): boolean {
+  if (message.type === 'attachment') {
+    return true;
+  }
   if (message.type === 'user') {
     if (
       readBooleanFlag(message, 'isCompactSummary')

@@ -70,6 +70,7 @@ describe('ApiSessionClient pending queue materialization', () => {
                 pendingQueueState: {
                     known: true,
                     pendingCount: 0,
+                    pendingBlockedCount: 0,
                     pendingVersion: 5,
                 },
             });
@@ -220,6 +221,7 @@ describe('ApiSessionClient pending queue materialization', () => {
             pendingQueueState: {
                 known: true,
                 pendingCount: 1,
+                pendingBlockedCount: 0,
                 pendingVersion: 2,
             },
             latestTurnStatus: 'in_progress',
@@ -378,6 +380,7 @@ describe('ApiSessionClient pending queue materialization', () => {
                 pendingQueueState: {
                     known: true,
                     pendingCount: 0,
+                    pendingBlockedCount: 0,
                     pendingVersion: 6,
                 },
             });
@@ -902,6 +905,21 @@ describe('ApiSessionClient pending queue materialization', () => {
             pendingCount: 2,
             pendingVersion: 1,
         });
+        Object.defineProperty(client, 'sessionConnectionSupervisor', {
+            configurable: true,
+            value: {
+                stop: vi.fn(async () => {}),
+                getState: () => ({
+                    phase: 'online',
+                    reason: null,
+                    attempt: 0,
+                    nextRetryAt: null,
+                    lastConnectedAt: Date.now(),
+                    lastDisconnectedAt: null,
+                    lastErrorMessage: null,
+                }),
+            },
+        });
         const onUserMessage = vi.fn();
         client.onUserMessage(onUserMessage);
 
@@ -954,6 +972,9 @@ describe('ApiSessionClient pending queue materialization', () => {
         }
 
         expect(onUserMessage.mock.calls.map((call) => call[0]?.localId)).toEqual(['local-p1', 'local-p2']);
+        const axiosMod = await import('axios');
+        const axios = axiosMod.default as any;
+        vi.spyOn(axios, 'get').mockResolvedValue({ data: { pending: [] } });
         await expect(client.popPendingMessage()).resolves.toBe(false);
         expect(materializeResponses).toHaveLength(0);
     });

@@ -34,6 +34,7 @@ describe('createClaudePendingAwareInputConsumer', () => {
     expect(materializeNextPendingMessageSafely).toHaveBeenCalledWith({
       reconcileWhenEmpty: 'force',
       activeTurnDeliveryPolicy: 'allow_live_delivery',
+      pendingQueueDeliveryTiming: 'after_foreground_ready',
     });
   });
 
@@ -49,6 +50,7 @@ describe('createClaudePendingAwareInputConsumer', () => {
     expect(materializeNextPendingMessageSafely).toHaveBeenCalledWith({
       reconcileWhenEmpty: 'force',
       activeTurnDeliveryPolicy: 'allow_live_delivery',
+      pendingQueueDeliveryTiming: 'after_foreground_ready',
     });
   });
 
@@ -63,6 +65,23 @@ describe('createClaudePendingAwareInputConsumer', () => {
 
     expect(materializeNextPendingMessageSafely).toHaveBeenCalledWith({
       reconcileWhenEmpty: 'force',
+      pendingQueueDeliveryTiming: 'after_foreground_ready',
+    });
+  });
+
+  it('passes runtime-idle timing to queued pending materialization without changing live steering policy', async () => {
+    const { session, materializeNextPendingMessageSafely } = createSessionHarness({
+      sessionPendingQueueDeliveryTiming: 'after_runtime_idle',
+    });
+
+    const consumer = createClaudePendingAwareInputConsumer(session);
+
+    await consumer.drainPending({ reason: 'test-runtime-idle-timing' });
+
+    expect(materializeNextPendingMessageSafely).toHaveBeenCalledWith({
+      reconcileWhenEmpty: 'force',
+      activeTurnDeliveryPolicy: 'allow_live_delivery',
+      pendingQueueDeliveryTiming: 'after_runtime_idle',
     });
   });
 });

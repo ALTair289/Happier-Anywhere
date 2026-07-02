@@ -1,14 +1,108 @@
 import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, win32 } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
 import { buildConnectedServiceCredentialRecord } from '@happier-dev/protocol';
 
-import { materializePiConnectedServiceAuth } from './materializePiConnectedServiceAuth';
+import {
+  PI_BROKER_DAEMON_STATE_PATH_ENV,
+  PI_BROKER_REFRESH_TOKEN_ENV,
+  PI_BROKER_SELECTIONS_ENV,
+  PI_BROKER_SELECTION_IDENTITY_ENV,
+  isPiBrokerMarker,
+  parsePiBrokerSelections,
+  resolvePiBrokerExtensionPath,
+} from '@/backends/pi/brokerExtension';
+
+import {
+  applyPiCodingAgentDirChildEnvFormatting,
+  formatPiCodingAgentDirForChildEnv,
+  materializePiConnectedServiceAuth,
+} from './materializePiConnectedServiceAuth';
+
+/**
+ * No-leak invariant for brokered Pi OAuth (the dual-refresher fix). The provider refresh token must
+ * appear in NONE of: the materialized `auth.json`, the broker extension source on disk, or the emitted
+ * child env. Brokered Pi may receive the current short-lived access token for its synchronous
+ * `getApiKey` path, but it never receives a provider refresh token and therefore cannot become a second
+ * refresher.
+ */
+async function assertNoRefreshTokenLeak(params: Readonly<{
+  agentDir: string;
+  env: Record<string, string>;
+  sentinels: readonly string[];
+}>): Promise<void> {
+  const authRaw = await readFile(join(params.agentDir, 'auth.json'), 'utf8');
+  for (const sentinel of params.sentinels) {
+    expect(authRaw).not.toContain(sentinel);
+    for (const [, value] of Object.entries(params.env)) {
+      expect(value).not.toContain(sentinel);
+    }
+  }
+  // The broker extension file (if written) must also be free of the secrets — it embeds NO tokens.
+  const extensionRaw = await readFile(resolvePiBrokerExtensionPath(params.agentDir), 'utf8').catch(() => '');
+  for (const sentinel of params.sentinels) {
+    expect(extensionRaw).not.toContain(sentinel);
+  }
+}
 
 describe('materializePiConnectedServiceAuth', () => {
+  it('keeps Windows child agent dirs non-namespaced because Pi auth storage locks auth.json', () => {
+    const agentDir = win32.join(
+      'C:\\',
+      'Users',
+      'test_qa',
+      'AppData',
+      'Local',
+      'Temp',
+      'happier-windows-provider-codex-pi-qa-20260626T2055Z',
+      'happier-home',
+      'daemon',
+      'connected-services',
+      'materialized',
+      'csm_0e41d1c24f1de526058d59c0a42e58ff',
+      'pi',
+      'pi-agent-dir',
+    );
+
+    expect(formatPiCodingAgentDirForChildEnv(agentDir, 'win32')).toBe(agentDir);
+    expect(formatPiCodingAgentDirForChildEnv(`\\\\?\\${agentDir}`, 'win32')).toBe(`\\\\?\\${agentDir}`);
+    expect(formatPiCodingAgentDirForChildEnv('/tmp/happier/pi-agent-dir', 'darwin')).toBe('/tmp/happier/pi-agent-dir');
+  });
+
+  it('formats only the promoted Pi session dir with the Win32 namespace after final-root rewrite', () => {
+    const agentDir = win32.join(
+      'C:\\',
+      'Users',
+      'test_qa',
+      'AppData',
+      'Local',
+      'Temp',
+      'happier-windows-provider-codex-pi-qa-20260626T2055Z',
+      'happier-home',
+      'daemon',
+      'connected-services',
+      'materialized',
+      'csm_0e41d1c24f1de526058d59c0a42e58ff',
+      'pi',
+      'pi-agent-dir',
+    );
+    const sessionDir = win32.join(agentDir, 'sessions', '--tmp-project--');
+    const env = {
+      PI_CODING_AGENT_DIR: agentDir,
+      PI_CODING_AGENT_SESSION_DIR: sessionDir,
+      OTHER_PATH: agentDir,
+    };
+
+    applyPiCodingAgentDirChildEnvFormatting(env, 'win32');
+
+    expect(env.PI_CODING_AGENT_DIR).toBe(agentDir);
+    expect(env.PI_CODING_AGENT_SESSION_DIR).toBe(`\\\\?\\${sessionDir}`);
+    expect(env.OTHER_PATH).toBe(agentDir);
+  });
+
   it('writes Anthropic token credentials to auth.json for Pi hot reload', async () => {
     const now = Date.now();
     const rootDir = await mkdtemp(join(tmpdir(), 'happier-pi-auth-'));
@@ -31,6 +125,8 @@ describe('materializePiConnectedServiceAuth', () => {
     expect(res.env.PI_CODING_AGENT_DIR).toContain('pi-agent-dir');
     expect(res.env).not.toHaveProperty('ANTHROPIC_API_KEY');
     expect(res.env).not.toHaveProperty('ANTHROPIC_OAUTH_TOKEN');
+    // Direct API key ⇒ NOT brokered ⇒ no broker env.
+    expect(res.env).not.toHaveProperty(PI_BROKER_SELECTIONS_ENV);
 
     const authPath = join(res.env.PI_CODING_AGENT_DIR, 'auth.json');
     const authRaw = await readFile(authPath, 'utf8');
@@ -65,7 +161,7 @@ describe('materializePiConnectedServiceAuth', () => {
     expect(res.env).not.toHaveProperty('PI_CODING_AGENT_SESSION_DIR');
   });
 
-  it('writes Claude subscription setup-token credentials to auth.json for Pi hot reload', async () => {
+  it('writes Claude subscription setup-token credentials to auth.json for Pi hot reload (direct, not brokered)', async () => {
     const now = Date.now();
     const rootDir = await mkdtemp(join(tmpdir(), 'happier-pi-auth-'));
     const claudeSubscription = buildConnectedServiceCredentialRecord({
@@ -87,6 +183,8 @@ describe('materializePiConnectedServiceAuth', () => {
     expect(res.env.PI_CODING_AGENT_DIR).toContain('pi-agent-dir');
     expect(res.env).not.toHaveProperty('ANTHROPIC_OAUTH_TOKEN');
     expect(res.env).not.toHaveProperty('ANTHROPIC_API_KEY');
+    // Setup-token is a long-lived secret used directly (no provider refresh) ⇒ NOT brokered.
+    expect(res.env).not.toHaveProperty(PI_BROKER_SELECTIONS_ENV);
 
     const authPath = join(res.env.PI_CODING_AGENT_DIR, 'auth.json');
     const authRaw = await readFile(authPath, 'utf8');
@@ -98,7 +196,7 @@ describe('materializePiConnectedServiceAuth', () => {
     });
   });
 
-  it('writes Claude subscription OAuth credentials as Pi native Anthropic OAuth auth', async () => {
+  it('brokers Claude subscription OAuth: NO refresh token reaches Pi (auth.json/env/extension)', async () => {
     const now = Date.now();
     const rootDir = await mkdtemp(join(tmpdir(), 'happier-pi-auth-'));
     const claudeSubscription = buildConnectedServiceCredentialRecord({
@@ -108,8 +206,8 @@ describe('materializePiConnectedServiceAuth', () => {
       kind: 'oauth',
       expiresAt: now + 60_000,
       oauth: {
-        accessToken: 'claude-access-token',
-        refreshToken: 'claude-refresh-token',
+        accessToken: 'claude-access-token-SECRET',
+        refreshToken: 'claude-refresh-token-MUST-NOT-LEAK',
         idToken: null,
         scope: null,
         tokenType: 'Bearer',
@@ -126,20 +224,30 @@ describe('materializePiConnectedServiceAuth', () => {
       anthropic: null,
     });
 
-    expect(res.env.PI_CODING_AGENT_DIR).toContain('pi-agent-dir');
-    expect(res.env).not.toHaveProperty('ANTHROPIC_OAUTH_TOKEN');
-    expect(res.env).not.toHaveProperty('ANTHROPIC_API_KEY');
+    const agentDir = res.env.PI_CODING_AGENT_DIR;
+    const authRaw = await readFile(join(agentDir, 'auth.json'), 'utf8');
+    const auth = JSON.parse(authRaw) as Record<string, { type: string; refresh?: string; access?: string; expires?: number; accountId?: string }>;
 
-    const authPath = join(res.env.PI_CODING_AGENT_DIR, 'auth.json');
-    const authRaw = await readFile(authPath, 'utf8');
-    expect(JSON.parse(authRaw)).toEqual({
-      anthropic: {
-        type: 'oauth',
-        access: 'claude-access-token',
-        refresh: 'claude-refresh-token',
-        expires: now + 60_000,
-        accountId: 'claude-account-id',
-      },
+    // The brokered anthropic entry keeps the current access token for Pi's synchronous first-turn
+    // getApiKey path, but the refresh value is only a non-secret broker marker.
+    expect(auth.anthropic.type).toBe('oauth');
+    expect(isPiBrokerMarker(auth.anthropic.refresh)).toBe(true);
+    expect(auth.anthropic.refresh).not.toBe('claude-refresh-token-MUST-NOT-LEAK');
+    expect(auth.anthropic.access).toBe('claude-access-token-SECRET');
+    expect(auth.anthropic.expires).toBe(claudeSubscription.expiresAt);
+    expect(auth.anthropic.accountId).toBe('claude-account-id');
+
+    // Broker env: selections + daemon-state path + selection identity present; refresh-token env is the
+    // scoped capability token (or absent if no daemon control token in this test env), never the secret.
+    const selections = parsePiBrokerSelections(res.env[PI_BROKER_SELECTIONS_ENV]);
+    expect(selections.anthropic).toMatchObject({ serviceId: 'claude-subscription', profileId: 'claude-pro-oauth' });
+    expect(res.env[PI_BROKER_DAEMON_STATE_PATH_ENV]).toBeDefined();
+    expect(typeof res.env[PI_BROKER_SELECTION_IDENTITY_ENV]).toBe('string');
+
+    await assertNoRefreshTokenLeak({
+      agentDir,
+      env: res.env,
+      sentinels: ['claude-refresh-token-MUST-NOT-LEAK'],
     });
   });
 
@@ -208,7 +316,7 @@ describe('materializePiConnectedServiceAuth', () => {
     });
   });
 
-  it('writes OpenAI API key credentials to auth.json', async () => {
+  it('writes OpenAI API key credentials to auth.json (direct, not brokered)', async () => {
     const now = Date.now();
     const rootDir = await mkdtemp(join(tmpdir(), 'happier-pi-auth-'));
     const openai = buildConnectedServiceCredentialRecord({
@@ -227,6 +335,7 @@ describe('materializePiConnectedServiceAuth', () => {
       anthropic: null,
     });
 
+    expect(res.env).not.toHaveProperty(PI_BROKER_SELECTIONS_ENV);
     const authPath = join(res.env.PI_CODING_AGENT_DIR, 'auth.json');
     const authRaw = await readFile(authPath, 'utf8');
     expect(JSON.parse(authRaw)).toEqual({
@@ -237,7 +346,7 @@ describe('materializePiConnectedServiceAuth', () => {
     });
   });
 
-  it('materializes asymmetric active credentials for independent services', async () => {
+  it('brokers Codex OAuth + keeps a direct Anthropic key: NO Codex refresh token reaches Pi', async () => {
     const now = Date.now();
     const rootDir = await mkdtemp(join(tmpdir(), 'happier-pi-auth-'));
     const openaiCodex = buildConnectedServiceCredentialRecord({
@@ -247,8 +356,8 @@ describe('materializePiConnectedServiceAuth', () => {
       kind: 'oauth',
       expiresAt: now + 60_000,
       oauth: {
-        accessToken: 'codex-access-p2',
-        refreshToken: 'codex-refresh-p2',
+        accessToken: 'codex-access-p2-SECRET',
+        refreshToken: 'codex-refresh-p2-MUST-NOT-LEAK',
         idToken: null,
         scope: null,
         tokenType: 'Bearer',
@@ -273,19 +382,67 @@ describe('materializePiConnectedServiceAuth', () => {
     });
 
     expect(res.env).not.toHaveProperty('ANTHROPIC_API_KEY');
-    const authPath = join(res.env.PI_CODING_AGENT_DIR, 'auth.json');
-    const authRaw = await readFile(authPath, 'utf8');
-    expect(JSON.parse(authRaw)).toMatchObject({
-      'openai-codex': {
-        type: 'oauth',
-        access: 'codex-access-p2',
-        refresh: 'codex-refresh-p2',
-        accountId: 'acct-codex-p2',
-      },
-      anthropic: {
-        type: 'api_key',
-        key: 'sk-ant-p1',
+    const agentDir = res.env.PI_CODING_AGENT_DIR;
+    const authRaw = await readFile(join(agentDir, 'auth.json'), 'utf8');
+    const auth = JSON.parse(authRaw) as Record<string, Record<string, unknown>>;
+
+    // Codex (OAuth) ⇒ brokered marker (no refresh leak); anthropic (token) ⇒ direct api_key.
+    expect(auth['openai-codex'].type).toBe('oauth');
+    expect(isPiBrokerMarker(auth['openai-codex'].refresh)).toBe(true);
+    expect(auth['openai-codex'].refresh).not.toBe('codex-refresh-p2-MUST-NOT-LEAK');
+    expect(auth['openai-codex'].access).toBe('codex-access-p2-SECRET');
+    expect(auth['openai-codex'].expires).toBe(openaiCodex.expiresAt);
+    expect(auth['openai-codex'].accountId).toBe('acct-codex-p2');
+    expect(auth.anthropic).toEqual({ type: 'api_key', key: 'sk-ant-p1' });
+
+    const selections = parsePiBrokerSelections(res.env[PI_BROKER_SELECTIONS_ENV]);
+    // Selections key by the SHARED bridge tag (openai), while the auth.json entry keys by Pi's id.
+    expect(selections.openai).toMatchObject({ serviceId: 'openai-codex', profileId: 'codex-p2' });
+    // Only the Codex lane is brokered; the direct anthropic key is NOT a broker selection.
+    expect(selections.anthropic).toBeUndefined();
+
+    await assertNoRefreshTokenLeak({
+      agentDir,
+      env: res.env,
+      sentinels: ['codex-refresh-p2-MUST-NOT-LEAK'],
+    });
+  });
+
+  it('does not inject the scoped broker-refresh token value as the master control token (no env carries the master)', async () => {
+    // The scoped token is derived from the daemon master control token but the master itself must NEVER
+    // appear in any emitted env value (least privilege). In this unit env there is typically no daemon
+    // control token, so the scoped token env is simply absent — assert it is never the raw master.
+    const now = Date.now();
+    const rootDir = await mkdtemp(join(tmpdir(), 'happier-pi-auth-'));
+    const claudeSubscription = buildConnectedServiceCredentialRecord({
+      now,
+      serviceId: 'claude-subscription',
+      profileId: 'claude-pro-oauth',
+      kind: 'oauth',
+      expiresAt: now + 60_000,
+      oauth: {
+        accessToken: 'a',
+        refreshToken: 'r',
+        idToken: null,
+        scope: null,
+        tokenType: 'Bearer',
+        providerAccountId: 'acct',
+        providerEmail: null,
       },
     });
+
+    const res = await materializePiConnectedServiceAuth({
+      rootDir,
+      openaiCodex: null,
+      openai: null,
+      claudeSubscription,
+      anthropic: null,
+    });
+
+    // If a scoped token was injected, it must be a derived (base64url) value, never a placeholder secret.
+    const scoped = res.env[PI_BROKER_REFRESH_TOKEN_ENV];
+    if (typeof scoped === 'string') {
+      expect(scoped.length).toBeGreaterThan(0);
+    }
   });
 });

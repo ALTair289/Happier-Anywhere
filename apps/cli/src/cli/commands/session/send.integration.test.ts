@@ -618,6 +618,25 @@ describe('happier session send (integration)', () => {
     const waitSocket = createApiSessionSocketStub({
       onConnect: (connectedSocket) => {
         setTimeout(() => {
+          transcriptMessages = [
+            ...transcriptMessages,
+            {
+              id: 'msg-active-wait-complete',
+              seq: 8,
+              createdAt: Date.now(),
+              content: {
+                t: 'plain',
+                v: {
+                  role: 'agent',
+                  content: {
+                    type: 'acp',
+                    provider: 'claude',
+                    data: { type: 'task_complete', id: 'task_send_wait_1' },
+                  },
+                },
+              },
+            },
+          ];
           connectedSocket.trigger('update', {
             id: 'u_task_complete',
             seq: 8,
@@ -653,9 +672,13 @@ describe('happier session send (integration)', () => {
     const output = captureConsoleJsonOutput();
     let releaseLookupTimer: NodeJS.Timeout | null = null;
     try {
-      releaseLookupTimer = setTimeout(() => {
+      releaseLookupTimer = setInterval(() => {
         if (!lastActiveSessionRpcLocalId) {
           return;
+        }
+        if (releaseLookupTimer) {
+          clearInterval(releaseLookupTimer);
+          releaseLookupTimer = null;
         }
         visibleMessageByLocalId = {
           id: 'msg-active-wait-1',
@@ -695,7 +718,7 @@ describe('happier session send (integration)', () => {
             },
           },
         ];
-      }, 40);
+      }, 20);
 
       const sendPromise = handleSessionCommand(
         ['send', sessionId, 'Wait for this prompt', '--wait', '--timeout', '1', '--json'],
@@ -727,12 +750,18 @@ describe('happier session send (integration)', () => {
       await sendPromise;
 
       const parsed = output.json();
-      expect(parsed.ok).toBe(true);
+      expect(parsed.ok, JSON.stringify({
+        parsed,
+        lastActiveSessionRpcLocalId,
+        transcriptLookupRequests,
+        transcriptAfterSeqRequests,
+        transcriptMessagesLength: transcriptMessages.length,
+      })).toBe(true);
       expect(parsed.kind).toBe('session_send');
       expect(parsed.data?.waited).toBe(true);
       expect(transcriptLookupRequests).toBeGreaterThan(0);
     } finally {
-      if (releaseLookupTimer) clearTimeout(releaseLookupTimer);
+      if (releaseLookupTimer) clearInterval(releaseLookupTimer);
       output.restore();
     }
   });
@@ -900,7 +929,7 @@ describe('happier session send (integration)', () => {
     }
   });
 
-  it('treats a ready event as completion when an active-session prompt materializes without ACP task_complete', async () => {
+  it('treats task completion as completion when an active-session prompt materializes', async () => {
     const { handleSessionCommand } = await import('./index');
     const { encodeBase64: encodeBase64Session, encryptWithDataKey, decodeBase64, decryptWithDataKey } = await import('@/api/encryption');
 
@@ -934,15 +963,34 @@ describe('happier session send (integration)', () => {
     const waitSocket = createApiSessionSocketStub({
       onConnect: (connectedSocket) => {
         setTimeout(() => {
+          transcriptMessages = [
+            ...transcriptMessages,
+            {
+              id: 'msg-active-wait-task-complete',
+              seq: 8,
+              createdAt: Date.now(),
+              content: {
+                t: 'plain',
+                v: {
+                  role: 'agent',
+                  content: {
+                    type: 'acp',
+                    provider: 'codex',
+                    data: { type: 'task_complete', id: 'task_send_wait_1' },
+                  },
+                },
+              },
+            },
+          ];
           connectedSocket.trigger('update', {
-            id: 'u_ready',
+            id: 'u_task_complete',
             seq: 8,
             createdAt: Date.now(),
             body: {
               t: 'new-message',
               sid: sessionId,
               message: {
-                id: 'msg-active-wait-ready',
+                id: 'msg-active-wait-task-complete',
                 seq: 8,
                 localId: null,
                 createdAt: Date.now(),
@@ -952,9 +1000,9 @@ describe('happier session send (integration)', () => {
                   v: {
                     role: 'agent',
                     content: {
-                      id: 'ready_evt_send_wait_1',
-                      type: 'event',
-                      data: { type: 'ready' },
+                      type: 'acp',
+                      provider: 'codex',
+                      data: { type: 'task_complete', id: 'task_send_wait_1' },
                     },
                   },
                 },
@@ -990,7 +1038,7 @@ describe('happier session send (integration)', () => {
               t: 'plain',
               v: {
                 role: 'user',
-                content: { type: 'text', text: 'Wait for ready event' },
+                content: { type: 'text', text: 'Wait for task completion' },
               },
             },
           },
@@ -998,7 +1046,7 @@ describe('happier session send (integration)', () => {
       }, 40);
 
       const sendPromise = handleSessionCommand(
-        ['send', sessionId, 'Wait for ready event', '--wait', '--timeout', '1', '--json'],
+        ['send', sessionId, 'Wait for task completion', '--wait', '--timeout', '1', '--json'],
         {
           readCredentialsFn: async () => ({
             token: 'token_test',
@@ -1032,7 +1080,7 @@ describe('happier session send (integration)', () => {
     }
   });
 
-  it('ignores older unresolved turns when waiting for the current send to reach ready', async () => {
+  it('ignores older unresolved turns when waiting for the current send to reach task completion', async () => {
     const { handleSessionCommand } = await import('./index');
     const { encodeBase64: encodeBase64Session, encryptWithDataKey, decodeBase64, decryptWithDataKey } = await import('@/api/encryption');
 
@@ -1066,15 +1114,34 @@ describe('happier session send (integration)', () => {
     const waitSocket = createApiSessionSocketStub({
       onConnect: (connectedSocket) => {
         setTimeout(() => {
+          transcriptMessages = [
+            ...transcriptMessages,
+            {
+              id: 'msg-current-turn-task-complete',
+              seq: 4,
+              createdAt: Date.now(),
+              content: {
+                t: 'plain',
+                v: {
+                  role: 'agent',
+                  content: {
+                    type: 'acp',
+                    provider: 'codex',
+                    data: { type: 'task_complete', id: 'task_send_wait_current_turn' },
+                  },
+                },
+              },
+            },
+          ];
           connectedSocket.trigger('update', {
-            id: 'u_ready_current_turn',
+            id: 'u_task_complete_current_turn',
             seq: 4,
             createdAt: Date.now(),
             body: {
               t: 'new-message',
               sid: sessionId,
               message: {
-                id: 'msg-current-turn-ready',
+                id: 'msg-current-turn-task-complete',
                 seq: 4,
                 localId: null,
                 createdAt: Date.now(),
@@ -1084,9 +1151,9 @@ describe('happier session send (integration)', () => {
                   v: {
                     role: 'agent',
                     content: {
-                      id: 'ready_evt_send_wait_current_turn',
-                      type: 'event',
-                      data: { type: 'ready' },
+                      type: 'acp',
+                      provider: 'codex',
+                      data: { type: 'task_complete', id: 'task_send_wait_current_turn' },
                     },
                   },
                 },

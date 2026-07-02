@@ -6,6 +6,16 @@ export type ClaudeRemoteStreamedTranscriptEphemeralOptions = Readonly<{
     createdAt: number;
     updatedAt?: number;
     meta?: Record<string, unknown>;
+    tick?: number;
+}>;
+
+export type ClaudeRemoteStreamedTranscriptEphemeralDeltaOptions = Readonly<{
+    localId: string;
+    tick: number;
+    baseLength: number;
+    createdAt: number;
+    updatedAt?: number;
+    meta?: Record<string, unknown>;
 }>;
 
 export type ClaudeRemoteStreamedTranscriptClient = Readonly<{
@@ -29,6 +39,12 @@ export type ClaudeRemoteStreamedTranscriptClient = Readonly<{
         body: ACPMessageData,
         opts: ClaudeRemoteStreamedTranscriptEphemeralOptions,
     ) => void | Promise<void>;
+    sendAgentMessageEphemeralDelta?: (
+        provider: ACPProvider,
+        body: ACPMessageData,
+        opts: ClaudeRemoteStreamedTranscriptEphemeralDeltaOptions,
+    ) => void | Promise<void>;
+    getEphemeralStreamConnectionEpoch?: () => number;
 }>;
 
 export type ClaudeRemoteStreamedTranscriptSession = StreamedTranscriptWriterSession & Readonly<{
@@ -61,6 +77,20 @@ export function createClaudeRemoteStreamedTranscriptSession(
             ? {
                 sendAgentMessageEphemeral: (provider, body, opts) =>
                     client.sendAgentMessageEphemeral?.(provider, body, opts),
+            }
+            : {}),
+        ...(typeof client.sendAgentMessageEphemeralDelta === 'function'
+            ? {
+                sendAgentMessageEphemeralDelta: (
+                    provider: ACPProvider,
+                    body: ACPMessageData,
+                    opts: ClaudeRemoteStreamedTranscriptEphemeralDeltaOptions,
+                ) => void client.sendAgentMessageEphemeralDelta?.(provider, body, opts),
+            }
+            : {}),
+        ...(typeof client.getEphemeralStreamConnectionEpoch === 'function'
+            ? {
+                getEphemeralStreamConnectionEpoch: () => client.getEphemeralStreamConnectionEpoch?.() ?? 0,
             }
             : {}),
     };

@@ -13,8 +13,9 @@ vi.mock('socket.io-client', () => ({
 }));
 
 vi.mock('@/persistence', () => ({
-    readLastChangesCursor: vi.fn(async () => 0),
-    writeLastChangesCursor: vi.fn(async () => {}),
+    readCredentials: vi.fn(async () => null),
+    readAccountChangesCursor: vi.fn(async () => 0),
+    writeAccountChangesCursor: vi.fn(async () => {}),
 }));
 
 vi.mock('axios');
@@ -22,8 +23,8 @@ vi.mock('axios');
 describe('ApiSessionClient long-offline reconnect fallback', () => {
     it('falls back to snapshot sync when /v2/changes hits the page cap (>=200) and still catches up messages on reconnect', async () => {
         const { ApiSessionClient } = await import('./session/sessionClient');
-        const { writeLastChangesCursor } = await import('@/persistence');
-        (writeLastChangesCursor as any).mockClear?.();
+        const { writeAccountChangesCursor } = await import('@/persistence');
+        (writeAccountChangesCursor as any).mockClear?.();
 
         const mockSocket = createApiSessionSocketStub();
         const mockUserSocket = createApiSessionSocketStub();
@@ -86,15 +87,15 @@ describe('ApiSessionClient long-offline reconnect fallback', () => {
         await (client as any).changesSyncInFlight;
 
         expect(snapshotSpy).toHaveBeenCalledWith({ reason: 'socket-reconnect-catchup' });
-        expect(writeLastChangesCursor).toHaveBeenCalledWith('account-1', CHANGES_PAGE_LIMIT);
+        expect(writeAccountChangesCursor).not.toHaveBeenCalled();
 
         await client.close();
     });
 
     it('falls back to snapshot sync when /v2/changes is missing (e.g. old server 404) and still catches up messages on reconnect', async () => {
         const { ApiSessionClient } = await import('./session/sessionClient');
-        const { writeLastChangesCursor } = await import('@/persistence');
-        (writeLastChangesCursor as any).mockClear?.();
+        const { writeAccountChangesCursor } = await import('@/persistence');
+        (writeAccountChangesCursor as any).mockClear?.();
 
         const mockSocket = createApiSessionSocketStub();
         const mockUserSocket = createApiSessionSocketStub();
@@ -148,15 +149,15 @@ describe('ApiSessionClient long-offline reconnect fallback', () => {
         await (client as any).changesSyncInFlight;
 
         expect(snapshotSpy).toHaveBeenCalledWith({ reason: 'socket-reconnect-catchup' });
-        expect(writeLastChangesCursor).not.toHaveBeenCalled();
+        expect(writeAccountChangesCursor).not.toHaveBeenCalled();
 
         await client.close();
     });
 
     it.each([401, 403] as const)('reports /v2/changes auth status %i to the session supervisor without fallback sync', async (status) => {
         const { ApiSessionClient } = await import('./session/sessionClient');
-        const { writeLastChangesCursor } = await import('@/persistence');
-        (writeLastChangesCursor as any).mockClear?.();
+        const { writeAccountChangesCursor } = await import('@/persistence');
+        (writeAccountChangesCursor as any).mockClear?.();
 
         const mockSocket = createApiSessionSocketStub();
         const mockUserSocket = createApiSessionSocketStub();
@@ -221,15 +222,15 @@ describe('ApiSessionClient long-offline reconnect fallback', () => {
             errorMessage: expect.any(String),
         } satisfies ReadinessProbeResult);
         expect(snapshotSpy).not.toHaveBeenCalled();
-        expect(writeLastChangesCursor).not.toHaveBeenCalled();
+        expect(writeAccountChangesCursor).not.toHaveBeenCalled();
 
         await client.close();
     });
 
     it.each([401, 403] as const)('reports profile auth status %i to the session supervisor before /v2/changes sync', async (status) => {
         const { ApiSessionClient } = await import('./session/sessionClient');
-        const { writeLastChangesCursor } = await import('@/persistence');
-        (writeLastChangesCursor as any).mockClear?.();
+        const { writeAccountChangesCursor } = await import('@/persistence');
+        (writeAccountChangesCursor as any).mockClear?.();
 
         const mockSocket = createApiSessionSocketStub();
         const mockUserSocket = createApiSessionSocketStub();
@@ -288,15 +289,15 @@ describe('ApiSessionClient long-offline reconnect fallback', () => {
         const axiosGetCalls = vi.mocked(axios.get).mock.calls;
         expect(axiosGetCalls.some((call) => String(call[0]).includes('/v2/changes'))).toBe(false);
         expect(snapshotSpy).not.toHaveBeenCalled();
-        expect(writeLastChangesCursor).not.toHaveBeenCalled();
+        expect(writeAccountChangesCursor).not.toHaveBeenCalled();
 
         await client.close();
     });
 
     it.each([401, 403] as const)('throws /v2/changes auth status %i without a session supervisor instead of falling back', async (status) => {
         const { ApiSessionClient } = await import('./session/sessionClient');
-        const { writeLastChangesCursor } = await import('@/persistence');
-        (writeLastChangesCursor as any).mockClear?.();
+        const { writeAccountChangesCursor } = await import('@/persistence');
+        (writeAccountChangesCursor as any).mockClear?.();
 
         const mockSocket = createApiSessionSocketStub();
         const mockUserSocket = createApiSessionSocketStub();
@@ -341,7 +342,7 @@ describe('ApiSessionClient long-offline reconnect fallback', () => {
         });
 
         expect(snapshotSpy).not.toHaveBeenCalled();
-        expect(writeLastChangesCursor).not.toHaveBeenCalled();
+        expect(writeAccountChangesCursor).not.toHaveBeenCalled();
 
         await client.close();
     });

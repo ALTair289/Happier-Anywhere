@@ -108,12 +108,17 @@ export class AgentStateRequestStore {
         kind?: string;
         source?: string;
         permissionSuggestions?: unknown[] | null;
+        replaceCompletedRequest?: boolean;
         updateState?: (state: AgentState) => AgentState;
     }>): void {
         updateAgentStateBestEffort(
             this.session,
             (currentState) => {
                 const requests = cloneStringKeyedRecordToNullProto<AgentStateRequestEntry>(currentState.requests);
+                const completedRequests = cloneStringKeyedRecordToNullProto<AgentStateCompletedEntry>(currentState.completedRequests);
+                if (params.replaceCompletedRequest) {
+                    delete completedRequests[params.requestId];
+                }
                 const entry = Object.create(null) as AgentStateRequestEntry & { source?: string; permissionSuggestions?: unknown[] };
                 entry.tool = params.toolName;
                 entry.kind = params.kind ?? resolveAgentRequestKind(params.toolName);
@@ -128,7 +133,7 @@ export class AgentStateRequestStore {
                 if (isAgentStateRequestCoveredByCompletedRequests({
                     requestId: params.requestId,
                     request: entry,
-                    completedRequests: currentState.completedRequests as Record<string, unknown> | null | undefined,
+                    completedRequests,
                     options: PENDING_REQUEST_COVERAGE_OPTIONS,
                 })) {
                     return typeof params.updateState === 'function' ? params.updateState(currentState) : currentState;
@@ -138,6 +143,7 @@ export class AgentStateRequestStore {
                 const nextState: AgentState = {
                     ...currentState,
                     requests,
+                    completedRequests,
                 };
                 return typeof params.updateState === 'function' ? params.updateState(nextState) : nextState;
             },

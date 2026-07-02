@@ -31,6 +31,9 @@ type FakeSession = {
   reconcilePendingQueueState: ReturnType<typeof vi.fn>;
   getLastObservedMessageSeq: ReturnType<typeof vi.fn>;
   beginTurnAssistantTextSnapshot: ReturnType<typeof vi.fn>;
+  deferDeliveredUserMessageWatermarkToProviderAcceptance: ReturnType<typeof vi.fn>;
+  confirmUserMessageDeliveredToProvider: ReturnType<typeof vi.fn>;
+  blockPendingMessageDelivery: ReturnType<typeof vi.fn>;
   sendAgentMessage: ReturnType<typeof vi.fn>;
   sendSessionEvent: ReturnType<typeof vi.fn>;
   updateMetadata: ReturnType<typeof vi.fn>;
@@ -120,7 +123,9 @@ const {
       }),
     ),
     resolveGeminiSystemPromptTextMock: vi.fn(async () => 'fresh system prompt'),
-    sendGeminiPromptWithRetryMock: vi.fn<(opts: { prompt: string }) => Promise<AcpTurnOutcome>>(async () => ({
+    sendGeminiPromptWithRetryMock: vi.fn<
+      (opts: { prompt: string; onProviderPromptAccepted?: () => void }) => Promise<AcpTurnOutcome>
+    >(async () => ({
       kind: 'completed',
       stopReason: 'end_turn',
     })),
@@ -398,6 +403,9 @@ function createFakeSession(): FakeSession {
     reconcilePendingQueueState: vi.fn(async () => false),
     getLastObservedMessageSeq: vi.fn(() => 10),
     beginTurnAssistantTextSnapshot: vi.fn(() => 'turn-token-1'),
+    deferDeliveredUserMessageWatermarkToProviderAcceptance: vi.fn(),
+    confirmUserMessageDeliveredToProvider: vi.fn(),
+    blockPendingMessageDelivery: vi.fn(async () => true),
     sendAgentMessage: vi.fn(),
     sendSessionEvent: vi.fn(),
     updateMetadata: vi.fn(async () => undefined),
@@ -498,6 +506,104 @@ describe('runGemini input consumer migration', () => {
       }),
     );
     expect(emitReadyIfIdleMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('opts Gemini direct into provider-acceptance pending delivery custody', async () => {
+    const session = createFakeSession();
+    setFakeSession(session);
+    waitForNextInputMock.mockReset();
+    waitForNextInputMock.mockResolvedValueOnce(null);
+
+    const { runGemini } = await import('./runGemini');
+
+    await runGemini({ credentials });
+
+    expect(session.deferDeliveredUserMessageWatermarkToProviderAcceptance).toHaveBeenCalledTimes(1);
+  });
+
+  it('confirms consumed pending rows when Gemini reports provider prompt acceptance', async () => {
+    const session = createFakeSession();
+    setFakeSession(session);
+    waitForNextInputMock.mockReset();
+    waitForNextInputMock
+      .mockResolvedValueOnce({
+        message: 'queued prompt text',
+        mode: {
+          permissionMode: 'safe-yolo',
+          model: 'gemini-2.5-pro',
+          originalUserMessage: 'visible user text',
+          appendSystemPrompt: null,
+          localId: 'local-accepted',
+          replaySeedAllowed: true,
+        },
+        isolate: false,
+        hash: 'mode-hash-1',
+        maxUserMessageSeq: 42,
+        userMessageLocalIds: ['local-accepted'],
+      })
+      .mockResolvedValueOnce(null);
+
+    let resolvePrompt!: (outcome: AcpTurnOutcome) => void;
+    const promptCompletion = new Promise<AcpTurnOutcome>((resolve) => {
+      resolvePrompt = resolve;
+    });
+    sendGeminiPromptWithRetryMock.mockReset();
+    sendGeminiPromptWithRetryMock.mockImplementationOnce(async (params) => {
+      params.onProviderPromptAccepted?.();
+      return await promptCompletion;
+    });
+
+    const { runGemini } = await import('./runGemini');
+
+    const runPromise = runGemini({ credentials });
+    try {
+      await vi.waitFor(() => {
+        expect(session.confirmUserMessageDeliveredToProvider).toHaveBeenCalledTimes(1);
+      });
+      expect(session.confirmUserMessageDeliveredToProvider).toHaveBeenCalledWith(42, {
+        localIds: ['local-accepted'],
+      });
+      expect(session.blockPendingMessageDelivery).not.toHaveBeenCalled();
+    } finally {
+      resolvePrompt({ kind: 'completed', stopReason: 'end_turn' });
+      await runPromise;
+    }
+  });
+
+  it('blocks consumed pending rows when Gemini fails before provider prompt acceptance', async () => {
+    const session = createFakeSession();
+    setFakeSession(session);
+    waitForNextInputMock.mockReset();
+    waitForNextInputMock
+      .mockResolvedValueOnce({
+        message: 'queued prompt text',
+        mode: {
+          permissionMode: 'safe-yolo',
+          model: 'gemini-2.5-pro',
+          originalUserMessage: 'visible user text',
+          appendSystemPrompt: null,
+          localId: 'local-rejected',
+          replaySeedAllowed: true,
+        },
+        isolate: false,
+        hash: 'mode-hash-1',
+        maxUserMessageSeq: null,
+        userMessageLocalIds: ['local-rejected'],
+      })
+      .mockResolvedValueOnce(null);
+
+    sendGeminiPromptWithRetryMock.mockReset();
+    sendGeminiPromptWithRetryMock.mockRejectedValueOnce(new Error('Gemini rejected the prompt'));
+
+    const { runGemini } = await import('./runGemini');
+
+    await expect(runGemini({ credentials })).resolves.toBeUndefined();
+
+    expect(session.confirmUserMessageDeliveredToProvider).not.toHaveBeenCalled();
+    expect(session.blockPendingMessageDelivery).toHaveBeenCalledWith({
+      localIds: ['local-rejected'],
+      reason: 'provider_rejected_before_acceptance',
+    });
   });
 
   it('ignores stale abort requests after a cancelled Gemini turn so later pending input can run', async () => {

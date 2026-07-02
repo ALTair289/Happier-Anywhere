@@ -44,8 +44,12 @@ export type CodexAppServerClient = Readonly<{
     registerNotificationHandler: (method: string, handler: JsonRpcNotificationHandler) => () => void;
 }>;
 
+export type CodexAppServerClientDisposeOptions = Readonly<{
+    pendingRequestError?: Error;
+}>;
+
 export type DisposableCodexAppServerClient = CodexAppServerClient & Readonly<{
-    dispose: () => Promise<void>;
+    dispose: (options?: CodexAppServerClientDisposeOptions) => Promise<void>;
 }>;
 
 type MessageQueueState = {
@@ -617,12 +621,12 @@ export async function createCodexAppServerClient(params: Readonly<{
         };
     };
 
-    const dispose = async (): Promise<void> => {
+    const dispose = async (options?: CodexAppServerClientDisposeOptions): Promise<void> => {
         if (disposePromise) {
             return await disposePromise;
         }
         disposing = true;
-        const disposedError = createDisposedError();
+        const disposedError = options?.pendingRequestError ?? createDisposedError();
         failWaiters(state, disposedError);
         failPendingRequests(disposedError);
         disposePromise = (async () => {

@@ -10,11 +10,23 @@ describe('createClaudeOwnComposerTextLog (lane X, incident cmq8y3nlx user_draft 
     expect(log.matches('  please continue with the refactor \n')).toBe(true);
   });
 
-  it('matches any single line of a recorded multiline injection (the composer shows the bottom line)', () => {
+  it('does not treat one line of a recorded multiline injection as clearable own residue', () => {
     const log = createClaudeOwnComposerTextLog();
-    log.record('first instruction line\nsecond instruction line\r\nthird line');
-    expect(log.matches('third line')).toBe(true);
-    expect(log.matches('second instruction line')).toBe(true);
+    const prompt = 'first instruction line\nsecond instruction line\r\nthird line';
+    log.record(prompt);
+
+    expect(log.matches(prompt)).toBe(true);
+    expect(log.matches('third line')).toBe(false);
+    expect(log.matches('second instruction line')).toBe(false);
+  });
+
+  it('does not match a genuine edited draft with a one-letter suffix after a recorded prompt', () => {
+    const log = createClaudeOwnComposerTextLog();
+    const prompt = 'please continue with the refactor';
+    log.record(prompt);
+
+    expect(log.matches(`${prompt} d`)).toBe(false);
+    expect(log.matches(`${prompt}\nd`)).toBe(false);
   });
 
   it('NEVER matches genuine user text, partial overlaps, or empty drafts', () => {
@@ -42,6 +54,73 @@ describe('createClaudeOwnComposerTextLog (lane X, incident cmq8y3nlx user_draft 
 
     nowMs += 5_001;
     expect(log.matches(longPrompt.slice(0, 280))).toBe(false);
+  });
+
+  it('matches a short prefix only after a risky terminal write marked it as possible own residue', () => {
+    let nowMs = 10_000;
+    const log = createClaudeOwnComposerTextLog({
+      nowMs: () => nowMs,
+      prefixResidueWindowMs: 5_000,
+    });
+    const longPrompt = `please produce the full report ${'x'.repeat(320)}`;
+    const shortResidue = longPrompt.slice(0, 34);
+    log.record(longPrompt);
+
+    expect(log.matches(shortResidue)).toBe(false);
+
+    log.recordPossiblePartialResidue(longPrompt);
+
+    expect(log.matches(shortResidue)).toBe(true);
+    expect(log.matches('please produce a different draft')).toBe(false);
+
+    nowMs += 5_001;
+    expect(log.matches(shortResidue)).toBe(false);
+  });
+
+  it('matches a recent Claude collapsed paste marker for a recorded multiline injection', () => {
+    let nowMs = 10_000;
+    const log = createClaudeOwnComposerTextLog({
+      nowMs: () => nowMs,
+      prefixResidueWindowMs: 5_000,
+    });
+    const prompt = Array.from({ length: 41 }, (_, index) => `line ${index}`).join('\n');
+    log.record(prompt);
+
+    expect(log.matches('[Pasted text #1 +40 lines]')).toBe(true);
+    expect(log.matches('[Pasted text +40 lines]')).toBe(true);
+    expect(log.matches('[Pasted text #1 +39 lines]')).toBe(true);
+    expect(log.matches('[Pasted text #1 +43 lines]')).toBe(true);
+    expect(log.matches('[Pasted text #1 +44 lines]')).toBe(false);
+
+    nowMs += 5_001;
+    expect(log.matches('[Pasted text #1 +40 lines]')).toBe(false);
+  });
+
+  it('keeps large collapsed paste markers matchable through the scaled provider-acceptance wait', () => {
+    let nowMs = 10_000;
+    const log = createClaudeOwnComposerTextLog({ nowMs: () => nowMs });
+    const prompt = Array.from({ length: 3_663 }, (_, index) => `line ${index}`).join('\n');
+    log.record(prompt);
+
+    nowMs += 181_000;
+    expect(log.matches('[Pasted text #1 +3662 lines]')).toBe(true);
+
+    nowMs += 10 * 60_000;
+    expect(log.matches('[Pasted text #1 +3662 lines]')).toBe(false);
+  });
+
+  it('does not match a genuine draft that merely contains a Claude collapsed paste marker', () => {
+    const log = createClaudeOwnComposerTextLog();
+    const prompt = Array.from({ length: 41 }, (_, index) => `line ${index}`).join('\n');
+    log.record(prompt);
+
+    expect(log.matches('please explain why [Pasted text #1 +40 lines] happened')).toBe(false);
+  });
+
+  it('does not match Claude collapsed paste markers for single-line injections', () => {
+    const log = createClaudeOwnComposerTextLog();
+    log.record('please continue with the refactor');
+    expect(log.matches('[Pasted text #1 +0 lines]')).toBe(false);
   });
 
   it('is bounded: oldest entries are evicted beyond the limit', () => {

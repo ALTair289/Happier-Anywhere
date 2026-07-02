@@ -57,12 +57,17 @@ function sendTurnLifecycleMessage(
   provider: string | null | undefined,
   type: 'turn_failed' | 'turn_cancelled',
   providerTurnId: string | null | undefined,
+  issue?: SessionRuntimeIssueV1 | null,
 ): void {
   const normalizedProvider = typeof provider === 'string' && provider.trim() ? provider.trim() : 'agent';
   const id = normalizeProviderFact(providerTurnId) ?? randomUUID();
   session?.sendAgentMessage?.(
     normalizedProvider as ACPProvider,
-    { type, id } as unknown as ACPMessageData,
+    {
+      type,
+      id,
+      ...(type === 'turn_failed' && issue ? { issue } : {}),
+    } as unknown as ACPMessageData,
   );
 }
 
@@ -99,7 +104,7 @@ export async function surfacePrimarySessionRuntimeIssue(
     await input.recordIssue?.(record);
     return issue;
   }
-  sendTurnLifecycleMessage(input.session, input.provider, 'turn_failed', issue.providerTurnId ?? input.providerTurnId);
+  sendTurnLifecycleMessage(input.session, input.provider, 'turn_failed', issue.providerTurnId ?? input.providerTurnId, issue);
   await input.recordIssue?.(record);
   return issue;
 }

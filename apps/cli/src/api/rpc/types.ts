@@ -1,3 +1,5 @@
+import type { SocketRpcAuthorizationContext } from '@happier-dev/protocol';
+
 /**
  * Common RPC types and interfaces for both session and machine clients
  */
@@ -35,6 +37,7 @@ export type RpcHandlerMap = Map<string, RpcHandler>;
 export interface RpcRequest {
     method: string;
     params: unknown;
+    authorization?: SocketRpcAuthorizationContext;
 }
 
 /**
@@ -51,7 +54,16 @@ export interface RpcHandlerConfig {
     encryptionVariant: 'legacy' | 'dataKey';
     encryptionMode?: 'e2ee' | 'plain';
     logger?: (message: string, data?: any) => void;
+    authorizeRequest?: (request: Readonly<{
+        method: string;
+        params: unknown;
+        authorization?: SocketRpcAuthorizationContext;
+    }>) => RpcAuthorizationResult | Promise<RpcAuthorizationResult>;
 }
+
+export type RpcAuthorizationResult =
+    | { ok: true }
+    | { ok: false; error: string; errorCode?: string };
 
 /**
  * Result of RPC handler execution

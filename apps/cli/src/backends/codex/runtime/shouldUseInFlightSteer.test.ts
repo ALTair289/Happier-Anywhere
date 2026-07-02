@@ -38,7 +38,7 @@ describe('shouldUseInFlightSteer', () => {
         })).toBe(true);
     });
 
-    it('blocks steering when the permission mode changed', () => {
+    it('blocks steering when the permission mode changed and the runtime cannot apply config in flight', () => {
         expect(shouldUseInFlightSteer({
             runtime: {
                 supportsInFlightSteer: () => true,
@@ -48,6 +48,19 @@ describe('shouldUseInFlightSteer', () => {
             didChangePermissionMode: true,
             isPromptNonSteerable: false,
         })).toBe(false);
+    });
+
+    it('allows steering a permission-mode change when the runtime can apply config in flight', () => {
+        expect(shouldUseInFlightSteer({
+            runtime: {
+                supportsInFlightSteer: () => true,
+                supportsInFlightConfigApply: () => true,
+                isTurnInFlight: () => true,
+                canSteerPrompt: () => true,
+            },
+            didChangePermissionMode: true,
+            isPromptNonSteerable: false,
+        })).toBe(true);
     });
 
     it('blocks only prompts classified as non-steerable by the shared payload policy', () => {

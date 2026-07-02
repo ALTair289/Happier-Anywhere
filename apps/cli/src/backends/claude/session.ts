@@ -23,6 +23,26 @@ import type { TerminalRuntimeFlags } from '@/terminal/runtime/terminalRuntimeFla
 import { resolveSessionCriticalMetadataDrainTimeoutMs } from '@/session/transport/shared/sessionTimeouts';
 import { getProjectPath } from './utils/path';
 import { readExplicitClaudeResumeSessionIdFromArgs } from './utils/claudeResumeArgs';
+import {
+    createSessionRuntimeActivityPublisher,
+    type SessionRuntimeActivityPublisher,
+} from '@/session/runtimeActivity/sessionRuntimeActivityPublisher';
+import {
+    buildClaudeProviderTaskRuntimeActivitySourceId,
+    CLAUDE_PROVIDER_TASK_RUNTIME_ACTIVITY_SOURCE_CLASS,
+    CLAUDE_RUNTIME_ACTIVITY_PROVIDER_ID,
+} from './providerActivity/createClaudeProviderActivityLedger';
+import {
+    isSidechainSessionHook,
+    isSidechainSessionHookRuntimeActivityEvent,
+    isSidechainSessionHookRuntimeActivityTerminalEvent,
+    readSessionHookEventName,
+    readSidechainSessionHookProviderTaskId,
+} from './utils/sessionHookAttribution';
+import { readClaudeSessionHookBackgroundTasks } from './utils/sessionHookBackgroundTasks';
+import { readClaudeSessionHookTaskNotification } from './utils/sessionHookTaskNotification';
+
+const CLAUDE_RUNTIME_ACTIVITY_PROJECTION_LEASE_MS = 120_000;
 
 export type SessionFoundInfo = {
     sessionId: string;
@@ -300,6 +320,7 @@ export class Session {
     readonly path: string;
     readonly logPath: string;
     readonly client: SessionClientPort;
+    readonly runtimeActivityPublisher: SessionRuntimeActivityPublisher;
     pushSender: PushNotificationClient | null;
     accountSettings: AccountSettings | null;
     accountSettingsSecretsReadKeys: readonly Uint8Array[];
@@ -411,6 +432,14 @@ export class Session {
     }) {
         this.path = opts.path;
         this.client = opts.client;
+        this.runtimeActivityPublisher = createSessionRuntimeActivityPublisher({
+            nowMs: () => Date.now(),
+            leaseDurationMs: CLAUDE_RUNTIME_ACTIVITY_PROJECTION_LEASE_MS,
+            updateRuntimeActivityProjection: (projection) => opts.client.updateRuntimeActivityProjection?.(projection),
+            logError: (event, details) => {
+                logger.debug(`[claude-session] ${event}`, details);
+            },
+        });
         this.pushSender = opts.pushSender ?? null;
         this.accountSettings = opts.accountSettings ?? null;
         this.accountSettingsSecretsReadKeys = opts.accountSettingsSecretsReadKeys ?? [];
@@ -808,7 +837,93 @@ export class Session {
         }
     }
 
+    private publishSidechainHookRuntimeActivity = (data: SessionHookData): void => {
+        const sourceId = buildClaudeProviderTaskRuntimeActivitySourceId(
+            readSidechainSessionHookProviderTaskId(data),
+        );
+        if (!sourceId) return;
+        if (isSidechainSessionHookRuntimeActivityTerminalEvent(data)) {
+            void this.runtimeActivityPublisher.clearSource(
+                sourceId,
+                'claude_sidechain_hook_terminal',
+            ).catch((error) => {
+                logger.debug('[Session] failed to clear Claude sidechain hook runtime activity (non-fatal)', { error });
+            });
+            return;
+        }
+        if (!isSidechainSessionHookRuntimeActivityEvent(data)) return;
+        void this.runtimeActivityPublisher.observeSource({
+            id: sourceId,
+            reason: 'claude_sidechain_hook_activity',
+        }).catch((error) => {
+            logger.debug('[Session] failed to renew Claude sidechain hook runtime activity (non-fatal)', { error });
+        });
+    }
+
+    private publishMainHookBackgroundTaskRuntimeActivity = (data: SessionHookData): void => {
+        if (isSidechainSessionHook(data)) return;
+        if (readSessionHookEventName(data) !== 'Stop') return;
+        const backgroundTasks = readClaudeSessionHookBackgroundTasks(data);
+        if (!backgroundTasks) return;
+        if (backgroundTasks.reportsEmpty) {
+            void this.runtimeActivityPublisher.clearProviderSources(
+                CLAUDE_RUNTIME_ACTIVITY_PROVIDER_ID,
+                'claude_hook_no_background_tasks',
+            ).catch((error) => {
+                logger.debug('[Session] failed to clear Claude hook background-task runtime activity (non-fatal)', { error });
+            });
+            return;
+        }
+        for (const taskId of backgroundTasks.terminalTaskIds) {
+            const sourceId = buildClaudeProviderTaskRuntimeActivitySourceId(taskId);
+            if (!sourceId) continue;
+            void this.runtimeActivityPublisher.clearSource(
+                sourceId,
+                'claude_hook_background_task_terminal',
+            ).catch((error) => {
+                logger.debug('[Session] failed to clear Claude hook terminal background task (non-fatal)', { error });
+            });
+        }
+        for (const taskId of backgroundTasks.activeTaskIds) {
+            const sourceId = buildClaudeProviderTaskRuntimeActivitySourceId(taskId);
+            if (!sourceId) continue;
+            void this.runtimeActivityPublisher.setSourceActive({
+                id: sourceId,
+                sourceClass: CLAUDE_PROVIDER_TASK_RUNTIME_ACTIVITY_SOURCE_CLASS,
+                providerId: CLAUDE_RUNTIME_ACTIVITY_PROVIDER_ID,
+            }).catch((error) => {
+                logger.debug('[Session] failed to publish Claude hook background task runtime activity (non-fatal)', { error });
+            });
+        }
+    }
+
+    private publishHookTaskNotificationRuntimeActivity = (data: SessionHookData): void => {
+        const notification = readClaudeSessionHookTaskNotification(data);
+        if (!notification) return;
+        const sourceId = buildClaudeProviderTaskRuntimeActivitySourceId(notification.taskId);
+        if (!sourceId) return;
+        if (notification.terminal) {
+            void this.runtimeActivityPublisher.clearSource(
+                sourceId,
+                'claude_hook_task_notification_terminal',
+            ).catch((error) => {
+                logger.debug('[Session] failed to clear Claude hook task notification runtime activity (non-fatal)', { error });
+            });
+            return;
+        }
+        void this.runtimeActivityPublisher.setSourceActive({
+            id: sourceId,
+            sourceClass: CLAUDE_PROVIDER_TASK_RUNTIME_ACTIVITY_SOURCE_CLASS,
+            providerId: CLAUDE_RUNTIME_ACTIVITY_PROVIDER_ID,
+        }).catch((error) => {
+            logger.debug('[Session] failed to publish Claude hook task notification runtime activity (non-fatal)', { error });
+        });
+    }
+
     onClaudeSessionHook = (data: SessionHookData): void => {
+        this.publishHookTaskNotificationRuntimeActivity(data);
+        this.publishMainHookBackgroundTaskRuntimeActivity(data);
+        this.publishSidechainHookRuntimeActivity(data);
         for (const callback of this.claudeSessionHookCallbacks) {
             callback(data);
         }

@@ -31,6 +31,11 @@ import {
   recordSessionTurnCompleted,
   surfacePrimarySessionRuntimeIssue,
 } from '@/agent/runtime/session/errors/surfacePrimarySessionRuntimeIssue';
+import { waitForSessionMetadataRetryBackoff } from '@/agent/runtime/sessionMetadataWaitRetryBackoff';
+import {
+  classifyPrimarySessionRuntimeIssue,
+  PI_PROVIDER_SESSION_FAILURE_AFTER_PROMPT_ACCEPTANCE_DIAGNOSTIC,
+} from '@/agent/runtime/session/errors/classifyPrimarySessionRuntimeIssue';
 import {
   collectAcpModelScopedConfigOptions,
   normalizeConfigOptionsArray,
@@ -53,12 +58,14 @@ import type {
 import { resolveSessionMediaDedupeKey } from '@/session/sessionMedia/sessionMediaDedupeKey';
 import {
   SESSION_MEDIA_MESSAGE_META_KIND_V1,
+  type SessionRuntimeIssueV1,
   type SessionMediaItemV1,
   TranscriptRawAgentEventV1Schema,
   type TranscriptRawAgentEventV1,
 } from '@happier-dev/protocol';
 
 const DEFAULT_SESSION_CONTROL_TIMEOUT_MS = 15_000;
+const ACP_FAILURE_TRACE_ENV = 'HAPPIER_ACP_FAILURE_TRACE';
 
 type RuntimeSessionMediaMessage = Extract<AgentMessage, { type: 'session-media' }>;
 type RuntimeSessionMediaSource = RuntimeSessionMediaMessage['media'][number];
@@ -118,6 +125,85 @@ function resolveSessionControlTimeoutMs(): number {
   return Math.trunc(parsed);
 }
 
+function readAcpPromptFailureErrorMessage(error: unknown): string {
+  return error instanceof Error
+    ? error.message
+    : typeof error === 'string'
+      ? error
+      : '';
+}
+
+function classifyAcpPromptFailureErrorMessageKind(error: unknown): string {
+  const message = readAcpPromptFailureErrorMessage(error).trim();
+  if (!message) return 'empty';
+  if (/^provider session failed$/iu.test(message)) return 'generic_provider_session_failed';
+  if (message.startsWith('Pi provider reported ')) return 'pi_provider_diagnostic';
+  return 'other';
+}
+
+function readAcpPromptFailureErrorMessageLength(error: unknown): number {
+  return readAcpPromptFailureErrorMessage(error).length;
+}
+
+function isGenericProviderSessionFailureRuntimeIssue(issue: SessionRuntimeIssueV1): boolean {
+  return issue.source === 'provider_session_error'
+    && issue.code === 'provider_session_error'
+    && issue.sanitizedPreview === 'Provider session failed';
+}
+
+function normalizeAcpPromptFailureRuntimeIssueError(params: Readonly<{
+  provider: string;
+  error: unknown;
+  turnInFlight: boolean;
+}>): unknown {
+  if (params.provider !== 'pi') return params.error;
+  if (!params.turnInFlight) return params.error;
+  const issue = classifyPrimarySessionRuntimeIssue({
+    cause: 'session_error',
+    provider: params.provider,
+    error: params.error,
+  });
+  return isGenericProviderSessionFailureRuntimeIssue(issue)
+    ? PI_PROVIDER_SESSION_FAILURE_AFTER_PROMPT_ACCEPTANCE_DIAGNOSTIC
+    : params.error;
+}
+
+function classifyAcpRuntimeIssuePreviewKind(issue: SessionRuntimeIssueV1 | null): string {
+  const preview = issue?.sanitizedPreview?.trim() ?? '';
+  if (!preview) return 'none';
+  if (preview === 'Provider session failed') return 'generic_provider_session_failed';
+  if (preview.startsWith('Pi provider reported ')) return 'pi_provider_diagnostic';
+  return 'other';
+}
+
+function traceAcpPromptFailureBoundary(params: Readonly<{
+  provider: string;
+  error: unknown;
+  issue: SessionRuntimeIssueV1 | null;
+  turnInFlight: boolean;
+  lifecycleAvailable: boolean;
+  compatibilityMarkerSent: boolean;
+}>): void {
+  if (params.provider !== 'pi') return;
+  if (process.env[ACP_FAILURE_TRACE_ENV] !== '1') return;
+  logger.debug('[acp] prompt failure trace', {
+    provider: params.provider,
+    branch: 'surface_prompt_failure',
+    cause: 'session_error',
+    errorMessageKind: classifyAcpPromptFailureErrorMessageKind(params.error),
+    errorMessageLength: readAcpPromptFailureErrorMessageLength(params.error),
+    issueSource: params.issue?.source ?? null,
+    issueCode: params.issue?.code ?? null,
+    issuePreviewKind: classifyAcpRuntimeIssuePreviewKind(params.issue),
+    issuePreviewLength: typeof params.issue?.sanitizedPreview === 'string'
+      ? params.issue.sanitizedPreview.length
+      : 0,
+    turnInFlight: params.turnInFlight,
+    lifecycleAvailable: params.lifecycleAvailable,
+    compatibilityMarkerSent: params.compatibilityMarkerSent,
+  });
+}
+
 function normalizeSessionConfigOptionValue(value: string | number | boolean | null): string | number | boolean | null {
   if (typeof value === 'string') {
     const trimmed = value.trim();
@@ -172,10 +258,17 @@ export type AcpRuntime = Readonly<{
    * Send additional user text into the currently running turn when supported.
    *
    * This should NOT start a new turn and should NOT abort the current turn.
-   */
+  */
   steerPrompt: (prompt: string, options?: AcpRuntimeSteerPromptOptions) => Promise<void>;
   compactContext: (command: string) => Promise<void>;
   sendPrompt: (prompt: string) => Promise<void>;
+  sendPromptWithMeta: (params: {
+    text: string;
+    localId?: string | null;
+    meta?: Record<string, unknown>;
+    onProviderPromptAccepted?: () => void;
+  }) => Promise<void>;
+  failTurn: (error: unknown) => Promise<boolean>;
   flushTurn: () => Promise<void>;
 }>;
 
@@ -622,11 +715,23 @@ export function createAcpRuntime(params: {
         const onGlobalAbort = () => abortIteration('acp-runtime:pending-pump:global-abort');
         controller.signal.addEventListener('abort', onGlobalAbort, { once: true });
 
-        const winner = await Promise.race([
-          params.pendingQueue!
+        const waitForMetadataWake = async (): Promise<'metadata'> => {
+          const didUpdate = await params.pendingQueue!
             .waitForMetadataUpdate(iteration.signal)
-            .then(() => 'metadata')
-            .catch(() => 'metadata'),
+            .catch(() => false);
+          if (!didUpdate && !iteration.signal.aborted) {
+            await waitForSessionMetadataRetryBackoff({
+              abortSignal: iteration.signal,
+              backoffMs: pollIntervalMs,
+              defaultMs: pollIntervalMs,
+              minMs: 1,
+            });
+          }
+          return 'metadata';
+        };
+
+        const winner = await Promise.race([
+          waitForMetadataWake(),
           waitForPollWake().then(() => 'poll'),
         ]);
         controller.signal.removeEventListener('abort', onGlobalAbort);
@@ -912,7 +1017,7 @@ export function createAcpRuntime(params: {
         });
         compatibilityMarkerId = handle.turnId;
       }
-      await surfacePrimarySessionRuntimeIssue({
+      const issue = await surfacePrimarySessionRuntimeIssue({
         cause: 'status_error',
         provider: params.provider,
         providerTurnId,
@@ -923,10 +1028,74 @@ export function createAcpRuntime(params: {
         params.session.sendAgentMessage(params.provider, {
           type: 'turn_failed',
           id: compatibilityMarkerId,
+          ...(issue ? { issue } : {}),
         });
       }
     })().catch((error) => {
       logger.debug(`[${params.provider}] Failed to persist primary session runtime issue (non-fatal)`, error);
+    });
+    return true;
+  };
+
+  const surfacePromptFailure = async (detailRaw: unknown): Promise<boolean> => {
+    if (isAbortLikeError(detailRaw)) return false;
+    if (turnAborted) return true;
+
+    const providerTurnId = currentTurnId ?? (turnInFlight ? ensureCurrentTurnId() : null);
+    turnAborted = true;
+    clearToolCallCache();
+    params.onThinkingChange(false);
+    params.session.keepAlive(false, 'remote');
+
+    try {
+      await streamedTranscriptWriter.flushAll({ reason: 'abort', interruptedReason: 'prompt-error' });
+    } catch (error) {
+      logger.debug(`[${params.provider}] Failed to flush streamed transcript after prompt failure`, error);
+    }
+    await abortPendingAcpPermissionRequests(
+      params.permissionHandler,
+      'ACP runtime prompt failed',
+      (error) => {
+        logger.debug(`[${params.provider}] Failed to abort pending permission requests after prompt failure`, error);
+      },
+    );
+
+    let compatibilityMarkerId = providerTurnId;
+    if (turnInFlight && !taskStartedSent && params.session.sessionTurnLifecycle) {
+      const handle = await params.session.sessionTurnLifecycle.beginTurn({
+        provider: params.provider,
+        ...(providerTurnId ? { providerTurnId } : {}),
+      });
+      compatibilityMarkerId = handle.turnId;
+    }
+    const issueError = normalizeAcpPromptFailureRuntimeIssueError({
+      provider: params.provider,
+      error: detailRaw,
+      turnInFlight,
+    });
+    const issue = await surfacePrimarySessionRuntimeIssue({
+      cause: 'session_error',
+      provider: params.provider,
+      providerTurnId,
+      error: issueError,
+      session: params.session,
+    });
+    let compatibilityMarkerSent = false;
+    if (turnInFlight && compatibilityMarkerId && params.session.sessionTurnLifecycle) {
+      params.session.sendAgentMessage(params.provider, {
+        type: 'turn_failed',
+        id: compatibilityMarkerId,
+        ...(issue ? { issue } : {}),
+      });
+      compatibilityMarkerSent = true;
+    }
+    traceAcpPromptFailureBoundary({
+      provider: params.provider,
+      error: detailRaw,
+      issue: issue ?? null,
+      turnInFlight,
+      lifecycleAvailable: !!params.session.sessionTurnLifecycle,
+      compatibilityMarkerSent,
     });
     return true;
   };
@@ -1677,6 +1846,31 @@ export function createAcpRuntime(params: {
     }
   };
 
+  const sendPromptToProvider = async (
+    prompt: string,
+    onProviderPromptAccepted?: () => void,
+  ): Promise<void> => {
+    if (!sessionId) {
+      throw new Error(`${params.provider} ACP session was not started`);
+    }
+
+    const b = await ensureBackend();
+    try {
+      await b.sendPrompt(sessionId, prompt);
+    } catch (error) {
+      rethrowPromptError(error);
+    }
+    onProviderPromptAccepted?.();
+    try {
+      if (b.waitForResponseComplete) {
+        rememberTurnOutcome(await b.waitForResponseComplete());
+      }
+    } catch (error) {
+      rethrowPromptError(error);
+    }
+    publishSessionId();
+  };
+
   return {
     getSessionId: () => sessionId,
     supportsInFlightSteer: () => inFlightSteerEnabled,
@@ -1894,20 +2088,16 @@ export function createAcpRuntime(params: {
     },
 
     async sendPrompt(prompt: string): Promise<void> {
-      if (!sessionId) {
-        throw new Error(`${params.provider} ACP session was not started`);
-      }
+      await sendPromptToProvider(prompt);
+    },
 
-      const b = await ensureBackend();
-      try {
-        await b.sendPrompt(sessionId, prompt);
-        if (b.waitForResponseComplete) {
-          rememberTurnOutcome(await b.waitForResponseComplete());
-        }
-      } catch (error) {
-        rethrowPromptError(error);
-      }
-      publishSessionId();
+    async sendPromptWithMeta(promptParams: {
+      text: string;
+      localId?: string | null;
+      meta?: Record<string, unknown>;
+      onProviderPromptAccepted?: () => void;
+    }): Promise<void> {
+      await sendPromptToProvider(promptParams.text, promptParams.onProviderPromptAccepted);
     },
 
     async compactContext(command: string): Promise<void> {
@@ -1929,6 +2119,10 @@ export function createAcpRuntime(params: {
         rethrowPromptError(error);
       }
       publishSessionId();
+    },
+
+    async failTurn(error: unknown): Promise<boolean> {
+      return surfacePromptFailure(error);
     },
 
     async flushTurn(): Promise<void> {

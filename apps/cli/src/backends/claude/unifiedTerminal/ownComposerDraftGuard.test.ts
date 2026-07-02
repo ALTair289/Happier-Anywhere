@@ -67,6 +67,22 @@ describe('clearOwnLeftoverComposerDraft (C11: idle pre-injection own-leftover gu
     expect(clears).toBe(1);
   });
 
+  it('clears an own collapsed paste marker whose line count matches a recent multiline injection', async () => {
+    const prompt = Array.from({ length: 41 }, (_, index) => `line ${index}`).join('\n');
+    const captures = [idleScreen('[Pasted text #1 +40 lines]'), idleScreen('')];
+    let clears = 0;
+    const result = await clearOwnLeftoverComposerDraft({
+      captureInputState: async () => ({ currentInput: captures.shift() ?? idleScreen('') }),
+      sendClearKey: async () => {
+        clears += 1;
+      },
+      ownComposerTexts: ownLog(prompt),
+      wait: async () => undefined,
+    });
+    expect(result).toMatchObject({ status: 'cleared', attempts: 1 });
+    expect(clears).toBe(1);
+  });
+
   it('retries the bounded second clear when the first key leaves the draft behind', async () => {
     const captures = [idleScreen(OWN_TEXT), idleScreen(OWN_TEXT), idleScreen('')];
     let clears = 0;
@@ -109,6 +125,38 @@ describe('clearOwnLeftoverComposerDraft (C11: idle pre-injection own-leftover gu
         throw new Error('must not clear a genuine user draft');
       },
       ownComposerTexts: ownLog(OWN_TEXT),
+      wait: async () => undefined,
+    });
+    expect(result.status).toBe('foreign_draft');
+  });
+
+  it('NEVER clears a genuine draft equal to one line of a previous multiline prompt', async () => {
+    const multilinePrompt = 'first instruction line\nsecond instruction line\nthird instruction line';
+    const result = await clearOwnLeftoverComposerDraft({
+      captureInputState: async () => ({
+        currentInput: idleScreen('second instruction line'),
+        cursor: { x: 27, y: 1 },
+      }),
+      sendClearKey: async () => {
+        throw new Error('must not clear a genuine user draft matching a prior prompt line');
+      },
+      ownComposerTexts: ownLog(multilinePrompt),
+      wait: async () => undefined,
+    });
+    expect(result.status).toBe('foreign_draft');
+  });
+
+  it('NEVER clears a genuine draft equal to a previous prompt plus a one-letter suffix', async () => {
+    const previousPrompt = 'please continue with the refactor';
+    const result = await clearOwnLeftoverComposerDraft({
+      captureInputState: async () => ({
+        currentInput: idleScreen(`${previousPrompt} d`),
+        cursor: { x: 37, y: 1 },
+      }),
+      sendClearKey: async () => {
+        throw new Error('must not clear a genuine edited user draft');
+      },
+      ownComposerTexts: ownLog(previousPrompt),
       wait: async () => undefined,
     });
     expect(result.status).toBe('foreign_draft');

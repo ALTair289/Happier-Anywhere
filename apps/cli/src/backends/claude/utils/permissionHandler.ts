@@ -20,6 +20,7 @@ import { syncClaudePermissionModeFromMetadata } from '@/backends/claude/utils/sy
 import type { PermissionRpcPayload } from './permissionRpc';
 import { updateAgentStateBestEffort, updateMetadataBestEffort } from '@/api/session/sessionWritesBestEffort';
 import { configuration } from '@/configuration';
+import { waitForSessionMetadataRetryBackoff } from '@/agent/runtime/sessionMetadataWaitRetryBackoff';
 import { cloneStringKeyedRecordToNullProto } from '@/api/session/agentStateRecords';
 import type { Metadata } from '@/api/types';
 import { resolveAgentRequestKind } from '@/agent/permissions/requestKind';
@@ -111,26 +112,7 @@ export class PermissionHandler {
 
         const backoffMs = configuration.claudeMetadataWatcherIdleBackoffMs;
         const waitForAbortOrBackoff = async (): Promise<void> => {
-            if (signal.aborted) return;
-            if (backoffMs <= 0) return;
-            await new Promise<void>((resolve) => {
-                let settled = false;
-                const onAbort = () => {
-                    if (settled) return;
-                    settled = true;
-                    clearTimeout(timer);
-                    signal.removeEventListener('abort', onAbort);
-                    resolve();
-                };
-                const timer = setTimeout(() => {
-                    if (settled) return;
-                    settled = true;
-                    signal.removeEventListener('abort', onAbort);
-                    resolve();
-                }, backoffMs);
-                timer.unref?.();
-                signal.addEventListener('abort', onAbort, { once: true });
-            });
+            await waitForSessionMetadataRetryBackoff({ abortSignal: signal, backoffMs });
         };
 
         void (async () => {

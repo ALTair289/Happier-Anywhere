@@ -40,6 +40,36 @@ describe('publishInFlightSteerCapability', () => {
     expect(state.capabilities?.inFlightSteerAvailable).toBe(false);
   });
 
+  it('publishes in-flight config apply support only when the runtime exposes it', async () => {
+    const { publishInFlightSteerCapability } = await import('./publishInFlightSteerCapability');
+
+    let state: AgentState = { capabilities: { inFlightConfigApplySupported: true } };
+    const session = {
+      updateAgentState: (updater: (current: AgentState) => AgentState) => {
+        state = updater(state);
+      },
+    };
+
+    publishInFlightSteerCapability({
+      session: session as any,
+      runtime: {
+        supportsInFlightSteer: () => true,
+        supportsInFlightConfigApply: () => true,
+      } as any,
+    });
+
+    expect(state.capabilities?.inFlightConfigApplySupported).toBe(true);
+
+    publishInFlightSteerCapability({
+      session: session as any,
+      runtime: {
+        supportsInFlightSteer: () => true,
+      } as any,
+    });
+
+    expect(state.capabilities?.inFlightConfigApplySupported).toBe(false);
+  });
+
   it('publishes inFlightSteer=false when runtime does not support in-flight steer', async () => {
     const { publishInFlightSteerCapability } = await import('./publishInFlightSteerCapability');
 

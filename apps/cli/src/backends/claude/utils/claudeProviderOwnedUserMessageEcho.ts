@@ -19,9 +19,7 @@ export const isClaudeProviderOwnedUserMessageEcho: ProviderOwnedUserMessageEchoC
   const localId = messageLocalId || bodyLocalId;
   if (!extractClaudeJsonlMessageKeyFromLocalId(localId)) return false;
 
-  const source = typeof message.meta?.source === 'string' ? message.meta.source : null;
-  const sentFrom = typeof message.meta?.sentFrom === 'string' ? message.meta.sentFrom : null;
-  return source === 'cli' || sentFrom === 'cli';
+  return true;
 };
 
 export function installClaudeProviderOwnedUserMessageEchoClassifier(

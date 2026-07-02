@@ -5,13 +5,19 @@ import { logger } from '@/ui/logger';
 import { isClaudeUnifiedTerminalManagedSettingsOptionError } from './buildClaudeUnifiedTerminalSpawn';
 import { isClaudeUnifiedTerminalHostDeadError } from './createClaudeUnifiedController';
 import { isClaudeUnifiedTerminalReadinessTimeoutError } from './createClaudeUnifiedTerminalReadinessBridge';
-import { isClaudeUnifiedTerminalTerminalInjectionFailureError } from './terminalInjectionFailureError';
+import {
+  isClaudeUnifiedTerminalProviderAcceptanceTimeoutError,
+  isClaudeUnifiedTerminalTerminalInjectionFailureError,
+  isClaudeUnifiedTerminalUnconfirmedSubmitFailureError,
+} from './terminalInjectionFailureError';
 
 type RuntimeIssueSessionClient = Parameters<typeof surfacePrimarySessionRuntimeIssue>[0]['session'];
 
 export function isClaudeUnifiedTerminalRuntimeIssueError(error: unknown): boolean {
   return isClaudeUnifiedTerminalHostDeadError(error)
     || isClaudeUnifiedTerminalTerminalInjectionFailureError(error)
+    || isClaudeUnifiedTerminalUnconfirmedSubmitFailureError(error)
+    || isClaudeUnifiedTerminalProviderAcceptanceTimeoutError(error)
     || isClaudeUnifiedTerminalReadinessTimeoutError(error)
     || isTerminalHostStartupError(error)
     || isClaudeUnifiedTerminalManagedSettingsOptionError(error);

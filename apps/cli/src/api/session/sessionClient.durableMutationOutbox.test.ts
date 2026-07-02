@@ -1116,10 +1116,8 @@ describe('ApiSessionClient durable mutation outbox', () => {
     client.sendSessionDeath();
 
     await expect.poll(() => vi.mocked(axios.post).mock.calls.length).toBeGreaterThan(0);
-    expect(sessionSocketStub.emit).toHaveBeenCalledWith(
-      'session-end',
-      expect.objectContaining({ sid: 's1', time: expect.any(Number) }),
-    );
+    expect(sessionSocketStub.emit).not.toHaveBeenCalledWith('session-end', expect.anything());
+    expect(sessionSocketStub.emitWithAck).not.toHaveBeenCalledWith('session-end', expect.anything());
     await expect.poll(() => readPersistedOutboxMutationCount('s1')).toBe(1);
     await client.close();
   });
@@ -1139,10 +1137,11 @@ describe('ApiSessionClient durable mutation outbox', () => {
 
     await expect.poll(() => vi.mocked(axios.post).mock.calls.length).toBeGreaterThan(0);
     await client.flush();
-    expect(sessionSocketStub.emit).toHaveBeenCalledWith(
+    expect(sessionSocketStub.emitWithAck).toHaveBeenCalledWith(
       'session-end',
       expect.objectContaining({ sid: 's1', time: expect.any(Number) }),
     );
+    expect(sessionSocketStub.emit).not.toHaveBeenCalledWith('session-end', expect.anything());
     await expect.poll(() => readPersistedOutboxMutationCount('s1')).toBe(1);
     await client.close();
   });

@@ -6,6 +6,11 @@ import { writeExecutableShimSync } from '@/testkit/fs/executableShim';
 import { createTempDirSync, removeTempDirSync } from '@/testkit/fs/tempDir';
 import { buildPiToolsForPermissionMode, createPiBackend } from './backend';
 import { HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY } from '@/daemon/connectedServices/connectedServiceChildEnvironment';
+import {
+  PI_BROKER_SELECTIONS_ENV,
+  resolvePiBrokerExtensionPath,
+  serializePiBrokerSelections,
+} from '@/backends/pi/brokerExtension';
 
 const envKeys = ['PATH', 'HAPPIER_PI_PATH', HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY] as const;
 const TEMP_DIRS = new Set<string>();
@@ -119,6 +124,37 @@ describe('pi backend argv', () => {
     ]));
     const modelIndex = args?.indexOf('--model') ?? -1;
     expect(args?.[modelIndex + 1]).not.toBe('openai-codex/*');
+  });
+
+  it('passes the broker extension path when launching a brokered connected-service provider', () => {
+    process.env.PATH = '';
+    process.env.HAPPIER_PI_PATH = createFakeBin('pi');
+    const agentDir = createTempDirSync('happier-pi-agent-dir-');
+    TEMP_DIRS.add(agentDir);
+
+    const backend = createPiBackend({
+      cwd: '/tmp',
+      env: {
+        PI_CODING_AGENT_DIR: agentDir,
+        [HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY]: JSON.stringify([
+          { kind: 'profile', serviceId: 'openai-codex', profileId: 'codex-work' },
+        ]),
+        [PI_BROKER_SELECTIONS_ENV]: serializePiBrokerSelections({
+          openai: {
+            serviceId: 'openai-codex',
+            profileId: 'codex-work',
+            accountId: 'acct_1',
+            planType: 'pro',
+          },
+        }),
+      },
+      permissionMode: 'default',
+    }) as unknown as { options?: { args?: string[] } };
+
+    expect(backend.options?.args).toEqual(expect.arrayContaining([
+      '--extension',
+      resolvePiBrokerExtensionPath(agentDir),
+    ]));
   });
 });
 

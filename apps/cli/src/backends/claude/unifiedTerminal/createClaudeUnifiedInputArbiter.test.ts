@@ -133,7 +133,9 @@ describe('createClaudeUnifiedInputArbiter', () => {
       quietPeriodMs: 0,
       providerAcceptanceTimeoutMs: 10,
       injectPrompt,
-      onInjectionFailure: (failure) => failures.push(failure.failureState),
+      onInjectionFailure: (failure) => {
+        failures.push(failure.failureState);
+      },
     });
 
     arbiter.observeLifecycle({ type: 'turn_state', state: 'idle', observedAtMs: nowMs });
@@ -215,7 +217,9 @@ describe('createClaudeUnifiedInputArbiter', () => {
       providerAcceptanceTimeoutMs: 10,
       injectPrompt,
       evaluateInFlightSteer: async () => ({ steer: true }),
-      onInjectionFailure: (failure) => failures.push(failure.failureState),
+      onInjectionFailure: (failure) => {
+        failures.push(failure.failureState);
+      },
       onPromptAccepted: async (acceptedBatch) => {
         accepted.push(acceptedBatch.message);
       },
@@ -308,6 +312,50 @@ describe('createClaudeUnifiedInputArbiter', () => {
 
     arbiter.dispose();
     expect(handedBack).toEqual([]);
+  });
+
+  it('terminalizes a terminal-custody prompt immediately when the terminal reports a failed turn', async () => {
+    vi.useFakeTimers();
+    let nowMs = 10_000;
+    const batch = { message: 'queued in Claude TUI and then failed', origin: { kind: 'ui_pending' as const } };
+    const injectPrompt = vi.fn().mockResolvedValue({ status: 'injected', at: nowMs, bytesWritten: batch.message.length });
+    const onInjectionFailure = vi.fn();
+    const arbiter = createClaudeUnifiedInputArbiter({
+      nowMs: () => nowMs,
+      quietPeriodMs: 0,
+      providerAcceptanceTimeoutMs: 10_000,
+      injectPrompt,
+      evaluateInFlightSteer: async () => ({ steer: true }),
+      onInjectionFailure,
+    });
+
+    arbiter.observeLifecycle({ type: 'turn_state', state: 'running', observedAtMs: nowMs });
+    await arbiter.enqueueUiMessage(batch);
+    nowMs += 1_000;
+    await arbiter.drainWhenSafe();
+    await expect(arbiter.observePromptCustodyByTerminal(batch)).resolves.toBe(true);
+
+    nowMs += 1_000;
+    arbiter.observeLifecycle({ type: 'turn_state', state: 'finalizing', observedAtMs: nowMs });
+    await expect(arbiter.observePendingProviderAcceptanceTerminalFailure()).resolves.toBe(false);
+
+    expect(onInjectionFailure).toHaveBeenCalledWith(expect.objectContaining({
+      failureState: 'failed_terminal',
+      batch,
+      result: expect.objectContaining({
+        reason: 'timeout',
+        phase: 'after_enter_unknown',
+        duplicateRisk: 'likely',
+        recoverable: true,
+      }),
+    }));
+    expect(arbiter.snapshot()).toMatchObject({
+      queuedCount: 0,
+      terminalCustodyCount: 0,
+      providerAcceptancePendingCount: 0,
+      lastFailureReason: 'timeout',
+      headInputState: 'failed_terminal',
+    });
   });
 
   it('continues injecting later prompts while earlier steered prompts wait in Claude terminal custody', async () => {
@@ -628,6 +676,205 @@ describe('createClaudeUnifiedInputArbiter', () => {
     arbiter.dispose();
   });
 
+  it('does not accept a draft-clear server-owned pending prompt from provider output without identity confirmation', async () => {
+    vi.useFakeTimers();
+    let nowMs = 10_000;
+    const accepted: string[] = [];
+    const injectPrompt = vi.fn().mockImplementation(async (batch) => ({
+      status: 'injected' as const,
+      at: nowMs,
+      bytesWritten: batch.message.length,
+    }));
+    const onInjectionFailure = vi.fn();
+    const arbiter = createClaudeUnifiedInputArbiter({
+      nowMs: () => nowMs,
+      quietPeriodMs: 0,
+      maxWaitMs: 60_000,
+      providerAcceptanceTimeoutMs: 40,
+      injectPrompt,
+      onPromptAccepted: async (batch) => {
+        accepted.push(batch.message);
+      },
+      onInjectionFailure,
+    });
+
+    arbiter.observeLifecycle({ type: 'output', observedAtMs: nowMs });
+    arbiter.observeUserTypingState({ userTyping: true, observedAtMs: nowMs });
+    await arbiter.enqueueUiMessage({
+      message: 'deliver once after draft clear',
+      origin: { kind: 'ui_pending' },
+      maxUserMessageSeq: 739,
+      userMessageLocalIds: ['pending-local-draft-clear'],
+    });
+    nowMs += 1;
+    await arbiter.drainWhenSafe();
+
+    expect(injectPrompt).not.toHaveBeenCalled();
+    expect(arbiter.snapshot()).toMatchObject({
+      queuedCount: 1,
+      lastDeferredReason: 'user_typing',
+    });
+
+    arbiter.notifyTerminalComposerCleared();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(injectPrompt).toHaveBeenCalledTimes(1);
+    expect(accepted).toEqual([]);
+    expect(arbiter.snapshot()).toMatchObject({
+      queuedCount: 1,
+      headInputState: 'awaiting_provider_acceptance',
+    });
+
+    nowMs += 20;
+    arbiter.observeLifecycle({ type: 'output', observedAtMs: nowMs });
+    nowMs += 20;
+    await vi.advanceTimersByTimeAsync(40);
+    await vi.waitFor(() => {
+      expect(onInjectionFailure).toHaveBeenCalledTimes(1);
+    });
+    await arbiter.drainWhenSafe();
+
+    expect(injectPrompt).toHaveBeenCalledTimes(1);
+    expect(accepted).toEqual([]);
+    expect(arbiter.snapshot()).toMatchObject({
+      queuedCount: 1,
+      lastFailureReason: 'timeout',
+      headInputState: 'failed_terminal',
+    });
+
+    arbiter.dispose();
+  });
+
+  it('does not accept a draft-clear server-owned pending prompt from terminal finalizing without identity confirmation', async () => {
+    vi.useFakeTimers();
+    let nowMs = 10_000;
+    const accepted: string[] = [];
+    const injectPrompt = vi.fn().mockImplementation(async (batch) => ({
+      status: 'injected' as const,
+      at: nowMs,
+      bytesWritten: batch.message.length,
+    }));
+    const onInjectionFailure = vi.fn();
+    const arbiter = createClaudeUnifiedInputArbiter({
+      nowMs: () => nowMs,
+      quietPeriodMs: 0,
+      maxWaitMs: 60_000,
+      providerAcceptanceTimeoutMs: 40,
+      injectPrompt,
+      onPromptAccepted: async (batch) => {
+        accepted.push(batch.message);
+      },
+      onInjectionFailure,
+    });
+
+    arbiter.observeLifecycle({ type: 'output', observedAtMs: nowMs });
+    arbiter.observeUserTypingState({ userTyping: true, observedAtMs: nowMs });
+    await arbiter.enqueueUiMessage({
+      message: 'deliver once after finalizing',
+      origin: { kind: 'ui_pending' },
+      maxUserMessageSeq: null,
+      userMessageLocalIds: ['pending-local-finalizing'],
+    });
+    nowMs += 1;
+    await arbiter.drainWhenSafe();
+
+    expect(injectPrompt).not.toHaveBeenCalled();
+    expect(arbiter.snapshot()).toMatchObject({
+      queuedCount: 1,
+      lastDeferredReason: 'user_typing',
+    });
+
+    arbiter.notifyTerminalComposerCleared();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(injectPrompt).toHaveBeenCalledTimes(1);
+    expect(accepted).toEqual([]);
+    expect(arbiter.snapshot()).toMatchObject({
+      queuedCount: 1,
+      headInputState: 'awaiting_provider_acceptance',
+    });
+
+    nowMs += 20;
+    arbiter.observeLifecycle({ type: 'turn_state', state: 'finalizing', observedAtMs: nowMs });
+    nowMs += 20;
+    await vi.advanceTimersByTimeAsync(40);
+    await vi.waitFor(() => {
+      expect(onInjectionFailure).toHaveBeenCalledTimes(1);
+    });
+    await arbiter.drainWhenSafe();
+
+    expect(injectPrompt).toHaveBeenCalledTimes(1);
+    expect(accepted).toEqual([]);
+    expect(arbiter.snapshot()).toMatchObject({
+      queuedCount: 1,
+      lastFailureReason: 'timeout',
+      headInputState: 'failed_terminal',
+    });
+
+    arbiter.dispose();
+  });
+
+  it('does not accept a server-owned pending prompt from running-state evidence after provider acceptance timeout', async () => {
+    vi.useFakeTimers();
+    let nowMs = 10_000;
+    const accepted: string[] = [];
+    const injectPrompt = vi.fn().mockImplementation(async (batch) => ({
+      status: 'injected' as const,
+      at: nowMs,
+      bytesWritten: batch.message.length,
+    }));
+    const onInjectionFailure = vi.fn();
+    const arbiter = createClaudeUnifiedInputArbiter({
+      nowMs: () => nowMs,
+      quietPeriodMs: 0,
+      providerAcceptanceTimeoutMs: 40,
+      injectPrompt,
+      onPromptAccepted: async (batch) => {
+        accepted.push(batch.message);
+      },
+      onInjectionFailure,
+    });
+
+    arbiter.observeLifecycle({ type: 'output', observedAtMs: nowMs });
+    await arbiter.enqueueUiMessage({
+      message: 'late running-state accepted prompt',
+      origin: { kind: 'ui_pending' },
+      maxUserMessageSeq: null,
+      userMessageLocalIds: ['pending-local-late-running'],
+    });
+    nowMs += 1;
+    await arbiter.drainWhenSafe();
+    expect(injectPrompt).toHaveBeenCalledTimes(1);
+
+    nowMs += 40;
+    await vi.advanceTimersByTimeAsync(40);
+    await vi.waitFor(() => {
+      expect(onInjectionFailure).toHaveBeenCalledTimes(1);
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(injectPrompt).toHaveBeenCalledTimes(1);
+    expect(arbiter.snapshot()).toMatchObject({
+      queuedCount: 1,
+      lastFailureReason: 'timeout',
+      headInputState: 'failed_ambiguous',
+    });
+
+    nowMs += 1;
+    arbiter.observeLifecycle({ type: 'turn_state', state: 'running', observedAtMs: nowMs });
+    await vi.advanceTimersByTimeAsync(0);
+    await arbiter.drainWhenSafe();
+
+    expect(injectPrompt).toHaveBeenCalledTimes(1);
+    expect(accepted).toEqual([]);
+    expect(arbiter.snapshot()).toMatchObject({
+      queuedCount: 1,
+      lastFailureReason: 'timeout',
+      headInputState: 'failed_terminal',
+    });
+
+    arbiter.dispose();
+  });
+
   it('retries and injects after a stale user-typing startup observation expires', async () => {
     vi.useFakeTimers();
     let nowMs = 10_000;
@@ -761,6 +1008,49 @@ describe('createClaudeUnifiedInputArbiter', () => {
       batch: expect.objectContaining({ message: 'hello' }),
       result: expect.objectContaining({ reason: 'pane_dead' }),
     }));
+  });
+
+  it('drops a server-owned pending prompt when a terminal failure is claimed by durable pending state', async () => {
+    let nowMs = 10_000;
+    const onInjectionFailure = vi.fn(async () => ({ action: 'claimed_pending_delivery' as const }));
+    const onUndeliverableBatches = vi.fn();
+    const arbiter = createClaudeUnifiedInputArbiter({
+      nowMs: () => nowMs,
+      injectPrompt: async () => ({
+        status: 'failed' as const,
+        reason: 'pane_dead' as const,
+        phase: 'liveness' as const,
+        duplicateRisk: 'none' as const,
+        recoverable: false,
+      }),
+      onInjectionFailure,
+      onUndeliverableBatches,
+    });
+
+    await arbiter.enqueueUiMessage({
+      message: 'server-owned prompt terminal failure',
+      origin: { kind: 'ui_pending' },
+      maxUserMessageSeq: 177,
+      userMessageLocalIds: ['pending-local-terminal-failure'],
+    });
+    arbiter.observeLifecycle({ type: 'output', observedAtMs: nowMs });
+    nowMs += 1_000;
+    await arbiter.drainWhenSafe();
+
+    expect(onInjectionFailure).toHaveBeenCalledWith(expect.objectContaining({
+      failureState: 'failed_terminal',
+      batch: expect.objectContaining({
+        userMessageLocalIds: ['pending-local-terminal-failure'],
+      }),
+      result: expect.objectContaining({ reason: 'pane_dead' }),
+    }));
+    expect(arbiter.snapshot()).toMatchObject({
+      queuedCount: 0,
+      headInputState: null,
+    });
+
+    arbiter.dispose();
+    expect(onUndeliverableBatches).not.toHaveBeenCalled();
   });
 
   it('terminalizes deterministic invalid prompt text without handing it back as undeliverable', async () => {
@@ -977,6 +1267,52 @@ describe('createClaudeUnifiedInputArbiter', () => {
     }));
   });
 
+  it('keeps an unconfirmed submit failure owned when failure notification is not explicitly handled', async () => {
+    let nowMs = 10_000;
+    const handedBack: string[] = [];
+    const onInjectionFailure = vi.fn();
+    const arbiter = createClaudeUnifiedInputArbiter({
+      nowMs: () => nowMs,
+      quietPeriodMs: 0,
+      injectPrompt: async () => ({
+        status: 'failed',
+        reason: 'host_unreachable',
+        phase: 'after_enter_unknown',
+        duplicateRisk: 'possible',
+        recoverable: true,
+      }),
+      onInjectionFailure,
+      onUndeliverableBatches: (batches) => {
+        handedBack.push(...batches.map((batch) => batch.message));
+      },
+    });
+
+    await arbiter.enqueueUiMessage({ message: 'unhandled after-enter failure', origin: { kind: 'ui_pending' } });
+    arbiter.observeLifecycle({ type: 'output', observedAtMs: nowMs });
+    nowMs += 1_000;
+    await arbiter.drainWhenSafe();
+
+    expect(onInjectionFailure).toHaveBeenCalledWith(expect.objectContaining({
+      failureState: 'failed_ambiguous',
+      batch: expect.objectContaining({ message: 'unhandled after-enter failure' }),
+      result: expect.objectContaining({
+        reason: 'host_unreachable',
+        phase: 'after_enter_unknown',
+      }),
+    }));
+    expect(arbiter.snapshot()).toMatchObject({
+      queuedCount: 1,
+      lastFailureReason: 'host_unreachable',
+      headInputState: 'failed_ambiguous',
+    });
+
+    await arbiter.dispose();
+
+    // After-Enter failures carry duplicate risk: keep the batch visible while the runtime is
+    // active, but do not hand it back on teardown unless the delivery owner proved it is safe.
+    expect(handedBack).toEqual([]);
+  });
+
   it('accepts late provider confirmation after an ambiguous timeout without retrying the prompt', async () => {
     vi.useFakeTimers();
     let nowMs = 10_000;
@@ -1079,6 +1415,59 @@ describe('createClaudeUnifiedInputArbiter', () => {
     });
   });
 
+  it('accepts a seq-less pending head before steer retry when core delivery state records post-injection provider acceptance', async () => {
+    let nowMs = 10_000;
+    let deliveryAccepted = false;
+    const accepted: string[] = [];
+    const injectPrompt = vi.fn(async (batch, options) => ({
+      status: 'injected' as const,
+      at: nowMs,
+      bytesWritten: batch.message.length,
+      options,
+    }));
+    const evaluateInFlightSteer = vi.fn(async () => ({ steer: true as const }));
+    const arbiter = createClaudeUnifiedInputArbiter({
+      nowMs: () => nowMs,
+      quietPeriodMs: 0,
+      injectPrompt,
+      evaluateInFlightSteer,
+      isPromptDeliveryAccepted: () => deliveryAccepted,
+      onPromptAccepted: async (batch) => {
+        accepted.push(batch.message);
+      },
+    });
+
+    await arbiter.enqueueUiMessage({
+      message: 'post-injection accepted local-id-only prompt',
+      origin: { kind: 'ui_pending' },
+      maxUserMessageSeq: null,
+      userMessageLocalIds: ['2354977c-f259-4e0d-bbdc-6268129b5e85'],
+    });
+    arbiter.observeLifecycle({ type: 'turn_state', state: 'idle', observedAtMs: nowMs });
+    arbiter.observeLifecycle({ type: 'output', observedAtMs: nowMs });
+    await arbiter.drainWhenSafe();
+
+    expect(injectPrompt).toHaveBeenCalledTimes(1);
+    expect(arbiter.snapshot()).toMatchObject({
+      queuedCount: 1,
+      headInputState: 'awaiting_provider_acceptance',
+    });
+
+    deliveryAccepted = true;
+    nowMs += 1_000;
+    arbiter.observeLifecycle({ type: 'turn_state', state: 'running', observedAtMs: nowMs });
+    await arbiter.drainWhenSafe();
+
+    expect(evaluateInFlightSteer).not.toHaveBeenCalled();
+    expect(injectPrompt).toHaveBeenCalledTimes(1);
+    expect(accepted).toEqual(['post-injection accepted local-id-only prompt']);
+    expect(arbiter.snapshot()).toMatchObject({
+      queuedCount: 0,
+      lastFailureReason: null,
+      headInputState: 'submitted',
+    });
+  });
+
   it('retries a host-level injected prompt once after provider confirmation never arrives', async () => {
     vi.useFakeTimers();
     let nowMs = 10_000;
@@ -1163,6 +1552,153 @@ describe('createClaudeUnifiedInputArbiter', () => {
       lastFailureReason: null,
       headInputState: 'awaiting_provider_acceptance',
     });
+  });
+
+  it('drops a server-owned pending prompt when provider acceptance timeout is claimed by durable pending state', async () => {
+    vi.useFakeTimers();
+    let nowMs = 10_000;
+    const injectPrompt = vi.fn(async (batch) => ({ status: 'injected' as const, at: nowMs, bytesWritten: batch.message.length }));
+    const onInjectionFailure = vi.fn(async () => ({ action: 'claimed_pending_delivery' as const }));
+    const arbiter = createClaudeUnifiedInputArbiter({
+      nowMs: () => nowMs,
+      quietPeriodMs: 0,
+      providerAcceptanceTimeoutMs: 40,
+      injectPrompt,
+      onInjectionFailure,
+    });
+
+    await arbiter.enqueueUiMessage({
+      message: 'server-owned prompt times out',
+      origin: { kind: 'ui_pending' },
+      maxUserMessageSeq: 901,
+      userMessageLocalIds: ['pending-local-timeout'],
+    });
+    arbiter.observeLifecycle({ type: 'output', observedAtMs: nowMs });
+    nowMs += 1_000;
+    await arbiter.drainWhenSafe();
+    expect(injectPrompt).toHaveBeenCalledTimes(1);
+
+    nowMs += 40;
+    await vi.advanceTimersByTimeAsync(40);
+    await vi.waitFor(() => {
+      expect(onInjectionFailure).toHaveBeenCalledTimes(1);
+    });
+    arbiter.observeLifecycle({ type: 'turn_state', state: 'idle', observedAtMs: nowMs });
+    arbiter.observeLifecycle({ type: 'output', observedAtMs: nowMs });
+    await arbiter.drainWhenSafe();
+
+    expect(onInjectionFailure).toHaveBeenCalledWith(expect.objectContaining({
+      failureState: 'failed_ambiguous',
+      batch: expect.objectContaining({
+        userMessageLocalIds: ['pending-local-timeout'],
+      }),
+    }));
+    expect(injectPrompt).toHaveBeenCalledTimes(1);
+    expect(arbiter.snapshot()).toMatchObject({
+      queuedCount: 0,
+      lastFailureReason: null,
+    });
+  });
+
+  it('does not accept claimed pending delivery from a broad provider submit hook without identity evidence', async () => {
+    let nowMs = 10_000;
+    const accepted: string[] = [];
+    const arbiter = createClaudeUnifiedInputArbiter({
+      nowMs: () => nowMs,
+      quietPeriodMs: 0,
+      injectPrompt: async (batch) => ({
+        status: 'injected',
+        at: nowMs,
+        bytesWritten: batch.message.length,
+      }),
+      onPromptAccepted: async (batch) => {
+        accepted.push(batch.message);
+      },
+    });
+
+    await arbiter.enqueueUiMessage({
+      message: 'claimed prompt',
+      origin: { kind: 'ui_pending' },
+      maxUserMessageSeq: null,
+      userMessageLocalIds: ['claimed-local-id'],
+    });
+    arbiter.observeLifecycle({ type: 'turn_state', state: 'idle', observedAtMs: nowMs });
+    arbiter.observeLifecycle({ type: 'output', observedAtMs: nowMs });
+    nowMs += 1_000;
+    await arbiter.drainWhenSafe();
+
+    await expect(arbiter.confirmPromptAcceptedByProvider()).resolves.toBe(false);
+    expect(accepted).toEqual([]);
+    expect(arbiter.snapshot()).toMatchObject({
+      queuedCount: 1,
+      headInputState: 'awaiting_provider_acceptance',
+    });
+
+    await expect(arbiter.confirmPromptAcceptedByProviderIf((batch) => (
+      batch.userMessageLocalIds?.includes('claimed-local-id') === true
+    ))).resolves.toBe(true);
+    expect(accepted).toEqual(['claimed prompt']);
+    expect(arbiter.snapshot()).toMatchObject({
+      queuedCount: 0,
+      headInputState: 'submitted',
+    });
+  });
+
+  it('accepts provider confirmation that arrives while injection is still resolving', async () => {
+    vi.useFakeTimers();
+    let nowMs = 10_000;
+    const accepted: string[] = [];
+    const providerConfirmations: boolean[] = [];
+    const onInjectionFailure = vi.fn();
+    let arbiter!: ClaudeUnifiedInputArbiter;
+    const injectPrompt = vi.fn(async (batch) => {
+      providerConfirmations.push(await arbiter.confirmPromptAcceptedByProvider());
+      return {
+        status: 'injected' as const,
+        at: nowMs,
+        bytesWritten: batch.message.length,
+      };
+    });
+    arbiter = createClaudeUnifiedInputArbiter({
+      nowMs: () => nowMs,
+      quietPeriodMs: 0,
+      providerAcceptanceTimeoutMs: 40,
+      injectPrompt,
+      onPromptAccepted: async (batch) => {
+        accepted.push(batch.message);
+      },
+      onInjectionFailure,
+    });
+
+    await arbiter.enqueueUiMessage({
+      message: 'prompt accepted during injection',
+      origin: { kind: 'ui_pending' },
+      maxUserMessageSeq: null,
+      userMessageLocalIds: ['pending-local-during-injection'],
+    });
+    arbiter.observeLifecycle({ type: 'turn_state', state: 'idle', observedAtMs: nowMs });
+    arbiter.observeLifecycle({ type: 'output', observedAtMs: nowMs });
+    nowMs += 1_000;
+    await arbiter.drainWhenSafe();
+
+    expect(providerConfirmations).toEqual([false]);
+    expect(injectPrompt).toHaveBeenCalledTimes(1);
+    expect(accepted).toEqual([]);
+    await expect(arbiter.confirmPromptAcceptedByProviderIf((batch) => (
+      batch.userMessageLocalIds?.includes('pending-local-during-injection') === true
+    ))).resolves.toBe(true);
+    expect(accepted).toEqual(['prompt accepted during injection']);
+    expect(arbiter.snapshot()).toMatchObject({
+      queuedCount: 0,
+      lastFailureReason: null,
+      headInputState: 'submitted',
+    });
+
+    nowMs += 40;
+    await vi.advanceTimersByTimeAsync(40);
+
+    expect(onInjectionFailure).not.toHaveBeenCalled();
+    expect(injectPrompt).toHaveBeenCalledTimes(1);
   });
 
   it('terminalizes a host-level injected prompt when provider confirmation never arrives after retry', async () => {

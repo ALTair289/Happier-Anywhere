@@ -4,7 +4,11 @@ import type {
   SessionRuntimeIssueSourceV1,
   SessionRuntimeIssueV1,
 } from '@happier-dev/protocol';
-import { ConnectedServiceIdSchema, readConnectedServiceLimitCategoryV1 } from '@happier-dev/protocol';
+import {
+  ConnectedServiceIdSchema,
+  readConnectedServiceLimitCategoryV1,
+  redactBugReportSensitiveText,
+} from '@happier-dev/protocol';
 
 import { classifyProviderLimitEvidence } from '@/daemon/connectedServices/quotas/normalization';
 
@@ -50,6 +54,17 @@ const sanitizedPreviewBySource = {
   dependency_failure: 'Provider dependency failed',
   unknown: 'Session runtime failed',
 } as const satisfies Record<SessionRuntimeIssueSourceV1, string>;
+
+const PI_PROVIDER_TOKEN_PATTERN = /\bsk-[A-Za-z0-9][A-Za-z0-9_-]{12,}\b/gu;
+export const PI_PROVIDER_SESSION_FAILURE_AFTER_PROMPT_ACCEPTANCE_DIAGNOSTIC =
+  'Pi provider reported provider session failure after prompt acceptance';
+const PI_TERMINAL_DIAGNOSTIC_PREFIXES = [
+  'Pi provider reported turn_failed without details after prompt acceptance',
+  'Pi provider reported assistant_message_end failed without details after prompt acceptance',
+  PI_PROVIDER_SESSION_FAILURE_AFTER_PROMPT_ACCEPTANCE_DIAGNOSTIC,
+  'Pi provider reported turn_failed after prompt acceptance:',
+  'Pi provider reported assistant_message_end failed after prompt acceptance:',
+] as const;
 
 function extractErrorTextParts(error: unknown): string[] {
   if (typeof error === 'string') return [error];
@@ -155,6 +170,23 @@ function buildSafeModelNotFoundPreview(error: unknown): string | null {
   const modelRef = `${provider}/${model}`;
   if (modelRef.length > 180) return null;
   return `Model not found: ${modelRef}`;
+}
+
+function buildSafePiTerminalDiagnosticPreview(params: Readonly<{
+  provider: string | null;
+  error: unknown;
+}>): string | null {
+  if (params.provider !== 'pi') return null;
+  for (const part of extractErrorTextParts(params.error)) {
+    const preview = redactBugReportSensitiveText(part)
+      .replace(PI_PROVIDER_TOKEN_PATTERN, '[redacted-provider-token]')
+      .replace(/\s+/gu, ' ')
+      .trim();
+    if (!preview) continue;
+    if (!PI_TERMINAL_DIAGNOSTIC_PREFIXES.some((prefix) => preview.startsWith(prefix))) continue;
+    return preview.slice(0, 2_000);
+  }
+  return null;
 }
 
 function normalizeUrl(value: unknown): string | null {
@@ -379,7 +411,9 @@ export function classifyPrimarySessionRuntimeIssue(
     ...(provider === null ? {} : { provider }),
     ...(providerTurnId === null ? {} : { providerTurnId }),
     sanitizedPreview: temporaryThrottle === null
-      ? buildSafeModelNotFoundPreview(input.error) ?? sanitizedPreviewBySource[source]
+      ? buildSafeModelNotFoundPreview(input.error)
+        ?? buildSafePiTerminalDiagnosticPreview({ provider, error: input.error })
+        ?? sanitizedPreviewBySource[source]
       : 'Provider is temporarily limiting requests',
     ...(usageLimit === null ? {} : { usageLimit }),
     ...(temporaryThrottle === null ? {} : { temporaryThrottle }),

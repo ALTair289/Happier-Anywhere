@@ -126,5 +126,46 @@ describe('createCurrentSessionTranscriptPort', () => {
     const port = createCurrentSessionTranscriptPort(() => session);
 
     expect(port.sendAgentMessageEphemeral).toBeUndefined();
+    expect(port.sendAgentMessageEphemeralDelta).toBeUndefined();
+    expect(port.getEphemeralStreamConnectionEpoch).toBeUndefined();
+  });
+
+  it('routes ephemeral stream delta writes and connection epochs through the latest swapped session', () => {
+    const firstSession = {
+      sendAgentMessage: vi.fn(),
+      sendAgentMessageEphemeral: vi.fn(),
+      sendAgentMessageEphemeralDelta: vi.fn(),
+      getEphemeralStreamConnectionEpoch: vi.fn(() => 1),
+      sendAgentMessageCommitted: vi.fn(async () => {}),
+    };
+    const secondSession = {
+      sendAgentMessage: vi.fn(),
+      sendAgentMessageEphemeral: vi.fn(),
+      sendAgentMessageEphemeralDelta: vi.fn(),
+      getEphemeralStreamConnectionEpoch: vi.fn(() => 7),
+      sendAgentMessageCommitted: vi.fn(async () => {}),
+    };
+
+    let currentSession = firstSession;
+    const port = createCurrentSessionTranscriptPort(() => currentSession as any);
+
+    currentSession = secondSession;
+
+    expect(port.sendAgentMessageEphemeralDelta).toBeTypeOf('function');
+    port.sendAgentMessageEphemeralDelta?.(
+      'codex',
+      { type: 'message', message: ' live' },
+      { localId: 'segment-1', tick: 2, baseLength: 4, createdAt: 1_000, updatedAt: 1_040 },
+    );
+
+    expect(firstSession.sendAgentMessageEphemeralDelta).not.toHaveBeenCalled();
+    expect(secondSession.sendAgentMessageEphemeralDelta).toHaveBeenCalledWith(
+      'codex',
+      { type: 'message', message: ' live' },
+      { localId: 'segment-1', tick: 2, baseLength: 4, createdAt: 1_000, updatedAt: 1_040 },
+    );
+
+    expect(port.getEphemeralStreamConnectionEpoch?.()).toBe(7);
+    expect(firstSession.getEphemeralStreamConnectionEpoch).not.toHaveBeenCalled();
   });
 });

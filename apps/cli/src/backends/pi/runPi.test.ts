@@ -63,4 +63,19 @@ describe('runPi', () => {
       supportsMcpServers: false,
     });
   });
+
+  it('keeps Pi on standard queue-handoff semantics instead of provider-acceptance custody', async () => {
+    await runPi({ credentials });
+
+    expect(runStandardAcpProviderMock).toHaveBeenCalledTimes(1);
+    const config = runStandardAcpProviderMock.mock.calls[0]?.[1] as Record<string, unknown> | undefined;
+    expect(config).toBeTruthy();
+    expect(config).toMatchObject({
+      flavor: 'pi',
+      supportsMcpServers: false,
+    });
+    expect(config).not.toHaveProperty('deferDeliveredUserMessageWatermarkToProviderAcceptance');
+    expect(config).not.toHaveProperty('providerAcceptance');
+    expect(config).not.toHaveProperty('pendingDeliveryCustody');
+  });
 });

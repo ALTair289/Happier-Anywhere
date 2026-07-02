@@ -52,9 +52,14 @@ export type ClaudeUnifiedPromptInjectionFailure<Mode = unknown> = Readonly<{
   failureState: 'failed_ambiguous' | 'failed_terminal';
 }>;
 
+export type ClaudeUnifiedPromptInjectionFailureHandling =
+  | Readonly<{ action: 'claimed_pending_delivery' }>
+  | Readonly<{ action: 'surfaced_runtime_issue' }>
+  | void;
+
 export type ClaudeUnifiedPromptInjectionFailureHandler<Mode = unknown> = (
   failure: ClaudeUnifiedPromptInjectionFailure<Mode>,
-) => void;
+) => ClaudeUnifiedPromptInjectionFailureHandling | Promise<ClaudeUnifiedPromptInjectionFailureHandling>;
 
 export type ClaudeUnifiedPromptInjectionOptions = Readonly<{
   /**
@@ -97,6 +102,7 @@ export type ClaudeUnifiedInputArbiter<Mode = unknown> = Readonly<{
   observePromptCustodyByTerminal(batch: ClaudeUnifiedPromptBatch<Mode>): Promise<boolean>;
   confirmPromptAcceptedByProvider(): Promise<boolean>;
   confirmPromptAcceptedByProviderIf(matcher: (batch: ClaudeUnifiedPromptBatch<Mode>) => boolean): Promise<boolean>;
+  observePendingProviderAcceptanceTerminalFailure(): Promise<boolean>;
   drainWhenSafe(): Promise<void>;
   snapshot(): ClaudeUnifiedInputArbiterSnapshot;
   dispose(): Promise<void> | void;

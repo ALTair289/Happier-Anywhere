@@ -22,6 +22,15 @@ import { projectConnectedServiceRuntimeAuthRecoveryReport } from '@/daemon/conne
 import type { ConnectedServiceRuntimeFailureClassification } from '@/daemon/connectedServices/runtimeAuth/types';
 import { redactBugReportSensitiveText } from '@happier-dev/protocol';
 
+import {
+  PI_BROKER_LOAD_NONCE_ENV,
+  PI_BROKER_PROVIDERS,
+  PI_BROKER_SELECTIONS_ENV,
+  parsePiBrokerSelections,
+  verifyPiBrokerReadyForConnectedSession,
+  type PiBrokerReadiness,
+} from '@/backends/pi/brokerExtension';
+
 import { createPiConnectedServiceRuntimeAuthAdapter } from '../connectedServices/createPiConnectedServiceRuntimeAuthAdapter';
 import { resolvePiCompactionTurnOutcome } from './compaction/resolvePiCompactionTurnOutcome';
 import {
@@ -60,6 +69,8 @@ type PendingTurn = {
   compactionInProgress: boolean;
   /** True after Pi emitted `agent_end` but before Happier has proven the provider is idle. */
   agentEndObserved: boolean;
+  /** True after Pi emitted `agent_start` for the prompt accepted by this pending turn. */
+  agentStartObserved: boolean;
   /** Bumped on every Pi event so an in-flight liveness probe can detect stale state. */
   activityEpoch: number;
   /** Consecutive liveness probes where Pi claimed to be busy but emitted no events. */
@@ -85,6 +96,10 @@ type Deferred<T> = {
   resolve: (value: T) => void;
   reject: (error: Error) => void;
 };
+
+type PendingTurnStartGraceResult =
+  | { status: 'started' | 'completed' | 'timeout' }
+  | { status: 'rejected'; error: Error };
 
 function parseCompactInstructions(command: string): string | undefined {
   const trimmed = command.trim();
@@ -168,6 +183,7 @@ const DEFAULT_PI_RPC_LIVENESS_PROBE_TIMEOUT_MS = 10_000;
 const DEFAULT_PI_RPC_MAX_SILENT_PROBES = 4;
 const DEFAULT_PI_RPC_PROMPT_COLLISION_IDLE_WAIT_MS = 30_000;
 const DEFAULT_PI_RPC_PROMPT_COLLISION_IDLE_POLL_MS = 250;
+const DEFAULT_PI_RPC_PROMPT_ACK_START_GRACE_MS = 2_500;
 const DEFAULT_PI_RPC_COMPACTION_AUTO_CONTINUE_MAX = 3;
 const DEFAULT_PI_RPC_COMPACTION_AUTO_CONTINUE_PROMPT =
   'Continue the interrupted work from the recovered provider context. Do not restart or repeat completed work.';
@@ -186,6 +202,98 @@ const PI_RPC_LIMIT_EXHAUSTION_TEXT_PATTERN =
   /\b(usage\s*limit|rate\s*limit|too many requests|resource[_\s-]*exhausted|limit reached|out of credits|credits exhausted)\b|\bquota(?:[_\s-]*(?:exceeded|exhausted|reached)|[_\s-]*limit[_\s-]*(?:exceeded|exhausted|reached))\b/u;
 const PI_RPC_RATE_LIMIT_STATUS_TEXT_PATTERN =
   /\b(?:http|status|code|error)["']?\s*[:=]?\s*429\b|\b429\b.*\btoo many requests\b|\btoo many requests\b.*\b429\b/u;
+const PI_RPC_PROVIDER_TOKEN_PATTERN = /\bsk-[A-Za-z0-9][A-Za-z0-9_-]{12,}\b/gu;
+
+function redactPiDiagnosticText(value: string): string {
+  return redactBugReportSensitiveText(value).replace(PI_RPC_PROVIDER_TOKEN_PATTERN, '[redacted-provider-token]');
+}
+
+function isExactGenericProviderSessionFailure(value: string): boolean {
+  return /^provider session failed$/iu.test(value.trim());
+}
+
+const PI_RPC_FAILURE_TRACE_ENV = 'HAPPIER_PI_RPC_FAILURE_TRACE';
+const PI_RPC_FAILURE_TRACE_MAX_STRING_LENGTH = 240;
+const PI_RPC_FAILURE_TRACE_MAX_ARRAY_LENGTH = 10;
+const PI_RPC_FAILURE_TRACE_SAFE_SCALAR_FIELDS = [
+  'type',
+  'command',
+  'success',
+  'error',
+  'message',
+  'detail',
+  'reason',
+  'status',
+  'terminalStatus',
+  'terminal_status',
+  'stopReason',
+  'stop_reason',
+  'errorCode',
+  'error_code',
+  'errorMessage',
+  'error_message',
+  'provider',
+  'model',
+] as const;
+
+function sanitizePiRpcFailureTraceScalar(value: unknown): string | number | boolean | null {
+  if (typeof value === 'string') {
+    const normalized = redactPiDiagnosticText(value).replace(/\s+/gu, ' ').trim();
+    return normalized.length > 0 ? normalized.slice(0, PI_RPC_FAILURE_TRACE_MAX_STRING_LENGTH) : null;
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'boolean') return value;
+  return null;
+}
+
+function collectPiRpcFailureTraceScalars(record: Record<string, unknown>): Record<string, string | number | boolean> {
+  const output: Record<string, string | number | boolean> = {};
+  for (const key of PI_RPC_FAILURE_TRACE_SAFE_SCALAR_FIELDS) {
+    const sanitized = sanitizePiRpcFailureTraceScalar(record[key]);
+    if (sanitized !== null) output[key] = sanitized;
+  }
+  return output;
+}
+
+function buildPiRpcFailureTraceMessageShape(value: unknown): Record<string, unknown> | null {
+  const message = asRecord(value);
+  if (!message) return null;
+  const content = Array.isArray(message.content) ? message.content : null;
+  return {
+    ...collectPiRpcFailureTraceScalars(message),
+    hasContent: content !== null,
+    contentLength: content?.length ?? null,
+    contentItemTypes: content
+      ?.slice(0, PI_RPC_FAILURE_TRACE_MAX_ARRAY_LENGTH)
+      .map((item) => asNonEmptyString(asRecord(item)?.type) ?? typeof item) ?? [],
+  };
+}
+
+function sanitizePiRpcFailureTraceExtraValue(value: unknown): unknown {
+  const scalar = sanitizePiRpcFailureTraceScalar(value);
+  if (scalar !== null) return scalar;
+  if (Array.isArray(value)) {
+    return value
+      .slice(0, PI_RPC_FAILURE_TRACE_MAX_ARRAY_LENGTH)
+      .map((item) => sanitizePiRpcFailureTraceExtraValue(item));
+  }
+  const record = asRecord(value);
+  if (record) {
+    return {
+      object: true,
+      keys: Object.keys(record).slice(0, PI_RPC_FAILURE_TRACE_MAX_ARRAY_LENGTH),
+    };
+  }
+  return null;
+}
+
+function sanitizePiRpcFailureTraceExtra(extra: Record<string, unknown>): Record<string, unknown> {
+  const output: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(extra)) {
+    output[key] = sanitizePiRpcFailureTraceExtraValue(value);
+  }
+  return output;
+}
 
 function collectPiStderrRuntimeAuthMarkerText(value: unknown, output: string[]): void {
   if (typeof value === 'string') {
@@ -338,10 +446,121 @@ function buildPiStderrRuntimeAuthEvidence(
   };
 }
 
+const PI_RPC_BARE_TURN_FAILED_DETAIL =
+  'Pi provider reported turn_failed without details after prompt acceptance';
+const PI_RPC_BARE_ASSISTANT_MESSAGE_END_FAILED_DETAIL =
+  'Pi provider reported assistant_message_end failed without details after prompt acceptance';
+const PI_RPC_POST_ACCEPTANCE_PROVIDER_SESSION_FAILURE_DETAIL =
+  'Pi provider reported provider session failure after prompt acceptance';
+const PI_RPC_TURN_FAILED_DETAIL_FIELDS: ReadonlyArray<readonly [label: string, key: string]> = [
+  ['code', 'code'],
+  ['errorCode', 'errorCode'],
+  ['errorCode', 'error_code'],
+  ['status', 'status'],
+  ['statusCode', 'statusCode'],
+  ['statusCode', 'status_code'],
+  ['reason', 'reason'],
+  ['message', 'message'],
+  ['errorMessage', 'errorMessage'],
+  ['errorMessage', 'error_message'],
+  ['error', 'error'],
+  ['detail', 'detail'],
+  ['provider', 'provider'],
+  ['model', 'model'],
+];
+
+function normalizePiTurnFailedDiagnosticScalar(value: unknown): string | null {
+  if (typeof value === 'string') {
+    const normalized = redactPiDiagnosticText(value).replace(/\s+/gu, ' ').trim();
+    return normalized.length > 0 ? normalized.slice(0, 500) : null;
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  return null;
+}
+
+function collectPiTurnFailedDiagnosticFields(
+  record: Record<string, unknown>,
+  output: string[],
+  seen: Set<string>,
+  prefix = '',
+): void {
+  for (const [label, key] of PI_RPC_TURN_FAILED_DETAIL_FIELDS) {
+    const value = normalizePiTurnFailedDiagnosticScalar(record[key]);
+    if (!value) continue;
+    const field = prefix ? `${prefix}.${label}` : label;
+    const dedupeKey = `${field}=${value}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    output.push(`${field}=${value}`);
+  }
+}
+
+function buildPiTurnFailedDiagnostic(event: Record<string, unknown>): string {
+  const fields: string[] = [];
+  const seen = new Set<string>();
+  collectPiTurnFailedDiagnosticFields(event, fields, seen);
+
+  const nestedError = asRecord(event.error);
+  if (nestedError) collectPiTurnFailedDiagnosticFields(nestedError, fields, seen, 'error');
+  const nestedData = asRecord(event.data);
+  if (nestedData) collectPiTurnFailedDiagnosticFields(nestedData, fields, seen, 'data');
+
+  if (fields.length === 0) return PI_RPC_BARE_TURN_FAILED_DETAIL;
+  const joined = fields.join(', ').slice(0, 1_000);
+  return `Pi provider reported turn_failed after prompt acceptance: ${joined}`;
+}
+
+function readPiTerminalStatus(value: unknown): string | null {
+  const status = asNonEmptyString(value);
+  return status ? status.toLowerCase() : null;
+}
+
+function isPiFailedAssistantTerminalEvent(event: Record<string, unknown>): boolean {
+  const type = asNonEmptyString(event.type);
+  if (type !== 'assistant_message_end' && type !== 'message_end') return false;
+  const message = asRecord(event.message);
+  if (message && message.role !== 'assistant') return false;
+
+  const terminalStatus = readPiTerminalStatus(
+    event.terminalStatus ??
+    event.terminal_status ??
+    message?.terminalStatus ??
+    message?.terminal_status,
+  );
+  return terminalStatus === 'failed' || terminalStatus === 'failure' || terminalStatus === 'error';
+}
+
+function buildPiAssistantMessageEndFailedDiagnostic(event: Record<string, unknown>): string {
+  const fields: string[] = [];
+  const seen = new Set<string>();
+  collectPiTurnFailedDiagnosticFields(event, fields, seen);
+
+  const message = asRecord(event.message);
+  if (message) collectPiTurnFailedDiagnosticFields(message, fields, seen, 'message');
+  const nestedError = asRecord(event.error);
+  if (nestedError) collectPiTurnFailedDiagnosticFields(nestedError, fields, seen, 'error');
+  const nestedData = asRecord(event.data);
+  if (nestedData) collectPiTurnFailedDiagnosticFields(nestedData, fields, seen, 'data');
+
+  if (fields.length === 0) return PI_RPC_BARE_ASSISTANT_MESSAGE_END_FAILED_DETAIL;
+  const joined = fields.join(', ').slice(0, 1_000);
+  return `Pi provider reported assistant_message_end failed after prompt acceptance: ${joined}`;
+}
+
+function buildPiPostAcceptancePromptFailureDiagnostic(error: unknown): string {
+  const detail = normalizePiTurnFailedDiagnosticScalar(error);
+  if (!detail || isExactGenericProviderSessionFailure(detail)) {
+    return PI_RPC_POST_ACCEPTANCE_PROVIDER_SESSION_FAILURE_DETAIL;
+  }
+  return `${PI_RPC_POST_ACCEPTANCE_PROVIDER_SESSION_FAILURE_DETAIL}: ${detail.slice(0, 1_000)}`;
+}
+
 const PI_RPC_LIVENESS_PROBE_TIMEOUT_ENV = 'HAPPIER_PI_RPC_LIVENESS_PROBE_TIMEOUT_MS';
 const PI_RPC_MAX_SILENT_PROBES_ENV = 'HAPPIER_PI_RPC_MAX_SILENT_PROBES';
 const PI_RPC_PROMPT_COLLISION_IDLE_WAIT_ENV = 'HAPPIER_PI_RPC_PROMPT_COLLISION_IDLE_WAIT_MS';
 const PI_RPC_PROMPT_COLLISION_IDLE_POLL_ENV = 'HAPPIER_PI_RPC_PROMPT_COLLISION_IDLE_POLL_MS';
+const PI_RPC_PROMPT_ACK_START_GRACE_ENV = 'HAPPIER_PI_RPC_PROMPT_ACK_START_GRACE_MS';
 const PI_RPC_COMPACTION_AUTO_CONTINUE_MAX_ENV = 'HAPPIER_PI_RPC_COMPACTION_AUTO_CONTINUE_MAX';
 const PI_RPC_COMPACTION_AUTO_CONTINUE_PROMPT_ENV = 'HAPPIER_PI_RPC_COMPACTION_AUTO_CONTINUE_PROMPT';
 
@@ -418,6 +637,13 @@ export class PiRpcBackend implements AgentBackend {
   private lastPublishedUsageKey: string | null = null;
   private readonly connectedServiceRuntimeAuthAdapter = createPiConnectedServiceRuntimeAuthAdapter();
   private disposed = false;
+  /**
+   * Memoized once-per-session broker preflight (fail-closed). Broker readiness is a launch-time fact
+   * (extension asset on disk + daemon bridge reachable + extension actually loaded), so verify once and
+   * enforce before startup/prompt commands. Native + direct-API-key sessions resolve `ready: true`
+   * (no-op).
+   */
+  private connectedBrokerPreflight: Promise<PiBrokerReadiness> | null = null;
   private anonymousCompactionSequence = 0;
   private activeCompactionLifecycleId: string | null = null;
   /** Bounded tail of recent raw stderr lines, retained only to enrich a non-zero process-exit (O2). */
@@ -443,6 +669,7 @@ export class PiRpcBackend implements AgentBackend {
 
   async startSession(): Promise<StartSessionResult> {
     await this.ensureProcess();
+    await this.ensureConnectedBrokerReady();
     this.emitMessage({ type: 'status', status: 'starting' });
 
     const stateBefore = await this.getState();
@@ -457,7 +684,7 @@ export class PiRpcBackend implements AgentBackend {
       return { sessionId: existingSessionId };
     }
 
-    const created = await this.sendCommand({ type: 'new_session' }, 60_000);
+    const created = await this.sendProviderAffectingCommand({ type: 'new_session' }, 60_000);
     if ((asRecord(created.data)?.cancelled ?? false) === true) {
       throw new Error('Pi cancelled new_session');
     }
@@ -620,8 +847,50 @@ export class PiRpcBackend implements AgentBackend {
     return this.sessionModelState;
   }
 
+  /**
+   * Fail-closed broker preflight before startup/prompt commands. For brokered connected sessions, the
+   * stored credential carries NO real refresh token — it only works if the Happier broker extension
+   * actually loaded and the daemon bridge is reachable. Verify that once; if not ready, throw a clear
+   * error rather than letting Pi attempt a request with a non-functional brokered credential. Native +
+   * direct-API-key sessions short-circuit to ready (no broker env present) so this is a strict no-op.
+   */
+  private async ensureConnectedBrokerReady(): Promise<void> {
+    this.connectedBrokerPreflight ??= verifyPiBrokerReadyForConnectedSession(this.options.env);
+    const readiness = await this.connectedBrokerPreflight;
+    if (!readiness.ready) {
+      // Reset so a transient miss (e.g. handshake still in flight) can be re-verified on retry.
+      this.connectedBrokerPreflight = null;
+      throw new Error(
+        `Pi connected-service authentication is not ready (${readiness.reason}). `
+        + 'The session was stopped to avoid using a non-functional brokered credential.',
+      );
+    }
+  }
+
+  private async ensureConnectedBrokerReadyForProviderCommand(): Promise<void> {
+    await this.ensureProcess();
+    await this.ensureConnectedBrokerReady();
+  }
+
+  private async sendProviderAffectingCommand(
+    command: PiRpcCommandWithoutId,
+    timeoutMs = 30_000,
+  ): Promise<PiRpcResponse> {
+    await this.ensureConnectedBrokerReadyForProviderCommand();
+    return this.sendCommand(command, timeoutMs, { processAlreadyEnsured: true });
+  }
+
+  private refreshPiBrokerLoadNonceForNextSpawn(): void {
+    const selections = parsePiBrokerSelections(this.options.env[PI_BROKER_SELECTIONS_ENV]);
+    const hasBrokeredProvider = PI_BROKER_PROVIDERS.some((provider) => selections[provider]);
+    if (!hasBrokeredProvider) return;
+    this.options.env[PI_BROKER_LOAD_NONCE_ENV] = randomUUID();
+    this.connectedBrokerPreflight = null;
+  }
+
   async sendPrompt(sessionId: SessionId, prompt: string): Promise<void> {
     this.assertSession(sessionId);
+    await this.ensureConnectedBrokerReady();
 
     const barrier = createDeferred<void>();
     this.pendingTurnBarrier = barrier;
@@ -647,11 +916,14 @@ export class PiRpcBackend implements AgentBackend {
       // Ensure we have a live process *before* allocating a pending turn.
       // If the process died between turns, `ensureProcess()` may need to restart and reattach via --session.
       await this.ensureProcess();
+      await this.ensureConnectedBrokerReady();
 
       settleBarrier();
 
       for (let attempt = 0; attempt < 2; attempt += 1) {
         let turn: Promise<void> | null = null;
+        let promptSendAttempted = false;
+        let startGraceStatus: PendingTurnStartGraceResult['status'] | null = null;
         try {
           if (this.pendingTurn) {
             if (attempt === 0) {
@@ -667,8 +939,10 @@ export class PiRpcBackend implements AgentBackend {
             }
             throw new Error('Pi is already processing another prompt');
           }
+          await this.ensureConnectedBrokerReadyForProviderCommand();
           turn = this.createPendingTurn(this.getPendingTurnStallTimeoutMs());
-          await this.sendCommand({ type: 'prompt', message });
+          promptSendAttempted = true;
+          await this.sendCommand({ type: 'prompt', message }, 30_000, { processAlreadyEnsured: true });
           await turn;
           return;
         } catch (error) {
@@ -696,6 +970,25 @@ export class PiRpcBackend implements AgentBackend {
           }
 
           if (turn) {
+            const pending = this.pendingTurn;
+            if (!pending) {
+              await turn;
+              return;
+            }
+            const startGraceResult = await this.waitForPendingTurnStartGrace(pending);
+            startGraceStatus = startGraceResult.status;
+            if (startGraceResult.status === 'started' || startGraceResult.status === 'completed') {
+              await turn;
+              return;
+            }
+            if (startGraceResult.status === 'rejected') {
+              throw this.surfaceSendPromptCatchBoundaryError(startGraceResult.error, {
+                promptSendAttempted,
+                turnAllocated: turn !== null,
+                startGraceStatus,
+              });
+            }
+
             this.rejectPendingTurn(promptError);
             await turn.catch(() => undefined);
           }
@@ -709,7 +1002,11 @@ export class PiRpcBackend implements AgentBackend {
               normalizedError.includes('epipe'));
 
           if (!canRecoverFromProcessExit) {
-            throw promptError;
+            throw this.surfaceSendPromptCatchBoundaryError(promptError, {
+              promptSendAttempted,
+              turnAllocated: turn !== null,
+              startGraceStatus,
+            });
           }
 
           try {
@@ -734,7 +1031,8 @@ export class PiRpcBackend implements AgentBackend {
     if (!this.process) {
       throw new Error('Pi process is not running');
     }
-    await this.sendCommand({ type: 'steer', message });
+    await this.ensureConnectedBrokerReady();
+    await this.sendCommand({ type: 'steer', message }, 30_000, { processAlreadyEnsured: true });
   }
 
   async compactContext(sessionId: SessionId, command: string): Promise<void> {
@@ -742,7 +1040,7 @@ export class PiRpcBackend implements AgentBackend {
     const maybeRestart = this.maybeRestartForUpdatedAuthJson();
     if (maybeRestart) await maybeRestart;
     const customInstructions = parseCompactInstructions(command);
-    await this.sendCommand({
+    await this.sendProviderAffectingCommand({
       type: 'compact',
       ...(customInstructions ? { customInstructions } : {}),
     }, 240_000);
@@ -756,7 +1054,7 @@ export class PiRpcBackend implements AgentBackend {
     if (!normalized) return;
 
     const selection = await this.resolveModelSelection(normalized);
-    await this.sendCommand({ type: 'set_model', provider: selection.provider, modelId: selection.modelId }, 60_000);
+    await this.sendProviderAffectingCommand({ type: 'set_model', provider: selection.provider, modelId: selection.modelId }, 60_000);
     this.currentModelProvider = selection.provider;
     await this.publishRuntimeState(await this.getState());
   }
@@ -775,7 +1073,7 @@ export class PiRpcBackend implements AgentBackend {
     const level = normalizePiThinkingEffort(value);
     if (!level) return;
 
-    await this.sendCommand({ type: 'set_thinking_level', level }, 30_000);
+    await this.sendProviderAffectingCommand({ type: 'set_thinking_level', level }, 30_000);
     await this.publishRuntimeState(await this.getState());
   }
 
@@ -881,6 +1179,7 @@ export class PiRpcBackend implements AgentBackend {
   }
 
   private spawnRpcProcess(params: Readonly<{ args: string[] }>): void {
+    this.refreshPiBrokerLoadNonceForNextSpawn();
     const child = spawn(this.options.command, params.args, {
       cwd: this.options.cwd,
       env: {
@@ -1124,6 +1423,73 @@ export class PiRpcBackend implements AgentBackend {
     });
   }
 
+  private isPiRpcFailureTraceEnabled(): boolean {
+    return this.options.env[PI_RPC_FAILURE_TRACE_ENV] === '1' || process.env[PI_RPC_FAILURE_TRACE_ENV] === '1';
+  }
+
+  private tracePiRpcFailureBoundary(
+    branch: string,
+    record: Record<string, unknown>,
+    extra: Record<string, unknown> = {},
+  ): void {
+    if (!this.isPiRpcFailureTraceEnabled()) return;
+    const id = asNonEmptyString(record.id);
+    const pending = id ? this.pendingRequests.get(id) ?? null : null;
+    const messageShape = buildPiRpcFailureTraceMessageShape(record.message);
+
+    logger.debug('[pi] RPC failure trace', {
+      branch,
+      ...collectPiRpcFailureTraceScalars(record),
+      idPresent: id !== null,
+      idMatchesOpenPrompt: id !== null && this.openPromptRequestIds.has(id),
+      hasPendingRequest: pending !== null,
+      pendingCommandType: pending?.commandType ?? null,
+      pendingTurnPresent: this.pendingTurn !== null,
+      ...(messageShape ? { messageShape } : {}),
+      ...sanitizePiRpcFailureTraceExtra(extra),
+    });
+  }
+
+  private surfaceSendPromptCatchBoundaryError(
+    error: Error,
+    context: Readonly<{
+      promptSendAttempted: boolean;
+      turnAllocated: boolean;
+      startGraceStatus: PendingTurnStartGraceResult['status'] | null;
+    }>,
+  ): Error {
+    const promptErrorExactGeneric = isExactGenericProviderSessionFailure(error.message);
+    const normalizedToPiDiagnostic = context.promptSendAttempted && promptErrorExactGeneric;
+
+    if (context.promptSendAttempted || context.turnAllocated) {
+      this.tracePiRpcFailureBoundary('send_prompt_error_caught', {
+        type: 'prompt_error',
+        command: 'prompt',
+        error: error.message,
+      }, {
+        promptSendAttempted: context.promptSendAttempted,
+        turnAllocated: context.turnAllocated,
+        startGraceStatus: context.startGraceStatus,
+        promptErrorExactGeneric,
+        normalizedToPiDiagnostic,
+      });
+    }
+
+    if (!normalizedToPiDiagnostic) return error;
+
+    const normalized = new Error(PI_RPC_POST_ACCEPTANCE_PROVIDER_SESSION_FAILURE_DETAIL);
+    this.emitMessage({
+      type: 'terminal-output',
+      data: PI_RPC_POST_ACCEPTANCE_PROVIDER_SESSION_FAILURE_DETAIL,
+    });
+    this.emitMessage({
+      type: 'status',
+      status: 'error',
+      detail: PI_RPC_POST_ACCEPTANCE_PROVIDER_SESSION_FAILURE_DETAIL,
+    });
+    return normalized;
+  }
+
   private handleStdoutLine(line: string): void {
     const trimmed = line.trim();
     if (!trimmed) return;
@@ -1140,6 +1506,9 @@ export class PiRpcBackend implements AgentBackend {
 
     const record = asRecord(parsed);
     if (!record) return;
+    if (this.pendingTurn) {
+      this.tracePiRpcFailureBoundary('stdout_record', record);
+    }
 
     if (record.type === 'response') {
       this.handleResponse(record as PiRpcResponse);
@@ -1155,20 +1524,42 @@ export class PiRpcBackend implements AgentBackend {
     const pending = this.pendingRequests.get(id);
     if (!pending) {
       if (response.command === 'prompt' && !response.success && this.openPromptRequestIds.has(id)) {
+        this.tracePiRpcFailureBoundary('late_open_prompt_response', response);
         this.openPromptRequestIds.delete(id);
-        const detail = asNonEmptyString(response.error) ?? 'Pi prompt failed';
-        this.rejectPendingTurn(new Error(detail));
+        const detail = buildPiPostAcceptancePromptFailureDiagnostic(response.error);
+        this.emitMessage({ type: 'terminal-output', data: detail });
         this.emitMessage({ type: 'status', status: 'error', detail });
+        this.rejectPendingTurn(new Error(detail));
+      } else {
+        this.tracePiRpcFailureBoundary('ignored_response_no_pending_request', response);
       }
       return;
     }
 
+    if (this.pendingTurn || response.command === 'prompt' || !response.success) {
+      this.tracePiRpcFailureBoundary('pending_request_response', response, {
+        pendingCommandType: pending.commandType,
+      });
+    }
     clearTimeout(pending.timeout);
     this.pendingRequests.delete(id);
 
     if (!response.success) {
       this.openPromptRequestIds.delete(id);
-      pending.reject(new Error(asNonEmptyString(response.error) ?? `Pi RPC command failed: ${response.command}`));
+      const rawDetail = asNonEmptyString(response.error) ?? `Pi RPC command failed: ${response.command}`;
+      const detail = pending.commandType === 'prompt' && isExactGenericProviderSessionFailure(rawDetail)
+        ? PI_RPC_POST_ACCEPTANCE_PROVIDER_SESSION_FAILURE_DETAIL
+        : rawDetail;
+      if (pending.commandType === 'prompt') {
+        this.tracePiRpcFailureBoundary('pending_prompt_failure_response', response, { detail });
+        this.emitMessage({
+          type: 'terminal-output',
+          data: detail === PI_RPC_POST_ACCEPTANCE_PROVIDER_SESSION_FAILURE_DETAIL
+            ? detail
+            : `Pi RPC prompt failed: ${detail}`,
+        });
+      }
+      pending.reject(new Error(detail));
       return;
     }
     if (pending.commandType === 'prompt') {
@@ -1244,6 +1635,12 @@ export class PiRpcBackend implements AgentBackend {
   private handlePiAssistantFailureEvent(event: Record<string, unknown>): void {
     const detail = this.readPiAssistantErrorMessage(event);
     if (!detail) return;
+    this.tracePiRpcFailureBoundary('assistant_failure_event_detail_present', event);
+    if (this.pendingTurn && !this.pendingTurn.agentStartObserved) {
+      // A resumed Pi RPC session can replay a stale assistant error just after accepting the next
+      // prompt. Do not fail that new turn unless Pi has emitted agent_start for it first.
+      return;
+    }
     const classification = this.classifyPiAssistantRuntimeAuthFailure(event);
     // Pi's overflow/server-capacity recovery *begins* with an assistant
     // `message_end{stopReason:'error'}` and then self-heals via compaction, retry, or resumed tool
@@ -1260,6 +1657,29 @@ export class PiRpcBackend implements AgentBackend {
     }
     this.emitMessage({ type: 'status', status: 'error', detail });
     void this.reportPiRuntimeAuthFailureToDaemon(classification);
+    this.rejectPendingTurn(this.createPiAssistantFailureError(detail, classification));
+  }
+
+  private handlePiTurnFailedEvent(event: Record<string, unknown>): void {
+    if (!this.pendingTurn) return;
+    this.tracePiRpcFailureBoundary('turn_failed_event_matched', event);
+    const detail = buildPiTurnFailedDiagnostic(event);
+    this.emitMessage({ type: 'terminal-output', data: detail });
+    this.emitMessage({ type: 'status', status: 'error', detail });
+    this.rejectPendingTurn(new Error(detail));
+  }
+
+  private handlePiAssistantMessageEndTerminalFailureEvent(event: Record<string, unknown>): void {
+    if (!this.pendingTurn) return;
+    if (!isPiFailedAssistantTerminalEvent(event)) return;
+    this.tracePiRpcFailureBoundary('failed_assistant_terminal_event_matched', event);
+    const detail = buildPiAssistantMessageEndFailedDiagnostic(event);
+    const classification = this.classifyPiAssistantRuntimeAuthFailure(event);
+    this.emitMessage({ type: 'terminal-output', data: detail });
+    this.emitMessage({ type: 'status', status: 'error', detail });
+    if (classification) {
+      void this.reportPiRuntimeAuthFailureToDaemon(classification);
+    }
     this.rejectPendingTurn(this.createPiAssistantFailureError(detail, classification));
   }
 
@@ -1292,11 +1712,22 @@ export class PiRpcBackend implements AgentBackend {
     const normalizedEvent = this.normalizeCompactionLifecycleEvent(event);
     this.notePendingTurnActivity(normalizedEvent);
 
-    for (const msg of mapPiRpcEventToAgentMessages(normalizedEvent)) {
+    const mappedMessages = mapPiRpcEventToAgentMessages(normalizedEvent);
+    this.tracePiRpcFailureBoundary('event_mapped', normalizedEvent, {
+      mappedAgentMessageTypes: mappedMessages.map((msg) => msg.type).slice(0, PI_RPC_FAILURE_TRACE_MAX_ARRAY_LENGTH),
+    });
+
+    for (const msg of mappedMessages) {
       this.emitMessage(msg);
     }
 
     this.handlePiAssistantFailureEvent(normalizedEvent);
+    this.handlePiAssistantMessageEndTerminalFailureEvent(normalizedEvent);
+
+    if (normalizedEvent.type === 'turn_failed') {
+      this.handlePiTurnFailedEvent(normalizedEvent);
+      return;
+    }
 
     if (normalizedEvent.type === 'agent_end') {
       if (this.pendingTurn) {
@@ -1405,7 +1836,7 @@ export class PiRpcBackend implements AgentBackend {
   private emitMessage(message: AgentMessage): void {
     const safeMessage: AgentMessage =
       message.type === 'terminal-output'
-        ? ({ ...message, data: redactBugReportSensitiveText(String(message.data ?? '')) } as AgentMessage)
+        ? ({ ...message, data: redactPiDiagnosticText(String(message.data ?? '')) } as AgentMessage)
         : message;
 
     for (const handler of this.messageHandlers) {
@@ -1420,8 +1851,11 @@ export class PiRpcBackend implements AgentBackend {
   private async sendCommand(
     command: PiRpcCommandWithoutId,
     timeoutMs = 30_000,
+    options: Readonly<{ processAlreadyEnsured?: boolean }> = {},
   ): Promise<PiRpcResponse> {
-    await this.ensureProcess();
+    if (options.processAlreadyEnsured !== true) {
+      await this.ensureProcess();
+    }
     const child = this.process;
     if (!child?.stdin) {
       throw new Error('Pi process stdin is unavailable');
@@ -1482,6 +1916,7 @@ export class PiRpcBackend implements AgentBackend {
       compactionResumeTimeout: null,
       compactionInProgress: false,
       agentEndObserved: false,
+      agentStartObserved: false,
       activityEpoch: 0,
       consecutiveSilentProbes: 0,
       livenessProbeInFlight: false,
@@ -1566,6 +2001,36 @@ export class PiRpcBackend implements AgentBackend {
       PI_RPC_PROMPT_COLLISION_IDLE_POLL_ENV,
       DEFAULT_PI_RPC_PROMPT_COLLISION_IDLE_POLL_MS,
     );
+  }
+
+  private getPromptAckStartGraceMs(): number {
+    return readPositiveIntegerEnv(
+      this.options.env,
+      PI_RPC_PROMPT_ACK_START_GRACE_ENV,
+      DEFAULT_PI_RPC_PROMPT_ACK_START_GRACE_MS,
+    );
+  }
+
+  private async waitForPendingTurnStartGrace(pending: PendingTurn): Promise<PendingTurnStartGraceResult> {
+    if (this.pendingTurn !== pending) return { status: 'completed' };
+    if (pending.agentStartObserved) return { status: 'started' };
+
+    const deadline = Date.now() + this.getPromptAckStartGraceMs();
+    const observedStart = (async (): Promise<PendingTurnStartGraceResult> => {
+      while (Date.now() < deadline) {
+        if (this.pendingTurn !== pending) return { status: 'completed' };
+        if (pending.agentStartObserved) return { status: 'started' };
+        await delay(Math.min(25, Math.max(1, deadline - Date.now())));
+      }
+      if (this.pendingTurn !== pending) return { status: 'completed' };
+      return pending.agentStartObserved ? { status: 'started' } : { status: 'timeout' };
+    })();
+
+    const completion: Promise<PendingTurnStartGraceResult> = pending.promise
+      .then(() => ({ status: 'completed' as const }))
+      .catch((error: unknown) => ({ status: 'rejected' as const, error: asError(error) }));
+
+    return Promise.race([completion, observedStart]);
   }
 
   private async waitForPromptCollisionToBecomeIdle(): Promise<void> {
@@ -1714,6 +2179,7 @@ export class PiRpcBackend implements AgentBackend {
     if (type === 'agent_start') {
       pending.compactionInProgress = false;
       pending.agentEndObserved = false;
+      pending.agentStartObserved = true;
       pending.recoverableAssistantErrorObserved = false;
       pending.lastCompactionEnd = null;
       pending.lastAssistantStopReason = null;
@@ -1901,6 +2367,15 @@ export class PiRpcBackend implements AgentBackend {
     }
 
     if (this.pendingTurn !== pending) return;
+    if (!state) {
+      pending.consecutiveSilentProbes += 1;
+      if (pending.consecutiveSilentProbes >= this.getMaxSilentProbes()) {
+        this.rejectPendingTurnAsStalled(pending);
+        return;
+      }
+      this.armPendingTurnInactivityTimer(pending);
+      return;
+    }
     if (state && (state.isStreaming === true || state.isCompacting === true)) {
       this.schedulePendingTurnCompletionBusyGrace(pending);
       return;

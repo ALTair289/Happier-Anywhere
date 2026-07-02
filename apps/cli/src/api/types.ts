@@ -14,8 +14,10 @@ import type {
   PrimaryTurnStatusV1,
   ContentPublicKeyFingerprint,
   SessionRollbackRangesV1,
+  SessionRuntimeActivitySourceClassV1,
   SessionUsageLimitRecoveryV1,
   SessionTerminalMetadata,
+  SocketRpcAuthorizationContext,
   SessionMessageRole,
   SessionContinuationRecoveryV1,
 } from '@happier-dev/protocol'
@@ -135,6 +137,7 @@ export type SessionBroadcast = SessionBroadcastContainer
 export interface SocketRpcRequestPayload {
   method: string
   params: unknown
+  authorization?: SocketRpcAuthorizationContext
 }
 
 export interface SocketRpcCallPayload extends SocketRpcRequestPayload {
@@ -154,6 +157,7 @@ export interface SocketRpcCallResponse {
 export interface ServerToClientEvents {
   update: (data: Update) => void
   session: (data: SessionBroadcast) => void
+  'server:restarting': (data: { retryAfterMs?: number }) => void
   [SOCKET_RPC_EVENTS.REQUEST]: (data: SocketRpcRequestPayload, callback: (response: unknown) => void) => void
   [SOCKET_RPC_EVENTS.REGISTERED]: (data: { method: string }) => void
   [SOCKET_RPC_EVENTS.UNREGISTERED]: (data: { method: string }) => void
@@ -179,21 +183,32 @@ export interface ClientToServerEvents {
     mode?: 'local' | 'remote';
   }) => void
   'session-end': (data: { sid: string, time: number }, cb?: (answer: SessionEndAckResponse) => void) => void,
-  'pending-materialize-next': (data: { sid: string; pendingVersion?: number }, cb?: (answer: {
+  'pending-materialize-next': (data: {
+    sid: string;
+    pendingVersion?: number;
+    deliveryState?: 'provider';
+    deliveryTiming?: 'after_foreground_ready' | 'after_runtime_idle';
+  }, cb?: (answer: {
     ok: boolean;
     didMaterialize?: boolean;
-    didWrite?: boolean;
-    pendingCount?: number;
-    pendingVersion?: number;
-    message?: {
-      id?: string;
-      seq?: number;
-      localId?: string;
-      messageRole?: SessionMessageRole;
-      content?: SessionMessageContent;
-      createdAt?: number;
-      updatedAt?: number;
-    };
+	    didWrite?: boolean;
+	    pendingCount?: number;
+	    pendingBlockedCount?: number;
+	    pendingVersion?: number;
+	    deferredReason?: 'runtime_activity_active';
+	    deliveryState?: {
+	      mode: 'provider';
+	      unresolved: boolean;
+	    };
+	    message?: {
+	      id?: string | null;
+	      seq?: number | null;
+	      localId?: string;
+	      messageRole?: SessionMessageRole | null;
+	      content?: SessionMessageContent;
+	      createdAt?: number;
+	      updatedAt?: number;
+	    };
     error?: string;
   }) => void) => void,
   'execution-run-updated': (data: {
@@ -206,6 +221,24 @@ export interface ClientToServerEvents {
       localId: string;
       messageRole?: SessionMessageRole | null;
       sidechainId?: string | null;
+      /** Live-stream tick this full snapshot corresponds to (delta-chaining checkpoint anchor). */
+      tick?: number;
+      content: string | SessionMessageContent;
+      createdAt: number;
+      updatedAt: number;
+    };
+  }) => void
+  'transcript-stream-segment-delta': (data: {
+    sid: string;
+    message: {
+      localId: string;
+      messageRole?: SessionMessageRole | null;
+      sidechainId?: string | null;
+      /** Per-segment live emission sequence (1-based, includes snapshot emissions). */
+      tick: number;
+      /** Accumulated text length (UTF-16 code units) BEFORE applying this delta. */
+      baseLength: number;
+      /** Envelope carrying ONLY the text appended since the previous live emission. */
       content: string | SessionMessageContent;
       createdAt: number;
       updatedAt: number;
@@ -249,13 +282,18 @@ type SessionSharedFields = Readonly<{
   initialTranscriptAfterSeq?: number;
   metadata: Metadata;
   metadataVersion: number;
-  agentState: AgentState | null;
-  agentStateVersion: number;
-  pendingCount?: number;
-  pendingVersion?: number;
-  latestTurnStatus?: PrimaryTurnStatusV1 | null;
-  latestTurnStatusObservedAt?: number | null;
-}>;
+	  agentState: AgentState | null;
+	  agentStateVersion: number;
+	  pendingCount?: number;
+	  pendingBlockedCount?: number;
+	  pendingVersion?: number;
+	  latestTurnStatus?: PrimaryTurnStatusV1 | null;
+	  latestTurnStatusObservedAt?: number | null;
+	  runtimeActivityActiveCount?: number;
+	  runtimeActivityObservedAt?: number | null;
+	  runtimeActivityExpiresAt?: number | null;
+	  runtimeActivitySourceClass?: SessionRuntimeActivitySourceClassV1 | null;
+	}>;
 
 export type Session =
   | (SessionSharedFields & Readonly<{ encryptionMode: 'plain' }>)
@@ -483,6 +521,10 @@ export type Metadata = {
   codexSessionId?: string, // Codex session/conversation ID (uuid)
   codexBackendMode?: 'mcp' | 'acp' | 'appServer',
   agentRuntimeDescriptorV1?: unknown,
+  // Compact, count-only workflow activity headline (CWF3). The live invalidation pointer to durable
+  // `activity/workflow_run.v1` system records; full phase/agent detail lives only in those records.
+  // Stored key is exactly `sessionWorkflowActivityHeadlineV1` in both repos (plan §3.3).
+  sessionWorkflowActivityHeadlineV1?: unknown,
   geminiSessionId?: string, // Gemini ACP session ID (opaque)
   opencodeSessionId?: string, // OpenCode ACP session ID (opaque)
   opencodeBackendMode?: 'server' | 'acp',
@@ -709,6 +751,18 @@ export type Metadata = {
    * committed while the runner was down are redelivered instead of silently skipped.
    */
   deliveredUserMessageSeqV1?: number,
+  /**
+   * Provider-custody watermark: highest user-row seq accepted by the provider/runtime.
+   * This is intentionally separate from the legacy delivered cursor so older metadata never
+   * becomes provider-accepted proof by name collision.
+   */
+  providerAcceptedUserMessageSeqV1?: number,
+  /**
+   * Delivery watermark interpretation. `queueHandoff` preserves legacy semantics where
+   * deliveredUserMessageSeqV1 means the runtime queue accepted handoff. `providerAcceptance`
+   * means catch-up/resume must use providerAcceptedUserMessageSeqV1 as provider custody.
+   */
+  userMessageDeliveryWatermarkModeV1?: 'queueHandoff' | 'providerAcceptance',
 };
 
 /**

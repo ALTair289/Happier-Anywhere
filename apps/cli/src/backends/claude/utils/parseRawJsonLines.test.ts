@@ -46,6 +46,33 @@ describe('parseRawJsonLines', () => {
     expect((parsed as any)?.uuid).toBe('p1');
   });
 
+  it('parses a goal_status attachment record and preserves the inner attachment object', () => {
+    const parsed = parseRawJsonLinesObject({
+      type: 'attachment',
+      uuid: 'a1',
+      sessionId: 's1',
+      timestamp: '2026-06-19T14:39:26.067Z',
+      attachment: { type: 'goal_status', met: false, condition: 'ship it', sentinel: true },
+    });
+    expect(parsed?.type).toBe('attachment');
+    expect((parsed as any)?.uuid).toBe('a1');
+    expect((parsed as any)?.attachment).toEqual({
+      type: 'goal_status',
+      met: false,
+      condition: 'ship it',
+      sentinel: true,
+    });
+  });
+
+  it('parses an attachment with an unknown subtype (forward-compatible)', () => {
+    const parsed = parseRawJsonLinesObject({
+      type: 'attachment',
+      attachment: { type: 'agent_listing_delta', agents: [] },
+    });
+    expect(parsed?.type).toBe('attachment');
+    expect((parsed as any)?.attachment?.type).toBe('agent_listing_delta');
+  });
+
   it('does not drop assistant messages when usage schema changes (invalid usage is ignored)', () => {
     const parsed = parseRawJsonLinesObject({
       type: 'assistant',

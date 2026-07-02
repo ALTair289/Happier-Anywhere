@@ -1,16 +1,35 @@
 import chalk from 'chalk';
+import { join } from 'node:path';
 
 import { readCredentials, type Credentials } from '@/persistence';
 import { createSessionAttachFile } from '@/daemon/sessionAttachFile';
-import { AGENTS } from '@/backends/catalog';
+import {
+  AGENTS,
+  getConnectedServiceStateSharingDescriptor,
+  resolveConnectedServiceCandidatePersistedSessionFile,
+} from '@/backends/catalog';
 import type { CatalogAgentId } from '@/backends/types';
 import { fetchSessionById, fetchSessionsPage, type RawSessionListRow, type RawSessionRecord } from '@/session/transport/http/sessionsHttp';
 import { resolveSessionIdOrPrefix } from '@/session/query/resolveSessionId';
 import { resolveSessionEncryptionContextFromCredentials, tryDecryptSessionMetadata } from '@/session/transport/encryption/sessionEncryptionContext';
 import { encodeBase64 } from '@/api/encryption';
 import { bootstrapAccountSettingsContext } from '@/settings/accountSettings/bootstrapAccountSettingsContext';
-import type { AccountSettings } from '@happier-dev/protocol';
-import { accountSettingsParse } from '@happier-dev/protocol';
+import { ApiClient } from '@/api/api';
+import { configuration } from '@/configuration';
+import { shouldResolveConnectedServiceAuthForSpawn } from '@/daemon/connectedServices/shouldResolveConnectedServiceAuthForSpawn';
+import { resolveConnectedServiceAuthForSpawn } from '@/daemon/connectedServices/resolveConnectedServiceAuthForSpawn';
+import { resolveEffectiveProviderStateMode } from '@/daemon/connectedServices/stateSharing/resolveEffectiveProviderStateMode';
+import { createConnectedServiceMaterializedTargetRootCleanup } from '@/daemon/connectedServices/materialize/createConnectedServiceMaterializedTargetRootCleanup';
+import { resolveSpawnChildEnvironment } from '@/daemon/spawn/resolveSpawnChildEnvironment';
+import { resolveProviderSpawnExtrasForRuntime } from '@/settings/providerSettings';
+import type { SpawnSessionOptions } from '@/rpc/handlers/registerSessionHandlers';
+import type { AccountSettings, ConnectedServiceBindingsV1, ConnectedServiceMaterializationIdentityV1 } from '@happier-dev/protocol';
+import {
+  accountSettingsParse,
+  ConnectedServiceBindingsV1Schema,
+  readConnectedServiceMaterializationIdentityV1FromMetadata,
+  resolveConnectedServicesProviderStateSharingPolicyV1,
+} from '@happier-dev/protocol';
 import { canUseInkSelector, runSessionActionSelector } from '@/ui/ink/runSessionActionSelector';
 import { buildCliSessionRowModel } from '@/cli/output/session/buildCliSessionRowModel';
 import { buildResumeSelectionModel, formatResumeSelectionFooter } from '@/cli/commands/resumeInteractiveSelection';
@@ -31,6 +50,23 @@ type ResumableSessionSelection =
   | { type: 'cancelled' }
   | { type: 'none' };
 
+type DirectResumeConnectedServiceEnvironment = Readonly<{
+  env: Record<string, string>;
+  cleanupOnFailure: (() => void) | null;
+  cleanupOnExit: (() => void) | null;
+}>;
+
+function resolveDirectResumeFailureCleanup(params: Readonly<{
+  agentId: CatalogAgentId;
+  env: Readonly<Record<string, string>>;
+  cleanupOnFailure: (() => void) | null;
+}>): (() => void) | null {
+  return params.cleanupOnFailure ?? createConnectedServiceMaterializedTargetRootCleanup({
+    agentId: params.agentId,
+    env: params.env,
+  });
+}
+
 async function resolveAgentHandler(agentId: CatalogAgentId): Promise<CommandHandler> {
   const entry = AGENTS[agentId];
   if (!entry?.getCliCommandHandler) {
@@ -42,6 +78,155 @@ async function resolveAgentHandler(agentId: CatalogAgentId): Promise<CommandHand
 async function defaultReadAccountSettings(params: { credentials: Credentials }): Promise<AccountSettings> {
   const ctx = await bootstrapAccountSettingsContext({ credentials: params.credentials, mode: 'fast' });
   return ctx.settings;
+}
+
+function readConnectedServicesFromSessionMetadata(
+  metadata: Record<string, unknown> | null,
+): ConnectedServiceBindingsV1 | null {
+  const parsed = ConnectedServiceBindingsV1Schema.safeParse(metadata?.connectedServices);
+  return parsed.success ? parsed.data : null;
+}
+
+function readConnectedServicesUpdatedAtFromSessionMetadata(
+  metadata: Record<string, unknown> | null,
+): number | undefined {
+  const raw = metadata?.connectedServicesUpdatedAt;
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : undefined;
+}
+
+function readCodexBackendModeFromProviderSpawnExtras(extras: Record<string, unknown>): SpawnSessionOptions['codexBackendMode'] | undefined {
+  const raw = extras.codexBackendMode;
+  return raw === 'mcp' || raw === 'acp' || raw === 'appServer' ? raw : undefined;
+}
+
+function readExperimentalCodexAcpFromProviderSpawnExtras(extras: Record<string, unknown>): boolean | undefined {
+  return typeof extras.experimentalCodexAcp === 'boolean' ? extras.experimentalCodexAcp : undefined;
+}
+
+function overlayProcessEnv(env: Readonly<Record<string, string>>): () => void {
+  const previous = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries(env)) {
+    previous.set(key, process.env[key]);
+    process.env[key] = value;
+  }
+  return () => {
+    for (const [key, value] of previous.entries()) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  };
+}
+
+async function resolveDirectResumeConnectedServiceEnvironment(params: Readonly<{
+  agentId: CatalogAgentId;
+  credentials: Credentials;
+  accountSettings: AccountSettings;
+  directory: string;
+  sessionId: string;
+  vendorResumeId: string;
+  sessionMetadata: Record<string, unknown> | null;
+}>): Promise<DirectResumeConnectedServiceEnvironment | null> {
+  const connectedServices = readConnectedServicesFromSessionMetadata(params.sessionMetadata);
+  if (!connectedServices) return null;
+
+  const materializationIdentity: ConnectedServiceMaterializationIdentityV1 | null =
+    readConnectedServiceMaterializationIdentityV1FromMetadata(params.sessionMetadata);
+  const providerSpawnExtras = resolveProviderSpawnExtrasForRuntime({
+    agentId: params.agentId,
+    settings: params.accountSettings as Readonly<Record<string, unknown>>,
+    processEnv: process.env,
+  });
+  const connectedServicesUpdatedAt = readConnectedServicesUpdatedAtFromSessionMetadata(params.sessionMetadata);
+  const codexBackendMode = readCodexBackendModeFromProviderSpawnExtras(providerSpawnExtras);
+  const experimentalCodexAcp = readExperimentalCodexAcpFromProviderSpawnExtras(providerSpawnExtras);
+  const spawnOptions: SpawnSessionOptions = {
+    directory: params.directory,
+    backendTarget: { kind: 'builtInAgent', agentId: params.agentId },
+    existingSessionId: params.sessionId,
+    resume: params.vendorResumeId,
+    connectedServices,
+    ...(connectedServicesUpdatedAt !== undefined ? { connectedServicesUpdatedAt } : {}),
+    ...(materializationIdentity ? { connectedServiceMaterializationIdentityV1: materializationIdentity } : {}),
+    ...(codexBackendMode ? { codexBackendMode } : {}),
+    ...(experimentalCodexAcp !== undefined ? { experimentalCodexAcp } : {}),
+  };
+
+  if (!shouldResolveConnectedServiceAuthForSpawn(spawnOptions)) return null;
+
+  const api = await ApiClient.create(params.credentials);
+  const requestedStateMode = resolveConnectedServicesProviderStateSharingPolicyV1(
+    (params.accountSettings as Readonly<Record<string, unknown>>).connectedServicesProviderStateSharingSettingsV1,
+    params.agentId,
+  ).stateMode;
+  const resumeReachabilityRequired = resolveEffectiveProviderStateMode({
+    requestedStateMode,
+    descriptor: await getConnectedServiceStateSharingDescriptor(params.agentId),
+  }) === 'shared';
+  const connectedServiceAuth = await resolveConnectedServiceAuthForSpawn({
+    agentId: params.agentId,
+    sessionDirectory: params.directory,
+    connectedServicesBindingsRaw: connectedServices,
+    materializationKey: materializationIdentity?.id ?? params.sessionId,
+    ...(materializationIdentity ? { connectedServiceMaterializationIdentityV1: materializationIdentity } : {}),
+    activeServerDir: configuration.activeServerDir,
+    baseDir: join(configuration.happyHomeDir, 'daemon', 'connected-services', 'materialized'),
+    credentials: params.credentials,
+    api,
+    sessionId: params.sessionId,
+    accountSettings: params.accountSettings,
+    processEnv: process.env,
+    vendorResumeId: params.vendorResumeId,
+    resumeReachabilityRequired,
+    candidatePersistedSessionFile: resolveConnectedServiceCandidatePersistedSessionFile(
+      params.agentId,
+      params.sessionMetadata,
+    ),
+  });
+  if (!connectedServiceAuth) return null;
+
+  try {
+    const entry = AGENTS[params.agentId];
+    const daemonSpawnHooks = entry?.getDaemonSpawnHooks
+      ? await entry.getDaemonSpawnHooks()
+      : null;
+    const spawnEnvironment = await resolveSpawnChildEnvironment({
+      options: {
+        ...spawnOptions,
+        connectedServices: connectedServiceAuth.connectedServicesBindings,
+      },
+      profileEnvironmentVariables: {},
+      daemonSpawnHooks,
+      processEnv: process.env,
+      logDebug: () => {},
+      logInfo: () => {},
+      logWarn: () => {},
+      connectedServiceAuth,
+    });
+    const cleanupOnFailure = resolveDirectResumeFailureCleanup({
+      agentId: params.agentId,
+      env: connectedServiceAuth.env,
+      cleanupOnFailure: spawnEnvironment.cleanupOnFailure,
+    });
+    if (!spawnEnvironment.ok) {
+      throw new Error(spawnEnvironment.errorMessage);
+    }
+
+    return {
+      env: spawnEnvironment.extraEnvForChild,
+      cleanupOnFailure,
+      cleanupOnExit: spawnEnvironment.cleanupOnExit,
+    };
+  } catch (error) {
+    resolveDirectResumeFailureCleanup({
+      agentId: params.agentId,
+      env: connectedServiceAuth.env,
+      cleanupOnFailure: connectedServiceAuth.cleanupOnFailure,
+    })?.();
+    throw error;
+  }
 }
 
 async function selectResumableSessionId(params: Readonly<{
@@ -159,6 +344,7 @@ export async function handleResumeCommand(
   }
   if (!rawSession) throw new Error(`Session not found: ${sessionIdOrPrefix}`);
 
+  const sessionMetadata = tryDecryptSessionMetadata({ credentials, rawSession });
   const rowModel = buildCliSessionRowModel({ credentials, rawSession, accountSettings });
 
   if (rowModel.archivedAt !== null) {
@@ -170,8 +356,7 @@ export async function handleResumeCommand(
 
   const directory = rowModel.path;
   if (!directory) {
-    const metadata = tryDecryptSessionMetadata({ credentials, rawSession });
-    if (!metadata) {
+    if (!sessionMetadata) {
       throw new Error('Failed to decrypt session metadata. Reconnect your terminal and try again.');
     }
     throw new Error('Session metadata is missing a working directory path.');
@@ -205,9 +390,24 @@ export async function handleResumeCommand(
 
   const prevAttachEnv = process.env.HAPPIER_SESSION_ATTACH_FILE;
   process.env.HAPPIER_SESSION_ATTACH_FILE = attach.filePath;
+  let restoreConnectedServiceEnv: (() => void) | null = null;
+  let connectedServiceEnv: DirectResumeConnectedServiceEnvironment | null = null;
+  let handlerCompleted = false;
 
   try {
     chdirFn(directory);
+    connectedServiceEnv = await resolveDirectResumeConnectedServiceEnvironment({
+      agentId,
+      credentials,
+      accountSettings,
+      directory,
+      sessionId: rawSession.id,
+      vendorResumeId: vendorResume.vendorResumeId,
+      sessionMetadata,
+    });
+    if (connectedServiceEnv) {
+      restoreConnectedServiceEnv = overlayProcessEnv(connectedServiceEnv.env);
+    }
 
     const handler = await resolveAgentHandlerFn(agentId);
     const context: CommandContext = {
@@ -216,10 +416,18 @@ export async function handleResumeCommand(
       terminalRuntime: deps?.terminalRuntime ?? null,
     };
     await handler(context);
+    handlerCompleted = true;
   } catch (error) {
+    if (!handlerCompleted) {
+      connectedServiceEnv?.cleanupOnFailure?.();
+    }
     await attach.cleanup().catch(() => {});
     throw error;
   } finally {
+    restoreConnectedServiceEnv?.();
+    if (handlerCompleted) {
+      connectedServiceEnv?.cleanupOnExit?.();
+    }
     if (prevAttachEnv === undefined) {
       delete process.env.HAPPIER_SESSION_ATTACH_FILE;
     } else {

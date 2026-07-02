@@ -4,29 +4,32 @@ import type {
 } from '@/agent/localControl/turnLifecycle';
 import type { RawJSONLines } from '@/backends/claude/types';
 import type { SessionHookData } from '../utils/startHookServer';
-import { isSidechainSessionHook } from '../utils/sessionHookAttribution';
-import { createClaudeProviderActivityLedger } from '../providerActivity/createClaudeProviderActivityLedger';
+import {
+  isSidechainSessionHook,
+  readSessionHookEventName,
+} from '../utils/sessionHookAttribution';
+import { readClaudeSessionHookBackgroundTasks } from '../utils/sessionHookBackgroundTasks';
+export { isClaudeTaskNotificationUserPromptHook } from '../utils/sessionHookTaskNotification';
+import { isClaudeTaskNotificationUserPromptHook } from '../utils/sessionHookTaskNotification';
+import {
+  buildClaudeProviderTaskRuntimeActivitySourceId,
+  CLAUDE_PROVIDER_TASK_RUNTIME_ACTIVITY_SOURCE_CLASS,
+  CLAUDE_RUNTIME_ACTIVITY_PROVIDER_ID,
+  createClaudeProviderActivityLedger,
+  type ClaudeProviderRuntimeActivityPublisher,
+} from '../providerActivity/createClaudeProviderActivityLedger';
 import { readClaudeTranscriptProviderActivity } from './readClaudeTranscriptProviderActivity';
 import { readClaudeTranscriptTurnSignal } from './readClaudeTranscriptTurnSignal';
-
-function readHookEventName(data: SessionHookData): string {
-  const raw = data.hook_event_name ?? data.hookEventName;
-  return typeof raw === 'string' ? raw : '';
-}
 
 function readHookErrorDiscriminator(data: SessionHookData): string | undefined {
   const raw = data.error ?? data.error_type;
   return typeof raw === 'string' && raw.trim().length > 0 ? raw.trim() : undefined;
 }
 
-function hookReportsNoActiveBackgroundTasks(data: SessionHookData): boolean {
-  const raw = data.background_tasks ?? data.backgroundTasks;
-  return Array.isArray(raw) && raw.length === 0;
-}
-
 function hookToLifecycleEvent(data: SessionHookData): LocalTurnLifecycleEvent | null {
-  const hookEventName = readHookEventName(data);
+  const hookEventName = readSessionHookEventName(data);
   if (hookEventName === 'UserPromptSubmit') {
+    if (isClaudeTaskNotificationUserPromptHook(data)) return null;
     return { type: 'turn_started', providerTurnId: null, source: 'claude_hook_user_prompt_submit' };
   }
   if (hookEventName === 'Stop') {
@@ -49,14 +52,98 @@ function hookToLifecycleEvent(data: SessionHookData): LocalTurnLifecycleEvent | 
 
 export function createClaudeLocalLifecycleTracker(opts: Readonly<{
   lifecycle: LocalTurnLifecycleController;
+  runtimeActivityPublisher?: ClaudeProviderRuntimeActivityPublisher | null;
 }>) {
   const providerActivityLedger = createClaudeProviderActivityLedger();
 
-  const observeLifecycle = (event: LocalTurnLifecycleEvent | null): void => {
-    if (!event) return;
-    if (event.type === 'completion_candidate' && providerActivityLedger.hasActiveProviderTasks()) {
+  const runRuntimeActivityEffect = (
+    _label: string,
+    effect: () => Promise<void> | void,
+  ): void => {
+    try {
+      void Promise.resolve(effect()).catch(() => undefined);
+    } catch {
+      // Runtime-activity projection is non-critical to local lifecycle parsing.
+    }
+  };
+
+  const setProviderTaskRuntimeActivityActive = (taskId: unknown): void => {
+    const sourceId = buildClaudeProviderTaskRuntimeActivitySourceId(taskId);
+    if (!sourceId || !opts.runtimeActivityPublisher) return;
+    runRuntimeActivityEffect('set-active', () => opts.runtimeActivityPublisher?.setSourceActive({
+      id: sourceId,
+      sourceClass: CLAUDE_PROVIDER_TASK_RUNTIME_ACTIVITY_SOURCE_CLASS,
+      providerId: CLAUDE_RUNTIME_ACTIVITY_PROVIDER_ID,
+    }));
+  };
+
+  const clearProviderTaskRuntimeActivity = (
+    taskId: unknown,
+    reason = 'claude_provider_task_terminal',
+  ): void => {
+    const sourceId = buildClaudeProviderTaskRuntimeActivitySourceId(taskId);
+    if (!sourceId || !opts.runtimeActivityPublisher) return;
+    runRuntimeActivityEffect('clear-source', () => opts.runtimeActivityPublisher?.clearSource(
+      sourceId,
+      reason,
+    ));
+  };
+
+  const observeProviderTaskRuntimeActivity = (taskId: unknown): void => {
+    const sourceId = buildClaudeProviderTaskRuntimeActivitySourceId(taskId);
+    if (!sourceId || !opts.runtimeActivityPublisher) return;
+    runRuntimeActivityEffect('observe-source', () => opts.runtimeActivityPublisher?.setSourceActive({
+      id: sourceId,
+      sourceClass: CLAUDE_PROVIDER_TASK_RUNTIME_ACTIVITY_SOURCE_CLASS,
+      providerId: CLAUDE_RUNTIME_ACTIVITY_PROVIDER_ID,
+    }));
+  };
+
+  const renewProviderTaskRuntimeActivity = (taskId: unknown, reason: string): void => {
+    const sourceId = buildClaudeProviderTaskRuntimeActivitySourceId(taskId);
+    if (!sourceId || !opts.runtimeActivityPublisher) return;
+    runRuntimeActivityEffect('observe-source', () => opts.runtimeActivityPublisher?.observeSource({
+      id: sourceId,
+      reason,
+    }));
+  };
+
+  const clearClaudeRuntimeActivity = (reason: string): void => {
+    providerActivityLedger.clearProviderTasks();
+    if (!opts.runtimeActivityPublisher) return;
+    runRuntimeActivityEffect('clear-provider', () => opts.runtimeActivityPublisher?.clearProviderSources(
+      CLAUDE_RUNTIME_ACTIVITY_PROVIDER_ID,
+      reason,
+    ));
+  };
+
+  const reconcileHookBackgroundTasks = (data: SessionHookData): void => {
+    const backgroundTasks = readClaudeSessionHookBackgroundTasks(data);
+    if (!backgroundTasks) return;
+    if (backgroundTasks.activeTaskIds.size === 0 && backgroundTasks.reportsEmpty) {
+      clearClaudeRuntimeActivity('claude_hook_no_background_tasks');
       return;
     }
+    const knownActiveTaskIds = new Set<string>();
+    for (const taskId of backgroundTasks.terminalTaskIds) {
+      providerActivityLedger.noteProviderTaskFinished(taskId);
+      clearProviderTaskRuntimeActivity(taskId, 'claude_hook_background_task_terminal');
+    }
+    for (const blocker of providerActivityLedger.getActiveProviderTaskBlockers()) {
+      knownActiveTaskIds.add(blocker.taskId);
+      if (backgroundTasks.activeTaskIds.has(blocker.taskId)) continue;
+      providerActivityLedger.noteProviderTaskFinished(blocker.taskId);
+      clearProviderTaskRuntimeActivity(blocker.taskId, 'claude_hook_background_tasks_reconciled');
+    }
+    for (const taskId of backgroundTasks.activeTaskIds) {
+      if (knownActiveTaskIds.has(taskId)) continue;
+      providerActivityLedger.noteProviderTaskStarted(taskId);
+      setProviderTaskRuntimeActivityActive(taskId);
+    }
+  };
+
+  const observeLifecycle = (event: LocalTurnLifecycleEvent | null): void => {
+    if (!event) return;
     opts.lifecycle.observe(event);
   };
 
@@ -65,21 +152,17 @@ export function createClaudeLocalLifecycleTracker(opts: Readonly<{
     if (!activity) return;
     if (activity.type === 'async_agent_started') {
       providerActivityLedger.noteTranscriptAsyncAgentTask(activity.taskId);
-      observeLifecycle({
-        type: 'continuation_detected',
-        providerTurnId: null,
-        source: 'claude_transcript_async_agent_launch',
-      });
+      setProviderTaskRuntimeActivityActive(activity.taskId);
       return;
     }
-    if (activity.terminal && activity.taskId) {
+    if (activity.type === 'task_notification' && activity.taskId) {
+      if (!activity.terminal) {
+        observeProviderTaskRuntimeActivity(activity.taskId);
+        return;
+      }
       providerActivityLedger.noteProviderTaskFinished(activity.taskId);
+      clearProviderTaskRuntimeActivity(activity.taskId);
     }
-    observeLifecycle({
-      type: 'continuation_detected',
-      providerTurnId: null,
-      source: 'claude_transcript_task_notification',
-    });
   };
 
   const observe = (event: LocalTurnLifecycleEvent | null): void => {
@@ -90,11 +173,13 @@ export function createClaudeLocalLifecycleTracker(opts: Readonly<{
     observeHook(data: SessionHookData): void {
       // Sidechain (subagent) hooks never drive the primary turn lifecycle: a
       // subagent StopFailure/Stop/SessionEnd is not primary-turn evidence.
-      // Subagent activity is tracked through the transcript provider-activity
-      // ledger instead (async launches / task notifications).
-      if (isSidechainSessionHook(data)) return;
-      if (readHookEventName(data) === 'Stop' && hookReportsNoActiveBackgroundTasks(data)) {
-        providerActivityLedger.clearProviderTasks();
+      // Source-keyed sidechain activity is published at the Claude Session hook
+      // boundary so all modes share one runtime-activity producer.
+      if (isSidechainSessionHook(data)) {
+        return;
+      }
+      if (readSessionHookEventName(data) === 'Stop') {
+        reconcileHookBackgroundTasks(data);
       }
       observe(hookToLifecycleEvent(data));
     },
@@ -103,6 +188,7 @@ export function createClaudeLocalLifecycleTracker(opts: Readonly<{
       observe(readClaudeTranscriptTurnSignal(message));
     },
     observeProcessExit(): void {
+      clearClaudeRuntimeActivity('claude_process_exit');
       const snapshot = opts.lifecycle.snapshot();
       if (!snapshot.active || snapshot.terminal) return;
       opts.lifecycle.observe({

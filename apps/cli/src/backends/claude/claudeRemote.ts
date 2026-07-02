@@ -23,6 +23,11 @@ import {
     buildClaudeCompactionStartedEvent,
     type ClaudeCompletionEvent,
 } from './contextCompactionEvents';
+import {
+    confirmClaudeRemoteProviderPromptAccepted,
+    type ClaudeRemoteProviderAcceptedPrompt,
+    type ClaudeRemoteProviderPromptAcceptedHandler,
+} from './remote/providerPromptAcceptance';
 
 function buildClaudeEffortArgs(params: Readonly<{
     modelId: unknown;
@@ -112,7 +117,7 @@ export async function claudeRemote(opts: {
     jsRuntime?: JsRuntime,
 
     // Dynamic parameters
-    nextMessage: () => Promise<{ message: string, mode: EnhancedMode } | null>,
+    nextMessage: () => Promise<ClaudeRemoteProviderAcceptedPrompt<EnhancedMode> | null>,
     onReady: () => void | Promise<void>,
     isAborted: (toolCallId: string) => boolean,
 
@@ -123,6 +128,7 @@ export async function claudeRemote(opts: {
     onCompletionEvent?: (event: ClaudeCompletionEvent) => void,
     onSessionReset?: () => void,
     setUserMessageSender?: (sender: ((message: SDKUserMessage) => void) | null) => void,
+    onPromptAcceptedByProvider?: ClaudeRemoteProviderPromptAcceptedHandler | null,
 }) {
 
     // Determine how we should (re)start the Claude session.
@@ -276,6 +282,7 @@ export async function claudeRemote(opts: {
             opts.onMessage(message);
         },
     });
+    confirmClaudeRemoteProviderPromptAccepted(opts.onPromptAcceptedByProvider, initial);
 
     const interruptTurn = async (): Promise<void> => {
         try {
@@ -336,6 +343,7 @@ export async function claudeRemote(opts: {
                 }
                 mode = next.mode;
                 messages.push({ type: 'user', message: { role: 'user', content: next.message } });
+                confirmClaudeRemoteProviderPromptAccepted(opts.onPromptAcceptedByProvider, next);
             }
 
             // Handle tool result

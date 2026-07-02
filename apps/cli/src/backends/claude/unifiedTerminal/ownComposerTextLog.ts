@@ -1,12 +1,27 @@
+import {
+  countPromptNewlines,
+  pastedTextLineCountMatchesPrompt,
+  parseExactClaudePastedTextMarkerLineCount,
+} from './claudePastedTextMarker';
+
 import { normalizeClaudeUnifiedPromptIdentityText } from './promptIdentity';
 
 const DEFAULT_LIMIT = 32;
 const DEFAULT_PREFIX_RESIDUE_WINDOW_MS = 2 * 60_000;
+const DEFAULT_LARGE_COLLAPSED_PASTE_MARKER_WINDOW_MS = 10 * 60_000;
+const LARGE_COLLAPSED_PASTE_MARKER_MIN_LINES = 200;
 const MIN_PREFIX_RESIDUE_CHARS = 256;
+const MIN_CONTEXTUAL_PREFIX_RESIDUE_CHARS = 32;
 
 export type ClaudeOwnComposerTextLog = Readonly<{
   /** Record a text WE wrote into the TUI (injected prompt). Bounded FIFO. */
   record: (text: string) => void;
+  /**
+   * Mark a text whose terminal write failed after bytes may already have reached the composer.
+   * This enables a short-prefix match for the same bounded residue window; ordinary records keep
+   * rejecting short prefixes so genuine user drafts remain protected.
+   */
+  recordPossiblePartialResidue: (text: string) => void;
   /**
    * True when the composer draft matches recorded own text, or a recent long prefix residue from
    * an interrupted own injection. Short/old prefixes are intentionally rejected so a genuine user
@@ -30,9 +45,19 @@ function collapseWhitespace(value: string): string {
 
 type OwnComposerTextLogEntry = Readonly<{
   text: string;
-  candidates: readonly string[];
+  collapsedText: string;
+  clearableCandidates: readonly string[];
+  collapsedPasteLineCount?: number | undefined;
   recordedAtMs: number;
+  shortPrefixResidueUntilMs?: number | undefined;
 }>;
+
+function entryHasPrefix(entry: OwnComposerTextLogEntry, draft: string): boolean {
+  return (
+    (entry.text.length > draft.length && entry.text.startsWith(draft))
+    || (entry.collapsedText.length > draft.length && entry.collapsedText.startsWith(draft))
+  );
+}
 
 function isRecentPrefixResidue(params: Readonly<{
   entry: OwnComposerTextLogEntry;
@@ -40,10 +65,36 @@ function isRecentPrefixResidue(params: Readonly<{
   nowMs: number;
   prefixResidueWindowMs: number;
 }>): boolean {
-  return params.normalizedDraft.length >= MIN_PREFIX_RESIDUE_CHARS
-    && params.entry.text.length > params.normalizedDraft.length
-    && params.entry.text.startsWith(params.normalizedDraft)
+  const longPrefixResidue = params.normalizedDraft.length >= MIN_PREFIX_RESIDUE_CHARS
     && params.nowMs - params.entry.recordedAtMs <= params.prefixResidueWindowMs;
+  const contextualShortPrefixResidue = params.normalizedDraft.length >= MIN_CONTEXTUAL_PREFIX_RESIDUE_CHARS
+    && params.entry.shortPrefixResidueUntilMs !== undefined
+    && params.nowMs <= params.entry.shortPrefixResidueUntilMs;
+  return (longPrefixResidue || contextualShortPrefixResidue)
+    && entryHasPrefix(params.entry, params.normalizedDraft);
+}
+
+function isCollapsedPasteMarkerMatch(params: Readonly<{
+  entry: OwnComposerTextLogEntry;
+  collapsedPasteLineCount: number | null;
+  nowMs: number;
+  prefixResidueWindowMs: number;
+  largeCollapsedPasteMarkerWindowMs: number;
+}>): boolean {
+  if (
+    params.collapsedPasteLineCount === null
+    || params.entry.collapsedPasteLineCount === undefined
+    || !pastedTextLineCountMatchesPrompt({
+      promptText: params.entry.text,
+      pastedLineCount: params.collapsedPasteLineCount,
+    })
+  ) {
+    return false;
+  }
+  const markerWindowMs = params.collapsedPasteLineCount >= LARGE_COLLAPSED_PASTE_MARKER_MIN_LINES
+    ? params.largeCollapsedPasteMarkerWindowMs
+    : params.prefixResidueWindowMs;
+  return params.nowMs - params.entry.recordedAtMs <= markerWindowMs;
 }
 
 /**
@@ -56,41 +107,94 @@ export function createClaudeOwnComposerTextLog(opts?: Readonly<{
   limit?: number;
   nowMs?: (() => number) | undefined;
   prefixResidueWindowMs?: number | undefined;
+  largeCollapsedPasteMarkerWindowMs?: number | undefined;
 }>): ClaudeOwnComposerTextLog {
   const limit = Math.max(1, Math.trunc(opts?.limit ?? DEFAULT_LIMIT));
   const nowMs = opts?.nowMs ?? Date.now;
   const prefixResidueWindowMs = Math.max(0, Math.trunc(opts?.prefixResidueWindowMs ?? DEFAULT_PREFIX_RESIDUE_WINDOW_MS));
+  const largeCollapsedPasteMarkerWindowMs = Math.max(
+    prefixResidueWindowMs,
+    Math.trunc(opts?.largeCollapsedPasteMarkerWindowMs ?? DEFAULT_LARGE_COLLAPSED_PASTE_MARKER_WINDOW_MS),
+  );
   const entries: OwnComposerTextLogEntry[] = [];
+
+  const createEntry = (
+    normalized: string,
+    recordedAtMs: number,
+    shortPrefixResidueUntilMs?: number | undefined,
+  ): OwnComposerTextLogEntry => {
+    const collapsedText = collapseWhitespace(normalized);
+    const newlineCount = countPromptNewlines(normalized);
+    return {
+      text: normalized,
+      collapsedText,
+      // Clearable ownership is intentionally limited to the full injected text. Individual
+      // prompt lines are only near-match evidence and must not become an Escape-clearing action.
+      clearableCandidates: [normalized, collapsedText],
+      ...(newlineCount > 0 ? { collapsedPasteLineCount: newlineCount } : {}),
+      recordedAtMs,
+      shortPrefixResidueUntilMs,
+    };
+  };
+
+  const trimToLimit = (): void => {
+    while (entries.length > limit) entries.shift();
+  };
 
   return {
     record(text) {
       const normalized = normalize(text);
       if (normalized.length === 0) return;
-      const lines = normalized
-        .split('\n')
-        .map((line) => line.trim())
-        .filter((line) => line.length > 0);
-      entries.push({
-        text: normalized,
-        candidates: [normalized, collapseWhitespace(normalized), ...lines],
-        recordedAtMs: nowMs(),
-      });
-      while (entries.length > limit) entries.shift();
+      entries.push(createEntry(normalized, nowMs()));
+      trimToLimit();
+    },
+    recordPossiblePartialResidue(text) {
+      const normalized = normalize(text);
+      if (normalized.length === 0) return;
+      const now = nowMs();
+      const shortPrefixResidueUntilMs = now + prefixResidueWindowMs;
+      const existingIndex = entries.findIndex((entry) => entry.text === normalized);
+      if (existingIndex >= 0) {
+        const existing = entries[existingIndex];
+        if (existing) {
+          entries[existingIndex] = {
+            ...existing,
+            shortPrefixResidueUntilMs,
+          };
+        }
+        return;
+      }
+      entries.push(createEntry(normalized, now, shortPrefixResidueUntilMs));
+      trimToLimit();
     },
     matches(draft) {
       const normalized = normalize(draft);
       if (normalized.length === 0) return false;
       const collapsed = collapseWhitespace(normalized);
       const referenceMs = nowMs();
+      const collapsedPasteLineCount = parseExactClaudePastedTextMarkerLineCount(normalized);
       return entries.some((entry) => (
-        entry.candidates.includes(normalized)
-        || entry.candidates.includes(collapsed)
+        entry.clearableCandidates.includes(normalized)
+        || entry.clearableCandidates.includes(collapsed)
+        || isCollapsedPasteMarkerMatch({
+          entry,
+          collapsedPasteLineCount,
+          nowMs: referenceMs,
+          prefixResidueWindowMs,
+          largeCollapsedPasteMarkerWindowMs,
+        })
         || isRecentPrefixResidue({
           entry,
           normalizedDraft: normalized,
           nowMs: referenceMs,
           prefixResidueWindowMs,
         })
+        || (collapsed !== normalized && isRecentPrefixResidue({
+          entry,
+          normalizedDraft: collapsed,
+          nowMs: referenceMs,
+          prefixResidueWindowMs,
+        }))
       ));
     },
   };

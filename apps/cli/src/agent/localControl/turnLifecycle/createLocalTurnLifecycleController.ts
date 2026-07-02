@@ -126,6 +126,10 @@ export function createLocalTurnLifecycleController(opts: Readonly<{
     }
 
     if (event.type === 'completion_candidate') {
+      if (state.terminal && !state.active) {
+        resolveSafeWaiters();
+        return;
+      }
       clearQuiescenceTimer();
       state.active = true;
       state.terminal = false;
@@ -144,6 +148,10 @@ export function createLocalTurnLifecycleController(opts: Readonly<{
     }
 
     if (event.type === 'continuation_detected') {
+      if (state.terminal && !state.active) {
+        resolveSafeWaiters();
+        return;
+      }
       clearQuiescenceTimer();
       state.active = true;
       state.terminal = false;

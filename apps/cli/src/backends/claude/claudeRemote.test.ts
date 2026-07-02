@@ -139,6 +139,35 @@ describe('claudeRemote', () => {
     expect(call?.options?.executable).toBe('/managed/js-runtime');
   });
 
+  it('confirms provider acceptance after starting the legacy SDK query with the prompt stream', async () => {
+    const onPromptAcceptedByProvider = vi.fn();
+    mockQuery.mockReturnValue(messageStream(resultMessage()));
+    let didSendPrompt = false;
+
+    const { claudeRemote } = await import('./claudeRemote');
+
+    await claudeRemote(createBaseOptions({
+      nextMessage: async () => {
+        if (didSendPrompt) return null;
+        didSendPrompt = true;
+        return {
+          message: 'hello',
+          mode: defaultMode(),
+          maxUserMessageSeq: 7,
+          userMessageLocalIds: ['legacy-local-7'],
+        } as any;
+      },
+      onPromptAcceptedByProvider,
+    } as any));
+
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+    expect(onPromptAcceptedByProvider).toHaveBeenCalledTimes(1);
+    expect(onPromptAcceptedByProvider).toHaveBeenCalledWith({
+      maxUserMessageSeq: 7,
+      userMessageLocalIds: ['legacy-local-7'],
+    });
+  });
+
   it('passes the resolved Claude CLI path into the remote launcher env so it does not rediscover it', async () => {
     mockQuery.mockReturnValue(messageStream(resultMessage()));
 

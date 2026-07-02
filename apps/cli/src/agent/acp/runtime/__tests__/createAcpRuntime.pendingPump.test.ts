@@ -277,6 +277,50 @@ describe('createAcpRuntime pending queue pump', () => {
     await runtime.reset();
   });
 
+  it('does not redrain immediately when a metadata wake resolves false without aborting', async () => {
+    const { session } = createSessionClientWithMetadata();
+
+    let metadataWaitCalls = 0;
+    const drainPending = vi.fn(async (): Promise<DrainPendingResult> => ({
+      materialized: 0,
+      stoppedReason: 'no_pending',
+    }));
+    const runtime = createAcpRuntime({
+      provider: 'codex',
+      directory: '/tmp',
+      session,
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: createApprovedPermissionHandler(),
+      onThinkingChange: () => {},
+      ensureBackend: async () => {
+        throw new Error('backend should not be created for pending pump test');
+      },
+      inFlightSteer: { enabled: true },
+      pendingQueue: {
+        drainDuringTurn: true,
+        pollIntervalMs: 50,
+        inputConsumer: { drainPending },
+        waitForMetadataUpdate: async (abortSignal?: AbortSignal) => {
+          metadataWaitCalls += 1;
+          if (metadataWaitCalls === 1) return false;
+          return await new Promise<boolean>((resolve) => {
+            if (abortSignal?.aborted) return resolve(false);
+            abortSignal?.addEventListener('abort', () => resolve(false), { once: true });
+          });
+        },
+      },
+    });
+
+    runtime.beginTurn();
+    await nextTick();
+
+    expect(metadataWaitCalls).toBe(1);
+    expect(drainPending).toHaveBeenCalledTimes(1);
+
+    await runtime.reset();
+  });
+
   it('stops the pending pump after a terminal auth failure instead of retrying forever', async () => {
     const { session } = createSessionClientWithMetadata();
 

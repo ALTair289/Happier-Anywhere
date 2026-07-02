@@ -44,6 +44,33 @@ export const claudeCliPath = resolveCliRuntimeAssetPath('scripts', 'claude_local
 
 const CLAUDE_LOCAL_FETCH_IDLE_CLEAR_DELAY_MS = 500;
 const CLAUDE_LOCAL_UNKNOWN_FETCH_ID = '__happier_unknown_claude_fetch__';
+const REDACTED_MCP_CONFIG_LOG_VALUE = '[redacted-mcp-config]';
+
+function redactClaudeArgsForLog(args: readonly string[]): string[] {
+    const redacted: string[] = [];
+
+    for (let i = 0; i < args.length; i++) {
+        const arg = args[i] ?? '';
+
+        if (arg === '--mcp-config') {
+            redacted.push(arg);
+            if (i + 1 < args.length) {
+                redacted.push(REDACTED_MCP_CONFIG_LOG_VALUE);
+                i += 1;
+            }
+            continue;
+        }
+
+        if (arg.startsWith('--mcp-config=')) {
+            redacted.push(`--mcp-config=${REDACTED_MCP_CONFIG_LOG_VALUE}`);
+            continue;
+        }
+
+        redacted.push(arg);
+    }
+
+    return redacted;
+}
 
 export async function claudeLocal(opts: {
     abort: AbortSignal,
@@ -405,7 +432,7 @@ export async function claudeLocal(opts: {
             logger.debug(
                 `[ClaudeLocal] Spawning ${shouldUseNodeLauncher ? 'node launcher' : 'Claude'}: ${shouldUseNodeLauncher ? claudeCliPath : resolvedClaudeCliPath}`,
             );
-            logger.debug(`[ClaudeLocal] Args: ${JSON.stringify(args)}`);
+            logger.debug(`[ClaudeLocal] Args: ${JSON.stringify(redactClaudeArgsForLog(args))}`);
 
             // Fail closed if node launcher is required but no JavaScript runtime is available
             if (shouldUseNodeLauncher && !nodeExecutable) {

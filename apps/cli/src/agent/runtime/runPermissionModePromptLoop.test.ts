@@ -14,6 +14,8 @@ import { createRuntimeOverrideSynchronizers } from './createRuntimeOverrideSynch
 import { formatProviderPromptErrorMessage } from './formatProviderPromptErrorMessage';
 import { createFakeAcpRuntimeBackend } from '@/testkit/backends/acpRuntimeBackend';
 import { createApprovedPermissionHandler } from '@/testkit/backends/permissionHandler';
+import { createSessionTurnLifecycle } from '@/agent/runtime/session/turn/lifecycle';
+import type { SessionTurnMutationV1 } from '@/api/session/mutations/sessionMutationTypes';
 
 type PromptLoopMetadata = Metadata & {
   replaySeedV1?: any;
@@ -178,6 +180,217 @@ describe('runPermissionModePromptLoop', () => {
     expect(flushPendingAfterStart.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(syncFromMetadata).toHaveBeenCalled();
     expect(permissionHandler.setPermissionMode).toHaveBeenCalled();
+  });
+
+  it('confirms queued user-message delivery only after the provider prompt send resolves', async () => {
+    let resolveProviderSend!: () => void;
+    const providerSend = new Promise<void>((resolve) => {
+      resolveProviderSend = resolve;
+    });
+    const confirmUserMessageDeliveredToProvider = vi.fn();
+    const session = createMutableApiSessionClientFixture<PromptLoopMetadata>({
+      overrides: {
+        confirmUserMessageDeliveredToProvider,
+      } as Partial<ApiSessionClient>,
+    });
+    const queue = createModeQueue();
+    const runtime = createRuntime();
+    runtime.sendPromptWithMeta = vi.fn(async () => {
+      await providerSend;
+    });
+    const messageBuffer = new MessageBuffer();
+    const permissionHandler = {
+      setPermissionMode: vi.fn(),
+      reset: vi.fn(),
+    } as any;
+
+    queue.push(
+      { text: 'hello', localId: 'local-1' },
+      { permissionMode: 'default' },
+      { userMessageSeq: 7, userMessageLocalIds: ['local-1'] },
+    );
+
+    let shouldExit = false;
+    const loopPromise = runPermissionModePromptLoop({
+      providerName: 'Test Provider',
+      agentMessageType: 'qwen',
+      explicitPermissionMode: undefined,
+      session,
+      messageQueue: queue,
+      permissionHandler,
+      runtime,
+      createOverrideSynchronizer: () => ({ syncFromMetadata: () => {}, flushPendingAfterStart: async () => {} }),
+      messageBuffer,
+      shouldExit: () => shouldExit,
+      getAbortSignal: () => new AbortController().signal,
+      keepAlive: () => {},
+      setThinking: () => {},
+      sendReady: () => {
+        shouldExit = true;
+      },
+      currentPermissionModeUpdatedAt: 0,
+      setCurrentPermissionMode: () => {},
+      setCurrentPermissionModeUpdatedAt: () => {},
+      formatPromptErrorMessage: (error) => `Error: ${String(error)}`,
+    });
+
+    await vi.waitFor(() => {
+      expect(runtime.sendPromptWithMeta).toHaveBeenCalledTimes(1);
+    });
+    expect(confirmUserMessageDeliveredToProvider).not.toHaveBeenCalled();
+
+    resolveProviderSend();
+    await loopPromise;
+
+    expect(confirmUserMessageDeliveredToProvider).toHaveBeenCalledTimes(1);
+    expect(confirmUserMessageDeliveredToProvider).toHaveBeenCalledWith(7, { localIds: ['local-1'] });
+  });
+
+  it('confirms ACP queued delivery after backend acceptance before response completion', async () => {
+    let resolveResponseComplete!: (outcome?: { kind: 'completed'; stopReason: 'end_turn' }) => void;
+    const responseComplete = new Promise<{ kind: 'completed'; stopReason: 'end_turn' } | undefined>((resolve) => {
+      resolveResponseComplete = resolve;
+    });
+    const confirmUserMessageDeliveredToProvider = vi.fn();
+    const session = createMutableApiSessionClientFixture<PromptLoopMetadata>({
+      overrides: {
+        confirmUserMessageDeliveredToProvider,
+      } as Partial<ApiSessionClient>,
+    });
+    const waitForResponseComplete = vi.fn(async () => await responseComplete);
+    const backend = createFakeAcpRuntimeBackend({
+      sessionId: 'acp-acceptance-session',
+      sendPrompt: vi.fn(async () => {}),
+      waitForResponseComplete,
+    });
+    const runtime = createAcpRuntime({
+      provider: 'opencode',
+      directory: '/tmp',
+      session,
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: createApprovedPermissionHandler(),
+      onThinkingChange: () => {},
+      ensureBackend: async () => backend,
+    });
+    const queue = createModeQueue();
+    const permissionHandler = {
+      setPermissionMode: vi.fn(),
+      reset: vi.fn(),
+    } as any;
+
+    queue.push(
+      { text: 'hello', localId: 'local-acp-accepted' },
+      { permissionMode: 'default' },
+      { userMessageSeq: 9, userMessageLocalIds: ['local-acp-accepted'] },
+    );
+
+    let shouldExit = false;
+    const readySpy = vi.fn(() => {
+      shouldExit = true;
+    });
+    const loopPromise = runPermissionModePromptLoop({
+      providerName: 'OpenCode',
+      agentMessageType: 'opencode',
+      explicitPermissionMode: undefined,
+      session,
+      messageQueue: queue,
+      permissionHandler,
+      runtime,
+      createOverrideSynchronizer: () => ({ syncFromMetadata: () => {}, flushPendingAfterStart: async () => {} }),
+      messageBuffer: new MessageBuffer(),
+      shouldExit: () => shouldExit,
+      getAbortSignal: () => new AbortController().signal,
+      keepAlive: () => {},
+      setThinking: () => {},
+      sendReady: readySpy,
+      currentPermissionModeUpdatedAt: 0,
+      setCurrentPermissionMode: () => {},
+      setCurrentPermissionModeUpdatedAt: () => {},
+      formatPromptErrorMessage: formatProviderPromptErrorMessage,
+    });
+
+    try {
+      await vi.waitFor(() => {
+        expect(waitForResponseComplete).toHaveBeenCalledTimes(1);
+      });
+      await waitForPromptLoopTick();
+
+      expect(confirmUserMessageDeliveredToProvider).toHaveBeenCalledTimes(1);
+      expect(confirmUserMessageDeliveredToProvider).toHaveBeenCalledWith(9, {
+        localIds: ['local-acp-accepted'],
+      });
+      expect(readySpy).not.toHaveBeenCalled();
+    } finally {
+      resolveResponseComplete({ kind: 'completed', stopReason: 'end_turn' });
+      await loopPromise.catch(() => undefined);
+      await runtime.reset();
+    }
+
+    await loopPromise;
+    expect(readySpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('blocks provider-claimed pending delivery when runtime startup fails before provider send', async () => {
+    const blockPendingMessageDelivery = vi.fn(async () => true);
+    const sendAgentMessage = vi.fn();
+    const session = createMutableApiSessionClientFixture<PromptLoopMetadata>({
+      overrides: {
+        blockPendingMessageDelivery,
+        sendAgentMessage,
+      } as Partial<ApiSessionClient>,
+    });
+    const queue = createModeQueue();
+    const runtime = createRuntime();
+    runtime.startOrLoad = vi.fn(async () => {
+      throw new Error('OpenCode runtime exited before prompt dispatch');
+    });
+    runtime.sendPromptWithMeta = vi.fn(async () => {});
+    const messageBuffer = new MessageBuffer();
+    const permissionHandler = {
+      setPermissionMode: vi.fn(),
+      reset: vi.fn(),
+    } as any;
+
+    queue.push(
+      { text: 'hello', localId: 'local-provider-claim' },
+      { permissionMode: 'default' },
+      { userMessageSeq: null, userMessageLocalIds: ['local-provider-claim'] },
+    );
+
+    let shouldExit = false;
+    await runPermissionModePromptLoop({
+      providerName: 'Test Provider',
+      agentMessageType: 'opencode',
+      explicitPermissionMode: undefined,
+      session,
+      messageQueue: queue,
+      permissionHandler,
+      runtime,
+      createOverrideSynchronizer: () => ({ syncFromMetadata: () => {}, flushPendingAfterStart: async () => {} }),
+      messageBuffer,
+      shouldExit: () => shouldExit,
+      getAbortSignal: () => new AbortController().signal,
+      keepAlive: () => {},
+      setThinking: () => {},
+      sendReady: () => {
+        shouldExit = true;
+      },
+      currentPermissionModeUpdatedAt: 0,
+      setCurrentPermissionMode: () => {},
+      setCurrentPermissionModeUpdatedAt: () => {},
+      formatPromptErrorMessage: formatProviderPromptErrorMessage,
+    });
+
+    expect(runtime.sendPromptWithMeta).not.toHaveBeenCalled();
+    expect(blockPendingMessageDelivery).toHaveBeenCalledWith({
+      localIds: ['local-provider-claim'],
+      reason: 'runtime_disposed_before_delivery',
+    });
+    expect(sendAgentMessage).toHaveBeenCalledWith('opencode', expect.objectContaining({
+      type: 'message',
+      message: expect.stringContaining('OpenCode runtime exited before prompt dispatch'),
+    }));
   });
 
   it('waits for the queued user transcript row before sending the provider prompt', async () => {
@@ -380,6 +593,7 @@ describe('runPermissionModePromptLoop', () => {
       text: 'hello',
       localId: 'local-1',
       meta: { sessionWorkStateRequestV1: { refresh: true } },
+      onProviderPromptAccepted: expect.any(Function),
     });
     expect(runtime.sendPrompt).not.toHaveBeenCalled();
   });
@@ -557,6 +771,105 @@ describe('runPermissionModePromptLoop', () => {
       if (!message || typeof message !== 'object') return false;
       return (message as { type?: unknown }).type === 'turn_failed';
     })).toBe(true);
+  });
+
+  it('surfaces caught ACP prompt errors as a failed turn and does not flush task_complete', async () => {
+    const session = createPromptLoopSession();
+    const sentMessages: unknown[] = [];
+    const mutations: SessionTurnMutationV1[] = [];
+    const sessionTurnLifecycle = createSessionTurnLifecycle({
+      sessionId: 'happy-session-prompt-error',
+      createId: () => 'turn-1',
+      now: () => 123,
+      enqueueSessionTurn: async (mutation) => {
+        mutations.push(mutation);
+      },
+    });
+    vi.spyOn(session, 'sendAgentMessage').mockImplementation((_provider, body) => {
+      sentMessages.push(body);
+    });
+    (session as typeof session & { sessionTurnLifecycle: typeof sessionTurnLifecycle }).sessionTurnLifecycle =
+      sessionTurnLifecycle;
+
+    const backend = createFakeAcpRuntimeBackend({
+      sessionId: 'pi-session-prompt-error',
+      sendPrompt: async () => {
+        throw new Error('PiRpcCommandResponseTimeoutError: Timed out waiting for Pi RPC response (get_state)');
+      },
+    });
+
+    const queue = createModeQueue();
+    const runtime = createAcpRuntime({
+      provider: 'pi',
+      directory: '/tmp',
+      session,
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: createApprovedPermissionHandler(),
+      onThinkingChange: () => {},
+      ensureBackend: async () => backend,
+    });
+    const permissionHandler = {
+      setPermissionMode: vi.fn(),
+      reset: vi.fn(),
+    } as unknown as Parameters<typeof runPermissionModePromptLoop>[0]['permissionHandler'];
+
+    queue.push({ text: 'hello', localId: 'local-prompt-error' }, { permissionMode: 'default' });
+
+    let shouldExit = false;
+    await runPermissionModePromptLoop({
+      providerName: 'Pi',
+      agentMessageType: 'pi',
+      explicitPermissionMode: undefined,
+      session,
+      messageQueue: queue,
+      permissionHandler,
+      runtime,
+      createOverrideSynchronizer: () => ({ syncFromMetadata: () => {}, flushPendingAfterStart: async () => {} }),
+      messageBuffer: new MessageBuffer(),
+      shouldExit: () => shouldExit,
+      getAbortSignal: () => new AbortController().signal,
+      keepAlive: () => {},
+      setThinking: () => {},
+      sendReady: () => {
+        shouldExit = true;
+      },
+      currentPermissionModeUpdatedAt: 0,
+      setCurrentPermissionMode: () => {},
+      setCurrentPermissionModeUpdatedAt: () => {},
+      formatPromptErrorMessage: formatProviderPromptErrorMessage,
+    });
+
+    expect(sentMessages.some((message) => {
+      return Boolean(message && typeof message === 'object' && (message as { type?: unknown }).type === 'task_complete');
+    })).toBe(false);
+    expect(sentMessages.some((message) => {
+      if (!message || typeof message !== 'object') return false;
+      const record = message as { type?: unknown; message?: unknown };
+      return record.type === 'message' && typeof record.message === 'string'
+        && record.message.includes('PiRpcCommandResponseTimeoutError');
+    })).toBe(false);
+    expect(sentMessages).toContainEqual(expect.objectContaining({
+      type: 'turn_failed',
+      id: 'session-turn:turn-1',
+    }));
+    expect(mutations).toEqual([
+      expect.objectContaining({
+        action: 'begin',
+        turnId: 'session-turn:turn-1',
+        provider: 'pi',
+      }),
+      expect.objectContaining({
+        action: 'fail',
+        turnId: 'session-turn:turn-1',
+        provider: 'pi',
+        issue: expect.objectContaining({
+          code: 'provider_session_error',
+          source: 'provider_session_error',
+          status: 'failed',
+        }),
+      }),
+    ]);
   });
 
   it('refreshes the session snapshot and re-syncs metadata overrides before sending the next queued prompt when queue delivery wins the race', async () => {

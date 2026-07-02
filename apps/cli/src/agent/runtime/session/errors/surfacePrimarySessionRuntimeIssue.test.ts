@@ -84,6 +84,28 @@ describe('surfacePrimarySessionRuntimeIssue', () => {
     expect(failTurn).toHaveBeenCalledWith(expect.objectContaining({ issue }));
   });
 
+  it('preserves Pi provider-session diagnostics through session error surfacing', async () => {
+    const failTurn = vi.fn();
+
+    const issue = await runtimeIssueSurface.surfacePrimarySessionRuntimeIssue({
+      provider: 'pi',
+      providerTurnId: 'pi-turn-provider-session',
+      occurredAt: 789,
+      cause: 'session_error',
+      error: new Error('Pi provider reported provider session failure after prompt acceptance'),
+      session: { sessionTurnLifecycle: createLifecycleStub({ failTurn }) },
+    });
+
+    expect(issue).toMatchObject({
+      code: 'provider_session_error',
+      source: 'provider_session_error',
+      provider: 'pi',
+      providerTurnId: 'pi-turn-provider-session',
+      sanitizedPreview: 'Pi provider reported provider session failure after prompt acceptance',
+    });
+    expect(failTurn).toHaveBeenCalledWith(expect.objectContaining({ issue }));
+  });
+
   it('surfaces cancellation as cancelled primary turn state without a runtime issue', async () => {
     const sendAgentMessage = vi.fn();
     const cancelTurn = vi.fn();

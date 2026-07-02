@@ -34,6 +34,7 @@ import type {
   VerifyResumeReachableResult,
 } from '@/backends/connectedServices/verifyResumeReachableTypes';
 import type { ConnectedServiceProviderRuntimeAuthAdapter } from '@/daemon/connectedServices/runtimeAuth/types';
+import type { ConnectedServiceQuotaFetcherDescriptor } from '@/daemon/connectedServices/quotas/types';
 import type {
   ConnectedServiceRuntimeAuthSelectionMaterializerParams,
 } from '@/daemon/connectedServices/sessionAuthSwitch/runtimeAuthSelectionMaterializerTypes';
@@ -64,6 +65,12 @@ export function requireCatalogEntry(agentId: CatalogAgentId): AgentCatalogEntry 
   const entry = AGENTS[agentId];
   if (!entry) throw new Error(`Missing catalog agent entry for ${agentId}`);
   return entry;
+}
+
+export function getConnectedServiceQuotaFetcherDescriptors(): ReadonlyArray<ConnectedServiceQuotaFetcherDescriptor> {
+  return Object.values(AGENTS)
+    .map((entry) => entry?.connectedServiceQuotaFetcherDescriptor)
+    .filter((descriptor): descriptor is ConnectedServiceQuotaFetcherDescriptor => descriptor !== undefined);
 }
 
 const cachedVendorResumeSupportPromises = new Map<CatalogAgentId, Promise<VendorResumeSupportFn>>();

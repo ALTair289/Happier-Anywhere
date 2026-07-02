@@ -21,6 +21,7 @@ import { isToolAllowedForSession } from '@/agent/permissions/permissionToolIdent
 import { applyAllowedToolsToAllowlist, applyUpdatedPermissionsToAllowlist, seedAllowlistFromCompletedRequests } from '@/agent/permissions/applyPermissionAllowlistUpdates';
 import { resolvePermissionIntentFromMetadataSnapshot } from '@/agent/runtime/permission/permissionModeFromMetadata';
 import { normalizePermissionModeToIntent } from '@/agent/runtime/permission/permissionModeCanonical';
+import { waitForSessionMetadataRetryBackoff } from '@/agent/runtime/sessionMetadataWaitRetryBackoff';
 import { isDefaultWriteLikeToolName } from '@/agent/permissions/writeLikeToolNameHeuristics';
 import { shouldSuppressProviderPermissionForHappierApproval } from '@/agent/tools/happierTools/resolveHappierActionForMcpToolName';
 import {
@@ -30,6 +31,9 @@ import {
 } from '@happier-dev/agents';
 import { isChangeTitleToolLikeName } from '@happier-dev/protocol/tools/v2';
 import { withAskUserQuestionUiFreeformDefault } from './askUserQuestionFreeformDefault';
+import { resolveClaudePermissionHookTimeoutMs } from '../utils/permissionHookTimeout';
+
+export { DEFAULT_PROVIDER_HOOK_CEILING_MS } from '../utils/permissionHookTimeout';
 
 type PendingPermissionRequest = {
     id: string;
@@ -67,40 +71,6 @@ type ClaudeToolHookData = Readonly<{
 }>;
 
 const DEFAULT_RESPONSE_TIMEOUT_MS = 10 * 60 * 1000;
-/**
- * Default provider-side permission hook ceiling: 7 days, in milliseconds.
- *
- * Claude kills the permission hook forwarder once its installed command `timeout` elapses, after which
- * the forwarder is dead and a late UI answer can no longer reach Claude. This ceiling MUST stay aligned
- * with the installed hook `timeout` (`generateHookSettings` `DEFAULT_PERMISSION_HOOK_TIMEOUT_SECONDS`,
- * also 7 days) so the bridge's answer-time expiry only ever fires when the forwarder is genuinely dead,
- * never on an artificially short timeout.
- *
- * It is INDEPENDENT of the bridge's own `responseTimeoutMs`: even in wait-indefinitely mode (no Happier
- * waiter) the provider still enforces the hook timeout, so the bridge must expire past-ceiling answers
- * rather than approving them into a dead socket. Effectively unlimited so an operator can launch a
- * session before sleeping and answer the permission on waking, while staying finite so a genuinely-dead
- * forwarder is still honestly expired.
- */
-export const DEFAULT_PROVIDER_HOOK_CEILING_MS = 7 * 24 * 60 * 60 * 1000;
-
-/**
- * Optional environment override (seconds) for the default provider hook ceiling. Mirrors the
- * `HAPPIER_CLAUDE_PERMISSION_HOOK_TIMEOUT_SECONDS` override read by `generateHookSettings`, so overriding
- * the installed hook `timeout` keeps the bridge ceiling aligned without threading an account setting
- * through `runClaude`. An explicit `providerHookCeilingMs` / finite `responseTimeoutMs` still wins.
- */
-const PROVIDER_HOOK_CEILING_ENV_VAR = 'HAPPIER_CLAUDE_PERMISSION_HOOK_TIMEOUT_SECONDS';
-
-function readProviderHookCeilingEnvMs(): number | null {
-    const raw = process.env[PROVIDER_HOOK_CEILING_ENV_VAR];
-    if (typeof raw !== 'string') return null;
-    const seconds = Number(raw.trim());
-    if (Number.isFinite(seconds) && seconds > 0) {
-        return Math.floor(seconds) * 1000;
-    }
-    return null;
-}
 const PERMISSION_TIMED_OUT_REASON = 'Timed out waiting for permission response';
 const PERMISSION_EXPIRED_REASON = 'Provider hook timeout elapsed before a response was delivered';
 const TRANSCRIPT_TAIL_BYTES = 512 * 1024;
@@ -155,7 +125,7 @@ export class ClaudeLocalPermissionBridge {
         } else {
             // Wait-indefinitely mode (no finite response timeout): use the env-overridable default, kept
             // aligned with the installed hook `timeout` so expiry only fires on a genuinely-dead forwarder.
-            this.providerHookCeilingMs = readProviderHookCeilingEnvMs() ?? DEFAULT_PROVIDER_HOOK_CEILING_MS;
+            this.providerHookCeilingMs = resolveClaudePermissionHookTimeoutMs();
         }
         this.requestStore = new AgentStateRequestStore({
             session: this.session.client,
@@ -582,31 +552,7 @@ export class ClaudeLocalPermissionBridge {
         this.metadataWatcherAbort = controller;
         const signal = controller.signal;
         const waitForAbortOrBackoff = async (): Promise<void> => {
-            const backoffMs = 250;
-            if (signal.aborted) return;
-            await new Promise<void>((resolve) => {
-                let settled = false;
-                const timer = setTimeout(() => {
-                    if (settled) return;
-                    settled = true;
-                    cleanup(onAbort);
-                    resolve();
-                }, backoffMs);
-                timer.unref?.();
-
-                const cleanup = (onAbort: () => void) => {
-                    signal.removeEventListener('abort', onAbort);
-                    clearTimeout(timer);
-                };
-
-                const onAbort = () => {
-                    if (settled) return;
-                    settled = true;
-                    cleanup(onAbort);
-                    resolve();
-                };
-                signal.addEventListener('abort', onAbort, { once: true });
-            });
+            await waitForSessionMetadataRetryBackoff({ abortSignal: signal });
         };
 
         void (async () => {

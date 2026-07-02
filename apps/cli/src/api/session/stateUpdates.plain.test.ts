@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { updateSessionAgentStateWithAck, updateSessionMetadataWithAck } from './stateUpdates';
+import {
+  updateSessionAgentStateWithAck,
+  updateSessionMetadataWithAck,
+  updateSessionRuntimeActivityProjectionWithAck,
+} from './stateUpdates';
 import { logger } from '@/ui/logger';
 
 describe('stateUpdates (plaintext sessions)', () => {
@@ -212,6 +216,63 @@ describe('stateUpdates (plaintext sessions)', () => {
     await updateSessionAgentStateWithAck(updateWithStaleRuntimeIssueSummary);
 
     expect(version).toBe(2);
+  });
+
+  it('sends runtime activity projection through a dedicated public projection event', async () => {
+    const emitWithAck = vi.fn(async (_event: string, payload: any) => {
+      expect(payload).toEqual({
+        sid: 's1',
+        runtimeActivityActiveCount: 2,
+        runtimeActivityObservedAt: 1_000,
+        runtimeActivityExpiresAt: 2_000,
+        runtimeActivitySourceClass: 'provider_detached_task',
+      });
+      expect(payload).not.toHaveProperty('thinking');
+      expect(payload).not.toHaveProperty('metadata');
+      expect(payload).not.toHaveProperty('agentState');
+      expect(payload).not.toHaveProperty('latestTurnStatus');
+      expect(payload).not.toHaveProperty('activeAt');
+      expect(payload).not.toHaveProperty('meaningfulActivityAt');
+      return {
+        result: 'success',
+        didWrite: true,
+        runtimeActivityActiveCount: 2,
+        runtimeActivityObservedAt: 1_000,
+        runtimeActivityExpiresAt: 2_000,
+        runtimeActivitySourceClass: 'provider_detached_task',
+      };
+    });
+
+    await updateSessionRuntimeActivityProjectionWithAck({
+      socket: { emitWithAck },
+      sessionId: 's1',
+      runtimeActivityActiveCount: 2,
+      runtimeActivityObservedAt: 1_000,
+      runtimeActivityExpiresAt: 2_000,
+      runtimeActivitySourceClass: 'provider_detached_task',
+    });
+
+    expect(emitWithAck).toHaveBeenCalledTimes(1);
+    expect(emitWithAck).toHaveBeenCalledWith('update-runtime-activity', expect.any(Object));
+  });
+
+  it('rejects failed runtime activity projection acks without falling back to state or keepalive transports', async () => {
+    const emitWithAck = vi.fn(async (_event: string, _payload: any) => ({ result: 'forbidden' }));
+
+    await expect(updateSessionRuntimeActivityProjectionWithAck({
+      socket: { emitWithAck },
+      sessionId: 's1',
+      runtimeActivityActiveCount: 0,
+      runtimeActivityObservedAt: null,
+      runtimeActivityExpiresAt: null,
+      runtimeActivitySourceClass: null,
+    })).rejects.toMatchObject({
+      code: 'runtime_activity_update_failed',
+      retryable: false,
+    });
+
+    expect(emitWithAck).toHaveBeenCalledTimes(1);
+    expect(emitWithAck.mock.calls.map((call) => call[0])).toEqual(['update-runtime-activity']);
   });
 
   it('rejects metadata updates when snapshot sync cannot establish a metadata version', async () => {

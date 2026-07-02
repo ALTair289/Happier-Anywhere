@@ -1,4 +1,4 @@
-import { appendFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, rm, writeFile, rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -123,6 +123,69 @@ describe('createClaudeUnifiedTranscriptBridge', () => {
       }));
       expect(onMessage).not.toHaveBeenCalled();
       expect(onTranscriptMessage).not.toHaveBeenCalled();
+    } finally {
+      await bridge.dispose();
+    }
+  });
+
+  it('does not forward historical raw rows after the known-resume raw follower resets', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'happier-claude-unified-transcript-raw-reset-'));
+    tempDirs.push(dir);
+    const transcriptPath = join(dir, 'sess_raw_reset.jsonl');
+    await writeFile(transcriptPath, '');
+
+    const onRawTranscriptValue = vi.fn();
+    const bridge = createClaudeUnifiedTranscriptBridge({
+      sessionId: 'sess_raw_reset',
+      transcriptPath,
+      workingDirectory: dir,
+      onRawTranscriptValue,
+      subscribeClaudeSessionHooks: () => () => {},
+      transcriptMissingWarningMs: 0,
+    });
+
+    try {
+      await bridge.start({ abortSignal: new AbortController().signal });
+      await appendRawJsonl(transcriptPath, {
+        type: 'queue-operation',
+        operation: 'enqueue',
+        timestamp: new Date().toISOString(),
+        sessionId: 'sess_raw_reset',
+        content: 'initial live raw row',
+      });
+      await waitUntil(() => onRawTranscriptValue.mock.calls.length >= 1);
+
+      const replacementPath = `${transcriptPath}.replacement`;
+      await writeFile(
+        replacementPath,
+        [
+          JSON.stringify({
+            type: 'queue-operation',
+            operation: 'enqueue',
+            timestamp: new Date(Date.now() - 60_000).toISOString(),
+            sessionId: 'sess_raw_reset',
+            content: 'old raw row after replacement',
+          }),
+          JSON.stringify({
+            type: 'queue-operation',
+            operation: 'enqueue',
+            timestamp: new Date(Date.now() + 1000).toISOString(),
+            sessionId: 'sess_raw_reset',
+            content: 'fresh raw row after replacement',
+          }),
+        ].join('\n') + '\n',
+      );
+      await rename(replacementPath, transcriptPath);
+
+      await waitUntil(() => onRawTranscriptValue.mock.calls.some(([value]) => (
+        (value as { content?: unknown } | null)?.content === 'fresh raw row after replacement'
+      )));
+      const contents = onRawTranscriptValue.mock.calls.map(([value]) => (
+        (value as { content?: unknown } | null)?.content
+      ));
+      expect(contents).toContain('initial live raw row');
+      expect(contents).toContain('fresh raw row after replacement');
+      expect(contents).not.toContain('old raw row after replacement');
     } finally {
       await bridge.dispose();
     }

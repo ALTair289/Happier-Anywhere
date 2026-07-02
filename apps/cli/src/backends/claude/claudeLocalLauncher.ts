@@ -36,6 +36,7 @@ import {
     emitClaudeUnifiedLifecycleGapDetected,
 } from './unifiedTerminal/telemetry';
 import { createClaudeSessionTranscriptProjector } from './localControl/createClaudeSessionTranscriptProjector';
+import { createClaudeWorkflowActivitySourceForSession } from './workflows/createClaudeWorkflowActivitySourceForSession';
 
 function upsertClaudePermissionModeArgs(
     args: string[] | undefined,
@@ -99,7 +100,20 @@ export async function claudeLocalLauncher(
 
         const entry = opts?.entry ?? 'initial';
         const remoteSwitchingEnabled = opts?.remoteSwitchingEnabled !== false;
-        const transcriptProjector = createClaudeSessionTranscriptProjector({ session, logPrefix: '[local]' });
+        // Centralized Claude Dynamic Workflow ACTIVITY source (CWF2/CWF3/CWF4). Built at the launcher
+        // (which owns credentials + stored-content encryption) and handed to the projector, which feeds
+        // it the SAME raw transcript channel as the goal source and applies its CWF4 owned-id filter at
+        // the work-state merge chokepoint. Null when no credentials are available yet — the goal /
+        // work-state path is unaffected.
+        const workflowActivitySource = await createClaudeWorkflowActivitySourceForSession({
+            session,
+            logPrefix: '[local]',
+            getCurrentClaudeSessionId: () => {
+                const claudeSessionId = session.client.getMetadataSnapshot?.()?.claudeSessionId;
+                return typeof claudeSessionId === 'string' && claudeSessionId.trim().length > 0 ? claudeSessionId.trim() : null;
+            },
+        });
+        const transcriptProjector = createClaudeSessionTranscriptProjector({ session, logPrefix: '[local]', workflowActivitySource });
         const readyHandler = createClaudeReadyHandler({
             session: session.client,
             pushSender: null,
@@ -137,10 +151,18 @@ export async function claudeLocalLauncher(
         });
         const applyFd3ThinkingFallback = (thinking: boolean): void => {
             const snapshot = turnLifecycle.snapshot();
+            // Claude's legacy terminal thinking signal can briefly flip back to busy
+            // for post-result task notifications/background output. Once the hook
+            // lifecycle has terminalized the foreground turn, only a real hook
+            // turn-start should open the next foreground lifecycle.
+            if (thinking && snapshot.terminal && !snapshot.active) return;
             if (!thinking && snapshot.active && !snapshot.terminal) return;
             session.onThinkingChange(thinking);
         };
-        const lifecycleTracker = createClaudeLocalLifecycleTracker({ lifecycle: turnLifecycle });
+        const lifecycleTracker = createClaudeLocalLifecycleTracker({
+            lifecycle: turnLifecycle,
+            runtimeActivityPublisher: session.runtimeActivityPublisher,
+        });
         const unifiedTelemetry = createClaudeUnifiedTelemetrySink();
 
         // Create scanner
@@ -152,6 +174,13 @@ export async function claudeLocalLauncher(
         onMessage: (message) => {
             transcriptProjector.observe(message);
             lifecycleTracker.observeTranscript(message);
+        },
+        // Native Claude `/goal` source (plan H7): goal_status attachments + the
+        // system/init slash_commands are dropped before `onMessage` (F2 gate), so
+        // the goal source must observe them on the RAW channel. The projector keeps
+        // them out of the visible transcript.
+        onRawJsonlValue: (value) => {
+            transcriptProjector.observeRaw(value);
         },
         onTranscriptMissing: () => {
             session.client.sendSessionEvent({
@@ -483,6 +512,10 @@ export async function claudeLocalLauncher(
         pendingQueueWatcher?.stop();
         deferredRemoteSwitch?.dispose();
         turnLifecycle.dispose();
+
+        // Drain any pending workflow-activity writes, then stop scheduling (dispose via reset()).
+        await transcriptProjector.flushWorkflowActivity();
+        transcriptProjector.reset();
 
         // Cleanup
         await scanner.cleanup();

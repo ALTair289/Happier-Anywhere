@@ -21,6 +21,12 @@ export type StreamedTranscriptSegmentRuntime = {
   lastLiveSnapshotAtMs: number;
   lastLiveSnapshotTextLen: number;
   lastLiveSnapshotText: string;
+  /** Per-segment live emission sequence; increments on every live emit (snapshot or delta). */
+  liveTick: number;
+  /** Time of the last full-snapshot live emission (checkpoint anchor for delta receivers). */
+  lastLiveCheckpointAtMs: number;
+  /** Session connection epoch observed at the last live emission (null before the first emit). */
+  lastLiveEmitEpoch: number | null;
   additionalMeta: Record<string, unknown>;
   durableCheckpointTimer: ReturnType<typeof setTimeout> | null;
   liveSnapshotTimer: ReturnType<typeof setTimeout> | null;

@@ -10,11 +10,13 @@ import { createCodexConnectedServicesMaterializer } from '@/backends/codex/conne
 import { materializeCodexConnectedServiceRuntimeAuthSelection } from '@/backends/codex/connectedServices/materializeCodexConnectedServiceRuntimeAuthSelection';
 import { resolveCodexConnectedServiceSwitchContinuity } from '@/backends/codex/connectedServices/resolveCodexConnectedServiceSwitchContinuity';
 import { resolveCodexConnectedServiceCandidatePersistedSessionFile } from '@/backends/codex/connectedServices/resolveCodexConnectedServiceCandidatePersistedSessionFile';
+import { openAiCodexQuotaFetcherDescriptor } from '@/backends/codex/connectedServices/quotaFetcher';
 import { codexDaemonSpawnHooks } from '@/backends/codex/daemon/spawnHooks';
 import { readCodexEnvironmentAuthState } from '@/backends/codex/cli/auth/readCodexEnvironmentAuthState';
 import { codexAppServerCatalogControlAdapter } from '@/backends/codex/appServer/catalogControl/codexAppServerCatalogControlAdapter';
 import { codexAppServerGoalControlAdapter } from '@/backends/codex/appServer/goalControl/codexAppServerGoalControlAdapter';
 import { codexAppServerUsageLimitRecoveryControlAdapter } from '@/backends/codex/appServer/usageLimitRecoveryControl/codexAppServerUsageLimitRecoveryControlAdapter';
+import { buildCodexRuntimeLocalHandoffMetadata } from '@/backends/codex/sessionHandoff/runtimeLocalMetadata';
 import type { AgentCatalogEntry } from '../types';
 import type { ConnectedServiceCredentialLifecycleDescriptor } from '@/daemon/connectedServices/credentials/lifecycleTypes';
 
@@ -50,6 +52,7 @@ export const agent = {
   getDaemonSpawnHooks: async () => codexDaemonSpawnHooks,
   getConnectedServiceMaterializer: async () => createCodexConnectedServicesMaterializer(),
   getConnectedServiceStateSharingDescriptor: async () => codexConnectedServiceStateSharingDescriptor,
+  connectedServiceQuotaFetcherDescriptor: openAiCodexQuotaFetcherDescriptor,
   getConnectedServiceRuntimeAuthAdapter: async () => createCodexConnectedServiceRuntimeAuthAdapter(),
   materializeConnectedServiceRuntimeAuthSelection: materializeCodexConnectedServiceRuntimeAuthSelection,
   getConnectedServiceCredentialLifecycleDescriptor: async () => codexConnectedServiceCredentialLifecycleDescriptor,
@@ -63,6 +66,7 @@ export const agent = {
   getSessionCatalogControlAdapter: async () => codexAppServerCatalogControlAdapter,
   getSessionUsageLimitRecoveryControlAdapter: async () => codexAppServerUsageLimitRecoveryControlAdapter,
   vendorResumeSupport: AGENTS_CORE.codex.resume.vendorResume,
+  buildRuntimeLocalHandoffMetadata: buildCodexRuntimeLocalHandoffMetadata,
   getVendorResumeSupport: async () => supportsCodexVendorResume,
   getAcpBackendFactory: async () => {
     const { createCodexAcpBackend } = await import('@/backends/codex/acp/backend');

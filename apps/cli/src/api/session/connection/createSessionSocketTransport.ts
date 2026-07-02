@@ -10,6 +10,7 @@ import { createSocketTransportAdapter } from '@/api/connection/createSocketTrans
 import { configuration } from '@/configuration';
 import { getSocketIoProxyOptions } from '@/utils/proxy/socketIoProxy';
 import { resolveLoopbackHttpUrl } from '@/api/client/loopbackUrl';
+import { resolveSessionControlSocketConnectTimeoutMs } from '@/session/transport/shared/sessionTimeouts';
 
 const ACCESS_KEY_BINDING_CACHE_TTL_MS = 30_000;
 const MAX_ACCESS_KEY_BINDING_CACHE_ENTRIES = 2_048;
@@ -157,7 +158,9 @@ export function createSessionSocketTransport(params: Readonly<{
         ...getSocketIoProxyOptions({ targetUrl: serverUrl, env }),
     });
 
-    const socketTransport = createSocketTransportAdapter(socket);
+    const socketTransport = createSocketTransportAdapter(socket, {
+        connectTimeoutMs: resolveSessionControlSocketConnectTimeoutMs(),
+    });
     const transport: ManagedConnectionTransport = {
         ...socketTransport,
         async connect(): Promise<void> {

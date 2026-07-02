@@ -6,6 +6,7 @@ import { cmdSessionList } from './list';
 import { cmdSessionHistory } from './history';
 import { cmdSessionStatus } from './status';
 import { cmdSessionCreate } from './create';
+import { SESSION_CREATE_USAGE } from './create/parseSessionCreateSpawnOptions';
 import { cmdSessionSend } from './send';
 import { cmdSessionWait } from './wait';
 import { cmdSessionStop } from './stop';
@@ -86,7 +87,7 @@ function printSessionSubcommandHelp(subcommand: string): boolean {
       console.log('happier session status <session-id-or-prefix> [--live] [--json]');
       return true;
     case 'create':
-      console.log('happier session create [--path <path>] [--backend <backend-target>] [--title <title>] [--tag <tag>] [--prompt <text>|--message <text>] [--json]');
+      console.log(SESSION_CREATE_USAGE);
       return true;
     case 'send':
       console.log('happier session send <session-id-or-prefix> <message> [--permission-mode <mode>] [--model <model-id>] [--wait] [--timeout <seconds>] [--json]');
@@ -120,7 +121,7 @@ export async function handleSessionCommand(
     if (!subcommand || subcommand === 'help' || subcommand === '--help' || subcommand === '-h') {
       console.log('happier session list [--active] [--archived] [--limit N] [--cursor C] [--include-system] [--resumable] [--plain] [--json]');
       console.log('happier session status <session-id-or-prefix> [--live] [--json]');
-      console.log('happier session create [--path <path>] [--backend <backend-target>] [--tag <tag>] [--title <title>] [--prompt <text>|--message <text>] [--json]');
+      console.log(SESSION_CREATE_USAGE);
       console.log('happier session send <session-id-or-prefix> <message> [--permission-mode <mode>] [--model <model-id>] [--wait] [--timeout <seconds>] [--json]');
       console.log('happier session wait <session-id-or-prefix> [--timeout <seconds>] [--json]');
       console.log('happier session stop <session-id-or-prefix> [--json]');

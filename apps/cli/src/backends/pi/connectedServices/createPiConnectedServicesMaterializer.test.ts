@@ -77,7 +77,7 @@ describe('createPiConnectedServicesMaterializer', () => {
     expect(result).not.toBeNull();
     const piAgentDir = result!.env.PI_CODING_AGENT_DIR;
     expect(piAgentDir).toBe(join(rootDir, 'pi-agent-dir'));
-    expect(result!.env).not.toHaveProperty('PI_CODING_AGENT_SESSION_DIR');
+    expect(result!.env.PI_CODING_AGENT_SESSION_DIR).toBe(join(piAgentDir, 'sessions', '--tmp-project--'));
     await expect(readFile(
       join(piAgentDir, 'sessions', '--tmp-project--', '2026-05-21T00-00-00-000Z_pi-session-1.jsonl'),
       'utf8',

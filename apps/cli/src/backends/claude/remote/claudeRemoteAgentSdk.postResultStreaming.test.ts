@@ -4,7 +4,7 @@ import { claudeRemoteAgentSdk } from './claudeRemoteAgentSdk';
 import { makeMode } from './claudeRemoteAgentSdk.testkit';
 
 describe('claudeRemoteAgentSdk post-result streaming', () => {
-    it('continues consuming the response stream after a result while waiting for nextMessage', async () => {
+    it('continues consuming post-result assistant output without reopening the foreground turn', async () => {
         let responseNextCalls = 0;
         let resolveDone: (() => void) | null = null;
 
@@ -65,6 +65,7 @@ describe('claudeRemoteAgentSdk post-result streaming', () => {
         });
         const thinkingEvents: boolean[] = [];
         const onReady = vi.fn();
+        const onMessage = vi.fn();
 
         const runnerPromise = claudeRemoteAgentSdk({
             sessionId: null,
@@ -78,7 +79,7 @@ describe('claudeRemoteAgentSdk post-result streaming', () => {
             onReady,
             onThinkingChange: (thinking: boolean) => thinkingEvents.push(thinking),
             onSessionFound: () => {},
-            onMessage: () => {},
+            onMessage,
             createQuery,
         } as any);
 
@@ -96,7 +97,113 @@ describe('claudeRemoteAgentSdk post-result streaming', () => {
             // Expect it to keep consuming the stream even though the next user message isn't available yet.
             expect(responseNextCalls).toBeGreaterThanOrEqual(2);
             expect(onReady).toHaveBeenCalledTimes(1);
-            expect(thinkingEvents).toEqual([true, false, true]);
+            expect(onMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'assistant' }));
+            expect(thinkingEvents).toEqual([true, false]);
+        } finally {
+            resolveSecond(null);
+            await runnerPromise;
+        }
+    });
+
+    it('does not reopen the foreground turn for late post-result stream events without a follow-up prompt', async () => {
+        let responseNextCalls = 0;
+        let resolveDone: (() => void) | null = null;
+
+        const createQuery = vi.fn((_params: any) => {
+            let closed = false;
+            const iterator = {
+                [Symbol.asyncIterator]() {
+                    return this;
+                },
+                async next() {
+                    if (closed) {
+                        return { done: true, value: undefined };
+                    }
+                    responseNextCalls += 1;
+                    if (responseNextCalls === 1) {
+                        return { done: false, value: { type: 'result' } as any };
+                    }
+                    if (responseNextCalls === 2) {
+                        return {
+                            done: false,
+                            value: {
+                                type: 'stream_event',
+                                event: {
+                                    type: 'content_block_delta',
+                                    delta: { type: 'text_delta', text: 'after-result-stream' },
+                                },
+                            } as any,
+                        };
+                    }
+                    if (responseNextCalls === 3) {
+                        return {
+                            done: false,
+                            value: {
+                                type: 'stream_event',
+                                event: { type: 'message_stop' },
+                            } as any,
+                        };
+                    }
+                    return await new Promise((resolve) => {
+                        resolveDone = () => resolve({ done: true, value: undefined });
+                    });
+                },
+            };
+
+            return {
+                ...iterator,
+                close: vi.fn(() => {
+                    closed = true;
+                    resolveDone?.();
+                }),
+                setPermissionMode: vi.fn(),
+                setModel: vi.fn(),
+                setMaxThinkingTokens: vi.fn(),
+                supportedCommands: vi.fn(async () => []),
+                supportedModels: vi.fn(async () => []),
+            } as any;
+        });
+
+        let didSendFirst = false;
+        let resolveSecond!: (value: { message: string; mode: any } | null) => void;
+        const secondMessagePromise = new Promise<{ message: string; mode: any } | null>((resolve) => {
+            resolveSecond = resolve;
+        });
+        const nextMessage = vi.fn(async (): Promise<{ message: string; mode: any } | null> => {
+            if (!didSendFirst) {
+                didSendFirst = true;
+                return { message: 'hello', mode: makeMode({ claudeRemoteAgentSdkEnabled: true }) };
+            }
+            return await secondMessagePromise;
+        });
+        const thinkingEvents: boolean[] = [];
+        const onReady = vi.fn();
+        const onMessage = vi.fn();
+
+        const runnerPromise = claudeRemoteAgentSdk({
+            sessionId: null,
+            transcriptPath: null,
+            path: '/tmp',
+            claudeArgs: [],
+            claudeExecutablePath: '/tmp/claude',
+            canCallTool: async () => ({ behavior: 'allow', updatedInput: {} }),
+            isAborted: () => false,
+            nextMessage,
+            onReady,
+            onThinkingChange: (thinking: boolean) => thinkingEvents.push(thinking),
+            onSessionFound: () => {},
+            onMessage,
+            createQuery,
+        } as any);
+
+        try {
+            await vi.waitFor(() => {
+                expect(responseNextCalls).toBeGreaterThanOrEqual(3);
+            });
+
+            expect(onReady).toHaveBeenCalledTimes(1);
+            expect(onMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'assistant' }));
+            expect(thinkingEvents).toEqual([true, false]);
         } finally {
             resolveSecond(null);
             await runnerPromise;

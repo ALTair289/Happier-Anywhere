@@ -5,6 +5,7 @@ import type { ApiSessionClient } from '@/api/session/sessionClient';
 import type { PermissionMode } from '@/api/types';
 import type { MessageBuffer } from '@/ui/ink/messageBuffer';
 
+import type { PiBackendOptions } from '@/backends/pi/acp/backend';
 import { publishPiSessionIdMetadata } from '@/backends/pi/utils/piSessionIdMetadata';
 
 export function createPiAcpRuntime(params: {
@@ -21,7 +22,7 @@ export function createPiAcpRuntime(params: {
 }) {
   const lastPublishedPiSessionId = { value: null as string | null };
 
-  return createCatalogProviderAcpRuntime({
+  return createCatalogProviderAcpRuntime<PiBackendOptions>({
     provider: 'pi',
     loggerLabel: 'PiACP',
     directory: params.directory,
@@ -35,6 +36,9 @@ export function createPiAcpRuntime(params: {
       machineId: params.machineId,
     },
     getPermissionMode: params.getPermissionMode,
+    backendOptions: {
+      env: process.env,
+    },
     pendingQueueDrainMaxPopPerWake: params.pendingQueueDrainMaxPopPerWake,
     inFlightSteer: { enabled: true },
     onSessionIdChange: (nextSessionId) => {

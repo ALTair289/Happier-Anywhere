@@ -3,6 +3,7 @@ import type { RawJSONLines } from '@/backends/claude/types';
 import { configuration } from '@/configuration';
 import { startFileWatcher } from '@/integrations/watcher/startFileWatcher';
 import { parseRawJsonLinesObject } from '@/backends/claude/utils/parseRawJsonLines';
+import type { JsonlFollowerMetricEvent } from '@/agent/localControl/jsonlFollowMetrics';
 
 import { extractAgentIdFromTaskResultText } from './extractAgentIdFromTaskResult';
 import {
@@ -13,15 +14,27 @@ import {
   markUuidSeenAndReturnIsDuplicate,
   LruSet,
 } from './_shared';
+import {
+  createClaudeJsonlResetReplaySuppressor,
+  type ClaudeJsonlResetReplaySuppressor,
+} from '../../utils/claudeJsonlReplaySuppression';
 
 import { realpath } from 'node:fs/promises';
 import { createJsonlFollowController, type JsonlFollowController } from '@/agent/localControl/jsonlFollowController';
 import { normalizeJsonlFollowPolicy, type JsonlFollowPolicyInput, type JsonlFollowPolicyV1 } from '@/agent/localControl/jsonlFollowPolicy';
 import { isGenericSubAgentToolName } from '@happier-dev/protocol/tools/v2';
+import { normalizeClaudeAgentSdkProviderTaskId } from '../../providerActivity/createClaudeProviderActivityLedger';
 
 type WatchFile = (file: string, onFileChange: (file: string) => void) => () => void;
 
 type EmitImported = (body: RawJSONLines, meta: Record<string, unknown>) => void;
+
+export type ClaudeRemoteSubagentFileActivity = Readonly<{
+  sidechainId: string;
+  agentId: string;
+  providerTaskIds: readonly string[];
+  resolvedJsonlPath: string;
+}>;
 
 type ResolveJsonlPathForAgentId = (params: {
   agentId: string;
@@ -32,6 +45,7 @@ type ResolveJsonlPathForAgentId = (params: {
 type Entry = {
   sidechainId: string; // Task tool_use id
   agentId: string;
+  providerTaskIds: readonly string[];
   outputFilePath: string;
   resolvedJsonlPath: string;
   controller: JsonlFollowController;
@@ -42,6 +56,7 @@ type Entry = {
 type PendingRegistration = {
   sidechainId: string;
   agentId: string;
+  providerTaskIds: readonly string[];
   markCompletedAfterRegister: boolean;
 };
 
@@ -49,6 +64,7 @@ export class ClaudeRemoteSubagentFileCollector {
   private readonly emitImported: EmitImported;
   private readonly watchFile: WatchFile;
   private readonly resolveJsonlPathForAgentId: ResolveJsonlPathForAgentId | null;
+  private readonly onSourceActivity: ((activity: ClaudeRemoteSubagentFileActivity) => void) | null;
 
   private lastClaudeSessionId: string | null = null;
   private toolNameByToolUseId = new Map<string, string>();
@@ -64,11 +80,13 @@ export class ClaudeRemoteSubagentFileCollector {
     emitImported: EmitImported;
     watchFile?: WatchFile;
     resolveJsonlPathForAgentId?: ResolveJsonlPathForAgentId;
+    onSourceActivity?: (activity: ClaudeRemoteSubagentFileActivity) => void;
     followPolicy?: JsonlFollowPolicyInput;
   }) {
     this.emitImported = opts.emitImported;
     this.watchFile = opts.watchFile ?? startFileWatcher;
     this.resolveJsonlPathForAgentId = opts.resolveJsonlPathForAgentId ?? null;
+    this.onSourceActivity = opts.onSourceActivity ?? null;
     this.followPolicy = normalizeJsonlFollowPolicy(opts.followPolicy);
   }
 
@@ -134,6 +152,11 @@ export class ClaudeRemoteSubagentFileCollector {
         this.pendingBySidechainId.set(toolUseId, {
           sidechainId: toolUseId,
           agentId: agentIdFromInput || toolUseId,
+          providerTaskIds: buildProviderTaskIdCandidates({
+            toolUseResult: null,
+            agentId: agentIdFromInput || toolUseId,
+            sidechainId: toolUseId,
+          }),
           markCompletedAfterRegister: false,
         });
         this.flushPendingRegistrations();
@@ -175,6 +198,11 @@ export class ClaudeRemoteSubagentFileCollector {
       const agentIdFromToolUseInput = this.agentIdByToolUseId.get(toolUseId) ?? '';
       const agentId = agentIdFromToolUseResult || (ids.agentId ? String(ids.agentId).trim() : '') || agentIdFromToolUseInput;
       if (!agentId) continue;
+      const providerTaskIds = buildProviderTaskIdCandidates({
+        toolUseResult,
+        agentId,
+        sidechainId: toolUseId,
+      });
 
       const outputFilePath =
         extractOutputFilePathFromTaskResultText(toolResultText) ??
@@ -194,7 +222,12 @@ export class ClaudeRemoteSubagentFileCollector {
         // Session id/transcript path may not be known yet (init may arrive after Task spawns). Store a pending entry and
         // retry once we learn session_id (or when syncAll() is called).
         if (this.resolveJsonlPathForAgentId && !this.entriesBySidechainId.has(toolUseId)) {
-          this.pendingBySidechainId.set(toolUseId, { sidechainId: toolUseId, agentId, markCompletedAfterRegister: shouldMarkCompleted });
+          this.pendingBySidechainId.set(toolUseId, {
+            sidechainId: toolUseId,
+            agentId,
+            providerTaskIds,
+            markCompletedAfterRegister: shouldMarkCompleted,
+          });
         } else if (shouldMarkCompleted) {
           this.markEntryCompleted(toolUseId);
         }
@@ -204,6 +237,7 @@ export class ClaudeRemoteSubagentFileCollector {
       const registration = this.registerTaskOutputFile({
         sidechainId: toolUseId,
         agentId,
+        providerTaskIds,
         outputFilePath,
         markCompletedAfterRegister: shouldMarkCompleted,
       });
@@ -249,6 +283,7 @@ export class ClaudeRemoteSubagentFileCollector {
   private async registerTaskOutputFile(params: {
     sidechainId: string;
     agentId: string;
+    providerTaskIds: readonly string[];
     outputFilePath: string;
     markCompletedAfterRegister?: boolean;
   }): Promise<void> {
@@ -271,11 +306,17 @@ export class ClaudeRemoteSubagentFileCollector {
 
     const sidechainId = params.sidechainId;
     const agentId = params.agentId;
+    const replaySuppressor = createClaudeJsonlResetReplaySuppressor();
+    const handleFollowerMetric = (event: JsonlFollowerMetricEvent): void => {
+      if (event.type !== 'file_reset') return;
+      replaySuppressor.markReset();
+    };
 
     const now = Date.now();
     const entry: Entry = {
       sidechainId,
       agentId,
+      providerTaskIds: params.providerTaskIds,
       outputFilePath: params.outputFilePath,
       resolvedJsonlPath,
       createdAtMs: now,
@@ -284,8 +325,14 @@ export class ClaudeRemoteSubagentFileCollector {
         filePath: resolvedJsonlPath,
         pollPolicy: this.followPolicy,
         watchFile: this.watchFile,
+        metrics: { emit: handleFollowerMetric },
         onClosed: () => this.closeEntry(sidechainId),
-        onJson: (value) => this.ingestJson({ sidechainId, agentId, resolvedJsonlPath }, value),
+        onJson: (value) => this.ingestJson({
+          sidechainId,
+          agentId,
+          providerTaskIds: params.providerTaskIds,
+          resolvedJsonlPath,
+        }, value, { replaySuppressor }),
       }),
     };
 
@@ -339,9 +386,12 @@ export class ClaudeRemoteSubagentFileCollector {
   }
 
   private ingestJson(
-    params: { sidechainId: string; agentId: string; resolvedJsonlPath: string },
+    params: { sidechainId: string; agentId: string; providerTaskIds: readonly string[]; resolvedJsonlPath: string },
     value: unknown,
+    opts?: { replaySuppressor?: ClaudeJsonlResetReplaySuppressor },
   ): void {
+    if (opts?.replaySuppressor?.shouldSuppress(value)) return;
+
     const parsed = parseRawJsonLinesObject(value);
     if (!parsed) return;
 
@@ -366,6 +416,13 @@ export class ClaudeRemoteSubagentFileCollector {
     }
 
     markRecordAsSidechain(parsed, params.sidechainId);
+
+    this.onSourceActivity?.({
+      sidechainId: params.sidechainId,
+      agentId: params.agentId,
+      providerTaskIds: params.providerTaskIds,
+      resolvedJsonlPath: params.resolvedJsonlPath,
+    });
 
     this.emitImported(parsed, {
       importedFrom: 'claude-subagent-file',
@@ -419,6 +476,7 @@ export class ClaudeRemoteSubagentFileCollector {
       const registration = this.registerTaskOutputFile({
         sidechainId: pending.sidechainId,
         agentId: pending.agentId,
+        providerTaskIds: pending.providerTaskIds,
         outputFilePath,
         markCompletedAfterRegister: pending.markCompletedAfterRegister,
       });
@@ -426,6 +484,36 @@ export class ClaudeRemoteSubagentFileCollector {
       void registration.finally(() => this.pendingRegistrations.delete(registration));
     }
   }
+}
+
+function addProviderTaskCandidate(candidates: string[], value: unknown): void {
+  const normalized = normalizeClaudeAgentSdkProviderTaskId(value);
+  if (!normalized || candidates.includes(normalized)) return;
+  candidates.push(normalized);
+}
+
+function buildProviderTaskIdCandidates(params: {
+  toolUseResult: unknown;
+  agentId: string;
+  sidechainId: string;
+}): readonly string[] {
+  const candidates: string[] = [];
+  const result = params.toolUseResult && typeof params.toolUseResult === 'object' && !Array.isArray(params.toolUseResult)
+    ? params.toolUseResult as Record<string, unknown>
+    : null;
+  if (result) {
+    addProviderTaskCandidate(candidates, result.backgroundTaskId);
+    addProviderTaskCandidate(candidates, result.background_task_id);
+    addProviderTaskCandidate(candidates, result.taskId);
+    addProviderTaskCandidate(candidates, result.task_id);
+    addProviderTaskCandidate(candidates, result.agentId);
+    addProviderTaskCandidate(candidates, result.agent_id);
+    addProviderTaskCandidate(candidates, result.teammateId);
+    addProviderTaskCandidate(candidates, result.teammate_id);
+  }
+  addProviderTaskCandidate(candidates, params.agentId);
+  addProviderTaskCandidate(candidates, params.sidechainId);
+  return candidates;
 }
 
 function shouldMarkSidechainCompletedAfterToolResult(params: {

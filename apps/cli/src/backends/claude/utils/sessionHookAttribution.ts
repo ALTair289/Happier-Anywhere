@@ -1,4 +1,5 @@
 import type { SessionHookData } from './startHookServer';
+import { normalizeClaudeAgentSdkProviderTaskId } from '../providerActivity/createClaudeProviderActivityLedger';
 
 /**
  * Claude Code emits hook events for sidechain (subagent) activity with an
@@ -20,4 +21,37 @@ export function readSessionHookSidechainAgentId(data: SessionHookData): string |
 
 export function isSidechainSessionHook(data: SessionHookData): boolean {
   return readSessionHookSidechainAgentId(data) !== null;
+}
+
+export function readSessionHookEventName(data: SessionHookData): string {
+  const raw = data.hook_event_name ?? data.hookEventName;
+  return typeof raw === 'string' ? raw : '';
+}
+
+export function readSidechainSessionHookProviderTaskId(data: SessionHookData): string | null {
+  const agentId = readSessionHookSidechainAgentId(data);
+  return normalizeClaudeAgentSdkProviderTaskId(agentId);
+}
+
+export function isSidechainSessionHookRuntimeActivityEvent(data: SessionHookData): boolean {
+  switch (readSessionHookEventName(data)) {
+    case 'PreToolUse':
+    case 'PostToolUse':
+    case 'UserPromptSubmit':
+    case 'Notification':
+      return true;
+    default:
+      return false;
+  }
+}
+
+export function isSidechainSessionHookRuntimeActivityTerminalEvent(data: SessionHookData): boolean {
+  switch (readSessionHookEventName(data)) {
+    case 'Stop':
+    case 'StopFailure':
+    case 'SessionEnd':
+      return true;
+    default:
+      return false;
+  }
 }

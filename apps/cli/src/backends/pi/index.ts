@@ -14,7 +14,10 @@ const piConnectedServiceCredentialLifecycleDescriptor: ConnectedServiceCredentia
   providerId: 'pi',
   serviceIds: AGENTS_CORE.pi.connectedServices.supportedServiceIds,
   spawnPreflightOauthRefresh: { mode: 'expiry_window' },
-  refreshedCredentialApplication: { mode: 'restart_required' },
+  refreshedCredentialApplication: {
+    mode: 'restart_required',
+    noRestartRequiredServiceIds: ['openai-codex', 'claude-subscription'],
+  },
   predictiveSoftSwitch: { mode: 'unsupported' },
   sameAccountFanoutStrategy: 'none',
   runtimeAuthApply: { directLiveHotAuth: 'unsupported' },

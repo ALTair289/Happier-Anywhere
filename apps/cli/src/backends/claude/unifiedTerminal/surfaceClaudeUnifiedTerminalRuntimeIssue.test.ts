@@ -17,6 +17,7 @@ function buildInjectionFailureError(
     batch: {
       message: 'hello',
       origin: { kind: 'ui_pending' },
+      ...(failureState === 'failed_ambiguous' ? { userMessageLocalIds: ['pending-local'] } : {}),
     },
     result: {
       status: 'failed',
@@ -26,6 +27,24 @@ function buildInjectionFailureError(
       recoverable: true,
     },
     failureState,
+  });
+}
+
+function buildRecoverableAmbiguousInjectionFailureError(): ClaudeUnifiedTerminalInjectionFailureError {
+  return new ClaudeUnifiedTerminalInjectionFailureError({
+    batch: {
+      message: 'hello',
+      origin: { kind: 'ui_pending' },
+      userMessageLocalIds: ['pending-local'],
+    },
+    result: {
+      status: 'failed',
+      reason: 'timeout',
+      phase: 'after_write_before_enter',
+      duplicateRisk: 'possible',
+      recoverable: true,
+    },
+    failureState: 'failed_ambiguous',
   });
 }
 
@@ -79,7 +98,47 @@ describe('surfaceClaudeUnifiedTerminalRuntimeIssue', () => {
   });
 
   it('does not classify recoverable ambiguous injection failures as terminal runtime issues', () => {
-    expect(isClaudeUnifiedTerminalRuntimeIssueError(buildInjectionFailureError('failed_ambiguous'))).toBe(false);
+    expect(isClaudeUnifiedTerminalRuntimeIssueError(buildRecoverableAmbiguousInjectionFailureError())).toBe(false);
+  });
+
+  it('classifies host-unreachable submit failures after Enter as terminal runtime issues', () => {
+    expect(isClaudeUnifiedTerminalRuntimeIssueError(
+      new ClaudeUnifiedTerminalInjectionFailureError({
+        batch: {
+          message: 'hello',
+          origin: { kind: 'ui_pending' },
+        },
+        result: {
+          status: 'failed',
+          reason: 'host_unreachable',
+          phase: 'after_enter_unknown',
+          duplicateRisk: 'possible',
+          recoverable: true,
+        },
+        failureState: 'failed_ambiguous',
+      }),
+    )).toBe(true);
+  });
+
+  it('classifies provider-acceptance timeouts without pending local ids as terminal runtime issues', () => {
+    expect(isClaudeUnifiedTerminalRuntimeIssueError(
+      new ClaudeUnifiedTerminalInjectionFailureError({
+        batch: {
+          message: 'hello',
+          origin: { kind: 'ui_pending' },
+          userMessageLocalIds: [],
+        },
+        result: {
+          status: 'failed',
+          reason: 'timeout',
+          phase: 'after_enter_unknown',
+          duplicateRisk: 'likely',
+          recoverable: true,
+        },
+        failureState: 'failed_ambiguous',
+      }),
+    )).toBe(true);
+    expect(isClaudeUnifiedTerminalRuntimeIssueError(buildInjectionFailureError('failed_ambiguous'))).toBe(true);
   });
 
   it('does not classify unrelated errors as runtime issues', () => {
@@ -152,7 +211,7 @@ describe('surfaceClaudeUnifiedTerminalRuntimeIssue', () => {
     } as unknown as Parameters<typeof surfaceClaudeUnifiedTerminalRuntimeIssue>[0]['session'];
 
     const surfaced = await surfaceClaudeUnifiedTerminalRuntimeIssue({
-      error: buildInjectionFailureError('failed_ambiguous'),
+      error: buildRecoverableAmbiguousInjectionFailureError(),
       session,
     });
     expect(surfaced).toBe(false);

@@ -69,10 +69,11 @@ vi.mock('./rpc/RpcHandlerManager', () => ({
     async invokeLocal() {
       return { ok: true };
     }
+    async waitForIdle() {}
   },
 }));
 vi.mock('./changes', () => ({ fetchChanges: vi.fn() }));
-vi.mock('@/persistence', () => ({ readLastChangesCursor: vi.fn(), writeLastChangesCursor: vi.fn() }));
+vi.mock('@/persistence', () => ({ readAccountChangesCursor: vi.fn(), writeAccountChangesCursor: vi.fn() }));
 vi.mock('./client/loopbackUrl', () => ({ resolveLoopbackHttpUrl: (value: string) => value }));
 vi.mock('@/utils/proxy/socketIoProxy', () => ({ getSocketIoProxyOptions: () => ({}) }));
 vi.mock('@/utils/time', () => ({ backoff: async <T>(fn: () => Promise<T>) => await fn() }));

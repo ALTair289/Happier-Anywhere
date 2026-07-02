@@ -739,6 +739,16 @@ describe('composer content exposure (incident cmq7pyqkj, U1)', () => {
     expect(state.composerContent).toBe('/effort medium/effort medium');
   });
 
+  it('blocks in-flight steering on slash composer content even when the suggestion picker is closed', () => {
+    const state = parseClaudeScreenState([
+      '╭───────────────────────────────────────╮',
+      '│ > /effort medium/effort medium        │',
+      '╰───────────────────────────────────────╯',
+    ].join('\n'));
+    expect(state.slashPickerOpen).toBe(false);
+    expect(resolveClaudeScreenInFlightSteerVeto(state)).toBe('slash_picker');
+  });
+
   it('reads the BOTTOM composer line, not an executed-prompt echo above it', () => {
     const state = parseClaudeScreenState([
       '❯ /effort medium',

@@ -10,6 +10,7 @@ import {
     RpcHandlerMap,
     RpcRequest,
     RpcHandlerConfig,
+    type RpcAuthorizationResult,
 } from './types';
 import { Socket } from 'socket.io-client';
 import { SOCKET_RPC_EVENTS } from '@happier-dev/protocol/socketRpc';
@@ -22,6 +23,7 @@ export class RpcHandlerManager {
     private readonly encryptionVariant: 'legacy' | 'dataKey';
     private readonly encryptionMode: 'e2ee' | 'plain';
     private readonly logger: (message: string, data?: any) => void;
+    private readonly authorizeRequest: RpcHandlerConfig['authorizeRequest'];
     private socket: Socket | null = null;
     private inFlightRequestCount = 0;
     private idleResolvers = new Set<() => void>();
@@ -32,6 +34,12 @@ export class RpcHandlerManager {
         this.encryptionVariant = config.encryptionVariant;
         this.encryptionMode = config.encryptionMode ?? 'e2ee';
         this.logger = config.logger || ((msg, data) => defaultLogger.debug(msg, data));
+        this.authorizeRequest = config.authorizeRequest;
+    }
+
+    private encodeResponse(response: unknown): unknown {
+        if (this.encryptionMode === 'plain') return response;
+        return encodeBase64(encrypt(this.encryptionKey, this.encryptionVariant, response));
     }
 
     /**
@@ -61,16 +69,14 @@ export class RpcHandlerManager {
     async handleRequest(
         request: RpcRequest,
     ): Promise<any> {
-        this.inFlightRequestCount += 1;
+        this.beginInFlightRequest();
         try {
             const handler = this.handlers.get(request.method);
 
             if (!handler) {
                 this.logger('[RPC] [ERROR] Method not found', { method: request.method });
                 const errorResponse = { error: RPC_ERROR_MESSAGES.METHOD_NOT_FOUND, errorCode: RPC_ERROR_CODES.METHOD_NOT_FOUND };
-                if (this.encryptionMode === 'plain') return errorResponse;
-                const encryptedError = encodeBase64(encrypt(this.encryptionKey, this.encryptionVariant, errorResponse));
-                return encryptedError;
+                return this.encodeResponse(errorResponse);
             }
 
             // Decrypt the incoming params (unless session is plaintext).
@@ -83,7 +89,21 @@ export class RpcHandlerManager {
               const errorResponse = {
                 error: 'Invalid RPC params',
               };
-              return encodeBase64(encrypt(this.encryptionKey, this.encryptionVariant, errorResponse));
+              return this.encodeResponse(errorResponse);
+            }
+
+            const authorizationResult: RpcAuthorizationResult = this.authorizeRequest
+              ? await this.authorizeRequest({
+                method: request.method,
+                params: decryptedParams,
+                authorization: request.authorization,
+              })
+              : { ok: true };
+            if (authorizationResult.ok !== true) {
+              return this.encodeResponse({
+                error: authorizationResult.error,
+                ...(authorizationResult.errorCode ? { errorCode: authorizationResult.errorCode } : {}),
+              });
             }
 
             // Call the handler
@@ -92,28 +112,19 @@ export class RpcHandlerManager {
             this.logger('[RPC] Handler returned', { method: request.method, hasResult: result !== undefined });
 
             // Encrypt and return the response
-            if (this.encryptionMode === 'plain') {
-              return result;
+            const response = this.encodeResponse(result);
+            if (this.encryptionMode !== 'plain' && typeof response === 'string') {
+              this.logger('[RPC] Sending encrypted response', { method: request.method, responseLength: response.length });
             }
-            const encryptedResponse = encodeBase64(encrypt(this.encryptionKey, this.encryptionVariant, result));
-            this.logger('[RPC] Sending encrypted response', { method: request.method, responseLength: encryptedResponse.length });
-            return encryptedResponse;
+            return response;
         } catch (error) {
             this.logger('[RPC] [ERROR] Error handling request', { error });
             const errorResponse = {
                 error: error instanceof Error ? error.message : 'Unknown error'
             };
-            if (this.encryptionMode === 'plain') return errorResponse;
-            return encodeBase64(encrypt(this.encryptionKey, this.encryptionVariant, errorResponse));
+            return this.encodeResponse(errorResponse);
         } finally {
-            this.inFlightRequestCount = Math.max(0, this.inFlightRequestCount - 1);
-            if (this.inFlightRequestCount === 0 && this.idleResolvers.size > 0) {
-                const resolvers = Array.from(this.idleResolvers);
-                this.idleResolvers.clear();
-                for (const resolve of resolvers) {
-                    resolve();
-                }
-            }
+            this.finishInFlightRequest();
         }
     }
 
@@ -129,7 +140,12 @@ export class RpcHandlerManager {
         if (!handler) {
             return { error: RPC_ERROR_MESSAGES.METHOD_NOT_FOUND, errorCode: RPC_ERROR_CODES.METHOD_NOT_FOUND };
         }
-        return await handler(params as any);
+        this.beginInFlightRequest();
+        try {
+            return await handler(params as any);
+        } finally {
+            this.finishInFlightRequest();
+        }
     }
 
     onSocketConnect(socket: Socket): void {
@@ -186,6 +202,21 @@ export class RpcHandlerManager {
      */
     private getPrefixedMethod(method: string): string {
         return `${this.scopePrefix}:${method}`;
+    }
+
+    private beginInFlightRequest(): void {
+        this.inFlightRequestCount += 1;
+    }
+
+    private finishInFlightRequest(): void {
+        this.inFlightRequestCount = Math.max(0, this.inFlightRequestCount - 1);
+        if (this.inFlightRequestCount === 0 && this.idleResolvers.size > 0) {
+            const resolvers = Array.from(this.idleResolvers);
+            this.idleResolvers.clear();
+            for (const resolve of resolvers) {
+                resolve();
+            }
+        }
     }
 }
 

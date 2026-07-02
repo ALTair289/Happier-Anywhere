@@ -3,6 +3,98 @@ import { describe, expect, it, vi } from 'vitest';
 import { createClaudeRawMessageTurnDiffBridge } from './createClaudeRawMessageTurnDiffBridge';
 
 describe('createClaudeRawMessageTurnDiffBridge', () => {
+  function replayWriteTurn(bridge: ReturnType<typeof createClaudeRawMessageTurnDiffBridge>): void {
+    expect(bridge.observe({
+      type: 'assistant',
+      uuid: 'assistant-tool-call-row',
+      isSidechain: false,
+      message: {
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool_use',
+            id: 'tool_write_1',
+            name: 'Write',
+            input: {
+              file_path: '/repo/session-changes-qa-root.txt',
+              content: 'gamma\n',
+            },
+          },
+        ],
+      },
+    } as any)).toMatchObject({
+      type: 'assistant',
+      uuid: 'assistant-tool-call-row',
+    });
+    expect(bridge.observe({
+      type: 'user',
+      uuid: 'user-tool-result-row',
+      isSidechain: false,
+      toolUseResult: {
+        type: 'update',
+        filePath: '/repo/session-changes-qa-root.txt',
+        content: 'gamma\n',
+        originalFile: 'beta\n',
+      },
+      message: {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'tool_write_1',
+            content: 'written',
+            is_error: false,
+          },
+        ],
+      },
+    } as any)).toMatchObject({
+      type: 'user',
+      uuid: 'user-tool-result-row',
+    });
+    expect(bridge.observe({
+      type: 'assistant',
+      uuid: 'assistant-end-turn-row',
+      isSidechain: false,
+      message: {
+        role: 'assistant',
+        stop_reason: 'end_turn',
+        content: [],
+      },
+    } as any)).toMatchObject({
+      type: 'assistant',
+      uuid: 'assistant-end-turn-row',
+    });
+    bridge.flushAfterForwardIfNeeded();
+  }
+
+  it('emits deterministic synthetic TurnDiff identities when the same Claude turn replays', () => {
+    const firstSendMessage = vi.fn();
+    const firstBridge = createClaudeRawMessageTurnDiffBridge({
+      getSessionId: () => 'happy-session-id',
+      sendMessage: firstSendMessage,
+    });
+    replayWriteTurn(firstBridge);
+
+    const secondSendMessage = vi.fn();
+    const secondBridge = createClaudeRawMessageTurnDiffBridge({
+      getSessionId: () => 'happy-session-id',
+      sendMessage: secondSendMessage,
+    });
+    replayWriteTurn(secondBridge);
+
+    expect(firstSendMessage).toHaveBeenCalledTimes(2);
+    expect(secondSendMessage).toHaveBeenCalledTimes(2);
+    expect(firstSendMessage.mock.calls.map((call) => call[0].uuid)).toEqual(
+      secondSendMessage.mock.calls.map((call) => call[0].uuid),
+    );
+    expect(firstSendMessage.mock.calls[0]?.[0].message.content[0].id).toBe(
+      secondSendMessage.mock.calls[0]?.[0].message.content[0].id,
+    );
+    expect(firstSendMessage.mock.calls[1]?.[0].message.content[0].tool_use_id).toBe(
+      firstSendMessage.mock.calls[0]?.[0].message.content[0].id,
+    );
+  });
+
   it('drops Claude local-command and system lifecycle records from visible transcript content', () => {
     const sendMessage = vi.fn();
     const bridge = createClaudeRawMessageTurnDiffBridge({

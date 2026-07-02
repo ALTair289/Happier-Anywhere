@@ -5,6 +5,7 @@ import { createGeminiConnectedServiceRuntimeAuthAdapter } from '@/backends/gemin
 import { createGeminiConnectedServicesMaterializer } from '@/backends/gemini/connectedServices/createGeminiConnectedServicesMaterializer';
 import { geminiConnectedServiceStateSharingDescriptor } from '@/backends/gemini/connectedServices/geminiConnectedServiceStateSharingDescriptor';
 import { geminiUsageLimitRecoveryControlAdapter } from '@/backends/gemini/connectedServices/geminiUsageLimitRecoveryControlAdapter';
+import { geminiQuotaFetcherDescriptor } from '@/backends/gemini/connectedServices/quotaFetcher';
 import { resolveGeminiConnectedServiceSwitchContinuity } from '@/backends/gemini/connectedServices/resolveGeminiConnectedServiceSwitchContinuity';
 import { geminiDaemonSpawnHooks } from '@/backends/gemini/daemon/spawnHooks';
 import type { AgentCatalogEntry } from '../types';
@@ -33,6 +34,7 @@ export const agent = {
   getConnectedServiceRuntimeAuthAdapter: async () => createGeminiConnectedServiceRuntimeAuthAdapter(),
   getConnectedServiceCredentialLifecycleDescriptor: async () => geminiConnectedServiceCredentialLifecycleDescriptor,
   getConnectedServiceStateSharingDescriptor: async () => geminiConnectedServiceStateSharingDescriptor,
+  connectedServiceQuotaFetcherDescriptor: geminiQuotaFetcherDescriptor,
   resolveConnectedServiceSwitchContinuity: async (params) => await resolveGeminiConnectedServiceSwitchContinuity(params),
   verifyResumeReachable: async (input) =>
     await (await import('@/backends/gemini/connectedServices/verifyResumeReachableGemini')).verifyResumeReachableGemini(input),

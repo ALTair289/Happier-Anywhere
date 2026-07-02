@@ -15,7 +15,7 @@ describe('configuration pending queue', () => {
     tempDirs.length = 0;
   });
 
-  it('defaults idle wake polling to a prompt defensive interval', async () => {
+  it('disables idle wake polling by default', async () => {
     const homeDir = createTempDirSync('happier-cli-config-');
     tempDirs.push(homeDir);
     process.env.HAPPIER_HOME_DIR = homeDir;
@@ -24,6 +24,18 @@ describe('configuration pending queue', () => {
     const configMod = await import('./configuration');
     configMod.reloadConfiguration();
 
-    expect(configMod.configuration.pendingQueueIdleWakePollIntervalMs).toBe(5_000);
+    expect(configMod.configuration.pendingQueueIdleWakePollIntervalMs).toBe(0);
+  });
+
+  it('allows an explicit idle wake polling opt-in interval', async () => {
+    const homeDir = createTempDirSync('happier-cli-config-');
+    tempDirs.push(homeDir);
+    process.env.HAPPIER_HOME_DIR = homeDir;
+    process.env.HAPPIER_PENDING_QUEUE_IDLE_WAKE_POLL_INTERVAL_MS = '60000';
+
+    const configMod = await import('./configuration');
+    configMod.reloadConfiguration();
+
+    expect(configMod.configuration.pendingQueueIdleWakePollIntervalMs).toBe(60_000);
   });
 });

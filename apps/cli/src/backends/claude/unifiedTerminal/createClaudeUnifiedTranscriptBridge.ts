@@ -16,6 +16,8 @@ import type { SessionHookData } from '../utils/startHookServer';
 import type { ClaudeUnifiedSessionHookSubscription } from './createClaudeUnifiedHookLifecycleBridge';
 import type { ClaudeUnifiedStartableDisposable } from './_types';
 import { createJsonlFollowController, type JsonlFollowController } from '@/agent/localControl/jsonlFollowController';
+import type { JsonlFollowerMetricEvent } from '@/agent/localControl/jsonlFollowMetrics';
+import { createClaudeJsonlResetReplaySuppressor } from '../utils/claudeJsonlReplaySuppression';
 
 type ClaudeUnifiedTranscriptBridgeSessionFound = (sessionId: string, data: SessionHookData) => void;
 
@@ -170,6 +172,7 @@ export function createClaudeUnifiedTranscriptBridge(opts: Readonly<{
   const knownResumeTranscript = readKnownResumeTranscriptPath(opts);
   const knownResumeTranscriptPath = knownResumeTranscript?.path ?? null;
   let knownResumeRawFollower: JsonlFollowController | null = null;
+  const knownResumeRawFollowerReplaySuppressor = createClaudeJsonlResetReplaySuppressor();
 
   const recordSessionStartBaselines = (
     sessionInfo: ClaudeUnifiedSessionStartInfo,
@@ -217,8 +220,20 @@ export function createClaudeUnifiedTranscriptBridge(opts: Readonly<{
     const follower = createJsonlFollowController({
       filePath: knownResumeTranscriptPath,
       startOffsetBytes,
+      metrics: {
+        emit: (event: JsonlFollowerMetricEvent) => {
+          if (event.type !== 'file_reset') return;
+          const suppressBeforeMs = knownResumeRawFollowerReplaySuppressor.markReset();
+          logger.debug('[unified]: known resume raw transcript follower reset; suppressing replay-prone rows', {
+            sessionId: knownResumeSessionId,
+            reason: event.reason,
+            suppressBeforeMs,
+          });
+        },
+      },
       onJson: (value) => {
         if (disposed) return;
+        if (knownResumeRawFollowerReplaySuppressor.shouldSuppress(value)) return;
         opts.onRawTranscriptValue?.(value);
       },
       onError: (error) => {

@@ -8,6 +8,11 @@ export type MachineDownloadTransferInitResponse =
   | Readonly<{ success: true; downloadId: string; chunkSizeBytes: number; sizeBytes: number; name: string }>
   | Readonly<{ success: false; error: string }>;
 
+export type MachineDownloadTransferRpcRegistration = Readonly<{
+  transferSessionStore: TransferSessionStore;
+  dispose: () => Promise<void>;
+}>;
+
 type ResolvedMachineDownloadSource = Readonly<{
   source: DownloadTransferSource;
   logContext?: Record<string, unknown>;
@@ -36,7 +41,8 @@ export function registerMachineDownloadTransferRpcHandlers<TRequest>(params: Rea
   resolveSource: (request: TRequest) => Promise<ResolvedMachineDownloadSource | RejectedMachineDownloadSource>;
   initFailureMessage: string;
   store?: TransferSessionStore;
-}>): TransferSessionStore {
+}>): MachineDownloadTransferRpcRegistration {
+  const ownsStore = !params.store;
   const store = params.store ?? new TransferSessionStore({ ttlMs: configuration.filesTransferSessionTtlMs });
 
   registerDownloadTransferLifecycleHandlers<MachineDownloadTransferInitResponse>({
@@ -93,5 +99,12 @@ export function registerMachineDownloadTransferRpcHandlers<TRequest>(params: Rea
     }),
   });
 
-  return store;
+  return {
+    transferSessionStore: store,
+    dispose: async () => {
+      if (ownsStore) {
+        await store.dispose();
+      }
+    },
+  };
 }

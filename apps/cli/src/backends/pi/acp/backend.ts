@@ -1,5 +1,11 @@
 import type { AgentBackend, AgentFactoryOptions, McpServerConfig } from '@/agent/core';
 import type { PermissionMode } from '@/api/types';
+import {
+  PI_BROKER_PROVIDERS,
+  PI_BROKER_SELECTIONS_ENV,
+  parsePiBrokerSelections,
+  resolvePiBrokerExtensionPath,
+} from '@/backends/pi/brokerExtension';
 import { PiRpcBackend } from '@/backends/pi/rpc/PiRpcBackend';
 import { readConnectedServiceChildSelectionsFromEnv } from '@/daemon/connectedServices/connectedServiceChildEnvironment';
 import { requireProviderCliLaunchSpec } from '@/runtime/managedTools/requireProviderCliLaunchSpec';
@@ -68,6 +74,17 @@ function resolvePiLaunchSelectionFromConnectedServiceSelection(
   return null;
 }
 
+function resolvePiBrokerExtensionArgs(env: Readonly<Record<string, string>>): string[] {
+  const agentDir = env.PI_CODING_AGENT_DIR?.trim();
+  if (!agentDir) return [];
+
+  const selections = parsePiBrokerSelections(env[PI_BROKER_SELECTIONS_ENV]);
+  const hasBrokeredProvider = PI_BROKER_PROVIDERS.some((provider) => selections[provider]);
+  if (!hasBrokeredProvider) return [];
+
+  return ['--extension', resolvePiBrokerExtensionPath(agentDir)];
+}
+
 export function createPiBackend(options: PiBackendOptions): AgentBackend {
   const env = Object.fromEntries(
     Object.entries(options.env ?? {}).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
@@ -81,6 +98,7 @@ export function createPiBackend(options: PiBackendOptions): AgentBackend {
     command: launch.command,
     args: [
       ...launch.args,
+      ...resolvePiBrokerExtensionArgs(env),
       ...(launchSelection
         ? [
           '--provider',

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { DEFAULT_SESSION_METADATA_WAIT_RETRY_BACKOFF_MS } from '@/agent/runtime/sessionMetadataWaitRetryBackoff';
 import { startLocalPendingQueueRemoteSwitchWatcher } from './startLocalPendingQueueRemoteSwitchWatcher';
 
 describe('startLocalPendingQueueRemoteSwitchWatcher', () => {
@@ -104,6 +105,53 @@ describe('startLocalPendingQueueRemoteSwitchWatcher', () => {
 
     await vi.advanceTimersByTimeAsync(1);
     expect(waitForPendingQueueUpdate).toHaveBeenCalledTimes(2);
+
+    watcher.stop();
+    vi.useRealTimers();
+  });
+
+  it('re-arms after a missed pending-queue update wait when fallback polling is disabled', async () => {
+    vi.useFakeTimers();
+    const wakeRef: { current: ((value: boolean) => void) | null } = { current: null };
+    const peekPendingCount = vi.fn<() => Promise<number>>().mockResolvedValue(1);
+    const requestRemoteSwitch = vi.fn<() => Promise<boolean>>().mockResolvedValue(true);
+    let waitCalls = 0;
+    const waitForPendingQueueUpdate = vi.fn<(signal?: AbortSignal) => Promise<boolean>>(
+      async (signal?: AbortSignal) => {
+        waitCalls += 1;
+        if (waitCalls === 1) {
+          return false;
+        }
+        return await new Promise<boolean>((resolve) => {
+          wakeRef.current = resolve;
+          signal?.addEventListener('abort', () => resolve(false), { once: true });
+        });
+      },
+    );
+
+    const watcher = startLocalPendingQueueRemoteSwitchWatcher({
+      peekPendingCount,
+      pollIntervalMs: 0,
+      requestRemoteSwitch,
+      waitForPendingQueueUpdate,
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(waitForPendingQueueUpdate).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_SESSION_METADATA_WAIT_RETRY_BACKOFF_MS - 1);
+    expect(waitForPendingQueueUpdate).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(waitForPendingQueueUpdate).toHaveBeenCalledTimes(2);
+
+    const wake = wakeRef.current;
+    if (!wake) throw new Error('expected pending queue update waiter to be re-armed');
+    wake(true);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(peekPendingCount).toHaveBeenCalledTimes(1);
+    expect(requestRemoteSwitch).toHaveBeenCalledTimes(1);
 
     watcher.stop();
     vi.useRealTimers();

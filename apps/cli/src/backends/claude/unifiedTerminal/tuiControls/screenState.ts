@@ -463,6 +463,7 @@ function hasBlockingOverlay(state: ClaudeScreenState): boolean {
   return (
     state.generating
     || state.slashPickerOpen
+    || (state.composerContent?.startsWith('/') ?? false)
     || state.permissionEditorOpen
     || state.permissionPromptVisible
     || state.trustFolderPromptVisible
@@ -516,7 +517,7 @@ export function resolveClaudeScreenInFlightSteerVeto(state: ClaudeScreenState): 
   if (state.effortChangeDialogVisible) return 'effort_change_dialog';
   if (state.unrecognizedConfirmationDialogVisible) return 'unrecognized_confirmation_dialog';
   if (state.permissionEditorOpen) return 'permission_editor';
-  if (state.slashPickerOpen) return 'slash_picker';
+  if (state.slashPickerOpen || (state.composerContent?.startsWith('/') ?? false)) return 'slash_picker';
   if (state.selectionListVisible) return 'selection_list';
   if (state.userDraftPresent) return 'user_draft';
   if (state.generating) return null;

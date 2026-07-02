@@ -31,9 +31,14 @@ import { registerKillSessionHandler } from '@/rpc/handlers/killSession';
 import { stopCaffeinate } from '@/integrations/caffeinate';
 import { connectionState } from '@/api/offline/serverConnectionErrors';
 import { createSessionProviderInputConsumer } from '@/agent/runtime/sessionInput/SessionProviderInputConsumer';
-import { resolveSessionPendingQueueMaxPopPerWake } from '@/agent/runtime/sessionInput/pendingQueueDrainPolicy';
+import {
+  resolveSessionPendingQueueDeliveryTiming,
+  resolveSessionPendingQueueMaxPopPerWake,
+} from '@/agent/runtime/sessionInput/pendingQueueDrainPolicy';
 import type { MessageBatch } from '@/agent/runtime/sessionInput/types';
+import { normalizePendingDeliveryLocalIds } from '@/agent/runtime/session/pendingDelivery/undeliverableProviderPrompt';
 import type { ApiSessionClient } from '@/api/session/sessionClient';
+import type { PendingQueueDeliveryBlockedReason } from '@/api/session/pendingQueueV2Transport';
 import { createCurrentSessionTranscriptPort } from '@/api/session/createCurrentSessionTranscriptPort';
 import { createStreamedTranscriptWriter } from '@/api/session/streamedTranscriptWriter';
 import { formatGeminiErrorForUi } from '@/backends/gemini/utils/formatGeminiErrorForUi';
@@ -193,6 +198,7 @@ export async function runGemini(opts: {
 
   const accountSettings = opts.accountSettingsContext?.settings ?? null;
   const pendingQueueDrainMaxPopPerWake = resolveSessionPendingQueueMaxPopPerWake(accountSettings);
+  const pendingQueueDeliveryTiming = resolveSessionPendingQueueDeliveryTiming(accountSettings);
   const permissionModeSeed = resolvePermissionModeSeedForAgentStart({
     agentId: 'gemini',
     explicitPermissionMode: opts.permissionMode,
@@ -225,6 +231,10 @@ export async function runGemini(opts: {
   let isProcessingMessage = false;
   let pendingSessionSwap: ApiSessionClient | null = null;
 
+  const requestProviderAcceptanceDeliveryCustody = (targetSession: ApiSessionClient): void => {
+    targetSession.deferDeliveredUserMessageWatermarkToProviderAcceptance?.();
+  };
+
   /**
    * Apply a pending session swap. Called between message processing cycles.
    * This ensures session swaps happen at safe points, not during message processing.
@@ -233,6 +243,7 @@ export async function runGemini(opts: {
     if (pendingSessionSwap) {
       logger.debug('[gemini] Applying pending session swap');
       session = pendingSessionSwap;
+      requestProviderAcceptanceDeliveryCustody(session);
       if (permissionHandler) {
         permissionHandler.updateSession(pendingSessionSwap);
       }
@@ -259,6 +270,7 @@ export async function runGemini(opts: {
       } else {
         // Safe to swap immediately
         session = newSession;
+        requestProviderAcceptanceDeliveryCustody(session);
         if (permissionHandler) {
           permissionHandler.updateSession(newSession);
         }
@@ -273,6 +285,7 @@ export async function runGemini(opts: {
   });
 
   session = initializedSession.session;
+  requestProviderAcceptanceDeliveryCustody(session);
   reconnectionHandle = initializedSession.reconnectionHandle;
 
   const promptArtifactBodyCache = new Map<string, string | null>();
@@ -538,6 +551,7 @@ export async function runGemini(opts: {
   terminationHandlers = registerRunnerTerminationHandlers({
     process,
     exit: (code) => process.exit(code),
+    sessionExitReport: { sessionId: session.sessionId },
     onTerminate: async (event, outcome) => {
       shouldExit = true;
       await handleAbort();
@@ -709,6 +723,7 @@ export async function runGemini(opts: {
 	        waitForMetadataUpdate: (signal) => session.waitForMetadataUpdate(signal),
 	      },
 	      pendingDrainMaxPopPerWake: pendingQueueDrainMaxPopPerWake,
+	      pendingQueueDeliveryTiming,
 	      onMetadataUpdate: syncControlsFromMetadata,
 	    });
 
@@ -810,6 +825,35 @@ export async function runGemini(opts: {
       let readyTurnContext: ReadyNotificationTurnContext | undefined;
       let promptTurnOutcome: AcpTurnOutcome | void = undefined;
       let promptTurnError: unknown = null;
+      let didAttemptProviderSend = false;
+      let didConfirmProviderAccepted = false;
+      const pendingDeliveryLocalIds = normalizePendingDeliveryLocalIds(message.userMessageLocalIds ?? []);
+      const pendingDeliveryMaxSeq =
+        typeof message.maxUserMessageSeq === 'number' && Number.isFinite(message.maxUserMessageSeq)
+          ? Math.trunc(message.maxUserMessageSeq)
+          : null;
+      const confirmProviderAccepted = (): void => {
+        if (didConfirmProviderAccepted) return;
+        didConfirmProviderAccepted = true;
+        if (pendingDeliveryMaxSeq === null && pendingDeliveryLocalIds.length === 0) return;
+        session.confirmUserMessageDeliveredToProvider?.(pendingDeliveryMaxSeq, {
+          localIds: pendingDeliveryLocalIds,
+        });
+      };
+      const blockDeliveryBeforeProviderAcceptance = async (
+        reason: PendingQueueDeliveryBlockedReason,
+      ): Promise<void> => {
+        if (didConfirmProviderAccepted) return;
+        if (pendingDeliveryLocalIds.length === 0) return;
+        try {
+          await session.blockPendingMessageDelivery?.({
+            localIds: pendingDeliveryLocalIds,
+            reason,
+          });
+        } catch {
+          // Best-effort only: the turn failure is still surfaced below.
+        }
+      };
       try {
         const startSeqExclusive = session.getLastObservedMessageSeq();
         const turnToken = session.beginTurnAssistantTextSnapshot({ startSeqExclusive });
@@ -917,6 +961,7 @@ export async function runGemini(opts: {
 
         logger.debug(formatGeminiPromptDebugSummary(promptToSend));
         
+        didAttemptProviderSend = true;
         promptTurnOutcome = await sendGeminiPromptWithRetry({
           backend: geminiBackend,
           acpSessionId,
@@ -927,7 +972,9 @@ export async function runGemini(opts: {
           maxRetries: 3,
           retryDelayMs: 2_000,
           waitForResponseTimeoutMs: 120_000,
+          onProviderPromptAccepted: confirmProviderAccepted,
         });
+        confirmProviderAccepted();
         
         // Mark as not first message after sending prompt
         if (first) {
@@ -935,6 +982,9 @@ export async function runGemini(opts: {
         }
       } catch (error) {
         promptTurnError = error;
+        await blockDeliveryBeforeProviderAcceptance(
+          didAttemptProviderSend ? 'provider_rejected_before_acceptance' : 'runtime_disposed_before_delivery',
+        );
         logger.debug('[gemini] Error in gemini session:', error);
         const isAbortError = error instanceof Error && error.name === 'AbortError';
 

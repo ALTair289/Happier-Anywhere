@@ -392,6 +392,117 @@ describe('createSessionMutationOutbox', () => {
         await outbox.close();
     });
 
+    it.each(['begin', 'touch_active'] as const)(
+        'does not wait for non-terminal %s session turn delivery before resolving the enqueue',
+        async (action) => {
+            const delivery = createDeferred<unknown>();
+            const socket = createApiSessionSocketStub({
+                connected: true,
+                emitWithAck: async () => await delivery.promise,
+            });
+            vi.mocked(axios.post).mockRejectedValue(new Error('HTTP fallback should not run after socket delivery'));
+            const { createSessionMutationOutbox } = await import('./createSessionMutationOutbox');
+            const { createSessionTurnMutation } = await import('./sessionMutationTypes');
+            const outbox = createSessionMutationOutbox({
+                token: 'tok',
+                sessionId: 's-non-terminal-turn-delivery',
+                getSocket: () => socket,
+                requestReconnect: () => {},
+            });
+            let enqueueSettled = false;
+            const enqueue = outbox.enqueueSessionTurn(createSessionTurnMutation({
+                sessionId: 's-non-terminal-turn-delivery',
+                action,
+                turnId: `turn-${action}`,
+                provider: 'claude',
+                mutationId: `mutation-${action}`,
+                observedAt: 1_000,
+            })).then(() => {
+                enqueueSettled = true;
+            });
+
+            try {
+                await expect.poll(() => socket.emitWithAck.mock.calls.length).toBe(1);
+                await Promise.resolve();
+                await Promise.resolve();
+
+                expect(enqueueSettled).toBe(true);
+                await expect(readPersistedOutboxMutations('s-non-terminal-turn-delivery')).resolves.toEqual([
+                    expect.objectContaining({
+                        kind: 'session_turn',
+                        mutationId: `mutation-${action}`,
+                    }),
+                ]);
+            } finally {
+                delivery.resolve({ ok: true });
+                await Promise.allSettled([enqueue]);
+                await outbox.close();
+            }
+        },
+    );
+
+    it.each(['fail', 'cancel'] as const)(
+        'awaits delivery flush before resolving terminal %s session turn enqueues',
+        async (action) => {
+            const delivery = createDeferred<unknown>();
+            const socket = createApiSessionSocketStub({
+                connected: true,
+                emitWithAck: async () => await delivery.promise,
+            });
+            vi.mocked(axios.post).mockRejectedValue(new Error('HTTP fallback should not run after socket delivery'));
+            const { createSessionMutationOutbox } = await import('./createSessionMutationOutbox');
+            const { createSessionTurnMutation } = await import('./sessionMutationTypes');
+            const outbox = createSessionMutationOutbox({
+                token: 'tok',
+                sessionId: 's-terminal-turn-delivery',
+                getSocket: () => socket,
+                requestReconnect: () => {},
+            });
+            let enqueueSettled = false;
+            const enqueue = outbox.enqueueSessionTurn(createSessionTurnMutation({
+                sessionId: 's-terminal-turn-delivery',
+                action,
+                turnId: `turn-${action}`,
+                provider: 'claude',
+                ...(action === 'fail'
+                    ? {
+                        issue: {
+                            v: 1,
+                            scope: 'primary_session',
+                            status: 'failed',
+                            code: 'provider_session_error',
+                            source: 'provider_session_error',
+                            occurredAt: 1_000,
+                            provider: 'claude',
+                            sanitizedPreview: 'Claude terminal delivery failed',
+                        },
+                    }
+                    : {}),
+                mutationId: `mutation-${action}`,
+                observedAt: 1_000,
+            })).then(() => {
+                enqueueSettled = true;
+            });
+
+            try {
+                await expect.poll(() => socket.emitWithAck.mock.calls.length).toBe(1);
+                await Promise.resolve();
+                await Promise.resolve();
+
+                expect(enqueueSettled).toBe(false);
+
+                delivery.resolve({ ok: true });
+                await enqueue;
+                expect(enqueueSettled).toBe(true);
+                await expect(readPersistedOutboxMutations('s-terminal-turn-delivery')).resolves.toEqual([]);
+            } finally {
+                delivery.resolve({ ok: true });
+                await Promise.allSettled([enqueue]);
+                await outbox.close();
+            }
+        },
+    );
+
     it('dead-letters exhausted unsupported session-end mutations after legacy proof fails', async () => {
         process.env.HAPPIER_SESSION_MUTATION_OUTBOX_MAX_ATTEMPTS = '1';
         vi.mocked(axios.post).mockRejectedValue({ response: { status: 404 } });

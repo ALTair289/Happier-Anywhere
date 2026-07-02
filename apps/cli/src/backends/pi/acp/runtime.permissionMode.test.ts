@@ -46,6 +46,37 @@ describe('Pi ACP runtime permission mode wiring', () => {
     });
   });
 
+  it('passes the process env to the Pi backend factory for connected-service launch decisions', async () => {
+    const previousSelections = process.env.HAPPIER_PI_BROKER_SELECTIONS;
+    process.env.HAPPIER_PI_BROKER_SELECTIONS = '{"openai":{"serviceId":"openai-codex","profileId":"codex-work","accountId":"acct_1","planType":"pro"}}';
+
+    try {
+      const createCalls: CatalogAcpRuntimeCreateCall[] = [];
+      createCatalogAcpBackendSpy(createCalls);
+
+      const runtime = createPiAcpRuntime({
+        directory: '/tmp',
+        machineId: 'machine-1',
+        session: createApiSessionClientFixture(),
+        messageBuffer: createMessageBufferFixture(),
+        mcpServers: {},
+        permissionHandler: createApprovedPermissionHandler(),
+        onThinkingChange() {},
+        getPermissionMode: () => 'default',
+      });
+
+      await runtime.startOrLoad({});
+
+      expect(createCalls[0].env?.HAPPIER_PI_BROKER_SELECTIONS).toBe(process.env.HAPPIER_PI_BROKER_SELECTIONS);
+    } finally {
+      if (previousSelections === undefined) {
+        delete process.env.HAPPIER_PI_BROKER_SELECTIONS;
+      } else {
+        process.env.HAPPIER_PI_BROKER_SELECTIONS = previousSelections;
+      }
+    }
+  });
+
   it('forwards permissionMode to createCatalogAcpBackend and recreates backend after reset', async () => {
     const createCalls: CatalogAcpRuntimeCreateCall[] = [];
     const createSpy = createCatalogAcpBackendSpy(createCalls);
@@ -65,13 +96,15 @@ describe('Pi ACP runtime permission mode wiring', () => {
 
     await runtime.startOrLoad({});
     expect(createSpy).toHaveBeenCalledTimes(1);
-    expect(createCalls).toEqual([{ agentId: 'pi', permissionMode: 'default' }]);
+    expect(createCalls.map(({ agentId, permissionMode }) => ({ agentId, permissionMode }))).toEqual([
+      { agentId: 'pi', permissionMode: 'default' },
+    ]);
 
     permissionMode = 'read-only';
     await runtime.reset();
     await runtime.startOrLoad({});
     expect(createSpy).toHaveBeenCalledTimes(2);
-    expect(createCalls[1]).toEqual({ agentId: 'pi', permissionMode: 'read-only' });
+    expect(createCalls[1]).toMatchObject({ agentId: 'pi', permissionMode: 'read-only' });
   });
 
   it('publishes piSessionFile metadata when the PI session file is discoverable from runtime env', async () => {

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import type { RawJSONLines } from '@/backends/claude/types';
 import { emitCanonicalTurnDiffTool } from '@/agent/runtime/emitCanonicalTurnDiffTool';
+import { resolveCanonicalTurnDiffSyntheticMessageUuid } from '@/agent/tools/diff/canonicalTurnDiffIdentity';
 
 import { ClaudeTurnChangeTracker } from './ClaudeTurnChangeTracker';
 import { isClaudeExplicitDiffToolInput } from './isClaudeExplicitDiffToolInput';
@@ -114,13 +115,14 @@ function filterUserContent(params: Readonly<{
 
 function sendSyntheticToolUse(params: Readonly<{
     callId: string;
+    uuid: string;
     toolName: string;
     input: unknown;
     sendMessage: SendRawMessage;
 }>): void {
     params.sendMessage({
         type: 'assistant',
-        uuid: randomUUID(),
+        uuid: params.uuid,
         isSidechain: false,
         message: {
             role: 'assistant',
@@ -138,12 +140,13 @@ function sendSyntheticToolUse(params: Readonly<{
 
 function sendSyntheticToolResult(params: Readonly<{
     callId: string;
+    uuid: string;
     output: unknown;
     sendMessage: SendRawMessage;
 }>): void {
     params.sendMessage({
         type: 'user',
-        uuid: randomUUID(),
+        uuid: params.uuid,
         isSidechain: false,
         message: {
             role: 'user',
@@ -181,6 +184,7 @@ export function createClaudeRawMessageTurnDiffBridge(params: Readonly<{
                     const resolvedCallId = callId ?? randomUUID();
                     sendSyntheticToolUse({
                         callId: resolvedCallId,
+                        uuid: resolveCanonicalTurnDiffSyntheticMessageUuid(resolvedCallId, 'assistant'),
                         toolName,
                         input,
                         sendMessage: params.sendMessage,
@@ -190,6 +194,7 @@ export function createClaudeRawMessageTurnDiffBridge(params: Readonly<{
                 sendToolResult: ({ callId, output }) => {
                     sendSyntheticToolResult({
                         callId,
+                        uuid: resolveCanonicalTurnDiffSyntheticMessageUuid(callId, 'user'),
                         output,
                         sendMessage: params.sendMessage,
                     });

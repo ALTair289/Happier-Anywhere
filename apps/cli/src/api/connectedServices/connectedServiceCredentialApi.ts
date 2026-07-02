@@ -18,10 +18,9 @@ import type { Credentials } from '@/persistence';
 import { logger } from '@/ui/logger';
 
 import { createHttpStatusError } from '../client/httpStatusError';
-import { serializeAxiosErrorForLog } from '../client/serializeAxiosErrorForLog';
+import { logServerEndpointFailure } from '../client/serverEndpointFailureLog';
 import { resolveServerHttpBaseUrl } from '../client/serverHttpBaseUrl';
-
-const CONNECTED_SERVICE_CREDENTIAL_HTTP_TIMEOUT_MS = 5_000;
+import { resolveConnectedServicesServerApiTimeoutMs } from './serverApiTimeout';
 
 export class ConnectedServiceAuthGroupGenerationConflictError extends Error {
   constructor(public readonly generation: number) {
@@ -133,7 +132,7 @@ export async function getAccountEncryptionMode(params: Readonly<{
       `${serverUrl}/v1/account/encryption`,
       {
         headers: authHeaders(params.token),
-        timeout: CONNECTED_SERVICE_CREDENTIAL_HTTP_TIMEOUT_MS,
+        timeout: resolveConnectedServicesServerApiTimeoutMs(),
       },
     );
     if (response.status === 404) return 'e2ee';
@@ -145,7 +144,11 @@ export async function getAccountEncryptionMode(params: Readonly<{
     throwConnectedServiceGroupGenerationConflictIfPresent(error);
     const status = readAxiosStatus(error);
     if (status === 404) return 'e2ee';
-    logger.debug(`[API] [ERROR] Failed to get account encryption mode:`, serializeAxiosErrorForLog(error));
+    logServerEndpointFailure({
+      logger,
+      operation: 'Failed to get account encryption mode',
+      error,
+    });
     return 'unknown';
   }
 }
@@ -164,7 +167,7 @@ export async function getConnectedServiceCredentialSealed(params: Readonly<{
       `${serverUrl}/v2/connect/${serviceId}/profiles/${profileId}/credential`,
       {
         headers: authHeaders(params.token),
-        timeout: CONNECTED_SERVICE_CREDENTIAL_HTTP_TIMEOUT_MS,
+        timeout: resolveConnectedServicesServerApiTimeoutMs(),
       },
     );
     if (response.status !== 200) {
@@ -203,7 +206,11 @@ export async function getConnectedServiceCredentialSealed(params: Readonly<{
     if (status === 409 && code === 'connect_credential_unsupported_format') {
       throw new ConnectedServiceCredentialUnsupportedFormatError(params.serviceId, params.profileId);
     }
-    logger.debug(`[API] [ERROR] Failed to get connected service credential:`, serializeAxiosErrorForLog(error));
+    logServerEndpointFailure({
+      logger,
+      operation: 'Failed to get connected service credential',
+      error,
+    });
     throw new Error(`Failed to get connected service credential: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
 }
@@ -222,7 +229,7 @@ export async function getConnectedServiceCredentialPlain(params: Readonly<{
       `${serverUrl}/v3/connect/${serviceId}/profiles/${profileId}/credential`,
       {
         headers: authHeaders(params.token),
-        timeout: CONNECTED_SERVICE_CREDENTIAL_HTTP_TIMEOUT_MS,
+        timeout: resolveConnectedServicesServerApiTimeoutMs(),
       },
     );
     if (response.status !== 200) {
@@ -254,7 +261,11 @@ export async function getConnectedServiceCredentialPlain(params: Readonly<{
     if (status === 409 && code === 'connect_credential_unsupported_format') {
       return null;
     }
-    logger.debug(`[API] [ERROR] Failed to get connected service credential (v3):`, serializeAxiosErrorForLog(error));
+    logServerEndpointFailure({
+      logger,
+      operation: 'Failed to get connected service credential (v3)',
+      error,
+    });
     throw new Error(`Failed to get connected service credential: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
 }
@@ -273,7 +284,7 @@ export async function getConnectedServiceAuthGroup(params: Readonly<{
       `${serverUrl}/v3/connect/${serviceId}/groups/${groupId}`,
       {
         headers: authHeaders(params.token),
-        timeout: CONNECTED_SERVICE_CREDENTIAL_HTTP_TIMEOUT_MS,
+        timeout: resolveConnectedServicesServerApiTimeoutMs(),
       },
     );
     if (response.status !== 200) {
@@ -288,7 +299,11 @@ export async function getConnectedServiceAuthGroup(params: Readonly<{
     throwConnectedServiceGroupGenerationConflictIfPresent(error);
     const status = readAxiosStatus(error);
     if (status === 404) return null;
-    logger.debug(`[API] [ERROR] Failed to get connected service auth group:`, serializeAxiosErrorForLog(error));
+    logServerEndpointFailure({
+      logger,
+      operation: 'Failed to get connected service auth group',
+      error,
+    });
     if (typeof status === 'number' && Number.isFinite(status)) {
       throw createHttpStatusError(
         status,

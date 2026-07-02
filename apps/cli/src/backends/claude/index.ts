@@ -7,7 +7,9 @@ import { claudeConnectedServiceStateSharingDescriptor } from '@/backends/claude/
 import { materializeClaudeConnectedServiceRuntimeAuthSelection } from '@/backends/claude/connectedServices/materializeClaudeConnectedServiceRuntimeAuthSelection';
 import { resolveClaudeConnectedServiceSwitchContinuity } from '@/backends/claude/connectedServices/resolveClaudeConnectedServiceSwitchContinuity';
 import { resolveClaudeConnectedServiceCandidatePersistedSessionFile } from '@/backends/claude/connectedServices/resolveClaudeConnectedServiceCandidatePersistedSessionFile';
+import { claudeSubscriptionQuotaFetcherDescriptor } from '@/backends/claude/connectedServices/quotaFetcher';
 import { claudeDaemonSpawnHooks } from '@/backends/claude/daemon/spawnHooks';
+import { buildClaudeRuntimeLocalHandoffMetadata } from '@/backends/claude/sessionHandoff/runtimeLocalMetadata';
 import type { AgentCatalogEntry } from '../types';
 import type { ConnectedServiceCredentialLifecycleDescriptor } from '@/daemon/connectedServices/credentials/lifecycleTypes';
 
@@ -16,9 +18,27 @@ const claudeConnectedServiceCredentialLifecycleDescriptor: ConnectedServiceCrede
   serviceIds: AGENTS_CORE.claude.connectedServices.supportedServiceIds,
   spawnPreflightOauthRefresh: { mode: 'force' },
   refreshedCredentialApplication: { mode: 'no_restart_required' },
-  predictiveSoftSwitch: { mode: 'unsupported', liveSessionRequirement: { kind: 'none' } },
+  predictiveSoftSwitch: {
+    mode: 'supported',
+    liveSessionRequirement: {
+      kind: 'shared_group_auth_surface',
+      serviceIds: ['claude-subscription'],
+      authEnvKey: 'CLAUDE_CONFIG_DIR',
+      authEnvSubpath: ['claude-config'],
+    },
+  },
   sameAccountFanoutStrategy: 'shared_group_auth_surface',
-  runtimeAuthApply: { directLiveHotAuth: 'unsupported' },
+  runtimeAuthApply: {
+    directLiveHotAuth: {
+      supportsInTurnApply: false,
+      requiresExactRuntimeIdentity: false,
+      refreshSelectionResync: 'not_applicable',
+      authMode: {
+        kind: 'provider_owned',
+        name: 'claude_shared_group_auth_surface',
+      },
+    },
+  },
 };
 
 export const agent = {
@@ -35,7 +55,9 @@ export const agent = {
   materializeConnectedServiceRuntimeAuthSelection: materializeClaudeConnectedServiceRuntimeAuthSelection,
   getConnectedServiceCredentialLifecycleDescriptor: async () => claudeConnectedServiceCredentialLifecycleDescriptor,
   getConnectedServiceStateSharingDescriptor: async () => claudeConnectedServiceStateSharingDescriptor,
+  connectedServiceQuotaFetcherDescriptor: claudeSubscriptionQuotaFetcherDescriptor,
   getSessionUsageLimitRecoveryControlAdapter: async () => claudeUsageLimitRecoveryControlAdapter,
+  getSessionGoalControlAdapter: async () => (await import('./goalControl/claudeGoalControlAdapter')).claudeGoalControlAdapter,
   resolveConnectedServiceSwitchContinuity: async (params) => await resolveClaudeConnectedServiceSwitchContinuity(params),
   resolveConnectedServiceCandidatePersistedSessionFile: ({ metadata }) =>
     resolveClaudeConnectedServiceCandidatePersistedSessionFile({ metadata }),
@@ -52,6 +74,7 @@ export const agent = {
     }),
   getDirectSessionProviderOps: async () => (await import('@/backends/claude/directSessions/providerOps')).claudeDirectSessionProviderOps,
   vendorResumeSupport: AGENTS_CORE.claude.resume.vendorResume,
+  buildRuntimeLocalHandoffMetadata: buildClaudeRuntimeLocalHandoffMetadata,
   getPreflightSessionControlsProbeAdapter: async () => (await import('@/backends/claude/preflight/claudePreflightModelsProbeAdapter')).claudePreflightModelsProbeAdapter,
   getHeadlessTmuxArgvTransform: async () => (await import('@/backends/claude/startup/headlessTmuxArgs')).ensureClaudeHeadlessTmuxStartingModeArgs,
 } satisfies AgentCatalogEntry;

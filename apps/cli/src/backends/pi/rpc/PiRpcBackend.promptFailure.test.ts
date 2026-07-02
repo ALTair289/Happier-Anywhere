@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY } from '@/daemon/connectedServices/connectedServiceChildEnvironment';
+import { logger } from '@/ui/logger';
 
 import { PiRpcBackend } from './PiRpcBackend';
 
@@ -72,6 +73,480 @@ rl.on('line', (line) => {
           error: 'No API key found for openai'
         });
       }, 20);
+      break;
+    default:
+      out({ id: command.id, type: 'response', command: command.type, success: true });
+      break;
+  }
+});
+`;
+  writeFileSync(scriptPath, script, 'utf8');
+  chmodSync(scriptPath, 0o755);
+  return scriptPath;
+}
+
+function makeFakePiRpcImmediatePromptFailureScript(dir: string): string {
+  const scriptPath = join(dir, 'fake-pi-rpc-immediate-prompt-failure.js');
+  const script = `
+const readline = require('node:readline');
+const rl = readline.createInterface({ input: process.stdin });
+const out = (obj) => process.stdout.write(JSON.stringify(obj) + '\\n');
+
+rl.on('line', (line) => {
+  let command;
+  try {
+    command = JSON.parse(line);
+  } catch {
+    return;
+  }
+
+  switch (command.type) {
+    case 'new_session':
+      out({ id: command.id, type: 'response', command: 'new_session', success: true, data: { cancelled: false } });
+      break;
+    case 'get_state':
+      out({
+        id: command.id,
+        type: 'response',
+        command: 'get_state',
+        success: true,
+        data: {
+          sessionId: 'pi-session-immediate-prompt-failure',
+          model: { id: 'gpt-5.5', provider: 'openai-codex', name: 'GPT-5.5' }
+        }
+      });
+      break;
+    case 'get_available_models':
+      out({
+        id: command.id,
+        type: 'response',
+        command: 'get_available_models',
+        success: true,
+        data: { models: [{ id: 'gpt-5.5', provider: 'openai-codex', name: 'GPT-5.5' }] }
+      });
+      break;
+    case 'get_commands':
+      out({ id: command.id, type: 'response', command: 'get_commands', success: true, data: { commands: [] } });
+      break;
+    case 'prompt':
+      out({
+        id: command.id,
+        type: 'response',
+        command: 'prompt',
+        success: false,
+        error: 'OpenAI Codex auth failed for access token sk-proj-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      });
+      break;
+    default:
+      out({ id: command.id, type: 'response', command: command.type, success: true });
+      break;
+  }
+});
+`;
+  writeFileSync(scriptPath, script, 'utf8');
+  chmodSync(scriptPath, 0o755);
+  return scriptPath;
+}
+
+function makeFakePiRpcImmediateGenericPromptFailureScript(dir: string): string {
+  const scriptPath = join(dir, 'fake-pi-rpc-immediate-generic-prompt-failure.js');
+  const script = `
+const readline = require('node:readline');
+const rl = readline.createInterface({ input: process.stdin });
+const out = (obj) => process.stdout.write(JSON.stringify(obj) + '\\n');
+
+rl.on('line', (line) => {
+  let command;
+  try {
+    command = JSON.parse(line);
+  } catch {
+    return;
+  }
+
+  switch (command.type) {
+    case 'new_session':
+      out({ id: command.id, type: 'response', command: 'new_session', success: true, data: { cancelled: false } });
+      break;
+    case 'get_state':
+      out({
+        id: command.id,
+        type: 'response',
+        command: 'get_state',
+        success: true,
+        data: {
+          sessionId: 'pi-session-immediate-generic-prompt-failure',
+          model: { id: 'gpt-5.5', provider: 'openai-codex', name: 'GPT-5.5' }
+        }
+      });
+      break;
+    case 'get_available_models':
+      out({
+        id: command.id,
+        type: 'response',
+        command: 'get_available_models',
+        success: true,
+        data: { models: [{ id: 'gpt-5.5', provider: 'openai-codex', name: 'GPT-5.5' }] }
+      });
+      break;
+    case 'get_commands':
+      out({ id: command.id, type: 'response', command: 'get_commands', success: true, data: { commands: [] } });
+      break;
+    case 'prompt':
+      out({
+        id: command.id,
+        type: 'response',
+        command: 'prompt',
+        success: false,
+        error: 'Provider session failed'
+      });
+      break;
+    default:
+      out({ id: command.id, type: 'response', command: command.type, success: true });
+      break;
+  }
+});
+`;
+  writeFileSync(scriptPath, script, 'utf8');
+  chmodSync(scriptPath, 0o755);
+  return scriptPath;
+}
+
+function makeFakePiRpcTraceFailureScript(dir: string): string {
+  const scriptPath = join(dir, 'fake-pi-rpc-trace-failure.js');
+  const longDetail = 'x'.repeat(900);
+  const script = `
+const readline = require('node:readline');
+const rl = readline.createInterface({ input: process.stdin });
+const out = (obj) => process.stdout.write(JSON.stringify(obj) + '\\n');
+
+rl.on('line', (line) => {
+  let command;
+  try {
+    command = JSON.parse(line);
+  } catch {
+    return;
+  }
+
+  switch (command.type) {
+    case 'new_session':
+      out({ id: command.id, type: 'response', command: 'new_session', success: true, data: { cancelled: false } });
+      break;
+    case 'get_state':
+      out({
+        id: command.id,
+        type: 'response',
+        command: 'get_state',
+        success: true,
+        data: {
+          sessionId: 'pi-session-trace-failure',
+          isStreaming: false,
+          isCompacting: false,
+          model: { id: 'gpt-5.5', provider: 'openai-codex', name: 'GPT-5.5' }
+        }
+      });
+      break;
+    case 'get_available_models':
+      out({
+        id: command.id,
+        type: 'response',
+        command: 'get_available_models',
+        success: true,
+        data: { models: [{ id: 'gpt-5.5', provider: 'openai-codex', name: 'GPT-5.5' }] }
+      });
+      break;
+    case 'get_commands':
+      out({ id: command.id, type: 'response', command: 'get_commands', success: true, data: { commands: [] } });
+      break;
+    case 'prompt':
+      out({ id: command.id, type: 'response', command: 'prompt', success: true });
+      setTimeout(() => {
+        out({ type: 'agent_start' });
+        out({
+          type: 'turn_failed',
+          errorMessage: 'OpenAI Codex token sk-proj-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa failed ${longDetail}',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'assistant text must not be traced' }],
+            errorMessage: 'nested token sk-proj-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb failed'
+          },
+          data: {
+            status: 401,
+            authFile: '/tmp/auth.json',
+            refreshToken: 'refresh-token-secret'
+          }
+        });
+        out({ type: 'agent_end' });
+      }, 10);
+      break;
+    default:
+      out({ id: command.id, type: 'response', command: command.type, success: true });
+      break;
+  }
+});
+`;
+  writeFileSync(scriptPath, script, 'utf8');
+  chmodSync(scriptPath, 0o755);
+  return scriptPath;
+}
+
+function makeFakePiRpcPostAcceptanceGenericPromptFailureScript(dir: string): string {
+  const scriptPath = join(dir, 'fake-pi-rpc-post-acceptance-generic-prompt-failure.js');
+  const script = `
+const readline = require('node:readline');
+const rl = readline.createInterface({ input: process.stdin });
+const out = (obj) => process.stdout.write(JSON.stringify(obj) + '\\n');
+
+rl.on('line', (line) => {
+  let command;
+  try {
+    command = JSON.parse(line);
+  } catch {
+    return;
+  }
+
+  switch (command.type) {
+    case 'new_session':
+      out({ id: command.id, type: 'response', command: 'new_session', success: true, data: { cancelled: false } });
+      break;
+    case 'get_state':
+      out({
+        id: command.id,
+        type: 'response',
+        command: 'get_state',
+        success: true,
+        data: {
+          sessionId: 'pi-session-post-acceptance-generic-prompt-failure',
+          isStreaming: false,
+          isCompacting: false,
+          model: { id: 'gpt-5.5', provider: 'openai-codex', name: 'GPT-5.5' }
+        }
+      });
+      break;
+    case 'get_available_models':
+      out({
+        id: command.id,
+        type: 'response',
+        command: 'get_available_models',
+        success: true,
+        data: { models: [{ id: 'gpt-5.5', provider: 'openai-codex', name: 'GPT-5.5' }] }
+      });
+      break;
+    case 'get_commands':
+      out({ id: command.id, type: 'response', command: 'get_commands', success: true, data: { commands: [] } });
+      break;
+    case 'prompt':
+      out({ id: command.id, type: 'response', command: 'prompt', success: true });
+      setTimeout(() => {
+        out({
+          id: command.id,
+          type: 'response',
+          command: 'prompt',
+          success: false,
+          error: 'Provider session failed'
+        });
+      }, 10);
+      break;
+    default:
+      out({ id: command.id, type: 'response', command: command.type, success: true });
+      break;
+  }
+});
+`;
+  writeFileSync(scriptPath, script, 'utf8');
+  chmodSync(scriptPath, 0o755);
+  return scriptPath;
+}
+
+function makeFakePiRpcBareTurnFailedScript(dir: string): string {
+  const scriptPath = join(dir, 'fake-pi-rpc-bare-turn-failed.js');
+  const script = `
+const readline = require('node:readline');
+const rl = readline.createInterface({ input: process.stdin });
+const out = (obj) => process.stdout.write(JSON.stringify(obj) + '\\n');
+
+rl.on('line', (line) => {
+  let command;
+  try {
+    command = JSON.parse(line);
+  } catch {
+    return;
+  }
+
+  switch (command.type) {
+    case 'new_session':
+      out({ id: command.id, type: 'response', command: 'new_session', success: true, data: { cancelled: false } });
+      break;
+    case 'get_state':
+      out({
+        id: command.id,
+        type: 'response',
+        command: 'get_state',
+        success: true,
+        data: {
+          sessionId: 'pi-session-bare-turn-failed',
+          isStreaming: false,
+          isCompacting: false,
+          model: { id: 'gpt-5.5', provider: 'openai-codex', name: 'GPT-5.5' }
+        }
+      });
+      break;
+    case 'get_available_models':
+      out({
+        id: command.id,
+        type: 'response',
+        command: 'get_available_models',
+        success: true,
+        data: { models: [{ id: 'gpt-5.5', provider: 'openai-codex', name: 'GPT-5.5' }] }
+      });
+      break;
+    case 'get_commands':
+      out({ id: command.id, type: 'response', command: 'get_commands', success: true, data: { commands: [] } });
+      break;
+    case 'prompt':
+      out({ id: command.id, type: 'response', command: 'prompt', success: true });
+      setTimeout(() => {
+        out({ type: 'turn_failed' });
+        out({ type: 'agent_end' });
+      }, 10);
+      break;
+    default:
+      out({ id: command.id, type: 'response', command: command.type, success: true });
+      break;
+  }
+});
+`;
+  writeFileSync(scriptPath, script, 'utf8');
+  chmodSync(scriptPath, 0o755);
+  return scriptPath;
+}
+
+function makeFakePiRpcFailedAssistantEndThenBareTurnFailedScript(dir: string): string {
+  const scriptPath = join(dir, 'fake-pi-rpc-failed-assistant-end-then-bare-turn-failed.js');
+  const script = `
+const readline = require('node:readline');
+const rl = readline.createInterface({ input: process.stdin });
+const out = (obj) => process.stdout.write(JSON.stringify(obj) + '\\n');
+
+rl.on('line', (line) => {
+  let command;
+  try {
+    command = JSON.parse(line);
+  } catch {
+    return;
+  }
+
+  switch (command.type) {
+    case 'new_session':
+      out({ id: command.id, type: 'response', command: 'new_session', success: true, data: { cancelled: false } });
+      break;
+    case 'get_state':
+      out({
+        id: command.id,
+        type: 'response',
+        command: 'get_state',
+        success: true,
+        data: {
+          sessionId: 'pi-session-failed-assistant-end-then-bare-turn-failed',
+          isStreaming: false,
+          isCompacting: false,
+          model: { id: 'gpt-5.5', provider: 'openai-codex', name: 'GPT-5.5' }
+        }
+      });
+      break;
+    case 'get_available_models':
+      out({
+        id: command.id,
+        type: 'response',
+        command: 'get_available_models',
+        success: true,
+        data: { models: [{ id: 'gpt-5.5', provider: 'openai-codex', name: 'GPT-5.5' }] }
+      });
+      break;
+    case 'get_commands':
+      out({ id: command.id, type: 'response', command: 'get_commands', success: true, data: { commands: [] } });
+      break;
+    case 'prompt':
+      out({ id: command.id, type: 'response', command: 'prompt', success: true });
+      setTimeout(() => {
+        out({ type: 'agent_start' });
+        out({
+          type: 'assistant_message_end',
+          terminalStatus: 'failed',
+          message: { role: 'assistant', content: [] }
+        });
+        out({ type: 'agent_end' });
+      }, 10);
+      setTimeout(() => {
+        out({ type: 'turn_failed' });
+      }, 80);
+      break;
+    default:
+      out({ id: command.id, type: 'response', command: command.type, success: true });
+      break;
+  }
+});
+`;
+  writeFileSync(scriptPath, script, 'utf8');
+  chmodSync(scriptPath, 0o755);
+  return scriptPath;
+}
+
+function makeFakePiRpcStructuredTurnFailedScript(dir: string): string {
+  const scriptPath = join(dir, 'fake-pi-rpc-structured-turn-failed.js');
+  const script = `
+const readline = require('node:readline');
+const rl = readline.createInterface({ input: process.stdin });
+const out = (obj) => process.stdout.write(JSON.stringify(obj) + '\\n');
+
+rl.on('line', (line) => {
+  let command;
+  try {
+    command = JSON.parse(line);
+  } catch {
+    return;
+  }
+
+  switch (command.type) {
+    case 'new_session':
+      out({ id: command.id, type: 'response', command: 'new_session', success: true, data: { cancelled: false } });
+      break;
+    case 'get_state':
+      out({
+        id: command.id,
+        type: 'response',
+        command: 'get_state',
+        success: true,
+        data: {
+          sessionId: 'pi-session-structured-turn-failed',
+          isStreaming: false,
+          isCompacting: false,
+          model: { id: 'gpt-5.5', provider: 'openai-codex', name: 'GPT-5.5' }
+        }
+      });
+      break;
+    case 'get_available_models':
+      out({
+        id: command.id,
+        type: 'response',
+        command: 'get_available_models',
+        success: true,
+        data: { models: [{ id: 'gpt-5.5', provider: 'openai-codex', name: 'GPT-5.5' }] }
+      });
+      break;
+    case 'get_commands':
+      out({ id: command.id, type: 'response', command: 'get_commands', success: true, data: { commands: [] } });
+      break;
+    case 'prompt':
+      out({ id: command.id, type: 'response', command: 'prompt', success: true });
+      setTimeout(() => {
+        out({
+          type: 'turn_failed',
+          code: 'provider_auth_failed',
+          errorMessage: 'OpenAI Codex token sk-proj-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa was rejected',
+          data: { status: 401 }
+        });
+        out({ type: 'agent_end' });
+      }, 10);
       break;
     default:
       out({ id: command.id, type: 'response', command: command.type, success: true });
@@ -912,6 +1387,356 @@ describe('PiRpcBackend prompt error handling', () => {
       (backend as any).createPendingTurn = () => originalCreatePendingTurn(500);
 
       await expect(backend.sendPrompt(session.sessionId, 'hello')).rejects.toThrow(/No API key found/i);
+    } finally {
+      await backend.dispose();
+    }
+  });
+
+  it('emits a redacted terminal diagnostic when a prompt RPC fails before the provider turn starts', async () => {
+    const workDir = makeTempDir('happier-pi-rpc-immediate-failure-');
+    tempDirs.push(workDir);
+    const fakeScript = makeFakePiRpcImmediatePromptFailureScript(workDir);
+    const diagnostics: string[] = [];
+
+    const backend = new PiRpcBackend({
+      cwd: workDir,
+      command: process.execPath,
+      args: [fakeScript],
+      env: {},
+    });
+    backend.onMessage((message) => {
+      if (message.type === 'terminal-output') diagnostics.push(String(message.data));
+    });
+
+    try {
+      const session = await backend.startSession();
+
+      await expect(backend.sendPrompt(session.sessionId, 'hello')).rejects.toThrow(/OpenAI Codex auth failed/i);
+      expect(diagnostics).toEqual([
+        expect.stringContaining('Pi RPC prompt failed: OpenAI Codex auth failed'),
+      ]);
+      expect(diagnostics.join('\n')).not.toContain('sk-proj-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+    } finally {
+      await backend.dispose();
+    }
+  });
+
+  it('surfaces immediate generic prompt failures as Pi provider diagnostics', async () => {
+    const workDir = makeTempDir('happier-pi-rpc-immediate-generic-failure-');
+    tempDirs.push(workDir);
+    const fakeScript = makeFakePiRpcImmediateGenericPromptFailureScript(workDir);
+
+    const backend = new PiRpcBackend({
+      cwd: workDir,
+      command: process.execPath,
+      args: [fakeScript],
+      env: {},
+    });
+
+    const messages: any[] = [];
+    backend.onMessage((message) => messages.push(message));
+
+    try {
+      const session = await backend.startSession();
+
+      await expect(backend.sendPrompt(session.sessionId, 'hello')).rejects.toThrow(
+        /Pi provider reported provider session failure after prompt acceptance/i,
+      );
+
+      expect(messages).toContainEqual(expect.objectContaining({
+        type: 'terminal-output',
+        data: 'Pi provider reported provider session failure after prompt acceptance',
+      }));
+      expect(JSON.stringify(messages)).not.toContain('"Provider session failed"');
+    } finally {
+      await backend.dispose();
+    }
+  });
+
+  it('normalizes exact generic prompt catch-boundary failures and traces the catch branch', async () => {
+    const workDir = makeTempDir('happier-pi-rpc-generic-catch-boundary-');
+    tempDirs.push(workDir);
+    const fakeScript = makeFakePiRpcProcessScript(workDir);
+    const debugSpy = vi.spyOn(logger, 'debug').mockImplementation(() => undefined);
+
+    const backend = new PiRpcBackend({
+      cwd: workDir,
+      command: process.execPath,
+      args: [fakeScript],
+      env: {
+        HAPPIER_PI_RPC_FAILURE_TRACE: '1',
+        HAPPIER_PI_RPC_PROMPT_ACK_START_GRACE_MS: '1',
+      },
+    });
+
+    const messages: any[] = [];
+    backend.onMessage((message) => messages.push(message));
+
+    try {
+      const session = await backend.startSession();
+      const originalSendCommand = (backend as any).sendCommand.bind(backend) as (
+        command: { type: string },
+        timeoutMs?: number,
+        options?: Readonly<{ processAlreadyEnsured?: boolean }>,
+      ) => Promise<unknown>;
+      (backend as any).sendCommand = (
+        command: { type: string },
+        timeoutMs?: number,
+        options?: Readonly<{ processAlreadyEnsured?: boolean }>,
+      ) => {
+        if (command.type === 'prompt') {
+          return Promise.reject(new Error('Provider session failed'));
+        }
+        return originalSendCommand(command, timeoutMs, options);
+      };
+
+      await expect(backend.sendPrompt(session.sessionId, 'sensitive prompt marker')).rejects.toThrow(
+        /Pi provider reported provider session failure after prompt acceptance/i,
+      );
+
+      expect(messages).toContainEqual(expect.objectContaining({
+        type: 'terminal-output',
+        data: 'Pi provider reported provider session failure after prompt acceptance',
+      }));
+      expect(messages).toContainEqual(expect.objectContaining({
+        type: 'status',
+        status: 'error',
+        detail: 'Pi provider reported provider session failure after prompt acceptance',
+      }));
+
+      const tracePayloads = debugSpy.mock.calls
+        .filter(([message]) => message === '[pi] RPC failure trace')
+        .map(([, payload]) => payload as { branch?: string });
+      expect(tracePayloads).toContainEqual(expect.objectContaining({
+        branch: 'send_prompt_error_caught',
+        command: 'prompt',
+        promptSendAttempted: true,
+        turnAllocated: true,
+        promptErrorExactGeneric: true,
+        normalizedToPiDiagnostic: true,
+      }));
+      expect(tracePayloads.map((payload) => payload.branch)).not.toContain('pending_prompt_failure_response');
+      expect(tracePayloads.map((payload) => payload.branch)).not.toContain('turn_failed_event_matched');
+      expect(JSON.stringify(tracePayloads)).not.toContain('sensitive prompt marker');
+    } finally {
+      debugSpy.mockRestore();
+      await backend.dispose();
+    }
+  });
+
+  it('does not trace Pi RPC failure boundaries unless explicitly enabled', async () => {
+    const workDir = makeTempDir('happier-pi-rpc-trace-disabled-');
+    tempDirs.push(workDir);
+    const fakeScript = makeFakePiRpcTraceFailureScript(workDir);
+    const debugSpy = vi.spyOn(logger, 'debug').mockImplementation(() => undefined);
+
+    const backend = new PiRpcBackend({
+      cwd: workDir,
+      command: process.execPath,
+      args: [fakeScript],
+      env: {},
+    });
+
+    try {
+      const session = await backend.startSession();
+
+      await expect(backend.sendPrompt(session.sessionId, 'sensitive prompt marker')).rejects.toThrow(
+        /Pi provider reported turn_failed after prompt acceptance/i,
+      );
+
+      expect(debugSpy.mock.calls.filter(([message]) => message === '[pi] RPC failure trace')).toEqual([]);
+    } finally {
+      debugSpy.mockRestore();
+      await backend.dispose();
+    }
+  });
+
+  it('writes opt-in sanitized Pi RPC failure boundary traces with branch evidence', async () => {
+    const workDir = makeTempDir('happier-pi-rpc-trace-enabled-');
+    tempDirs.push(workDir);
+    const fakeScript = makeFakePiRpcTraceFailureScript(workDir);
+    const debugSpy = vi.spyOn(logger, 'debug').mockImplementation(() => undefined);
+
+    const backend = new PiRpcBackend({
+      cwd: workDir,
+      command: process.execPath,
+      args: [fakeScript],
+      env: { HAPPIER_PI_RPC_FAILURE_TRACE: '1' },
+    });
+
+    try {
+      const session = await backend.startSession();
+
+      await expect(backend.sendPrompt(session.sessionId, 'sensitive prompt marker')).rejects.toThrow(
+        /Pi provider reported turn_failed after prompt acceptance/i,
+      );
+
+      const tracePayloads = debugSpy.mock.calls
+        .filter(([message]) => message === '[pi] RPC failure trace')
+        .map(([, payload]) => payload as { branch?: string });
+      const branches = tracePayloads.map((payload) => payload.branch);
+
+      expect(branches).toContain('stdout_record');
+      expect(branches).toContain('event_mapped');
+      expect(branches).toContain('turn_failed_event_matched');
+
+      const serialized = JSON.stringify(tracePayloads);
+      expect(serialized).toContain('[redacted-provider-token]');
+      expect(serialized).not.toContain('sensitive prompt marker');
+      expect(serialized).not.toContain('assistant text must not be traced');
+      expect(serialized).not.toContain('sk-proj-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+      expect(serialized).not.toContain('sk-proj-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
+      expect(serialized).not.toContain('refresh-token-secret');
+      expect(serialized).not.toContain('auth.json');
+      for (const payload of tracePayloads) {
+        expect(JSON.stringify(payload).length).toBeLessThan(2_500);
+      }
+    } finally {
+      debugSpy.mockRestore();
+      await backend.dispose();
+    }
+  });
+
+  it('surfaces generic post-acceptance prompt failures as Pi provider diagnostics', async () => {
+    const workDir = makeTempDir('happier-pi-rpc-post-acceptance-generic-failure-');
+    tempDirs.push(workDir);
+    const fakeScript = makeFakePiRpcPostAcceptanceGenericPromptFailureScript(workDir);
+
+    const backend = new PiRpcBackend({
+      cwd: workDir,
+      command: process.execPath,
+      args: [fakeScript],
+      env: {},
+    });
+
+    const messages: any[] = [];
+    backend.onMessage((message) => messages.push(message));
+
+    try {
+      const session = await backend.startSession();
+
+      await expect(backend.sendPrompt(session.sessionId, 'hello')).rejects.toThrow(
+        /Pi provider reported provider session failure after prompt acceptance/i,
+      );
+
+      expect(messages).toContainEqual(expect.objectContaining({
+        type: 'status',
+        status: 'error',
+        detail: 'Pi provider reported provider session failure after prompt acceptance',
+      }));
+      expect(messages).toContainEqual(expect.objectContaining({
+        type: 'terminal-output',
+        data: 'Pi provider reported provider session failure after prompt acceptance',
+      }));
+    } finally {
+      await backend.dispose();
+    }
+  });
+
+  it('surfaces bare Pi turn_failed events as provider terminal failures after prompt acceptance', async () => {
+    const workDir = makeTempDir('happier-pi-rpc-bare-turn-failed-');
+    tempDirs.push(workDir);
+    const fakeScript = makeFakePiRpcBareTurnFailedScript(workDir);
+
+    const backend = new PiRpcBackend({
+      cwd: workDir,
+      command: process.execPath,
+      args: [fakeScript],
+      env: {},
+    });
+
+    const messages: any[] = [];
+    backend.onMessage((message) => messages.push(message));
+
+    try {
+      const session = await backend.startSession();
+
+      await expect(backend.sendPrompt(session.sessionId, 'hello')).rejects.toThrow(
+        /Pi provider reported turn_failed without details after prompt acceptance/i,
+      );
+
+      expect(messages).toContainEqual(expect.objectContaining({
+        type: 'status',
+        status: 'error',
+        detail: 'Pi provider reported turn_failed without details after prompt acceptance',
+      }));
+      expect(messages).toContainEqual(expect.objectContaining({
+        type: 'terminal-output',
+        data: 'Pi provider reported turn_failed without details after prompt acceptance',
+      }));
+      expect(JSON.stringify(messages)).not.toContain('sk-');
+    } finally {
+      await backend.dispose();
+    }
+  });
+
+  it('preserves a useful diagnostic when failed assistant_message_end clears the turn before bare turn_failed', async () => {
+    const workDir = makeTempDir('happier-pi-rpc-failed-assistant-end-turn-failed-');
+    tempDirs.push(workDir);
+    const fakeScript = makeFakePiRpcFailedAssistantEndThenBareTurnFailedScript(workDir);
+
+    const backend = new PiRpcBackend({
+      cwd: workDir,
+      command: process.execPath,
+      args: [fakeScript],
+      env: {
+        HAPPIER_PI_RPC_AGENT_END_SETTLE_MS: '10',
+      },
+    });
+
+    const messages: any[] = [];
+    backend.onMessage((message) => messages.push(message));
+
+    try {
+      const session = await backend.startSession();
+
+      await expect(backend.sendPrompt(session.sessionId, 'hello')).rejects.toThrow(
+        /Pi provider reported assistant_message_end failed without details after prompt acceptance/i,
+      );
+
+      expect(messages).toContainEqual(expect.objectContaining({
+        type: 'status',
+        status: 'error',
+        detail: 'Pi provider reported assistant_message_end failed without details after prompt acceptance',
+      }));
+      expect(messages).toContainEqual(expect.objectContaining({
+        type: 'terminal-output',
+        data: 'Pi provider reported assistant_message_end failed without details after prompt acceptance',
+      }));
+      expect(JSON.stringify(messages)).not.toContain('sk-');
+    } finally {
+      await backend.dispose();
+    }
+  });
+
+  it('preserves structured Pi turn_failed fields in the sanitized provider diagnostic', async () => {
+    const workDir = makeTempDir('happier-pi-rpc-structured-turn-failed-');
+    tempDirs.push(workDir);
+    const fakeScript = makeFakePiRpcStructuredTurnFailedScript(workDir);
+
+    const backend = new PiRpcBackend({
+      cwd: workDir,
+      command: process.execPath,
+      args: [fakeScript],
+      env: {},
+    });
+
+    const messages: any[] = [];
+    backend.onMessage((message) => messages.push(message));
+
+    try {
+      const session = await backend.startSession();
+
+      await expect(backend.sendPrompt(session.sessionId, 'hello')).rejects.toThrow(
+        /Pi provider reported turn_failed after prompt acceptance/i,
+      );
+
+      const status = messages.find((message) => message?.type === 'status' && message.status === 'error');
+      expect(status?.detail).toContain('code=provider_auth_failed');
+      expect(status?.detail).toContain('errorMessage=OpenAI Codex token');
+      expect(status?.detail).toContain('data.status=401');
+      expect(status?.detail).not.toContain('sk-proj-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+      expect(JSON.stringify(messages)).not.toContain('sk-proj-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
     } finally {
       await backend.dispose();
     }

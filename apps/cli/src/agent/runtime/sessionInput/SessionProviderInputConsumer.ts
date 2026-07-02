@@ -2,12 +2,17 @@ import type { MessageQueue2 } from '@/agent/runtime/modeMessageQueue';
 import { readAuthenticationStatus } from '@/api/client/httpStatusError';
 import { configuration } from '@/configuration';
 import { logger } from '@/ui/logger';
+import {
+  DEFAULT_SESSION_METADATA_WAIT_RETRY_BACKOFF_MS,
+  waitForSessionMetadataRetryBackoff,
+} from '@/agent/runtime/sessionMetadataWaitRetryBackoff';
 
 import type {
   DrainPendingOptions,
   DrainPendingResult,
   MessageBatch,
   PendingMaterializationActiveTurnPolicy,
+  PendingQueueDeliveryTiming,
   PendingMaterializationReconcileWhenEmpty,
   PendingMaterializationResult,
   SessionProviderInputConsumer,
@@ -25,10 +30,12 @@ export interface SessionProviderInputConsumerSession {
   materializeNextPendingMessageSafely?: ((opts?: {
     reconcileWhenEmpty?: PendingMaterializationReconcileWhenEmpty;
     activeTurnDeliveryPolicy?: PendingMaterializationActiveTurnPolicy;
+    pendingQueueDeliveryTiming?: PendingQueueDeliveryTiming;
   }) => Promise<PendingMaterializationResult>) | undefined;
   popPendingMessage: () => Promise<boolean>;
   shouldAttemptPendingMaterialization?: ((opts?: {
     activeTurnDeliveryPolicy?: PendingMaterializationActiveTurnPolicy;
+    pendingQueueDeliveryTiming?: PendingQueueDeliveryTiming;
   }) => boolean) | undefined;
   reconcilePendingQueueState?: ((opts: { force: boolean }) => unknown | Promise<unknown>) | undefined;
   waitForMetadataUpdate: (abortSignal?: AbortSignal) => Promise<boolean>;
@@ -41,7 +48,10 @@ export interface SessionProviderInputConsumerOptions<Mode, Message> {
   reconcileWhenEmpty?: PendingMaterializationReconcileWhenEmpty | undefined;
   activeTurnDeliveryPolicy?: PendingMaterializationActiveTurnPolicy | undefined;
   resolveActiveTurnDeliveryPolicy?: (() => PendingMaterializationActiveTurnPolicy | undefined) | undefined;
+  pendingQueueDeliveryTiming?: PendingQueueDeliveryTiming | undefined;
+  resolvePendingQueueDeliveryTiming?: (() => PendingQueueDeliveryTiming | undefined) | undefined;
   idleWakePollIntervalMs?: number | undefined;
+  metadataWaitRetryBackoffMs?: number | undefined;
   pendingDrainMaxPopPerWake?: number | undefined;
 }
 
@@ -50,13 +60,16 @@ type WakeWinner = { kind: 'queue'; hasMessages: boolean } | { kind: 'meta'; ok: 
 function buildMaterializeOptions(
   reconcileWhenEmpty: PendingMaterializationReconcileWhenEmpty,
   activeTurnDeliveryPolicy: PendingMaterializationActiveTurnPolicy | undefined,
+  pendingQueueDeliveryTiming: PendingQueueDeliveryTiming | undefined,
 ): {
   reconcileWhenEmpty: PendingMaterializationReconcileWhenEmpty;
   activeTurnDeliveryPolicy?: PendingMaterializationActiveTurnPolicy;
+  pendingQueueDeliveryTiming?: PendingQueueDeliveryTiming;
 } {
   return {
     reconcileWhenEmpty,
     ...(activeTurnDeliveryPolicy ? { activeTurnDeliveryPolicy } : {}),
+    ...(pendingQueueDeliveryTiming ? { pendingQueueDeliveryTiming } : {}),
   };
 }
 
@@ -65,6 +78,26 @@ function readActiveTurnDeliveryPolicy(opts: {
   resolveActiveTurnDeliveryPolicy?: (() => PendingMaterializationActiveTurnPolicy | undefined) | undefined;
 }): PendingMaterializationActiveTurnPolicy | undefined {
   return opts.resolveActiveTurnDeliveryPolicy?.() ?? opts.activeTurnDeliveryPolicy;
+}
+
+function readPendingQueueDeliveryTiming(opts: {
+  pendingQueueDeliveryTiming?: PendingQueueDeliveryTiming | undefined;
+  resolvePendingQueueDeliveryTiming?: (() => PendingQueueDeliveryTiming | undefined) | undefined;
+}): PendingQueueDeliveryTiming | undefined {
+  return opts.resolvePendingQueueDeliveryTiming?.() ?? opts.pendingQueueDeliveryTiming;
+}
+
+function buildAttemptOptions(
+  activeTurnDeliveryPolicy: PendingMaterializationActiveTurnPolicy | undefined,
+  pendingQueueDeliveryTiming: PendingQueueDeliveryTiming | undefined,
+): {
+  activeTurnDeliveryPolicy?: PendingMaterializationActiveTurnPolicy;
+  pendingQueueDeliveryTiming?: PendingQueueDeliveryTiming;
+} {
+  return {
+    ...(activeTurnDeliveryPolicy ? { activeTurnDeliveryPolicy } : {}),
+    ...(pendingQueueDeliveryTiming ? { pendingQueueDeliveryTiming } : {}),
+  };
 }
 
 function logInputConsumerMaterializationDecision(opts: {
@@ -91,9 +124,26 @@ function logInputConsumerMaterializationDecision(opts: {
 export function createSessionProviderInputConsumer<Mode, Message>(
   opts: SessionProviderInputConsumerOptions<Mode, Message>,
 ): SessionProviderInputConsumer<Mode, Message> {
+  let waitForNextInputTurn: Promise<void> = Promise.resolve();
+
   return {
     async waitForNextInput(waitOpts) {
-      return await waitForNextInput({ ...opts, abortSignal: waitOpts.abortSignal });
+      const previousTurn = waitForNextInputTurn;
+      let releaseTurn: () => void = () => {};
+      const currentTurn = new Promise<void>((resolve) => {
+        releaseTurn = resolve;
+      });
+      waitForNextInputTurn = previousTurn.catch(() => undefined).then(() => currentTurn);
+
+      try {
+        const canStart = await waitForSerializedWaitTurn(previousTurn, waitOpts.abortSignal);
+        if (!canStart || waitOpts.abortSignal.aborted) {
+          return null;
+        }
+        return await waitForNextInput({ ...opts, abortSignal: waitOpts.abortSignal });
+      } finally {
+        releaseTurn();
+      }
     },
     async drainPending(drainOpts) {
       return await drainPendingMessages(withDefaultDrainOptions(
@@ -101,19 +151,61 @@ export function createSessionProviderInputConsumer<Mode, Message>(
         opts.pendingDrainMaxPopPerWake,
         opts.activeTurnDeliveryPolicy,
         opts.resolveActiveTurnDeliveryPolicy,
+        opts.pendingQueueDeliveryTiming,
+        opts.resolvePendingQueueDeliveryTiming,
         drainOpts,
       ));
     },
   };
 }
 
+async function waitForSerializedWaitTurn(previousTurn: Promise<void>, abortSignal: AbortSignal): Promise<boolean> {
+  if (abortSignal.aborted) {
+    return false;
+  }
+
+  return await new Promise<boolean>((resolve) => {
+    let done = false;
+
+    const finish = (canStart: boolean) => {
+      if (done) return;
+      done = true;
+      abortSignal.removeEventListener('abort', onAbort);
+      resolve(canStart);
+    };
+
+    const onAbort = () => finish(false);
+    abortSignal.addEventListener('abort', onAbort, { once: true });
+
+    previousTurn.then(
+      () => finish(true),
+      () => finish(true),
+    );
+  });
+}
+
 export function createSessionProviderPendingDrainAdapter(
   session: SessionProviderInputConsumerSession,
-  defaults?: Pick<DrainPendingOptions, 'maxPopPerWake'>,
+  defaults?: Pick<
+    DrainPendingOptions,
+    | 'maxPopPerWake'
+    | 'activeTurnDeliveryPolicy'
+    | 'resolveActiveTurnDeliveryPolicy'
+    | 'pendingQueueDeliveryTiming'
+    | 'resolvePendingQueueDeliveryTiming'
+  >,
 ): Pick<SessionProviderInputConsumer<never, never>, 'drainPending'> {
   return {
     async drainPending(drainOpts) {
-      return await drainPendingMessages(withDefaultDrainOptions(session, defaults?.maxPopPerWake, undefined, undefined, drainOpts));
+      return await drainPendingMessages(withDefaultDrainOptions(
+        session,
+        defaults?.maxPopPerWake,
+        defaults?.activeTurnDeliveryPolicy,
+        defaults?.resolveActiveTurnDeliveryPolicy,
+        defaults?.pendingQueueDeliveryTiming,
+        defaults?.resolvePendingQueueDeliveryTiming,
+        drainOpts,
+      ));
     },
   };
 }
@@ -122,10 +214,11 @@ async function waitForNextInput<Mode, Message>(
   opts: SessionProviderInputConsumerOptions<Mode, Message> & { abortSignal: AbortSignal },
 ): Promise<MessageBatch<Mode, Message> | null> {
   const idleWakePollIntervalMs = opts.idleWakePollIntervalMs ?? configuration.pendingQueueIdleWakePollIntervalMs;
-  // Idle-timer wakes upgrade the empty-queue reconcile policy to 'throttled': server
-  // pending-changed nudges can be lost (socket churn), and a passive 'skip' loop would
-  // then never learn about queued rows again (QA A-F3/C-F2 one-behind/stuck family).
-  // The client-side reconcile throttle bounds the extra server load.
+  const metadataWaitRetryBackoffMs = opts.metadataWaitRetryBackoffMs ?? DEFAULT_SESSION_METADATA_WAIT_RETRY_BACKOFF_MS;
+  // When explicitly enabled, idle-timer wakes upgrade the empty-queue reconcile
+  // policy to 'throttled' so suspected lost pending-changed nudges can self-heal.
+  // The default is disabled; normal wakeups should come from server metadata
+  // updates and reconnect catch-up rather than periodic polling.
   let wokeByIdleTimer = false;
 
   while (true) {
@@ -171,26 +264,11 @@ async function waitForNextInput<Mode, Message>(
         waitForMetadataUpdate: opts.session.waitForMetadataUpdate,
         controller,
         idleWakePollIntervalMs,
+        metadataWaitRetryBackoffMs,
       });
 
       if (winner.kind === 'meta' && !winner.ok) {
         controller.abort('sessionProviderInputConsumer-meta-false');
-
-        await Promise.resolve();
-        if (!opts.abortSignal.aborted) {
-          await callMetadataUpdate(opts.onMetadataUpdate);
-        }
-
-        const queuedAfterMetadataFailure = await collectQueuedBatch(opts.messageQueue, opts.abortSignal);
-        if (queuedAfterMetadataFailure) {
-          return queuedAfterMetadataFailure;
-        }
-
-        if (idleWakePollIntervalMs <= 0) {
-          return null;
-        }
-
-        await waitForIdleFallback({ abortSignal: opts.abortSignal, idleWakePollIntervalMs });
 
         if (opts.abortSignal.aborted) {
           return null;
@@ -247,9 +325,11 @@ async function materializePendingMessage<Mode, Message>(
   if (safeMaterialize) {
     const reconcileWhenEmpty = opts.reconcileWhenEmpty ?? 'skip';
     const activeTurnDeliveryPolicy = readActiveTurnDeliveryPolicy(opts);
+    const pendingQueueDeliveryTiming = readPendingQueueDeliveryTiming(opts);
     const result = await safeMaterialize(buildMaterializeOptions(
       reconcileWhenEmpty,
       activeTurnDeliveryPolicy,
+      pendingQueueDeliveryTiming,
     ));
     logInputConsumerMaterializationDecision({
       source: 'waitForNextInput',
@@ -267,9 +347,10 @@ async function materializePendingMessage<Mode, Message>(
     return;
   }
 
-  if (!(opts.session.shouldAttemptPendingMaterialization?.({
-    activeTurnDeliveryPolicy: readActiveTurnDeliveryPolicy(opts),
-  }) ?? true)) {
+  if (!(opts.session.shouldAttemptPendingMaterialization?.(buildAttemptOptions(
+    readActiveTurnDeliveryPolicy(opts),
+    readPendingQueueDeliveryTiming(opts),
+  )) ?? true)) {
     return;
   }
 
@@ -281,9 +362,12 @@ function withDefaultDrainOptions(
   defaultMaxPopPerWake: number | undefined,
   defaultActiveTurnDeliveryPolicy: PendingMaterializationActiveTurnPolicy | undefined,
   defaultResolveActiveTurnDeliveryPolicy: (() => PendingMaterializationActiveTurnPolicy | undefined) | undefined,
+  defaultPendingQueueDeliveryTiming: PendingQueueDeliveryTiming | undefined,
+  defaultResolvePendingQueueDeliveryTiming: (() => PendingQueueDeliveryTiming | undefined) | undefined,
   drainOpts: DrainPendingOptions | undefined,
 ): DrainPendingOptions & { session: SessionProviderInputConsumerSession } {
   const drainPolicyOverride = drainOpts?.activeTurnDeliveryPolicy !== undefined;
+  const deliveryTimingOverride = drainOpts?.pendingQueueDeliveryTiming !== undefined;
 
   return {
     ...(drainOpts ?? {}),
@@ -292,6 +376,9 @@ function withDefaultDrainOptions(
     activeTurnDeliveryPolicy: drainOpts?.activeTurnDeliveryPolicy ?? defaultActiveTurnDeliveryPolicy,
     resolveActiveTurnDeliveryPolicy: drainOpts?.resolveActiveTurnDeliveryPolicy
       ?? (drainPolicyOverride ? undefined : defaultResolveActiveTurnDeliveryPolicy),
+    pendingQueueDeliveryTiming: drainOpts?.pendingQueueDeliveryTiming ?? defaultPendingQueueDeliveryTiming,
+    resolvePendingQueueDeliveryTiming: drainOpts?.resolvePendingQueueDeliveryTiming
+      ?? (deliveryTimingOverride ? undefined : defaultResolvePendingQueueDeliveryTiming),
   };
 }
 
@@ -311,7 +398,8 @@ async function drainPendingMessages(
       }
 
       const activeTurnDeliveryPolicy = readActiveTurnDeliveryPolicy(opts);
-      const attemptOpts = { activeTurnDeliveryPolicy };
+      const pendingQueueDeliveryTiming = readPendingQueueDeliveryTiming(opts);
+      const attemptOpts = buildAttemptOptions(activeTurnDeliveryPolicy, pendingQueueDeliveryTiming);
       const canMaterialize = opts.session.shouldAttemptPendingMaterialization?.(attemptOpts) ?? true;
       if (!canMaterialize) {
         await opts.session.reconcilePendingQueueState?.({ force: true });
@@ -346,7 +434,12 @@ async function materializeNextPendingForDrain(
     try {
       const reconcileWhenEmpty = 'force';
       const activeTurnDeliveryPolicy = readActiveTurnDeliveryPolicy(opts);
-      const result = await safeMaterialize(buildMaterializeOptions(reconcileWhenEmpty, activeTurnDeliveryPolicy));
+      const pendingQueueDeliveryTiming = readPendingQueueDeliveryTiming(opts);
+      const result = await safeMaterialize(buildMaterializeOptions(
+        reconcileWhenEmpty,
+        activeTurnDeliveryPolicy,
+        pendingQueueDeliveryTiming,
+      ));
       logInputConsumerMaterializationDecision({
         source: 'drainPending',
         reconcileWhenEmpty,
@@ -398,52 +491,90 @@ async function waitForWakeSignal<Mode, Message>(opts: {
   waitForMetadataUpdate: (abortSignal?: AbortSignal) => Promise<boolean>;
   controller: AbortController;
   idleWakePollIntervalMs: number;
+  metadataWaitRetryBackoffMs: number;
 }): Promise<WakeWinner> {
   const queueWait = opts.messageQueue
     .waitForMessagesSignal(opts.controller.signal)
     .then((hasMessages) => ({ kind: 'queue' as const, hasMessages }));
-  const metaWait = opts.waitForMetadataUpdate(opts.controller.signal).then((ok) => ({ kind: 'meta' as const, ok }));
-  const idleWait =
-    opts.idleWakePollIntervalMs > 0
-      ? new Promise<{ kind: 'idle' }>((resolve) => {
-          const timer = setTimeout(() => resolve({ kind: 'idle' as const }), opts.idleWakePollIntervalMs);
-          timer.unref?.();
-          opts.controller.signal.addEventListener(
-            'abort',
-            () => {
-              clearTimeout(timer);
-            },
-            { once: true },
-          );
-        })
-      : null;
+  const idleWait = createIdleWakeWait(opts.idleWakePollIntervalMs, opts.controller.signal);
 
-  return await Promise.race([queueWait, metaWait, ...(idleWait ? [idleWait] : [])]);
+  try {
+    while (true) {
+      if (opts.controller.signal.aborted) {
+        return { kind: 'meta', ok: false };
+      }
+
+      const metaWait = opts.waitForMetadataUpdate(opts.controller.signal)
+        .then(
+          (ok) => ({ kind: 'meta' as const, ok }),
+          () => ({ kind: 'meta' as const, ok: false }),
+        );
+
+      const winner = await Promise.race([queueWait, ...(idleWait ? [idleWait.promise] : []), metaWait]);
+      if (winner.kind !== 'meta' || winner.ok || opts.controller.signal.aborted) {
+        return winner;
+      }
+
+      const queueIdleOrBackoffWinner = await Promise.race([
+        queueWait,
+        ...(idleWait ? [idleWait.promise] : []),
+        waitForSessionMetadataRetryBackoff({
+          abortSignal: opts.controller.signal,
+          backoffMs: opts.metadataWaitRetryBackoffMs,
+        }).then(() => null),
+      ]);
+      if (queueIdleOrBackoffWinner) {
+        return queueIdleOrBackoffWinner;
+      }
+    }
+  } finally {
+    idleWait?.cancel();
+  }
 }
 
-async function waitForIdleFallback(opts: { abortSignal: AbortSignal; idleWakePollIntervalMs: number }): Promise<void> {
-  await new Promise<void>((resolve) => {
-    let done = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
+function createIdleWakeWait(
+  idleWakePollIntervalMs: number,
+  abortSignal: AbortSignal,
+): { promise: Promise<WakeWinner>; cancel: () => void } | null {
+  if (idleWakePollIntervalMs <= 0) {
+    return null;
+  }
 
-    const finish = () => {
-      if (done) return;
-      done = true;
-      if (timer) clearTimeout(timer);
-      opts.abortSignal.removeEventListener('abort', onFallbackAbort);
-      resolve();
-    };
+  let done = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let resolveWait: ((winner: WakeWinner) => void) | null = null;
 
-    const onFallbackAbort = () => finish();
+  const cleanup = () => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    abortSignal.removeEventListener('abort', onAbort);
+  };
 
-    timer = setTimeout(finish, opts.idleWakePollIntervalMs);
+  const finish = (winner: WakeWinner) => {
+    if (done) return;
+    done = true;
+    cleanup();
+    resolveWait?.(winner);
+  };
+
+  const onAbort = () => finish({ kind: 'meta', ok: false });
+
+  const promise = new Promise<WakeWinner>((resolve) => {
+    resolveWait = resolve;
+    timer = setTimeout(() => finish({ kind: 'idle' }), idleWakePollIntervalMs);
     timer.unref?.();
-    opts.abortSignal.addEventListener('abort', onFallbackAbort, { once: true });
-
-    if (opts.abortSignal.aborted) {
-      finish();
+    abortSignal.addEventListener('abort', onAbort, { once: true });
+    if (abortSignal.aborted) {
+      onAbort();
     }
   });
+
+  return {
+    promise,
+    cancel: cleanup,
+  };
 }
 
 async function callMetadataUpdate(onMetadataUpdate: (() => void | Promise<void>) | null | undefined): Promise<void> {

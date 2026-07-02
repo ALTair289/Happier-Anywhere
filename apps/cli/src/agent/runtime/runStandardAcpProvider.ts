@@ -145,6 +145,7 @@ export type StandardAcpProviderConfig = {
   onTerminalDisplayControllerReady?: (controller: TerminalDisplayController) => void;
   shouldRenderTerminalDisplay?: (params: { opts: StandardAcpProviderRunOptions; session: ApiSessionClient; metadata: Metadata }) => boolean;
   resolveKeepAliveMode?: () => KeepAliveMode;
+  deferUserMessageDeliveryWatermarkToProviderAcceptance?: boolean;
 };
 
 type StandardAcpProviderDeps = {
@@ -253,6 +254,9 @@ export async function runStandardAcpProvider(
 
   session = initializedSession.session;
   const reconnectionHandle = initializedSession.reconnectionHandle;
+  if (config.deferUserMessageDeliveryWatermarkToProviderAcceptance === true) {
+    session.deferDeliveredUserMessageWatermarkToProviderAcceptance?.();
+  }
 
   let abortRequestedCallback: (() => void | Promise<void>) | null = null;
   permissionHandler = createProviderEnforcedPermissionHandlerFn({
@@ -394,6 +398,16 @@ export async function runStandardAcpProvider(
   session.setSessionRuntimeControls?.(runtime);
 
   let cleanupRan = false;
+  let apiSessionClosedForCleanup = false;
+  const closeApiSessionForCleanup = async () => {
+    if (apiSessionClosedForCleanup) return;
+    apiSessionClosedForCleanup = true;
+    try {
+      await session.close();
+    } catch (error) {
+      logger.debug(`${config.uiLogPrefix} Failed to close API session during session cleanup (non-fatal)`, error);
+    }
+  };
   const cleanupOnce = async () => {
     if (cleanupRan) return;
     cleanupRan = true;
@@ -402,6 +416,7 @@ export async function runStandardAcpProvider(
     } catch (error) {
       logger.debug(`${config.uiLogPrefix} Failed to clean up pending permissions during session cleanup (non-fatal)`, error);
     }
+    await closeApiSessionForCleanup();
     await cleanupBackendRunResourcesFn({
       keepAliveInterval,
       reconnectionHandle,
@@ -429,6 +444,7 @@ export async function runStandardAcpProvider(
   const terminationHandlers = registerRunnerTerminationHandlers({
     process,
     exit: (code) => process.exit(code),
+    sessionExitReport: { sessionId: session.sessionId },
     onTerminate: async (event, outcome) => {
       shouldExit = true;
       await handleAbort();
@@ -440,6 +456,7 @@ export async function runStandardAcpProvider(
       try {
         if (archiveDecision.archive) {
           await archiveAndCloseRuntimeSessionFn(session, opts.credentials, archiveDecision.archiveReason);
+          apiSessionClosedForCleanup = true;
         }
       } finally {
         await cleanupOnce();

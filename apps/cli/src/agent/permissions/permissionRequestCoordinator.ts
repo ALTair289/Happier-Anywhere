@@ -48,6 +48,7 @@ export type PermissionRequestCoordinatorStore = Readonly<{
         kind?: string;
         source?: string;
         permissionSuggestions?: unknown[] | null;
+        replaceCompletedRequest?: boolean;
     }>): void;
     completeRequest(params: Readonly<{
         requestId: string;
@@ -101,6 +102,7 @@ export class PermissionRequestCoordinator<TResult> {
     private readonly store: PermissionRequestCoordinatorStore;
     private readonly pendingRequests = new Map<string, PendingPermissionRequest<TResult>>();
     private readonly cachedDecisions = new Map<string, CachedPermissionDecision<TResult>>();
+    private readonly invalidatedDecisionRequestIds = new Set<string>();
     private waiterSequence = 0;
 
     constructor(params: Readonly<{ store: PermissionRequestCoordinatorStore }>) {
@@ -129,8 +131,14 @@ export class PermissionRequestCoordinator<TResult> {
         }
 
         const cached = this.cachedDecisions.get(request.requestId);
-        if (cached && isCompatibleCachedDecision(cached, request)) {
+        const invalidatedDecision = this.invalidatedDecisionRequestIds.delete(request.requestId);
+        const cachedCompatible = cached ? isCompatibleCachedDecision(cached, request) : false;
+        if (cached && cachedCompatible && !invalidatedDecision) {
             return Promise.resolve(cached.result);
+        }
+        const replaceCompletedRequest = invalidatedDecision || !!cached;
+        if (cached && !cachedCompatible) {
+            this.cachedDecisions.delete(request.requestId);
         }
 
         entry = {
@@ -156,6 +164,7 @@ export class PermissionRequestCoordinator<TResult> {
             ...(Array.isArray(request.permissionSuggestions)
                 ? { permissionSuggestions: [...request.permissionSuggestions] }
                 : {}),
+            ...(replaceCompletedRequest ? { replaceCompletedRequest: true } : {}),
         });
 
         return this.attachWaiter(entry, options?.signal);
@@ -256,7 +265,9 @@ export class PermissionRequestCoordinator<TResult> {
     }
 
     cancelRequest(requestId: string, reason: string): void {
-        this.cachedDecisions.delete(requestId);
+        if (this.cachedDecisions.delete(requestId)) {
+            this.invalidatedDecisionRequestIds.add(requestId);
+        }
         const entry = this.pendingRequests.get(requestId);
         if (!entry) return;
 
@@ -268,6 +279,9 @@ export class PermissionRequestCoordinator<TResult> {
     }
 
     cancelAll(reason: string): void {
+        for (const requestId of this.cachedDecisions.keys()) {
+            this.invalidatedDecisionRequestIds.add(requestId);
+        }
         for (const requestId of [...this.pendingRequests.keys()]) {
             this.cancelRequest(requestId, reason);
         }

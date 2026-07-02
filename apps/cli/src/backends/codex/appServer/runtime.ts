@@ -129,6 +129,7 @@ import type {
 import {
     parseCodexConnectedServiceRuntimeAuthApplyRequest,
     readCodexConnectedServiceRuntimeAuthExpected,
+    type CodexConnectedServiceRuntimeAuthExpected,
 } from '../connectedServices/codexConnectedServiceRuntimeAuthContract';
 import {
     resolveConnectedServiceRuntimeAuthContextFromEnv,
@@ -136,6 +137,7 @@ import {
 import {
     resolveCodexRuntimeAuthClassificationContext,
 } from '../connectedServices/resolveCodexRuntimeAuthClassificationContext';
+import { resolveOpenAiCodexDaemonRefreshSelection } from '../connectedServices/resolveOpenAiCodexDaemonRefreshSelection';
 import { UsageLimitRecoveryScheduler } from '@/daemon/connectedServices/usageLimitRecovery/UsageLimitRecoveryScheduler';
 import {
     resolveCodexUsageLimitSwitchProgress,
@@ -169,6 +171,9 @@ type CodexRateLimitSnapshotPublishContext = CodexLiveAccountIdentity & Readonly<
     rawResetCredits?: unknown;
 }>;
 
+type CodexConnectedServiceRuntimeAppliedIdentitySource =
+    CodexConnectedServiceRuntimeIdentitySeed['source'] | 'live_account_read';
+
 type CodexConnectedServiceRuntimeAppliedIdentity = Readonly<{
     serviceId: 'openai-codex';
     activeAccountId: string;
@@ -176,7 +181,7 @@ type CodexConnectedServiceRuntimeAppliedIdentity = Readonly<{
     profileId: string;
     groupId?: string;
     generation?: string | number;
-    source: CodexConnectedServiceRuntimeIdentitySeed['source'];
+    source: CodexConnectedServiceRuntimeAppliedIdentitySource;
 }>;
 
 type CodexConnectedServiceAuthApplyGenerationResult = SessionConnectedServiceAuthApplyGenerationResponseV1;
@@ -334,6 +339,24 @@ function codexAppServerPromptLocalIdPayload(localIds: readonly string[] | null |
     localIds?: readonly string[];
 } {
     return localIds && localIds.length > 0 ? { localIds } : {};
+}
+
+function codexAppServerPromptHasDeliveryIdentity(
+    prompt: Pick<CodexAppServerPendingProviderPrompt, 'localIds' | 'userMessageSeq'>,
+): boolean {
+    return (prompt.localIds?.length ?? 0) > 0 || prompt.userMessageSeq !== null;
+}
+
+function buildCodexAppServerRetryDeliveryIdentityOptions(
+    pending: CodexAppServerPendingProviderPrompt | null | undefined,
+): CodexAppServerPromptOptions | undefined {
+    if (!pending || pending.accepted || !codexAppServerPromptHasDeliveryIdentity(pending)) {
+        return undefined;
+    }
+    return {
+        ...codexAppServerPromptLocalIdPayload(pending.localIds),
+        ...(pending.userMessageSeq === null ? {} : { userMessageSeq: pending.userMessageSeq }),
+    };
 }
 
 async function buildCodexTurnInputForPrompt(
@@ -910,6 +933,7 @@ function createCodexAppServerTurnFailure(
     value: unknown,
     runtimeEnv: Pick<NodeJS.ProcessEnv, string>,
     session: RuntimeSession,
+    sourceAccountIdentity?: Pick<CodexConnectedServiceRuntimeAppliedIdentity, 'activeAccountId' | 'accountLabel' | 'generation'> | null,
 ): Error {
     const payload = readCodexAppServerErrorPayload(value);
     const authContext = resolveCodexRuntimeAuthClassificationContext({ runtimeEnv, session });
@@ -919,6 +943,13 @@ function createCodexAppServerTurnFailure(
         serviceId: 'openai-codex',
         profileId: authContext.profileId,
         groupId: authContext.groupId,
+        sourceAccountIdentity: sourceAccountIdentity
+            ? {
+                providerAccountId: sourceAccountIdentity.activeAccountId,
+                accountLabel: sourceAccountIdentity.accountLabel,
+                groupGeneration: sourceAccountIdentity.generation,
+            }
+            : null,
     });
     return new CodexAppServerTurnFailure(
         payload ? formatCodexAppServerErrorPayloadMessage(payload) ?? 'Codex app-server turn failed' : 'Codex app-server turn failed',
@@ -980,26 +1011,6 @@ function buildThreadConfigOverrideParams(
             model_reasoning_effort: currentReasoningEffort,
         },
     };
-}
-
-type CodexAppServerSteerContext = Readonly<{
-    modeId: string | null;
-    modelId: string | null;
-    reasoningEffort: string | null;
-    serviceTier: string | null;
-    hasServiceTierOverride: boolean;
-}>;
-
-function areSteerContextsEqual(
-    left: CodexAppServerSteerContext | null,
-    right: CodexAppServerSteerContext | null,
-): boolean {
-    if (!left || !right) return false;
-    return left.modeId === right.modeId
-        && left.modelId === right.modelId
-        && left.reasoningEffort === right.reasoningEffort
-        && left.serviceTier === right.serviceTier
-        && left.hasServiceTierOverride === right.hasServiceTierOverride;
 }
 
 function createPendingTurn(
@@ -1064,6 +1075,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
 }>): Readonly<{
     getSessionId: () => string | null;
     supportsInFlightSteer: () => boolean;
+    supportsInFlightConfigApply: () => boolean;
     canSteerPrompt: () => boolean;
     isTurnInFlight: () => boolean;
     hasActiveProviderTurn: () => boolean;
@@ -1152,7 +1164,6 @@ export function createCodexAppServerRuntime(params: Readonly<{
     let pendingTurnFinalizationTimer: ReturnType<typeof setTimeout> | null = null;
     let pendingTurnBlockingItemDrainTimer: ReturnType<typeof setTimeout> | null = null;
     let scheduledPendingTurnFlushReason: 'turn-end' | 'abort' | null = null;
-    let activeTurnSteerContext: CodexAppServerSteerContext | null = null;
     let activeTurnAcceptsSteer = false;
     let lastPublishedInFlightSteerAvailability: boolean | null = null;
     let activeTurnHasMeaningfulContextWindowRecoveryActivity = false;
@@ -1188,6 +1199,112 @@ export function createCodexAppServerRuntime(params: Readonly<{
         });
     };
 
+    const buildRuntimeIdentityFromRefreshSelection = (
+        liveIdentity: CodexLiveAccountIdentity,
+        refreshSelection: ReturnType<typeof resolveOpenAiCodexDaemonRefreshSelection>,
+    ): CodexConnectedServiceRuntimeAppliedIdentity | null => {
+        const activeAccountId = liveIdentity.activeAccountId?.trim();
+        if (!activeAccountId || !refreshSelection) return null;
+
+        const { selection } = refreshSelection;
+        if (selection.kind === 'group') {
+            return {
+                serviceId: 'openai-codex',
+                activeAccountId,
+                accountLabel: liveIdentity.accountLabel,
+                profileId: selection.activeProfileId,
+                groupId: selection.groupId,
+                generation: selection.generation,
+                source: 'live_account_read',
+            };
+        }
+
+        const preservedGeneration = latestConnectedServiceRuntimeIdentity
+            && latestConnectedServiceRuntimeIdentity.profileId === selection.profileId
+            && (latestConnectedServiceRuntimeIdentity.groupId ?? null) === (refreshSelection.recoveryGroupId ?? null)
+            && latestConnectedServiceRuntimeIdentity.generation !== undefined
+            ? latestConnectedServiceRuntimeIdentity.generation
+            : undefined;
+        return {
+            serviceId: 'openai-codex',
+            activeAccountId,
+            accountLabel: liveIdentity.accountLabel,
+            profileId: selection.profileId,
+            ...(refreshSelection.recoveryGroupId ? { groupId: refreshSelection.recoveryGroupId } : {}),
+            ...(preservedGeneration === undefined ? {} : { generation: preservedGeneration }),
+            source: 'live_account_read',
+        };
+    };
+
+    const buildRuntimeIdentityFromExpectedContext = (
+        liveIdentity: CodexLiveAccountIdentity,
+        expected: CodexConnectedServiceRuntimeAuthExpected | null,
+    ): CodexConnectedServiceRuntimeAppliedIdentity | null => {
+        if (!expected) return null;
+        const activeAccountId = liveIdentity.activeAccountId?.trim();
+        const profileId = expected.profileId?.trim();
+        if (!activeAccountId || !profileId) return null;
+        const groupId = expected.groupId?.trim();
+        return {
+            serviceId: 'openai-codex',
+            activeAccountId,
+            accountLabel: liveIdentity.accountLabel,
+            profileId,
+            ...(groupId ? { groupId } : {}),
+            ...(expected.generation === undefined ? {} : { generation: expected.generation }),
+            source: 'live_account_read',
+        };
+    };
+
+    const runtimeIdentityMatchesRefreshSelection = (
+        identity: CodexConnectedServiceRuntimeAppliedIdentity,
+        refreshSelection: ReturnType<typeof resolveOpenAiCodexDaemonRefreshSelection>,
+    ): boolean => {
+        if (!refreshSelection) return true;
+        const { selection } = refreshSelection;
+        if (selection.kind === 'group') {
+            return identity.profileId === selection.activeProfileId
+                && identity.groupId === selection.groupId
+                && String(identity.generation ?? '') === String(selection.generation);
+        }
+        return identity.profileId === selection.profileId
+            && (identity.groupId ?? null) === refreshSelection.recoveryGroupId;
+    };
+
+    const buildLiveAccountRuntimeIdentity = (
+        liveIdentity: CodexLiveAccountIdentity,
+    ): CodexConnectedServiceRuntimeAppliedIdentity | null => {
+        const activeAccountId = liveIdentity.activeAccountId?.trim();
+        if (!activeAccountId) return null;
+
+        const refreshSelection = resolveOpenAiCodexDaemonRefreshSelection(runtimeEnv, params.session);
+        const selectedIdentity = buildRuntimeIdentityFromRefreshSelection(liveIdentity, refreshSelection);
+        if (selectedIdentity) return selectedIdentity;
+
+        if (latestConnectedServiceRuntimeIdentity) {
+            return {
+                ...latestConnectedServiceRuntimeIdentity,
+                activeAccountId,
+                accountLabel: liveIdentity.accountLabel ?? latestConnectedServiceRuntimeIdentity.accountLabel ?? null,
+                source: 'live_account_read',
+            };
+        }
+
+        return null;
+    };
+
+    const refreshLiveAccountRuntimeIdentity = async (
+        expected?: CodexConnectedServiceRuntimeAuthExpected | null,
+    ): Promise<CodexConnectedServiceRuntimeAppliedIdentity | null> => {
+        const liveIdentity = await readLiveAccountIdentity();
+        const liveRuntimeIdentity = buildLiveAccountRuntimeIdentity(liveIdentity)
+            ?? buildRuntimeIdentityFromExpectedContext(liveIdentity, expected ?? null);
+        if (liveRuntimeIdentity) {
+            latestConnectedServiceRuntimeIdentity = liveRuntimeIdentity;
+        }
+        return liveRuntimeIdentity;
+    };
+
     const isProviderTurnInFlight = (): boolean => (
         turnInFlight || pendingTurn !== null || activeProviderTurnItemIds.size > 0
     );
@@ -1220,15 +1337,19 @@ export function createCodexAppServerRuntime(params: Readonly<{
             ? mergeSparseCodexSnapshotUpdate(lastRateLimitSnapshot, rawSnapshot)
             : rawSnapshot;
         lastRateLimitSnapshot = snapshot;
-        const runtimeIdentity = latestConnectedServiceRuntimeIdentity;
         let liveIdentity: CodexLiveAccountIdentity | null = null;
         if (options?.includeLiveAccountIdentity === true) {
             try {
                 liveIdentity = await readLiveAccountIdentity();
+                const liveRuntimeIdentity = buildLiveAccountRuntimeIdentity(liveIdentity);
+                if (liveRuntimeIdentity) {
+                    latestConnectedServiceRuntimeIdentity = liveRuntimeIdentity;
+                }
             } catch (error) {
                 logger.debug('[codex-app-server] Failed to read live account identity for rate-limit snapshot (non-fatal)', error);
             }
         }
+        const runtimeIdentity = latestConnectedServiceRuntimeIdentity;
         if (
             runtimeIdentity
             || liveIdentity?.activeAccountId
@@ -1269,6 +1390,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
         if (!pending || pending.accepted || !pendingProviderPrompts.has(pending)) return;
         pending.accepted = true;
         pendingProviderPrompts.delete(pending);
+        if (!codexAppServerPromptHasDeliveryIdentity(pending)) return;
         onPromptAcceptedByProvider?.({
             ...codexAppServerPromptLocalIdPayload(pending.localIds),
             userMessageSeq: pending.userMessageSeq,
@@ -1443,19 +1565,11 @@ export function createCodexAppServerRuntime(params: Readonly<{
             await applyStartOrLoadResponse(client, resumedThread.nextThreadId, resumedThread.response);
         },
     });
-    const captureCurrentSteerContext = (): CodexAppServerSteerContext => ({
-        modeId: currentModeId,
-        modelId: currentModelId,
-        reasoningEffort: currentReasoningEffort,
-        serviceTier: currentServiceTier,
-        hasServiceTierOverride,
-    });
     const canSteerPrompt = (): boolean => {
         return Boolean(
             pendingTurn
             && turnInFlight
-            && activeTurnAcceptsSteer
-            && areSteerContextsEqual(activeTurnSteerContext, captureCurrentSteerContext()),
+            && activeTurnAcceptsSteer,
         );
     };
     const publishInFlightSteerAvailabilityIfChanged = (): void => {
@@ -1465,7 +1579,6 @@ export function createCodexAppServerRuntime(params: Readonly<{
         params.onInFlightSteerAvailabilityChange?.(next);
     };
     const markActiveTurnSteerable = (): void => {
-        activeTurnSteerContext = captureCurrentSteerContext();
         activeTurnAcceptsSteer = true;
         publishInFlightSteerAvailabilityIfChanged();
     };
@@ -1474,7 +1587,6 @@ export function createCodexAppServerRuntime(params: Readonly<{
         publishInFlightSteerAvailabilityIfChanged();
     };
     const clearActiveTurnSteerability = (): void => {
-        activeTurnSteerContext = null;
         activeTurnAcceptsSteer = false;
         publishInFlightSteerAvailabilityIfChanged();
     };
@@ -2428,6 +2540,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
 
     const finishPendingTurn = async (options?: Readonly<{
         error?: Error;
+        emitUndeliverablePrompt?: boolean;
         flushReason?: 'turn-end' | 'abort' | 'failure';
         insideBridgeWork?: boolean;
     }>): Promise<void> => {
@@ -2529,7 +2642,11 @@ export function createCodexAppServerRuntime(params: Readonly<{
         setThinking(false);
         if (!activeTurn) return;
         if (options?.error) {
-            emitPendingProviderPromptAsUndeliverable(activeTurn.providerPrompt);
+            if (options.emitUndeliverablePrompt === false) {
+                clearPendingProviderPrompt(activeTurn.providerPrompt);
+            } else {
+                emitPendingProviderPromptAsUndeliverable(activeTurn.providerPrompt);
+            }
             activeTurn.reject(options.error);
             return;
         }
@@ -3015,7 +3132,12 @@ export function createCodexAppServerRuntime(params: Readonly<{
                             }).action === 'await_provider_retry') {
                                 return;
                             }
-                            const failure = createCodexAppServerTurnFailure(notificationParams, runtimeEnv, params.session);
+                            const failure = createCodexAppServerTurnFailure(
+                                notificationParams,
+                                runtimeEnv,
+                                params.session,
+                                latestConnectedServiceRuntimeIdentity,
+                            );
                             if (shouldDeferCodexAppServerTurnFailureToPromptLoop(failure)) {
                                 const failedTurnId = readProviderEventTurnId(notificationParams);
                                 if (failedTurnId) {
@@ -3082,7 +3204,12 @@ export function createCodexAppServerRuntime(params: Readonly<{
                                         ? readCodexTurnStatus(notificationParams)
                                         : null;
                                     if (method === 'turn/completed' && terminalStatus === 'failed') {
-                                        const failure = createCodexAppServerTurnFailure(notificationParams, runtimeEnv, params.session);
+                                        const failure = createCodexAppServerTurnFailure(
+                                            notificationParams,
+                                            runtimeEnv,
+                                            params.session,
+                                            latestConnectedServiceRuntimeIdentity,
+                                        );
                                         if (shouldDeferCodexAppServerTurnFailureToPromptLoop(failure)) {
                                             await finishPendingTurn({
                                                 error: failure,
@@ -3138,23 +3265,33 @@ export function createCodexAppServerRuntime(params: Readonly<{
     };
 
     const disposeClient = async (options?: Readonly<{
+        emitUndeliverablePrompts?: boolean;
         pendingTurnError?: Error;
     }>): Promise<void> => {
-        emitAllPendingProviderPromptsAsUndeliverable();
+        if (options?.emitUndeliverablePrompts !== false) {
+            emitAllPendingProviderPromptsAsUndeliverable();
+        }
         const activeClientPromise = clientPromise;
         clientPromise = null;
         if (!activeClientPromise) {
             await finishPendingTurn(options?.pendingTurnError
-                ? { error: options.pendingTurnError, flushReason: 'abort' }
+                ? {
+                    error: options.pendingTurnError,
+                    emitUndeliverablePrompt: options.emitUndeliverablePrompts,
+                    flushReason: 'abort',
+                }
                 : undefined);
             return;
         }
         try {
             const client = await activeClientPromise;
-            await client.dispose();
+            await client.dispose(options?.pendingTurnError
+                ? { pendingRequestError: options.pendingTurnError }
+                : undefined);
         } finally {
             await finishPendingTurn({
                 ...(options?.pendingTurnError ? { error: options.pendingTurnError } : {}),
+                emitUndeliverablePrompt: options?.emitUndeliverablePrompts,
                 flushReason: 'abort',
             });
         }
@@ -3464,8 +3601,10 @@ export function createCodexAppServerRuntime(params: Readonly<{
             threadId: activeThreadId,
         });
         const recovery = (async () => {
+            const pendingTurnError = new CodexAppServerConnectedServiceAuthTransportInvalidatedTurn();
             await disposeClient({
-                pendingTurnError: new CodexAppServerConnectedServiceAuthTransportInvalidatedTurn(),
+                emitUndeliverablePrompts: false,
+                pendingTurnError,
             });
             const resumedClient = await ensureClient();
             const resumedThread = await resumeThread(resumedClient, activeThreadId, {
@@ -3659,6 +3798,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
         // turn without interrupting it. This may not affect a currently-running tool until that
         // tool finishes, but it should still be handled within the same turn.
         supportsInFlightSteer: () => true,
+        supportsInFlightConfigApply: () => true,
         canSteerPrompt,
         isTurnInFlight: () => turnInFlight,
         hasActiveProviderTurn: () => pendingTurn !== null,
@@ -3967,12 +4107,18 @@ export function createCodexAppServerRuntime(params: Readonly<{
                 } catch (error) {
                     const failure = error instanceof Error ? error : new Error(String(error));
                     const failedTurnHadMeaningfulActivity = activeTurnHasMeaningfulContextWindowRecoveryActivity;
-                    await finishPendingTurn({ error: failure, flushReason: 'abort' });
-                    if (isCodexAppServerConnectedServiceAuthTransportInvalidatedTurn(failure)) {
+                    const isConnectedServiceAuthTransportInvalidation =
+                        isCodexAppServerConnectedServiceAuthTransportInvalidatedTurn(failure);
+                    await finishPendingTurn({
+                        error: failure,
+                        emitUndeliverablePrompt: isConnectedServiceAuthTransportInvalidation ? false : undefined,
+                        flushReason: 'abort',
+                    });
+                    if (isConnectedServiceAuthTransportInvalidation) {
                         await waitForConnectedServiceAuthTransportInvalidationRecovery();
                         if (failedTurnHadMeaningfulActivity) {
                             promptForAttempt = contextWindowRecoveryConfig.continuationPrompt;
-                            optionsForAttempt = undefined;
+                            optionsForAttempt = buildCodexAppServerRetryDeliveryIdentityOptions(pendingProviderPrompt);
                         }
                         continue;
                     }
@@ -3993,7 +4139,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
                             recoveredTemporaryRecoverableTurnFailure = true;
                             promptForAttempt = retryDecision.prompt;
                             if (retryDecision.promptKind === 'continuation') {
-                                optionsForAttempt = undefined;
+                                optionsForAttempt = buildCodexAppServerRetryDeliveryIdentityOptions(pendingProviderPrompt);
                             } else {
                                 optionsForAttempt = options;
                             }
@@ -4032,7 +4178,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
                             }
                             promptForAttempt = retryDecision.prompt;
                             if (retryDecision.promptKind === 'continuation') {
-                                optionsForAttempt = undefined;
+                                optionsForAttempt = buildCodexAppServerRetryDeliveryIdentityOptions(pendingProviderPrompt);
                             } else {
                                 optionsForAttempt = options;
                             }
@@ -4245,15 +4391,37 @@ export function createCodexAppServerRuntime(params: Readonly<{
                     error: 'runtime_identity_probe_account_mismatch',
                 };
             }
-            const identity = latestConnectedServiceRuntimeIdentity;
-            if (!identity) {
-                return {
-                    ok: false,
-                    errorCode: 'runtime_identity_probe_missing_exact_identity',
-                    error: 'runtime_identity_probe_missing_exact_identity',
-                };
-            }
             const expected = readCodexConnectedServiceRuntimeAuthExpected(request.expected);
+            const fanoutExpectedContext = request.reason === 'same_provider_account_exhausted'
+                ? expected
+                : null;
+            let identity = latestConnectedServiceRuntimeIdentity;
+            const refreshSelection = resolveOpenAiCodexDaemonRefreshSelection(runtimeEnv, params.session);
+            const staleCachedIdentity = identity
+                ? !runtimeIdentityMatchesRefreshSelection(identity, refreshSelection)
+                : false;
+            if (staleCachedIdentity) {
+                try {
+                    identity = await refreshLiveAccountRuntimeIdentity(fanoutExpectedContext);
+                } catch (error) {
+                    logger.debug('[codex-app-server] Failed to refresh stale connected-service runtime identity probe from live account (non-fatal)', error);
+                    identity = null;
+                }
+            }
+            if (!identity) {
+                try {
+                    identity = await refreshLiveAccountRuntimeIdentity(fanoutExpectedContext);
+                } catch (error) {
+                    logger.debug('[codex-app-server] Failed to read live account identity for connected-service runtime identity probe (non-fatal)', error);
+                }
+                if (!identity) {
+                    return {
+                        ok: false,
+                        errorCode: 'runtime_identity_probe_missing_exact_identity',
+                        error: 'runtime_identity_probe_missing_exact_identity',
+                    };
+                }
+            }
             if (expected?.groupId && expected.groupId !== identity.groupId) {
                 return {
                     ok: false,

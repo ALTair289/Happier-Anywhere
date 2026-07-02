@@ -17,11 +17,14 @@ import {
   AcpConfigOptionOverridesV1Schema,
   AgentRuntimeDescriptorV1Schema,
   BackendTargetRefSchema,
+  RestartAllSessionRunnersRequestV1Schema,
+  RestartSessionRunnerRequestV1Schema,
   SessionConnectedServiceAuthSwitchRpcParamsSchema,
   SessionContinueWithReplayRpcParamsSchema,
   SessionForkRpcParamsSchema,
   SessionInitialGoalRequestV1Schema,
   SessionMcpSelectionV1Schema,
+  SessionRunnerStatusGetRequestV1Schema,
   isSpawnSessionErrorDetail,
   type ConnectedServiceBindingsV1,
 } from '@happier-dev/protocol';
@@ -54,9 +57,15 @@ import {
   type SessionHandoffDirectPeerTransferHandle,
 } from './rpcHandlers.sessionHandoff';
 import { registerMachinePromptAssetsRpcHandlers } from './rpcHandlers.promptAssets';
-import { registerMachinePromptAssetTransferRpcHandlers } from './rpcHandlers.promptAssetTransfers';
+import {
+  registerMachinePromptAssetTransferRpcHandlers,
+  type MachinePromptAssetTransferRpcRegistration,
+} from './rpcHandlers.promptAssetTransfers';
 import { registerMachinePromptRegistriesRpcHandlers } from './rpcHandlers.promptRegistries';
-import { registerMachinePromptRegistryTransferRpcHandlers } from './rpcHandlers.promptRegistryTransfers';
+import {
+  registerMachinePromptRegistryTransferRpcHandlers,
+  type MachinePromptRegistryTransferRpcRegistration,
+} from './rpcHandlers.promptRegistryTransfers';
 import { registerMachineSessionGoalRpcHandlers } from './rpcHandlers.sessionGoals';
 import { registerMachineServerWorkRpcHandlers } from './rpcHandlers.serverWork';
 import type { DaemonServerWorkScheduler } from '@/daemon/serverWork';
@@ -94,7 +103,12 @@ import { dispatchProviderNativeFork } from '@/session/fork/providerNativeForkDis
 import { createPromptAssetAdapterRegistry } from '@/promptAssets/createPromptAssetAdapterRegistry';
 import { createPromptRegistryAdapterRegistry } from '@/promptRegistries/createPromptRegistryAdapterRegistry';
 import { normalizeSpawnSessionDirectory } from '@/rpc/handlers/spawnSessionOptionsContract';
-import { requestDaemonSessionConnectedServiceAuthSwitch } from '@/daemon/controlClient';
+import {
+  getDaemonSessionRunnerStatus,
+  requestDaemonSessionConnectedServiceAuthSwitch,
+  restartAllDaemonSessionRunners,
+  requestDaemonSessionRunnerRestart,
+} from '@/daemon/controlClient';
 
 function normalizeDaemonSpawnSessionEnvelope(result: unknown): SpawnSessionResult | null {
   if (!result || typeof result !== 'object') return null;
@@ -191,6 +205,12 @@ export type MachineRpcHandlerDeps = Readonly<{
   retryTemporaryThrottleNow?: RetryTemporaryThrottleNow;
 }>;
 
+export type MachineRpcLifecycleRegistration = Readonly<{
+  promptAssetTransfers: MachinePromptAssetTransferRpcRegistration;
+  promptRegistryTransfers: MachinePromptRegistryTransferRpcRegistration;
+  dispose: () => Promise<void>;
+}>;
+
 async function fetchForkChildSessionOrThrow(params: Readonly<{
   token: string;
   sessionId: string;
@@ -265,7 +285,7 @@ export function registerMachineRpcHandlers(params: Readonly<{
   rpcHandlerManager: RpcHandlerManager;
   handlers: MachineRpcHandlers;
   deps?: MachineRpcHandlerDeps;
-}>): void {
+}>): MachineRpcLifecycleRegistration {
   const { rpcHandlerManager, handlers } = params;
   const { spawnSession, stopSession, requestShutdown } = handlers;
   const memoryWorker = handlers.memory ?? null;
@@ -285,6 +305,30 @@ export function registerMachineRpcHandlers(params: Readonly<{
       return { ok: false, errorCode: 'unsupported_service' };
     }
     return await requestDaemonSessionConnectedServiceAuthSwitch(parsed);
+  });
+
+  rpcHandlerManager.registerHandler(RPC_METHODS.DAEMON_SESSION_RUNNER_RESTART, async (raw: unknown) => {
+    const parsed = RestartSessionRunnerRequestV1Schema.safeParse(raw);
+    if (!parsed.success) {
+      throw new Error('Invalid daemon session runner restart request');
+    }
+    return await requestDaemonSessionRunnerRestart(parsed.data);
+  });
+
+  rpcHandlerManager.registerHandler(RPC_METHODS.DAEMON_SESSION_RUNNER_RESTART_ALL, async (raw: unknown) => {
+    const parsed = RestartAllSessionRunnersRequestV1Schema.safeParse(raw);
+    if (!parsed.success) {
+      throw new Error('Invalid daemon session runner restart-all request');
+    }
+    return await restartAllDaemonSessionRunners(parsed.data);
+  });
+
+  rpcHandlerManager.registerHandler(RPC_METHODS.DAEMON_SESSION_RUNNER_STATUS_GET, async (raw: unknown) => {
+    const parsed = SessionRunnerStatusGetRequestV1Schema.safeParse(raw);
+    if (!parsed.success) {
+      throw new Error('Invalid daemon session runner status request');
+    }
+    return await getDaemonSessionRunnerStatus(parsed.data);
   });
 
   // Register spawn session handler
@@ -578,7 +622,7 @@ export function registerMachineRpcHandlers(params: Readonly<{
     rpcHandlerManager,
     adapterRegistry: promptAssetAdapterRegistry,
   });
-  registerMachinePromptAssetTransferRpcHandlers({
+  const promptAssetTransfers = registerMachinePromptAssetTransferRpcHandlers({
     rpcHandlerManager,
     adapterRegistry: promptAssetAdapterRegistry,
   });
@@ -591,7 +635,7 @@ export function registerMachineRpcHandlers(params: Readonly<{
       happierHomeDir: params.deps?.promptAssetsHappierHomeDir,
     },
   });
-  registerMachinePromptRegistryTransferRpcHandlers({
+  const promptRegistryTransfers = registerMachinePromptRegistryTransferRpcHandlers({
     rpcHandlerManager,
     registry: promptRegistryAdapterRegistry,
   });
@@ -1474,4 +1518,15 @@ export function registerMachineRpcHandlers(params: Readonly<{
       uploadUrl: typeof params?.uploadUrl === 'string' ? params.uploadUrl : null,
     };
   });
+
+  return {
+    promptAssetTransfers,
+    promptRegistryTransfers,
+    dispose: async () => {
+      await Promise.all([
+        promptAssetTransfers.dispose(),
+        promptRegistryTransfers.dispose(),
+      ]);
+    },
+  };
 }

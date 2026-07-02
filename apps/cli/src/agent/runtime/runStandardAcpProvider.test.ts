@@ -635,6 +635,16 @@ describe('runStandardAcpProvider', () => {
     expect(harness.metrics.defaultReadyCalls).toBe(0);
   });
 
+  it('defers user-message delivery watermarks when the standard provider config opts in', async () => {
+    const harness = createHarness();
+    harness.session.deferDeliveredUserMessageWatermarkToProviderAcceptance = vi.fn();
+    (harness.config as any).deferUserMessageDeliveryWatermarkToProviderAcceptance = true;
+
+    await runStandardAcpProvider(harness.opts, harness.config, harness.deps);
+
+    expect(harness.session.deferDeliveredUserMessageWatermarkToProviderAcceptance).toHaveBeenCalledTimes(1);
+  });
+
   it('uses provider-controlled keep-alive mode when configured', async () => {
     const harness = createHarness();
     const keepAliveModes: string[] = [];
@@ -810,6 +820,14 @@ describe('runStandardAcpProvider', () => {
 
     expect(harness.metrics.permissionAbortReasons).toEqual(['Session ended']);
     expect(harness.metrics.callOrder).toEqual(['permission:Session ended', 'backend-cleanup']);
+  });
+
+  it('closes the API session during cleanup so unresolved provider claims can be blocked', async () => {
+    const harness = createHarness();
+
+    await runStandardAcpProvider(harness.opts, harness.config, harness.deps);
+
+    expect(harness.session.close).toHaveBeenCalledTimes(1);
   });
 
   it('invokes abort handler lifecycle when abort RPC fires', async () => {

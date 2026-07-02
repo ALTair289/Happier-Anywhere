@@ -11,10 +11,9 @@ import { ClaudeTurnChangeTracker } from '../utils/ClaudeTurnChangeTracker';
 import { isClaudeExplicitDiffToolInput } from '../utils/isClaudeExplicitDiffToolInput';
 import { isReadOnlyClaudeSdkToolAllowed } from './isReadOnlyClaudeSdkToolAllowed';
 import {
-  isTerminalClaudeAgentSdkProviderTaskStatus,
-  normalizeClaudeAgentSdkProviderTaskId,
-  readClaudeAgentSdkProviderTaskStatus,
-} from '@/backends/claude/sdk/providerTaskStatus';
+  createClaudeProviderActivityLedger,
+  readClaudeProviderTaskActivity,
+} from '@/backends/claude/providerActivity/createClaudeProviderActivityLedger';
 
 export type ClaudeSdkPermissionPolicy = 'no_tools' | 'read_only' | 'workspace_write';
 
@@ -27,6 +26,7 @@ export class ClaudeSdkAgentBackend implements AgentBackend {
   private readonly toolNameByCallId = new Map<string, string>();
   private readonly suppressedExplicitDiffCallIds = new Set<string>();
   private readonly turnChangeTracker = new ClaudeTurnChangeTracker();
+  private readonly providerActivityLedger = createClaudeProviderActivityLedger();
   private query: ReturnType<typeof query> | null = null;
   private activeTaskId: string | null = null;
 
@@ -108,6 +108,7 @@ export class ClaudeSdkAgentBackend implements AgentBackend {
     if (this.started) return;
     this.started = true;
     this.activeTaskId = null;
+    this.providerActivityLedger.clearProviderTasks();
 
     const model = this.normalizeModelId(this.opts.modelId);
     const canCallTool = this.buildCanCallTool();
@@ -237,6 +238,7 @@ export class ClaudeSdkAgentBackend implements AgentBackend {
       const pending = this.pendingTurn;
       this.pendingTurn = null;
       this.pendingTurnCompletion = null;
+      this.providerActivityLedger.clearProviderTasks();
       this.settledTurnOrdinal = this.currentTurnOrdinal;
       this.turnChangeTracker.resetTurn();
       pending?.reject(new Error('Turn cancelled'));
@@ -286,6 +288,7 @@ export class ClaudeSdkAgentBackend implements AgentBackend {
     if (pending) {
       this.pendingTurn = null;
       this.pendingTurnCompletion = null;
+      this.providerActivityLedger.clearProviderTasks();
       this.suppressedExplicitDiffCallIds.clear();
       this.settledTurnOrdinal = this.currentTurnOrdinal;
       pending.reject(new Error('Agent disposed'));
@@ -349,6 +352,7 @@ export class ClaudeSdkAgentBackend implements AgentBackend {
       if (pending) {
         this.pendingTurn = null;
         this.pendingTurnCompletion = null;
+        this.providerActivityLedger.clearProviderTasks();
         this.turnChangeTracker.resetTurn();
         this.suppressedExplicitDiffCallIds.clear();
         pending.reject(fatal);
@@ -360,38 +364,72 @@ export class ClaudeSdkAgentBackend implements AgentBackend {
     }
   }
 
+  private emitIdleIfProviderBackgroundWorkComplete(): void {
+    if (this.pendingTurn || this.providerActivityLedger.hasActiveProviderTasks()) return;
+    this.activeTaskId = null;
+    this.providerActivityLedger.clearProviderTasks();
+    this.emit({ type: 'status', status: 'idle' });
+  }
+
+  private completeSuccessfulTurn(params: Readonly<{ settledTurnOrdinal: number | null }>): void {
+    const turnChangeSet = this.turnChangeTracker.completeTurn({
+      sessionId: this.vendorSessionId ?? this.localSessionId,
+      status: 'completed',
+    });
+    if (turnChangeSet) {
+      emitCanonicalTurnDiffTool({
+        turnChangeSet,
+        protocol: 'claude',
+        rawToolName: 'ClaudeTurnDiff',
+        sendToolCall: ({ toolName, input, callId }) => {
+          const resolvedCallId = callId ?? randomUUID();
+          const args = input && typeof input === 'object' && !Array.isArray(input)
+            ? (input as Record<string, unknown>)
+            : {};
+          this.emit({ type: 'tool-call', toolName, callId: resolvedCallId, args });
+          return resolvedCallId;
+        },
+        sendToolResult: ({ callId, output }) => {
+          this.emit({ type: 'tool-result', toolName: 'Diff', callId, result: output });
+        },
+      });
+    }
+
+    this.toolNameByCallId.clear();
+    this.suppressedExplicitDiffCallIds.clear();
+    const pending = this.pendingTurn;
+    if (pending) {
+      this.pendingTurn = null;
+      this.pendingTurnCompletion = null;
+      pending.resolve();
+    }
+    if (params.settledTurnOrdinal !== null) {
+      this.settledTurnOrdinal = params.settledTurnOrdinal;
+    }
+    this.emitIdleIfProviderBackgroundWorkComplete();
+  }
+
   private handleSdkMessage(msg: SDKMessage): void {
     if (!msg || typeof msg !== 'object') return;
     const type = msg.type;
     if (type === 'system') {
       const system = msg as SDKSystemMessage;
-      const subtype = system.subtype;
-
-      if (subtype === 'task_started') {
-        const taskId = normalizeClaudeAgentSdkProviderTaskId(system.task_id);
-        const isTerminalTaskStatus = isTerminalClaudeAgentSdkProviderTaskStatus(readClaudeAgentSdkProviderTaskStatus(system));
-        if (taskId && !isTerminalTaskStatus) {
-          this.activeTaskId = taskId;
+      const taskActivity = readClaudeProviderTaskActivity(system);
+      if (taskActivity?.type === 'started') {
+        this.activeTaskId = taskActivity.taskId;
+        this.providerActivityLedger.noteProviderTaskStarted(taskActivity.taskId);
+      } else if (taskActivity?.type === 'progress') {
+        if (!this.activeTaskId) {
+          this.activeTaskId = taskActivity.taskId;
         }
-        if (taskId && isTerminalTaskStatus && taskId === this.activeTaskId) {
+        this.providerActivityLedger.noteProviderTaskProgress(taskActivity.taskId);
+      } else if (taskActivity?.type === 'terminal') {
+        if (taskActivity.taskId === this.activeTaskId) {
           this.activeTaskId = null;
         }
-      } else if (subtype === 'task_progress') {
-        const taskId = normalizeClaudeAgentSdkProviderTaskId(system.task_id);
-        const isTerminalTaskStatus = isTerminalClaudeAgentSdkProviderTaskStatus(readClaudeAgentSdkProviderTaskStatus(system));
-        if (!this.activeTaskId && taskId && !isTerminalTaskStatus) {
-          this.activeTaskId = taskId;
-        }
-        if (taskId && isTerminalTaskStatus && taskId === this.activeTaskId) {
-          this.activeTaskId = null;
-        }
-      } else if (subtype === 'task_notification') {
-        const taskId = normalizeClaudeAgentSdkProviderTaskId(system.task_id);
-        const status = readClaudeAgentSdkProviderTaskStatus(system);
-        if (taskId && taskId === this.activeTaskId && isTerminalClaudeAgentSdkProviderTaskStatus(status)) {
-          this.activeTaskId = null;
-        }
+        this.providerActivityLedger.noteProviderTaskFinished(taskActivity.taskId);
       }
+      this.emitIdleIfProviderBackgroundWorkComplete();
 
       if (system.subtype === 'init') {
         const previousVendorSessionId = this.vendorSessionId;
@@ -407,35 +445,7 @@ export class ClaudeSdkAgentBackend implements AgentBackend {
           previousVendorSessionId !== system.session_id.trim(),
         );
         if (isSessionBoundary && pending) {
-          const turnChangeSet = this.turnChangeTracker.completeTurn({
-            sessionId: this.vendorSessionId ?? this.localSessionId,
-            status: 'completed',
-          });
-          if (turnChangeSet) {
-            emitCanonicalTurnDiffTool({
-              turnChangeSet,
-              protocol: 'claude',
-              rawToolName: 'ClaudeTurnDiff',
-              sendToolCall: ({ toolName, input, callId }) => {
-                const resolvedCallId = callId ?? randomUUID();
-                const args = input && typeof input === 'object' && !Array.isArray(input)
-                  ? (input as Record<string, unknown>)
-                  : {};
-                this.emit({ type: 'tool-call', toolName, callId: resolvedCallId, args });
-                return resolvedCallId;
-              },
-              sendToolResult: ({ callId, output }) => {
-                this.emit({ type: 'tool-result', toolName: 'Diff', callId, result: output });
-              },
-            });
-          }
-          this.toolNameByCallId.clear();
-          this.suppressedExplicitDiffCallIds.clear();
-          this.pendingTurn = null;
-          this.pendingTurnCompletion = null;
-          this.settledTurnOrdinal = this.currentTurnOrdinal;
-          pending.resolve();
-          this.emit({ type: 'status', status: 'idle' });
+          this.completeSuccessfulTurn({ settledTurnOrdinal: this.currentTurnOrdinal });
         }
       }
       return;
@@ -444,6 +454,13 @@ export class ClaudeSdkAgentBackend implements AgentBackend {
     if (type === 'user') {
       // Tool results are emitted as user-content blocks in the Claude SDK stream.
       const user = msg as any;
+      const taskActivity = readClaudeProviderTaskActivity(user);
+      if (taskActivity?.type === 'background') {
+        const backgroundTaskId = this.providerActivityLedger.noteBackgroundProviderTask(taskActivity.taskId);
+        if (backgroundTaskId && !this.activeTaskId) {
+          this.activeTaskId = backgroundTaskId;
+        }
+      }
       const content = user?.message?.content;
       if (Array.isArray(content)) {
         for (const block of content) {
@@ -527,39 +544,7 @@ export class ClaudeSdkAgentBackend implements AgentBackend {
       this.emitTokenCountTelemetry(result);
 
       if (result.subtype === 'success') {
-        const turnChangeSet = this.turnChangeTracker.completeTurn({
-          sessionId: this.vendorSessionId ?? this.localSessionId,
-          status: 'completed',
-        });
-        if (turnChangeSet) {
-          emitCanonicalTurnDiffTool({
-            turnChangeSet,
-            protocol: 'claude',
-            rawToolName: 'ClaudeTurnDiff',
-            sendToolCall: ({ toolName, input, callId }) => {
-              const resolvedCallId = callId ?? randomUUID();
-              const args = input && typeof input === 'object' && !Array.isArray(input)
-                ? (input as Record<string, unknown>)
-                : {};
-              this.emit({ type: 'tool-call', toolName, callId: resolvedCallId, args });
-              return resolvedCallId;
-            },
-            sendToolResult: ({ callId, output }) => {
-              this.emit({ type: 'tool-result', toolName: 'Diff', callId, result: output });
-            },
-          });
-        }
-        // A completed turn means tool call ids won't be reused; keep memory bounded.
-        this.toolNameByCallId.clear();
-        this.suppressedExplicitDiffCallIds.clear();
-        const pending = this.pendingTurn;
-        if (pending) {
-          this.pendingTurn = null;
-          this.pendingTurnCompletion = null;
-          pending.resolve();
-        }
-        this.settledTurnOrdinal = result.num_turns;
-        this.emit({ type: 'status', status: 'idle' });
+        this.completeSuccessfulTurn({ settledTurnOrdinal: result.num_turns });
         return;
       }
 
@@ -571,6 +556,7 @@ export class ClaudeSdkAgentBackend implements AgentBackend {
       if (pending) {
         this.pendingTurn = null;
         this.pendingTurnCompletion = null;
+        this.providerActivityLedger.clearProviderTasks();
         this.turnChangeTracker.resetTurn();
         this.suppressedExplicitDiffCallIds.clear();
         pending.reject(new Error(`Claude SDK error: ${result.subtype}`));

@@ -26,12 +26,21 @@ function historicalCatchUpCreatedAt(): number {
 const { mockIo } = vi.hoisted(() => ({
     mockIo: vi.fn(),
 }));
+const { mockFetchSessionSystemRecordHttp, mockUpsertSessionSystemRecordHttp } = vi.hoisted(() => ({
+    mockFetchSessionSystemRecordHttp: vi.fn(),
+    mockUpsertSessionSystemRecordHttp: vi.fn(),
+}));
 
 let mockSocket: any;
 let mockUserSocket: any;
 
 vi.mock('socket.io-client', () => ({
     io: mockIo
+}));
+
+vi.mock('@/session/transport/http/sessionSystemRecordsHttp', () => ({
+    fetchSessionSystemRecord: (...args: unknown[]) => mockFetchSessionSystemRecordHttp(...args),
+    upsertSessionSystemRecord: (...args: unknown[]) => mockUpsertSessionSystemRecordHttp(...args),
 }));
 
 vi.mock('./session/connection/createSessionSocketTransport', () => ({
@@ -488,6 +497,8 @@ describe('ApiSessionClient connection handling', () => {
         ]);
         originalArgv = [...process.argv];
         vi.spyOn(console, 'log').mockImplementation(() => {});
+        mockFetchSessionSystemRecordHttp.mockReset();
+        mockUpsertSessionSystemRecordHttp.mockReset();
 
         replaceSocketPair();
 
@@ -546,6 +557,77 @@ describe('ApiSessionClient connection handling', () => {
     it('exposes last observed transcript seq for fork/resume heuristics', () => {
         const client = createClient('token', mockSession);
         expect(client.getLastObservedMessageSeq()).toBe(0);
+    });
+
+    it('upserts session system records through the canonical HTTP helper', async () => {
+        const client = createClient('token', mockSession);
+        connectSessionSocket();
+        mockUpsertSessionSystemRecordHttp.mockResolvedValueOnce({
+            id: 'record-1',
+            sessionId: mockSession.id,
+            namespace: 'activity',
+            kind: 'workflow_run.v1',
+            localId: 'activity:workflow_run:v1:run-1',
+            content: { t: 'plain', v: { v: 1 } },
+            createdAt: '2026-06-30T00:00:00.000Z',
+            updatedAt: '2026-06-30T00:00:00.000Z',
+        });
+
+        await client.upsertSessionSystemRecord({
+            namespace: 'activity',
+            kind: 'workflow_run.v1',
+            localId: 'activity:workflow_run:v1:run-1',
+            content: { t: 'plain', v: { v: 1 } },
+        });
+
+        expect(mockUpsertSessionSystemRecordHttp).toHaveBeenCalledWith({
+            token: 'token',
+            sessionId: mockSession.id,
+            namespace: 'activity',
+            kind: 'workflow_run.v1',
+            localId: 'activity:workflow_run:v1:run-1',
+            content: { t: 'plain', v: { v: 1 } },
+        });
+        expect(mockSocket.emitWithAck).not.toHaveBeenCalledWith('upsert-system-record', expect.anything());
+    });
+
+    it('fetches session system records through the canonical HTTP helper', async () => {
+        const client = createClient('token', mockSession);
+        const record = {
+            id: 'record-1',
+            sessionId: mockSession.id,
+            namespace: 'activity',
+            kind: 'workflow_run.v1',
+            localId: 'activity:workflow_run:v1:run-1',
+            content: { t: 'plain', v: { v: 1 } },
+            createdAt: '2026-06-30T00:00:00.000Z',
+            updatedAt: '2026-06-30T00:00:00.000Z',
+        };
+        mockFetchSessionSystemRecordHttp.mockResolvedValueOnce(record);
+
+        await expect(client.fetchSessionSystemRecord({
+            namespace: 'activity',
+            localId: 'activity:workflow_run:v1:run-1',
+        })).resolves.toBe(record);
+
+        expect(mockFetchSessionSystemRecordHttp).toHaveBeenCalledWith({
+            token: 'token',
+            sessionId: mockSession.id,
+            namespace: 'activity',
+            localId: 'activity:workflow_run:v1:run-1',
+        });
+    });
+
+    it('exposes the current stored-content encryption context for session-owned records', () => {
+        const client = createClient('token', mockSession);
+
+        expect(client.getStoredContentEncryptionContext()).toEqual({
+            mode: 'e2ee',
+            ctx: {
+                encryptionKey: mockSession.encryptionKey,
+                encryptionVariant: mockSession.encryptionVariant,
+            },
+        });
     });
 
     it('keeps execution.run.send RPC registered even when execution.runs is disabled', async () => {
@@ -663,6 +745,47 @@ describe('ApiSessionClient connection handling', () => {
             expect.objectContaining({
                 role: 'user',
                 content: { type: 'text', text: 'wake prompt committed before runner attach' },
+            }),
+            { seq: 1 },
+        );
+    });
+
+    it('delivers post-attach startup catch-up user messages missed by the live socket', async () => {
+        const axiosMod = await import('axios');
+        const axios = axiosMod.default as any;
+        const plaintext = {
+            role: 'user',
+            content: { type: 'text', text: 'spawned session follow-up prompt' },
+            localId: 'first-turn-local',
+            meta: { source: 'ui', sentFrom: 'web' },
+        };
+        const getSpy = vi.spyOn(axios, 'get').mockImplementation(async () =>
+            buildMessagesListResponse([
+                buildEncryptedTranscriptMessage({
+                    session: mockSession,
+                    plaintext,
+                    id: 'm-spawned-follow-up-1',
+                    seq: 1,
+                    localId: 'first-turn-local',
+                    createdAt: Date.now() + 10,
+                }),
+            ]),
+        );
+
+        mockSession.seq = 0;
+        mockSession.metadata.startedBy = 'daemon';
+
+        const client = createClient('token', mockSession);
+        const onUserMessage = vi.fn();
+        client.onUserMessage(onUserMessage);
+
+        await waitForNextTick();
+        expect(getSessionMessagesGetCalls(getSpy, mockSession.id).length).toBeGreaterThanOrEqual(1);
+        expect(onUserMessage).toHaveBeenCalledWith(
+            expect.objectContaining({
+                role: 'user',
+                content: { type: 'text', text: 'spawned session follow-up prompt' },
+                localId: 'first-turn-local',
             }),
             { seq: 1 },
         );
@@ -1394,7 +1517,7 @@ describe('ApiSessionClient connection handling', () => {
         });
     });
 
-    it('consumes daemon initial prompt env and seeds one user prompt on callback attach', () => {
+    it('consumes daemon initial prompt env and seeds one user prompt on callback attach', async () => {
         envScope.patch({ HAPPIER_DAEMON_INITIAL_PROMPT: '  run nightly health check  ' });
 
         const client = createClient('fake-token', mockSession);
@@ -1403,6 +1526,7 @@ describe('ApiSessionClient connection handling', () => {
 
         client.onUserMessage(onUserMessage);
         client.onUserMessage(onUserMessage);
+        await waitForNextTick();
 
         expect(onUserMessage).toHaveBeenCalledTimes(1);
         expect(onUserMessage).toHaveBeenCalledWith(
@@ -2334,6 +2458,31 @@ describe('ApiSessionClient connection handling', () => {
                 expect.objectContaining({ sid: mockSession.id, thinking: false, mode: 'remote' }),
             ],
         ]);
+    });
+
+    it('replays the latest keepAlive state as non-volatile presence after reconnect', async () => {
+        replaceSocketPair({ sessionSocket: createConfiguredSocket({ connected: false }) });
+        const client = createClient('fake-token', mockSession);
+        await new Promise((resolve) => setImmediate(resolve));
+        mockSocket.emit.mockClear();
+        mockSocket.volatile.emit.mockClear();
+
+        client.keepAlive(true, 'remote');
+        client.keepAlive(false, 'remote');
+
+        expect(getSocketEventCalls(mockSocket, 'session-alive')).toHaveLength(0);
+        expect(getSocketVolatileEventCalls(mockSocket, 'session-alive')).toHaveLength(0);
+
+        mockSocket.connected = true;
+        await (client as any).sessionConnectionSupervisor.start();
+
+        expect(getSocketEventCalls(mockSocket, 'session-alive')).toEqual([
+            [
+                'session-alive',
+                expect.objectContaining({ sid: mockSession.id, thinking: false, mode: 'remote' }),
+            ],
+        ]);
+        expect(getSocketVolatileEventCalls(mockSocket, 'session-alive')).toHaveLength(0);
     });
 
 		    it('attaches server localId onto decrypted user messages', async () => {

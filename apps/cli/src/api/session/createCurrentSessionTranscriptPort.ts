@@ -19,8 +19,14 @@ type TranscriptPortSession = Readonly<{
   sendAgentMessageEphemeral?: (
     provider: ACPProvider,
     body: ACPMessageData,
-    opts: { localId: string; createdAt: number; updatedAt?: number; meta?: Record<string, unknown> },
+    opts: { localId: string; createdAt: number; updatedAt?: number; meta?: Record<string, unknown>; tick?: number },
   ) => void;
+  sendAgentMessageEphemeralDelta?: (
+    provider: ACPProvider,
+    body: ACPMessageData,
+    opts: { localId: string; tick: number; baseLength: number; createdAt: number; updatedAt?: number; meta?: Record<string, unknown> },
+  ) => void;
+  getEphemeralStreamConnectionEpoch?: () => number;
 }>;
 
 export function createCurrentSessionTranscriptPort(
@@ -42,8 +48,20 @@ export function createCurrentSessionTranscriptPort(
       return (
         provider: ACPProvider,
         body: ACPMessageData,
-        opts: { localId: string; createdAt: number; updatedAt?: number; meta?: Record<string, unknown> },
+        opts: { localId: string; createdAt: number; updatedAt?: number; meta?: Record<string, unknown>; tick?: number },
       ) => getSession().sendAgentMessageEphemeral?.(provider, body, opts);
+    },
+    get sendAgentMessageEphemeralDelta() {
+      if (typeof getSession().sendAgentMessageEphemeralDelta !== 'function') return undefined;
+      return (
+        provider: ACPProvider,
+        body: ACPMessageData,
+        opts: { localId: string; tick: number; baseLength: number; createdAt: number; updatedAt?: number; meta?: Record<string, unknown> },
+      ) => getSession().sendAgentMessageEphemeralDelta?.(provider, body, opts);
+    },
+    get getEphemeralStreamConnectionEpoch() {
+      if (typeof getSession().getEphemeralStreamConnectionEpoch !== 'function') return undefined;
+      return () => getSession().getEphemeralStreamConnectionEpoch?.() ?? 0;
     },
   };
 }

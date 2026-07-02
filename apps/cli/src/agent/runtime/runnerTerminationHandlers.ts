@@ -5,8 +5,15 @@ import {
   type RunnerTerminationEvent,
   type RunnerTerminationOutcome,
 } from './runnerTerminationOutcome';
+import { writeSessionExitReportSync } from '../../session/diagnostics/sessionExitReport';
 
 type ProcessLike = Pick<EventEmitter, 'on' | 'removeListener'>;
+type RunnerTerminationSessionExitReportOptions = Readonly<{
+  baseDir?: string;
+  sessionId?: string | null;
+  pid?: number;
+  now?: () => number;
+}>;
 
 function clampTerminationTimeoutMs(rawValue: unknown, fallbackMs: number, maxMs: number): number {
   const raw = Number.parseInt(String(rawValue ?? ''), 10);
@@ -24,10 +31,40 @@ export type RunnerTerminationHandlerRegistration = Readonly<{
   dispose: () => void;
 }>;
 
+function writeRunnerTerminationSessionExitReport(params: Readonly<{
+  options: RunnerTerminationSessionExitReportOptions | null | undefined;
+  event: RunnerTerminationEvent;
+  outcome: RunnerTerminationOutcome;
+}>): void {
+  const options = params.options;
+  if (!options) return;
+
+  const observedAt = options.now?.() ?? Date.now();
+  try {
+    writeSessionExitReportSync({
+      baseDir: options.baseDir,
+      sessionId: options.sessionId ?? null,
+      pid: options.pid ?? process.pid,
+      report: {
+        observedAt,
+        observedBy: 'session',
+        reason: 'runner-termination',
+        terminationKind: params.event.kind,
+        terminationSignal: params.event.kind === 'signal' ? params.event.signal : null,
+        terminationRequestedAt: observedAt,
+        terminationReason: params.outcome.archiveReason ?? null,
+      },
+    });
+  } catch {
+    // Diagnostic writes must never prevent process termination.
+  }
+}
+
 export function registerRunnerTerminationHandlers(params: Readonly<{
   process: ProcessLike;
   exit: (code: number) => void;
   onTerminate: (event: RunnerTerminationEvent, outcome: RunnerTerminationOutcome) => void | Promise<void>;
+  sessionExitReport?: RunnerTerminationSessionExitReportOptions | null;
   /**
    * Optional policy hook to decide whether an unhandled rejection should
    * terminate the runner process.
@@ -49,7 +86,10 @@ export function registerRunnerTerminationHandlers(params: Readonly<{
     terminated = true;
 
     const outcome = computeRunnerTerminationOutcome(event);
-    const terminationWork = Promise.resolve(params.onTerminate(event, outcome));
+    writeRunnerTerminationSessionExitReport({ options: params.sessionExitReport, event, outcome });
+    const terminationWork = Promise.resolve()
+      .then(() => params.onTerminate(event, outcome))
+      .catch(() => undefined);
     const completion = new Promise<void>((resolve) => {
       const timer = setTimeout(() => resolve(), terminationTimeoutMs);
       terminationWork.finally(() => {

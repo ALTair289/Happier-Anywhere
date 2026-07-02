@@ -28,7 +28,7 @@ import type {
     MachineTransferSendEnvelope,
 } from '@happier-dev/protocol';
 import { fetchChanges, fetchChangesAccountId } from './changes';
-import { readLastChangesCursor, writeLastChangesCursor } from '@/persistence';
+import { readAccountChangesCursor, writeAccountChangesCursor } from '@/persistence';
 import { resolveLoopbackHttpUrl } from './client/loopbackUrl';
 import { createAuthenticationHttpStatusError, isAuthenticationError, isAuthenticationStatus } from './client/httpStatusError';
 import { serializeAxiosErrorForLog } from './client/serializeAxiosErrorForLog';
@@ -43,6 +43,7 @@ import {
 import { createSessionEndMutation, createSessionTurnMutation } from './session/mutations/sessionMutationTypes';
 
 import type { DaemonToServerEvents, ServerToDaemonEvents } from './machine/socketTypes';
+import { authorizeMachineRpcRequest } from './machine/machineRpcAuthorization';
 import { registerMachineRpcHandlers, type MachineRpcHandlerDeps, type MachineRpcHandlers } from './machine/rpcHandlers';
 import { resolveMachineRpcWorkingDirectory } from './machine/resolveMachineRpcWorkingDirectory';
 import type { Socket } from 'socket.io-client';
@@ -74,6 +75,10 @@ type MachineSessionEndPayload = Readonly<{
     sid: string;
     time: number;
     exit?: unknown;
+}>;
+
+type RpcLifecycleRegistration = Readonly<{
+    dispose: () => Promise<void>;
 }>;
 
 function isMachineSessionEndPayload(value: unknown): value is MachineSessionEndPayload {
@@ -134,6 +139,7 @@ export class ApiMachineClient {
     private connectionStateListeners = new Set<(state: ManagedConnectionState) => void>();
     private connectionSupervisor: ManagedConnectionSupervisor | null = null;
     private sessionEndMutationOutboxes = new Map<string, SessionMutationOutbox>();
+    private readonly rpcLifecycleRegistrations: RpcLifecycleRegistration[] = [];
     private readonly machineRpcWorkingDirectory: string;
     private readonly filesystemAccessPolicy: FilesystemAccessPolicy;
     private readonly ownershipMetadata: Readonly<{
@@ -205,7 +211,8 @@ export class ApiMachineClient {
             scopePrefix: this.machine.id,
             encryptionKey: this.machine.encryptionKey,
             encryptionVariant: this.machine.encryptionVariant,
-            logger: (msg, data) => logger.debug(msg, data)
+            logger: (msg, data) => logger.debug(msg, data),
+            authorizeRequest: authorizeMachineRpcRequest,
         });
 
         const machineRpcWorkingDirectory = resolveMachineRpcWorkingDirectory();
@@ -214,7 +221,7 @@ export class ApiMachineClient {
         this.filesystemAccessPolicy = filesystemAccessPolicy;
         let additionalAllowedReadDirs: string[] = [];
         let additionalAllowedWriteDirs: string[] = [];
-        registerSessionHandlers(this.rpcHandlerManager, machineRpcWorkingDirectory, {
+        this.rpcLifecycleRegistrations.push(registerSessionHandlers(this.rpcHandlerManager, machineRpcWorkingDirectory, {
             accessPolicy: filesystemAccessPolicy,
             setAdditionalAllowedReadDirs: (dirs) => {
                 additionalAllowedReadDirs = dirs;
@@ -222,12 +229,12 @@ export class ApiMachineClient {
             setAdditionalAllowedWriteDirs: (dirs) => {
                 additionalAllowedWriteDirs = dirs;
             },
-        });
-        registerFileSystemHandlers(this.rpcHandlerManager, machineRpcWorkingDirectory, {
+        }));
+        this.rpcLifecycleRegistrations.push(registerFileSystemHandlers(this.rpcHandlerManager, machineRpcWorkingDirectory, {
             accessPolicy: filesystemAccessPolicy,
             getAdditionalAllowedReadDirs: () => additionalAllowedReadDirs,
             getAdditionalAllowedWriteDirs: () => additionalAllowedWriteDirs,
-        });
+        }));
         registerWorkspaceAnchorHandlers(this.rpcHandlerManager, {
             defaultDirectory: machineRpcWorkingDirectory,
             accessPolicy: filesystemAccessPolicy,
@@ -260,7 +267,7 @@ export class ApiMachineClient {
         machineTransferChannel,
         directPeerTransfer,
     }: MachineRpcHandlers, deps?: MachineRpcHandlerDeps) {
-        registerMachineRpcHandlers({
+        const machineRpcLifecycleRegistration = registerMachineRpcHandlers({
             rpcHandlerManager: this.rpcHandlerManager,
             handlers: {
                 spawnSession,
@@ -283,6 +290,7 @@ export class ApiMachineClient {
                     ?? ((payload) => this.emitDirectSessionTranscriptUpdate(payload)),
             },
         });
+        this.rpcLifecycleRegistrations.push(machineRpcLifecycleRegistration);
     }
 
     onUpdate(listener: (update: Update) => boolean | void): () => void {
@@ -763,6 +771,8 @@ export class ApiMachineClient {
         if (this.connectionSupervisor) {
             await this.connectionSupervisor.stop();
         }
+        await this.rpcHandlerManager.waitForIdle();
+        await this.disposeRpcLifecycleRegistrations();
         const outboxes = Array.from(this.sessionEndMutationOutboxes.values());
         this.sessionEndMutationOutboxes.clear();
         await Promise.all(outboxes.map(async (outbox) => {
@@ -770,6 +780,19 @@ export class ApiMachineClient {
                 await outbox.close();
             } catch (error) {
                 logger.debug('[API MACHINE] Failed to close session-end mutation outbox', {
+                    error: serializeAxiosErrorForLog(error),
+                });
+            }
+        }));
+    }
+
+    private async disposeRpcLifecycleRegistrations(): Promise<void> {
+        const registrations = this.rpcLifecycleRegistrations.splice(0);
+        await Promise.all(registrations.map(async (registration) => {
+            try {
+                await registration.dispose();
+            } catch (error) {
+                logger.debug('[API MACHINE] Failed to dispose RPC lifecycle registration', {
                     error: serializeAxiosErrorForLog(error),
                 });
             }
@@ -904,13 +927,13 @@ export class ApiMachineClient {
             if (!accountId) return;
 
             const CHANGES_PAGE_LIMIT = 200;
-            const after = await readLastChangesCursor(accountId);
+            const after = await readAccountChangesCursor(accountId);
             const result = await fetchChanges({ token: this.token, after, limit: CHANGES_PAGE_LIMIT });
 
             if (result.status === 'cursor-gone') {
                 await this.refreshMachineFromServer();
                 await this.notifyAccountSettingsVersionHint({ settingsVersion: null, source: 'cursor-gone' });
-                await writeLastChangesCursor(accountId, result.currentCursor);
+                await writeAccountChangesCursor(accountId, result.currentCursor);
                 return;
             }
             if (result.status !== 'ok') {
@@ -956,7 +979,7 @@ export class ApiMachineClient {
                 await this.notifyAccountSettingsVersionHint({ settingsVersion: null, source: 'page-limit' });
             }
 
-            await writeLastChangesCursor(accountId, nextCursor);
+            await writeAccountChangesCursor(accountId, nextCursor);
         })();
 
         this.changesSyncInFlight = p;

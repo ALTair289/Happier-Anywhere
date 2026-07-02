@@ -7,6 +7,8 @@ export class ClaudeUnifiedTerminalInjectionFailureError extends Error {
   readonly phase: ClaudeUnifiedPromptInjectionFailure['result']['phase'];
   readonly duplicateRisk: ClaudeUnifiedPromptInjectionFailure['result']['duplicateRisk'];
   readonly recoverable: ClaudeUnifiedPromptInjectionFailure['result']['recoverable'];
+  readonly maxUserMessageSeq: number | null;
+  readonly userMessageLocalIds: readonly string[];
 
   constructor(failure: ClaudeUnifiedPromptInjectionFailure) {
     super(
@@ -20,7 +22,28 @@ export class ClaudeUnifiedTerminalInjectionFailureError extends Error {
     this.phase = failure.result.phase;
     this.duplicateRisk = failure.result.duplicateRisk;
     this.recoverable = failure.result.recoverable;
+    this.maxUserMessageSeq = failure.batch.maxUserMessageSeq ?? null;
+    this.userMessageLocalIds = [...(failure.batch.userMessageLocalIds ?? [])];
   }
+}
+
+export function createClaudeUnifiedTerminalUnobservedFailedTurnError(): ClaudeUnifiedTerminalInjectionFailureError {
+  return new ClaudeUnifiedTerminalInjectionFailureError({
+    batch: {
+      message: '',
+      origin: { kind: 'ui_pending' },
+      maxUserMessageSeq: null,
+      userMessageLocalIds: [],
+    },
+    result: {
+      status: 'failed',
+      reason: 'timeout',
+      phase: 'after_enter_unknown',
+      duplicateRisk: 'likely',
+      recoverable: true,
+    },
+    failureState: 'failed_terminal',
+  });
 }
 
 export function isClaudeUnifiedTerminalInjectionFailureError(
@@ -35,7 +58,9 @@ export function isClaudeUnifiedTerminalAmbiguousInjectionFailureError(
   error: unknown,
 ): error is ClaudeUnifiedTerminalInjectionFailureError {
   return isClaudeUnifiedTerminalInjectionFailureError(error)
-    && (error as { failureState?: unknown }).failureState === 'failed_ambiguous';
+    && (error as { failureState?: unknown }).failureState === 'failed_ambiguous'
+    && !isClaudeUnifiedTerminalUnconfirmedSubmitFailureError(error)
+    && !isClaudeUnifiedTerminalProviderAcceptanceTimeoutError(error);
 }
 
 export function isClaudeUnifiedTerminalTerminalInjectionFailureError(
@@ -43,6 +68,38 @@ export function isClaudeUnifiedTerminalTerminalInjectionFailureError(
 ): error is ClaudeUnifiedTerminalInjectionFailureError {
   return isClaudeUnifiedTerminalInjectionFailureError(error)
     && (error as { failureState?: unknown }).failureState !== 'failed_ambiguous';
+}
+
+function hasUserMessageLocalIds(error: unknown): boolean {
+  const raw = (error as { userMessageLocalIds?: unknown }).userMessageLocalIds;
+  return Array.isArray(raw) && raw.some((value) => typeof value === 'string' && value.trim().length > 0);
+}
+
+export function isClaudeUnifiedTerminalUnclaimableProviderAcceptanceTimeoutError(
+  error: unknown,
+): error is ClaudeUnifiedTerminalInjectionFailureError {
+  return isClaudeUnifiedTerminalProviderAcceptanceTimeoutError(error)
+    && !hasUserMessageLocalIds(error);
+}
+
+export function isClaudeUnifiedTerminalProviderAcceptanceTimeoutError(
+  error: unknown,
+): error is ClaudeUnifiedTerminalInjectionFailureError {
+  return isClaudeUnifiedTerminalInjectionFailureError(error)
+    && (error as { failureState?: unknown }).failureState === 'failed_ambiguous'
+    && (error as { reason?: unknown }).reason === 'timeout'
+    && (error as { phase?: unknown }).phase === 'after_enter_unknown'
+    && (error as { duplicateRisk?: unknown }).duplicateRisk !== 'none'
+    && (error as { recoverable?: unknown }).recoverable === true;
+}
+
+export function isClaudeUnifiedTerminalUnconfirmedSubmitFailureError(
+  error: unknown,
+): error is ClaudeUnifiedTerminalInjectionFailureError {
+  return isClaudeUnifiedTerminalInjectionFailureError(error)
+    && (error as { failureState?: unknown }).failureState === 'failed_ambiguous'
+    && (error as { reason?: unknown }).reason === 'host_unreachable'
+    && (error as { phase?: unknown }).phase === 'after_enter_unknown';
 }
 
 export function isClaudeUnifiedTerminalRecoverableProviderAcceptanceUnknownFailure(

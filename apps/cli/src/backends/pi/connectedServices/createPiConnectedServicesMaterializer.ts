@@ -22,7 +22,11 @@ import {
   formatPiSessionDirectoryForCwd,
   resolvePiSessionIdFromResumeReference,
 } from '@/backends/pi/utils/piSessionFiles';
-import { materializePiConnectedServiceAuth } from './materializePiConnectedServiceAuth';
+import {
+  applyPiCodingAgentDirChildEnvFormatting,
+  formatPiCodingAgentDirForChildEnv,
+  materializePiConnectedServiceAuth,
+} from './materializePiConnectedServiceAuth';
 import { piConnectedServiceStateSharingDescriptor } from './piConnectedServiceStateSharingDescriptor';
 
 function resolvePiStateSharingMode(settingsLike: unknown): 'isolated' | 'shared' {
@@ -112,6 +116,19 @@ function resolveVendorResumeIdFromImportedPiSessionFile(detail: ConnectedService
   return null;
 }
 
+function formatPiMaterializedTargetEnvForStateSharing(
+  env: Readonly<Record<string, string>>,
+): Record<string, string> {
+  return {
+    ...env,
+    PI_CODING_AGENT_DIR: formatPiCodingAgentDirForChildEnv(env.PI_CODING_AGENT_DIR),
+  };
+}
+
+function formatPiPromotedChildEnv(input: Readonly<{ env: Record<string, string> }>): void {
+  applyPiCodingAgentDirChildEnvFormatting(input.env);
+}
+
 export function createPiConnectedServicesMaterializer(): ConnectedServicesProviderMaterializer {
   return async (params) => {
     const openaiCodex = params.recordsByServiceId.get('openai-codex') ?? null;
@@ -131,12 +148,19 @@ export function createPiConnectedServicesMaterializer(): ConnectedServicesProvid
     const requestedStateMode = resolvePiStateSharingMode(params.accountSettings);
     const cwd = asNonEmptyString(params.sessionDirectory);
     if (requestedStateMode !== 'shared' || !cwd) {
-      return { env: materialized.env, cleanupOnFailure: params.cleanupRoot, cleanupOnExit: null };
+      return {
+        env: materialized.env,
+        afterPromote: formatPiPromotedChildEnv,
+        cleanupOnFailure: params.cleanupRoot,
+        cleanupOnExit: null,
+      };
     }
 
     const sourceEnv = params.processEnv ?? process.env;
     const encodedCwdDir = formatPiSessionDirectoryForCwd(cwd);
     const nativeSourceRoot = resolvePiNativeSourceAgentRoot(sourceEnv);
+    const targetMaterializedEnv = formatPiMaterializedTargetEnvForStateSharing(materialized.env);
+    const targetSessionDir = join(materialized.env.PI_CODING_AGENT_DIR, 'sessions', encodedCwdDir);
     // Backfill destination = the NATIVE shared store for this cwd, which is also the SOURCE of the
     // `sessions/--<cwd>--` symlink materialized below. Importing here (not into the symlink's own
     // destination under pi-agent-dir) keeps legacy sessions in the single shared store and avoids the
@@ -157,8 +181,8 @@ export function createPiConnectedServicesMaterializer(): ConnectedServicesProvid
         sourceEnv: toStringRecord(sourceEnv),
       },
       target: {
-        targetMaterializedRoot: materialized.env.PI_CODING_AGENT_DIR,
-        targetMaterializedEnv: materialized.env,
+        targetMaterializedRoot: targetMaterializedEnv.PI_CODING_AGENT_DIR,
+        targetMaterializedEnv,
       },
       configMode: 'isolated',
       requestedStateMode,
@@ -178,7 +202,8 @@ export function createPiConnectedServicesMaterializer(): ConnectedServicesProvid
     await writeConnectedServiceStateSharingManifest(params.rootDir, applyResult.manifest);
 
     return {
-      env: { ...materialized.env, ...applyResult.envOverrides },
+      env: { ...materialized.env, PI_CODING_AGENT_SESSION_DIR: targetSessionDir, ...applyResult.envOverrides },
+      afterPromote: formatPiPromotedChildEnv,
       diagnostics: applyResult.diagnostics,
       cleanupOnFailure: params.cleanupRoot,
       cleanupOnExit: null,

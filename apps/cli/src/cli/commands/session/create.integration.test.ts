@@ -3,12 +3,17 @@ import { createServer, type Server } from 'node:http';
 
 import { DEFAULT_CATALOG_AGENT_ID } from '@/backends/types';
 import { SOCKET_RPC_EVENTS } from '@happier-dev/protocol/socketRpc';
-import { bindApiSessionSocketMock, createApiSessionSocketStub } from '@/testkit/backends/apiSessionSocketHarness';
+import {
+  bindApiSessionSocketMock,
+  createApiSessionSocketStub,
+  type ApiSessionSocketStub,
+} from '@/testkit/backends/apiSessionSocketHarness';
 import { deriveBoxPublicKeyFromSeed, sealEncryptedDataKeyEnvelopeV1 } from '@happier-dev/protocol';
 import { createEnvKeyScope } from '@/testkit/env/envScope';
 import { createTempDir, removeTempDir } from '@/testkit/fs/tempDir';
 import { captureConsoleJsonOutput } from '@/testkit/logger/captureOutput';
 import { clearDaemonState, writeDaemonState } from '@/persistence';
+import { SESSION_CREATE_USAGE } from './create/parseSessionCreateSpawnOptions';
 
 const { mockIo } = vi.hoisted(() => ({
   mockIo: vi.fn(),
@@ -25,6 +30,7 @@ describe('happier session create (integration)', () => {
     'HAPPIER_HOME_DIR',
     'HAPPIER_STACK_INVOKED_CWD',
     'HAPPIER_SESSION_REQUESTED_DIRECTORY',
+    'HAPPIER_SESSION_SOCKET_CONNECT_TIMEOUT_MS',
   ] as const;
   let envScope = createEnvKeyScope(envKeys);
   let server: Server | null = null;
@@ -34,6 +40,7 @@ describe('happier session create (integration)', () => {
   let observedSpawnBody: Record<string, unknown> | null = null;
   let sessionGetAttempts = 0;
   let sessionGetNotFoundUntil = 0;
+  let sessionSocket: ApiSessionSocketStub;
 
   beforeEach(async () => {
     happyHomeDir = await createTempDir('happier-cli-session-create-');
@@ -107,6 +114,35 @@ describe('happier session create (integration)', () => {
         return;
       }
 
+      if (req.method === 'PATCH' && url.pathname === `/v2/sessions/${sessionId}`) {
+        const chunks: Buffer[] = [];
+        for await (const c of req) chunks.push(Buffer.from(c));
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as {
+          metadata?: { ciphertext?: unknown; expectedVersion?: unknown };
+        };
+        const metadata = body.metadata;
+        if (!metadata || typeof metadata.ciphertext !== 'string' || metadata.expectedVersion !== metadataVersion) {
+          res.statusCode = 200;
+          res.setHeader('content-type', 'application/json');
+          res.end(JSON.stringify({
+            success: false,
+            error: 'version-mismatch',
+            metadata: { version: metadataVersion, value: metadataCiphertext },
+          }));
+          return;
+        }
+
+        const decrypted = decryptWithDataKey(decodeBase64(metadata.ciphertext, 'base64'), dek);
+        expect(decrypted?.summary?.text).toBe('My Title');
+        expect(decrypted?.tag).toBe('MyTag');
+        metadataCiphertext = metadata.ciphertext;
+        metadataVersion += 1;
+        res.statusCode = 200;
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({ success: true, metadata: { version: metadataVersion } }));
+        return;
+      }
+
       res.statusCode = 404;
       res.end();
     });
@@ -138,7 +174,7 @@ describe('happier session create (integration)', () => {
       controlToken: 'test-token',
     });
 
-    const socket = createApiSessionSocketStub({
+    sessionSocket = createApiSessionSocketStub({
       emit: async (event: string, args: unknown[]) => {
         if (event === 'update-metadata') {
           const [data, callback] = args as [any, ((value: unknown) => void) | undefined];
@@ -165,7 +201,7 @@ describe('happier session create (integration)', () => {
         }
       },
     });
-    bindApiSessionSocketMock(mockIo, socket);
+    bindApiSessionSocketMock(mockIo, sessionSocket);
   });
 
   afterEach(async () => {
@@ -250,6 +286,37 @@ describe('happier session create (integration)', () => {
       expect(parsed.kind).toBe('session_create');
       expect(parsed.data?.session?.id).toBe('sess_integration_create_123');
       expect(sessionGetAttempts).toBeGreaterThan(1);
+    } finally {
+      output.restore();
+    }
+  });
+
+  it('returns success when create-time title metadata falls back after a session socket connect timeout', async () => {
+    const { handleSessionCommand } = await import('./index');
+    envScope.patch({ HAPPIER_SESSION_SOCKET_CONNECT_TIMEOUT_MS: '1' });
+    sessionSocket.connect.mockImplementation(() => sessionSocket);
+
+    const output = captureConsoleJsonOutput();
+
+    try {
+      await handleSessionCommand(['create', '--tag', 'MyTag', '--title', 'My Title', '--prompt', 'Plan the refactor', '--json'], {
+        readCredentialsFn: async () => ({
+          token: 'token_test',
+          encryption: {
+            type: 'dataKey',
+            publicKey: deriveBoxPublicKeyFromSeed(machineKeySeed),
+            machineKey: machineKeySeed,
+          },
+        }),
+      });
+
+      const parsed = output.json();
+      expect(parsed.ok).toBe(true);
+      expect(parsed.kind).toBe('session_create');
+      expect(parsed.data?.session?.id).toBe('sess_integration_create_123');
+      expect(parsed.data?.session?.tag).toBe('MyTag');
+      expect(parsed.data?.session?.title).toBe('My Title');
+      expect(sessionSocket.connect).toHaveBeenCalled();
     } finally {
       output.restore();
     }
@@ -367,9 +434,7 @@ describe('happier session create (integration)', () => {
       expect(parsed.ok).toBe(false);
       expect(parsed.kind).toBe('session_create');
       expect(parsed.error?.code).toBe('invalid_arguments');
-      expect(parsed.error?.message).toBe(
-        'Usage: happier session create [--path <path>] [--backend <backend-target>] [--title <text>] [--tag <tag>] [--prompt <text>|--message <text>] [--json]',
-      );
+      expect(parsed.error?.message).toBe(`Usage: ${SESSION_CREATE_USAGE}`);
     } finally {
       output.restore();
     }

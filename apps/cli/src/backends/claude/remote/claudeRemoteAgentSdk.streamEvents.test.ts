@@ -4,6 +4,55 @@ import { claudeRemoteAgentSdk } from './claudeRemoteAgentSdk';
 import { makeMode } from './claudeRemoteAgentSdk.testkit';
 
 describe('claudeRemoteAgentSdk stream events', () => {
+    it('confirms provider acceptance after starting the Agent SDK query with the prompt stream', async () => {
+        const onPromptAcceptedByProvider = vi.fn();
+        let didSendPrompt = false;
+        const createQuery = vi.fn((_params: any) => {
+            return {
+                async *[Symbol.asyncIterator]() {
+                    yield { type: 'result' } as any;
+                },
+                close: vi.fn(),
+                setPermissionMode: vi.fn(),
+                setModel: vi.fn(),
+                setMaxThinkingTokens: vi.fn(),
+                supportedCommands: vi.fn(async () => []),
+                supportedModels: vi.fn(async () => []),
+            } as any;
+        });
+
+        await claudeRemoteAgentSdk({
+            sessionId: null,
+            transcriptPath: null,
+            path: '/tmp',
+            claudeExecutablePath: '/tmp/claude',
+            canCallTool: async () => ({ behavior: 'allow', updatedInput: {} }),
+            isAborted: () => false,
+            nextMessage: async () => {
+                if (didSendPrompt) return null;
+                didSendPrompt = true;
+                return {
+                    message: 'hello',
+                    mode: makeMode({ claudeRemoteAgentSdkEnabled: true }),
+                    maxUserMessageSeq: 12,
+                    userMessageLocalIds: ['agent-sdk-local-12'],
+                };
+            },
+            onReady: () => {},
+            onSessionFound: () => {},
+            onMessage: () => {},
+            onPromptAcceptedByProvider,
+            createQuery,
+        } as any);
+
+        expect(createQuery).toHaveBeenCalledTimes(1);
+        expect(onPromptAcceptedByProvider).toHaveBeenCalledTimes(1);
+        expect(onPromptAcceptedByProvider).toHaveBeenCalledWith({
+            maxUserMessageSeq: 12,
+            userMessageLocalIds: ['agent-sdk-local-12'],
+        });
+    });
+
     it('streams Agent SDK stream_event text deltas through StreamedTranscriptWriter (no synthetic partial messages)', async () => {
         const onMessage = vi.fn();
         const streamedTranscriptWriter = {

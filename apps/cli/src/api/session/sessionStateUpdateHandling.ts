@@ -7,6 +7,7 @@ import {
     UNKNOWN_PENDING_QUEUE_STATE,
     type PendingQueueState,
 } from './pendingQueueState';
+import type { PendingQueueRuntimeActivityProjection } from '@/agent/runtime/sessionInput/pendingQueueDrainPolicy';
 
 function tryDecodeSessionStateValue<T>(params: {
     rawValue: unknown;
@@ -35,6 +36,13 @@ function tryDecodeSessionStateValue<T>(params: {
     }
 }
 
+function hasRuntimeActivityProjectionFields(value: unknown): boolean {
+    if (!value || typeof value !== 'object') return false;
+    const record = value as Record<string, unknown>;
+    return 'runtimeActivityActiveCount' in record
+        || 'runtimeActivityExpiresAt' in record;
+}
+
 export function handleSessionStateUpdate(params: {
     update: Update;
     updateSource: 'session-scoped' | 'user-scoped';
@@ -46,6 +54,7 @@ export function handleSessionStateUpdate(params: {
     agentStateVersion: number;
     pendingWakeSeq: number;
     pendingQueueState?: PendingQueueState;
+    runtimeActivityProjection?: PendingQueueRuntimeActivityProjection;
     encryptionKey: Uint8Array;
     encryptionVariant: 'legacy' | 'dataKey';
     onMetadataUpdated: () => void;
@@ -58,9 +67,11 @@ export function handleSessionStateUpdate(params: {
     agentStateVersion: number;
     pendingWakeSeq: number;
     pendingQueueState: PendingQueueState;
+    runtimeActivityProjection: PendingQueueRuntimeActivityProjection;
 } {
     const currentPendingQueueState = params.pendingQueueState ?? UNKNOWN_PENDING_QUEUE_STATE;
     const unchangedPendingQueueState = currentPendingQueueState;
+    const unchangedRuntimeActivityProjection = params.runtimeActivityProjection ?? {};
     const body = params.update.body as any;
     if (body?.t === 'pending-changed') {
         const sid = body.sid ?? body.sessionId;
@@ -73,6 +84,7 @@ export function handleSessionStateUpdate(params: {
                 agentStateVersion: params.agentStateVersion,
                 pendingWakeSeq: params.pendingWakeSeq,
                 pendingQueueState: unchangedPendingQueueState,
+                runtimeActivityProjection: unchangedRuntimeActivityProjection,
             };
         }
 
@@ -87,6 +99,7 @@ export function handleSessionStateUpdate(params: {
                 agentStateVersion: params.agentStateVersion,
                 pendingWakeSeq: params.pendingWakeSeq + 1,
                 pendingQueueState: unchangedPendingQueueState,
+                runtimeActivityProjection: unchangedRuntimeActivityProjection,
             };
         }
 
@@ -102,6 +115,7 @@ export function handleSessionStateUpdate(params: {
             agentStateVersion: params.agentStateVersion,
             pendingWakeSeq: params.pendingWakeSeq + (applied.changed ? 1 : 0),
             pendingQueueState: applied.state,
+            runtimeActivityProjection: unchangedRuntimeActivityProjection,
         };
     }
 
@@ -116,6 +130,7 @@ export function handleSessionStateUpdate(params: {
                 agentStateVersion: params.agentStateVersion,
                 pendingWakeSeq: params.pendingWakeSeq,
                 pendingQueueState: unchangedPendingQueueState,
+                runtimeActivityProjection: unchangedRuntimeActivityProjection,
             };
         }
 
@@ -159,6 +174,14 @@ export function handleSessionStateUpdate(params: {
             agentStateVersion,
             pendingWakeSeq: params.pendingWakeSeq,
             pendingQueueState: unchangedPendingQueueState,
+            runtimeActivityProjection: hasRuntimeActivityProjectionFields(body)
+                ? {
+                    runtimeActivityActiveCount: body.runtimeActivityActiveCount,
+                    runtimeActivityObservedAt: body.runtimeActivityObservedAt,
+                    runtimeActivityExpiresAt: body.runtimeActivityExpiresAt,
+                    runtimeActivitySourceClass: body.runtimeActivitySourceClass,
+                }
+                : unchangedRuntimeActivityProjection,
         };
     }
 
@@ -176,6 +199,7 @@ export function handleSessionStateUpdate(params: {
             agentStateVersion: params.agentStateVersion,
             pendingWakeSeq: params.pendingWakeSeq,
             pendingQueueState: unchangedPendingQueueState,
+            runtimeActivityProjection: unchangedRuntimeActivityProjection,
         };
     }
 
@@ -187,5 +211,6 @@ export function handleSessionStateUpdate(params: {
         agentStateVersion: params.agentStateVersion,
         pendingWakeSeq: params.pendingWakeSeq,
         pendingQueueState: unchangedPendingQueueState,
+        runtimeActivityProjection: unchangedRuntimeActivityProjection,
     };
 }

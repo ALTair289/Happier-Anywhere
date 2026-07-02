@@ -585,6 +585,132 @@ describe('ApiSessionClient transcript vNext transport', () => {
     }
   });
 
+  it('includes the live-stream tick on transcript-stream-segment snapshot emissions when provided', async () => {
+    vi.resetModules();
+    sessionSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true, id: 'm1', seq: 1, localId: 'segment-1', didWrite: true } });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+
+    const { ApiSessionClient } = await import('./sessionClient');
+
+    const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+    client.sendAgentMessageEphemeral(
+      'codex',
+      { type: 'message', message: 'Hello' },
+      { localId: 'segment-1', createdAt: 1_000, tick: 5 },
+    );
+
+    expect(sessionSocketStub.emit).toHaveBeenCalledWith(
+      'transcript-stream-segment',
+      expect.objectContaining({
+        sid: 's1',
+        message: expect.objectContaining({
+          localId: 'segment-1',
+          tick: 5,
+        }),
+      }),
+    );
+  });
+
+  it('emits transcript-stream-segment-delta ticks carrying only the appended text', async () => {
+    vi.resetModules();
+    sessionSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true, id: 'm1', seq: 1, localId: 'segment-1', didWrite: true } });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+
+    const { ApiSessionClient } = await import('./sessionClient');
+
+    const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+    expect(client.sendAgentMessageEphemeralDelta).toBeTypeOf('function');
+    client.sendAgentMessageEphemeralDelta(
+      'codex',
+      { type: 'message', message: ' world', sidechainId: 'sc-1' },
+      {
+        localId: 'segment-1',
+        tick: 2,
+        baseLength: 5,
+        createdAt: 1_000,
+        updatedAt: 1_040,
+        meta: {
+          happierStreamSegmentV1: {
+            v: 1,
+            segmentKind: 'assistant',
+            segmentLocalId: 'segment-1',
+            segmentState: 'streaming',
+            startedAtMs: 1_000,
+            updatedAtMs: 1_040,
+          },
+        },
+      },
+    );
+
+    expect(sessionSocketStub.emitWithAck).not.toHaveBeenCalled();
+    expect(sessionSocketStub.emit).toHaveBeenCalledWith(
+      'transcript-stream-segment-delta',
+      expect.objectContaining({
+        sid: 's1',
+        message: expect.objectContaining({
+          localId: 'segment-1',
+          messageRole: 'agent',
+          sidechainId: 'sc-1',
+          tick: 2,
+          baseLength: 5,
+          createdAt: 1_000,
+          updatedAt: 1_040,
+          content: {
+            t: 'plain',
+            v: expect.objectContaining({
+              role: 'agent',
+              content: {
+                type: 'acp',
+                provider: 'codex',
+                data: { type: 'message', message: ' world', sidechainId: 'sc-1' },
+              },
+            }),
+          },
+        }),
+      }),
+    );
+  });
+
+  it('does not emit transcript-stream-segment-delta while the socket is disconnected', async () => {
+    vi.resetModules();
+    sessionSocketStub = createApiSessionSocketStub({ connected: false, emitWithAckResult: { ok: true } });
+    userSocketStub = createApiSessionSocketStub({ connected: false, emitWithAckResult: { ok: true } });
+
+    const { ApiSessionClient } = await import('./sessionClient');
+
+    const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+    client.sendAgentMessageEphemeralDelta(
+      'codex',
+      { type: 'message', message: 'delta' },
+      { localId: 'segment-1', tick: 2, baseLength: 5, createdAt: 1_000 },
+    );
+
+    expect(sessionSocketStub.emit).not.toHaveBeenCalledWith(
+      'transcript-stream-segment-delta',
+      expect.anything(),
+    );
+  });
+
+  it('advances the ephemeral stream connection epoch on every socket connect', async () => {
+    vi.resetModules();
+    sessionSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true, id: 'm1', seq: 1, localId: 'l1', didWrite: true } });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+
+    const { ApiSessionClient } = await import('./sessionClient');
+
+    const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const initialEpoch = client.getEphemeralStreamConnectionEpoch();
+    expect(initialEpoch).toBeGreaterThanOrEqual(1);
+
+    // Boundary mock: the mocked connection supervisor invokes onConnected on every start().
+    await (client as unknown as { sessionConnectionSupervisor: { start: () => Promise<void> } }).sessionConnectionSupervisor.start();
+
+    expect(client.getEphemeralStreamConnectionEpoch()).toBe(initialEpoch + 1);
+  });
+
   it('clears materialized localId state when a durable stream checkpoint arrives as message-updated', async () => {
     vi.resetModules();
     sessionSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true, id: 'm1', seq: 1, localId: 'segment-1', didWrite: true } });

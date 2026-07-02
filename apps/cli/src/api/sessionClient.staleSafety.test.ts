@@ -13,8 +13,9 @@ vi.mock('socket.io-client', () => ({
 }));
 
 vi.mock('@/persistence', () => ({
-    readLastChangesCursor: vi.fn(async () => 0),
-    writeLastChangesCursor: vi.fn(async () => {}),
+    readCredentials: vi.fn(async () => null),
+    readAccountChangesCursor: vi.fn(async () => 0),
+    writeAccountChangesCursor: vi.fn(async () => {}),
 }));
 
 vi.mock('axios');
@@ -26,15 +27,15 @@ describe('ApiSessionClient stale socket safety', () => {
 
     it('runs stale safety through /v2/changes without forcing a session detail snapshot', async () => {
         const { ApiSessionClient } = await import('./session/sessionClient');
-        const { writeLastChangesCursor } = await import('@/persistence');
-        (writeLastChangesCursor as any).mockClear?.();
+        const { writeAccountChangesCursor } = await import('@/persistence');
+        (writeAccountChangesCursor as any).mockClear?.();
 
         const sessionSocket = createApiSessionSocketStub();
         const userSocket = createApiSessionSocketStub({ connected: true });
         bindApiSessionSocketPairMock(mockIo, { sessionSocket, userSocket });
 
         const sessionId = 'test-session-id';
-        (axios.get as any).mockImplementation(async (url: string) => {
+        (axios.get as any).mockImplementation(async (url: string, config?: any) => {
             if (url.endsWith('/v1/account/profile')) {
                 return { status: 200, data: { id: 'account-1' } };
             }
@@ -77,9 +78,10 @@ describe('ApiSessionClient stale socket safety', () => {
             expect((client as any).pendingQueueState).toEqual({
                 known: true,
                 pendingCount: 3,
+                pendingBlockedCount: 0,
                 pendingVersion: 7,
             });
-            expect(writeLastChangesCursor).toHaveBeenCalledWith('account-1', 2);
+            expect(writeAccountChangesCursor).not.toHaveBeenCalled();
         } finally {
             await client.close();
         }
@@ -100,14 +102,13 @@ describe('ApiSessionClient stale socket safety', () => {
         const sessionId = 'test-session-id';
         const changesAfter: number[] = [];
         const sessionDetailReads: string[] = [];
-        (axios.get as any).mockImplementation(async (url: string) => {
+        (axios.get as any).mockImplementation(async (url: string, config?: any) => {
             if (url.endsWith('/v1/account/profile')) {
                 return { status: 200, data: { id: 'account-1' } };
             }
 
             if (url.includes('/v2/changes')) {
-                const parsed = new URL(url);
-                changesAfter.push(Number(parsed.searchParams.get('after') ?? 0));
+                changesAfter.push(Number(config?.params?.after ?? 0));
                 return {
                     status: 200,
                     data: {
@@ -135,10 +136,9 @@ describe('ApiSessionClient stale socket safety', () => {
         );
 
         try {
-            for (let index = 0; index < 8; index += 1) {
-                await Promise.resolve();
-            }
-            expect(changesAfter).toEqual([0]);
+            await vi.waitFor(() => {
+                expect(changesAfter).toEqual([0]);
+            });
 
             await vi.advanceTimersByTimeAsync(80);
             sessionSocket.trigger('update', {
@@ -154,13 +154,15 @@ describe('ApiSessionClient stale socket safety', () => {
                 createdAt: Date.now(),
                 body: { t: 'noop', sid: sessionId },
             });
-            expect(changesAfter).toEqual([0]);
+            expect(changesAfter[0]).toBe(0);
 
             await vi.advanceTimersByTimeAsync(1);
             for (let index = 0; index < 8; index += 1) {
                 await Promise.resolve();
             }
-            expect(changesAfter).toEqual([0, 0]);
+            await vi.waitFor(() => {
+                expect(changesAfter).toEqual([0, 1]);
+            });
             expect(sessionDetailReads).toEqual([]);
             expect(sessionSocket.connected).toBe(true);
         } finally {

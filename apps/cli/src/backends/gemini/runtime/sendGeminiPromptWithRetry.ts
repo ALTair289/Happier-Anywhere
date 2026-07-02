@@ -39,21 +39,6 @@ function getErrorDetails(error: unknown): string {
   return typeof details === 'string' ? details : '';
 }
 
-function isRetryableAcpTurnOutcome(outcome: AcpTurnOutcome | void): outcome is AcpTurnOutcome {
-  return (
-    outcome?.kind === 'timed_out' ||
-    (outcome?.kind === 'completed' && outcome.stopReason === 'max_turn_requests')
-  );
-}
-
-function describeRetryableAcpTurnOutcome(outcome: AcpTurnOutcome): string {
-  if (outcome.kind === 'timed_out') return `turn timed out after ${outcome.capMs}ms`;
-  if (outcome.kind === 'completed' && outcome.stopReason === 'max_turn_requests') {
-    return 'turn reached the maximum turn request cap';
-  }
-  return 'turn ended before producing a final response';
-}
-
 export async function sendGeminiPromptWithRetry(params: {
   backend: GeminiPromptBackend;
   acpSessionId: string;
@@ -64,6 +49,7 @@ export async function sendGeminiPromptWithRetry(params: {
   maxRetries?: number;
   retryDelayMs?: number;
   waitForResponseTimeoutMs?: number;
+  onProviderPromptAccepted?: () => void;
 }): Promise<AcpTurnOutcome | void> {
   const maxRetries = typeof params.maxRetries === 'number' ? params.maxRetries : 3;
   const retryDelayMs = typeof params.retryDelayMs === 'number' ? params.retryDelayMs : 2_000;
@@ -73,8 +59,11 @@ export async function sendGeminiPromptWithRetry(params: {
   let lastError: unknown = null;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    let providerPromptAccepted = false;
     try {
       await params.backend.sendPrompt(params.acpSessionId, params.prompt);
+      providerPromptAccepted = true;
+      params.onProviderPromptAccepted?.();
       params.onDebug('[gemini] Prompt sent successfully');
 
       // Wait for Gemini to finish responding (all chunks received + final idle)
@@ -82,17 +71,15 @@ export async function sendGeminiPromptWithRetry(params: {
       if (params.backend.waitForResponseComplete) {
         const outcome = await params.backend.waitForResponseComplete(waitForResponseTimeoutMs);
         params.onDebug('[gemini] Response complete');
-        if (isRetryableAcpTurnOutcome(outcome) && attempt < maxRetries) {
-          params.onDebug(`[gemini] Retryable turn outcome on attempt ${attempt}/${maxRetries}: ${describeRetryableAcpTurnOutcome(outcome)}`);
-          params.messageBuffer.addMessage(`Gemini turn did not finish cleanly, retrying (${attempt}/${maxRetries})...`, 'status');
-          await new Promise((resolve) => setTimeout(resolve, retryDelayMs * attempt));
-          continue;
-        }
         return isAcpTurnOutcome(outcome) ? outcome : undefined;
       }
 
       return undefined;
     } catch (promptError) {
+      if (providerPromptAccepted) {
+        throw promptError;
+      }
+
       lastError = promptError;
       const errorDetails = getErrorDetails(promptError);
       const errorCode = getErrorCode(promptError);

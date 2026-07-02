@@ -5,6 +5,7 @@ import type { EnhancedMode } from '../loop';
 import type { Session } from '../session';
 import type { LauncherResult } from '../claudeLocalLauncher';
 import { createClaudeSessionTranscriptProjector } from '../localControl/createClaudeSessionTranscriptProjector';
+import { createClaudeWorkflowActivitySourceForSession } from '../workflows/createClaudeWorkflowActivitySourceForSession';
 import type { NormalizedProviderUsageLimitDetailsV1 } from '../connectedServices/mapClaudeRateLimitEventToUsageDetails';
 import { adoptClaudePermissionModeFromMetadata } from '../utils/syncPermissionModeFromMetadata';
 import {
@@ -13,6 +14,7 @@ import {
 } from '../connectedServices/surfaceClaudeRuntimeIssues';
 import { createClaudeInFlightSteerCapabilityPublisher } from './createClaudeInFlightSteerCapabilityPublisher';
 import { runClaudeUnifiedTerminalSession } from './runClaudeUnifiedTerminalSession';
+import { readDaemonInitialGoalFromEnv } from '@/agent/runtime/sessionInitialGoal';
 import { isClaudeUnifiedTerminalManagedSettingsOptionError } from './buildClaudeUnifiedTerminalSpawn';
 import { CLAUDE_UNIFIED_TUI_RUNTIME_CONTROL_FEATURE_ID, DEFAULT_CLAUDE_TUI_CONTROL_TIMINGS } from './tuiControls';
 import { ClaudeUnifiedResumeChoiceBroker } from './resumeChoice/claudeUnifiedResumeChoiceBroker';
@@ -37,9 +39,18 @@ import {
   surfaceClaudeUnifiedTerminalRuntimeIssue,
 } from './surfaceClaudeUnifiedTerminalRuntimeIssue';
 import {
+  createClaudeUnifiedTerminalUnobservedFailedTurnError,
   isClaudeUnifiedTerminalAmbiguousInjectionFailureError,
   isClaudeUnifiedTerminalRecoverableProviderAcceptanceUnknownFailure,
 } from './terminalInjectionFailureError';
+import {
+  isClaudeUnifiedProviderUnavailablePromptDeliveryWindowActive,
+  promoteClaudeUnifiedProviderAcceptanceTimeoutBlockForUnavailableProvider,
+  resolveClaudeUnifiedPendingDeliveryBlock,
+  resolveClaudeUnifiedProviderUnavailableUntilMs,
+  type ClaudeUnifiedProviderUnavailablePromptDeliveryWindow,
+} from './pendingDeliveryBlock';
+import { returnOrBlockUndeliverableProviderPrompt } from '@/agent/runtime/session/pendingDelivery/undeliverableProviderPrompt';
 import { surfacePrimarySessionRuntimeIssue } from '@/agent/runtime/session/errors/surfacePrimarySessionRuntimeIssue';
 import { isTerminalHostStartupError } from '@/integrations/terminalHost/errors';
 import { runTmuxAttach } from '@/terminal/attachment/tmuxAttach';
@@ -239,8 +250,22 @@ export async function claudeUnifiedTerminalLauncher(
   let turnInterrupt: (() => Promise<void>) | null = null;
   const initialPrompt = extractClaudeTerminalInitialPrompt(session.claudeArgs);
   let initialPromptPending = typeof initialPrompt.prompt === 'string';
-  const transcriptProjector = createClaudeSessionTranscriptProjector({ session, logPrefix: '[unified]' });
+  // Centralized Claude Dynamic Workflow ACTIVITY source (CWF2/CWF3/CWF4). Built at the launcher
+  // (which owns credentials + stored-content encryption) and handed to the projector, which feeds it
+  // the SAME raw transcript channel as the goal source and applies its CWF4 owned-id filter at the
+  // work-state merge chokepoint. Null when no credentials are available yet — the goal / work-state
+  // path is unaffected.
+  const workflowActivitySource = await createClaudeWorkflowActivitySourceForSession({
+    session,
+    logPrefix: '[unified]',
+    getCurrentClaudeSessionId: () => {
+      const claudeSessionId = session.client.getMetadataSnapshot?.()?.claudeSessionId;
+      return typeof claudeSessionId === 'string' && claudeSessionId.trim().length > 0 ? claudeSessionId.trim() : null;
+    },
+  });
+  const transcriptProjector = createClaudeSessionTranscriptProjector({ session, logPrefix: '[unified]', workflowActivitySource });
   let lastSurfacedRuntimeAuthFailureAtMs: number | null = null;
+  let recentPrimaryProviderUnavailableForPromptDelivery: ClaudeUnifiedProviderUnavailablePromptDeliveryWindow | null = null;
   const readyHandler = createClaudeReadyHandler({
     session: session.client,
     pushSender: session.pushSender,
@@ -275,6 +300,14 @@ export async function claudeUnifiedTerminalLauncher(
   await binding.seedPersistedPromptEchoes();
 
   const surfaceRateLimit = (details: NormalizedProviderUsageLimitDetailsV1): void => {
+    if (details.sourcedFromSidechain !== true) {
+      const observedAtMs = Date.now();
+      const unavailableUntilMs = resolveClaudeUnifiedProviderUnavailableUntilMs(details, observedAtMs);
+      recentPrimaryProviderUnavailableForPromptDelivery = unavailableUntilMs === null
+        ? null
+        : { unavailableUntilMs };
+    }
+
     void surfaceClaudeRateLimitRuntimeIssue(session, details, '[unified]')
       .catch((error) => {
         logger.debug('[unified]: failed to surface Claude rate-limit runtime issue', error);
@@ -286,6 +319,7 @@ export async function claudeUnifiedTerminalLauncher(
     reason: string;
     source: string;
     detail?: string | undefined;
+    providerAcceptanceFailureObserved?: boolean | undefined;
   }>): Promise<void> => {
     if (event.reason === 'aborted') {
       await binding.recordPromptTurnCancelled();
@@ -306,6 +340,8 @@ export async function claudeUnifiedTerminalLauncher(
           logger.debug('[unified]: failed to surface Claude transcript API-error turn failure (non-fatal)', error);
           return null;
         });
+      } else if (event.reason === 'failed' && event.providerAcceptanceFailureObserved !== true) {
+        await surfaceTerminalRuntimeIssue(createClaudeUnifiedTerminalUnobservedFailedTurnError());
       }
     } finally {
       // Any non-aborted terminal projection (hook StopFailure, process exit, unknown) must
@@ -314,7 +350,33 @@ export async function claudeUnifiedTerminalLauncher(
       await binding.recordPromptTurnFailed().catch(() => undefined);
     }
   };
-  const surfaceTerminalRuntimeIssue = async (error: unknown): Promise<void> => {
+  const surfaceTerminalRuntimeIssue = async (
+    error: unknown,
+  ): Promise<
+    | void
+    | Readonly<{ action: 'claimed_pending_delivery' }>
+    | Readonly<{ action: 'surfaced_runtime_issue' }>
+  > => {
+    const resolvedPendingDeliveryBlock = resolveClaudeUnifiedPendingDeliveryBlock(error);
+    const nowMs = Date.now();
+    if (!isClaudeUnifiedProviderUnavailablePromptDeliveryWindowActive(recentPrimaryProviderUnavailableForPromptDelivery, nowMs)) {
+      recentPrimaryProviderUnavailableForPromptDelivery = null;
+    }
+    const pendingDeliveryBlock = promoteClaudeUnifiedProviderAcceptanceTimeoutBlockForUnavailableProvider(
+      resolvedPendingDeliveryBlock,
+      recentPrimaryProviderUnavailableForPromptDelivery,
+      nowMs,
+    );
+    let didBlockPendingDelivery = false;
+    if (pendingDeliveryBlock && session.client.blockPendingMessageDelivery) {
+      didBlockPendingDelivery = await session.client.blockPendingMessageDelivery(pendingDeliveryBlock).catch((blockError) => {
+        logger.debug('[unified]: failed to block Claude unified terminal pending delivery (non-fatal)', blockError);
+        return false;
+      });
+      if (didBlockPendingDelivery && pendingDeliveryBlock.reason !== 'provider_acceptance_timeout') {
+        return { action: 'claimed_pending_delivery' };
+      }
+    }
     if (isClaudeUnifiedTerminalAmbiguousInjectionFailureError(error)) {
       logger.debug('[unified]: Claude unified terminal prompt delivery is ambiguous; waiting for confirmation or retry');
       return;
@@ -332,7 +394,12 @@ export async function claudeUnifiedTerminalLauncher(
     });
     if (surfaced) {
       binding.notePromptTurnTerminal();
+      await session.client.flush().catch((flushError) => {
+        logger.debug('[unified]: failed to flush Claude unified terminal runtime issue surface (non-fatal)', flushError);
+      });
+      if (!didBlockPendingDelivery) return { action: 'surfaced_runtime_issue' };
     }
+    if (didBlockPendingDelivery) return { action: 'claimed_pending_delivery' };
   };
 
   session.client.rpcHandlerManager.registerHandler('abort', async () => {
@@ -462,6 +529,14 @@ export async function claudeUnifiedTerminalLauncher(
     return false;
   };
 
+  // Initial goal (P1-E4): consumed once from the daemon-provided env and injected on the FIRST
+  // launch only; a relaunch (park/respawn) must not re-inject it.
+  let pendingInitialGoalObjective = readDaemonInitialGoalFromEnv()?.objective?.trim() || null;
+  const consumeInitialGoalObjective = (): string | undefined => {
+    const objective = pendingInitialGoalObjective;
+    pendingInitialGoalObjective = null;
+    return objective ?? undefined;
+  };
   const runUnifiedTerminalSessionOnce = async (): Promise<void> => {
     await runClaudeUnifiedTerminalSession({
       path: session.path,
@@ -486,21 +561,32 @@ export async function claudeUnifiedTerminalLauncher(
       signal: abortController.signal,
       // A message pulled by the runner's input pump during a death/dispose unwind
       // must come back to the session queue instead of being dropped into the
-      // dead host (silent queue-swallow, incident cmq8y3nlx).
+      // dead host (silent queue-swallow, incident cmq8y3nlx). Server-owned
+      // pending-delivery rows stay owned by the durable pending row; legacy
+      // non-pending/local prompts still use the local queue handback.
       returnUnconsumedMessage: ({ message, mode, maxUserMessageSeq, userMessageLocalIds }) => {
-        try {
-          if (isInFlightStartupMessage({ message, maxUserMessageSeq, userMessageLocalIds })) {
-            inFlightStartupMessage = null;
-          }
-          // Preserve watermark attribution: a re-pended batch must stay confirmable at its
-          // eventual provider acceptance (A3-HIGH-1).
-          session.queue.unshift(message, mode, {
-            userMessageSeq: maxUserMessageSeq ?? null,
-            userMessageLocalIds: userMessageLocalIds ?? [],
-          });
-        } catch (error) {
-          logger.debug('[unified]: failed to requeue undeliverable unified terminal message', error);
+        if (isInFlightStartupMessage({ message, maxUserMessageSeq, userMessageLocalIds })) {
+          inFlightStartupMessage = null;
         }
+        returnOrBlockUndeliverableProviderPrompt({
+          input: { message, mode, maxUserMessageSeq, userMessageLocalIds },
+          localIds: userMessageLocalIds,
+          blockPendingMessageDelivery: session.client.blockPendingMessageDelivery?.bind(session.client),
+          blockReason: 'runtime_disposed_before_delivery',
+          requeueLegacyInput: (input) => {
+            try {
+              // Preserve watermark attribution: a re-pended legacy batch must stay confirmable at
+              // its eventual provider acceptance (A3-HIGH-1).
+              session.queue.unshift(input.message, input.mode, {
+                userMessageSeq: input.maxUserMessageSeq ?? null,
+                userMessageLocalIds: input.userMessageLocalIds ?? [],
+              });
+            } catch (error) {
+              logger.debug('[unified]: failed to requeue undeliverable unified terminal message', error);
+            }
+          },
+          logPrefix: '[unified]',
+        });
       },
       // A3-HIGH-1 root fix: the delivered-user-message watermark persists HERE — when the
       // provider provably accepted the batch — not when the row entered volatile memory.
@@ -511,15 +597,35 @@ export async function claudeUnifiedTerminalLauncher(
           localIds: userMessageLocalIds,
         });
       },
-      onPromptTerminallyRejectedBeforeProvider: ({ maxUserMessageSeq, userMessageLocalIds }) => {
+      onPromptTerminallyRejectedBeforeProvider: ({ userMessageLocalIds, reason }) => {
         consecutiveParkRelaunches = 0;
         inFlightStartupMessage = null;
-        session.client.confirmUserMessageDeliveredToProvider?.(maxUserMessageSeq, {
+        void session.client.blockPendingMessageDelivery?.({
           localIds: userMessageLocalIds,
+          reason,
+        }).catch((error) => {
+          logger.debug('[unified]: failed to block deterministic pre-provider pending delivery rejection', error);
         });
       },
+      runtimeActivityPublisher: session.runtimeActivityPublisher,
       registerTerminalComposerClearRuntimeControl: (clearTerminalComposer) =>
         session.client.registerSessionRuntimeControls?.({ clearTerminalComposer }) ?? (() => undefined),
+      registerGoalRuntimeControl: (controls) =>
+        session.client.registerSessionRuntimeControls?.(controls) ?? (() => undefined),
+      // Claude's live `/goal clear` emits no goal_status, so the clear effector deterministically
+      // removes the goal work-state item via the projector-owned goal source.
+      clearGoalWorkState: () => transcriptProjector.clearGoalWorkState(),
+      // Record the SET epoch when `/goal <objective>` reaches the terminal, so re-setting the same
+      // objective after a clear is accepted instead of being suppressed as a stale replay (G2).
+      recordGoalSetIntent: () => transcriptProjector.recordGoalSetIntent(),
+      // Native Claude `/goal` source (plan H7): the goal_status attachment + the
+      // system/init slash_commands ride the raw transcript channel (the scanner drops
+      // them before `onMessage`). Feed the centralized goal source via the projector;
+      // it keeps them out of the visible transcript.
+      onRawTranscriptValue: (value) => {
+        transcriptProjector.observeRaw(value);
+      },
+      initialGoalObjective: consumeInitialGoalObjective(),
       nextMessage: async () => {
         if (parkedMessage) {
           const parked = parkedMessage;
@@ -762,6 +868,9 @@ export async function claudeUnifiedTerminalLauncher(
       }
     }
   } finally {
+    // Drain any pending workflow-activity writes, then stop scheduling (dispose via reset()).
+    await transcriptProjector.flushWorkflowActivity();
+    transcriptProjector.reset();
     resumeChoiceBroker.dispose();
     inFlightSteerCapabilityPublisher.dispose();
     removeExternalAbortListener?.();

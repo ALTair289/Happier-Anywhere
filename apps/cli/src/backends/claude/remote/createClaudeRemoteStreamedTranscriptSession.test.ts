@@ -120,4 +120,42 @@ describe('createClaudeRemoteStreamedTranscriptSession', () => {
             expect.objectContaining({ localId: 'segment-1' }),
         );
     });
+
+    it('proxies optional ephemeral delta sends and connection epochs when the session client supports them', () => {
+        const sendAgentMessageEphemeralDelta = vi.fn();
+        const getEphemeralStreamConnectionEpoch = vi.fn(() => 3);
+
+        const session = createClaudeRemoteStreamedTranscriptSession({
+            sendAgentMessage: () => {},
+            sendAgentMessageCommitted: async () => {},
+            sendAgentMessageEphemeral: () => {},
+            sendAgentMessageEphemeralDelta,
+            getEphemeralStreamConnectionEpoch,
+        });
+
+        expect(session.sendAgentMessageEphemeralDelta).toBeTypeOf('function');
+        session.sendAgentMessageEphemeralDelta?.(
+            'claude',
+            { type: 'message', message: ' delta' },
+            { localId: 'segment-1', tick: 2, baseLength: 5, createdAt: 10, updatedAt: 20 },
+        );
+
+        expect(sendAgentMessageEphemeralDelta).toHaveBeenCalledWith(
+            'claude',
+            { type: 'message', message: ' delta' },
+            { localId: 'segment-1', tick: 2, baseLength: 5, createdAt: 10, updatedAt: 20 },
+        );
+        expect(session.getEphemeralStreamConnectionEpoch?.()).toBe(3);
+    });
+
+    it('keeps delta sends unavailable when the session client does not support them', () => {
+        const session = createClaudeRemoteStreamedTranscriptSession({
+            sendAgentMessage: () => {},
+            sendAgentMessageCommitted: async () => {},
+            sendAgentMessageEphemeral: () => {},
+        });
+
+        expect(session.sendAgentMessageEphemeralDelta).toBeUndefined();
+        expect(session.getEphemeralStreamConnectionEpoch).toBeUndefined();
+    });
 });

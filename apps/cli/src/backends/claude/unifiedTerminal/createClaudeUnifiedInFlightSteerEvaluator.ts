@@ -15,7 +15,7 @@ import {
   parseClaudeScreenState,
   resolveClaudeScreenInFlightSteerVeto,
 } from './tuiControls/screenState';
-import { isClaudeComposerCaptureStyleUnavailablePlaceholderCandidate } from './tuiControls/composerCaptureClassification';
+import { classifyClaudeOwnComposerDraft } from './ownComposerDraftClassification';
 import type { EnhancedMode } from '../loop';
 import { mapToClaudeMode } from '../utils/permissionMode';
 
@@ -35,6 +35,11 @@ export type ClaudeUnifiedUserDraftStarvationInfo = Readonly<{
   ownLeftover: boolean;
   draftLength: number;
 }>;
+
+type ClaudeUnifiedDraftLikeVetoReason = 'user_draft' | 'slash_picker';
+type ClaudeUnifiedDraftLikeVetoHandlingResult =
+  | ClaudeUnifiedInFlightSteerDecision
+  | Readonly<{ action: 'recheck' | 'fallback' }>;
 
 export type ClaudeUnifiedInFlightSteerWiring<Mode extends EnhancedMode = EnhancedMode> = Readonly<{
   evaluateInFlightSteer: ClaudeUnifiedInFlightSteerEvaluator<Mode>;
@@ -182,17 +187,27 @@ export function createClaudeUnifiedInFlightSteerEvaluator<Mode extends EnhancedM
    *   `user_terminal_draft` reason is teed to the capability publisher (UI pending honesty) and
    *   the one-shot starvation callback fires (single user-visible notification, never a loop).
    */
-  async function handleUserDraftVeto(
+  async function handleDraftLikeVeto(
     batch: ClaudeUnifiedPromptBatch<Mode>,
     screen: ClaudeScreenState,
     rawText: string,
-  ): Promise<ClaudeUnifiedInFlightSteerDecision | null> {
+    vetoReason: ClaudeUnifiedDraftLikeVetoReason,
+  ): Promise<ClaudeUnifiedDraftLikeVetoHandlingResult> {
     const captureInputState = opts.hostAdapter.captureInputState;
+    const ownComposerTexts = opts.ownComposerTexts ?? { matches: () => false };
     let current = screen;
     let currentRawText = rawText;
-    let ownLeftover = (current.composerContent ?? '').length > 0
-      && opts.ownComposerTexts?.matches(current.composerContent ?? '') === true;
-    if (!ownLeftover && isClaudeComposerCaptureStyleUnavailablePlaceholderCandidate(currentRawText, current)) {
+    let draftClassification = classifyClaudeOwnComposerDraft({
+      screen: current,
+      rawText: currentRawText,
+      ownComposerTexts,
+      stopOnGenerating: false,
+    });
+    let ownLeftover = draftClassification === 'own';
+    if (vetoReason === 'slash_picker' && !ownLeftover) {
+      return { action: 'fallback' };
+    }
+    if (draftClassification === 'capture_style_unavailable') {
       const draftLength = (current.composerContent ?? '').length;
       emitClaudeUnifiedSteerDecision(opts.telemetry, {
         decision: 'vetoed',
@@ -227,13 +242,22 @@ export function createClaudeUnifiedInFlightSteerEvaluator<Mode extends EnhancedM
           originKind: batch.origin.kind,
           draftLength: (current.composerContent ?? '').length,
         });
-        if (resolveClaudeScreenInFlightSteerVeto(current) !== 'user_draft') {
+        if (resolveClaudeScreenInFlightSteerVeto(current) !== vetoReason) {
           // Draft gone (or screen changed): re-evaluate the fresh screen through the normal flow.
           resetUserDraftStarvation();
-          return null;
+          return { action: 'recheck' };
         }
-        ownLeftover = opts.ownComposerTexts?.matches(current.composerContent ?? '') === true;
-        if (!ownLeftover && isClaudeComposerCaptureStyleUnavailablePlaceholderCandidate(currentRawText, current)) {
+        draftClassification = classifyClaudeOwnComposerDraft({
+          screen: current,
+          rawText: currentRawText,
+          ownComposerTexts,
+          stopOnGenerating: false,
+        });
+        ownLeftover = draftClassification === 'own';
+        if (vetoReason === 'slash_picker' && !ownLeftover) {
+          return { action: 'fallback' };
+        }
+        if (draftClassification === 'capture_style_unavailable') {
           const draftLength = (current.composerContent ?? '').length;
           emitClaudeUnifiedSteerDecision(opts.telemetry, {
             decision: 'vetoed',
@@ -247,6 +271,10 @@ export function createClaudeUnifiedInFlightSteerEvaluator<Mode extends EnhancedM
         }
         if (!ownLeftover) break;
       }
+    }
+
+    if (vetoReason !== 'user_draft') {
+      return { action: 'fallback' };
     }
 
     const draftLength = (current.composerContent ?? '').length;
@@ -340,9 +368,15 @@ export function createClaudeUnifiedInFlightSteerEvaluator<Mode extends EnhancedM
         const screenText = inputState.currentInput;
         const screen = parseClaudeScreenState(screenText, { cursor: inputState.cursor });
         const vetoReason = resolveClaudeScreenInFlightSteerVeto(screen);
-        if (vetoReason === 'user_draft') {
-          const decision = await handleUserDraftVeto(batch, screen, screenText);
-          if (decision !== null) return decision;
+        if (vetoReason === 'user_draft' || vetoReason === 'slash_picker') {
+          const decision = await handleDraftLikeVeto(batch, screen, screenText, vetoReason);
+          if ('action' in decision) {
+            if (decision.action === 'fallback') {
+              return veto(batch, vetoReason);
+            }
+          } else {
+            return decision;
+          }
           continue;
         }
         if (vetoReason !== null) {

@@ -97,7 +97,7 @@ describe('claudeRemoteAgentSdk (ExitPlanMode transition)', () => {
     expect(response?.setPermissionMode).toHaveBeenCalledWith('bypassPermissions');
   });
 
-  it('resolves duplicate ExitPlanMode permission waiters from canUseTool and PermissionRequest with one approval', async () => {
+  it('resolves duplicate ExitPlanMode permission waiters from canUseTool with one approval', async () => {
     const { session, client } = createPermissionHandlerSessionStubWithMetadata({
       sessionId: 's1',
       metadata: { acpSessionModeOverrideV1: { v: 1, updatedAt: 1, modeId: 'plan' } },
@@ -119,17 +119,10 @@ describe('claudeRemoteAgentSdk (ExitPlanMode transition)', () => {
             { plan: 'p1' },
             { signal: directController.signal, toolUseID: toolUseId, agentID: 'agent_1' },
           );
-          const hookPromise = capturedOptions.hooks.PermissionRequest[0].hooks[0](
-            {
-              hook_event_name: 'PermissionRequest',
-              session_id: 'sess_1',
-              transcript_path: '/tmp/sess_1.jsonl',
-              cwd: '/tmp',
-              tool_name: 'ExitPlanMode',
-              tool_input: { plan: 'p1' },
-            },
-            toolUseId,
-            { signal: hookController.signal },
+          const duplicatePromise = capturedOptions.canUseTool(
+            'ExitPlanMode',
+            { plan: 'p1' },
+            { signal: hookController.signal, toolUseID: toolUseId, agentID: 'agent_1' },
           );
 
           expect(Object.keys(client.agentState.requests)).toEqual([toolUseId]);
@@ -138,20 +131,11 @@ describe('claudeRemoteAgentSdk (ExitPlanMode transition)', () => {
           expect(permissionRpc).toBeDefined();
           await permissionRpc?.({ id: toolUseId, approved: true } as any);
 
-          const bothPermissionWaiters = Promise.all([directPromise, hookPromise]);
+          const bothPermissionWaiters = Promise.all([directPromise, duplicatePromise]);
 
-          const [directResult, hookResult] = await expectResolvesWithin(bothPermissionWaiters);
+          const [directResult, duplicateResult] = await expectResolvesWithin(bothPermissionWaiters);
           expect(directResult).toEqual({ behavior: 'allow', updatedInput: { plan: 'p1' } });
-          expect(hookResult).toEqual(
-            expect.objectContaining({
-              continue: true,
-              suppressOutput: true,
-              hookSpecificOutput: {
-                hookEventName: 'PermissionRequest',
-                decision: { behavior: 'allow', updatedInput: { plan: 'p1' } },
-              },
-            }),
-          );
+          expect(duplicateResult).toEqual({ behavior: 'allow', updatedInput: { plan: 'p1' } });
 
           yield { type: 'result' } as any;
         },

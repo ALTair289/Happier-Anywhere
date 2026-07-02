@@ -6,7 +6,14 @@ import {
 } from '@/agent/localControl/turnLifecycle';
 import { TERMINAL_INPUT_QUIET_PERIOD_MS } from '@/agent/runtime/terminal/injection/arbiter';
 
-import { createClaudeLocalLifecycleTracker } from '../localControl/claudeLocalLifecycleTracker';
+import {
+  createClaudeLocalLifecycleTracker,
+  isClaudeTaskNotificationUserPromptHook,
+} from '../localControl/claudeLocalLifecycleTracker';
+import {
+  CLAUDE_RUNTIME_ACTIVITY_PROVIDER_ID,
+  type ClaudeProviderRuntimeActivityPublisher,
+} from '../providerActivity/createClaudeProviderActivityLedger';
 import { isClaudeRuntimeAuthFailureEvidence } from '../connectedServices/classifyClaudeConnectedServiceRuntimeAuthFailure';
 import {
   mapClaudeRateLimitEventToUsageDetails,
@@ -31,6 +38,7 @@ export type ClaudeUnifiedPromptTurnTerminalEvent = Readonly<{
   reason: LocalTurnTerminalReason;
   source: string;
   detail?: string | undefined;
+  providerAcceptanceFailureObserved?: boolean | undefined;
 }>;
 
 export type ClaudeUnifiedSessionEndEvent = Readonly<{
@@ -69,7 +77,10 @@ function readSystemSubtype(message: RawJSONLines): string {
 
 export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
   subscribeClaudeSessionHooks: ClaudeUnifiedSessionHookSubscription;
-  arbiter: Pick<ClaudeUnifiedInputArbiter, 'observeLifecycle' | 'confirmPromptAcceptedByProvider' | 'drainWhenSafe'>;
+  arbiter: Pick<ClaudeUnifiedInputArbiter, 'observeLifecycle' | 'confirmPromptAcceptedByProvider' | 'drainWhenSafe'>
+    & Readonly<{
+      observePendingProviderAcceptanceTerminalFailure?: ClaudeUnifiedInputArbiter['observePendingProviderAcceptanceTerminalFailure'];
+    }>;
   completionQuiescenceMs: number;
   onThinkingChange?: ((thinking: boolean) => void) | undefined;
   onReady?: (() => void | Promise<void>) | undefined;
@@ -90,6 +101,7 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
   onTrustedProviderProgress?: (() => void) | undefined;
   onPromptTurnTerminal?: ((event: ClaudeUnifiedPromptTurnTerminalEvent) => void | Promise<void>) | undefined;
   onSessionEnd?: ((event: ClaudeUnifiedSessionEndEvent) => void | Promise<void>) | undefined;
+  runtimeActivityPublisher?: ClaudeProviderRuntimeActivityPublisher | null | undefined;
 }>): ClaudeUnifiedHookLifecycleBridge {
   let disposed = false;
   let unsubscribe: (() => void) | null = null;
@@ -245,10 +257,18 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
       // Run the terminal projection (which may abort/fail the canonical turn)
       // before clearing the thinking state; otherwise onThinkingChange(false)
       // emits task_complete first and a failed turn is recorded as completed.
+      let providerAcceptanceFailureObserved: boolean | undefined;
+      if (snapshot.lastTerminalReason !== 'aborted') {
+        chainTerminalSideEffect('pending-provider-acceptance-terminal-failure', async () => {
+          providerAcceptanceFailureObserved =
+            await opts.arbiter.observePendingProviderAcceptanceTerminalFailure?.() === true;
+        });
+      }
       chainTerminalSideEffect('prompt-turn-terminal', () => opts.onPromptTurnTerminal?.({
         reason: snapshot.lastTerminalReason ?? 'unknown',
         source: event.source,
         ...(event.type === 'turn_terminal' && event.detail ? { detail: event.detail } : {}),
+        ...(providerAcceptanceFailureObserved === undefined ? {} : { providerAcceptanceFailureObserved }),
       }));
       chainTerminalSideEffect(
         'thinking-cleared',
@@ -280,7 +300,10 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
           void settleTerminalSnapshot(snapshot, event);
         },
       });
-      tracker = createClaudeLocalLifecycleTracker({ lifecycle });
+      tracker = createClaudeLocalLifecycleTracker({
+        lifecycle,
+        runtimeActivityPublisher: opts.runtimeActivityPublisher ?? null,
+      });
       unsubscribe = opts.subscribeClaudeSessionHooks((data) => {
         const hookEventName = readHookEventName(data);
         // Sidechain (subagent) hooks carry an agent_id attribution. They must not
@@ -296,7 +319,7 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
         } else if (hookEventName === 'PostCompact') {
           if (!sidechain) observeCompactionCompleted();
         } else if (hookEventName === 'UserPromptSubmit') {
-          if (!sidechain) {
+          if (!sidechain && !isClaudeTaskNotificationUserPromptHook(data)) {
             opts.onTrustedProviderProgress?.();
             observeProviderPromptStarted();
             if (opts.onProviderPromptSubmitMetadata) {
@@ -359,6 +382,10 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
       disposeSubscription(unsubscribe);
       unsubscribe = null;
       tracker = null;
+      void opts.runtimeActivityPublisher?.clearProviderSources(
+        CLAUDE_RUNTIME_ACTIVITY_PROVIDER_ID,
+        'claude_unified_bridge_dispose',
+      ).catch(() => undefined);
       lifecycle?.dispose();
       lifecycle = null;
     },

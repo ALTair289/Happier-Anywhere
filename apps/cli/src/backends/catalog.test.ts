@@ -203,7 +203,7 @@ describe('AGENTS', () => {
       providerId: 'claude',
       serviceIds: expect.arrayContaining(['claude-subscription']),
       spawnPreflightOauthRefresh: { mode: 'force' },
-      refreshedCredentialApplication: { mode: 'restart_required' },
+      refreshedCredentialApplication: { mode: 'no_restart_required' },
     });
     await expect(resolveDescriptor('pi')).resolves.toMatchObject({
       providerId: 'pi',
@@ -853,12 +853,16 @@ describe('AGENTS', () => {
     });
   });
 
-  it('loads Codex inactive goal control through the backend catalog hook', async () => {
+  it('loads inactive goal controls through backend catalog hooks for supported providers', async () => {
     await expect(getSessionGoalControlAdapter('codex')).resolves.toMatchObject({
       setGoal: expect.any(Function),
       clearGoal: expect.any(Function),
     });
-    await expect(getSessionGoalControlAdapter('claude')).resolves.toBeNull();
+    await expect(getSessionGoalControlAdapter('claude')).resolves.toMatchObject({
+      setGoal: expect.any(Function),
+      clearGoal: expect.any(Function),
+      getGoal: expect.any(Function),
+    });
   });
 
   it('loads inactive usage-limit recovery control for supported providers', async () => {

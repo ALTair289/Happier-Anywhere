@@ -13,16 +13,24 @@ import type { PermissionModeQueuedPrompt } from '@/agent/runtime/permission/perm
 import {
   resolveProviderPromptWithReplaySeed,
 } from '@/agent/runtime/replaySeed/replaySeedV1';
+import { normalizePendingDeliveryLocalIds } from '@/agent/runtime/session/pendingDelivery/undeliverableProviderPrompt';
 import { isAbortLikeError } from '@/agent/executionRuns/runtime/turnDelivery';
 import { configuration } from '@/configuration';
+import type { PendingQueueDeliveryBlockedReason } from '@/api/session/pendingQueueV2Transport';
 
 type PromptRuntime = {
   beginTurn: () => void;
   startOrLoad: (opts: { resumeId?: string; importHistory?: boolean; deferPendingDrain?: boolean }) => Promise<unknown>;
   drainPendingAfterStartOrLoad?: () => Promise<void>;
   sendPrompt: (message: string) => Promise<void>;
-  sendPromptWithMeta?: (params: { text: string; localId?: string | null; meta?: Record<string, unknown> }) => Promise<void>;
+  sendPromptWithMeta?: (params: {
+    text: string;
+    localId?: string | null;
+    meta?: Record<string, unknown>;
+    onProviderPromptAccepted?: () => void;
+  }) => Promise<void>;
   compactContext?: (command: string) => Promise<void>;
+  failTurn?: (error: unknown) => void | boolean | Promise<void | boolean>;
   flushTurn: () => void | Promise<void>;
   reset: () => Promise<void>;
   getSessionId: () => string | null;
@@ -38,6 +46,8 @@ type QueuedPermissionModeMessage = {
   message: PermissionModeQueuedPrompt;
   mode: { permissionMode: PermissionMode; appendSystemPrompt?: string | null };
   hash: string;
+  maxUserMessageSeq: number | null;
+  userMessageLocalIds: readonly string[];
 };
 
 export type ReadyNotificationTurnContext = Readonly<{
@@ -175,6 +185,27 @@ export async function runPermissionModePromptLoop(opts: {
     }
   };
 
+  const confirmQueuedUserMessageDeliveredToProvider = (message: QueuedPermissionModeMessage): void => {
+    opts.session.confirmUserMessageDeliveredToProvider?.(message.maxUserMessageSeq, {
+      localIds: message.userMessageLocalIds,
+    });
+  };
+
+  const blockQueuedUserMessageDeliveryBeforeProviderAcceptance = async (
+    message: QueuedPermissionModeMessage,
+    reason: PendingQueueDeliveryBlockedReason,
+  ): Promise<boolean> => {
+    const localIds = normalizePendingDeliveryLocalIds(message.userMessageLocalIds);
+    if (localIds.length === 0 || typeof opts.session.blockPendingMessageDelivery !== 'function') {
+      return false;
+    }
+    try {
+      return await opts.session.blockPendingMessageDelivery({ localIds, reason });
+    } catch {
+      return false;
+    }
+  };
+
   const ensureFreshSessionSnapshotBeforeTurnBestEffort = async (): Promise<void> => {
     if (snapshotFreshForNextPromptBoundary) {
       return;
@@ -267,7 +298,13 @@ export async function runPermissionModePromptLoop(opts: {
         },
       });
       if (!next) continue;
-      message = { message: next.message, mode: next.mode, hash: next.hash };
+      message = {
+        message: next.message,
+        mode: next.mode,
+        hash: next.hash,
+        maxUserMessageSeq: next.maxUserMessageSeq ?? null,
+        userMessageLocalIds: next.userMessageLocalIds ?? [],
+      };
     }
     if (!message) continue;
 
@@ -310,6 +347,7 @@ export async function runPermissionModePromptLoop(opts: {
     if (special.type === 'clear') {
       opts.messageBuffer.addMessage(`Resetting ${opts.providerName} session…`, 'status');
       await opts.runtime.reset();
+      confirmQueuedUserMessageDeliveredToProvider(message);
       wasStarted = false;
       pendingFreshSessionSystemPrompt = false;
       await opts.onAfterReset?.();
@@ -324,6 +362,13 @@ export async function runPermissionModePromptLoop(opts: {
     let shouldSendReady = true;
     let suppressFlushTurnFailure = false;
     let readyTurnContext: ReadyNotificationTurnContext | undefined;
+    let didAttemptProviderSend = false;
+    let didConfirmProviderAccepted = false;
+    const confirmProviderAccepted = (): void => {
+      if (didConfirmProviderAccepted) return;
+      didConfirmProviderAccepted = true;
+      confirmQueuedUserMessageDeliveredToProvider(message);
+    };
     try {
       turnInFlight = true;
       let shouldApplyFreshSessionSystemPrompt = pendingFreshSessionSystemPrompt;
@@ -352,6 +397,7 @@ export async function runPermissionModePromptLoop(opts: {
       const special = parseSpecialCommand(message.message.text);
       if (special.type === 'compact' && typeof opts.runtime.compactContext === 'function') {
         await opts.runtime.compactContext(special.originalMessage ?? message.message.text.trim());
+        confirmQueuedUserMessageDeliveredToProvider(message);
         continue;
       }
 
@@ -383,22 +429,45 @@ export async function runPermissionModePromptLoop(opts: {
           : seedResolution.providerPrompt;
 
       if (typeof opts.runtime.sendPromptWithMeta === 'function') {
+        didAttemptProviderSend = true;
         await opts.runtime.sendPromptWithMeta({
           text: providerPrompt,
           localId,
           ...(message.message.meta ? { meta: message.message.meta } : {}),
+          onProviderPromptAccepted: confirmProviderAccepted,
         });
+        confirmProviderAccepted();
       } else {
+        didAttemptProviderSend = true;
         await opts.runtime.sendPrompt(providerPrompt);
+        confirmProviderAccepted();
       }
     } catch (error) {
+      if (!didConfirmProviderAccepted) {
+        const pendingDeliveryBlockedReason: PendingQueueDeliveryBlockedReason = didAttemptProviderSend
+          ? 'provider_rejected_before_acceptance'
+          : 'runtime_disposed_before_delivery';
+        await blockQueuedUserMessageDeliveryBeforeProviderAcceptance(message, pendingDeliveryBlockedReason);
+      }
+
       if (error instanceof StrictInitialResumeError || error instanceof ResumeFailClosedError) {
         shouldSendReady = false;
         suppressFlushTurnFailure = true;
         throw error;
       }
       if (!isAbortLikeError(error)) {
-        opts.session.sendAgentMessage(opts.agentMessageType, { type: 'message', message: opts.formatPromptErrorMessage(error) });
+        let surfacedStructuredFailure = false;
+        if (typeof opts.runtime.failTurn === 'function') {
+          try {
+            const result = await opts.runtime.failTurn(error);
+            surfacedStructuredFailure = result !== false;
+          } catch {
+            surfacedStructuredFailure = false;
+          }
+        }
+        if (!surfacedStructuredFailure) {
+          opts.session.sendAgentMessage(opts.agentMessageType, { type: 'message', message: opts.formatPromptErrorMessage(error) });
+        }
       }
     } finally {
       turnInFlight = false;

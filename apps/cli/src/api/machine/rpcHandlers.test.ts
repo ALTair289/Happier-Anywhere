@@ -61,10 +61,55 @@ const { fetchServerFeaturesSnapshotMock } = vi.hoisted(() => ({
   })),
 }));
 
-const { requestDaemonSessionConnectedServiceAuthSwitchMock } = vi.hoisted(() => ({
+const {
+  getDaemonSessionRunnerStatusMock,
+  requestDaemonSessionConnectedServiceAuthSwitchMock,
+  requestDaemonSessionRunnerRestartMock,
+  restartAllDaemonSessionRunnersMock,
+} = vi.hoisted(() => ({
+  getDaemonSessionRunnerStatusMock: vi.fn(async (_body: unknown) => ({
+    v: 1,
+    sessionId: 'session-1',
+    machineId: 'machine-1',
+    daemonId: 'daemon-1',
+    observedAtMs: 123,
+    runner: {
+      pid: 123,
+      runtimeId: 'version:1.0.0',
+      cliVersion: '1.0.0',
+      entrypointVersion: '1.0.0',
+      processCommandHash: 'hash-1',
+      entrypointSource: 'process_command',
+      startedBy: 'daemon',
+      startingMode: 'remote',
+    },
+    daemon: {
+      cliVersion: '1.1.0',
+      startedWithCliVersion: '1.1.0',
+      currentEntrypointVersion: 'version:1.1.0',
+      currentEntrypointSource: 'launch_spec',
+    },
+    versionState: 'stale',
+    statusSource: 'process_command_inferred',
+    plannedRestart: { supported: true, eligible: true, disabledReason: null },
+  })),
   requestDaemonSessionConnectedServiceAuthSwitchMock: vi.fn(async (_body: unknown) => ({
     ok: true,
     action: 'restart_requested',
+  })),
+  requestDaemonSessionRunnerRestartMock: vi.fn(async (_body: unknown) => ({
+    ok: true,
+    status: 'restarted',
+    sessionId: 'session-1',
+  })),
+  restartAllDaemonSessionRunnersMock: vi.fn(async (_body: unknown) => ({
+    ok: true,
+    mode: 'force_current_cli',
+    requestedCount: 1,
+    restartedCount: 1,
+    skippedCount: 0,
+    failedCount: 0,
+    results: [{ ok: true, status: 'restarted', sessionId: 'session-1' }],
   })),
 }));
 
@@ -122,7 +167,10 @@ vi.mock('@/daemon/controlClient', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/daemon/controlClient')>();
   return {
     ...actual,
+    getDaemonSessionRunnerStatus: getDaemonSessionRunnerStatusMock,
     requestDaemonSessionConnectedServiceAuthSwitch: requestDaemonSessionConnectedServiceAuthSwitchMock,
+    requestDaemonSessionRunnerRestart: requestDaemonSessionRunnerRestartMock,
+    restartAllDaemonSessionRunners: restartAllDaemonSessionRunnersMock,
   };
 });
 
@@ -159,6 +207,49 @@ describe('registerMachineRpcHandlers', () => {
     requestDaemonSessionConnectedServiceAuthSwitchMock.mockResolvedValue({
       ok: true,
       action: 'restart_requested',
+    });
+    requestDaemonSessionRunnerRestartMock.mockReset();
+    requestDaemonSessionRunnerRestartMock.mockResolvedValue({
+      ok: true,
+      status: 'restarted',
+      sessionId: 'session-1',
+    });
+    restartAllDaemonSessionRunnersMock.mockReset();
+    restartAllDaemonSessionRunnersMock.mockResolvedValue({
+      ok: true,
+      mode: 'force_current_cli',
+      requestedCount: 1,
+      restartedCount: 1,
+      skippedCount: 0,
+      failedCount: 0,
+      results: [{ ok: true, status: 'restarted', sessionId: 'session-1' }],
+    });
+    getDaemonSessionRunnerStatusMock.mockReset();
+    getDaemonSessionRunnerStatusMock.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      machineId: 'machine-1',
+      daemonId: 'daemon-1',
+      observedAtMs: 123,
+      runner: {
+        pid: 123,
+        runtimeId: 'version:1.0.0',
+        cliVersion: '1.0.0',
+        entrypointVersion: '1.0.0',
+        processCommandHash: 'hash-1',
+        entrypointSource: 'process_command',
+        startedBy: 'daemon',
+        startingMode: 'remote',
+      },
+      daemon: {
+        cliVersion: '1.1.0',
+        startedWithCliVersion: '1.1.0',
+        currentEntrypointVersion: 'version:1.1.0',
+        currentEntrypointSource: 'launch_spec',
+      },
+      versionState: 'stale',
+      statusSource: 'process_command_inferred',
+      plannedRestart: { supported: true, eligible: true, disabledReason: null },
     });
   });
 
@@ -251,6 +342,74 @@ describe('registerMachineRpcHandlers', () => {
       ok: true,
       action: 'restart_requested',
     });
+  });
+
+  it('registers session-runner restart machine RPCs and forwards daemon control contracts', async () => {
+    const registered = new Map<string, (params: any) => Promise<any>>();
+    const rpcHandlerManager = {
+      registerHandler: (method: string, handler: (params: any) => Promise<any>) => {
+        registered.set(method, handler);
+      },
+    } as any;
+
+    registerMachineRpcHandlers({
+      rpcHandlerManager,
+      handlers: {
+        spawnSession: async () => ({ type: 'success', sessionId: 's1' } as const),
+        stopSession: async () => true,
+        requestShutdown: () => {},
+      },
+    });
+
+    const restartHandler = registered.get(RPC_METHODS.DAEMON_SESSION_RUNNER_RESTART);
+    const restartAllHandler = registered.get(RPC_METHODS.DAEMON_SESSION_RUNNER_RESTART_ALL);
+    const statusHandler = registered.get(RPC_METHODS.DAEMON_SESSION_RUNNER_STATUS_GET);
+    expect(restartHandler).toBeDefined();
+    expect(restartAllHandler).toBeDefined();
+    expect(statusHandler).toBeDefined();
+
+    await expect(restartHandler!({
+      sessionId: 'session-1',
+      mode: 'if_stale',
+      reason: 'ui_stale_runner_banner',
+      expectedRunnerPid: 123,
+      expectedProcessCommandHash: 'hash-1',
+      expectedRunnerEntrypointIdentity: 'version:1.0.0',
+    })).resolves.toEqual({ ok: true, status: 'restarted', sessionId: 'session-1' });
+    expect(requestDaemonSessionRunnerRestartMock).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      mode: 'if_stale',
+      reason: 'ui_stale_runner_banner',
+      expectedRunnerPid: 123,
+      expectedProcessCommandHash: 'hash-1',
+      expectedRunnerEntrypointIdentity: 'version:1.0.0',
+    });
+
+    await expect(restartAllHandler!({
+      mode: 'force_current_cli',
+      dryRun: true,
+      reason: 'daemon_restart_session_runners_command',
+    })).resolves.toEqual({
+      ok: true,
+      mode: 'force_current_cli',
+      requestedCount: 1,
+      restartedCount: 1,
+      skippedCount: 0,
+      failedCount: 0,
+      results: [{ ok: true, status: 'restarted', sessionId: 'session-1' }],
+    });
+    expect(restartAllDaemonSessionRunnersMock).toHaveBeenCalledWith({
+      mode: 'force_current_cli',
+      dryRun: true,
+      reason: 'daemon_restart_session_runners_command',
+    });
+
+    await expect(statusHandler!({ sessionId: ' session-1 ' })).resolves.toMatchObject({
+      sessionId: 'session-1',
+      machineId: 'machine-1',
+      versionState: 'stale',
+    });
+    expect(getDaemonSessionRunnerStatusMock).toHaveBeenCalledWith({ sessionId: 'session-1' });
   });
 
   it('forwards account settings version hints when spawning a session', async () => {

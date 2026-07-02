@@ -887,6 +887,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         const deliveryAttribution = {
             userMessageSeq: deliveryInfo?.seq ?? null,
             userMessageLocalId: message.localId ?? null,
+            providerAcceptancePending: deliveryInfo?.providerAcceptancePending === true,
         };
 
         // Structured Happier user messages must be treated as plain text (no special command parsing).
@@ -987,6 +988,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         const terminationHandlers = registerRunnerTerminationHandlers({
             process,
             exit: (code) => process.exit(code),
+            sessionExitReport: { sessionId: session.sessionId },
             onTerminate: cleanup,
             shouldTerminateOnUnhandledRejection: createClaudeShouldTerminateOnUnhandledRejection({
                 abortWasRequestedRecently: (withinMs) => currentSession?.wasUserAbortRequestedRecently(withinMs) ?? false,
@@ -1308,8 +1310,16 @@ async function runClaudeLocalFastStart(credentials: Credentials, options: StartO
         deps: {
             registerRpcHandlers: ({ artifacts }) => {
                 registerSessionHandlers(artifacts.deferredSession.rpcHandlerManager, workingDirectory, {
-                    materializeNextPendingMessageSafely:
-                        artifacts.deferredSession.materializeNextPendingMessageSafely.bind(artifacts.deferredSession),
+                    sessionRuntimeControls: {
+                        materializeNextPendingMessageSafely: async (opts) => {
+                            const result = await artifacts.deferredSession.materializeNextPendingMessageSafely(opts);
+                            return {
+                                ok: true,
+                                didMaterialize: result.type === 'materialized',
+                                result,
+                            };
+                        },
+                    },
                 });
             },
                 startHookServer: async () => {
@@ -1626,6 +1636,7 @@ async function runClaudeLocalFastStart(credentials: Credentials, options: StartO
                     const deliveryAttribution = {
                         userMessageSeq: deliveryInfo?.seq ?? null,
                         userMessageLocalId: message.localId ?? null,
+                        providerAcceptancePending: deliveryInfo?.providerAcceptancePending === true,
                     };
 
                     if (!structuredRouting) {
@@ -1837,6 +1848,7 @@ async function runClaudeLocalFastStart(credentials: Credentials, options: StartO
         const terminationHandlers = registerRunnerTerminationHandlers({
             process,
             exit: (code) => process.exit(code),
+            sessionExitReport: { sessionId: coordinator.artifacts.deferredSession.sessionId },
             onTerminate: async (event, outcome) => {
             restoreStdinBestEffort({ stdin: process.stdin as any });
             try {

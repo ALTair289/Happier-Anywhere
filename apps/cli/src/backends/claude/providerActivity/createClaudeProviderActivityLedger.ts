@@ -1,4 +1,24 @@
-import { normalizeClaudeAgentSdkProviderTaskId } from '@/backends/claude/sdk/providerTaskStatus';
+import {
+    isTerminalClaudeAgentSdkProviderTaskStatus,
+    normalizeClaudeAgentSdkProviderTaskId,
+    normalizeClaudeAgentSdkProviderTaskStatus,
+    readClaudeAgentSdkProviderTaskStatus,
+} from '@happier-dev/protocol';
+import type { SessionRuntimeActivityPublisher } from '@/session/runtimeActivity/sessionRuntimeActivityPublisher';
+
+export const CLAUDE_RUNTIME_ACTIVITY_PROVIDER_ID = 'claude';
+export const CLAUDE_PROVIDER_TASK_RUNTIME_ACTIVITY_SOURCE_CLASS = 'provider_detached_task';
+
+export type ClaudeProviderRuntimeActivityPublisher = Pick<
+    SessionRuntimeActivityPublisher,
+    'setSourceActive' | 'observeSource' | 'clearSource' | 'clearProviderSources'
+>;
+
+export type ClaudeProviderTaskActivity =
+    | Readonly<{ type: 'background'; taskId: string }>
+    | Readonly<{ type: 'started'; taskId: string }>
+    | Readonly<{ type: 'progress'; taskId: string }>
+    | Readonly<{ type: 'terminal'; taskId: string }>;
 
 export type ClaudeProviderActivitySource =
     | 'assistant-auto-backgrounded-tool-result'
@@ -11,7 +31,7 @@ export {
     normalizeClaudeAgentSdkProviderTaskId,
     normalizeClaudeAgentSdkProviderTaskStatus,
     readClaudeAgentSdkProviderTaskStatus,
-} from '@/backends/claude/sdk/providerTaskStatus';
+} from '@happier-dev/protocol';
 
 export type ClaudeProviderTaskBlocker = {
     taskId: string;
@@ -22,6 +42,87 @@ type ProviderTaskEntry = {
     taskId: string;
     sources: Set<ClaudeProviderActivitySource>;
 };
+
+function readRecord(value: unknown): Readonly<Record<string, unknown>> | null {
+    return value && typeof value === 'object' && !Array.isArray(value)
+        ? value as Readonly<Record<string, unknown>>
+        : null;
+}
+
+function readProviderTaskId(value: unknown): string | null {
+    const record = readRecord(value);
+    if (!record) return null;
+    return normalizeClaudeAgentSdkProviderTaskId(
+        record.task_id
+        ?? record.taskId
+        ?? record.agent_id
+        ?? record.agentId,
+    );
+}
+
+export function buildClaudeProviderTaskRuntimeActivitySourceId(taskId: unknown): string | null {
+    const normalizedTaskId = normalizeClaudeAgentSdkProviderTaskId(taskId);
+    return normalizedTaskId ? `claude:provider-task:${normalizedTaskId}` : null;
+}
+
+export function readClaudeBackgroundProviderTaskId(value: unknown): string | null {
+    const record = readRecord(value);
+    if (!record) return null;
+    const taskResultRecord = readRecord(record.tool_use_result ?? record.toolUseResult);
+    if (!taskResultRecord) return null;
+    const explicitBackgroundTaskId = normalizeClaudeAgentSdkProviderTaskId(
+        taskResultRecord.backgroundTaskId
+        ?? taskResultRecord.background_task_id,
+    );
+    if (explicitBackgroundTaskId) return explicitBackgroundTaskId;
+
+    const status = normalizeClaudeAgentSdkProviderTaskStatus(taskResultRecord.status);
+    const launchedAsync = taskResultRecord.assistantAutoBackgrounded === true
+        || taskResultRecord.assistant_auto_backgrounded === true
+        || taskResultRecord.isAsync === true
+        || status === 'async_launched';
+    if (!launchedAsync) return null;
+
+    return normalizeClaudeAgentSdkProviderTaskId(
+        taskResultRecord.taskId
+        ?? taskResultRecord.task_id
+        ?? taskResultRecord.agentId
+        ?? taskResultRecord.agent_id,
+    );
+}
+
+export function readClaudeProviderTaskActivity(value: unknown): ClaudeProviderTaskActivity | null {
+    const backgroundTaskId = readClaudeBackgroundProviderTaskId(value);
+    if (backgroundTaskId) {
+        return { type: 'background', taskId: backgroundTaskId };
+    }
+
+    const record = readRecord(value);
+    if (!record || record.type !== 'system') return null;
+    const taskId = readProviderTaskId(record);
+    if (!taskId) return null;
+
+    const status = readClaudeAgentSdkProviderTaskStatus(record);
+    const isTerminalStatus = isTerminalClaudeAgentSdkProviderTaskStatus(status);
+
+    switch (record.subtype) {
+        case 'task_started':
+            return isTerminalStatus
+                ? { type: 'terminal', taskId }
+                : { type: 'started', taskId };
+        case 'task_progress':
+        case 'task_updated':
+            return isTerminalStatus
+                ? { type: 'terminal', taskId }
+                : { type: 'progress', taskId };
+        case 'task_notification':
+            return isTerminalStatus
+                ? { type: 'terminal', taskId }
+                : { type: 'progress', taskId };
+        default:
+            return null;
+    }
+}
 
 export function createClaudeProviderActivityLedger() {
     const activeProviderTasks = new Map<string, ProviderTaskEntry>();

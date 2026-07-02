@@ -1,4 +1,5 @@
 import type { RawJSONLines } from '../types';
+import { parseClaudeQueuedCommandAttachment } from '../attachments/claudeAttachmentTypes';
 import { normalizeClaudeUnifiedPromptIdentityText } from './promptIdentity';
 
 type AcceptedPrompt = Readonly<{
@@ -110,10 +111,8 @@ function readQueuedCommandPromptTexts(value: unknown): readonly string[] {
     return typeof content === 'string' && content.length > 0 ? [content] : [];
   }
   if (message.type === 'attachment') {
-    const attachment = readObject(message.attachment);
-    if (!attachment || attachment.type !== 'queued_command') return [];
-    const prompt = attachment.prompt;
-    return typeof prompt === 'string' && prompt.length > 0 ? [prompt] : [];
+    const command = parseClaudeQueuedCommandAttachment(message);
+    return command ? [command.prompt] : [];
   }
   return [];
 }
