@@ -1,0 +1,2 @@
+ALTER TABLE "Session"
+ADD COLUMN "pendingBlockedCount" INTEGER NOT NULL DEFAULT 0;

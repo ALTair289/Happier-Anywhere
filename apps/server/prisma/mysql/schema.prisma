@@ -63,7 +63,7 @@ model Account {
     AccountPetPackage      AccountPetPackage[]
     AccountPetAsset        AccountPetAsset[]
     ServiceAccountToken    ServiceAccountToken[]
-    ServiceAccountQuotaSnapshot ServiceAccountQuotaSnapshot[]
+    ProviderAccountUsageRecord ProviderAccountUsageRecord[]
     ConnectedServiceAuthGroup ConnectedServiceAuthGroup[]
     RelationshipsFrom      UserRelationship[]         @relation("RelationshipsFrom")
     RelationshipsTo        UserRelationship[]         @relation("RelationshipsTo")
@@ -81,6 +81,13 @@ model Account {
     AccountSettingsSnapshots AccountSettingsSnapshot[]
     SessionPendingMessage  SessionPendingMessage[]
     SessionFolderAssignment SessionFolderAssignment[]
+    SessionPin             SessionPin[]
+    SessionOrganizationFolder SessionOrganizationFolder[]
+    SessionOrganizationTag SessionOrganizationTag[]
+    SessionTagAssignment   SessionTagAssignment[]
+    SessionOrganizationOrderEntry SessionOrganizationOrderEntry[]
+    SessionOrganizationLabel SessionOrganizationLabel[]
+    SessionOrganizationCheckpoint SessionOrganizationCheckpoint?
     AccountIdentity        AccountIdentity[]
     automations            Automation[]
     automationRuns         AutomationRun[]
@@ -293,6 +300,7 @@ model Session {
     seq               Int                 @default(0)
     pendingVersion    Int                 @default(0)
     pendingCount      Int                 @default(0)
+    pendingBlockedCount Int               @default(0)
     pendingQueueSeq   Int                 @default(0)
     // Server-readable per-session activity projection (minimal, E2EE-safe).
     // These fields exist to support authoritative badge counts for background/closed devices.
@@ -308,6 +316,10 @@ model Session {
     latestTurnStatus String?
     latestTurnStatusObservedAt BigInt?
     lastRuntimeIssue String?
+    runtimeActivityActiveCount Int @default(0)
+    runtimeActivityObservedAt BigInt?
+    runtimeActivityExpiresAt BigInt?
+    runtimeActivitySourceClass String?
     meaningfulActivityAt DateTime?
     active            Boolean             @default(true)
     archivedAt        DateTime?
@@ -325,6 +337,8 @@ model Session {
     publicShare       PublicSessionShare?
     accountChanges    AccountChange[]    @relation("AccountChangeSession")
     sessionFolderAssignments SessionFolderAssignment[]
+    sessionPins       SessionPin[]
+    sessionTagAssignments SessionTagAssignment[]
     producedByAutomationRuns AutomationRun[] @relation("AutomationRunProducedSession")
 
     @@unique([accountId, tag])
@@ -393,6 +407,128 @@ model SessionFolderAssignment {
     @@index([sessionId])
 }
 
+model SessionPin {
+    id        String   @id @default(cuid())
+    accountId String
+    sessionId String
+    sortKey   String?
+    pinnedAt  DateTime @default(now())
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+    session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+    @@unique([accountId, sessionId])
+    @@index([accountId, sortKey])
+    @@index([sessionId])
+}
+
+model SessionOrganizationFolder {
+    id             String   @id @default(cuid())
+    accountId      String
+    folderKey      String @db.LongText
+    folderHash     String
+    parentKey      String? @db.LongText
+    parentHash     String?
+    sortKey        String?
+    displayDbValue String? @db.LongText
+    archivedAt     DateTime?
+    createdAt      DateTime @default(now())
+    updatedAt      DateTime @updatedAt
+
+    account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+    @@unique([accountId, folderHash])
+    @@index([accountId, parentHash, sortKey])
+    @@index([accountId, archivedAt])
+}
+
+model SessionOrganizationTag {
+    id             String   @id @default(cuid())
+    accountId      String
+    tagKey         String @db.LongText
+    tagHash        String
+    sortKey        String?
+    displayDbValue String? @db.LongText
+    archivedAt     DateTime?
+    createdAt      DateTime @default(now())
+    updatedAt      DateTime @updatedAt
+
+    account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+    assignments SessionTagAssignment[]
+
+    @@unique([accountId, tagHash])
+    @@index([accountId, sortKey])
+    @@index([accountId, archivedAt])
+}
+
+model SessionTagAssignment {
+    id        String   @id @default(cuid())
+    accountId String
+    sessionId String
+    tagId     String
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+    session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+    tag     SessionOrganizationTag @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+    @@unique([accountId, sessionId, tagId])
+    @@index([accountId, tagId])
+    @@index([sessionId])
+    @@index([tagId])
+}
+
+model SessionOrganizationOrderEntry {
+    id        String   @id @default(cuid())
+    accountId String
+    scopeKind String
+    scopeKey  String @db.LongText
+    scopeHash String
+    itemKind  String
+    itemKey   String @db.LongText
+    itemHash  String
+    sortKey   String
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+    @@unique([accountId, scopeKind, scopeHash, itemKind, itemHash], map: "SessionOrgOrderEntry_scope_item_key")
+    @@index([accountId, scopeKind, scopeHash, sortKey], map: "SessionOrgOrderEntry_scope_sort_idx")
+}
+
+model SessionOrganizationLabel {
+    id             String   @id @default(cuid())
+    accountId      String
+    labelKind      String
+    scopeKey       String @db.LongText
+    scopeHash      String
+    displayDbValue String? @db.LongText
+    archivedAt     DateTime?
+    createdAt      DateTime @default(now())
+    updatedAt      DateTime @updatedAt
+
+    account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+    @@unique([accountId, labelKind, scopeHash])
+    @@index([accountId, labelKind, archivedAt])
+}
+
+model SessionOrganizationCheckpoint {
+    id        String   @id @default(cuid())
+    accountId String   @unique
+    version   Int      @default(0)
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+    @@index([accountId, version])
+}
+
 model SessionMessage {
     id        String   @id @default(cuid())
     sessionId String
@@ -432,7 +568,9 @@ model SessionPendingMessage {
     messageRole      String?
     /// [SessionPendingMessageContent]
     content          Json
-    status           SessionPendingMessageStatus @default(queued)
+    status                SessionPendingMessageStatus @default(queued)
+    deliveryState         String?
+    deliveryBlockedReason String?
     position         Int
     discardedAt      DateTime?
     discardedReason  String?
@@ -441,6 +579,7 @@ model SessionPendingMessage {
 
     @@unique([sessionId, localId])
     @@index([sessionId, status, position])
+    @@index([sessionId, status, deliveryState, position], map: "SessionPendingMessage_sid_status_dstate_position_idx")
     @@index([sessionId, authorAccountId])
     @@index([sessionId, status, updatedAt])
 }
@@ -747,22 +886,55 @@ model ServiceAccountToken {
     @@index([accountId])
 }
 
-model ServiceAccountQuotaSnapshot {
-    id         String    @id @default(cuid())
-    accountId  String
-    account    Account   @relation(fields: [accountId], references: [id], onDelete: Cascade)
-    vendor     String
-    profileId  String    @default("default")
-    snapshot   Bytes
-    status     String?
-    fetchedAt  DateTime?
-    staleAfterMs Int?
-    metadata   Json?
-    createdAt  DateTime  @default(now())
-    updatedAt  DateTime  @updatedAt
+model ProviderAccountUsageRecord {
+    id              String   @id @default(cuid())
+    accountId       String
+    account         Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+    providerId      String
+    recordId        String
+    accountSubjectId String
+    subjectKind     String
+    quotaScope      String
+    quotaScopeId    String?
+    quotaScopeIdKey String
+    recordKeyJson   Json
+    payloadMode     String
+    status          String
+    snapshot        Json?
+    sealedPayload   Json?
+    fetchedAt       DateTime?
+    staleAfterMs    Int?
+    refreshRequestedAt DateTime?
+    metadata        Json?
+    createdAt       DateTime @default(now())
+    updatedAt       DateTime @updatedAt
 
-    @@unique([accountId, vendor, profileId])
-    @@index([accountId])
+    sources         ConnectedServiceUsageSource[]
+
+    @@unique([accountId, recordId])
+    @@unique([accountId, providerId, accountSubjectId, quotaScope, quotaScopeIdKey])
+    @@index([accountId, providerId])
+    @@index([accountId, status])
+}
+
+model ConnectedServiceUsageSource {
+    id                         String   @id @default(cuid())
+    accountId                  String
+    serviceId                  String
+    profileId                  String
+    sourceKey                  String
+    providerAccountUsageRecordId String
+    bindingKind                String
+    groupId                    String?
+    groupGeneration            Int?
+    createdAt                  DateTime @default(now())
+    updatedAt                  DateTime @updatedAt
+
+    providerAccountUsageRecord ProviderAccountUsageRecord @relation(fields: [accountId, providerAccountUsageRecordId], references: [accountId, recordId], onDelete: Cascade, onUpdate: Cascade)
+
+    @@unique([accountId, serviceId, profileId])
+    @@unique([accountId, sourceKey])
+    @@index([accountId, providerAccountUsageRecordId])
 }
 
 model ConnectedServiceAuthGroup {

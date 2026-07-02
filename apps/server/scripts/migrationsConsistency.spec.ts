@@ -132,4 +132,40 @@ describe("migrations (provider completeness)", () => {
             ]),
         ).toBe(true);
     });
+
+    it("includes session organization tables across providers", () => {
+        const root = process.cwd();
+        expectProviderSchemasToContain(root, "model SessionPin");
+        expectProviderSchemasToContain(root, "model SessionOrganizationFolder");
+        expectProviderSchemasToContain(root, "model SessionOrganizationTag");
+        expectProviderSchemasToContain(root, "model SessionTagAssignment");
+        expectProviderSchemasToContain(root, "model SessionOrganizationOrderEntry");
+        expectProviderSchemasToContain(root, "model SessionOrganizationLabel");
+        expectProviderSchemasToContain(root, "model SessionOrganizationCheckpoint");
+
+        const tableNames = [
+            "SessionPin",
+            "SessionOrganizationFolder",
+            "SessionOrganizationTag",
+            "SessionTagAssignment",
+            "SessionOrganizationOrderEntry",
+            "SessionOrganizationLabel",
+            "SessionOrganizationCheckpoint",
+        ];
+
+        const pgFiles = listMigrationSqlFiles(join(root, "prisma", "migrations"));
+        for (const tableName of tableNames) {
+            expect(anyFileContains(pgFiles, [`CREATE TABLE "${tableName}"`])).toBe(true);
+        }
+
+        const sqliteFiles = listMigrationSqlFiles(join(root, "prisma", "sqlite", "migrations"));
+        for (const tableName of tableNames) {
+            expect(anyFileContains(sqliteFiles, [`CREATE TABLE "${tableName}"`])).toBe(true);
+        }
+
+        const mysqlFiles = listMigrationSqlFiles(join(root, "prisma", "mysql", "migrations"));
+        for (const tableName of tableNames) {
+            expect(anyFileContains(mysqlFiles, [`CREATE TABLE \`${tableName}\``])).toBe(true);
+        }
+    });
 });

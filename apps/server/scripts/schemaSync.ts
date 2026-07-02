@@ -110,6 +110,16 @@ function generateProviderSchemaFromPostgres(
 	        body = body.replace(/^(\s*settingsDbValue\s+String\?)(?![^\n]*@db\.)/gm, "$1 @db.LongText");
 	        body = body.replace(/^(\s*policyJson\s+String\b)(?![^\n]*@db\.)/gm, "$1 @db.LongText");
 	        body = body.replace(/^(\s*stateJson\s+String\?)(?![^\n]*@db\.)/gm, "$1 @db.LongText");
+
+	        // Session organization stores legacy/account-setting keys and private display envelopes.
+	        // Queryable indexes use bounded hash columns; the original key/envelope columns must not
+	        // be truncated by MySQL's default VARCHAR(191).
+	        body = body.replace(/^(\s*folderKey\s+String\b)(?![^\n]*@db\.)/gm, "$1 @db.LongText");
+	        body = body.replace(/^(\s*parentKey\s+String\?)(?![^\n]*@db\.)/gm, "$1 @db.LongText");
+	        body = body.replace(/^(\s*tagKey\s+String\b)(?![^\n]*@db\.)/gm, "$1 @db.LongText");
+	        body = body.replace(/^(\s*scopeKey\s+String\b)(?![^\n]*@db\.)/gm, "$1 @db.LongText");
+	        body = body.replace(/^(\s*itemKey\s+String\b)(?![^\n]*@db\.)/gm, "$1 @db.LongText");
+	        body = body.replace(/^(\s*displayDbValue\s+String\?)(?![^\n]*@db\.)/gm, "$1 @db.LongText");
 	    }
 
     const header = [

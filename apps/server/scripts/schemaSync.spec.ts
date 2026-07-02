@@ -169,4 +169,43 @@ datasource db {
 	        expect(mysql).toContain("stateJson  String? @db.LongText");
 	        expect(mysql).toContain("stateJson String? @db.LongText");
 	    });
+
+    it("uses LongText for session organization legacy keys and display envelopes in MySQL", () => {
+        const master = `
+generator client {
+    provider = "prisma-client-js"
+}
+
+datasource db {
+    provider = "postgresql"
+    url      = env("DATABASE_URL")
+}
+
+model SessionOrganizationFolder {
+    id             String @id
+    folderKey      String
+    parentKey      String?
+    displayDbValue String?
+}
+
+model SessionOrganizationOrderEntry {
+    id       String @id
+    scopeKey String
+    itemKey  String
+}
+
+model SessionOrganizationLabel {
+    id             String @id
+    scopeKey       String
+    displayDbValue String?
+}
+`;
+
+        const mysql = generateMySqlSchemaFromPostgres(master);
+        expect(mysql).toContain("folderKey      String @db.LongText");
+        expect(mysql).toContain("parentKey      String? @db.LongText");
+        expect(mysql).toContain("displayDbValue String? @db.LongText");
+        expect(mysql).toContain("scopeKey String @db.LongText");
+        expect(mysql).toContain("itemKey  String @db.LongText");
+    });
 	});
