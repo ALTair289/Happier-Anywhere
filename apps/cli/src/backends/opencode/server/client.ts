@@ -9,7 +9,15 @@ import {
   ensureSharedManagedOpenCodeServerBaseUrl,
   isLoopbackManagedOpenCodeBaseUrl,
   readSharedManagedOpenCodeServerStateBestEffort,
+  type SharedManagedOpenCodeServerState,
 } from './sharedManagedServer';
+import {
+  isSameOpenCodeManagedServerGeneration,
+  resolveOpenCodeManagedServerIdentity,
+  type OpenCodeManagedServerIdentity,
+  type OpenCodeManagedServerIdentityChange,
+  type OpenCodeManagedServerIdentityChangeReason,
+} from './openCodeManagedServerIdentity';
 
 type PermissionReply = 'once' | 'always' | 'reject';
 
@@ -175,6 +183,7 @@ export type OpenCodeServerRuntimeClient = Readonly<{
   questionReject: (opts: { requestId: string }) => Promise<boolean>;
   permissionReply: (opts: { requestId: string; reply: PermissionReply }) => Promise<boolean>;
   subscribeGlobalEvents: (opts: { signal: AbortSignal; onEvent: (evt: OpenCodeGlobalEvent) => void }) => Promise<void>;
+  getManagedServerIdentity: () => OpenCodeManagedServerIdentity | null;
   dispose: () => Promise<void>;
 }>;
 
@@ -242,7 +251,13 @@ async function sleepUntilOrAbort(ms: number, signal: AbortSignal): Promise<void>
   });
 }
 
-export async function createOpenCodeServerRuntimeClient(params: Readonly<{ directory: string; messageBuffer: MessageBuffer; baseUrlOverride?: string | null; env?: NodeJS.ProcessEnv }>): Promise<OpenCodeServerRuntimeClient> {
+export async function createOpenCodeServerRuntimeClient(params: Readonly<{
+  directory: string;
+  messageBuffer: MessageBuffer;
+  baseUrlOverride?: string | null;
+  env?: NodeJS.ProcessEnv;
+  onManagedServerIdentityChanged?: (change: OpenCodeManagedServerIdentityChange) => void;
+}>): Promise<OpenCodeServerRuntimeClient> {
   const env = params.env ?? process.env;
   const httpTimeoutMs = resolveOpenCodeServerHttpTimeoutMs(env);
   const readIdleTimeoutMs = resolveOpenCodeSseReadIdleTimeoutMs(env);
@@ -280,8 +295,45 @@ export async function createOpenCodeServerRuntimeClient(params: Readonly<{ direc
       }),
   );
 
+  // Managed-server generation identity. The runtime uses this to detect mid-turn server replacement
+  // (Lane E). It is tracked only in managed mode; explicit URL / override modes never emit changes.
+  let managedServerIdentity: OpenCodeManagedServerIdentity | null = null;
+
+  const captureManagedServerIdentityFromState = (
+    state: SharedManagedOpenCodeServerState | null,
+    reason: OpenCodeManagedServerIdentityChangeReason,
+  ): void => {
+    if (!usingManagedServer) return;
+    if (!state || typeof state.baseUrl !== 'string' || !isLoopbackManagedOpenCodeBaseUrl(state.baseUrl)) {
+      return;
+    }
+    const nextIdentity = resolveOpenCodeManagedServerIdentity(state);
+    if (isSameOpenCodeManagedServerGeneration(managedServerIdentity, nextIdentity)) {
+      // Same process generation: refresh the normalized fields without surfacing a change.
+      managedServerIdentity = nextIdentity;
+      return;
+    }
+    const previous = managedServerIdentity;
+    managedServerIdentity = nextIdentity;
+    // The initial baseline must not surface as a "change"; only genuine replacements do.
+    if (reason === 'initial') return;
+    try {
+      params.onManagedServerIdentityChanged?.({ previous, current: nextIdentity, reason });
+    } catch {
+      // Identity-change observers must never destabilize the client transport loop.
+    }
+  };
+
+  if (usingManagedServer) {
+    // Establish the baseline generation so a later replacement is detectable. Best-effort: a missing
+    // state file simply leaves identity null until the first refresh observes a server.
+    const initialState = await readSharedManagedOpenCodeServerStateBestEffort().catch(() => null);
+    captureManagedServerIdentityFromState(initialState, 'initial');
+  }
+
   const refreshBaseUrlIfManagedBestEffort = async (opts: Readonly<{
     allowEnsure: boolean;
+    reason: OpenCodeManagedServerIdentityChangeReason;
   }>): Promise<void> => {
     if (!usingManagedServer) return;
 
@@ -294,6 +346,9 @@ export async function createOpenCodeServerRuntimeClient(params: Readonly<{ direc
     }
 
     if (!opts.allowEnsure) {
+      // SSE-reconnect refresh: never ensures/replaces a server. Surface an identity change only if
+      // the already-written state points at a new managed-server generation.
+      captureManagedServerIdentityFromState(state, opts.reason);
       return;
     }
 
@@ -326,6 +381,11 @@ export async function createOpenCodeServerRuntimeClient(params: Readonly<{ direc
     } catch {
       // Ignore (caller will retry with backoff).
     }
+
+    // After an ensure, the managed server may have been replaced on a new port/pid. Re-read the
+    // freshly written state and surface a generation change if the process identity differs.
+    const stateAfterEnsure = await readSharedManagedOpenCodeServerStateBestEffort().catch(() => null);
+    captureManagedServerIdentityFromState(stateAfterEnsure, opts.reason);
   };
 
   const waitForManagedServerHealthAfterRefreshBestEffort = async (): Promise<void> => {
@@ -352,7 +412,7 @@ export async function createOpenCodeServerRuntimeClient(params: Readonly<{ direc
         throw error;
       }
       logger.debug('[OpenCodeServer] Retrying managed HTTP request after transient transport failure', error);
-      await refreshBaseUrlIfManagedBestEffort({ allowEnsure: true });
+      await refreshBaseUrlIfManagedBestEffort({ allowEnsure: true, reason: 'http_retry_ensure' });
       await waitForManagedServerHealthAfterRefreshBestEffort();
       return await request(baseUrl);
     }
@@ -672,7 +732,7 @@ export async function createOpenCodeServerRuntimeClient(params: Readonly<{ direc
                 : '[OpenCodeServer] SSE stream ended; reconnecting (best-effort)',
               error,
             );
-            await refreshBaseUrlIfManagedBestEffort({ allowEnsure: false });
+            await refreshBaseUrlIfManagedBestEffort({ allowEnsure: false, reason: 'sse_reconnect_state_refresh' });
             const delayMs = resolveSseReconnectDelayMs(attempt, env);
             attempt += 1;
             await sleepUntilOrAbort(delayMs, combinedAbort.signal);
@@ -691,6 +751,7 @@ export async function createOpenCodeServerRuntimeClient(params: Readonly<{ direc
         }
       })();
     },
+    getManagedServerIdentity: () => managedServerIdentity,
     dispose: async () => {
       disposed = true;
       if (subscriptionLoopAbort) {

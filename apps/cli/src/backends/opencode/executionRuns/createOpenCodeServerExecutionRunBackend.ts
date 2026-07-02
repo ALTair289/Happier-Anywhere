@@ -35,6 +35,7 @@ type ExecutionRunSessionAdapter = Pick<ApiSessionClient,
     | 'getLastObservedMessageSeq'
     | 'keepAlive'
     | 'updateMetadata'
+    | 'updateRuntimeActivityProjection'
     | 'sendAgentMessage'
     | 'sendAgentMessageCommitted'
 >;
@@ -156,6 +157,7 @@ export function createOpenCodeServerExecutionRunBackend(args: Readonly<{
         getMetadataSnapshot: () => metadataSnapshot,
         getLastObservedMessageSeq: () => lastObservedMessageSeq,
         keepAlive: () => undefined,
+        updateRuntimeActivityProjection: async () => {},
         updateMetadata: async (updater: Parameters<ApiSessionClient['updateMetadata']>[0]) => {
             const next = await updater(metadataSnapshot);
             metadataSnapshot = next ?? metadataSnapshot;

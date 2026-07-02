@@ -78,6 +78,7 @@ export async function runOpenCode(opts: StandardAcpProviderRunOptions & {
     waitingForCommandLabel: 'OpenCode',
     agentMessageType: 'opencode',
     startRuntimeBeforeFirstPrompt: backendMode === 'server',
+    deferUserMessageDeliveryWatermarkToProviderAcceptance: backendMode === 'server',
     machineMetadata: initialMachineMetadata,
     terminalDisplay: OpenCodeTerminalDisplay,
     resolveRuntimeDirectory: ({ session, metadata }) => session.getMetadataSnapshot()?.path ?? metadata.path,

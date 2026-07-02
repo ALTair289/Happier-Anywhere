@@ -1,18 +1,36 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { createServer } from 'node:net';
+import { basename } from 'node:path';
 
 import { resolveWindowsCommandInvocation } from '@happier-dev/cli-common/process';
 
+import { configuration } from '@/configuration';
 import { logger } from '@/ui/logger';
 import { requireProviderCliLaunchSpec } from '@/runtime/managedTools/requireProviderCliLaunchSpec';
 
 import { resolveOpenCodeServerAuthHeadersFromEnv } from './openCodeServerAuth';
-import { resolveOpenCodeManagedServerChildEnv } from './openCodeManagedServerEnv';
+import {
+  resolveOpenCodeManagedServerChildEnv,
+  OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV,
+} from './openCodeManagedServerEnv';
+import {
+  OPEN_CODE_BROKER_LOAD_NONCE_ENV,
+  OPEN_CODE_BROKER_PROVIDERS,
+  OPEN_CODE_BROKER_SELECTIONS_ENV,
+  applyOpenCodeBrokerRefreshTokenEnv,
+  ensureOpenCodeBrokerPluginAssets,
+  parseOpenCodeBrokerSelections,
+} from '@/backends/opencode/brokerPlugin';
 import { resolveOpenCodeManagedServerTrackedPid } from './resolveOpenCodeManagedServerTrackedPid';
 import { terminateManagedOpenCodeServerPidBestEffort } from './terminateManagedOpenCodeServerPidBestEffort';
 import { waitForOpenCodeServerHealth } from './waitForOpenCodeServerHealth';
 import { readPositiveIntEnv } from '@/utils/readPositiveIntEnv';
+import {
+  createOpenCodeManagedServerLogCapture,
+  pruneOpenCodeManagedServerLogs,
+} from './managedServerLogs';
 
 async function resolveEphemeralPort(hostname: string): Promise<number> {
   return await new Promise<number>((resolve, reject) => {
@@ -35,17 +53,54 @@ function resolveOpenCodeCommand(): Readonly<{ command: string; args: readonly st
   return { command: launch.command, args: launch.args };
 }
 
+/**
+ * For connected (config-isolated) sessions only, ensure the Happier-owned config home exists and the
+ * broker plugin file(s) referenced by the materialized `OPENCODE_CONFIG_CONTENT` are written. Keyed
+ * on the selection-identity env so NATIVE sessions (no selection identity) are a strict no-op and
+ * keep loading the user's own config/plugins.
+ */
+async function ensureConnectedOpenCodeBrokerAssetsBeforeSpawn(env: NodeJS.ProcessEnv): Promise<void> {
+  if (typeof env[OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV] !== 'string') return;
+  const selections = parseOpenCodeBrokerSelections(env[OPEN_CODE_BROKER_SELECTIONS_ENV]);
+  const providers = OPEN_CODE_BROKER_PROVIDERS.filter((provider) => selections[provider]);
+  if (providers.length > 0) {
+    env[OPEN_CODE_BROKER_LOAD_NONCE_ENV] = randomUUID();
+  }
+  await ensureOpenCodeBrokerPluginAssets({ providers });
+}
+
+/**
+ * Read the daemon master control token from the 0600 daemon-state file (best-effort). Used ONLY to
+ * derive the SCOPED broker-refresh capability token for the child env — the master token itself is
+ * never placed in the OpenCode env (F2 least privilege).
+ */
+function readDaemonControlTokenBestEffort(): string | null {
+  try {
+    const parsed = JSON.parse(readFileSync(configuration.daemonStateFile, 'utf8')) as { controlToken?: unknown };
+    return typeof parsed.controlToken === 'string' && parsed.controlToken.trim().length > 0
+      ? parsed.controlToken.trim()
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function startManagedOpenCodeServer(params: Readonly<{
   hostname?: string;
   port?: number;
   timeoutMs?: number;
   xdgRootDir?: string | null;
   isolateConfig?: boolean;
-  onSpawned?: (started: Readonly<{ baseUrl: string; pid: number }>) => void | Promise<void>;
+  /** Override the durable-log directory (defaults to `configuration.logsDir`). */
+  logsDir?: string;
+  /** Launch fingerprint recorded in the log header for cross-server diagnostics. */
+  launchFingerprint?: string;
+  onSpawned?: (started: Readonly<{ baseUrl: string; pid: number; logPath: string }>) => void | Promise<void>;
 }> = {}): Promise<{
   baseUrl: string;
   pid: number;
   close: () => Promise<void>;
+  logPath: string;
 }> {
   const hostname = typeof params.hostname === 'string' && params.hostname.trim().length > 0 ? params.hostname.trim() : '127.0.0.1';
   const port = typeof params.port === 'number' && Number.isFinite(params.port) && params.port > 0
@@ -64,11 +119,20 @@ export async function startManagedOpenCodeServer(params: Readonly<{
 
   const xdgRootDir = typeof params.xdgRootDir === 'string' ? params.xdgRootDir.trim() : '';
   const isolateConfig = params.isolateConfig === true;
+
+  // Connected sessions (selection identity present) are config-isolated: ensure the Happier-owned
+  // empty config home exists and write the broker plugin file(s) before spawn. Native sessions have
+  // no selection identity ⇒ this is a no-op ⇒ native HOME/XDG/config/plugins remain untouched.
+  await ensureConnectedOpenCodeBrokerAssetsBeforeSpawn(process.env);
+
   const childEnv = resolveOpenCodeManagedServerChildEnv({
     baseEnv: process.env,
     xdgRootDir: xdgRootDir.length > 0 ? xdgRootDir : null,
     isolateConfig,
   });
+  // Inject the SCOPED broker-refresh capability token (connected brokered sessions only). The master
+  // control token is read here to DERIVE it but is never placed in the child env (F2 least privilege).
+  applyOpenCodeBrokerRefreshTokenEnv(childEnv, readDaemonControlTokenBestEffort);
   const invocation = resolveWindowsCommandInvocation({
     command: cmd,
     args,
@@ -85,6 +149,45 @@ export async function startManagedOpenCodeServer(params: Readonly<{
   const baseUrl = `http://${hostname}:${port}`;
   let trackedPid = proc.pid ?? -1;
 
+  // Durable per-server log: tee post-start stdout/stderr to disk for future incident diagnosis.
+  // The data listeners below double as the pipe drain, so the child never blocks on a full pipe.
+  const logCapture = createOpenCodeManagedServerLogCapture({
+    ...(typeof params.logsDir === 'string' ? { logsDir: params.logsDir } : {}),
+    port,
+    spawnPid: proc.pid ?? -1,
+    commandBasename: basename(cmd),
+    args,
+    hostname,
+    baseUrl,
+    ...(typeof params.launchFingerprint === 'string' && params.launchFingerprint.trim().length > 0
+      ? { launchFingerprint: params.launchFingerprint.trim() }
+      : {}),
+  });
+  const logPath = logCapture.logPath;
+
+  // Bounded startup buffer (used only for readiness/failure error messages). After readiness we
+  // stop growing it but KEEP the listeners so output continues to drain + persist to the log.
+  const MAX_STARTUP_OUTPUT_BYTES = 64 * 1024;
+  const startupChunks: string[] = [];
+  let startupOutputBytes = 0;
+  let captureStartupOutput = true;
+  const appendStartupOutput = (text: string): void => {
+    if (!captureStartupOutput || startupOutputBytes >= MAX_STARTUP_OUTPUT_BYTES) return;
+    startupChunks.push(text);
+    startupOutputBytes += text.length;
+  };
+  const readStartupOutput = (): string => startupChunks.join('') || '<no output captured>';
+  const onStdout = (chunk: Buffer): void => {
+    appendStartupOutput(chunk.toString());
+    logCapture.write('stdout', chunk);
+  };
+  const onStderr = (chunk: Buffer): void => {
+    appendStartupOutput(chunk.toString());
+    logCapture.write('stderr', chunk);
+  };
+  proc.stdout?.on('data', onStdout);
+  proc.stderr?.on('data', onStderr);
+
   let closePromise: Promise<void> | null = null;
   const close = async () => {
     if (closePromise) {
@@ -92,18 +195,22 @@ export async function startManagedOpenCodeServer(params: Readonly<{
       return;
     }
     closePromise = (async () => {
-      if (trackedPid > 0) {
-        try {
-          await terminateManagedOpenCodeServerPidBestEffort(trackedPid);
-          return;
-        } catch {
-          // fall through to direct kill
-        }
-      }
       try {
-        proc.kill();
-      } catch {
-        // best-effort only
+        if (trackedPid > 0) {
+          try {
+            await terminateManagedOpenCodeServerPidBestEffort(trackedPid);
+            return;
+          } catch {
+            // fall through to direct kill
+          }
+        }
+        try {
+          proc.kill();
+        } catch {
+          // best-effort only
+        }
+      } finally {
+        await logCapture.close().catch(() => {});
       }
     })();
     await closePromise;
@@ -113,25 +220,18 @@ export async function startManagedOpenCodeServer(params: Readonly<{
     const tag = randomUUID();
     const timer = setTimeout(() => {
       void close();
-      reject(new Error(`Timeout waiting for OpenCode server to start after ${timeoutMs}ms (${tag}). Output:\n${output || '<no output captured>'}`));
+      reject(new Error(`Timeout waiting for OpenCode server to start after ${timeoutMs}ms (${tag}). Log: ${logPath}. Output:\n${readStartupOutput()}`));
     }, timeoutMs);
     timer.unref?.();
 
-    let output = '';
-    const appendOutput = (chunk: Buffer) => {
-      output += chunk.toString();
-    };
-
-    proc.stdout?.on('data', appendOutput);
-    proc.stderr?.on('data', appendOutput);
     proc.on('exit', (code, signal) => {
       clearTimeout(timer);
       void close();
       const codeLabel = code ?? 'unknown';
       const signalLabel = signal ?? 'none';
       reject(new Error(
-        `OpenCode server exited before ready (code=${codeLabel}, signal=${signalLabel}). Output:
-${output || '<no output captured>'}`,
+        `OpenCode server exited before ready (code=${codeLabel}, signal=${signalLabel}). Log: ${logPath}. Output:
+${readStartupOutput()}`,
       ));
     });
     proc.on('error', (error) => {
@@ -149,10 +249,14 @@ ${output || '<no output captured>'}`,
         clearTimeout(timer);
         void close();
         const message = error instanceof Error ? error.message : String(error);
-        reject(new Error(`OpenCode server did not become healthy: ${message}. Output:
-${output || '<no output captured>'}`));
+        reject(new Error(`OpenCode server did not become healthy: ${message}. Log: ${logPath}. Output:
+${readStartupOutput()}`));
       });
   });
+
+  // Readiness reached: stop growing the bounded startup buffer; the log listeners keep draining and
+  // persisting subsequent output (this replaces the old removeAllListeners + resume drain-only path).
+  captureStartupOutput = false;
 
   try {
     trackedPid = await resolveOpenCodeManagedServerTrackedPid({
@@ -163,24 +267,21 @@ ${output || '<no output captured>'}`));
   } catch {
     // keep the spawned pid best-effort
   }
+  logCapture.recordTrackedPid(trackedPid);
 
   try {
-    await params.onSpawned?.({ baseUrl, pid: trackedPid });
+    await params.onSpawned?.({ baseUrl, pid: trackedPid, logPath });
   } catch (error) {
     await close();
     throw error;
   }
 
-  try {
-    proc.stdout?.removeAllListeners('data');
-    proc.stderr?.removeAllListeners('data');
-    // Keep the pipe open and drain output so the managed server can keep logging without SIGPIPE/EPIPE crashes.
-    proc.stdout?.resume();
-    proc.stderr?.resume();
-  } catch {
-    // ignore
-  }
+  // Prune old managed-server logs by count (never the just-created one). Best-effort, non-blocking.
+  void pruneOpenCodeManagedServerLogs({
+    ...(typeof params.logsDir === 'string' ? { logsDir: params.logsDir } : {}),
+    keepPath: logPath,
+  }).catch(() => {});
 
   proc.unref?.();
-  return { baseUrl, pid: trackedPid, close };
+  return { baseUrl, pid: trackedPid, close, logPath };
 }

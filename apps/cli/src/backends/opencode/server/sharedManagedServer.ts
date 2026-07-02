@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -35,6 +36,12 @@ export type SharedManagedOpenCodeServerState = Readonly<{
   expectedCmdlineHash?: string;
   activeServerDir?: string;
   daemonInstanceId?: string;
+  /**
+   * Path to the durable per-server log file (see `managedServerLogs/`). Optional so older state
+   * files and non-logging callers remain compatible. Diagnostics link old/new server logs across a
+   * managed-server replacement.
+   */
+  logPath?: string;
 }>;
 
 type ManagedServerProcessInfo = OpenCodeServerProcessInfo;
@@ -56,8 +63,8 @@ type ResolveDeps = Readonly<{
   generateOwnerToken?: () => string;
   readProcessStartTimeMs?: (pid: number) => Promise<number | null> | number | null;
   startServer: (params?: {
-    onSpawned?: (started: Readonly<{ baseUrl: string; pid: number }>) => void | Promise<void>;
-  }) => Promise<{ baseUrl: string; pid: number }>;
+    onSpawned?: (started: Readonly<{ baseUrl: string; pid: number; logPath?: string }>) => void | Promise<void>;
+  }) => Promise<{ baseUrl: string; pid: number; logPath?: string }>;
   nowMs?: () => number;
 }>;
 
@@ -75,6 +82,14 @@ type ReleaseForAuthSwitchDeps = Readonly<{
   drainMs: number;
   trackedClaimCountForLaunchFingerprint?: () => Promise<number> | number;
   allowCurrentSessionClaim?: boolean;
+  /**
+   * Lane F prevention: returns whether the managed server's remaining claimant (the switching
+   * session kept by `allowCurrentSessionClaim`) currently has an in-flight OpenCode turn. When it
+   * does, the release is deferred (the server is left running, state intact) so the turn is never
+   * torn down mid-stream — closing the OQ-2 sole-claimant mid-turn-kill window. The server is then
+   * reaped at turn quiescence by the orphan-reap startup scan once no claim remains.
+   */
+  hasInFlightTurnForLaunchFingerprint?: () => Promise<boolean> | boolean;
 }>;
 
 type ReleaseForAuthSwitchResult = Readonly<{
@@ -88,7 +103,8 @@ type ReleaseForAuthSwitchResult = Readonly<{
     | 'active_server_dir_mismatch'
     | 'pid_dead'
     | 'process_identity_mismatch'
-    | 'tracked_session_claimed';
+    | 'tracked_session_claimed'
+    | 'in_flight_turn';
 }>;
 
 function hashCommandLine(rawCommandLine: string): string {
@@ -104,6 +120,49 @@ function readPositiveInt(value: unknown): number | null {
   const numeric = typeof value === 'number' ? value : Number(value);
   if (!Number.isFinite(numeric) || numeric <= 0) return null;
   return Math.floor(numeric);
+}
+
+function stateBelongsToCurrentDaemonOwner(
+  state: SharedManagedOpenCodeServerState,
+  deps: Pick<ResolveDeps, 'currentActiveServerDir' | 'currentDaemonInstanceId'>,
+): boolean {
+  if (state.v !== 2) return true;
+  const currentDaemonInstanceId = readNonEmptyString(deps.currentDaemonInstanceId ?? null);
+  const currentActiveServerDir = readNonEmptyString(deps.currentActiveServerDir ?? null);
+  if (!currentDaemonInstanceId || !currentActiveServerDir) return true;
+  return state.daemonInstanceId === currentDaemonInstanceId
+    && state.activeServerDir === currentActiveServerDir;
+}
+
+export function resolveManagedOpenCodeDaemonOwnerIdFromState(
+  state: unknown,
+  fallbackActiveServerId: string,
+): string {
+  const source = typeof state === 'object' && state !== null
+    ? state as Record<string, unknown>
+    : null;
+  const runtimeId = readNonEmptyString(source?.runtimeId);
+  const pid = readPositiveInt(source?.pid);
+  const startedAt = readPositiveInt(source?.startedAt);
+  if (runtimeId && pid !== null && startedAt !== null) {
+    return `${runtimeId}:${pid}:${startedAt}`;
+  }
+  return runtimeId ?? readNonEmptyString(fallbackActiveServerId) ?? 'cloud';
+}
+
+function readCurrentDaemonOwnerIdBestEffort(): string | null {
+  try {
+    return resolveManagedOpenCodeDaemonOwnerIdFromState(
+      JSON.parse(readFileSync(configuration.daemonStateFile, 'utf8')),
+      configuration.activeServerId,
+    );
+  } catch {
+    return null;
+  }
+}
+
+function resolveCurrentManagedServerOwnerId(): string {
+  return readCurrentDaemonOwnerIdBestEffort() ?? configuration.activeServerId;
 }
 
 function isTrustedManagedOpenCodeStateV2(state: SharedManagedOpenCodeServerState): boolean {
@@ -142,7 +201,34 @@ type ManagedOpenCodeStartupScanOrphanReapDecision = Readonly<{
 type TrackedOpenCodeLaunchFingerprintClaims = Readonly<{
   countsByLaunchFingerprint: ReadonlyMap<string, number>;
   hasUnknownOpenCodeTrackedClaims: boolean;
+  /**
+   * Launch fingerprints for which at least one claiming OpenCode session currently has an in-flight
+   * turn (per the daemon's connected-service turn deferral queue). Used by the auth-switch release
+   * to defer killing a server whose sole claimant is still mid-turn (Lane F).
+   */
+  inFlightTurnLaunchFingerprints: ReadonlySet<string>;
 }>;
+
+/**
+ * Best-effort resolver for the daemon-owned per-session in-flight-turn query. Returns `null` when
+ * the daemon registry is unavailable (e.g. unit tests, non-daemon contexts). Mirrors the dynamic
+ * import used for tracked session markers so `sharedManagedServer` stays free of a hard daemon
+ * dependency.
+ */
+async function resolveOpenCodeConnectedServiceInFlightTurnQueryBestEffort(): Promise<
+  ((sessionId: string) => boolean) | null
+> {
+  try {
+    const registry = await import('@/daemon/connectedServices/sessionAuthSwitch/openCodeConnectedServiceInFlightTurnRegistry');
+    const query = (registry as { isOpenCodeConnectedServiceTurnInFlight?: unknown })
+      .isOpenCodeConnectedServiceTurnInFlight;
+    return typeof query === 'function'
+      ? (sessionId: string) => (query as (id: string) => boolean)(sessionId) === true
+      : null;
+  } catch {
+    return null;
+  }
+}
 
 export function decideManagedOpenCodeStartupScanStateAction(input: Readonly<{
   state: SharedManagedOpenCodeServerState;
@@ -320,13 +406,19 @@ function isMarkerPidAliveBestEffort(pid: unknown): boolean {
 
 async function readTrackedOpenCodeLaunchFingerprintClaimsBestEffort(): Promise<TrackedOpenCodeLaunchFingerprintClaims> {
   const counts = new Map<string, number>();
+  const inFlightTurnLaunchFingerprints = new Set<string>();
   let hasUnknownOpenCodeTrackedClaims = false;
   try {
     const daemonSessionRegistry = await import('@/daemon/sessionRegistry');
     const listSessionMarkers = (daemonSessionRegistry as { listSessionMarkers?: unknown }).listSessionMarkers;
     if (typeof listSessionMarkers !== 'function') {
-      return { countsByLaunchFingerprint: counts, hasUnknownOpenCodeTrackedClaims: true };
+      return {
+        countsByLaunchFingerprint: counts,
+        hasUnknownOpenCodeTrackedClaims: true,
+        inFlightTurnLaunchFingerprints,
+      };
     }
+    const isTurnInFlight = await resolveOpenCodeConnectedServiceInFlightTurnQueryBestEffort();
     const markers = await Promise.resolve(
       (listSessionMarkers as () => Promise<readonly unknown[]> | readonly unknown[])(),
     ).catch(() => []);
@@ -338,6 +430,10 @@ async function readTrackedOpenCodeLaunchFingerprintClaimsBestEffort(): Promise<T
       if (launchFingerprint) {
         const existing = counts.get(launchFingerprint) ?? 0;
         counts.set(launchFingerprint, existing + 1);
+        const happySessionId = tryReadNonEmptyString(markerRecord.happySessionId);
+        if (happySessionId && isTurnInFlight?.(happySessionId)) {
+          inFlightTurnLaunchFingerprints.add(launchFingerprint);
+        }
         continue;
       }
       hasUnknownOpenCodeTrackedClaims = true;
@@ -345,7 +441,7 @@ async function readTrackedOpenCodeLaunchFingerprintClaimsBestEffort(): Promise<T
   } catch {
     hasUnknownOpenCodeTrackedClaims = true;
   }
-  return { countsByLaunchFingerprint: counts, hasUnknownOpenCodeTrackedClaims };
+  return { countsByLaunchFingerprint: counts, hasUnknownOpenCodeTrackedClaims, inFlightTurnLaunchFingerprints };
 }
 
 function normalizeSharedManagedServerState(
@@ -372,6 +468,9 @@ function normalizeSharedManagedServerState(
       : {}),
     ...(Number.isFinite(state.startTimeMs) && (state.startTimeMs ?? 0) > 0
       ? { startTimeMs: Math.floor(state.startTimeMs as number) }
+      : {}),
+    ...(typeof state.logPath === 'string' && state.logPath.trim()
+      ? { logPath: state.logPath.trim() }
       : {}),
   };
 }
@@ -409,7 +508,8 @@ export async function resolveSharedManagedOpenCodeServerBaseUrl(
       && state.launchEnvFingerprint !== desiredLaunchFingerprint,
     );
     if (state && deps.isPidAlive(state.pid) && isLoopbackManagedOpenCodeBaseUrl(state.baseUrl)) {
-      const healthy = launchFingerprintMismatch
+      const ownerMismatch = !stateBelongsToCurrentDaemonOwner(state, deps);
+      const healthy = ownerMismatch || launchFingerprintMismatch
         ? false
         : await deps.probeHealth(state.baseUrl).catch(() => false);
       if (healthy) {
@@ -432,7 +532,7 @@ export async function resolveSharedManagedOpenCodeServerBaseUrl(
             await invokeKillPidBestEffort(deps.killPid, state.pid);
           }
         }
-      } else if (deps.getProcessInfo && deps.killPid) {
+      } else if (!ownerMismatch && deps.getProcessInfo && deps.killPid) {
         const info = await deps.getProcessInfo(state.pid).catch(() => null);
         if (await hasTrustedManagedOpenCodeStateIdentityForTermination(state, deps, info)) {
           await invokeKillPidBestEffort(deps.killPid, state.pid);
@@ -448,6 +548,7 @@ export async function resolveSharedManagedOpenCodeServerBaseUrl(
     let provisionalPid = -1;
     let provisionalStartTimeMs = nowMs;
     let provisionalExpectedCmdlineHash = '';
+    let provisionalLogPath: string | undefined;
 
     const resolveOwnershipProof = async (pid: number): Promise<Readonly<{
       startTimeMs: number;
@@ -478,12 +579,14 @@ export async function resolveSharedManagedOpenCodeServerBaseUrl(
           provisionalPid = spawned.pid;
           provisionalStartTimeMs = ownershipProof.startTimeMs;
           provisionalExpectedCmdlineHash = ownershipProof.expectedCmdlineHash;
+          provisionalLogPath = readNonEmptyString(spawned.logPath) ?? undefined;
           await deps.writeState({
             baseUrl: spawned.baseUrl,
             pid: spawned.pid,
             startedAtMs: nowMs,
             status: 'starting',
             ...(desiredLaunchFingerprint ? { launchEnvFingerprint: desiredLaunchFingerprint } : {}),
+            ...(provisionalLogPath ? { logPath: provisionalLogPath } : {}),
             ...(daemonInstanceId && activeServerDir
               ? {
                   v: 2 as const,
@@ -503,12 +606,14 @@ export async function resolveSharedManagedOpenCodeServerBaseUrl(
             expectedCmdlineHash: provisionalExpectedCmdlineHash,
           }
         : await resolveOwnershipProof(started.pid);
+      const resolvedLogPath = readNonEmptyString(started.logPath) ?? provisionalLogPath;
       const nextState: SharedManagedOpenCodeServerState = {
         baseUrl: started.baseUrl,
         pid: started.pid,
         startedAtMs: nowMs,
         status: 'ready',
         ...(desiredLaunchFingerprint ? { launchEnvFingerprint: desiredLaunchFingerprint } : {}),
+        ...(resolvedLogPath ? { logPath: resolvedLogPath } : {}),
         ...(daemonInstanceId && activeServerDir
           ? {
               v: 2 as const,
@@ -530,6 +635,7 @@ export async function resolveSharedManagedOpenCodeServerBaseUrl(
           startedAtMs: nowMs,
           status: 'failed',
           lastFailureAtMs: nowMs,
+          ...(provisionalLogPath ? { logPath: provisionalLogPath } : {}),
           ...(daemonInstanceId && activeServerDir
             ? {
                 v: 2 as const,
@@ -599,6 +705,7 @@ function readManagedOpenCodeServerStateFromUnknown(parsed: unknown): SharedManag
   const expectedCmdlineHash = readNonEmptyString(source.expectedCmdlineHash);
   const activeServerDir = readNonEmptyString(source.activeServerDir);
   const daemonInstanceId = readNonEmptyString(source.daemonInstanceId);
+  const logPath = readNonEmptyString(source.logPath);
   const stateVersion = source.v === 2 ? 2 as const : undefined;
   if (!baseUrl) return null;
   if (!Number.isFinite(pid) || pid <= 0) return null;
@@ -616,6 +723,7 @@ function readManagedOpenCodeServerStateFromUnknown(parsed: unknown): SharedManag
     ...(expectedCmdlineHash ? { expectedCmdlineHash } : {}),
     ...(activeServerDir ? { activeServerDir } : {}),
     ...(daemonInstanceId ? { daemonInstanceId } : {}),
+    ...(logPath ? { logPath } : {}),
   };
 }
 
@@ -707,6 +815,21 @@ export async function releaseForAuthSwitchFromState(
       }
     }
 
+    // Lane F prevention (final gate before the kill): never tear down a managed server whose
+    // remaining claimant — the switching session itself, kept by `allowCurrentSessionClaim` above —
+    // still has an in-flight OpenCode turn. Multi-session claims are already protected by the claim
+    // count; this closes the sole-claimant window (OQ-2) where the current session's claim is
+    // subtracted to zero yet a turn is still streaming. Leave BOTH the process and the state file
+    // intact: the turn finishes against the live server, which the orphan-reap startup scan then
+    // releases once it has no remaining claims (release deferred to turn quiescence, never wedged).
+    if (deps.hasInFlightTurnForLaunchFingerprint) {
+      const hasInFlightTurn = await Promise.resolve(deps.hasInFlightTurnForLaunchFingerprint())
+        .catch(() => false);
+      if (hasInFlightTurn === true) {
+        return { released: false, reason: 'in_flight_turn' };
+      }
+    }
+
     await Promise.resolve(deps.killPid(state.pid, deps.drainMs)).catch(() => false);
     await deps.removeState().catch(() => {});
     return { released: true, reason: 'released' };
@@ -742,7 +865,7 @@ export async function releaseForAuthSwitch(
       });
     },
     currentActiveServerDir: configuration.activeServerDir,
-    currentDaemonInstanceId: configuration.activeServerId,
+    currentDaemonInstanceId: resolveCurrentManagedServerOwnerId(),
     expectedOwnerToken: normalizedOwnerToken,
     drainMs,
     trackedClaimCountForLaunchFingerprint: () => {
@@ -753,6 +876,8 @@ export async function releaseForAuthSwitch(
       return explicitClaimCount;
     },
     allowCurrentSessionClaim: true,
+    hasInFlightTurnForLaunchFingerprint: () =>
+      trackedClaims.inFlightTurnLaunchFingerprints.has(normalizedFingerprint),
   });
 }
 
@@ -796,7 +921,7 @@ export async function ensureSharedManagedOpenCodeServerBaseUrl(params: Readonly<
           : null;
         const decision = decideManagedOpenCodeStartupScanStateAction({
           state,
-          currentDaemonInstanceId: configuration.activeServerId,
+          currentDaemonInstanceId: resolveCurrentManagedServerOwnerId(),
           currentActiveServerDir: configuration.activeServerDir,
           isPidAlive: pidAlive,
           processInfo,
@@ -846,15 +971,16 @@ export async function ensureSharedManagedOpenCodeServerBaseUrl(params: Readonly<
     killPid: killPidBestEffort,
     currentLaunchFingerprint,
     currentActiveServerDir: configuration.activeServerDir,
-    currentDaemonInstanceId: configuration.activeServerId,
+    currentDaemonInstanceId: resolveCurrentManagedServerOwnerId(),
     generateOwnerToken: () => randomUUID(),
     readProcessStartTimeMs: async (pid) => await readProcessStartTimeMsBestEffort(pid),
     startServer: async (startParams) => {
       const started = await startManagedOpenCodeServer({
         ...(xdgRootDir ? { xdgRootDir } : {}),
+        ...(currentLaunchFingerprint ? { launchFingerprint: currentLaunchFingerprint } : {}),
         ...(startParams?.onSpawned ? { onSpawned: startParams.onSpawned } : {}),
       });
-      return { baseUrl: started.baseUrl, pid: started.pid };
+      return { baseUrl: started.baseUrl, pid: started.pid, logPath: started.logPath };
     },
   });
 

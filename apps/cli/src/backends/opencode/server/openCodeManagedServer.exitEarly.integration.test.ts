@@ -25,7 +25,7 @@ setTimeout(() => process.kill(process.pid, 'SIGTERM'), 10);
 
       let errorMessage = '';
       try {
-        await startManagedOpenCodeServer({ timeoutMs: 5_000 });
+        await startManagedOpenCodeServer({ timeoutMs: 5_000, logsDir: join(dir, 'logs') });
       } catch (error) {
         errorMessage = error instanceof Error ? error.message : String(error);
       }
@@ -34,6 +34,8 @@ setTimeout(() => process.kill(process.pid, 'SIGTERM'), 10);
       expect(errorMessage).toMatch(/no output captured/i);
       expect(errorMessage).toContain('Output:\n<no output captured>');
       expect(errorMessage).not.toContain('Output:\\n<no output captured>');
+      // The startup-failure error references the durable log path for diagnosis.
+      expect(errorMessage).toContain(join(dir, 'logs', 'opencode-managed-servers'));
     } finally {
       fetchSpy.mockRestore();
       if (prevCmd === undefined) delete process.env.HAPPIER_OPENCODE_PATH;

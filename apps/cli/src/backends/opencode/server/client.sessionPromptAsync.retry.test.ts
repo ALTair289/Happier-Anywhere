@@ -48,7 +48,9 @@ describe('createOpenCodeServerRuntimeClient sessionPromptAsync managed retry', (
         const readMock = readSharedManagedOpenCodeServerStateBestEffort as unknown as ReturnType<typeof vi.fn>;
 
         ensureMock.mockResolvedValueOnce('http://127.0.0.1:9999');
-        readMock.mockResolvedValueOnce({
+        // Persistent mock: the client reads managed-server state at construction (identity baseline)
+        // and again on the transport-failure retry path; a single once-mock leaves the retry undefined.
+        readMock.mockResolvedValue({
             baseUrl: 'http://127.0.0.1:10000',
             pid: process.pid,
             startedAtMs: Date.now(),

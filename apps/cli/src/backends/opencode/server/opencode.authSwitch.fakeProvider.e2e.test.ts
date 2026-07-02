@@ -13,6 +13,7 @@ import { waitForCondition } from '@/testkit/async/waitFor';
 import { spawnDetachedInlineNodeTestProcess, waitForProcessExit } from '@/testkit/process/spawn';
 
 import { createOpenCodeConnectedServiceRuntimeAuthAdapter } from '../connectedServices/createOpenCodeConnectedServiceRuntimeAuthAdapter';
+import { setOpenCodeConnectedServiceInFlightTurnProvider } from '@/daemon/connectedServices/sessionAuthSwitch/openCodeConnectedServiceInFlightTurnRegistry';
 import { startManagedOpenCodeServer } from './openCodeManagedServer';
 import { resolveOpenCodeManagedServerLaunchFingerprint } from './openCodeManagedServerEnv';
 import {
@@ -198,6 +199,7 @@ describe('OpenCode auth-switch fake-provider e2e', () => {
   let fakeBinDir: string | null = null;
 
   afterEach(async () => {
+    setOpenCodeConnectedServiceInFlightTurnProvider(null);
     for (const markerPid of markerPids.splice(0)) {
       await removeSessionMarker(markerPid).catch(() => {});
       killPidBestEffort(markerPid);
@@ -395,6 +397,99 @@ describe('OpenCode auth-switch fake-provider e2e', () => {
     await waitForCondition(() => !isOpenCodeServerPidAlive(orphanServer.pid), {
       timeoutMs: 20_000,
       label: 'auth-switch release process exit',
+    });
+  }, 120_000);
+
+  it('defers the auth-switch release while the sole claimant has an in-flight turn, then releases at quiescence', async () => {
+    // Lane F prevention end-to-end: a sole-claimant managed server (the switching session) must NOT
+    // be torn down while that session still has an in-flight OpenCode turn. The release should report
+    // `in_flight_turn` (server + state intact), then succeed once the turn quiesces. Exercises the
+    // real wiring: in-flight-turn registry -> session-marker scan (happySessionId) -> release guard ->
+    // runtime adapter reason passthrough.
+    const localFakeBinDir = await createFakeBinDir();
+    fakeBinDir = localFakeBinDir;
+    const fakeOpenCodePath = join(localFakeBinDir, 'opencode');
+    await createFakeOpenCodeBinary(fakeOpenCodePath);
+
+    const homePreview = await prepareIsolatedDaemonTestHome({
+      prefix: 'happier-opencode-auth-switch-inflight-',
+      extraEnv: {
+        HAPPIER_OPENCODE_PATH: fakeOpenCodePath,
+        HAPPIER_OPENCODE_AUTH_SWITCH_DRAIN_MS: '200',
+      },
+    });
+    preparedHome = homePreview;
+
+    const { managedServersDir } = currentManagedServerDirs();
+    await mkdir(managedServersDir, { recursive: true });
+
+    const orphanServer = await startManagedOpenCodeServer({ timeoutMs: 5_000 });
+    startedServers.push(orphanServer);
+    const launchFingerprint = `inflight-${randomUUID()}`;
+    const ownerToken = `owner-${randomUUID()}`;
+    const statePath = join(managedServersDir, `${launchFingerprint}.json`);
+    const state = await buildTrustedManagedState({
+      launchFingerprint,
+      ownerToken,
+      server: orphanServer,
+    });
+    await writeManagedState(statePath, state);
+
+    // A single tracked claim: the switching session itself (subtracted by allowCurrentSessionClaim,
+    // so claim count alone would permit the kill — only the in-flight-turn guard holds it back).
+    const marker = spawnDetachedInlineNodeTestProcess('setInterval(() => {}, 1 << 30)', {
+      stdio: ['ignore', 'ignore', 'ignore'],
+    });
+    const markerPid = marker.pid ?? -1;
+    expect(markerPid).toBeGreaterThan(0);
+    markerPids.push(markerPid);
+    const happySessionId = `tracked-inflight-${markerPid}`;
+    await writeSessionMarker({
+      pid: markerPid,
+      happySessionId,
+      startedBy: 'daemon',
+      metadata: {
+        flavor: 'opencode',
+        opencodeManagedServerLaunchFingerprint: launchFingerprint,
+      },
+    });
+
+    // The session's turn is in flight.
+    const turnInFlightSessionIds = new Set<string>([happySessionId]);
+    setOpenCodeConnectedServiceInFlightTurnProvider((sessionId) => turnInFlightSessionIds.has(sessionId));
+
+    const runtimeAdapter = createOpenCodeConnectedServiceRuntimeAuthAdapter();
+    const blockedResult = await runtimeAdapter.recoverAfterRuntimeAuthSwitch({
+      target: { agentId: 'opencode', targetId: 'fake-session' },
+      selection: { previousLaunchFingerprint: launchFingerprint, previousOwnerToken: ownerToken },
+    }) as { detached?: boolean; detachedReason?: string; recovery?: string };
+    expect(blockedResult).toMatchObject({
+      detached: false,
+      detachedReason: 'in_flight_turn',
+      recovery: 'restart_rematerialize',
+    });
+    expect(await pathExists(statePath)).toBe(true);
+    expect(isOpenCodeServerPidAlive(orphanServer.pid)).toBe(true);
+
+    // Turn quiesces (boundary reached / turn cancelled): the release now proceeds.
+    turnInFlightSessionIds.clear();
+
+    const releasedResult = await runtimeAdapter.recoverAfterRuntimeAuthSwitch({
+      target: { agentId: 'opencode', targetId: 'fake-session' },
+      selection: { previousLaunchFingerprint: launchFingerprint, previousOwnerToken: ownerToken },
+    }) as { detached?: boolean; detachedReason?: string; recovery?: string };
+    expect(releasedResult).toMatchObject({
+      detached: true,
+      detachedReason: 'released',
+      recovery: 'restart_rematerialize',
+    });
+    await waitForCondition(async () => !(await pathExists(statePath)), {
+      timeoutMs: 20_000,
+      label: 'auth-switch in-flight release state file removal after quiescence',
+    });
+    await waitForCondition(() => !isOpenCodeServerPidAlive(orphanServer.pid), {
+      timeoutMs: 20_000,
+      label: 'auth-switch in-flight release process exit after quiescence',
     });
   }, 120_000);
 });

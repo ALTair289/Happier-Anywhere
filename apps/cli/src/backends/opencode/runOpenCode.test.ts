@@ -119,6 +119,16 @@ describe('runOpenCode', () => {
     }
   });
 
+  it('opts server-mode OpenCode into provider-acceptance delivery watermarks', async () => {
+    await runOpenCode({ credentials });
+
+    expect(runStandardAcpProviderMock).toHaveBeenCalledTimes(1);
+    expect(runStandardAcpProviderMock.mock.calls[0]?.[1]).toMatchObject({
+      flavor: 'opencode',
+      deferUserMessageDeliveryWatermarkToProviderAcceptance: true,
+    });
+  });
+
   it('does not block startup while waiting for metadata snapshot publish prerequisites', async () => {
     const ensureMetadataSnapshot = vi.fn(() => new Promise<null>(() => {}));
     const updateMetadata = vi.fn(async () => {});

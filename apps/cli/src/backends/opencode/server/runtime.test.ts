@@ -1,3 +1,7 @@
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { MessageBuffer } from '@/ui/ink/messageBuffer';
@@ -5,16 +9,29 @@ import { buildChangeTitleInstruction } from '@/agent/runtime/changeTitleInstruct
 import { logger } from '@/ui/logger';
 import { HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY } from '@/daemon/connectedServices/connectedServiceChildEnvironment';
 import { resetConnectedServiceRuntimeAuthFailureReportDedupeForTests } from '@/daemon/connectedServices/runtimeAuth/reportConnectedServiceRuntimeAuthFailureToDaemon';
+import { configuration, reloadConfiguration } from '@/configuration';
 
-import { createOpenCodeServerRuntime } from './runtime';
+import { createOpenCodeServerRuntime, OPENCODE_CONNECTED_AUTH_NOT_MATERIALIZED_CODE } from './runtime';
 import { isTerminalOpenCodeToolPartStatus } from './runtime/createOpenCodeProviderActivityTracker';
+import { OPENCODE_SERVER_RESTARTED_DURING_TURN_ISSUE_CODE } from './runtime/createOpenCodeManagedServerTurnInterruptionSupervisor';
+import { OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV } from './openCodeManagedServerEnv';
+import {
+  OPEN_CODE_BROKER_SELECTIONS_ENV,
+  OPEN_CODE_BROKER_DAEMON_STATE_PATH_ENV,
+  OPEN_CODE_BROKER_LOAD_NONCE_ENV,
+  ensureOpenCodeBrokerPluginAssets,
+  serializeOpenCodeBrokerSelections,
+} from '../brokerPlugin';
+import type { OpenCodeManagedServerIdentity, OpenCodeManagedServerIdentityChange } from './openCodeManagedServerIdentity';
 import type { OpenCodeServerRuntimeClient } from './client';
 import type { OpenCodeGlobalEvent } from './types';
 import type { ProviderEnforcedPermissionHandler } from '@/agent/permissions/ProviderEnforcedPermissionHandler';
 
 const mockNotifyDaemonConnectedServiceRuntimeAuthFailure = vi.hoisted(() => vi.fn(async () => ({})));
+const mockQueryDaemonOpenCodeBrokerLoadHandshake = vi.hoisted(() => vi.fn());
 vi.mock('@/daemon/controlClient', () => ({
   notifyDaemonConnectedServiceRuntimeAuthFailure: mockNotifyDaemonConnectedServiceRuntimeAuthFailure,
+  queryDaemonOpenCodeBrokerLoadHandshake: mockQueryDaemonOpenCodeBrokerLoadHandshake,
 }));
 
 function createScheduledRuntimeAuthRecoveryReport(input: Readonly<{ includeTranscriptEvent?: boolean }> = {}) {
@@ -61,15 +78,28 @@ function createFakePermissionHandler() {
 }
 
 type OpenCodeRuntimePromptHarness = Readonly<{
-  sendPromptWithMeta(params: { text: string; localId?: string | null }): Promise<void>;
+  sendPromptWithMeta(params: { text: string; localId?: string | null; meta?: Record<string, unknown> }): Promise<void>;
 }>;
 
 type OpenCodePromptAsyncCall = Parameters<OpenCodeServerRuntimeClient['sessionPromptAsync']>[0];
 
-function createFakeClient() {
+type FakeManagedServerIdentity = {
+  baseUrl: string;
+  pid: number;
+  startedAtMs: number;
+  generationKey: string;
+};
+
+function createFakeClient(opts: Readonly<{ emitServerConnectedOnSubscribe?: boolean }> = {}) {
   let onEvent: ((evt: OpenCodeGlobalEvent) => void) | null = null;
   let directoryOverride: string | null = null;
   let statusType: string = 'idle';
+  let managedServerIdentity: FakeManagedServerIdentity | null = {
+    baseUrl: 'http://127.0.0.1:7777',
+    pid: 4242,
+    startedAtMs: 1,
+    generationKey: 'gen-initial',
+  };
   const client = {
     sessionList: vi.fn(async () => ([] as unknown[])),
     sessionCreate: vi.fn<OpenCodeServerRuntimeClient['sessionCreate']>(async () => ({ id: 'ses_1' })),
@@ -117,7 +147,14 @@ function createFakeClient() {
     permissionList: vi.fn(async () => ([] as unknown[])),
     subscribeGlobalEvents: vi.fn(async ({ onEvent: cb }: { onEvent: (evt: OpenCodeGlobalEvent) => void }) => {
       onEvent = cb;
+      if (opts.emitServerConnectedOnSubscribe !== false) {
+        cb({
+          directory: '/tmp',
+          payload: { type: 'server.connected', properties: {} },
+        });
+      }
     }),
+    getManagedServerIdentity: () => managedServerIdentity as any,
     dispose: vi.fn(async () => {}),
     // Real OpenCode SSE subscribers do not await the callback return value.
     __emit: async (evt: OpenCodeGlobalEvent) => {
@@ -127,10 +164,14 @@ function createFakeClient() {
       statusType = next;
     },
     __getDirectoryOverride: () => directoryOverride,
+    __setManagedServerIdentity: (next: FakeManagedServerIdentity | null) => {
+      managedServerIdentity = next;
+    },
   } satisfies OpenCodeServerRuntimeClient & {
     __emit: (evt: OpenCodeGlobalEvent) => Promise<void>;
     __setStatusType: (next: string) => void;
     __getDirectoryOverride: () => string | null;
+    __setManagedServerIdentity: (next: FakeManagedServerIdentity | null) => void;
   };
 
   return client;
@@ -155,6 +196,7 @@ function createFakeSession() {
     keepAlive: vi.fn(),
     sendAgentMessage: vi.fn(),
     sendSessionEvent: vi.fn(),
+    updateRuntimeActivityProjection: vi.fn(async () => {}),
     sessionTurnLifecycle: {
       beginTurn: vi.fn(async () => ({ turnId: 'session-turn-1' })),
       attachProviderTurnId: vi.fn(async () => {}),
@@ -469,6 +511,198 @@ describe('createOpenCodeServerRuntime', () => {
         environment: { HAPPIER_TEST_MCP: '1' },
       },
     });
+  });
+
+  it('waits for the OpenCode server.connected startup event before dispatching the first prompt', async () => {
+    const client = createFakeClient({ emitServerConnectedOnSubscribe: false });
+    const session = createFakeSession();
+    const runtime = createOpenCodeServerRuntime({
+      directory: '/tmp',
+      session,
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: createFakePermissionHandler() as unknown as ProviderEnforcedPermissionHandler,
+      onThinkingChange: vi.fn(),
+    }, {
+      createClient: async () => client as unknown as OpenCodeServerRuntimeClient,
+    });
+
+    try {
+      await runtime.startOrLoad({});
+      runtime.beginTurn();
+      const promptPromise = (runtime as unknown as OpenCodeRuntimePromptHarness).sendPromptWithMeta({
+        text: 'first prompt before startup readiness',
+        localId: 'local-startup-ready',
+      });
+      void promptPromise.catch(() => undefined);
+      const outcome = observePromiseSettlement(promptPromise);
+
+      await flushTranscriptCommitMicrotasks();
+
+      expect(client.sessionPromptAsync).not.toHaveBeenCalled();
+      expect(outcome.status).toBe('pending');
+
+      await client.__emit({
+        directory: '/tmp',
+        payload: { type: 'server.connected', properties: {} },
+      });
+      await flushTranscriptCommitMicrotasks();
+
+      await expect.poll(() => client.sessionPromptAsync.mock.calls.length).toBe(1);
+
+      await emitTerminalAssistantAndIdle(client, { messageId: 'msg_startup_ready_done' });
+      await expect(promptPromise).resolves.toBeUndefined();
+    } finally {
+      await runtime.reset().catch(() => {});
+    }
+  });
+
+  it('rejects when the turn resolves before the prompt is dispatched to OpenCode', async () => {
+    const client = createFakeClient({ emitServerConnectedOnSubscribe: false });
+    const session = createFakeSession();
+    const runtime = createOpenCodeServerRuntime({
+      directory: '/tmp',
+      session,
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: createFakePermissionHandler() as unknown as ProviderEnforcedPermissionHandler,
+      onThinkingChange: vi.fn(),
+    }, {
+      createClient: async () => client as unknown as OpenCodeServerRuntimeClient,
+    });
+
+    try {
+      await runtime.startOrLoad({});
+      runtime.beginTurn();
+      const promptPromise = (runtime as unknown as OpenCodeRuntimePromptHarness).sendPromptWithMeta({
+        text: 'prompt that must not resolve before provider dispatch',
+        localId: 'local-pre-dispatch-turn-resolution',
+      });
+      void promptPromise.catch(() => undefined);
+      const outcome = observePromiseSettlement(promptPromise);
+
+      await flushTranscriptCommitMicrotasks();
+
+      expect(client.sessionPromptAsync).not.toHaveBeenCalled();
+      expect(outcome.status).toBe('pending');
+
+      await emitTerminalAssistantAndIdle(client, { messageId: 'msg_external_before_prompt_dispatch' });
+
+      await expect(promptPromise).rejects.toThrow(/before provider dispatch/i);
+      expect(client.sessionPromptAsync).not.toHaveBeenCalled();
+    } finally {
+      await runtime.reset().catch(() => {});
+    }
+  });
+
+  it('requires server.connected again after runtime reset before dispatching a prompt', async () => {
+    const firstClient = createFakeClient();
+    const secondClient = createFakeClient({ emitServerConnectedOnSubscribe: false });
+    const clients = [firstClient, secondClient];
+    const session = createFakeSession();
+    const runtime = createOpenCodeServerRuntime({
+      directory: '/tmp',
+      session,
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: createFakePermissionHandler() as unknown as ProviderEnforcedPermissionHandler,
+      onThinkingChange: vi.fn(),
+    }, {
+      createClient: async () => {
+        const next = clients.shift();
+        if (!next) throw new Error('No fake OpenCode client available');
+        return next as unknown as OpenCodeServerRuntimeClient;
+      },
+    });
+
+    try {
+      await runtime.startOrLoad({});
+      await runtime.reset();
+
+      await runtime.startOrLoad({});
+      runtime.beginTurn();
+      const promptPromise = (runtime as unknown as OpenCodeRuntimePromptHarness).sendPromptWithMeta({
+        text: 'first prompt after reset',
+        localId: 'local-startup-ready-after-reset',
+      });
+      void promptPromise.catch(() => undefined);
+      const outcome = observePromiseSettlement(promptPromise);
+
+      await flushTranscriptCommitMicrotasks();
+
+      expect(secondClient.sessionPromptAsync).not.toHaveBeenCalled();
+      expect(outcome.status).toBe('pending');
+
+      await secondClient.__emit({
+        directory: '/tmp',
+        payload: { type: 'server.connected', properties: {} },
+      });
+      await flushTranscriptCommitMicrotasks();
+
+      await expect.poll(() => secondClient.sessionPromptAsync.mock.calls.length).toBe(1);
+
+      await emitTerminalAssistantAndIdle(secondClient, { messageId: 'msg_startup_ready_after_reset_done' });
+      await expect(promptPromise).resolves.toBeUndefined();
+    } finally {
+      await runtime.reset().catch(() => {});
+    }
+  });
+
+  it('rejects a prompt waiting for server.connected when runtime reset replaces the session', async () => {
+    const firstClient = createFakeClient({ emitServerConnectedOnSubscribe: false });
+    const secondClient = createFakeClient({ emitServerConnectedOnSubscribe: false });
+    secondClient.__setManagedServerIdentity({
+      baseUrl: 'http://127.0.0.1:8888',
+      pid: 5252,
+      startedAtMs: 2,
+      generationKey: 'gen-after-reset',
+    });
+    const clients = [firstClient, secondClient];
+    const session = createFakeSession();
+    const runtime = createOpenCodeServerRuntime({
+      directory: '/tmp',
+      session,
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: createFakePermissionHandler() as unknown as ProviderEnforcedPermissionHandler,
+      onThinkingChange: vi.fn(),
+    }, {
+      createClient: async () => {
+        const next = clients.shift();
+        if (!next) throw new Error('No fake OpenCode client available');
+        return next as unknown as OpenCodeServerRuntimeClient;
+      },
+    });
+
+    try {
+      await runtime.startOrLoad({});
+      runtime.beginTurn();
+      const promptPromise = (runtime as unknown as OpenCodeRuntimePromptHarness).sendPromptWithMeta({
+        text: 'prompt that must not survive reset',
+        localId: 'local-startup-ready-reset-abort',
+      });
+      void promptPromise.catch(() => undefined);
+      const outcome = observePromiseSettlement(promptPromise);
+
+      await flushTranscriptCommitMicrotasks();
+
+      expect(firstClient.sessionPromptAsync).not.toHaveBeenCalled();
+      expect(outcome.status).toBe('pending');
+
+      await runtime.reset();
+      await runtime.startOrLoad({});
+      await secondClient.__emit({
+        directory: '/tmp',
+        payload: { type: 'server.connected', properties: {} },
+      });
+      await flushTranscriptCommitMicrotasks();
+
+      await expect.poll(() => outcome.status).toBe('rejected');
+      expect(firstClient.sessionPromptAsync).not.toHaveBeenCalled();
+      expect(secondClient.sessionPromptAsync).not.toHaveBeenCalled();
+    } finally {
+      await runtime.reset().catch(() => {});
+    }
   });
 
   it('creates the OpenCode session without waiting for slow MCP registration', async () => {
@@ -1703,6 +1937,42 @@ describe('createOpenCodeServerRuntime', () => {
     await expect(promptPromise).resolves.toBeUndefined();
   });
 
+  it('notifies provider prompt acceptance after prompt_async resolves before session idle', async () => {
+    const client = createFakeClient();
+    const session = createFakeSession();
+    const runtime = createOpenCodeServerRuntime({
+      directory: '/tmp',
+      session,
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: createFakePermissionHandler() as unknown as ProviderEnforcedPermissionHandler,
+      onThinkingChange: vi.fn(),
+    }, {
+      createClient: async () => client as unknown as OpenCodeServerRuntimeClient,
+    });
+
+    await runtime.startOrLoad({});
+    runtime.beginTurn();
+
+    const onProviderPromptAccepted = vi.fn();
+    const promptPromise = (runtime as any).sendPromptWithMeta({
+      text: 'hello',
+      localId: 'local-provider-accepted',
+      onProviderPromptAccepted,
+    });
+    const settlement = observePromiseSettlement(promptPromise);
+
+    await expect.poll(() => client.sessionPromptAsync.mock.calls.length).toBe(1);
+    await flushTranscriptCommitMicrotasks();
+
+    expect(onProviderPromptAccepted).toHaveBeenCalledTimes(1);
+    expect(settlement.status).toBe('pending');
+
+    await emitTerminalAssistantAndIdle(client, { messageId: 'msg_asst_accepted' });
+
+    await expect(promptPromise).resolves.toBeUndefined();
+  });
+
   it('does not pass an explicit Anthropic retired model override to OpenCode prompt_async', async () => {
     const client = createFakeClient();
     const session = createFakeSession();
@@ -1794,6 +2064,84 @@ describe('createOpenCodeServerRuntime', () => {
     await emitTerminalAssistantAndIdle(client, { messageId: 'msg_asst_1' });
 
     await expect(promptPromise).resolves.toBeUndefined();
+  });
+
+  it('uses per-message model overrides from prompt metadata without replacing the selected model', async () => {
+    const client = createFakeClient();
+    client.globalConfigGet = vi.fn(async () => ({ model: 'openai/gpt-5.5-pro' }));
+    client.providersList = vi.fn(async () => ([
+      {
+        id: 'openai',
+        env: ['OPENAI_API_KEY'],
+        models: ({
+          'gpt-5.2': { id: 'gpt-5.2', name: 'GPT-5.2', status: 'active', capabilities: { input: { text: true } } },
+          'gpt-5.4-mini': { id: 'gpt-5.4-mini', name: 'GPT-5.4 Mini', status: 'active', capabilities: { input: { text: true } } },
+        }) as Record<string, unknown>,
+      },
+    ]));
+    const session = createFakeSession();
+    const runtime = createOpenCodeServerRuntime({
+      directory: '/tmp',
+      session,
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: createFakePermissionHandler() as unknown as ProviderEnforcedPermissionHandler,
+      onThinkingChange: vi.fn(),
+    }, {
+      createClient: async () => client as unknown as OpenCodeServerRuntimeClient,
+    });
+
+    await runtime.startOrLoad({});
+    await runtime.setSessionModel('openai/gpt-5.2');
+    runtime.beginTurn();
+
+    const firstPrompt = (runtime as unknown as OpenCodeRuntimePromptHarness).sendPromptWithMeta({
+      text: 'hello',
+      localId: 'local-message-model',
+      meta: { model: 'gpt-5.4-mini' },
+    });
+
+    await expect.poll(() => client.sessionPromptAsync.mock.calls.length).toBe(1);
+    expect(readOpenCodePromptAsyncCall(client, 0)).toMatchObject({
+      sessionId: 'ses_1',
+      model: { providerID: 'openai', modelID: 'gpt-5.4-mini' },
+      parts: [{ type: 'text', text: 'hello' }],
+    });
+
+    client.__emit({
+      directory: '/tmp',
+      payload: { type: 'message.part.updated', properties: { part: { id: 'part_1', type: 'text', sessionID: 'ses_1' } } },
+    });
+    client.__emit({
+      directory: '/tmp',
+      payload: { type: 'message.part.delta', properties: { sessionID: 'ses_1', messageID: 'msg_asst_1', partID: 'part_1', delta: 'ok' } },
+    });
+    await emitTerminalAssistantAndIdle(client, { messageId: 'msg_asst_1' });
+    await expect(firstPrompt).resolves.toBeUndefined();
+
+    runtime.beginTurn();
+    const secondPrompt = (runtime as unknown as OpenCodeRuntimePromptHarness).sendPromptWithMeta({
+      text: 'again',
+      localId: 'local-selected-model',
+    });
+
+    await expect.poll(() => client.sessionPromptAsync.mock.calls.length).toBe(2);
+    expect(readOpenCodePromptAsyncCall(client, 1)).toMatchObject({
+      sessionId: 'ses_1',
+      model: { providerID: 'openai', modelID: 'gpt-5.2' },
+      parts: [{ type: 'text', text: 'again' }],
+    });
+
+    client.__emit({
+      directory: '/tmp',
+      payload: { type: 'message.part.updated', properties: { part: { id: 'part_2', type: 'text', sessionID: 'ses_1' } } },
+    });
+    client.__emit({
+      directory: '/tmp',
+      payload: { type: 'message.part.delta', properties: { sessionID: 'ses_1', messageID: 'msg_asst_2', partID: 'part_2', delta: 'ok' } },
+    });
+    await emitTerminalAssistantAndIdle(client, { messageId: 'msg_asst_2' });
+    await expect(secondPrompt).resolves.toBeUndefined();
   });
 
   it('does not override the selected model even when MCP servers are configured and the OpenCode default model lacks tool-call support', async () => {
@@ -3594,11 +3942,8 @@ describe('createOpenCodeServerRuntime', () => {
       runtime.beginTurn();
 
       const promptPromise = (runtime as any).sendPromptWithMeta({ text: 'hello', localId: 'local-buffer-default' });
-      // Avoid expect.poll under fake timers; let the async prompt setup yield once.
-      for (let i = 0; i < 10; i += 1) {
-        // eslint-disable-next-line no-await-in-loop
-        await Promise.resolve();
-      }
+      // Avoid expect.poll under fake timers; let the async prompt setup drain.
+      await flushTranscriptCommitMicrotasks();
       expect(client.sessionPromptAsync).toHaveBeenCalledTimes(1);
 
       let queuedEvent = client.__emit({
@@ -3951,10 +4296,7 @@ describe('createOpenCodeServerRuntime', () => {
 
       const promptPromise = (runtime as any).sendPromptWithMeta({ text: 'hello', localId: 'local-tool-boundary-stream' });
       void promptPromise.catch(() => {});
-      for (let i = 0; i < 10; i += 1) {
-        // eslint-disable-next-line no-await-in-loop
-        await Promise.resolve();
-      }
+      await flushTranscriptCommitMicrotasks();
       expect(client.sessionPromptAsync).toHaveBeenCalledTimes(1);
 
       await client.__emit({
@@ -6725,10 +7067,7 @@ describe('createOpenCodeServerRuntime', () => {
 
       const promptPromise = (runtime as any).sendPromptWithMeta({ text: 'hello', localId: 'local-deadlock-guard' });
       const settlement = observePromiseSettlement(promptPromise);
-      for (let i = 0; i < 10; i += 1) {
-        // eslint-disable-next-line no-await-in-loop
-        await Promise.resolve();
-      }
+      await flushTranscriptCommitMicrotasks();
       expect(client.sessionPromptAsync).toHaveBeenCalledTimes(1);
 
       await client.__emit({
@@ -6785,10 +7124,7 @@ describe('createOpenCodeServerRuntime', () => {
       const promptPromise = (runtime as any).sendPromptWithMeta({ text: 'hello', localId: 'local-hung-prompt-async' });
       const settlement = observePromiseSettlement(promptPromise);
       void promptPromise.catch(() => undefined);
-      for (let i = 0; i < 10; i += 1) {
-        // eslint-disable-next-line no-await-in-loop
-        await Promise.resolve();
-      }
+      await flushTranscriptCommitMicrotasks();
       expect(client.sessionPromptAsync).toHaveBeenCalledTimes(1);
 
       await advanceTimersAndFlush(10_500);
@@ -8153,11 +8489,318 @@ describe('createOpenCodeServerRuntime', () => {
     await emitTerminalAssistantAndIdle(client, { messageId: 'msg_parent_after_background_launch' });
 
     await expect(promptPromise).resolves.toBeUndefined();
+    expect(session.updateRuntimeActivityProjection).toHaveBeenCalledWith(expect.objectContaining({
+      runtimeActivityActiveCount: 1,
+      runtimeActivitySourceClass: 'provider_detached_task',
+    }));
+    expect(session.updateRuntimeActivityProjection).not.toHaveBeenCalledWith(expect.objectContaining({
+      runtimeActivitySourceClass: 'provider_autonomous_output',
+    }));
     expect((client.sessionMessagesList as any).mock.calls).not.toEqual(
       expect.arrayContaining([expect.arrayContaining([expect.objectContaining({ sessionId: 'ses_background_child' })])]),
     );
 
     releaseChildImport();
+    await runtime.cancel().catch(() => {});
+    expect(session.updateRuntimeActivityProjection).toHaveBeenLastCalledWith({
+      runtimeActivityActiveCount: 0,
+      runtimeActivityObservedAt: null,
+      runtimeActivityExpiresAt: null,
+      runtimeActivitySourceClass: null,
+    });
+  });
+
+  it('clears detached OpenCode runtime activity when a background wake says the work completed', async () => {
+    const client = createFakeClient() as any;
+    client.sessionMessagesList = vi.fn(async () => ([] as unknown[]));
+
+    const session = createFakeSession();
+    const runtime = createOpenCodeServerRuntime({
+      directory: '/tmp',
+      session,
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: { handleToolCall: vi.fn(async () => ({ decision: 'approved' })) } as any,
+      onThinkingChange: vi.fn(),
+    }, {
+      createClient: async () => client as any,
+    });
+
+    await runtime.startOrLoad({});
+    runtime.beginTurn();
+
+    const promptPromise = (runtime as any).sendPromptWithMeta({ text: 'hello', localId: 'local-background-task-clear' });
+    await expect.poll(() => client.sessionPromptAsync.mock.calls.length).toBe(1);
+
+    client.__emit({
+      directory: '/tmp',
+      payload: {
+        type: 'message.part.updated',
+        properties: {
+          part: {
+            id: 'part_background_task_clear',
+            type: 'tool',
+            sessionID: 'ses_1',
+            messageID: 'msg_background_task_clear',
+            callID: 'call_background_task_clear',
+            tool: 'task',
+            state: {
+              status: 'completed',
+              input: { background: true },
+              output: '<task state="running" id="ses_background_child_clear"></task>',
+              metadata: { sessionId: 'ses_background_child_clear', background: true },
+            },
+          },
+        },
+      },
+    });
+    await expect.poll(() => session.updateRuntimeActivityProjection.mock.calls.some((call: any[]) =>
+      call[0]?.runtimeActivityActiveCount === 1 && call[0]?.runtimeActivitySourceClass === 'provider_detached_task',
+    )).toBe(true);
+
+    client.__emit({
+      directory: '/tmp',
+      payload: { type: 'message.part.updated', properties: { part: { id: 'part_parent_after_background_clear', type: 'text', sessionID: 'ses_1' } } },
+    });
+    client.__emit({
+      directory: '/tmp',
+      payload: {
+        type: 'message.part.delta',
+        properties: {
+          sessionID: 'ses_1',
+          messageID: 'msg_parent_after_background_clear',
+          partID: 'part_parent_after_background_clear',
+          delta: 'Parent foreground answer',
+        },
+      },
+    });
+    await emitTerminalAssistantAndIdle(client, { messageId: 'msg_parent_after_background_clear' });
+    await expect(promptPromise).resolves.toBeUndefined();
+
+    await client.__emit({
+      directory: '/tmp',
+      payload: {
+        type: 'message.part.delta',
+        properties: {
+          sessionID: 'ses_1',
+          messageID: 'msg_background_clear_wake',
+          partID: 'part_background_clear_wake',
+          delta: '<task state="completed" id="ses_background_child_clear"><task_result>Done</task_result></task>',
+        },
+      },
+    });
+    await expect.poll(() => session.updateRuntimeActivityProjection).toHaveBeenLastCalledWith({
+      runtimeActivityActiveCount: 0,
+      runtimeActivityObservedAt: null,
+      runtimeActivityExpiresAt: null,
+      runtimeActivitySourceClass: null,
+    });
+
+    await runtime.cancel().catch(() => {});
+  });
+
+  it('does not clear all OpenCode detached runtime activity for an unattributed single-task wake', async () => {
+    const client = createFakeClient() as any;
+    client.sessionMessagesList = vi.fn(async () => ([] as unknown[]));
+
+    const session = createFakeSession();
+    const runtime = createOpenCodeServerRuntime({
+      directory: '/tmp',
+      session,
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: { handleToolCall: vi.fn(async () => ({ decision: 'approved' })) } as any,
+      onThinkingChange: vi.fn(),
+    }, {
+      createClient: async () => client as any,
+    });
+
+    await runtime.startOrLoad({});
+    runtime.beginTurn();
+
+    const promptPromise = (runtime as any).sendPromptWithMeta({ text: 'hello', localId: 'local-background-task-unattributed-clear' });
+    await expect.poll(() => client.sessionPromptAsync.mock.calls.length).toBe(1);
+
+    client.__emit({
+      directory: '/tmp',
+      payload: {
+        type: 'message.part.updated',
+        properties: {
+          part: {
+            id: 'part_background_task_unattributed_clear',
+            type: 'tool',
+            sessionID: 'ses_1',
+            messageID: 'msg_background_task_unattributed_clear',
+            callID: 'call_background_task_unattributed_clear',
+            tool: 'task',
+            state: {
+              status: 'completed',
+              input: { background: true },
+              output: '<task state="running" id="ses_background_child_unattributed_clear"></task>',
+              metadata: { sessionId: 'ses_background_child_unattributed_clear', background: true },
+            },
+          },
+        },
+      },
+    });
+    await expect.poll(() => session.updateRuntimeActivityProjection.mock.calls.some((call: any[]) =>
+      call[0]?.runtimeActivityActiveCount === 1 && call[0]?.runtimeActivitySourceClass === 'provider_detached_task',
+    )).toBe(true);
+
+    client.__emit({
+      directory: '/tmp',
+      payload: { type: 'message.part.updated', properties: { part: { id: 'part_parent_after_background_unattributed_clear', type: 'text', sessionID: 'ses_1' } } },
+    });
+    client.__emit({
+      directory: '/tmp',
+      payload: {
+        type: 'message.part.delta',
+        properties: {
+          sessionID: 'ses_1',
+          messageID: 'msg_parent_after_background_unattributed_clear',
+          partID: 'part_parent_after_background_unattributed_clear',
+          delta: 'Parent foreground answer',
+        },
+      },
+    });
+    await emitTerminalAssistantAndIdle(client, { messageId: 'msg_parent_after_background_unattributed_clear' });
+    await expect(promptPromise).resolves.toBeUndefined();
+
+    const writesBeforeUnattributedWake = session.updateRuntimeActivityProjection.mock.calls.length;
+    await client.__emit({
+      directory: '/tmp',
+      payload: {
+        type: 'message.part.delta',
+        properties: {
+          sessionID: 'ses_1',
+          messageID: 'msg_background_unattributed_clear_wake',
+          partID: 'part_background_unattributed_clear_wake',
+          delta: [
+            '<system-reminder>',
+            '[BACKGROUND TASK COMPLETED]',
+            '<!-- OMO_INTERNAL_INITIATOR -->',
+            '</system-reminder>',
+          ].join('\n'),
+        },
+      },
+    });
+    await flushTranscriptCommitMicrotasks();
+    expect(session.updateRuntimeActivityProjection.mock.calls.length).toBe(writesBeforeUnattributedWake);
+
+    await client.__emit({
+      directory: '/tmp',
+      payload: {
+        type: 'message.part.delta',
+        properties: {
+          sessionID: 'ses_1',
+          messageID: 'msg_background_all_clear_wake',
+          partID: 'part_background_all_clear_wake',
+          delta: [
+            '<system-reminder>',
+            '[ALL BACKGROUND TASKS COMPLETE]',
+            '<!-- OMO_INTERNAL_INITIATOR -->',
+            '</system-reminder>',
+          ].join('\n'),
+        },
+      },
+    });
+    await expect.poll(() => session.updateRuntimeActivityProjection).toHaveBeenLastCalledWith({
+      runtimeActivityActiveCount: 0,
+      runtimeActivityObservedAt: null,
+      runtimeActivityExpiresAt: null,
+      runtimeActivitySourceClass: null,
+    });
+
+    await runtime.cancel().catch(() => {});
+  });
+
+  it('does not publish detached runtime activity for foreground-only OpenCode tool work', async () => {
+    const client = createFakeClient() as any;
+    client.sessionMessagesList = vi.fn(async () => ([] as unknown[]));
+
+    const session = createFakeSession();
+    const runtime = createOpenCodeServerRuntime({
+      directory: '/tmp',
+      session,
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: { handleToolCall: vi.fn(async () => ({ decision: 'approved' })) } as any,
+      onThinkingChange: vi.fn(),
+    }, {
+      createClient: async () => client as any,
+    });
+
+    await runtime.startOrLoad({});
+    runtime.beginTurn();
+
+    const promptPromise = (runtime as any).sendPromptWithMeta({ text: 'hello', localId: 'local-foreground-tool' });
+    await expect.poll(() => client.sessionPromptAsync.mock.calls.length).toBe(1);
+
+    client.__emit({
+      directory: '/tmp',
+      payload: {
+        type: 'message.part.updated',
+        properties: {
+          part: {
+            id: 'part_foreground_tool',
+            type: 'tool',
+            sessionID: 'ses_1',
+            messageID: 'msg_foreground_tool',
+            callID: 'call_foreground_tool',
+            tool: 'read',
+            state: {
+              status: 'running',
+              input: { filePath: 'README.md' },
+              output: '',
+            },
+          },
+        },
+      },
+    });
+    await flushTranscriptCommitMicrotasks();
+    expect(session.updateRuntimeActivityProjection).not.toHaveBeenCalled();
+
+    client.__emit({
+      directory: '/tmp',
+      payload: {
+        type: 'message.part.updated',
+        properties: {
+          part: {
+            id: 'part_foreground_tool',
+            type: 'tool',
+            sessionID: 'ses_1',
+            messageID: 'msg_foreground_tool',
+            callID: 'call_foreground_tool',
+            tool: 'read',
+            state: {
+              status: 'completed',
+              input: { filePath: 'README.md' },
+              output: 'ok',
+            },
+          },
+        },
+      },
+    });
+    client.__emit({
+      directory: '/tmp',
+      payload: { type: 'message.part.updated', properties: { part: { id: 'part_parent_foreground_tool', type: 'text', sessionID: 'ses_1' } } },
+    });
+    client.__emit({
+      directory: '/tmp',
+      payload: {
+        type: 'message.part.delta',
+        properties: {
+          sessionID: 'ses_1',
+          messageID: 'msg_parent_foreground_tool',
+          partID: 'part_parent_foreground_tool',
+          delta: 'Done',
+        },
+      },
+    });
+    await emitTerminalAssistantAndIdle(client, { messageId: 'msg_parent_foreground_tool' });
+    await expect(promptPromise).resolves.toBeUndefined();
+    expect(session.updateRuntimeActivityProjection).not.toHaveBeenCalled();
+
     await runtime.cancel().catch(() => {});
   });
 
@@ -8232,6 +8875,7 @@ describe('createOpenCodeServerRuntime', () => {
     await flushTranscriptCommitMicrotasks();
 
     expect(sentAgentMessagesOfType(session, 'task_started')).toHaveLength(1);
+    expect(session.updateRuntimeActivityProjection).not.toHaveBeenCalled();
 
     await client.__emit({
       directory: '/tmp',
@@ -10335,5 +10979,542 @@ describe('createOpenCodeServerRuntime', () => {
       await runtime?.reset().catch(() => {});
       restoreEnv();
     }
+  });
+});
+
+describe('createOpenCodeServerRuntime managed-server generation recovery (Lane E)', () => {
+  const buildIdentity = (generationKey: string): OpenCodeManagedServerIdentity => ({
+    baseUrl: 'http://127.0.0.1:7777',
+    pid: 4242,
+    startedAtMs: 1,
+    generationKey,
+  });
+
+  const toolHistoryMessage = (status: string, opts?: { messageId?: string; callId?: string; sessionId?: string; tool?: string }) => {
+    const messageId = opts?.messageId ?? 'msg_tool';
+    const callId = opts?.callId ?? 'call_x';
+    const sessionId = opts?.sessionId ?? 'ses_1';
+    const tool = opts?.tool ?? 'read';
+    return {
+      info: { id: messageId, role: 'assistant', sessionID: sessionId },
+      parts: [{
+        id: `part_${callId}`,
+        type: 'tool',
+        sessionID: sessionId,
+        messageID: messageId,
+        callID: callId,
+        tool,
+        state: { status, ...(status === 'completed' ? { output: 'done', input: {} } : { input: {} }) },
+      }],
+    };
+  };
+
+  const emitRunningTool = async (
+    client: ReturnType<typeof createFakeClient>,
+    opts?: { messageId?: string; callId?: string; sessionId?: string; tool?: string },
+  ) => {
+    const messageId = opts?.messageId ?? 'msg_tool';
+    const callId = opts?.callId ?? 'call_x';
+    const sessionId = opts?.sessionId ?? 'ses_1';
+    const tool = opts?.tool ?? 'read';
+    await client.__emit({
+      directory: '/tmp',
+      payload: {
+        type: 'message.part.updated',
+        properties: {
+          part: {
+            id: `part_${callId}`,
+            type: 'tool',
+            sessionID: sessionId,
+            messageID: messageId,
+            callID: callId,
+            tool,
+            state: { status: 'running', input: {} },
+          },
+        },
+      },
+    });
+    await flushTranscriptCommitMicrotasks();
+  };
+
+  async function startGenerationRecoveryTurn() {
+    const client = createFakeClient();
+    const session = createFakeSession();
+    const onThinkingChange = vi.fn();
+    let capturedOnChange: ((change: OpenCodeManagedServerIdentityChange) => void) | null = null;
+    const runtime = createOpenCodeServerRuntime({
+      directory: '/tmp',
+      session,
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: createFakePermissionHandler() as unknown as ProviderEnforcedPermissionHandler,
+      onThinkingChange,
+    }, {
+      createClient: async (clientParams) => {
+        capturedOnChange = clientParams.onManagedServerIdentityChanged ?? null;
+        return client as unknown as OpenCodeServerRuntimeClient;
+      },
+    });
+    await runtime.startOrLoad({});
+    runtime.beginTurn();
+    const promptPromise = (runtime as unknown as {
+      sendPromptWithMeta: (params: { text: string; localId: string }) => Promise<void>;
+    }).sendPromptWithMeta({ text: 'hello', localId: 'local-gen' });
+    void promptPromise.catch(() => undefined);
+    await flushTranscriptCommitMicrotasks();
+    return { client, session, runtime, promptPromise, getOnChange: () => capturedOnChange };
+  }
+
+  it('fails the active turn once with opencode_server_restarted_during_turn when a live-known tool stays non-terminal after a generation change', async () => {
+    const { client, session, runtime, promptPromise, getOnChange } = await startGenerationRecoveryTurn();
+    try {
+      await emitRunningTool(client);
+      // Replacement server reattaches durable history, but the tool is still `running` (orphaned).
+      (client.sessionMessagesList as any).mockResolvedValue([toolHistoryMessage('running')]);
+      client.__setManagedServerIdentity(buildIdentity('gen-B'));
+
+      const onChange = getOnChange();
+      expect(onChange).toBeTruthy();
+      onChange?.({ previous: buildIdentity('gen-initial'), current: buildIdentity('gen-B'), reason: 'http_retry_ensure' });
+      await flushTranscriptCommitMicrotasks();
+      await flushTranscriptCommitMicrotasks();
+
+      const restartTurnFailedCount = () =>
+        (sentAgentMessagesOfType(session, 'turn_failed') as Array<{ code?: string }>)
+          .filter((m) => m.code === OPENCODE_SERVER_RESTARTED_DURING_TURN_ISSUE_CODE).length;
+      const restartFailTurnCount = () =>
+        ((session.sessionTurnLifecycle.failTurn as any).mock.calls as Array<[{ issue?: { code?: string } }]>)
+          .filter((call) => call[0]?.issue?.code === OPENCODE_SERVER_RESTARTED_DURING_TURN_ISSUE_CODE).length;
+      // Fires EXACTLY once: a single user-visible turn_failed and a single failTurn persist, not
+      // merely "at least once".
+      expect(restartTurnFailedCount()).toBe(1);
+      expect(restartFailTurnCount()).toBe(1);
+      const failArg = (session.sessionTurnLifecycle.failTurn as any).mock.calls.at(-1)?.[0];
+      expect(failArg?.issue?.code).toBe(OPENCODE_SERVER_RESTARTED_DURING_TURN_ISSUE_CODE);
+      expect(failArg?.issue?.source).toBe('stream_error');
+      // No task_complete, no sessionAbort, no prompt replay.
+      expect(sentAgentMessagesOfType(session, 'task_complete')).toHaveLength(0);
+      expect(client.sessionAbort).not.toHaveBeenCalled();
+      expect((client.sessionPromptAsync as any).mock.calls.length).toBe(1);
+      await expect(promptPromise).rejects.toMatchObject({ code: OPENCODE_SERVER_RESTARTED_DURING_TURN_ISSUE_CODE });
+
+      // A SECOND generation change AFTER the turn already failed must NOT double-fail: the turn is
+      // settled, so the supervisor sees no active turn and only clears orphaned work.
+      client.__setManagedServerIdentity(buildIdentity('gen-C'));
+      getOnChange()?.({ previous: buildIdentity('gen-B'), current: buildIdentity('gen-C'), reason: 'http_retry_ensure' });
+      await flushTranscriptCommitMicrotasks();
+      await flushTranscriptCommitMicrotasks();
+      expect(restartTurnFailedCount()).toBe(1);
+      expect(restartFailTurnCount()).toBe(1);
+    } finally {
+      await runtime.reset().catch(() => {});
+    }
+  });
+
+  it('does not fail with the restart issue when the live-known tool reconciles terminal on the replacement server', async () => {
+    const { client, session, runtime, getOnChange } = await startGenerationRecoveryTurn();
+    try {
+      await emitRunningTool(client);
+      // Replacement server's durable history shows the tool completed: forward + continue.
+      (client.sessionMessagesList as any).mockResolvedValue([toolHistoryMessage('completed')]);
+      client.__setManagedServerIdentity(buildIdentity('gen-B'));
+
+      getOnChange()?.({ previous: buildIdentity('gen-initial'), current: buildIdentity('gen-B'), reason: 'http_retry_ensure' });
+      await flushTranscriptCommitMicrotasks();
+      await flushTranscriptCommitMicrotasks();
+
+      const turnFailed = sentAgentMessagesOfType(session, 'turn_failed') as Array<{ code?: string }>;
+      expect(turnFailed.some((m) => m.code === OPENCODE_SERVER_RESTARTED_DURING_TURN_ISSUE_CODE)).toBe(false);
+      expect(client.sessionAbort).not.toHaveBeenCalled();
+    } finally {
+      await runtime.reset().catch(() => {});
+    }
+  });
+
+  it('clears orphaned work without a user-visible failure when the generation changes with no active turn', async () => {
+    const client = createFakeClient();
+    const session = createFakeSession();
+    let capturedOnChange: ((change: OpenCodeManagedServerIdentityChange) => void) | null = null;
+    const getOnChange = () => capturedOnChange;
+    const runtime = createOpenCodeServerRuntime({
+      directory: '/tmp',
+      session,
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: createFakePermissionHandler() as unknown as ProviderEnforcedPermissionHandler,
+      onThinkingChange: vi.fn(),
+    }, {
+      createClient: async (clientParams) => {
+        capturedOnChange = clientParams.onManagedServerIdentityChanged ?? null;
+        return client as unknown as OpenCodeServerRuntimeClient;
+      },
+    });
+    try {
+      await runtime.startOrLoad({});
+      client.__setManagedServerIdentity(buildIdentity('gen-B'));
+      const onChange = getOnChange();
+      expect(onChange).toBeTruthy();
+      onChange?.({ previous: buildIdentity('gen-initial'), current: buildIdentity('gen-B'), reason: 'sse_reconnect_state_refresh' });
+      await flushTranscriptCommitMicrotasks();
+
+      expect(sentAgentMessagesOfType(session, 'turn_failed')).toHaveLength(0);
+      expect(session.sessionTurnLifecycle.failTurn as any).not.toHaveBeenCalled();
+    } finally {
+      await runtime.reset().catch(() => {});
+    }
+  });
+
+  it('does not count orphaned old-generation provider work as live when probing turn liveness (closes F4)', async () => {
+    const { client, runtime, getOnChange } = await startGenerationRecoveryTurn();
+    try {
+      // session-next tool: tracked active but NOT live-known, so the supervisor will not fail the turn.
+      await client.__emit({
+        directory: '/tmp',
+        payload: { type: 'session.next.tool.started', properties: { sessionID: 'ses_1', callID: 'call_sn' } },
+      });
+      await flushTranscriptCommitMicrotasks();
+      expect((await runtime.probeTurnLiveness()).active).toBe(true);
+
+      // Generation advances; no live-known tools means no proactive failure — the turn stays active.
+      (client.sessionMessagesList as any).mockResolvedValue([]);
+      client.__setManagedServerIdentity(buildIdentity('gen-B'));
+      getOnChange()?.({ previous: buildIdentity('gen-initial'), current: buildIdentity('gen-B'), reason: 'http_retry_ensure' });
+      await flushTranscriptCommitMicrotasks();
+
+      // The orphaned session-next work belongs to the replaced generation: not live for the new one.
+      expect((await runtime.probeTurnLiveness()).active).toBe(false);
+    } finally {
+      await runtime.reset().catch(() => {});
+    }
+  });
+});
+
+describe('createOpenCodeServerRuntime origin-agnostic transcript projection (Lane H / S2)', () => {
+  async function startSessionWithoutTurn() {
+    const client = createFakeClient();
+    const session = createFakeSession();
+    const runtime = createOpenCodeServerRuntime({
+      directory: '/tmp',
+      session,
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: createFakePermissionHandler() as unknown as ProviderEnforcedPermissionHandler,
+      onThinkingChange: vi.fn(),
+    }, {
+      createClient: async () => client as unknown as OpenCodeServerRuntimeClient,
+    });
+    await runtime.startOrLoad({});
+    return { client, session, runtime };
+  }
+
+  const externalUserMessage = () => ({
+    info: { id: 'msg_tui_user', role: 'user', sessionID: 'ses_1', time: { created: 10 } },
+    parts: [{ id: 'p_u', type: 'text', text: 'hello from the TUI' }],
+  });
+  const externalAssistantMessage = () => ({
+    info: { id: 'msg_tui_assistant', role: 'assistant', sessionID: 'ses_1', finish: 'stop', time: { created: 11, completed: 12 } },
+    parts: [{ id: 'p_a', type: 'text', text: 'reply from OpenCode' }],
+  });
+
+  it('mirrors a TUI-originated user message and its assistant response exactly once and never re-enqueues it', async () => {
+    const { client, session } = await startSessionWithoutTurn();
+    (client.sessionMessagesList as any).mockResolvedValue([externalUserMessage(), externalAssistantMessage()]);
+
+    // A TUI-authored assistant message materializes while no Happier turn is active.
+    await client.__emit({
+      directory: '/tmp',
+      payload: { type: 'message.updated', properties: { info: { id: 'msg_tui_assistant', role: 'assistant', sessionID: 'ses_1', finish: 'stop', time: { completed: 12 } } } },
+    });
+    await flushTranscriptCommitMicrotasks();
+    await flushTranscriptCommitMicrotasks();
+
+    const userCommits = (session.sendUserTextMessageCommitted as any).mock.calls;
+    const assistantCommits = (session.sendAgentMessageCommitted as any).mock.calls;
+    expect(userCommits).toHaveLength(1);
+    expect(userCommits[0]?.[0]).toBe('hello from the TUI');
+    expect(userCommits[0]?.[1]?.meta?.source).toBe('cli');
+    expect(assistantCommits.some((c: any[]) => c?.[1]?.message === 'reply from OpenCode')).toBe(true);
+    // Mirror-only: the imported user message is never sent back to OpenCode as a prompt.
+    expect((client.sessionPromptAsync as any).mock.calls.length).toBe(0);
+
+    // Re-emitting the same message must not duplicate (dedupe gate + deterministic import ids).
+    await client.__emit({
+      directory: '/tmp',
+      payload: { type: 'message.updated', properties: { info: { id: 'msg_tui_assistant', role: 'assistant', sessionID: 'ses_1', finish: 'stop', time: { completed: 12 } } } },
+    });
+    await flushTranscriptCommitMicrotasks();
+    await flushTranscriptCommitMicrotasks();
+    expect((session.sendUserTextMessageCommitted as any).mock.calls).toHaveLength(1);
+  });
+
+  it('does not mirror an in-progress (non-terminal) assistant message', async () => {
+    const { client, session } = await startSessionWithoutTurn();
+    (client.sessionMessagesList as any).mockResolvedValue([
+      externalUserMessage(),
+      // Assistant has no completed time -> not settled.
+      { info: { id: 'msg_partial', role: 'assistant', sessionID: 'ses_1' }, parts: [{ id: 'p', type: 'text', text: 'partial...' }] },
+    ]);
+
+    await client.__emit({
+      directory: '/tmp',
+      payload: { type: 'message.updated', properties: { info: { id: 'msg_tui_user', role: 'user', sessionID: 'ses_1' } } },
+    });
+    await flushTranscriptCommitMicrotasks();
+    await flushTranscriptCommitMicrotasks();
+
+    expect((session.sendUserTextMessageCommitted as any).mock.calls).toHaveLength(1);
+    const assistantCommits = (session.sendAgentMessageCommitted as any).mock.calls;
+    expect(assistantCommits.some((c: any[]) => typeof c?.[1]?.message === 'string' && String(c[1].message).includes('partial'))).toBe(false);
+  });
+});
+
+describe('createOpenCodeServerRuntime — connected-service broker preflight (fail-closed)', () => {
+  async function writeUsableDaemonState(path: string): Promise<void> {
+    await writeFile(path, JSON.stringify({ httpPort: 1234, controlToken: 'tok' }), 'utf8');
+  }
+
+  function buildConnectedEnv(overrides: Readonly<{ brokered?: boolean; daemonStatePath?: string }>): NodeJS.ProcessEnv {
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      [OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV]: 'opencode|connected|openai-codex:primary:',
+    };
+    // Always control the broker inputs explicitly so the verdict is deterministic regardless of
+    // the ambient process env.
+    delete env[OPEN_CODE_BROKER_SELECTIONS_ENV];
+    delete env[OPEN_CODE_BROKER_DAEMON_STATE_PATH_ENV];
+    delete env[OPEN_CODE_BROKER_LOAD_NONCE_ENV];
+    if (overrides.brokered) {
+      env[OPEN_CODE_BROKER_SELECTIONS_ENV] = serializeOpenCodeBrokerSelections({
+        openai: { serviceId: 'openai-codex', profileId: 'primary', accountId: null, planType: null },
+      });
+    }
+    if (typeof overrides.daemonStatePath === 'string') {
+      env[OPEN_CODE_BROKER_DAEMON_STATE_PATH_ENV] = overrides.daemonStatePath;
+    }
+    return env;
+  }
+
+  function startConnectedRuntime(
+    env: NodeJS.ProcessEnv,
+    opts: Readonly<{ emitServerConnectedOnSubscribe?: boolean }> = {},
+  ) {
+    const client = createFakeClient(opts);
+    const session = mirrorLifecycleMarkersForTest(createFakeSession());
+    const runtime = createOpenCodeServerRuntime({
+      directory: '/tmp',
+      env,
+      session,
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: createFakePermissionHandler() as unknown as ProviderEnforcedPermissionHandler,
+      onThinkingChange: vi.fn(),
+    }, {
+      createClient: async () => client as unknown as OpenCodeServerRuntimeClient,
+    });
+    return { client, session, runtime };
+  }
+
+  it('waits for server.connected before evaluating connected broker readiness for the first prompt', async () => {
+    const env = buildConnectedEnv({ brokered: true });
+    const { client, session, runtime } = startConnectedRuntime(env, { emitServerConnectedOnSubscribe: false });
+
+    await runtime.startOrLoad({});
+    runtime.beginTurn();
+    const promptPromise = (runtime as unknown as {
+      sendPromptWithMeta: (params: { text: string; localId: string }) => Promise<void>;
+    }).sendPromptWithMeta({ text: 'hello', localId: 'local-broker-preflight-after-connected' });
+    void promptPromise.catch(() => undefined);
+    const outcome = observePromiseSettlement(promptPromise);
+
+    await flushTranscriptCommitMicrotasks();
+
+    expect(client.sessionPromptAsync).not.toHaveBeenCalled();
+    expect(outcome.status).toBe('pending');
+    expect(session.sessionTurnLifecycle.failTurn).not.toHaveBeenCalled();
+    expect(sentAgentMessagesOfType(session, 'turn_failed')).toHaveLength(0);
+
+    await client.__emit({
+      directory: '/tmp',
+      payload: { type: 'server.connected', properties: {} },
+    });
+
+    await expect(promptPromise).rejects.toThrow();
+    expect(client.sessionPromptAsync).not.toHaveBeenCalled();
+    expect(session.sessionTurnLifecycle.failTurn).toHaveBeenCalledWith(expect.objectContaining({
+      provider: 'opencode',
+      issue: expect.objectContaining({
+        code: OPENCODE_CONNECTED_AUTH_NOT_MATERIALIZED_CODE,
+      }),
+    }));
+  });
+
+  it('does not forward a prompt when the turn is cancelled while broker preflight is pending', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'happier-opencode-runtime-broker-home-'));
+    const restoreHome = withEnvForTest({ HAPPIER_HOME_DIR: home });
+    reloadConfiguration();
+    const daemonStatePath = join(home, 'daemon.state.json');
+    await writeUsableDaemonState(daemonStatePath);
+    await ensureOpenCodeBrokerPluginAssets({ providers: ['openai'], happyHomeDir: configuration.happyHomeDir });
+
+    let resolveHandshake!: (ready: boolean) => void;
+    mockQueryDaemonOpenCodeBrokerLoadHandshake.mockImplementation(
+      () => new Promise<boolean>((resolve) => {
+        resolveHandshake = resolve;
+      }),
+    );
+
+    const env = buildConnectedEnv({ brokered: true, daemonStatePath });
+    const { client, runtime } = startConnectedRuntime(env);
+
+    try {
+      await runtime.startOrLoad({});
+      runtime.beginTurn();
+      const promptPromise = (runtime as unknown as {
+        sendPromptWithMeta: (params: { text: string; localId: string }) => Promise<void>;
+      }).sendPromptWithMeta({ text: 'hello while broker readiness is pending', localId: 'local-broker-preflight-cancelled' });
+      void promptPromise.catch(() => undefined);
+      const outcome = observePromiseSettlement(promptPromise);
+
+      await expect.poll(() => mockQueryDaemonOpenCodeBrokerLoadHandshake.mock.calls.length).toBe(1);
+      expect(outcome.status).toBe('pending');
+      expect(client.sessionPromptAsync).not.toHaveBeenCalled();
+
+      await runtime.cancel();
+      resolveHandshake(true);
+      await flushTranscriptCommitMicrotasks();
+
+      await expect.poll(() => outcome.status).toBe('rejected');
+      expect(client.sessionPromptAsync).not.toHaveBeenCalled();
+    } finally {
+      mockQueryDaemonOpenCodeBrokerLoadHandshake.mockReset();
+      await runtime.reset().catch(() => {});
+      restoreHome();
+      reloadConfiguration();
+    }
+  });
+
+  it('fails the turn closed for a connected brokered session when the broker is not ready, never forwarding the prompt to OpenCode', async () => {
+    // Brokered provider present but no daemon-state bridge path => preflight is not ready.
+    const env = buildConnectedEnv({ brokered: true });
+    const { client, session, runtime } = startConnectedRuntime(env);
+
+    await runtime.startOrLoad({});
+    runtime.beginTurn();
+    const promptPromise = (runtime as unknown as {
+      sendPromptWithMeta: (params: { text: string; localId: string }) => Promise<void>;
+    }).sendPromptWithMeta({ text: 'hello', localId: 'local-broker-preflight-not-ready' });
+
+    await expect(promptPromise).rejects.toThrow();
+
+    // Fail-closed: the prompt must NEVER be forwarded to OpenCode (no native/upstream fallback).
+    expect(client.sessionPromptAsync).not.toHaveBeenCalled();
+
+    // The turn is failed with the canonical auth-materialization issue code.
+    expect(session.sessionTurnLifecycle.failTurn).toHaveBeenCalledWith(expect.objectContaining({
+      provider: 'opencode',
+      issue: expect.objectContaining({
+        code: OPENCODE_CONNECTED_AUTH_NOT_MATERIALIZED_CODE,
+        status: 'failed',
+        scope: 'primary_session',
+      }),
+    }));
+    const failedMarkers = sentAgentMessagesOfType(session, 'turn_failed');
+    expect(failedMarkers.length).toBe(1);
+    expect((failedMarkers[0] as { code?: string }).code).toBe(OPENCODE_CONNECTED_AUTH_NOT_MATERIALIZED_CODE);
+
+    await runtime.reset().catch(() => {});
+  });
+
+  it('does not run the broker preflight for a native session (proceeds to send the prompt)', async () => {
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    delete env[OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV];
+    const { client, runtime } = startConnectedRuntime(env);
+
+    await runtime.startOrLoad({});
+    runtime.beginTurn();
+    const promptPromise = (runtime as unknown as {
+      sendPromptWithMeta: (params: { text: string; localId: string }) => Promise<void>;
+    }).sendPromptWithMeta({ text: 'hello', localId: 'local-broker-preflight-native' });
+    void promptPromise.catch(() => undefined);
+
+    await expect.poll(() => client.sessionPromptAsync.mock.calls.length).toBe(1);
+
+    await runtime.cancel().catch(() => {});
+    await promptPromise.catch(() => undefined);
+    await runtime.reset().catch(() => {});
+  });
+
+  it('treats a connected direct-API-key session (no brokered provider) as ready and proceeds', async () => {
+    const env = buildConnectedEnv({ brokered: false });
+    const { client, runtime } = startConnectedRuntime(env);
+
+    await runtime.startOrLoad({});
+    runtime.beginTurn();
+    const promptPromise = (runtime as unknown as {
+      sendPromptWithMeta: (params: { text: string; localId: string }) => Promise<void>;
+    }).sendPromptWithMeta({ text: 'hello', localId: 'local-broker-preflight-direct-key' });
+    void promptPromise.catch(() => undefined);
+
+    await expect.poll(() => client.sessionPromptAsync.mock.calls.length).toBe(1);
+
+    await runtime.cancel().catch(() => {});
+    await promptPromise.catch(() => undefined);
+    await runtime.reset().catch(() => {});
+  });
+
+  it('rechecks connected broker readiness after runtime reset instead of reusing a previous ready verdict', async () => {
+    const env = buildConnectedEnv({ brokered: false });
+    const firstClient = createFakeClient();
+    const secondClient = createFakeClient();
+    const clients = [firstClient, secondClient];
+    const session = mirrorLifecycleMarkersForTest(createFakeSession());
+    const runtime = createOpenCodeServerRuntime({
+      directory: '/tmp',
+      env,
+      session,
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: createFakePermissionHandler() as unknown as ProviderEnforcedPermissionHandler,
+      onThinkingChange: vi.fn(),
+    }, {
+      createClient: async () => {
+        const next = clients.shift();
+        if (!next) throw new Error('No fake OpenCode client available');
+        return next as unknown as OpenCodeServerRuntimeClient;
+      },
+    });
+
+    await runtime.startOrLoad({});
+    runtime.beginTurn();
+    const firstPrompt = (runtime as unknown as {
+      sendPromptWithMeta: (params: { text: string; localId: string }) => Promise<void>;
+    }).sendPromptWithMeta({ text: 'hello direct key', localId: 'local-direct-key-before-reset' });
+    void firstPrompt.catch(() => undefined);
+
+    await expect.poll(() => firstClient.sessionPromptAsync.mock.calls.length).toBe(1);
+    await runtime.cancel().catch(() => {});
+    await firstPrompt.catch(() => undefined);
+    await runtime.reset().catch(() => {});
+
+    env[OPEN_CODE_BROKER_SELECTIONS_ENV] = serializeOpenCodeBrokerSelections({
+      openai: { serviceId: 'openai-codex', profileId: 'primary', accountId: null, planType: null },
+    });
+
+    await runtime.startOrLoad({});
+    runtime.beginTurn();
+    const secondPrompt = (runtime as unknown as {
+      sendPromptWithMeta: (params: { text: string; localId: string }) => Promise<void>;
+    }).sendPromptWithMeta({ text: 'hello brokered', localId: 'local-brokered-after-reset' });
+
+    await expect(secondPrompt).rejects.toThrow();
+    expect(secondClient.sessionPromptAsync).not.toHaveBeenCalled();
+    expect(session.sessionTurnLifecycle.failTurn).toHaveBeenCalledWith(expect.objectContaining({
+      provider: 'opencode',
+      issue: expect.objectContaining({
+        code: OPENCODE_CONNECTED_AUTH_NOT_MATERIALIZED_CODE,
+      }),
+    }));
+
+    await runtime.reset().catch(() => {});
   });
 });

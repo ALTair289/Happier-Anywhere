@@ -297,6 +297,71 @@ describe('createOpenCodeTranscriptStreamBridge', () => {
     ]);
   });
 
+  it('forwards ephemeral stream deltas with merged base metadata and exposes the connection epoch', () => {
+    const deltaCalls: Array<{
+      provider: ACPProvider;
+      body: ACPMessageData;
+      opts: {
+        localId: string;
+        tick: number;
+        baseLength: number;
+        createdAt: number;
+        updatedAt?: number;
+        meta?: Record<string, unknown>;
+      };
+    }> = [];
+
+    const session = createOpenCodeTranscriptStreamSession({
+      baseMeta: { importedFrom: 'acp-sidechain' },
+      session: {
+        sendAgentMessageCommitted: async () => {},
+        sendAgentMessage: () => {},
+        sendAgentMessageEphemeral: () => {},
+        sendAgentMessageEphemeralDelta: (provider, body, opts) => {
+          deltaCalls.push({ provider, body, opts });
+        },
+        getEphemeralStreamConnectionEpoch: () => 4,
+      },
+    });
+
+    expect(session.sendAgentMessageEphemeralDelta).toBeTypeOf('function');
+    session.sendAgentMessageEphemeralDelta?.(
+      'opencode',
+      { type: 'message', message: '_DELTA' },
+      { localId: 'segment-1', tick: 2, baseLength: 8, createdAt: 10, updatedAt: 20 },
+    );
+
+    expect(deltaCalls).toEqual([
+      {
+        provider: 'opencode',
+        body: { type: 'message', message: '_DELTA' },
+        opts: {
+          localId: 'segment-1',
+          tick: 2,
+          baseLength: 8,
+          createdAt: 10,
+          updatedAt: 20,
+          meta: { importedFrom: 'acp-sidechain' },
+        },
+      },
+    ]);
+    expect(session.getEphemeralStreamConnectionEpoch?.()).toBe(4);
+  });
+
+  it('does not advertise delta sends when the underlying session lacks support', () => {
+    const session = createOpenCodeTranscriptStreamSession({
+      baseMeta: {},
+      session: {
+        sendAgentMessageCommitted: async () => {},
+        sendAgentMessage: () => {},
+        sendAgentMessageEphemeral: () => {},
+      },
+    });
+
+    expect(session.sendAgentMessageEphemeralDelta).toBeUndefined();
+    expect(session.getEphemeralStreamConnectionEpoch).toBeUndefined();
+  });
+
   it('routes streamed committed snapshots through the durable enqueue hook when available', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(0));

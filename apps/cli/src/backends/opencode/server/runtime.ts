@@ -57,7 +57,10 @@ import { extractOpenCodeFileDiff } from '../utils/extractOpenCodeFileDiff';
 import { readOpenCodeSessionRuntimeHandleFromMetadata } from '../utils/opencodeSessionAffinity';
 import { extractOpenCodeSessionDiffPayload } from './extractOpenCodeSessionDiffPayload';
 import {
+  openCodeBackgroundTaskWakeIndicatesAllTasksComplete,
   readOpenCodeBackgroundTaskWakeSource,
+  readOpenCodeBackgroundTaskWakeRuntimeSourceId,
+  readOpenCodeBackgroundTaskLaunchRuntimeSourceId,
   openCodeToolPartLooksLikeBackgroundOutputContinuation,
   openCodeToolPartLooksLikeBackgroundTaskLaunch,
 } from './openCodeBackgroundTaskSignals';
@@ -75,10 +78,27 @@ import {
   isTerminalOpenCodeToolPartStatus,
 } from './runtime/createOpenCodeProviderActivityTracker';
 import {
+  createOpenCodeManagedServerTurnInterruptionSupervisor,
+  OPENCODE_SERVER_RESTARTED_DURING_TURN_ISSUE_CODE,
+  type OpenCodeManagedServerTurnInterruptionSupervisor,
+} from './runtime/createOpenCodeManagedServerTurnInterruptionSupervisor';
+import { resolveOpenCodeServerControlPollIntervals } from './runtime/controlPollIntervals';
+import {
+  OPEN_CODE_BROKER_LOAD_NONCE_ENV,
+  OPEN_CODE_BROKER_PROVIDERS,
+  OPEN_CODE_BROKER_SELECTIONS_ENV,
+  parseOpenCodeBrokerSelections,
+  verifyOpenCodeBrokerReadyForConnectedSession,
+  type OpenCodeBrokerReadiness,
+} from '@/backends/opencode/brokerPlugin';
+import {
   classifyOpenCodeAssistantCompletion,
   classifyOpenCodeMessageForProjection,
   classifyOpenCodePartForProjection,
 } from '../transcriptProjection';
+import { createSessionRuntimeActivityPublisher } from '@/session/runtimeActivity/sessionRuntimeActivityPublisher';
+
+const OPENCODE_RUNTIME_ACTIVITY_LEASE_MS = 120_000;
 
 function mergeSessionWorkStateIntoMetadata(
   metadata: Metadata,
@@ -159,6 +179,15 @@ class OpenCodeControlPlaneRequestListError extends Error {
 }
 
 const OPENCODE_IDLE_WITHOUT_TERMINAL_ASSISTANT_CODE = 'opencode_idle_without_terminal_assistant';
+export const OPENCODE_PROMPT_NOT_DISPATCHED_CODE = 'opencode_prompt_not_dispatched';
+
+/**
+ * Provider-owned runtime-issue code surfaced when a CONNECTED OpenCode session's auth broker is not
+ * materialized/reachable before its first prompt. The session is failed closed rather than falling
+ * back to native/upstream OpenCode auth (the stored broker marker is itself non-functional without
+ * the plugin). `SessionRuntimeIssueV1.code` is an open string, so no protocol registration is needed.
+ */
+export const OPENCODE_CONNECTED_AUTH_NOT_MATERIALIZED_CODE = 'opencode_connected_auth_not_materialized';
 
 function openCodeErrorLooksLikeContextOverflow(error: unknown): boolean {
   const text = (extractOpenCodeErrorText(error) ?? '').trim().toLowerCase();
@@ -210,6 +239,17 @@ export function createOpenCodeServerRuntime(params: {
   const provider: ACPProvider = 'opencode';
   const createClient = deps.createClient ?? createOpenCodeServerRuntimeClient;
   const env = params.env ?? process.env;
+  const refreshOpenCodeBrokerLoadNonceForNextSpawn = (): void => {
+    const selections = parseOpenCodeBrokerSelections(env[OPEN_CODE_BROKER_SELECTIONS_ENV]);
+    const hasBrokeredProvider = OPEN_CODE_BROKER_PROVIDERS.some((provider) => selections[provider]);
+    if (!hasBrokeredProvider) return;
+    const nonce = randomUUID();
+    env[OPEN_CODE_BROKER_LOAD_NONCE_ENV] = nonce;
+    // The managed-server helper still reads the child env from process.env. Mirror the nonce so the
+    // spawned OpenCode broker and this runtime's post-spawn preflight check use the same process key.
+    process.env[OPEN_CODE_BROKER_LOAD_NONCE_ENV] = nonce;
+  };
+  let connectedBrokerPreflight: Promise<OpenCodeBrokerReadiness> | null = null;
   const runtimeAuthAdapter = createOpenCodeConnectedServiceRuntimeAuthAdapter();
   const shapeLogger = createEventShapeLoggerForLog({ logger, scope: 'opencode-server' });
   let activeLifecycleMarkerId: string | null = null;
@@ -280,6 +320,8 @@ export function createOpenCodeServerRuntime(params: {
   let client: OpenCodeServerRuntimeClient | null = null;
   let sessionId: string | null = null;
   let subscriptionAbort: AbortController | null = null;
+  let serverConnectedDeferred = createDeferred<void>();
+  let serverConnectedGenerationKey: string | null = null;
   let currentContextWindowTokens: number | null = null;
   const observedCompactionLifecycleIds = new Set<string>();
   let manualCompactionSequence = 0;
@@ -344,6 +386,61 @@ export function createOpenCodeServerRuntime(params: {
   let resolveOnIdleInFlight = false;
   let turnControlAbort: AbortController | null = null;
   const providerActivityTracker = createOpenCodeProviderActivityTracker();
+  const runtimeActivityPublisher = createSessionRuntimeActivityPublisher({
+    nowMs: () => Date.now(),
+    leaseDurationMs: OPENCODE_RUNTIME_ACTIVITY_LEASE_MS,
+    updateRuntimeActivityProjection: (projection) => params.session.updateRuntimeActivityProjection(projection),
+    logError: (event, details) => {
+      logger.debug('[OpenCodeServer] runtime activity projection update failed (non-fatal)', {
+        event,
+        details,
+      });
+    },
+  });
+  const publishDetachedRuntimeActivity = (sourceId: string): void => {
+    void runtimeActivityPublisher.setSourceActive({
+      id: sourceId,
+      sourceClass: 'provider_detached_task',
+      providerId: provider,
+    });
+  };
+  const clearDetachedRuntimeActivity = (sourceId: string | null, reason: string): Promise<void> => {
+    if (sourceId) {
+      return runtimeActivityPublisher.clearSource(sourceId, reason);
+    }
+    if (runtimeActivityPublisher.getProjection().runtimeActivityActiveCount <= 0) {
+      return Promise.resolve();
+    }
+    return runtimeActivityPublisher.clearProviderSources(provider, reason);
+  };
+  const clearDetachedRuntimeActivityBestEffort = (sourceId: string | null, reason: string): void => {
+    void clearDetachedRuntimeActivity(sourceId, reason);
+  };
+  const clearAllDetachedRuntimeActivityBestEffort = (reason: string): void => {
+    void clearDetachedRuntimeActivity(null, reason);
+  };
+  // Generation-aware crash recovery (Lane E). Assigned after its dependency helpers are defined; all
+  // references are null-safe so the synchronous module body can wire it before any method runs.
+  let managedServerTurnSupervisor: OpenCodeManagedServerTurnInterruptionSupervisor | null = null;
+  const currentManagedServerGenerationKey = (): string | null =>
+    managedServerTurnSupervisor?.getCurrentGenerationKey() ?? null;
+  // Liveness must only count work backed by the CURRENT managed-server generation. Work observed
+  // under a replaced generation is orphaned and must not keep a turn alive (closes the F4 wedge).
+  const hasLiveProviderWorkForCurrentGeneration = (): boolean => {
+    const generationKey = currentManagedServerGenerationKey();
+    if (!generationKey) return providerActivityTracker.hasActiveProviderWork();
+    return providerActivityTracker.hasActiveProviderWorkNotOrphanedByGeneration(generationKey);
+  };
+  // True if any live-known tool call of the active turn is still active after a bounded reconcile —
+  // i.e. it stayed non-terminal/missing in the replacement server's durable history.
+  const hasUnreconciledActiveLiveKnownToolWork = (): boolean => {
+    const workState = providerActivityTracker.getProviderWorkState();
+    if (!workState.active) return false;
+    for (const tool of workState.activeToolCalls) {
+      if (turnLiveKnownToolCallKeys.has(tool.key)) return true;
+    }
+    return false;
+  };
   let turnAwaitingUserResponseCount = 0;
   let compactionInProgress = false;
   let retryBackoffUntilMs: number | null = null;
@@ -663,12 +760,59 @@ export function createOpenCodeServerRuntime(params: {
 
   const ensureClient = async (): Promise<OpenCodeServerRuntimeClient> => {
     if (client) return client;
+    connectedBrokerPreflight = null;
+    resetServerConnectedReadiness();
+    refreshOpenCodeBrokerLoadNonceForNextSpawn();
     client = await createClient({
       directory: params.directory,
       env,
       messageBuffer: params.messageBuffer,
+      onManagedServerIdentityChanged: (change) => {
+        connectedBrokerPreflight = null;
+        resetServerConnectedReadiness();
+        managedServerTurnSupervisor?.handleManagedServerIdentityChange(change);
+      },
     });
     return client;
+  };
+
+  const readCurrentServerConnectedGenerationKey = (): string =>
+    client?.getManagedServerIdentity()?.generationKey ?? 'untracked';
+
+  const resetServerConnectedReadiness = (): void => {
+    serverConnectedGenerationKey = null;
+    serverConnectedDeferred.resolve();
+    serverConnectedDeferred = createDeferred<void>();
+  };
+
+  const markServerConnected = (): void => {
+    serverConnectedGenerationKey = readCurrentServerConnectedGenerationKey();
+    serverConnectedDeferred.resolve();
+  };
+
+  const isActivePromptTurn = (turn: Deferred<void>, targetSessionId: string): boolean =>
+    turnDeferred === turn && turnPromptActive && sessionId === targetSessionId;
+
+  const waitForServerConnectedBeforePrompt = async (
+    turn: Deferred<void>,
+    targetSessionId: string,
+  ): Promise<boolean> => {
+    for (;;) {
+      if (!isActivePromptTurn(turn, targetSessionId)) return false;
+      const expectedGenerationKey = readCurrentServerConnectedGenerationKey();
+      if (serverConnectedGenerationKey === expectedGenerationKey) return true;
+
+      const pendingReadiness = serverConnectedDeferred.promise;
+      const outcome = await Promise.race([
+        pendingReadiness.then(() => ({ type: 'server_connected' as const })),
+        turn.promise.then(
+          () => ({ type: 'turn_resolved' as const }),
+          (error: unknown) => ({ type: 'turn_rejected' as const, error }),
+        ),
+      ]);
+      if (outcome.type === 'turn_rejected') throw outcome.error;
+      if (outcome.type === 'turn_resolved') return false;
+    }
   };
 
   const publishDynamicSessionOptionsBestEffort = () => {
@@ -915,6 +1059,12 @@ export function createOpenCodeServerRuntime(params: {
     }
 
     throw new Error(`Invalid OpenCode model id: ${rawModelId}`);
+  };
+
+  const resolvePromptModelOverride = async (meta: unknown): Promise<OpenCodeModelRef | undefined> => {
+    const rawModelId = normalizeString(asRecord(meta)?.model).trim();
+    if (!rawModelId) return selectedModel ?? undefined;
+    return (await resolveModelOverride(rawModelId)) ?? undefined;
   };
 
   const attachSubscriptionIfNeeded = async (): Promise<void> => {
@@ -1262,7 +1412,8 @@ export function createOpenCodeServerRuntime(params: {
   };
 
   const probeFinalTurnLivenessBeforeDeadlockAbort = async (): Promise<FinalTurnLivenessProbeResult> => {
-    const providerWork = providerActivityTracker.hasActiveProviderWork();
+    // Generation-aware: orphaned work from a replaced managed server must not early-exit the probe.
+    const providerWork = hasLiveProviderWorkForCurrentGeneration();
     const userWaits = turnAwaitingUserResponseCount;
     const toolForwarding = pendingTurnToolForwardingWork.size;
     const taskDiscovery = pendingTaskChildSessionDiscoveryCallKeys.size;
@@ -1392,7 +1543,9 @@ export function createOpenCodeServerRuntime(params: {
       if (!turnDeferred || !turnPromptActive || watchdogFired) continue;
 
       const nowMs = Date.now();
-      if (providerActivityTracker.hasActiveProviderWork() || turnAwaitingUserResponseCount > 0 || compactionInProgress || activeManualCompaction) {
+      // Generation-aware: only work backed by the current managed-server generation keeps the turn
+      // alive. Orphaned work from a replaced server must not refresh the clock forever (F4 wedge).
+      if (hasLiveProviderWorkForCurrentGeneration() || turnAwaitingUserResponseCount > 0 || compactionInProgress || activeManualCompaction) {
         turnLastActivityAtMs = nowMs;
         continue;
       }
@@ -1455,8 +1608,15 @@ export function createOpenCodeServerRuntime(params: {
   const recordProviderAutonomousBackgroundWake = (input: Readonly<{
     source: 'native-background-task' | 'oh-my-openagent-background-task';
     messageId?: string | null;
+    runtimeActivitySourceId?: string | null;
+    clearAllRuntimeActivitySources?: boolean;
   }>): void => {
     if (!sessionId || turnPromptActive) return;
+    if (input.runtimeActivitySourceId) {
+      clearDetachedRuntimeActivityBestEffort(input.runtimeActivitySourceId, 'opencode_background_task_wake');
+    } else if (input.clearAllRuntimeActivitySources === true) {
+      clearAllDetachedRuntimeActivityBestEffort('opencode_background_task_wake_all_complete');
+    }
     pendingProviderAutonomousBackgroundWake = {
       source: input.source,
       observedAtMs: Date.now(),
@@ -1478,6 +1638,7 @@ export function createOpenCodeServerRuntime(params: {
     turnPromptActive = true;
     turnActivitySeen = true;
     turnLastActivityAtMs = Date.now();
+    managedServerTurnSupervisor?.captureTurnStartGeneration();
     handledPermissionIds = new Set<string>();
     handledQuestionIds = new Set<string>();
     inFlightPermissionIds = new Set<string>();
@@ -1594,18 +1755,7 @@ export function createOpenCodeServerRuntime(params: {
     });
   };
 
-  const pollSleepMs = (() => {
-    const raw = Number.parseInt(String(env.HAPPIER_OPENCODE_SERVER_CONTROL_POLL_INTERVAL_MS ?? ''), 10);
-    const configured = Number.isFinite(raw) && raw >= 25 ? Math.trunc(raw) : configuration.pendingQueueIdleWakePollIntervalMs;
-    // Clamp to keep control-plane polling responsive without excessive churn.
-    return Math.max(25, Math.min(2_000, configured));
-  })();
-
-  const turnActivePollSleepMs = (() => {
-    const raw = Number.parseInt(String(env.HAPPIER_OPENCODE_SERVER_ACTIVE_CONTROL_POLL_INTERVAL_MS ?? ''), 10);
-    const configured = Number.isFinite(raw) && raw >= 25 ? Math.trunc(raw) : Math.min(pollSleepMs, 250);
-    return Math.max(25, Math.min(2_000, configured));
-  })();
+  const { pollSleepMs, turnActivePollSleepMs } = resolveOpenCodeServerControlPollIntervals(env);
 
   const turnPreexistingSnapshotLimit = (() => {
     const raw = Number.parseInt(String(env.HAPPIER_OPENCODE_SERVER_TURN_PREEXISTING_SNAPSHOT_LIMIT ?? ''), 10);
@@ -2056,6 +2206,102 @@ export function createOpenCodeServerRuntime(params: {
     }
   };
 
+  // Origin-agnostic transcript projection (Lane H / S2). Mirrors messages that THIS Happier session's
+  // OpenCode session (and its known sidechains) produced regardless of which surface authored them —
+  // crucially, messages typed directly in an attached OpenCode TUI while no Happier turn is active.
+  //
+  // Idempotency / mirror-only invariants:
+  // - `observedRemoteTextMessageIds` is the in-memory dedupe gate; the live-turn projection path
+  //   populates it for every turn-owned message, so this passive path only mirrors external turns.
+  // - `importOpenCodeTextHistoryCommitted` commits with a deterministic `buildImportLocalId`, so a
+  //   re-import after reconnect/resume cannot duplicate (server-side localId dedupe), and the
+  //   imported user message is marked passive (never re-enqueued back to OpenCode).
+  // - Only SETTLED messages are mirrored: user messages, and assistant messages with terminal
+  //   completion evidence (so partial in-progress assistant text is never committed).
+  let passiveTranscriptProjectionInFlight = false;
+  let passiveTranscriptProjectionRerunRequested = false;
+
+  const buildSettledExternalTranscriptItems = (rawMessages: unknown[]): ReturnType<typeof extractOpenCodeTextHistoryItems> => {
+    const settledMessageIds = new Set<string>();
+    for (const rawMessage of rawMessages) {
+      const rec = asRecord(rawMessage);
+      if (!rec) continue;
+      const projection = classifyOpenCodeMessageForProjection(rec);
+      if (!projection.messageId) continue;
+      if (projection.kind === 'user_transcript') {
+        settledMessageIds.add(projection.messageId);
+        continue;
+      }
+      if (
+        projection.kind === 'assistant_transcript'
+        && classifyOpenCodeAssistantCompletion(rec).kind === 'terminal_success'
+      ) {
+        settledMessageIds.add(projection.messageId);
+      }
+    }
+    return extractOpenCodeTextHistoryItems(rawMessages).filter(
+      (item) => settledMessageIds.has(item.messageId) && !observedRemoteTextMessageIds.has(item.messageId),
+    );
+  };
+
+  const projectExternalSessionMessagesBestEffort = async (): Promise<void> => {
+    if (!sessionId) return;
+    // While a Happier turn is active, the live projection path owns this session's messages; passive
+    // mirroring is only for externally (e.g. TUI) authored turns when no Happier turn is in flight.
+    if (turnPromptActive) return;
+    if (passiveTranscriptProjectionInFlight) {
+      passiveTranscriptProjectionRerunRequested = true;
+      return;
+    }
+    passiveTranscriptProjectionInFlight = true;
+    try {
+      do {
+        passiveTranscriptProjectionRerunRequested = false;
+        if (!sessionId || turnPromptActive) return;
+        const c = await ensureClient();
+        // Ownership: only this session's OpenCode session id and its discovered sidechains.
+        const ownedSessions: Array<Readonly<{ remoteSessionId: string; sidechainId: string | null }>> = [
+          { remoteSessionId: sessionId, sidechainId: null },
+          ...Array.from(sidechainIdByRemoteSessionId.entries()).map(([remoteSessionId, sidechainId]) => ({
+            remoteSessionId,
+            sidechainId,
+          })),
+        ];
+        for (const owned of ownedSessions) {
+          let raw: unknown;
+          try {
+            raw = await c.sessionMessagesList({ sessionId: owned.remoteSessionId });
+          } catch (error) {
+            logger.debug('[OpenCodeServer] passive transcript projection: list failed (non-fatal)', {
+              sessionId: owned.remoteSessionId,
+              error,
+            });
+            continue;
+          }
+          const items = buildSettledExternalTranscriptItems(Array.isArray(raw) ? raw : []);
+          if (items.length === 0) continue;
+          await importOpenCodeTextHistoryCommitted({
+            session: params.session,
+            provider,
+            remoteSessionId: owned.remoteSessionId,
+            items,
+            importedFrom: owned.sidechainId ? 'acp-sidechain' : 'acp-history',
+            ...(owned.sidechainId ? { sidechainId: owned.sidechainId } : {}),
+          });
+          markObservedTextHistoryItems(items);
+        }
+      } while (passiveTranscriptProjectionRerunRequested);
+    } catch (error) {
+      logger.debug('[OpenCodeServer] passive transcript projection failed (non-fatal)', error);
+    } finally {
+      passiveTranscriptProjectionInFlight = false;
+    }
+  };
+
+  const scheduleExternalSessionTranscriptProjection = (): void => {
+    void projectExternalSessionMessagesBestEffort();
+  };
+
   const resolveOrCreateUserMessageId = async (localIdRaw: string | null | undefined): Promise<string | null> => {
     const localId = typeof localIdRaw === 'string' ? localIdRaw.trim() : '';
     if (!localId) return null;
@@ -2230,38 +2476,52 @@ export function createOpenCodeServerRuntime(params: {
         : 'OpenCode became idle before producing assistant activity.',
   });
 
-  const failTurnAfterIdleWithoutTerminalAssistant = (): void => {
+  // Canonical OpenCode turn-failure emitter. The idle-without-terminal-assistant fallback, the
+  // managed-server-restart recovery (Lane E), and the connected-broker preflight (Lane C) all need
+  // the identical terminal sequence: emit a `turn_failed` transcript marker, persist the failure via
+  // `sessionTurnLifecycle.failTurn`, stop the thinking indicator, flush+clear the stream writers, and
+  // reject the active turn promise. Only the issue (code + sanitizedPreview) differs, so it is the
+  // sole input. Single-fire is structurally preserved: the guard short-circuits once `rejectTurn`
+  // synchronously nulls `turnDeferred`. NONE of these paths replay the prompt or call sessionAbort.
+  const emitOpenCodeTurnFailure = (input: Readonly<{ issue: SessionRuntimeIssueV1 }>): void => {
     if (!turnDeferred || !turnPromptActive) return;
-    idleWithoutTerminalAssistantTimer = null;
-    const providerTurnId = ensureActiveLifecycleMarkerId();
-    const issue = buildIdleWithoutTerminalAssistantIssue(providerTurnId);
-    const error = Object.assign(new Error(issue.sanitizedPreview), {
-      code: OPENCODE_IDLE_WITHOUT_TERMINAL_ASSISTANT_CODE,
+    const { issue } = input;
+    const code = issue.code;
+    const providerTurnId = issue.providerTurnId ?? ensureActiveLifecycleMarkerId();
+    const error = Object.assign(new Error(issue.sanitizedPreview ?? code), {
+      code,
       issue,
     });
     const failureMarker = {
       type: 'turn_failed',
       id: providerTurnId,
-      code: OPENCODE_IDLE_WITHOUT_TERMINAL_ASSISTANT_CODE,
-      reason: OPENCODE_IDLE_WITHOUT_TERMINAL_ASSISTANT_CODE,
+      code,
+      reason: code,
       issue,
     } satisfies ACPMessageData & {
       type: 'turn_failed';
-      code: typeof OPENCODE_IDLE_WITHOUT_TERMINAL_ASSISTANT_CODE;
-      reason: typeof OPENCODE_IDLE_WITHOUT_TERMINAL_ASSISTANT_CODE;
+      code: string;
+      reason: string;
     };
     setThinking(false);
-    void flushAndClearStreamWriters({ reason: 'abort', interruptedReason: OPENCODE_IDLE_WITHOUT_TERMINAL_ASSISTANT_CODE }).finally(() => {
+    void flushAndClearStreamWriters({ reason: 'abort', interruptedReason: code }).finally(() => {
       params.session.sendAgentMessage(provider, failureMarker);
       void params.session.sessionTurnLifecycle?.failTurn({
         provider,
         providerTurnId,
         issue,
       }).catch((failError: unknown) => {
-        logger.debug('[OpenCodeServer] failed to persist idle-without-terminal-assistant turn failure (non-fatal)', failError);
+        logger.debug(`[OpenCodeServer] failed to persist turn failure (non-fatal) [${code}]`, failError);
       });
     });
     rejectTurn(error);
+  };
+
+  const failTurnAfterIdleWithoutTerminalAssistant = (): void => {
+    if (!turnDeferred || !turnPromptActive) return;
+    idleWithoutTerminalAssistantTimer = null;
+    const providerTurnId = ensureActiveLifecycleMarkerId();
+    emitOpenCodeTurnFailure({ issue: buildIdleWithoutTerminalAssistantIssue(providerTurnId) });
   };
 
   const scheduleIdleWithoutTerminalAssistantFallback = (): void => {
@@ -2272,6 +2532,174 @@ export function createOpenCodeServerRuntime(params: {
     );
     idleWithoutTerminalAssistantTimer.unref?.();
   };
+
+  // Generation-aware crash recovery (Lane E): the managed `opencode serve` process was replaced
+  // mid-turn and the in-flight tool work could not be reconciled from durable history. Mirrors the
+  // idle-without-terminal-assistant failure shape but is keyed on the server-restart issue code and
+  // never calls `client.sessionAbort` (the old process is already gone) nor replays the prompt.
+  const failActiveTurnDueToManagedServerRestart = (input: Readonly<{
+    sanitizedPreview: string;
+  }>): void => {
+    if (!turnDeferred || !turnPromptActive) return;
+    const providerTurnId = ensureActiveLifecycleMarkerId();
+    // No task_complete, no client.sessionAbort, no prompt replay (the old process is already gone).
+    emitOpenCodeTurnFailure({
+      issue: {
+        v: 1,
+        scope: 'primary_session',
+        status: 'failed',
+        code: OPENCODE_SERVER_RESTARTED_DURING_TURN_ISSUE_CODE,
+        source: 'stream_error',
+        occurredAt: Date.now(),
+        provider,
+        providerTurnId,
+        sanitizedPreview: input.sanitizedPreview,
+      },
+    });
+  };
+
+  // Fail-closed connected-service broker preflight (Lane C, plan §5 item 5). For a CONNECTED OpenCode
+  // session whose Happier auth broker is not materialized/reachable, fail the active turn with a clear
+  // auth-materialization issue instead of forwarding the prompt — the stored broker marker is itself
+  // non-functional, so falling back to native/upstream OpenCode auth must never happen. Mirrors the
+  // canonical idle/managed-server-restart turn-failure shape (no prompt replay, no sessionAbort).
+  const failTurnDueToConnectedBrokerNotReady = (reason: string): void => {
+    if (!turnDeferred || !turnPromptActive) return;
+    const providerTurnId = ensureActiveLifecycleMarkerId();
+    // No prompt replay, no native/upstream fallback (the stored broker marker is non-functional).
+    emitOpenCodeTurnFailure({
+      issue: {
+        v: 1,
+        scope: 'primary_session',
+        status: 'failed',
+        code: OPENCODE_CONNECTED_AUTH_NOT_MATERIALIZED_CODE,
+        source: 'stream_error',
+        occurredAt: Date.now(),
+        provider,
+        providerTurnId,
+        sanitizedPreview:
+          'OpenCode connected-service authentication is not materialized for this session '
+          + `(${reason}). The session was stopped to avoid falling back to unmanaged OpenCode auth.`,
+      },
+    });
+  };
+
+  const createPromptNotDispatchedError = (reason: string): Error & {
+    code: typeof OPENCODE_PROMPT_NOT_DISPATCHED_CODE;
+    issue: SessionRuntimeIssueV1;
+  } => {
+    const providerTurnId = activeLifecycleMarkerId ?? ensureActiveLifecycleMarkerId();
+    const issue: SessionRuntimeIssueV1 = {
+      v: 1,
+      scope: 'primary_session',
+      status: 'failed',
+      code: OPENCODE_PROMPT_NOT_DISPATCHED_CODE,
+      source: 'provider_session_error',
+      occurredAt: Date.now(),
+      provider,
+      providerTurnId,
+      sanitizedPreview:
+        'OpenCode prompt was not dispatched before provider dispatch '
+        + `(${reason}). The turn was failed instead of confirming provider delivery.`,
+    };
+    const error = new Error(issue.sanitizedPreview) as Error & {
+      code: typeof OPENCODE_PROMPT_NOT_DISPATCHED_CODE;
+      issue: SessionRuntimeIssueV1;
+    };
+    error.code = OPENCODE_PROMPT_NOT_DISPATCHED_CODE;
+    error.issue = issue;
+    return error;
+  };
+
+  const throwPromptNotDispatched = (reason: string): never => {
+    const error = createPromptNotDispatchedError(reason);
+    if (turnDeferred && turnPromptActive) {
+      emitOpenCodeTurnFailure({ issue: error.issue });
+    }
+    throw error;
+  };
+
+  const awaitPreDispatchTurnSettlement = async (
+    turn: Deferred<void>,
+    reason: string,
+  ): Promise<never> => {
+    await turn.promise;
+    throw createPromptNotDispatchedError(reason);
+  };
+
+  // Memoized once-per-session preflight: the broker readiness is a launch-time fact (plugin assets +
+  // daemon bridge reachability), so verify it once and enforce the verdict on every turn (fail-closed).
+  const ensureConnectedBrokerPreflight = (): Promise<OpenCodeBrokerReadiness> => {
+    connectedBrokerPreflight ??= verifyOpenCodeBrokerReadyForConnectedSession(env);
+    return connectedBrokerPreflight;
+  };
+
+  const waitForConnectedBrokerPreflightBeforePrompt = async (
+    turn: Deferred<void>,
+    targetSessionId: string,
+  ): Promise<OpenCodeBrokerReadiness | null> => {
+    for (;;) {
+      if (!isActivePromptTurn(turn, targetSessionId)) return null;
+      const preflightGenerationKey = readCurrentServerConnectedGenerationKey();
+      const outcome = await Promise.race([
+        ensureConnectedBrokerPreflight().then(
+          (readiness) => ({ type: 'readiness' as const, readiness }),
+          (error: unknown) => ({ type: 'readiness_rejected' as const, error }),
+        ),
+        turn.promise.then(
+          () => ({ type: 'turn_resolved' as const }),
+          (error: unknown) => ({ type: 'turn_rejected' as const, error }),
+        ),
+      ]);
+
+      if (outcome.type === 'turn_rejected') throw outcome.error;
+      if (outcome.type === 'turn_resolved') return null;
+      if (outcome.type === 'readiness_rejected') throw outcome.error;
+      if (!isActivePromptTurn(turn, targetSessionId)) return null;
+
+      const serverReadyForPrompt = await waitForServerConnectedBeforePrompt(turn, targetSessionId);
+      if (!serverReadyForPrompt) return null;
+      if (preflightGenerationKey !== readCurrentServerConnectedGenerationKey()) {
+        continue;
+      }
+
+      return outcome.readiness;
+    }
+  };
+
+  managedServerTurnSupervisor = createOpenCodeManagedServerTurnInterruptionSupervisor({
+    isTurnActive: () => Boolean(turnDeferred) && turnPromptActive,
+    getManagedServerIdentity: () => client?.getManagedServerIdentity() ?? null,
+    setObservedGenerationKey: (generationKey) => providerActivityTracker.setObservedGenerationKey(generationKey),
+    reconcileLiveKnownToolStateFromHistory: () => refreshLiveKnownOpenCodeStateFromControlPlaneBestEffort(),
+    hasUnreconciledActiveLiveKnownToolWork: () => hasUnreconciledActiveLiveKnownToolWork(),
+    failActiveTurnDueToManagedServerRestart: (failInput) => failActiveTurnDueToManagedServerRestart(failInput),
+    resetProviderWorkForInterruptedTurn: () => {
+      providerActivityTracker.clearActiveWork({ reason: 'turn_reset' });
+    },
+    clearOrphanedProviderWork: (currentGenerationKey) => {
+      providerActivityTracker.clearActiveWork({
+        reason: 'managed_server_generation_replaced',
+        generationKey: currentGenerationKey,
+      });
+    },
+    describeActiveProviderWorkForLog: () => {
+      const workState = providerActivityTracker.getProviderWorkState();
+      if (!workState.active) return { activeToolCallCount: 0 };
+      return {
+        activeToolCallCount: workState.activeToolCallCount,
+        activeToolCalls: workState.activeToolCalls.map((tool) => ({
+          key: tool.key,
+          sessionId: tool.sessionId,
+          toolName: tool.toolName,
+          status: tool.status,
+          ...(tool.observedGenerationKey ? { observedGenerationKey: tool.observedGenerationKey.slice(0, 12) } : {}),
+        })),
+      };
+    },
+    getProviderSessionId: () => sessionId,
+    getActiveSidechainSessionIds: () => Array.from(sidechainIdByRemoteSessionId.keys()),
+  });
 
   const sendDelta = (delta: string, remoteSessionId: string, messageID: string, sidechainId: string | null) => {
     markTurnActivity();
@@ -2428,6 +2856,9 @@ export function createOpenCodeServerRuntime(params: {
     const toolRaw = normalizeString(part.tool).trim();
     const toolLower = toolRaw.toLowerCase();
     const isBackgroundTaskLaunch = openCodeToolPartLooksLikeBackgroundTaskLaunch(part);
+    if (isBackgroundTaskLaunch) {
+      publishDetachedRuntimeActivity(readOpenCodeBackgroundTaskLaunchRuntimeSourceId(part));
+    }
     observedToolPartByCallKey.set(callKey, part);
     const isChangeTitleTool =
       toolLower === preferredOpenCodeChangeTitleToolName.toLowerCase() || isChangeTitleToolNameAlias(toolLower);
@@ -2878,6 +3309,10 @@ export function createOpenCodeServerRuntime(params: {
     shapeLogger.log(`event:${type || 'unknown'}`, payload);
 
     if (type === 'server.connected') {
+      markServerConnected();
+      // Origin-agnostic catch-up after (re)connect: mirror any external (e.g. TUI-authored) turns
+      // that landed while disconnected. Idempotent via the dedupe gate + deterministic import ids.
+      scheduleExternalSessionTranscriptProjection();
       return refreshLiveKnownOpenCodeStateFromControlPlaneBestEffort();
     }
 
@@ -2920,6 +3355,17 @@ export function createOpenCodeServerRuntime(params: {
       const infoMessageId = projection.messageId || normalizeString(info.id);
       if (!turnPromptActive && projection.kind === 'assistant_transcript' && pendingProviderAutonomousBackgroundWake) {
         beginProviderAutonomousBackgroundTurnIfNeeded({ reason: 'background-wake' });
+      }
+      // Origin-agnostic projection (S2): a message materialized for this session while no Happier
+      // turn owns it (e.g. typed in an attached OpenCode TUI). Mirror it into the transcript. The
+      // passive pass only commits SETTLED messages and dedupes via `observedRemoteTextMessageIds`.
+      if (
+        !turnPromptActive
+        && (projection.kind === 'user_transcript' || projection.kind === 'assistant_transcript')
+        && infoMessageId
+        && !observedRemoteTextMessageIds.has(infoMessageId)
+      ) {
+        scheduleExternalSessionTranscriptProjection();
       }
       if (projection.kind === 'user_transcript' && infoMessageId) {
         noteUserMessageIdForActiveTurn(infoMessageId);
@@ -2983,6 +3429,8 @@ export function createOpenCodeServerRuntime(params: {
         recordProviderAutonomousBackgroundWake({
           source: backgroundWakeSource,
           messageId: normalizeString(part.messageID),
+          runtimeActivitySourceId: readOpenCodeBackgroundTaskWakeRuntimeSourceId(rawPartText),
+          clearAllRuntimeActivitySources: openCodeBackgroundTaskWakeIndicatesAllTasksComplete(rawPartText),
         });
         if (partID) suppressLivePartProjection(sessionID, partID, normalizeString(part.messageID));
         return;
@@ -3098,6 +3546,8 @@ export function createOpenCodeServerRuntime(params: {
         recordProviderAutonomousBackgroundWake({
           source: backgroundWakeSource,
           messageId: messageID,
+          runtimeActivitySourceId: readOpenCodeBackgroundTaskWakeRuntimeSourceId(nextAccumulated),
+          clearAllRuntimeActivitySources: openCodeBackgroundTaskWakeIndicatesAllTasksComplete(nextAccumulated),
         });
         suppressLivePartProjection(sessionID, partID, messageID);
         return;
@@ -3387,6 +3837,7 @@ export function createOpenCodeServerRuntime(params: {
         const existing = await c.sessionGet({ sessionId: resumeId });
         sessionId = existing.id ?? resumeId;
         providerActivityTracker.resetForProviderSession(sessionId);
+        await clearDetachedRuntimeActivity(null, 'opencode_provider_session_reset');
         omitCustomMessageIdForResumedSession = true;
         const sessionDirectory = normalizeString(existing.directory).trim();
         if (sessionDirectory) {
@@ -3452,6 +3903,7 @@ export function createOpenCodeServerRuntime(params: {
       const created: OpenCodeSession = await c.sessionCreate({ permission: [...resolveSessionPermissionRuleset()] as unknown[] });
       sessionId = created.id;
       providerActivityTracker.resetForProviderSession(sessionId);
+      await clearDetachedRuntimeActivity(null, 'opencode_provider_session_reset');
       omitCustomMessageIdForResumedSession = false;
       const createdDirectory = normalizeString(created.directory).trim();
       if (createdDirectory) {
@@ -3476,8 +3928,14 @@ export function createOpenCodeServerRuntime(params: {
       await this.sendPromptWithMeta?.({ text: prompt, localId: resumeBackfillLocalId });
     },
 
-    async sendPromptWithMeta(paramsWithMeta: { text: string; localId?: string | null }): Promise<void> {
-      if (!sessionId) throw new Error('OpenCode server session was not started');
+    async sendPromptWithMeta(paramsWithMeta: {
+      text: string;
+      localId?: string | null;
+      meta?: Record<string, unknown>;
+      onProviderPromptAccepted?: () => void;
+    }): Promise<void> {
+      const promptSessionId = sessionId;
+      if (!promptSessionId) throw new Error('OpenCode server session was not started');
       const c = await ensureClient();
       scheduleMcpServersForCurrentDirectoryBestEffort();
       pendingProviderAutonomousBackgroundWake = null;
@@ -3490,7 +3948,6 @@ export function createOpenCodeServerRuntime(params: {
         : (await resolveOrCreateUserMessageId(paramsWithMeta.localId ?? null)) ?? undefined;
       if (messageID) observedRemoteTextMessageIds.add(messageID);
       const agent = selectedAgent ?? undefined;
-      const model = selectedModel ?? undefined;
       const promptOptions = buildOpenCodePromptOptionPayload(configOverrides);
       turnDeferred = createDeferred<void>();
       // A turn can be aborted from a background poll/SSE callback before sendPromptWithMeta reaches its await.
@@ -3500,6 +3957,7 @@ export function createOpenCodeServerRuntime(params: {
       turnPromptActive = true;
       turnActivitySeen = false;
       turnLastActivityAtMs = Date.now();
+      managedServerTurnSupervisor?.captureTurnStartGeneration();
       watchdogFired = false;
       idleSignalSeen = false;
       idleSignalSeenViaControlPlane = false;
@@ -3513,6 +3971,25 @@ export function createOpenCodeServerRuntime(params: {
       handledQuestionIds = new Set<string>();
       inFlightPermissionIds = new Set<string>();
       inFlightQuestionIds = new Set<string>();
+
+      const serverReadyForPrompt = await waitForServerConnectedBeforePrompt(thisTurnDeferred, promptSessionId);
+      if (!serverReadyForPrompt) {
+        throwPromptNotDispatched('server readiness ended before prompt_async');
+      }
+
+      // Fail-closed connected-service broker preflight after the server has reported connected but
+      // before any prompt reaches OpenCode. No-op for native + direct-API-key sessions (the preflight
+      // returns ready). For a connected brokered session whose broker is not materialized/reachable,
+      // fail the turn closed instead of letting the prompt fall through to unmanaged OpenCode auth.
+      const brokerReadiness = await waitForConnectedBrokerPreflightBeforePrompt(thisTurnDeferred, promptSessionId);
+      if (brokerReadiness === null) {
+        throwPromptNotDispatched('connected broker preflight ended before prompt_async');
+      } else if (brokerReadiness.ready === false) {
+        failTurnDueToConnectedBrokerNotReady(brokerReadiness.reason);
+        await thisTurnDeferred.promise;
+        return;
+      }
+
       const controlAbort = new AbortController();
       turnControlAbort = controlAbort;
       const deadlockGuardLoop = runTurnDeadlockGuard(controlAbort.signal).catch((error) => {
@@ -3521,16 +3998,18 @@ export function createOpenCodeServerRuntime(params: {
       let prePromptMessageIdsForBackfill: Set<string> | null = null;
 
       if (!shouldOmitCustomMessageId) {
-        await waitForIdleBeforePromptBestEffort({ client: c, sessionId, signal: controlAbort.signal });
+        await waitForIdleBeforePromptBestEffort({ client: c, sessionId: promptSessionId, signal: controlAbort.signal });
       }
       if (controlAbort.signal.aborted) {
         // Abort handling (runtime.cancel) will reject the turn; do not attempt to send another prompt.
-        await thisTurnDeferred.promise;
-        return;
+        await awaitPreDispatchTurnSettlement(thisTurnDeferred, 'control abort fired before prompt_async');
+      }
+      if (!isActivePromptTurn(thisTurnDeferred, promptSessionId)) {
+        await awaitPreDispatchTurnSettlement(thisTurnDeferred, 'active prompt turn ended before prompt_async');
       }
 
       try {
-        const raw = await c.sessionMessagesList({ sessionId });
+        const raw = await c.sessionMessagesList({ sessionId: promptSessionId });
         const items = Array.isArray(raw) ? raw : [];
         const ids: string[] = [];
         for (const row of items) {
@@ -3549,9 +4028,14 @@ export function createOpenCodeServerRuntime(params: {
         turnPrePromptMessageIdsAll = null;
       }
 
+      if (!isActivePromptTurn(thisTurnDeferred, promptSessionId)) {
+        await awaitPreDispatchTurnSettlement(thisTurnDeferred, 'active prompt turn ended before prompt_async');
+      }
+
       try {
+        const model = await resolvePromptModelOverride(paramsWithMeta.meta);
         const promptAsyncPromise = c.sessionPromptAsync({
-          sessionId,
+          sessionId: promptSessionId,
           messageId: messageID,
           agent,
           model,
@@ -3593,6 +4077,7 @@ export function createOpenCodeServerRuntime(params: {
         rejectTurn(error);
         throw error;
       }
+      paramsWithMeta.onProviderPromptAccepted?.();
 
       const pollControlPlaneOnce = async () => {
         if (controlAbort.signal.aborted) return;
@@ -3709,6 +4194,7 @@ export function createOpenCodeServerRuntime(params: {
       compactionInProgress = true;
       turnPromptActive = true;
       turnActivitySeen = false;
+      managedServerTurnSupervisor?.captureTurnStartGeneration();
       idleSignalSeen = false;
       idleSignalSeenViaControlPlane = false;
       turnUserMessageId = null;
@@ -3814,13 +4300,18 @@ export function createOpenCodeServerRuntime(params: {
       rejectTurn(new Error('OpenCode session aborted'));
       resetRuntimeState();
       providerActivityTracker.resetForProviderSession(cancelledSessionId);
+      await clearDetachedRuntimeActivity(null, 'opencode_cancel');
     },
 
     async reset(): Promise<void> {
+      rejectTurn(new Error('OpenCode runtime reset'));
       resetRuntimeState();
+      connectedBrokerPreflight = null;
+      resetServerConnectedReadiness();
       setThinking(false);
       sessionId = null;
       providerActivityTracker.resetForProviderSession(null);
+      await clearDetachedRuntimeActivity(null, 'opencode_reset');
       selectedAgent = null;
       selectedModel = null;
       currentContextWindowTokens = null;

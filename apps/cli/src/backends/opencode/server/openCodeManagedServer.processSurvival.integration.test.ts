@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execSync } from 'node:child_process';
@@ -78,13 +78,20 @@ process.on('SIGINT', shutdown);
       await chmod(scriptPath, 0o755);
       process.env.HAPPIER_OPENCODE_PATH = scriptPath;
 
-      const started = await startManagedOpenCodeServer({ timeoutMs: 5_000 });
+      const logsDir = join(dir, 'logs');
+      const started = await startManagedOpenCodeServer({ timeoutMs: 5_000, logsDir });
       expect(started.baseUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
       expect(Number.isFinite(started.pid)).toBe(true);
       expect(isPidAlive(started.pid)).toBe(true);
+      expect(started.logPath.startsWith(join(logsDir, 'opencode-managed-servers'))).toBe(true);
 
       await new Promise((r) => setTimeout(r, 400));
       expect(isPidAlive(started.pid)).toBe(true);
+
+      // Post-start output must be durably persisted to the server log (not just drained/discarded).
+      const logContents = await readFile(started.logPath, 'utf8');
+      expect(logContents).toContain('# OpenCode managed server log');
+      expect(logContents).toContain('fake-opencode-log');
 
       await started.close();
       await new Promise((r) => setTimeout(r, 250));
@@ -135,7 +142,7 @@ process.on('SIGINT', () => {});
       process.env.HAPPIER_OPENCODE_PATH = scriptPath;
       process.env.HAPPIER_OPENCODE_SERVER_STOP_GRACE_MS = '50';
 
-      const started = await startManagedOpenCodeServer({ timeoutMs: 5_000 });
+      const started = await startManagedOpenCodeServer({ timeoutMs: 5_000, logsDir: join(dir, 'logs') });
       expect(isPidAlive(started.pid)).toBe(true);
 
       await started.close();
@@ -194,6 +201,7 @@ setInterval(() => {}, 1000).unref?.();
       let spawnedPid = -1;
       await expect(startManagedOpenCodeServer({
         timeoutMs: 5_000,
+        logsDir: join(dir, 'logs'),
         onSpawned: ({ pid }) => {
           spawnedPid = pid;
           throw new Error('persist failed');

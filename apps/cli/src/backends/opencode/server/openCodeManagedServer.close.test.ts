@@ -15,6 +15,16 @@ const resolveOpenCodeManagedServerChildEnvMock = vi.fn(() => ({ PATH: process.en
 const resolveOpenCodeManagedServerTrackedPidMock = vi.fn(async ({ spawnPid }: { spawnPid: number }) => spawnPid);
 const terminateManagedOpenCodeServerPidBestEffortMock = vi.fn();
 const waitForOpenCodeServerHealthMock = vi.fn(async () => {});
+const MOCK_LOG_PATH = '/tmp/happier-fake-managed-server.log';
+const logCaptureCloseMock = vi.fn(async () => {});
+const createOpenCodeManagedServerLogCaptureMock = vi.fn(() => ({
+  logPath: MOCK_LOG_PATH,
+  write: vi.fn(),
+  recordTrackedPid: vi.fn(),
+  recordNote: vi.fn(),
+  close: logCaptureCloseMock,
+}));
+const pruneOpenCodeManagedServerLogsMock = vi.fn(async () => {});
 
 vi.mock('node:child_process', () => ({
   spawn: spawnMock,
@@ -36,7 +46,8 @@ vi.mock('./openCodeServerAuth', () => ({
   resolveOpenCodeServerAuthHeadersFromEnv: resolveOpenCodeServerAuthHeadersFromEnvMock,
 }));
 
-vi.mock('./openCodeManagedServerEnv', () => ({
+vi.mock('./openCodeManagedServerEnv', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./openCodeManagedServerEnv')>()),
   resolveOpenCodeManagedServerChildEnv: resolveOpenCodeManagedServerChildEnvMock,
 }));
 
@@ -50,6 +61,11 @@ vi.mock('./terminateManagedOpenCodeServerPidBestEffort', () => ({
 
 vi.mock('./waitForOpenCodeServerHealth', () => ({
   waitForOpenCodeServerHealth: waitForOpenCodeServerHealthMock,
+}));
+
+vi.mock('./managedServerLogs', () => ({
+  createOpenCodeManagedServerLogCapture: createOpenCodeManagedServerLogCaptureMock,
+  pruneOpenCodeManagedServerLogs: pruneOpenCodeManagedServerLogsMock,
 }));
 
 function createManagedServerProcessHarness(): {
@@ -160,7 +176,8 @@ describe('startManagedOpenCodeServer close fallback', () => {
       expect.objectContaining({ detached: true, windowsVerbatimArguments: true }),
     );
     expect(started.pid).toBe(48123);
-    expect(onSpawned).toHaveBeenCalledWith({ baseUrl: 'http://127.0.0.1:43111', pid: 48123 });
+    expect(started.logPath).toBe(MOCK_LOG_PATH);
+    expect(onSpawned).toHaveBeenCalledWith({ baseUrl: 'http://127.0.0.1:43111', pid: 48123, logPath: MOCK_LOG_PATH });
     expect(callOrder).toEqual(['health', 'resolveTrackedPid', 'onSpawned']);
 
     await started.close();
