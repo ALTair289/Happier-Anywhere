@@ -214,7 +214,7 @@ describe('ChatList (FlashList v2, web) scroll pin intent without wheel events', 
     });
   });
 
-  it('unpins on sustained non-programmatic upward movement within the pin threshold (scrollbar/keyboard, plan E3)', async () => {
+  it('keeps the pin for sustained non-programmatic upward movement without recent user intent', async () => {
     flashListChatListHarnessState.settingValues.transcriptListImplementation = 'flash_v2';
     flashListChatListHarnessState.settingValues.transcriptScrollPinEnabled = true;
     flashListChatListHarnessState.settingValues.transcriptScrollAutoFollowWhenPinned = true;
@@ -252,18 +252,16 @@ describe('ChatList (FlashList v2, web) scroll pin intent without wheel events', 
       scrollerEl.scrollTop = 1430;
       await screen.triggerScroll(1430);
 
-      const scrollTopAfterSustainedUpwardMovement = scrollerEl.scrollTop;
-
-      // Content grows. Sustained upward movement mirrored the wheel unpin path, so the
-      // viewport must NOT be pulled back to the bottom.
+      // Content grows. Without wheel/pointer/touch intent, passive upward churn alone no
+      // longer owns release authority, so the viewport stays pinned to the live tail.
       scrollerEl.scrollHeight = 2400;
       await screen.triggerContentSizeChange(0, 2400);
 
-      expect(scrollerEl.scrollTop).toBe(scrollTopAfterSustainedUpwardMovement);
+      expect(scrollerEl.scrollTop).toBe(1900);
     });
   });
 
-  it('keeps the pin through a single upward height-churn frame within the threshold (no sustain, plan E3)', async () => {
+  it('keeps the pin through a single upward height-churn frame within the threshold', async () => {
     flashListChatListHarnessState.settingValues.transcriptListImplementation = 'flash_v2';
     flashListChatListHarnessState.settingValues.transcriptScrollPinEnabled = true;
     flashListChatListHarnessState.settingValues.transcriptScrollAutoFollowWhenPinned = true;
@@ -300,9 +298,104 @@ describe('ChatList (FlashList v2, web) scroll pin intent without wheel events', 
       scrollerEl.scrollHeight = 2400;
       await screen.triggerContentSizeChange(0, 2400);
 
-      // Still following: growth keeps the bottom-region distance (30px) instead of leaving
-      // the viewport parked at the stale offset.
-      expect(scrollerEl.scrollTop).toBe(1870);
+      // Still following: passive churn does not steal release authority from pinned follow mode.
+      expect(scrollerEl.scrollTop).toBe(1900);
+    });
+  });
+
+  it('keeps the pin through repeated upward height-churn frames while web content height changes', async () => {
+    flashListChatListHarnessState.settingValues.transcriptListImplementation = 'flash_v2';
+    flashListChatListHarnessState.settingValues.transcriptScrollPinEnabled = true;
+    flashListChatListHarnessState.settingValues.transcriptScrollAutoFollowWhenPinned = true;
+    flashListChatListHarnessState.settingValues.transcriptScrollPinOffsetThresholdPx = 100;
+
+    const scrollerEl: any = {
+      scrollHeight: 2000,
+      clientHeight: 500,
+      scrollTop: 1500,
+      isConnected: true,
+    };
+
+    await withFlashListChatListWebScrollerDom(scrollerEl, async () => {
+      const { ChatList } = await import('./ChatList');
+
+      const screen = await renderFlashListChatList(
+        <ChatList session={flashListChatListHarnessState.sessionState} />
+      );
+
+      expect(screen.getCapturedFlashListProps()).toBeTruthy();
+
+      await screen.triggerInitialFill({
+        layoutHeight: 500,
+        contentHeight: 2000,
+        contentWidth: 0,
+      });
+      await screen.triggerScroll(1500);
+
+      // Streaming/recycling churn can report repeated small upward scrollTop deltas while
+      // the underlying content height is also changing. That must not be interpreted as
+      // sustained scrollbar/keyboard intent to unpin.
+      scrollerEl.scrollHeight = 2010;
+      scrollerEl.scrollTop = 1495;
+      await screen.triggerScroll(1495);
+
+      scrollerEl.scrollHeight = 2020;
+      scrollerEl.scrollTop = 1490;
+      await screen.triggerScroll(1490);
+
+      scrollerEl.scrollHeight = 2400;
+      await screen.triggerContentSizeChange(0, 2400);
+
+      // Still following: repeated passive churn still lacks release authority without user intent.
+      expect(scrollerEl.scrollTop).toBe(1900);
+    });
+  });
+
+  it('keeps the pin when the app own pin write UNDER-SHOOTS during streaming and RN-web marks it isTrusted (Q1-WEB-1)', async () => {
+    // The Q1-WEB-1 regression: RN-web fires `isTrusted:true` for the app's OWN programmatic `scrollTop=` pin
+    // write. When that write under-shoots the growing bottom mid-stream it is NOT an exact self-write match, so
+    // the only thing keeping a pinned reader from falsely releasing is that web release authority now reads the
+    // genuine-movement signal (self-write + churn excluded) instead of the event's isTrusted flag.
+    flashListChatListHarnessState.settingValues.transcriptListImplementation = 'flash_v2';
+    flashListChatListHarnessState.settingValues.transcriptScrollPinEnabled = true;
+    flashListChatListHarnessState.settingValues.transcriptScrollAutoFollowWhenPinned = true;
+    flashListChatListHarnessState.settingValues.transcriptScrollPinOffsetThresholdPx = 100;
+
+    const scrollerEl: any = {
+      scrollHeight: 2000,
+      clientHeight: 500,
+      scrollTop: 1500,
+      isConnected: true,
+    };
+
+    await withFlashListChatListWebScrollerDom(scrollerEl, async () => {
+      const { ChatList } = await import('./ChatList');
+
+      const screen = await renderFlashListChatList(
+        <ChatList session={flashListChatListHarnessState.sessionState} />
+      );
+
+      expect(screen.getCapturedFlashListProps()).toBeTruthy();
+
+      await screen.triggerInitialFill({
+        layoutHeight: 500,
+        contentHeight: 2000,
+        contentWidth: 0,
+      });
+      await screen.triggerScroll(1500);
+
+      // Content grows; the app's own pin write lands a few px short of the new bottom and the resulting
+      // scroll event is isTrusted. It must NOT be read as a genuine user scroll-up.
+      scrollerEl.scrollHeight = 2010;
+      scrollerEl.scrollTop = 1495; // under-shot the new max (1510)
+      await screen.triggerScroll(1495, { isTrusted: true });
+
+      scrollerEl.scrollHeight = 2400;
+      await screen.triggerContentSizeChange(0, 2400);
+
+      // Still following: bottom-follow moved the viewport toward the new bottom rather than parking it at
+      // the under-shoot offset (which is what a false release would do).
+      expect(scrollerEl.scrollTop).toBeGreaterThan(1495);
     });
   });
 

@@ -13,14 +13,15 @@ import {
     useSessionTranscriptIds,
     useSetting,
 } from '@/sync/domains/state/storage';
-import { Dimensions, FlatList, PixelRatio, Platform, View, type LayoutChangeEvent, type NativeScrollEvent, type NativeSyntheticEvent } from 'react-native';
-import { FlashList, LayoutCommitObserver } from '@/components/ui/lists/flashListCompat/FlashListCompat';
+import { Dimensions, PixelRatio, Platform, View, type LayoutChangeEvent, type NativeScrollEvent, type NativeSyntheticEvent } from 'react-native';
 import { useCallback } from 'react';
 import { MessageView, MessageViewWithSessionCommon } from './MessageView';
 import type { Message, ToolCallMessage } from '@/sync/domains/messages/messageTypes';
+import { buildSessionMessageRouteId } from '@/sync/domains/messages/messageRouteIds';
 import { Metadata, Session } from '@/sync/domains/state/storageTypes';
 import { buildSessionMetadataStabilitySignatureValue, buildStableJsonSignature } from '@/sync/domains/session/metadata/sessionMetadataStability';
 import { buildSessionTranscriptRenderSignature } from '@/sync/domains/session/transcriptRenderSignature';
+import { buildPendingSessionRequestsSourceSignature } from '@/sync/domains/session/pending/listPendingSessionRequests';
 import type { OpenApprovalArtifactForSession } from '@/sync/domains/artifacts/approvalArtifacts';
 import { ChatFooter, type ChatFooterDirectControlState } from './ChatFooter';
 import { buildChatListItems, buildChatListItemsCached, type ChatListItem, type ChatListItemsBuildCache } from '@/components/sessions/chatListItems';
@@ -32,8 +33,7 @@ import { PendingMessagesTranscriptBlock, type PendingMessageEditRequest } from '
 import { SessionActionDraftCard } from '@/components/sessions/actions/SessionActionDraftCard';
 import { UserActionPromptCard } from '@/components/tools/shell/userActions/UserActionPromptCard';
 import { sync, type SessionViewportAnchorSnapshot } from '@/sync/sync';
-import { useSessionCatchingUpNewer } from '@/sync/store/hooks';
-import { jumpToTranscriptSeq } from '@/utils/sessions/jumpToTranscriptSeq';
+import { useActiveServerAccountScope, useSessionCatchingUpNewer } from '@/sync/store/hooks';
 import { fireAndForget } from '@/utils/system/fireAndForget';
 import { buildTranscriptTurnsCached, type TranscriptTurnsBuildCache } from '@/components/sessions/transcript/turnGrouping/buildTranscriptTurns';
 import { buildTranscriptTurnUnits } from '@/components/sessions/transcript/turnGrouping/buildTranscriptTurnUnits';
@@ -66,18 +66,20 @@ import {
 import {
     configureTranscriptViewportTelemetryFromTuning,
     recordTranscriptViewportTelemetryEvent,
-    resolveTranscriptViewportTelemetryListImplementation,
     resolveTranscriptViewportTelemetryPlatform,
     transcriptViewportTelemetry,
     type TranscriptViewportTelemetryEvent,
     type TranscriptViewportTelemetryObservationReason,
     type TranscriptViewportTelemetryBlankAreaSource,
     type TranscriptViewportTelemetryBottomFollowMode,
-    type TranscriptViewportTelemetryListOrientation,
-    type TranscriptViewportTelemetryLiveTailAnchorKind,
+    type TranscriptViewportTelemetryLayoutCacheClearReason,
+    type TranscriptViewportTelemetryLayoutCacheClearState,
     type TranscriptViewportTelemetryMvcpPolicy,
+    type TranscriptViewportTelemetryNativeBlankWindowSignature,
     type TranscriptViewportTelemetryScrollReason,
-    type TranscriptViewportTelemetryScrollWriter,
+    type TranscriptViewportTelemetryScrollToIndexFailureState,
+    type TranscriptViewportTelemetryTransactionState,
+    type TranscriptViewportTelemetryVisibleRangeReadStatus,
     type TranscriptViewportTelemetryVisibleWindowSource,
 } from '@/components/sessions/transcript/scroll/transcriptViewportTelemetry';
 import {
@@ -85,37 +87,131 @@ import {
     type TranscriptViewportCommandController,
 } from '@/components/sessions/transcript/viewport/createTranscriptViewportCommandController';
 import {
+    createTranscriptViewportLifecycle,
+    type TranscriptViewportLifecycle,
+    type TranscriptViewportLifecycleEffect,
+    type TranscriptViewportLifecycleEvent,
+} from '@/components/sessions/transcript/viewport/lifecycle/lifecycle';
+import {
+    createTranscriptLifecycleHost,
+    type TranscriptLifecycleHost,
+    type TranscriptLifecycleHostContentGrowthLiveTailCommandPlan,
+    type TranscriptLifecycleHostContentGrowthLiveTailScheduledPin,
+    type TranscriptLifecycleHostContentGrowthLiveTailScheduledPinFireEffect,
+    type TranscriptLifecycleHostExplicitJumpPlan,
+    type TranscriptLifecycleHostExplicitReturnPlan,
+    type TranscriptLifecycleHostFollowBottomIntentPlan,
+    type TranscriptLifecycleHostLocalInteractionPlan,
+    type TranscriptLifecycleHostMeasuredNativePinPlan,
+    type TranscriptLifecycleHostNativeGestureTakeoverPlan,
+    type TranscriptLifecycleHostNativeMountSettlePendingPinFlushPlan,
+    type TranscriptLifecycleHostNativeOffsetEscapeReleasePlan,
+    type TranscriptLifecycleHostNativeTouchIntentPlan,
+    type TranscriptLifecycleHostNativeTouchReleasePlan,
+    type TranscriptLifecycleHostNativeUserScrollTakeoverPlan,
+    type TranscriptLifecycleHostSessionEntryPlan,
+    type TranscriptLifecycleHostScrollObservationPlan,
+    type NativeEntrySettleConfirmationEffect,
+    type NativeExplicitJumpConfirmationEffect,
+} from '@/components/sessions/transcript/viewport/lifecycle/lifecycleHost';
+import {
+    applyTranscriptLifecycleScrollObservationPlan,
+    type TranscriptLifecycleScrollObservationPlanContinuationInput,
+} from '@/components/sessions/transcript/viewport/lifecycle/lifecycleHostScrollObservationApplier';
+import {
+    applyTranscriptContentSizeObservation,
+    applyTranscriptLayoutObservation,
+    type TranscriptContentSizeObservationApplierEffects,
+    type TranscriptLayoutObservationApplierEffects,
+} from '@/components/sessions/transcript/viewport/lifecycle/layoutContentSizeObservationApplier';
+import {
+    resolveNativeTrustedBottomArrivalEffects,
+    type NativeTrustedBottomArrivalEffect,
+} from '@/components/sessions/transcript/viewport/lifecycle/nativeTrustedBottomArrival';
+import {
+    resolveNativeReturnToLiveTailApplyEffects,
+    type NativeReturnToLiveTailApplyEffect,
+    type NativeSettledReturnToLiveTailDrainEffect,
+    type NativeSettledReturnToLiveTailReturnEffect,
+} from '@/components/sessions/transcript/viewport/lifecycle/nativeReturnToLiveTail';
+import {
+    resolveNativeMomentumSettleAwayReleaseStateEffects,
+    type NativeMomentumSettleAwayReleaseStateEffect,
+} from '@/components/sessions/transcript/viewport/lifecycle/nativeMomentumSettleAwayRelease';
+import {
+    resolveNativeBottomFollowRearmAdoptionDecision,
+    type NativeBottomFollowRearmAdoptionEffect,
+} from '@/components/sessions/transcript/viewport/lifecycle/nativeBottomFollowRearmAdoption';
+import {
+    resolveNativeBottomFollowRearmResetEffects,
+    type NativeBottomFollowRearmResetEffect,
+} from '@/components/sessions/transcript/viewport/lifecycle/nativeBottomFollowRearmReset';
+import {
+    resolveWebUserScrollIntentTimestampApplyEffects,
+    resolveWebUserScrollTakeoverApplyEffects,
+    type WebUserScrollIntentTimestampApplyEffect,
+    type WebUserScrollTakeoverApplyEffect,
+} from '@/components/sessions/transcript/viewport/lifecycle/webUserScrollIntent';
+import {
+    resolveWebImmediateReleaseLiveTailApplyEffects,
+    type WebImmediateReleaseLiveTailApplyEffect,
+} from '@/components/sessions/transcript/viewport/lifecycle/webImmediateReleaseLiveTail';
+import {
+    resolveNativeDragActiveMirrorApplyEffects,
+    resolveNativeMomentumActiveMirrorApplyEffects,
+    type NativeDragActiveMirrorApplyEffect,
+    type NativeMomentumActiveMirrorApplyEffect,
+} from '@/components/sessions/transcript/viewport/lifecycle/nativeActiveMirror';
+import {
     type TranscriptViewportTransactionOutcome,
 } from '@/components/sessions/transcript/viewport/transcriptViewportOwnership';
 import type {
+    TranscriptViewportAnchorIdentity,
     TranscriptViewportCommand,
     TranscriptViewportControllerInput,
+    TranscriptViewportJumpAlignment,
     TranscriptViewportMode,
 } from '@/components/sessions/transcript/viewport/transcriptViewportTypes';
+import { createNativeInvertedFlashListFactSource } from '@/components/sessions/transcript/viewport/driver/nativeInvertedFlashListFacts';
+import type { TranscriptViewportFactSource } from '@/components/sessions/transcript/viewport/driver/transcriptViewportFacts';
+import {
+    createTranscriptViewportCommandHost,
+} from '@/components/sessions/transcript/viewport/driver/commandHost';
+import type { TranscriptViewportDriverDeps } from '@/components/sessions/transcript/viewport/driver/types';
 import { resolveTranscriptInitialFillTuning } from '@/components/sessions/transcript/scroll/resolveTranscriptInitialFillTuning';
-import { resolveInitialWebPinRetryDelays } from '@/components/sessions/transcript/scroll/resolveInitialWebPinRetryDelays';
-import { resolveWebPinRetryTimeoutMs } from '@/components/sessions/transcript/scroll/resolveWebPinRetryTimeoutMs';
-import { resolveSessionEntryBottomFollow } from '@/components/sessions/transcript/scroll/resolveSessionEntryBottomFollow';
-import { resolveTranscriptBottomFollowIntent } from '@/components/sessions/transcript/scroll/resolveTranscriptBottomFollowIntent';
-import { canAutoFollowTranscriptBottom, isExplicitTranscriptBottomFollowCommand } from '@/components/sessions/transcript/scroll/transcriptAutoFollowGate';
 import {
-    resolveTranscriptBottomFollowMode,
-    type TranscriptBottomFollowModeState,
-} from '@/components/sessions/transcript/scroll/transcriptBottomFollowMode';
+    createSessionOpenLatch,
+    type SessionOpenLatch,
+} from '@/components/sessions/transcript/viewport/sessionOpen/sessionOpenLatch';
+import { resolveSessionOpenWebInitialPinRetryPlan } from '@/components/sessions/transcript/viewport/sessionOpen/webInitialPinRetryPlan';
+import type {
+    SessionOpenArmResetPlan,
+    SessionOpenDisposeResetPlan,
+    SessionOpenEntryKind,
+    SessionOpenLatchEffect,
+} from '@/components/sessions/transcript/viewport/sessionOpen/types';
+import { resolveSessionEntryViewportState } from '@/components/sessions/transcript/scroll/resolveSessionEntryBottomFollow';
+import type { LastNativeRestoreIndexCommand, ScrollableChatListRef } from '@/components/sessions/transcript/viewport/transcriptScrollableListTypes';
+import { readNativeAbsoluteScrollOffset } from '@/components/sessions/transcript/viewport/driver/readNativeAbsoluteScrollOffset';
+import { createWebDomScrollObservation, type WebDomScrollObservation } from '@/components/sessions/transcript/viewport/driver/webDomObservation';
 import {
-    resolveTranscriptFlashListBottomMaintenance,
-    type TranscriptFlashListBottomMaintenanceResult,
-} from '@/components/sessions/transcript/scroll/transcriptFlashListBottomMaintenance';
+    canAutoFollowTranscriptBottom,
+    isExplicitTranscriptBottomFollowCommand,
+    resolveTranscriptAutoFollowPinWaitMs,
+} from '@/components/sessions/transcript/scroll/transcriptAutoFollowGate';
+import type { TranscriptBottomFollowModeState } from '@/components/sessions/transcript/scroll/transcriptBottomFollowMode';
 import {
-    fromCanonicalScrollOffset,
+    TranscriptListShell,
+    type TranscriptListShellPlatformInteractionProps,
+    type TranscriptListShellRef,
+} from '@/components/sessions/transcript/viewport/shell/TranscriptListShell';
+import { resolveMainTranscriptRendererFrameHost } from '@/components/sessions/transcript/viewport/shell/mainTranscriptRendererFrameHost';
+import { resolveTranscriptListShellEdgeSlots } from '@/components/sessions/transcript/viewport/shell/transcriptListShellEdgeSlots';
+import {
     orientTranscriptListItems,
-    resolveBottomRawScrollCommandOffset,
-    resolveBottomRawScrollOffset,
     resolveEntrySliceSourceBounds,
     resolveOlderNeighborRenderedIndex,
-    resolveOrientedListEdgeSlots,
     resolveTranscriptListPresentation,
-    toCanonicalScrollOffset,
     type TranscriptListOrientation,
 } from '@/components/sessions/transcript/listOrientation';
 import {
@@ -134,15 +230,13 @@ import { settingsDefaults } from '@/sync/domains/settings/settings';
 import { deriveTranscriptInteractionFromSession, type TranscriptInteraction } from '@/utils/sessions/deriveTranscriptInteraction';
 import { listPendingUserActionRequests } from '@/utils/sessions/sessionUtils';
 import { buildChatListNativeId } from './chatListNativeId';
-import { useWebFlashListCrashFallback } from '@/components/ui/lists/useWebFlashListCrashFallback';
 import {
     TranscriptMessageSelectionBoundary,
     useOptionalTranscriptSelectionState,
 } from '@/components/sessions/transcript/messageSelection/TranscriptMessageSelectionContext';
 import { buildTranscriptHotColdSegments } from '@/components/sessions/transcript/segments/buildTranscriptHotColdSegments';
-import { resolveNativeInvertedColdScrollIndex, resolveWebColdListScrollTarget } from '@/components/sessions/transcript/segments/resolveWebHotColdScrollDecision';
+import { resolveNativeInvertedColdScrollIndex } from '@/components/sessions/transcript/segments/resolveWebHotColdScrollDecision';
 import { TranscriptHotTail } from '@/components/sessions/transcript/segments/TranscriptHotTail';
-import { resolvePendingWebPrependAnchorIndex as resolvePendingWebPrependAnchorItemIndex } from '@/components/sessions/transcript/webTranscriptPrependAnchorIndex';
 import {
     isMessageRolledBack,
     readSessionRollbackRangesV1,
@@ -157,8 +251,10 @@ import {
     resolveWebTranscriptScrollMetrics,
     type WebTranscriptScrollMetrics,
 } from '@/components/sessions/transcript/webTranscriptScrollMetrics';
-import { resolveWebBottomFollowAdjustment } from '@/components/sessions/transcript/scroll/resolveWebBottomFollowAdjustment';
-import { WebTranscriptSplitFooter } from '@/components/sessions/transcript/web/WebTranscriptSplitFooter';
+import {
+    TRANSCRIPT_WEB_HOT_TAIL_ITEM_TEST_ID_PREFIX,
+    WebTranscriptSplitFooter,
+} from '@/components/sessions/transcript/web/WebTranscriptSplitFooter';
 import {
     ComposerKeyboardFloatingInset,
     ComposerKeyboardScrollInset,
@@ -168,8 +264,6 @@ import {
     captureWebTranscriptViewportAnchor,
     refreshWebTranscriptPrependAnchor,
     resolveWebTranscriptViewportAnchorAlignment,
-    restoreWebTranscriptPrependAnchor,
-    restoreWebTranscriptViewportAnchor,
     TRANSCRIPT_WEB_MESSAGE_PREPEND_ANCHOR_TEST_ID_PREFIX,
     TRANSCRIPT_WEB_PREPEND_ANCHOR_TEST_ID_PREFIX,
     TRANSCRIPT_WEB_TOOL_CALL_PREPEND_ANCHOR_TEST_ID_PREFIX,
@@ -177,11 +271,10 @@ import {
     type WebTranscriptPrependAnchor,
     type WebTranscriptPrependRestoreResult,
     type WebTranscriptViewportAnchor,
+    type WebTranscriptViewportAnchorRestoreResult,
 } from '@/components/sessions/transcript/webTranscriptPrependAnchor';
-import { resolveWebTranscriptPrependRangeReservePx } from '@/components/sessions/transcript/webTranscriptPrependRangeReserve';
 import {
     captureNativeTranscriptViewportAnchor,
-    planNativeTranscriptViewportAnchorRestore,
     resolveNativeTranscriptViewportAnchorRestoreObservation,
 } from '@/components/sessions/transcript/transcriptNativeViewportAnchor';
 import {
@@ -189,7 +282,26 @@ import {
     resolveTranscriptViewportAnchorFocusOffsetPx,
     resolveTranscriptViewportAnchorIndex,
 } from '@/components/sessions/transcript/transcriptViewportAnchorResolution';
-import { resolveTranscriptJumpSeqIndex } from '@/components/sessions/transcript/transcriptJumpSeqIndexResolution';
+import {
+    resolveTranscriptJumpSeqIndex,
+    resolveTranscriptJumpTargetIndex,
+} from '@/components/sessions/transcript/viewport/jump/resolveTranscriptJumpTargetIndex';
+import type {
+    TranscriptJumpResult,
+    TranscriptJumpTarget,
+    TranscriptJumpTargetIndexResult,
+    TranscriptJumpTargetRole,
+} from '@/components/sessions/transcript/viewport/jump/transcriptJumpTargetTypes';
+import {
+    executeTranscriptTargetWindowJump,
+    isTranscriptSeqMountedInWebRenderedWindow,
+    resolveTranscriptJumpTargetRequest,
+    resolveTranscriptNavigationJumpPlan,
+    resolveTranscriptNavigationPaneJumpRequest,
+    resolveTranscriptRouteJumpSeqPlan,
+    resolveTranscriptTargetWindowLoadTarget,
+    useTranscriptTargetWindowHostAdapter,
+} from '@/components/sessions/transcript/viewport/window/useTranscriptTargetWindowHostAdapter';
 import {
     clearStreamingSessionUiTelemetryMarks,
     readSessionUiTelemetryNowMs,
@@ -198,43 +310,85 @@ import {
 } from '@/sync/runtime/performance/sessionUiTelemetry';
 import { syncPerformanceTelemetry } from '@/sync/runtime/syncPerformanceTelemetry';
 import {
-    TRANSCRIPT_NATIVE_SCROLL_EVENT_THROTTLE_MS,
     TRANSCRIPT_TOP_GUTTER_PX,
     TRANSCRIPT_VISUAL_UPDATE_FALLBACK_TIMEOUT_MS,
-    TRANSCRIPT_WEB_FLASH_LIST_SCROLL_EVENT_THROTTLE_MS,
-    TRANSCRIPT_WEB_GENUINE_TOP_EPSILON_PX,
 } from '@/components/sessions/transcript/_constants';
 import { CatchUpProgressOverlay } from '@/components/sessions/transcript/CatchUpProgressOverlay';
+import { resolveWebDomOlderLoadObservationTrigger } from '@/components/sessions/transcript/viewport/driver/webDomOlderLoadObservation';
 import { OlderLoadProgressOverlay } from '@/components/sessions/transcript/OlderLoadProgressOverlay';
 import {
     useTranscriptOlderPagination,
     type TranscriptOlderPaginationSnapshot,
 } from '@/components/sessions/transcript/pagination/useTranscriptOlderPagination';
+import { waitForNextTranscriptVisualUpdate } from '@/components/sessions/transcript/pagination/waitForNextTranscriptVisualUpdate';
 import { waitForVisualUpdateWithTimeout } from '@/components/sessions/transcript/pagination/waitForVisualUpdateWithTimeout';
 import {
-    observePrependOutcome,
-    type PrependCapturedAnchor,
-    type PrependOutcome,
-} from '@/components/sessions/transcript/viewport/prepend/observePrependOutcome';
+    readPersistedSessionMessagePins,
+    savePersistedSessionMessagePins,
+} from '@/sync/domains/state/sessionMessagePinsPersistence';
 import {
-    createPrependFallbackQuietGate,
-    type PrependFallbackQuietGate,
-} from '@/components/sessions/transcript/viewport/prepend/prependFallbackQuietGate';
+    buildTranscriptNavigationLoadedMessages,
+    createTranscriptNavigationLoadedMessagesCache,
+    deriveTranscriptNavigationEntriesWithLoadedMessageCache,
+} from '@/components/sessions/transcript/navigation/buildTranscriptNavigationLoadedMessages';
+import { deriveTranscriptNavigationRailLayout } from '@/components/sessions/transcript/navigation/deriveTranscriptNavigationRailLayout';
 import {
-    createPrependTransaction,
-    type PrependTransaction,
-} from '@/components/sessions/transcript/viewport/prepend/prependTransaction';
+    deriveTranscriptNavigationRemoteUserTurns,
+    resolveTranscriptNavigationRemoteUserTurnBeforeSeq,
+} from '@/components/sessions/transcript/navigation/transcriptNavigationRemoteUserTurns';
+import { TranscriptNavigationRail } from '@/components/sessions/transcript/navigation/TranscriptNavigationRail';
+import { transcriptNavigationPaneStore, useTranscriptNavigationPaneOpen } from '@/components/sessions/transcript/navigation/transcriptNavigationPaneStore';
+import type {
+    TranscriptNavigationEntry,
+    TranscriptNavigationJumpRequest,
+} from '@/components/sessions/transcript/navigation/transcriptNavigationTypes';
+import { deriveNativeTranscriptVisibleAnchorFacts } from '@/components/sessions/transcript/viewport/visibility/nativeTranscriptVisibleAnchorFacts';
+import {
+    deriveTranscriptNavigationRuntimeAnchors,
+    type TranscriptNavigationRenderedAnchorSource,
+    type TranscriptNavigationRuntimeAnchor,
+} from '@/components/sessions/transcript/viewport/visibility/transcriptNavigationRuntimeAnchors';
+import {
+    clearTranscriptNavigationVisibilityStore,
+    getTranscriptNavigationVisibilityStore,
+    useTranscriptNavigationVisibilitySnapshot,
+} from '@/components/sessions/transcript/viewport/visibility/transcriptNavigationVisibilityStore';
+import {
+    hasAnyWebTranscriptDataTestId,
+    resolveFirstVisibleWebAnchorTestId,
+    scheduleWebTranscriptNavigationVisibilityObservation,
+} from '@/components/sessions/transcript/viewport/visibility/webTranscriptNavigationVisibilityObserver';
+import { useLayoutMaxWidth } from '@/components/ui/layout/layout';
+import { useUserMessageHistoryRemoteEntries } from '@/hooks/session/useUserMessageHistory';
+import {
+    toggleSessionMessagePin,
+    type PersistedSessionMessagePinV1,
+} from '@/sync/domains/messages/pins/sessionMessagePins';
+import {
+    createNativePrependOwner,
+    type NativePrependBeginInput,
+    type NativePrependObservationInput,
+    type NativePrependOwner,
+    type NativePrependOwnerEffect,
+} from '@/components/sessions/transcript/viewport/prepend/nativePrependOwner';
+import {
+    createWebPrependOwner,
+    type WebPrependOwner,
+    type WebPrependOwnerEffect,
+} from '@/components/sessions/transcript/viewport/prepend/webPrependOwner';
 import { LruMap } from '@/utils/cache/lruMap';
 import {
     buildTranscriptItemHeightSignatureKey,
-    getDefaultTranscriptItemHeightCache,
     type TranscriptItemHeightValiditySignature,
 } from '@/components/sessions/transcript/measurement/transcriptItemHeightCache';
 import {
-    createTranscriptMeasurementReconciler,
     isStructuralSignatureDelta,
     type TranscriptMeasurementReconciler,
 } from '@/components/sessions/transcript/measurement/transcriptMeasurementReconciler';
+import {
+    createTranscriptMeasurementHost,
+    type TranscriptMeasurementHostEffect,
+} from '@/components/sessions/transcript/measurement/transcriptMeasurementHost';
 import {
     TranscriptRowLayoutMutationProvider,
     type TranscriptRowLayoutMutation,
@@ -246,7 +400,12 @@ import {
     resolveTranscriptRowItemType,
     type TranscriptRowShellItem,
 } from '@/components/sessions/transcript/measurement/transcriptRowShellSignature';
-import { readStreamSegmentMetaV1 } from '@/sync/reducer/helpers/streamSegmentMeta';
+import {
+    collectTranscriptNavigationMessageIdsForItem,
+    resolveTranscriptLiveTailAnchor,
+    transcriptNavigationRoleForMessage,
+    type TranscriptLiveTailAnchorReason,
+} from '@/components/sessions/transcript/viewport/lifecycle/transcriptRowClassification';
 import {
     createTranscriptMountSettlePinCoordinator,
     type TranscriptMountSettlePinCoordinator,
@@ -262,150 +421,93 @@ import {
     rememberTranscriptWarmStablePaint,
 } from '@/components/sessions/transcript/paint/transcriptWarmPaintCache';
 import {
-    nativeBottomFollowCanApplyCompletion,
-    nativeBottomFollowCanCompletePendingPin,
-    nativeBottomFollowPinTargetObserved,
+    resolveNativeBottomFollowPreviousFollow,
+    resolveNativeContentMaterializationAutoPin,
+    resolveNativeInitialFollowBottomDecision,
+    resolveNativeMountSettleIntervalDecision,
+    resolveNativeMountSettleBottomPinRetention,
+    resolveNativeMountSettlePassiveDriftRepinDistanceDecision,
+    resolveNativeMountSettlePassiveDriftRepinEffects,
+    resolveNativeMountSettlePassiveDriftRepinPreflightDecision,
+    resolveNativeMountSettlePendingFlushTriggerDecision,
+    type NativeContentMaterializationAutoPin,
+    type NativeContentMaterializationAutoPinPostSuccessDecision,
+    type NativeInitialFollowBottomDecision,
+    type NativeMountSettleIntervalDecision,
+    type NativeMountSettlePassiveDriftRepinEffect,
+    type NativeMountSettlePendingFlushTriggerDecision,
+    type NativeStreamAppendPinContentVersion,
+    type NativeSuccessfulBottomPinRecords,
+    type NativeSuccessfulBottomPinInitialViewportEffects,
 } from '@/components/sessions/transcript/viewport/nativeBottomFollowObservationPolicy';
+import { resolveNativeSliceEntryObservation } from '@/components/sessions/transcript/viewport/nativeEntryRestoreObservationPolicy';
 import {
-    nativeEntryRestoreObservationMatches,
-    resolveNativeSliceEntryObservation,
-} from '@/components/sessions/transcript/viewport/nativeEntryRestoreObservationPolicy';
-import {
-    createEntryRestoreTransaction,
-    type EntryRestoreTransaction,
-    type EntryRestoreTransactionTarget,
-} from '@/components/sessions/transcript/viewport/entryRestore/entryRestoreTransaction';
-import {
-    resolveEntryRestoreTarget,
-    type EntryRestoreSliceTarget,
-} from '@/components/sessions/transcript/viewport/entryRestore/resolveEntryRestoreTarget';
+    createEntryRestoreOwner,
+    type EntryRestoreOwner,
+    type EntryRestoreOwnerAnchor,
+    type EntryRestoreOwnerEffect,
+} from '@/components/sessions/transcript/viewport/entryRestore/entryRestoreOwner';
+import type { EntryRestoreSliceTarget } from '@/components/sessions/transcript/viewport/entryRestore/resolveEntryRestoreTarget';
 import {
     shouldIgnoreNativeInvalidScrollObservation as resolveShouldIgnoreNativeInvalidScrollObservation,
-    shouldIgnoreNativePassiveViewportScroll as resolveShouldIgnoreNativePassiveViewportScroll,
-    shouldRecordNativePassiveUnpinnedMovement as resolveShouldRecordNativePassiveUnpinnedMovement,
 } from '@/components/sessions/transcript/viewport/nativePassiveScrollPolicy';
 
-type ScrollableChatListRef = Readonly<{
-    scrollToIndex: (params: { index: number; animated?: boolean; viewOffset?: number; viewPosition?: number }) => void;
-    scrollToOffset: (params: { offset: number; animated?: boolean }) => void;
-    scrollToEnd?: (params?: { animated?: boolean }) => void;
-    clearLayoutCacheOnUpdate?: () => void;
-    computeVisibleIndices?: () => { startIndex: number; endIndex: number };
-    getAbsoluteLastScrollOffset?: () => number;
-    getFirstVisibleIndex?: () => number;
-    getLayout?: (index: number) => { x: number; y: number; width: number; height: number } | undefined;
-}>;
+function didWebViewportAnchorRestoreSucceed(
+    result: WebTranscriptViewportAnchorRestoreResult,
+): boolean {
+    return result.status === 'restored' || result.status === 'already_aligned';
+}
 
 type ChatTranscriptListItem = TranscriptRowShellItem;
 
-type TranscriptLiveTailAnchorReason = TranscriptViewportTelemetryLiveTailAnchorKind;
-type TranscriptLiveTailAnchor = Readonly<{ messageId: string; reason: TranscriptLiveTailAnchorReason }> | null;
+type ContentGrowthLiveTailCommandApplyEffect =
+    NonNullable<TranscriptLifecycleHostContentGrowthLiveTailCommandPlan['contentGrowthLiveTailCommandEffect']>;
+type SessionEntryRenderResetEffects = TranscriptLifecycleHostSessionEntryPlan['renderResetEffects'];
+type SessionEntryViewportApplyEffect = TranscriptLifecycleHostSessionEntryPlan['viewportEffects'][number];
+type ExplicitJumpTakeoverApplyEffect = TranscriptLifecycleHostExplicitJumpPlan['explicitJumpTakeoverEffects'][number];
+type ExplicitReturnToLiveTailViewportEffect = TranscriptLifecycleHostExplicitReturnPlan['viewportEffects'][number];
+type FollowBottomIntentTakeoverApplyEffect =
+    TranscriptLifecycleHostFollowBottomIntentPlan['followBottomIntentTakeoverEffects'][number];
+type LocalTranscriptInteractionAutoPinDeferralApplyEffect =
+    TranscriptLifecycleHostLocalInteractionPlan['localInteractionAutoPinDeferralEffects'][number];
+type NativeMeasuredPinPlan = TranscriptLifecycleHostMeasuredNativePinPlan;
+type NativeMeasuredPinIssuePlan = Extract<NativeMeasuredPinPlan, { type: 'issue-command' }>;
+type NativeMeasuredBottomPinCommandResultPlan = NativeMeasuredPinIssuePlan['commandPlan'];
+type NativeMeasuredBottomPinCommandResultPostSuccessPlan =
+    NativeMeasuredBottomPinCommandResultPlan['postSuccess'];
+type NativeInvertedFollowBottomPinDecision =
+    NativeMeasuredPinIssuePlan['invertedFollowBottomDecision'];
+type NativeMeasuredBottomPinPreAutoFollowDecision =
+    NativeMeasuredPinIssuePlan['preAutoFollowDecision'];
+type NativeAutomaticPinSameOffsetDecision =
+    NativeMeasuredPinIssuePlan['sameOffsetDecision'];
+type NativeStreamAppendContentVersionDecision =
+    NativeMeasuredPinIssuePlan['streamAppendDecision'];
+type NativeMountSettlePendingPinFlushPlan =
+    TranscriptLifecycleHostNativeMountSettlePendingPinFlushPlan;
+type NativeGestureTakeoverPlan = TranscriptLifecycleHostNativeGestureTakeoverPlan;
+type NativeOffsetReleaseLiveTailStateEffect =
+    TranscriptLifecycleHostNativeOffsetEscapeReleasePlan['nativeOffsetReleaseLiveTailStateEffects'][number];
+type ScrollObservationPlan = TranscriptLifecycleHostScrollObservationPlan;
+type WebPassiveLiveTailCorrectionEffect =
+    NonNullable<ScrollObservationPlan['webPassiveLiveTailCorrectionEffect']>;
+type NativeScrollAcceptedViewportPaintEffect =
+    ScrollObservationPlan['acceptedViewportPaintEffects'][number];
+type GenericScrollObservationViewportStateEffect =
+    Extract<TranscriptViewportLifecycleEffect, { type: 'apply-generic-observed-viewport-state' }>;
+type GenericScrollObservationReadOnlyVisibleBottomEffect =
+    Extract<TranscriptViewportLifecycleEffect, { type: 'apply-generic-read-only-visible-bottom-state' }>;
+type GenericScrollObservationSuppressionEffect =
+    Extract<TranscriptViewportLifecycleEffect, { type: 'suppress-generic-scroll-observation' }>;
+type GenericScrollObservationAnchorCaptureCancellationEffect =
+    Extract<TranscriptViewportLifecycleEffect, { type: 'cancel-scheduled-viewport-anchor-capture' }>;
+type NativeTouchIntentApplyEffect =
+    TranscriptLifecycleHostNativeTouchIntentPlan['nativeTouchIntentEffects'][number];
+type NativeTouchReleaseLiveTailStateEffect =
+    TranscriptLifecycleHostNativeTouchReleasePlan['nativeTouchReleaseStateEffects'][number];
+type NativeUserScrollTakeoverApplyEffect =
+    TranscriptLifecycleHostNativeUserScrollTakeoverPlan['nativeUserScrollTakeoverEffects'][number];
 
-/**
- * Classify a candidate live-tail row: a per-token-streaming assistant message, or an in-flight
- * (running) tool call. Returns null for everything else (the carve does not engage on it directly).
- *
- * BOTH live-tail signals are scoped to `sessionActive` (R2 + defense-in-depth): a tool left
- * `running`, OR an assistant segment left `segmentState:'streaming'`, after a disconnect / missed
- * completion / interrupted turn on an otherwise-idle session must NOT keep the carve open, or its
- * trailing rows would be permanently detached into the edge slot — the exact idle orphan the carve
- * exists to avoid. A streaming assistant segment is normally self-gating (the reducer clears
- * `segmentState` on finalize), but that clear can be missed (interrupt / reconnect) leaving a stale
- * `streaming` flag far up a completed transcript; gating on `sessionActive` makes the carve fail
- * closed on an idle session regardless of a stale segment marker. `sessionActive` is true throughout
- * a genuinely-active streaming turn, so the legitimate live case is unaffected.
- */
-function classifyLiveTailAnchorMessage(
-    message: Message | null,
-    sessionActive: boolean,
-): 'streaming-message' | 'streaming-tool' | null {
-    if (!message) return null;
-    if (!sessionActive) return null;
-    if (message.kind === 'tool-call') {
-        return message.tool?.state === 'running' ? 'streaming-tool' : null;
-    }
-    if (message.kind !== 'agent-text') return null;
-    return readStreamSegmentMetaV1(message.meta)?.segmentState === 'streaming' ? 'streaming-message' : null;
-}
-
-/**
- * Derive the native edge-slot carve anchor (plan §12 #1). The anchor is the FIRST actively-streaming
- * row (assistant text or running tool, scanning oldest→newest so the carve runs anchor→end). When no
- * row is detectably mid-stream this frame, two fallbacks keep the carve from collapsing mid-turn:
- *   1. `thinkingFallbackMessageId` (activeThinkingMessageId) — the live thinking pulse row.
- *   2. the WHOLE-TURN floor: while `turnActive` (`session.thinking` spans the whole turn) and a
- *      committed row exists, anchor at `latestCommittedActivityKey`. This is what prevents the carve
- *      collapsing at the thinking→answer / text→tool transition frame (where the thinking pulse has
- *      cleared and the next row has not yet been flagged streaming). Idle (turnActive false, nothing
- *      streaming) returns null → no carve → no orphaned trailing block.
- */
-function resolveTranscriptLiveTailAnchor(params: Readonly<{
-    items: readonly ChatTranscriptListItem[];
-    getMessageById: (messageId: string) => Message | null;
-    thinkingFallbackMessageId: string | null;
-    turnActive: boolean;
-    sessionActive: boolean;
-    latestCommittedActivityKey: string | null;
-}>): TranscriptLiveTailAnchor {
-    const sessionActive = params.sessionActive;
-    for (const item of params.items) {
-        if (item.kind === 'message') {
-            const reason = classifyLiveTailAnchorMessage(params.getMessageById(item.messageId), sessionActive);
-            if (reason) return { messageId: item.messageId, reason };
-            continue;
-        }
-
-        if (
-            item.kind === 'tool-calls-group' ||
-            item.kind === 'tool-group-header' ||
-            item.kind === 'tool-group-expand' ||
-            item.kind === 'tool-group-tool' ||
-            item.kind === 'tool-group-footer'
-        ) {
-            for (const messageId of item.toolMessageIds) {
-                const reason = classifyLiveTailAnchorMessage(params.getMessageById(messageId), sessionActive);
-                if (reason) return { messageId, reason };
-            }
-            continue;
-        }
-
-        if (item.kind === 'turn') {
-            if (item.turn.userMessageId) {
-                const reason = classifyLiveTailAnchorMessage(params.getMessageById(item.turn.userMessageId), sessionActive);
-                if (reason) return { messageId: item.turn.userMessageId, reason };
-            }
-            for (const contentItem of item.turn.content) {
-                if (contentItem.kind === 'message') {
-                    const reason = classifyLiveTailAnchorMessage(params.getMessageById(contentItem.messageId), sessionActive);
-                    if (reason) return { messageId: contentItem.messageId, reason };
-                    continue;
-                }
-                if (contentItem.kind === 'tool_calls') {
-                    for (const messageId of contentItem.toolMessageIds) {
-                        const reason = classifyLiveTailAnchorMessage(params.getMessageById(messageId), sessionActive);
-                        if (reason) return { messageId, reason };
-                    }
-                }
-            }
-        }
-    }
-
-    if (params.thinkingFallbackMessageId != null) {
-        return { messageId: params.thinkingFallbackMessageId, reason: 'thinking' };
-    }
-
-    // The whole-turn floor must fail closed on an idle session exactly like the streaming-message and
-    // running-tool anchors (FIX 1 / orphan-safe). A `thinking && !active` state (a debounced thinking
-    // grace flag lingering after the turn ended, or a thinking flag stuck across a disconnect) is NOT
-    // a live turn — anchoring on it would detach the trailing block into the edge slot with no growing
-    // row to justify it (the idle orphan). A genuinely-active turn is BOTH active and thinking, so the
-    // legitimate live case (incl. the Gemini/legacy no-segment-meta path) is unaffected.
-    if (sessionActive && params.turnActive && params.latestCommittedActivityKey != null) {
-        return { messageId: params.latestCommittedActivityKey, reason: 'turn-floor' };
-    }
-
-    return null;
-}
 
 function measureTranscriptDerivation<T>(
     name: string,
@@ -415,38 +517,6 @@ function measureTranscriptDerivation<T>(
     if (!syncPerformanceTelemetry.isEnabled()) return fn();
     return syncPerformanceTelemetry.measure(name, buildFields(), fn);
 }
-
-/**
- * Host-side context for the single entry-restore write (plan F2): everything the
- * alignment predicate and the one allowed correction need to re-derive targets.
- * The transaction itself (`entryRestoreTransaction.ts`) owns the write budget.
- */
-type EntryRestoreWriteContext = Readonly<{
-    anchor: SessionViewportAnchorSnapshot | null;
-    createdAtMs: number;
-    /** Remembered distance from the bottom of the transcript, in px. */
-    distanceFromBottom: number;
-    /** Canonical content height (scroll-event contentSize basis) at issue time. */
-    issuedContentHeight: number;
-    issuedLayoutHeight: number;
-    /**
-     * `slice-anchor` (N2b.2): the entry's initial act was the data-window slice —
-     * an observe-only transaction that confirms the visible anchor still sits at
-     * the saved pixel offset and can never authorize a write.
-     */
-    kind: 'anchor' | 'distance' | 'bottom' | 'slice-anchor';
-    sessionId: string;
-    targetOffsetY: number | null;
-    targetOffsetYWasClamped: boolean;
-}>;
-
-type LastNativeRestoreIndexCommand = Readonly<{
-    index: number;
-    issuedAtMs: number;
-    reason: TranscriptViewportTelemetryScrollReason;
-    sessionId: string;
-    viewOffset?: number;
-}>;
 
 type NativeVisibleWindowSnapshot = Readonly<{
     blankAreaPx: number;
@@ -458,6 +528,10 @@ type NativeVisibleWindowSnapshot = Readonly<{
     lastKnownLastVisibleItemId?: string;
     visibleWindowStale?: boolean;
     visibleWindowSource: TranscriptViewportTelemetryVisibleWindowSource;
+    visibleRangeReadStatus?: TranscriptViewportTelemetryVisibleRangeReadStatus;
+    visibleRenderedStartIndex?: number;
+    visibleRenderedEndIndex?: number;
+    firstVisibleRenderedIndex?: number;
 }>;
 
 type NativeViewableTranscriptItem = Readonly<{
@@ -466,18 +540,8 @@ type NativeViewableTranscriptItem = Readonly<{
     item?: ChatTranscriptListItem | null;
 }>;
 
-type ScheduledPinToBottom = {
-    kind: 'raf' | 'timeout';
+type ScheduledPinToBottom = TranscriptLifecycleHostContentGrowthLiveTailScheduledPin<WebTranscriptScrollMetrics> & {
     id: any;
-    previousWebMetrics: WebTranscriptScrollMetrics | null;
-    reason: TranscriptViewportTelemetryScrollReason;
-    /**
-     * Native hot/cold carve only: snapshot of "was following the live tail at the inverted bottom"
-     * taken BEFORE the data/layout change. The post-change distance is unreliable on native because
-     * FlashList MVCP offset-correction re-anchors the index-0 (live-tail-advance) insert; this
-     * pre-change decision lets the bottom pin fire authoritatively (mirrors web's capture-before).
-     */
-    nativePrevFollowAtBottom?: boolean;
 };
 
 const EMPTY_MESSAGES_BY_ID: Readonly<Record<string, Message>> = Object.freeze({});
@@ -488,25 +552,13 @@ const TRANSCRIPT_SCROLL_USER_INTENT_RECENT_MS = 500;
 // movement heuristic treats it as user intent (scrollbar drag / keyboard scrolling, which fire
 // no wheel/pointer/touch handlers). A single frame can be virtualization height-churn noise.
 const TRANSCRIPT_WEB_NON_PROGRAMMATIC_SCROLL_SUSTAIN_FRAMES = 2;
-const TRANSCRIPT_NATIVE_DRAW_DISTANCE_DEFAULT_MIN_PX = 600;
-const TRANSCRIPT_NATIVE_DRAW_DISTANCE_DEFAULT_MAX_PX = 1200;
 const TRANSCRIPT_NATIVE_ENTRY_SLICE_HEAD_OFFSET_TOLERANCE_PX = 2;
 const TRANSCRIPT_NATIVE_ENTRY_RESTORE_PAINT_RELEASE_DELAY_MS = 32;
+const TRANSCRIPT_WEB_PREPEND_INDEX_RECOVERY_RETRY_MS = 16;
 const TRANSCRIPT_NATIVE_TOUCH_ESCAPE_MOVE_THRESHOLD_PX = 12;
 const TRANSCRIPT_SCROLL_JUMP_TO_BOTTOM_REVEAL_VIEWPORT_RATIO_MAX = 4;
-const TRANSCRIPT_WEB_INITIAL_PIN_STABILIZE_FALLBACK_MS = 1500;
-const TRANSCRIPT_WEB_INITIAL_PIN_RETRY_INTERVAL_FALLBACK_MS = 250;
 const TRANSCRIPT_DERIVED_ITEMS_CACHE_FALLBACK_MAX_SESSIONS = 16;
 const TRANSCRIPT_ROW_WIDTH_BUCKET_PX = 64;
-
-function resolveIndexScrollWriter(params: Readonly<{
-    platform: ReturnType<typeof resolveTranscriptViewportTelemetryPlatform>;
-    listImplementation: string;
-}>): TranscriptViewportTelemetryScrollWriter {
-    if (params.platform === 'web') return 'web-scroll-to-index';
-    if (params.listImplementation === 'flatlist_legacy') return 'legacy-scroll-to-index';
-    return 'native-scroll-to-index';
-}
 
 function resolveNativeScrollEventMetric(value: unknown): number | null {
     return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : null;
@@ -519,27 +571,34 @@ function canUseWriteFreeEntrySliceForAnchorOffset(itemOffsetPx: number): boolean
     );
 }
 
+function normalizeRestoreAnchorIdentity(
+    anchor: Pick<SessionViewportAnchorSnapshot, 'kind' | 'itemId' | 'messageId'>,
+): TranscriptViewportAnchorIdentity | null {
+    if (typeof anchor.itemId !== 'string' || anchor.itemId.length === 0) return null;
+    return {
+        kind: anchor.kind,
+        itemId: anchor.itemId,
+        messageId: anchor.messageId ?? null,
+    };
+}
+
+function normalizeDurableViewportSeq(value: unknown): number | null {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+    const seq = Math.trunc(value);
+    return seq > 0 ? seq : null;
+}
+
+function resolveFiniteMessageSeq(message: Message | null | undefined): number | null {
+    const seq = message?.seq;
+    return typeof seq === 'number' && Number.isFinite(seq) ? Math.trunc(seq) : null;
+}
+
 function readFiniteTelemetryNumber(value: unknown): number | undefined {
     return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
 function readTelemetryBoolean(value: unknown): boolean | undefined {
     return typeof value === 'boolean' ? value : undefined;
-}
-
-function resolveNativeTelemetryMvcpPolicy(
-    maintenance: TranscriptFlashListBottomMaintenanceResult | undefined,
-): TranscriptViewportTelemetryMvcpPolicy {
-    if (!maintenance) return 'default';
-    if ('disabled' in maintenance && maintenance.disabled === true) return 'disabled';
-    if (
-        'startRenderingFromBottom' in maintenance &&
-        maintenance.startRenderingFromBottom === true
-    ) {
-        if (typeof maintenance.autoscrollToBottomThreshold === 'number') return 'autoscroll-threshold';
-        return 'start-rendering-from-bottom';
-    }
-    return 'default';
 }
 
 function readNativeTouchPageY(event: unknown): number | null {
@@ -561,23 +620,6 @@ function readNativeTouchPageY(event: unknown): number | null {
         }
     }
     return null;
-}
-
-function withTranscriptViewportCommandAnimation(
-    command: TranscriptViewportCommand,
-    animated: boolean,
-): TranscriptViewportCommand {
-    switch (command.kind) {
-        case 'pin-bottom':
-        case 'scroll-offset':
-        case 'restore-offset':
-        case 'restore-index':
-        case 'jump-to-seq':
-            return { ...command, animated };
-        case 'none':
-        case 'skip-native-js-pin':
-            return command;
-    }
 }
 
 type TranscriptDerivedItemsCacheEntry = {
@@ -716,6 +758,18 @@ export type TranscriptViewportChangeState = Readonly<{
     anchor?: SessionViewportAnchorSnapshot | null;
 }>;
 
+type PendingJumpSeqViewportPromotion = Readonly<{
+    emitViewportChange: ((state: TranscriptViewportChangeState) => void) | undefined;
+    seq: number;
+    sessionId: string;
+}>;
+
+type PromotedJumpSeqViewportProtection = Readonly<{
+    promotedAtMs: number;
+    seq: number;
+    sessionId: string;
+}>;
+
 type ChatListProps = Readonly<{
     session: Session;
     bottomNotice?: ChatListBottomNotice | null;
@@ -726,6 +780,7 @@ type ChatListProps = Readonly<{
     approvalRequests?: readonly OpenApprovalArtifactForSession[];
     jumpToSeq?: number | null;
     followBottomIntentKey?: string | number | null;
+    onJumpLanded?: (result: Extract<TranscriptJumpResult, { status: 'scrolled' | 'window-rendered' }>) => void;
     onViewportChange?: (state: TranscriptViewportChangeState) => void;
     onEditPendingMessage?: (request: PendingMessageEditRequest) => void | Promise<void>;
     isWarmKeepAliveInstance?: boolean;
@@ -745,6 +800,7 @@ function areChatListNonSessionPropsEqual(left: ChatListProps, right: ChatListPro
         && left.approvalRequests === right.approvalRequests
         && left.jumpToSeq === right.jumpToSeq
         && left.followBottomIntentKey === right.followBottomIntentKey
+        && left.onJumpLanded === right.onJumpLanded
         && left.onViewportChange === right.onViewportChange
         && left.onEditPendingMessage === right.onEditPendingMessage
         && left.isWarmKeepAliveInstance === right.isWarmKeepAliveInstance
@@ -757,11 +813,11 @@ function areChatListPropsEqual(left: ChatListProps, right: ChatListProps): boole
     return areChatListSessionRelevantPropsEqual(left.session, right.session);
 }
 
-export const ChatList = React.memo(function ChatList(props: ChatListProps) {
-    React.useEffect(() => {
-        fireAndForget(preloadEnrichedMarkdownRuntime(), { tag: 'ChatList.preloadEnrichedMarkdownRuntime' });
-    }, []);
+function requestSessionOpenInitialFill(): void {
+    fireAndForget(preloadEnrichedMarkdownRuntime(), { tag: 'ChatList.preloadEnrichedMarkdownRuntime' });
+}
 
+export const ChatList = React.memo(function ChatList(props: ChatListProps) {
     const fork = useForkedTranscriptSnapshot(props.session.id);
     const { ids: childMessageIdsOldestFirst, isLoaded } = useSessionTranscriptIds(props.session.id);
     const childMessagesById = useSessionMessagesById(props.session.id);
@@ -824,14 +880,78 @@ export const ChatList = React.memo(function ChatList(props: ChatListProps) {
         }
         return swrFallbackMessagesById;
     }, [forkAwareMessageDescriptors, swrFallbackMessagesById]);
+    const activeServerAccountScope = useActiveServerAccountScope();
+    const [messagePinsRevision, bumpMessagePinsRevision] = React.useReducer((value: number) => value + 1, 0);
+    const sessionMessagePins = React.useMemo(
+        () => readPersistedSessionMessagePins(props.session.id, activeServerAccountScope),
+        [activeServerAccountScope, messagePinsRevision, props.session.id],
+    );
+    const transcriptNavigationLoadedMessagesCacheRef = React.useRef<ReturnType<typeof createTranscriptNavigationLoadedMessagesCache> | null>(null);
+    if (!transcriptNavigationLoadedMessagesCacheRef.current) {
+        transcriptNavigationLoadedMessagesCacheRef.current = createTranscriptNavigationLoadedMessagesCache();
+    }
+    const transcriptNavigationLoadedMessagesCache = transcriptNavigationLoadedMessagesCacheRef.current;
+    const togglePersistedSessionMessagePin = React.useCallback((pin: PersistedSessionMessagePinV1) => {
+        const currentPins = readPersistedSessionMessagePins(props.session.id, activeServerAccountScope);
+        const nextPins = toggleSessionMessagePin(currentPins, pin);
+        savePersistedSessionMessagePins(props.session.id, nextPins, activeServerAccountScope);
+        bumpMessagePinsRevision();
+    }, [activeServerAccountScope, props.session.id]);
+    const transcriptNavigationLoadedMessages = React.useMemo(() => (
+        buildTranscriptNavigationLoadedMessages({
+            cache: transcriptNavigationLoadedMessagesCache,
+            messageIdsOldestFirst,
+            messagesById,
+            sessionId: props.session.id,
+        })
+    ), [messageIdsOldestFirst, messagesById, props.session.id, transcriptNavigationLoadedMessagesCache]);
+    const transcriptNavigationRemoteBeforeSeq = React.useMemo(
+        () => resolveTranscriptNavigationRemoteUserTurnBeforeSeq(transcriptNavigationLoadedMessages),
+        [transcriptNavigationLoadedMessages],
+    );
+    const transcriptNavigationRemoteHistory = useUserMessageHistoryRemoteEntries({
+        autoLoad: transcriptNavigationRemoteBeforeSeq !== null,
+        enabled: !forkedTranscriptEnabled && transcriptNavigationRemoteBeforeSeq !== null,
+        initialBeforeSeq: transcriptNavigationRemoteBeforeSeq,
+        sessionId: props.session.id,
+    });
+    const transcriptNavigationRemoteUserTurns = React.useMemo(() => (
+        deriveTranscriptNavigationRemoteUserTurns({
+            sessionId: props.session.id,
+            beforeSeq: transcriptNavigationRemoteBeforeSeq,
+            entries: transcriptNavigationRemoteHistory.entries,
+        })
+    ), [props.session.id, transcriptNavigationRemoteBeforeSeq, transcriptNavigationRemoteHistory.entries]);
+    const transcriptNavigationEntries = React.useMemo<TranscriptNavigationEntry[]>(() => {
+        return deriveTranscriptNavigationEntriesWithLoadedMessageCache({
+            cache: transcriptNavigationLoadedMessagesCache,
+            sessionId: props.session.id,
+            mode: 'all',
+            loadedMessages: transcriptNavigationLoadedMessages,
+            remoteUserTurns: transcriptNavigationRemoteUserTurns,
+            pins: sessionMessagePins,
+        });
+    }, [props.session.id, sessionMessagePins, transcriptNavigationLoadedMessages, transcriptNavigationLoadedMessagesCache, transcriptNavigationRemoteUserTurns]);
     const committedMessagesForPendingRequests = React.useMemo(() => (
         messageIdsOldestFirst
             .map((messageId) => messagesById[messageId])
             .filter((message): message is Message => Boolean(message))
     ), [messageIdsOldestFirst, messagesById]);
+    const pendingRequestsSessionSignature = React.useMemo(
+        () => buildPendingSessionRequestsSourceSignature(props.session),
+        [
+            props.session.active,
+            props.session.agentState,
+            props.session.id,
+            props.session.pendingPermissionRequestCount,
+            props.session.pendingRequestObservedAt,
+            props.session.pendingUserActionRequestCount,
+        ],
+    );
+    const pendingRequestsSession = useStableValueBySignature(props.session, pendingRequestsSessionSignature);
     const pendingUserActionRequests = React.useMemo(
-        () => listPendingUserActionRequests(props.session, committedMessagesForPendingRequests),
-        [committedMessagesForPendingRequests, props.session],
+        () => listPendingUserActionRequests(pendingRequestsSession, committedMessagesForPendingRequests),
+        [committedMessagesForPendingRequests, pendingRequestsSession],
     );
     const sessionMetadataSignature = React.useMemo(
         () => buildStableJsonSignature(buildSessionMetadataStabilitySignatureValue(props.session.metadata ?? null)),
@@ -867,6 +987,8 @@ export const ChatList = React.memo(function ChatList(props: ChatListProps) {
                 cache: derivedItemsCacheEntry.turnsCache,
                 messageIdsOldestFirst,
                 messagesById,
+                pendingMessages,
+                discardedMessages: discardedPendingMessages,
                 groupToolCalls,
                 toolCallsGroupStrategy,
                 forkBoundaryBeforeMessageIds: forkAwareMessageDescriptors?.forkBoundaryBeforeMessageIds,
@@ -874,7 +996,7 @@ export const ChatList = React.memo(function ChatList(props: ChatListProps) {
                 forkMetadataByMessageId: forkAwareMessageDescriptors?.metadataByMessageId,
             });
         });
-    }, [forkAwareMessageDescriptors, groupingMode, messageIdsOldestFirst, messagesById, groupToolCalls, toolCallsGroupStrategy]);
+    }, [forkAwareMessageDescriptors, groupingMode, messageIdsOldestFirst, messagesById, pendingMessages, discardedPendingMessages, groupToolCalls, toolCallsGroupStrategy]);
 
     React.useEffect(() => {
         if (groupingMode !== 'turns' || !turnsCache) return;
@@ -1039,6 +1161,9 @@ export const ChatList = React.memo(function ChatList(props: ChatListProps) {
                 forkedTranscriptEnabled={forkedTranscriptEnabled}
                 items={groupedItems}
                 maxTurnEntriesPerListItem={transcriptMaxTurnEntriesPerListItem}
+                transcriptNavigationEntries={transcriptNavigationEntries}
+                messagePins={sessionMessagePins}
+                onToggleMessagePin={togglePersistedSessionMessagePin}
                 messagesById={internalMessagesById}
                 forkMessageMetadataById={forkAwareMessageDescriptors?.metadataByMessageId ?? null}
                 committedMessagesCount={messageIdsOldestFirst.length}
@@ -1056,6 +1181,7 @@ export const ChatList = React.memo(function ChatList(props: ChatListProps) {
                 interaction={interaction}
                 jumpToSeq={props.jumpToSeq ?? null}
                 followBottomIntentKey={props.followBottomIntentKey ?? null}
+                onJumpLanded={props.onJumpLanded}
                 onViewportChange={props.onViewportChange}
                 onEditPendingMessage={props.onEditPendingMessage}
                 isWarmKeepAliveInstance={props.isWarmKeepAliveInstance === true}
@@ -1144,6 +1270,8 @@ const ChatListMessageRow = React.memo(function ChatListMessageRow(props: {
     rollbackAction?: TranscriptRollbackAction | null;
     rollbackRanges: readonly SessionRollbackRangeV1[];
     approvalRequests?: readonly OpenApprovalArtifactForSession[];
+    messagePins: readonly PersistedSessionMessagePinV1[];
+    onToggleMessagePin: (pin: PersistedSessionMessagePinV1) => void;
 } & Partial<TranscriptSessionCommonProps>) {
     const originSessionId = props.originSessionId ?? props.sessionId;
     const committedMessage = useMessage(originSessionId, props.messageId);
@@ -1166,6 +1294,9 @@ const ChatListMessageRow = React.memo(function ChatListMessageRow(props: {
             rollbackAction={props.rollbackAction ?? null}
             historical={historical}
             approvalRequests={props.approvalRequests}
+            messagePins={props.messagePins}
+            onToggleMessagePin={props.onToggleMessagePin}
+            onToggleToolPin={props.onToggleMessagePin}
             forkCommon={props.forkCommon}
             messageDisplayCommon={props.messageDisplayCommon}
             toolChromeCommon={props.toolChromeCommon}
@@ -1183,6 +1314,9 @@ const ChatListMessageRow = React.memo(function ChatListMessageRow(props: {
             rollbackAction={props.rollbackAction ?? null}
             historical={historical}
             approvalRequests={props.approvalRequests}
+            messagePins={props.messagePins}
+            onToggleMessagePin={props.onToggleMessagePin}
+            onToggleToolPin={props.onToggleMessagePin}
         />
     );
     return (
@@ -1213,7 +1347,16 @@ const TranscriptRowShell = React.memo(function TranscriptRowShell(props: Readonl
     // row positioned above where the previous frame ended (overlap is structurally impossible during
     // append). The floor resets on a structural/expansion/width/font change (the shrink-capable
     // transitions) so a collapse leaves no persistent over-reservation.
+    const signatureKey = React.useMemo(
+        () => buildTranscriptItemHeightSignatureKey(props.signature),
+        [props.signature],
+    );
+    const lastSignatureKeyRef = React.useRef(signatureKey);
+    const lastSignatureRef = React.useRef(props.signature);
+    const previousSignatureForReservation =
+        lastSignatureKeyRef.current === signatureKey ? undefined : lastSignatureRef.current;
     const reservation = resolveTranscriptRowShellHeight({
+        previousSignature: previousSignatureForReservation,
         reconciler: props.reconciler,
         signature: props.signature,
     });
@@ -1221,12 +1364,6 @@ const TranscriptRowShell = React.memo(function TranscriptRowShell(props: Readonl
     const shellStyle = React.useMemo(() => (
         reservedMinHeight === undefined ? undefined : { minHeight: reservedMinHeight }
     ), [reservedMinHeight]);
-    const signatureKey = React.useMemo(
-        () => buildTranscriptItemHeightSignatureKey(props.signature),
-        [props.signature],
-    );
-    const lastSignatureKeyRef = React.useRef(signatureKey);
-    const lastSignatureRef = React.useRef(props.signature);
 
     const handleLayout = React.useCallback((event: LayoutChangeEvent) => {
         const height = event?.nativeEvent?.layout?.height;
@@ -1302,6 +1439,9 @@ const ChatListInternal = React.memo((props: {
     forkedTranscriptEnabled: boolean,
     items: ChatTranscriptListItem[],
     maxTurnEntriesPerListItem: number,
+    transcriptNavigationEntries: readonly TranscriptNavigationEntry[],
+    messagePins: readonly PersistedSessionMessagePinV1[],
+    onToggleMessagePin: (pin: PersistedSessionMessagePinV1) => void,
     messagesById: Readonly<Record<string, Message>>,
     forkMessageMetadataById: Readonly<Record<string, { originSessionId: string; isReadOnlyContext: boolean }>> | null,
     committedMessagesCount: number,
@@ -1319,12 +1459,14 @@ const ChatListInternal = React.memo((props: {
     interaction: TranscriptInteraction;
     jumpToSeq?: number | null;
     followBottomIntentKey?: string | number | null;
+    onJumpLanded?: (result: Extract<TranscriptJumpResult, { status: 'scrolled' | 'window-rendered' }>) => void;
     onViewportChange?: (state: TranscriptViewportChangeState) => void;
     onEditPendingMessage?: (request: PendingMessageEditRequest) => void | Promise<void>;
     isWarmKeepAliveInstance?: boolean;
     routeHydrationPending?: boolean;
 } & TranscriptSessionCommonProps) => {
     const transcriptMessageSelection = useOptionalTranscriptSelectionState();
+    const transcriptContentMaxWidth = useLayoutMaxWidth();
     const [isLoadingOlder, setIsLoadingOlder] = React.useState(false);
     const [nativePrependTransactionRevision, bumpNativePrependTransactionRevision] = React.useReducer(
         (value: number) => value + 1,
@@ -1332,6 +1474,10 @@ const ChatListInternal = React.memo((props: {
     );
     const [hasMoreOlder, setHasMoreOlder] = React.useState<boolean | null>(null);
     const [listLayoutHeight, setListLayoutHeight] = React.useState(0);
+    const [listLayoutWidthPx, setListLayoutWidthPx] = React.useState(() => {
+        const width = Dimensions.get('window')?.width;
+        return typeof width === 'number' && Number.isFinite(width) && width > 0 ? Math.round(width) : 0;
+    });
     const [listLayoutWidthBucket, setListLayoutWidthBucket] = React.useState(resolveInitialTranscriptRowWidthBucket);
     const [listContentHeight, setListContentHeight] = React.useState(0);
     const [webMarkdownRuntimeReady, setWebMarkdownRuntimeReady] = React.useState(isEnrichedMarkdownRuntimePreloaded);
@@ -1347,20 +1493,32 @@ const ChatListInternal = React.memo((props: {
         sessionId: string;
         timeoutId: ReturnType<typeof setTimeout>;
     } | null>(null);
+    const sessionOpenWebInitialPinRetryTimeoutRef = React.useRef<{
+        sessionId: string;
+        timeoutId: ReturnType<typeof setTimeout>;
+    } | null>(null);
     const nativeEntryRestorePaintReleaseTimeoutRef = React.useRef<{
         issuedAtMs: number;
         sessionId: string;
         timeoutId: ReturnType<typeof setTimeout>;
     } | null>(null);
     const listRef = React.useRef<ScrollableChatListRef | null>(null);
+    const pendingJumpSeqViewportPromotionRef = React.useRef<PendingJumpSeqViewportPromotion | null>(null);
+    const promotedJumpSeqViewportProtectionRef = React.useRef<PromotedJumpSeqViewportProtection | null>(null);
+    const lastRouteJumpProtectionClearingWebMovementAtMsRef = React.useRef(Number.NEGATIVE_INFINITY);
+    const flushPendingJumpSeqViewportPromotionForExitRef = React.useRef<() => void>(() => {});
     const flushViewportAnchorCaptureRef = React.useRef<(options?: Readonly<{ deferEmit?: boolean }>) => void>(() => {});
     const flushExitLiveTailIntentRef = React.useRef<(options?: Readonly<{ deferEmit?: boolean }>) => void>(() => {});
     // Render-safe handle for session-exit/unmount disposal of an open entry-restore
-    // transaction (mirror of invalidateNativePrependTransactionRef): the lifecycle fn is
+    // transaction (mirror of invalidateNativePrependOwnerRef): the lifecycle fn is
     // defined after the command seam in source order.
     const disposeEntryRestoreTransactionForExitRef = React.useRef<() => void>(() => {});
     const currentSessionIdRef = React.useRef(props.sessionId);
     if (currentSessionIdRef.current !== props.sessionId) {
+        flushPendingJumpSeqViewportPromotionForExitRef.current();
+        pendingJumpSeqViewportPromotionRef.current = null;
+        promotedJumpSeqViewportProtectionRef.current = null;
+        lastRouteJumpProtectionClearingWebMovementAtMsRef.current = Number.NEGATIVE_INFINITY;
         // Session exit (plan A3): capture the debounced anchor synchronously while the previous
         // session's list/data refs are still mounted and the current-session ref still points at
         // the exiting session; the emit itself is deferred off the render phase.
@@ -1378,6 +1536,44 @@ const ChatListInternal = React.memo((props: {
     }
     const viewportCommandController = viewportCommandControllerRef.current;
     viewportCommandController.setCurrentSessionId(props.sessionId);
+    const viewportLifecycleRef = React.useRef<TranscriptViewportLifecycle | null>(null);
+    if (viewportLifecycleRef.current === null) {
+        viewportLifecycleRef.current = createTranscriptViewportLifecycle();
+    }
+    const viewportLifecycle = viewportLifecycleRef.current;
+    const viewportLifecycleHostRef = React.useRef<TranscriptLifecycleHost | null>(null);
+    if (viewportLifecycleHostRef.current === null) {
+        viewportLifecycleHostRef.current = createTranscriptLifecycleHost({
+            lifecycle: viewportLifecycle,
+        });
+    }
+    const lifecycleHost = viewportLifecycleHostRef.current;
+    const entryRestoreOwnerRef = React.useRef<EntryRestoreOwner | null>(null);
+    if (entryRestoreOwnerRef.current === null) {
+        entryRestoreOwnerRef.current = createEntryRestoreOwner();
+    }
+    const entryRestoreOwner = entryRestoreOwnerRef.current;
+    const applyEntryRestoreOwnerEffectsRef = React.useRef<(effects: readonly EntryRestoreOwnerEffect[]) => void>(() => {});
+    const sessionOpenLatchRef = React.useRef<SessionOpenLatch | null>(null);
+    if (sessionOpenLatchRef.current === null) {
+        sessionOpenLatchRef.current = createSessionOpenLatch();
+    }
+    const sessionOpenLatch = sessionOpenLatchRef.current;
+    const applySessionOpenLatchEffectsRef = React.useRef<(effects: readonly SessionOpenLatchEffect[]) => void>(() => {});
+    const usesNativeFlashListBottomMaintenance =
+        Platform.OS !== 'web';
+    const nativePrependOwnerRef = React.useRef<NativePrependOwner | null>(null);
+    if (nativePrependOwnerRef.current === null) {
+        nativePrependOwnerRef.current = createNativePrependOwner();
+    }
+    const nativePrependOwner = nativePrependOwnerRef.current;
+    const applyNativePrependOwnerEffectsRef = React.useRef<(effects: readonly NativePrependOwnerEffect[]) => void>(() => {});
+    const webPrependOwnerRef = React.useRef<WebPrependOwner | null>(null);
+    if (webPrependOwnerRef.current === null) {
+        webPrependOwnerRef.current = createWebPrependOwner();
+    }
+    const webPrependOwner = webPrependOwnerRef.current;
+    const applyWebPrependOwnerEffectsRef = React.useRef<(effects: readonly WebPrependOwnerEffect[]) => void>(() => {});
     React.useLayoutEffect(() => {
         viewportCommandController.setActive(true);
         return () => {
@@ -1400,38 +1596,30 @@ const ChatListInternal = React.memo((props: {
      * suppresses this entry permanently and releases the entry ownership phase.
      */
     const preemptEntryRestoreTransaction = React.useCallback(() => {
-        const transaction = entryRestoreTransactionRef.current;
-        if (transaction && !transaction.isClosed()) {
-            transaction.onTrustedUserScroll();
-            finishEntryRestoreTransactionRef.current(transaction);
-            return;
-        }
-        if (!transaction) {
-            entryRestoreSuppressedRef.current = true;
-        }
-        closeEntryViewportOwnership('preempted');
-    }, [closeEntryViewportOwnership]);
+        applyEntryRestoreOwnerEffectsRef.current(entryRestoreOwner.preempt({
+            reason: 'trusted-scroll',
+            sessionId: props.sessionId,
+        }));
+    }, [entryRestoreOwner, props.sessionId]);
     const itemsRef = React.useRef<readonly ChatTranscriptListItem[]>(props.items);
     const listDataRef = React.useRef<readonly ChatTranscriptListItem[]>(props.items);
+    const canonicalWindowedItemsRef = React.useRef<readonly ChatTranscriptListItem[]>(props.items);
     // Pre-decomposition source (turn / tool-calls-group shapes) for visitors that must
     // not see per-unit rows (auto-expand policy scan).
     const preDecompositionItemsRef = React.useRef<ChatTranscriptListItem[]>(props.items);
     const toolRouteCommonRef = React.useRef(props.toolRouteCommon);
     toolRouteCommonRef.current = props.toolRouteCommon;
     const lastJumpSeqRef = React.useRef<number | null>(null);
+    const inFlightJumpSeqRef = React.useRef<number | null>(null);
     const listLayoutHeightRef = React.useRef<number>(0);
+    const listLayoutWidthPxRef = React.useRef<number>(listLayoutWidthPx);
     const listLayoutWidthBucketRef = React.useRef<string>(listLayoutWidthBucket);
     const listContentHeightRef = React.useRef<number>(0);
-    const lastMeasuredContentActivityKeyRef = React.useRef<string | null>(null);
-    const initialFillStatusRef = React.useRef<'idle' | 'in_progress' | 'done'>('idle');
-    // C1: the single measurement reconciler — sole recycle-type/reservation/global-invalidation
-    // authority for transcript rows. It composes the shared height cache for the exact (stable) path
-    // and owns the per-item monotonic floors, per-type medians, and the transaction-gated, once-per-
-    // commit `clearLayoutCacheOnUpdate` decision.
-    const measurementReconciler = React.useMemo<TranscriptMeasurementReconciler>(
-        () => createTranscriptMeasurementReconciler({ cache: getDefaultTranscriptItemHeightCache() }),
+    const measurementHost = React.useMemo(
+        () => createTranscriptMeasurementHost(),
         [],
     );
+    const measurementReconciler = measurementHost.reconciler;
     const mountSettleCoordinatorRef = React.useRef<TranscriptMountSettlePinCoordinator | null>(null);
     if (mountSettleCoordinatorRef.current === null) {
         mountSettleCoordinatorRef.current = createTranscriptMountSettlePinCoordinator({
@@ -1440,19 +1628,24 @@ const ChatListInternal = React.memo((props: {
     }
     const recordListLayoutWidth = React.useCallback((width: unknown) => {
         if (typeof width !== 'number' || !Number.isFinite(width)) return;
+        if (width > 0) {
+            const nextWidthPx = Math.round(width);
+            if (listLayoutWidthPxRef.current !== nextWidthPx) {
+                listLayoutWidthPxRef.current = nextWidthPx;
+                setListLayoutWidthPx(nextWidthPx);
+            }
+        }
         const nextBucket = resolveTranscriptRowWidthBucket(width);
         if (listLayoutWidthBucketRef.current === nextBucket) return;
         listLayoutWidthBucketRef.current = nextBucket;
         setListLayoutWidthBucket(nextBucket);
     }, []);
-    const initialPinSessionIdRef = React.useRef<string | null>(null);
-    const didAutoExpandToolCallsGroupsForSessionRef = React.useRef<string | null>(null);
     const initialFillAbortRef = React.useRef<AbortController | null>(null);
+    const requestSessionOpenInitialFillRef = React.useRef<() => void>(() => {});
     const chatListReactId = React.useId();
     const chatListNativeId = React.useMemo(() => buildChatListNativeId(props.sessionId, chatListReactId), [props.sessionId, chatListReactId]);
     const webScrollContainerRef = React.useRef<HTMLElement | null>(null);
-    const pendingWebPrependAnchorRef = React.useRef<ReturnType<typeof captureWebTranscriptPrependAnchor> | null>(null);
-    const inFlightWebPrependAnchorRef = React.useRef<ReturnType<typeof captureWebTranscriptPrependAnchor> | null>(null);
+    const transcriptNavigationRuntimeAnchorsRef = React.useRef<readonly TranscriptNavigationRuntimeAnchor[]>([]);
     const webHotColdCountsRef = React.useRef<{ coldCount: number; hotCount: number }>({
         coldCount: props.items.length,
         hotCount: 0,
@@ -1463,62 +1656,36 @@ const ChatListInternal = React.memo((props: {
         hasMore: true,
         insideThreshold: false,
     });
-    // Native prepend transaction (plan F4 / Lane C): exactly one transaction per older-page
-    // prepend; commit opens the prepend ownership phase; one post-commit layout timeout.
-    const nativePrependTransactionRef = React.useRef<PrependTransaction | null>(null);
-    // Pending explicit jump-to-bottom confirmation (plan B7): armed when a native flash
-    // explicit jump write is issued; spent on ONE bounded re-confirm if the content height
-    // churns before the bottom is observed; cleared on bottom arrival / trusted scroll /
-    // session change. Never a correction loop.
-    const pendingNativeExplicitJumpConfirmRef = React.useRef<{
-        sessionId: string;
-        issuedContentHeight: number;
-    } | null>(null);
-    // Pending entry-bottom settle confirmation (plan P3, mirror of B7): armed when a
-    // follow-bottom entry first marks the initial viewport applied. The baseline content
-    // height comes from the SCROLL-EVENT source only (never mixed with the measured ref —
-    // the two disagree by the composer inset, E7) and refreshes on every bottom-confirmed
-    // frame. Spent on ONE bounded re-confirm when late content settle GROWS the event
-    // content height while the viewport is left above the bottom and the mode machine still
-    // says 'following'; cleared on trusted scroll / release / session change. Never a loop.
-    const pendingNativeEntrySettleConfirmRef = React.useRef<{
-        sessionId: string;
-        issuedContentHeight: number | null;
-    } | null>(null);
-    const nativePrependCommitArmedRef = React.useRef(false);
-    const nativePrependLayoutTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-    // Layout-quiet gate (plan P1): the single fallback write is withheld until the anchor
-    // row's observed offset is stable across one quiet window, so FlashList's asynchronous
-    // MVCP correction can land first (mvcp-preserved, zero writes) instead of double-shifting.
-    const nativePrependQuietGateRef = React.useRef<PrependFallbackQuietGate | null>(null);
-    const nativePrependQuietTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-    // N2d.1 corrector deference: one pending re-observation scheduled when an applied corrector
-    // correction lands during a committed transaction, so the corrector-covered classification
-    // closes the window (mvcp-preserved, zero writes) before the quiet gate can spend the fallback.
-    const nativePrependCorrectorNudgeRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-    const observeNativePrependTransactionRef = React.useRef<() => void>(() => {});
-    const invalidateNativePrependTransactionRef = React.useRef<() => void>(() => {});
+    const nativePrependLayoutTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+    const nativePrependQuietReobserveTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+    const nativePrependCorrectorReobserveTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+    const observeNativePrependOwnerRef = React.useRef<() => void>(() => {});
+    const invalidateNativePrependOwnerRef = React.useRef<() => void>(() => {});
     // Plan P2: lets the momentum-settle handler (defined before the scheduler) arm a capture
     // for the dwelled position when every momentum frame was swallowed (open transactions).
-    const scheduleViewportAnchorCaptureRef = React.useRef<(state: TranscriptViewportChangeState) => void>(() => {});
+    const scheduleViewportAnchorCaptureRef = React.useRef<(
+        state: TranscriptViewportChangeState,
+        options?: Readonly<{ suppressAnchorCapture?: boolean }>,
+    ) => void>(() => {});
     const resetOlderPaginationRef = React.useRef<() => void>(() => {});
-    const pendingWebPrependIndexRecoveryRef = React.useRef(false);
-    const scheduledWebPrependIndexRecoveryRef = React.useRef<{ kind: 'raf' | 'timeout'; ids: any[] } | null>(null);
-    const webPrependRestoreWindowExpiryTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+    const webPrependIndexRecoveryScheduleRef = React.useRef<{ kind: 'raf' | 'timeout'; ids: any[] } | null>(null);
+    const webPrependIndexRecoveryRunningRef = React.useRef(false);
+    const webPrependRestoreExpiryTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+    const runWebPrependIndexRecoveryRef = React.useRef<() => boolean>(() => false);
     const [webPrependRangeReservePx, setWebPrependRangeReservePx] = React.useState(0);
     const clearWebPrependRangeReserve = React.useCallback(() => {
         setWebPrependRangeReservePx((previous) => previous === 0 ? previous : 0);
     }, []);
     const cancelWebPrependRestoreWindowExpiry = React.useCallback(() => {
-        const timeoutId = webPrependRestoreWindowExpiryTimeoutRef.current;
+        const timeoutId = webPrependRestoreExpiryTimerRef.current;
         if (timeoutId === null) return;
-        webPrependRestoreWindowExpiryTimeoutRef.current = null;
+        webPrependRestoreExpiryTimerRef.current = null;
         clearTimeout(timeoutId);
     }, []);
     const cancelScheduledWebPrependIndexRecovery = React.useCallback(() => {
-        const scheduledRecovery = scheduledWebPrependIndexRecoveryRef.current;
+        const scheduledRecovery = webPrependIndexRecoveryScheduleRef.current;
         if (!scheduledRecovery) return;
-        scheduledWebPrependIndexRecoveryRef.current = null;
+        webPrependIndexRecoveryScheduleRef.current = null;
         if (scheduledRecovery.kind === 'raf') {
             for (const id of scheduledRecovery.ids) {
                 cancelAnimationFrame(id);
@@ -1529,13 +1696,6 @@ const ChatListInternal = React.memo((props: {
             clearTimeout(id);
         }
     }, []);
-    const clearWebPrependRestoreWindowState = React.useCallback(() => {
-        pendingWebPrependAnchorRef.current = null;
-        pendingWebPrependIndexRecoveryRef.current = false;
-        cancelWebPrependRestoreWindowExpiry();
-        cancelScheduledWebPrependIndexRecovery();
-        clearWebPrependRangeReserve();
-    }, [cancelScheduledWebPrependIndexRecovery, cancelWebPrependRestoreWindowExpiry, clearWebPrependRangeReserve]);
     const closeWebPrependViewportOwnership = React.useCallback((
         outcome: TranscriptViewportTransactionOutcome,
     ) => {
@@ -1546,30 +1706,52 @@ const ChatListInternal = React.memo((props: {
     const clearWebPrependRestoreWindow = React.useCallback((
         outcome: TranscriptViewportTransactionOutcome,
     ) => {
-        clearWebPrependRestoreWindowState();
-        closeWebPrependViewportOwnership(outcome);
-    }, [clearWebPrependRestoreWindowState, closeWebPrependViewportOwnership]);
+        applyWebPrependOwnerEffectsRef.current(webPrependOwner.clear({
+            outcome,
+            sessionId: props.sessionId,
+        }));
+    }, [props.sessionId, webPrependOwner]);
     const wantsPinnedRef = React.useRef(true);
     const pinThresholdPxRef = React.useRef(72);
     const lastUserScrollIntentAtMsRef = React.useRef(Number.NEGATIVE_INFINITY);
+    const lastExplicitWebScrollIntentAtMsRef = React.useRef(Number.NEGATIVE_INFINITY);
     const nativeTranscriptTouchStartYRef = React.useRef<number | null>(null);
-    // Last web scroll-container `scrollTop` we observed or wrote programmatically. Used to detect a
-    // genuine web user scroll-up (movement toward the top) without relying on `isTrusted`, which RNW
-    // does not reliably set, while excluding our own programmatic pin/restore scroll writes.
-    const lastObservedWebScrollTopRef = React.useRef<number | null>(null);
-    // Plan E3: consecutive same-direction non-programmatic web movement streak feeding the
-    // scrollbar/keyboard intent heuristic in the web onScroll path.
-    const webNonProgrammaticScrollStreakRef = React.useRef<{ direction: -1 | 1; count: number } | null>(null);
+    const resolveRestoreAnchorIndexForCommandRef = React.useRef<(anchor: TranscriptViewportAnchorIdentity) => number | null>(() => null);
+    const resolveJumpToSeqIndexForCommandRef = React.useRef<(
+        seq: number,
+        routeMessageId?: string | null,
+        transcriptBlockIndex?: number | null,
+        role?: TranscriptJumpTargetRole | null,
+    ) => number | null>(() => null);
+    const webDomObservationRef = React.useRef<WebDomScrollObservation | null>(null);
+    if (webDomObservationRef.current === null) {
+        webDomObservationRef.current = createWebDomScrollObservation();
+    }
+    const webDomObservation = webDomObservationRef.current;
+    const applyWebPassiveLiveTailCorrectionEffectRef = React.useRef<(
+        effect: WebPassiveLiveTailCorrectionEffect,
+    ) => boolean>(() => false);
     const lastAutoRepinAtMsRef = React.useRef(Number.NEGATIVE_INFINITY);
     const lastPinOffsetForIntentRef = React.useRef<number | null>(null);
     const lastScrollOffsetForIntentRef = React.useRef<number | null>(null);
     const bottomFollowModeStateRef = React.useRef<TranscriptBottomFollowModeState>({
         dragSession: null,
-        mode: resolveSessionEntryBottomFollow(readSessionViewportForEntry(props.sessionId))
-            ? 'following'
-            : 'released',
+        mode: resolveSessionEntryViewportState(readSessionViewportForEntry(props.sessionId)).bottomFollowMode,
     });
     const [bottomFollowModeRevision, bumpBottomFollowModeRevision] = React.useReducer((value: number) => (value + 1) % 1_000_000, 0);
+    const commitBottomFollowModeState = React.useCallback((next: TranscriptBottomFollowModeState) => {
+        const previous = bottomFollowModeStateRef.current;
+        bottomFollowModeStateRef.current = next;
+        if (previous.mode !== next.mode) {
+            bumpBottomFollowModeRevision();
+        }
+    }, []);
+
+    const dispatchViewportLifecycleEvent = React.useCallback((event: TranscriptViewportLifecycleEvent) => {
+        const transition = viewportLifecycle.dispatch(event);
+        commitBottomFollowModeState(transition.state.bottomFollowState);
+        return transition;
+    }, [commitBottomFollowModeState, viewportLifecycle]);
     const lastNativePinOffsetRef = React.useRef<number | null>(null);
     const lastNativeBottomFollowPinCommandRef = React.useRef<{
         sessionId: string;
@@ -1578,9 +1760,9 @@ const ChatListInternal = React.memo((props: {
     } | null>(null);
     const lastNativeRestoreIndexCommandRef = React.useRef<LastNativeRestoreIndexCommand | null>(null);
     const nativeAutomaticBottomPinCommandSessionRef = React.useRef<string | null>(null);
-    const nativeContentMaterializationAutoPinRef = React.useRef<{ contentHeight: number; sessionId: string } | null>(null);
+    const nativeContentMaterializationAutoPinRef = React.useRef<NativeContentMaterializationAutoPin | null>(null);
     // Single stream writer (plan B3): at most one follow command per measured content version.
-    const lastNativeStreamAppendPinRef = React.useRef<{ contentHeight: number; sessionId: string } | null>(null);
+    const lastNativeStreamAppendPinRef = React.useRef<NativeStreamAppendPinContentVersion | null>(null);
     const nativeListDragActiveRef = React.useRef(false);
     const nativeBottomFollowRearmedAfterDragRef = React.useRef(false);
     // Plan B9: true between onMomentumScrollBegin and onMomentumScrollEnd. Combined with the
@@ -1593,18 +1775,8 @@ const ChatListInternal = React.memo((props: {
     const lastProactiveAutoFollowActivityKeyRef = React.useRef<string | null>(props.latestCommittedActivityKey);
     const pendingNativeMountSettleBottomPinRef = React.useRef(false);
     const flushPendingNativeMountSettleBottomPinRef = React.useRef<(() => void) | null>(null);
-    const nativeContentMeasurementSessionRef = React.useRef<{ sessionId: string; measured: boolean }>({
-        sessionId: props.sessionId,
-        measured: false,
-    });
-    const nativeInitialViewportAppliedSessionRef = React.useRef<{ sessionId: string; applied: boolean }>({
-        sessionId: props.sessionId,
-        applied: false,
-    });
     const nativeInitialViewportPendingObservationRef = React.useRef(false);
-    // Entry-restore single owner (plan F2 / Lane A): one transaction per session entry.
-    const entryRestoreTransactionRef = React.useRef<EntryRestoreTransaction | null>(null);
-    const entryRestoreWriteContextRef = React.useRef<EntryRestoreWriteContext | null>(null);
+    // Entry-restore owner state lives in viewport/entryRestore; ChatList applies its effects.
     // N2b.2 slice-from-anchor entry window (native flash_v2 anchored entries).
     const [entrySliceWindow, setEntrySliceWindow] = React.useState<{
         sessionId: string;
@@ -1612,18 +1784,11 @@ const ChatListInternal = React.memo((props: {
     } | null>(null);
     const entrySliceWindowRef = React.useRef<{ sessionId: string; anchorRowId: string } | null>(null);
     const entrySliceWithheldCountRef = React.useRef(0);
-    /** Per-session degradation latch: slice identity unresolvable → existing write pipeline. */
-    const entrySliceDegradedSessionRef = React.useRef<string | null>(null);
     const revealEntrySliceWindowRef = React.useRef<() => number>(() => 0);
     const entryRestoreDeadlineTimeoutRef = React.useRef<{
         sessionId: string;
         timeoutId: ReturnType<typeof setTimeout>;
     } | null>(null);
-    // Set when the user (or jump-to-seq) took over before any transaction was created:
-    // this entry will never open one.
-    const entryRestoreSuppressedRef = React.useRef(false);
-    const finishEntryRestoreTransactionRef = React.useRef<(transaction: EntryRestoreTransaction) => void>(() => {});
-    const legacyEntryRestoreAppliedRef = React.useRef<{ sessionId: string; offsetY: number } | null>(null);
     const composerInsetHeightRef = React.useRef(0);
     // Render-visible mirror of `composerInsetHeightRef` (the single source of truth). Bottom-anchored
     // overlays that live OUTSIDE the scroll geometry (e.g. the catch-up overlay) must re-position when
@@ -1688,6 +1853,7 @@ const ChatListInternal = React.memo((props: {
         hasMore: boolean;
         status: 'loaded' | 'no_more' | 'not_ready' | 'in_flight';
     } | null>) | null>(null);
+    const requestBoundedEntryViewportMaterializationRef = React.useRef<() => boolean>(() => false);
 
     const transcriptMotionPreset = useSetting('transcriptMotionPreset');
     const transcriptMotionFreshnessMs = useSetting('transcriptMotionFreshnessMs');
@@ -1700,30 +1866,6 @@ const ChatListInternal = React.memo((props: {
     const sessionThinkingInlinePresentation = useSetting('sessionThinkingInlinePresentation');
     const sessionThinkingInlineChrome = useSetting('sessionThinkingInlineChrome');
 
-    const stopScrollEventPropagationOnWeb = React.useCallback((event: any) => {
-        // Expo Router (Vaul/Radix) modals on web often install document-level scroll-lock listeners
-        // that `preventDefault()` wheel/touch scroll, which breaks scrolling inside nested scroll views.
-        // Stopping propagation here keeps the event within the transcript subtree so native scrolling works.
-        if (Platform.OS !== 'web') return;
-        preemptEntryRestoreTransaction();
-        const nowMs = Date.now();
-        lastUserScrollIntentAtMsRef.current = nowMs;
-        // If the user scrolls upward (away from the bottom), treat that as explicit intent to unpin
-        // immediately, even if they remain within the pinned threshold. This prevents mount-time
-        // stabilization retries from fighting the user for several seconds after entering a session.
-        const deltaY = (event as any)?.deltaY;
-        if (typeof deltaY === 'number' && Number.isFinite(deltaY) && deltaY < 0) {
-            wantsPinnedRef.current = false;
-        }
-        if (typeof event?.stopPropagation === 'function') event.stopPropagation();
-    }, [preemptEntryRestoreTransaction]);
-
-    const markUserScrollIntentOnWeb = React.useCallback(() => {
-        if (Platform.OS !== 'web') return;
-        preemptEntryRestoreTransaction();
-        lastUserScrollIntentAtMsRef.current = Date.now();
-    }, [preemptEntryRestoreTransaction]);
-
     const updateNativeInitialViewportPendingObservation = React.useCallback((pending: boolean) => {
         if (Platform.OS === 'web') return;
         if (nativeInitialViewportPendingObservationRef.current === pending) return;
@@ -1731,141 +1873,124 @@ const ChatListInternal = React.memo((props: {
         setNativeInitialViewportPendingObservation(pending);
     }, []);
 
-    const recordNativeUserScrollIntent = React.useCallback((nowMs: number = Date.now()) => {
-        if (Platform.OS === 'web') return;
-        preemptEntryRestoreTransaction();
-        lastUserScrollIntentAtMsRef.current = nowMs;
-        pendingNativeMountSettleBottomPinRef.current = false;
-        nativeMountSettleAutoPinSuppressedRef.current = true;
-        updateNativeInitialViewportPendingObservation(false);
+    const applyNativeUserScrollTakeoverHostEffects = React.useCallback((
+        effects: readonly NativeUserScrollTakeoverApplyEffect[],
+    ) => {
+        for (const effect of effects) {
+            if (effect.sessionId !== props.sessionId) continue;
+            switch (effect.type) {
+                case 'native-user-scroll-preempt-entry-restore':
+                    preemptEntryRestoreTransaction();
+                    break;
+                case 'native-user-scroll-cancel-native-mount-settle-bottom-pin':
+                    pendingNativeMountSettleBottomPinRef.current = false;
+                    break;
+                case 'native-user-scroll-suppress-native-mount-settle-auto-pin':
+                    nativeMountSettleAutoPinSuppressedRef.current = true;
+                    break;
+                case 'native-user-scroll-clear-native-initial-viewport-pending-observation':
+                    updateNativeInitialViewportPendingObservation(false);
+                    break;
+                case 'native-user-scroll-record-intent-timestamp':
+                    lastUserScrollIntentAtMsRef.current = effect.timestampMs;
+                    break;
+            }
+        }
     }, [
         preemptEntryRestoreTransaction,
+        props.sessionId,
         updateNativeInitialViewportPendingObservation,
+    ]);
+
+    const recordNativeUserScrollIntent = React.useCallback((nowMs: number = Date.now()) => {
+        if (Platform.OS === 'web') return;
+        const plan = lifecycleHost.planNativeUserScrollTakeover({
+            sessionId: props.sessionId,
+            timestampMs: nowMs,
+        });
+        applyNativeUserScrollTakeoverHostEffects(plan.nativeUserScrollTakeoverEffects);
+    }, [
+        applyNativeUserScrollTakeoverHostEffects,
+        lifecycleHost,
+        props.sessionId,
     ]);
 
     const resetNativeSessionViewportLifecycle = React.useCallback((sessionId: string) => {
         if (Platform.OS === 'web') return;
-        nativeContentMeasurementSessionRef.current = { sessionId, measured: false };
-        nativeInitialViewportAppliedSessionRef.current = { sessionId, applied: false };
+        sessionOpenLatch.resetNativeInitialViewport(sessionId);
         updateNativeInitialViewportPendingObservation(false);
-    }, [updateNativeInitialViewportPendingObservation]);
+    }, [sessionOpenLatch, updateNativeInitialViewportPendingObservation]);
 
     const hasNativeContentMeasurementForCurrentSession = React.useCallback((): boolean => {
-        if (Platform.OS === 'web') return true;
-        const state = nativeContentMeasurementSessionRef.current;
-        return state.sessionId === props.sessionId && state.measured === true;
-    }, [props.sessionId]);
-
-    const markNativeContentMeasurementForCurrentSession = React.useCallback(() => {
-        if (Platform.OS === 'web') return;
-        nativeContentMeasurementSessionRef.current = { sessionId: props.sessionId, measured: true };
-    }, [props.sessionId]);
+        return measurementHost.hasNativeContentMeasurementForSession({
+            platform: Platform.OS === 'web' ? 'web' : 'native',
+            sessionId: props.sessionId,
+        });
+    }, [measurementHost, props.sessionId]);
 
     const hasNativeInitialViewportAppliedForCurrentSession = React.useCallback((): boolean => {
         if (Platform.OS === 'web') return true;
-        const state = nativeInitialViewportAppliedSessionRef.current;
-        return state.sessionId === props.sessionId && state.applied === true;
-    }, [props.sessionId]);
+        return sessionOpenLatch.hasNativeInitialViewportApplied(props.sessionId);
+    }, [props.sessionId, sessionOpenLatch]);
 
     const markNativeInitialViewportAppliedForCurrentSession = React.useCallback((options?: Readonly<{
         entrySettleBaselineContentHeight?: number;
     }>) => {
         if (Platform.OS === 'web') return;
-        const previousState = nativeInitialViewportAppliedSessionRef.current;
-        const wasApplied = previousState.sessionId === props.sessionId && previousState.applied === true;
-        nativeInitialViewportAppliedSessionRef.current = { sessionId: props.sessionId, applied: true };
+        const { wasApplied } = sessionOpenLatch.markNativeInitialViewportApplied(props.sessionId);
         updateNativeInitialViewportPendingObservation(false);
         if (!wasApplied && sessionEntryViewportRef.current?.shouldFollowBottom !== false) {
-            // Plan P3: arm the one-shot settle re-confirm for follow-bottom entries — late
-            // content settle after the entry pin must still end at the TRUE bottom. The
-            // baseline stays event-source-only; callers without an event content height
-            // arm with null and the first bottom-confirmed frame fills it.
-            const baseline = options?.entrySettleBaselineContentHeight;
-            pendingNativeEntrySettleConfirmRef.current = {
+            lifecycleHost.armNativeEntrySettleConfirmation({
+                baselineContentHeight: options?.entrySettleBaselineContentHeight,
                 sessionId: props.sessionId,
-                issuedContentHeight: typeof baseline === 'number' && Number.isFinite(baseline)
-                    ? baseline
-                    : null,
-            };
+            });
         }
-        if (entryRestoreTransactionRef.current === null) {
+        if (!entryRestoreOwner.hasOpenTransaction(props.sessionId)) {
             // Cold-open entry phase (no entry-restore transaction): applied = confirmed.
-            // Restore entries close their phase through finishEntryRestoreTransaction.
+            // Restore entries close their phase through the entry restore owner.
             closeEntryViewportOwnership('confirmed');
         }
     }, [
         closeEntryViewportOwnership,
+        entryRestoreOwner,
+        lifecycleHost,
         props.sessionId,
+        sessionOpenLatch,
         updateNativeInitialViewportPendingObservation,
     ]);
 
-    const shouldRecordNativePassiveUnpinnedMovement = React.useCallback((distanceFromBottom: number, thresholdPx: number): boolean => {
-        return resolveShouldRecordNativePassiveUnpinnedMovement({
-            configuredBottomDistanceNoiseFloorPx: resolveTranscriptMountSettleTuning().bottomDistanceNoiseFloorPx,
-            distanceFromBottom,
-            hasNativeContentMeasurement: hasNativeContentMeasurementForCurrentSession(),
-            hasNativeInitialViewportApplied: hasNativeInitialViewportAppliedForCurrentSession(),
-            isWeb: Platform.OS === 'web',
-            pinThresholdPx: thresholdPx,
-            wantsPinned: wantsPinnedRef.current,
-        });
+    const applyNativeBottomFollowCompletionHostEffects = React.useCallback((
+        effects: TranscriptLifecycleHostScrollObservationPlan['nativeBottomFollowCompletionEffects'],
+    ) => {
+        for (const effect of effects) {
+            if (
+                effect.type !== 'complete-native-bottom-follow' ||
+                effect.sessionId !== props.sessionId
+            ) {
+                continue;
+            }
+            pendingNativeMountSettleBottomPinRef.current = false;
+            markNativeInitialViewportAppliedForCurrentSession({
+                // Plan P3: the applying frame's event content height is
+                // the settle-confirm baseline (event source only, E7).
+                entrySettleBaselineContentHeight: effect.entrySettleBaselineContentHeight,
+            });
+        }
     }, [
-        hasNativeContentMeasurementForCurrentSession,
-        hasNativeInitialViewportAppliedForCurrentSession,
+        markNativeInitialViewportAppliedForCurrentSession,
+        props.sessionId,
     ]);
 
     const shouldIgnoreNativeInvalidScrollObservation = React.useCallback((
         offsetY: number,
         distanceFromBottom: number,
-        layoutHeight: number,
-        contentHeight: number,
     ): boolean => {
         return resolveShouldIgnoreNativeInvalidScrollObservation({
-            contentHeight,
             distanceFromBottom,
             isWeb: Platform.OS === 'web',
-            layoutHeight,
             offsetY,
-            orientation: listOrientationRef.current,
         });
     }, []);
-
-    const shouldIgnoreNativePassiveViewportScroll = React.useCallback((
-        isTrusted: boolean,
-        nowMs: number,
-        distanceFromBottom: number,
-        thresholdPx: number,
-    ): boolean => {
-        const entryViewport = sessionEntryViewportRef.current;
-        return resolveShouldIgnoreNativePassiveViewportScroll({
-            configuredBottomDistanceNoiseFloorPx: resolveTranscriptMountSettleTuning().bottomDistanceNoiseFloorPx,
-            currentSessionId: props.sessionId,
-            distanceFromBottom,
-            entryViewportSessionId: entryViewport?.sessionId ?? null,
-            entryViewportShouldFollowBottom: entryViewport?.shouldFollowBottom ?? null,
-            hasNativeContentMeasurement: hasNativeContentMeasurementForCurrentSession(),
-            hasNativeInitialViewportApplied: hasNativeInitialViewportAppliedForCurrentSession(),
-            isTrusted,
-            isWeb: Platform.OS === 'web',
-            lastUserScrollIntentAtMs: lastUserScrollIntentAtMsRef.current,
-            nowMs,
-            pinThresholdPx: thresholdPx,
-            shouldRecordPassiveUnpinnedMovement: shouldRecordNativePassiveUnpinnedMovement(distanceFromBottom, thresholdPx),
-            userIntentRecentMs: TRANSCRIPT_SCROLL_USER_INTENT_RECENT_MS,
-            wantsPinned: wantsPinnedRef.current,
-        });
-    }, [
-        hasNativeContentMeasurementForCurrentSession,
-        hasNativeInitialViewportAppliedForCurrentSession,
-        props.sessionId,
-        shouldRecordNativePassiveUnpinnedMovement,
-    ]);
-
-    const refreshNativeRecentPassiveUserScrollIntent = React.useCallback((isTrusted: boolean, nowMs: number) => {
-        if (Platform.OS === 'web' || isTrusted) return;
-        if (nowMs - lastUserScrollIntentAtMsRef.current >= TRANSCRIPT_SCROLL_USER_INTENT_RECENT_MS) return;
-        recordNativeUserScrollIntent(nowMs);
-    }, [recordNativeUserScrollIntent]);
 
     const resolveWebScrollMetrics = React.useCallback(() => {
         if (Platform.OS !== 'web') return null;
@@ -1893,33 +2018,23 @@ const ChatListInternal = React.memo((props: {
         return metrics;
     }, [chatListNativeId]);
 
-    const resolveFirstVisibleWebAnchorTestId = React.useCallback((metrics: WebTranscriptScrollMetrics): string | undefined => {
-        const querySelectorAll = metrics.element.querySelectorAll?.bind(metrics.element);
-        const getContainerRect = metrics.element.getBoundingClientRect?.bind(metrics.element);
-        if (!querySelectorAll || !getContainerRect) return undefined;
-        let containerRect: DOMRect | null = null;
-        try {
-            containerRect = getContainerRect();
-        } catch {
-            return undefined;
-        }
-        const viewportTop = containerRect.top;
-        const viewportBottom = containerRect.top + metrics.clientHeight;
-        try {
-            const anchors = Array.from(querySelectorAll<HTMLElement>('[data-testid]'));
-            for (const anchor of anchors) {
-                const testId = anchor.getAttribute('data-testid') ?? undefined;
-                if (!testId) continue;
-                const rect = anchor.getBoundingClientRect?.();
-                if (!rect) continue;
-                if (rect.bottom > viewportTop && rect.top < viewportBottom) {
-                    return testId;
-                }
-            }
-        } catch {
-            return undefined;
-        }
-        return undefined;
+    const observeWebTranscriptNavigationVisibilityForSession = React.useCallback((
+        metrics: WebTranscriptScrollMetrics,
+        scrollIntent: Readonly<{ isTrusted: boolean }> | null,
+    ) => {
+        if (Platform.OS !== 'web') return;
+        scheduleWebTranscriptNavigationVisibilityObservation({
+            anchors: transcriptNavigationRuntimeAnchorsRef.current,
+            metrics,
+            scrollIntent,
+            store: getTranscriptNavigationVisibilityStore(props.sessionId),
+        });
+    }, [props.sessionId]);
+
+    const resolveEnabledViewportTelemetryTuning = React.useCallback(() => {
+        const tuning = sync.getSyncTuning();
+        configureTranscriptViewportTelemetryFromTuning(tuning);
+        return transcriptViewportTelemetry.isEnabled() ? tuning : null;
     }, []);
 
     const resolveWebViewportTelemetryDiagnostics = React.useCallback((params: Readonly<{
@@ -1932,30 +2047,21 @@ const ChatListInternal = React.memo((props: {
         scrollable?: boolean;
         trigger: 'scroll' | 'edge-reached' | 'restore' | 'prepend-restore' | 'jump';
     }>) => {
+        if (!resolveEnabledViewportTelemetryTuning()) return {};
         const metrics = params.metrics ?? null;
         const paginationSnapshot = olderPaginationSnapshotRef.current;
         const counts = webHotColdCountsRef.current;
-        const pendingAnchor = pendingWebPrependAnchorRef.current;
-        const pendingWebPrependAnchorKind =
-            pendingAnchor?.anchorTestId ? 'stable'
-                : pendingAnchor?.itemTestId ? 'item'
-                    : 'none';
-        const pendingWebPrependAnchorId =
-            pendingAnchor?.anchorTestId ?? pendingAnchor?.itemTestId ?? undefined;
-        const pendingWebPrependAnchorIndex = pendingAnchor
-            ? resolvePendingWebPrependAnchorItemIndex({
-                anchorTestId: pendingAnchor.anchorTestId,
-                itemTestId: pendingAnchor.itemTestId,
-                items: itemsRef.current,
-            })
-            : undefined;
+        const webPrependFacts = webPrependOwner.telemetryFacts({ items: itemsRef.current });
         return {
             trigger: params.trigger,
             ...(metrics ? {
                 domScrollTop: metrics.scrollTop,
                 domScrollHeight: metrics.scrollHeight,
                 domClientHeight: metrics.clientHeight,
-                firstVisibleAnchorTestId: resolveFirstVisibleWebAnchorTestId(metrics) ?? 'none',
+                firstVisibleAnchorTestId: resolveFirstVisibleWebAnchorTestId({
+                    anchors: transcriptNavigationRuntimeAnchorsRef.current,
+                    metrics,
+                }) ?? 'none',
             } : {
                 firstVisibleAnchorTestId: 'none',
             }),
@@ -1966,12 +2072,10 @@ const ChatListInternal = React.memo((props: {
             paginationSuspendedReasons: params.paginationSuspendedReasons ?? paginationSnapshot.suspendedReasons,
             coldCount: counts.coldCount,
             hotCount: counts.hotCount,
-            pendingWebPrependAnchorKind,
-            ...(pendingWebPrependAnchorId ? { pendingWebPrependAnchorId } : {}),
-            ...(pendingWebPrependAnchorIndex !== undefined ? { pendingWebPrependAnchorIndex } : {}),
+            ...webPrependFacts,
             programmaticWebWrite: params.programmaticWebWrite,
         };
-    }, [resolveFirstVisibleWebAnchorTestId]);
+    }, [resolveEnabledViewportTelemetryTuning, webPrependOwner]);
 
     const resolveBackwardPrefetchThresholdPx = React.useCallback((viewportPx: number): number => {
         const tuning = sync.getSyncTuning();
@@ -1984,16 +2088,7 @@ const ChatListInternal = React.memo((props: {
         });
     }, []);
 
-    const waitForNextVisualUpdate = React.useCallback(async () => {
-        await Promise.resolve();
-        await Promise.resolve();
-        const raf = (globalThis as any)?.requestAnimationFrame as undefined | ((cb: () => void) => any);
-        if (typeof raf === 'function') {
-            await new Promise<void>((resolve) => {
-                raf(() => resolve());
-            });
-        }
-    }, []);
+    const waitForNextVisualUpdate = React.useCallback(waitForNextTranscriptVisualUpdate, []);
 
     const motionConfig = React.useMemo(() => {
         return resolveTranscriptMotionConfig({
@@ -2022,11 +2117,10 @@ const ChatListInternal = React.memo((props: {
     const transcriptScrollJumpToBottomMinNewCount = useSetting('transcriptScrollJumpToBottomMinNewCount');
     const transcriptScrollJumpToBottomRevealViewportRatio = useSetting('transcriptScrollJumpToBottomRevealViewportRatio');
     const transcriptScrollJumpToBottomAnimateScroll = useSetting('transcriptScrollJumpToBottomAnimateScroll');
-    const transcriptListImplementation = useSetting('transcriptListImplementation');
     const transcriptToolCallsCollapsedPreviewCountSetting = useSetting('transcriptToolCallsCollapsedPreviewCount');
 
     const [scrollPin, setScrollPin] = React.useState<TranscriptScrollPinState>(() => ({
-        isPinned: resolveSessionEntryBottomFollow(readSessionViewportForEntry(props.sessionId)),
+        isPinned: resolveSessionEntryViewportState(readSessionViewportForEntry(props.sessionId)).shouldFollowBottom,
         newActivityCount: 0,
         lastActivityKey: null,
     }));
@@ -2054,42 +2148,12 @@ const ChatListInternal = React.memo((props: {
     const [jumpToBottomDistanceFromBottom, setJumpToBottomDistanceFromBottom] = React.useState(0);
     const jumpToBottomDistanceFromBottomRef = React.useRef(0);
     const isPinnedRef = React.useRef(true);
-    const sessionEntryViewportRef = React.useRef<{
-        sessionId: string;
-        shouldFollowBottom: boolean;
-        // Finite persisted distance-from-bottom, or null when the stored viewport carried
-        // no trustworthy offset (missing or non-finite) — consumers must not treat null as 0
-        // where 0 means "at the bottom".
-        offsetY: number | null;
-        anchor: SessionViewportAnchorSnapshot | null;
-    } | null>(null);
-    if (sessionEntryViewportRef.current?.sessionId !== props.sessionId) {
-        const sessionViewport = readSessionViewportForEntry(props.sessionId);
-        const shouldFollowBottom = resolveSessionEntryBottomFollow(sessionViewport);
-        // Persisted viewports are untrusted input: a non-finite stored offsetY must read as
-        // "no remembered offset" everywhere downstream (entry restore, exit-flush fallback).
-        const persistedEntryOffsetY =
-            typeof sessionViewport?.offsetY === 'number' && Number.isFinite(sessionViewport.offsetY)
-                ? sessionViewport.offsetY
-                : null;
-        sessionEntryViewportRef.current = {
-            sessionId: props.sessionId,
-            shouldFollowBottom,
-            offsetY: persistedEntryOffsetY,
-            anchor: sessionViewport?.anchor ?? null,
-        };
-        wantsPinnedRef.current = shouldFollowBottom;
-        isPinnedRef.current = shouldFollowBottom;
-        bottomFollowModeStateRef.current = resolveTranscriptBottomFollowMode(bottomFollowModeStateRef.current, {
-            type: 'session-entry',
-            shouldFollowBottom,
-        });
-        lastUserScrollIntentAtMsRef.current = Number.NEGATIVE_INFINITY;
-        lastAutoRepinAtMsRef.current = Number.NEGATIVE_INFINITY;
-        lastPinOffsetForIntentRef.current = shouldFollowBottom ? 0 : persistedEntryOffsetY;
-        lastScrollOffsetForIntentRef.current = null;
-        lastObservedWebScrollTopRef.current = null;
-        webNonProgrammaticScrollStreakRef.current = null;
+    const resetOlderPaginationForSessionEntry = React.useCallback(() => {
+        hasMoreOlderRef.current = null;
+        resetOlderPaginationRef.current();
+    }, []);
+    const applySessionEntryRenderResetEffects = React.useCallback((sessionEntryRenderResetEffects: SessionEntryRenderResetEffects) => {
+        webDomObservation.reset();
         lastNativePinOffsetRef.current = null;
         lastNativeBottomFollowPinCommandRef.current = null;
         nativeAutomaticBottomPinCommandSessionRef.current = null;
@@ -2097,58 +2161,60 @@ const ChatListInternal = React.memo((props: {
         nativeMomentumScrollActiveRef.current = false;
         lastNativeStreamAppendPinRef.current = null;
         lastProactiveAutoFollowActivityKeyRef.current = props.latestCommittedActivityKey;
-        lastMeasuredContentActivityKeyRef.current = null;
-        hasMoreOlderRef.current = null;
-        resetOlderPaginationRef.current();
-            resetNativeSessionViewportLifecycle(props.sessionId);
-            // An entry transaction left open by the exiting session closes with an
-            // attributable outcome (mirror of the prepend disposal below) — entry
-            // restores must never be dropped silently (plan §4).
-            disposeEntryRestoreTransactionForExitRef.current();
-            entryRestoreTransactionRef.current = null;
-            entryRestoreWriteContextRef.current = null;
-            entryRestoreSuppressedRef.current = false;
-            legacyEntryRestoreAppliedRef.current = null;
-            // Slice window/degradation are per-entry; state clears in the session-scope effect.
-            entrySliceWindowRef.current = null;
-            entrySliceDegradedSessionRef.current = null;
-            const entryRestoreDeadlineTimeout = entryRestoreDeadlineTimeoutRef.current;
-            if (entryRestoreDeadlineTimeout) {
-                entryRestoreDeadlineTimeoutRef.current = null;
-                clearTimeout(entryRestoreDeadlineTimeout.timeoutId);
-            }
-            const nativeEntryRestorePaintReleaseTimeout = nativeEntryRestorePaintReleaseTimeoutRef.current;
-            if (nativeEntryRestorePaintReleaseTimeout) {
-                nativeEntryRestorePaintReleaseTimeoutRef.current = null;
-                clearTimeout(nativeEntryRestorePaintReleaseTimeout.timeoutId);
-            }
-            invalidateNativePrependTransactionRef.current();
-            pendingNativeExplicitJumpConfirmRef.current = null;
-            // Plan P3: follow-bottom entries (cold or warm keep-alive) arm the one-shot
-            // settle re-confirm at entry — warm reopens never re-run the applied lifecycle,
-            // yet a catch-up content swap can leave them above the bottom. The event-source
-            // baseline is filled by the first observed frame.
-            pendingNativeEntrySettleConfirmRef.current =
-                shouldFollowBottom && Platform.OS !== 'web' && transcriptListImplementation !== 'flatlist_legacy'
-                    ? { sessionId: props.sessionId, issuedContentHeight: null }
-                    : null;
-            lastNativeRestoreIndexCommandRef.current = null;
+        resetOlderPaginationForSessionEntry();
+        if (sessionEntryRenderResetEffects.platform === 'native') {
+            resetNativeSessionViewportLifecycle(sessionEntryRenderResetEffects.nativeSessionViewportReset.sessionId);
+        }
+        disposeEntryRestoreTransactionForExitRef.current();
+        applyEntryRestoreOwnerEffectsRef.current(entryRestoreOwner.resetForSession({ sessionId: props.sessionId }));
+        entrySliceWindowRef.current = null;
+        const entryRestoreDeadlineTimeout = entryRestoreDeadlineTimeoutRef.current;
+        if (entryRestoreDeadlineTimeout) {
+            entryRestoreDeadlineTimeoutRef.current = null;
+            clearTimeout(entryRestoreDeadlineTimeout.timeoutId);
+        }
+        const nativeEntryRestorePaintReleaseTimeout = nativeEntryRestorePaintReleaseTimeoutRef.current;
+        if (nativeEntryRestorePaintReleaseTimeout) {
+            nativeEntryRestorePaintReleaseTimeoutRef.current = null;
+            clearTimeout(nativeEntryRestorePaintReleaseTimeout.timeoutId);
+        }
+        invalidateNativePrependOwnerRef.current();
+        lifecycleHost.clearNativeExplicitJumpConfirmation({ sessionId: sessionEntryRenderResetEffects.nativeExplicitJumpReset.sessionId });
+        lifecycleHost.resetNativeEntrySettleConfirmation({
+            sessionId: sessionEntryRenderResetEffects.nativeEntrySettleReset.sessionId,
+            shouldArmConfirmation: sessionEntryRenderResetEffects.nativeEntrySettleReset.shouldArmConfirmation,
+        });
+        lastNativeRestoreIndexCommandRef.current = null;
         anchorLookupLoadCountRef.current = 0;
         anchorLookupInFlightRef.current = false;
         anchorLookupExhaustedRef.current = false;
-        // Single-owner phase machine: a fresh controller state per session entry.
-        // Restore entries open the entry phase at mount; native cold opens own the
-        // viewport until the initial bottom viewport is applied.
         viewportCommandController.resetForSession({
             sessionId: props.sessionId,
-            openEntryTransaction:
-                !shouldFollowBottom ||
-                (Platform.OS !== 'web' && transcriptListImplementation !== 'flatlist_legacy'),
+            openEntryTransaction: sessionEntryRenderResetEffects.commandControllerReset.openEntryTransaction,
         });
-        // C1: drop per-item floors, per-type medians, and the per-commit clear latch on session
-        // entry so a new session never reserves heights from the previous one.
-        measurementReconciler.resetForSession(props.sessionId);
-    }
+        measurementHost.resetForSession({ sessionId: sessionEntryRenderResetEffects.measurementReset.sessionId });
+    }, [
+        entryRestoreOwner,
+        lifecycleHost,
+        measurementHost,
+        props.latestCommittedActivityKey,
+        props.sessionId,
+        resetNativeSessionViewportLifecycle,
+        resetOlderPaginationForSessionEntry,
+        viewportCommandController,
+        webDomObservation,
+    ]);
+    const sessionEntryViewportRef = React.useRef<{
+        sessionId: string;
+        entryKind: SessionOpenEntryKind;
+        shouldFollowBottom: boolean;
+        // Finite persisted distance-from-bottom, or null when the stored viewport carried
+        // no trustworthy offset (missing or non-finite) — consumers must not treat null as 0
+        // where 0 means "at the bottom".
+        offsetY: number | null;
+        anchor: SessionViewportAnchorSnapshot | null;
+        effects: readonly SessionEntryViewportApplyEffect[];
+    } | null>(null);
     const [expandedToolCallsAnchorMessageIds, setExpandedToolCallsAnchorMessageIds] = React.useState<ReadonlySet<string>>(
         () => new Set<string>(),
     );
@@ -2175,23 +2241,67 @@ const ChatListInternal = React.memo((props: {
         setIsLoadingOlder(true);
     }, [clearOlderLoadSpinnerDelay]);
 
+    const applyExplicitJumpTakeoverApplyEffects = React.useCallback((
+        effects: readonly ExplicitJumpTakeoverApplyEffect[],
+    ) => {
+        for (const effect of effects) {
+            if (effect.sessionId !== props.sessionId) continue;
+            switch (effect.type) {
+                case 'explicit-jump-cancel-native-mount-settle-bottom-pin':
+                    pendingNativeMountSettleBottomPinRef.current = false;
+                    break;
+                case 'explicit-jump-suppress-entry-restore':
+                    applyEntryRestoreOwnerEffectsRef.current(entryRestoreOwner.preempt({
+                        reason: 'jump',
+                        sessionId: props.sessionId,
+                    }));
+                    break;
+                case 'explicit-jump-preempt-entry-restore':
+                    preemptEntryRestoreTransaction();
+                    break;
+                case 'explicit-jump-clear-native-entry-restore-paint-release-timeout': {
+                    const nativeEntryRestorePaintReleaseTimeout = nativeEntryRestorePaintReleaseTimeoutRef.current;
+                    if (nativeEntryRestorePaintReleaseTimeout) {
+                        nativeEntryRestorePaintReleaseTimeoutRef.current = null;
+                        clearTimeout(nativeEntryRestorePaintReleaseTimeout.timeoutId);
+                    }
+                    break;
+                }
+                case 'explicit-jump-invalidate-native-prepend-transaction':
+                    invalidateNativePrependOwnerRef.current();
+                    break;
+                case 'explicit-jump-clear-native-restore-index-command-cache':
+                    lastNativeRestoreIndexCommandRef.current = null;
+                    break;
+                case 'explicit-jump-close-native-prepend-transaction':
+                    applyNativePrependOwnerEffectsRef.current(nativePrependOwner.trustedScroll({
+                        activeOwner: viewportCommandController.activeOwner(),
+                        sessionId: props.sessionId,
+                    }));
+                    break;
+            }
+        }
+    }, [
+        entryRestoreOwner,
+        nativePrependOwner,
+        preemptEntryRestoreTransaction,
+        props.sessionId,
+        viewportCommandController,
+    ]);
     React.useEffect(() => {
         if (props.jumpToSeq == null) return;
-        pendingNativeMountSettleBottomPinRef.current = false;
-        // Jump-to-seq takes over the viewport: the entry-restore transaction (if any) is
-        // preempted and this entry never opens another one.
-        entryRestoreSuppressedRef.current = true;
-        preemptEntryRestoreTransaction();
-        const nativeEntryRestorePaintReleaseTimeout = nativeEntryRestorePaintReleaseTimeoutRef.current;
-        if (nativeEntryRestorePaintReleaseTimeout) {
-            nativeEntryRestorePaintReleaseTimeoutRef.current = null;
-            clearTimeout(nativeEntryRestorePaintReleaseTimeout.timeoutId);
-        }
-        invalidateNativePrependTransactionRef.current();
-        lastNativeRestoreIndexCommandRef.current = null;
+        const plan = lifecycleHost.planExplicitJumpTakeover({
+            reason: 'jump-to-seq',
+            sessionId: props.sessionId,
+        });
+        commitBottomFollowModeState(plan.state.bottomFollowState);
+        applyExplicitJumpTakeoverApplyEffects(plan.explicitJumpTakeoverEffects);
     }, [
-        preemptEntryRestoreTransaction,
+        applyExplicitJumpTakeoverApplyEffects,
+        commitBottomFollowModeState,
+        lifecycleHost,
         props.jumpToSeq,
+        props.sessionId,
     ]);
 
     const cancelScheduledPinToBottom = React.useCallback(() => {
@@ -2209,51 +2319,311 @@ const ChatListInternal = React.memo((props: {
         clearTimeout(scheduled.id);
     }, []);
 
-    const commitBottomFollowModeState = React.useCallback((next: TranscriptBottomFollowModeState) => {
-        const previous = bottomFollowModeStateRef.current;
-        bottomFollowModeStateRef.current = next;
-        if (previous.mode !== next.mode) {
-            bumpBottomFollowModeRevision();
-        }
-    }, []);
-
-    const beginNativeBottomFollowGestureIntent = React.useCallback(() => {
-        if (Platform.OS === 'web') return;
-        recordNativeUserScrollIntent();
-        markNativeInitialViewportAppliedForCurrentSession();
-        nativeListDragActiveRef.current = true;
-        nativeBottomFollowRearmedAfterDragRef.current = false;
-        // A finger down catches any in-flight fling: its momentum window ends here.
-        nativeMomentumScrollActiveRef.current = false;
-        if (listOrientationRef.current !== 'inverted') {
+    const applyImmediateWebReleaseApplyEffects = React.useCallback((
+        effects: readonly WebImmediateReleaseLiveTailApplyEffect[],
+    ) => {
+        for (const effect of effects) {
+            if (effect.sessionId !== props.sessionId) continue;
             wantsPinnedRef.current = false;
-            isPinnedRef.current = false;
         }
-        cancelScheduledPinToBottom();
-        commitBottomFollowModeState(resolveTranscriptBottomFollowMode(bottomFollowModeStateRef.current, {
-            type: 'list-drag-start',
+    }, [props.sessionId]);
+
+    const applyImmediateWebReleaseLifecycleEffects = React.useCallback((
+        effects: readonly TranscriptViewportLifecycleEffect[],
+    ) => {
+        applyImmediateWebReleaseApplyEffects(resolveWebImmediateReleaseLiveTailApplyEffects({
+            effects,
+            sessionId: props.sessionId,
         }));
     }, [
-        cancelScheduledPinToBottom,
+        applyImmediateWebReleaseApplyEffects,
+        props.sessionId,
+    ]);
+
+    const applyNativeMomentumActiveMirrorApplyEffects = React.useCallback((
+        effects: readonly NativeMomentumActiveMirrorApplyEffect[],
+    ) => {
+        for (const effect of effects) {
+            if (effect.sessionId !== props.sessionId) continue;
+            nativeMomentumScrollActiveRef.current = effect.active;
+        }
+    }, [props.sessionId]);
+
+    const applyNativeMomentumActiveMirrorLifecycleEffects = React.useCallback((
+        effects: readonly TranscriptViewportLifecycleEffect[],
+    ) => {
+        if (Platform.OS === 'web') return;
+        applyNativeMomentumActiveMirrorApplyEffects(resolveNativeMomentumActiveMirrorApplyEffects({
+            effects,
+            sessionId: props.sessionId,
+        }));
+    }, [
+        applyNativeMomentumActiveMirrorApplyEffects,
+        props.sessionId,
+    ]);
+
+    const applyNativeDragActiveMirrorApplyEffects = React.useCallback((
+        effects: readonly NativeDragActiveMirrorApplyEffect[],
+    ) => {
+        for (const effect of effects) {
+            if (effect.sessionId !== props.sessionId) continue;
+            nativeListDragActiveRef.current = effect.active;
+        }
+    }, [props.sessionId]);
+
+    const applyNativeDragActiveMirrorLifecycleEffects = React.useCallback((
+        effects: readonly TranscriptViewportLifecycleEffect[],
+    ) => {
+        if (Platform.OS === 'web') return;
+        applyNativeDragActiveMirrorApplyEffects(resolveNativeDragActiveMirrorApplyEffects({
+            effects,
+            sessionId: props.sessionId,
+        }));
+    }, [
+        applyNativeDragActiveMirrorApplyEffects,
+        props.sessionId,
+    ]);
+
+    const applyNativeBottomFollowRearmResetEffects = React.useCallback((
+        effects: readonly NativeBottomFollowRearmResetEffect[],
+    ) => {
+        for (const effect of effects) {
+            if (effect.sessionId !== props.sessionId) continue;
+            if (effect.type !== 'reset-native-bottom-follow-rearm') continue;
+            nativeBottomFollowRearmedAfterDragRef.current = false;
+        }
+    }, [props.sessionId]);
+
+    const applyNativeBottomFollowRearmResetLifecycleEffects = React.useCallback((
+        effects: readonly TranscriptViewportLifecycleEffect[],
+    ) => {
+        if (Platform.OS === 'web') return;
+        applyNativeBottomFollowRearmResetEffects(resolveNativeBottomFollowRearmResetEffects({
+            effects,
+            sessionId: props.sessionId,
+        }));
+    }, [
+        applyNativeBottomFollowRearmResetEffects,
+        props.sessionId,
+    ]);
+
+    const applyNativeTouchReleaseLiveTailStateEffects = React.useCallback((
+        effects: readonly NativeTouchReleaseLiveTailStateEffect[],
+    ) => {
+        for (const effect of effects) {
+            if (effect.sessionId !== props.sessionId) continue;
+            if (effect.type !== 'apply-native-touch-release-live-tail-state') continue;
+            wantsPinnedRef.current = false;
+            isPinnedRef.current = false;
+            commitScrollPinState({ ...scrollPinRef.current, isPinned: false });
+        }
+    }, [
+        commitScrollPinState,
+        props.sessionId,
+    ]);
+
+    const applyNativeOffsetReleaseLiveTailStateEffects = React.useCallback((
+        effects: readonly NativeOffsetReleaseLiveTailStateEffect[],
+    ): boolean => {
+        let appliedRelease = false;
+        for (const effect of effects) {
+            if (effect.sessionId !== props.sessionId) continue;
+            if (effect.type !== 'apply-native-offset-release-live-tail-state') continue;
+            commitBottomFollowModeState(effect.bottomFollowState);
+            wantsPinnedRef.current = false;
+            isPinnedRef.current = false;
+            appliedRelease = true;
+        }
+        return appliedRelease;
+    }, [
         commitBottomFollowModeState,
+        props.sessionId,
+    ]);
+
+    const releaseLiveTailForImmediateWebUserIntent = React.useCallback(() => {
+        const transition = dispatchViewportLifecycleEvent({
+            sessionId: props.sessionId,
+            source: 'web-immediate-user-intent',
+            type: 'release-live-tail-intent',
+        });
+        applyImmediateWebReleaseLifecycleEffects(transition.effects);
+    }, [
+        applyImmediateWebReleaseLifecycleEffects,
+        dispatchViewportLifecycleEvent,
+        props.sessionId,
+    ]);
+
+    const applyWebUserScrollTakeoverApplyEffects = React.useCallback((
+        effects: readonly WebUserScrollTakeoverApplyEffect[],
+    ) => {
+        for (const effect of effects) {
+            if (effect.sessionId !== props.sessionId) continue;
+            preemptEntryRestoreTransaction();
+        }
+    }, [
+        preemptEntryRestoreTransaction,
+        props.sessionId,
+    ]);
+
+    const applyWebUserScrollTakeoverLifecycleEffects = React.useCallback((
+        effects: readonly TranscriptViewportLifecycleEffect[],
+    ) => {
+        applyWebUserScrollTakeoverApplyEffects(resolveWebUserScrollTakeoverApplyEffects({
+            effects,
+            sessionId: props.sessionId,
+        }));
+    }, [
+        applyWebUserScrollTakeoverApplyEffects,
+        props.sessionId,
+    ]);
+
+    const applyWebUserScrollIntentTimestampApplyEffects = React.useCallback((
+        effects: readonly WebUserScrollIntentTimestampApplyEffect[],
+    ) => {
+        for (const effect of effects) {
+            if (effect.sessionId !== props.sessionId) continue;
+            lastUserScrollIntentAtMsRef.current = effect.timestampMs;
+        }
+    }, [props.sessionId]);
+
+    const applyWebUserScrollIntentTimestampLifecycleEffects = React.useCallback((
+        effects: readonly TranscriptViewportLifecycleEffect[],
+    ) => {
+        applyWebUserScrollIntentTimestampApplyEffects(resolveWebUserScrollIntentTimestampApplyEffects({
+            effects,
+            sessionId: props.sessionId,
+        }));
+    }, [
+        applyWebUserScrollIntentTimestampApplyEffects,
+        props.sessionId,
+    ]);
+
+    const stopScrollEventPropagationOnWeb = React.useCallback((event: any) => {
+        // Expo Router (Vaul/Radix) modals on web often install document-level scroll-lock listeners
+        // that `preventDefault()` wheel/touch scroll, which breaks scrolling inside nested scroll views.
+        // Stopping propagation here keeps the event within the transcript subtree so native scrolling works.
+        if (Platform.OS !== 'web') return;
+        const nowMs = Date.now();
+        lastExplicitWebScrollIntentAtMsRef.current = nowMs;
+        const transition = dispatchViewportLifecycleEvent({
+            sessionId: props.sessionId,
+            type: 'web-user-scroll-takeover',
+        });
+        applyWebUserScrollTakeoverLifecycleEffects(transition.effects);
+        const timestampTransition = dispatchViewportLifecycleEvent({
+            sessionId: props.sessionId,
+            timestampMs: nowMs,
+            type: 'web-user-scroll-intent-timestamp',
+        });
+        applyWebUserScrollIntentTimestampLifecycleEffects(timestampTransition.effects);
+        // If the user scrolls upward (away from the bottom), treat that as explicit intent to unpin
+        // immediately, even if they remain within the pinned threshold. This prevents mount-time
+        // stabilization retries from fighting the user for several seconds after entering a session.
+        const deltaY = (event as any)?.deltaY;
+        if (typeof deltaY === 'number' && Number.isFinite(deltaY) && deltaY < 0) {
+            releaseLiveTailForImmediateWebUserIntent();
+        }
+        if (typeof event?.stopPropagation === 'function') event.stopPropagation();
+    }, [
+        applyWebUserScrollIntentTimestampLifecycleEffects,
+        applyWebUserScrollTakeoverLifecycleEffects,
+        dispatchViewportLifecycleEvent,
+        props.sessionId,
+        releaseLiveTailForImmediateWebUserIntent,
+    ]);
+
+    const markUserScrollIntentOnWeb = React.useCallback(() => {
+        if (Platform.OS !== 'web') return;
+        const nowMs = Date.now();
+        lastExplicitWebScrollIntentAtMsRef.current = nowMs;
+        const transition = dispatchViewportLifecycleEvent({
+            sessionId: props.sessionId,
+            type: 'web-user-scroll-takeover',
+        });
+        applyWebUserScrollTakeoverLifecycleEffects(transition.effects);
+        const timestampTransition = dispatchViewportLifecycleEvent({
+            sessionId: props.sessionId,
+            timestampMs: nowMs,
+            type: 'web-user-scroll-intent-timestamp',
+        });
+        applyWebUserScrollIntentTimestampLifecycleEffects(timestampTransition.effects);
+    }, [
+        applyWebUserScrollIntentTimestampLifecycleEffects,
+        applyWebUserScrollTakeoverLifecycleEffects,
+        dispatchViewportLifecycleEvent,
+        props.sessionId,
+    ]);
+
+    const applyNativeGestureTakeoverPlan = React.useCallback((plan: NativeGestureTakeoverPlan) => {
+        if (Platform.OS === 'web') return;
+        commitBottomFollowModeState(plan.state.bottomFollowState);
+        applyNativeUserScrollTakeoverHostEffects(plan.nativeUserScrollTakeoverEffects);
+        markNativeInitialViewportAppliedForCurrentSession();
+        // A finger down catches any in-flight fling: its momentum window ends here.
+        cancelScheduledPinToBottom();
+        applyNativeBottomFollowRearmResetEffects(plan.nativeBottomFollowRearmResetEffects);
+        applyNativeDragActiveMirrorApplyEffects(plan.nativeDragActiveMirrorEffects);
+        applyNativeMomentumActiveMirrorApplyEffects(plan.nativeMomentumActiveMirrorEffects);
+    }, [
+        applyNativeBottomFollowRearmResetEffects,
+        applyNativeDragActiveMirrorApplyEffects,
+        applyNativeMomentumActiveMirrorApplyEffects,
+        applyNativeUserScrollTakeoverHostEffects,
+        commitBottomFollowModeState,
+        cancelScheduledPinToBottom,
         markNativeInitialViewportAppliedForCurrentSession,
-        recordNativeUserScrollIntent,
+    ]);
+
+    const recordNativeGestureTakeover = React.useCallback((nowMs?: number) => {
+        if (Platform.OS === 'web') return;
+        const plan = lifecycleHost.planNativeGestureTakeover({
+            sessionId: props.sessionId,
+            timestampMs: nowMs ?? Date.now(),
+        });
+        applyNativeGestureTakeoverPlan(plan);
+    }, [
+        applyNativeGestureTakeoverPlan,
+        lifecycleHost,
+        props.sessionId,
     ]);
 
     const hasOpenEntryRestoreTransactionForSession = React.useCallback(() => {
-        const transaction = entryRestoreTransactionRef.current;
-        return transaction != null && transaction.sessionId === props.sessionId && !transaction.isClosed();
-    }, [props.sessionId]);
+        return entryRestoreOwner.hasOpenTransaction(props.sessionId);
+    }, [entryRestoreOwner, props.sessionId]);
 
     const hasOpenNativePrependTransactionForSession = React.useCallback((): boolean => {
-        const transaction = nativePrependTransactionRef.current;
-        return transaction != null && transaction.sessionId === props.sessionId && !transaction.isClosed();
-    }, [props.sessionId]);
+        return nativePrependOwner.hasOpenTransaction(props.sessionId);
+    }, [nativePrependOwner, props.sessionId]);
 
     const hasActiveNativeViewportRestore = React.useCallback(() => (
         hasOpenEntryRestoreTransactionForSession() ||
         hasOpenNativePrependTransactionForSession()
     ), [hasOpenEntryRestoreTransactionForSession, hasOpenNativePrependTransactionForSession]);
+
+    const applyNativeTouchIntentHostEffects = React.useCallback((
+        effects: readonly NativeTouchIntentApplyEffect[],
+    ) => {
+        for (const effect of effects) {
+            if (effect.sessionId !== props.sessionId) continue;
+            switch (effect.type) {
+                case 'native-touch-record-intent-timestamp':
+                    lastUserScrollIntentAtMsRef.current = effect.timestampMs;
+                    break;
+                case 'native-touch-suppress-native-mount-settle-auto-pin':
+                    nativeMountSettleAutoPinSuppressedRef.current = true;
+                    break;
+                case 'native-touch-cancel-native-mount-settle-bottom-pin':
+                    pendingNativeMountSettleBottomPinRef.current = false;
+                    break;
+                case 'native-touch-cancel-scheduled-pin':
+                    cancelScheduledPinToBottom();
+                    break;
+            }
+        }
+    }, [
+        cancelScheduledPinToBottom,
+        props.sessionId,
+    ]);
 
     const recordNativeTranscriptTouchStartIntent = React.useCallback((event?: unknown) => {
         if (Platform.OS === 'web') return;
@@ -2279,44 +2649,44 @@ const ChatListInternal = React.memo((props: {
             Math.abs(currentY - startY) >= TRANSCRIPT_NATIVE_TOUCH_ESCAPE_MOVE_THRESHOLD_PX;
         if (movedVertically && !hasActiveNativeRestore && wantsPinnedRef.current) {
             nativeTranscriptTouchStartYRef.current = currentY;
-            beginNativeBottomFollowGestureIntent();
-            if (listOrientationRef.current === 'inverted') {
-                const releaseThresholdPx = pinThresholdPxRef.current;
-                // Inverted active streams can remain physically bottom-pinned long
-                // enough that no trusted scroll frame arrives before drag-end. Once
-                // the user's touch has moved beyond the escape threshold, the
-                // gesture itself owns the viewport: release live-tail now and let a
-                // later trusted bottom observation re-arm follow if the user returns.
-                commitBottomFollowModeState(resolveTranscriptBottomFollowMode(bottomFollowModeStateRef.current, {
-                    distanceFromBottom: releaseThresholdPx + 1,
-                    movedAwayFromBottom: true,
-                    pinThresholdPx: releaseThresholdPx,
-                    type: 'trusted-away-observation',
-                }));
-                wantsPinnedRef.current = false;
-                isPinnedRef.current = false;
-                nativeBottomFollowRearmedAfterDragRef.current = false;
-                commitScrollPinState({ ...scrollPinRef.current, isPinned: false });
-            }
+            recordNativeGestureTakeover();
+            const releaseThresholdPx = pinThresholdPxRef.current;
+            // Native active streams can remain physically bottom-pinned long enough
+            // that no trusted scroll frame arrives before drag-end. Once the user's
+            // touch has moved beyond the escape threshold, the gesture itself owns
+            // the viewport: release live-tail now and let a later trusted bottom
+            // observation re-arm follow if the user returns.
+            const plan = lifecycleHost.planNativeTouchRelease({
+                distanceFromLiveTailPx: releaseThresholdPx + 1,
+                pinThresholdPx: releaseThresholdPx,
+                sessionId: props.sessionId,
+            });
+            commitBottomFollowModeState(plan.state.bottomFollowState);
+            applyNativeTouchReleaseLiveTailStateEffects(plan.nativeTouchReleaseStateEffects);
+            applyNativeBottomFollowRearmResetEffects(plan.nativeBottomFollowRearmResetEffects);
             return;
         }
-        if (!hasActiveNativeRestore) {
-            lastUserScrollIntentAtMsRef.current = Date.now();
-        }
-        nativeMountSettleAutoPinSuppressedRef.current = true;
-        pendingNativeMountSettleBottomPinRef.current = false;
-        cancelScheduledPinToBottom();
+        const nowMs = Date.now();
+        const plan = lifecycleHost.planNativeTouchIntent({
+            hasActiveNativeViewportRestore: hasActiveNativeRestore,
+            sessionId: props.sessionId,
+            timestampMs: nowMs,
+        });
+        applyNativeTouchIntentHostEffects(plan.nativeTouchIntentEffects);
     }, [
-        cancelScheduledPinToBottom,
-        commitBottomFollowModeState,
-        commitScrollPinState,
+        applyNativeTouchIntentHostEffects,
         hasActiveNativeViewportRestore,
-        beginNativeBottomFollowGestureIntent,
+        applyNativeBottomFollowRearmResetEffects,
+        applyNativeTouchReleaseLiveTailStateEffects,
+        commitBottomFollowModeState,
+        lifecycleHost,
+        props.sessionId,
+        recordNativeGestureTakeover,
     ]);
 
     const recordNativeListDragEscapeIntent = React.useCallback(() => {
-        beginNativeBottomFollowGestureIntent();
-    }, [beginNativeBottomFollowGestureIntent]);
+        recordNativeGestureTakeover();
+    }, [recordNativeGestureTakeover]);
 
     const recordNativeTranscriptResponderStartIntent = React.useCallback((event?: unknown) => {
         recordNativeTranscriptTouchStartIntent(event);
@@ -2346,11 +2716,67 @@ const ChatListInternal = React.memo((props: {
         recordNativeTranscriptTouchStartIntent,
     ]);
 
+    const mainTranscriptListShellPlatformInteractionProps = React.useMemo<TranscriptListShellPlatformInteractionProps>(() => {
+        if (Platform.OS === 'web') {
+            return {
+                onWheel: stopScrollEventPropagationOnWeb,
+                onTouchMove: stopScrollEventPropagationOnWeb,
+                onPointerDown: markUserScrollIntentOnWeb,
+                onMouseDown: markUserScrollIntentOnWeb,
+            };
+        }
+        return {
+            onTouchCancel: recordNativeTranscriptTouchEndIntent,
+            onTouchEnd: recordNativeTranscriptTouchEndIntent,
+            onTouchMove: recordNativeTranscriptTouchIntent,
+            onTouchStart: recordNativeTranscriptTouchStartIntent,
+        };
+    }, [
+        markUserScrollIntentOnWeb,
+        recordNativeTranscriptTouchEndIntent,
+        recordNativeTranscriptTouchIntent,
+        recordNativeTranscriptTouchStartIntent,
+        stopScrollEventPropagationOnWeb,
+    ]);
+
+    const applyLocalTranscriptInteractionAutoPinDeferralApplyEffects = React.useCallback((
+        effects: readonly LocalTranscriptInteractionAutoPinDeferralApplyEffect[],
+    ) => {
+        for (const effect of effects) {
+            if (effect.sessionId !== props.sessionId) continue;
+            switch (effect.type) {
+                case 'local-interaction-record-intent-timestamp':
+                    lastUserScrollIntentAtMsRef.current = effect.timestampMs;
+                    break;
+                case 'local-interaction-suppress-native-mount-settle-auto-pin':
+                    nativeMountSettleAutoPinSuppressedRef.current = true;
+                    break;
+                case 'local-interaction-cancel-scheduled-pin':
+                    cancelScheduledPinToBottom();
+                    break;
+            }
+        }
+    }, [
+        cancelScheduledPinToBottom,
+        props.sessionId,
+    ]);
+
     const deferAutoPinAfterLocalTranscriptInteraction = React.useCallback(() => {
-        lastUserScrollIntentAtMsRef.current = Date.now();
-        nativeMountSettleAutoPinSuppressedRef.current = true;
-        cancelScheduledPinToBottom();
-    }, [cancelScheduledPinToBottom]);
+        const nowMs = Date.now();
+        const plan = lifecycleHost.planLocalInteractionAutoPinDeferral({
+            sessionId: props.sessionId,
+            timestampMs: nowMs,
+        });
+        commitBottomFollowModeState(plan.state.bottomFollowState);
+        applyLocalTranscriptInteractionAutoPinDeferralApplyEffects(
+            plan.localInteractionAutoPinDeferralEffects,
+        );
+    }, [
+        applyLocalTranscriptInteractionAutoPinDeferralApplyEffects,
+        commitBottomFollowModeState,
+        lifecycleHost,
+        props.sessionId,
+    ]);
 
     const prepareWebToolGroupLocalHeightChange = React.useCallback((): 'anchor' | 'bottom' | 'none' => {
         if (Platform.OS !== 'web') return 'none';
@@ -2431,67 +2857,100 @@ const ChatListInternal = React.memo((props: {
     React.useEffect(() => {
         onViewportChangeRef.current = props.onViewportChange;
     }, [props.onViewportChange]);
-    const emitViewportChange = React.useCallback((state: TranscriptViewportChangeState) => {
-        onViewportChangeRef.current?.(state);
-    }, []);
+    const stampViewportAnchorForEmit = React.useCallback((
+        anchor: SessionViewportAnchorSnapshot | null | undefined,
+    ): SessionViewportAnchorSnapshot | null | undefined => {
+        if (!anchor) return anchor;
+        const stampedSeq = normalizeDurableViewportSeq(anchor.seq);
+        if (stampedSeq !== null) {
+            return { ...anchor, seq: stampedSeq };
+        }
+        const messageId = typeof anchor.messageId === 'string' && anchor.messageId.length > 0
+            ? anchor.messageId
+            : null;
+        if (!messageId) return anchor;
+        const state = getStorage().getState();
+        const session = state?.sessionMessages?.[props.sessionId];
+        const stateMessagesById =
+            (session?.messagesById ?? session?.messagesMap ?? {}) as Readonly<Record<string, Message | undefined>>;
+        const seq = resolveFiniteMessageSeq(props.messagesById[messageId] ?? stateMessagesById[messageId] ?? null);
+        return seq == null ? anchor : { ...anchor, seq };
+    }, [
+        props.messagesById,
+        props.sessionId,
+    ]);
+    const emitViewportChange = React.useCallback((state: TranscriptViewportChangeState): boolean => {
+        const emit = onViewportChangeRef.current;
+        if (!emit) return false;
+        emit({
+            ...state,
+            anchor: stampViewportAnchorForEmit(state.anchor),
+        });
+        return true;
+    }, [stampViewportAnchorForEmit]);
+    const applyExplicitReturnToLiveTailViewportEffects = React.useCallback((
+        effects: readonly ExplicitReturnToLiveTailViewportEffect[],
+    ) => {
+        for (const effect of effects) {
+            if (effect.sessionId !== props.sessionId) continue;
+            if (effect.type !== 'apply-explicit-return-to-live-tail-viewport') continue;
+            commitScrollPinState({ ...scrollPinRef.current, isPinned: effect.isPinned, newActivityCount: 0 });
+            const emitted = emitViewportChange({
+                isPinned: effect.isPinned,
+                offsetY: effect.distanceFromLiveTailPx,
+                shouldRestoreViewport: false,
+            });
+            if (!emitted) {
+                sync.markSessionLiveTailIntent(props.sessionId);
+            }
+        }
+    }, [
+        commitScrollPinState,
+        emitViewportChange,
+        props.sessionId,
+    ]);
+    const commitExplicitReturnToLiveTailState = React.useCallback((
+        intent: Extract<TranscriptViewportLifecycleEvent, { type: 'return-to-live-tail-intent' }>['intent'],
+    ) => {
+        wantsPinnedRef.current = true;
+        isPinnedRef.current = true;
+        const plan = lifecycleHost.planExplicitReturnToLiveTail({
+            intent,
+            sessionId: props.sessionId,
+        });
+        commitBottomFollowModeState(plan.state.bottomFollowState);
+        applyExplicitReturnToLiveTailViewportEffects(plan.viewportEffects);
+    }, [
+        applyExplicitReturnToLiveTailViewportEffects,
+        commitBottomFollowModeState,
+        lifecycleHost,
+        props.sessionId,
+    ]);
     const cancelScheduledViewportAnchorCapture = React.useCallback(() => {
         const scheduled = scheduledViewportAnchorCaptureRef.current;
         if (!scheduled) return;
         scheduledViewportAnchorCaptureRef.current = null;
         clearTimeout(scheduled.timeoutId);
     }, []);
-    const lastFollowBottomIntentKeyRef = React.useRef<string | number | null>(props.followBottomIntentKey ?? null);
-
-    React.useEffect(() => {
-        return () => {
-            flushViewportAnchorCaptureRef.current();
-            flushExitLiveTailIntentRef.current();
-            // An entry transaction still open at unmount closes with an attributable
-            // outcome (mirror of the prepend invalidation below) — never a silent drop.
-            disposeEntryRestoreTransactionForExitRef.current();
-            const entryRestoreDeadlineTimeout = entryRestoreDeadlineTimeoutRef.current;
-            if (entryRestoreDeadlineTimeout) {
-                entryRestoreDeadlineTimeoutRef.current = null;
-                clearTimeout(entryRestoreDeadlineTimeout.timeoutId);
-            }
-            initialFillAbortRef.current?.abort();
-            initialFillAbortRef.current = null;
-            const timeoutId = olderLoadSpinnerDelayTimeoutRef.current;
-            if (timeoutId) {
-                olderLoadSpinnerDelayTimeoutRef.current = null;
-                clearTimeout(timeoutId);
-            }
-            const nativeFirstPaintFallbackReleaseTimeout = nativeFirstPaintFallbackReleaseTimeoutRef.current;
-            if (nativeFirstPaintFallbackReleaseTimeout) {
-                nativeFirstPaintFallbackReleaseTimeoutRef.current = null;
-                clearTimeout(nativeFirstPaintFallbackReleaseTimeout.timeoutId);
-            }
-            const nativeEntryRestorePaintReleaseTimeout = nativeEntryRestorePaintReleaseTimeoutRef.current;
-            if (nativeEntryRestorePaintReleaseTimeout) {
-                nativeEntryRestorePaintReleaseTimeoutRef.current = null;
-                clearTimeout(nativeEntryRestorePaintReleaseTimeout.timeoutId);
-            }
-            mountSettleCoordinatorRef.current?.reset({ reason: 'unmount' });
-            pendingNativeMountSettleBottomPinRef.current = false;
-            invalidateNativePrependTransactionRef.current();
-            lastNativeRestoreIndexCommandRef.current = null;
-            nativeMountSettleAutoPinSuppressedRef.current = false;
-        };
-    }, []);
-
-    React.useEffect(() => {
-        // Reset per-session state.
-        flushViewportAnchorCaptureRef.current();
+    const invalidateViewportAnchorCapture = React.useCallback(() => {
         viewportAnchorCaptureGenerationRef.current += 1;
         cancelScheduledViewportAnchorCapture();
+    }, [cancelScheduledViewportAnchorCapture]);
+    const resetViewportAnchorCaptureForSessionEntry = React.useCallback(() => {
+        flushViewportAnchorCaptureRef.current();
+        invalidateViewportAnchorCapture();
+    }, [invalidateViewportAnchorCapture]);
+    const resetInitialFillForSessionEntry = React.useCallback(() => {
         initialFillAbortRef.current?.abort();
         initialFillAbortRef.current = null;
-        initialFillStatusRef.current = 'idle';
+    }, []);
+    const resetNativeMountSettleFlagsForSessionEntry = React.useCallback(() => {
         setNativeMountSettleStable(false);
         nativeMountSettleDeadlineReachedRef.current = false;
         nativeMountSettleAutoPinSuppressedRef.current = false;
         setNativeMountSettleDeadlineReached(false);
-        hideOlderLoadSpinner();
+    }, []);
+    const clearNativePaintReleaseTimeoutsForSessionEntry = React.useCallback(() => {
         const nativeFirstPaintFallbackReleaseTimeout = nativeFirstPaintFallbackReleaseTimeoutRef.current;
         if (nativeFirstPaintFallbackReleaseTimeout) {
             nativeFirstPaintFallbackReleaseTimeoutRef.current = null;
@@ -2502,67 +2961,274 @@ const ChatListInternal = React.memo((props: {
             nativeEntryRestorePaintReleaseTimeoutRef.current = null;
             clearTimeout(nativeEntryRestorePaintReleaseTimeout.timeoutId);
         }
-        hasMoreOlderRef.current = null;
-        resetOlderPaginationRef.current();
-        cancelScheduledPinToBottom();
-        didAutoExpandToolCallsGroupsForSessionRef.current = null;
-        inFlightWebPrependAnchorRef.current = null;
+    }, []);
+    const resetTransientSessionEntryUiState = React.useCallback(() => {
         clearWebPrependRestoreWindow('abandoned-identity');
         setExpandedToolCallsAnchorMessageIds(new Set());
+    }, [clearWebPrependRestoreWindow]);
+    const consumeSessionOpenArmEntryViewportState = React.useCallback(() => {
         const entryViewport = sessionEntryViewportRef.current;
         const shouldFollowBottom = entryViewport?.shouldFollowBottom ?? true;
-        const offsetY = entryViewport?.offsetY ?? 0;
         const entryAnchor = shouldFollowBottom ? null : (entryViewport?.anchor ?? null);
-        wantsPinnedRef.current = shouldFollowBottom;
-        isPinnedRef.current = shouldFollowBottom;
-        commitBottomFollowModeState(resolveTranscriptBottomFollowMode(bottomFollowModeStateRef.current, {
-            type: 'session-entry',
+        const entryEffects = entryViewport?.effects ?? [];
+        if (entryViewport && entryEffects.length > 0) {
+            sessionEntryViewportRef.current = {
+                ...entryViewport,
+                effects: [],
+            };
+        }
+        return {
+            entryAnchor,
+            entryEffects,
+            entryOffsetY: entryViewport?.offsetY ?? null,
             shouldFollowBottom,
-        }));
+        };
+    }, []);
+    const applyFollowBottomIntentTakeoverApplyEffects = React.useCallback((
+        effects: readonly FollowBottomIntentTakeoverApplyEffect[],
+    ) => {
+        for (const effect of effects) {
+            if (effect.sessionId !== props.sessionId) continue;
+            switch (effect.type) {
+                case 'follow-bottom-intent-preempt-entry-restore':
+                    preemptEntryRestoreTransaction();
+                    break;
+                case 'follow-bottom-intent-clear-user-scroll-intent':
+                    lastUserScrollIntentAtMsRef.current = Number.NEGATIVE_INFINITY;
+                    break;
+                case 'follow-bottom-intent-record-live-tail-pin-offset':
+                    lastPinOffsetForIntentRef.current = effect.distanceFromLiveTailPx;
+                    break;
+            }
+        }
+    }, [
+        preemptEntryRestoreTransaction,
+        props.sessionId,
+    ]);
+    const applySessionEntryViewportApplyEffects = React.useCallback((
+        effects: readonly SessionEntryViewportApplyEffect[],
+        entryAnchor: SessionViewportAnchorSnapshot | null,
+    ) => {
+        for (const effect of effects) {
+            if (effect.sessionId !== props.sessionId) continue;
+            if (effect.type !== 'apply-session-entry-viewport') continue;
+            wantsPinnedRef.current = effect.isPinned;
+            isPinnedRef.current = effect.isPinned;
+            commitScrollPinState({
+                isPinned: effect.isPinned,
+                lastActivityKey: null,
+                newActivityCount: 0,
+            });
+            jumpToBottomDistanceFromBottomRef.current = effect.jumpButtonDistanceFromLiveTailPx;
+            setJumpToBottomDistanceFromBottom(effect.jumpButtonDistanceFromLiveTailPx);
+            if (effect.shouldEmitViewportChange) {
+                emitViewportChange({
+                    anchor: effect.shouldUseEntryAnchor ? entryAnchor : null,
+                    isPinned: effect.isPinned,
+                    offsetY: effect.jumpButtonDistanceFromLiveTailPx,
+                    shouldRestoreViewport: effect.shouldRestoreViewport,
+                });
+            }
+        }
+    }, [
+        commitScrollPinState,
+        emitViewportChange,
+        props.sessionId,
+    ]);
+    React.useLayoutEffect(() => {
+        const resolvedEntryViewport = resolveSessionEntryViewportState<SessionViewportAnchorSnapshot>(
+            readSessionViewportForEntry(props.sessionId),
+        );
+        const shouldFollowBottom = resolvedEntryViewport.shouldFollowBottom;
+        const persistedEntryOffsetY = resolvedEntryViewport.offsetY;
+        const entryKind: SessionOpenEntryKind = props.jumpToSeq != null
+            ? 'jump'
+            : (shouldFollowBottom ? 'bottom' : 'anchored');
+        if (
+            sessionEntryViewportRef.current?.sessionId === props.sessionId &&
+            sessionEntryViewportRef.current.entryKind === entryKind
+        ) {
+            return;
+        }
+        const platform = Platform.OS === 'web' ? 'web' : 'native';
+        const lifecycleEntry = lifecycleHost.enterSession({
+            entryDistanceFromLiveTailPx: persistedEntryOffsetY,
+            platform,
+            sessionId: props.sessionId,
+            shouldFollowLiveTail: shouldFollowBottom,
+        });
+        const tuning = sync.getSyncTuning();
+        const webInitialPinRetryPlan = resolveSessionOpenWebInitialPinRetryPlan(tuning);
+        const armDecision = sessionOpenLatch.arm({
+            entryKind,
+            isNativeFlashListBottomMaintenanceEnabled: Platform.OS !== 'web',
+            nativeFirstPaintFallbackDelayMs:
+                tuning.transcriptInitialFillBudgetMs +
+                tuning.transcriptMountSettleQuiescentWindowMs * 2 +
+                1,
+            nowMs: Date.now(),
+            platform,
+            sessionId: props.sessionId,
+            shouldFollowBottom,
+            webInitialPinRetryDelaysMs: webInitialPinRetryPlan.retryDelaysMs,
+            webInitialPinStabilizeMs: webInitialPinRetryPlan.stabilizeMaxMs,
+        });
+        sessionEntryViewportRef.current = {
+            sessionId: props.sessionId,
+            entryKind,
+            shouldFollowBottom,
+            offsetY: persistedEntryOffsetY,
+            anchor: resolvedEntryViewport.anchor,
+            effects: lifecycleEntry.viewportEffects,
+        };
+        wantsPinnedRef.current = Boolean(shouldFollowBottom);
+        isPinnedRef.current = shouldFollowBottom;
+        commitBottomFollowModeState(lifecycleEntry.state.bottomFollowState);
         lastUserScrollIntentAtMsRef.current = Number.NEGATIVE_INFINITY;
+        lastExplicitWebScrollIntentAtMsRef.current = Number.NEGATIVE_INFINITY;
+        lastRouteJumpProtectionClearingWebMovementAtMsRef.current = Number.NEGATIVE_INFINITY;
+        lastAutoRepinAtMsRef.current = Number.NEGATIVE_INFINITY;
+        lastPinOffsetForIntentRef.current = shouldFollowBottom ? 0 : persistedEntryOffsetY;
+        lastScrollOffsetForIntentRef.current = null;
+        applySessionEntryRenderResetEffects(lifecycleEntry.renderResetEffects);
+        applySessionOpenLatchEffectsRef.current(armDecision.effects);
+        applySessionOpenLatchEffectsRef.current(sessionOpenLatch.onHostFacts({
+            contentHeight: listContentHeightRef.current,
+            hasEntrySliceWindow: entrySliceWindowRef.current?.sessionId === props.sessionId,
+            isLoaded: props.isLoaded,
+            isScrollable: false,
+            itemCount: itemsRef.current.length,
+            layoutHeight: listLayoutHeightRef.current,
+            nowMs: Date.now(),
+            sessionId: props.sessionId,
+            userWantsPinned: wantsPinnedRef.current,
+        }).effects);
+    }, [
+        applySessionEntryRenderResetEffects,
+        commitBottomFollowModeState,
+        lifecycleHost,
+        props.isLoaded,
+        props.jumpToSeq,
+        props.sessionId,
+        sessionOpenLatch,
+    ]);
+    const lastFollowBottomIntentKeyRef = React.useRef<string | number | null>(props.followBottomIntentKey ?? null);
+
+    const applySessionOpenArmResetPlan = React.useCallback((plan: SessionOpenArmResetPlan): void => {
+        if (plan.sessionId !== props.sessionId) return;
+        resetViewportAnchorCaptureForSessionEntry();
+        resetInitialFillForSessionEntry();
+        resetNativeMountSettleFlagsForSessionEntry();
+        hideOlderLoadSpinner();
+        clearNativePaintReleaseTimeoutsForSessionEntry();
+        resetOlderPaginationForSessionEntry();
+        cancelScheduledPinToBottom();
+        resetTransientSessionEntryUiState();
+        const {
+            entryAnchor,
+            entryEffects,
+            entryOffsetY,
+            shouldFollowBottom,
+        } = consumeSessionOpenArmEntryViewportState();
+        lastUserScrollIntentAtMsRef.current = Number.NEGATIVE_INFINITY;
+        lastExplicitWebScrollIntentAtMsRef.current = Number.NEGATIVE_INFINITY;
+        lastRouteJumpProtectionClearingWebMovementAtMsRef.current = Number.NEGATIVE_INFINITY;
         lastAutoRepinAtMsRef.current = Number.NEGATIVE_INFINITY;
         // Null (no trustworthy remembered offset) must survive here: 0 would read as
         // "at the bottom" and let the exit flush fabricate a live-tail report.
-        lastPinOffsetForIntentRef.current = shouldFollowBottom ? 0 : (entryViewport?.offsetY ?? null);
+        lastPinOffsetForIntentRef.current = shouldFollowBottom ? 0 : entryOffsetY;
         lastScrollOffsetForIntentRef.current = null;
-        lastObservedWebScrollTopRef.current = null;
-        webNonProgrammaticScrollStreakRef.current = null;
-            lastNativePinOffsetRef.current = null;
-            lastNativeBottomFollowPinCommandRef.current = null;
-            lastProactiveAutoFollowActivityKeyRef.current = props.latestCommittedActivityKey;
-            resetNativeSessionViewportLifecycle(props.sessionId);
-            invalidateNativePrependTransactionRef.current();
-            lastNativeRestoreIndexCommandRef.current = null;
-            if (Platform.OS !== 'web') {
-                listContentHeightRef.current = 0;
-                setListContentHeight(0);
+        webDomObservation.reset();
+        lastNativePinOffsetRef.current = null;
+        lastNativeBottomFollowPinCommandRef.current = null;
+        lastProactiveAutoFollowActivityKeyRef.current = props.latestCommittedActivityKey;
+        resetNativeSessionViewportLifecycle(plan.sessionId);
+        invalidateNativePrependOwnerRef.current();
+        lastNativeRestoreIndexCommandRef.current = null;
+        if (Platform.OS !== 'web') {
+            listContentHeightRef.current = 0;
+            setListContentHeight(0);
         }
         pendingNativeMountSettleBottomPinRef.current = false;
-        const nextScrollPinState = {
-            isPinned: shouldFollowBottom,
-            newActivityCount: 0,
-            lastActivityKey: null,
-        };
-        scrollPinRef.current = nextScrollPinState;
-        setScrollPin(nextScrollPinState);
-        jumpToBottomDistanceFromBottomRef.current = offsetY;
-        setJumpToBottomDistanceFromBottom(offsetY);
-        emitViewportChange({
-            isPinned: shouldFollowBottom,
-            offsetY,
-            shouldRestoreViewport: !shouldFollowBottom,
-            anchor: entryAnchor,
-        });
+        applySessionEntryViewportApplyEffects(entryEffects, entryAnchor);
+    }, [
+        applySessionEntryViewportApplyEffects,
+        cancelScheduledPinToBottom,
+        clearNativePaintReleaseTimeoutsForSessionEntry,
+        consumeSessionOpenArmEntryViewportState,
+        hideOlderLoadSpinner,
+        resetInitialFillForSessionEntry,
+        resetNativeMountSettleFlagsForSessionEntry,
+        resetNativeSessionViewportLifecycle,
+        resetOlderPaginationForSessionEntry,
+        resetTransientSessionEntryUiState,
+        resetViewportAnchorCaptureForSessionEntry,
+        props.latestCommittedActivityKey,
+        props.sessionId,
+        webDomObservation,
+    ]);
+
+    const applySessionOpenDisposeResetPlan = React.useCallback((plan: SessionOpenDisposeResetPlan): void => {
+        if (plan.reason !== 'session-switch' && plan.reason !== 'disposed') return;
+        resetInitialFillForSessionEntry();
+        clearNativePaintReleaseTimeoutsForSessionEntry();
+        cancelScheduledPinToBottom();
+        pendingNativeMountSettleBottomPinRef.current = false;
     }, [
         cancelScheduledPinToBottom,
-        cancelScheduledViewportAnchorCapture,
-        clearWebPrependRestoreWindow,
-        commitBottomFollowModeState,
-        emitViewportChange,
-        hideOlderLoadSpinner,
-        props.sessionId,
-        resetNativeSessionViewportLifecycle,
+        clearNativePaintReleaseTimeoutsForSessionEntry,
+        resetInitialFillForSessionEntry,
     ]);
+
+    const applyUnmountCleanup = React.useCallback(() => {
+        flushPendingJumpSeqViewportPromotionForExitRef.current();
+        flushViewportAnchorCaptureRef.current();
+        flushExitLiveTailIntentRef.current();
+        // An entry transaction still open at unmount closes with an attributable
+        // outcome (mirror of the prepend invalidation below) — never a silent drop.
+        disposeEntryRestoreTransactionForExitRef.current();
+        const entryRestoreDeadlineTimeout = entryRestoreDeadlineTimeoutRef.current;
+        if (entryRestoreDeadlineTimeout) {
+            entryRestoreDeadlineTimeoutRef.current = null;
+            clearTimeout(entryRestoreDeadlineTimeout.timeoutId);
+        }
+        initialFillAbortRef.current?.abort();
+        initialFillAbortRef.current = null;
+        const timeoutId = olderLoadSpinnerDelayTimeoutRef.current;
+        if (timeoutId) {
+            olderLoadSpinnerDelayTimeoutRef.current = null;
+            clearTimeout(timeoutId);
+        }
+        const nativeFirstPaintFallbackReleaseTimeout = nativeFirstPaintFallbackReleaseTimeoutRef.current;
+        if (nativeFirstPaintFallbackReleaseTimeout) {
+            nativeFirstPaintFallbackReleaseTimeoutRef.current = null;
+            clearTimeout(nativeFirstPaintFallbackReleaseTimeout.timeoutId);
+        }
+        const nativeEntryRestorePaintReleaseTimeout = nativeEntryRestorePaintReleaseTimeoutRef.current;
+        if (nativeEntryRestorePaintReleaseTimeout) {
+            nativeEntryRestorePaintReleaseTimeoutRef.current = null;
+            clearTimeout(nativeEntryRestorePaintReleaseTimeout.timeoutId);
+        }
+        mountSettleCoordinatorRef.current?.reset({ reason: 'unmount' });
+        pendingNativeMountSettleBottomPinRef.current = false;
+        invalidateNativePrependOwnerRef.current();
+        lastNativeRestoreIndexCommandRef.current = null;
+        nativeMountSettleAutoPinSuppressedRef.current = false;
+    }, []);
+
+    React.useEffect(() => {
+        return () => {
+            applyUnmountCleanup();
+        };
+    }, [applyUnmountCleanup]);
+
+    // Web unmount detaches the DOM before passive cleanup; route-jump promotion
+    // needs one last metrics read while the exiting scroller still exists.
+    React.useLayoutEffect(() => {
+        return () => {
+            flushPendingJumpSeqViewportPromotionForExitRef.current();
+        };
+    }, []);
 
     const pinEnabled = transcriptScrollPinEnabled !== false;
     const pinThresholdPx =
@@ -2597,6 +3263,124 @@ const ChatListInternal = React.memo((props: {
             })
         );
     }, [jumpRevealOffsetThresholdPx]);
+    const resolveJumpSeqViewportPromotionState = React.useCallback((params: Readonly<{
+        distanceFromBottom: number;
+        metrics: WebTranscriptScrollMetrics;
+    }>): TranscriptViewportChangeState => {
+        const distanceFromBottom = Math.max(0, Math.trunc(params.distanceFromBottom));
+        const isPinned = distanceFromBottom <= pinThresholdPxRef.current;
+        const anchor = isPinned
+            ? null
+            : captureWebTranscriptViewportAnchor({ container: params.metrics.element });
+        const capturedAnchor: SessionViewportAnchorSnapshot | null = anchor
+            ? { ...anchor, capturedAtMs: Date.now() }
+            : null;
+
+        return {
+            anchor: capturedAnchor,
+            isPinned,
+            offsetY: distanceFromBottom,
+            shouldRestoreViewport: !isPinned,
+        };
+    }, []);
+
+    const promotePendingJumpSeqViewportSnapshot = React.useCallback((params: Readonly<{
+        distanceFromBottom: number;
+        metrics: WebTranscriptScrollMetrics;
+        requireRestorableAnchor?: boolean;
+        scrollOffsetPx: number;
+    }>): boolean => {
+        const pending = pendingJumpSeqViewportPromotionRef.current;
+        if (!pending) return false;
+        if (pending.sessionId !== props.sessionId) {
+            pendingJumpSeqViewportPromotionRef.current = null;
+            return false;
+        }
+
+        const viewportState = resolveJumpSeqViewportPromotionState({
+            distanceFromBottom: params.distanceFromBottom,
+            metrics: params.metrics,
+        });
+        if (
+            params.requireRestorableAnchor === true &&
+            !viewportState.isPinned &&
+            !viewportState.anchor
+        ) {
+            return false;
+        }
+        pendingJumpSeqViewportPromotionRef.current = null;
+        const distanceFromBottom = viewportState.offsetY;
+        const isPinned = viewportState.isPinned;
+
+        invalidateViewportAnchorCapture();
+        promotedJumpSeqViewportProtectionRef.current = isPinned
+            ? null
+            : {
+                promotedAtMs: Date.now(),
+                seq: pending.seq,
+                sessionId: props.sessionId,
+            };
+        wantsPinnedRef.current = isPinned;
+        isPinnedRef.current = isPinned;
+        lastPinOffsetForIntentRef.current = distanceFromBottom;
+        lastScrollOffsetForIntentRef.current = Math.max(0, Math.trunc(params.scrollOffsetPx));
+        commitBottomFollowModeState({ dragSession: null, mode: isPinned ? 'following' : 'released' });
+        commitJumpToBottomDistanceForVisibility(distanceFromBottom);
+        commitScrollPinState({
+            ...scrollPinRef.current,
+            isPinned,
+            newActivityCount: isPinned ? 0 : scrollPinRef.current.newActivityCount,
+        });
+        pending.emitViewportChange?.(viewportState);
+        return true;
+    }, [
+        commitBottomFollowModeState,
+        commitJumpToBottomDistanceForVisibility,
+        commitScrollPinState,
+        invalidateViewportAnchorCapture,
+        props.sessionId,
+        resolveJumpSeqViewportPromotionState,
+    ]);
+
+    const flushPendingJumpSeqViewportPromotionForExit = React.useCallback(() => {
+        const pending = pendingJumpSeqViewportPromotionRef.current;
+        if (!pending) return;
+        if (pending.sessionId !== currentSessionIdRef.current) return;
+        if (Platform.OS !== 'web') return;
+
+        const metrics = resolveWebScrollMetrics();
+        if (!metrics) return;
+
+        const viewportState = resolveJumpSeqViewportPromotionState({
+            distanceFromBottom: getWebTranscriptDistanceFromBottom(metrics),
+            metrics,
+        });
+        pendingJumpSeqViewportPromotionRef.current = null;
+        invalidateViewportAnchorCapture();
+        promotedJumpSeqViewportProtectionRef.current = viewportState.isPinned
+            ? null
+            : {
+                promotedAtMs: Date.now(),
+                seq: pending.seq,
+                sessionId: pending.sessionId,
+            };
+        const emit = pending.emitViewportChange;
+        queueMicrotask(() => {
+            emit?.(viewportState);
+        });
+    }, [
+        invalidateViewportAnchorCapture,
+        resolveJumpSeqViewportPromotionState,
+        resolveWebScrollMetrics,
+    ]);
+
+    React.useLayoutEffect(() => {
+        flushPendingJumpSeqViewportPromotionForExitRef.current = flushPendingJumpSeqViewportPromotionForExit;
+    }, [flushPendingJumpSeqViewportPromotionForExit]);
+
+    const targetWindowActiveRef = React.useRef(false);
+    const activeTargetWindowTargetRef = React.useRef<TranscriptJumpTarget | null>(null);
+    const targetWindowEdgeLoadInFlightRef = React.useRef({ older: false, newer: false });
     const canAutoFollowForReason = React.useCallback((
         reason: TranscriptViewportTelemetryScrollReason,
         options?: Readonly<{ explicit?: boolean }>,
@@ -2607,73 +3391,115 @@ const ChatListInternal = React.memo((props: {
         jumpToSeqActive: jumpToSeqActiveRef.current && reason !== 'jump-to-seq',
         pinEnabled: pinEnabledRef.current,
         reason,
+        targetWindowActive: targetWindowActiveRef.current,
         wantsPinned: wantsPinnedRef.current,
     }), []);
+    // Native inverted scroll facts own the raw native offset mapping. Web DOM offsets stay raw scrollTop identity
+    // at the host/web boundary and do not enter this native source.
+    const nativeInvertedFactSourceRef = React.useRef<TranscriptViewportFactSource | null>(null);
+    if (Platform.OS !== 'web' && nativeInvertedFactSourceRef.current === null) {
+        nativeInvertedFactSourceRef.current = createNativeInvertedFlashListFactSource({
+            readRawScrollOffset: () => readNativeAbsoluteScrollOffset(listRef.current) ?? undefined,
+            readContentHeight: () => listContentHeightRef.current,
+            readLayoutHeight: () => listLayoutHeightRef.current,
+            readRenderedVisibleRange: () => {
+                try {
+                    return listRef.current?.computeVisibleIndices?.() ?? null;
+                } catch {
+                    return null;
+                }
+            },
+            readFirstVisibleRenderedIndex: () => {
+                try {
+                    return listRef.current?.getFirstVisibleIndex?.() ?? null;
+                } catch {
+                    return null;
+                }
+            },
+            readRenderedItemCount: () => listDataRef.current.length,
+            readSourceIndexForRenderedIndex: (renderedIndex) => {
+                const itemId = listDataRef.current[renderedIndex]?.id;
+                if (!itemId) return null;
+                const sourceIndex = canonicalWindowedItemsRef.current.findIndex((item) => item.id === itemId);
+                return sourceIndex >= 0 ? sourceIndex : null;
+            },
+        });
+    }
     const readCurrentNativeDistanceFromBottom = React.useCallback((params: {
         contentHeight?: number;
         layoutHeight?: number;
     } = {}): number | null => {
         if (Platform.OS === 'web') return null;
-        const offset = listRef.current?.getAbsoluteLastScrollOffset?.();
-        if (typeof offset !== 'number' || !Number.isFinite(offset)) return null;
-        const layoutHeight = typeof params.layoutHeight === 'number' && Number.isFinite(params.layoutHeight)
-            ? params.layoutHeight
-            : listLayoutHeightRef.current;
-        const contentHeight = typeof params.contentHeight === 'number' && Number.isFinite(params.contentHeight)
-            ? params.contentHeight
-            : listContentHeightRef.current;
-        if (!Number.isFinite(contentHeight) || !Number.isFinite(layoutHeight) || layoutHeight <= 0) return null;
-        // Raw offsets map through the orientation seam once. FlashList/RN inverted
-        // transforms the rendered rows, but native offsets still grow physically
-        // toward the visual bottom, so the canonical offset is the native offset.
-        const canonicalOffset = toCanonicalScrollOffset({
-            offsetY: offset,
-            contentHeight,
-            layoutHeight,
-            orientation: listOrientationRef.current,
-        });
-        return Math.max(0, Math.trunc(contentHeight - layoutHeight - canonicalOffset));
+        return nativeInvertedFactSourceRef.current?.getDistanceFromLiveTail(params) ?? null;
     }, []);
-    const releaseNativeBottomFollowIfFlashListOffsetEscaped = React.useCallback((params: {
+    const resolveNativeObservedScrollOffset = React.useCallback((rawOffsetY: number, override?: {
+        contentHeight?: number;
+        layoutHeight?: number;
+    }) => {
+        if (Platform.OS === 'web') return null;
+        return nativeInvertedFactSourceRef.current?.resolveObservedOffset(rawOffsetY, override) ?? null;
+    }, []);
+    const readViewportContentMetrics = React.useCallback((override?: {
+        contentHeight?: number;
+        layoutHeight?: number;
+    }) => {
+        if (Platform.OS === 'web') {
+            const contentHeight = typeof override?.contentHeight === 'number' && Number.isFinite(override.contentHeight)
+                ? override.contentHeight
+                : listContentHeightRef.current;
+            const layoutHeight = typeof override?.layoutHeight === 'number' && Number.isFinite(override.layoutHeight)
+                ? override.layoutHeight
+                : listLayoutHeightRef.current;
+            if (!Number.isFinite(contentHeight) || !Number.isFinite(layoutHeight) || layoutHeight <= 0) return null;
+            const normalizedContentHeight = Math.max(0, contentHeight);
+            const normalizedLayoutHeight = Math.max(0, layoutHeight);
+            return {
+                contentHeight: normalizedContentHeight,
+                layoutHeight: normalizedLayoutHeight,
+                scrollable: normalizedContentHeight > normalizedLayoutHeight,
+            };
+        }
+        return nativeInvertedFactSourceRef.current?.getContentMetrics(override) ?? null;
+    }, []);
+    const readViewportVisibleSourceRange = React.useCallback(() => {
+        return nativeInvertedFactSourceRef.current?.getVisibleSourceRange() ?? null;
+    }, []);
+    const resolveViewportReachedEdge = React.useCallback((edge: 'start' | 'end'): 'older' | 'newer' => {
+        if (Platform.OS === 'web') return edge === 'start' ? 'older' : 'newer';
+        return nativeInvertedFactSourceRef.current?.resolveReachedEdge(edge) ?? (edge === 'start' ? 'older' : 'newer');
+    }, []);
+    const observeNativeStreamAppendOffsetEscape = React.useCallback((params: {
         contentHeight: number;
         layoutHeight: number;
     }): boolean => {
-        if (Platform.OS === 'web') return false;
-        if (!wantsPinnedRef.current) return false;
-        if (hasActiveNativeViewportRestore()) return false;
-        if (
-            nativeBottomFollowRearmedAfterDragRef.current &&
-            bottomFollowModeStateRef.current.mode === 'following'
-        ) return false;
-        // Plan P3 (B6-consistent): a stale offset against freshly grown content is only an
-        // ESCAPE when the user could have escaped — an active/retained drag session, live
-        // momentum, a finger on the list, or recent scroll intent. A streaming burst with no
-        // touch attribution must never release follow off the not-yet-corrected offset.
-        if (
-            bottomFollowModeStateRef.current.mode === 'following' &&
-            bottomFollowModeStateRef.current.dragSession == null &&
-            !nativeMomentumScrollActiveRef.current &&
-            nativeTranscriptTouchStartYRef.current == null &&
-            Date.now() - lastUserScrollIntentAtMsRef.current >= TRANSCRIPT_SCROLL_USER_INTENT_AUTO_PIN_DELAY_MS
-        ) return false;
-        const distanceFromBottom = readCurrentNativeDistanceFromBottom(params);
-        if (distanceFromBottom == null) return false;
-        if (distanceFromBottom <= pinThresholdPx) return false;
-        beginNativeBottomFollowGestureIntent();
-        commitBottomFollowModeState(resolveTranscriptBottomFollowMode(bottomFollowModeStateRef.current, {
-            type: 'trusted-away-observation',
-            distanceFromBottom,
-            movedAwayFromBottom: true,
+        const distanceFromBottom = Platform.OS === 'web'
+            ? null
+            : readCurrentNativeDistanceFromBottom(params);
+        const plan = lifecycleHost.planNativeOffsetEscapeRelease({
+            bottomFollowState: bottomFollowModeStateRef.current,
+            distanceFromLiveTailPx: distanceFromBottom,
+            hasActiveNativeViewportRestore: hasActiveNativeViewportRestore(),
+            hasNativeTouchStart: nativeTranscriptTouchStartYRef.current != null,
+            hasRearmedNativeBottomFollow: nativeBottomFollowRearmedAfterDragRef.current,
+            isNative: Platform.OS !== 'web',
+            nativeMomentumScrollActive: nativeMomentumScrollActiveRef.current,
             pinThresholdPx,
-        }));
-        wantsPinnedRef.current = false;
-        isPinnedRef.current = false;
-        return true;
+            sessionId: props.sessionId,
+            timestampMs: Date.now(),
+            wantsPinned: wantsPinnedRef.current,
+        });
+        if (plan.decision.type !== 'release') return false;
+        if (plan.nativeGestureTakeoverPlan) {
+            applyNativeGestureTakeoverPlan(plan.nativeGestureTakeoverPlan);
+        }
+        return applyNativeOffsetReleaseLiveTailStateEffects(plan.nativeOffsetReleaseLiveTailStateEffects);
     }, [
-        beginNativeBottomFollowGestureIntent,
-        commitBottomFollowModeState,
+        applyNativeGestureTakeoverPlan,
+        applyNativeOffsetReleaseLiveTailStateEffects,
         hasActiveNativeViewportRestore,
+        lifecycleHost,
         pinThresholdPx,
+        props.sessionId,
         readCurrentNativeDistanceFromBottom,
     ]);
     /**
@@ -2682,55 +3508,398 @@ const ChatListInternal = React.memo((props: {
      * same observation window so sync marks live-tail intent (catch-up resolves
      * `tail_reset_latest_page`, never `defer_forward_loading`, on the next big gap).
      */
-    const adoptNativeFollowingForTrustedBottomArrival = React.useCallback((distanceFromBottom: number | null) => {
-        if (Platform.OS === 'web') return;
-        lastUserScrollIntentAtMsRef.current = Number.NEGATIVE_INFINITY;
-        nativeMountSettleAutoPinSuppressedRef.current = false;
-        nativeBottomFollowRearmedAfterDragRef.current = true;
-        wantsPinnedRef.current = true;
-        isPinnedRef.current = true;
-        const normalizedDistance = typeof distanceFromBottom === 'number' && Number.isFinite(distanceFromBottom)
-            ? Math.max(0, Math.trunc(distanceFromBottom))
-            : 0;
-        lastPinOffsetForIntentRef.current = normalizedDistance;
-        commitJumpToBottomDistanceForVisibility(normalizedDistance);
-        commitScrollPinState({ ...scrollPinRef.current, isPinned: true, newActivityCount: 0 });
-        emitViewportChange({ isPinned: true, offsetY: 0, shouldRestoreViewport: false });
+    const applyNativeTrustedBottomArrivalEffects = React.useCallback((
+        effects: readonly NativeTrustedBottomArrivalEffect[],
+    ) => {
+        for (const effect of effects) {
+            if (effect.sessionId !== props.sessionId) continue;
+            if (effect.type === 'adopt-native-trusted-bottom-arrival') {
+                lastUserScrollIntentAtMsRef.current = Number.NEGATIVE_INFINITY;
+                nativeMountSettleAutoPinSuppressedRef.current = false;
+                nativeBottomFollowRearmedAfterDragRef.current = true;
+                wantsPinnedRef.current = true;
+                isPinnedRef.current = true;
+                lastPinOffsetForIntentRef.current = effect.distanceFromLiveTailPx;
+                commitJumpToBottomDistanceForVisibility(effect.distanceFromLiveTailPx);
+                commitScrollPinState({ ...scrollPinRef.current, isPinned: true, newActivityCount: 0 });
+                emitViewportChange(effect.viewportState);
+            }
+        }
     }, [
         commitJumpToBottomDistanceForVisibility,
         commitScrollPinState,
         emitViewportChange,
+        props.sessionId,
+    ]);
+    const adoptNativeFollowingForTrustedBottomArrival = React.useCallback((distanceFromBottom: number | null) => {
+        if (Platform.OS === 'web') return;
+        applyNativeTrustedBottomArrivalEffects(resolveNativeTrustedBottomArrivalEffects({
+            distanceFromLiveTailPx: distanceFromBottom,
+            sessionId: props.sessionId,
+        }));
+    }, [
+        applyNativeTrustedBottomArrivalEffects,
+        props.sessionId,
+    ]);
+    /**
+     * Deferred-newer drain (plan C6/D3): the list supplies viewport GEOMETRY only. The data layer
+     * accrues the deferred-forward backlog and owns the release decision (threshold + in-flight
+     * dedupe + fetch) in `sync.maybeDrainDeferredNewerMessages`. Routing every viewport observation
+     * through this single owner removes parallel list-side threshold decisions.
+     */
+	    const drainDeferredNewerMessages = React.useCallback((params: Readonly<{
+	        distanceFromBottom: number;
+	        pinned: boolean;
+	    }>) => {
+	        sync.maybeDrainDeferredNewerMessages(props.sessionId, {
+	            isPinned: params.pinned,
+	            distanceFromBottomPx: params.distanceFromBottom,
+	        });
+    }, [props.sessionId]);
+    const applyNativeReturnToLiveTailApplyEffects = React.useCallback((
+        effects: readonly NativeReturnToLiveTailApplyEffect[],
+    ): boolean => {
+        let appliedReturn = false;
+        for (const effect of effects) {
+            if (effect.sessionId !== props.sessionId) continue;
+            if (effect.type === 'adopt-native-return-to-live-tail') {
+                adoptNativeFollowingForTrustedBottomArrival(effect.distanceFromLiveTailPx);
+                appliedReturn = true;
+                continue;
+            }
+            if (effect.type === 'drain-native-return-to-live-tail') {
+                drainDeferredNewerMessages({
+                    distanceFromBottom: effect.distanceFromLiveTailPx,
+                    pinned: effect.isPinned,
+                });
+            }
+        }
+        return appliedReturn;
+    }, [
+        adoptNativeFollowingForTrustedBottomArrival,
+        drainDeferredNewerMessages,
+        props.sessionId,
+    ]);
+    const applyNativeReturnToLiveTailLifecycleEffects = React.useCallback((
+        effects: readonly TranscriptViewportLifecycleEffect[],
+    ): boolean => {
+        if (Platform.OS === 'web') return false;
+        return applyNativeReturnToLiveTailApplyEffects(resolveNativeReturnToLiveTailApplyEffects({
+            effects,
+            sessionId: props.sessionId,
+        }));
+    }, [
+        applyNativeReturnToLiveTailApplyEffects,
+        props.sessionId,
+    ]);
+    const applyNativeSettledReturnToLiveTailReturnEffects = React.useCallback((
+        effects: readonly NativeSettledReturnToLiveTailReturnEffect[],
+    ): boolean => {
+        let appliedReturn = false;
+        for (const effect of effects) {
+            if (effect.sessionId !== props.sessionId) continue;
+            if (effect.type === 'adopt-native-settled-return-to-live-tail') {
+                adoptNativeFollowingForTrustedBottomArrival(effect.distanceFromLiveTailPx);
+                appliedReturn = true;
+                continue;
+            }
+            if (effect.type === 'capture-native-settled-return-anchor') {
+                scheduleViewportAnchorCaptureRef.current(effect.viewportState);
+            }
+        }
+        return appliedReturn;
+    }, [
+        adoptNativeFollowingForTrustedBottomArrival,
+        props.sessionId,
+    ]);
+    const applyNativeSettledReturnToLiveTailDrainEffects = React.useCallback((
+        effects: readonly NativeSettledReturnToLiveTailDrainEffect[],
+    ) => {
+        for (const effect of effects) {
+            if (effect.sessionId !== props.sessionId) continue;
+            if (effect.type !== 'drain-native-settled-return-to-live-tail') continue;
+            drainDeferredNewerMessages({
+                distanceFromBottom: effect.distanceFromLiveTailPx,
+                pinned: effect.isPinned,
+            });
+        }
+    }, [drainDeferredNewerMessages, props.sessionId]);
+    const shouldSuppressGenericViewportStateForProtectedJumpSeq = React.useCallback((): boolean => {
+        if (Platform.OS !== 'web') return false;
+        const protection = promotedJumpSeqViewportProtectionRef.current;
+        if (!protection) return false;
+        if (protection.sessionId !== props.sessionId) {
+            promotedJumpSeqViewportProtectionRef.current = null;
+            return false;
+        }
+        if (
+            props.jumpToSeq != null &&
+            Math.trunc(props.jumpToSeq) !== protection.seq
+        ) {
+            promotedJumpSeqViewportProtectionRef.current = null;
+            return false;
+        }
+        if (
+            lastExplicitWebScrollIntentAtMsRef.current > protection.promotedAtMs ||
+            lastRouteJumpProtectionClearingWebMovementAtMsRef.current > protection.promotedAtMs
+        ) {
+            promotedJumpSeqViewportProtectionRef.current = null;
+            return false;
+        }
+        return true;
+    }, [
+        props.jumpToSeq,
+        props.sessionId,
+    ]);
+    const applyGenericScrollObservationViewportStateApplyEffects = React.useCallback((
+        effects: readonly GenericScrollObservationViewportStateEffect[],
+        params: Readonly<{
+            recordAcceptedViewportPaintObservation: () => void;
+        }>,
+    ): boolean => {
+        let applied = false;
+        for (const effect of effects) {
+            if (effect.sessionId !== props.sessionId) continue;
+            applied = true;
+            if (shouldSuppressGenericViewportStateForProtectedJumpSeq()) continue;
+            const { state } = effect;
+            lastPinOffsetForIntentRef.current = state.lastDistanceFromLiveTailPx;
+            lastScrollOffsetForIntentRef.current = state.nextScrollOffsetPx;
+            wantsPinnedRef.current = state.wantsPinned;
+            isPinnedRef.current = state.viewportState.isPinned;
+            emitViewportChange(state.viewportState);
+            scheduleViewportAnchorCaptureRef.current(state.anchorCapture.viewportState, {
+                suppressAnchorCapture: state.anchorCapture.suppressAnchorCapture,
+            });
+            commitJumpToBottomDistanceForVisibility(state.jumpButtonDistanceFromLiveTailPx);
+	            commitScrollPinEvent(state.scrollPinEvent);
+	            params.recordAcceptedViewportPaintObservation();
+	            if (Platform.OS !== 'web') {
+	                drainDeferredNewerMessages({
+	                    distanceFromBottom: state.drain.distanceFromLiveTailPx,
+	                    pinned: state.drain.isPinned,
+	                });
+	            }
+	        }
+	        return applied;
+	    }, [
+        commitJumpToBottomDistanceForVisibility,
+        commitScrollPinEvent,
+        drainDeferredNewerMessages,
+        emitViewportChange,
+        props.sessionId,
+        shouldSuppressGenericViewportStateForProtectedJumpSeq,
+    ]);
+    const applyGenericScrollObservationViewportStateEffects = React.useCallback((
+        effects: readonly TranscriptViewportLifecycleEffect[],
+        params: Readonly<{
+            recordAcceptedViewportPaintObservation: () => void;
+        }>,
+    ): boolean => {
+        const applyEffects = effects.filter((
+            effect,
+        ): effect is GenericScrollObservationViewportStateEffect => (
+            effect.sessionId === props.sessionId &&
+            effect.type === 'apply-generic-observed-viewport-state'
+        ));
+        return applyGenericScrollObservationViewportStateApplyEffects(applyEffects, params);
+    }, [
+        applyGenericScrollObservationViewportStateApplyEffects,
+        props.sessionId,
+    ]);
+    const applyGenericScrollObservationReadOnlyVisibleBottomStateEffects = React.useCallback((
+        effects: readonly GenericScrollObservationReadOnlyVisibleBottomEffect[],
+    ): boolean => {
+        let applied = false;
+        for (const effect of effects) {
+            if (effect.sessionId !== props.sessionId) continue;
+            applied = true;
+            // Keep this path read-only: it updates visibility/telemetry state for a native passive
+            // exact-bottom observation without emitting viewport persistence, drains, or pin writes.
+            const { state } = effect;
+            lastPinOffsetForIntentRef.current = state.lastDistanceFromLiveTailPx;
+            commitJumpToBottomDistanceForVisibility(state.jumpButtonDistanceFromLiveTailPx);
+            commitScrollPinEvent(state.scrollPinEvent);
+        }
+        return applied;
+    }, [
+        commitJumpToBottomDistanceForVisibility,
+        commitScrollPinEvent,
+        props.sessionId,
+    ]);
+    const applyGenericScrollObservationReadOnlyVisibleBottomEffects = React.useCallback((
+        effects: readonly TranscriptViewportLifecycleEffect[],
+    ): boolean => {
+        const applyEffects = effects.filter((
+            effect,
+        ): effect is GenericScrollObservationReadOnlyVisibleBottomEffect => (
+            effect.sessionId === props.sessionId &&
+            effect.type === 'apply-generic-read-only-visible-bottom-state'
+        ));
+        return applyGenericScrollObservationReadOnlyVisibleBottomStateEffects(applyEffects);
+    }, [
+        applyGenericScrollObservationReadOnlyVisibleBottomStateEffects,
+        props.sessionId,
+    ]);
+    const applyGenericScrollObservationSuppressionApplyEffects = React.useCallback((
+        effects: readonly GenericScrollObservationSuppressionEffect[],
+    ): boolean => {
+        let applied = false;
+        for (const effect of effects) {
+            if (effect.sessionId !== props.sessionId) continue;
+            applied = true;
+        }
+        return applied;
+    }, [props.sessionId]);
+    const applyGenericScrollObservationSuppressionEffects = React.useCallback((
+        effects: readonly TranscriptViewportLifecycleEffect[],
+    ): boolean => {
+        const applyEffects = effects.filter((
+            effect,
+        ): effect is GenericScrollObservationSuppressionEffect => (
+            effect.sessionId === props.sessionId &&
+            effect.type === 'suppress-generic-scroll-observation'
+        ));
+        return applyGenericScrollObservationSuppressionApplyEffects(applyEffects);
+    }, [
+        applyGenericScrollObservationSuppressionApplyEffects,
+        props.sessionId,
+    ]);
+    const applyGenericScrollObservationAnchorCaptureCancellationApplyEffects = React.useCallback((
+        effects: readonly GenericScrollObservationAnchorCaptureCancellationEffect[],
+    ): boolean => {
+        let applied = false;
+        for (const effect of effects) {
+            if (effect.sessionId !== props.sessionId) continue;
+            applied = true;
+            invalidateViewportAnchorCapture();
+        }
+        return applied;
+    }, [invalidateViewportAnchorCapture, props.sessionId]);
+    const applyGenericScrollObservationAnchorCaptureCancellationEffects = React.useCallback((
+        effects: readonly TranscriptViewportLifecycleEffect[],
+    ): boolean => {
+        const applyEffects = effects.filter((
+            effect,
+        ): effect is GenericScrollObservationAnchorCaptureCancellationEffect => (
+            effect.sessionId === props.sessionId &&
+            effect.type === 'cancel-scheduled-viewport-anchor-capture'
+        ));
+        return applyGenericScrollObservationAnchorCaptureCancellationApplyEffects(applyEffects);
+    }, [
+        applyGenericScrollObservationAnchorCaptureCancellationApplyEffects,
+        props.sessionId,
+    ]);
+    const applyNativeMomentumSettleAwayReleaseStateEffects = React.useCallback((
+        effects: readonly NativeMomentumSettleAwayReleaseStateEffect[],
+    ): boolean => {
+        let appliedRelease = false;
+        for (const effect of effects) {
+            if (effect.sessionId !== props.sessionId) continue;
+            if (effect.type !== 'apply-native-momentum-settle-away-release-state') continue;
+            wantsPinnedRef.current = false;
+            isPinnedRef.current = false;
+            cancelScheduledPinToBottom();
+            lastPinOffsetForIntentRef.current = effect.distanceFromLiveTailPx;
+            commitJumpToBottomDistanceForVisibility(effect.distanceFromLiveTailPx);
+            commitScrollPinEvent(effect.scrollPinEvent);
+            emitViewportChange(effect.viewportState);
+            // Plan P2: the settle is user-attributed (trusted drag session) — capture the
+            // dwelled position even when every momentum frame was swallowed elsewhere.
+            scheduleViewportAnchorCaptureRef.current(effect.viewportState);
+            appliedRelease = true;
+        }
+        return appliedRelease;
+    }, [
+        cancelScheduledPinToBottom,
+        commitJumpToBottomDistanceForVisibility,
+        commitScrollPinEvent,
+        emitViewportChange,
+        props.sessionId,
+    ]);
+    const applyNativeMomentumSettleAwayReleaseLifecycleEffects = React.useCallback((
+        effects: readonly TranscriptViewportLifecycleEffect[],
+    ): boolean => {
+        if (Platform.OS === 'web') return false;
+        return applyNativeMomentumSettleAwayReleaseStateEffects(resolveNativeMomentumSettleAwayReleaseStateEffects({
+            effects,
+            pinEnabled: pinEnabledRef.current,
+            sessionId: props.sessionId,
+            wantsPinned: wantsPinnedRef.current,
+        }));
+    }, [
+        applyNativeMomentumSettleAwayReleaseStateEffects,
+        props.sessionId,
+    ]);
+    const applyNativeBottomFollowRearmAdoptionEffects = React.useCallback((
+        effects: readonly NativeBottomFollowRearmAdoptionEffect[],
+    ) => {
+        for (const effect of effects) {
+            if (effect.sessionId !== props.sessionId) continue;
+            if (effect.type !== 'adopt-native-bottom-follow-rearm') continue;
+            adoptNativeFollowingForTrustedBottomArrival(effect.distanceFromLiveTailPx);
+        }
+    }, [
+        adoptNativeFollowingForTrustedBottomArrival,
+        props.sessionId,
+    ]);
+    const applyNativeBottomFollowRearmLifecycleEffects = React.useCallback((
+        effects: readonly TranscriptViewportLifecycleEffect[],
+    ): boolean => {
+        if (Platform.OS === 'web') return false;
+        const decision = resolveNativeBottomFollowRearmAdoptionDecision({
+            effects,
+            hasRearmedNativeBottomFollow: nativeBottomFollowRearmedAfterDragRef.current,
+            sessionId: props.sessionId,
+        });
+        applyNativeBottomFollowRearmAdoptionEffects(decision.effects);
+        return decision.consumed;
+    }, [
+        applyNativeBottomFollowRearmAdoptionEffects,
+        props.sessionId,
     ]);
     const recordNativeListDragEndIntent = React.useCallback(() => {
         if (Platform.OS === 'web') return;
-        nativeListDragActiveRef.current = false;
         const dragSession = bottomFollowModeStateRef.current.dragSession;
         const distanceFromBottom =
             dragSession?.latestDistanceFromBottom ??
             readCurrentNativeDistanceFromBottom() ??
             null;
-        const nextBottomFollowState = resolveTranscriptBottomFollowMode(bottomFollowModeStateRef.current, {
-            distanceFromBottom,
+        const transition = dispatchViewportLifecycleEvent({
+            distanceFromLiveTailPx: distanceFromBottom,
             pinThresholdPx,
-            sawAwayMovement: dragSession?.sawAwayMovement ?? false,
-            type: 'drag-end',
+            sessionId: props.sessionId,
+            type: 'gesture-end',
         });
-        commitBottomFollowModeState(nextBottomFollowState);
-        if (nextBottomFollowState.mode === 'following') {
-            adoptNativeFollowingForTrustedBottomArrival(distanceFromBottom);
-        } else {
-            nativeBottomFollowRearmedAfterDragRef.current = false;
+        applyNativeDragActiveMirrorLifecycleEffects(transition.effects);
+        const appliedLifecycleReturn = applyNativeReturnToLiveTailLifecycleEffects(transition.effects);
+        const appliedLifecycleRearm = applyNativeBottomFollowRearmLifecycleEffects(transition.effects);
+        if (appliedLifecycleReturn || appliedLifecycleRearm) {
+            return;
         }
+        applyNativeBottomFollowRearmResetLifecycleEffects(transition.effects);
     }, [
-        adoptNativeFollowingForTrustedBottomArrival,
-        commitBottomFollowModeState,
+        applyNativeBottomFollowRearmLifecycleEffects,
+        applyNativeBottomFollowRearmResetLifecycleEffects,
+        applyNativeDragActiveMirrorLifecycleEffects,
+        applyNativeReturnToLiveTailLifecycleEffects,
+        dispatchViewportLifecycleEvent,
         pinThresholdPx,
+        props.sessionId,
         readCurrentNativeDistanceFromBottom,
     ]);
     const recordNativeMomentumScrollBeginIntent = React.useCallback(() => {
         if (Platform.OS === 'web') return;
-        nativeMomentumScrollActiveRef.current = true;
-    }, []);
+        const transition = dispatchViewportLifecycleEvent({
+            sessionId: props.sessionId,
+            type: 'native-momentum-scroll-begin',
+        });
+        applyNativeMomentumActiveMirrorLifecycleEffects(transition.effects);
+    }, [
+        applyNativeMomentumActiveMirrorLifecycleEffects,
+        dispatchViewportLifecycleEvent,
+        props.sessionId,
+    ]);
     /**
      * Post-drag momentum settle (plan B8): a trusted fling that lands within the pin
      * threshold re-arms follow even though every momentum frame is untrusted — the
@@ -2741,62 +3910,36 @@ const ChatListInternal = React.memo((props: {
      */
     const recordNativeMomentumScrollEndSettle = React.useCallback(() => {
         if (Platform.OS === 'web') return;
-        nativeMomentumScrollActiveRef.current = false;
-        const state = bottomFollowModeStateRef.current;
-        if (
-            (state.mode !== 'released' && state.mode !== 'following') ||
-            state.dragSession?.trusted !== true
-        ) return;
+        const momentumEndTransition = dispatchViewportLifecycleEvent({
+            sessionId: props.sessionId,
+            type: 'native-momentum-scroll-end',
+        });
+        applyNativeMomentumActiveMirrorLifecycleEffects(momentumEndTransition.effects);
         const distanceFromBottom = readCurrentNativeDistanceFromBottom();
-        const nextBottomFollowState = resolveTranscriptBottomFollowMode(state, {
-            distanceFromBottom,
+        const transition = dispatchViewportLifecycleEvent({
+            distanceFromLiveTailPx: distanceFromBottom,
             pinThresholdPx,
+            sessionId: props.sessionId,
             type: 'momentum-settle',
         });
-        commitBottomFollowModeState(nextBottomFollowState);
-        if (nextBottomFollowState.mode === 'following') {
-            adoptNativeFollowingForTrustedBottomArrival(
-                distanceFromBottom ?? state.dragSession.latestDistanceFromBottom,
-            );
+        if (applyNativeReturnToLiveTailLifecycleEffects(transition.effects)) {
             return;
         }
-        if (wantsPinnedRef.current) {
-            // The fling settled away from the bottom but the drag-end-near-bottom adoption
-            // left follow armed: release it now and surface the released UI state.
-            const settledDistanceFromBottom = Math.max(
-                0,
-                Math.trunc(distanceFromBottom ?? state.dragSession.latestDistanceFromBottom ?? 0),
-            );
-            wantsPinnedRef.current = false;
-            isPinnedRef.current = false;
-            nativeBottomFollowRearmedAfterDragRef.current = false;
-            cancelScheduledPinToBottom();
-            lastPinOffsetForIntentRef.current = settledDistanceFromBottom;
-            commitJumpToBottomDistanceForVisibility(settledDistanceFromBottom);
-            commitScrollPinEvent({
-                type: 'scroll',
-                enabled: pinEnabledRef.current,
-                offsetY: settledDistanceFromBottom,
-                pinnedOffsetThresholdPx: 0,
-            });
-            const settledViewportState = {
-                isPinned: false,
-                offsetY: settledDistanceFromBottom,
-                shouldRestoreViewport: true,
-            };
-            emitViewportChange(settledViewportState);
-            // Plan P2: the settle is user-attributed (trusted drag session) — capture the
-            // dwelled position even when every momentum frame was swallowed elsewhere.
-            scheduleViewportAnchorCaptureRef.current(settledViewportState);
+        if (applyNativeBottomFollowRearmLifecycleEffects(transition.effects)) {
+            return;
+        }
+        if (applyNativeMomentumSettleAwayReleaseLifecycleEffects(transition.effects)) {
+            applyNativeBottomFollowRearmResetLifecycleEffects(transition.effects);
         }
     }, [
-        adoptNativeFollowingForTrustedBottomArrival,
-        cancelScheduledPinToBottom,
-        commitBottomFollowModeState,
-        commitJumpToBottomDistanceForVisibility,
-        commitScrollPinEvent,
-        emitViewportChange,
+        applyNativeBottomFollowRearmLifecycleEffects,
+        applyNativeBottomFollowRearmResetLifecycleEffects,
+        applyNativeMomentumActiveMirrorLifecycleEffects,
+        applyNativeMomentumSettleAwayReleaseLifecycleEffects,
+        applyNativeReturnToLiveTailLifecycleEffects,
+        dispatchViewportLifecycleEvent,
         pinThresholdPx,
+        props.sessionId,
         readCurrentNativeDistanceFromBottom,
     ]);
     React.useEffect(() => {
@@ -2830,64 +3973,28 @@ const ChatListInternal = React.memo((props: {
     const isCatchingUpNewer = useSessionCatchingUpNewer(props.sessionId);
     const showCatchUpOverlay = isCatchingUpNewer;
     const transcriptListExtraData = React.useMemo(() => ({
+        messagePins: props.messagePins,
         selectionVersion: transcriptMessageSelection.selectionVersion,
-    }), [transcriptMessageSelection.selectionVersion]);
+    }), [props.messagePins, transcriptMessageSelection.selectionVersion]);
 
     // N3.1: the inverted pilot rides the flash_v2 machinery with orientation as an
     // orthogonal axis — every `=== 'flash_v2'` gate below stays authoritative; the
     // orientation is consumed ONLY at the seam boundaries (data order, raw<->canonical
     // scroll offsets, edge slots, chronological neighbor lookups).
     const transcriptListPresentation = resolveTranscriptListPresentation({
-        setting: transcriptListImplementation,
         platformIsWeb: Platform.OS === 'web',
     });
-    const preferredListImplementation = transcriptListPresentation.implementation;
-    // Plan E1: capture the viewport synchronously inside the crash handler, BEFORE the
-    // implementation flip renders, so the fallback list can restore the reading position.
-    const webCrashFallbackViewportRef = React.useRef<Readonly<{
-        sessionId: string;
-        anchor: ReturnType<typeof captureWebTranscriptViewportAnchor>;
-        distanceFromBottom: number;
-    }> | null>(null);
     const pendingWebLocalHeightChangeAnchorRef = React.useRef<Readonly<{
         sessionId: string;
         anchor: WebTranscriptViewportAnchor;
     }> | null>(null);
-    const captureWebCrashFallbackViewport = React.useCallback(() => {
-        if (Platform.OS !== 'web') return;
-        const metrics = resolveWebScrollMetrics();
-        if (!metrics) return;
-        let anchor: ReturnType<typeof captureWebTranscriptViewportAnchor> = null;
-        try {
-            anchor = captureWebTranscriptViewportAnchor({ container: metrics.element });
-        } catch {
-            anchor = null;
-        }
-        webCrashFallbackViewportRef.current = {
-            sessionId: props.sessionId,
-            anchor,
-            distanceFromBottom: Math.max(0, Math.trunc(getWebTranscriptDistanceFromBottom(metrics))),
-        };
-    }, [props.sessionId, resolveWebScrollMetrics]);
-    const webFlashListCrashed = useWebFlashListCrashFallback({
-        enabled: Platform.OS === 'web' && preferredListImplementation === 'flash_v2',
-        onBeforeFallback: captureWebCrashFallbackViewport,
-    });
-    const listImplementation =
-        Platform.OS === 'web' && preferredListImplementation === 'flash_v2' && webFlashListCrashed
-            ? 'flatlist_legacy'
-            : preferredListImplementation;
-    const listOrientation: TranscriptListOrientation =
-        listImplementation === 'flash_v2' ? transcriptListPresentation.orientation : 'standard';
-    const isInvertedNativeList = listOrientation === 'inverted';
-    const listOrientationRef = React.useRef(listOrientation);
-    listOrientationRef.current = listOrientation;
+    const listOrientation: TranscriptListOrientation = transcriptListPresentation.orientation;
     const resolveSyncLoadOlderOptions = React.useCallback((): SyncLoadOlderOptions | undefined => {
-        if (Platform.OS === 'web' || listImplementation !== 'flash_v2') return undefined;
+        if (Platform.OS === 'web') return undefined;
         const configuredLimit = sync.getSyncTuning().transcriptNativeOlderMessagesPageSize;
         if (typeof configuredLimit !== 'number' || !Number.isFinite(configuredLimit)) return undefined;
         return { limit: Math.max(1, Math.trunc(configuredLimit)) };
-    }, [listImplementation]);
+    }, []);
     const [firstListPaintObserved, setFirstListPaintObserved] = React.useState(false);
     const [nativeViewportPaintObserved, setNativeViewportPaintObservedState] = React.useState(false);
     const nativeViewportPaintObservedRef = React.useRef(false);
@@ -2924,7 +4031,6 @@ const ChatListInternal = React.memo((props: {
     }, [props.sessionId]);
     const releaseNativePaintForIssuedEntryRestore = React.useCallback(() => {
         if (Platform.OS === 'web') return false;
-        if (listImplementation !== 'flash_v2') return false;
         if (nativeViewportPaintObservedRef.current) return false;
         if (
             nativeEntryRestorePaintReleasedRef.current.sessionId === props.sessionId &&
@@ -2932,14 +4038,15 @@ const ChatListInternal = React.memo((props: {
         ) {
             return false;
         }
-        if (listLayoutHeightRef.current <= 0 || listContentHeightRef.current <= 0) return false;
+        const contentMetrics = readViewportContentMetrics();
+        if (!contentMetrics || contentMetrics.contentHeight <= 0) return false;
         if (sessionEntryViewportRef.current?.sessionId !== props.sessionId) return false;
         if (sessionEntryViewportRef.current.shouldFollowBottom !== false) return false;
-        if (entryRestoreTransactionRef.current?.sessionId !== props.sessionId) return false;
+        if (!entryRestoreOwner.hasOpenTransaction(props.sessionId)) return false;
 
         updateNativeEntryRestorePaintReleased(true);
         return true;
-    }, [listImplementation, props.sessionId, updateNativeEntryRestorePaintReleased]);
+    }, [entryRestoreOwner, props.sessionId, readViewportContentMetrics, updateNativeEntryRestorePaintReleased]);
     /**
      * 32ms paint-release polish (plan A4): once the entry-restore transaction has issued its
      * write (background sessions) or closed, reveal the restored viewport shortly after.
@@ -2947,7 +4054,6 @@ const ChatListInternal = React.memo((props: {
      */
     const scheduleNativePaintReleaseForEntryRestore = React.useCallback((options?: Readonly<{ force?: boolean }>) => {
         if (Platform.OS === 'web') return;
-        if (listImplementation !== 'flash_v2') return;
         if (options?.force !== true && props.sessionActive) return;
         if (nativeViewportPaintObservedRef.current) return;
         if (
@@ -2958,12 +4064,12 @@ const ChatListInternal = React.memo((props: {
         }
         if (sessionEntryViewportRef.current?.sessionId !== props.sessionId) return;
         if (sessionEntryViewportRef.current.shouldFollowBottom !== false) return;
-        const writeContext = entryRestoreWriteContextRef.current;
-        if (writeContext?.sessionId !== props.sessionId) return;
+        const paintReleaseHandle = entryRestoreOwner.nativePaintReleaseHandle({ sessionId: props.sessionId });
+        if (!paintReleaseHandle) return;
         const existing = nativeEntryRestorePaintReleaseTimeoutRef.current;
         if (
             existing?.sessionId === props.sessionId &&
-            existing.issuedAtMs === writeContext.createdAtMs
+            existing.issuedAtMs === paintReleaseHandle.issuedAtMs
         ) {
             return;
         }
@@ -2973,7 +4079,7 @@ const ChatListInternal = React.memo((props: {
         }
 
         const handle = {
-            issuedAtMs: writeContext.createdAtMs,
+            issuedAtMs: paintReleaseHandle.issuedAtMs,
             sessionId: props.sessionId,
             timeoutId: null as unknown as ReturnType<typeof setTimeout>,
         };
@@ -2981,11 +4087,14 @@ const ChatListInternal = React.memo((props: {
             if (nativeEntryRestorePaintReleaseTimeoutRef.current !== handle) return;
             nativeEntryRestorePaintReleaseTimeoutRef.current = null;
             if (currentSessionIdRef.current !== handle.sessionId) return;
-            if (entryRestoreWriteContextRef.current?.createdAtMs !== handle.issuedAtMs) return;
+            if (!entryRestoreOwner.matchesNativePaintReleaseHandle({
+                issuedAtMs: handle.issuedAtMs,
+                sessionId: handle.sessionId,
+            })) return;
             releaseNativePaintForIssuedEntryRestore();
         }, TRANSCRIPT_NATIVE_ENTRY_RESTORE_PAINT_RELEASE_DELAY_MS);
         nativeEntryRestorePaintReleaseTimeoutRef.current = handle;
-    }, [listImplementation, props.sessionActive, props.sessionId, releaseNativePaintForIssuedEntryRestore]);
+    }, [entryRestoreOwner, props.sessionActive, props.sessionId, releaseNativePaintForIssuedEntryRestore]);
     const firstPaintTelemetryRef = React.useRef<{
         recorded: boolean;
         sessionId: string;
@@ -3075,7 +4184,6 @@ const ChatListInternal = React.memo((props: {
     // tool-group expansion state lives. `props.items` stays the pre-decomposition
     // source for consumers that visit turn/tool-calls-group shapes (auto-expand).
     const decomposedItems = React.useMemo<ChatTranscriptListItem[]>(() => {
-        if (listImplementation !== 'flash_v2') return props.items;
         return buildTranscriptTurnUnits({
             items: props.items,
             getMessageById: getTurnMessageById,
@@ -3086,7 +4194,6 @@ const ChatListInternal = React.memo((props: {
     }, [
         expandedToolCallsAnchorMessageIds,
         getTurnMessageById,
-        listImplementation,
         props.forkMessageMetadataById,
         props.items,
         transcriptToolCallsCollapsedPreviewCountSetting,
@@ -3096,7 +4203,7 @@ const ChatListInternal = React.memo((props: {
     // lands at the viewport head with zero scroll writes. The withheld older rows
     // reveal as one prepend-observed commit when the entry transaction closes.
     const entrySliceSourceBounds = React.useMemo(() => {
-        if (Platform.OS === 'web' || listImplementation !== 'flash_v2') return null;
+        if (Platform.OS === 'web') return null;
         if (!entrySliceWindow || entrySliceWindow.sessionId !== props.sessionId) return null;
         const index = decomposedItems.findIndex((item) => item.id === entrySliceWindow.anchorRowId);
         // Anchor row id no longer present (fail open: reveal everything).
@@ -3110,28 +4217,47 @@ const ChatListInternal = React.memo((props: {
             orientation: listOrientation,
         });
         return bounds.end - bounds.start < decomposedItems.length ? bounds : null;
-    }, [decomposedItems, entrySliceWindow, listImplementation, listOrientation, props.sessionId]);
+    }, [decomposedItems, entrySliceWindow, listOrientation, props.sessionId]);
     entrySliceWithheldCountRef.current = entrySliceSourceBounds
         ? decomposedItems.length - (entrySliceSourceBounds.end - entrySliceSourceBounds.start)
         : 0;
-    // Canonical (oldest-first) windowed view BEFORE the orientation boundary. The hot/cold
-    // segmentation runs here so web (standard) and native (inverted) share one policy call;
-    // each segment is then oriented independently for the rendered list.
-    const canonicalWindowedItems = React.useMemo<readonly ChatTranscriptListItem[]>(() => {
-        if (listImplementation === 'flatlist_legacy') return decomposedItems;
+    // Canonical (oldest-first) entry-sliced view BEFORE the orientation boundary.
+    const entryWindowedItems = React.useMemo<readonly ChatTranscriptListItem[]>(() => {
         return entrySliceSourceBounds
             ? decomposedItems.slice(entrySliceSourceBounds.start, entrySliceSourceBounds.end)
             : decomposedItems;
-    }, [decomposedItems, entrySliceSourceBounds, listImplementation]);
-    const displayItems = React.useMemo<readonly ChatTranscriptListItem[]>(() => {
-        if (listImplementation === 'flatlist_legacy') {
-            // Legacy: inverted lists expect newest-first input.
-            return [...props.items].reverse();
+    }, [decomposedItems, entrySliceSourceBounds]);
+    const resolveTargetWindowItemSeq = React.useCallback((item: ChatTranscriptListItem): number | null => {
+        const directSeq = (item as { seq?: unknown }).seq;
+        if (typeof directSeq === 'number' && Number.isFinite(directSeq)) return Math.trunc(directSeq);
+        const descriptor = resolveTranscriptViewportAnchorDescriptor(item);
+        const messageId = descriptor?.messageId;
+        if (!messageId) return null;
+        const seq = getTurnMessageById(messageId)?.seq;
+        return typeof seq === 'number' && Number.isFinite(seq) ? Math.trunc(seq) : null;
+    }, [getTurnMessageById]);
+    const sessionTargetWindowState = sync.getSessionTargetWindowState(props.sessionId);
+    const targetWindowHostFacts = useTranscriptTargetWindowHostAdapter({
+        items: entryWindowedItems,
+        windowState: sessionTargetWindowState,
+        resolveSeq: resolveTargetWindowItemSeq,
+    });
+    const targetWindowActive = targetWindowHostFacts.targetWindowActive;
+    targetWindowActiveRef.current = targetWindowActive;
+    React.useEffect(() => {
+        if (!targetWindowActive) {
+            activeTargetWindowTargetRef.current = null;
         }
+    }, [targetWindowActive]);
+    // Canonical (oldest-first) windowed view BEFORE the orientation boundary. The hot/cold
+    // segmentation runs here so web (standard) and native (inverted) share one policy call;
+    // each segment is then oriented independently for the rendered list.
+    const canonicalWindowedItems = targetWindowHostFacts.items;
+    const displayItems = React.useMemo<readonly ChatTranscriptListItem[]>(() => {
         // N3.1: the orientation reversal is a view adapter at the LIST BOUNDARY only —
         // turn grouping, derived items, and the slice window above stay oldest-first.
         return orientTranscriptListItems(canonicalWindowedItems, listOrientation);
-    }, [canonicalWindowedItems, listImplementation, listOrientation, props.items]);
+    }, [canonicalWindowedItems, listOrientation]);
     const liveTailAnchor = React.useMemo(() => resolveTranscriptLiveTailAnchor({
         items: canonicalWindowedItems,
         getMessageById: getTurnMessageById,
@@ -3163,15 +4289,7 @@ const ChatListInternal = React.memo((props: {
         const hotTailItemCount = platformIsWeb
             ? tuning.transcriptWebHotTailItemCount
             : tuning.transcriptNativeHotTailItemCount;
-        // FIX 2 (native standard orientation guard): the native carve renders the live tail in the
-        // edge slot, which hardcodes `displayIndexMode="invertedEdgeSlot"` and whose pin guards assume
-        // inverted orientation. flash_v2 STANDARD is selectable on native (non-default), so the native
-        // carve must ONLY engage under inverted orientation — standard-native flash_v2 falls back to
-        // the cold list / all-in behavior (never the inverted edge slot). Web is always standard and
-        // owns its in-flow footer carve, so it is unaffected by this guard.
-        const enabled =
-            listImplementation === 'flash_v2' &&
-            (platformIsWeb || (hotTailItemCount > 0 && listOrientation === 'inverted'));
+        const enabled = platformIsWeb || hotTailItemCount > 0;
         const segments = buildTranscriptHotColdSegments({
             enabled,
             hotTailItemCount: hotTailItemCount > 0 ? hotTailItemCount : 1,
@@ -3203,9 +4321,9 @@ const ChatListInternal = React.memo((props: {
             hotCount: segments.hotItems.length,
             splitIndex: segments.splitIndex,
         };
-    }, [canonicalWindowedItems, expandedToolCallsAnchorMessageIds, listImplementation, listOrientation, liveTailAnchorMessageId, props.activeThinkingMessageId]);
+    }, [canonicalWindowedItems, expandedToolCallsAnchorMessageIds, listOrientation, liveTailAnchorMessageId, props.activeThinkingMessageId]);
     const transcriptHotColdSplitActive =
-        listImplementation === 'flash_v2' && transcriptHotColdSegments.hotItems.length > 0;
+        transcriptHotColdSegments.hotItems.length > 0;
     const shouldUseWebHotColdSplit = Platform.OS === 'web' && transcriptHotColdSplitActive;
     const shouldUseNativeHotColdSplit = Platform.OS !== 'web' && transcriptHotColdSplitActive;
     const listData = transcriptHotColdSplitActive ? transcriptHotColdSegments.coldItems : displayItems;
@@ -3260,7 +4378,6 @@ const ChatListInternal = React.memo((props: {
         nativeVisibleWindowSnapshotRef.current = null;
         lastNativeVisibleRowsSnapshotRef.current = null;
     }, [
-        listImplementation,
         props.sessionId,
         updateNativeEntryRestorePaintReleased,
         updateNativeViewportPaintObserved,
@@ -3270,9 +4387,87 @@ const ChatListInternal = React.memo((props: {
     // (e.g. initial viewport fill and jump-to-seq resolution). `itemsRef`/`listDataRef`
     // ALWAYS hold the same decomposed array the list renders; index-based consumers
     // (renderItem prev-row lookup, jump/anchor/prepend index math) must use these.
+    canonicalWindowedItemsRef.current = canonicalWindowedItems;
     itemsRef.current = displayItems;
     listDataRef.current = listData;
     preDecompositionItemsRef.current = props.items;
+
+    const transcriptNavigationRenderedSources = React.useMemo<TranscriptNavigationRenderedAnchorSource[]>(() => {
+        const state = getStorage().getState();
+        const session = state?.sessionMessages?.[props.sessionId];
+        const stateMessagesById = (session?.messagesById ?? session?.messagesMap ?? {}) as Readonly<Record<string, Message>>;
+        const reducerState = session?.reducerState ?? null;
+        return listData.flatMap((item, sourceIndex) => {
+            const messageIds = collectTranscriptNavigationMessageIdsForItem(item);
+            const messages = messageIds.flatMap((messageId) => {
+                const message = props.messagesById[messageId] ?? stateMessagesById[messageId] ?? null;
+                if (!message) return [];
+                return [{
+                    messageId,
+                    routeMessageId: buildSessionMessageRouteId({
+                        messageId,
+                        messagesById: { [messageId]: message },
+                        reducerState,
+                    }),
+                    seq: typeof message.seq === 'number' && Number.isFinite(message.seq)
+                        ? Math.trunc(message.seq)
+                        : null,
+                    transcriptBlockIndex:
+                        typeof message.transcriptBlockIndex === 'number' && Number.isFinite(message.transcriptBlockIndex)
+                            ? Math.trunc(message.transcriptBlockIndex)
+                            : null,
+                    role: transcriptNavigationRoleForMessage(message),
+                }];
+            });
+            if (messages.length === 0) return [];
+            return [{
+                sourceIndex,
+                messageIds,
+                messages,
+            }];
+        });
+    }, [listData, props.messagesById, props.sessionId]);
+    const transcriptNavigationRuntimeAnchors = React.useMemo(
+        () => deriveTranscriptNavigationRuntimeAnchors({
+            entries: props.transcriptNavigationEntries,
+            renderedSources: transcriptNavigationRenderedSources,
+        }),
+        [props.transcriptNavigationEntries, transcriptNavigationRenderedSources],
+    );
+    transcriptNavigationRuntimeAnchorsRef.current = transcriptNavigationRuntimeAnchors;
+    const transcriptNavigationRailVisible = React.useMemo(() => deriveTranscriptNavigationRailLayout({
+        entryCount: props.transcriptNavigationEntries.length,
+        paneHeightPx: listLayoutHeight,
+        paneWidthPx: listLayoutWidthPx,
+        platformOS: Platform.OS === 'web' || Platform.OS === 'ios' || Platform.OS === 'android'
+            ? Platform.OS
+            : 'native-other',
+        transcriptContentWidthPx: Math.min(listLayoutWidthPx, transcriptContentMaxWidth),
+        transcriptMaxWidthPx: transcriptContentMaxWidth,
+    }).visible, [
+        listLayoutHeight,
+        listLayoutWidthPx,
+        props.transcriptNavigationEntries.length,
+        transcriptContentMaxWidth,
+    ]);
+    // Panel-only mode hides the rail (width steal), so the pane's open state must
+    // keep visibility observation alive for the panel's active-entry tracking.
+    const transcriptNavigationPaneOpen = useTranscriptNavigationPaneOpen(props.sessionId);
+    const transcriptNavigationVisibilitySnapshot = useTranscriptNavigationVisibilitySnapshot(props.sessionId, {
+        enabled: transcriptNavigationRailVisible || transcriptNavigationPaneOpen,
+    });
+    const transcriptNavigationRailVisibilitySnapshot = React.useMemo(() => {
+        const entryIds = new Set(props.transcriptNavigationEntries.map((entry) => entry.id));
+        const currentAnchorId = transcriptNavigationVisibilitySnapshot.currentAnchorId &&
+            entryIds.has(transcriptNavigationVisibilitySnapshot.currentAnchorId)
+            ? transcriptNavigationVisibilitySnapshot.currentAnchorId
+            : null;
+        const visibleAnchorIds = transcriptNavigationVisibilitySnapshot.visibleAnchorIds.filter((id) => entryIds.has(id));
+        return {
+            currentAnchorId,
+            visibleAnchorIds,
+        };
+    }, [props.transcriptNavigationEntries, transcriptNavigationVisibilitySnapshot]);
 
     React.useEffect(() => {
         recordStreamingVisibleUpdateForSessionUiTelemetry({
@@ -3293,11 +4488,10 @@ const ChatListInternal = React.memo((props: {
     React.useEffect(() => {
         return () => {
             clearStreamingSessionUiTelemetryMarks(props.sessionId);
+            clearTranscriptNavigationVisibilityStore(props.sessionId);
         };
     }, [props.sessionId]);
 
-    const usesNativeFlashListBottomMaintenance =
-        Platform.OS !== 'web' && listImplementation === 'flash_v2';
     const hasRearmedNativeBottomFollow = React.useCallback((): boolean => (
         usesNativeFlashListBottomMaintenance &&
         bottomFollowModeStateRef.current.mode === 'following' &&
@@ -3306,36 +4500,16 @@ const ChatListInternal = React.memo((props: {
     ), [usesNativeFlashListBottomMaintenance]);
     const nativeEntryShouldUseBottomMaintenance =
         sessionEntryViewportRef.current?.shouldFollowBottom !== false;
-    const configuredFlashListDrawDistance = sync.getSyncTuning().transcriptFlashListDrawDistance;
-    // C4: explicit tuning stays the override; the unset default is ~1x viewport height clamped
-    // to [600, 1200]px so rows above the viewport (where prepends land and where the user is
-    // heading while paginating) are measured before they enter (E4 height churn, prepend
-    // layout-not-ready windows). FlashList's own default is only 250px on native.
-    const flashListDrawDistance =
-        Platform.OS !== 'web'
-            ? (typeof configuredFlashListDrawDistance === 'number' &&
-                Number.isFinite(configuredFlashListDrawDistance) &&
-                configuredFlashListDrawDistance > 0
-                ? Math.trunc(configuredFlashListDrawDistance)
-                : Math.min(
-                    TRANSCRIPT_NATIVE_DRAW_DISTANCE_DEFAULT_MAX_PX,
-                    Math.max(
-                        TRANSCRIPT_NATIVE_DRAW_DISTANCE_DEFAULT_MIN_PX,
-                        Math.ceil(Number.isFinite(listLayoutHeight) ? listLayoutHeight : 0),
-                    ),
-                ))
-            : undefined;
+    const frameTuning = sync.getSyncTuning();
+    const configuredFlashListDrawDistance = frameTuning.transcriptFlashListDrawDistance;
     const telemetryPlatform = resolveTranscriptViewportTelemetryPlatform(Platform.OS);
-    const telemetryListImplementation = resolveTranscriptViewportTelemetryListImplementation({
-        platform: telemetryPlatform,
-        listImplementation,
-    });
     const resolveNativeVisibleWindowSnapshot = React.useCallback((): NativeVisibleWindowSnapshot => {
         const data = listDataRef.current;
         const layoutHeight = listLayoutHeightRef.current;
         const blankAreaPx = data.length > 0 && Number.isFinite(layoutHeight) && layoutHeight > 0
             ? Math.max(0, Math.trunc(layoutHeight))
             : 0;
+        let visibleRangeReadStatus: TranscriptViewportTelemetryVisibleRangeReadStatus = 'null';
         const resolveLastKnownVisibleRowsSnapshot = (): NativeVisibleWindowSnapshot | null => {
             const snapshot = lastNativeVisibleRowsSnapshotRef.current;
             if (!snapshot?.hasVisibleRows) return null;
@@ -3350,6 +4524,12 @@ const ChatListInternal = React.memo((props: {
         };
         const buildBlankSnapshot = (
             visibleWindowSource: TranscriptViewportTelemetryVisibleWindowSource,
+            rangeFacts: Readonly<{
+                firstVisibleRenderedIndex?: number;
+                visibleRangeReadStatus?: TranscriptViewportTelemetryVisibleRangeReadStatus;
+                visibleRenderedEndIndex?: number;
+                visibleRenderedStartIndex?: number;
+            }> = {},
         ): NativeVisibleWindowSnapshot => {
             const lastKnownSnapshot = resolveLastKnownVisibleRowsSnapshot();
             if (lastKnownSnapshot) {
@@ -3357,8 +4537,18 @@ const ChatListInternal = React.memo((props: {
                     blankAreaPx,
                     blankAreaSource: 'index-estimate',
                     hasVisibleRows: false,
+                    ...(rangeFacts.firstVisibleRenderedIndex !== undefined
+                        ? { firstVisibleRenderedIndex: rangeFacts.firstVisibleRenderedIndex }
+                        : {}),
                     lastKnownFirstVisibleItemId: lastKnownSnapshot.firstVisibleItemId,
                     lastKnownLastVisibleItemId: lastKnownSnapshot.lastVisibleItemId,
+                    ...(rangeFacts.visibleRangeReadStatus ? { visibleRangeReadStatus: rangeFacts.visibleRangeReadStatus } : {}),
+                    ...(rangeFacts.visibleRenderedEndIndex !== undefined
+                        ? { visibleRenderedEndIndex: rangeFacts.visibleRenderedEndIndex }
+                        : {}),
+                    ...(rangeFacts.visibleRenderedStartIndex !== undefined
+                        ? { visibleRenderedStartIndex: rangeFacts.visibleRenderedStartIndex }
+                        : {}),
                     visibleWindowSource,
                     visibleWindowStale: true,
                 };
@@ -3366,7 +4556,17 @@ const ChatListInternal = React.memo((props: {
             return {
                 blankAreaPx,
                 blankAreaSource: 'index-estimate',
+                ...(rangeFacts.firstVisibleRenderedIndex !== undefined
+                    ? { firstVisibleRenderedIndex: rangeFacts.firstVisibleRenderedIndex }
+                    : {}),
                 hasVisibleRows: false,
+                ...(rangeFacts.visibleRangeReadStatus ? { visibleRangeReadStatus: rangeFacts.visibleRangeReadStatus } : {}),
+                ...(rangeFacts.visibleRenderedEndIndex !== undefined
+                    ? { visibleRenderedEndIndex: rangeFacts.visibleRenderedEndIndex }
+                    : {}),
+                ...(rangeFacts.visibleRenderedStartIndex !== undefined
+                    ? { visibleRenderedStartIndex: rangeFacts.visibleRenderedStartIndex }
+                    : {}),
                 visibleWindowSource,
             };
         };
@@ -3381,30 +4581,56 @@ const ChatListInternal = React.memo((props: {
                     blankAreaPx: 0,
                     blankAreaSource: 'none',
                     hasVisibleRows: false,
+                    visibleRangeReadStatus: 'null',
                     visibleWindowSource,
                 };
             }
             const normalizedStart = Math.trunc(startIndex);
             const normalizedEnd = Math.trunc(endIndex);
+            const rangeFacts = {
+                visibleRenderedEndIndex: normalizedEnd,
+                visibleRenderedStartIndex: normalizedStart,
+            };
             if (normalizedStart > normalizedEnd) {
-                return buildBlankSnapshot(visibleWindowSource);
+                return buildBlankSnapshot(visibleWindowSource, {
+                    ...rangeFacts,
+                    firstVisibleRenderedIndex: normalizedStart,
+                    visibleRangeReadStatus: 'reversed',
+                });
             }
+            const rangeOutOfBounds =
+                normalizedStart < 0 ||
+                normalizedEnd < 0 ||
+                normalizedStart >= data.length ||
+                normalizedEnd >= data.length;
             const clampedStart = Math.max(0, Math.min(data.length - 1, normalizedStart));
             const clampedEnd = Math.max(0, Math.min(data.length - 1, normalizedEnd));
             if (clampedStart > clampedEnd) {
-                return buildBlankSnapshot(visibleWindowSource);
+                return buildBlankSnapshot(visibleWindowSource, {
+                    ...rangeFacts,
+                    firstVisibleRenderedIndex: normalizedStart,
+                    visibleRangeReadStatus: 'out-of-range',
+                });
             }
             const firstVisibleItemId = data[clampedStart]?.id;
             const lastVisibleItemId = data[clampedEnd]?.id;
             if (!firstVisibleItemId && !lastVisibleItemId) {
-                return buildBlankSnapshot(visibleWindowSource);
+                return buildBlankSnapshot(visibleWindowSource, {
+                    ...rangeFacts,
+                    firstVisibleRenderedIndex: normalizedStart,
+                    visibleRangeReadStatus: rangeOutOfBounds ? 'out-of-range' : 'ok',
+                });
             }
             const snapshot: NativeVisibleWindowSnapshot = {
                 blankAreaPx: 0,
                 blankAreaSource: 'none',
+                firstVisibleRenderedIndex: normalizedStart,
                 firstVisibleItemId,
                 hasVisibleRows: true,
                 lastVisibleItemId,
+                visibleRangeReadStatus: rangeOutOfBounds ? 'out-of-range' : 'ok',
+                visibleRenderedEndIndex: normalizedEnd,
+                visibleRenderedStartIndex: normalizedStart,
                 visibleWindowSource,
             };
             lastNativeVisibleRowsSnapshotRef.current = snapshot;
@@ -3418,6 +4644,7 @@ const ChatListInternal = React.memo((props: {
                 : null;
             if (snapshot) return snapshot;
         } catch {
+            visibleRangeReadStatus = 'threw';
             // Fall through to the viewability/ref fallback; telemetry must not affect scrolling.
         }
 
@@ -3435,6 +4662,7 @@ const ChatListInternal = React.memo((props: {
             blankAreaPx,
             blankAreaSource: blankAreaPx > 0 ? 'index-estimate' : 'none',
             hasVisibleRows: false,
+            visibleRangeReadStatus,
             visibleWindowSource: 'none',
         };
     }, []);
@@ -3442,72 +4670,73 @@ const ChatListInternal = React.memo((props: {
     const resolveNativeTelemetryDiagnostics = React.useCallback((
         source: Readonly<Record<string, unknown>>,
     ): Record<string, unknown> => {
-        if (Platform.OS === 'web' || telemetryListImplementation !== 'flash_v2') return {};
-        const orientation: TranscriptViewportTelemetryListOrientation =
-            listOrientationRef.current === 'inverted' ? 'inverted' : 'standard';
+        if (Platform.OS === 'web') return {};
         const rawOffsetFromSource = readFiniteTelemetryNumber(source.rawOffsetY);
-        let rawOffsetFromList: number | undefined;
-        try {
-            rawOffsetFromList = readFiniteTelemetryNumber(listRef.current?.getAbsoluteLastScrollOffset?.());
-        } catch {
-            rawOffsetFromList = undefined;
-        }
+        const rawOffsetFromList = readNativeAbsoluteScrollOffset(listRef.current) ?? undefined;
         const rawOffsetY = rawOffsetFromSource ?? rawOffsetFromList;
+        const eventLayoutHeight = readFiniteTelemetryNumber(source.layoutHeight);
+        const eventContentHeight = readFiniteTelemetryNumber(source.contentHeight);
+        const refLayoutHeight = readFiniteTelemetryNumber(listLayoutHeightRef.current);
+        const refContentHeight = readFiniteTelemetryNumber(listContentHeightRef.current);
         const layoutHeight =
-            readFiniteTelemetryNumber(source.layoutHeight) ?? readFiniteTelemetryNumber(listLayoutHeightRef.current);
+            eventLayoutHeight ?? refLayoutHeight;
         const contentHeight =
-            readFiniteTelemetryNumber(source.contentHeight) ?? readFiniteTelemetryNumber(listContentHeightRef.current);
+            eventContentHeight ?? refContentHeight;
+        const observedOffset =
+            rawOffsetY !== undefined &&
+            layoutHeight !== undefined &&
+            contentHeight !== undefined
+                ? resolveNativeObservedScrollOffset(rawOffsetY, { contentHeight, layoutHeight })
+                : null;
         const canonicalOffsetY =
             readFiniteTelemetryNumber(source.canonicalOffsetY)
-            ?? (
-                rawOffsetY !== undefined &&
-                layoutHeight !== undefined &&
-                contentHeight !== undefined
-                    ? toCanonicalScrollOffset({
-                        offsetY: rawOffsetY,
-                        contentHeight,
-                        layoutHeight,
-                        orientation,
-                    })
-                    : readFiniteTelemetryNumber(source.offsetY)
-            );
+            ?? observedOffset?.canonicalOffsetY
+            ?? readFiniteTelemetryNumber(source.offsetY);
         const distanceFromBottom =
             readFiniteTelemetryNumber(source.distanceFromBottom)
-            ?? (
-                canonicalOffsetY !== undefined &&
-                layoutHeight !== undefined &&
-                contentHeight !== undefined
-                    ? Math.max(0, Math.trunc(contentHeight - layoutHeight - canonicalOffsetY))
-                    : undefined
-            );
+            ?? observedOffset?.distanceFromLiveTailPx;
         const isAtRawBottom =
             readTelemetryBoolean(source.isAtRawBottom)
-            ?? (
-                rawOffsetY !== undefined &&
-                layoutHeight !== undefined &&
-                contentHeight !== undefined
-                    ? (
-                        Math.abs(rawOffsetY - resolveBottomRawScrollOffset({
-                            contentHeight,
-                            layoutHeight,
-                            orientation,
-                        })) <= 1
-                    )
-                    : undefined
-            );
+            ?? observedOffset?.isAtRawLiveTail;
         const visibleSnapshot = resolveNativeVisibleWindowSnapshot();
         const bottomFollowState = bottomFollowModeStateRef.current;
         const bottomFollowMode: TranscriptViewportTelemetryBottomFollowMode =
             bottomFollowState.mode === 'escaping' || bottomFollowState.mode === 'released'
                 ? bottomFollowState.mode
                 : 'following';
+        const listDataLength = listDataRef.current.length;
+        const fullItemCount = itemsRef.current.length;
+        const carveTelemetry = liveTailCarveTelemetryRef.current;
+        const coldCount = carveTelemetry.active ? carveTelemetry.coldCount : listDataLength;
+        const hotCount = carveTelemetry.active ? carveTelemetry.hotCount : 0;
+        const nativeBlankWindowSignature: TranscriptViewportTelemetryNativeBlankWindowSignature | undefined =
+            visibleSnapshot.hasVisibleRows === false &&
+            listDataLength > 0 &&
+            layoutHeight !== undefined &&
+            contentHeight !== undefined &&
+            layoutHeight > 0 &&
+            contentHeight > layoutHeight &&
+            visibleSnapshot.blankAreaPx > 0
+                ? 'empty-visible-window'
+                : undefined;
+        const entryRestoreState: TranscriptViewportTelemetryTransactionState =
+            entryRestoreOwner.telemetryState(props.sessionId);
+        const prependState: TranscriptViewportTelemetryTransactionState =
+            nativePrependOwner.telemetryState(props.sessionId);
+        const layoutCacheClearState: TranscriptViewportTelemetryLayoutCacheClearState = 'idle';
+        const layoutCacheClearReason: TranscriptViewportTelemetryLayoutCacheClearReason = 'none';
+        const scrollToIndexFailureState: TranscriptViewportTelemetryScrollToIndexFailureState = 'none';
 
         return {
-            orientation,
+            orientation: 'inverted',
             ...(rawOffsetY !== undefined ? { rawOffsetY } : {}),
             ...(canonicalOffsetY !== undefined ? { canonicalOffsetY } : {}),
             ...(layoutHeight !== undefined ? { layoutHeight } : {}),
             ...(contentHeight !== undefined ? { contentHeight } : {}),
+            ...(eventLayoutHeight !== undefined ? { eventLayoutHeight } : {}),
+            ...(eventContentHeight !== undefined ? { eventContentHeight } : {}),
+            ...(refLayoutHeight !== undefined ? { refLayoutHeight } : {}),
+            ...(refContentHeight !== undefined ? { refContentHeight } : {}),
             ...(distanceFromBottom !== undefined ? { distanceFromBottom } : {}),
             bottomFollowMode,
             dragSessionTrusted: bottomFollowState.dragSession?.trusted === true,
@@ -3517,16 +4746,39 @@ const ChatListInternal = React.memo((props: {
             hasVisibleRows: visibleSnapshot.hasVisibleRows,
             ...(visibleSnapshot.firstVisibleItemId ? { firstVisibleItemId: visibleSnapshot.firstVisibleItemId } : {}),
             ...(visibleSnapshot.lastVisibleItemId ? { lastVisibleItemId: visibleSnapshot.lastVisibleItemId } : {}),
+            ...(visibleSnapshot.firstVisibleRenderedIndex !== undefined
+                ? { firstVisibleRenderedIndex: visibleSnapshot.firstVisibleRenderedIndex }
+                : {}),
+            ...(visibleSnapshot.visibleRangeReadStatus
+                ? { visibleRangeReadStatus: visibleSnapshot.visibleRangeReadStatus }
+                : {}),
+            ...(visibleSnapshot.visibleRenderedStartIndex !== undefined
+                ? { visibleRenderedStartIndex: visibleSnapshot.visibleRenderedStartIndex }
+                : {}),
+            ...(visibleSnapshot.visibleRenderedEndIndex !== undefined
+                ? { visibleRenderedEndIndex: visibleSnapshot.visibleRenderedEndIndex }
+                : {}),
             ...(visibleSnapshot.visibleWindowStale ? { visibleWindowStale: true } : {}),
             ...(visibleSnapshot.lastKnownFirstVisibleItemId ? { lastKnownFirstVisibleItemId: visibleSnapshot.lastKnownFirstVisibleItemId } : {}),
             ...(visibleSnapshot.lastKnownLastVisibleItemId ? { lastKnownLastVisibleItemId: visibleSnapshot.lastKnownLastVisibleItemId } : {}),
             blankAreaPx: visibleSnapshot.blankAreaPx,
             blankAreaSource: visibleSnapshot.blankAreaSource,
             visibleWindowSource: visibleSnapshot.visibleWindowSource,
+            ...(nativeBlankWindowSignature ? { nativeBlankWindowSignature } : {}),
+            listDataLength,
+            fullItemCount,
+            coldCount,
+            hotCount,
+            entryRestoreState,
+            prependState,
+            layoutCacheClearState,
+            layoutCacheClearReason,
+            scrollToIndexFailureState,
         };
     }, [
+        props.sessionId,
         resolveNativeVisibleWindowSnapshot,
-        telemetryListImplementation,
+        resolveNativeObservedScrollOffset,
     ]);
     const resolveViewportTelemetryMode = React.useCallback((mode?: TranscriptViewportMode): TranscriptViewportMode => {
         return mode ?? (wantsPinnedRef.current ? 'follow-bottom' : 'user-unpinned');
@@ -3538,22 +4790,21 @@ const ChatListInternal = React.memo((props: {
         }>,
         options?: Readonly<{ sessionId?: string }>,
     ) => {
-        const tuning = sync.getSyncTuning();
-        configureTranscriptViewportTelemetryFromTuning(tuning);
-        if (!transcriptViewportTelemetry.isEnabled()) return;
+        const tuning = resolveEnabledViewportTelemetryTuning();
+        if (!tuning) return;
         const nativeDiagnostics = resolveNativeTelemetryDiagnostics(event);
         recordTranscriptViewportTelemetryEvent({
             ...event,
             ...nativeDiagnostics,
             sessionId: options?.sessionId ?? props.sessionId,
             platform: telemetryPlatform,
-            listImplementation: telemetryListImplementation,
+            listImplementation: 'flash_v2',
             timestampMs: Date.now(),
         }, tuning);
     }, [
         props.sessionId,
+        resolveEnabledViewportTelemetryTuning,
         resolveNativeTelemetryDiagnostics,
-        telemetryListImplementation,
         telemetryPlatform,
     ]);
     const recordRestoreDecisionTelemetry = React.useCallback((
@@ -3608,37 +4859,6 @@ const ChatListInternal = React.memo((props: {
         resolveWebViewportTelemetryDiagnostics,
     ]);
 
-    const scheduleWebPrependRestoreWindowExpiry = React.useCallback((anchor: WebTranscriptPrependAnchor | null) => {
-        cancelWebPrependRestoreWindowExpiry();
-        if (Platform.OS !== 'web' || listImplementation !== 'flash_v2' || anchor === null) return;
-
-        const arm = (target: WebTranscriptPrependAnchor) => {
-            const delayMs = Math.max(0, Math.ceil(target.expiresAtMs - Date.now())) + 1;
-            webPrependRestoreWindowExpiryTimeoutRef.current = setTimeout(() => {
-                webPrependRestoreWindowExpiryTimeoutRef.current = null;
-                const pendingAnchor = pendingWebPrependAnchorRef.current;
-                if (!pendingAnchor) return;
-                if (Date.now() <= pendingAnchor.expiresAtMs) {
-                    arm(pendingAnchor);
-                    return;
-                }
-                clearWebPrependRestoreWindow('abandoned-identity');
-                recordRestoreDecisionTelemetry('skipped', {
-                    mode: 'restore-anchor',
-                    programmaticWebWrite: false,
-                    webTrigger: 'prepend-restore',
-                });
-            }, delayMs);
-        };
-
-        arm(anchor);
-    }, [
-        cancelWebPrependRestoreWindowExpiry,
-        clearWebPrependRestoreWindow,
-        listImplementation,
-        recordRestoreDecisionTelemetry,
-    ]);
-
     const recordScrollObservedTelemetry = React.useCallback((
         params: Readonly<{
             contentHeight?: number;
@@ -3673,29 +4893,21 @@ const ChatListInternal = React.memo((props: {
             rawOffsetY?: number;
         }> = {},
     ) => {
-        if (Platform.OS === 'web' || telemetryListImplementation !== 'flash_v2') return;
-        const rawOffsetY = params.rawOffsetY ?? readFiniteTelemetryNumber(listRef.current?.getAbsoluteLastScrollOffset?.());
+        if (Platform.OS === 'web') return;
+        const tuning = sync.getSyncTuning();
+        configureTranscriptViewportTelemetryFromTuning(tuning);
+        if (!transcriptViewportTelemetry.isEnabled()) return;
+        const rawOffsetY = params.rawOffsetY ?? readNativeAbsoluteScrollOffset(listRef.current) ?? undefined;
         const layoutHeight = params.layoutHeight ?? listLayoutHeightRef.current;
         const contentHeight = params.contentHeight ?? listContentHeightRef.current;
+        const observedOffset = rawOffsetY !== undefined
+            ? resolveNativeObservedScrollOffset(rawOffsetY, { contentHeight, layoutHeight })
+            : null;
         const canonicalOffsetY =
-            params.canonicalOffsetY ??
-            (
-                rawOffsetY !== undefined
-                    ? toCanonicalScrollOffset({
-                        offsetY: rawOffsetY,
-                        contentHeight,
-                        layoutHeight,
-                        orientation: listOrientationRef.current,
-                    })
-                    : undefined
-            );
+            params.canonicalOffsetY ?? observedOffset?.canonicalOffsetY;
         const distanceFromBottom =
-            params.distanceFromBottom ??
-            (
-                canonicalOffsetY !== undefined
-                    ? Math.max(0, Math.trunc(contentHeight - layoutHeight - canonicalOffsetY))
-                    : undefined
-            );
+            params.distanceFromBottom ?? observedOffset?.distanceFromLiveTailPx;
+        const visibleSourceRange = readViewportVisibleSourceRange();
         recordViewportTelemetryEvent({
             type: 'visible-window-observed',
             mode: resolveViewportTelemetryMode(),
@@ -3706,21 +4918,36 @@ const ChatListInternal = React.memo((props: {
             layoutHeight,
             contentHeight,
             distanceFromBottom,
+            firstVisibleSourceIndex: visibleSourceRange?.firstSourceIndex,
+            lastVisibleSourceIndex: visibleSourceRange?.lastSourceIndex,
         });
     }, [
         recordViewportTelemetryEvent,
+        readViewportVisibleSourceRange,
+        resolveNativeObservedScrollOffset,
         resolveViewportTelemetryMode,
-        telemetryListImplementation,
     ]);
 
     const handleNativeViewableItemsChanged = React.useCallback((info: Readonly<{
         viewableItems?: readonly NativeViewableTranscriptItem[];
     }>) => {
-        if (Platform.OS === 'web' || telemetryListImplementation !== 'flash_v2') return;
+        if (Platform.OS === 'web') return;
+        const viewableItems = Array.isArray(info.viewableItems) ? info.viewableItems : [];
+        const visibilityStore = getTranscriptNavigationVisibilityStore(props.sessionId);
+        if (transcriptNavigationRuntimeAnchors.length > 0 && visibilityStore.hasSubscribers()) {
+            visibilityStore.set(deriveNativeTranscriptVisibleAnchorFacts({
+                anchors: transcriptNavigationRuntimeAnchors,
+                itemCount: listDataRef.current.length,
+                orientation: listOrientation,
+                preferUserTurnAnchor: true,
+                viewableItems,
+            }));
+        } else if (visibilityStore.hasSubscribers()) {
+            visibilityStore.set(null);
+        }
         const tuning = sync.getSyncTuning();
         configureTranscriptViewportTelemetryFromTuning(tuning);
         if (!transcriptViewportTelemetry.isEnabled()) return;
-        const viewableItems = Array.isArray(info.viewableItems) ? info.viewableItems : [];
         const visibleItems = viewableItems
             .filter((item) => item.isViewable !== false)
             .sort((left, right) => (left.index ?? Number.MAX_SAFE_INTEGER) - (right.index ?? Number.MAX_SAFE_INTEGER));
@@ -3747,19 +4974,26 @@ const ChatListInternal = React.memo((props: {
         }
         recordNativeVisibleWindowTelemetry('observed');
     }, [
+        listOrientation,
+        props.sessionId,
         recordNativeVisibleWindowTelemetry,
-        telemetryListImplementation,
+        transcriptNavigationRuntimeAnchors,
     ]);
 
     const shouldAttachNativeViewabilityTelemetry =
         Platform.OS !== 'web' &&
-        telemetryListImplementation === 'flash_v2' &&
         sync.getSyncTuning().transcriptViewportTelemetryEnabled === true;
+    const shouldAttachNativeViewability =
+        Platform.OS !== 'web' &&
+        (shouldAttachNativeViewabilityTelemetry || (
+            transcriptNavigationRuntimeAnchors.length > 0 &&
+            getTranscriptNavigationVisibilityStore(props.sessionId).hasSubscribers()
+        ));
     const nativeViewabilityConfig = React.useMemo(() => (
-        shouldAttachNativeViewabilityTelemetry
+        shouldAttachNativeViewability
             ? { itemVisiblePercentThreshold: 1 }
             : undefined
-    ), [shouldAttachNativeViewabilityTelemetry]);
+    ), [shouldAttachNativeViewability]);
 
     // ---- N1 evidence wiring (dev-gated telemetry only; zero product behavior) ----
     // Row identity state for N1.2/N1.3: last measured height and last content count per row id,
@@ -3798,7 +5032,7 @@ const ChatListInternal = React.memo((props: {
         return resolveTranscriptRowViewportRelation({
             rowTopY: layout?.y,
             rowHeightPx: layout?.height,
-            scrollOffsetY: listRef.current?.getAbsoluteLastScrollOffset?.(),
+            scrollOffsetY: readNativeAbsoluteScrollOffset(listRef.current) ?? undefined,
             viewportHeightPx: listLayoutHeightRef.current,
         });
     }, []);
@@ -3829,47 +5063,35 @@ const ChatListInternal = React.memo((props: {
         resolveRowEvidenceViewportRelation,
         resolveViewportTelemetryMode,
     ]);
-    // C1: a monotonically increasing per-commit token. The reconciler coalesces the global
-    // `clearLayoutCacheOnUpdate` to at most one clear per commit token, so the host only needs to
-    // advance it once per React commit.
-    const layoutInvalidationCommitTokenRef = React.useRef(0);
     React.useEffect(() => {
-        layoutInvalidationCommitTokenRef.current += 1;
+        measurementHost.advanceLayoutInvalidationCommitToken();
     });
+    const applyTranscriptMeasurementHostEffects = React.useCallback((
+        effects: readonly TranscriptMeasurementHostEffect[],
+    ) => {
+        for (const effect of effects) {
+            if (effect.type === 'clear-layout-cache') {
+                const list = listRef.current;
+                list?.clearLayoutCacheOnUpdate?.();
+            }
+        }
+    }, []);
     const handleRowLayoutMutation = React.useCallback((params: Readonly<{
         itemId: string;
         mutation: TranscriptRowLayoutMutation;
         rowKind: string;
     }>) => {
-        const { reason, previousSignature, nextSignature } = params.mutation;
-        const viewportTransactionOpen =
-            hasOpenNativePrependTransactionForSession() || hasOpenEntryRestoreTransactionForSession();
-        const commitToken = layoutInvalidationCommitTokenRef.current;
-        // C1: the sole, transaction-gated `clearLayoutCacheOnUpdate` caller. The reconciler clears
-        // only on a real structural delta (never on a streaming append) and never while a prepend or
-        // entry-restore transaction owns the viewport — preserving the anti-thrash intent without the
-        // blunt streaming suppression. A deferred clear is not queued; the next post-transaction
-        // structural mutation re-requests (a clear is a refresh, not a debt). A direct expand/collapse
-        // is a discrete structural action with no signature pair, so it asks for a structural clear.
-        const decision = (reason === 'signature-change' && previousSignature !== undefined && nextSignature !== undefined)
-            ? measurementReconciler.requestGlobalLayoutInvalidation({
-                previous: previousSignature,
-                next: nextSignature,
-                viewportTransactionOpen,
-                commitToken,
-            })
-            : measurementReconciler.requestGlobalLayoutInvalidation({
-                structural: reason === 'expand' || reason === 'collapse',
-                viewportTransactionOpen,
-                commitToken,
-            });
-        if (decision.clear) {
-            listRef.current?.clearLayoutCacheOnUpdate?.();
-        }
+        const result = measurementHost.observeRowLayoutMutation({
+            mutation: params.mutation,
+            viewportTransactionOpen:
+                hasOpenNativePrependTransactionForSession() || hasOpenEntryRestoreTransactionForSession(),
+        });
+        applyTranscriptMeasurementHostEffects(result.effects);
     }, [
+        applyTranscriptMeasurementHostEffects,
         hasOpenEntryRestoreTransactionForSession,
         hasOpenNativePrependTransactionForSession,
-        measurementReconciler,
+        measurementHost,
     ]);
     React.useEffect(() => {
         // N1.1 + N2d.1: one always-on subscription to the patched FlashList offset corrector.
@@ -3877,21 +5099,13 @@ const ChatListInternal = React.memo((props: {
         // applied corrections accumulate on the transaction so the observation can classify a
         // corrector-covered commit as mvcp-preserved instead of double-correcting. Dev/QA
         // consumer: viewport telemetry (gated per event at the listener level).
-        if (Platform.OS === 'web' || listImplementation !== 'flash_v2') return undefined;
+        if (Platform.OS === 'web') return undefined;
         return subscribeToFlashListOffsetCorrections((event) => {
             if (event.type === 'correction-applied' && typeof event.diffPx === 'number') {
-                const transaction = nativePrependTransactionRef.current;
-                if (transaction && !transaction.isClosed()) {
-                    transaction.onCorrectorCorrectionApplied(event.diffPx);
-                    if (transaction.state() === 'committed' && nativePrependCorrectorNudgeRef.current == null) {
-                        // Re-observe off the vendor scroll path so the covered classification
-                        // closes the window promptly (before the quiet gate can spend the fallback).
-                        nativePrependCorrectorNudgeRef.current = setTimeout(() => {
-                            nativePrependCorrectorNudgeRef.current = null;
-                            observeNativePrependTransactionRef.current();
-                        }, 0);
-                    }
-                }
+                applyNativePrependOwnerEffectsRef.current(nativePrependOwner.recordCorrectorCorrection({
+                    diffPx: event.diffPx,
+                    sessionId: props.sessionId,
+                }));
             }
             if (!isViewportEvidenceTelemetryEnabled()) return;
             recordViewportTelemetryEvent({
@@ -3904,511 +5118,443 @@ const ChatListInternal = React.memo((props: {
         });
     }, [
         isViewportEvidenceTelemetryEnabled,
-        listImplementation,
+        nativePrependOwner,
+        props.sessionId,
         recordViewportTelemetryEvent,
         resolveViewportTelemetryMode,
     ]);
 
-    /**
-     * Deferred-newer drain (plan C6/D3): the list supplies viewport GEOMETRY only. The data layer
-     * accrues the deferred-forward backlog and owns the release decision (threshold + in-flight
-     * dedupe + fetch) in `sync.maybeDrainDeferredNewerMessages`. Routing the list through that single
-     * owner removes the parallel list-side decision path that silently stalled catch-up on list
-     * shells that did not reproduce the old onScroll callbacks.
-     */
-    const drainDeferredNewerMessages = React.useCallback((params: Readonly<{
-        distanceFromBottom: number;
-        pinned: boolean;
-    }>) => {
-        sync.maybeDrainDeferredNewerMessages(props.sessionId, {
-            isPinned: params.pinned,
-            distanceFromBottomPx: params.distanceFromBottom,
-        });
-    }, [props.sessionId]);
-
-    const resolveViewportCommand = React.useCallback((input: TranscriptViewportControllerInput): TranscriptViewportCommand => {
-        return viewportCommandController.resolve(input);
-    }, [viewportCommandController]);
-
     const hasWebPrependRestoreWindow = React.useCallback((): boolean => {
         if (Platform.OS !== 'web') return false;
-        return (
-            inFlightWebPrependAnchorRef.current != null ||
-            pendingWebPrependAnchorRef.current != null ||
-            pendingWebPrependIndexRecoveryRef.current === true
-        );
-    }, []);
+        return webPrependOwner.hasRestoreWindow();
+    }, [webPrependOwner]);
 
-    const resolveViewportCommandTelemetryWriter = React.useCallback((
-        command: TranscriptViewportCommand,
-    ): TranscriptViewportTelemetryScrollWriter => {
-        if (command.kind === 'none' || command.kind === 'skip-native-js-pin') return 'mvcp-skip';
-        if (command.kind === 'restore-index' || command.kind === 'jump-to-seq') {
-            return resolveIndexScrollWriter({ platform: telemetryPlatform, listImplementation });
-        }
-        if (Platform.OS === 'web') {
-            return command.kind === 'pin-bottom' || command.mode === 'follow-bottom' || command.mode === 'jump-to-bottom'
-                ? 'web-dom-bottom'
-                : 'web-dom-restore';
-        }
-        return command.mode === 'jump-to-bottom' ? 'native-explicit-jump' : 'native-scroll-to-offset';
-    }, [listImplementation, telemetryPlatform]);
-
-    const executeViewportCommand = React.useCallback((command: TranscriptViewportCommand): boolean => {
-        return viewportCommandController.execute(command, {
-            hasWebPrependRestoreWindow,
-            isWeb: Platform.OS === 'web',
-            recordRejectedWrite: ({ command: rejectedCommand, rejectedOwner, activeOwner }) => {
-                recordViewportTelemetryEvent({
-                    type: 'scroll-write-rejected',
-                    writer: resolveViewportCommandTelemetryWriter(rejectedCommand),
-                    reason: rejectedCommand.reason,
-                    rejectedOwner,
-                    activeOwner,
-                    mode: rejectedCommand.mode,
-                    targetOffsetY: rejectedCommand.kind === 'scroll-offset' || rejectedCommand.kind === 'restore-offset'
-                        ? rejectedCommand.offsetY
-                        : rejectedCommand.kind === 'restore-index' || rejectedCommand.kind === 'jump-to-seq'
-                            ? rejectedCommand.index
-                            : undefined,
-                    layoutHeight: listLayoutHeightRef.current,
-                    contentHeight: listContentHeightRef.current,
-                    nativeMountSettleStable,
-                });
-            },
-            perform: (commandToPerform) => {
-        const command = commandToPerform;
-        if (command.kind === 'skip-native-js-pin') {
-            recordViewportTelemetryEvent({
-                type: 'scroll-write',
-                writer: 'mvcp-skip',
-                reason: command.reason,
-                mode: command.mode,
-                layoutHeight: listLayoutHeightRef.current,
-                contentHeight: listContentHeightRef.current,
-                distanceFromBottom: lastPinOffsetForIntentRef.current ?? undefined,
-                nativeMountSettleStable,
-            });
-            return true;
-        }
-
-        if (command.kind === 'pin-bottom') {
-            if (Platform.OS === 'web') {
-                clearWebPrependRangeReserve();
-                const metrics = resolveWebScrollMetrics();
-                if (!metrics) return false;
-                const previousOffsetY = metrics.scrollTop;
-                const scrollToVisualBottom = listImplementation !== 'flatlist_legacy';
-                try {
-                    metrics.element.scrollTop = scrollToVisualBottom ? metrics.scrollHeight : 0;
-                } catch {
-                    try {
-                        metrics.element.scrollTop = scrollToVisualBottom ? metrics.scrollHeight : 0;
-                    } catch {
-                        return false;
-                    }
-                }
-                lastObservedWebScrollTopRef.current = metrics.element.scrollTop;
-                const targetOffsetY = metrics.element.scrollTop;
-                recordViewportTelemetryEvent({
-                    type: 'scroll-write',
-                    writer: 'web-dom-bottom',
-                    reason: command.reason,
-                    mode: command.mode,
-                    targetOffsetY,
-                    previousOffsetY,
-                    layoutHeight: metrics.clientHeight,
-                    contentHeight: metrics.scrollHeight,
-                    distanceFromBottom: Math.max(0, Math.trunc(metrics.scrollHeight - metrics.clientHeight - targetOffsetY)),
-                    ...resolveWebViewportTelemetryDiagnostics({
-                        metrics,
-                        programmaticWebWrite: true,
-                        scrollable: isWebTranscriptScrollable(metrics, 1),
-                        trigger: command.reason === 'prepend-restore' ? 'prepend-restore' : command.mode === 'jump-to-bottom' ? 'jump' : 'restore',
-                    }),
-                });
-                return true;
-            }
-
-            const node = listRef.current;
-            if (!node) return false;
-            const isLegacyList = listImplementation === 'flatlist_legacy';
-            const isInvertedOrientation = listOrientationRef.current === 'inverted';
-            const offset = isLegacyList
-                ? 0
-                : Math.max(0, Math.trunc(listContentHeightRef.current - listLayoutHeightRef.current));
-            if (!isLegacyList && !isInvertedOrientation && command.mode === 'jump-to-bottom' && typeof node.scrollToEnd === 'function') {
-                // Plan B7: an explicit jump targets the list's OWN end. Our contentHeight
-                // snapshot can be mid-churn (field trace: jump landed at ~93% after the
-                // height shrank under the write), so never derive the explicit bottom
-                // target from it when the list exposes scrollToEnd (FlashList 2.3.2 does).
-                node.scrollToEnd({ animated: command.animated ?? false });
-            } else {
-                if (typeof node.scrollToOffset !== 'function') return false;
-                if (
-                    !isLegacyList &&
-                    !isInvertedOrientation &&
-                    command.mode === 'jump-to-bottom' &&
-                    offset <= 0 &&
-                    listDataRef.current.length > 0 &&
-                    (listContentHeightRef.current <= 0 || listLayoutHeightRef.current <= 0)
-                ) {
-                    // Plan B7: never issue scrollToOffset(0) for an explicit jump while the
-                    // content is unmeasured (0 is the TOP of a scrollable transcript). Defer
-                    // to the bounded explicit re-confirm and telemeter the deferral.
-                    recordRestoreDecisionTelemetry('not-ready', {
-                        mode: 'jump-to-bottom',
-                        contentHeight: listContentHeightRef.current,
-                        layoutHeight: listLayoutHeightRef.current,
-                    });
-                    return false;
-                }
-                const rawBottomOffset = isLegacyList
-                    ? offset
-                    : command.mode === 'jump-to-bottom'
-                        ? resolveBottomRawScrollCommandOffset({
-                            contentHeight: listContentHeightRef.current,
-                            layoutHeight: listLayoutHeightRef.current,
-                            orientation: listOrientationRef.current,
-                        })
-                        : resolveBottomRawScrollOffset({
-                            contentHeight: listContentHeightRef.current,
-                            layoutHeight: listLayoutHeightRef.current,
-                            orientation: listOrientationRef.current,
-                        });
-                // Device-proven: an inverted FlashList ignores scrollToOffset({offset: 0}) (the list
-                // does not move to raw 0). The newest row is index 0 of the reversed newest-first data,
-                // so the visual bottom must be commanded via scrollToIndex(0). scrollToOffset stays the
-                // path for standard/legacy and for non-bottom restore writes.
-                if (!isLegacyList && isInvertedOrientation && typeof node.scrollToIndex === 'function') {
-                    // Offset the inverted bottom command UP by the composer/agent-input inset so the
-                    // newest row lands fully ABOVE the input rather than one inset-height short (device-
-                    // proven: viewOffset = -composerInset drives distance-from-bottom to exactly 0; +inset
-                    // or 0 leaves the gap the user has to manually scroll past). No inset (e.g. tests) →
-                    // the plain index-0 command.
-                    // With the native hot/cold split ON, the live tail lives in the visual-bottom edge
-                    // slot BELOW data[0], so the bottom command must clear BOTH the composer inset and
-                    // the hot-tail's rendered height for the live tail to land above the composer. The
-                    // hot-tail ref is 0 when the split is OFF, so this reduces to the composer-only inset.
-                    const bottomInset = composerInsetHeightRef.current + nativeHotTailHeightRef.current;
-                    node.scrollToIndex(
-                        bottomInset > 0
-                            ? { index: 0, animated: command.animated ?? false, viewOffset: -bottomInset }
-                            : { index: 0, animated: command.animated ?? false },
-                    );
-                } else {
-                    node.scrollToOffset({ offset: rawBottomOffset, animated: command.animated ?? false });
-                }
-                recordViewportTelemetryEvent({
-                    type: 'scroll-write',
-                    writer: command.mode === 'jump-to-bottom' ? 'native-explicit-jump' : 'native-scroll-to-offset',
-                    reason: command.reason,
-                    mode: command.mode,
-                    targetOffsetY: rawBottomOffset,
-                    previousOffsetY: lastNativePinOffsetRef.current ?? undefined,
-                    layoutHeight: listLayoutHeightRef.current,
-                    contentHeight: listContentHeightRef.current,
-                    distanceFromBottom: 0,
-                    nativeMountSettleStable,
-                    // §12 #4: stamp the deterministic pin inset (composerInset + hot-tail height) so
-                    // device QA can prove the inverted bottom command compensated for the EXACT
-                    // rendered live-tail height. Only when the carve owns this pin (flag=0 unchanged).
-                    ...resolveInvertedBottomPinCarveTelemetryFields(),
-                });
-                return true;
-            }
-            recordViewportTelemetryEvent({
-                type: 'scroll-write',
-                writer: command.mode === 'jump-to-bottom' ? 'native-explicit-jump' : 'native-scroll-to-offset',
-                reason: command.reason,
-                mode: command.mode,
-                targetOffsetY: offset,
-                previousOffsetY: lastNativePinOffsetRef.current ?? undefined,
-                layoutHeight: listLayoutHeightRef.current,
-                contentHeight: listContentHeightRef.current,
-                distanceFromBottom: 0,
-                nativeMountSettleStable,
-            });
-            return true;
-        }
-
-        if (command.kind === 'scroll-offset' || command.kind === 'restore-offset') {
-            if (Platform.OS === 'web') {
-                const metrics = resolveWebScrollMetrics();
-                if (!metrics) return false;
-                const previousOffsetY = metrics.scrollTop;
-                const targetOffsetY = command.kind === 'restore-offset'
-                    ? listImplementation === 'flatlist_legacy'
-                        ? Math.min(resolveWebTranscriptMaxScrollTop(metrics), command.offsetY)
-                        : Math.max(0, resolveWebTranscriptMaxScrollTop(metrics) - command.offsetY)
-                    : Math.max(0, Math.trunc(command.offsetY));
-                try {
-                    metrics.element.scrollTop = targetOffsetY;
-                } catch {
-                    return false;
-                }
-                lastObservedWebScrollTopRef.current = metrics.element.scrollTop;
-                recordViewportTelemetryEvent({
-                    type: 'scroll-write',
-                    writer: command.mode === 'follow-bottom' || command.mode === 'jump-to-bottom'
-                        ? 'web-dom-bottom'
-                        : 'web-dom-restore',
-                    reason: command.reason,
-                    mode: command.mode,
-                    targetOffsetY,
-                    previousOffsetY,
-                    layoutHeight: metrics.clientHeight,
-                    contentHeight: metrics.scrollHeight,
-                    distanceFromBottom: command.kind === 'restore-offset'
-                        ? command.offsetY
-                        : Math.max(0, Math.trunc(metrics.scrollHeight - metrics.clientHeight - targetOffsetY)),
-                    ...resolveWebViewportTelemetryDiagnostics({
-                        metrics,
-                        programmaticWebWrite: true,
-                        scrollable: isWebTranscriptScrollable(metrics, 1),
-                        trigger: command.reason === 'prepend-restore' ? 'prepend-restore' : command.mode === 'jump-to-bottom' ? 'jump' : 'restore',
-                    }),
-                });
-                return true;
-            }
-
-            const node = listRef.current;
-            if (!node || typeof node.scrollToOffset !== 'function') return false;
-            const layoutHeight = listLayoutHeightRef.current;
-            const contentHeight = command.kind === 'restore-offset' && typeof command.contentHeight === 'number' && Number.isFinite(command.contentHeight)
-                ? Math.max(0, Math.trunc(command.contentHeight))
-                : listContentHeightRef.current;
-            const maxOffset = Math.max(0, Math.trunc(contentHeight - layoutHeight));
-            const targetOffsetY = command.kind === 'restore-offset'
-                ? listImplementation === 'flatlist_legacy'
-                    ? Math.min(maxOffset, command.offsetY)
-                    : Math.max(0, maxOffset - command.offsetY)
-                : Math.max(0, Math.trunc(command.offsetY));
-            // N3.2: command/telemetry offsets stay CANONICAL (standard-space); the raw
-            // write target maps through the orientation seam at this single boundary.
-            const rawTargetOffsetY = listImplementation === 'flatlist_legacy'
-                ? targetOffsetY
-                : Math.max(0, fromCanonicalScrollOffset({
-                    offsetY: targetOffsetY,
-                    contentHeight,
-                    layoutHeight,
-                    orientation: listOrientationRef.current,
-                }));
-            node.scrollToOffset({ offset: rawTargetOffsetY, animated: command.animated ?? false });
-            recordViewportTelemetryEvent({
-                type: 'scroll-write',
-                writer: command.mode === 'jump-to-bottom' ? 'native-explicit-jump' : 'native-scroll-to-offset',
-                reason: command.reason,
-                mode: command.mode,
-                targetOffsetY,
-                previousOffsetY: lastNativePinOffsetRef.current ?? undefined,
-                layoutHeight,
-                contentHeight,
-                distanceFromBottom: command.kind === 'restore-offset' ? command.offsetY : undefined,
-                nativeMountSettleStable,
-            });
-            return true;
-        }
-
-        if (command.kind === 'restore-index' || command.kind === 'jump-to-seq') {
-            let index = command.kind === 'restore-index' ? command.index : command.index;
-            if (typeof index !== 'number' || !Number.isFinite(index)) return false;
-            if (Platform.OS === 'web' && shouldUseWebHotColdSplit) {
-                const target = resolveWebColdListScrollTarget({
-                    fullIndex: index,
-                    coldCount: transcriptHotColdSegments.coldItems.length,
-                    reason: command.kind === 'jump-to-seq'
-                        ? 'jump-to-seq'
-                        : command.reason === 'prepend-restore'
-                            ? 'prepend-recovery'
-                            : 'restore-index',
-                });
-                if (target.kind === 'pin_to_bottom') {
-                    const metrics = resolveWebScrollMetrics();
-                    if (!metrics) return false;
-                    const previousOffsetY = metrics.scrollTop;
-                    try {
-                        metrics.element.scrollTop = metrics.scrollHeight;
-                    } catch {
-                        return false;
-                    }
-                    lastObservedWebScrollTopRef.current = metrics.element.scrollTop;
-                    recordViewportTelemetryEvent({
-                        type: 'scroll-write',
-                        writer: 'web-dom-bottom',
-                        reason: command.reason,
-                        mode: command.mode,
-                        targetOffsetY: metrics.element.scrollTop,
-                        previousOffsetY,
-                        layoutHeight: metrics.clientHeight,
-                        contentHeight: metrics.scrollHeight,
-                        distanceFromBottom: getWebTranscriptDistanceFromBottom({
-                            ...metrics,
-                            scrollTop: metrics.element.scrollTop,
-                        }),
-                        ...resolveWebViewportTelemetryDiagnostics({
-                            metrics,
-                            programmaticWebWrite: true,
-                            scrollable: isWebTranscriptScrollable(metrics, 1),
-                            trigger: command.kind === 'jump-to-seq' ? 'jump' : command.reason === 'prepend-restore' ? 'prepend-restore' : 'restore',
-                        }),
-                    });
-                    return true;
-                }
-                index = target.index;
-            }
-            if (Platform.OS !== 'web' && shouldUseNativeHotColdSplit) {
-                // Map the FULL rendered display index to a COLD rendered index (FlashList `data` is the
-                // cold slice). A hot-tail target resolves to the newest cold row, bringing the live
-                // tail's edge slot into view — mirroring the web hot/cold index discipline.
-                const renderedColdIndex = resolveNativeInvertedColdScrollIndex({
-                    renderedFullIndex: index,
-                    fullCount: itemsRef.current.length,
-                    coldCount: listDataRef.current.length,
-                });
-                if (renderedColdIndex != null) {
-                    index = renderedColdIndex;
-                }
-            }
-            const node = listRef.current;
-            if (!node || typeof node.scrollToIndex !== 'function') return false;
-                if (command.kind === 'restore-index') {
-                    if (Platform.OS !== 'web') {
-                        lastNativeRestoreIndexCommandRef.current = {
-                            index,
-                            issuedAtMs: Date.now(),
-                            reason: command.reason,
-                            sessionId: command.sessionId,
-                            viewOffset: command.viewOffset,
-                        };
-                    }
-                    const restoreParams = {
-                        index,
-                        animated: command.animated ?? false,
-                        viewOffset: command.viewOffset,
-                        ...(Platform.OS === 'web' ? { viewPosition: 0 } : {}),
-                    };
-                    node.scrollToIndex(restoreParams);
-                } else {
-                if (Platform.OS !== 'web') {
-                    lastNativeRestoreIndexCommandRef.current = {
-                        index,
-                        issuedAtMs: Date.now(),
-                        reason: command.reason,
-                        sessionId: command.sessionId,
-                    };
-                }
-                node.scrollToIndex({ index, animated: command.animated ?? true, viewPosition: 0.5 });
-            }
-                recordViewportTelemetryEvent({
-                    type: 'scroll-write',
-                    writer: resolveIndexScrollWriter({
-                        platform: telemetryPlatform,
-                        listImplementation,
-                    }),
-                    reason: command.reason,
-                    mode: command.mode,
-                    targetOffsetY: index,
-                    layoutHeight: listLayoutHeightRef.current,
-                    contentHeight: listContentHeightRef.current,
-                    nativeMountSettleStable,
-                    ...(Platform.OS === 'web' ? resolveWebViewportTelemetryDiagnostics({
-                        metrics: resolveWebScrollMetrics(),
-                        programmaticWebWrite: true,
-                        scrollable: undefined,
-                        trigger: command.kind === 'jump-to-seq' ? 'jump' : command.reason === 'prepend-restore' ? 'prepend-restore' : 'restore',
-                    }) : {}),
-                });
-                return true;
-            }
-
-        return false;
-            },
-        });
-    }, [
+    const viewportDriverDeps = React.useMemo<TranscriptViewportDriverDeps>(() => ({
+            listRef,
+            listContentHeightRef,
+            listLayoutHeightRef,
+            listDataRef,
+            itemsRef,
+            composerInsetHeightRef,
+            nativeHotTailHeightRef,
+            lastPinOffsetForIntentRef,
+            lastNativePinOffsetRef,
+            webDomObservation,
+            lastNativeRestoreIndexCommandRef,
+            nativeMountSettleStable,
+            telemetryPlatform,
+            shouldUseWebHotColdSplit,
+            shouldUseNativeHotColdSplit,
+            coldItemCount: transcriptHotColdSegments.coldItems.length,
             clearWebPrependRangeReserve,
-            hasWebPrependRestoreWindow,
-            listImplementation,
+            resolveRestoreAnchorIndex: (anchor) => resolveRestoreAnchorIndexForCommandRef.current(anchor),
+            resolveJumpToSeqIndex: (seq, routeMessageId, transcriptBlockIndex, role) => (
+                resolveJumpToSeqIndexForCommandRef.current(seq, routeMessageId, transcriptBlockIndex, role)
+            ),
+            resolveWebScrollMetrics,
+            recordViewportTelemetryEvent,
+            recordRestoreDecisionTelemetry,
+            resolveWebViewportTelemetryDiagnostics,
+            resolveInvertedBottomPinCarveTelemetryFields,
+        }), [
+            clearWebPrependRangeReserve,
             nativeMountSettleStable,
             recordRestoreDecisionTelemetry,
             recordViewportTelemetryEvent,
             resolveInvertedBottomPinCarveTelemetryFields,
-            resolveViewportCommandTelemetryWriter,
             resolveWebViewportTelemetryDiagnostics,
             resolveWebScrollMetrics,
             shouldUseNativeHotColdSplit,
             shouldUseWebHotColdSplit,
             telemetryPlatform,
             transcriptHotColdSegments.coldItems.length,
-            viewportCommandController,
+            webDomObservation,
         ]);
 
-    const writeWebRestoreScrollTopThroughViewportCommand = React.useCallback((
-        params: Readonly<{
-            mode: Extract<TranscriptViewportMode, 'restore-anchor' | 'restore-distance'>;
-            reason: Extract<TranscriptViewportTelemetryScrollReason, 'content-size-change' | 'entry-restore' | 'prepend-restore'>;
-            targetScrollTop: number;
-        }>,
+    const commandHost = React.useMemo(() => createTranscriptViewportCommandHost({
+        controller: viewportCommandController,
+        driverDeps: viewportDriverDeps,
+        hasWebPrependRestoreWindow,
+        isWeb: () => Platform.OS === 'web',
+    }), [
+        hasWebPrependRestoreWindow,
+        viewportCommandController,
+        viewportDriverDeps,
+    ]);
+
+    const resolveViewportCommand = React.useCallback((input: TranscriptViewportControllerInput): TranscriptViewportCommand => {
+        return commandHost.resolve(input);
+    }, [commandHost]);
+
+    const executeViewportCommand = React.useCallback((command: TranscriptViewportCommand): boolean => {
+        return commandHost.execute(command);
+    }, [commandHost]);
+
+    const executeViewportCommandWithAnimation = React.useCallback((
+        command: TranscriptViewportCommand,
+        animated: boolean,
     ): boolean => {
-        return executeViewportCommand(resolveViewportCommand({
-            type: 'scroll-offset',
-            sessionId: props.sessionId,
-            reason: params.reason,
-            mode: params.mode,
-            offsetY: params.targetScrollTop,
-            animated: false,
-        }));
-    }, [executeViewportCommand, props.sessionId, resolveViewportCommand]);
+        return commandHost.executeWithAnimation(command, animated);
+    }, [commandHost]);
+
+    const applyNativeExplicitJumpConfirmationEffects = React.useCallback((
+        effects: readonly NativeExplicitJumpConfirmationEffect[],
+    ) => {
+        for (const effect of effects) {
+            if (effect.sessionId !== props.sessionId) {
+                continue;
+            }
+            if (effect.type === 'adopt-live-tail-arrival') {
+                adoptNativeFollowingForTrustedBottomArrival(effect.distanceFromBottom);
+                continue;
+            }
+            if (effect.type === 'issue-reconfirm-jump-to-bottom') {
+                executeViewportCommandWithAnimation(resolveViewportCommand({
+                    type: 'jump-to-bottom',
+                    sessionId: props.sessionId,
+                }), false);
+            }
+        }
+    }, [
+        adoptNativeFollowingForTrustedBottomArrival,
+        executeViewportCommandWithAnimation,
+        props.sessionId,
+        resolveViewportCommand,
+    ]);
+
+    const resolveNativePrependObservationInput = React.useCallback((sessionId: string): NativePrependObservationInput => {
+        const node = listRef.current;
+        const absoluteScrollOffset = readNativeAbsoluteScrollOffset(node) ?? Number.NaN;
+        return {
+            activeOwner: viewportCommandController.activeOwner(),
+            nowMs: Date.now(),
+            postCommit: {
+                absoluteScrollOffset,
+                contentHeight: listContentHeightRef.current,
+                getLayout: (index: number) => {
+                    try {
+                        return node?.getLayout?.(index) ?? undefined;
+                    } catch {
+                        return undefined;
+                    }
+                },
+                items: listDataRef.current,
+                layoutHeight: listLayoutHeightRef.current,
+            },
+            sessionId,
+        };
+    }, [viewportCommandController]);
+
+    const applyNativePrependOwnerEffects = React.useCallback((
+        effects: readonly NativePrependOwnerEffect[],
+    ) => {
+        for (const effect of effects) {
+            switch (effect.type) {
+                case 'preempt-entry-restore-for-prepend':
+                    preemptEntryRestoreTransaction();
+                    break;
+                case 'open-prepend-ownership': {
+                    const openResult = viewportCommandController.openTransaction('prepend');
+                    if (!openResult.opened) {
+                        applyNativePrependOwnerEffectsRef.current(nativePrependOwner.invalidate({
+                            activeOwner: viewportCommandController.activeOwner(),
+                            reason: 'ownership-rejected',
+                            sessionId: effect.sessionId,
+                        }));
+                    }
+                    break;
+                }
+                case 'close-prepend-ownership':
+                    if (viewportCommandController.activeOwner() === 'prepend') {
+                        viewportCommandController.closeTransaction('prepend', effect.outcome);
+                    }
+                    break;
+                case 'execute-command':
+                    executeViewportCommand(resolveViewportCommand(effect.command));
+                    break;
+                case 'schedule-layout-timeout': {
+                    const existing = nativePrependLayoutTimerRef.current;
+                    if (existing != null) clearTimeout(existing);
+                    nativePrependLayoutTimerRef.current = setTimeout(() => {
+                        nativePrependLayoutTimerRef.current = null;
+                        applyNativePrependOwnerEffectsRef.current(nativePrependOwner.runLayoutTimeout(
+                            resolveNativePrependObservationInput(effect.sessionId),
+                        ));
+                    }, effect.delayMs);
+                    break;
+                }
+                case 'clear-layout-timeout': {
+                    const existing = nativePrependLayoutTimerRef.current;
+                    if (existing != null) {
+                        nativePrependLayoutTimerRef.current = null;
+                        clearTimeout(existing);
+                    }
+                    break;
+                }
+                case 'schedule-quiet-reobserve': {
+                    const existing = nativePrependQuietReobserveTimerRef.current;
+                    if (existing != null) clearTimeout(existing);
+                    nativePrependQuietReobserveTimerRef.current = setTimeout(() => {
+                        nativePrependQuietReobserveTimerRef.current = null;
+                        applyNativePrependOwnerEffectsRef.current(nativePrependOwner.runQuietReobserve(
+                            resolveNativePrependObservationInput(effect.sessionId),
+                        ));
+                    }, effect.delayMs);
+                    break;
+                }
+                case 'clear-quiet-reobserve': {
+                    const existing = nativePrependQuietReobserveTimerRef.current;
+                    if (existing != null) {
+                        nativePrependQuietReobserveTimerRef.current = null;
+                        clearTimeout(existing);
+                    }
+                    break;
+                }
+                case 'schedule-corrector-reobserve': {
+                    const existing = nativePrependCorrectorReobserveTimerRef.current;
+                    if (existing != null) clearTimeout(existing);
+                    nativePrependCorrectorReobserveTimerRef.current = setTimeout(() => {
+                        nativePrependCorrectorReobserveTimerRef.current = null;
+                        applyNativePrependOwnerEffectsRef.current(nativePrependOwner.runCorrectorReobserve(
+                            resolveNativePrependObservationInput(effect.sessionId),
+                        ));
+                    }, effect.delayMs);
+                    break;
+                }
+                case 'clear-corrector-reobserve': {
+                    const existing = nativePrependCorrectorReobserveTimerRef.current;
+                    if (existing != null) {
+                        nativePrependCorrectorReobserveTimerRef.current = null;
+                        clearTimeout(existing);
+                    }
+                    break;
+                }
+                case 'bump-transaction-revision':
+                    bumpNativePrependTransactionRevision();
+                    break;
+                case 'record-restore-decision-for-session':
+                    recordViewportTelemetryEvent({
+                        type: 'restore-decision',
+                        mode: effect.mode,
+                        reason: effect.reason,
+                        anchorItemOffsetPx: effect.anchorItemOffsetPx,
+                        anchorDeltaPx: effect.anchorDeltaPx,
+                        correctorAppliedDiffTotalPx: effect.correctorAppliedDiffTotalPx,
+                        correctorEventCount: effect.correctorEventCount,
+                    }, { sessionId: effect.sessionId });
+                    break;
+            }
+        }
+    }, [
+        executeViewportCommand,
+        nativePrependOwner,
+        preemptEntryRestoreTransaction,
+        recordViewportTelemetryEvent,
+        resolveNativePrependObservationInput,
+        resolveViewportCommand,
+        viewportCommandController,
+    ]);
+    applyNativePrependOwnerEffectsRef.current = applyNativePrependOwnerEffects;
 
     const restoreWebPrependAnchorThroughViewportCommand = React.useCallback((
         anchor: WebTranscriptPrependAnchor,
     ): WebTranscriptPrependRestoreResult => {
-        return restoreWebTranscriptPrependAnchor(anchor, {
-            writeScrollTop: (targetScrollTop) => writeWebRestoreScrollTopThroughViewportCommand({
-                mode: 'restore-anchor',
-                reason: 'prepend-restore',
-                targetScrollTop,
-            }),
+        return commandHost.restoreWebPrependAnchor({
+            anchor,
+            sessionId: props.sessionId,
         });
-    }, [writeWebRestoreScrollTopThroughViewportCommand]);
+    }, [
+        commandHost,
+        props.sessionId,
+    ]);
+
+    const resolveWebPrependRefreshOptions = React.useCallback((strategy: 'anchor' | 'item' | 'growth' | 'none') => {
+        if (strategy === 'anchor') {
+            return { adoptCurrentAnchorPosition: true, recaptureAnchor: true, recaptureItem: true } as const;
+        }
+        if (strategy === 'item') {
+            return { adoptCurrentAnchorPosition: true, recaptureItem: true } as const;
+        }
+        return { preserveBaselineMetrics: true } as const;
+    }, []);
+
+    const applyWebPrependOwnerEffects = React.useCallback((
+        effects: readonly WebPrependOwnerEffect[],
+    ) => {
+        for (const effect of effects) {
+            switch (effect.type) {
+                case 'execute-web-prepend-restore': {
+                    const restoreResult = restoreWebPrependAnchorThroughViewportCommand(effect.anchor);
+                    const metrics = resolveWebScrollMetrics();
+                    const refreshedAnchor = metrics
+                        ? refreshWebTranscriptPrependAnchor(
+                            effect.anchor,
+                            metrics,
+                            resolveWebPrependRefreshOptions(restoreResult.strategy),
+                        )
+                        : null;
+                    const acceptEffects = webPrependOwner.acceptRestoreResult({
+                        currentMetrics: metrics,
+                        nowMs: Date.now(),
+                        refreshedAnchor,
+                        result: restoreResult,
+                        sessionId: effect.sessionId,
+                    });
+                    applyWebPrependOwnerEffectsRef.current(acceptEffects);
+                    break;
+                }
+                case 'execute-anchor-recovery':
+                    executeViewportCommand(resolveViewportCommand({
+                        type: 'restore-anchor',
+                        sessionId: effect.sessionId,
+                        reason: 'prepend-restore',
+                        anchor: effect.anchor,
+                        itemOffsetPx: effect.itemOffsetPx,
+                        animated: false,
+                    }));
+                    break;
+                case 'preempt-entry-restore-for-prepend':
+                    preemptEntryRestoreTransaction();
+                    break;
+                case 'open-prepend-ownership': {
+                    const openResult = viewportCommandController.openTransaction('prepend');
+                    if (!openResult.opened) {
+                        applyWebPrependOwnerEffectsRef.current(webPrependOwner.clear({
+                            outcome: 'abandoned-identity',
+                            sessionId: effect.sessionId,
+                        }));
+                    }
+                    break;
+                }
+                case 'close-prepend-ownership':
+                    closeWebPrependViewportOwnership(effect.outcome);
+                    break;
+                case 'set-web-range-reserve':
+                    setWebPrependRangeReservePx((previous) => previous === effect.reservePx ? previous : effect.reservePx);
+                    break;
+                case 'clear-web-range-reserve':
+                    clearWebPrependRangeReserve();
+                    break;
+                case 'schedule-web-restore-expiry': {
+                    cancelWebPrependRestoreWindowExpiry();
+                    const arm = (expiresAtMs: number) => {
+                        const delayMs = Math.max(0, Math.ceil(expiresAtMs - Date.now())) + 1;
+                        webPrependRestoreExpiryTimerRef.current = setTimeout(() => {
+                            webPrependRestoreExpiryTimerRef.current = null;
+                            applyWebPrependOwnerEffectsRef.current(webPrependOwner.expire({ nowMs: Date.now() }));
+                        }, delayMs);
+                    };
+                    arm(effect.expiresAtMs);
+                    break;
+                }
+                case 'clear-web-restore-expiry':
+                    cancelWebPrependRestoreWindowExpiry();
+                    break;
+                case 'schedule-web-index-recovery': {
+                    if (webPrependIndexRecoveryScheduleRef.current) break;
+                    const scheduleTimeoutRecovery = (delayMs: number) => {
+                        const handle: { kind: 'timeout'; ids: any[] } = { kind: 'timeout', ids: [] };
+                        webPrependIndexRecoveryScheduleRef.current = handle;
+                        const timeoutId = setTimeout(() => {
+                            if (webPrependIndexRecoveryScheduleRef.current !== handle) return;
+                            webPrependIndexRecoveryScheduleRef.current = null;
+                            webPrependIndexRecoveryRunningRef.current = true;
+                            try {
+                                runWebPrependIndexRecoveryRef.current();
+                            } finally {
+                                webPrependIndexRecoveryRunningRef.current = false;
+                            }
+                        }, delayMs);
+                        handle.ids.push(timeoutId);
+                    };
+                    if (webPrependIndexRecoveryRunningRef.current) {
+                        scheduleTimeoutRecovery(TRANSCRIPT_WEB_PREPEND_INDEX_RECOVERY_RETRY_MS);
+                        break;
+                    }
+                    if (typeof requestAnimationFrame === 'function') {
+                        const handle: { kind: 'raf'; ids: any[] } = { kind: 'raf', ids: [] };
+                        webPrependIndexRecoveryScheduleRef.current = handle;
+                        const first = requestAnimationFrame(() => {
+                            const second = requestAnimationFrame(() => {
+                                if (webPrependIndexRecoveryScheduleRef.current !== handle) return;
+                                webPrependIndexRecoveryScheduleRef.current = null;
+                                webPrependIndexRecoveryRunningRef.current = true;
+                                try {
+                                    runWebPrependIndexRecoveryRef.current();
+                                } finally {
+                                    webPrependIndexRecoveryRunningRef.current = false;
+                                }
+                            });
+                            handle.ids.push(second);
+                        });
+                        handle.ids.push(first);
+                        break;
+                    }
+                    scheduleTimeoutRecovery(TRANSCRIPT_WEB_PREPEND_INDEX_RECOVERY_RETRY_MS);
+                    break;
+                }
+                case 'clear-web-index-recovery':
+                    cancelScheduledWebPrependIndexRecovery();
+                    break;
+                case 'record-restore-decision':
+                    recordRestoreDecisionTelemetry(effect.reason, {
+                        mode: effect.mode,
+                        programmaticWebWrite: effect.programmaticWebWrite,
+                        webTrigger: effect.webTrigger,
+                    });
+                    break;
+            }
+        }
+    }, [
+        cancelScheduledWebPrependIndexRecovery,
+        cancelWebPrependRestoreWindowExpiry,
+        clearWebPrependRangeReserve,
+        closeWebPrependViewportOwnership,
+        executeViewportCommand,
+        preemptEntryRestoreTransaction,
+        recordRestoreDecisionTelemetry,
+        refreshWebTranscriptPrependAnchor,
+        resolveViewportCommand,
+        resolveWebPrependRefreshOptions,
+        resolveWebScrollMetrics,
+        restoreWebPrependAnchorThroughViewportCommand,
+        viewportCommandController,
+        webPrependOwner,
+    ]);
+    applyWebPrependOwnerEffectsRef.current = applyWebPrependOwnerEffects;
 
     const restoreWebViewportAnchorThroughViewportCommand = React.useCallback((params: Readonly<{
-        anchor: Parameters<typeof restoreWebTranscriptViewportAnchor>[0]['anchor'];
-        container: HTMLElement;
+        anchor: WebTranscriptViewportAnchor;
+        itemIndex?: number | null;
         reason?: Extract<TranscriptViewportTelemetryScrollReason, 'content-size-change' | 'entry-restore'>;
-    }>) => {
-        return restoreWebTranscriptViewportAnchor(params, {
-            writeScrollTop: (targetScrollTop) => writeWebRestoreScrollTopThroughViewportCommand({
-                mode: 'restore-anchor',
-                reason: params.reason ?? 'entry-restore',
-                targetScrollTop,
-            }),
+    }>): WebTranscriptViewportAnchorRestoreResult => {
+        return commandHost.restoreWebVisibleAnchor({
+            anchor: params.anchor,
+            animated: false,
+            itemIndex: params.itemIndex,
+            reason: params.reason,
+            sessionId: props.sessionId,
         });
-    }, [writeWebRestoreScrollTopThroughViewportCommand]);
+    }, [commandHost, props.sessionId]);
 
     React.useLayoutEffect(() => {
         if (Platform.OS !== 'web') return;
         const pending = pendingWebLocalHeightChangeAnchorRef.current;
         if (!pending) return;
-        if (pending.sessionId !== props.sessionId || listImplementation !== 'flash_v2') {
+        if (pending.sessionId !== props.sessionId) {
             pendingWebLocalHeightChangeAnchorRef.current = null;
             return;
         }
-        const metrics = resolveWebScrollMetrics();
-        if (!metrics) return;
         pendingWebLocalHeightChangeAnchorRef.current = null;
         restoreWebViewportAnchorThroughViewportCommand({
             anchor: pending.anchor,
-            container: metrics.element,
             reason: 'content-size-change',
         });
     }, [
         expandedToolCallsAnchorMessageIds,
         listContentHeight,
         listData.length,
-        listImplementation,
         props.sessionId,
-        resolveWebScrollMetrics,
         restoreWebViewportAnchorThroughViewportCommand,
     ]);
 
@@ -4419,13 +5565,38 @@ const ChatListInternal = React.memo((props: {
         mountSettleCoordinatorRef.current?.observeMetrics({
             sessionId: props.sessionId,
             nowMs: options.nowMs ?? Date.now(),
-            initialFillStatus: initialFillStatusRef.current,
+            initialFillStatus: sessionOpenLatch.initialFillStatus(),
             listContentHeight: listContentHeightRef.current,
             listLayoutHeight: listLayoutHeightRef.current,
             composerInsetHeight: composerInsetHeightRef.current,
             distanceFromBottom: options.distanceFromBottom ?? lastPinOffsetForIntentRef.current ?? 0,
         });
     }, [props.sessionId]);
+
+    const applyNativeMountSettleIntervalDecision = React.useCallback((params: Readonly<{
+        clearIntervalCallback: () => void;
+        decision: NativeMountSettleIntervalDecision;
+    }>): void => {
+        const { clearIntervalCallback, decision } = params;
+        if (decision.type === 'continue') return;
+
+        closeEntryViewportOwnership('deadline');
+        if (decision.type === 'stable') {
+            setNativeMountSettleStable(true);
+            nativeMountSettleDeadlineReachedRef.current = false;
+            flushPendingNativeMountSettleBottomPinRef.current?.();
+            clearIntervalCallback();
+            return;
+        }
+
+        nativeMountSettleDeadlineReachedRef.current = true;
+        setNativeMountSettleDeadlineReached(true);
+        if (decision.requestPendingFlush) {
+            pendingNativeMountSettleBottomPinRef.current = true;
+            flushPendingNativeMountSettleBottomPinRef.current?.();
+        }
+        clearIntervalCallback();
+    }, [closeEntryViewportOwnership]);
 
     React.useEffect(() => {
         if (!usesNativeFlashListBottomMaintenance) return undefined;
@@ -4440,27 +5611,19 @@ const ChatListInternal = React.memo((props: {
             }
             const nowMs = Date.now();
             coordinator.sample({ sessionId: props.sessionId, nowMs });
-            if (coordinator.getSnapshot().stableSettle) {
-                closeEntryViewportOwnership('deadline');
-                setNativeMountSettleStable(true);
-                nativeMountSettleDeadlineReachedRef.current = false;
-                flushPendingNativeMountSettleBottomPinRef.current?.();
-                clearInterval(intervalId);
-                return;
-            }
-            if (nowMs >= deadlineMs) {
-                closeEntryViewportOwnership('deadline');
-                nativeMountSettleDeadlineReachedRef.current = true;
-                setNativeMountSettleDeadlineReached(true);
-                if (!nativeMountSettleAutoPinSuppressedRef.current) {
-                    pendingNativeMountSettleBottomPinRef.current = true;
-                    flushPendingNativeMountSettleBottomPinRef.current?.();
-                }
-                clearInterval(intervalId);
-            }
+            const mountSettleIntervalDecision = resolveNativeMountSettleIntervalDecision({
+                autoPinSuppressed: nativeMountSettleAutoPinSuppressedRef.current,
+                deadlineMs,
+                nowMs,
+                stableSettle: coordinator.getSnapshot().stableSettle,
+            });
+            applyNativeMountSettleIntervalDecision({
+                clearIntervalCallback: () => clearInterval(intervalId),
+                decision: mountSettleIntervalDecision,
+            });
         }, intervalMs);
         return () => clearInterval(intervalId);
-    }, [closeEntryViewportOwnership, props.sessionId, usesNativeFlashListBottomMaintenance]);
+    }, [applyNativeMountSettleIntervalDecision, props.sessionId, usesNativeFlashListBottomMaintenance]);
 
     const recordFirstListPaint = React.useCallback(() => {
         setFirstListPaintObserved(true);
@@ -4528,28 +5691,26 @@ const ChatListInternal = React.memo((props: {
             }
         }
 
-        const measuredLayoutHeight = listLayoutHeightRef.current;
-        const measuredContentHeight = listContentHeightRef.current;
-        if (measuredLayoutHeight > 0 && measuredContentHeight > 0) {
+        const measuredMetrics = readViewportContentMetrics();
+        if (measuredMetrics && measuredMetrics.contentHeight > 0) {
             const distanceFromBottom =
                 typeof lastPinOffsetForIntentRef.current === 'number' &&
                 Number.isFinite(lastPinOffsetForIntentRef.current)
                     ? Math.max(0, Math.trunc(lastPinOffsetForIntentRef.current))
                     : 0;
             return {
-                contentHeight: Math.max(0, Math.trunc(measuredContentHeight)),
+                contentHeight: Math.max(0, Math.trunc(measuredMetrics.contentHeight)),
                 distanceFromBottom,
-                layoutHeight: Math.max(0, Math.trunc(measuredLayoutHeight)),
+                layoutHeight: Math.max(0, Math.trunc(measuredMetrics.layoutHeight)),
             };
         }
 
         return null;
-    }, [resolveWebScrollMetrics]);
+    }, [readViewportContentMetrics, resolveWebScrollMetrics]);
     const hasWarmStablePaint = hasTranscriptWarmStablePaint({
         committedMessagesCount: props.committedMessagesCount,
         items: listData.length,
         latestCommittedActivityKey: props.latestCommittedActivityKey,
-        listImplementation: telemetryListImplementation,
         platform: telemetryPlatform,
         routeHydrationPending: props.routeHydrationPending === true,
         sessionId: props.sessionId,
@@ -4571,7 +5732,6 @@ const ChatListInternal = React.memo((props: {
                 committedMessagesCount: props.committedMessagesCount,
                 items: listData.length,
                 latestCommittedActivityKey: props.latestCommittedActivityKey,
-                listImplementation: telemetryListImplementation,
                 platform: telemetryPlatform,
                 routeHydrationPending: props.routeHydrationPending === true,
                 sessionId: props.sessionId,
@@ -4633,7 +5793,6 @@ const ChatListInternal = React.memo((props: {
         props.routeHydrationPending,
         props.sessionId,
         shouldUseWebHotColdSplit,
-        telemetryListImplementation,
         telemetryPlatform,
         transcriptHotColdSegments.coldItems.length,
         transcriptHotColdSegments.hotItems.length,
@@ -4651,63 +5810,46 @@ const ChatListInternal = React.memo((props: {
 
     const shouldCommitContentHeightState = React.useCallback(() => {
         if (Platform.OS === 'web') return true;
-        if (initialFillStatusRef.current !== 'done') return true;
+        if (sessionOpenLatch.initialFillStatus() !== 'done') return true;
         return props.jumpToSeq != null;
     }, [props.jumpToSeq]);
 
-    // Arm the MVCP bottom-autoscroll threshold from the real viewport height as soon as the
-    // viewport is laid out, decoupled from content mount-settle. On the inverted native path the
-    // JS pin is a deliberate no-op, so this threshold is the ONLY bottom-pin authority; gating it
-    // behind `nativeMountSettleStable` (a quiescent content-height window that never settles while
-    // rows measure late on a tall cold open) was half of the cold-open follow-bottom deadlock.
-    // The resolver still withholds the threshold for non-follow / open-transaction / web / legacy
-    // (see resolveTranscriptFlashListBottomMaintenance), and `normalizePositive` rejects a
-    // not-yet-laid-out (<= 0) height, so passing the raw layout height is safe.
     const flashListMvcpThresholdLayoutHeight = listLayoutHeight;
-    const flashListMaintainVisibleContentPosition = React.useMemo(() => {
-        // FlashList/web can throw "index out of bounds, not enough layouts" under heavy append + scroll
-        // when `maintainVisibleContentPosition.startRenderingFromBottom` is enabled. On web we already
-        // pin via direct DOM scroll writes, so omit this prop to avoid the crash.
+    const mainTranscriptRendererFrameHost = React.useMemo(() => {
         const bottomFollowModeState = bottomFollowModeStateRef.current;
-        return resolveTranscriptFlashListBottomMaintenance({
+        return resolveMainTranscriptRendererFrameHost({
             autoFollowWhenPinned,
             bottomFollowMode: bottomFollowModeState.mode,
+            configuredDrawDistance: configuredFlashListDrawDistance,
             hasOpenViewportTransaction:
                 hasOpenEntryRestoreTransactionForSession() || hasOpenNativePrependTransactionForSession(),
             layoutHeight: flashListMvcpThresholdLayoutHeight,
-            // Plan §12 #3: while the native edge-slot carve is active the JS force-pin owns the
-            // bottom; withhold the MVCP bottom autoscroll threshold so it cannot fight the pin.
             liveRegionActive: shouldUseNativeHotColdSplit,
             nativeEntryShouldUseBottomMaintenance,
-            orientation: listOrientation,
+            nativeID: chatListNativeId,
             pinEnabled,
             pinThresholdPx,
-            platformIsWeb: Platform.OS === 'web',
+            platformOS: Platform.OS,
+            targetWindowActive,
         });
     }, [
         autoFollowWhenPinned,
         bottomFollowModeRevision,
+        chatListNativeId,
+        configuredFlashListDrawDistance,
         flashListMvcpThresholdLayoutHeight,
         hasOpenEntryRestoreTransactionForSession,
         hasOpenNativePrependTransactionForSession,
-        listOrientation,
         nativeEntryShouldUseBottomMaintenance,
         nativeInitialViewportPendingObservation,
         nativePrependTransactionRevision,
         pinEnabled,
         pinThresholdPx,
         shouldUseNativeHotColdSplit,
+        targetWindowActive,
     ]);
-    nativeFlashListMvcpPolicyRef.current =
-        Platform.OS !== 'web' && listImplementation === 'flash_v2'
-            ? resolveNativeTelemetryMvcpPolicy(flashListMaintainVisibleContentPosition)
-            : 'none';
-
-    const flatListMaintainVisibleContentPosition = React.useMemo(() => {
-        return canAutoFollowForReason('stream-append')
-            ? { minIndexForVisible: 0, autoscrollToTopThreshold: pinThresholdPx }
-            : undefined;
-    }, [bottomFollowModeRevision, canAutoFollowForReason, pinThresholdPx]);
+    nativeFlashListMvcpPolicyRef.current = mainTranscriptRendererFrameHost.telemetryMvcpPolicy;
+    const mainTranscriptListShellFrame = mainTranscriptRendererFrameHost.frame;
 
     const resolveCreatedAtForMessageId = React.useCallback((messageId: string): number | null => {
         const state = getStorage().getState();
@@ -4724,6 +5866,123 @@ const ChatListInternal = React.memo((props: {
         const seq = message?.seq;
         return typeof seq === 'number' && Number.isFinite(seq) ? Math.trunc(seq) : null;
     }, [props.sessionId]);
+
+    const resolveRouteMessageIdForMessageId = React.useCallback((messageId: string): string | null => {
+        const state = getStorage().getState();
+        const session = state?.sessionMessages?.[props.sessionId];
+        const messagesById = (session?.messagesById ?? session?.messagesMap ?? {}) as Readonly<Record<string, Message>>;
+        return buildSessionMessageRouteId({
+            messageId,
+            messagesById,
+            reducerState: session?.reducerState ?? null,
+        });
+    }, [props.sessionId]);
+
+    const resolveTranscriptBlockIndexForMessageId = React.useCallback((messageId: string): number | null => {
+        const state = getStorage().getState();
+        const session = state?.sessionMessages?.[props.sessionId];
+        const message = session?.messagesById?.[messageId] ?? session?.messagesMap?.[messageId] ?? null;
+        const transcriptBlockIndex = message?.transcriptBlockIndex;
+        return typeof transcriptBlockIndex === 'number' && Number.isFinite(transcriptBlockIndex)
+            ? Math.trunc(transcriptBlockIndex)
+            : null;
+    }, [props.sessionId]);
+
+    const resolveRoleForMessageId = React.useCallback((messageId: string): TranscriptJumpTargetRole | null => {
+        const state = getStorage().getState();
+        const session = state?.sessionMessages?.[props.sessionId];
+        const message = session?.messagesById?.[messageId] ?? session?.messagesMap?.[messageId] ?? null;
+        if (message?.kind === 'user-text') return 'user';
+        if (message?.kind === 'agent-text') return 'assistant';
+        if (message?.kind === 'tool-call') return 'tool';
+        if (message?.kind === 'agent-event') return 'system';
+        return message ? 'unknown' : null;
+    }, [props.sessionId]);
+
+    const resolveJumpToSeqIndexFromLoadedItems = React.useCallback((
+        targetSeq: number,
+        routeMessageId?: string | null,
+        transcriptBlockIndex?: number | null,
+        role?: TranscriptJumpTargetRole | null,
+    ): number | null => {
+        if (typeof targetSeq !== 'number' || !Number.isFinite(targetSeq) || targetSeq < 0) return null;
+        const normalizedSeq = Math.trunc(targetSeq);
+        const normalizedRouteMessageId = typeof routeMessageId === 'string' && routeMessageId.trim().length > 0
+            ? routeMessageId.trim()
+            : null;
+        if (normalizedRouteMessageId) {
+            const result = resolveTranscriptJumpTargetIndex({
+                target: {
+                    kind: 'route-message-id',
+                    routeMessageId: normalizedRouteMessageId,
+                    seqHint: normalizedSeq,
+                    transcriptBlockIndex,
+                    role,
+                },
+                items: itemsRef.current as readonly Record<string, unknown>[],
+                resolveSeqForMessageId,
+                resolveRouteMessageIdForMessageId,
+                resolveTranscriptBlockIndexForMessageId,
+                resolveRoleForMessageId,
+                hasMoreOlder: hasMoreOlderRef.current !== false,
+                hasMoreNewer: targetWindowHostFacts.hasMoreNewer,
+            });
+            return result.status === 'found' ? result.index : null;
+        }
+        return resolveTranscriptJumpSeqIndex({
+            targetSeq: normalizedSeq,
+            items: itemsRef.current,
+            resolveSeqForMessageId,
+            // Treat unknown as "may have more": resolving the nearest-loaded fallback too
+            // early aborts jump materialization, while the load loop self-terminates on
+            // `no_more` and flips this latch for the post-exhaustion fallback landing.
+            hasMoreOlder: hasMoreOlderRef.current !== false,
+        });
+    }, [
+        resolveRoleForMessageId,
+        resolveRouteMessageIdForMessageId,
+        resolveSeqForMessageId,
+        targetWindowHostFacts.hasMoreNewer,
+        resolveTranscriptBlockIndexForMessageId,
+    ]);
+    resolveJumpToSeqIndexForCommandRef.current = resolveJumpToSeqIndexFromLoadedItems;
+
+    const resolveJumpTargetIndexFromRenderedWindow = React.useCallback((target: TranscriptJumpTarget): TranscriptJumpTargetIndexResult => {
+        return resolveTranscriptJumpTargetIndex({
+            target,
+            items: canonicalWindowedItemsRef.current as readonly Record<string, unknown>[],
+            resolveSeqForMessageId,
+            resolveRouteMessageIdForMessageId,
+            resolveTranscriptBlockIndexForMessageId,
+            resolveRoleForMessageId,
+            hasMoreOlder: hasMoreOlderRef.current !== false,
+            hasMoreNewer: targetWindowHostFacts.hasMoreNewer,
+        });
+    }, [
+        resolveRoleForMessageId,
+        resolveRouteMessageIdForMessageId,
+        resolveSeqForMessageId,
+        targetWindowHostFacts.hasMoreNewer,
+        resolveTranscriptBlockIndexForMessageId,
+    ]);
+
+    const isTranscriptJumpTargetInRenderedWindow = React.useCallback((target: TranscriptJumpTarget): boolean => {
+        return resolveJumpTargetIndexFromRenderedWindow(target).status === 'found';
+    }, [resolveJumpTargetIndexFromRenderedWindow]);
+
+    const resolveRestoreAnchorIdentityFromSourceIndex = React.useCallback((index: number): TranscriptViewportAnchorIdentity | null => {
+        if (!Number.isFinite(index)) return null;
+        const item = itemsRef.current[Math.max(0, Math.trunc(index))] as ChatTranscriptListItem | undefined;
+        return item ? resolveTranscriptViewportAnchorDescriptor(item) : null;
+    }, []);
+
+    const resolveRestoreAnchorSourceIndexFromLoadedItems = React.useCallback((anchor: TranscriptViewportAnchorIdentity): number | null => {
+        return resolveTranscriptViewportAnchorIndex({
+            anchor,
+            items: itemsRef.current,
+        });
+    }, []);
+    resolveRestoreAnchorIndexForCommandRef.current = resolveRestoreAnchorSourceIndexFromLoadedItems;
 
     const resolveKindForMessageId = React.useCallback((messageId: string): string | null => {
         const state = getStorage().getState();
@@ -4815,54 +6074,27 @@ const ChatListInternal = React.memo((props: {
         rowFontScaleKey,
         rowWidthBucket,
     ]);
-    const shouldHoldNativeFirstPaintPlaceholderForMountSettle =
-        usesNativeFlashListBottomMaintenance &&
-        sessionEntryViewportRef.current?.shouldFollowBottom !== false &&
-        props.jumpToSeq == null &&
-        !nativeMountSettleStable &&
-        !nativeMountSettleDeadlineReached;
-    const shouldHoldNativeFirstPaintPlaceholderForPendingViewport =
-        usesNativeFlashListBottomMaintenance &&
-        props.jumpToSeq == null &&
-        !nativeMountSettleDeadlineReached &&
-        nativeInitialViewportPendingObservation &&
-        (
-            sessionEntryViewportRef.current?.shouldFollowBottom !== false ||
-            (
-                entryRestoreTransactionRef.current?.sessionId === props.sessionId &&
-                !entryRestoreTransactionRef.current.isClosed()
-            )
-        );
-    const nativeWarmFirstPaintDistanceAppearsOffBottom =
-        usesNativeFlashListBottomMaintenance &&
-        sessionEntryViewportRef.current?.shouldFollowBottom !== false &&
-        typeof lastPinOffsetForIntentRef.current === 'number' &&
-        Number.isFinite(lastPinOffsetForIntentRef.current) &&
-        lastPinOffsetForIntentRef.current > pinThresholdPx;
-    const canWarmKeepAliveBypassNativeFirstPaintPlaceholder =
-        isWarmKeepAliveInstance &&
-        !nativeWarmFirstPaintDistanceAppearsOffBottom;
-    const shouldHoldNativeFirstPaintPlaceholder =
-        !nativeViewportPaintObserved &&
-        !nativeEntryRestorePaintReleased &&
-        (
-            (
-                !nativeMountSettleStable &&
-                !nativeMountSettleDeadlineReached &&
-                (!firstListPaintObserved || shouldHoldNativeFirstPaintPlaceholderForMountSettle)
-            ) ||
-            shouldHoldNativeFirstPaintPlaceholderForPendingViewport
-        );
     const showNativeFirstPaintPlaceholder =
         Platform.OS !== 'web' &&
-        listImplementation === 'flash_v2' &&
-        props.isLoaded &&
-        listData.length > 0 &&
-        !canWarmKeepAliveBypassNativeFirstPaintPlaceholder &&
-        shouldHoldNativeFirstPaintPlaceholder;
+        sessionOpenLatch.shouldShowNativeFirstPaintPlaceholder({
+            firstListPaintObserved,
+            hasOpenEntryRestoreTransaction: entryRestoreOwner.hasOpenTransaction(props.sessionId),
+            isLoaded: props.isLoaded,
+            isWarmKeepAliveInstance,
+            itemCount: listData.length,
+            jumpToSeqActive: props.jumpToSeq != null,
+            lastPinOffsetForIntent: lastPinOffsetForIntentRef.current,
+            nativeEntryRestorePaintReleased,
+            nativeInitialViewportPendingObservation,
+            nativeMountSettleDeadlineReached,
+            nativeMountSettleStable,
+            nativeViewportPaintObserved,
+            pinThresholdPx,
+            sessionId: props.sessionId,
+            usesNativeFlashListBottomMaintenance,
+        });
     const showWebMarkdownRuntimeFirstPaintPlaceholder =
         Platform.OS === 'web' &&
-        listImplementation === 'flash_v2' &&
         props.isLoaded &&
         listData.length > 0 &&
         !firstListPaintObserved &&
@@ -4875,13 +6107,89 @@ const ChatListInternal = React.memo((props: {
         showNativeFirstPaintPlaceholder ||
         showWebMarkdownRuntimeFirstPaintPlaceholder ||
         showRouteHydrationFirstPaintPlaceholder;
+    const applyNativeAcceptedViewportPaintEffects = React.useCallback((
+        effects: readonly NativeScrollAcceptedViewportPaintEffect[],
+    ): boolean => {
+        if (Platform.OS === 'web') return false;
+        let applied = false;
+        for (const effect of effects) {
+            if (
+                effect.type !== 'record-accepted-viewport-paint' ||
+                effect.sessionId !== props.sessionId
+            ) {
+                continue;
+            }
+            applied = true;
+            updateNativeViewportPaintObserved(true);
+            if (firstPaintTelemetryRef.current?.recorded === false) {
+                recordFirstListPaint();
+            }
+            if (!showFirstPaintPlaceholder) {
+                const paintMetrics = resolveEffectiveListPaintMetrics() ?? {
+                    contentHeight: effect.fallbackMetrics.contentHeight,
+                    distanceFromBottom: effect.fallbackMetrics.distanceFromLiveTailPx,
+                    layoutHeight: effect.fallbackMetrics.layoutHeight,
+                };
+                recordStablePaintTelemetry(paintMetrics, {
+                    nativeViewportObserved: true,
+                });
+            }
+        }
+        return applied;
+    }, [
+        recordFirstListPaint,
+        recordStablePaintTelemetry,
+        resolveEffectiveListPaintMetrics,
+        showFirstPaintPlaceholder,
+        updateNativeViewportPaintObserved,
+        props.sessionId,
+    ]);
+    const applyLifecycleHostScrollObservationPlan = React.useCallback((
+        plan: ScrollObservationPlan,
+        callbacks: Readonly<{
+            continueAfterEarlyEffects: (input: TranscriptLifecycleScrollObservationPlanContinuationInput) => void;
+            recordNativeScrollObservation: (reason: TranscriptViewportTelemetryObservationReason) => void;
+        }>,
+    ): boolean => {
+        return applyTranscriptLifecycleScrollObservationPlan(plan, {
+            applyGenericScrollObservationAnchorCaptureCancellationEffects,
+            applyGenericScrollObservationReadOnlyVisibleBottomEffects,
+            applyGenericScrollObservationSuppressionEffects,
+            applyGenericScrollObservationViewportStateEffects,
+            applyNativeAcceptedViewportPaintEffects,
+            applyNativeBottomFollowCompletionEffects: applyNativeBottomFollowCompletionHostEffects,
+            applyNativeSettledReturnToLiveTailDrainEffects,
+            applyNativeSettledReturnToLiveTailReturnEffects,
+            applyNativeUserScrollTakeoverEffects: applyNativeUserScrollTakeoverHostEffects,
+            applyWebPassiveLiveTailCorrectionEffect: (effect) =>
+                applyWebPassiveLiveTailCorrectionEffectRef.current(effect),
+            applyWebUserScrollIntentTimestampLifecycleEffects,
+            applyWebUserScrollTakeoverLifecycleEffects,
+            commitBottomFollowModeState,
+            continueAfterEarlyEffects: callbacks.continueAfterEarlyEffects,
+            markNativeInitialViewportApplied: markNativeInitialViewportAppliedForCurrentSession,
+            recordNativeScrollObservation: callbacks.recordNativeScrollObservation,
+        });
+    }, [
+        applyGenericScrollObservationAnchorCaptureCancellationEffects,
+        applyGenericScrollObservationReadOnlyVisibleBottomEffects,
+        applyGenericScrollObservationSuppressionEffects,
+        applyGenericScrollObservationViewportStateEffects,
+        applyNativeAcceptedViewportPaintEffects,
+        applyNativeBottomFollowCompletionHostEffects,
+        applyNativeSettledReturnToLiveTailDrainEffects,
+        applyNativeSettledReturnToLiveTailReturnEffects,
+        applyNativeUserScrollTakeoverHostEffects,
+        applyWebUserScrollIntentTimestampLifecycleEffects,
+        applyWebUserScrollTakeoverLifecycleEffects,
+        commitBottomFollowModeState,
+        markNativeInitialViewportAppliedForCurrentSession,
+    ]);
     const nativeFirstPaintReleasedWithoutListLoad =
         Platform.OS !== 'web' &&
-        listImplementation === 'flash_v2' &&
         (nativeMountSettleStable || nativeMountSettleDeadlineReached);
     React.useEffect(() => {
         if (Platform.OS === 'web') return;
-        if (listImplementation !== 'flash_v2') return;
         if (!usesNativeFlashListBottomMaintenance) return;
         if (!props.isLoaded) return;
         if (listData.length <= 0) return;
@@ -4902,22 +6210,24 @@ const ChatListInternal = React.memo((props: {
             nativeFirstPaintFallbackReleaseTimeoutRef.current = null;
             if (currentSessionIdRef.current !== handle.sessionId) return;
             if (nativeViewportPaintObservedRef.current) return;
-            nativeMountSettleDeadlineReachedRef.current = true;
-            setNativeMountSettleDeadlineReached(true);
-            updateNativeInitialViewportPendingObservation(false);
+            const decision = sessionOpenLatch.onNativeFirstPaintFallbackDeadline({
+                nativeViewportPaintObserved: nativeViewportPaintObservedRef.current,
+                nowMs: Date.now(),
+                sessionId: handle.sessionId,
+            });
+            applySessionOpenLatchEffectsRef.current(decision.effects);
         }, timeoutMs);
         nativeFirstPaintFallbackReleaseTimeoutRef.current = handle;
     }, [
         listData.length,
-        listImplementation,
         props.isLoaded,
         props.sessionId,
+        sessionOpenLatch,
         updateNativeInitialViewportPendingObservation,
         usesNativeFlashListBottomMaintenance,
     ]);
     React.useEffect(() => {
         if (Platform.OS !== 'web') return;
-        if (listImplementation !== 'flash_v2') return;
         if (firstListPaintObserved) return;
         if (!props.isLoaded) return;
         if (listData.length <= 0) return;
@@ -4929,7 +6239,6 @@ const ChatListInternal = React.memo((props: {
         firstListPaintObserved,
         listContentHeight,
         listData.length,
-        listImplementation,
         listLayoutHeight,
         props.isLoaded,
         recordFirstListPaint,
@@ -5004,7 +6313,7 @@ const ChatListInternal = React.memo((props: {
     }, [buildRowShellSignature, handleRowLayoutMutation, handleRowShellMeasured, measurementReconciler]);
 
     const captureCurrentWebPrependAnchor = React.useCallback(() => {
-        if (Platform.OS !== 'web' || listImplementation !== 'flash_v2') return null;
+        if (Platform.OS !== 'web') return null;
         const metrics = resolveWebScrollMetrics();
         if (!metrics) return null;
         if (!isWebTranscriptScrollable(metrics, 1)) return null;
@@ -5016,103 +6325,9 @@ const ChatListInternal = React.memo((props: {
             stabilizeForMs: tuning.transcriptWebInitialPinStabilizeMs,
         });
         return anchor;
-    }, [listImplementation, pinThresholdPx, resolveWebScrollMetrics]);
+    }, [pinThresholdPx, resolveWebScrollMetrics]);
 
-    /**
-     * Plan E2: every web prepend capture/restore/growth-fallback/recovery outcome is
-     * telemetered as a restore decision (existing reasons only; no behavior change).
-     * Growth fallbacks report mode 'restore-distance' so they are distinguishable from
-     * anchor/item restores; intermediate outcomes use non-transaction reasons so native
-     * invariant-D outcome counting stays unaffected.
-     */
-    const recordWebPrependRestoreOutcome = React.useCallback((
-        result: Readonly<{ didAdjustScroll: boolean; strategy: 'anchor' | 'item' | 'growth' | 'none' }>,
-    ) => {
-        if (Platform.OS !== 'web') return;
-        const prependDiagnostics = {
-            programmaticWebWrite: result.didAdjustScroll,
-            webTrigger: 'prepend-restore' as const,
-        };
-        if (result.strategy === 'growth') {
-            recordRestoreDecisionTelemetry('restored', { mode: 'restore-distance', ...prependDiagnostics });
-            return;
-        }
-        if (result.strategy === 'none') {
-            recordRestoreDecisionTelemetry('not-ready', { mode: 'restore-anchor', ...prependDiagnostics });
-            return;
-        }
-        recordRestoreDecisionTelemetry(result.didAdjustScroll ? 'restored' : 'observed', {
-            mode: 'restore-anchor',
-            ...prependDiagnostics,
-        });
-    }, [recordRestoreDecisionTelemetry]);
-
-    const clearNativePrependQuietState = React.useCallback(() => {
-        nativePrependQuietGateRef.current = null;
-        const quietTimer = nativePrependQuietTimerRef.current;
-        if (quietTimer != null) {
-            nativePrependQuietTimerRef.current = null;
-            clearTimeout(quietTimer);
-        }
-    }, []);
-
-    const finishNativePrependTransaction = React.useCallback((transaction: PrependTransaction) => {
-        if (nativePrependTransactionRef.current === transaction) {
-            nativePrependTransactionRef.current = null;
-        }
-        nativePrependCommitArmedRef.current = false;
-        clearNativePrependQuietState();
-        const layoutTimeout = nativePrependLayoutTimeoutRef.current;
-        if (layoutTimeout != null) {
-            nativePrependLayoutTimeoutRef.current = null;
-            clearTimeout(layoutTimeout);
-        }
-        const correctorNudge = nativePrependCorrectorNudgeRef.current;
-        if (correctorNudge != null) {
-            nativePrependCorrectorNudgeRef.current = null;
-            clearTimeout(correctorNudge);
-        }
-        const outcome = transaction.outcome() ?? 'abandoned-identity';
-        if (viewportCommandController.activeOwner() === 'prepend') {
-            viewportCommandController.closeTransaction('prepend', outcome);
-        }
-        // Every prepend outcome is telemetered (invariant D: never silent), attributed to the
-        // transaction's own session even when disposal happens during a session switch.
-        recordViewportTelemetryEvent({
-            type: 'restore-decision',
-            mode: 'restore-anchor',
-            reason: outcome,
-            anchorItemOffsetPx: transaction.capturedAnchor.itemOffsetPx,
-            anchorDeltaPx: transaction.conclusiveAnchorDeltaPx() ?? undefined,
-            correctorAppliedDiffTotalPx: transaction.correctorCoverage().appliedDiffTotalPx,
-            correctorEventCount: transaction.correctorCoverage().eventCount,
-        }, { sessionId: transaction.sessionId });
-        bumpNativePrependTransactionRevision();
-    }, [clearNativePrependQuietState, recordViewportTelemetryEvent, viewportCommandController]);
-
-    const invalidateNativePrependTransaction = React.useCallback(() => {
-        const transaction = nativePrependTransactionRef.current;
-        if (!transaction) return;
-        if (!transaction.isClosed()) {
-            transaction.onCaptureInvalidated();
-        }
-        finishNativePrependTransaction(transaction);
-    }, [finishNativePrependTransaction]);
-    invalidateNativePrependTransactionRef.current = invalidateNativePrependTransaction;
-
-    const beginNativePrependTransaction = React.useCallback((): PrependTransaction | null => {
-        if (Platform.OS === 'web' || listImplementation !== 'flash_v2') return null;
-        if (wantsPinnedRef.current) return null;
-        if (viewportCommandController.activeOwner() === 'entry') {
-            // N2d.3(i): entry-owned MATERIALIZATION loads never reach here (they pass
-            // preservePrependViewport:false — LA-R contract). A begin call while the entry
-            // owner is still active is therefore an entry-ADJACENT prepend (first user
-            // older-load / slice reveal): close the entry transaction with an attributable
-            // outcome and let the prepend transaction observe the commit instead of
-            // letting it land transaction-less (the N2d live begin-miss).
-            preemptEntryRestoreTransaction();
-            if (viewportCommandController.activeOwner() === 'entry') return null;
-        }
+    const captureNativePrependOwnerAnchor = React.useCallback((): NativePrependBeginInput['capturedAnchor'] => {
         const layoutHeight = listLayoutHeightRef.current;
         const contentHeight = listContentHeightRef.current;
         if (!Number.isFinite(layoutHeight) || layoutHeight <= 0) return null;
@@ -5131,7 +6346,7 @@ const ChatListInternal = React.memo((props: {
         if (!Number.isFinite(result.anchor.itemOffsetPx)) return null;
         const anchorItemId = result.anchor.itemId;
         if (typeof anchorItemId !== 'string' || anchorItemId.length === 0) return null;
-        const capturedAnchor: PrependCapturedAnchor = {
+        const capturedAnchor: NonNullable<NativePrependBeginInput['capturedAnchor']> = {
             key: { itemId: anchorItemId, messageId: result.anchor.messageId ?? null },
             itemOffsetPx: result.anchor.itemOffsetPx,
             capturedDataLength: listDataRef.current.length,
@@ -5139,14 +6354,45 @@ const ChatListInternal = React.memo((props: {
                 ? listDataRef.current[0].id
                 : null,
         };
+        return capturedAnchor;
+    }, []);
 
-        invalidateNativePrependTransaction();
-        const transaction = createPrependTransaction({ sessionId: props.sessionId, capturedAnchor });
-        nativePrependTransactionRef.current = transaction;
-        nativePrependCommitArmedRef.current = false;
-        nativePrependQuietGateRef.current = createPrependFallbackQuietGate();
-        return transaction;
-    }, [invalidateNativePrependTransaction, listImplementation, preemptEntryRestoreTransaction, props.sessionId, viewportCommandController]);
+    const beginNativePrependOwner = React.useCallback((): boolean => {
+        if (Platform.OS === 'web') return false;
+        if (wantsPinnedRef.current) return false;
+
+        const buildInput = (): NativePrependBeginInput => ({
+            activeOwner: viewportCommandController.activeOwner(),
+            capturedAnchor: captureNativePrependOwnerAnchor(),
+            contentHeight: listContentHeightRef.current,
+            layoutHeight: listLayoutHeightRef.current,
+            preservePrependViewport: true,
+            sessionId: props.sessionId,
+        });
+
+        const firstEffects = nativePrependOwner.begin(buildInput());
+        applyNativePrependOwnerEffects(firstEffects);
+        if (firstEffects.some((effect) => effect.type === 'preempt-entry-restore-for-prepend')) {
+            const secondEffects = nativePrependOwner.begin(buildInput());
+            applyNativePrependOwnerEffects(secondEffects);
+        }
+        return nativePrependOwner.hasOpenTransaction(props.sessionId);
+    }, [
+        applyNativePrependOwnerEffects,
+        captureNativePrependOwnerAnchor,
+        nativePrependOwner,
+        props.sessionId,
+        viewportCommandController,
+    ]);
+
+    const invalidateNativePrependOwner = React.useCallback(() => {
+        applyNativePrependOwnerEffects(nativePrependOwner.invalidate({
+            activeOwner: viewportCommandController.activeOwner(),
+            reason: 'session-entry',
+            sessionId: props.sessionId,
+        }));
+    }, [applyNativePrependOwnerEffects, nativePrependOwner, props.sessionId, viewportCommandController]);
+    invalidateNativePrependOwnerRef.current = invalidateNativePrependOwner;
 
     /**
      * N2b.2: reveals the withheld slice-window rows as ONE prepend-observed data
@@ -5169,159 +6415,39 @@ const ChatListInternal = React.memo((props: {
         // commits on the next render and the transaction observes it (commit armed).
         entrySliceWindowRef.current = null;
         setEntrySliceWindow(null);
-        const transaction = beginNativePrependTransaction();
-        if (
-            transaction &&
-            nativePrependTransactionRef.current === transaction &&
-            !transaction.isClosed()
-        ) {
-            nativePrependCommitArmedRef.current = true;
-        }
-        return withheldCount;
-    }, [beginNativePrependTransaction, props.sessionId]);
-    revealEntrySliceWindowRef.current = revealEntrySliceWindow;
-
-    const computeNativePrependObservation = React.useCallback((transaction: PrependTransaction): PrependOutcome => {
-        const node = listRef.current;
-        const absoluteScrollOffset = (() => {
-            try {
-                const value = node?.getAbsoluteLastScrollOffset?.();
-                return typeof value === 'number' ? value : Number.NaN;
-            } catch {
-                return Number.NaN;
-            }
-        })();
-        return observePrependOutcome({
-            capturedAnchor: transaction.capturedAnchor,
-            postCommit: {
-                items: listDataRef.current,
-                getLayout: (index: number) => {
-                    try {
-                        return node?.getLayout?.(index) ?? undefined;
-                    } catch {
-                        return undefined;
-                    }
-                },
-                absoluteScrollOffset,
-                contentHeight: listContentHeightRef.current,
-                layoutHeight: listLayoutHeightRef.current,
-            },
-            // N2d.1: a misalignment fully explained by corrections the vendor corrector already
-            // applied classifies mvcp-preserved (zero writes) instead of double-correcting.
-            correctorCoverage: transaction.correctorCoverage(),
-        });
-    }, []);
-
-    const forwardNativePrependObservation = React.useCallback((
-        transaction: PrependTransaction,
-        outcome: PrependOutcome,
-    ) => {
-        const write = transaction.onObservationWindow(outcome);
-        if (write) {
-            // Execute the single fallback against the same live snapshot the observation came
-            // from (LC-R #7); the prepend phase is open, so the seam accepts owner='prepend'.
-            executeViewportCommand(resolveViewportCommand({
-                type: 'scroll-offset',
-                sessionId: transaction.sessionId,
-                reason: 'prepend-restore',
-                mode: 'restore-anchor',
-                offsetY: write.write.targetOffsetY,
-                animated: false,
-            }));
-        }
-    }, [executeViewportCommand, resolveViewportCommand]);
-
-    const observeNativePrependTransaction = React.useCallback(() => {
-        if (Platform.OS === 'web' || listImplementation !== 'flash_v2') return;
-        const transaction = nativePrependTransactionRef.current;
-        if (!transaction) return;
-        if (transaction.sessionId !== props.sessionId) {
-            invalidateNativePrependTransaction();
-            return;
-        }
-        if (transaction.isClosed()) {
-            finishNativePrependTransaction(transaction);
-            return;
-        }
-        if (transaction.state() === 'awaiting-commit') {
-            if (!nativePrependCommitArmedRef.current) return;
-            // Commit once the prepended page is reflected in the rendered items (LC-R #2):
-            // the prepend ownership phase opens here, bounded by ONE post-commit layout timeout.
-            transaction.onCommit();
-            const openResult = viewportCommandController.openTransaction('prepend');
-            if (!openResult.opened) {
-                transaction.onCaptureInvalidated();
-                finishNativePrependTransaction(transaction);
-                return;
-            }
-            bumpNativePrependTransactionRevision();
+        if (beginNativePrependOwner()) {
             const tuning = sync.getSyncTuning();
             const { budgetMs } = resolveTranscriptInitialFillTuning({
                 transcriptInitialFillBudgetMs: tuning.transcriptInitialFillBudgetMs,
                 transcriptInitialFillMaxNoProgressLoads: tuning.transcriptInitialFillMaxNoProgressLoads,
             });
-            nativePrependLayoutTimeoutRef.current = setTimeout(() => {
-                nativePrependLayoutTimeoutRef.current = null;
-                const current = nativePrependTransactionRef.current;
-                if (current !== transaction || transaction.isClosed()) return;
-                // Plan P1: the deadline bounds the layout-quiet wait. If a conclusive
-                // observation exists at the deadline, spend it (write-once: fallback-restored
-                // or mvcp-preserved) instead of abandoning the reading position.
-                const finalOutcome = computeNativePrependObservation(transaction);
-                if (finalOutcome.kind === 'mvcp-preserved' || finalOutcome.kind === 'needs-fallback') {
-                    forwardNativePrependObservation(transaction, finalOutcome);
-                }
-                if (!transaction.isClosed()) {
-                    transaction.onLayoutTimeout();
-                }
-                finishNativePrependTransaction(transaction);
-            }, budgetMs);
+            applyNativePrependOwnerEffects(nativePrependOwner.armCommit({
+                layoutTimeoutMs: budgetMs,
+                sessionId: props.sessionId,
+            }));
         }
-        if (transaction.state() !== 'committed') return;
-        const outcome = computeNativePrependObservation(transaction);
-        if (outcome.kind === 'needs-fallback') {
-            // Layout-quiet gate (plan P1): FlashList's own MVCP correction applies
-            // asynchronously — withhold the single fallback until the misalignment is stable
-            // across one quiet window, re-observing on a single re-armed timer. The post-commit
-            // layout timeout above bounds the whole wait.
-            const gate = nativePrependQuietGateRef.current ?? createPrependFallbackQuietGate();
-            nativePrependQuietGateRef.current = gate;
-            const decision = gate.onMisalignedObservation({
-                observedItemOffsetPx: transaction.capturedAnchor.itemOffsetPx + outcome.deltaPx,
-                nowMs: Date.now(),
-            });
-            if (decision.kind === 'wait') {
-                const previousTimer = nativePrependQuietTimerRef.current;
-                if (previousTimer != null) clearTimeout(previousTimer);
-                nativePrependQuietTimerRef.current = setTimeout(() => {
-                    nativePrependQuietTimerRef.current = null;
-                    observeNativePrependTransactionRef.current();
-                }, decision.reobserveInMs);
-                return;
-            }
-        }
-        forwardNativePrependObservation(transaction, outcome);
-        if (transaction.isClosed()) {
-            finishNativePrependTransaction(transaction);
-        }
-        // Non-conclusive outcomes (layout-not-ready / identity-unchanged) keep the single
-        // window open; the host re-observes on the next layout/content/scroll event.
+        return withheldCount;
+    }, [applyNativePrependOwnerEffects, beginNativePrependOwner, nativePrependOwner, props.sessionId]);
+    revealEntrySliceWindowRef.current = revealEntrySliceWindow;
+
+    const observeNativePrependOwner = React.useCallback(() => {
+        if (Platform.OS === 'web') return;
+        applyNativePrependOwnerEffects(nativePrependOwner.observe(
+            resolveNativePrependObservationInput(props.sessionId),
+        ));
     }, [
-        computeNativePrependObservation,
-        finishNativePrependTransaction,
-        forwardNativePrependObservation,
-        invalidateNativePrependTransaction,
-        listImplementation,
+        applyNativePrependOwnerEffects,
+        nativePrependOwner,
         props.sessionId,
-        viewportCommandController,
+        resolveNativePrependObservationInput,
     ]);
-    observeNativePrependTransactionRef.current = observeNativePrependTransaction;
+    observeNativePrependOwnerRef.current = observeNativePrependOwner;
 
     const captureCurrentViewportAnchor = React.useCallback((): SessionViewportAnchorSnapshot | null => {
         if (wantsPinnedRef.current) return null;
 
         const capturedAtMs = Date.now();
-        if (Platform.OS === 'web' && listImplementation === 'flash_v2') {
+        if (Platform.OS === 'web') {
             const metrics = resolveWebScrollMetrics();
             if (!metrics) return null;
             const anchor = captureWebTranscriptViewportAnchor({ container: metrics.element });
@@ -5332,19 +6458,15 @@ const ChatListInternal = React.memo((props: {
             };
         }
 
-        if (Platform.OS !== 'web' && listImplementation === 'flash_v2') {
-            const result = captureNativeTranscriptViewportAnchor({
-                ref: listRef.current,
-                data: listDataRef.current,
-                focusOffsetPx: resolveTranscriptViewportAnchorFocusOffsetPx(listLayoutHeightRef.current),
-                capturedAtMs,
-                resolveAnchor: (item) => resolveTranscriptViewportAnchorDescriptor(item),
-            });
-            return result.status === 'captured' ? result.anchor : null;
-        }
-
-        return null;
-    }, [listImplementation, resolveWebScrollMetrics]);
+        const result = captureNativeTranscriptViewportAnchor({
+            ref: listRef.current,
+            data: listDataRef.current,
+            focusOffsetPx: resolveTranscriptViewportAnchorFocusOffsetPx(listLayoutHeightRef.current),
+            capturedAtMs,
+            resolveAnchor: (item) => resolveTranscriptViewportAnchorDescriptor(item),
+        });
+        return result.status === 'captured' ? result.anchor : null;
+    }, [resolveWebScrollMetrics]);
 
     const emitViewportAnchorCapture = React.useCallback((
         state: TranscriptViewportChangeState,
@@ -5416,7 +6538,7 @@ const ChatListInternal = React.memo((props: {
         const debounceMs = sync.getSyncTuning().transcriptViewportAnchorCaptureDebounceMs;
         const captureAnchor = captureCurrentViewportAnchor;
         const dueAtMs = Date.now() + debounceMs;
-        const emit = onViewportChangeRef.current;
+        const emit = emitViewportChange;
         const generation = viewportAnchorCaptureGenerationRef.current;
         const sessionId = currentSessionIdRef.current;
         const wantsPinned = wantsPinnedRef.current;
@@ -5453,7 +6575,7 @@ const ChatListInternal = React.memo((props: {
         };
         const timeoutId = armTimeout(debounceMs);
         scheduledViewportAnchorCaptureRef.current = { captureAnchor, dueAtMs, emit, generation, sessionId, state, timeoutId, wantsPinned };
-    }, [cancelScheduledViewportAnchorCapture, captureCurrentViewportAnchor, emitViewportAnchorCapture]);
+    }, [cancelScheduledViewportAnchorCapture, captureCurrentViewportAnchor, emitViewportAnchorCapture, emitViewportChange]);
     scheduleViewportAnchorCaptureRef.current = scheduleViewportAnchorCapture;
 
     const flushScheduledViewportAnchorCapture = React.useCallback((options?: Readonly<{ deferEmit?: boolean }>) => {
@@ -5502,9 +6624,9 @@ const ChatListInternal = React.memo((props: {
      * bottom and poisons catch-up. The report intentionally bypasses the sync seam's
      * observed-unpinned preserve branch (shouldRestoreViewport:false routes straight to
      * markSessionLiveTailIntent): exit-time bottom is a deliberate, deterministic signal.
-     */
+    */
     const flushExitLiveTailIntent = React.useCallback((options?: Readonly<{ deferEmit?: boolean }>) => {
-        if (Platform.OS === 'web' || listImplementation !== 'flash_v2') return;
+        if (Platform.OS === 'web') return;
         // Real navigation detaches the list ref before the passive unmount cleanup runs —
         // fall back to the last observed distance (kept honest by the passive bottom-arrival
         // branch) when the live read is unavailable.
@@ -5520,265 +6642,56 @@ const ChatListInternal = React.memo((props: {
             return;
         }
         emit(liveTailState);
-    }, [listImplementation, pinThresholdPx, readCurrentNativeDistanceFromBottom]);
+    }, [pinThresholdPx, readCurrentNativeDistanceFromBottom]);
     React.useLayoutEffect(() => {
         flushExitLiveTailIntentRef.current = flushExitLiveTailIntent;
     }, [flushExitLiveTailIntent]);
 
     const refreshInFlightWebPrependAnchor = React.useCallback((options?: Readonly<{ userScrolledDuringLoad?: boolean }>) => {
-        if (Platform.OS !== 'web' || listImplementation !== 'flash_v2') return;
-        if (options?.userScrolledDuringLoad !== true) return;
-        const currentAnchor = inFlightWebPrependAnchorRef.current;
-        const metrics = resolveWebScrollMetrics();
-        if (!metrics) return;
-        if (!isWebTranscriptScrollable(metrics, 1)) return;
-        if (!currentAnchor) {
-            inFlightWebPrependAnchorRef.current = captureCurrentWebPrependAnchor();
-            return;
-        }
-        inFlightWebPrependAnchorRef.current = refreshWebTranscriptPrependAnchor(currentAnchor, {
-            ...metrics,
-            scrollHeight: currentAnchor.metrics.scrollHeight,
-        }, {
-            recaptureAnchor: true,
-            userIntentAtMs: lastUserScrollIntentAtMsRef.current,
-        });
-    }, [captureCurrentWebPrependAnchor, listImplementation, resolveWebScrollMetrics]);
+        if (Platform.OS !== 'web') return;
+        applyWebPrependOwnerEffects(webPrependOwner.refreshInFlightForUserScroll({
+            anchor: captureCurrentWebPrependAnchor(),
+            sessionId: props.sessionId,
+            userScrolledDuringLoad: options?.userScrolledDuringLoad === true,
+        }));
+    }, [applyWebPrependOwnerEffects, captureCurrentWebPrependAnchor, props.sessionId, webPrependOwner]);
 
     const retargetPendingWebPrependAnchorForUserScroll = React.useCallback(() => {
-        if (Platform.OS !== 'web' || listImplementation !== 'flash_v2') return;
-        const pendingAnchor = pendingWebPrependAnchorRef.current;
-        if (!pendingAnchor) return;
-        const metrics = resolveWebScrollMetrics();
-        if (!metrics) return;
-        if (!isWebTranscriptScrollable(metrics, 1)) return;
-        pendingWebPrependAnchorRef.current = refreshWebTranscriptPrependAnchor(pendingAnchor, metrics, {
-            recaptureAnchor: true,
-            resetExpiry: true,
-            userIntentAtMs: lastUserScrollIntentAtMsRef.current,
+        if (Platform.OS !== 'web') return;
+        applyWebPrependOwnerEffects(webPrependOwner.retargetPendingForUserScroll({
+            anchor: captureCurrentWebPrependAnchor(),
+            sessionId: props.sessionId,
+        }));
+    }, [applyWebPrependOwnerEffects, captureCurrentWebPrependAnchor, props.sessionId, webPrependOwner]);
+
+    const runWebPrependIndexRecovery = React.useCallback((): boolean => {
+        if (Platform.OS !== 'web') return false;
+        const facts = webPrependOwner.telemetryFacts({ items: itemsRef.current });
+        const recoveryIndex = typeof facts.pendingWebPrependAnchorIndex === 'number'
+            ? facts.pendingWebPrependAnchorIndex
+            : null;
+        const recoveryAnchor = recoveryIndex == null
+            ? null
+            : resolveRestoreAnchorIdentityFromSourceIndex(recoveryIndex);
+        const effects = webPrependOwner.retryPending({
+            currentItemIndex: recoveryIndex,
+            items: itemsRef.current,
+            nowMs: Date.now(),
+            recoveryAnchor,
+            sessionId: props.sessionId,
         });
-        pendingWebPrependIndexRecoveryRef.current = false;
-    }, [listImplementation, resolveWebScrollMetrics]);
-
-    const resolvePendingWebPrependRefreshOptions = React.useCallback((strategy: 'anchor' | 'item' | 'growth' | 'none') => {
-        if (strategy === 'anchor') {
-            return { adoptCurrentAnchorPosition: true, recaptureAnchor: true, recaptureItem: true } as const;
-        }
-        if (strategy === 'item') {
-            return { adoptCurrentAnchorPosition: true, recaptureItem: true } as const;
-        }
-        return { preserveBaselineMetrics: true } as const;
-    }, []);
-
-    const updateWebPrependRangeReserve = React.useCallback((
-        anchor: WebTranscriptPrependAnchor | null,
-        metrics: Readonly<{ scrollHeight: number }> | null,
-    ) => {
-        if (Platform.OS !== 'web' || listImplementation !== 'flash_v2' || !anchor || !metrics) {
-            clearWebPrependRangeReserve();
-            return;
-        }
-        const nextReserve = resolveWebTranscriptPrependRangeReservePx({
-            baselineScrollHeight: anchor.metrics.scrollHeight,
-            currentScrollHeight: metrics.scrollHeight,
-        });
-        setWebPrependRangeReservePx((previous) => previous === nextReserve ? previous : nextReserve);
-    }, [clearWebPrependRangeReserve, listImplementation]);
-
-    const resolvePendingWebPrependItemIndex = React.useCallback((itemTestId: string | null): number | null => {
-        if (!itemTestId?.startsWith(TRANSCRIPT_WEB_PREPEND_ANCHOR_TEST_ID_PREFIX)) return null;
-        const itemId = itemTestId.slice(TRANSCRIPT_WEB_PREPEND_ANCHOR_TEST_ID_PREFIX.length);
-        const index = itemsRef.current.findIndex((item) => item.id === itemId);
-        return index >= 0 ? index : null;
-    }, []);
-
-    const resolvePendingWebPrependAnchorIndex = React.useCallback((anchorTestId: string | null): number | null => {
-        let anchorMessageId: string | null = null;
-        if (anchorTestId?.startsWith(TRANSCRIPT_WEB_MESSAGE_PREPEND_ANCHOR_TEST_ID_PREFIX)) {
-            anchorMessageId = anchorTestId.slice(TRANSCRIPT_WEB_MESSAGE_PREPEND_ANCHOR_TEST_ID_PREFIX.length);
-        } else if (anchorTestId?.startsWith(TRANSCRIPT_WEB_TOOL_GROUP_PREPEND_ANCHOR_TEST_ID_PREFIX)) {
-            anchorMessageId = anchorTestId.slice(TRANSCRIPT_WEB_TOOL_GROUP_PREPEND_ANCHOR_TEST_ID_PREFIX.length);
-        } else if (anchorTestId?.startsWith(TRANSCRIPT_WEB_TOOL_CALL_PREPEND_ANCHOR_TEST_ID_PREFIX)) {
-            anchorMessageId = anchorTestId.slice(TRANSCRIPT_WEB_TOOL_CALL_PREPEND_ANCHOR_TEST_ID_PREFIX.length);
-        }
-        if (!anchorMessageId) return null;
-
-        // Two-pass like resolveTranscriptViewportAnchorIndex (N2c): exact message-owning
-        // rows (incl. per-unit tool rows) win; the group header cap is the containment
-        // fallback for tools hidden behind a collapsed preview.
-        const items = itemsRef.current;
-        const owningIndex = items.findIndex((item) => {
-            if (item.kind === 'message') {
-                return item.messageId === anchorMessageId;
-            }
-            if (item.kind === 'tool-group-tool') {
-                return item.toolMessageId === anchorMessageId;
-            }
-            if (item.kind === 'tool-calls-group') {
-                return item.toolMessageIds.includes(anchorMessageId);
-            }
-            if (item.kind === 'turn') {
-                if (item.turn.userMessageId === anchorMessageId) return true;
-                return item.turn.content.some((content) => {
-                    if (content.kind === 'message') {
-                        return content.messageId === anchorMessageId;
-                    }
-                    if (content.kind === 'tool_calls') {
-                        return content.toolMessageIds.includes(anchorMessageId);
-                    }
-                    return false;
-                });
-            }
-            return false;
-        });
-        if (owningIndex >= 0) return owningIndex;
-
-        const containingIndex = items.findIndex((item) => (
-            item.kind === 'tool-group-header' && item.toolMessageIds.includes(anchorMessageId)
+        applyWebPrependOwnerEffects(effects);
+        return effects.some((effect) => (
+            effect.type === 'execute-anchor-recovery' ||
+            effect.type === 'execute-web-prepend-restore'
         ));
-        return containingIndex >= 0 ? containingIndex : null;
-    }, []);
-
-    const resolvePendingWebPrependRecoveryIndex = React.useCallback((pendingAnchor: WebTranscriptPrependAnchor | null): number | null => {
-        if (!pendingAnchor) return null;
-        return resolvePendingWebPrependAnchorIndex(pendingAnchor.anchorTestId) ?? resolvePendingWebPrependItemIndex(pendingAnchor.itemTestId);
-    }, [resolvePendingWebPrependAnchorIndex, resolvePendingWebPrependItemIndex]);
-
-        const tryScrollPendingWebPrependItemIntoView = React.useCallback((pendingAnchor: WebTranscriptPrependAnchor | null): boolean => {
-            if (Platform.OS !== 'web' || listImplementation !== 'flash_v2') return false;
-            const index = resolvePendingWebPrependRecoveryIndex(pendingAnchor);
-            if (index == null) return false;
-            const target = resolveWebColdListScrollTarget({
-                fullIndex: index,
-                coldCount: shouldUseWebHotColdSplit
-                    ? transcriptHotColdSegments.coldItems.length
-                    : listDataRef.current.length,
-                reason: 'prepend-recovery',
-            });
-            try {
-                if (target.kind === 'pin_to_bottom') {
-                    return executeViewportCommand(resolveViewportCommand({
-                        type: 'jump-to-bottom',
-                        sessionId: props.sessionId,
-                    }));
-                }
-                return executeViewportCommand(resolveViewportCommand({
-                    type: 'restore-anchor',
-                    sessionId: props.sessionId,
-                    reason: 'prepend-restore',
-                    index: target.index,
-                    animated: false,
-                }));
-            } catch {
-                return false;
-            }
-        }, [
-            executeViewportCommand,
-            listImplementation,
-            props.sessionId,
-            resolvePendingWebPrependRecoveryIndex,
-            resolveViewportCommand,
-            shouldUseWebHotColdSplit,
-            transcriptHotColdSegments.coldItems.length,
-        ]);
-
-    const attemptPendingWebPrependIndexRecovery = React.useCallback((): boolean => {
-        if (Platform.OS !== 'web' || listImplementation !== 'flash_v2') return false;
-        if (!pendingWebPrependIndexRecoveryRef.current || !pendingWebPrependAnchorRef.current) return false;
-        const scheduleRetry = () => {
-            if (scheduledWebPrependIndexRecoveryRef.current) return;
-            const handle: { kind: 'timeout'; ids: any[] } = { kind: 'timeout', ids: [] };
-            scheduledWebPrependIndexRecoveryRef.current = handle;
-            const timeoutId = setTimeout(() => {
-                if (scheduledWebPrependIndexRecoveryRef.current !== handle) return;
-                scheduledWebPrependIndexRecoveryRef.current = null;
-                attemptPendingWebPrependIndexRecovery();
-            }, 16);
-            handle.ids.push(timeoutId);
-        };
-        const didRecoverIndex = tryScrollPendingWebPrependItemIntoView(pendingWebPrependAnchorRef.current);
-        if (!didRecoverIndex) {
-            if (Date.now() <= pendingWebPrependAnchorRef.current.expiresAtMs) {
-                scheduleRetry();
-            } else {
-                clearWebPrependRestoreWindow('abandoned-identity');
-                // Plan E2: recovery window expired without remounting the anchor row.
-                recordRestoreDecisionTelemetry('skipped', {
-                    mode: 'restore-anchor',
-                    programmaticWebWrite: false,
-                    webTrigger: 'prepend-restore',
-                });
-            }
-            return false;
-        }
-
-        pendingWebPrependIndexRecoveryRef.current = false;
-        const retryAnchor = pendingWebPrependAnchorRef.current;
-        const retryRestoreResult = restoreWebPrependAnchorThroughViewportCommand(retryAnchor);
-        recordWebPrependRestoreOutcome(retryRestoreResult);
-        const retryMetrics = resolveWebScrollMetrics();
-        if (!retryMetrics) {
-            clearWebPrependRestoreWindow('confirmed');
-            return true;
-        }
-        updateWebPrependRangeReserve(retryAnchor, retryMetrics);
-        pendingWebPrependAnchorRef.current = refreshWebTranscriptPrependAnchor(
-            retryAnchor,
-            retryMetrics,
-            resolvePendingWebPrependRefreshOptions(retryRestoreResult.strategy),
-        );
-        scheduleWebPrependRestoreWindowExpiry(pendingWebPrependAnchorRef.current);
-        if (
-            (retryRestoreResult.strategy === 'growth' || retryRestoreResult.strategy === 'none') &&
-            pendingWebPrependAnchorRef.current &&
-            Date.now() <= pendingWebPrependAnchorRef.current.expiresAtMs
-        ) {
-            pendingWebPrependIndexRecoveryRef.current = true;
-            scheduleRetry();
-        }
-        return true;
-        }, [
-            clearWebPrependRestoreWindow,
-            listImplementation,
-            recordRestoreDecisionTelemetry,
-            recordWebPrependRestoreOutcome,
-            resolvePendingWebPrependRefreshOptions,
-            resolveWebScrollMetrics,
-            scheduleWebPrependRestoreWindowExpiry,
-            restoreWebPrependAnchorThroughViewportCommand,
-            tryScrollPendingWebPrependItemIntoView,
-            updateWebPrependRangeReserve,
-        ]);
-
-    const schedulePendingWebPrependIndexRecovery = React.useCallback(() => {
-        if (Platform.OS !== 'web' || listImplementation !== 'flash_v2') return;
-        const scheduledRecovery = scheduledWebPrependIndexRecoveryRef.current;
-        if (scheduledRecovery) return;
-
-        if (typeof requestAnimationFrame === 'function') {
-            const handle: { kind: 'raf'; ids: any[] } = { kind: 'raf', ids: [] };
-            scheduledWebPrependIndexRecoveryRef.current = handle;
-            const first = requestAnimationFrame(() => {
-                const second = requestAnimationFrame(() => {
-                    if (scheduledWebPrependIndexRecoveryRef.current !== handle) return;
-                    scheduledWebPrependIndexRecoveryRef.current = null;
-                    attemptPendingWebPrependIndexRecovery();
-                });
-                handle.ids.push(second);
-            });
-            handle.ids.push(first);
-            return;
-        }
-
-        const handle: { kind: 'timeout'; ids: any[] } = { kind: 'timeout', ids: [] };
-        scheduledWebPrependIndexRecoveryRef.current = handle;
-        const timeoutId = setTimeout(() => {
-            if (scheduledWebPrependIndexRecoveryRef.current !== handle) return;
-            scheduledWebPrependIndexRecoveryRef.current = null;
-            attemptPendingWebPrependIndexRecovery();
-        }, 0);
-        handle.ids.push(timeoutId);
-    }, [attemptPendingWebPrependIndexRecovery, listImplementation]);
+    }, [
+        applyWebPrependOwnerEffects,
+        props.sessionId,
+        resolveRestoreAnchorIdentityFromSourceIndex,
+        webPrependOwner,
+    ]);
+    runWebPrependIndexRecoveryRef.current = runWebPrependIndexRecovery;
 
       const renderItem = useCallback(({ item, index }: { item: ChatTranscriptListItem; index: number }) => {
           if (item.kind === 'action-draft') {
@@ -5840,6 +6753,8 @@ const ChatListInternal = React.memo((props: {
                     interaction={interaction}
                     approvalRequests={props.approvalRequests}
                     getMessageById={props.forkedTranscriptEnabled ? getTurnMessageById : undefined}
+                    messagePins={props.messagePins}
+                    onToggleToolPin={props.onToggleMessagePin}
                     forkCommon={props.forkCommon}
                     messageDisplayCommon={props.messageDisplayCommon}
                     toolChromeCommon={props.toolChromeCommon}
@@ -5906,6 +6821,8 @@ const ChatListInternal = React.memo((props: {
                     message={toolMessage}
                     expanded={item.expanded}
                     approvalRequests={props.approvalRequests}
+                    messagePins={props.messagePins}
+                    onToggleToolPin={props.onToggleMessagePin}
                     forkCommon={props.forkCommon}
                     messageDisplayCommon={props.messageDisplayCommon}
                     toolChromeCommon={props.toolChromeCommon}
@@ -5951,6 +6868,8 @@ const ChatListInternal = React.memo((props: {
                            getMessageById={getTurnMessageById}
                            getMessageOrigin={getTurnMessageOrigin}
                            approvalRequests={props.approvalRequests}
+                           messagePins={props.messagePins}
+                           onToggleMessagePin={props.onToggleMessagePin}
                            rollbackRanges={props.rollbackRanges}
                            resolveRollbackAction={resolveRollbackActionForMessage}
                              resolveThinkingExpanded={resolveThinkingExpanded}
@@ -5980,13 +6899,12 @@ const ChatListInternal = React.memo((props: {
             const olderNeighborIndex = resolveOlderNeighborRenderedIndex(
                 index,
                 neighborItems.length,
-                listOrientationRef.current,
+                listOrientation,
             );
-            const prev = listImplementation === 'flash_v2' && olderNeighborIndex != null
+            const prev = olderNeighborIndex != null
                 ? neighborItems[olderNeighborIndex]
                 : undefined;
             const shouldTightenToolStack =
-                listImplementation === 'flash_v2' &&
                 toolChromeMode === 'activity_feed' &&
                 resolveKindForMessageId(item.messageId) === 'tool-call' &&
                 prev?.kind === 'message' &&
@@ -6010,6 +6928,8 @@ const ChatListInternal = React.memo((props: {
                             rollbackAction={props.rollbackActionsByMessageId[item.messageId] ?? null}
                             rollbackRanges={props.rollbackRanges}
                             approvalRequests={props.approvalRequests}
+                            messagePins={props.messagePins}
+                            onToggleMessagePin={props.onToggleMessagePin}
                             forkCommon={props.forkCommon}
                             messageDisplayCommon={props.messageDisplayCommon}
                             toolChromeCommon={props.toolChromeCommon}
@@ -6020,7 +6940,7 @@ const ChatListInternal = React.memo((props: {
             ));
         }
         return null;
-      }, [expandedToolCallsAnchorMessageIds, getTurnMessageById, getTurnMessageOrigin, listImplementation, props.activeThinkingMessageId, props.approvalRequests, props.forkCommon, props.interaction, props.messageDisplayCommon, props.metadata, props.rollbackRanges, props.sessionId, props.toolChromeCommon, resolveCreatedAtForMessageId, resolveKindForMessageId, resolveRollbackActionForMessage, resolveThinkingExpanded, resolveToolCallMessagesForIds, setThinkingExpanded, setToolCallsGroupExpanded, toolTimelineChromeMode, wrapTranscriptItemForAnchor]);
+      }, [expandedToolCallsAnchorMessageIds, getTurnMessageById, getTurnMessageOrigin, listOrientation, props.activeThinkingMessageId, props.approvalRequests, props.forkCommon, props.interaction, props.messageDisplayCommon, props.messagePins, props.metadata, props.onToggleMessagePin, props.rollbackRanges, props.sessionId, props.toolChromeCommon, resolveCreatedAtForMessageId, resolveKindForMessageId, resolveRollbackActionForMessage, resolveThinkingExpanded, resolveToolCallMessagesForIds, setThinkingExpanded, setToolCallsGroupExpanded, toolTimelineChromeMode, wrapTranscriptItemForAnchor]);
     const renderTranscriptItemAtIndex = React.useCallback((item: ChatTranscriptListItem, index: number) => {
         return renderItem({ item, index });
     }, [renderItem]);
@@ -6056,6 +6976,7 @@ const ChatListInternal = React.memo((props: {
         } else {
             showOlderLoadSpinner();
         }
+        let loadCompleted = false;
         try {
             if (
                 preservePrependViewport &&
@@ -6066,6 +6987,7 @@ const ChatListInternal = React.memo((props: {
                 // commit, no network) — the next load paginates normally.
                 const revealed = revealEntrySliceWindowRef.current();
                 if (revealed > 0) {
+                    loadCompleted = true;
                     return {
                         loaded: revealed,
                         // The top guard already excluded `false`; null means unknown → assume more.
@@ -6074,19 +6996,14 @@ const ChatListInternal = React.memo((props: {
                     };
                 }
             }
-            inFlightWebPrependAnchorRef.current = preservePrependViewport
-                ? captureCurrentWebPrependAnchor()
-                : null;
-            // In inverted native mode, real older-history loads append at the rendered data end
-            // (visual top). They are not prepends from the list's raw-offset perspective, so the
-            // standard native prepend fallback would be a second, wrong scroll owner.
-            const shouldOpenNativePrependTransaction =
-                preservePrependViewport &&
-                listOrientationRef.current !== 'inverted';
-            const nativePrependTransaction = shouldOpenNativePrependTransaction
-                ? beginNativePrependTransaction()
-                : null;
-
+            if (Platform.OS === 'web') {
+                const webPrependAnchorBeforeLoad = preservePrependViewport ? captureCurrentWebPrependAnchor() : null;
+                applyWebPrependOwnerEffects(webPrependOwner.beforeLoad({
+                    anchor: webPrependAnchorBeforeLoad,
+                    preservePrependViewport,
+                    sessionId: props.sessionId,
+                }));
+            }
             const syncLoadOlderOptions = resolveSyncLoadOlderOptions();
             const result = props.forkedTranscriptEnabled
                 ? (syncLoadOlderOptions
@@ -6096,59 +7013,17 @@ const ChatListInternal = React.memo((props: {
                     ? await sync.loadOlderMessages(props.sessionId, syncLoadOlderOptions)
                     : await sync.loadOlderMessages(props.sessionId));
 
-            const webPrependAnchor = inFlightWebPrependAnchorRef.current;
-            inFlightWebPrependAnchorRef.current = null;
-
-            if (Platform.OS === 'web' && listImplementation === 'flash_v2' && preservePrependViewport && result.loaded > 0) {
-                // Plan E2: capture outcome — a restore window opens ('pending') or the capture
-                // was skipped (pinned/non-scrollable viewport) and the prepend rides bottom-follow.
-                recordRestoreDecisionTelemetry(webPrependAnchor ? 'pending' : 'skipped', {
-                    mode: 'restore-anchor',
-                    programmaticWebWrite: false,
-                    webTrigger: 'prepend-restore',
+            if (Platform.OS === 'web') {
+                const webPrependAfterLoadEffects = webPrependOwner.afterLoad({
+                    activeOwner: viewportCommandController.activeOwner(),
+                    loadedRowCount: result.loaded,
+                    nowMs: Date.now(),
+                    preservePrependViewport,
+                    sessionId: props.sessionId,
                 });
+                applyWebPrependOwnerEffects(webPrependAfterLoadEffects);
             }
-            if (webPrependAnchor && result.loaded > 0) {
-                pendingWebPrependAnchorRef.current = refreshWebTranscriptPrependAnchor(
-                    webPrependAnchor,
-                    webPrependAnchor.metrics,
-                    {
-                        resetExpiry: true,
-                        userIntentAtMs: lastUserScrollIntentAtMsRef.current,
-                    },
-                );
-                const restoreResult = restoreWebPrependAnchorThroughViewportCommand(pendingWebPrependAnchorRef.current);
-                recordWebPrependRestoreOutcome(restoreResult);
-                const metrics = resolveWebScrollMetrics();
-                updateWebPrependRangeReserve(webPrependAnchor, metrics);
-                if (metrics && pendingWebPrependAnchorRef.current) {
-                    pendingWebPrependAnchorRef.current = refreshWebTranscriptPrependAnchor(
-                        pendingWebPrependAnchorRef.current,
-                        metrics,
-                        resolvePendingWebPrependRefreshOptions(restoreResult.strategy),
-                    );
-                }
-                pendingWebPrependIndexRecoveryRef.current = restoreResult.strategy === 'growth';
-                scheduleWebPrependRestoreWindowExpiry(pendingWebPrependAnchorRef.current);
-                if (restoreResult.strategy === 'growth') {
-                    schedulePendingWebPrependIndexRecovery();
-                }
-            }
-            if (
-                nativePrependTransaction &&
-                nativePrependTransactionRef.current === nativePrependTransaction &&
-                !nativePrependTransaction.isClosed()
-            ) {
-                if (result.loaded > 0) {
-                    // Commit happens when the prepended items are reflected in the rendered
-                    // array (layout effect), not here at promise resolution (LC-R #2).
-                    nativePrependCommitArmedRef.current = true;
-                } else {
-                    // Empty/no-op loads dispose the capture with an explicit outcome (LC-R #4).
-                    invalidateNativePrependTransaction();
-                }
-            }
-
+            loadCompleted = true;
             if (result.status === 'no_more') {
                 hasMoreOlderRef.current = false;
                 setHasMoreOlder(false);
@@ -6162,40 +7037,39 @@ const ChatListInternal = React.memo((props: {
                 status: result.status,
             };
         } finally {
-            inFlightWebPrependAnchorRef.current = null;
-            const danglingTransaction = nativePrependTransactionRef.current;
-            if (
-                danglingTransaction != null &&
-                !nativePrependCommitArmedRef.current &&
-                danglingTransaction.sessionId === props.sessionId &&
-                danglingTransaction.state() === 'awaiting-commit'
-            ) {
-                // The load threw or yielded nothing observable: never drop the capture silently.
-                invalidateNativePrependTransaction();
+            if (Platform.OS === 'web' && !loadCompleted) {
+                applyWebPrependOwnerEffects(webPrependOwner.clear({
+                    outcome: 'abandoned-identity',
+                    sessionId: props.sessionId,
+                }));
+            }
+            if (!loadCompleted && nativePrependOwner.hasOpenTransaction(props.sessionId)) {
+                applyNativePrependOwnerEffects(nativePrependOwner.invalidate({
+                    activeOwner: viewportCommandController.activeOwner(),
+                    reason: 'load-empty',
+                    sessionId: props.sessionId,
+                }));
             }
             hideOlderLoadSpinner();
             loadOlderInFlight.current = false;
         }
     }, [
-        beginNativePrependTransaction,
+        applyNativePrependOwnerEffects,
+        applyWebPrependOwnerEffects,
         captureCurrentWebPrependAnchor,
         clearOlderLoadSpinnerDelay,
         hasMoreOlder,
         hideOlderLoadSpinner,
-        invalidateNativePrependTransaction,
-        listImplementation,
+        nativePrependOwner,
         pinThresholdPx,
         props.committedMessagesCount,
         props.forkedTranscriptEnabled,
         props.isLoaded,
         props.sessionId,
-        recordRestoreDecisionTelemetry,
-        recordWebPrependRestoreOutcome,
         resolveSyncLoadOlderOptions,
-        resolveWebScrollMetrics,
-        scheduleWebPrependRestoreWindowExpiry,
-        restoreWebPrependAnchorThroughViewportCommand,
         showOlderLoadSpinner,
+        viewportCommandController,
+        webPrependOwner,
     ]);
     loadOlderForAnchorLookupRef.current = loadOlder;
 
@@ -6211,12 +7085,12 @@ const ChatListInternal = React.memo((props: {
     // with ChainTranscriptList; replaces the deleted dwell scheduler family. Suspension while
     // any viewport transaction is open comes from the ownership machine.
     const olderPagination = useTranscriptOlderPagination({
-        enabled: listImplementation === 'flash_v2',
+        enabled: true,
         loadOlder: paginationLoadOlder,
         thresholdPx: resolveBackwardPrefetchThresholdPx(listLayoutHeight),
         cooldownMs: sync.getSyncTuning().transcriptOlderLoadCooldownMs,
         spinnerDelayMs: sync.getSyncTuning().transcriptOlderLoadSpinnerDelayMs,
-        isFillDone: () => initialFillStatusRef.current === 'done',
+        isFillDone: () => sessionOpenLatch.initialFillStatus() === 'done',
         isTransactionOpen: () => viewportCommandController.activeOwner() !== 'follow',
     });
     olderPaginationSnapshotRef.current = olderPagination.getSnapshot();
@@ -6231,7 +7105,6 @@ const ChatListInternal = React.memo((props: {
         webMetrics?: WebTranscriptScrollMetrics | null;
         trigger?: 'scroll' | 'edge-reached';
     }>) => {
-        if (listImplementation !== 'flash_v2') return;
         const usesWebDomMetrics = Platform.OS === 'web' && params.webMetrics != null;
         const layoutHeight = usesWebDomMetrics ? params.webMetrics!.clientHeight : params.layoutHeight;
         const contentHeight = usesWebDomMetrics ? params.webMetrics!.scrollHeight : params.contentHeight;
@@ -6275,13 +7148,73 @@ const ChatListInternal = React.memo((props: {
             });
         }
     }, [
-        listImplementation,
         olderPagination,
         onOlderPaginationScrollObservation,
         pinThresholdPx,
         recordViewportTelemetryEvent,
         resolveViewportTelemetryMode,
         resolveWebViewportTelemetryDiagnostics,
+    ]);
+
+    const resolveActiveTargetWindowContinuationTarget = React.useCallback((): TranscriptJumpTarget | null => {
+        const activeWindowState = targetWindowHostFacts.activeWindowState;
+        const targetSeq = activeWindowState?.targetSeq;
+        if (typeof targetSeq !== 'number' || !Number.isFinite(targetSeq)) return null;
+        const normalizedTargetSeq = Math.trunc(targetSeq);
+        const rememberedTarget = activeTargetWindowTargetRef.current;
+        const rememberedTargetSeq = rememberedTarget?.kind === 'seq'
+            ? rememberedTarget.seq
+            : rememberedTarget?.seqHint;
+        if (
+            typeof rememberedTargetSeq === 'number' &&
+            Number.isFinite(rememberedTargetSeq) &&
+            Math.trunc(rememberedTargetSeq) === normalizedTargetSeq
+        ) {
+            return rememberedTarget;
+        }
+        return { kind: 'seq', seq: normalizedTargetSeq };
+    }, [targetWindowHostFacts.activeWindowState]);
+
+    const loadTargetWindowPageAtEdge = React.useCallback(async (direction: 'older' | 'newer') => {
+        const activeWindowState = targetWindowHostFacts.activeWindowState;
+        if (!activeWindowState || !props.sessionId) return;
+        if (direction === 'older' && activeWindowState.hasMoreOlder !== true) return;
+        if (direction === 'newer' && activeWindowState.hasMoreNewer !== true) {
+            if (activeWindowState.hasMoreNewer === false) {
+                sync.markSessionLiveTailIntent(props.sessionId);
+                activeTargetWindowTargetRef.current = null;
+            }
+            return;
+        }
+        if (targetWindowEdgeLoadInFlightRef.current[direction]) return;
+        const target = resolveActiveTargetWindowContinuationTarget();
+        if (!target) return;
+        targetWindowEdgeLoadInFlightRef.current[direction] = true;
+        try {
+            const routeSeqHint = target.kind === 'route-message-id' && typeof target.seqHint === 'number' && Number.isFinite(target.seqHint)
+                ? Math.trunc(target.seqHint)
+                : null;
+            const loadTarget = target.kind === 'seq'
+                ? { kind: 'seq' as const, seq: Math.trunc(target.seq) }
+                : routeSeqHint != null
+                    ? {
+                        kind: 'route-message-id' as const,
+                        routeMessageId: target.routeMessageId,
+                        seqHint: routeSeqHint,
+                    }
+                    : null;
+            if (!loadTarget) return;
+            const result = await sync.loadTargetWindowMessages(props.sessionId, loadTarget, { direction });
+            if (result?.status === 'loaded' && result.targetPresent) {
+                activeTargetWindowTargetRef.current = target;
+            }
+        } finally {
+            targetWindowEdgeLoadInFlightRef.current[direction] = false;
+        }
+    }, [
+        props.sessionId,
+        resolveActiveTargetWindowContinuationTarget,
+        targetWindowHostFacts.activeWindowState,
     ]);
 
     /**
@@ -6292,93 +7225,52 @@ const ChatListInternal = React.memo((props: {
      * callback into an older-page load.
      */
     const observePaginationEdgeReachedNudge = React.useCallback((visualEdge: 'older' | 'newer') => {
+        if (targetWindowActiveRef.current) {
+            void loadTargetWindowPageAtEdge(visualEdge);
+            return;
+        }
         if (visualEdge !== 'older') return;
         const liveWebMetrics = Platform.OS === 'web' ? resolveWebScrollMetrics() : null;
         const rawEdgeOffset = liveWebMetrics
             ? liveWebMetrics.scrollTop
-            : (() => {
-                try {
-                    const value = listRef.current?.getAbsoluteLastScrollOffset?.();
-                    return typeof value === 'number' && Number.isFinite(value) ? value : null;
-                } catch {
-                    return null;
-                }
-            })();
+            : readNativeAbsoluteScrollOffset(listRef.current);
         if (typeof rawEdgeOffset !== 'number') return;
         const layoutH = liveWebMetrics?.clientHeight ?? listLayoutHeightRef.current;
         const contentH = liveWebMetrics?.scrollHeight ?? listContentHeightRef.current;
-        const canonicalEdgeOffset = toCanonicalScrollOffset({
-            offsetY: rawEdgeOffset,
-            contentHeight: contentH,
-            layoutHeight: layoutH,
-            orientation: listOrientationRef.current,
-        });
+        const nativeObservedOffset = liveWebMetrics
+            ? null
+            : resolveNativeObservedScrollOffset(rawEdgeOffset, { contentHeight: contentH, layoutHeight: layoutH });
+        const canonicalEdgeOffset = liveWebMetrics ? rawEdgeOffset : nativeObservedOffset?.canonicalOffsetY;
+        if (typeof canonicalEdgeOffset !== 'number') return;
         observeOlderPaginationScroll({
             offsetY: canonicalEdgeOffset,
             layoutHeight: layoutH,
             contentHeight: contentH,
-            distanceFromBottom: Math.max(0, Math.trunc(contentH - layoutH - canonicalEdgeOffset)),
+            distanceFromBottom: liveWebMetrics
+                ? Math.max(0, Math.trunc(contentH - layoutH - canonicalEdgeOffset))
+                : nativeObservedOffset?.distanceFromLiveTailPx ?? 0,
             webMetrics: liveWebMetrics,
             trigger: 'edge-reached',
         });
-    }, [observeOlderPaginationScroll, resolveWebScrollMetrics]);
+    }, [
+        loadTargetWindowPageAtEdge,
+        observeOlderPaginationScroll,
+        resolveNativeObservedScrollOffset,
+        resolveWebScrollMetrics,
+    ]);
+
+    const observeWebPrependOwner = React.useCallback(() => {
+        if (Platform.OS !== 'web') return;
+        const effects = webPrependOwner.observePending({
+            nowMs: Date.now(),
+            sessionId: props.sessionId,
+        });
+        applyWebPrependOwnerEffects(effects);
+    }, [applyWebPrependOwnerEffects, listContentHeight, listData.length, props.sessionId, webPrependOwner]);
 
     React.useLayoutEffect(() => {
-        if (Platform.OS !== 'web' || listImplementation !== 'flash_v2') return;
-
-        let pendingAnchor = pendingWebPrependAnchorRef.current;
-        if (!pendingAnchor) return;
-        if (pendingAnchor.userIntentAtMs !== lastUserScrollIntentAtMsRef.current) {
-            const metrics = resolveWebScrollMetrics();
-            if (!metrics || !isWebTranscriptScrollable(metrics, 1)) {
-                clearWebPrependRestoreWindow('abandoned-identity');
-                // Plan E2: the scroller went away/unscrollable — the restore window is disposed.
-                recordRestoreDecisionTelemetry('skipped', {
-                    mode: 'restore-anchor',
-                    programmaticWebWrite: false,
-                    webTrigger: 'prepend-restore',
-                });
-                return;
-            }
-            pendingAnchor = refreshWebTranscriptPrependAnchor(pendingAnchor, metrics, {
-                recaptureAnchor: true,
-                resetExpiry: true,
-                userIntentAtMs: lastUserScrollIntentAtMsRef.current,
-            });
-            pendingWebPrependAnchorRef.current = pendingAnchor;
-            pendingWebPrependIndexRecoveryRef.current = false;
-        }
-        if (Date.now() > pendingAnchor.expiresAtMs) {
-            clearWebPrependRestoreWindow('abandoned-identity');
-            // Plan E2: the stabilization window expired; the restore window closes silently no more.
-            recordRestoreDecisionTelemetry('skipped', {
-                mode: 'restore-anchor',
-                programmaticWebWrite: false,
-                webTrigger: 'prepend-restore',
-            });
-            return;
-        }
-
-        const restoreResult = restoreWebPrependAnchorThroughViewportCommand(pendingAnchor);
-        recordWebPrependRestoreOutcome(restoreResult);
-        const metrics = resolveWebScrollMetrics();
-        if (!metrics) {
-            clearWebPrependRestoreWindow(restoreResult.didAdjustScroll ? 'confirmed' : 'abandoned-identity');
-            return;
-        }
-        updateWebPrependRangeReserve(pendingAnchor, metrics);
-        pendingWebPrependAnchorRef.current = refreshWebTranscriptPrependAnchor(
-            pendingAnchor,
-            metrics,
-            resolvePendingWebPrependRefreshOptions(restoreResult.strategy),
-        );
-        scheduleWebPrependRestoreWindowExpiry(pendingWebPrependAnchorRef.current);
-        pendingWebPrependIndexRecoveryRef.current =
-            pendingWebPrependIndexRecoveryRef.current || restoreResult.strategy === 'growth';
-        if (pendingWebPrependIndexRecoveryRef.current && pendingWebPrependAnchorRef.current) {
-            attemptPendingWebPrependIndexRecovery();
-        }
-    }, [attemptPendingWebPrependIndexRecovery, clearWebPrependRestoreWindow, listContentHeight, listData.length, listImplementation, props.sessionId, recordRestoreDecisionTelemetry, recordWebPrependRestoreOutcome, resolvePendingWebPrependRefreshOptions, resolveWebScrollMetrics, restoreWebPrependAnchorThroughViewportCommand, scheduleWebPrependRestoreWindowExpiry, updateWebPrependRangeReserve]);
+        observeWebPrependOwner();
+    }, [listContentHeight, listData.length, observeWebPrependOwner]);
 
         const tryPinToBottomDom = React.useCallback((reason: TranscriptViewportTelemetryScrollReason = 'initial-open'): boolean => {
             if (reason === 'jump-to-bottom') {
@@ -6394,8 +7286,6 @@ const ChatListInternal = React.memo((props: {
                     shouldFollowBottom: true,
                     entrySnapshot: null,
                     jumpToSeq: null,
-                    platform: telemetryPlatform,
-                    listImplementation: telemetryListImplementation,
                 }));
             }
             if (reason === 'jump-to-seq') {
@@ -6420,17 +7310,25 @@ const ChatListInternal = React.memo((props: {
             pinThresholdPx,
             props.sessionId,
             resolveViewportCommand,
-            telemetryListImplementation,
             telemetryPlatform,
         ]);
 
-    const resolveNearestSurvivingViewportAnchorIndex = React.useCallback((anchor: SessionViewportAnchorSnapshot): number | null => {
+    const resolveSeqForViewportAnchor = React.useCallback((anchor: SessionViewportAnchorSnapshot): number | null => {
         const anchorMessageId = typeof anchor.messageId === 'string' && anchor.messageId.length > 0
             ? anchor.messageId
             : null;
-        if (!anchorMessageId) return null;
-        const anchorSeq = resolveSeqForMessageId(anchorMessageId);
-        if (typeof anchorSeq !== 'number' || !Number.isFinite(anchorSeq)) return null;
+        const messageSeq = anchorMessageId ? resolveSeqForMessageId(anchorMessageId) : null;
+        const normalizeSeq = (value: unknown): number | null => {
+            if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+            const seq = Math.trunc(value);
+            return seq > 0 ? seq : null;
+        };
+        return normalizeSeq(messageSeq) ?? normalizeSeq(anchor.seq);
+    }, [resolveSeqForMessageId]);
+
+    const resolveNearestSurvivingViewportAnchorIndex = React.useCallback((anchor: SessionViewportAnchorSnapshot): number | null => {
+        const anchorSeq = resolveSeqForViewportAnchor(anchor);
+        if (anchorSeq == null) return null;
 
         type AnchorIndexCandidate = { index: number; seq: number };
         let earlier: AnchorIndexCandidate | null = null;
@@ -6488,18 +7386,32 @@ const ChatListInternal = React.memo((props: {
         }
 
         return earlier?.index ?? later?.index ?? null;
-    }, [resolveSeqForMessageId]);
+    }, [resolveSeqForMessageId, resolveSeqForViewportAnchor]);
+
+    const resolveEntryRestoreOwnerAnchor = React.useCallback((
+        anchor: SessionViewportAnchorSnapshot,
+        resolvedIndex: number | null,
+    ): EntryRestoreOwnerAnchor | null => {
+        const currentIdentity = resolvedIndex != null
+            ? resolveRestoreAnchorIdentityFromSourceIndex(resolvedIndex)
+            : null;
+        const fallbackIdentity = normalizeRestoreAnchorIdentity(anchor);
+        const identity = currentIdentity ?? fallbackIdentity;
+        if (!identity) return null;
+        return {
+            ...identity,
+            capturedAtMs: anchor.capturedAtMs,
+            itemOffsetPx: anchor.itemOffsetPx,
+            seq: resolveSeqForViewportAnchor(anchor),
+        };
+    }, [resolveRestoreAnchorIdentityFromSourceIndex, resolveSeqForViewportAnchor]);
 
     React.useLayoutEffect(() => {
-        // Prepend transaction commit/observe loop (plan F4): commits once the prepended page
-        // is reflected in the rendered items, then re-observes the single window on every
-        // layout/data pass until the transaction closes.
-        observeNativePrependTransaction();
+        observeNativePrependOwner();
     }, [
         listContentHeight,
         listData.length,
-        listImplementation,
-        observeNativePrependTransaction,
+        observeNativePrependOwner,
         props.sessionId,
     ]);
 
@@ -6532,135 +7444,175 @@ const ChatListInternal = React.memo((props: {
             };
         }
         // A6: ONE canonical native content basis — the scroll-event contentSize. The measured
-        // ref carries the composer inset added back (`resolveMeasuredContentHeight`), so the
-        // canonical basis subtracts it again; entry alignment checks in onScroll read the same
-        // basis directly from the scroll event.
+        // ref carries the composer inset added back by the measurement host, so the canonical
+        // basis subtracts it again; entry alignment checks in onScroll read the same basis
+        // directly from the scroll event.
         if (!hasNativeContentMeasurementForCurrentSession()) {
             return { contentHeight: 0, layoutHeight: listLayoutHeightRef.current };
         }
-        const contentHeight = listImplementation === 'flash_v2'
-            ? Math.max(0, Math.trunc(listContentHeightRef.current - composerInsetHeightRef.current))
-            : Math.max(0, Math.trunc(listContentHeightRef.current));
+        const contentHeight = Math.max(0, Math.trunc(listContentHeightRef.current - composerInsetHeightRef.current));
         return { contentHeight, layoutHeight: listLayoutHeightRef.current };
-    }, [hasNativeContentMeasurementForCurrentSession, listImplementation, resolveWebScrollMetrics]);
+    }, [hasNativeContentMeasurementForCurrentSession, resolveWebScrollMetrics]);
 
-    const clearEntryRestoreDeadlineTimeout = React.useCallback(() => {
-        const scheduled = entryRestoreDeadlineTimeoutRef.current;
-        if (!scheduled) return;
-        entryRestoreDeadlineTimeoutRef.current = null;
-        clearTimeout(scheduled.timeoutId);
-    }, []);
-
-    /**
-     * Single close point of the entry-restore lifecycle (plan F2): ownership phase release,
-     * outcome telemetry, and the native first-paint reveal all hang off the transaction close.
-     */
-    const finishEntryRestoreTransaction = React.useCallback((transaction: EntryRestoreTransaction) => {
-        if (entryRestoreTransactionRef.current !== transaction) return;
-        if (!transaction.isClosed()) return;
-        clearEntryRestoreDeadlineTimeout();
-        const outcome = transaction.outcome();
-        const writeContext = entryRestoreWriteContextRef.current;
-        closeEntryViewportOwnership(
-            outcome === 'preempted-user-scroll'
-                ? 'preempted'
-                : outcome === 'deadline'
-                    ? 'deadline'
-                    : 'confirmed',
-        );
-        recordRestoreDecisionTelemetry(
-            outcome === 'confirmed'
-                ? 'restored'
-                : outcome === 'deadline'
-                    ? 'not-ready'
-                    : 'skipped',
-            {
-                mode: writeContext?.kind === 'anchor' || writeContext?.kind === 'slice-anchor'
-                    ? 'restore-anchor'
-                    : writeContext?.kind === 'bottom'
-                        ? 'follow-bottom'
-                        : 'restore-distance',
-                offsetY: writeContext?.distanceFromBottom,
-                contentHeight: writeContext?.issuedContentHeight,
-                layoutHeight: writeContext?.issuedLayoutHeight,
-            },
-        );
-        if (Platform.OS !== 'web' && transaction.sessionId === currentSessionIdRef.current) {
-            updateNativeInitialViewportPendingObservation(false);
-            if (outcome === 'confirmed') {
-                markNativeInitialViewportAppliedForCurrentSession();
-            } else {
-                // A4: the placeholder release is driven by transaction close; the 32ms polish
-                // keeps the reveal off the same frame as the final write. The deadline timer
-                // always fires, so this can never hang.
-                scheduleNativePaintReleaseForEntryRestore({ force: true });
-            }
-            if (writeContext?.kind === 'slice-anchor') {
-                // N2b.2: the entry phase is over (any outcome) — reveal the withheld
-                // older rows as one prepend-observed commit so scroll room above the
-                // anchor exists again (the window must never stay stranded).
-                revealEntrySliceWindowRef.current();
+    const applyEntryRestoreOwnerEffects = React.useCallback((
+        effects: readonly EntryRestoreOwnerEffect[],
+    ) => {
+        for (const effect of effects) {
+            switch (effect.type) {
+                case 'execute-command': {
+                    let issued = false;
+                    if (effect.command.type === 'restore-web-anchor-through-command') {
+                        const restoreResult = restoreWebViewportAnchorThroughViewportCommand({
+                            anchor: {
+                                ...effect.command.anchor,
+                                messageId: effect.command.anchor.messageId ?? null,
+                            },
+                            itemIndex: effect.command.itemIndex,
+                        });
+                        issued = didWebViewportAnchorRestoreSucceed(restoreResult);
+                        if (issued) {
+                            const metrics = resolveWebScrollMetrics();
+                            if (metrics) {
+                                applyEntryRestoreOwnerEffectsRef.current(entryRestoreOwner.observeWeb({
+                                    contentHeight: metrics.scrollHeight,
+                                    layoutHeight: metrics.clientHeight,
+                                    nowMs: Date.now(),
+                                    observation: { status: 'aligned' },
+                                    sessionId: props.sessionId,
+                                }));
+                            }
+                        }
+                    } else {
+                        const command = resolveViewportCommand(effect.command);
+                        const commandWithContentHeight =
+                            Platform.OS !== 'web' &&
+                            command.kind === 'restore-distance' &&
+                            effect.command.type === 'restore-distance' &&
+                            typeof effect.command.contentHeight === 'number'
+                                ? { ...command, contentHeight: effect.command.contentHeight }
+                                : command;
+                        issued = executeViewportCommand(commandWithContentHeight);
+                    }
+                    if (!issued) {
+                        applyEntryRestoreOwnerEffectsRef.current(entryRestoreOwner.markInitialCommandFailed({
+                            sessionId: props.sessionId,
+                        }));
+                    }
+                    break;
+                }
+                case 'schedule-entry-deadline': {
+                    const scheduled = entryRestoreDeadlineTimeoutRef.current;
+                    if (scheduled) {
+                        entryRestoreDeadlineTimeoutRef.current = null;
+                        clearTimeout(scheduled.timeoutId);
+                    }
+                    const handle = {
+                        sessionId: effect.sessionId,
+                        timeoutId: null as unknown as ReturnType<typeof setTimeout>,
+                    };
+                    handle.timeoutId = setTimeout(() => {
+                        if (entryRestoreDeadlineTimeoutRef.current !== handle) return;
+                        entryRestoreDeadlineTimeoutRef.current = null;
+                        applyEntryRestoreOwnerEffectsRef.current(entryRestoreOwner.runDeadline({
+                            nowMs: Number.MAX_SAFE_INTEGER,
+                            sessionId: handle.sessionId,
+                        }));
+                    }, Math.max(0, Math.trunc(effect.deadlineMs)));
+                    entryRestoreDeadlineTimeoutRef.current = handle;
+                    break;
+                }
+                case 'clear-entry-deadline': {
+                    const scheduled = entryRestoreDeadlineTimeoutRef.current;
+                    if (!scheduled) break;
+                    entryRestoreDeadlineTimeoutRef.current = null;
+                    clearTimeout(scheduled.timeoutId);
+                    break;
+                }
+                case 'set-native-initial-viewport-pending-observation':
+                    updateNativeInitialViewportPendingObservation(effect.pending);
+                    break;
+                case 'set-entry-slice-window':
+                    entrySliceWindowRef.current = {
+                        anchorRowId: effect.anchorRowId,
+                        sessionId: effect.sessionId,
+                    };
+                    setEntrySliceWindow(entrySliceWindowRef.current);
+                    break;
+                case 'clear-entry-slice-window':
+                    entrySliceWindowRef.current = null;
+                    setEntrySliceWindow(null);
+                    break;
+                case 'request-bounded-materialization':
+                    requestBoundedEntryViewportMaterializationRef.current();
+                    break;
+                case 'close-entry-ownership':
+                    closeEntryViewportOwnership(effect.outcome);
+                    break;
+                case 'record-restore-decision':
+                    recordRestoreDecisionTelemetry(effect.reason, {
+                        mode: effect.mode,
+                        offsetY: effect.offsetY,
+                        contentHeight: effect.contentHeight,
+                        layoutHeight: effect.layoutHeight,
+                    });
+                    break;
+                case 'record-restore-decision-for-session':
+                    recordViewportTelemetryEvent({
+                        type: 'restore-decision',
+                        mode: effect.mode,
+                        reason: effect.reason,
+                        offsetY: effect.offsetY,
+                    }, { sessionId: effect.sessionId });
+                    break;
+                case 'native-initial-viewport-applied':
+                    updateNativeInitialViewportPendingObservation(false);
+                    invalidateViewportAnchorCapture();
+                    markNativeInitialViewportAppliedForCurrentSession();
+                    break;
+                case 'schedule-native-entry-paint-release':
+                    updateNativeInitialViewportPendingObservation(false);
+                    scheduleNativePaintReleaseForEntryRestore({ force: effect.force });
+                    break;
+                case 'reveal-entry-slice-window':
+                    revealEntrySliceWindowRef.current();
+                    break;
             }
         }
     }, [
-        clearEntryRestoreDeadlineTimeout,
         closeEntryViewportOwnership,
+        entryRestoreOwner,
+        executeViewportCommand,
+        invalidateViewportAnchorCapture,
         markNativeInitialViewportAppliedForCurrentSession,
+        props.sessionId,
         recordRestoreDecisionTelemetry,
+        recordViewportTelemetryEvent,
+        resolveViewportCommand,
+        resolveWebScrollMetrics,
+        restoreWebViewportAnchorThroughViewportCommand,
         scheduleNativePaintReleaseForEntryRestore,
         updateNativeInitialViewportPendingObservation,
     ]);
-    finishEntryRestoreTransactionRef.current = finishEntryRestoreTransaction;
+    applyEntryRestoreOwnerEffectsRef.current = applyEntryRestoreOwnerEffects;
 
     /**
      * Disposes an OPEN entry-restore transaction on session exit/unmount (mirror of
      * invalidateNativePrependTransaction): the transaction closes preempted and its outcome
      * is telemetered against the transaction's own session — entry restores must never be
-     * dropped silently (plan §4 "every outcome telemetered"). Deliberately bypasses
-     * finishEntryRestoreTransaction: that path attributes telemetry to the CURRENT session
-     * (wrong across a switch) and schedules paint-release work for a lifecycle the exiting
-     * session no longer owns.
+     * dropped silently (plan §4 "every outcome telemetered"). Deliberately applies the
+     * owner dispose effects directly: current-session close paths would attribute telemetry
+     * to the wrong session across a switch and schedule paint-release work for a lifecycle
+     * the exiting session no longer owns.
      */
     const disposeEntryRestoreTransactionForExit = React.useCallback(() => {
-        const transaction = entryRestoreTransactionRef.current;
-        if (!transaction || transaction.isClosed()) return;
-        transaction.onTrustedUserScroll();
-        clearEntryRestoreDeadlineTimeout();
-        const writeContext = entryRestoreWriteContextRef.current;
-        closeEntryViewportOwnership('preempted');
-        recordViewportTelemetryEvent({
-            type: 'restore-decision',
-            mode: writeContext?.kind === 'anchor' || writeContext?.kind === 'slice-anchor'
-                ? 'restore-anchor'
-                : writeContext?.kind === 'bottom'
-                    ? 'follow-bottom'
-                    : 'restore-distance',
-            reason: 'skipped',
-            offsetY: writeContext?.distanceFromBottom,
-        }, { sessionId: transaction.sessionId });
+        applyEntryRestoreOwnerEffects(entryRestoreOwner.disposeForExit({
+            currentSessionId: currentSessionIdRef.current,
+        }));
     }, [
-        clearEntryRestoreDeadlineTimeout,
-        closeEntryViewportOwnership,
-        recordViewportTelemetryEvent,
+        applyEntryRestoreOwnerEffects,
+        entryRestoreOwner,
     ]);
     disposeEntryRestoreTransactionForExitRef.current = disposeEntryRestoreTransactionForExit;
-
-    const armEntryRestoreDeadline = React.useCallback((transaction: EntryRestoreTransaction, deadlineMs: number) => {
-        clearEntryRestoreDeadlineTimeout();
-        const handle = {
-            sessionId: transaction.sessionId,
-            timeoutId: null as unknown as ReturnType<typeof setTimeout>,
-        };
-        handle.timeoutId = setTimeout(() => {
-            if (entryRestoreDeadlineTimeoutRef.current !== handle) return;
-            entryRestoreDeadlineTimeoutRef.current = null;
-            if (entryRestoreTransactionRef.current !== transaction || transaction.isClosed()) return;
-            // The deadline must always close the transaction, regardless of timer clock skew.
-            transaction.onDeadline(Number.MAX_SAFE_INTEGER);
-            finishEntryRestoreTransactionRef.current(transaction);
-        }, Math.max(0, Math.trunc(deadlineMs)));
-        entryRestoreDeadlineTimeoutRef.current = handle;
-    }, [clearEntryRestoreDeadlineTimeout]);
 
     const resolveEntryRestoreDeadlineMs = React.useCallback((): number => {
         const tuning = sync.getSyncTuning();
@@ -6699,100 +7651,7 @@ const ChatListInternal = React.memo((props: {
         })(), { tag: 'ChatList.restoreEntryAnchorLookup' });
         return true;
     }, []);
-
-    const issueEntryRestoreAnchorWrite = React.useCallback((index: number, viewOffset: number): boolean => {
-        return executeViewportCommand(resolveViewportCommand({
-            type: 'first-paint',
-            sessionId: props.sessionId,
-            shouldFollowBottom: false,
-            entrySnapshot: {
-                shouldFollowBottom: false,
-                offsetY: 0,
-                anchorIndex: index,
-                anchorViewOffset: viewOffset,
-            },
-            jumpToSeq: null,
-            platform: telemetryPlatform,
-            listImplementation: telemetryListImplementation,
-        }));
-    }, [executeViewportCommand, props.sessionId, resolveViewportCommand, telemetryListImplementation, telemetryPlatform]);
-
-    const issueEntryRestoreDistanceWrite = React.useCallback((distanceFromBottom: number, contentHeight: number): boolean => {
-        const command = resolveViewportCommand({
-            type: 'first-paint',
-            sessionId: props.sessionId,
-            shouldFollowBottom: false,
-            entrySnapshot: {
-                shouldFollowBottom: false,
-                offsetY: distanceFromBottom,
-            },
-            jumpToSeq: null,
-            platform: telemetryPlatform,
-            listImplementation: telemetryListImplementation,
-        });
-        const commandWithContentHeight = Platform.OS !== 'web' && command.kind === 'restore-offset'
-            ? { ...command, contentHeight }
-            : command;
-        return executeViewportCommand(commandWithContentHeight);
-    }, [executeViewportCommand, props.sessionId, resolveViewportCommand, telemetryListImplementation, telemetryPlatform]);
-
-    const issueWebEntryRestoreAnchorWrite = React.useCallback((anchor: SessionViewportAnchorSnapshot | null): boolean => {
-        if (Platform.OS !== 'web' || listImplementation !== 'flash_v2' || !anchor) return false;
-        const metrics = resolveWebScrollMetrics();
-        if (!metrics) return false;
-        const result = restoreWebViewportAnchorThroughViewportCommand({
-            container: metrics.element,
-            anchor: { ...anchor, messageId: anchor.messageId ?? null },
-        });
-        return result.status === 'restored' || result.status === 'already_aligned';
-    }, [listImplementation, resolveWebScrollMetrics, restoreWebViewportAnchorThroughViewportCommand]);
-
-    // Plan E1: after the crash fallback flips the implementation, restore the viewport that
-    // was captured from the crashed list — a fresh entry restore on the new implementation,
-    // anchor-first through the viewport command seam with the remembered distance as fallback.
-    React.useLayoutEffect(() => {
-        if (Platform.OS !== 'web' || !webFlashListCrashed) return;
-        const snapshot = webCrashFallbackViewportRef.current;
-        if (!snapshot) return;
-        webCrashFallbackViewportRef.current = null;
-        if (snapshot.sessionId !== props.sessionId) return;
-        // An open entry transaction still owns the viewport and will place it itself.
-        const entryTransaction = entryRestoreTransactionRef.current;
-        if (entryTransaction && !entryTransaction.isClosed()) return;
-        // A pinned-at-bottom viewport rides bottom-follow on the new implementation.
-        if (wantsPinnedRef.current && snapshot.distanceFromBottom <= pinThresholdPx) return;
-        const opened = viewportCommandController.activeOwner() === 'follow'
-            ? viewportCommandController.openTransaction('entry').opened
-            : false;
-        try {
-            let restored = false;
-            if (snapshot.anchor) {
-                const metrics = resolveWebScrollMetrics();
-                if (metrics) {
-                    const result = restoreWebViewportAnchorThroughViewportCommand({
-                        container: metrics.element,
-                        anchor: snapshot.anchor,
-                    });
-                    restored = result.status === 'restored' || result.status === 'already_aligned';
-                }
-            }
-            if (!restored) {
-                issueEntryRestoreDistanceWrite(snapshot.distanceFromBottom, listContentHeightRef.current);
-            }
-        } finally {
-            if (opened) {
-                viewportCommandController.closeTransaction('entry', 'confirmed');
-            }
-        }
-    }, [
-        issueEntryRestoreDistanceWrite,
-        pinThresholdPx,
-        props.sessionId,
-        resolveWebScrollMetrics,
-        restoreWebViewportAnchorThroughViewportCommand,
-        viewportCommandController,
-        webFlashListCrashed,
-    ]);
+    requestBoundedEntryViewportMaterializationRef.current = requestBoundedEntryViewportMaterialization;
 
     /**
      * Web confirm-or-deadline (plan A5): verify the open web entry transaction against live DOM
@@ -6801,71 +7660,37 @@ const ChatListInternal = React.memo((props: {
      */
     const verifyWebEntryRestoreTransaction = React.useCallback(() => {
         if (Platform.OS !== 'web') return;
-        const transaction = entryRestoreTransactionRef.current;
-        const writeContext = entryRestoreWriteContextRef.current;
-        if (!transaction || transaction.isClosed() || transaction.sessionId !== props.sessionId || !writeContext) return;
         const metrics = resolveWebScrollMetrics();
         if (!metrics) return;
-        const nowMs = Date.now();
         const tolerancePx = Math.max(pinThresholdPx, 2);
-        if (writeContext.kind === 'anchor') {
-            if (!writeContext.anchor) return;
-            // A still-open web anchor transaction means the issue-time anchor restore could
-            // not see the anchor row (seam scroll-to-index fallback). Once the row mounts, a
-            // read-only alignment observation drives confirm or the single DOM correction.
-            const alignment = resolveWebTranscriptViewportAnchorAlignment({
-                container: metrics.element,
-                anchor: { ...writeContext.anchor, messageId: writeContext.anchor.messageId ?? null },
-                tolerancePx,
-            });
-            if (alignment.status === 'aligned') {
-                transaction.onObservation({ status: 'aligned' }, nowMs);
-            } else if (alignment.status === 'misaligned') {
-                const directive = transaction.onObservation({ status: 'misaligned' }, nowMs);
-                if (directive.action === 'issue-correction-write') {
-                    const result = restoreWebViewportAnchorThroughViewportCommand({
-                        container: metrics.element,
-                        anchor: { ...writeContext.anchor, messageId: writeContext.anchor.messageId ?? null },
-                    });
-                    if (result.status === 'restored' || result.status === 'already_aligned') {
-                        // The helper read the anchor back and applied the exact delta.
-                        transaction.onObservation({ status: 'aligned' }, nowMs);
-                    }
-                }
-            }
-            // not_found stays inconclusive; the deadline closes the transaction honestly.
-        } else {
-            const distanceTarget = writeContext.kind === 'bottom' ? 0 : writeContext.distanceFromBottom;
-            const distanceFromBottom = getWebTranscriptDistanceFromBottom(metrics);
-            if (Math.abs(distanceFromBottom - distanceTarget) <= tolerancePx) {
-                transaction.onObservation({ status: 'aligned' }, nowMs);
-            } else if (metrics.scrollHeight + tolerancePx >= writeContext.issuedContentHeight) {
-                const directive = transaction.onObservation({ status: 'misaligned' }, nowMs);
-                if (directive.action === 'issue-correction-write') {
-                    const issuedContentHeight = Math.max(0, Math.trunc(metrics.scrollHeight));
-                    if (writeContext.kind === 'bottom') {
-                        tryPinToBottomDom('initial-open');
-                    } else {
-                        issueEntryRestoreDistanceWrite(distanceTarget, issuedContentHeight);
-                    }
-                    entryRestoreWriteContextRef.current = {
-                        ...writeContext,
-                        issuedContentHeight,
-                    };
-                }
-            }
-        }
-        if (transaction.isClosed()) {
-            finishEntryRestoreTransaction(transaction);
-        }
+        const effects = entryRestoreOwner.observeWebHostFacts({
+            contentHeight: metrics.scrollHeight,
+            distanceFromBottom: getWebTranscriptDistanceFromBottom(metrics),
+            layoutHeight: metrics.clientHeight,
+            nowMs: Date.now(),
+            resolveAnchorObservation: (anchor) => {
+                // A still-open web anchor transaction means the issue-time anchor restore could
+                // not see the anchor row (seam scroll-to-index fallback). Once the row mounts, a
+                // read-only alignment observation drives confirm or the single DOM correction.
+                const alignment = resolveWebTranscriptViewportAnchorAlignment({
+                    container: metrics.element,
+                    anchor: { ...anchor, messageId: anchor.messageId ?? null },
+                    tolerancePx,
+                });
+                return alignment.status === 'aligned' || alignment.status === 'misaligned'
+                    ? { status: alignment.status }
+                    : null;
+            },
+            sessionId: props.sessionId,
+            tolerancePx,
+        });
+        applyEntryRestoreOwnerEffects(effects);
     }, [
-        finishEntryRestoreTransaction,
-        issueEntryRestoreDistanceWrite,
+        applyEntryRestoreOwnerEffects,
+        entryRestoreOwner,
         pinThresholdPx,
         props.sessionId,
         resolveWebScrollMetrics,
-        restoreWebViewportAnchorThroughViewportCommand,
-        tryPinToBottomDom,
     ]);
 
     /**
@@ -6873,142 +7698,87 @@ const ChatListInternal = React.memo((props: {
      * the frame is inconclusive (anchor layout unmeasured, stale content metrics): only
      * conclusive aligned|misaligned observations are ever forwarded (Lane A review contract).
      */
-    const resolveNativeEntryRestoreAlignmentObservation = React.useCallback((params: Readonly<{
+    const observeNativeEntryRestoreHostFacts = React.useCallback((params: Readonly<{
         contentHeight: number;
         distanceFromBottom: number;
+        layoutHeight: number;
+        nowMs: number;
         offsetY: number;
         rawOffsetY?: number;
-    }>): { status: 'aligned' | 'misaligned' } | null => {
-        const writeContext = entryRestoreWriteContextRef.current;
-        if (!writeContext || writeContext.sessionId !== props.sessionId) return null;
+        targetKind?: 'slice-anchor';
+    }>): readonly EntryRestoreOwnerEffect[] => {
         const tolerancePx = Math.max(pinThresholdPx, 2);
-        if (writeContext.kind === 'slice-anchor' && writeContext.anchor) {
-            // N2b.2: zero-write entries confirm only when the visible anchor row
-            // is still sitting at its saved pixel offset.
-            const anchorIndex = resolveTranscriptViewportAnchorIndex({
-                anchor: writeContext.anchor,
-                items: listDataRef.current,
-            });
-            if (anchorIndex == null) return null;
-            const layout = (() => {
-                try {
-                    return listRef.current?.getLayout?.(anchorIndex) ?? null;
-                } catch {
-                    return null;
+        return entryRestoreOwner.observeNativeHostFacts({
+            contentHeight: params.contentHeight,
+            distanceFromBottom: params.distanceFromBottom,
+            layoutHeight: params.layoutHeight,
+            nowMs: params.nowMs,
+            observedOffsetY: params.offsetY,
+            resolveAnchorObservation: (anchor) => {
+                const nativeAnchor: SessionViewportAnchorSnapshot = {
+                    ...anchor,
+                    capturedAtMs: anchor.capturedAtMs ?? Date.now(),
+                };
+                const anchorIndex = resolveTranscriptViewportAnchorIndex({
+                    anchor: nativeAnchor,
+                    items: listDataRef.current,
+                }) ?? resolveNearestSurvivingViewportAnchorIndex(nativeAnchor);
+                if (anchorIndex == null) return null;
+                const observation = resolveNativeTranscriptViewportAnchorRestoreObservation({
+                    ref: listRef.current,
+                    index: anchorIndex,
+                    itemOffsetPx: anchor.itemOffsetPx,
+                    tolerancePx,
+                });
+                if (observation.status === 'aligned' || observation.status === 'misaligned') {
+                    return { status: observation.status };
                 }
-            })();
-            const visibleRange = (() => {
-                try {
-                    return listRef.current?.computeVisibleIndices?.() ?? null;
-                } catch {
-                    return null;
-                }
-            })();
-            const status = resolveNativeSliceEntryObservation({
-                anchorIndex,
-                anchorLayout: layout,
-                absoluteScrollOffset: params.rawOffsetY ?? params.offsetY,
-                contentHeight: params.contentHeight,
-                itemOffsetPx: writeContext.anchor.itemOffsetPx,
-                layoutHeight: listLayoutHeightRef.current,
-                tolerancePx,
-                visibleRange,
-            });
-            return status === 'inconclusive' ? null : { status };
-        }
-        if (writeContext.kind === 'anchor' && writeContext.anchor) {
-            const anchorIndex = resolveTranscriptViewportAnchorIndex({
-                anchor: writeContext.anchor,
-                items: listDataRef.current,
-            }) ?? resolveNearestSurvivingViewportAnchorIndex(writeContext.anchor);
-            if (anchorIndex == null) return null;
-            const observation = resolveNativeTranscriptViewportAnchorRestoreObservation({
-                ref: listRef.current,
-                index: anchorIndex,
-                itemOffsetPx: writeContext.anchor.itemOffsetPx,
-                tolerancePx,
-            });
-            if (observation.status === 'aligned' || observation.status === 'misaligned') {
-                return { status: observation.status };
-            }
-            return null;
-        }
-        if (writeContext.kind === 'distance') {
-            const matches = nativeEntryRestoreObservationMatches({
-                contentHeight: writeContext.issuedContentHeight,
-                kind: 'distance',
-                offsetY: writeContext.distanceFromBottom,
-                sessionId: writeContext.sessionId,
-                targetOffsetY: writeContext.targetOffsetY ?? undefined,
-                targetOffsetYWasClamped: writeContext.targetOffsetYWasClamped,
-            }, {
-                contentHeight: params.contentHeight,
-                distanceFromBottom: params.distanceFromBottom,
-                observedOffsetY: params.offsetY,
-                sessionId: props.sessionId,
-                tolerancePx,
-            });
-            if (matches) return { status: 'aligned' };
-            if (params.contentHeight + tolerancePx < writeContext.issuedContentHeight) {
-                // Stale content frame: the list has not laid out the issued basis yet.
                 return null;
-            }
-            return { status: 'misaligned' };
-        }
-        return null;
-    }, [pinThresholdPx, props.sessionId, resolveNearestSurvivingViewportAnchorIndex]);
-
-    /** Host-derived single correction write for the open native entry transaction. */
-    const issueNativeEntryRestoreCorrection = React.useCallback((params: Readonly<{
-        contentHeight: number;
-        layoutHeight: number;
-    }>) => {
-        const writeContext = entryRestoreWriteContextRef.current;
-        if (!writeContext || writeContext.sessionId !== props.sessionId) return;
-        // N2b.2: slice entries are observe-only — the transaction never directs a
-        // correction, and the host must never write for them either.
-        if (writeContext.kind === 'slice-anchor') return;
-        if (writeContext.kind === 'anchor' && writeContext.anchor) {
-            const anchorIndex = resolveTranscriptViewportAnchorIndex({
-                anchor: writeContext.anchor,
-                items: listDataRef.current,
-            }) ?? resolveNearestSurvivingViewportAnchorIndex(writeContext.anchor);
-            if (anchorIndex == null) return;
-            const restorePlan = planNativeTranscriptViewportAnchorRestore({
-                index: anchorIndex,
-                itemOffsetPx: writeContext.anchor.itemOffsetPx,
-            });
-            if (restorePlan.status !== 'planned') return;
-            executeViewportCommand(resolveViewportCommand({
-                type: 'restore-anchor',
-                sessionId: props.sessionId,
-                reason: 'entry-restore',
-                index: restorePlan.index,
-                viewOffset: restorePlan.viewOffset,
-                animated: false,
-            }));
-            return;
-        }
-        if (writeContext.kind === 'distance') {
-            const issuedContentHeight = Math.max(0, Math.trunc(params.contentHeight));
-            const maxOffsetY = Math.max(0, Math.trunc(issuedContentHeight - params.layoutHeight));
-            const targetOffsetY = Math.max(0, maxOffsetY - writeContext.distanceFromBottom);
-            executeViewportCommand(resolveViewportCommand({
-                type: 'scroll-offset',
-                sessionId: props.sessionId,
-                reason: 'entry-restore',
-                mode: 'restore-distance',
-                offsetY: targetOffsetY,
-                animated: false,
-            }));
-            entryRestoreWriteContextRef.current = {
-                ...writeContext,
-                issuedContentHeight,
-                targetOffsetY,
-                targetOffsetYWasClamped: maxOffsetY < writeContext.distanceFromBottom,
-            };
-        }
-    }, [executeViewportCommand, props.sessionId, resolveNearestSurvivingViewportAnchorIndex, resolveViewportCommand]);
+            },
+            resolveSliceObservation: (anchor) => {
+                // N2b.2: zero-write entries confirm only when the visible anchor row
+                // is still sitting at its saved pixel offset.
+                const anchorIndex = resolveTranscriptViewportAnchorIndex({
+                    anchor,
+                    items: listDataRef.current,
+                });
+                if (anchorIndex == null) return null;
+                const layout = (() => {
+                    try {
+                        return listRef.current?.getLayout?.(anchorIndex) ?? null;
+                    } catch {
+                        return null;
+                    }
+                })();
+                const visibleRange = (() => {
+                    try {
+                        return listRef.current?.computeVisibleIndices?.() ?? null;
+                    } catch {
+                        return null;
+                    }
+                })();
+                const status = resolveNativeSliceEntryObservation({
+                    anchorIndex,
+                    anchorLayout: layout,
+                    absoluteScrollOffset: params.rawOffsetY ?? params.offsetY,
+                    contentHeight: params.contentHeight,
+                    itemOffsetPx: anchor.itemOffsetPx,
+                    layoutHeight: listLayoutHeightRef.current,
+                    tolerancePx,
+                    visibleRange,
+                });
+                return status === 'inconclusive' ? null : { status };
+            },
+            sessionId: props.sessionId,
+            targetKind: params.targetKind,
+            tolerancePx,
+        });
+    }, [
+        entryRestoreOwner,
+        pinThresholdPx,
+        props.sessionId,
+        resolveNearestSurvivingViewportAnchorIndex,
+    ]);
 
     /**
      * N2b.2: layout-driven confirmation for slice entries — a write-free entry produces
@@ -7016,128 +7786,27 @@ const ChatListInternal = React.memo((props: {
      * content commits by reading the anchor row position straight off the list ref.
      */
     const verifyNativeSliceEntryRestoreTransaction = React.useCallback(() => {
-        if (Platform.OS === 'web' || listImplementation !== 'flash_v2') return;
-        const transaction = entryRestoreTransactionRef.current;
-        const writeContext = entryRestoreWriteContextRef.current;
-        if (!transaction || transaction.isClosed() || transaction.sessionId !== props.sessionId) return;
-        if (writeContext?.kind !== 'slice-anchor' || !writeContext.anchor) return;
-        const anchorIndex = resolveTranscriptViewportAnchorIndex({
-            anchor: writeContext.anchor,
-            items: listDataRef.current,
-        });
-        if (anchorIndex == null) return;
-        const node = listRef.current;
-        const layout = (() => {
-            try {
-                return node?.getLayout?.(anchorIndex) ?? null;
-            } catch {
-                return null;
-            }
-        })();
-        const absoluteScrollOffset = (() => {
-            try {
-                const value = node?.getAbsoluteLastScrollOffset?.();
-                return typeof value === 'number' ? value : Number.NaN;
-            } catch {
-                return Number.NaN;
-            }
-        })();
-        const status = resolveNativeSliceEntryObservation({
-            anchorIndex,
-            anchorLayout: layout,
-            absoluteScrollOffset,
+        if (Platform.OS === 'web') return;
+        if (!entryRestoreOwner.hasOpenTransaction(props.sessionId)) return;
+        const effects = observeNativeEntryRestoreHostFacts({
             contentHeight: listContentHeightRef.current,
-            itemOffsetPx: writeContext.anchor.itemOffsetPx,
+            distanceFromBottom: 0,
             layoutHeight: listLayoutHeightRef.current,
-            tolerancePx: Math.max(pinThresholdPx, 2),
-            visibleRange: (() => {
-                try {
-                    return node?.computeVisibleIndices?.() ?? null;
-                } catch {
-                    return null;
-                }
-            })(),
+            nowMs: Date.now(),
+            offsetY: readNativeAbsoluteScrollOffset(listRef.current) ?? Number.NaN,
+            targetKind: 'slice-anchor',
         });
-        if (status === 'inconclusive') return;
-        transaction.onObservation({ status }, Date.now());
-        if (transaction.isClosed()) {
-            const confirmed = transaction.outcome() === 'confirmed';
-            finishEntryRestoreTransaction(transaction);
-            if (confirmed) {
-                updateNativeViewportPaintObserved(true);
-            }
+        if (effects.length === 0) return;
+        applyEntryRestoreOwnerEffects(effects);
+        if (effects.some((effect) => effect.type === 'native-initial-viewport-applied')) {
+            updateNativeViewportPaintObserved(true);
         }
     }, [
-        finishEntryRestoreTransaction,
-        listImplementation,
-        pinThresholdPx,
+        applyEntryRestoreOwnerEffects,
+        entryRestoreOwner,
+        observeNativeEntryRestoreHostFacts,
         props.sessionId,
         updateNativeViewportPaintObserved,
-    ]);
-
-    /**
-     * KEEP-INLINE legacy escape hatch (Lane A review F2 contract): `flatlist_legacy` keeps its
-     * old inline distance restore (the seam applies the inverted-offset semantics) and never
-     * opens an entry-restore transaction; this path dies with flatlist_legacy itself.
-     */
-    const attemptLegacyEntryDistanceRestore = React.useCallback(() => {
-        const entryViewport = sessionEntryViewportRef.current;
-        if (!entryViewport || entryViewport.sessionId !== props.sessionId) return;
-        if (entryViewport.shouldFollowBottom !== false) return;
-        if (props.jumpToSeq != null) return;
-        if (wantsPinnedRef.current) return;
-        if (lastUserScrollIntentAtMsRef.current !== Number.NEGATIVE_INFINITY) return;
-        const offsetY = typeof entryViewport.offsetY === 'number' && Number.isFinite(entryViewport.offsetY)
-            ? Math.max(0, Math.trunc(entryViewport.offsetY))
-            : 0;
-        const applied = legacyEntryRestoreAppliedRef.current;
-        if (applied?.sessionId === entryViewport.sessionId && applied.offsetY === offsetY) return;
-        if (Platform.OS === 'web') {
-            const metrics = resolveWebScrollMetrics();
-            if (!metrics) return;
-            if (resolveWebTranscriptMaxScrollTop(metrics) < offsetY && requestBoundedEntryViewportMaterialization()) {
-                return;
-            }
-        } else {
-            const layoutHeight = listLayoutHeightRef.current;
-            const contentHeight = listContentHeightRef.current;
-            if (!Number.isFinite(layoutHeight) || layoutHeight <= 0) return;
-            if (!Number.isFinite(contentHeight) || contentHeight <= 0) return;
-            if (
-                Math.max(0, Math.trunc(contentHeight - layoutHeight)) < offsetY &&
-                requestBoundedEntryViewportMaterialization()
-            ) {
-                return;
-            }
-        }
-        if (!executeViewportCommand(resolveViewportCommand({
-            type: 'first-paint',
-            sessionId: props.sessionId,
-            shouldFollowBottom: false,
-            entrySnapshot: {
-                shouldFollowBottom: false,
-                offsetY,
-            },
-            jumpToSeq: null,
-            platform: telemetryPlatform,
-            listImplementation: telemetryListImplementation,
-        }))) {
-            return;
-        }
-        legacyEntryRestoreAppliedRef.current = { sessionId: entryViewport.sessionId, offsetY };
-        closeEntryViewportOwnership('confirmed');
-        recordRestoreDecisionTelemetry('restored', { mode: 'restore-distance', offsetY });
-    }, [
-        closeEntryViewportOwnership,
-        executeViewportCommand,
-        props.jumpToSeq,
-        props.sessionId,
-        recordRestoreDecisionTelemetry,
-        requestBoundedEntryViewportMaterialization,
-        resolveViewportCommand,
-        resolveWebScrollMetrics,
-        telemetryListImplementation,
-        telemetryPlatform,
     ]);
 
     /**
@@ -7147,26 +7816,9 @@ const ChatListInternal = React.memo((props: {
      * initial write is issued here. Content-height churn can never re-issue a write: there is
      * no reapply path (evidence E1).
      */
-    const attemptEntryRestore = React.useCallback((): void => {
+    const runEntryRestoreAttempt = React.useCallback((): void => {
         const entryViewport = sessionEntryViewportRef.current;
         if (!entryViewport || entryViewport.sessionId !== props.sessionId) return;
-        if (entryViewport.shouldFollowBottom !== false) return;
-        if (listImplementation === 'flatlist_legacy') {
-            attemptLegacyEntryDistanceRestore();
-            return;
-        }
-        if (entryRestoreTransactionRef.current != null) return;
-        if (entryRestoreSuppressedRef.current) return;
-        if (props.jumpToSeq != null || latestJumpToSeqRef.current != null) {
-            entryRestoreSuppressedRef.current = true;
-            closeEntryViewportOwnership('preempted');
-            return;
-        }
-        if (lastUserScrollIntentAtMsRef.current !== Number.NEGATIVE_INFINITY) {
-            entryRestoreSuppressedRef.current = true;
-            closeEntryViewportOwnership('preempted');
-            return;
-        }
 
         const { contentHeight, layoutHeight } = resolveEntryRestoreCanonicalMetrics();
         const items = listDataRef.current;
@@ -7174,32 +7826,13 @@ const ChatListInternal = React.memo((props: {
         const exactAnchorIndex = anchor
             ? resolveTranscriptViewportAnchorIndex({ anchor, items })
             : null;
-        const distanceFromBottom = typeof entryViewport.offsetY === 'number' && Number.isFinite(entryViewport.offsetY)
-            ? Math.max(0, Math.trunc(entryViewport.offsetY))
-            : 0;
-        const resolveParams = {
-            snapshot: { shouldFollowBottom: false, offsetY: distanceFromBottom, anchor },
-            items,
-            contentMeasured: { contentHeight, layoutHeight },
-            fillSettled: initialFillStatusRef.current === 'done',
-            canMaterializeOlder: canRequestBoundedEntryViewportMaterialization(),
-            anchorIndexResolver: () => exactAnchorIndex,
-            nearestSurvivingResolver: () => (anchor ? resolveNearestSurvivingViewportAnchorIndex(anchor) : null),
-            anchorSeqResolver: () => (
-                typeof anchor?.messageId === 'string' && anchor.messageId.length > 0
-                    ? resolveSeqForMessageId(anchor.messageId) ?? null
-                    : null
-            ),
-        };
+        const nearestAnchorIndex = anchor ? resolveNearestSurvivingViewportAnchorIndex(anchor) : null;
+        const anchorSeq = anchor ? resolveSeqForViewportAnchor(anchor) : null;
+        const restoredAnchorForOwner = anchor
+            ? resolveEntryRestoreOwnerAnchor(anchor, exactAnchorIndex ?? nearestAnchorIndex)
+            : null;
 
-        /**
-         * N2b.2: maps the slice target's durable identity (server id + seq for hydrated
-         * persisted anchors; rendered id for in-memory captures) to a rendered anchor
-         * the row resolution understands. Returns null when no rendered row owns it.
-         */
-        const resolveEntrySliceRenderedAnchor = (
-            sliceTarget: EntryRestoreSliceTarget,
-        ): SessionViewportAnchorSnapshot | null => {
+        const resolveEntrySliceRenderedAnchor = (sliceTarget: EntryRestoreSliceTarget): EntryRestoreOwnerAnchor | null => {
             const baseAnchor: SessionViewportAnchorSnapshot = {
                 kind: anchor?.kind ?? 'message',
                 messageId: sliceTarget.anchorMessageId,
@@ -7238,328 +7871,103 @@ const ChatListInternal = React.memo((props: {
             return { ...baseAnchor, messageId: renderedId, itemId: renderedId };
         };
 
-        /** N2b.2: applies the slice window + the observe-only entry transaction. */
-        const applyEntrySliceWindow = (
-            sliceTarget: EntryRestoreSliceTarget,
-        ): 'applied' | 'materializing' | 'degraded' => {
-            const renderedAnchor = resolveEntrySliceRenderedAnchor(sliceTarget);
-            const sliceIndex = renderedAnchor != null
-                ? resolveTranscriptViewportAnchorIndex({ anchor: renderedAnchor, items: listDataRef.current })
-                : null;
-            if (renderedAnchor == null || sliceIndex == null) {
-                if (canRequestBoundedEntryViewportMaterialization() && requestBoundedEntryViewportMaterialization()) {
-                    recordRestoreDecisionTelemetry('missing-anchor', {
-                        mode: 'restore-anchor',
-                        offsetY: distanceFromBottom,
-                        contentHeight,
-                        layoutHeight,
-                    });
-                    return 'materializing';
-                }
-                return 'degraded';
-            }
-
-            if (!canUseWriteFreeEntrySliceForAnchorOffset(sliceTarget.anchorItemOffsetPx)) {
-                const restorePlan = planNativeTranscriptViewportAnchorRestore({
-                    index: sliceIndex,
-                    itemOffsetPx: sliceTarget.anchorItemOffsetPx,
-                });
-                if (restorePlan.status !== 'planned') return 'degraded';
-                const fallbackNowMs = Date.now();
-                const fallbackDeadlineMs = resolveEntryRestoreDeadlineMs();
-                const target = {
-                    kind: 'anchor' as const,
-                    index: restorePlan.index,
-                    viewOffset: restorePlan.viewOffset,
-                };
-                const issued = issueEntryRestoreAnchorWrite(target.index, target.viewOffset);
-                if (!issued) {
-                    recordRestoreDecisionTelemetry('not-ready', {
-                        mode: 'restore-anchor',
-                        offsetY: distanceFromBottom,
-                        contentHeight,
-                        layoutHeight,
-                    });
-                    return 'materializing';
-                }
-                const transaction = createEntryRestoreTransaction({
-                    sessionId: props.sessionId,
-                    target,
-                    nowMs: fallbackNowMs,
-                    deadlineMs: fallbackDeadlineMs,
-                });
-                entryRestoreTransactionRef.current = transaction;
-                entryRestoreWriteContextRef.current = {
-                    anchor: renderedAnchor,
-                    createdAtMs: fallbackNowMs,
-                    distanceFromBottom,
-                    issuedContentHeight: contentHeight,
-                    issuedLayoutHeight: layoutHeight,
-                    kind: 'anchor',
-                    sessionId: props.sessionId,
-                    targetOffsetY: null,
-                    targetOffsetYWasClamped: false,
-                };
-                armEntryRestoreDeadline(transaction, fallbackDeadlineMs);
-                updateNativeInitialViewportPendingObservation(true);
-                recordRestoreDecisionTelemetry('pending', {
-                    mode: 'restore-anchor',
-                    offsetY: distanceFromBottom,
-                    contentHeight,
-                    layoutHeight,
-                    anchorIndex: target.index,
-                    anchorRestoreViewOffset: target.viewOffset,
-                });
-                return 'applied';
-            }
-
-            const anchorRowId = listDataRef.current[sliceIndex]?.id;
-            if (typeof anchorRowId !== 'string' || anchorRowId.length === 0) return 'degraded';
-
-            const sliceNowMs = Date.now();
-            const sliceDeadlineMs = resolveEntryRestoreDeadlineMs();
-            entrySliceWindowRef.current = { sessionId: props.sessionId, anchorRowId };
-            setEntrySliceWindow(entrySliceWindowRef.current);
-            const transaction = createEntryRestoreTransaction({
-                sessionId: props.sessionId,
-                // Post-slice the anchor is the window head; this target is the
-                // OBSERVATION target only — observe-only transactions never write.
-                target: { kind: 'anchor', index: 0, viewOffset: 0 },
-                nowMs: sliceNowMs,
-                deadlineMs: sliceDeadlineMs,
-                writePolicy: 'observe-only',
-            });
-            entryRestoreTransactionRef.current = transaction;
-            entryRestoreWriteContextRef.current = {
-                anchor: renderedAnchor,
-                createdAtMs: sliceNowMs,
-                distanceFromBottom,
-                issuedContentHeight: contentHeight,
-                issuedLayoutHeight: layoutHeight,
-                kind: 'slice-anchor',
-                sessionId: props.sessionId,
-                targetOffsetY: null,
-                targetOffsetYWasClamped: false,
-            };
-            armEntryRestoreDeadline(transaction, sliceDeadlineMs);
-            updateNativeInitialViewportPendingObservation(true);
-            recordRestoreDecisionTelemetry('pending', {
-                mode: 'restore-anchor',
-                offsetY: distanceFromBottom,
-                contentHeight,
-                layoutHeight,
-            });
-            return 'applied';
-        };
-
-        const sliceCapable =
+        const sliceTarget: EntryRestoreSliceTarget | null =
             Platform.OS !== 'web' &&
-            listImplementation === 'flash_v2' &&
-            entrySliceDegradedSessionRef.current !== props.sessionId;
-        if (sliceCapable) {
-            const sliceResolved = resolveEntryRestoreTarget({
-                ...resolveParams,
-                slice: { hostCanBuildAnchorWindow: true },
-            });
-            if (sliceResolved.kind === 'slice') {
-                const sliceOutcome = applyEntrySliceWindow(sliceResolved);
-                if (sliceOutcome !== 'degraded') return;
-                // Identity unfindable within the bounded budget: this entry falls back
-                // to the existing write pipeline (distance one-shot stays the ONLY
-                // degraded identity-less path).
-                entrySliceDegradedSessionRef.current = props.sessionId;
-            }
-        }
-
-        const target = resolveEntryRestoreTarget(resolveParams);
-
-        if (target.kind === 'none' && (target.reason === 'awaiting-fill-settle' || target.reason === 'content-unmeasured')) {
-            // Wait verdict (type-split per Lane A review): re-resolve on the next
-            // measurement/fill change without opening a transaction.
-            return;
-        }
-        if (target.kind === 'materialize-then-anchor') {
-            requestBoundedEntryViewportMaterialization();
-            recordRestoreDecisionTelemetry('missing-anchor', {
-                mode: 'restore-anchor',
-                offsetY: distanceFromBottom,
-                contentHeight,
-                layoutHeight,
-            });
-            return;
-        }
-        if (
-            target.kind === 'distance-oneshot' &&
-            distanceFromBottom > Math.max(0, Math.trunc(contentHeight - layoutHeight)) &&
-            requestBoundedEntryViewportMaterialization()
-        ) {
-            // Wiring-layer extension over resolveEntryRestoreTarget (ledger note): a remembered
-            // distance deeper than the loaded window materializes older pages first (bounded),
-            // then the one-shot still issues exactly once.
-            recordRestoreDecisionTelemetry('not-ready', {
-                mode: 'restore-distance',
-                offsetY: distanceFromBottom,
-                contentHeight,
-                layoutHeight,
-            });
-            return;
-        }
-        if (anchor && exactAnchorIndex == null && target.kind !== 'none') {
-            recordRestoreDecisionTelemetry('entry-anchor-missing', {
-                mode: 'restore-anchor',
-                offsetY: distanceFromBottom,
-                contentHeight,
-                layoutHeight,
-            });
-        }
-
-        const nowMs = Date.now();
-        const deadlineMs = resolveEntryRestoreDeadlineMs();
-        if (target.kind === 'none') {
-            if (target.reason === 'awaiting-fill-settle' || target.reason === 'content-unmeasured') {
-                return;
-            }
-            const transaction = createEntryRestoreTransaction({
-                sessionId: props.sessionId,
-                target: { kind: 'none', reason: target.reason },
-                nowMs,
-                deadlineMs,
-            });
-            entryRestoreTransactionRef.current = transaction;
-            finishEntryRestoreTransaction(transaction);
-            return;
-        }
-
-        let issued = false;
-        let targetOffsetY: number | null = null;
-        let targetOffsetYWasClamped = false;
-        let webAnchorConfirmedAtIssue = false;
-        if (target.kind === 'anchor') {
-            if (Platform.OS === 'web') {
-                webAnchorConfirmedAtIssue = issueWebEntryRestoreAnchorWrite(anchor);
-                issued = webAnchorConfirmedAtIssue || issueEntryRestoreAnchorWrite(target.index, target.viewOffset);
-            } else {
-                issued = issueEntryRestoreAnchorWrite(target.index, target.viewOffset);
-            }
-        } else if (target.kind === 'distance-oneshot') {
-            const maxOffsetY = Math.max(0, Math.trunc(contentHeight - layoutHeight));
-            targetOffsetY = target.targetOffsetY;
-            targetOffsetYWasClamped = maxOffsetY < distanceFromBottom;
-            issued = issueEntryRestoreDistanceWrite(distanceFromBottom, contentHeight);
-        } else {
-            // 'bottom' cannot occur for restore entries (shouldFollowBottom === false), but the
-            // resolver type carries it; route it through the seam for completeness.
-            issued = executeViewportCommand(resolveViewportCommand({
-                type: 'first-paint',
-                sessionId: props.sessionId,
-                shouldFollowBottom: true,
-                entrySnapshot: null,
-                jumpToSeq: null,
-                platform: telemetryPlatform,
-                listImplementation: telemetryListImplementation,
-            }));
-        }
-        if (!issued) {
-            // No write landed (list ref/metrics not ready): retry on the next layout pass —
-            // the transaction only exists once its initial write is real.
-            recordRestoreDecisionTelemetry('not-ready', {
-                mode: target.kind === 'anchor' ? 'restore-anchor' : 'restore-distance',
-                offsetY: distanceFromBottom,
-                contentHeight,
-                layoutHeight,
-            });
-            return;
-        }
-
-        const transaction = createEntryRestoreTransaction({
-            sessionId: props.sessionId,
-            target,
-            nowMs,
-            deadlineMs,
-        });
-        entryRestoreTransactionRef.current = transaction;
-        entryRestoreWriteContextRef.current = {
-            anchor: target.kind === 'anchor' ? anchor : null,
-            createdAtMs: nowMs,
-            distanceFromBottom,
-            issuedContentHeight: contentHeight,
-            issuedLayoutHeight: layoutHeight,
-            kind: target.kind === 'anchor' ? 'anchor' : target.kind === 'bottom' ? 'bottom' : 'distance',
-            sessionId: props.sessionId,
-            targetOffsetY,
-            targetOffsetYWasClamped,
-        };
-        armEntryRestoreDeadline(transaction, deadlineMs);
-        if (Platform.OS !== 'web') {
-            updateNativeInitialViewportPendingObservation(true);
-        }
-        recordRestoreDecisionTelemetry(
-            target.kind === 'distance-oneshot' ? 'entry-distance-oneshot' : 'pending',
-            {
-                mode: target.kind === 'anchor' ? 'restore-anchor' : 'restore-distance',
-                offsetY: distanceFromBottom,
-                contentHeight,
-                layoutHeight,
-                anchorIndex: target.kind === 'anchor' ? target.index : undefined,
-                anchorRestoreViewOffset: target.kind === 'anchor' ? target.viewOffset : undefined,
+            !sessionOpenLatch.isEntrySliceDegraded(props.sessionId) &&
+            anchor &&
+            typeof anchor.messageId === 'string' &&
+            anchor.messageId.trim().length > 0
+                ? {
+                    kind: 'slice',
+                    anchorMessageId: anchor.messageId,
+                    anchorSeq,
+                    anchorItemOffsetPx: Number.isFinite(anchor.itemOffsetPx) ? anchor.itemOffsetPx : 0,
+                }
+                : null;
+        const renderedSliceAnchor = sliceTarget ? resolveEntrySliceRenderedAnchor(sliceTarget) : null;
+        const renderedSliceIndex = renderedSliceAnchor
+            ? resolveTranscriptViewportAnchorIndex({ anchor: renderedSliceAnchor, items: listDataRef.current })
+            : null;
+        const anchorRowId =
+            renderedSliceIndex != null && typeof listDataRef.current[renderedSliceIndex]?.id === 'string'
+                ? listDataRef.current[renderedSliceIndex].id
+                : null;
+        const effects = entryRestoreOwner.attempt({
+            canMaterializeOlder: canRequestBoundedEntryViewportMaterialization(),
+            contentHeight,
+            currentSessionId: props.sessionId,
+            deadlineMs: resolveEntryRestoreDeadlineMs(),
+            exactAnchorIndex,
+            fillSettled: sessionOpenLatch.initialFillStatus() === 'done',
+            items,
+            jumpToSeqActive: props.jumpToSeq != null || latestJumpToSeqRef.current != null,
+            layoutHeight,
+            nearestAnchorIndex,
+            nowMs: Date.now(),
+            platform: Platform.OS === 'web' ? 'web' : 'native',
+            restoredViewport: {
+                anchor: restoredAnchorForOwner,
+                offsetY: typeof entryViewport.offsetY === 'number' ? entryViewport.offsetY : null,
+                sessionId: entryViewport.sessionId,
+                shouldFollowBottom: entryViewport.shouldFollowBottom,
             },
-        );
-        if (webAnchorConfirmedAtIssue) {
-            // The helper read the anchor position and routed the exact target through the
-            // command seam; that read-back is the conclusive aligned observation.
-            transaction.onObservation({ status: 'aligned' }, nowMs);
-            finishEntryRestoreTransaction(transaction);
-            return;
+            slice: sliceTarget
+                ? {
+                    anchorRowId,
+                    capable: true,
+                    renderedAnchor: renderedSliceAnchor,
+                    renderedAnchorIndex: renderedSliceIndex,
+                    target: sliceTarget,
+                    writeFree: canUseWriteFreeEntrySliceForAnchorOffset(sliceTarget.anchorItemOffsetPx),
+                }
+                : { capable: false },
+            userScrollObserved: lastUserScrollIntentAtMsRef.current !== Number.NEGATIVE_INFINITY,
+        });
+        if (
+            sliceTarget &&
+            effects.length === 0 &&
+            entryRestoreOwner.telemetryState(props.sessionId) === 'none'
+        ) {
+            sessionOpenLatch.markEntrySliceDegraded(props.sessionId);
         }
-        if (Platform.OS === 'web' && initialFillStatusRef.current === 'done') {
+        applyEntryRestoreOwnerEffects(effects);
+        if (Platform.OS === 'web' && sessionOpenLatch.initialFillStatus() === 'done') {
             verifyWebEntryRestoreTransaction();
         }
     }, [
-        armEntryRestoreDeadline,
-        attemptLegacyEntryDistanceRestore,
+        applyEntryRestoreOwnerEffects,
         canRequestBoundedEntryViewportMaterialization,
-        closeEntryViewportOwnership,
-        executeViewportCommand,
-        finishEntryRestoreTransaction,
-        issueEntryRestoreAnchorWrite,
-        issueEntryRestoreDistanceWrite,
-        issueWebEntryRestoreAnchorWrite,
-        listImplementation,
+        entryRestoreOwner,
         props.jumpToSeq,
         props.sessionId,
-        recordRestoreDecisionTelemetry,
-        requestBoundedEntryViewportMaterialization,
         resolveEntryRestoreCanonicalMetrics,
         resolveEntryRestoreDeadlineMs,
+        resolveEntryRestoreOwnerAnchor,
         resolveNearestSurvivingViewportAnchorIndex,
-        resolveSeqForMessageId,
-        resolveViewportCommand,
-        telemetryListImplementation,
-        telemetryPlatform,
-        updateNativeInitialViewportPendingObservation,
+        resolveSeqForViewportAnchor,
         verifyWebEntryRestoreTransaction,
     ]);
-    attemptEntryRestoreRef.current = attemptEntryRestore;
+    attemptEntryRestoreRef.current = runEntryRestoreAttempt;
 
     React.useLayoutEffect(() => {
-        attemptEntryRestore();
+        runEntryRestoreAttempt();
         if (Platform.OS === 'web') {
             verifyWebEntryRestoreTransaction();
         } else {
             verifyNativeSliceEntryRestoreTransaction();
         }
-    }, [attemptEntryRestore, listContentHeight, listData.length, listImplementation, listLayoutHeight, props.sessionId, verifyNativeSliceEntryRestoreTransaction, verifyWebEntryRestoreTransaction]);
+    }, [runEntryRestoreAttempt, listContentHeight, listData.length, listLayoutHeight, props.sessionId, verifyNativeSliceEntryRestoreTransaction, verifyWebEntryRestoreTransaction]);
 
-    const captureWebBottomFollowPreviousMetrics = React.useCallback((): WebTranscriptScrollMetrics | null => {
-        if (Platform.OS !== 'web' || listImplementation !== 'flash_v2') return null;
-        const metrics = resolveWebScrollMetrics();
-        if (!metrics) return null;
-        return {
-            ...metrics,
-            clientHeight: listLayoutHeightRef.current > 0 ? listLayoutHeightRef.current : metrics.clientHeight,
-            scrollHeight: listContentHeightRef.current > 0 ? listContentHeightRef.current : metrics.scrollHeight,
-        };
-    }, [listImplementation, resolveWebScrollMetrics]);
+	    const captureWebBottomFollowPreviousMetrics = React.useCallback((): WebTranscriptScrollMetrics | null => {
+	        if (Platform.OS !== 'web') return null;
+	        const metrics = resolveWebScrollMetrics();
+	        if (!metrics) return null;
+	        return {
+	            ...metrics,
+	            clientHeight: listLayoutHeightRef.current > 0 ? listLayoutHeightRef.current : metrics.clientHeight,
+	            scrollHeight: listContentHeightRef.current > 0 ? listContentHeightRef.current : metrics.scrollHeight,
+	        };
+	    }, [resolveWebScrollMetrics]);
 
     // Native analog of captureWebBottomFollowPreviousMetrics (carve only). Snapshots "the user was
     // following the live tail at the inverted bottom" BEFORE a data/layout change, using the
@@ -7567,47 +7975,236 @@ const ChatListInternal = React.memo((props: {
     // FlashList MVCP offset-correction corrupts on the hot→cold (index-0) insert. Returns false when
     // the carve is OFF (nativeHotTailHeightRef === 0), so flag=0 behavior is byte-for-byte unchanged.
     const captureNativeBottomFollowPreviousFollow = React.useCallback((): boolean => {
-        if (Platform.OS === 'web' || !usesNativeFlashListBottomMaintenance) return false;
-        if (nativeHotTailHeightRef.current <= 0) return false;
-        if (!wantsPinnedRef.current) return false;
-        if (bottomFollowModeStateRef.current.mode !== 'following') return false;
-        if (Date.now() - lastUserScrollIntentAtMsRef.current < TRANSCRIPT_SCROLL_USER_INTENT_AUTO_PIN_DELAY_MS) return false;
-        return true;
+        return resolveNativeBottomFollowPreviousFollow({
+            autoPinDelayMs: TRANSCRIPT_SCROLL_USER_INTENT_AUTO_PIN_DELAY_MS,
+            bottomFollowMode: bottomFollowModeStateRef.current.mode,
+            isNative: Platform.OS !== 'web',
+            lastUserScrollIntentAtMs: lastUserScrollIntentAtMsRef.current,
+            nativeHotTailHeightPx: nativeHotTailHeightRef.current,
+            nowMs: Date.now(),
+            usesNativeFlashListBottomMaintenance,
+            wantsPinned: wantsPinnedRef.current,
+        });
     }, [usesNativeFlashListBottomMaintenance]);
 
     const applyWebBottomFollowAdjustment = React.useCallback((
         previousMetrics: WebTranscriptScrollMetrics,
         reason: TranscriptViewportTelemetryScrollReason = 'content-size-change',
-    ): boolean => {
-        if (Platform.OS !== 'web' || listImplementation !== 'flash_v2') return false;
-        const nextMetrics = resolveWebScrollMetrics();
-        if (!nextMetrics) return false;
-        const targetScrollTop = resolveWebBottomFollowAdjustment({
-            mode: wantsPinnedRef.current ? 'following' : 'released',
-            previousMetrics,
-            nextMetrics,
-            tolerancePx: pinThresholdPx,
-            recentUserIntent: Date.now() - lastUserScrollIntentAtMsRef.current < TRANSCRIPT_SCROLL_USER_INTENT_AUTO_PIN_DELAY_MS,
-        });
-        if (targetScrollTop === null) return false;
-            return executeViewportCommand(resolveViewportCommand({
-                type: 'auto-follow',
-                sessionId: props.sessionId,
-                distanceFromBottom: Number.MAX_SAFE_INTEGER,
-                pinThresholdPx,
-                recentUserIntent: false,
-                wantsPinned: wantsPinnedRef.current,
-                reason,
-                targetOffsetY: targetScrollTop,
-            }));
-        }, [
-            executeViewportCommand,
-            listImplementation,
+	    ): boolean => {
+	        if (Platform.OS !== 'web') return false;
+	        return executeViewportCommand(resolveViewportCommand({
+	            type: 'preserve-live-tail-distance',
+            sessionId: props.sessionId,
+            previousDistanceFromLiveTailPx: getWebTranscriptDistanceFromBottom(previousMetrics),
             pinThresholdPx,
-            props.sessionId,
-            resolveViewportCommand,
-            resolveWebScrollMetrics,
-        ]);
+            recentUserIntent: Date.now() - lastUserScrollIntentAtMsRef.current < TRANSCRIPT_SCROLL_USER_INTENT_AUTO_PIN_DELAY_MS,
+            wantsPinned: wantsPinnedRef.current,
+            reason,
+        }));
+    }, [
+        executeViewportCommand,
+        pinThresholdPx,
+        props.sessionId,
+        resolveViewportCommand,
+    ]);
+
+    const applyNativeInvertedFollowBottomPinDecision = React.useCallback((
+        decision: NativeInvertedFollowBottomPinDecision,
+        reason: TranscriptViewportTelemetryScrollReason,
+    ): boolean => {
+        if (decision.type !== 'handled') return false;
+        if (decision.clearPendingMountSettleBottomPin) {
+            pendingNativeMountSettleBottomPinRef.current = false;
+        }
+        if (decision.markInitialViewportApplied) {
+            markNativeInitialViewportAppliedForCurrentSession();
+        }
+        if (decision.issuePinBottomCommand) {
+            executeViewportCommand(resolveViewportCommand({
+                type: 'pin-bottom',
+                sessionId: props.sessionId,
+                reason,
+                mode: 'follow-bottom',
+                animated: false,
+            }));
+        }
+        return true;
+    }, [
+        executeViewportCommand,
+        markNativeInitialViewportAppliedForCurrentSession,
+        props.sessionId,
+        resolveViewportCommand,
+    ]);
+
+    const applyNativeMeasuredBottomPinPreAutoFollowDecision = React.useCallback((
+        decision: NativeMeasuredBottomPinPreAutoFollowDecision,
+    ): decision is Extract<NativeMeasuredBottomPinPreAutoFollowDecision, { type: 'skip-pin' }> => {
+        if (decision.type !== 'skip-pin') return false;
+        if (decision.setPendingMountSettleBottomPin) {
+            pendingNativeMountSettleBottomPinRef.current = true;
+        }
+        return true;
+    }, []);
+
+    const applyNativeAutomaticPinSameOffsetDecision = React.useCallback((
+        decision: NativeAutomaticPinSameOffsetDecision,
+    ): boolean => {
+        if (decision.type !== 'skip-pin') return false;
+        if (decision.markInitialViewportApplied) {
+            markNativeInitialViewportAppliedForCurrentSession();
+        }
+        if (decision.setPendingMountSettleBottomPin) {
+            pendingNativeMountSettleBottomPinRef.current = true;
+        }
+        if (decision.updateInitialViewportPendingObservation) {
+            updateNativeInitialViewportPendingObservation(true);
+        }
+        return true;
+    }, [
+        markNativeInitialViewportAppliedForCurrentSession,
+        updateNativeInitialViewportPendingObservation,
+    ]);
+
+    const applyNativeStreamAppendContentVersionDecision = React.useCallback((
+        decision: NativeStreamAppendContentVersionDecision,
+    ): boolean => {
+        if (decision.type !== 'skip-pin') return false;
+        if (decision.clearPendingMountSettleBottomPin) {
+            pendingNativeMountSettleBottomPinRef.current = false;
+        }
+        if (decision.markInitialViewportApplied) {
+            markNativeInitialViewportAppliedForCurrentSession();
+        }
+        return true;
+    }, [
+        markNativeInitialViewportAppliedForCurrentSession,
+    ]);
+
+    const applyNativeStreamAppendContentVersionRecord = React.useCallback((
+        record: NativeStreamAppendPinContentVersion | null,
+    ): void => {
+        if (!record) return;
+        lastNativeStreamAppendPinRef.current = record;
+    }, []);
+
+    const applyNativeSuccessfulBottomPinRecords = React.useCallback((
+        records: NativeSuccessfulBottomPinRecords,
+    ): void => {
+        if (records.lastNativePinOffset != null) {
+            lastNativePinOffsetRef.current = records.lastNativePinOffset;
+        }
+        if (records.bottomFollowPinCommand) {
+            lastNativeBottomFollowPinCommandRef.current = {
+                offsetY: records.bottomFollowPinCommand.offsetY,
+                sessionId: records.bottomFollowPinCommand.sessionId,
+                writtenAtMs: Date.now(),
+            };
+        }
+        if (records.automaticBottomPinCommandSessionId) {
+            nativeAutomaticBottomPinCommandSessionRef.current =
+                records.automaticBottomPinCommandSessionId;
+        }
+    }, []);
+
+    const applyNativeContentMaterializationAutoPinPostSuccessDecision = React.useCallback((
+        decision: NativeContentMaterializationAutoPinPostSuccessDecision,
+    ): void => {
+        if (decision.clearMaterializationAutoPin) {
+            nativeContentMaterializationAutoPinRef.current = null;
+        }
+    }, []);
+
+    const applyNativeSuccessfulBottomPinInitialViewportEffects = React.useCallback((
+        effects: NativeSuccessfulBottomPinInitialViewportEffects,
+    ): void => {
+        if (effects.markInitialViewportApplied) {
+            pendingNativeMountSettleBottomPinRef.current = false;
+            markNativeInitialViewportAppliedForCurrentSession();
+        }
+        if (effects.setPendingMountSettleBottomPin) {
+            pendingNativeMountSettleBottomPinRef.current = true;
+        }
+        if (effects.updateInitialViewportPendingObservation) {
+            updateNativeInitialViewportPendingObservation(true);
+        }
+    }, [
+        markNativeInitialViewportAppliedForCurrentSession,
+        updateNativeInitialViewportPendingObservation,
+    ]);
+
+    const shouldDeferNativeAutomaticPinToSessionOpenLatch = React.useCallback((
+        reason: TranscriptViewportTelemetryScrollReason,
+    ): boolean => {
+        if (Platform.OS === 'web' || !usesNativeFlashListBottomMaintenance) return false;
+        if (isExplicitTranscriptBottomFollowCommand(reason)) return false;
+        if (reason === 'initial-open' || reason === 'mount-settle') return false;
+        const nativeSessionOpenPositioningActive =
+            !nativeMountSettleStable &&
+            !nativeMountSettleDeadlineReachedRef.current;
+        if (
+            hasNativeInitialViewportAppliedForCurrentSession() &&
+            !nativeSessionOpenPositioningActive
+        ) {
+            return false;
+        }
+        const phase = sessionOpenLatch.phase();
+        return (
+            nativeSessionOpenPositioningActive ||
+            phase === 'awaiting-data' ||
+            phase === 'awaiting-layout' ||
+            phase === 'positioning' ||
+            phase === 'confirming'
+        );
+    }, [
+        hasNativeInitialViewportAppliedForCurrentSession,
+        nativeMountSettleStable,
+        sessionOpenLatch,
+        usesNativeFlashListBottomMaintenance,
+    ]);
+
+    const applyNativeMeasuredBottomPinPostSuccessEffects = React.useCallback((
+        postSuccess: NativeMeasuredBottomPinCommandResultPostSuccessPlan,
+    ): void => {
+        applyNativeStreamAppendContentVersionRecord(postSuccess.streamAppendRecord);
+        applyNativeSuccessfulBottomPinRecords(postSuccess.successfulBottomPinRecords);
+        applyNativeContentMaterializationAutoPinPostSuccessDecision(postSuccess.materializationCleanupDecision);
+        applyNativeSuccessfulBottomPinInitialViewportEffects(postSuccess.initialViewportEffects);
+    }, [
+        applyNativeContentMaterializationAutoPinPostSuccessDecision,
+        applyNativeStreamAppendContentVersionRecord,
+        applyNativeSuccessfulBottomPinInitialViewportEffects,
+        applyNativeSuccessfulBottomPinRecords,
+    ]);
+
+    const applyNativeMeasuredBottomPinCommandResultPlan = React.useCallback((
+        plan: NativeMeasuredBottomPinCommandResultPlan,
+    ): boolean => {
+        if (!executeViewportCommand(resolveViewportCommand(plan.commandInput))) {
+            return false;
+        }
+        applyNativeMeasuredBottomPinPostSuccessEffects(plan.postSuccess);
+        return true;
+    }, [
+        applyNativeMeasuredBottomPinPostSuccessEffects,
+        executeViewportCommand,
+        resolveViewportCommand,
+    ]);
+
+    const applyNativeMeasuredPinPlanResult = React.useCallback((
+        plan: NativeMeasuredPinPlan,
+    ): boolean => {
+        if (plan.type === 'blocked') return false;
+        if (plan.type === 'defer-for-mount-settle') {
+            if (plan.effect.sessionId !== props.sessionId) return false;
+            pendingNativeMountSettleBottomPinRef.current = true;
+            return false;
+        }
+        if (plan.type === 'not-ready') return false;
+        return applyNativeMeasuredBottomPinCommandResultPlan(plan.commandPlan);
+    }, [
+        applyNativeMeasuredBottomPinCommandResultPlan,
+        props.sessionId,
+    ]);
 
     const pinNativeFlashListToBottomIfMeasured = React.useCallback((options?: {
         force?: boolean;
@@ -7622,333 +8219,216 @@ const ChatListInternal = React.memo((props: {
          */
         forceFollowPin?: boolean;
     }): boolean => {
-        if (!usesNativeFlashListBottomMaintenance) return false;
         const telemetryReason = options?.telemetryReason ?? 'content-size-change';
         const isExplicitNativeCommand =
             telemetryReason === 'jump-to-bottom' ||
             telemetryReason === 'jump-to-seq';
-        if (props.jumpToSeq != null && telemetryReason !== 'jump-to-seq') return false;
-        if (
-            !canAutoFollowForReason(telemetryReason, { explicit: isExplicitNativeCommand })
-        ) return false;
-        if (
-            !isExplicitNativeCommand &&
-            !hasRearmedNativeBottomFollow() &&
-            Date.now() - lastUserScrollIntentAtMsRef.current < TRANSCRIPT_SCROLL_USER_INTENT_AUTO_PIN_DELAY_MS
-        ) return false;
-        const shouldSkipAutomaticNativeJsPin =
-            !isExplicitNativeCommand &&
-            (
-                telemetryReason === 'stream-append' ||
-                listOrientationRef.current === 'inverted'
-            );
-        if (
-            !shouldSkipAutomaticNativeJsPin &&
-            !isExplicitNativeCommand &&
-            !(options?.force === true && telemetryReason === 'mount-settle') &&
-            mountSettleCoordinatorRef.current?.getSnapshot().isMountSettleActive === true &&
-            !nativeMountSettleDeadlineReachedRef.current
-        ) {
+        if (shouldDeferNativeAutomaticPinToSessionOpenLatch(telemetryReason)) {
             pendingNativeMountSettleBottomPinRef.current = true;
             return false;
         }
-
-        const layoutHeight = listLayoutHeightRef.current;
-        const contentHeight = listContentHeightRef.current;
-        if (!hasNativeContentMeasurementForCurrentSession()) return false;
-        if (!Number.isFinite(layoutHeight) || layoutHeight <= 0) return false;
-        if (!Number.isFinite(contentHeight) || contentHeight <= 0) return false;
-
-        const offset = Math.max(0, Math.trunc(contentHeight - layoutHeight));
-        // Inverted cold opens establish the visual bottom at first paint via
-        // startRenderingFromBottom. The JS pin writes nothing on inverted
-        // (shouldSkipAutomaticNativeJsPin), so the "initial bottom viewport applied" condition is
-        // satisfied the moment the viewport is measured — there is no later offset-at-bottom
-        // observation to wait for. Treating inverted like an already-at-bottom (offset <= 0) entry
-        // closes the entry viewport transaction at first paint, which arms the MVCP threshold (the
-        // only inverted bottom-pin authority) and breaks the cold-open follow-bottom deadlock.
-        const invertedFirstPaintEstablishesBottom =
-            shouldSkipAutomaticNativeJsPin && listOrientationRef.current === 'inverted';
-        // Inverted follow-bottom bottom-reach + maintenance (device-proven on session
-        // cmqbym9nh0m1ztmwgdjd8rsqw: shouldFollowBottom=true yet the list opened ~17000px from the
-        // bottom). On an inverted FlashList, scrollToOffset({offset: 0}) is a no-op and MVCP's
-        // autoscrollToBottomThreshold only MAINTAINS a bottom you already reached — neither TRAVELS to
-        // the newest row. So inverted bottom-follow is owned by an explicit pin-bottom command, whose
-        // perform now commands scrollToIndex(0) on inverted. Re-issue it on every automatic
-        // content/layout pin while in `following` mode: the list reaches the bottom as the cold-open
-        // content settles AND stays pinned as new content streams in. The user-intent delay guard
-        // above plus the `following` mode check keep it from fighting a deliberate scroll-up.
-        const invertedFollowBottomNeedsExplicitPin =
-            invertedFirstPaintEstablishesBottom &&
-            wantsPinnedRef.current &&
-            bottomFollowModeStateRef.current.mode === 'following';
-        if (invertedFollowBottomNeedsExplicitPin) {
-            if (!hasNativeInitialViewportAppliedForCurrentSession()) {
-                pendingNativeMountSettleBottomPinRef.current = false;
-                markNativeInitialViewportAppliedForCurrentSession();
-            }
-            // Only command the bottom when the viewport is measurably OFF it. When already pinned at the
-            // inverted visual bottom the native list holds position, so no write is issued — keeping
-            // steady-state streaming write-free and only re-pinning when content growth (or a stale
-            // cold-open layout) has pushed the viewport away from the newest row.
-            const distanceFromInvertedBottom = readCurrentNativeDistanceFromBottom();
-            // Carve auto-follow: when the pre-change state was "following the live tail" (captured
-            // before MVCP could re-anchor the hot→cold index-0 insert), re-issue the inverted bottom
-            // command authoritatively — the post-change distance is unreliable here (MVCP races it).
-            // Otherwise keep the steady-state write-free gate (only pin when measurably off-bottom).
-            const willFireInvertedPin =
-                options?.forceFollowPin === true ||
-                (distanceFromInvertedBottom != null && distanceFromInvertedBottom > pinThresholdPx);
-            if (willFireInvertedPin) {
-                executeViewportCommand(resolveViewportCommand({
-                    type: 'pin-bottom',
-                    sessionId: props.sessionId,
-                    reason: telemetryReason,
-                    mode: 'follow-bottom',
-                    animated: false,
-                }));
-            }
-            return true;
-        }
+        const viewportContentMetrics = readViewportContentMetrics();
         const shouldDeferInitialViewportAppliedUntilObserved =
             options?.markInitialViewportApplied === 'when-scrollable';
         const shouldMarkInitialViewportApplied =
             !shouldDeferInitialViewportAppliedUntilObserved;
-        const shouldRetryUnobservedNativeBottomPin =
-            offset > 0 &&
-            pendingNativeMountSettleBottomPinRef.current &&
-            !hasNativeInitialViewportAppliedForCurrentSession() &&
-            nativeMountSettleStable;
-        const shouldSkipUnstableAutomaticRetryUntilObserved =
-            !shouldSkipAutomaticNativeJsPin &&
-            !isExplicitNativeCommand &&
-            offset > 0 &&
-            pendingNativeMountSettleBottomPinRef.current &&
-            telemetryReason === 'initial-open';
-        const shouldSkipLateInitialOpenAfterAutomaticNativePin =
-            !shouldSkipAutomaticNativeJsPin &&
-            !isExplicitNativeCommand &&
-            telemetryReason === 'initial-open' &&
-            nativeAutomaticBottomPinCommandSessionRef.current === props.sessionId;
-        const shouldSkipDefaultNativeMaterializationPin =
-            !shouldSkipAutomaticNativeJsPin &&
-            !isExplicitNativeCommand &&
-            !(
-                telemetryReason === 'content-size-change' &&
-                nativeContentMaterializationAutoPinRef.current?.sessionId === props.sessionId &&
-                nativeContentMaterializationAutoPinRef.current.contentHeight === contentHeight
-            ) &&
-            (
-                telemetryReason === 'initial-open' ||
-                telemetryReason === 'layout-change' ||
-                telemetryReason === 'content-size-change'
-            );
-        const shouldSkipDuplicateAutomaticRetryUntilObserved =
-            !shouldSkipAutomaticNativeJsPin &&
-            !isExplicitNativeCommand &&
-            !(options?.force === true && telemetryReason === 'mount-settle') &&
-            offset > 0 &&
-            pendingNativeMountSettleBottomPinRef.current &&
-            lastNativePinOffsetRef.current != null &&
-            (
-                lastNativePinOffsetRef.current === offset ||
-                telemetryReason === 'initial-open'
-            );
-        if (
-            shouldSkipDefaultNativeMaterializationPin ||
-            shouldSkipUnstableAutomaticRetryUntilObserved ||
-            shouldSkipLateInitialOpenAfterAutomaticNativePin ||
-            shouldSkipDuplicateAutomaticRetryUntilObserved
-        ) {
-            if (!hasNativeInitialViewportAppliedForCurrentSession()) {
-                pendingNativeMountSettleBottomPinRef.current = true;
-            }
+        const measuredPinPlan = lifecycleHost.planMeasuredNativeLiveTailPin({
+            autoPinDelayMs: TRANSCRIPT_SCROLL_USER_INTENT_AUTO_PIN_DELAY_MS,
+            bottomFollowMode: bottomFollowModeStateRef.current.mode,
+            canAutoFollow: canAutoFollowForReason(telemetryReason, { explicit: isExplicitNativeCommand }),
+            contentHeight: viewportContentMetrics?.contentHeight ?? 0,
+            deferInitialViewportAppliedUntilObserved: shouldDeferInitialViewportAppliedUntilObserved,
+            distanceFromBottom: readCurrentNativeDistanceFromBottom(),
+            force: options?.force === true,
+            forceFollowPin: options?.forceFollowPin === true,
+            forceMountSettle: options?.force === true && telemetryReason === 'mount-settle',
+            hasContentMeasurement: hasNativeContentMeasurementForCurrentSession(),
+            hasInitialViewportApplied: hasNativeInitialViewportAppliedForCurrentSession(),
+            hasRearmedBottomFollow: hasRearmedNativeBottomFollow(),
+            isExplicitNativeCommand,
+            isJumpToSeqActive: props.jumpToSeq != null,
+            isMountSettleActive: mountSettleCoordinatorRef.current?.getSnapshot().isMountSettleActive === true,
+            lastNativePinOffset: lastNativePinOffsetRef.current,
+            lastStreamAppendPin: lastNativeStreamAppendPinRef.current,
+            lastUserScrollIntentAtMs: lastUserScrollIntentAtMsRef.current,
+            layoutHeight: viewportContentMetrics?.layoutHeight ?? 0,
+            materializationAutoPin: nativeContentMaterializationAutoPinRef.current,
+            mountSettleDeadlineReached: nativeMountSettleDeadlineReachedRef.current,
+            nativeAutomaticBottomPinCommandSessionId: nativeAutomaticBottomPinCommandSessionRef.current,
+            nativeMountSettleStable,
+            nowMs: Date.now(),
+            pendingMountSettleBottomPin: pendingNativeMountSettleBottomPinRef.current,
+            pinThresholdPx,
+            reason: telemetryReason,
+            sessionId: props.sessionId,
+            shouldMarkInitialViewportApplied,
+            usesNativeFlashListBottomMaintenance,
+            wantsPinned: wantsPinnedRef.current,
+        });
+        if (measuredPinPlan.type === 'blocked' || measuredPinPlan.type === 'defer-for-mount-settle') {
+            return applyNativeMeasuredPinPlanResult(measuredPinPlan);
+        }
+        if (measuredPinPlan.type === 'not-ready') return false;
+        if (applyNativeInvertedFollowBottomPinDecision(
+            measuredPinPlan.invertedFollowBottomDecision,
+            telemetryReason,
+        )) {
             return true;
         }
-        if (
-            options?.force !== true &&
-            lastNativePinOffsetRef.current === offset &&
-            !shouldRetryUnobservedNativeBottomPin
-        ) {
-            if (shouldMarkInitialViewportApplied) {
-                markNativeInitialViewportAppliedForCurrentSession();
-            }
-            if (shouldDeferInitialViewportAppliedUntilObserved && offset > 0) {
-                pendingNativeMountSettleBottomPinRef.current = true;
-            }
+        if (applyNativeMeasuredBottomPinPreAutoFollowDecision(measuredPinPlan.preAutoFollowDecision)) {
             return true;
         }
-        if (
-            options?.force === true &&
-            telemetryReason === 'mount-settle' &&
-            pendingNativeMountSettleBottomPinRef.current &&
-            !hasNativeInitialViewportAppliedForCurrentSession() &&
-            lastNativePinOffsetRef.current === offset
-        ) {
-            // One idempotent settle pin per mount window (plan B4): a same-offset
-            // mount-settle wake never re-issues the write.
-            if (shouldDeferInitialViewportAppliedUntilObserved && offset > 0) {
-                updateNativeInitialViewportPendingObservation(true);
-            }
+        if (applyNativeAutomaticPinSameOffsetDecision(measuredPinPlan.sameOffsetDecision)) {
             return true;
         }
 
-        const streamAppendAlreadyOwnsContentVersion =
-            lastNativeStreamAppendPinRef.current?.sessionId === props.sessionId &&
-            lastNativeStreamAppendPinRef.current.contentHeight === contentHeight;
-        if (shouldSkipAutomaticNativeJsPin && streamAppendAlreadyOwnsContentVersion) {
-            // Invariant F: never two follow commands for the same content version.
+        if (applyNativeStreamAppendContentVersionDecision(measuredPinPlan.streamAppendDecision)) {
             return true;
         }
-        if (
-            !isExplicitNativeCommand &&
-            telemetryReason === 'mount-settle' &&
-            streamAppendAlreadyOwnsContentVersion
-        ) {
-            // The current content version was already claimed by the stream-append
-            // MVCP-only owner. Mount settle must not add a JS scroll write for the
-            // same height or it recreates a second competing bottom-follow writer.
-            if (shouldMarkInitialViewportApplied) {
-                pendingNativeMountSettleBottomPinRef.current = false;
-                markNativeInitialViewportAppliedForCurrentSession();
-            }
-            return true;
-        }
-        if (!executeViewportCommand(resolveViewportCommand({
-            type: 'auto-follow',
-            sessionId: props.sessionId,
-            distanceFromBottom: Number.MAX_SAFE_INTEGER,
-            pinThresholdPx,
-            recentUserIntent: false,
-            wantsPinned: wantsPinnedRef.current,
-            reason: telemetryReason,
-            targetOffsetY: offset,
-            skipNativeJsPin: shouldSkipAutomaticNativeJsPin,
-        }))) {
-            return false;
-        }
-        if (shouldSkipAutomaticNativeJsPin && telemetryReason === 'stream-append') {
-            lastNativeStreamAppendPinRef.current = {
-                contentHeight,
-                sessionId: props.sessionId,
-            };
-        }
-        if (!shouldSkipAutomaticNativeJsPin) {
-            lastNativePinOffsetRef.current = offset;
-        }
-        if (!isExplicitNativeCommand && !shouldSkipAutomaticNativeJsPin) {
-            lastNativeBottomFollowPinCommandRef.current = {
-                sessionId: props.sessionId,
-                offsetY: offset,
-                writtenAtMs: Date.now(),
-            };
-        }
-        if (!isExplicitNativeCommand && !shouldSkipAutomaticNativeJsPin) {
-            nativeAutomaticBottomPinCommandSessionRef.current = props.sessionId;
-        }
-        if (telemetryReason === 'content-size-change') {
-            nativeContentMaterializationAutoPinRef.current = null;
-        }
-        if (
-            shouldMarkInitialViewportApplied ||
-            (shouldDeferInitialViewportAppliedUntilObserved &&
-                (offset <= 0 || invertedFirstPaintEstablishesBottom))
-        ) {
-            pendingNativeMountSettleBottomPinRef.current = false;
-            markNativeInitialViewportAppliedForCurrentSession();
-        }
-        if (
-            shouldDeferInitialViewportAppliedUntilObserved &&
-            offset > 0 &&
-            !invertedFirstPaintEstablishesBottom
-        ) {
-            pendingNativeMountSettleBottomPinRef.current = true;
-            updateNativeInitialViewportPendingObservation(true);
-        }
-        return true;
+        return applyNativeMeasuredPinPlanResult(measuredPinPlan);
     }, [
-        executeViewportCommand,
+        applyNativeMeasuredPinPlanResult,
+        applyNativeMeasuredBottomPinPreAutoFollowDecision,
+        applyNativeAutomaticPinSameOffsetDecision,
+        applyNativeStreamAppendContentVersionDecision,
+        applyNativeInvertedFollowBottomPinDecision,
         canAutoFollowForReason,
         hasRearmedNativeBottomFollow,
         hasNativeContentMeasurementForCurrentSession,
         hasNativeInitialViewportAppliedForCurrentSession,
-        markNativeInitialViewportAppliedForCurrentSession,
+        lifecycleHost,
         nativeMountSettleStable,
         props.jumpToSeq,
         props.sessionId,
         pinThresholdPx,
-        resolveViewportCommand,
-        updateNativeInitialViewportPendingObservation,
+        readViewportContentMetrics,
+        shouldDeferNativeAutomaticPinToSessionOpenLatch,
         usesNativeFlashListBottomMaintenance,
     ]);
+
+    const applyNativeEntrySettleConfirmationEffects = React.useCallback((
+        effects: readonly NativeEntrySettleConfirmationEffect[],
+    ) => {
+        for (const effect of effects) {
+            if (
+                effect.type !== 'issue-entry-settle-reconfirm-pin' ||
+                effect.sessionId !== props.sessionId
+            ) {
+                continue;
+            }
+            pinNativeFlashListToBottomIfMeasured({
+                force: true,
+                telemetryReason: 'mount-settle',
+            });
+        }
+    }, [pinNativeFlashListToBottomIfMeasured, props.sessionId]);
+
+    const observeNativeConfirmation = React.useCallback((params: Readonly<{
+        contentHeight: number;
+        distanceFromBottom: number;
+        isTrusted: boolean;
+        mountSettleStable: boolean;
+    }>): boolean => {
+        if (Platform.OS === 'web') return false;
+        const plan = lifecycleHost.observeNativeScrollConfirmation({
+            bottomFollowMode: bottomFollowModeStateRef.current.mode,
+            contentHeight: params.contentHeight,
+            distanceFromBottom: params.distanceFromBottom,
+            isTrusted: params.isTrusted,
+            mountSettleDeadlineReached: nativeMountSettleDeadlineReachedRef.current,
+            mountSettleStable: params.mountSettleStable,
+            pinThresholdPx,
+            sessionId: props.sessionId,
+            wantsPinned: wantsPinnedRef.current,
+        });
+        applyNativeExplicitJumpConfirmationEffects(plan.explicitJumpEffects);
+        applyNativeEntrySettleConfirmationEffects(plan.entrySettleEffects);
+        return plan.consumed;
+    }, [
+        applyNativeEntrySettleConfirmationEffects,
+        applyNativeExplicitJumpConfirmationEffects,
+        lifecycleHost,
+        pinThresholdPx,
+        props.sessionId,
+    ]);
+
+    const applyNativeInitialFollowBottomDecision = React.useCallback((
+        decision: NativeInitialFollowBottomDecision,
+    ): boolean => {
+        if (decision.type === 'blocked') return false;
+        if (decision.type === 'already-owned') return true;
+        return pinNativeFlashListToBottomIfMeasured({
+            force: decision.force,
+            markInitialViewportApplied: decision.markInitialViewportApplied,
+            telemetryReason: decision.telemetryReason,
+        });
+    }, [pinNativeFlashListToBottomIfMeasured]);
 
     const pinNativeInitialFollowBottomViewportIfReady = React.useCallback((
         reason: TranscriptViewportTelemetryScrollReason = 'initial-open',
     ): boolean => {
-        if (!usesNativeFlashListBottomMaintenance) return false;
-        if (props.jumpToSeq != null) return false;
-        if (!canAutoFollowForReason(reason)) return false;
-        if (hasNativeInitialViewportAppliedForCurrentSession()) return false;
-        if (
-            !hasRearmedNativeBottomFollow() &&
-            Date.now() - lastUserScrollIntentAtMsRef.current < TRANSCRIPT_SCROLL_USER_INTENT_AUTO_PIN_DELAY_MS
-        ) return false;
-        if (
-            reason === 'initial-open' &&
-            (
-                pendingNativeMountSettleBottomPinRef.current ||
-                lastNativePinOffsetRef.current != null
-            )
-        ) {
-            return true;
-        }
-        return pinNativeFlashListToBottomIfMeasured({
-            force: true,
-            markInitialViewportApplied: 'when-scrollable',
-            telemetryReason: reason,
+        const decision = resolveNativeInitialFollowBottomDecision({
+            autoPinDelayMs: TRANSCRIPT_SCROLL_USER_INTENT_AUTO_PIN_DELAY_MS,
+            canAutoFollow: canAutoFollowForReason(reason),
+            hasInitialViewportApplied: hasNativeInitialViewportAppliedForCurrentSession(),
+            hasLastNativePinOffset: lastNativePinOffsetRef.current != null,
+            hasRearmedBottomFollow: hasRearmedNativeBottomFollow(),
+            isJumpToSeqActive: props.jumpToSeq != null,
+            lastUserScrollIntentAtMs: lastUserScrollIntentAtMsRef.current,
+            nowMs: Date.now(),
+            pendingMountSettleBottomPin: pendingNativeMountSettleBottomPinRef.current,
+            reason,
+            usesNativeFlashListBottomMaintenance,
         });
+        return applyNativeInitialFollowBottomDecision(decision);
     }, [
+        applyNativeInitialFollowBottomDecision,
         canAutoFollowForReason,
         hasRearmedNativeBottomFollow,
         hasNativeInitialViewportAppliedForCurrentSession,
-        pinNativeFlashListToBottomIfMeasured,
         props.jumpToSeq,
         usesNativeFlashListBottomMaintenance,
     ]);
 
     const shouldKeepPendingNativeMountSettleBottomPin = React.useCallback((): boolean => {
-        if (!usesNativeFlashListBottomMaintenance) return false;
-        if (props.jumpToSeq != null) return false;
-        if (!canAutoFollowForReason('mount-settle')) return false;
-        return hasRearmedNativeBottomFollow() ||
-            Date.now() - lastUserScrollIntentAtMsRef.current >= TRANSCRIPT_SCROLL_USER_INTENT_AUTO_PIN_DELAY_MS;
+        return resolveNativeMountSettleBottomPinRetention({
+            autoPinDelayMs: TRANSCRIPT_SCROLL_USER_INTENT_AUTO_PIN_DELAY_MS,
+            canAutoFollowMountSettle: canAutoFollowForReason('mount-settle'),
+            hasRearmedNativeBottomFollow: hasRearmedNativeBottomFollow(),
+            isJumpToSeqActive: props.jumpToSeq != null,
+            lastUserScrollIntentAtMs: lastUserScrollIntentAtMsRef.current,
+            nowMs: Date.now(),
+            usesNativeFlashListBottomMaintenance,
+        });
     }, [canAutoFollowForReason, hasRearmedNativeBottomFollow, props.jumpToSeq, usesNativeFlashListBottomMaintenance]);
 
-    const pinToBottom = React.useCallback((reason: TranscriptViewportTelemetryScrollReason = 'initial-open') => {
+    const applyNativeExplicitPinCommandEffects = React.useCallback((isExplicitNativeCommand: boolean): void => {
+        if (!isExplicitNativeCommand) return;
+        pendingNativeMountSettleBottomPinRef.current = false;
+    }, []);
+
+    const pinToBottom = React.useCallback((reason: TranscriptViewportTelemetryScrollReason = 'initial-open'): boolean => {
         if (Platform.OS === 'web') {
             // Prefer DOM scroll writes on web: RNW list refs can apply delayed `scrollToOffset` that
             // fights against our pinning and results in visible drift/jitter.
             if (tryPinToBottomDom(reason)) {
-                return;
+                return true;
             }
             // If we cannot reliably locate a DOM scroll container yet, avoid falling back to the
             // list ref scroll APIs on web. Early `scrollToOffset({ offset: 0 })` calls can create
             // visible "scroll to top" jitter during mount while the real scroll container is still
             // being attached/measured.
-            return;
+            return false;
         }
         if (usesNativeFlashListBottomMaintenance) {
-            const isExplicitNativeCommand = reason === 'jump-to-bottom' || reason === 'jump-to-seq';
-            if (isExplicitNativeCommand) {
-                pendingNativeMountSettleBottomPinRef.current = false;
-            }
-            pinNativeFlashListToBottomIfMeasured({
+            const isExplicitNativeCommand = isExplicitTranscriptBottomFollowCommand(reason);
+            applyNativeExplicitPinCommandEffects(isExplicitNativeCommand);
+            return pinNativeFlashListToBottomIfMeasured({
                 force: isExplicitNativeCommand,
                 telemetryReason: reason,
             });
-            return;
         }
-        executeViewportCommand(resolveViewportCommand(reason === 'jump-to-bottom'
+        return executeViewportCommand(resolveViewportCommand(reason === 'jump-to-bottom'
             ? {
                 type: 'jump-to-bottom',
                 sessionId: props.sessionId,
@@ -7961,8 +8441,8 @@ const ChatListInternal = React.memo((props: {
                 animated: false,
             }));
     }, [
+        applyNativeExplicitPinCommandEffects,
         executeViewportCommand,
-        listImplementation,
         pinNativeFlashListToBottomIfMeasured,
         props.sessionId,
         resolveViewportCommand,
@@ -7970,6 +8450,32 @@ const ChatListInternal = React.memo((props: {
         tryPinToBottomDom,
         usesNativeFlashListBottomMaintenance,
     ]);
+
+    const applyWebPassiveLiveTailCorrectionEffect = React.useCallback((
+        effect: WebPassiveLiveTailCorrectionEffect,
+    ): boolean => {
+        if (Platform.OS !== 'web') return false;
+        if (effect.sessionId !== props.sessionId) return false;
+        pinToBottom(effect.reason);
+        return true;
+    }, [
+        pinToBottom,
+        props.sessionId,
+    ]);
+    applyWebPassiveLiveTailCorrectionEffectRef.current = applyWebPassiveLiveTailCorrectionEffect;
+
+    const applyNativeMountSettleMeasuredPinResult = React.useCallback((pinApplied: boolean): boolean => {
+        if (!pinApplied) return false;
+        if (hasNativeInitialViewportAppliedForCurrentSession()) {
+            pendingNativeMountSettleBottomPinRef.current = false;
+        }
+        return true;
+    }, [hasNativeInitialViewportAppliedForCurrentSession]);
+
+    const applyNativeMountSettlePendingRetentionResult = React.useCallback((shouldRetain: boolean): void => {
+        if (!shouldRetain) return;
+        pendingNativeMountSettleBottomPinRef.current = true;
+    }, []);
 
     const pinToBottomRespectingNativeMountSettle = React.useCallback((
         reason: TranscriptViewportTelemetryScrollReason = 'mount-settle',
@@ -7982,20 +8488,17 @@ const ChatListInternal = React.memo((props: {
             if (reason === 'initial-open') {
                 return;
             }
-            if (pinNativeFlashListToBottomIfMeasured({ telemetryReason: reason, forceFollowPin })) {
-                if (hasNativeInitialViewportAppliedForCurrentSession()) {
-                    pendingNativeMountSettleBottomPinRef.current = false;
-                }
+            const measuredPinApplied = pinNativeFlashListToBottomIfMeasured({ telemetryReason: reason, forceFollowPin });
+            if (applyNativeMountSettleMeasuredPinResult(measuredPinApplied)) {
                 return;
             }
-            if (shouldKeepPendingNativeMountSettleBottomPin()) {
-                pendingNativeMountSettleBottomPinRef.current = true;
-            }
+            applyNativeMountSettlePendingRetentionResult(shouldKeepPendingNativeMountSettleBottomPin());
             return;
         }
         pinToBottom(reason);
     }, [
-        hasNativeInitialViewportAppliedForCurrentSession,
+        applyNativeMountSettleMeasuredPinResult,
+        applyNativeMountSettlePendingRetentionResult,
         pinNativeInitialFollowBottomViewportIfReady,
         pinNativeFlashListToBottomIfMeasured,
         pinToBottom,
@@ -8003,28 +8506,47 @@ const ChatListInternal = React.memo((props: {
         usesNativeFlashListBottomMaintenance,
     ]);
 
-    const flushPendingNativeMountSettleBottomPin = React.useCallback(() => {
-        if (!pendingNativeMountSettleBottomPinRef.current && !nativeMountSettleDeadlineReachedRef.current) return;
-        if (!shouldKeepPendingNativeMountSettleBottomPin()) {
-            pendingNativeMountSettleBottomPinRef.current = false;
-            return;
-        }
-        if (
-            mountSettleCoordinatorRef.current?.getSnapshot().isMountSettleActive === true &&
-            !nativeMountSettleDeadlineReachedRef.current
-        ) return;
-        if (pinNativeFlashListToBottomIfMeasured({
-            markInitialViewportApplied: 'when-scrollable',
-            telemetryReason: 'mount-settle',
-        })) {
-            if (!hasNativeInitialViewportAppliedForCurrentSession()) {
-                return;
+    const applyNativePendingMountSettleFlushCommandResult = React.useCallback((pinApplied: boolean): void => {
+        if (!pinApplied) return;
+        if (!hasNativeInitialViewportAppliedForCurrentSession()) return;
+        pendingNativeMountSettleBottomPinRef.current = false;
+    }, [hasNativeInitialViewportAppliedForCurrentSession]);
+
+    const applyNativeMountSettlePendingPinFlushPlan = React.useCallback((
+        plan: NativeMountSettlePendingPinFlushPlan,
+    ): void => {
+        for (const effect of plan.effects) {
+            if (effect.sessionId !== props.sessionId) continue;
+            if (effect.type === 'clear-pending-native-mount-settle-bottom-pin') {
+                pendingNativeMountSettleBottomPinRef.current = false;
+                continue;
             }
-            pendingNativeMountSettleBottomPinRef.current = false;
+            if (effect.type === 'request-measured-native-live-tail-pin') {
+                applyNativePendingMountSettleFlushCommandResult(pinNativeFlashListToBottomIfMeasured({
+                    markInitialViewportApplied: 'when-scrollable',
+                    telemetryReason: effect.reason,
+                }));
+            }
         }
     }, [
-        hasNativeInitialViewportAppliedForCurrentSession,
+        applyNativePendingMountSettleFlushCommandResult,
         pinNativeFlashListToBottomIfMeasured,
+        props.sessionId,
+    ]);
+
+    const flushPendingNativeMountSettleBottomPin = React.useCallback(() => {
+        const mountSettleFlushPlan = lifecycleHost.planNativeMountSettlePendingPinFlush({
+            canRetainPendingMountSettleBottomPin: shouldKeepPendingNativeMountSettleBottomPin(),
+            isMountSettleActive: mountSettleCoordinatorRef.current?.getSnapshot().isMountSettleActive === true,
+            mountSettleDeadlineReached: nativeMountSettleDeadlineReachedRef.current,
+            pendingMountSettleBottomPin: pendingNativeMountSettleBottomPinRef.current,
+            sessionId: props.sessionId,
+        });
+        applyNativeMountSettlePendingPinFlushPlan(mountSettleFlushPlan);
+    }, [
+        applyNativeMountSettlePendingPinFlushPlan,
+        lifecycleHost,
+        props.sessionId,
         shouldKeepPendingNativeMountSettleBottomPin,
     ]);
     flushPendingNativeMountSettleBottomPinRef.current = flushPendingNativeMountSettleBottomPin;
@@ -8036,7 +8558,6 @@ const ChatListInternal = React.memo((props: {
     // following (captured before the change), so a scrolled-up reader is never yanked.
     const pinNativeLiveTailForHotTailHeight = React.useCallback((height: number) => {
         if (Platform.OS === 'web' || !usesNativeFlashListBottomMaintenance) return;
-        if (listOrientationRef.current !== 'inverted') return;
         const carve = liveTailCarveTelemetryRef.current;
         if (!carve.active) return;
         const wasFollowing = captureNativeBottomFollowPreviousFollow();
@@ -8069,18 +8590,48 @@ const ChatListInternal = React.memo((props: {
     ]);
     pinNativeLiveTailForHotTailHeightRef.current = pinNativeLiveTailForHotTailHeight;
 
-    React.useEffect(() => {
-        if (!nativeMountSettleStable) return;
+    const applyNativeMountSettlePendingFlushRequest = React.useCallback((
+        decision: NativeMountSettlePendingFlushTriggerDecision,
+    ): void => {
+        if (decision.type !== 'request-pending-flush') return;
+        pendingNativeMountSettleBottomPinRef.current = true;
+    }, []);
+
+    const applyNativeMountSettlePendingFlushTriggerDecision = React.useCallback((
+        decision: NativeMountSettlePendingFlushTriggerDecision,
+    ) => {
+        if (decision.type === 'noop') return;
+        applyNativeMountSettlePendingFlushRequest(decision);
         flushPendingNativeMountSettleBottomPin();
-    }, [flushPendingNativeMountSettleBottomPin, nativeMountSettleStable]);
+    }, [
+        applyNativeMountSettlePendingFlushRequest,
+        flushPendingNativeMountSettleBottomPin,
+    ]);
 
     React.useEffect(() => {
-        if (!nativeMountSettleDeadlineReached) return;
-        if (nativeMountSettleAutoPinSuppressedRef.current) return;
-        if (hasNativeInitialViewportAppliedForCurrentSession()) return;
-        pendingNativeMountSettleBottomPinRef.current = true;
-        flushPendingNativeMountSettleBottomPin();
-    }, [flushPendingNativeMountSettleBottomPin, hasNativeInitialViewportAppliedForCurrentSession, nativeMountSettleDeadlineReached]);
+        applyNativeMountSettlePendingFlushTriggerDecision(resolveNativeMountSettlePendingFlushTriggerDecision({
+            autoPinSuppressed: false,
+            hasInitialViewportApplied: false,
+            mountSettleDeadlineReached: false,
+            mountSettleStable: nativeMountSettleStable,
+        }));
+    }, [
+        applyNativeMountSettlePendingFlushTriggerDecision,
+        nativeMountSettleStable,
+    ]);
+
+    React.useEffect(() => {
+        applyNativeMountSettlePendingFlushTriggerDecision(resolveNativeMountSettlePendingFlushTriggerDecision({
+            autoPinSuppressed: nativeMountSettleAutoPinSuppressedRef.current,
+            hasInitialViewportApplied: hasNativeInitialViewportAppliedForCurrentSession(),
+            mountSettleDeadlineReached: nativeMountSettleDeadlineReached,
+            mountSettleStable: false,
+        }));
+    }, [
+        applyNativeMountSettlePendingFlushTriggerDecision,
+        hasNativeInitialViewportAppliedForCurrentSession,
+        nativeMountSettleDeadlineReached,
+    ]);
 
     const deferPinToBottomAfterScroll = React.useCallback((
         reason: TranscriptViewportTelemetryScrollReason,
@@ -8106,70 +8657,37 @@ const ChatListInternal = React.memo((props: {
     ]);
 
     const jumpToBottom = React.useCallback(() => {
-        // Plan B7: an explicit jump preempts and closes BOTH restore transactions BEFORE
-        // the write is issued, so no restore decision can fire after the jump.
-        preemptEntryRestoreTransaction();
-        const prependTransaction = nativePrependTransactionRef.current;
-        if (prependTransaction && !prependTransaction.isClosed()) {
-            prependTransaction.onTrustedUserScroll();
-            finishNativePrependTransaction(prependTransaction);
-        }
-        if (Platform.OS === 'web') {
-            if (tryPinToBottomDom('jump-to-bottom')) {
-                viewportAnchorCaptureGenerationRef.current += 1;
-                cancelScheduledViewportAnchorCapture();
-                isPinnedRef.current = true;
-                wantsPinnedRef.current = true;
-                commitBottomFollowModeState(resolveTranscriptBottomFollowMode(bottomFollowModeStateRef.current, {
-                    type: 'jump-to-bottom',
-                }));
-                commitScrollPinState({ ...scrollPinRef.current, isPinned: true, newActivityCount: 0 });
-                emitViewportChange({ isPinned: true, offsetY: 0, shouldRestoreViewport: false });
+        const plan = lifecycleHost.planExplicitJumpTakeover({
+            reason: 'jump-to-bottom',
+            sessionId: props.sessionId,
+        });
+        commitBottomFollowModeState(plan.state.bottomFollowState);
+        applyExplicitJumpTakeoverApplyEffects(plan.explicitJumpTakeoverEffects);
+        if (usesNativeFlashListBottomMaintenance) {
+            const distanceFromBottom = readCurrentNativeDistanceFromBottom();
+            if (distanceFromBottom != null && distanceFromBottom <= pinThresholdPxRef.current) {
+                lifecycleHost.clearNativeExplicitJumpConfirmation({ sessionId: props.sessionId });
+                commitExplicitReturnToLiveTailState('jump-to-bottom');
+                invalidateViewportAnchorCapture();
                 return;
             }
         }
         if (usesNativeFlashListBottomMaintenance) {
-            // Arm the single bounded re-confirm (plan B7): if the content height churns
-            // before the bottom is observed, ONE more explicit write lands the jump.
-            pendingNativeExplicitJumpConfirmRef.current = {
+            lifecycleHost.armNativeExplicitJumpConfirmation({
                 sessionId: props.sessionId,
                 issuedContentHeight: listContentHeightRef.current,
-            };
+            });
         }
         const command = resolveViewportCommand({
             type: 'jump-to-bottom',
             sessionId: props.sessionId,
         });
-        if (!executeViewportCommand(withTranscriptViewportCommandAnimation(command, jumpAnimateScroll))) {
+        if (!executeViewportCommandWithAnimation(command, jumpAnimateScroll)) {
             pinToBottom('jump-to-bottom');
         }
-        isPinnedRef.current = true;
-        wantsPinnedRef.current = true;
-        commitBottomFollowModeState(resolveTranscriptBottomFollowMode(bottomFollowModeStateRef.current, {
-            type: 'jump-to-bottom',
-        }));
-        viewportAnchorCaptureGenerationRef.current += 1;
-        cancelScheduledViewportAnchorCapture();
-        commitScrollPinState({ ...scrollPinRef.current, isPinned: true, newActivityCount: 0 });
-        emitViewportChange({ isPinned: true, offsetY: 0, shouldRestoreViewport: false });
-        if (Platform.OS === 'web') {
-            tryPinToBottomDom('jump-to-bottom');
-        }
-    }, [
-        cancelScheduledViewportAnchorCapture,
-        commitBottomFollowModeState,
-        commitScrollPinState,
-        finishNativePrependTransaction,
-        preemptEntryRestoreTransaction,
-            emitViewportChange,
-            executeViewportCommand,
-            jumpAnimateScroll,
-            pinToBottom,
-            props.sessionId,
-            resolveViewportCommand,
-            tryPinToBottomDom,
-            usesNativeFlashListBottomMaintenance,
-        ]);
+        commitExplicitReturnToLiveTailState('jump-to-bottom');
+        invalidateViewportAnchorCapture();
+    }, [applyExplicitJumpTakeoverApplyEffects, commitBottomFollowModeState, commitExplicitReturnToLiveTailState, executeViewportCommandWithAnimation, invalidateViewportAnchorCapture, jumpAnimateScroll, lifecycleHost, pinToBottom, props.sessionId, readCurrentNativeDistanceFromBottom, resolveViewportCommand, usesNativeFlashListBottomMaintenance]);
 
     React.useLayoutEffect(() => {
         const followBottomIntentKey = props.followBottomIntentKey ?? null;
@@ -8177,133 +8695,297 @@ const ChatListInternal = React.memo((props: {
         if (lastFollowBottomIntentKeyRef.current === followBottomIntentKey) return;
 
         lastFollowBottomIntentKeyRef.current = followBottomIntentKey;
-        wantsPinnedRef.current = true;
-        isPinnedRef.current = true;
-        commitBottomFollowModeState(resolveTranscriptBottomFollowMode(bottomFollowModeStateRef.current, {
-            type: 'follow-bottom-intent',
-        }));
-        viewportAnchorCaptureGenerationRef.current += 1;
-        cancelScheduledViewportAnchorCapture();
-        preemptEntryRestoreTransaction();
-        lastUserScrollIntentAtMsRef.current = Number.NEGATIVE_INFINITY;
-        lastPinOffsetForIntentRef.current = 0;
-        commitScrollPinState({ ...scrollPinRef.current, isPinned: true, newActivityCount: 0 });
-        emitViewportChange({ isPinned: true, offsetY: 0, shouldRestoreViewport: false });
+        commitExplicitReturnToLiveTailState('follow-bottom-intent');
+        invalidateViewportAnchorCapture();
+        const plan = lifecycleHost.planFollowBottomIntentTakeover({
+            sessionId: props.sessionId,
+        });
+        commitBottomFollowModeState(plan.state.bottomFollowState);
+        applyFollowBottomIntentTakeoverApplyEffects(plan.followBottomIntentTakeoverEffects);
         pinToBottom('jump-to-bottom');
     }, [
-        cancelScheduledViewportAnchorCapture,
+        applyFollowBottomIntentTakeoverApplyEffects,
         commitBottomFollowModeState,
-        commitScrollPinState,
-        emitViewportChange,
+        commitExplicitReturnToLiveTailState,
+        invalidateViewportAnchorCapture,
+        lifecycleHost,
         pinToBottom,
-        preemptEntryRestoreTransaction,
         props.followBottomIntentKey,
+        props.sessionId,
     ]);
 
     const resolveAutoPinWaitMs = React.useCallback((reason: TranscriptViewportTelemetryScrollReason): number | null => {
-        if (!canAutoFollowForReason(reason)) return null;
-        if (hasRearmedNativeBottomFollow()) {
-            return 0;
-        }
-        const elapsedSinceUserIntentMs = Date.now() - lastUserScrollIntentAtMsRef.current;
-        if (elapsedSinceUserIntentMs >= TRANSCRIPT_SCROLL_USER_INTENT_AUTO_PIN_DELAY_MS) return 0;
-        return Math.max(0, TRANSCRIPT_SCROLL_USER_INTENT_AUTO_PIN_DELAY_MS - elapsedSinceUserIntentMs);
+        return resolveTranscriptAutoFollowPinWaitMs({
+            autoPinDelayMs: TRANSCRIPT_SCROLL_USER_INTENT_AUTO_PIN_DELAY_MS,
+            canAutoFollow: canAutoFollowForReason(reason),
+            hasRearmedBottomFollow: hasRearmedNativeBottomFollow(),
+            lastUserScrollIntentAtMs: lastUserScrollIntentAtMsRef.current,
+            nowMs: Date.now(),
+        });
     }, [canAutoFollowForReason, hasRearmedNativeBottomFollow]);
+
+    const applyContentGrowthLiveTailScheduledPinFireEffects = React.useCallback((
+        effects: readonly TranscriptLifecycleHostContentGrowthLiveTailScheduledPinFireEffect<WebTranscriptScrollMetrics>[],
+    ): void => {
+        for (const effect of effects) {
+            if (effect.type === 'apply-web-bottom-follow-adjustment') {
+                if (applyWebBottomFollowAdjustment(effect.previousWebMetrics, effect.reason)) return;
+                continue;
+            }
+            if (effect.type === 'pin-native-respecting-mount-settle') {
+                pinToBottomRespectingNativeMountSettle(effect.reason, effect.nativePrevFollowAtBottom);
+                continue;
+            }
+            pinToBottom(effect.reason);
+        }
+    }, [
+        applyWebBottomFollowAdjustment,
+        pinToBottom,
+        pinToBottomRespectingNativeMountSettle,
+    ]);
+
+    const applyScheduledPinToBottomFire = React.useCallback((handle: ScheduledPinToBottom): void => {
+        const firePlan = lifecycleHost.planContentGrowthLiveTailScheduledPinFire<WebTranscriptScrollMetrics>({
+            pin: handle,
+            usesNativeFlashListBottomMaintenance,
+            waitMs: resolveAutoPinWaitMs(handle.reason),
+        });
+        if (firePlan.clearScheduled) {
+            scheduledPinRef.current = null;
+        }
+        applyContentGrowthLiveTailScheduledPinFireEffects(firePlan.effects);
+    }, [
+        applyContentGrowthLiveTailScheduledPinFireEffects,
+        lifecycleHost,
+        resolveAutoPinWaitMs,
+        usesNativeFlashListBottomMaintenance,
+    ]);
 
     const schedulePinToBottom = React.useCallback((
         previousWebMetrics: WebTranscriptScrollMetrics | null = null,
         reason: TranscriptViewportTelemetryScrollReason = 'content-size-change',
         nativePrevFollowAtBottom: boolean = false,
     ) => {
-        if (listImplementation !== 'flash_v2') return;
-        const waitMs = resolveAutoPinWaitMs(reason);
-        if (waitMs === null) return;
-        if (scheduledPinRef.current) {
-            const scheduled = scheduledPinRef.current;
-            const shouldSupersedeStaleNativePin =
-                Platform.OS !== 'web' &&
-                usesNativeFlashListBottomMaintenance &&
-                reason === 'stream-append' &&
-                scheduled.reason !== 'stream-append';
-            if (!shouldSupersedeStaleNativePin) return;
+        const raf = (globalThis as any)?.requestAnimationFrame as undefined | ((cb: () => void) => any);
+	        const schedulePlan = lifecycleHost.planContentGrowthLiveTailPinSchedule<WebTranscriptScrollMetrics>({
+            canUseAnimationFrame: typeof raf === 'function',
+            currentScheduled: scheduledPinRef.current,
+            nativePrevFollowAtBottom,
+            platform: Platform.OS === 'web' ? 'web' : 'native',
+            previousWebMetrics,
+            reason,
+	            usesNativeFlashListBottomMaintenance,
+	            waitMs: resolveAutoPinWaitMs(reason),
+	        });
+	        if (schedulePlan.type === 'skip' || schedulePlan.type === 'keep-existing') return;
+        if (schedulePlan.cancelExisting) {
             cancelScheduledPinToBottom();
         }
 
-        const raf = (globalThis as any)?.requestAnimationFrame as undefined | ((cb: () => void) => any);
-        if (waitMs === 0 && typeof raf === 'function') {
-            const handle: ScheduledPinToBottom = { kind: 'raf', id: 0, previousWebMetrics, reason, nativePrevFollowAtBottom };
+        if (schedulePlan.pin.kind === 'raf' && typeof raf === 'function') {
+            const handle: ScheduledPinToBottom = { ...schedulePlan.pin, id: 0 };
             scheduledPinRef.current = handle;
             handle.id = raf(() => {
                 if (scheduledPinRef.current !== handle) return;
-                scheduledPinRef.current = null;
-                if (resolveAutoPinWaitMs(reason) !== 0) return;
-                if (handle.previousWebMetrics && applyWebBottomFollowAdjustment(handle.previousWebMetrics, reason)) return;
-                if (usesNativeFlashListBottomMaintenance) {
-                    pinToBottomRespectingNativeMountSettle(reason, handle.nativePrevFollowAtBottom === true);
-                    return;
-                }
-                pinToBottom(reason);
+                applyScheduledPinToBottomFire(handle);
             });
             return;
         }
 
-        const handle: ScheduledPinToBottom = { kind: 'timeout', id: null, previousWebMetrics, reason, nativePrevFollowAtBottom };
+        const handle: ScheduledPinToBottom = { ...schedulePlan.pin, id: null };
         scheduledPinRef.current = handle;
         handle.id = setTimeout(() => {
             if (scheduledPinRef.current !== handle) return;
-            scheduledPinRef.current = null;
-            if (resolveAutoPinWaitMs(reason) !== 0) return;
-            if (handle.previousWebMetrics && applyWebBottomFollowAdjustment(handle.previousWebMetrics, reason)) return;
-            if (usesNativeFlashListBottomMaintenance) {
-                pinToBottomRespectingNativeMountSettle(reason, handle.nativePrevFollowAtBottom === true);
-                return;
-            }
-            pinToBottom(reason);
-        }, waitMs);
+            applyScheduledPinToBottomFire(handle);
+        }, schedulePlan.pin.delayMs);
     }, [
-        applyWebBottomFollowAdjustment,
+        applyScheduledPinToBottomFire,
         cancelScheduledPinToBottom,
-        listImplementation,
-        pinToBottom,
-        pinToBottomRespectingNativeMountSettle,
+        lifecycleHost,
         resolveAutoPinWaitMs,
         usesNativeFlashListBottomMaintenance,
     ]);
 
-    const updateNativeBottomFollowModeFromScrollObservation = React.useCallback((params: Readonly<{
+    const applyScheduledContentGrowthLiveTailCommand = React.useCallback((
+        params: Readonly<{
+            effect: ContentGrowthLiveTailCommandApplyEffect | null;
+            nativePrevFollowAtBottom: boolean;
+            previousWebMetrics: WebTranscriptScrollMetrics | null;
+        }>,
+    ): boolean => {
+        if (!params.effect) return false;
+        if (params.effect.sessionId !== props.sessionId) return false;
+        schedulePinToBottom(params.previousWebMetrics, params.effect.reason, params.nativePrevFollowAtBottom);
+        return true;
+    }, [
+        props.sessionId,
+        schedulePinToBottom,
+    ]);
+
+    const requestAutomaticLiveTailPin = React.useCallback((
+        previousWebMetrics: WebTranscriptScrollMetrics | null = null,
+        reason: TranscriptViewportTelemetryScrollReason = 'content-size-change',
+        nativePrevFollowAtBottom: boolean = false,
+    ): boolean => {
+        const plan = lifecycleHost.planContentGrowthLiveTailCommand({
+            reason,
+            sessionId: props.sessionId,
+            wantsLiveTail: wantsPinnedRef.current,
+        });
+        commitBottomFollowModeState(plan.state.bottomFollowState);
+        return applyScheduledContentGrowthLiveTailCommand({
+            effect: plan.contentGrowthLiveTailCommandEffect,
+            nativePrevFollowAtBottom,
+            previousWebMetrics,
+        });
+    }, [
+        applyScheduledContentGrowthLiveTailCommand,
+        commitBottomFollowModeState,
+        lifecycleHost,
+        props.sessionId,
+    ]);
+
+    const applyMeasuredNativeContentGrowthLiveTailCommand = React.useCallback((
+        effect: ContentGrowthLiveTailCommandApplyEffect | null,
+    ): boolean => {
+        if (!effect) return false;
+        return pinNativeFlashListToBottomIfMeasured({ telemetryReason: effect.reason });
+    }, [pinNativeFlashListToBottomIfMeasured]);
+
+    const requestMeasuredNativeAutomaticLiveTailPin = React.useCallback((
+        reason: TranscriptViewportTelemetryScrollReason = 'content-size-change',
+    ): boolean => {
+        if (Platform.OS === 'web') return false;
+        const plan = lifecycleHost.planContentGrowthLiveTailCommand({
+            reason,
+            sessionId: props.sessionId,
+            wantsLiveTail: wantsPinnedRef.current,
+        });
+        commitBottomFollowModeState(plan.state.bottomFollowState);
+        return applyMeasuredNativeContentGrowthLiveTailCommand(plan.contentGrowthLiveTailCommandEffect);
+    }, [
+        applyMeasuredNativeContentGrowthLiveTailCommand,
+        commitBottomFollowModeState,
+        lifecycleHost,
+        props.sessionId,
+    ]);
+
+    const applySessionScopedMeasuredNativeAutomaticLiveTailPinEffects = React.useCallback((
+        effects: readonly NativeMountSettlePassiveDriftRepinEffect[],
+    ): void => {
+        for (const effect of effects) {
+            if (
+                effect.type !== 'request-measured-native-automatic-live-tail-pin' ||
+                effect.sessionId !== props.sessionId
+            ) {
+                continue;
+            }
+            requestMeasuredNativeAutomaticLiveTailPin(effect.reason);
+        }
+    }, [
+        props.sessionId,
+        requestMeasuredNativeAutomaticLiveTailPin,
+    ]);
+    const applyNativeMountSettlePassiveDriftRepinObservation = React.useCallback((params: Readonly<{
+        bottomFollowMode: TranscriptBottomFollowModeState['mode'];
+        isTrusted: boolean;
+        nowMs: number;
+        pinThresholdPx: number;
+        usesNativeFlashListBottomMaintenance: boolean;
+        wantsPinned: boolean;
+    }>): void => {
+        const preflightDecision = resolveNativeMountSettlePassiveDriftRepinPreflightDecision({
+            autoPinDelayMs: TRANSCRIPT_SCROLL_USER_INTENT_AUTO_PIN_DELAY_MS,
+            bottomFollowMode: params.bottomFollowMode,
+            isMountSettleActive: mountSettleCoordinatorRef.current?.getSnapshot().isMountSettleActive === true,
+            isNative: Platform.OS !== 'web',
+            isTrusted: params.isTrusted,
+            lastUserScrollIntentAtMs: lastUserScrollIntentAtMsRef.current,
+            nowMs: params.nowMs,
+            usesNativeFlashListBottomMaintenance: params.usesNativeFlashListBottomMaintenance,
+            wantsPinned: params.wantsPinned,
+        });
+        if (preflightDecision.type !== 'check-current-distance') return;
+
+        // Cold-open open-flicker root fix: a structural `clearLayoutCacheOnUpdate` inside
+        // the mount-settle window resets FlashList bottom maintenance and yanks the inverted
+        // follow-bottom list toward the visual top. MVCP only MAINTAINS a bottom already
+        // reached — it never re-travels there — so the passive-drift bail below would wrongly
+        // leave the list yanked. While the mount window is still active and an untrusted frame
+        // observes the list off the bottom with no recent user intent, re-issue the canonical
+        // inverted bottom pin to catch the yank (and a known ~260ms second-source transient).
+        // The pin's own off-bottom guard makes a same-content re-pin a no-op once the bottom
+        // is reached, so this cannot loop.
+        const distanceFromLiveTailPx = readCurrentNativeDistanceFromBottom();
+        const distanceDecision = resolveNativeMountSettlePassiveDriftRepinDistanceDecision({
+            distanceFromLiveTailPx,
+            pinThresholdPx: params.pinThresholdPx,
+        });
+        applySessionScopedMeasuredNativeAutomaticLiveTailPinEffects(
+            resolveNativeMountSettlePassiveDriftRepinEffects({
+                decision: distanceDecision,
+                sessionId: props.sessionId,
+            }),
+        );
+    }, [
+        applySessionScopedMeasuredNativeAutomaticLiveTailPinEffects,
+        props.sessionId,
+        readCurrentNativeDistanceFromBottom,
+    ]);
+
+    const observeWebGenuineScrollMovement = React.useCallback((params: Readonly<{
         distanceFromBottom: number;
         isTrusted: boolean;
-        movedAwayFromBottom: boolean;
-        movedTowardBottom: boolean;
-        recentUserIntent: boolean;
-    }>) => {
-        if (Platform.OS === 'web') return;
-        if (params.movedAwayFromBottom && params.recentUserIntent) {
-            commitBottomFollowModeState(resolveTranscriptBottomFollowMode(bottomFollowModeStateRef.current, {
-                distanceFromBottom: params.distanceFromBottom,
-                movedAwayFromBottom: true,
-                pinThresholdPx,
-                type: 'trusted-away-observation',
-            }));
-            return;
+        metrics: WebTranscriptScrollMetrics | null;
+        pinThresholdPx: number;
+        visualBottomScrollOffset: number | null;
+    }>): Readonly<{
+        webObservedUpwardIntent: boolean;
+        webObservedUserScrollMovement: boolean;
+    }> => {
+        const metrics = params.metrics;
+        if (!metrics) {
+            return {
+                webObservedUpwardIntent: false,
+                webObservedUserScrollMovement: false,
+            };
         }
-        if (params.isTrusted && params.movedTowardBottom) {
-            commitBottomFollowModeState(resolveTranscriptBottomFollowMode(bottomFollowModeStateRef.current, {
-                distanceFromBottom: params.distanceFromBottom,
-                movedTowardBottom: true,
-                pinThresholdPx,
-                type: 'trusted-bottom-observation',
-            }));
-            return;
+        // Plan E3 / C3b: genuine web scroll (scrollbar drag / keyboard) fires no
+        // wheel/pointer/touch handler and is not reliably `isTrusted`, so the single
+        // owner `webDomObservation` classifies it as "scrollTop moved to
+        // a value that does NOT match the app's own last programmatic write". This is
+        // the web release authority fed to the lifecycle below — never the event
+        // `isTrusted` flag, which RN-web also sets for our own pin/restore writes (the
+        // Q1-WEB-1 root cause). When content height is stable a genuine away-move
+        // releases eagerly; while content is reflowing it must be beyond-threshold or
+        // sustained so streaming churn cannot masquerade as scrollbar/keyboard intent.
+        const movement = webDomObservation.observeGenuineScrollMovement({
+            metrics,
+            fallbackObservedScrollTop: wantsPinnedRef.current ? params.visualBottomScrollOffset : null,
+            distanceFromBottom: params.distanceFromBottom,
+            pinThresholdPx: params.pinThresholdPx,
+            sustainFrames: TRANSCRIPT_WEB_NON_PROGRAMMATIC_SCROLL_SUSTAIN_FRAMES,
+            isTrusted: params.isTrusted,
+        });
+        if (!movement.isGenuineUserMovement) {
+            return {
+                webObservedUpwardIntent: false,
+                webObservedUserScrollMovement: false,
+            };
         }
-        if (!params.isTrusted && params.distanceFromBottom <= pinThresholdPx) {
-            commitBottomFollowModeState(resolveTranscriptBottomFollowMode(bottomFollowModeStateRef.current, {
-                distanceFromBottom: params.distanceFromBottom,
-                pinThresholdPx,
-                type: 'passive-bottom-observation',
-            }));
+
+        if (!movement.upwardIntent) {
+            return {
+                webObservedUpwardIntent: false,
+                webObservedUserScrollMovement: true,
+            };
         }
-    }, [commitBottomFollowModeState, pinThresholdPx]);
+
+        return {
+            webObservedUpwardIntent: true,
+            webObservedUserScrollMovement: true,
+        };
+    }, [webDomObservation]);
 
     const handleComposerInsetHeightChange = React.useCallback((height: number) => {
         const nextHeight = typeof height === 'number' && Number.isFinite(height) ? Math.max(0, Math.trunc(height)) : 0;
@@ -8313,7 +8995,7 @@ const ChatListInternal = React.memo((props: {
         setComposerInsetHeight(nextHeight);
         observeMountSettleMetrics();
 
-        if (Platform.OS !== 'web' && listImplementation === 'flash_v2') {
+        if (Platform.OS !== 'web') {
             const delta = nextHeight - previousHeight;
             if (delta !== 0 && listContentHeightRef.current > 0) {
                 const nextContentHeight = Math.max(0, listContentHeightRef.current + delta);
@@ -8324,16 +9006,8 @@ const ChatListInternal = React.memo((props: {
             }
         }
 
-        schedulePinToBottom(null, 'layout-change');
-    }, [listImplementation, observeMountSettleMetrics, schedulePinToBottom, shouldCommitContentHeightState]);
-
-    const resolveMeasuredContentHeight = React.useCallback((height: number): number => {
-        const normalizedHeight = Math.max(0, Math.trunc(height));
-        if (Platform.OS === 'web' || listImplementation !== 'flash_v2') {
-            return normalizedHeight;
-        }
-        return normalizedHeight + composerInsetHeightRef.current;
-    }, [listImplementation]);
+        requestAutomaticLiveTailPin(null, 'layout-change');
+    }, [observeMountSettleMetrics, requestAutomaticLiveTailPin, shouldCommitContentHeightState]);
 
     const listFooterNode = React.useMemo(() => (
         <>
@@ -8421,13 +9095,125 @@ const ChatListInternal = React.memo((props: {
         transcriptHotColdSegments.hotItems,
         transcriptHotColdSegments.hotItemsCanonical,
     ]);
-    // N3.2: in an inverted FlashList the header slot renders at the data start =
-    // VISUAL BOTTOM, so the visual-top/visual-bottom nodes swap slots there.
-    const orientedFlashListEdgeSlots = React.useMemo(() => resolveOrientedListEdgeSlots({
-        orientation: listOrientation,
+    // In an inverted FlashList the header slot renders at the data start = visual bottom.
+    const mainTranscriptListShellEdgeSlots = React.useMemo(() => resolveTranscriptListShellEdgeSlots({
+        frame: mainTranscriptListShellFrame,
         visualTopNode: listHeaderNode,
         visualBottomNode: flashListFooterNode,
-    }), [flashListFooterNode, listHeaderNode, listOrientation]);
+    }), [flashListFooterNode, listHeaderNode, mainTranscriptListShellFrame]);
+    const mainTranscriptListOlderLoadOverlay =
+        (olderPagination.isLoadingOlder || isLoadingOlder) && !showFirstPaintPlaceholder ? (
+            <OlderLoadProgressOverlay />
+        ) : null;
+    const mainTranscriptListCatchUpOverlay = (
+        <CatchUpProgressOverlay
+            isCatchingUp={showCatchUpOverlay}
+            bottomInset={composerInsetHeight}
+            spinnerDelayMs={sync.getSyncTuning().transcriptOlderLoadSpinnerDelayMs}
+        />
+    );
+    const layoutObservationApplierEffects = React.useMemo<TranscriptLayoutObservationApplierEffects<WebTranscriptScrollMetrics>>(() => ({
+        captureNativeBottomFollowPreviousFollow,
+        captureWebBottomFollowPreviousMetrics,
+        commitLayoutHeight: (height: number) => {
+            listLayoutHeightRef.current = height;
+            setListLayoutHeight(height);
+        },
+        observeMountSettleMetrics,
+        observeNativePrependOwner,
+        observeWebPrependOwner,
+        pinNativeInitialFollowBottomViewportIfReady,
+        recordLayoutMeasuredTelemetry: ({ contentHeight, layoutHeight }) => {
+            recordViewportTelemetryEvent({
+                type: 'layout-measured',
+                mode: resolveViewportTelemetryMode(),
+                reason: 'layout-change',
+                layoutHeight,
+                contentHeight,
+            });
+        },
+        recordNativeVisibleWindowTelemetry,
+        requestAutomaticLiveTailPin,
+        runEntryRestoreAttempt,
+        verifyNativeSliceEntryRestoreTransaction,
+    }), [
+        captureNativeBottomFollowPreviousFollow,
+        captureWebBottomFollowPreviousMetrics,
+        observeMountSettleMetrics,
+        observeNativePrependOwner,
+        observeWebPrependOwner,
+        pinNativeInitialFollowBottomViewportIfReady,
+        recordNativeVisibleWindowTelemetry,
+        recordViewportTelemetryEvent,
+        requestAutomaticLiveTailPin,
+        resolveViewportTelemetryMode,
+        runEntryRestoreAttempt,
+        verifyNativeSliceEntryRestoreTransaction,
+    ]);
+    const contentSizeObservationApplierEffects = React.useMemo<TranscriptContentSizeObservationApplierEffects<WebTranscriptScrollMetrics>>(() => ({
+        captureNativeBottomFollowPreviousFollow,
+        captureWebBottomFollowPreviousMetrics,
+        commitContentHeight: (measuredContentHeight: number) => {
+            listContentHeightRef.current = measuredContentHeight;
+            if (shouldCommitContentHeightState()) {
+                setListContentHeight(measuredContentHeight);
+            }
+        },
+        observeMountSettleMetrics,
+        observeNativePrependOwner,
+        observeWebPrependOwner,
+        pinNativeInitialFollowBottomViewportIfReady,
+        prepareNativeContentMaterializationAutoPin: (observation) => {
+            nativeContentMaterializationAutoPinRef.current =
+                resolveNativeContentMaterializationAutoPin({
+                    contentHeight: observation.measuredContentHeight,
+                    hasInitialViewportApplied: hasNativeInitialViewportAppliedForCurrentSession(),
+                    isNative: Platform.OS !== 'web',
+                    lastBottomFollowPinCommandSessionId:
+                        lastNativeBottomFollowPinCommandRef.current?.sessionId,
+                    layoutHeight: listLayoutHeightRef.current,
+                    pinThresholdPx,
+                    previousContentHeight: observation.previousMeasuredContentHeight,
+                    reason: observation.reason,
+                    sessionId: props.sessionId,
+                    usesNativeFlashListBottomMaintenance,
+                    wantsPinned: wantsPinnedRef.current,
+                });
+        },
+        recordContentMeasuredTelemetry: ({ contentHeight, layoutHeight, reason }) => {
+            recordViewportTelemetryEvent({
+                type: 'content-measured',
+                mode: resolveViewportTelemetryMode(),
+                reason,
+                layoutHeight,
+                contentHeight,
+            });
+        },
+        recordNativeVisibleWindowTelemetry,
+        observeNativeStreamAppendOffsetEscape,
+        requestAutomaticLiveTailPin,
+        runEntryRestoreAttempt,
+        verifyNativeSliceEntryRestoreTransaction,
+    }), [
+        captureNativeBottomFollowPreviousFollow,
+        captureWebBottomFollowPreviousMetrics,
+        hasNativeInitialViewportAppliedForCurrentSession,
+        observeMountSettleMetrics,
+        observeNativePrependOwner,
+        observeWebPrependOwner,
+        pinNativeInitialFollowBottomViewportIfReady,
+        pinThresholdPx,
+        props.sessionId,
+        recordNativeVisibleWindowTelemetry,
+        recordViewportTelemetryEvent,
+        observeNativeStreamAppendOffsetEscape,
+        requestAutomaticLiveTailPin,
+        resolveViewportTelemetryMode,
+        runEntryRestoreAttempt,
+        shouldCommitContentHeightState,
+        usesNativeFlashListBottomMaintenance,
+        verifyNativeSliceEntryRestoreTransaction,
+    ]);
 
     React.useEffect(() => {
         return () => {
@@ -8458,7 +9244,7 @@ const ChatListInternal = React.memo((props: {
         }
         if (hasNewCommittedActivity) {
             lastProactiveAutoFollowActivityKeyRef.current = latestActivityKey;
-            const nativeOffsetEscapedBottomFollow = releaseNativeBottomFollowIfFlashListOffsetEscaped({
+            const nativeOffsetEscapedBottomFollow = observeNativeStreamAppendOffsetEscape({
                 contentHeight: listContentHeightRef.current,
                 layoutHeight: listLayoutHeightRef.current,
             });
@@ -8490,174 +9276,210 @@ const ChatListInternal = React.memo((props: {
         pinEnabled,
         pinToBottomRespectingNativeMountSettle,
         props.latestCommittedActivityKey,
-        releaseNativeBottomFollowIfFlashListOffsetEscaped,
+        observeNativeStreamAppendOffsetEscape,
         usesNativeFlashListBottomMaintenance,
     ]);
 
-    React.useEffect(() => {
-        if (!props.isLoaded) return;
-        if (props.jumpToSeq != null) return;
-        if (!props.sessionId) return;
-        if (initialPinSessionIdRef.current === props.sessionId) return;
-        if (sessionEntryViewportRef.current?.shouldFollowBottom === false) {
-            initialPinSessionIdRef.current = props.sessionId;
-            initialWebPinStabilizingRef.current = false;
-            return;
-        }
-
-        // Some platforms (especially web) can apply scroll anchoring / restoration
-        // during the first render+layout ticks, resulting in the transcript appearing "scrolled up"
-        // after a refresh. The web follow-bottom entry runs through the entry-restore transaction
-        // (plan A5): one initial pin write, at most one correction, and a stop-condition of
-        // confirm-or-deadline instead of the legacy bottom-stability polling.
-        initialPinSessionIdRef.current = props.sessionId;
-        let cancelled = false;
-
-        const tuning = sync.getSyncTuning();
-        const stabilizeMaxMsRaw = tuning.transcriptWebInitialPinStabilizeMs;
-        const retryIntervalMsRaw = tuning.transcriptWebInitialPinRetryIntervalMs;
-        const stabilizeMaxMs =
-            typeof stabilizeMaxMsRaw === 'number' && Number.isFinite(stabilizeMaxMsRaw)
-                ? Math.max(0, Math.trunc(stabilizeMaxMsRaw))
-                : TRANSCRIPT_WEB_INITIAL_PIN_STABILIZE_FALLBACK_MS;
-        const retryIntervalMs =
-            typeof retryIntervalMsRaw === 'number' && Number.isFinite(retryIntervalMsRaw)
-                ? Math.max(16, Math.trunc(retryIntervalMsRaw))
-                : TRANSCRIPT_WEB_INITIAL_PIN_RETRY_INTERVAL_FALLBACK_MS;
-
-        const ensureWebEntryBottomTransaction = (): EntryRestoreTransaction | null => {
-            const existing = entryRestoreTransactionRef.current;
-            if (existing) {
-                return existing.sessionId === props.sessionId ? existing : null;
-            }
-            const metrics = resolveWebScrollMetrics();
-            if (!metrics) return null;
-            // First write of the web follow-bottom entry.
-            pinToBottom('initial-open');
-            const nowMs = Date.now();
-            const transaction = createEntryRestoreTransaction({
-                sessionId: props.sessionId,
-                target: { kind: 'bottom' },
-                nowMs,
-                deadlineMs: stabilizeMaxMs,
-            });
-            entryRestoreTransactionRef.current = transaction;
-            entryRestoreWriteContextRef.current = {
-                anchor: null,
-                createdAtMs: nowMs,
-                distanceFromBottom: 0,
-                issuedContentHeight: Math.max(0, Math.trunc(metrics.scrollHeight)),
-                issuedLayoutHeight: Math.max(0, Math.trunc(metrics.clientHeight)),
-                kind: 'bottom',
-                sessionId: props.sessionId,
-                targetOffsetY: null,
-                targetOffsetYWasClamped: false,
-            };
-            armEntryRestoreDeadline(transaction, stabilizeMaxMs);
-            return transaction;
-        };
-
-        const attempt = (): boolean => {
-            if (cancelled) return true;
-            // If the user is actively scrolling (or scroll inertia is still firing wheel events),
-            // avoid fighting their intent with initial pin retries.
-            if (Platform.OS === 'web') {
-                if (wantsPinnedRef.current === false) {
-                    preemptEntryRestoreTransaction();
-                    initialWebPinStabilizingRef.current = false;
-                    return true;
-                }
-                if (Date.now() - lastUserScrollIntentAtMsRef.current < TRANSCRIPT_SCROLL_USER_INTENT_AUTO_PIN_DELAY_MS) return false;
-                const transaction = ensureWebEntryBottomTransaction();
-                if (!transaction) return false;
-                if (!transaction.isClosed()) {
-                    verifyWebEntryRestoreTransaction();
-                }
-                if (transaction.isClosed()) {
-                    initialWebPinStabilizingRef.current = false;
-                    return true;
-                }
-                return false;
-            }
-            pinToBottomRespectingNativeMountSettle('initial-open');
-            return false;
-        };
-
-        if (Platform.OS === 'web') {
-            const startedAtMs = Date.now();
-
-            if (stabilizeMaxMs <= 0 || attempt()) {
-                if (stabilizeMaxMs <= 0) {
-                    attempt();
-                }
-                return () => {
-                    cancelled = true;
-                    initialWebPinStabilizingRef.current = false;
-                };
-            }
-
-            const delays = resolveInitialWebPinRetryDelays({
-                milestonesMs: tuning.transcriptWebInitialPinRetryMilestonesMs,
-                stabilizeMaxMs,
-                retryIntervalMs,
-            });
-
-            if (delays.length === 0) {
-                initialWebPinStabilizingRef.current = false;
-                return () => {
-                    cancelled = true;
-                };
-            }
-
-            initialWebPinStabilizingRef.current = true;
-            let timeoutId: ReturnType<typeof setTimeout> | null = null;
-            let delayIndex = 0;
-
-            const scheduleNext = () => {
-                if (cancelled) return;
-                if (delayIndex >= delays.length) {
-                    initialWebPinStabilizingRef.current = false;
-                    return;
-                }
-                const delayMs = delays[delayIndex];
-                delayIndex += 1;
-                const timeoutMs = resolveWebPinRetryTimeoutMs({
-                    startedAtMs,
-                    nowMs: Date.now(),
-                    milestoneMs: delayMs,
-                });
-                timeoutId = setTimeout(() => {
-                    timeoutId = null;
-                    if (attempt()) return;
-                    scheduleNext();
-                }, timeoutMs);
-            };
-
-            scheduleNext();
-            return () => {
-                cancelled = true;
-                initialWebPinStabilizingRef.current = false;
-                if (timeoutId) {
-                    clearTimeout(timeoutId);
-                }
-            };
-        }
-
-        // One idempotent settle pin per mount window (plan B4): pin once; the
-        // mount-settle coordinator owns any later settle pin.
-        attempt();
-        return () => { cancelled = true; };
+    const beginSessionOpenWebBottomEntry = React.useCallback((deadlineMs: number): boolean => {
+        if (Platform.OS !== 'web') return false;
+        if (entryRestoreOwner.hasOpenTransaction(props.sessionId)) return true;
+        const metrics = resolveWebScrollMetrics();
+        if (!metrics) return false;
+        pinToBottom('initial-open');
+        applyEntryRestoreOwnerEffects(entryRestoreOwner.beginWebBottom({
+            contentHeight: Math.max(0, Math.trunc(metrics.scrollHeight)),
+            deadlineMs,
+            layoutHeight: Math.max(0, Math.trunc(metrics.clientHeight)),
+            nowMs: Date.now(),
+            sessionId: props.sessionId,
+        }));
+        return entryRestoreOwner.hasOpenTransaction(props.sessionId);
     }, [
-        armEntryRestoreDeadline,
-        pinNativeFlashListToBottomIfMeasured,
+        applyEntryRestoreOwnerEffects,
+        entryRestoreOwner,
+        pinToBottom,
+        props.sessionId,
+        resolveWebScrollMetrics,
+    ]);
+
+    const executeSessionOpenInitialPinAttempt = React.useCallback((): boolean => {
+        if (Platform.OS === 'web') {
+            if (wantsPinnedRef.current === false) {
+                preemptEntryRestoreTransaction();
+                initialWebPinStabilizingRef.current = false;
+                return true;
+            }
+            if (Date.now() - lastUserScrollIntentAtMsRef.current < TRANSCRIPT_SCROLL_USER_INTENT_AUTO_PIN_DELAY_MS) return false;
+            let pinApplied = false;
+            if (!entryRestoreOwner.hasOpenTransaction(props.sessionId)) {
+                pinApplied = pinToBottom('initial-open');
+            }
+            if (entryRestoreOwner.hasOpenTransaction(props.sessionId)) {
+                verifyWebEntryRestoreTransaction();
+            }
+            if (!entryRestoreOwner.hasOpenTransaction(props.sessionId)) {
+                if (!pinApplied) {
+                    const existingRetry = sessionOpenWebInitialPinRetryTimeoutRef.current;
+                    if (existingRetry) {
+                        clearTimeout(existingRetry.timeoutId);
+                        sessionOpenWebInitialPinRetryTimeoutRef.current = null;
+                    }
+                    const [retryDelayMs] = resolveSessionOpenWebInitialPinRetryPlan(sync.getSyncTuning()).retryDelaysMs;
+                    if (typeof retryDelayMs === 'number' && Number.isFinite(retryDelayMs)) {
+                        const timeoutId = setTimeout(() => {
+                            const handle = sessionOpenWebInitialPinRetryTimeoutRef.current;
+                            if (!handle || handle.timeoutId !== timeoutId) return;
+                            sessionOpenWebInitialPinRetryTimeoutRef.current = null;
+                            if (handle.sessionId !== currentSessionIdRef.current) return;
+                            pinToBottom('initial-open');
+                        }, Math.max(0, Math.trunc(retryDelayMs)));
+                        sessionOpenWebInitialPinRetryTimeoutRef.current = {
+                            sessionId: props.sessionId,
+                            timeoutId,
+                        };
+                    }
+                    return false;
+                }
+                initialWebPinStabilizingRef.current = false;
+                return true;
+            }
+            return false;
+        }
+        pinToBottomRespectingNativeMountSettle('initial-open');
+        return false;
+    }, [
+        entryRestoreOwner,
         pinToBottom,
         pinToBottomRespectingNativeMountSettle,
         preemptEntryRestoreTransaction,
+        props.sessionId,
+        verifyWebEntryRestoreTransaction,
+    ]);
+
+    const applySessionOpenLatchEffects = React.useCallback((effects: readonly SessionOpenLatchEffect[]): void => {
+        for (const effect of effects) {
+            switch (effect.type) {
+                case 'apply-arm-reset-plan':
+                    applySessionOpenArmResetPlan(effect.plan);
+                    continue;
+                case 'apply-dispose-reset-plan':
+                    applySessionOpenDisposeResetPlan(effect.plan);
+                    continue;
+                case 'hold-native-first-paint-placeholder':
+                    continue;
+                case 'release-native-first-paint-placeholder':
+                    nativeMountSettleDeadlineReachedRef.current = true;
+                    setNativeMountSettleDeadlineReached(true);
+                    updateNativeInitialViewportPendingObservation(false);
+                    break;
+                case 'request-initial-pin':
+                    executeSessionOpenInitialPinAttempt();
+                    break;
+                case 'begin-web-bottom-entry':
+                    if (beginSessionOpenWebBottomEntry(effect.deadlineMs)) {
+                        verifyWebEntryRestoreTransaction();
+                    }
+                    break;
+                case 'schedule-web-initial-pin-retry': {
+                    if (Platform.OS !== 'web') break;
+                    const existing = sessionOpenWebInitialPinRetryTimeoutRef.current;
+                    if (existing) {
+                        clearTimeout(existing.timeoutId);
+                        sessionOpenWebInitialPinRetryTimeoutRef.current = null;
+                    }
+                    initialWebPinStabilizingRef.current = true;
+                    const timeoutId = setTimeout(() => {
+                        const handle = sessionOpenWebInitialPinRetryTimeoutRef.current;
+                        if (!handle || handle.timeoutId !== timeoutId) return;
+                        sessionOpenWebInitialPinRetryTimeoutRef.current = null;
+                        if (handle.sessionId !== currentSessionIdRef.current) return;
+                        executeSessionOpenInitialPinAttempt();
+                    }, Math.max(0, effect.deadlineAtMs - Date.now()));
+                    sessionOpenWebInitialPinRetryTimeoutRef.current = {
+                        sessionId: props.sessionId,
+                        timeoutId,
+                    };
+                    break;
+                }
+                case 'request-initial-fill':
+                    requestSessionOpenInitialFillRef.current();
+                    break;
+                case 'request-entry-restore-attempt':
+                    runEntryRestoreAttempt();
+                    verifyWebEntryRestoreTransaction();
+                    break;
+            }
+        }
+    }, [
+        applySessionOpenArmResetPlan,
+        applySessionOpenDisposeResetPlan,
+        beginSessionOpenWebBottomEntry,
+        executeSessionOpenInitialPinAttempt,
+        props.sessionId,
+        runEntryRestoreAttempt,
+        updateNativeInitialViewportPendingObservation,
+        verifyWebEntryRestoreTransaction,
+    ]);
+    applySessionOpenLatchEffectsRef.current = applySessionOpenLatchEffects;
+
+    React.useLayoutEffect(() => {
+        if (!props.sessionId || !props.isLoaded || props.jumpToSeq != null) return;
+        if (
+            Platform.OS === 'web' &&
+            sessionEntryViewportRef.current?.sessionId === props.sessionId &&
+            sessionEntryViewportRef.current.shouldFollowBottom !== false
+        ) {
+            executeSessionOpenInitialPinAttempt();
+        }
+        applySessionOpenLatchEffects(sessionOpenLatch.onHostFacts({
+            contentHeight: listContentHeightRef.current,
+            hasEntrySliceWindow: entrySliceWindowRef.current?.sessionId === props.sessionId,
+            isLoaded: props.isLoaded,
+            isScrollable: false,
+            itemCount: props.items.length,
+            layoutHeight: listLayoutHeightRef.current,
+            nowMs: Date.now(),
+            sessionId: props.sessionId,
+            userWantsPinned: wantsPinnedRef.current,
+        }).effects);
+    }, [
+        applySessionOpenLatchEffects,
+        executeSessionOpenInitialPinAttempt,
         props.isLoaded,
+        props.items.length,
         props.jumpToSeq,
         props.sessionId,
-        resolveWebScrollMetrics,
-        verifyWebEntryRestoreTransaction,
+        sessionOpenLatch,
+    ]);
+
+    React.useEffect(() => {
+        if (!props.sessionId || !props.isLoaded || props.jumpToSeq != null) return;
+        if (
+            Platform.OS === 'web' &&
+            sessionEntryViewportRef.current?.sessionId === props.sessionId &&
+            sessionEntryViewportRef.current.shouldFollowBottom !== false
+        ) {
+            executeSessionOpenInitialPinAttempt();
+        }
+        applySessionOpenLatchEffects(sessionOpenLatch.onHostFacts({
+            contentHeight: listContentHeightRef.current,
+            hasEntrySliceWindow: entrySliceWindowRef.current?.sessionId === props.sessionId,
+            isLoaded: props.isLoaded,
+            isScrollable: false,
+            itemCount: props.items.length,
+            layoutHeight: listLayoutHeightRef.current,
+            nowMs: Date.now(),
+            sessionId: props.sessionId,
+            userWantsPinned: wantsPinnedRef.current,
+        }).effects);
+    }, [
+        applySessionOpenLatchEffects,
+        executeSessionOpenInitialPinAttempt,
+        props.isLoaded,
+        props.items.length,
+        props.jumpToSeq,
+        props.sessionId,
+        sessionOpenLatch,
     ]);
 
     const isScrollable = React.useCallback((): boolean => {
@@ -8750,13 +9572,13 @@ const ChatListInternal = React.memo((props: {
         // `items`/`listData` identity is not robust here.
         if (props.jumpToSeq != null) return;
         if (!props.sessionId) return;
-        if (didAutoExpandToolCallsGroupsForSessionRef.current === props.sessionId) return;
+        if (sessionOpenLatch.hasAutoExpandedToolCallsGroups(props.sessionId)) return;
         if (isScrollable()) return;
 
         const expanded = tryAutoExpandNewestToolCallsGroup();
         if (!expanded) return;
 
-        didAutoExpandToolCallsGroupsForSessionRef.current = props.sessionId;
+        sessionOpenLatch.markAutoExpandedToolCallsGroups(props.sessionId);
         fireAndForget((async () => {
             await Promise.resolve();
             await Promise.resolve();
@@ -8765,104 +9587,192 @@ const ChatListInternal = React.memo((props: {
         })(), { tag: 'ChatList.autoExpandToolCallsGroup' });
     });
 
-    const resolveJumpIndex = React.useCallback((): number | null => {
-        const target = props.jumpToSeq;
-        if (typeof target !== 'number' || !Number.isFinite(target) || target < 0) return null;
-        return resolveTranscriptJumpSeqIndex({
-            targetSeq: target,
-            items: itemsRef.current,
-            resolveSeqForMessageId,
-            // Treat unknown as "may have more": resolving the nearest-loaded fallback too
-            // early aborts jump materialization, while the load loop self-terminates on
-            // `no_more` and flips this latch for the post-exhaustion fallback landing.
-            hasMoreOlder: hasMoreOlderRef.current !== false,
+    const isWebTranscriptSeqMounted = React.useCallback((seq: number): boolean => {
+        return isTranscriptSeqMountedInWebRenderedWindow({
+            hasAnyTestId: hasAnyWebTranscriptDataTestId,
+            hotTailTestIdPrefix: TRANSCRIPT_WEB_HOT_TAIL_ITEM_TEST_ID_PREFIX,
+            items: canonicalWindowedItemsRef.current, platformOS: Platform.OS,
+            prependAnchorTestIdPrefix: TRANSCRIPT_WEB_PREPEND_ANCHOR_TEST_ID_PREFIX,
+            resolveContainer: () => resolveWebScrollMetrics()?.element,
+            resolveItemId: (item) => item.id, resolveSeq: resolveTargetWindowItemSeq, seq,
         });
-    }, [props.jumpToSeq, resolveSeqForMessageId]);
+    }, [resolveTargetWindowItemSeq, resolveWebScrollMetrics]);
+
+    const jumpToTranscriptTarget = React.useCallback(async (
+        target: TranscriptJumpTarget,
+        options?: Readonly<{ align?: TranscriptViewportJumpAlignment; preferTargetWindow?: boolean }>,
+    ): Promise<TranscriptJumpResult> => {
+        const targetRequest = resolveTranscriptJumpTargetRequest(target);
+        if (!targetRequest) return { status: 'not-found', reason: 'invalid-target' };
+        const { normalizedTargetSeq, routeMessageId, transcriptBlockIndex, role } = targetRequest;
+        const sessionId = props.sessionId;
+        if (!sessionId) return { status: 'not-found', reason: 'unavailable' };
+
+        const scrollToTarget = (): boolean => {
+            const command = resolveViewportCommand({
+                type: 'jump-to-seq',
+                sessionId,
+                seq: normalizedTargetSeq,
+                routeMessageId,
+                transcriptBlockIndex,
+                role,
+                ...(options?.align ? { align: options.align } : {}),
+            });
+            const applied = executeViewportCommandWithAnimation(command, true);
+            if (applied && Platform.OS === 'web') {
+                pendingJumpSeqViewportPromotionRef.current = {
+                    emitViewportChange: onViewportChangeRef.current,
+                    seq: normalizedTargetSeq,
+                    sessionId,
+                };
+                const metrics = resolveWebScrollMetrics();
+                if (metrics) {
+                    promotePendingJumpSeqViewportSnapshot({
+                        distanceFromBottom: getWebTranscriptDistanceFromBottom(metrics),
+                        metrics,
+                        requireRestorableAnchor: true,
+                        scrollOffsetPx: metrics.scrollTop,
+                    });
+                }
+            }
+            return applied;
+        };
+
+        const result = await executeTranscriptTargetWindowJump({
+            align: options?.align,
+            canRenderTargetWindow: options?.preferTargetWindow === true && !props.forkedTranscriptEnabled,
+            forceTargetWindow: options?.preferTargetWindow === true,
+            isTargetInRenderedWindow: () => isTranscriptJumpTargetInRenderedWindow(target),
+            isTargetMounted: () => Platform.OS === 'web'
+                ? isWebTranscriptSeqMounted(normalizedTargetSeq)
+                : true,
+            loadTargetWindow: async ({ target: windowTarget, direction }) => {
+                const loadTarget = resolveTranscriptTargetWindowLoadTarget(windowTarget, normalizedTargetSeq);
+                const result = await sync.loadTargetWindowMessages(sessionId, loadTarget, {
+                    direction: direction ?? 'initial',
+                });
+                if (result?.status === 'stale') return { status: 'stale' as const };
+                if (result?.status === 'loaded' && result.targetPresent) {
+                    activeTargetWindowTargetRef.current = windowTarget;
+                    return {
+                        windowId: result.windowId,
+                        targetSeq: result.targetSeq,
+                        newerCursor: result.newerCursor,
+                        hasMoreNewer: result.hasMoreNewer,
+                    };
+                }
+                return null;
+            },
+            onJumpLanded: props.onJumpLanded,
+            pageTowardTarget: async () => {
+                const syncLoadOlderOptions = resolveSyncLoadOlderOptions();
+                const loadOlderResult = props.forkedTranscriptEnabled
+                    ? (syncLoadOlderOptions
+                        ? await sync.loadOlderMessagesForkAware(sessionId, syncLoadOlderOptions)
+                        : await sync.loadOlderMessagesForkAware(sessionId))
+                    : (syncLoadOlderOptions
+                        ? await sync.loadOlderMessages(sessionId, syncLoadOlderOptions)
+                        : await sync.loadOlderMessages(sessionId));
+                if (loadOlderResult.status === 'no_more') {
+                    return { status: 'not-found', reason: 'exhausted' };
+                }
+                await Promise.resolve();
+                await Promise.resolve();
+                return scrollToTarget()
+                    ? { status: 'scrolled', target }
+                    : { status: 'not-found', reason: 'unavailable' };
+            },
+            platformOS: Platform.OS,
+            readScrollTop: () => resolveWebScrollMetrics()?.scrollTop ?? null,
+            resolveTargetIndex: () => resolveJumpTargetIndexFromRenderedWindow(target),
+            scrollToTarget,
+            target,
+            targetSeq: normalizedTargetSeq,
+        });
+        return result;
+    }, [props.forkedTranscriptEnabled, props.onJumpLanded, props.sessionId, executeViewportCommandWithAnimation, isWebTranscriptSeqMounted, isTranscriptJumpTargetInRenderedWindow, promotePendingJumpSeqViewportSnapshot, resolveJumpTargetIndexFromRenderedWindow, resolveSyncLoadOlderOptions, resolveWebScrollMetrics, resolveViewportCommand]);
+
+    const handleTranscriptNavigationRailJump = React.useCallback((
+        entry: TranscriptNavigationEntry,
+        request: TranscriptNavigationJumpRequest,
+    ): Promise<TranscriptJumpResult> | undefined => {
+        const plan = resolveTranscriptNavigationJumpPlan({
+            entry,
+            isTargetInRenderedWindow: isTranscriptJumpTargetInRenderedWindow,
+            request,
+            sessionId: props.sessionId,
+        });
+        if (!plan) return;
+        const result = jumpToTranscriptTarget(plan.target, {
+            align: plan.align,
+            preferTargetWindow: plan.preferTargetWindow,
+        });
+        fireAndForget(result, { tag: 'ChatList.transcriptNavigationRailJump' });
+        return result;
+    }, [isTranscriptJumpTargetInRenderedWindow, jumpToTranscriptTarget, props.sessionId]);
+
+    const handleTranscriptNavigationPaneEntryPress = React.useCallback((entry: TranscriptNavigationEntry): Promise<TranscriptJumpResult> | undefined => {
+        const request = resolveTranscriptNavigationPaneJumpRequest(entry, props.sessionId);
+        return request ? handleTranscriptNavigationRailJump(entry, request) : undefined;
+    }, [handleTranscriptNavigationRailJump, props.sessionId]);
+
+    React.useLayoutEffect(() => {
+        transcriptNavigationPaneStore.set(props.sessionId, {
+            activeEntryId: transcriptNavigationRailVisibilitySnapshot.currentAnchorId,
+            entries: props.transcriptNavigationEntries,
+            onEntryPress: handleTranscriptNavigationPaneEntryPress,
+        });
+        return () => {
+            transcriptNavigationPaneStore.set(props.sessionId, null);
+        };
+    }, [handleTranscriptNavigationPaneEntryPress, props.sessionId, props.transcriptNavigationEntries, transcriptNavigationRailVisibilitySnapshot.currentAnchorId]);
 
     React.useEffect(() => {
-        const target = props.jumpToSeq;
-        if (typeof target !== 'number' || !Number.isFinite(target) || target < 0) return;
-        if (!props.isLoaded) return;
-        if (lastJumpSeqRef.current === target) return;
-        if (!props.sessionId) return;
+        const normalizedTarget = resolveTranscriptRouteJumpSeqPlan({
+            committedMessagesCount: props.committedMessagesCount,
+            hasUsableWebMetrics: () => {
+                const metrics = resolveWebScrollMetrics();
+                return !!metrics && metrics.clientHeight > 0 && metrics.scrollHeight > 0;
+            },
+            inFlightJumpSeq: inFlightJumpSeqRef.current,
+            isLoaded: props.isLoaded,
+            jumpToSeq: props.jumpToSeq,
+            lastJumpSeq: lastJumpSeqRef.current,
+            listContentHeight,
+            listLayoutHeight,
+            platformOS: Platform.OS,
+            sessionId: props.sessionId,
+        });
+        if (normalizedTarget == null) return;
 
-        lastJumpSeqRef.current = target;
+        inFlightJumpSeqRef.current = normalizedTarget;
         fireAndForget((async () => {
-            await jumpToTranscriptSeq({
-                targetSeq: target,
-                getIndex: resolveJumpIndex,
-                loadOlder: async () => {
-                    const syncLoadOlderOptions = resolveSyncLoadOlderOptions();
-                    const result = props.forkedTranscriptEnabled
-                        ? (syncLoadOlderOptions
-                            ? await sync.loadOlderMessagesForkAware(props.sessionId, syncLoadOlderOptions)
-                            : await sync.loadOlderMessagesForkAware(props.sessionId))
-                        : (syncLoadOlderOptions
-                            ? await sync.loadOlderMessages(props.sessionId, syncLoadOlderOptions)
-                            : await sync.loadOlderMessages(props.sessionId));
-                    if (result.status === 'no_more') return { status: 'no_more' as const };
-                    return { status: 'loaded' as const, hasMore: result.hasMore };
-                },
-                afterLoadOlder: async () => {
-                    // Yield to allow store updates + list re-render before re-checking `getIndex`.
-                    await Promise.resolve();
-                    await Promise.resolve();
-                },
-                scrollToIndex: (index) => {
-                    if (shouldUseWebHotColdSplit) {
-                        const decision = resolveWebColdListScrollTarget({
-                            fullIndex: index,
-                            coldCount: transcriptHotColdSegments.coldItems.length,
-                            reason: 'jump-to-seq',
-                        });
-                        if (decision.kind === 'pin_to_bottom') {
-                            pinToBottom('jump-to-seq');
-                            return;
-                        }
-                        const command = resolveViewportCommand({
-                            type: 'jump-to-seq',
-                            sessionId: props.sessionId,
-                            seq: target,
-                            index: decision.index,
-                        });
-                        executeViewportCommand(withTranscriptViewportCommandAnimation(command, true));
-                        return;
-                    }
-                    const command = resolveViewportCommand({
-                        type: 'jump-to-seq',
-                        sessionId: props.sessionId,
-                        seq: target,
-                        index,
-                    });
-                    executeViewportCommand(withTranscriptViewportCommandAnimation(command, true));
-                },
-                maxLoads: 25,
-            });
+            try {
+                const result = await jumpToTranscriptTarget(
+                    { kind: 'seq', seq: normalizedTarget },
+                    { preferTargetWindow: true },
+                );
+                if (result.status === 'scrolled' || result.status === 'window-rendered') {
+                    lastJumpSeqRef.current = normalizedTarget;
+                }
+            } finally {
+                if (inFlightJumpSeqRef.current === normalizedTarget) {
+                    inFlightJumpSeqRef.current = null;
+                }
+            }
         })(), { tag: 'ChatList.jumpToTranscriptSeq' });
-    }, [
-        pinToBottom,
-        props.forkedTranscriptEnabled,
-        props.isLoaded,
-        props.jumpToSeq,
-        props.sessionId,
-        executeViewportCommand,
-        resolveJumpIndex,
-        resolveSyncLoadOlderOptions,
-        resolveViewportCommand,
-        shouldUseWebHotColdSplit,
-        transcriptHotColdSegments.coldItems.length,
-    ]);
+    }, [props.committedMessagesCount, props.isLoaded, props.jumpToSeq, props.sessionId, jumpToTranscriptTarget, listContentHeight, listLayoutHeight, resolveWebScrollMetrics]);
 
     React.useEffect(() => {
         if (!props.isLoaded) return;
         if (props.jumpToSeq != null) return;
         if (!props.sessionId) return;
-        if (initialFillStatusRef.current !== 'idle') return;
+        if (sessionOpenLatch.initialFillStatus() !== 'idle') return;
 
         // Wait for at least one layout + content measurement pass before deciding whether to fill.
         if (listLayoutHeight <= 0 || listContentHeight <= 0) return;
 
-        initialFillStatusRef.current = 'in_progress';
+        if (!sessionOpenLatch.markInitialFillInProgress(props.sessionId)) return;
         initialFillAbortRef.current?.abort();
         const controller = new AbortController();
         initialFillAbortRef.current = controller;
@@ -8917,28 +9827,59 @@ const ChatListInternal = React.memo((props: {
                 if (consecutiveNoProgressLoads >= maxNoProgressLoads) break;
             }
             if (signal.aborted) return;
-            initialFillStatusRef.current = 'done';
+            applySessionOpenLatchEffects(sessionOpenLatch.onInitialFillSettled({
+                nowMs: Date.now(),
+                sessionId: props.sessionId,
+            }).effects);
             observeMountSettleMetrics();
             if (!shouldPinDuringInitialFill) {
                 // Fill settled: resolve (and verify on web) the entry-restore transaction.
-                attemptEntryRestore();
+                runEntryRestoreAttempt();
                 verifyWebEntryRestoreTransaction();
             }
         })(), { tag: 'ChatList.initialFillOlderMessages' });
     }, [
-        attemptEntryRestore,
         isScrollable,
         listContentHeight,
         listLayoutHeight,
         loadOlder,
         observeMountSettleMetrics,
+        applySessionOpenLatchEffects,
         pinToBottomRespectingNativeMountSettle,
         props.committedMessagesCount,
         props.isLoaded,
         props.jumpToSeq,
         props.sessionId,
+        runEntryRestoreAttempt,
+        sessionOpenLatch,
         verifyWebEntryRestoreTransaction,
         waitForNextVisualUpdate,
+    ]);
+    requestSessionOpenInitialFillRef.current = requestSessionOpenInitialFill;
+
+    React.useEffect(() => {
+        if (!props.sessionId) return;
+        const decision = sessionOpenLatch.onHostFacts({
+            contentHeight: listContentHeight,
+            hasEntrySliceWindow: entrySliceWindowRef.current?.sessionId === props.sessionId,
+            isLoaded: props.isLoaded,
+            isScrollable: isScrollable(),
+            itemCount: displayItems.length,
+            layoutHeight: listLayoutHeight,
+            nowMs: Date.now(),
+            sessionId: props.sessionId,
+            userWantsPinned: wantsPinnedRef.current,
+        });
+        applySessionOpenLatchEffects(decision.effects);
+    }, [
+        applySessionOpenLatchEffects,
+        isScrollable,
+        displayItems.length,
+        listContentHeight,
+        listLayoutHeight,
+        props.isLoaded,
+        props.sessionId,
+        sessionOpenLatch,
     ]);
 
     return (
@@ -8954,425 +9895,51 @@ const ChatListInternal = React.memo((props: {
                                   } as any)
                 : {})}
             >
-          {listImplementation === 'flatlist_legacy' ? (
-          <FlatList<ChatTranscriptListItem>
-          ref={(node) => {
-            // react-test-renderer does not provide a stable ref object; we store it manually.
-            listRef.current = node as unknown as ScrollableChatListRef | null;
-          }}
-            {...(Platform.OS === 'web'
-              ? ({
-                                    onWheel: stopScrollEventPropagationOnWeb,
-                                    onTouchMove: stopScrollEventPropagationOnWeb,
-                                    onPointerDown: markUserScrollIntentOnWeb,
-                                    onMouseDown: markUserScrollIntentOnWeb,
-                              } as any)
-              : ({
-                                    onTouchCancel: recordNativeTranscriptTouchEndIntent,
-                                    onTouchEnd: recordNativeTranscriptTouchEndIntent,
-                                    onTouchMove: recordNativeTranscriptTouchIntent,
-                                    onTouchStart: recordNativeTranscriptTouchStartIntent,
-                              } as any)
-              )}
-          testID="transcript-chat-list"
-          data={listData}
-          extraData={transcriptListExtraData}
-          inverted={true}
-          key={props.sessionId}
-                      nativeID={chatListNativeId}
-                      keyExtractor={keyExtractor}
-                      maintainVisibleContentPosition={
-                        flatListMaintainVisibleContentPosition
-                      }
-                    onLayout={(e) => {
-                        const layout = e?.nativeEvent?.layout;
-                        recordListLayoutWidth(layout?.width);
-                        const h = layout?.height;
-                        if (typeof h === 'number' && Number.isFinite(h)) {
-                            const layoutHeightChanged = listLayoutHeightRef.current !== h;
-                            listLayoutHeightRef.current = h;
-                            setListLayoutHeight(h);
-                            if (layoutHeightChanged) {
-                                recordViewportTelemetryEvent({
-                                    type: 'layout-measured',
-                                    mode: resolveViewportTelemetryMode(),
-                                    reason: 'layout-change',
-                                    layoutHeight: h,
-                                    contentHeight: listContentHeightRef.current,
-                                });
-                            }
-                        }
-                    }}
-                    onContentSizeChange={(_, h) => {
-                        if (typeof h === 'number' && Number.isFinite(h)) {
-                            const contentHeightChanged = listContentHeightRef.current !== h;
-                            markNativeContentMeasurementForCurrentSession();
-                            listContentHeightRef.current = h;
-                            setListContentHeight(h);
-                            if (contentHeightChanged) {
-                                recordViewportTelemetryEvent({
-                                    type: 'content-measured',
-                                    mode: resolveViewportTelemetryMode(),
-                                    reason: 'content-size-change',
-                                    layoutHeight: listLayoutHeightRef.current,
-                                    contentHeight: h,
-                                });
-                            }
-                        }
-                    }}
-                onScroll={(e) => {
-                    const y = e?.nativeEvent?.contentOffset?.y;
-                    if (typeof y !== 'number' || !Number.isFinite(y)) return;
-                    const nowMs = Date.now();
-                    const isTrusted = (e as any)?.nativeEvent?.isTrusted === true;
-                    const nativeDistanceFromBottom = y;
-                    const shouldIgnoreInvalidNativeScroll = shouldIgnoreNativeInvalidScrollObservation(
-                        y,
-                        nativeDistanceFromBottom,
-                        listLayoutHeightRef.current,
-                        listContentHeightRef.current,
-                    );
-                    if (Platform.OS !== 'web') {
-                        recordScrollObservedTelemetry({
-                            offsetY: y,
-                            layoutHeight: listLayoutHeightRef.current,
-                            contentHeight: listContentHeightRef.current,
-                            distanceFromBottom: nativeDistanceFromBottom,
-                            reason: shouldIgnoreInvalidNativeScroll
-                                ? 'invalid-native-offset'
-                                : 'observed',
-                        });
-                    }
-                    // Invalid (NaN/negative) observations are dropped only (plan B5):
-                    // no recovery repin side effects.
-                    if (shouldIgnoreInvalidNativeScroll) return;
-                    const shouldIgnorePassiveNativeScroll = shouldIgnoreNativePassiveViewportScroll(
-                        isTrusted,
-                        nowMs,
-                        nativeDistanceFromBottom,
-                        pinThresholdPx,
-                    );
-                    const shouldRecordPassiveNativeMovement =
-                        !isTrusted && shouldRecordNativePassiveUnpinnedMovement(nativeDistanceFromBottom, pinThresholdPx);
-                    if (isTrusted) {
-                                            recordNativeUserScrollIntent(nowMs);
-                                            markNativeInitialViewportAppliedForCurrentSession();
-                    } else if (shouldIgnorePassiveNativeScroll) {
-                        return;
-                    } else if (shouldRecordPassiveNativeMovement) {
-                        recordNativeUserScrollIntent(nowMs);
-                    } else {
-                        refreshNativeRecentPassiveUserScrollIntent(isTrusted, nowMs);
-                    }
-                    const flatListPreviousScrollOffset =
-                        lastScrollOffsetForIntentRef.current ?? (wantsPinnedRef.current ? 0 : null);
-                    const flatListMovedAwayFromBottom =
-                        flatListPreviousScrollOffset !== null && y > flatListPreviousScrollOffset;
-                    const flatListMovedTowardBottom =
-                        flatListPreviousScrollOffset !== null && y < flatListPreviousScrollOffset;
-                    const flatListRecentUserIntent =
-                        isTrusted || nowMs - lastUserScrollIntentAtMsRef.current < TRANSCRIPT_SCROLL_USER_INTENT_RECENT_MS;
-                    const flatListNativeAwayGestureStillOpen =
-                        Platform.OS !== 'web' &&
-                        bottomFollowModeStateRef.current.dragSession?.trusted === true &&
-                        bottomFollowModeStateRef.current.dragSession.sawAwayMovement === true;
-                    if (
-                        flatListNativeAwayGestureStillOpen &&
-                        !isTrusted &&
-                        nativeDistanceFromBottom <= pinThresholdPx
-                    ) {
-                        if (nativeListDragActiveRef.current) {
-                            updateNativeBottomFollowModeFromScrollObservation({
-                                distanceFromBottom: nativeDistanceFromBottom,
-                                isTrusted,
-                                movedAwayFromBottom: flatListMovedAwayFromBottom,
-                                movedTowardBottom: flatListMovedTowardBottom,
-                                recentUserIntent: flatListRecentUserIntent,
-                            });
-                        }
-                        return;
-                    }
-                    const followIntent = resolveTranscriptBottomFollowIntent({
-                        canRearmBottom:
-                            !flatListNativeAwayGestureStillOpen ||
-                            (isTrusted && flatListMovedTowardBottom),
-                        // Plan B6 trusted-gate: on native only trusted scrolls release follow;
-                        // web keeps gesture-derived recent intent as release authority.
-                        canRelease: Platform.OS === 'web'
-                            ? flatListRecentUserIntent
-                            : isTrusted &&
-                                (
-                                    listOrientationRef.current !== 'inverted' ||
-                                    nativeDistanceFromBottom > pinThresholdPx
-                                ),
-                        direction: 'toward-zero',
-                        distanceFromBottom: y,
-                        pinThresholdPx,
-                        previousScrollOffset: flatListPreviousScrollOffset,
-                        scrollOffset: y,
-                        wantsPinned: wantsPinnedRef.current,
-                    });
-                    updateNativeBottomFollowModeFromScrollObservation({
-                        distanceFromBottom: followIntent.nextDistanceFromBottom,
-                        isTrusted,
-                        movedAwayFromBottom: flatListMovedAwayFromBottom,
-                        movedTowardBottom: flatListMovedTowardBottom,
-                        recentUserIntent: flatListRecentUserIntent,
-                    });
-                    if (
-                        Platform.OS !== 'web' &&
-                        !isTrusted &&
-                        bottomFollowModeStateRef.current.mode !== 'following' &&
-                        followIntent.isPinned &&
-                        followIntent.wantsPinned
-                    ) {
-                        return;
-                    }
-                    lastPinOffsetForIntentRef.current = followIntent.nextDistanceFromBottom;
-                    lastScrollOffsetForIntentRef.current = followIntent.nextScrollOffset;
-                    wantsPinnedRef.current = followIntent.wantsPinned;
-
-                    const distanceFromBottom = followIntent.nextDistanceFromBottom;
-                    const effectiveThresholdPx = followIntent.effectivePinnedOffsetThresholdPx;
-                    const pinned = followIntent.isPinned;
-                    if (
-                        !pinned &&
-                        wantsPinnedRef.current &&
-                        pinEnabled &&
-                        autoFollowWhenPinned &&
-                        canAutoFollowForReason('stream-append') &&
-                        props.jumpToSeq == null &&
-                        Platform.OS !== 'web' &&
-                        nowMs - lastAutoRepinAtMsRef.current > TRANSCRIPT_SCROLL_AUTO_REPIN_THROTTLE_MS &&
-                        nowMs - lastUserScrollIntentAtMsRef.current >= TRANSCRIPT_SCROLL_USER_INTENT_AUTO_PIN_DELAY_MS
-                    ) {
-                        // Web/virtualization can sometimes drift the scroll position even without user intent.
-                        // If we still "want pinned", repin opportunistically.
-                        lastAutoRepinAtMsRef.current = nowMs;
-                            deferPinToBottomAfterScroll('stream-append');
-                    }
-                    isPinnedRef.current = pinned;
-                    const viewportState = {
-                        isPinned: pinned,
-                        offsetY: distanceFromBottom,
-                        shouldRestoreViewport: !wantsPinnedRef.current,
-                    };
-                    emitViewportChange(viewportState);
-                    scheduleViewportAnchorCapture(viewportState, {
-                        suppressAnchorCapture: shouldRecordPassiveNativeMovement,
-                    });
-                    commitJumpToBottomDistanceForVisibility(distanceFromBottom);
-                    commitScrollPinEvent({
-                        type: 'scroll',
-                        enabled: pinEnabled,
-                        offsetY: distanceFromBottom,
-                        pinnedOffsetThresholdPx: effectiveThresholdPx,
-                    });
-
-                    drainDeferredNewerMessages({ distanceFromBottom, pinned });
-                }}
-                onScrollBeginDrag={() => {
-                    recordNativeListDragEscapeIntent();
-                }}
-                onScrollEndDrag={recordNativeListDragEndIntent}
-                scrollEventThrottle={TRANSCRIPT_NATIVE_SCROLL_EVENT_THROTTLE_MS}
-                keyboardShouldPersistTaps="handled"
-                keyboardDismissMode="none"
-                renderItem={renderItem}
-                onEndReachedThreshold={0.2}
-                onEndReached={() => {
-                    if (initialFillStatusRef.current !== 'done') return;
-                    void loadOlder();
-                }}
-	                        onScrollToIndexFailed={(info: { index: number; averageItemLength: number }) => {
-                                if (handleNativeRestoreIndexFailure(info.index)) return;
-                                if (props.jumpToSeq == null) return;
-	                            // Best-effort fallback for dynamic-height explicit jump targets.
-	                            const offset = Math.max(0, Math.trunc(info.averageItemLength * info.index));
-	                                executeViewportCommand(resolveViewportCommand({
-	                                type: 'scroll-offset',
-	                                sessionId: props.sessionId,
-	                                reason: 'jump-to-seq',
-	                                mode: 'jump-to-seq',
-	                            offsetY: offset,
-	                            animated: true,
-	                        }));
-	                    }}
-                  ListHeaderComponent={listHeaderNode}
-                  ListFooterComponent={
-                        listFooterNode
-                    }
-              />
-              ) : (
-                  <LayoutCommitObserver onCommitLayoutEffect={recordLayoutCommitObserved}>
-                  <FlashList
-                      ref={(node: ScrollableChatListRef | null) => {
+                  <TranscriptListShell<ChatTranscriptListItem>
+                      ref={(node: TranscriptListShellRef<ChatTranscriptListItem> | null) => {
                           listRef.current = node as unknown as ScrollableChatListRef | null;
                       }}
-                        {...(Platform.OS === 'web'
-                            ? ({
-                                        onWheel: stopScrollEventPropagationOnWeb,
-                                        onTouchMove: stopScrollEventPropagationOnWeb,
-                                        onPointerDown: markUserScrollIntentOnWeb,
-                                        onMouseDown: markUserScrollIntentOnWeb,
-                                  } as any)
-                                  : ({
-                                        onTouchCancel: recordNativeTranscriptTouchEndIntent,
-                                        onTouchEnd: recordNativeTranscriptTouchEndIntent,
-                                        onTouchMove: recordNativeTranscriptTouchIntent,
-                                        onTouchStart: recordNativeTranscriptTouchStartIntent,
-                                  } as any)
-                            )}
-                        testID="transcript-chat-list"
+                      frame={mainTranscriptListShellFrame}
+                      onCommitLayoutEffect={recordLayoutCommitObserved}
+                      platformInteractionProps={mainTranscriptListShellPlatformInteractionProps}
                       data={listData}
-                      inverted={isInvertedNativeList ? true : undefined}
                       extraData={transcriptListExtraData}
                       key={props.sessionId}
-                      nativeID={chatListNativeId}
                       keyExtractor={keyExtractor}
                         overrideProps={nativeFlashListScrollOverrideProps}
                         getItemType={getItemType}
-                        drawDistance={flashListDrawDistance}
                       onLoad={handleFlashListLoad}
-                      maintainVisibleContentPosition={
-                          flashListMaintainVisibleContentPosition
-                      }
-                      onViewableItemsChanged={shouldAttachNativeViewabilityTelemetry ? handleNativeViewableItemsChanged : undefined}
+                      onViewableItemsChanged={shouldAttachNativeViewability ? handleNativeViewableItemsChanged : undefined}
                       viewabilityConfig={nativeViewabilityConfig}
-                      onLayout={(e: LayoutChangeEvent) => {
-                          const layout = e?.nativeEvent?.layout;
-                          recordListLayoutWidth(layout?.width);
-                          const h = layout?.height;
-                          if (typeof h === 'number' && Number.isFinite(h)) {
-                              const layoutHeightChanged = listLayoutHeightRef.current !== h;
-                              const previousWebMetrics = captureWebBottomFollowPreviousMetrics();
-                              const nativePrevFollowAtBottom = captureNativeBottomFollowPreviousFollow();
-                              listLayoutHeightRef.current = h;
-                                      setListLayoutHeight(h);
-                                      if (layoutHeightChanged) {
-                                          recordViewportTelemetryEvent({
-                                              type: 'layout-measured',
-                                              mode: resolveViewportTelemetryMode(),
-                                              reason: 'layout-change',
-                                              layoutHeight: h,
-                                              contentHeight: listContentHeightRef.current,
-                                          });
-                                      }
-                                      recordNativeVisibleWindowTelemetry('layout-change', {
-                                          layoutHeight: h,
-                                          contentHeight: listContentHeightRef.current,
-                                      });
-                                      observeMountSettleMetrics();
-                                      pinNativeInitialFollowBottomViewportIfReady('layout-change');
-                                  if (Platform.OS !== 'web' && listImplementation === 'flash_v2') {
-                                      observeNativePrependTransaction();
-                                  }
-                                  if (Platform.OS !== 'web' && sessionEntryViewportRef.current?.shouldFollowBottom === false) {
-                                      // One transaction per entry: this only resolves while no
-                                      // transaction exists yet (no E1 reapply on layout change).
-                                      attemptEntryRestore();
-                                      verifyNativeSliceEntryRestoreTransaction();
-                                  }
-                                        if (layoutHeightChanged && listContentHeightRef.current > 0) {
-                                            schedulePinToBottom(previousWebMetrics, 'layout-change', nativePrevFollowAtBottom);
-                                        }
-                          }
-                      }}
-                          onContentSizeChange={(_: number, h: number) => {
-                                  if (typeof h === 'number' && Number.isFinite(h)) {
-                                      const measuredContentHeight = resolveMeasuredContentHeight(h);
-                                      const previousMeasuredContentHeight = listContentHeightRef.current;
-                                      const contentHeightChanged = previousMeasuredContentHeight !== measuredContentHeight;
-                                      const contentHeightGrew = measuredContentHeight > previousMeasuredContentHeight;
-                                      const previousMeasuredActivityKey = lastMeasuredContentActivityKeyRef.current;
-                                      const latestActivityKey = props.latestCommittedActivityKey;
-                                      const contentSizeScrollReason: TranscriptViewportTelemetryScrollReason =
-                                          props.sessionActive &&
-                                          previousMeasuredActivityKey != null &&
-                                          latestActivityKey != null &&
-                                          (
-                                              previousMeasuredActivityKey !== latestActivityKey ||
-                                              (previousMeasuredActivityKey === latestActivityKey && contentHeightGrew)
-                                          )
-                                              ? 'stream-append'
-                                              : 'content-size-change';
-                                      const materializationLayoutHeight = listLayoutHeightRef.current;
-                                      const materializationDeltaHeight = measuredContentHeight - previousMeasuredContentHeight;
-                                      const materializationPreviousTargetOffsetY =
-                                          Number.isFinite(materializationLayoutHeight) && materializationLayoutHeight > 0
-                                              ? Math.max(0, Math.trunc(previousMeasuredContentHeight - materializationLayoutHeight))
-                                              : 0;
-                                      const lastNativeBottomFollowPinCommand = lastNativeBottomFollowPinCommandRef.current;
-                                      const hasNativeBottomFollowPinCommandForCurrentSession =
-                                          lastNativeBottomFollowPinCommand?.sessionId === props.sessionId;
-                                      const shouldAllowNativeContentMaterializationAutoPin =
-                                          Platform.OS !== 'web' &&
-                                          usesNativeFlashListBottomMaintenance &&
-                                          contentSizeScrollReason === 'content-size-change' &&
-                                          wantsPinnedRef.current &&
-                                          (
-                                              hasNativeInitialViewportAppliedForCurrentSession() ||
-                                              hasNativeBottomFollowPinCommandForCurrentSession
-                                          ) &&
-                                          previousMeasuredContentHeight > 0 &&
-                                          Number.isFinite(materializationLayoutHeight) &&
-                                          materializationLayoutHeight > 0 &&
-                                          materializationDeltaHeight >= materializationLayoutHeight &&
-                                          materializationPreviousTargetOffsetY <= Math.max(
-                                              pinThresholdPx,
-                                              materializationLayoutHeight * 0.5,
-                                          );
-                                      nativeContentMaterializationAutoPinRef.current =
-                                          shouldAllowNativeContentMaterializationAutoPin
-                                              ? { sessionId: props.sessionId, contentHeight: measuredContentHeight }
-                                              : null;
-                                  const previousWebMetrics = captureWebBottomFollowPreviousMetrics();
-                                  const nativePrevFollowAtBottom = captureNativeBottomFollowPreviousFollow();
-                                  markNativeContentMeasurementForCurrentSession();
-                                      listContentHeightRef.current = measuredContentHeight;
-                                      lastMeasuredContentActivityKeyRef.current = props.latestCommittedActivityKey;
-                                      if (shouldCommitContentHeightState()) {
-                                          setListContentHeight(measuredContentHeight);
-                                      }
-                                      if (
-                                          contentHeightChanged &&
-                                          contentSizeScrollReason === 'stream-append' &&
-                                          Platform.OS !== 'web'
-                                      ) {
-                                          releaseNativeBottomFollowIfFlashListOffsetEscaped({
-                                              contentHeight: measuredContentHeight,
-                                              layoutHeight: listLayoutHeightRef.current,
-                                          });
-                                      }
-                                      if (contentHeightChanged) {
-                                          recordViewportTelemetryEvent({
-                                              type: 'content-measured',
-                                              mode: resolveViewportTelemetryMode(),
-                                              reason: contentSizeScrollReason,
-                                              layoutHeight: listLayoutHeightRef.current,
-                                              contentHeight: measuredContentHeight,
-                                          });
-                                      }
-                                      recordNativeVisibleWindowTelemetry(contentSizeScrollReason, {
-                                          layoutHeight: listLayoutHeightRef.current,
-                                          contentHeight: measuredContentHeight,
-                                      });
-                                      observeMountSettleMetrics();
-                                      pinNativeInitialFollowBottomViewportIfReady(contentSizeScrollReason);
-                                      if (Platform.OS !== 'web' && listImplementation === 'flash_v2') {
-                                          observeNativePrependTransaction();
-                                      }
-                                  if (Platform.OS !== 'web' && sessionEntryViewportRef.current?.shouldFollowBottom === false) {
-                                      // One transaction per entry: content-size changes can only
-                                      // resolve a not-yet-issued restore, never re-issue one (E1).
-                                      attemptEntryRestore();
-                                      verifyNativeSliceEntryRestoreTransaction();
-                                  }
-                                        if (contentHeightChanged && listLayoutHeightRef.current > 0) {
-                                            schedulePinToBottom(previousWebMetrics, contentSizeScrollReason, nativePrevFollowAtBottom);
-                                        }
-                          }
-                      }}
+	                      onLayout={(e: LayoutChangeEvent) => {
+	                          const layout = e?.nativeEvent?.layout;
+	                          recordListLayoutWidth(layout?.width);
+	                          const h = layout?.height;
+	                          applyTranscriptLayoutObservation({
+	                              contentHeight: listContentHeightRef.current,
+	                              layoutHeight: typeof h === 'number' ? h : Number.NaN,
+	                              layoutHeightChanged: listLayoutHeightRef.current !== h,
+	                              platformOS: Platform.OS,
+	                              shouldRestoreNativeEntry: sessionEntryViewportRef.current?.shouldFollowBottom === false,
+	                          }, layoutObservationApplierEffects);
+	                      }}
+	                          onContentSizeChange={(_: number, h: number) => {
+	                                  const contentSizeObservation = measurementHost.observeContentSizeChange({
+	                                      composerInsetHeight: composerInsetHeightRef.current,
+	                                      latestCommittedActivityKey: props.latestCommittedActivityKey,
+                                      platform: Platform.OS === 'web' ? 'web' : 'native',
+                                      previousMeasuredContentHeight: listContentHeightRef.current,
+                                      rawContentHeight: h,
+	                                      sessionActive: props.sessionActive,
+	                                      sessionId: props.sessionId,
+	                                  });
+	                                  applyTranscriptContentSizeObservation({
+	                                      layoutHeight: listLayoutHeightRef.current,
+	                                      observation: contentSizeObservation,
+	                                      platformOS: Platform.OS,
+	                                      shouldRestoreNativeEntry: sessionEntryViewportRef.current?.shouldFollowBottom === false,
+	                                  }, contentSizeObservationApplierEffects);
+	                      }}
                         onScroll={(e: NativeSyntheticEvent<NativeScrollEvent>) => {
                                 // React Native Web exposes `contentOffset.y` via a computed getter on every
                                 // scroll event. For web FlashList we already need live DOM metrics, so read
@@ -9384,6 +9951,9 @@ const ChatListInternal = React.memo((props: {
                                 if (typeof rawObservedOffsetY !== 'number' || !Number.isFinite(rawObservedOffsetY)) return;
                                             const nowMs = Date.now();
                                             const isTrusted = (nativeEvent as any)?.isTrusted === true;
+                                            if (liveWebMetrics) {
+                                                observeWebTranscriptNavigationVisibilityForSession(liveWebMetrics, { isTrusted });
+                                            }
                               const eventLayoutH =
                                   Platform.OS !== 'web'
                                       ? resolveNativeScrollEventMetric(nativeEvent?.layoutMeasurement?.height)
@@ -9394,19 +9964,26 @@ const ChatListInternal = React.memo((props: {
                                       : null;
                               const layoutH = eventLayoutH ?? listLayoutHeightRef.current;
                               const contentH = eventContentH ?? listContentHeightRef.current;
-                              // N3.2: ALL downstream observation logic reads CANONICAL standard-space
-                              // offsets (0 = oldest edge); inverted raw offsets map here, at the single
-                              // observation boundary (identity under standard orientation).
-                              const y = toCanonicalScrollOffset({
-                                  offsetY: rawObservedOffsetY,
-                                  contentHeight: contentH,
-                                  layoutHeight: layoutH,
-                                  orientation: listOrientationRef.current,
-                              });
-                              const refDistanceFromBottom =
-                                  layoutH > 0 && contentH >= layoutH
-                                      ? Math.max(0, Math.trunc(contentH - layoutH - y))
-                                      : 0;
+                              // N3.2/D9: downstream observation logic reads CANONICAL standard-space offsets
+                              // (0 = oldest edge). Web DOM scrollTop is identity; native inverted raw offset
+                              // normalization is owned by the native fact source.
+                              const isWebScrollObservation = Platform.OS === 'web';
+                              const nativeObservedOffset = isWebScrollObservation
+                                  ? null
+                                  : resolveNativeObservedScrollOffset(rawObservedOffsetY, {
+                                      contentHeight: contentH,
+                                      layoutHeight: layoutH,
+                                  });
+                              if (!isWebScrollObservation && !nativeObservedOffset) return;
+                              const y = isWebScrollObservation ? rawObservedOffsetY : nativeObservedOffset?.canonicalOffsetY;
+                              if (typeof y !== 'number') return;
+                              const refDistanceFromBottom = isWebScrollObservation
+                                  ? (
+                                      layoutH > 0 && contentH >= layoutH
+                                          ? Math.max(0, Math.trunc(contentH - layoutH - y))
+                                          : 0
+                                  )
+                                  : nativeObservedOffset?.distanceFromLiveTailPx ?? 0;
                               const refVisualBottomScrollOffset =
                                   layoutH > 0 && contentH >= layoutH
                                       ? Math.max(0, Math.trunc(contentH - layoutH))
@@ -9435,42 +10012,29 @@ const ChatListInternal = React.memo((props: {
                                     const shouldIgnoreInvalidNativeScroll = shouldIgnoreNativeInvalidScrollObservation(
                                         rawObservedOffsetY,
                                         refDistanceFromBottom,
-                                        layoutH,
-                                        contentH,
                                     );
                                     if (shouldIgnoreInvalidNativeScroll) {
                                         // Drop-only (plan B5): no recovery repin side effects.
                                         recordNativeScrollObservation('invalid-native-offset');
                                         return;
                                     }
-                                    const shouldIgnorePassiveNativeScroll = shouldIgnoreNativePassiveViewportScroll(
-                                        isTrusted,
-                                        nowMs,
-                                        refDistanceFromBottom,
-                                        pinThresholdPx,
-                                    );
-                                    const entryRestoreTransaction = entryRestoreTransactionRef.current;
                                     const hasOpenNativeEntryRestoreTransaction =
                                         Platform.OS !== 'web' &&
-                                        entryRestoreTransaction != null &&
-                                        entryRestoreTransaction.sessionId === props.sessionId &&
-                                        !entryRestoreTransaction.isClosed();
+                                        entryRestoreOwner.hasOpenTransaction(props.sessionId);
                                     const commitOpenEntryRestoreVisibleState = () => {
                                         if (Platform.OS === 'web' || !hasOpenNativeEntryRestoreTransaction) return;
-                                        const entryRestoreWriteContext = entryRestoreWriteContextRef.current;
                                         if (props.isLoaded && listDataRef.current.length > 0) {
                                             updateNativeViewportPaintObserved(true);
                                             if (firstPaintTelemetryRef.current?.recorded === false) {
                                                 recordFirstListPaint();
                                             }
                                         }
-                                        const visibleDistanceFromBottom = Math.max(
-                                            0,
-                                            Math.trunc(Math.max(
-                                                entryRestoreWriteContext?.distanceFromBottom ?? 0,
-                                                refDistanceFromBottom,
-                                            )),
-                                        );
+                                        const visibleDistanceFromBottom =
+                                            entryRestoreOwner.visibleDistanceForOpenNativeEntry({
+                                                observedDistanceFromBottom: refDistanceFromBottom,
+                                                sessionId: props.sessionId,
+                                            });
+                                        if (visibleDistanceFromBottom == null) return;
                                         commitJumpToBottomDistanceForVisibility(visibleDistanceFromBottom);
                                         commitScrollPinEvent({
                                             type: 'scroll',
@@ -9484,507 +10048,264 @@ const ChatListInternal = React.memo((props: {
                                     // observations drive confirm / the single correction; any
                                     // other frame holds ownership without writing.
                                     let entryRestoreConfirmedByThisObservation = false;
-                                    if (hasOpenNativeEntryRestoreTransaction && entryRestoreTransaction) {
+                                    if (hasOpenNativeEntryRestoreTransaction) {
                                         if (isTrusted) {
                                             preemptEntryRestoreTransaction();
                                         } else {
-                                            const alignmentObservation = resolveNativeEntryRestoreAlignmentObservation({
+                                            const entryEffects = observeNativeEntryRestoreHostFacts({
                                                 contentHeight: contentH,
                                                 distanceFromBottom: refDistanceFromBottom,
+                                                layoutHeight: layoutH,
+                                                nowMs,
                                                 offsetY: y,
                                                 rawOffsetY: rawObservedOffsetY,
                                             });
-                                            if (alignmentObservation == null) {
+                                            entryRestoreConfirmedByThisObservation =
+                                                entryEffects.some((effect) => effect.type === 'native-initial-viewport-applied');
+                                            applyEntryRestoreOwnerEffects(entryEffects);
+                                            if (!entryEffects.some((effect) => effect.type === 'close-entry-ownership')) {
                                                 commitOpenEntryRestoreVisibleState();
+                                                invalidateViewportAnchorCapture();
                                                 recordNativeScrollObservation('pending');
                                                 return;
                                             }
-                                            const entryRestoreDirective = entryRestoreTransaction.onObservation(alignmentObservation, nowMs);
-                                            if (entryRestoreTransaction.isClosed()) {
-                                                entryRestoreConfirmedByThisObservation =
-                                                    entryRestoreTransaction.outcome() === 'confirmed';
-                                                finishEntryRestoreTransaction(entryRestoreTransaction);
-                                                if (entryRestoreConfirmedByThisObservation) {
-                                                    updateNativeViewportPaintObserved(true);
-                                                }
-                                            } else {
-                                                if (entryRestoreDirective.action === 'issue-correction-write') {
-                                                    issueNativeEntryRestoreCorrection({
-                                                        contentHeight: contentH,
-                                                        layoutHeight: layoutH,
-                                                    });
-                                                }
-                                                commitOpenEntryRestoreVisibleState();
-                                                recordNativeScrollObservation('pending');
-                                                return;
+                                            if (entryRestoreConfirmedByThisObservation) {
+                                                updateNativeViewportPaintObserved(true);
                                             }
                                         }
                                     }
-                                    if (Platform.OS === 'web') {
-                                        verifyWebEntryRestoreTransaction();
-                                    }
-                                    const nativePrependTransaction =
-                                        Platform.OS !== 'web' ? nativePrependTransactionRef.current : null;
                                     if (
-                                        nativePrependTransaction != null &&
-                                        nativePrependTransaction.sessionId === props.sessionId &&
-                                        !nativePrependTransaction.isClosed()
+                                        Platform.OS !== 'web' &&
+                                        nativePrependOwner.hasOpenTransaction(props.sessionId)
                                     ) {
                                         if (isTrusted) {
                                             // Trusted scrolls preempt the transaction with zero writes;
                                             // MVCP alone holds the position under the finger (LC-R #5).
-                                            nativePrependTransaction.onTrustedUserScroll();
-                                            finishNativePrependTransaction(nativePrependTransaction);
+                                            applyNativePrependOwnerEffects(nativePrependOwner.trustedScroll({
+                                                activeOwner: viewportCommandController.activeOwner(),
+                                                sessionId: props.sessionId,
+                                            }));
                                         } else {
-                                            observeNativePrependTransaction();
-                                            if (!nativePrependTransaction.isClosed()) {
+                                            observeNativePrependOwner();
+                                            if (nativePrependOwner.hasOpenTransaction(props.sessionId)) {
                                                 recordNativeScrollObservation('pending');
                                                 return;
                                             }
                                         }
                                     }
-                                    const pendingExplicitJump = pendingNativeExplicitJumpConfirmRef.current;
-                                    if (Platform.OS !== 'web' && pendingExplicitJump) {
-                                        if (pendingExplicitJump.sessionId !== props.sessionId || isTrusted) {
-                                            pendingNativeExplicitJumpConfirmRef.current = null;
-                                        } else if (refDistanceFromBottom <= pinThresholdPx) {
-                                            // Bottom reached: the explicit jump is confirmed;
-                                            // MVCP bottom maintenance owns it from here.
-                                            pendingNativeExplicitJumpConfirmRef.current = null;
-                                        } else if (contentH !== pendingExplicitJump.issuedContentHeight) {
-                                            // Plan B7: the content height churned under the explicit
-                                            // jump before the bottom was observed. Spend the ONE
-                                            // bounded re-confirm (snap) inside the explicit phase —
-                                            // never a correction loop.
-                                            pendingNativeExplicitJumpConfirmRef.current = null;
-                                            executeViewportCommand(withTranscriptViewportCommandAnimation(
-                                                resolveViewportCommand({
-                                                    type: 'jump-to-bottom',
-                                                    sessionId: props.sessionId,
-                                                }),
-                                                false,
-                                            ));
-                                        }
-                                    }
-                                    const pendingEntrySettle = pendingNativeEntrySettleConfirmRef.current;
-                                    if (Platform.OS !== 'web' && pendingEntrySettle) {
-                                        if (
-                                            pendingEntrySettle.sessionId !== props.sessionId ||
-                                            isTrusted ||
-                                            !wantsPinnedRef.current ||
-                                            bottomFollowModeStateRef.current.mode !== 'following'
-                                        ) {
-                                            pendingNativeEntrySettleConfirmRef.current = null;
-                                        } else if (refDistanceFromBottom <= pinThresholdPx) {
-                                            // Bottom-confirmed frame: refresh the event-source
-                                            // baseline (the entry bottom holds at this content
-                                            // version); the one-shot stays armed for late settle.
-                                            pendingNativeEntrySettleConfirmRef.current = {
-                                                ...pendingEntrySettle,
-                                                issuedContentHeight: contentH,
-                                            };
-                                        } else if (pendingEntrySettle.issuedContentHeight == null) {
-                                            // First observed frame after a (warm) entry: record the
-                                            // event-source baseline; only GROWTH from here can spend
-                                            // the one-shot (bogus recycled offsets carry no growth).
-                                            pendingNativeEntrySettleConfirmRef.current = {
-                                                ...pendingEntrySettle,
-                                                issuedContentHeight: contentH,
-                                            };
-                                        } else if (
-                                            pendingEntrySettle.issuedContentHeight != null &&
-                                            contentH > pendingEntrySettle.issuedContentHeight &&
-                                            (
-                                                nativeMountSettleStable ||
-                                                nativeMountSettleDeadlineReachedRef.current
-                                            )
-                                        ) {
-                                            // Plan P3: LATE content settle (after the mount window —
-                                            // the coordinator owns pins inside it) GREW the content
-                                            // and left the viewport above the bottom while still
-                                            // 'following'. Spend the ONE bounded settle re-confirm
-                                            // (mirror of B7) — never a loop. Bogus recycled offsets
-                                            // never spend it: they carry no event-source growth.
-                                            pendingNativeEntrySettleConfirmRef.current = null;
-                                            pinNativeFlashListToBottomIfMeasured({
-                                                force: true,
-                                                telemetryReason: 'mount-settle',
-                                            });
-                                        }
-                                    }
-                                    recordNativeScrollObservation(
-                                        shouldIgnorePassiveNativeScroll ? 'skipped' : 'observed',
-                                    );
-                                    const observedPendingNativeBottomPinTarget =
-                                        Platform.OS !== 'web' &&
-                                        usesNativeFlashListBottomMaintenance &&
-                                        pendingNativeMountSettleBottomPinRef.current &&
-                                        nativeBottomFollowPinTargetObserved({
-                                            lastNativePinOffset: lastNativePinOffsetRef.current,
-                                            pinThresholdPx,
-                                            visualBottomScrollOffset: refVisualBottomScrollOffset,
-                                        });
-                                    const canCompletePendingNativeBottomFollow = nativeBottomFollowCanCompletePendingPin({
-                                        mountSettleDeadlineReached: nativeMountSettleDeadlineReachedRef.current,
-                                        mountSettleStable: nativeMountSettleStable,
-                                        pendingBottomPin: pendingNativeMountSettleBottomPinRef.current,
-                                        pinTargetObserved: observedPendingNativeBottomPinTarget,
-                                    });
-                                    if (nativeBottomFollowCanApplyCompletion({
-                                        canCompletePendingPin: canCompletePendingNativeBottomFollow,
+                                    if (observeNativeConfirmation({
+                                        contentHeight: contentH,
                                         distanceFromBottom: refDistanceFromBottom,
-                                        isNative: Platform.OS !== 'web',
-                                        pinThresholdPx,
-                                        wantsPinned: wantsPinnedRef.current,
+                                        isTrusted,
+                                        mountSettleStable: nativeMountSettleStable,
                                     })) {
-                                        pendingNativeMountSettleBottomPinRef.current = false;
-                                        markNativeInitialViewportAppliedForCurrentSession({
-                                            // Plan P3: the applying frame's event content height is
-                                            // the settle-confirm baseline (event source only, E7).
-                                            entrySettleBaselineContentHeight: contentH,
-                                        });
-                                    }
-	                                    const shouldRecordPassiveNativeMovement =
-	                                        !entryRestoreConfirmedByThisObservation &&
-	                                        !isTrusted &&
-	                                        shouldRecordNativePassiveUnpinnedMovement(refDistanceFromBottom, pinThresholdPx);
-                                    if (isTrusted) {
-                                        recordNativeUserScrollIntent(nowMs);
-                                        markNativeInitialViewportAppliedForCurrentSession();
-                                    } else if (shouldIgnorePassiveNativeScroll) {
+                                        recordNativeScrollObservation('observed');
                                         return;
-                                    } else if (shouldRecordPassiveNativeMovement) {
-                                        recordNativeUserScrollIntent(nowMs);
-                                    } else if (!entryRestoreConfirmedByThisObservation) {
-                                        refreshNativeRecentPassiveUserScrollIntent(isTrusted, nowMs);
                                     }
-                                // On web the FlashList content height can be stale or collapsed (the hot/cold
-                                // split renders the tail in the footer), so the ref-based distance can read 0
-                                // even while the user is scrolled up. Prefer the live DOM scroller metrics so
-                                // the released/observed viewport intent is not discarded by a measurement zero.
-                                const distanceFromBottom = liveWebMetrics
-                                    ? getWebTranscriptDistanceFromBottom(liveWebMetrics)
-                                    : refDistanceFromBottom;
-                                const visualBottomScrollOffset = liveWebMetrics
-                                    ? resolveWebTranscriptMaxScrollTop(liveWebMetrics)
-                                    : refVisualBottomScrollOffset;
-                                mountSettleCoordinatorRef.current?.sample({
-                                    sessionId: props.sessionId,
-                                    nowMs,
-                                });
-                                let webObservedUserScrollMovement = false;
-                                if (liveWebMetrics) {
-                                    // Plan E3: genuine web scroll movement (scrollbar drag / keyboard) fires
-                                    // no wheel/pointer/touch handler and is not reliably `isTrusted`, so it is
-                                    // detected as "scroll moved without a recent programmatic write".
-                                    // Programmatic pin/restore scroll writes update
-                                    // `lastObservedWebScrollTopRef` to their own target, so they are not
-                                    // misread as user movement. A single upward frame counts only beyond the
-                                    // pin threshold (legacy behavior); SUSTAINED movement counts anywhere,
-                                    // and upward movement unpins, mirroring the wheel path.
-                                    const liveScrollTop = liveWebMetrics.scrollTop;
-                                    const previousObservedScrollTop =
-                                        lastObservedWebScrollTopRef.current
-                                        ?? (wantsPinnedRef.current ? visualBottomScrollOffset : null);
-                                    if (previousObservedScrollTop != null && liveScrollTop !== previousObservedScrollTop) {
-                                        const movementDirection: -1 | 1 = liveScrollTop < previousObservedScrollTop ? -1 : 1;
-                                        const previousStreak = webNonProgrammaticScrollStreakRef.current;
-                                        const streakCount = previousStreak?.direction === movementDirection
-                                            ? previousStreak.count + 1
-                                            : 1;
-                                        webNonProgrammaticScrollStreakRef.current = {
-                                            direction: movementDirection,
-                                            count: streakCount,
-                                        };
-                                        const beyondPinThreshold = distanceFromBottom > pinThresholdPx;
-                                        const sustainedMovement =
-                                            streakCount >= TRANSCRIPT_WEB_NON_PROGRAMMATIC_SCROLL_SUSTAIN_FRAMES;
-                                        const upwardIntent = movementDirection === -1 && (beyondPinThreshold || sustainedMovement);
-                                        const downwardIntent = movementDirection === 1 && beyondPinThreshold && sustainedMovement;
-                                        if (upwardIntent || downwardIntent) {
-                                            webObservedUserScrollMovement = true;
-                                            lastUserScrollIntentAtMsRef.current = nowMs;
-                                            if (upwardIntent) {
-                                                // Mirror the wheel path: upward movement is explicit
-                                                // intent to unpin, even within the pinned threshold.
-                                                wantsPinnedRef.current = false;
-                                                preemptEntryRestoreTransaction();
-                                            }
+                                    // On web the FlashList content height can be stale or collapsed (the hot/cold
+                                    // split renders the tail in the footer), so the ref-based distance can read 0
+                                    // even while the user is scrolled up. Prefer the live DOM scroller metrics so
+                                    // the released/observed viewport intent is not discarded by a measurement zero.
+                                    const distanceFromBottom = liveWebMetrics
+                                        ? getWebTranscriptDistanceFromBottom(liveWebMetrics)
+                                        : refDistanceFromBottom;
+                                    const visualBottomScrollOffset = liveWebMetrics
+                                        ? resolveWebTranscriptMaxScrollTop(liveWebMetrics)
+                                        : refVisualBottomScrollOffset;
+                                    if (
+                                        Platform.OS === 'web' &&
+                                        liveWebMetrics &&
+                                        promotePendingJumpSeqViewportSnapshot({
+                                            distanceFromBottom,
+                                            metrics: liveWebMetrics,
+                                            scrollOffsetPx: liveWebMetrics.scrollTop,
+                                        })
+                                    ) {
+                                        return;
+                                    }
+                                    const {
+                                        webObservedUpwardIntent,
+                                        webObservedUserScrollMovement,
+                                    } = observeWebGenuineScrollMovement({
+                                        distanceFromBottom,
+                                        isTrusted,
+                                        metrics: liveWebMetrics,
+                                        pinThresholdPx,
+                                        visualBottomScrollOffset,
+                                    });
+                                    const recentUserIntentBeforeObservation =
+                                        isTrusted || nowMs - lastUserScrollIntentAtMsRef.current < TRANSCRIPT_SCROLL_USER_INTENT_RECENT_MS;
+                                    if (
+                                        Platform.OS === 'web' &&
+                                        isTrusted &&
+                                        webObservedUserScrollMovement
+                                    ) {
+                                        lastRouteJumpProtectionClearingWebMovementAtMsRef.current = nowMs;
+                                    }
+                                    if (Platform.OS === 'web') {
+                                        if (isTrusted && webObservedUserScrollMovement) {
+                                            preemptEntryRestoreTransaction();
+                                        } else {
+                                            verifyWebEntryRestoreTransaction();
                                         }
                                     }
-                                    lastObservedWebScrollTopRef.current = liveScrollTop;
-                                }
-                                observeMountSettleMetrics({
-                                    nowMs,
-                                    distanceFromBottom,
-                                });
-                                const recentUserIntent =
-                                    isTrusted || nowMs - lastUserScrollIntentAtMsRef.current < TRANSCRIPT_SCROLL_USER_INTENT_RECENT_MS;
-                                // Plan B2 (evidence E8): passive-drift repin and the
-                                // `effectiveDistanceFromBottom = 0` ground-truth falsification are deleted.
-                                // Decisions below read the observed distance as-is.
-                                const effectiveDistanceFromBottom = distanceFromBottom;
-                                const effectiveScrollOffset = liveWebMetrics ? liveWebMetrics.scrollTop : y;
-                                // The continuous web DOM-scroll path reports the genuine top as a
-                                // near-zero `effectiveScrollOffset`. The browser rounds `scrollTop` to an
-                                // integer (dpr=1) or leaves a sub-pixel residue (Retina), so a viewport
-                                // resting at the very top is rarely EXACTLY 0 — a strict `=== 0` test
-                                // mis-fires and the genuine-top frame never re-arms. A plain 'scroll'
-                                // trigger SUSPENDS the older-pagination machine within the genuine-top band
-                                // (offsetSuspended), so a viewport parked inside the threshold (e.g. when
-                                // the top rendered row is a tall tool group whose height keeps the offset
-                                // off zero until the genuine top is reached) never re-arms after its
-                                // cooldown. Classify only the genuine-top frame as 'edge-reached' so it
-                                // satisfies the machine's existing `allowsExactEdge` (-> `exactEdgeRetryEligible`)
-                                // re-arm. Strictly gated on web/standard (non-inverted) + within the
-                                // `TRANSCRIPT_WEB_GENUINE_TOP_EPSILON_PX` band (the machine uses the SAME
-                                // epsilon) so the 800px band cannot widen and a mid-band frame cannot
-                                // re-arm (anti-burst preserved).
-                                const isGenuineWebTopFrame =
-                                    Platform.OS === 'web' &&
-                                    listOrientationRef.current !== 'inverted' &&
-                                    effectiveScrollOffset >= 0 &&
-                                    effectiveScrollOffset <= TRANSCRIPT_WEB_GENUINE_TOP_EPSILON_PX;
-                                observeOlderPaginationScroll({
-                                    offsetY: effectiveScrollOffset,
-                                    layoutHeight: layoutH,
-                                    contentHeight: contentH,
-                                    distanceFromBottom: effectiveDistanceFromBottom,
-                                    webMetrics: liveWebMetrics,
-                                    trigger: isGenuineWebTopFrame ? 'edge-reached' : 'scroll',
-                                });
-                                if (loadOlderInFlight.current) {
-                                    refreshInFlightWebPrependAnchor({
-                                        userScrolledDuringLoad: isTrusted || webObservedUserScrollMovement,
+                                    // Plan B2 (evidence E8): passive-drift repin and the
+                                    // `effectiveDistanceFromBottom = 0` ground-truth falsification are deleted.
+                                    // Decisions below read the observed distance as-is.
+                                    const effectiveDistanceFromBottom = distanceFromBottom;
+                                    const effectiveScrollOffset = liveWebMetrics ? liveWebMetrics.scrollTop : y;
+                                    const flashListPreviousScrollOffset =
+                                        lastScrollOffsetForIntentRef.current ?? (wantsPinnedRef.current ? visualBottomScrollOffset : null);
+                                    const flashListMovedAwayFromBottom =
+                                        flashListPreviousScrollOffset !== null &&
+                                        typeof effectiveScrollOffset === 'number' &&
+                                        effectiveScrollOffset < flashListPreviousScrollOffset;
+                                    const flashListMovedTowardBottom =
+                                        flashListPreviousScrollOffset !== null &&
+                                        typeof effectiveScrollOffset === 'number' &&
+                                        effectiveScrollOffset > flashListPreviousScrollOffset;
+                                    const nativeAwayGestureStillOpen =
+                                        Platform.OS !== 'web' &&
+                                        bottomFollowModeStateRef.current.dragSession?.trusted === true &&
+                                        bottomFollowModeStateRef.current.dragSession.sawAwayMovement === true;
+                                    const sessionEntryViewport = sessionEntryViewportRef.current;
+                                    const scrollObservationPlan = Platform.OS === 'web'
+                                    ? lifecycleHost.observeScroll({
+                                        distanceFromLiveTailPx: effectiveDistanceFromBottom,
+                                        hasLiveWebMetrics: liveWebMetrics != null,
+                                        isTrusted,
+                                        movedAwayFromLiveTail: webObservedUpwardIntent,
+                                        movedTowardLiveTail: flashListMovedTowardBottom,
+                                        nowMs,
+                                        pinEnabled,
+                                        pinThresholdPx,
+                                        platform: 'web',
+                                        previousScrollOffsetPx: flashListPreviousScrollOffset,
+                                        recentUserIntent: recentUserIntentBeforeObservation,
+                                        scrollOffsetPx: effectiveScrollOffset,
+                                        sessionId: props.sessionId,
+                                        wantsPinned: wantsPinnedRef.current,
+                                        webObservedUserScrollMovement,
+                                    })
+                                    : lifecycleHost.observeScroll({
+                                        bottomFollowMode: bottomFollowModeStateRef.current.mode,
+                                        configuredBottomDistanceNoiseFloorPx:
+                                            resolveTranscriptMountSettleTuning().bottomDistanceNoiseFloorPx,
+                                        contentHeightPx: contentH,
+                                        distanceFromLiveTailForReleasePx: refDistanceFromBottom,
+                                        distanceFromLiveTailPx: effectiveDistanceFromBottom,
+                                        entryRestoreConfirmedByObservation: entryRestoreConfirmedByThisObservation,
+                                        hasNativeContentMeasurement: hasNativeContentMeasurementForCurrentSession(),
+                                        hasNativeInitialViewportApplied: hasNativeInitialViewportAppliedForCurrentSession(),
+                                        hasOpenTrustedAwayGesture: nativeAwayGestureStillOpen,
+                                        hasRenderedItems: listDataRef.current.length > 0,
+                                        hasTrustedDragSession:
+                                            bottomFollowModeStateRef.current.dragSession?.trusted === true,
+                                        isLoaded: props.isLoaded,
+                                        isTrusted,
+                                        isWarmKeepAliveInstance,
+                                        lastNativePinOffset: lastNativePinOffsetRef.current,
+                                        lastUserScrollIntentAtMs: lastUserScrollIntentAtMsRef.current,
+                                        layoutHeightPx: layoutH,
+                                        movedAwayFromLiveTail: flashListMovedAwayFromBottom,
+                                        movedTowardLiveTail: flashListMovedTowardBottom,
+                                        nativeListDragActive: nativeListDragActiveRef.current,
+                                        nativeMomentumScrollActive: nativeMomentumScrollActiveRef.current,
+                                        nativeMountSettleDeadlineReached:
+                                            nativeMountSettleDeadlineReachedRef.current,
+                                        nativeMountSettleStable,
+                                        nowMs,
+                                        pendingBottomPin: pendingNativeMountSettleBottomPinRef.current,
+                                        pinEnabled,
+                                        pinThresholdPx,
+                                        platform: 'native',
+                                        previousScrollOffsetPx: flashListPreviousScrollOffset,
+                                        recentUserIntent: recentUserIntentBeforeObservation,
+                                        scrollOffsetPx: effectiveScrollOffset,
+                                        sessionEntrySessionId: sessionEntryViewport?.sessionId ?? null,
+                                        sessionEntryShouldFollowBottom:
+                                            sessionEntryViewport?.shouldFollowBottom,
+                                        sessionId: props.sessionId,
+                                        userIntentRecentMs: TRANSCRIPT_SCROLL_USER_INTENT_RECENT_MS,
+                                        usesNativeFlashListBottomMaintenance,
+                                        visualBottomScrollOffset: refVisualBottomScrollOffset,
+                                        wantsPinned: wantsPinnedRef.current,
                                     });
-                                }
-                                if (recentUserIntent && (Platform.OS !== 'web' || isTrusted)) {
-                                    retargetPendingWebPrependAnchorForUserScroll();
-                                }
-                                const flashListPreviousScrollOffset =
-                                    lastScrollOffsetForIntentRef.current ?? (wantsPinnedRef.current ? visualBottomScrollOffset : null);
-                                const flashListMovedAwayFromBottom =
-                                    flashListPreviousScrollOffset !== null &&
-                                    typeof effectiveScrollOffset === 'number' &&
-                                    effectiveScrollOffset < flashListPreviousScrollOffset;
-                                const flashListMovedTowardBottom =
-                                    flashListPreviousScrollOffset !== null &&
-                                    typeof effectiveScrollOffset === 'number' &&
-                                    effectiveScrollOffset > flashListPreviousScrollOffset;
-                                const nativeAwayGestureStillOpen =
-                                    Platform.OS !== 'web' &&
-                                    bottomFollowModeStateRef.current.dragSession?.trusted === true &&
-                                    bottomFollowModeStateRef.current.dragSession.sawAwayMovement === true;
-                                if (
-                                    nativeAwayGestureStillOpen &&
-                                    !isTrusted &&
-                                    effectiveDistanceFromBottom <= pinThresholdPx
-                                ) {
-                                    if (nativeListDragActiveRef.current) {
-                                        updateNativeBottomFollowModeFromScrollObservation({
-                                            distanceFromBottom: effectiveDistanceFromBottom,
-                                            isTrusted,
-                                            movedAwayFromBottom: flashListMovedAwayFromBottom,
-                                            movedTowardBottom: flashListMovedTowardBottom,
+                                const scrollObservationConsumed = applyLifecycleHostScrollObservationPlan(
+                                    scrollObservationPlan,
+                                    {
+                                        continueAfterEarlyEffects({
+                                            hasNativeMountSettlePassiveDriftRepinObservation,
                                             recentUserIntent,
-                                        });
-                                    }
-                                    // Bottom-follow finish: the away-gesture bail must keep read-only UI state
-                                    // honest (jump-button distance + pin badge) even while it declines to
-                                    // re-pin for the open trusted away-gesture — exactly as the precedent
-                                    // below does — otherwise the jump affordance freezes at a stale distance.
-                                    // BUT only when `effectiveDistanceFromBottom` is trustworthy: in the
-                                    // inverted model an active streaming session can glue the raw offset at 0,
-                                    // so an untrusted near-bottom frame after an away drag is STALE and must
-                                    // NOT hide the affordance (it would falsely report the user back at bottom).
-                                    // Non-inverted distance is reliable, so commit there. No `wantsPinned`
-                                    // write / mode change: release attribution stays with the away-gesture.
-                                    if (listOrientationRef.current !== 'inverted') {
-                                        lastPinOffsetForIntentRef.current = effectiveDistanceFromBottom;
-                                        commitJumpToBottomDistanceForVisibility(effectiveDistanceFromBottom);
-                                        commitScrollPinEvent({
-                                            type: 'scroll',
-                                            enabled: pinEnabled,
-                                            offsetY: effectiveDistanceFromBottom,
-                                            pinnedOffsetThresholdPx: pinThresholdPx,
-                                        });
-                                    }
+                                        }) {
+                                            mountSettleCoordinatorRef.current?.sample({
+                                                sessionId: props.sessionId,
+                                                nowMs,
+                                            });
+                                            observeMountSettleMetrics({
+                                                nowMs,
+                                                distanceFromBottom,
+                                            });
+                                            const effectiveRecentUserIntent = Platform.OS === 'web'
+                                                ? recentUserIntentBeforeObservation
+                                                : recentUserIntent;
+                                            const olderLoadTrigger =
+                                                Platform.OS === 'web' &&
+                                                typeof effectiveScrollOffset === 'number'
+                                                    ? resolveWebDomOlderLoadObservationTrigger({
+                                                        scrollTop: effectiveScrollOffset,
+                                                    })
+                                                    : 'scroll';
+                                            observeOlderPaginationScroll({
+                                                offsetY: effectiveScrollOffset,
+                                                layoutHeight: layoutH,
+                                                contentHeight: contentH,
+                                                distanceFromBottom: effectiveDistanceFromBottom,
+                                                webMetrics: liveWebMetrics,
+                                                trigger: olderLoadTrigger,
+                                            });
+                                            if (loadOlderInFlight.current) {
+                                                refreshInFlightWebPrependAnchor({
+                                                    userScrolledDuringLoad: isTrusted || webObservedUserScrollMovement,
+                                                });
+                                            }
+                                            if (
+                                                effectiveRecentUserIntent &&
+                                                (Platform.OS !== 'web' || isTrusted)
+                                            ) {
+                                                retargetPendingWebPrependAnchorForUserScroll();
+                                            }
+                                            if (
+                                                Platform.OS !== 'web' &&
+                                                hasNativeMountSettlePassiveDriftRepinObservation
+                                            ) {
+                                                applyNativeMountSettlePassiveDriftRepinObservation({
+                                                    bottomFollowMode: bottomFollowModeStateRef.current.mode,
+                                                    isTrusted,
+                                                    nowMs,
+                                                    pinThresholdPx,
+                                                    usesNativeFlashListBottomMaintenance,
+                                                    wantsPinned: wantsPinnedRef.current,
+                                                });
+                                            }
+                                        },
+                                        recordNativeScrollObservation,
+	                                    },
+	                                );
+	                                if (Platform.OS === 'web') {
+	                                    const plannedWantsPinned =
+	                                        scrollObservationPlan.state.bottomFollowState.mode === 'following';
+	                                    drainDeferredNewerMessages({
+	                                        distanceFromBottom: effectiveDistanceFromBottom,
+	                                        pinned: plannedWantsPinned && effectiveDistanceFromBottom <= pinThresholdPx,
+	                                    });
+	                                }
+	                                if (scrollObservationConsumed) {
+	                                    return;
+	                                }
+                                if (Platform.OS === 'web') {
                                     return;
                                 }
-                                const followIntent = resolveTranscriptBottomFollowIntent({
-                                    canRearmBottom:
-                                        !nativeAwayGestureStillOpen ||
-                                        (isTrusted && flashListMovedTowardBottom),
-                                    // Plan B6 trusted-gate: on native only trusted scrolls release
-                                    // follow; web keeps gesture-derived recent intent as release
-                                    // authority (wheel/pointer/streak paths own web unpinning).
-                                    // Plan B9: untrusted momentum frames inside the post-drag
-                                    // attribution window (active momentum + retained trusted drag
-                                    // session) carry the drag's release authority — height churn
-                                    // without a drag still never releases.
-                                    canRelease: Platform.OS === 'web'
-                                        ? recentUserIntent
-                                        : (
-                                            isTrusted ||
-                                            (
-                                                nativeMomentumScrollActiveRef.current &&
-                                                bottomFollowModeStateRef.current.dragSession?.trusted === true
-                                            )
-                                        ) &&
-                                            (
-                                                listOrientationRef.current !== 'inverted' ||
-                                                refDistanceFromBottom > pinThresholdPx
-                                            ),
-                                    direction: 'toward-max',
-                                    distanceFromBottom: effectiveDistanceFromBottom,
-                                    pinThresholdPx,
-                                    previousScrollOffset: flashListPreviousScrollOffset,
-                                    scrollOffset: effectiveScrollOffset,
-                                    wantsPinned: wantsPinnedRef.current,
-                                });
-                                updateNativeBottomFollowModeFromScrollObservation({
-                                    distanceFromBottom: followIntent.nextDistanceFromBottom,
-                                    isTrusted,
-                                    movedAwayFromBottom: flashListMovedAwayFromBottom,
-                                    movedTowardBottom: flashListMovedTowardBottom,
-                                    recentUserIntent,
-                                });
-                                if (
-                                    Platform.OS !== 'web' &&
-                                    !isTrusted &&
-                                    bottomFollowModeStateRef.current.mode !== 'following' &&
-                                    followIntent.isPinned &&
-                                    followIntent.wantsPinned
-                                ) {
-                                    // The mode machine only re-follows on trusted movement, but the
-                                    // viewport visibly sits at the bottom: keep read-only UI state
-                                    // (jump button, pin badge) honest without writes or mode changes.
-                                    // Plan P3: also record the observed distance so the exit-flush
-                                    // live-tail fallback sees the visible bottom truth.
-                                    lastPinOffsetForIntentRef.current = followIntent.nextDistanceFromBottom;
-                                    commitJumpToBottomDistanceForVisibility(followIntent.nextDistanceFromBottom);
-                                    commitScrollPinEvent({
-                                        type: 'scroll',
-                                        enabled: pinEnabled,
-                                        offsetY: followIntent.nextDistanceFromBottom,
-                                        pinnedOffsetThresholdPx: followIntent.effectivePinnedOffsetThresholdPx,
-                                    });
-                                    return;
-                                }
-                                if (
-                                    Platform.OS !== 'web' &&
-                                    usesNativeFlashListBottomMaintenance &&
-                                    !isTrusted &&
-                                    wantsPinnedRef.current &&
-                                    bottomFollowModeStateRef.current.mode === 'following' &&
-                                    mountSettleCoordinatorRef.current?.getSnapshot().isMountSettleActive === true &&
-                                    nowMs - lastUserScrollIntentAtMsRef.current >= TRANSCRIPT_SCROLL_USER_INTENT_AUTO_PIN_DELAY_MS
-                                ) {
-                                    // Cold-open open-flicker root fix: a structural
-                                    // `clearLayoutCacheOnUpdate` inside the mount-settle window resets
-                                    // FlashList bottom maintenance and yanks the inverted follow-bottom
-                                    // list toward the visual top. MVCP only MAINTAINS a bottom already
-                                    // reached — it never re-travels there — so the passive-drift bail
-                                    // below would wrongly leave the list yanked. While the mount window
-                                    // is still active and an untrusted frame observes the list off the
-                                    // bottom with no recent user intent, re-issue the canonical inverted
-                                    // bottom pin to catch the yank (and a known ~260ms second-source
-                                    // transient). The pin's own off-bottom guard makes a same-content
-                                    // re-pin a no-op once the bottom is reached, so this cannot loop.
-                                    const mountSettleDistanceFromBottom = readCurrentNativeDistanceFromBottom();
-                                    if (
-                                        mountSettleDistanceFromBottom != null &&
-                                        mountSettleDistanceFromBottom > pinThresholdPx
-                                    ) {
-                                        pinNativeFlashListToBottomIfMeasured({ telemetryReason: 'layout-change' });
-                                    }
-                                }
-                                if (
-                                    Platform.OS !== 'web' &&
-                                    !isTrusted &&
-                                    bottomFollowModeStateRef.current.mode === 'following' &&
-                                    followIntent.wantsPinned &&
-                                    !followIntent.isPinned
-                                ) {
-                                    // Passive height-churn drift while the mode machine still says
-                                    // 'following' (plan B1/E8): MVCP owns bottom maintenance, so a
-                                    // drift frame never surfaces released UI state, emits viewport
-                                    // changes, or schedules writes.
-                                    return;
-                                }
-                                lastPinOffsetForIntentRef.current = followIntent.nextDistanceFromBottom;
-                                lastScrollOffsetForIntentRef.current = followIntent.nextScrollOffset;
-                                wantsPinnedRef.current = followIntent.wantsPinned;
-
-                                const effectiveThresholdPx = followIntent.effectivePinnedOffsetThresholdPx;
-                                const pinned = followIntent.isPinned;
-                                isPinnedRef.current = pinned;
-                                const viewportState = {
-                                    isPinned: pinned,
-                                    offsetY: effectiveDistanceFromBottom,
-                                    shouldRestoreViewport: !wantsPinnedRef.current,
-                                };
-                                emitViewportChange(viewportState);
-                                // Plan P2: momentum frames inside the post-drag attribution window
-                                // (B9) are USER movement — they must schedule/refresh the anchor
-                                // capture so a dwell after a fling captures the reading position.
-                                const momentumCarriesUserAttribution =
-                                    nativeMomentumScrollActiveRef.current &&
-                                    bottomFollowModeStateRef.current.dragSession?.trusted === true;
-                                scheduleViewportAnchorCapture(viewportState, {
-                                    suppressAnchorCapture:
-                                        shouldRecordPassiveNativeMovement && !momentumCarriesUserAttribution,
-                                });
-                                commitJumpToBottomDistanceForVisibility(effectiveDistanceFromBottom);
-                                commitScrollPinEvent({
-                                    type: 'scroll',
-                                    enabled: pinEnabled,
-                                    offsetY: effectiveDistanceFromBottom,
-                                    pinnedOffsetThresholdPx: effectiveThresholdPx,
-                                });
-
-                                const nativeFollowBottomObservationCanReleasePaint =
-                                    refDistanceFromBottom <= effectiveThresholdPx &&
-                                    (
-                                        !usesNativeFlashListBottomMaintenance ||
-                                        nativeMountSettleStable ||
-                                        nativeMountSettleDeadlineReachedRef.current ||
-                                        (
-                                            isWarmKeepAliveInstance &&
-                                            sessionEntryViewportRef.current?.shouldFollowBottom !== false
-                                        )
-                                    );
-                                const nativeAcceptedViewportPaintObservation =
-                                    Platform.OS !== 'web' &&
-                                    props.isLoaded &&
-                                    listDataRef.current.length > 0 &&
-                                    !isTrusted &&
-                                    (
-                                        nativeFollowBottomObservationCanReleasePaint ||
-                                        entryRestoreConfirmedByThisObservation ||
-                                        (!wantsPinnedRef.current && refDistanceFromBottom > effectiveThresholdPx)
-                                    );
-                                if (nativeAcceptedViewportPaintObservation) {
-                                    updateNativeViewportPaintObserved(true);
-                                    if (firstPaintTelemetryRef.current?.recorded === false) {
-                                        recordFirstListPaint();
-                                    }
-                                    if (!showFirstPaintPlaceholder) {
-                                        const paintMetrics = resolveEffectiveListPaintMetrics() ?? {
-                                            contentHeight: Math.max(0, Math.trunc(contentH)),
-                                            distanceFromBottom: Math.max(0, Math.trunc(refDistanceFromBottom)),
-                                            layoutHeight: Math.max(0, Math.trunc(layoutH)),
-                                        };
-                                        recordStablePaintTelemetry(paintMetrics, {
-                                            nativeViewportObserved: true,
-                                        });
-                                    }
-                                }
-
-                                drainDeferredNewerMessages({
-                                    distanceFromBottom: effectiveDistanceFromBottom,
-                                    pinned,
-                                });
                             }}
                             onScrollBeginDrag={() => {
                                 recordNativeListDragEscapeIntent();
@@ -9992,53 +10313,43 @@ const ChatListInternal = React.memo((props: {
                             onScrollEndDrag={recordNativeListDragEndIntent}
                             onMomentumScrollBegin={recordNativeMomentumScrollBeginIntent}
                             onMomentumScrollEnd={recordNativeMomentumScrollEndSettle}
-                            scrollEventThrottle={
-                                Platform.OS === 'web'
-                                    ? TRANSCRIPT_WEB_FLASH_LIST_SCROLL_EVENT_THROTTLE_MS
-                                    : TRANSCRIPT_NATIVE_SCROLL_EVENT_THROTTLE_MS
-                            }
-                            keyboardShouldPersistTaps="handled"
-                            keyboardDismissMode="none"
                             renderItem={renderItem}
                             onStartReachedThreshold={flashListStartReachedThreshold}
                             onStartReached={() => {
-                                observePaginationEdgeReachedNudge(listOrientation === 'inverted' ? 'newer' : 'older');
+                                observePaginationEdgeReachedNudge(resolveViewportReachedEdge('start'));
                             }}
                             onEndReachedThreshold={flashListStartReachedThreshold}
                             onEndReached={() => {
-                                observePaginationEdgeReachedNudge(listOrientation === 'inverted' ? 'older' : 'newer');
+                                observePaginationEdgeReachedNudge(resolveViewportReachedEdge('end'));
                             }}
                             onScrollToIndexFailed={(info: { index: number; averageItemLength: number }) => {
                                       if (handleNativeRestoreIndexFailure(info.index)) return;
                                       if (props.jumpToSeq == null) return;
-	                                  // The averageItemLength estimate approximates a RAW offset of the
-	                                  // rendered index; commands carry CANONICAL offsets (N3.2 seam).
-	                                  const rawEstimatedOffset = Math.max(0, Math.trunc(info.averageItemLength * info.index));
-	                                  const offset = toCanonicalScrollOffset({
-	                                      offsetY: rawEstimatedOffset,
-	                                      contentHeight: listContentHeightRef.current,
-	                                      layoutHeight: listLayoutHeightRef.current,
-	                                      orientation: listOrientationRef.current,
-	                                  });
 	                                      executeViewportCommand(resolveViewportCommand({
-	                                      type: 'scroll-offset',
+	                                      type: 'recover-jump-to-seq',
 	                                      sessionId: props.sessionId,
-	                                      reason: 'jump-to-seq',
-	                                      mode: 'jump-to-seq',
-	                                  offsetY: offset,
+	                                  failedRenderedIndex: info.index,
+	                                  averageItemLengthPx: info.averageItemLength,
 	                                  animated: true,
 	                              }));
 	                          }}
-                      ListHeaderComponent={orientedFlashListEdgeSlots.listHeaderNode}
-                      ListFooterComponent={orientedFlashListEdgeSlots.listFooterNode}
+                      header={mainTranscriptListShellEdgeSlots.listHeaderNode}
+                      footer={mainTranscriptListShellEdgeSlots.listFooterNode}
+                      olderLoadOverlay={mainTranscriptListOlderLoadOverlay}
+                      catchUpOverlay={mainTranscriptListCatchUpOverlay}
                   />
-                  </LayoutCommitObserver>
-              )}
+              <TranscriptNavigationRail
+                  currentAnchorId={transcriptNavigationRailVisibilitySnapshot.currentAnchorId}
+                  entries={props.transcriptNavigationEntries}
+                  onJumpToEntry={handleTranscriptNavigationRailJump}
+                  paneHeightPx={listLayoutHeight}
+                  paneWidthPx={listLayoutWidthPx}
+                  transcriptContentWidthPx={Math.min(listLayoutWidthPx, transcriptContentMaxWidth)}
+                  transcriptMaxWidthPx={transcriptContentMaxWidth}
+                  visibleAnchorIds={transcriptNavigationRailVisibilitySnapshot.visibleAnchorIds}
+              />
               {showFirstPaintPlaceholder ? (
                   <TranscriptFirstPaintPlaceholder reducedMotion={reducedMotionPreferred} />
-              ) : null}
-              {(olderPagination.isLoadingOlder || isLoadingOlder) && !showFirstPaintPlaceholder ? (
-                  <OlderLoadProgressOverlay />
               ) : null}
               {jumpToBottomAffordance.isVisible ? (
                   <ComposerKeyboardFloatingInset
@@ -10054,11 +10365,6 @@ const ChatListInternal = React.memo((props: {
                     />
                 </ComposerKeyboardFloatingInset>
             ) : null}
-              <CatchUpProgressOverlay
-                  isCatchingUp={showCatchUpOverlay}
-                  bottomInset={composerInsetHeight}
-                  spinnerDelayMs={sync.getSyncTuning().transcriptOlderLoadSpinnerDelayMs}
-              />
             </View>
         </TranscriptMotionProvider>
     )
