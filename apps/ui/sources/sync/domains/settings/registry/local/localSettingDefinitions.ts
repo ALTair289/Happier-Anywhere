@@ -111,6 +111,20 @@ export const LOCAL_SETTING_DEFINITIONS = defineSettingDefinitions({
             serializeCurrent: (value: readonly unknown[]) => value.length,
         },
     },
+    collapsedGroupKeysV1: {
+        schema: z.record(z.string(), z.boolean()).default({}),
+        default: {},
+        description: 'Collapsed state for session list groups on this device',
+        storageScope: 'local',
+        analytics: {
+            trackCurrentState: true,
+            trackChanges: true,
+            valueKind: 'count',
+            privacy: 'count_only',
+            identityScope: 'device_user',
+            serializeCurrent: objectKeyCount,
+        },
+    },
     sessionListFocusedFolderV1: {
         schema: SessionListFocusedFolderV1Schema,
         default: null,
@@ -480,7 +494,7 @@ export const LOCAL_SETTING_DEFINITIONS = defineSettingDefinitions({
         analytics: { trackCurrentState: true, trackChanges: true, valueKind: 'enum', privacy: 'safe', identityScope: 'device_user' },
     },
     sessionLastMobileSurfaceBySessionId: {
-        schema: z.record(z.string(), z.enum(['chat', 'browse', 'git', 'tabs', 'terminal'])).default({}),
+        schema: z.record(z.string(), z.enum(['chat', 'browse', 'git', 'navigation', 'tabs', 'terminal'])).default({}),
         default: {},
         description: 'Last active mobile session surface by server-scoped session key, with legacy bare session ids accepted for compatibility',
         storageScope: 'local',

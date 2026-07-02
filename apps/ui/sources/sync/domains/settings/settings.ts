@@ -7,7 +7,11 @@ import {
 } from '@/agents/providers/registry/providerSettingArtifacts';
 import { z } from 'zod';
 import { ACCOUNT_SETTING_ARTIFACTS } from './registry/account/accountSettingArtifacts';
-import { stripDeprecatedSessionOnlyKeys } from './parse/accountSettingsLegacyCleanup';
+import {
+    stripDeprecatedSessionOnlyKeys,
+    stripMigratedSessionOrganizationSettings,
+} from './parse/accountSettingsLegacyCleanup';
+import type { SessionFoldersV1 } from '@/sync/domains/session/folders';
 
 // NOTE: We intentionally do NOT support legacy provider config objects (e.g. `openaiConfig`).
 // Profiles must use `environmentVariables` + `envVarRequirements` only.
@@ -61,19 +65,29 @@ type SettingsMetadata = Readonly<{
     schemaVersion: number;
 }>;
 
+type LegacySessionOrganizationSettings = Partial<{
+    pinnedSessionKeysV1: string[];
+    workspaceLabelsV1: Record<string, string>;
+    collapsedGroupKeysV1: Record<string, boolean>;
+    sessionTagsV1: Record<string, string[]>;
+    sessionListGroupOrderV1: Record<string, string[]>;
+    sessionWorkspaceOrderV1: Record<string, string[]>;
+    sessionFoldersV1: SessionFoldersV1;
+}>;
+
 export type KnownSettings = SettingsMetadata & typeof ACCOUNT_SETTING_ARTIFACTS.defaults;
-export type Settings = KnownSettings & typeof PROVIDER_SETTINGS_DEFAULTS;
+export type Settings = KnownSettings & typeof PROVIDER_SETTINGS_DEFAULTS & LegacySessionOrganizationSettings;
 export { ACCOUNT_SETTING_ARTIFACTS };
 
 //
 // Defaults
 //
 
-export const settingsDefaults: Settings = {
+export const settingsDefaults: Settings = stripMigratedSessionOrganizationSettings({
     schemaVersion: SUPPORTED_SCHEMA_VERSION,
     ...ACCOUNT_SETTING_ARTIFACTS.defaults,
     ...PROVIDER_SETTINGS_DEFAULTS,
-};
+});
 Object.freeze(settingsDefaults);
 
 //
@@ -86,7 +100,9 @@ export function settingsParse(settings: unknown): Settings {
         schema: SettingsSchema,
         defaults: settingsDefaults as Record<string, unknown>,
         supportedSchemaVersion: SUPPORTED_SCHEMA_VERSION,
-        pruneResult: (nextSettings) => pruneSecretBindings(nextSettings as Settings) as Record<string, unknown>,
+        pruneResult: (nextSettings) => pruneSecretBindings(
+            stripMigratedSessionOrganizationSettings(nextSettings as Record<string, unknown>) as Settings,
+        ) as Record<string, unknown>,
         debugEnabled: isSettingsSyncDebugEnabled(),
         isDev: typeof __DEV__ !== 'undefined' && __DEV__,
     }) as Settings;
@@ -102,7 +118,9 @@ export function applySettings(settings: Settings, delta: Partial<Settings>): Set
     const result = { ...settings, ...delta };
 
     // Hard cutover: remove deprecated session-only settings keys even if they exist in the input.
-    const cleanedResult = stripDeprecatedSessionOnlyKeys(result as Record<string, unknown>);
+    const cleanedResult = stripMigratedSessionOrganizationSettings(
+        stripDeprecatedSessionOnlyKeys(result as Record<string, unknown>),
+    );
 
     // Fill in any missing fields with defaults
     const defaultsRecord = settingsDefaults as Record<string, unknown>;

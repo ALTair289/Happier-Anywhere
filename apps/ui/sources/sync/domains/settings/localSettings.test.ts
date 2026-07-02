@@ -29,6 +29,7 @@ describe('localSettingsParse', () => {
         expect(parsed.localNotificationsShowPendingPermissionRequests).toBe(true);
         expect(parsed.localNotificationsShowPendingUserActionRequests).toBe(true);
         expect(parsed.localNotificationsForegroundBehavior).toBe('full');
+        expect(parsed.collapsedGroupKeysV1).toEqual({});
         expect(typeof (parsed as any).sidebarWidthPx).toBe('number');
         expect(typeof (parsed as any).sidebarWidthBasisPx).toBe('number');
         expect((parsed as any).bottomPaneHeightPx).toBe(320);
@@ -50,6 +51,20 @@ describe('localSettingsParse', () => {
         });
 
         expect(applied.brandHeroSeenAt).toBe(1_789_000_000_000);
+    });
+
+    it('keeps session list collapsed groups as local-only UI state', () => {
+        const parsed = localSettingsParse({
+            collapsedGroupKeysV1: {
+                'server-a:project:/repo': true,
+                'server-a:folder:planning': false,
+            },
+        });
+
+        expect(parsed.collapsedGroupKeysV1).toEqual({
+            'server-a:project:/repo': true,
+            'server-a:folder:planning': false,
+        });
     });
 
     it('falls back to null for malformed mobile brand hero dismissal timestamps', () => {
