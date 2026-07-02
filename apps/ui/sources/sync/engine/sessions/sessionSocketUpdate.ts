@@ -112,6 +112,15 @@ type HandleSessionMessageSocketUpdateParams = {
         updateType: 'new-message' | 'message-updated';
     }>) => boolean;
     fetchSessions: () => void;
+    /**
+     * Narrow alternative to `fetchSessions` for projection-only routing when a
+     * durable message cannot be projected locally (no extracted
+     * attentionImpact on encrypted content, or the session shell is unknown):
+     * refresh just that session's shell. Current servers always attach
+     * `attentionImpact` to message fan-outs, so this is a legacy-server
+     * fallback path. When absent, the full `fetchSessions()` fallback is used.
+     */
+    requestSessionShellRefresh?: (sessionId: string) => void;
     applyMessages: (sessionId: string, messages: NormalizedMessage[]) => void;
     enqueueMessages?: (sessionId: string, messages: NormalizedMessage[]) => void;
     onNormalizedMessagesApplied?: (sessionId: string, messages: NormalizedMessage[]) => void;
@@ -200,9 +209,18 @@ function applyProjectionOnlySessionPatch(params: Readonly<{
     applySessions: HandleSessionMessageSocketUpdateParams['applySessions'];
     applyCacheOnlySessionProjectionPatch?: HandleSessionMessageSocketUpdateParams['applyCacheOnlySessionProjectionPatch'];
     fetchSessions: () => void;
+    requestSessionShellRefresh?: (sessionId: string) => void;
 }>): void {
-    if (storedSessionMessageAttentionImpactOrNull(params.rawMessage) === null) {
+    const refreshSessionShell = () => {
+        if (params.requestSessionShellRefresh) {
+            params.requestSessionShellRefresh(params.sessionId);
+            return;
+        }
         params.fetchSessions();
+    };
+
+    if (storedSessionMessageAttentionImpactOrNull(params.rawMessage) === null) {
+        refreshSessionShell();
         return;
     }
 
@@ -216,7 +234,7 @@ function applyProjectionOnlySessionPatch(params: Readonly<{
         return;
     }
     if (!params.session) {
-        params.fetchSessions();
+        refreshSessionShell();
         return;
     }
     const patch = buildMessageSessionProjectionPatch({
@@ -409,6 +427,7 @@ async function handleSessionMessageSocketUpdate(params: HandleSessionMessageSock
             applySessions,
             applyCacheOnlySessionProjectionPatch: params.applyCacheOnlySessionProjectionPatch,
             fetchSessions,
+            requestSessionShellRefresh: params.requestSessionShellRefresh,
         });
         if (normalizedMessageSeq !== null) {
             params.markSessionKnownRemoteSeq?.(sessionId, normalizedMessageSeq);
@@ -432,6 +451,7 @@ async function handleSessionMessageSocketUpdate(params: HandleSessionMessageSock
             applySessions,
             applyCacheOnlySessionProjectionPatch: params.applyCacheOnlySessionProjectionPatch,
             fetchSessions,
+            requestSessionShellRefresh: params.requestSessionShellRefresh,
         });
         if (normalizedMessageSeq !== null) {
             params.markSessionKnownRemoteSeq?.(sessionId, normalizedMessageSeq);

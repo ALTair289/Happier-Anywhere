@@ -539,14 +539,23 @@ describe('fetchAndApplyTargetWindowMessages', () => {
     it('activates target-window mode for an inactive older-side fetch even when direction is older', async () => {
         const target = buildEncryptedApiMessage({ id: 'target', seq: 100 });
         const older = buildEncryptedApiMessage({ id: 'older', seq: 99 });
-        const request = vi.fn(async () => new Response(
-            JSON.stringify({
-                messages: [target, older],
-                hasMore: true,
-                nextBeforeSeq: 99,
-            }),
-            { status: 200, headers: { 'Content-Type': 'application/json' } },
-        ));
+        const request = vi.fn(async (path: string) => {
+            const url = new URL(path, 'https://sync.test');
+            return new Response(
+                JSON.stringify(url.searchParams.has('afterSeq')
+                    ? {
+                        messages: [],
+                        hasMore: false,
+                        nextAfterSeq: null,
+                    }
+                    : {
+                        messages: [target, older],
+                        hasMore: true,
+                        nextBeforeSeq: 99,
+                    }),
+                { status: 200, headers: { 'Content-Type': 'application/json' } },
+            );
+        });
         let windowState = createInactiveSessionMessagesWindowState();
 
         const result = await fetchAndApplyTargetWindowMessages({
@@ -568,15 +577,17 @@ describe('fetchAndApplyTargetWindowMessages', () => {
             log: { log: () => {} },
         });
 
-        const url = readRequestUrl(request);
+        expect(request).toHaveBeenCalledTimes(2);
+        const url = readRequestUrl(request, 0);
         expect(url.searchParams.get('beforeSeq')).toBe('101');
         expect(url.searchParams.has('afterSeq')).toBe(false);
+        expect(readRequestUrl(request, 1).searchParams.get('afterSeq')).toBe('100');
         expect(result).toMatchObject({
             status: 'loaded',
             olderCursor: 99,
             newerCursor: 100,
             hasMoreOlder: true,
-            hasMoreNewer: null,
+            hasMoreNewer: false,
         });
         expect(windowState).toMatchObject({
             isWindowMode: true,
@@ -587,21 +598,31 @@ describe('fetchAndApplyTargetWindowMessages', () => {
             olderCursor: 99,
             newerCursor: 100,
             hasMoreOlder: true,
-            hasMoreNewer: null,
+            hasMoreNewer: false,
         });
     });
 
-    it('activates target-window mode for an inactive newer-side fetch using newer-side cursors', async () => {
+    it('activates target-window mode for an inactive newer-side fetch with initial target context', async () => {
+        const target = buildEncryptedApiMessage({ id: 'target', seq: 100 });
         const newerOne = buildEncryptedApiMessage({ id: 'newer-101', seq: 101 });
         const newerTwo = buildEncryptedApiMessage({ id: 'newer-102', seq: 102 });
-        const request = vi.fn(async () => new Response(
-            JSON.stringify({
-                messages: [newerOne, newerTwo],
-                hasMore: true,
-                nextAfterSeq: 102,
-            }),
-            { status: 200, headers: { 'Content-Type': 'application/json' } },
-        ));
+        const request = vi.fn(async (path: string) => {
+            const url = new URL(path, 'https://sync.test');
+            return new Response(
+                JSON.stringify(url.searchParams.has('afterSeq')
+                    ? {
+                        messages: [newerOne, newerTwo],
+                        hasMore: true,
+                        nextAfterSeq: 102,
+                    }
+                    : {
+                        messages: [target],
+                        hasMore: false,
+                        nextBeforeSeq: null,
+                    }),
+                { status: 200, headers: { 'Content-Type': 'application/json' } },
+            );
+        });
         let windowState = createInactiveSessionMessagesWindowState();
 
         const result = await fetchAndApplyTargetWindowMessages({
@@ -624,15 +645,19 @@ describe('fetchAndApplyTargetWindowMessages', () => {
             log: { log: () => {} },
         });
 
-        const url = readRequestUrl(request);
-        expect(url.searchParams.get('afterSeq')).toBe('100');
-        expect(url.searchParams.has('beforeSeq')).toBe(false);
+        expect(request).toHaveBeenCalledTimes(2);
+        const url = readRequestUrl(request, 0);
+        expect(url.searchParams.get('beforeSeq')).toBe('101');
+        expect(url.searchParams.has('afterSeq')).toBe(false);
+        expect(readRequestUrl(request, 1).searchParams.get('afterSeq')).toBe('100');
         expect(result).toMatchObject({
             status: 'loaded',
             targetSeq: 100,
-            olderCursor: 100,
+            rawSeqs: [100, 101, 102],
+            appliedSeqs: [100, 101, 102],
+            olderCursor: null,
             newerCursor: 102,
-            hasMoreOlder: null,
+            hasMoreOlder: false,
             hasMoreNewer: true,
         });
         expect(windowState).toMatchObject({
@@ -641,9 +666,9 @@ describe('fetchAndApplyTargetWindowMessages', () => {
             targetSeq: 100,
             windowMinSeq: 100,
             windowMaxSeq: 102,
-            olderCursor: 100,
+            olderCursor: null,
             newerCursor: 102,
-            hasMoreOlder: null,
+            hasMoreOlder: false,
             hasMoreNewer: true,
         });
     });
@@ -1013,16 +1038,102 @@ describe('fetchAndApplyTargetWindowMessages', () => {
     });
 });
 describe('F1: cursor seed guards (wrong-window cursor isolation)', () => {
+    it('uses initial dual-page materialization for a fresh newer-direction window so the target row is included', async () => {
+        const targetB = buildEncryptedApiMessage({ id: 'target-b', seq: 200 });
+        const newerB = buildEncryptedApiMessage({ id: 'newer-b', seq: 201 });
+        const request = vi.fn(async (path: string) => {
+            const url = new URL(path, 'https://sync.test');
+            if (url.searchParams.get('beforeSeq') === '201') {
+                return new Response(
+                    JSON.stringify({ messages: [targetB], hasMore: false, nextBeforeSeq: null }),
+                    { status: 200, headers: { 'Content-Type': 'application/json' } },
+                );
+            }
+            if (url.searchParams.get('afterSeq') === '200') {
+                return new Response(
+                    JSON.stringify({ messages: [newerB], hasMore: true, nextAfterSeq: 201 }),
+                    { status: 200, headers: { 'Content-Type': 'application/json' } },
+                );
+            }
+            throw new Error(`unexpected fresh-window request ${path}`);
+        });
+        let windowState: SessionMessagesWindowState = activateSessionMessagesWindow(
+            createInactiveSessionMessagesWindowState(),
+            {
+                windowId: 'window-A',
+                targetSeq: 30,
+                windowMinSeq: 28,
+                windowMaxSeq: 35,
+                olderCursor: 28,
+                newerCursor: 35,
+                hasMoreOlder: false,
+                hasMoreNewer: true,
+                activatedAtMs: 1000,
+            },
+        );
+
+        const result = await fetchAndApplyTargetWindowMessages({
+            sessionId: 's-f1',
+            windowId: 'window-B',
+            target: { kind: 'seq', seq: 200 },
+            direction: 'newer',
+            limit: 1,
+            scope: 'main',
+            getSessionEncryption: () => ({ decryptMessages: vi.fn(async (messages: ApiMessage[]) => messages.map(buildTextContent)) }),
+            request,
+            sessionReceivedMessages: new Map<string, Map<string, number>>(),
+            applyMessages: vi.fn(),
+            getWindowState: () => windowState,
+            setWindowState: (next: SessionMessagesWindowState) => { windowState = next; },
+            now: () => 12_345,
+            log: { log: () => {} },
+        });
+
+        expect(request).toHaveBeenCalledTimes(2);
+        expect(readRequestUrl(request, 0).searchParams.get('beforeSeq')).toBe('201');
+        expect(readRequestUrl(request, 1).searchParams.get('afterSeq')).toBe('200');
+        expect(result).toMatchObject({
+            status: 'loaded',
+            windowId: 'window-B',
+            targetSeq: 200,
+            targetPresent: true,
+            rawSeqs: [200, 201],
+            appliedSeqs: [200, 201],
+            olderCursor: null,
+            newerCursor: 201,
+            hasMoreOlder: false,
+            hasMoreNewer: true,
+        });
+        expect(windowState).toMatchObject({
+            isWindowMode: true,
+            windowId: 'window-B',
+            targetSeq: 200,
+            windowMinSeq: 200,
+            windowMaxSeq: 201,
+            olderCursor: null,
+            newerCursor: 201,
+            hasMoreOlder: false,
+            hasMoreNewer: true,
+        });
+    });
+
     it('derives beforeSeq from targetSeq when window A is active but jump targets window B (direction older)', async () => {
         // F1 RED: window A currently active with olderCursor=50.
         // Jump to window B (different windowId) with direction 'older' must use
-        // beforeSeq = targetSeq(B) + 1 = 201, NOT A's olderCursor=50.
+        // beforeSeq = targetSeq(B) + 1 = 201, NOT A's olderCursor=50, then use
+        // the fresh-window newer-side page for context.
         const targetB = buildEncryptedApiMessage({ id: 'target-b', seq: 200 });
         const olderB = buildEncryptedApiMessage({ id: 'older-b', seq: 199 });
-        const request = vi.fn(async () => new Response(
-            JSON.stringify({ messages: [targetB, olderB], hasMore: false, nextBeforeSeq: null }),
-            { status: 200, headers: { 'Content-Type': 'application/json' } },
-        ));
+        const newerB = buildEncryptedApiMessage({ id: 'newer-b', seq: 201 });
+        const request = vi.fn(async (path: string) => {
+            const url = new URL(path, 'https://sync.test');
+            return new Response(
+                JSON.stringify(url.searchParams.has('afterSeq')
+                    ? { messages: [newerB], hasMore: false, nextAfterSeq: 201 }
+                    : { messages: [targetB, olderB], hasMore: false, nextBeforeSeq: null }),
+                { status: 200, headers: { 'Content-Type': 'application/json' } },
+            );
+        });
 
         // Window A is currently active with olderCursor=50. Must include activatedAtMs.
         let windowState: SessionMessagesWindowState = activateSessionMessagesWindow(
@@ -1043,7 +1154,7 @@ describe('F1: cursor seed guards (wrong-window cursor isolation)', () => {
         expect(windowState.isWindowMode).toBe(true);
         expect((windowState as { olderCursor?: number }).olderCursor).toBe(50);
 
-        await fetchAndApplyTargetWindowMessages({
+        const result = await fetchAndApplyTargetWindowMessages({
             sessionId: 's-f1',
             windowId: 'window-B',
             target: { kind: 'seq', seq: 200 },
@@ -1060,14 +1171,26 @@ describe('F1: cursor seed guards (wrong-window cursor isolation)', () => {
             log: { log: () => {} },
         });
 
-        const url = readRequestUrl(request);
+        expect(request).toHaveBeenCalledTimes(2);
+        const url = readRequestUrl(request, 0);
         // Must use B's targetSeq-derived beforeSeq (200 + 1 = 201), NOT window A's olderCursor (50)
         expect(url.searchParams.get('beforeSeq')).toBe('201');
         expect(url.searchParams.has('afterSeq')).toBe(false);
+        expect(readRequestUrl(request, 1).searchParams.get('afterSeq')).toBe('200');
+        expect(result).toMatchObject({
+            status: 'loaded',
+            rawSeqs: [200, 199, 201],
+            olderCursor: null,
+            newerCursor: 201,
+            hasMoreOlder: false,
+            hasMoreNewer: false,
+        });
         expect(windowState).toMatchObject({
             isWindowMode: true,
             windowId: 'window-B',
             targetSeq: 200,
+            windowMinSeq: 199,
+            windowMaxSeq: 201,
         });
     });
 });

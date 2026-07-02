@@ -857,6 +857,51 @@ describe('handleNewMessageSocketUpdate', () => {
         }));
     });
 
+    it('requests a targeted session shell refresh instead of a full session-list refetch for hidden messages without attention metadata', async () => {
+        const requestSessionShellRefresh = vi.fn();
+        const decryptMessage = vi.fn();
+        const { params, fetchSessions, applyMessages, applySessions } = buildHarness({
+            updateData: buildUpdate({ sid: 's1', messageId: 'm2', messageSeq: 2 }),
+            getSession: () => ({
+                ...buildSession('s1'),
+                latestTurnStatus: 'in_progress',
+                latestTurnStatusObservedAt: 900,
+            }),
+            getSessionEncryption: () => ({ decryptMessage }),
+            isSessionActivelyViewed: () => false,
+            isSessionFullContentConsumerActive: () => false,
+            realtimeProjectionMode: 'enabled',
+            requestSessionShellRefresh,
+        });
+
+        await handleNewMessageSocketUpdate(params);
+
+        expect(requestSessionShellRefresh).toHaveBeenCalledTimes(1);
+        expect(requestSessionShellRefresh).toHaveBeenCalledWith('s1');
+        expect(fetchSessions).not.toHaveBeenCalled();
+        expect(decryptMessage).not.toHaveBeenCalled();
+        expect(applyMessages).not.toHaveBeenCalled();
+        expect(applySessions).not.toHaveBeenCalled();
+    });
+
+    it('falls back to a full session-list refetch for attention-less hidden messages when no targeted refresh is provided', async () => {
+        const { params, fetchSessions } = buildHarness({
+            updateData: buildUpdate({ sid: 's1', messageId: 'm2', messageSeq: 2 }),
+            getSession: () => ({
+                ...buildSession('s1'),
+                latestTurnStatus: 'in_progress',
+                latestTurnStatusObservedAt: 900,
+            }),
+            isSessionActivelyViewed: () => false,
+            isSessionFullContentConsumerActive: () => false,
+            realtimeProjectionMode: 'enabled',
+        });
+
+        await handleNewMessageSocketUpdate(params);
+
+        expect(fetchSessions).toHaveBeenCalledTimes(1);
+    });
+
     it('can coalesce socket message applies by passing a coalescer enqueue function', async () => {
         const applied: Array<{ sessionId: string; ids: string[] }> = [];
         const applyMessages = vi.fn((sessionId: string, messages: NormalizedMessage[]) => {

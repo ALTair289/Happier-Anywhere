@@ -4,25 +4,38 @@ import { nowServerMs } from '@/sync/runtime/time';
 import { RawRecordSchema, type RawRecord } from '@/sync/typesRaw';
 import { randomUUID } from '@/platform/randomUUID';
 import type { DecryptedArtifact } from '@/sync/domains/artifacts/artifactTypes';
-import type { DiscardedPendingMessage, PendingMessage } from '@/sync/domains/state/storageTypes';
+import type {
+    DiscardedPendingMessage,
+    PendingDeliveryStatus,
+    PendingMessage,
+} from '@/sync/domains/state/storageTypes';
 import { getAgentCore, resolveAgentIdFromFlavor } from '@/agents/catalog/catalog';
 import { resolveSentFrom } from '@/sync/domains/messages/sentFrom';
 import { buildSendMessageMeta } from '@/sync/domains/messages/buildSendMessageMeta';
 import { throwAuthenticationResponseErrorIfNeeded } from '@/sync/runtime/connectivity/authErrors';
-import { SessionStoredMessageContentSchema, type SessionStoredMessageContent } from '@happier-dev/protocol';
+import { isTransientConnectivityError } from '@/sync/runtime/connectivity/transientConnectivityErrors';
+import {
+    normalizePendingDeliveryBlockedReason,
+    SessionStoredMessageContentSchema,
+    type PendingDeliveryBlockedReason,
+    type SessionStoredMessageContent,
+} from '@happier-dev/protocol';
 import { t } from '@/text';
 
-type PendingStatus = 'queued' | 'discarded';
+type PendingStatus = 'queued' | 'delivering' | 'blocked' | 'discarded' | 'unknown';
 
 type PendingRow = {
     localId: string;
     content: SessionStoredMessageContent;
     status: PendingStatus;
+    statusRaw: string;
+    deliveryStateRaw: string | null;
     position: number;
     createdAt: number;
     updatedAt: number;
     discardedAt: number | null;
     discardedReason: string | null;
+    deliveryBlockedReason: string | null;
     authorAccountId: string | null;
 };
 
@@ -51,18 +64,34 @@ function parsePendingRows(raw: unknown): PendingRow[] | null {
         const localId = item.localId;
         const content = item.content;
         const status = item.status;
+        const deliveryState = item.deliveryState;
         const position = item.position;
         const createdAt = item.createdAt;
         const updatedAt = item.updatedAt;
         const discardedAt = item.discardedAt;
         const discardedReason = item.discardedReason;
+        const deliveryBlockedReason = item.deliveryBlockedReason;
         const authorAccountId = item.authorAccountId;
 
         if (typeof localId !== 'string' || localId.length === 0) continue;
         if (!isPlainObject(content)) continue;
         const contentParsed = SessionStoredMessageContentSchema.safeParse(content);
         if (!contentParsed.success) continue;
-        if (status !== 'queued' && status !== 'discarded') continue;
+        const statusRaw = typeof status === 'string' && status.length > 0 ? status : 'unknown';
+        const legacyStatus: PendingStatus =
+            statusRaw === 'queued' || statusRaw === 'delivering' || statusRaw === 'blocked' || statusRaw === 'discarded'
+                ? statusRaw
+                : 'unknown';
+        const deliveryStateRaw = typeof deliveryState === 'string' && deliveryState.length > 0
+            ? deliveryState
+            : null;
+        const parsedStatus: PendingStatus = legacyStatus !== 'discarded' && deliveryStateRaw
+            ? (
+                deliveryStateRaw === 'queued' || deliveryStateRaw === 'delivering' || deliveryStateRaw === 'blocked'
+                    ? deliveryStateRaw
+                    : 'unknown'
+            )
+            : legacyStatus;
         if (typeof position !== 'number' || !Number.isFinite(position)) continue;
         if (typeof createdAt !== 'number' || !Number.isFinite(createdAt)) continue;
         if (typeof updatedAt !== 'number' || !Number.isFinite(updatedAt)) continue;
@@ -70,16 +99,38 @@ function parsePendingRows(raw: unknown): PendingRow[] | null {
         out.push({
             localId,
             content: contentParsed.data,
-            status,
+            status: parsedStatus,
+            statusRaw: legacyStatus !== 'discarded' && deliveryStateRaw ? deliveryStateRaw : statusRaw,
+            deliveryStateRaw,
             position,
             createdAt,
             updatedAt,
             discardedAt: typeof discardedAt === 'number' && Number.isFinite(discardedAt) ? discardedAt : null,
             discardedReason: typeof discardedReason === 'string' && discardedReason.length > 0 ? discardedReason : null,
+            deliveryBlockedReason:
+                typeof deliveryBlockedReason === 'string' && deliveryBlockedReason.length > 0
+                    ? deliveryBlockedReason
+                    : null,
             authorAccountId: typeof authorAccountId === 'string' && authorAccountId.length > 0 ? authorAccountId : null,
         });
     }
     return out;
+}
+
+function resolvePendingDeliveryStatus(row: Pick<PendingRow, 'status'>): PendingDeliveryStatus {
+    if (row.status === 'delivering') return 'server_delivering';
+    if (row.status === 'blocked' || row.status === 'unknown') return 'blocked';
+    return 'server_queued';
+}
+
+function resolvePendingDeliveryBlockedReason(row: Pick<PendingRow, 'status' | 'deliveryBlockedReason'>): {
+    reason?: PendingDeliveryBlockedReason;
+    rawReason?: string;
+} {
+    if (row.status !== 'blocked' && row.status !== 'unknown') return {};
+    if (!row.deliveryBlockedReason) return { reason: 'unknown' };
+    const reason = normalizePendingDeliveryBlockedReason(row.deliveryBlockedReason);
+    return reason ? { reason } : { reason: 'unknown', rawReason: row.deliveryBlockedReason };
 }
 
 function coerceDiscardReason(value: string | null): 'switch_to_local' | 'manual' {
@@ -103,8 +154,9 @@ function coercePendingUserTextRecord(decrypted: unknown): { rawRecord: RawRecord
 }
 
 const enqueueCommitTailsBySessionId = new Map<string, Promise<void>>();
+const deletedPendingLocalIdsBySessionId = new Map<string, Set<string>>();
 
-function runPendingEnqueueCommitInOrder(sessionId: string, op: () => Promise<void>): Promise<void> {
+function runPendingEnqueueCommitInOrder<T>(sessionId: string, op: () => Promise<T>): Promise<T> {
     const prev = enqueueCommitTailsBySessionId.get(sessionId) ?? Promise.resolve();
     const next = prev.catch(() => undefined).then(op);
     const settled = next.then(
@@ -118,6 +170,63 @@ function runPendingEnqueueCommitInOrder(sessionId: string, op: () => Promise<voi
     });
     enqueueCommitTailsBySessionId.set(sessionId, tail);
     return next;
+}
+
+function markPendingLocalIdDeleted(sessionId: string, localId: string): void {
+    const deleted = deletedPendingLocalIdsBySessionId.get(sessionId) ?? new Set<string>();
+    deleted.add(localId);
+    deletedPendingLocalIdsBySessionId.set(sessionId, deleted);
+}
+
+function isPendingLocalIdDeleted(sessionId: string, localId: string): boolean {
+    return deletedPendingLocalIdsBySessionId.get(sessionId)?.has(localId) === true;
+}
+
+function clearDeletedPendingLocalId(sessionId: string, localId: string): void {
+    const deleted = deletedPendingLocalIdsBySessionId.get(sessionId);
+    if (!deleted) return;
+    deleted.delete(localId);
+    if (deleted.size === 0) {
+        deletedPendingLocalIdsBySessionId.delete(sessionId);
+    }
+}
+
+function filterDeletedPendingRows<T extends Pick<PendingRow, 'localId'>>(sessionId: string, rows: T[]): T[] {
+    const deleted = deletedPendingLocalIdsBySessionId.get(sessionId);
+    if (!deleted || deleted.size === 0) return rows;
+    return rows.filter((row) => !deleted.has(row.localId));
+}
+
+function pruneDeletedPendingLocalIds(sessionId: string, rows: Pick<PendingRow, 'localId'>[]): void {
+    const deleted = deletedPendingLocalIdsBySessionId.get(sessionId);
+    if (!deleted || deleted.size === 0) return;
+
+    const presentLocalIds = new Set(rows.map((row) => row.localId));
+    for (const localId of deleted) {
+        if (!presentLocalIds.has(localId)) {
+            deleted.delete(localId);
+        }
+    }
+
+    if (deleted.size === 0) {
+        deletedPendingLocalIdsBySessionId.delete(sessionId);
+    }
+}
+
+async function deleteAcceptedTombstonedPendingMessage(params: {
+    sessionId: string;
+    localId: string;
+    request: (path: string, init?: RequestInit) => Promise<Response>;
+}): Promise<void> {
+    try {
+        const response = await params.request(`/v2/sessions/${params.sessionId}/pending/${params.localId}`, { method: 'DELETE' });
+        if (!response.ok) {
+            assertPendingResponseOk(response, 'Failed to delete pending message');
+        }
+        clearDeletedPendingLocalId(params.sessionId, params.localId);
+    } catch {
+        return;
+    }
 }
 
 function buildPendingDecryptFailureMessage(params: {
@@ -145,6 +254,18 @@ function buildPendingDecryptFailureMessage(params: {
         displayText: t('session.pendingMessages.decryptFailed'),
         rawRecord: { pendingDecryptFailure },
         pendingDecryptFailure,
+    };
+}
+
+function withPendingDeliveryState<T extends PendingMessage>(row: PendingRow, message: T): T {
+    const pendingDeliveryStatus = resolvePendingDeliveryStatus(row);
+    const { reason: pendingDeliveryBlockedReason, rawReason: pendingDeliveryBlockedReasonRaw } = resolvePendingDeliveryBlockedReason(row);
+    return {
+        ...message,
+        pendingDeliveryStatus,
+        ...(pendingDeliveryBlockedReason ? { pendingDeliveryBlockedReason } : {}),
+        ...(pendingDeliveryBlockedReasonRaw ? { pendingDeliveryBlockedReasonRaw } : {}),
+        ...(row.status === 'unknown' ? { pendingDeliveryStatusRaw: row.statusRaw } : {}),
     };
 }
 
@@ -247,8 +368,15 @@ export async function fetchAndApplyPendingMessagesV2(params: {
         return;
     }
 
-    const queued = rows.filter((r) => r.status === 'queued').sort((a, b) => a.position - b.position || a.createdAt - b.createdAt || a.localId.localeCompare(b.localId));
-    const discarded = rows.filter((r) => r.status === 'discarded').sort((a, b) => (a.discardedAt ?? a.updatedAt) - (b.discardedAt ?? b.updatedAt));
+    pruneDeletedPendingLocalIds(sessionId, rows);
+    const visibleRows = filterDeletedPendingRows(sessionId, rows);
+
+    const queued = visibleRows
+        .filter((r) => r.status !== 'discarded')
+        .sort((a, b) => a.position - b.position || a.createdAt - b.createdAt || a.localId.localeCompare(b.localId));
+    const discarded = visibleRows
+        .filter((r) => r.status === 'discarded')
+        .sort((a, b) => (a.discardedAt ?? a.updatedAt) - (b.discardedAt ?? b.updatedAt));
 
     const pendingMessages: PendingMessage[] = [];
     for (const r of queued) {
@@ -257,26 +385,25 @@ export async function fetchAndApplyPendingMessagesV2(params: {
             sessionEncryption,
         });
         if (decrypted.kind === 'decrypt_failed') {
-            pendingMessages.push(decrypted.message);
+            pendingMessages.push(withPendingDeliveryState(r, decrypted.message));
             continue;
         }
 
         const coerced = coercePendingUserTextRecord(decrypted.value);
         if (!coerced) {
-            pendingMessages.push(buildPendingDecryptFailureMessage({ row: r }));
+            pendingMessages.push(withPendingDeliveryState(r, buildPendingDecryptFailureMessage({ row: r })));
             continue;
         }
-        pendingMessages.push({
+        pendingMessages.push(withPendingDeliveryState(r, {
             id: r.localId,
             localId: r.localId,
             createdAt: r.createdAt,
             updatedAt: r.updatedAt,
             source: 'server_pending',
-            deliveryStatus: 'accepted',
             text: coerced.text,
             displayText: coerced.displayText,
             rawRecord: coerced.rawRecord,
-        });
+        }));
     }
 
     const discardedMessages: DiscardedPendingMessage[] = [];
@@ -334,7 +461,8 @@ export async function enqueuePendingMessageV2(params: {
     fetchArtifactWithBody?: (artifactId: string) => Promise<DecryptedArtifact | null>;
     updateArtifact?: (artifact: DecryptedArtifact) => void;
     request: (path: string, init?: RequestInit) => Promise<Response>;
-}): Promise<void> {
+    onLocalPendingProjectionCreated?: (event: Readonly<{ localId: string }>) => void;
+}): Promise<Readonly<{ localId: string; accepted: boolean }>> {
     const { sessionId, text, displayText, encryption, request, metaOverrides } = params;
 
     storage.getState().markSessionOptimisticThinking(sessionId);
@@ -386,9 +514,14 @@ export async function enqueuePendingMessageV2(params: {
         displayText,
         rawRecord,
     });
+    params.onLocalPendingProjectionCreated?.({ localId });
 
     try {
-        await runPendingEnqueueCommitInOrder(sessionId, async () => {
+        const outcome = await runPendingEnqueueCommitInOrder(sessionId, async () => {
+            if (isPendingLocalIdDeleted(sessionId, localId)) {
+                return { committed: false };
+            }
+
             let writeBody: Record<string, unknown>;
             if (sessionEncryptionMode === 'plain') {
                 writeBody = { localId, content: { t: 'plain', v: rawRecord }, messageRole: 'user' };
@@ -405,7 +538,18 @@ export async function enqueuePendingMessageV2(params: {
             if (!response.ok) {
                 assertPendingResponseOk(response, 'Failed to enqueue pending message');
             }
+            return { committed: true };
         });
+
+        if (isPendingLocalIdDeleted(sessionId, localId)) {
+            if (outcome.committed) {
+                await deleteAcceptedTombstonedPendingMessage({ sessionId, localId, request });
+            } else {
+                clearDeletedPendingLocalId(sessionId, localId);
+            }
+            return { localId, accepted: true };
+        }
+
         storage.getState().upsertPendingMessage(sessionId, {
             id: localId,
             localId,
@@ -417,8 +561,96 @@ export async function enqueuePendingMessageV2(params: {
             displayText,
             rawRecord,
         });
+        return { localId, accepted: true };
     } catch (e) {
+        if (isTransientConnectivityError(e)) {
+            storage.getState().clearSessionOptimisticThinking(sessionId);
+            return { localId, accepted: false };
+        }
         storage.getState().removePendingMessage(sessionId, localId);
+        storage.getState().clearSessionOptimisticThinking(sessionId);
+        throw e;
+    }
+}
+
+export async function retryPendingMessageEnqueueV2(params: {
+    sessionId: string;
+    localId: string;
+    encryption: Encryption;
+    request: (path: string, init?: RequestInit) => Promise<Response>;
+}): Promise<Readonly<{ accepted: boolean }>> {
+    const { sessionId, localId, encryption, request } = params;
+    const existing = storage.getState().sessionPending[sessionId]?.messages?.find((message) =>
+        message.localId === localId || message.id === localId
+    );
+    if (!existing || existing.deliveryStatus === 'accepted') {
+        return { accepted: true };
+    }
+    const parsed = RawRecordSchema.safeParse(existing.rawRecord);
+    if (!parsed.success || parsed.data.role !== 'user') {
+        storage.getState().removePendingMessage(sessionId, existing.id);
+        return { accepted: true };
+    }
+
+    const session = storage.getState().sessions[sessionId];
+    if (!session) {
+        storage.getState().removePendingMessage(sessionId, existing.id);
+        return { accepted: true };
+    }
+    const sessionEncryptionMode: 'e2ee' | 'plain' = session.encryptionMode === 'plain' ? 'plain' : 'e2ee';
+    const sessionEncryption = sessionEncryptionMode === 'plain' ? null : encryption.getSessionEncryption(sessionId);
+    if (sessionEncryptionMode === 'e2ee' && !sessionEncryption) {
+        storage.getState().clearSessionOptimisticThinking(sessionId);
+        return { accepted: false };
+    }
+
+    try {
+        const outcome = await runPendingEnqueueCommitInOrder(sessionId, async () => {
+            if (isPendingLocalIdDeleted(sessionId, existing.localId ?? existing.id)) {
+                return { committed: false };
+            }
+
+            const writeBody =
+                sessionEncryptionMode === 'plain'
+                    ? { localId: existing.localId ?? existing.id, content: { t: 'plain' as const, v: parsed.data }, messageRole: 'user' }
+                    : { localId: existing.localId ?? existing.id, ciphertext: await sessionEncryption!.encryptRawRecord(parsed.data), messageRole: 'user' };
+
+            const response = await request(`/v2/sessions/${sessionId}/pending`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(writeBody),
+            });
+            if (!response.ok) {
+                assertPendingResponseOk(response, 'Failed to enqueue pending message');
+            }
+            return { committed: true };
+        });
+
+        const localId = existing.localId ?? existing.id;
+        if (isPendingLocalIdDeleted(sessionId, localId)) {
+            if (outcome.committed) {
+                await deleteAcceptedTombstonedPendingMessage({ sessionId, localId, request });
+            } else {
+                clearDeletedPendingLocalId(sessionId, localId);
+            }
+            return { accepted: true };
+        }
+
+        storage.getState().upsertPendingMessage(sessionId, {
+            ...existing,
+            updatedAt: nowServerMs(),
+            source: 'local_outbound',
+            deliveryStatus: 'accepted',
+            rawRecord: parsed.data,
+        });
+        storage.getState().markSessionOptimisticThinking(sessionId);
+        return { accepted: true };
+    } catch (e) {
+        if (isTransientConnectivityError(e)) {
+            storage.getState().clearSessionOptimisticThinking(sessionId);
+            return { accepted: false };
+        }
+        storage.getState().removePendingMessage(sessionId, existing.id);
         storage.getState().clearSessionOptimisticThinking(sessionId);
         throw e;
     }
@@ -518,6 +750,15 @@ export async function deletePendingMessageV2(params: {
     request: (path: string, init?: RequestInit) => Promise<Response>;
 }): Promise<void> {
     const { sessionId, pendingId, request } = params;
+    const existing = storage.getState().sessionPending[sessionId]?.messages?.find((message) =>
+        message.id === pendingId || message.localId === pendingId
+    );
+    if (existing?.source === 'local_outbound' && existing.deliveryStatus === 'queued') {
+        markPendingLocalIdDeleted(sessionId, existing.localId ?? existing.id);
+        storage.getState().removePendingMessage(sessionId, existing.id);
+        storage.getState().clearSessionOptimisticThinking(sessionId);
+        return;
+    }
 
     const response = await request(`/v2/sessions/${sessionId}/pending/${pendingId}`, { method: 'DELETE' });
     if (!response.ok) {
@@ -542,6 +783,44 @@ export async function discardPendingMessageV2(params: {
     });
     if (!response.ok) {
         assertPendingResponseOk(response, 'Failed to discard pending message');
+    }
+    await fetchAndApplyPendingMessagesV2({ sessionId, encryption, request });
+}
+
+export async function retryPendingDeliveryV2(params: {
+    sessionId: string;
+    pendingId: string;
+    encryption: Encryption;
+    request: (path: string, init?: RequestInit) => Promise<Response>;
+}): Promise<void> {
+    const { sessionId, pendingId, encryption, request } = params;
+
+    const response = await request(`/v2/sessions/${sessionId}/pending/${pendingId}/delivery/retry`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+    });
+    if (!response.ok) {
+        assertPendingResponseOk(response, 'Failed to retry pending delivery');
+    }
+    await fetchAndApplyPendingMessagesV2({ sessionId, encryption, request });
+}
+
+export async function markPendingDeliveryHandledV2(params: {
+    sessionId: string;
+    pendingId: string;
+    encryption: Encryption;
+    request: (path: string, init?: RequestInit) => Promise<Response>;
+}): Promise<void> {
+    const { sessionId, pendingId, encryption, request } = params;
+
+    const response = await request(`/v2/sessions/${sessionId}/pending/${pendingId}/delivery/handled`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+    });
+    if (!response.ok) {
+        assertPendingResponseOk(response, 'Failed to mark pending delivery handled');
     }
     await fetchAndApplyPendingMessagesV2({ sessionId, encryption, request });
 }

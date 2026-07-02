@@ -5,7 +5,7 @@ import { settingsParse } from '@/sync/domains/settings/settings';
 import type { Session } from '@/sync/domains/state/storageTypes';
 import { storage } from '@/sync/domains/state/storage';
 
-import { enqueuePendingMessageV2 } from './pendingQueueV2';
+import { deletePendingMessageV2, enqueuePendingMessageV2 } from './pendingQueueV2';
 import { buildSession, createPendingQueueEncryption, resetPendingQueueState } from './pendingQueueV2.testHelpers';
 
 describe('pendingQueueV2 optimistic thinking', () => {
@@ -26,13 +26,17 @@ describe('pendingQueueV2 optimistic thinking', () => {
 
         expect(storage.getState().sessions[sessionId].optimisticThinkingAt ?? null).toBeNull();
 
-        await enqueuePendingMessageV2({
+        const result = await enqueuePendingMessageV2({
             sessionId,
             text: 'hello',
             encryption,
             request: async () => new Response(null, { status: 200 }),
         });
 
+        expect(result).toEqual({
+            localId: expect.any(String),
+            accepted: true,
+        });
         expect(storage.getState().sessions[sessionId].optimisticThinkingAt ?? null).not.toBeNull();
         expect(storage.getState().sessionPending[sessionId]?.messages[0]?.deliveryStatus).toBe('accepted');
     });
@@ -86,6 +90,101 @@ describe('pendingQueueV2 optimistic thinking', () => {
         await promise;
 
         expect(storage.getState().sessionPending[sessionId]?.messages[0]?.deliveryStatus).toBe('accepted');
+    });
+
+    it('notifies when the local pending row is projected before the server accepts it', async () => {
+        const sessionId = 's_test_local_projection_callback';
+        storage.getState().applySessions([buildSession({ sessionId })]);
+        const encryption = await createPendingQueueEncryption({ sessionId, seedByte: 7 });
+        const projections: Array<{ localId: string; status: unknown }> = [];
+
+        let acceptRequest!: () => void;
+        const requestGate = new Promise<void>((resolve) => {
+            acceptRequest = resolve;
+        });
+
+        const promise = enqueuePendingMessageV2({
+            sessionId,
+            text: 'hello',
+            encryption,
+            request: async () => {
+                await requestGate;
+                return new Response(null, { status: 200 });
+            },
+            onLocalPendingProjectionCreated: ({ localId }) => {
+                projections.push({
+                    localId,
+                    status: storage.getState().sessionPending[sessionId]?.messages[0]?.deliveryStatus,
+                });
+            },
+        });
+
+        expect(projections).toEqual([{
+            localId: expect.any(String),
+            status: 'queued',
+        }]);
+
+        acceptRequest();
+        await promise;
+
+        expect(projections).toHaveLength(1);
+        expect(storage.getState().sessionPending[sessionId]?.messages[0]?.deliveryStatus).toBe('accepted');
+    });
+
+    it('does not recreate a deleted local pending row when the in-flight enqueue later resolves', async () => {
+        const sessionId = 's_test_delete_during_enqueue';
+        storage.getState().applySessions([buildSession({ sessionId })]);
+        const encryption = await createPendingQueueEncryption({ sessionId, seedByte: 13 });
+
+        let postStarted!: () => void;
+        const postStartedGate = new Promise<void>((resolve) => {
+            postStarted = resolve;
+        });
+        let releaseRequest!: () => void;
+        const requestGate = new Promise<void>((resolve) => {
+            releaseRequest = resolve;
+        });
+        const requestCalls: Array<{ path: string; method: string | undefined }> = [];
+        const request = async (path: string, init?: RequestInit) => {
+            requestCalls.push({ path, method: init?.method });
+            if (init?.method === 'POST') {
+                postStarted();
+                await requestGate;
+            }
+            return new Response(null, { status: 200 });
+        };
+
+        const enqueuePromise = enqueuePendingMessageV2({
+            sessionId,
+            text: 'delete me',
+            encryption,
+            request,
+        });
+
+        const localId = storage.getState().sessionPending[sessionId]?.messages[0]?.localId;
+        expect(localId).toEqual(expect.any(String));
+
+        await postStartedGate;
+
+        await deletePendingMessageV2({
+            sessionId,
+            pendingId: localId!,
+            request,
+        });
+
+        expect(storage.getState().sessionPending[sessionId]?.messages ?? []).toEqual([]);
+
+        releaseRequest();
+        await expect(enqueuePromise).resolves.toEqual({
+            localId,
+            accepted: true,
+        });
+
+        expect(storage.getState().sessionPending[sessionId]?.messages ?? []).toEqual([]);
+        expect(requestCalls).toEqual([
+            { path: `/v2/sessions/${sessionId}/pending`, method: 'POST' },
+            { path: `/v2/sessions/${sessionId}/pending/${localId}`, method: 'DELETE' },
+        ]);
     });
 
     it('keeps queued pending messages in call order even when earlier encryption resolves later', async () => {

@@ -33,6 +33,7 @@ import {
 } from '@/sync/engine/sessions/sessionApplyCoalescer';
 import { createSessionListRenderableProjectionPatchCoalescer } from '@/sync/engine/sessions/sessionListRenderableProjectionPatchCoalescer';
 import { createSessionMessageApplyCoalescer } from '@/sync/engine/sessions/sessionMessageApplyCoalescer';
+import { createSessionShellRefreshCoalescer } from '@/sync/engine/sessions/sessionShellRefreshCoalescer';
 import { recordSessionInvalidationRequested } from '@/sync/engine/sessions/sessionInvalidationTelemetry';
 import { settingsDefaults } from '@/sync/domains/settings/settings';
 import type { Settings } from '@/sync/domains/settings/settings';
@@ -114,6 +115,7 @@ type CacheOnlySessionUpdateProjectionPatchPayload = Readonly<{
 type SocketSessionHydrationReason =
     | 'socket-update-missing-session'
     | 'socket-update-unpatchable'
+    | 'socket-update-attention-unknown'
     | 'socket-update-turn-projection'
     | 'share-visibility-change';
 

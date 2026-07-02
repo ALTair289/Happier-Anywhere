@@ -126,6 +126,7 @@ function isLatestTargetWindowRequest(sessionId: string, requestEpoch: number): b
  */
 export function clearTargetWindowRequestEpochs(): void {
     latestTargetWindowRequestEpochBySessionId.clear();
+    nextTargetWindowRequestEpoch = 0;
 }
 
 function shouldDropTargetWindowCommit(params: Readonly<{
@@ -174,18 +175,17 @@ export async function fetchAndApplyTargetWindowMessages(params: {
     const targetSequence = targetSeq(params.target);
     const currentWindowState = params.getWindowState();
     const requestEpoch = markTargetWindowRequestInitiated(params.sessionId);
-    const pageDirection = params.direction === 'newer' ? 'newer' : 'older';
     // Only reuse an existing window cursor if the active window belongs to the same jump target.
-    // When a different window is active (pin→pin far jump), seed from targetSeq instead so we
-    // fetch the correct page for the new window and do not corrupt its cursor from window A.
+    // Fresh activations use the initial dual-page path even when the strategy has a direction
+    // hint, because newer-side pages are exclusive and can otherwise exclude the target row.
     const sameWindowActive = currentWindowState.isWindowMode && currentWindowState.windowId === params.windowId;
+    const useInitialMaterialization = params.direction === 'initial' || !sameWindowActive;
+    const pageDirection = !useInitialMaterialization && params.direction === 'newer' ? 'newer' : 'older';
     const beforeSeq = pageDirection === 'older'
-        ? params.direction === 'older'
-            ? (sameWindowActive ? (currentWindowState.olderCursor ?? targetSequence + 1) : targetSequence + 1)
-            : targetSequence + 1
+        ? (useInitialMaterialization ? targetSequence + 1 : (currentWindowState.olderCursor ?? targetSequence + 1))
         : undefined;
     const afterSeq = pageDirection === 'newer'
-        ? (sameWindowActive ? (currentWindowState.newerCursor ?? targetSequence) : targetSequence)
+        ? (currentWindowState.newerCursor ?? targetSequence)
         : undefined;
     const requestPath = buildSessionMessagesPath({
         sessionId: params.sessionId,
@@ -202,30 +202,30 @@ export async function fetchAndApplyTargetWindowMessages(params: {
         beforeSeq?: number;
         afterSeq?: number;
     }>): Promise<TargetWindowPageResult> => runSessionMessagesPagePipeline({
-            sessionId: params.sessionId,
-            purpose: 'target-window',
-            page: {
-                direction: page.direction,
-                requestPath: page.requestPath,
-                scope,
-                sidechainId,
-                limit: params.limit,
-                beforeSeq: page.beforeSeq,
-                afterSeq: page.afterSeq,
-            },
-            lifecyclePolicy: 'suppress',
-            getSessionEncryption: params.getSessionEncryption,
-            isSessionKnown: params.isSessionKnown,
-            request: params.request,
-            sessionReceivedMessages: params.sessionReceivedMessages,
-            applyMessages: params.applyMessages,
-            log: params.log,
-            sessionEncryptionMode: params.sessionEncryptionMode,
-            initialMessageDecryptBatchSize: params.initialMessageDecryptBatchSize,
-            messageDecryptBatchSize: params.messageDecryptBatchSize,
-            messageDecryptYieldDelayMs: params.messageDecryptYieldDelayMs,
-            yieldToMessageDecryptBatch: params.yieldToMessageDecryptBatch,
-        });
+        sessionId: params.sessionId,
+        purpose: 'target-window',
+        page: {
+            direction: page.direction,
+            requestPath: page.requestPath,
+            scope,
+            sidechainId,
+            limit: params.limit,
+            beforeSeq: page.beforeSeq,
+            afterSeq: page.afterSeq,
+        },
+        lifecyclePolicy: 'suppress',
+        getSessionEncryption: params.getSessionEncryption,
+        isSessionKnown: params.isSessionKnown,
+        request: params.request,
+        sessionReceivedMessages: params.sessionReceivedMessages,
+        applyMessages: params.applyMessages,
+        log: params.log,
+        sessionEncryptionMode: params.sessionEncryptionMode,
+        initialMessageDecryptBatchSize: params.initialMessageDecryptBatchSize,
+        messageDecryptBatchSize: params.messageDecryptBatchSize,
+        messageDecryptYieldDelayMs: params.messageDecryptYieldDelayMs,
+        yieldToMessageDecryptBatch: params.yieldToMessageDecryptBatch,
+    });
 
     const result = await loadPage({
         direction: pageDirection,
@@ -299,7 +299,7 @@ export async function fetchAndApplyTargetWindowMessages(params: {
     }
 
     const pageResults: TargetWindowPageResult[] = [result];
-    if (params.direction === 'initial') {
+    if (useInitialMaterialization) {
         pageResults.push(await loadPage({
             direction: 'newer',
             requestPath: buildSessionMessagesPath({
@@ -317,7 +317,7 @@ export async function fetchAndApplyTargetWindowMessages(params: {
     const minSeq = rawSeqs.length > 0 ? Math.min(...rawSeqs) : targetSequence;
     const maxSeq = rawSeqs.length > 0 ? Math.max(...rawSeqs) : targetSequence;
     const nextBeforeSeq = normalizeCursorFromPage(result.page.nextBeforeSeq);
-    const newerInitialResult = params.direction === 'initial' ? pageResults[1] : null;
+    const newerInitialResult = useInitialMaterialization ? pageResults[1] : null;
     const nextAfterSeq = normalizeCursorFromPage((newerInitialResult ?? result).page.nextAfterSeq);
     const appliedSeqs = pageResults.flatMap((pageResult) => pageResult.appliedSeqs);
     commitWindowState = params.getWindowState();
@@ -342,7 +342,7 @@ export async function fetchAndApplyTargetWindowMessages(params: {
         };
     }
 
-    const shouldActivateWindow = params.direction === 'initial'
+    const shouldActivateWindow = useInitialMaterialization
         || !commitWindowState.isWindowMode
         || commitWindowState.windowId !== params.windowId;
     const nextState = shouldActivateWindow
@@ -351,12 +351,14 @@ export async function fetchAndApplyTargetWindowMessages(params: {
             targetSeq: targetSequence,
             windowMinSeq: minSeq,
             windowMaxSeq: maxSeq,
-            olderCursor: pageDirection === 'newer' ? targetSequence : nextBeforeSeq,
-            newerCursor: params.direction === 'initial'
+            olderCursor: useInitialMaterialization ? nextBeforeSeq : (pageDirection === 'newer' ? targetSequence : nextBeforeSeq),
+            newerCursor: useInitialMaterialization
                 ? (nextAfterSeq ?? maxSeq)
                 : (pageDirection === 'newer' ? nextAfterSeq : maxSeq),
-            hasMoreOlder: pageDirection === 'newer' ? null : normalizeHasMore(result.page.hasMore, nextBeforeSeq),
-            hasMoreNewer: params.direction === 'initial'
+            hasMoreOlder: useInitialMaterialization
+                ? normalizeHasMore(result.page.hasMore, nextBeforeSeq)
+                : (pageDirection === 'newer' ? null : normalizeHasMore(result.page.hasMore, nextBeforeSeq)),
+            hasMoreNewer: useInitialMaterialization
                 ? normalizeHasMore(newerInitialResult?.page.hasMore, nextAfterSeq)
                 : (pageDirection === 'newer' ? normalizeHasMore(result.page.hasMore, nextAfterSeq) : null),
             activatedAtMs: params.now(),

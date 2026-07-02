@@ -243,6 +243,33 @@ describe('handleMessageUpdatedSocketUpdate', () => {
         }));
     });
 
+    it('requests a targeted session shell refresh instead of a full refetch for hidden stale-marked updates without attention metadata', async () => {
+        const decryptMessage = vi.fn();
+        const requestSessionShellRefresh = vi.fn();
+        const { params, applyMessages, applySessions, fetchSessions } = buildHarness({
+            updateData: buildUpdate({ sid: 's1', messageId: 'm2', messageSeq: 2 }),
+            getSession: () => ({
+                ...buildSession('s1'),
+                latestTurnStatus: 'in_progress',
+                latestTurnStatusObservedAt: 900,
+            }),
+            getSessionEncryption: () => ({ decryptMessage }),
+            isSessionActivelyViewed: () => false,
+            isSessionFullContentConsumerActive: () => false,
+            realtimeProjectionMode: 'enabled',
+            requestSessionShellRefresh,
+        });
+
+        await handleMessageUpdatedSocketUpdate(params);
+
+        expect(requestSessionShellRefresh).toHaveBeenCalledTimes(1);
+        expect(requestSessionShellRefresh).toHaveBeenCalledWith('s1');
+        expect(fetchSessions).not.toHaveBeenCalled();
+        expect(decryptMessage).not.toHaveBeenCalled();
+        expect(applyMessages).not.toHaveBeenCalled();
+        expect(applySessions).not.toHaveBeenCalled();
+    });
+
     it('marks already-loaded hidden encrypted message updates with attention impact stale while still advancing projection', async () => {
         const decryptMessage = vi.fn(async () => ({
             id: 'm2',

@@ -100,6 +100,122 @@ describe('pendingQueueV2 decrypt mapping', () => {
         expect(messages[0]?.text).toBe('ok');
     });
 
+    it('maps old-server queued rows without delivery fields to visible server queued messages', async () => {
+        const sessionId = 's_old_server_pending';
+        const encryption = await createPendingQueueEncryption({ sessionId });
+
+        await fetchAndApplyPendingMessagesV2({
+            sessionId,
+            encryption,
+            request: async () =>
+                new Response(
+                    JSON.stringify({
+                        pending: [
+                            {
+                                localId: 'old-queued',
+                                content: { t: 'plain', v: { role: 'user', content: { type: 'text', text: 'legacy row' } } },
+                                status: 'queued',
+                                position: 0,
+                                createdAt: 1,
+                                updatedAt: 1,
+                            },
+                        ],
+                    }),
+                    { status: 200 },
+                ),
+        });
+
+        const messages = storage.getState().sessionPending[sessionId]?.messages ?? [];
+        expect(messages.map((message) => message.localId)).toEqual(['old-queued']);
+        expect(messages[0]?.text).toBe('legacy row');
+        expect((messages[0] as any)?.pendingDeliveryStatus).toBe('server_queued');
+    });
+
+    it('fails closed by keeping unknown newer pending statuses visible as blocked', async () => {
+        const sessionId = 's_future_status_pending';
+        const encryption = await createPendingQueueEncryption({ sessionId });
+
+        await fetchAndApplyPendingMessagesV2({
+            sessionId,
+            encryption,
+            request: async () =>
+                new Response(
+                    JSON.stringify({
+                        pending: [
+                            {
+                                localId: 'blocked-known',
+                                content: { t: 'plain', v: { role: 'user', content: { type: 'text', text: 'blocked known' } } },
+                                status: 'blocked',
+                                deliveryBlockedReason: 'terminal_host_unreachable',
+                                position: 0,
+                                createdAt: 1,
+                                updatedAt: 1,
+                            },
+                            {
+                                localId: 'blocked-future',
+                                content: { t: 'plain', v: { role: 'user', content: { type: 'text', text: 'blocked future' } } },
+                                status: 'awaiting_moon_phase',
+                                deliveryBlockedReason: 'newer_runtime_reason',
+                                position: 1,
+                                createdAt: 2,
+                                updatedAt: 2,
+                            },
+                        ],
+                    }),
+                    { status: 200 },
+                ),
+        });
+
+        const messages = storage.getState().sessionPending[sessionId]?.messages ?? [];
+        expect(messages.map((message) => message.localId)).toEqual(['blocked-known', 'blocked-future']);
+        expect(messages.map((message) => (message as any).pendingDeliveryStatus)).toEqual(['blocked', 'blocked']);
+        expect((messages[0] as any).pendingDeliveryBlockedReason).toBe('terminal_host_unreachable');
+        expect((messages[1] as any).pendingDeliveryBlockedReason).toBe('unknown');
+        expect((messages[1] as any).pendingDeliveryStatusRaw).toBe('awaiting_moon_phase');
+    });
+
+    it('uses additive deliveryState over legacy queued status for mixed-version-safe rows', async () => {
+        const sessionId = 's_additive_delivery_state_pending';
+        const encryption = await createPendingQueueEncryption({ sessionId });
+
+        await fetchAndApplyPendingMessagesV2({
+            sessionId,
+            encryption,
+            request: async () =>
+                new Response(
+                    JSON.stringify({
+                        pending: [
+                            {
+                                localId: 'provider-owned',
+                                content: { t: 'plain', v: { role: 'user', content: { type: 'text', text: 'provider owned' } } },
+                                status: 'queued',
+                                deliveryState: 'delivering',
+                                position: 0,
+                                createdAt: 1,
+                                updatedAt: 1,
+                            },
+                            {
+                                localId: 'blocked-additive',
+                                content: { t: 'plain', v: { role: 'user', content: { type: 'text', text: 'blocked additive' } } },
+                                status: 'queued',
+                                deliveryState: 'blocked',
+                                deliveryBlockedReason: 'payload_too_large',
+                                position: 1,
+                                createdAt: 2,
+                                updatedAt: 2,
+                            },
+                        ],
+                    }),
+                    { status: 200 },
+                ),
+        });
+
+        const messages = storage.getState().sessionPending[sessionId]?.messages ?? [];
+        expect(messages.map((message) => (message as any).pendingDeliveryStatus)).toEqual(['server_delivering', 'blocked']);
+        expect(messages.map((message) => message.deliveryStatus)).toEqual([undefined, undefined]);
+        expect((messages[1] as any).pendingDeliveryBlockedReason).toBe('payload_too_large');
+    });
+
     it('skips malformed pending rows and keeps valid rows while retaining decrypt failures explicitly', async () => {
         const sessionId = 's_test_mixed';
         const encryption = await createPendingQueueEncryption({ sessionId, seedByte: 9 });
