@@ -17,6 +17,10 @@ import type {
 } from '../terminalHost/_types';
 import { buildTerminalControlCapture } from '../terminalHost/controlCapture';
 import { TERMINAL_SHIFT_TAB_SEQUENCE } from '../terminalHost/controlTypes';
+import {
+  runTerminalPromptSubmission,
+  type TerminalPromptSubmitVerificationPolicy,
+} from '../terminalHost/promptSubmitVerification';
 import type { Disposable, PtyProcess, PtyProvider } from '@/integrations/pty/ptyProvider';
 import { createNodePtyProvider } from '@/integrations/pty/ptyProvider';
 import { delay } from '@/utils/time';
@@ -99,6 +103,7 @@ export function createPtyTerminalHostAdapter(params?: Readonly<{
   rows?: number;
   inputStabilityDelayMs?: number;
   postWriteLivenessDelayMs?: number;
+  promptSubmitVerification?: TerminalPromptSubmitVerificationPolicy | undefined;
   now?: () => number;
 }>): TerminalHostAdapter {
   const ptyProvider = params?.ptyProvider ?? createNodePtyProvider();
@@ -106,6 +111,7 @@ export function createPtyTerminalHostAdapter(params?: Readonly<{
   const rows = Math.max(2, Math.trunc(params?.rows ?? DEFAULT_ROWS));
   const inputStabilityDelayMs = Math.max(0, Math.trunc(params?.inputStabilityDelayMs ?? INPUT_STABILITY_DELAY_MS));
   const postWriteLivenessDelayMs = Math.max(0, Math.trunc(params?.postWriteLivenessDelayMs ?? POST_WRITE_LIVENESS_DELAY_MS));
+  const promptSubmitVerification = params?.promptSubmitVerification;
   const now = params?.now ?? (() => Date.now());
   const sessions = new Map<string, PtyTerminalHostSession>();
 
@@ -286,7 +292,7 @@ export function createPtyTerminalHostAdapter(params?: Readonly<{
           };
         }
       }
-      if (!writeToSession(session, `${input.text}\r`)) {
+      if (!writeToSession(session, input.text)) {
         return failedInjectionResult({
           reason: 'host_unreachable',
           phase: 'during_write',
@@ -294,11 +300,26 @@ export function createPtyTerminalHostAdapter(params?: Readonly<{
           recoverable: true,
         });
       }
-      if (!await waitForPostWriteLiveness(session)) {
+      const submission = await runTerminalPromptSubmission({
+        promptText: input.text,
+        submitEnter: async () => {
+          if (!writeToSession(session, '\r')) return 'failed';
+          return await waitForPostWriteLiveness(session) ? 'success' : 'failed';
+        },
+        ...(promptSubmitVerification?.shouldVerifyAfterSubmit(input.text)
+          ? {
+              verifyAfterSubmit: async ({ promptText }) => promptSubmitVerification.isPromptStillPendingAfterSubmit({
+                promptText,
+                screenText: session.screen.capture(),
+              }),
+            }
+          : {}),
+      });
+      if (!submission.success) {
         return failedInjectionResult({
-          reason: 'host_unreachable',
-          phase: 'after_enter_unknown',
-          duplicateRisk: 'possible',
+          reason: submission.reason === 'timeout' ? 'timeout' : 'host_unreachable',
+          phase: submission.phase,
+          duplicateRisk: submission.duplicateRisk,
           recoverable: true,
         });
       }

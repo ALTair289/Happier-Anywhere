@@ -4,8 +4,15 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { createClaudePromptSubmitVerificationPolicy } from '@/backends/claude/unifiedTerminal/claudePromptSubmitVerification';
+
 import { createZellijTerminalHostAdapter as createZellijTerminalHostAdapterBase } from './adapter';
-import { ZellijActionTimeoutError, type ZellijActions, type ZellijPane } from './actions';
+import {
+  DEFAULT_ZELLIJ_WRITE_BYTES_CHUNK_SIZE,
+  ZellijActionTimeoutError,
+  type ZellijActions,
+  type ZellijPane,
+} from './actions';
 import { prepareZellijSocketDir, resolveZellijSocketDir } from './socketDir';
 import { isTerminalHostStartupError } from '../terminalHost/errors';
 
@@ -17,6 +24,15 @@ function createZellijTerminalHostAdapter(
   return createZellijTerminalHostAdapterBase({
     prepareSocketDir: skipPrepareZellijSocketDir,
     ...params,
+  });
+}
+
+function createClaudeZellijTerminalHostAdapter(
+  params: Parameters<typeof createZellijTerminalHostAdapterBase>[0],
+) {
+  return createZellijTerminalHostAdapter({
+    ...params,
+    promptSubmitVerification: createClaudePromptSubmitVerificationPolicy(),
   });
 }
 
@@ -63,7 +79,10 @@ describe('createZellijTerminalHostAdapter', () => {
         listCount += 1;
         return listCount === 1 ? [] : [{ id: 42, is_plugin: false, is_focused: true, terminal_command: '/managed/node' }];
       },
-      dumpScreen: async () => '',
+      dumpScreen: async (params) => {
+        calls.push(`dump:${params.paneId}`);
+        return '';
+      },
       closePane: async () => undefined,
       killSession: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
     } as ZellijActions & {
@@ -263,7 +282,7 @@ describe('createZellijTerminalHostAdapter', () => {
     } as ZellijActions & {
       startCommandDetached(): Promise<{ dispose(): void }>;
     };
-    const adapter = createZellijTerminalHostAdapter({
+    const adapter = createClaudeZellijTerminalHostAdapter({
       zellijBinary: '/tools/zellij',
       happyHomeDir: '/home/happier',
       actions,
@@ -348,7 +367,7 @@ describe('createZellijTerminalHostAdapter', () => {
     } as ZellijActions & {
       startCommandDetached(): Promise<{ dispose(): void }>;
     };
-    const adapter = createZellijTerminalHostAdapter({
+    const adapter = createClaudeZellijTerminalHostAdapter({
       zellijBinary: '/tools/zellij',
       happyHomeDir: '/home/happier',
       actions,
@@ -444,7 +463,7 @@ describe('createZellijTerminalHostAdapter', () => {
       listSessions(): Promise<{ exitCode: number; stdout: string; stderr: string }>;
       startCommandDetached(): Promise<{ dispose(): void }>;
     };
-    const adapter = createZellijTerminalHostAdapter({
+    const adapter = createClaudeZellijTerminalHostAdapter({
       zellijBinary: '/tools/zellij',
       happyHomeDir: '/home/happier',
       actions,
@@ -494,7 +513,7 @@ describe('createZellijTerminalHostAdapter', () => {
     } as ZellijActions & {
       startCommandDetached(): Promise<{ dispose(): void }>;
     };
-    const adapter = createZellijTerminalHostAdapter({
+    const adapter = createClaudeZellijTerminalHostAdapter({
       zellijBinary: '/tools/zellij',
       happyHomeDir: '/home/happier',
       actions,
@@ -560,7 +579,7 @@ describe('createZellijTerminalHostAdapter', () => {
       },
       killSession: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
     } as ZellijActions;
-    const adapter = createZellijTerminalHostAdapter({
+    const adapter = createClaudeZellijTerminalHostAdapter({
       zellijBinary: '/tools/zellij',
       happyHomeDir: '/home/happier',
       actions,
@@ -600,7 +619,7 @@ describe('createZellijTerminalHostAdapter', () => {
       closePane: async () => undefined,
       killSession: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
     };
-    const adapter = createZellijTerminalHostAdapter({
+    const adapter = createClaudeZellijTerminalHostAdapter({
       zellijBinary: '/tools/zellij',
       happyHomeDir: '/home/happier',
       actions,
@@ -620,6 +639,578 @@ describe('createZellijTerminalHostAdapter', () => {
     )).resolves.toMatchObject({ status: 'injected' });
 
     expect(calls).toEqual(['write:terminal_42:prompt', 'enter:terminal_42']);
+  });
+
+  it('uses zellij action paste plus a separate Enter for argv-safe prompt delivery', async () => {
+    const calls: string[] = [];
+    const actions: ZellijActions = {
+      attachCreateBackground: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+      runCommand: async () => ({ exitCode: 0, stdout: 'terminal_1', stderr: '' }),
+      pasteText: async (params) => {
+        calls.push(`paste:${params.paneId}:${params.text}:${params.timeoutMs ?? 'none'}`);
+      },
+      writeBytesChunked: async () => {
+        throw new Error('safe zellij prompt delivery should use action paste');
+      },
+      sendEnter: async (params) => {
+        calls.push(`enter:${params.paneId}:${params.timeoutMs ?? 'none'}`);
+      },
+      sendEscape: async () => {
+        throw new Error('should not interrupt');
+      },
+      listPanes: async () => [{ id: 1, is_plugin: false, is_focused: true }],
+      dumpScreen: async () => '',
+      closePane: async () => undefined,
+      killSession: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+    };
+    const adapter = createZellijTerminalHostAdapter({
+      zellijBinary: '/tools/zellij',
+      happyHomeDir: '/home/happier',
+      actions,
+      actionTimeoutMs: 123,
+      pasteMaxBytes: 1024,
+    });
+
+    await expect(adapter.injectUserPrompt(
+      {
+        kind: 'zellij',
+        sessionName: 'session-a',
+        paneId: 'terminal_1',
+        attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' },
+      },
+      {
+        text: 'line one\nline two',
+        multiline: true,
+        origin: { kind: 'ui_pending', nonce: 'nonce-a' },
+        scheduling: {},
+      },
+    )).resolves.toMatchObject({ status: 'injected', bytesWritten: Buffer.byteLength('line one\nline two') });
+
+    expect(calls).toEqual([
+      'paste:terminal_1:line one\nline two:123',
+      expect.stringMatching(/^enter:terminal_1:\d+$/),
+    ]);
+  });
+
+  it('checks large zellij paste after submitting and retries Enter when it remains pending', async () => {
+    const prompt = Array.from({ length: 6_000 }, (_, index) => `line ${index} ${'x'.repeat(36)}`).join('\n');
+    expect(Buffer.byteLength(prompt, 'utf8')).toBeGreaterThan(250_000);
+    const calls: string[] = [];
+    let dumpCount = 0;
+    const actions: ZellijActions = {
+      attachCreateBackground: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+      runCommand: async () => ({ exitCode: 0, stdout: 'terminal_1', stderr: '' }),
+      pasteText: async (params) => {
+        calls.push(`paste:${params.paneId}`);
+      },
+      writeBytesChunked: async () => {
+        throw new Error('safe zellij prompt delivery should use action paste');
+      },
+      sendEnter: async (params) => {
+        calls.push(`enter:${params.paneId}`);
+      },
+      sendEscape: async () => {
+        throw new Error('should not interrupt');
+      },
+      listPanes: async () => [{ id: 1, is_plugin: false, is_focused: true }],
+      dumpScreen: async (params) => {
+        calls.push(`dump:${params.paneId}`);
+        dumpCount += 1;
+        return dumpCount === 1 ? '[Pasted text #1 +5999 lines]' : '';
+      },
+      closePane: async () => undefined,
+      killSession: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+    };
+    const adapter = createClaudeZellijTerminalHostAdapter({
+      zellijBinary: '/tools/zellij',
+      happyHomeDir: '/home/happier',
+      actions,
+      actionTimeoutMs: 123,
+      pasteMaxBytes: 1024 * 1024,
+    });
+
+    await expect(adapter.injectUserPrompt(
+      {
+        kind: 'zellij',
+        sessionName: 'session-a',
+        paneId: 'terminal_1',
+        attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' },
+      },
+      {
+        text: prompt,
+        multiline: true,
+        origin: { kind: 'ui_pending', nonce: 'nonce-large-zellij-verify' },
+        scheduling: {},
+      },
+    )).resolves.toMatchObject({ status: 'injected' });
+
+    expect(calls).toEqual([
+      'paste:terminal_1',
+      'enter:terminal_1',
+      'dump:terminal_1',
+      'enter:terminal_1',
+      'dump:terminal_1',
+    ]);
+  });
+
+  it('re-sends Enter once when a collapsed multiline paste remains in the composer after submit', async () => {
+    const calls: string[] = [];
+    let dumpCount = 0;
+    const actions: ZellijActions = {
+      attachCreateBackground: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+      runCommand: async () => ({ exitCode: 0, stdout: 'terminal_1', stderr: '' }),
+      pasteText: async (params) => {
+        calls.push(`paste:${params.paneId}`);
+      },
+      writeBytesChunked: async () => {
+        throw new Error('safe zellij prompt delivery should use action paste');
+      },
+      sendEnter: async (params) => {
+        calls.push(`enter:${params.paneId}`);
+      },
+      sendEscape: async () => {
+        throw new Error('should not interrupt');
+      },
+      listPanes: async () => [{ id: 1, is_plugin: false, is_focused: true }],
+      dumpScreen: async (params) => {
+        dumpCount += 1;
+        calls.push(`dump:${params.paneId}`);
+        return dumpCount === 1 ? '[Pasted text #1 +40 lines]' : '';
+      },
+      closePane: async () => undefined,
+      killSession: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+    };
+    const adapter = createClaudeZellijTerminalHostAdapter({
+      zellijBinary: '/tools/zellij',
+      happyHomeDir: '/home/happier',
+      actions,
+      actionTimeoutMs: 123,
+      pasteMaxBytes: 1024 * 1024,
+    });
+
+    await expect(adapter.injectUserPrompt(
+      {
+        kind: 'zellij',
+        sessionName: 'session-a',
+        paneId: 'terminal_1',
+        attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' },
+      },
+      {
+        text: Array.from({ length: 41 }, (_, index) => `line ${index}`).join('\n'),
+        multiline: true,
+        origin: { kind: 'ui_pending', nonce: 'nonce-zellij-submit-retry' },
+        scheduling: {},
+      },
+    )).resolves.toMatchObject({ status: 'injected' });
+
+    expect(calls).toEqual([
+      'paste:terminal_1',
+      'enter:terminal_1',
+      'dump:terminal_1',
+      'enter:terminal_1',
+      'dump:terminal_1',
+    ]);
+  });
+
+  it('reports ambiguous failure when a collapsed zellij paste remains after the bounded Enter retry', async () => {
+    const calls: string[] = [];
+    const actions: ZellijActions = {
+      attachCreateBackground: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+      runCommand: async () => ({ exitCode: 0, stdout: 'terminal_1', stderr: '' }),
+      pasteText: async (params) => {
+        calls.push(`paste:${params.paneId}`);
+      },
+      writeBytesChunked: async () => {
+        throw new Error('safe zellij prompt delivery should use action paste');
+      },
+      sendEnter: async (params) => {
+        calls.push(`enter:${params.paneId}`);
+      },
+      sendEscape: async () => {
+        throw new Error('should not interrupt');
+      },
+      listPanes: async () => [{ id: 1, is_plugin: false, is_focused: true }],
+      dumpScreen: async (params) => {
+        calls.push(`dump:${params.paneId}`);
+        return '[Pasted text #1 +40 lines]';
+      },
+      closePane: async () => undefined,
+      killSession: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+    };
+    const adapter = createClaudeZellijTerminalHostAdapter({
+      zellijBinary: '/tools/zellij',
+      happyHomeDir: '/home/happier',
+      actions,
+      actionTimeoutMs: 123,
+      pasteMaxBytes: 1024 * 1024,
+    });
+
+    await expect(adapter.injectUserPrompt(
+      {
+        kind: 'zellij',
+        sessionName: 'session-a',
+        paneId: 'terminal_1',
+        attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' },
+      },
+      {
+        text: Array.from({ length: 41 }, (_, index) => `line ${index}`).join('\n'),
+        multiline: true,
+        origin: { kind: 'ui_pending', nonce: 'nonce-zellij-submit-stuck' },
+        scheduling: {},
+      },
+    )).resolves.toEqual({
+      status: 'failed',
+      reason: 'host_unreachable',
+      phase: 'after_enter_unknown',
+      duplicateRisk: 'possible',
+      recoverable: true,
+    });
+
+    expect(calls).toEqual([
+      'paste:terminal_1',
+      'enter:terminal_1',
+      'dump:terminal_1',
+      'enter:terminal_1',
+      'dump:terminal_1',
+    ]);
+  });
+
+  it('submits a large zellij paste when pre-submit screen proof is inconclusive', async () => {
+    const prompt = Array.from({ length: 6_000 }, (_, index) => `line ${index} ${'x'.repeat(36)}`).join('\n');
+    const calls: string[] = [];
+    const actions: ZellijActions = {
+      attachCreateBackground: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+      runCommand: async () => ({ exitCode: 0, stdout: 'terminal_1', stderr: '' }),
+      pasteText: async (params) => {
+        calls.push(`paste:${params.paneId}`);
+      },
+      writeBytesChunked: async () => {
+        throw new Error('safe zellij prompt delivery should use action paste');
+      },
+      sendEnter: async (params) => {
+        calls.push(`enter:${params.paneId}`);
+      },
+      sendEscape: async () => {
+        throw new Error('should not interrupt');
+      },
+      listPanes: async () => [{ id: 1, is_plugin: false, is_focused: true }],
+      dumpScreen: async (params) => {
+        calls.push(`dump:${params.paneId}`);
+        return 'old composer contents';
+      },
+      closePane: async () => undefined,
+      killSession: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+    };
+    const adapter = createClaudeZellijTerminalHostAdapter({
+      zellijBinary: '/tools/zellij',
+      happyHomeDir: '/home/happier',
+      actions,
+      actionTimeoutMs: 123,
+      pasteMaxBytes: 1024 * 1024,
+    });
+
+    await expect(adapter.injectUserPrompt(
+      {
+        kind: 'zellij',
+        sessionName: 'session-a',
+        paneId: 'terminal_1',
+        attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' },
+      },
+      {
+        text: prompt,
+        multiline: true,
+        origin: { kind: 'ui_pending', nonce: 'nonce-large-zellij-unverified' },
+        scheduling: {},
+      },
+    )).resolves.toMatchObject({ status: 'injected', bytesWritten: Buffer.byteLength(prompt) });
+
+    expect(calls).toEqual([
+      'paste:terminal_1',
+      'enter:terminal_1',
+      'dump:terminal_1',
+    ]);
+  });
+
+  it('does not wait for a delayed pre-submit collapsed marker before pressing Enter', async () => {
+    const prompt = Array.from({ length: 6_000 }, (_, index) => `line ${index} ${'x'.repeat(36)}`).join('\n');
+    const calls: string[] = [];
+    let dumpCount = 0;
+    let enterCount = 0;
+    const actions: ZellijActions = {
+      attachCreateBackground: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+      runCommand: async () => ({ exitCode: 0, stdout: 'terminal_1', stderr: '' }),
+      pasteText: async (params) => {
+        calls.push(`paste:${params.paneId}`);
+      },
+      writeBytesChunked: async () => {
+        throw new Error('safe zellij prompt delivery should use action paste');
+      },
+      sendEnter: async (params) => {
+        enterCount += 1;
+        calls.push(`enter:${params.paneId}`);
+      },
+      sendEscape: async () => {
+        throw new Error('should not interrupt');
+      },
+      listPanes: async () => [{ id: 1, is_plugin: false, is_focused: true }],
+      dumpScreen: async (params) => {
+        dumpCount += 1;
+        calls.push(`dump:${params.paneId}:${dumpCount}`);
+        if (enterCount > 0) return '';
+        return dumpCount < 3 ? 'old composer contents' : '❯ [Pasted text #1 +5999 lines]';
+      },
+      closePane: async () => undefined,
+      killSession: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+    };
+    const adapter = createClaudeZellijTerminalHostAdapter({
+      zellijBinary: '/tools/zellij',
+      happyHomeDir: '/home/happier',
+      actions,
+      actionTimeoutMs: 1_000,
+      pasteMaxBytes: 1024 * 1024,
+    });
+
+    const injection = adapter.injectUserPrompt(
+      {
+        kind: 'zellij',
+        sessionName: 'session-a',
+        paneId: 'terminal_1',
+        attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' },
+      },
+      {
+        text: prompt,
+        multiline: true,
+        origin: { kind: 'ui_pending', nonce: 'nonce-large-zellij-delayed-marker' },
+        scheduling: {},
+      },
+    );
+
+    await expect(injection).resolves.toMatchObject({ status: 'injected' });
+    expect(calls).toEqual([
+      'paste:terminal_1',
+      'enter:terminal_1',
+      'dump:terminal_1:1',
+    ]);
+  });
+
+  it('does not treat a stale visible placeholder as a still-pending submitted paste', async () => {
+    const prompt = Array.from({ length: 6_000 }, (_, index) => `line ${index} ${'x'.repeat(36)}`).join('\n');
+    const calls: string[] = [];
+    const actions: ZellijActions = {
+      attachCreateBackground: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+      runCommand: async () => ({ exitCode: 0, stdout: 'terminal_1', stderr: '' }),
+      pasteText: async (params) => {
+        calls.push(`paste:${params.paneId}`);
+      },
+      writeBytesChunked: async () => {
+        throw new Error('safe zellij prompt delivery should use action paste');
+      },
+      sendEnter: async (params) => {
+        calls.push(`enter:${params.paneId}`);
+      },
+      sendEscape: async () => {
+        throw new Error('should not interrupt');
+      },
+      listPanes: async () => [{ id: 1, is_plugin: false, is_focused: true }],
+      dumpScreen: async (params) => {
+        calls.push(`dump:${params.paneId}`);
+        return [
+          'previous prompt already submitted',
+          '[Pasted text +5999 lines]',
+          '',
+          '│ > │',
+        ].join('\n');
+      },
+      closePane: async () => undefined,
+      killSession: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+    };
+    const adapter = createClaudeZellijTerminalHostAdapter({
+      zellijBinary: '/tools/zellij',
+      happyHomeDir: '/home/happier',
+      actions,
+      actionTimeoutMs: 123,
+      pasteMaxBytes: 1024 * 1024,
+    });
+
+    await expect(adapter.injectUserPrompt(
+      {
+        kind: 'zellij',
+        sessionName: 'session-a',
+        paneId: 'terminal_1',
+        attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' },
+      },
+      {
+        text: prompt,
+        multiline: true,
+        origin: { kind: 'ui_pending', nonce: 'nonce-large-zellij-stale-placeholder' },
+        scheduling: {},
+      },
+    )).resolves.toMatchObject({ status: 'injected', bytesWritten: Buffer.byteLength(prompt) });
+
+    expect(calls).toEqual([
+      'paste:terminal_1',
+      'enter:terminal_1',
+      'dump:terminal_1',
+    ]);
+  });
+
+  it('falls back to chunked byte writes when prompt text exceeds the argv-safe paste cap', async () => {
+    const calls: string[] = [];
+    const actions: ZellijActions = {
+      attachCreateBackground: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+      runCommand: async () => ({ exitCode: 0, stdout: 'terminal_1', stderr: '' }),
+      pasteText: async () => {
+        throw new Error('over-cap zellij prompt delivery must not use action paste');
+      },
+      writeBytesChunked: async (params) => {
+        calls.push(`write:${params.paneId}:${params.text}:${params.chunkSize ?? 'none'}:${params.timeoutMs ?? 'none'}`);
+      },
+      sendEnter: async (params) => {
+        calls.push(`enter:${params.paneId}:${params.timeoutMs ?? 'none'}`);
+      },
+      sendEscape: async () => {
+        throw new Error('should not interrupt');
+      },
+      listPanes: async () => [{ id: 1, is_plugin: false, is_focused: true }],
+      dumpScreen: async () => '',
+      closePane: async () => undefined,
+      killSession: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+    };
+    const adapter = createZellijTerminalHostAdapter({
+      zellijBinary: '/tools/zellij',
+      happyHomeDir: '/home/happier',
+      actions,
+      actionTimeoutMs: 123,
+      pasteMaxBytes: 4,
+    });
+
+    await expect(adapter.injectUserPrompt(
+      {
+        kind: 'zellij',
+        sessionName: 'session-a',
+        paneId: 'terminal_1',
+        attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' },
+      },
+      {
+        text: 'hello',
+        multiline: false,
+        origin: { kind: 'ui_pending', nonce: 'nonce-a' },
+        scheduling: {},
+      },
+    )).resolves.toMatchObject({ status: 'injected', bytesWritten: Buffer.byteLength('hello') });
+
+    expect(calls).toEqual([
+      `write:terminal_1:hello:${DEFAULT_ZELLIJ_WRITE_BYTES_CHUNK_SIZE}:123`,
+      expect.stringMatching(/^enter:terminal_1:\d+$/),
+    ]);
+  });
+
+  it('falls back to chunked byte writes when zellij action paste is unavailable', async () => {
+    const calls: string[] = [];
+    const actions: ZellijActions = {
+      attachCreateBackground: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+      runCommand: async () => ({ exitCode: 0, stdout: 'terminal_1', stderr: '' }),
+      pasteText: async () => {
+        calls.push('paste');
+        throw new Error('zellij action paste failed: unknown action');
+      },
+      writeBytesChunked: async (params) => {
+        calls.push(`write:${params.paneId}:${params.text}:${params.timeoutMs ?? 'none'}`);
+      },
+      sendEnter: async (params) => {
+        calls.push(`enter:${params.paneId}:${params.timeoutMs ?? 'none'}`);
+      },
+      sendEscape: async () => {
+        throw new Error('should not interrupt');
+      },
+      listPanes: async () => [{ id: 1, is_plugin: false, is_focused: true }],
+      dumpScreen: async () => '',
+      closePane: async () => undefined,
+      killSession: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+    };
+    const adapter = createZellijTerminalHostAdapter({
+      zellijBinary: '/tools/zellij',
+      happyHomeDir: '/home/happier',
+      actions,
+      actionTimeoutMs: 123,
+      pasteMaxBytes: 1024,
+    });
+
+    await expect(adapter.injectUserPrompt(
+      {
+        kind: 'zellij',
+        sessionName: 'session-a',
+        paneId: 'terminal_1',
+        attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' },
+      },
+      {
+        text: 'hello',
+        multiline: false,
+        origin: { kind: 'ui_pending', nonce: 'nonce-a' },
+        scheduling: {},
+      },
+    )).resolves.toMatchObject({ status: 'injected', bytesWritten: Buffer.byteLength('hello') });
+
+    expect(calls).toEqual([
+      'paste',
+      'write:terminal_1:hello:123',
+      expect.stringMatching(/^enter:terminal_1:\d+$/),
+    ]);
+  });
+
+  it('does not fall back to chunked byte writes when zellij action paste times out', async () => {
+    const calls: string[] = [];
+    const actions: ZellijActions = {
+      attachCreateBackground: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+      runCommand: async () => ({ exitCode: 0, stdout: 'terminal_1', stderr: '' }),
+      pasteText: async () => {
+        calls.push('paste');
+        throw new ZellijActionTimeoutError('paste');
+      },
+      writeBytesChunked: async () => {
+        calls.push('write');
+      },
+      sendEnter: async () => {
+        calls.push('enter');
+      },
+      sendEscape: async () => {
+        throw new Error('should not interrupt');
+      },
+      listPanes: async () => [{ id: 1, is_plugin: false, is_focused: true }],
+      dumpScreen: async () => '',
+      closePane: async () => undefined,
+      killSession: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+    };
+    const adapter = createZellijTerminalHostAdapter({
+      zellijBinary: '/tools/zellij',
+      happyHomeDir: '/home/happier',
+      actions,
+      actionTimeoutMs: 123,
+      pasteMaxBytes: 1024,
+    });
+
+    await expect(adapter.injectUserPrompt(
+      {
+        kind: 'zellij',
+        sessionName: 'session-a',
+        paneId: 'terminal_1',
+        attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' },
+      },
+      {
+        text: 'hello',
+        multiline: false,
+        origin: { kind: 'ui_pending', nonce: 'nonce-a' },
+        scheduling: {},
+      },
+    )).resolves.toEqual({
+      status: 'failed',
+      reason: 'timeout',
+      phase: 'during_write',
+      duplicateRisk: 'possible',
+      recoverable: true,
+    });
+
+    expect(calls).toEqual(['paste']);
   });
 
   it('does not close a proven command replacement that reuses a closed bootstrap pane id', async () => {

@@ -27,6 +27,18 @@ function watcherDebugMessages(debugSpy: ReturnType<typeof vi.spyOn>): string[] {
   return debugSpy.mock.calls.map(([message]) => String(message));
 }
 
+async function advanceMissingParentRetriesUntilExpired(debugSpy: ReturnType<typeof vi.spyOn>): Promise<void> {
+  for (let i = 0; i < 60; i += 1) {
+    if (watcherDebugMessages(debugSpy).some((message) => message.includes('stopping watcher'))) {
+      return;
+    }
+    await vi.advanceTimersByTimeAsync(1_000);
+    await Promise.resolve();
+  }
+
+  throw new Error(`Timed out waiting for missing-parent watcher expiry. Logs:\n${watcherDebugMessages(debugSpy).join('\n')}`);
+}
+
 describe('startFileWatcher', () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -66,7 +78,10 @@ describe('startFileWatcher', () => {
       calls += 1;
     });
 
-    await vi.advanceTimersByTimeAsync(120_000);
+    await vi.waitFor(() => {
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+    });
+    await advanceMissingParentRetriesUntilExpired(debugSpy);
     const debugCountAfterExpiry = watcherDebugMessages(debugSpy).length;
 
     await vi.advanceTimersByTimeAsync(120_000);

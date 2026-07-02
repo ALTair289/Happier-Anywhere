@@ -72,6 +72,33 @@ describe('zellij actions', () => {
     vi.useRealTimers();
   });
 
+  it('pastes text with pane id as one zellij action without shell interpolation', async () => {
+    const { pasteText } = await import('./actions');
+    await pasteText({
+      zellijBinary: '/tools/zellij',
+      paneId: 'terminal_1',
+      text: 'hello $(rm -rf /)\nsecond line',
+      env: { ZELLIJ_SOCKET_DIR: '/tmp/zellij sock' },
+    });
+
+    expect(spawnMock).toHaveBeenCalledWith(
+      '/tools/zellij',
+      ['action', 'paste', '--pane-id', 'terminal_1', 'hello $(rm -rf /)\nsecond line'],
+      expect.objectContaining({ shell: false }),
+    );
+    const options = spawnMock.mock.calls[0]?.[2] as SpawnOptions | undefined;
+    expect(options?.env).toMatchObject({ ZELLIJ_SOCKET_DIR: '/tmp/zellij sock' });
+  });
+
+  it('resolves conservative zellij action-paste byte caps by host platform', async () => {
+    const { resolveZellijActionPasteSafeBytes } = await import('./actions');
+
+    expect(resolveZellijActionPasteSafeBytes('darwin')).toBe(300_000);
+    expect(resolveZellijActionPasteSafeBytes('linux')).toBe(65_536);
+    expect(resolveZellijActionPasteSafeBytes('win32')).toBe(16_384);
+    expect(resolveZellijActionPasteSafeBytes('freebsd')).toBe(65_536);
+  });
+
   it('runs raw-byte write chunks and Enter without shell interpolation', async () => {
     const { writeBytesChunked, sendEnter } = await import('./actions');
     await writeBytesChunked({

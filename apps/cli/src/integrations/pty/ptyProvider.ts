@@ -8,6 +8,7 @@ import {
 } from '@/runtime/resolveRuntimeEntrypointArgv';
 import { isEmbeddedBunBundlePath } from '@/runtime/js/isEmbeddedBunBundlePath';
 import { logger } from '@/ui/logger';
+import { createNodePtyRelayProvider } from './nodePtyRelayProvider';
 import { createPythonPtyRelayProvider } from './pythonPtyRelayProvider';
 
 export type Disposable = Readonly<{ dispose: () => void }>;
@@ -283,15 +284,27 @@ export function createNodePtyProvider(params?: Readonly<{
     currentExecPath,
   });
   const require = createRequire(requireBase);
-  const fallbackProvider =
-    params?.fallbackProvider
-    ?? createPythonPtyRelayProvider({
+  const hasFallbackProviderOverride = Object.prototype.hasOwnProperty.call(params ?? {}, 'fallbackProvider');
+  const defaultNodeRelayProvider = hasFallbackProviderOverride
+    ? null
+    : createNodePtyRelayProvider({
       env: params?.env ?? process.env,
       platform,
+      currentExecPath,
     });
+  const defaultFallbackProvider = defaultNodeRelayProvider
+    ?? (hasFallbackProviderOverride
+      ? null
+      : createPythonPtyRelayProvider({
+        env: params?.env ?? process.env,
+        platform,
+      }));
+  const fallbackProvider = hasFallbackProviderOverride
+    ? (params?.fallbackProvider ?? null)
+    : defaultFallbackProvider;
   const fallbackBackendName =
     params?.fallbackBackendName
-    ?? (fallbackProvider ? 'python-relay' : null);
+    ?? (fallbackProvider ? (defaultNodeRelayProvider ? 'node-relay' : 'python-relay') : null);
   const nativeLoadErrors: Array<{ id: string; message: string }> = [];
 
   const tryResolveModule = (moduleId: string): { id: string; module: typeof import('node-pty') } | null => {

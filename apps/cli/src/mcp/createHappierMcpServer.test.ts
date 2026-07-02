@@ -111,6 +111,108 @@ describe('createHappierMcpServer', () => {
     expect(captured.deps.isActionApprovalRequired('session.list', { surface: 'session_agent' })).toBe(true);
   });
 
+  it('reads latest account action settings for enablement and approval without recreating the bridge', async () => {
+    const captured: { deps?: any } = {};
+
+    vi.doMock('@happier-dev/protocol', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('@happier-dev/protocol')>();
+      return {
+        ...actual,
+        createActionExecutor: (deps: any) => {
+          captured.deps = deps;
+          return {} as any;
+        },
+      };
+    });
+
+    let accountSettings: any = {
+      actionsSettingsV1: {
+        v: 1,
+        actions: {
+          'session.list': {
+            disabledSurfaces: ['session_agent'],
+          },
+        },
+      },
+    };
+
+    const { createHappierMcpServer } = await import('@/mcp/createHappierMcpServer');
+
+    createHappierMcpServer({
+      sessionId: 'sess_mcp_live_settings_1',
+      rpcHandlerManager: { invokeLocal: async () => ({}) },
+      sendClaudeSessionMessage: () => {},
+      updateMetadata: () => {},
+    } as any, {
+      getAccountSettings: () => accountSettings,
+    });
+
+    expect(captured.deps).toBeDefined();
+    expect(captured.deps.isActionEnabled('session.list', { surface: 'session_agent' })).toBe(false);
+    expect(captured.deps.isActionApprovalRequired('session.list', { surface: 'session_agent' })).toBe(false);
+
+    accountSettings = {
+      actionsSettingsV1: {
+        v: 1,
+        actions: {
+          'session.list': {
+            disabledSurfaces: [],
+            approvalRequiredSurfaces: ['session_agent'],
+          },
+        },
+      },
+    };
+
+    expect(captured.deps.isActionEnabled('session.list', { surface: 'session_agent' })).toBe(true);
+    expect(captured.deps.isActionApprovalRequired('session.list', { surface: 'session_agent' })).toBe(true);
+  });
+
+  it('keeps direct tool registrations scoped to the settings snapshot used to create that MCP server', async () => {
+    let accountSettings: any = {
+      actionsSettingsV1: {
+        v: 1,
+        actions: {
+          'session.list': {
+            disabledSurfaces: ['session_agent'],
+            toolExposureModes: { session_agent: 'direct' },
+          },
+        },
+      },
+    };
+
+    const { createHappierMcpServer } = await import('@/mcp/createHappierMcpServer');
+
+    const fakeClient = {
+      sessionId: 'sess_mcp_direct_tool_snapshot_1',
+      rpcHandlerManager: { invokeLocal: async () => ({}) },
+      sendClaudeSessionMessage: () => {},
+      updateMetadata: () => {},
+    } as any;
+
+    const first = createHappierMcpServer(fakeClient, {
+      getAccountSettings: () => accountSettings,
+    });
+    expect(first.toolNames).not.toContain('session_list');
+
+    accountSettings = {
+      actionsSettingsV1: {
+        v: 1,
+        actions: {
+          'session.list': {
+            disabledSurfaces: [],
+            toolExposureModes: { session_agent: 'direct' },
+          },
+        },
+      },
+    };
+
+    expect(first.toolNames).not.toContain('session_list');
+    const second = createHappierMcpServer(fakeClient, {
+      getAccountSettings: () => accountSettings,
+    });
+    expect(second.toolNames).toContain('session_list');
+  });
+
   it('forwards execution.run.list request payloads through the shared action executor deps', async () => {
     const captured: { deps?: any } = {};
 

@@ -22,24 +22,36 @@ import {
 } from '@happier-dev/protocol';
 import { RPC_METHODS } from '@happier-dev/protocol/rpc';
 import { MemorySearchResultV1Schema, MemoryWindowV1Schema, type MemorySearchResultV1, type MemoryWindowV1 } from '@happier-dev/protocol';
-import { createMcpActionApprovalRequirement, createMcpActionEnablement } from '@/mcp/server/createMcpActionEnablement';
+import {
+  createMcpActionApprovalRequirement,
+  createMcpActionEnablement,
+  createMcpActionSettingsProvider,
+} from '@/mcp/server/createMcpActionEnablement';
 
 export function createHappierMcpServer(
   client: HappyMcpSessionClient,
-  opts?: Readonly<{ credentials?: Credentials | null; accountSettings?: AccountSettings | null }>,
+  opts?: Readonly<{
+    credentials?: Credentials | null;
+    accountSettings?: AccountSettings | null;
+    getAccountSettings?: (() => AccountSettings | null) | null;
+  }>,
 ): { mcp: McpServer; toolNames: string[] } {
   // This server is the per-session MCP bridge that a running session agent uses.
   // It must use the `session_agent` surface so action enablement + approvals can be
   // configured separately from the external MCP surface (`mcp`).
   const toolSurface = 'session_agent' as const;
   const credentials = opts?.credentials ?? null;
-  const actionsSettings = opts?.accountSettings?.actionsSettingsV1 ?? null;
-  const isActionEnabled = createMcpActionEnablement({
+  const actionSettingsProvider = createMcpActionSettingsProvider({
     accountSettings: opts?.accountSettings ?? null,
+    getAccountSettings: opts?.getAccountSettings ?? null,
+  });
+  const readActionsSettings = () => actionSettingsProvider.getActionsSettings();
+  const isActionEnabled = createMcpActionEnablement({
+    actionSettingsProvider,
     surface: toolSurface,
   });
   const isActionApprovalRequired = createMcpActionApprovalRequirement({
-    accountSettings: opts?.accountSettings ?? null,
+    actionSettingsProvider,
     surface: toolSurface,
   });
   const ctx = credentials
@@ -180,13 +192,15 @@ export function createHappierMcpServer(
       return isActionSpecSurfacedOn(spec, toolSurface) && isActionEnabled(id as any);
     },
     surface: toolSurface,
-    actionsSettings,
+    actionsSettings: readActionsSettings(),
+    getActionsSettings: readActionsSettings,
   });
 
   const { toolNames } = registerHappierMcpBuiltInTools(mcp as any, {
     sessionId: client.sessionId,
     surface: toolSurface,
-    actionsSettings,
+    actionsSettings: readActionsSettings(),
+    getActionsSettings: readActionsSettings,
     deps: {
       changeTitle: createChangeTitleToolHandler({
         executor,

@@ -9,6 +9,7 @@ export type CatalogAcpRuntimeCreateCall = {
     agentId: string;
     permissionMode: PermissionMode | null | undefined;
     happierSessionId?: string | null;
+    env?: NodeJS.ProcessEnv;
 };
 
 function createFakeBackend(id: number): AgentBackend {
@@ -31,11 +32,16 @@ function createFakeBackend(id: number): AgentBackend {
 
 export function createCatalogAcpBackendSpy(createCalls: CatalogAcpRuntimeCreateCall[]) {
     return vi.spyOn(acpModule, 'createCatalogAcpBackend').mockImplementation(async (agentId, options) => {
-        const catalogOptions = (options ?? {}) as { permissionMode?: PermissionMode | null; happierSessionId?: string | null };
+        const catalogOptions = (options ?? {}) as {
+            permissionMode?: PermissionMode | null;
+            happierSessionId?: string | null;
+            env?: NodeJS.ProcessEnv;
+        };
         createCalls.push({
             agentId,
             permissionMode: catalogOptions.permissionMode,
             ...(catalogOptions.happierSessionId !== undefined ? { happierSessionId: catalogOptions.happierSessionId } : {}),
+            ...(catalogOptions.env !== undefined ? { env: catalogOptions.env } : {}),
         });
 
         return {

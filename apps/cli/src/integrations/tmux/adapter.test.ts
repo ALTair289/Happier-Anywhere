@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { createClaudePromptSubmitVerificationPolicy } from '@/backends/claude/unifiedTerminal/claudePromptSubmitVerification';
 import { parseClaudeScreenState, resolveClaudeScreenInFlightSteerVeto } from '@/backends/claude/unifiedTerminal/tuiControls/screenState';
 
 import { createTmuxTerminalHostAdapter } from './adapter';
@@ -11,6 +12,13 @@ const TMUX_HANDLE = {
   paneId: 'claude.1',
   attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' },
 } as const;
+
+function createClaudeTmuxTerminalHostAdapter(tmux: TmuxUtilities) {
+  return createTmuxTerminalHostAdapter({
+    tmux,
+    promptSubmitVerification: createClaudePromptSubmitVerificationPolicy(),
+  });
+}
 
 describe('createTmuxTerminalHostAdapter', () => {
   afterEach(() => {
@@ -83,7 +91,7 @@ describe('createTmuxTerminalHostAdapter', () => {
     });
   });
 
-  it('types prompt text as literal keys and submits with carriage return', async () => {
+  it('pastes prompt text through a tmux buffer and submits with carriage return', async () => {
     const tmux = new TmuxUtilities();
     const executeTmuxCommand = vi.spyOn(tmux, 'executeTmuxCommand').mockResolvedValue({
       returncode: 0,
@@ -111,16 +119,23 @@ describe('createTmuxTerminalHostAdapter', () => {
       ),
     ).resolves.toMatchObject({ status: 'injected' });
 
-    expect(executeTmuxCommand.mock.calls.map((call) => call[0])).toEqual([
+    const calls = executeTmuxCommand.mock.calls;
+    const loadArgs = calls[3]?.[0];
+    expect(loadArgs?.[0]).toBe('load-buffer');
+    const bufferName = loadArgs?.[2];
+    expect(typeof bufferName).toBe('string');
+    expect(calls.map((call) => call[0])).toEqual([
       ['display-message', '-p', '-t', 'happy:claude.1', '#{pane_dead}\t#{pane_pid}\t#{pane_current_command}'],
       ['display-message', '-p', '#{cursor_x}\t#{cursor_y}'],
       ['display-message', '-p', '#{cursor_x}\t#{cursor_y}'],
-      ['send-keys', '-t', 'happy:claude.1', '-l', '--', 'queued prompt'],
+      ['load-buffer', '-b', bufferName, '-'],
+      ['paste-buffer', '-p', '-r', '-d', '-b', bufferName, '-t', 'happy:claude.1'],
       ['send-keys', '-t', 'happy:claude.1', 'C-m'],
     ]);
+    expect(calls[3]?.[5]).toBe('queued prompt');
   });
 
-  it('types multiline prompts with tmux newline keys before submitting with carriage return', async () => {
+  it('pastes multiline prompts without sending tmux newline keys before submit', async () => {
     const tmux = new TmuxUtilities();
     const executeTmuxCommand = vi.spyOn(tmux, 'executeTmuxCommand').mockResolvedValue({
       returncode: 0,
@@ -128,6 +143,7 @@ describe('createTmuxTerminalHostAdapter', () => {
       stderr: '',
       command: [],
     });
+    const captureCurrentInput = vi.spyOn(tmux, 'captureCurrentInput').mockResolvedValue('');
     const adapter = createTmuxTerminalHostAdapter({ tmux });
 
     await expect(
@@ -147,16 +163,279 @@ describe('createTmuxTerminalHostAdapter', () => {
       ),
     ).resolves.toMatchObject({ status: 'injected' });
 
-    expect(executeTmuxCommand.mock.calls.map((call) => call[0])).toEqual([
+    const calls = executeTmuxCommand.mock.calls;
+    const bufferName = calls[1]?.[0]?.[2];
+    expect(calls.map((call) => call[0])).toEqual([
       ['display-message', '-p', '-t', 'happy:claude.1', '#{pane_dead}\t#{pane_pid}\t#{pane_current_command}'],
-      ['send-keys', '-t', 'happy:claude.1', '-l', '--', 'alpha'],
-      ['send-keys', '-t', 'happy:claude.1', 'C-j'],
-      ['send-keys', '-t', 'happy:claude.1', '-l', '--', 'beta'],
+      ['load-buffer', '-b', bufferName, '-'],
+      ['paste-buffer', '-p', '-r', '-d', '-b', bufferName, '-t', 'happy:claude.1'],
+      ['send-keys', '-t', 'happy:claude.1', 'C-m'],
+    ]);
+    expect(calls[1]?.[5]).toBe('alpha\nbeta');
+    expect(calls.map((call) => call[0]).some((args) => args[0] === 'send-keys' && args.includes('C-j'))).toBe(false);
+    expect(captureCurrentInput).not.toHaveBeenCalled();
+  });
+
+  it('keeps incident-sized prompts on one tmux buffer paste instead of chunked key sends', async () => {
+    const prompt = `${Array.from({ length: 6_000 }, (_, index) => `line ${index.toString().padStart(4, '0')} ${'x'.repeat(32)}`).join('\n')}
+
+[attachments]
+- synthetic-large-prompt.txt
+[/attachments]`;
+    expect(Buffer.byteLength(prompt, 'utf8')).toBeGreaterThan(250_000);
+
+    const tmux = new TmuxUtilities();
+    const executeTmuxCommand = vi.spyOn(tmux, 'executeTmuxCommand').mockResolvedValue({
+      returncode: 0,
+      stdout: '0\t12345\tclaude\n',
+      stderr: '',
+      command: [],
+    });
+    const captureCurrentInput = vi.spyOn(tmux, 'captureCurrentInput').mockResolvedValue('');
+    const adapter = createClaudeTmuxTerminalHostAdapter(tmux);
+
+    await expect(
+      adapter.injectUserPrompt(
+        {
+          kind: 'tmux',
+          sessionName: 'happy',
+          paneId: 'claude.1',
+          attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' },
+        },
+        {
+          text: prompt,
+          multiline: true,
+          origin: { kind: 'ui_pending', nonce: 'nonce-large' },
+          scheduling: {},
+        },
+      ),
+    ).resolves.toMatchObject({ status: 'injected', bytesWritten: Buffer.byteLength(prompt, 'utf8') });
+
+    const calls = executeTmuxCommand.mock.calls;
+    const bufferName = calls[1]?.[0]?.[2];
+    expect(calls.map((call) => call[0])).toEqual([
+      ['display-message', '-p', '-t', 'happy:claude.1', '#{pane_dead}\t#{pane_pid}\t#{pane_current_command}'],
+      ['load-buffer', '-b', bufferName, '-'],
+      ['paste-buffer', '-p', '-r', '-d', '-b', bufferName, '-t', 'happy:claude.1'],
+      ['send-keys', '-t', 'happy:claude.1', 'C-m'],
+    ]);
+    expect(calls[1]?.[5]).toBe(prompt);
+    expect(calls.map((call) => call[0]).filter((args) => args[0] === 'send-keys')).toEqual([
+      ['send-keys', '-t', 'happy:claude.1', 'C-m'],
+    ]);
+    expect(calls.flatMap((call) => call[0])).not.toContain(prompt);
+    expect(captureCurrentInput).toHaveBeenCalledTimes(1);
+  });
+
+  it('submits large tmux paste before checking whether the composer stayed stuck', async () => {
+    const prompt = Array.from({ length: 6_000 }, (_, index) => `line ${index} ${'x'.repeat(36)}`).join('\n');
+    expect(Buffer.byteLength(prompt, 'utf8')).toBeGreaterThan(250_000);
+    const order: string[] = [];
+    const tmux = new TmuxUtilities();
+    vi.spyOn(tmux, 'executeTmuxCommand').mockImplementation(async (args) => {
+      order.push(args[0] ?? '');
+      return {
+        returncode: 0,
+        stdout: args[0] === 'display-message' ? '0\t12345\tclaude\n' : '',
+        stderr: '',
+        command: [...args],
+      };
+    });
+    let captureCount = 0;
+    vi.spyOn(tmux, 'captureCurrentInput').mockImplementation(async () => {
+      captureCount += 1;
+      order.push('capture-current-input');
+      return captureCount === 1 ? '[Pasted text #1 +5999 lines]' : '';
+    });
+    const adapter = createClaudeTmuxTerminalHostAdapter(tmux);
+
+    await expect(
+      adapter.injectUserPrompt(
+        {
+          kind: 'tmux',
+          sessionName: 'happy',
+          paneId: 'claude.1',
+          attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' },
+        },
+        {
+          text: prompt,
+          multiline: true,
+          origin: { kind: 'ui_pending', nonce: 'nonce-large-verify' },
+          scheduling: {},
+        },
+      ),
+    ).resolves.toMatchObject({ status: 'injected' });
+
+    expect(order).toEqual([
+      'display-message',
+      'load-buffer',
+      'paste-buffer',
+      'send-keys',
+      'capture-current-input',
+      'send-keys',
+      'capture-current-input',
+    ]);
+  });
+
+  it('submits large tmux paste once when post-submit stuck-composer evidence is inconclusive', async () => {
+    const prompt = Array.from({ length: 6_000 }, (_, index) => `line ${index} ${'x'.repeat(36)}`).join('\n');
+    const tmux = new TmuxUtilities();
+    const executeTmuxCommand = vi.spyOn(tmux, 'executeTmuxCommand').mockImplementation(async (args) => ({
+      returncode: 0,
+      stdout: args[0] === 'display-message' ? '0\t12345\tclaude\n' : '',
+      stderr: '',
+      command: [...args],
+    }));
+    const captureCurrentInput = vi.spyOn(tmux, 'captureCurrentInput').mockResolvedValue('old composer contents');
+    const adapter = createClaudeTmuxTerminalHostAdapter(tmux);
+
+    await expect(
+      adapter.injectUserPrompt(
+        {
+          kind: 'tmux',
+          sessionName: 'happy',
+          paneId: 'claude.1',
+          attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' },
+        },
+        {
+          text: prompt,
+          multiline: true,
+          origin: { kind: 'ui_pending', nonce: 'nonce-large-unverified' },
+          scheduling: {},
+        },
+      ),
+    ).resolves.toMatchObject({ status: 'injected', bytesWritten: Buffer.byteLength(prompt, 'utf8') });
+
+    expect(executeTmuxCommand.mock.calls.map((call) => call[0]).filter((args) => args[0] === 'send-keys')).toEqual([
+      ['send-keys', '-t', 'happy:claude.1', 'C-m'],
+    ]);
+    expect(captureCurrentInput).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry Enter when only a stale visible placeholder matches after submit', async () => {
+    const prompt = Array.from({ length: 6_000 }, (_, index) => `line ${index} ${'x'.repeat(36)}`).join('\n');
+    const tmux = new TmuxUtilities();
+    const executeTmuxCommand = vi.spyOn(tmux, 'executeTmuxCommand').mockImplementation(async (args) => ({
+      returncode: 0,
+      stdout: args[0] === 'display-message' ? '0\t12345\tclaude\n' : '',
+      stderr: '',
+      command: [...args],
+    }));
+    vi.spyOn(tmux, 'captureCurrentInput').mockResolvedValue([
+      'previous prompt already submitted',
+      '[Pasted text +5999 lines]',
+      '',
+      '│ > │',
+    ].join('\n'));
+    const adapter = createClaudeTmuxTerminalHostAdapter(tmux);
+
+    await expect(
+      adapter.injectUserPrompt(
+        {
+          kind: 'tmux',
+          sessionName: 'happy',
+          paneId: 'claude.1',
+          attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' },
+        },
+        {
+          text: prompt,
+          multiline: true,
+          origin: { kind: 'ui_pending', nonce: 'nonce-large-stale-placeholder' },
+          scheduling: {},
+        },
+      ),
+    ).resolves.toMatchObject({ status: 'injected', bytesWritten: Buffer.byteLength(prompt, 'utf8') });
+
+    expect(executeTmuxCommand.mock.calls.map((call) => call[0]).filter((args) => args[0] === 'send-keys')).toEqual([
       ['send-keys', '-t', 'happy:claude.1', 'C-m'],
     ]);
   });
 
-  it('chunks literal prompt text without treating leading dashes as tmux options', async () => {
+  it('does not retry Enter when a submitted prompt-shaped transcript marker remains above the composer', async () => {
+    const tmux = new TmuxUtilities();
+    const executeTmuxCommand = vi.spyOn(tmux, 'executeTmuxCommand').mockImplementation(async (args) => ({
+      returncode: 0,
+      stdout: args[0] === 'display-message' ? '0\t12345\tclaude\n' : '',
+      stderr: '',
+      command: [...args],
+    }));
+    vi.spyOn(tmux, 'captureCurrentInput').mockResolvedValue([
+      'earlier submitted prompt',
+      '❯ [Pasted text #1 +40 lines]',
+      '',
+      '│ > │',
+    ].join('\n'));
+    const adapter = createClaudeTmuxTerminalHostAdapter(tmux);
+
+    await expect(
+      adapter.injectUserPrompt(
+        {
+          kind: 'tmux',
+          sessionName: 'happy',
+          paneId: 'claude.1',
+          attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' },
+        },
+        {
+          text: Array.from({ length: 41 }, (_, index) => `line ${index}`).join('\n'),
+          multiline: true,
+          origin: { kind: 'ui_pending', nonce: 'nonce-post-submit-stale' },
+          scheduling: {},
+        },
+      ),
+    ).resolves.toMatchObject({ status: 'injected' });
+
+    expect(executeTmuxCommand.mock.calls.map((call) => call[0]).filter((args) => args[0] === 'send-keys')).toEqual([
+      ['send-keys', '-t', 'happy:claude.1', 'C-m'],
+    ]);
+  });
+
+  it('retries Enter when the current composer marker has footer rows below it', async () => {
+    const tmux = new TmuxUtilities();
+    const executeTmuxCommand = vi.spyOn(tmux, 'executeTmuxCommand').mockImplementation(async (args) => ({
+      returncode: 0,
+      stdout: args[0] === 'display-message' ? '0\t12345\tclaude\n' : '',
+      stderr: '',
+      command: [...args],
+    }));
+    let captureCount = 0;
+    vi.spyOn(tmux, 'captureCurrentInput').mockImplementation(async () => {
+      captureCount += 1;
+      if (captureCount === 1) {
+        return [
+          '┄'.repeat(20),
+          '› [Pasted text #1 +40 lines]',
+          '─'.repeat(20),
+          '▶▶ auto mode on (shift+tab to cycle)',
+        ].join('\n');
+      }
+      return '';
+    });
+    const adapter = createClaudeTmuxTerminalHostAdapter(tmux);
+
+    await expect(
+      adapter.injectUserPrompt(
+        {
+          kind: 'tmux',
+          sessionName: 'happy',
+          paneId: 'claude.1',
+          attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' },
+        },
+        {
+          text: Array.from({ length: 41 }, (_, index) => `line ${index}`).join('\n'),
+          multiline: true,
+          origin: { kind: 'ui_pending', nonce: 'nonce-post-submit-footer' },
+          scheduling: {},
+        },
+      ),
+    ).resolves.toMatchObject({ status: 'injected' });
+
+    expect(executeTmuxCommand.mock.calls.map((call) => call[0]).filter((args) => args[0] === 'send-keys')).toEqual([
+      ['send-keys', '-t', 'happy:claude.1', 'C-m'],
+      ['send-keys', '-t', 'happy:claude.1', 'C-m'],
+    ]);
+  });
+
+  it('keeps leading-dash prompt text out of tmux argv by loading it through stdin', async () => {
     const originalChunkSize = process.env.HAPPIER_CLI_TMUX_SEND_KEYS_CHUNK_SIZE;
     process.env.HAPPIER_CLI_TMUX_SEND_KEYS_CHUNK_SIZE = '4';
     try {
@@ -186,12 +465,16 @@ describe('createTmuxTerminalHostAdapter', () => {
         ),
       ).resolves.toMatchObject({ status: 'injected' });
 
-      expect(executeTmuxCommand.mock.calls.map((call) => call[0])).toEqual([
+      const calls = executeTmuxCommand.mock.calls;
+      const bufferName = calls[1]?.[0]?.[2];
+      expect(calls.map((call) => call[0])).toEqual([
         ['display-message', '-p', '-t', 'happy:claude.1', '#{pane_dead}\t#{pane_pid}\t#{pane_current_command}'],
-        ['send-keys', '-t', 'happy:claude.1', '-l', '--', '-abc'],
-        ['send-keys', '-t', 'happy:claude.1', '-l', '--', 'def'],
+        ['load-buffer', '-b', bufferName, '-'],
+        ['paste-buffer', '-p', '-r', '-d', '-b', bufferName, '-t', 'happy:claude.1'],
         ['send-keys', '-t', 'happy:claude.1', 'C-m'],
       ]);
+      expect(calls[1]?.[5]).toBe('-abcdef');
+      expect(calls.flatMap((call) => call[0])).not.toContain('-abcdef');
     } finally {
       if (originalChunkSize === undefined) {
         delete process.env.HAPPIER_CLI_TMUX_SEND_KEYS_CHUNK_SIZE;
@@ -350,12 +633,12 @@ describe('createTmuxTerminalHostAdapter', () => {
     expect(executeTmuxCommand).toHaveBeenCalledTimes(1);
   });
 
-  it('fails with host_unreachable when typed tmux injection fails', async () => {
+  it('fails with host_unreachable and cleans up when tmux paste fails after loading a buffer', async () => {
     const tmux = new TmuxUtilities();
     vi.spyOn(tmux, 'executeTmuxCommand').mockImplementation(async (args) => ({
-      returncode: args[0] === 'display-message' ? 0 : 1,
+      returncode: args[0] === 'paste-buffer' ? 1 : 0,
       stdout: args[0] === 'display-message' ? '0\t12345\tclaude\n' : '',
-      stderr: args[0] === 'send-keys' ? 'tmux unavailable' : '',
+      stderr: args[0] === 'paste-buffer' ? 'tmux unavailable' : '',
       command: [...args],
     }));
     const adapter = createTmuxTerminalHostAdapter({ tmux });
@@ -382,6 +665,7 @@ describe('createTmuxTerminalHostAdapter', () => {
       duplicateRisk: 'none',
       recoverable: true,
     });
+    expect((tmux.executeTmuxCommand as unknown as { mock: { calls: Array<[readonly string[]]> } }).mock.calls.map((call) => call[0][0])).toContain('delete-buffer');
   });
 
   it('fails with timeout when prompt injection exceeds its deadline', async () => {
@@ -390,7 +674,13 @@ describe('createTmuxTerminalHostAdapter', () => {
       if (args[0] === 'display-message') {
         return { returncode: 0, stdout: '0\t12345\tclaude\n', stderr: '', command: [...args] };
       }
-      return { returncode: 1, stdout: '', stderr: '', command: [...args], timedOut: true };
+      return {
+        returncode: args[0] === 'load-buffer' || args[0] === 'delete-buffer' ? 0 : 1,
+        stdout: '',
+        stderr: '',
+        command: [...args],
+        ...(args[0] === 'paste-buffer' ? { timedOut: true } : {}),
+      };
     });
     const adapter = createTmuxTerminalHostAdapter({ tmux });
 
@@ -418,7 +708,7 @@ describe('createTmuxTerminalHostAdapter', () => {
     });
   });
 
-  it('does not report timeout while a tmux write command can still continue', async () => {
+  it('waits for an in-flight tmux load-buffer command before reporting an exhausted pre-write deadline', async () => {
     vi.useFakeTimers();
     const tmux = new TmuxUtilities();
     const calls: readonly string[][] = [];
@@ -428,7 +718,7 @@ describe('createTmuxTerminalHostAdapter', () => {
       if (args[0] === 'display-message') {
         return { returncode: 0, stdout: '0\t12345\tclaude\n', stderr: '', command: [...args] };
       }
-      if (args[0] === 'send-keys' && args.includes('-l')) {
+      if (args[0] === 'load-buffer') {
         return new Promise((resolve) => {
           finishWrite = resolve;
         });
@@ -460,11 +750,17 @@ describe('createTmuxTerminalHostAdapter', () => {
 
     finishWrite?.({ returncode: 0, stdout: '', stderr: '', command: [] });
     await vi.advanceTimersByTimeAsync(1_000);
-    await expect(injection).resolves.toMatchObject({ status: 'injected' });
+    await expect(injection).resolves.toEqual({
+      status: 'failed',
+      reason: 'timeout',
+      phase: 'before_write',
+      duplicateRisk: 'none',
+      recoverable: true,
+    });
     expect(calls).toEqual([
       ['display-message', '-p', '-t', 'happy:claude.1', '#{pane_dead}\t#{pane_pid}\t#{pane_current_command}'],
-      ['send-keys', '-t', 'happy:claude.1', '-l', '--', 'queued prompt'],
-      ['send-keys', '-t', 'happy:claude.1', 'C-m'],
+      ['load-buffer', '-b', calls[1]?.[2] ?? '', '-'],
+      ['delete-buffer', '-b', calls[1]?.[2] ?? ''],
     ]);
   });
 

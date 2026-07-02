@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createContext, runInContext } from 'node:vm';
 
@@ -10,10 +10,12 @@ describe('logger.debugLargeJson', () => {
     const envKeys = ['DEBUG', 'HAPPIER_HOME_DIR'] as const;
     let envScope = createEnvKeyScope(envKeys);
     let tempDir: string;
+    let originalArgv: string[];
 
     beforeEach(() => {
         envScope = createEnvKeyScope(envKeys);
         tempDir = createTempDirSync('happier-cli-logger-test-');
+        originalArgv = [...process.argv];
         envScope.patch({
             HAPPIER_HOME_DIR: tempDir,
             DEBUG: undefined,
@@ -24,6 +26,7 @@ describe('logger.debugLargeJson', () => {
     afterEach(() => {
         removeTempDirSync(tempDir);
         envScope.restore();
+        process.argv = originalArgv;
     });
 
     it('does not write to log file when DEBUG is not set', async () => {
@@ -148,5 +151,27 @@ describe('logger.debugLargeJson', () => {
         } finally {
             consoleSpy.mockRestore();
         }
+    });
+
+    it('prunes daemon logs best-effort when constructing a daemon logger', async () => {
+        process.argv = ['node', 'happier', 'daemon', 'start'];
+        const logsDir = join(tempDir, 'logs');
+        mkdirSync(logsDir, { recursive: true });
+        for (let index = 0; index < 52; index += 1) {
+            writeFileSync(
+                join(logsDir, `2026-06-30-10-${String(index).padStart(2, '0')}-00-pid-${index}-daemon.log`),
+                `old ${index}\n`,
+                'utf8',
+            );
+        }
+
+        const { logger } = (await import('@/ui/logger')) as typeof import('@/ui/logger');
+        logger.debug('[TEST] current daemon log');
+
+        await vi.waitFor(() => {
+            const daemonLogs = readdirSync(logsDir).filter(file => file.endsWith('-daemon.log'));
+            expect(daemonLogs).toHaveLength(50);
+            expect(daemonLogs).toContain(logger.getLogPath().split('/').pop());
+        });
     });
 });

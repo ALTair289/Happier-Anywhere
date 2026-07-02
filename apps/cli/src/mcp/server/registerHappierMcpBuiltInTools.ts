@@ -41,15 +41,17 @@ export function registerHappierMcpBuiltInTools(
         sessionId: string;
         surface: BuiltInHappierToolsSurface;
         actionsSettings?: ActionsSettingsV1 | null;
+        getActionsSettings?: (() => ActionsSettingsV1 | null) | null;
         deps: DispatchDeps;
         resolveSessionId?: (toolArgs: unknown) => string;
     }>,
 ): Readonly<{ toolNames: string[] }> {
     const isActionEnabled = params.deps.isActionEnabled ?? (() => true);
+    const readActionsSettings = () => params.getActionsSettings?.() ?? params.actionsSettings ?? null;
     const enabledTools = listBuiltInHappierTools({
         surface: params.surface,
         isActionEnabled,
-        actionsSettings: params.actionsSettings ?? null,
+        actionsSettings: readActionsSettings(),
     });
 
     for (const tool of enabledTools) {
@@ -74,7 +76,8 @@ export function registerHappierMcpBuiltInTools(
                         args,
                         sessionId,
                         surface: params.surface,
-                        actionsSettings: params.actionsSettings ?? null,
+                        actionsSettings: readActionsSettings(),
+                        getActionsSettings: readActionsSettings,
                         ...(approvalOrigin ? { approvalOrigin } : {}),
                         deps: params.deps,
                     });
@@ -87,7 +90,14 @@ export function registerHappierMcpBuiltInTools(
                     }
 
                     return {
-                        content: [{ type: 'text' as const, text: JSON.stringify({ errorCode: result.errorCode, error: result.error }) }],
+                        content: [{
+                            type: 'text' as const,
+                            text: JSON.stringify({
+                                errorCode: result.errorCode,
+                                error: result.error,
+                                ...(result.details === undefined ? {} : { details: result.details }),
+                            }),
+                        }],
                         isError: true as const,
                     };
                 } catch (error) {

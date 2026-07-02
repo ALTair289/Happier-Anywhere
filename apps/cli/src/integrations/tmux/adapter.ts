@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import type {
   TerminalHostAdapter,
   TerminalHostHandle,
@@ -10,10 +12,11 @@ import type {
 import { delay } from '@/utils/time';
 
 import { createTmuxTerminalControlPort } from './control';
-import { resolveTmuxPromptSubmitDelayMs, resolveTmuxSendKeysChunkSize } from './env';
+import { resolveTmuxPromptSubmitDelayMs } from './env';
 import { evaluateTmuxPaneLiveness } from './paneLiveness';
 import { TmuxUtilities } from './TmuxUtilities';
-import { typeTextViaSendKeys } from './typeText';
+import { pasteTextViaTmuxBuffer } from './typeText';
+import type { TerminalPromptSubmitVerificationPolicy } from '../terminalHost/promptSubmitVerification';
 
 /**
  * Stability sampling delay between the two full-pane captures used to detect that the user is
@@ -23,6 +26,10 @@ const INPUT_STABILITY_DELAY_MS = 50;
 
 function targetFromHandle(handle: TerminalHostHandle): string {
   return handle.paneId ? `${handle.sessionName}:${handle.paneId}` : handle.sessionName;
+}
+
+function createTmuxPromptBufferName(): string {
+  return `happier_prompt_${randomUUID().replace(/-/g, '')}`;
 }
 
 function cursorPositionsEqual(
@@ -58,8 +65,12 @@ function failedInjectionResult(params: Readonly<{
   };
 }
 
-export function createTmuxTerminalHostAdapter(params?: Readonly<{ tmux?: TmuxUtilities }>): TerminalHostAdapter {
+export function createTmuxTerminalHostAdapter(params?: Readonly<{
+  tmux?: TmuxUtilities;
+  promptSubmitVerification?: TerminalPromptSubmitVerificationPolicy | undefined;
+}>): TerminalHostAdapter {
   const tmux = params?.tmux ?? new TmuxUtilities();
+  const promptSubmitVerification = params?.promptSubmitVerification;
 
   async function evaluateLiveness(handle: TerminalHostHandle) {
     return evaluateTmuxPaneLiveness({
@@ -152,12 +163,29 @@ export function createTmuxTerminalHostAdapter(params?: Readonly<{ tmux?: TmuxUti
           };
         }
       }
-      const result = await typeTextViaSendKeys({
+      const result = await pasteTextViaTmuxBuffer({
         target: targetFromHandle(handle),
         text: input.text,
-        chunkSize: resolveTmuxSendKeysChunkSize(),
+        bufferName: createTmuxPromptBufferName(),
         submitDelayMs: resolveTmuxPromptSubmitDelayMs(),
+        submitRetryDelayMs: resolveTmuxPromptSubmitDelayMs(),
         timeoutMs: input.scheduling.timeoutMs,
+        ...(promptSubmitVerification?.shouldVerifyBeforeSubmit(input.text)
+          ? {
+            verifyBeforeSubmit: async ({ text }) => promptSubmitVerification.verifyScreenBeforeSubmit({
+              promptText: text,
+              screenText: await tmux.captureCurrentInput(targetFromHandle(handle)),
+            }),
+          }
+          : {}),
+        ...(promptSubmitVerification?.shouldVerifyAfterSubmit(input.text)
+          ? {
+            verifyAfterSubmit: async ({ text }) => promptSubmitVerification.isPromptStillPendingAfterSubmit({
+              promptText: text,
+              screenText: await tmux.captureCurrentInput(targetFromHandle(handle)),
+            }),
+          }
+          : {}),
         executor: (args, options) => tmux.executeTmuxCommand(
           [...args],
           undefined,

@@ -97,6 +97,29 @@ describe('resolveCliFeatureDecision', () => {
     expect(decision.blockedBy).toBe('server');
   });
 
+  it('fails closed for pending delivery-state support when an old server only reports the basic pending queue gate', () => {
+    const snapshot: CliServerFeaturesSnapshot = {
+      status: 'ready',
+      features: FeaturesResponseSchema.parse({
+        features: {
+          sharing: {
+            pendingQueueV2: { enabled: true },
+          },
+        },
+        capabilities: {},
+      }),
+    };
+
+    const decision = resolveCliFeatureDecision({
+      featureId: 'sharing.pendingDeliveryState',
+      env: {} as NodeJS.ProcessEnv,
+      serverSnapshot: snapshot,
+    });
+
+    expect(decision.state).toBe('disabled');
+    expect(decision.blockedBy).toBe('server');
+  });
+
   // Unified mode is itself opt-in; the TUI runtime-control gate rides it and defaults ON.
   // The env flag is a KILL-SWITCH (set =0 to disable), not an enable switch.
   it('enables the Claude Unified TUI runtime-control gate by default (unified mode is the opt-in)', () => {

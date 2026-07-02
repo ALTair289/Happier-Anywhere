@@ -12,6 +12,7 @@ import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { inspect } from 'node:util'
 import { writeConsoleErrorBestEffort, writeConsoleLogBestEffort } from '@/utils/writeConsoleBestEffort'
+import { pruneLogsByCount } from '@/utils/logs/pruneLogsByCount'
 // Note: readDaemonState is imported lazily inside listDaemonLogFiles() to avoid
 // circular dependency: logger.ts ↔ persistence.ts
 
@@ -47,6 +48,27 @@ function getSessionLogPath(): string {
   return join(configuration.logsDir, filename)
 }
 
+function resolveLogKeepCount(rawValue: string | undefined, fallback: number): number {
+  const value = Number(rawValue)
+  return Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback
+}
+
+async function pruneDaemonLogsForCurrentLogger(logFilePath: string): Promise<void> {
+  if (!configuration.isDaemonProcess) return
+  try {
+    mkdirSync(dirname(logFilePath), { recursive: true })
+    appendFileSync(logFilePath, '')
+  } catch {
+    // Best-effort pruning only.
+  }
+  await pruneLogsByCount({
+    dir: configuration.logsDir,
+    suffix: '-daemon.log',
+    keepCount: resolveLogKeepCount(process.env.HAPPIER_DAEMON_LOG_KEEP_COUNT, 50),
+    keepPath: logFilePath,
+  }).catch(() => ({ pruned: 0 }))
+}
+
 class Logger {
   private dangerouslyUnencryptedServerLoggingUrl: string | undefined
   private hasLoggedFileWriteError: boolean = false
@@ -54,6 +76,8 @@ class Logger {
   constructor(
     public readonly logFilePath = getSessionLogPath()
   ) {
+    void pruneDaemonLogsForCurrentLogger(this.logFilePath)
+
     // Remote logging enabled only when explicitly set with server URL
     if (process.env.DANGEROUSLY_LOG_TO_SERVER_FOR_AI_AUTO_DEBUGGING 
       && process.env.HAPPIER_SERVER_URL) {

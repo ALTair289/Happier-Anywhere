@@ -19,15 +19,19 @@ import {
   defaultZellijActions,
   DEFAULT_ZELLIJ_WRITE_BYTES_CHUNK_SIZE,
   isZellijActionTimeoutError,
+  resolveZellijActionPasteSafeBytes,
   type ZellijCommandResult,
   type ZellijActions,
   type ZellijDetachedCommandHandle,
   type ZellijPane,
 } from './actions';
 import { sanitizeTerminalHostDiagnosticText } from '../terminalHost/sanitizeTerminalHostDiagnosticText';
-import { resolvePromptSubmitTimeoutMs } from '../terminalHost/promptSubmitTimeout';
 import { createZellijTerminalControlPort } from './control';
 import { prepareZellijSocketDir, resolveZellijSocketDir } from './socketDir';
+import {
+  runTerminalPromptSubmission,
+  type TerminalPromptSubmitVerificationPolicy,
+} from '../terminalHost/promptSubmitVerification';
 
 const DEFAULT_INPUT_STABILITY_DELAY_MS = 50;
 /**
@@ -773,13 +777,17 @@ export function createZellijTerminalHostAdapter(params: Readonly<{
   actions?: ZellijActions;
   launchStrategy?: ZellijLaunchStrategy;
   chunkSize?: number;
+  pasteMaxBytes?: number;
   inputStabilityDelayMs?: number;
   actionTimeoutMs?: number;
+  promptSubmitVerification?: TerminalPromptSubmitVerificationPolicy | undefined;
   prepareSocketDir?: ((socketDir: string) => Promise<void>) | undefined;
 }>): TerminalHostAdapter {
   const actions = params.actions ?? defaultZellijActions;
   const prepareSocketDir = params.prepareSocketDir ?? prepareZellijSocketDir;
   const actionTimeoutMs = Math.max(1, Math.trunc(params.actionTimeoutMs ?? DEFAULT_ACTION_TIMEOUT_MS));
+  const pasteMaxBytes = Math.max(0, Math.trunc(params.pasteMaxBytes ?? resolveZellijActionPasteSafeBytes()));
+  const promptSubmitVerification = params.promptSubmitVerification;
   const env: Readonly<Record<string, string>> = {
     ZELLIJ_SOCKET_DIR: resolveZellijSocketDir(params.happyHomeDir),
   };
@@ -1167,31 +1175,93 @@ export function createZellijTerminalHostAdapter(params: Readonly<{
       const injectionTimeoutMs = input.scheduling.timeoutMs ?? actionTimeoutMs;
       const deadline = createTerminalHostDeadline(injectionTimeoutMs);
       const textToWrite = input.text;
+      const textToWriteBytes = Buffer.byteLength(textToWrite, 'utf8');
       let failurePhase: TerminalInjectionFailurePhase = 'during_write';
       let duplicateRisk: TerminalInjectionDuplicateRisk = 'possible';
       try {
-        await actions.writeBytesChunked({
+        const paneEnv = sessionEnv(env, handle.sessionName);
+        const writeBytes = () => actions.writeBytesChunked({
           zellijBinary: params.zellijBinary,
-          env: sessionEnv(env, handle.sessionName),
+          env: paneEnv,
           paneId,
           text: textToWrite,
           chunkSize: params.chunkSize ?? DEFAULT_ZELLIJ_WRITE_BYTES_CHUNK_SIZE,
           timeoutMs: injectionTimeoutMs,
         });
-        failurePhase = 'after_write_before_enter';
-        const submitTimeoutMs = resolvePromptSubmitTimeoutMs({
-          remainingTimeoutMs: remainingTerminalHostDeadlineMs(deadline),
-          fallbackTimeoutMs: actionTimeoutMs,
-        });
+        if (actions.pasteText && textToWriteBytes <= pasteMaxBytes) {
+          try {
+            await actions.pasteText({
+              zellijBinary: params.zellijBinary,
+              env: paneEnv,
+              paneId,
+              text: textToWrite,
+              timeoutMs: injectionTimeoutMs,
+            });
+          } catch (error) {
+            if (isZellijActionTimeoutError(error)) throw error;
+            await writeBytes();
+          }
+        } else {
+          await writeBytes();
+        }
         failurePhase = 'after_enter_unknown';
         duplicateRisk = 'likely';
-        await actions.sendEnter({
-          zellijBinary: params.zellijBinary,
-          env: sessionEnv(env, handle.sessionName),
-          paneId,
-          ...(submitTimeoutMs !== undefined ? { timeoutMs: submitTimeoutMs } : {}),
+        const submission = await runTerminalPromptSubmission({
+          promptText: textToWrite,
+          ...(promptSubmitVerification?.shouldVerifyBeforeSubmit(textToWrite)
+            ? {
+              verifyBeforeSubmit: async ({ promptText, remainingTimeoutMs }) => {
+                const screenText = await actions.dumpScreen({
+                  zellijBinary: params.zellijBinary,
+                  env: sessionEnv(env, handle.sessionName),
+                  paneId,
+                  ...(remainingTimeoutMs !== undefined
+                    ? { timeoutMs: remainingTimeoutMs }
+                    : { timeoutMs: actionTimeoutMs }),
+                });
+                return promptSubmitVerification.verifyScreenBeforeSubmit({ promptText, screenText });
+              },
+            }
+            : {}),
+          submitEnter: async ({ remainingTimeoutMs }) => {
+            await actions.sendEnter({
+              zellijBinary: params.zellijBinary,
+              env: sessionEnv(env, handle.sessionName),
+              paneId,
+              ...(remainingTimeoutMs !== undefined ? { timeoutMs: remainingTimeoutMs } : { timeoutMs: actionTimeoutMs }),
+            });
+            return 'success';
+          },
+          ...(promptSubmitVerification?.shouldVerifyAfterSubmit(textToWrite)
+            ? {
+              verifyAfterSubmit: async ({ promptText, remainingTimeoutMs }) => {
+                const screenText = await actions.dumpScreen({
+                  zellijBinary: params.zellijBinary,
+                  env: sessionEnv(env, handle.sessionName),
+                  paneId,
+                  ...(remainingTimeoutMs !== undefined
+                    ? { timeoutMs: remainingTimeoutMs }
+                    : { timeoutMs: actionTimeoutMs }),
+                });
+                return promptSubmitVerification.isPromptStillPendingAfterSubmit({
+                  promptText,
+                  screenText,
+                });
+              },
+            }
+            : {}),
+          remainingTimeoutMs: () => remainingTerminalHostDeadlineMs(deadline),
+          wait,
         });
-        return { status: 'injected', at: Date.now(), bytesWritten: Buffer.byteLength(textToWrite) };
+        if (!submission.success) {
+          return failedInjectionResult({
+            reason: submission.reason === 'timeout' ? 'timeout' : 'host_unreachable',
+            phase: submission.phase,
+            duplicateRisk: submission.duplicateRisk,
+            recoverable: true,
+          });
+        }
+        return { status: 'injected', at: Date.now(), bytesWritten: textToWriteBytes };
       } catch (error) {
         return failedInjectionResult({
           reason: isZellijActionTimeoutError(error) ? 'timeout' : 'host_unreachable',

@@ -61,6 +61,7 @@ export type ZellijActions = Readonly<{
   }> & ZellijTimeoutParams): Promise<ZellijCommandResult>;
   runCommand(params: ZellijRunCommandParams & ZellijTimeoutParams): Promise<ZellijCommandResult>;
   startCommandDetached?(params: ZellijRunCommandParams & ZellijTimeoutParams): Promise<ZellijDetachedCommandHandle>;
+  pasteText?(params: ZellijPaneActionParams & Readonly<{ text: string; timeoutMs?: number }>): Promise<void>;
   writeBytesChunked(params: ZellijPaneActionParams & Readonly<{ text: string; chunkSize?: number; timeoutMs?: number }>): Promise<void>;
   sendEnter(params: ZellijPaneActionParams & Readonly<{ timeoutMs?: number }>): Promise<void>;
   sendEscape(params: ZellijPaneActionParams & Readonly<{ timeoutMs?: number }>): Promise<void>;
@@ -77,6 +78,12 @@ export type ZellijAttachActions = Readonly<{
 }>;
 
 export const DEFAULT_ZELLIJ_WRITE_BYTES_CHUNK_SIZE = 4096;
+export const ZELLIJ_ACTION_PASTE_SAFE_BYTES = {
+  darwin: 300_000,
+  linux: 65_536,
+  win32: 16_384,
+  fallback: 65_536,
+} as const;
 
 const ZELLIJ_HOST_ENV_KEYS = new Set([
   'PATH',
@@ -324,6 +331,28 @@ export async function writeBytesChunked(params: ZellijPaneActionParams & Readonl
   }
 }
 
+export function resolveZellijActionPasteSafeBytes(platform: NodeJS.Platform = process.platform): number {
+  if (platform === 'darwin') return ZELLIJ_ACTION_PASTE_SAFE_BYTES.darwin;
+  if (platform === 'linux') return ZELLIJ_ACTION_PASTE_SAFE_BYTES.linux;
+  if (platform === 'win32') return ZELLIJ_ACTION_PASTE_SAFE_BYTES.win32;
+  return ZELLIJ_ACTION_PASTE_SAFE_BYTES.fallback;
+}
+
+export async function pasteText(params: ZellijPaneActionParams & Readonly<{
+  text: string;
+  timeoutMs?: number;
+}>): Promise<void> {
+  if (params.timeoutMs === 0) throw new ZellijActionTimeoutError('paste');
+  await requireSuccess(
+    await runZellij(
+      params,
+      ['action', 'paste', '--pane-id', params.paneId, params.text],
+      params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs, action: 'paste' } : { action: 'paste' },
+    ),
+    'paste',
+  );
+}
+
 export async function sendEnter(params: ZellijPaneActionParams & Readonly<{ timeoutMs?: number }>): Promise<void> {
   if (params.timeoutMs === 0) throw new ZellijActionTimeoutError('send-keys');
   await requireSuccess(
@@ -418,6 +447,7 @@ export const defaultZellijActions: ZellijActions = {
   attachCreateBackground,
   runCommand,
   startCommandDetached,
+  pasteText,
   writeBytesChunked,
   sendEnter,
   sendEscape,

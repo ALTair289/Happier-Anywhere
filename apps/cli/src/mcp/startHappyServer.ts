@@ -10,7 +10,7 @@ import { configuration } from "@/configuration";
 import type { Credentials } from '@/persistence';
 import type { ExecutionRunServiceResult, WaitForExecutionRunResult } from "@/session/services/executionRuns";
 import type { AccountSettings } from '@happier-dev/protocol';
-import { createMcpActionEnablement } from '@/mcp/server/createMcpActionEnablement';
+import { createMcpActionEnablement, createMcpActionSettingsProvider } from '@/mcp/server/createMcpActionEnablement';
 
 export type HappyMcpExecutionRunService = Readonly<{
     start: (request: unknown) => Promise<ExecutionRunServiceResult<unknown>>;
@@ -33,18 +33,29 @@ export type HappyMcpSessionClient = {
 
 export async function startHappyServer(
     client: HappyMcpSessionClient,
-    opts?: Readonly<{ credentials?: Credentials | null; accountSettings?: AccountSettings | null }>,
+    opts?: Readonly<{
+        credentials?: Credentials | null;
+        accountSettings?: AccountSettings | null;
+        getAccountSettings?: (() => AccountSettings | null) | null;
+    }>,
 ) {
     // Do not eagerly construct an MCP server on startup; only snapshot the names.
     // Full server creation is done per request inside the handler.
-    const isActionEnabled = createMcpActionEnablement({
+    const actionSettingsProvider = createMcpActionSettingsProvider({
         accountSettings: opts?.accountSettings ?? null,
+        getAccountSettings: opts?.getAccountSettings ?? null,
+    });
+    const isActionEnabled = createMcpActionEnablement({
+        actionSettingsProvider,
         surface: 'session_agent',
     });
+    // This is an informational startup snapshot. Direct MCP tool registrations are
+    // bound when a client initializes/lists tools; clients must refresh/reconnect
+    // to observe newly exposed direct tool names.
     const toolNamesSnapshot = listBuiltInHappierTools({
         surface: 'session_agent',
         isActionEnabled,
-        actionsSettings: opts?.accountSettings?.actionsSettingsV1 ?? null,
+        actionsSettings: actionSettingsProvider.getActionsSettings(),
     }).map((tool) => tool.name);
     const keepAliveIntervalMs = configuration.mcpSseKeepAliveIntervalMs;
 
@@ -67,6 +78,7 @@ export async function startHappyServer(
         const { mcp } = createHappierMcpServer(client, {
             credentials: opts?.credentials ?? null,
             accountSettings: opts?.accountSettings ?? null,
+            getAccountSettings: opts?.getAccountSettings ?? null,
         });
 
         const transport = new StreamableHTTPServerTransport({

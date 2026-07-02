@@ -89,6 +89,7 @@ afterEach(() => {
   vi.resetModules();
   vi.unmock('node:module');
   vi.unmock('node:fs');
+  vi.unmock('@/integrations/pty/nodePtyRelayProvider');
 });
 
 describe('createNodePtyProvider', () => {
@@ -384,5 +385,43 @@ describe('createNodePtyProvider', () => {
 
     expect(() => provider.spawn({ file: '/bin/bash', args: [], options: {} }))
       .toThrowError(new Error('terminal_pty_provider_missing'));
+  });
+
+  it('uses the managed Node relay fallback on Windows when native providers are unavailable', async () => {
+    vi.resetModules();
+    const relayProcess = createFakeProcess();
+    const relayProvider = { spawn: vi.fn(() => relayProcess) };
+    const createNodePtyRelayProvider = vi.fn(() => relayProvider);
+    vi.doMock('node:module', () => ({
+      createRequire: () => {
+        return () => {
+          throw new Error('missing native PTY');
+        };
+      },
+    }));
+    vi.doMock('@/integrations/pty/nodePtyRelayProvider', () => ({
+      createNodePtyRelayProvider,
+    }));
+    vi.doMock('@/ui/logger', () => ({
+      logger: {
+        debug: vi.fn(),
+      },
+    }));
+
+    const { createNodePtyProvider } = await import('@/integrations/pty/ptyProvider');
+    const provider = createNodePtyProvider({
+      platform: 'win32',
+      env: { PATH: 'C:\\Windows\\System32' },
+      currentExecPath: 'C:\\happier\\happier.exe',
+    });
+
+    const spawned = provider.spawn({ file: 'cmd.exe', args: ['/c', 'echo ok'], options: {} });
+
+    expect(spawned).toBe(relayProcess);
+    expect(createNodePtyRelayProvider).toHaveBeenCalledWith(expect.objectContaining({
+      platform: 'win32',
+      currentExecPath: 'C:\\happier\\happier.exe',
+    }));
+    expect(relayProvider.spawn).toHaveBeenCalledWith({ file: 'cmd.exe', args: ['/c', 'echo ok'], options: {} });
   });
 });
