@@ -48,6 +48,19 @@ describe('flashListOffsetCorrectionHook', () => {
         ]);
     });
 
+    it('forwards the carve-pause skip event emitted by the CORRIDOR-2a vendor patch (REVIEW-2a F1)', () => {
+        // The 2a patch reports corrections withheld while `happierPauseOffsetCorrection` is set.
+        // Dropping this type in the sanitizer would blind the pause seam's only runtime signal.
+        const received: FlashListOffsetCorrectionEvent[] = [];
+        subscribe((event) => received.push(event));
+
+        readGlobalHook()?.({ type: 'correction-skipped-happier-paused', diffPx: 18, timestampMs: 50 });
+
+        expect(received).toEqual([
+            { type: 'correction-skipped-happier-paused', diffPx: 18, timestampMs: 50 },
+        ]);
+    });
+
     it('is production-safe always-on: subscribing installs the hook with no dev gating', () => {
         // The prepend transaction's corrector-deference depends on this signal in production:
         // the API intentionally exposes no dev flag.

@@ -1,16 +1,13 @@
 /**
- * Transcript list orientation seam (lane N3.1 of the inverted-FlashList pilot).
+ * Transcript list orientation seam.
  *
- * Everything inside the transcript stays in canonical oldest-first scroll space:
- * 0 = older/history edge, max = newest/live-tail edge. FlashList/RN `inverted`
- * exposes visual bottom at the raw list start, so this module is the only place
- * that mirrors raw native offsets into canonical transcript offsets.
+ * Owns presentation/data-order mapping only. Native raw scroll physics live in
+ * the viewport driver.
  */
 
 export type TranscriptListOrientation = 'standard' | 'inverted';
 
 export type TranscriptListPresentation = Readonly<{
-    implementation: 'flash_v2' | 'flatlist_legacy';
     orientation: TranscriptListOrientation;
 }>;
 
@@ -19,24 +16,16 @@ function isInRangeIndex(index: number, count: number): boolean {
 }
 
 /**
- * Resolves the account setting value to the rendered list presentation.
- * 'flatlist_legacy' -> { flatlist_legacy, standard }.
- * 'flash_v2_inverted' on native -> { flash_v2, inverted } (the pilot).
- * 'flash_v2_inverted' on web -> { flash_v2, standard } (web hot/cold split + DOM
- * writers assume non-inverted; native-only pilot).
- * 'flash_v2' and ANY unknown/invalid value -> { flash_v2, standard } (mirrors
- * today's tolerant fallback).
+ * Resolves the platform to the canonical rendered list presentation.
+ * Native FlashList is inverted; web FlashList stays standard because web hot/cold
+ * split + DOM writers assume non-inverted block flow.
  */
 export function resolveTranscriptListPresentation(
-    params: Readonly<{ setting: unknown; platformIsWeb: boolean }>
+    params: Readonly<{ platformIsWeb: boolean }>
 ): TranscriptListPresentation {
-    if (params.setting === 'flatlist_legacy') {
-        return { implementation: 'flatlist_legacy', orientation: 'standard' };
-    }
-    if (params.setting === 'flash_v2_inverted' && !params.platformIsWeb) {
-        return { implementation: 'flash_v2', orientation: 'inverted' };
-    }
-    return { implementation: 'flash_v2', orientation: 'standard' };
+    return {
+        orientation: params.platformIsWeb ? 'standard' : 'inverted',
+    };
 }
 
 /**
@@ -83,66 +72,6 @@ export function resolveOlderNeighborRenderedIndex(
     }
     const neighbor = orientation === 'inverted' ? index + 1 : index - 1;
     return isInRangeIndex(neighbor, count) ? neighbor : null;
-}
-
-/**
- * Maps a RAW native scroll offset to canonical transcript offset.
- *
- * Standard: raw list start is the older/history edge.
- * Inverted: raw list start is the newest/live-tail edge, so the observed offset
- * is mirrored into the canonical oldest-first transcript space.
- */
-export function toCanonicalScrollOffset(
-    params: Readonly<{ offsetY: number; contentHeight: number; layoutHeight: number; orientation: TranscriptListOrientation }>
-): number {
-    if (params.orientation === 'inverted') {
-        const scrollableExtent = Math.max(0, params.contentHeight - params.layoutHeight);
-        return scrollableExtent - params.offsetY;
-    }
-    return params.offsetY;
-}
-
-/**
- * Inverse of toCanonicalScrollOffset.
- * Use for converting canonical write targets to raw scroll offsets.
- */
-export function fromCanonicalScrollOffset(
-    params: Readonly<{ offsetY: number; contentHeight: number; layoutHeight: number; orientation: TranscriptListOrientation }>
-): number {
-    if (params.orientation === 'inverted') {
-        const scrollableExtent = Math.max(0, params.contentHeight - params.layoutHeight);
-        return scrollableExtent - params.offsetY;
-    }
-    return params.offsetY;
-}
-
-/**
- * RAW scroll offset that means "pinned at the visual bottom".
- */
-export function resolveBottomRawScrollOffset(
-    params: Readonly<{ contentHeight: number; layoutHeight: number; orientation: TranscriptListOrientation }>
-): number {
-    if (params.orientation === 'inverted') {
-        return 0;
-    }
-    return Math.max(0, Math.trunc(params.contentHeight - params.layoutHeight));
-}
-
-/**
- * RAW imperative list command target for "go to the visual bottom".
- *
- * This is intentionally separate from observed-offset interpretation. Under
- * native `inverted`, mature chat implementations command the visual bottom via
- * the list start (`scrollToOffset(0)` / `scrollToIndex(0)`), while passive
- * observations may still be reported in physical UIScrollView coordinates.
- */
-export function resolveBottomRawScrollCommandOffset(
-    params: Readonly<{ contentHeight: number; layoutHeight: number; orientation: TranscriptListOrientation }>
-): number {
-    if (params.orientation === 'inverted') {
-        return 0;
-    }
-    return resolveBottomRawScrollOffset(params);
 }
 
 /**

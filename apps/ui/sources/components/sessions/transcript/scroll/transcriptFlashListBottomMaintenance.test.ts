@@ -1,22 +1,19 @@
 import { describe, expect, it } from 'vitest';
 
-import { resolveTranscriptFlashListBottomMaintenance } from './transcriptFlashListBottomMaintenance';
+import {
+    resolveTranscriptFlashListBottomMaintenance,
+    resolveTranscriptFlashListBottomMaintenanceDecision,
+} from './transcriptFlashListBottomMaintenance';
 
 const baseParams = {
     autoFollowWhenPinned: true,
     bottomFollowMode: 'following' as const,
     layoutHeight: 600,
     nativeEntryShouldUseBottomMaintenance: true,
-    orientation: 'standard' as const,
     pinEnabled: true,
     pinThresholdPx: 72,
     platformIsWeb: false,
     hasOpenViewportTransaction: false,
-};
-
-const invertedParams = {
-    ...baseParams,
-    orientation: 'inverted' as const,
 };
 
 describe('transcript FlashList bottom maintenance policy', () => {
@@ -69,6 +66,14 @@ describe('transcript FlashList bottom maintenance policy', () => {
         })).toEqual({ startRenderingFromBottom: true });
     });
 
+    it('keeps ordinary released MVCP armed when no live turn can mutate the visual bottom', () => {
+        expect(resolveTranscriptFlashListBottomMaintenance({
+            ...baseParams,
+            bottomFollowMode: 'released',
+            liveRegionActive: false,
+        })).toEqual({ startRenderingFromBottom: true });
+    });
+
     it('keeps the existing unpinned entry-restore policy unless implementation proves a safer disabled object', () => {
         expect(resolveTranscriptFlashListBottomMaintenance({
             ...baseParams,
@@ -102,12 +107,9 @@ describe('transcript FlashList bottom maintenance policy', () => {
         });
     });
 
-    describe('inverted orientation (N3.2)', () => {
-        // FlashList/RN inverted transforms presentation, but native offsets still grow
-        // toward the physical content end. The visual live tail is therefore maintained
-        // by the same startRenderingFromBottom/autoscroll policy as standard mode.
-        it('uses the same native bottom maintenance threshold while following', () => {
-            expect(resolveTranscriptFlashListBottomMaintenance(invertedParams)).toEqual({
+    describe('native canonical bottom maintenance', () => {
+        it('uses the native bottom maintenance threshold while following', () => {
+            expect(resolveTranscriptFlashListBottomMaintenance(baseParams)).toEqual({
                 animateAutoScrollToBottom: false,
                 autoscrollToBottomThreshold: 72 / 600,
                 startRenderingFromBottom: true,
@@ -116,57 +118,58 @@ describe('transcript FlashList bottom maintenance policy', () => {
 
         it('keeps MVCP offset correction armed without bottom autoscroll while escaping or released', () => {
             expect(resolveTranscriptFlashListBottomMaintenance({
-                ...invertedParams,
+                ...baseParams,
                 bottomFollowMode: 'escaping',
             })).toEqual({ startRenderingFromBottom: true });
             expect(resolveTranscriptFlashListBottomMaintenance({
-                ...invertedParams,
+                ...baseParams,
                 bottomFollowMode: 'released',
             })).toEqual({ startRenderingFromBottom: true });
         });
 
         it('withholds bottom autoscroll while a viewport transaction is open (plan B3 single-owner rule)', () => {
             expect(resolveTranscriptFlashListBottomMaintenance({
-                ...invertedParams,
+                ...baseParams,
                 hasOpenViewportTransaction: true,
             })).toEqual({ startRenderingFromBottom: true });
         });
 
         it('keeps bottom maintenance without autoscroll when pinning or auto-follow is disabled', () => {
             expect(resolveTranscriptFlashListBottomMaintenance({
-                ...invertedParams,
+                ...baseParams,
                 pinEnabled: false,
             })).toEqual({ startRenderingFromBottom: true });
             expect(resolveTranscriptFlashListBottomMaintenance({
-                ...invertedParams,
+                ...baseParams,
                 autoFollowWhenPinned: false,
             })).toEqual({ startRenderingFromBottom: true });
         });
 
-        it('never emits a disabled MVCP object for inverted physical bottom maintenance', () => {
+        it('does not disable MVCP outside the carve-active released window', () => {
             const modes = ['following', 'escaping', 'released'] as const;
             for (const mode of modes) {
                 for (const hasOpenViewportTransaction of [false, true]) {
                     const result = resolveTranscriptFlashListBottomMaintenance({
-                        ...invertedParams,
+                        ...baseParams,
                         bottomFollowMode: mode,
                         hasOpenViewportTransaction,
+                        liveRegionActive: false,
                     });
                     expect(result).not.toEqual({ disabled: true });
                 }
             }
         });
 
-        it('returns undefined on web regardless of orientation (web never gets the native MVCP props)', () => {
+        it('returns undefined on web before native MVCP props are resolved', () => {
             expect(resolveTranscriptFlashListBottomMaintenance({
-                ...invertedParams,
+                ...baseParams,
                 platformIsWeb: true,
             })).toBeUndefined();
         });
 
         it('does not emit a zero threshold before layout measurement', () => {
             const result = resolveTranscriptFlashListBottomMaintenance({
-                ...invertedParams,
+                ...baseParams,
                 layoutHeight: 0,
             });
 
@@ -186,10 +189,12 @@ describe('transcript FlashList bottom maintenance policy', () => {
                 ...baseParams,
                 liveRegionActive: true,
             })).toEqual({ startRenderingFromBottom: true });
+        });
 
+        it('withholds bottom autoscroll while a target window is active', () => {
             expect(resolveTranscriptFlashListBottomMaintenance({
-                ...invertedParams,
-                liveRegionActive: true,
+                ...baseParams,
+                targetWindowActive: true,
             })).toEqual({ startRenderingFromBottom: true });
         });
 
@@ -209,11 +214,64 @@ describe('transcript FlashList bottom maintenance policy', () => {
             });
         });
 
-        it('does not change the released/escaping policy when the live region is active', () => {
-            expect(resolveTranscriptFlashListBottomMaintenance({
+        it('keeps the native MVCP prop stable while pausing JS offset correction for released carve windows (NQA-F4)', () => {
+            // NQA-F4: returning {disabled:true} nulls the native MVCP prop, unmounts FlashList's
+            // ScrollAnchor, and lets RN Fabric re-latch against stale 1e6 anchor state. Carve
+            // withholding must pause only FlashList's JS correction path.
+            expect(resolveTranscriptFlashListBottomMaintenanceDecision({
                 ...baseParams,
                 bottomFollowMode: 'released',
                 liveRegionActive: true,
+            })).toEqual({
+                maintainVisibleContentPosition: { startRenderingFromBottom: true },
+                pauseOffsetCorrection: true,
+            });
+            expect(resolveTranscriptFlashListBottomMaintenanceDecision({
+                ...baseParams,
+                bottomFollowMode: 'escaping',
+                liveRegionActive: true,
+            })).toEqual({
+                maintainVisibleContentPosition: { startRenderingFromBottom: true },
+                pauseOffsetCorrection: true,
+            });
+        });
+
+        it('never flaps the native MVCP prop across carve follow/release transitions (NQA-F4)', () => {
+            const modes = ['following', 'escaping', 'released'] as const;
+            for (const platformIsWeb of [false, true]) {
+                for (const liveRegionActive of [false, true]) {
+                    for (const bottomFollowMode of modes) {
+                        const result = resolveTranscriptFlashListBottomMaintenance({
+                            ...baseParams,
+                            bottomFollowMode,
+                            liveRegionActive,
+                            platformIsWeb,
+                        });
+
+                        if (platformIsWeb) {
+                            expect(result).toBeUndefined();
+                            continue;
+                        }
+
+                        expect(result).toEqual(expect.objectContaining({
+                            startRenderingFromBottom: true,
+                        }));
+                        expect(result).not.toHaveProperty('disabled');
+                    }
+                }
+            }
+        });
+
+        it('keeps MVCP offset-correction ARMED while released during an active turn when the carve is not growing (§3a prepend-preservation)', () => {
+            // Regression (§3a): the prior {disabled:true} superset fired for the WHOLE active turn,
+            // killing applyOffsetCorrection so an older-page prepend lost reading position
+            // (violating Invariant C; inverted older-load has no fallback writer). The disable is
+            // now scoped to the carve-active window only — a released reader during an active turn
+            // whose carve is NOT growing must keep MVCP armed for prepend preservation.
+            expect(resolveTranscriptFlashListBottomMaintenance({
+                ...baseParams,
+                bottomFollowMode: 'released',
+                liveRegionActive: false,
             })).toEqual({ startRenderingFromBottom: true });
         });
     });

@@ -20,6 +20,7 @@ export type TranscriptBottomFollowModeEvent =
     | { type: 'passive-bottom-observation'; distanceFromBottom: number; pinThresholdPx: number }
     | { type: 'drag-end'; distanceFromBottom: number | null; pinThresholdPx: number; sawAwayMovement: boolean }
     | { type: 'momentum-settle'; distanceFromBottom: number | null; pinThresholdPx: number }
+    | { type: 'release-live-tail-intent' }
     | { type: 'jump-to-bottom' }
     | { type: 'follow-bottom-intent' }
     | { type: 'content-growth' };
@@ -179,6 +180,11 @@ export function resolveTranscriptBottomFollowMode(
                 mode: nearBottom ? 'following' : 'released',
             };
         }
+        case 'release-live-tail-intent':
+            return {
+                dragSession: null,
+                mode: 'released',
+            };
         case 'jump-to-bottom':
         case 'follow-bottom-intent':
             return {

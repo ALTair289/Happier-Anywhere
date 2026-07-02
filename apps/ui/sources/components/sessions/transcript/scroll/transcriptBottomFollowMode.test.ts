@@ -26,6 +26,50 @@ describe('transcript bottom-follow mode', () => {
         });
     });
 
+    it('keeps the user-owned drag session escaping near bottom, then re-follows on near-bottom drag end', () => {
+        const nearBottomDrag = resolveTranscriptBottomFollowMode(state(), {
+            type: 'list-drag-start',
+        });
+
+        expect(nearBottomDrag).toMatchObject({
+            mode: 'escaping',
+            dragSession: {
+                latestDistanceFromBottom: null,
+                sawAwayMovement: false,
+                trusted: true,
+            },
+        });
+
+        const observedNearBottom = resolveTranscriptBottomFollowMode(nearBottomDrag, {
+            distanceFromBottom: 40,
+            movedAwayFromBottom: true,
+            pinThresholdPx: 72,
+            type: 'trusted-away-observation',
+        });
+
+        expect(observedNearBottom).toMatchObject({
+            dragSession: {
+                latestDistanceFromBottom: 40,
+                sawAwayMovement: false,
+            },
+            mode: 'escaping',
+        });
+
+        expect(resolveTranscriptBottomFollowMode(observedNearBottom, {
+            distanceFromBottom: 40,
+            pinThresholdPx: 72,
+            sawAwayMovement: false,
+            type: 'drag-end',
+        })).toMatchObject({
+            dragSession: {
+                latestDistanceFromBottom: 40,
+                returnedToBottom: true,
+                sawAwayMovement: false,
+            },
+            mode: 'following',
+        });
+    });
+
     it('releases after trusted away movement beyond the pinned threshold', () => {
         expect(resolveTranscriptBottomFollowMode(state({
             dragSession: {
@@ -181,6 +225,15 @@ describe('transcript bottom-follow mode', () => {
             pinThresholdPx: 72,
             type: 'passive-bottom-observation',
         })).toMatchObject({
+            mode: 'released',
+        });
+    });
+
+    it('releases following mode from explicit live-tail release intent', () => {
+        expect(resolveTranscriptBottomFollowMode(state({ mode: 'following' }), {
+            type: 'release-live-tail-intent',
+        })).toEqual({
+            dragSession: null,
             mode: 'released',
         });
     });

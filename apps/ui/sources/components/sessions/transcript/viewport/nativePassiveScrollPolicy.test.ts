@@ -23,79 +23,55 @@ describe('native passive scroll policy', () => {
         })).toBe(0);
     });
 
-    it('ignores impossible native negative offsets without suppressing ordinary top bounce', () => {
+    it('ignores native negative offsets without orientation or content metrics', () => {
         expect(shouldIgnoreNativeInvalidScrollObservation({
-            contentHeight: 24578,
             distanceFromBottom: 996655,
             isWeb: false,
-            layoutHeight: 682,
             offsetY: -972759,
-            orientation: 'standard',
         })).toBe(true);
 
         expect(shouldIgnoreNativeInvalidScrollObservation({
-            contentHeight: 24578,
             distanceFromBottom: -972759,
             isWeb: false,
-            layoutHeight: 682,
             offsetY: -972759,
-            orientation: 'standard',
         })).toBe(true);
 
         expect(shouldIgnoreNativeInvalidScrollObservation({
-            contentHeight: 24578,
-            distanceFromBottom: 23928,
+            distanceFromBottom: 0,
             isWeb: false,
-            layoutHeight: 682,
             offsetY: -32,
-            orientation: 'standard',
-        })).toBe(false);
+        })).toBe(true);
 
         expect(shouldIgnoreNativeInvalidScrollObservation({
-            contentHeight: 24578,
             distanceFromBottom: 996655,
             isWeb: true,
-            layoutHeight: 682,
             offsetY: -972759,
-            orientation: 'standard',
         })).toBe(false);
     });
 
-    it('ignores inverted raw bottom-bounce offsets before they can release follow or re-enable MVCP', () => {
+    it('keeps non-negative native offsets observable after rejecting negative raw bottom-bounce offsets', () => {
         expect(shouldIgnoreNativeInvalidScrollObservation({
-            contentHeight: 9982,
             distanceFromBottom: 0,
             isWeb: false,
-            layoutHeight: 682,
             offsetY: -20,
-            orientation: 'inverted',
         })).toBe(true);
 
         expect(shouldIgnoreNativeInvalidScrollObservation({
-            contentHeight: 9982,
             distanceFromBottom: 0,
             isWeb: false,
-            layoutHeight: 682,
             offsetY: -681,
-            orientation: 'inverted',
         })).toBe(true);
 
         expect(shouldIgnoreNativeInvalidScrollObservation({
-            contentHeight: 9982,
             distanceFromBottom: 249,
             isWeb: false,
-            layoutHeight: 682,
             offsetY: 249,
-            orientation: 'inverted',
         })).toBe(false);
 
         expect(shouldIgnoreNativeInvalidScrollObservation({
-            contentHeight: 9982,
             distanceFromBottom: 0,
             isWeb: true,
-            layoutHeight: 682,
             offsetY: -681,
-            orientation: 'inverted',
         })).toBe(false);
     });
 

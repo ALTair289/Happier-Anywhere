@@ -23,7 +23,8 @@ export type FlashListOffsetCorrectionEventType =
     | 'pause-cleared'
     | 'correction-applied'
     | 'correction-skipped-paused'
-    | 'correction-skipped-animation';
+    | 'correction-skipped-animation'
+    | 'correction-skipped-happier-paused';
 
 export type FlashListOffsetCorrectionSource = 'scroll-to-index' | 'initial-scroll-index';
 
@@ -40,6 +41,7 @@ const EVENT_TYPES = new Set<FlashListOffsetCorrectionEventType>([
     'correction-applied',
     'correction-skipped-paused',
     'correction-skipped-animation',
+    'correction-skipped-happier-paused',
 ]);
 
 const SOURCES = new Set<FlashListOffsetCorrectionSource>([
