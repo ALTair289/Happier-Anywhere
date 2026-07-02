@@ -29,7 +29,7 @@ internal object HappierCryptoWorkerSerializedJson {
       return parsed.toMap()
     }
     return when (parsed.optString(typeKey, "")) {
-      "undefined" -> null
+      "undefined" -> parsed.toMap()
       "json" -> fromJsonValue(parsed.opt(valueKey))
       else -> original
     }

@@ -76,16 +76,29 @@ describe('happier crypto worker local Expo module config', () => {
         const androidWorker = readFileSync(join(moduleRoot, 'android/src/main/java/dev/happier/cryptoworker/HappierCryptoWorker.kt'), 'utf8');
         const androidJson = readFileSync(join(moduleRoot, 'android/src/main/java/dev/happier/cryptoworker/HappierCryptoWorkerSerializedJson.kt'), 'utf8');
         expect(androidWorker).toContain('HappierCryptoWorkerSerializedJson.parseEnvelopeOrOriginal');
+        expect(androidWorker).toContain('decryptSecretboxJsonBatch(items: List<Map<String, String>>): List<Any?>');
+        expect(androidWorker).toContain('decryptAesGcmJsonBatch(items: List<Map<String, String>>): List<Any?>');
         expect(androidJson).toContain('__happierSerializedJsonValueV1');
+        expect(androidJson).toContain('"undefined" -> parsed.toMap()');
+        expect(androidJson).not.toContain('"undefined" -> null');
 
-        for (const fileName of [
-            'HappierCryptoWorkerAesGcm.swift',
-            'HappierCryptoWorkerSecretbox.swift',
-        ]) {
-            const source = readFileSync(join(moduleRoot, 'ios', fileName), 'utf8');
-            expect(source).toContain('HappierCryptoWorkerSerializedJson.parseEnvelopeOrOriginal');
-        }
+        const iosWorker = readFileSync(join(moduleRoot, 'ios/HappierCryptoWorker.swift'), 'utf8');
+        expect(iosWorker).toContain('decryptDataKeyEnvelopeV1Batch(_ items: [[String: String]]) -> [String?]');
+        expect(iosWorker).toContain('decryptSecretboxJsonBatch(_ items: [[String: String]]) -> [Any?]');
+        expect(iosWorker).toContain('decryptAesGcmJsonBatch(_ items: [[String: String]]) -> [Any?]');
+
+        const iosAesGcm = readFileSync(join(moduleRoot, 'ios/HappierCryptoWorkerAesGcm.swift'), 'utf8');
+        expect(iosAesGcm).toContain('HappierCryptoWorkerSerializedJson.parseEnvelopeOrOriginal');
+        expect(iosAesGcm).toContain('decryptAesGcmJsonBatch(_ items: [[String: String]]) -> [Any?]');
+
+        const iosSecretbox = readFileSync(join(moduleRoot, 'ios/HappierCryptoWorkerSecretbox.swift'), 'utf8');
+        expect(iosSecretbox).toContain('HappierCryptoWorkerSerializedJson.parseEnvelopeOrOriginal');
+        expect(iosSecretbox).toContain('decryptSecretboxJsonBatch(_ items: [[String: String]]) -> [Any?]');
+
         const iosJson = readFileSync(join(moduleRoot, 'ios/HappierCryptoWorkerTypes.swift'), 'utf8');
         expect(iosJson).toContain('__happierSerializedJsonValueV1');
+        expect(iosJson).toContain('parseEnvelopeOrOriginal(_ value: String) -> Any?');
+        expect(iosJson).toContain('case "undefined":\n      return object');
+        expect(iosJson).not.toContain('case "undefined":\n      return nil');
     });
 });

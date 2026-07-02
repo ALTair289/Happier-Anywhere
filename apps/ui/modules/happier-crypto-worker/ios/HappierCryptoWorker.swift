@@ -17,11 +17,11 @@ enum HappierCryptoWorker {
     HappierCryptoWorkerDataKeyEnvelope.decryptDataKeyEnvelopeV1Batch(items)
   }
 
-  static func decryptSecretboxJsonBatch(_ items: [[String: String]]) -> [String?] {
+  static func decryptSecretboxJsonBatch(_ items: [[String: String]]) -> [Any?] {
     HappierCryptoWorkerSecretbox.decryptSecretboxJsonBatch(items)
   }
 
-  static func decryptAesGcmJsonBatch(_ items: [[String: String]]) -> [String?] {
+  static func decryptAesGcmJsonBatch(_ items: [[String: String]]) -> [Any?] {
     HappierCryptoWorkerAesGcm.decryptAesGcmJsonBatch(items)
   }
 }

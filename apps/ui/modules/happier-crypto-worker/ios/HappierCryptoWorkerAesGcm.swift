@@ -7,8 +7,8 @@ enum HappierCryptoWorkerAesGcm {
   private static let nonceBytes = 12
   private static let tagBytes = 16
 
-  static func decryptAesGcmJsonBatch(_ items: [[String: String]]) -> [String?] {
-    items.map { item -> String? in
+  static func decryptAesGcmJsonBatch(_ items: [[String: String]]) -> [Any?] {
+    items.map { item -> Any? in
       guard
         let payloadBase64 = item["encryptedPayloadBase64"],
         let keyBase64 = item["keyBase64"],

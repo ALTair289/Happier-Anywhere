@@ -23,7 +23,7 @@ enum HappierCryptoWorkerSerializedJson {
 
     switch object["type"] as? String {
     case "undefined":
-      return nil
+      return object
     case "json":
       return object["value"]
     default:

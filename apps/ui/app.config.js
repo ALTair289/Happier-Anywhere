@@ -176,6 +176,7 @@ function resolveDefaultExpoRuntimeVersion() {
 
 const devClientLaunchMode = (process.env.HAPPIER_EXPO_DEVCLIENT_LAUNCH_MODE || '').trim();
 const devClientSilentLaunch = parseOptionalBoolean(process.env.HAPPIER_EXPO_DEVCLIENT_SILENT_LAUNCH);
+const iosMemoryProfilingRuntime = readBoolEnv('HAPPIER_IOS_MEMORY_PROFILING_RUNTIME', false);
 const updatesNativeDebugEnabled =
     parseOptionalBoolean(process.env.HAPPIER_EXPO_USE_NATIVE_DEBUG) ??
     parseOptionalBoolean(process.env.EX_UPDATES_NATIVE_DEBUG) ??
@@ -357,7 +358,7 @@ const baseExpoConfig = {
                     root: "./sources/app"
                 }
             ],
-            ...(devClientLaunchMode ? [[
+            ...(devClientLaunchMode && !iosMemoryProfilingRuntime ? [[
                 "expo-dev-client",
                 {
                     launchMode: devClientLaunchMode
@@ -427,7 +428,7 @@ const baseExpoConfig = {
             ]
         ],
         updates: updatesConfig,
-        ...(devClientSilentLaunch === true ? { developmentClient: { silentLaunch: true } } : {}),
+        ...(devClientSilentLaunch === true && !iosMemoryProfilingRuntime ? { developmentClient: { silentLaunch: true } } : {}),
         experiments: {
             typedRoutes: true
         },

@@ -100,6 +100,7 @@ describe('createNativeCryptoWorker native', () => {
             '{"__happierSerializedJsonValueV1":true,"type":"json","value":{"ok":true}}',
             null,
             '{"__happierSerializedJsonValueV1":true,"type":"undefined"}',
+            { __happierSerializedJsonValueV1: true, type: 'undefined' },
             '{',
         ]);
         nativeModuleMock.requireNativeModule.mockReturnValueOnce({
@@ -116,13 +117,14 @@ describe('createNativeCryptoWorker native', () => {
                 { ciphertextBase64: 'ciphertext-2', keyBase64: 'key-2' },
                 { ciphertextBase64: 'ciphertext-3', keyBase64: 'key-3' },
                 { ciphertextBase64: 'ciphertext-4', keyBase64: 'key-4' },
+                { ciphertextBase64: 'ciphertext-5', keyBase64: 'key-5' },
             ],
         };
 
         await expect(createNativeCryptoWorker().decryptSecretboxJson(request)).resolves.toEqual({
             status: 'ok',
             source: 'native',
-            items: [{ ok: true }, null, undefined, null],
+            items: [{ ok: true }, null, undefined, undefined, null],
         });
         expect(decryptSecretboxJsonBatch).toHaveBeenCalledWith(request.items);
     });

@@ -6,8 +6,8 @@ enum HappierCryptoWorkerSecretbox {
   private static let nonceBytes = 24
   private static let macBytes = 16
 
-  static func decryptSecretboxJsonBatch(_ items: [[String: String]]) -> [String?] {
-    items.map { item -> String? in
+  static func decryptSecretboxJsonBatch(_ items: [[String: String]]) -> [Any?] {
+    items.map { item -> Any? in
       guard
         let ciphertextBase64 = item["ciphertextBase64"],
         let keyBase64 = item["keyBase64"],
