@@ -2,6 +2,7 @@ import * as React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { renderScreen, standardCleanup } from '@/dev/testkit';
+import { resetFlashListChatListHarness } from '@/dev/testkit/harness/chatListHarness';
 import { installTranscriptCommonModuleMocks } from './transcriptTestHelpers';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -157,22 +158,12 @@ vi.mock('@/components/sessions/actions/SessionActionDraftCard', () => ({
     SessionActionDraftCard: () => React.createElement('SessionActionDraftCard'),
 }));
 
-vi.mock('@/sync/sync', () => ({
-    sync: {
-        getSyncTuning: () => ({
-            transcriptForwardPrefetchThresholdPx: 0,
-            transcriptBackwardPrefetchThresholdPx: 0,
-            transcriptFlashListEstimatedItemSize: 120,
-            transcriptWebHotTailItemCount: 2,
-            transcriptWebInitialPinStabilizeMs: 0,
-            transcriptWebInitialPinRetryIntervalMs: 16,
-        }),
-        loadOlderMessages: vi.fn(),
+vi.mock('@/sync/sync', async () =>
+    (await import('@/dev/testkit/harness/chatListHarness')).createFlashListChatListSyncModuleMock({
         loadOlderMessagesForkAware: vi.fn(),
-        loadNewerMessages: vi.fn(),
         hasDeferredNewerMessages: () => false,
-    },
-}));
+    }),
+);
 
 vi.mock('@/sync/domains/state/agentStateCapabilities', () => ({
     getPermissionsInUiWhileLocal: () => ({}),
@@ -244,10 +235,6 @@ vi.mock('./chatListNativeId', () => ({
     buildChatListNativeId: () => 'transcript-chat-list-native',
 }));
 
-vi.mock('@/components/ui/lists/useWebFlashListCrashFallback', () => ({
-    useWebFlashListCrashFallback: () => false,
-}));
-
 vi.mock('@/components/sessions/transcript/segments/buildTranscriptHotColdSegments', async () => await import('./segments/buildTranscriptHotColdSegments'));
 
 vi.mock('@/components/sessions/transcript/webTranscriptScrollMetrics', () => ({
@@ -269,6 +256,16 @@ vi.mock('@/components/sessions/transcript/webTranscriptPrependAnchor', () => ({
 
 describe('ChatList web hot/cold split', () => {
     beforeEach(() => {
+        resetFlashListChatListHarness({
+            syncTuningState: {
+                transcriptForwardPrefetchThresholdPx: 0,
+                transcriptBackwardPrefetchThresholdPx: 0,
+                transcriptFlashListEstimatedItemSize: 120,
+                transcriptWebHotTailItemCount: 2,
+                transcriptWebInitialPinStabilizeMs: 0,
+                transcriptWebInitialPinRetryIntervalMs: 16,
+            },
+        });
         capturedFlashListProps = null;
         sessionState = {
             id: 'session-1',

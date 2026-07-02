@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { resolveTranscriptJumpSeqIndex } from './transcriptJumpSeqIndexResolution';
+import { resolveTranscriptJumpSeqIndex } from './viewport/jump/resolveTranscriptJumpTargetIndex';
 
 const seqByMessageId: Record<string, number> = {
     'msg-2200': 2200,

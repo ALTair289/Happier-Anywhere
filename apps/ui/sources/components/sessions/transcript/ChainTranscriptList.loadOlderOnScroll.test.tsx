@@ -87,6 +87,26 @@ describe('ChainTranscriptList', () => {
         await flushHookEffects({ cycles: 1, turns });
     }
 
+    const NATIVE_INVERTED_LAYOUT_HEIGHT = 500;
+    const NATIVE_INVERTED_CONTENT_HEIGHT = 2000;
+
+    function nativeInvertedRawOffsetFromOlderEdge(offsetFromOlderEdge: number): number {
+        return Math.max(
+            0,
+            NATIVE_INVERTED_CONTENT_HEIGHT - NATIVE_INVERTED_LAYOUT_HEIGHT - Math.trunc(offsetFromOlderEdge),
+        );
+    }
+
+    function nativeInvertedScrollEvent(offsetFromOlderEdge: number) {
+        return {
+            nativeEvent: {
+                contentOffset: { y: nativeInvertedRawOffsetFromOlderEdge(offsetFromOlderEdge) },
+                contentSize: { height: NATIVE_INVERTED_CONTENT_HEIGHT },
+                layoutMeasurement: { height: NATIVE_INVERTED_LAYOUT_HEIGHT },
+            },
+        };
+    }
+
     afterEach(() => {
         syncTuningState = {
             transcriptFlashListEstimatedItemSize: 120,
@@ -114,6 +134,33 @@ describe('ChainTranscriptList', () => {
 
             const list = screen.findByType('FlashList' as any);
             expect(list.props.scrollEventThrottle).toBe(32);
+        } finally {
+            Object.defineProperty(Platform, 'OS', { configurable: true, value: originalPlatform });
+        }
+    });
+
+    it('renders native sidechain FlashList inverted with newest-first data', async () => {
+        const { Platform } = await import('react-native');
+        const originalPlatform = Platform.OS;
+        Object.defineProperty(Platform, 'OS', { configurable: true, value: 'ios' });
+        try {
+            const screen = await renderChainTranscriptList({
+                sessionId: 's1',
+                messages: [
+                    { kind: 'user-text', id: 'oldest', localId: null, createdAt: 1, text: 'first' },
+                    { kind: 'agent-text', id: 'newest', localId: null, createdAt: 2, text: 'second', isThinking: false },
+                ],
+                metadata: null,
+                interaction: { canSendMessages: true, canApprovePermissions: true, disableToolNavigation: true },
+            });
+
+            const list = getFlashList(screen);
+            expect(list.props.inverted).toBe(true);
+            expect(list.props.data.map((item: { id: string }) => item.id)).toEqual(['msg:newest', 'msg:oldest']);
+            expect(list.props.onStartReached).toBeUndefined();
+            expect(typeof list.props.onEndReached).toBe('function');
+            expect(list.props.onEndReachedThreshold).toBe(list.props.onStartReachedThreshold);
+            expect(list.props.scrollEventThrottle).toBe(16);
         } finally {
             Object.defineProperty(Platform, 'OS', { configurable: true, value: originalPlatform });
         }
@@ -165,7 +212,7 @@ describe('ChainTranscriptList', () => {
         expect(scrollToEndSpy).not.toHaveBeenCalled();
     });
 
-    it('falls back to an estimated last-item offset when scrollToIndex cannot measure yet', async () => {
+    it('falls back to the estimated live-tail offset when scrollToIndex cannot measure yet', async () => {
         scrollToIndexShouldReject = true;
         const screen = await renderChainTranscriptList({
             sessionId: 's1',
@@ -194,11 +241,10 @@ describe('ChainTranscriptList', () => {
             await settleListEffects(2);
         });
 
-        // N2c: the turn decomposes into one message row per agent text, so the
-        // bottom pin targets the LAST decomposed row.
+        // Native sidechain FlashList is inverted, so the live-tail row is index 0.
         expect(initialScrollToIndexSpy).toHaveBeenCalledWith(
             expect.objectContaining({
-                index: 1,
+                index: 0,
                 animated: false,
                 viewPosition: 1,
             }),
@@ -209,7 +255,7 @@ describe('ChainTranscriptList', () => {
         ];
         expect(scrollToOffsetCalls).toEqual(expect.arrayContaining([
             [expect.objectContaining({
-                offset: 120,
+                offset: 0,
                 animated: false,
             })],
         ]));
@@ -272,7 +318,7 @@ describe('ChainTranscriptList', () => {
             list.props.onContentSizeChange(0, 1000);
             list.props.onScroll({
                 nativeEvent: {
-                    contentOffset: { y: 100 },
+                    contentOffset: { y: 120 },
                     contentSize: { height: 1000 },
                     layoutMeasurement: { height: 500 },
                 },
@@ -322,7 +368,7 @@ describe('ChainTranscriptList', () => {
             list.props.onContentSizeChange(0, 1000);
             list.props.onScroll({
                 nativeEvent: {
-                    contentOffset: { y: 100 },
+                    contentOffset: { y: 120 },
                     contentSize: { height: 1000 },
                     layoutMeasurement: { height: 500 },
                 },
@@ -358,35 +404,29 @@ describe('ChainTranscriptList', () => {
             const list = getFlashList(screen);
             const scrollTo = async (y: number) => {
                 await act(async () => {
-                    list.props.onScroll({
-                        nativeEvent: {
-                            contentOffset: { y },
-                            contentSize: { height: 1000 },
-                            layoutMeasurement: { height: 500 },
-                        },
-                    });
+                    list.props.onScroll(nativeInvertedScrollEvent(y));
                     await settleListEffects();
                 });
             };
             await act(async () => {
-                invokeTestInstanceHandler(list, 'onLayout', { nativeEvent: { layout: { height: 500 } } });
-                list.props.onContentSizeChange(0, 1000);
+                invokeTestInstanceHandler(list, 'onLayout', { nativeEvent: { layout: { height: NATIVE_INVERTED_LAYOUT_HEIGHT } } });
+                list.props.onContentSizeChange(0, NATIVE_INVERTED_CONTENT_HEIGHT);
                 await settleListEffects();
             });
 
-            await scrollTo(100);
+            await scrollTo(120);
             expect(loadOlder).toHaveBeenCalledTimes(1);
 
             // Parked inside the threshold: cooldown elapsing alone never re-arms (E6 anti-burst).
             await act(async () => {
                 await vi.advanceTimersByTimeAsync(5000);
             });
-            await scrollTo(120);
+            await scrollTo(160);
             expect(loadOlder).toHaveBeenCalledTimes(1);
 
             // An observed threshold exit -> re-enter re-arms the machine for exactly one more load.
             await scrollTo(900);
-            await scrollTo(100);
+            await scrollTo(120);
             expect(loadOlder).toHaveBeenCalledTimes(2);
         } finally {
             vi.useRealTimers();
@@ -410,28 +450,22 @@ describe('ChainTranscriptList', () => {
             const list = getFlashList(screen);
             const scrollTo = async (y: number) => {
                 await act(async () => {
-                    list.props.onScroll({
-                        nativeEvent: {
-                            contentOffset: { y },
-                            contentSize: { height: 1000 },
-                            layoutMeasurement: { height: 500 },
-                        },
-                    });
+                    list.props.onScroll(nativeInvertedScrollEvent(y));
                     await settleListEffects();
                 });
             };
             await act(async () => {
-                invokeTestInstanceHandler(list, 'onLayout', { nativeEvent: { layout: { height: 500 } } });
-                list.props.onContentSizeChange(0, 1000);
+                invokeTestInstanceHandler(list, 'onLayout', { nativeEvent: { layout: { height: NATIVE_INVERTED_LAYOUT_HEIGHT } } });
+                list.props.onContentSizeChange(0, NATIVE_INVERTED_CONTENT_HEIGHT);
                 await settleListEffects();
             });
 
-            await scrollTo(100);
+            await scrollTo(120);
             expect(loadOlder).toHaveBeenCalledTimes(1);
 
             // Exit -> re-enter while the cooldown is still running: no immediate load…
             await scrollTo(900);
-            await scrollTo(100);
+            await scrollTo(120);
             expect(loadOlder).toHaveBeenCalledTimes(1);
 
             // …but the re-arm is honored when the cooldown elapses.
@@ -522,7 +556,7 @@ describe('ChainTranscriptList', () => {
         await act(async () => {
             invokeTestInstanceHandler(list, 'onLayout', { nativeEvent: { layout: { height: 500 } } });
             list.props.onContentSizeChange(0, 1000);
-            list.props.onScroll({ nativeEvent: { contentOffset: { y: 100 } } });
+            list.props.onScroll({ nativeEvent: { contentOffset: { y: 120 } } });
             await settleListEffects();
             expect(loadOlder).toHaveBeenCalledTimes(1);
             const loadOlderPromise = loadOlder.mock.results[0]?.value as Promise<unknown> | undefined;
@@ -788,7 +822,7 @@ describe('ChainTranscriptList', () => {
         expect(loadOlder).not.toHaveBeenCalled();
     });
 
-    it('does not let onStartReached bypass the pinned short-transcript guard', async () => {
+    it('does not let the rendered older edge bypass the pinned short-transcript guard', async () => {
         scrollToIndexShouldReject = false;
         const loadOlder = vi.fn(async () => ({ loaded: 1, hasMore: true, status: 'loaded' as const }));
 
@@ -804,7 +838,7 @@ describe('ChainTranscriptList', () => {
         await act(async () => {
             invokeTestInstanceHandler(list, 'onLayout', { nativeEvent: { layout: { height: 500 } } });
             list.props.onContentSizeChange(0, 400);
-            list.props.onStartReached();
+            list.props.onEndReached();
             await settleListEffects();
         });
 
@@ -840,43 +874,49 @@ describe('ChainTranscriptList', () => {
         expect(loadOlder).not.toHaveBeenCalled();
     });
     it('preserves the viewport when older messages prepend above the current position on web', async () => {
-        scrollToIndexShouldReject = false;
-        const { ChainTranscriptList } = await import('./ChainTranscriptList');
-        const scrollEl: any = {
-            scrollTop: 100,
-            scrollHeight: 1000,
-            clientHeight: 500,
-        };
-        const loadOlder = vi.fn(async () => {
-            scrollEl.scrollHeight = 1300;
-            return { loaded: 5, hasMore: true, status: 'loaded' as const };
-        });
-
-        const screen = await renderChainTranscriptList({
-            sessionId: 's1',
-            messages: [{ kind: 'agent-text', id: 'm1', localId: null, createdAt: 1, text: 'hi', isThinking: false }],
-            metadata: null,
-            interaction: { canSendMessages: true, canApprovePermissions: true, disableToolNavigation: true },
-            loadOlder,
-        });
-
-        const list = getFlashList(screen);
-        await act(async () => {
-            invokeTestInstanceHandler(list, 'onLayout', { nativeEvent: { layout: { height: 500 } } });
-            list.props.onContentSizeChange(0, 1000);
-            list.props.onScroll({
-                nativeEvent: {
-                    contentOffset: { y: 100 },
-                    contentSize: { height: 1000 },
-                    layoutMeasurement: { height: 500 },
-                    target: scrollEl,
-                },
-                target: scrollEl,
+        const { Platform } = await import('react-native');
+        const originalPlatform = Platform.OS;
+        Object.defineProperty(Platform, 'OS', { configurable: true, value: 'web' });
+        try {
+            scrollToIndexShouldReject = false;
+            const scrollEl: any = {
+                scrollTop: 100,
+                scrollHeight: 1000,
+                clientHeight: 500,
+            };
+            const loadOlder = vi.fn(async () => {
+                scrollEl.scrollHeight = 1300;
+                return { loaded: 5, hasMore: true, status: 'loaded' as const };
             });
-            await settleListEffects(3);
-        });
 
-        expect(loadOlder).toHaveBeenCalledTimes(1);
-        expect(scrollEl.scrollTop).toBe(400);
+            const screen = await renderChainTranscriptList({
+                sessionId: 's1',
+                messages: [{ kind: 'agent-text', id: 'm1', localId: null, createdAt: 1, text: 'hi', isThinking: false }],
+                metadata: null,
+                interaction: { canSendMessages: true, canApprovePermissions: true, disableToolNavigation: true },
+                loadOlder,
+            });
+
+            const list = getFlashList(screen);
+            await act(async () => {
+                invokeTestInstanceHandler(list, 'onLayout', { nativeEvent: { layout: { height: 500 } } });
+                list.props.onContentSizeChange(0, 1000);
+                list.props.onScroll({
+                    nativeEvent: {
+                        contentOffset: { y: 100 },
+                        contentSize: { height: 1000 },
+                        layoutMeasurement: { height: 500 },
+                        target: scrollEl,
+                    },
+                    target: scrollEl,
+                });
+                await settleListEffects(3);
+            });
+
+            expect(loadOlder).toHaveBeenCalledTimes(1);
+            expect(scrollEl.scrollTop).toBe(400);
+        } finally {
+            Object.defineProperty(Platform, 'OS', { configurable: true, value: originalPlatform });
+        }
     });
 });

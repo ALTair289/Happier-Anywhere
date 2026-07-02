@@ -338,21 +338,12 @@ vi.mock('@/sync/domains/state/agentStateCapabilities', () => ({
   getPermissionsInUiWhileLocal: () => ({}),
 }));
 
-vi.mock('@/sync/sync', () => ({
-  sync: {
-    loadOlderMessages: vi.fn(),
+vi.mock('@/sync/sync', async () =>
+  (await import('@/dev/testkit/harness/chatListHarness')).createFlashListChatListSyncModuleMock({
     loadOlderMessagesForkAware: vi.fn(),
-    loadNewerMessages: vi.fn(),
     hasDeferredNewerMessages: () => false,
-    getSyncTuning: () => ({
-      transcriptForwardPrefetchThresholdPx: 0,
-      transcriptBackwardPrefetchThresholdPx: 0,
-      transcriptFlashListEstimatedItemSize: 120,
-      transcriptWebInitialPinStabilizeMs: 3000,
-      transcriptWebInitialPinRetryIntervalMs: 250,
-    }),
-  },
-}));
+  }),
+);
 
 describe('ChatList (forked transcript)', () => {
     async function renderChatList() {
@@ -479,10 +470,11 @@ describe('ChatList (forked transcript)', () => {
         expect(useMessageMock).toHaveBeenCalledWith('parent-1', 'p1');
         expect(useMessageMock).toHaveBeenCalledWith('child-1', 'c1');
 
-        const firstMessageView = capturedMessageViewProps[0];
-        expect(firstMessageView).toBeTruthy();
-        expect(firstMessageView.sessionId).toBe('parent-1');
-        expect(firstMessageView.interaction).toEqual(
+        const ancestorMessageView = capturedMessageViewProps.find((props) => (
+            props?.sessionId === 'parent-1' && props?.message?.id === 'p1'
+        ));
+        expect(ancestorMessageView).toBeTruthy();
+        expect(ancestorMessageView.interaction).toEqual(
             expect.objectContaining({
                 canSendMessages: false,
                 canApprovePermissions: false,
@@ -509,7 +501,7 @@ describe('ChatList (forked transcript)', () => {
             await flushHookEffects({ cycles: 2, turns: 3 });
         });
 
-        expect(loadOlderForkAware).toHaveBeenCalledWith('child-1');
+        expect(loadOlderForkAware).toHaveBeenCalledWith('child-1', { limit: 64 });
 
         await screen.unmount();
     });

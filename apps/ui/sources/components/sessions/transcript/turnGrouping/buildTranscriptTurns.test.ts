@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { AgentTextMessage, Message, ModeSwitchMessage, ToolCallMessage, UserTextMessage } from '@/sync/domains/messages/messageTypes';
+import type { PendingMessage } from '@/sync/domains/state/storageTypes';
 
 import { buildTranscriptTurns, buildTranscriptTurnsCached } from './buildTranscriptTurns';
 
@@ -81,7 +82,51 @@ function toolMessage(opts: {
     };
 }
 
+function pendingMessage(opts: {
+    id: string;
+    localId: string | null;
+    createdAt: number;
+    source: 'local_outbound' | 'server_pending';
+}): PendingMessage {
+    return {
+        id: opts.id,
+        localId: opts.localId,
+        createdAt: opts.createdAt,
+        updatedAt: opts.createdAt,
+        text: `pending:${opts.id}`,
+        source: opts.source,
+        rawRecord: {},
+    };
+}
+
 describe('buildTranscriptTurns', () => {
+    it('hides committed user rows that are still owned by unresolved server pending state', () => {
+        const committedUser = {
+            ...userMessage('m-user', 20),
+            localId: 'pending-1',
+            text: 'committed but not accepted',
+        };
+        const chronological: Message[] = [committedUser];
+        const messagesById = Object.fromEntries(chronological.map((m) => [m.id, m]));
+
+        const turns = buildTranscriptTurns({
+            messageIdsOldestFirst: chronological.map((m) => m.id),
+            messagesById,
+            pendingMessages: [
+                pendingMessage({
+                    id: 'pending-row',
+                    localId: 'pending-1',
+                    createdAt: 10,
+                    source: 'server_pending',
+                }),
+            ],
+            groupToolCalls: true,
+            toolCallsGroupStrategy: 'consecutive_tools',
+        });
+
+        expect(turns).toEqual([]);
+    });
+
     it('starts a null-user turn before a fork boundary tool message', () => {
         const chronological: Message[] = [
             userMessage('u1', 1),
@@ -497,6 +542,42 @@ describe('buildTranscriptTurns', () => {
 });
 
 describe('buildTranscriptTurnsCached', () => {
+    it('rebuilds cached turns when unresolved server pending state starts owning a committed localId', () => {
+        const committedUser = {
+            ...userMessage('m-user', 20),
+            localId: 'pending-1',
+            text: 'committed but not accepted',
+        };
+        const chronological: Message[] = [committedUser];
+        const messagesById = Object.fromEntries(chronological.map((m) => [m.id, m]));
+        let cache = buildTranscriptTurnsCached({
+            cache: null,
+            messageIdsOldestFirst: chronological.map((m) => m.id),
+            messagesById,
+            groupToolCalls: true,
+            toolCallsGroupStrategy: 'consecutive_tools',
+        });
+        expect(cache.turns.map((turn) => turn.userMessageId)).toEqual(['m-user']);
+
+        cache = buildTranscriptTurnsCached({
+            cache,
+            messageIdsOldestFirst: chronological.map((m) => m.id),
+            messagesById,
+            pendingMessages: [
+                pendingMessage({
+                    id: 'pending-row',
+                    localId: 'pending-1',
+                    createdAt: 10,
+                    source: 'server_pending',
+                }),
+            ],
+            groupToolCalls: true,
+            toolCallsGroupStrategy: 'consecutive_tools',
+        });
+
+        expect(cache.turns).toEqual([]);
+    });
+
     it('resets turn grouping state when an appended fork boundary starts with a tool message', () => {
         const chronological: Message[] = [
             userMessage('u1', 1),

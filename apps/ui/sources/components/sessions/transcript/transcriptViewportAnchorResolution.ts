@@ -76,7 +76,7 @@ function itemOwnsMessageId(item: TranscriptViewportAnchorResolvableItem, message
 }
 
 export function resolveTranscriptViewportAnchorIndex(params: Readonly<{
-    anchor: Pick<SessionViewportAnchorSnapshot, 'messageId' | 'itemId'>;
+    anchor: Pick<SessionViewportAnchorSnapshot, 'messageId' | 'itemId' | 'seq'>;
     items: readonly TranscriptViewportAnchorResolvableItem[];
 }>): number | null {
     const messageId = typeof params.anchor.messageId === 'string' && params.anchor.messageId.length > 0
@@ -92,7 +92,12 @@ export function resolveTranscriptViewportAnchorIndex(params: Readonly<{
     }
 
     const itemIndex = params.items.findIndex((item) => item.id === params.anchor.itemId);
-    return itemIndex >= 0 ? itemIndex : null;
+    if (itemIndex >= 0) return itemIndex;
+
+    const anchorSeq = normalizeSeq(params.anchor.seq);
+    if (anchorSeq == null) return null;
+    const seqIndex = params.items.findIndex((item) => normalizeSeq(item.seq) === anchorSeq);
+    return seqIndex >= 0 ? seqIndex : null;
 }
 
 export function resolveTranscriptViewportAnchorLookup(params: Readonly<{

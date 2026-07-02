@@ -41,6 +41,23 @@ const sessionViewportMockState = vi.hoisted(() => ({
 const deferredNewerMockState = vi.hoisted(() => ({
     sessionIds: new Set<string>(),
 }));
+const targetWindowMockState = vi.hoisted(() => ({
+    inactive: {
+        isWindowMode: false,
+        windowId: null,
+        targetSeq: null,
+        windowMinSeq: null,
+        windowMaxSeq: null,
+        olderCursor: null,
+        newerCursor: null,
+        hasMoreOlder: null,
+        hasMoreNewer: null,
+        activatedAtMs: null,
+    },
+    bySessionId: new Map<string, any>(),
+    loadTargetWindowMessages: vi.fn(),
+    markSessionLiveTailIntent: vi.fn(),
+}));
 const pinHudMockState = vi.hoisted(() => ({
     renderCount: 0,
 }));
@@ -222,10 +239,6 @@ vi.mock('@/components/sessions/keyboardAvoidance', () => ({
         }, children),
 }));
 
-vi.mock('@/components/ui/lists/useWebFlashListCrashFallback', () => ({
-    useWebFlashListCrashFallback: () => false,
-}));
-
 vi.mock('@/hooks/ui/useReducedMotionPreference', () => ({
     useReducedMotionPreference: () => false,
 }));
@@ -241,11 +254,17 @@ vi.mock('@/utils/system/fireAndForget', () => ({
 vi.mock('@/sync/sync', async () =>
     (await import('@/dev/testkit/harness/chatListHarness')).createFlashListChatListSyncModuleMock({
         loadOlderMessages: vi.fn(async () => ({ loaded: 0, hasMore: false, status: 'no_more' as const })),
+        loadTargetWindowMessages: targetWindowMockState.loadTargetWindowMessages,
         loadNewerMessages: vi.fn(async () => undefined),
         hasDeferredNewerMessages: (sessionId: string) => deferredNewerMockState.sessionIds.has(sessionId),
         getSessionViewport: (sessionId: string) => sessionViewportMockState.byId.get(sessionId) ?? null,
+        getSessionTargetWindowState: (sessionId: string) =>
+            targetWindowMockState.bySessionId.get(sessionId) ?? targetWindowMockState.inactive,
         onSessionViewportChange: () => {},
-        markSessionLiveTailIntent: () => {},
+        markSessionLiveTailIntent: (sessionId: string) => {
+            targetWindowMockState.bySessionId.set(sessionId, targetWindowMockState.inactive);
+            targetWindowMockState.markSessionLiveTailIntent(sessionId);
+        },
     })
 );
 
@@ -266,6 +285,27 @@ function streamingAssistantMeta() {
             segmentLocalId: null,
             updatedAtMs: 0,
         },
+    };
+}
+
+let transcriptHarnessRenderRevision = 0;
+
+function forceTranscriptHarnessRender() {
+    // Production committed-message changes re-render ChatList through storage subscriptions
+    // (`useSessionTranscriptIds` / `useSessionMessagesById`). This file overrides those hooks
+    // with non-reactive reads, so message-state mutations use a harness-only prop change.
+    // Do not use session.seq here: per-message seq bumps are intentionally render-irrelevant
+    // for the transcript shell memo signature.
+    transcriptHarnessRenderRevision += 1;
+    const revision = transcriptHarnessRenderRevision;
+    return () => {
+        void revision;
+    };
+}
+
+function renderHarnessSession() {
+    return {
+        ...flashListChatListHarnessState.sessionState,
     };
 }
 
@@ -347,6 +387,10 @@ function configureHarness(options: Readonly<{
         accessLevel: null,
         canApprovePermissions: true,
     };
+    targetWindowMockState.bySessionId.clear();
+    targetWindowMockState.loadTargetWindowMessages.mockReset();
+    targetWindowMockState.loadTargetWindowMessages.mockResolvedValue(null);
+    targetWindowMockState.markSessionLiveTailIntent.mockReset();
 }
 
 function configureTelemetrySink(): ReturnType<typeof vi.fn> {
@@ -521,6 +565,7 @@ beforeEach(() => {
     listRefMockState.visibleRange = null;
     pinHudMockState.renderCount = 0;
     renderedMessageViewProps.length = 0;
+    transcriptHarnessRenderRevision = 0;
     sessionViewportMockState.byId.clear();
     deferredNewerMockState.sessionIds.clear();
     configureHarness();
@@ -591,23 +636,20 @@ describe('ChatList (FlashList v2 inverted pilot)', () => {
             expect(listDataIds(screen)).toEqual(['m1', 'm2']);
         });
 
-        it("keeps today's flash_v2 prop surface byte-for-byte when the flag is off", async () => {
+        it('resolves native flash_v2 to the canonical inverted presentation', async () => {
             configureHarness({ platformOs: 'ios', implementation: 'flash_v2' });
             const dims = { layoutHeight: 500, contentHeight: 2000 };
             const screen = await renderInvertedChatList();
             await coldOpenAtBottom(screen, dims);
 
             const props = screen.requireCapturedFlashListProps();
-            expect(props.inverted).toBeUndefined();
-            expect(listDataIds(screen)).toEqual(['m1', 'm2', 'm3', 'm4']);
-            // Standard MVCP policy stays untouched (startRenderingFromBottom present).
+            expect(props.inverted).toBe(true);
+            expect(listDataIds(screen)).toEqual(['m4', 'm3', 'm2', 'm1']);
             expect(props.maintainVisibleContentPosition).toMatchObject({
                 startRenderingFromBottom: true,
             });
             expect(props.maintainVisibleContentPosition).not.toHaveProperty('disabled');
-            // Standard cold open still issues its mount-settle bottom pin (flag-off
-            // behavior unchanged: raw bottom = contentHeight - layoutHeight).
-            expect(fileFlashListRefHandle.scrollToOffset).toHaveBeenCalledWith({ offset: 1500, animated: false });
+            expect(fileFlashListRefHandle.scrollToOffset).not.toHaveBeenCalled();
         });
     });
 
@@ -642,14 +684,11 @@ describe('ChatList (FlashList v2 inverted pilot)', () => {
             });
         });
 
-        it('re-pins the inverted follow-bottom list when a structural clear yanks it off the bottom inside the mount-settle window', async () => {
-            // Cold-open open-flicker root fix (device-proven on session
-            // cmqbym9nh0m1ztmwgdjd8rsqw): a structural clearLayoutCacheOnUpdate inside the
-            // mount-settle window resets FlashList bottom maintenance and yanks the inverted
-            // follow-bottom list toward the visual top (raw ~6 -> ~contentHeight). MVCP only
-            // MAINTAINS a bottom it has already reached, so an untrusted off-bottom frame that
-            // is still 'following' inside the mount window must re-issue the canonical inverted
-            // bottom pin (scrollToIndex(0)) instead of bailing as passive drift.
+        it('keeps structural-clear drift write-free while the session-open latch owns positioning', async () => {
+            // NQA-F3 / REVIEW-C1 contract: the session-open latch is the single owner of cold
+            // positioning during structural clearLayoutCacheOnUpdate drift. An untrusted
+            // off-bottom frame inside that latch window must stay write-free here; issuing a
+            // second scrollToIndex(0) would create a competing structural-clear writer.
             const screen = await renderInvertedChatList();
 
             // First paint only — no settleNativeMount, so the mount-settle window stays active
@@ -667,7 +706,7 @@ describe('ChatList (FlashList v2 inverted pilot)', () => {
             // still following with no user intent — the post-clear re-stack seen on device.
             await scrollRaw(screen, 900, { layoutHeight: 500, contentHeight: 2000 });
 
-            expect(fileFlashListRefHandle.scrollToIndex).toHaveBeenCalledWith({ index: 0, animated: false });
+            expect(fileFlashListRefHandle.scrollToIndex).not.toHaveBeenCalled();
         });
 
         it('does not re-pin a settled inverted follow-bottom list on a passive off-bottom drift frame', async () => {
@@ -713,7 +752,10 @@ describe('ChatList (FlashList v2 inverted pilot)', () => {
             };
             const { ChatList } = await import('./ChatList');
             await screen.update(
-                <ChatList session={{ ...flashListChatListHarnessState.sessionState, seq: 1 }} />,
+                <ChatList
+                    session={renderHarnessSession()}
+                    onEditPendingMessage={forceTranscriptHarnessRender()}
+                />,
             );
             listRefMockState.absoluteScrollOffset = 0;
             await screen.triggerContentSizeChange(0, 2120, { cycles: 2, turns: 2, frames: 1 });
@@ -767,7 +809,10 @@ describe('ChatList (FlashList v2 inverted pilot)', () => {
             };
             const { ChatList } = await import('./ChatList');
             await screen.update(
-                <ChatList session={{ ...flashListChatListHarnessState.sessionState, seq: 1 }} />,
+                <ChatList
+                    session={renderHarnessSession()}
+                    onEditPendingMessage={forceTranscriptHarnessRender()}
+                />,
             );
             await fireTranscriptItemShellLayout(findTranscriptItemShell(screen, 'm4'), 260);
             // The live iOS failure class reports transient no-visible samples while the
@@ -857,7 +902,10 @@ describe('ChatList (FlashList v2 inverted pilot)', () => {
             };
 
             await screen.update(
-                <ChatList session={{ ...flashListChatListHarnessState.sessionState, seq: 2 }} />,
+                <ChatList
+                    session={renderHarnessSession()}
+                    onEditPendingMessage={forceTranscriptHarnessRender()}
+                />,
             );
 
             expect(fileFlashListRefHandle.clearLayoutCacheOnUpdate).toHaveBeenCalledTimes(1);
@@ -908,13 +956,33 @@ describe('ChatList (FlashList v2 inverted pilot)', () => {
                 hasVisibleRows: true,
                 firstVisibleItemId: 'm4',
                 lastVisibleItemId: 'm1',
+                firstVisibleSourceIndex: 0,
+                lastVisibleSourceIndex: 3,
                 blankAreaPx: 0,
                 visibleWindowSource: 'ref-compute',
                 blankAreaSource: 'none',
             });
         });
 
-        it('does not install native viewability collection while viewport telemetry is disabled', async () => {
+        it('does not install native viewability collection while viewport telemetry is disabled and no navigation anchors exist', async () => {
+            configureHarness({
+                syncTuningState: {
+                    transcriptViewportTelemetryEnabled: false,
+                },
+            });
+            flashListChatListHarnessState.sessionMessagesState = {
+                messages: [],
+                isLoaded: true,
+            };
+            const screen = await renderInvertedChatList();
+            await coldOpenAtBottom(screen, { layoutHeight: 500, contentHeight: 2000 });
+
+            const props = screen.requireCapturedFlashListProps();
+            expect(props.onViewableItemsChanged).toBeUndefined();
+            expect(props.viewabilityConfig).toBeUndefined();
+        });
+
+        it('keeps native navigation visibility detached while viewport telemetry is disabled and navigation facts have no subscribers', async () => {
             configureHarness({
                 syncTuningState: {
                     transcriptViewportTelemetryEnabled: false,
@@ -926,6 +994,40 @@ describe('ChatList (FlashList v2 inverted pilot)', () => {
             const props = screen.requireCapturedFlashListProps();
             expect(props.onViewableItemsChanged).toBeUndefined();
             expect(props.viewabilityConfig).toBeUndefined();
+        });
+
+        it('keeps native navigation visibility attached while viewport telemetry is disabled when navigation facts are subscribed', async () => {
+            configureHarness({
+                syncTuningState: {
+                    transcriptViewportTelemetryEnabled: false,
+                },
+            });
+            const { getTranscriptNavigationVisibilityStore } = await import('./viewport/visibility/transcriptNavigationVisibilityStore');
+            const unsubscribe = getTranscriptNavigationVisibilityStore('session-1').subscribe(vi.fn());
+            try {
+                const screen = await renderInvertedChatList();
+                await coldOpenAtBottom(screen, { layoutHeight: 500, contentHeight: 2000 });
+
+                const props = screen.requireCapturedFlashListProps();
+                expect(typeof props.onViewableItemsChanged).toBe('function');
+                expect(props.viewabilityConfig).toEqual({ itemVisiblePercentThreshold: 1 });
+            } finally {
+                unsubscribe();
+            }
+        });
+
+        it('does not compute visible source-range diagnostics while viewport telemetry is disabled', async () => {
+            configureHarness({
+                syncTuningState: {
+                    transcriptViewportTelemetryEnabled: false,
+                },
+            });
+            const screen = await renderInvertedChatList();
+            fileFlashListRefHandle.computeVisibleIndices.mockClear();
+
+            await coldOpenAtBottom(screen, { layoutHeight: 500, contentHeight: 2000 });
+
+            expect(fileFlashListRefHandle.computeVisibleIndices).not.toHaveBeenCalled();
         });
 
         it('distinguishes visual bottom with no visible rows from bottom with rendered rows', async () => {
@@ -949,6 +1051,61 @@ describe('ChatList (FlashList v2 inverted pilot)', () => {
             });
             expect(visibleEvents[visibleEvents.length - 1]).not.toHaveProperty('firstVisibleItemId');
             expect(visibleEvents[visibleEvents.length - 1]).not.toHaveProperty('lastVisibleItemId');
+        });
+
+        it('classifies a native blank-window frame while a reader scrolls up from bottom', async () => {
+            const dims = { layoutHeight: 500, contentHeight: 2000 };
+            const telemetrySink = configureTelemetrySink();
+            const screen = await renderInvertedChatList();
+            await coldOpenAtBottom(screen, dims);
+            telemetrySink.mockClear();
+
+            const flashListProps = screen.requireCapturedFlashListProps();
+            await act(async () => {
+                flashListProps.onScrollBeginDrag?.({});
+            });
+            await screen.settle({ cycles: 1, turns: 1 });
+
+            listRefMockState.visibleRange = { startIndex: 3, endIndex: 1 };
+            await scrollRaw(screen, 640, dims, { isTrusted: true });
+
+            const visibleEvents = visibleWindowEvents(telemetrySink);
+            expect(visibleEvents.length).toBeGreaterThan(0);
+            expect(visibleEvents[visibleEvents.length - 1]).toMatchObject({
+                orientation: 'inverted',
+                rawOffsetY: 640,
+                canonicalOffsetY: 860,
+                distanceFromBottom: 640,
+                contentHeight: 2000,
+                layoutHeight: 500,
+                eventContentHeight: 2000,
+                eventLayoutHeight: 500,
+                refContentHeight: 2000,
+                refLayoutHeight: 500,
+                bottomFollowMode: 'escaping',
+                dragSessionTrusted: true,
+                nativeMomentumActive: false,
+                mvcpPolicy: 'start-rendering-from-bottom',
+                hasVisibleRows: false,
+                visibleWindowSource: 'ref-compute',
+                visibleWindowStale: true,
+                blankAreaPx: 500,
+                blankAreaSource: 'index-estimate',
+                nativeBlankWindowSignature: 'empty-visible-window',
+                listDataLength: 4,
+                fullItemCount: 4,
+                coldCount: 4,
+                hotCount: 0,
+                visibleRangeReadStatus: 'reversed',
+                visibleRenderedStartIndex: 3,
+                visibleRenderedEndIndex: 1,
+                firstVisibleRenderedIndex: 3,
+                entryRestoreState: 'none',
+                prependState: 'none',
+                layoutCacheClearState: 'idle',
+                layoutCacheClearReason: 'none',
+                scrollToIndexFailureState: 'none',
+            });
         });
     });
 
@@ -1015,7 +1172,7 @@ describe('ChatList (FlashList v2 inverted pilot)', () => {
             expect(screen.findAllByTestId('transcript-jump-to-bottom')).toHaveLength(0);
         });
 
-        it('keeps viewport ownership pinned during a near-bottom drag but drops the autoscroll threshold while escaping', async () => {
+        it('drops bottom maintenance immediately during a bottom drag, then releases on trusted away movement', async () => {
             const onViewportChange = vi.fn();
             const telemetrySink = configureTelemetrySink();
             const screen = await renderInvertedChatListWithViewportChange(onViewportChange);
@@ -1028,20 +1185,18 @@ describe('ChatList (FlashList v2 inverted pilot)', () => {
                 flashListProps.onScrollBeginDrag?.({});
             });
             await screen.settle({ cycles: 1, turns: 1 });
+
+            expect(screen.requireCapturedFlashListProps().maintainVisibleContentPosition).toEqual({ startRenderingFromBottom: true });
+
             await scrollRaw(screen, 40, dims, { isTrusted: true });
 
             expect(lastScrollObserved(telemetrySink)).toMatchObject({
                 orientation: 'inverted',
-                mode: 'follow-bottom',
                 rawOffsetY: 40,
                 distanceFromBottom: 40,
                 bottomFollowMode: 'escaping',
             });
             expect(screen.requireCapturedFlashListProps().maintainVisibleContentPosition).toEqual({ startRenderingFromBottom: true });
-            expect(onViewportChange).toHaveBeenLastCalledWith(expect.objectContaining({
-                isPinned: true,
-                shouldRestoreViewport: false,
-            }));
             expect(screen.findAllByTestId('transcript-jump-to-bottom')).toHaveLength(0);
             expect(committedScrollWrites(telemetrySink)).toEqual([]);
 
@@ -1156,6 +1311,97 @@ describe('ChatList (FlashList v2 inverted pilot)', () => {
     describe('deferred newer catchup at the inverted live tail', () => {
         const dims = { layoutHeight: 500, contentHeight: 2000 };
 
+        it('drains deferred newer once when a released reader returns at drag end before momentum settles', async () => {
+            configureHarness({
+                syncTuningState: {
+                    transcriptForwardPrefetchThresholdPx: 300,
+                },
+            });
+            const syncMod = await import('@/sync/sync');
+            const loadNewerMessagesMock = vi.mocked(syncMod.sync.loadNewerMessages);
+            const effectOrder: string[] = [];
+            deferredNewerMockState.sessionIds.add('session-1');
+            loadNewerMessagesMock.mockImplementation(async () => {
+                effectOrder.push('drain-deferred-newer');
+                deferredNewerMockState.sessionIds.delete('session-1');
+                return { loaded: 1, hasMore: false, status: 'no_more' };
+            });
+            loadNewerMessagesMock.mockClear();
+
+            const onViewportChange = vi.fn((state) => {
+                if (state.isPinned === true && state.shouldRestoreViewport === false) {
+                    effectOrder.push('viewport-pinned');
+                }
+            });
+            const screen = await renderInvertedChatListWithViewportChange(onViewportChange);
+            await coldOpenAtBottom(screen, dims);
+
+            await releaseFollowByDrag(screen, 600, dims);
+            expect(loadNewerMessagesMock).not.toHaveBeenCalled();
+
+            const flashListProps = screen.requireCapturedFlashListProps();
+            await act(async () => {
+                flashListProps.onScrollBeginDrag?.({});
+            });
+            listRefMockState.absoluteScrollOffset = 40;
+            onViewportChange.mockClear();
+            loadNewerMessagesMock.mockClear();
+            effectOrder.length = 0;
+            await act(async () => {
+                flashListProps.onScrollEndDrag?.({});
+                flashListProps.onMomentumScrollBegin?.({});
+            });
+
+            expect(onViewportChange).toHaveBeenCalledWith(expect.objectContaining({
+                isPinned: true,
+                offsetY: 0,
+                shouldRestoreViewport: false,
+            }));
+            expect(loadNewerMessagesMock).toHaveBeenCalledTimes(1);
+            expect(effectOrder).toEqual(['viewport-pinned', 'drain-deferred-newer']);
+
+            onViewportChange.mockClear();
+            loadNewerMessagesMock.mockClear();
+            effectOrder.length = 0;
+            await act(async () => {
+                flashListProps.onMomentumScrollEnd?.({});
+            });
+            await screen.settle({ cycles: 1, turns: 2 });
+
+            expect(onViewportChange).not.toHaveBeenCalled();
+            expect(loadNewerMessagesMock).not.toHaveBeenCalled();
+            expect(effectOrder).toEqual([]);
+        });
+
+        it('does not drain deferred newer when a near-bottom drag began already following', async () => {
+            configureHarness({
+                syncTuningState: {
+                    transcriptForwardPrefetchThresholdPx: 300,
+                },
+            });
+            const syncMod = await import('@/sync/sync');
+            const loadNewerMessagesMock = vi.mocked(syncMod.sync.loadNewerMessages);
+            deferredNewerMockState.sessionIds.add('session-1');
+            loadNewerMessagesMock.mockClear();
+
+            const screen = await renderInvertedChatList();
+            await coldOpenAtBottom(screen, dims);
+
+            const flashListProps = screen.requireCapturedFlashListProps();
+            await act(async () => {
+                flashListProps.onScrollBeginDrag?.({});
+            });
+            listRefMockState.absoluteScrollOffset = 40;
+            await act(async () => {
+                flashListProps.onScrollEndDrag?.({});
+                flashListProps.onMomentumScrollBegin?.({});
+                flashListProps.onMomentumScrollEnd?.({});
+            });
+            await screen.settle({ cycles: 1, turns: 2 });
+
+            expect(loadNewerMessagesMock).not.toHaveBeenCalled();
+        });
+
         it('drains deferred newer pages exactly once on bottom approach and emits live-tail', async () => {
             configureHarness({
                 syncTuningState: {
@@ -1212,6 +1458,56 @@ describe('ChatList (FlashList v2 inverted pilot)', () => {
             }));
             expect(loadNewerMessagesMock).toHaveBeenCalledTimes(1);
         });
+
+        it('emits lifecycle pinned viewport before draining when a settled native scroll returns to the live tail', async () => {
+            configureHarness({
+                syncTuningState: {
+                    transcriptForwardPrefetchThresholdPx: 300,
+                },
+            });
+            const syncMod = await import('@/sync/sync');
+            const loadNewerMessagesMock = vi.mocked(syncMod.sync.loadNewerMessages);
+            const effectOrder: string[] = [];
+            deferredNewerMockState.sessionIds.add('session-1');
+            loadNewerMessagesMock.mockImplementation(async () => {
+                effectOrder.push('drain-deferred-newer');
+                deferredNewerMockState.sessionIds.delete('session-1');
+                return { loaded: 1, hasMore: false, status: 'no_more' };
+            });
+            loadNewerMessagesMock.mockClear();
+
+            const onViewportChange = vi.fn((state) => {
+                if (state.isPinned === true && state.shouldRestoreViewport === false) {
+                    effectOrder.push(`viewport-pinned:${state.offsetY}`);
+                }
+            });
+            const screen = await renderInvertedChatListWithViewportChange(onViewportChange);
+            await coldOpenAtBottom(screen, dims);
+
+            await releaseFollowByDrag(screen, 600, dims);
+            const flashListProps = screen.requireCapturedFlashListProps();
+            await act(async () => {
+                flashListProps.onMomentumScrollEnd?.({});
+            });
+            await screen.settle({ cycles: 1, turns: 2 });
+            expect(loadNewerMessagesMock).not.toHaveBeenCalled();
+
+            onViewportChange.mockClear();
+            loadNewerMessagesMock.mockClear();
+            effectOrder.length = 0;
+            await act(async () => {
+                vi.setSystemTime(new Date(Date.now() + 600));
+            });
+            await scrollRaw(screen, 40, dims, { isTrusted: true });
+
+            expect(onViewportChange).toHaveBeenCalledWith(expect.objectContaining({
+                isPinned: true,
+                offsetY: 0,
+                shouldRestoreViewport: false,
+            }));
+            expect(loadNewerMessagesMock).toHaveBeenCalledTimes(1);
+            expect(effectOrder).toEqual(['viewport-pinned:0', 'drain-deferred-newer']);
+        });
     });
 
     describe('jump-to-bottom (explicit owner)', () => {
@@ -1247,6 +1543,418 @@ describe('ChatList (FlashList v2 inverted pilot)', () => {
                 reason: 'jump-to-bottom',
                 targetOffsetY: 0,
             });
+        });
+
+        it('does not issue a stale explicit bottom write when the native list is already at bottom', async () => {
+            const dims = { layoutHeight: 500, contentHeight: 2000 };
+            const telemetrySink = configureTelemetrySink();
+            const screen = await renderInvertedChatList();
+            await coldOpenAtBottom(screen, dims);
+            await releaseFollowByDrag(screen, 1000, dims);
+
+            const jumpButtons = screen.findAllByTestId('transcript-jump-to-bottom');
+            expect(jumpButtons.length).toBeGreaterThan(0);
+
+            // Stale affordance case: the visible button reflects the previous released state,
+            // but the native list has already rubber-banded back to exact visual bottom before
+            // the tap is delivered. Re-issuing scrollToIndex(0, viewOffset) here creates the
+            // visible jump-up-then-back bounce this test prevents.
+            listRefMockState.absoluteScrollOffset = 0;
+            fileFlashListRefHandle.scrollToOffset.mockClear();
+            fileFlashListRefHandle.scrollToEnd.mockClear();
+            fileFlashListRefHandle.scrollToIndex.mockClear();
+            telemetrySink.mockClear();
+
+            await act(async () => {
+                jumpButtons[0]!.props.onPress?.();
+            });
+            await screen.settle({ cycles: 1, turns: 1 });
+
+            expect(fileFlashListRefHandle.scrollToEnd).not.toHaveBeenCalled();
+            expect(fileFlashListRefHandle.scrollToOffset).not.toHaveBeenCalled();
+            expect(fileFlashListRefHandle.scrollToIndex).not.toHaveBeenCalled();
+            expect(committedScrollWrites(telemetrySink)).toEqual([]);
+            expect(screen.findAllByTestId('transcript-jump-to-bottom')).toHaveLength(0);
+        });
+    });
+
+    describe('native target-window mode', () => {
+        function messagesForSeqRange(startSeq: number, count: number, label: string) {
+            return Array.from({ length: count }, (_, index) => {
+                const seq = startSeq + index;
+                return {
+                    kind: 'agent-text' as const,
+                    id: `m${seq}`,
+                    localId: null,
+                    createdAt: seq,
+                    seq,
+                    text: `${label} ${seq}`,
+                };
+            });
+        }
+
+        function activateWindowState(
+            sessionId: string,
+            targetSeq: number,
+            messages: readonly { seq: number }[],
+            options: Readonly<{ hasMoreOlder?: boolean; hasMoreNewer?: boolean }> = {},
+        ): void {
+            targetWindowMockState.bySessionId.set(sessionId, {
+                isWindowMode: true,
+                windowId: `target:${sessionId}:${targetSeq}`,
+                targetSeq,
+                windowMinSeq: messages[0]?.seq ?? targetSeq,
+                windowMaxSeq: messages[messages.length - 1]?.seq ?? targetSeq,
+                olderCursor: messages[0]?.seq ?? targetSeq,
+                newerCursor: messages[messages.length - 1]?.seq ?? targetSeq,
+                hasMoreOlder: options.hasMoreOlder ?? true,
+                hasMoreNewer: options.hasMoreNewer ?? true,
+                activatedAtMs: 1,
+            });
+        }
+
+        it('activates native window mode for a far jump', async () => {
+            const targetWindowMessages = messagesForSeqRange(327, 10, 'target window');
+            flashListChatListHarnessState.sessionMessagesState = {
+                isLoaded: true,
+                messages: messagesForSeqRange(437, 16, 'tail'),
+            };
+            flashListChatListHarnessState.sessionState = {
+                ...flashListChatListHarnessState.sessionState,
+                seq: 452,
+            };
+            targetWindowMockState.loadTargetWindowMessages.mockImplementation(async (
+                sessionId: string,
+                target: { kind: 'seq'; seq: number },
+                options: { direction?: string } = {},
+            ) => {
+                expect(sessionId).toBe('session-1');
+                expect(target).toEqual({ kind: 'seq', seq: 331 });
+                expect(options.direction).toBe('older');
+                activateWindowState(sessionId, target.seq, targetWindowMessages);
+                flashListChatListHarnessState.sessionMessagesState = {
+                    isLoaded: true,
+                    messages: targetWindowMessages,
+                };
+                return {
+                    status: 'loaded',
+                    windowId: 'target:session-1:331',
+                    targetSeq: 331,
+                    targetPresent: true,
+                    rawSeqs: targetWindowMessages.map((message) => message.seq),
+                    appliedSeqs: targetWindowMessages.map((message) => message.seq),
+                    olderCursor: 327,
+                    newerCursor: 336,
+                    hasMoreOlder: true,
+                    hasMoreNewer: true,
+                };
+            });
+
+            const { ChatList } = await import('./ChatList');
+            const screen = await renderFlashListChatList(
+                <ChatList session={flashListChatListHarnessState.sessionState} jumpToSeq={331} />,
+            );
+            await screen.triggerInitialFill({
+                layoutHeight: 500,
+                contentHeight: 2000,
+                flushOptions: { cycles: 1, turns: 2 },
+            });
+            await screen.settle({ cycles: 1, turns: 3 });
+
+            expect(targetWindowMockState.loadTargetWindowMessages).toHaveBeenCalledTimes(1);
+            expect(targetWindowMockState.bySessionId.get('session-1')).toMatchObject({
+                isWindowMode: true,
+                targetSeq: 331,
+                windowMinSeq: 327,
+                windowMaxSeq: 336,
+            });
+        });
+
+        it('aligns an active native target window through the explicit jump command path', async () => {
+            const targetWindowMessages = messagesForSeqRange(327, 10, 'target window');
+            activateWindowState('session-1', 331, targetWindowMessages);
+            flashListChatListHarnessState.sessionMessagesState = {
+                isLoaded: true,
+                messages: targetWindowMessages,
+            };
+            flashListChatListHarnessState.sessionState = {
+                ...flashListChatListHarnessState.sessionState,
+                seq: 452,
+            };
+
+            const { ChatList } = await import('./ChatList');
+            const screen = await renderFlashListChatList(
+                <ChatList session={flashListChatListHarnessState.sessionState} jumpToSeq={331} />,
+            );
+            await screen.triggerInitialFill({
+                layoutHeight: 500,
+                contentHeight: 2000,
+                flushOptions: { cycles: 1, turns: 2 },
+            });
+            await screen.settle({ cycles: 1, turns: 2 });
+
+            expect(targetWindowMockState.loadTargetWindowMessages).not.toHaveBeenCalled();
+            expect(listDataIds(screen)).toEqual(['m336', 'm335', 'm334', 'm333', 'm332', 'm331', 'm330', 'm329', 'm328', 'm327']);
+            expect(fileFlashListRefHandle.scrollToOffset).not.toHaveBeenCalled();
+            expect(fileFlashListRefHandle.scrollToEnd).not.toHaveBeenCalled();
+            expect(fileFlashListRefHandle.scrollToIndex).toHaveBeenCalledWith({
+                index: 5,
+                animated: true,
+                viewPosition: 0.5,
+            });
+        });
+
+        it('renders a first-message target with newer context and pages newer until live tail', async () => {
+            const initialWindowMessages = messagesForSeqRange(1, 3, 'target window');
+            const firstNewerPage = messagesForSeqRange(4, 2, 'newer window');
+            const finalNewerPage = messagesForSeqRange(6, 2, 'newer window');
+            flashListChatListHarnessState.sessionMessagesState = {
+                isLoaded: true,
+                messages: messagesForSeqRange(50, 10, 'tail'),
+            };
+            flashListChatListHarnessState.sessionState = {
+                ...flashListChatListHarnessState.sessionState,
+                seq: 59,
+            };
+            let newerPageCount = 0;
+            targetWindowMockState.loadTargetWindowMessages.mockImplementation(async (
+                sessionId: string,
+                target: { kind: 'seq'; seq: number },
+                options: { direction?: string } = {},
+            ) => {
+                expect(sessionId).toBe('session-1');
+                expect(target).toEqual({ kind: 'seq', seq: 1 });
+                const direction = options.direction ?? 'initial';
+                if (direction === 'newer') newerPageCount += 1;
+                const nextMessages = direction === 'newer' && newerPageCount === 1
+                    ? [...initialWindowMessages, ...firstNewerPage]
+                    : direction === 'newer'
+                        ? [...initialWindowMessages, ...firstNewerPage, ...finalNewerPage]
+                        : initialWindowMessages;
+                const hasMoreNewer = direction === 'newer'
+                    ? newerPageCount < 2
+                    : true;
+                activateWindowState(sessionId, target.seq, nextMessages, {
+                    hasMoreOlder: false,
+                    hasMoreNewer,
+                });
+                flashListChatListHarnessState.sessionMessagesState = {
+                    isLoaded: true,
+                    messages: nextMessages,
+                };
+                return {
+                    status: 'loaded',
+                    windowId: 'target:session-1:1',
+                    targetSeq: 1,
+                    targetPresent: true,
+                    rawSeqs: nextMessages.map((message) => message.seq),
+                    appliedSeqs: nextMessages.map((message) => message.seq),
+                    olderCursor: 1,
+                    newerCursor: nextMessages[nextMessages.length - 1]?.seq ?? 1,
+                    hasMoreOlder: false,
+                    hasMoreNewer,
+                };
+            });
+
+            const { ChatList } = await import('./ChatList');
+            const screen = await renderFlashListChatList(
+                <ChatList session={flashListChatListHarnessState.sessionState} jumpToSeq={1} />,
+            );
+            await screen.triggerInitialFill({
+                layoutHeight: 500,
+                contentHeight: 2000,
+                flushOptions: { cycles: 1, turns: 2 },
+            });
+            await screen.settle({ cycles: 1, turns: 3 });
+
+            expect(listDataIds(screen)).toEqual(['m3', 'm2', 'm1']);
+            const props = screen.requireCapturedFlashListProps();
+
+            await act(async () => {
+                props.onStartReached?.();
+                await Promise.resolve();
+                await Promise.resolve();
+            });
+            await screen.settle({ cycles: 1, turns: 2 });
+            await act(async () => {
+                screen.tree.update(
+                    <ChatList
+                        session={{ ...flashListChatListHarnessState.sessionState }}
+                        onEditPendingMessage={vi.fn()}
+                    />,
+                );
+            });
+            await screen.settle({ cycles: 1, turns: 2 });
+            expect(targetWindowMockState.loadTargetWindowMessages).toHaveBeenLastCalledWith(
+                'session-1',
+                { kind: 'seq', seq: 1 },
+                expect.objectContaining({ direction: 'newer' }),
+            );
+            expect(listDataIds(screen)).toEqual(['m5', 'm4', 'm3', 'm2', 'm1']);
+
+            await act(async () => {
+                screen.requireCapturedFlashListProps().onStartReached?.();
+                await Promise.resolve();
+                await Promise.resolve();
+            });
+            await screen.settle({ cycles: 1, turns: 2 });
+            await act(async () => {
+                screen.tree.update(
+                    <ChatList
+                        session={{ ...flashListChatListHarnessState.sessionState }}
+                        onEditPendingMessage={vi.fn()}
+                    />,
+                );
+            });
+            await screen.settle({ cycles: 1, turns: 2 });
+            expect(targetWindowMockState.loadTargetWindowMessages).toHaveBeenCalledTimes(3);
+            expect(listDataIds(screen)).toEqual(['m7', 'm6', 'm5', 'm4', 'm3', 'm2', 'm1']);
+
+            await act(async () => {
+                screen.requireCapturedFlashListProps().onStartReached?.();
+                await Promise.resolve();
+                await Promise.resolve();
+            });
+            await screen.settle({ cycles: 1, turns: 2 });
+            expect(targetWindowMockState.markSessionLiveTailIntent).toHaveBeenCalledWith('session-1');
+        });
+
+        it('pages older at the older edge while native window mode is active', async () => {
+            const targetWindowMessages = messagesForSeqRange(10, 3, 'target window');
+            const olderPage = messagesForSeqRange(8, 2, 'older window');
+            activateWindowState('session-1', 10, targetWindowMessages, {
+                hasMoreOlder: true,
+                hasMoreNewer: false,
+            });
+            flashListChatListHarnessState.sessionMessagesState = {
+                isLoaded: true,
+                messages: targetWindowMessages,
+            };
+            targetWindowMockState.loadTargetWindowMessages.mockImplementation(async (
+                sessionId: string,
+                target: { kind: 'seq'; seq: number },
+                options: { direction?: string } = {},
+            ) => {
+                expect(options.direction).toBe('older');
+                const nextMessages = [...olderPage, ...targetWindowMessages];
+                activateWindowState(sessionId, target.seq, nextMessages, {
+                    hasMoreOlder: false,
+                    hasMoreNewer: false,
+                });
+                flashListChatListHarnessState.sessionMessagesState = {
+                    isLoaded: true,
+                    messages: nextMessages,
+                };
+                return {
+                    status: 'loaded',
+                    windowId: 'target:session-1:10',
+                    targetSeq: 10,
+                    targetPresent: true,
+                    rawSeqs: olderPage.map((message) => message.seq),
+                    appliedSeqs: olderPage.map((message) => message.seq),
+                    olderCursor: 8,
+                    newerCursor: 12,
+                    hasMoreOlder: false,
+                    hasMoreNewer: false,
+                };
+            });
+
+            const { ChatList } = await import('./ChatList');
+            const forceRerenderEditPendingMessage = vi.fn();
+            const screen = await renderFlashListChatList(
+                <ChatList session={flashListChatListHarnessState.sessionState} />,
+            );
+            await screen.triggerInitialFill({
+                layoutHeight: 500,
+                contentHeight: 2000,
+                flushOptions: { cycles: 1, turns: 2 },
+            });
+
+            await act(async () => {
+                screen.requireCapturedFlashListProps().onEndReached?.();
+            });
+            await screen.settle({ cycles: 1, turns: 2 });
+            await act(async () => {
+                screen.tree.update(
+                    <ChatList
+                        session={{ ...flashListChatListHarnessState.sessionState }}
+                        onEditPendingMessage={forceRerenderEditPendingMessage}
+                    />,
+                );
+            });
+            await screen.settle({ cycles: 1, turns: 2 });
+
+            expect(targetWindowMockState.loadTargetWindowMessages).toHaveBeenCalledWith(
+                'session-1',
+                { kind: 'seq', seq: 10 },
+                expect.objectContaining({ direction: 'older' }),
+            );
+            expect(listDataIds(screen)).toEqual(['m12', 'm11', 'm10', 'm9', 'm8']);
+        });
+
+        it('exits native window mode on jump-to-bottom', async () => {
+            const dims = { layoutHeight: 500, contentHeight: 2000 };
+            const targetWindowMessages = messagesForSeqRange(327, 10, 'target window');
+            activateWindowState('session-1', 331, targetWindowMessages);
+            flashListChatListHarnessState.sessionMessagesState = {
+                isLoaded: true,
+                messages: targetWindowMessages,
+            };
+            const screen = await renderInvertedChatList();
+            await coldOpenAtBottom(screen, dims);
+            await releaseFollowByDrag(screen, 1000, dims);
+
+            const jumpButtons = screen.findAllByTestId('transcript-jump-to-bottom');
+            expect(jumpButtons.length).toBeGreaterThan(0);
+            await act(async () => {
+                jumpButtons[0]!.props.onPress?.();
+            });
+            await screen.settle({ cycles: 1, turns: 1 });
+
+            expect(targetWindowMockState.markSessionLiveTailIntent).toHaveBeenCalledWith('session-1');
+            expect(targetWindowMockState.bySessionId.get('session-1')).toMatchObject({
+                isWindowMode: false,
+            });
+        });
+
+        it('renders the next session outside window mode after a session switch', async () => {
+            const targetWindowMessages = messagesForSeqRange(327, 10, 'target window');
+            activateWindowState('session-1', 331, targetWindowMessages);
+            flashListChatListHarnessState.sessionMessagesState = {
+                isLoaded: true,
+                messages: targetWindowMessages,
+            };
+
+            const { ChatList } = await import('./ChatList');
+            const screen = await renderFlashListChatList(
+                <ChatList session={flashListChatListHarnessState.sessionState} />,
+            );
+            await screen.triggerInitialFill({
+                layoutHeight: 500,
+                contentHeight: 2000,
+                flushOptions: { cycles: 1, turns: 2 },
+            });
+            expect(listDataIds(screen)).toEqual(['m336', 'm335', 'm334', 'm333', 'm332', 'm331', 'm330', 'm329', 'm328', 'm327']);
+
+            flashListChatListHarnessState.sessionMessagesState = {
+                isLoaded: true,
+                messages: OLDEST_FIRST_MESSAGES.map((message) => ({ ...message, id: `s2-${message.id}` })),
+            };
+            await act(async () => {
+                screen.tree.update(
+                    <ChatList
+                        session={{
+                            ...flashListChatListHarnessState.sessionState,
+                            id: 'session-2',
+                            seq: 4,
+                        }}
+                    />,
+                );
+            });
+            await screen.settle({ cycles: 1, turns: 2 });
+
+            expect(targetWindowMockState.bySessionId.get('session-2')).toBeUndefined();
+            expect(listDataIds(screen)).toEqual(['s2-m4', 's2-m3', 's2-m2', 's2-m1']);
         });
     });
 
@@ -1404,7 +2112,10 @@ describe('ChatList (FlashList v2 inverted pilot)', () => {
             // same way), then let the content commit feed the prepend observation.
             const { ChatList } = await import('./ChatList');
             await screen.update(
-                <ChatList session={{ ...flashListChatListHarnessState.sessionState, seq: 1 }} />,
+                <ChatList
+                    session={renderHarnessSession()}
+                    onEditPendingMessage={forceTranscriptHarnessRender()}
+                />,
             );
             // In inverted data terms the older page APPENDS at the data end: every
             // previously rendered row keeps its index, layout, and raw offset.
@@ -1450,7 +2161,10 @@ describe('ChatList (FlashList v2 inverted pilot)', () => {
 
             const { ChatList } = await import('./ChatList');
             await screen.update(
-                <ChatList session={{ ...flashListChatListHarnessState.sessionState, seq: 1 }} />,
+                <ChatList
+                    session={renderHarnessSession()}
+                    onEditPendingMessage={forceTranscriptHarnessRender()}
+                />,
             );
             await screen.triggerContentSizeChange(0, 3000, { cycles: 2, turns: 2, frames: 1 });
             await screen.settle({ advanceTimersMs: 500, cycles: 2, turns: 4 });
@@ -1737,7 +2451,10 @@ describe('ChatList (FlashList v2 inverted pilot)', () => {
             };
             const { ChatList } = await import('./ChatList');
             await screen.update(
-                <ChatList session={{ ...flashListChatListHarnessState.sessionState, seq: 1 }} />,
+                <ChatList
+                    session={renderHarnessSession()}
+                    onEditPendingMessage={forceTranscriptHarnessRender()}
+                />,
             );
             await screen.triggerContentSizeChange(0, 520, { cycles: 2, turns: 2, frames: 1 });
             await screen.settle({ cycles: 2, turns: 2 });
@@ -1966,7 +2683,10 @@ describe('ChatList (FlashList v2 inverted pilot)', () => {
             };
             const { ChatList } = await import('./ChatList');
             await screen.update(
-                <ChatList session={{ ...flashListChatListHarnessState.sessionState, seq: 1 }} />,
+                <ChatList
+                    session={renderHarnessSession()}
+                    onEditPendingMessage={forceTranscriptHarnessRender()}
+                />,
             );
 
             // Anchor recomputed to null → no carve → every row back in the recycler.
@@ -2029,23 +2749,17 @@ describe('ChatList (FlashList v2 inverted pilot)', () => {
             await act(async () => { screen.tree.unmount(); });
         });
 
-        it('does NOT engage the native carve when the list is standard-oriented flash_v2 (FIX 2 orientation guard)', async () => {
-            // flash_v2 STANDARD is selectable on native (non-default; default is flash_v2_inverted).
-            // The native edge slot hardcodes the inverted edge-slot display-index mode + inverted pin
-            // guards, so the carve must ONLY engage under inverted orientation. Standard-native falls
-            // back to the cold list / all-in behavior (no detached edge slot).
+        it('engages the native carve for flash_v2 because native FlashList is canonically inverted', async () => {
             configureHarness({
                 implementation: 'flash_v2',
                 syncTuningState: { transcriptNativeHotTailItemCount: 1 },
             });
-            // A genuinely-streaming row that WOULD carve under inverted orientation.
             markNewestAgentMessageStreaming('m4');
             const screen = await renderInvertedChatList();
 
-            // No native carve: the full transcript stays in the recycler (standard order, oldest→newest)
-            // and there is no detached edge-slot block.
-            expect(listDataIds(screen)).toEqual(['m1', 'm2', 'm3', 'm4']);
-            expect(screen.findAllByTestId('transcript-native-hot-tail').length).toBe(0);
+            expect(listDataIds(screen)).toEqual(['m3', 'm2', 'm1']);
+            expect(screen.findByTestId('transcript-native-hot-tail')).not.toBeNull();
+            expect(screen.findByTestId('transcript-native-hot-tail-item-m4')).not.toBeNull();
 
             await act(async () => { screen.tree.unmount(); });
         });
@@ -2106,6 +2820,12 @@ describe('ChatList (FlashList v2 inverted pilot)', () => {
             const screen = await renderInvertedChatList();
             await coldOpenAtBottom(screen, { layoutHeight: 500, contentHeight: 2000 });
             await releaseFollowByDrag(screen, 1200, { layoutHeight: 500, contentHeight: 2000 });
+            // NQA-F4: carve-active release must keep native MVCP stable; only FlashList's JS
+            // applyOffsetCorrection is paused so the ScrollAnchor/native prop never unmounts.
+            expect(screen.requireCapturedFlashListProps().maintainVisibleContentPosition).toEqual({
+                startRenderingFromBottom: true,
+            });
+            expect(screen.requireCapturedFlashListProps().happierPauseOffsetCorrection).toBe(true);
             fileFlashListRefHandle.scrollToIndex.mockClear();
             telemetrySink.mockClear();
 
@@ -2121,6 +2841,28 @@ describe('ChatList (FlashList v2 inverted pilot)', () => {
                 liveRegionActive: true,
                 nativeHotTailHeightPx: 260,
                 nativeCarvePinIssued: false,
+            });
+
+            await act(async () => { screen.tree.unmount(); });
+        });
+
+        it('keeps MVCP offset-correction ARMED for a released reader during an active turn when the carve is not growing (§3a prepend-preservation)', async () => {
+            // §3a regression: an active turn ALONE (sessionState.active, carve not growing) must NOT
+            // disable MVCP. The prior {disabled:true} superset fired for the whole active turn and
+            // killed applyOffsetCorrection, so an older-page prepend lost reading position (Invariant
+            // C; inverted older-load has no fallback writer). Only the carve actively growing
+            // (liveRegionActive, covered above) withholds correction.
+            configureHarness({ syncTuningState: { transcriptNativeHotTailItemCount: 1 } });
+            flashListChatListHarnessState.sessionState = {
+                ...flashListChatListHarnessState.sessionState,
+                active: true,
+            };
+            const screen = await renderInvertedChatList();
+            await coldOpenAtBottom(screen, { layoutHeight: 500, contentHeight: 2000 });
+            await releaseFollowByDrag(screen, 1200, { layoutHeight: 500, contentHeight: 2000 });
+
+            expect(screen.requireCapturedFlashListProps().maintainVisibleContentPosition).toEqual({
+                startRenderingFromBottom: true,
             });
 
             await act(async () => { screen.tree.unmount(); });

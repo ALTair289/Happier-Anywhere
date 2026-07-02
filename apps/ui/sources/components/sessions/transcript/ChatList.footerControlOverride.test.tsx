@@ -16,6 +16,11 @@ vi.mock('@shopify/flash-list', () => ({
     FlashList: () => null,
 }));
 
+vi.mock('@/components/ui/lists/flashListCompat/FlashListCompat', async () => {
+    const { createFlashListChatListModuleMock } = await import('@/dev/testkit/harness/chatListHarness');
+    return createFlashListChatListModuleMock({ renderItems: false });
+});
+
 vi.mock('react-native-safe-area-context', () => ({
     useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }),
 }));
@@ -69,7 +74,7 @@ installTranscriptCommonModuleMocks({
             useSessionLatestThinkingMessageId: () => null,
             useSessionLatestThinkingMessageActivityAtMs: () => null,
             useMessage: () => null,
-            useSetting: (key: string) => (key === 'transcriptListImplementation' ? 'flatlist_legacy' : undefined),
+            useSetting: (key: string) => (key === 'transcriptListImplementation' ? 'flash_v2' : undefined),
         });
     },
 });

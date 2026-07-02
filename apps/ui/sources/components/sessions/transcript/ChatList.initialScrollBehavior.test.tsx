@@ -1,34 +1,67 @@
 import * as React from 'react';
+import renderer, { act } from 'react-test-renderer';
 import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest';
-import { standardCleanup } from '@/dev/testkit';
+import { flushHookEffects, standardCleanup } from '@/dev/testkit';
+import { createFlashListChatListWebScroller } from '@/dev/testkit/harness/chatListHarness';
 import {
-  flushLegacyChatListEffects,
-  legacyChatListHarnessState,
-  renderLegacyChatList,
-  requireCapturedFlatListProps,
-  resetLegacyChatListHarness,
-  triggerLegacyChatListEndReached,
-  triggerLegacyChatListInitialFill,
-} from './ChatList.legacyListTestHarness';
-import { installLegacyChatListHarnessCommonModuleMocks } from './chatListLegacyHarnessTestHelpers';
+  flashListChatListHarnessState,
+  renderFlashListChatList,
+  renderFlashListChatListSession,
+  requireCapturedFlashListProps,
+  resetFlashListChatListHarness,
+  triggerFlashListChatListEndReached,
+  triggerFlashListChatListInitialFill,
+  triggerFlashListChatListScroll,
+  withFlashListChatListWebScrollerDom,
+} from '@/dev/testkit/harness/chatListHarness';
+import { installFlashListChatListCommonModuleMocks } from '@/dev/testkit/harness/chatListHarnessModuleMocks';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
-
-let capturedTurnViewProps: any = null;
 
 const scrollToOffsetMock = vi.fn();
 const scrollToIndexMock = vi.fn();
 const loadOlderMessagesMock = vi.fn();
 
-let flatListRefImpl: any = null;
+let capturedToolGroupUnitHeaderProps: any[] = [];
+let flashListRefImpl: any = null;
 let sessionViewportState: { isPinned: boolean; offsetY: number; lastUpdatedAt: number; source: 'default' | 'observed' } | null = null;
 
 const buildChatListItemsMock = vi.fn((..._args: any[]) => ([] as any[]));
 
-installLegacyChatListHarnessCommonModuleMocks();
+installFlashListChatListCommonModuleMocks();
+
+async function renderCapturedFlashListFooter() {
+  const capturedFlashListProps = requireCapturedFlashListProps();
+  const footer = capturedFlashListProps.ListFooterComponent;
+  expect(footer).toBeTruthy();
+
+  let renderedItem: renderer.ReactTestRenderer | null = null;
+  await act(async () => {
+    renderedItem = renderer.create(React.isValidElement(footer) ? footer : React.createElement(footer));
+  });
+  await act(async () => {
+    renderedItem?.unmount();
+  });
+}
+
+function recordWebScrollerScrollTopWrites(scrollerEl: { clientHeight: number; scrollHeight: number; scrollTop: number }): number[] {
+  const writes: number[] = [];
+  let scrollTopValue = scrollerEl.scrollTop;
+  Object.defineProperty(scrollerEl, 'scrollTop', {
+    configurable: true,
+    enumerable: true,
+    get: () => scrollTopValue,
+    set: (value: number) => {
+      writes.push(value);
+      const maxScrollTop = Math.max(0, scrollerEl.scrollHeight - scrollerEl.clientHeight);
+      scrollTopValue = Math.max(0, Math.min(value, maxScrollTop));
+    },
+  });
+  return writes;
+}
 
 vi.mock('@/components/sessions/chatListItems', async () => (
-  (await import('./ChatList.legacyListTestHarness')).createLegacyChatListItemsModuleMock(buildChatListItemsMock)
+  (await import('@/dev/testkit/harness/chatListHarness')).createFlashListChatListItemsModuleMock(buildChatListItemsMock)
 ));
 
 vi.mock('./ChatFooter', () => ({
@@ -41,14 +74,34 @@ vi.mock('./MessageView', () => ({
 }));
 
 vi.mock('@/components/sessions/transcript/turns/TurnView', () => ({
-  TurnView: (props: any) => {
-    capturedTurnViewProps = props;
-    return React.createElement('TurnView');
+  TurnView: () => React.createElement('TurnView'),
+  TurnViewWithSessionCommon: () => React.createElement('TurnViewWithSessionCommon'),
+}));
+
+vi.mock('@/components/sessions/transcript/toolCalls/units/ToolCallsGroupUnitHeaderRow', () => ({
+  ToolCallsGroupUnitHeaderRow: (props: any) => {
+    capturedToolGroupUnitHeaderProps.push(props);
+    return React.createElement('ToolCallsGroupUnitHeaderRow', props);
   },
-  TurnViewWithSessionCommon: (props: any) => {
-    capturedTurnViewProps = props;
-    return React.createElement('TurnViewWithSessionCommon');
+  ToolCallsGroupUnitHeaderRowWithSessionCommon: (props: any) => {
+    capturedToolGroupUnitHeaderProps.push(props);
+    return React.createElement('ToolCallsGroupUnitHeaderRowWithSessionCommon', props);
   },
+}));
+
+vi.mock('@/components/sessions/transcript/toolCalls/units/ToolCallsGroupUnitExpandRow', () => ({
+  ToolCallsGroupUnitExpandRow: (props: any) => React.createElement('ToolCallsGroupUnitExpandRow', props),
+  ToolCallsGroupUnitExpandRowWithSessionCommon: (props: any) => React.createElement('ToolCallsGroupUnitExpandRowWithSessionCommon', props),
+}));
+
+vi.mock('@/components/sessions/transcript/toolCalls/units/ToolCallsGroupUnitToolRow', () => ({
+  ToolCallsGroupUnitToolRow: (props: any) => React.createElement('ToolCallsGroupUnitToolRow', props),
+  ToolCallsGroupUnitToolRowWithSessionCommon: (props: any) => React.createElement('ToolCallsGroupUnitToolRowWithSessionCommon', props),
+}));
+
+vi.mock('@/components/sessions/transcript/toolCalls/units/ToolCallsGroupUnitFooterRow', () => ({
+  ToolCallsGroupUnitFooterRow: (props: any) => React.createElement('ToolCallsGroupUnitFooterRow', props),
+  ToolCallsGroupUnitFooterRowWithSessionCommon: (props: any) => React.createElement('ToolCallsGroupUnitFooterRowWithSessionCommon', props),
 }));
 
 vi.mock('@/components/sessions/pending/PendingMessagesTranscriptBlock', () => ({
@@ -67,22 +120,13 @@ vi.mock('@/utils/system/fireAndForget', () => ({
   fireAndForget: (p: any) => p,
 }));
 
-vi.mock('@/sync/sync', () => ({
-  sync: {
+vi.mock('@/sync/sync', async () =>
+  (await import('@/dev/testkit/harness/chatListHarness')).createFlashListChatListSyncModuleMock({
     loadOlderMessages: loadOlderMessagesMock,
-    loadNewerMessages: vi.fn(),
     hasDeferredNewerMessages: () => false,
     getSessionViewport: () => sessionViewportState,
-    getSyncTuning: () => ({
-      transcriptForwardPrefetchThresholdPx: 0,
-      transcriptBackwardPrefetchThresholdPx: 0,
-      transcriptFlashListEstimatedItemSize: 120,
-      transcriptWebInitialPinStabilizeMs: 3000,
-      transcriptWebInitialPinRetryIntervalMs: 250,
-      transcriptMaxTurnEntriesPerListItem: 8,
-    }),
-  },
-}));
+  }),
+);
 
 describe('ChatList (initial scroll/pagination behavior)', () => {
   afterEach(() => {
@@ -90,19 +134,28 @@ describe('ChatList (initial scroll/pagination behavior)', () => {
   });
 
   beforeEach(() => {
-    capturedTurnViewProps = null;
+    flashListRefImpl = {
+      scrollToOffset: scrollToOffsetMock,
+      scrollToIndex: scrollToIndexMock,
+    };
+    resetFlashListChatListHarness({
+      flashListRefHandle: flashListRefImpl,
+      syncTuningState: {
+        transcriptForwardPrefetchThresholdPx: 0,
+        transcriptBackwardPrefetchThresholdPx: 0,
+        transcriptFlashListEstimatedItemSize: 120,
+        transcriptWebInitialPinStabilizeMs: 3000,
+        transcriptWebInitialPinRetryIntervalMs: 250,
+        transcriptMaxTurnEntriesPerListItem: 8,
+      },
+    });
+    capturedToolGroupUnitHeaderProps = [];
     scrollToOffsetMock.mockClear();
     scrollToIndexMock.mockClear();
     loadOlderMessagesMock.mockReset();
     buildChatListItemsMock.mockClear();
     sessionViewportState = null;
-
-    flatListRefImpl = {
-      scrollToOffset: scrollToOffsetMock,
-      scrollToIndex: scrollToIndexMock,
-    };
-    resetLegacyChatListHarness({ flatListRefValue: flatListRefImpl });
-    legacyChatListHarnessState.sessionState = {
+    flashListChatListHarnessState.sessionState = {
       id: 'session-1',
       seq: 0,
       metadata: null,
@@ -110,21 +163,21 @@ describe('ChatList (initial scroll/pagination behavior)', () => {
       canApprovePermissions: true,
       agentState: null,
     };
-    legacyChatListHarnessState.settingValues.transcriptListImplementation = 'flatlist_legacy';
-    legacyChatListHarnessState.settingValues.transcriptToolCallsCollapsedPreviewCount = 5;
+    flashListChatListHarnessState.settingValues.transcriptListImplementation = 'flash_v2';
+    flashListChatListHarnessState.settingValues.transcriptToolCallsCollapsedPreviewCount = 5;
   });
 
   it('does not load older messages from mount-time onEndReached before the user scrolls', async () => {
-    legacyChatListHarnessState.sessionMessagesState = {
+    flashListChatListHarnessState.sessionMessagesState = {
       isLoaded: true,
       messages: [{ id: 'm1' }],
     };
     loadOlderMessagesMock.mockResolvedValue({ loaded: 1, hasMore: true, status: 'loaded' });
 
-    const screen = await renderLegacyChatList({ flushOptions: { cycles: 0 } });
+    const screen = await renderFlashListChatListSession({ flushOptions: { cycles: 0 } });
 
-    requireCapturedFlatListProps();
-    await triggerLegacyChatListEndReached();
+    requireCapturedFlashListProps();
+    await triggerFlashListChatListEndReached();
 
     expect(loadOlderMessagesMock).not.toHaveBeenCalled();
 
@@ -132,14 +185,14 @@ describe('ChatList (initial scroll/pagination behavior)', () => {
   });
 
   it('can auto-load older messages even when committedMessagesCount is 0 (e.g. sidechain-only latest page)', async () => {
-    legacyChatListHarnessState.sessionState = { ...legacyChatListHarnessState.sessionState, seq: 25 };
-    legacyChatListHarnessState.sessionMessagesState = { isLoaded: true, messages: [] };
+    flashListChatListHarnessState.sessionState = { ...flashListChatListHarnessState.sessionState, seq: 25 };
+    flashListChatListHarnessState.sessionMessagesState = { isLoaded: true, messages: [] };
     loadOlderMessagesMock.mockResolvedValue({ loaded: 0, hasMore: false, status: 'no_more' });
 
-    const screen = await renderLegacyChatList({ flushOptions: { cycles: 0 } });
+    const screen = await renderFlashListChatListSession({ flushOptions: { cycles: 0 } });
 
-    requireCapturedFlatListProps();
-    await triggerLegacyChatListInitialFill();
+    requireCapturedFlashListProps();
+    await triggerFlashListChatListInitialFill();
 
     expect(loadOlderMessagesMock).toHaveBeenCalledTimes(1);
     // On web, we avoid `scrollToOffset` during mount to prevent visible jitter. Pinning uses DOM scroll when available.
@@ -149,14 +202,14 @@ describe('ChatList (initial scroll/pagination behavior)', () => {
   });
 
   it('can auto-load older messages even when session.seq is 0 (pagination cursor can still be ready)', async () => {
-    legacyChatListHarnessState.sessionState = { ...legacyChatListHarnessState.sessionState, seq: 0 };
-    legacyChatListHarnessState.sessionMessagesState = { isLoaded: true, messages: [] };
+    flashListChatListHarnessState.sessionState = { ...flashListChatListHarnessState.sessionState, seq: 0 };
+    flashListChatListHarnessState.sessionMessagesState = { isLoaded: true, messages: [] };
     loadOlderMessagesMock.mockResolvedValue({ loaded: 0, hasMore: false, status: 'no_more' });
 
-    const screen = await renderLegacyChatList({ flushOptions: { cycles: 0 } });
+    const screen = await renderFlashListChatListSession({ flushOptions: { cycles: 0 } });
 
-    requireCapturedFlatListProps();
-    await triggerLegacyChatListInitialFill();
+    requireCapturedFlashListProps();
+    await triggerFlashListChatListInitialFill();
 
     expect(loadOlderMessagesMock).toHaveBeenCalledTimes(1);
 
@@ -164,8 +217,8 @@ describe('ChatList (initial scroll/pagination behavior)', () => {
   });
 
   it('keeps loading older pages past 10 attempts while the transcript is still short and progress continues', async () => {
-    legacyChatListHarnessState.sessionState = { ...legacyChatListHarnessState.sessionState, seq: 250 };
-    legacyChatListHarnessState.sessionMessagesState = { isLoaded: true, messages: [] };
+    flashListChatListHarnessState.sessionState = { ...flashListChatListHarnessState.sessionState, seq: 250 };
+    flashListChatListHarnessState.sessionMessagesState = { isLoaded: true, messages: [] };
     loadOlderMessagesMock
       .mockResolvedValueOnce({ loaded: 1, hasMore: true, status: 'loaded' })
       .mockResolvedValueOnce({ loaded: 1, hasMore: true, status: 'loaded' })
@@ -180,10 +233,10 @@ describe('ChatList (initial scroll/pagination behavior)', () => {
       .mockResolvedValueOnce({ loaded: 1, hasMore: true, status: 'loaded' })
       .mockResolvedValueOnce({ loaded: 1, hasMore: false, status: 'no_more' });
 
-    const screen = await renderLegacyChatList({ flushOptions: { cycles: 0 } });
+    const screen = await renderFlashListChatListSession({ flushOptions: { cycles: 0 } });
 
-    requireCapturedFlatListProps();
-    await triggerLegacyChatListInitialFill({
+    requireCapturedFlashListProps();
+    await triggerFlashListChatListInitialFill({
       flushOptions: { cycles: 4 },
     });
 
@@ -193,13 +246,13 @@ describe('ChatList (initial scroll/pagination behavior)', () => {
   });
 
   it('pins to the visual bottom on initial load (even before layout measurements)', async () => {
-    legacyChatListHarnessState.sessionState = { ...legacyChatListHarnessState.sessionState, seq: 25 };
-    legacyChatListHarnessState.sessionMessagesState = {
+    flashListChatListHarnessState.sessionState = { ...flashListChatListHarnessState.sessionState, seq: 25 };
+    flashListChatListHarnessState.sessionMessagesState = {
       isLoaded: true,
       messages: [{ id: 'm1' }],
     };
 
-    const screen = await renderLegacyChatList({ flushOptions: { cycles: 0 } });
+    const screen = await renderFlashListChatListSession({ flushOptions: { cycles: 0 } });
 
     // On web, pinning happens via DOM scroll when possible; we do not rely on list ref scroll APIs.
     expect(scrollToOffsetMock).not.toHaveBeenCalled();
@@ -208,33 +261,33 @@ describe('ChatList (initial scroll/pagination behavior)', () => {
   });
 
   it('stops wheel event propagation on web so transcript scrolling is not blocked by document scroll-lock listeners', async () => {
-    const screen = await renderLegacyChatList({ flushOptions: { cycles: 0 } });
+    const screen = await renderFlashListChatListSession({ flushOptions: { cycles: 0 } });
 
-    const capturedFlatListProps = requireCapturedFlatListProps();
-    expect(typeof capturedFlatListProps.onWheel).toBe('function');
+    const capturedFlashListProps = requireCapturedFlashListProps();
+    expect(typeof capturedFlashListProps.onWheel).toBe('function');
 
     const stopPropagation = vi.fn();
-    capturedFlatListProps.onWheel({ stopPropagation });
+    capturedFlashListProps.onWheel({ stopPropagation });
     expect(stopPropagation).toHaveBeenCalledTimes(1);
 
     await screen.unmount();
   });
 
-  it('falls back to setting scrollTop directly on web when FlatList ref methods are not available', async () => {
-    legacyChatListHarnessState.sessionState = { ...legacyChatListHarnessState.sessionState, seq: 25 };
-    legacyChatListHarnessState.sessionMessagesState = {
+  it('falls back to setting scrollTop directly on web when list ref methods are not available', async () => {
+    flashListChatListHarnessState.sessionState = { ...flashListChatListHarnessState.sessionState, seq: 25 };
+    flashListChatListHarnessState.sessionMessagesState = {
       isLoaded: true,
       messages: [{ id: 'm1' }],
     };
 
-    flatListRefImpl = {};
-    legacyChatListHarnessState.flatListRefValue = flatListRefImpl;
+    flashListRefImpl = {};
+    flashListChatListHarnessState.flashListRefHandle = flashListRefImpl;
 
-    const scrollerEl: any = {
+    const scrollerEl: any = createFlashListChatListWebScroller({
       scrollHeight: 2000,
       clientHeight: 500,
       scrollTop: 900,
-    };
+    });
     const rootEl: any = {
       querySelectorAll: () => [scrollerEl],
       scrollHeight: 0,
@@ -245,15 +298,16 @@ describe('ChatList (initial scroll/pagination behavior)', () => {
     const prevWindow = (globalThis as any).window;
     try {
       (globalThis as any).document = {
+        querySelector: () => scrollerEl,
         getElementById: () => rootEl,
       };
       (globalThis as any).window = {
         getComputedStyle: () => ({ overflowY: 'auto' }),
       };
 
-      const screen = await renderLegacyChatList({ flushOptions: { cycles: 0 } });
+      const screen = await renderFlashListChatListSession({ flushOptions: { cycles: 0 } });
 
-      expect(scrollerEl.scrollTop).toBe(0);
+      expect(scrollerEl.scrollTop).toBe(1500);
       await screen.unmount();
     } finally {
       (globalThis as any).document = prevDocument;
@@ -261,62 +315,60 @@ describe('ChatList (initial scroll/pagination behavior)', () => {
     }
   });
 
-  it('restores an observed unpinned viewport during initial fill without pinning it', async () => {
-    legacyChatListHarnessState.sessionState = { ...legacyChatListHarnessState.sessionState, seq: 25 };
-    legacyChatListHarnessState.sessionMessagesState = {
+  it('corrects same-height passive web drift after a cold-open bottom pin without releasing live-tail', async () => {
+    flashListChatListHarnessState.sessionState = { ...flashListChatListHarnessState.sessionState, seq: 452 };
+    flashListChatListHarnessState.sessionMessagesState = {
       isLoaded: true,
-      messages: [{ id: 'm1' }],
+      messages: [{ id: 'm1', seq: 452 }],
     };
-    sessionViewportState = {
-      isPinned: false,
-      offsetY: 320,
-      lastUpdatedAt: 1,
-      source: 'observed',
-    };
-    loadOlderMessagesMock.mockResolvedValue({ loaded: 0, hasMore: false, status: 'no_more' });
+    flashListChatListHarnessState.settingValues.transcriptScrollPinOffsetThresholdPx = 72;
 
-    const scrollerEl: any = {
-      scrollHeight: 2000,
-      clientHeight: 500,
+    const scrollerEl = createFlashListChatListWebScroller({
+      scrollHeight: 10732,
+      clientHeight: 679,
       scrollTop: 0,
-    };
-    const rootEl: any = {
-      querySelectorAll: () => [scrollerEl],
-      scrollHeight: 0,
-      clientHeight: 0,
-    };
+    });
+    const scrollTopWrites = recordWebScrollerScrollTopWrites(scrollerEl);
+    const onViewportChange = vi.fn();
 
-    const prevDocument = (globalThis as any).document;
-    const prevWindow = (globalThis as any).window;
-    try {
-      (globalThis as any).document = {
-        getElementById: () => rootEl,
-      };
-      (globalThis as any).window = {
-        getComputedStyle: () => ({ overflowY: 'auto' }),
-      };
+    await withFlashListChatListWebScrollerDom(scrollerEl, async () => {
+      const { ChatList } = await import('./ChatList');
+      const screen = await renderFlashListChatList(
+        <ChatList
+          session={{ ...flashListChatListHarnessState.sessionState }}
+          onViewportChange={onViewportChange}
+        />,
+        { flushOptions: { cycles: 0 } },
+      );
 
-      const screen = await renderLegacyChatList({ flushOptions: { cycles: 0 } });
+      expect(scrollerEl.scrollTop).toBe(10053);
 
-      requireCapturedFlatListProps();
-      await triggerLegacyChatListInitialFill({
-        contentHeight: 1000,
-        flushOptions: { cycles: 2 },
-        layoutHeight: 500,
-      });
+      onViewportChange.mockClear();
+      scrollTopWrites.length = 0;
+      scrollerEl.scrollTop = 9982;
+      scrollTopWrites.length = 0;
 
-      expect(scrollerEl.scrollTop).toBe(320);
-      expect(scrollToOffsetMock).not.toHaveBeenCalled();
+      await triggerFlashListChatListScroll(
+        9982,
+        {
+          contentSize: { height: 10732, width: 400 },
+          layoutMeasurement: { height: 679, width: 400 },
+        },
+        { cycles: 1, turns: 1 },
+      );
+
+      expect(scrollTopWrites).toEqual([10732]);
+      expect(scrollerEl.scrollTop).toBe(10053);
+      expect(onViewportChange).not.toHaveBeenCalledWith(expect.objectContaining({ isPinned: false }));
+      expect(onViewportChange).not.toHaveBeenCalledWith(expect.objectContaining({ shouldRestoreViewport: true }));
+
       await screen.unmount();
-    } finally {
-      (globalThis as any).document = prevDocument;
-      (globalThis as any).window = prevWindow;
-    }
+    });
   });
 
   it('uses DOM scroll metrics on web to decide scrollability (ignores inflated contentSize from collapsed subtrees)', async () => {
-    legacyChatListHarnessState.sessionState = { ...legacyChatListHarnessState.sessionState, seq: 25 };
-    legacyChatListHarnessState.sessionMessagesState = {
+    flashListChatListHarnessState.sessionState = { ...flashListChatListHarnessState.sessionState, seq: 25 };
+    flashListChatListHarnessState.sessionMessagesState = {
       isLoaded: true,
       messages: [{ id: 'm1' }],
     };
@@ -338,10 +390,10 @@ describe('ChatList (initial scroll/pagination behavior)', () => {
         getComputedStyle: () => ({ overflowY: 'auto' }),
       };
 
-      const screen = await renderLegacyChatList({ flushOptions: { cycles: 0 } });
+      const screen = await renderFlashListChatListSession({ flushOptions: { cycles: 0 } });
 
-      requireCapturedFlatListProps();
-      await triggerLegacyChatListInitialFill({
+      requireCapturedFlashListProps();
+      await triggerFlashListChatListInitialFill({
         contentHeight: 2000,
         flushOptions: { cycles: 2 },
         layoutHeight: 500,
@@ -356,8 +408,8 @@ describe('ChatList (initial scroll/pagination behavior)', () => {
   });
 
   it('auto-expands the newest tool calls group when the transcript cannot scroll and the group has hidden tools', async () => {
-    legacyChatListHarnessState.sessionState = { ...legacyChatListHarnessState.sessionState, seq: 25 };
-    legacyChatListHarnessState.sessionMessagesState = {
+    flashListChatListHarnessState.sessionState = { ...flashListChatListHarnessState.sessionState, seq: 25 };
+    flashListChatListHarnessState.sessionMessagesState = {
       isLoaded: true,
       messages: [{ id: 'm1', seq: 100 }],
     };
@@ -382,23 +434,23 @@ describe('ChatList (initial scroll/pagination behavior)', () => {
 
     loadOlderMessagesMock.mockResolvedValue({ loaded: 0, hasMore: false, status: 'no_more' });
 
-    const screen = await renderLegacyChatList({ flushOptions: { cycles: 0 } });
+    const screen = await renderFlashListChatListSession({ flushOptions: { cycles: 0 } });
 
-    requireCapturedFlatListProps();
-    await triggerLegacyChatListInitialFill({
+    requireCapturedFlashListProps();
+    await triggerFlashListChatListInitialFill({
       flushOptions: { cycles: 4 },
     });
+    await renderCapturedFlashListFooter();
 
     expect(loadOlderMessagesMock).toHaveBeenCalledTimes(1);
-    expect(capturedTurnViewProps).toBeTruthy();
-    expect(capturedTurnViewProps.expandedToolCallsAnchorMessageIds?.has('tool-9')).toBe(true);
+    expect(capturedToolGroupUnitHeaderProps.at(-1)?.expanded).toBe(true);
 
     await screen.unmount();
   });
 
   it('does not auto-expand a huge tool calls group into one giant rendered row when the transcript cannot scroll', async () => {
-    legacyChatListHarnessState.sessionState = { ...legacyChatListHarnessState.sessionState, seq: 25 };
-    legacyChatListHarnessState.sessionMessagesState = {
+    flashListChatListHarnessState.sessionState = { ...flashListChatListHarnessState.sessionState, seq: 25 };
+    flashListChatListHarnessState.sessionMessagesState = {
       isLoaded: true,
       messages: [{ id: 'm1', seq: 100 }],
     };
@@ -423,23 +475,23 @@ describe('ChatList (initial scroll/pagination behavior)', () => {
 
     loadOlderMessagesMock.mockResolvedValue({ loaded: 0, hasMore: false, status: 'no_more' });
 
-    const screen = await renderLegacyChatList({ flushOptions: { cycles: 0 } });
+    const screen = await renderFlashListChatListSession({ flushOptions: { cycles: 0 } });
 
-    requireCapturedFlatListProps();
-    await triggerLegacyChatListInitialFill({
+    requireCapturedFlashListProps();
+    await triggerFlashListChatListInitialFill({
       flushOptions: { cycles: 4 },
     });
+    await renderCapturedFlashListFooter();
 
     expect(loadOlderMessagesMock).toHaveBeenCalledTimes(1);
-    expect(capturedTurnViewProps).toBeTruthy();
-    expect(capturedTurnViewProps.expandedToolCallsAnchorMessageIds?.size ?? 0).toBe(0);
+    expect(capturedToolGroupUnitHeaderProps.at(-1)?.expanded).toBe(false);
 
     await screen.unmount();
   });
 
   it('auto-expands a tool calls group even if the group only appears after the initial fill completes', async () => {
-    legacyChatListHarnessState.sessionState = { ...legacyChatListHarnessState.sessionState, seq: 25 };
-    legacyChatListHarnessState.sessionMessagesState = {
+    flashListChatListHarnessState.sessionState = { ...flashListChatListHarnessState.sessionState, seq: 25 };
+    flashListChatListHarnessState.sessionMessagesState = {
       isLoaded: true,
       messages: [{ id: 'm1', seq: 100 }],
     };
@@ -465,28 +517,29 @@ describe('ChatList (initial scroll/pagination behavior)', () => {
     loadOlderMessagesMock.mockResolvedValue({ loaded: 0, hasMore: false, status: 'no_more' });
 
     const { ChatList } = await import('./ChatList');
-    const screen = await renderLegacyChatList({ flushOptions: { cycles: 0 } });
+    const screen = await renderFlashListChatListSession({ flushOptions: { cycles: 0 } });
 
-    requireCapturedFlatListProps();
-    await triggerLegacyChatListInitialFill({
+    requireCapturedFlashListProps();
+    await triggerFlashListChatListInitialFill({
       flushOptions: { cycles: 4 },
     });
 
     expect(loadOlderMessagesMock).toHaveBeenCalledTimes(1);
-    expect(capturedTurnViewProps).toBeNull();
+    expect(capturedToolGroupUnitHeaderProps).toHaveLength(0);
 
     // Next render: tool calls group exists, but the initial-fill effect should not need to re-run.
-    legacyChatListHarnessState.sessionMessagesState = {
-      ...legacyChatListHarnessState.sessionMessagesState,
-      messages: [...legacyChatListHarnessState.sessionMessagesState.messages, { id: 'm2', seq: 101 }],
+    flashListChatListHarnessState.sessionMessagesState = {
+      ...flashListChatListHarnessState.sessionMessagesState,
+      messages: [...flashListChatListHarnessState.sessionMessagesState.messages, { id: 'm2', seq: 101 }],
     };
     buildChatListItemsMock.mockReturnValue([toolGroupTurnItem] as any);
-    await screen.update(<ChatList session={{ ...legacyChatListHarnessState.sessionState }} followBottomIntentKey="tool-group-visible" />);
-    await flushLegacyChatListEffects({ cycles: 4 });
+    await screen.update(<ChatList session={{ ...flashListChatListHarnessState.sessionState }} followBottomIntentKey="tool-group-visible" />);
+    await flushHookEffects({ cycles: 4 });
+    await renderCapturedFlashListFooter();
 
-    expect(capturedTurnViewProps).toBeTruthy();
-    expect(capturedTurnViewProps.expandedToolCallsAnchorMessageIds?.has('tool-9')).toBe(true);
+    expect(capturedToolGroupUnitHeaderProps.at(-1)?.expanded).toBe(true);
 
     await screen.unmount();
   });
+
 });

@@ -82,6 +82,44 @@ describe('transcriptNativeViewportAnchor', () => {
         expect(result.status === 'captured' ? result.anchor.itemOffsetPx : null).toBe(65);
     });
 
+    it('does not throw or capture a poisoned anchor when the native offset read throws', () => {
+        const result = captureNativeTranscriptViewportAnchor({
+            ref: {
+                scrollToIndex: () => undefined,
+                scrollToOffset: () => undefined,
+                computeVisibleIndices: () => ({ startIndex: 1, endIndex: 1 }),
+                getLayout: (index: number) => (
+                    index === 1 ? { x: 0, y: 180, width: 320, height: 90 } : undefined
+                ),
+                getAbsoluteLastScrollOffset: () => {
+                    throw new Error('native recycler is recycling');
+                },
+            },
+            data: items,
+            focusOffsetPx: 64,
+            capturedAtMs: 654,
+        });
+
+        expect(result).toEqual({ status: 'no_measurable_items' });
+    });
+
+    it('does not capture a native anchor with a non-finite pixel offset', () => {
+        const result = captureNativeTranscriptViewportAnchor({
+            ref: createRef({
+                scrollOffset: Number.NaN,
+                visibleRange: { startIndex: 1, endIndex: 1 },
+                layouts: {
+                    1: { x: 0, y: 180, width: 320, height: 90 },
+                },
+            }),
+            data: items,
+            focusOffsetPx: 64,
+            capturedAtMs: 655,
+        });
+
+        expect(result).toEqual({ status: 'no_measurable_items' });
+    });
+
     it('returns methods_unavailable when required FlashList measurement methods are absent', () => {
         const result = captureNativeTranscriptViewportAnchor({
             ref: {
@@ -208,6 +246,44 @@ describe('transcriptNativeViewportAnchor', () => {
                 scrollOffset: 200,
                 visibleRange: { startIndex: 1, endIndex: 2 },
                 layouts: {},
+            }),
+            index: 2,
+            itemOffsetPx: 40,
+            tolerancePx: 2,
+        });
+
+        expect(result).toEqual({ status: 'waiting_for_layout' });
+    });
+
+    it('waits for layout when the native restore observation offset read throws', () => {
+        const result = resolveNativeTranscriptViewportAnchorRestoreObservation({
+            ref: {
+                scrollToIndex: () => undefined,
+                scrollToOffset: () => undefined,
+                computeVisibleIndices: () => ({ startIndex: 1, endIndex: 2 }),
+                getLayout: (index: number) => (
+                    index === 2 ? { x: 0, y: 240, width: 320, height: 100 } : undefined
+                ),
+                getAbsoluteLastScrollOffset: () => {
+                    throw new Error('native recycler is recycling');
+                },
+            },
+            index: 2,
+            itemOffsetPx: 40,
+            tolerancePx: 2,
+        });
+
+        expect(result).toEqual({ status: 'waiting_for_layout' });
+    });
+
+    it('waits for layout when the native restore observation offset is non-finite', () => {
+        const result = resolveNativeTranscriptViewportAnchorRestoreObservation({
+            ref: createRef({
+                scrollOffset: Infinity,
+                visibleRange: { startIndex: 1, endIndex: 2 },
+                layouts: {
+                    2: { x: 0, y: 240, width: 320, height: 100 },
+                },
             }),
             index: 2,
             itemOffsetPx: 40,

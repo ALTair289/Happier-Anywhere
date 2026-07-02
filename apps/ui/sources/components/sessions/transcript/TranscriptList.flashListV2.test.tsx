@@ -16,6 +16,7 @@ let transcriptListImplementationSetting: 'flash_v2' | 'flatlist_legacy' = 'flash
 let platformOs: 'web' | 'ios' = 'web';
 let headerHeightState = 0;
 let safeAreaTopState = 0;
+let renderedMessageViewProps: any[] = [];
 
 vi.mock('@shopify/flash-list', () => ({
     FlashList: (props: any) => {
@@ -87,7 +88,10 @@ vi.mock('react-native-safe-area-context', () => ({
 
 vi.mock('./MessageView', () => ({
     MessageView: () => React.createElement('MessageView'),
-    MessageViewWithSessionCommon: () => React.createElement('MessageView'),
+    MessageViewWithSessionCommon: (props: any) => {
+        renderedMessageViewProps.push(props);
+        return React.createElement('MessageView', props);
+    },
 }));
 
 vi.mock('./ChatFooter', () => ({
@@ -103,6 +107,7 @@ describe('TranscriptList (FlashList v2)', () => {
         platformOs = 'web';
         headerHeightState = 0;
         safeAreaTopState = 0;
+        renderedMessageViewProps = [];
     });
 
     it('renders FlashList with startRenderingFromBottom enabled when selected', async () => {
@@ -111,12 +116,17 @@ describe('TranscriptList (FlashList v2)', () => {
                     sessionId="s1"
                     metadata={null}
                     messages={[{ kind: 'user-text', id: 'u1', localId: null, createdAt: 1, text: 'hi' } as any]}
-                    interaction={{ canSendMessages: true, canApprovePermissions: true }}
                 />);
 
         expect(renderedFlatListCount).toBe(0);
         expect(capturedFlashListProps).not.toBeNull();
         expect(capturedFlashListProps.maintainVisibleContentPosition?.startRenderingFromBottom).toBe(true);
+        expect(renderedMessageViewProps[0]?.interaction).toEqual({
+            canApprovePermissions: false,
+            canSendMessages: false,
+            disableToolNavigation: true,
+            permissionDisabledReason: 'public',
+        });
     });
 
     it('throttles web FlashList scroll events above one frame to reduce scroll-render churn', async () => {
@@ -125,7 +135,6 @@ describe('TranscriptList (FlashList v2)', () => {
                     sessionId="s1"
                     metadata={null}
                     messages={[{ kind: 'user-text', id: 'u1', localId: null, createdAt: 1, text: 'hi' } as any]}
-                    interaction={{ canSendMessages: true, canApprovePermissions: true }}
                 />);
 
         expect(capturedFlashListProps).not.toBeNull();
@@ -140,11 +149,29 @@ describe('TranscriptList (FlashList v2)', () => {
                     sessionId="s1"
                     metadata={null}
                     messages={[{ kind: 'user-text', id: 'u1', localId: null, createdAt: 1, text: 'hi' } as any]}
-                    interaction={{ canSendMessages: true, canApprovePermissions: true }}
                 />);
 
         expect(capturedFlashListProps).not.toBeNull();
         expect(capturedFlashListProps.scrollEventThrottle).toBe(16);
+    });
+
+    it('renders native FlashList with inverted newest-first data', async () => {
+        platformOs = 'ios';
+
+        const { TranscriptList } = await import('./TranscriptList');
+        await renderScreen(<TranscriptList
+                    sessionId="s1"
+                    metadata={null}
+                    messages={[
+                        { kind: 'user-text', id: 'oldest', localId: null, createdAt: 1, text: 'first' } as any,
+                        { kind: 'agent-text', id: 'newest', localId: null, createdAt: 2, text: 'second', isThinking: false } as any,
+                    ]}
+                />);
+
+        expect(capturedFlashListProps).not.toBeNull();
+        expect(capturedFlashListProps.inverted).toBe(true);
+        expect(capturedFlashListProps.data.map((item: any) => item.id)).toEqual(['newest', 'oldest']);
+        expect(capturedFlashListProps.maintainVisibleContentPosition?.startRenderingFromBottom).toBe(true);
     });
 
     it('keeps drag scrolling from dismissing the keyboard on iOS', async () => {
@@ -155,7 +182,6 @@ describe('TranscriptList (FlashList v2)', () => {
                     sessionId="s1"
                     metadata={null}
                     messages={[{ kind: 'user-text', id: 'u1', localId: null, createdAt: 1, text: 'hi' } as any]}
-                    interaction={{ canSendMessages: true, canApprovePermissions: true }}
                 />);
 
         expect(capturedFlashListProps).not.toBeNull();
@@ -172,7 +198,6 @@ describe('TranscriptList (FlashList v2)', () => {
                     sessionId="s1"
                     metadata={null}
                     messages={[{ kind: 'user-text', id: 'u1', localId: null, createdAt: 1, text: 'hi' } as any]}
-                    interaction={{ canSendMessages: true, canApprovePermissions: true }}
                 />);
 
         const duplicatedChromeSpacerHeight = headerHeightState + safeAreaTopState + 32;
@@ -192,7 +217,6 @@ describe('TranscriptList (FlashList v2)', () => {
                     sessionId="s1"
                     metadata={null}
                     messages={[{ kind: 'user-text', id: 'u1', localId: null, createdAt: 1, text: 'hi' } as any]}
-                    interaction={{ canSendMessages: true, canApprovePermissions: true }}
                 />);
 
         const compactTopGutters = screen.findAll((node) => node.props?.style?.height === 12);

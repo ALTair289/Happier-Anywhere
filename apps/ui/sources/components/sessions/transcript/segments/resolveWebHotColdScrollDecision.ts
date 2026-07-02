@@ -5,7 +5,7 @@ export type WebHotColdScrollDecision =
 export type WebColdListScrollTargetReason =
     | 'jump-to-seq'
     | 'prepend-recovery'
-    | 'restore-index';
+    | 'restore-anchor';
 
 export type WebColdListScrollTarget =
     | Readonly<{

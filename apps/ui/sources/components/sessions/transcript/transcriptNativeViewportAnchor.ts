@@ -1,4 +1,5 @@
 import type { FlashListRef } from '@/components/ui/lists/flashListCompat/FlashListCompat';
+import { readNativeAbsoluteScrollOffset } from '@/components/sessions/transcript/viewport/driver/readNativeAbsoluteScrollOffset';
 
 export type NativeTranscriptViewportFlashListRef<T> = FlashListRef<T>;
 
@@ -192,7 +193,8 @@ export function captureNativeTranscriptViewportAnchor<T>(params: Readonly<{
     const visibleRange = resolveVisibleRange(ref, params.data.length);
     if (visibleRange == null) return { status: 'no_visible_indices' };
 
-    const absoluteScrollOffset = getAbsoluteLastScrollOffset();
+    const absoluteScrollOffset = readNativeAbsoluteScrollOffset(ref);
+    if (absoluteScrollOffset === null) return { status: 'no_measurable_items' };
     const candidate = chooseFocusLineIndex({
         getLayout,
         range: visibleRange,
@@ -315,8 +317,8 @@ export function resolveNativeTranscriptViewportAnchorRestoreObservation<T>(param
 
     if (canMeasurePixelOffset) {
         const layout = ref.getLayout(params.index);
-        const absoluteScrollOffset = ref.getAbsoluteLastScrollOffset();
-        if (!isFiniteLayout(layout) || !Number.isFinite(absoluteScrollOffset)) {
+        const absoluteScrollOffset = readNativeAbsoluteScrollOffset(ref);
+        if (!isFiniteLayout(layout) || absoluteScrollOffset === null) {
             return { status: 'waiting_for_layout' };
         }
 

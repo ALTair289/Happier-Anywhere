@@ -48,6 +48,8 @@ class FakeElement {
     public isConnected = true;
     public parentElement: FakeElement | null = null;
     public querySelectorAllCount = 0;
+    public querySelectorCount = 0;
+    public querySelectorShouldThrow = false;
 
     private rect: { top: number; bottom: number };
     private readonly nodesBySelector = new Map<string, FakeElement[]>();
@@ -82,6 +84,16 @@ class FakeElement {
         return this.nodesBySelector.get(selector) ?? [];
     }
 
+    querySelector(selector: string) {
+        this.querySelectorCount += 1;
+        if (this.querySelectorShouldThrow) {
+            throw new Error('querySelector unavailable');
+        }
+        const testId = parseDataTestIdAttributeSelector(selector);
+        if (testId == null) return this.nodesBySelector.get(selector)?.[0] ?? null;
+        return this.nodesBySelector.get('[data-testid]')?.find((node) => node.getAttribute('data-testid') === testId) ?? null;
+    }
+
     setQuerySelectorAll(selector: string, nodes: FakeElement[]) {
         this.nodesBySelector.set(selector, nodes);
     }
@@ -89,6 +101,14 @@ class FakeElement {
     setRect(rect: { top: number; bottom: number }) {
         this.rect = rect;
     }
+}
+
+function parseDataTestIdAttributeSelector(selector: string): string | null {
+    const match = selector.match(/^\[data-testid="((?:\\.|[^"\\])*)"\]$/);
+    if (!match) return null;
+    return match[1]
+        .replace(/\\([0-9a-fA-F]{1,6})\s?/g, (_value, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)))
+        .replace(/\\(.)/g, '$1');
 }
 
 function createContainer(params: Readonly<{
@@ -440,6 +460,89 @@ describe('webTranscriptPrependAnchor', () => {
                 status: 'restored',
             });
             expect(container.scrollTop).toBe(608);
+        } finally {
+            restoreHTMLElement();
+        }
+    });
+
+    it('restores saved viewport anchors with exact DOM lookups instead of scanning every test id descendant', () => {
+        const restoreWebTranscriptViewportAnchor =
+            resolveModuleFunction<RestoreWebTranscriptViewportAnchor>('restoreWebTranscriptViewportAnchor');
+        if (!restoreWebTranscriptViewportAnchor) return;
+        const restoreHTMLElement = installFakeHTMLElement();
+
+        try {
+            const itemId = 'turn:1/[quoted]"\\slash';
+            const messageId = 'm1/[quoted]"\\slash';
+            const itemAnchor = new FakeElement(`transcript-item-${itemId}`, { top: 180, bottom: 640 });
+            const messageAnchor = new FakeElement(`transcript-anchor-message-${messageId}`, { top: 240, bottom: 320 });
+            messageAnchor.parentElement = itemAnchor;
+            const unrelatedAnchors = Array.from(
+                { length: 300 },
+                (_value, index) => new FakeElement(`unrelated-${index}`, { top: 0, bottom: 1 }),
+            );
+            const container = createContainer({
+                scrollTop: 500,
+                scrollHeight: 1600,
+                clientHeight: 600,
+                anchors: [...unrelatedAnchors, itemAnchor, messageAnchor],
+            });
+            itemAnchor.parentElement = container;
+
+            expect(restoreWebTranscriptViewportAnchor({
+                container: container as unknown as HTMLElement,
+                anchor: {
+                    kind: 'message',
+                    messageId,
+                    itemId,
+                    itemOffsetPx: 72,
+                },
+            }, writeScrollTopFor(container))).toEqual({
+                didAdjustScroll: true,
+                status: 'restored',
+            });
+            expect(container.scrollTop).toBe(608);
+            expect(container.querySelectorCount).toBe(2);
+            expect(container.querySelectorAllCount).toBe(0);
+        } finally {
+            restoreHTMLElement();
+        }
+    });
+
+    it('falls back to a test-id scan when exact DOM lookup is unavailable', () => {
+        const restoreWebTranscriptViewportAnchor =
+            resolveModuleFunction<RestoreWebTranscriptViewportAnchor>('restoreWebTranscriptViewportAnchor');
+        if (!restoreWebTranscriptViewportAnchor) return;
+        const restoreHTMLElement = installFakeHTMLElement();
+
+        try {
+            const itemAnchor = new FakeElement('transcript-item-turn:1', { top: 180, bottom: 640 });
+            const messageAnchor = new FakeElement('transcript-anchor-message-m1', { top: 240, bottom: 320 });
+            messageAnchor.parentElement = itemAnchor;
+            const container = createContainer({
+                scrollTop: 500,
+                scrollHeight: 1600,
+                clientHeight: 600,
+                anchors: [itemAnchor, messageAnchor],
+            });
+            container.querySelectorShouldThrow = true;
+            itemAnchor.parentElement = container;
+
+            expect(restoreWebTranscriptViewportAnchor({
+                container: container as unknown as HTMLElement,
+                anchor: {
+                    kind: 'message',
+                    messageId: 'm1',
+                    itemId: 'turn:1',
+                    itemOffsetPx: 72,
+                },
+            }, writeScrollTopFor(container))).toEqual({
+                didAdjustScroll: true,
+                status: 'restored',
+            });
+            expect(container.scrollTop).toBe(608);
+            expect(container.querySelectorCount).toBe(2);
+            expect(container.querySelectorAllCount).toBe(2);
         } finally {
             restoreHTMLElement();
         }

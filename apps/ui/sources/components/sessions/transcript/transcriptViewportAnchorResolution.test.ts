@@ -41,6 +41,23 @@ describe('transcriptViewportAnchorResolution', () => {
         })).toBe(0);
     });
 
+    it('falls back to durable seq when hydrated anchor ids are runtime-stale', () => {
+        const items = [
+            { kind: 'message', id: 'new-runtime-m300', messageId: 'new-runtime-m300', seq: 300 },
+            { kind: 'message', id: 'new-runtime-m301', messageId: 'new-runtime-m301', seq: 301 },
+            { kind: 'message', id: 'new-runtime-m302', messageId: 'new-runtime-m302', seq: 302 },
+        ] as const;
+
+        expect(resolveTranscriptViewportAnchorIndex({
+            anchor: {
+                messageId: 'server-m301',
+                itemId: 'old-runtime-m301',
+                seq: 301,
+            },
+            items,
+        })).toBe(1);
+    });
+
     it('creates the finest stable descriptor available for a turn row', () => {
         expect(resolveTranscriptViewportAnchorDescriptor({
             kind: 'turn',
@@ -188,7 +205,7 @@ describe('transcriptViewportAnchorResolution', () => {
             })).toEqual({ status: 'missing', reason: 'fork-boundary' });
 
             expect(resolveTranscriptViewportAnchorLookup({
-                anchor: { messageId: 'server-anchor', itemId: 'msg:server-anchor', seq: 20 },
+                anchor: { messageId: 'server-anchor', itemId: 'msg:server-anchor', seq: 30 },
                 items,
                 materializedSeqRange: { minSeq: 10, maxSeq: 40 },
             })).toEqual({ status: 'missing', reason: 'deleted-missing' });

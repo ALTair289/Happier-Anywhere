@@ -3,28 +3,31 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { standardCleanup } from '@/dev/testkit';
 import {
-    buildLegacyChatListItems,
-    renderLegacyChatList,
-    resetLegacyChatListHarness,
-    triggerLegacyChatListScroll,
-} from './ChatList.legacyListTestHarness';
-import { installLegacyChatListHarnessCommonModuleMocks } from './chatListLegacyHarnessTestHelpers';
+    buildFlashListChatListItems,
+    createFlashListChatListWebScroller,
+    renderFlashListChatListSession,
+    resetFlashListChatListHarness,
+    triggerFlashListChatListScroll,
+    withFlashListChatListWebScrollerDom,
+} from '@/dev/testkit/harness/chatListHarness';
+import { installFlashListChatListCommonModuleMocks } from '@/dev/testkit/harness/chatListHarnessModuleMocks';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
 const loadNewerMessages = vi.fn(async (_sessionId?: string) => {});
 const hasDeferredNewerMessages = vi.fn(() => true);
 const getSyncTuning = vi.fn(() => ({ transcriptForwardPrefetchThresholdPx: 800, transcriptBackwardPrefetchThresholdPx: 0 }));
+const maybeDrainDeferredNewerMessages = vi.fn();
 
-installLegacyChatListHarnessCommonModuleMocks({
+installFlashListChatListCommonModuleMocks({
     reactNative: async () =>
-        (await import('@/dev/testkit/harness/chatListHarness')).createLegacyChatListReactNativeMock({
+        (await import('@/dev/testkit/harness/chatListHarness')).createFlashListChatListReactNativeMock({
             platformOs: 'web',
         }),
 });
 
 vi.mock('@/components/sessions/chatListItems', async () => (
-    (await import('./ChatList.legacyListTestHarness')).createLegacyChatListItemsModuleMock(buildLegacyChatListItems)
+    (await import('@/dev/testkit/harness/chatListHarness')).createFlashListChatListItemsModuleMock(buildFlashListChatListItems)
 ));
 
 vi.mock('./ChatFooter', () => ({
@@ -57,65 +60,70 @@ vi.mock('@/utils/system/fireAndForget', () => ({
     fireAndForget: (p: any) => p,
 }));
 
-const deferredNewerDrainInFlight = new Set<string>();
-
-vi.mock('@/sync/sync', () => ({
-    sync: {
-        loadOlderMessages: vi.fn(),
+vi.mock('@/sync/sync', async () =>
+    (await import('@/dev/testkit/harness/chatListHarness')).createFlashListChatListSyncModuleMock({
         loadNewerMessages,
         hasDeferredNewerMessages,
         getSyncTuning,
-        // C6/D3: sync owns the deferred-newer drain decision (threshold + in-flight dedupe + fetch);
-        // the list supplies geometry only. This stand-in mirrors that decision against the
-        // boundary-mocked loadNewerMessages so the forward-prefetch contract is exercised.
-        maybeDrainDeferredNewerMessages: (
-            sessionId: string,
-            viewport: { isPinned: boolean; distanceFromBottomPx: number },
-        ) => {
-            if (!sessionId || hasDeferredNewerMessages() !== true) return;
-            const thresholdPx = getSyncTuning().transcriptForwardPrefetchThresholdPx;
-            const nearBottom = viewport.isPinned || viewport.distanceFromBottomPx <= thresholdPx;
-            if (!nearBottom || deferredNewerDrainInFlight.has(sessionId)) return;
-            deferredNewerDrainInFlight.add(sessionId);
-            void Promise.resolve(loadNewerMessages(sessionId)).catch(() => {}).finally(() => {
-                deferredNewerDrainInFlight.delete(sessionId);
-            });
-        },
-    },
-}));
+        maybeDrainDeferredNewerMessages,
+    }),
+);
 
 describe('ChatList (forward prefetch)', () => {
     beforeEach(() => {
-        resetLegacyChatListHarness({
+        resetFlashListChatListHarness({
             platformOs: 'web',
         });
 
-        deferredNewerDrainInFlight.clear();
         loadNewerMessages.mockClear();
         hasDeferredNewerMessages.mockClear();
         hasDeferredNewerMessages.mockReturnValue(true);
         getSyncTuning.mockClear();
         getSyncTuning.mockReturnValue({ transcriptForwardPrefetchThresholdPx: 800, transcriptBackwardPrefetchThresholdPx: 0 });
+        maybeDrainDeferredNewerMessages.mockClear();
     });
 
     afterEach(() => {
         standardCleanup();
     });
 
-    it('loads newer messages when unpinned and near bottom and deferred newer exists', async () => {
-        await renderLegacyChatList();
-        await triggerLegacyChatListScroll(200);
+    it('routes unpinned near-bottom geometry to sync for deferred newer handling', async () => {
+        const scroller = createFlashListChatListWebScroller({
+            clientHeight: 500,
+            scrollHeight: 1000,
+            scrollTop: 200,
+        });
+        await withFlashListChatListWebScrollerDom(scroller, async () => {
+            await renderFlashListChatListSession();
+            maybeDrainDeferredNewerMessages.mockClear();
+            scroller.scrollTop = 200;
+            await triggerFlashListChatListScroll(200);
+        });
 
-        expect(loadNewerMessages).toHaveBeenCalledTimes(1);
-        expect(loadNewerMessages).toHaveBeenCalledWith('session-1');
+        expect(maybeDrainDeferredNewerMessages).toHaveBeenCalledWith('session-1', {
+            isPinned: false,
+            distanceFromBottomPx: 300,
+        });
+        expect(loadNewerMessages).not.toHaveBeenCalled();
     });
 
-    it('does not prefetch newer messages when scroll is outside configured threshold', async () => {
-        getSyncTuning.mockReturnValue({ transcriptForwardPrefetchThresholdPx: 100, transcriptBackwardPrefetchThresholdPx: 0 });
+    it('delegates far-from-bottom geometry to sync instead of filtering by threshold locally', async () => {
+        const scroller = createFlashListChatListWebScroller({
+            clientHeight: 500,
+            scrollHeight: 1000,
+            scrollTop: 0,
+        });
+        await withFlashListChatListWebScrollerDom(scroller, async () => {
+            await renderFlashListChatListSession();
+            maybeDrainDeferredNewerMessages.mockClear();
+            scroller.scrollTop = 0;
+            await triggerFlashListChatListScroll(0);
+        });
 
-        await renderLegacyChatList();
-        await triggerLegacyChatListScroll(200);
-
+        expect(maybeDrainDeferredNewerMessages).toHaveBeenCalledWith('session-1', {
+            isPinned: false,
+            distanceFromBottomPx: 500,
+        });
         expect(loadNewerMessages).not.toHaveBeenCalled();
     });
 });

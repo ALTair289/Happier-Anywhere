@@ -18,6 +18,11 @@ vi.mock('@shopify/flash-list', () => ({
   FlashList: () => null,
 }));
 
+vi.mock('@/components/ui/lists/flashListCompat/FlashListCompat', async () => {
+  const { createFlashListChatListModuleMock } = await import('@/dev/testkit/harness/chatListHarness');
+  return createFlashListChatListModuleMock({ renderItems: true });
+});
+
 installTranscriptCommonModuleMocks({
     reactNative: async () => {
         const { createReactNativeWebMock } = await import('@/dev/testkit/mocks/reactNative');
@@ -91,7 +96,7 @@ describe('TranscriptList (thinking expansion controlled)', () => {
   });
 
   it('controls inline thinking expansion via list-owned state', async () => {
-    settingValues.transcriptListImplementation = 'flatlist_legacy';
+    settingValues.transcriptListImplementation = 'flash_v2';
     settingValues.sessionThinkingDisplayMode = 'inline';
     settingValues.sessionThinkingInlinePresentation = 'summary';
 
@@ -103,10 +108,15 @@ describe('TranscriptList (thinking expansion controlled)', () => {
           sessionId="s1"
           metadata={null}
           messages={[thinkingMessage as any, normalMessage as any]}
-          interaction={{ canSendMessages: false, canApprovePermissions: false }}
         />);
 
     const firstThinkingProps = getRenderedMessageProps().find((p) => p?.message?.id === 't1');
+    expect(firstThinkingProps?.interaction).toEqual({
+      canApprovePermissions: false,
+      canSendMessages: false,
+      disableToolNavigation: true,
+      permissionDisabledReason: 'public',
+    });
     expect(firstThinkingProps?.thinkingExpanded).toBe(false);
     expect(typeof firstThinkingProps?.onThinkingExpandedChange).toBe('function');
 
@@ -119,7 +129,7 @@ describe('TranscriptList (thinking expansion controlled)', () => {
   });
 
   it('renders messages through parent-provided transcript session common', async () => {
-    settingValues.transcriptListImplementation = 'flatlist_legacy';
+    settingValues.transcriptListImplementation = 'flash_v2';
     settingValues.sessionThinkingDisplayMode = 'inline';
     settingValues.sessionThinkingInlinePresentation = 'summary';
     settingValues.sessionThinkingInlineChrome = 'plain';
@@ -143,7 +153,6 @@ describe('TranscriptList (thinking expansion controlled)', () => {
       sessionId="s1"
       metadata={null}
       messages={[message as any]}
-      interaction={{ canSendMessages: false, canApprovePermissions: false }}
     />);
 
     expect(renderedMessageViewProps).toHaveLength(0);

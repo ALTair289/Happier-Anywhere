@@ -1,6 +1,8 @@
 import type { Message, ToolCallMessage, UserTextMessage } from '@/sync/domains/messages/messageTypes';
+import type { DiscardedPendingMessage, PendingMessage } from '@/sync/domains/state/storageTypes';
 import { isToolCallMessageGroupableInTranscript } from '@/components/sessions/transcript/toolCalls/isToolCallMessageGroupableInTranscript';
 import { filterVisibleContextCompactionLifecycleMessageIds } from '@/components/sessions/transcript/events/contextCompactionLifecycleProjection';
+import { filterCommittedTranscriptMessageIdsForPendingState } from '@/sync/domains/pending/pendingTranscriptProjection';
 
 export type TranscriptTurnToolCallsGroupStrategy = 'consecutive_tools' | 'all_tools_in_turn';
 
@@ -302,13 +304,21 @@ export function buildTranscriptTurnsCached(opts: {
     cache: TranscriptTurnsBuildCache | null;
     messageIdsOldestFirst: string[];
     messagesById: Readonly<Record<string, Message>>;
+    pendingMessages?: readonly PendingMessage[] | null;
+    discardedMessages?: readonly DiscardedPendingMessage[] | null;
     groupToolCalls: boolean;
     toolCallsGroupStrategy: TranscriptTurnToolCallsGroupStrategy;
     forkBoundaryBeforeMessageIds?: ReadonlySet<string>;
     forkBoundarySignature?: string;
     forkMetadataByMessageId?: Readonly<Record<string, unknown>>;
 }): TranscriptTurnsBuildCache {
-    const visibleMessageIdsOldestFirst = filterVisibleContextCompactionLifecycleMessageIds(opts.messageIdsOldestFirst, opts.messagesById);
+    const contextVisibleMessageIdsOldestFirst = filterVisibleContextCompactionLifecycleMessageIds(opts.messageIdsOldestFirst, opts.messagesById);
+    const visibleMessageIdsOldestFirst = filterCommittedTranscriptMessageIdsForPendingState({
+        messageIdsOldestFirst: contextVisibleMessageIdsOldestFirst,
+        messagesById: opts.messagesById,
+        pendingMessages: opts.pendingMessages,
+        discardedMessages: opts.discardedMessages,
+    });
     const nextMessageGroupingKeysOldestFirst = visibleMessageIdsOldestFirst.map((id) => getMessageGroupingKey(opts.messagesById[id]));
     const canReuse =
         opts.cache != null &&
@@ -437,6 +447,8 @@ export function buildTranscriptTurnsCached(opts: {
 export function buildTranscriptTurns(opts: {
     messageIdsOldestFirst: string[];
     messagesById: Readonly<Record<string, Message>>;
+    pendingMessages?: readonly PendingMessage[] | null;
+    discardedMessages?: readonly DiscardedPendingMessage[] | null;
     groupToolCalls: boolean;
     toolCallsGroupStrategy: TranscriptTurnToolCallsGroupStrategy;
     forkBoundaryBeforeMessageIds?: ReadonlySet<string>;
@@ -447,6 +459,8 @@ export function buildTranscriptTurns(opts: {
         cache: null,
         messageIdsOldestFirst: opts.messageIdsOldestFirst,
         messagesById: opts.messagesById,
+        pendingMessages: opts.pendingMessages,
+        discardedMessages: opts.discardedMessages,
         groupToolCalls: opts.groupToolCalls,
         toolCallsGroupStrategy: opts.toolCallsGroupStrategy,
         forkBoundaryBeforeMessageIds: opts.forkBoundaryBeforeMessageIds,

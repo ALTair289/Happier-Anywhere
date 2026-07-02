@@ -205,7 +205,7 @@ async function primeAtBottom(screen: Awaited<ReturnType<typeof renderFlashListCh
 }
 
 async function observeNativeScrollAtBottom(screen: Awaited<ReturnType<typeof renderFlashListChatList>>) {
-    await screen.triggerScroll(600, {
+    await screen.triggerScroll(0, {
         contentSize: { height: 1200, width: 0 },
         isTrusted: true,
         layoutMeasurement: { height: 600, width: 0 },
@@ -255,6 +255,7 @@ describe('ChatList (FlashList v2 native scroll escape)', () => {
         const { ChatList, screen } = await renderStreamingChatList();
 
         await primeAtBottom(screen);
+        getAbsoluteLastScrollOffsetSpy.mockReturnValue(300);
         await act(async () => {
             screen.requireCapturedFlashListProps().onScrollBeginDrag?.({});
             vi.setSystemTime(new Date(500));
@@ -337,7 +338,7 @@ describe('ChatList (FlashList v2 native scroll escape)', () => {
         await primeAtBottom(screen);
         await growStreamingAssistantMessage(ChatList, screen, 1500);
 
-        expect(autoFollowReasons()).toContain('stream-append');
+        expect(autoFollowReasons()).not.toContain('stream-append');
         expect(scrollToOffsetSpy).not.toHaveBeenCalled();
         expect(screen.requireCapturedFlashListProps().maintainVisibleContentPosition).toMatchObject({
             animateAutoScrollToBottom: false,
@@ -353,14 +354,14 @@ describe('ChatList (FlashList v2 native scroll escape)', () => {
         await act(async () => {
             screen.requireCapturedFlashListProps().onScrollBeginDrag?.({});
         });
-        await screen.triggerScroll(400, {
+        await screen.triggerScroll(200, {
             contentSize: { height: 1200, width: 0 },
             layoutMeasurement: { height: 600, width: 0 },
         }, { cycles: 1, turns: 1 });
         await act(async () => {
             vi.setSystemTime(new Date(500));
         });
-        await screen.triggerScroll(600, {
+        await screen.triggerScroll(0, {
             contentSize: { height: 1200, width: 0 },
             layoutMeasurement: { height: 600, width: 0 },
         }, { cycles: 1, turns: 1 });
@@ -383,7 +384,7 @@ describe('ChatList (FlashList v2 native scroll escape)', () => {
             vi.setSystemTime(new Date(500));
         });
 
-        await screen.triggerScroll(400, {
+        await screen.triggerScroll(200, {
             contentSize: { height: 1500, width: 0 },
             layoutMeasurement: { height: 600, width: 0 },
         }, { cycles: 1, turns: 1 });
@@ -403,13 +404,13 @@ describe('ChatList (FlashList v2 native scroll escape)', () => {
             screen.requireCapturedFlashListProps().onScrollBeginDrag?.({});
         });
 
-        await screen.triggerScroll(400, {
+        await screen.triggerScroll(200, {
             contentSize: { height: 1200, width: 0 },
             isTrusted: true,
             layoutMeasurement: { height: 600, width: 0 },
         }, { cycles: 1, turns: 1 });
 
-        await screen.triggerScroll(560, {
+        await screen.triggerScroll(40, {
             contentSize: { height: 1200, width: 0 },
             isTrusted: true,
             layoutMeasurement: { height: 600, width: 0 },
@@ -447,12 +448,12 @@ describe('ChatList (FlashList v2 native scroll escape)', () => {
             screen.requireCapturedFlashListProps().onScrollBeginDrag?.({});
         });
 
-        await screen.triggerScroll(400, {
+        await screen.triggerScroll(200, {
             contentSize: { height: 1200, width: 0 },
             layoutMeasurement: { height: 600, width: 0 },
         }, { cycles: 1, turns: 1 });
 
-        await screen.triggerScroll(560, {
+        await screen.triggerScroll(40, {
             contentSize: { height: 1200, width: 0 },
             layoutMeasurement: { height: 600, width: 0 },
         }, { cycles: 1, turns: 1 });
@@ -477,7 +478,7 @@ describe('ChatList (FlashList v2 native scroll escape)', () => {
         });
         await growStreamingAssistantMessage(ChatList, screen, 1500);
 
-        expect(autoFollowReasons()).toContain('stream-append');
+        expect(autoFollowReasons()).not.toContain('stream-append');
         expect(scrollToOffsetSpy).not.toHaveBeenCalled();
     });
 
@@ -490,12 +491,12 @@ describe('ChatList (FlashList v2 native scroll escape)', () => {
             screen.requireCapturedFlashListProps().onScrollBeginDrag?.({});
         });
 
-        await screen.triggerScroll(400, {
+        await screen.triggerScroll(200, {
             contentSize: { height: 1200, width: 0 },
             layoutMeasurement: { height: 600, width: 0 },
         }, { cycles: 1, turns: 1 });
 
-        await screen.triggerScroll(600, {
+        await screen.triggerScroll(0, {
             contentSize: { height: 1200, width: 0 },
             layoutMeasurement: { height: 600, width: 0 },
         }, { cycles: 1, turns: 1 });
@@ -508,7 +509,7 @@ describe('ChatList (FlashList v2 native scroll escape)', () => {
         viewportControllerMockState.resolveInputs = [];
         await growStreamingAssistantMessage(ChatList, screen, 1500);
 
-        expect(autoFollowReasons()).toContain('stream-append');
+        expect(autoFollowReasons()).not.toContain('stream-append');
         expect(scrollToOffsetSpy).not.toHaveBeenCalled();
     });
 
@@ -540,8 +541,27 @@ describe('ChatList (FlashList v2 native scroll escape)', () => {
 
         await growStreamingAssistantMessage(ChatList, screen, 1500);
 
-        expect(autoFollowReasons()).toContain('stream-append');
+        expect(autoFollowReasons()).not.toContain('stream-append');
         expect(scrollToOffsetSpy).not.toHaveBeenCalled();
+        expect(screen.requireCapturedFlashListProps().maintainVisibleContentPosition).toMatchObject({
+            startRenderingFromBottom: true,
+            autoscrollToBottomThreshold: 0.12,
+        });
+    });
+
+    it('does not hard-release bottom-follow from a recent generic touch plus stale stream-growth offset', async () => {
+        const { ChatList, screen } = await renderStreamingChatList();
+
+        await primeAtBottom(screen);
+        getAbsoluteLastScrollOffsetSpy.mockReturnValue(0);
+        await act(async () => {
+            screen.requireCapturedFlashListProps().onTouchMove?.({});
+            vi.setSystemTime(new Date(100));
+        });
+
+        await growStreamingAssistantMessage(ChatList, screen, 1500);
+
+        expect(autoFollowReasons()).not.toContain('stream-append');
         expect(screen.requireCapturedFlashListProps().maintainVisibleContentPosition).toMatchObject({
             startRenderingFromBottom: true,
             autoscrollToBottomThreshold: 0.12,

@@ -1,78 +1,27 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-    fromCanonicalScrollOffset,
     mapTranscriptListIndexBetweenOrders,
     orientTranscriptListItems,
-    resolveBottomRawScrollCommandOffset,
-    resolveBottomRawScrollOffset,
     resolveEntrySliceSourceBounds,
     resolveOlderNeighborRenderedIndex,
     resolveOrientedListEdgeSlots,
     resolveTranscriptListPresentation,
-    toCanonicalScrollOffset,
 } from './listOrientation';
 
 describe('resolveTranscriptListPresentation', () => {
-    it('maps flatlist_legacy to the legacy standard presentation on both platforms', () => {
-        expect(resolveTranscriptListPresentation({ setting: 'flatlist_legacy', platformIsWeb: false })).toEqual({
-            implementation: 'flatlist_legacy',
-            orientation: 'standard',
-        });
-        expect(resolveTranscriptListPresentation({ setting: 'flatlist_legacy', platformIsWeb: true })).toEqual({
-            implementation: 'flatlist_legacy',
-            orientation: 'standard',
-        });
+    it('resolves native to the canonical inverted FlashList presentation without reading a setting', () => {
+        const presentation = resolveTranscriptListPresentation({ platformIsWeb: false });
+
+        expect(presentation).toEqual({ orientation: 'inverted' });
+        expect(presentation).not.toHaveProperty('implementation');
     });
 
-    it('maps flash_v2 to standard flash on both platforms', () => {
-        expect(resolveTranscriptListPresentation({ setting: 'flash_v2', platformIsWeb: false })).toEqual({
-            implementation: 'flash_v2',
-            orientation: 'standard',
-        });
-        expect(resolveTranscriptListPresentation({ setting: 'flash_v2', platformIsWeb: true })).toEqual({
-            implementation: 'flash_v2',
-            orientation: 'standard',
-        });
-    });
+    it('resolves web to the canonical standard FlashList presentation without reading a setting', () => {
+        const presentation = resolveTranscriptListPresentation({ platformIsWeb: true });
 
-    it('maps flash_v2_inverted to the inverted pilot on native only', () => {
-        expect(resolveTranscriptListPresentation({ setting: 'flash_v2_inverted', platformIsWeb: false })).toEqual({
-            implementation: 'flash_v2',
-            orientation: 'inverted',
-        });
-    });
-
-    it('downgrades flash_v2_inverted to standard on web', () => {
-        expect(resolveTranscriptListPresentation({ setting: 'flash_v2_inverted', platformIsWeb: true })).toEqual({
-            implementation: 'flash_v2',
-            orientation: 'standard',
-        });
-    });
-
-    it('falls back to standard flash_v2 for unknown or invalid setting values', () => {
-        const invalidSettings: unknown[] = [
-            'something_else',
-            '',
-            'FLATLIST_LEGACY',
-            null,
-            undefined,
-            42,
-            0,
-            true,
-            false,
-            {},
-            [],
-            { setting: 'flatlist_legacy' },
-        ];
-        for (const setting of invalidSettings) {
-            for (const platformIsWeb of [false, true]) {
-                expect(resolveTranscriptListPresentation({ setting, platformIsWeb })).toEqual({
-                    implementation: 'flash_v2',
-                    orientation: 'standard',
-                });
-            }
-        }
+        expect(presentation).toEqual({ orientation: 'standard' });
+        expect(presentation).not.toHaveProperty('implementation');
     });
 });
 
@@ -179,101 +128,6 @@ describe('resolveOlderNeighborRenderedIndex', () => {
             expect(resolveOlderNeighborRenderedIndex(Number.POSITIVE_INFINITY, 5, orientation)).toBeNull();
             expect(resolveOlderNeighborRenderedIndex(0, 0, orientation)).toBeNull();
         }
-    });
-});
-
-describe('toCanonicalScrollOffset', () => {
-    it('passes raw offsets through unchanged in standard orientation, including bounce and floats', () => {
-        expect(toCanonicalScrollOffset({ offsetY: 0, contentHeight: 1000, layoutHeight: 400, orientation: 'standard' })).toBe(0);
-        expect(toCanonicalScrollOffset({ offsetY: 123.45, contentHeight: 1000, layoutHeight: 400, orientation: 'standard' })).toBe(123.45);
-        expect(toCanonicalScrollOffset({ offsetY: -37.5, contentHeight: 1000, layoutHeight: 400, orientation: 'standard' })).toBe(-37.5);
-        expect(toCanonicalScrollOffset({ offsetY: 600, contentHeight: 1000, layoutHeight: 400, orientation: 'standard' })).toBe(600);
-    });
-
-    it('mirrors native FlashList inverted offsets into canonical oldest-first space', () => {
-        // Inverted visual bottom is raw list start. Canonical transcript space remains
-        // oldest-first, so raw 0 maps to the newest/bottom end and raw max maps to top.
-        expect(toCanonicalScrollOffset({ offsetY: 0, contentHeight: 1000, layoutHeight: 400, orientation: 'inverted' })).toBe(600);
-        expect(toCanonicalScrollOffset({ offsetY: 600, contentHeight: 1000, layoutHeight: 400, orientation: 'inverted' })).toBe(0);
-        expect(toCanonicalScrollOffset({ offsetY: 200, contentHeight: 1000, layoutHeight: 400, orientation: 'inverted' })).toBe(400);
-    });
-
-    it('mirrors inverted bounce without clamping so validity checks can still inspect raw offsets', () => {
-        expect(toCanonicalScrollOffset({ offsetY: -25, contentHeight: 1000, layoutHeight: 400, orientation: 'inverted' })).toBe(625);
-        expect(toCanonicalScrollOffset({ offsetY: 650, contentHeight: 1000, layoutHeight: 400, orientation: 'inverted' })).toBe(-50);
-    });
-
-    it('handles under-filled geometry (contentHeight < layoutHeight) without clamping', () => {
-        expect(toCanonicalScrollOffset({ offsetY: 0, contentHeight: 200, layoutHeight: 400, orientation: 'standard' })).toBe(0);
-        expect(toCanonicalScrollOffset({ offsetY: 0, contentHeight: 200, layoutHeight: 400, orientation: 'inverted' })).toBe(0);
-        expect(toCanonicalScrollOffset({ offsetY: -200, contentHeight: 200, layoutHeight: 400, orientation: 'inverted' })).toBe(200);
-    });
-
-    it('preserves float precision in inverted orientation', () => {
-        expect(toCanonicalScrollOffset({ offsetY: 123.25, contentHeight: 1000.5, layoutHeight: 400.25, orientation: 'inverted' })).toBe(477);
-    });
-});
-
-describe('fromCanonicalScrollOffset', () => {
-    it('is the identity in standard orientation', () => {
-        expect(fromCanonicalScrollOffset({ offsetY: 250.5, contentHeight: 1000, layoutHeight: 400, orientation: 'standard' })).toBe(250.5);
-        expect(fromCanonicalScrollOffset({ offsetY: -10, contentHeight: 1000, layoutHeight: 400, orientation: 'standard' })).toBe(-10);
-    });
-
-    it('mirrors canonical write targets for native inverted orientation', () => {
-        expect(fromCanonicalScrollOffset({ offsetY: 600, contentHeight: 1000, layoutHeight: 400, orientation: 'inverted' })).toBe(0);
-        expect(fromCanonicalScrollOffset({ offsetY: 0, contentHeight: 1000, layoutHeight: 400, orientation: 'inverted' })).toBe(600);
-    });
-
-    it('round-trips with toCanonicalScrollOffset in both orientations, including floats and bounce values', () => {
-        const geometries = [
-            { contentHeight: 1000, layoutHeight: 400 },
-            { contentHeight: 1000.5, layoutHeight: 399.25 },
-            { contentHeight: 200, layoutHeight: 400 }, // under-filled
-            { contentHeight: 0, layoutHeight: 0 },
-        ];
-        const offsets = [0, 1, 600, 599.5, 123.0625, -37.5, -0.25, 612.75];
-        for (const orientation of ['standard', 'inverted'] as const) {
-            for (const { contentHeight, layoutHeight } of geometries) {
-                for (const offsetY of offsets) {
-                    const canonical = toCanonicalScrollOffset({ offsetY, contentHeight, layoutHeight, orientation });
-                    expect(fromCanonicalScrollOffset({ offsetY: canonical, contentHeight, layoutHeight, orientation })).toBe(offsetY);
-                    const raw = fromCanonicalScrollOffset({ offsetY, contentHeight, layoutHeight, orientation });
-                    expect(toCanonicalScrollOffset({ offsetY: raw, contentHeight, layoutHeight, orientation })).toBe(offsetY);
-                }
-            }
-        }
-    });
-});
-
-describe('resolveBottomRawScrollOffset', () => {
-    it('returns the scrollable extent truncated toward zero in standard orientation', () => {
-        expect(resolveBottomRawScrollOffset({ contentHeight: 1000, layoutHeight: 400, orientation: 'standard' })).toBe(600);
-        expect(resolveBottomRawScrollOffset({ contentHeight: 1000.9, layoutHeight: 400, orientation: 'standard' })).toBe(600);
-    });
-
-    it('clamps to zero for under-filled geometry in standard orientation', () => {
-        expect(resolveBottomRawScrollOffset({ contentHeight: 200, layoutHeight: 400, orientation: 'standard' })).toBe(0);
-        expect(resolveBottomRawScrollOffset({ contentHeight: 0, layoutHeight: 0, orientation: 'standard' })).toBe(0);
-    });
-
-    it('returns the raw list-start offset in inverted orientation', () => {
-        expect(resolveBottomRawScrollOffset({ contentHeight: 1000, layoutHeight: 400, orientation: 'inverted' })).toBe(0);
-        expect(resolveBottomRawScrollOffset({ contentHeight: 200, layoutHeight: 400, orientation: 'inverted' })).toBe(0);
-        expect(resolveBottomRawScrollOffset({ contentHeight: 0, layoutHeight: 0, orientation: 'inverted' })).toBe(0);
-    });
-});
-
-describe('resolveBottomRawScrollCommandOffset', () => {
-    it('targets the physical content end in standard orientation', () => {
-        expect(resolveBottomRawScrollCommandOffset({ contentHeight: 1000, layoutHeight: 400, orientation: 'standard' })).toBe(600);
-        expect(resolveBottomRawScrollCommandOffset({ contentHeight: 1000.9, layoutHeight: 400, orientation: 'standard' })).toBe(600);
-    });
-
-    it('targets the list start for user-facing inverted bottom commands', () => {
-        expect(resolveBottomRawScrollCommandOffset({ contentHeight: 1000, layoutHeight: 400, orientation: 'inverted' })).toBe(0);
-        expect(resolveBottomRawScrollCommandOffset({ contentHeight: 200, layoutHeight: 400, orientation: 'inverted' })).toBe(0);
-        expect(resolveBottomRawScrollCommandOffset({ contentHeight: 0, layoutHeight: 0, orientation: 'inverted' })).toBe(0);
     });
 });
 
