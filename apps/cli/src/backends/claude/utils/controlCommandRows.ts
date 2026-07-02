@@ -6,9 +6,8 @@ import type { RawJSONLines } from '../types';
  * When a slash command is submitted in Claude's TUI, Claude writes user rows containing
  * `<command-name>…</command-name>` / `<command-args>…` and a follow-up
  * `<local-command-stdout>…` row. These are control bookkeeping, never conversation text.
- * The shared shape parser lives here so the live registration-based echo suppressor
- * (`unifiedTerminal/controlCommandEcho.ts`) and the resume-snapshot replay filter
- * (`sessionScanner.ts`) agree on what a command row is.
+ * The shared shape parser lives here so provider echo handling and transcript visibility
+ * agree on what a command row is.
  */
 export type ClaudeControlCommandRowShape =
   | Readonly<{ kind: 'command'; name: string; args: string }>
@@ -37,6 +36,7 @@ export function readClaudeControlCommandRowShape(message: RawJSONLines): ClaudeC
   if (text === null) return null;
   const trimmed = text.trim();
   if (trimmed.startsWith('<local-command-stdout>')) return { kind: 'stdout' };
+  if (!trimmed.startsWith('<command-name>')) return null;
   const nameMatch = COMMAND_NAME_TAG.exec(trimmed);
   if (!nameMatch) return null;
   return {

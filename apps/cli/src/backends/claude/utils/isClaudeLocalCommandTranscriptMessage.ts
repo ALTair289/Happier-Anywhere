@@ -1,5 +1,5 @@
 import type { RawJSONLines } from '../types';
-import { isCompactHookLocalCommandStdout } from './isCompactHookLocalCommandStdout';
+import { readClaudeControlCommandRowShape } from './controlCommandRows';
 
 function firstClaudeMessageText(value: unknown): string | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -19,10 +19,9 @@ function firstClaudeMessageText(value: unknown): string | null {
 
 export function isClaudeLocalCommandTranscriptMessage(message: RawJSONLines): boolean {
   if (message.type !== 'user') return false;
+  if (readClaudeControlCommandRowShape(message) !== null) return true;
   const text = firstClaudeMessageText(message);
   if (!text) return false;
   const trimmed = text.trim();
-  if (trimmed.startsWith('<local-command-caveat>')) return true;
-  if (trimmed.startsWith('<local-command-stdout>') && isCompactHookLocalCommandStdout(message)) return true;
-  return trimmed.includes('<command-name>/compact</command-name>');
+  return trimmed.startsWith('<local-command-caveat>');
 }

@@ -446,7 +446,7 @@ describe('sessionScanner', () => {
     expect(collectedMessages[0].uuid).toBe('missing_during_runner_restart')
   })
 
-  it('suppresses control-command XML rows in the one-time resume snapshot but keeps live rows and genuine backfill (resume-replay leak)', async () => {
+  it('suppresses control-command XML rows in replay and live follow mode while keeping genuine user backfill', async () => {
     const altProjectDir = join(testDir, 'alt-project-command-replay')
     await mkdir(altProjectDir, { recursive: true })
 
@@ -494,23 +494,35 @@ describe('sessionScanner', () => {
     await waitFor(() => collectedMessages.length >= 1, 1000)
     expect(collectedMessages.map((m) => (m as { uuid?: string }).uuid)).toEqual(['genuine_backfill'])
 
-    // Live rows are never shape-filtered: a genuine user-typed TUI command surfaces
-    // (controller-typed echoes are handled downstream by the registration-based suppressor).
     await appendFile(
       transcriptPath,
-      JSON.stringify({
-        type: 'user',
-        uuid: 'cmd_live',
-        timestamp: '2026-06-11T19:05:00.000Z',
-        message: {
-          role: 'user',
-          content: '<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>',
-        },
-      }) + '\n',
+      [
+        JSON.stringify({
+          type: 'user',
+          uuid: 'cmd_live',
+          timestamp: '2026-06-11T19:05:00.000Z',
+          message: {
+            role: 'user',
+            content: '<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>',
+          },
+        }),
+        JSON.stringify({
+          type: 'user',
+          uuid: 'stdout_live',
+          timestamp: '2026-06-11T19:05:00.100Z',
+          message: { role: 'user', content: '<local-command-stdout>Cleared conversation</local-command-stdout>' },
+        }),
+        JSON.stringify({
+          type: 'user',
+          uuid: 'genuine_live',
+          timestamp: '2026-06-11T19:05:00.200Z',
+          message: { role: 'user', content: 'genuine live prompt' },
+        }),
+      ].join('\n') + '\n',
     )
 
     await waitFor(() => collectedMessages.length >= 2, 3000)
-    expect(collectedMessages.map((m) => (m as { uuid?: string }).uuid)).toEqual(['genuine_backfill', 'cmd_live'])
+    expect(collectedMessages.map((m) => (m as { uuid?: string }).uuid)).toEqual(['genuine_backfill', 'genuine_live'])
   })
 
   it('does not replay historical JSONL rows as live rows after the followed file is replaced', async () => {

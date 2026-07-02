@@ -16,7 +16,6 @@ import type { JsonlFollowerMetricEvent } from '@/agent/localControl/jsonlFollowM
 import { INTERNAL_CLAUDE_EVENT_TYPES } from './internalClaudeEventTypes';
 import { parseRawJsonLinesObject } from './parseRawJsonLines';
 import { isClaudeInternalTranscriptMessage } from './isClaudeInternalTranscriptMessage';
-import { readClaudeControlCommandRowShape } from './controlCommandRows';
 import {
     createClaudeJsonlResetReplaySuppressor,
     isClaudeJsonlReplaySuppressedValue,
@@ -499,15 +498,6 @@ export async function createSessionScanner(opts: {
             return false;
         }
         if (isReplaySuppressedRow(file, replayOpts?.suppressBeforeMs)) {
-            return false;
-        }
-        // Resume-replay leak (2026-06-11): slash-command XML rows (`<command-name>…` /
-        // `<local-command-stdout>…`) that reach a one-time snapshot replay UNCOMMITTED were
-        // suppressed by a previous runner whose registration-based echo suppressor does not
-        // survive a relaunch. They are control bookkeeping, never conversation — drop them
-        // deterministically. Live follower rows are never shape-filtered (a genuine user-typed
-        // TUI command may surface; controller echoes are handled by the live suppressor).
-        if (replayOpts && readClaudeControlCommandRowShape(file) !== null) {
             return false;
         }
         logger.debug(`[SESSION_SCANNER] Sending new message: type=${file.type}, uuid=${file.type === 'summary' ? file.leafUuid : file.uuid}`);

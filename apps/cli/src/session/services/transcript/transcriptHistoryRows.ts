@@ -67,10 +67,11 @@ function readTranscriptArtifactText(value: unknown): string | null {
   return readFirstText(message?.content);
 }
 
-function isCompactLocalCommandStdoutText(value: string): boolean {
+function isClaudeLocalCommandArtifactText(value: string): boolean {
   const trimmed = value.trim();
-  if (!trimmed.startsWith('<local-command-stdout>')) return false;
-  return /\b(?:PreCompact|PostCompact)\b/u.test(trimmed);
+  if (trimmed.startsWith('<local-command-caveat>')) return true;
+  if (trimmed.startsWith('<local-command-stdout>')) return true;
+  return trimmed.startsWith('<command-name>');
 }
 
 export function isHistoryArtifactDecryptedRow(value: unknown): boolean {
@@ -79,10 +80,7 @@ export function isHistoryArtifactDecryptedRow(value: unknown): boolean {
 
   const text = readTranscriptArtifactText(value);
   if (!text) return false;
-  const trimmed = text.trim();
-  if (trimmed.startsWith('<local-command-caveat>')) return true;
-  if (trimmed.includes('<command-name>/compact</command-name>')) return true;
-  return isCompactLocalCommandStdoutText(trimmed);
+  return isClaudeLocalCommandArtifactText(text);
 }
 
 export function tryResolveDecryptedTranscriptPayload(params: Readonly<{
