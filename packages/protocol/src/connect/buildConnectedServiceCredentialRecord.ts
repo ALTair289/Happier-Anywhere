@@ -9,6 +9,10 @@ export type ConnectedServiceOauthCredentialRawMetadata = Readonly<{
     subscriptionType?: string;
     rateLimitTier?: string;
   }>;
+  'claude.ai_oauth'?: Readonly<{
+    subscriptionType?: string;
+    rateLimitTier?: string;
+  }>;
 }>;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -25,7 +29,11 @@ function sanitizeOauthRawMetadata(
   raw: ConnectedServiceOauthCredentialRawMetadata | null | undefined,
 ): ConnectedServiceOauthCredentialRawMetadata | null {
   const root = isRecord(raw) ? raw : {};
-  const claudeAiOauthRaw = isRecord(root.claudeAiOauth) ? root.claudeAiOauth : {};
+  const claudeAiOauthRaw = isRecord(root.claudeAiOauth)
+    ? root.claudeAiOauth
+    : isRecord(root['claude.ai_oauth'])
+      ? root['claude.ai_oauth']
+      : {};
   const subscriptionType = readString(claudeAiOauthRaw.subscriptionType);
   const rateLimitTier = readString(claudeAiOauthRaw.rateLimitTier);
   const claudeAiOauth = {

@@ -11,6 +11,8 @@ export type AccountScopedBlobKind =
   | 'automation_template_payload'
   | 'connected_service_credential'
   | 'connected_service_quota_snapshot'
+  | 'provider_account_usage_snapshot'
+  | 'session_organization_display'
   | 'session_respawn_environment';
 
 export type AccountScopedCryptoMaterial =
@@ -31,7 +33,13 @@ const ACCOUNT_SCOPED_KIND_BYTE: Record<AccountScopedBlobKind, number> = {
   connected_service_credential: 3,
   connected_service_quota_snapshot: 4,
   session_respawn_environment: 5,
+  provider_account_usage_snapshot: 6,
+  session_organization_display: 7,
 };
+
+const LEGACY_READ_ONLY_ACCOUNT_SCOPED_BLOB_KINDS = new Set<AccountScopedBlobKind>([
+  'connected_service_quota_snapshot',
+]);
 
 function encodeUtf8(value: string): Uint8Array {
   return new TextEncoder().encode(value);
@@ -73,6 +81,9 @@ export function sealAccountScopedBlobCiphertext(params: {
   payload: unknown;
   randomBytes: (length: number) => Uint8Array;
 }): string {
+  if (LEGACY_READ_ONLY_ACCOUNT_SCOPED_BLOB_KINDS.has(params.kind)) {
+    throw new Error(`Account-scoped blob kind ${params.kind} is legacy read-only and cannot be sealed`);
+  }
   const kindByte = ACCOUNT_SCOPED_KIND_BYTE[params.kind];
   if (!Number.isFinite(kindByte)) {
     throw new Error(`Unsupported account-scoped blob kind: ${String(params.kind)}`);

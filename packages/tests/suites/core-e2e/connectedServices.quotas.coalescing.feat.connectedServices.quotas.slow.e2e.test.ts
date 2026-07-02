@@ -6,8 +6,11 @@ import { randomUUID } from 'node:crypto';
 
 import {
   ConnectedServiceQuotaSnapshotV1Schema,
-  openAccountScopedBlobCiphertext,
+  ProviderAccountUsageSnapshotV1Schema,
+  buildProviderAccountUsageRecordId,
+  openProviderAccountUsageSnapshotCiphertext,
   type ConnectedServiceQuotaSnapshotV1,
+  type ProviderAccountUsageSnapshotV1,
 } from '@happier-dev/protocol';
 
 import {
@@ -27,10 +30,11 @@ const run = createRunDirs({ runLabel: 'core' });
 type CountingServerProxy = Readonly<{
   baseUrl: string;
   quotaWriteCount: () => number;
+  providerUsageWriteCount: () => number;
   stop: () => Promise<void>;
 }>;
 
-type QuotaGetResponse = Readonly<{
+type ProviderUsageGetResponse = Readonly<{
   sealed?: Readonly<{ format: 'account_scoped_v1'; ciphertext: string }>;
   metadata?: Readonly<{ fetchedAt: number; staleAfterMs: number; status: string }>;
 }>;
@@ -63,6 +67,7 @@ function copyBufferToArrayBuffer(buffer: Buffer): ArrayBuffer {
 
 async function startCountingServerProxy(targetBaseUrl: string): Promise<CountingServerProxy> {
   let quotaWriteCount = 0;
+  let providerUsageWriteCount = 0;
   const target = new URL(targetBaseUrl);
   const server = createServer(async (req, res) => {
     try {
@@ -73,6 +78,12 @@ async function startCountingServerProxy(targetBaseUrl: string): Promise<Counting
         /^\/v2\/connect\/[^/]+\/profiles\/[^/]+\/quotas$/u.test(targetUrl.pathname)
       ) {
         quotaWriteCount += 1;
+      }
+      if (
+        req.method === 'POST' &&
+        /^\/v2\/connect\/provider-account-usage\/[^/]+$/u.test(targetUrl.pathname)
+      ) {
+        providerUsageWriteCount += 1;
       }
       const headers = new Headers();
       for (const [key, value] of Object.entries(req.headers)) {
@@ -128,6 +139,7 @@ async function startCountingServerProxy(targetBaseUrl: string): Promise<Counting
   return {
     baseUrl: `http://127.0.0.1:${address.port}`,
     quotaWriteCount: () => quotaWriteCount,
+    providerUsageWriteCount: () => providerUsageWriteCount,
     stop: async () => {
       server.close();
       await once(server, 'close');
@@ -139,13 +151,19 @@ function createSnapshot(params: Readonly<{
   profileId: string;
   fetchedAt: number;
   used: number;
+  activeAccountId?: string;
 }>): ConnectedServiceQuotaSnapshotV1 {
   return ConnectedServiceQuotaSnapshotV1Schema.parse({
     v: 1,
     serviceId: 'openai-codex',
     profileId: params.profileId,
+    providerId: 'openai-codex',
+    activeAccountId: params.activeAccountId ?? 'acct-1',
     fetchedAt: params.fetchedAt,
+    fetchedAtMs: params.fetchedAt,
     staleAfterMs: 60_000,
+    source: 'in_band_provider_snapshot',
+    confidence: 'exact',
     planLabel: 'Pro',
     accountLabel: 'user@example.test',
     meters: [
@@ -161,6 +179,17 @@ function createSnapshot(params: Readonly<{
         details: {},
       },
     ],
+  });
+}
+
+function providerUsageRecordIdForSnapshot(snapshot: ConnectedServiceQuotaSnapshotV1): string {
+  const providerId = snapshot.providerId ?? snapshot.serviceId;
+  const accountSubjectId = snapshot.activeAccountId ?? `legacy-connected-service:${snapshot.serviceId}:${snapshot.profileId}`;
+  return buildProviderAccountUsageRecordId({
+    providerId,
+    accountSubjectId,
+    subjectKind: snapshot.activeAccountId ? 'account' : 'unknown',
+    quotaScope: 'account',
   });
 }
 
@@ -185,15 +214,15 @@ async function postQuotaSnapshotToDaemon(
   });
   expect(response.status).toBe(200);
   expect(response.data.ok).toBe(true);
-  expect(response.data.result).toMatchObject({ status: 'recorded', quotaStateRecorded: true });
+  expect(response.data.result).toMatchObject({ status: 'recorded' });
 }
 
-async function fetchPersistedQuotaSnapshot(params: Readonly<{
+async function fetchPersistedProviderUsageSnapshot(params: Readonly<{
   fixture: StartedConnectedServicesCodexDaemonFixture;
-  profileId: string;
-}>): Promise<ConnectedServiceQuotaSnapshotV1> {
-  const response = await fetchJson<QuotaGetResponse>(
-    `${params.fixture.serverBaseUrl}/v2/connect/openai-codex/profiles/${params.profileId}/quotas`,
+  snapshot: ConnectedServiceQuotaSnapshotV1;
+}>): Promise<ProviderAccountUsageSnapshotV1 | null> {
+  const response = await fetchJson<ProviderUsageGetResponse>(
+    `${params.fixture.serverBaseUrl}/v2/connect/provider-account-usage/${providerUsageRecordIdForSnapshot(params.snapshot)}`,
     {
       method: 'GET',
       headers: {
@@ -203,16 +232,16 @@ async function fetchPersistedQuotaSnapshot(params: Readonly<{
       timeoutMs: 20_000,
     },
   );
+  if (response.status === 404) return null;
   expect(response.status).toBe(200);
   const ciphertext = response.data?.sealed?.ciphertext;
   expect(typeof ciphertext).toBe('string');
-  const opened = openAccountScopedBlobCiphertext({
-    kind: 'connected_service_quota_snapshot',
+  const opened = openProviderAccountUsageSnapshotCiphertext({
     material: { type: 'legacy', secret: params.fixture.accountSecret },
     ciphertext: ciphertext ?? '',
   });
   expect(opened?.value).toBeTruthy();
-  return ConnectedServiceQuotaSnapshotV1Schema.parse(opened?.value);
+  return ProviderAccountUsageSnapshotV1Schema.parse(opened?.value);
 }
 
 describe('core e2e: connected-service quota in-band coalescing', () => {
@@ -260,8 +289,9 @@ describe('core e2e: connected-service quota in-band coalescing', () => {
 
     const sessionId = randomUUID();
     const spawn = await spawnConnectedCodexSession(fixture, sessionId);
-    expect(spawn.status).toBe(200);
-    expect(spawn.data.success).toBe(true);
+    if (spawn.status !== 200 || spawn.data.success !== true) {
+      throw new Error(`Expected connected Codex session spawn to succeed; status=${spawn.status}; body=${JSON.stringify(spawn.data)}`);
+    }
     expect(typeof spawn.data.sessionId).toBe('string');
     const happySessionId = spawn.data.sessionId ?? sessionId;
 
@@ -274,13 +304,17 @@ describe('core e2e: connected-service quota in-band coalescing', () => {
     await postQuotaSnapshotToDaemon(fixture, happySessionId, latest);
 
     await waitFor(async () => {
-      const persisted = await fetchPersistedQuotaSnapshot({ fixture: fixture!, profileId: 'work' });
-      return persisted.fetchedAt === latest.fetchedAt && persisted.meters[0]?.used === latest.meters[0]?.used;
+      const persisted = await fetchPersistedProviderUsageSnapshot({ fixture: fixture!, snapshot: latest });
+      return persisted?.fetchedAtMs === latest.fetchedAt && persisted.meters[0]?.used === latest.meters[0]?.used;
     }, { timeoutMs: 20_000, intervalMs: 250 });
 
-    const persisted = await fetchPersistedQuotaSnapshot({ fixture, profileId: 'work' });
-    expect(persisted.fetchedAt).toBe(latest.fetchedAt);
+    const persisted = await fetchPersistedProviderUsageSnapshot({ fixture, snapshot: latest });
+    expect(persisted).not.toBeNull();
+    if (!persisted) throw new Error('Expected persisted provider-account usage snapshot');
+    expect(persisted.fetchedAtMs).toBe(latest.fetchedAt);
+    expect(persisted.recordId).toBe(providerUsageRecordIdForSnapshot(latest));
     expect(persisted.meters[0]?.used).toBe(latest.meters[0]?.used);
-    expect(proxy?.quotaWriteCount()).toBeLessThanOrEqual(3);
+    expect(proxy?.quotaWriteCount()).toBe(0);
+    expect(proxy?.providerUsageWriteCount()).toBeLessThanOrEqual(3);
   }, 360_000);
 });

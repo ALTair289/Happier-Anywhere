@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
 import tweetnacl from 'tweetnacl';
-import { encodeBase64 } from './base64.js';
+import { decodeBase64, encodeBase64 } from './base64.js';
 import { stringifySerializedJsonValue } from './serializedJsonValue.js';
+import { sealLegacyConnectedServiceQuotaSnapshotFixtureCiphertext } from '../testing/accountScopedCipherFixtures.js';
 
 import {
   openAccountScopedBlobCiphertext,
@@ -92,11 +93,44 @@ describe('accountScopedCipher', () => {
     expect(opened?.value).toEqual(payload);
   });
 
-  it('seals and opens v1 ciphertext for connected service quota snapshots', () => {
+  it('rejects connected service quota snapshots as a durable account-scoped persistence kind', () => {
     const kind: AccountScopedBlobKind = 'connected_service_quota_snapshot';
     const machineKey = new Uint8Array(32).fill(5);
     const material: AccountScopedCryptoMaterial = { type: 'dataKey', machineKey };
     const payload = { v: 1, serviceId: 'openai-codex', profileId: 'work', fetchedAt: Date.now(), meters: [] };
+
+    expect(() => sealAccountScopedBlobCiphertext({
+      kind,
+      material,
+      payload,
+      randomBytes: deterministicRandomBytesFactory(),
+    })).toThrow(/legacy read-only/i);
+  });
+
+  it('opens legacy connected service quota snapshot ciphertext in compatibility mode', () => {
+    const machineKey = new Uint8Array(32).fill(5);
+    const material: AccountScopedCryptoMaterial = { type: 'dataKey', machineKey };
+    const payload = { v: 1, serviceId: 'openai-codex', profileId: 'work', fetchedAt: Date.now(), meters: [] };
+    const ciphertext = sealLegacyConnectedServiceQuotaSnapshotFixtureCiphertext({
+      material,
+      payload,
+      randomBytes: deterministicRandomBytesFactory(),
+    });
+
+    const opened = openAccountScopedBlobCiphertext({
+      kind: 'connected_service_quota_snapshot',
+      material,
+      ciphertext,
+    });
+    expect(opened?.format).toBe('account_scoped_v1');
+    expect(opened?.value).toEqual(payload);
+  });
+
+  it('seals and opens v1 ciphertext for provider account usage snapshots', () => {
+    const kind = 'provider_account_usage_snapshot' as AccountScopedBlobKind;
+    const machineKey = new Uint8Array(32).fill(6);
+    const material: AccountScopedCryptoMaterial = { type: 'dataKey', machineKey };
+    const payload = { v: 1, recordId: 'paug_v1_example', meters: [] };
 
     const ciphertext = sealAccountScopedBlobCiphertext({
       kind,
@@ -105,6 +139,11 @@ describe('accountScopedCipher', () => {
       randomBytes: deterministicRandomBytesFactory(),
     });
 
+    expect(openAccountScopedBlobCiphertext({
+      kind: 'connected_service_quota_snapshot',
+      material,
+      ciphertext,
+    })).toBeNull();
     const opened = openAccountScopedBlobCiphertext({
       kind,
       material,
@@ -112,6 +151,40 @@ describe('accountScopedCipher', () => {
     });
     expect(opened?.format).toBe('account_scoped_v1');
     expect(opened?.value).toEqual(payload);
+  });
+
+  it('keeps existing account-scoped v1 kind bytes stable while adding provider usage snapshots and session organization display', () => {
+    const machineKey = new Uint8Array(32).fill(7);
+    const material: AccountScopedCryptoMaterial = { type: 'dataKey', machineKey };
+    const randomBytes = deterministicRandomBytesFactory();
+
+    const sessionRespawnCiphertext = sealAccountScopedBlobCiphertext({
+      kind: 'session_respawn_environment',
+      material,
+      payload: { env: {} },
+      randomBytes,
+    });
+    const providerUsageCiphertext = sealAccountScopedBlobCiphertext({
+      kind: 'provider_account_usage_snapshot' as AccountScopedBlobKind,
+      material,
+      payload: { v: 1, recordId: 'paug_v1_example', meters: [] },
+      randomBytes,
+    });
+    const sessionOrganizationDisplayCiphertext = sealAccountScopedBlobCiphertext({
+      kind: 'session_organization_display',
+      material,
+      payload: { label: 'Project A' },
+      randomBytes,
+    });
+
+    expect(decodeBase64(sessionRespawnCiphertext, 'base64')[1]).toBe(5);
+    expect(decodeBase64(providerUsageCiphertext, 'base64')[1]).toBe(6);
+    expect(decodeBase64(sessionOrganizationDisplayCiphertext, 'base64')[1]).toBe(7);
+    expect(openAccountScopedBlobCiphertext({
+      kind: 'session_organization_display',
+      material,
+      ciphertext: sessionOrganizationDisplayCiphertext,
+    })?.value).toEqual({ label: 'Project A' });
   });
 
   it('allows legacy and dataKey devices to read the same v1 ciphertext', () => {

@@ -8,6 +8,7 @@ const {
     ConnectedServiceCredentialRecordV1Schema,
     ConnectedServiceCredentialHealthV1Schema,
     ConnectedServiceQuotaSnapshotV1Schema,
+    ConnectedServiceUsageSourceV1Schema,
     SealedConnectedServiceCredentialV1Schema,
 } = schemas;
 
@@ -133,6 +134,38 @@ describe('connectedServiceSchemas', () => {
         });
         expect(parsed.meters).toHaveLength(1);
         expect(parsed.meters[0]?.meterId).toBe('requests');
+    });
+
+    it('requires explicit connected-service source context for provider-account quota projections', () => {
+        expect(ConnectedServiceUsageSourceV1Schema.parse({
+            serviceId: 'openai-codex',
+            profileId: 'work',
+            bindingKind: 'profile',
+        })).toEqual({
+            serviceId: 'openai-codex',
+            profileId: 'work',
+            bindingKind: 'profile',
+        });
+
+        expect(ConnectedServiceUsageSourceV1Schema.parse({
+            serviceId: 'openai-codex',
+            profileId: 'work',
+            bindingKind: 'group_member',
+            groupId: 'team',
+            groupGeneration: 7,
+        })).toEqual({
+            serviceId: 'openai-codex',
+            profileId: 'work',
+            bindingKind: 'group_member',
+            groupId: 'team',
+            groupGeneration: 7,
+        });
+
+        expect(ConnectedServiceUsageSourceV1Schema.safeParse({
+            serviceId: 'openai-codex',
+            profileId: 'work',
+            bindingKind: 'group_member',
+        }).success).toBe(false);
     });
 
     it('parses additive quota meter source and remaining semantics', () => {

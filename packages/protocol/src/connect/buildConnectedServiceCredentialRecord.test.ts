@@ -83,6 +83,40 @@ describe('buildConnectedServiceCredentialRecord', () => {
     });
   });
 
+  it('canonicalizes legacy Claude OAuth raw metadata into the safe provider metadata shape', () => {
+    const now = 1700000000000;
+    const rec = buildConnectedServiceCredentialRecord({
+      now,
+      serviceId: 'claude-subscription',
+      profileId: 'default',
+      kind: 'oauth',
+      oauth: {
+        accessToken: 'at',
+        refreshToken: 'rt',
+        idToken: null,
+        scope: 'user:inference user:profile user:sessions:claude_code',
+        tokenType: 'Bearer',
+        providerAccountId: null,
+        providerEmail: null,
+        raw: rawFromUntypedCaller({
+          'claude.ai_oauth': {
+            subscriptionType: ' team ',
+            rateLimitTier: 'team_5x',
+            access_token: 'must-not-persist',
+          },
+        }),
+      },
+    });
+
+    expect(rec.oauth?.raw).toEqual({
+      claudeAiOauth: {
+        subscriptionType: 'team',
+        rateLimitTier: 'team_5x',
+      },
+    });
+    expect(JSON.stringify(rec.oauth?.raw)).not.toContain('access-token');
+  });
+
   it('strips secret-like and arbitrary oauth raw fields before persistence', () => {
     const now = 1700000000000;
     const rec = buildConnectedServiceCredentialRecord({

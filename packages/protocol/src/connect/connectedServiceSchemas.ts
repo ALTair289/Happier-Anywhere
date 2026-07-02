@@ -331,6 +331,30 @@ export const ConnectedServiceQuotaMeterV1Schema = z
 
 export type ConnectedServiceQuotaMeterV1 = z.infer<typeof ConnectedServiceQuotaMeterV1Schema>;
 
+export const ConnectedServiceUsageSourceBindingKindV1Schema = z.enum(['profile', 'group_member']);
+export type ConnectedServiceUsageSourceBindingKindV1 = z.infer<typeof ConnectedServiceUsageSourceBindingKindV1Schema>;
+
+export const ConnectedServiceUsageSourceV1Schema = z
+    .object({
+        serviceId: ConnectedServiceIdSchema,
+        profileId: ConnectedServiceProfileIdSchema,
+        bindingKind: ConnectedServiceUsageSourceBindingKindV1Schema,
+        groupId: z.string().trim().min(1).optional(),
+        groupGeneration: z.number().int().nonnegative().optional(),
+    })
+    .strict()
+    .superRefine((source, ctx) => {
+        if (source.bindingKind === 'group_member' && !source.groupId) {
+            ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                message: 'Group-member connected-service usage sources require groupId',
+                path: ['groupId'],
+            });
+        }
+    });
+
+export type ConnectedServiceUsageSourceV1 = z.infer<typeof ConnectedServiceUsageSourceV1Schema>;
+
 export const ConnectedServiceQuotaSnapshotV1Schema = z
     .object({
         v: z.literal(1),
