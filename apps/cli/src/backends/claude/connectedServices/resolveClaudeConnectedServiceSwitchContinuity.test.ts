@@ -5,8 +5,10 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { ConnectedServiceSwitchContinuityParams } from '@/backends/types';
+import { buildConnectedServiceCredentialRecord } from '@happier-dev/protocol';
 
 import { resolveClaudeConnectedServiceSwitchContinuity } from './resolveClaudeConnectedServiceSwitchContinuity';
+import { CLAUDE_CODE_RECOMMENDED_OAUTH_SCOPE } from './nativeAuth/claudeCodeCredentialScopes';
 
 const CLAUDE_ROLLBACK_ENV = 'HAPPIER_CONNECTED_SERVICES_LEGACY_CLAUDE_RESTART_SAME_HOME';
 
@@ -21,6 +23,39 @@ const claudeEnvKeys = [
 const originalClaudeEnv = new Map<string, string | undefined>(
   claudeEnvKeys.map((key) => [key, process.env[key]]),
 );
+
+function createClaudeSubscriptionOauthRecord(profileId: string) {
+  return buildConnectedServiceCredentialRecord({
+    now: 1_000,
+    serviceId: 'claude-subscription',
+    profileId,
+    kind: 'oauth',
+    expiresAt: 2_000,
+    oauth: {
+      accessToken: `${profileId}-access`,
+      refreshToken: `${profileId}-refresh`,
+      idToken: null,
+      scope: CLAUDE_CODE_RECOMMENDED_OAUTH_SCOPE,
+      tokenType: 'Bearer',
+      providerAccountId: `${profileId}-account`,
+      providerEmail: `${profileId}@example.test`,
+    },
+  });
+}
+
+function createClaudeSubscriptionSetupTokenRecord(profileId: string) {
+  return buildConnectedServiceCredentialRecord({
+    now: 1_000,
+    serviceId: 'claude-subscription',
+    profileId,
+    kind: 'token',
+    token: {
+      token: `${profileId}-setup-token`,
+      providerAccountId: `${profileId}-account`,
+      providerEmail: `${profileId}@example.test`,
+    },
+  });
+}
 
 function restoreClaudeEnv(): void {
   for (const [key, value] of originalClaudeEnv) {
@@ -159,7 +194,7 @@ describe('resolveClaudeConnectedServiceSwitchContinuity', () => {
     });
   });
 
-  it('uses restart_same_home for Claude subscription group member switches targeting the shared group config dir', async () => {
+  it('uses hot_apply for Claude subscription group member switches targeting the shared group config dir', async () => {
     const runtimeClaudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-group-config-'));
     const sourceClaudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-source-root-'));
     try {
@@ -182,6 +217,10 @@ describe('resolveClaudeConnectedServiceSwitchContinuity', () => {
         },
         runtimeAuthSelection: {
           serviceId: 'claude-subscription',
+          record: createClaudeSubscriptionOauthRecord('backup'),
+          groupId: 'claude',
+          activeProfileId: 'backup',
+          fallbackProfileId: 'primary',
           targetMaterializedEnv: { CLAUDE_CONFIG_DIR: runtimeClaudeConfigDir },
           targetMaterializedRoot: runtimeClaudeConfigDir,
           claudeRuntimeAuthSharedGroupSurface: {
@@ -200,14 +239,67 @@ describe('resolveClaudeConnectedServiceSwitchContinuity', () => {
         },
         vendorResumeId: 'vendor-session-1',
         cwd: process.cwd(),
-      }))).resolves.toEqual({ mode: 'restart_same_home' });
+      }))).resolves.toEqual({ mode: 'hot_apply' });
     } finally {
       await rm(runtimeClaudeConfigDir, { recursive: true, force: true });
       await rm(sourceClaudeConfigDir, { recursive: true, force: true });
     }
   });
 
-  it('fails closed when Claude subscription group same-home restart cannot prove resume reachability', async () => {
+  it('does not use hot_apply for token-backed Claude subscription groups even when stale shared-home metadata is present', async () => {
+    const runtimeClaudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-token-group-config-'));
+    const sourceClaudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-token-source-root-'));
+    try {
+      await expect(resolveClaudeConnectedServiceSwitchContinuity(createParams({
+        previousBinding: {
+          source: 'connected',
+          selection: 'group',
+          serviceId: 'claude-subscription',
+          profileId: 'primary',
+          groupId: 'claude',
+        },
+        nextBinding: {
+          source: 'connected',
+          selection: 'group',
+          serviceId: 'claude-subscription',
+          profileId: 'setup',
+          groupId: 'claude',
+        },
+        runtimeAuthSelection: {
+          serviceId: 'claude-subscription',
+          record: createClaudeSubscriptionSetupTokenRecord('setup'),
+          groupId: 'claude',
+          activeProfileId: 'setup',
+          fallbackProfileId: 'primary',
+          targetMaterializedEnv: { CLAUDE_CONFIG_DIR: runtimeClaudeConfigDir },
+          targetMaterializedRoot: runtimeClaudeConfigDir,
+          claudeRuntimeAuthSharedGroupSurface: {
+            mode: 'shared_group_auth_surface',
+            runtimeClaudeConfigDir,
+            runtimeMaterializedRoot: runtimeClaudeConfigDir,
+            sourceClaudeConfigDir,
+          },
+        },
+        targetMaterializedEnv: { CLAUDE_CONFIG_DIR: runtimeClaudeConfigDir },
+        targetMaterializedRoot: runtimeClaudeConfigDir,
+        connectedServiceMaterializationIdentityV1: {
+          v: 1,
+          id: 'materialization-1',
+          createdAtMs: 1,
+        },
+        vendorResumeId: 'vendor-session-1',
+        cwd: process.cwd(),
+      }))).resolves.toEqual({
+        mode: 'restart_shared_state_required',
+        reason: 'claude_shared_state_required',
+      });
+    } finally {
+      await rm(runtimeClaudeConfigDir, { recursive: true, force: true });
+      await rm(sourceClaudeConfigDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not require restart reachability proof for Claude subscription group shared-home hot apply', async () => {
     const runtimeClaudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-group-config-'));
     const sourceClaudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-source-root-'));
     try {
@@ -228,6 +320,10 @@ describe('resolveClaudeConnectedServiceSwitchContinuity', () => {
         },
         runtimeAuthSelection: {
           serviceId: 'claude-subscription',
+          record: createClaudeSubscriptionOauthRecord('backup'),
+          groupId: 'claude',
+          activeProfileId: 'backup',
+          fallbackProfileId: 'primary',
           targetMaterializedEnv: { CLAUDE_CONFIG_DIR: runtimeClaudeConfigDir },
           targetMaterializedRoot: runtimeClaudeConfigDir,
           claudeRuntimeAuthSharedGroupSurface: {
@@ -246,14 +342,7 @@ describe('resolveClaudeConnectedServiceSwitchContinuity', () => {
         },
         vendorResumeId: 'vendor-session-1',
         cwd: process.cwd(),
-      }))).resolves.toMatchObject({
-        mode: 'unsupported',
-        reason: 'provider_session_state_unavailable_for_resume',
-        diagnostics: {
-          reachabilityMissReason: 'claude_native_store_unreachable',
-          vendorResumeId: 'vendor-session-1',
-        },
-      });
+      }))).resolves.toEqual({ mode: 'hot_apply' });
     } finally {
       await rm(runtimeClaudeConfigDir, { recursive: true, force: true });
       await rm(sourceClaudeConfigDir, { recursive: true, force: true });

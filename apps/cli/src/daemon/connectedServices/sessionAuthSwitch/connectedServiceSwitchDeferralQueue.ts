@@ -54,6 +54,9 @@ type PendingSwitch = {
   timer: ReturnType<typeof setTimeout> | null;
   requests: DeferredRequest[];
   settled: boolean;
+  // Claimed synchronously when execution begins (before the runSwitch await) so a second terminal
+  // turn event arriving during that await cannot re-invoke runSwitch on the same pending.
+  executing: boolean;
 };
 
 type SessionTurnState = {
@@ -196,7 +199,10 @@ export function createConnectedServiceSwitchDeferralQueue(
     pending: PendingSwitch,
     reason: ConnectedServiceSwitchDeferralCompletionReason,
   ): Promise<void> => {
-    if (pending.settled) return;
+    if (pending.settled || pending.executing) return;
+    // Claim execution synchronously, before the first await, so concurrent terminal events (or a
+    // timeout racing a terminal event) cannot both pass the guard and double-invoke runSwitch.
+    pending.executing = true;
     clearPendingTimer(pending);
     try {
       await pending.runSwitch();
@@ -245,6 +251,17 @@ export function createConnectedServiceSwitchDeferralQueue(
   const schedulePendingTimeout = (pending: PendingSwitch): void => {
     clearPendingTimer(pending);
     pending.timer = setTimeout(() => {
+      // Lane F deferral-timeout escape hatch: the turn boundary never arrived within the timeout, so
+      // the deferred switch is forced. Close the turn cleanly at a forced boundary FIRST so the
+      // forced switch is a clean terminal transition rather than a silent mid-stream kill: downstream
+      // continuation/recovery and the managed-server release in-flight-turn guard then observe a
+      // quiesced turn instead of an indefinitely stuck in-flight flag (which would otherwise wedge
+      // the forced switch or leak the prior-fingerprint server).
+      const state = turnStateBySessionId.get(pending.sessionId);
+      if (state?.inFlight === true) {
+        state.inFlight = false;
+        state.lastEvent = 'turn_cancelled';
+      }
       void executePendingSwitch(pending, 'aborted_after_timeout');
     }, timeoutMs);
   };
@@ -280,6 +297,7 @@ export function createConnectedServiceSwitchDeferralQueue(
         timer: null,
         requests: [deferred.request],
         settled: false,
+        executing: false,
       };
       pendingBySessionId.set(sessionId, created);
       schedulePendingTimeout(created);
@@ -326,6 +344,7 @@ export function createConnectedServiceSwitchDeferralQueue(
       timer: null,
       requests: [deferred.request],
       settled: false,
+      executing: false,
     };
     pendingBySessionId.set(sessionId, replacement);
     schedulePendingTimeout(replacement);

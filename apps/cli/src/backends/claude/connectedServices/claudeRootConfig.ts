@@ -66,6 +66,8 @@ export function readClaudeOauthAccountIdentity(value: unknown): Readonly<{
   }
   return {
     email: readNonBlankString(oauthAccount.emailAddress) ?? readNonBlankString(oauthAccount.email),
-    accountId: readNonBlankString(oauthAccount.id) ?? readNonBlankString(oauthAccount.uuid),
+    accountId: readNonBlankString(oauthAccount.accountUuid)
+      ?? readNonBlankString(oauthAccount.id)
+      ?? readNonBlankString(oauthAccount.uuid),
   };
 }

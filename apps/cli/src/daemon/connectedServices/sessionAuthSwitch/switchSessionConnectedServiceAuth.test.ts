@@ -4654,6 +4654,140 @@ describe('switchSessionConnectedServiceAuth', () => {
       .toBe(runtimeAuthSelection);
   });
 
+  it('requires direct live Codex apply for usage-limit recovery when the provider declares direct live auth', async () => {
+    const tracked = trackedSession({
+      spawnOptions: {
+        directory: '/tmp/project',
+        backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+        connectedServices: codexBindings('old-codex-profile'),
+        environmentVariables: {
+          [HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY]: JSON.stringify([
+            { kind: 'profile', serviceId: 'openai-codex', profileId: 'old-codex-profile' },
+          ]),
+        },
+      },
+    });
+    const record = buildConnectedServiceCredentialRecord({
+      now: 1_000,
+      serviceId: 'openai-codex',
+      profileId: 'new-codex-profile',
+      kind: 'oauth',
+      expiresAt: 2_000,
+      oauth: {
+        accessToken: 'access',
+        refreshToken: 'refresh',
+        idToken: 'id',
+        scope: null,
+        tokenType: null,
+        providerAccountId: 'acct',
+        providerEmail: null,
+      },
+    });
+    const binding = { source: 'connected', selection: 'profile', profileId: 'new-codex-profile' } as const;
+    const applyConnectedServiceAuthGeneration = vi.fn(async () => ({
+      ok: true,
+      appliedVia: 'direct_live_hot_auth',
+      verification: { activeAccountId: 'acct' },
+    }));
+    const runtimeAuthSelection = {
+      serviceId: 'openai-codex',
+      binding,
+      profileId: 'new-codex-profile',
+      record,
+      applyConnectedServiceAuthGeneration,
+      applyReason: 'usage_limit',
+    };
+    type RuntimeAuthSelectionContinuityInput =
+      Parameters<SwitchSessionConnectedServiceAuthInput['resolveContinuity']>[0]
+      & Readonly<{ runtimeAuthSelection?: unknown }>;
+    const materializeRuntimeAuthSelection = vi.fn(async (
+      input: Parameters<NonNullable<SwitchSessionConnectedServiceAuthInput['materializeRuntimeAuthSelection']>>[0],
+    ) => ({
+      ...runtimeAuthSelection,
+      requireDirectLiveHotApply: input.requireDirectLiveHotApply,
+    }));
+    const hotApply = createSessionConnectedServiceAuthHotApply({
+      resolveRuntimeAuthAdapter: async () => createCodexConnectedServiceRuntimeAuthAdapter(),
+    });
+    const restartSession = vi.fn();
+    const switchInput = {
+      core: createCore(),
+      groupSwitchTriggerReason: 'usage_limit',
+      postSwitchVerificationMode: {
+        kind: 'disabled_for_test_only',
+        reason: 'existing switch fixture does not exercise provider adoption verification',
+      },
+      getChildren: () => [tracked],
+      api: {
+        listConnectedServiceProfiles: async () => ({
+          serviceId: 'openai-codex' as const,
+          profiles: [{ profileId: 'new-codex-profile', status: 'connected' as const }],
+        }),
+        getConnectedServiceAuthGroup: async () => null,
+      },
+      runtimeAuthApplyCapabilityResolver: () => ({
+        directLiveHotAuth: {
+          supportsInTurnApply: true,
+          requiresExactRuntimeIdentity: true,
+          refreshSelectionResync: 'required',
+          authMode: {
+            kind: 'external_token_injection',
+            surface: 'codex_chatgpt_auth_tokens',
+          },
+        },
+      }),
+      materializeRuntimeAuthSelection,
+      resolveContinuity: async (input: RuntimeAuthSelectionContinuityInput) => {
+        expect(input.runtimeAuthSelection).toEqual(expect.objectContaining({
+          ...runtimeAuthSelection,
+          requireDirectLiveHotApply: true,
+        }));
+        const continuity = await resolveCodexConnectedServiceSwitchContinuity({
+          sessionId: input.sessionId,
+          agentId: input.agentId,
+          serviceId: input.serviceId,
+          previousBinding: input.previous,
+          nextBinding: input.next,
+          fromBindings: input.previousBindings,
+          toBindings: input.normalizedBindings,
+          runtimeAuthSelection: input.runtimeAuthSelection,
+        });
+        if (continuity.mode === 'hot_apply') return { mode: 'hot_apply' };
+        throw new Error(`Expected hot_apply continuity, got ${continuity.mode}`);
+      },
+      restartSession,
+      hotApply,
+      persistSessionBindings: vi.fn(),
+      registerHotApplyTargets: vi.fn(),
+      emitSessionEvent: vi.fn(),
+      request: {
+        sessionId: 'sess_1',
+        agentId: 'codex',
+        bindings: codexBindings('new-codex-profile'),
+      },
+    } satisfies SwitchSessionConnectedServiceAuthInput;
+
+    await expect(switchSessionConnectedServiceAuth(switchInput)).resolves.toMatchObject({
+      ok: true,
+      action: 'hot_applied',
+      continuityByServiceId: { 'openai-codex': 'hot_apply' },
+    });
+
+    expect(restartSession).not.toHaveBeenCalled();
+    expect(materializeRuntimeAuthSelection).toHaveBeenCalledWith(expect.objectContaining({
+      applyReason: 'usage_limit',
+      requireDirectLiveHotApply: true,
+    }));
+    expect(applyConnectedServiceAuthGeneration).toHaveBeenCalledWith(expect.objectContaining({
+      serviceId: 'openai-codex',
+      reason: 'usage_limit',
+      requireDirectLiveHotApply: true,
+      authGeneration: expect.objectContaining({
+        credential: record,
+      }),
+    }));
+  });
+
   it('uses preflight runtime-auth materialization during dry-run switches without applying side effects', async () => {
     const tracked = trackedSession({
       spawnOptions: {

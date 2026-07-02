@@ -112,6 +112,15 @@ describe('reconcileIndexedSameAccountFanoutCandidates', () => {
       event: 'quota_work_suppressed',
       phase: 'same_account_fanout',
       reason: 'runtime_identity_probe_account_mismatch',
+      sessionId: 'sess_same',
+      expectedProviderAccountId: 'acct-a',
+      actualProviderAccountId: 'acct-b',
+      expectedProfileId: 'stale-profile',
+      actualProfileId: 'stale-profile',
+      expectedGroupId: 'team',
+      actualGroupId: 'team',
+      expectedGroupGeneration: 4,
+      actualGroupGeneration: 4,
     }));
     expect(reconciliation.invalidateRuntimeAccountIdentity).toHaveBeenCalledWith('sess_same');
   });

@@ -1726,6 +1726,8 @@ describe('ConnectedServiceRefreshCoordinator', () => {
         generation: 7,
       },
       chatgptPlanType: 'plus',
+      // Exercise the rotation path explicitly (F6: rotation now requires near-expiry OR force).
+      forceRefresh: true,
     });
 
     expect(result).toEqual({
@@ -1847,6 +1849,7 @@ describe('ConnectedServiceRefreshCoordinator', () => {
         profileId: 'work',
       },
       chatgptPlanType: 'team',
+      forceRefresh: true,
     });
 
     expect(result).toEqual({
@@ -1859,6 +1862,77 @@ describe('ConnectedServiceRefreshCoordinator', () => {
     expect(activeAuth.access_token).toBe('new-access');
     expect(activeAuth.refresh_token).toBe('rotated-refresh');
     await expect(lstat(resolveCodexHomeForMaterialization(baseDir, 'openai-codex-refresh-work'))).rejects.toThrow();
+  });
+
+  it('returns the CURRENT Codex access token without rotating when valid and forceRefresh is not set (F6)', async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-refresh-bridge-noforce-'));
+    const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-server-refresh-bridge-noforce-'));
+    const credentials: Credentials = {
+      token: 'happy-token',
+      encryption: { type: 'legacy', secret: new Uint8Array(32).fill(11) },
+    };
+    if (credentials.encryption.type !== 'legacy') throw new Error('fixture');
+
+    const now = 1_000_000;
+    const record = buildConnectedServiceCredentialRecord({
+      now,
+      serviceId: 'openai-codex',
+      profileId: 'work',
+      kind: 'oauth',
+      // Far from expiry vs refreshWindowMs below — must NOT rotate the single-use refresh token.
+      expiresAt: now + 60 * 60_000,
+      oauth: {
+        accessToken: 'current-codex-access',
+        refreshToken: 'current-codex-refresh-MUST-NOT-ROTATE',
+        idToken: 'id',
+        scope: null,
+        tokenType: 'Bearer',
+        providerAccountId: 'chatgpt-account',
+        providerEmail: 'alice@example.com',
+      },
+    });
+    const sealed = sealAccountScopedBlobCiphertext({
+      kind: 'connected_service_credential',
+      material: { type: 'legacy', secret: credentials.encryption.secret },
+      payload: record,
+      randomBytes: (length) => randomBytes(length),
+    });
+    const acquireLease = vi.fn(async () => ({ acquired: true, leaseUntil: now + 60_000 }));
+    const registerSealed = vi.fn(async () => {});
+    const api = {
+      getConnectedServiceCredentialSealed: vi.fn(async () => ({
+        sealed: { format: 'account_scoped_v1', ciphertext: sealed },
+        metadata: { kind: 'oauth', providerEmail: 'alice@example.com', providerAccountId: 'chatgpt-account', expiresAt: now + 60 * 60_000 },
+      })),
+      acquireConnectedServiceRefreshLease: acquireLease,
+      registerConnectedServiceCredentialSealed: registerSealed,
+    } as unknown as ApiClient;
+    const fetchMock = vi.fn(async () => { throw new Error('must not refresh a still-valid token'); });
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+
+    const coordinator = new ConnectedServiceRefreshCoordinator({
+      api,
+      credentials,
+      machineIdProvider: () => 'machine-1',
+      ownerIdProvider: () => 'machine-1:daemon-a',
+      activeServerDir,
+      baseDir,
+      refreshWindowMs: 5 * 60_000,
+      refreshLeaseMs: 30_000,
+      now: () => now,
+    });
+
+    const result = await coordinator.refreshOpenAiCodexChatGptTokensForBridge({
+      selection: { kind: 'profile', serviceId: 'openai-codex', profileId: 'work' },
+      chatgptPlanType: 'plus',
+      forceRefresh: false,
+    });
+
+    expect(result).toEqual({ accessToken: 'current-codex-access', chatgptAccountId: 'chatgpt-account', chatgptPlanType: 'plus' });
+    // No provider refresh, no lease, no rotation/persist when the token is still valid.
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(acquireLease).not.toHaveBeenCalled();
+    expect(registerSealed).not.toHaveBeenCalled();
   });
 
   it('waits and re-reads credentials when another daemon owns the refresh lease for spawn preflight', async () => {

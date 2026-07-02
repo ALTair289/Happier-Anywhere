@@ -24,6 +24,15 @@ export type ConnectedServiceQuotaFetcher = Readonly<{
   }>) => Promise<unknown>;
 }>;
 
+export type ConnectedServiceQuotaFetcherHostParams = Readonly<{
+  env: NodeJS.ProcessEnv;
+  staleAfterMs: number;
+}>;
+
+export type ConnectedServiceQuotaFetcherDescriptor = Readonly<{
+  loadQuota: (params: ConnectedServiceQuotaFetcherHostParams) => ConnectedServiceQuotaFetcher;
+}>;
+
 /**
  * Stable machine codes for quota fetch failures. Do not change existing values;
  * add new ones only.
@@ -47,12 +56,15 @@ export class ConnectedServiceQuotaFetchError extends Error {
   readonly quotaFetchErrorCode: ConnectedServiceQuotaFetchErrorCode;
   /** Provider-supplied machine code extracted from the error response body, when present. */
   readonly providerCode: string | null;
+  /** Provider-owned classification that this auth failure cannot be fixed by retry/refresh. */
+  readonly reconnectRequired: boolean;
 
   constructor(message: string, options: Readonly<{
     status?: number | null;
     retryAfterMs?: number | null;
     quotaFetchErrorCode: ConnectedServiceQuotaFetchErrorCode;
     providerCode?: string | null;
+    reconnectRequired?: boolean;
   }>) {
     super(message);
     this.name = 'ConnectedServiceQuotaFetchError';
@@ -66,5 +78,6 @@ export class ConnectedServiceQuotaFetchError extends Error {
     this.providerCode = typeof options.providerCode === 'string' && options.providerCode.trim()
       ? options.providerCode.trim()
       : null;
+    this.reconnectRequired = options.reconnectRequired === true;
   }
 }

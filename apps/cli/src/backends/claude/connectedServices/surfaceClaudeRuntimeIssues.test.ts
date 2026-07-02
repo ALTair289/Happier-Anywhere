@@ -434,6 +434,8 @@ describe('surfaceClaudeRuntimeIssues runtime-auth projection', () => {
       expect(mockNotifyDaemonConnectedServiceQuotaSnapshot).toHaveBeenCalledWith(expect.objectContaining({
         sessionId: 'sess_claude_selected_snapshot',
         serviceId: 'claude-subscription',
+        groupId: 'team-pool',
+        groupGeneration: 4,
         snapshot: expect.objectContaining({
           serviceId: 'claude-subscription',
           profileId: 'claude-main',
@@ -445,7 +447,13 @@ describe('surfaceClaudeRuntimeIssues runtime-auth projection', () => {
         }),
       }));
       expect(mockNotifyDaemonConnectedServiceRuntimeAuthFailure).toHaveBeenCalledWith(
-        expect.objectContaining({ sessionId: 'sess_claude_selected_snapshot' }),
+        expect.objectContaining({
+          sessionId: 'sess_claude_selected_snapshot',
+          classification: expect.objectContaining({
+            groupId: 'team-pool',
+            groupGeneration: 4,
+          }),
+        }),
         expect.anything(),
       );
     } finally {

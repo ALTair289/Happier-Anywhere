@@ -9,8 +9,8 @@ import { describe, expect, it, vi, afterEach } from 'vitest';
 
 import { buildConnectedServiceCredentialRecord } from '@happier-dev/protocol';
 
-import { createOpenAiCodexQuotaFetcher } from './openAiCodexQuotaFetcher';
-import { ConnectedServiceQuotaFetchError } from '../types';
+import { ConnectedServiceQuotaFetchError } from '@/daemon/connectedServices/quotas/types';
+import { createOpenAiCodexQuotaFetcher } from './quotaFetcher';
 
 const BASE_RECORD_PARAMS = {
   now: 1_000_000,

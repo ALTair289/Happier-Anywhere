@@ -15,6 +15,7 @@ export type RuntimeAccountIdentitySource =
   | 'spawn_selection'
   | 'group_switch_selection'
   | 'codex_live_auth_apply'
+  | 'runtime_auth_failure_report'
   | 'runtime_identity_probe';
 
 export type RuntimeAccountIdentityRecordInput = Readonly<{

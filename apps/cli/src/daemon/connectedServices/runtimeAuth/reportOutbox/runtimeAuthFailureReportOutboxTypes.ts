@@ -4,7 +4,11 @@ import type {
   ConnectedServiceRuntimeLimitCategory,
   ConnectedServiceRuntimeQuotaScope,
 } from '../types';
-import type { SessionUsageLimitRecoveryResumePromptModeV1 } from '@happier-dev/protocol';
+import type {
+  ConnectedServiceCredentialHealthStatusV1,
+  ProviderAccountUsageRecordId,
+  SessionUsageLimitRecoveryResumePromptModeV1,
+} from '@happier-dev/protocol';
 
 export type RuntimeAuthFailureReportOutboxAction = Readonly<{
   kind: 'open_url';
@@ -21,10 +25,18 @@ export type RuntimeAuthFailureReportOutboxClassification = Readonly<{
   serviceId: string;
   profileId: string | null;
   groupId: string | null;
+  groupGeneration?: number | null;
+  activeProfileId?: string | null;
+  credentialHealthStatus?: ConnectedServiceCredentialHealthStatusV1 | null;
+  identityProofVersion?: number | null;
+  sourceKey?: string | null;
+  providerAccountUsageRecordId?: ProviderAccountUsageRecordId | null;
   resetsAtMs: number | null;
   retryAfterMs?: number | null;
   quotaScope?: ConnectedServiceRuntimeQuotaScope;
   providerLimitId?: string | null;
+  sourceProviderAccountId?: string | null;
+  sourceAccountLabel?: string | null;
   action?: RuntimeAuthFailureReportOutboxAction | null;
   planType: string | null;
   rateLimits: null;

@@ -83,6 +83,32 @@ export function computeClaudeCodeCredentialFingerprint(payload: unknown): string
   return `sha256:${createHash('sha256').update(canonical).digest('hex')}`;
 }
 
+export function computeClaudeCodeCredentialAccountProofFingerprint(payload: unknown): string | null {
+  const root = readObject(payload);
+  const credential = readObject(root?.claudeAiOauth);
+  const accessToken = readString(credential?.accessToken);
+  const refreshToken = readString(credential?.refreshToken);
+  if (!accessToken || !refreshToken) return null;
+  const subscriptionType = readOptionalString(credential?.subscriptionType);
+  const rateLimitTier = readOptionalString(credential?.rateLimitTier);
+
+  return computeClaudeCodeCredentialFingerprint({
+    claudeAiOauth: {
+      accessToken,
+      refreshToken,
+      scopes: parseClaudeCodeCredentialScopes(
+        Array.isArray(credential?.scopes)
+          ? credential.scopes.filter((scope): scope is string => typeof scope === 'string')
+          : typeof credential?.scopes === 'string'
+            ? credential.scopes
+            : null,
+      ),
+      ...(subscriptionType ? { subscriptionType } : {}),
+      ...(rateLimitTier ? { rateLimitTier } : {}),
+    },
+  });
+}
+
 export function parseClaudeCodeCredentialFile(value: unknown): ClaudeCodeCredentialFileParseResult {
   const root = readObject(value);
   const credential = readObject(root?.claudeAiOauth);

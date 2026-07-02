@@ -11,6 +11,7 @@ const selection = {
   serviceId: 'claude-subscription',
   activeProfileId: 'work',
   groupId: 'claude',
+  generation: 42,
 };
 
 describe('classifyClaudeConnectedServiceRuntimeAuthFailure', () => {
@@ -34,6 +35,7 @@ describe('classifyClaudeConnectedServiceRuntimeAuthFailure', () => {
       serviceId: 'claude-subscription',
       profileId: 'work',
       groupId: 'claude',
+      groupGeneration: 42,
       source: 'stable_provider_message',
     });
   });

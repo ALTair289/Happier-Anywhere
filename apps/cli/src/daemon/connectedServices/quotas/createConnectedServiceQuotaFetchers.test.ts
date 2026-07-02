@@ -1,10 +1,87 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import type { ConnectedServiceCredentialRecordV1, ConnectedServiceQuotaSnapshotV1 } from '@happier-dev/protocol';
 import { buildConnectedServiceCredentialRecord } from '@happier-dev/protocol';
 
 import { createConnectedServiceQuotaFetchers } from './createConnectedServiceQuotaFetchers';
 
 describe('createConnectedServiceQuotaFetchers', () => {
+  it('builds fetchers from provider descriptors and forwards generic host params unchanged', () => {
+    const env = {
+      HAPPIER_CONNECTED_SERVICES_QUOTAS_STALE_AFTER_MS: '45000',
+      HAPPIER_CONNECTED_SERVICES_OPENAI_CODEX_USAGE_URL: 'https://provider-owned.example/usage',
+    };
+    const loaded: Array<Readonly<{
+      env: NodeJS.ProcessEnv;
+      staleAfterMs: number;
+    }>> = [];
+    const firstFetcher = {
+      serviceId: 'openai-codex' as const,
+      fetch: async () => null,
+    };
+    const secondFetcher = {
+      serviceId: 'claude-subscription' as const,
+      fetch: async () => null,
+    };
+    const descriptors = [
+      {
+        loadQuota: (params: Readonly<{
+          env: NodeJS.ProcessEnv;
+          staleAfterMs: number;
+        }>) => {
+          loaded.push(params);
+          return firstFetcher;
+        },
+      },
+      {
+        loadQuota: (params: Readonly<{
+          env: NodeJS.ProcessEnv;
+          staleAfterMs: number;
+        }>) => {
+          loaded.push(params);
+          return secondFetcher;
+        },
+      },
+    ];
+
+    const fetchers = createConnectedServiceQuotaFetchers(env, descriptors);
+
+    expect(fetchers).toEqual([firstFetcher, secondFetcher]);
+    expect(loaded).toHaveLength(2);
+    expect(loaded.every((params) => params.env === env)).toBe(true);
+    expect(loaded.map((params) => params.staleAfterMs)).toEqual([45_000, 45_000]);
+  });
+
+  it('clamps generic stale-after host params before provider descriptors receive them', () => {
+    const loaded: number[] = [];
+    const descriptors = [
+      {
+        loadQuota: (params: Readonly<{
+          env: NodeJS.ProcessEnv;
+          staleAfterMs: number;
+        }>) => {
+          loaded.push(params.staleAfterMs);
+          return {
+            serviceId: 'gemini' as const,
+            fetch: async (
+              _params: Readonly<{
+                record: ConnectedServiceCredentialRecordV1;
+                now: number;
+                signal: AbortSignal;
+              }>,
+            ): Promise<ConnectedServiceQuotaSnapshotV1 | null> => null,
+          };
+        },
+      },
+    ];
+
+    createConnectedServiceQuotaFetchers({
+      HAPPIER_CONNECTED_SERVICES_QUOTAS_STALE_AFTER_MS: '1',
+    }, descriptors);
+
+    expect(loaded).toEqual([5_000]);
+  });
+
   it('uses direct provider quota endpoints when no proxy URL is configured', async () => {
     const now = 1_000_000;
     const fetchMock = vi.fn(async () => ({

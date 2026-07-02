@@ -41,6 +41,18 @@ export type ConnectedServiceResolvedSelection =
       policy: unknown;
     }>;
 
+const activeMaterializationAttemptByRootDir = new Map<string, string>();
+const materializationPromotionTailByRootDir = new Map<string, Promise<void>>();
+
+export class ConnectedServiceMaterializationSupersededError extends Error {
+  readonly code = 'connected_service_materialization_superseded';
+
+  constructor(rootDir: string) {
+    super(`Connected-service materialization for ${rootDir} was superseded by a newer attempt`);
+    this.name = 'ConnectedServiceMaterializationSupersededError';
+  }
+}
+
 function bestEffortCleanupDirectory(path: string): () => void {
   let cleaned = false;
   return () => {
@@ -48,6 +60,47 @@ function bestEffortCleanupDirectory(path: string): () => void {
     cleaned = true;
     void rm(path, { recursive: true, force: true }).catch(() => {});
   };
+}
+
+function forgetActiveAttemptIfCurrent(rootDir: string, attemptId: string): void {
+  if (activeMaterializationAttemptByRootDir.get(rootDir) === attemptId) {
+    activeMaterializationAttemptByRootDir.delete(rootDir);
+  }
+}
+
+function assertActiveAttempt(params: Readonly<{
+  rootDir: string;
+  attemptId: string;
+  cleanupRoot: () => void;
+}>): void {
+  if (activeMaterializationAttemptByRootDir.get(params.rootDir) === params.attemptId) {
+    return;
+  }
+  params.cleanupRoot();
+  throw new ConnectedServiceMaterializationSupersededError(params.rootDir);
+}
+
+async function runSerializedPromotion<T>(
+  rootDir: string,
+  promote: () => Promise<T>,
+): Promise<T> {
+  const previousTail = materializationPromotionTailByRootDir.get(rootDir) ?? Promise.resolve();
+  let releaseCurrent!: () => void;
+  const currentTailSegment = new Promise<void>((resolve) => {
+    releaseCurrent = resolve;
+  });
+  const currentTail = previousTail.catch(() => {}).then(() => currentTailSegment);
+  materializationPromotionTailByRootDir.set(rootDir, currentTail);
+
+  await previousTail.catch(() => {});
+  try {
+    return await promote();
+  } finally {
+    releaseCurrent();
+    if (materializationPromotionTailByRootDir.get(rootDir) === currentTail) {
+      materializationPromotionTailByRootDir.delete(rootDir);
+    }
+  }
 }
 
 function rewriteEnvRoot(
@@ -103,10 +156,15 @@ export async function materializeConnectedServicesForSpawn(params: Readonly<{
   // `rootDir` is `<baseDir>/<segment>/<agentId>`; recover the segment for the sibling attempt dir.
   const materializationSegment = basename(dirname(rootDir));
   const attemptRoot = join(params.baseDir, '.attempts', `${materializationSegment}-${params.agentId}-${randomUUID()}`);
+  const attemptId = attemptRoot;
+  activeMaterializationAttemptByRootDir.set(rootDir, attemptId);
   const cleanupRoot = bestEffortCleanupDirectory(attemptRoot);
 
   const materializer = await getConnectedServiceMaterializer(params.agentId);
-  if (!materializer) return null;
+  if (!materializer) {
+    forgetActiveAttemptIfCurrent(rootDir, attemptId);
+    return null;
+  }
   await mkdir(attemptRoot, { recursive: true });
   let materialized: ConnectedServicesMaterializeResult | null;
   try {
@@ -125,10 +183,12 @@ export async function materializeConnectedServicesForSpawn(params: Readonly<{
     });
   } catch (error) {
     cleanupRoot();
+    forgetActiveAttemptIfCurrent(rootDir, attemptId);
     throw error;
   }
   if (!materialized) {
     cleanupRoot();
+    forgetActiveAttemptIfCurrent(rootDir, attemptId);
     return null;
   }
   const materializedEnv = rewriteEnvRoot(materialized.env, attemptRoot, rootDir);
@@ -142,39 +202,45 @@ export async function materializeConnectedServicesForSpawn(params: Readonly<{
     agentId: params.agentId,
     targetMaterializedEnv: materializedEnv,
   }) ?? (materialized.cleanupOnFailure ? rootDir : null);
-  await replaceDirectoryAtomically({
-    stagedDir: attemptRoot,
-    targetDir: rootDir,
-    ...(materialized.afterPromote
-      ? {
-          afterPromote: async () => {
-            await materialized.afterPromote?.({
-              env: materializedEnv,
-              targetMaterializedRoot,
-              finalRootDir: rootDir,
-            });
-          },
-        }
-      : {}),
-  });
-  const cleanupFinalRoot = bestEffortCleanupDirectory(rootDir);
-  const cleanupOnFailure = materialized.cleanupOnFailure ? cleanupFinalRoot : materialized.cleanupOnFailure;
-  const cleanupOnExit = materialized.cleanupOnExit ? cleanupFinalRoot : materialized.cleanupOnExit;
-  return {
-    ...materialized,
-    cleanupOnFailure,
-    cleanupOnExit,
-    env: {
-      ...materializedEnv,
-      ...(targetMaterializedRoot
-        ? { [HAPPIER_CONNECTED_SERVICE_TARGET_MATERIALIZED_ROOT_ENV_KEY]: targetMaterializedRoot }
-        : null),
-      ...(serializedSelections
-        ? { [HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY]: serializedSelections }
-        : null),
-      ...(serializedMaterializedEnvKeys
-        ? { [HAPPIER_CONNECTED_SERVICE_MATERIALIZED_ENV_KEYS_ENV_KEY]: serializedMaterializedEnvKeys }
-        : null),
-    },
-  };
+  try {
+    await runSerializedPromotion(rootDir, async () => {
+      assertActiveAttempt({ rootDir, attemptId, cleanupRoot });
+      await replaceDirectoryAtomically({
+        stagedDir: attemptRoot,
+        targetDir: rootDir,
+        afterPromote: async () => {
+          await materialized.afterPromote?.({
+            env: materializedEnv,
+            targetMaterializedRoot,
+            finalRootDir: rootDir,
+          });
+          assertActiveAttempt({ rootDir, attemptId, cleanupRoot });
+        },
+      });
+      assertActiveAttempt({ rootDir, attemptId, cleanupRoot });
+    });
+    assertActiveAttempt({ rootDir, attemptId, cleanupRoot });
+    const cleanupFinalRoot = bestEffortCleanupDirectory(rootDir);
+    const cleanupOnFailure = materialized.cleanupOnFailure ? cleanupFinalRoot : materialized.cleanupOnFailure;
+    const cleanupOnExit = materialized.cleanupOnExit ? cleanupFinalRoot : materialized.cleanupOnExit;
+    return {
+      ...materialized,
+      cleanupOnFailure,
+      cleanupOnExit,
+      env: {
+        ...materializedEnv,
+        ...(targetMaterializedRoot
+          ? { [HAPPIER_CONNECTED_SERVICE_TARGET_MATERIALIZED_ROOT_ENV_KEY]: targetMaterializedRoot }
+          : null),
+        ...(serializedSelections
+          ? { [HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY]: serializedSelections }
+          : null),
+        ...(serializedMaterializedEnvKeys
+          ? { [HAPPIER_CONNECTED_SERVICE_MATERIALIZED_ENV_KEYS_ENV_KEY]: serializedMaterializedEnvKeys }
+          : null),
+      },
+    };
+  } finally {
+    forgetActiveAttemptIfCurrent(rootDir, attemptId);
+  }
 }

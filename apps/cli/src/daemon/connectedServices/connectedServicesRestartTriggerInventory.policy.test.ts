@@ -140,7 +140,17 @@ const DURABLE_CONNECTED_SERVICE_RESTART_INTENT_DEFINITION_BASENAMES: ReadonlySet
 ]);
 
 const DURABLE_RUNTIME_AUTH_RECOVERY_REPLAY_PATTERN =
-  /\b(runtime-auth-recovery\.json|runtimeAuthRecoveryScheduler\.hydrate\s*\(\s*\)|store\?:\s*DurableRecoveryStore<RuntimeAuthRecoveryIntent>|hydrate\s*\(\s*\):\s*ReadonlyArray<RuntimeAuthRecoveryIntent>)/;
+  /\b(runtime-auth-recovery\.json|runtimeAuthRecoveryScheduler\.hydrate\s*\(\s*\)|store\?:\s*DurableRecoveryStore<RuntimeAuthRecoveryIntent>|hydrate\s*\(\s*\):\s*ReadonlyArray<RuntimeAuthRecoveryIntent>|drainRuntimeAuthFailureReportOutboxToDaemon\s*\()/;
+
+const DURABLE_RUNTIME_AUTH_RECOVERY_REPLAY_DEFINITION_BASENAMES: ReadonlySet<string> = new Set([
+  'runtimeAuthFailureReportOutboxDrain.ts',
+]);
+
+const MARKER_DERIVED_STARTUP_RESTART_REPLAY_PATTERN =
+  /\bopencode_dead_daemon_marker_restart\b/;
+
+const PLANNED_CONNECTED_SERVICE_RESTART_PATTERN =
+  /\brequestPlannedRunnerRestart\s*\(\s*\{[\s\S]*?\breason:\s*['"]connected_service_switch['"][\s\S]*?\}\s*\)/g;
 
 // ---------------------------------------------------------------------------
 // Marker grammar
@@ -306,11 +316,41 @@ async function collectDurableRuntimeAuthRecoveryReplaySites(): Promise<string[]>
   ]);
   const findings: string[] = [];
   for (const file of [...daemonFiles, ...backendFiles, ...sessionFiles, ...agentFiles, ...rpcFiles]) {
+    if (DURABLE_RUNTIME_AUTH_RECOVERY_REPLAY_DEFINITION_BASENAMES.has(basename(file))) continue;
     const source = await readFile(file, 'utf8');
     const lines = source.split('\n');
     for (let index = 0; index < lines.length; index += 1) {
       if (!DURABLE_RUNTIME_AUTH_RECOVERY_REPLAY_PATTERN.test(lines[index] ?? '')) continue;
       findings.push(`${scopedPathOf(file)}:${index + 1}`);
+    }
+  }
+  return findings;
+}
+
+async function collectMarkerDerivedStartupRestartReplaySites(): Promise<string[]> {
+  const daemonFiles = await listSourceFiles(daemonDir);
+  const findings: string[] = [];
+  for (const file of daemonFiles) {
+    const source = await readFile(file, 'utf8');
+    const lines = source.split('\n');
+    for (let index = 0; index < lines.length; index += 1) {
+      if (!MARKER_DERIVED_STARTUP_RESTART_REPLAY_PATTERN.test(lines[index] ?? '')) continue;
+      findings.push(`${scopedPathOf(file)}:${index + 1}`);
+    }
+  }
+  return findings;
+}
+
+async function collectConnectedServicePlannedRestartCallsMissingFinalActivityGate(): Promise<string[]> {
+  const daemonFiles = await listSourceFiles(daemonDir);
+  const findings: string[] = [];
+  for (const file of daemonFiles) {
+    const source = await readFile(file, 'utf8');
+    for (const match of source.matchAll(PLANNED_CONNECTED_SERVICE_RESTART_PATTERN)) {
+      const callSource = match[0] ?? '';
+      if (/\bcanSignal\s*:/.test(callSource)) continue;
+      const lineNumber = source.slice(0, match.index ?? 0).split('\n').length;
+      findings.push(`${scopedPathOf(file)}:${lineNumber}`);
     }
   }
   return findings;
@@ -391,6 +431,26 @@ describe('connected-services restart/switch trigger inventory (K5 bypass guard)'
       `Runtime-auth recovery may retry while the daemon is alive, but daemon restart must not re-drive old recovery intents.\n`
       + `Do not wire product runtime paths to runtime-auth-recovery.json or hydrate runtime-auth recovery on daemon start.\n`
       + `Runtime references:\n${findings.map((finding) => `  ${finding}`).join('\n')}`,
+    ).toEqual([]);
+  });
+
+  it('does not reintroduce marker-derived startup restart replay', async () => {
+    const findings = await collectMarkerDerivedStartupRestartReplaySites();
+
+    expect(
+      findings,
+      `Daemon startup reconstruction must remain passive; dead disk markers must not define marker-derived restart reasons.\n`
+      + `Runtime references:\n${findings.map((finding) => `  ${finding}`).join('\n')}`,
+    ).toEqual([]);
+  });
+
+  it('runs the final activity gate for connected-service planned runner restarts', async () => {
+    const findings = await collectConnectedServicePlannedRestartCallsMissingFinalActivityGate();
+
+    expect(
+      findings,
+      `Connected-service planned runner restarts must pass canSignal so final pre-signal activity checks cannot be bypassed.\n`
+      + `Missing canSignal:\n${findings.map((finding) => `  ${finding}`).join('\n')}`,
     ).toEqual([]);
   });
 

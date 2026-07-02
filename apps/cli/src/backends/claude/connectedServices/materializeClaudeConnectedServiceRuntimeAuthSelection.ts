@@ -15,6 +15,7 @@ import { resolveClaudeConnectedServiceStableConfigDir } from './resolveClaudeCon
 import {
   CLAUDE_RUNTIME_AUTH_SHARED_GROUP_SURFACE_METADATA_KEY,
   buildClaudeRuntimeAuthSharedGroupSurfaceMetadata,
+  readClaudeRuntimeAuthSharedGroupSurfaceMetadata,
 } from './claudeRuntimeAuthSharedGroupSurfaceMetadata';
 import { resolveClaudeConnectedServiceCandidatePersistedSessionFile } from './resolveClaudeConnectedServiceCandidatePersistedSessionFile';
 
@@ -106,7 +107,7 @@ function buildPreflightRuntimeAuthSelection(params: Readonly<{
   selection: ConnectedServiceResolvedSelection | null;
   trackedEnv?: NodeJS.ProcessEnv;
 }>): unknown {
-  if (params.serviceId !== 'claude-subscription' || params.selection?.kind !== 'group') {
+  if (params.serviceId !== 'claude-subscription' || params.selection?.kind !== 'group' || params.record.kind !== 'oauth') {
     return params.baseSelection;
   }
 
@@ -171,15 +172,17 @@ export const materializeClaudeConnectedServiceRuntimeAuthSelection: ConnectedSer
     ...(typeof params.baseSelection.fallbackProfileId === 'string' ? { fallbackProfileId: params.baseSelection.fallbackProfileId } : {}),
     ...(typeof params.baseSelection.generation === 'number' ? { generation: params.baseSelection.generation } : {}),
   });
-  if (params.input.mode === 'preflight') {
-    return buildPreflightRuntimeAuthSelection({
-      activeServerDir,
-      serviceId: params.input.serviceId,
-      baseSelection: params.baseSelection,
-      record,
-      selection,
-      trackedEnv: params.input.tracked.spawnOptions?.environmentVariables,
-    });
+  const sharedGroupRuntimeAuthSelection = buildPreflightRuntimeAuthSelection({
+    activeServerDir,
+    serviceId: params.input.serviceId,
+    baseSelection: params.baseSelection,
+    record,
+    selection,
+    trackedEnv: params.input.tracked.spawnOptions?.environmentVariables,
+  });
+  if (params.input.mode === 'preflight') return sharedGroupRuntimeAuthSelection;
+  if (readClaudeRuntimeAuthSharedGroupSurfaceMetadata(sharedGroupRuntimeAuthSelection)) {
+    return sharedGroupRuntimeAuthSelection;
   }
   const trackedContinuityContext = resolveTrackedConnectedServiceSwitchContinuityContext({
     agentId: params.input.agentId,
@@ -237,6 +240,7 @@ export const materializeClaudeConnectedServiceRuntimeAuthSelection: ConnectedSer
     : null;
   const sharedGroupSurfaceMetadata = params.input.serviceId === 'claude-subscription'
     && selection?.kind === 'group'
+    && record.kind === 'oauth'
     && samePath(trackedEnv?.CLAUDE_CONFIG_DIR, materializedClaudeConfigDir)
     ? buildClaudeRuntimeAuthSharedGroupSurfaceMetadata({
         runtimeClaudeConfigDir: materializedClaudeConfigDir,

@@ -1,5 +1,3 @@
-import { randomUUID } from 'node:crypto';
-
 import {
   ConnectedServiceIdSchema,
   ConnectedServiceUxDiagnosticV1Schema,
@@ -8,6 +6,7 @@ import {
   ConnectedServiceSwitchAttemptOutcomeV1Schema,
   ConnectedServiceSwitchAttemptSessionAdoptionV1Schema,
   agentEventAttentionImpact,
+  buildAgentEventLocalId,
   type ConnectedServiceId,
   type ConnectedServiceUxDiagnosticV1,
   type ConnectedServiceSwitchAttemptedContinuityModeV1,
@@ -399,6 +398,77 @@ function readDisplayLabel(value: unknown): string | null {
   return normalized.length > 0 ? normalized : null;
 }
 
+function buildSwitchDeferralEventId(deferral: ConnectedServiceRuntimeSwitchDeferralSessionEvent): string {
+  return buildAgentEventLocalId('connected-service-account-switch-deferral', [
+    deferral.policy,
+    deferral.awaitingBoundary ? 'awaiting_boundary' : 'awaiting_idle',
+    deferral.timeoutMs,
+  ]);
+}
+
+function buildSwitchDeferralCompletionEventId(
+  deferralCompletion: ConnectedServiceRuntimeSwitchDeferralCompletionSessionEvent,
+): string {
+  return buildAgentEventLocalId('connected-service-account-switch-deferral-completed', [
+    deferralCompletion.policy,
+    deferralCompletion.reason,
+  ]);
+}
+
+function buildSwitchDeferralSupersededEventId(
+  superseded: ConnectedServiceRuntimeSwitchDeferralSupersededSessionEvent,
+): string {
+  return buildAgentEventLocalId('connected-service-account-switch-deferral-superseded', [
+    superseded.policy ?? 'unknown',
+  ]);
+}
+
+function buildSwitchAttemptEventId(attempt: ConnectedServiceRuntimeSwitchAttemptSessionEvent): string {
+  return buildAgentEventLocalId('connected-service-account-switch-attempt', [
+    attempt.ok ? 'ok' : 'failed',
+    attempt.action,
+    attempt.reason ?? attempt.rawReason ?? 'unknown',
+    attempt.attemptedContinuityMode ?? 'unknown',
+    attempt.outcome ?? 'unknown',
+    attempt.outcomeAction ?? 'unknown',
+    attempt.errorCode ?? 'none',
+  ]);
+}
+
+function buildProviderStateSharingDegradedEventId(
+  degraded: ConnectedServiceRuntimeStateSharingDegradedSessionEvent,
+): string {
+  return buildAgentEventLocalId('provider-state-sharing-degraded', [
+    degraded.serviceId,
+    degraded.requestedStateMode,
+    degraded.effectiveStateMode,
+    degraded.code,
+    degraded.reason,
+  ]);
+}
+
+function buildConnectedServiceAccountSwitchEventId(
+  parsed: ConnectedServiceRuntimeSwitchSessionEvent,
+  reason: TranscriptSwitchReason,
+): string {
+  const groupPart = parsed.groupId ?? 'direct';
+  if (parsed.generation !== undefined) {
+    return buildAgentEventLocalId('connected-service-account-switch', [
+      parsed.serviceId,
+      groupPart,
+      parsed.generation,
+    ]);
+  }
+  return buildAgentEventLocalId('connected-service-account-switch', [
+    parsed.serviceId,
+    groupPart,
+    parsed.fromProfileId ?? 'none',
+    parsed.toProfileId ?? 'none',
+    reason,
+    parsed.mode,
+  ]);
+}
+
 function buildStoredContent(params: Readonly<{
   credentials: Credentials;
   rawSession: Awaited<ReturnType<typeof fetchSessionById>>;
@@ -480,12 +550,7 @@ export async function commitConnectedServiceAccountSwitchSessionEvent(params: Re
       sessionId: params.sessionId,
     });
     if (!rawSession) return;
-    const eventId = [
-      'connected-service-account-switch-deferral',
-      deferral.policy,
-      deferral.awaitingBoundary ? 'awaiting-boundary' : 'awaiting-idle',
-      randomUUID(),
-    ].join(':');
+    const eventId = buildSwitchDeferralEventId(deferral);
     await commitAgentEventStoredMessage({
       credentials: params.credentials,
       sessionId: params.sessionId,
@@ -508,12 +573,7 @@ export async function commitConnectedServiceAccountSwitchSessionEvent(params: Re
       sessionId: params.sessionId,
     });
     if (!rawSession) return;
-    const eventId = [
-      'connected-service-account-switch-deferral-completed',
-      deferralCompletion.policy,
-      deferralCompletion.reason,
-      randomUUID(),
-    ].join(':');
+    const eventId = buildSwitchDeferralCompletionEventId(deferralCompletion);
     await commitAgentEventStoredMessage({
       credentials: params.credentials,
       sessionId: params.sessionId,
@@ -535,11 +595,7 @@ export async function commitConnectedServiceAccountSwitchSessionEvent(params: Re
       sessionId: params.sessionId,
     });
     if (!rawSession) return;
-    const eventId = [
-      'connected-service-account-switch-deferral-superseded',
-      superseded.policy ?? 'unknown',
-      randomUUID(),
-    ].join(':');
+    const eventId = buildSwitchDeferralSupersededEventId(superseded);
     await commitAgentEventStoredMessage({
       credentials: params.credentials,
       sessionId: params.sessionId,
@@ -561,11 +617,7 @@ export async function commitConnectedServiceAccountSwitchSessionEvent(params: Re
       sessionId: params.sessionId,
     });
     if (!rawSession) return;
-    const eventId = [
-      'connected-service-account-switch-attempt',
-      attempt.ok ? 'ok' : 'failed',
-      randomUUID(),
-    ].join(':');
+    const eventId = buildSwitchAttemptEventId(attempt);
     await commitAgentEventStoredMessage({
       credentials: params.credentials,
       sessionId: params.sessionId,
@@ -602,11 +654,7 @@ export async function commitConnectedServiceAccountSwitchSessionEvent(params: Re
       sessionId: params.sessionId,
     });
     if (!rawSession) return;
-    const eventId = [
-      'provider-state-sharing-degraded',
-      degraded.serviceId,
-      randomUUID(),
-    ].join(':');
+    const eventId = buildProviderStateSharingDegradedEventId(degraded);
     await commitAgentEventStoredMessage({
       credentials: params.credentials,
       sessionId: params.sessionId,
@@ -636,12 +684,7 @@ export async function commitConnectedServiceAccountSwitchSessionEvent(params: Re
   });
   if (!rawSession) return;
 
-  const eventId = [
-    'connected-service-account-switch',
-    parsed.serviceId,
-    parsed.groupId ?? 'direct',
-    parsed.generation ?? randomUUID(),
-  ].join(':');
+  const eventId = buildConnectedServiceAccountSwitchEventId(parsed, reason);
   const profilesById = params.listConnectedServiceProfiles
     ? await loadConnectedServiceNotificationProfilesById({
       serviceId: parsed.serviceId,

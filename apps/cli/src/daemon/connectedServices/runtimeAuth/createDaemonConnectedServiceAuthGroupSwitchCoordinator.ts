@@ -14,7 +14,13 @@ import {
   type ConnectedServiceAuthGroupSwitchEvent,
 } from '../accountGroups/switching/ConnectedServiceAuthGroupSwitchCoordinator';
 import { evaluatePredictiveSoftSwitchSessionApplyPolicy } from '../accountGroups/switching/predictiveSoftSwitchPolicy';
-import { buildConnectedServiceAuthGroupSwitchState } from '../accountGroups/switching/buildConnectedServiceAuthGroupSwitchState';
+import {
+  buildConnectedServiceAuthGroupSwitchStateFromPersistedMemberState,
+} from '../accountGroups/switching/buildConnectedServiceAuthGroupSwitchState';
+import {
+  buildConnectedServiceAuthGroupSwitchStateFromAccountUsage,
+  type AccountUsageStoreForAuthGroupSwitchState,
+} from '../accountGroups/switching/buildConnectedServiceAuthGroupSwitchStateFromAccountUsage';
 import { createConnectedServiceAuthGenerationApplyFailureError } from './connectedServiceAuthGenerationApplyFailure';
 import type { ConnectedServiceSessionAuthSwitchReason } from './connectedServiceSessionAuthSwitchCore';
 
@@ -252,6 +258,7 @@ async function runQuotaSnapshotProbeWithTimeout(input: Readonly<{
 export function createDaemonConnectedServiceAuthGroupSwitchCoordinator(params: Readonly<{
   api: AuthGroupApi;
   runtimeQuotaSnapshots: ConnectedServiceAuthGroupRuntimeQuotaSnapshotStore;
+  accountUsageStore?: AccountUsageStoreForAuthGroupSwitchState | null;
   leases?: InMemoryConnectedServiceAuthGroupSwitchLeaseRegistry;
   quotaFreshnessMs: number;
   nowMs: () => number;
@@ -321,16 +328,15 @@ export function createDaemonConnectedServiceAuthGroupSwitchCoordinator(params: R
         sleepMs: params.sleepMs ?? defaultSwitchCoordinatorSleepMs,
       });
       if (!group) throw new Error(`Connected service auth group not found (${input.serviceId}/${input.groupId})`);
-      await params.hydratePersistedQuotaSnapshotsForGroup?.({
-        serviceId,
-        groupId: input.groupId,
-        profileIds: group.members.map((member) => member.profileId),
-      });
-      const state = buildConnectedServiceAuthGroupSwitchState({
-        group,
-        runtimeQuotaSnapshots: params.runtimeQuotaSnapshots,
-        nowMs: params.nowMs(),
-      });
+      const sourceBackedState = params.accountUsageStore
+        ? buildConnectedServiceAuthGroupSwitchStateFromAccountUsage({
+          group,
+          accountUsageStore: params.accountUsageStore,
+        })?.state ?? null
+        : null;
+      const state = sourceBackedState ?? (
+        buildConnectedServiceAuthGroupSwitchStateFromPersistedMemberState({ group })
+      );
       if (typeof params.api.listConnectedServiceProfiles !== 'function') return state;
       const profiles = await params.api.listConnectedServiceProfiles({ serviceId }).catch(() => null);
       if (!profiles) return state;
@@ -365,11 +371,12 @@ export function createDaemonConnectedServiceAuthGroupSwitchCoordinator(params: R
         generation: group.generation,
         ...(input.expectedGeneration === undefined ? {} : { expectedGeneration: input.expectedGeneration }),
       });
-      return buildConnectedServiceAuthGroupSwitchState({
-        group,
-        runtimeQuotaSnapshots: params.runtimeQuotaSnapshots,
-        nowMs: params.nowMs(),
-      });
+      return params.accountUsageStore
+        ? buildConnectedServiceAuthGroupSwitchStateFromAccountUsage({
+          group,
+          accountUsageStore: params.accountUsageStore,
+        })?.state ?? buildConnectedServiceAuthGroupSwitchStateFromPersistedMemberState({ group })
+        : buildConnectedServiceAuthGroupSwitchStateFromPersistedMemberState({ group });
     },
     ...(params.probeQuotaSnapshotsForGroup ? {
       probeQuotaSnapshotsForGroup: async (input) => {

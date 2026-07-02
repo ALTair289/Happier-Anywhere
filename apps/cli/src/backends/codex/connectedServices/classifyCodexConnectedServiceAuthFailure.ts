@@ -16,10 +16,13 @@ export type CodexConnectedServiceRuntimeFailureClassification = Readonly<{
   serviceId: ConnectedServiceId;
   profileId: ConnectedServiceProfileId | null;
   groupId: string | null;
+  groupGeneration?: number | null;
   resetsAtMs: number | null;
   retryAfterMs: number | null;
   planType: string | null;
   rateLimits: unknown | null;
+  sourceProviderAccountId?: string | null;
+  sourceAccountLabel?: string | null;
   source: 'structured_provider_error' | 'stable_provider_message' | 'provider_runtime_marker';
   recoveryAction?: CodexConnectedServiceRecoveryAction | null;
 }>;
@@ -34,6 +37,11 @@ export type ClassifyCodexConnectedServiceAuthFailureInput = Readonly<{
   serviceId: ConnectedServiceId;
   profileId: ConnectedServiceProfileId | null;
   groupId: string | null;
+  sourceAccountIdentity?: Readonly<{
+    providerAccountId?: string | null;
+    accountLabel?: string | null;
+    groupGeneration?: string | number | null;
+  }> | null;
 }>;
 
 const CODEX_ACCOUNT_CHANGED_MESSAGE =
@@ -56,6 +64,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function readString(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+}
+
+function readNonNegativeInteger(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return Math.trunc(value);
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  if (!/^\d+$/.test(normalized)) return null;
+  const parsed = Number(normalized);
+  return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
 function readErrorRecord(value: unknown): Record<string, unknown> | null {
@@ -134,16 +151,24 @@ function buildClassification(
     recoveryAction?: CodexConnectedServiceRecoveryAction | null;
   }>,
 ): CodexConnectedServiceRuntimeFailureClassification {
+  const sourceProviderAccountId = readString(input.sourceAccountIdentity?.providerAccountId);
+  const sourceAccountLabel = sourceProviderAccountId
+    ? readString(input.sourceAccountIdentity?.accountLabel)
+    : null;
+  const groupGeneration = readNonNegativeInteger(input.sourceAccountIdentity?.groupGeneration);
   return {
     kind: params.kind,
     ...(params.limitCategory ? { limitCategory: params.limitCategory } : {}),
     serviceId: input.serviceId,
     profileId: input.profileId,
     groupId: input.groupId,
+    ...(groupGeneration !== null ? { groupGeneration } : {}),
     resetsAtMs: params.resetsAtMs ?? null,
     retryAfterMs: params.retryAfterMs ?? null,
     planType: params.planType ?? null,
     rateLimits: params.rateLimits ?? null,
+    ...(sourceProviderAccountId ? { sourceProviderAccountId } : {}),
+    ...(sourceProviderAccountId && sourceAccountLabel !== null ? { sourceAccountLabel } : {}),
     source: params.source,
     ...(params.recoveryAction ? { recoveryAction: params.recoveryAction } : {}),
   };

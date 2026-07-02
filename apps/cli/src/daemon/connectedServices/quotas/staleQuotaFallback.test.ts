@@ -115,8 +115,6 @@ describe('ConnectedServiceQuotasCoordinator — X8: stale-but-usable quota on fe
       })),
       getConnectedServiceQuotaSnapshotSealed: vi.fn(async () => null),
       getConnectedServiceCredentialSealed: vi.fn(async () => null),
-      registerConnectedServiceQuotaSnapshotPlain: vi.fn(async () => {}),
-      registerConnectedServiceQuotaSnapshotSealed: vi.fn(async () => {}),
       getAccountEncryptionMode: vi.fn(async () => 'plain' as const),
     };
 
@@ -199,8 +197,6 @@ describe('ConnectedServiceQuotasCoordinator — X8: stale-but-usable quota on fe
       getConnectedServiceCredentialPlain: vi.fn(async () => null),
       getConnectedServiceQuotaSnapshotSealed: vi.fn(async () => null),
       getConnectedServiceCredentialSealed: vi.fn(async () => null),
-      registerConnectedServiceQuotaSnapshotPlain: vi.fn(async () => {}),
-      registerConnectedServiceQuotaSnapshotSealed: vi.fn(async () => {}),
       getAccountEncryptionMode: vi.fn(async () => 'plain' as const),
     };
 

@@ -72,6 +72,12 @@ export type ConnectedServiceCredentialLifecycleDescriptor = Readonly<{
   }>;
   refreshedCredentialApplication: Readonly<{
     mode: 'restart_required' | 'hot_apply' | 'no_restart_required';
+    /**
+     * Service ids whose refreshed OAuth credential is consumed out-of-band by the runtime and therefore
+     * must not trigger a process restart. Used for provider-owned brokers where the child holds only a
+     * stable marker and asks the daemon for access tokens at request time.
+     */
+    noRestartRequiredServiceIds?: ReadonlyArray<ConnectedServiceId>;
   }>;
   predictiveSoftSwitch: Readonly<{
     mode: 'supported' | 'unsupported';

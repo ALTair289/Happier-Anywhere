@@ -1,4 +1,8 @@
-import { readConnectedServiceLimitCategoryV1 } from '@happier-dev/protocol';
+import {
+  ConnectedServiceCredentialHealthStatusV1Schema,
+  ProviderAccountUsageRecordIdSchema,
+  readConnectedServiceLimitCategoryV1,
+} from '@happier-dev/protocol';
 
 import {
   ConnectedServiceRuntimeAuthFailureKindSchema,
@@ -66,6 +70,12 @@ function readNullableTimestampMs(value: unknown): number | null {
   return Math.max(0, Math.trunc(value));
 }
 
+function readNullableNonNegativeInt(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  return Math.max(0, Math.trunc(value));
+}
+
 function readKind(value: unknown): ConnectedServiceRuntimeAuthFailureKind | null {
   const parsed = ConnectedServiceRuntimeAuthFailureKindSchema.safeParse(value);
   return parsed.success ? parsed.data : null;
@@ -113,6 +123,20 @@ function readRecoveryAction(
   return null;
 }
 
+function readCredentialHealthStatus(
+  value: unknown,
+): NonNullable<ConnectedServiceRuntimeFailureClassification['credentialHealthStatus']> | null {
+  const parsed = ConnectedServiceCredentialHealthStatusV1Schema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+function readProviderAccountUsageRecordId(
+  value: unknown,
+): NonNullable<ConnectedServiceRuntimeFailureClassification['providerAccountUsageRecordId']> | null {
+  const parsed = ProviderAccountUsageRecordIdSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
 export function sanitizeConnectedServiceRuntimeFailureClassification(
   value: unknown,
 ): ConnectedServiceRuntimeFailureClassification | null {
@@ -126,6 +150,14 @@ export function sanitizeConnectedServiceRuntimeFailureClassification(
   const retryAfterMs = readNullableTimestampMs(value.retryAfterMs);
   const quotaScope = readQuotaScope(value.quotaScope);
   const providerLimitId = readNullableSafeProviderString(value.providerLimitId);
+  const sourceProviderAccountId = readNullableSafeProviderString(value.sourceProviderAccountId);
+  const sourceAccountLabel = sourceProviderAccountId
+    ? readNullableSafeProviderString(value.sourceAccountLabel)
+    : null;
+  const activeProfileId = readNullableString(value.activeProfileId);
+  const sourceKey = readNullableSafeProviderString(value.sourceKey);
+  const credentialHealthStatus = readCredentialHealthStatus(value.credentialHealthStatus);
+  const providerAccountUsageRecordId = readProviderAccountUsageRecordId(value.providerAccountUsageRecordId);
   const action = readSafeAction(value.action);
   const recoveryAction = readRecoveryAction(value.recoveryAction);
 
@@ -135,10 +167,20 @@ export function sanitizeConnectedServiceRuntimeFailureClassification(
     serviceId,
     profileId: readNullableString(value.profileId),
     groupId: readNullableString(value.groupId),
+    ...(value.groupGeneration === undefined ? {} : { groupGeneration: readNullableNonNegativeInt(value.groupGeneration) }),
+    ...(value.activeProfileId === undefined ? {} : { activeProfileId }),
+    ...(value.credentialHealthStatus === undefined ? {} : { credentialHealthStatus }),
+    ...(value.identityProofVersion === undefined
+      ? {}
+      : { identityProofVersion: readNullableNonNegativeInt(value.identityProofVersion) }),
+    ...(value.sourceKey === undefined ? {} : { sourceKey }),
+    ...(value.providerAccountUsageRecordId === undefined ? {} : { providerAccountUsageRecordId }),
     resetsAtMs: readNullableTimestampMs(value.resetsAtMs),
     ...(value.retryAfterMs === undefined ? {} : { retryAfterMs }),
     ...(quotaScope ? { quotaScope } : {}),
     ...(value.providerLimitId === undefined ? {} : { providerLimitId }),
+    ...(sourceProviderAccountId ? { sourceProviderAccountId } : {}),
+    ...(sourceProviderAccountId && value.sourceAccountLabel !== undefined ? { sourceAccountLabel } : {}),
     ...(value.action === undefined ? {} : { action }),
     planType: readNullableSafeProviderString(value.planType),
     rateLimits: null,

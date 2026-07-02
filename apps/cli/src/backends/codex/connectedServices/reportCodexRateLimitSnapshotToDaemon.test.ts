@@ -14,6 +14,8 @@ import {
 type NotifyQuotaSnapshotInput = Readonly<{
   sessionId: string;
   serviceId: 'openai-codex';
+  groupId?: string | null;
+  groupGeneration?: number | null;
   snapshot: unknown;
 }>;
 
@@ -56,6 +58,8 @@ describe('reportCodexRateLimitSnapshotToDaemon', () => {
     expect(notify).toHaveBeenCalledWith({
       sessionId: 'sess_1',
       serviceId: 'openai-codex',
+      groupId: 'main',
+      groupGeneration: 2,
       snapshot: expect.objectContaining({
         serviceId: 'openai-codex',
         profileId: 'backup',
@@ -150,14 +154,16 @@ describe('reportCodexRateLimitSnapshotToDaemon', () => {
       notify,
     });
 
-    expect(notify).toHaveBeenCalledWith({
+    expect(notify).toHaveBeenCalledWith(expect.objectContaining({
       sessionId: 'sess_1',
       serviceId: 'openai-codex',
+      groupId: 'main',
+      groupGeneration: 2,
       snapshot: expect.objectContaining({
         serviceId: 'openai-codex',
         profileId: 'fresh-member',
       }),
-    });
+    }));
   });
 
   it('falls back to the child env selection when session metadata has no usable connected binding', async () => {
@@ -183,11 +189,13 @@ describe('reportCodexRateLimitSnapshotToDaemon', () => {
       notify,
     });
 
-    expect(notify).toHaveBeenCalledWith({
+    expect(notify).toHaveBeenCalledWith(expect.objectContaining({
       sessionId: 'sess_1',
       serviceId: 'openai-codex',
+      groupId: 'main',
+      groupGeneration: 2,
       snapshot: expect.objectContaining({ profileId: 'backup' }),
-    });
+    }));
   });
 
   it('does not report selected auth-store account id as live activeAccountId for connected-service snapshots', async () => {
@@ -221,13 +229,15 @@ describe('reportCodexRateLimitSnapshotToDaemon', () => {
       notify,
     });
 
-    expect(notify).toHaveBeenCalledWith({
+    expect(notify).toHaveBeenCalledWith(expect.objectContaining({
       sessionId: 'sess_1',
       serviceId: 'openai-codex',
+      groupId: 'main',
+      groupGeneration: 2,
       snapshot: expect.not.objectContaining({
         activeAccountId: 'acct_selected_not_proven_live',
       }),
-    });
+    }));
     const firstCall = notify.mock.calls[0]?.[0];
     expect(firstCall?.snapshot).not.toHaveProperty('activeAccountId');
   });
@@ -269,15 +279,17 @@ describe('reportCodexRateLimitSnapshotToDaemon', () => {
       notify,
     });
 
-    expect(notify).toHaveBeenCalledWith({
+    expect(notify).toHaveBeenCalledWith(expect.objectContaining({
       sessionId: 'sess_1',
       serviceId: 'openai-codex',
+      groupId: 'main',
+      groupGeneration: 2,
       snapshot: expect.objectContaining({
         profileId: 'backup',
         activeAccountId: 'acct_live_codex',
         accountLabel: 'live@example.test',
       }),
-    });
+    }));
   });
 
   it('reports connected-service activeAccountId when the runtime supplies live account/read proof', async () => {
@@ -302,15 +314,17 @@ describe('reportCodexRateLimitSnapshotToDaemon', () => {
       notify,
     });
 
-    expect(notify).toHaveBeenCalledWith({
+    expect(notify).toHaveBeenCalledWith(expect.objectContaining({
       sessionId: 'sess_1',
       serviceId: 'openai-codex',
+      groupId: 'main',
+      groupGeneration: 2,
       snapshot: expect.objectContaining({
         profileId: 'backup',
         activeAccountId: 'acct_live_from_account_read',
         accountLabel: 'live-account@example.test',
       }),
-    });
+    }));
   });
 
   it('normalizes merged sparse app-server snapshots without erasing identity or reset windows', async () => {
@@ -507,16 +521,18 @@ describe('reportCodexRateLimitSnapshotToDaemon', () => {
       notify,
     });
 
-    expect(notify).toHaveBeenCalledWith({
+    expect(notify).toHaveBeenCalledWith(expect.objectContaining({
       sessionId: 'sess_1',
       serviceId: 'openai-codex',
+      groupId: null,
+      groupGeneration: null,
       snapshot: expect.objectContaining({
         serviceId: 'openai-codex',
         profileId: expect.stringMatching(/^acct:[a-f0-9]{48}$/u),
         activeAccountId: 'acct_native_codex',
         providerId: 'codex',
       }),
-    });
+    }));
   });
 
   it('uses the native Codex auth-store email as the quota account label when the rate-limit payload is email-less', async () => {
@@ -541,13 +557,15 @@ describe('reportCodexRateLimitSnapshotToDaemon', () => {
       notify,
     });
 
-    expect(notify).toHaveBeenCalledWith({
+    expect(notify).toHaveBeenCalledWith(expect.objectContaining({
       sessionId: 'sess_1',
       serviceId: 'openai-codex',
+      groupId: null,
+      groupGeneration: null,
       snapshot: expect.objectContaining({
         activeAccountId: 'acct_native_codex',
         accountLabel: 'codex-user@example.test',
       }),
-    });
+    }));
   });
 });

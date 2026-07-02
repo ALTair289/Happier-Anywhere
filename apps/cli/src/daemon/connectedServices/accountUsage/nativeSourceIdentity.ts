@@ -1,18 +1,19 @@
 import { createHash } from 'node:crypto';
 
-type NativeQuotaProfileIdKind = 'acct' | 'native';
+type NativeProviderAccountUsageSourceProfileKind = 'providerSubject' | 'localCredential';
 
 function hashProfileMaterial(material: string): string {
   return createHash('sha256').update(material, 'utf8').digest('hex').slice(0, 48);
 }
 
-export function buildNativeQuotaProfileId(params: Readonly<{
-  kind: NativeQuotaProfileIdKind;
+export function buildNativeProviderAccountUsageSourceProfileId(params: Readonly<{
+  kind: NativeProviderAccountUsageSourceProfileKind;
   providerId: string;
   material: string;
 }>): string {
   const providerId = params.providerId.trim();
   const material = params.material.trim();
+  const prefix = params.kind === 'providerSubject' ? 'acct' : 'native';
   const hash = hashProfileMaterial(`${providerId}:${material || 'unknown'}`);
-  return `${params.kind}:${hash}`;
+  return `${prefix}:${hash}`;
 }

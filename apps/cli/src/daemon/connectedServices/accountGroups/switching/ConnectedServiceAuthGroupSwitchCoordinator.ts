@@ -1,6 +1,7 @@
 import {
   hasConnectedServiceAuthGroupCandidateEvidenceForSwitchReason,
   selectConnectedServiceAuthGroupCandidate,
+  type ConnectedServiceAuthGroupCandidateDecisionTrace,
   type ConnectedServiceAuthGroupMember,
   type ConnectedServiceAuthGroupMemberRuntimeState,
   type ConnectedServiceAuthGroupPolicyV1,
@@ -54,6 +55,10 @@ type ConnectedServiceAuthGroupSwitchApplyGenerationInput = Readonly<{
    * than null (which the UI renders as the native / "CLI Auth" label).
    */
   fromProfileId?: string | null;
+}>;
+
+type ConnectedServiceAuthGroupSwitchDecisionDiagnostics = Readonly<{
+  decisionTrace: ConnectedServiceAuthGroupCandidateDecisionTrace;
 }>;
 
 type LeaseOutcome =
@@ -183,6 +188,7 @@ export type ConnectedServiceAuthGroupSwitchResult =
         reason: string;
         retryAtMs?: number | null;
       }>>;
+      diagnostics?: ConnectedServiceAuthGroupSwitchDecisionDiagnostics;
     }>
   | Readonly<{ status: 'manual_strategy'; generation: number }>
   | Readonly<{ status: 'auto_switch_disabled'; generation: number }>
@@ -212,6 +218,7 @@ export type ConnectedServiceAuthGroupSwitchEvent = Readonly<{
   resultStatus: ConnectedServiceAuthGroupSwitchResult['status'];
   success: boolean;
   latencyMs: number;
+  decisionTrace?: ConnectedServiceAuthGroupCandidateDecisionTrace;
 }>;
 
 function isReasonEnabled(policy: ConnectedServiceAuthGroupPolicyV1, reason: string): boolean {
@@ -243,6 +250,53 @@ function resolveEarliestRetryAtMs(excluded: ReadonlyArray<Readonly<{ retryAtMs?:
   return earliest;
 }
 
+function buildSwitchDecisionDiagnostics(input: Readonly<{
+  decisionTrace: ConnectedServiceAuthGroupCandidateDecisionTrace;
+}>): ConnectedServiceAuthGroupSwitchDecisionDiagnostics {
+  return { decisionTrace: input.decisionTrace };
+}
+
+function isReadonlyRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isSwitchDecisionTrace(value: unknown): value is ConnectedServiceAuthGroupCandidateDecisionTrace {
+  if (!isReadonlyRecord(value)) return false;
+  const reason = value.reason;
+  return (
+    (reason === 'selected' || reason === 'manual_strategy' || reason === 'no_eligible_members')
+    && Array.isArray(value.candidates)
+  );
+}
+
+function mergeSwitchDecisionDiagnostics(input: Readonly<{
+  diagnostics?: unknown;
+  decisionTrace: ConnectedServiceAuthGroupCandidateDecisionTrace;
+}>): unknown {
+  if (input.diagnostics === undefined) {
+    return buildSwitchDecisionDiagnostics({ decisionTrace: input.decisionTrace });
+  }
+  if (isReadonlyRecord(input.diagnostics)) {
+    return {
+      ...input.diagnostics,
+      decisionTrace: input.decisionTrace,
+    };
+  }
+  return {
+    applyDiagnostics: input.diagnostics,
+    decisionTrace: input.decisionTrace,
+  };
+}
+
+function readSwitchResultDecisionTrace(
+  result: ConnectedServiceAuthGroupSwitchResult,
+): ConnectedServiceAuthGroupCandidateDecisionTrace | undefined {
+  if (!('diagnostics' in result)) return undefined;
+  if (!isReadonlyRecord(result.diagnostics)) return undefined;
+  const decisionTrace = result.diagnostics.decisionTrace;
+  return isSwitchDecisionTrace(decisionTrace) ? decisionTrace : undefined;
+}
+
 function resolvePolicyRecoveryWaitRetryAtMs(input: Readonly<{
   retryAtMs?: number | null;
   resetsAtMs?: number | null;
@@ -252,6 +306,38 @@ function resolvePolicyRecoveryWaitRetryAtMs(input: Readonly<{
   return values.length > 0 ? Math.max(...values) : null;
 }
 
+function buildPolicyWaitUntilResetResult(input: Readonly<{
+  loaded: ConnectedServiceAuthGroupSwitchState;
+  retryAtMs: number | null;
+}>): Extract<ConnectedServiceAuthGroupSwitchResult, Readonly<{ status: 'no_eligible_member' }>> {
+  const excluded = input.loaded.members.map((member) => ({
+    profileId: member.profileId,
+    reason: 'policy_wait_until_reset' as const,
+    ...(input.retryAtMs === null ? {} : { retryAtMs: input.retryAtMs }),
+  }));
+  const candidates = input.loaded.members.map((member) => ({
+    profileId: member.profileId,
+    decision: 'excluded' as const,
+    exclusionReason: 'policy_wait_until_reset' as const,
+    ...(input.retryAtMs === null ? {} : { retryAtMs: input.retryAtMs }),
+    quotaEvidence: { status: 'stale_or_missing' as const },
+  }));
+  return {
+    status: 'no_eligible_member',
+    generation: input.loaded.generation,
+    groupExhausted: true,
+    retryAtMs: input.retryAtMs,
+    excluded,
+    diagnostics: buildSwitchDecisionDiagnostics({
+      decisionTrace: {
+        activeProfileId: input.loaded.activeProfileId,
+        reason: 'no_eligible_members',
+        candidates,
+      },
+    }),
+  };
+}
+
 function normalizeProfileId(value: string | null | undefined): string | null {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
@@ -259,12 +345,18 @@ function normalizeProfileId(value: string | null | undefined): string | null {
 }
 
 function canRetryCurrentProfileForObservedProfile(input: Readonly<{
+  reason: string;
   observedProfileId?: string | null;
   activeProfileId: string | null | undefined;
 }>): boolean {
+  if (input.reason !== 'soft_threshold') return false;
   const observedProfileId = normalizeProfileId(input.observedProfileId);
   const activeProfileId = normalizeProfileId(input.activeProfileId);
   return !observedProfileId || !activeProfileId || observedProfileId === activeProfileId;
+}
+
+function canRetryObservedProfileDuringPreTurnSelection(reason: string): boolean {
+  return reason === 'soft_threshold';
 }
 
 function isProfileEligibleForObservedGeneration(input: Readonly<{
@@ -391,13 +483,48 @@ function buildPredictiveApplyUnavailableResult(input: Readonly<{
   activeProfileId: string | null;
   generation: number;
   failure: ConnectedServiceAuthGenerationApplyFailure;
+  decisionTrace?: ConnectedServiceAuthGroupCandidateDecisionTrace;
 }>): Extract<ConnectedServiceAuthGroupSwitchResult, { status: 'predictive_apply_unavailable' }> {
+  const diagnostics = input.decisionTrace === undefined
+    ? input.failure.diagnostics
+    : mergeSwitchDecisionDiagnostics({
+        diagnostics: input.failure.diagnostics,
+        decisionTrace: input.decisionTrace,
+      });
   return {
     status: 'predictive_apply_unavailable',
     activeProfileId: input.activeProfileId,
     generation: input.generation,
     errorCode: input.failure.errorCode,
-    ...(input.failure.diagnostics === undefined ? {} : { diagnostics: input.failure.diagnostics }),
+    ...(diagnostics === undefined ? {} : { diagnostics }),
+  };
+}
+
+function buildGenerationApplyResult(input: Readonly<{
+  activeProfileId: string | null;
+  generation: number;
+  reason?: string;
+  failure: ConnectedServiceAuthGenerationApplyFailure;
+  decisionTrace?: ConnectedServiceAuthGroupCandidateDecisionTrace;
+}>): Extract<
+  ConnectedServiceAuthGroupSwitchResult,
+  { status: 'generation_apply_failed' | 'predictive_apply_unavailable' }
+> {
+  if (isTransientPredictiveApplyUnavailable({ reason: input.reason, failure: input.failure })) {
+    return buildPredictiveApplyUnavailableResult(input);
+  }
+  const diagnostics = input.decisionTrace === undefined
+    ? input.failure.diagnostics
+    : mergeSwitchDecisionDiagnostics({
+        diagnostics: input.failure.diagnostics,
+        decisionTrace: input.decisionTrace,
+      });
+  return {
+    status: 'generation_apply_failed',
+    activeProfileId: input.activeProfileId,
+    generation: input.generation,
+    errorCode: input.failure.errorCode,
+    ...(diagnostics === undefined ? {} : { diagnostics }),
   };
 }
 
@@ -626,6 +753,9 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
         status: 'observed_generation',
         activeProfileId: observed.activeProfileId,
         generation: observed.generation,
+        diagnostics: buildSwitchDecisionDiagnostics({
+          decisionTrace: observedGenerationSelection.decisionTrace,
+        }),
       },
     });
     input.lease.complete(completion);
@@ -637,23 +767,17 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
 
   private async applyObservedGeneration(completion: LeaseCompletion): Promise<ObservedGenerationApplyResult> {
     let applyResult: ConnectedServiceAuthGroupSwitchApplyGenerationResult | void;
+    const decisionTrace = readSwitchResultDecisionTrace(completion.result);
     try {
       const preflightFailure = await this.preflightPredictiveSessionApply(completion);
       if (preflightFailure) {
-        if (isTransientPredictiveApplyUnavailable({ reason: completion.reason, failure: preflightFailure })) {
-          return buildPredictiveApplyUnavailableResult({
-            activeProfileId: completion.activeProfileId,
-            generation: completion.generation,
-            failure: preflightFailure,
-          });
-        }
-        return {
-          status: 'generation_apply_failed',
+        return buildGenerationApplyResult({
           activeProfileId: completion.activeProfileId,
           generation: completion.generation,
-          errorCode: preflightFailure.errorCode,
-          ...(preflightFailure.diagnostics === undefined ? {} : { diagnostics: preflightFailure.diagnostics }),
-        };
+          reason: completion.reason,
+          failure: preflightFailure,
+          ...(decisionTrace === undefined ? {} : { decisionTrace }),
+        });
       }
       applyResult = await this.deps.applyGeneration(completion);
       const predictiveFailure = readPredictiveSoftSwitchSessionApplyFailure({
@@ -662,44 +786,39 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
         applyResult,
       });
       if (predictiveFailure) {
-        if (isTransientPredictiveApplyUnavailable({ reason: completion.reason, failure: predictiveFailure })) {
-          return buildPredictiveApplyUnavailableResult({
-            activeProfileId: completion.activeProfileId,
-            generation: completion.generation,
-            failure: predictiveFailure,
-          });
-        }
-        return {
-          status: 'generation_apply_failed',
+        return buildGenerationApplyResult({
           activeProfileId: completion.activeProfileId,
           generation: completion.generation,
-          errorCode: predictiveFailure.errorCode,
-          ...(predictiveFailure.diagnostics === undefined ? {} : { diagnostics: predictiveFailure.diagnostics }),
-        };
+          reason: completion.reason,
+          failure: predictiveFailure,
+          ...(decisionTrace === undefined ? {} : { decisionTrace }),
+        });
       }
+      const applyFields = switchResultApplyFields(applyResult);
       return {
         status: 'observed_generation',
         activeProfileId: completion.activeProfileId,
         generation: completion.generation,
-        ...switchResultApplyFields(applyResult),
+        ...applyFields,
+        ...(decisionTrace === undefined
+          ? {}
+          : {
+              diagnostics: mergeSwitchDecisionDiagnostics({
+                diagnostics: applyFields.diagnostics,
+                decisionTrace,
+              }),
+            }),
       };
     } catch (error) {
       const applyFailure = readConnectedServiceAuthGenerationApplyFailure(error);
       if (!applyFailure) throw error;
-      if (isTransientPredictiveApplyUnavailable({ reason: completion.reason, failure: applyFailure })) {
-        return buildPredictiveApplyUnavailableResult({
-          activeProfileId: completion.activeProfileId,
-          generation: completion.generation,
-          failure: applyFailure,
-        });
-      }
-      return {
-        status: 'generation_apply_failed',
+      return buildGenerationApplyResult({
         activeProfileId: completion.activeProfileId,
         generation: completion.generation,
-        errorCode: applyFailure.errorCode,
-        ...(applyFailure.diagnostics === undefined ? {} : { diagnostics: applyFailure.diagnostics }),
-      };
+        reason: completion.reason,
+        failure: applyFailure,
+        ...(decisionTrace === undefined ? {} : { decisionTrace }),
+      });
     }
   }
 
@@ -781,6 +900,7 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
     mode?: ConnectedServiceAuthGroupSwitchApplyMode;
     success: boolean;
     startedAtMs: number;
+    decisionTrace?: ConnectedServiceAuthGroupCandidateDecisionTrace;
   }>): void {
     this.deps.emitEvent?.({
       type: 'connected_service_auth_group_switch',
@@ -802,6 +922,7 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
       resultStatus: input.resultStatus,
       success: input.success,
       latencyMs: Math.max(0, this.deps.nowMs() - input.startedAtMs),
+      ...(input.decisionTrace === undefined ? {} : { decisionTrace: input.decisionTrace }),
     });
   }
 
@@ -827,6 +948,7 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
     mode?: ConnectedServiceAuthGroupSwitchApplyMode;
     success: boolean;
     startedAtMs: number;
+    decisionTrace?: ConnectedServiceAuthGroupCandidateDecisionTrace;
   }>): void {
     if (input.resultStatus === 'predictive_apply_unavailable') return;
     if (!this.shouldEmitSwitchPipelineResult(input.trigger, input.phase)) return;
@@ -881,6 +1003,7 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
       toGeneration: input.result.generation,
       success: false,
       startedAtMs: input.startedAtMs,
+      decisionTrace: readSwitchResultDecisionTrace(input.result),
     });
     return input.result;
   }
@@ -908,15 +1031,12 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
     if (input.loaded.policy.recoveryMode === 'wait_until_reset') {
       return {
         phase: 'policy',
-        result: {
-          status: 'no_eligible_member',
-          generation: input.loaded.generation,
-          groupExhausted: true,
+        result: buildPolicyWaitUntilResetResult({
+          loaded: input.loaded,
           retryAtMs: input.trigger === 'classified_failure'
             ? resolvePolicyRecoveryWaitRetryAtMs(input.request)
             : null,
-          excluded: [],
-        },
+        }),
       };
     }
 
@@ -992,6 +1112,7 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
           toGeneration: observed.generation,
           success: false,
           startedAtMs,
+          decisionTrace: readSwitchResultDecisionTrace(observed.result),
         });
         return observed.result;
       }
@@ -1096,6 +1217,9 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
                 status: 'observed_generation',
                 activeProfileId: loaded.activeProfileId,
                 generation: loaded.generation,
+                diagnostics: buildSwitchDecisionDiagnostics({
+                  decisionTrace: observedGenerationSelection.decisionTrace,
+                }),
               },
             });
             lease.complete(completion);
@@ -1141,10 +1265,11 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
       }
 
       if (trigger === 'pre_turn') {
+        const allowCurrentProfileRetry = canRetryObservedProfileDuringPreTurnSelection(input.reason);
         loaded = await this.probeQuotaSnapshotsBeforePreTurnSelection({
           request: input,
           loaded,
-          allowCurrentProfileRetry: true,
+          allowCurrentProfileRetry,
         });
 
         const loadedActiveProfileId = normalizeProfileId(loaded.activeProfileId);
@@ -1156,7 +1281,7 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
             policy: loaded.policy,
             members: loaded.members,
             memberStatesByProfileId: loaded.memberStatesByProfileId,
-            allowCurrentProfileRetry: true,
+            allowCurrentProfileRetry,
           });
           if (isProfileEligibleForObservedGeneration({
             profileId: loadedActiveProfileId,
@@ -1170,6 +1295,9 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
               status: 'observed_generation',
               activeProfileId: loaded.activeProfileId,
               generation: loaded.generation,
+              diagnostics: buildSwitchDecisionDiagnostics({
+                decisionTrace: observedGenerationSelection.decisionTrace,
+              }),
             };
             const completion = buildLeaseCompletion({
               ...(input.sessionId ? { sessionId: input.sessionId } : {}),
@@ -1217,6 +1345,7 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
 
       const allowLoadedActiveProfileRetry = trigger === 'pre_turn'
         ? canRetryCurrentProfileForObservedProfile({
+            reason: input.reason,
             observedProfileId,
             activeProfileId: loaded.activeProfileId,
           })
@@ -1239,6 +1368,7 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
               groupExhausted: true,
               retryAtMs: resolveEarliestRetryAtMs(selected.excluded),
               excluded: selected.excluded,
+              diagnostics: buildSwitchDecisionDiagnostics({ decisionTrace: selected.decisionTrace }),
             };
         return this.completePipelineResult({
           trigger,
@@ -1252,11 +1382,13 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
       }
 
       let selectedProfileId = selected.selected.profileId;
+      let selectedDecisionTrace = selected.decisionTrace;
       if (selectedProfileId === loaded.activeProfileId && trigger === 'pre_turn' && allowLoadedActiveProfileRetry) {
         const result: ConnectedServiceAuthGroupSwitchResult = {
           status: 'observed_generation',
           activeProfileId: loaded.activeProfileId,
           generation: loaded.generation,
+          diagnostics: buildSwitchDecisionDiagnostics({ decisionTrace: selectedDecisionTrace }),
         };
         return this.completePipelineResult({
           trigger,
@@ -1286,22 +1418,13 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
             fromProfileId: commitLoaded.activeProfileId,
           });
           if (preflightFailure) {
-            const result: ConnectedServiceAuthGroupSwitchResult = isTransientPredictiveApplyUnavailable({
+            const result: ConnectedServiceAuthGroupSwitchResult = buildGenerationApplyResult({
+              activeProfileId: selectedProfileId,
+              generation: commitLoaded.generation + 1,
               reason: input.reason,
               failure: preflightFailure,
-            })
-              ? buildPredictiveApplyUnavailableResult({
-                  activeProfileId: selectedProfileId,
-                  generation: commitLoaded.generation + 1,
-                  failure: preflightFailure,
-                })
-              : {
-                  status: 'generation_apply_failed',
-                  activeProfileId: selectedProfileId,
-                  generation: commitLoaded.generation + 1,
-                  errorCode: preflightFailure.errorCode,
-                  ...(preflightFailure.diagnostics === undefined ? {} : { diagnostics: preflightFailure.diagnostics }),
-                };
+              decisionTrace: selectedDecisionTrace,
+            });
             if (result.status === 'predictive_apply_unavailable') {
               return this.completePipelineResult({
                 trigger,
@@ -1313,6 +1436,28 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
                 startedAtMs,
               });
             }
+            this.maybeEmitSwitchPipelineResult({
+              trigger,
+              phase: 'apply_failed',
+              request: input,
+              loaded: commitLoaded,
+              resultStatus: 'generation_apply_failed',
+              toProfileId: selectedProfileId,
+              toGeneration: commitLoaded.generation + 1,
+              success: false,
+              startedAtMs,
+              decisionTrace: selectedDecisionTrace,
+            });
+            lease.complete(buildLeaseCompletion({
+              ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+              serviceId: input.serviceId,
+              groupId: input.groupId,
+              activeProfileId: selectedProfileId,
+              generation: commitLoaded.generation + 1,
+              reason: input.reason,
+              fromProfileId: commitLoaded.activeProfileId,
+              result,
+            }));
             return result;
           }
           committed = await this.deps.commitSwitch({
@@ -1370,6 +1515,7 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
                     groupExhausted: true,
                     retryAtMs: resolveEarliestRetryAtMs(retrySelected.excluded),
                     excluded: retrySelected.excluded,
+                    diagnostics: buildSwitchDecisionDiagnostics({ decisionTrace: retrySelected.decisionTrace }),
                   };
               return this.completePipelineResult({
                 trigger,
@@ -1382,6 +1528,7 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
               });
             }
             selectedProfileId = retrySelected.selected.profileId;
+            selectedDecisionTrace = retrySelected.decisionTrace;
             if (trigger === 'pre_turn' && selectedProfileId === commitLoaded.activeProfileId) {
               const result: ConnectedServiceAuthGroupSwitchResult = {
                 status: 'observed_generation',
@@ -1414,6 +1561,7 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
           status: 'switched',
           activeProfileId: committed.activeProfileId ?? selectedProfileId,
           generation: committed.generation,
+          diagnostics: buildSwitchDecisionDiagnostics({ decisionTrace: selectedDecisionTrace }),
         },
       });
       let applyResult: ConnectedServiceAuthGroupSwitchApplyGenerationResult | void;
@@ -1448,13 +1596,17 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
           toGeneration: committed.generation,
           success: false,
           startedAtMs,
+          decisionTrace: selectedDecisionTrace,
         });
         return {
           status: 'generation_apply_failed',
           activeProfileId: committed.activeProfileId ?? selectedProfileId,
           generation: committed.generation,
           errorCode: applyFailure.errorCode,
-          ...(applyFailure.diagnostics === undefined ? {} : { diagnostics: applyFailure.diagnostics }),
+          diagnostics: mergeSwitchDecisionDiagnostics({
+            diagnostics: applyFailure.diagnostics,
+            decisionTrace: selectedDecisionTrace,
+          }),
         };
       }
       const sessionSwitchKey = this.resolveSessionSwitchKey(input);
@@ -1485,13 +1637,17 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
           toGeneration: committed.generation,
           success: false,
           startedAtMs,
+          decisionTrace: selectedDecisionTrace,
         });
         return {
           status: 'generation_apply_failed',
           activeProfileId: committed.activeProfileId ?? selectedProfileId,
           generation: committed.generation,
           errorCode: predictiveFailure.errorCode,
-          ...(predictiveFailure.diagnostics === undefined ? {} : { diagnostics: predictiveFailure.diagnostics }),
+          diagnostics: mergeSwitchDecisionDiagnostics({
+            diagnostics: predictiveFailure.diagnostics,
+            decisionTrace: selectedDecisionTrace,
+          }),
         };
       }
       this.recordSessionSwitch(sessionSwitchKey, this.deps.nowMs());
@@ -1506,12 +1662,18 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
         ...(applyResult?.mode ? { mode: applyResult.mode } : {}),
         success: true,
         startedAtMs,
+        decisionTrace: selectedDecisionTrace,
       });
+      const applyFields = switchResultApplyFields(applyResult);
       return {
         status: 'switched',
         activeProfileId: committed.activeProfileId ?? selectedProfileId,
         generation: committed.generation,
-        ...switchResultApplyFields(applyResult),
+        ...applyFields,
+        diagnostics: mergeSwitchDecisionDiagnostics({
+          diagnostics: applyFields.diagnostics,
+          decisionTrace: selectedDecisionTrace,
+        }),
       };
     } catch (error) {
       lease.fail(error);

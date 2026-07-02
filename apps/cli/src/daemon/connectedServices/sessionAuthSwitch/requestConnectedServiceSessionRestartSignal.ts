@@ -115,7 +115,7 @@ export async function requestConnectedServiceSessionRestartSignal(params: Readon
   pid: number;
   processGroupPid?: number | null;
   delayMs: number;
-  shouldSignal?: () => boolean;
+  shouldSignal?: () => boolean | Promise<boolean>;
   onSignalFailure: (error: unknown) => void;
   onProcessAlreadyMissing?: () => void;
   restartDiagnostic?: ConnectedServiceDaemonRestartDiagnosticInput;
@@ -136,8 +136,8 @@ export async function requestConnectedServiceSessionRestartSignal(params: Readon
     });
   };
 
-  const signal = (): ConnectedServiceSessionRestartSignalResult => {
-    if (params.shouldSignal && !params.shouldSignal()) {
+  const signal = async (): Promise<ConnectedServiceSessionRestartSignalResult> => {
+    if (params.shouldSignal && !await params.shouldSignal()) {
       recordDiagnostic('skipped_stale_owner');
       return { status: 'skipped_stale_owner' };
     }
@@ -170,13 +170,13 @@ export async function requestConnectedServiceSessionRestartSignal(params: Readon
   };
 
   if (params.delayMs <= 0) {
-    return signal();
+    return await signal();
   }
 
   return await new Promise<ConnectedServiceSessionRestartSignalResult>((resolve, reject) => {
     const timer = setTimeout(() => {
       try {
-        resolve(signal());
+        void signal().then(resolve, reject);
       } catch (error) {
         reject(error);
       }

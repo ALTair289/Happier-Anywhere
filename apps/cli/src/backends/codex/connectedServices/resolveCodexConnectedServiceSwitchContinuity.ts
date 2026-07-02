@@ -28,6 +28,12 @@ function asNonEmptyString(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function readRecord(value: unknown): Record<string, unknown> | null {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
 export async function resolveCodexConnectedServiceSwitchContinuity(
   params: ConnectedServiceSwitchContinuityParams,
 ): Promise<ConnectedServiceSwitchContinuityResult> {
@@ -49,6 +55,9 @@ export async function resolveCodexConnectedServiceSwitchContinuity(
       && !Array.isArray(hotApply)
       && (hotApply as Record<string, unknown>).supported === true
     ) {
+      return { mode: 'hot_apply' };
+    }
+    if (readRecord(params.runtimeAuthSelection)?.requireDirectLiveHotApply === true) {
       return { mode: 'hot_apply' };
     }
   }

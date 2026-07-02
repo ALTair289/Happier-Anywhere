@@ -1,5 +1,5 @@
 import { lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep, win32 } from 'node:path';
 
 import type { ConnectedServiceStateSharingDescriptor, ConnectedServiceStateSharingDescriptorEntry } from '@/backends/types';
 import type { ConnectedServicesMaterializationDiagnostic } from '@/daemon/connectedServices/materialize/providerMaterializerTypes';
@@ -68,10 +68,40 @@ export type ApplyConnectedServiceStateSharingDescriptorResult = Readonly<{
   importedSessionFileMappings: readonly ConnectedServiceStateSharingSessionFileMappingV1[];
 }>;
 
+function isWin32ShapedPath(path: string): boolean {
+  return /^[a-zA-Z]:[\\/]/.test(path)
+    || path.startsWith('\\\\?\\')
+    || path.startsWith('\\\\')
+    || path.startsWith('//')
+    || path.includes('\\');
+}
+
+function normalizeWin32ExtendedLengthPath(path: string): string {
+  if (path.startsWith('\\\\?\\UNC\\')) return `\\\\${path.slice('\\\\?\\UNC\\'.length)}`;
+  if (path.startsWith('\\\\?\\')) return path.slice('\\\\?\\'.length);
+  return path;
+}
+
+function resolveForPathComparison(path: string): string {
+  if (isWin32ShapedPath(path)) return win32.resolve(normalizeWin32ExtendedLengthPath(path));
+  return resolve(path);
+}
+
+function relativeForPathComparison(root: string, path: string): string {
+  if (isWin32ShapedPath(path) || isWin32ShapedPath(root)) {
+    return win32.relative(resolveForPathComparison(root), resolveForPathComparison(path));
+  }
+
+  return relative(resolveForPathComparison(root), resolveForPathComparison(path));
+}
+
 function isPathWithin(path: string, root: string): boolean {
-  const rel = relative(root, path);
+  const rel = relativeForPathComparison(root, path);
   if (rel.length === 0) return true;
-  return !rel.startsWith('..') && !rel.startsWith(sep) && !rel.includes(`..${sep}`);
+  if (isWin32ShapedPath(path) || isWin32ShapedPath(root)) {
+    return !rel.startsWith('..') && !win32.isAbsolute(rel) && !rel.includes(`..${win32.sep}`);
+  }
+  return !rel.startsWith('..') && !isAbsolute(rel) && !rel.includes(`..${sep}`);
 }
 
 function normalizeRelativePath(path: string): string {
@@ -83,9 +113,9 @@ function isAllowedMigrationSource(params: Readonly<{
   existingMaterializedStateContext?: ExistingMaterializedStateContext;
 }>): boolean {
   if (!params.existingMaterializedStateContext) return false;
-  const previousRoot = resolve(params.existingMaterializedStateContext.previousMaterializedRoot);
+  const previousRoot = params.existingMaterializedStateContext.previousMaterializedRoot;
   if (!isPathWithin(params.sourceRoot, previousRoot)) return false;
-  const relativeToPrevious = normalizeRelativePath(relative(previousRoot, params.sourceRoot));
+  const relativeToPrevious = normalizeRelativePath(relativeForPathComparison(previousRoot, params.sourceRoot));
   if (!relativeToPrevious || relativeToPrevious.startsWith('..') || relativeToPrevious.startsWith('/')) return false;
   return params.existingMaterializedStateContext.allowedRelativePaths.some((allowed) => {
     const normalizedAllowed = normalizeRelativePath(allowed);
@@ -96,8 +126,8 @@ function isAllowedMigrationSource(params: Readonly<{
 
 function assertNativeSourceRootInvariant(input: ApplyConnectedServiceStateSharingDescriptorInput): void {
   if (process.env.NODE_ENV === 'production') return;
-  const sourceRoot = resolve(input.nativeSourceContext.sourceRoot);
-  const targetRoot = resolve(input.target.targetMaterializedRoot);
+  const sourceRoot = input.nativeSourceContext.sourceRoot;
+  const targetRoot = input.target.targetMaterializedRoot;
   if (!isPathWithin(sourceRoot, targetRoot)) return;
   if (isAllowedMigrationSource({ sourceRoot, existingMaterializedStateContext: input.existingMaterializedStateContext })) return;
   throw new Error('nativeSourceContext.sourceRoot must not be nested under target.targetMaterializedRoot');

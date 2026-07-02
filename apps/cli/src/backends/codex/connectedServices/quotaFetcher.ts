@@ -1,4 +1,3 @@
-import { ConnectedServiceQuotaFetchError, type ConnectedServiceQuotaFetcher } from '../types';
 import type { ConnectedServiceCredentialRecordV1, ConnectedServiceQuotaMeterV1 } from '@happier-dev/protocol';
 
 import { mapCodexRateLimitResetCreditsToQuotaRecoveryCredits } from '@/backends/codex/quota/codexQuotaRecoveryCredits';
@@ -6,8 +5,13 @@ import {
   consumeCodexRateLimitResetCredit,
   DEFAULT_CODEX_RATE_LIMIT_RESET_CREDITS_URL,
 } from '@/backends/codex/quota/codexRateLimitResetCreditsClient';
-import { isRecord, normalizeNonEmptyString, normalizePct, resolveConnectedServiceQuotaAccountLabel } from '../quotaNormalization';
-import { parseRetryAfterHeader } from '../normalization';
+import {
+  ConnectedServiceQuotaFetchError,
+  type ConnectedServiceQuotaFetcher,
+  type ConnectedServiceQuotaFetcherDescriptor,
+} from '@/daemon/connectedServices/quotas/types';
+import { isRecord, normalizeNonEmptyString, normalizePct, resolveConnectedServiceQuotaAccountLabel } from '@/daemon/connectedServices/quotas/quotaNormalization';
+import { parseRetryAfterHeader } from '@/daemon/connectedServices/quotas/normalization';
 
 const RESET_AT_PLAUSIBILITY_FLOOR_TOLERANCE_MS = 24 * 60 * 60_000;
 
@@ -71,6 +75,29 @@ function buildQuotaUnknownMeter(meterId: string, label: string): ConnectedServic
 }
 
 const DEFAULT_OPENAI_CODEX_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage';
+
+function parseNonEmptyStringEnv(raw: string | undefined): string | undefined {
+  const trimmed = (raw ?? '').trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function parseDisableQuotaEndpointEnv(raw: string | undefined): boolean {
+  const value = (raw ?? '').trim().toLowerCase();
+  return value === '1' || value === 'true' || value === 'yes';
+}
+
+export const openAiCodexQuotaFetcherDescriptor: ConnectedServiceQuotaFetcherDescriptor = {
+  loadQuota: ({ env, staleAfterMs }) => createOpenAiCodexQuotaFetcher({
+    usageUrl: parseNonEmptyStringEnv(env.HAPPIER_CONNECTED_SERVICES_OPENAI_CODEX_USAGE_URL),
+    resetCreditsUrl: parseNonEmptyStringEnv(env.HAPPIER_CONNECTED_SERVICES_OPENAI_CODEX_RESET_CREDITS_URL),
+    staleAfterMs,
+    userAgent: parseNonEmptyStringEnv(env.HAPPIER_CONNECTED_SERVICES_QUOTAS_USER_AGENT),
+    disablePrivateEndpoint: parseDisableQuotaEndpointEnv(
+      env.HAPPIER_CONNECTED_SERVICES_DISABLE_CODEX_QUOTA_ENDPOINT,
+    ),
+  }),
+};
+
 export function createOpenAiCodexQuotaFetcher(params?: Readonly<{
   usageUrl?: string;
   resetCreditsUrl?: string | null;

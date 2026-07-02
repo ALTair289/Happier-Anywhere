@@ -22,16 +22,36 @@ type SameAccountFanoutDiagnostic = Readonly<{
   phase: 'same_account_fanout';
   reason: string;
   retryAfterMs?: number;
+  sessionId?: string;
+  expectedProviderAccountId?: string | null;
+  actualProviderAccountId?: string | null;
+  expectedProfileId?: string;
+  actualProfileId?: string | null;
+  expectedGroupId?: string;
+  actualGroupId?: string | null;
+  expectedGroupGeneration?: number | null;
+  actualGroupGeneration?: number | null;
 }>;
 
 function recordSuppression(
   recordDiagnostic: ((event: SameAccountFanoutDiagnostic) => void) | undefined,
-  reason: string,
+  input: Readonly<{
+    reason: string;
+    sessionId?: string;
+    expectedProviderAccountId?: string | null;
+    actualProviderAccountId?: string | null;
+    expectedProfileId?: string;
+    actualProfileId?: string | null;
+    expectedGroupId?: string;
+    actualGroupId?: string | null;
+    expectedGroupGeneration?: number | null;
+    actualGroupGeneration?: number | null;
+  }>,
 ): void {
   recordDiagnostic?.({
     event: 'quota_work_suppressed',
     phase: 'same_account_fanout',
-    reason,
+    ...input,
   });
 }
 
@@ -62,7 +82,17 @@ export async function reconcileIndexedSameAccountFanoutCandidates(input: Readonl
         expectedGroupGeneration: candidate.groupGeneration,
       });
     } catch {
-      recordSuppression(input.recordDiagnostic, 'runtime_identity_probe_missing_exact_identity');
+      recordSuppression(input.recordDiagnostic, {
+        reason: 'runtime_identity_probe_missing_exact_identity',
+        sessionId: candidate.sessionId,
+        expectedProviderAccountId: input.providerAccountId,
+        expectedProfileId: candidate.profileId,
+        actualProfileId: candidate.profileId,
+        expectedGroupId: candidate.groupId ?? input.groupId,
+        actualGroupId: candidate.groupId ?? input.groupId,
+        expectedGroupGeneration: candidate.groupGeneration,
+        actualGroupGeneration: candidate.groupGeneration,
+      });
       input.invalidateRuntimeAccountIdentity(candidate.sessionId);
       continue;
     }
@@ -77,12 +107,17 @@ export async function reconcileIndexedSameAccountFanoutCandidates(input: Readonl
       observedAtMs: input.now(),
     });
     if (match.status === 'suppressed') {
-      recordSuppression(input.recordDiagnostic, match.reason);
+      recordSuppression(input.recordDiagnostic, {
+        reason: match.reason,
+        ...match.diagnostic,
+      });
       input.invalidateRuntimeAccountIdentity(candidate.sessionId);
       continue;
     }
     if (match.staleExpectedStateReconciled) {
-      recordSuppression(input.recordDiagnostic, 'runtime_identity_probe_stale_expected_state_reconciled');
+      recordSuppression(input.recordDiagnostic, {
+        reason: 'runtime_identity_probe_stale_expected_state_reconciled',
+      });
     }
     input.recordRuntimeAccountIdentity(match.entry);
     reconciled.push(match.entry);

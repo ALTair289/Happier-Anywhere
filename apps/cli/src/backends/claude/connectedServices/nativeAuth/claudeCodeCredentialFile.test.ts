@@ -8,6 +8,8 @@ import { buildConnectedServiceCredentialRecord } from '@happier-dev/protocol';
 
 import {
   buildClaudeCodeCredentialPayload,
+  computeClaudeCodeCredentialAccountProofFingerprint,
+  computeClaudeCodeCredentialFingerprint,
   parseClaudeCodeCredentialFile,
   resolveClaudeCodeCredentialsFilePath,
   writeClaudeCodeCredentialsFile,
@@ -123,6 +125,30 @@ describe('claudeCodeCredentialFile', () => {
         },
       },
     });
+  });
+
+  it('computes account proof fingerprints without volatile credential expiry', () => {
+    const firstPayload = {
+      claudeAiOauth: {
+        accessToken: 'access-placeholder',
+        refreshToken: 'refresh-placeholder',
+        expiresAt: REALISTIC_EXPIRES_AT_MS,
+        scopes: ['user:profile', 'user:inference'],
+      },
+    };
+    const refreshedExpiryPayload = {
+      claudeAiOauth: {
+        ...firstPayload.claudeAiOauth,
+        expiresAt: REALISTIC_EXPIRES_AT_MS + 1_000,
+      },
+    };
+
+    expect(computeClaudeCodeCredentialFingerprint(firstPayload)).not.toBe(
+      computeClaudeCodeCredentialFingerprint(refreshedExpiryPayload),
+    );
+    expect(computeClaudeCodeCredentialAccountProofFingerprint(firstPayload)).toBe(
+      computeClaudeCodeCredentialAccountProofFingerprint(refreshedExpiryPayload),
+    );
   });
 
   it('writes .credentials.json atomically under the selected CLAUDE_CONFIG_DIR', async () => {

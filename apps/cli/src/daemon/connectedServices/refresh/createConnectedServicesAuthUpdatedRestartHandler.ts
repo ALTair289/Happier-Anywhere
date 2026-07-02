@@ -147,7 +147,9 @@ export function createConnectedServicesAuthUpdatedRestartHandler(params: Readonl
     for (const target of event.affectedTargets) {
       const descriptor = await params.resolveLifecycleDescriptor(target.agentId);
       if (!(descriptor.serviceIds as readonly string[]).includes(event.binding.serviceId)) continue;
-      if (descriptor.refreshedCredentialApplication.mode !== 'restart_required') continue;
+      const refreshedCredentialApplication = descriptor.refreshedCredentialApplication;
+      if (refreshedCredentialApplication.mode !== 'restart_required') continue;
+      if ((refreshedCredentialApplication.noRestartRequiredServiceIds ?? []).some((serviceId) => serviceId === event.binding.serviceId)) continue;
       if (params.restartRequestedPids.has(target.pid)) continue;
 
       const tracked = params.pidToTrackedSession.get(target.pid);

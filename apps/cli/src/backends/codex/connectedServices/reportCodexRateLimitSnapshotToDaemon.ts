@@ -12,7 +12,7 @@ import {
   type ConnectedServiceQuotaSnapshotDeliveryFlushResult,
   type ConnectedServiceQuotaSnapshotDeliveryOutbox,
 } from '@/daemon/connectedServices/quotas/connectedServiceQuotaSnapshotDeliveryOutbox';
-import { buildNativeQuotaProfileId } from '@/daemon/connectedServices/quotas/nativeQuotaProfileId';
+import { buildNativeProviderAccountUsageSourceProfileId } from '@/daemon/connectedServices/accountUsage/nativeSourceIdentity';
 import { notifyDaemonConnectedServiceQuotaSnapshot } from '@/daemon/controlClient';
 import { resolveConfiguredCodexHome } from '../utils/resolveConfiguredCodexHome';
 import { mapCodexRateLimitSnapshotToQuotaSnapshot } from './mapCodexRateLimitSnapshot';
@@ -24,6 +24,8 @@ import {
 type NotifyQuotaSnapshot = (body: Readonly<{
   sessionId: string;
   serviceId: 'openai-codex';
+  groupId?: string | null;
+  groupGeneration?: number | null;
   snapshot: ConnectedServiceQuotaSnapshotV1;
 }>) => Promise<unknown>;
 
@@ -37,9 +39,11 @@ export function createCodexQuotaSnapshotDeliveryOutboxForNotify(input: Readonly<
   retryDelayMs?: number | null;
 }>): ConnectedServiceQuotaSnapshotDeliveryOutbox {
   return createConnectedServiceQuotaSnapshotDeliveryOutbox({
-    deliver: async ({ sessionId, snapshot }) => await input.notify({
+    deliver: async ({ sessionId, groupId, groupGeneration, snapshot }) => await input.notify({
       sessionId,
       serviceId: 'openai-codex',
+      ...(groupId !== undefined ? { groupId } : {}),
+      ...(groupGeneration !== undefined ? { groupGeneration } : {}),
       snapshot,
     }),
     retryDelayMs: input.retryDelayMs === undefined
@@ -50,9 +54,11 @@ export function createCodexQuotaSnapshotDeliveryOutboxForNotify(input: Readonly<
 }
 
 const defaultCodexQuotaSnapshotDeliveryOutbox = createCodexQuotaSnapshotDeliveryOutboxForNotify({
-  notify: async ({ sessionId, serviceId, snapshot }) => await notifyDaemonConnectedServiceQuotaSnapshot({
+  notify: async ({ sessionId, serviceId, groupId, groupGeneration, snapshot }) => await notifyDaemonConnectedServiceQuotaSnapshot({
     sessionId,
     serviceId,
+    ...(groupId !== undefined ? { groupId } : {}),
+    ...(groupGeneration !== undefined ? { groupGeneration } : {}),
     snapshot,
   }),
 });
@@ -82,8 +88,8 @@ async function resolveCodexNativeQuotaIdentity(env: Pick<NodeJS.ProcessEnv, stri
   }
   if (proof.status === 'resolved') {
     return {
-      profileId: buildNativeQuotaProfileId({
-        kind: 'acct',
+      profileId: buildNativeProviderAccountUsageSourceProfileId({
+        kind: 'providerSubject',
         providerId: 'codex',
         material: proof.accountId,
       }),
@@ -92,8 +98,8 @@ async function resolveCodexNativeQuotaIdentity(env: Pick<NodeJS.ProcessEnv, stri
     };
   }
   return {
-    profileId: buildNativeQuotaProfileId({
-      kind: 'native',
+    profileId: buildNativeProviderAccountUsageSourceProfileId({
+      kind: 'localCredential',
       providerId: 'codex',
       material: codexHome,
     }),

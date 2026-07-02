@@ -9,7 +9,7 @@ import { describe, expect, it, vi, afterEach } from 'vitest';
 
 import { buildConnectedServiceCredentialRecord } from '@happier-dev/protocol';
 
-import { createConnectedServiceQuotaFetchers } from '../createConnectedServiceQuotaFetchers';
+import { createConnectedServiceQuotaFetchers } from './createConnectedServiceQuotaFetchers';
 
 afterEach(() => {
   vi.restoreAllMocks();

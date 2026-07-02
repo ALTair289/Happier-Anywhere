@@ -15,7 +15,7 @@ import {
     projectConnectedServiceRuntimeAuthRecoveryReport,
 } from '@/daemon/connectedServices/runtimeAuth/projection/connectedServiceRuntimeAuthRecoverySessionEvent';
 import { findConnectedServiceChildSelection } from '@/daemon/connectedServices/connectedServiceChildEnvironment';
-import { buildNativeQuotaProfileId } from '@/daemon/connectedServices/quotas/nativeQuotaProfileId';
+import { buildNativeProviderAccountUsageSourceProfileId } from '@/daemon/connectedServices/accountUsage/nativeSourceIdentity';
 import { createConnectedServiceQuotaSnapshotDeliveryOutbox } from '@/daemon/connectedServices/quotas/connectedServiceQuotaSnapshotDeliveryOutbox';
 import { notifyDaemonConnectedServiceQuotaSnapshot } from '@/daemon/controlClient';
 import { logger } from '@/ui/logger';
@@ -50,9 +50,11 @@ const recentRecoveryProjectionByClient = new WeakMap<
 >();
 
 const claudeQuotaSnapshotDeliveryOutbox = createConnectedServiceQuotaSnapshotDeliveryOutbox({
-    deliver: async ({ sessionId, serviceId, snapshot }) => await notifyDaemonConnectedServiceQuotaSnapshot({
+    deliver: async ({ sessionId, serviceId, groupId, groupGeneration, snapshot }) => await notifyDaemonConnectedServiceQuotaSnapshot({
         sessionId,
         serviceId,
+        ...(groupId !== undefined ? { groupId } : {}),
+        ...(groupGeneration !== undefined ? { groupGeneration } : {}),
         snapshot,
     }),
     retryDelayMs: 1_000,
@@ -172,8 +174,8 @@ function projectClaudeRuntimeAuthRecoveryReport(input: Readonly<{
 }
 
 function buildNativeClaudeQuotaProfileId(): string {
-    return buildNativeQuotaProfileId({
-        kind: 'native',
+    return buildNativeProviderAccountUsageSourceProfileId({
+        kind: 'localCredential',
         providerId: 'claude',
         material: resolveConfiguredClaudeConfigDir({ env: process.env }),
     });
@@ -320,10 +322,15 @@ export async function surfaceClaudeRateLimitRuntimeIssue(
     const connectedServiceId: RuntimeIssueConnectedService['serviceId'] =
         classification.serviceId === 'anthropic' ? 'anthropic' : 'claude-subscription';
     const profileId = classification.profileId ?? (selection ? null : buildNativeClaudeQuotaProfileId());
+    const selectedGroup = selection?.kind === 'group' ? selection : null;
+    const effectiveGroupId = classification.groupId ?? selectedGroup?.groupId ?? null;
+    const effectiveGroupGeneration = selectedGroup && effectiveGroupId === selectedGroup.groupId
+        ? selectedGroup.generation
+        : null;
     const connectedService: RuntimeIssueConnectedService = {
         serviceId: connectedServiceId,
         profileId,
-        groupId: classification.groupId,
+        groupId: effectiveGroupId,
     };
     // Incident Jun-11 H-B (trigger half) / FIX-3: rows imported from `subagents/agent-*.jsonl`
     // (isSidechain) describe a SUBAGENT request, not the parent turn. They must not fail the
@@ -351,7 +358,8 @@ export async function surfaceClaudeRateLimitRuntimeIssue(
         await claudeQuotaSnapshotDeliveryOutbox.enqueueAndFlush({
             sessionId: session.client.sessionId,
             serviceId: connectedServiceId,
-            groupId: classification.groupId ?? (selection?.kind === 'group' ? selection.groupId : null),
+            ...(effectiveGroupId ? { groupId: effectiveGroupId } : {}),
+            ...(effectiveGroupGeneration !== null ? { groupGeneration: effectiveGroupGeneration } : {}),
             snapshot: buildClaudeRuntimeQuotaSnapshot({
                 details,
                 fetchedAt: occurredAt,

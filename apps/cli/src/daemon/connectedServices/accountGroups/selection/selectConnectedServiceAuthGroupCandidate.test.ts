@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   DEFAULT_CONNECTED_SERVICE_AUTH_GROUP_POLICY_V1,
+  hasConnectedServiceAuthGroupCandidateEvidenceForSwitchReason,
   isConnectedServiceAuthGroupSoftSwitchCandidateMeaningfullyBetter,
   reconcileMemberRuntimeStateWithFreshQuotaEvidence,
   selectConnectedServiceAuthGroupCandidate,
@@ -571,6 +572,117 @@ describe('selectConnectedServiceAuthGroupCandidate', () => {
     });
   });
 
+  it('emits candidate-level decision traces when stale source quota blocks automatic selection', () => {
+    const result = selectConnectedServiceAuthGroupCandidate({
+      nowMs: 61_100,
+      quotaFreshnessMs: 60_000,
+      activeProfileId: 'active',
+      policy: { ...basePolicy, strategy: 'least_limited', softSwitchRemainingPercent: 15 },
+      members: [
+        member('active', 1, 1),
+        member('backup', 2, 2),
+      ],
+      memberStatesByProfileId: new Map([
+        ['active', {
+          quotaSnapshot: {
+            capturedAtMs: 1,
+            effectiveMeterId: 'weekly',
+            effectiveRemainingPercent: 2,
+          },
+        }],
+        ['backup', {
+          quotaSnapshot: {
+            capturedAtMs: 61_090,
+            effectiveMeterId: 'weekly',
+            effectiveRemainingPercent: 80,
+          },
+        }],
+      ]),
+      allowCurrentProfileRetry: true,
+    });
+
+    expect(result.selected?.profileId).toBe('active');
+    expect(result).toMatchObject({
+      decisionTrace: expect.objectContaining({
+        activeProfileId: 'active',
+        reason: 'selected',
+        candidates: expect.arrayContaining([
+          expect.objectContaining({
+            profileId: 'active',
+            decision: 'selected',
+            quotaEvidence: expect.objectContaining({
+              status: 'stale_or_missing',
+            }),
+          }),
+          expect.objectContaining({
+            profileId: 'backup',
+            decision: 'eligible',
+            quotaEvidence: expect.objectContaining({
+              status: 'fresh',
+              remainingPercent: 80,
+            }),
+          }),
+        ]),
+      }),
+    });
+  });
+
+  it('allows quota-unknown targets only for hard usage-limit recovery', () => {
+    const emptyStates = new Map<string, ConnectedServiceAuthGroupMemberRuntimeState>();
+
+    expect(hasConnectedServiceAuthGroupCandidateEvidenceForSwitchReason({
+      reason: 'usage_limit',
+      profileId: 'fallback',
+      nowMs: 1_000,
+      quotaFreshnessMs: 60_000,
+      memberStatesByProfileId: emptyStates,
+    })).toBe(true);
+    expect(hasConnectedServiceAuthGroupCandidateEvidenceForSwitchReason({
+      reason: 'same_provider_account_exhausted',
+      profileId: 'fallback',
+      nowMs: 1_000,
+      quotaFreshnessMs: 60_000,
+      memberStatesByProfileId: emptyStates,
+    })).toBe(true);
+    expect(hasConnectedServiceAuthGroupCandidateEvidenceForSwitchReason({
+      reason: 'soft_threshold',
+      profileId: 'fallback',
+      nowMs: 1_000,
+      quotaFreshnessMs: 60_000,
+      memberStatesByProfileId: emptyStates,
+    })).toBe(false);
+    expect(hasConnectedServiceAuthGroupCandidateEvidenceForSwitchReason({
+      reason: 'same_provider_account_exhausted',
+      profileId: 'fallback',
+      nowMs: 1_000,
+      quotaFreshnessMs: 60_000,
+      memberStatesByProfileId: new Map([
+        ['fallback', {
+          quotaSnapshot: {
+            capturedAtMs: 900,
+            effectiveMeterId: 'weekly',
+            effectiveRemainingPercent: 0,
+          },
+        }],
+      ]),
+    })).toBe(false);
+    expect(hasConnectedServiceAuthGroupCandidateEvidenceForSwitchReason({
+      reason: 'usage_limit',
+      profileId: 'fallback',
+      nowMs: 1_000,
+      quotaFreshnessMs: 60_000,
+      memberStatesByProfileId: new Map([
+        ['fallback', {
+          quotaSnapshot: {
+            capturedAtMs: 900,
+            effectiveMeterId: 'weekly',
+            effectiveRemainingPercent: 0,
+          },
+        }],
+      ]),
+    })).toBe(false);
+  });
+
   it('applies policy fallback cooldowns to recent rate-limit and capacity failures without provider timing', () => {
     const result = selectConnectedServiceAuthGroupCandidate({
       nowMs: 1_000,
@@ -694,6 +806,34 @@ describe('selectConnectedServiceAuthGroupCandidate', () => {
       profileId: 'reauth',
       reason: 'auth_invalid',
     });
+  });
+
+  it('excludes any known non-connected credential health before automatic selection', () => {
+    const result = selectConnectedServiceAuthGroupCandidate({
+      nowMs: 1_000,
+      quotaFreshnessMs: 60_000,
+      activeProfileId: 'active',
+      policy: { ...basePolicy, strategy: 'priority' },
+      members: [
+        member('refreshing', 1, 1),
+        member('retryable-refresh-failed', 2, 2),
+        member('reauth', 3, 3),
+        member('healthy', 4, 4),
+      ],
+      memberStatesByProfileId: new Map([
+        ['refreshing', { credentialHealthStatus: 'refreshing' }],
+        ['retryable-refresh-failed', { credentialHealthStatus: 'refresh_failed_retryable' }],
+        ['reauth', { credentialHealthStatus: 'needs_reauth' }],
+        ['healthy', { credentialHealthStatus: 'connected' }],
+      ]),
+    });
+
+    expect(result.selected?.profileId).toBe('healthy');
+    expect(result.excluded).toEqual(expect.arrayContaining([
+      { profileId: 'refreshing', reason: 'auth_invalid' },
+      { profileId: 'retryable-refresh-failed', reason: 'auth_invalid' },
+      { profileId: 'reauth', reason: 'auth_invalid' },
+    ]));
   });
 
   it('excludes snapshot-level eligibility blockers from candidate selection', () => {

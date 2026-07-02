@@ -100,6 +100,7 @@ export class RuntimeAccountIdentityIndex {
       if (excludeSessionId && entry.sessionId === excludeSessionId) continue;
       if (groupId !== undefined && entry.groupId !== groupId) continue;
       const currentGeneration = input.currentGroupGenerationBySessionId?.get(entry.sessionId);
+      if (entry.groupGeneration !== null && currentGeneration === undefined) continue;
       if (
         currentGeneration !== undefined
         && entry.groupGeneration !== null

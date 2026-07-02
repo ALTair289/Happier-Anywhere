@@ -26,8 +26,7 @@ export type ConnectedServiceQuotaSnapshotDeliveryDiagnostic = Readonly<{
   phase: 'quota_snapshot_delivery';
   reason:
     | 'daemon_quota_snapshot_delivery_failed'
-    | 'quota_snapshot_outbox_overflow'
-    | 'quota_snapshot_outbox_expired';
+    | 'quota_snapshot_outbox_overflow';
   sessionId: string;
   serviceId: ConnectedServiceId;
   profileId: string;
@@ -66,15 +65,12 @@ type DeliverConnectedServiceQuotaSnapshot = (
 
 type PendingDelivery = Readonly<{
   input: ConnectedServiceQuotaSnapshotDeliveryInput;
-  firstQueuedAtMs: number;
-  lastQueuedAtMs: number;
   attempts: number;
   lastError: string | null;
 }>;
 
 const DEFAULT_MAX_ATTEMPTS = 5;
 const DEFAULT_MAX_PENDING_ENTRIES = 256;
-const DEFAULT_MAX_PENDING_PAYLOAD_AGE_MS = 5 * 60_000;
 
 function readDeliveryError(result: unknown): string | null {
   if (!result || typeof result !== 'object' || Array.isArray(result)) return null;
@@ -159,24 +155,18 @@ export function createConnectedServiceQuotaSnapshotDeliveryOutbox(params: Readon
   deliver: DeliverConnectedServiceQuotaSnapshot;
   maxAttempts?: number;
   maxPendingEntries?: number;
-  maxPendingPayloadAgeMs?: number;
   retryDelayMs?: number | null;
-  nowMs?: () => number;
   onDiagnostic?: (diagnostic: ConnectedServiceQuotaSnapshotDeliveryDiagnostic) => void;
 }>): ConnectedServiceQuotaSnapshotDeliveryOutbox {
   const pending = new Map<string, PendingDelivery>();
   const maxAttempts = normalizePositiveInt(params.maxAttempts, DEFAULT_MAX_ATTEMPTS);
   const maxPendingEntries = normalizePositiveInt(params.maxPendingEntries, DEFAULT_MAX_PENDING_ENTRIES);
-  const maxPendingPayloadAgeMs = normalizePositiveInt(
-    params.maxPendingPayloadAgeMs,
-    DEFAULT_MAX_PENDING_PAYLOAD_AGE_MS,
-  );
   const retryDelayMs =
     params.retryDelayMs === null || params.retryDelayMs === undefined
       ? null
       : normalizePositiveInt(params.retryDelayMs, 1_000);
-  const nowMs = params.nowMs ?? Date.now;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  let droppedSinceLastFlush = 0;
 
   const clearRetryTimer = (): void => {
     if (!retryTimer) return;
@@ -195,6 +185,7 @@ export function createConnectedServiceQuotaSnapshotDeliveryOutbox(params: Readon
     flushReason: ConnectedServiceQuotaSnapshotDeliveryFlushReason,
   ): void => {
     pending.delete(key);
+    droppedSinceLastFlush += 1;
     emitDiagnostic(buildDiagnostic({
       entry,
       event: 'quota_snapshot_delivery_dropped',
@@ -204,17 +195,6 @@ export function createConnectedServiceQuotaSnapshotDeliveryOutbox(params: Readon
       lastError: entry.lastError,
       flushReason,
     }));
-  };
-
-  const pruneExpired = (flushReason: ConnectedServiceQuotaSnapshotDeliveryFlushReason): number => {
-    const now = nowMs();
-    let dropped = 0;
-    for (const [key, entry] of pending) {
-      if (now - entry.firstQueuedAtMs <= maxPendingPayloadAgeMs) continue;
-      dropEntry(key, entry, 'quota_snapshot_outbox_expired', flushReason);
-      dropped += 1;
-    }
-    return dropped;
   };
 
   const enforceMaxPendingEntries = (): void => {
@@ -237,16 +217,13 @@ export function createConnectedServiceQuotaSnapshotDeliveryOutbox(params: Readon
   const enqueue = (input: ConnectedServiceQuotaSnapshotDeliveryInput): void => {
     const key = slotKey(input);
     const existing = pending.get(key);
-	    const now = nowMs();
-	    pending.set(key, {
-	      input,
-	      firstQueuedAtMs: now,
-	      lastQueuedAtMs: now,
-	      attempts: existing?.attempts ?? 0,
-	      lastError: null,
-	    });
-	    enforceMaxPendingEntries();
-	  };
+    pending.set(key, {
+      input,
+      attempts: existing?.attempts ?? 0,
+      lastError: null,
+    });
+    enforceMaxPendingEntries();
+  };
 
   const flushPending = async (options: Readonly<{
     reason?: ConnectedServiceQuotaSnapshotDeliveryFlushReason;
@@ -254,7 +231,8 @@ export function createConnectedServiceQuotaSnapshotDeliveryOutbox(params: Readon
   }> = {}): Promise<ConnectedServiceQuotaSnapshotDeliveryFlushResult> => {
     const flushReason = options.reason ?? 'manual_flush';
     clearRetryTimer();
-    let dropped = pruneExpired(flushReason);
+    let dropped = droppedSinceLastFlush;
+    droppedSinceLastFlush = 0;
     let attempted = 0;
     let delivered = 0;
     for (const [key, entry] of Array.from(pending.entries())) {
@@ -262,79 +240,53 @@ export function createConnectedServiceQuotaSnapshotDeliveryOutbox(params: Readon
       const attemptCount = entry.attempts + 1;
       attempted += 1;
       try {
-	        const result = await params.deliver(entry.input);
-	        const deliveryError = readDeliveryError(result);
-	        if (!deliveryError) {
-	          if (pending.get(key) === entry) {
-	            pending.delete(key);
-	          }
-	          delivered += 1;
-	          continue;
-	        }
-	        const currentEntry = pending.get(key);
-	        if (currentEntry !== entry) continue;
-	        const nextEntry: PendingDelivery = {
-	          ...currentEntry,
-	          attempts: attemptCount,
-	          lastError: deliveryError,
-	        };
-        if (attemptCount >= maxAttempts) {
-          pending.delete(key);
-          dropped += 1;
-          emitDiagnostic(buildDiagnostic({
-            entry: nextEntry,
-            event: 'quota_snapshot_delivery_dropped',
-            reason: 'daemon_quota_snapshot_delivery_failed',
-            attemptCount,
-            maxAttempts,
-            lastError: deliveryError,
-            flushReason,
-          }));
-        } else {
-          pending.set(key, nextEntry);
-          emitDiagnostic(buildDiagnostic({
-            entry: nextEntry,
-            event: 'quota_snapshot_delivery_retrying',
-            reason: 'daemon_quota_snapshot_delivery_failed',
-            attemptCount,
-            maxAttempts,
-            lastError: deliveryError,
-            flushReason,
-          }));
+        const result = await params.deliver(entry.input);
+        const deliveryError = readDeliveryError(result);
+        if (!deliveryError) {
+          if (pending.get(key) === entry) {
+            pending.delete(key);
+          }
+          delivered += 1;
+          continue;
         }
-	      } catch (error) {
-	        const lastError = formatDeliveryError(error);
-	        const currentEntry = pending.get(key);
-	        if (currentEntry !== entry) continue;
-	        const nextEntry: PendingDelivery = {
-	          ...currentEntry,
-	          attempts: attemptCount,
-	          lastError,
-	        };
-        if (attemptCount >= maxAttempts) {
-          pending.delete(key);
-          dropped += 1;
-          emitDiagnostic(buildDiagnostic({
-            entry: nextEntry,
-            event: 'quota_snapshot_delivery_dropped',
-            reason: 'daemon_quota_snapshot_delivery_failed',
-            attemptCount,
-            maxAttempts,
-            lastError,
-            flushReason,
-          }));
-        } else {
-          pending.set(key, nextEntry);
-          emitDiagnostic(buildDiagnostic({
-            entry: nextEntry,
-            event: 'quota_snapshot_delivery_retrying',
-            reason: 'daemon_quota_snapshot_delivery_failed',
-            attemptCount,
-            maxAttempts,
-            lastError,
-            flushReason,
-          }));
-        }
+        const currentEntry = pending.get(key);
+        if (currentEntry !== entry) continue;
+        const boundedAttemptCount = Math.min(attemptCount, maxAttempts);
+        const nextEntry: PendingDelivery = {
+          ...currentEntry,
+          attempts: boundedAttemptCount,
+          lastError: deliveryError,
+        };
+        pending.set(key, nextEntry);
+        emitDiagnostic(buildDiagnostic({
+          entry: nextEntry,
+          event: 'quota_snapshot_delivery_retrying',
+          reason: 'daemon_quota_snapshot_delivery_failed',
+          attemptCount: boundedAttemptCount,
+          maxAttempts,
+          lastError: deliveryError,
+          flushReason,
+        }));
+      } catch (error) {
+        const lastError = formatDeliveryError(error);
+        const currentEntry = pending.get(key);
+        if (currentEntry !== entry) continue;
+        const boundedAttemptCount = Math.min(attemptCount, maxAttempts);
+        const nextEntry: PendingDelivery = {
+          ...currentEntry,
+          attempts: boundedAttemptCount,
+          lastError,
+        };
+        pending.set(key, nextEntry);
+        emitDiagnostic(buildDiagnostic({
+          entry: nextEntry,
+          event: 'quota_snapshot_delivery_retrying',
+          reason: 'daemon_quota_snapshot_delivery_failed',
+          attemptCount: boundedAttemptCount,
+          maxAttempts,
+          lastError,
+          flushReason,
+        }));
       }
     }
     if (pending.size > 0) {

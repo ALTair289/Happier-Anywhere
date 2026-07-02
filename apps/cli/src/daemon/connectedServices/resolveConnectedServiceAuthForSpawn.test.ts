@@ -5,7 +5,12 @@ import { randomBytes } from 'node:crypto';
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { sealAccountScopedBlobCiphertext } from '@happier-dev/protocol';
+import {
+  buildProviderAccountUsageRecordId,
+  sealAccountScopedBlobCiphertext,
+  type ProviderAccountUsageRecordKeyV1,
+  type ProviderAccountUsageSnapshotV1,
+} from '@happier-dev/protocol';
 
 import { buildConnectedServiceCredentialRecord } from '@happier-dev/protocol';
 import type { Credentials } from '@/persistence';
@@ -37,6 +42,45 @@ async function createIsolatedClaudeSourceEnv(): Promise<NodeJS.ProcessEnv> {
     HOME: homeDir,
     USER: 'happier-test-user',
     CLAUDE_CONFIG_DIR: claudeConfigDir,
+  };
+}
+
+function createProviderAccountUsageSnapshot(profileId: string, remainingPct: number): ProviderAccountUsageSnapshotV1 {
+  const recordKey: ProviderAccountUsageRecordKeyV1 = {
+    providerId: 'claude',
+    accountSubjectId: `acct_${profileId}`,
+    subjectKind: 'subscription',
+    quotaScope: 'account',
+  };
+  return {
+    v: 1,
+    recordId: buildProviderAccountUsageRecordId(recordKey),
+    recordKey,
+    providerId: 'claude',
+    accountSubject: { kind: 'providerSubject', id: recordKey.accountSubjectId },
+    observedAtMs: 1_000,
+    fetchedAtMs: 1_000,
+    staleAfterMs: 300_000,
+    source: 'runtimeSignal',
+    confidence: 'confirmed',
+    state: 'loaded_data',
+    meters: [{
+      meterId: 'monthly',
+      label: 'Monthly',
+      used: 100 - remainingPct,
+      limit: 100,
+      remaining: remainingPct,
+      remainingPct,
+      usedPct: 100 - remainingPct,
+      utilizationPct: 100 - remainingPct,
+      resetsAt: 10_000,
+      resetAtMs: 10_000,
+      unit: 'credits',
+      status: 'ok',
+      limitScope: 'account',
+      confidence: 'exact',
+      details: { limitCategory: 'usage_limit' },
+    }],
   };
 }
 
@@ -1221,7 +1265,7 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
     });
   });
 
-  it('observes a newer group active profile when spawn fallback reports no eligible member from stale state', async () => {
+  it('observes a newer group active profile after refresh-failure fallback without snapshot-driven pre-spawn switching', async () => {
     const baseDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-test-'));
     const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-server-test-'));
     const now = 1_000_000;
@@ -1458,12 +1502,7 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
       },
     });
 
-    expect(switchBeforeTurn).toHaveBeenCalledWith({
-      sessionId: 'session-1',
-      serviceId: 'openai-codex',
-      groupId: 'codex-divergence',
-      reason: 'soft_threshold',
-    });
+    expect(switchBeforeTurn).not.toHaveBeenCalled();
     expect(switchAfterClassifiedFailure).toHaveBeenCalledWith(expect.objectContaining({
       sessionId: 'session-1',
       serviceId: 'openai-codex',
@@ -2812,7 +2851,184 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
     expect(auth.access_token).toBe('backup-access');
   });
 
-  it('delegates stale group quota probing to the pre-turn coordinator before materializing spawn auth', async () => {
+  it('uses the authoritative server active profile for hard usage-limit fallback when automatic selection reports no eligible member from stale evidence', async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-test-'));
+    const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-server-test-'));
+
+    const primaryRecord = buildConnectedServiceCredentialRecord({
+      now: 10,
+      serviceId: 'openai-codex',
+      profileId: 'primary',
+      kind: 'oauth',
+      expiresAt: null,
+      oauth: {
+        accessToken: 'primary-access',
+        refreshToken: 'primary-refresh',
+        idToken: 'primary-id',
+        scope: null,
+        tokenType: null,
+        providerAccountId: 'primary-acct',
+        providerEmail: null,
+      },
+    });
+    const backupRecord = buildConnectedServiceCredentialRecord({
+      now: 10,
+      serviceId: 'openai-codex',
+      profileId: 'backup',
+      kind: 'oauth',
+      expiresAt: null,
+      oauth: {
+        accessToken: 'backup-access',
+        refreshToken: 'backup-refresh',
+        idToken: 'backup-id',
+        scope: null,
+        tokenType: null,
+        providerAccountId: 'backup-acct',
+        providerEmail: null,
+      },
+    });
+
+    const credentials: Credentials = {
+      token: 'happy-token',
+      encryption: { type: 'legacy', secret: new Uint8Array(32).fill(12) },
+    };
+
+    if (credentials.encryption.type !== 'legacy') {
+      throw new Error('test fixture expected legacy encryption');
+    }
+
+    const primaryCiphertext = sealAccountScopedBlobCiphertext({
+      kind: 'connected_service_credential',
+      material: { type: 'legacy', secret: credentials.encryption.secret },
+      payload: primaryRecord,
+      randomBytes: (length) => randomBytes(length),
+    });
+    const backupCiphertext = sealAccountScopedBlobCiphertext({
+      kind: 'connected_service_credential',
+      material: { type: 'legacy', secret: credentials.encryption.secret },
+      payload: backupRecord,
+      randomBytes: (length) => randomBytes(length),
+    });
+
+    let groupReads = 0;
+    const getConnectedServiceAuthGroup = vi.fn(async () => {
+      groupReads += 1;
+      return {
+        v: 1,
+        serviceId: 'openai-codex',
+        groupId: 'main',
+        displayName: null,
+        activeProfileId: groupReads === 1 ? 'primary' : 'backup',
+        generation: groupReads === 1 ? 7 : 8,
+        policy: { v: 1, strategy: 'least_limited', autoSwitch: true },
+        state: { v: 1 },
+        members: [
+          {
+            v: 1,
+            serviceId: 'openai-codex',
+            groupId: 'main',
+            profileId: 'primary',
+            enabled: true,
+            priority: 1,
+            state: { v: 1, quotaExhaustedUntilMs: 5_000 },
+            createdAt: 1,
+            updatedAt: 1,
+          },
+          {
+            v: 1,
+            serviceId: 'openai-codex',
+            groupId: 'main',
+            profileId: 'backup',
+            enabled: true,
+            priority: 2,
+            state: { v: 1 },
+            createdAt: 2,
+            updatedAt: 2,
+          },
+        ],
+        createdAt: 1,
+        updatedAt: 1,
+      };
+    });
+    const switchBeforeTurn = vi.fn(async () => ({
+      status: 'no_eligible_member' as const,
+      generation: 7,
+      retryAtMs: null,
+      excluded: [
+        { profileId: 'backup', reason: 'quota_unknown' as const },
+      ],
+    }));
+
+    const api = {
+      getConnectedServiceAuthGroup,
+      getConnectedServiceCredentialSealed: async (params: { serviceId: string; profileId: string }) => {
+        const { serviceId, profileId } = params;
+        if (serviceId !== 'openai-codex') return null;
+        const ciphertextByProfileId = {
+          primary: primaryCiphertext,
+          backup: backupCiphertext,
+        } as const;
+        const sealedCiphertext = ciphertextByProfileId[profileId as keyof typeof ciphertextByProfileId];
+        if (!sealedCiphertext) return null;
+        return {
+          sealed: { format: 'account_scoped_v1', ciphertext: sealedCiphertext },
+          metadata: { kind: 'oauth', providerEmail: null, providerAccountId: `${profileId}-acct`, expiresAt: null },
+        };
+      },
+    } as unknown as ApiClient;
+
+    const resolveWithCoordinator = resolveConnectedServiceAuthForSpawn as unknown as (
+      params: Parameters<typeof resolveConnectedServiceAuthForSpawn>[0] & {
+        authGroupSwitchCoordinator: Readonly<{
+          switchBeforeTurn: typeof switchBeforeTurn;
+        }>;
+        sessionId: string;
+      },
+    ) => ReturnType<typeof resolveConnectedServiceAuthForSpawn>;
+
+    const connectedServiceAuth = await resolveWithCoordinator({
+      agentId: 'codex',
+      connectedServicesBindingsRaw: {
+        v: 1,
+        bindingsByServiceId: {
+          'openai-codex': {
+            source: 'connected',
+            selection: 'group',
+            groupId: 'main',
+            profileId: 'primary',
+          },
+        },
+      },
+      materializationKey: 'session-1',
+      activeServerDir,
+      baseDir,
+      credentials,
+      api,
+      runtimeQuotaSnapshots: new ConnectedServiceAuthGroupRuntimeQuotaSnapshotStore(),
+      quotaFreshnessMs: 60_000,
+      nowMs: () => 1_000,
+      sessionId: 'session-1',
+      authGroupSwitchCoordinator: { switchBeforeTurn },
+    });
+
+    expect(switchBeforeTurn).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      serviceId: 'openai-codex',
+      groupId: 'main',
+      reason: 'usage_limit',
+    });
+    expect(getConnectedServiceAuthGroup).toHaveBeenCalledTimes(2);
+    expect(connectedServiceAuth?.connectedServicesBindings.bindingsByServiceId['openai-codex']).toMatchObject({
+      source: 'connected',
+      selection: 'group',
+      groupId: 'main',
+      profileId: 'backup',
+    });
+    const auth = JSON.parse(await readFile(join(connectedServiceAuth!.env.CODEX_HOME, 'auth.json'), 'utf8'));
+    expect(auth.access_token).toBe('backup-access');
+  });
+
+  it('does not delegate stale group quota probing without source-backed account usage during spawn auth materialization', async () => {
     const baseDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-test-'));
     const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-server-test-'));
 
@@ -2969,18 +3185,13 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
       authGroupSwitchCoordinator: { switchBeforeTurn },
     });
 
-    expect(switchBeforeTurn).toHaveBeenCalledWith({
-      sessionId: 'session-1',
-      serviceId: 'openai-codex',
-      groupId: 'main',
-      reason: 'soft_threshold',
-    });
+    expect(switchBeforeTurn).not.toHaveBeenCalled();
     expect(connectedServiceAuth).not.toBeNull();
     const auth = JSON.parse(await readFile(join(connectedServiceAuth!.env.CODEX_HOME, 'auth.json'), 'utf8'));
-    expect(auth.access_token).toBe('backup-access');
+    expect(auth.access_token).toBe('primary-access');
   });
 
-  it('suppresses spawn-time group switching while matching runtime-auth recovery is still pending', async () => {
+  it('does not consult the soft-switch recovery guard when spawn-time soft-threshold switching is unavailable', async () => {
     const baseDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-test-'));
     const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-server-test-'));
 
@@ -3143,20 +3354,14 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
       softSwitchRecoveryGuard,
     });
 
-    expect(softSwitchRecoveryGuard).toHaveBeenCalledWith({
-      sessionId: 'session-1',
-      serviceId: 'openai-codex',
-      groupId: 'main',
-      activeProfileId: 'primary',
-      reason: 'soft_threshold',
-    });
+    expect(softSwitchRecoveryGuard).not.toHaveBeenCalled();
     expect(switchBeforeTurn).not.toHaveBeenCalled();
     expect(connectedServiceAuth).not.toBeNull();
     const auth = JSON.parse(await readFile(join(connectedServiceAuth!.env.CODEX_HOME, 'auth.json'), 'utf8'));
     expect(auth.access_token).toBe('primary-access');
   });
 
-  it('allows spawn-time soft-threshold group switching for Claude sessions before any live runtime exists (RD-QUO-10)', async () => {
+  it('does not use runtime quota snapshots as spawn-time soft-threshold switching authority', async () => {
     const baseDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-test-'));
     const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-server-test-'));
     const processEnv = await createIsolatedClaudeSourceEnv();
@@ -3384,6 +3589,205 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
       }
     }
 
+    expect(switchBeforeTurn).not.toHaveBeenCalled();
+    expect(connectedServiceAuth).not.toBeNull();
+    const credential = await readClaudeCodeNativeCredential(connectedServiceAuth!.env.CLAUDE_CONFIG_DIR!);
+    expect(credential).toMatchObject({
+      claudeAiOauth: {
+        accessToken: 'primary-access',
+        refreshToken: 'primary-refresh',
+      },
+    });
+  });
+
+  it('allows spawn-time soft-threshold group switching from source-backed provider account usage without runtime quota snapshots', async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-test-'));
+    const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-server-test-'));
+    const processEnv = await createIsolatedClaudeSourceEnv();
+    const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
+    const now = 1_000_000;
+
+    const primaryRecord = buildConnectedServiceCredentialRecord({
+      now,
+      serviceId: 'claude-subscription',
+      profileId: 'primary',
+      kind: 'oauth',
+      expiresAt: null,
+      oauth: {
+        accessToken: 'primary-access',
+        refreshToken: 'primary-refresh',
+        idToken: null,
+        scope: CLAUDE_SUBSCRIPTION_OAUTH_SCOPE,
+        tokenType: 'Bearer',
+        providerAccountId: 'primary-acct',
+        providerEmail: null,
+      },
+    });
+    const backupRecord = buildConnectedServiceCredentialRecord({
+      now,
+      serviceId: 'claude-subscription',
+      profileId: 'backup',
+      kind: 'oauth',
+      expiresAt: null,
+      oauth: {
+        accessToken: 'backup-access',
+        refreshToken: 'backup-refresh',
+        idToken: null,
+        scope: CLAUDE_SUBSCRIPTION_OAUTH_SCOPE,
+        tokenType: 'Bearer',
+        providerAccountId: 'backup-acct',
+        providerEmail: null,
+      },
+    });
+
+    const credentials: Credentials = {
+      token: 'happy-token',
+      encryption: { type: 'legacy', secret: new Uint8Array(32).fill(23) },
+    };
+    if (credentials.encryption.type !== 'legacy') {
+      throw new Error('test fixture expected legacy encryption');
+    }
+
+    const primaryCiphertext = sealAccountScopedBlobCiphertext({
+      kind: 'connected_service_credential',
+      material: { type: 'legacy', secret: credentials.encryption.secret },
+      payload: primaryRecord,
+      randomBytes: (length) => randomBytes(length),
+    });
+    const backupCiphertext = sealAccountScopedBlobCiphertext({
+      kind: 'connected_service_credential',
+      material: { type: 'legacy', secret: credentials.encryption.secret },
+      payload: backupRecord,
+      randomBytes: (length) => randomBytes(length),
+    });
+
+    const switchBeforeTurn = vi.fn(async () => ({
+      status: 'switched' as const,
+      activeProfileId: 'backup',
+      generation: 8,
+    }));
+    const accountUsageStore = {
+      resolveBySource: vi.fn((source: { serviceId: string; profileId: string; groupId?: string | null; groupGeneration?: number | null }) => {
+        if (
+          source.serviceId !== 'claude-subscription'
+          || source.groupId !== 'main'
+          || source.groupGeneration !== 7
+        ) {
+          return null;
+        }
+        if (source.profileId === 'primary') return createProviderAccountUsageSnapshot('primary', 5);
+        if (source.profileId === 'backup') return createProviderAccountUsageSnapshot('backup', 60);
+        return null;
+      }),
+    };
+    const api = {
+      getConnectedServiceAuthGroup: async () => ({
+        v: 1,
+        serviceId: 'claude-subscription',
+        groupId: 'main',
+        displayName: null,
+        activeProfileId: 'primary',
+        generation: 7,
+        policy: {
+          v: 1,
+          strategy: 'least_limited',
+          autoSwitch: true,
+          probeIfSnapshotOlderThanMs: 60_000,
+          preTurnProbeMode: 'when_stale',
+          preTurnProbeOrder: 'current_first_then_candidates',
+        },
+        state: { v: 1 },
+        members: [
+          {
+            v: 1,
+            serviceId: 'claude-subscription',
+            groupId: 'main',
+            profileId: 'primary',
+            enabled: true,
+            priority: 1,
+            state: { v: 1 },
+            createdAt: 1,
+            updatedAt: 1,
+          },
+          {
+            v: 1,
+            serviceId: 'claude-subscription',
+            groupId: 'main',
+            profileId: 'backup',
+            enabled: true,
+            priority: 2,
+            state: { v: 1 },
+            createdAt: 2,
+            updatedAt: 2,
+          },
+        ],
+        createdAt: 1,
+        updatedAt: 1,
+      }),
+      getConnectedServiceCredentialSealed: async (params: { serviceId: string; profileId: string }) => {
+        const { serviceId, profileId } = params;
+        if (serviceId !== 'claude-subscription') return null;
+        const ciphertextByProfileId = {
+          primary: primaryCiphertext,
+          backup: backupCiphertext,
+        } as const;
+        const sealedCiphertext = ciphertextByProfileId[profileId as keyof typeof ciphertextByProfileId];
+        if (!sealedCiphertext) return null;
+        return {
+          sealed: { format: 'account_scoped_v1', ciphertext: sealedCiphertext },
+          metadata: { kind: 'oauth', providerEmail: null, providerAccountId: `${profileId}-acct`, expiresAt: null },
+        };
+      },
+    } as unknown as ApiClient;
+
+    const resolveWithCoordinator = resolveConnectedServiceAuthForSpawn as unknown as (
+      params: Parameters<typeof resolveConnectedServiceAuthForSpawn>[0] & {
+        authGroupSwitchCoordinator: Readonly<{
+          switchBeforeTurn: typeof switchBeforeTurn;
+        }>;
+        accountUsageStore: typeof accountUsageStore;
+        sessionId: string;
+      },
+    ) => ReturnType<typeof resolveConnectedServiceAuthForSpawn>;
+
+    let connectedServiceAuth: Awaited<ReturnType<typeof resolveWithCoordinator>>;
+    try {
+      if (originalPlatformDescriptor) {
+        Object.defineProperty(process, 'platform', { ...originalPlatformDescriptor, value: 'linux' });
+      }
+      connectedServiceAuth = await resolveWithCoordinator({
+        agentId: 'claude',
+        connectedServicesBindingsRaw: {
+          v: 1,
+          bindingsByServiceId: {
+            'claude-subscription': {
+              source: 'connected',
+              selection: 'group',
+              groupId: 'main',
+              profileId: 'primary',
+            },
+          },
+        },
+        materializationKey: 'session-1',
+        activeServerDir,
+        baseDir,
+        credentials,
+        api,
+        runtimeQuotaSnapshots: new ConnectedServiceAuthGroupRuntimeQuotaSnapshotStore(),
+        accountUsageStore,
+        quotaFreshnessMs: 60_000,
+        nowMs: () => now,
+        processEnv,
+        sessionId: 'session-1',
+        authGroupSwitchCoordinator: { switchBeforeTurn },
+      });
+    } finally {
+      if (originalPlatformDescriptor) {
+        Object.defineProperty(process, 'platform', originalPlatformDescriptor);
+      }
+    }
+
+    expect(accountUsageStore.resolveBySource).toHaveBeenCalled();
     expect(switchBeforeTurn).toHaveBeenCalledTimes(1);
     expect(switchBeforeTurn).toHaveBeenCalledWith(expect.objectContaining({
       serviceId: 'claude-subscription',

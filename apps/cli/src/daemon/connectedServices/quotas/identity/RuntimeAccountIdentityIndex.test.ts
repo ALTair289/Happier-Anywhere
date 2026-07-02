@@ -125,4 +125,35 @@ describe('RuntimeAccountIdentityIndex', () => {
 
     expect(index.readSessionIdentity('codex-session')).toBeNull();
   });
+
+  it('does not return group-bound identities when the current group generation is unavailable', () => {
+    const index = new RuntimeAccountIdentityIndex({
+      nowMs: () => 1_000,
+      ttlMs: 60_000,
+    });
+
+    expect(index.record({
+      sessionId: 'codex-session',
+      serviceId: 'openai-codex',
+      groupId: 'codex-team',
+      profileId: 'primary',
+      providerAccountId: 'acct-codex',
+      accountLabel: null,
+      observedAtMs: 1_000,
+      source: 'runtime_quota_snapshot',
+      proofStrength: 'exact',
+      groupGeneration: 8,
+    })).toEqual({ status: 'recorded' });
+
+    expect(resolveSessionsSharingProviderAccount(index, {
+      serviceId: 'openai-codex',
+      providerAccountId: 'acct-codex',
+      currentGroupGenerationBySessionId: new Map(),
+    })).toEqual([]);
+    expect(resolveSessionsSharingProviderAccount(index, {
+      serviceId: 'openai-codex',
+      providerAccountId: 'acct-codex',
+      currentGroupGenerationBySessionId: new Map([['codex-session', 8]]),
+    }).map((entry) => entry.sessionId)).toEqual(['codex-session']);
+  });
 });

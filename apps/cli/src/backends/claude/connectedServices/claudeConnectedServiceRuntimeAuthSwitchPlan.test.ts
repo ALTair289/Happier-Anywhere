@@ -39,7 +39,7 @@ describe('resolveClaudeConnectedServiceRuntimeAuthSwitchPlan', () => {
     });
   });
 
-  it('requires restart/rematerialize with native credential-file materialization for Claude subscription OAuth credentials', () => {
+  it('supports shared-home hot apply with native credential-file materialization for Claude subscription OAuth credentials', () => {
     const record = buildConnectedServiceCredentialRecord({
       now: 1000,
       serviceId: 'claude-subscription',
@@ -58,8 +58,8 @@ describe('resolveClaudeConnectedServiceRuntimeAuthSwitchPlan', () => {
     });
 
     expect(resolveClaudeConnectedServiceRuntimeAuthSwitchPlan(record)).toEqual({
-      supportsHotApply: false,
-      recovery: 'restart_rematerialize',
+      supportsHotApply: true,
+      recovery: 'shared_group_auth_surface_rewrite',
       envKeys: ['CLAUDE_CONFIG_DIR'],
       materialization: 'claude_code_native_credentials_file',
     });

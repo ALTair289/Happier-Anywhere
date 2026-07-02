@@ -2,9 +2,88 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { ConnectedServiceQuotaSnapshotV1Schema, buildConnectedServiceCredentialRecord } from '@happier-dev/protocol';
 
-import { createOpenAiCodexQuotaFetcher } from './openAiCodexQuotaFetcher';
+import * as openAiCodexQuotaFetcherModule from './quotaFetcher';
+import { createOpenAiCodexQuotaFetcher } from './quotaFetcher';
+
+type QuotaDescriptorModule = Readonly<{
+  openAiCodexQuotaFetcherDescriptor?: Readonly<{
+    loadQuota: (params: Readonly<{
+      env: NodeJS.ProcessEnv;
+      staleAfterMs: number;
+    }>) => ReturnType<typeof createOpenAiCodexQuotaFetcher>;
+  }>;
+}>;
 
 describe('createOpenAiCodexQuotaFetcher', () => {
+  it('exposes a provider-owned descriptor that parses endpoint host env before loading the fetcher', async () => {
+    const descriptor = (openAiCodexQuotaFetcherModule as QuotaDescriptorModule).openAiCodexQuotaFetcherDescriptor;
+    expect(descriptor).toBeTruthy();
+
+    const now = 1_000_000;
+    const usageUrl = 'https://quota.happier.dev/openai-codex/usage';
+    const resetCreditsUrl = 'https://quota.happier.dev/openai-codex/reset-credits';
+    const fetchMock = vi.fn(async (input: unknown) => {
+      const url = String(input ?? '');
+      if (url === usageUrl) {
+        return {
+          ok: true,
+          json: async () => ({
+            rate_limit: {
+              primary_window: { used_percent: 10, reset_at: 1700000000 },
+            },
+          }),
+        };
+      }
+      if (url === resetCreditsUrl) {
+        return {
+          ok: true,
+          json: async () => ({ available_count: 0, credits: [] }),
+        };
+      }
+      throw new Error(`Unexpected URL ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+
+    const record = buildConnectedServiceCredentialRecord({
+      now,
+      serviceId: 'openai-codex',
+      profileId: 'work',
+      kind: 'oauth',
+      expiresAt: now + 60_000,
+      oauth: {
+        accessToken: 'at',
+        refreshToken: 'rt',
+        idToken: null,
+        scope: null,
+        tokenType: null,
+        providerAccountId: 'acct',
+        providerEmail: 'user@example.com',
+      },
+    });
+
+    const fetcher = descriptor!.loadQuota({
+      env: {
+        HAPPIER_CONNECTED_SERVICES_OPENAI_CODEX_USAGE_URL: usageUrl,
+        HAPPIER_CONNECTED_SERVICES_OPENAI_CODEX_RESET_CREDITS_URL: resetCreditsUrl,
+        HAPPIER_CONNECTED_SERVICES_QUOTAS_USER_AGENT: 'codex-descriptor-agent/1.0',
+      },
+      staleAfterMs: 123_000,
+    });
+
+    const snapshot = await fetcher.fetch({ record, now, signal: new AbortController().signal });
+
+    expect(snapshot).toMatchObject({
+      serviceId: 'openai-codex',
+      staleAfterMs: 123_000,
+    });
+    expect(fetchMock).toHaveBeenNthCalledWith(1, usageUrl, expect.objectContaining({
+      headers: expect.objectContaining({
+        'User-Agent': 'codex-descriptor-agent/1.0',
+      }),
+    }));
+    expect(fetchMock).toHaveBeenNthCalledWith(2, resetCreditsUrl, expect.anything());
+  });
+
   it('polls the ChatGPT wham usage endpoint by default with connected account headers', async () => {
     const now = 1_000_000;
     const fetchMock = vi.fn(async () => ({

@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { buildConnectedServiceCredentialRecord } from '@happier-dev/protocol';
 import type { ConnectedServiceSwitchContinuityParams } from '@/backends/types';
 
 import { resolveCodexConnectedServiceSwitchContinuity } from './resolveCodexConnectedServiceSwitchContinuity';
@@ -57,6 +58,37 @@ function createParams(
 }
 
 describe('resolveCodexConnectedServiceSwitchContinuity', () => {
+  it('keeps direct-live-required runtime auth selections on the hot-apply path when the runtime callback is unavailable', async () => {
+    await expect(resolveCodexConnectedServiceSwitchContinuity(createParams({
+      connectedServiceMaterializationIdentityV1: null,
+      vendorResumeId: null,
+      targetMaterializedRoot: null,
+      targetMaterializedEnv: null,
+      cwd: null,
+      runtimeAuthSelection: {
+        requireDirectLiveHotApply: true,
+        record: buildConnectedServiceCredentialRecord({
+          now: 1_000,
+          serviceId: 'openai-codex',
+          profileId: 'new',
+          kind: 'oauth',
+          expiresAt: 2_000,
+          oauth: {
+            accessToken: 'access',
+            refreshToken: 'refresh',
+            idToken: 'id',
+            scope: null,
+            tokenType: null,
+            providerAccountId: 'acct',
+            providerEmail: 'codex-user@example.test',
+          },
+        }),
+      },
+    }))).resolves.toEqual({
+      mode: 'hot_apply',
+    });
+  });
+
   it('fails closed for same-group switches when exact resume reachability inputs are missing', async () => {
     await expect(resolveCodexConnectedServiceSwitchContinuity(createParams({
       targetMaterializedRoot: null,

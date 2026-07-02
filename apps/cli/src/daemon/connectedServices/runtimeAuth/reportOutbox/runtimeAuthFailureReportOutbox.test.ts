@@ -28,6 +28,8 @@ const classifiedFailure = {
     accessToken: 'secret-rate-limit-token',
   },
   source: 'structured_provider_error',
+  sourceProviderAccountId: 'acct-source',
+  sourceAccountLabel: 'source@example.test',
   accessToken: 'secret-access-token',
   refresh_token: 'secret-refresh-token',
   env: { OPENAI_API_KEY: 'secret-env-value' },
@@ -71,6 +73,8 @@ describe('runtimeAuthFailureReportOutbox', () => {
           planType: 'team',
           rateLimits: null,
           source: 'structured_provider_error',
+          sourceProviderAccountId: 'acct-source',
+          sourceAccountLabel: 'source@example.test',
         },
         attemptCount: 1,
         createdAtMs: 1_700_000_000_000,
@@ -125,6 +129,108 @@ describe('runtimeAuthFailureReportOutbox', () => {
         createdAtMs: 1_700_000_000_000,
         updatedAtMs: 1_700_000_000_500,
       });
+    } finally {
+      await removeTempDir(outboxDir);
+    }
+  });
+
+  it('coalesces unchanged evidence even when retryAfterMs jitters between retries', async () => {
+    const outboxDir = await createTempDir('happier-runtime-auth-report-outbox-stable-key-');
+    try {
+      await enqueueRuntimeAuthFailureReportOutboxItem({
+        outboxDir,
+        report: {
+          sessionId: 'sess_1',
+          switchesThisTurn: 1,
+          classification: classifiedFailure,
+        },
+        nowMs: () => 1_700_000_000_000,
+      });
+      await enqueueRuntimeAuthFailureReportOutboxItem({
+        outboxDir,
+        report: {
+          sessionId: 'sess_1',
+          switchesThisTurn: 2,
+          classification: {
+            ...classifiedFailure,
+            retryAfterMs: 30_000,
+          },
+        },
+        nowMs: () => 1_700_000_000_500,
+      });
+
+      const items = await readRuntimeAuthFailureReportOutboxItems({ outboxDir });
+      expect(items).toHaveLength(1);
+      expect(items[0]).toMatchObject({
+        switchesThisTurn: 2,
+        attemptCount: 2,
+      });
+    } finally {
+      await removeTempDir(outboxDir);
+    }
+  });
+
+  it.each([
+    [
+      'active profile evidence changes',
+      { activeProfileId: 'primary' },
+      { activeProfileId: 'backup' },
+    ],
+    [
+      'group generation changes',
+      { groupGeneration: 4 },
+      { groupGeneration: 5 },
+    ],
+    [
+      'credential health evidence changes',
+      { credentialHealthStatus: 'connected' },
+      { credentialHealthStatus: 'needs_reauth' },
+    ],
+    [
+      'identity proof version changes',
+      { identityProofVersion: 1 },
+      { identityProofVersion: 2 },
+    ],
+    [
+      'source relation key changes',
+      { sourceKey: 'source:profile:primary' },
+      { sourceKey: 'source:profile:backup' },
+    ],
+    [
+      'provider-account usage record evidence changes',
+      { providerAccountUsageRecordId: 'paug_v1_record_one' },
+      { providerAccountUsageRecordId: 'paug_v1_record_two' },
+    ],
+  ] as const)('does not coalesce retry state when %s', async (_label, firstPatch, secondPatch) => {
+    const outboxDir = await createTempDir('happier-runtime-auth-report-outbox-evidence-change-');
+    try {
+      await enqueueRuntimeAuthFailureReportOutboxItem({
+        outboxDir,
+        report: {
+          sessionId: 'sess_1',
+          switchesThisTurn: 1,
+          classification: {
+            ...classifiedFailure,
+            ...firstPatch,
+          },
+        },
+        nowMs: () => 1_700_000_000_000,
+      });
+      await enqueueRuntimeAuthFailureReportOutboxItem({
+        outboxDir,
+        report: {
+          sessionId: 'sess_1',
+          switchesThisTurn: 2,
+          classification: {
+            ...classifiedFailure,
+            ...secondPatch,
+          },
+        },
+        nowMs: () => 1_700_000_000_500,
+      });
+
+      const items = await readRuntimeAuthFailureReportOutboxItems({ outboxDir });
+      expect(items).toHaveLength(2);
     } finally {
       await removeTempDir(outboxDir);
     }

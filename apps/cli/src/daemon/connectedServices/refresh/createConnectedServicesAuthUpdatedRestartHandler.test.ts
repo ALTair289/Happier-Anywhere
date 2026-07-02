@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { CatalogAgentId } from '@/backends/types';
+import { agent as openCodeAgent } from '@/backends/opencode';
+import { agent as piAgent } from '@/backends/pi';
 import type { ConnectedServiceCredentialLifecycleDescriptor } from '@/daemon/connectedServices/credentials/lifecycleTypes';
 import type { TrackedSession } from '@/daemon/types';
 import { createConnectedServicesAuthUpdatedRestartHandler } from './createConnectedServicesAuthUpdatedRestartHandler';
@@ -94,6 +96,69 @@ describe('createConnectedServicesAuthUpdatedRestartHandler', () => {
         generation: 7,
       }),
     }));
+  });
+
+  it('does not restart OpenCode or Pi for brokered same-account OAuth refreshes', async () => {
+    const restartRequestedPids = new Set<number>();
+    const requestRestartSignal = vi.fn(async (_params: RestartSignalParams) => ({ signaled: true }));
+    const pidToTrackedSession = new Map<number, TrackedSession>([
+      [1, createTrackedSession({ pid: 1, sessionId: 'opencode-session' })],
+      [2, createTrackedSession({ pid: 2, sessionId: 'pi-session' })],
+    ]);
+
+    const handler = createConnectedServicesAuthUpdatedRestartHandler({
+      restartRequestedPids,
+      pidToTrackedSession,
+      resolveLifecycleDescriptor: async (agentId) => {
+        if (agentId === 'opencode') return await openCodeAgent.getConnectedServiceCredentialLifecycleDescriptor();
+        if (agentId === 'pi') return await piAgent.getConnectedServiceCredentialLifecycleDescriptor();
+        return createLifecycleDescriptor(agentId, 'restart_required');
+      },
+      resolveProcessGroupPid: (tracked) => tracked.pid,
+      requestRestartSignal,
+      restartSignalDelayMs: 0,
+    } satisfies RestartHandlerParams);
+
+    await handler({
+      binding: { serviceId: 'openai-codex', profileId: 'work' },
+      affectedTargets: [
+        { pid: 1, agentId: 'opencode' },
+        { pid: 2, agentId: 'pi' },
+      ],
+      trigger: 'refresh_triggered_restart',
+    });
+
+    expect(requestRestartSignal).not.toHaveBeenCalled();
+    expect(restartRequestedPids.size).toBe(0);
+  });
+
+  it('still restarts OpenCode when a direct API-key connected service is reconnected', async () => {
+    const restartRequestedPids = new Set<number>();
+    const requestRestartSignal = vi.fn(async (_params: RestartSignalParams) => ({ signaled: true }));
+    const pidToTrackedSession = new Map<number, TrackedSession>([
+      [1, createTrackedSession({ pid: 1, sessionId: 'opencode-session' })],
+    ]);
+
+    const handler = createConnectedServicesAuthUpdatedRestartHandler({
+      restartRequestedPids,
+      pidToTrackedSession,
+      resolveLifecycleDescriptor: async (agentId) => {
+        if (agentId === 'opencode') return await openCodeAgent.getConnectedServiceCredentialLifecycleDescriptor();
+        return createLifecycleDescriptor(agentId, 'restart_required');
+      },
+      resolveProcessGroupPid: (tracked) => tracked.pid,
+      requestRestartSignal,
+      restartSignalDelayMs: 0,
+    } satisfies RestartHandlerParams);
+
+    await handler({
+      binding: { serviceId: 'openai', profileId: 'platform-key' },
+      affectedTargets: [{ pid: 1, agentId: 'opencode' }],
+      trigger: 'reconnect_propagation',
+    });
+
+    expect(requestRestartSignal).toHaveBeenCalledTimes(1);
+    expect(restartRequestedPids.has(1)).toBe(true);
   });
 
   it('passes the resolved tracked session and gated-restart target to the restart-signal dependency (K3)', async () => {

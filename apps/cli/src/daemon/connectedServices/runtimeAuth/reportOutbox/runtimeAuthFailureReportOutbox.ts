@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
+  ConnectedServiceCredentialHealthStatusV1Schema,
+  ProviderAccountUsageRecordIdSchema,
   readConnectedServiceLimitCategoryV1,
   SessionUsageLimitRecoveryResumePromptModeV1Schema,
   type SessionUsageLimitRecoveryResumePromptModeV1,
@@ -16,6 +18,7 @@ import {
   type ConnectedServiceRuntimeLimitCategory,
   type ConnectedServiceRuntimeQuotaScope,
 } from '../types';
+import { readStableRuntimeAuthFailureClassificationIdentity } from '../runtimeAuthFailureReportIdentity';
 import type {
   DrainRuntimeAuthFailureReportOutboxItemResult,
   DrainRuntimeAuthFailureReportOutboxItemsResult,
@@ -88,6 +91,12 @@ function readNullableTimestampMs(value: unknown): number | null {
   return Math.max(0, Math.trunc(value));
 }
 
+function readNullableNonNegativeInt(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  return Math.max(0, Math.trunc(value));
+}
+
 function readNonNegativeInt(value: unknown, fallback: number): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
   return Math.max(0, Math.trunc(value));
@@ -141,6 +150,20 @@ function readRecoveryAction(value: unknown): RuntimeAuthFailureReportOutboxRecov
   return null;
 }
 
+function readCredentialHealthStatus(
+  value: unknown,
+): NonNullable<RuntimeAuthFailureReportOutboxClassification['credentialHealthStatus']> | null {
+  const parsed = ConnectedServiceCredentialHealthStatusV1Schema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+function readProviderAccountUsageRecordId(
+  value: unknown,
+): NonNullable<RuntimeAuthFailureReportOutboxClassification['providerAccountUsageRecordId']> | null {
+  const parsed = ProviderAccountUsageRecordIdSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
 function sanitizeClassification(value: unknown): RuntimeAuthFailureReportOutboxClassification | null {
   if (!isRecord(value)) return null;
   const kind = readKind(value.kind);
@@ -152,6 +175,12 @@ function sanitizeClassification(value: unknown): RuntimeAuthFailureReportOutboxC
   const retryAfterMs = readNullableTimestampMs(value.retryAfterMs);
   const quotaScope = readQuotaScope(value.quotaScope);
   const providerLimitId = readNullableSafeProviderString(value.providerLimitId);
+  const sourceProviderAccountId = readNullableSafeProviderString(value.sourceProviderAccountId);
+  const sourceAccountLabel = sourceProviderAccountId
+    ? readNullableSafeProviderString(value.sourceAccountLabel)
+    : null;
+  const activeProfileId = readNullableString(value.activeProfileId);
+  const sourceKey = readNullableSafeProviderString(value.sourceKey);
   const action = readSafeAction(value.action);
   const recoveryAction = readRecoveryAction(value.recoveryAction);
 
@@ -161,10 +190,24 @@ function sanitizeClassification(value: unknown): RuntimeAuthFailureReportOutboxC
     serviceId,
     profileId: readNullableString(value.profileId),
     groupId: readNullableString(value.groupId),
+    ...(value.groupGeneration === undefined ? {} : { groupGeneration: readNullableNonNegativeInt(value.groupGeneration) }),
+    ...(value.activeProfileId === undefined ? {} : { activeProfileId }),
+    ...(value.credentialHealthStatus === undefined
+      ? {}
+      : { credentialHealthStatus: readCredentialHealthStatus(value.credentialHealthStatus) }),
+    ...(value.identityProofVersion === undefined
+      ? {}
+      : { identityProofVersion: readNullableNonNegativeInt(value.identityProofVersion) }),
+    ...(value.sourceKey === undefined ? {} : { sourceKey }),
+    ...(value.providerAccountUsageRecordId === undefined
+      ? {}
+      : { providerAccountUsageRecordId: readProviderAccountUsageRecordId(value.providerAccountUsageRecordId) }),
     resetsAtMs: readNullableTimestampMs(value.resetsAtMs),
     ...(value.retryAfterMs === undefined ? {} : { retryAfterMs }),
     ...(quotaScope ? { quotaScope } : {}),
     ...(value.providerLimitId === undefined ? {} : { providerLimitId }),
+    ...(sourceProviderAccountId ? { sourceProviderAccountId } : {}),
+    ...(sourceProviderAccountId && value.sourceAccountLabel !== undefined ? { sourceAccountLabel } : {}),
     ...(value.action === undefined ? {} : { action }),
     planType: readNullableSafeProviderString(value.planType),
     rateLimits: null,
@@ -191,17 +234,28 @@ function buildReportKey(input: Readonly<{
   sessionId: string;
   classification: RuntimeAuthFailureReportOutboxClassification;
 }>): string {
+  const classificationIdentity = readStableRuntimeAuthFailureClassificationIdentity(input.classification);
   const fingerprint = {
     sessionId: input.sessionId,
-    serviceId: input.classification.serviceId,
-    profileId: input.classification.profileId,
-    groupId: input.classification.groupId,
-    kind: input.classification.kind,
-    limitCategory: input.classification.limitCategory ?? null,
-    resetsAtMs: input.classification.resetsAtMs,
-    retryAfterMs: input.classification.retryAfterMs ?? null,
-    quotaScope: input.classification.quotaScope ?? null,
-    providerLimitId: input.classification.providerLimitId ?? null,
+    ...(classificationIdentity ?? {
+      kind: input.classification.kind,
+      serviceId: input.classification.serviceId,
+      profileId: input.classification.profileId,
+      groupId: input.classification.groupId,
+      groupGeneration: input.classification.groupGeneration ?? null,
+      activeProfileId: input.classification.activeProfileId ?? null,
+      credentialHealthStatus: input.classification.credentialHealthStatus ?? null,
+      identityProofVersion: input.classification.identityProofVersion ?? null,
+      sourceKey: input.classification.sourceKey ?? null,
+      providerAccountUsageRecordId: input.classification.providerAccountUsageRecordId ?? null,
+      limitCategory: input.classification.limitCategory ?? null,
+      providerLimitId: input.classification.providerLimitId ?? null,
+      sourceProviderAccountId: input.classification.sourceProviderAccountId ?? null,
+      recoveryActionKind: input.classification.recoveryAction?.kind ?? null,
+      resetsAtMsBucket: typeof input.classification.resetsAtMs === 'number' && Number.isFinite(input.classification.resetsAtMs)
+        ? Math.floor(input.classification.resetsAtMs / 60_000)
+        : null,
+    }),
     action: input.classification.action ?? null,
     recoveryAction: input.classification.recoveryAction ?? null,
     source: input.classification.source,

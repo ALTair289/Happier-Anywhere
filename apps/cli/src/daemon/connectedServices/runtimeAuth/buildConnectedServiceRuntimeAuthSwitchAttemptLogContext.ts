@@ -38,6 +38,27 @@ export type ConnectedServiceRuntimeAuthSwitchAttemptLogContext = Readonly<{
   reachabilityMissReason: string | null;
   verificationStatus: string | null;
   verificationReason: string | null;
+  excludedSummary: ReadonlyArray<Readonly<{
+    profileId: string;
+    reason: string;
+    retryAtMs: number | null;
+  }>> | null;
+  decisionTraceSummary: Readonly<{
+    activeProfileId: string | null;
+    reason: string | null;
+    candidates: ReadonlyArray<Readonly<{
+      profileId: string;
+      decision: string;
+      exclusionReason: string | null;
+      retryAtMs: number | null;
+      quotaEvidence: Readonly<{
+        status: string | null;
+        remainingPercent: number | null;
+        capturedAtMs: number | null;
+        exhausted: boolean | null;
+      }>;
+    }>>;
+  }> | null;
 }>;
 
 function isRecord(value: unknown): value is UnknownRecord {
@@ -56,6 +77,10 @@ function readNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
+function readBoolean(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null;
+}
+
 function redactString(value: string | null, marker: string): string | null {
   return value ? marker : null;
 }
@@ -72,6 +97,57 @@ function readSwitchAttemptResult(result: unknown): UnknownRecord | null {
 function readContinuityDiagnostics(diagnostics: unknown): UnknownRecord | null {
   const continuity = readRecordProperty(diagnostics, 'continuity');
   return isRecord(continuity) ? continuity : null;
+}
+
+function readExcludedSummary(switchResult: unknown): ConnectedServiceRuntimeAuthSwitchAttemptLogContext['excludedSummary'] {
+  const excluded = readRecordProperty(switchResult, 'excluded');
+  if (!Array.isArray(excluded)) return null;
+  const sanitized = excluded.flatMap((entry) => {
+    if (!isRecord(entry)) return [];
+    const profileId = readString(readRecordProperty(entry, 'profileId'));
+    const reason = readString(readRecordProperty(entry, 'reason'));
+    if (!profileId || !reason) return [];
+    return [{
+      profileId,
+      reason,
+      retryAtMs: readNumber(readRecordProperty(entry, 'retryAtMs')),
+    }];
+  });
+  return sanitized.length > 0 ? sanitized : null;
+}
+
+function readDecisionTraceSummary(
+  diagnostics: unknown,
+): ConnectedServiceRuntimeAuthSwitchAttemptLogContext['decisionTraceSummary'] {
+  const decisionTrace = readRecordProperty(diagnostics, 'decisionTrace');
+  if (!isRecord(decisionTrace)) return null;
+  const candidates = readRecordProperty(decisionTrace, 'candidates');
+  const sanitizedCandidates = Array.isArray(candidates)
+    ? candidates.flatMap((candidate) => {
+      if (!isRecord(candidate)) return [];
+      const profileId = readString(readRecordProperty(candidate, 'profileId'));
+      const decision = readString(readRecordProperty(candidate, 'decision'));
+      if (!profileId || !decision) return [];
+      const quotaEvidence = readRecordProperty(candidate, 'quotaEvidence');
+      return [{
+        profileId,
+        decision,
+        exclusionReason: readString(readRecordProperty(candidate, 'exclusionReason')),
+        retryAtMs: readNumber(readRecordProperty(candidate, 'retryAtMs')),
+        quotaEvidence: {
+          status: readString(readRecordProperty(quotaEvidence, 'status')),
+          remainingPercent: readNumber(readRecordProperty(quotaEvidence, 'remainingPercent')),
+          capturedAtMs: readNumber(readRecordProperty(quotaEvidence, 'capturedAtMs')),
+          exhausted: readBoolean(readRecordProperty(quotaEvidence, 'exhausted')),
+        },
+      }];
+    })
+    : [];
+  return {
+    activeProfileId: readString(readRecordProperty(decisionTrace, 'activeProfileId')),
+    reason: readString(readRecordProperty(decisionTrace, 'reason')),
+    candidates: sanitizedCandidates,
+  };
 }
 
 function readVerificationForService(input: Readonly<{
@@ -108,6 +184,7 @@ function resolveFailurePhase(input: Readonly<{
     case 'selection_mismatch':
       return 'binding_resolution';
     case 'no_eligible_member':
+    case 'no_eligible_members':
       return 'selection';
     case 'recovery_action_required':
     case 'temporary_retry_armed':
@@ -138,6 +215,8 @@ export function buildConnectedServiceRuntimeAuthSwitchAttemptLogContext(input: R
     : readString(readRecordProperty(switchResult, 'status')) ?? outcomeStatus ?? 'unknown';
   const diagnostics = readRecordProperty(switchResult, 'diagnostics');
   const continuityDiagnostics = readContinuityDiagnostics(diagnostics);
+  const excludedSummary = readExcludedSummary(switchResult);
+  const decisionTraceSummary = readDecisionTraceSummary(diagnostics);
   const verification = readVerificationForService({
     switchResult,
     serviceId: input.classification.serviceId,
@@ -185,5 +264,7 @@ export function buildConnectedServiceRuntimeAuthSwitchAttemptLogContext(input: R
     reachabilityMissReason: readString(readRecordProperty(continuityDiagnostics, 'reachabilityMissReason')),
     verificationStatus: readString(readRecordProperty(verification, 'status')),
     verificationReason: readString(readRecordProperty(verification, 'reason')),
+    excludedSummary,
+    decisionTraceSummary,
   };
 }

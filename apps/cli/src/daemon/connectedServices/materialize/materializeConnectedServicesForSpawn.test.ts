@@ -5,6 +5,8 @@ import { join, resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
 import { buildConnectedServiceCredentialRecord } from '@happier-dev/protocol';
+import { resolveOpenCodeConnectedConfigHomeDir } from '@/backends/opencode/brokerPlugin';
+import { buildPiBrokerMarker } from '@/backends/pi/brokerExtension';
 import { materializeConnectedServicesForSpawn } from './materializeConnectedServicesForSpawn';
 import { normalizeMaterializationKeyForPath } from './normalizeMaterializationKeyForPath';
 import { HAPPIER_CONNECTED_SERVICE_MATERIALIZED_ENV_KEYS_ENV_KEY } from '../connectedServiceChildEnvironment';
@@ -465,7 +467,9 @@ describe('materializeConnectedServicesForSpawn', () => {
     expect(result!.env.USERPROFILE).toBeUndefined();
     expect(result!.env.OPENCODE_TEST_HOME).toBeUndefined();
     expect(result!.env.XDG_DATA_HOME).toBeUndefined();
-    expect(result!.env.XDG_CONFIG_HOME).toBeUndefined();
+    // Connected OpenCode sessions are config-isolated: XDG_CONFIG_HOME points at the Happier-owned
+    // connected-config home so the user's third-party plugins never contaminate brokered auth.
+    expect(result!.env.XDG_CONFIG_HOME).toBe(resolveOpenCodeConnectedConfigHomeDir());
     expect(result!.env.XDG_CACHE_HOME).toBeUndefined();
     expect(result!.env.XDG_STATE_HOME).toBeUndefined();
     expect(result!.env[HAPPIER_CONNECTED_SERVICE_TARGET_MATERIALIZED_ROOT_ENV_KEY]).toBe(
@@ -473,18 +477,18 @@ describe('materializeConnectedServicesForSpawn', () => {
     );
 
     const auth = JSON.parse(result!.env.OPENCODE_AUTH_CONTENT ?? '{}');
-    expect(auth).toEqual({
-      openai: {
-        type: 'oauth',
-        refresh: 'refresh',
-        access: 'access',
-        expires: 123,
-        accountId: 'acct',
-      },
-      anthropic: {
-        type: 'api',
-        key: 'sk-ant-123',
-      },
+    // No-leak invariant: the brokered Codex subscription emits a non-refreshable broker marker, never
+    // the OAuth refresh/access token bytes; the Anthropic Console API key is a legitimate static
+    // credential and stays as a direct `{type:'api', key}` entry.
+    expect(auth.openai).toEqual({
+      type: 'api',
+      key: expect.stringMatching(/^happier-broker:openai:/),
+    });
+    expect(auth.openai.refresh).toBeUndefined();
+    expect(auth.openai.access).toBeUndefined();
+    expect(auth.anthropic).toEqual({
+      type: 'api',
+      key: 'sk-ant-123',
     });
     expect(fetchMock).not.toHaveBeenCalled();
 
@@ -523,7 +527,8 @@ describe('materializeConnectedServicesForSpawn', () => {
     expect(result!.env.USERPROFILE).toBeUndefined();
     expect(result!.env.OPENCODE_TEST_HOME).toBeUndefined();
     expect(result!.env.XDG_DATA_HOME).toBeUndefined();
-    expect(result!.env.XDG_CONFIG_HOME).toBeUndefined();
+    // Connected OpenCode sessions are config-isolated even for direct API keys.
+    expect(result!.env.XDG_CONFIG_HOME).toBe(resolveOpenCodeConnectedConfigHomeDir());
     expect(result!.env.XDG_CACHE_HOME).toBeUndefined();
     expect(result!.env.XDG_STATE_HOME).toBeUndefined();
 
@@ -536,7 +541,7 @@ describe('materializeConnectedServicesForSpawn', () => {
     });
   });
 
-  it('keeps OpenCode oauth materialization local when the network would reject the refresh token', async () => {
+  it('never embeds a Codex OAuth refresh token in OpenCode auth and never probes the network', async () => {
     const baseDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-test-'));
     const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-server-test-'));
     const codex = buildConnectedServiceCredentialRecord({
@@ -547,7 +552,7 @@ describe('materializeConnectedServicesForSpawn', () => {
       expiresAt: 123,
       oauth: {
         accessToken: 'access',
-        refreshToken: 'stale-refresh',
+        refreshToken: 'super-secret-refresh',
         idToken: null,
         scope: null,
         tokenType: null,
@@ -555,17 +560,9 @@ describe('materializeConnectedServicesForSpawn', () => {
         providerEmail: null,
       },
     });
-    const fetchMock = vi.fn(async () => ({
-      ok: false,
-      status: 401,
-      statusText: 'Unauthorized',
-      text: async () => JSON.stringify({
-        error: {
-          message: 'Your refresh token has already been used to generate a new access token. Please try signing in again.',
-          type: 'invalid_request_error',
-        },
-      }),
-    }));
+    const fetchMock = vi.fn(async () => {
+      throw new Error('OAuth refresh must not be probed during materialization');
+    });
     vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
 
     const result = await materializeConnectedServicesForSpawn({
@@ -579,13 +576,21 @@ describe('materializeConnectedServicesForSpawn', () => {
     });
 
     expect(result).not.toBeNull();
-    const auth = JSON.parse(result!.env.OPENCODE_AUTH_CONTENT ?? '{}');
-    expect(auth.openai.refresh).toBe('stale-refresh');
+    const serializedAuth = result!.env.OPENCODE_AUTH_CONTENT ?? '{}';
+    // No-leak invariant: the refresh token bytes never appear in the materialized auth payload.
+    expect(serializedAuth).not.toContain('super-secret-refresh');
+    const auth = JSON.parse(serializedAuth);
+    expect(auth.openai).toEqual({
+      type: 'api',
+      key: expect.stringMatching(/^happier-broker:openai:/),
+    });
+    expect(auth.openai.refresh).toBeUndefined();
+    expect(auth.openai.access).toBeUndefined();
     expect(fetchMock).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
   });
 
-  it('rejects OpenCode anthropic oauth credentials', async () => {
+  it('rejects an OpenCode direct-Anthropic service that carries an oauth credential', async () => {
     const baseDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-test-'));
     const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-server-test-'));
     const claude = buildConnectedServiceCredentialRecord({
@@ -605,7 +610,12 @@ describe('materializeConnectedServicesForSpawn', () => {
       },
     });
 
-    await expect(materializeConnectedServicesForSpawn({
+    // The direct `anthropic` Console-key service only accepts a static token credential. Claude
+    // subscription OAuth is now brokered via the `claude-subscription` service; routing an OAuth
+    // credential through the direct-Anthropic service is an illegal combination and must fail-closed.
+    // Assert the rejection's structural shape (token-record requirement, anthropic service) rather
+    // than exact wording.
+    const rejection = await materializeConnectedServicesForSpawn({
       agentId: 'opencode',
       materializationKey: 'session-2b',
       activeServerDir,
@@ -613,7 +623,13 @@ describe('materializeConnectedServicesForSpawn', () => {
       recordsByServiceId: new Map([
         ['anthropic', claude],
       ]),
-    })).rejects.toThrow(/anthropic oauth/i);
+    }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(rejection).toBeInstanceOf(Error);
+    expect((rejection as Error).message.toLowerCase()).toContain('anthropic');
+    expect((rejection as Error).message.toLowerCase()).toContain('token credential record');
   });
 
   it('materializes Pi auth.json with openai-codex oauth and Anthropic API key credentials', async () => {
@@ -666,7 +682,7 @@ describe('materializeConnectedServicesForSpawn', () => {
       'openai-codex': {
         type: 'oauth',
         access: 'access',
-        refresh: 'refresh',
+        refresh: buildPiBrokerMarker('openai-codex', '1'),
         expires: 123,
         accountId: 'acct',
       },

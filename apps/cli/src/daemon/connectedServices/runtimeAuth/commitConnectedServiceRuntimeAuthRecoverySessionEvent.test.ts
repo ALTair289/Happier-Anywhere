@@ -199,6 +199,104 @@ describe('commitConnectedServiceRuntimeAuthRecoverySessionEvent', () => {
     expect(secondPayload.content.v.content.id).toBe(secondPayload.localId);
   });
 
+  it('does not treat retry schedule drift as a new runtime-auth recovery event row', async () => {
+    process.env.HAPPIER_SERVER_URL = 'http://server.example.test';
+    vi.resetModules();
+    const {
+      commitConnectedServiceRuntimeAuthRecoverySessionEvent,
+    } = await import('./commitConnectedServiceRuntimeAuthRecoverySessionEvent');
+
+    vi.spyOn(axios, 'get').mockResolvedValue({
+      status: 200,
+      data: {
+        session: {
+          id: 'sess-recovery',
+          seq: 1,
+          createdAt: 1,
+          updatedAt: 1,
+          active: true,
+          activeAt: 1,
+          encryptionMode: 'plain',
+          metadata: '{}',
+          metadataVersion: 1,
+          agentState: null,
+          agentStateVersion: 1,
+          dataEncryptionKey: null,
+        },
+      },
+    });
+    const postSpy = vi.spyOn(axios, 'post').mockResolvedValue({
+      status: 200,
+      data: {
+        didWrite: true,
+        message: { id: 'msg-recovery', seq: 2, localId: 'local-recovery', createdAt: 2 },
+      },
+    });
+    const credentials = {
+      token: 'token-1',
+      encryption: { type: 'legacy' as const, secret: new Uint8Array([1, 2, 3, 4]) },
+    };
+    const event = {
+      type: 'connected-service-runtime-auth-recovery',
+      status: 'retry_scheduled',
+      serviceId: 'openai-codex',
+      profileId: 'primary',
+      groupId: 'team-pool',
+      attempt: 3,
+      nextRetryAtMs: 2_000_000,
+      terminal: false,
+      reason: 'provider_capacity',
+      diagnostic: {
+        code: 'recovery_retry_scheduled',
+        failurePhase: 'runtime_auth_recovery',
+        source: 'runtime_auth_recovery',
+        serviceId: 'openai-codex',
+        profileId: 'primary',
+        groupId: 'team-pool',
+        retryable: true,
+        suggestedActions: ['retry'],
+      },
+    } as const;
+
+    await commitConnectedServiceRuntimeAuthRecoverySessionEvent({
+      credentials,
+      sessionId: 'sess-recovery',
+      event,
+    });
+    await commitConnectedServiceRuntimeAuthRecoverySessionEvent({
+      credentials,
+      sessionId: 'sess-recovery',
+      event: {
+        ...event,
+        nextRetryAtMs: 2_060_000,
+      },
+    });
+
+    expect(postSpy).toHaveBeenCalledTimes(2);
+    const firstPayload = postSpy.mock.calls[0]?.[1] as Readonly<{
+      attentionImpact?: { affectsUnread: boolean; affectsMeaningfulActivity: boolean };
+      localId: string;
+      content: { v: { content: { id: string } } };
+    }>;
+    const secondPayload = postSpy.mock.calls[1]?.[1] as Readonly<{
+      attentionImpact?: { affectsUnread: boolean; affectsMeaningfulActivity: boolean };
+      localId: string;
+      content: { v: { content: { id: string } } };
+    }>;
+    expect(firstPayload.localId).toBe(secondPayload.localId);
+    expect(firstPayload.localId).toBe('connected-service-runtime-auth-recovery:openai-codex:team-pool:primary:retry_scheduled:3:false:provider_capacity');
+    expect(firstPayload.content.v.content.id).toBe(firstPayload.localId);
+    expect(secondPayload.content.v.content.id).toBe(secondPayload.localId);
+    expect(firstPayload.attentionImpact).toEqual({
+      affectsUnread: false,
+      affectsMeaningfulActivity: false,
+    });
+    expect(secondPayload.attentionImpact).toEqual({
+      affectsUnread: false,
+      affectsMeaningfulActivity: false,
+    });
+  });
+
   it('reuses the same local id when the same runtime-auth recovery incident is retried', async () => {
     process.env.HAPPIER_SERVER_URL = 'http://server.example.test';
     vi.resetModules();

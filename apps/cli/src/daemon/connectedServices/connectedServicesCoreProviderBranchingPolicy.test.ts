@@ -16,6 +16,10 @@ const providerBackendImportPattern =
   /from\s+(['"])@\/backends\/(codex|claude|opencode|gemini|pi)(?:\/|\1)/gu;
 const providerPersistedSessionMetadataPattern =
   /\b(codex|claude|opencode|gemini|pi)SessionFile\b/gu;
+const providerQuotaEndpointLiteralPattern =
+  /(chatgpt\.com\/backend-api\/wham|api\.anthropic\.com\/api\/oauth|HAPPIER_CONNECTED_SERVICES_(?:OPENAI_CODEX|CLAUDE_SUBSCRIPTION|ANTHROPIC)_[A-Z0-9_]*(?:USAGE_URL|RESET_CREDITS_URL|QUOTA_ENDPOINT|USER_AGENT))/gu;
+const providerQuotaLeafImportPattern =
+  /from\s+(['"]).*\/(?:claudeSubscriptionQuotaFetcher|geminiQuotaFetcher|openAiCodexQuotaFetcher|quotaFetcher)\1/gu;
 
 /**
  * Documented provider-owned seams in the daemon `connectedServices` core.
@@ -29,12 +33,6 @@ const allowedDaemonProviderLiteralFiles: Readonly<Record<string, string>> = {
     'provider-owned GitHub connected-account target owns the GitHub service id',
   'notifications/dispatchConnectedServiceAccountSwitchNotification.ts':
     'notification copy maps canonical service ids to product display names',
-  'quotas/fetchers/claudeSubscriptionQuotaFetcher.ts':
-    'provider-owned quota fetcher is keyed to the Claude subscription service',
-  'quotas/fetchers/geminiQuotaFetcher.ts':
-    'provider-owned quota fetcher is keyed to the Gemini service',
-  'quotas/fetchers/openAiCodexQuotaFetcher.ts':
-    'provider-owned quota fetcher is keyed to the OpenAI Codex service',
   'refresh/ConnectedServiceRefreshCoordinator.ts':
     'Codex app-server ChatGPT bridge refresh is the central daemon lifecycle entrypoint for openai-codex',
   'refresh/serviceRefreshers.ts':
@@ -120,5 +118,26 @@ describe('connected-services shared core provider branching policy', () => {
     );
 
     expect(Array.from(new Set(matches))).toEqual([]);
+  });
+
+  it('keeps provider quota endpoint literals and leaf imports out of the generic quota fetcher factory', async () => {
+    const factoryPath = fileURLToPath(new URL('quotas/createConnectedServiceQuotaFetchers.ts', import.meta.url));
+    const source = await readFile(factoryPath, 'utf8');
+    const endpointLiterals = Array.from(
+      source.matchAll(providerQuotaEndpointLiteralPattern),
+      (match) => match[0],
+    );
+    const providerLeafImports = Array.from(
+      source.matchAll(providerQuotaLeafImportPattern),
+      (match) => match[0],
+    );
+
+    expect({
+      endpointLiterals: Array.from(new Set(endpointLiterals)),
+      providerLeafImports: Array.from(new Set(providerLeafImports)),
+    }).toEqual({
+      endpointLiterals: [],
+      providerLeafImports: [],
+    });
   });
 });

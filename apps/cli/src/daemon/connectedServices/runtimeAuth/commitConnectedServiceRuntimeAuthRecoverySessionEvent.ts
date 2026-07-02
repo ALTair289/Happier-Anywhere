@@ -1,5 +1,7 @@
 import {
   TranscriptRawAgentEventV1Schema,
+  agentEventAttentionImpact,
+  buildAgentEventLocalId,
   type SessionStoredMessageContent,
 } from '@happier-dev/protocol';
 
@@ -32,19 +34,6 @@ function buildStoredContent(params: Readonly<{
   };
 }
 
-function normalizeEventIdPart(value: string | null | undefined): string {
-  const normalized = typeof value === 'string' && value.trim().length > 0 ? value.trim() : 'none';
-  return normalized.replace(/[^a-zA-Z0-9._:-]+/gu, '_');
-}
-
-function normalizeEventIdBooleanPart(value: boolean | null | undefined): string {
-  return typeof value === 'boolean' ? String(value) : 'none';
-}
-
-function normalizeEventIdNumberPart(value: number | null | undefined): string {
-  return typeof value === 'number' && Number.isFinite(value) ? String(Math.trunc(value)) : 'none';
-}
-
 function parseRuntimeAuthRecoveryEvent(
   value: unknown,
 ): ConnectedServiceRuntimeAuthRecoveryTranscriptEventV1 | null {
@@ -56,17 +45,15 @@ function parseRuntimeAuthRecoveryEvent(
 function buildRuntimeAuthRecoveryTranscriptEventId(
   event: ConnectedServiceRuntimeAuthRecoveryTranscriptEventV1,
 ): string {
-  return [
-    'connected-service-runtime-auth-recovery',
-    normalizeEventIdPart(event.serviceId),
-    normalizeEventIdPart(event.groupId),
-    normalizeEventIdPart(event.profileId),
-    normalizeEventIdPart(event.status),
-    normalizeEventIdNumberPart(event.attempt),
-    normalizeEventIdNumberPart(event.nextRetryAtMs),
-    normalizeEventIdBooleanPart(event.terminal),
-    normalizeEventIdPart(event.reason),
-  ].join(':');
+  return buildAgentEventLocalId('connected-service-runtime-auth-recovery', [
+    event.serviceId,
+    event.groupId ?? 'none',
+    event.profileId ?? 'none',
+    event.status,
+    event.attempt ?? 'none',
+    typeof event.terminal === 'boolean' ? String(event.terminal) : 'none',
+    event.reason ?? 'none',
+  ]);
 }
 
 export async function commitConnectedServiceRuntimeAuthRecoverySessionEvent(params: Readonly<{
@@ -90,6 +77,7 @@ export async function commitConnectedServiceRuntimeAuthRecoverySessionEvent(para
     sessionId: params.sessionId,
     localId: eventId,
     messageRole: 'event',
+    attentionImpact: agentEventAttentionImpact(event),
     content: buildStoredContent({
       credentials: params.credentials,
       rawSession,

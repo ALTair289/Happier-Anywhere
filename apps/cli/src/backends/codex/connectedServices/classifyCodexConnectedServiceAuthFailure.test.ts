@@ -33,6 +33,33 @@ describe('classifyCodexConnectedServiceAuthFailure', () => {
     });
   });
 
+  it('attaches exact source account identity to usage-limit failures when the runtime supplies it', () => {
+    const result = classifyCodexConnectedServiceAuthFailure({
+      providerErrorPath: true,
+      error: {
+        error: {
+          message: 'Usage limit reached',
+          codexErrorInfo: 'UsageLimitExceeded',
+        },
+      },
+      serviceId: 'openai-codex',
+      profileId: 'work',
+      groupId: 'pool',
+      sourceAccountIdentity: {
+        providerAccountId: 'acct-source',
+        accountLabel: 'source@example.test',
+        groupGeneration: 42,
+      },
+    });
+
+    expect(result).toMatchObject({
+      kind: 'usage_limit',
+      sourceProviderAccountId: 'acct-source',
+      sourceAccountLabel: 'source@example.test',
+      groupGeneration: 42,
+    });
+  });
+
   it('classifies structured usage-limit recovery as quota recovery, not provider state sharing', () => {
     const result = classifyCodexConnectedServiceAuthFailure({
       providerErrorPath: true,

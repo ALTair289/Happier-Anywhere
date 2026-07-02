@@ -344,16 +344,13 @@ describe('createConnectedServiceQuotaSnapshotDeliveryOutbox', () => {
     expect(outbox.pendingCount()).toBe(0);
   });
 
-  it('does not expire a fresh coalesced payload using the first failed enqueue time', async () => {
-    let nowMs = 0;
+  it('flushes retained pending payloads after a long offline interval', async () => {
     const deliver = vi.fn()
       .mockResolvedValueOnce({ error: 'daemon offline' })
       .mockResolvedValueOnce({ ok: true });
     const outbox = createConnectedServiceQuotaSnapshotDeliveryOutbox({
       deliver,
       maxAttempts: 5,
-      maxPendingPayloadAgeMs: 100,
-      nowMs: () => nowMs,
     });
 
     await outbox.enqueueAndFlush({
@@ -364,7 +361,6 @@ describe('createConnectedServiceQuotaSnapshotDeliveryOutbox', () => {
       snapshot: quotaSnapshot({ activeAccountId: 'acct_old', fetchedAt: 1_000 }),
     });
 
-    nowMs = 101;
     outbox.enqueue({
       sessionId: 'sess_1',
       serviceId: 'openai-codex',
@@ -374,7 +370,14 @@ describe('createConnectedServiceQuotaSnapshotDeliveryOutbox', () => {
     });
     await outbox.flushPending({ reason: 'daemon_reconnect' });
 
-    expect(deliver).toHaveBeenCalledTimes(2);
+    expect(deliver).toHaveBeenCalledTimes(3);
+    expect(deliver.mock.calls[1]?.[0]).toMatchObject({
+      groupGeneration: 1,
+      snapshot: {
+        activeAccountId: 'acct_old',
+        fetchedAt: 1_000,
+      },
+    });
     expect(deliver.mock.calls.at(-1)?.[0]).toMatchObject({
       groupGeneration: 2,
       snapshot: {
@@ -385,7 +388,7 @@ describe('createConnectedServiceQuotaSnapshotDeliveryOutbox', () => {
     expect(outbox.pendingCount()).toBe(0);
   });
 
-  it('automatically retries pending snapshots until delivery succeeds or the bounded attempt budget is exhausted', async () => {
+  it('automatically retries pending snapshots until delivery succeeds', async () => {
     vi.useFakeTimers();
     const deliver = vi.fn()
       .mockResolvedValueOnce({ error: 'daemon offline' })
@@ -410,9 +413,52 @@ describe('createConnectedServiceQuotaSnapshotDeliveryOutbox', () => {
     expect(outbox.pendingCount()).toBe(0);
   });
 
+  it('reports overflow drops in the next flush result', async () => {
+    const diagnostics: unknown[] = [];
+    const deliver = vi.fn(async () => ({ ok: true }));
+    const outbox = createConnectedServiceQuotaSnapshotDeliveryOutbox({
+      deliver,
+      maxPendingEntries: 1,
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+    });
 
-  it('emits a bounded final diagnostic and clears pending state after the last failed attempt', async () => {
-    const deliver = vi.fn(async () => ({ error: 'daemon offline' }));
+    outbox.enqueue({
+      sessionId: 'sess_1',
+      serviceId: 'openai-codex',
+      groupId: 'main',
+      groupGeneration: 1,
+      snapshot: quotaSnapshot({ activeAccountId: 'acct_evicted' }),
+    });
+
+    const result = await outbox.enqueueAndFlush({
+      sessionId: 'sess_2',
+      serviceId: 'openai-codex',
+      groupId: 'main',
+      groupGeneration: 1,
+      snapshot: quotaSnapshot({ activeAccountId: 'acct_kept' }),
+    });
+
+    expect(result).toEqual({
+      attempted: 1,
+      delivered: 1,
+      pending: 0,
+      dropped: 1,
+    });
+    expect(diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event: 'quota_snapshot_delivery_dropped',
+        reason: 'quota_snapshot_outbox_overflow',
+        sessionId: 'sess_1',
+      }),
+    ]));
+  });
+
+
+  it('keeps the latest pending snapshot after bounded daemon delivery failures so reconnect can flush it', async () => {
+    const deliver = vi.fn()
+      .mockResolvedValueOnce({ error: 'daemon offline' })
+      .mockResolvedValueOnce({ error: 'daemon still offline' })
+      .mockResolvedValueOnce({ ok: true });
     const diagnostics: unknown[] = [];
     const outbox = createConnectedServiceQuotaSnapshotDeliveryOutbox({
       deliver,
@@ -430,9 +476,9 @@ describe('createConnectedServiceQuotaSnapshotDeliveryOutbox', () => {
     await outbox.flushPending({ reason: 'daemon_reconnect' });
 
     expect(deliver).toHaveBeenCalledTimes(2);
-    expect(outbox.pendingCount()).toBe(0);
+    expect(outbox.pendingCount()).toBe(1);
     expect(diagnostics.at(-1)).toEqual(expect.objectContaining({
-      event: 'quota_snapshot_delivery_dropped',
+      event: 'quota_snapshot_delivery_retrying',
       phase: 'quota_snapshot_delivery',
       reason: 'daemon_quota_snapshot_delivery_failed',
       sessionId: 'sess_1',
@@ -441,8 +487,56 @@ describe('createConnectedServiceQuotaSnapshotDeliveryOutbox', () => {
       activeAccountId: 'acct_live',
       attemptCount: 2,
       maxAttempts: 2,
-      lastError: 'daemon offline',
+      lastError: 'daemon still offline',
     }));
+
+    await outbox.flushPending({ reason: 'daemon_reconnect' });
+
+    expect(deliver).toHaveBeenCalledTimes(3);
+    expect(outbox.pendingCount()).toBe(0);
+  });
+
+  it('keeps the latest pending snapshot across a long offline interval so reconnect can flush stale display evidence', async () => {
+    const deliver = vi.fn()
+      .mockResolvedValueOnce({ error: 'daemon offline' })
+      .mockResolvedValueOnce({ ok: true });
+    const diagnostics: unknown[] = [];
+    const outbox = createConnectedServiceQuotaSnapshotDeliveryOutbox({
+      deliver,
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+    });
+
+    await outbox.enqueueAndFlush({
+      sessionId: 'sess_1',
+      serviceId: 'openai-codex',
+      groupId: 'main',
+      groupGeneration: 7,
+      snapshot: quotaSnapshot({
+        activeAccountId: 'acct_stale_but_latest',
+        fetchedAt: 1_000,
+        remainingPct: 0,
+      }),
+    });
+
+    await outbox.flushPending({ reason: 'daemon_reconnect' });
+
+    expect(deliver).toHaveBeenCalledTimes(2);
+    expect(deliver.mock.calls.at(-1)?.[0]).toMatchObject({
+      sessionId: 'sess_1',
+      serviceId: 'openai-codex',
+      groupId: 'main',
+      groupGeneration: 7,
+      snapshot: {
+        activeAccountId: 'acct_stale_but_latest',
+        fetchedAt: 1_000,
+      },
+    });
+    expect(outbox.pendingCount()).toBe(0);
+    expect(diagnostics).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event: 'quota_snapshot_delivery_dropped',
+      }),
+    ]));
   });
 
   it('clears pending snapshots when a session exits', async () => {
@@ -465,17 +559,8 @@ describe('createConnectedServiceQuotaSnapshotDeliveryOutbox', () => {
     expect(deliver).toHaveBeenCalledTimes(1);
   });
 
-  it('flushes a cold-reconnect runtime quota snapshot into daemon fanout state', async () => {
+  it('flushes a cold-reconnect runtime quota snapshot without driving daemon fanout state', async () => {
     const runtimeQuotaSnapshots = new ConnectedServiceAuthGroupRuntimeQuotaSnapshotStore();
-    const quotaCoordinator = {
-      recordInBandQuotaSnapshot: vi.fn(async () => ({ status: 'persisted' as const })),
-      recordRuntimeAccountIdentityFromSnapshot: vi.fn(),
-      recordAccountExhaustionAndFanout: vi.fn(async () => ({
-        status: 'recorded' as const,
-        fanoutCandidates: 1,
-        fanoutRequests: 1,
-      })),
-    };
     let daemonOnline = false;
     const deliver = vi.fn(async (body) => {
       if (!daemonOnline) return { error: 'daemon offline' };
@@ -509,7 +594,6 @@ describe('createConnectedServiceQuotaSnapshotDeliveryOutbox', () => {
             },
           },
         }],
-        quotaCoordinator,
         runtimeQuotaSnapshots,
         sessionId: body.sessionId,
         serviceId: body.serviceId,
@@ -536,20 +620,6 @@ describe('createConnectedServiceQuotaSnapshotDeliveryOutbox', () => {
     daemonOnline = true;
     await outbox.flushPending({ reason: 'daemon_reconnect' });
 
-    expect(quotaCoordinator.recordRuntimeAccountIdentityFromSnapshot).toHaveBeenCalledWith(expect.objectContaining({
-      sessionId: 'sess_1',
-      providerAccountId: 'acct_live_codex',
-      groupGeneration: 42,
-    }));
-    expect(quotaCoordinator.recordAccountExhaustionAndFanout).toHaveBeenCalledWith({
-      sourceSessionId: 'sess_1',
-      serviceId: 'openai-codex',
-      groupId: 'main',
-      exhaustedProfileId: 'primary',
-      providerAccountId: 'acct_live_codex',
-      resetAtMs: 10_000,
-      reason: 'usage_limit',
-    });
     expect(outbox.pendingCount()).toBe(0);
   });
 

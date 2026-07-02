@@ -6,16 +6,17 @@ import { z } from 'zod';
 
 export const CODEX_CHATGPT_AUTH_TOKENS_REFRESH_PATH =
   '/connected-service-auth/openai-codex/chatgpt-auth-tokens/refresh';
+export const CODEX_CHATGPT_AUTH_TOKENS_REFRESH_SERVICE_ID = 'openai-codex';
 
 export const CodexChatGptAuthTokensRefreshSelectionSchema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('profile'),
-    serviceId: z.literal('openai-codex'),
+    serviceId: z.literal(CODEX_CHATGPT_AUTH_TOKENS_REFRESH_SERVICE_ID),
     profileId: ConnectedServiceProfileIdSchema,
   }),
   z.object({
     kind: z.literal('group'),
-    serviceId: z.literal('openai-codex'),
+    serviceId: z.literal(CODEX_CHATGPT_AUTH_TOKENS_REFRESH_SERVICE_ID),
     groupId: ConnectedServiceAuthGroupIdSchema,
     activeProfileId: ConnectedServiceProfileIdSchema,
     fallbackProfileId: ConnectedServiceProfileIdSchema,

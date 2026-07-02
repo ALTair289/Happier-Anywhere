@@ -82,7 +82,7 @@ describe('commitConnectedServiceQuotaLifecycleSessionEvents', () => {
     });
   });
 
-  it('uses a deterministic local id for repeated quota lifecycle edges', async () => {
+  it('uses a reset-scoped local id for repeated quota lifecycle edges', async () => {
     process.env.HAPPIER_SERVER_URL = 'http://server.example.test';
     vi.resetModules();
     const { commitConnectedServiceQuotaLifecycleSessionEvents } = await import('./commitConnectedServiceQuotaLifecycleSessionEvents');
@@ -107,16 +107,51 @@ describe('commitConnectedServiceQuotaLifecycleSessionEvents', () => {
       transition: {
         ...transition,
         cycleId: 'cycle-1950000',
-        resetAtMs: 1_950_000,
       },
     });
 
     expect(postSpy).toHaveBeenCalledTimes(2);
     const firstPayload = postSpy.mock.calls[0]?.[1] as Readonly<{ localId: string; content: { v: { content: { id: string } } } }>;
     const secondPayload = postSpy.mock.calls[1]?.[1] as Readonly<{ localId: string; content: { v: { content: { id: string } } } }>;
-    expect(firstPayload.localId).not.toBe(secondPayload.localId);
+    expect(firstPayload.localId).toBe(secondPayload.localId);
     expect(firstPayload.content.v.content.id).toBe(firstPayload.localId);
     expect(secondPayload.content.v.content.id).toBe(secondPayload.localId);
+  });
+
+  it('buckets reset timing in the local id so daemon re-observations do not append duplicate rows', async () => {
+    process.env.HAPPIER_SERVER_URL = 'http://server.example.test';
+    vi.resetModules();
+    const { commitConnectedServiceQuotaLifecycleSessionEvents } = await import('./commitConnectedServiceQuotaLifecycleSessionEvents');
+
+    vi.spyOn(axios, 'get').mockResolvedValue(PLAIN_SESSION_RESPONSE);
+    const postSpy = vi.spyOn(axios, 'post').mockResolvedValue(COMMIT_RESPONSE);
+    const transition = {
+      phase: 'blocked' as const,
+      serviceId: 'openai-codex' as const,
+      groupId: 'main',
+      activeProfileId: 'primary',
+      sessionIds: ['sess-1'],
+      cycleId: 'reset_at_1900000',
+      issueFingerprint: 'quota-blocked:openai-codex:main',
+      resetAtMs: 1_900_000,
+      reason: 'connected_service_group_quota_exhausted',
+    };
+
+    await commitConnectedServiceQuotaLifecycleSessionEvents({ credentials: CREDENTIALS, transition });
+    await commitConnectedServiceQuotaLifecycleSessionEvents({
+      credentials: CREDENTIALS,
+      transition: {
+        ...transition,
+        cycleId: 'reset_at_1900999',
+        resetAtMs: 1_900_999,
+      },
+    });
+
+    expect(postSpy).toHaveBeenCalledTimes(2);
+    const firstPayload = postSpy.mock.calls[0]?.[1] as Readonly<{ localId: string }>;
+    const secondPayload = postSpy.mock.calls[1]?.[1] as Readonly<{ localId: string }>;
+    expect(firstPayload.localId).toBe(secondPayload.localId);
+    expect(firstPayload.localId).toContain('reset_at_1860000');
   });
 
   it('reuses the same local id when the same quota lifecycle incident is retried', async () => {
@@ -205,6 +240,41 @@ describe('commitConnectedServiceQuotaLifecycleSessionEvents', () => {
       profileId: 'backup',
       reason: 'fresh_quota_evidence',
     });
+  });
+
+  it('buckets recovered cycle ids when reset timing is only available through cycleId', async () => {
+    process.env.HAPPIER_SERVER_URL = 'http://server.example.test';
+    vi.resetModules();
+    const { commitConnectedServiceQuotaLifecycleSessionEvents } = await import('./commitConnectedServiceQuotaLifecycleSessionEvents');
+
+    vi.spyOn(axios, 'get').mockResolvedValue(PLAIN_SESSION_RESPONSE);
+    const postSpy = vi.spyOn(axios, 'post').mockResolvedValue(COMMIT_RESPONSE);
+    const transition = {
+      phase: 'recovered' as const,
+      serviceId: 'openai-codex' as const,
+      groupId: 'main',
+      activeProfileId: 'backup',
+      sessionIds: ['sess-1'],
+      cycleId: 'reset_at_1900000',
+      issueFingerprint: 'quota-blocked:openai-codex:main',
+      resetAtMs: null,
+      reason: 'fresh_quota_evidence',
+    };
+
+    await commitConnectedServiceQuotaLifecycleSessionEvents({ credentials: CREDENTIALS, transition });
+    await commitConnectedServiceQuotaLifecycleSessionEvents({
+      credentials: CREDENTIALS,
+      transition: {
+        ...transition,
+        cycleId: 'reset_at_1900999',
+      },
+    });
+
+    expect(postSpy).toHaveBeenCalledTimes(2);
+    const firstPayload = postSpy.mock.calls[0]?.[1] as Readonly<{ localId: string }>;
+    const secondPayload = postSpy.mock.calls[1]?.[1] as Readonly<{ localId: string }>;
+    expect(firstPayload.localId).toBe(secondPayload.localId);
+    expect(firstPayload.localId).toContain('reset_at_1860000');
   });
 
   it('keeps committing remaining sessions when one session commit fails', async () => {

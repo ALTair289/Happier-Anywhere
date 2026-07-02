@@ -112,6 +112,91 @@ describe('reportConnectedServiceRuntimeAuthFailureToDaemon', () => {
       expect(notify).toHaveBeenCalledTimes(2);
     });
 
+    it('does not suppress usage-limit reports from different source provider accounts', async () => {
+      const notify = vi.fn(async () => ({ ok: true, result: { status: 'noop' } }));
+
+      await reportConnectedServiceRuntimeAuthFailureToDaemon({
+        sessionId: 'sess_dedupe_source_account',
+        switchesThisTurn: 0,
+        classification: {
+          ...limitClassification,
+          sourceProviderAccountId: 'acct_source_one',
+        },
+        notify,
+        nowMs: () => 1_000,
+      });
+      await reportConnectedServiceRuntimeAuthFailureToDaemon({
+        sessionId: 'sess_dedupe_source_account',
+        switchesThisTurn: 0,
+        classification: {
+          ...limitClassification,
+          sourceProviderAccountId: 'acct_source_two',
+        },
+        notify,
+        nowMs: () => 1_100,
+      });
+
+      expect(notify).toHaveBeenCalledTimes(2);
+    });
+
+    it.each([
+      [
+        'active profile evidence changes',
+        { activeProfileId: 'primary' },
+        { activeProfileId: 'backup' },
+      ],
+      [
+        'group generation changes',
+        { groupGeneration: 4 },
+        { groupGeneration: 5 },
+      ],
+      [
+        'credential health evidence changes',
+        { credentialHealthStatus: 'connected' },
+        { credentialHealthStatus: 'needs_reauth' },
+      ],
+      [
+        'identity proof version changes',
+        { identityProofVersion: 1 },
+        { identityProofVersion: 2 },
+      ],
+      [
+        'source relation key changes',
+        { sourceKey: 'source:profile:primary' },
+        { sourceKey: 'source:profile:backup' },
+      ],
+      [
+        'provider-account usage record evidence changes',
+        { providerAccountUsageRecordId: 'paug_v1_record_one' },
+        { providerAccountUsageRecordId: 'paug_v1_record_two' },
+      ],
+    ] as const)('does not suppress reports inside the dedupe window when %s', async (_label, firstPatch, secondPatch) => {
+      const notify = vi.fn(async () => ({ ok: true, result: { status: 'noop' } }));
+
+      await reportConnectedServiceRuntimeAuthFailureToDaemon({
+        sessionId: 'sess_dedupe_evidence_change',
+        switchesThisTurn: 0,
+        classification: {
+          ...limitClassification,
+          ...firstPatch,
+        },
+        notify,
+        nowMs: () => 1_000,
+      });
+      await reportConnectedServiceRuntimeAuthFailureToDaemon({
+        sessionId: 'sess_dedupe_evidence_change',
+        switchesThisTurn: 0,
+        classification: {
+          ...limitClassification,
+          ...secondPatch,
+        },
+        notify,
+        nowMs: () => 1_100,
+      });
+
+      expect(notify).toHaveBeenCalledTimes(2);
+    });
+
     it('reports again once the dedupe window has elapsed', async () => {
       const notify = vi.fn(async () => ({ ok: true, result: { status: 'noop' } }));
 
@@ -486,6 +571,7 @@ describe('reportConnectedServiceRuntimeAuthFailureToDaemon', () => {
   it('enqueues a sanitized outbox report when daemon notification fails', async () => {
     const outboxDir = await createTempDir('happier-runtime-auth-report-outbox-helper-');
     try {
+      const scheduleOutboxDrain = vi.fn();
       await expect(reportConnectedServiceRuntimeAuthFailureToDaemon({
         sessionId: 'sess_1',
         switchesThisTurn: 2,
@@ -501,6 +587,7 @@ describe('reportConnectedServiceRuntimeAuthFailureToDaemon', () => {
         }),
         logger: { debug: vi.fn() },
         reportOutboxDir: outboxDir,
+        scheduleOutboxDrain,
         nowMs: () => 1_700_000_000_000,
       })).resolves.toMatchObject({
         handled: false,
@@ -519,6 +606,7 @@ describe('reportConnectedServiceRuntimeAuthFailureToDaemon', () => {
       expect(JSON.stringify(items[0])).not.toContain('secret-access-token');
       expect(JSON.stringify(items[0])).not.toContain('secret-env-value');
       expect(JSON.stringify(items[0])).not.toContain('raw-provider-body');
+      expect(scheduleOutboxDrain).toHaveBeenCalledOnce();
     } finally {
       await removeTempDir(outboxDir);
     }

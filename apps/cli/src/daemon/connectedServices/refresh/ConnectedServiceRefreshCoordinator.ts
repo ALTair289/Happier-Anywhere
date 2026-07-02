@@ -21,8 +21,12 @@ import {
   type CodexChatGptAuthTokensRefreshSelection,
 } from '@/backends/codex/connectedServices/codexChatGptAuthTokensRefreshBridgeContract';
 import { materializeCodexChatGptRefreshBridgeSelection } from '@/backends/codex/connectedServices/materializeCodexChatGptRefreshBridgeSelection';
+import {
+  resolveClaudeSubscriptionAuthTokensRefreshProfileId,
+  type ClaudeSubscriptionAuthTokensRefreshResponse,
+  type ClaudeSubscriptionAuthTokensRefreshSelection,
+} from '@/backends/claude/connectedServices/claudeSubscriptionAuthTokensRefreshBridgeContract';
 
-import { parseConnectedServicesBindings } from '../parseConnectedServicesBindings';
 import { resolveConnectedServiceAccountMode } from '@/cloud/connectedServices/resolveConnectedServiceAccountMode';
 import { resolveConnectedServiceCredentials } from '@/cloud/connectedServices/resolveConnectedServiceCredentials';
 import {
@@ -40,11 +44,11 @@ import type {
   ConnectedServiceRefreshFailureCategory,
   ConnectedServiceRefreshReason,
 } from '@/daemon/connectedServices/credentials/lifecycleTypes';
-import {
-  readConnectedServiceChildSelectionsFromEnv,
-  type ConnectedServiceChildSelection,
-} from '../connectedServiceChildEnvironment';
 import { readConnectedServiceMaterializationIdentityV1 } from '../materialize/createConnectedServiceMaterializationIdentity';
+import {
+  ConnectedServiceRuntimeRegistry,
+  type ConnectedServiceRuntimeRefreshTarget,
+} from '../runtimeRegistry/registry';
 
 type BoundProfile = Readonly<{ serviceId: ConnectedServiceId; profileId: string }>;
 type ConnectedServiceCredentialSource =
@@ -92,16 +96,7 @@ export type ConnectedServiceCredentialHealthNotificationTarget = Readonly<{
   sessionId: string;
 }>;
 
-type SpawnTarget = Readonly<{
-  pid: number;
-  agentId: CatalogAgentId;
-  sessionId: string | null;
-  materializationKey: string;
-  connectedServiceMaterializationIdentityV1: ConnectedServiceMaterializationIdentityV1 | null;
-  sessionDirectory: string | null;
-  bindings: ReadonlyArray<BoundProfile>;
-  selectionsByServiceId: ReadonlyMap<ConnectedServiceId, ConnectedServiceChildSelection>;
-}>;
+type SpawnTarget = ConnectedServiceRuntimeRefreshTarget;
 
 type RematerializedTargetFailure = Readonly<{
   target: SpawnTarget;
@@ -232,18 +227,6 @@ async function defaultSleepMs(ms: number): Promise<void> {
     const timeout = setTimeout(resolve, Math.max(0, Math.trunc(ms)));
     (timeout as unknown as { unref?: () => void }).unref?.();
   });
-}
-
-function selectionToBoundProfile(selection: ConnectedServiceChildSelection): BoundProfile {
-  return {
-    serviceId: selection.serviceId,
-    profileId: selection.kind === 'group' ? selection.activeProfileId : selection.profileId,
-  };
-}
-
-function buildSelectionsByServiceId(env: Pick<NodeJS.ProcessEnv, string> | undefined): ReadonlyMap<ConnectedServiceId, ConnectedServiceChildSelection> {
-  const selections = readConnectedServiceChildSelectionsFromEnv(env ?? {});
-  return new Map(selections.map((selection) => [selection.serviceId, selection]));
 }
 
 function buildRefreshDiagnostic(params: Readonly<{
@@ -398,8 +381,10 @@ function hasObservedOauthCredentialChanged(
 }
 
 export class ConnectedServiceRefreshCoordinator {
-  private readonly targetsByPid = new Map<number, SpawnTarget>();
+  private readonly runtimeRegistry: ConnectedServiceRuntimeRegistry;
   private readonly inFlightRefreshes = new Map<string, Promise<ConnectedServiceCredentialRefreshResult>>();
+  private readonly inFlightRefreshRematerializations = new Map<string, Promise<RematerializedTargetsResult>>();
+  private readonly inFlightRefreshAuthUpdatedNotifications = new Map<string, Promise<void>>();
 
   constructor(private readonly params: Readonly<{
     api: ApiClient;
@@ -426,7 +411,10 @@ export class ConnectedServiceRefreshCoordinator {
       affectedTargets: ReadonlyArray<ConnectedServiceCredentialHealthNotificationTarget>;
     }>) => void | Promise<void>;
     logRefreshDiagnostic?: (diagnostic: ConnectedServiceCredentialRefreshDiagnostic) => void;
-  }>) {}
+    runtimeRegistry?: ConnectedServiceRuntimeRegistry;
+  }>) {
+    this.runtimeRegistry = params.runtimeRegistry ?? new ConnectedServiceRuntimeRegistry();
+  }
 
   registerSpawnTarget(params: Readonly<{
     pid: number;
@@ -440,12 +428,7 @@ export class ConnectedServiceRefreshCoordinator {
     connectedServicesBindingsRaw: unknown;
     connectedServiceSelectionsEnv?: Pick<NodeJS.ProcessEnv, string>;
   }>): void {
-    const selectionsByServiceId = buildSelectionsByServiceId(params.connectedServiceSelectionsEnv);
-    const bindings = selectionsByServiceId.size > 0
-      ? Array.from(selectionsByServiceId.values()).map(selectionToBoundProfile)
-      : parseConnectedServicesBindings(params.connectedServicesBindingsRaw);
-    if (bindings.length === 0) return;
-    this.targetsByPid.set(params.pid, {
+    this.runtimeRegistry.registerTarget({
       pid: params.pid,
       agentId: params.agentId,
       sessionId: typeof params.sessionId === 'string' && params.sessionId.trim().length > 0
@@ -458,23 +441,17 @@ export class ConnectedServiceRefreshCoordinator {
       sessionDirectory: typeof params.sessionDirectory === 'string' && params.sessionDirectory.trim().length > 0
         ? params.sessionDirectory.trim()
         : null,
-      bindings,
-      selectionsByServiceId,
+      connectedServicesBindingsRaw: params.connectedServicesBindingsRaw,
+      ...(params.connectedServiceSelectionsEnv ? { connectedServiceSelectionsEnv: params.connectedServiceSelectionsEnv } : {}),
     });
   }
 
   unregisterPid(pid: number): void {
-    this.targetsByPid.delete(pid);
+    this.runtimeRegistry.unregisterPid(pid);
   }
 
   transferPid(fromPid: number, toPid: number): void {
-    const target = this.targetsByPid.get(fromPid);
-    if (!target) return;
-    this.targetsByPid.delete(fromPid);
-    this.targetsByPid.set(toPid, {
-      ...target,
-      pid: toPid,
-    });
+    this.runtimeRegistry.transferPid(fromPid, toPid);
   }
 
   async tickOnce(): Promise<void> {
@@ -482,7 +459,7 @@ export class ConnectedServiceRefreshCoordinator {
     const unique = new Map<string, BoundProfile>();
     const errors: unknown[] = [];
 
-    for (const target of this.targetsByPid.values()) {
+    for (const target of this.runtimeRegistry.listRefreshTargets()) {
       for (const binding of target.bindings) {
         unique.set(bindingKey(binding), binding);
       }
@@ -504,10 +481,27 @@ export class ConnectedServiceRefreshCoordinator {
   async refreshOpenAiCodexChatGptTokensForBridge(input: Readonly<{
     selection: CodexChatGptAuthTokensRefreshSelection;
     chatgptPlanType: string | null;
+    forceRefresh?: boolean;
   }>): Promise<CodexChatGptAuthTokensRefreshResponse> {
     const profileId = resolveCodexChatGptAuthTokensRefreshProfileId(input.selection);
+    const binding = { serviceId: 'openai-codex' as const, profileId };
+
+    // F6: on a cold broker cache-miss (forceRefresh unset) return the CURRENT access token if it is
+    // still valid, instead of rotating the single-use refresh token on every new OpenCode process.
+    // The broker forces a rotation ONLY on its 401-retry path. (Near-expiry tokens still rotate below.)
+    if (input.forceRefresh !== true) {
+      const current = await this.readValidOauthAccessTokenForBridge(binding);
+      if (current) {
+        return {
+          accessToken: current.accessToken,
+          chatgptAccountId: current.providerAccountId,
+          chatgptPlanType: input.chatgptPlanType,
+        };
+      }
+    }
+
     const updated = await this.refreshOauthBinding(
-      { serviceId: 'openai-codex', profileId },
+      binding,
       this.params.now(),
       { force: true, reason: 'provider_auth_bridge' },
     );
@@ -534,6 +528,91 @@ export class ConnectedServiceRefreshCoordinator {
       accessToken: updated.credential.oauth.accessToken,
       chatgptAccountId: updated.credential.oauth.providerAccountId,
       chatgptPlanType: input.chatgptPlanType,
+    };
+  }
+
+  /**
+   * Daemon-side handler for the OpenCode Claude broker bridge: deliver a fresh Anthropic ACCESS
+   * token (never the refresh token). Reuses the canonical per-binding refresh (single-flight,
+   * rotation-aware, persists the rotated refresh token) for subscription OAuth; setup-tokens are
+   * long-lived access tokens and are returned as-is (nothing to refresh).
+   */
+  async refreshClaudeSubscriptionTokensForBridge(input: Readonly<{
+    selection: ClaudeSubscriptionAuthTokensRefreshSelection;
+    forceRefresh?: boolean;
+  }>): Promise<ClaudeSubscriptionAuthTokensRefreshResponse> {
+    const profileId = resolveClaudeSubscriptionAuthTokensRefreshProfileId(input.selection);
+    const binding = { serviceId: 'claude-subscription' as const, profileId };
+    const source = await this.readCredentialForRefresh(binding);
+    if (!source) {
+      throw new Error('connected_service_claude_refresh_unavailable');
+    }
+    if (source.record.kind === 'token') {
+      // Setup-tokens are long-lived access tokens; nothing to refresh (forceRefresh is moot).
+      return {
+        accessToken: source.record.token.token,
+        anthropicAccountId: source.record.token.providerAccountId,
+        expiresAt: source.record.expiresAt ?? null,
+      };
+    }
+    // F6: return the CURRENT access token if still valid + not forced (avoid rotating on every cold
+    // broker cache-miss). The broker forces a rotation ONLY on its 401-retry path.
+    if (input.forceRefresh !== true && this.isOauthSourceStillValidForBridge(source)) {
+      return {
+        accessToken: source.record.oauth.accessToken,
+        anthropicAccountId: source.record.oauth.providerAccountId,
+        expiresAt: this.resolveExpiresAtForSource(source),
+      };
+    }
+    const updated = await this.refreshOauthBinding(
+      binding,
+      this.params.now(),
+      { force: true, reason: 'provider_auth_bridge' },
+    );
+    if (updated.status !== 'refreshed' || updated.credential?.kind !== 'oauth') {
+      throw new Error('connected_service_claude_refresh_unavailable');
+    }
+    return {
+      accessToken: updated.credential.oauth.accessToken,
+      anthropicAccountId: updated.credential.oauth.providerAccountId,
+      expiresAt: updated.credential.expiresAt ?? null,
+    };
+  }
+
+  /** Resolve the authoritative expiry for a credential source (sealed metadata wins over the record). */
+  private resolveExpiresAtForSource(source: ConnectedServiceCredentialSource): number | null {
+    if (source.mode === 'plain') return source.record.expiresAt ?? null;
+    return source.metadata.expiresAt ?? source.record.expiresAt ?? null;
+  }
+
+  /**
+   * True when the source is an OAuth credential whose access token is NOT within the refresh window of
+   * expiry. Mirrors the `force:false` not-needed gate in `refreshOauthBindingUnserialized` so the
+   * bridge's "return current" path matches the proactive refresher's notion of "still valid".
+   */
+  private isOauthSourceStillValidForBridge(source: ConnectedServiceCredentialSource): boolean {
+    if (source.record.kind !== 'oauth') return false;
+    if (!source.record.oauth.accessToken.trim()) return false;
+    const expiresAt = this.resolveExpiresAtForSource(source);
+    if (typeof expiresAt !== 'number' || !Number.isFinite(expiresAt)) return false;
+    return expiresAt - this.params.now() > this.params.refreshWindowMs;
+  }
+
+  /**
+   * For the access-token bridges (F6): read the current credential and return its access token when it
+   * is OAuth and still valid (not near expiry). Returns null when missing, non-OAuth, or near expiry
+   * (the caller then performs a forced rotating refresh).
+   */
+  private async readValidOauthAccessTokenForBridge(
+    binding: BoundProfile,
+  ): Promise<Readonly<{ accessToken: string; providerAccountId: string | null }> | null> {
+    const source = await this.readCredentialForRefresh(binding);
+    if (!source || !this.isOauthSourceStillValidForBridge(source) || source.record.kind !== 'oauth') {
+      return null;
+    }
+    return {
+      accessToken: source.record.oauth.accessToken,
+      providerAccountId: source.record.oauth.providerAccountId,
     };
   }
 
@@ -575,7 +654,7 @@ export class ConnectedServiceRefreshCoordinator {
     );
     if (result.status !== 'refreshed') return result;
 
-    const rematerialization = await this.rematerializeTargetsForBindingDetailed(binding);
+    const rematerialization = await this.rematerializeTargetsForBindingAfterRefresh(binding);
     const targetFailures = resolveRuntimeAuthRematerializationFailures({
       result: rematerialization,
       sessionId: input.sessionId ?? null,
@@ -588,19 +667,15 @@ export class ConnectedServiceRefreshCoordinator {
       });
     }
 
-    const affectedTargets = rematerialization.rematerializedTargets;
     if (!wasRuntimeAuthSessionRematerialized({ result: rematerialization, sessionId: input.sessionId ?? null })) {
       return await this.finalizeRefreshResult(this.buildMissingRuntimeAuthTargetRefreshResult({
         binding,
         sourceResult: result,
       }));
     }
-    if (affectedTargets.length === 0) return result;
-    await this.params.onAuthUpdated?.({
-      binding,
-      affectedTargets,
-      trigger: 'refresh_triggered_restart',
-    });
+    if (rematerialization.rematerializedTargets.length > 0) {
+      await this.notifyAuthUpdatedForRefreshedBinding(binding, rematerialization.rematerializedTargets);
+    }
     return result;
   }
 
@@ -627,13 +702,9 @@ export class ConnectedServiceRefreshCoordinator {
     }
     if (result.status !== 'refreshed') return;
 
-    const affectedTargets = await this.rematerializeTargetsForBinding(binding);
-    if (affectedTargets.length === 0) return;
-    await this.params.onAuthUpdated?.({
-      binding,
-      affectedTargets,
-      trigger: 'refresh_triggered_restart',
-    });
+    const rematerialization = await this.rematerializeTargetsForBindingAfterRefresh(binding);
+    if (rematerialization.rematerializedTargets.length === 0) return;
+    await this.notifyAuthUpdatedForRefreshedBinding(binding, rematerialization.rematerializedTargets);
   }
 
   private async isRefreshBlockedByCredentialHealth(binding: BoundProfile): Promise<boolean> {
@@ -848,7 +919,7 @@ export class ConnectedServiceRefreshCoordinator {
   private resolveNotificationTargetsForBinding(
     binding: BoundProfile,
   ): ReadonlyArray<ConnectedServiceCredentialHealthNotificationTarget> {
-    return Array.from(this.targetsByPid.values())
+    return this.runtimeRegistry.listRefreshTargets()
       .filter((target) => target.bindings.some((b) => b.serviceId === binding.serviceId && b.profileId === binding.profileId))
       .map((target) => ({
         pid: target.pid,
@@ -1230,8 +1301,53 @@ export class ConnectedServiceRefreshCoordinator {
     return (await this.rematerializeTargetsForBindingDetailed(binding)).rematerializedTargets;
   }
 
+  private async rematerializeTargetsForBindingAfterRefresh(binding: BoundProfile): Promise<RematerializedTargetsResult> {
+    const key = bindingKey(binding);
+    const existing = this.inFlightRefreshRematerializations.get(key);
+    if (existing) return await existing;
+
+    const promise = this.rematerializeTargetsForBindingDetailed(binding);
+    this.inFlightRefreshRematerializations.set(key, promise);
+    try {
+      return await promise;
+    } finally {
+      if (this.inFlightRefreshRematerializations.get(key) === promise) {
+        this.inFlightRefreshRematerializations.delete(key);
+      }
+    }
+  }
+
+  private async notifyAuthUpdatedForRefreshedBinding(
+    binding: BoundProfile,
+    affectedTargets: ReadonlyArray<SpawnTarget>,
+  ): Promise<void> {
+    if (affectedTargets.length === 0) return;
+    const key = bindingKey(binding);
+    const existing = this.inFlightRefreshAuthUpdatedNotifications.get(key);
+    if (existing) {
+      await existing;
+      return;
+    }
+
+    const promise = Promise.resolve(this.params.onAuthUpdated?.({
+      binding,
+      affectedTargets,
+      trigger: 'refresh_triggered_restart',
+    }));
+    this.inFlightRefreshAuthUpdatedNotifications.set(key, promise);
+    try {
+      await promise;
+    } finally {
+      queueMicrotask(() => {
+        if (this.inFlightRefreshAuthUpdatedNotifications.get(key) === promise) {
+          this.inFlightRefreshAuthUpdatedNotifications.delete(key);
+        }
+      });
+    }
+  }
+
   private async rematerializeTargetsForBindingDetailed(binding: BoundProfile): Promise<RematerializedTargetsResult> {
-    const affected = Array.from(this.targetsByPid.values()).filter((target) =>
+    const affected = this.runtimeRegistry.listRefreshTargets().filter((target) =>
       target.bindings.some((b) => b.serviceId === binding.serviceId && b.profileId === binding.profileId),
     );
     const rematerialized: SpawnTarget[] = [];

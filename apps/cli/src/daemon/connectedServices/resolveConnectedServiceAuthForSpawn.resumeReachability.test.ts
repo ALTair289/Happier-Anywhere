@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -15,6 +15,8 @@ import {
   ConnectedServiceSpawnResumeUnreachableError,
   resolveConnectedServiceAuthForSpawn,
 } from './resolveConnectedServiceAuthForSpawn';
+import { resolveConnectedServiceMaterializedRootDir } from './materialize/resolveConnectedServiceMaterializedRootDir';
+import { waitForCondition } from '@/testkit/async/waitFor';
 
 /**
  * K1 increment-3 — the §2 hard post-materialization reachability RE-VERIFY gate.
@@ -52,6 +54,25 @@ function makePiOauthCodexRecord(now: number) {
   });
 }
 
+function makeCodexOauthRecord(now: number) {
+  return buildConnectedServiceCredentialRecord({
+    now,
+    serviceId: 'openai-codex',
+    profileId: 'work',
+    kind: 'oauth',
+    expiresAt: now + 3_600_000,
+    oauth: {
+      accessToken: 'codex-access',
+      refreshToken: 'codex-refresh',
+      idToken: 'codex-id',
+      scope: null,
+      tokenType: 'Bearer',
+      providerAccountId: 'codex-acct',
+      providerEmail: null,
+    },
+  });
+}
+
 function makeLegacyCredentials(): Credentials {
   const credentials: Credentials = {
     token: 'happy-token',
@@ -61,6 +82,28 @@ function makeLegacyCredentials(): Credentials {
     throw new Error('test fixture expected legacy encryption');
   }
   return credentials;
+}
+
+function makeCodexApi(now: number, credentials: Credentials): ApiClient {
+  if (credentials.encryption.type !== 'legacy') {
+    throw new Error('test fixture expected legacy encryption');
+  }
+  const secret = credentials.encryption.secret;
+  const ciphertext = sealAccountScopedBlobCiphertext({
+    kind: 'connected_service_credential',
+    material: { type: 'legacy', secret },
+    payload: makeCodexOauthRecord(now),
+    randomBytes: (length) => randomBytes(length),
+  });
+  return {
+    getConnectedServiceCredentialSealed: async (params: { serviceId: string; profileId: string }) => {
+      if (params.serviceId !== 'openai-codex' || params.profileId !== 'work') return null;
+      return {
+        sealed: { format: 'account_scoped_v1', ciphertext },
+        metadata: { kind: 'oauth', providerEmail: null, providerAccountId: 'codex-acct', expiresAt: null },
+      };
+    },
+  } as unknown as ApiClient;
 }
 
 function makePiCodexApi(now: number, credentials: Credentials): ApiClient {
@@ -98,13 +141,89 @@ function sharedStateAccountSettings() {
       v: 1,
       defaults: { configMode: 'isolated', stateMode: 'isolated' },
       byAgentId: {
+        codex: { stateMode: 'shared' },
         pi: { stateMode: 'shared' },
       },
     },
   };
 }
 
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function expectPathRemoved(path: string): Promise<void> {
+  await waitForCondition(async () => !(await pathExists(path)), {
+    label: `removal of ${path}`,
+    timeoutMs: 1_000,
+    intervalMs: 25,
+  });
+  expect(await pathExists(path)).toBe(false);
+}
+
 describe('resolveConnectedServiceAuthForSpawn post-materialization resume reachability gate', () => {
+  it('cleans up a Codex materialized root when post-materialization resume reachability fails without a provider cleanup hook', async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), 'happier-reverify-codex-miss-base-'));
+    const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-reverify-codex-miss-server-'));
+    const sourceCodexHome = await mkdtemp(join(tmpdir(), 'happier-reverify-codex-source-home-'));
+    const fakeHome = await mkdtemp(join(tmpdir(), 'happier-reverify-codex-home-'));
+    const originalHome = process.env.HOME;
+    const now = 1_000_000;
+    const cwd = '/tmp/reverify-codex-miss-project';
+
+    const credentials = makeLegacyCredentials();
+    const api = makeCodexApi(now, credentials);
+    try {
+      process.env.HOME = fakeHome;
+
+      await expect(resolveConnectedServiceAuthForSpawn({
+        agentId: 'codex',
+        sessionDirectory: cwd,
+        connectedServicesBindingsRaw: PI_CONNECTED_BINDINGS,
+        materializationKey: 'codex-session-miss',
+        activeServerDir,
+        baseDir,
+        credentials,
+        api,
+        nowMs: () => now,
+        accountSettings: sharedStateAccountSettings(),
+        processEnv: {
+          CODEX_HOME: sourceCodexHome,
+          CODEX_SQLITE_HOME: sourceCodexHome,
+          HOME: fakeHome,
+        } as NodeJS.ProcessEnv,
+        vendorResumeId: '00000000-0000-4000-8000-000000000001',
+        resumeReachabilityRequired: true,
+      })).rejects.toMatchObject({
+        name: 'ConnectedServiceSpawnResumeUnreachableError',
+        errorCode: 'provider_session_state_unavailable_for_resume',
+        failurePhase: 'continuity',
+        agentId: 'codex',
+        vendorResumeId: '00000000-0000-4000-8000-000000000001',
+      });
+
+      const materializedRoot = resolveConnectedServiceMaterializedRootDir({
+        baseDir,
+        agentId: 'codex',
+        materializationKey: 'codex-session-miss',
+        materializationIdentity: null,
+      });
+      await expectPathRemoved(materializedRoot);
+    } finally {
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+      await rm(baseDir, { recursive: true, force: true });
+      await rm(activeServerDir, { recursive: true, force: true });
+      await rm(sourceCodexHome, { recursive: true, force: true });
+      await rm(fakeHome, { recursive: true, force: true });
+    }
+  });
+
   it('fails closed with the structured continuity reason when the resumed session is unreachable in the materialized target', async () => {
     const baseDir = await mkdtemp(join(tmpdir(), 'happier-reverify-miss-base-'));
     const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-reverify-miss-server-'));
@@ -144,6 +263,14 @@ describe('resolveConnectedServiceAuthForSpawn post-materialization resume reacha
         agentId: 'pi',
         vendorResumeId: 'pi-session-missing',
       });
+
+      const materializedRoot = resolveConnectedServiceMaterializedRootDir({
+        baseDir,
+        agentId: 'pi',
+        materializationKey: 'session-miss',
+        materializationIdentity: null,
+      });
+      await expectPathRemoved(materializedRoot);
     } finally {
       if (originalHome === undefined) delete process.env.HOME;
       else process.env.HOME = originalHome;

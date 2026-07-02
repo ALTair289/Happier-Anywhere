@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { ConnectedServiceAuthGroupV1 } from '@happier-dev/protocol';
+import {
+  buildProviderAccountUsageRecordId,
+  type ConnectedServiceAuthGroupV1,
+  type ProviderAccountUsageRecordKeyV1,
+  type ProviderAccountUsageSnapshotV1,
+} from '@happier-dev/protocol';
 
 import { ConnectedServiceAuthGroupRuntimeQuotaSnapshotStore } from '../accountGroups/quotas/ConnectedServiceAuthGroupRuntimeQuotaSnapshotStore';
 import { DEFAULT_CONNECTED_SERVICE_AUTH_GROUP_POLICY_V1 } from '../accountGroups/selection/selectConnectedServiceAuthGroupCandidate';
@@ -41,6 +46,45 @@ function group(activeProfileId: string, generation: number): ConnectedServiceAut
     ],
     createdAt: 1,
     updatedAt: 1,
+  };
+}
+
+function accountUsageSnapshot(profileId: string, remainingPct: number): ProviderAccountUsageSnapshotV1 {
+  const recordKey: ProviderAccountUsageRecordKeyV1 = {
+    providerId: 'codex',
+    accountSubjectId: `acct_${profileId}`,
+    subjectKind: 'account',
+    quotaScope: 'account',
+  };
+  return {
+    v: 1,
+    recordId: buildProviderAccountUsageRecordId(recordKey),
+    recordKey,
+    providerId: 'codex',
+    accountSubject: { kind: 'providerSubject', id: recordKey.accountSubjectId },
+    observedAtMs: 1_000,
+    fetchedAtMs: 1_000,
+    staleAfterMs: 300_000,
+    source: 'runtimeSignal',
+    confidence: 'confirmed',
+    state: 'loaded_data',
+    meters: [{
+      meterId: 'weekly',
+      label: 'Weekly',
+      used: 100 - remainingPct,
+      limit: 100,
+      remaining: remainingPct,
+      remainingPct,
+      usedPct: 100 - remainingPct,
+      utilizationPct: 100 - remainingPct,
+      resetsAt: 10_000,
+      resetAtMs: 10_000,
+      unit: 'credits',
+      status: 'ok',
+      limitScope: 'account',
+      confidence: 'exact',
+      details: { limitCategory: 'usage_limit' },
+    }],
   };
 }
 
@@ -597,7 +641,7 @@ describe('createDaemonConnectedServiceAuthGroupSwitchCoordinator', () => {
     }));
   });
 
-  it('commits automated switches with runtime-cooldown override after fresher quota proves the target usable', async () => {
+  it('does not use runtime quota snapshots to clear persisted target limiter state without source-backed account usage', async () => {
     const initial = group('primary', 1);
     const groupWithStaleBackupLimiter: ConnectedServiceAuthGroupV1 = {
       ...initial,
@@ -674,16 +718,12 @@ describe('createDaemonConnectedServiceAuthGroupSwitchCoordinator', () => {
       groupId: 'main',
       reason: 'usage_limit',
       observedProfileId: 'primary',
-    })).resolves.toMatchObject({ status: 'switched', activeProfileId: 'backup' });
+    })).resolves.toMatchObject({ status: 'no_eligible_member' });
 
-    expect(api.updateConnectedServiceAuthGroupActiveProfile).toHaveBeenCalledWith(expect.objectContaining({
-      activeProfileId: 'backup',
-      expectedGeneration: 1,
-      overrideRuntimeCooldown: true,
-    }));
+    expect(api.updateConnectedServiceAuthGroupActiveProfile).not.toHaveBeenCalled();
   });
 
-  it('hydrates persisted quota snapshots for group members before pre-turn selection', async () => {
+  it('does not hydrate persisted quota snapshots for group members before pre-turn selection', async () => {
     const runtimeQuotaSnapshots = new ConnectedServiceAuthGroupRuntimeQuotaSnapshotStore();
     const api = {
       getConnectedServiceAuthGroup: vi.fn(async () => group('primary', 1)),
@@ -760,13 +800,53 @@ describe('createDaemonConnectedServiceAuthGroupSwitchCoordinator', () => {
       serviceId: 'openai-codex',
       groupId: 'main',
       reason: 'soft_threshold',
-    })).resolves.toMatchObject({ status: 'switched', activeProfileId: 'backup' });
+    })).resolves.toMatchObject({ status: 'observed_generation', activeProfileId: 'primary' });
 
-    expect(hydratePersistedQuotaSnapshotsForGroup).toHaveBeenCalledWith({
+    expect(hydratePersistedQuotaSnapshotsForGroup).not.toHaveBeenCalled();
+    expect(api.updateConnectedServiceAuthGroupActiveProfile).not.toHaveBeenCalled();
+  });
+
+  it('drives pre-turn soft switching from source-backed provider account usage without runtime quota snapshots', async () => {
+    const primary = accountUsageSnapshot('primary', 0);
+    const backup = accountUsageSnapshot('backup', 90);
+    const api = {
+      getConnectedServiceAuthGroup: vi.fn(async () => group('primary', 1)),
+      updateConnectedServiceAuthGroupRuntimeState: vi.fn(async () => group('primary', 1)),
+      updateConnectedServiceAuthGroupActiveProfile: vi.fn(async ({ activeProfileId }: { activeProfileId: string }) => ({
+        ...group(activeProfileId, 2),
+        activeProfileId,
+        generation: 2,
+      })),
+    };
+    const accountUsageStore = {
+      resolveBySource: vi.fn((source: { profileId: string; groupGeneration?: number }) => {
+        if (source.groupGeneration !== 1) return null;
+        if (source.profileId === 'primary') return primary;
+        if (source.profileId === 'backup') return backup;
+        return null;
+      }),
+    };
+    const coordinator = createDaemonConnectedServiceAuthGroupSwitchCoordinator({
+      api,
+      runtimeQuotaSnapshots: new ConnectedServiceAuthGroupRuntimeQuotaSnapshotStore(),
+      accountUsageStore,
+      quotaFreshnessMs: 60_000,
+      nowMs: () => 1_000,
+      restartSession: async () => {},
+    } as Parameters<typeof createDaemonConnectedServiceAuthGroupSwitchCoordinator>[0] & Readonly<{
+      accountUsageStore: typeof accountUsageStore;
+    }>);
+
+    await expect(coordinator.switchBeforeTurn({
       serviceId: 'openai-codex',
       groupId: 'main',
-      profileIds: ['primary', 'backup'],
-    });
+      reason: 'soft_threshold',
+    })).resolves.toMatchObject({ status: 'switched', activeProfileId: 'backup' });
+
+    expect(api.updateConnectedServiceAuthGroupActiveProfile).toHaveBeenCalledWith(expect.objectContaining({
+      activeProfileId: 'backup',
+      expectedGeneration: 1,
+    }));
   });
 
   it('persists observed quota failure state before relying on selector state', async () => {

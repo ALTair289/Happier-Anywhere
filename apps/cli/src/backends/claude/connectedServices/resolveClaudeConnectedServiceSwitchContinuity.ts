@@ -20,7 +20,7 @@ import {
   CLAUDE_CONNECTED_SERVICES_LEGACY_RESTART_SAME_HOME_ENV,
   verifyResumeReachableClaude,
 } from './verifyResumeReachableClaude';
-import { readClaudeRuntimeAuthSharedGroupSurfaceMetadata } from './claudeRuntimeAuthSharedGroupSurfaceMetadata';
+import { resolveClaudeSharedGroupHotApplyTarget } from './claudeSharedGroupHotApplyTarget';
 
 const CLAUDE_RESTART_REMATERIALIZE_REQUIRED_REASON = 'claude_restart_rematerialize_required';
 const CLAUDE_SHARED_STATE_REQUIRED_REASON = 'claude_shared_state_required';
@@ -42,11 +42,11 @@ function asNonEmptyString(value: unknown): string | null {
 
 function targetsClaudeSharedGroupRuntimeConfig(params: ConnectedServiceSwitchContinuityParams): boolean {
   if (params.serviceId !== 'claude-subscription') return false;
-  const metadata = readClaudeRuntimeAuthSharedGroupSurfaceMetadata(params.runtimeAuthSelection);
-  if (!metadata) return false;
+  const target = resolveClaudeSharedGroupHotApplyTarget(params.runtimeAuthSelection);
+  if (!target) return false;
   return (
-    params.targetMaterializedRoot === metadata.runtimeMaterializedRoot
-    && params.targetMaterializedEnv?.CLAUDE_CONFIG_DIR === metadata.runtimeClaudeConfigDir
+    params.targetMaterializedRoot === target.metadata.runtimeMaterializedRoot
+    && params.targetMaterializedEnv?.CLAUDE_CONFIG_DIR === target.metadata.runtimeClaudeConfigDir
   );
 }
 
@@ -119,7 +119,7 @@ export async function resolveClaudeConnectedServiceSwitchContinuity(
       isSameConnectedServiceAuthGroup(params)
       && targetsClaudeSharedGroupRuntimeConfig(params)
     ) {
-      return await resolveClaudeRestartSameHomeContinuity(params);
+      return { mode: 'hot_apply' };
     }
     return resolveConnectedServiceRestartContinuityAction({
       stateSharingDescriptor: claudeConnectedServiceStateSharingDescriptor,

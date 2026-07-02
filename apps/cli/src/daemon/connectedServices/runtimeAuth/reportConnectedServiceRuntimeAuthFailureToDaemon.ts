@@ -12,11 +12,13 @@ import {
   normalizeConnectedServiceRuntimeAuthRecoveryProjection,
   type ConnectedServiceRuntimeAuthRecoveryProjection,
 } from './projection/connectedServiceRuntimeAuthRecoveryProjection';
+import { buildStableRuntimeAuthFailureReportDedupeKey } from './runtimeAuthFailureReportIdentity';
 import {
   enqueueRuntimeAuthFailureReportOutboxItem,
   removeRuntimeAuthFailureReportOutboxItem,
   resolveRuntimeAuthFailureReportOutboxKey,
 } from './reportOutbox/runtimeAuthFailureReportOutbox';
+import { scheduleRuntimeAuthFailureReportOutboxDrainToDaemon } from './reportOutbox/runtimeAuthFailureReportOutboxDrainScheduler';
 
 type RuntimeAuthFailureNotifyBody = Readonly<{
   sessionId: string;
@@ -37,6 +39,10 @@ type RuntimeAuthFailureNotify = (
 type RuntimeAuthFailureLogger = Readonly<{
   debug: (message: string, error?: unknown) => void;
 }>;
+
+type RuntimeAuthFailureReportOutboxDrainScheduler = (input: Readonly<{
+  outboxDir?: string;
+}>) => void;
 
 export type ConnectedServiceRuntimeAuthFailureDaemonReport = Readonly<{
   handled: boolean;
@@ -68,53 +74,9 @@ export function resetConnectedServiceRuntimeAuthFailureReportDedupeForTests(): v
   recentRuntimeAuthFailureReportsByStableKey.clear();
 }
 
-function readRecord(value: unknown): Readonly<Record<string, unknown>> | null {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? value as Readonly<Record<string, unknown>>
-    : null;
-}
-
-function readRecoveryActionKind(value: unknown): string | null {
-  const action = readRecord(value);
-  const kind = action?.kind;
-  return kind === 'provider_state_sharing_required' || kind === 'quota_recovery_required' ? kind : null;
-}
-
 function readResumePromptMode(value: unknown): SessionUsageLimitRecoveryResumePromptModeV1 | null {
   const parsed = SessionUsageLimitRecoveryResumePromptModeV1Schema.safeParse(value);
   return parsed.success ? parsed.data : null;
-}
-
-// Stable failure fingerprint: identity + failure kind + provider-declared reset horizon
-// (bucketed to absorb parse jitter). Volatile per-trigger fields (`retryAfterMs`,
-// `statusMessage`, rate-limit telemetry) are deliberately excluded — they are recomputed
-// from Date.now() per trigger and made every key unique in the live incident. The
-// explicit resume-prompt mode is included because it changes recovery continuation
-// and usage-limit metadata semantics.
-function buildStableRuntimeAuthFailureReportDedupeKey(input: Readonly<{
-  sessionId: string;
-  switchesThisTurn: number;
-  resumePromptMode: SessionUsageLimitRecoveryResumePromptModeV1 | null;
-  classification: unknown;
-}>): string | null {
-  const classification = readRecord(input.classification);
-  if (!classification) return null;
-  const resetsAtMs = typeof classification.resetsAtMs === 'number' && Number.isFinite(classification.resetsAtMs)
-    ? Math.floor(classification.resetsAtMs / 60_000)
-    : null;
-  return JSON.stringify({
-    sessionId: input.sessionId,
-    switchesThisTurn: input.switchesThisTurn,
-    kind: classification.kind ?? null,
-    serviceId: classification.serviceId ?? null,
-    profileId: classification.profileId ?? null,
-    groupId: classification.groupId ?? null,
-    limitCategory: classification.limitCategory ?? null,
-    providerLimitId: classification.providerLimitId ?? null,
-    recoveryActionKind: readRecoveryActionKind(classification.recoveryAction),
-    resetsAtMsBucket: resetsAtMs,
-    resumePromptMode: input.resumePromptMode,
-  });
 }
 
 function pruneStaleRuntimeAuthFailureReportDedupeEntries(nowMs: number): void {
@@ -134,11 +96,19 @@ export async function reportConnectedServiceRuntimeAuthFailureToDaemon(input: Re
 	  logger?: RuntimeAuthFailureLogger;
   logPrefix?: string;
   reportOutboxDir?: string;
+  scheduleOutboxDrain?: RuntimeAuthFailureReportOutboxDrainScheduler;
   nowMs?: () => number;
 }>): Promise<ConnectedServiceRuntimeAuthFailureDaemonReport> {
   const notify = input.notify ?? notifyDaemonConnectedServiceRuntimeAuthFailure;
   const logger = input.logger ?? defaultLogger;
   const logPrefix = input.logPrefix ?? '[connected-services]';
+  const scheduleOutboxDrain = input.scheduleOutboxDrain ?? ((args: Readonly<{ outboxDir?: string }>) => {
+    scheduleRuntimeAuthFailureReportOutboxDrainToDaemon({
+      ...(args.outboxDir ? { outboxDir: args.outboxDir } : {}),
+      logger,
+      logPrefix,
+    });
+  });
   const resumePromptMode = readResumePromptMode(input.resumePromptMode);
   const reportBody = {
     sessionId: input.sessionId,
@@ -149,11 +119,16 @@ export async function reportConnectedServiceRuntimeAuthFailureToDaemon(input: Re
 
   async function enqueueOutboxBestEffort(): Promise<void> {
     try {
-      await enqueueRuntimeAuthFailureReportOutboxItem({
+      const result = await enqueueRuntimeAuthFailureReportOutboxItem({
         ...(input.reportOutboxDir ? { outboxDir: input.reportOutboxDir } : {}),
         report: reportBody,
         ...(input.nowMs ? { nowMs: input.nowMs } : {}),
       });
+      if (result.status === 'enqueued') {
+        scheduleOutboxDrain({
+          ...(input.reportOutboxDir ? { outboxDir: input.reportOutboxDir } : {}),
+        });
+      }
     } catch (error) {
       logger.debug(`${logPrefix} Failed to enqueue connected-service runtime auth failure report outbox item (non-fatal)`, error);
     }

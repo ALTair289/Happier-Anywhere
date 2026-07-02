@@ -15,6 +15,7 @@ import {
 } from '@/session/transport/http/sessionsHttp';
 
 import type { ConnectedServiceQuotaLifecycleTransition } from './ConnectedServiceQuotasCoordinator';
+import { buildQuotaLifecycleTranscriptEventId } from './quotaLifecycleEventIdentity';
 
 function buildStoredContent(params: Readonly<{
   credentials: Credentials;
@@ -30,11 +31,6 @@ function buildStoredContent(params: Readonly<{
     t: 'encrypted',
     c: encryptSessionPayload({ ctx, payload: params.payload }),
   };
-}
-
-function normalizeEventIdPart(value: string | null | undefined): string {
-  const normalized = typeof value === 'string' && value.trim().length > 0 ? value.trim() : 'none';
-  return normalized.replace(/[^a-zA-Z0-9._:-]+/gu, '_');
 }
 
 function buildQuotaLifecycleTranscriptEvent(
@@ -65,21 +61,6 @@ function buildQuotaLifecycleTranscriptEvent(
   };
 }
 
-function buildQuotaLifecycleTranscriptEventId(params: Readonly<{
-  transition: ConnectedServiceQuotaLifecycleTransition;
-  event: ReturnType<typeof TranscriptRawAgentEventV1Schema.parse>;
-}>): string {
-  const issueFingerprint = typeof params.transition.issueFingerprint === 'string' && params.transition.issueFingerprint.trim().length > 0
-    ? params.transition.issueFingerprint
-    : `${params.transition.serviceId}:${params.transition.groupId}`;
-  return [
-    params.event.type,
-    normalizeEventIdPart(issueFingerprint),
-    normalizeEventIdPart(params.transition.cycleId),
-    normalizeEventIdPart(params.transition.reason),
-  ].join(':');
-}
-
 /**
  * RD-QUO-13: transcript producer for the quota lifecycle edges. Commits a
  * `provider-quota-wait` / `provider-quota-recovered` raw agent event into every
@@ -103,8 +84,11 @@ export async function commitConnectedServiceQuotaLifecycleSessionEvents(params: 
       });
       if (!rawSession) continue;
       const eventId = buildQuotaLifecycleTranscriptEventId({
-        transition: params.transition,
-        event: parsedEvent.data,
+        eventType: parsedEvent.data.type,
+        issueFingerprint: params.transition.issueFingerprint || `${params.transition.serviceId}:${params.transition.groupId}`,
+        resetAtMs: params.transition.resetAtMs,
+        cycleId: params.transition.cycleId,
+        reason: params.transition.reason,
       });
       await commitSessionStoredMessage({
         token: params.credentials.token,

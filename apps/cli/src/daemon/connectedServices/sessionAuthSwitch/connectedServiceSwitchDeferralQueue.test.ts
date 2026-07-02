@@ -160,6 +160,78 @@ describe('connectedServiceSwitchDeferralQueue', () => {
     expect(runSwitch).toHaveBeenCalledTimes(1);
   });
 
+  it('runs a deferred switch only once when two terminal events arrive while runSwitch is in flight', async () => {
+    let releaseRunSwitch: () => void = () => {};
+    const runSwitch = vi.fn(() => new Promise<void>((resolve) => {
+      releaseRunSwitch = resolve;
+    }));
+    const emitSessionEvent = vi.fn();
+    const queue = createConnectedServiceSwitchDeferralQueue({
+      timeoutMs: 60_000,
+      disableDeferral: false,
+      emitSessionEvent,
+    });
+
+    queue.recordTurnLifecycleEvent({ sessionId: 'sess_1', event: 'prompt_or_steer' });
+    const pending = queue.requestSwitch({
+      sessionId: 'sess_1',
+      policy: 'defer_until_turn_boundary',
+      source: 'manual',
+      target: target(),
+      runSwitch,
+    });
+
+    // Two terminal turn events land back-to-back (e.g. an assistant_message_end immediately followed
+    // by a turn_cancelled) within the window where runSwitch is awaited but has not yet settled the
+    // pending. The executing flag must be claimed synchronously at entry so the second event is a
+    // no-op — otherwise runSwitch (a SIGTERM/restart signal) fires twice and the completion event is
+    // double-emitted.
+    queue.recordTurnLifecycleEvent({ sessionId: 'sess_1', event: 'assistant_message_end' });
+    queue.recordTurnLifecycleEvent({ sessionId: 'sess_1', event: 'turn_cancelled' });
+
+    expect(runSwitch).toHaveBeenCalledTimes(1);
+
+    releaseRunSwitch();
+    await pending;
+
+    expect(runSwitch).toHaveBeenCalledTimes(1);
+    const completedEvents = emitSessionEvent.mock.calls.filter(
+      ([, event]) => (event as { type?: string }).type === 'connected_service_account_switch_deferral_completed',
+    );
+    expect(completedEvents).toHaveLength(1);
+  });
+
+  it('closes the in-flight turn at a forced boundary when the deferral timeout fires (no silent mid-stream kill)', async () => {
+    // Lane F deferral-timeout escape hatch: when the boundary never arrives within the timeout the
+    // switch is forced, but the turn must be closed cleanly first so downstream (and the managed-
+    // server release in-flight-turn guard) sees a quiesced turn rather than an indefinitely stuck
+    // in-flight flag that would either wedge the forced switch or leak the old server.
+    const runSwitch = vi.fn(async () => {});
+    const queue = createConnectedServiceSwitchDeferralQueue({
+      timeoutMs: 60_000,
+      disableDeferral: false,
+    });
+
+    queue.recordTurnLifecycleEvent({ sessionId: 'sess_1', event: 'prompt_or_steer' });
+    expect(queue.isTurnInFlight('sess_1')).toBe(true);
+
+    const pending = queue.requestSwitch({
+      sessionId: 'sess_1',
+      policy: 'defer_until_turn_boundary',
+      source: 'manual',
+      target: target(),
+      runSwitch,
+    });
+
+    vi.advanceTimersByTime(60_000);
+    await pending;
+
+    expect(runSwitch).toHaveBeenCalledTimes(1);
+    // The forced switch closed the turn at a (forced) boundary instead of leaving it mid-stream.
+    expect(queue.isTurnInFlight('sess_1')).toBe(false);
+    expect(queue.getTurnLifecycleState('sess_1').lastEvent).toBe('turn_cancelled');
+  });
+
   it('bypasses deferral when HAPPIER_CONNECTED_SERVICES_DISABLE_TURN_DEFERRAL is enabled', async () => {
     const runSwitch = vi.fn(async () => {});
     const queue = createConnectedServiceSwitchDeferralQueue({
