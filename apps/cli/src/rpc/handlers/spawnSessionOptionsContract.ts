@@ -52,6 +52,7 @@ const SpawnDaemonSessionRequestCompatSchema = z.object({
   initialTranscriptAfterSeq: z.number().int().min(0).optional(),
   initialGoal: SessionInitialGoalRequestV1Schema.optional(),
   attachMetadataIdentityPolicy: SessionAttachMetadataIdentityPolicySchema.optional(),
+  approvedNewDirectoryCreation: z.boolean().optional(),
   resume: z.string().trim().min(1).optional(),
   experimentalCodexAcp: z.boolean().optional(),
   codexBackendMode: z.enum(['mcp', 'acp', 'appServer']).optional(),

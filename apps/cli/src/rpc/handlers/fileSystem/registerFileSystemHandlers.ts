@@ -1,4 +1,5 @@
 import type { RpcHandlerRegistrar } from '@/api/rpc/types';
+import { configuration } from '@/configuration';
 
 import { registerReadFileHandler } from './readFileHandler';
 import { registerWriteFileHandler } from './writeFileHandler';
@@ -7,6 +8,7 @@ import { registerPathMutationHandlers } from './pathMutationHandlers';
 import { registerSessionTransferRpcHandlers } from '@/transfers/rpc/registerSessionTransferRpcHandlers';
 import { resolveSessionRpcTransferMaxBytes } from '@/transfers/policy/sessionRpcTransferPolicy';
 import { createTransferPathAllowanceRegistry } from '@/transfers/targets/createTransferPathAllowanceRegistry';
+import { TransferSessionStore } from '@/transfers/core/transferSessionStore';
 import {
   type FilesystemAccessPolicy,
   resolveFilesystemPolicyDefaultDirectory,
@@ -27,7 +29,10 @@ export function registerFileSystemHandlers(
     getAdditionalAllowedReadDirs?: () => ReadonlyArray<string>;
     getAdditionalAllowedWriteDirs?: () => ReadonlyArray<string>;
   }>,
-): void {
+): Readonly<{
+  transferSessionStore: TransferSessionStore;
+  dispose: () => Promise<void>;
+}> {
   const accessPolicy: FilesystemAccessPolicy = opts?.accessPolicy ?? { kind: 'osUser' };
   const effectiveWorkingDirectory = resolveFilesystemPolicyDefaultDirectory({
     defaultDirectory: workingDirectory,
@@ -39,6 +44,7 @@ export function registerFileSystemHandlers(
     onReadDirsChange: () => {},
     onWriteDirsChange: () => {},
   });
+  const transferSessionStore = new TransferSessionStore({ ttlMs: configuration.filesTransferSessionTtlMs });
 
   registerReadFileHandler(rpcHandlerManager, {
     defaultDirectory: effectiveWorkingDirectory,
@@ -65,6 +71,7 @@ export function registerFileSystemHandlers(
   registerSessionTransferRpcHandlers(rpcHandlerManager, {
     workingDirectory: effectiveWorkingDirectory,
     accessPolicy,
+    store: transferSessionStore,
     getAdditionalAllowedReadDirs,
     getAdditionalAllowedWriteDirs,
     sessionRpcTransferMaxBytes: resolveSessionRpcTransferMaxBytes(),
@@ -72,4 +79,9 @@ export function registerFileSystemHandlers(
       pathAllowanceRegistry,
     },
   });
+
+  return {
+    transferSessionStore,
+    dispose: () => transferSessionStore.dispose(),
+  };
 }

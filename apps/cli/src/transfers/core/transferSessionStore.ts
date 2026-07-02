@@ -46,17 +46,28 @@ export class TransferSessionStore {
   private readonly downloads = new Map<string, DownloadSession>();
   private readonly tempRoot: string;
   private readonly ttlMs: number;
+  private disposed = false;
+  private disposePromise: Promise<void> | null = null;
 
   constructor(deps: TransferSessionStoreDeps) {
     this.ttlMs = Math.max(1000, Math.floor(deps.ttlMs));
     this.tempRoot = join(tmpdir(), 'happier', 'file-transfers', randomUUID());
   }
 
+  private assertOpen(): void {
+    if (this.disposed) {
+      throw new Error('Transfer session store is disposed');
+    }
+  }
+
   async ensureTempRoot(): Promise<void> {
+    this.assertOpen();
     await mkdir(this.tempRoot, { recursive: true });
   }
 
   cleanupExpiredBestEffort(now = Date.now()): void {
+    if (this.disposed) return;
+
     for (const [uploadId, session] of this.uploads) {
       if (session.expiresAt > now) continue;
       this.uploads.delete(uploadId);
@@ -86,6 +97,7 @@ export class TransferSessionStore {
     recipientPublicKeyBase64?: string;
     hash: UploadSession['hash'];
   }>): Promise<UploadSession> {
+    this.assertOpen();
     await this.ensureTempRoot();
     const uploadId = randomUUID();
     const tempPath = join(this.tempRoot, `${uploadId}.upload`);
@@ -152,6 +164,7 @@ export class TransferSessionStore {
     chunkSizeBytes: number;
     recipientPublicKeyBase64?: string;
   }>): Promise<DownloadSession> {
+    this.assertOpen();
     const stats = await stat(input.filePath);
     const downloadId = randomUUID();
     const file = await open(input.filePath, 'r');
@@ -190,5 +203,35 @@ export class TransferSessionStore {
     if (session.deleteFileOnClose) {
       await rm(session.filePath, { force: true }).catch(() => undefined);
     }
+  }
+
+  async dispose(): Promise<void> {
+    if (this.disposePromise) {
+      return await this.disposePromise;
+    }
+
+    this.disposed = true;
+    const uploads = [...this.uploads.values()];
+    const downloads = [...this.downloads.values()];
+    this.uploads.clear();
+    this.downloads.clear();
+
+    this.disposePromise = (async () => {
+      await Promise.all([
+        ...uploads.map(async (session) => {
+          await session.file.close().catch(() => undefined);
+          await rm(session.tempPath, { force: true }).catch(() => undefined);
+        }),
+        ...downloads.map(async (session) => {
+          await session.file.close().catch(() => undefined);
+          if (session.deleteFileOnClose) {
+            await rm(session.filePath, { force: true }).catch(() => undefined);
+          }
+        }),
+      ]);
+      await rm(this.tempRoot, { recursive: true, force: true }).catch(() => undefined);
+    })();
+
+    return await this.disposePromise;
   }
 }

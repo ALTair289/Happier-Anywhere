@@ -52,8 +52,21 @@ function createRpcHandlerManager(): { handlers: Map<string, Handler>; registerHa
 
 describe('attachments upload (chunked)', () => {
   const envBackup = snapshotProcessEnv();
+  const transferRegistrations: Array<ReturnType<typeof registerSessionTransferRpcHandlers>> = [];
 
-  afterEach(() => {
+  function registerTransferHandlersForTest(
+    ...args: Parameters<typeof registerSessionTransferRpcHandlers>
+  ): ReturnType<typeof registerSessionTransferRpcHandlers> {
+    const registration = registerSessionTransferRpcHandlers(...args);
+    transferRegistrations.push(registration);
+    return registration;
+  }
+
+  afterEach(async () => {
+    const registrations = transferRegistrations.splice(0);
+    await Promise.all(registrations.map(async (registration) => {
+      await registration.dispose();
+    }));
     restoreProcessEnv(envBackup);
     vi.unstubAllEnvs();
     reloadConfiguration();
@@ -78,7 +91,7 @@ describe('attachments upload (chunked)', () => {
           writeAllowedDirs.current = [...dirs];
         },
       });
-      registerSessionTransferRpcHandlers(mgr as unknown as RpcHandlerManager, {
+      registerTransferHandlersForTest(mgr as unknown as RpcHandlerManager, {
         workingDirectory,
         getAdditionalAllowedReadDirs: () => readAllowedDirs.current,
         getAdditionalAllowedWriteDirs: () => writeAllowedDirs.current,
@@ -127,7 +140,7 @@ describe('attachments upload (chunked)', () => {
           writeAllowedDirs.current = [...dirs];
         },
       });
-      registerSessionTransferRpcHandlers(mgr as unknown as RpcHandlerManager, {
+      registerTransferHandlersForTest(mgr as unknown as RpcHandlerManager, {
         workingDirectory,
         getAdditionalAllowedReadDirs: () => readAllowedDirs.current,
         getAdditionalAllowedWriteDirs: () => writeAllowedDirs.current,
@@ -178,7 +191,7 @@ describe('attachments upload (chunked)', () => {
           writeAllowedDirs.current = [...dirs];
         },
       });
-      registerSessionTransferRpcHandlers(mgr as unknown as RpcHandlerManager, {
+      registerTransferHandlersForTest(mgr as unknown as RpcHandlerManager, {
         workingDirectory,
         getAdditionalAllowedReadDirs: () => readAllowedDirs.current,
         getAdditionalAllowedWriteDirs: () => writeAllowedDirs.current,
@@ -224,7 +237,7 @@ describe('attachments upload (chunked)', () => {
           writeAllowedDirs.current = [...dirs];
         },
       });
-      registerSessionTransferRpcHandlers(mgr as unknown as RpcHandlerManager, {
+      registerTransferHandlersForTest(mgr as unknown as RpcHandlerManager, {
         workingDirectory,
         getAdditionalAllowedReadDirs: () => readAllowedDirs.current,
         getAdditionalAllowedWriteDirs: () => writeAllowedDirs.current,
@@ -272,7 +285,7 @@ describe('attachments upload (chunked)', () => {
           writeAllowedDirs.current = [...dirs];
         },
       });
-      registerSessionTransferRpcHandlers(mgr as unknown as RpcHandlerManager, {
+      registerTransferHandlersForTest(mgr as unknown as RpcHandlerManager, {
         workingDirectory,
         getAdditionalAllowedReadDirs: () => readAllowedDirs.current,
         getAdditionalAllowedWriteDirs: () => writeAllowedDirs.current,
@@ -323,7 +336,7 @@ describe('attachments upload (chunked)', () => {
           writeAllowedDirs.current = [...dirs];
         },
       });
-      registerSessionTransferRpcHandlers(mgr as unknown as RpcHandlerManager, {
+      registerTransferHandlersForTest(mgr as unknown as RpcHandlerManager, {
         workingDirectory,
         getAdditionalAllowedReadDirs: () => readAllowedDirs.current,
         getAdditionalAllowedWriteDirs: () => writeAllowedDirs.current,
@@ -370,7 +383,7 @@ describe('attachments upload (chunked)', () => {
           writeAllowedDirs.current = [...dirs];
         },
       });
-      registerSessionTransferRpcHandlers(mgr as unknown as RpcHandlerManager, {
+      registerTransferHandlersForTest(mgr as unknown as RpcHandlerManager, {
         workingDirectory,
         getAdditionalAllowedReadDirs: () => readAllowedDirs.current,
         getAdditionalAllowedWriteDirs: () => writeAllowedDirs.current,
@@ -440,7 +453,7 @@ describe('attachments upload (chunked)', () => {
           writeAllowedDirs.current = [...dirs];
         },
       });
-      registerSessionTransferRpcHandlers(mgr as unknown as RpcHandlerManager, {
+      registerTransferHandlersForTest(mgr as unknown as RpcHandlerManager, {
         workingDirectory: machineWorkingDirectory,
         getAdditionalAllowedReadDirs: () => readAllowedDirs.current,
         getAdditionalAllowedWriteDirs: () => writeAllowedDirs.current,
@@ -507,7 +520,7 @@ describe('attachments upload (chunked)', () => {
           writeAllowedDirs.current = [...dirs];
         },
       });
-      registerSessionTransferRpcHandlers(mgr as unknown as RpcHandlerManager, {
+      registerTransferHandlersForTest(mgr as unknown as RpcHandlerManager, {
         workingDirectory,
         getAdditionalAllowedReadDirs: () => readAllowedDirs.current,
         getAdditionalAllowedWriteDirs: () => writeAllowedDirs.current,
@@ -596,7 +609,7 @@ describe('attachments upload (chunked)', () => {
           writeAllowedDirs.current = [...dirs];
         },
       });
-      registerSessionTransferRpcHandlers(mgr as unknown as RpcHandlerManager, {
+      registerTransferHandlersForTest(mgr as unknown as RpcHandlerManager, {
         workingDirectory,
         getAdditionalAllowedReadDirs: () => readAllowedDirs.current,
         getAdditionalAllowedWriteDirs: () => writeAllowedDirs.current,

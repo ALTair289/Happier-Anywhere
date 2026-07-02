@@ -33,17 +33,23 @@ describe('registerSessionHandlers pending queue materialization', () => {
     });
   });
 
-  it('delegates pending materialization RPC to the safe materializer owner', async () => {
+  it('delegates pending materialization RPC through session runtime controls', async () => {
     const { handlers, registrar } = createRegistrar();
     const materializeNextPendingMessageSafely = vi.fn(async () => ({
-      type: 'materialized' as const,
-      localId: 'local-1',
-      seq: 3,
-      content: { t: 'plain' as const, v: { text: 'hello' } },
+      ok: true as const,
+      didMaterialize: true,
+      result: {
+        type: 'materialized' as const,
+        localId: 'local-1',
+        seq: 3,
+        content: { t: 'plain' as const, v: { text: 'hello' } },
+      },
     }));
 
     registerSessionHandlers(registrar, process.cwd(), {
-      materializeNextPendingMessageSafely,
+      sessionRuntimeControls: {
+        materializeNextPendingMessageSafely,
+      },
     });
 
     await expect(handlers.get(SESSION_RPC_METHODS.SESSION_PENDING_QUEUE_MATERIALIZE_NEXT)?.({

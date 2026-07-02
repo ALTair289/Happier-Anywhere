@@ -36,8 +36,6 @@ import {
     type FilesystemAccessPolicy,
     resolveFilesystemPolicyDefaultDirectory,
 } from './fileSystem/accessPolicy/filesystemAccessPolicy';
-import type { MaterializeNextPendingResult } from '@/api/session/sessionClientPort';
-import type { PendingQueueReconcileWhenEmpty } from '@/api/session/pendingQueueReadPolicy';
 
 /*
  * Spawn Session Options and Result
@@ -217,6 +215,11 @@ export type SpawnSessionResult =
     | { type: 'requestToApproveDirectoryCreation'; directory: string }
     | { type: 'error'; errorCode: SpawnSessionErrorCode; errorMessage: string; errorDetail?: SpawnSessionErrorDetail };
 
+export type SessionHandlersRegistration = Readonly<{
+    transferSessionStore: TransferSessionStore;
+    dispose: () => Promise<void>;
+}>;
+
 /**
  * Register all session RPC handlers with the daemon
  */
@@ -231,9 +234,6 @@ export function registerSessionHandlers(
             localId?: string;
             meta: Record<string, unknown>;
         }) => Promise<void> | void) | null;
-        materializeNextPendingMessageSafely?: ((opts?: {
-            reconcileWhenEmpty?: PendingQueueReconcileWhenEmpty;
-        }) => Promise<MaterializeNextPendingResult>) | null;
         setAdditionalAllowedReadDirs?: (dirs: string[]) => void;
         setAdditionalAllowedWriteDirs?: (dirs: string[]) => void;
         accessPolicy?: FilesystemAccessPolicy;
@@ -241,7 +241,7 @@ export function registerSessionHandlers(
         /** QAE-1: daemon-side propagation for successful wait-resume cancels. */
         notifyUsageLimitWaitResumeCancelled?: ((request: Readonly<{ sessionId: string }>) => Promise<unknown> | unknown) | null;
     }>,
-) {
+): SessionHandlersRegistration {
     const pathAllowanceRegistry = createTransferPathAllowanceRegistry({
         onReadDirsChange: (dirs) => {
             opts?.setAdditionalAllowedReadDirs?.([...dirs]);
@@ -282,7 +282,7 @@ export function registerSessionHandlers(
         sessionRuntimeControls: opts?.sessionRuntimeControls ?? null,
     });
     registerSessionPendingQueueMaterializeNextHandler(rpcHandlerManager, {
-        materializeNextPendingMessageSafely: opts?.materializeNextPendingMessageSafely ?? null,
+        sessionRuntimeControls: opts?.sessionRuntimeControls ?? null,
     });
     registerSessionControlHandlers(rpcHandlerManager, {
         getSessionMetadata: opts?.getSessionMetadata ?? null,
@@ -290,4 +290,9 @@ export function registerSessionHandlers(
         sessionRuntimeControls: opts?.sessionRuntimeControls ?? null,
         notifyUsageLimitWaitResumeCancelled: opts?.notifyUsageLimitWaitResumeCancelled ?? null,
     });
+
+    return {
+        transferSessionStore: transferStore,
+        dispose: () => transferStore.dispose(),
+    };
 }

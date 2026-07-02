@@ -79,6 +79,15 @@ describe('SpawnDaemonSessionRequestSchema', () => {
     expect(parsed.connectedServicesUpdatedAt).toBe(123);
   });
 
+  it('accepts approved directory creation through the internal transport request', () => {
+    const parsed = SpawnDaemonSessionRequestSchema.parse({
+      directory: '/tmp',
+      approvedNewDirectoryCreation: true,
+    });
+
+    expect(parsed.approvedNewDirectoryCreation).toBe(true);
+  });
+
   it('accepts initial transcript catch-up cursors from resume requests', () => {
     const parsed = SpawnDaemonSessionRequestSchema.parse({
       directory: '/tmp',

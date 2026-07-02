@@ -9,6 +9,11 @@ import type { FilesystemAccessPolicy } from '@/rpc/handlers/fileSystem/accessPol
 
 type DirectorySupplier = () => ReadonlyArray<string>;
 
+export type SessionTransferRpcHandlerRegistration = Readonly<{
+  transferSessionStore: TransferSessionStore;
+  dispose: () => Promise<void>;
+}>;
+
 function normalizeTransferDirectories(getDirectories?: DirectorySupplier): string[] {
   const value = getDirectories?.() ?? [];
   return Array.isArray(value)
@@ -29,7 +34,8 @@ export function registerSessionTransferRpcHandlers(
       pathAllowanceRegistry: TransferPathAllowanceRegistry;
     }>;
   }>,
-): void {
+): SessionTransferRpcHandlerRegistration {
+  const ownsStore = !deps.store;
   const store = deps.store ?? new TransferSessionStore({ ttlMs: configuration.filesTransferSessionTtlMs });
 
   registerBulkTransferUploadRpcHandlers(rpcHandlerManager, {
@@ -48,4 +54,13 @@ export function registerSessionTransferRpcHandlers(
     getAdditionalAllowedReadDirs: () => normalizeTransferDirectories(deps.getAdditionalAllowedReadDirs),
     sessionRpcTransferMaxBytes: deps.sessionRpcTransferMaxBytes ?? null,
   });
+
+  return {
+    transferSessionStore: store,
+    dispose: async () => {
+      if (ownsStore) {
+        await store.dispose();
+      }
+    },
+  };
 }

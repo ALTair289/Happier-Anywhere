@@ -26,7 +26,19 @@ function createRpcHandlerManager(): { handlers: Map<string, Handler>; registerHa
   };
 }
 
-afterEach(() => {
+const directTransferStores: TransferSessionStore[] = [];
+
+function createTrackedTransferSessionStore(deps: ConstructorParameters<typeof TransferSessionStore>[0]): TransferSessionStore {
+  const store = new TransferSessionStore(deps);
+  directTransferStores.push(store);
+  return store;
+}
+
+afterEach(async () => {
+  const stores = directTransferStores.splice(0);
+  await Promise.all(stores.map(async (store) => {
+    await store.dispose();
+  }));
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -172,7 +184,7 @@ describe('file transfers (upload)', () => {
     vi.setSystemTime(0);
 
     const workspace = mkdtempSync(join(tmpdir(), 'happier-files-upload-'));
-    const store = new TransferSessionStore({ ttlMs: 1000 });
+    const store = createTrackedTransferSessionStore({ ttlMs: 1000 });
     const mgr = createRpcHandlerManager();
     registerBulkTransferUploadRpcHandlers(mgr as unknown as RpcHandlerManager, { workingDirectory: workspace, store });
 
@@ -252,7 +264,7 @@ describe('file transfers (upload)', () => {
     const workspace = mkdtempSync(join(tmpdir(), 'happier-files-upload-'));
     writeFileSync(join(workspace, 'file.txt'), 'old\n', 'utf8');
 
-    const store = new TransferSessionStore({ ttlMs: 1000 });
+    const store = createTrackedTransferSessionStore({ ttlMs: 1000 });
     const mgr = createRpcHandlerManager();
     registerBulkTransferUploadRpcHandlers(mgr as unknown as RpcHandlerManager, {
       workingDirectory: workspace,
@@ -302,7 +314,7 @@ describe('file transfers (upload)', () => {
 
   it('rejects session-routed uploads that exceed the advertised server-routed size limit', async () => {
     const workspace = mkdtempSync(join(tmpdir(), 'happier-files-upload-'));
-    const store = new TransferSessionStore({ ttlMs: 1000 });
+    const store = createTrackedTransferSessionStore({ ttlMs: 1000 });
     const mgr = createRpcHandlerManager();
     registerBulkTransferUploadRpcHandlers(mgr as unknown as RpcHandlerManager, {
       workingDirectory: workspace,

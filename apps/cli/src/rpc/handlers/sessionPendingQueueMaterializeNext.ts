@@ -5,6 +5,7 @@ import type {
   MaterializeNextPendingResult,
 } from '@/api/session/sessionClientPort';
 import type { PendingQueueReconcileWhenEmpty } from '@/api/session/pendingQueueReadPolicy';
+import type { SessionRuntimeControls } from './sessionControls';
 
 export type SessionPendingQueueMaterializeNextResponse =
   | Readonly<{
@@ -27,15 +28,13 @@ function readReconcileWhenEmpty(raw: unknown): PendingQueueReconcileWhenEmpty {
 export function registerSessionPendingQueueMaterializeNextHandler(
   rpc: RpcHandlerRegistrar,
   opts: Readonly<{
-    materializeNextPendingMessageSafely?: ((opts?: {
-      reconcileWhenEmpty?: PendingQueueReconcileWhenEmpty;
-    }) => Promise<MaterializeNextPendingResult>) | null;
+    sessionRuntimeControls?: Pick<SessionRuntimeControls, 'materializeNextPendingMessageSafely'> | null;
   }>,
 ): void {
   rpc.registerHandler(SESSION_RPC_METHODS.SESSION_PENDING_QUEUE_MATERIALIZE_NEXT, async (
     raw: unknown,
   ): Promise<SessionPendingQueueMaterializeNextResponse> => {
-    if (typeof opts.materializeNextPendingMessageSafely !== 'function') {
+    if (typeof opts.sessionRuntimeControls?.materializeNextPendingMessageSafely !== 'function') {
       return {
         ok: false,
         error: 'pending_materializer_unavailable',
@@ -43,13 +42,8 @@ export function registerSessionPendingQueueMaterializeNextHandler(
       };
     }
 
-    const result = await opts.materializeNextPendingMessageSafely({
+    return await opts.sessionRuntimeControls.materializeNextPendingMessageSafely({
       reconcileWhenEmpty: readReconcileWhenEmpty(raw),
     });
-    return {
-      ok: true,
-      didMaterialize: result.type === 'materialized',
-      result,
-    };
   });
 }
