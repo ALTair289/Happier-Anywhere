@@ -26,6 +26,7 @@ import { syncMemoryHintsForSessionsOnce } from './syncMemoryHintsForSessionsOnce
 import { runMemoryHintsExecutionRun } from './hints/runMemoryHintsExecutionRun';
 import { commitMemorySystemRecords } from '@/session/systemRecords/memory/commitMemorySystemRecords';
 import { fetchMemorySummaryShardSystemRecords } from '@/session/systemRecords/memory/fetchMemorySystemRecords';
+import { logServerEndpointFailure } from '@/api/client/serverEndpointFailureLog';
 import { syncDeepIndexForSessionsOnce } from './deepIndex/syncDeepIndexForSessionsOnce';
 import { resolveEmbeddingsProvider } from './deepIndex/embeddings/resolveEmbeddingsProvider';
 import {
@@ -116,6 +117,14 @@ function filterRowsByCoveragePolicy(params: Readonly<{
   }
 
   return rows;
+}
+
+function logMemoryWorkerServerEndpointFailure(operation: string, error: unknown): void {
+  logServerEndpointFailure({
+    logger,
+    operation: `memory worker ${operation}`,
+    error,
+  });
 }
 
 export async function startMemoryWorker(params: Readonly<{
@@ -228,9 +237,7 @@ export async function startMemoryWorker(params: Readonly<{
           });
           return decrypted;
         } catch (error) {
-          logger.debug('[memoryWorker] Failed to fetch/decrypt transcript page (best-effort)', {
-            message: error instanceof Error ? error.message : String(error),
-          });
+          logMemoryWorkerServerEndpointFailure('transcript page', error);
           return [];
         }
       },
@@ -286,9 +293,7 @@ export async function startMemoryWorker(params: Readonly<{
         nowMs: Date.now(),
       });
     } catch (error) {
-      logger.debug('[memoryWorker] Failed to fetch/decrypt selected transcript rows (best-effort)', {
-        message: error instanceof Error ? error.message : String(error),
-      });
+      logMemoryWorkerServerEndpointFailure('selected transcript rows', error);
       return [];
     }
   };
@@ -398,9 +403,7 @@ export async function startMemoryWorker(params: Readonly<{
             ctx,
           });
         } catch (error) {
-          logger.debug('[memoryWorker] Failed to fetch memory summary system records (best-effort)', {
-            message: error instanceof Error ? error.message : String(error),
-          });
+          logMemoryWorkerServerEndpointFailure('summary system records', error);
           return [];
         }
       },
