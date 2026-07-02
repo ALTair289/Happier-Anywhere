@@ -7,7 +7,7 @@ import { Item } from '@/components/ui/lists/Item';
 import { ItemGroup } from '@/components/ui/lists/ItemGroup';
 import { ItemList } from '@/components/ui/lists/ItemList';
 import { Avatar } from '@/components/ui/avatar/Avatar';
-import { storage, useSession, useIsDataReady, useLocalSetting, useSetting, useSettingMutable } from '@/sync/domains/state/storage';
+import { storage, useSession, useIsDataReady, useLocalSetting, useSessionOrganizationProjection, useSetting } from '@/sync/domains/state/storage';
 import { getSessionName, useSessionStatus, formatOSPlatform, formatPathRelativeToHome, getSessionAvatarId, type SessionStatus } from '@/utils/sessions/sessionUtils';
 import { Modal } from '@/modal';
 import { useUnistyles } from 'react-native-unistyles';
@@ -74,7 +74,7 @@ import {
 } from '@/components/sessions/actions/sessionActionIds';
 import { listVisibleSessionActionIds, resolveSessionReadStateActionId } from '@/components/sessions/actions/sessionActionAvailability';
 import { createSessionActionInfoItemProps } from '@/components/sessions/actions/sessionActionPresentation';
-import { getTagsForSession, sessionTagKey, setTagsForSession } from '@/components/sessions/shell/sessionTagUtils';
+import { getTagsForSession, sessionTagKey } from '@/components/sessions/shell/sessionTagUtils';
 import { useSessionListMoveSheet } from '@/components/sessions/shell/move-sheet/useSessionListMoveSheet';
 import type { SessionListMoveSheetTarget } from '@/components/sessions/shell/move-sheet/buildSessionListMoveSheetTargets';
 import {
@@ -85,7 +85,12 @@ import {
 } from '@/sync/domains/session/folders';
 import { TokenStorage } from '@/auth/storage/tokenStorage';
 import { getServerProfileById } from '@/sync/domains/server/serverProfiles';
-import { setSessionFolderAssignment } from '@/sync/ops/sessionFolders';
+import {
+    setSessionFolderAssignment as setSessionOrganizationFolderAssignment,
+    setSessionPin as setSessionOrganizationPin,
+    setSessionTagLabels as setSessionOrganizationTagLabels,
+} from '@/sync/ops/sessionOrganization';
+import { buildSessionOrganizationListViewState } from '@/sync/domains/session/organization/viewState';
 import {
     buildSessionDebugInformation,
     isSessionDebugInformationEnabled,
@@ -454,9 +459,6 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
     const actionsSettingsV1 = useSetting('actionsSettingsV1');
     const sessionReplayEnabled = useSetting('sessionReplayEnabled') === true;
     const hideInactiveSessions = useSetting('hideInactiveSessions') === true;
-    const [pinnedSessionKeysV1, setPinnedSessionKeysV1] = useSettingMutable('pinnedSessionKeysV1');
-    const [sessionTagsV1, setSessionTagsV1] = useSettingMutable('sessionTagsV1');
-    const sessionFoldersV1 = useSetting('sessionFoldersV1');
     const { openMoveSheet } = useSessionListMoveSheet();
     const sharingSupported = useSessionSharingSupport();
     const automationsSupport = useAutomationsSupport();
@@ -612,10 +614,17 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
     const isArchivedSession = session.archivedAt != null;
     const resolvedServerId = resolveServerIdForSessionIdFromLocalCache(session.id);
     const scopedMutationServerId = resolvedServerId ?? sessionServerId ?? routeScope.serverId ?? null;
+    const organizationProjection = useSessionOrganizationProjection(scopedMutationServerId);
+    const organizationListViewState = React.useMemo(() => buildSessionOrganizationListViewState({
+        serverId: scopedMutationServerId ?? '',
+        projection: organizationProjection,
+    }), [organizationProjection, scopedMutationServerId]);
+    const sessionSettingsKey = typeof scopedMutationServerId === 'string' && scopedMutationServerId.trim()
+        ? sessionTagKey(scopedMutationServerId, session.id)
+        : null;
     const isPinnedSession = Boolean(
-        resolvedServerId &&
-        Array.isArray(pinnedSessionKeysV1) &&
-        pinnedSessionKeysV1.includes(`${resolvedServerId}:${session.id}`),
+        sessionSettingsKey &&
+        organizationListViewState.pinnedSessionKeysV1.includes(sessionSettingsKey),
     );
     const sessionActionTarget = React.useMemo(
         () => createSessionActionTarget({
@@ -635,11 +644,8 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
         [sessionActionTarget],
     );
     const canRenameSession = visibleSessionActionIds.has(SESSION_ACTION_RENAME_ID);
-    const sessionSettingsKey = typeof resolvedServerId === 'string' && resolvedServerId.trim()
-        ? sessionTagKey(resolvedServerId, session.id)
-        : null;
     const sessionInfoTags = sessionSettingsKey
-        ? getTagsForSession(sessionTagsV1 as Record<string, string[]> | null | undefined, sessionSettingsKey)
+        ? getTagsForSession(organizationListViewState.sessionTagsV1 as Record<string, string[]> | null | undefined, sessionSettingsKey)
         : [];
     const pinInfoItemProps = React.useMemo(() => createSessionActionInfoItemProps({
         actionId: isPinnedSession ? SESSION_ACTION_UNPIN_ID : SESSION_ACTION_PIN_ID,
@@ -666,9 +672,25 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
         iconColor: theme.colors.state.danger.foreground,
     }), [theme.colors.state.danger.foreground]);
     const moveTargets = React.useMemo(() => buildSessionInfoMoveTargets({
-        sessionFolders: sessionFoldersV1,
+        sessionFolders: organizationListViewState.sessionFoldersV1,
         workspace: resolveSessionInfoWorkspaceRef(session, scopedMutationServerId),
-    }), [scopedMutationServerId, session, sessionFoldersV1]);
+    }), [organizationListViewState.sessionFoldersV1, scopedMutationServerId, session]);
+
+    const getOrganizationMutationContext = useCallback(async () => {
+        const serverId = typeof scopedMutationServerId === 'string' ? scopedMutationServerId.trim() : '';
+        if (!serverId) {
+            throw new HappyError(t('errors.unknownError'), false);
+        }
+        const serverProfile = getServerProfileById(serverId);
+        if (!serverProfile) {
+            throw new HappyError(t('errors.unknownError'), false);
+        }
+        const credentials = await TokenStorage.getCredentialsForServerUrl(serverProfile.serverUrl, { serverId: serverProfile.id });
+        if (!credentials) {
+            throw new HappyError(t('errors.unknownError'), false);
+        }
+        return { credentials, serverId: serverProfile.id, serverUrl: serverProfile.serverUrl };
+    }, [scopedMutationServerId]);
 
     const handleTogglePinned = useCallback(async () => {
         if (!sessionSettingsKey) return;
@@ -678,14 +700,17 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
             context: {
                 operations: {
                     setPinned: async (_sessionId, pinned) => {
-                        const current = Array.isArray(pinnedSessionKeysV1) ? pinnedSessionKeysV1 : [];
-                        const withoutSession = current.filter((key) => key !== sessionSettingsKey);
-                        await setPinnedSessionKeysV1(pinned ? [...withoutSession, sessionSettingsKey] : withoutSession);
+                        const mutation = await getOrganizationMutationContext();
+                        await setSessionOrganizationPin({
+                            ...mutation,
+                            sessionId: session.id,
+                            pinned,
+                        });
                     },
                 },
             },
         });
-    }, [isPinnedSession, pinnedSessionKeysV1, sessionActionTarget, sessionSettingsKey, setPinnedSessionKeysV1]);
+    }, [getOrganizationMutationContext, isPinnedSession, session.id, sessionActionTarget, sessionSettingsKey]);
     const [pinningSession, performTogglePinned] = useHappyAction(handleTogglePinned);
 
     const handleEditTags = useCallback(async () => {
@@ -709,16 +734,17 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
             context: {
                 operations: {
                     setTags: async (_sessionId, tags) => {
-                        await setSessionTagsV1(setTagsForSession(
-                            sessionTagsV1 as Record<string, string[]> | null | undefined,
-                            sessionSettingsKey,
-                            [...tags],
-                        ));
+                        const mutation = await getOrganizationMutationContext();
+                        await setSessionOrganizationTagLabels({
+                            ...mutation,
+                            sessionId: session.id,
+                            tags: [...tags],
+                        });
                     },
                 },
             },
         });
-    }, [sessionActionTarget, sessionInfoTags, sessionSettingsKey, sessionTagsV1, setSessionTagsV1]);
+    }, [getOrganizationMutationContext, session.id, sessionActionTarget, sessionInfoTags, sessionSettingsKey]);
     const [editingTags, performEditTags] = useHappyAction(handleEditTags);
 
     const handleMoveToFolder = useCallback(async () => {
@@ -738,22 +764,9 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
             context: {
                 operations: {
                     moveToFolder: async (_target, input) => {
-                        const serverId = typeof scopedMutationServerId === 'string' ? scopedMutationServerId.trim() : '';
-                        if (!serverId) {
-                            throw new HappyError(t('errors.unknownError'), false);
-                        }
-                        const serverProfile = getServerProfileById(serverId);
-                        if (!serverProfile) {
-                            throw new HappyError(t('errors.unknownError'), false);
-                        }
-                        const credentials = await TokenStorage.getCredentialsForServerUrl(serverProfile.serverUrl, { serverId: serverProfile.id });
-                        if (!credentials) {
-                            throw new HappyError(t('errors.unknownError'), false);
-                        }
-                        await setSessionFolderAssignment({
-                            credentials,
-                            serverId: serverProfile.id,
-                            serverUrl: serverProfile.serverUrl,
+                        const mutation = await getOrganizationMutationContext();
+                        await setSessionOrganizationFolderAssignment({
+                            ...mutation,
                             sessionId: session.id,
                             folderId: input?.folderId ?? null,
                         });
@@ -761,7 +774,7 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                 },
             },
         });
-    }, [moveTargets, openMoveSheet, scopedMutationServerId, session.id, sessionActionTarget, sessionFoldersEnabled, sessionName]);
+    }, [getOrganizationMutationContext, moveTargets, openMoveSheet, session.id, sessionActionTarget, sessionFoldersEnabled, sessionName]);
     const [movingToFolder, performMoveToFolder] = useHappyAction(handleMoveToFolder);
 
     const handleStopAndMaybeArchive = useCallback(async () => {
@@ -1047,7 +1060,7 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                         scopedMutationServerId={scopedMutationServerId}
                         isPinnedSession={isPinnedSession}
                     />
-                    {sessionSettingsKey && pinInfoItemProps ? (
+                    {!isArchivedSession && sessionSettingsKey && pinInfoItemProps ? (
                         <Item
                             {...pinInfoItemProps}
                             onPress={performTogglePinned}

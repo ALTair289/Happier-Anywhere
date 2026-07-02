@@ -15,19 +15,13 @@ async function dispatchSessionTreePointerDrag(page: Page, params: Readonly<{
   scrollDuringDrag?: 'target-into-view' | 'autoscroll-bottom';
 }>): Promise<DragDispatchResult> {
   await page.getByTestId(params.sourceTestId).scrollIntoViewIfNeeded();
-  await page.getByTestId(params.sourceTestId).hover();
+  await page.getByTestId(params.sourceTestId).hover().catch(() => undefined);
 
   if (!params.scrollDuringDrag) {
     await page.getByTestId(params.targetTestId).scrollIntoViewIfNeeded();
   }
 
-  const result = await page.evaluate(async ({
-    sourceTestId,
-    sourceChildTestId,
-    targetTestId,
-    targetEdge,
-    scrollDuringDrag,
-  }) => {
+  const scrollMetricsBefore = await page.evaluate((sourceTestId) => {
     const byTestId = (testId: string): HTMLElement | null => (
       document.querySelector<HTMLElement>(`[data-testid="${CSS.escape(testId)}"]`)
     );
@@ -39,84 +33,164 @@ async function dispatchSessionTreePointerDrag(page: Page, params: Readonly<{
       }
       return document.scrollingElement instanceof HTMLElement ? document.scrollingElement : null;
     };
-    const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-    const dispatchPointer = (
-      target: EventTarget,
-      type: string,
-      point: Readonly<{ x: number; y: number }>,
-      buttons: number,
-    ) => {
-      target.dispatchEvent(new PointerEvent(type, {
-        bubbles: true,
-        cancelable: true,
-        pointerId: 77,
-        pointerType: 'mouse',
-        isPrimary: true,
-        button: 0,
-        buttons,
-        clientX: point.x,
-        clientY: point.y,
-        screenX: point.x,
-        screenY: point.y,
-      }));
-    };
-    const pointForTarget = (element: HTMLElement, edge: 'top' | 'middle' | 'bottom') => {
-      const rect = element.getBoundingClientRect();
-      const y = edge === 'top'
-        ? rect.top + 4
-        : edge === 'bottom'
-          ? rect.bottom - 4
-          : rect.top + rect.height / 2;
-      return {
-        x: rect.left + Math.min(Math.max(rect.width * 0.5, 8), Math.max(rect.width - 8, 8)),
-        y,
-      };
-    };
-
     const sourceContainer = byTestId(sourceTestId);
-    if (!sourceContainer) return { ok: false, scrollTopBefore: null, scrollTopAfter: null, error: `missing ${sourceTestId}` };
-    const source = sourceChildTestId
-      ? sourceContainer.querySelector<HTMLElement>(`[data-testid="${CSS.escape(sourceChildTestId)}"]`)
-      : sourceContainer;
-    if (!source) return { ok: false, scrollTopBefore: null, scrollTopAfter: null, error: `missing ${sourceChildTestId ?? sourceTestId}` };
+    const scrollable = sourceContainer ? findScrollableAncestor(sourceContainer) : null;
+    const rect = scrollable?.getBoundingClientRect() ?? null;
+    return {
+      scrollTop: scrollable?.scrollTop ?? null,
+      rect: rect
+        ? { left: rect.left, width: rect.width, bottom: rect.bottom }
+        : null,
+    };
+  }, params.sourceTestId);
 
-    const scrollable = findScrollableAncestor(sourceContainer);
-    const scrollTopBefore = scrollable?.scrollTop ?? null;
-    const sourcePoint = pointForTarget(source, 'middle');
-    dispatchPointer(source, 'pointerdown', sourcePoint, 1);
-    await wait(35);
-    dispatchPointer(window, 'pointermove', { x: sourcePoint.x + 2, y: sourcePoint.y + 10 }, 1);
-    await wait(35);
+  const sourceContainer = page.getByTestId(params.sourceTestId);
+  const source = params.sourceChildTestId
+    ? sourceContainer.getByTestId(params.sourceChildTestId)
+    : sourceContainer;
+  const sourceBox = await source.boundingBox();
+  if (!sourceBox) {
+    return {
+      ok: false,
+      scrollTopBefore: scrollMetricsBefore.scrollTop,
+      scrollTopAfter: scrollMetricsBefore.scrollTop,
+      error: `missing ${params.sourceChildTestId ?? params.sourceTestId}`,
+    };
+  }
 
-    if (scrollDuringDrag === 'target-into-view') {
-      const targetBeforeScroll = byTestId(targetTestId);
-      targetBeforeScroll?.scrollIntoView({ block: 'center', inline: 'nearest' });
-      await wait(80);
-    } else if (scrollDuringDrag === 'autoscroll-bottom' && scrollable) {
-      const rect = scrollable.getBoundingClientRect();
-      dispatchPointer(window, 'pointermove', { x: rect.left + rect.width / 2, y: rect.bottom - 6 }, 1);
-      await wait(900);
+  const pointForBox = (
+    box: NonNullable<Awaited<ReturnType<typeof source.boundingBox>>>,
+    edge: 'top' | 'middle' | 'bottom',
+    outsideEdges: boolean = false,
+  ) => {
+    const y = outsideEdges && edge === 'top'
+      ? box.y - 4
+      : outsideEdges && edge === 'bottom'
+        ? box.y + box.height + 4
+        : edge === 'top'
+          ? box.y + 1
+          : edge === 'bottom'
+            ? box.y + box.height - 1
+            : box.y + box.height / 2;
+    return {
+      x: box.x + Math.min(Math.max(box.width * 0.5, 8), Math.max(box.width - 8, 8)),
+      y,
+    };
+  };
+
+  const folderDragRowTestIdFromHeaderTestId = (testId: string): string | null => {
+    const prefix = 'session-folder-header-';
+    return testId.startsWith(prefix)
+      ? `session-folder-drag-row-${testId.slice(prefix.length)}`
+      : null;
+  };
+
+  const resolveTargetBox = async (
+    targetTestId: string,
+  ): Promise<NonNullable<Awaited<ReturnType<typeof source.boundingBox>>> | null> => {
+    const folderDragRowTestId = folderDragRowTestIdFromHeaderTestId(targetTestId);
+    if (!folderDragRowTestId) {
+      return page.getByTestId(targetTestId).boundingBox();
     }
+    const folderDragRow = page.getByTestId(folderDragRowTestId);
+    const rowBox = await folderDragRow.boundingBox().catch(() => null);
+    if (rowBox) return rowBox;
+    return page.evaluate((testId) => {
+      const element = document.querySelector<HTMLElement>(`[data-testid="${CSS.escape(testId)}"]`);
+      const row = element?.parentElement ?? element;
+      const rect = row?.getBoundingClientRect();
+      if (!rect) return null;
+      return {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+      };
+    }, targetTestId);
+  };
 
-    const target = byTestId(targetTestId);
-    if (!target) {
-      dispatchPointer(window, 'pointerup', sourcePoint, 0);
-      return { ok: false, scrollTopBefore, scrollTopAfter: scrollable?.scrollTop ?? null, error: `missing ${targetTestId}` };
-    }
-    const targetPoint = pointForTarget(target, targetEdge);
-    for (const fraction of [0.35, 0.7, 1]) {
-      dispatchPointer(window, 'pointermove', {
-        x: sourcePoint.x + (targetPoint.x - sourcePoint.x) * fraction,
-        y: sourcePoint.y + (targetPoint.y - sourcePoint.y) * fraction,
-      }, 1);
-      await wait(45);
-    }
-    dispatchPointer(window, 'pointerup', targetPoint, 0);
-    await wait(160);
-    return { ok: true, scrollTopBefore, scrollTopAfter: scrollable?.scrollTop ?? null };
-  }, params);
+  const sourcePoint = pointForBox(sourceBox, 'middle');
+  await page.mouse.move(sourcePoint.x, sourcePoint.y);
+  await page.mouse.down({ button: 'left' });
+  await page.waitForTimeout(35);
+  await page.mouse.move(sourcePoint.x + 2, sourcePoint.y + 10);
+  await page.waitForTimeout(35);
 
-  if (!result.ok) throw new Error(result.error ?? 'drag dispatch failed');
+  if (params.scrollDuringDrag === 'target-into-view') {
+    await page.getByTestId(params.targetTestId).scrollIntoViewIfNeeded();
+    await page.waitForTimeout(80);
+  } else if (params.scrollDuringDrag === 'autoscroll-bottom' && scrollMetricsBefore.rect) {
+    await page.mouse.move(
+      scrollMetricsBefore.rect.left + scrollMetricsBefore.rect.width / 2,
+      scrollMetricsBefore.rect.bottom - 6,
+    );
+    await page.waitForTimeout(900);
+  }
+
+  const targetBox = await resolveTargetBox(params.targetTestId);
+  if (!targetBox) {
+    await page.mouse.up({ button: 'left' });
+    const scrollTopAfter = await page.evaluate((sourceTestId) => {
+      const byTestId = (testId: string): HTMLElement | null => (
+        document.querySelector<HTMLElement>(`[data-testid="${CSS.escape(testId)}"]`)
+      );
+      const findScrollableAncestor = (element: HTMLElement): HTMLElement | null => {
+        let current: HTMLElement | null = element.parentElement;
+        while (current) {
+          if (current.scrollHeight > current.clientHeight + 8) return current;
+          current = current.parentElement;
+        }
+        return document.scrollingElement instanceof HTMLElement ? document.scrollingElement : null;
+      };
+      const sourceContainer = byTestId(sourceTestId);
+      return sourceContainer ? findScrollableAncestor(sourceContainer)?.scrollTop ?? null : null;
+    }, params.sourceTestId);
+    return {
+      ok: false,
+      scrollTopBefore: scrollMetricsBefore.scrollTop,
+      scrollTopAfter,
+      error: `missing ${params.targetTestId}`,
+    };
+  }
+
+  const targetPoint = pointForBox(
+    targetBox,
+    params.targetEdge,
+    params.sourceTestId.startsWith('session-folder-drag-row-')
+      && params.targetTestId.startsWith('session-folder-header-'),
+  );
+  for (const fraction of [0.35, 0.7, 1]) {
+    await page.mouse.move(
+      sourcePoint.x + (targetPoint.x - sourcePoint.x) * fraction,
+      sourcePoint.y + (targetPoint.y - sourcePoint.y) * fraction,
+    );
+    await page.waitForTimeout(45);
+  }
+  await page.mouse.up({ button: 'left' });
+  await page.waitForTimeout(160);
+
+  const scrollTopAfter = await page.evaluate((sourceTestId) => {
+    const byTestId = (testId: string): HTMLElement | null => (
+      document.querySelector<HTMLElement>(`[data-testid="${CSS.escape(testId)}"]`)
+    );
+    const findScrollableAncestor = (element: HTMLElement): HTMLElement | null => {
+      let current: HTMLElement | null = element.parentElement;
+      while (current) {
+        if (current.scrollHeight > current.clientHeight + 8) return current;
+        current = current.parentElement;
+      }
+      return document.scrollingElement instanceof HTMLElement ? document.scrollingElement : null;
+    };
+    const sourceContainer = byTestId(sourceTestId);
+    return sourceContainer ? findScrollableAncestor(sourceContainer)?.scrollTop ?? null : null;
+  }, params.sourceTestId);
+
+  const result = {
+    ok: true,
+    scrollTopBefore: scrollMetricsBefore.scrollTop,
+    scrollTopAfter,
+  };
+
   await page.waitForTimeout(250);
   return result;
 }
@@ -141,11 +215,13 @@ export async function dragFolderToTarget(page: Page, params: Readonly<{
   targetTestId: string;
   targetEdge: 'top' | 'middle' | 'bottom';
 }>): Promise<void> {
-  await dispatchSessionTreePointerDrag(page, {
-    sourceTestId: `session-folder-header-${params.sourceFolderId}`,
+  const result = await dispatchSessionTreePointerDrag(page, {
+    sourceTestId: `session-folder-drag-row-${params.sourceFolderId}`,
+    sourceChildTestId: `session-folder-reorder-handle-${params.sourceFolderId}`,
     targetTestId: params.targetTestId,
     targetEdge: params.targetEdge,
   });
+  if (!result.ok) throw new Error(result.error ?? 'folder drag dispatch failed');
 }
 
 /** A DOM rect captured inside the browser (`getBoundingClientRect` shape). */
