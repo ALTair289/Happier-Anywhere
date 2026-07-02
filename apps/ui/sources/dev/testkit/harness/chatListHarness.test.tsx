@@ -3,7 +3,30 @@ import renderer from 'react-test-renderer';
 import { act } from 'react-test-renderer';
 import { describe, expect, it, vi } from 'vitest';
 
+const DELETED_LEGACY_CHAT_LIST_HARNESS_EXPORTS = [
+    ['legacy', 'ChatListHarnessState'].join(''),
+    ['render', 'LegacyChatList'].join(''),
+    ['reset', 'LegacyChatListHarness'].join(''),
+    ['trigger', 'LegacyChatListScroll'].join(''),
+    ['trigger', 'LegacyChatListInitialFill'].join(''),
+    ['trigger', 'LegacyChatListEndReached'].join(''),
+    ['get', 'CapturedFlatListProps'].join(''),
+    ['require', 'CapturedFlatListProps'].join(''),
+    ['build', 'LegacyChatListItems'].join(''),
+    ['create', 'LegacyChatListItemsModuleMock'].join(''),
+    ['create', 'LegacyChatListReactNativeMock'].join(''),
+    ['create', 'LegacyChatListStorageMock'].join(''),
+];
+
 describe('chatListHarness', () => {
+    it('does not export deleted legacy ChatList harness compatibility aliases', async () => {
+        const harnessModule = await import('./chatListHarness');
+
+        for (const deletedExport of DELETED_LEGACY_CHAT_LIST_HARNESS_EXPORTS) {
+            expect(harnessModule).not.toHaveProperty(deletedExport);
+        }
+    });
+
     it('captures FlashList props and drives initial fill for FlashList ChatList tests', async () => {
         const harnessModule = await import('./chatListHarness');
 

@@ -33,6 +33,20 @@ const mocks = vi.hoisted(() => {
             ...delta,
         })),
         settingsParse,
+        fetchSessionOrganizationSnapshot: vi.fn(async () => ({
+            snapshot: {
+                schemaVersion: 1,
+                version: 0,
+                pins: [],
+                folders: [],
+                folderAssignments: [],
+                tags: [],
+                tagAssignments: [],
+                orderEntries: [],
+                labels: [],
+            },
+        })),
+        importLegacySessionOrganization: vi.fn(async () => {}),
         storageState: {
             settings: {
                 analyticsOptOut: false,
@@ -80,6 +94,14 @@ vi.mock('@/sync/domains/server/serverProfiles', () => ({
     getServerProfileLegacyServerIds: () => mocks.serverProfileLegacyServerIds,
 }));
 
+vi.mock('@/sync/api/session/sessionOrganizationApi', () => ({
+    fetchSessionOrganizationSnapshot: mocks.fetchSessionOrganizationSnapshot,
+}));
+
+vi.mock('@/sync/ops/sessionOrganization/importLegacySessionOrganization', () => ({
+    importLegacySessionOrganization: mocks.importLegacySessionOrganization,
+}));
+
 vi.mock('@/sync/domains/state/storage', async () => {
     const { createStorageModuleStub } = await import('@/dev/testkit/mocks/storage');
     return createStorageModuleStub({
@@ -105,8 +127,10 @@ vi.mock('@/sync/domains/state/persistence', () => ({
     loadPurchases: () => ({}),
     loadProfile: () => ({}),
     loadThemePreference: () => 'adaptive',
+    loadLocalPetSourcesBySourceKey: () => ({}),
     loadSessionDrafts: () => ({}),
     loadSessionReviewCommentsDrafts: () => ({}),
+    loadWorkspaceReviewCommentsDrafts: () => ({}),
     loadSessionActionDrafts: () => ({}),
     loadNewSessionDraft: () => null,
     loadSessionPermissionModes: () => ({}),
@@ -122,8 +146,10 @@ vi.mock('@/sync/domains/state/persistence', () => ({
     saveLocalSettings: vi.fn(),
     savePurchases: vi.fn(),
     saveProfile: vi.fn(),
+    saveLocalPetSourcesBySourceKey: vi.fn(),
     saveSessionDrafts: vi.fn(),
     saveSessionReviewCommentsDrafts: vi.fn(),
+    saveWorkspaceReviewCommentsDrafts: vi.fn(),
     saveSessionActionDrafts: vi.fn(),
     saveNewSessionDraft: vi.fn(),
     clearNewSessionDraft: vi.fn(),
@@ -134,6 +160,7 @@ vi.mock('@/sync/domains/state/persistence', () => ({
     saveSessionModelModeUpdatedAts: vi.fn(),
     saveSessionMaterializedMaxSeqById: vi.fn(),
     saveChangesCursor: vi.fn(),
+    pruneStaleInstanceChangesCursors: vi.fn(),
     saveLastChangesCursorByAccountId: vi.fn(),
     savePendingSettings: vi.fn(),
     saveDeviceAnalyticsId: vi.fn(),
@@ -175,6 +202,8 @@ describe('syncSettings account settings ciphertext', () => {
         mocks.serverFetch.mockReset();
         mocks.applySettingsFn.mockClear();
         mocks.settingsParse.mockClear();
+        mocks.fetchSessionOrganizationSnapshot.mockClear();
+        mocks.importLegacySessionOrganization.mockClear();
         mocks.getRandomBytes.mockClear();
         mocks.serverProfileLegacyServerIds = ['localhost-52753'];
         mocks.storageState.settings = {
@@ -632,6 +661,12 @@ describe('syncSettings account settings ciphertext', () => {
                     status: 200,
                     headers: { 'Content-Type': 'application/json' },
                 }),
+            )
+            .mockResolvedValueOnce(
+                new Response(JSON.stringify({ success: true, version: 13 }), {
+                    status: 200,
+                    headers: { 'Content-Type': 'application/json' },
+                }),
             );
 
         await syncSettings({
@@ -729,29 +764,100 @@ describe('syncSettings account settings ciphertext', () => {
             material: { type: 'dataKey', machineKey: TEST_MACHINE_KEY },
             ciphertext: String(migrateBody.content?.c ?? ''),
         });
-        expect(opened?.value).toEqual(expect.objectContaining({
-            pinnedSessionKeysV1: ['srv_identity:session-a', 'srv_identity:session-b'],
-            sessionTagsV1: {
-                'srv_identity:session-a': ['legacy-tag'],
-                'srv_identity:session-b': ['identity-tag'],
-            },
-            sessionListGroupOrderV1: {
-                'server:srv_identity:active:project:p1': ['srv_identity:session-a'],
-                'server:srv_identity:active:project:p2': ['srv_identity:session-c'],
-                'pinned-v1': ['srv_identity:session-a'],
-            },
-            sessionWorkspaceOrderV1: {
-                'server:srv_identity:workspaces': ['workspace:legacy'],
-            },
+        expect(opened?.value).toEqual({ analyticsOptOut: false });
+        expect(mocks.fetchSessionOrganizationSnapshot).toHaveBeenCalledWith(expect.objectContaining({
+            credentials,
+            serverUrl: 'http://127.0.0.1:3009',
         }));
-        expect((opened?.value as Record<string, unknown> | undefined)?.serverSelectionGroups).toBeUndefined();
+        expect(mocks.importLegacySessionOrganization).toHaveBeenCalledWith(expect.objectContaining({
+            credentials,
+            serverId: 'srv_identity',
+            serverUrl: 'http://127.0.0.1:3009',
+            request: expect.objectContaining({
+                pins: [
+                    { sessionId: 'session-a', sortKey: '00000001' },
+                    { sessionId: 'session-b', sortKey: '00000002' },
+                ],
+                tagAssignments: [
+                    { sessionId: 'session-a', tagIds: ['legacy-tag'] },
+                    { sessionId: 'session-b', tagIds: ['identity-tag'] },
+                ],
+            }),
+        }));
         expect(mocks.storageState.applySettingsForScope).toHaveBeenLastCalledWith(
             { serverId: 'srv_identity', accountId: 'account-a' },
             expect.objectContaining({
+                analyticsOptOut: false,
                 pinnedSessionKeysV1: ['srv_identity:session-a', 'srv_identity:session-b'],
+                sessionTagsV1: {
+                    'srv_identity:session-a': ['legacy-tag'],
+                    'srv_identity:session-b': ['identity-tag'],
+                },
             }),
             13,
         );
+    });
+
+    it('reports imported legacy pinned session ids to the sync orchestrator', async () => {
+        const encryptionStub = {
+            getContentPrivateKey: () => TEST_MACHINE_KEY,
+            decryptRaw: vi.fn(async () => {
+                throw new Error('plain settings should not decrypt ciphertext');
+            }),
+        } as unknown as Encryption;
+        const onLegacySessionOrganizationImported = vi.fn();
+
+        mocks.serverFetch
+            .mockResolvedValueOnce(
+                new Response(JSON.stringify({ mode: 'plain', updatedAt: Date.now() }), {
+                    status: 200,
+                    headers: { 'Content-Type': 'application/json' },
+                }),
+            )
+            .mockResolvedValueOnce(
+                new Response(JSON.stringify({
+                    content: {
+                        t: 'plain',
+                        v: {
+                            analyticsOptOut: false,
+                            pinnedSessionKeysV1: ['srv_identity:session-a', 'srv_identity:session-b'],
+                        },
+                    },
+                    version: 12,
+                }), {
+                    status: 200,
+                    headers: { 'Content-Type': 'application/json' },
+                }),
+            )
+            .mockResolvedValueOnce(
+                new Response(JSON.stringify({ success: true, version: 13 }), {
+                    status: 200,
+                    headers: { 'Content-Type': 'application/json' },
+                }),
+            );
+
+        await (syncSettings as unknown as (params: Parameters<typeof syncSettings>[0] & {
+            onLegacySessionOrganizationImported?: typeof onLegacySessionOrganizationImported;
+        }) => Promise<void>)({
+            credentials,
+            encryption: encryptionStub,
+            settingsScope: { serverId: 'srv_identity', accountId: 'account-a' },
+            pendingSettings: {},
+            clearPendingSettings: vi.fn(),
+            onLegacySessionOrganizationImported,
+        });
+
+        expect(mocks.importLegacySessionOrganization).toHaveBeenCalledWith(expect.objectContaining({
+            request: expect.objectContaining({
+                pins: [
+                    { sessionId: 'session-a', sortKey: '00000001' },
+                    { sessionId: 'session-b', sortKey: '00000002' },
+                ],
+            }),
+        }));
+        expect(onLegacySessionOrganizationImported).toHaveBeenCalledWith({
+            pinnedSessionIds: ['session-a', 'session-b'],
+        });
     });
 
     it('migrates payload-discovered server ids even when profile legacy aliases are absent', async () => {
@@ -823,13 +929,14 @@ describe('syncSettings account settings ciphertext', () => {
             material: { type: 'dataKey', machineKey: TEST_MACHINE_KEY },
             ciphertext: String(migrateBody.content?.c ?? ''),
         });
-        expect(opened?.value).toEqual(expect.objectContaining({
-            pinnedSessionKeysV1: ['srv_identity:session-a'],
-            sessionTagsV1: {
-                'srv_identity:session-a': ['local-tag'],
-            },
+        expect(opened?.value).toEqual({});
+        expect(mocks.importLegacySessionOrganization).toHaveBeenCalledWith(expect.objectContaining({
+            serverId: 'srv_identity',
+            request: expect.objectContaining({
+                pins: [{ sessionId: 'session-a', sortKey: '00000001' }],
+                tagAssignments: [{ sessionId: 'session-a', tagIds: ['local-tag'] }],
+            }),
         }));
-        expect((opened?.value as Record<string, unknown> | undefined)?.serverSelectionGroups).toBeUndefined();
     });
 
     it('does not rewrite payload-discovered aliases when the active scope is still host-derived', async () => {
@@ -863,6 +970,12 @@ describe('syncSettings account settings ciphertext', () => {
                     status: 200,
                     headers: { 'Content-Type': 'application/json' },
                 }),
+            )
+            .mockResolvedValueOnce(
+                new Response(JSON.stringify({ success: true, version: 13 }), {
+                    status: 200,
+                    headers: { 'Content-Type': 'application/json' },
+                }),
             );
 
         await syncSettings({
@@ -876,15 +989,17 @@ describe('syncSettings account settings ciphertext', () => {
         expect(mocks.serverFetch.mock.calls.map((call) => [call[0], call[1]?.method ?? 'GET'])).toEqual([
             ['/v1/account/encryption', 'GET'],
             ['/v2/account/settings', 'GET'],
+            ['/v2/account/settings', 'POST'],
         ]);
         expect(mocks.storageState.applySettingsForScope).toHaveBeenLastCalledWith(
             { serverId: 'localhost-52753', accountId: 'account-a' },
             expect.objectContaining({
+                analyticsOptOut: false,
                 sessionListGroupOrderV1: {
                     'server:192.168.1.115-52753:active:project:p2': ['192.168.1.115-52753:session-c'],
                 },
             }),
-            12,
+            13,
         );
     });
 

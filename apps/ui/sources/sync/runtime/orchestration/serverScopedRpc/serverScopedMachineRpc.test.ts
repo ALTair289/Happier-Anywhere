@@ -96,6 +96,33 @@ describe('machineRpcWithServerScope', () => {
         expect(createEphemeralSocketSpy).not.toHaveBeenCalled();
     });
 
+    it('preserves authorization on active direct machine RPC calls', async () => {
+        getActiveServerSnapshotSpy.mockReturnValue({
+            serverId: 'server-a',
+            serverUrl: 'https://server-a.example.test',
+            kind: 'custom',
+            generation: 1,
+        });
+        machineRpcSpy.mockResolvedValue({ ok: true });
+
+        const authorization = { kind: 'session.write', sessionId: 'sess_1' } as const;
+        const { machineRpcWithServerScope } = await import('./serverScopedMachineRpc');
+        await expect(machineRpcWithServerScope({
+            machineId: 'machine-1',
+            method: 'daemon.sessionRunner.restart',
+            payload: { reason: 'manual' },
+            authorization,
+        })).resolves.toEqual({ ok: true });
+
+        expect(machineRpcSpy).toHaveBeenCalledWith(
+            'machine-1',
+            'daemon.sessionRunner.restart',
+            { reason: 'manual' },
+            { timeoutMs: 30000, authorization },
+        );
+        expect(createEphemeralSocketSpy).not.toHaveBeenCalled();
+    });
+
     it('routes RPC through a scoped socket when target server differs from active server', async () => {
         syncPerformanceTelemetry.configure({
             enabled: true,
@@ -172,6 +199,61 @@ describe('machineRpcWithServerScope', () => {
         })).toEqual(expect.objectContaining({
             status: 'viable',
         }));
+        expect(fakeSocket.disconnect).toHaveBeenCalledTimes(1);
+    });
+
+    it('preserves authorization on scoped machine RPC socket calls', async () => {
+        getActiveServerSnapshotSpy.mockReturnValue({
+            serverId: 'server-a',
+            serverUrl: 'https://server-a.example.test',
+            kind: 'custom',
+            generation: 1,
+        });
+        listServerProfilesSpy.mockReturnValue([
+            { id: 'server-b', serverUrl: 'https://server-b.example.test', name: 'Server B' },
+        ]);
+        getCredentialsSpy.mockResolvedValue({ token: 'token-b', secret: 'secret-b' });
+
+        const machineEncryption = {
+            encryptRaw: vi.fn(async () => 'encrypted-payload'),
+            decryptRaw: vi.fn(async () => ({ decoded: true })),
+        };
+        createEncryptionSpy.mockResolvedValue({
+            decryptEncryptionKey: vi.fn(async () => null),
+            initializeMachines: vi.fn(async () => {}),
+            getMachineEncryption: vi.fn(() => machineEncryption),
+        });
+
+        vi.stubGlobal('fetch', vi.fn(async () => ({
+            ok: true,
+            json: async () => [{ id: 'machine-1', dataEncryptionKey: null }],
+        })));
+
+        const emitWithAck = vi.fn(async () => ({ ok: true, result: 'encrypted-result' }));
+        const fakeSocket = {
+            timeout: vi.fn(() => ({ emitWithAck })),
+            emit: vi.fn(),
+            disconnect: vi.fn(),
+        };
+        createEphemeralSocketSpy.mockResolvedValueOnce(fakeSocket);
+
+        const authorization = { kind: 'session.write', sessionId: 'sess_1' } as const;
+        const { machineRpcWithServerScope } = await import('./serverScopedMachineRpc');
+        await expect(machineRpcWithServerScope({
+            machineId: 'machine-1',
+            method: 'daemon.sessionRunner.restart',
+            payload: { reason: 'manual' },
+            serverId: 'server-b',
+            timeoutMs: 5000,
+            authorization,
+        })).resolves.toEqual({ decoded: true });
+
+        expect(emitWithAck).toHaveBeenCalledWith(SOCKET_RPC_EVENTS.CALL, {
+            method: 'machine-1:daemon.sessionRunner.restart',
+            params: 'encrypted-payload',
+            authorization,
+            timeoutMs: 5000,
+        });
         expect(fakeSocket.disconnect).toHaveBeenCalledTimes(1);
     });
 
@@ -317,14 +399,21 @@ describe('machineRpcWithServerScope', () => {
         createEphemeralSocketSpy.mockResolvedValueOnce(fakeSocket);
 
         const { machineRpcWithServerScope } = await import('./serverScopedMachineRpc');
+        const authorization = { kind: 'session.write', sessionId: 'sess_1' } as const;
         const result = await machineRpcWithServerScope({
             machineId: 'machine-1',
             method: 'spawn-happy-session',
             payload: { directory: '/tmp/repo' },
+            authorization,
         });
 
         expect(result).toEqual({ decoded: true });
-        expect(machineRpcSpy).toHaveBeenCalledTimes(1);
+        expect(machineRpcSpy).toHaveBeenCalledWith(
+            'machine-1',
+            'spawn-happy-session',
+            { directory: '/tmp/repo' },
+            { timeoutMs: 30000, authorization },
+        );
         expect(createEphemeralSocketSpy).toHaveBeenCalledWith(expect.objectContaining({
             serverUrl: 'https://server-a.example.test',
             token: 'token-a',
@@ -332,6 +421,12 @@ describe('machineRpcWithServerScope', () => {
         }));
         expect(machineEncryption.encryptRaw).toHaveBeenCalledWith({ directory: '/tmp/repo' });
         expect(machineEncryption.decryptRaw).toHaveBeenCalledWith('encrypted-result');
+        expect(emitWithAck).toHaveBeenCalledWith(SOCKET_RPC_EVENTS.CALL, {
+            method: 'machine-1:spawn-happy-session',
+            params: 'encrypted-payload',
+            authorization,
+            timeoutMs: 30000,
+        });
         expect(findTelemetryEvent('sync.encryption.machine.encryptRaw.scopedRpc.sessionWrite')).toMatchObject({
             count: 1,
             fields: { items: 1 },

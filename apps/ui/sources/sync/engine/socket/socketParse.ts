@@ -20,6 +20,24 @@ export type TranscriptStreamSegmentEphemeralUpdate = Readonly<{
         sidechainId?: string | null;
         messageRole?: SessionMessageRole | null;
         content: SessionStoredMessageContent;
+        /** Live-stream tick this snapshot corresponds to (delta-chaining checkpoint anchor). */
+        tick?: number | null;
+        createdAt: number;
+        updatedAt: number;
+    }>;
+}>;
+
+export type TranscriptStreamSegmentDeltaEphemeralUpdate = Readonly<{
+    type: 'transcript-stream-segment-delta';
+    sessionId: string;
+    message: Readonly<{
+        localId: string;
+        sidechainId?: string | null;
+        messageRole?: SessionMessageRole | null;
+        /** Envelope carrying ONLY the text appended since the previous live emission. */
+        content: SessionStoredMessageContent;
+        tick: number;
+        baseLength: number;
         createdAt: number;
         updatedAt: number;
     }>;
@@ -38,7 +56,27 @@ export type DirectSessionTranscriptUpdatedEphemeralUpdate = Readonly<{
 export type ParsedEphemeralUpdate =
     | EphemeralUpdate
     | TranscriptStreamSegmentEphemeralUpdate
+    | TranscriptStreamSegmentDeltaEphemeralUpdate
     | DirectSessionTranscriptUpdatedEphemeralUpdate;
+
+// Hot-path note: the primary parse is the protocol `EphemeralUpdateSchema` discriminated union
+// (keyed dispatch, delta variant listed first). The local schemas below are compatibility
+// fallbacks only; the delta fallback is tried first because delta ticks are by far the most
+// frequent ephemeral event while a segment streams (~25Hz per active segment).
+const TranscriptStreamSegmentDeltaEphemeralUpdateSchema = z.object({
+    type: z.literal('transcript-stream-segment-delta'),
+    sessionId: z.string(),
+    message: z.object({
+        localId: z.string(),
+        sidechainId: z.string().nullable().optional(),
+        messageRole: SessionMessageRoleSchema.nullable().optional(),
+        content: SessionStoredMessageContentSchema,
+        tick: z.number().int().min(1),
+        baseLength: z.number().int().min(0),
+        createdAt: z.number(),
+        updatedAt: z.number(),
+    }).passthrough(),
+}).passthrough();
 
 const TranscriptStreamSegmentEphemeralUpdateSchema = z.object({
     type: z.literal('transcript-stream-segment'),
@@ -48,6 +86,7 @@ const TranscriptStreamSegmentEphemeralUpdateSchema = z.object({
         sidechainId: z.string().nullable().optional(),
         messageRole: SessionMessageRoleSchema.nullable().optional(),
         content: SessionStoredMessageContentSchema,
+        tick: z.number().int().min(0).nullable().optional(),
         createdAt: z.number(),
         updatedAt: z.number(),
     }).passthrough(),
@@ -146,6 +185,11 @@ export function parseUpdateContainer(update: unknown): UpdateContainer | null {
 export function parseEphemeralUpdate(update: unknown): ParsedEphemeralUpdate | null {
     const validatedUpdate = EphemeralUpdateSchema.safeParse(update);
     if (!validatedUpdate.success) {
+        const transcriptStreamSegmentDeltaUpdate = TranscriptStreamSegmentDeltaEphemeralUpdateSchema.safeParse(update);
+        if (transcriptStreamSegmentDeltaUpdate.success) {
+            return transcriptStreamSegmentDeltaUpdate.data;
+        }
+
         const transcriptStreamSegmentUpdate = TranscriptStreamSegmentEphemeralUpdateSchema.safeParse(update);
         if (transcriptStreamSegmentUpdate.success) {
             return transcriptStreamSegmentUpdate.data;

@@ -974,6 +974,7 @@ describe('socket update handling: plaintext update-session', () => {
                 activeAt: 1,
                 archivedAt: null,
                 pendingCount: 0,
+                pendingBlockedCount: 1,
                 pendingVersion: 1,
                 metadataVersion: 1,
                 agentStateVersion: 0,
@@ -1006,8 +1007,59 @@ describe('socket update handling: plaintext update-session', () => {
         expect(storage.getState().sessionListRenderables['s_cached_pending']).toEqual(
             expect.objectContaining({
                 pendingCount: 4,
+                pendingBlockedCount: 1,
                 pendingVersion: 8,
                 meaningfulActivityAt: 2_345,
+            }),
+        );
+        expect(params.invalidateSessions).not.toHaveBeenCalled();
+        expect((params.applySessions as unknown as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    });
+
+    it('clears cache-only blocked pending state when pending-changed sends explicit zero', async () => {
+        storage.getState().replaceSessionListRenderables([
+            {
+                id: 's_cached_pending_clear',
+                seq: 1,
+                createdAt: 1,
+                updatedAt: 1,
+                active: true,
+                activeAt: 1,
+                archivedAt: null,
+                pendingCount: 2,
+                pendingBlockedCount: 1,
+                pendingVersion: 1,
+                metadataVersion: 1,
+                agentStateVersion: 0,
+                metadata: { path: '/tmp', host: 'localhost' },
+                thinking: false,
+                thinkingAt: 0,
+                presence: 'online',
+            },
+        ]);
+
+        const params = buildBaseParams();
+        await handleUpdateContainer({
+            ...params,
+            updateData: {
+                id: 'u_plain_pending_cache_only_clear',
+                seq: 12,
+                createdAt: 1236,
+                body: {
+                    t: 'pending-changed',
+                    sid: 's_cached_pending_clear',
+                    pendingCount: 1,
+                    pendingBlockedCount: 0,
+                    pendingVersion: 8,
+                },
+            } as ApiUpdateContainer,
+        });
+
+        expect(storage.getState().sessionListRenderables.s_cached_pending_clear).toEqual(
+            expect.objectContaining({
+                pendingCount: 1,
+                pendingBlockedCount: 0,
+                pendingVersion: 8,
             }),
         );
         expect(params.invalidateSessions).not.toHaveBeenCalled();
@@ -1069,7 +1121,7 @@ describe('socket update handling: plaintext update-session', () => {
     });
 
     it('updates hydrated sessions for pending-changed meaningful activity without forcing a sessions refresh', async () => {
-        storage.getState().applySessions([buildSession('s_hydrated_pending')]);
+        storage.getState().applySessions([{ ...buildSession('s_hydrated_pending'), pendingBlockedCount: 1 }]);
         const params = buildBaseParams();
 
         await handleUpdateContainer({
@@ -1093,10 +1145,89 @@ describe('socket update handling: plaintext update-session', () => {
         expect(applySessionsSpy.mock.calls[0]?.[0]?.[0]).toEqual(expect.objectContaining({
             id: 's_hydrated_pending',
             pendingCount: 2,
+            pendingBlockedCount: 1,
             pendingVersion: 5,
             meaningfulActivityAt: 3_456,
         }));
         expect(params.invalidateSessions).not.toHaveBeenCalled();
+    });
+
+    it('clears hydrated blocked pending state when pending-changed sends explicit zero', async () => {
+        storage.getState().applySessions([{ ...buildSession('s_hydrated_pending_clear'), pendingBlockedCount: 1 }]);
+        const params = buildBaseParams();
+
+        await handleUpdateContainer({
+            ...params,
+            updateData: {
+                id: 'u_hydrated_pending_clear',
+                seq: 13,
+                createdAt: 1237,
+                body: {
+                    t: 'pending-changed',
+                    sid: 's_hydrated_pending_clear',
+                    pendingCount: 0,
+                    pendingBlockedCount: 0,
+                    pendingVersion: 5,
+                },
+            } as ApiUpdateContainer,
+        });
+
+        const applySessionsSpy = params.applySessions as unknown as ReturnType<typeof vi.fn>;
+        expect(applySessionsSpy).toHaveBeenCalledTimes(1);
+        expect(applySessionsSpy.mock.calls[0]?.[0]?.[0]).toEqual(expect.objectContaining({
+            id: 's_hydrated_pending_clear',
+            pendingCount: 0,
+            pendingBlockedCount: 0,
+            pendingVersion: 5,
+        }));
+        expect(params.invalidateSessions).not.toHaveBeenCalled();
+    });
+
+    it('prunes cached server-owned pending rows when pending-changed sends zero queued rows', async () => {
+        const sessionId = 's_hydrated_pending_detail_clear';
+        storage.getState().applySessions([{ ...buildSession(sessionId), pendingCount: 1, pendingVersion: 1 }]);
+        storage.getState().applyPendingMessages(sessionId, [
+            {
+                id: 'server-pending-1',
+                localId: 'server-pending-1',
+                createdAt: 1,
+                updatedAt: 1,
+                source: 'server_pending',
+                text: 'sent to provider',
+                rawRecord: {},
+            },
+            {
+                id: 'local-outbound-1',
+                localId: 'local-outbound-1',
+                createdAt: 2,
+                updatedAt: 2,
+                source: 'local_outbound',
+                deliveryStatus: 'queued',
+                text: 'saving locally',
+                rawRecord: {},
+            },
+        ]);
+        const params = buildBaseParams();
+
+        await handleUpdateContainer({
+            ...params,
+            updateData: {
+                id: 'u_hydrated_pending_detail_clear',
+                seq: 13,
+                createdAt: 1237,
+                body: {
+                    t: 'pending-changed',
+                    sid: sessionId,
+                    pendingCount: 0,
+                    pendingBlockedCount: 0,
+                    pendingVersion: 5,
+                },
+            } as ApiUpdateContainer,
+        });
+
+        expect(storage.getState().sessionPending[sessionId]?.messages.map((message) => message.id)).toEqual([
+            'local-outbound-1',
+        ]);
     });
 
     it('uses targeted session hydration for unpatchable cache-only update-session payloads when available', async () => {
@@ -1341,6 +1472,61 @@ describe('socket update handling: plaintext update-session', () => {
                 latestTurnStatus: 'completed',
                 latestTurnStatusObservedAt: 1210,
                 meaningfulActivityAt: 1210,
+                updatedAt: 1237,
+            }),
+        );
+        expect(params.invalidateSessions).not.toHaveBeenCalled();
+        expect((params.applySessions as unknown as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    });
+
+    it('updates cache-only renderables for runtime activity projection payloads without forcing hydration', async () => {
+        storage.getState().replaceSessionListRenderables([
+            {
+                id: 's_cached_runtime_activity_projection',
+                seq: 1,
+                createdAt: 1,
+                updatedAt: 1,
+                active: true,
+                activeAt: 1,
+                archivedAt: null,
+                metadataVersion: 1,
+                agentStateVersion: 0,
+                metadata: { path: '/tmp', host: 'localhost' },
+                thinking: false,
+                thinkingAt: 0,
+                presence: 'online',
+                latestTurnStatus: 'completed',
+                runtimeActivityActiveCount: 0,
+                runtimeActivityObservedAt: null,
+                runtimeActivityExpiresAt: null,
+                runtimeActivitySourceClass: null,
+            },
+        ]);
+
+        const params = buildBaseParams();
+        await handleUpdateContainer({
+            ...params,
+            updateData: {
+                id: 'u_runtime_activity_projection_cache_only',
+                seq: 13,
+                createdAt: 1237,
+                body: {
+                    t: 'update-session',
+                    id: 's_cached_runtime_activity_projection',
+                    runtimeActivityActiveCount: 1,
+                    runtimeActivityObservedAt: 1200,
+                    runtimeActivityExpiresAt: 132_000,
+                    runtimeActivitySourceClass: 'provider_detached_task',
+                },
+            },
+        });
+
+        expect(storage.getState().sessionListRenderables['s_cached_runtime_activity_projection']).toEqual(
+            expect.objectContaining({
+                runtimeActivityActiveCount: 1,
+                runtimeActivityObservedAt: 1200,
+                runtimeActivityExpiresAt: 132_000,
+                runtimeActivitySourceClass: 'provider_detached_task',
                 updatedAt: 1237,
             }),
         );
@@ -1730,7 +1916,7 @@ describe('socket update handling: plaintext update-session', () => {
         expect(params.invalidateSessions).not.toHaveBeenCalled();
         expect((params.applySessions as unknown as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
 
-        await vi.runAllTimersAsync();
+        await vi.advanceTimersByTimeAsync(16);
     });
 
     it('applies same-timestamp higher-seq urgent cache-only projection after queued non-urgent progress', async () => {
@@ -1806,7 +1992,7 @@ describe('socket update handling: plaintext update-session', () => {
         expect(params.invalidateSessions).not.toHaveBeenCalled();
         expect((params.applySessions as unknown as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
 
-        await vi.runAllTimersAsync();
+        await vi.advanceTimersByTimeAsync(16);
     });
 
     it('marks cache-only renderables unread when a ready projection advances past the read cursor', async () => {
@@ -2129,7 +2315,8 @@ describe('socket update handling: plaintext update-session', () => {
         expect((params.applySessions as unknown as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
     });
 
-    it('skips fresh cache-only timestamp-only activity patches until runtime freshness needs refresh', () => {
+    it('skips fresh cache-only timestamp-only activity patches until runtime freshness needs refresh', async () => {
+        vi.useFakeTimers();
         syncPerformanceTelemetry.configure({
             enabled: true,
             slowThresholdMs: 1_000_000,
@@ -2205,9 +2392,9 @@ describe('socket update handling: plaintext update-session', () => {
 
         expect(storage.getState().sessionListRenderables.s_cached_activity_timestamp_gate).toEqual(
             expect.objectContaining({
-                activeAt: 61_001,
-                thinkingAt: 61_001,
-                updatedAt: 61_001,
+                activeAt: 1,
+                thinkingAt: 1,
+                updatedAt: 1,
             }),
         );
         expect(syncPerformanceTelemetry.snapshot().events.find((entry) => entry.name === 'sync.socket.sessions.activity.flush')?.fields)
@@ -2216,10 +2403,21 @@ describe('socket update handling: plaintext update-session', () => {
                 renderableTimestampOnlyPatches: 1,
                 renderableTimestampOnlySkippedFreshPatches: 0,
             }));
+
+        await vi.advanceTimersByTimeAsync(16);
+
+        expect(storage.getState().sessionListRenderables.s_cached_activity_timestamp_gate).toEqual(
+            expect.objectContaining({
+                activeAt: 61_001,
+                thinkingAt: 61_001,
+                updatedAt: 61_001,
+            }),
+        );
         expect(applySessions).not.toHaveBeenCalled();
     });
 
-    it('refreshes cache-only activity timestamps even when a durable projection has a newer updatedAt', () => {
+    it('refreshes cache-only activity timestamps even when a durable projection has a newer updatedAt', async () => {
+        vi.useFakeTimers();
         storage.getState().replaceSessionListRenderables([
             {
                 id: 's_cached_activity_heartbeat',
@@ -2255,6 +2453,19 @@ describe('socket update handling: plaintext update-session', () => {
             ]),
             applySessions,
         });
+
+        expect(storage.getState().sessionListRenderables.s_cached_activity_heartbeat).toEqual(
+            expect.objectContaining({
+                active: true,
+                activeAt: 1,
+                thinking: true,
+                thinkingAt: 1,
+                presence: 'online',
+                updatedAt: 100_000,
+            }),
+        );
+
+        await vi.advanceTimersByTimeAsync(16);
 
         expect(storage.getState().sessionListRenderables.s_cached_activity_heartbeat).toEqual(
             expect.objectContaining({
@@ -2345,7 +2556,8 @@ describe('socket update handling: plaintext update-session', () => {
         expect(applySessions).not.toHaveBeenCalled();
     });
 
-    it('records activity flush telemetry for hydrated and cache-only renderable updates', () => {
+    it('records activity flush telemetry for hydrated and cache-only renderable updates', async () => {
+        vi.useFakeTimers();
         syncPerformanceTelemetry.configure({
             enabled: true,
             slowThresholdMs: 1_000_000,
@@ -2410,9 +2622,12 @@ describe('socket update handling: plaintext update-session', () => {
             renderableTimestampOnlyPatches: 1,
             renderableStateChangePatches: 0,
         }));
+
+        await vi.advanceTimersByTimeAsync(16);
     });
 
-    it('updates cache-only renderables for activity updates without waiting for hydration', () => {
+    it('updates cache-only renderables for activity updates without waiting for hydration', async () => {
+        vi.useFakeTimers();
         storage.getState().replaceSessionListRenderables([
             {
                 id: 's_cached_activity',
@@ -2451,11 +2666,131 @@ describe('socket update handling: plaintext update-session', () => {
 
         expect(storage.getState().sessionListRenderables['s_cached_activity']).toEqual(
             expect.objectContaining({
+                active: true,
+                activeAt: 1,
+                thinking: true,
+                thinkingAt: 1,
+                presence: 'online',
+            }),
+        );
+        expect(applySessions).not.toHaveBeenCalled();
+
+        await vi.advanceTimersByTimeAsync(16);
+
+        expect(storage.getState().sessionListRenderables['s_cached_activity']).toEqual(
+            expect.objectContaining({
                 active: false,
                 activeAt: 20,
                 thinking: false,
                 thinkingAt: 20,
                 presence: 20,
+            }),
+        );
+        expect(applySessions).not.toHaveBeenCalled();
+    });
+
+    it('coalesces cache-only activity renderable patches across sessions before touching the list store', async () => {
+        vi.useFakeTimers();
+        storage.getState().replaceSessionListRenderables([
+            {
+                id: 's_cached_activity_coalesced_one',
+                seq: 1,
+                createdAt: 1,
+                updatedAt: 1,
+                active: false,
+                activeAt: 1,
+                archivedAt: null,
+                metadataVersion: 1,
+                agentStateVersion: 0,
+                metadata: { path: '/tmp/one', host: 'localhost' },
+                thinking: false,
+                thinkingAt: 0,
+                presence: 1,
+            },
+            {
+                id: 's_cached_activity_coalesced_two',
+                seq: 1,
+                createdAt: 1,
+                updatedAt: 1,
+                active: false,
+                activeAt: 1,
+                archivedAt: null,
+                metadataVersion: 1,
+                agentStateVersion: 0,
+                metadata: { path: '/tmp/two', host: 'localhost' },
+                thinking: false,
+                thinkingAt: 0,
+                presence: 1,
+            },
+        ]);
+
+        const applySessions = vi.fn();
+        flushActivityUpdates({
+            updates: new Map([
+                [
+                    's_cached_activity_coalesced_one',
+                    {
+                        type: 'activity',
+                        id: 's_cached_activity_coalesced_one',
+                        sessionId: 's_cached_activity_coalesced_one',
+                        active: true,
+                        activeAt: 20,
+                        thinking: true,
+                    },
+                ],
+                [
+                    's_cached_activity_coalesced_two',
+                    {
+                        type: 'activity',
+                        id: 's_cached_activity_coalesced_two',
+                        sessionId: 's_cached_activity_coalesced_two',
+                        active: true,
+                        activeAt: 21,
+                        thinking: true,
+                    },
+                ],
+            ]),
+            applySessions,
+        });
+
+        expect(storage.getState().sessionListRenderables['s_cached_activity_coalesced_one']).toEqual(
+            expect.objectContaining({
+                active: false,
+                activeAt: 1,
+                thinking: false,
+                thinkingAt: 0,
+                presence: 1,
+            }),
+        );
+        expect(storage.getState().sessionListRenderables['s_cached_activity_coalesced_two']).toEqual(
+            expect.objectContaining({
+                active: false,
+                activeAt: 1,
+                thinking: false,
+                thinkingAt: 0,
+                presence: 1,
+            }),
+        );
+        expect(applySessions).not.toHaveBeenCalled();
+
+        await vi.advanceTimersByTimeAsync(16);
+
+        expect(storage.getState().sessionListRenderables['s_cached_activity_coalesced_one']).toEqual(
+            expect.objectContaining({
+                active: true,
+                activeAt: 20,
+                thinking: true,
+                thinkingAt: 20,
+                presence: 'online',
+            }),
+        );
+        expect(storage.getState().sessionListRenderables['s_cached_activity_coalesced_two']).toEqual(
+            expect.objectContaining({
+                active: true,
+                activeAt: 21,
+                thinking: true,
+                thinkingAt: 21,
+                presence: 'online',
             }),
         );
         expect(applySessions).not.toHaveBeenCalled();

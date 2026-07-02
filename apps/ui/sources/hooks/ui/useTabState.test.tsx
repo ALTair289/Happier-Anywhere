@@ -1,4 +1,5 @@
 import React from 'react';
+import { act } from 'react-test-renderer';
 import { describe, expect, it, vi, afterEach } from 'vitest';
 
 import { renderScreen } from '@/dev/testkit';
@@ -115,5 +116,41 @@ describe('useTabState', () => {
 
     expect(seen.at(-1)).toBe('sessions');
     expect(mocks.kvSet).toHaveBeenCalledWith({ token: 't' }, 'ui:active-tab', 'sessions', -1);
+  });
+
+  it('retries the requested tab after a recoverable version mismatch', async () => {
+    mocks.useAuth.mockReturnValue({ credentials: { token: 't' } });
+    mocks.kvBulkGet
+      .mockResolvedValueOnce({ values: [] })
+      .mockResolvedValueOnce({ values: [{ key: 'ui:active-tab', value: 'sessions', version: 3 }] });
+    mocks.kvSet
+      .mockRejectedValueOnce(new Error('Failed to set key "ui:active-tab": version-mismatch (current version: 3)'))
+      .mockResolvedValueOnce(4);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const { useTabState } = await import('./useTabState');
+    let setActiveTab: ((tab: 'inbox') => Promise<void>) | null = null;
+    const seen: string[] = [];
+
+    function Test() {
+      const tabState = useTabState();
+      setActiveTab = tabState.setActiveTab as (tab: 'inbox') => Promise<void>;
+      React.useEffect(() => {
+        seen.push(tabState.activeTab);
+      }, [tabState.activeTab]);
+      return null;
+    }
+
+    await renderScreen(<Test />);
+
+    await act(async () => {
+      await setActiveTab?.('inbox');
+    });
+
+    expect(seen.at(-1)).toBe('inbox');
+    expect(mocks.kvSet).toHaveBeenNthCalledWith(1, { token: 't' }, 'ui:active-tab', 'inbox', -1);
+    expect(mocks.kvSet).toHaveBeenNthCalledWith(2, { token: 't' }, 'ui:active-tab', 'inbox', 3);
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
   });
 });

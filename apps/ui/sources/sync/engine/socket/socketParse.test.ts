@@ -155,6 +155,62 @@ describe('socketParse', () => {
         expect((res as any)?.message?.messageRole).toBe('event');
     });
 
+    it('parses transcript stream segment snapshots carrying a live-stream tick', () => {
+        const res = parseEphemeralUpdate({
+            type: 'transcript-stream-segment',
+            sessionId: 's1',
+            message: {
+                localId: 'segment-1',
+                messageRole: 'agent',
+                tick: 25,
+                content: { t: 'encrypted', c: 'cipher' },
+                createdAt: 1_000,
+                updatedAt: 1_010,
+            },
+        });
+
+        expect(res?.type).toBe('transcript-stream-segment');
+        expect((res as any)?.message?.tick).toBe(25);
+    });
+
+    it('parses transcript stream segment delta ephemerals', () => {
+        const res = parseEphemeralUpdate({
+            type: 'transcript-stream-segment-delta',
+            sessionId: 's1',
+            message: {
+                localId: 'segment-1',
+                messageRole: 'agent',
+                tick: 2,
+                baseLength: 5,
+                content: { t: 'encrypted', c: 'cipher-of-delta' },
+                createdAt: 1_000,
+                updatedAt: 1_040,
+            },
+        });
+
+        expect(res).not.toBeNull();
+        expect(res?.type).toBe('transcript-stream-segment-delta');
+        expect((res as any)?.message?.tick).toBe(2);
+        expect((res as any)?.message?.baseLength).toBe(5);
+    });
+
+    it('rejects transcript stream segment deltas without chaining fields', () => {
+        const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        const res = parseEphemeralUpdate({
+            type: 'transcript-stream-segment-delta',
+            sessionId: 's1',
+            message: {
+                localId: 'segment-1',
+                content: { t: 'encrypted', c: 'cipher' },
+                createdAt: 1_000,
+                updatedAt: 1_040,
+            },
+        });
+
+        expect(res).toBeNull();
+        consoleErrorSpy.mockRestore();
+    });
+
     it('parses direct-session transcript delta ephemerals', () => {
         const res = parseEphemeralUpdate({
             type: 'direct-session-transcript-delta',

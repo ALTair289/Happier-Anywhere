@@ -110,11 +110,13 @@ describe('machineRpcWithServerScope (retry)', () => {
 
     const { machineRpcWithServerScope } = await import('./serverScopedMachineRpc');
 
+    const authorization = { kind: 'session.write', sessionId: 'sess_1' } as const;
     const rpcPromise = machineRpcWithServerScope({
       machineId: 'machine-1',
       method: 'method-test',
       payload: { value: 1 },
       preferScoped: true,
+      authorization,
     });
     const assertion = expect(rpcPromise).resolves.toEqual({ ok: true });
 
@@ -127,6 +129,13 @@ describe('machineRpcWithServerScope (retry)', () => {
     expect(emitWithAckSpy).toHaveBeenNthCalledWith(1, SOCKET_RPC_EVENTS.CALL, {
       method: 'machine-1:method-test',
       params: 'encrypted-payload',
+      authorization,
+      timeoutMs: 30000,
+    });
+    expect(emitWithAckSpy).toHaveBeenNthCalledWith(2, SOCKET_RPC_EVENTS.CALL, {
+      method: 'machine-1:method-test',
+      params: 'encrypted-payload',
+      authorization,
       timeoutMs: 30000,
     });
   });

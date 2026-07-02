@@ -134,6 +134,7 @@ describe('followUpSpawnedSessionWithServerScope', () => {
                 profileId: 'profile-work',
                 localId: 'first-turn-local',
                 bypassPendingQueueReason: 'spawned_session_follow_up',
+                runtimeRpcDeliveryMode: 'required',
             },
         );
     });
@@ -414,7 +415,11 @@ describe('followUpSpawnedSessionWithServerScope', () => {
             'hello from active server',
             undefined,
             undefined,
-            { localId: 'first-turn-local', bypassPendingQueueReason: 'spawned_session_follow_up' },
+            {
+                localId: 'first-turn-local',
+                bypassPendingQueueReason: 'spawned_session_follow_up',
+                runtimeRpcDeliveryMode: 'required',
+            },
         );
         expect(ensureSessionVisibleForMessageRoute).toHaveBeenCalledWith(
             'sess_target',
@@ -524,7 +529,10 @@ describe('followUpSpawnedSessionWithServerScope', () => {
         let storedSession: Session | null = null;
         const { sync } = await import('@/sync/sync');
         const refreshSessions = vi.spyOn(sync, 'refreshSessions').mockImplementation(async () => {});
-        const sendMessage = vi.spyOn(sync, 'sendMessage').mockImplementation(async () => {});
+        const sendMessage = vi.spyOn(sync, 'sendMessage').mockImplementation(async () => ({
+            localId: 'follow-up-local',
+            persistence: 'provider_direct',
+        }));
         const ensureSessionVisibleForMessageRoute = vi.fn(async (_sessionId: string, _options?: Readonly<{ forceRefresh?: boolean }>) => {});
 
         const { createFollowUpSpawnedSessionWithServerScope } = await import('./followUpSpawnedSession');
@@ -578,7 +586,11 @@ describe('followUpSpawnedSessionWithServerScope', () => {
                     kind: 'attachments.v1',
                 },
             },
-            { profileId: 'profile-work', bypassPendingQueueReason: 'spawned_session_follow_up' },
+            {
+                profileId: 'profile-work',
+                bypassPendingQueueReason: 'spawned_session_follow_up',
+                runtimeRpcDeliveryMode: 'required',
+            },
         );
     });
 });

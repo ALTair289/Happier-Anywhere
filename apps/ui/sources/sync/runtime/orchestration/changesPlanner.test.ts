@@ -97,6 +97,16 @@ describe('planSyncActionsFromChanges', () => {
             sessionIds: ['s1'],
             folderIds: ['folder-a'],
         });
+        expect(planned.sessionOrganization).toEqual({
+            mode: 'snapshot',
+            assignmentSessionIds: ['s1'],
+            folderIds: ['folder-a'],
+            tagIds: [],
+            orderScopes: [],
+            includeFolders: false,
+            includeTags: false,
+            includeLabels: false,
+        });
     });
 
     it('plans bulk session folder assignment refresh from account hints', () => {
@@ -114,6 +124,112 @@ describe('planSyncActionsFromChanges', () => {
         expect(planned.sessionFolderAssignments).toEqual({
             mode: 'folders',
             folderIds: ['folder-a', 'folder-b'],
+        });
+        expect(planned.sessionOrganization).toEqual({
+            mode: 'snapshot',
+            assignmentSessionIds: [],
+            folderIds: ['folder-a', 'folder-b'],
+            tagIds: [],
+            orderScopes: [],
+            includeFolders: false,
+            includeTags: false,
+            includeLabels: false,
+        });
+    });
+
+    it('plans scoped session organization refresh from organization hints', () => {
+        const planned = planSyncActionsFromChanges([
+            buildChange({
+                cursor: 1,
+                kind: 'account',
+                entityId: 'session-organization',
+                hint: {
+                    sessionOrganization: true,
+                    scope: 'order',
+                    sessionIds: ['s2', 's1', 's1'],
+                    folderIds: ['folder-a'],
+                    tagIds: ['tag-a'],
+                    orderScopes: [{ scopeKind: 'group', scopeKey: 'server:server-a:active:project:repo' }],
+                },
+            }),
+        ]);
+
+        expect(planned.invalidate.settings).toBe(false);
+        expect(planned.sessionOrganization).toEqual({
+            mode: 'snapshot',
+            assignmentSessionIds: ['s1', 's2'],
+            folderIds: ['folder-a'],
+            tagIds: ['tag-a'],
+            orderScopes: [{ scopeKind: 'group', scopeKey: 'server:server-a:active:project:repo' }],
+            includeFolders: false,
+            includeTags: false,
+            includeLabels: false,
+        });
+    });
+
+    it('plans actual server session organization scope hints as scoped snapshot refreshes', () => {
+        const planned = planSyncActionsFromChanges([
+            buildChange({
+                cursor: 1,
+                kind: 'account',
+                entityId: 'session-organization',
+                hint: { sessionOrganization: true, scope: 'pins', sessionIds: ['s-pin'] },
+            }),
+            buildChange({
+                cursor: 2,
+                kind: 'account',
+                entityId: 'session-organization',
+                hint: { sessionOrganization: true, scope: 'folders', folderIds: ['folder-a'] },
+            }),
+            buildChange({
+                cursor: 3,
+                kind: 'account',
+                entityId: 'session-organization',
+                hint: { sessionOrganization: true, scope: 'tags', tagIds: ['tag-a'] },
+            }),
+            buildChange({
+                cursor: 4,
+                kind: 'account',
+                entityId: 'session-organization',
+                hint: { sessionOrganization: true, scope: 'labels', scopeKeys: ['workspace-a'] },
+            }),
+            buildChange({
+                cursor: 5,
+                kind: 'account',
+                entityId: 'session-organization',
+                hint: { sessionOrganization: true, scope: 'order', scopeKeys: ['root'] },
+            }),
+        ]);
+
+        expect(planned.invalidate.settings).toBe(false);
+        expect(planned.sessionFolderAssignments).toEqual({ mode: 'none' });
+        expect(planned.sessionOrganization).toEqual({
+            mode: 'snapshot',
+            assignmentSessionIds: ['s-pin'],
+            folderIds: ['folder-a'],
+            tagIds: ['tag-a'],
+            orderScopes: [],
+            includeFolders: true,
+            includeTags: true,
+            includeLabels: true,
+        });
+    });
+
+    it('plans a session-list refresh for pin organization hints without message catch-up', () => {
+        const planned = planSyncActionsFromChanges([
+            buildChange({
+                cursor: 1,
+                kind: 'account',
+                entityId: 'session-organization',
+                hint: { sessionOrganization: true, scope: 'pins', sessionIds: ['s-pin'] },
+            }),
+        ]);
+
+        expect(planned.invalidate.sessions).toBe(true);
+        expect(planned.sessionIdsToCatchUp).toEqual([]);
+        expect(planned.sessionOrganization).toMatchObject({
+            mode: 'snapshot',
+            assignmentSessionIds: ['s-pin'],
         });
     });
 
@@ -144,6 +260,36 @@ describe('planSyncActionsFromChanges', () => {
 
         expect(loaded.decision).toBe('critical');
         expect(unloaded.decision).toBe('intentionally-skipped-by-explicit-policy');
+    });
+
+    it('classifies all session organization hints as critical organization materialization', () => {
+        for (const change of [
+            buildChange({
+                cursor: 1,
+                kind: 'account',
+                entityId: 'session-organization',
+                hint: { sessionOrganization: true, scope: 'pins', sessionIds: ['s1'] },
+            }),
+            buildChange({
+                cursor: 2,
+                kind: 'session',
+                entityId: 's1',
+                hint: { sessionOrganization: true, scope: 'tagAssignments', sessionIds: ['s1'], tagIds: ['tag-a'] },
+            }),
+            buildChange({
+                cursor: 3,
+                kind: 'account',
+                entityId: 'session-folder-assignments',
+                hint: { sessionFolderAssignments: true, sessionOrganization: true, scope: 'folderAssignments', folderIds: ['folder-a'] },
+            }),
+        ]) {
+            expect(classifyChangeForCheckpoint(change, { isSessionMessagesLoaded: () => false })).toMatchObject({
+                decision: 'critical',
+                plannerOwner: 'session-organization',
+                snapshotDomain: 'session-organization',
+                materializationProof: 'session-organization',
+            });
+        }
     });
 
     it('plans automation invalidation when automation change kind is present', () => {

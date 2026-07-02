@@ -47,7 +47,9 @@ export function buildDesktopTrayState(params: Readonly<{
     const showCounts = params.health.machineCount > 0;
     const status = params.health.kind === 'machine_not_ready'
         ? 'attention_required'
-        : params.health.kind;
+        : params.health.kind === 'server_restarting'
+            ? 'connecting'
+            : params.health.kind;
 
     return {
         status,

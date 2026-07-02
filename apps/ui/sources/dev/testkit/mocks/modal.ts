@@ -65,3 +65,7 @@ export function createModalModuleMock(options: ModalModuleMockOptions = {}) {
         },
     };
 }
+
+export function installModalModuleMock(options: ModalModuleMockOptions = {}) {
+    return () => createModalModuleMock(options).module;
+}

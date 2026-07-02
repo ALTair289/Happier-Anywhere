@@ -121,7 +121,9 @@ export async function machineRpcWithServerScope<R, A>(params: ServerScopedMachin
                         context.machineId,
                         params.method,
                         params.payload,
-                        { timeoutMs: context.timeoutMs },
+                        params.authorization
+                            ? { timeoutMs: context.timeoutMs, authorization: params.authorization }
+                            : { timeoutMs: context.timeoutMs },
                     ),
                     {
                         scope: 'active',
@@ -177,6 +179,7 @@ export async function machineRpcWithServerScope<R, A>(params: ServerScopedMachin
                             resolveScopedMachineRpcEncryptRawAttributionEvent(params.method),
                             async () => await machineEncryption.encryptRaw(params.payload),
                         ),
+                        ...(params.authorization ? { authorization: params.authorization } : {}),
                         timeoutMs: context.timeoutMs,
                     }) as Promise<SocketRpcResult>,
                 {

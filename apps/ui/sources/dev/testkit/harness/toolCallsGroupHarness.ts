@@ -1,6 +1,7 @@
 import * as React from 'react';
 
 import type { ToolCallMessage } from '@/sync/domains/messages/messageTypes';
+import type { PersistedSessionMessagePinV1 } from '@/sync/domains/messages/pins/sessionMessagePins';
 import type { Metadata } from '@/sync/domains/state/storageTypes';
 import type { TranscriptInteraction } from '@/utils/sessions/deriveTranscriptInteraction';
 
@@ -20,6 +21,8 @@ export type ToolCallsGroupHarnessOptions = Readonly<{
     forcePermissionPromptsInTranscript?: boolean;
     expanded?: boolean;
     setExpanded?: (expanded: boolean) => void;
+    messagePins?: readonly PersistedSessionMessagePinV1[];
+    onToggleToolPin?: (pin: PersistedSessionMessagePinV1) => void;
     interaction?: TranscriptInteraction;
 }>;
 
@@ -38,6 +41,8 @@ export async function renderToolCallsGroupView(
             forcePermissionPromptsInTranscript: options.forcePermissionPromptsInTranscript,
             expanded: options.expanded ?? false,
             setExpanded: options.setExpanded ?? (() => {}),
+            messagePins: options.messagePins,
+            onToggleToolPin: options.onToggleToolPin,
             interaction: options.interaction ?? defaultTranscriptInteraction,
         }),
     );
@@ -60,6 +65,8 @@ export async function renderStatefulToolCallsGroupView(
             forcePermissionPromptsInTranscript: options.forcePermissionPromptsInTranscript,
             expanded,
             setExpanded,
+            messagePins: options.messagePins,
+            onToggleToolPin: options.onToggleToolPin,
             interaction: options.interaction ?? defaultTranscriptInteraction,
         });
     }

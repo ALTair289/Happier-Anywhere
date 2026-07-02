@@ -34,6 +34,11 @@ describe('loadSyncTuning', () => {
             tuning.sessionListBackgroundHydrationApplyBatchSize,
         );
         expect(tuning.sessionRealtimeProjectionMode).toBe('enabled');
+        expect(tuning.sessionTranscriptRetentionRecentKeepCount).toBe(3);
+        expect(tuning.sessionTranscriptRetentionGraceMs).toBeGreaterThanOrEqual(2 * 60_000);
+        expect(tuning.sessionTranscriptRetentionGraceMs).toBeLessThanOrEqual(5 * 60_000);
+        expect(tuning.sessionTranscriptRetentionSweepDebounceMs).toBeGreaterThan(0);
+        expect(tuning.sessionTranscriptRetentionSweepDebounceMs).toBeLessThanOrEqual(5_000);
         expect(tuning.sidechainDemandHydrationConcurrencyLimit).toBeGreaterThan(0);
         expect(tuning.sidechainDemandHydrationConcurrencyLimit).toBeLessThanOrEqual(4);
         expect(tuning.transcriptWebInitialPinStabilizeMs).toBe(1500);
@@ -58,6 +63,7 @@ describe('loadSyncTuning', () => {
         expect(tuning.nativeCryptoWorkerMode).toBe('auto');
         expect(tuning.activityUpdateDebounceMs).toBeGreaterThanOrEqual(1_000);
         expect(tuning.activityUpdateDebounceMs).toBeLessThanOrEqual(15_000);
+        expect(tuning.transcriptLegendListSpikeSurface).toBe('off');
     });
 
     it('applies env JSON overrides', () => {
@@ -69,6 +75,7 @@ describe('loadSyncTuning', () => {
                     transcriptFlashListEstimatedItemSize: 222,
                     transcriptWebHotTailItemCount: 9,
                     transcriptNativeHotTailItemCount: 3,
+                    transcriptLegendListSpikeSurface: 'readOnly',
                     transcriptMaxTurnEntriesPerListItem: 6,
                     transcriptWebInitialPinStabilizeMs: 3000,
                     transcriptWebInitialPinRetryMilestonesMs: [25, 75, 125],
@@ -143,6 +150,7 @@ describe('loadSyncTuning', () => {
         expect(tuning.transcriptFlashListEstimatedItemSize).toBe(222);
         expect(tuning.transcriptWebHotTailItemCount).toBe(9);
         expect(tuning.transcriptNativeHotTailItemCount).toBe(3);
+        expect(tuning.transcriptLegendListSpikeSurface).toBe('readOnly');
         expect(tuning.transcriptMaxTurnEntriesPerListItem).toBe(6);
         expect(tuning.transcriptWebInitialPinStabilizeMs).toBe(3000);
         expect(tuning.transcriptWebInitialPinRetryMilestonesMs).toEqual([25, 75, 125]);
@@ -248,6 +256,7 @@ describe('loadSyncTuning', () => {
                 EXPO_PUBLIC_HAPPIER_SYNC_TUNING_JSON: JSON.stringify({
                     messageLargeGapSeq: -1,
                     transcriptWebHotTailItemCount: 0,
+                    transcriptLegendListSpikeSurface: 'legend',
                     transcriptMaxTurnEntriesPerListItem: -1,
                     transcriptWebInitialPinStabilizeMs: -1,
                     transcriptWebInitialPinRetryMilestonesMs: [25, -1, 125],
@@ -316,6 +325,7 @@ describe('loadSyncTuning', () => {
 
         expect(tuning.messageLargeGapSeq).toBeGreaterThan(0);
         expect(tuning.transcriptWebHotTailItemCount).toBeGreaterThan(0);
+        expect(tuning.transcriptLegendListSpikeSurface).toBe('off');
         expect(tuning.transcriptMaxTurnEntriesPerListItem).toBeGreaterThan(0);
         expect(tuning.transcriptWebInitialPinStabilizeMs).toBe(1500);
         expect(tuning.transcriptWebInitialPinRetryMilestonesMs).toEqual([16, 50, 100, 200, 400, 800]);
@@ -395,5 +405,27 @@ describe('loadSyncTuning', () => {
         });
 
         expect(tuning.transcriptFlashListDrawDistance).toBe(0);
+    });
+
+    it('accepts only known transcript Legend spike surfaces', () => {
+        for (const surface of ['off', 'readOnly', 'sidechain', 'main'] as const) {
+            expect(loadSyncTuning({
+                env: {
+                    EXPO_PUBLIC_HAPPIER_SYNC_TUNING_JSON: JSON.stringify({
+                        transcriptLegendListSpikeSurface: surface,
+                    }),
+                },
+            }).transcriptLegendListSpikeSurface).toBe(surface);
+        }
+
+        for (const value of [true, 'legend', 'mainChat', '', 'read-only', null, 1]) {
+            expect(loadSyncTuning({
+                env: {
+                    EXPO_PUBLIC_HAPPIER_SYNC_TUNING_JSON: JSON.stringify({
+                        transcriptLegendListSpikeSurface: value,
+                    }),
+                },
+            }).transcriptLegendListSpikeSurface).toBe('off');
+        }
     });
 });

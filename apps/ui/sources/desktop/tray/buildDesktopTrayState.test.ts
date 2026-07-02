@@ -74,6 +74,23 @@ describe('buildDesktopTrayState', () => {
         });
     });
 
+    it('maps planned server restart health to a connecting tray state', () => {
+        expect(buildDesktopTrayState({
+            health: {
+                kind: 'server_restarting',
+                machineCount: 2,
+                onlineCount: 2,
+                statusLabelKey: 'status.connecting',
+                machineLabelKey: 'status.online',
+            },
+            t: translate,
+        })).toEqual({
+            status: 'connecting',
+            label: 'status.connecting',
+            detail: 'status.online · 2/2',
+        });
+    });
+
     it('maps machine_not_ready health to an attention-required tray state (Rust tray enum does not accept machine_not_ready)', () => {
         expect(buildDesktopTrayState({
             health: {

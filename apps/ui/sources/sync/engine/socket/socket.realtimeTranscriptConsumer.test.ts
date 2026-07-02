@@ -35,6 +35,10 @@ import { clearActiveViewingSessionsForServerScopeReset } from '@/sync/domains/se
 import { markSessionVisible } from '@/sync/domains/session/activeViewingSession';
 import { storage } from '@/sync/domains/state/storage';
 import { projectManager } from '@/sync/runtime/orchestration/projectManager';
+import {
+    clearSessionRealtimeTranscriptSuppression,
+    enableSessionRealtimeTranscriptSuppression,
+} from '@/sync/runtime/sessionRealtimeTranscriptSuppression';
 import { registerSessionRealtimeTranscriptConsumer } from '@/sync/runtime/sessionRealtimeTranscriptConsumers';
 import { handleUpdateContainer } from './socket';
 
@@ -144,6 +148,7 @@ describe('socket realtime explicit transcript consumers', () => {
         storage.setState(initialStorageState, true);
         projectManager.clear();
         clearActiveViewingSessionsForServerScopeReset();
+        clearSessionRealtimeTranscriptSuppression(undefined, { isDevOrTest: true });
     });
 
     afterEach(() => {
@@ -152,6 +157,7 @@ describe('socket realtime explicit transcript consumers', () => {
         storage.setState(initialStorageState, true);
         projectManager.clear();
         clearActiveViewingSessionsForServerScopeReset();
+        clearSessionRealtimeTranscriptSuppression(undefined, { isDevOrTest: true });
     });
 
     it('defers transcript for a hidden session with no explicit transcript consumer', async () => {
@@ -274,6 +280,65 @@ describe('socket realtime explicit transcript consumers', () => {
 
         expect(applyMessages).not.toHaveBeenCalled();
         expect(markSessionTranscriptDeferred).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps visible unsuppressed new-message updates on the materialized transcript route', async () => {
+        const visibleSessionId = 'visible-unsuppressed-session';
+        storage.getState().applySessions([{
+            ...buildSession(visibleSessionId),
+            serverId: 'profile-a',
+        }]);
+        markSessionVisible(visibleSessionId, 'profile-a');
+
+        const applyMessages = vi.fn();
+        const markSessionTranscriptDeferred = vi.fn();
+
+        await handleUpdateContainer({
+            ...buildBaseParams({ applyMessages, markSessionTranscriptDeferred }),
+            sourceServerId: 'identity-a',
+            updateData: buildPlainNewMessageUpdate(visibleSessionId),
+        });
+
+        expect(markSessionTranscriptDeferred).not.toHaveBeenCalled();
+        expect(applyMessages).toHaveBeenCalledTimes(1);
+    });
+
+    it('routes a visible suppressed new-message through projection-only deferred transcript state', async () => {
+        const visibleSessionId = 'visible-suppressed-session';
+        storage.getState().applySessions([{
+            ...buildSession(visibleSessionId),
+            serverId: 'profile-a',
+            lastViewedSessionSeq: 1,
+        }]);
+        markSessionVisible(visibleSessionId, 'profile-a');
+        enableSessionRealtimeTranscriptSuppression({
+            sessionId: visibleSessionId,
+            sourceServerId: 'profile-a',
+        }, { isDevOrTest: true });
+
+        const applyMessages = vi.fn();
+        const markSessionKnownRemoteSeq = vi.fn();
+        const markSessionMaterializedMaxSeq = vi.fn();
+        const markSessionTranscriptDeferred = vi.fn();
+
+        await handleUpdateContainer({
+            ...buildBaseParams({
+                applyMessages,
+                markSessionKnownRemoteSeq,
+                markSessionMaterializedMaxSeq,
+                markSessionTranscriptDeferred,
+            }),
+            sourceServerId: 'identity-a',
+            updateData: buildPlainNewMessageUpdate(visibleSessionId),
+        });
+
+        expect(applyMessages).not.toHaveBeenCalled();
+        expect(markSessionMaterializedMaxSeq).not.toHaveBeenCalled();
+        expect(markSessionKnownRemoteSeq).toHaveBeenCalledWith(visibleSessionId, 2);
+        expect(markSessionTranscriptDeferred).toHaveBeenCalledWith(visibleSessionId, expect.objectContaining({
+            updateType: 'new-message',
+            seq: 2,
+        }));
     });
 
     it('stops materializing once the explicit transcript consumer unmounts', async () => {

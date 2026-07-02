@@ -1,5 +1,6 @@
 import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { act } from 'react-test-renderer';
 import { createUseSettingMock, flushHookEffects, renderScreen } from '@/dev/testkit';
 import type { DaemonExecutionRunEntry } from '@happier-dev/protocol';
 import { installMachineDetailsCommonModuleMocks } from './machineDetailsTestHelpers';
@@ -13,6 +14,7 @@ const {
     machineExecutionRunsListSpy,
     modalSpies,
     routerPushSpy,
+    runRefreshDiagnosticActionSpy,
     stopRunSpy,
     stopSessionSpy,
 } = vi.hoisted(() => ({
@@ -24,6 +26,7 @@ const {
         show: vi.fn(),
     },
     routerPushSpy: vi.fn(),
+    runRefreshDiagnosticActionSpy: vi.fn(async (_context: unknown, action: () => Promise<unknown>) => action()),
     stopRunSpy: vi.fn<(..._args: any[]) => Promise<any>>(async (..._args: any[]) => ({ ok: true })),
     stopSessionSpy: vi.fn<(..._args: any[]) => Promise<any>>(async (..._args: any[]) => ({ ok: true })),
 }));
@@ -151,6 +154,10 @@ vi.mock('@/utils/errors/daemonUnavailableAlert', () => ({
     tryShowDaemonUnavailableAlertForRpcError: () => false,
     tryShowDaemonUnavailableAlertForRpcFailure: () => false,
 }));
+vi.mock('@/utils/system/userInteractionDiagnostics', () => ({
+    runRefreshDiagnosticAction: (context: unknown, action: () => Promise<unknown>) =>
+        runRefreshDiagnosticActionSpy(context, action),
+}));
 
 vi.mock('@/utils/sessions/machineUtils', () => ({ isMachineOnline: () => true }));
 vi.mock('@/utils/sessions/sessionUtils', () => ({ formatPathRelativeToHome: () => '', getSessionName: () => '', getSessionSubtitle: () => '' }));
@@ -205,6 +212,7 @@ describe('MachineDetailScreen (execution runs section)', () => {
 
     beforeEach(() => {
         routerPushSpy.mockClear();
+        runRefreshDiagnosticActionSpy.mockClear();
         stopRunSpy.mockClear();
         stopSessionSpy.mockClear();
         modalSpies.confirm.mockClear();
@@ -219,6 +227,25 @@ describe('MachineDetailScreen (execution runs section)', () => {
 
         expect(machineExecutionRunsListSpy).toHaveBeenCalledWith('machine-1', { serverId: 'server-a' });
         expect(screen.findByTestId('item-group:runs.title')).toBeTruthy();
+    });
+
+    it('wraps pull-to-refresh in refresh diagnostics', async () => {
+        const { default: MachineDetailScreen } = await import('@/app/(app)/machine/[id]');
+
+        const screen = await renderScreen(React.createElement(MachineDetailScreen));
+        await flushHookEffects();
+        const scrollView = screen.tree.root.findAll((node) => Boolean(node.props.refreshControl))[0];
+        expect(scrollView).toBeTruthy();
+        const refreshControl = scrollView.props.refreshControl;
+
+        await act(async () => {
+            await refreshControl.props.onRefresh();
+        });
+
+        expect(runRefreshDiagnosticActionSpy).toHaveBeenCalledWith({
+            action: 'pull_to_refresh',
+            screen: 'machine_detail',
+        }, expect.any(Function));
     });
 
     it('renders an execution runs group when enabled', async () => {

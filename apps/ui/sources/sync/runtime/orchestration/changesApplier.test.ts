@@ -31,6 +31,7 @@ function buildPlanned(partial: {
         },
         kv: partial.kv ?? { type: 'none' },
         sessionFolderAssignments: { mode: 'none' },
+        sessionOrganization: { mode: 'none' },
     };
 }
 
@@ -130,7 +131,7 @@ describe('changesApplier', () => {
         });
     });
 
-    it('does not advance assignment-only changes when assignment refresh fails', async () => {
+    it('does not advance assignment-only changes when organization refresh fails', async () => {
         const result = await applyPlannedChangeActions({
             planned: {
                 ...buildPlanned({
@@ -148,6 +149,16 @@ describe('changesApplier', () => {
                     sessionIds: ['s1'],
                     folderIds: ['folder-a'],
                 },
+                sessionOrganization: {
+                    mode: 'snapshot',
+                    assignmentSessionIds: ['s1'],
+                    folderIds: ['folder-a'],
+                    tagIds: [],
+                    orderScopes: [],
+                    includeFolders: false,
+                    includeTags: false,
+                    includeLabels: false,
+                },
             } as PlannedChangeActions,
             credentials,
             isSessionMessagesLoaded: () => true,
@@ -156,7 +167,137 @@ describe('changesApplier', () => {
             invalidateScmStatusForSession: () => {},
             applyTodoSocketUpdates: async () => {},
             kvBulkGet: async () => ({ values: [] }),
-            refreshSessionFolderAssignments: async () => {
+            refreshSessionFolderAssignments: async () => {},
+            refreshSessionOrganization: async () => {
+                throw new Error('refresh failed');
+            },
+        } as Parameters<typeof applyPlannedChangeActions>[0]);
+
+        expect(result).toMatchObject({
+            status: 'partial',
+            safeAdvanceCursor: null,
+            blockedCursor: '1',
+            blockedReason: 'partial-materialization',
+        });
+    });
+
+    it('refreshes session organization before advancing organization changes', async () => {
+        const refreshSessionOrganization = vi.fn(async () => {});
+        const plan = {
+            mode: 'snapshot' as const,
+            assignmentSessionIds: ['s1'],
+            folderIds: ['folder-a'],
+            tagIds: [],
+            orderScopes: [],
+            includeFolders: false,
+            includeTags: false,
+            includeLabels: false,
+        };
+
+        const result = await applyPlannedChangeActions({
+            planned: {
+                ...buildPlanned({
+                    changes: [
+                        buildChange({
+                            cursor: 1,
+                            kind: 'session',
+                            entityId: 's1',
+                            hint: { sessionFolderAssignment: true, folderId: 'folder-a' },
+                        }),
+                    ],
+                }),
+                sessionOrganization: plan,
+            } as PlannedChangeActions,
+            credentials,
+            isSessionMessagesLoaded: () => true,
+            invalidate: {},
+            invalidateMessagesForSession: async () => {},
+            invalidateScmStatusForSession: () => {},
+            applyTodoSocketUpdates: async () => {},
+            kvBulkGet: async () => ({ values: [] }),
+            refreshSessionOrganization,
+        } as Parameters<typeof applyPlannedChangeActions>[0]);
+
+        expect(result).toMatchObject({ status: 'complete', safeAdvanceCursor: '1' });
+        expect(refreshSessionOrganization).toHaveBeenCalledWith(plan);
+    });
+
+    it('does not advance organization changes when organization refresh fails', async () => {
+        const result = await applyPlannedChangeActions({
+            planned: {
+                ...buildPlanned({
+                    changes: [
+                        buildChange({
+                            cursor: 1,
+                            kind: 'session',
+                            entityId: 's1',
+                            hint: { sessionFolderAssignment: true, folderId: 'folder-a' },
+                        }),
+                    ],
+                }),
+                sessionOrganization: {
+                    mode: 'snapshot',
+                    assignmentSessionIds: ['s1'],
+                    folderIds: ['folder-a'],
+                    tagIds: [],
+                    orderScopes: [],
+                    includeFolders: false,
+                    includeTags: false,
+                    includeLabels: false,
+                },
+            } as PlannedChangeActions,
+            credentials,
+            isSessionMessagesLoaded: () => true,
+            invalidate: {},
+            invalidateMessagesForSession: async () => {},
+            invalidateScmStatusForSession: () => {},
+            applyTodoSocketUpdates: async () => {},
+            kvBulkGet: async () => ({ values: [] }),
+            refreshSessionOrganization: async () => {
+                throw new Error('refresh failed');
+            },
+        } as Parameters<typeof applyPlannedChangeActions>[0]);
+
+        expect(result).toMatchObject({
+            status: 'partial',
+            safeAdvanceCursor: null,
+            blockedCursor: '1',
+            blockedReason: 'partial-materialization',
+        });
+    });
+
+    it('does not advance account organization changes when organization refresh fails', async () => {
+        const result = await applyPlannedChangeActions({
+            planned: {
+                ...buildPlanned({
+                    changes: [
+                        buildChange({
+                            cursor: 1,
+                            kind: 'account',
+                            entityId: 'session-organization',
+                            hint: { sessionOrganization: true, scope: 'pins', sessionIds: ['s1'] },
+                        }),
+                    ],
+                }),
+                sessionOrganization: {
+                    mode: 'snapshot',
+                    assignmentSessionIds: ['s1'],
+                    folderIds: [],
+                    tagIds: [],
+                    orderScopes: [],
+                    includeFolders: false,
+                    includeTags: false,
+                    includeLabels: false,
+                },
+            } as PlannedChangeActions,
+            credentials,
+            isSessionMessagesLoaded: () => false,
+            invalidate: {},
+            invalidateMessagesForSession: async () => {},
+            invalidateScmStatusForSession: () => {},
+            applyTodoSocketUpdates: async () => {},
+            kvBulkGet: async () => ({ values: [] }),
+            refreshSessionOrganization: async () => {
                 throw new Error('refresh failed');
             },
         } as Parameters<typeof applyPlannedChangeActions>[0]);

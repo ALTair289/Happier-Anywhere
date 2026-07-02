@@ -16,6 +16,7 @@ import { notifyExecutionRunActivity } from '@/sync/runtime/executionRuns/executi
 import { syncPerformanceTelemetry } from '@/sync/runtime/syncPerformanceTelemetry';
 import { scmStatusSync } from '@/scm/scmStatusSync';
 import { ingestWorkspaceMutationMessages } from '@/scm/refresh/workspaceMutationIngestionRuntime';
+import { deliverHiddenSessionScmMutationSignal } from '@/sync/engine/sessions/hiddenSessionScmMutationSignal';
 import { voiceHooks } from '@/voice/context/voiceHooks';
 import { reportNewAgentRequestsFromSessionTransition } from '@/voice/context/reportNewAgentRequestsFromSessionTransition';
 import { deriveNewAgentRequests } from '@/sync/domains/permissions/deriveNewAgentRequests';
@@ -46,17 +47,21 @@ import {
     isStrictlyNewerSessionMetadataVersion,
 } from '@/sync/engine/sessions/syncSessions';
 import {
+    buildSessionRuntimeActivityProjectionPatch,
+    hasSessionRuntimeActivityProjectionFields,
+} from '@/sync/engine/sessions/sessionRuntimeActivityProjection';
+import {
     buildSessionListRenderableMetadata,
     type SessionListRenderableSession,
 } from '@/sync/domains/session/listing/sessionListRenderable';
 import { computeHasUnreadActivity } from '@/sync/domains/messages/unread';
 import {
-    storedSessionMessageContentAttentionImpact,
-    storedSessionMessageContentAttentionImpactOrNull,
+    storedSessionMessageAttentionImpact,
+    storedSessionMessageAttentionImpactOrNull,
 } from '@/sync/domains/messages/messageUserAttention';
 import {
     handleTranscriptStreamSegmentEphemeralUpdate,
-    type TranscriptStreamSegmentEphemeralUpdate,
+    type AnyTranscriptStreamSegmentEphemeralUpdate,
     type TranscriptStreamSegmentSessionMessageEncryption,
 } from '@/sync/engine/sessions/handleTranscriptStreamSegmentEphemeralUpdate';
 import { parsePlainSessionMetadata } from '@/sync/engine/sessions/parsePlainSessionPayload';
@@ -119,6 +124,10 @@ type ActivityRenderablePatch = Readonly<{
     thinkingAt: number;
     presence: 'online' | number;
     updatedAt: number;
+}>;
+
+type ActivityRenderableProjectionPatchPayload = Readonly<{
+    patch: ActivityRenderablePatch;
 }>;
 
 const CACHE_ONLY_ACTIVITY_TIMESTAMP_PATCH_MIN_INTERVAL_MS = Math.floor(SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS / 2);
@@ -188,6 +197,17 @@ const cacheOnlySessionUpdateProjectionPatchCoalescer = createSessionListRenderab
     applyPatches: (patches) => storage.getState().applySessionListRenderablePatches(patches),
 });
 
+const activityRenderableProjectionPatchCoalescer = createSessionListRenderableProjectionPatchCoalescer<ActivityRenderableProjectionPatchPayload>({
+    getConfig: () => ({
+        enabled: socketSessionApplyTuning.sessionSocketApplyCoalescingEnabled,
+        windowMs: socketSessionApplyTuning.sessionSocketApplyCoalescingWindowMs,
+        maxBatchSize: socketSessionApplyTuning.sessionSocketApplyCoalescingMaxBatchSize,
+    }),
+    readRenderable: (sessionId) => storage.getState().sessionListRenderables[sessionId],
+    buildPatch: ({ payload }) => payload.patch,
+    applyPatches: (patches) => storage.getState().applySessionListRenderablePatches(patches),
+});
+
 const cacheOnlySessionUpdateSeqBySession = new Map<string, number>();
 
 function setSocketSessionApplyHandler(applySessions: ApplySessions): void {
@@ -217,6 +237,13 @@ function isSessionFullContentConsumerActiveForRealtime(
     // Delegate to the shared selector so realtime routing and catch-up consume the identical
     // live-content-consumer fan-out (single source of truth — the divergence is unrepresentable).
     return resolveSessionLiveConsumption(sessionId, sourceServerId).isFullContentConsumer;
+}
+
+function isSessionActivelyViewedForRealtime(
+    sessionId: string,
+    sourceServerId?: string | null,
+): boolean {
+    return resolveSessionLiveConsumption(sessionId, sourceServerId).isVisible;
 }
 
 function normalizeProjectionSeq(value: unknown): number | null {
@@ -340,6 +367,7 @@ function buildCacheOnlySessionProjectionPatch(params: Readonly<{
     if (typeof updateBody.meaningfulActivityAt === 'number' && Number.isFinite(updateBody.meaningfulActivityAt)) {
         patch.meaningfulActivityAt = updateBody.meaningfulActivityAt;
     }
+    Object.assign(patch, buildSessionRuntimeActivityProjectionPatch(renderable, updateBody));
     patch.hasUnreadMessages = computeCacheOnlySessionRenderableHasUnreadMessages(renderable, patch);
     return patch;
 }
@@ -447,7 +475,8 @@ function hasSafeCacheOnlySessionProjectionFields(updateBody: any): boolean {
         'lastRuntimeIssue',
         'archivedAt',
         'meaningfulActivityAt',
-    ].some((key) => Object.prototype.hasOwnProperty.call(updateBody, key));
+    ].some((key) => Object.prototype.hasOwnProperty.call(updateBody, key))
+        || hasSessionRuntimeActivityProjectionFields(updateBody);
 }
 
 function readProjectedPendingCount(updateBody: any, key: 'pendingPermissionRequestCount' | 'pendingUserActionRequestCount'): number | null {
@@ -500,12 +529,14 @@ function readShareSessionId(body: unknown): string | null {
     return typeof candidate === 'string' && candidate.trim().length > 0 ? candidate.trim() : null;
 }
 
-function buildPendingChangedSessionPatch(body: unknown): Pick<Session, 'pendingCount' | 'pendingVersion'> & Pick<Partial<Session>, 'meaningfulActivityAt'> {
-    const pendingBody = body as { pendingCount: number; pendingVersion: number; meaningfulActivityAt?: unknown };
+function buildPendingChangedSessionPatch(body: unknown): Pick<Session, 'pendingCount' | 'pendingVersion'> & Pick<Partial<Session>, 'pendingBlockedCount' | 'meaningfulActivityAt'> {
+    const pendingBody = body as { pendingCount: number; pendingBlockedCount?: unknown; pendingVersion: number; meaningfulActivityAt?: unknown };
     const meaningfulActivityAt = finiteTimestamp(pendingBody.meaningfulActivityAt);
+    const pendingBlockedCount = finiteNumber(pendingBody.pendingBlockedCount);
     return {
         pendingCount: pendingBody.pendingCount,
         pendingVersion: pendingBody.pendingVersion,
+        ...(pendingBlockedCount === null ? {} : { pendingBlockedCount: Math.max(0, Math.trunc(pendingBlockedCount)) }),
         ...(meaningfulActivityAt === undefined ? {} : { meaningfulActivityAt }),
     };
 }
@@ -574,7 +605,7 @@ function buildCacheOnlyDurableMessageProjectionPatch(params: Readonly<{
     messageSeq: number | null;
 }>): Readonly<Partial<Omit<SessionListRenderableSession, 'id'>>> {
     const { renderable, updateData, rawMessage, messageSeq } = params;
-    const attentionImpact = storedSessionMessageContentAttentionImpact(rawMessage?.content);
+    const attentionImpact = storedSessionMessageAttentionImpact(rawMessage);
     const nextSessionSeq = computeNextSessionSeqFromUpdate({
         currentSessionSeq: renderable.seq ?? 0,
         updateType: 'new-message',
@@ -637,6 +668,15 @@ function patchNullableFieldChanged(
     return (renderable[key] ?? null) !== (patch[key] ?? null);
 }
 
+function patchNumberFieldChanged(
+    renderable: SessionListRenderableSession,
+    patch: Readonly<Partial<Omit<SessionListRenderableSession, 'id'>>>,
+    key: keyof Omit<SessionListRenderableSession, 'id'>,
+): boolean {
+    if (!hasPatchField(patch, key)) return false;
+    return renderable[key] !== patch[key];
+}
+
 function shouldApplyCacheOnlySessionUpdateProjectionPatchImmediately(params: Readonly<{
     renderable: SessionListRenderableSession;
     patch: Readonly<Partial<Omit<SessionListRenderableSession, 'id'>>>;
@@ -648,6 +688,7 @@ function shouldApplyCacheOnlySessionUpdateProjectionPatchImmediately(params: Rea
         || patchBooleanFieldChanged(renderable, patch, 'thinking')
         || patchNullableFieldChanged(renderable, patch, 'archivedAt')
         || patchNullableFieldChanged(renderable, patch, 'lastRuntimeIssue')
+        || patchNumberFieldChanged(renderable, patch, 'runtimeActivityActiveCount')
         || patchBooleanFieldChanged(renderable, patch, 'hasUnreadMessages')
         || patchBooleanFieldChanged(renderable, patch, 'hasPendingPermissionRequests')
         || patchBooleanFieldChanged(renderable, patch, 'hasPendingUserActionRequests');
@@ -697,7 +738,7 @@ function applyCacheOnlyDurableMessageProjectionPatch(params: Readonly<{
     messageSeq: number | null;
     shouldContinue?: () => boolean;
 }>): boolean {
-    if (storedSessionMessageContentAttentionImpactOrNull(params.rawMessage?.content) === null) {
+    if (storedSessionMessageAttentionImpactOrNull(params.rawMessage) === null) {
         return false;
     }
 
@@ -784,6 +825,29 @@ function shouldSkipFreshTimestampOnlyRenderableActivityPatch(
         || nextRuntimeTimestamp - previousRuntimeTimestamp < CACHE_ONLY_ACTIVITY_TIMESTAMP_PATCH_MIN_INTERVAL_MS;
 }
 
+function shouldApplyCacheOnlyActivityRenderablePatch(
+    sessionId: string,
+    patch: ActivityRenderablePatch,
+): boolean {
+    if (storage.getState().sessions[sessionId]) return false;
+    const renderable = storage.getState().sessionListRenderables[sessionId];
+    if (!renderable) return false;
+
+    const isTimestampOnlyPatch = isTimestampOnlyActivityPatch(renderable, patch);
+    const isTurningOff = patch.active === false && patch.thinking === false;
+    if (!isTimestampOnlyPatch) {
+        if (isTurningOff) {
+            if (patch.activeAt < renderable.activeAt) return false;
+        } else if (patch.activeAt < renderable.updatedAt) {
+            return false;
+        }
+    }
+    if (isTimestampOnlyPatch && shouldSkipFreshTimestampOnlyRenderableActivityPatch(renderable, patch)) {
+        return false;
+    }
+    return true;
+}
+
 const socketMessageApplyCoalescer = createSessionMessageApplyCoalescer({
     getConfig: getSocketMessageApplyConfig,
     applyBatch: (sessionId, messages) => {
@@ -806,7 +870,7 @@ const socketMessageApplyCoalescer = createSessionMessageApplyCoalescer({
 });
 
 type DeferredTranscriptStreamSegmentEntry = Readonly<{
-    update: TranscriptStreamSegmentEphemeralUpdate;
+    update: AnyTranscriptStreamSegmentEphemeralUpdate;
     sourceServerId?: string | null;
     shouldContinue: () => boolean;
     getSessionEncryption: (sessionId: string) => TranscriptStreamSegmentSessionMessageEncryption | null;
@@ -1188,7 +1252,7 @@ export async function handleUpdateContainer(params: {
             isMutableToolCall: (sessionId, toolUseId) => storage.getState().isMutableToolCall(sessionId, toolUseId),
             invalidateScmStatus: (sessionId) => scmStatusSync.invalidateFromMutation(sessionId),
             isSessionMessagesLoaded,
-            isSessionActivelyViewed: (sessionId) => isSessionVisible(sessionId, sourceServerId),
+            isSessionActivelyViewed: (sessionId) => isSessionActivelyViewedForRealtime(sessionId, sourceServerId),
             isSessionFullContentConsumerActive: (sessionId) => isSessionFullContentConsumerActiveForRealtime(sessionId, sourceServerId),
             realtimeProjectionMode: socketSessionApplyTuning.sessionRealtimeProjectionMode,
             getSessionMaterializedMaxSeq: getSessionMaterializedMaxSeqForGapDetection,
@@ -1197,6 +1261,15 @@ export async function handleUpdateContainer(params: {
             markSessionKnownRemoteSeq,
             markSessionTranscriptDeferred,
             markSessionTranscriptStale,
+            onTranscriptSkippedDurableMessage: ({ sessionId, rawMessage }) => {
+                if (!shouldContinue()) return;
+                void deliverHiddenSessionScmMutationSignal({
+                    sessionId,
+                    sourceServerId,
+                    rawMessage,
+                    getSessionEncryption: (targetSessionId) => encryption.getSessionEncryption(targetSessionId),
+                });
+            },
             onTaskLifecycleEvent: onTaskLifecycleEvent
                 ? (sessionId, event) => {
                     if (!shouldContinue()) return;
@@ -1251,7 +1324,7 @@ export async function handleUpdateContainer(params: {
             isMutableToolCall: (sessionId, toolUseId) => storage.getState().isMutableToolCall(sessionId, toolUseId),
             invalidateScmStatus: (sessionId) => scmStatusSync.invalidateFromMutation(sessionId),
             isSessionMessagesLoaded,
-            isSessionActivelyViewed: (sessionId) => isSessionVisible(sessionId, sourceServerId),
+            isSessionActivelyViewed: (sessionId) => isSessionActivelyViewedForRealtime(sessionId, sourceServerId),
             isSessionFullContentConsumerActive: (sessionId) => isSessionFullContentConsumerActiveForRealtime(sessionId, sourceServerId),
             realtimeProjectionMode: socketSessionApplyTuning.sessionRealtimeProjectionMode,
             getSessionMaterializedMaxSeq: getSessionMaterializedMaxSeqForGapDetection,
@@ -1260,6 +1333,15 @@ export async function handleUpdateContainer(params: {
             markSessionKnownRemoteSeq,
             markSessionTranscriptDeferred,
             markSessionTranscriptStale,
+            onTranscriptSkippedDurableMessage: ({ sessionId, rawMessage }) => {
+                if (!shouldContinue()) return;
+                void deliverHiddenSessionScmMutationSignal({
+                    sessionId,
+                    sourceServerId,
+                    rawMessage,
+                    getSessionEncryption: (targetSessionId) => encryption.getSessionEncryption(targetSessionId),
+                });
+            },
             onTaskLifecycleEvent: onTaskLifecycleEvent
                 ? (sessionId, event) => {
                     if (!shouldContinue()) return;
@@ -1279,6 +1361,7 @@ export async function handleUpdateContainer(params: {
         socketMessageApplyCoalescer.dropSessionIds([updateData.body.sid]);
         durableMessageProjectionPatchCoalescer.dropSessionIds([updateData.body.sid]);
         cacheOnlySessionUpdateProjectionPatchCoalescer.dropSessionIds([updateData.body.sid]);
+        activityRenderableProjectionPatchCoalescer.dropSessionIds([updateData.body.sid]);
         cacheOnlySessionUpdateSeqBySession.delete(updateData.body.sid);
         dropDeferredTranscriptStreamSegments(updateData.body.sid);
         handleDeleteSessionSocketUpdate({
@@ -1294,6 +1377,9 @@ export async function handleUpdateContainer(params: {
         const state = storage.getState();
         const session = getSocketSessionApplyBase(sessionId);
         const pendingPatch = buildPendingChangedSessionPatch(updateData.body);
+        if (pendingPatch.pendingCount === 0) {
+            state.pruneServerPendingMessages(sessionId);
+        }
         if (!session) {
             const cachedRenderable = state.sessionListRenderables[sessionId];
             if (cachedRenderable) {
@@ -1776,6 +1862,7 @@ export async function handleUpdateContainer(params: {
         socketMessageApplyCoalescer.dropSessionIds([sessionId]);
         durableMessageProjectionPatchCoalescer.dropSessionIds([sessionId]);
         cacheOnlySessionUpdateProjectionPatchCoalescer.dropSessionIds([sessionId]);
+        activityRenderableProjectionPatchCoalescer.dropSessionIds([sessionId]);
         cacheOnlySessionUpdateSeqBySession.delete(sessionId);
         dropDeferredTranscriptStreamSegments(sessionId);
         handleDeleteSessionSocketUpdate({
@@ -1934,7 +2021,17 @@ export function flushActivityUpdates(params: {
     }
     if (renderablePatches.length > 0) {
         if (!shouldContinue()) return;
-        storage.getState().applySessionListRenderablePatches(renderablePatches);
+        for (const { sessionId, patch } of renderablePatches) {
+            activityRenderableProjectionPatchCoalescer.enqueue(
+                sessionId,
+                { patch },
+                {
+                    shouldContinue: () => shouldContinue()
+                        && shouldApplyCacheOnlyActivityRenderablePatch(sessionId, patch),
+                    deferLeadingPatch: true,
+                },
+            );
+        }
     }
 }
 
@@ -2039,6 +2136,32 @@ export function handleEphemeralSocketUpdate(params: {
                 });
         }
         return applyDeferredTranscriptStreamSegment(entry);
+    } else if (updateData.type === 'transcript-stream-segment-delta') {
+        // Delta ticks are useful only to a live transcript consumer: they chain onto in-memory
+        // assembly state and the ~1s full-snapshot checkpoints keep background sessions fresh.
+        // Dropping them here (never deferring) keeps hidden sessions off the hot path; the
+        // assembly layer resyncs from the next checkpoint when the session becomes visible.
+        const needsLiveTranscript = isSessionFullContentConsumerActiveForRealtime(updateData.sessionId, sourceServerId);
+        if (!needsLiveTranscript) {
+            syncPerformanceTelemetry.count('sync.socket.transcriptStreamSegmentDelta.droppedHidden', { messages: 1 });
+            return Promise.resolve();
+        }
+        const entry: DeferredTranscriptStreamSegmentEntry = {
+            update: updateData,
+            sourceServerId,
+            shouldContinue,
+            getSessionEncryption,
+            getSession,
+            applyMessages,
+            skipWhenHidden: false,
+        };
+        return flushDeferredTranscriptStreamSegments(updateData.sessionId)
+            .then((deferredEntryCount) => {
+                if (deferredEntryCount > 0) {
+                    socketMessageApplyCoalescer.flush(updateData.sessionId);
+                }
+                return applyDeferredTranscriptStreamSegment(entry);
+            });
     }
 
     // daemon-status ephemeral updates are deprecated, machine status is handled via machine-activity

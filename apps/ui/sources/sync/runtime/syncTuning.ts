@@ -1,5 +1,7 @@
 import Constants from 'expo-constants';
 
+export type TranscriptLegendListSpikeSurface = 'off' | 'readOnly' | 'sidechain' | 'main';
+
 export type SyncTuning = Readonly<{
     messageLargeGapSeq: number;
     messageMaxIncrementalPagesOnResume: number;
@@ -11,6 +13,7 @@ export type SyncTuning = Readonly<{
     transcriptFlashListEstimatedItemSize: number;
     transcriptWebHotTailItemCount: number;
     transcriptNativeHotTailItemCount: number;
+    transcriptLegendListSpikeSurface: TranscriptLegendListSpikeSurface;
     transcriptMaxTurnEntriesPerListItem: number;
     transcriptWebInitialPinStabilizeMs: number;
     transcriptWebInitialPinRetryIntervalMs: number;
@@ -55,6 +58,16 @@ export type SyncTuning = Readonly<{
     sessionSocketApplyCoalescingWindowMs: number;
     sessionSocketApplyCoalescingMaxBatchSize: number;
     sessionRealtimeProjectionMode: 'disabled' | 'shadow' | 'enabled';
+    /**
+     * Bounded transcript retention: how many recently-viewed hydrated transcripts to keep
+     * resident BEYOND mounted/live-consumer sessions. Older unprotected transcripts are
+     * evicted and rehydrate through the normal first-open load pipeline on re-open.
+     */
+    sessionTranscriptRetentionRecentKeepCount: number;
+    /** Minimum idle time since last view/mount release before a transcript may be evicted. */
+    sessionTranscriptRetentionGraceMs: number;
+    /** Debounce for the eviction sweep so rapid navigation does not thrash. */
+    sessionTranscriptRetentionSweepDebounceMs: number;
     sidechainDemandHydrationConcurrencyLimit: number;
     changesPageLimit: number;
     changesMaxPagesPerResume: number;
@@ -187,6 +200,13 @@ function readSessionRealtimeProjectionMode(obj: Record<string, unknown>): SyncTu
     return value === 'disabled' || value === 'shadow' || value === 'enabled' ? value : null;
 }
 
+function readTranscriptLegendListSpikeSurface(obj: Record<string, unknown>): TranscriptLegendListSpikeSurface | null {
+    const value = obj.transcriptLegendListSpikeSurface;
+    return value === 'off' || value === 'readOnly' || value === 'sidechain' || value === 'main'
+        ? value
+        : null;
+}
+
 function readRatio(obj: Record<string, unknown>, key: keyof SyncTuning): number | null {
     const value = obj[key as string];
     if (typeof value !== 'number' || !Number.isFinite(value)) return null;
@@ -238,6 +258,7 @@ export function loadSyncTuning(opts?: {
         // explicit flag>0 tests + segments/webHotColdSplit/TranscriptHotTail. Detail:
         // .project/plans/native-streaming-hot-cold-split-scoping.md (§ON-path device findings).
         transcriptNativeHotTailItemCount: 4,
+        transcriptLegendListSpikeSurface: 'off',
         transcriptMaxTurnEntriesPerListItem: 8,
         transcriptWebInitialPinStabilizeMs: 1500,
         transcriptWebInitialPinRetryIntervalMs: 250,
@@ -282,6 +303,9 @@ export function loadSyncTuning(opts?: {
         sessionSocketApplyCoalescingWindowMs: 16,
         sessionSocketApplyCoalescingMaxBatchSize: 64,
         sessionRealtimeProjectionMode: 'enabled',
+        sessionTranscriptRetentionRecentKeepCount: 3,
+        sessionTranscriptRetentionGraceMs: 3 * 60 * 1000,
+        sessionTranscriptRetentionSweepDebounceMs: 1_000,
         sidechainDemandHydrationConcurrencyLimit: 2,
         changesPageLimit: 200,
         changesMaxPagesPerResume: 5,
@@ -338,6 +362,7 @@ export function loadSyncTuning(opts?: {
         transcriptFlashListEstimatedItemSize: readNumber(merged, 'transcriptFlashListEstimatedItemSize', { min: 20, max: 2000 }) ?? defaults.transcriptFlashListEstimatedItemSize,
         transcriptWebHotTailItemCount: readNumber(merged, 'transcriptWebHotTailItemCount', { min: 1, max: 200 }) ?? defaults.transcriptWebHotTailItemCount,
         transcriptNativeHotTailItemCount: readNumber(merged, 'transcriptNativeHotTailItemCount', { min: 0, max: 200 }) ?? defaults.transcriptNativeHotTailItemCount,
+        transcriptLegendListSpikeSurface: readTranscriptLegendListSpikeSurface(merged) ?? defaults.transcriptLegendListSpikeSurface,
         transcriptMaxTurnEntriesPerListItem: readNumber(merged, 'transcriptMaxTurnEntriesPerListItem', { min: 0, max: 200 }) ?? defaults.transcriptMaxTurnEntriesPerListItem,
         transcriptWebInitialPinStabilizeMs: readNumber(merged, 'transcriptWebInitialPinStabilizeMs', { min: 0, max: 20_000 }) ?? defaults.transcriptWebInitialPinStabilizeMs,
         transcriptWebInitialPinRetryIntervalMs: readNumber(merged, 'transcriptWebInitialPinRetryIntervalMs', { min: 16, max: 2000 }) ?? defaults.transcriptWebInitialPinRetryIntervalMs,
@@ -384,6 +409,9 @@ export function loadSyncTuning(opts?: {
         sessionSocketApplyCoalescingWindowMs: readNumber(merged, 'sessionSocketApplyCoalescingWindowMs', { min: 0, max: 200 }) ?? defaults.sessionSocketApplyCoalescingWindowMs,
         sessionSocketApplyCoalescingMaxBatchSize: readNumber(merged, 'sessionSocketApplyCoalescingMaxBatchSize', { min: 2, max: 1000 }) ?? defaults.sessionSocketApplyCoalescingMaxBatchSize,
         sessionRealtimeProjectionMode: readSessionRealtimeProjectionMode(merged) ?? defaults.sessionRealtimeProjectionMode,
+        sessionTranscriptRetentionRecentKeepCount: readNumber(merged, 'sessionTranscriptRetentionRecentKeepCount', { min: 0, max: 200 }) ?? defaults.sessionTranscriptRetentionRecentKeepCount,
+        sessionTranscriptRetentionGraceMs: readNumber(merged, 'sessionTranscriptRetentionGraceMs', { min: 0, max: 24 * 60 * 60 * 1000 }) ?? defaults.sessionTranscriptRetentionGraceMs,
+        sessionTranscriptRetentionSweepDebounceMs: readNumber(merged, 'sessionTranscriptRetentionSweepDebounceMs', { min: 0, max: 60_000 }) ?? defaults.sessionTranscriptRetentionSweepDebounceMs,
         sidechainDemandHydrationConcurrencyLimit: readNumber(merged, 'sidechainDemandHydrationConcurrencyLimit', { min: 1, max: 8 }) ?? defaults.sidechainDemandHydrationConcurrencyLimit,
         changesPageLimit: readNumber(merged, 'changesPageLimit', { min: 1, max: 10_000 }) ?? defaults.changesPageLimit,
         changesMaxPagesPerResume: readNumber(merged, 'changesMaxPagesPerResume', { min: 1, max: 100 }) ?? defaults.changesMaxPagesPerResume,

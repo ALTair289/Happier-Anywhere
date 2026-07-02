@@ -54,6 +54,7 @@ export async function applyPlannedChangeActions(params: {
         todos?: () => Promise<void>;
     };
     refreshSessionFolderAssignments?: (plan: Exclude<PlannedChangeActions['sessionFolderAssignments'], { mode: 'none' }>) => Promise<void>;
+    refreshSessionOrganization?: (plan: Exclude<PlannedChangeActions['sessionOrganization'], { mode: 'none' }>) => Promise<void>;
     invalidateMessagesForSession: (sessionId: string) => Promise<void>;
     invalidateScmStatusForSession: (sessionId: string) => void;
     applyTodoSocketUpdates: (changes: TodoSocketUpdate[]) => Promise<void>;
@@ -72,6 +73,7 @@ export async function applyPlannedChangeActions(params: {
     const completedPendingSessionIds = new Set<string>();
     const failedPendingSessionIds = new Set<string>();
     let sessionFolderAssignmentsRefreshFailed = false;
+    let sessionOrganizationRefreshFailed = false;
     const loadedCatchUpSessionIds = planned.sessionIdsToCatchUp.filter((sessionId) =>
         params.isSessionMessagesLoaded(sessionId),
     );
@@ -125,6 +127,23 @@ export async function applyPlannedChangeActions(params: {
                 await params.refreshSessionFolderAssignments(sessionFolderAssignmentsPlan);
             } catch {
                 sessionFolderAssignmentsRefreshFailed = true;
+            }
+        });
+    }
+
+    const sessionOrganizationPlan = planned.sessionOrganization.mode === 'none'
+        ? null
+        : planned.sessionOrganization;
+    if (sessionOrganizationPlan) {
+        tasks.push(async () => {
+            try {
+                if (!params.refreshSessionOrganization) {
+                    sessionOrganizationRefreshFailed = true;
+                    return;
+                }
+                await params.refreshSessionOrganization(sessionOrganizationPlan);
+            } catch {
+                sessionOrganizationRefreshFailed = true;
             }
         });
     }
@@ -258,6 +277,22 @@ export async function applyPlannedChangeActions(params: {
 
         if (classification.materializationProof === 'session-folder-assignments') {
             if (sessionFolderAssignmentsRefreshFailed) {
+                return {
+                    status: 'partial',
+                    safeAdvanceCursor,
+                    blockedCursor: classification.cursor,
+                    blockedReason: 'partial-materialization',
+                    processedChanges,
+                    blockedChanges: planned.changes.length - processedChanges,
+                };
+            }
+            safeAdvanceCursor = classification.cursor;
+            processedChanges += 1;
+            continue;
+        }
+
+        if (classification.materializationProof === 'session-organization') {
+            if (sessionOrganizationRefreshFailed) {
                 return {
                     status: 'partial',
                     safeAdvanceCursor,

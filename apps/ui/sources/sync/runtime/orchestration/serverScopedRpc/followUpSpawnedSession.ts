@@ -2,7 +2,7 @@ import type { AuthCredentials } from '@/auth/storage/tokenStorage';
 import type { SessionMessageDirectBypassReason } from '@/sync/domains/session/control/submitMode';
 import type { Session } from '@/sync/domains/state/storageTypes';
 import { storage } from '@/sync/domains/state/storage';
-import { sync } from '@/sync/sync';
+import { sync, type SessionUserMessageRuntimeRpcDeliveryMode } from '@/sync/sync';
 import { createNotAuthenticatedError, isAuthenticationResponseStatus } from '@/sync/runtime/connectivity/authErrors';
 
 import { fetchSessionByIdWithServerScope } from './fetchSessionByIdWithServerScope';
@@ -127,6 +127,7 @@ function getDefaultActiveSync() {
                 profileId?: string | null;
                 localId?: string | null;
                 bypassPendingQueueReason?: SessionMessageDirectBypassReason;
+                runtimeRpcDeliveryMode?: SessionUserMessageRuntimeRpcDeliveryMode;
             }>,
         ) => {
             if (typeof sync.sendMessage === 'function') {
@@ -229,8 +230,12 @@ export function createFollowUpSpawnedSessionWithServerScope(deps?: Readonly<{
                                 ...(params.profileId ? { profileId: params.profileId } : {}),
                                 ...(params.messageLocalId ? { localId: params.messageLocalId } : {}),
                                 bypassPendingQueueReason: 'spawned_session_follow_up',
+                                runtimeRpcDeliveryMode: 'required',
                             }
-                            : { bypassPendingQueueReason: 'spawned_session_follow_up' },
+                            : {
+                                bypassPendingQueueReason: 'spawned_session_follow_up',
+                                runtimeRpcDeliveryMode: 'required',
+                            },
                     );
                     return;
                 }

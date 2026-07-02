@@ -557,11 +557,15 @@ describe('UI testkit mock factories', () => {
         expect(useSetting('toolViewTapAction' as any)).toBe('fallback:toolViewTapAction');
     });
 
-    it('installs direct vi.mock factories for react-native, text, and unistyles', async () => {
+    it('installs direct vi.mock factories for modal, react-native, text, and unistyles', async () => {
+        const { installModalModuleMock } = await import('./modal');
         const { installReactNativeWebMock } = await import('./reactNative');
         const { installTextModuleMock } = await import('./text');
         const { installUnistylesMock } = await import('./unistyles');
 
+        const modalModule = installModalModuleMock({
+            confirmResult: true,
+        })();
         const reactNativeModule = await installReactNativeWebMock({
             View: 'View',
             Platform: {
@@ -582,6 +586,7 @@ describe('UI testkit mock factories', () => {
         const installedTheme = installedUnistyles.theme as Record<string, unknown>;
         const installedColors = installedTheme.colors as Record<string, unknown> | undefined;
 
+        expect(await modalModule.Modal.confirm('Confirm')).toBe(true);
         expect(reactNativeModule.View).toBe('View');
         expect(reactNativeModule.Platform.OS).toBe('ios');
         expect(textModule.t('settings.title')).toBe('tx:settings.title');

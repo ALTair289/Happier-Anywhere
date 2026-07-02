@@ -4,10 +4,12 @@ import { act, type ReactTestInstance } from 'react-test-renderer';
 import { flushHookEffects, type FlushHookEffectsOptions } from '../hooks/flushHookEffects';
 import { createCapturingFlashListMock } from '../mocks/flashList';
 import { createReactNativeWebMock } from '../mocks/reactNative';
-import { createStorageModuleMock, createStorageStoreMock } from '../mocks/storage';
+import { createStorageModuleMock, createStorageStoreMock, createStorageStoreModuleMock } from '../mocks/storage';
 import { renderScreen, type RenderScreenResult } from '../render/renderScreen';
 import type { RenderWithAppProvidersOptions } from '../render/renderWithAppProviders';
+import type { ServerAccountScope } from '@/sync/domains/scope/serverAccountScope';
 import { createReducer } from '@/sync/reducer/reducer';
+import { createInactiveSessionMessagesWindowState } from '@/sync/runtime/sessionMessagesWindowState';
 import { loadSyncTuning, type SyncTuning } from '@/sync/runtime/syncTuning';
 
 export type ChatListHarness = RenderScreenResult & Readonly<{
@@ -49,6 +51,7 @@ type FlashListChatListHarnessState = {
     sessionState: any;
     settingValues: Record<string, any>;
     syncTuningState: SyncTuningState;
+    activeServerAccountScope: ServerAccountScope | null;
 };
 
 type FlashListDomInstallerOptions = {
@@ -99,6 +102,12 @@ export class FlashListChatListWebElement {
         return this.nodesBySelector.get(selector) ?? [];
     }
 
+    querySelector(selector: string) {
+        const testId = parseDataTestIdAttributeSelector(selector);
+        if (testId == null) return this.nodesBySelector.get(selector)?.[0] ?? null;
+        return this.nodesBySelector.get('[data-testid]')?.find((node) => node.getAttribute('data-testid') === testId) ?? null;
+    }
+
     setQuerySelectorAll(selector: string, nodes: FlashListChatListWebElement[]) {
         this.nodesBySelector.set(selector, nodes);
     }
@@ -110,6 +119,14 @@ export class FlashListChatListWebElement {
     setRect(rect: { top: number; bottom: number }) {
         this.rect = rect;
     }
+}
+
+function parseDataTestIdAttributeSelector(selector: string): string | null {
+    const match = selector.match(/^\[data-testid="((?:\\.|[^"\\])*)"\]$/);
+    if (!match) return null;
+    return match[1]
+        .replace(/\\([0-9a-fA-F]{1,6})\s?/g, (_value, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)))
+        .replace(/\\(.)/g, '$1');
 }
 
 export function createFlashListChatListWebElement(
@@ -161,26 +178,6 @@ export function createFlashListChatListWebScroller(
     return scroller;
 }
 
-type LegacyChatListHarnessState = {
-    capturedFlatListProps: any | null;
-    sessionMessagesState: SessionMessagesState;
-    sessionPendingState: SessionPendingState;
-    sessionActionDraftsState: any[];
-    sessionState: any;
-    settingValues: Record<string, any>;
-    flatListRefValue: any;
-};
-
-export const legacyChatListHarnessState: LegacyChatListHarnessState = {
-    capturedFlatListProps: null,
-    sessionMessagesState: { messages: [], isLoaded: true },
-    sessionPendingState: { messages: [], discarded: [], isLoaded: true },
-    sessionActionDraftsState: [],
-    sessionState: null,
-    settingValues: {},
-    flatListRefValue: null,
-};
-
 export const flashListChatListHarnessState: FlashListChatListHarnessState = {
     flashListProps: null,
     flashListRefHandle: {
@@ -195,6 +192,7 @@ export const flashListChatListHarnessState: FlashListChatListHarnessState = {
     sessionState: null,
     settingValues: {},
     syncTuningState: loadSyncTuning(),
+    activeServerAccountScope: null,
 };
 
 function createFlashListChatListMessagesSnapshot() {
@@ -204,6 +202,7 @@ function createFlashListChatListMessagesSnapshot() {
     );
 
     return {
+        profileScope: flashListChatListHarnessState.activeServerAccountScope,
         sessionMessages: {
             [sessionId]: {
                 messageIdsOldestFirst: Object.keys(messagesById),
@@ -240,6 +239,7 @@ export function resetFlashListChatListHarness(
     flashListChatListHarnessState.sessionMessagesState = { messages: [], isLoaded: true };
     flashListChatListHarnessState.sessionPendingState = { messages: [], discarded: [], isLoaded: true };
     flashListChatListHarnessState.sessionActionDraftsState = [];
+    flashListChatListHarnessState.activeServerAccountScope = null;
     flashListChatListHarnessState.sessionState = {
         id: 'session-1',
         seq: 0,
@@ -438,7 +438,7 @@ export async function createFlashListChatListReactNativeMock(
     options: Readonly<{
         overrides?: Record<string, unknown>;
         platformOs?: 'web' | 'ios';
-        trackFlatListRender?: () => void;
+        trackFlashListRender?: () => void;
     }> = {},
 ) {
     const platformOs = options.platformOs ?? flashListChatListHarnessState.platformOs;
@@ -453,7 +453,7 @@ export async function createFlashListChatListReactNativeMock(
         Pressable: ({ children, ...props }: any) => React.createElement('Pressable', props, children),
         ActivityIndicator: () => React.createElement('ActivityIndicator'),
         FlatList: () => {
-            options.trackFlatListRender?.();
+            options.trackFlashListRender?.();
             return React.createElement('FlatList');
         },
         ...(options.overrides ?? {}),
@@ -464,20 +464,22 @@ export async function createFlashListChatListStorageMock(
     importOriginal: <T>() => Promise<T>,
     overrides: Partial<typeof import('@/sync/domains/state/storage')> = {},
 ) {
-    const sessionState = flashListChatListHarnessState.sessionState;
-    const messages = flashListChatListHarnessState.sessionMessagesState.messages ?? [];
-    const messagesById = Object.fromEntries(messages.map((message: any) => [message.id, message]));
+    const readMessages = () => flashListChatListHarnessState.sessionMessagesState.messages ?? [];
+    const readMessagesById = () => Object.fromEntries(readMessages().map((message: any) => [message.id, message]));
 
     return createStorageModuleMock({
         importOriginal,
         overrides: {
             storage: createStorageStoreMock(createFlashListChatListMessagesSnapshot()),
             useSession: () => flashListChatListHarnessState.sessionState,
-            useSessionTranscriptIds: () => ({
-                ids: messages.map((message: any) => message.id),
-                isLoaded: flashListChatListHarnessState.sessionMessagesState.isLoaded,
-            }),
-            useSessionMessagesById: () => messagesById,
+            useSessionTranscriptIds: () => {
+                const messages = readMessages();
+                return {
+                    ids: messages.map((message: any) => message.id),
+                    isLoaded: flashListChatListHarnessState.sessionMessagesState.isLoaded,
+                };
+            },
+            useSessionMessagesById: () => readMessagesById(),
             useSessionMessagesReducerState: () => createReducer(),
             useSessionForkSupportSource: () => null,
             useSessionWorkspacePath: () => null,
@@ -487,8 +489,21 @@ export async function createFlashListChatListStorageMock(
             useSessionLatestThinkingMessageId: () => null,
             useSessionLatestThinkingMessageActivityAtMs: () => null,
             useMessage: (_sessionId: string, messageId: string) =>
-                messages.find((message: any) => message.id === messageId) ?? null,
+                readMessages().find((message: any) => message.id === messageId) ?? null,
             useSetting: (key: string) => flashListChatListHarnessState.settingValues[key],
+            getStorage: () => createStorageStoreMock(createFlashListChatListMessagesSnapshot()),
+            ...overrides,
+        },
+    });
+}
+
+export async function createFlashListChatListStorageStoreMock(
+    importOriginal: <T>() => Promise<T>,
+    overrides: Partial<typeof import('@/sync/domains/state/storageStore')> = {},
+) {
+    return createStorageStoreModuleMock({
+        importOriginal,
+        overrides: {
             getStorage: () => createStorageStoreMock(createFlashListChatListMessagesSnapshot()),
             ...overrides,
         },
@@ -527,6 +542,7 @@ export function createFlashListChatListSyncModuleMock(
             loadNewerMessages,
             hasDeferredNewerMessages,
             getSyncTuning: () => flashListChatListHarnessState.syncTuningState,
+            getSessionTargetWindowState: () => createInactiveSessionMessagesWindowState(),
             maybeDrainDeferredNewerMessages,
             ...overrides,
         },
@@ -633,6 +649,16 @@ export async function triggerFlashListChatListStartReached(
     await flushHookEffects(flushOptions);
 }
 
+export async function triggerFlashListChatListEndReached(
+    flushOptions: FlushHookEffectsOptions = {},
+): Promise<void> {
+    const capturedFlashListProps = requireCapturedFlashListProps();
+    await act(async () => {
+        await capturedFlashListProps.onEndReached?.();
+    });
+    await flushHookEffects(flushOptions);
+}
+
 export async function withFlashListChatListWebScrollerDom<T>(
     scrollerElement: unknown,
     run: () => Promise<T>,
@@ -699,281 +725,13 @@ export async function withRenderedFlashListChatListWebScroller<T>(
     );
 }
 
-function createLegacyChatListMessagesSnapshot() {
-    const sessionId = String(legacyChatListHarnessState.sessionState?.id ?? 'session-1');
-    const allMessages = [...(legacyChatListHarnessState.sessionMessagesState.messages ?? [])];
-    const messagesById = Object.fromEntries(
-        allMessages.map((message: any) => [message.id, message]),
-    );
-    const messageIdsOldestFirst = allMessages.map((message: any) => message.id);
-
-    return {
-        sessionMessages: {
-            [sessionId]: {
-                messageIdsOldestFirst,
-                messagesById,
-                messagesMap: messagesById,
-                reducerState: createReducer(),
-                reducerVersion: 0,
-                latestThinkingMessageId: null,
-                latestThinkingMessageActivityAtMs: null,
-                latestReadyEventSeq: null,
-                latestReadyEventAt: null,
-                messagesVersion: 0,
-                lastAppliedAgentStateVersion: null,
-                isLoaded: legacyChatListHarnessState.sessionMessagesState.isLoaded,
-            },
-        },
-    };
-}
-
-export function resetLegacyChatListHarness(options: {
-    platformOs?: 'web' | 'ios';
-    flatListRefValue?: any;
-} = {}) {
-    legacyChatListHarnessState.capturedFlatListProps = null;
-    legacyChatListHarnessState.sessionMessagesState = { messages: [], isLoaded: true };
-    legacyChatListHarnessState.sessionPendingState = { messages: [], discarded: [], isLoaded: true };
-    legacyChatListHarnessState.sessionActionDraftsState = [];
-    legacyChatListHarnessState.sessionState = {
-        id: 'session-1',
-        seq: 0,
-        metadata: null,
-        accessLevel: null,
-        canApprovePermissions: true,
-        agentState: null,
-    };
-    legacyChatListHarnessState.flatListRefValue = options.flatListRefValue ?? null;
-
-    for (const key of Object.keys(legacyChatListHarnessState.settingValues)) {
-        delete legacyChatListHarnessState.settingValues[key];
-    }
-
-    legacyChatListHarnessState.settingValues.transcriptGroupingMode = 'linear';
-    legacyChatListHarnessState.settingValues.transcriptGroupToolCalls = false;
-    legacyChatListHarnessState.settingValues.transcriptTurnToolCallsGroupStrategy = 'consecutive_tools';
-    legacyChatListHarnessState.settingValues.transcriptListImplementation = 'flatlist_legacy';
-    legacyChatListHarnessState.settingValues.transcriptScrollPinEnabled = true;
-    legacyChatListHarnessState.settingValues.transcriptScrollPinOffsetThresholdPx = 72;
-    legacyChatListHarnessState.settingValues.transcriptScrollJumpToBottomEnabled = true;
-    legacyChatListHarnessState.settingValues.transcriptScrollJumpToBottomMinNewCount = 1;
-    legacyChatListHarnessState.settingValues.transcriptScrollJumpToBottomAnimateScroll = false;
-    legacyChatListHarnessState.settingValues.transcriptMotionPreset = 'off';
-    legacyChatListHarnessState.settingValues.transcriptAnimateNewItemsEnabled = false;
-
-    return options.platformOs ?? 'web';
-}
-
-export function buildLegacyChatListItems({
-    messageIdsOldestFirst,
-    messagesById,
-    pendingMessages,
-    actionDrafts,
-}: {
-    messageIdsOldestFirst?: string[];
-    messagesById?: Record<string, any>;
-    pendingMessages?: any[];
-    actionDrafts?: any[];
-}) {
-    const items: any[] = [];
-    for (const id of messageIdsOldestFirst ?? []) {
-        const message = messagesById?.[id];
-        if (!message) continue;
-        items.push({
-            kind: 'message',
-            id: message.id,
-            messageId: message.id,
-            createdAt: message.createdAt,
-            seq: null,
-        });
-    }
-    if ((pendingMessages ?? []).length > 0) {
-        items.push({
-            kind: 'pending-queue',
-            id: 'pending-queue',
-            pendingMessages,
-            discardedMessages: [],
-        });
-    }
-    for (const draft of actionDrafts ?? []) {
-        items.push({
-            kind: 'action-draft',
-            id: `draft:${draft.id}`,
-            draft,
-        });
-    }
-    return items;
-}
-
-export function createLegacyChatListItemsModuleMock(
-    buildChatListItems: (options: {
-        actionDrafts?: any[];
-        messageIdsOldestFirst?: string[];
-        messagesById?: Record<string, any>;
-        pendingMessages?: any[];
-    }) => any[] = buildLegacyChatListItems,
-) {
-    return {
-        buildChatListItems,
-        buildChatListItemsCached: (options: any) => ({
-            cache: null,
-            items: buildChatListItems(options),
-        }),
-    };
-}
-
-export async function createLegacyChatListReactNativeMock(options: {
-    platformOs?: 'web' | 'ios';
-} = {}) {
-    const platformOs = options.platformOs ?? 'web';
-
-    return createReactNativeWebMock({
-        Platform: {
-            OS: platformOs,
-            select: (values: Record<string, unknown>) =>
-                values?.[platformOs] ?? values?.default,
-        },
-        View: (props: any) => React.createElement('View', props, props.children),
-        Pressable: ({ children, ...props }: any) => React.createElement('Pressable', props, children),
-        ActivityIndicator: () => React.createElement('ActivityIndicator'),
-        FlatList: (props: any) => {
-            legacyChatListHarnessState.capturedFlatListProps = props;
-            if (typeof props.ref === 'function') {
-                props.ref(legacyChatListHarnessState.flatListRefValue);
-            } else if (props.ref && typeof props.ref === 'object') {
-                props.ref.current = legacyChatListHarnessState.flatListRefValue;
-            }
-            const children: any[] = [];
-            if (props.ListHeaderComponent) children.push(props.ListHeaderComponent);
-            if (Array.isArray(props.data) && typeof props.renderItem === 'function') {
-                for (const item of props.data) {
-                    children.push(props.renderItem({ item }));
-                }
-            }
-            if (props.ListFooterComponent) children.push(props.ListFooterComponent);
-            return React.createElement('FlatList', null, ...children);
-        },
-    });
-}
-
-export async function createLegacyChatListStorageMock(
-    importOriginal: <T>() => Promise<T>,
-) {
-    return createStorageModuleMock({
-        importOriginal,
-        overrides: {
-            storage: createStorageStoreMock(createLegacyChatListMessagesSnapshot()),
-            useSession: () => legacyChatListHarnessState.sessionState,
-            useSessionTranscriptIds: () => {
-                const committedMessages = legacyChatListHarnessState.sessionMessagesState.messages ?? [];
-                return {
-                    ids: committedMessages.map((message: any) => message.id),
-                    isLoaded: legacyChatListHarnessState.sessionMessagesState.isLoaded,
-                };
-            },
-            useSessionMessagesById: () => {
-                const committedMessages = legacyChatListHarnessState.sessionMessagesState.messages ?? [];
-                return Object.fromEntries(committedMessages.map((message: any) => [message.id, message]));
-            },
-            useSessionMessagesReducerState: () => createReducer(),
-            useSessionForkSupportSource: () => null,
-            useSessionWorkspacePath: () => null,
-            useForkedTranscriptSnapshot: () => null,
-            useSessionPendingMessages: () => legacyChatListHarnessState.sessionPendingState,
-            useSessionActionDrafts: () => legacyChatListHarnessState.sessionActionDraftsState,
-            useSessionLatestThinkingMessageId: () => null,
-            useSessionLatestThinkingMessageActivityAtMs: () => null,
-            useMessage: (_sessionId: string, messageId: string) =>
-                (legacyChatListHarnessState.sessionMessagesState.messages ?? []).find((message: any) => message.id === messageId) ?? null,
-            useSetting: (key: string) => legacyChatListHarnessState.settingValues[key],
-            getStorage: () => createStorageStoreMock(createLegacyChatListMessagesSnapshot()),
-        },
-    });
-}
-
-export function getCapturedFlatListProps() {
-    return legacyChatListHarnessState.capturedFlatListProps;
-}
-
-export function requireCapturedFlatListProps() {
-    const capturedFlatListProps = getCapturedFlatListProps();
-    if (!capturedFlatListProps) {
-        throw new Error('Expected the legacy ChatList harness to capture FlatList props');
-    }
-    return capturedFlatListProps;
-}
-
-export async function flushLegacyChatListEffects(
-    options: FlushHookEffectsOptions = {},
-): Promise<void> {
-    await flushHookEffects({
-        cycles: options.cycles ?? 2,
-        turns: options.turns ?? 1,
-        advanceTimersMs: options.advanceTimersMs,
-        runAllTimers: options.runAllTimers,
-        frames: options.frames,
-    });
-}
-
-export async function triggerLegacyChatListScroll(
-    offsetY: number,
-    options: FlushHookEffectsOptions = {},
-): Promise<void> {
-    const capturedFlatListProps = requireCapturedFlatListProps();
-    await act(async () => {
-        capturedFlatListProps.onScroll?.({
-            nativeEvent: {
-                contentOffset: { y: offsetY },
-            },
-        });
-    });
-    await flushLegacyChatListEffects(options);
-}
-
-export async function triggerLegacyChatListInitialFill(
-    options: Readonly<{
-        contentHeight?: number;
-        contentWidth?: number;
-        flushOptions?: FlushHookEffectsOptions;
-        layoutHeight?: number;
-        layoutWidth?: number;
-    }> = {},
-): Promise<void> {
-    const capturedFlatListProps = requireCapturedFlatListProps();
-    await act(async () => {
-        capturedFlatListProps.onLayout?.({
-            nativeEvent: {
-                layout: {
-                    height: options.layoutHeight ?? 800,
-                    width: options.layoutWidth ?? 400,
-                },
-            },
-        });
-        capturedFlatListProps.onContentSizeChange?.(
-            options.contentWidth ?? 400,
-            options.contentHeight ?? 200,
-        );
-    });
-    await flushLegacyChatListEffects(options.flushOptions);
-}
-
-export async function triggerLegacyChatListEndReached(
-    options: FlushHookEffectsOptions = {},
-): Promise<void> {
-    const capturedFlatListProps = requireCapturedFlatListProps();
-    await act(async () => {
-        capturedFlatListProps.onEndReached?.();
-    });
-    await flushLegacyChatListEffects(options);
-}
-
-export async function renderLegacyChatList(
+export async function renderFlashListChatListSession(
     options: Parameters<typeof renderScreen>[1] = {},
-): Promise<RenderScreenResult> {
+): Promise<FlashListChatListHarness> {
     const { ChatList } = await import('@/components/sessions/transcript/ChatList');
-    return renderScreen(
+    return renderFlashListChatList(
         React.createElement(ChatList, {
-            session: { ...legacyChatListHarnessState.sessionState },
+            session: { ...flashListChatListHarnessState.sessionState },
         }),
         options,
     );
@@ -985,9 +743,10 @@ export type FlashListChatListHarness = ChatListHarness & Readonly<{
     triggerContentSizeChange: typeof triggerFlashListChatListContentSizeChange;
     triggerInitialFill: typeof triggerFlashListChatListInitialFill;
     triggerLoad: typeof triggerFlashListChatListLoad;
-    triggerPointerDown: typeof triggerFlashListChatListPointerDown;
-    triggerScroll: typeof triggerFlashListChatListScroll;
-    triggerStartReached: typeof triggerFlashListChatListStartReached;
+	triggerPointerDown: typeof triggerFlashListChatListPointerDown;
+	triggerScroll: typeof triggerFlashListChatListScroll;
+	triggerEndReached: typeof triggerFlashListChatListEndReached;
+	triggerStartReached: typeof triggerFlashListChatListStartReached;
 }>;
 
 export async function renderChatList(
@@ -1023,6 +782,7 @@ export async function renderFlashListChatList(
         triggerLoad: triggerFlashListChatListLoad,
         triggerPointerDown: triggerFlashListChatListPointerDown,
         triggerScroll: triggerFlashListChatListScroll,
+        triggerEndReached: triggerFlashListChatListEndReached,
         triggerStartReached: triggerFlashListChatListStartReached,
     };
 }

@@ -24,7 +24,34 @@ let nextConsumerId = 1;
 const mountedTranscriptConsumerIdentitiesByConsumerId = new Map<number, Readonly<{
     sessionId: string;
     serverId: string | null;
+    /**
+     * Retention-only holds keep a session's materialized transcript resident in memory
+     * (see `sync/engine/sessions/sessionTranscriptRetention.ts`) but intentionally do NOT
+     * make the session a realtime full-content consumer: hidden-but-mounted surfaces stay
+     * on the projection-only routing path.
+     */
+    retentionOnly: boolean;
 }>>();
+
+type TranscriptConsumerReleaseListener = (sessionId: string) => void;
+
+// Hoisted-function + globalThis-keyed storage (same pattern as activeViewingSession.ts):
+// sync.ts subscribes during its own module evaluation and this module can sit inside an
+// import cycle with it, so a module-scoped `const` Set would hit the TDZ.
+function getTranscriptConsumerReleaseListeners(): Set<TranscriptConsumerReleaseListener> {
+    // Key inlined (not a module-scoped const) so this hoisted function is TDZ-safe.
+    const host = globalThis as typeof globalThis & {
+        __HAPPIER_TRANSCRIPT_CONSUMER_RELEASE_LISTENERS__?: Set<TranscriptConsumerReleaseListener>;
+    };
+    host.__HAPPIER_TRANSCRIPT_CONSUMER_RELEASE_LISTENERS__ ??= new Set<TranscriptConsumerReleaseListener>();
+    return host.__HAPPIER_TRANSCRIPT_CONSUMER_RELEASE_LISTENERS__;
+}
+
+function notifyTranscriptConsumerReleased(sessionId: string): void {
+    for (const listener of getTranscriptConsumerReleaseListeners()) {
+        listener(sessionId);
+    }
+}
 
 function normalizeSessionId(value: unknown): string | null {
     if (typeof value !== 'string') return null;
@@ -44,18 +71,28 @@ function resolveRegisteredServerId(sessionId: string, serverId?: string | null):
     return resolveServerProfileScopeIdForIdentifier(resolvedServerId) || resolvedServerId;
 }
 
-function resolveMountedConsumerServerId(consumerId: number, sessionId: string, serverId: string | null): string | null {
+function resolveMountedConsumerServerId(
+    consumerId: number,
+    sessionId: string,
+    serverId: string | null,
+    retentionOnly: boolean,
+): string | null {
     if (serverId) return serverId;
     const resolvedServerId = resolveRegisteredServerId(sessionId);
     if (!resolvedServerId) return null;
     mountedTranscriptConsumerIdentitiesByConsumerId.set(consumerId, {
         sessionId,
         serverId: resolvedServerId,
+        retentionOnly,
     });
     return resolvedServerId;
 }
 
-export function registerSessionRealtimeTranscriptConsumer(sessionId: string, serverId?: string | null): () => void {
+function registerMountedTranscriptConsumer(
+    sessionId: string,
+    serverId: string | null | undefined,
+    retentionOnly: boolean,
+): () => void {
     const normalizedSessionId = normalizeSessionId(sessionId);
     if (!normalizedSessionId) {
         return () => {};
@@ -65,10 +102,30 @@ export function registerSessionRealtimeTranscriptConsumer(sessionId: string, ser
     mountedTranscriptConsumerIdentitiesByConsumerId.set(consumerId, {
         sessionId: normalizedSessionId,
         serverId: resolveRegisteredServerId(normalizedSessionId, serverId),
+        retentionOnly,
     });
     return () => {
-        mountedTranscriptConsumerIdentitiesByConsumerId.delete(consumerId);
+        if (mountedTranscriptConsumerIdentitiesByConsumerId.delete(consumerId)) {
+            notifyTranscriptConsumerReleased(normalizedSessionId);
+        }
     };
+}
+
+export function registerSessionRealtimeTranscriptConsumer(sessionId: string, serverId?: string | null): () => void {
+    return registerMountedTranscriptConsumer(sessionId, serverId, false);
+}
+
+/**
+ * Registers a mount-lifetime transcript retention hold for `sessionId`.
+ *
+ * Used by transcript-rendering surfaces (`SessionView` via `useSessionSurfaceActivation`)
+ * for their FULL mounted lifetime — including hidden-but-mounted back-stack screens — so
+ * the transcript eviction sweep can never free a transcript that is still rendered
+ * somewhere in the navigation stack. Unlike `registerSessionRealtimeTranscriptConsumer`,
+ * this does NOT opt the session into realtime full-content routing.
+ */
+export function registerSessionTranscriptRetentionConsumer(sessionId: string, serverId?: string | null): () => void {
+    return registerMountedTranscriptConsumer(sessionId, serverId, true);
 }
 
 export function readMountedSessionRealtimeTranscriptConsumerSessionIds(serverId?: string | null): string[] {
@@ -80,7 +137,8 @@ export function readMountedSessionRealtimeTranscriptConsumerSessionIds(serverId?
     const sessionIds = new Set<string>();
 
     for (const [consumerId, entry] of mountedTranscriptConsumerIdentitiesByConsumerId.entries()) {
-        const resolvedServerId = resolveMountedConsumerServerId(consumerId, entry.sessionId, entry.serverId);
+        if (entry.retentionOnly) continue;
+        const resolvedServerId = resolveMountedConsumerServerId(consumerId, entry.sessionId, entry.serverId, entry.retentionOnly);
         if (
             resolvedSourceServerId
             && (!resolvedServerId || !areServerProfileIdentifiersEquivalent(resolvedServerId, resolvedSourceServerId))
@@ -91,6 +149,32 @@ export function readMountedSessionRealtimeTranscriptConsumerSessionIds(serverId?
     }
 
     return Array.from(sessionIds);
+}
+
+/**
+ * All sessions with at least one mounted transcript consumer of ANY kind (realtime
+ * full-content consumers and retention-only holds). This is the eviction-eligibility
+ * read: a session listed here must never have its transcript evicted.
+ */
+export function readMountedSessionTranscriptConsumerSessionIdsForRetention(): string[] {
+    if (mountedTranscriptConsumerIdentitiesByConsumerId.size === 0) return [];
+    const sessionIds = new Set<string>();
+    for (const entry of mountedTranscriptConsumerIdentitiesByConsumerId.values()) {
+        sessionIds.add(entry.sessionId);
+    }
+    return Array.from(sessionIds);
+}
+
+/**
+ * Notifies when a mounted transcript consumer unregisters (a transcript surface
+ * unmounted). The transcript retention sweep uses this as its trigger.
+ */
+export function subscribeSessionTranscriptConsumerReleases(listener: TranscriptConsumerReleaseListener): () => void {
+    const listeners = getTranscriptConsumerReleaseListeners();
+    listeners.add(listener);
+    return () => {
+        listeners.delete(listener);
+    };
 }
 
 export function clearMountedSessionRealtimeTranscriptConsumers(): void {

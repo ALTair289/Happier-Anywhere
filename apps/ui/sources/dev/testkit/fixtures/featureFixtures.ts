@@ -42,13 +42,14 @@ type RootLayoutFeaturesOverrides = Omit<Partial<RootLayoutFeatures>, 'features' 
             encryption?: Partial<RootLayoutFeatures['features']['encryption']>;
             e2ee?: Partial<RootLayoutFeatures['features']['e2ee']>;
         }>;
-    capabilities?: Omit<Partial<RootLayoutFeatures['capabilities']>, 'oauth' | 'social' | 'auth' | 'encryption' | 'pets'> &
+    capabilities?: Omit<Partial<RootLayoutFeatures['capabilities']>, 'oauth' | 'social' | 'auth' | 'encryption' | 'pets' | 'sharing'> &
         Readonly<{
             oauth?: Partial<RootLayoutFeatures['capabilities']['oauth']>;
             social?: Partial<RootLayoutFeatures['capabilities']['social']>;
             auth?: Partial<RootLayoutFeatures['capabilities']['auth']>;
             encryption?: Partial<RootLayoutFeatures['capabilities']['encryption']>;
             pets?: Partial<RootLayoutFeatures['capabilities']['pets']>;
+            sharing?: Partial<RootLayoutFeatures['capabilities']['sharing']>;
         }>;
 }>;
 
@@ -95,6 +96,7 @@ const BASE_ROOT_LAYOUT_FEATURES: RootLayoutFeatures = {
             public: { enabled: true },
             contentKeys: { enabled: true },
             pendingQueueV2: { enabled: false },
+            pendingDeliveryState: { enabled: false },
         },
         sessions: {
             enabled: false,
@@ -156,6 +158,12 @@ const BASE_ROOT_LAYOUT_FEATURES: RootLayoutFeatures = {
         },
         voice: { configured: false, provider: null, requested: false, disabledByBuildPolicy: false },
         pets: DEFAULT_PETS_CAPABILITIES,
+        sharing: {
+            pendingQueueV2: {
+                deliveryState: false,
+                deliveryBlockedReason: false,
+            },
+        },
         encryption: {
             storagePolicy: 'required_e2ee',
             allowAccountOptOut: false,
@@ -242,6 +250,7 @@ export function createRootLayoutFeaturesResponse(overrides?: RootLayoutFeaturesO
     const nextCapabilitiesEncryption: Partial<RootLayoutFeatures['capabilities']['encryption']> =
         nextCapabilities.encryption ?? {};
     const nextCapabilitiesPets: Partial<RootLayoutFeatures['capabilities']['pets']> = nextCapabilities.pets ?? {};
+    const nextCapabilitiesSharing: Partial<RootLayoutFeatures['capabilities']['sharing']> = nextCapabilities.sharing ?? {};
     const nextCapabilitiesAuthRecovery: Partial<RootLayoutFeatures['capabilities']['auth']['recovery']> =
         nextCapabilitiesAuth.recovery ?? {};
     const nextCapabilitiesAuthUi: Partial<RootLayoutFeatures['capabilities']['auth']['ui']> =
@@ -425,6 +434,14 @@ export function createRootLayoutFeaturesResponse(overrides?: RootLayoutFeaturesO
                 friends: {
                     ...BASE_ROOT_LAYOUT_FEATURES.capabilities.social.friends,
                     ...(nextCapabilitiesSocial.friends ?? {}),
+                },
+            },
+            sharing: {
+                ...BASE_ROOT_LAYOUT_FEATURES.capabilities.sharing,
+                ...nextCapabilitiesSharing,
+                pendingQueueV2: {
+                    ...BASE_ROOT_LAYOUT_FEATURES.capabilities.sharing.pendingQueueV2,
+                    ...(nextCapabilitiesSharing.pendingQueueV2 ?? {}),
                 },
             },
             oauth: {

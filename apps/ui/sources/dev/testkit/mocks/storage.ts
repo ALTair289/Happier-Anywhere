@@ -73,6 +73,18 @@ export function createStorageModuleStub<TOverrides extends object>(overrides: TO
     const allSessionListRenderables = [] as ReturnType<StorageModule['useAllSessionListRenderables']>;
     const allAttentionSessions = [] as ReturnType<StorageModule['useAllSessionsForAttention']>;
     const allAttentionSessionListRenderables = [] as ReturnType<StorageModule['useAllSessionListRenderablesForAttention']>;
+    const sessionOrganizationProjection = {
+        schemaVersion: null,
+        version: null,
+        pinnedSessionIds: [],
+        pinsBySessionId: {},
+        foldersById: {},
+        folderAssignmentsBySessionId: {},
+        tagsById: {},
+        tagAssignmentsBySessionId: {},
+        orderEntriesByScopeKey: {},
+        labelsByLabelKey: {},
+    } satisfies NonNullable<ReturnType<StorageModule['useSessionOrganizationProjection']>>;
     const sessionTranscriptIds = [] as string[];
     const sessionMessagesById = {} as ReturnType<StorageModule['useSessionMessagesById']>;
     const sessionMessagesReducerState = null as unknown as ReturnType<StorageModule['useSessionMessagesReducerState']>;
@@ -152,6 +164,7 @@ export function createStorageModuleStub<TOverrides extends object>(overrides: TO
         useAllSessionListRenderables: () => allSessionListRenderables,
         useAllSessionsForAttention: () => allAttentionSessions,
         useAllSessionListRenderablesForAttention: () => allAttentionSessionListRenderables,
+        useSessionOrganizationProjection: () => sessionOrganizationProjection,
         useMachine: () => null,
         useIsDataReady: () => true,
         useSocketStatus: () => socketStatus,

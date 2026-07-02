@@ -2,6 +2,7 @@ import type { ReadinessProbeResult } from '@happier-dev/connection-supervisor';
 
 import { runtimeFetch } from '@/utils/system/runtimeFetch';
 
+import { buildRetryLaterProbeResultFromResponse } from './retryLaterProbeResult';
 import { sanitizeEndpointErrorMessage } from './sanitizeEndpointErrorMessage';
 import { isRuntimeActive } from '@/utils/runtime/isRuntimeActive';
 
@@ -25,23 +26,6 @@ function joinBaseAndPath(baseUrl: string, path: string): string {
     const base = String(baseUrl ?? '').replace(/\/+$/, '');
     const normalizedPath = path.startsWith('/') ? path : `/${path}`;
     return `${base}${normalizedPath}`;
-}
-
-function parseRetryAfterMs(headers: Headers): number | undefined {
-    const raw = headers.get('Retry-After') ?? headers.get('retry-after');
-    if (!raw) return undefined;
-    const trimmed = raw.trim();
-    if (!trimmed) return undefined;
-    const seconds = Number.parseInt(trimmed, 10);
-    if (Number.isFinite(seconds) && seconds > 0) {
-        return seconds * 1000;
-    }
-    const timestamp = Date.parse(trimmed);
-    if (Number.isFinite(timestamp)) {
-        const deltaMs = timestamp - Date.now();
-        if (deltaMs > 0) return deltaMs;
-    }
-    return undefined;
 }
 
 async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
@@ -111,6 +95,9 @@ export function createEndpointReadinessProbe(params: Readonly<{
                 timeoutMs,
             );
             if (versionResponse.status !== 200) {
+                if (versionResponse.status === 429 || versionResponse.status === 503) {
+                    return buildRetryLaterProbeResultFromResponse(versionResponse, `Version probe returned ${versionResponse.status}`);
+                }
                 return {
                     status: 'server_unreachable',
                     errorMessage: `Version probe returned ${versionResponse.status}`,
@@ -135,18 +122,11 @@ export function createEndpointReadinessProbe(params: Readonly<{
             );
 
             if (healthResponse.status === 429) {
-                return {
-                    status: 'retry_later',
-                    retryAfterMs: parseRetryAfterMs(healthResponse.headers),
-                    errorMessage: `Health probe returned ${healthResponse.status}`,
-                };
+                return buildRetryLaterProbeResultFromResponse(healthResponse, `Health probe returned ${healthResponse.status}`);
             }
 
             if (healthResponse.status === 503 || healthResponse.status >= 500) {
-                return {
-                    status: 'retry_later',
-                    errorMessage: `Health probe returned ${healthResponse.status}`,
-                };
+                return buildRetryLaterProbeResultFromResponse(healthResponse, `Health probe returned ${healthResponse.status}`);
             }
         } catch (error) {
             return {
@@ -183,18 +163,11 @@ export function createEndpointReadinessProbe(params: Readonly<{
             }
 
             if (authResponse.status === 429) {
-                return {
-                    status: 'retry_later',
-                    retryAfterMs: parseRetryAfterMs(authResponse.headers),
-                    errorMessage: `Authenticated probe returned ${authResponse.status}`,
-                };
+                return buildRetryLaterProbeResultFromResponse(authResponse, `Authenticated probe returned ${authResponse.status}`);
             }
 
             if (authResponse.status >= 500) {
-                return {
-                    status: 'retry_later',
-                    errorMessage: `Authenticated probe returned ${authResponse.status}`,
-                };
+                return buildRetryLaterProbeResultFromResponse(authResponse, `Authenticated probe returned ${authResponse.status}`);
             }
 
             if (authResponse.status !== 200) {

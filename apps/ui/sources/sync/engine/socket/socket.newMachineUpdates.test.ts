@@ -12,6 +12,7 @@ import {
 } from '@/sync/domains/session/activeViewingSession';
 import { useVoiceTargetStore } from '@/voice/runtime/voiceTargetStore';
 import * as executionRunActivityBus from '@/sync/runtime/executionRuns/executionRunActivityBus';
+import { resetTranscriptStreamSegmentAssemblyForTests } from '@/sync/engine/sessions/transcriptStreamSegmentAssembly';
 import { flushMachineActivityUpdates, handleEphemeralSocketUpdate, handleUpdateContainer } from './socket';
 
 const initialStorageState = storage.getState();
@@ -80,6 +81,25 @@ function buildTranscriptStreamSegmentUpdate(sessionId: string, content: unknown,
             content,
             createdAt: 1_000,
             updatedAt: 1_010,
+        },
+    };
+}
+
+function buildTranscriptStreamSegmentDeltaUpdate(
+    sessionId: string,
+    content: unknown,
+    opts: { localId?: string; tick: number; baseLength: number },
+) {
+    return {
+        type: 'transcript-stream-segment-delta',
+        sessionId,
+        message: {
+            localId: opts.localId ?? 'segment-1',
+            tick: opts.tick,
+            baseLength: opts.baseLength,
+            content,
+            createdAt: 1_000,
+            updatedAt: 1_040,
         },
     };
 }
@@ -430,6 +450,68 @@ describe('socket update handling: transcript stream segment ephemerals', () => {
             role: 'agent',
             content: [{ type: 'text', text: 'Hello live' }],
         });
+    });
+
+    it('applies transcript stream segment deltas by reconstructing text for live-consumed sessions', async () => {
+        resetTranscriptStreamSegmentAssemblyForTests();
+        const sessionId = 'plain_stream_delta_session';
+        markSessionVisible(sessionId);
+        setActiveViewingSessionId(sessionId);
+        storage.getState().applySessions([buildSession(sessionId, 'plain')]);
+        const applyMessages = vi.fn();
+        const baseParams = {
+            addActivityUpdate: vi.fn(),
+            addMachineActivityUpdate: vi.fn(),
+            getSessionEncryption: vi.fn(() => null),
+            getSession: (id: string) => storage.getState().sessions[id],
+            applyMessages,
+        };
+
+        await handleEphemeralSocketUpdate({
+            ...baseParams,
+            update: buildTranscriptStreamSegmentUpdate(
+                sessionId,
+                buildPlainTranscriptStreamSegmentContent('Hello'),
+            ),
+        });
+        await handleEphemeralSocketUpdate({
+            ...baseParams,
+            update: buildTranscriptStreamSegmentDeltaUpdate(
+                sessionId,
+                buildPlainTranscriptStreamSegmentContent(' live'),
+                { tick: 2, baseLength: 5 },
+            ),
+        });
+
+        expect(applyMessages).toHaveBeenCalledTimes(2);
+        const [, messages] = applyMessages.mock.calls[1] as [string, NormalizedMessage[]];
+        expect(messages[0]).toMatchObject({
+            localId: 'segment-1',
+            role: 'agent',
+            content: [{ type: 'text', text: 'Hello live' }],
+        });
+    });
+
+    it('drops transcript stream segment deltas for sessions without a live transcript consumer', async () => {
+        resetTranscriptStreamSegmentAssemblyForTests();
+        const sessionId = 'hidden_stream_delta_session';
+        storage.getState().applySessions([buildSession(sessionId, 'plain')]);
+        const applyMessages = vi.fn();
+
+        await handleEphemeralSocketUpdate({
+            update: buildTranscriptStreamSegmentDeltaUpdate(
+                sessionId,
+                buildPlainTranscriptStreamSegmentContent(' hidden'),
+                { tick: 2, baseLength: 5 },
+            ),
+            addActivityUpdate: vi.fn(),
+            addMachineActivityUpdate: vi.fn(),
+            getSessionEncryption: vi.fn(() => null),
+            getSession: (id: string) => storage.getState().sessions[id],
+            applyMessages,
+        });
+
+        expect(applyMessages).not.toHaveBeenCalled();
     });
 
     it('drops hidden non-coalesced encrypted stream segments before decrypting', async () => {

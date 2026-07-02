@@ -105,6 +105,7 @@ export const Animated = {
         start: (cb?: any) => {
             cb?.({ finished: true });
         },
+        stop: () => {},
     }),
     parallel: (steps: Array<{ start?: (cb?: (result: { finished: boolean }) => void) => void }>) => ({
         start: (cb?: (result: { finished: boolean }) => void) => {
