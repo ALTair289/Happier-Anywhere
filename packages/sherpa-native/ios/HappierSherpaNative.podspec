@@ -61,5 +61,9 @@ Pod::Spec.new do |s|
 
   s.libraries = 'c++'
 
-  s.source_files = '**/*.{h,m,mm,swift}'
+  s.source_files = [
+    'HappierSherpaNativeModule.swift',
+    'HappierSherpaOfflineTtsEngine.{h,mm}',
+    'HappierSherpaOnlineAsrEngine.{h,mm}'
+  ]
 end

@@ -1,6 +1,8 @@
 #import "HappierSherpaOfflineTtsEngine.h"
 
 #include <atomic>
+#include <cstring>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
