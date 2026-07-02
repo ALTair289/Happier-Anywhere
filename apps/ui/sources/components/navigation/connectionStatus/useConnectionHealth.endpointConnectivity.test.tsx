@@ -7,6 +7,7 @@ import { installConnectionStatusCommonModuleMocks } from './connectionStatusTest
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
 let endpointStatus: import('@happier-dev/connection-supervisor').ManagedConnectionPhase = 'online';
+let endpointReason: import('@happier-dev/connection-supervisor').ManagedConnectionReason = null;
 let socketStatus: import('./connectionHealthTypes').ConnectionSocketStatus = 'connected';
 let syncErrorKind: 'auth' | 'network' | null = null;
 let syncErrorServerId: string | null = null;
@@ -31,7 +32,7 @@ installConnectionStatusCommonModuleMocks({
         return createPartialStorageModuleMock(importOriginal, {
             useEndpointConnectivity: () => ({
                 status: endpointStatus,
-                reason: null,
+                reason: endpointReason,
                 attempt: 0,
                 nextRetryAt: null,
                 lastConnectedAt: null,
@@ -61,6 +62,7 @@ installConnectionStatusCommonModuleMocks({
 describe('useConnectionHealth (endpoint connectivity integration)', () => {
     beforeEach(() => {
         endpointStatus = 'online';
+        endpointReason = null;
         socketStatus = 'connected';
         syncErrorKind = null;
         syncErrorServerId = null;
@@ -77,6 +79,23 @@ describe('useConnectionHealth (endpoint connectivity integration)', () => {
         const hook = await renderHook(() => useConnectionHealth());
 
         expect(hook.getCurrent().kind).toBe('server_unreachable');
+    });
+
+    it('renders planned server restarts as neutral reconnect with known machine state', async () => {
+        endpointStatus = 'offline';
+        endpointReason = 'server_restarting';
+        socketStatus = 'disconnected';
+        machines = [
+            { id: 'm1', active: true, activeAt: Date.now(), revokedAt: null, daemonState: { status: 'running' } },
+        ];
+
+        const { useConnectionHealth } = await import('./useConnectionHealth');
+        const hook = await renderHook(() => useConnectionHealth());
+
+        expect(hook.getCurrent().kind).toBe('server_restarting');
+        expect(hook.getCurrent().tone).toBe('neutral');
+        expect(hook.getCurrent().statusLabelKey).toBe('status.connecting');
+        expect(hook.getCurrent().machineLabelKey).toBe('status.online');
     });
 
     it('surfaces auth_required when endpoint auth_failed', async () => {

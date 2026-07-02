@@ -18,15 +18,19 @@ import {
 import { createSyncSocketTransport } from '@/sync/api/session/connection/createSyncSocketTransport';
 import {
     reportServerUnreachable,
+    invalidateServerReachabilitySupervisor,
+    reportServerRestarting,
     startServerReachabilitySupervisor,
     stopServerReachabilitySupervisor,
     subscribeServerReachabilityState,
 } from '@/sync/runtime/connectivity/serverReachabilitySupervisorPool';
 import { createNotAuthenticatedError } from '@/sync/runtime/connectivity/authErrors';
 import { isSocketIoAckTimeoutError, raceSocketIoAckTimeout } from '@/sync/runtime/socketIoAckTimeout';
+import type { SocketRpcAuthorizationContext } from '@happier-dev/protocol/rpc';
 
 const STATIC_EXPO_PUBLIC_HAPPIER_SOCKET_ACK_AUTH_SETTLE_TIMEOUT_MS =
     process.env.EXPO_PUBLIC_HAPPIER_SOCKET_ACK_AUTH_SETTLE_TIMEOUT_MS;
+const SOCKET_PLANNED_RESTART_PROBE_DELAY_MS = 250;
 
 function readSocketAckAuthSettleTimeoutMs(): number {
     const raw = String(STATIC_EXPO_PUBLIC_HAPPIER_SOCKET_ACK_AUTH_SETTLE_TIMEOUT_MS ?? '').trim();
@@ -34,6 +38,16 @@ function readSocketAckAuthSettleTimeoutMs(): number {
     const parsed = Number.parseInt(raw, 10);
     if (!Number.isFinite(parsed)) return 250;
     return Math.max(0, Math.min(5_000, parsed));
+}
+
+function readSocketPlannedRestartProbeDelayMs(payload: unknown): number {
+    if (typeof payload !== 'object' || payload === null) {
+        return SOCKET_PLANNED_RESTART_PROBE_DELAY_MS;
+    }
+    const raw = (payload as { retryAfterMs?: unknown }).retryAfterMs;
+    return typeof raw === 'number' && Number.isFinite(raw) && raw > 0
+        ? Math.min(SOCKET_PLANNED_RESTART_PROBE_DELAY_MS, Math.floor(raw))
+        : SOCKET_PLANNED_RESTART_PROBE_DELAY_MS;
 }
 
 function readSessionEncryptionModeFromLocalState(sessionId: string): 'plain' | 'e2ee' | null {
@@ -126,17 +140,23 @@ function buildSocketRpcCallPayload(params: Readonly<{
     method: string;
     payload: unknown;
     timeoutMs?: number;
-}>): Readonly<{ method: string; params: unknown; timeoutMs?: number }> {
+    authorization?: SocketRpcAuthorizationContext;
+}>): Readonly<{ method: string; params: unknown; timeoutMs?: number; authorization?: SocketRpcAuthorizationContext }> {
+    const authorization = params.authorization
+        ? { authorization: params.authorization }
+        : {};
     if (typeof params.timeoutMs === 'number' && params.timeoutMs > 0) {
         return {
             method: params.method,
             params: params.payload,
             timeoutMs: params.timeoutMs,
+            ...authorization,
         };
     }
     return {
         method: params.method,
         params: params.payload,
+        ...authorization,
     };
 }
 
@@ -374,7 +394,7 @@ class ApiSocket {
         machineId: string,
         method: string,
         params: A,
-        options?: { timeoutMs?: number },
+        options?: { timeoutMs?: number; authorization?: SocketRpcAuthorizationContext },
     ): Promise<R> {
         const machineEncryption = this.encryption!.getMachineEncryption(machineId);
         if (!machineEncryption) {
@@ -387,6 +407,7 @@ class ApiSocket {
                 method: `${machineId}:${method}`,
                 payload: await machineEncryption.encryptRaw(params),
                 timeoutMs: options?.timeoutMs,
+                authorization: options?.authorization,
             }),
             options,
         );
@@ -583,6 +604,14 @@ class ApiSocket {
         });
     }
 
+    private invalidateReachabilityAfterSocketTransportFailure(error: unknown): void {
+        const config = this.config;
+        if (!config) return;
+        void invalidateServerReachabilitySupervisor({ serverUrl: config.endpoint, token: config.token }).catch(() => {
+            reportServerUnreachable(config.endpoint, error);
+        });
+    }
+
     private ensureSocketTransport(): void {
         if (!this.config) return;
         const key = `${this.config.endpoint}|${this.config.token}`;
@@ -624,16 +653,21 @@ class ApiSocket {
                     return;
                 }
                 this.pendingReconnectNotification = true;
-                reportServerUnreachable(this.config!.endpoint, event.error ?? new Error(event.reason ?? 'socket disconnect'));
+                this.invalidateReachabilityAfterSocketTransportFailure(event.error ?? new Error(event.reason ?? 'socket disconnect'));
             }),
             transport.onError((error: unknown) => {
                 this.setError(error instanceof Error ? error : new Error(String(error)));
-                reportServerUnreachable(this.config!.endpoint, error);
+                this.invalidateReachabilityAfterSocketTransportFailure(error);
             }),
         ];
     }
 
     private installSocketEventHandlers(socket: Socket) {
+        socket.on?.('server:restarting', (payload: unknown) => {
+            const config = this.config;
+            if (!config) return;
+            reportServerRestarting(config.endpoint, readSocketPlannedRestartProbeDelayMs(payload));
+        });
         socket.onAny((event, data) => {
             syncPerformanceTelemetry.measure(
                 'sync.socket.event',
