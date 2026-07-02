@@ -52,7 +52,7 @@ function buildRecoveryCreditConsumeIdempotencyKey(input: Readonly<{
         : null;
     const selector = providerCreditId.length > 0
         ? `credit:${providerCreditId}`
-        : `snapshot:${snapshotFetchedAtMs ?? 'unknown'}`;
+        : `aggregate:${snapshotFetchedAtMs ?? 'unknown'}`;
     const key = `connected-service-quota-recovery-credit:v1:${input.serviceId}:${input.profileId}:${selector}`;
     return key.length <= 256
         ? key

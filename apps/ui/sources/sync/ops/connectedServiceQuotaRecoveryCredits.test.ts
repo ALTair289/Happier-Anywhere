@@ -74,6 +74,32 @@ describe('connectedServiceQuotaRecoveryCredits ops', () => {
         });
     });
 
+    it('uses the canonical aggregate idempotency selector when no provider credit id is present', async () => {
+        machineRpcWithServerScopeMock.mockResolvedValueOnce({
+            ok: true,
+            receipt: {
+                idempotencyKey: 'connected-service-quota-recovery-credit:v1:openai-codex:work:aggregate:1000',
+                status: 'consumed',
+            },
+            snapshot: null,
+        });
+
+        const { connectedServiceQuotaRecoveryCreditConsume } = await import('./connectedServiceQuotaRecoveryCredits');
+        await connectedServiceQuotaRecoveryCreditConsume({
+            machineId: 'machine-1',
+            serverId: 'server-1',
+            serviceId: 'openai-codex',
+            profileId: 'work',
+            sourceSnapshotFetchedAtMs: 1_000,
+        });
+
+        expect(machineRpcWithServerScopeMock).toHaveBeenCalledWith(expect.objectContaining({
+            payload: expect.objectContaining({
+                idempotencyKey: 'connected-service-quota-recovery-credit:v1:openai-codex:work:aggregate:1000',
+            }),
+        }));
+    });
+
     it('fails closed for invalid input and unsupported responses', async () => {
         const { connectedServiceQuotaRecoveryCreditConsume } = await import('./connectedServiceQuotaRecoveryCredits');
 

@@ -1,10 +1,18 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import type { CodexBackendMode } from '@happier-dev/agents';
 
 import { buildSessionHandoffMetadataPatch } from './buildSessionHandoffMetadataPatch';
 
 describe('buildSessionHandoffMetadataPatch', () => {
     const legacyCodexBackendMode = '  mcp_resume  ' as unknown as CodexBackendMode;
+    const sourceText = readFileSync(fileURLToPath(new URL('./buildSessionHandoffMetadataPatch.ts', import.meta.url)), 'utf8');
+
+    it('keeps provider-specific handoff behavior behind provider catalog hooks', () => {
+        expect(sourceText).not.toContain('@happier-dev/agents');
+        expect(sourceText).not.toMatch(/providerId\s*={2,3}\s*['"](?:claude|codex|opencode)['"]/);
+    });
 
     it('stores source/target workspace roots in handoffV1 for handoff-back planning', () => {
         const updated = buildSessionHandoffMetadataPatch({
