@@ -61,17 +61,33 @@ Fix the cause, not the symptom.
 - Centralize or reuse the canonical path when the same issue exists elsewhere; do not leave parallel implementations to drift.
 - If the root cause crosses package boundaries, identify the owning boundary first, then make the smallest coherent cross-package change.
 
+## Systemic changes and split-brain prevention
+
+Treat split-brain implementations as correctness bugs. A split brain is any case where two or more active owners, registries, parsers, state machines, schemas, feature gates, provider paths, or normalization layers can make independent decisions for the same domain concept.
+
+- Do not hand off patchwork fixes. A local fix is acceptable only when the behavior truly belongs locally; otherwise fix the owning choke point.
+- Before changing behavior, map the relevant system path: inputs, normalization, state/persistence, feature gates, provider/catalog hooks, callers, readers, tests, and user-visible outputs.
+- Search beyond the immediate file for parallel logic using symbols, routes, commands, config keys, feature ids, provider ids, event types, storage keys, schema names, env vars, test fixtures, and UI identifiers.
+- If multiple paths implement the same concept, choose or create one canonical owner and migrate all in-scope callers/readers/writers to it in the same coherent change.
+- Reuse, extend, move, or extract existing code before adding new logic. New duplicate registries, fallback branches, helper stacks, or similar-but-different implementations are forbidden unless required for deployed compatibility.
+- Apply invariants at the correct layer: parse/normalize at boundaries, enforce domain rules in the domain owner, and keep UI/CLI/server adapters thin unless the behavior is adapter-specific.
+- Do not centralize coincidental duplication. If similar code represents genuinely different bounded contexts, keep it separate and name the distinction.
+- Compatibility paths must be narrow, boundary-owned, tested, and documented by the deployed shape/version they support. New writes should use the canonical path.
+- If the systemic fix is too large or blocked, do not disguise a workaround as complete. Mark `[blocked]`, explain the required canonical fix, and keep any temporary mitigation narrow and tested.
+- Before handoff, search for bypasses of the canonical owner, stale alternate paths, duplicate registries, direct callers, and compatibility leftovers; remove them or explain why they remain.
+
 ## Execution loop
 
 Use this loop for implementation work:
 
-1. Understand current behavior.
-2. Find the existing owner/pattern.
-3. Write or adjust the smallest meaningful test when behavior changes.
-4. Make the smallest coherent change.
-5. Run the narrowest relevant check.
-6. Broaden validation before handoff.
-7. Self-review the diff for scope, correctness, and evidence.
+1. Understand current behavior and reproduce/observe the issue when feasible.
+2. Map the relevant code paths, owners, readers, writers, and tests.
+3. Find the existing canonical owner/pattern.
+4. Write or adjust the smallest meaningful test when behavior changes.
+5. Make the smallest coherent systemic change at the owning choke point.
+6. Run the narrowest relevant check.
+7. Broaden validation before handoff.
+8. Self-review for duplicate paths, bypasses, and split-brain risk.
 
 ## Multi-agent safety
 
@@ -291,7 +307,9 @@ Details: `docs/binary-runtime.md` and `docs/cli-architecture.md`.
 
 ### Server (`apps/server`)
 
-- Do not create Prisma migrations yourself.
+- Do not change Prisma schema unless schema/data-model changes are explicitly in scope.
+- When schema changes are in scope, own the complete migration work: update schemas, create migrations, inspect SQL, keep affected providers in sync, and validate.
+- Migration reset/db-push/custom SQL is allowed when appropriate for the task and target database, but shared/staging/production/user-data databases require explicit approval.
 - Use transactions and `afterTx` correctly; do not perform non-transactional side effects inside DB transactions.
 - Validate inputs with Zod and keep retryable API operations idempotent.
 - Follow `apps/server/AGENTS.md` for server-specific storage/action/privacy rules.
@@ -322,6 +340,7 @@ Before finalizing:
 - Verify every requested item is covered or marked `[blocked]`.
 - Report tests/typechecks/docs checks actually run; do not fabricate evidence.
 - Mention any validation you could not run and why.
+- For non-trivial behavior changes, report the canonical owner/choke point used and any duplicate or legacy paths removed or intentionally left.
 - Ensure no unapproved `*_SUMMARY.md`, `*_ANALYSIS.md`, or similar report files were created.
 
 ## Critical reminder

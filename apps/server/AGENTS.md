@@ -46,8 +46,17 @@ Prefer existing domain folders and module owners before creating new top-level f
 
 ## Database and transactions
 
-- Do not create Prisma migrations yourself. Humans own migration creation.
-- Do not change Prisma schema unless the task explicitly requires it.
+- Do not change Prisma schema unless schema/data-model changes are explicitly in scope.
+- When schema changes are in scope, own the complete migration work:
+  - update the relevant Prisma schema(s),
+  - create/update the required migration(s) with the server workflow,
+  - keep provider-specific Postgres/SQLite/MySQL schemas and migrations in sync when affected,
+  - inspect generated SQL for data-loss or downtime risks,
+  - validate with the relevant server test/build lane.
+- Custom migration SQL, backfills, `db push`, or reset-style commands are allowed only when appropriate for the task and target database.
+  - Safe for disposable local/test databases when clearly scoped.
+  - Requires explicit approval for shared, staging, production, or user-data databases.
+- Do not use migrations as a workaround for unrelated schema drift. Identify and fix the owning schema/migration path.
 - Use `inTx` for database operations that must be transactional.
 - Use `afterTx` for events/side effects that must run only after a successful commit.
 - Do not run non-transactional side effects (file uploads, external calls, notifications, etc.) inside DB transactions.
