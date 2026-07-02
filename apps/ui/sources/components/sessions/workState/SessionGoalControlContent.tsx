@@ -5,8 +5,10 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Text, TextInput } from '@/components/ui/text/Text';
 import { t } from '@/text';
 
-import { GoalUsageSummary } from './GoalUsageSummary';
-import { canPauseOrResumeGoal, resolveGoalStatusLabelKey } from './goalActionVisibility';
+import { GoalBudgetDisclosure } from './GoalBudgetDisclosure';
+import { GoalIcon } from './goalIcon';
+import { GoalUsageMetadata } from './GoalUsageMetadata';
+import { canPauseOrResumeGoal, resolveGoalActionCapabilities, resolveGoalStatusLabelKey, type GoalActionCapabilities } from './goalActionVisibility';
 import type { SessionWorkStateItem } from './sessionWorkStateTypes';
 
 type GoalSaveBudgetDraft = Readonly<{
@@ -23,11 +25,22 @@ export function SessionGoalControlContent(props: Readonly<{
     onResume: () => void;
     onComplete: () => void;
     onClear: () => void;
+    /** Closes the whole surface from the set-first-goal form's Cancel action. */
+    onCancel?: () => void;
     busy?: boolean;
+    /**
+     * Provider capability profile applied when there is no goal item yet (the set-first-goal form),
+     * so a provider like Claude shows only edit/clear with no budget. Ignored once a goal item
+     * carries its own `goalCapabilities`.
+     */
+    capabilityFallback?: GoalActionCapabilities | null;
 }>) {
     const { theme } = useUnistyles();
     const isPaused = props.goal?.status === 'paused';
+    const capabilities = resolveGoalActionCapabilities(props.goal, props.capabilityFallback);
     const canComplete = Boolean(props.goal && props.goal.status !== 'complete' && props.goal.statusReason !== 'budgetLimited');
+    const showPauseResume = capabilities.canStop && canPauseOrResumeGoal(props.goal);
+    const showComplete = capabilities.canStop && canComplete;
     const [editing, setEditing] = React.useState(!props.goal);
     const [budgetEnabled, setBudgetEnabled] = React.useState(typeof props.goal?.tokenBudget === 'number');
     const [draftBudget, setDraftBudget] = React.useState(
@@ -106,25 +119,36 @@ export function SessionGoalControlContent(props: Readonly<{
             </Text>
         </Pressable>
     );
+    const budgetDisclosure = (
+        <GoalBudgetDisclosure
+            budgetConfigurable={capabilities.canConfigureBudget}
+            budgetEnabled={budgetEnabled}
+            draftBudget={draftBudget}
+            budgetError={budgetError}
+            busy={props.busy}
+            onBudgetEnabledChange={(enabled) => {
+                setBudgetEnabled(enabled);
+                setBudgetError(false);
+            }}
+            onDraftBudgetChange={(value) => {
+                setDraftBudget(value);
+                setBudgetError(false);
+            }}
+        />
+    );
+
     return (
         <View style={styles.root}>
-            <View style={styles.header}>
-                <View style={styles.heading}>
-                    <Text style={[styles.title, { color: theme.colors.text.primary }]}>
-                        {t('session.workState.goal.title')}
-                    </Text>
-                    {props.goal ? (
-                        <View style={[
-                            styles.statusPill,
-                            { backgroundColor: theme.colors.surface.selected },
-                        ]}>
-                            <Text style={[styles.statusText, { color: theme.colors.text.secondary }]}>
-                                {statusText}
-                            </Text>
-                        </View>
-                    ) : null}
-                </View>
-                {props.goal ? (
+            {props.goal ? (
+                <View style={styles.header}>
+                    <View style={styles.heading}>
+                        <Text style={[styles.title, { color: theme.colors.text.primary }]}>
+                            {t('session.workState.goal.title')}
+                        </Text>
+                        <Text style={[styles.statusText, { color: theme.colors.text.secondary }]} numberOfLines={1}>
+                            {statusText}
+                        </Text>
+                    </View>
                     <View style={styles.headerActions}>
                         {editing ? (
                             <>
@@ -143,7 +167,7 @@ export function SessionGoalControlContent(props: Readonly<{
                             </>
                         ) : (
                             <>
-                                {canPauseOrResumeGoal(props.goal) ? (
+                                {showPauseResume ? (
                                     <Pressable
                                         testID="session-goal-pause-resume-button"
                                         accessibilityRole="button"
@@ -156,7 +180,7 @@ export function SessionGoalControlContent(props: Readonly<{
                                         </Text>
                                     </Pressable>
                                 ) : null}
-                                {canComplete ? (
+                                {showComplete ? (
                                     <Pressable
                                         testID="session-goal-complete-button"
                                         accessibilityRole="button"
@@ -169,33 +193,49 @@ export function SessionGoalControlContent(props: Readonly<{
                                         </Text>
                                     </Pressable>
                                 ) : null}
-                                <Pressable
-                                    testID="session-goal-clear-button"
-                                    accessibilityRole="button"
-                                    onPress={props.onClear}
-                                    disabled={props.busy}
-                                    style={styles.headerActionButton}
-                                >
-                                    <Text style={[styles.secondaryActionText, { color: theme.colors.state.danger.foreground }]}>
-                                        {t('session.workState.goal.clear')}
-                                    </Text>
-                                </Pressable>
-                                <Pressable
-                                    testID="session-goal-edit-button"
-                                    accessibilityRole="button"
-                                    onPress={() => setEditing(true)}
-                                    disabled={props.busy}
-                                    style={styles.secondaryButton}
-                                >
-                                    <Text style={[styles.secondaryActionText, { color: theme.colors.text.secondary }]}>
-                                        {t('common.edit')}
-                                    </Text>
-                                </Pressable>
+                                {capabilities.canClear ? (
+                                    <Pressable
+                                        testID="session-goal-clear-button"
+                                        accessibilityRole="button"
+                                        onPress={props.onClear}
+                                        disabled={props.busy}
+                                        style={styles.headerActionButton}
+                                    >
+                                        <Text style={[styles.secondaryActionText, { color: theme.colors.state.danger.foreground }]}>
+                                            {t('session.workState.goal.clear')}
+                                        </Text>
+                                    </Pressable>
+                                ) : null}
+                                {capabilities.canEdit ? (
+                                    <Pressable
+                                        testID="session-goal-edit-button"
+                                        accessibilityRole="button"
+                                        onPress={() => setEditing(true)}
+                                        disabled={props.busy}
+                                        style={styles.secondaryButton}
+                                    >
+                                        <Text style={[styles.secondaryActionText, { color: theme.colors.text.secondary }]}>
+                                            {t('common.edit')}
+                                        </Text>
+                                    </Pressable>
+                                ) : null}
                             </>
                         )}
                     </View>
-                ) : null}
-            </View>
+                </View>
+            ) : (
+                <View style={styles.setHeader}>
+                    <GoalIcon color={theme.colors.text.primary} size={22} />
+                    <View style={styles.setHeadingText}>
+                        <Text style={[styles.title, { color: theme.colors.text.primary }]}>
+                            {t('session.workState.goal.setTitle')}
+                        </Text>
+                        <Text style={[styles.setSubtitle, { color: theme.colors.text.secondary }]}>
+                            {t('session.workState.goal.setSubtitle')}
+                        </Text>
+                    </View>
+                </View>
+            )}
             {editing ? (
                 <TextInput
                     testID="session-goal-objective-input"
@@ -209,41 +249,32 @@ export function SessionGoalControlContent(props: Readonly<{
                         {
                             color: theme.colors.text.primary,
                             borderColor: theme.colors.border.default,
-                            backgroundColor: theme.colors.surface.inset,
                         },
                     ]}
                 />
             ) : props.goal ? (
-                <View style={[
-                    styles.goalReadout,
-                    {
-                        borderColor: theme.colors.border.default,
-                        backgroundColor: theme.colors.surface.inset,
-                    },
-                ]}>
-                    <Text style={[styles.goalReadoutText, { color: theme.colors.text.primary }]} numberOfLines={4}>
+                <View style={styles.objectiveRow}>
+                    <GoalIcon color={theme.colors.text.primary} size={16} />
+                    <Text style={[styles.objectiveText, { color: theme.colors.text.primary }]} numberOfLines={4}>
                         {props.goal.title}
                     </Text>
                 </View>
             ) : null}
-            <GoalUsageSummary
-                goal={props.goal}
-                editing={editing}
-                busy={props.busy}
-                budgetEnabled={budgetEnabled}
-                draftBudget={draftBudget}
-                budgetError={budgetError}
-                onBudgetEnabledChange={(enabled) => {
-                    setBudgetEnabled(enabled);
-                    setBudgetError(false);
-                }}
-                onDraftBudgetChange={(value) => {
-                    setDraftBudget(value);
-                    setBudgetError(false);
-                }}
-            />
+            {props.goal && !editing ? <GoalUsageMetadata goal={props.goal} /> : null}
+            {editing ? budgetDisclosure : null}
             {!props.goal && editing ? (
                 <View style={styles.footerActions}>
+                    <Pressable
+                        testID="session-goal-cancel-button"
+                        accessibilityRole="button"
+                        onPress={() => props.onCancel?.()}
+                        disabled={props.busy}
+                        style={styles.secondaryButton}
+                    >
+                        <Text style={[styles.secondaryActionText, { color: theme.colors.text.secondary }]}>
+                            {t('common.cancel')}
+                        </Text>
+                    </Pressable>
                     {saveButton}
                 </View>
             ) : null}
@@ -270,38 +301,49 @@ const styles = StyleSheet.create(() => ({
         gap: 8,
         flex: 1,
     },
+    setHeader: {
+        flexDirection: 'row',
+        alignItems: 'flex-start',
+        gap: 10,
+    },
+    setHeadingText: {
+        flex: 1,
+        gap: 4,
+        minWidth: 0,
+    },
+    setSubtitle: {
+        fontSize: 12,
+        fontWeight: '400',
+        lineHeight: 16,
+    },
     title: {
         fontSize: 14,
         fontWeight: '700',
     },
-    statusPill: {
-        borderRadius: 999,
-        paddingHorizontal: 8,
-        paddingVertical: 3,
-    },
     statusText: {
-        fontSize: 11,
-        fontWeight: '700',
+        fontSize: 12,
+        fontWeight: '600',
     },
-    goalReadout: {
-        minHeight: 104,
-        borderWidth: StyleSheet.hairlineWidth,
-        borderRadius: 10,
-        paddingHorizontal: 12,
-        paddingVertical: 10,
+    objectiveRow: {
+        flexDirection: 'row',
+        alignItems: 'flex-start',
+        gap: 8,
     },
-    goalReadoutText: {
+    objectiveText: {
+        flex: 1,
         fontSize: 14,
         fontWeight: '400',
+        lineHeight: 19,
     },
     input: {
-        height: 104,
+        minHeight: 96,
         borderWidth: StyleSheet.hairlineWidth,
         borderRadius: 10,
         paddingHorizontal: 12,
         paddingVertical: 10,
         textAlignVertical: 'top',
         fontSize: 14,
+        backgroundColor: 'transparent',
     },
     headerActions: {
         flexDirection: 'row',
@@ -319,26 +361,27 @@ const styles = StyleSheet.create(() => ({
         alignItems: 'center',
         justifyContent: 'flex-end',
         gap: 12,
-        minHeight: 36,
+        minHeight: 40,
     },
     primaryButton: {
-        minHeight: 36,
+        minHeight: 40,
         minWidth: 92,
-        borderRadius: 9,
-        paddingHorizontal: 14,
+        borderRadius: 999,
+        paddingHorizontal: 16,
         justifyContent: 'center',
         alignItems: 'center',
     },
     secondaryButton: {
-        minHeight: 34,
+        minHeight: 40,
         justifyContent: 'center',
+        paddingHorizontal: 4,
     },
     actionText: {
-        fontSize: 12,
+        fontSize: 13,
         fontWeight: '700',
     },
     secondaryActionText: {
-        fontSize: 12,
+        fontSize: 13,
         fontWeight: '700',
     },
 }));

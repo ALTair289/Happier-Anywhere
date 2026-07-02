@@ -1,4 +1,5 @@
 import type {
+    SessionWorkStateGoalCapabilities,
     SessionWorkStateItem,
     SessionWorkStateKind,
     SessionWorkStateOrigin,
@@ -60,6 +61,16 @@ function readStatusReason(value: unknown): SessionWorkStateStatusReason | null {
     return value === 'budgetLimited' ? value : null;
 }
 
+function readGoalCapabilities(value: unknown): SessionWorkStateGoalCapabilities | null {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const raw = value as Record<string, unknown>;
+    const capabilities: { canEdit?: boolean; canStop?: boolean; canClear?: boolean } = {};
+    if (typeof raw.canEdit === 'boolean') capabilities.canEdit = raw.canEdit;
+    if (typeof raw.canStop === 'boolean') capabilities.canStop = raw.canStop;
+    if (typeof raw.canClear === 'boolean') capabilities.canClear = raw.canClear;
+    return Object.keys(capabilities).length > 0 ? capabilities : null;
+}
+
 function readItem(value: unknown): ReadItemResult {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return { type: 'invalid' };
     const raw = value as Record<string, unknown>;
@@ -85,12 +96,15 @@ function readItem(value: unknown): ReadItemResult {
             title,
             updatedAt,
             ...(readStatusReason(raw.statusReason) ? { statusReason: readStatusReason(raw.statusReason) as SessionWorkStateStatusReason } : {}),
+            ...(readGoalCapabilities(raw.goalCapabilities) ? { goalCapabilities: readGoalCapabilities(raw.goalCapabilities) as SessionWorkStateGoalCapabilities } : {}),
             ...(typeof raw.summary === 'string' ? { summary: raw.summary } : {}),
             ...(typeof raw.backendId === 'string' ? { backendId: raw.backendId } : {}),
             ...(typeof raw.agentId === 'string' ? { agentId: raw.agentId } : {}),
             ...(typeof raw.vendorRef === 'string' ? { vendorRef: raw.vendorRef } : {}),
             ...(typeof raw.order === 'number' && Number.isFinite(raw.order) ? { order: raw.order } : {}),
+            ...(readString(raw.parentId) ? { parentId: readString(raw.parentId) as string } : {}),
             ...(typeof raw.priority === 'string' ? { priority: raw.priority } : {}),
+            ...(typeof raw.progress === 'number' && Number.isFinite(raw.progress) && raw.progress >= 0 && raw.progress <= 1 ? { progress: raw.progress } : {}),
             ...(typeof raw.tokenBudget === 'number' && Number.isFinite(raw.tokenBudget) ? { tokenBudget: raw.tokenBudget } : {}),
             ...(raw.tokenBudget === null ? { tokenBudget: null } : {}),
             ...(typeof raw.tokensUsed === 'number' && Number.isFinite(raw.tokensUsed) ? { tokensUsed: raw.tokensUsed } : {}),
@@ -99,6 +113,17 @@ function readItem(value: unknown): ReadItemResult {
             ...(readNonNegativeNumber(raw.startedAt) !== null ? { startedAt: readNonNegativeNumber(raw.startedAt) as number } : {}),
             ...(readNonNegativeNumber(raw.completedAt) !== null ? { completedAt: readNonNegativeNumber(raw.completedAt) as number } : {}),
         },
+    };
+}
+
+function readTruncation(value: unknown): SessionWorkStateSnapshot['truncated'] | null {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const raw = value as Record<string, unknown>;
+    if (raw.reason !== 'item_limit' && raw.reason !== 'provider_limit') return null;
+    const omittedCount = readNonNegativeNumber(raw.omittedCount);
+    return {
+        reason: raw.reason,
+        ...(omittedCount !== null && Number.isInteger(omittedCount) ? { omittedCount } : {}),
     };
 }
 
@@ -115,6 +140,7 @@ function readCanonicalSnapshot(value: unknown): SessionWorkStateSnapshot | null 
         .map((item) => item.item);
     if (items.length === 0) return null;
 
+    const truncated = readTruncation(raw.truncated);
     return {
         v: 1,
         backendId,
@@ -122,6 +148,7 @@ function readCanonicalSnapshot(value: unknown): SessionWorkStateSnapshot | null 
         items,
         ...(typeof raw.agentId === 'string' ? { agentId: raw.agentId } : {}),
         ...(typeof raw.primaryItemId === 'string' || raw.primaryItemId === null ? { primaryItemId: raw.primaryItemId } : {}),
+        ...(truncated ? { truncated } : {}),
     };
 }
 
@@ -168,12 +195,35 @@ function firstItem(snapshot: SessionWorkStateSnapshot | null, predicate: (item: 
     return snapshot?.items.find(predicate) ?? null;
 }
 
+/**
+ * The session's CURRENT goal for "current goal" surfaces (the AgentInput goal chip label): only a
+ * `kind:'goal'` item with `status:'active'`. Completed, cancelled/cleared, paused, or blocked goals
+ * are deliberately NOT current, so those surfaces fall back to the "Set goal" affordance. Mirrors
+ * happy's `resolveVisibleAgentGoalStatus` (active-only). This is intentionally distinct from
+ * `resolvePrimarySessionWorkStateItem`, which also returns inactive items for the status badge.
+ */
+export function resolveActiveSessionGoalItem(snapshot: SessionWorkStateSnapshot | null): SessionWorkStateItem | null {
+    return firstItem(snapshot, (item) => item.kind === 'goal' && item.status === 'active');
+}
+
+function isTerminalWorkStateStatus(status: SessionWorkStateStatus): boolean {
+    return status === 'complete' || status === 'cancelled';
+}
+
 export function resolvePrimarySessionWorkStateItem(snapshot: SessionWorkStateSnapshot | null): SessionWorkStateItem | null {
     if (!snapshot || snapshot.items.length === 0) return null;
     const primaryId = typeof snapshot.primaryItemId === 'string' ? snapshot.primaryItemId : null;
     if (primaryId) {
         const primary = snapshot.items.find((item) => item.id === primaryId);
-        if (primary) return primary;
+        // Trust the published primary unless it is terminal (complete/cancelled) while a non-terminal
+        // item still exists: a stale/legacy primaryItemId must not pin a finished row over active
+        // work. This mirrors the protocol write-side resolver's status-rank rule (G4) so the read and
+        // write paths agree, while still surfacing a completed/cancelled item when ALL items are
+        // terminal (a history badge).
+        if (primary && (!isTerminalWorkStateStatus(primary.status)
+            || !snapshot.items.some((item) => !isTerminalWorkStateStatus(item.status)))) {
+            return primary;
+        }
     }
     return firstItem(snapshot, (item) => item.kind === 'task' && item.status === 'active')
         ?? firstItem(snapshot, (item) => item.kind === 'todo' && item.status === 'active')
@@ -187,6 +237,10 @@ export function resolvePrimarySessionWorkStateItem(snapshot: SessionWorkStateSna
 export function formatSessionWorkStateBadgeLabel(item: SessionWorkStateItem | null, translate: Translate): string | null {
     if (!item) return null;
     if (item.kind === 'goal') {
+        // A cancelled (cleared) goal is not a current goal — it must NOT render as a badge (mirrors
+        // happy's resolveVisibleAgentGoalStatus, which only surfaces active goals). Returning null
+        // means the cleared goal produces no badge, so clearing a goal removes the badge.
+        if (item.status === 'cancelled') return null;
         if (item.status === 'paused') return translate('session.workState.badge.goalPaused');
         if (item.statusReason === 'budgetLimited') return translate('session.workState.badge.goalBudgetLimited');
         if (item.status === 'blocked') return translate('session.workState.badge.goalBlocked');

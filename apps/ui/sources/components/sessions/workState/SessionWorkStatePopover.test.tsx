@@ -2,6 +2,7 @@ import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import renderer, { act } from 'react-test-renderer';
 
+import { SessionWorkStateContent } from './SessionWorkStateContent';
 import { SessionWorkStatePopover } from './SessionWorkStatePopover';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -9,30 +10,21 @@ import { SessionWorkStatePopover } from './SessionWorkStatePopover';
 const confirm = vi.hoisted(() => vi.fn());
 const alert = vi.hoisted(() => vi.fn());
 
-vi.mock('@/modal', async () => {
-    const { createModalModuleMock } = await import('@/dev/testkit/mocks/modal');
-    const mock = createModalModuleMock();
-    return {
-        ...mock.module,
-        Modal: {
-            ...mock.module.Modal,
-            alert,
-            confirm,
-        },
-    };
-});
+vi.mock('@/modal', async () => (await import('@/dev/testkit/mocks/modal')).installModalModuleMock({
+    spies: { alert, confirm },
+})());
 
-vi.mock('@/text', async () => {
-    const { createTextModuleMock } = await import('@/dev/testkit/mocks/text');
-    return createTextModuleMock({
-        translate: (key, params) => {
-            if (key === 'session.workState.goal.budgetProgress' && params?.used && params?.budget) {
-                return `${params.used} / ${params.budget}`;
-            }
-            return `${key}:${params?.title ?? ''}`;
-        },
-    });
-});
+vi.mock('@/text', async () => (await import('@/dev/testkit/mocks/text')).installTextModuleMock({
+    translate: (key, params) => {
+        if (key === 'session.workState.goal.budgetProgress' && params?.used && params?.budget) {
+            return `${params.used} / ${params.budget}`;
+        }
+        if (key === 'session.workState.goal.tokensSuffix' && params?.count != null) {
+            return `${params.count} tokens`;
+        }
+        return `${key}:${params?.title ?? ''}`;
+    },
+})());
 
 vi.mock('@/components/ui/popover', () => ({
     Popover: (props: any) => React.createElement('Popover', props, props.open ? (
@@ -51,11 +43,16 @@ vi.mock('@/components/ui/text/Text', () => ({
     TextInput: (props: Record<string, unknown>) => React.createElement('TextInput', props, null),
 }));
 
-vi.mock('react-native-svg', () => ({
-    Svg: (props: Record<string, unknown> & { children?: React.ReactNode }) =>
-        React.createElement('Svg', props, props.children),
-    Circle: (props: Record<string, unknown>) => React.createElement('Circle', props, null),
-}));
+vi.mock('react-native-svg', () => {
+    const Svg = (props: Record<string, unknown> & { children?: React.ReactNode }) =>
+        React.createElement('Svg', props, props.children);
+    return {
+        default: Svg,
+        Svg,
+        Circle: (props: Record<string, unknown>) => React.createElement('Circle', props, null),
+        Path: (props: Record<string, unknown>) => React.createElement('Path', props, null),
+    };
+});
 
 vi.mock('@/components/sessions/agentInput/components/AgentInputContentPopover', () => ({
     AgentInputContentPopover: (props: Record<string, unknown> & {
@@ -68,22 +65,16 @@ vi.mock('@/components/sessions/agentInput/components/AgentInputContentPopover', 
     ),
 }));
 
-vi.mock('react-native', async () => {
-    const { createReactNativeWebMock } = await import('@/dev/testkit/mocks/reactNative');
-    return createReactNativeWebMock({
-        View: (props: Record<string, unknown> & { children?: React.ReactNode }) =>
-            React.createElement('View', props, props.children),
-        Pressable: (props: Record<string, unknown> & { children?: React.ReactNode }) =>
-            React.createElement('Pressable', props, props.children),
-        ScrollView: (props: Record<string, unknown> & { children?: React.ReactNode }) =>
-            React.createElement('ScrollView', props, props.children),
-    });
-});
+vi.mock('react-native', async () => (await import('@/dev/testkit/mocks/reactNative')).installReactNativeWebMock({
+    View: (props: Record<string, unknown> & { children?: React.ReactNode }) =>
+        React.createElement('View', props, props.children),
+    Pressable: (props: Record<string, unknown> & { children?: React.ReactNode }) =>
+        React.createElement('Pressable', props, props.children),
+    ScrollView: (props: Record<string, unknown> & { children?: React.ReactNode }) =>
+        React.createElement('ScrollView', props, props.children),
+})());
 
-vi.mock('react-native-unistyles', async () => {
-    const { createUnistylesMock } = await import('@/dev/testkit/mocks/unistyles');
-    return createUnistylesMock();
-});
+vi.mock('react-native-unistyles', async () => (await import('@/dev/testkit/mocks/unistyles')).installUnistylesMock()());
 
 function collectText(value: unknown): string {
     if (typeof value === 'string' || typeof value === 'number') return String(value);
@@ -282,7 +273,7 @@ describe('SessionWorkStatePopover', () => {
         act(() => tree?.unmount());
     });
 
-    it('does not expose pause or clear actions before a goal exists', async () => {
+    it('hides the empty goal creation form in the status popover before a goal exists', async () => {
         const anchorRef = { current: null } as React.RefObject<any>;
 
         let tree: renderer.ReactTestRenderer | undefined;
@@ -298,10 +289,80 @@ describe('SessionWorkStatePopover', () => {
             />);
         });
 
-        expect(tree?.root.findByProps({ testID: 'session-goal-save-button' })).toBeTruthy();
+        expect(() => tree?.root.findByProps({ testID: 'session-goal-objective-input' })).toThrow();
+        expect(() => tree?.root.findByProps({ testID: 'session-goal-save-button' })).toThrow();
         expect(() => tree?.root.findByProps({ testID: 'session-goal-pause-resume-button' })).toThrow();
         expect(() => tree?.root.findByProps({ testID: 'session-goal-complete-button' })).toThrow();
         expect(() => tree?.root.findByProps({ testID: 'session-goal-clear-button' })).toThrow();
+
+        act(() => tree?.unmount());
+    });
+
+    it('keeps the AgentInput goal-chip content as the set-first-goal affordance', async () => {
+        let tree: renderer.ReactTestRenderer | undefined;
+        await act(async () => {
+            tree = renderer.create(<SessionWorkStateContent
+                snapshot={null}
+                editableGoal
+                requestClose={vi.fn()}
+                onSetGoal={vi.fn()}
+                onClearGoal={vi.fn()}
+            />);
+        });
+
+        expect(tree?.root.findByProps({ testID: 'session-goal-objective-input' })).toBeTruthy();
+        expect(tree?.root.findByProps({ testID: 'session-goal-save-button' })).toBeTruthy();
+        expect(() => tree?.root.findByProps({ testID: 'session-goal-pause-resume-button' })).toThrow();
+        expect(() => tree?.root.findByProps({ testID: 'session-goal-clear-button' })).toThrow();
+
+        act(() => tree?.unmount());
+    });
+
+    it('renders the set-first-goal form as creation-only: no usage metrics, budget collapsed, cancel available', async () => {
+        let tree: renderer.ReactTestRenderer | undefined;
+        await act(async () => {
+            tree = renderer.create(<SessionWorkStateContent
+                snapshot={null}
+                editableGoal
+                requestClose={vi.fn()}
+                onSetGoal={vi.fn()}
+                onClearGoal={vi.fn()}
+            />);
+        });
+
+        // The confusing pre-goal usage cards are gone: no time/tokens metadata before a goal exists.
+        expect(() => tree?.root.findByProps({ testID: 'session-goal-usage-meta' })).toThrow();
+        // Budget is a collapsed optional disclosure, not a competing primary control.
+        expect(tree?.root.findByProps({ testID: 'session-goal-budget-disclosure' })).toBeTruthy();
+        expect(() => tree?.root.findByProps({ testID: 'session-goal-budget-input' })).toThrow();
+        expect(tree?.root.findByProps({ testID: 'session-goal-cancel-button' })).toBeTruthy();
+
+        act(() => tree?.unmount());
+    });
+
+    it('keeps the AgentInput goal-chip set-first-goal affordance even when a task is primary', async () => {
+        let tree: renderer.ReactTestRenderer | undefined;
+        await act(async () => {
+            tree = renderer.create(<SessionWorkStateContent
+                snapshot={{
+                    v: 1,
+                    backendId: 'claude',
+                    updatedAt: 10,
+                    primaryItemId: 'task:active',
+                    items: [
+                        { id: 'task:active', kind: 'task', origin: 'vendor', status: 'active', title: 'Run focused tests', updatedAt: 10 },
+                    ],
+                }}
+                editableGoal
+                requestClose={vi.fn()}
+                onSetGoal={vi.fn()}
+                onClearGoal={vi.fn()}
+            />);
+        });
+
+        expect(tree?.root.findByProps({ testID: 'session-goal-objective-input' })).toBeTruthy();
+        expect(tree?.root.findByProps({ testID: 'session-goal-save-button' })).toBeTruthy();
+        expect(tree?.root.findByProps({ testID: 'session-work-state-item-task-active' })).toBeTruthy();
 
         act(() => tree?.unmount());
     });
@@ -424,6 +485,64 @@ describe('SessionWorkStatePopover', () => {
         act(() => tree?.unmount());
     });
 
+    it('closes immediately when an edit resolves to the unchanged goal (no confirmation will arrive)', async () => {
+        // Re-submitting the same objective is a no-op: the CLI goal source dedupes and never
+        // republishes, so waiting for a work-state confirmation would strand the popover in
+        // "setting goal…" for the full timeout. Treat "no change needed" as immediate success.
+        const anchorRef = { current: null } as React.RefObject<any>;
+        const onSetGoal = vi.fn().mockResolvedValue({ ok: true });
+        const onRequestClose = vi.fn();
+
+        let tree: renderer.ReactTestRenderer | undefined;
+        await act(async () => {
+            tree = renderer.create(<SessionWorkStatePopover
+                open
+                anchorRef={anchorRef}
+                snapshot={{
+                    v: 1,
+                    backendId: 'claude',
+                    updatedAt: 10,
+                    primaryItemId: 'goal:claude',
+                    items: [
+                        {
+                            id: 'goal:claude',
+                            kind: 'goal',
+                            origin: 'vendor',
+                            status: 'active',
+                            title: 'Ship goals',
+                            updatedAt: 10,
+                            goalCapabilities: { canEdit: true, canClear: true },
+                        },
+                    ],
+                }}
+                editableGoal
+                onRequestClose={onRequestClose}
+                onSetGoal={onSetGoal}
+                onClearGoal={vi.fn()}
+            />);
+        });
+
+        await act(async () => {
+            await tree?.root.findByProps({ testID: 'session-goal-edit-button' }).props.onPress();
+        });
+        // Edit to the SAME objective (trimmed-equal) and save.
+        act(() => {
+            tree?.root.findByProps({ testID: 'session-goal-objective-input' }).props.onChangeText('Ship goals  ');
+        });
+        await act(async () => {
+            await tree?.root.findByProps({ testID: 'session-goal-save-button' }).props.onPress();
+        });
+
+        // The mutation still dispatches (the runtime may re-inject), but the popover must NOT
+        // be left pending: it closes immediately rather than awaiting a confirmation that the
+        // source's no-churn dedupe will never deliver.
+        expect(onSetGoal).toHaveBeenCalled();
+        expect(onRequestClose).toHaveBeenCalled();
+        expect(tree?.root.findAllByProps({ testID: 'session-goal-pending' })).toHaveLength(0);
+
+        act(() => tree?.unmount());
+    });
+
     it('marks active goals complete from the popover without changing the objective', async () => {
         const anchorRef = { current: null } as React.RefObject<any>;
         const onSetGoal = vi.fn().mockResolvedValue({ ok: true });
@@ -532,9 +651,10 @@ describe('SessionWorkStatePopover', () => {
             />);
         });
 
-        expect(tree?.root.findByProps({ testID: 'session-goal-token-usage' })).toBeTruthy();
-        expect(tree?.root.findByProps({ testID: 'session-goal-token-usage-value' }).props.children).toBe('25%');
-        expect(tree?.root.findByProps({ testID: 'session-goal-budget-summary' }).props.children).toBe('250 / 1k');
+        const budgetMeta = collectText(tree?.root.findByProps({ testID: 'session-goal-usage-meta' }).props.children);
+        expect(budgetMeta).toContain('250 / 1k');
+        expect(budgetMeta).toContain('25%');
+        expect(tree?.root.findByProps({ testID: 'session-goal-budget-meter' })).toBeTruthy();
 
         act(() => tree?.unmount());
     });
@@ -571,10 +691,9 @@ describe('SessionWorkStatePopover', () => {
             />);
         });
 
-        expect(collectText(tree?.toJSON())).toContain('session.workState.goal.tokensUsed:');
-        expect(tree?.root.findByProps({ testID: 'session-goal-budget-summary' }).props.children)
-            .toBe('250');
-        expect(() => tree?.root.findByProps({ testID: 'session-goal-token-usage' })).toThrow();
+        const noBudgetMeta = collectText(tree?.root.findByProps({ testID: 'session-goal-usage-meta' }).props.children);
+        expect(noBudgetMeta).toContain('250 tokens');
+        expect(() => tree?.root.findByProps({ testID: 'session-goal-budget-meter' })).toThrow();
 
         act(() => tree?.unmount());
     });
@@ -728,6 +847,195 @@ describe('SessionWorkStatePopover', () => {
         act(() => tree?.unmount());
     });
 
+    it('exposes only edit and clear for a Claude goal carrying { canEdit, canClear } capabilities', async () => {
+        const anchorRef = { current: null } as React.RefObject<any>;
+
+        let tree: renderer.ReactTestRenderer | undefined;
+        await act(async () => {
+            tree = renderer.create(<SessionWorkStatePopover
+                open
+                anchorRef={anchorRef}
+                snapshot={{
+                    v: 1,
+                    backendId: 'claude',
+                    updatedAt: 10,
+                    primaryItemId: 'goal:claude',
+                    items: [
+                        {
+                            id: 'goal:claude',
+                            kind: 'goal',
+                            origin: 'vendor',
+                            status: 'active',
+                            title: 'Ship goals',
+                            updatedAt: 10,
+                            goalCapabilities: { canEdit: true, canClear: true },
+                        },
+                    ],
+                }}
+                editableGoal
+                onRequestClose={vi.fn()}
+                onSetGoal={vi.fn()}
+                onClearGoal={vi.fn()}
+            />);
+        });
+
+        // Claude does not publish canStop → no pause/resume/complete and no token-budget editor.
+        expect(() => tree?.root.findByProps({ testID: 'session-goal-pause-resume-button' })).toThrow();
+        expect(() => tree?.root.findByProps({ testID: 'session-goal-complete-button' })).toThrow();
+        expect(tree?.root.findByProps({ testID: 'session-goal-clear-button' })).toBeTruthy();
+        expect(tree?.root.findByProps({ testID: 'session-goal-edit-button' })).toBeTruthy();
+
+        await act(async () => {
+            await tree?.root.findByProps({ testID: 'session-goal-edit-button' }).props.onPress();
+        });
+        expect(() => tree?.root.findByProps({ testID: 'session-goal-budget-disclosure' })).toThrow();
+        expect(() => tree?.root.findByProps({ testID: 'session-goal-budget-input' })).toThrow();
+
+        act(() => tree?.unmount());
+    });
+
+    it('keeps Codex goals (no capabilities) on the full control surface', async () => {
+        const anchorRef = { current: null } as React.RefObject<any>;
+
+        let tree: renderer.ReactTestRenderer | undefined;
+        await act(async () => {
+            tree = renderer.create(<SessionWorkStatePopover
+                open
+                anchorRef={anchorRef}
+                snapshot={{
+                    v: 1,
+                    backendId: 'codex',
+                    updatedAt: 10,
+                    primaryItemId: 'goal:codex',
+                    items: [
+                        { id: 'goal:codex', kind: 'goal', origin: 'vendor', status: 'active', title: 'Ship goals', updatedAt: 10 },
+                    ],
+                }}
+                editableGoal
+                onRequestClose={vi.fn()}
+                onSetGoal={vi.fn()}
+                onClearGoal={vi.fn()}
+            />);
+        });
+
+        expect(tree?.root.findByProps({ testID: 'session-goal-pause-resume-button' })).toBeTruthy();
+        expect(tree?.root.findByProps({ testID: 'session-goal-complete-button' })).toBeTruthy();
+        expect(tree?.root.findByProps({ testID: 'session-goal-clear-button' })).toBeTruthy();
+        await act(async () => {
+            await tree?.root.findByProps({ testID: 'session-goal-edit-button' }).props.onPress();
+        });
+        expect(tree?.root.findByProps({ testID: 'session-goal-budget-disclosure' })).toBeTruthy();
+
+        act(() => tree?.unmount());
+    });
+
+    it('holds a pending "setting goal" state until the work-state confirms, then closes', async () => {
+        const anchorRef = { current: null } as React.RefObject<any>;
+        const onSetGoal = vi.fn().mockResolvedValue({ ok: true });
+        const onRequestClose = vi.fn();
+
+        const activeSnapshot = {
+            v: 1 as const,
+            backendId: 'codex',
+            updatedAt: 10,
+            primaryItemId: 'goal:codex',
+            items: [
+                { id: 'goal:codex', kind: 'goal' as const, origin: 'vendor' as const, status: 'active' as const, title: 'Ship goals', updatedAt: 10 },
+            ],
+        };
+
+        let tree: renderer.ReactTestRenderer | undefined;
+        await act(async () => {
+            tree = renderer.create(<SessionWorkStatePopover
+                open
+                anchorRef={anchorRef}
+                snapshot={activeSnapshot}
+                editableGoal
+                onRequestClose={onRequestClose}
+                onSetGoal={onSetGoal}
+                onClearGoal={vi.fn()}
+            />);
+        });
+
+        await act(async () => {
+            await tree?.root.findByProps({ testID: 'session-goal-complete-button' }).props.onPress();
+        });
+
+        expect(tree?.root.findByProps({ testID: 'session-goal-pending' })).toBeTruthy();
+        expect(onRequestClose).not.toHaveBeenCalled();
+
+        // The native work-state now reflects the change → confirmation closes the popover.
+        await act(async () => {
+            tree?.update(<SessionWorkStatePopover
+                open
+                anchorRef={anchorRef}
+                snapshot={{
+                    ...activeSnapshot,
+                    updatedAt: 11,
+                    items: [
+                        { id: 'goal:codex', kind: 'goal', origin: 'vendor', status: 'complete', title: 'Ship goals', updatedAt: 11 },
+                    ],
+                }}
+                editableGoal
+                onRequestClose={onRequestClose}
+                onSetGoal={onSetGoal}
+                onClearGoal={vi.fn()}
+            />);
+        });
+
+        expect(onRequestClose).toHaveBeenCalledTimes(1);
+        expect(() => tree?.root.findByProps({ testID: 'session-goal-pending' })).toThrow();
+
+        act(() => tree?.unmount());
+    });
+
+    it('surfaces a diagnostic when the goal update is never confirmed (timeout)', async () => {
+        vi.useFakeTimers();
+        try {
+            const anchorRef = { current: null } as React.RefObject<any>;
+            const onSetGoal = vi.fn().mockResolvedValue({ ok: true });
+            const onRequestClose = vi.fn();
+
+            let tree: renderer.ReactTestRenderer | undefined;
+            await act(async () => {
+                tree = renderer.create(<SessionWorkStatePopover
+                    open
+                    anchorRef={anchorRef}
+                    snapshot={{
+                        v: 1,
+                        backendId: 'codex',
+                        updatedAt: 10,
+                        primaryItemId: 'goal:codex',
+                        items: [
+                            { id: 'goal:codex', kind: 'goal', origin: 'vendor', status: 'active', title: 'Ship goals', updatedAt: 10 },
+                        ],
+                    }}
+                    editableGoal
+                    onRequestClose={onRequestClose}
+                    onSetGoal={onSetGoal}
+                    onClearGoal={vi.fn()}
+                />);
+            });
+
+            await act(async () => {
+                await tree?.root.findByProps({ testID: 'session-goal-complete-button' }).props.onPress();
+            });
+            expect(tree?.root.findByProps({ testID: 'session-goal-pending' })).toBeTruthy();
+
+            await act(async () => {
+                vi.advanceTimersByTime(12_000);
+            });
+
+            expect(() => tree?.root.findByProps({ testID: 'session-goal-pending' })).toThrow();
+            expect(tree?.root.findByProps({ testID: 'session-goal-pending-error' })).toBeTruthy();
+            expect(onRequestClose).not.toHaveBeenCalled();
+
+            act(() => tree?.unmount());
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
     it('clears an existing token budget when no limit is selected', async () => {
         const anchorRef = { current: null } as React.RefObject<any>;
         const onSetGoal = vi.fn().mockResolvedValue({ ok: true });
@@ -757,7 +1065,7 @@ describe('SessionWorkStatePopover', () => {
             await tree?.root.findByProps({ testID: 'session-goal-edit-button' }).props.onPress();
         });
         await act(async () => {
-            await tree?.root.findByProps({ testID: 'session-goal-budget-no-limit-button' }).props.onPress();
+            await tree?.root.findByProps({ testID: 'session-goal-budget-remove-button' }).props.onPress();
         });
         await act(async () => {
             await tree?.root.findByProps({ testID: 'session-goal-save-button' }).props.onPress();
