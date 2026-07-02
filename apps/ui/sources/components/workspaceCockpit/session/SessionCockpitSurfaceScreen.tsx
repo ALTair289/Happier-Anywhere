@@ -12,6 +12,7 @@ import {
 import { useAppPaneScope } from '@/components/appShell/panes/hooks/useAppPaneScope';
 import type { AttachmentDraft } from '@/components/sessions/attachments/attachmentDraftModel';
 import { SessionDetailsPanel } from '@/components/sessions/panes/SessionDetailsPanel';
+import { SessionTranscriptNavigationPane } from '@/components/sessions/panes/SessionTranscriptNavigationPane';
 import {
     createSessionCommitDetailsTab,
     createSessionDetailsTerminalTab,
@@ -27,6 +28,7 @@ import {
     type SessionPaneUrlState,
 } from '@/components/sessions/panes/url/sessionPaneUrlState';
 import { SessionView } from '@/components/sessions/shell/SessionView';
+import { useTranscriptNavigationPaneSnapshot } from '@/components/sessions/transcript/navigation/transcriptNavigationPaneStore';
 import type { SessionRouteHydrationState } from '@/sync/domains/session/sessionRouteHydrationState';
 import { deferOnWeb } from '@/utils/platform/deferOnWeb';
 
@@ -57,6 +59,7 @@ export const SessionCockpitSurfaceScreen = React.memo((props: SessionCockpitSurf
     const activeRightTabId = pane.scopeState?.right?.activeTabId ?? null;
     const rightIsOpen = pane.scopeState?.right?.isOpen ?? false;
     const detailsIsOpen = pane.scopeState?.details?.isOpen ?? false;
+    const transcriptNavigationPaneSnapshot = useTranscriptNavigationPaneSnapshot(props.sessionId);
     const openRight = pane.openRight;
     const closeRight = pane.closeRight;
     const closeDetails = pane.closeDetails;
@@ -174,10 +177,12 @@ export const SessionCockpitSurfaceScreen = React.memo((props: SessionCockpitSurf
             routeHydrationState={props.routeHydrationState}
             safeAreaTopMode={safeAreaTopMode}
             headerSafeAreaTopMode={headerSafeAreaTopMode}
+            surfaceFocusedOverride={isFocused}
             chatBottomSpacing="none"
         />
     ), [
         headerSafeAreaTopMode,
+        isFocused,
         props.initialAttachmentDrafts,
         props.jumpToSeq,
         props.paneUrlState,
@@ -219,6 +224,19 @@ export const SessionCockpitSurfaceScreen = React.memo((props: SessionCockpitSurf
                         onOpenStashDetails={openStashDetails}
                     />
                 </React.Suspense>
+            </SessionCockpitFullscreenSurface>,
+        );
+    }
+
+    if (props.surface === 'navigation') {
+        return renderSessionChrome(
+            <SessionCockpitFullscreenSurface screenTestID="session-transcript-navigation-screen" safeAreaPadding={false}>
+                <SessionTranscriptNavigationPane
+                    activeEntryId={transcriptNavigationPaneSnapshot.activeEntryId}
+                    entries={transcriptNavigationPaneSnapshot.entries}
+                    onEntryPress={transcriptNavigationPaneSnapshot.onEntryPress ?? (() => {})}
+                    sessionId={props.sessionId}
+                />
             </SessionCockpitFullscreenSurface>,
         );
     }

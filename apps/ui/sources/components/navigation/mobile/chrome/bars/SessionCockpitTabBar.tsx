@@ -57,6 +57,7 @@ export const SessionCockpitTabBar = React.memo((props: SessionCockpitTabBarProps
             icon: 'git-branch-outline',
             badge: gitBadge ?? undefined,
         },
+        { id: 'navigation', label: t('session.transcriptNavigation.title'), icon: 'list-outline' },
         {
             id: 'tabs',
             label: t('workspaceCockpit.tabs'),

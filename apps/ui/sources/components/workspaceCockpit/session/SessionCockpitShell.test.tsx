@@ -92,6 +92,11 @@ vi.mock('@/components/sessions/panes/SessionDetailsPanel', () => ({
     SessionDetailsPanel: (props: Record<string, unknown>) => React.createElement('SessionDetailsPanel', props),
 }));
 
+vi.mock('@/components/sessions/panes/SessionTranscriptNavigationPane', () => ({
+    SessionTranscriptNavigationPane: (props: Record<string, unknown>) =>
+        React.createElement('SessionTranscriptNavigationPane', props),
+}));
+
 vi.mock('@/components/sessions/panes/surfaces/SessionBrowseFilesSurface', () => ({
     SessionBrowseFilesSurface: (props: Record<string, unknown>) => React.createElement('SessionBrowseFilesSurface', props),
 }));
@@ -348,6 +353,25 @@ describe('SessionCockpitSurfaceScreen', () => {
         }));
     });
 
+    it('passes cockpit tab focus into SessionView for inactive preloaded chat surfaces', async () => {
+        navigationFocusState.isFocused = false;
+
+        const screen = await renderScreen(
+            <AppPaneProvider>
+                <CockpitSurfaceHarness
+                    sessionId="s_1"
+                    scopeId="session:s_1"
+                    surface="chat"
+                    routeServerId="server-b"
+                    terminalTabAvailable
+                />
+            </AppPaneProvider>,
+        );
+
+        const sessionView = screen.tree.findByType('SessionView' as never);
+        expect(sessionView.props.surfaceFocusedOverride).toBe(false);
+    });
+
     it('reuses the session chrome for fullscreen cockpit surfaces', async () => {
         safeAreaInsetsMock.top = 24;
         safeAreaInsetsMock.bottom = 12;
@@ -381,6 +405,7 @@ describe('SessionCockpitSurfaceScreen', () => {
     it.each([
         ['browse', 'SessionBrowseFilesSurface'],
         ['git', 'SessionGitSurface'],
+        ['navigation', 'SessionTranscriptNavigationPane'],
         ['terminal', 'SessionTerminalSurface'],
         ['tabs', 'SessionDetailsPanel'],
     ] as const)('renders the %s surface inside shared session chrome', async (surface, expectedType) => {

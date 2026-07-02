@@ -1,14 +1,14 @@
 import { buildScopedSessionRouteHref } from '@/hooks/session/sessionRouteServerScope';
 
-export type SessionMobileSurface = 'chat' | 'browse' | 'git' | 'tabs' | 'terminal';
+export type SessionMobileSurface = 'chat' | 'browse' | 'git' | 'navigation' | 'tabs' | 'terminal';
 export type SessionLegacyRouteKind = 'index' | 'files' | 'git' | 'details' | 'terminal';
 
-type SessionRightTabId = 'git' | 'files' | 'terminal';
+type SessionRightTabId = 'git' | 'files' | 'navigation' | 'terminal';
 type SessionRouteQueryValue = string | number | boolean | null | undefined;
 
 function normalizeSessionMobileSurface(value: string | null | undefined): SessionMobileSurface | null {
     const normalized = typeof value === 'string' ? value.trim() : '';
-    if (normalized === 'chat' || normalized === 'browse' || normalized === 'git' || normalized === 'tabs' || normalized === 'terminal') {
+    if (normalized === 'chat' || normalized === 'browse' || normalized === 'git' || normalized === 'navigation' || normalized === 'tabs' || normalized === 'terminal') {
         return normalized;
     }
     return null;
@@ -23,6 +23,9 @@ export function resolveSessionRightTabIdForSurface(
     }
     if (surface === 'git') {
         return 'git';
+    }
+    if (surface === 'navigation') {
+        return 'navigation';
     }
     if (surface === 'terminal' && terminalTabAvailable) {
         return 'terminal';
@@ -64,6 +67,9 @@ export function resolveSessionMobileSurfaceIntent(input: Readonly<{
     if (input.activeRightTabId === 'files') {
         return 'browse';
     }
+    if (input.activeRightTabId === 'navigation') {
+        return 'navigation';
+    }
     if (input.activeRightTabId === 'terminal' && input.terminalTabAvailable === true) {
         return 'terminal';
     }
@@ -82,7 +88,7 @@ export function resolveSessionRoutePathForSurface(
         query?: Readonly<Record<string, SessionRouteQueryValue>>;
     }> = {},
 ): string {
-    const query = surface === 'chat'
+    const query = surface === 'chat' || surface === 'navigation'
         ? { ...options.query, mobileSurface: surface }
         : options.query;
     const suffix =

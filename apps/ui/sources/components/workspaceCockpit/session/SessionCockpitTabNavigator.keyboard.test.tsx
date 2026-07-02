@@ -7,10 +7,11 @@ const navigatorState = vi.hoisted(() => ({
     screenOptions: null as null | Record<string, unknown>,
     navigationContainerLinking: null as null | Record<string, unknown>,
     registeredChrome: null as null | {
-        switchSurface: (surface: 'chat' | 'browse' | 'git' | 'tabs' | 'terminal') => void;
+        switchSurface: (surface: 'chat' | 'browse' | 'git' | 'navigation' | 'tabs' | 'terminal') => void;
     },
     localSettingReads: [] as string[],
     persistedSurfaces: [] as Array<Readonly<{ sessionId: string; surface: string }>>,
+    screenOptionsByName: {} as Record<string, Record<string, unknown> | null>,
 }));
 
 vi.mock('@react-navigation/native', () => ({
@@ -36,7 +37,7 @@ vi.mock('@react-navigation/bottom-tabs', () => ({
             }) => React.ReactNode;
         }) => {
             navigatorState.screenOptions = screenOptions ?? null;
-            const routes = ['chat', 'browse', 'git', 'tabs', 'terminal'].map((name) => ({ key: name, name }));
+            const routes = ['chat', 'browse', 'git', 'navigation', 'tabs', 'terminal'].map((name) => ({ key: name, name }));
             return React.createElement('BottomTabNavigator', { screenOptions }, [
                 React.createElement(React.Fragment, { key: 'screens' }, children),
                 React.createElement(React.Fragment, { key: 'tab-bar' }, tabBar?.({
@@ -48,10 +49,16 @@ vi.mock('@react-navigation/bottom-tabs', () => ({
                 })),
             ]);
         },
-        Screen: ({ children, name }: { children?: (props: { navigation: { navigate: () => void } }) => React.ReactNode; name: string }) =>
-            React.createElement('BottomTabScreen', { name }, typeof children === 'function'
+        Screen: ({ children, name, options }: {
+            children?: (props: { navigation: { navigate: () => void } }) => React.ReactNode;
+            name: string;
+            options?: Record<string, unknown>;
+        }) => {
+            navigatorState.screenOptionsByName[name] = options ?? null;
+            return React.createElement('BottomTabScreen', { name, options }, typeof children === 'function'
                 ? children({ navigation: { navigate: () => {} } })
-                : children),
+                : children);
+        },
     }),
 }));
 
@@ -67,7 +74,7 @@ vi.mock('./SessionCockpitSurfaceNavigation', () => ({
 
 vi.mock('./SessionCockpitChromeRegistry', () => ({
     useSessionCockpitChromeRegister: () => (model: {
-        switchSurface: (surface: 'chat' | 'browse' | 'git' | 'tabs' | 'terminal') => void;
+        switchSurface: (surface: 'chat' | 'browse' | 'git' | 'navigation' | 'tabs' | 'terminal') => void;
     }) => {
         navigatorState.registeredChrome = model;
         return () => {};
@@ -94,6 +101,7 @@ describe('SessionCockpitTabNavigator keyboard behavior', () => {
         navigatorState.registeredChrome = null;
         navigatorState.localSettingReads = [];
         navigatorState.persistedSurfaces = [];
+        navigatorState.screenOptionsByName = {};
     });
 
     it('does not ask the native tab navigator to hide tab chrome during keyboard transitions', async () => {
@@ -145,9 +153,26 @@ describe('SessionCockpitTabNavigator keyboard behavior', () => {
             />,
         );
 
-        navigatorState.registeredChrome?.switchSurface('git');
+        navigatorState.registeredChrome?.switchSurface('navigation');
 
         expect(navigatorState.localSettingReads).not.toContain('sessionLastMobileSurfaceBySessionId');
-        expect(navigatorState.persistedSurfaces).toEqual([{ sessionId: 's1', surface: 'git' }]);
+        expect(navigatorState.persistedSurfaces).toEqual([{ sessionId: 's1', surface: 'navigation' }]);
+    });
+
+    it('eagerly mounts the chat host when transcript navigation is the initial cockpit surface', async () => {
+        const { SessionCockpitTabNavigator } = await import('./SessionCockpitTabNavigator');
+
+        await renderScreen(
+            <SessionCockpitTabNavigator
+                initialSurface="navigation"
+                scopeId="session:s1"
+                sessionId="s1"
+                terminalTabAvailable
+            />,
+        );
+
+        expect(navigatorState.screenOptionsByName.chat).toEqual(expect.objectContaining({
+            lazy: false,
+        }));
     });
 });
