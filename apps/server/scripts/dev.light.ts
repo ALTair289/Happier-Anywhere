@@ -1,6 +1,6 @@
 import { mkdir } from 'node:fs/promises';
 import { applyLightDefaultEnv } from '../sources/flavors/light/env';
-import { buildLightDevPlan } from './dev.lightPlan';
+import { buildLightDevPlan, recordLightDevMigrationSignature } from './dev.lightPlan';
 import { runCommand } from './runCommand';
 
 async function main() {
@@ -17,8 +17,10 @@ async function main() {
     await mkdir(filesDir, { recursive: true });
     await mkdir(dbDir, { recursive: true });
 
-    // Apply migrations (idempotent).
-    await runCommand('yarn', plan.migrateDeployArgs, env);
+    if (plan.shouldRunMigrateDeploy && plan.migrateDeployArgs) {
+        await runCommand('yarn', plan.migrateDeployArgs, env);
+        await recordLightDevMigrationSignature(plan);
+    }
 
     // Run the light flavor.
     await runCommand('yarn', plan.startLightArgs, env);
