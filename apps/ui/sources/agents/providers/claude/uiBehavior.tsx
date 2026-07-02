@@ -10,16 +10,25 @@ import {
 } from '@/agents/providers/claude/sessionSubagents/createClaudeSubagentLauncherDetailsTab';
 import { SessionClaudeSubagentLauncherView } from '@/agents/providers/claude/sessionSubagents/SessionClaudeSubagentLauncherView';
 import { resolveClaudeBrowseSourceOptions } from '@/agents/providers/claude/directSessions/resolveClaudeBrowseSourceOptions';
+import { claudeGoalActionCapabilityProfile, claudeSupportsEditableGoals } from '@/agents/providers/claude/workState/claudeEditableGoals';
+import { buildClaudeSessionHandoffProviderPatch } from '@/agents/providers/claude/sessionHandoff';
 
 export const CLAUDE_UI_BEHAVIOR_OVERRIDE: AgentUiBehavior = {
     mcpServers: {
         supportsDetectedConfigScan: true,
+    },
+    workState: {
+        supportsEditableGoals: ({ agentId, session }) => claudeSupportsEditableGoals({ agentId, session }),
+        resolveGoalActionCapabilityProfile: ({ agentId, session }) => claudeGoalActionCapabilityProfile({ agentId, session }),
     },
     directSessions: {
         browse: {
             order: 20,
             getSourceOptions: () => resolveClaudeBrowseSourceOptions(),
         },
+    },
+    sessionHandoff: {
+        buildProviderPatch: () => buildClaudeSessionHandoffProviderPatch(),
     },
     sessionComposer: {
         buildNextMessageMetaOverrides: ({ configOptionOverrides, metaOverrides }) =>
