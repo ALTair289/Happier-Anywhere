@@ -2,7 +2,6 @@ import * as React from 'react';
 import {
     getStorage,
     useForkedTranscriptSnapshot,
-    useMessage,
     useSessionChatFooterState,
     useSessionActionDrafts,
     useSessionLatestThinkingMessageId,
@@ -15,7 +14,6 @@ import {
 } from '@/sync/domains/state/storage';
 import { Dimensions, PixelRatio, Platform, View, type LayoutChangeEvent, type NativeScrollEvent, type NativeSyntheticEvent } from 'react-native';
 import { useCallback } from 'react';
-import { MessageView, MessageViewWithSessionCommon } from './MessageView';
 import type { Message, ToolCallMessage } from '@/sync/domains/messages/messageTypes';
 import { buildSessionMessageRouteId } from '@/sync/domains/messages/messageRouteIds';
 import { Metadata, Session } from '@/sync/domains/state/storageTypes';
@@ -23,6 +21,7 @@ import { buildSessionMetadataStabilitySignatureValue, buildStableJsonSignature }
 import { buildSessionTranscriptRenderSignature } from '@/sync/domains/session/transcriptRenderSignature';
 import { buildPendingSessionRequestsSourceSignature } from '@/sync/domains/session/pending/listPendingSessionRequests';
 import type { OpenApprovalArtifactForSession } from '@/sync/domains/artifacts/approvalArtifacts';
+import { ChatListMessageRow, TranscriptRowShell } from './ChatListRows';
 import { ChatFooter, type ChatFooterDirectControlState } from './ChatFooter';
 import { buildChatListItems, buildChatListItemsCached, type ChatListItem, type ChatListItemsBuildCache } from '@/components/sessions/chatListItems';
 import { buildForkAwareMessageDescriptors } from '@/components/sessions/transcript/forkContext/buildForkAwareMessageDescriptors';
@@ -53,11 +52,6 @@ import { resolveTranscriptToolCallsCollapsedPreviewCount } from '@/sync/domains/
 import { JumpToBottomButton } from '@/components/sessions/transcript/scroll/JumpToBottomButton';
 import { resolveJumpToBottomAffordanceState } from '@/components/sessions/transcript/scroll/jumpToBottomAffordanceState';
 import { resolveNextJumpToBottomDistanceVisibilityState } from '@/components/sessions/transcript/scroll/jumpToBottomVisibilityDistanceState';
-import {
-    resolveTranscriptScrollPinStateUpdate,
-    type TranscriptScrollPinEvent,
-    type TranscriptScrollPinState,
-} from '@/components/sessions/transcript/scroll/transcriptScrollPinController';
 import { subscribeToFlashListOffsetCorrections } from '@/components/sessions/transcript/scroll/flashListOffsetCorrectionHook';
 import {
     resolveTranscriptRowContentCount,
@@ -96,8 +90,6 @@ import {
     createTranscriptLifecycleHost,
     type TranscriptLifecycleHost,
     type TranscriptLifecycleHostContentGrowthLiveTailCommandPlan,
-    type TranscriptLifecycleHostContentGrowthLiveTailScheduledPin,
-    type TranscriptLifecycleHostContentGrowthLiveTailScheduledPinFireEffect,
     type TranscriptLifecycleHostExplicitJumpPlan,
     type TranscriptLifecycleHostExplicitReturnPlan,
     type TranscriptLifecycleHostFollowBottomIntentPlan,
@@ -114,6 +106,13 @@ import {
     type NativeEntrySettleConfirmationEffect,
     type NativeExplicitJumpConfirmationEffect,
 } from '@/components/sessions/transcript/viewport/lifecycle/lifecycleHost';
+import {
+    planBottomFollowWriteSchedulerEvent,
+    type BottomFollowAutomaticWriter,
+    type BottomFollowScheduledWrite,
+    type BottomFollowWriteSchedulerEffect,
+    type BottomFollowWriteSchedulerState,
+} from '@/components/sessions/transcript/viewport/bottomFollow/writeScheduler';
 import {
     applyTranscriptLifecycleScrollObservationPlan,
     type TranscriptLifecycleScrollObservationPlanContinuationInput,
@@ -199,7 +198,12 @@ import {
     isExplicitTranscriptBottomFollowCommand,
     resolveTranscriptAutoFollowPinWaitMs,
 } from '@/components/sessions/transcript/scroll/transcriptAutoFollowGate';
-import type { TranscriptBottomFollowModeState } from '@/components/sessions/transcript/scroll/transcriptBottomFollowMode';
+import {
+    resolveTranscriptScrollPinStateUpdate,
+    type TranscriptBottomFollowModeState,
+    type TranscriptScrollPinEvent,
+    type TranscriptScrollPinState,
+} from '@/components/sessions/transcript/scroll/transcriptBottomFollowMode';
 import {
     TranscriptListShell,
     type TranscriptListShellPlatformInteractionProps,
@@ -264,7 +268,6 @@ import {
     captureWebTranscriptViewportAnchor,
     refreshWebTranscriptPrependAnchor,
     resolveWebTranscriptViewportAnchorAlignment,
-    TRANSCRIPT_WEB_MESSAGE_PREPEND_ANCHOR_TEST_ID_PREFIX,
     TRANSCRIPT_WEB_PREPEND_ANCHOR_TEST_ID_PREFIX,
     TRANSCRIPT_WEB_TOOL_CALL_PREPEND_ANCHOR_TEST_ID_PREFIX,
     TRANSCRIPT_WEB_TOOL_GROUP_PREPEND_ANCHOR_TEST_ID_PREFIX,
@@ -377,23 +380,12 @@ import {
     type WebPrependOwnerEffect,
 } from '@/components/sessions/transcript/viewport/prepend/webPrependOwner';
 import { LruMap } from '@/utils/cache/lruMap';
-import {
-    buildTranscriptItemHeightSignatureKey,
-    type TranscriptItemHeightValiditySignature,
-} from '@/components/sessions/transcript/measurement/transcriptItemHeightCache';
-import {
-    isStructuralSignatureDelta,
-    type TranscriptMeasurementReconciler,
-} from '@/components/sessions/transcript/measurement/transcriptMeasurementReconciler';
+import type { TranscriptMeasurementReconciler } from '@/components/sessions/transcript/measurement/transcriptMeasurementReconciler';
 import {
     createTranscriptMeasurementHost,
     type TranscriptMeasurementHostEffect,
 } from '@/components/sessions/transcript/measurement/transcriptMeasurementHost';
-import {
-    TranscriptRowLayoutMutationProvider,
-    type TranscriptRowLayoutMutation,
-} from '@/components/sessions/transcript/measurement/TranscriptRowLayoutMutationContext';
-import { resolveTranscriptRowShellHeight } from '@/components/sessions/transcript/measurement/resolveTranscriptRowShellHeight';
+import type { TranscriptRowLayoutMutation } from '@/components/sessions/transcript/measurement/TranscriptRowLayoutMutationContext';
 import {
     buildTranscriptRowShellSignature,
     resolveTranscriptItemActiveThinkingMessageId,
@@ -406,13 +398,8 @@ import {
     transcriptNavigationRoleForMessage,
     type TranscriptLiveTailAnchorReason,
 } from '@/components/sessions/transcript/viewport/lifecycle/transcriptRowClassification';
+import type { TranscriptMountSettleTuning } from '@/components/sessions/transcript/viewport/lifecycle/mountSettle';
 import {
-    createTranscriptMountSettlePinCoordinator,
-    type TranscriptMountSettlePinCoordinator,
-    type TranscriptMountSettleTuning,
-} from '@/components/sessions/transcript/scroll/transcriptMountSettlePinCoordinator';
-import {
-    hasTranscriptSessionCommonProps,
     type TranscriptSessionCommonProps,
     useTranscriptSessionCommon,
 } from '@/components/sessions/transcript/transcriptSessionCommon';
@@ -540,7 +527,7 @@ type NativeViewableTranscriptItem = Readonly<{
     item?: ChatTranscriptListItem | null;
 }>;
 
-type ScheduledPinToBottom = TranscriptLifecycleHostContentGrowthLiveTailScheduledPin<WebTranscriptScrollMetrics> & {
+type ScheduledPinToBottom = BottomFollowScheduledWrite<WebTranscriptScrollMetrics> & {
     id: any;
 };
 
@@ -1256,174 +1243,6 @@ const ChatListFooterWithKeyboardInset = React.memo((props: {
     );
 });
 
-const ChatListMessageRow = React.memo(function ChatListMessageRow(props: {
-    sessionId: string;
-    messageId: string;
-    messageOverride?: Message | null;
-    originSessionId?: string;
-    isReadOnlyContext?: boolean;
-    metadata: Metadata | null;
-    activeThinkingMessageId: string | null;
-    resolveThinkingExpanded: (messageId: string) => boolean;
-    setThinkingExpanded: (messageId: string, expanded: boolean) => void;
-    interaction: TranscriptInteraction;
-    rollbackAction?: TranscriptRollbackAction | null;
-    rollbackRanges: readonly SessionRollbackRangeV1[];
-    approvalRequests?: readonly OpenApprovalArtifactForSession[];
-    messagePins: readonly PersistedSessionMessagePinV1[];
-    onToggleMessagePin: (pin: PersistedSessionMessagePinV1) => void;
-} & Partial<TranscriptSessionCommonProps>) {
-    const originSessionId = props.originSessionId ?? props.sessionId;
-    const committedMessage = useMessage(originSessionId, props.messageId);
-    const message = props.messageOverride ?? committedMessage;
-    if (!message) return null;
-
-    const isThinking = message.kind === 'agent-text' && message.isThinking === true;
-    const readOnlyInteraction = deriveReadOnlyTranscriptInteraction(props.interaction, props.isReadOnlyContext === true);
-    const historical = isMessageRolledBack({ message, rollbackRanges: props.rollbackRanges });
-    const canUseParentCommon = originSessionId === props.sessionId && hasTranscriptSessionCommonProps(props);
-    const messageView = canUseParentCommon ? (
-        <MessageViewWithSessionCommon
-            message={message}
-            metadata={props.metadata}
-            sessionId={originSessionId}
-            activeThinkingMessageId={props.activeThinkingMessageId}
-            thinkingExpanded={isThinking ? props.resolveThinkingExpanded(message.id) : undefined}
-            onThinkingExpandedChange={isThinking ? (next) => props.setThinkingExpanded(message.id, next) : undefined}
-            interaction={readOnlyInteraction}
-            rollbackAction={props.rollbackAction ?? null}
-            historical={historical}
-            approvalRequests={props.approvalRequests}
-            messagePins={props.messagePins}
-            onToggleMessagePin={props.onToggleMessagePin}
-            onToggleToolPin={props.onToggleMessagePin}
-            forkCommon={props.forkCommon}
-            messageDisplayCommon={props.messageDisplayCommon}
-            toolChromeCommon={props.toolChromeCommon}
-            toolRouteCommon={props.toolRouteCommon}
-        />
-    ) : (
-        <MessageView
-            message={message}
-            metadata={props.metadata}
-            sessionId={originSessionId}
-            activeThinkingMessageId={props.activeThinkingMessageId}
-            thinkingExpanded={isThinking ? props.resolveThinkingExpanded(message.id) : undefined}
-            onThinkingExpandedChange={isThinking ? (next) => props.setThinkingExpanded(message.id, next) : undefined}
-            interaction={readOnlyInteraction}
-            rollbackAction={props.rollbackAction ?? null}
-            historical={historical}
-            approvalRequests={props.approvalRequests}
-            messagePins={props.messagePins}
-            onToggleMessagePin={props.onToggleMessagePin}
-            onToggleToolPin={props.onToggleMessagePin}
-        />
-    );
-    return (
-        <View testID={`${TRANSCRIPT_WEB_MESSAGE_PREPEND_ANCHOR_TEST_ID_PREFIX}${props.messageId}`}>
-            <View testID={`transcript-message-${props.messageId}`}>
-                {messageView}
-            </View>
-        </View>
-    );
-});
-
-const TranscriptRowShell = React.memo(function TranscriptRowShell(props: Readonly<{
-    reconciler: TranscriptMeasurementReconciler;
-    children: React.ReactNode;
-    itemId: string;
-    onRowLayoutMutation?: (params: Readonly<{
-        itemId: string;
-        mutation: TranscriptRowLayoutMutation;
-        rowKind: string;
-    }>) => void;
-    /** N1.2 evidence callback (dev-gated telemetry only; no layout behavior). */
-    onRowMeasured?: (params: Readonly<{ itemId: string; rowKind: string; heightPx: number }>) => void;
-    signature: TranscriptItemHeightValiditySignature;
-}>) {
-    // C1: the row-shell reservation is sourced from the single measurement reconciler. Stable rows
-    // carry an exact minHeight (== last measured); streaming/prepended/never-measured rows carry a
-    // monotonic floor (>= last measured) so a growing or freshly-inserted row never leaves the next
-    // row positioned above where the previous frame ended (overlap is structurally impossible during
-    // append). The floor resets on a structural/expansion/width/font change (the shrink-capable
-    // transitions) so a collapse leaves no persistent over-reservation.
-    const signatureKey = React.useMemo(
-        () => buildTranscriptItemHeightSignatureKey(props.signature),
-        [props.signature],
-    );
-    const lastSignatureKeyRef = React.useRef(signatureKey);
-    const lastSignatureRef = React.useRef(props.signature);
-    const previousSignatureForReservation =
-        lastSignatureKeyRef.current === signatureKey ? undefined : lastSignatureRef.current;
-    const reservation = resolveTranscriptRowShellHeight({
-        previousSignature: previousSignatureForReservation,
-        reconciler: props.reconciler,
-        signature: props.signature,
-    });
-    const reservedMinHeight = reservation?.minHeight;
-    const shellStyle = React.useMemo(() => (
-        reservedMinHeight === undefined ? undefined : { minHeight: reservedMinHeight }
-    ), [reservedMinHeight]);
-
-    const handleLayout = React.useCallback((event: LayoutChangeEvent) => {
-        const height = event?.nativeEvent?.layout?.height;
-        if (typeof height === 'number' && Number.isFinite(height)) {
-            const heightPx = Math.max(1, Math.trunc(height));
-            props.reconciler.recordMeasuredHeight({ signature: props.signature, heightPx });
-            props.onRowMeasured?.({
-                itemId: props.itemId,
-                rowKind: props.signature.kind,
-                heightPx,
-            });
-        }
-    }, [props.reconciler, props.itemId, props.onRowMeasured, props.signature]);
-
-    React.useLayoutEffect(() => {
-        if (lastSignatureKeyRef.current === signatureKey) return;
-        const previousSignature = lastSignatureRef.current;
-        lastSignatureKeyRef.current = signatureKey;
-        lastSignatureRef.current = props.signature;
-        // Reset the per-item floor on any shrink-capable structural change (expansion toggle,
-        // rowState transition, shape, width/font) so the next onLayout re-seeds from the new
-        // (possibly smaller) height — collapse never carries a stale tall floor.
-        if (isStructuralSignatureDelta(previousSignature, props.signature)) {
-            props.reconciler.resetReservationForStructuralChange({
-                itemId: props.itemId,
-                signature: props.signature,
-            });
-        }
-        props.onRowLayoutMutation?.({
-            itemId: props.itemId,
-            mutation: {
-                reason: 'signature-change',
-                sourceId: props.itemId,
-                previousSignature,
-                nextSignature: props.signature,
-            },
-            rowKind: props.signature.kind,
-        });
-    }, [props.onRowLayoutMutation, props.reconciler, props.itemId, signatureKey, props.signature]);
-    const handleChildRowLayoutMutation = React.useCallback((mutation: TranscriptRowLayoutMutation) => {
-        props.onRowLayoutMutation?.({
-            itemId: props.itemId,
-            mutation,
-            rowKind: props.signature.kind,
-        });
-    }, [props.itemId, props.onRowLayoutMutation, props.signature.kind]);
-
-    return (
-        <TranscriptRowLayoutMutationProvider value={handleChildRowLayoutMutation}>
-            <View
-                testID={`${TRANSCRIPT_WEB_PREPEND_ANCHOR_TEST_ID_PREFIX}${props.itemId}`}
-                style={shellStyle}
-                onLayout={handleLayout}
-            >
-                {props.children}
-            </View>
-        </TranscriptRowLayoutMutationProvider>
-    );
-});
-
 /**
  * C1: a structural (shrink-capable) signature delta warrants resetting the per-item floor and is the
  * only thing that may drive a whole-list invalidation. A pure streaming append (rowState stays
@@ -1494,9 +1313,13 @@ const ChatListInternal = React.memo((props: {
         timeoutId: ReturnType<typeof setTimeout>;
     } | null>(null);
     const sessionOpenWebInitialPinRetryTimeoutRef = React.useRef<{
+        deadlineAtMs: number;
+        retryIndex: number;
         sessionId: string;
         timeoutId: ReturnType<typeof setTimeout>;
     } | null>(null);
+    const sessionOpenWebInitialPinRetryArmAtMsRef = React.useRef(Date.now());
+    const scheduleFirstSessionOpenWebInitialPinRetryRef = React.useRef<(() => void) | null>(null);
     const nativeEntryRestorePaintReleaseTimeoutRef = React.useRef<{
         issuedAtMs: number;
         sessionId: string;
@@ -1545,6 +1368,7 @@ const ChatListInternal = React.memo((props: {
     if (viewportLifecycleHostRef.current === null) {
         viewportLifecycleHostRef.current = createTranscriptLifecycleHost({
             lifecycle: viewportLifecycle,
+            mountSettleTuning: resolveTranscriptMountSettleTuning(),
         });
     }
     const lifecycleHost = viewportLifecycleHostRef.current;
@@ -1620,12 +1444,6 @@ const ChatListInternal = React.memo((props: {
         [],
     );
     const measurementReconciler = measurementHost.reconciler;
-    const mountSettleCoordinatorRef = React.useRef<TranscriptMountSettlePinCoordinator | null>(null);
-    if (mountSettleCoordinatorRef.current === null) {
-        mountSettleCoordinatorRef.current = createTranscriptMountSettlePinCoordinator({
-            tuning: resolveTranscriptMountSettleTuning(),
-        });
-    }
     const recordListLayoutWidth = React.useCallback((width: unknown) => {
         if (typeof width !== 'number' || !Number.isFinite(width)) return;
         if (width > 0) {
@@ -1675,7 +1493,7 @@ const ChatListInternal = React.memo((props: {
     const [webPrependRangeReservePx, setWebPrependRangeReservePx] = React.useState(0);
     const clearWebPrependRangeReserve = React.useCallback(() => {
         setWebPrependRangeReservePx((previous) => previous === 0 ? previous : 0);
-    }, []);
+    }, [lifecycleHost]);
     const cancelWebPrependRestoreWindowExpiry = React.useCallback(() => {
         const timeoutId = webPrependRestoreExpiryTimerRef.current;
         if (timeoutId === null) return;
@@ -1772,6 +1590,7 @@ const ChatListInternal = React.memo((props: {
     const nativeVisibleWindowSnapshotRef = React.useRef<NativeVisibleWindowSnapshot | null>(null);
     const lastNativeVisibleRowsSnapshotRef = React.useRef<NativeVisibleWindowSnapshot | null>(null);
     const nativeFlashListMvcpPolicyRef = React.useRef<TranscriptViewportTelemetryMvcpPolicy>('none');
+    const nativeFlashListPauseOffsetCorrectionRef = React.useRef(false);
     const lastProactiveAutoFollowActivityKeyRef = React.useRef<string | null>(props.latestCommittedActivityKey);
     const pendingNativeMountSettleBottomPinRef = React.useRef(false);
     const flushPendingNativeMountSettleBottomPinRef = React.useRef<(() => void) | null>(null);
@@ -1830,6 +1649,15 @@ const ChatListInternal = React.memo((props: {
         };
     }, []);
     const scheduledPinRef = React.useRef<ScheduledPinToBottom | null>(null);
+    const bottomFollowWriteSchedulerStateRef = React.useRef<BottomFollowWriteSchedulerState<WebTranscriptScrollMetrics>>({
+        gestureActive: false,
+        pending: null,
+    });
+    const scheduleBottomFollowWriteTimerRef = React.useRef<((write: BottomFollowScheduledWrite<WebTranscriptScrollMetrics>) => void) | null>(null);
+    const applyBottomFollowWriteSchedulerEffectsRef = React.useRef<((effects: readonly BottomFollowWriteSchedulerEffect<WebTranscriptScrollMetrics>[]) => void) | null>(null);
+    const authorizeImmediateBottomFollowWriteRef = React.useRef<(
+        (writer: BottomFollowAutomaticWriter, reason: TranscriptViewportTelemetryScrollReason) => boolean
+    )>(() => false);
     const latestJumpToSeqRef = React.useRef<number | null>(props.jumpToSeq ?? null);
     latestJumpToSeqRef.current = props.jumpToSeq ?? null;
     const initialWebPinStabilizingRef = React.useRef(false);
@@ -2029,7 +1857,7 @@ const ChatListInternal = React.memo((props: {
             scrollIntent,
             store: getTranscriptNavigationVisibilityStore(props.sessionId),
         });
-    }, [props.sessionId]);
+    }, [lifecycleHost, props.sessionId]);
 
     const resolveEnabledViewportTelemetryTuning = React.useCallback(() => {
         const tuning = sync.getSyncTuning();
@@ -2306,6 +2134,10 @@ const ChatListInternal = React.memo((props: {
 
     const cancelScheduledPinToBottom = React.useCallback(() => {
         pendingNativeMountSettleBottomPinRef.current = false;
+        bottomFollowWriteSchedulerStateRef.current = {
+            ...bottomFollowWriteSchedulerStateRef.current,
+            pending: null,
+        };
         const scheduled = scheduledPinRef.current;
         if (!scheduled) return;
         scheduledPinRef.current = null;
@@ -2368,6 +2200,19 @@ const ChatListInternal = React.memo((props: {
         for (const effect of effects) {
             if (effect.sessionId !== props.sessionId) continue;
             nativeListDragActiveRef.current = effect.active;
+            const schedulerPlan = planBottomFollowWriteSchedulerEvent(
+                bottomFollowWriteSchedulerStateRef.current,
+                {
+                    active: effect.active,
+                    type: 'set-gesture-active',
+                },
+            );
+            bottomFollowWriteSchedulerStateRef.current = schedulerPlan.state;
+            for (const schedulerEffect of schedulerPlan.effects) {
+                if (schedulerEffect.type === 'schedule-write') {
+                    scheduleBottomFollowWriteTimerRef.current?.(schedulerEffect.write);
+                }
+            }
         }
     }, [props.sessionId]);
 
@@ -2861,20 +2706,37 @@ const ChatListInternal = React.memo((props: {
         anchor: SessionViewportAnchorSnapshot | null | undefined,
     ): SessionViewportAnchorSnapshot | null | undefined => {
         if (!anchor) return anchor;
-        const stampedSeq = normalizeDurableViewportSeq(anchor.seq);
-        if (stampedSeq !== null) {
-            return { ...anchor, seq: stampedSeq };
-        }
-        const messageId = typeof anchor.messageId === 'string' && anchor.messageId.length > 0
-            ? anchor.messageId
-            : null;
-        if (!messageId) return anchor;
         const state = getStorage().getState();
         const session = state?.sessionMessages?.[props.sessionId];
         const stateMessagesById =
             (session?.messagesById ?? session?.messagesMap ?? {}) as Readonly<Record<string, Message | undefined>>;
-        const seq = resolveFiniteMessageSeq(props.messagesById[messageId] ?? stateMessagesById[messageId] ?? null);
-        return seq == null ? anchor : { ...anchor, seq };
+        const candidateMessageIds: string[] = [];
+        const seen = new Set<string>();
+        const addMessageId = (value: unknown) => {
+            if (typeof value !== 'string' || value.length === 0 || seen.has(value)) return;
+            seen.add(value);
+            candidateMessageIds.push(value);
+        };
+        const item = listDataRef.current.find((candidate) => candidate.id === anchor.itemId);
+        if (item) {
+            for (const messageId of collectTranscriptNavigationMessageIdsForItem(item)) {
+                addMessageId(messageId);
+            }
+        }
+        const toolCallRowIdMatch = anchor.itemId.match(/^toolCalls:(?:linear:([^#]+)|turn:.*:([^:#]+))(?:#.*)?$/);
+        addMessageId(toolCallRowIdMatch?.[1] ?? toolCallRowIdMatch?.[2]);
+        const toolUnitRowIdMatch = anchor.itemId.match(/#tool:([^#]+)$/);
+        addMessageId(toolUnitRowIdMatch?.[1]);
+        addMessageId(anchor.messageId);
+        for (const messageId of candidateMessageIds) {
+            const seq = resolveFiniteMessageSeq(props.messagesById[messageId] ?? stateMessagesById[messageId] ?? null);
+            if (seq != null) return { ...anchor, messageId, seq };
+        }
+        const stampedSeq = normalizeDurableViewportSeq(anchor.seq);
+        if (stampedSeq !== null) {
+            return { ...anchor, seq: stampedSeq };
+        }
+        return anchor;
     }, [
         props.messagesById,
         props.sessionId,
@@ -3150,7 +3012,11 @@ const ChatListInternal = React.memo((props: {
             setListContentHeight(0);
         }
         pendingNativeMountSettleBottomPinRef.current = false;
+        sessionOpenWebInitialPinRetryArmAtMsRef.current = Date.now();
         applySessionEntryViewportApplyEffects(entryEffects, entryAnchor);
+        if (Platform.OS === 'web' && shouldFollowBottom) {
+            scheduleFirstSessionOpenWebInitialPinRetryRef.current?.();
+        }
     }, [
         applySessionEntryViewportApplyEffects,
         cancelScheduledPinToBottom,
@@ -3209,7 +3075,7 @@ const ChatListInternal = React.memo((props: {
             nativeEntryRestorePaintReleaseTimeoutRef.current = null;
             clearTimeout(nativeEntryRestorePaintReleaseTimeout.timeoutId);
         }
-        mountSettleCoordinatorRef.current?.reset({ reason: 'unmount' });
+        lifecycleHost.resetMountSettle({ reason: 'unmount' });
         pendingNativeMountSettleBottomPinRef.current = false;
         invalidateNativePrependOwnerRef.current();
         lastNativeRestoreIndexCommandRef.current = null;
@@ -4171,6 +4037,15 @@ const ChatListInternal = React.memo((props: {
         const session = state?.sessionMessages?.[props.sessionId];
         return session?.messagesById?.[messageId] ?? session?.messagesMap?.[messageId] ?? null;
     }, [props.messagesById, props.sessionId]);
+    // R1: revision resolver for row shell signatures — `id + revision` replaces full-message
+    // serialization. Fork-context messages resolve against their origin session's revisions;
+    // messages without a tracked revision fall back to the legacy content signature downstream.
+    const getTurnMessageRevisionById = React.useCallback((messageId: string): number | null => {
+        const state = getStorage().getState();
+        const originSessionId = props.forkMessageMetadataById?.[messageId]?.originSessionId ?? props.sessionId;
+        const revision = state?.sessionMessages?.[originSessionId]?.messageRevisionsById?.[messageId];
+        return typeof revision === 'number' && Number.isFinite(revision) ? Math.trunc(revision) : null;
+    }, [props.forkMessageMetadataById, props.sessionId]);
     const resolveToolCallMessagesForIds = React.useCallback((toolMessageIds: readonly string[]): ToolCallMessage[] => {
         const toolMessages: ToolCallMessage[] = [];
         for (const toolMessageId of toolMessageIds) {
@@ -4742,6 +4617,7 @@ const ChatListInternal = React.memo((props: {
             dragSessionTrusted: bottomFollowState.dragSession?.trusted === true,
             nativeMomentumActive: nativeMomentumScrollActiveRef.current,
             mvcpPolicy: nativeFlashListMvcpPolicyRef.current,
+            pauseOffsetCorrection: nativeFlashListPauseOffsetCorrectionRef.current,
             ...(isAtRawBottom !== undefined ? { isAtRawBottom } : {}),
             hasVisibleRows: visibleSnapshot.hasVisibleRows,
             ...(visibleSnapshot.firstVisibleItemId ? { firstVisibleItemId: visibleSnapshot.firstVisibleItemId } : {}),
@@ -5562,7 +5438,7 @@ const ChatListInternal = React.memo((props: {
         distanceFromBottom?: number;
         nowMs?: number;
     }> = {}) => {
-        mountSettleCoordinatorRef.current?.observeMetrics({
+        lifecycleHost.observeMountSettleMetrics({
             sessionId: props.sessionId,
             nowMs: options.nowMs ?? Date.now(),
             initialFillStatus: sessionOpenLatch.initialFillStatus(),
@@ -5604,18 +5480,13 @@ const ChatListInternal = React.memo((props: {
         const intervalMs = tuning.transcriptMountSettleQuiescentWindowMs;
         const deadlineMs = Date.now() + tuning.transcriptInitialFillBudgetMs + intervalMs;
         const intervalId = setInterval(() => {
-            const coordinator = mountSettleCoordinatorRef.current;
-            if (!coordinator) {
-                clearInterval(intervalId);
-                return;
-            }
             const nowMs = Date.now();
-            coordinator.sample({ sessionId: props.sessionId, nowMs });
+            lifecycleHost.sampleMountSettle({ sessionId: props.sessionId, nowMs });
             const mountSettleIntervalDecision = resolveNativeMountSettleIntervalDecision({
                 autoPinSuppressed: nativeMountSettleAutoPinSuppressedRef.current,
                 deadlineMs,
                 nowMs,
-                stableSettle: coordinator.getSnapshot().stableSettle,
+                stableSettle: lifecycleHost.getMountSettleSnapshot().stableSettle,
             });
             applyNativeMountSettleIntervalDecision({
                 clearIntervalCallback: () => clearInterval(intervalId),
@@ -5623,7 +5494,7 @@ const ChatListInternal = React.memo((props: {
             });
         }, intervalMs);
         return () => clearInterval(intervalId);
-    }, [applyNativeMountSettleIntervalDecision, props.sessionId, usesNativeFlashListBottomMaintenance]);
+    }, [applyNativeMountSettleIntervalDecision, lifecycleHost, props.sessionId, usesNativeFlashListBottomMaintenance]);
 
     const recordFirstListPaint = React.useCallback(() => {
         setFirstListPaintObserved(true);
@@ -5657,15 +5528,16 @@ const ChatListInternal = React.memo((props: {
                 web: Platform.OS === 'web' ? 1 : 0,
             });
         }
-        mountSettleCoordinatorRef.current?.recordFirstListPaint({
+        lifecycleHost.recordMountSettleFirstListPaint({
             sessionId: props.sessionId,
             nowMs,
         });
         observeMountSettleMetrics({ nowMs });
         releaseNativePaintForIssuedEntryRestore();
-    }, [
-        observeMountSettleMetrics,
-        props.committedMessagesCount,
+	    }, [
+        lifecycleHost,
+	        observeMountSettleMetrics,
+	        props.committedMessagesCount,
         props.routeHydrationPending,
         props.sessionId,
         releaseNativePaintForIssuedEntryRestore,
@@ -5800,13 +5672,13 @@ const ChatListInternal = React.memo((props: {
 
     const recordLayoutCommitObserved = React.useCallback(() => {
         const nowMs = Date.now();
-        mountSettleCoordinatorRef.current?.recordLayoutCommitObserved({
+        lifecycleHost.recordMountSettleLayoutCommitObserved({
             sessionId: props.sessionId,
             nowMs,
         });
         observeMountSettleMetrics({ nowMs });
         scheduleNativePaintReleaseForEntryRestore();
-    }, [observeMountSettleMetrics, props.sessionId, scheduleNativePaintReleaseForEntryRestore]);
+    }, [lifecycleHost, observeMountSettleMetrics, props.sessionId, scheduleNativePaintReleaseForEntryRestore]);
 
     const shouldCommitContentHeightState = React.useCallback(() => {
         if (Platform.OS === 'web') return true;
@@ -5849,6 +5721,7 @@ const ChatListInternal = React.memo((props: {
         targetWindowActive,
     ]);
     nativeFlashListMvcpPolicyRef.current = mainTranscriptRendererFrameHost.telemetryMvcpPolicy;
+    nativeFlashListPauseOffsetCorrectionRef.current = mainTranscriptRendererFrameHost.pauseOffsetCorrection;
     const mainTranscriptListShellFrame = mainTranscriptRendererFrameHost.frame;
 
     const resolveCreatedAtForMessageId = React.useCallback((messageId: string): number | null => {
@@ -6054,6 +5927,7 @@ const ChatListInternal = React.memo((props: {
             expandedToolCallsAnchorMessageIds,
             forkMessageMetadataById: props.forkMessageMetadataById,
             getMessageById: getTurnMessageById,
+            getMessageRevisionById: getTurnMessageRevisionById,
             groupingMode: props.groupingMode,
             item,
             latestCommittedActivityKey: props.latestCommittedActivityKey,
@@ -6065,6 +5939,7 @@ const ChatListInternal = React.memo((props: {
     ), [
         expandedToolCallsAnchorMessageIds,
         getTurnMessageById,
+        getTurnMessageRevisionById,
         props.groupingMode,
         props.activeThinkingMessageId,
         props.forkMessageMetadataById,
@@ -7326,6 +7201,44 @@ const ChatListInternal = React.memo((props: {
         return normalizeSeq(messageSeq) ?? normalizeSeq(anchor.seq);
     }, [resolveSeqForMessageId]);
 
+    const resolveViewportItemSeqs = React.useCallback((item: ChatTranscriptListItem): number[] => {
+        const seqs: number[] = [];
+        const addSeq = (seq: number | null | undefined) => {
+            if (typeof seq === 'number' && Number.isFinite(seq)) seqs.push(Math.trunc(seq));
+        };
+        if (item.kind === 'message') {
+            addSeq(item.seq ?? resolveSeqForMessageId(item.messageId));
+            return seqs;
+        }
+        if (item.kind === 'tool-calls-group') {
+            for (const toolMessageId of item.toolMessageIds) {
+                addSeq(resolveSeqForMessageId(toolMessageId));
+            }
+            return seqs;
+        }
+        // Per-unit rows: a tool unit resolves its OWN seq; header/expand/footer caps
+        // resolve none, so nearest surviving anchors land on a real row.
+        if (item.kind === 'tool-group-tool') {
+            addSeq(item.seq ?? resolveSeqForMessageId(item.toolMessageId));
+            return seqs;
+        }
+        if (item.kind === 'turn') {
+            if (item.turn.userMessageId) {
+                addSeq(resolveSeqForMessageId(item.turn.userMessageId));
+            }
+            for (const content of item.turn.content) {
+                if (content.kind === 'message') {
+                    addSeq(resolveSeqForMessageId(content.messageId));
+                } else if (content.kind === 'tool_calls') {
+                    for (const toolMessageId of content.toolMessageIds) {
+                        addSeq(resolveSeqForMessageId(toolMessageId));
+                    }
+                }
+            }
+        }
+        return seqs;
+    }, [resolveSeqForMessageId]);
+
     const resolveNearestSurvivingViewportAnchorIndex = React.useCallback((anchor: SessionViewportAnchorSnapshot): number | null => {
         const anchorSeq = resolveSeqForViewportAnchor(anchor);
         if (anchorSeq == null) return null;
@@ -7333,48 +7246,11 @@ const ChatListInternal = React.memo((props: {
         type AnchorIndexCandidate = { index: number; seq: number };
         let earlier: AnchorIndexCandidate | null = null;
         let later: AnchorIndexCandidate | null = null;
-        const resolveItemSeqs = (item: ChatTranscriptListItem): number[] => {
-            const seqs: number[] = [];
-            const addSeq = (seq: number | null | undefined) => {
-                if (typeof seq === 'number' && Number.isFinite(seq)) seqs.push(Math.trunc(seq));
-            };
-            if (item.kind === 'message') {
-                addSeq(item.seq ?? resolveSeqForMessageId(item.messageId));
-                return seqs;
-            }
-            if (item.kind === 'tool-calls-group') {
-                for (const toolMessageId of item.toolMessageIds) {
-                    addSeq(resolveSeqForMessageId(toolMessageId));
-                }
-                return seqs;
-            }
-            // N2c per-unit rows: a tool unit resolves its OWN seq; header/expand/footer
-            // caps resolve none, so the nearest surviving anchor lands on a real row.
-            if (item.kind === 'tool-group-tool') {
-                addSeq(item.seq ?? resolveSeqForMessageId(item.toolMessageId));
-                return seqs;
-            }
-            if (item.kind === 'turn') {
-                if (item.turn.userMessageId) {
-                    addSeq(resolveSeqForMessageId(item.turn.userMessageId));
-                }
-                for (const content of item.turn.content) {
-                    if (content.kind === 'message') {
-                        addSeq(resolveSeqForMessageId(content.messageId));
-                    } else if (content.kind === 'tool_calls') {
-                        for (const toolMessageId of content.toolMessageIds) {
-                            addSeq(resolveSeqForMessageId(toolMessageId));
-                        }
-                    }
-                }
-            }
-            return seqs;
-        };
 
         const items = listDataRef.current;
         for (let index = 0; index < items.length; index += 1) {
             const item = items[index]!;
-            for (const normalizedSeq of resolveItemSeqs(item)) {
+            for (const normalizedSeq of resolveViewportItemSeqs(item)) {
                 if (normalizedSeq < anchorSeq) {
                     if (!earlier || normalizedSeq > earlier.seq) earlier = { index, seq: normalizedSeq };
                     continue;
@@ -7386,7 +7262,15 @@ const ChatListInternal = React.memo((props: {
         }
 
         return earlier?.index ?? later?.index ?? null;
-    }, [resolveSeqForMessageId, resolveSeqForViewportAnchor]);
+    }, [resolveSeqForViewportAnchor, resolveViewportItemSeqs]);
+
+    const isViewportAnchorSeqLoaded = React.useCallback((anchorSeq: number, items: readonly ChatTranscriptListItem[]): boolean => {
+        const normalizedAnchorSeq = Math.trunc(anchorSeq);
+        for (const item of items) {
+            if (resolveViewportItemSeqs(item).some((seq) => seq === normalizedAnchorSeq)) return true;
+        }
+        return false;
+    }, [resolveViewportItemSeqs]);
 
     const resolveEntryRestoreOwnerAnchor = React.useCallback((
         anchor: SessionViewportAnchorSnapshot,
@@ -7907,6 +7791,7 @@ const ChatListInternal = React.memo((props: {
             platform: Platform.OS === 'web' ? 'web' : 'native',
             restoredViewport: {
                 anchor: restoredAnchorForOwner,
+                anchorSeqLoaded: anchorSeq != null ? isViewportAnchorSeqLoaded(anchorSeq, items) : false,
                 offsetY: typeof entryViewport.offsetY === 'number' ? entryViewport.offsetY : null,
                 sessionId: entryViewport.sessionId,
                 shouldFollowBottom: entryViewport.shouldFollowBottom,
@@ -7940,6 +7825,7 @@ const ChatListInternal = React.memo((props: {
         entryRestoreOwner,
         props.jumpToSeq,
         props.sessionId,
+        isViewportAnchorSeqLoaded,
         resolveEntryRestoreCanonicalMetrics,
         resolveEntryRestoreDeadlineMs,
         resolveEntryRestoreOwnerAnchor,
@@ -8247,7 +8133,7 @@ const ChatListInternal = React.memo((props: {
             hasRearmedBottomFollow: hasRearmedNativeBottomFollow(),
             isExplicitNativeCommand,
             isJumpToSeqActive: props.jumpToSeq != null,
-            isMountSettleActive: mountSettleCoordinatorRef.current?.getSnapshot().isMountSettleActive === true,
+            isMountSettleActive: lifecycleHost.getMountSettleSnapshot().isMountSettleActive === true,
             lastNativePinOffset: lastNativePinOffsetRef.current,
             lastStreamAppendPin: lastNativeStreamAppendPinRef.current,
             lastUserScrollIntentAtMs: lastUserScrollIntentAtMsRef.current,
@@ -8316,12 +8202,9 @@ const ChatListInternal = React.memo((props: {
             ) {
                 continue;
             }
-            pinNativeFlashListToBottomIfMeasured({
-                force: true,
-                telemetryReason: 'mount-settle',
-            });
+            authorizeImmediateBottomFollowWriteRef.current('settle-reconfirm', 'mount-settle');
         }
-    }, [pinNativeFlashListToBottomIfMeasured, props.sessionId]);
+    }, [props.sessionId]);
 
     const observeNativeConfirmation = React.useCallback((params: Readonly<{
         contentHeight: number;
@@ -8456,10 +8339,8 @@ const ChatListInternal = React.memo((props: {
     ): boolean => {
         if (Platform.OS !== 'web') return false;
         if (effect.sessionId !== props.sessionId) return false;
-        pinToBottom(effect.reason);
-        return true;
+        return authorizeImmediateBottomFollowWriteRef.current('web-passive-correction', effect.reason);
     }, [
-        pinToBottom,
         props.sessionId,
     ]);
     applyWebPassiveLiveTailCorrectionEffectRef.current = applyWebPassiveLiveTailCorrectionEffect;
@@ -8506,6 +8387,94 @@ const ChatListInternal = React.memo((props: {
         usesNativeFlashListBottomMaintenance,
     ]);
 
+    const applyAuthorizedBottomFollowWrite = React.useCallback((
+        effect: Extract<BottomFollowWriteSchedulerEffect<WebTranscriptScrollMetrics>, { type: 'authorize-write' }>,
+    ): boolean => {
+        switch (effect.command) {
+            case 'web-bottom-follow-adjustment':
+                return applyWebBottomFollowAdjustment(effect.previousWebMetrics, effect.reason);
+            case 'native-respecting-mount-settle':
+                pinToBottomRespectingNativeMountSettle(effect.reason, effect.nativePrevFollowAtBottom === true);
+                return true;
+            case 'pin-to-bottom':
+                return pinToBottom(effect.reason);
+            default:
+                if (effect.writer === 'settle-reconfirm') {
+                    return pinNativeFlashListToBottomIfMeasured({
+                        force: true,
+                        telemetryReason: effect.reason,
+                    });
+                }
+                if (effect.writer === 'hot-tail-carve') {
+                    return pinNativeFlashListToBottomIfMeasured({
+                        telemetryReason: effect.reason,
+                        forceFollowPin: true,
+                    });
+                }
+                if (effect.writer === 'deferred-post-scroll' && usesNativeFlashListBottomMaintenance) {
+                    return pinNativeFlashListToBottomIfMeasured({
+                        force: true,
+                        markInitialViewportApplied: pendingNativeMountSettleBottomPinRef.current || !hasNativeInitialViewportAppliedForCurrentSession()
+                            ? 'when-scrollable'
+                            : undefined,
+                        telemetryReason: effect.reason,
+                    });
+                }
+                if (effect.writer === 'passive-drift') {
+                    return pinNativeFlashListToBottomIfMeasured({ telemetryReason: effect.reason });
+                }
+                return pinToBottom(effect.reason);
+        }
+    }, [
+        applyWebBottomFollowAdjustment,
+        hasNativeInitialViewportAppliedForCurrentSession,
+        pinNativeFlashListToBottomIfMeasured,
+        pinToBottom,
+        pinToBottomRespectingNativeMountSettle,
+        usesNativeFlashListBottomMaintenance,
+    ]);
+
+    const applyBottomFollowWriteSchedulerEffects = React.useCallback((
+        effects: readonly BottomFollowWriteSchedulerEffect<WebTranscriptScrollMetrics>[],
+    ): void => {
+        for (const effect of effects) {
+            if (effect.type === 'cancel-scheduled-write') {
+                cancelScheduledPinToBottom();
+                continue;
+            }
+            if (effect.type === 'schedule-write') {
+                scheduleBottomFollowWriteTimerRef.current?.(effect.write);
+                continue;
+            }
+            if (effect.type === 'authorize-write') {
+                if (effect.command === 'web-bottom-follow-adjustment') {
+                    if (applyAuthorizedBottomFollowWrite(effect)) return;
+                    continue;
+                }
+                applyAuthorizedBottomFollowWrite(effect);
+            }
+        }
+    }, [
+        applyAuthorizedBottomFollowWrite,
+        cancelScheduledPinToBottom,
+    ]);
+    applyBottomFollowWriteSchedulerEffectsRef.current = applyBottomFollowWriteSchedulerEffects;
+
+    const authorizeImmediateBottomFollowWrite = React.useCallback((
+        writer: BottomFollowAutomaticWriter,
+        reason: TranscriptViewportTelemetryScrollReason,
+    ): boolean => {
+        const plan = planBottomFollowWriteSchedulerEvent(bottomFollowWriteSchedulerStateRef.current, {
+            reason,
+            type: 'authorize-immediate-write',
+            writer,
+        });
+        bottomFollowWriteSchedulerStateRef.current = plan.state;
+        applyBottomFollowWriteSchedulerEffects(plan.effects);
+        return plan.effects.some((effect) => effect.type === 'authorize-write');
+    }, [applyBottomFollowWriteSchedulerEffects]);
+    authorizeImmediateBottomFollowWriteRef.current = authorizeImmediateBottomFollowWrite;
+
     const applyNativePendingMountSettleFlushCommandResult = React.useCallback((pinApplied: boolean): void => {
         if (!pinApplied) return;
         if (!hasNativeInitialViewportAppliedForCurrentSession()) return;
@@ -8537,7 +8506,7 @@ const ChatListInternal = React.memo((props: {
     const flushPendingNativeMountSettleBottomPin = React.useCallback(() => {
         const mountSettleFlushPlan = lifecycleHost.planNativeMountSettlePendingPinFlush({
             canRetainPendingMountSettleBottomPin: shouldKeepPendingNativeMountSettleBottomPin(),
-            isMountSettleActive: mountSettleCoordinatorRef.current?.getSnapshot().isMountSettleActive === true,
+            isMountSettleActive: lifecycleHost.getMountSettleSnapshot().isMountSettleActive === true,
             mountSettleDeadlineReached: nativeMountSettleDeadlineReachedRef.current,
             pendingMountSettleBottomPin: pendingNativeMountSettleBottomPinRef.current,
             sessionId: props.sessionId,
@@ -8580,10 +8549,9 @@ const ChatListInternal = React.memo((props: {
         }
         // Authoritative inverted bottom pin: bypasses the post-change distance gate MVCP corrupts on
         // the hot→cold index-0 insert (forceFollowPin), reading the just-committed hot-tail height.
-        pinNativeFlashListToBottomIfMeasured({ telemetryReason: 'stream-append', forceFollowPin: true });
+        authorizeImmediateBottomFollowWriteRef.current('hot-tail-carve', 'stream-append');
     }, [
         captureNativeBottomFollowPreviousFollow,
-        pinNativeFlashListToBottomIfMeasured,
         recordViewportTelemetryEvent,
         resolveViewportTelemetryMode,
         usesNativeFlashListBottomMaintenance,
@@ -8637,24 +8605,9 @@ const ChatListInternal = React.memo((props: {
         reason: TranscriptViewportTelemetryScrollReason,
     ) => {
         fireAndForget(Promise.resolve().then(() => {
-            if (usesNativeFlashListBottomMaintenance) {
-                pinNativeFlashListToBottomIfMeasured({
-                    force: true,
-                    markInitialViewportApplied: pendingNativeMountSettleBottomPinRef.current || !hasNativeInitialViewportAppliedForCurrentSession()
-                        ? 'when-scrollable'
-                        : undefined,
-                    telemetryReason: reason,
-                });
-                return;
-            }
-            pinToBottom(reason);
+            authorizeImmediateBottomFollowWriteRef.current('deferred-post-scroll', reason);
         }), { tag: 'ChatList.deferPinToBottomAfterScroll' });
-    }, [
-        hasNativeInitialViewportAppliedForCurrentSession,
-        pinNativeFlashListToBottomIfMeasured,
-        pinToBottom,
-        usesNativeFlashListBottomMaintenance,
-    ]);
+    }, []);
 
     const jumpToBottom = React.useCallback(() => {
         const plan = lifecycleHost.planExplicitJumpTakeover({
@@ -8724,84 +8677,66 @@ const ChatListInternal = React.memo((props: {
         });
     }, [canAutoFollowForReason, hasRearmedNativeBottomFollow]);
 
-    const applyContentGrowthLiveTailScheduledPinFireEffects = React.useCallback((
-        effects: readonly TranscriptLifecycleHostContentGrowthLiveTailScheduledPinFireEffect<WebTranscriptScrollMetrics>[],
-    ): void => {
-        for (const effect of effects) {
-            if (effect.type === 'apply-web-bottom-follow-adjustment') {
-                if (applyWebBottomFollowAdjustment(effect.previousWebMetrics, effect.reason)) return;
-                continue;
-            }
-            if (effect.type === 'pin-native-respecting-mount-settle') {
-                pinToBottomRespectingNativeMountSettle(effect.reason, effect.nativePrevFollowAtBottom);
-                continue;
-            }
-            pinToBottom(effect.reason);
-        }
-    }, [
-        applyWebBottomFollowAdjustment,
-        pinToBottom,
-        pinToBottomRespectingNativeMountSettle,
-    ]);
-
     const applyScheduledPinToBottomFire = React.useCallback((handle: ScheduledPinToBottom): void => {
-        const firePlan = lifecycleHost.planContentGrowthLiveTailScheduledPinFire<WebTranscriptScrollMetrics>({
-            pin: handle,
+        if (scheduledPinRef.current !== handle) return;
+        const firePlan = planBottomFollowWriteSchedulerEvent(bottomFollowWriteSchedulerStateRef.current, {
+            observedRawOffsetY: Platform.OS === 'web' ? null : readNativeAbsoluteScrollOffset(listRef.current),
+            type: 'fire-pending',
             usesNativeFlashListBottomMaintenance,
             waitMs: resolveAutoPinWaitMs(handle.reason),
         });
-        if (firePlan.clearScheduled) {
-            scheduledPinRef.current = null;
-        }
-        applyContentGrowthLiveTailScheduledPinFireEffects(firePlan.effects);
+        bottomFollowWriteSchedulerStateRef.current = firePlan.state;
+        scheduledPinRef.current = null;
+        applyBottomFollowWriteSchedulerEffects(firePlan.effects);
     }, [
-        applyContentGrowthLiveTailScheduledPinFireEffects,
-        lifecycleHost,
+        applyBottomFollowWriteSchedulerEffects,
         resolveAutoPinWaitMs,
         usesNativeFlashListBottomMaintenance,
     ]);
 
-    const schedulePinToBottom = React.useCallback((
-        previousWebMetrics: WebTranscriptScrollMetrics | null = null,
-        reason: TranscriptViewportTelemetryScrollReason = 'content-size-change',
-        nativePrevFollowAtBottom: boolean = false,
-    ) => {
+    const scheduleBottomFollowWriteTimer = React.useCallback((
+        write: BottomFollowScheduledWrite<WebTranscriptScrollMetrics>,
+    ): void => {
         const raf = (globalThis as any)?.requestAnimationFrame as undefined | ((cb: () => void) => any);
-	        const schedulePlan = lifecycleHost.planContentGrowthLiveTailPinSchedule<WebTranscriptScrollMetrics>({
-            canUseAnimationFrame: typeof raf === 'function',
-            currentScheduled: scheduledPinRef.current,
-            nativePrevFollowAtBottom,
-            platform: Platform.OS === 'web' ? 'web' : 'native',
-            previousWebMetrics,
-            reason,
-	            usesNativeFlashListBottomMaintenance,
-	            waitMs: resolveAutoPinWaitMs(reason),
-	        });
-	        if (schedulePlan.type === 'skip' || schedulePlan.type === 'keep-existing') return;
-        if (schedulePlan.cancelExisting) {
-            cancelScheduledPinToBottom();
-        }
-
-        if (schedulePlan.pin.kind === 'raf' && typeof raf === 'function') {
-            const handle: ScheduledPinToBottom = { ...schedulePlan.pin, id: 0 };
+        if (write.kind === 'raf' && typeof raf === 'function') {
+            const handle: ScheduledPinToBottom = { ...write, id: 0 };
             scheduledPinRef.current = handle;
             handle.id = raf(() => {
-                if (scheduledPinRef.current !== handle) return;
                 applyScheduledPinToBottomFire(handle);
             });
             return;
         }
 
-        const handle: ScheduledPinToBottom = { ...schedulePlan.pin, id: null };
+        const handle: ScheduledPinToBottom = { ...write, id: null };
         scheduledPinRef.current = handle;
         handle.id = setTimeout(() => {
-            if (scheduledPinRef.current !== handle) return;
             applyScheduledPinToBottomFire(handle);
-        }, schedulePlan.pin.delayMs);
+        }, write.delayMs);
+    }, [applyScheduledPinToBottomFire]);
+    scheduleBottomFollowWriteTimerRef.current = scheduleBottomFollowWriteTimer;
+
+    const requestBottomFollowScheduledWrite = React.useCallback((
+        previousWebMetrics: WebTranscriptScrollMetrics | null = null,
+        reason: TranscriptViewportTelemetryScrollReason = 'content-size-change',
+        nativePrevFollowAtBottom: boolean = false,
+        writer: BottomFollowAutomaticWriter = 'automatic-live-tail',
+    ) => {
+        const raf = (globalThis as any)?.requestAnimationFrame as undefined | ((cb: () => void) => any);
+	        const schedulePlan = planBottomFollowWriteSchedulerEvent(bottomFollowWriteSchedulerStateRef.current, {
+            canUseAnimationFrame: typeof raf === 'function',
+            nativePrevFollowAtBottom,
+            platform: Platform.OS === 'web' ? 'web' : 'native',
+            previousWebMetrics,
+            reason,
+            type: 'request-write',
+	            usesNativeFlashListBottomMaintenance,
+	            waitMs: resolveAutoPinWaitMs(reason),
+            writer,
+	        });
+        bottomFollowWriteSchedulerStateRef.current = schedulePlan.state;
+        applyBottomFollowWriteSchedulerEffects(schedulePlan.effects);
     }, [
-        applyScheduledPinToBottomFire,
-        cancelScheduledPinToBottom,
-        lifecycleHost,
+        applyBottomFollowWriteSchedulerEffects,
         resolveAutoPinWaitMs,
         usesNativeFlashListBottomMaintenance,
     ]);
@@ -8815,11 +8750,16 @@ const ChatListInternal = React.memo((props: {
     ): boolean => {
         if (!params.effect) return false;
         if (params.effect.sessionId !== props.sessionId) return false;
-        schedulePinToBottom(params.previousWebMetrics, params.effect.reason, params.nativePrevFollowAtBottom);
+        requestBottomFollowScheduledWrite(
+            params.previousWebMetrics,
+            params.effect.reason,
+            params.nativePrevFollowAtBottom,
+            'content-growth',
+        );
         return true;
     }, [
         props.sessionId,
-        schedulePinToBottom,
+        requestBottomFollowScheduledWrite,
     ]);
 
     const requestAutomaticLiveTailPin = React.useCallback((
@@ -8845,13 +8785,6 @@ const ChatListInternal = React.memo((props: {
         props.sessionId,
     ]);
 
-    const applyMeasuredNativeContentGrowthLiveTailCommand = React.useCallback((
-        effect: ContentGrowthLiveTailCommandApplyEffect | null,
-    ): boolean => {
-        if (!effect) return false;
-        return pinNativeFlashListToBottomIfMeasured({ telemetryReason: effect.reason });
-    }, [pinNativeFlashListToBottomIfMeasured]);
-
     const requestMeasuredNativeAutomaticLiveTailPin = React.useCallback((
         reason: TranscriptViewportTelemetryScrollReason = 'content-size-change',
     ): boolean => {
@@ -8862,9 +8795,12 @@ const ChatListInternal = React.memo((props: {
             wantsLiveTail: wantsPinnedRef.current,
         });
         commitBottomFollowModeState(plan.state.bottomFollowState);
-        return applyMeasuredNativeContentGrowthLiveTailCommand(plan.contentGrowthLiveTailCommandEffect);
+        if (!plan.contentGrowthLiveTailCommandEffect) return false;
+        return authorizeImmediateBottomFollowWriteRef.current(
+            'passive-drift',
+            plan.contentGrowthLiveTailCommandEffect.reason,
+        );
     }, [
-        applyMeasuredNativeContentGrowthLiveTailCommand,
         commitBottomFollowModeState,
         lifecycleHost,
         props.sessionId,
@@ -8897,7 +8833,7 @@ const ChatListInternal = React.memo((props: {
         const preflightDecision = resolveNativeMountSettlePassiveDriftRepinPreflightDecision({
             autoPinDelayMs: TRANSCRIPT_SCROLL_USER_INTENT_AUTO_PIN_DELAY_MS,
             bottomFollowMode: params.bottomFollowMode,
-            isMountSettleActive: mountSettleCoordinatorRef.current?.getSnapshot().isMountSettleActive === true,
+            isMountSettleActive: lifecycleHost.getMountSettleSnapshot().isMountSettleActive === true,
             isNative: Platform.OS !== 'web',
             isTrusted: params.isTrusted,
             lastUserScrollIntentAtMs: lastUserScrollIntentAtMsRef.current,
@@ -8995,19 +8931,8 @@ const ChatListInternal = React.memo((props: {
         setComposerInsetHeight(nextHeight);
         observeMountSettleMetrics();
 
-        if (Platform.OS !== 'web') {
-            const delta = nextHeight - previousHeight;
-            if (delta !== 0 && listContentHeightRef.current > 0) {
-                const nextContentHeight = Math.max(0, listContentHeightRef.current + delta);
-                listContentHeightRef.current = nextContentHeight;
-                if (shouldCommitContentHeightState()) {
-                    setListContentHeight(nextContentHeight);
-                }
-            }
-        }
-
         requestAutomaticLiveTailPin(null, 'layout-change');
-    }, [observeMountSettleMetrics, requestAutomaticLiveTailPin, shouldCommitContentHeightState]);
+    }, [observeMountSettleMetrics, requestAutomaticLiveTailPin]);
 
     const listFooterNode = React.useMemo(() => (
         <>
@@ -9256,7 +9181,7 @@ const ChatListInternal = React.memo((props: {
             ) {
                 // Native flash stream growth pins exactly once per measured content
                 // version from onContentSizeChange (plan B3 single writer).
-                pinToBottomRespectingNativeMountSettle('stream-append');
+                authorizeImmediateBottomFollowWriteRef.current('proactive-auto-follow', 'stream-append');
             }
         }
         const nextScrollPin = resolveTranscriptScrollPinStateUpdate(
@@ -9274,7 +9199,6 @@ const ChatListInternal = React.memo((props: {
         canAutoFollowForReason,
         commitScrollPinState,
         pinEnabled,
-        pinToBottomRespectingNativeMountSettle,
         props.latestCommittedActivityKey,
         observeNativeStreamAppendOffsetEscape,
         usesNativeFlashListBottomMaintenance,
@@ -9319,25 +9243,6 @@ const ChatListInternal = React.memo((props: {
             }
             if (!entryRestoreOwner.hasOpenTransaction(props.sessionId)) {
                 if (!pinApplied) {
-                    const existingRetry = sessionOpenWebInitialPinRetryTimeoutRef.current;
-                    if (existingRetry) {
-                        clearTimeout(existingRetry.timeoutId);
-                        sessionOpenWebInitialPinRetryTimeoutRef.current = null;
-                    }
-                    const [retryDelayMs] = resolveSessionOpenWebInitialPinRetryPlan(sync.getSyncTuning()).retryDelaysMs;
-                    if (typeof retryDelayMs === 'number' && Number.isFinite(retryDelayMs)) {
-                        const timeoutId = setTimeout(() => {
-                            const handle = sessionOpenWebInitialPinRetryTimeoutRef.current;
-                            if (!handle || handle.timeoutId !== timeoutId) return;
-                            sessionOpenWebInitialPinRetryTimeoutRef.current = null;
-                            if (handle.sessionId !== currentSessionIdRef.current) return;
-                            pinToBottom('initial-open');
-                        }, Math.max(0, Math.trunc(retryDelayMs)));
-                        sessionOpenWebInitialPinRetryTimeoutRef.current = {
-                            sessionId: props.sessionId,
-                            timeoutId,
-                        };
-                    }
                     return false;
                 }
                 initialWebPinStabilizingRef.current = false;
@@ -9356,6 +9261,97 @@ const ChatListInternal = React.memo((props: {
         verifyWebEntryRestoreTransaction,
     ]);
 
+    const scheduleSessionOpenWebInitialPinRetry = React.useCallback((deadlineAtMs: number, retryIndex = 0): void => {
+        if (Platform.OS !== 'web') return;
+        if (jumpToSeqActiveRef.current) return;
+        const existing = sessionOpenWebInitialPinRetryTimeoutRef.current;
+        if (existing) {
+            if (existing.sessionId === props.sessionId && existing.deadlineAtMs <= deadlineAtMs) return;
+            clearTimeout(existing.timeoutId);
+            sessionOpenWebInitialPinRetryTimeoutRef.current = null;
+        }
+        initialWebPinStabilizingRef.current = true;
+        const timeoutId = setTimeout(() => {
+            const handle = sessionOpenWebInitialPinRetryTimeoutRef.current;
+            if (!handle || handle.timeoutId !== timeoutId) return;
+            sessionOpenWebInitialPinRetryTimeoutRef.current = null;
+            if (handle.sessionId !== currentSessionIdRef.current) return;
+            if (jumpToSeqActiveRef.current) return;
+            const completed = executeSessionOpenInitialPinAttempt();
+            if (
+                !completed &&
+                wantsPinnedRef.current !== false &&
+                !entryRestoreOwner.hasOpenTransaction(handle.sessionId) &&
+                Date.now() - lastUserScrollIntentAtMsRef.current >= TRANSCRIPT_SCROLL_USER_INTENT_AUTO_PIN_DELAY_MS
+            ) {
+                pinToBottom('initial-open');
+            }
+            const retryPlan = resolveSessionOpenWebInitialPinRetryPlan(sync.getSyncTuning());
+            const nextRetryIndex = handle.retryIndex + 1;
+            const nextRetryDelayMs = retryPlan.retryDelaysMs[nextRetryIndex];
+            if (
+                !jumpToSeqActiveRef.current &&
+                wantsPinnedRef.current !== false &&
+                typeof nextRetryDelayMs === 'number' &&
+                Number.isFinite(nextRetryDelayMs) &&
+                Date.now() - lastUserScrollIntentAtMsRef.current >= TRANSCRIPT_SCROLL_USER_INTENT_AUTO_PIN_DELAY_MS
+            ) {
+                scheduleSessionOpenWebInitialPinRetry(
+                    sessionOpenWebInitialPinRetryArmAtMsRef.current + Math.max(0, Math.trunc(nextRetryDelayMs)),
+                    nextRetryIndex,
+                );
+            }
+        }, Math.max(0, deadlineAtMs - Date.now()));
+        sessionOpenWebInitialPinRetryTimeoutRef.current = {
+            deadlineAtMs,
+            retryIndex,
+            sessionId: props.sessionId,
+            timeoutId,
+        };
+    }, [
+        entryRestoreOwner,
+        executeSessionOpenInitialPinAttempt,
+        pinToBottom,
+        props.sessionId,
+    ]);
+
+    const scheduleFirstSessionOpenWebInitialPinRetry = React.useCallback((): void => {
+        if (Platform.OS !== 'web' || sessionOpenWebInitialPinRetryTimeoutRef.current) return;
+        const [retryDelayMs] = resolveSessionOpenWebInitialPinRetryPlan(sync.getSyncTuning()).retryDelaysMs;
+        if (typeof retryDelayMs !== 'number' || !Number.isFinite(retryDelayMs)) return;
+        scheduleSessionOpenWebInitialPinRetry(
+            sessionOpenWebInitialPinRetryArmAtMsRef.current + Math.max(0, Math.trunc(retryDelayMs)),
+            0,
+        );
+    }, [scheduleSessionOpenWebInitialPinRetry]);
+    scheduleFirstSessionOpenWebInitialPinRetryRef.current = scheduleFirstSessionOpenWebInitialPinRetry;
+
+    React.useEffect(() => {
+        if (
+            Platform.OS !== 'web' ||
+            !props.sessionId ||
+            !props.isLoaded ||
+            props.jumpToSeq != null ||
+            (
+                sessionEntryViewportRef.current !== null &&
+                (
+                    sessionEntryViewportRef.current.sessionId !== props.sessionId ||
+                    sessionEntryViewportRef.current.shouldFollowBottom === false
+                )
+            ) ||
+            entryRestoreOwner.hasOpenTransaction(props.sessionId)
+        ) {
+            return;
+        }
+        scheduleFirstSessionOpenWebInitialPinRetry();
+    }, [
+        entryRestoreOwner,
+        props.isLoaded,
+        props.jumpToSeq,
+        props.sessionId,
+        scheduleFirstSessionOpenWebInitialPinRetry,
+    ]);
+
     const applySessionOpenLatchEffects = React.useCallback((effects: readonly SessionOpenLatchEffect[]): void => {
         for (const effect of effects) {
             switch (effect.type) {
@@ -9372,35 +9368,19 @@ const ChatListInternal = React.memo((props: {
                     setNativeMountSettleDeadlineReached(true);
                     updateNativeInitialViewportPendingObservation(false);
                     break;
-                case 'request-initial-pin':
-                    executeSessionOpenInitialPinAttempt();
+                case 'request-initial-pin': {
+                    const completed = executeSessionOpenInitialPinAttempt();
+                    if (!completed) scheduleFirstSessionOpenWebInitialPinRetry();
                     break;
+                }
                 case 'begin-web-bottom-entry':
                     if (beginSessionOpenWebBottomEntry(effect.deadlineMs)) {
                         verifyWebEntryRestoreTransaction();
                     }
                     break;
-                case 'schedule-web-initial-pin-retry': {
-                    if (Platform.OS !== 'web') break;
-                    const existing = sessionOpenWebInitialPinRetryTimeoutRef.current;
-                    if (existing) {
-                        clearTimeout(existing.timeoutId);
-                        sessionOpenWebInitialPinRetryTimeoutRef.current = null;
-                    }
-                    initialWebPinStabilizingRef.current = true;
-                    const timeoutId = setTimeout(() => {
-                        const handle = sessionOpenWebInitialPinRetryTimeoutRef.current;
-                        if (!handle || handle.timeoutId !== timeoutId) return;
-                        sessionOpenWebInitialPinRetryTimeoutRef.current = null;
-                        if (handle.sessionId !== currentSessionIdRef.current) return;
-                        executeSessionOpenInitialPinAttempt();
-                    }, Math.max(0, effect.deadlineAtMs - Date.now()));
-                    sessionOpenWebInitialPinRetryTimeoutRef.current = {
-                        sessionId: props.sessionId,
-                        timeoutId,
-                    };
+                case 'schedule-web-initial-pin-retry':
+                    scheduleSessionOpenWebInitialPinRetry(effect.deadlineAtMs);
                     break;
-                }
                 case 'request-initial-fill':
                     requestSessionOpenInitialFillRef.current();
                     break;
@@ -9417,6 +9397,8 @@ const ChatListInternal = React.memo((props: {
         executeSessionOpenInitialPinAttempt,
         props.sessionId,
         runEntryRestoreAttempt,
+        scheduleFirstSessionOpenWebInitialPinRetry,
+        scheduleSessionOpenWebInitialPinRetry,
         updateNativeInitialViewportPendingObservation,
         verifyWebEntryRestoreTransaction,
     ]);
@@ -9424,12 +9406,19 @@ const ChatListInternal = React.memo((props: {
 
     React.useLayoutEffect(() => {
         if (!props.sessionId || !props.isLoaded || props.jumpToSeq != null) return;
+        const sessionEntryViewport = sessionEntryViewportRef.current;
         if (
             Platform.OS === 'web' &&
-            sessionEntryViewportRef.current?.sessionId === props.sessionId &&
-            sessionEntryViewportRef.current.shouldFollowBottom !== false
+            (
+                sessionEntryViewport === null ||
+                (
+                    sessionEntryViewport.sessionId === props.sessionId &&
+                    sessionEntryViewport.shouldFollowBottom !== false
+                )
+            )
         ) {
-            executeSessionOpenInitialPinAttempt();
+            const completed = executeSessionOpenInitialPinAttempt();
+            if (!completed) scheduleFirstSessionOpenWebInitialPinRetry();
         }
         applySessionOpenLatchEffects(sessionOpenLatch.onHostFacts({
             contentHeight: listContentHeightRef.current,
@@ -9449,17 +9438,25 @@ const ChatListInternal = React.memo((props: {
         props.items.length,
         props.jumpToSeq,
         props.sessionId,
+        scheduleFirstSessionOpenWebInitialPinRetry,
         sessionOpenLatch,
     ]);
 
     React.useEffect(() => {
         if (!props.sessionId || !props.isLoaded || props.jumpToSeq != null) return;
+        const sessionEntryViewport = sessionEntryViewportRef.current;
         if (
             Platform.OS === 'web' &&
-            sessionEntryViewportRef.current?.sessionId === props.sessionId &&
-            sessionEntryViewportRef.current.shouldFollowBottom !== false
+            (
+                sessionEntryViewport === null ||
+                (
+                    sessionEntryViewport.sessionId === props.sessionId &&
+                    sessionEntryViewport.shouldFollowBottom !== false
+                )
+            )
         ) {
-            executeSessionOpenInitialPinAttempt();
+            const completed = executeSessionOpenInitialPinAttempt();
+            if (!completed) scheduleFirstSessionOpenWebInitialPinRetry();
         }
         applySessionOpenLatchEffects(sessionOpenLatch.onHostFacts({
             contentHeight: listContentHeightRef.current,
@@ -9479,6 +9476,7 @@ const ChatListInternal = React.memo((props: {
         props.items.length,
         props.jumpToSeq,
         props.sessionId,
+        scheduleFirstSessionOpenWebInitialPinRetry,
         sessionOpenLatch,
     ]);
 
@@ -10238,7 +10236,7 @@ const ChatListInternal = React.memo((props: {
                                             hasNativeMountSettlePassiveDriftRepinObservation,
                                             recentUserIntent,
                                         }) {
-                                            mountSettleCoordinatorRef.current?.sample({
+                                            lifecycleHost.sampleMountSettle({
                                                 sessionId: props.sessionId,
                                                 nowMs,
                                             });

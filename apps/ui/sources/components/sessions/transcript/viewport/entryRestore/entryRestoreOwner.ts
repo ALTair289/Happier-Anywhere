@@ -48,6 +48,11 @@ type EntryRestoreOwnerWriteContext = Readonly<{
     targetOffsetYWasClamped: boolean;
 }>;
 
+type WebBottomSettleConfirmation = Readonly<{
+    context: EntryRestoreOwnerWriteContext;
+    spent: boolean;
+}>;
+
 const WEB_BOTTOM_ENTRY_CONFIRMATION_EPSILON_PX = 1;
 
 export type EntryRestoreOwnerCommandInput =
@@ -133,6 +138,7 @@ export type EntryRestoreOwnerAttemptInput<TItem> = Readonly<{
     platform: EntryRestoreOwnerPlatform;
     restoredViewport: Readonly<{
         anchor: EntryRestoreOwnerAnchor | null;
+        anchorSeqLoaded?: boolean;
         offsetY: number | null;
         sessionId: string;
         shouldFollowBottom: boolean;
@@ -216,6 +222,7 @@ export function createEntryRestoreOwner(): EntryRestoreOwner {
     let writeContext: EntryRestoreOwnerWriteContext | null = null;
     let suppressedSessionId: string | null = null;
     let lastClosedSessionId: string | null = null;
+    let webBottomSettleConfirmation: WebBottomSettleConfirmation | null = null;
 
     function attempt<TItem>(params: EntryRestoreOwnerAttemptInput<TItem>): readonly EntryRestoreOwnerEffect[] {
         const entryViewport = params.restoredViewport;
@@ -256,6 +263,7 @@ export function createEntryRestoreOwner(): EntryRestoreOwner {
             fillSettled: params.fillSettled,
             canMaterializeOlder: params.canMaterializeOlder,
             anchorIndexResolver: () => params.exactAnchorIndex,
+            anchorSeqLoadedResolver: () => entryViewport.anchorSeqLoaded === true,
             nearestSurvivingResolver: () => params.nearestAnchorIndex,
         });
 
@@ -401,7 +409,9 @@ export function createEntryRestoreOwner(): EntryRestoreOwner {
     }
 
     function observeWebHostFacts(params: EntryRestoreOwnerWebHostFactsInput): readonly EntryRestoreOwnerEffect[] {
-        if (!transaction || transaction.isClosed() || transaction.sessionId !== params.sessionId || !writeContext) return [];
+        if (!transaction || transaction.isClosed() || transaction.sessionId !== params.sessionId || !writeContext) {
+            return observeClosedWebBottomSettle(params);
+        }
         const observation = resolveWebHostObservation(writeContext, params);
         if (observation == null) return [];
         return observeWeb({
@@ -464,6 +474,7 @@ export function createEntryRestoreOwner(): EntryRestoreOwner {
     function resetForSession(params: Readonly<{ sessionId: string }>): readonly EntryRestoreOwnerEffect[] {
         void params;
         clearTransaction();
+        webBottomSettleConfirmation = null;
         lastClosedSessionId = null;
         suppressedSessionId = null;
         return [
@@ -603,6 +614,7 @@ export function createEntryRestoreOwner(): EntryRestoreOwner {
         target: EntryRestoreTransactionTarget;
         writePolicy?: 'issue-initial-write' | 'observe-only';
     }>): readonly EntryRestoreOwnerEffect[] {
+        webBottomSettleConfirmation = null;
         transaction = createEntryRestoreTransaction({
             sessionId: params.sessionId,
             target: params.target,
@@ -624,17 +636,27 @@ export function createEntryRestoreOwner(): EntryRestoreOwner {
     function closeEffects(currentSessionId: string, platform: EntryRestoreOwnerPlatform): readonly EntryRestoreOwnerEffect[] {
         if (!transaction || !transaction.isClosed()) return [];
         const sessionId = transaction.sessionId;
+        const outcome = transaction.outcome();
+        const settledBottomContext =
+            platform === 'web' &&
+            outcome === 'confirmed' &&
+            writeContext?.kind === 'bottom'
+                ? writeContext
+                : null;
         const effects = [
             { sessionId, type: 'clear-entry-deadline' } as const,
             ...mapCloseEffects(resolveEntryRestoreCloseEffects({
                 currentSessionId,
-                outcome: transaction.outcome(),
+                outcome,
                 platform,
                 sessionId,
                 writeContext,
             })),
         ];
         clearTransaction({ closedSessionId: sessionId });
+        webBottomSettleConfirmation = settledBottomContext
+            ? { context: settledBottomContext, spent: false }
+            : null;
         return effects;
     }
 
@@ -678,6 +700,25 @@ export function createEntryRestoreOwner(): EntryRestoreOwner {
         lastClosedSessionId = options.closedSessionId ?? lastClosedSessionId;
         transaction = null;
         writeContext = null;
+    }
+
+    function observeClosedWebBottomSettle(
+        params: EntryRestoreOwnerWebHostFactsInput,
+    ): readonly EntryRestoreOwnerEffect[] {
+        const confirmation = webBottomSettleConfirmation;
+        if (!confirmation || confirmation.spent || confirmation.context.sessionId !== params.sessionId) return [];
+        const observation = resolveWebHostObservation(confirmation.context, params);
+        if (observation == null || observation.status !== 'misaligned') return [];
+        webBottomSettleConfirmation = { ...confirmation, spent: true };
+        return [{
+            command: buildDistanceCommand(
+                params.sessionId,
+                0,
+                Math.max(0, Math.trunc(params.contentHeight)),
+                false,
+            ),
+            type: 'execute-command',
+        }];
     }
 
     return {

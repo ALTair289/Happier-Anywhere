@@ -74,6 +74,7 @@ export type ResolveEntryRestoreTargetParams<TItem> = Readonly<{
     /** True while bounded older-page materialization budget remains for anchor lookup. */
     canMaterializeOlder: boolean;
     anchorIndexResolver: (anchor: EntryRestoreAnchorSnapshot, items: readonly TItem[]) => number | null;
+    anchorSeqLoadedResolver?: (anchorSeq: number, items: readonly TItem[]) => boolean;
     nearestSurvivingResolver: (anchor: EntryRestoreAnchorSnapshot, items: readonly TItem[]) => number | null;
     anchorSeqResolver?: (anchor: EntryRestoreAnchorSnapshot) => number | null;
 }>;
@@ -136,7 +137,11 @@ export function resolveEntryRestoreTarget<TItem>(
         if (exactTarget) return exactTarget;
 
         const anchorSeqHint = resolveDurableAnchorSeqHint(anchor, params.anchorSeqResolver);
-        if (params.canMaterializeOlder && anchorSeqHint !== null) {
+        if (
+            params.canMaterializeOlder &&
+            anchorSeqHint !== null &&
+            params.anchorSeqLoadedResolver?.(anchorSeqHint, params.items) !== true
+        ) {
             return {
                 kind: 'materialize-then-anchor',
                 anchorSeqHint,

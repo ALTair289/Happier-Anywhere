@@ -825,7 +825,7 @@ vi.mock('@/components/sessions/transcript/scroll/JumpToBottomButton', () => ({
     JumpToBottomButton: (props: any) => React.createElement('JumpToBottomButton', props),
 }));
 
-vi.mock('@/components/sessions/transcript/scroll/transcriptScrollPinController', async () => await import('./scroll/transcriptScrollPinController'));
+vi.mock('@/components/sessions/transcript/scroll/transcriptBottomFollowMode', async () => await import('./scroll/transcriptBottomFollowMode'));
 
 vi.mock('@/encryption/hex', () => ({
     decodeHex: () => new Uint8Array(),
@@ -14707,7 +14707,7 @@ describe('ChatList (FlashList v2)', () => {
         );
     });
 
-    it('stamps visible web tool-group anchors with the live message seq before persistence', async () => {
+    it('normalizes visible web tool-group header anchors through the live row before persistence', async () => {
         await withWebFlashListFakeTimers(1_000, async () => {
             runtimeMockState.platformOs = 'web';
             syncTuningState = {
@@ -14717,8 +14717,8 @@ describe('ChatList (FlashList v2)', () => {
             const contentHeight = 1200;
             const clientHeight = 400;
             const scrollTop = 480;
-            const toolGroupItem = createFlashListChatListWebElement('transcript-item-tool-group-runtime', { top: 110, bottom: 260 });
-            const toolGroupAnchor = createFlashListChatListWebElement('transcript-anchor-tool-group-runtime-t2', { top: 120, bottom: 220 });
+            const toolGroupItem = createFlashListChatListWebElement('transcript-item-toolCalls:linear:runtime-t2', { top: 110, bottom: 260 });
+            const toolGroupAnchor = createFlashListChatListWebElement('transcript-anchor-tool-group-rotated-runtime-id', { top: 120, bottom: 220 });
             toolGroupAnchor.parentElement = toolGroupItem;
             const scroller = createFlashListChatListWebScroller({
                 clientHeight,

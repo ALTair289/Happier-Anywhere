@@ -543,6 +543,7 @@ export function createFlashListChatListSyncModuleMock(
             hasDeferredNewerMessages,
             getSyncTuning: () => flashListChatListHarnessState.syncTuningState,
             getSessionTargetWindowState: () => createInactiveSessionMessagesWindowState(),
+            markSessionLiveTailIntent: () => undefined,
             maybeDrainDeferredNewerMessages,
             ...overrides,
         },

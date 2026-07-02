@@ -208,7 +208,11 @@ type MessageViewProps = {
   };
 };
 
-export const MessageView = (props: MessageViewProps) => {
+// R3: transcript rows are memoized — the message object's identity changes only on revision
+// (store in-place contract), and per-row selection state reaches each block through the
+// selection store subscription, so a parent/list re-render with stable props must not
+// re-render every visible message subtree.
+export const MessageView = React.memo(function MessageView(props: MessageViewProps) {
   const transcriptSessionCommon = useTranscriptSessionCommon(props.sessionId);
   return (
     <MessageViewWithSessionCommon
@@ -219,14 +223,14 @@ export const MessageView = (props: MessageViewProps) => {
       toolRouteCommon={transcriptSessionCommon.toolRoute}
     />
   );
-};
+});
 
-export const MessageViewWithSessionCommon = (props: MessageViewProps & {
+export const MessageViewWithSessionCommon = React.memo(function MessageViewWithSessionCommon(props: MessageViewProps & {
   forkCommon: TranscriptForkCommon;
   messageDisplayCommon: TranscriptMessageDisplayCommon;
   toolChromeCommon: TranscriptToolChromeCommon;
   toolRouteCommon: TranscriptToolRouteCommon;
-}) => {
+}) {
   if (shouldHideVoiceAgentTurnMessage(props.message)) return null;
   return (
     <View style={styles.messageContainer} renderToHardwareTextureAndroid={true}>
@@ -261,7 +265,7 @@ export const MessageViewWithSessionCommon = (props: MessageViewProps & {
       </View>
     </View>
   );
-};
+});
 
 // RenderBlock function that dispatches to the correct component based on message kind
 function RenderBlock(props: {

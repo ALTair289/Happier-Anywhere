@@ -150,6 +150,12 @@ import {
     type NativeConfirmationOwnerScrollPlan,
 } from './nativeConfirmationOwner';
 import {
+    createTranscriptMountSettlePinCoordinator,
+    type TranscriptMountSettleMetrics,
+    type TranscriptMountSettleSnapshot,
+    type TranscriptMountSettleTuning,
+} from './mountSettle';
+import {
     resolveSessionEntryRenderResetEffects,
     type SessionEntryRenderResetEffects,
 } from './sessionEntryRenderResetEffects';
@@ -597,7 +603,9 @@ export type TranscriptLifecycleHost = Readonly<{
         input: TranscriptLifecycleHostNativeExplicitJumpConfirmationClearInput,
     ): void;
     enterSession(input: TranscriptLifecycleHostSessionEntryInput): TranscriptLifecycleHostSessionEntryPlan;
+    getMountSettleSnapshot(): TranscriptMountSettleSnapshot;
     getState(): TranscriptViewportLifecycleState;
+    observeMountSettleMetrics(input: TranscriptMountSettleMetrics): void;
     observeNativeScrollConfirmation(
         input: TranscriptLifecycleHostNativeScrollConfirmationInput,
     ): TranscriptLifecycleHostNativeScrollConfirmationPlan;
@@ -653,16 +661,28 @@ export type TranscriptLifecycleHost = Readonly<{
         pinThresholdPx: number;
         sessionId: string;
     }>): TranscriptLifecycleHostNativeTouchReleasePlan;
+    recordMountSettleFirstListPaint(input: Readonly<{ sessionId: string; nowMs: number }>): void;
+    recordMountSettleLayoutCommitObserved(input: Readonly<{ sessionId: string; nowMs: number }>): void;
     resetNativeEntrySettleConfirmation(
         input: TranscriptLifecycleHostNativeEntrySettleConfirmationResetInput,
     ): void;
+    resetMountSettle(input?: Readonly<{ reason?: 'session-change' | 'unmount' }>): void;
+    sampleMountSettle(input: Readonly<{ sessionId: string; nowMs: number }>): void;
 }>;
 
 export function createTranscriptLifecycleHost(options: Readonly<{
     lifecycle?: TranscriptViewportLifecycle;
+    mountSettleTuning?: TranscriptMountSettleTuning;
 }> = {}): TranscriptLifecycleHost {
     const lifecycle = options.lifecycle ?? createTranscriptViewportLifecycle();
     const nativeConfirmationOwner = createNativeConfirmationOwner();
+    const mountSettle = createTranscriptMountSettlePinCoordinator({
+        tuning: options.mountSettleTuning ?? {
+            bottomDistanceNoiseFloorPx: 0,
+            dimensionNoiseFloorPx: 0,
+            quiescentWindowMs: 0,
+        },
+    });
 
     const transitionPlan = (transition: TranscriptViewportLifecycleTransition): LifecycleHostPlanBase => ({
         lifecycleEffects: transition.effects,
@@ -861,8 +881,14 @@ export function createTranscriptLifecycleHost(options: Readonly<{
                 }),
             };
         },
+        getMountSettleSnapshot() {
+            return mountSettle.getSnapshot();
+        },
         getState() {
             return lifecycle.getState();
+        },
+        observeMountSettleMetrics(input) {
+            mountSettle.observeMetrics(input);
         },
         observeNativeScrollConfirmation(input) {
             return nativeConfirmationOwner.observeScroll(input);
@@ -1012,8 +1038,20 @@ export function createTranscriptLifecycleHost(options: Readonly<{
                 }),
             };
         },
+        recordMountSettleFirstListPaint(input) {
+            mountSettle.recordFirstListPaint(input);
+        },
+        recordMountSettleLayoutCommitObserved(input) {
+            mountSettle.recordLayoutCommitObserved(input);
+        },
         resetNativeEntrySettleConfirmation(input) {
             nativeConfirmationOwner.resetEntrySettle(input);
+        },
+        resetMountSettle(input) {
+            mountSettle.reset(input);
+        },
+        sampleMountSettle(input) {
+            mountSettle.sample(input);
         },
     };
 }

@@ -321,8 +321,8 @@ vi.mock('@/components/sessions/transcript/scroll/JumpToBottomButton', () => ({
   JumpToBottomButton: () => null,
 }));
 
-vi.mock('@/components/sessions/transcript/scroll/transcriptScrollPinController', async () => {
-  const actual = await vi.importActual<any>('@/components/sessions/transcript/scroll/transcriptScrollPinController');
+vi.mock('@/components/sessions/transcript/scroll/transcriptBottomFollowMode', async () => {
+  const actual = await vi.importActual<any>('@/components/sessions/transcript/scroll/transcriptBottomFollowMode');
   return actual;
 });
 

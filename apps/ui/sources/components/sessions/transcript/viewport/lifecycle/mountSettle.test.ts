@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { createTranscriptMountSettlePinCoordinator } from './transcriptMountSettlePinCoordinator';
+import { createTranscriptMountSettlePinCoordinator } from './mountSettle';
 
 const tuning = {
     quiescentWindowMs: 100,
@@ -20,7 +20,7 @@ function observeDoneAt(nowMs: number) {
     };
 }
 
-describe('transcriptMountSettlePinCoordinator', () => {
+describe('lifecycle mount-settle owner', () => {
     it('tracks first paint and layout commit separately from stable settle', () => {
         const coordinator = createTranscriptMountSettlePinCoordinator({ tuning });
 

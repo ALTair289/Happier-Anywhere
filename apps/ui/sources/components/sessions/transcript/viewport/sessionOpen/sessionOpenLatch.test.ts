@@ -121,6 +121,31 @@ describe('session open latch', () => {
         ]);
     });
 
+    it('requests initial web pin and retry once per arm across repeated host facts', () => {
+        const latch = createSessionOpenLatch();
+        const facts = {
+            contentHeight: 240,
+            hasEntrySliceWindow: false,
+            isLoaded: true,
+            isScrollable: false,
+            itemCount: 3,
+            layoutHeight: 600,
+            nowMs: 1_025,
+            sessionId: 'session-a',
+            userWantsPinned: true,
+        };
+
+        latch.arm(armInput());
+        latch.onHostFacts(facts);
+        const repeated = latch.onHostFacts({
+            ...facts,
+            nowMs: 1_050,
+        });
+
+        expect(repeated.effects.some((effect) => effect.type === 'request-initial-pin')).toBe(false);
+        expect(repeated.effects.some((effect) => effect.type === 'schedule-web-initial-pin-retry')).toBe(false);
+    });
+
     it('allows the first bottom pin after data arrives even before layout is measured', () => {
         const latch = createSessionOpenLatch();
 

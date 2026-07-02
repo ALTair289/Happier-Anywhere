@@ -177,6 +177,7 @@ type TranscriptViewportTelemetryNativeDiagnostics = Readonly<{
     dragSessionTrusted?: boolean;
     nativeMomentumActive?: boolean;
     mvcpPolicy?: TranscriptViewportTelemetryMvcpPolicy;
+    pauseOffsetCorrection?: boolean;
     isAtRawBottom?: boolean;
     hasVisibleRows?: boolean;
     firstVisibleItemId?: string;
@@ -248,6 +249,9 @@ export type TranscriptViewportTelemetryEvent =
         dragSessionTrusted?: boolean;
         nativeMomentumActive?: boolean;
         mvcpPolicy?: TranscriptViewportTelemetryMvcpPolicy;
+        pauseOffsetCorrection?: boolean;
+        schedulerAuthorityWriter?: TranscriptViewportTelemetryScrollWriter;
+        schedulerAuthorityReason?: TranscriptViewportTelemetryScrollReason;
         isAtRawBottom?: boolean;
         hasVisibleRows?: boolean;
         firstVisibleItemId?: string;
@@ -301,6 +305,9 @@ export type TranscriptViewportTelemetryEvent =
         dragSessionTrusted?: boolean;
         nativeMomentumActive?: boolean;
         mvcpPolicy?: TranscriptViewportTelemetryMvcpPolicy;
+        pauseOffsetCorrection?: boolean;
+        schedulerAuthorityWriter?: TranscriptViewportTelemetryScrollWriter;
+        schedulerAuthorityReason?: TranscriptViewportTelemetryScrollReason;
         isAtRawBottom?: boolean;
         hasVisibleRows?: boolean;
         firstVisibleItemId?: string;
@@ -772,6 +779,7 @@ function readNativeDiagnostics(source: Record<string, unknown>): TranscriptViewp
         ...spreadBoolean('dragSessionTrusted', source.dragSessionTrusted),
         ...spreadBoolean('nativeMomentumActive', source.nativeMomentumActive),
         ...(mvcpPolicy ? { mvcpPolicy } : {}),
+        ...spreadBoolean('pauseOffsetCorrection', source.pauseOffsetCorrection),
         ...spreadBoolean('isAtRawBottom', source.isAtRawBottom),
         ...spreadBoolean('hasVisibleRows', source.hasVisibleRows),
         ...(firstVisibleItemId ? { firstVisibleItemId } : {}),
@@ -869,9 +877,13 @@ function sanitizeTelemetryEvent(
         const reason = readEnum(source.reason, SCROLL_REASONS);
         if (!writer || !reason) return null;
         const sessionId = redactSessionId(rawSessionId);
+        const schedulerAuthorityWriter = readEnum(source.schedulerAuthorityWriter, SCROLL_WRITERS) ?? writer;
+        const schedulerAuthorityReason = readEnum(source.schedulerAuthorityReason, SCROLL_REASONS) ?? reason;
         const sharedFields = {
             writer,
             reason,
+            schedulerAuthorityWriter,
+            schedulerAuthorityReason,
             sessionId,
             platform,
             listImplementation,

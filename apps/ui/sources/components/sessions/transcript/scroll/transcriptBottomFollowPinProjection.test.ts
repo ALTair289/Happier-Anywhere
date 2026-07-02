@@ -4,7 +4,7 @@ import {
     reduceTranscriptScrollPinState,
     resolveTranscriptScrollPinStateUpdate,
     type TranscriptScrollPinState,
-} from './transcriptScrollPinController';
+} from './transcriptBottomFollowMode';
 
 describe('reduceTranscriptScrollPinState', () => {
     it('tracks pinned/unpinned based on offset threshold', () => {

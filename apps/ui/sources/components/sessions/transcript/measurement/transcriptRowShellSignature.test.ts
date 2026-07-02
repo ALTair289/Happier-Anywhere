@@ -141,12 +141,14 @@ describe('buildTranscriptRowShellSignature', () => {
         item: TranscriptRowShellItem;
         messagesById: Readonly<Record<string, any>>;
         expandedToolCallsAnchorMessageIds?: ReadonlySet<string>;
+        revisionsById?: Readonly<Record<string, number>>;
     }>) {
         return buildTranscriptRowShellSignature({
             activeThinkingMessageId: null,
             expandedToolCallsAnchorMessageIds: params.expandedToolCallsAnchorMessageIds ?? new Set(),
             forkMessageMetadataById: null,
             getMessageById: (messageId) => params.messagesById[messageId] ?? null,
+            getMessageRevisionById: (messageId) => params.revisionsById?.[messageId] ?? null,
             groupingMode: 'turns',
             item: params.item,
             latestCommittedActivityKey: null,
@@ -409,6 +411,124 @@ describe('buildTranscriptRowShellSignature', () => {
 
             expect(churned.structuralKey).toBe(base.structuralKey);
             expect(churned.rowState).toBe('stable');
+        });
+    });
+
+    describe('revision-keyed message structural keys (R1)', () => {
+        function giantAgentMessage(id: string, byteCount: number) {
+            return {
+                kind: 'agent-text',
+                id,
+                text: 'x'.repeat(byteCount),
+                createdAt: 1,
+            } as any;
+        }
+
+        it('never serializes message content when a revision is available', () => {
+            const message = giantAgentMessage('agent-big', 512 * 1024);
+            const signature = buildSignature({
+                item: messageItem('agent-big'),
+                messagesById: { 'agent-big': message },
+                revisionsById: { 'agent-big': 7 },
+            });
+
+            expect(signature.structuralKey.length).toBeLessThan(256);
+            expect(signature.structuralKey).not.toContain('xxxx');
+        });
+
+        it('invalidates exactly when the revision bumps and stays stable when it does not', () => {
+            const message = giantAgentMessage('agent-1', 64);
+            const stableA = buildSignature({
+                item: messageItem('agent-1'),
+                messagesById: { 'agent-1': message },
+                revisionsById: { 'agent-1': 3 },
+            });
+            // New object identity, same revision: identical signature (store bumps the
+            // revision on every message write, so an unchanged revision means unchanged content).
+            const stableB = buildSignature({
+                item: messageItem('agent-1'),
+                messagesById: { 'agent-1': giantAgentMessage('agent-1', 64) },
+                revisionsById: { 'agent-1': 3 },
+            });
+            const bumped = buildSignature({
+                item: messageItem('agent-1'),
+                messagesById: { 'agent-1': message },
+                revisionsById: { 'agent-1': 4 },
+            });
+
+            expect(stableB.structuralKey).toBe(stableA.structuralKey);
+            expect(bumped.structuralKey).not.toBe(stableA.structuralKey);
+        });
+
+        it('falls back to content-based invalidation when no revision exists', () => {
+            const before = buildSignature({
+                item: messageItem('legacy-1'),
+                messagesById: { 'legacy-1': giantAgentMessage('legacy-1', 8) },
+            });
+            const after = buildSignature({
+                item: messageItem('legacy-1'),
+                messagesById: { 'legacy-1': giantAgentMessage('legacy-1', 16) },
+            });
+
+            expect(after.structuralKey).not.toBe(before.structuralKey);
+        });
+
+        it('keys turn rows on member revisions without serializing member content', () => {
+            const item: TranscriptRowShellItem = {
+                kind: 'turn',
+                id: 'turn-rev',
+                turn: {
+                    id: 'turn-rev',
+                    userMessageId: 'user-1',
+                    content: [{ kind: 'message', messageId: 'agent-big' }],
+                },
+            };
+            const messagesById = {
+                'user-1': giantAgentMessage('user-1', 32),
+                'agent-big': giantAgentMessage('agent-big', 512 * 1024),
+            };
+
+            const before = buildSignature({
+                item,
+                messagesById,
+                revisionsById: { 'user-1': 1, 'agent-big': 5 },
+            });
+            const unchanged = buildSignature({
+                item,
+                messagesById,
+                revisionsById: { 'user-1': 1, 'agent-big': 5 },
+            });
+            const bumped = buildSignature({
+                item,
+                messagesById,
+                revisionsById: { 'user-1': 1, 'agent-big': 6 },
+            });
+
+            expect(before.structuralKey.length).toBeLessThan(1024);
+            expect(before.structuralKey).not.toContain('xxxx');
+            expect(unchanged.structuralKey).toBe(before.structuralKey);
+            expect(bumped.structuralKey).not.toBe(before.structuralKey);
+        });
+
+        it('keys tool-group-tool units on their own revision without serializing content', () => {
+            const item: TranscriptRowShellItem = {
+                kind: 'tool-group-tool',
+                id: 'group#tool:tool-big',
+                groupId: 'group',
+                toolMessageId: 'tool-big',
+                toolMessageIds: ['tool-big'],
+                expanded: false,
+                createdAt: 1,
+                seq: null,
+            };
+            const messagesById = { 'tool-big': toolMessage('tool-big', { blob: 'x'.repeat(256 * 1024) }) };
+
+            const before = buildSignature({ item, messagesById, revisionsById: { 'tool-big': 2 } });
+            const bumped = buildSignature({ item, messagesById, revisionsById: { 'tool-big': 3 } });
+
+            expect(before.structuralKey.length).toBeLessThan(256);
+            expect(before.structuralKey).not.toContain('xxxx');
+            expect(bumped.structuralKey).not.toBe(before.structuralKey);
         });
     });
 });

@@ -59,6 +59,7 @@ export type ContentGrowthLiveTailScheduledPinFireEffect<PreviousWebMetrics = unk
     }>;
 
 export type ContentGrowthLiveTailScheduledPinFireInput<PreviousWebMetrics = unknown> = Readonly<{
+    observedRawOffsetY?: number | null;
     pin: ContentGrowthLiveTailScheduledPin<PreviousWebMetrics>;
     usesNativeFlashListBottomMaintenance: boolean;
     waitMs: number | null;
@@ -68,7 +69,7 @@ export type ContentGrowthLiveTailScheduledPinFireDecision<PreviousWebMetrics = u
     | Readonly<{
         clearScheduled: true;
         effects: readonly [];
-        reason: 'auto-follow-not-ready';
+        reason: 'auto-follow-not-ready' | 'negative-raw-offset';
         type: 'skip-fire';
     }>
     | Readonly<{
@@ -127,6 +128,19 @@ export function planContentGrowthLiveTailPinSchedule<PreviousWebMetrics = unknow
 export function planContentGrowthLiveTailScheduledPinFire<PreviousWebMetrics = unknown>(
     input: ContentGrowthLiveTailScheduledPinFireInput<PreviousWebMetrics>,
 ): ContentGrowthLiveTailScheduledPinFireDecision<PreviousWebMetrics> {
+    if (
+        typeof input.observedRawOffsetY === 'number' &&
+        Number.isFinite(input.observedRawOffsetY) &&
+        input.observedRawOffsetY < 0
+    ) {
+        return {
+            clearScheduled: true,
+            effects: [],
+            reason: 'negative-raw-offset',
+            type: 'skip-fire',
+        };
+    }
+
     if (input.waitMs !== 0) {
         return {
             clearScheduled: true,

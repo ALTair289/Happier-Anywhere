@@ -334,4 +334,63 @@ describe('entry restore owner', () => {
         ]);
         expect(owner.telemetryState('session-a')).toBe('closed');
     });
+
+    it('rechecks web bottom confirmation after late content-height settle and spends one corrective repin', () => {
+        const owner = createEntryRestoreOwner();
+
+        owner.beginWebBottom({
+            contentHeight: 11_556,
+            deadlineMs: 1500,
+            layoutHeight: 334,
+            nowMs: 1000,
+            sessionId: 'session-a',
+        });
+
+        const initiallyAligned = owner.observeWebHostFacts({
+            contentHeight: 11_556,
+            distanceFromBottom: 0,
+            layoutHeight: 334,
+            nowMs: 1050,
+            resolveAnchorObservation: () => null,
+            sessionId: 'session-a',
+            tolerancePx: 72,
+        });
+
+        expect(effectTypes(initiallyAligned)).toContain('close-entry-ownership');
+        expect(owner.telemetryState('session-a')).toBe('closed');
+
+        const lateSettled = owner.observeWebHostFacts({
+            contentHeight: 11_548,
+            distanceFromBottom: 8,
+            layoutHeight: 334,
+            nowMs: 1100,
+            resolveAnchorObservation: () => null,
+            sessionId: 'session-a',
+            tolerancePx: 72,
+        });
+        const repeatedLateSettled = owner.observeWebHostFacts({
+            contentHeight: 11_548,
+            distanceFromBottom: 8,
+            layoutHeight: 334,
+            nowMs: 1120,
+            resolveAnchorObservation: () => null,
+            sessionId: 'session-a',
+            tolerancePx: 72,
+        });
+
+        expect(executeEffects(lateSettled)).toEqual([
+            {
+                command: {
+                    animated: false,
+                    contentHeight: 11_548,
+                    distanceFromLiveTailPx: 0,
+                    reason: 'entry-restore',
+                    sessionId: 'session-a',
+                    type: 'restore-distance',
+                },
+                type: 'execute-command',
+            },
+        ]);
+        expect(executeEffects(repeatedLateSettled)).toEqual([]);
+    });
 });

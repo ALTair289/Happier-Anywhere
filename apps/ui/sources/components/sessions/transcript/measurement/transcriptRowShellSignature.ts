@@ -77,6 +77,14 @@ export function buildTranscriptRowShellSignature(params: Readonly<{
     expandedToolCallsAnchorMessageIds: ReadonlySet<string>;
     forkMessageMetadataById: Readonly<Record<string, { originSessionId: string; isReadOnlyContext: boolean }>> | null;
     getMessageById: (messageId: string) => Message | null;
+    /**
+     * R1: message structural keys are revision-based, never content-based. The store bumps
+     * `messageRevisionsById` exactly when a message is written, so `id + revision` invalidates
+     * whenever content can have changed — without serializing the (potentially multi-MB) message.
+     * Returning `null` (message without a tracked revision, e.g. fork-context messages) falls
+     * back to the legacy content signature for that message only.
+     */
+    getMessageRevisionById: (messageId: string) => number | null;
     groupingMode: string;
     item: TranscriptRowShellItem;
     latestCommittedActivityKey: string | null;
@@ -103,7 +111,7 @@ export function buildTranscriptRowShellSignature(params: Readonly<{
         const message = params.getMessageById(item.messageId);
         return {
             ...base,
-            structuralKey: buildMessageShellStructuralKey(item.messageId, message),
+            structuralKey: buildMessageShellStructuralKey(item.messageId, message, params.getMessageRevisionById(item.messageId)),
             expansionKey: [
                 'tools:none',
                 buildThinkingExpansionKey({
@@ -133,6 +141,7 @@ export function buildTranscriptRowShellSignature(params: Readonly<{
             structuralKey: buildToolGroupShellStructuralKey({
                 id: item.id,
                 getMessageById: params.getMessageById,
+                getMessageRevisionById: params.getMessageRevisionById,
                 expandedToolCallsAnchorMessageIds: params.expandedToolCallsAnchorMessageIds,
                 toolMessageIds: item.toolMessageIds,
             }),
@@ -183,7 +192,7 @@ export function buildTranscriptRowShellSignature(params: Readonly<{
             structuralKey: buildStableJsonSignature({
                 groupId: item.groupId,
                 groupExpanded: item.expanded,
-                messageRevision: buildMessageShellStructuralKey(item.toolMessageId, message),
+                messageRevision: buildMessageShellStructuralKey(item.toolMessageId, message, params.getMessageRevisionById(item.toolMessageId)),
             }),
             expansionKey: [item.expanded ? 'tools:expanded' : 'tools:collapsed', 'thinking:none'].join('|'),
             rowState: resolveMessageRowState({
@@ -220,6 +229,7 @@ export function buildTranscriptRowShellSignature(params: Readonly<{
             structuralKey: buildTurnShellStructuralKey({
                 expandedToolCallsAnchorMessageIds: params.expandedToolCallsAnchorMessageIds,
                 getMessageById: params.getMessageById,
+                getMessageRevisionById: params.getMessageRevisionById,
                 turn: item.turn,
             }),
             expansionKey: [
@@ -322,26 +332,45 @@ function resolveMessageRowType(message: Message | null, activeThinkingMessageId:
     return 'message:agent';
 }
 
-function buildMessageShellStructuralKey(messageId: string, message: Message | null): string {
+function buildMessageShellStructuralKey(
+    messageId: string,
+    message: Message | null,
+    revision: number | null,
+): string {
     if (!message) return `${messageId}:missing`;
+    // R1: revision-keyed — the store bumps the revision on every write of this message, so
+    // `id + revision` changes exactly when the message content can have changed. Never
+    // serialize the message itself (tool results reach tens of MB).
+    if (typeof revision === 'number' && Number.isFinite(revision)) {
+        return `${messageId}:r${Math.trunc(revision)}`;
+    }
     return buildStableJsonSignature(message);
 }
 
 function buildTurnShellStructuralKey(params: Readonly<{
     expandedToolCallsAnchorMessageIds: ReadonlySet<string>;
     getMessageById: (messageId: string) => Message | null;
+    getMessageRevisionById: (messageId: string) => number | null;
     turn: TranscriptTurn;
 }>): string {
     const messageRevisions: string[] = [];
     if (params.turn.userMessageId) {
-        messageRevisions.push(buildMessageShellStructuralKey(params.turn.userMessageId, params.getMessageById(params.turn.userMessageId)));
+        messageRevisions.push(buildMessageShellStructuralKey(
+            params.turn.userMessageId,
+            params.getMessageById(params.turn.userMessageId),
+            params.getMessageRevisionById(params.turn.userMessageId),
+        ));
     }
     return buildStableJsonSignature({
         id: params.turn.id,
         userMessageId: params.turn.userMessageId,
         content: params.turn.content.map((content) => {
             if (content.kind === 'message') {
-                messageRevisions.push(buildMessageShellStructuralKey(content.messageId, params.getMessageById(content.messageId)));
+                messageRevisions.push(buildMessageShellStructuralKey(
+                    content.messageId,
+                    params.getMessageById(content.messageId),
+                    params.getMessageRevisionById(content.messageId),
+                ));
                 return content;
             }
             return {
@@ -349,6 +378,7 @@ function buildTurnShellStructuralKey(params: Readonly<{
                 id: content.id,
                 signature: buildToolGroupShellSignatureValue({
                     getMessageById: params.getMessageById,
+                    getMessageRevisionById: params.getMessageRevisionById,
                     expandedToolCallsAnchorMessageIds: params.expandedToolCallsAnchorMessageIds,
                     toolMessageIds: content.toolMessageIds,
                 }),
@@ -385,6 +415,7 @@ function selectCollapsedToolGroupSignatureMessageIds(toolMessageIds: readonly st
 
 function buildToolGroupShellSignatureValue(params: Readonly<{
     getMessageById: (messageId: string) => Message | null;
+    getMessageRevisionById: (messageId: string) => number | null;
     expandedToolCallsAnchorMessageIds: ReadonlySet<string>;
     toolMessageIds: readonly string[];
 }>) {
@@ -403,7 +434,7 @@ function buildToolGroupShellSignatureValue(params: Readonly<{
         }),
         signatureMessageIds,
         messageRevisions: signatureMessageIds.map((messageId) => (
-            buildMessageShellStructuralKey(messageId, params.getMessageById(messageId))
+            buildMessageShellStructuralKey(messageId, params.getMessageById(messageId), params.getMessageRevisionById(messageId))
         )),
     };
 }
@@ -411,6 +442,7 @@ function buildToolGroupShellSignatureValue(params: Readonly<{
 function buildToolGroupShellStructuralKey(params: Readonly<{
     id: string;
     getMessageById: (messageId: string) => Message | null;
+    getMessageRevisionById: (messageId: string) => number | null;
     expandedToolCallsAnchorMessageIds: ReadonlySet<string>;
     toolMessageIds: readonly string[];
 }>): string {

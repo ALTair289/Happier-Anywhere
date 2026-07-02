@@ -145,8 +145,8 @@ vi.mock('@/components/sessions/keyboardAvoidance', () => ({
     React.createElement('ComposerKeyboardFloatingInset', null, children),
 }));
 
-vi.mock('@/components/sessions/transcript/scroll/transcriptScrollPinController', async () => {
-  const actual: any = await vi.importActual('@/components/sessions/transcript/scroll/transcriptScrollPinController');
+vi.mock('@/components/sessions/transcript/scroll/transcriptBottomFollowMode', async () => {
+  const actual: any = await vi.importActual('@/components/sessions/transcript/scroll/transcriptBottomFollowMode');
   return actual;
 });
 

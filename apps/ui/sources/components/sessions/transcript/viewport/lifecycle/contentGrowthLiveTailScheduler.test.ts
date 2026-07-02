@@ -226,4 +226,23 @@ describe('content-growth live-tail scheduler owner', () => {
             type: 'fire',
         });
     });
+
+    it('absorbs gesture-free negative raw offset observations instead of authorizing a pin write', () => {
+        const input = {
+            observedRawOffsetY: -1076,
+            pin: scheduledPin({
+                nativePrevFollowAtBottom: true,
+                reason: 'stream-append',
+            }),
+            usesNativeFlashListBottomMaintenance: true,
+            waitMs: 0,
+        };
+
+        expect(planContentGrowthLiveTailScheduledPinFire(input)).toEqual({
+            clearScheduled: true,
+            effects: [],
+            reason: 'negative-raw-offset',
+            type: 'skip-fire',
+        });
+    });
 });

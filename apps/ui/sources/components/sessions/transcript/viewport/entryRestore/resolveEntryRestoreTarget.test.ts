@@ -121,6 +121,25 @@ describe('resolve entry restore target', () => {
         }))).toEqual({ kind: 'materialize-then-anchor', anchorSeqHint: 3 });
     });
 
+    it('does not materialize older pages when the durable anchor seq is already inside the loaded range', () => {
+        expect(resolveEntryRestoreTarget(buildParams({
+            snapshot: {
+                shouldFollowBottom: false,
+                offsetY: 420,
+                anchor: {
+                    itemId: 'toolCalls:turn:runtime#header',
+                    itemOffsetPx: 26,
+                    messageId: 'rotated-runtime-id',
+                    seq: 25,
+                },
+            },
+            canMaterializeOlder: true,
+            anchorIndexResolver: () => null,
+            anchorSeqLoadedResolver: () => true,
+            nearestSurvivingResolver: () => 1,
+        }))).toEqual({ kind: 'anchor', index: 1, itemOffsetPx: 26 });
+    });
+
     it('does not materialize an unresolvable anchor without a durable seq hint', () => {
         expect(resolveEntryRestoreTarget(buildParams({
             snapshot: {

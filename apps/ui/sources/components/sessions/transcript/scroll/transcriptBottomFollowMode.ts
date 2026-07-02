@@ -12,6 +12,28 @@ export type TranscriptBottomFollowModeState = Readonly<{
     mode: TranscriptBottomFollowMode;
 }>;
 
+export type TranscriptScrollPinState = {
+    isPinned: boolean;
+    newActivityCount: number;
+    lastActivityKey: string | null;
+};
+
+export type TranscriptScrollPinEvent =
+    | {
+        type: 'scroll';
+        enabled: boolean;
+        offsetY: number;
+        pinnedOffsetThresholdPx: number;
+    }
+    | {
+        type: 'newActivity';
+        enabled: boolean;
+        activityKey: string | null;
+    }
+    | {
+        type: 'resetNewActivity';
+    };
+
 export type TranscriptBottomFollowModeEvent =
     | { type: 'session-entry'; shouldFollowBottom: boolean }
     | { type: 'list-drag-start' }
@@ -194,6 +216,59 @@ export function resolveTranscriptBottomFollowMode(
         case 'content-growth':
             return state;
     }
+}
+
+export function resolveTranscriptScrollPinStateUpdate(
+    state: TranscriptScrollPinState,
+    event: TranscriptScrollPinEvent,
+): TranscriptScrollPinState | null {
+    const next = reduceTranscriptScrollPinState(state, event);
+    return next === state ? null : next;
+}
+
+export function reduceTranscriptScrollPinState(
+    state: TranscriptScrollPinState,
+    event: TranscriptScrollPinEvent,
+): TranscriptScrollPinState {
+    if (event.type === 'resetNewActivity') {
+        if (state.newActivityCount === 0) return state;
+        return { ...state, newActivityCount: 0 };
+    }
+
+    if (event.type === 'scroll') {
+        if (!event.enabled) {
+            if (state.isPinned && state.newActivityCount === 0) return state;
+            return { ...state, isPinned: true, newActivityCount: 0 };
+        }
+
+        const threshold = normalizeDistance(event.pinnedOffsetThresholdPx);
+        const offsetY = Number.isFinite(event.offsetY) ? event.offsetY : 0;
+        const nextPinned = offsetY <= threshold;
+
+        if (nextPinned) {
+            if (state.isPinned && state.newActivityCount === 0) return state;
+            return { ...state, isPinned: true, newActivityCount: 0 };
+        }
+
+        if (!state.isPinned) return state;
+        return { ...state, isPinned: false };
+    }
+
+    if (!event.enabled) return state;
+
+    const key = typeof event.activityKey === 'string' && event.activityKey.length > 0 ? event.activityKey : null;
+    if (!key) return state;
+    if (state.lastActivityKey === key) return state;
+
+    if (state.isPinned) {
+        return { ...state, lastActivityKey: key };
+    }
+
+    return {
+        ...state,
+        lastActivityKey: key,
+        newActivityCount: state.newActivityCount + 1,
+    };
 }
 
 function normalizeDistance(value: number): number {

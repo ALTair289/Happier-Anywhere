@@ -207,8 +207,8 @@ vi.mock('@/components/sessions/transcript/scroll/JumpToBottomButton', () => ({
     JumpToBottomButton: (props: any) => React.createElement('JumpToBottomButton', props),
 }));
 
-vi.mock('@/components/sessions/transcript/scroll/transcriptScrollPinController', async (importOriginal) => {
-    const actual = await importOriginal<typeof import('@/components/sessions/transcript/scroll/transcriptScrollPinController')>();
+vi.mock('@/components/sessions/transcript/scroll/transcriptBottomFollowMode', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('@/components/sessions/transcript/scroll/transcriptBottomFollowMode')>();
     return {
         ...actual,
         reduceTranscriptScrollPinState: (state: any) => state,
