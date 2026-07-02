@@ -7,7 +7,12 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { checkDaemonState, startLocalDaemonWithAuth } from './daemon.mjs';
+import {
+  checkDaemonState,
+  matchDaemonEnvLine,
+  resolveStackDaemonStartVerifyTimeoutMs,
+  startLocalDaemonWithAuth,
+} from './daemon.mjs';
 import { spawnDetachedInlineNodeTestProcess } from './testkit/core/spawn_test_process.mjs';
 import { writeStubHappierCliFiles } from './testkit/core/stub_happier_cli_files.mjs';
 import { resolveStackCredentialPaths } from './utils/auth/credentials_paths.mjs';
@@ -22,6 +27,14 @@ function runNode(args, { cwd, env }) {
     proc.on('error', reject);
     proc.on('exit', (code, signal) => resolve({ code: code ?? (signal ? 1 : 0), signal: signal ?? null, stdout, stderr }));
   });
+}
+
+function createStubStackEnv(overrides = {}) {
+  return {
+    ...process.env,
+    HAPPIER_STACK_REPO_DIR: '',
+    ...overrides,
+  };
 }
 
 async function writeStubHappyCli({ cliDir }) {
@@ -128,6 +141,11 @@ async function writeAccessKeyFile(path, token) {
     );
 }
 
+test('stack daemon start verification default matches the daemon restart wait budget', () => {
+  assert.equal(resolveStackDaemonStartVerifyTimeoutMs({}), 60_000);
+  assert.equal(resolveStackDaemonStartVerifyTimeoutMs({ HAPPIER_STACK_DAEMON_START_VERIFY_TIMEOUT_MS: '1234' }), 1234);
+});
+
 test('startLocalDaemonWithAuth treats daemon start exit=0 as failure when daemon never becomes running', async () => {
   const tmp = await mkdtemp(join(tmpdir(), 'happy-stacks-daemon-start-verify-'));
   try {
@@ -138,13 +156,12 @@ test('startLocalDaemonWithAuth treats daemon start exit=0 as failure when daemon
     await writeFile(join(cliHomeDir, 'access.key'), 'seed-access-key\n', 'utf-8');
     await writeFile(join(cliHomeDir, 'settings.json'), JSON.stringify({ machineId: 'test-machine' }) + '\n', 'utf-8');
 
-    const env = {
-      ...process.env,
+    const env = createStubStackEnv({
       HAPPIER_STACK_STACK: 'dev',
       HAPPIER_STACK_AUTO_AUTH_SEED: '0',
       HAPPIER_STACK_MIGRATE_CREDENTIALS: '0',
       HAPPIER_STACK_CLI_BUILD: '0',
-    };
+    });
 
     await assert.rejects(
       startLocalDaemonWithAuth({
@@ -174,14 +191,13 @@ test('startLocalDaemonWithAuth fails fast when stack-scoped auth is stale and on
     await mkdir(cliHomeDir, { recursive: true });
     await writeFile(join(cliHomeDir, 'settings.json'), JSON.stringify({ machineId: 'test-machine' }) + '\n', 'utf-8');
 
-    const env = {
-      ...process.env,
+    const env = createStubStackEnv({
       HAPPIER_STACK_STACK: 'dev',
       HAPPIER_STACK_AUTO_AUTH_SEED: '0',
       HAPPIER_STACK_MIGRATE_CREDENTIALS: '0',
       HAPPIER_STACK_CLI_BUILD: '0',
       HAPPIER_ACTIVE_SERVER_ID: 'stack_dev__id_default',
-    };
+    });
 
     const staleToken = createTestJwt({ sub: 'account-a', jti: 'stale' });
     const validOtherAccountToken = createTestJwt({ sub: 'account-b', jti: 'valid' });
@@ -226,15 +242,14 @@ test('startLocalDaemonWithAuth does not backfill legacy access.key from main whe
     await mkdir(mainCliHomeDir, { recursive: true });
     await writeFile(join(cliHomeDir, 'settings.json'), JSON.stringify({ machineId: 'test-machine' }) + '\n', 'utf-8');
 
-    const env = {
-      ...process.env,
+    const env = createStubStackEnv({
       HAPPIER_STACK_STORAGE_DIR: storageDir,
       HAPPIER_STACK_STACK: stackName,
       HAPPIER_STACK_AUTO_AUTH_SEED: '0',
       HAPPIER_STACK_MIGRATE_CREDENTIALS: '1',
       HAPPIER_STACK_CLI_BUILD: '0',
       HAPPIER_ACTIVE_SERVER_ID: `stack_${stackName}__id_default`,
-    };
+    });
 
     const currentToken = createTestJwt({ sub: 'current-account', jti: 'current' });
     const mainToken = createTestJwt({ sub: 'main-account', jti: 'main' });
@@ -338,7 +353,7 @@ try {
       'utf-8'
     );
 
-    const res = await runNode([runnerPath], { cwd: tmp, env: process.env });
+    const res = await runNode([runnerPath], { cwd: tmp, env: createStubStackEnv() });
     assert.match(res.stdout + res.stderr, /\[daemon\] stub daemon start/);
   } finally {
     await rm(tmp, { recursive: true, force: true });
@@ -404,7 +419,7 @@ await startLocalDaemonWithAuth({
       'utf-8'
     );
 
-    const res = await runNode([runnerPath], { cwd: tmp, env: process.env });
+    const res = await runNode([runnerPath], { cwd: tmp, env: createStubStackEnv() });
     assert.equal(res.code, 0, `${res.stdout}${res.stderr}`);
     assert.match(res.stdout + res.stderr, /\[daemon\] .*keeping TUI running\./);
   } finally {
@@ -431,14 +446,25 @@ test('startLocalDaemonWithAuth surfaces already-running daemon in TUI mode', asy
     await writeFile(
       runnerPath,
       `
-import { spawn } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { startLocalDaemonWithAuth } from ${JSON.stringify(join(rootDir, 'scripts', 'daemon.mjs'))};
+	import { spawn } from 'node:child_process';
+	import http from 'node:http';
+	import { mkdirSync, writeFileSync } from 'node:fs';
+	import { join } from 'node:path';
+	import { startLocalDaemonWithAuth } from ${JSON.stringify(join(rootDir, 'scripts', 'daemon.mjs'))};
 
 const cliHomeDir = ${JSON.stringify(cliHomeDir)};
 const internalServerUrl = 'http://127.0.0.1:4301';
 const publicServerUrl = 'http://localhost:4301';
+const control = http.createServer((req, res) => {
+  if (req.method === 'POST' && req.url === '/ping' && req.headers['x-happier-daemon-token'] === 'state-token') {
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ status: 'ok' }));
+    return;
+  }
+  res.statusCode = 401;
+  res.end();
+});
+await new Promise((resolve) => control.listen(0, '127.0.0.1', resolve));
 
 // Simulate an already-running daemon by writing a daemon.state.json pointing at a long-lived process
 // that contains the expected env vars in its ps output (daemonEnvMatches()).
@@ -456,7 +482,13 @@ const dummy = spawn(process.execPath, ['-e', 'setInterval(()=>{}, 1e6)'], {
 mkdirSync(join(cliHomeDir, 'servers', 'stack_dev__id_default'), { recursive: true });
 writeFileSync(
   join(cliHomeDir, 'servers', 'stack_dev__id_default', 'daemon.state.json'),
-  JSON.stringify({ pid: dummy.pid, httpPort: 1, startedAt: Date.now(), startedWithCliVersion: 'test' }) + '\\n',
+  JSON.stringify({
+    pid: dummy.pid,
+    httpPort: control.address().port,
+    controlToken: 'state-token',
+    startedAt: Date.now(),
+    startedWithCliVersion: 'test',
+  }) + '\\n',
   'utf-8'
 );
 
@@ -480,6 +512,7 @@ try {
     cliIdentity: 'default',
   });
 } finally {
+  await new Promise((resolve) => control.close(resolve));
   try {
     process.kill(-dummy.pid, 'SIGKILL');
   } catch {
@@ -490,9 +523,189 @@ try {
       'utf-8'
     );
 
-    const res = await runNode([runnerPath], { cwd: tmp, env: process.env });
+    const res = await runNode([runnerPath], { cwd: tmp, env: createStubStackEnv() });
     assert.match(res.stdout + res.stderr, /\[daemon\] .*already running/i);
   } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('startLocalDaemonWithAuth preserves an existing running daemon when requested', async () => {
+  const scriptsDir = dirname(fileURLToPath(import.meta.url));
+  const rootDir = dirname(scriptsDir);
+
+  const tmp = await mkdtemp(join(tmpdir(), 'happy-stacks-daemon-preserve-running-'));
+  try {
+    const cliDir = join(tmp, 'apps', 'cli');
+    await writeStubHappyCli({ cliDir });
+    const cliBin = join(cliDir, 'bin', 'happier.mjs');
+
+    const cliHomeDir = join(tmp, 'stack', 'cli');
+    await mkdir(cliHomeDir, { recursive: true });
+    await writeFile(join(cliHomeDir, 'access.key'), 'seed-access-key\n', 'utf-8');
+    await writeFile(join(cliHomeDir, 'settings.json'), JSON.stringify({ machineId: 'test-machine' }) + '\n', 'utf-8');
+
+    const runnerPath = join(tmp, 'runner-preserve.mjs');
+    await writeFile(
+      runnerPath,
+      `
+import { spawn } from 'node:child_process';
+import http from 'node:http';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { startLocalDaemonWithAuth } from ${JSON.stringify(join(rootDir, 'scripts', 'daemon.mjs'))};
+
+const cliHomeDir = ${JSON.stringify(cliHomeDir)};
+const internalServerUrl = 'http://127.0.0.1:4301';
+const staleServerUrl = 'http://127.0.0.1:4300';
+const publicServerUrl = 'http://localhost:4301';
+const control = http.createServer((req, res) => {
+  if (req.method === 'POST' && req.url === '/ping' && req.headers['x-happier-daemon-token'] === 'state-token') {
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ status: 'ok' }));
+    return;
+  }
+  res.statusCode = 401;
+  res.end();
+});
+await new Promise((resolve) => control.listen(0, '127.0.0.1', resolve));
+
+const dummy = spawn(process.execPath, ['-e', 'setInterval(()=>{}, 1e6)'], {
+  env: {
+    ...process.env,
+    HAPPIER_HOME_DIR: cliHomeDir,
+    HAPPIER_SERVER_URL: staleServerUrl,
+    HAPPIER_WEBAPP_URL: publicServerUrl,
+  },
+  stdio: ['ignore', 'ignore', 'ignore'],
+  detached: true,
+});
+
+mkdirSync(join(cliHomeDir, 'servers', 'stack_dev__id_default'), { recursive: true });
+writeFileSync(
+  join(cliHomeDir, 'servers', 'stack_dev__id_default', 'daemon.state.json'),
+  JSON.stringify({
+    pid: dummy.pid,
+    httpPort: control.address().port,
+    controlToken: 'state-token',
+    startedAt: Date.now(),
+    startedWithCliVersion: 'test',
+  }) + '\\n',
+  'utf-8'
+);
+
+try {
+  await startLocalDaemonWithAuth({
+    cliBin: ${JSON.stringify(cliBin)},
+    cliHomeDir,
+    internalServerUrl,
+    publicServerUrl,
+    isShuttingDown: () => false,
+    forceRestart: false,
+    preserveExistingRunning: true,
+    env: {
+      ...process.env,
+      HAPPIER_STACK_STACK: 'dev',
+      HAPPIER_STACK_AUTO_AUTH_SEED: '0',
+      HAPPIER_STACK_MIGRATE_CREDENTIALS: '0',
+      HAPPIER_STACK_CLI_BUILD: '0',
+      HAPPIER_STACK_DAEMON_START_VERIFY_TIMEOUT_MS: '200',
+      HAPPIER_STACK_DAEMON_START_VERIFY_POLL_MS: '10',
+      HAPPIER_STACK_DAEMON_START_VERIFY_STABLE_MS: '0',
+    },
+    stackName: 'dev',
+    cliIdentity: 'default',
+  });
+  process.kill(dummy.pid, 0);
+  console.log('dummy-alive');
+} finally {
+  await new Promise((resolve) => control.close(resolve));
+  try {
+    process.kill(-dummy.pid, 'SIGKILL');
+  } catch {
+    // ignore
+  }
+}
+`.trimStart(),
+      'utf-8',
+    );
+
+    const res = await runNode([runnerPath], { cwd: tmp, env: createStubStackEnv() });
+    assert.equal(res.code, 0, res.stdout + res.stderr);
+    assert.match(res.stdout + res.stderr, /dummy-alive/);
+    assert.match(res.stdout + res.stderr, /keeping existing daemon/i);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('startLocalDaemonWithAuth does not accept an unpingable daemon state as already running', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'happy-stacks-daemon-unpingable-running-'));
+  let dummy = null;
+  try {
+    const cliDir = join(tmp, 'apps', 'cli');
+    const cliBin = await writeStubHappyCli({ cliDir });
+    const cliHomeDir = join(tmp, 'stack', 'cli');
+    const internalServerUrl = 'http://127.0.0.1:4301';
+    const publicServerUrl = 'http://localhost:4301';
+    await mkdir(cliHomeDir, { recursive: true });
+    await writeFile(join(cliHomeDir, 'access.key'), 'seed-access-key\n', 'utf-8');
+    await writeFile(join(cliHomeDir, 'settings.json'), JSON.stringify({ machineId: 'test-machine' }) + '\n', 'utf-8');
+
+    dummy = spawn(process.execPath, ['-e', 'setInterval(()=>{}, 1e6)'], {
+      env: {
+        ...process.env,
+        HAPPIER_HOME_DIR: cliHomeDir,
+        HAPPIER_SERVER_URL: internalServerUrl,
+        HAPPIER_WEBAPP_URL: publicServerUrl,
+      },
+      stdio: ['ignore', 'ignore', 'ignore'],
+      detached: true,
+    });
+
+    const stateDir = join(cliHomeDir, 'servers', 'stack_dev__id_default');
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(
+      join(stateDir, 'daemon.state.json'),
+      JSON.stringify({
+        pid: dummy.pid,
+        httpPort: 1,
+        controlToken: 'state-token',
+        startedAt: Date.now(),
+        startedWithCliVersion: 'test',
+      }) + '\n',
+      'utf-8',
+    );
+
+    await assert.rejects(
+      startLocalDaemonWithAuth({
+        cliBin,
+        cliHomeDir,
+        internalServerUrl,
+        publicServerUrl,
+        isShuttingDown: () => false,
+        forceRestart: false,
+        env: createStubStackEnv({
+          HAPPIER_STACK_STACK: 'dev',
+          HAPPIER_STACK_AUTO_AUTH_SEED: '0',
+          HAPPIER_STACK_MIGRATE_CREDENTIALS: '0',
+          HAPPIER_STACK_CLI_BUILD: '0',
+          HAPPIER_STACK_DAEMON_START_VERIFY_TIMEOUT_MS: '200',
+          HAPPIER_STACK_DAEMON_START_VERIFY_POLL_MS: '10',
+          HAPPIER_STACK_DAEMON_START_VERIFY_STABLE_MS: '0',
+        }),
+        stackName: 'dev',
+      }),
+      /Failed to auto re-seed daemon credentials|Failed to start daemon|daemon is not authenticated yet/,
+    );
+  } finally {
+    if (dummy?.pid) {
+      try {
+        process.kill(-dummy.pid, 'SIGKILL');
+      } catch {
+        // ignore
+      }
+    }
     await rm(tmp, { recursive: true, force: true });
   }
 });
@@ -531,18 +744,36 @@ if (sub === 'start') {
     [
       '-e',
       \`
-const { mkdirSync, writeFileSync } = require('node:fs');
-const { join } = require('node:path');
-setTimeout(() => {
-  const serverDir = join(${JSON.stringify(cliHomeDir)}, 'servers', 'stack_dev__id_default');
-  mkdirSync(serverDir, { recursive: true });
-  writeFileSync(
-    join(serverDir, 'daemon.state.json'),
-    JSON.stringify({ pid: process.pid, httpPort: 1, startedAt: Date.now(), startedWithCliVersion: 'test' }) + '\\\\n',
-    'utf-8'
-  );
-}, 16000);
-setInterval(() => {}, 1000);
+	const { mkdirSync, writeFileSync } = require('node:fs');
+	const { join } = require('node:path');
+	const http = require('node:http');
+	setTimeout(() => {
+	  const serverDir = join(${JSON.stringify(cliHomeDir)}, 'servers', 'stack_dev__id_default');
+	  mkdirSync(serverDir, { recursive: true });
+	  const control = http.createServer((req, res) => {
+	    if (req.method === 'POST' && req.url === '/ping' && req.headers['x-happier-daemon-token'] === 'state-token') {
+	      res.setHeader('content-type', 'application/json');
+	      res.end(JSON.stringify({ status: 'ok' }));
+	      return;
+	    }
+	    res.statusCode = 401;
+	    res.end();
+	  });
+	  control.listen(0, '127.0.0.1', () => {
+	    writeFileSync(
+	      join(serverDir, 'daemon.state.json'),
+	      JSON.stringify({
+	        pid: process.pid,
+	        httpPort: control.address().port,
+	        controlToken: 'state-token',
+	        startedAt: Date.now(),
+	        startedWithCliVersion: 'test',
+	      }) + '\\\\n',
+	      'utf-8'
+	    );
+	  });
+	}, 16000);
+	setInterval(() => {}, 1000);
 \`,
     ],
     {
@@ -569,15 +800,14 @@ process.exit(0);
       publicServerUrl: 'http://localhost:4301',
       isShuttingDown: () => false,
       forceRestart: true,
-      env: {
-        ...process.env,
+      env: createStubStackEnv({
         HAPPIER_STACK_STACK: 'dev',
         HAPPIER_STACK_AUTO_AUTH_SEED: '0',
         HAPPIER_STACK_MIGRATE_CREDENTIALS: '0',
         HAPPIER_STACK_CLI_BUILD: '0',
         HAPPIER_STACK_DAEMON_START_VERIFY_POLL_MS: '50',
         HAPPIER_STACK_DAEMON_START_VERIFY_STABLE_MS: '0',
-      },
+      }),
       stackName: 'dev',
       cliIdentity: 'default',
     });
@@ -629,18 +859,36 @@ if (sub === 'start') {
     [
       '-e',
       \`
-const { mkdirSync, writeFileSync } = require('node:fs');
-const { join } = require('node:path');
-setTimeout(() => {
-  const serverDir = join(${JSON.stringify(cliHomeDir)}, 'servers', 'stack_dev__id_default');
-  mkdirSync(serverDir, { recursive: true });
-  writeFileSync(
-    join(serverDir, 'daemon.state.json'),
-    JSON.stringify({ pid: process.pid, httpPort: 1, startedAt: Date.now(), startedWithCliVersion: 'test' }) + '\\\\n',
-    'utf-8'
-  );
-}, 12000);
-setInterval(() => {}, 1000);
+	const { mkdirSync, writeFileSync } = require('node:fs');
+	const { join } = require('node:path');
+	const http = require('node:http');
+	setTimeout(() => {
+	  const serverDir = join(${JSON.stringify(cliHomeDir)}, 'servers', 'stack_dev__id_default');
+	  mkdirSync(serverDir, { recursive: true });
+	  const control = http.createServer((req, res) => {
+	    if (req.method === 'POST' && req.url === '/ping' && req.headers['x-happier-daemon-token'] === 'state-token') {
+	      res.setHeader('content-type', 'application/json');
+	      res.end(JSON.stringify({ status: 'ok' }));
+	      return;
+	    }
+	    res.statusCode = 401;
+	    res.end();
+	  });
+	  control.listen(0, '127.0.0.1', () => {
+	    writeFileSync(
+	      join(serverDir, 'daemon.state.json'),
+	      JSON.stringify({
+	        pid: process.pid,
+	        httpPort: control.address().port,
+	        controlToken: 'state-token',
+	        startedAt: Date.now(),
+	        startedWithCliVersion: 'test',
+	      }) + '\\\\n',
+	      'utf-8'
+	    );
+	  });
+	}, 12000);
+	setInterval(() => {}, 1000);
 \`,
     ],
     {
@@ -666,15 +914,14 @@ process.exit(0);
       publicServerUrl: 'http://localhost:4301',
       isShuttingDown: () => false,
       forceRestart: true,
-      env: {
-        ...process.env,
+      env: createStubStackEnv({
         HAPPIER_STACK_STACK: 'dev',
         HAPPIER_STACK_AUTO_AUTH_SEED: '0',
         HAPPIER_STACK_MIGRATE_CREDENTIALS: '0',
         HAPPIER_STACK_CLI_BUILD: '0',
         HAPPIER_STACK_DAEMON_START_VERIFY_POLL_MS: '50',
         HAPPIER_STACK_DAEMON_START_VERIFY_STABLE_MS: '0',
-      },
+      }),
       stackName: 'dev',
       cliIdentity: 'default',
     });
@@ -688,6 +935,121 @@ process.exit(0);
       // ignore
     }
   } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('startLocalDaemonWithAuth allows slower source daemon startups by default', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'happy-stacks-daemon-source-start-'));
+  const cliHomeDir = join(tmp, 'stack', 'cli');
+  const childPidPath = join(tmp, 'daemon-child.pid');
+  const statePath = join(cliHomeDir, 'servers', 'stack_dev__id_default', 'daemon.state.json');
+
+  try {
+    const monoRoot = tmp;
+    const { cliBinDir } = await writeStubHappierCliFiles(monoRoot, {
+      packageJsonContent: '{}\n',
+      binHappierScript: 'process.exit(42);\n',
+      distIndexScript: `
+import { spawn } from 'node:child_process';
+
+const args = process.argv.slice(2);
+const home = process.env.HAPPIER_HOME_DIR || process.env.HAPPIER_STACK_CLI_HOME_DIR;
+if (!home) process.exit(2);
+
+if (args[0] !== 'daemon') process.exit(0);
+const sub = args[1] || '';
+if (sub === 'stop') process.exit(0);
+if (sub === 'status') process.exit(1);
+
+if (sub === 'start') {
+  const child = spawn(
+    process.execPath,
+    [
+      '-e',
+      \`
+	const { mkdirSync, writeFileSync } = require('node:fs');
+	const { join } = require('node:path');
+	const http = require('node:http');
+	writeFileSync(${JSON.stringify(childPidPath)}, String(process.pid), 'utf-8');
+	setTimeout(() => {
+	  const serverDir = join(${JSON.stringify(cliHomeDir)}, 'servers', 'stack_dev__id_default');
+	  mkdirSync(serverDir, { recursive: true });
+	  const control = http.createServer((req, res) => {
+	    if (req.method === 'POST' && req.url === '/ping' && req.headers['x-happier-daemon-token'] === 'state-token') {
+	      res.setHeader('content-type', 'application/json');
+	      res.end(JSON.stringify({ status: 'ok' }));
+	      return;
+	    }
+	    res.statusCode = 401;
+	    res.end();
+	  });
+	  control.listen(0, '127.0.0.1', () => {
+	    writeFileSync(
+	      join(serverDir, 'daemon.state.json'),
+	      JSON.stringify({
+	        pid: process.pid,
+	        httpPort: control.address().port,
+	        controlToken: 'state-token',
+	        startedAt: Date.now(),
+	        startedWithCliVersion: 'test',
+	      }) + '\\\\n',
+	      'utf-8'
+	    );
+	  });
+	}, 6000);
+	setInterval(() => {}, 1000);
+\`,
+    ],
+    {
+      detached: true,
+      stdio: 'ignore',
+      env: process.env,
+    }
+  );
+  child.unref();
+  process.exit(0);
+}
+
+process.exit(0);
+      `.trimStart(),
+    });
+    const cliBin = join(cliBinDir, 'happier.mjs');
+
+    await mkdir(cliHomeDir, { recursive: true });
+    await writeFile(join(cliHomeDir, 'access.key'), 'seed-access-key\n', 'utf-8');
+    await writeFile(join(cliHomeDir, 'settings.json'), JSON.stringify({ machineId: 'test-machine' }) + '\n', 'utf-8');
+
+    await startLocalDaemonWithAuth({
+      cliBin,
+      cliHomeDir,
+      internalServerUrl: 'http://127.0.0.1:4301',
+      publicServerUrl: 'http://localhost:4301',
+      isShuttingDown: () => false,
+      forceRestart: true,
+      env: createStubStackEnv({
+        HAPPIER_STACK_STACK: 'dev',
+        HAPPIER_STACK_AUTO_AUTH_SEED: '0',
+        HAPPIER_STACK_MIGRATE_CREDENTIALS: '0',
+        HAPPIER_STACK_CLI_BUILD: '0',
+        HAPPIER_STACK_DAEMON_START_VERIFY_POLL_MS: '50',
+        HAPPIER_STACK_DAEMON_START_VERIFY_STABLE_MS: '0',
+      }),
+      stackName: 'dev',
+      cliIdentity: 'default',
+    });
+
+    const state = JSON.parse(await readFile(statePath, 'utf-8'));
+    assert.equal(typeof state.pid, 'number');
+  } finally {
+    try {
+      const pid = Number(await readFile(childPidPath, 'utf-8'));
+      if (Number.isFinite(pid) && pid > 0) {
+        process.kill(pid, 'SIGKILL');
+      }
+    } catch {
+      // ignore
+    }
     await rm(tmp, { recursive: true, force: true });
   }
 });
@@ -726,18 +1088,36 @@ if (sub === 'start') {
     [
       '-e',
       \`
-const { mkdirSync, writeFileSync } = require('node:fs');
-const { join } = require('node:path');
-setTimeout(() => {
-  const serverDir = join(${JSON.stringify(cliHomeDir)}, 'servers', 'stack_dev__id_default');
-  mkdirSync(serverDir, { recursive: true });
-  writeFileSync(
-    join(serverDir, 'daemon.state.json'),
-    JSON.stringify({ pid: process.pid, httpPort: 1, startedAt: Date.now(), startedWithCliVersion: 'test' }) + '\\\\n',
-    'utf-8'
-  );
-}, 2000);
-setInterval(() => {}, 1000);
+	const { mkdirSync, writeFileSync } = require('node:fs');
+	const { join } = require('node:path');
+	const http = require('node:http');
+	setTimeout(() => {
+	  const serverDir = join(${JSON.stringify(cliHomeDir)}, 'servers', 'stack_dev__id_default');
+	  mkdirSync(serverDir, { recursive: true });
+	  const control = http.createServer((req, res) => {
+	    if (req.method === 'POST' && req.url === '/ping' && req.headers['x-happier-daemon-token'] === 'state-token') {
+	      res.setHeader('content-type', 'application/json');
+	      res.end(JSON.stringify({ status: 'ok' }));
+	      return;
+	    }
+	    res.statusCode = 401;
+	    res.end();
+	  });
+	  control.listen(0, '127.0.0.1', () => {
+	    writeFileSync(
+	      join(serverDir, 'daemon.state.json'),
+	      JSON.stringify({
+	        pid: process.pid,
+	        httpPort: control.address().port,
+	        controlToken: 'state-token',
+	        startedAt: Date.now(),
+	        startedWithCliVersion: 'test',
+	      }) + '\\\\n',
+	      'utf-8'
+	    );
+	  });
+	}, 2000);
+	setInterval(() => {}, 1000);
 \`,
     ],
     {
@@ -764,15 +1144,14 @@ process.exit(0);
       publicServerUrl: 'http://localhost:4301',
       isShuttingDown: () => false,
       forceRestart: true,
-      env: {
-        ...process.env,
+      env: createStubStackEnv({
         HAPPIER_STACK_STACK: 'dev',
         HAPPIER_STACK_AUTO_AUTH_SEED: '0',
         HAPPIER_STACK_MIGRATE_CREDENTIALS: '0',
         HAPPIER_STACK_CLI_BUILD: '0',
         HAPPIER_STACK_DAEMON_START_VERIFY_POLL_MS: '50',
         HAPPIER_STACK_DAEMON_START_VERIFY_STABLE_MS: '0',
-      },
+      }),
       stackName: 'dev',
       cliIdentity: 'default',
     });
@@ -814,10 +1193,9 @@ test('checkDaemonState ignores running daemon state from a different active serv
       'utf-8'
     );
 
-    const env = {
-      ...process.env,
+    const env = createStubStackEnv({
       HAPPIER_ACTIVE_SERVER_ID: 'stack_dev2__id_default',
-    };
+    });
     const state = checkDaemonState(cliHomeDir, { serverUrl: 'http://127.0.0.1:4301', env });
     assert.deepEqual(state, { status: 'stopped', pid: null });
   } finally {
@@ -828,4 +1206,25 @@ test('checkDaemonState ignores running daemon state from a different active serv
     }
     await rm(tmp, { recursive: true, force: true });
   }
+});
+
+test('matchDaemonEnvLine identifies which daemon env binding differs', () => {
+  const line = [
+    'node',
+    'HAPPIER_HOME_DIR=/tmp/happier-stack/cli',
+    'HAPPIER_SERVER_URL=http://127.0.0.1:52753',
+    'HAPPIER_WEBAPP_URL=http://stale.localhost:52753',
+  ].join(' ');
+
+  assert.deepEqual(matchDaemonEnvLine({
+    line,
+    cliHomeDir: '/tmp/happier-stack/cli',
+    internalServerUrl: 'http://127.0.0.1:52753',
+    publicServerUrl: 'http://happier-stack.localhost:52753',
+  }), {
+    matches: false,
+    reason: 'webapp',
+    key: 'HAPPIER_WEBAPP_URL',
+    expected: 'http://happier-stack.localhost:52753',
+  });
 });

@@ -89,6 +89,94 @@ export async function recordStackRuntimeUpdate(statePath, patch = {}) {
   });
 }
 
+function normalizeRuntimePid(pid) {
+  const n = Number(pid);
+  return Number.isFinite(n) && n > 1 ? n : null;
+}
+
+export function createStackServerRuntimeProcessPatch({
+  listenerPid,
+  wrapperPid,
+  serverPort,
+  clearProxyState = false,
+} = {}) {
+  const serverPid = normalizeRuntimePid(listenerPid);
+  const serverWrapperPid = normalizeRuntimePid(wrapperPid);
+  const processes = {};
+  if (serverPid) {
+    processes.serverPid = serverPid;
+  }
+  if (wrapperPid !== undefined) {
+    processes.serverWrapperPid = serverWrapperPid;
+  }
+  const patch = { processes };
+  if (clearProxyState) {
+    processes.proxyPid = null;
+    processes.serverBackendPid = null;
+    processes.serverDrainingPid = null;
+    patch.ports = {
+      server: normalizeRuntimePort(serverPort),
+      serverBackend: null,
+    };
+    patch.serverProxy = {
+      enabled: false,
+      mode: 'direct',
+      restartMode: null,
+      fallbackReason: null,
+    };
+  }
+  return patch;
+}
+
+export function createStackDevProxyRuntimePatch({
+  stablePort,
+  backendPort,
+  proxyPid,
+  backendPid,
+  drainingPid,
+  mode = 'proxy',
+  restartMode,
+  fallbackReason,
+  enabled = true,
+} = {}) {
+  const normalizedStablePort = normalizeRuntimePort(stablePort);
+  const normalizedBackendPort = normalizeRuntimePort(backendPort);
+  const serverProxy = {
+    enabled: Boolean(enabled),
+    mode,
+    restartMode: restartMode ? String(restartMode) : null,
+    fallbackReason: fallbackReason ? String(fallbackReason) : null,
+  };
+
+  return {
+    processes: {
+      proxyPid: normalizeRuntimePid(proxyPid),
+      serverBackendPid: normalizeRuntimePid(backendPid),
+      serverDrainingPid: normalizeRuntimePid(drainingPid),
+    },
+    ports: {
+      server: normalizedStablePort,
+      serverBackend: normalizedBackendPort,
+    },
+    serverProxy,
+  };
+}
+
+function normalizeRuntimePort(port) {
+  const n = Number(port);
+  return Number.isInteger(n) && n > 0 && n <= 65535 ? n : null;
+}
+
+export async function recordStackRuntimeServerPids(
+  statePath,
+  { listenerPid, wrapperPid, serverPort, clearProxyState = false } = {},
+) {
+  return await recordStackRuntimeUpdate(
+    statePath,
+    createStackServerRuntimeProcessPatch({ listenerPid, wrapperPid, serverPort, clearProxyState }),
+  );
+}
+
 export async function recordStackRuntimeStopRequest(
   statePath,
   { signal = 'SIGTERM', requestedBy = 'unknown', reason = '', preserveDaemon = false } = {},

@@ -137,6 +137,21 @@ test('stack owner-death watchdog reaps stale infra and preserves session process
     const watchdogLog = await waitForLogMatch(watchdogLogPath, /sweep complete \(killed=\d+, errors=0\)/i);
     assert.match(watchdogLog, /owner pid .* is gone; sweeping stack-owned runtime/i);
     assert.match(watchdogLog, /sweep complete \(killed=\d+, errors=0\)/i);
+    const structuredLine = watchdogLog
+      .split('\n')
+      .find((line) => line.startsWith('[owner-watchdog-json] '));
+    assert.ok(structuredLine, `expected structured owner-watchdog-json line in log:\n${watchdogLog}`);
+    const structured = JSON.parse(structuredLine.slice('[owner-watchdog-json] '.length));
+    assert.equal(structured.event, 'owner_death_sweep_complete');
+    assert.equal(structured.stackName, fixture.stackName);
+    assert.equal(structured.errorCount, 0);
+    assert.ok(structured.killedCount >= 1, `expected at least one killed process, got ${structured.killedCount}`);
+    const directlyKilledPids = structured.actions?.processes?.killed?.map((entry) => entry.pid) ?? [];
+    const sweptPids = structured.actions?.sweep?.pids?.map((entry) => entry.pid) ?? [];
+    assert.ok(
+      [...directlyKilledPids, ...sweptPids].includes(infraPid),
+      `expected structured log to include infra pid ${infraPid}: ${structuredLine}`,
+    );
   } finally {
     terminateProcessTree(infraPid);
     await fixture.cleanup();

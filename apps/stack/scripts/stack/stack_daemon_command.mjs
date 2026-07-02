@@ -5,7 +5,7 @@ import { findExistingStackCredentialPath } from '../utils/auth/credentials_paths
 import { parseArgs } from '../utils/cli/args.mjs';
 import { printResult, wantsHelp } from '../utils/cli/cli.mjs';
 import { isTty, promptSelect, withRl } from '../utils/cli/wizard.mjs';
-import { checkDaemonState, daemonStatusSummary, startLocalDaemonWithAuth, stopLocalDaemon } from '../daemon.mjs';
+import { checkDaemonStatePingAware, daemonStatusSummary, startLocalDaemonWithAuth, stopLocalDaemon } from '../daemon.mjs';
 import { getComponentDir, resolveStackEnvPath } from '../utils/paths/paths.mjs';
 import { run } from '../utils/proc/proc.mjs';
 import { resolveServerPortFromEnv, resolveServerUrls } from '../utils/server/urls.mjs';
@@ -248,7 +248,7 @@ export async function runStackDaemonCommand({ rootDir, stackName, argv, json }) 
           internalServerUrl,
           env: envForIdentity,
         },
-        { checkDaemonStateImpl: checkDaemonState },
+        { checkDaemonStateImpl: checkDaemonStatePingAware },
       ).catch(() => {});
 
       return { ok: true, action, cliIdentity: identity, cliHomeDir, status: status.trim() };

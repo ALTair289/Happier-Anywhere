@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { statSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { maybeResetTailscaleServe } from './tailscale.mjs';
-import { checkDaemonState, getDaemonEnv, isDaemonRunning, startLocalDaemonWithAuth, stopLocalDaemon } from './daemon.mjs';
+import { checkDaemonStatePingAware, getDaemonEnv, startLocalDaemonWithAuth, stopLocalDaemon } from './daemon.mjs';
 import { printResult, wantsHelp, wantsJson } from './utils/cli/cli.mjs';
 import { assertServerComponentDirMatches, assertServerPrismaProviderMatches } from './utils/server/validate.mjs';
 import { resolveServerStartScript } from './utils/server/flavor_scripts.mjs';
@@ -23,12 +23,19 @@ import {
   probeExistingAccountCountForServerComponent,
   resolveAutoCopyFromMainEnabled,
 } from './utils/stack/startup.mjs';
-import { readStackRuntimeStateFile, recordStackRuntimeStart, recordStackRuntimeUpdate } from './utils/stack/runtime_state.mjs';
+import {
+  readStackRuntimeStateFile,
+  recordStackRuntimeServerPids,
+  recordStackRuntimeStart,
+  recordStackRuntimeUpdate,
+} from './utils/stack/runtime_state.mjs';
+import { startStackRuntimeDaemonPidReconciler } from './utils/stack/runtime_daemon_state.mjs';
 import { resolveStackContext } from './utils/stack/context.mjs';
 import { getPublicServerUrlEnvOverride, resolveServerUrls } from './utils/server/urls.mjs';
 import { preferStackLocalhostUrl } from './utils/paths/localhost_host.mjs';
 import { openUrlInBrowser } from './utils/ui/browser.mjs';
 import { ensureDevExpoServer, resolveExpoTailscaleEnabled } from './utils/dev/expo_dev.mjs';
+import { resolveStackOwnedServerListenPid } from './utils/dev/server.mjs';
 import { maybeRunInteractiveStackAuthSetup } from './utils/auth/interactive_stack_auth.mjs';
 import { getInvokedCwd, inferComponentFromCwd } from './utils/cli/cwd_scope.mjs';
 import { daemonStartGate, formatDaemonAuthRequiredError } from './utils/auth/daemon_gate.mjs';
@@ -43,7 +50,7 @@ import { isSandboxed } from './utils/env/sandbox.mjs';
 import { installExitCleanup } from './utils/proc/exit_cleanup.mjs';
 import { expandHome } from './utils/paths/canonical_home.mjs';
 import { validateUiServingConfig } from './utils/server/ui_build_check.mjs';
-import { resolveLocalServerPortForStack } from './utils/server/resolve_stack_server_port.mjs';
+import { isRuntimePortOwnedByStackDevProxy, resolveLocalServerPortForStack } from './utils/server/resolve_stack_server_port.mjs';
 import { findExistingStackCredentialPath } from './utils/auth/credentials_paths.mjs';
 import { createServiceDaemonAutostarter } from './utils/service/daemon_autostart.mjs';
 import { applyRuntimeServerLightSqliteEnv } from './utils/server/apply_runtime_server_light_sqlite_env.mjs';
@@ -251,6 +258,7 @@ async function main() {
 	  let shuttingDown = false;
 	  let ownedDaemonPid = null;
 	  let daemonAutostarter = null;
+	  let daemonRuntimeReconciler = null;
 	  installExitCleanup({ label: 'local', children });
 	  const baseEnv = { ...process.env };
 	  const stackCtx = resolveStackContext({ env: baseEnv, autostart });
@@ -306,10 +314,29 @@ async function main() {
   }
 
   const serverAlreadyRunning = await isHappierServerRunning(internalServerUrl);
+  const serverRuntimeProxyAlreadyOwned = stackMode && runtimeStatePath
+    ? await isRuntimePortOwnedByStackDevProxy({
+        env: baseEnv,
+        port: serverPort,
+        stackName,
+        runtimeStatePath,
+      })
+    : false;
   const daemonAlreadyRunning = startDaemon
-    ? isDaemonRunning(cliHomeDir, { serverUrl: internalServerUrl, env: daemonScopeEnv })
+    ? ['running', 'starting'].includes((await checkDaemonStatePingAware(cliHomeDir, { serverUrl: internalServerUrl, env: daemonScopeEnv })).status)
     : false;
   if (!restart && serverAlreadyRunning && (!startDaemon || daemonAlreadyRunning)) {
+    if (stackMode && runtimeStatePath && !serverRuntimeProxyAlreadyOwned) {
+      const listenerPid = await resolveStackOwnedServerListenPid({ serverPort, stackName, envPath }).catch(() => null);
+      if (Number.isFinite(Number(listenerPid)) && Number(listenerPid) > 1) {
+        await recordStackRuntimeServerPids(runtimeStatePath, {
+          listenerPid: Number(listenerPid),
+          wrapperPid: null,
+          serverPort,
+          clearProxyState: true,
+        }).catch(() => {});
+      }
+    }
     console.log(
       `${green('✓')} start: already running ${dim('(')}` +
         `${dim('server=')}${cyan(internalServerUrl)}` +
@@ -467,10 +494,21 @@ async function main() {
         ? spawnProc('server', serverLaunchSpec.command, serverLaunchSpec.args, serverEnv, { cwd: serverDir })
         : await pmSpawnScript({ label: 'server', dir: serverDir, script: serverStartScript, env: serverEnv });
       children.push(server);
-      if (stackMode && runtimeStatePath) {
-        await recordStackRuntimeUpdate(runtimeStatePath, { processes: { serverPid: server.pid } }).catch(() => {});
-      }
       await waitForServerReady(internalServerUrl);
+      if (stackMode && runtimeStatePath) {
+        const listenerPid = await resolveStackOwnedServerListenPid({ serverPort, stackName, envPath });
+        if (!(Number.isFinite(Number(listenerPid)) && Number(listenerPid) > 1)) {
+          throw new Error(
+            `[local] server readiness ownership could not be proven on port ${serverPort}: no stack-owned listener PID was discovered`
+          );
+        }
+        await recordStackRuntimeServerPids(runtimeStatePath, {
+          listenerPid: Number(listenerPid),
+          wrapperPid: server.pid,
+          serverPort,
+          clearProxyState: true,
+        }).catch(() => {});
+      }
     } else {
       console.log(`${green('✓')} server: already running at ${cyan(internalServerUrl)}`);
     }
@@ -581,7 +619,7 @@ async function main() {
               stackName,
               cliIdentity: 'default',
             });
-            const daemonState = checkDaemonState(cliHomeDir, { serverUrl: effectiveInternalServerUrl, env: daemonEnvForState });
+            const daemonState = await checkDaemonStatePingAware(cliHomeDir, { serverUrl: effectiveInternalServerUrl, env: daemonEnvForState });
             ownedDaemonPid = typeof daemonState?.pid === 'number' ? daemonState.pid : null;
           };
 
@@ -594,7 +632,10 @@ async function main() {
             retryBaseMs,
             retryMaxMs,
             getCredentialFingerprint,
-            isDaemonRunning: () => isDaemonRunning(cliHomeDir, { serverUrl: effectiveInternalServerUrl, env: daemonScopeEnv }),
+            isDaemonRunning: async () =>
+              ['running', 'starting'].includes(
+                (await checkDaemonStatePingAware(cliHomeDir, { serverUrl: effectiveInternalServerUrl, env: daemonScopeEnv })).status
+              ),
             startDaemon: startDaemonAndRecord,
             logger: console,
           });
@@ -665,10 +706,34 @@ async function main() {
 	        stackName,
 	        cliIdentity: 'default',
 	      });
-	      const daemonState = checkDaemonState(cliHomeDir, { serverUrl: effectiveInternalServerUrl, env: daemonEnvForState });
+	      const daemonState = await checkDaemonStatePingAware(cliHomeDir, { serverUrl: effectiveInternalServerUrl, env: daemonEnvForState });
 	      ownedDaemonPid = typeof daemonState?.pid === 'number' ? daemonState.pid : null;
 	    }
 	  }
+
+  if (startDaemon && stackMode && runtimeStatePath) {
+    const daemonRuntimeEnv = getDaemonEnv({
+      baseEnv: daemonScopeEnv,
+      cliHomeDir,
+      internalServerUrl: effectiveInternalServerUrl,
+      publicServerUrl: publicServerUrl || effectiveInternalServerUrl,
+      stackName,
+      cliIdentity: 'default',
+    });
+    daemonRuntimeReconciler = startStackRuntimeDaemonPidReconciler(
+      {
+        runtimeStatePath,
+        cliHomeDir,
+        internalServerUrl: effectiveInternalServerUrl,
+        env: daemonRuntimeEnv,
+        isShuttingDown: () => shuttingDown,
+      },
+      {
+        checkDaemonStateImpl: checkDaemonStatePingAware,
+      },
+    );
+    await daemonRuntimeReconciler?.syncNow?.();
+  }
 
   // Optional: start Expo dev-client Metro for mobile reviewers.
   if (startMobile) {
@@ -722,6 +787,11 @@ async function main() {
 
     try {
       daemonAutostarter?.stop?.();
+    } catch {
+      // ignore
+    }
+    try {
+      daemonRuntimeReconciler?.close?.();
     } catch {
       // ignore
     }

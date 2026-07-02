@@ -220,6 +220,210 @@ test('watch forwards stack context to daemon restart', async () => {
   assert.equal(restartArgs.forceRestart, false);
 });
 
+test('watch uses daemon control restart for a pingable running daemon and syncs runtime state', async () => {
+  let capturedOnChange = null;
+  let coldStartCalls = 0;
+  let controlRestartCalls = 0;
+  let syncCalls = 0;
+
+  watchHappyCliAndRestartDaemon(
+    {
+      enabled: true,
+      startDaemon: true,
+      buildCli: true,
+      cliDir: '/tmp/happy-cli',
+      cliBin: '/tmp/happy-cli/bin/happier.mjs',
+      cliHomeDir: '/tmp/happy-cli-home',
+      internalServerUrl: 'http://127.0.0.1:3009',
+      publicServerUrl: 'http://localhost:3009',
+      runtimeStatePath: '/tmp/stack.runtime.json',
+      isShuttingDown: () => false,
+      env: { TEST_ENV: '1' },
+      stackName: 'dev',
+    },
+    {
+      watchDebouncedImpl: ({ onChange }) => {
+        capturedOnChange = onChange;
+        return { close() {} };
+      },
+      ensureCliBuiltImpl: async () => ({ built: true, reason: 'test' }),
+      pingDaemonImpl: async () => ({ ok: true, pid: 111 }),
+      restartDaemonViaControlServerImpl: async (args) => {
+        controlRestartCalls += 1;
+        assert.equal(args.cliHomeDir, '/tmp/happy-cli-home');
+        assert.equal(args.internalServerUrl, 'http://127.0.0.1:3009');
+        assert.equal(args.stackName, 'dev');
+        assert.equal(Object.prototype.hasOwnProperty.call(args, 'restartSessionRunners'), false);
+      },
+      syncStackRuntimeDaemonPidFromDaemonStateImpl: async (args) => {
+        syncCalls += 1;
+        assert.equal(args.runtimeStatePath, '/tmp/stack.runtime.json');
+      },
+      startLocalDaemonWithAuthImpl: async (args) => {
+        coldStartCalls += 1;
+      },
+      existsSyncImpl: () => true,
+      logger: { log() {}, warn() {}, error() {} },
+    },
+  );
+
+  assert.equal(typeof capturedOnChange, 'function');
+  await capturedOnChange({ eventType: 'change', filename: 'foo.ts' });
+
+  assert.equal(controlRestartCalls, 1);
+  assert.equal(syncCalls, 1);
+  assert.equal(coldStartCalls, 0);
+});
+
+test('watch falls back to cold start when daemon control ping is unavailable', async () => {
+  let capturedOnChange = null;
+  let coldStartCalls = 0;
+  let controlRestartCalls = 0;
+  let coldStartArgs = null;
+
+  watchHappyCliAndRestartDaemon(
+    {
+      enabled: true,
+      startDaemon: true,
+      buildCli: true,
+      cliDir: '/tmp/happy-cli',
+      cliBin: '/tmp/happy-cli/bin/happier.mjs',
+      cliHomeDir: '/tmp/happy-cli-home',
+      internalServerUrl: 'http://127.0.0.1:3009',
+      publicServerUrl: 'http://localhost:3009',
+      isShuttingDown: () => false,
+    },
+    {
+      watchDebouncedImpl: ({ onChange }) => {
+        capturedOnChange = onChange;
+        return { close() {} };
+      },
+      ensureCliBuiltImpl: async () => ({ built: true, reason: 'test' }),
+      pingDaemonImpl: async () => ({ ok: false, reason: 'missing_state' }),
+      restartDaemonViaControlServerImpl: async () => {
+        controlRestartCalls += 1;
+      },
+      startLocalDaemonWithAuthImpl: async (args) => {
+        coldStartCalls += 1;
+        coldStartArgs = args;
+      },
+      existsSyncImpl: () => true,
+      logger: { log() {}, warn() {}, error() {} },
+    },
+  );
+
+  assert.equal(typeof capturedOnChange, 'function');
+  await capturedOnChange({ eventType: 'change', filename: 'foo.ts' });
+
+  assert.equal(controlRestartCalls, 0);
+  assert.equal(coldStartCalls, 1);
+  assert.equal(coldStartArgs?.preserveExistingRunning, true);
+});
+
+test('watch keeps existing daemon when daemon control restart is unavailable', async () => {
+  let capturedOnChange = null;
+  let coldStartCalls = 0;
+  let controlRestartCalls = 0;
+
+  watchHappyCliAndRestartDaemon(
+    {
+      enabled: true,
+      startDaemon: true,
+      buildCli: true,
+      cliDir: '/tmp/happy-cli',
+      cliBin: '/tmp/happy-cli/bin/happier.mjs',
+      cliHomeDir: '/tmp/happy-cli-home',
+      internalServerUrl: 'http://127.0.0.1:3009',
+      publicServerUrl: 'http://localhost:3009',
+      isShuttingDown: () => false,
+      stackName: 'dev',
+    },
+    {
+      watchDebouncedImpl: ({ onChange }) => {
+        capturedOnChange = onChange;
+        return { close() {} };
+      },
+      ensureCliBuiltImpl: async () => ({ built: true, reason: 'test' }),
+      pingDaemonImpl: async () => ({ ok: true, pid: 111 }),
+      restartDaemonViaControlServerImpl: async () => {
+        controlRestartCalls += 1;
+        const error = new Error('daemon control /restart failed (http 501): {"status":"restart_unavailable"}');
+        error.daemonControlPath = '/restart';
+        error.status = 501;
+        throw error;
+      },
+      startLocalDaemonWithAuthImpl: async () => {
+        coldStartCalls += 1;
+      },
+      existsSyncImpl: () => true,
+      logger: { log() {}, warn() {}, error() {} },
+    },
+  );
+
+  assert.equal(typeof capturedOnChange, 'function');
+  await capturedOnChange({ eventType: 'change', filename: 'foo.ts' });
+
+  assert.equal(controlRestartCalls, 1);
+  assert.equal(coldStartCalls, 0);
+});
+
+test('watch keeps a live runtime daemon when daemon control state is temporarily missing', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hs-daemon-runtime-live-'));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const runtimeStatePath = join(root, 'stack.runtime.json');
+  await writeFile(
+    runtimeStatePath,
+    JSON.stringify({ processes: { daemonPid: 4242, daemonPids: [4242] } }),
+    'utf-8',
+  );
+
+  let capturedOnChange = null;
+  let coldStartCalls = 0;
+  let controlRestartCalls = 0;
+
+  watchHappyCliAndRestartDaemon(
+    {
+      enabled: true,
+      startDaemon: true,
+      buildCli: true,
+      cliDir: '/tmp/happy-cli',
+      cliBin: '/tmp/happy-cli/bin/happier.mjs',
+      cliHomeDir: '/tmp/happy-cli-home',
+      internalServerUrl: 'http://127.0.0.1:3009',
+      publicServerUrl: 'http://localhost:3009',
+      runtimeStatePath,
+      isShuttingDown: () => false,
+      stackName: 'dev',
+    },
+    {
+      watchDebouncedImpl: ({ onChange }) => {
+        capturedOnChange = onChange;
+        return { close() {} };
+      },
+      ensureCliBuiltImpl: async () => ({ built: true, reason: 'test' }),
+      pingDaemonImpl: async () => ({ ok: false, reason: 'missing_state' }),
+      restartDaemonViaControlServerImpl: async () => {
+        controlRestartCalls += 1;
+      },
+      startLocalDaemonWithAuthImpl: async () => {
+        coldStartCalls += 1;
+      },
+      isPidAliveImpl: (pid) => pid === 4242,
+      existsSyncImpl: () => true,
+      logger: { log() {}, warn() {}, error() {} },
+    },
+  );
+
+  assert.equal(typeof capturedOnChange, 'function');
+  await capturedOnChange({ eventType: 'change', filename: 'foo.ts' });
+
+  assert.equal(controlRestartCalls, 0);
+  assert.equal(coldStartCalls, 0);
+});
+
 test('watch ignores no-op manifest events without missing real source edits', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'hs-daemon-watch-noop-'));
   t.after(async () => {

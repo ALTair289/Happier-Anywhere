@@ -8,7 +8,7 @@ import { STACK_WRAPPER_PRESERVE_KEYS, scrubHappierStackEnv } from '../utils/env/
 import { applyStackActiveServerScopeEnv } from '../utils/auth/stable_scope_id.mjs';
 import { getStackRuntimeStatePath, isPidAlive, readStackRuntimeStateFile } from '../utils/stack/runtime_state.mjs';
 import { readStackRuntimeStateWithDaemonSync } from '../utils/stack/runtime_daemon_state.mjs';
-import { checkDaemonState } from '../daemon.mjs';
+import { checkDaemonStatePingAware } from '../daemon.mjs';
 
 const readExistingEnv = readTextOrEmpty;
 const STACK_WRAPPER_CLEAR_UNPREFIXED_KEYS = [
@@ -117,7 +117,7 @@ export async function withStackEnv({ stackName, fn, extraEnv = {} }) {
       Number.isFinite(runtimePortCandidate) && runtimePortCandidate > 0 ? `http://127.0.0.1:${runtimePortCandidate}` : '',
     env,
   }, {
-    checkDaemonStateImpl: checkDaemonState,
+    checkDaemonStateImpl: checkDaemonStatePingAware,
   });
 
   // Runtime-only port overlay (ephemeral stacks): prefer stack.runtime.json ports when the stack

@@ -52,6 +52,24 @@ test('getDaemonEnv prefers the matching cli settings server id over the stable s
   assert.equal(env.HAPPIER_DAEMON_STARTUP_SOURCE, 'manual');
 });
 
+test('getDaemonEnv seeds stack ownership env from the resolved stack name', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'happy-stack-daemon-env-stack-'));
+
+  const env = getDaemonEnv({
+    baseEnv: {
+      HAPPIER_STACK_PROCESS_KIND: 'session',
+    },
+    cliHomeDir: dir,
+    internalServerUrl: 'http://127.0.0.1:3009',
+    publicServerUrl: 'http://127.0.0.1:3009',
+    stackName: 'dev',
+    cliIdentity: 'default',
+  });
+
+  assert.equal(env.HAPPIER_STACK_STACK, 'dev');
+  assert.equal(env.HAPPIER_STACK_PROCESS_KIND, 'daemon');
+});
+
 test('getDaemonEnv preserves a matching explicit active server id when settings profiles share the URL', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'happy-stack-daemon-env-explicit-'));
   const serverUrl = 'http://127.0.0.1:52753';

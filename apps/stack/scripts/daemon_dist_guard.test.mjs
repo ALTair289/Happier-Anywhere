@@ -1,12 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
-import { startLocalDaemonWithAuth, stopLocalDaemon } from './daemon.mjs';
+import {
+  createDaemonStartAttemptLogPath,
+  resolveGuardedLocalCliDistEntrypoint,
+  startLocalDaemonWithAuth,
+  stopLocalDaemon,
+} from './daemon.mjs';
 import { writeStubHappierCliFiles } from './testkit/core/stub_happier_cli_files.mjs';
 
 function runGit(args, cwd) {
@@ -16,6 +21,7 @@ function runGit(args, cwd) {
 function buildDaemonDistGuardEnv(overrides = {}) {
   return {
     ...process.env,
+    HAPPIER_STACK_REPO_DIR: '',
     HAPPIER_STACK_AUTO_AUTH_SEED: '0',
     HAPPIER_STACK_MIGRATE_CREDENTIALS: '0',
     ...overrides,
@@ -62,6 +68,66 @@ function overrideProcessReleaseNameForTest(nextName) {
   };
 }
 
+const FAKE_PING_AWARE_DAEMON_CHILD_SCRIPT = `
+const fs = require('node:fs');
+const http = require('node:http');
+const path = require('node:path');
+
+const statePath = process.argv[1];
+if (!statePath) process.exit(2);
+
+const server = http.createServer((req, res) => {
+  if (req.url === '/ping') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+    return;
+  }
+  res.writeHead(404, { 'content-type': 'application/json' });
+  res.end(JSON.stringify({ error: 'not-found' }));
+});
+
+server.listen(0, '127.0.0.1', () => {
+  const address = server.address();
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  fs.writeFileSync(
+    statePath,
+    JSON.stringify({
+      pid: process.pid,
+      httpPort: address.port,
+      controlToken: '',
+      startTime: new Date().toISOString(),
+    }),
+    'utf-8',
+  );
+});
+
+process.on('SIGTERM', () => {
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 50).unref();
+});
+
+setInterval(() => {}, 1000);
+`;
+
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", "'\\''")}'`;
+}
+
+function fakePingAwareDaemonSpawnerSource() {
+  return `
+const FAKE_PING_AWARE_DAEMON_CHILD_SCRIPT = ${JSON.stringify(FAKE_PING_AWARE_DAEMON_CHILD_SCRIPT)};
+
+function startFakePingAwareDaemon(statePath) {
+  const child = spawn(process.execPath, ['-e', FAKE_PING_AWARE_DAEMON_CHILD_SCRIPT, statePath, 'daemon', 'start'], {
+    detached: true,
+    stdio: 'ignore',
+  });
+  child.unref();
+  return child.pid;
+}
+`;
+}
+
 async function writeStubHappyCli({ cliDir }) {
   // Dist entrypoint exists, but package.json intentionally has no build script.
   // startLocalDaemonWithAuth should launch the daemon via dist (not via bin/happier.mjs).
@@ -71,11 +137,13 @@ import { existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
 const args = process.argv.slice(2);
+if (args[0] !== 'daemon') process.exit(0);
 const home = process.env.HAPPIER_HOME_DIR || process.env.HAPPIER_STACK_CLI_HOME_DIR;
 if (!home) process.exit(2);
 const state = join(home, 'daemon.state.json');
 
-if (args[0] !== 'daemon') process.exit(0);
+${fakePingAwareDaemonSpawnerSource()}
+
 const sub = args[1] || '';
 
 if (sub === 'stop') {
@@ -92,9 +160,7 @@ if (sub === 'stop') {
 }
 
 if (sub === 'start') {
-  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
-  child.unref();
-  writeFileSync(state, JSON.stringify({ pid: child.pid, httpPort: 0, startTime: new Date().toISOString() }), 'utf-8');
+  startFakePingAwareDaemon(state);
   process.exit(0);
 }
 
@@ -137,6 +203,8 @@ const eventsPath = process.env.HAPPIER_TEST_DAEMON_EVENTS_PATH;
 if (!home) process.exit(2);
 const state = join(home, 'daemon.state.json');
 
+${fakePingAwareDaemonSpawnerSource()}
+
 function event(name) {
   if (eventsPath) appendFileSync(eventsPath, name + '\\n', 'utf-8');
 }
@@ -161,9 +229,7 @@ if (sub === 'stop') {
 if (sub === 'start') {
   event('start');
   await delay(400);
-  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
-  child.unref();
-  writeFileSync(state, JSON.stringify({ pid: child.pid, httpPort: 0, startTime: new Date().toISOString() }), 'utf-8');
+  startFakePingAwareDaemon(state);
   await delay(100);
   process.exit(0);
 }
@@ -192,6 +258,8 @@ const eventsPath = process.env.HAPPIER_TEST_DAEMON_EVENTS_PATH;
 if (!home) process.exit(2);
 const state = join(home, 'daemon.state.json');
 
+${fakePingAwareDaemonSpawnerSource()}
+
 function event(name) {
   if (eventsPath) appendFileSync(eventsPath, name + '\\n', 'utf-8');
 }
@@ -216,9 +284,7 @@ if (sub === 'stop') {
 
 if (sub === 'start') {
   event('start');
-  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
-  child.unref();
-  writeFileSync(state, JSON.stringify({ pid: child.pid, httpPort: 0, startTime: new Date().toISOString() }), 'utf-8');
+  startFakePingAwareDaemon(state);
   process.exit(0);
 }
 
@@ -247,12 +313,7 @@ process.exit(0);
   return join(cliBinDir, 'happier.mjs');
 }
 
-async function writeRuntimeSnapshotHappyCli({ snapshotDir }) {
-  const cliDir = join(snapshotDir, 'cli');
-  await mkdir(cliDir, { recursive: true });
-  const implPath = join(cliDir, 'runtime-cli.mjs');
-  const cliBin = join(cliDir, 'happier');
-
+async function writePidOnlyFalseReadyStubHappyCli({ cliDir }) {
   const distScript = `
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
@@ -283,6 +344,56 @@ if (sub === 'start') {
   const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
   child.unref();
   writeFileSync(state, JSON.stringify({ pid: child.pid, httpPort: 0, startTime: new Date().toISOString() }), 'utf-8');
+  process.exit(0);
+}
+
+process.exit(0);
+`;
+  const monoRoot = join(cliDir, '..', '..');
+  const { cliBinDir } = await writeStubHappierCliFiles(monoRoot, {
+    packageJsonContent: '{}\n',
+    distIndexScript: distScript.trimStart(),
+    binHappierScript: 'process.exit(42);\n',
+  });
+  return join(cliBinDir, 'happier.mjs');
+}
+
+async function writeRuntimeSnapshotHappyCli({ snapshotDir }) {
+  const cliDir = join(snapshotDir, 'cli');
+  await mkdir(cliDir, { recursive: true });
+  const implPath = join(cliDir, 'runtime-cli.mjs');
+  const cliBin = join(cliDir, 'happier');
+
+  const distScript = `
+import { spawn } from 'node:child_process';
+import { existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+
+const args = process.argv.slice(2);
+const home = process.env.HAPPIER_HOME_DIR || process.env.HAPPIER_STACK_CLI_HOME_DIR;
+if (!home) process.exit(2);
+const state = join(home, 'daemon.state.json');
+
+${fakePingAwareDaemonSpawnerSource()}
+
+if (args[0] !== 'daemon') process.exit(0);
+const sub = args[1] || '';
+
+if (sub === 'stop') {
+  if (existsSync(state)) {
+    try {
+      const pid = Number(JSON.parse(readFileSync(state, 'utf-8')).pid);
+      if (Number.isFinite(pid) && pid > 1) {
+        try { process.kill(pid, 'SIGTERM'); } catch {}
+      }
+    } catch {}
+    try { rmSync(state); } catch {}
+  }
+  process.exit(0);
+}
+
+if (sub === 'start') {
+  startFakePingAwareDaemon(state);
   process.exit(0);
 }
 
@@ -324,6 +435,8 @@ const home = process.env.HAPPIER_HOME_DIR || process.env.HAPPIER_STACK_CLI_HOME_
 if (!home) process.exit(2);
 const state = join(home, 'daemon.state.json');
 
+${fakePingAwareDaemonSpawnerSource()}
+
 if (args[0] !== 'daemon') process.exit(0);
 const sub = args[1] || '';
 
@@ -341,9 +454,7 @@ if (sub === 'stop') {
 }
 
 if (sub === 'start-sync' || sub === 'start') {
-  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
-  child.unref();
-  writeFileSync(state, JSON.stringify({ pid: child.pid, httpPort: 0, startTime: new Date().toISOString() }), 'utf-8');
+  startFakePingAwareDaemon(state);
   process.exit(0);
 }
 
@@ -389,13 +500,13 @@ const home = process.env.HAPPIER_HOME_DIR || process.env.HAPPIER_STACK_CLI_HOME_
 if (!home) process.exit(2);
 const state = join(home, 'daemon.state.json');
 
+${fakePingAwareDaemonSpawnerSource()}
+
 if (args[0] !== 'daemon') process.exit(0);
 const sub = args[1] || '';
 
 if (sub === 'start-sync' || sub === 'start') {
-  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
-  child.unref();
-  writeFileSync(state, JSON.stringify({ pid: child.pid, httpPort: 0, startTime: new Date().toISOString() }), 'utf-8');
+  startFakePingAwareDaemon(state);
   process.exit(0);
 }
 
@@ -438,9 +549,7 @@ case "$1" in
   daemon)
     case "$2" in
       start)
-        "${process.execPath}" -e "setInterval(() => {}, 1000)" daemon start >/dev/null 2>&1 &
-        child=$!
-        printf '{"pid":%s,"httpPort":0,"startTime":"test"}\n' "$child" > "$STATE"
+        "${process.execPath}" -e ${shellQuote(FAKE_PING_AWARE_DAEMON_CHILD_SCRIPT)} "$STATE" daemon start >/dev/null 2>&1 &
         exit 0
         ;;
       stop)
@@ -471,6 +580,55 @@ esac
 async function readDaemonPid(statePath) {
   return Number(JSON.parse(await readFile(statePath, 'utf-8')).pid);
 }
+
+test('startLocalDaemonWithAuth requires daemon control ping before accepting running daemon state', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'happy-stacks-daemon-ping-ready-'));
+  try {
+    const { internalServerUrl, publicServerUrl } = await reserveLoopbackServerUrls();
+    const cliDir = join(tmp, 'apps', 'cli');
+    const cliBin = await writePidOnlyFalseReadyStubHappyCli({ cliDir });
+    await writeFile(join(tmp, 'package.json'), '{}\n', 'utf-8');
+    runGit(['init'], tmp);
+    runGit(['config', 'user.email', 'test@example.com'], tmp);
+    runGit(['config', 'user.name', 'Test User'], tmp);
+    runGit(['add', '.'], tmp);
+    runGit(['commit', '-m', 'init'], tmp);
+
+    const cliHomeDir = join(tmp, 'stack', 'cli');
+    await mkdir(cliHomeDir, { recursive: true });
+    await writeFile(join(cliHomeDir, 'access.key'), 'dummy\n', 'utf-8');
+    await writeFile(join(cliHomeDir, 'settings.json'), JSON.stringify({ machineId: 'test-machine' }) + '\n', 'utf-8');
+
+    await assert.rejects(
+      () =>
+        startLocalDaemonWithAuth({
+          cliBin,
+          cliHomeDir,
+          internalServerUrl,
+          publicServerUrl,
+          isShuttingDown: () => false,
+          forceRestart: true,
+          env: buildDaemonDistGuardEnv({
+            HAPPIER_STACK_CLI_BUILD: '1',
+            HAPPIER_STACK_DAEMON_START_VERIFY_TIMEOUT_MS: '250',
+            HAPPIER_STACK_DAEMON_START_VERIFY_POLL_MS: '25',
+            HAPPIER_STACK_DAEMON_START_VERIFY_STABLE_MS: '0',
+          }),
+          stackName: 'dev',
+          cliIdentity: 'default',
+        }),
+      /Failed to start daemon|daemon failed to start/i,
+    );
+
+    await stopLocalDaemon({
+      cliBin,
+      internalServerUrl,
+      cliHomeDir,
+    });
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
 
 test('startLocalDaemonWithAuth does not require a second CLI build when dist/index.mjs already exists', async () => {
   const tmp = await mkdtemp(join(tmpdir(), 'happy-stacks-daemon-dist-guard-'));
@@ -584,11 +742,12 @@ import { join } from 'node:path';
 const args = process.argv.slice(2);
 const home = process.env.HAPPIER_HOME_DIR || process.env.HAPPIER_STACK_CLI_HOME_DIR;
 if (!home) process.exit(2);
+
+${fakePingAwareDaemonSpawnerSource()}
+
 if (args[0] !== 'daemon') process.exit(0);
 if (args[1] === 'start') {
-  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
-  child.unref();
-  writeFileSync(join(home, 'daemon.state.json'), JSON.stringify({ pid: child.pid, httpPort: 0, startTime: new Date().toISOString() }), 'utf-8');
+  startFakePingAwareDaemon(join(home, 'daemon.state.json'));
 }
 process.exit(0);
 `;
@@ -660,11 +819,13 @@ import { existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
 const args = process.argv.slice(2);
+if (args[0] !== 'daemon') process.exit(0);
 const home = process.env.HAPPIER_HOME_DIR || process.env.HAPPIER_STACK_CLI_HOME_DIR;
 if (!home) process.exit(2);
 const state = join(home, 'daemon.state.json');
 
-if (args[0] !== 'daemon') process.exit(0);
+${fakePingAwareDaemonSpawnerSource()}
+
 const sub = args[1] || '';
 
 if (sub === 'stop') {
@@ -681,9 +842,7 @@ if (sub === 'stop') {
 }
 
 if (sub === 'start') {
-  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
-  child.unref();
-  writeFileSync(state, JSON.stringify({ pid: child.pid, httpPort: 0, startTime: new Date().toISOString() }), 'utf-8');
+  startFakePingAwareDaemon(state);
   process.exit(0);
 }
 
@@ -714,7 +873,7 @@ process.exit(0);
       join(cliDir, 'scripts', 'build.mjs'),
       `import { mkdirSync, writeFileSync } from 'node:fs';\n` +
         `import { join } from 'node:path';\n` +
-        `const dist = join(process.cwd(), 'dist');\n` +
+        `const dist = process.env.HAPPIER_WORKSPACE_DIST_OUTPUT_DIR || process.env.HAPPIER_CLI_BUILD_OUTPUT_DIR || join(process.cwd(), 'dist');\n` +
         `mkdirSync(dist, { recursive: true });\n` +
         `writeFileSync(join(dist, 'index.mjs'), ${JSON.stringify(distScript.trimStart())}, 'utf-8');\n`,
       'utf-8',
@@ -937,6 +1096,88 @@ test('startLocalDaemonWithAuth rejects incomplete dist when index imports missin
         }),
       /dist entrypoint is missing or incomplete|missing_module/i,
     );
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('resolveGuardedLocalCliDistEntrypoint rejects local dist outside the active CLI directory', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'happy-stacks-daemon-active-dist-guard-'));
+  try {
+    const activeCliDir = join(tmp, 'active', 'apps', 'cli');
+    const staleCliDir = join(tmp, 'T', 'hstack-runtime-start-fixture-stale', 'apps', 'cli');
+    const activeCliBin = await writeStubHappyCli({ cliDir: activeCliDir });
+    const staleCliBin = await writeStubHappyCli({ cliDir: staleCliDir });
+
+    const accepted = resolveGuardedLocalCliDistEntrypoint({
+      cliBin: activeCliBin,
+      activeCliDir,
+    });
+    assert.equal(accepted.ok, true);
+    assert.equal(accepted.distEntrypoint, join(activeCliDir, 'dist', 'index.mjs'));
+
+    const rejected = resolveGuardedLocalCliDistEntrypoint({
+      cliBin: staleCliBin,
+      activeCliDir,
+    });
+    assert.equal(rejected.ok, false);
+    assert.match(rejected.reason, /outside_active_cli_dir/);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('resolveGuardedLocalCliDistEntrypoint rejects symlinked active dist outside the active CLI directory', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'happy-stacks-daemon-active-dist-symlink-'));
+  try {
+    const activeCliDir = join(tmp, 'active', 'apps', 'cli');
+    const staleCliDir = join(tmp, 'T', 'hstack-runtime-start-fixture-stale', 'apps', 'cli');
+    const activeCliBin = await writeStubHappyCli({ cliDir: activeCliDir });
+    await writeStubHappyCli({ cliDir: staleCliDir });
+
+    await rm(join(activeCliDir, 'dist'), { recursive: true, force: true });
+    await symlink(join(staleCliDir, 'dist'), join(activeCliDir, 'dist'), 'dir');
+
+    const rejected = resolveGuardedLocalCliDistEntrypoint({
+      cliBin: activeCliBin,
+      activeCliDir,
+    });
+    assert.equal(rejected.ok, false);
+    assert.match(rejected.reason, /outside_active_cli_dir/);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('createDaemonStartAttemptLogPath prunes old start-attempt logs while keeping the current one', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'happy-stacks-daemon-start-attempt-prune-'));
+  try {
+    const cliHomeDir = join(tmp, 'cli-home');
+    const logsDir = join(cliHomeDir, 'logs');
+    await mkdir(logsDir, { recursive: true });
+    for (let index = 0; index < 4; index += 1) {
+      await writeFile(
+        join(logsDir, `2026-06-30-10-00-0${index}-pid-100-daemon-start-attempt.log`),
+        `old ${index}\n`,
+        'utf-8',
+      );
+    }
+
+    const currentPath = await createDaemonStartAttemptLogPath({
+      cliHomeDir,
+      nowMs: Date.parse('2026-06-30T10:01:00.000Z'),
+      pid: 200,
+      keepCount: 2,
+    });
+
+    const remaining = (await readdir(logsDir))
+      .filter((file) => file.endsWith('-daemon-start-attempt.log'))
+      .sort();
+    assert.equal(currentPath, join(logsDir, '2026-06-30-10-01-00-pid-200-daemon-start-attempt.log'));
+    assert.deepEqual(remaining, [
+      '2026-06-30-10-00-03-pid-100-daemon-start-attempt.log',
+      '2026-06-30-10-01-00-pid-200-daemon-start-attempt.log',
+    ]);
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }

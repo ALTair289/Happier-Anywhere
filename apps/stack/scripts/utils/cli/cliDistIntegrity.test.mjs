@@ -6,6 +6,7 @@ import { join } from 'node:path';
 
 import {
   findMissingCliDistModules,
+  probeCliDistRuntimeImport,
   readCliDistClosureFingerprint,
 } from './cliDistIntegrity.mjs';
 
@@ -47,6 +48,54 @@ test('readCliDistClosureFingerprint hashes only the reachable entrypoint closure
     assert.equal(second.ok, true);
     assert.equal(second.fileCount, 2);
     assert.equal(second.fingerprint, first.fingerprint);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('probeCliDistRuntimeImport resolves a valid ESM entrypoint', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'happy-cli-dist-runtime-probe-ok-'));
+  try {
+    const entrypoint = join(tmp, 'index.mjs');
+    await writeFile(entrypoint, 'export const ready = true;\n', 'utf-8');
+
+    await probeCliDistRuntimeImport(entrypoint);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('probeCliDistRuntimeImport rejects ESM link failures', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'happy-cli-dist-runtime-probe-fail-'));
+  try {
+    const entrypoint = join(tmp, 'index.mjs');
+    await writeFile(entrypoint, "import { A } from './chunk.mjs'; export const value = A;\n", 'utf-8');
+    await writeFile(join(tmp, 'chunk.mjs'), 'export const B = true;\n', 'utf-8');
+
+    await assert.rejects(
+      () => probeCliDistRuntimeImport(entrypoint),
+      /does not provide an export named|runtime import probe failed/
+    );
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('probeCliDistRuntimeImport rejects when the import process stays alive past the timeout', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'happy-cli-dist-runtime-probe-timeout-'));
+  try {
+    const entrypoint = join(tmp, 'index.mjs');
+    await writeFile(entrypoint, 'setInterval(() => {}, 1000);\n', 'utf-8');
+
+    const result = await Promise.race([
+      probeCliDistRuntimeImport(entrypoint, { timeoutMs: 50 }).then(
+        () => 'resolved',
+        (error) => error,
+      ),
+      new Promise((resolve) => setTimeout(() => resolve('timed-out'), 500)),
+    ]);
+
+    assert.match(result instanceof Error ? result.message : String(result), /timed out/i);
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }

@@ -1,8 +1,11 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { chmod, copyFile, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { resolveStackCredentialPaths } from './credentials_paths.mjs';
 import { decodeJwtPayloadUnsafe } from './decode_jwt_payload_unsafe.mjs';
+
+const validationCache = new Map();
 
 function readAuthTokenFromCredentialPath(path) {
   const p = String(path ?? '').trim();
@@ -19,6 +22,26 @@ function readAuthTokenFromCredentialPath(path) {
       // fall through
     }
     return raw;
+  } catch {
+    return null;
+  }
+}
+
+function buildCredentialValidationCacheKey({ path, token, serverUrl }) {
+  const p = String(path ?? '').trim();
+  const t = String(token ?? '').trim();
+  const base = String(serverUrl ?? '').trim().replace(/\/+$/, '');
+  if (!p || !t || !base) return null;
+  try {
+    const stat = statSync(p);
+    const tokenHash = createHash('sha256').update(t).digest('hex');
+    return [
+      base,
+      p,
+      stat.size,
+      Number.isFinite(stat.mtimeMs) ? stat.mtimeMs : 0,
+      tokenHash,
+    ].join('\0');
   } catch {
     return null;
   }
@@ -63,14 +86,18 @@ export async function ensureActiveAccessKeyValid({ cliHomeDir, serverUrl, env = 
 
   const activePath = resolved.serverScopedPath;
   const activeToken = readAuthTokenFromCredentialPath(activePath);
+  const activeCacheKey = activeToken
+    ? buildCredentialValidationCacheKey({ path: activePath, token: activeToken, serverUrl })
+    : null;
   const allowAccountSwitch =
     (env.HAPPIER_STACK_AUTH_REPAIR_ALLOW_ACCOUNT_SWITCH ?? '').toString().trim() === '1';
   const activeSub = activeToken ? decodeJwtPayloadUnsafe(activeToken)?.sub ?? null : null;
   const activeValid = activeToken
-    ? await validateTokenAgainstServer({ token: activeToken, serverUrl, timeoutMs })
+    ? validationCache.get(activeCacheKey) ?? await validateTokenAgainstServer({ token: activeToken, serverUrl, timeoutMs })
     : { ok: false, status: null };
 
   if (activeValid.ok) {
+    if (activeCacheKey) validationCache.set(activeCacheKey, activeValid);
     return { kind: 'ok', activePath };
   }
 

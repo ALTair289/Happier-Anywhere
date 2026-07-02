@@ -1,7 +1,7 @@
 import { homedir } from 'node:os';
-import { dirname, join, resolve, sep } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, readdir, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 
 import { pathExists } from '../fs/fs.mjs';
@@ -18,6 +18,8 @@ import {
 import { resolveInstalledPath, resolveInstalledCliRoot } from '../paths/runtime.mjs';
 import { expandHome } from '../paths/canonical_home.mjs';
 import { withCliDistBuildLock } from './cliDistBuildLock.mjs';
+import { buildIntoTempThenReplace } from '../fs/atomic_dir_swap.mjs';
+import { probeCliDistRuntimeImport } from '../cli/cliDistIntegrity.mjs';
 
 export { isCliDistBuildLockActive } from './cliDistBuildLock.mjs';
 
@@ -592,6 +594,16 @@ function collectExpectedPackageFilesFromPackageJson(pkgJson) {
   return [...new Set(candidates)].filter((p) => typeof p === 'string' && (p.startsWith('./') || p.startsWith('dist/')));
 }
 
+function remapDistPathToDir(path, { pkgDir, distDir }) {
+  const abs = resolve(path);
+  const realDistRoot = resolve(join(pkgDir, 'dist'));
+  if (abs === realDistRoot) return resolve(distDir);
+  if (abs.startsWith(realDistRoot + sep)) {
+    return join(resolve(distDir), relative(realDistRoot, abs));
+  }
+  return abs;
+}
+
 async function ensureWorkspacePackageBuilt(pkgDir, { quiet = false, env: envIn = process.env } = {}) {
   const pkgJsonPath = join(pkgDir, 'package.json');
   if (!(await pathExists(pkgJsonPath))) return { built: false, reason: 'missing-package-json' };
@@ -663,20 +675,47 @@ async function ensureWorkspacePackageBuiltUnderLock({ pkgDir, pkgJson, expectedF
   }
 
   const pm = await getComponentPm(pkgDir, env);
-  if (pm.name === 'yarn') {
-    await ensureYarnReady({ dir: pkgDir, env, quiet });
-    await run(pm.cmd, ['-s', 'build'], {
-      cwd: pkgDir,
-      stdio,
-      env: { ...env, HAPPIER_WORKSPACE_DIST_BUILD_LOCK_HELD: lockPath },
-    });
-  } else {
-    await run(pm.cmd, ['run', '-s', 'build'], {
-      cwd: pkgDir,
-      stdio,
-      env: { ...env, HAPPIER_WORKSPACE_DIST_BUILD_LOCK_HELD: lockPath },
-    });
-  }
+  await buildIntoTempThenReplace(distDir, async (tmpDistDir) => {
+    const buildEnv = {
+      ...env,
+      HAPPIER_WORKSPACE_DIST_BUILD_LOCK_HELD: lockPath,
+      HAPPIER_WORKSPACE_DIST_OUTPUT_DIR: tmpDistDir,
+    };
+    if (pm.name === 'yarn') {
+      await ensureYarnReady({ dir: pkgDir, env, quiet });
+      await run(pm.cmd, ['-s', 'build'], {
+        cwd: pkgDir,
+        stdio,
+        env: buildEnv,
+      });
+    } else {
+      await run(pm.cmd, ['run', '-s', 'build'], {
+        cwd: pkgDir,
+        stdio,
+        env: buildEnv,
+      });
+    }
+
+    const stagedExpectedFiles = expectedFiles.map((p) => remapDistPathToDir(p, { pkgDir, distDir: tmpDistDir }));
+    const missingStaged = stagedExpectedFiles.filter((p) => !existsSync(p));
+    if (missingStaged.length > 0) {
+      throw new Error(
+        `[local] build completed but expected staged outputs are still missing for ${pkgJson?.name ?? pkgDir}:\n` +
+          missingStaged.map((p) => `- ${p}`).join('\n') +
+          '\nFix: ensure the package build honors HAPPIER_WORKSPACE_DIST_OUTPUT_DIR or generates the files referenced by package.json exports/main/types.',
+      );
+    }
+
+    if (distEntrypoints.length > 0) {
+      for (const entryPath of distEntrypoints) {
+        await assertNoMissingLocalImports({
+          distDir: tmpDistDir,
+          entryPath: remapDistPathToDir(entryPath, { pkgDir, distDir: tmpDistDir }),
+          label,
+        });
+      }
+    }
+  });
 
   const missingAfter = expectedFiles.filter((p) => !existsSync(p));
   if (missingAfter.length > 0) {
@@ -768,6 +807,7 @@ export async function ensureWorkspacePackagesBuiltForComponent(componentDir, { q
 
 export async function ensureCliBuilt(cliDir, { buildCli, quiet = false, env: envIn = process.env } = {}) {
   await ensureDepsInstalled(cliDir, 'happier-cli', { quiet, env: envIn });
+  await ensureWorkspacePackagesBuiltForComponent(cliDir, { quiet, env: envIn });
   const repoRoot = coerceHappyMonorepoRootFromPath(cliDir);
   const lockPath = repoRoot
     ? join(repoRoot, '.project', 'tmp', 'cli-dist-build.lock')
@@ -788,17 +828,12 @@ export async function ensureCliBuilt(cliDir, { buildCli, quiet = false, env: env
     const mode = modeRaw === 'always' || modeRaw === 'auto' || modeRaw === 'never' ? modeRaw : 'auto';
     const distEntrypoint = join(cliDir, 'dist', 'index.mjs');
     const distDir = join(cliDir, 'dist');
-    const distBackupDir = join(cliDir, '.dist.hstack-backup');
+    const legacyDistBackupDir = join(cliDir, '.dist.hstack-backup');
     const buildStatePath = resolveBuildStatePath({ label: 'happier-cli', dir: cliDir });
     const gitSig = await computeGitWorktreeSignature(cliDir);
     const prev = await readJsonIfExists(buildStatePath);
 
-    // Recovery: if a previous build was interrupted after moving dist/ aside, we can be left with
-    // dist/ missing but .dist.hstack-backup/ present. Restore it so the stack remains runnable
-    // (and so subsequent "auto" mode checks can correctly treat the CLI as already built).
-    if (!(await pathExists(distDir)) && (await pathExists(distBackupDir))) {
-      await rename(distBackupDir, distDir);
-    }
+    await rm(legacyDistBackupDir, { recursive: true, force: true }).catch(() => {});
 
     if (waited && mode === 'always' && (await pathExists(distEntrypoint))) {
       const latestBuildState = await readJsonIfExists(buildStatePath);
@@ -835,22 +870,26 @@ export async function ensureCliBuilt(cliDir, { buildCli, quiet = false, env: env
     }
     const env = await preparePmEnv(cliDir, envIn);
     const pm = await getComponentPm(cliDir, env);
-    const hadDistBeforeBuild = await pathExists(distDir);
-    if (hadDistBeforeBuild) {
-      await rm(distBackupDir, { recursive: true, force: true });
-      await rename(distDir, distBackupDir);
-    }
-
-    try {
-      await run(pm.cmd, ['build'], { cwd: cliDir, env, stdio: quiet ? 'ignore' : 'inherit' });
+    await buildIntoTempThenReplace(distDir, async (tmpDistDir) => {
+      const outputDir = relative(cliDir, tmpDistDir).replace(/\\/g, '/');
+      if (!outputDir || outputDir.startsWith('..') || outputDir === '.' || outputDir.includes('/../')) {
+        throw new Error(`[local] invalid staged CLI dist output directory: ${tmpDistDir}`);
+      }
+      const buildEnv = {
+        ...env,
+        HAPPIER_CLI_BUILD_OUTPUT_DIR: outputDir,
+        HAPPIER_CLI_SKIP_PACKAGE_DIST_SYNC: '1',
+      };
+      await run(pm.cmd, ['build'], { cwd: cliDir, env: buildEnv, stdio: quiet ? 'ignore' : 'inherit' });
 
       // Sanity check: happier-cli daemon entrypoint must exist after a successful build.
       // Without this, watch-based rebuilds can restart the daemon into a MODULE_NOT_FOUND crash,
       // which looks like the UI "dies out of nowhere" even though the root cause is missing build output.
-      if (!(await pathExists(distEntrypoint))) {
+      const tmpDistEntrypoint = join(tmpDistDir, 'index.mjs');
+      if (!(await pathExists(tmpDistEntrypoint))) {
         throw new Error(
           `[local] happier-cli build finished but did not produce expected entrypoint.\n` +
-            `Expected: ${distEntrypoint}\n` +
+            `Expected: ${tmpDistEntrypoint}\n` +
             `Fix: run the component build directly and inspect its output:\n` +
             `  cd "${cliDir}" && ${pm.cmd} build`
         );
@@ -858,18 +897,9 @@ export async function ensureCliBuilt(cliDir, { buildCli, quiet = false, env: env
 
       // Dist integrity: ensure that local import specifiers reachable from the daemon entrypoint exist.
       // This prevents restarting the daemon into a runtime MODULE_NOT_FOUND crash if the build is partial.
-      await assertNoMissingLocalImports({ distDir, entryPath: distEntrypoint });
-
-      if (hadDistBeforeBuild) {
-        await rm(distBackupDir, { recursive: true, force: true });
-      }
-    } catch (error) {
-      if (hadDistBeforeBuild && (await pathExists(distBackupDir))) {
-        await rm(distDir, { recursive: true, force: true });
-        await rename(distBackupDir, distDir);
-      }
-      throw error;
-    }
+      await assertNoMissingLocalImports({ distDir: tmpDistDir, entryPath: tmpDistEntrypoint });
+      await probeCliDistRuntimeImport(tmpDistEntrypoint, { cwd: cliDir, env: buildEnv });
+    });
 
     // Persist new build state (best-effort).
     const nowSig = gitSig ?? (await computeGitWorktreeSignature(cliDir));

@@ -8,17 +8,36 @@ import { getServerComponentName, isHappierServerRunning } from './utils/server/s
 import { requireDir } from './utils/proc/pm.mjs';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { isDaemonRunning, stopLocalDaemon } from './daemon.mjs';
+import { checkDaemonStatePingAware, getDaemonEnv, stopLocalDaemon } from './daemon.mjs';
 import { printResult, wantsHelp, wantsJson } from './utils/cli/cli.mjs';
 import { assertServerComponentDirMatches, assertServerPrismaProviderMatches } from './utils/server/validate.mjs';
 import { getExpoStatePaths, isStateProcessRunning } from './utils/expo/expo.mjs';
-import { recordStackRuntimeStart, recordStackRuntimeUpdate } from './utils/stack/runtime_state.mjs';
+import {
+  createStackServerRuntimeProcessPatch,
+  createStackDevProxyRuntimePatch,
+  recordStackRuntimeStart,
+  recordStackRuntimeUpdate,
+} from './utils/stack/runtime_state.mjs';
+import { startStackRuntimeDaemonPidReconciler } from './utils/stack/runtime_daemon_state.mjs';
 import { resolveStackContext } from './utils/stack/context.mjs';
 import { resolveServerPortFromEnv, resolveServerUrls } from './utils/server/urls.mjs';
-import { ensureDevCliReady, prepareDaemonAuthSeed, startDevDaemon, watchHappyCliAndRestartDaemon } from './utils/dev/daemon.mjs';
-import { resolveStackOwnedServerRuntimePid, startDevServer, watchDevServerAndRestart } from './utils/dev/server.mjs';
+import {
+  createHappyCliReloadDescriptors,
+  createHappyCliReloadExecutor,
+  ensureDevCliReady,
+  prepareDaemonAuthSeed,
+  startDevDaemon,
+} from './utils/dev/daemon.mjs';
+import {
+  createDevServerReloadDescriptors,
+  createDevServerReloadExecutor,
+  resolveStackOwnedServerRuntimePid,
+  startDevServer,
+} from './utils/dev/server.mjs';
+import { resolveDevReloadPollIntervalMs, startDevReloadCoordinator } from './utils/dev/devReloadCoordinator.mjs';
+import { prepareDevProxyStartup, resolveDevProxyStableHost, shouldEnableStackDevProxy } from './utils/dev/devProxy.mjs';
 import { resolveDevServerConnection } from './utils/dev/resolveDevServerConnection.mjs';
-import { resolveLocalServerPortForStack } from './utils/server/resolve_stack_server_port.mjs';
+import { isRuntimePortOwnedByStackDevProxy, resolveLocalServerPortForStack } from './utils/server/resolve_stack_server_port.mjs';
 import { ensureDevExpoServer, resolveExpoTailscaleEnabled } from './utils/dev/expo_dev.mjs';
 import { preferStackLocalhostUrl } from './utils/paths/localhost_host.mjs';
 import { openUrlInBrowser } from './utils/ui/browser.mjs';
@@ -70,6 +89,7 @@ async function main() {
           '--watch',
           '--no-watch',
           '--no-browser',
+          '--no-proxy',
           '--mobile',
           '--rn-devtools',
           '--react-native-devtools',
@@ -87,6 +107,7 @@ async function main() {
 		        '  hstack dev --watch         # rebuild/restart happier-cli daemon on file changes (TTY default)',
 	        '  hstack dev --no-watch      # disable watch mode (always disabled in non-interactive mode)',
 	        '  hstack dev --no-browser    # do not open the UI in your browser automatically',
+	        '  hstack dev --no-proxy      # bind the dev server directly instead of using the stable-port proxy',
 	        '  hstack dev --mobile        # also start Expo dev-client Metro for mobile',
 	        '  hstack dev --rn-devtools   # open React Native DevTools (Metro debugger UI) in your browser',
 	        '  hstack dev --tauri         # start the desktop Tauri shell against this stack',
@@ -259,8 +280,16 @@ async function main() {
   const serverAlreadyRunning = startServer
     ? await isHappierServerRunning(localInternalServerUrl)
     : false;
+  const serverRuntimeProxyAlreadyOwned = startServer && stackMode && runtimeStatePath && !restart
+    ? await isRuntimePortOwnedByStackDevProxy({
+        env: baseEnv,
+        port: serverPort,
+        stackName,
+        runtimeStatePath,
+      })
+    : false;
   const daemonAlreadyRunning = startDaemon
-    ? isDaemonRunning(cliHomeDir, { serverUrl: internalServerUrl, env: baseEnv })
+    ? ['running', 'starting'].includes((await checkDaemonStatePingAware(cliHomeDir, { serverUrl: internalServerUrl, env: baseEnv })).status)
     : false;
 
   // Expo dev server state (worktree-scoped): single Expo process per stack/worktree.
@@ -311,6 +340,28 @@ async function main() {
     await killPortListeners(serverPort, { label: 'server' });
   }
 
+  const devProxyEnabled = shouldEnableStackDevProxy({ startServer, flags, env: baseEnv });
+  let proxyPlan = {
+    mode: 'direct',
+    stablePort: serverPort,
+    backendPort: serverPort,
+    proxyController: null,
+    fallbackReason: null,
+  };
+  if (startServer && devProxyEnabled && (!serverAlreadyRunning || restart)) {
+    const stableHost = resolveDevProxyStableHost({ env: baseEnv });
+    proxyPlan = await prepareDevProxyStartup({
+      enabled: true,
+      stablePort: serverPort,
+      stableHost,
+      targetHost: '127.0.0.1',
+      label: `${stackName ?? 'stack'}-server-proxy`,
+      logger: console,
+    });
+  }
+  const serverBindPort = proxyPlan.backendPort;
+  const serverBackendInternalUrl = `http://127.0.0.1:${serverBindPort}`;
+
   const { serverEnv, serverScript, serverProc } = startServer
     ? await startDevServer({
         serverComponentName,
@@ -318,7 +369,8 @@ async function main() {
         autostart,
         baseEnv,
         serverPort,
-        internalServerUrl: localInternalServerUrl,
+        serverBindPort,
+        internalServerUrl: serverBackendInternalUrl,
         publicServerUrl,
         envPath,
         stackMode,
@@ -326,8 +378,31 @@ async function main() {
         serverAlreadyRunning,
         restart,
         children,
+        serverProxyRuntime: proxyPlan.mode === 'proxy'
+          ? {
+              enabled: true,
+              proxyPid: proxyPlan.proxyController?.pid,
+              mode: 'proxy',
+              restartMode: 'exclusiveDb',
+            }
+          : null,
       })
     : { serverEnv: baseEnv, serverScript: null, serverProc: null };
+
+  if (startServer && stackMode && runtimeStatePath && proxyPlan.mode === 'directFallback') {
+    await recordStackRuntimeUpdate(
+      runtimeStatePath,
+      createStackDevProxyRuntimePatch({
+        stablePort: serverPort,
+        backendPort: null,
+        proxyPid: null,
+        backendPid: null,
+        drainingPid: null,
+        mode: 'directFallback',
+        fallbackReason: proxyPlan.fallbackReason,
+      }),
+    ).catch(() => {});
+  }
 
   if (!startServer) {
     console.log(`${green('✓')} server: external ${cyan(internalServerUrl)}`);
@@ -468,50 +543,113 @@ async function main() {
     }
   }
 
-  const cliWatcher = watchHappyCliAndRestartDaemon({
-    enabled: watchEnabled,
-    startDaemon: startDaemon && daemonStartGate({ env: baseEnv, cliHomeDir, serverUrl: internalServerUrl }).ok,
-    buildCli,
-    cliDir,
-    cliBin,
-    cliHomeDir,
-    internalServerUrl,
-    publicServerUrl,
-    runtimeStatePath,
-    isShuttingDown: () => shuttingDown,
-    env: baseEnv,
-    stackName,
-  });
-  if (cliWatcher) watchers.push(cliWatcher);
-
-  const serverProcRef = { current: serverProc };
-  if (startServer && stackMode && runtimeStatePath && !serverProcRef.current?.pid) {
-    // If the server was already running when we started dev, `startDevServer` won't spawn a new process
-    // (and therefore we don't have a ChildProcess handle). For safe watch/restart we need a PID.
-    const pid = await resolveStackOwnedServerRuntimePid({ runtimeStatePath, serverPort, stackName, envPath });
-    if (Number.isFinite(pid) && pid > 1) {
-      serverProcRef.current = { pid: Number(pid), exitCode: null };
-      await recordStackRuntimeUpdate(runtimeStatePath, { processes: { serverPid: Number(pid) } }).catch(() => {});
+  if (startDaemon && stackMode && runtimeStatePath) {
+    const daemonRuntimeEnv = getDaemonEnv({
+      baseEnv,
+      cliHomeDir,
+      internalServerUrl,
+      publicServerUrl: publicServerUrl || internalServerUrl,
+      stackName,
+      cliIdentity: 'default',
+    });
+    const daemonRuntimeReconciler = startStackRuntimeDaemonPidReconciler(
+      {
+        runtimeStatePath,
+        cliHomeDir,
+        internalServerUrl,
+        env: daemonRuntimeEnv,
+        isShuttingDown: () => shuttingDown,
+      },
+      {
+        checkDaemonStateImpl: checkDaemonStatePingAware,
+      },
+    );
+    if (daemonRuntimeReconciler) {
+      watchers.push(daemonRuntimeReconciler);
+      await daemonRuntimeReconciler.syncNow();
     }
   }
-  const serverWatcher = watchDevServerAndRestart({
-    enabled: startServer && watchEnabled && Boolean(serverProcRef.current?.pid),
-    stackMode,
-    serverComponentName,
-    serverDir,
-    serverPort,
-    internalServerUrl,
-    serverScript,
-    serverEnv,
-    runtimeStatePath,
-    stackName,
-    envPath,
-    children,
-    serverProcRef,
+
+  const serverProcRef = { current: serverProc };
+  if (startServer && stackMode && runtimeStatePath && !serverProcRef.current?.pid && !serverRuntimeProxyAlreadyOwned) {
+    // If the server was already running when we started dev, `startDevServer` won't spawn a new process
+    // (and therefore we don't have a ChildProcess handle). For safe watch/restart we need a PID.
+    const pid = await resolveStackOwnedServerRuntimePid({
+      runtimeStatePath,
+      serverPort: proxyPlan.mode === 'proxy' ? serverBindPort : serverPort,
+      stackName,
+      envPath,
+    });
+    if (Number.isFinite(pid) && pid > 1) {
+      serverProcRef.current = { pid: Number(pid), exitCode: null };
+      await recordStackRuntimeUpdate(
+        runtimeStatePath,
+        createStackServerRuntimeProcessPatch({
+          listenerPid: Number(pid),
+          wrapperPid: null,
+          serverPort,
+          clearProxyState: proxyPlan.mode !== 'proxy',
+        }),
+      ).catch(() => {});
+    }
+  }
+
+  const reloadDescriptors = [];
+  const reloadExecutors = [];
+  const daemonReloadEnabled = watchEnabled && startDaemon && daemonStartGate({ env: baseEnv, cliHomeDir, serverUrl: internalServerUrl }).ok;
+  const serverReloadEnabled = startServer && watchEnabled && Boolean(serverProcRef.current?.pid);
+
+  if (daemonReloadEnabled) {
+    reloadDescriptors.push(...createHappyCliReloadDescriptors({ cliDir }));
+    reloadExecutors.push(createHappyCliReloadExecutor({
+      startDaemon,
+      buildCli,
+      cliDir,
+      cliBin,
+      cliHomeDir,
+      internalServerUrl,
+      publicServerUrl,
+      runtimeStatePath,
+      isShuttingDown: () => shuttingDown,
+      env: baseEnv,
+      stackName,
+    }));
+  }
+
+  if (serverReloadEnabled) {
+    reloadDescriptors.push(...createDevServerReloadDescriptors({ serverDir }));
+    reloadExecutors.push(createDevServerReloadExecutor({
+      enabled: true,
+      stackMode,
+      serverComponentName,
+      serverDir,
+      serverPort,
+      serverBindPort,
+      internalServerUrl,
+      serverScript,
+      serverEnv,
+      runtimeStatePath,
+      stackName,
+      envPath,
+      children,
+      serverProcRef,
+      isShuttingDown: () => shuttingDown,
+      proxyController: proxyPlan.mode === 'proxy' ? proxyPlan.proxyController : null,
+    }));
+  }
+
+  const reloadWatcher = startDevReloadCoordinator({
+    enabled: watchEnabled,
+    descriptors: reloadDescriptors,
+    executors: reloadExecutors,
+    debounceMs: 500,
+    pollIntervalMs: resolveDevReloadPollIntervalMs(baseEnv),
     isShuttingDown: () => shuttingDown,
+    logger: console,
   });
-  if (serverWatcher) watchers.push(serverWatcher);
-  if (startServer && watchEnabled && stackMode && serverComponentName === 'happier-server' && !serverWatcher) {
+  if (reloadWatcher) watchers.push(reloadWatcher);
+
+  if (startServer && watchEnabled && stackMode && serverComponentName === 'happier-server' && !serverReloadEnabled) {
     console.warn(
       `[local] watch: server restart is disabled because the running server PID is unknown.\n` +
         `[local] watch: fix: re-run with --restart so hstack can (re)spawn the server and track its PID.`
@@ -615,6 +753,10 @@ async function main() {
       } catch {
         // ignore
       }
+    }
+
+    if (proxyPlan?.proxyController) {
+      await proxyPlan.proxyController.stop().catch(() => {});
     }
 
     if (startDaemon) {

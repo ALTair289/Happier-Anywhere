@@ -5,6 +5,29 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import { resolveStackOwnedServerListenPid, startDevServer, watchDevServerAndRestart } from './server.mjs';
+import { getSpawnedProcessPlannedExitReason } from '../proc/proc.mjs';
+
+function expectedDirectServerRuntimePatch({ listenerPid, wrapperPid, serverPort = 34567 }) {
+  return {
+    processes: {
+      serverPid: listenerPid,
+      serverWrapperPid: wrapperPid,
+      proxyPid: null,
+      serverBackendPid: null,
+      serverDrainingPid: null,
+    },
+    ports: {
+      server: serverPort,
+      serverBackend: null,
+    },
+    serverProxy: {
+      enabled: false,
+      mode: 'direct',
+      restartMode: null,
+      fallbackReason: null,
+    },
+  };
+}
 
 async function withTempServerDir(t, fn) {
   const dir = await mkdtemp(join(tmpdir(), 'hstack-dev-server-watch-'));
@@ -178,6 +201,171 @@ test('watchDevServerAndRestart keeps the existing server when preflight rebuild 
   });
 });
 
+test('watchDevServerAndRestart backs off repeated readiness failures instead of consuming pending changes forever', async (t) => {
+  await withTempServerDir(t, async (serverDir) => {
+    let capturedOnChange = null;
+    let nowMs = 1_000;
+    let spawnCalls = 0;
+    let readyCalls = 0;
+    const errors = [];
+    const serverProcRef = { current: { pid: 101, exitCode: null } };
+
+    const watcher = watchDevServerAndRestart(
+      createWatcherOptions(serverDir, { serverProcRef }),
+      {
+        watchDebouncedImpl: ({ onChange }) => {
+          capturedOnChange = onChange;
+          return { close() {} };
+        },
+        killProcessGroupOwnedByStackImpl: async () => ({ killed: true }),
+        waitForTcpPortFreeImpl: async () => true,
+        pmSpawnScriptImpl: async () => {
+          spawnCalls += 1;
+          return { pid: 200 + spawnCalls, exitCode: 1 };
+        },
+        listListenPidsImpl: async () => [spawnCalls === 0 ? 101 : 200 + spawnCalls],
+        getProcessGroupIdImpl: async (pid) => Number(pid),
+        recordStackRuntimeUpdateImpl: async () => {},
+        waitForServerReadyImpl: async () => {
+          readyCalls += 1;
+          if (readyCalls <= 2) {
+            await capturedOnChange({ eventType: 'change', filename: `pending-${readyCalls}.ts` });
+          }
+          throw new Error('replacement never became ready');
+        },
+        readWatchChangeSignatureImpl: createChangingSignatureReader(),
+        nowImpl: () => nowMs,
+        restartFailurePolicy: { maxFailures: 2, windowMs: 60_000, backoffMs: 30_000 },
+        logger: {
+          log() {},
+          error(message) {
+            errors.push(String(message));
+          },
+        },
+      }
+    );
+
+    try {
+      assert.ok(watcher);
+      await capturedOnChange({ eventType: 'change', filename: 'first-change.ts' });
+
+      assert.equal(spawnCalls, 2, 'pending restart must stop after the backoff threshold');
+      assert.equal(readyCalls, 2);
+      assert.equal(serverProcRef.current.pid, 101);
+      assert.ok(errors.some((message) => message.includes('server failed to start 2 times')));
+      assert.ok(errors.some((message) => message.includes('backing off for 30000ms')));
+
+      nowMs += 1_000;
+      await capturedOnChange({ eventType: 'change', filename: 'during-backoff.ts' });
+      assert.equal(spawnCalls, 2, 'changes during backoff must not spawn another replacement');
+    } finally {
+      watcher?.close?.();
+    }
+  });
+});
+
+test('watchDevServerAndRestart includes the recent child output excerpt on replacement failure', async (t) => {
+  await withTempServerDir(t, async (serverDir) => {
+    let capturedOnChange = null;
+    const errors = [];
+    const serverProcRef = { current: { pid: 101, exitCode: null } };
+
+    const watcher = watchDevServerAndRestart(
+      createWatcherOptions(serverDir, { serverProcRef }),
+      {
+        watchDebouncedImpl: ({ onChange }) => {
+          capturedOnChange = onChange;
+          return { close() {} };
+        },
+        killProcessGroupOwnedByStackImpl: async () => ({ killed: true }),
+        waitForTcpPortFreeImpl: async () => true,
+        pmSpawnScriptImpl: async ({ options }) => {
+          assert.equal(typeof options?.onLine, 'function', 'spawn should receive an onLine hook for recent output');
+          for (let i = 1; i <= 14; i += 1) {
+            options.onLine({ stream: 'stderr', line: `server-line-${i}` });
+          }
+          return { pid: 201, exitCode: 1 };
+        },
+        listListenPidsImpl: async () => [201],
+        getProcessGroupIdImpl: async (pid) => Number(pid),
+        recordStackRuntimeUpdateImpl: async () => {},
+        waitForServerReadyImpl: async () => {
+          throw new Error('replacement failed readiness');
+        },
+        readWatchChangeSignatureImpl: createChangingSignatureReader(),
+        restartFailurePolicy: { maxFailures: 1, windowMs: 60_000, backoffMs: 30_000, recentLineLimit: 8 },
+        logger: {
+          log() {},
+          error(message) {
+            errors.push(String(message));
+          },
+        },
+      }
+    );
+
+    try {
+      assert.ok(watcher);
+      await capturedOnChange({ eventType: 'change', filename: 'first-change.ts' });
+
+      const errorOutput = errors.join('\n');
+      assert.ok(errorOutput.includes('recent server output'));
+      assert.ok(errorOutput.includes('[stderr] server-line-7'));
+      assert.ok(errorOutput.includes('[stderr] server-line-14'));
+      assert.ok(!errorOutput.includes('server-line-6'));
+    } finally {
+      watcher?.close?.();
+    }
+  });
+});
+
+test('watchDevServerAndRestart reports direct-mode old-server-stopped failures before replacement spawn', async (t) => {
+  await withTempServerDir(t, async (serverDir) => {
+    let capturedOnChange = null;
+    let spawnCalls = 0;
+    const errors = [];
+    const serverProcRef = { current: { pid: 101, exitCode: null } };
+
+    const watcher = watchDevServerAndRestart(
+      createWatcherOptions(serverDir, { serverProcRef }),
+      {
+        watchDebouncedImpl: ({ onChange }) => {
+          capturedOnChange = onChange;
+          return { close() {} };
+        },
+        killProcessGroupOwnedByStackImpl: async () => ({ killed: true }),
+        waitForTcpPortFreeImpl: async () => false,
+        pmSpawnScriptImpl: async () => {
+          spawnCalls += 1;
+          return { pid: 201, exitCode: null };
+        },
+        listListenPidsImpl: async () => [101],
+        getProcessGroupIdImpl: async (pid) => Number(pid),
+        recordStackRuntimeUpdateImpl: async () => {},
+        readWatchChangeSignatureImpl: createChangingSignatureReader(),
+        logger: {
+          log() {},
+          error(message) {
+            errors.push(String(message));
+          },
+        },
+      }
+    );
+
+    try {
+      assert.ok(watcher);
+      await capturedOnChange({ eventType: 'change', filename: 'first-change.ts' });
+
+      assert.equal(spawnCalls, 0, 'port-release failure must happen before replacement spawn');
+      assert.equal(serverProcRef.current.pid, 101);
+      const errorOutput = errors.join('\n');
+      assert.ok(errorOutput.includes('direct mode cannot keep the old server serving after this point'));
+      assert.ok(!errorOutput.includes('keeping existing process as-is'));
+    } finally {
+      watcher?.close?.();
+    }
+  });
+});
+
 test('watchDevServerAndRestart waits for the old server port to be released before spawning', async (t) => {
   await withTempServerDir(t, async (serverDir) => {
     let capturedOnChange = null;
@@ -217,6 +405,152 @@ test('watchDevServerAndRestart waits for the old server port to be released befo
 
       assert.equal(waitForPortFreeCalls, 1);
       assert.equal(spawnCalls, 1);
+      assert.equal(serverProcRef.current.pid, 201);
+    } finally {
+      watcher?.close?.();
+    }
+  });
+});
+
+test('watchDevServerAndRestart marks direct-mode old server exits as planned dev reloads', async (t) => {
+  await withTempServerDir(t, async (serverDir) => {
+    let capturedOnChange = null;
+    const oldServer = { pid: 101, exitCode: null };
+    const serverProcRef = { current: oldServer };
+
+    const watcher = watchDevServerAndRestart(
+      createWatcherOptions(serverDir, { serverProcRef }),
+      {
+        watchDebouncedImpl: ({ onChange }) => {
+          capturedOnChange = onChange;
+          return { close() {} };
+        },
+        killProcessGroupOwnedByStackImpl: async () => {
+          assert.equal(getSpawnedProcessPlannedExitReason(oldServer), 'dev-reload');
+          return { killed: true };
+        },
+        waitForTcpPortFreeImpl: async () => true,
+        pmSpawnScriptImpl: async () => ({ pid: 201, exitCode: null }),
+        listListenPidsImpl: async () => [201],
+        getProcessGroupIdImpl: async () => 201,
+        recordStackRuntimeUpdateImpl: async () => {},
+        waitForServerReadyImpl: async () => {},
+        readWatchChangeSignatureImpl: createChangingSignatureReader(),
+        logger: { log() {}, error() {} },
+      }
+    );
+
+    try {
+      assert.ok(watcher);
+      await capturedOnChange({ eventType: 'change', filename: 'first-change.ts' });
+
+      assert.equal(getSpawnedProcessPlannedExitReason(oldServer), 'dev-reload');
+      assert.equal(serverProcRef.current.pid, 201);
+    } finally {
+      watcher?.close?.();
+    }
+  });
+});
+
+test('watchDevServerAndRestart waits for the pglite dir lock after port release before spawning', async (t) => {
+  await withTempServerDir(t, async (serverDir) => {
+    let capturedOnChange = null;
+    const order = [];
+    const serverProcRef = { current: { pid: 101, exitCode: null } };
+    const dbDir = join(serverDir, 'server-light', 'pglite');
+
+    const watcher = watchDevServerAndRestart(
+      createWatcherOptions(serverDir, {
+        serverProcRef,
+        serverEnv: {
+          HAPPIER_DB_PROVIDER: 'pglite',
+          HAPPY_DB_PROVIDER: 'pglite',
+          HAPPIER_SERVER_LIGHT_DB_DIR: dbDir,
+        },
+      }),
+      {
+        watchDebouncedImpl: ({ onChange }) => {
+          capturedOnChange = onChange;
+          return { close() {} };
+        },
+        killProcessGroupOwnedByStackImpl: async () => {
+          order.push('kill');
+          return { killed: true };
+        },
+        waitForTcpPortFreeImpl: async () => {
+          order.push('port-free');
+          return true;
+        },
+        waitForPgliteDirLockReleaseImpl: async (actualDbDir) => {
+          order.push(`pglite-lock:${actualDbDir}`);
+        },
+        pmSpawnScriptImpl: async () => {
+          order.push('spawn');
+          return { pid: 201, exitCode: null };
+        },
+        listListenPidsImpl: async () => [201],
+        getProcessGroupIdImpl: async () => 201,
+        recordStackRuntimeUpdateImpl: async () => {},
+        waitForServerReadyImpl: async () => {
+          order.push('ready');
+        },
+        readWatchChangeSignatureImpl: createChangingSignatureReader(),
+        logger: { log() {}, error() {} },
+      }
+    );
+
+    try {
+      assert.ok(watcher);
+      await capturedOnChange({ eventType: 'change', filename: 'first-change.ts' });
+
+      assert.deepEqual(order, ['kill', 'port-free', `pglite-lock:${dbDir}`, 'spawn', 'ready']);
+      assert.equal(serverProcRef.current.pid, 201);
+    } finally {
+      watcher?.close?.();
+    }
+  });
+});
+
+test('watchDevServerAndRestart does not wait for a pglite dir lock for sqlite', async (t) => {
+  await withTempServerDir(t, async (serverDir) => {
+    let capturedOnChange = null;
+    let lockWaitCalls = 0;
+    const serverProcRef = { current: { pid: 101, exitCode: null } };
+
+    const watcher = watchDevServerAndRestart(
+      createWatcherOptions(serverDir, {
+        serverProcRef,
+        serverEnv: {
+          HAPPIER_DB_PROVIDER: 'sqlite',
+          HAPPY_DB_PROVIDER: 'sqlite',
+          HAPPIER_SERVER_LIGHT_DB_DIR: join(serverDir, 'server-light', 'pglite'),
+        },
+      }),
+      {
+        watchDebouncedImpl: ({ onChange }) => {
+          capturedOnChange = onChange;
+          return { close() {} };
+        },
+        killProcessGroupOwnedByStackImpl: async () => ({ killed: true }),
+        waitForTcpPortFreeImpl: async () => true,
+        waitForPgliteDirLockReleaseImpl: async () => {
+          lockWaitCalls += 1;
+        },
+        pmSpawnScriptImpl: async () => ({ pid: 201, exitCode: null }),
+        listListenPidsImpl: async () => [201],
+        getProcessGroupIdImpl: async () => 201,
+        recordStackRuntimeUpdateImpl: async () => {},
+        waitForServerReadyImpl: async () => {},
+        readWatchChangeSignatureImpl: createChangingSignatureReader(),
+        logger: { log() {}, error() {} },
+      }
+    );
+
+    try {
+      assert.ok(watcher);
+      await capturedOnChange({ eventType: 'change', filename: 'first-change.ts' });
+
+      assert.equal(lockWaitCalls, 0);
       assert.equal(serverProcRef.current.pid, 201);
     } finally {
       watcher?.close?.();
@@ -909,6 +1243,50 @@ test('startDevServer runs stack restart cleanup even when existing server health
   });
 });
 
+test('startDevServer records the listener pid separately from the spawned wrapper pid', async (t) => {
+  await withTempServerDir(t, async (serverDir) => {
+    const children = [];
+    const updates = [];
+
+    const out = await startDevServer(
+      {
+        serverComponentName: 'happier-server-light',
+        serverDir,
+        autostart: { stackName: 'watch-test', baseDir: serverDir },
+        baseEnv: {
+          HAPPIER_STACK_SKIP_REFRESH_DEPS: '1',
+          HAPPIER_STACK_PRISMA_PUSH: '0',
+          HAPPIER_STACK_MANAGED_INFRA: '0',
+          HAPPIER_STACK_PRISMA_MIGRATE: '0',
+        },
+        serverPort: 34567,
+        internalServerUrl: 'http://127.0.0.1:34567',
+        publicServerUrl: 'http://127.0.0.1:34567',
+        envPath: join(serverDir, 'env'),
+        stackMode: true,
+        runtimeStatePath: join(serverDir, 'stack.runtime.json'),
+        serverAlreadyRunning: false,
+        restart: false,
+        children,
+        quiet: true,
+      },
+      {
+        ensureDepsInstalledImpl: async () => {},
+        pmSpawnScriptImpl: async () => ({ pid: 201, exitCode: null }),
+        waitForServerReadyImpl: async () => {},
+        listListenPidsImpl: async () => [301],
+        getProcessGroupIdImpl: async (pid) => (Number(pid) === 201 || Number(pid) === 301 ? 44 : Number(pid)),
+        recordStackRuntimeUpdateImpl: async (_path, patch) => {
+          updates.push(patch);
+        },
+      }
+    );
+
+    assert.equal(out.serverProc.pid, 201);
+    assert.deepEqual(updates, [expectedDirectServerRuntimePatch({ listenerPid: 301, wrapperPid: 201 })]);
+  });
+});
+
 test('watchDevServerAndRestart refuses to spawn when existing server is not stack-owned and port is occupied', async (t) => {
   await withTempServerDir(t, async (serverDir) => {
     let capturedOnChange = null;
@@ -961,6 +1339,52 @@ test('watchDevServerAndRestart refuses to spawn when existing server is not stac
       assert.deepEqual(children, []);
       assert.equal(serverProcRef.current.pid, 101);
       assert.ok(errors.some((message) => message.includes('server restart failed')));
+    } finally {
+      watcher?.close?.();
+    }
+  });
+});
+
+test('watchDevServerAndRestart records the listener pid separately from the replacement wrapper pid', async (t) => {
+  await withTempServerDir(t, async (serverDir) => {
+    let capturedOnChange = null;
+    const updates = [];
+    const children = [];
+    const serverProcRef = { current: { pid: 101, exitCode: null } };
+
+    const watcher = watchDevServerAndRestart(
+      createWatcherOptions(serverDir, { children, serverProcRef }),
+      {
+        watchDebouncedImpl: ({ onChange }) => {
+          capturedOnChange = onChange;
+          return { close() {} };
+        },
+        killProcessGroupOwnedByStackImpl: async () => ({ killed: true }),
+        waitForTcpPortFreeImpl: async () => true,
+        pmSpawnScriptImpl: async () => ({ pid: 201, exitCode: null }),
+        listListenPidsImpl: async () => [301],
+        getProcessGroupIdImpl: async (pid) => (
+          Number(pid) === 101 ? 7 :
+          Number(pid) === 201 || Number(pid) === 301 ? 44 :
+          Number(pid)
+        ),
+        recordStackRuntimeUpdateImpl: async (_path, patch) => {
+          updates.push(patch);
+        },
+        waitForServerReadyImpl: async () => {},
+        readWatchChangeSignatureImpl: createChangingSignatureReader(),
+        logger: { log() {}, error() {} },
+      }
+    );
+
+    try {
+      assert.ok(watcher);
+      assert.equal(typeof capturedOnChange, 'function');
+
+      await capturedOnChange({ eventType: 'change', filename: 'first-change.ts' });
+
+      assert.equal(serverProcRef.current.pid, 201);
+      assert.deepEqual(updates, [expectedDirectServerRuntimePatch({ listenerPid: 301, wrapperPid: 201 })]);
     } finally {
       watcher?.close?.();
     }
@@ -1172,7 +1596,7 @@ test('stopStackOwnedServerForRestart repairs a stale runtime PID with a proven s
   );
 
   assert.deepEqual(killedPids, [222]);
-  assert.deepEqual(updates, [{ processes: { serverPid: 222 } }]);
+  assert.deepEqual(updates, [expectedDirectServerRuntimePatch({ listenerPid: 222, wrapperPid: null })]);
 });
 
 test('stopStackOwnedServerForRestart does not kill a recorded PID until it is proven to own the listener', async () => {
@@ -1209,7 +1633,7 @@ test('stopStackOwnedServerForRestart does not kill a recorded PID until it is pr
   );
 
   assert.deepEqual(killedPids, [222]);
-  assert.deepEqual(updates, [{ processes: { serverPid: 222 } }]);
+  assert.deepEqual(updates, [expectedDirectServerRuntimePatch({ listenerPid: 222, wrapperPid: null })]);
 });
 
 test('stopStackOwnedServerForRestart refuses a live recorded PID that no longer has listener proof', async () => {
@@ -1274,6 +1698,31 @@ test('resolveStackOwnedServerRuntimePid rejects a live runtime PID without stack
   );
 
   assert.equal(pid, null);
+});
+
+test('resolveStackOwnedServerRuntimePid migrates an old wrapper serverPid to the listener pid', async () => {
+  const server = await import('./server.mjs');
+  assert.equal(typeof server.resolveStackOwnedServerRuntimePid, 'function');
+
+  const pid = await server.resolveStackOwnedServerRuntimePid(
+    {
+      runtimeStatePath: '/tmp/watch-test/stack.runtime.json',
+      serverPort: 34567,
+      stackName: 'watch-test',
+      envPath: '/tmp/watch-test/env',
+    },
+    {
+      readStackRuntimeStateFileImpl: async () => ({ processes: { serverPid: 101 } }),
+      isPidAliveImpl: () => true,
+      isPidOwnedByStackImpl: async (candidate) => Number(candidate) === 101 || Number(candidate) === 222,
+      listListenPidsImpl: async () => [222],
+      getProcessGroupIdImpl: async (candidate) => (
+        Number(candidate) === 101 || Number(candidate) === 222 ? 44 : Number(candidate)
+      ),
+    }
+  );
+
+  assert.equal(pid, 222);
 });
 
 test('resolveStackOwnedServerRuntimePid repairs an unrelated live runtime PID with a proven listener', async () => {

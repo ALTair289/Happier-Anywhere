@@ -15,7 +15,7 @@ import {
   resolveStackWebappTargetForAuth,
   resolveStackAuthCliExecutable,
 } from './stack_guided_login.mjs';
-import { checkDaemonState, startLocalDaemonWithAuth } from '../../daemon.mjs';
+import { checkDaemonStatePingAware, startLocalDaemonWithAuth } from '../../daemon.mjs';
 import { isTty } from '../cli/wizard.mjs';
 import { resolveStackRuntimeLaunchContext } from '../../runtime/launch/resolveStackRuntimeLaunchContext.mjs';
 
@@ -389,7 +389,7 @@ export async function startDaemonPostAuth({
   // Verify (best-effort): daemon wrote state.
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
-    const s = checkDaemonState(cliHomeDir, { serverUrl: internalServerUrl, env: mergedEnv });
+    const s = await checkDaemonStatePingAware(cliHomeDir, { serverUrl: internalServerUrl, env: mergedEnv });
     if (s.status === 'running') {
       return {
         ok: true,

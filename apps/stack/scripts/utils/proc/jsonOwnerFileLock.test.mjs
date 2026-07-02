@@ -1,16 +1,16 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
 import { spawnSync } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 
-import { withCliDistBuildLock } from './cliDistBuildLock.mjs';
+import { withJsonOwnerFileLock } from './jsonOwnerFileLock.mjs';
 
-test('withCliDistBuildLock reclaims a fresh lock from a dead owner pid immediately', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'hstack-cli-dist-lock-'));
-  const lockPath = join(root, 'cli-dist-build.lock');
+test('withJsonOwnerFileLock reclaims a fresh lock from a dead owner pid immediately', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'hstack-json-owner-lock-'));
+  const lockPath = join(root, 'owner.lock');
 
   try {
     await writeFile(
@@ -23,8 +23,10 @@ test('withCliDistBuildLock reclaims a fresh lock from a dead owner pid immediate
       'utf8',
     );
 
-    const result = await withCliDistBuildLock(
-      async () => {
+    const result = await withJsonOwnerFileLock(
+      async ({ lockPath: heldLockPath, waited }) => {
+        assert.equal(heldLockPath, lockPath);
+        assert.equal(waited, false);
         const owner = JSON.parse(await readFile(lockPath, 'utf8'));
         assert.equal(owner.pid, process.pid);
         return 'ok';
@@ -43,13 +45,13 @@ test('withCliDistBuildLock reclaims a fresh lock from a dead owner pid immediate
   }
 });
 
-test('withCliDistBuildLock reports wait progress while a live owner holds the lock', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'hstack-cli-dist-lock-wait-'));
-  const lockPath = join(root, 'cli-dist-build.lock');
+test('withJsonOwnerFileLock reports wait progress while a live owner holds the lock', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'hstack-json-owner-lock-wait-'));
+  const lockPath = join(root, 'owner.lock');
   const waitEvents = [];
 
   try {
-    const holder = withCliDistBuildLock(
+    const holder = withJsonOwnerFileLock(
       async () => {
         await delay(40);
         return 'held';
@@ -72,7 +74,7 @@ test('withCliDistBuildLock reports wait progress while a live owner holds the lo
       }
     }
 
-    const result = await withCliDistBuildLock(
+    const result = await withJsonOwnerFileLock(
       async ({ waited }) => {
         assert.equal(waited, true);
         return 'ok';
@@ -99,9 +101,9 @@ test('withCliDistBuildLock reports wait progress while a live owner holds the lo
   }
 });
 
-test('withCliDistBuildLock does not reclaim an old lock while the owner pid is alive', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'hstack-cli-dist-lock-live-owner-'));
-  const lockPath = join(root, 'cli-dist-build.lock');
+test('withJsonOwnerFileLock does not reclaim an old lock while the owner pid is alive', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'hstack-json-owner-lock-live-owner-'));
+  const lockPath = join(root, 'owner.lock');
   const owner = {
     pid: process.pid,
     createdAtMs: Date.now() - 60_000,
@@ -114,7 +116,7 @@ test('withCliDistBuildLock does not reclaim an old lock while the owner pid is a
 
     await assert.rejects(
       () =>
-        withCliDistBuildLock(
+        withJsonOwnerFileLock(
           async () => {
             enteredCriticalSection = true;
           },
@@ -123,9 +125,10 @@ test('withCliDistBuildLock does not reclaim an old lock while the owner pid is a
             timeoutMs: 60,
             pollIntervalMs: 10,
             staleAfterMs: 10,
+            errorLabel: 'test owner lock',
           },
         ),
-      /Timed out waiting for CLI dist build lock/,
+      /Timed out waiting for test owner lock/,
     );
 
     assert.equal(enteredCriticalSection, false);
@@ -135,9 +138,38 @@ test('withCliDistBuildLock does not reclaim an old lock while the owner pid is a
   }
 });
 
-test('withCliDistBuildLock does not heartbeat over or unlink a successor owner', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'hstack-cli-dist-lock-successor-'));
-  const lockPath = join(root, 'cli-dist-build.lock');
+test('withJsonOwnerFileLock reclaims a stale malformed owner using the file mtime fallback', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'hstack-json-owner-lock-malformed-'));
+  const lockPath = join(root, 'owner.lock');
+
+  try {
+    await writeFile(lockPath, '{not json', 'utf8');
+    const staleTime = new Date(Date.now() - 60_000);
+    await utimes(lockPath, staleTime, staleTime);
+
+    const result = await withJsonOwnerFileLock(
+      async () => {
+        const owner = JSON.parse(await readFile(lockPath, 'utf8'));
+        assert.equal(owner.pid, process.pid);
+        return 'ok';
+      },
+      {
+        lockPath,
+        timeoutMs: 200,
+        pollIntervalMs: 10,
+        staleAfterMs: 10,
+      },
+    );
+
+    assert.equal(result, 'ok');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('withJsonOwnerFileLock does not heartbeat over or unlink a successor owner', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'hstack-json-owner-lock-successor-'));
+  const lockPath = join(root, 'owner.lock');
   const successorOwner = {
     pid: process.pid + 1_000_000,
     createdAtMs: Date.now() + 1,
@@ -145,7 +177,7 @@ test('withCliDistBuildLock does not heartbeat over or unlink a successor owner',
   };
 
   try {
-    await withCliDistBuildLock(
+    await withJsonOwnerFileLock(
       async () => {
         await writeFile(lockPath, JSON.stringify(successorOwner), 'utf8');
         await delay(620);
@@ -165,10 +197,10 @@ test('withCliDistBuildLock does not heartbeat over or unlink a successor owner',
   }
 });
 
-test('withCliDistBuildLock does not delete a successor owner during stale-owner reclaim', async () => {
-  const tmp = await mkdtemp(join(tmpdir(), 'hstack-cli-dist-lock-reclaim-race-'));
+test('withJsonOwnerFileLock does not delete a successor owner during stale-owner reclaim', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'hstack-json-owner-lock-reclaim-race-'));
   try {
-    const moduleUrl = new URL('./cliDistBuildLock.mjs', import.meta.url).href;
+    const moduleUrl = new URL('./jsonOwnerFileLock.mjs', import.meta.url).href;
     const script = `
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -177,7 +209,7 @@ import { join } from 'node:path';
 
 const originalRenameSync = fs.renameSync;
 const originalRmSync = fs.rmSync;
-const lockPath = join(${JSON.stringify(tmp)}, 'cli-dist-build.lock');
+const lockPath = join(${JSON.stringify(tmp)}, 'owner.lock');
 const staleOwner = {
   pid: 999999,
   createdAtMs: Date.now() - 60_000,
@@ -211,11 +243,11 @@ fs.rmSync = function patchedRmSync(path, options) {
 
 syncBuiltinESMExports();
 
-const { withCliDistBuildLock } = await import(${JSON.stringify(moduleUrl)});
+const { withJsonOwnerFileLock } = await import(${JSON.stringify(moduleUrl)});
 
 await assert.rejects(
   () =>
-    withCliDistBuildLock(
+    withJsonOwnerFileLock(
       async () => {
         enteredCriticalSection = true;
       },
@@ -224,9 +256,10 @@ await assert.rejects(
         timeoutMs: 80,
         pollIntervalMs: 10,
         staleAfterMs: 1,
+        errorLabel: 'test owner lock',
       },
     ),
-  /Timed out waiting for CLI dist build lock/,
+  /Timed out waiting for test owner lock/,
 );
 
 assert.equal(enteredCriticalSection, false);
@@ -244,10 +277,10 @@ assert.deepEqual(JSON.parse(fs.readFileSync(lockPath, 'utf8')), successorOwner);
   }
 });
 
-test('withCliDistBuildLock removes and reacquires the lock after cleanup on Windows-shaped filesystems', async () => {
-  const tmp = await mkdtemp(join(tmpdir(), 'hstack-cli-dist-lock-cleanup-'));
+test('withJsonOwnerFileLock removes and reacquires the lock after cleanup on Windows-shaped filesystems', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'hstack-json-owner-lock-cleanup-'));
   try {
-    const moduleUrl = new URL('./cliDistBuildLock.mjs', import.meta.url).href;
+    const moduleUrl = new URL('./jsonOwnerFileLock.mjs', import.meta.url).href;
     const script = `
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
@@ -285,15 +318,15 @@ fs.unlinkSync = function patchedUnlinkSync(path) {
 
 syncBuiltinESMExports();
 
-const { withCliDistBuildLock } = await import(${JSON.stringify(moduleUrl)});
-const lockPath = join(${JSON.stringify(tmp)}, 'locks', 'cli-dist-build.lock');
+const { withJsonOwnerFileLock } = await import(${JSON.stringify(moduleUrl)});
+const lockPath = join(${JSON.stringify(tmp)}, 'locks', 'owner.lock');
 
-await withCliDistBuildLock(
+await withJsonOwnerFileLock(
   async () => {},
   { lockPath, timeoutMs: 50, pollIntervalMs: 5, staleAfterMs: 50 },
 );
 
-await withCliDistBuildLock(
+await withJsonOwnerFileLock(
   async () => {},
   { lockPath, timeoutMs: 50, pollIntervalMs: 5, staleAfterMs: 50 },
 );

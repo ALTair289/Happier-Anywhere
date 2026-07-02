@@ -402,6 +402,13 @@ export function gethstackRegistry() {
       hidden: true,
     },
     {
+      name: 'mobile:ios:profile',
+      kind: 'node',
+      scriptRelPath: 'scripts/mobile.mjs',
+      argsFromRest: (rest) => ['--prebuild', '--run-ios', '--no-metro', '--configuration=Release', '--profiling-runtime', ...rest],
+      hidden: true,
+    },
+    {
       name: 'mobile:install',
       kind: 'node',
       scriptRelPath: 'scripts/mobile.mjs',

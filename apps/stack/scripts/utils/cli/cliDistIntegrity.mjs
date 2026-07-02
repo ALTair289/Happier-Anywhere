@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+export const CLI_DIST_INTEGRITY_PROBE_ENV = 'HAPPIER_CLI_DIST_INTEGRITY_PROBE';
 
 export function isCliScriptEntrypoint(pathLike) {
   const value = String(pathLike ?? '').trim().toLowerCase();
@@ -100,6 +104,59 @@ export function findMissingCliDistModules(entrypoint, maxFiles = 400) {
 
 export function readCliDistIntegrity(entrypoint) {
   return readCliDistClosureFingerprint(entrypoint);
+}
+
+export async function probeCliDistRuntimeImport(entrypoint, options = {}) {
+  const entry = String(entrypoint ?? '').trim();
+  if (!entry) {
+    throw new Error('[cli-dist] runtime import probe missing entrypoint');
+  }
+  const nodeExecutable = options.nodeExecutable ?? process.execPath;
+  const timeoutMsRaw = Number(options.timeoutMs ?? 30_000);
+  const timeoutMs = Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0 ? Math.trunc(timeoutMsRaw) : 30_000;
+  const env = {
+    ...process.env,
+    ...(options.env ?? {}),
+    [CLI_DIST_INTEGRITY_PROBE_ENV]: '1',
+  };
+  const source = `await import(${JSON.stringify(pathToFileURL(entry).href)});`;
+
+  await new Promise((resolve, reject) => {
+    const child = spawn(nodeExecutable, ['--input-type=module', '--eval', source], {
+      cwd: options.cwd,
+      env,
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    let stderr = '';
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill('SIGKILL');
+      reject(new Error(`[cli-dist] runtime import probe timed out after ${timeoutMs}ms for ${entry}`));
+    }, timeoutMs);
+    timeout.unref?.();
+    child.stderr?.on('data', (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on('error', (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.on('close', (code, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      const suffix = stderr.trim() ? `\n${stderr.trim().split('\n').slice(-8).join('\n')}` : '';
+      reject(new Error(`[cli-dist] runtime import probe failed for ${entry} (code=${code}, signal=${signal ?? 'none'}).${suffix}`));
+    });
+  });
 }
 
 export function readCliDistClosureFingerprint(entrypoint, maxFiles = 400) {

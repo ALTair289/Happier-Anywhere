@@ -26,7 +26,7 @@ import { clearStackForceLoginCredentialPaths } from './utils/auth/clearStackForc
 import { resolveHandyMasterSecretFromStack } from './utils/auth/handy_master_secret.mjs';
 import { ensureDir, readTextIfExists } from './utils/fs/ops.mjs';
 import { stackExistsSync } from './utils/stack/stacks.mjs';
-import { checkDaemonState } from './daemon.mjs';
+import { checkDaemonStatePingAware } from './daemon.mjs';
 import { isTty, prompt, promptSelect, withRl } from './utils/cli/wizard.mjs';
 import { parseCliIdentityOrThrow, resolveCliHomeDirForIdentity } from './utils/stack/cli_identities.mjs';
 import {
@@ -1585,7 +1585,7 @@ async function cmdStatus({ json }) {
     },
   };
 
-  const daemon = checkDaemonState(cliHomeDir, { serverUrl: internalServerUrl });
+  const daemon = await checkDaemonStatePingAware(cliHomeDir, { serverUrl: internalServerUrl });
   const healthRaw = await fetchHappierHealth(internalServerUrl);
   const health = {
     ok: Boolean(healthRaw.ok),

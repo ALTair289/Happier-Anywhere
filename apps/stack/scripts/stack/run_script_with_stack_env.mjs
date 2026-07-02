@@ -11,6 +11,7 @@ import { getComponentDir, resolveStackEnvPath } from '../utils/paths/paths.mjs';
 import { resolveLocalhostHost } from '../utils/paths/localhost_host.mjs';
 import { killProcessGroupOwnedByStack } from '../utils/proc/ownership.mjs';
 import { run } from '../utils/proc/proc.mjs';
+import { pruneLogsByCount } from '../utils/proc/pruneLogsByCount.mjs';
 import { coercePort } from '../utils/server/port.mjs';
 import { waitForHttpOk } from '../utils/server/server.mjs';
 import { getCliHomeDirFromEnvOrDefault } from '../utils/stack/dirs.mjs';
@@ -38,6 +39,32 @@ export function hasRecordedRuntimePortsForRestart(runtimeState = null) {
 
 export function shouldReuseRuntimePortsOnRestart({ wantsRestart = false, runtimeState = null, wasRunning = false } = {}) {
   return Boolean(wantsRestart && (wasRunning || hasRecordedRuntimePortsForRestart(runtimeState)));
+}
+
+function resolveLogKeepCount(rawValue, fallback) {
+  const value = Number(rawValue);
+  return Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback;
+}
+
+export async function createStackRunnerLogPath({
+  logsDir,
+  scriptPath,
+  nowMs = Date.now(),
+  keepCount = resolveLogKeepCount(process.env.HAPPIER_STACK_RUNNER_LOG_KEEP_COUNT, 10),
+} = {}) {
+  const baseName = String(scriptPath ?? '').replace(/\.mjs$/, '');
+  const logPath = join(logsDir, `${baseName}.${nowMs}.log`);
+  await ensureDir(logsDir);
+  const handle = await open(logPath, 'a');
+  await handle.close();
+  await pruneLogsByCount({
+    dir: logsDir,
+    prefix: `${baseName}.`,
+    suffix: '.log',
+    keepCount,
+    keepPath: logPath,
+  }).catch(() => ({ pruned: 0 }));
+  return logPath;
 }
 
 export async function inspectExistingStartLikeRuntime({
@@ -462,9 +489,9 @@ export async function runStackScriptWithStackEnv({ rootDir, stackName, scriptPat
         // remain clean while still providing actionable error logs.
         const stackBaseDir = resolveStackEnvPath(stackName).baseDir;
         const logsDir = join(stackBaseDir, 'logs');
-        const logPath = join(logsDir, `${scriptPath.replace(/\.mjs$/, '')}.${Date.now()}.log`);
+        let logPath = join(logsDir, `${scriptPath.replace(/\.mjs$/, '')}.${Date.now()}.log`);
         if (background) {
-          await ensureDir(logsDir);
+          logPath = await createStackRunnerLogPath({ logsDir, scriptPath });
         }
 
         let logHandle = null;
@@ -646,8 +673,7 @@ export async function runStackScriptWithStackEnv({ rootDir, stackName, scriptPat
 
         const stackBaseDir = resolveStackEnvPath(stackName).baseDir;
         const logsDir = join(stackBaseDir, 'logs');
-        const logPath = join(logsDir, `${scriptPath.replace(/\.mjs$/, '')}.${Date.now()}.log`);
-        await ensureDir(logsDir);
+        const logPath = await createStackRunnerLogPath({ logsDir, scriptPath });
 
         const logHandle = await open(logPath, 'a');
         const outFd = logHandle.fd;

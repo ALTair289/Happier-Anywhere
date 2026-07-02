@@ -47,8 +47,8 @@ import { reconcileDaemonPaneAfterDaemonStarts } from './utils/tui/daemon_pane_re
 import { buildScriptPtyArgs } from './utils/tui/script_pty_command.mjs';
 import { resolveTuiChildTerminationPlan } from './utils/tui/child_termination_plan.mjs';
 import { installTuiStdinErrorGuard } from './utils/tui/stdin_error_guard.mjs';
-import { checkDaemonState } from './daemon.mjs';
-import { getObservedStackDaemon } from './utils/stack/runtime_daemon_state.mjs';
+import { checkDaemonStatePingAware } from './daemon.mjs';
+import { getObservedStackDaemonAsync } from './utils/stack/runtime_daemon_state.mjs';
 
 function nowTs() {
   const d = new Date();
@@ -350,13 +350,14 @@ async function buildStackSummaryLines({ rootDir, stackName }) {
     ? hasStackCredentials({ cliHomeDir, serverUrl: internalServerUrl, env: authScopeEnv })
     : hasStackCredentials({ cliHomeDir, serverUrl: '', env: authScopeEnv });
   const startDaemon = parseStartDaemonFlagFromEnv(env);
-  const observedDaemon = getObservedStackDaemon({
+  const observedDaemon = await getObservedStackDaemonAsync({
     cliHomeDir,
     internalServerUrl,
     runtimeDaemonPid: processes?.daemonPid ?? null,
+    runtimeDaemonPids: processes?.daemonPids ?? [],
     env: authScopeEnv,
   }, {
-    checkDaemonStateImpl: checkDaemonState,
+    checkDaemonStateImpl: checkDaemonStatePingAware,
   });
 
   const lines = [];
@@ -386,8 +387,17 @@ async function buildStackSummaryLines({ rootDir, stackName }) {
   lines.push('');
   lines.push('ports:');
   lines.push(`  server: ${ports?.server ?? '(unknown)'}`);
+  if (ports?.serverBackend) lines.push(`  serverBackend: ${ports.serverBackend}`);
   if (expoPort) lines.push(`  expo: ${expoPort}`);
   if (ports?.backend) lines.push(`  backend: ${ports.backend}`);
+
+  if (runtime?.serverProxy) {
+    lines.push('');
+    lines.push('server proxy:');
+    lines.push(`  mode: ${runtime.serverProxy.mode ?? '(unknown)'}`);
+    if (runtime.serverProxy.restartMode) lines.push(`  restartMode: ${runtime.serverProxy.restartMode}`);
+    if (runtime.serverProxy.fallbackReason) lines.push(`  fallbackReason: ${runtime.serverProxy.fallbackReason}`);
+  }
 
   if (expoPort && expoDevClientEnabled) {
     const payload = resolveMobileQrPayload({ env: process.env, port: Number(expoPort) });
@@ -400,6 +410,9 @@ async function buildStackSummaryLines({ rootDir, stackName }) {
   lines.push('');
   lines.push('pids:');
   if (processes?.serverPid) lines.push(`  serverPid: ${processes.serverPid}`);
+  if (processes?.proxyPid) lines.push(`  proxyPid: ${processes.proxyPid}`);
+  if (processes?.serverBackendPid) lines.push(`  serverBackendPid: ${processes.serverBackendPid}`);
+  if (processes?.serverDrainingPid) lines.push(`  serverDrainingPid: ${processes.serverDrainingPid}`);
   if (processes?.expoPid) lines.push(`  expoPid: ${processes.expoPid}`);
   if (observedDaemon.pid) lines.push(`  daemonPid: ${observedDaemon.pid}`);
   if (processes?.uiGatewayPid) lines.push(`  uiGatewayPid: ${processes.uiGatewayPid}`);
@@ -775,14 +788,15 @@ async function main() {
 		        const authed = internalServerUrl
 		          ? hasStackCredentials({ cliHomeDir, serverUrl: internalServerUrl, env: scopedEnv })
 		          : hasStackCredentials({ cliHomeDir, serverUrl: '', env: scopedEnv });
-		        const observedDaemon = getObservedStackDaemon({
-		          cliHomeDir,
-		          internalServerUrl,
-		          runtimeDaemonPid: runtime?.processes?.daemonPid ?? null,
-		          env: scopedEnv,
-		        }, {
-		          checkDaemonStateImpl: checkDaemonState,
-		        });
+			        const observedDaemon = await getObservedStackDaemonAsync({
+			          cliHomeDir,
+			          internalServerUrl,
+			          runtimeDaemonPid: runtime?.processes?.daemonPid ?? null,
+			          runtimeDaemonPids: runtime?.processes?.daemonPids ?? [],
+			          env: scopedEnv,
+			        }, {
+			          checkDaemonStateImpl: checkDaemonStatePingAware,
+			        });
 
 		        const startDaemon = parseStartDaemonFlagFromEnv(process.env);
 		        const notice = buildDaemonAuthNotice({
@@ -1028,13 +1042,14 @@ async function main() {
 
         if (startDaemon) {
           const runtime = await readStackRuntimeStateFile(runtimePath);
-          const observedDaemon = getObservedStackDaemon({
+          const observedDaemon = await getObservedStackDaemonAsync({
             cliHomeDir: join(resolveStackEnvPath(stackName).baseDir, 'cli'),
             internalServerUrl,
             runtimeDaemonPid: runtime?.processes?.daemonPid ?? null,
+            runtimeDaemonPids: runtime?.processes?.daemonPids ?? [],
             env: { ...process.env, ...envFromFile },
           }, {
-            checkDaemonStateImpl: checkDaemonState,
+            checkDaemonStateImpl: checkDaemonStatePingAware,
           });
           const daemonRunning = observedDaemon.running;
           if (!daemonRunning) {

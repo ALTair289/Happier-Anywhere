@@ -184,6 +184,40 @@ test('createServiceDaemonAutostarter stops once daemon is running', async () => 
   assert.equal(scheduler.queued().length, 0);
 });
 
+test('createServiceDaemonAutostarter awaits async daemon-running checks before stopping', async () => {
+  const scheduler = createFakeScheduler();
+  const calls = { start: 0, daemonChecks: 0 };
+
+  const autostarter = createServiceDaemonAutostarter({
+    enabled: true,
+    isShuttingDown: () => false,
+    isServerReady: async () => true,
+    pollMs: 5000,
+    maxAttemptsPerCredentials: 2,
+    retryBaseMs: 1000,
+    retryMaxMs: 10_000,
+    nowMs: scheduler.now,
+    schedule: scheduler.schedule,
+    cancel: scheduler.cancel,
+    getCredentialFingerprint: async () => 'cred:a',
+    isDaemonRunning: async () => {
+      calls.daemonChecks += 1;
+      return false;
+    },
+    startDaemon: async () => {
+      calls.start += 1;
+    },
+    logger: { log: () => {}, warn: () => {}, error: () => {} },
+  });
+
+  autostarter.start();
+  await scheduler.advanceOne();
+
+  assert.equal(calls.daemonChecks, 1);
+  assert.equal(calls.start, 1);
+  assert.equal(scheduler.queued().length, 0);
+});
+
 test('createServiceDaemonAutostarter waits for server readiness before starting daemon', async () => {
   const scheduler = createFakeScheduler();
   const calls = { start: 0 };

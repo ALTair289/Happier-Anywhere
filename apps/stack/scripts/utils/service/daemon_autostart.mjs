@@ -90,7 +90,7 @@ export function createServiceDaemonAutostarter({
   const tick = async () => {
     if (!running) return;
     if (isDown()) return stop();
-    if (daemonRunning()) return stop();
+    if (await daemonRunning()) return stop();
     if (inFlight) return;
 
     inFlight = true;

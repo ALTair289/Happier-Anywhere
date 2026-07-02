@@ -47,7 +47,9 @@ function createTestJwt({ sub, jti }) {
 }
 
 async function withAuthServer({ goodToken }, fn) {
+  let requestCount = 0;
   const server = http.createServer((req, res) => {
+    requestCount += 1;
     if (!req.url || !req.method) {
       res.statusCode = 400;
       res.end();
@@ -74,7 +76,7 @@ async function withAuthServer({ goodToken }, fn) {
   const port = server.address().port;
   const serverUrl = `http://127.0.0.1:${port}`;
   try {
-    return await fn({ serverUrl });
+    return await fn({ serverUrl, getRequestCount: () => requestCount });
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -137,6 +139,46 @@ test('ensureActiveAccessKeyValid does not overwrite an already-valid server-scop
       const result = await ensureActiveAccessKeyValid({ cliHomeDir: home, serverUrl, env, timeoutMs: 2_500 });
       assert.equal(result.kind, 'ok');
       assert.equal(readTokenFromAccessKeyFile(resolved.serverScopedPath), 'good-token');
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('ensureActiveAccessKeyValid caches unchanged active credential validation', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'happier-stack-cred-cache-'));
+  try {
+    await withAuthServer({ goodToken: 'good-token' }, async ({ serverUrl, getRequestCount }) => {
+      const env = { HAPPIER_ACTIVE_SERVER_ID: 'stack_test__id_default' };
+      const resolved = resolveStackCredentialPaths({ cliHomeDir: home, serverUrl, env });
+      writeAccessKeyFile(resolved.serverScopedPath, 'good-token');
+
+      const first = await ensureActiveAccessKeyValid({ cliHomeDir: home, serverUrl, env, timeoutMs: 2_500 });
+      const second = await ensureActiveAccessKeyValid({ cliHomeDir: home, serverUrl, env, timeoutMs: 2_500 });
+
+      assert.equal(first.kind, 'ok');
+      assert.equal(second.kind, 'ok');
+      assert.equal(getRequestCount(), 1);
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('ensureActiveAccessKeyValid revalidates when active credential content changes', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'happier-stack-cred-cache-change-'));
+  try {
+    await withAuthServer({ goodToken: 'good-token-2' }, async ({ serverUrl, getRequestCount }) => {
+      const env = { HAPPIER_ACTIVE_SERVER_ID: 'stack_test__id_default' };
+      const resolved = resolveStackCredentialPaths({ cliHomeDir: home, serverUrl, env });
+      writeAccessKeyFile(resolved.serverScopedPath, 'good-token-1');
+      await ensureActiveAccessKeyValid({ cliHomeDir: home, serverUrl, env, timeoutMs: 2_500 });
+
+      writeAccessKeyFile(resolved.serverScopedPath, 'good-token-2');
+      const result = await ensureActiveAccessKeyValid({ cliHomeDir: home, serverUrl, env, timeoutMs: 2_500 });
+
+      assert.equal(result.kind, 'ok');
+      assert.equal(getRequestCount(), 2);
     });
   } finally {
     rmSync(home, { recursive: true, force: true });
