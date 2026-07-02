@@ -4,11 +4,14 @@ import {
   CLAUDE_LOCAL_PERMISSION_BRIDGE_REQUEST_SOURCE,
   CLAUDE_LOCAL_PERMISSION_BRIDGE_STOPPED_REASON,
   CLAUDE_UNIFIED_TERMINAL_RESUME_CHOICE_REQUEST_SOURCE,
+  connectedServiceProfileKey,
   isAgentStateRequestCoveredByCompletedRequests,
   getAgentMediaCapabilities,
   isClaudeLocalPermissionBridgeAgentStateRequest,
   isClaudeUnifiedTerminalResumeChoiceAgentStateRequest,
   KIMI_PROVIDER_FIELDS,
+  resolveConnectedServiceDefaultProfileId,
+  resolveConnectedServiceProfileLabel,
 } from './index.js';
 import {
   CLAUDE_LOCAL_PERMISSION_BRIDGE_REQUEST_SOURCE as CLAUDE_LOCAL_PERMISSION_BRIDGE_REQUEST_SOURCE_FROM_CLAUDE_INDEX,
@@ -48,8 +51,8 @@ describe('agents package exports', () => {
   it('re-exports the agent-state request coverage helper from the package root', () => {
     expect(isAgentStateRequestCoveredByCompletedRequests({
       requestId: 'req',
-      request: { tool: 'Write', createdAt: 1 },
-      completedRequests: { req: { completedAt: 2 } },
+      request: { tool: 'Write', arguments: { file_path: '/tmp/a' }, createdAt: 1 },
+      completedRequests: { req: { tool: 'Write', arguments: { file_path: '/tmp/a' }, completedAt: 2 } },
     })).toBe(true);
   });
 
@@ -67,6 +70,22 @@ describe('agents package exports', () => {
 
   it('re-exports Kimi provider setting fields from the package root', () => {
     expect(KIMI_PROVIDER_FIELDS.kimiAcpPythonSelector.default).toBe('auto');
+  });
+
+  it('re-exports connected-service session option helpers from the package root', () => {
+    expect(connectedServiceProfileKey({ serviceId: 'anthropic', profileId: 'work/team' })).toBe(
+      'anthropic/work%2Fteam',
+    );
+    expect(resolveConnectedServiceProfileLabel({
+      labelsByKey: { 'anthropic/work%2Fteam': ' Work Team ' },
+      serviceId: 'anthropic',
+      profileId: 'work/team',
+    })).toBe('Work Team');
+    expect(resolveConnectedServiceDefaultProfileId({
+      serviceId: 'anthropic',
+      connectedProfileIds: ['personal', 'work'],
+      defaultProfileByServiceId: { anthropic: 'work' },
+    })).toBe('work');
   });
 
   it('re-exports Claude Code OAuth scope constants from the package root', async () => {

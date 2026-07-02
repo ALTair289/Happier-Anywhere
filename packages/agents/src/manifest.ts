@@ -160,7 +160,10 @@ export const AGENTS_CORE = {
             supportedKindsByServiceId: {
                 'openai-codex': ['oauth'],
                 openai: ['token'],
-                'claude-subscription': ['token'],
+                // OpenCode brokers Claude subscription OAuth (browser login) + setup-token via the
+                // Happier daemon broker (Bearer + anthropic-beta), so both kinds are selectable.
+                // Anthropic stays token-only (Console API key, x-api-key).
+                'claude-subscription': ['oauth', 'token'],
                 anthropic: ['token'],
             },
         },

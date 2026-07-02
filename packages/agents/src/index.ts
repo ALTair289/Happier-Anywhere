@@ -65,6 +65,29 @@ export {
   supportsAgentConnectedServiceSessionAuthSwitchTransition,
 } from './connectedServices/runtimeFallbackCapability.js';
 export {
+  buildConnectedServiceAccountGroupOptionsByServiceId,
+  buildConnectedServiceProfileOptionsByServiceId,
+  buildConnectedServicesBindingsPayload,
+  connectedServiceProfileKey,
+  connectedServiceProfileLegacyKey,
+  filterConnectedServiceV2ProfilesForAgent,
+  isConnectedServiceProfileKindSupportedForAgent,
+  resolveAgentSupportedConnectedServiceIds,
+  resolveConnectedServiceAccountGroupViableProfileId,
+  resolveConnectedServiceDefaultProfileId,
+  resolveConnectedServiceProfileLabel,
+  type ConnectedServiceProfileProjectionInput,
+  type ConnectedServiceSessionProjection,
+  type ConnectedServicesAccountGroupOption,
+  type ConnectedServicesAccountGroupOptionsByServiceId,
+  type ConnectedServicesAccountGroupReadiness,
+  type ConnectedServicesBindingOptionInput,
+  type ConnectedServicesProfileOption,
+  type ConnectedServicesProfileOptionsByServiceId,
+  type ConnectedServicesSessionAgentConnectedServices,
+  type ConnectedServicesSessionAgentCore,
+} from './connectedServices/sessionOptions.js';
+export {
   type TerminalHostKind,
   type TerminalInjectionDuplicateRisk,
   type TerminalInjectionFailurePhase,
@@ -186,6 +209,15 @@ export {
     type ProviderNativePermissionMode,
     resolveLatestPermissionIntent,
 } from './permissions/index.js';
+export {
+    assertNonEscalatingPermissionMode,
+    resolveNearestPermissionModeAtOrBelow,
+    resolvePermissionPrivilegeFromSessionMetadata,
+    resolvePermissionPrivilegeOrdinal,
+    type PermissionEscalationDecision,
+    type PermissionPrivilegeOrdinal,
+    type ResolvedPermissionPrivilege,
+} from './permissions/privilege.js';
 
 export {
     CLAUDE_LOCAL_PERMISSION_BRIDGE_REQUEST_SOURCE,

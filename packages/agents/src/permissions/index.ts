@@ -100,6 +100,7 @@ export function parsePermissionModeAlias(raw: string): PermissionMode | null {
         case 'read-only':
         case 'read':
         case 'ro':
+        case 'no-tools':
             return 'read-only';
 
         // safe-yolo intent (workspace-write with approval; Claude SDK's "auto" mode is the same shape)

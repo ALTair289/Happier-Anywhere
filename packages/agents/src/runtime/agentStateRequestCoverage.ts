@@ -104,6 +104,20 @@ function areEquivalentCrossIdRequests(params: Readonly<{
     return Math.abs(requestCreatedAt - completedAt) <= windowMs;
 }
 
+function areEquivalentSameIdRequests(params: Readonly<{
+    request: AgentStateRequestCoverageRecord;
+    completed: AgentStateRequestCoverageRecord;
+}>): boolean {
+    const tool = readString(params.request.tool);
+    if (!tool || readString(params.completed.tool) !== tool) return false;
+
+    const requestKind = readString(params.request.kind);
+    const completedKind = readString(params.completed.kind);
+    if (requestKind && completedKind && requestKind !== completedKind) return false;
+
+    return areJsonValuesEquivalent(params.request.arguments, params.completed.arguments);
+}
+
 export function isAgentStateRequestCoveredByCompletedRequests(params: Readonly<{
     requestId: string;
     request: unknown;
@@ -116,7 +130,12 @@ export function isAgentStateRequestCoveredByCompletedRequests(params: Readonly<{
 
     const createdAt = readNumber(request.createdAt) ?? 0;
     const sameIdCompleted = completedRequests[params.requestId];
-    if (sameIdCompleted && createdAt <= readAgentStateRequestCompletedAt(sameIdCompleted)) {
+    const sameIdCompletedRecord = readRecord(sameIdCompleted);
+    if (
+        sameIdCompletedRecord
+        && createdAt <= readAgentStateRequestCompletedAt(sameIdCompletedRecord)
+        && areEquivalentSameIdRequests({ request, completed: sameIdCompletedRecord })
+    ) {
         return true;
     }
 

@@ -120,15 +120,15 @@ describe('agent model config', () => {
     expect(variantFor('claude-haiku-4-5')).toBeUndefined();
   });
 
-  it('ships a non-empty static model list for Codex as a robust fallback when dynamic probing fails', () => {
+  it('does not ship named static Codex models because Codex model truth is dynamic', () => {
     const codex = getAgentModelConfig('codex');
     const codexModels = getAgentStaticModels('codex');
 
-    // Codex dynamic probing can fail transiently (missing CLI, auth not ready). The UI should still
-    // have a usable model picker without requiring a refresh.
     expect(codex.supportsSelection).toBe(true);
-    expect(codexModels.length).toBeGreaterThan(1);
-    expect(codexModels.map((model) => model.id)).toContain('gpt-5.4');
+    expect(codex.dynamicProbe).toBe('auto');
+    expect(codex.staticModels).toBeUndefined();
+    expect(codex.allowedModes).toEqual(['default']);
+    expect(codexModels).toEqual([{ id: 'default', name: 'default' }]);
   });
 
   it('treats Cursor models as dynamic ACP/CLI controls without freeform fallback', () => {
