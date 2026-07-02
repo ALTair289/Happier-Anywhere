@@ -1,5 +1,6 @@
 import * as React from 'react';
 import { FlatList, type FlatListProps, type NativeScrollEvent, type NativeSyntheticEvent } from 'react-native';
+import type { FlashListProps } from '@shopify/flash-list';
 
 import { resolveFlashListRuntime, type FlashListCompatComponent } from './resolveFlashListRuntime';
 
@@ -14,7 +15,13 @@ export type FlashListRef<T> = Readonly<{
   getAbsoluteLastScrollOffset?: () => number;
 }>;
 
-export type FlashListPropsCompat<T> = FlatListProps<T> & Readonly<{
+export type FlashListCompatMaintainVisibleContentPosition =
+  | FlatListProps<unknown>['maintainVisibleContentPosition']
+  | FlashListProps<unknown>['maintainVisibleContentPosition'];
+
+export type FlashListPropsCompat<T> = Omit<FlatListProps<T>, 'maintainVisibleContentPosition'> & Readonly<{
+  maintainVisibleContentPosition?: FlashListCompatMaintainVisibleContentPosition;
+  happierPauseOffsetCorrection?: boolean;
   estimatedItemSize?: number;
   drawDistance?: number;
   overrideItemLayout?: (layout: unknown, item: T, index: number, maxColumns?: number, extraData?: unknown) => void;
@@ -25,6 +32,27 @@ export type FlashListPropsCompat<T> = FlatListProps<T> & Readonly<{
   onLoad?: (info: { elapsedTimeInMs: number }) => void;
   overrideProps?: Record<string, unknown>;
 }>;
+
+function resolveFlatListMaintainVisibleContentPosition<T>(
+  value: FlashListCompatMaintainVisibleContentPosition | undefined,
+): FlatListProps<T>['maintainVisibleContentPosition'] | undefined {
+  if (value == null) return value;
+  if (typeof value !== 'object') return undefined;
+  if (!('minIndexForVisible' in value)) return undefined;
+  if (typeof value.minIndexForVisible !== 'number' || !Number.isFinite(value.minIndexForVisible)) {
+    return undefined;
+  }
+  const result: NonNullable<FlatListProps<T>['maintainVisibleContentPosition']> = {
+    minIndexForVisible: value.minIndexForVisible,
+  };
+  if (
+    'autoscrollToTopThreshold' in value &&
+    (typeof value.autoscrollToTopThreshold === 'number' || value.autoscrollToTopThreshold == null)
+  ) {
+    result.autoscrollToTopThreshold = value.autoscrollToTopThreshold;
+  }
+  return result;
+}
 
 export type FlashListMappingKey = string | number | bigint;
 
@@ -66,6 +94,8 @@ const FallbackFlashListBase = React.forwardRef(function FallbackFlashListInner<T
     overrideItemLayout: _overrideItemLayout,
     getItemType: _getItemType,
     initialScrollIndexParams: _initialScrollIndexParams,
+    happierPauseOffsetCorrection: _happierPauseOffsetCorrection,
+    maintainVisibleContentPosition,
     onStartReached,
     onStartReachedThreshold,
     onLoad,
@@ -73,6 +103,8 @@ const FallbackFlashListBase = React.forwardRef(function FallbackFlashListInner<T
     onScroll,
     ...restProps
   } = props;
+  const flatListMaintainVisibleContentPosition =
+    resolveFlatListMaintainVisibleContentPosition<T>(maintainVisibleContentPosition);
 
   const startReachedRef = React.useRef(false);
   const forwardedOnScroll = React.useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
@@ -101,7 +133,14 @@ const FallbackFlashListBase = React.forwardRef(function FallbackFlashListInner<T
     onLoad?.({ elapsedTimeInMs: 0 });
   }, [onLoad]);
 
-  return <FlatList {...restProps} ref={ref as never} onScroll={forwardedOnScroll} />;
+  return (
+    <FlatList
+      {...restProps}
+      ref={ref as never}
+      maintainVisibleContentPosition={flatListMaintainVisibleContentPosition}
+      onScroll={forwardedOnScroll}
+    />
+  );
 }) as unknown as FlashListCompatComponent;
 
 function resolveInitialLayoutStateValue<T>(initialState: FlashListLayoutStateInitialValue<T>): T {

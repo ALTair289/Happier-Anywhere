@@ -42,6 +42,7 @@ describe('flash-list commitLayout guard patch', () => {
     const patchContent = readFileSync(patchPath, 'utf8');
     expect(patchContent).toContain('HAPPIER PATCH(flash-list-commit-layout-guard)');
     expect(patchContent).toContain('dist/recyclerview/RecyclerView.js');
+    expect(patchContent).toContain('dist/recyclerview/ViewHolderCollection.js');
   });
 
   it('ships an installed RecyclerView with the guarded commitLayout path applied', () => {
@@ -54,12 +55,29 @@ describe('flash-list commitLayout guard patch', () => {
     // The guard marker must be present in the runtime entry actually resolved by Metro
     // (package "main" points at dist/).
     expect(distRecyclerView).toContain('HAPPIER PATCH(flash-list-commit-layout-guard)');
+    expect(distRecyclerView).not.toContain('HAPPIER PATCH(flash-list-first-reveal-commit)');
 
     // The pathological shape — commitLayout() invoked unconditionally in the else branch of the
     // layout effect — must be gone: every commitLayout call site in the layout effect must be
     // reachable only behind the pending-commit guard.
     expect(distRecyclerView).toContain('hasPendingCommitRef');
     expect(distRecyclerView).toContain('hasCommittedOnceRef');
+  });
+
+  it('ships a ViewHolderCollection that reveals populated measured content without a parent commit', () => {
+    const flashListRoot = resolveFlashListRoot();
+    const distViewHolderCollection = readFileSync(
+      join(flashListRoot, 'dist/recyclerview/ViewHolderCollection.js'),
+      'utf8',
+    );
+
+    // The blank-list regression reproduced on iOS with data/renderStack intact and the
+    // ViewHolderCollection container native alpha stuck at 0. The opacity owner must own a
+    // one-time self reveal once it has data, a container layout, and rendered holders.
+    expect(distViewHolderCollection).toContain('HAPPIER PATCH(flash-list-view-holder-self-reveal)');
+    expect(distViewHolderCollection).toContain('shouldRevealMeasuredContent');
+    expect(distViewHolderCollection).toContain('renderStack.size > 0');
+    expect(distViewHolderCollection).toContain('setRenderId(1)');
   });
 });
 
@@ -103,6 +121,7 @@ describe('flash-list offset-correction hook patch (N1.1 evidence)', () => {
     expect(distController).toContain('"initial-scroll-index"');
     expect(distController).toContain('"correction-applied"');
     expect(distController).toContain('"correction-skipped-paused"');
+    expect(distController).toContain('"correction-skipped-happier-paused"');
     expect(distController).toContain('"correction-skipped-animation"');
   });
 });

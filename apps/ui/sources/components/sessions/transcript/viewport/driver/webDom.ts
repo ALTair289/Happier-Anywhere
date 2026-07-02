@@ -1,0 +1,588 @@
+import { resolveWebColdListScrollTarget } from '@/components/sessions/transcript/segments/resolveWebHotColdScrollDecision';
+import { queryExactWebTranscriptDataTestId } from '@/components/sessions/transcript/webTranscriptDomTestId';
+import {
+    restoreWebTranscriptViewportAnchor,
+    restoreWebTranscriptPrependAnchor,
+    TRANSCRIPT_WEB_PREPEND_ANCHOR_TEST_ID_PREFIX,
+    type WebTranscriptPrependRestoreResult,
+    type WebTranscriptViewportAnchorRestoreResult,
+} from '@/components/sessions/transcript/webTranscriptPrependAnchor';
+import {
+    getWebTranscriptDistanceFromBottom,
+    isWebTranscriptScrollable,
+    resolveWebTranscriptMaxScrollTop,
+    type WebTranscriptScrollMetrics,
+} from '@/components/sessions/transcript/webTranscriptScrollMetrics';
+import type { ScrollableChatListRef } from '@/components/sessions/transcript/viewport/transcriptScrollableListTypes';
+import type { TranscriptViewportCommand } from '@/components/sessions/transcript/viewport/transcriptViewportTypes';
+import type {
+    TranscriptViewportDriverDeps,
+    TranscriptViewportDriverWriteResult,
+    TranscriptViewportListData,
+    WebDomMeasuredItemLayout,
+    WebDomTranscriptItemAlignment,
+} from './types';
+import type { WebDomScrollObservation } from './webDomObservation';
+
+type TestIdElement = Readonly<{
+    getAttribute?: (name: string) => string | null;
+    getBoundingClientRect?: () => Readonly<{ bottom: number; height?: number; top: number }>;
+}>;
+
+export function performWebDomViewportCommand(
+    command: TranscriptViewportCommand,
+    deps: TranscriptViewportDriverDeps,
+): boolean {
+    if (command.kind === 'pin-bottom') {
+        deps.clearWebPrependRangeReserve();
+        const metrics = deps.resolveWebScrollMetrics();
+        if (!metrics) return false;
+        return writeWebDomScrollTop({
+            deps,
+            metrics,
+            mode: command.mode,
+            reason: command.reason,
+            targetScrollTop: metrics.scrollHeight,
+            trigger: command.reason === 'prepend-restore' ? 'prepend-restore' : command.mode === 'jump-to-bottom' ? 'jump' : 'restore',
+            writer: 'web-dom-bottom',
+            distanceFromBottom: (landedScrollTop) => Math.max(0, Math.trunc(metrics.scrollHeight - metrics.clientHeight - landedScrollTop)),
+        });
+    }
+
+    if (command.kind === 'preserve-live-tail-distance') {
+        const metrics = deps.resolveWebScrollMetrics();
+        if (!metrics) return false;
+        const maxScrollTop = resolveWebTranscriptMaxScrollTop(metrics);
+        const previousDistanceFromLiveTailPx = Math.max(0, Math.trunc(command.previousDistanceFromLiveTailPx));
+        const targetScrollTop = Math.max(0, Math.min(maxScrollTop, maxScrollTop - previousDistanceFromLiveTailPx));
+        if (Math.abs(targetScrollTop - metrics.scrollTop) < 0.5) return false;
+
+        return writeWebDomScrollTop({
+            deps,
+            metrics,
+            mode: command.mode,
+            reason: command.reason,
+            targetScrollTop,
+            trigger: 'restore',
+            writer: 'web-dom-bottom',
+            distanceFromBottom: (landedScrollTop) => getWebTranscriptDistanceFromBottom({
+                ...metrics,
+                scrollTop: landedScrollTop,
+            }),
+        });
+    }
+
+    if (command.kind === 'restore-distance') {
+        const metrics = deps.resolveWebScrollMetrics();
+        if (!metrics) return false;
+        const targetScrollTop = Math.max(0, resolveWebTranscriptMaxScrollTop(metrics) - command.distanceFromLiveTailPx);
+
+        return writeWebDomScrollTop({
+            deps,
+            metrics,
+            mode: command.mode,
+            reason: command.reason,
+            targetScrollTop,
+            trigger: command.reason === 'prepend-restore' ? 'prepend-restore' : 'restore',
+            writer: 'web-dom-restore',
+            distanceFromBottom: () => command.distanceFromLiveTailPx,
+        });
+    }
+
+    if (command.kind === 'restore-visible-anchor') {
+        const result = performWebDomVisibleAnchorRestoreCommand(command, deps);
+        return result.status === 'restored' || result.status === 'already_aligned';
+    }
+
+    if (command.kind === 'restore-web-prepend-anchor') {
+        return performWebDomPrependAnchorRestoreCommand(command, deps).didAdjustScroll;
+    }
+
+    if (command.kind === 'restore-anchor' || command.kind === 'jump-to-seq') {
+        let index = command.kind === 'jump-to-seq'
+            ? (command.routeMessageId
+                ? deps.resolveJumpToSeqIndex(
+                    command.seq,
+                    command.routeMessageId,
+                    command.transcriptBlockIndex,
+                    command.role,
+                )
+                : deps.resolveJumpToSeqIndex(command.seq))
+            : deps.resolveRestoreAnchorIndex(command.target.anchor);
+        if (typeof index !== 'number' || !Number.isFinite(index)) return false;
+        if (deps.shouldUseWebHotColdSplit) {
+            const target = resolveWebColdListScrollTarget({
+                fullIndex: index,
+                coldCount: deps.coldItemCount,
+                reason: command.kind === 'jump-to-seq'
+                    ? 'jump-to-seq'
+                    : command.reason === 'prepend-restore'
+                        ? 'prepend-recovery'
+                        : 'restore-anchor',
+            });
+            if (target.kind === 'pin_to_bottom') {
+                const metrics = deps.resolveWebScrollMetrics();
+                if (!metrics) return false;
+                return writeWebDomScrollTop({
+                    deps,
+                    metrics,
+                    mode: command.mode,
+                    reason: command.reason,
+                    targetScrollTop: metrics.scrollHeight,
+                    trigger: command.kind === 'jump-to-seq' ? 'jump' : command.reason === 'prepend-restore' ? 'prepend-restore' : 'restore',
+                    writer: 'web-dom-bottom',
+                    distanceFromBottom: (landedScrollTop) => getWebTranscriptDistanceFromBottom({
+                        ...metrics,
+                        scrollTop: landedScrollTop,
+                    }),
+                });
+            }
+            index = target.index;
+        }
+
+        const itemId = resolveTranscriptViewportListDataItemIdAtIndex(deps.listDataRef.current, index);
+        if (!itemId) return false;
+        const metrics = deps.resolveWebScrollMetrics();
+        if (!metrics) return false;
+        const itemLayout = readScrollableChatListItemLayout(deps.listRef.current, index);
+        const result = scrollWebDomToTranscriptItem({
+            align: command.kind === 'jump-to-seq'
+                ? command.align ?? { kind: 'center' }
+                : { kind: 'top-with-item-offset', itemOffsetPx: command.target.itemOffsetPx },
+            itemId,
+            itemLayout,
+            metrics,
+            observation: deps.webDomObservation,
+        });
+        if (!result.ok) return false;
+        deps.recordViewportTelemetryEvent({
+            type: 'scroll-write',
+            writer: 'web-dom-restore',
+            reason: command.reason,
+            mode: command.mode,
+            targetOffsetY: result.targetScrollTop,
+            layoutHeight: metrics.clientHeight,
+            contentHeight: metrics.scrollHeight,
+            distanceFromBottom: getWebTranscriptDistanceFromBottom({
+                ...metrics,
+                scrollTop: result.landedScrollTop,
+            }),
+            ...deps.resolveWebViewportTelemetryDiagnostics({
+                metrics,
+                programmaticWebWrite: true,
+                scrollable: isWebTranscriptScrollable(metrics, 1),
+                trigger: command.kind === 'jump-to-seq'
+                    ? 'jump'
+                    : command.reason === 'prepend-restore'
+                        ? 'prepend-restore'
+                        : 'restore',
+            }),
+        });
+        return true;
+    }
+
+    return false;
+}
+
+export function performWebDomPrependAnchorRestoreCommand(
+    command: Extract<TranscriptViewportCommand, Readonly<{ kind: 'restore-web-prepend-anchor' }>>,
+    deps: TranscriptViewportDriverDeps,
+): WebTranscriptPrependRestoreResult {
+    const metrics = deps.resolveWebScrollMetrics();
+    if (!metrics) return { didAdjustScroll: false, strategy: 'none' };
+    return restoreWebTranscriptPrependAnchor(command.anchor, {
+        writeScrollTop: (targetScrollTop) => writeWebDomScrollTop({
+            deps,
+            metrics,
+            mode: command.mode,
+            reason: command.reason,
+            targetScrollTop,
+            trigger: 'prepend-restore',
+            writer: 'web-dom-restore',
+            distanceFromBottom: (landedScrollTop) => getWebTranscriptDistanceFromBottom({
+                ...metrics,
+                scrollTop: landedScrollTop,
+            }),
+        }),
+    });
+}
+
+export function performWebDomVisibleAnchorRestoreCommand(
+    command: Extract<TranscriptViewportCommand, Readonly<{ kind: 'restore-visible-anchor' }>>,
+    deps: TranscriptViewportDriverDeps,
+): WebTranscriptViewportAnchorRestoreResult {
+    const metrics = deps.resolveWebScrollMetrics();
+    if (!metrics) return { didAdjustScroll: false, status: 'not_applied' };
+    const directResult = restoreWebTranscriptViewportAnchor({
+        container: metrics.element,
+        anchor: {
+            kind: command.target.anchor.kind,
+            itemId: command.target.anchor.itemId,
+            messageId: command.target.anchor.messageId ?? null,
+            itemOffsetPx: command.target.itemOffsetPx,
+        },
+    }, {
+        writeScrollTop: (targetScrollTop) => writeWebDomScrollTop({
+            deps,
+            metrics,
+            mode: command.mode,
+            reason: command.reason,
+            targetScrollTop,
+            trigger: 'restore',
+            writer: 'web-dom-restore',
+            distanceFromBottom: (landedScrollTop) => getWebTranscriptDistanceFromBottom({
+                ...metrics,
+                scrollTop: landedScrollTop,
+            }),
+        }),
+    });
+    if (directResult.status !== 'not_found') return directResult;
+
+    const itemIndex = command.target.itemIndex;
+    if (typeof itemIndex !== 'number' || !Number.isFinite(itemIndex)) return directResult;
+    const normalizedIndex = Math.max(0, Math.trunc(itemIndex));
+    const itemId = resolveTranscriptViewportListDataItemIdAtIndex(deps.listDataRef.current, normalizedIndex) ??
+        command.target.anchor.itemId;
+    if (!itemId.trim()) return directResult;
+
+    const result = scrollWebDomToTranscriptItem({
+        align: { kind: 'top-with-item-offset', itemOffsetPx: command.target.itemOffsetPx },
+        itemId,
+        itemLayout: readScrollableChatListItemLayout(deps.listRef.current, normalizedIndex),
+        metrics,
+        observation: deps.webDomObservation,
+    });
+    if (!result.ok) return directResult;
+    deps.recordViewportTelemetryEvent({
+        type: 'scroll-write',
+        writer: 'web-dom-restore',
+        reason: command.reason,
+        mode: command.mode,
+        targetOffsetY: result.targetScrollTop,
+        layoutHeight: metrics.clientHeight,
+        contentHeight: metrics.scrollHeight,
+        distanceFromBottom: getWebTranscriptDistanceFromBottom({
+            ...metrics,
+            scrollTop: result.landedScrollTop,
+        }),
+        ...deps.resolveWebViewportTelemetryDiagnostics({
+            metrics,
+            programmaticWebWrite: true,
+            scrollable: isWebTranscriptScrollable(metrics, 1),
+            trigger: 'restore',
+        }),
+    });
+    return { didAdjustScroll: true, status: 'restored' };
+}
+
+export type WebDomLocalHeightChangeMode = 'follow-bottom' | 'preserve-position';
+
+export type WebDomLocalHeightChangeResult =
+    | Readonly<{
+        ok: true;
+        distanceFromBottom: number;
+        landedScrollTop: number;
+        previousScrollTop: number;
+        targetScrollTop: number;
+    }>
+    | Readonly<{
+        ok: false;
+        previousScrollTop: number;
+        reason: 'already_aligned' | 'no_growth' | 'write_failed';
+        targetScrollTop?: number;
+    }>;
+
+export function restoreWebDomLocalHeightChange(params: Readonly<{
+    capturedMetrics: WebTranscriptScrollMetrics;
+    mode: WebDomLocalHeightChangeMode;
+    observation: WebDomScrollObservation;
+}>): WebDomLocalHeightChangeResult {
+    const element = params.capturedMetrics.element;
+    const liveMetrics: WebTranscriptScrollMetrics = {
+        element,
+        scrollTop: element.scrollTop,
+        scrollHeight: element.scrollHeight,
+        clientHeight: element.clientHeight,
+    };
+    const previousScrollTop = liveMetrics.scrollTop;
+    const targetScrollTop = params.mode === 'follow-bottom'
+        ? resolveWebTranscriptMaxScrollTop(liveMetrics)
+        : resolvePreservedWebLocalHeightScrollTop({
+            capturedMetrics: params.capturedMetrics,
+            liveMetrics,
+        });
+    if (targetScrollTop == null) {
+        return {
+            ok: false,
+            previousScrollTop,
+            reason: 'no_growth',
+        };
+    }
+    if (targetScrollTop === previousScrollTop) {
+        return {
+            ok: false,
+            previousScrollTop,
+            reason: 'already_aligned',
+            targetScrollTop,
+        };
+    }
+
+    const write = params.observation.recordProgrammaticScrollTopWrite({
+        element,
+        targetScrollTop,
+    });
+    if (!write.ok) {
+        return {
+            ok: false,
+            previousScrollTop,
+            reason: 'write_failed',
+            targetScrollTop,
+        };
+    }
+
+    return {
+        ok: true,
+        distanceFromBottom: getWebTranscriptDistanceFromBottom({
+            ...liveMetrics,
+            scrollTop: write.landedScrollTop,
+        }),
+        landedScrollTop: write.landedScrollTop,
+        previousScrollTop,
+        targetScrollTop,
+    };
+}
+
+export type WebDomPrependGrowthResult =
+    | Readonly<{
+        ok: true;
+        distanceFromBottom: number;
+        growthPx: number;
+        landedScrollTop: number;
+        previousScrollTop: number;
+        targetScrollTop: number;
+    }>
+    | Readonly<{
+        ok: false;
+        previousScrollTop: number;
+        reason: 'no_growth' | 'write_failed';
+        targetScrollTop?: number;
+    }>;
+
+export function restoreWebDomPrependGrowth(params: Readonly<{
+    capturedMetrics: WebTranscriptScrollMetrics;
+    observation: WebDomScrollObservation;
+}>): WebDomPrependGrowthResult {
+    const element = params.capturedMetrics.element;
+    const liveMetrics: WebTranscriptScrollMetrics = {
+        element,
+        scrollTop: element.scrollTop,
+        scrollHeight: element.scrollHeight,
+        clientHeight: element.clientHeight,
+    };
+    const previousScrollTop = liveMetrics.scrollTop;
+    const growthPx = Math.max(0, liveMetrics.scrollHeight - params.capturedMetrics.scrollHeight);
+    if (growthPx <= 0) {
+        return {
+            ok: false,
+            previousScrollTop,
+            reason: 'no_growth',
+        };
+    }
+
+    const targetScrollTop = params.capturedMetrics.scrollTop + growthPx;
+    const write = params.observation.recordProgrammaticScrollTopWrite({
+        element,
+        targetScrollTop,
+    });
+    if (!write.ok) {
+        return {
+            ok: false,
+            previousScrollTop,
+            reason: 'write_failed',
+            targetScrollTop,
+        };
+    }
+
+    return {
+        ok: true,
+        distanceFromBottom: getWebTranscriptDistanceFromBottom({
+            ...liveMetrics,
+            scrollTop: write.landedScrollTop,
+        }),
+        growthPx,
+        landedScrollTop: write.landedScrollTop,
+        previousScrollTop,
+        targetScrollTop,
+    };
+}
+
+export function scrollWebDomToTranscriptItem(params: Readonly<{
+    align: WebDomTranscriptItemAlignment;
+    itemId: string;
+    itemLayout?: WebDomMeasuredItemLayout | null;
+    metrics: WebTranscriptScrollMetrics;
+    observation: WebDomScrollObservation;
+}>): TranscriptViewportDriverWriteResult {
+    const targetItem = findWebTranscriptItemElement({
+        container: params.metrics.element,
+        itemId: params.itemId,
+    });
+    if (!targetItem && params.itemLayout == null) return { ok: false, reason: 'not_found' };
+
+    const targetScrollTop = targetItem
+        ? resolveWebTranscriptItemTargetScrollTop({
+            align: params.align,
+            item: targetItem,
+            metrics: params.metrics,
+        })
+        : resolveWebTranscriptMeasuredLayoutTargetScrollTop({
+            align: params.align,
+            itemLayout: params.itemLayout,
+            metrics: params.metrics,
+        });
+    if (targetScrollTop == null) return { ok: false, reason: 'invalid_geometry' };
+
+    const write = params.observation.recordProgrammaticScrollTopWrite({
+        element: params.metrics.element,
+        targetScrollTop,
+    });
+    if (!write.ok) return { ok: false, reason: 'write_failed' };
+
+    return {
+        ok: true,
+        landedScrollTop: write.landedScrollTop,
+        targetScrollTop,
+    };
+}
+
+function writeWebDomScrollTop(params: Readonly<{
+    deps: TranscriptViewportDriverDeps;
+    distanceFromBottom: (landedScrollTop: number) => number;
+    metrics: WebTranscriptScrollMetrics;
+    mode: TranscriptViewportCommand['mode'];
+    reason: Exclude<TranscriptViewportCommand, Readonly<{ kind: 'none' }> | Readonly<{ kind: 'skip-native-js-pin' }>>['reason'];
+    targetScrollTop: number;
+    trigger: 'prepend-restore' | 'jump' | 'restore';
+    writer: 'web-dom-bottom' | 'web-dom-restore';
+}>): boolean {
+    const previousOffsetY = params.metrics.scrollTop;
+    const write = params.deps.webDomObservation.recordProgrammaticScrollTopWrite({
+        element: params.metrics.element,
+        targetScrollTop: params.targetScrollTop,
+    });
+    if (!write.ok) return false;
+    params.deps.recordViewportTelemetryEvent({
+        type: 'scroll-write',
+        writer: params.writer,
+        reason: params.reason,
+        mode: params.mode,
+        targetOffsetY: write.landedScrollTop,
+        previousOffsetY,
+        layoutHeight: params.metrics.clientHeight,
+        contentHeight: params.metrics.scrollHeight,
+        distanceFromBottom: params.distanceFromBottom(write.landedScrollTop),
+        ...params.deps.resolveWebViewportTelemetryDiagnostics({
+            metrics: params.metrics,
+            programmaticWebWrite: true,
+            scrollable: isWebTranscriptScrollable(params.metrics, 1),
+            trigger: params.trigger,
+        }),
+    });
+    return true;
+}
+
+function resolvePreservedWebLocalHeightScrollTop(params: Readonly<{
+    capturedMetrics: WebTranscriptScrollMetrics;
+    liveMetrics: WebTranscriptScrollMetrics;
+}>): number | null {
+    const growth = Math.max(0, params.liveMetrics.scrollHeight - params.capturedMetrics.scrollHeight);
+    if (growth <= 0) return null;
+    return params.capturedMetrics.scrollTop + growth;
+}
+
+function findWebTranscriptItemElement(params: Readonly<{
+    container: HTMLElement;
+    itemId: string;
+}>): TestIdElement | null {
+    const itemId = params.itemId.trim();
+    if (!itemId) return null;
+    const targetTestId = `${TRANSCRIPT_WEB_PREPEND_ANCHOR_TEST_ID_PREFIX}${itemId}`;
+    const exactMatch = queryExactWebTranscriptDataTestId(params.container, targetTestId);
+    if (exactMatch.attempted) return exactMatch.element as TestIdElement | null;
+
+    const nodes = params.container.querySelectorAll('[data-testid]');
+    for (const node of nodes) {
+        const element = node as TestIdElement;
+        if (element.getAttribute?.('data-testid') === targetTestId) {
+            return element;
+        }
+    }
+    return null;
+}
+
+function resolveWebTranscriptItemTargetScrollTop(params: Readonly<{
+    align: WebDomTranscriptItemAlignment;
+    item: TestIdElement;
+    metrics: WebTranscriptScrollMetrics;
+}>): number | null {
+    if (typeof params.metrics.element.getBoundingClientRect !== 'function') return null;
+    if (typeof params.item.getBoundingClientRect !== 'function') return null;
+
+    const containerRect = params.metrics.element.getBoundingClientRect();
+    const itemRect = params.item.getBoundingClientRect();
+    const itemTop = itemRect.top - containerRect.top;
+    const itemHeight = Number.isFinite(itemRect.height)
+        ? Math.max(0, Number(itemRect.height))
+        : Math.max(0, itemRect.bottom - itemRect.top);
+    const targetScrollTop = params.align.kind === 'center'
+        ? params.metrics.scrollTop + itemTop + itemHeight / 2 - params.metrics.clientHeight / 2
+        : params.metrics.scrollTop + itemTop - params.align.itemOffsetPx;
+
+    if (!Number.isFinite(targetScrollTop)) return null;
+    return Math.max(0, Math.trunc(targetScrollTop));
+}
+
+function resolveWebTranscriptMeasuredLayoutTargetScrollTop(params: Readonly<{
+    align: WebDomTranscriptItemAlignment;
+    itemLayout: WebDomMeasuredItemLayout | null | undefined;
+    metrics: WebTranscriptScrollMetrics;
+}>): number | null {
+    const y = params.itemLayout?.y;
+    const height = params.itemLayout?.height;
+    if (typeof y !== 'number' || !Number.isFinite(y)) return null;
+    if (typeof height !== 'number' || !Number.isFinite(height)) return null;
+
+    const targetScrollTop = params.align.kind === 'center'
+        ? y + Math.max(0, height) / 2 - params.metrics.clientHeight / 2
+        : y - params.align.itemOffsetPx;
+
+    if (!Number.isFinite(targetScrollTop)) return null;
+    return Math.max(0, Math.trunc(targetScrollTop));
+}
+
+function resolveTranscriptViewportListDataItemIdAtIndex(
+    listData: TranscriptViewportListData,
+    index: number,
+): string | null {
+    const item = listData[index];
+    const itemId = item?.id;
+    return typeof itemId === 'string' && itemId.trim().length > 0 ? itemId : null;
+}
+
+function readScrollableChatListItemLayout(
+    node: ScrollableChatListRef | null,
+    index: number,
+): Readonly<{ height: number; y: number }> | null {
+    if (!node || typeof node.getLayout !== 'function') return null;
+    try {
+        const layout = node.getLayout(index);
+        if (!layout) return null;
+        if (!Number.isFinite(layout.y) || !Number.isFinite(layout.height)) return null;
+        return {
+            height: Math.max(0, layout.height),
+            y: layout.y,
+        };
+    } catch {
+        return null;
+    }
+}

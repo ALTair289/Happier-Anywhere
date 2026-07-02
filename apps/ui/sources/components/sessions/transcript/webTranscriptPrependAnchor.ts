@@ -1,3 +1,4 @@
+import { queryExactWebTranscriptDataTestId } from '@/components/sessions/transcript/webTranscriptDomTestId';
 import type { WebTranscriptScrollMetrics } from '@/components/sessions/transcript/webTranscriptScrollMetrics';
 
 export const TRANSCRIPT_WEB_PREPEND_ANCHOR_TEST_ID_PREFIX = 'transcript-item-';
@@ -45,6 +46,11 @@ function resolveElementByTestId(params: Readonly<{
     container: HTMLElement;
     anchorTestId: string;
 }>): HTMLElement | null {
+    const exactMatch = queryExactWebTranscriptDataTestId(params.container, params.anchorTestId);
+    if (exactMatch.attempted) {
+        return typeof HTMLElement !== 'undefined' && exactMatch.element instanceof HTMLElement ? exactMatch.element : null;
+    }
+
     const nodes = params.container.querySelectorAll('[data-testid]');
     for (const node of nodes) {
         if (!(node instanceof HTMLElement)) continue;

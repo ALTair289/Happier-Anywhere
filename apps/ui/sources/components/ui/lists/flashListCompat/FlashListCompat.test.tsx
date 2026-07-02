@@ -14,6 +14,7 @@ describe('FlashListCompat', () => {
     vi.resetModules();
     vi.doUnmock('@shopify/flash-list');
     vi.doUnmock('@/components/ui/lists/flashListCompat/FlashListCompat');
+    vi.doUnmock('react-native');
   });
 
   it('falls back when the FlashList module throws during import', async () => {
@@ -143,6 +144,153 @@ describe('FlashListCompat', () => {
 
     expect(props.initialScrollIndexParams.viewOffset).toBe(32);
     expect(loads).toEqual([42]);
+  });
+
+  it('accepts the Happier offset-correction pause prop on the compat surface', () => {
+    const props = {
+      data: [],
+      renderItem: () => null,
+      happierPauseOffsetCorrection: true,
+    } satisfies FlashListPropsCompat<CompatTypeTestItem>;
+
+    expect(props.happierPauseOffsetCorrection).toBe(true);
+  });
+
+  it('accepts FlashList v2 maintain-visible-content-position props on the compat surface', () => {
+    const startFromBottomProps = {
+      data: [],
+      renderItem: () => null,
+      maintainVisibleContentPosition: {
+        startRenderingFromBottom: false,
+        autoscrollToBottomThreshold: 0.25,
+        autoscrollToTopThreshold: 0.5,
+        animateAutoScrollToBottom: true,
+      },
+    } satisfies FlashListPropsCompat<CompatTypeTestItem>;
+    const disabledFalseProps = {
+      data: [],
+      renderItem: () => null,
+      maintainVisibleContentPosition: {
+        disabled: false,
+      },
+    } satisfies FlashListPropsCompat<CompatTypeTestItem>;
+
+    expect(startFromBottomProps.maintainVisibleContentPosition.startRenderingFromBottom).toBe(false);
+    expect(startFromBottomProps.maintainVisibleContentPosition.animateAutoScrollToBottom).toBe(true);
+    expect(disabledFalseProps.maintainVisibleContentPosition.disabled).toBe(false);
+  });
+
+  it('filters FlashList-only maintain-visible-content-position props from the fallback FlatList', async () => {
+    let capturedFlatListProps: Record<string, unknown> | null = null;
+    const getCapturedFlatListProps = (): Record<string, unknown> | null => capturedFlatListProps;
+
+    vi.doUnmock('@/components/ui/lists/flashListCompat/FlashListCompat');
+    vi.doMock('react-native', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('react-native')>();
+      return {
+        ...actual,
+        FlatList: React.forwardRef((props: Record<string, unknown>, _ref: React.ForwardedRef<unknown>) => {
+          capturedFlatListProps = props;
+          return React.createElement('FlatList');
+        }),
+      };
+    });
+    vi.doMock('@shopify/flash-list', () => {
+      throw new TypeError('FlashList unavailable in this test runtime');
+    });
+
+    const module = await import('@/components/ui/lists/flashListCompat/FlashListCompat');
+
+    await act(async () => {
+      renderer.create(
+        <module.FlashList
+          data={[]}
+          renderItem={() => null}
+          maintainVisibleContentPosition={{ startRenderingFromBottom: true }}
+        />,
+      );
+    });
+
+    expect(getCapturedFlatListProps()?.maintainVisibleContentPosition).toBeUndefined();
+  });
+
+  it('preserves React Native maintain-visible-content-position props on the fallback FlatList', async () => {
+    let capturedFlatListProps: Record<string, unknown> | null = null;
+    const getCapturedFlatListProps = (): Record<string, unknown> | null => capturedFlatListProps;
+
+    vi.doUnmock('@/components/ui/lists/flashListCompat/FlashListCompat');
+    vi.doMock('react-native', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('react-native')>();
+      return {
+        ...actual,
+        FlatList: React.forwardRef((props: Record<string, unknown>, _ref: React.ForwardedRef<unknown>) => {
+          capturedFlatListProps = props;
+          return React.createElement('FlatList');
+        }),
+      };
+    });
+    vi.doMock('@shopify/flash-list', () => {
+      throw new TypeError('FlashList unavailable in this test runtime');
+    });
+
+    const module = await import('@/components/ui/lists/flashListCompat/FlashListCompat');
+    const mvcp = { minIndexForVisible: 0, autoscrollToTopThreshold: 10 };
+
+    await act(async () => {
+      renderer.create(
+        <module.FlashList
+          data={[]}
+          renderItem={() => null}
+          maintainVisibleContentPosition={mvcp}
+        />,
+      );
+    });
+
+    expect(getCapturedFlatListProps()?.maintainVisibleContentPosition).toEqual(mvcp);
+  });
+
+  it('strips FlashList-only maintain-visible-content-position keys from mixed fallback props', async () => {
+    let capturedFlatListProps: Record<string, unknown> | null = null;
+    const getCapturedFlatListProps = (): Record<string, unknown> | null => capturedFlatListProps;
+
+    vi.doUnmock('@/components/ui/lists/flashListCompat/FlashListCompat');
+    vi.doMock('react-native', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('react-native')>();
+      return {
+        ...actual,
+        FlatList: React.forwardRef((props: Record<string, unknown>, _ref: React.ForwardedRef<unknown>) => {
+          capturedFlatListProps = props;
+          return React.createElement('FlatList');
+        }),
+      };
+    });
+    vi.doMock('@shopify/flash-list', () => {
+      throw new TypeError('FlashList unavailable in this test runtime');
+    });
+
+    const module = await import('@/components/ui/lists/flashListCompat/FlashListCompat');
+
+    await act(async () => {
+      renderer.create(
+        <module.FlashList
+          data={[]}
+          renderItem={() => null}
+          maintainVisibleContentPosition={{
+            minIndexForVisible: 0,
+            autoscrollToTopThreshold: 10,
+            startRenderingFromBottom: true,
+            autoscrollToBottomThreshold: 0.25,
+            animateAutoScrollToBottom: false,
+            disabled: false,
+          }}
+        />,
+      );
+    });
+
+    expect(getCapturedFlatListProps()?.maintainVisibleContentPosition).toEqual({
+      minIndexForVisible: 0,
+      autoscrollToTopThreshold: 10,
+    });
   });
 
   it('does not expose unsupported viewPosition on initial scroll params', () => {

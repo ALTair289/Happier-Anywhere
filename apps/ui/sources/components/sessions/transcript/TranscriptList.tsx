@@ -1,27 +1,19 @@
 import * as React from 'react';
-import { FlatList, Platform, View } from 'react-native';
-import { FlashList } from '@/components/ui/lists/flashListCompat/FlashListCompat';
+import { Platform, View } from 'react-native';
 import { MessageViewWithSessionCommon } from '@/components/sessions/transcript/MessageView';
 import { ChatFooter } from '@/components/sessions/transcript/ChatFooter';
 import type { Message } from '@/sync/domains/messages/messageTypes';
 import type { Metadata } from '@/sync/domains/state/storageTypes';
-import { useSetting } from '@/sync/domains/state/storage';
 import { sync } from '@/sync/sync';
 import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
 import {
-    TRANSCRIPT_NATIVE_SCROLL_EVENT_THROTTLE_MS,
     TRANSCRIPT_TOP_GUTTER_PX,
-    TRANSCRIPT_WEB_FLASH_LIST_SCROLL_EVENT_THROTTLE_MS,
 } from '@/components/sessions/transcript/_constants';
 import { useTranscriptSessionCommon } from '@/components/sessions/transcript/transcriptSessionCommon';
 import { useOptionalTranscriptSelectionState } from '@/components/sessions/transcript/messageSelection/TranscriptMessageSelectionContext';
-
-type TranscriptInteraction = {
-    canSendMessages: boolean;
-    canApprovePermissions: boolean;
-    permissionDisabledReason?: 'public' | 'readOnly' | 'notGranted' | 'inactive';
-    disableToolNavigation?: boolean;
-};
+import { TranscriptListShell } from '@/components/sessions/transcript/viewport/shell/TranscriptListShell';
+import { resolveReadOnlyTranscriptListShellFrame } from '@/components/sessions/transcript/viewport/shell/transcriptListShellCapabilities';
+import { deriveTranscriptInteraction } from '@/utils/sessions/deriveTranscriptInteraction';
 
 export type TranscriptBottomNotice = {
     title: string;
@@ -45,27 +37,34 @@ const ListFooter = React.memo((props: { bottomNotice?: TranscriptBottomNotice | 
     return <ChatFooter notice={props.bottomNotice ?? null} controlledByUser={false} />;
 });
 
+const PUBLIC_READ_ONLY_TRANSCRIPT_INTERACTION = deriveTranscriptInteraction({
+    kind: 'public',
+    disableToolNavigation: true,
+});
+
 export const TranscriptList = React.memo((props: {
     sessionId: string;
     metadata: Metadata | null;
     messages: Message[];
-    interaction: TranscriptInteraction;
     bottomNotice?: TranscriptBottomNotice | null;
     isLoaded?: boolean;
 }) => {
-    const transcriptListImplementation = useSetting('transcriptListImplementation');
     const transcriptSessionCommon = useTranscriptSessionCommon(props.sessionId);
     const transcriptMessageSelection = useOptionalTranscriptSelectionState();
     const sessionThinkingDisplayMode = transcriptSessionCommon.messageDisplay.sessionThinkingDisplayMode;
     const sessionThinkingInlinePresentation = transcriptSessionCommon.messageDisplay.sessionThinkingInlinePresentation;
-    const listImplementation = transcriptListImplementation === 'flatlist_legacy' ? 'flatlist_legacy' : 'flash_v2';
+    const shellFrame = React.useMemo(() => resolveReadOnlyTranscriptListShellFrame({
+        accessKind: 'public',
+        bottomNoticeVisible: props.bottomNotice != null,
+        platformOS: Platform.OS,
+    }), [props.bottomNotice]);
     const listData = React.useMemo(() => {
-        if (listImplementation === 'flatlist_legacy') {
-            // Legacy: inverted lists expect newest-first input.
+        if (shellFrame.dataOrder === 'newest-first') {
+            // Inverted lists expect newest-first input.
             return [...props.messages].reverse();
         }
         return props.messages;
-    }, [listImplementation, props.messages]);
+    }, [props.messages, shellFrame.dataOrder]);
 
     const thinkingDefaultExpanded =
         sessionThinkingDisplayMode === 'inline' && sessionThinkingInlinePresentation === 'full';
@@ -101,7 +100,7 @@ export const TranscriptList = React.memo((props: {
                 message={item}
                 metadata={props.metadata}
                 sessionId={props.sessionId}
-                interaction={props.interaction}
+                interaction={PUBLIC_READ_ONLY_TRANSCRIPT_INTERACTION}
                 forkCommon={transcriptSessionCommon.fork}
                 messageDisplayCommon={transcriptSessionCommon.messageDisplay}
                 toolChromeCommon={transcriptSessionCommon.toolChrome}
@@ -111,7 +110,6 @@ export const TranscriptList = React.memo((props: {
             />
         );
     }, [
-        props.interaction,
         props.metadata,
         props.sessionId,
         resolveThinkingExpanded,
@@ -124,41 +122,15 @@ export const TranscriptList = React.memo((props: {
     ]);
 
     return (
-        listImplementation === 'flatlist_legacy' ? (
-            <FlatList
-                data={listData}
-                extraData={transcriptMessageSelection.selectionVersion}
-                inverted={true}
-                keyExtractor={keyExtractor}
-                maintainVisibleContentPosition={{
-                    minIndexForVisible: 0,
-                    autoscrollToTopThreshold: 10,
-                }}
-                keyboardShouldPersistTaps="handled"
-                keyboardDismissMode="none"
-                scrollEventThrottle={TRANSCRIPT_NATIVE_SCROLL_EVENT_THROTTLE_MS}
-                renderItem={renderItem}
-                ListHeaderComponent={<ListHeader isLoading={props.isLoaded === false} />}
-                ListFooterComponent={<ListFooter bottomNotice={props.bottomNotice ?? null} />}
-            />
-        ) : (
-            <FlashList
-                data={listData}
-                extraData={transcriptMessageSelection.selectionVersion}
-                keyExtractor={keyExtractor}
-                getItemType={getItemType}
-                maintainVisibleContentPosition={{ startRenderingFromBottom: true }}
-                keyboardShouldPersistTaps="handled"
-                keyboardDismissMode="none"
-                scrollEventThrottle={
-                    Platform.OS === 'web'
-                        ? TRANSCRIPT_WEB_FLASH_LIST_SCROLL_EVENT_THROTTLE_MS
-                        : TRANSCRIPT_NATIVE_SCROLL_EVENT_THROTTLE_MS
-                }
-                renderItem={renderItem}
-                ListHeaderComponent={<ListHeader isLoading={props.isLoaded === false} />}
-                ListFooterComponent={<ListFooter bottomNotice={props.bottomNotice ?? null} />}
-            />
-        )
+        <TranscriptListShell<Message>
+            data={listData}
+            extraData={transcriptMessageSelection.selectionVersion}
+            keyExtractor={keyExtractor}
+            getItemType={getItemType}
+            renderItem={renderItem}
+            frame={shellFrame}
+            header={<ListHeader isLoading={props.isLoaded === false} />}
+            footer={<ListFooter bottomNotice={props.bottomNotice ?? null} />}
+        />
     );
 });
