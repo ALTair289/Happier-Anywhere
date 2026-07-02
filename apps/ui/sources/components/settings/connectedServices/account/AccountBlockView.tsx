@@ -46,6 +46,8 @@ export type AccountBlockQuotaView = Readonly<{
     loading: boolean;
     hasSnapshot: boolean;
     isStale: boolean;
+    /** Whether refresh updates the same source currently displayed in this block. */
+    canRefresh: boolean;
     /** True while a force-refresh is in flight (drives the refreshing indicator). */
     isRefreshing: boolean;
     /** Latest action/load error (consume failure, load failure) for inline display. */
@@ -433,7 +435,7 @@ export const AccountBlockView = React.memo<AccountBlockViewProps>((props) => {
                     />
                 </Pressable>
             ) : null}
-            {!isPoolMember && quota ? (
+            {!isPoolMember && quota?.canRefresh ? (
                 // Dedicated force-refresh control: pulls a fresh quota snapshot
                 // (server refresh + poll) and the row's gauge/USAGE/RESETS update
                 // directly when it lands. This is the ONLY refresh affordance — the
@@ -516,6 +518,7 @@ export const AccountBlockView = React.memo<AccountBlockViewProps>((props) => {
     const hasInteractiveTrailing = (isPoolMember && props.onToggleEnabled != null)
         || (isPoolMember && props.onSetActive != null)
         || props.onToggleDefault != null
+        || (!isPoolMember && quota?.canRefresh === true)
         || actions.length > 0
         || (isPoolMember && props.reorderGesture != null);
 

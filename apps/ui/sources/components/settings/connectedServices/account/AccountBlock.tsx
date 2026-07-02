@@ -110,12 +110,15 @@ function buildQuotaView(hook: UseConnectedServiceQuotaSnapshotResult): AccountBl
 
     const usageRows = resolveAccountUsageRows(gauge?.allMeterRows);
     const capacityPct = gauge ? deriveAccountCapacityPct(gauge.allMeterRows) : null;
-    const resetRows = buildQuotaResetRows(snapshot?.recoveryCredits, nowMs, RESET_COUNTDOWN_DAYS_FORMATTER);
+    const resetRows = hook.canConsumeRecoveryCredit
+        ? buildQuotaResetRows(snapshot?.recoveryCredits, nowMs, RESET_COUNTDOWN_DAYS_FORMATTER)
+        : [];
 
     return {
         loading: hook.loading,
         hasSnapshot: snapshot != null,
         isStale: hook.isStale,
+        canRefresh: hook.canRefresh,
         isRefreshing: hook.isRefreshing,
         error: hook.error,
         refresh: hook.refresh,
@@ -123,14 +126,16 @@ function buildQuotaView(hook: UseConnectedServiceQuotaSnapshotResult): AccountBl
         usageRows,
         capacityPct,
         resetRows,
-        resetAvailableCount: hook.recoveryCreditSummary?.availableCount ?? 0,
+        resetAvailableCount: hook.canConsumeRecoveryCredit
+            ? hook.recoveryCreditSummary?.availableCount ?? 0
+            : 0,
         pinnedMeterIds: hook.pinnedMeterIds,
         togglePinnedMeter: hook.togglePinnedMeter,
         consumeRecoveryCredit: hook.consumeRecoveryCredit,
         consumeRecoveryCreditPending: hook.consumeRecoveryCreditPending,
         consumeRecoveryCreditPendingTarget: hook.consumeRecoveryCreditPendingTarget,
         // A reset can only be consumed when a target machine is resolved.
-        canConsume: hook.recoveryCreditMachineId != null,
+        canConsume: hook.canConsumeRecoveryCredit && hook.recoveryCreditMachineId != null,
     };
 }
 

@@ -42,6 +42,7 @@ let quotasEnabled = false;
 vi.mock('@/hooks/server/useFeatureEnabled', () => ({
   useFeatureEnabled: (featureId: string) => {
     if (featureId === 'connectedServices') return connectedServicesEnabled;
+    if (featureId === 'connectedServices.accountGroups') return false;
     if (featureId === 'connectedServices.quotas') return quotasEnabled;
     return true;
   },
@@ -55,7 +56,7 @@ vi.mock('@/sync/store/hooks', async () => {
       connectedServicesV2: [
         {
           serviceId: 'openai-codex',
-          profiles: [{ profileId: 'work', status: 'connected', providerEmail: null }],
+          profiles: [{ profileId: 'work', status: 'connected', kind: 'oauth', providerEmail: null }],
         },
       ],
     }),

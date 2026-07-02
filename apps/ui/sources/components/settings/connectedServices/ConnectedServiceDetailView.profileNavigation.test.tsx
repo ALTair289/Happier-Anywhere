@@ -33,7 +33,7 @@ vi.mock('@/auth/context/AuthContext', () => ({
 }));
 
 vi.mock('@/hooks/server/useFeatureEnabled', () => ({
-  useFeatureEnabled: () => true,
+  useFeatureEnabled: (featureId: string) => featureId !== 'connectedServices.accountGroups',
 }));
 
 vi.mock('@/sync/store/hooks', async () => {
@@ -86,7 +86,7 @@ describe('ConnectedServiceDetailView profile navigation', () => {
     // Opening the account is now the `open` kebab action on the shared AccountBlock.
     const actionHost = screen.tree.root
       .findAll((node) => (node.type as unknown) === 'ItemRowActions')
-      .find((host) => host.props?.title === 'work');
+      .find((host) => ((host.props?.actions ?? []) as ReadonlyArray<{ id: string }>).some((action) => action.id === 'open'));
     const openAction = ((actionHost?.props?.actions ?? []) as ReadonlyArray<{ id: string; onPress: () => void }>)
       .find((action) => action.id === 'open');
     expect(openAction).toBeTruthy();

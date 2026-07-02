@@ -133,6 +133,8 @@ function buildQuotaResult(overrides: Partial<UseConnectedServiceQuotaSnapshotRes
         nowMs: NOW_MS,
         recoveryCreditSummary: { availableCount: 1, nextExpiresAtMs: NOW_MS + 3 * DAY_MS, providerCreditId: 'pc-1' },
         recoveryCreditMachineId: 'machine-1',
+        canConsumeRecoveryCredit: true,
+        canRefresh: true,
         isRefreshing: false,
         refresh: vi.fn(async () => {}),
         consumeRecoveryCredit: vi.fn(async () => {}),
@@ -331,7 +333,7 @@ describe('AccountBlock', () => {
         const screen = await renderAccountBlock();
 
         // Account default is expanded -> toggling collapses it, persisting the deviation only.
-        screen.findByTestId('acct:header')?.props.onPress?.();
+        await screen.pressByTestIdAsync('acct:header');
 
         expect(settingsState.writes).toContainEqual({ 'anthropic:account:work': true });
     });
@@ -341,7 +343,7 @@ describe('AccountBlock', () => {
         quotaHookState.value = quota;
         const screen = await renderAccountBlock();
 
-        screen.findByTestId('acct:pin:weekly')?.props.onPress?.();
+        await screen.pressByTestIdAsync('acct:pin:weekly');
 
         expect(quota.togglePinnedMeter).toHaveBeenCalledWith('weekly');
     });
@@ -361,6 +363,60 @@ describe('AccountBlock', () => {
 
         expect(screen.findByTestId('acct:usage-skeleton')).toBeTruthy();
         expect(screen.findAllByTestId('acct:meter:weekly').length).toBe(0);
+    });
+
+    it('shows quota errors inline without hiding the account row', async () => {
+        quotaHookState.value = buildQuotaResult({
+            snapshot: null,
+            loading: false,
+            error: 'quota load failed',
+        });
+
+        const screen = await renderAccountBlock();
+
+        expect(screen.findByTestId('acct:header')).toBeTruthy();
+        expect(screen.findByTestId('acct:quota-error')).toBeTruthy();
+        expect(screen.getTextContent()).toContain('quota load failed');
+    });
+
+    it('shows the refresh-in-flight state and disables duplicate refresh presses', async () => {
+        quotaHookState.value = buildQuotaResult({ isRefreshing: true });
+
+        const screen = await renderAccountBlock();
+        const refresh = screen.findByTestId('acct:refresh');
+
+        expect(screen.findByTestId('acct:refreshing')).toBeTruthy();
+        expect(refresh?.props.disabled).toBe(true);
+        expect(refresh?.props.accessibilityState).toEqual(expect.objectContaining({
+            busy: true,
+            disabled: true,
+        }));
+    });
+
+    it('invokes the quota refresh once per refresh-button press', async () => {
+        const refresh = vi.fn(async () => {});
+        quotaHookState.value = buildQuotaResult({ refresh });
+
+        const screen = await renderAccountBlock();
+
+        await screen.pressByTestIdAsync('acct:refresh');
+
+        expect(refresh).toHaveBeenCalledTimes(1);
+    });
+
+    it('renders the account header as a group when the trailing refresh button is present', async () => {
+        const screen = await renderAccountBlock();
+
+        expect(screen.findByTestId('acct:header')?.props.role).toBe('group');
+    });
+
+    it('keeps reset credits visible but disabled when no target machine is resolved', async () => {
+        quotaHookState.value = buildQuotaResult({ recoveryCreditMachineId: null });
+
+        const screen = await renderAccountBlock();
+
+        expect(screen.findByTestId('acct:resets-hint')).toBeTruthy();
+        expect(screen.findByTestId('acct:reset-use:pc-1')?.props.disabled).toBe(true);
     });
 
     describe('poolMember variant', () => {

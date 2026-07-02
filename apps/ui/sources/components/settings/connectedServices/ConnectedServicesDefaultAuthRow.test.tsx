@@ -3,6 +3,7 @@ import renderer, { act } from 'react-test-renderer';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { renderScreen } from '@/dev/testkit';
 import { installConnectedServicesCommonModuleMocks } from './connectedServicesTestHelpers';
+import { AGENTS_CORE } from '@happier-dev/agents';
 import type { ConnectedServiceId, ConnectedServicesDefaultAuthByAgentIdV1 } from '@happier-dev/protocol';
 import type { ConnectedServicesServiceBinding } from '@/sync/domains/connectedServices/connectedServicesAgentOptionStateBindings';
 
@@ -377,5 +378,71 @@ describe('ConnectedServicesDefaultAuthRow', () => {
         )[0]!.props;
         expect(dropdown.itemTrigger.detailFormatter(null)).toBe('connectedServices.authChip.nativeLabel');
         expect(dropdown.itemTrigger.subtitle).toBe('connectedServices.defaultAuth.warning.connected_group_unavailable');
+    });
+
+    it('offers Claude subscription OAuth, setup-token, and Anthropic API key as selectable connected options for OpenCode', async () => {
+        const { ConnectedServicesDefaultAuthRow } = await import('./ConnectedServicesDefaultAuthRow');
+        const setDefaultAuthSettings = vi.fn();
+
+        const { tree } = await renderScreen(
+            <ConnectedServicesDefaultAuthRow
+                agentId="opencode"
+                agentTitle="OpenCode"
+                agentCore={{ connectedServices: AGENTS_CORE.opencode.connectedServices }}
+                connectedServicesEnabled={true}
+                accountGroupsEnabled={false}
+                accountProfileConnectedServicesV2={[
+                    {
+                        serviceId: 'claude-subscription' as ConnectedServiceId,
+                        profiles: [
+                            { profileId: 'claude-oauth', status: 'connected', kind: 'oauth', providerEmail: 'oauth@example.com' },
+                            { profileId: 'claude-setup', status: 'connected', kind: 'token', providerEmail: 'setup@example.com' },
+                        ],
+                    },
+                    {
+                        serviceId: 'anthropic' as ConnectedServiceId,
+                        profiles: [
+                            { profileId: 'api', status: 'connected', kind: 'token', providerEmail: 'api@example.com' },
+                        ],
+                    },
+                ]}
+                settings={{
+                    connectedServicesProfileLabelByKey: {},
+                    connectedServicesDefaultProfileByServiceId: {},
+                    connectedServicesDefaultAuthByAgentIdV1: { v: 1, bindingsByAgentId: {} },
+                }}
+                setDefaultAuthSettings={setDefaultAuthSettings}
+                onOpenConnectedServiceSettings={vi.fn()}
+            />,
+        );
+
+        const dropdown = tree.root.findAll((node) =>
+            node.props?.itemTrigger?.itemProps?.testID === 'settings-connected-services-default-auth-opencode'
+        )[0]!.props as Record<string, any>;
+        const itemIds: string[] = dropdown.items.map((item: { id: string }) => item.id);
+
+        // All three Anthropic auth options surface as real selectable connected profiles:
+        // browser-login OAuth + setup-token (claude-subscription) and Console API key (anthropic).
+        expect(itemIds).toContain('connected-service:claude-subscription:profile:claude-oauth');
+        expect(itemIds).toContain('connected-service:claude-subscription:profile:claude-setup');
+        expect(itemIds).toContain('connected-service:anthropic:profile:api');
+
+        // Selecting the browser-login OAuth profile writes a real connected binding for OpenCode
+        // (previously OAuth profiles surfaced only as a non-selectable setup-token guidance row).
+        await act(async () => {
+            dropdown.onSelect('connected-service:claude-subscription:profile:claude-oauth');
+        });
+
+        expect(setDefaultAuthSettings).toHaveBeenCalledWith({
+            v: 1,
+            bindingsByAgentId: {
+                opencode: {
+                    v: 1,
+                    bindingsByServiceId: {
+                        'claude-subscription': { source: 'connected', selection: 'profile', profileId: 'claude-oauth' },
+                    },
+                },
+            },
+        });
     });
 });

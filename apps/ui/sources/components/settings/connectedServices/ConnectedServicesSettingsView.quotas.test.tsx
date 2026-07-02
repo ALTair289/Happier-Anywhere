@@ -6,8 +6,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   ConnectedServiceQuotaSnapshotV1Schema,
   ConnectedServicesProviderStateSharingSettingsV1Schema,
-  sealAccountScopedBlobCiphertext,
 } from '@happier-dev/protocol';
+import { sealLegacyConnectedServiceQuotaSnapshotFixtureCiphertext } from '@happier-dev/protocol/testing/accountScopedCipherFixtures';
 import { installConnectedServicesCommonModuleMocks } from './connectedServicesTestHelpers';
 import type { fetchAccountEncryptionMode } from '@/sync/api/account/apiAccountEncryptionMode';
 import type { getConnectedServiceQuotaSnapshotSealed } from '@/sync/api/account/apiConnectedServicesQuotasV2';
@@ -223,8 +223,7 @@ describe('ConnectedServicesSettingsView quotas', () => {
         },
       ],
     });
-    const ciphertext = sealAccountScopedBlobCiphertext({
-      kind: 'connected_service_quota_snapshot',
+    const ciphertext = sealLegacyConnectedServiceQuotaSnapshotFixtureCiphertext({
       material: { type: 'legacy', secret: secretBytes },
       payload: snapshot,
       randomBytes: (length) => new Uint8Array(length).fill(7),

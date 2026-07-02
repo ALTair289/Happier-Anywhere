@@ -5,11 +5,21 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { __resetConnectedServiceQuotaSnapshotStore } from '@/hooks/server/connectedServices/connectedServiceQuotaSnapshotStore';
 
-import { ConnectedServiceQuotaSnapshotV1Schema, sealAccountScopedBlobCiphertext } from '@happier-dev/protocol';
+import {
+  buildProviderAccountUsageRecordId,
+  ConnectedServiceQuotaSnapshotV1Schema,
+  ProviderAccountUsageSnapshotV1Schema,
+  type ProviderAccountUsageSnapshotV1,
+} from '@happier-dev/protocol';
 import type { getConnectedServiceQuotaSnapshotSealed } from '@/sync/api/account/apiConnectedServicesQuotasV2';
 import type { fetchAccountEncryptionMode } from '@/sync/api/account/apiAccountEncryptionMode';
 import type { getConnectedServiceQuotaSnapshotPlain } from '@/sync/api/account/apiConnectedServicesQuotasV3';
 import { renderScreen } from '@/dev/testkit';
+import { resolveAuthCredentialsScopeKey } from '@/auth/storage/resolveAuthCredentialsScopeKey';
+import {
+  __resetProviderAccountUsageSnapshotCache,
+  writeProviderAccountUsageSnapshotToCache,
+} from '@/sync/domains/connectedServices/accountUsage/cache';
 
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -72,7 +82,7 @@ vi.mock('@/auth/context/AuthContext', () => ({
   useAuth: () => ({ credentials: stableCredentials }),
 }));
 
-const useFeatureEnabledSpy = vi.fn((_featureId: string) => true);
+const useFeatureEnabledSpy = vi.fn((featureId: string) => featureId !== 'connectedServices.accountGroups');
 vi.mock('@/hooks/server/useFeatureEnabled', () => ({
   useFeatureEnabled: (featureId: string) => useFeatureEnabledSpy(featureId),
 }));
@@ -154,6 +164,9 @@ describe('ConnectedServiceDetailView quotas', () => {
     // The quota snapshot store is a module-level cache keyed by scope; reset it so
     // each scenario re-runs the plain/sealed endpoint decision from a clean slate.
     __resetConnectedServiceQuotaSnapshotStore();
+    __resetProviderAccountUsageSnapshotCache();
+    useFeatureEnabledSpy.mockReset();
+    useFeatureEnabledSpy.mockImplementation((featureId: string) => featureId !== 'connectedServices.accountGroups');
     applySettingsSpy.mockClear();
     getConnectedServiceQuotaSnapshotSealedSpy.mockReset();
     getConnectedServiceQuotaSnapshotSealedSpy.mockResolvedValue(null);
@@ -174,6 +187,7 @@ describe('ConnectedServiceDetailView quotas', () => {
   const setFeatureFlags = (flags: Record<string, boolean>) => {
     useFeatureEnabledSpy.mockImplementation((featureId: string) => {
       if (featureId in flags) return Boolean(flags[featureId]);
+      if (featureId === 'connectedServices.accountGroups') return false;
       return true;
     });
   };
@@ -203,24 +217,47 @@ describe('ConnectedServiceDetailView quotas', () => {
     });
   }
 
-  function sealSnapshot(snapshot: ReturnType<typeof buildWeeklySnapshot>) {
-    const secretBytes = new Uint8Array(32).fill(3);
-    const ciphertext = sealAccountScopedBlobCiphertext({
-      kind: 'connected_service_quota_snapshot',
-      material: { type: 'legacy', secret: secretBytes },
-      payload: snapshot,
-      randomBytes: (length) => new Uint8Array(length).fill(7),
+  function buildAccountUsageSnapshot(): ProviderAccountUsageSnapshotV1 {
+    const recordKey = {
+      providerId: 'codex',
+      accountSubjectId: 'codex-account-1',
+      subjectKind: 'account',
+      quotaScope: 'account',
+    } as const;
+    return ProviderAccountUsageSnapshotV1Schema.parse({
+      v: 1,
+      recordId: buildProviderAccountUsageRecordId(recordKey),
+      recordKey,
+      providerId: 'codex',
+      accountSubject: { kind: 'providerSubject', id: 'codex-account-1' },
+      observedAtMs: 1,
+      fetchedAtMs: 1,
+      staleAfterMs: 60_000,
+      source: 'providerHttp',
+      confidence: 'confirmed',
+      state: 'loaded_data',
+      planLabel: 'Pro',
+      accountLabel: 'Codex account',
+      meters: [
+        {
+          meterId: 'account-usage-weekly',
+          label: 'Account usage weekly',
+          used: 82,
+          limit: 100,
+          unit: 'count',
+          utilizationPct: null,
+          resetsAt: null,
+          status: 'ok',
+          details: { limitCategory: 'usage_limit' },
+        },
+      ],
     });
-    return {
-      sealed: { format: 'account_scoped_v1' as const, ciphertext },
-      metadata: { fetchedAt: snapshot.fetchedAt, staleAfterMs: snapshot.staleAfterMs, status: 'ok' as const },
-    };
   }
 
   it('renders the AccountBlock USAGE meter when the quotas feature is enabled', async () => {
     setFeatureFlags({ connectedServices: true, 'connectedServices.quotas': true });
-    fetchAccountEncryptionModeSpy.mockResolvedValue({ mode: 'e2ee', updatedAt: 0 });
-    getConnectedServiceQuotaSnapshotSealedSpy.mockResolvedValue(sealSnapshot(buildWeeklySnapshot()));
+    fetchAccountEncryptionModeSpy.mockResolvedValue({ mode: 'plain', updatedAt: 0 });
+    getConnectedServiceQuotaSnapshotPlainSpy.mockResolvedValue(buildWeeklySnapshot());
 
     const { ConnectedServiceDetailView } = await import('./ConnectedServiceDetailView');
     const screen = await renderScreen(<ConnectedServiceDetailView />);
@@ -285,8 +322,8 @@ describe('ConnectedServiceDetailView quotas', () => {
 
   it('persists pinned meter ids via settings when the AccountBlock pin is toggled', async () => {
     setFeatureFlags({ connectedServices: true, 'connectedServices.quotas': true });
-    fetchAccountEncryptionModeSpy.mockResolvedValue({ mode: 'e2ee', updatedAt: 0 });
-    getConnectedServiceQuotaSnapshotSealedSpy.mockResolvedValue(sealSnapshot(buildWeeklySnapshot()));
+    fetchAccountEncryptionModeSpy.mockResolvedValue({ mode: 'plain', updatedAt: 0 });
+    getConnectedServiceQuotaSnapshotPlainSpy.mockResolvedValue(buildWeeklySnapshot());
 
     const { ConnectedServiceDetailView } = await import('./ConnectedServiceDetailView');
     const screen = await renderScreen(<ConnectedServiceDetailView />);
@@ -299,6 +336,27 @@ describe('ConnectedServiceDetailView quotas', () => {
     expect(applySettingsSpy).toHaveBeenCalledWith({
       connectedServicesQuotaPinnedMeterIdsByKey: { 'openai-codex/work': ['weekly'] },
     });
+  });
+
+  it('renders the AccountBlock usage meter from the connected-service quota view without duplicating cached provider account usage', async () => {
+    setFeatureFlags({ connectedServices: true, 'connectedServices.quotas': true });
+    fetchAccountEncryptionModeSpy.mockResolvedValue({ mode: 'plain', updatedAt: 0 });
+    getConnectedServiceQuotaSnapshotPlainSpy.mockResolvedValue(buildWeeklySnapshot());
+    writeProviderAccountUsageSnapshotToCache({
+      credentialScope: resolveAuthCredentialsScopeKey(stableCredentials),
+      snapshot: buildAccountUsageSnapshot(),
+    });
+
+    const { ConnectedServiceDetailView } = await import('./ConnectedServiceDetailView');
+    const screen = await renderScreen(<ConnectedServiceDetailView />);
+    await act(async () => {
+      await flushHookEffects({ cycles: 4, turns: 4 });
+    });
+
+    expect(getConnectedServiceQuotaSnapshotPlainSpy).toHaveBeenCalled();
+    expect(screen.findByTestId('account-block:work:usage')).toBeTruthy();
+    expect(screen.findByTestId('account-block:work:meter:weekly')).toBeTruthy();
+    expect(screen.findAllByTestId('account-block:work:meter:account-usage-weekly')).toHaveLength(0);
   });
 
   it('loads plaintext quota snapshots for plaintext accounts', async () => {

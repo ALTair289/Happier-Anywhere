@@ -177,6 +177,8 @@ function buildQuotaResult(overrides: Partial<UseConnectedServiceQuotaSnapshotRes
     nowMs: NOW_MS,
     recoveryCreditSummary: null,
     recoveryCreditMachineId: 'machine-1',
+    canConsumeRecoveryCredit: true,
+    canRefresh: true,
     isRefreshing: false,
     refresh: quotaHookState.refresh,
     consumeRecoveryCredit: vi.fn(async () => {}),
