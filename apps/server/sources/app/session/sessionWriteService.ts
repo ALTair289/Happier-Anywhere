@@ -8,12 +8,9 @@ import {
     isStoredContentKindAllowedForSessionByStoragePolicy,
     PrimaryTurnStatusV1Schema,
     TranscriptRawRecordV1Schema,
-    SESSION_MESSAGE_USER_ATTENTION_IMPACT,
-    agentEventAttentionImpact,
     agentEventLocalIdAttentionImpact,
     SessionTurnMutationV1Schema,
     SessionRuntimeIssueV1Schema,
-    TranscriptRawAgentEventV1Schema,
     type PrimaryTurnStatusV1,
     type SessionRuntimeIssueV1,
     type SessionTurnMutationReceiptV1,
@@ -25,6 +22,7 @@ import {
 import { resolveEncryptionWriteRejectionCode, type EncryptionPolicyRejectionCode } from "@/app/session/encryptionRejectionCodes";
 import { isDeepStrictEqual } from "node:util";
 import { parseSessionMessageSidechainId } from "./parseSessionMessageSidechainId";
+import { resolveMessageAttentionImpact } from "./messageAttentionImpact";
 import { didSessionActivityBadgeContributionChange, type SessionActivityBadgeInputs } from "@/app/activity/accountActivityBadge";
 import {
     resolveSessionReadCursorOperation,
@@ -169,27 +167,6 @@ function toSessionActivityBadgeInputs(
         active: value?.active ?? true,
         archivedAt: value?.archivedAt ?? null,
     };
-}
-
-function resolvePlainStoredAgentEvent(content: PrismaJson.SessionMessageContent): ReturnType<typeof TranscriptRawAgentEventV1Schema.parse> | null {
-    if (content.t !== "plain") return null;
-    const parsed = TranscriptRawRecordV1Schema.safeParse(content.v);
-    if (
-        !parsed.success
-        || parsed.data.role !== "agent"
-        || parsed.data.content.type !== "event"
-    ) return null;
-    const event = TranscriptRawAgentEventV1Schema.safeParse(parsed.data.content.data);
-    return event.success ? event.data : null;
-}
-
-function resolveMessageAttentionImpact(params: Readonly<{
-    content: PrismaJson.SessionMessageContent;
-    explicitAttentionImpact?: SessionMessageAttentionImpact;
-}>): SessionMessageAttentionImpact {
-    if (params.explicitAttentionImpact) return params.explicitAttentionImpact;
-    const event = resolvePlainStoredAgentEvent(params.content);
-    return event ? agentEventAttentionImpact(event) : SESSION_MESSAGE_USER_ATTENTION_IMPACT;
 }
 
 function shouldAdvanceReadCursorForNonUnreadMessage(before: SessionActivityBadgeInputs): boolean {

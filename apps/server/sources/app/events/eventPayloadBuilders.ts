@@ -1,5 +1,6 @@
 import { AccountProfile } from "@/types";
 import { getPublicUrl } from "@/storage/blob/files";
+import { resolveMessageAttentionImpact } from "@/app/session/messageAttentionImpact";
 import { type UpdatePayload, type EphemeralPayload } from "./eventPayloadTypes";
 import type {
     PrimaryTurnStatusV1,
@@ -35,6 +36,13 @@ function normalizeRuntimeActivityActiveCount(value: number | null | undefined): 
 }
 
 function serializeUpdateMessage(message: UpdateMessagePayloadInput, options?: UpdateMessagePayloadOptions) {
+    // Every message fan-out payload must carry attentionImpact so clients that
+    // cannot decrypt the content (hidden-session projection routing) can patch
+    // their session-list projection instead of refetching the whole session
+    // list. Write paths that computed a trusted write-time impact pass it via
+    // options; otherwise derive the canonical content-only resolution here.
+    const attentionImpact = options?.attentionImpact
+        ?? resolveMessageAttentionImpact({ content: message.content });
     return {
         id: message.id,
         seq: message.seq,
@@ -42,7 +50,7 @@ function serializeUpdateMessage(message: UpdateMessagePayloadInput, options?: Up
         localId: message.localId,
         ...(typeof message.sidechainId === "string" && message.sidechainId ? { sidechainId: message.sidechainId } : {}),
         ...(typeof message.messageRole === "string" ? { messageRole: message.messageRole } : {}),
-        ...(options?.attentionImpact ? { attentionImpact: options.attentionImpact } : {}),
+        attentionImpact,
         createdAt: message.createdAt.getTime(),
         updatedAt: message.updatedAt.getTime(),
     };

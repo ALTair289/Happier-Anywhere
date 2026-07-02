@@ -31,7 +31,7 @@ import {
     ensureHandyMasterSecret,
     resolveLightSqliteDatabaseUrl,
 } from '@/flavors/light/env';
-import { applySqliteMigrationsIfNeeded } from '@/flavors/light/sqliteMigrations';
+import { applySqliteMigrationsIfNeeded, resolveSqliteDatabaseFilePath } from '@/flavors/light/sqliteMigrations';
 import {
     getFilesBackendFromEnv,
     getSocketAdapterFromEnv,
@@ -40,6 +40,7 @@ import {
     resolveDefaultSocketAdapter,
 } from '@/config/backends';
 import http from 'node:http';
+import { stat } from 'node:fs/promises';
 import { Server as SocketIOServer } from 'socket.io';
 import { createAdapter } from '@socket.io/redis-streams-adapter';
 import { getRedisClient } from '@/storage/redis/redis';
@@ -65,6 +66,55 @@ export function getServerRoleFromEnv(env: NodeJS.ProcessEnv): ServerRole {
 function shouldEnableRedisAdapterFromEnv(env: NodeJS.ProcessEnv, flavor: ServerFlavor): boolean {
     const socketAdapter = getSocketAdapterFromEnv(env, resolveDefaultSocketAdapter(flavor));
     return isRedisStreamsEnabled(env, socketAdapter);
+}
+
+function resolveSqliteSizeWarnBytes(env: NodeJS.ProcessEnv): number | null {
+    const raw = String(env.HAPPIER_SERVER_DB_SIZE_WARN_BYTES ?? '').trim();
+    if (!raw) return null;
+    const parsed = Number.parseInt(raw, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+async function warnIfSqliteFileExceedsThreshold(params: Readonly<{
+    path: string;
+    label: string;
+    thresholdBytes: number;
+}>): Promise<void> {
+    const fileStat = await stat(params.path).catch((error: any) => {
+        if (error?.code === 'ENOENT') return null;
+        throw error;
+    });
+    if (!fileStat || !fileStat.isFile() || fileStat.size <= params.thresholdBytes) return;
+
+    log(
+        {
+            module: 'sqlite',
+            level: 'warn',
+            path: params.path,
+            sizeBytes: fileStat.size,
+            thresholdBytes: params.thresholdBytes,
+        },
+        `SQLite ${params.label} file is larger than the configured warning threshold`,
+    );
+}
+
+async function warnIfSqliteDatabaseFilesExceedThreshold(env: NodeJS.ProcessEnv): Promise<void> {
+    const thresholdBytes = resolveSqliteSizeWarnBytes(env);
+    if (thresholdBytes === null) return;
+
+    const dbPath = resolveSqliteDatabaseFilePath(String(env.DATABASE_URL ?? '').trim());
+    if (!dbPath) return;
+
+    await warnIfSqliteFileExceedsThreshold({
+        path: dbPath,
+        label: 'database',
+        thresholdBytes,
+    });
+    await warnIfSqliteFileExceedsThreshold({
+        path: `${dbPath}-wal`,
+        label: 'WAL',
+        thresholdBytes,
+    });
 }
 
 export async function startServer(flavor: ServerFlavor): Promise<void> {
@@ -117,6 +167,7 @@ export async function startServer(flavor: ServerFlavor): Promise<void> {
         if (dataDir) {
             await applySqliteMigrationsIfNeeded({ env: process.env, dataDir });
         }
+        await warnIfSqliteDatabaseFilesExceedThreshold(process.env);
         await initDbSqlite();
     } else {
         throw new Error(`Unsupported HAPPY_DB_PROVIDER/HAPPIER_DB_PROVIDER: ${dbProvider}`);

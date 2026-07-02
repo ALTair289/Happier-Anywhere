@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { join } from "node:path";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import {
     createStartServerDbMocks,
     installStartServerDbModuleMock,
@@ -45,6 +48,7 @@ vi.mock("@/utils/process/shutdown", async () => {
 
 describe("startServer sqlite WAL checkpoint shutdown ordering", () => {
     const startServerHarness = createStartServerHarness();
+    const originalDbSizeWarnBytes = process.env.HAPPIER_SERVER_DB_SIZE_WARN_BYTES;
 
     beforeEach(() => {
         callOrder.length = 0;
@@ -66,6 +70,11 @@ describe("startServer sqlite WAL checkpoint shutdown ordering", () => {
 
     afterEach(() => {
         startServerHarness.restore();
+        if (originalDbSizeWarnBytes === undefined) {
+            delete process.env.HAPPIER_SERVER_DB_SIZE_WARN_BYTES;
+        } else {
+            process.env.HAPPIER_SERVER_DB_SIZE_WARN_BYTES = originalDbSizeWarnBytes;
+        }
     });
 
     it("stops the sqlite WAL checkpoint worker before disconnecting Prisma", async () => {
@@ -125,5 +134,99 @@ describe("startServer sqlite WAL checkpoint shutdown ordering", () => {
         expect(sqliteWalCheckpointMocks.resolveBusyTimeout).not.toHaveBeenCalled();
         expect(sqliteWalCheckpointMocks.startWorker).not.toHaveBeenCalled();
         expect(callOrder).toEqual(["db.$disconnect"]);
+    });
+
+    it("warns when the sqlite database file exceeds the configured boot threshold", async () => {
+        const tmpDir = await mkdtemp(join(tmpdir(), "happier-sqlite-size-"));
+        try {
+            const dbPath = join(tmpDir, "happier.sqlite");
+            await writeFile(dbPath, "12345", "utf8");
+            startServerHarness.prepareImport({
+                SERVER_ROLE: "api",
+                REDIS_URL: undefined,
+                HAPPY_DB_PROVIDER: "sqlite",
+                HAPPIER_DB_PROVIDER: "sqlite",
+                HAPPIER_SERVER_DB_SIZE_WARN_BYTES: "4",
+                DATABASE_URL: `file:${dbPath}`,
+                HAPPY_SERVER_LIGHT_DATA_DIR: undefined,
+                HAPPIER_SERVER_LIGHT_DATA_DIR: undefined,
+            });
+
+            const { startServer } = await import("./startServer");
+            const { log } = await import("@/utils/logging/log");
+
+            await startServer("light");
+
+            expect(log).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    module: "sqlite",
+                    level: "warn",
+                    path: dbPath,
+                    sizeBytes: 5,
+                    thresholdBytes: 4,
+                }),
+                expect.stringContaining("SQLite database file is larger than the configured warning threshold"),
+            );
+        } finally {
+            await rm(tmpDir, { recursive: true, force: true });
+        }
+    });
+
+    it("warns when the sqlite WAL file exceeds the configured boot threshold", async () => {
+        const tmpDir = await mkdtemp(join(tmpdir(), "happier-sqlite-wal-size-"));
+        try {
+            const dbPath = join(tmpDir, "happier.sqlite");
+            await writeFile(dbPath, "1", "utf8");
+            await writeFile(`${dbPath}-wal`, "12345", "utf8");
+            startServerHarness.prepareImport({
+                SERVER_ROLE: "api",
+                REDIS_URL: undefined,
+                HAPPY_DB_PROVIDER: "sqlite",
+                HAPPIER_DB_PROVIDER: "sqlite",
+                HAPPIER_SERVER_DB_SIZE_WARN_BYTES: "4",
+                DATABASE_URL: `file:${dbPath}`,
+                HAPPY_SERVER_LIGHT_DATA_DIR: undefined,
+                HAPPIER_SERVER_LIGHT_DATA_DIR: undefined,
+            });
+
+            const { startServer } = await import("./startServer");
+            const { log } = await import("@/utils/logging/log");
+
+            await startServer("light");
+
+            expect(log).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    module: "sqlite",
+                    level: "warn",
+                    path: `${dbPath}-wal`,
+                    sizeBytes: 5,
+                    thresholdBytes: 4,
+                }),
+                expect.stringContaining("SQLite WAL file is larger than the configured warning threshold"),
+            );
+        } finally {
+            await rm(tmpDir, { recursive: true, force: true });
+        }
+    });
+
+    it("does not inspect sqlite size thresholds for non-sqlite providers", async () => {
+        startServerHarness.prepareImport({
+            SERVER_ROLE: "api",
+            REDIS_URL: undefined,
+            HAPPY_DB_PROVIDER: "pglite",
+            HAPPIER_DB_PROVIDER: "pglite",
+            HAPPIER_SERVER_DB_SIZE_WARN_BYTES: "1",
+        });
+        startServerDbMocks.getDbProviderFromEnv.mockReturnValue("pglite");
+
+        const { startServer } = await import("./startServer");
+        const { log } = await import("@/utils/logging/log");
+
+        await startServer("light");
+
+        expect(log).not.toHaveBeenCalledWith(
+            expect.objectContaining({ module: "sqlite", level: "warn" }),
+            expect.any(String),
+        );
     });
 });

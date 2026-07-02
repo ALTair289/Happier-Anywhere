@@ -47,6 +47,30 @@ export function resolveSocketFastDisconnectLogThresholdMsFromEnv(env: Record<str
     return parsed;
 }
 
+export const DEFAULT_SOCKET_PLANNED_RESTART_RETRY_AFTER_MS = 10_000;
+
+export function resolveSocketPlannedRestartRetryAfterMsFromEnv(env: Record<string, string | undefined>): number {
+    const raw = (
+        env.HAPPIER_SOCKET_PLANNED_RESTART_RETRY_AFTER_MS
+        ?? env.HAPPY_SOCKET_PLANNED_RESTART_RETRY_AFTER_MS
+        ?? ''
+    ).trim();
+    if (!raw) return DEFAULT_SOCKET_PLANNED_RESTART_RETRY_AFTER_MS;
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_SOCKET_PLANNED_RESTART_RETRY_AFTER_MS;
+    return parsed;
+}
+
+export function emitSocketPlannedRestart(
+    io: Readonly<{ emit: (event: string, payload: { retryAfterMs: number }) => unknown }>,
+    retryAfterMs: number,
+): void {
+    const normalizedRetryAfterMs = Number.isFinite(retryAfterMs) && retryAfterMs > 0
+        ? Math.floor(retryAfterMs)
+        : DEFAULT_SOCKET_PLANNED_RESTART_RETRY_AFTER_MS;
+    io.emit('server:restarting', { retryAfterMs: normalizedRetryAfterMs });
+}
+
 export function startSocket(app: Fastify) {
     const socketAdapter = getSocketAdapterFromEnv(process.env, "memory");
     const shouldEnableRedisAdapter = isRedisStreamsEnabled(process.env, socketAdapter);
@@ -56,6 +80,7 @@ export function startSocket(app: Fastify) {
     );
     const machineTransferFeatureEnv = readMachineTransferFeatureEnv(process.env);
     const fastDisconnectLogThresholdMs = resolveSocketFastDisconnectLogThresholdMsFromEnv(process.env);
+    const plannedRestartRetryAfterMs = resolveSocketPlannedRestartRetryAfterMsFromEnv(process.env);
 
     const instanceId = process.env.HAPPIER_INSTANCE_ID?.trim() || process.env.HAPPY_INSTANCE_ID?.trim() || randomUUID();
 
@@ -78,6 +103,8 @@ export function startSocket(app: Fastify) {
         connectTimeout: 20000,
         serveClient: false // Don't serve the client files
     });
+
+    let plannedSocketShutdownStarted = false;
 
     function rejectSocket(params: { statusCode: number; error: string; provider?: string; owner?: Record<string, unknown> }) {
         const err: any = new Error(params.error);
@@ -321,7 +348,7 @@ export function startSocket(app: Fastify) {
             );
 
             // Broadcast daemon offline status
-            if (connection.connectionType === 'machine-scoped') {
+            if (connection.connectionType === 'machine-scoped' && !plannedSocketShutdownStarted) {
                 const machineActivity = buildMachineActivityEphemeral(connection.machineId, false, Date.now());
                 eventRouter.emitEphemeral({
                     userId,
@@ -373,7 +400,13 @@ export function startSocket(app: Fastify) {
         );
     });
 
-    onShutdown('api', async () => {
+    onShutdown('api:socket', async () => {
+        plannedSocketShutdownStarted = true;
+        try {
+            emitSocketPlannedRestart(io, plannedRestartRetryAfterMs);
+        } catch (error) {
+            log({ module: 'websocket', error }, 'Failed to broadcast planned socket restart before shutdown');
+        }
         await io.close();
     });
 }
