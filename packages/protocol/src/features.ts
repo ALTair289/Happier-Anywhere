@@ -77,6 +77,14 @@ export {
   type SessionCapabilities,
   type SessionMessagesCapabilities,
 } from './features/payload/capabilities/sessionCapabilities.js';
+export {
+  DEFAULT_SHARING_CAPABILITIES,
+  DEFAULT_SHARING_PENDING_QUEUE_V2_CAPABILITIES,
+  SharingCapabilitiesSchema,
+  SharingPendingQueueV2CapabilitiesSchema,
+  type SharingCapabilities,
+  type SharingPendingQueueV2Capabilities,
+} from './features/payload/capabilities/sharingCapabilities.js';
 
 export { CapabilitiesSchema, type Capabilities } from './features/payload/capabilities/capabilitiesSchema.js';
 export { FeatureGatesSchema, type FeatureGates } from './features/payload/featureGatesSchema.js';

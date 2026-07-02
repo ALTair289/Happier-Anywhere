@@ -4,6 +4,7 @@ import {
   coerceBugReportsCapabilitiesFromFeaturesPayload,
   DEFAULT_BUG_REPORTS_CAPABILITIES,
   DEFAULT_MACHINE_TRANSFER_CAPABILITIES,
+  DEFAULT_SHARING_CAPABILITIES,
   FeaturesResponseSchema,
   MACHINE_TRANSFER_SERVER_ROUTED_MAX_BYTES_ENV_KEY,
   normalizeMachineTransferServerRoutedMaxBytes,
@@ -45,6 +46,8 @@ describe('FeaturesResponseSchema', () => {
     expect(parsed.features.attachments.uploads.enabled).toBe(false);
     expect(parsed.features.session.media.generated.enabled).toBe(false);
     expect(parsed.features.sharing.session.enabled).toBe(false);
+    expect(parsed.features.sharing.pendingQueueV2.enabled).toBe(false);
+    expect(parsed.features.sharing.pendingDeliveryState.enabled).toBe(false);
     expect(parsed.features.voice.enabled).toBe(false);
     expect(parsed.features.voice.happierVoice.enabled).toBe(false);
     expect((parsed as any).features.terminal.embeddedPty.enabled).toBe(false);
@@ -72,6 +75,7 @@ describe('FeaturesResponseSchema', () => {
       disabledByBuildPolicy: false,
     });
     expect(parsed.capabilities.machines.transfer).toEqual(DEFAULT_MACHINE_TRANSFER_CAPABILITIES);
+    expect(parsed.capabilities.sharing).toEqual(DEFAULT_SHARING_CAPABILITIES);
     expect(parsed.capabilities.oauth.providers).toEqual({});
     expect(parsed.capabilities.encryption).toEqual({
       storagePolicy: 'required_e2ee',
@@ -272,5 +276,99 @@ describe('FeaturesResponseSchema', () => {
       const enabled = readRequiredPath(parsed, path);
       expect(typeof enabled).toBe('boolean');
     }
+  });
+
+  it('keeps old UI/new server payloads additive for pending delivery state', () => {
+    const parsed = FeaturesResponseSchema.parse({
+      features: {
+        sharing: {
+          pendingQueueV2: { enabled: true },
+          pendingDeliveryState: { enabled: true },
+        },
+      },
+      capabilities: {
+        sharing: {
+          pendingQueueV2: {
+            deliveryState: true,
+            deliveryBlockedReason: true,
+          },
+        },
+      },
+    });
+
+    expect(parsed.features.sharing.pendingQueueV2.enabled).toBe(true);
+    expect(parsed.features.sharing.pendingDeliveryState.enabled).toBe(true);
+    expect(parsed.capabilities.sharing.pendingQueueV2.deliveryState).toBe(true);
+    expect(parsed.capabilities.sharing.pendingQueueV2.deliveryBlockedReason).toBe(true);
+  });
+
+  it('keeps new UI/old server payloads fail-closed for pending delivery state', () => {
+    const parsed = FeaturesResponseSchema.parse({
+      features: {
+        sharing: {
+          pendingQueueV2: { enabled: true },
+        },
+      },
+      capabilities: {},
+    });
+
+    expect(parsed.features.sharing.pendingQueueV2.enabled).toBe(true);
+    expect(parsed.features.sharing.pendingDeliveryState.enabled).toBe(false);
+    expect(parsed.capabilities.sharing.pendingQueueV2.deliveryState).toBe(false);
+    expect(parsed.capabilities.sharing.pendingQueueV2.deliveryBlockedReason).toBe(false);
+  });
+
+  it('preserves old daemon/new server base pending queue detection separately from delivery-state detection', () => {
+    const parsed = FeaturesResponseSchema.parse({
+      features: {
+        sharing: {
+          pendingQueueV2: { enabled: true },
+          pendingDeliveryState: { enabled: true },
+        },
+      },
+      capabilities: {
+        sharing: {
+          pendingQueueV2: {
+            deliveryState: true,
+            deliveryBlockedReason: true,
+          },
+        },
+      },
+    });
+
+    expect(parsed.features.sharing.pendingQueueV2.enabled).toBe(true);
+    expect(parsed.features.sharing.pendingDeliveryState.enabled).toBe(true);
+  });
+
+  it('keeps new daemon/old server delivery-state detection disabled during remote-dev to dev upgrades', () => {
+    const oldRemoteDevPayload = FeaturesResponseSchema.parse({
+      features: {
+        sharing: {
+          pendingQueueV2: { enabled: true },
+        },
+      },
+      capabilities: {},
+    });
+    const upgradedPayload = FeaturesResponseSchema.parse({
+      features: {
+        sharing: {
+          pendingQueueV2: { enabled: true },
+          pendingDeliveryState: { enabled: true },
+        },
+      },
+      capabilities: {
+        sharing: {
+          pendingQueueV2: {
+            deliveryState: true,
+            deliveryBlockedReason: true,
+          },
+        },
+      },
+    });
+
+    expect(oldRemoteDevPayload.features.sharing.pendingDeliveryState.enabled).toBe(false);
+    expect(oldRemoteDevPayload.capabilities.sharing.pendingQueueV2.deliveryState).toBe(false);
+    expect(upgradedPayload.features.sharing.pendingDeliveryState.enabled).toBe(true);
+    expect(upgradedPayload.capabilities.sharing.pendingQueueV2.deliveryState).toBe(true);
   });
 });

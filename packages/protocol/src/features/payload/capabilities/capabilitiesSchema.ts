@@ -38,6 +38,10 @@ import {
   DEFAULT_SESSION_CAPABILITIES,
   SessionCapabilitiesSchema,
 } from './sessionCapabilities.js';
+import {
+  DEFAULT_SHARING_CAPABILITIES,
+  SharingCapabilitiesSchema,
+} from './sharingCapabilities.js';
 
 export const CapabilitiesSchema = z.object({
   bugReports: BugReportsCapabilitiesSchema.optional().default(DEFAULT_BUG_REPORTS_CAPABILITIES),
@@ -66,6 +70,7 @@ export const CapabilitiesSchema = z.object({
     .default({ providers: {} }),
   auth: AuthCapabilitiesSchema.optional().default(DEFAULT_AUTH_CAPABILITIES),
   session: SessionCapabilitiesSchema.optional().default(DEFAULT_SESSION_CAPABILITIES),
+  sharing: SharingCapabilitiesSchema.optional().default(DEFAULT_SHARING_CAPABILITIES),
 });
 
 export type Capabilities = z.infer<typeof CapabilitiesSchema>;

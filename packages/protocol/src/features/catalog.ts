@@ -129,6 +129,12 @@ const FEATURE_CATALOG_DEFINITION = {
     dependencies: [],
     representation: 'server',
   },
+  'sharing.pendingDeliveryState': {
+    description: 'Provider delivery-state materialization support for pending queue routes and fields.',
+    defaultFailMode: 'fail_closed',
+    dependencies: ['sharing.pendingQueueV2'],
+    representation: 'server',
+  },
   sessions: {
     description: 'Session-level product surfaces and control-plane capabilities.',
     defaultFailMode: 'fail_closed',
@@ -369,8 +375,22 @@ const FEATURE_CATALOG_DEFINITION = {
     dependencies: [],
     representation: 'client',
   },
+  // Generalized, provider-agnostic umbrella gate for agent session goals + work-state goal
+  // projection. New capability-driven goal gating reads `agent.goals`; provider-specific goal
+  // sub-gates (e.g. `providers.codex.appServer.goals`) remain as independent back-compat flags so
+  // existing call sites and server configs keep working without forced reconfiguration. The
+  // umbrella relationship is realized by downstream gating that ANDs `agent.goals` with the
+  // provider-contributed goal capability, not by a catalog dependency edge — dependency wiring runs
+  // through the shared `applyFeatureDependencies` engine, and this umbrella intentionally declares
+  // no dependencies so enabling it never requires a provider sub-gate to be enabled first.
+  'agent.goals': {
+    description: 'Generalized agent session goal controls and work-state goal projection (umbrella over provider-specific goal sub-gates).',
+    defaultFailMode: 'fail_closed',
+    dependencies: [],
+    representation: 'client',
+  },
   'providers.codex.appServer.goals': {
-    description: 'Codex app-server native session goal controls and work-state projection.',
+    description: 'Codex app-server native session goal controls and work-state projection (provider-specific sub-gate under the generalized agent.goals umbrella).',
     defaultFailMode: 'fail_closed',
     dependencies: [],
     representation: 'client',

@@ -96,6 +96,16 @@ describe('feature catalog', () => {
     expect(FEATURE_CATALOG['providers.codex.appServer.structuredInput']?.dependencies).toContain('attachments.uploads');
   });
 
+  it('includes a generalized agent.goals umbrella feature alongside the Codex goal sub-gate', () => {
+    expect(isFeatureId('agent.goals')).toBe(true);
+    expect(FEATURE_CATALOG['agent.goals']?.representation).toBe('client');
+    expect(FEATURE_CATALOG['agent.goals']?.defaultFailMode).toBe('fail_closed');
+    expect(FEATURE_CATALOG['agent.goals']?.dependencies).toEqual([]);
+    // Codex goal flag remains a working, independent back-compat sub-gate.
+    expect(isFeatureId('providers.codex.appServer.goals')).toBe(true);
+    expect(FEATURE_CATALOG['providers.codex.appServer.goals']?.dependencies).toEqual([]);
+  });
+
   it('includes Claude unified terminal as a client-represented provider runtime feature', () => {
     expect(isFeatureId('providers.claude.unifiedTerminal')).toBe(true);
     expect(FEATURE_CATALOG['providers.claude.unifiedTerminal']?.representation).toBe('client');
@@ -131,6 +141,10 @@ describe('feature catalog', () => {
     expect(isFeatureId('sharing.public')).toBe(true);
     expect(isFeatureId('sharing.contentKeys')).toBe(true);
     expect(isFeatureId('sharing.pendingQueueV2')).toBe(true);
+    expect(isFeatureId('sharing.pendingDeliveryState')).toBe(true);
+    expect(FEATURE_CATALOG['sharing.pendingDeliveryState']?.representation).toBe('server');
+    expect(FEATURE_CATALOG['sharing.pendingDeliveryState']?.dependencies).toEqual(['sharing.pendingQueueV2']);
+    expect(FEATURE_CATALOG['sharing.pendingDeliveryState']?.defaultFailMode).toBe('fail_closed');
   });
 
   it('includes voice agent feature id', () => {

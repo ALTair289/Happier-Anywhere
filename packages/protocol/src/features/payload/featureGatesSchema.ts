@@ -88,6 +88,7 @@ export const FeatureGatesSchema = z.object({
       public: FeatureGateSchema.optional().default(DEFAULT_GATE_DISABLED),
       contentKeys: FeatureGateSchema.optional().default(DEFAULT_GATE_DISABLED),
       pendingQueueV2: FeatureGateSchema.optional().default(DEFAULT_GATE_DISABLED),
+      pendingDeliveryState: FeatureGateSchema.optional().default(DEFAULT_GATE_DISABLED),
     })
     .optional()
     .default({
@@ -95,6 +96,7 @@ export const FeatureGatesSchema = z.object({
       public: DEFAULT_GATE_DISABLED,
       contentKeys: DEFAULT_GATE_DISABLED,
       pendingQueueV2: DEFAULT_GATE_DISABLED,
+      pendingDeliveryState: DEFAULT_GATE_DISABLED,
     }),
   sessions: z
     .object({

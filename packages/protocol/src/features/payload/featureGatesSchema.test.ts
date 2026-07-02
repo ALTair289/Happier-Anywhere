@@ -98,4 +98,33 @@ describe('FeatureGatesSchema', () => {
     expect(readServerEnabledBit(parsed, 'connectedServices.accountGroups')).toBe(false);
     expect(readServerEnabledBit(parsed, 'connectedServices.accountFallback')).toBe(false);
   });
+
+  it('preserves pending delivery-state support separately from the basic pending queue gate', () => {
+    const parsed = FeaturesResponseSchema.parse({
+      features: {
+        sharing: {
+          pendingQueueV2: { enabled: true },
+          pendingDeliveryState: { enabled: true },
+        },
+      },
+      capabilities: {},
+    });
+
+    expect(readServerEnabledBit(parsed, 'sharing.pendingQueueV2')).toBe(true);
+    expect(readServerEnabledBit(parsed, 'sharing.pendingDeliveryState')).toBe(true);
+  });
+
+  it('defaults pending delivery-state support disabled when old servers omit it', () => {
+    const parsed = FeaturesResponseSchema.parse({
+      features: {
+        sharing: {
+          pendingQueueV2: { enabled: true },
+        },
+      },
+      capabilities: {},
+    });
+
+    expect(readServerEnabledBit(parsed, 'sharing.pendingQueueV2')).toBe(true);
+    expect(readServerEnabledBit(parsed, 'sharing.pendingDeliveryState')).toBe(false);
+  });
 });
