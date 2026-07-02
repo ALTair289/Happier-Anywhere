@@ -13,6 +13,7 @@ import { useSettingMutable } from '@/sync/domains/state/storage';
 import type { BusySteerSendPolicy, MessageSendMode, NonSteerableSendPromptSetting } from '@/sync/domains/session/control/submitMode';
 
 type PendingQueueDrainMode = 'one_at_a_time' | 'drain_all';
+type PendingQueueDeliveryTiming = 'after_foreground_ready' | 'after_runtime_idle';
 
 export const SessionComposerSettingsView = React.memo(function SessionComposerSettingsView() {
     const { theme } = useUnistyles();
@@ -21,6 +22,7 @@ export const SessionComposerSettingsView = React.memo(function SessionComposerSe
     const [busySteerSendPolicy, setBusySteerSendPolicy] = useSettingMutable('sessionBusySteerSendPolicy');
     const [nonSteerableSendPrompt, setNonSteerableSendPrompt] = useSettingMutable('sessionNonSteerableSendPrompt');
     const [pendingQueueDrainMode, setPendingQueueDrainMode] = useSettingMutable('sessionPendingQueueDrainMode');
+    const [pendingQueueDeliveryTiming, setPendingQueueDeliveryTiming] = useSettingMutable('sessionPendingQueueDeliveryTiming');
     const [agentInputEnterToSend, setAgentInputEnterToSend] = useSettingMutable('agentInputEnterToSend');
     const [agentInputEnterToSendNative, setAgentInputEnterToSendNative] = useSettingMutable('agentInputEnterToSendNative');
     const [agentInputHistoryScope, setAgentInputHistoryScope] = useSettingMutable('agentInputHistoryScope');
@@ -108,6 +110,18 @@ export const SessionComposerSettingsView = React.memo(function SessionComposerSe
             key: 'drain_all',
             title: t('settingsSession.messageSending.pendingDrainMode.drainAllTitle'),
             subtitle: t('settingsSession.messageSending.pendingDrainMode.drainAllSubtitle'),
+        },
+    ];
+    const pendingQueueDeliveryTimingOptions: Array<{ key: PendingQueueDeliveryTiming; title: string; subtitle: string }> = [
+        {
+            key: 'after_foreground_ready',
+            title: t('settingsSession.messageSending.pendingDeliveryTiming.afterForegroundReadyTitle'),
+            subtitle: t('settingsSession.messageSending.pendingDeliveryTiming.afterForegroundReadySubtitle'),
+        },
+        {
+            key: 'after_runtime_idle',
+            title: t('settingsSession.messageSending.pendingDeliveryTiming.afterRuntimeIdleTitle'),
+            subtitle: t('settingsSession.messageSending.pendingDeliveryTiming.afterRuntimeIdleSubtitle'),
         },
     ];
     const pendingQueueMayBeUsed = messageSendMode === 'server_pending' || busySteerSendPolicy === 'server_pending';
@@ -202,19 +216,34 @@ export const SessionComposerSettingsView = React.memo(function SessionComposerSe
             </ItemGroup>
 
             {pendingQueueMayBeUsed ? (
-                <ItemGroup title={t('settingsSession.messageSending.pendingDrainModeTitle')} footer={t('settingsSession.messageSending.pendingDrainModeFooter')}>
-                    {pendingQueueDrainModeOptions.map((option) => (
-                        <Item
-                            key={option.key}
-                            title={option.title}
-                            subtitle={option.subtitle}
-                            icon={<Ionicons name="layers-outline" size={29} color={theme.colors.accent.blue} />}
-                            rightElement={pendingQueueDrainMode === option.key ? <Ionicons name="checkmark" size={20} color={theme.colors.accent.blue} /> : null}
-                            onPress={() => setPendingQueueDrainMode(option.key)}
-                            showChevron={false}
-                        />
-                    ))}
-                </ItemGroup>
+                <>
+                    <ItemGroup title={t('settingsSession.messageSending.pendingDrainModeTitle')} footer={t('settingsSession.messageSending.pendingDrainModeFooter')}>
+                        {pendingQueueDrainModeOptions.map((option) => (
+                            <Item
+                                key={option.key}
+                                title={option.title}
+                                subtitle={option.subtitle}
+                                icon={<Ionicons name="layers-outline" size={29} color={theme.colors.accent.blue} />}
+                                rightElement={pendingQueueDrainMode === option.key ? <Ionicons name="checkmark" size={20} color={theme.colors.accent.blue} /> : null}
+                                onPress={() => setPendingQueueDrainMode(option.key)}
+                                showChevron={false}
+                            />
+                        ))}
+                    </ItemGroup>
+                    <ItemGroup title={t('settingsSession.messageSending.pendingDeliveryTimingTitle')} footer={t('settingsSession.messageSending.pendingDeliveryTimingFooter')}>
+                        {pendingQueueDeliveryTimingOptions.map((option) => (
+                            <Item
+                                key={option.key}
+                                title={option.title}
+                                subtitle={option.subtitle}
+                                icon={<Ionicons name="timer-outline" size={29} color={theme.colors.accent.blue} />}
+                                rightElement={pendingQueueDeliveryTiming === option.key ? <Ionicons name="checkmark" size={20} color={theme.colors.accent.blue} /> : null}
+                                onPress={() => setPendingQueueDeliveryTiming(option.key)}
+                                showChevron={false}
+                            />
+                        ))}
+                    </ItemGroup>
+                </>
             ) : null}
 
             <ItemGroup title={t('settingsSession.input.title')} footer={t('settingsSession.input.footer')}>

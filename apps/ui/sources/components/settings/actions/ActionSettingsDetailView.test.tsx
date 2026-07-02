@@ -1,12 +1,29 @@
 import * as React from 'react';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { DEFAULT_SESSION_AGENT_SPAWN_POLICY_V1 } from '@happier-dev/protocol';
 import { renderScreen, standardCleanup } from '@/dev/testkit';
 import { installSettingsViewCommonModuleMocks, resetSettingsViewCommonModuleMockState } from '../settingsViewTestHelpers';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const capture = vi.hoisted(() => ({
+    defaultSpawnPolicy: {
+        v: 1,
+        allowCustomDirectory: true,
+        allowCrossMachine: true,
+        allowBackendTargetOverride: true,
+        allowModelOverride: true,
+        allowPermissionModeOverride: true,
+        allowAgentModeOverride: true,
+        allowConfigOptionOverrides: true,
+        allowProfileOverride: true,
+        allowEnvironmentVariables: true,
+        allowConnectedServicesOverride: true,
+        allowMcpSelectionOverride: true,
+        allowTranscriptStorageOverride: true,
+        permissionCeiling: null,
+    },
     items: [] as Array<Record<string, unknown>>,
     itemListsWithSearchHeader: 0,
     itemGroupsWithSearchHeader: 0,
@@ -14,11 +31,14 @@ const capture = vi.hoisted(() => ({
     searchHeaders: [] as Array<Record<string, unknown>>,
     segmentedTabBars: [] as Array<Record<string, unknown>>,
     dropdownMenus: [] as Array<Record<string, unknown>>,
+    infoNotices: [] as Array<Record<string, unknown>>,
     rawSettings: { v: 1, actions: {} } as unknown,
+    rawSpawnPolicy: null as unknown,
     stackOptions: null as Record<string, unknown> | null,
     switches: [] as Array<Record<string, unknown>>,
     windowWidth: 800,
     setRawSettings: vi.fn(),
+    setSpawnPolicy: vi.fn(),
     reset() {
         this.items = [];
         this.itemListsWithSearchHeader = 0;
@@ -27,19 +47,40 @@ const capture = vi.hoisted(() => ({
         this.searchHeaders = [];
         this.segmentedTabBars = [];
         this.dropdownMenus = [];
+        this.infoNotices = [];
         this.rawSettings = { v: 1, actions: {} };
+        this.rawSpawnPolicy = this.defaultSpawnPolicy;
         this.stackOptions = null;
         this.switches = [];
         this.windowWidth = 800;
         this.setRawSettings.mockReset();
+        this.setSpawnPolicy.mockReset();
     },
 }));
+capture.rawSpawnPolicy = capture.defaultSpawnPolicy;
 
 vi.mock('@/hooks/server/useFeatureEnabled', () => ({
     useFeatureEnabled: () => true,
 }));
 
 installSettingsViewCommonModuleMocks({
+    text: async () => {
+        const { createTextModuleMock } = await import('@/dev/testkit/mocks/text');
+        const { en } = await import('@/text/translations/en');
+        const translate = (key: string, params?: Record<string, unknown>) => {
+            const value = key.split('.').reduce<unknown>((current, segment) => {
+                if (!current || typeof current !== 'object') {
+                    return undefined;
+                }
+                return (current as Record<string, unknown>)[segment];
+            }, en);
+            if (typeof value === 'function') {
+                return (value as (params: Record<string, unknown>) => string)(params ?? {});
+            }
+            return typeof value === 'string' ? value : key;
+        };
+        return createTextModuleMock({ translate, translateLoose: translate });
+    },
     reactNative: async () => {
         const { createReactNativeWebMock } = await import('@/dev/testkit/mocks/reactNative');
         return createReactNativeWebMock({
@@ -75,10 +116,18 @@ installSettingsViewCommonModuleMocks({
         return createStorageModuleMock({
             importOriginal,
             overrides: {
-                useSettingMutable: () => [capture.rawSettings, (next: unknown) => {
-                    capture.rawSettings = next;
-                    capture.setRawSettings(next);
-                }] as const,
+                useSettingMutable: (name: string) => {
+                    if (name === 'sessionAgentSpawnPolicyV1') {
+                        return [capture.rawSpawnPolicy, (next: unknown) => {
+                            capture.rawSpawnPolicy = next;
+                            capture.setSpawnPolicy(next);
+                        }] as const;
+                    }
+                    return [capture.rawSettings, (next: unknown) => {
+                        capture.rawSettings = next;
+                        capture.setRawSettings(next);
+                    }] as const;
+                },
                 useSetting: () => ({ privacy: { shareDeviceInventory: true } }),
             },
         });
@@ -126,6 +175,15 @@ vi.mock('@/components/ui/lists/Item', () => ({
     },
 }));
 
+vi.mock('@/components/ui/lists/ItemInfoNotice', () => ({
+    ItemInfoNotice: (props: Record<string, unknown>) => {
+        capture.infoNotices.push(props);
+        return React.createElement('ItemInfoNoticeMock', {
+            testID: props.testID,
+        });
+    },
+}));
+
 function containsSearchHeaderMock(node: React.ReactNode): boolean {
     return React.Children.toArray(node).some((child) => {
         if (!React.isValidElement(child)) {
@@ -170,6 +228,20 @@ afterEach(() => {
 });
 
 describe('ActionSettingsDetailView', () => {
+    it('describes ask-first approval as a queued request instead of a blocking confirmation', async () => {
+        const { ActionSettingsDetailContent } = await import('./ActionSettingsDetailView');
+
+        const screen = await renderScreen(<ActionSettingsDetailContent actionId="session.spawn_new" />);
+
+        expect(await screen.findByTestId('settings-actions:approval-mode-help')).toBeTruthy();
+        const approvalNotice = capture.infoNotices.find((notice) =>
+            notice.testID === 'settings-actions:approval-mode-help',
+        );
+        expect(approvalNotice?.body).toEqual(expect.stringContaining('approval request'));
+        expect(approvalNotice?.body).toEqual(expect.stringContaining('does not wait'));
+        expect(approvalNotice?.body).not.toEqual(expect.stringContaining('confirmation'));
+    });
+
     it('renders approval-capable targets as mode tabs and ordinary placements as switches', async () => {
         const { ActionSettingsDetailContent } = await import('./ActionSettingsDetailView');
 
@@ -218,6 +290,93 @@ describe('ActionSettingsDetailView', () => {
                 },
             },
         });
+    });
+
+    it('renders create-session AI-session policy controls and persists representative policy changes', async () => {
+        const { ActionSettingsDetailContent } = await import('./ActionSettingsDetailView');
+
+        await renderScreen(<ActionSettingsDetailContent actionId="session.spawn_new" />);
+
+        expect(capture.segmentedTabBars.some((bar) =>
+            bar.testIDPrefix === 'settings-actions:action:session.spawn_new:target:session_agent:mode'
+            && bar.activeTabId === 'allowed',
+        )).toBe(true);
+
+        const environmentSwitch = capture.switches.find((switchProps) =>
+            switchProps.testID === 'settings-actions:session-spawn-policy:allowEnvironmentVariables',
+        );
+        expect(environmentSwitch).toMatchObject({ value: true });
+
+        (environmentSwitch?.onValueChange as (next: boolean) => void)(false);
+
+        expect(capture.setSpawnPolicy).toHaveBeenLastCalledWith({
+            ...DEFAULT_SESSION_AGENT_SPAWN_POLICY_V1,
+            allowEnvironmentVariables: false,
+        });
+
+        capture.dropdownMenus = [];
+        await renderScreen(<ActionSettingsDetailContent actionId="session.spawn_new" />);
+
+        const ceilingMenu = capture.dropdownMenus.find((menu) => {
+            const itemTrigger = menu.itemTrigger as { itemProps?: { testID?: string } } | undefined;
+            return itemTrigger?.itemProps?.testID === 'settings-actions:session-spawn-policy:permissionCeiling';
+        });
+        expect(ceilingMenu).toMatchObject({ selectedId: 'inherit' });
+
+        (ceilingMenu?.onSelect as (itemId: string) => void)('default');
+
+        expect(capture.setSpawnPolicy).toHaveBeenLastCalledWith({
+            ...DEFAULT_SESSION_AGENT_SPAWN_POLICY_V1,
+            allowEnvironmentVariables: false,
+            permissionCeiling: 'default',
+        });
+    });
+
+    it('persists and reloads every create-session AI-session policy toggle', async () => {
+        const { ActionSettingsDetailContent } = await import('./ActionSettingsDetailView');
+        const toggleKeys = [
+            'allowCustomDirectory',
+            'allowCrossMachine',
+            'allowBackendTargetOverride',
+            'allowModelOverride',
+            'allowPermissionModeOverride',
+            'allowAgentModeOverride',
+            'allowConfigOptionOverrides',
+            'allowProfileOverride',
+            'allowEnvironmentVariables',
+            'allowConnectedServicesOverride',
+            'allowMcpSelectionOverride',
+            'allowTranscriptStorageOverride',
+        ] as const;
+
+        await renderScreen(<ActionSettingsDetailContent actionId="session.spawn_new" />);
+
+        for (const key of toggleKeys) {
+            const toggle = capture.switches.find((switchProps) =>
+                switchProps.testID === `settings-actions:session-spawn-policy:${key}`,
+            );
+            expect(toggle).toMatchObject({ value: true });
+
+            (toggle?.onValueChange as (next: boolean) => void)(false);
+            expect(capture.setSpawnPolicy).toHaveBeenLastCalledWith({
+                ...capture.defaultSpawnPolicy,
+                [key]: false,
+            });
+
+            capture.switches = [];
+            await renderScreen(<ActionSettingsDetailContent actionId="session.spawn_new" />);
+
+            const reloadedToggle = capture.switches.find((switchProps) =>
+                switchProps.testID === `settings-actions:session-spawn-policy:${key}`,
+            );
+            expect(reloadedToggle).toMatchObject({ value: false });
+
+            (reloadedToggle?.onValueChange as (next: boolean) => void)(true);
+            expect(capture.setSpawnPolicy).toHaveBeenLastCalledWith(capture.defaultSpawnPolicy);
+
+            capture.switches = [];
+            await renderScreen(<ActionSettingsDetailContent actionId="session.spawn_new" />);
+        }
     });
 
     it('renders tool exposure controls for eligible tool-backed integration surfaces', async () => {

@@ -152,10 +152,7 @@ describe('settings', () => {
 
         it('includes session folder settings by default', () => {
             const settings = settingsParse({});
-            expect(settings.sessionFoldersV1).toEqual({
-                v: 1,
-                folders: [],
-            });
+            expect(settings).not.toHaveProperty('sessionFoldersV1');
             expect(settings.sessionFolderViewModeV1).toBe('off');
         });
 
@@ -511,6 +508,28 @@ describe('settings', () => {
             } as any);
 
             expect((parsed as any).sessionMruOrderV1).toBeUndefined();
+            expect((parsed as any).futureAccountSetting).toBe('kept');
+        });
+
+        it('ignores migrated session organization fields as active account settings while preserving unrelated unknown keys', () => {
+            const parsed = settingsParse({
+                pinnedSessionKeysV1: ['server-a:session-a'],
+                sessionFoldersV1: { v: 1, folders: [] },
+                sessionTagsV1: { 'server-a:session-a': ['tag-a'] },
+                sessionListGroupOrderV1: { 'pinned-v1': ['server-a:session-a'] },
+                sessionWorkspaceOrderV1: { 'server:server-a:workspaces': ['workspace:/repo'] },
+                workspaceLabelsV1: { 'server:server-a:workspace:/repo': 'Repo' },
+                collapsedGroupKeysV1: { 'server-a:group-a': true },
+                futureAccountSetting: 'kept',
+            } as any);
+
+            expect(parsed).not.toHaveProperty('pinnedSessionKeysV1');
+            expect(parsed).not.toHaveProperty('sessionFoldersV1');
+            expect(parsed).not.toHaveProperty('sessionTagsV1');
+            expect(parsed).not.toHaveProperty('sessionListGroupOrderV1');
+            expect(parsed).not.toHaveProperty('sessionWorkspaceOrderV1');
+            expect(parsed).not.toHaveProperty('workspaceLabelsV1');
+            expect(parsed).not.toHaveProperty('collapsedGroupKeysV1');
             expect((parsed as any).futureAccountSetting).toBe('kept');
         });
 
@@ -1224,6 +1243,7 @@ describe('settings', () => {
             expect(settingsDefaults.sessionReplayMaxSeedChars).toBe(120_000);
             expect(settingsDefaults.sessionMessageSendMode).toBe('server_pending');
             expect((settingsDefaults as any).sessionPendingQueueDrainMode).toBe('one_at_a_time');
+            expect((settingsDefaults as any).sessionPendingQueueDeliveryTiming).toBe('after_foreground_ready');
             expect(settingsDefaults.sessionDefaultPermissionModeByTargetKey).toMatchObject({
                 [buildBackendTargetKey({ kind: 'builtInAgent', agentId: 'claude' })]: 'default',
                 [buildBackendTargetKey({ kind: 'builtInAgent', agentId: 'codex' })]: 'default',
@@ -1254,8 +1274,13 @@ describe('settings', () => {
                 byAgentId: {},
                 acknowledgedRisksByAgentId: {},
             });
-            expect((settingsDefaults as any).pinnedSessionKeysV1).toEqual([]);
-            expect((settingsDefaults as any).sessionListGroupOrderV1).toEqual({});
+            expect(settingsDefaults).not.toHaveProperty('pinnedSessionKeysV1');
+            expect(settingsDefaults).not.toHaveProperty('sessionFoldersV1');
+            expect(settingsDefaults).not.toHaveProperty('sessionTagsV1');
+            expect(settingsDefaults).not.toHaveProperty('sessionListGroupOrderV1');
+            expect(settingsDefaults).not.toHaveProperty('sessionWorkspaceOrderV1');
+            expect(settingsDefaults).not.toHaveProperty('workspaceLabelsV1');
+            expect(settingsDefaults).not.toHaveProperty('collapsedGroupKeysV1');
             expect((settingsDefaults as any).notificationsSettingsV1).toEqual({
                 v: 1,
                 pushEnabled: true,

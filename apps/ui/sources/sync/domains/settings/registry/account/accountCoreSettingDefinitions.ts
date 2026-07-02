@@ -1,6 +1,8 @@
 import {
+    DEFAULT_SESSION_PENDING_QUEUE_DELIVERY_TIMING,
     DEFAULT_SESSION_PENDING_QUEUE_DRAIN_MODE,
     DEFAULT_USAGE_LIMIT_RECOVERY_SETTINGS_V1,
+    SessionPendingQueueDeliveryTimingSchema,
     DEFAULT_WINDOWS_TERMINAL_WINDOW_NAME,
     SessionPendingQueueDrainModeSchema,
     UsageLimitRecoverySettingsV1Schema as ProtocolUsageLimitRecoverySettingsV1Schema,
@@ -321,6 +323,13 @@ export const ACCOUNT_CORE_SETTING_DEFINITIONS = defineSettingDefinitions({
         schema: SessionPendingQueueDrainModeSchema,
         default: DEFAULT_SESSION_PENDING_QUEUE_DRAIN_MODE,
         description: 'How many pending queue messages a running session should materialize at the next agent-ready boundary',
+        storageScope: 'account',
+        analytics: { trackCurrentState: true, trackChanges: true, valueKind: 'enum', privacy: 'safe', identityScope: 'person' },
+    },
+    sessionPendingQueueDeliveryTiming: {
+        schema: SessionPendingQueueDeliveryTimingSchema,
+        default: DEFAULT_SESSION_PENDING_QUEUE_DELIVERY_TIMING,
+        description: 'Whether queued pending messages wait for foreground readiness or all tracked runtime activity to become idle',
         storageScope: 'account',
         analytics: { trackCurrentState: true, trackChanges: true, valueKind: 'enum', privacy: 'safe', identityScope: 'person' },
     },

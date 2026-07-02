@@ -3,6 +3,8 @@ import {
     ActionToolExposureModeSchema,
     ActionsSettingsV1Schema,
     DEFAULT_ACTIONS_SETTINGS_V1,
+    DEFAULT_SESSION_AGENT_SPAWN_POLICY_V1,
+    SessionAgentSpawnPolicyV1Schema,
     buildSettingArtifacts,
     defineSettingDefinitions,
     type ActionToolExposureMode,
@@ -169,6 +171,30 @@ function buildActionsSettingsSummaryProperties(value: unknown): Record<string, n
     };
 }
 
+function buildSessionAgentSpawnPolicySummaryProperties(value: unknown): Record<string, boolean | number> {
+    const policy = SessionAgentSpawnPolicyV1Schema.parse(value);
+    const overrideFlags = [
+        policy.allowCustomDirectory,
+        policy.allowCrossMachine,
+        policy.allowBackendTargetOverride,
+        policy.allowModelOverride,
+        policy.allowPermissionModeOverride,
+        policy.allowAgentModeOverride,
+        policy.allowConfigOptionOverrides,
+        policy.allowProfileOverride,
+        policy.allowEnvironmentVariables,
+        policy.allowConnectedServicesOverride,
+        policy.allowMcpSelectionOverride,
+        policy.allowTranscriptStorageOverride,
+    ];
+
+    return {
+        allowedOverrideCount: overrideFlags.filter(Boolean).length,
+        deniedOverrideCount: overrideFlags.filter((allowed) => !allowed).length,
+        hasPermissionCeiling: policy.permissionCeiling !== null,
+    };
+}
+
 export const ACCOUNT_ACTIONS_SETTING_DEFINITIONS = defineSettingDefinitions({
     actionsSettingsV1: {
         schema: ActionsSettingsV1Schema,
@@ -182,6 +208,20 @@ export const ACCOUNT_ACTIONS_SETTING_DEFINITIONS = defineSettingDefinitions({
             privacy: 'count_only',
             identityScope: 'person',
             serializeCurrentProperties: buildActionsSettingsSummaryProperties,
+        },
+    },
+    sessionAgentSpawnPolicyV1: {
+        schema: SessionAgentSpawnPolicyV1Schema,
+        default: DEFAULT_SESSION_AGENT_SPAWN_POLICY_V1,
+        description: 'Session-agent create-session override policy',
+        storageScope: 'account',
+        analytics: {
+            trackCurrentState: true,
+            trackChanges: true,
+            valueKind: 'count',
+            privacy: 'count_only',
+            identityScope: 'person',
+            serializeCurrentProperties: buildSessionAgentSpawnPolicySummaryProperties,
         },
     },
 });
