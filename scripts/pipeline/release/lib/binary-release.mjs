@@ -699,13 +699,14 @@ export async function writeChecksumsFile({ product, version, artifacts, outDir }
 }
 
 export async function maybeSignFile({ path, trustedComment = '' }) {
+  const sigPath = `${path}.minisig`;
   const keyRaw = String(process.env.MINISIGN_SECRET_KEY ?? '').trim();
+  await rm(sigPath, { force: true });
   if (!keyRaw) return null;
   if (!commandExists('minisign')) {
     throw new Error('[release] MINISIGN_SECRET_KEY is set but minisign is not installed');
   }
   const preparedKey = await prepareMinisignSecretKeyFile(keyRaw);
-  const sigPath = `${path}.minisig`;
   const hasPassphrase = Object.prototype.hasOwnProperty.call(process.env, 'MINISIGN_PASSPHRASE');
   const passphrase = String(process.env.MINISIGN_PASSPHRASE ?? '');
   const keyPath = preparedKey.path;

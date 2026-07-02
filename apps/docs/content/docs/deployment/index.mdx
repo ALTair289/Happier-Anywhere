@@ -27,7 +27,7 @@ This section describes how to deploy **your own Happier Server** (the sync backe
 ## Quick decision (recommended)
 
 - Want a **managed service** on a host/VPS: use **Self-host runtime** (`happier relay host install`).
-- Already using a supervisor (Docker/Compose/k8s/Nomad/systemd): use **Docker** or the **runner** (`@happier-dev/relay-server`) and update on restart.
+- Already using a supervisor (Docker/Compose/k8s/Nomad/systemd): use **Docker** for image-pull updates, or the **runner** (`@happier-dev/relay-server`) for artifact downloads on restart.
 - Developing or customizing from source: use **repo-local mode** (or `hstack setup-from-source` for stack-based local workflows).
 
 ## Server flavors (high level)

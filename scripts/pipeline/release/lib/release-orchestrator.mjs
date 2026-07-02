@@ -142,11 +142,10 @@ export function computeReleaseExecutionPlan(input) {
       changed.changed_ui ||
       changed.changed_server ||
       changed.changed_cli ||
-      changed.changed_stack ||
       changed.changed_shared);
 
   const dockerBuildRelay = forceDeploy || changed.changed_ui || changed.changed_server || changed.changed_shared;
-  const dockerBuildDevBox = forceDeploy || changed.changed_cli || changed.changed_stack || changed.changed_shared;
+  const dockerBuildDevBox = forceDeploy || changed.changed_cli || changed.changed_shared;
 
   // `release.yml` routes npm publishing through `release-npm.yml` when any publish_* is true.
   const runPublishNpm = !dryRun && (bumpPlan.publish_cli || bumpPlan.publish_stack || bumpPlan.publish_server);
