@@ -1,9 +1,13 @@
 import { z } from 'zod';
 import { DirectTranscriptRawMessageV1Schema } from './directSessions/daemonRpcV1.js';
 import { ExecutionRunPublicStateSchema } from './executionRuns.js';
+import {
+  SessionMessageAttentionImpactSchema,
+} from './sessionMessages/transcriptRawRecordV1.js';
 import { SessionMessageRoleSchema } from './sessionMessages/sessionMessageRole.js';
 import { SessionStoredMessageContentSchema } from './sessionMessages/sessionStoredMessageContent.js';
 import { PrimaryTurnStatusV1Schema, SessionRuntimeIssueV1Schema } from './sessions/control/runtimeIssueV1.js';
+import { SessionRuntimeActivitySourceClassV1Schema } from './sessionRuntimeActivity/sessionRuntimeActivityV1.js';
 
 const TimestampMsSchema = z.number().int().min(0);
 const Base64Schema = z.string();
@@ -31,6 +35,7 @@ export const UpdateBodySchema = z.discriminatedUnion('t', [
         localId: z.string().nullable(),
         sidechainId: z.string().nullable().optional(),
         messageRole: SessionMessageRoleMetadataSchema,
+        attentionImpact: SessionMessageAttentionImpactSchema.optional(),
         createdAt: TimestampMsSchema,
         updatedAt: TimestampMsSchema,
       })
@@ -47,6 +52,7 @@ export const UpdateBodySchema = z.discriminatedUnion('t', [
         localId: z.string().nullable(),
         sidechainId: z.string().nullable().optional(),
         messageRole: SessionMessageRoleMetadataSchema,
+        attentionImpact: SessionMessageAttentionImpactSchema.optional(),
         createdAt: TimestampMsSchema,
         updatedAt: TimestampMsSchema,
       })
@@ -66,6 +72,10 @@ export const UpdateBodySchema = z.discriminatedUnion('t', [
     createdAt: TimestampMsSchema,
     updatedAt: TimestampMsSchema,
     meaningfulActivityAt: TimestampMsSchema.optional(),
+    runtimeActivityActiveCount: z.number().int().nonnegative().optional(),
+    runtimeActivityObservedAt: TimestampMsSchema.nullable().optional(),
+    runtimeActivityExpiresAt: TimestampMsSchema.nullable().optional(),
+    runtimeActivitySourceClass: SessionRuntimeActivitySourceClassV1Schema.nullable().optional(),
   }).passthrough(),
   z.object({
     t: z.literal('update-session'),
@@ -84,6 +94,10 @@ export const UpdateBodySchema = z.discriminatedUnion('t', [
     latestTurnStatus: PrimaryTurnStatusV1Schema.nullable().optional(),
     latestTurnStatusObservedAt: TimestampMsSchema.nullable().optional(),
     lastRuntimeIssue: SessionRuntimeIssueV1Schema.nullable().optional(),
+    runtimeActivityActiveCount: z.number().int().nonnegative().optional(),
+    runtimeActivityObservedAt: TimestampMsSchema.nullable().optional(),
+    runtimeActivityExpiresAt: TimestampMsSchema.nullable().optional(),
+    runtimeActivitySourceClass: SessionRuntimeActivitySourceClassV1Schema.nullable().optional(),
     meaningfulActivityAt: TimestampMsSchema.optional(),
     archivedAt: TimestampMsSchema.nullable().optional(),
   }).passthrough(),
@@ -93,6 +107,7 @@ export const UpdateBodySchema = z.discriminatedUnion('t', [
     sessionId: z.string().optional(),
     pendingVersion: z.number().int().min(0),
     pendingCount: z.number().int().min(0),
+    pendingBlockedCount: z.number().int().min(0).optional(),
     meaningfulActivityAt: TimestampMsSchema.optional(),
     changedByAccountId: z.string().optional(),
   }).passthrough(),
@@ -274,6 +289,34 @@ export const TranscriptStreamSegmentEphemeralMessageSchema = z.object({
   sidechainId: z.string().nullable().optional(),
   content: SessionStoredMessageContentSchema,
   messageRole: SessionMessageRoleMetadataSchema,
+  /**
+   * Live-stream tick this full snapshot corresponds to (per-segment, monotonically increasing
+   * across all live emissions). Checkpoint/resync anchor for `transcript-stream-segment-delta`
+   * chaining. Optional: absent from older CLIs and stripped by older servers.
+   */
+  tick: z.number().int().min(0).optional(),
+  createdAt: TimestampMsSchema,
+  updatedAt: TimestampMsSchema,
+}).passthrough();
+
+/**
+ * Delta form of the live transcript segment stream.
+ *
+ * `content` is the same stored-message envelope as the snapshot form (encrypted or plain), but the
+ * ACP body inside carries ONLY the text appended since the previous live emission for this segment.
+ * Receivers reconstruct the accumulated text from per-segment assembly state and MUST drop the
+ * delta (and wait for the next full-snapshot checkpoint) on any gap: unknown segment, unexpected
+ * `tick`, or `baseLength` mismatch.
+ */
+export const TranscriptStreamSegmentDeltaEphemeralMessageSchema = z.object({
+  localId: z.string().min(1),
+  sidechainId: z.string().nullable().optional(),
+  content: SessionStoredMessageContentSchema,
+  messageRole: SessionMessageRoleMetadataSchema,
+  /** Per-segment live emission sequence (1-based, includes snapshot emissions). */
+  tick: z.number().int().min(1),
+  /** Accumulated text length (UTF-16 code units) BEFORE applying this delta. */
+  baseLength: z.number().int().min(0),
   createdAt: TimestampMsSchema,
   updatedAt: TimestampMsSchema,
 }).passthrough();
@@ -301,6 +344,12 @@ export const DirectSessionTranscriptDeltaEphemeralSchema = z.object({
 });
 
 export const EphemeralUpdateSchema = z.discriminatedUnion('type', [
+  // Hottest live event first: delta ticks stream at the live cadence (~25Hz per active segment).
+  z.object({
+    type: z.literal('transcript-stream-segment-delta'),
+    sessionId: z.string(),
+    message: TranscriptStreamSegmentDeltaEphemeralMessageSchema,
+  }).passthrough(),
   z.object({
     type: z.literal('activity'),
     id: z.string(),

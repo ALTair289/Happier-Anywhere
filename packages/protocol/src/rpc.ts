@@ -69,6 +69,9 @@ export const RPC_METHODS = {
   DAEMON_SESSION_USAGE_LIMIT_CHECK_NOW: 'daemon.sessionUsageLimit.checkNow',
   DAEMON_CONNECTED_SERVICE_QUOTA_RECOVERY_CREDIT_CONSUME: 'daemon.connectedServiceQuota.recoveryCredit.consume',
   DAEMON_SESSION_CONNECTED_SERVICE_AUTH_SWITCH: 'daemon.sessionConnectedServiceAuth.switch',
+  DAEMON_SESSION_RUNNER_STATUS_GET: 'daemon.sessionRunner.status.get',
+  DAEMON_SESSION_RUNNER_RESTART: 'daemon.sessionRunner.restart',
+  DAEMON_SESSION_RUNNER_RESTART_ALL: 'daemon.sessionRunner.restartAll',
   DAEMON_SESSION_HANDOFF_START: 'daemon.sessionHandoff.start',
   DAEMON_SESSION_HANDOFF_PREPARE_TARGET: 'daemon.sessionHandoff.prepareTarget',
   DAEMON_SESSION_HANDOFF_PREPARE_TARGET_RESULT_GET: 'daemon.sessionHandoff.prepareTargetResult.get',
@@ -147,9 +150,62 @@ export const RPC_METHODS = {
 
 export type RpcMethod = (typeof RPC_METHODS)[keyof typeof RPC_METHODS];
 
+export const SOCKET_RPC_AUTHORIZATION_CONTEXT_KINDS = {
+  SESSION_WRITE: 'session.write',
+} as const;
+
+export type SocketRpcAuthorizationContextKind =
+  (typeof SOCKET_RPC_AUTHORIZATION_CONTEXT_KINDS)[keyof typeof SOCKET_RPC_AUTHORIZATION_CONTEXT_KINDS];
+
+export type SocketRpcSessionWriteAuthorizationContext = Readonly<{
+  kind: typeof SOCKET_RPC_AUTHORIZATION_CONTEXT_KINDS.SESSION_WRITE;
+  sessionId: string;
+}>;
+
+export type SocketRpcAuthorizationContext = SocketRpcSessionWriteAuthorizationContext;
+
+const MAX_SOCKET_RPC_AUTHORIZATION_SESSION_ID_LENGTH = 512;
+
+const SOCKET_RPC_SESSION_WRITE_AUTHORIZATION_METHODS = new Set<string>([
+  RPC_METHODS.DAEMON_SESSION_RUNNER_RESTART,
+]);
+
+function normalizeSocketRpcSessionId(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (trimmed.length > MAX_SOCKET_RPC_AUTHORIZATION_SESSION_ID_LENGTH) return null;
+  return trimmed;
+}
+
+export function parseSocketRpcAuthorizationContext(value: unknown): SocketRpcAuthorizationContext | null {
+  if (!value || typeof value !== 'object') return null;
+  const record = value as Record<string, unknown>;
+  if (record.kind !== SOCKET_RPC_AUTHORIZATION_CONTEXT_KINDS.SESSION_WRITE) return null;
+  const sessionId = normalizeSocketRpcSessionId(record.sessionId);
+  if (!sessionId) return null;
+  return {
+    kind: SOCKET_RPC_AUTHORIZATION_CONTEXT_KINDS.SESSION_WRITE,
+    sessionId,
+  };
+}
+
+export function resolveSocketRpcSessionWriteAuthorizationMethod(method: string): string | null {
+  const trimmed = method.trim();
+  if (SOCKET_RPC_SESSION_WRITE_AUTHORIZATION_METHODS.has(trimmed)) return trimmed;
+
+  const separatorIndex = trimmed.indexOf(':');
+  if (separatorIndex <= 0 || separatorIndex >= trimmed.length - 1) return null;
+  const unprefixedMethod = trimmed.slice(separatorIndex + 1);
+  return SOCKET_RPC_SESSION_WRITE_AUTHORIZATION_METHODS.has(unprefixedMethod)
+    ? unprefixedMethod
+    : null;
+}
+
 export const RPC_ERROR_CODES = {
   METHOD_NOT_AVAILABLE: 'RPC_METHOD_NOT_AVAILABLE',
   METHOD_NOT_FOUND: 'RPC_METHOD_NOT_FOUND',
+  FORBIDDEN: 'RPC_FORBIDDEN',
 } as const;
 
 export type RpcErrorCode = (typeof RPC_ERROR_CODES)[keyof typeof RPC_ERROR_CODES];
@@ -157,6 +213,7 @@ export type RpcErrorCode = (typeof RPC_ERROR_CODES)[keyof typeof RPC_ERROR_CODES
 export const RPC_ERROR_MESSAGES = {
   METHOD_NOT_AVAILABLE: 'RPC method not available',
   METHOD_NOT_FOUND: 'Method not found',
+  FORBIDDEN: 'Forbidden',
 } as const;
 
 // Session-scoped RPC method names (used with `${sessionId}:${method}` over socket RPC).

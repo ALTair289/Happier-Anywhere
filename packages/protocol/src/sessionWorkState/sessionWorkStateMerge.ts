@@ -1,3 +1,4 @@
+import { resolveSessionWorkStatePrimaryItemId } from './sessionWorkStatePrimary.js';
 import {
   SessionWorkStateV1Schema,
   type SessionWorkStateV1,
@@ -43,6 +44,11 @@ function readExistingSnapshot(value: unknown): ExistingSessionWorkStateSnapshot 
   } as ExistingSessionWorkStateSnapshot;
 }
 
+function readPrimaryItemId(value: unknown): string | null {
+  const id = typeof value === 'string' ? value.trim() : '';
+  return id.length > 0 ? id : null;
+}
+
 export function mergeSessionWorkStateV1(params: Readonly<{
   existing: unknown;
   nextOwned: SessionWorkStateV1;
@@ -52,7 +58,14 @@ export function mergeSessionWorkStateV1(params: Readonly<{
 }>): SessionWorkStateWriteSnapshotV1 {
   const nextOwned = SessionWorkStateV1Schema.parse(params.nextOwned);
   const existing = readExistingSnapshot(params.existing);
-  if (!existing) return nextOwned;
+  if (!existing) {
+    // Even the first publish must not force a source-local primary; resolve it
+    // canonically so a goal-only vs task-only snapshot agree with the merged rule.
+    return {
+      ...nextOwned,
+      primaryItemId: resolveSessionWorkStatePrimaryItemId(nextOwned.items, readPrimaryItemId(nextOwned.primaryItemId)),
+    };
+  }
 
   const nextOwnedIds = new Set(nextOwned.items.map((item) => item.id));
   const ownedIds = new Set([...(params.ownedItemIds ?? []), ...nextOwnedIds]);
@@ -66,10 +79,23 @@ export function mergeSessionWorkStateV1(params: Readonly<{
     return !id || !isOwnedItemId(id, ownedIds, ownedPrefixes);
   }).flatMap((item): SessionWorkStateWriteItemV1[] => asRecord(item) ? [item as SessionWorkStateWriteItemV1] : []);
 
+  const mergedItems = [...preservedItems, ...nextOwned.items];
+
+  // MED-2: resolve the primary ONCE over the MERGED item set using ONE canonical
+  // rule, instead of letting whichever source published last (`nextOwned`) force
+  // its own `primaryItemId`. The previous snapshot's primary is passed for
+  // stability (keep an active task/todo primary across updates), and the items the
+  // current publish wrote are passed as a recency tie-break (the goal you just set
+  // beats a stale goal of the same status) — without ever overriding priority.
   return {
     ...existing,
     ...nextOwned,
-    items: [...preservedItems, ...nextOwned.items],
+    items: mergedItems,
+    primaryItemId: resolveSessionWorkStatePrimaryItemId(
+      mergedItems,
+      readPrimaryItemId(existing.primaryItemId),
+      { preferItemIds: nextOwned.items.map((item) => item.id) },
+    ),
   };
 }
 

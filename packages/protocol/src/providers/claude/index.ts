@@ -3,10 +3,16 @@ export {
   ClaudeTaskToolInputSchema,
   ClaudeTaskToolRecordSchema,
   ClaudeTodoWriteTodoSchema,
+  isTerminalClaudeAgentSdkProviderTaskStatus,
+  normalizeClaudeActivityStatusSignal,
+  normalizeClaudeAgentSdkProviderTaskId,
+  normalizeClaudeAgentSdkProviderTaskStatus,
   normalizeClaudeTaskToolRecordsToWorkStateItems,
   normalizeClaudeTaskToolUseToWorkStateItem,
   normalizeClaudeTaskEventToWorkStateItem,
   normalizeClaudeTodoWriteTodosToWorkStateItems,
+  readClaudeAgentSdkProviderTaskStatus,
+  type ClaudeActivityStatusSignal,
   type ClaudeTaskEvent,
   type ClaudeTaskToolInput,
   type ClaudeTaskToolRecord,
@@ -17,3 +23,8 @@ export {
   normalizeClaudeSdkInitSkills,
   type ClaudeSdkSkillsOption,
 } from './sdkSkills.js';
+export {
+  isClaudeSlashCommandSupported,
+  normalizeClaudeSlashCommandName,
+  readClaudeSlashCommandNames,
+} from './slashCommands.js';

@@ -1,4 +1,5 @@
 export {
+  SessionWorkStateGoalCapabilitiesV1Schema,
   SessionWorkStateItemKindV1Schema,
   SessionWorkStateItemOriginV1Schema,
   SessionWorkStateItemV1Schema,
@@ -7,6 +8,7 @@ export {
   SessionWorkStateTruncationV1Schema,
   SessionWorkStateV1Schema,
   readDisplayableSessionWorkStateV1,
+  type SessionWorkStateGoalCapabilitiesV1,
   type SessionWorkStateItemKindV1,
   type SessionWorkStateItemOriginV1,
   type SessionWorkStateItemV1,
@@ -24,6 +26,7 @@ export {
 } from './sessionWorkStateItemIds.js';
 export { boundSessionWorkStateItemsV1 } from './sessionWorkStateBounds.js';
 export { mergeSessionWorkStateMetadataV1, mergeSessionWorkStateV1 } from './sessionWorkStateMerge.js';
+export { resolveSessionWorkStatePrimaryItemId } from './sessionWorkStatePrimary.js';
 export {
   DaemonSessionGoalClearRequestV1Schema,
   DaemonSessionGoalGetRequestV1Schema,

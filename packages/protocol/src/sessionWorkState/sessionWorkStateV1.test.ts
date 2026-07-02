@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
     readDisplayableSessionWorkStateV1,
+    SessionWorkStateGoalCapabilitiesV1Schema,
     SessionWorkStateItemV1Schema,
     SessionWorkStateStatusV1Schema,
     SessionWorkStateV1Schema,
@@ -88,6 +89,35 @@ describe('SessionWorkStateV1', () => {
                 updatedAt: 1,
             }),
         ).toThrow();
+    });
+
+    it('treats provider-derived goal capabilities as optional and additive', () => {
+        const withoutCapabilities = SessionWorkStateItemV1Schema.parse({
+            id: 'goal:thread-1',
+            kind: 'goal',
+            origin: 'vendor',
+            status: 'active',
+            title: 'Goal without capabilities',
+            updatedAt: 1,
+        });
+        expect(withoutCapabilities.goalCapabilities).toBeUndefined();
+
+        const withCapabilities = SessionWorkStateItemV1Schema.parse({
+            id: 'goal:claude',
+            kind: 'goal',
+            origin: 'derived',
+            backendId: 'claude',
+            status: 'active',
+            title: 'Goal with capabilities',
+            updatedAt: 2,
+            goalCapabilities: { canEdit: true, canStop: false, canClear: true },
+        });
+        expect(withCapabilities.goalCapabilities).toEqual({ canEdit: true, canStop: false, canClear: true });
+    });
+
+    it('parses a partial goal capability shape and rejects non-boolean members', () => {
+        expect(SessionWorkStateGoalCapabilitiesV1Schema.parse({ canEdit: true })).toEqual({ canEdit: true });
+        expect(() => SessionWorkStateGoalCapabilitiesV1Schema.parse({ canEdit: 'yes' })).toThrow();
     });
 
     it('builds stable vendor and deterministic fallback item ids', () => {

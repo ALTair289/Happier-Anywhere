@@ -71,12 +71,96 @@ describe('mergeSessionWorkStateV1', () => {
         });
 
         expect(merged.updatedAt).toBe(20);
+        // MED-2: the primary is resolved canonically over the MERGED set, not forced
+        // by the publishing source. No active item survives; the paused `goal:new`
+        // outranks the pending `todo:remote` (paused > pending in the canonical order).
         expect(merged.primaryItemId).toBe('goal:new');
         expect(readRecord(merged).unknownRoot).toBe(true);
         expect(merged.items.map((item) => readRecord(item).id)).toEqual(['future:item', 'todo:remote', 'goal:new']);
         expect(readRecord(merged.items[0]).futureField).toBe('preserve');
         expect(readRecord(merged.items[1]).remoteField).toBe('preserve');
         expect(merged.items.some((item) => readRecord(item).id === 'goal:old')).toBe(false);
+    });
+
+    it('keeps an active task primary when the goal source publishes alongside it (MED-2)', () => {
+        // A task/todo source previously made the active task primary.
+        const existing = {
+            v: 1,
+            backendId: 'claude',
+            updatedAt: 10,
+            primaryItemId: 'task:active',
+            items: [
+                {
+                    id: 'task:active',
+                    kind: 'task',
+                    origin: 'vendor',
+                    status: 'active',
+                    title: 'Active task',
+                    backendId: 'claude',
+                    updatedAt: 10,
+                },
+            ],
+        };
+        // The goal source publishes its OWN snapshot forcing primaryItemId to the goal.
+        const merged = mergeSessionWorkStateV1({
+            existing,
+            nextOwned: {
+                v: 1,
+                backendId: 'claude',
+                updatedAt: 20,
+                primaryItemId: 'goal:claude',
+                items: [
+                    {
+                        id: 'goal:claude',
+                        kind: 'goal',
+                        origin: 'vendor',
+                        status: 'active',
+                        title: 'Pursue the goal',
+                        backendId: 'claude',
+                        updatedAt: 20,
+                    },
+                ],
+            },
+            ownedSourceFamilies: ['goal:derived:claude.goal'],
+        });
+
+        // The badge must NOT flip to the goal: the active task outranks the active goal,
+        // deterministically and regardless of which source published last.
+        expect(merged.primaryItemId).toBe('task:active');
+        expect(merged.items.map((item) => readRecord(item).id)).toEqual(['task:active', 'goal:claude']);
+    });
+
+    it('is independent of source publish order (goal-first vs task-first)', () => {
+        const goalSnapshot = {
+            v: 1,
+            backendId: 'claude',
+            updatedAt: 5,
+            primaryItemId: 'goal:claude',
+            items: [{ id: 'goal:claude', kind: 'goal', origin: 'vendor', status: 'active', title: 'Goal', backendId: 'claude', updatedAt: 5 }],
+        } as const;
+        const taskSnapshot = {
+            v: 1,
+            backendId: 'claude',
+            updatedAt: 6,
+            primaryItemId: 'task:active',
+            items: [{ id: 'task:active', kind: 'task', origin: 'vendor', status: 'active', title: 'Task', backendId: 'claude', updatedAt: 6 }],
+        } as const;
+
+        // goal published first, then task.
+        const goalThenTask = mergeSessionWorkStateV1({
+            existing: mergeSessionWorkStateV1({ existing: undefined, nextOwned: goalSnapshot, ownedSourceFamilies: ['goal:derived:claude.goal'] }),
+            nextOwned: taskSnapshot,
+            ownedSourceFamilies: ['task:derived:claude.task'],
+        });
+        // task published first, then goal.
+        const taskThenGoal = mergeSessionWorkStateV1({
+            existing: mergeSessionWorkStateV1({ existing: undefined, nextOwned: taskSnapshot, ownedSourceFamilies: ['task:derived:claude.task'] }),
+            nextOwned: goalSnapshot,
+            ownedSourceFamilies: ['goal:derived:claude.goal'],
+        });
+
+        expect(goalThenTask.primaryItemId).toBe('task:active');
+        expect(taskThenGoal.primaryItemId).toBe('task:active');
     });
 
     it('merges an owned snapshot into session metadata through the canonical metadata key', () => {

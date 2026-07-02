@@ -20,6 +20,19 @@ export type SessionWorkStateItemKindV1 = z.infer<typeof SessionWorkStateItemKind
 export const SessionWorkStateItemOriginV1Schema = z.enum(['vendor', 'happier', 'derived']);
 export type SessionWorkStateItemOriginV1 = z.infer<typeof SessionWorkStateItemOriginV1Schema>;
 
+// Provider-derived goal capabilities. The owning provider computes these from its own
+// signals (Codex from app-server goal mode; Claude from observed `goal_status` + `/goal`
+// support) so generic UI gating stays capability-driven instead of branching on provider id.
+// All members optional + passthrough so the projection is additive and forward-compatible.
+export const SessionWorkStateGoalCapabilitiesV1Schema = z
+  .object({
+    canEdit: z.boolean().optional(),
+    canStop: z.boolean().optional(),
+    canClear: z.boolean().optional(),
+  })
+  .passthrough();
+export type SessionWorkStateGoalCapabilitiesV1 = z.infer<typeof SessionWorkStateGoalCapabilitiesV1Schema>;
+
 export const SessionWorkStateItemV1Schema = z
   .object({
     id: z.string().min(1),
@@ -36,6 +49,7 @@ export const SessionWorkStateItemV1Schema = z
     priority: z.string().optional(),
     progress: z.number().finite().min(0).max(1).optional(),
     statusReason: SessionWorkStateStatusReasonV1Schema.optional(),
+    goalCapabilities: SessionWorkStateGoalCapabilitiesV1Schema.optional(),
     tokenBudget: z.number().finite().positive().nullable().optional(),
     tokensUsed: z.number().int().nonnegative().optional(),
     timeUsedSeconds: z.number().finite().nonnegative().optional(),

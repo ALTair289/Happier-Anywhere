@@ -7,6 +7,7 @@ export const DaemonTerminalErrorCodeSchema = z.enum([
   'terminal_spawn_failed',
   'terminal_invalid_request',
   'terminal_busy',
+  'terminal_resize_unavailable',
 ]);
 export type DaemonTerminalErrorCode = z.infer<typeof DaemonTerminalErrorCodeSchema>;
 

@@ -55,13 +55,101 @@ function normalizeTimestampMs(value: unknown): number | null {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
-function normalizeClaudeTaskStatus(status: unknown, type: string): SessionWorkStateStatusV1 {
-  if (status === 'completed') return 'complete';
-  if (status === 'stopped') return 'cancelled';
-  if (status === 'failed' || status === 'error') return 'blocked';
-  if (status === 'pending') return 'pending';
-  if (status === 'running' || status === 'active' || type === 'task_started' || type === 'task_progress') return 'active';
+/**
+ * Neutral 7-value Claude activity status. This is the canonical vocabulary every Claude-owned
+ * surface (work-state task/todo rows AND workflow run/agent snapshots) projects from, so status
+ * normalization can never drift across them. Mirrors `SessionWorkflowAgentStatusV1`.
+ */
+export type ClaudeActivityStatusSignal =
+  | 'pending'
+  | 'active'
+  | 'complete'
+  | 'failed'
+  | 'blocked'
+  | 'cancelled'
+  | 'unknown';
+
+/**
+ * The single source of truth for Claude task/subagent/progress status normalization.
+ *
+ * Accepts the full Claude activity vocabulary across task lifecycle events, Task API tool status,
+ * and Dynamic Workflow `workflow_agent.state` values (`done`/`running`/`progress`/...). Both the
+ * work-state task mapper (`normalizeClaudeTaskStatus`, which projects `failed` -> `blocked` because
+ * work-state has no `failed`) and the CWF2 workflow normalizer delegate here. Do NOT add a parallel
+ * status table elsewhere.
+ */
+export function normalizeClaudeActivityStatusSignal(status: unknown, type?: string): ClaudeActivityStatusSignal {
+  const normalizedStatus = typeof status === 'string' ? status.trim().toLowerCase() : status;
+  if (
+    normalizedStatus === 'completed'
+    || normalizedStatus === 'complete'
+    || normalizedStatus === 'done'
+    || normalizedStatus === 'succeeded'
+    || normalizedStatus === 'success'
+  ) {
+    return 'complete';
+  }
+  if (normalizedStatus === 'stopped' || normalizedStatus === 'cancelled' || normalizedStatus === 'canceled') return 'cancelled';
+  if (normalizedStatus === 'failed' || normalizedStatus === 'error' || normalizedStatus === 'errored') return 'failed';
+  if (normalizedStatus === 'blocked') return 'blocked';
+  if (normalizedStatus === 'pending') return 'pending';
+  if (
+    normalizedStatus === 'running'
+    || normalizedStatus === 'active'
+    || normalizedStatus === 'in_progress'
+    || normalizedStatus === 'progress'
+    || type === 'task_started'
+    || type === 'task_progress'
+  ) {
+    return 'active';
+  }
   return 'unknown';
+}
+
+export function normalizeClaudeAgentSdkProviderTaskId(taskId: unknown): string | null {
+  if (typeof taskId !== 'string') return null;
+  const normalized = taskId.trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
+export function normalizeClaudeAgentSdkProviderTaskStatus(status: unknown): string | null {
+  if (typeof status !== 'string') return null;
+  const normalized = status.trim().toLowerCase();
+  return normalized.length > 0 ? normalized : null;
+}
+
+export function readClaudeAgentSdkProviderTaskStatus(message: unknown): string | null {
+  if (!message || typeof message !== 'object') return null;
+  const record = message as Record<string, unknown>;
+  const directStatus = normalizeClaudeAgentSdkProviderTaskStatus(record.status);
+  if (directStatus) return directStatus;
+
+  const patch = record.patch;
+  if (!patch || typeof patch !== 'object') return null;
+  return normalizeClaudeAgentSdkProviderTaskStatus((patch as Record<string, unknown>).status);
+}
+
+export function isTerminalClaudeAgentSdkProviderTaskStatus(status: unknown): boolean {
+  switch (normalizeClaudeAgentSdkProviderTaskStatus(status)) {
+    case 'completed':
+    case 'succeeded':
+    case 'success':
+    case 'stopped':
+    case 'failed':
+    case 'error':
+    case 'errored':
+    case 'cancelled':
+    case 'canceled':
+      return true;
+    default:
+      return false;
+  }
+}
+
+function normalizeClaudeTaskStatus(status: unknown, type: string): SessionWorkStateStatusV1 {
+  const signal = normalizeClaudeActivityStatusSignal(status, type);
+  // Work-state has no `failed` status; provider failures surface as `blocked`.
+  return signal === 'failed' ? 'blocked' : signal;
 }
 
 function normalizeClaudeTodoStatus(status: string): SessionWorkStateStatusV1 {
