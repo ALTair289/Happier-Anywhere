@@ -12,7 +12,7 @@ import { captureConsoleText } from '@/testkit/logger/captureOutput';
 
 import { handleAuthCommand } from '../auth';
 
-const envKeys = ['HAPPIER_HOME_DIR', 'HAPPIER_SERVER_URL', 'HAPPIER_WEBAPP_URL'] as const;
+const envKeys = ['HAPPIER_HOME_DIR', 'HAPPIER_SERVER_URL', 'HAPPIER_WEBAPP_URL', 'HAPPIER_ACTIVE_SERVER_ID'] as const;
 let envScope = createEnvKeyScope(envKeys);
 
 beforeEach(() => {
@@ -32,7 +32,7 @@ describe('happier auth status --json', () => {
         const output = captureConsoleText();
 
         try {
-          envScope.patch({ HAPPIER_HOME_DIR: home });
+          envScope.patch({ HAPPIER_HOME_DIR: home, HAPPIER_ACTIVE_SERVER_ID: undefined });
           reloadConfiguration();
 
           await handleAuthCommand(['status', '--json']);
@@ -68,7 +68,7 @@ describe('happier auth status --json', () => {
         const output = captureConsoleText();
 
         try {
-          envScope.patch({ HAPPIER_HOME_DIR: home });
+          envScope.patch({ HAPPIER_HOME_DIR: home, HAPPIER_ACTIVE_SERVER_ID: undefined });
           reloadConfiguration();
           vi.stubGlobal('fetch', vi.fn(async () => {
             throw new Error('network unavailable');
@@ -144,6 +144,7 @@ describe('happier auth status --json', () => {
             HAPPIER_HOME_DIR: home,
             HAPPIER_SERVER_URL: serverUrl,
             HAPPIER_WEBAPP_URL: serverUrl,
+            HAPPIER_ACTIVE_SERVER_ID: undefined,
           });
           reloadConfiguration();
 
@@ -215,7 +216,12 @@ describe('happier auth status --json', () => {
         const serverUrl = `http://127.0.0.1:${address.port}`;
 
         try {
-          envScope.patch({ HAPPIER_HOME_DIR: home, HAPPIER_SERVER_URL: serverUrl, HAPPIER_WEBAPP_URL: serverUrl });
+          envScope.patch({
+            HAPPIER_HOME_DIR: home,
+            HAPPIER_SERVER_URL: serverUrl,
+            HAPPIER_WEBAPP_URL: serverUrl,
+            HAPPIER_ACTIVE_SERVER_ID: undefined,
+          });
           reloadConfiguration();
 
           const ephemeralServerId = configuration.activeServerId;
@@ -230,7 +236,12 @@ describe('happier auth status --json', () => {
             machineIdByServerId: { ...(settings.machineIdByServerId ?? {}), [ephemeralServerId]: 'mid_ephemeral' },
           }));
 
-          envScope.patch({ HAPPIER_HOME_DIR: home, HAPPIER_SERVER_URL: undefined, HAPPIER_WEBAPP_URL: undefined });
+          envScope.patch({
+            HAPPIER_HOME_DIR: home,
+            HAPPIER_SERVER_URL: undefined,
+            HAPPIER_WEBAPP_URL: undefined,
+            HAPPIER_ACTIVE_SERVER_ID: undefined,
+          });
           reloadConfiguration();
 
           await handleAuthCommand(['status', '--json', '--server-url', serverUrl]);

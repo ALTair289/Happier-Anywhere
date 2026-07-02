@@ -41,6 +41,7 @@ export function summarizeSessionRow(params: Readonly<{
     activeAt: params.row.activeAt,
     ...(archivedAtValue !== undefined ? { archivedAt: archivedAtValue } : {}),
     ...(typeof params.row.pendingCount === 'number' ? { pendingCount: params.row.pendingCount } : {}),
+    ...(typeof (params.row as any).pendingBlockedCount === 'number' ? { pendingBlockedCount: (params.row as any).pendingBlockedCount } : {}),
     ...(tag ? { tag } : {}),
     ...(title ? { title } : {}),
     ...(path ? { path } : {}),

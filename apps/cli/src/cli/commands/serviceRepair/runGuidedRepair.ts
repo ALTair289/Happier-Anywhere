@@ -19,10 +19,12 @@ import {
   copyMultiStackDetectedInformational,
   copyNoActiveStackYet,
   copyNoServersConfigured,
-  copyServerProfileMissing,
   copyOrphanDaemonOnOtherChannel,
+  copyRunningDaemonCliMismatchChoicePrompt,
+  copyServerProfileMissing,
   formatFindingHeader,
   type ChannelSwitchChoice,
+  type RunningDaemonCliMismatchChoice,
 } from './prompts/_copy';
 
 /**
@@ -164,6 +166,31 @@ export async function runGuidedRepair(params: Readonly<{
         } else {
           console.log(`${FINDING_BODY_INDENT}${glyph.error()} ${severity.error('failed')} — retry: ${code(`${params.currentCli.invoker} daemon start`)}`);
         }
+      }
+      continue;
+    }
+
+    if (finding.kind === 'running_daemon_cli_mismatch') {
+      printRecommendationsHeaderOnce();
+      separateFromPreviousFinding();
+      for (const line of formatFindingHeader(finding)) console.log(line);
+      const copy = copyRunningDaemonCliMismatchChoicePrompt(finding);
+      for (const line of indentFindingBodyLines(copy.body)) console.log(line);
+      const choice = await promptMultipleChoice<RunningDaemonCliMismatchChoice>(
+        `${FINDING_BODY_INDENT}${bold(copy.question)}`,
+        copy.choices,
+        { defaultId: copy.defaultId },
+      );
+      if (choice === 'skip') continue;
+
+      const ok = dispatchFindingAction(finding, {
+        restartSessionRunners: choice === 'restart-daemon-and-session-runners',
+      });
+      if (ok) {
+        console.log(`${FINDING_BODY_INDENT}${glyph.success()} done.`);
+      } else {
+        const hint = retryHintFor(finding, params.currentCli.invoker);
+        console.log(`${FINDING_BODY_INDENT}${glyph.error()} ${severity.error('failed')} — ${hint}`);
       }
       continue;
     }
@@ -313,46 +340,17 @@ async function dispatchChannelSwitch(
   }
 }
 
-function dispatchFindingAction(finding: RepairFinding): boolean {
+function dispatchFindingAction(
+  finding: RepairFinding,
+  options: Readonly<{ restartSessionRunners?: boolean }> = {},
+): boolean {
   switch (finding.kind) {
     case 'cli_self_update_available':
       return runCliCommand(cliSelfUpdateArgs(finding.releaseChannel));
     case 'running_daemon_cli_mismatch':
-      // Three cases:
-      //   * `service-restart`: a managing service exists on the same relay
-      //     profile on the current CLI's channel. Restart the service so it
-      //     takes over cleanly (avoids "A background service is already
-      //     installed for the selected relay" guard in daemon-takeover).
-      //   * `daemon-takeover`: same channel, older version. Takeover respawns
-      //     the daemon with the current CLI.
-      //   * `daemon-stop`: cross-channel orphan. Takeover can't switch
-      //     channels, so we just stop. User decides whether to start a
-      //     current-channel daemon afterwards.
-      if (finding.recoveryStrategy === 'service-restart') {
-        // Always pass --takeover here: by construction, this branch fires
-        // because a different-CLI / different-channel daemon is holding the
-        // same profile as the current-channel service. Without --takeover
-        // the service-restart refuses and we leave the user in exactly the
-        // confusing state they ran repair to fix. `service restart --takeover`
-        // is safe to run when no manual conflict exists — it's a no-op in
-        // that case.
-        return runCliCommand(['service', 'restart', '--takeover']);
-      }
-      if (finding.recoveryStrategy === 'daemon-stop') {
-        // Cross-channel replace: stop the old-channel daemon, then start a
-        // fresh one using THIS CLI (which will be on the current channel).
-        // `happier daemon start` spawns against the active relay profile, so
-        // we end up with a current-channel daemon on the same profile the old
-        // daemon was using. If the stop fails, skip the start.
-        const stopped = runCliCommand([
-          'daemon', 'stop',
-          '--server-id', finding.daemon.serverId,
-          '--pid', String(finding.daemon.pid),
-        ]);
-        if (!stopped) return false;
-        return runCliCommand(['daemon', 'start']);
-      }
-      return runCliCommand(['daemon', 'restart', '--takeover']);
+      return dispatchRunningDaemonCliMismatchAction(finding, {
+        restartSessionRunners: options.restartSessionRunners === true,
+      });
     case 'running_daemon_duplicate_profile': {
       // Stop the older daemon: prefer the one NOT started by automatic startup,
       // else the last one in the list.
@@ -398,6 +396,55 @@ function dispatchFindingAction(finding: RepairFinding): boolean {
       // the walk returns true. This function should only see dispatchable kinds.
       return false;
   }
+}
+
+function dispatchRunningDaemonCliMismatchAction(
+  finding: Extract<RepairFinding, { kind: 'running_daemon_cli_mismatch' }>,
+  options: Readonly<{ restartSessionRunners: boolean }>,
+): boolean {
+  // Three cases:
+  //   * `service-restart`: a managing service exists on the same relay
+  //     profile on the current CLI's channel. Restart the service so it
+  //     takes over cleanly (avoids "A background service is already
+  //     installed for the selected relay" guard in daemon-takeover).
+  //   * `daemon-takeover`: same channel, older version. Takeover respawns
+  //     the daemon with the current CLI.
+  //   * `daemon-stop`: cross-channel orphan. Takeover can't switch
+  //     channels, so we just stop and start a current-channel daemon.
+  if (finding.recoveryStrategy === 'service-restart') {
+    // Always pass --takeover here: by construction, this branch fires
+    // because a different-CLI / different-channel daemon is holding the
+    // same profile as the current-channel service. Without --takeover
+    // the service-restart refuses and we leave the user in exactly the
+    // confusing state they ran repair to fix. `service restart --takeover`
+    // is safe to run when no manual conflict exists — it's a no-op in
+    // that case.
+    const restarted = runCliCommand(['service', 'restart', '--takeover']);
+    if (!restarted || !options.restartSessionRunners) return restarted;
+    return runCliCommand(['daemon', 'restart-session-runners', '--force-current-cli']);
+  }
+  if (finding.recoveryStrategy === 'daemon-stop') {
+    // Cross-channel replace: stop the old-channel daemon, then start a
+    // fresh one using THIS CLI (which will be on the current channel).
+    // `happier daemon start` spawns against the active relay profile, so
+    // we end up with a current-channel daemon on the same profile the old
+    // daemon was using. If the stop fails, skip the start.
+    const stopped = runCliCommand([
+      'daemon', 'stop',
+      '--server-id', finding.daemon.serverId,
+      '--pid', String(finding.daemon.pid),
+    ]);
+    if (!stopped) return false;
+    const started = runCliCommand(['daemon', 'start']);
+    if (!started || !options.restartSessionRunners) return started;
+    return runCliCommand(['daemon', 'restart-session-runners', '--force-current-cli']);
+  }
+  return runCliCommand([
+    'daemon',
+    'restart',
+    '--takeover',
+    ...(options.restartSessionRunners ? ['--restart-session-runners'] : []),
+  ]);
 }
 
 function cliSelfUpdateArgs(channel: 'stable' | 'preview' | 'dev'): string[] {

@@ -21,6 +21,10 @@ describe('configuration env url fallback', () => {
     'HAPPIER_EXECUTION_RUNS_MAX_DEPTH',
     'HAPPIER_EXECUTION_BUDGET_MAX_CONCURRENT_TOTAL_PER_SESSION',
     'HAPPIER_EXECUTION_BUDGET_MAX_CONCURRENT_BY_CLASS_JSON',
+    'HAPPIER_STACK_PROCESS_KIND',
+    'HAPPIER_STACK_STACK',
+    'HAPPIER_STACK_ENV_FILE',
+    'HAPPIER_STACK_REPO_DIR',
   ] as const;
   let envScope = createEnvKeyScope(envKeys);
   const tempDirs: string[] = [];
@@ -315,6 +319,72 @@ describe('configuration env url fallback', () => {
     expect(configMod.configuration.activeServerDir).toBe(join(homeDir, 'servers', 'android-keyboard-qa'));
     expect(configMod.configuration.serverUrl).toBe('http://127.0.0.1:52753');
     expect(configMod.configuration.webappUrl).toBe('http://localhost:52753');
+  });
+
+  it('lets explicit persisted active server metadata override a contradictory inherited server URL', async () => {
+    const homeDir = createTempDirSync('happier-cli-config-active-server-stale-url-');
+    tempDirs.push(homeDir);
+    const settingsFile = join(homeDir, 'settings.json');
+    writeFileSync(
+      settingsFile,
+      JSON.stringify(
+        {
+          schemaVersion: 6,
+          activeServerId: 'stack_repo-remote-dev-d72117acdb__id_default',
+          servers: {
+            'stack_repo-remote-dev-d72117acdb__id_default': {
+              id: 'stack_repo-remote-dev-d72117acdb__id_default',
+              serverUrl: 'http://127.0.0.1:52753',
+              localServerUrl: 'http://127.0.0.1:52753',
+              webappUrl: 'http://localhost:52753',
+            },
+            'localhost-53288': {
+              id: 'localhost-53288',
+              serverUrl: 'http://localhost:53288',
+              webappUrl: 'http://localhost:53288',
+            },
+          },
+        },
+        null,
+        2,
+      ),
+      'utf-8',
+    );
+
+    process.env.HAPPIER_HOME_DIR = homeDir;
+    process.env.HAPPIER_ACTIVE_SERVER_ID = 'stack_repo-remote-dev-d72117acdb__id_default';
+    process.env.HAPPIER_SERVER_URL = 'http://localhost:53288';
+    process.env.HAPPIER_WEBAPP_URL = 'http://localhost:53288';
+
+    const configMod = await import('./configuration');
+    configMod.reloadConfiguration();
+    expect(configMod.configuration.activeServerId).toBe('stack_repo-remote-dev-d72117acdb__id_default');
+    expect(configMod.configuration.activeServerDir).toBe(
+      join(homeDir, 'servers', 'stack_repo-remote-dev-d72117acdb__id_default'),
+    );
+    expect(configMod.configuration.serverUrl).toBe('http://127.0.0.1:52753');
+    expect(configMod.configuration.apiServerUrl).toBe('http://127.0.0.1:52753');
+    expect(configMod.configuration.webappUrl).toBe('http://localhost:52753');
+  });
+
+  it('normalizes inherited stack session process kind for daemon processes', async () => {
+    const homeDir = createTempDirSync('happier-cli-config-daemon-process-kind-');
+    tempDirs.push(homeDir);
+    const argv = process.argv;
+    process.argv = ['node', 'happier', 'daemon', 'start-sync'];
+    process.env.HAPPIER_HOME_DIR = homeDir;
+    process.env.HAPPIER_STACK_STACK = 'repo-remote-dev-d72117acdb';
+    process.env.HAPPIER_STACK_ENV_FILE = '/tmp/stack.env';
+    process.env.HAPPIER_STACK_PROCESS_KIND = 'session';
+
+    try {
+      const configMod = await import('./configuration');
+      configMod.reloadConfiguration();
+      expect(configMod.configuration.isDaemonProcess).toBe(true);
+      expect(process.env.HAPPIER_STACK_PROCESS_KIND).toBe('daemon');
+    } finally {
+      process.argv = argv;
+    }
   });
 
   it('reads execution-run and ephemeral-task budget env vars', async () => {

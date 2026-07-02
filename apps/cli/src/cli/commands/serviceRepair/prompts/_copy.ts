@@ -336,6 +336,22 @@ export type FindingPromptCopy = Readonly<{
   default: 'yes' | 'no';
 }>;
 
+export type RunningDaemonCliMismatchChoice =
+  | 'restart-daemon'
+  | 'restart-daemon-and-session-runners'
+  | 'skip';
+
+export type RunningDaemonCliMismatchChoicePrompt = Readonly<{
+  body: readonly string[];
+  question: string;
+  choices: readonly {
+    id: RunningDaemonCliMismatchChoice;
+    keys: readonly string[];
+    short: string;
+  }[];
+  defaultId: RunningDaemonCliMismatchChoice;
+}>;
+
 function entryShortLabel(entry: AutomaticStartupEntry): string {
   const channel = entry.releaseChannel;
   const version = entry.configuredCliVersion ?? entry.runningCliVersion ?? '(unknown version)';
@@ -559,6 +575,38 @@ export function copyRunningDaemonCliMismatch(
     ],
     question: 'Restart the daemon with this installation?',
     default: 'yes',
+  };
+}
+
+export function copyRunningDaemonCliMismatchChoicePrompt(
+  finding: RunningDaemonCliMismatch,
+): RunningDaemonCliMismatchChoicePrompt {
+  const base = copyRunningDaemonCliMismatch(finding);
+  return {
+    body: [
+      ...base.body,
+      '',
+      'Choose the daemon-only repair to preserve active session runners. Choose session runners when you want eligible tracked sessions to restart on the updated CLI too.',
+    ],
+    question: 'Repair action?',
+    choices: [
+      {
+        id: 'restart-daemon',
+        keys: ['y', 'yes', 'daemon'],
+        short: 'Y',
+      },
+      {
+        id: 'restart-daemon-and-session-runners',
+        keys: ['r', 'runners', 'session-runners'],
+        short: 'r',
+      },
+      {
+        id: 'skip',
+        keys: ['n', 'no', 'skip'],
+        short: 'n',
+      },
+    ],
+    defaultId: 'restart-daemon',
   };
 }
 

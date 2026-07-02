@@ -192,4 +192,16 @@ describe('probeAgentModelsBestEffort (static-only providers)', () => {
     expect(fable?.modelOptions?.[0]?.options?.some((opt) => opt.value === 'max')).toBe(true);
     expect(createCatalogAcpBackendMock).not.toHaveBeenCalled();
   });
+
+  it('falls back only to the default Codex model when dynamic probing is unavailable', async () => {
+    const res = await probeAgentModelsBestEffort({
+      agentId: 'codex',
+      cwd: process.cwd(),
+      timeoutMs: 100,
+    });
+
+    expect(res.provider).toBe('codex');
+    expect(res.source).toBe('static');
+    expect(res.availableModels).toEqual([{ id: 'default', name: 'Default' }]);
+  });
 });

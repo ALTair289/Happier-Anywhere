@@ -570,7 +570,7 @@ process.exit(1);
     }
   }, 20_000);
 
-  it('falls back to static codex models when codex ACP spawn is unavailable', async () => {
+  it('falls back only to the default Codex model when dynamic probing is unavailable', async () => {
     const prevPath = process.env.PATH;
     const prevOverride = process.env.HAPPIER_CODEX_ACP_BIN;
     process.env.PATH = '';
@@ -582,7 +582,7 @@ process.exit(1);
         timeoutMs: 500,
       });
       expect(res.source).toBe('static');
-      expect(res.availableModels[0]).toEqual({ id: 'default', name: 'Default' });
+      expect(res.availableModels).toEqual([{ id: 'default', name: 'Default' }]);
     } finally {
       process.env.PATH = prevPath;
       if (typeof prevOverride === 'string') {

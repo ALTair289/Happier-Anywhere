@@ -10,6 +10,7 @@ const {
   maybeRunDoctorRepairMock,
   maybeRunVersionGatedRuntimeMigrationMock,
   quiesceInstalledCliWindowsPayloadOwnersMock,
+  restartAllDaemonSessionRunnersMock,
   resolveCliBinaryAssetBundleFromReleaseAssetsMock,
   updateInstalledCliPayloadFromReleaseAssetsMock,
 } = vi.hoisted(() => ({
@@ -17,6 +18,15 @@ const {
   maybeRunDoctorRepairMock: vi.fn(async (_params: unknown) => false),
   maybeRunVersionGatedRuntimeMigrationMock: vi.fn(async (_params: unknown) => false),
   quiesceInstalledCliWindowsPayloadOwnersMock: vi.fn(async (_params: unknown) => undefined),
+  restartAllDaemonSessionRunnersMock: vi.fn(async (_params: unknown) => ({
+    ok: true,
+    mode: 'if_stale',
+    requestedCount: 0,
+    restartedCount: 0,
+    skippedCount: 0,
+    failedCount: 0,
+    results: [],
+  })),
   resolveCliBinaryAssetBundleFromReleaseAssetsMock: vi.fn(() => ({
     version: '9.9.10-preview.3',
     archive: { name: 'archive', url: 'https://example.test/archive.tgz' },
@@ -56,6 +66,14 @@ vi.mock('@/cli/runtime/update/quiesceInstalledCliWindowsPayloadOwners', () => ({
   quiesceInstalledCliWindowsPayloadOwners: (params: unknown) => quiesceInstalledCliWindowsPayloadOwnersMock(params),
 }));
 
+vi.mock('@/daemon/controlClient', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/daemon/controlClient')>();
+  return {
+    ...actual,
+    restartAllDaemonSessionRunners: (params: unknown) => restartAllDaemonSessionRunnersMock(params),
+  };
+});
+
 describe('happier self update for binary installs', () => {
   const envScope = createEnvKeyScope(STANDARD_MANAGED_CLI_RELEASE_CHANNEL_ENV_KEYS);
 
@@ -71,6 +89,7 @@ describe('happier self update for binary installs', () => {
     maybeRunDoctorRepairMock.mockReset();
     maybeRunVersionGatedRuntimeMigrationMock.mockReset();
     quiesceInstalledCliWindowsPayloadOwnersMock.mockReset();
+    restartAllDaemonSessionRunnersMock.mockReset();
     envScope.restore();
     vi.restoreAllMocks();
     vi.resetModules();
@@ -111,6 +130,7 @@ describe('happier self update for binary installs', () => {
       expect(maybeRunDoctorRepairMock).toHaveBeenCalledWith({
         migrationRan: false,
       });
+      expect(restartAllDaemonSessionRunnersMock).not.toHaveBeenCalled();
     } finally {
       process.argv = originalArgv;
       logSpy.mockRestore();

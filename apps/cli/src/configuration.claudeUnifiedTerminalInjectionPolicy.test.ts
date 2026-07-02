@@ -49,12 +49,12 @@ describe('configuration Claude unified terminal injection policy', () => {
 
     process.env.HAPPIER_CLAUDE_UNIFIED_TERMINAL_INJECTION_RETRY_LIMIT = '100';
     process.env.HAPPIER_CLAUDE_UNIFIED_TERMINAL_INJECTION_RETRY_BASE_DELAY_MS = '60001';
-    process.env.HAPPIER_CLAUDE_UNIFIED_TERMINAL_PROVIDER_ACCEPTANCE_TIMEOUT_MS = '120001';
+    process.env.HAPPIER_CLAUDE_UNIFIED_TERMINAL_PROVIDER_ACCEPTANCE_TIMEOUT_MS = '180001';
     vi.resetModules();
     const { configuration: clampedConfiguration } = await import('./configuration');
 
     expect(clampedConfiguration.claudeUnifiedTerminalInjectionRetryLimit).toBe(10);
     expect(clampedConfiguration.claudeUnifiedTerminalInjectionRetryBaseDelayMs).toBe(60_000);
-    expect(clampedConfiguration.claudeUnifiedTerminalProviderAcceptanceTimeoutMs).toBe(120_000);
+    expect(clampedConfiguration.claudeUnifiedTerminalProviderAcceptanceTimeoutMs).toBe(180_000);
   });
 });
