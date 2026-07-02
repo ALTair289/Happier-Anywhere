@@ -10,8 +10,15 @@ import { SESSION_RPC_METHODS } from '@happier-dev/protocol/rpc';
 import { readRpcErrorCode } from '@happier-dev/protocol/rpcErrors';
 
 import { fetchEncryptedTranscriptPageAfterSeq } from '@/api/session/fetchEncryptedTranscriptWindow';
-import { materializeNextPendingQueueV2MessageViaHttp } from '@/api/session/pendingQueueV2Transport';
-import { waitForTranscriptEncryptedMessageByLocalId } from '@/api/session/transcriptMessageLookup';
+import {
+  materializeNextPendingQueueV2MessageViaHttp,
+  type PendingQueueDeliveryBlockedReason,
+  readBlockedPendingQueueV2DeliveryByLocalIdFromServer,
+} from '@/api/session/pendingQueueV2Transport';
+import {
+  waitForTranscriptEncryptedMessageByLocalId,
+  type TranscriptMessageLookupResult,
+} from '@/api/session/transcriptMessageLookup';
 import type { Credentials } from '@/persistence';
 import {
   detectSessionTurnActivity,
@@ -28,7 +35,10 @@ import {
   encryptSessionPayload,
   tryDecryptSessionMetadata,
 } from '@/session/transport/encryption/sessionEncryptionContext';
-import { detectSessionTurnLifecycleEvent, isBareSessionReadyEvent } from '@/session/shared/sessionTurnLifecycle';
+import {
+  detectSessionTurnLifecycleEvent,
+  isSessionTurnCompletionProof,
+} from '@/session/shared/sessionTurnLifecycle';
 
 import { resolveSessionTransportContext } from './resolveSessionTransportContext';
 
@@ -143,14 +153,99 @@ function decryptTranscriptRowContent(params: Readonly<{
   }
 }
 
-function isAssistantTurnActivity(value: unknown): boolean {
+function isAssistantTurnCompletionProof(value: unknown): boolean {
   if (!value || isMemoryArtifactDecryptedRow(value) || isSessionUserMessage(value)) {
     return false;
   }
-  if (isBareSessionReadyEvent(value)) {
-    return false;
+  return isSessionTurnCompletionProof(value);
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function readNonnegativeInteger(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+function readStructuredIssuePreview(value: unknown): string | null {
+  const record = asRecord(value);
+  const preview = typeof record?.sanitizedPreview === 'string' ? record.sanitizedPreview.trim() : '';
+  return preview.length > 0 ? preview : null;
+}
+
+function readTranscriptRuntimeIssuePreview(value: unknown): string | null {
+  const record = asRecord(value);
+  const content = asRecord(record?.content);
+  const data = asRecord(content?.data);
+  const message = typeof data?.message === 'string' ? data.message.trim() : '';
+  return message.length > 0 ? message : null;
+}
+
+function hasTranscriptRuntimeIssue(value: unknown): boolean {
+  const record = asRecord(value);
+  const meta = asRecord(record?.meta);
+  const code = typeof meta?.runtimeIssueCode === 'string' ? meta.runtimeIssueCode.trim() : '';
+  return code.length > 0;
+}
+
+function readTranscriptLifecycleIssuePreview(value: unknown): string | null {
+  const record = asRecord(value);
+  const content = asRecord(record?.content);
+  const data = asRecord(content?.data);
+  return readStructuredIssuePreview(data?.issue);
+}
+
+function formatStructuredTurnFailureMessage(
+  kind: 'failed' | 'cancelled' | 'aborted',
+  preview?: string | null,
+): string {
+  if (kind === 'cancelled') return 'Current turn cancelled';
+  if (kind === 'aborted') return 'Current turn aborted';
+  const suffix = preview && preview.trim().length > 0 ? `: ${preview.trim()}` : '';
+  return `Current turn failed${suffix}`;
+}
+
+function readAssistantTurnFailure(value: unknown): string | null {
+  if (!value || isMemoryArtifactDecryptedRow(value) || isSessionUserMessage(value)) {
+    return null;
   }
-  return detectSessionTurnLifecycleEvent(value) !== null;
+  const lifecycleEvent = detectSessionTurnLifecycleEvent(value);
+  if (lifecycleEvent === 'turn_failed') {
+    return formatStructuredTurnFailureMessage('failed', readTranscriptLifecycleIssuePreview(value));
+  }
+  if (lifecycleEvent === 'turn_cancelled') {
+    return formatStructuredTurnFailureMessage('cancelled');
+  }
+  if (lifecycleEvent === 'turn_aborted') {
+    return formatStructuredTurnFailureMessage('aborted');
+  }
+  if (hasTranscriptRuntimeIssue(value)) {
+    return formatStructuredTurnFailureMessage('failed', readTranscriptRuntimeIssuePreview(value));
+  }
+  return null;
+}
+
+function readProjectedCurrentTurnFailure(params: Readonly<{
+  session: unknown;
+  currentUserCreatedAt: number;
+}>): string | null {
+  const record = asRecord(params.session);
+  if (!record) return null;
+  const latestTurnStatus = record.latestTurnStatus;
+  if (latestTurnStatus !== 'failed' && latestTurnStatus !== 'cancelled') {
+    return null;
+  }
+  const observedAt = readNonnegativeInteger(record.latestTurnStatusObservedAt);
+  if (observedAt === null || observedAt < params.currentUserCreatedAt) {
+    return null;
+  }
+  return formatStructuredTurnFailureMessage(
+    latestTurnStatus,
+    readStructuredIssuePreview(record.lastRuntimeIssue),
+  );
 }
 
 async function resolveCurrentTurnAfterSeqExclusive(params: Readonly<{
@@ -211,7 +306,73 @@ async function resolveCurrentTurnAfterSeqExclusive(params: Readonly<{
   }
 }
 
-async function hasAssistantActivityAfterCurrentUserTurn(params: Readonly<{
+type AssistantTurnOutcome =
+  | Readonly<{ kind: 'missing' }>
+  | Readonly<{ kind: 'completed' }>
+  | Readonly<{ kind: 'failed'; message: string }>;
+
+type CurrentPromptDeliveryOutcome =
+  | Readonly<{ kind: 'materialized'; message: TranscriptMessageLookupResult }>
+  | Readonly<{ kind: 'blocked'; reason: PendingQueueDeliveryBlockedReason }>
+  | Readonly<{ kind: 'missing' }>;
+
+const CURRENT_PROMPT_DELIVERY_POLL_MS = 250;
+
+function formatBlockedPromptDeliveryFailure(reason: PendingQueueDeliveryBlockedReason): string {
+  return `Current turn failed: pending delivery blocked (${reason})`;
+}
+
+async function readBlockedPromptDeliveryReason(params: Readonly<{
+  token: string;
+  sessionId: string;
+  localId: string;
+}>): Promise<PendingQueueDeliveryBlockedReason | null> {
+  try {
+    const blocked = await readBlockedPendingQueueV2DeliveryByLocalIdFromServer({
+      token: params.token,
+      sessionId: params.sessionId,
+      localId: params.localId,
+    });
+    return blocked?.reason ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function waitForCurrentPromptDelivery(params: Readonly<{
+  token: string;
+  sessionId: string;
+  localId: string;
+  maxWaitMs: number;
+}>): Promise<CurrentPromptDeliveryOutcome> {
+  const deadlineMs = Date.now() + Math.max(1, Math.trunc(params.maxWaitMs));
+
+  while (Date.now() <= deadlineMs) {
+    const remainingMs = deadlineMs - Date.now();
+    const materialized = await waitForTranscriptEncryptedMessageByLocalId({
+      token: params.token,
+      sessionId: params.sessionId,
+      localId: params.localId,
+      maxWaitMs: Math.max(1, Math.min(CURRENT_PROMPT_DELIVERY_POLL_MS, remainingMs)),
+    });
+    if (materialized) {
+      return { kind: 'materialized', message: materialized };
+    }
+
+    const blockedReason = await readBlockedPromptDeliveryReason(params);
+    if (blockedReason) {
+      return { kind: 'blocked', reason: blockedReason };
+    }
+  }
+
+  const blockedReason = await readBlockedPromptDeliveryReason(params);
+  if (blockedReason) {
+    return { kind: 'blocked', reason: blockedReason };
+  }
+  return { kind: 'missing' };
+}
+
+async function readAssistantTurnOutcomeAfterCurrentUserTurn(params: Readonly<{
   token: string;
   sessionId: string;
   localId: string;
@@ -220,7 +381,7 @@ async function hasAssistantActivityAfterCurrentUserTurn(params: Readonly<{
     encryptionKey: Uint8Array;
     encryptionVariant: 'legacy' | 'dataKey';
   }>;
-}>): Promise<boolean> {
+}>): Promise<AssistantTurnOutcome> {
   const afterSeq = Math.max(0, Math.trunc(params.materializedSeq) - 1);
   const rows = await fetchEncryptedTranscriptPageAfterSeq({
     token: params.token,
@@ -230,6 +391,7 @@ async function hasAssistantActivityAfterCurrentUserTurn(params: Readonly<{
   });
   const orderedRows = [...rows].sort((a, b) => a.seq - b.seq);
   const currentUserSeq = orderedRows.find((row) => row.localId === params.localId)?.seq ?? params.materializedSeq;
+  let sawCompletion = false;
 
   for (const row of orderedRows) {
     if (row.seq <= currentUserSeq) {
@@ -239,15 +401,19 @@ async function hasAssistantActivityAfterCurrentUserTurn(params: Readonly<{
       content: row.content,
       ctx: params.ctx,
     });
-    if (isAssistantTurnActivity(decrypted)) {
-      return true;
+    const failure = readAssistantTurnFailure(decrypted);
+    if (failure) {
+      return { kind: 'failed', message: failure };
+    }
+    if (isAssistantTurnCompletionProof(decrypted)) {
+      sawCompletion = true;
     }
   }
 
-  return false;
+  return sawCompletion ? { kind: 'completed' } : { kind: 'missing' };
 }
 
-async function waitForAssistantActivityAfterCurrentUserTurn(params: Readonly<{
+async function waitForAssistantOutcomeAfterCurrentUserTurn(params: Readonly<{
   token: string;
   sessionId: string;
   localId: string;
@@ -257,15 +423,16 @@ async function waitForAssistantActivityAfterCurrentUserTurn(params: Readonly<{
     encryptionVariant: 'legacy' | 'dataKey';
   }>;
   maxWaitMs: number;
-}>): Promise<boolean> {
+}>): Promise<AssistantTurnOutcome> {
   const deadlineMs = Date.now() + Math.max(1, Math.trunc(params.maxWaitMs));
   let lastAttempt = false;
 
   while (Date.now() <= deadlineMs) {
     lastAttempt = true;
     try {
-      if (await hasAssistantActivityAfterCurrentUserTurn(params)) {
-        return true;
+      const outcome = await readAssistantTurnOutcomeAfterCurrentUserTurn(params);
+      if (outcome.kind !== 'missing') {
+        return outcome;
       }
     } catch {
       // Missing proof is not success. Keep polling until the caller's wait budget expires.
@@ -279,9 +446,10 @@ async function waitForAssistantActivityAfterCurrentUserTurn(params: Readonly<{
   }
 
   if (!lastAttempt) {
-    return hasAssistantActivityAfterCurrentUserTurn(params).catch(() => false);
+    return readAssistantTurnOutcomeAfterCurrentUserTurn(params)
+      .catch((): AssistantTurnOutcome => ({ kind: 'missing' }));
   }
-  return false;
+  return { kind: 'missing' };
 }
 
 export async function sendSessionMessage(params: Readonly<{
@@ -414,18 +582,26 @@ export async function sendSessionMessage(params: Readonly<{
   let currentTurnAfterSeqExclusive: number | null = null;
 
   try {
-    const materialized = await waitForTranscriptEncryptedMessageByLocalId({
+    const promptDelivery = await waitForCurrentPromptDelivery({
       token: params.credentials.token,
       sessionId: sessionId,
       localId,
       maxWaitMs: Math.max(1, deadlineMs - Date.now()),
     });
-    if (!materialized) {
+    if (promptDelivery.kind === 'blocked') {
+      return {
+        ok: false,
+        code: 'wait_failed',
+        message: formatBlockedPromptDeliveryFailure(promptDelivery.reason),
+      };
+    }
+    if (promptDelivery.kind !== 'materialized') {
       return {
         ok: false,
         code: 'timeout',
       };
     }
+    const materialized = promptDelivery.message;
 
     try {
       const refreshedSession = await fetchSessionById({
@@ -486,15 +662,65 @@ export async function sendSessionMessage(params: Readonly<{
       initialAgentStateCiphertextBase64:
         agentStateCiphertext && agentStateCiphertext.length > 0 ? agentStateCiphertext : null,
     });
-    const observedAssistantActivity = await waitForAssistantActivityAfterCurrentUserTurn({
+    let finalSessionSnapshot = waitSessionSnapshot;
+    try {
+      const refreshedSession = await fetchSessionById({
+        token: params.credentials.token,
+        sessionId: sessionId,
+      });
+      if (refreshedSession) {
+        finalSessionSnapshot = refreshedSession;
+      }
+    } catch {
+      finalSessionSnapshot = waitSessionSnapshot;
+    }
+    const projectedFailure = readProjectedCurrentTurnFailure({
+      session: finalSessionSnapshot,
+      currentUserCreatedAt: materialized.createdAt,
+    });
+    if (projectedFailure) {
+      return {
+        ok: false,
+        code: 'wait_failed',
+        message: projectedFailure,
+      };
+    }
+    const assistantTurnOutcomeParams = {
       token: params.credentials.token,
       sessionId: sessionId,
       localId,
       materializedSeq: materialized.seq,
       ctx: sessionTarget.ctx,
+    };
+    const initialAssistantTurnOutcome = await readAssistantTurnOutcomeAfterCurrentUserTurn(assistantTurnOutcomeParams)
+      .catch((): AssistantTurnOutcome => ({ kind: 'missing' }));
+    if (initialAssistantTurnOutcome.kind === 'failed') {
+      return {
+        ok: false,
+        code: 'wait_failed',
+        message: initialAssistantTurnOutcome.message,
+      };
+    }
+    if (initialAssistantTurnOutcome.kind === 'completed') {
+      return {
+        ok: true,
+        sessionId: sessionId,
+        localId,
+        waited: true,
+      };
+    }
+    const assistantTurnOutcome = await waitForAssistantOutcomeAfterCurrentUserTurn({
+      ...assistantTurnOutcomeParams,
       maxWaitMs: Math.max(1, deadlineMs - Date.now()),
     });
-    if (!observedAssistantActivity) {
+    if (assistantTurnOutcome.kind === 'failed') {
+      return {
+        ok: false,
+        code: 'wait_failed',
+        message: assistantTurnOutcome.message,
+      };
+    }
+    if (assistantTurnOutcome.kind !== 'completed') {
       return {
         ok: false,
         code: 'timeout',

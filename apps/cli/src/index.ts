@@ -21,7 +21,7 @@ import { installAxiosProxySupport } from '@/utils/proxy/axiosProxy';
 import { ensureWindowsUtf8CodePage } from '@/utils/platform/windows/ensureWindowsUtf8CodePage';
 import { installConsoleWriteErrorGuards, shouldInstallConsoleWriteErrorGuards } from '@/utils/writeConsoleBestEffort';
 
-void (async () => {
+async function main() {
   // Best-effort Windows console hardening for Unicode output (workaround for upstream reports of mojibake when
   // launching via npm-generated wrappers). Opt-out via HAPPIER_WINDOWS_UTF8_CODEPAGE=0.
   ensureWindowsUtf8CodePage();
@@ -54,10 +54,14 @@ void (async () => {
   });
   const { args, terminalRuntime } = parseCliArgs(normalizedArgv);
   await dispatchCli({ args, terminalRuntime, rawArgv: process.argv });
-})().catch((error) => {
-  console.error('Error:', error instanceof Error ? error.message : 'Unknown error');
-  if (process.env.DEBUG) {
-    console.error(error);
-  }
-  process.exitCode = 1;
-});
+}
+
+if (process.env.HAPPIER_CLI_DIST_INTEGRITY_PROBE !== '1') {
+  void main().catch((error) => {
+    console.error('Error:', error instanceof Error ? error.message : 'Unknown error');
+    if (process.env.DEBUG) {
+      console.error(error);
+    }
+    process.exitCode = 1;
+  });
+}

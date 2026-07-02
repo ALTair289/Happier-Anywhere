@@ -757,7 +757,7 @@ export async function clearMachineId(opts?: Readonly<{
   });
 }
 
-export async function readLastChangesCursor(accountId: string): Promise<number> {
+export async function readAccountChangesCursor(accountId: string): Promise<number> {
   if (!accountId) return 0;
   const settings = await readSettings();
   const activeServerId = sanitizeServerIdForFilesystem(
@@ -768,7 +768,7 @@ export async function readLastChangesCursor(accountId: string): Promise<number> 
   return typeof cursor === 'number' && Number.isFinite(cursor) && cursor >= 0 ? cursor : 0;
 }
 
-export async function writeLastChangesCursor(accountId: string, cursor: number): Promise<void> {
+export async function writeAccountChangesCursor(accountId: string, cursor: number): Promise<void> {
   if (!accountId) return;
   if (!Number.isFinite(cursor) || cursor < 0) return;
   const next = Math.floor(cursor);

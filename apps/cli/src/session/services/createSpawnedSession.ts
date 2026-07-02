@@ -1,26 +1,48 @@
-import type { BackendTargetRefV1, ConnectedServiceBindingsV1 } from '@happier-dev/protocol';
+import type {
+  AcpConfigOptionOverridesV1,
+  BackendTargetRefV1,
+  ConnectedServiceBindingsV1,
+  SessionMcpSelectionV1,
+} from '@happier-dev/protocol';
 import { randomUUID } from 'node:crypto';
 
 import { resolveDaemonSpawnSessionByNonce, spawnDaemonSession } from '@/daemon/controlClient';
 import type { Credentials } from '@/persistence';
 import { SPAWN_SESSION_ERROR_CODES } from '@/rpc/handlers/registerSessionHandlers';
-import { SpawnDaemonSessionRequestSchema } from '@/rpc/handlers/spawnSessionOptionsContract';
+import { SpawnDaemonSessionRequestSchema, type SpawnDaemonSessionRequest } from '@/rpc/handlers/spawnSessionOptionsContract';
 import { updateSessionMetadataWithRetry } from '@/session/metadata/updateSessionMetadataWithRetry';
 import { fetchSessionById } from '@/session/transport/http/sessionsHttp';
 import { summarizeSessionRecord, type SessionSummary } from '@/cli/output/session/sessionSummary';
 import { delay } from '@/utils/time';
 
-type CreateSpawnedSessionParams = Readonly<{
+export type CreateSpawnedSessionParams = Readonly<{
   credentials: Credentials;
   directory: string;
   machineId?: string;
   backendTarget: BackendTargetRefV1;
   modelId?: string;
+  modelUpdatedAt?: number;
+  permissionMode?: string;
+  permissionModeUpdatedAt?: number;
+  agentModeId?: string;
+  agentModeUpdatedAt?: number;
+  sessionConfigOptionOverrides?: AcpConfigOptionOverridesV1;
   title?: string;
   tag?: string;
   initialMessage?: string;
+  profileId?: string;
+  environmentVariables?: Record<string, string>;
   connectedServices?: ConnectedServiceBindingsV1;
   connectedServicesUpdatedAt?: number;
+  mcpSelection?: SessionMcpSelectionV1;
+  transcriptStorage?: 'persisted' | 'direct';
+  terminal?: SpawnDaemonSessionRequest['terminal'];
+  windowsRemoteSessionLaunchMode?: SpawnDaemonSessionRequest['windowsRemoteSessionLaunchMode'];
+  windowsRemoteSessionConsole?: SpawnDaemonSessionRequest['windowsRemoteSessionConsole'];
+  windowsTerminalWindowName?: string;
+  codexBackendMode?: SpawnDaemonSessionRequest['codexBackendMode'];
+  agentRuntimeDescriptorV1?: SpawnDaemonSessionRequest['agentRuntimeDescriptorV1'];
+  approvedNewDirectoryCreation?: boolean;
 }>;
 
 const DEFAULT_SPAWNED_SESSION_FETCH_TIMEOUT_MS = 10_000;
@@ -111,13 +133,42 @@ export async function createSpawnedSession(
     spawnNonce,
     ...(params.machineId ? { machineId: params.machineId } : {}),
     backendTarget: params.backendTarget,
-    ...(params.modelId ? { modelId: params.modelId, modelUpdatedAt: Date.now() } : {}),
+    ...(params.permissionMode ? { permissionMode: params.permissionMode } : {}),
+    ...(typeof params.permissionModeUpdatedAt === 'number' && Number.isFinite(params.permissionModeUpdatedAt)
+      ? { permissionModeUpdatedAt: params.permissionModeUpdatedAt }
+      : {}),
+    ...(params.agentModeId ? { agentModeId: params.agentModeId } : {}),
+    ...(typeof params.agentModeUpdatedAt === 'number' && Number.isFinite(params.agentModeUpdatedAt)
+      ? { agentModeUpdatedAt: params.agentModeUpdatedAt }
+      : {}),
+    ...(params.modelId
+      ? {
+          modelId: params.modelId,
+          modelUpdatedAt: typeof params.modelUpdatedAt === 'number' && Number.isFinite(params.modelUpdatedAt)
+            ? params.modelUpdatedAt
+            : Date.now(),
+        }
+      : {}),
+    ...(params.sessionConfigOptionOverrides ? { sessionConfigOptionOverrides: params.sessionConfigOptionOverrides } : {}),
     ...(typeof params.initialMessage === 'string' && params.initialMessage.trim().length > 0
       ? { initialPrompt: params.initialMessage }
       : {}),
+    ...(params.profileId ? { profileId: params.profileId } : {}),
+    ...(params.environmentVariables ? { environmentVariables: params.environmentVariables } : {}),
     ...(params.connectedServices ? { connectedServices: params.connectedServices } : {}),
     ...(typeof params.connectedServicesUpdatedAt === 'number' && Number.isFinite(params.connectedServicesUpdatedAt)
       ? { connectedServicesUpdatedAt: params.connectedServicesUpdatedAt }
+      : {}),
+    ...(params.mcpSelection ? { mcpSelection: params.mcpSelection } : {}),
+    ...(params.transcriptStorage ? { transcriptStorage: params.transcriptStorage } : {}),
+    ...(params.terminal ? { terminal: params.terminal } : {}),
+    ...(params.windowsRemoteSessionLaunchMode ? { windowsRemoteSessionLaunchMode: params.windowsRemoteSessionLaunchMode } : {}),
+    ...(params.windowsRemoteSessionConsole ? { windowsRemoteSessionConsole: params.windowsRemoteSessionConsole } : {}),
+    ...(params.windowsTerminalWindowName ? { windowsTerminalWindowName: params.windowsTerminalWindowName } : {}),
+    ...(params.codexBackendMode ? { codexBackendMode: params.codexBackendMode } : {}),
+    ...(params.agentRuntimeDescriptorV1 ? { agentRuntimeDescriptorV1: params.agentRuntimeDescriptorV1 } : {}),
+    ...(typeof params.approvedNewDirectoryCreation === 'boolean'
+      ? { approvedNewDirectoryCreation: params.approvedNewDirectoryCreation }
       : {}),
   });
   const spawnResponse = await spawnDaemonSession(spawnRequest);

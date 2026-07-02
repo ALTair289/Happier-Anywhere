@@ -1,30 +1,19 @@
-import { isPermissionMode, type Metadata, type PermissionMode } from '@/api/types';
-import {
-  AcpConfigOptionOverridesV1Schema,
-  AcpSessionModeOverrideV1Schema,
-  ConnectedServiceBindingsV1Schema,
-  ModelOverrideV1Schema,
-  type ConnectedServiceBindingsV1,
-} from '@happier-dev/protocol';
-import {
-  readSessionMetadataConnectedServiceBindings,
-  resolveMetadataStringOverrideV1,
-  resolvePermissionIntentFromSessionMetadata,
-} from '@happier-dev/agents';
+import type { Metadata } from '@/api/types';
 
-type ForkInheritedSpawnOverrides = {
-  permissionMode?: PermissionMode;
-  permissionModeUpdatedAt?: number;
-  agentModeId?: string;
-  agentModeUpdatedAt?: number;
-  modelId?: string;
-  modelUpdatedAt?: number;
-  connectedServices?: ConnectedServiceBindingsV1;
-  connectedServicesUpdatedAt?: number;
-};
+import {
+  CHILD_SESSION_INHERITANCE_FIELD_SETS,
+  resolveChildSessionInheritedContextFromMetadata,
+  type ChildSessionInheritedMetadataOverrides,
+  type ChildSessionInheritedSpawnOverrides,
+} from '../inheritance/resolveChildSessionInheritedContextFromMetadata';
+
+type ForkInheritedSpawnOverrides = Omit<
+  ChildSessionInheritedSpawnOverrides,
+  'mcpSelection' | 'profileId'
+>;
 
 type ForkInheritedMetadataOverrides = Pick<
-  Metadata,
+  ChildSessionInheritedMetadataOverrides,
   | 'permissionMode'
   | 'permissionModeUpdatedAt'
   | 'modelOverrideV1'
@@ -42,141 +31,6 @@ type ForkInheritedMetadataOverrides = Pick<
   | 'connectedServicesUpdatedAt'
 >;
 
-function isFiniteNumber(value: unknown): value is number {
-  return typeof value === 'number' && Number.isFinite(value);
-}
-
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0;
-}
-
-function cloneSessionModesState(
-  value: unknown,
-): Metadata['sessionModesV1'] | undefined {
-  if (!value || typeof value !== 'object') return undefined;
-  const state = value as Metadata['sessionModesV1'];
-  if (
-    state?.v !== 1 ||
-    !isNonEmptyString(state.provider) ||
-    !isFiniteNumber(state.updatedAt) ||
-    !isNonEmptyString(state.currentModeId) ||
-    !Array.isArray(state.availableModes)
-  ) {
-    return undefined;
-  }
-  return {
-    v: 1,
-    provider: state.provider,
-    updatedAt: state.updatedAt,
-    currentModeId: state.currentModeId,
-    availableModes: state.availableModes
-      .filter((mode) => mode && isNonEmptyString(mode.id) && isNonEmptyString(mode.name))
-      .map((mode) => ({
-        id: mode.id,
-        name: mode.name,
-        ...(isNonEmptyString(mode.description) ? { description: mode.description } : {}),
-      })),
-  };
-}
-
-function cloneSessionModelsState(
-  value: unknown,
-): Metadata['sessionModelsV1'] | undefined {
-  if (!value || typeof value !== 'object') return undefined;
-  const state = value as Metadata['sessionModelsV1'];
-  if (
-    state?.v !== 1 ||
-    !isNonEmptyString(state.provider) ||
-    !isFiniteNumber(state.updatedAt) ||
-    !isNonEmptyString(state.currentModelId) ||
-    !Array.isArray(state.availableModels)
-  ) {
-    return undefined;
-  }
-  return {
-    v: 1,
-    provider: state.provider,
-    updatedAt: state.updatedAt,
-    currentModelId: state.currentModelId,
-    availableModels: state.availableModels
-      .filter((model) => model && isNonEmptyString(model.id) && isNonEmptyString(model.name))
-      .map((model) => ({
-        id: model.id,
-        name: model.name,
-        ...(isNonEmptyString(model.description) ? { description: model.description } : {}),
-      })),
-  };
-}
-
-function isAllowedConfigValue(value: unknown): value is string | number | boolean | null {
-  return value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean';
-}
-
-function cloneSessionConfigOptionsState(
-  value: unknown,
-): Metadata['sessionConfigOptionsV1'] | undefined {
-  if (!value || typeof value !== 'object') return undefined;
-  const state = value as Metadata['sessionConfigOptionsV1'];
-  if (
-    state?.v !== 1 ||
-    !isNonEmptyString(state.provider) ||
-    !isFiniteNumber(state.updatedAt) ||
-    !Array.isArray(state.configOptions)
-  ) {
-    return undefined;
-  }
-
-  return {
-    v: 1,
-    provider: state.provider,
-    updatedAt: state.updatedAt,
-    configOptions: state.configOptions
-      .filter((option) =>
-        option &&
-        isNonEmptyString(option.id) &&
-        isNonEmptyString(option.name) &&
-        isNonEmptyString(option.type) &&
-        isAllowedConfigValue(option.currentValue),
-      )
-      .map((option) => ({
-        id: option.id,
-        name: option.name,
-        type: option.type,
-        currentValue: option.currentValue,
-        ...(isNonEmptyString(option.description) ? { description: option.description } : {}),
-        ...(Array.isArray(option.options)
-          ? {
-            options: option.options
-              .filter((choice) => choice && isNonEmptyString(choice.name) && isAllowedConfigValue(choice.value))
-              .map((choice) => ({
-                value: choice.value,
-                name: choice.name,
-                ...(isNonEmptyString(choice.description) ? { description: choice.description } : {}),
-              })),
-          }
-          : {}),
-      })),
-  };
-}
-
-function resolveInheritedConnectedServices(
-  metadata: Record<string, unknown> | null | undefined,
-  providerId: string | null | undefined,
-): ConnectedServiceBindingsV1 | null {
-  const explicit = ConnectedServiceBindingsV1Schema.safeParse(metadata?.connectedServices);
-  if (explicit.success) return explicit.data;
-
-  if (!isNonEmptyString(providerId)) return null;
-  const derivedBindings = readSessionMetadataConnectedServiceBindings(metadata, providerId);
-  if (Object.keys(derivedBindings).length === 0) return null;
-
-  const derived = ConnectedServiceBindingsV1Schema.safeParse({
-    v: 1,
-    bindingsByServiceId: derivedBindings,
-  });
-  return derived.success ? derived.data : null;
-}
-
 export function resolveForkInheritedOverridesFromMetadata(
   metadata: Record<string, unknown> | null | undefined,
   providerId?: string | null,
@@ -184,96 +38,14 @@ export function resolveForkInheritedOverridesFromMetadata(
   spawn: ForkInheritedSpawnOverrides;
   metadata: ForkInheritedMetadataOverrides;
 } {
-  const spawn: ForkInheritedSpawnOverrides = {};
-  const metadataOverrides: ForkInheritedMetadataOverrides = {};
+  const inherited = resolveChildSessionInheritedContextFromMetadata({
+    metadata,
+    providerId,
+    fields: CHILD_SESSION_INHERITANCE_FIELD_SETS.fork,
+  });
 
-  const permission = resolvePermissionIntentFromSessionMetadata(metadata);
-  if (permission && isPermissionMode(permission.intent)) {
-    spawn.permissionMode = permission.intent;
-    spawn.permissionModeUpdatedAt = permission.updatedAt;
-    metadataOverrides.permissionMode = permission.intent;
-    metadataOverrides.permissionModeUpdatedAt = permission.updatedAt;
-  }
-
-  const model = resolveMetadataStringOverrideV1(metadata, 'modelOverrideV1', 'modelId');
-  if (model && model.value !== 'default') {
-    spawn.modelId = model.value;
-    spawn.modelUpdatedAt = model.updatedAt;
-  }
-
-  const modelOverrideRaw = ModelOverrideV1Schema.safeParse(metadata?.modelOverrideV1);
-  if (modelOverrideRaw.success) {
-    metadataOverrides.modelOverrideV1 = modelOverrideRaw.data;
-  }
-
-  const sessionModes = cloneSessionModesState(metadata?.sessionModesV1);
-  if (sessionModes) {
-    metadataOverrides.sessionModesV1 = sessionModes;
-  }
-
-  const sessionModels = cloneSessionModelsState(metadata?.sessionModelsV1);
-  if (sessionModels) {
-    metadataOverrides.sessionModelsV1 = sessionModels;
-  }
-
-  const configOptions = cloneSessionConfigOptionsState(metadata?.sessionConfigOptionsV1);
-  if (configOptions) {
-    metadataOverrides.sessionConfigOptionsV1 = configOptions;
-  }
-
-  const sessionModeOverrideRaw = AcpSessionModeOverrideV1Schema.safeParse(metadata?.sessionModeOverrideV1);
-  if (sessionModeOverrideRaw.success) {
-    metadataOverrides.sessionModeOverrideV1 = sessionModeOverrideRaw.data;
-    if (isNonEmptyString(sessionModeOverrideRaw.data.modeId)) {
-      spawn.agentModeId = sessionModeOverrideRaw.data.modeId;
-      spawn.agentModeUpdatedAt = sessionModeOverrideRaw.data.updatedAt;
-    }
-  }
-
-  const sessionConfigOverridesRaw = AcpConfigOptionOverridesV1Schema.safeParse(metadata?.sessionConfigOptionOverridesV1);
-  if (sessionConfigOverridesRaw.success) {
-    metadataOverrides.sessionConfigOptionOverridesV1 = sessionConfigOverridesRaw.data;
-  }
-
-  const acpSessionModes = cloneSessionModesState(metadata?.acpSessionModesV1);
-  if (acpSessionModes) {
-    metadataOverrides.acpSessionModesV1 = acpSessionModes;
-  }
-
-  const acpSessionModels = cloneSessionModelsState(metadata?.acpSessionModelsV1);
-  if (acpSessionModels) {
-    metadataOverrides.acpSessionModelsV1 = acpSessionModels;
-  }
-
-  const acpConfigOptions = cloneSessionConfigOptionsState(metadata?.acpConfigOptionsV1);
-  if (acpConfigOptions) {
-    metadataOverrides.acpConfigOptionsV1 = acpConfigOptions;
-  }
-
-  const acpModeOverrideRaw = AcpSessionModeOverrideV1Schema.safeParse(metadata?.acpSessionModeOverrideV1);
-  if (acpModeOverrideRaw.success) {
-    metadataOverrides.acpSessionModeOverrideV1 = acpModeOverrideRaw.data;
-    if (!spawn.agentModeId && isNonEmptyString(acpModeOverrideRaw.data.modeId)) {
-      spawn.agentModeId = acpModeOverrideRaw.data.modeId;
-      spawn.agentModeUpdatedAt = acpModeOverrideRaw.data.updatedAt;
-    }
-  }
-
-  const acpConfigOverridesRaw = AcpConfigOptionOverridesV1Schema.safeParse(metadata?.acpConfigOptionOverridesV1);
-  if (acpConfigOverridesRaw.success) {
-    metadataOverrides.acpConfigOptionOverridesV1 = acpConfigOverridesRaw.data;
-  }
-
-  const connectedServices = resolveInheritedConnectedServices(metadata, providerId);
-  if (connectedServices) {
-    spawn.connectedServices = connectedServices;
-    metadataOverrides.connectedServices = connectedServices;
-
-    if (isFiniteNumber(metadata?.connectedServicesUpdatedAt)) {
-      spawn.connectedServicesUpdatedAt = metadata.connectedServicesUpdatedAt;
-      metadataOverrides.connectedServicesUpdatedAt = metadata.connectedServicesUpdatedAt;
-    }
-  }
-
-  return { spawn, metadata: metadataOverrides };
+  return {
+    spawn: inherited.spawn,
+    metadata: inherited.metadata as Pick<Metadata, keyof ForkInheritedMetadataOverrides>,
+  };
 }

@@ -100,7 +100,7 @@ export async function fetchSessionById(params: Readonly<{ token: string; session
     throwAuthenticationStatusError(response.status);
   }
   if (response.status !== 200) {
-    throw new Error(`Unexpected status from /v2/sessions/${params.sessionId}: ${response.status}`);
+    throwUnexpectedHttpStatusError(response.status, `Unexpected status from /v2/sessions/${params.sessionId}: ${response.status}`);
   }
 
   return parseOrThrow<V2SessionByIdResponse>(V2SessionByIdResponseSchema, response.data, 'Unexpected /v2/sessions response shape').session;
@@ -147,6 +147,74 @@ export async function fetchSessionByIdCompat(params: Readonly<{ token: string; s
   }
 
   return parseOrThrow<V2SessionByIdResponse>(V2SessionByIdResponseSchema, response.data, 'Unexpected /v2/sessions response shape').session;
+}
+
+export async function patchSessionMetadata(params: Readonly<{
+  token: string;
+  sessionId: string;
+  ciphertext: string;
+  expectedVersion: number;
+}>): Promise<
+  | Readonly<{ success: true; version: number }>
+  | Readonly<{ success: false; error: 'version-mismatch'; current: { version: number; value: string | null } }>
+> {
+  const serverUrl = resolveServerHttpBaseUrl();
+  const encodedSessionId = encodeSessionIdPathSegment(params.sessionId);
+  const response = await axios.patch(`${serverUrl}/v2/sessions/${encodedSessionId}`, {
+    metadata: {
+      ciphertext: params.ciphertext,
+      expectedVersion: params.expectedVersion,
+    },
+  }, {
+    headers: {
+      Authorization: `Bearer ${params.token}`,
+      'Content-Type': 'application/json',
+    },
+    timeout: configuration.sessionControlHttpTimeoutMs,
+    validateStatus: () => true,
+  });
+
+  if (isAuthenticationStatus(response.status)) {
+    throwAuthenticationStatusError(response.status);
+  }
+  if (response.status === 404) {
+    const error = new Error('Session not found');
+    (error as { code?: string }).code = 'session_not_found';
+    throw error;
+  }
+  if (response.status !== 200) {
+    throwUnexpectedHttpStatusError(response.status, `Unexpected status from /v2/sessions/${params.sessionId}: ${response.status}`);
+  }
+
+  const data = response.data;
+  if (data && typeof data === 'object') {
+    const body = data as {
+      success?: unknown;
+      error?: unknown;
+      metadata?: { version?: unknown; value?: unknown };
+    };
+    if (body.success === true && typeof body.metadata?.version === 'number' && Number.isFinite(body.metadata.version)) {
+      return { success: true, version: body.metadata.version };
+    }
+    if (
+      body.success === false
+      && body.error === 'version-mismatch'
+      && typeof body.metadata?.version === 'number'
+      && Number.isFinite(body.metadata.version)
+      && (typeof body.metadata.value === 'string' || body.metadata.value === null)
+    ) {
+      return {
+        success: false,
+        error: 'version-mismatch',
+        current: {
+          version: body.metadata.version,
+          value: body.metadata.value,
+        },
+      };
+    }
+  }
+
+  throw new Error(`Unexpected /v2/sessions/${params.sessionId} patch response shape`);
 }
 
 export async function fetchSessionsPage(params: Readonly<{

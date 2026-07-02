@@ -46,7 +46,7 @@ describe('dispatchProviderNativeFork', () => {
       parentCodexSessionId: 'codex_parent_1',
       processEnv: expect.objectContaining({ CODEX_HOME: '/tmp/connected-codex-home' }),
     });
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       vendorSessionId: 'codex_child_1',
       spawn: {
         resume: 'codex_child_1',
@@ -56,15 +56,25 @@ describe('dispatchProviderNativeFork', () => {
       metadata: {
         codexSessionId: 'codex_child_1',
         codexBackendMode: 'appServer',
-        agentRuntimeDescriptorV1: expect.objectContaining({
-          provider: expect.objectContaining({
+        agentRuntimeDescriptorV1: {
+          providerId: 'codex',
+          provider: {
             backendMode: 'appServer',
             vendorSessionId: 'codex_child_1',
+            home: 'connectedService',
             connectedServiceId: 'openai-codex',
             connectedServiceProfileId: 'work',
-            homePath: '/tmp/connected-codex-home',
-          }),
-        }),
+            providerExtra: {
+              runtimeAffinity: {
+                backendMode: 'appServer',
+                vendorSessionId: 'codex_child_1',
+                home: 'connectedService',
+                connectedServiceId: 'openai-codex',
+                connectedServiceProfileId: 'work',
+              },
+            },
+          },
+        },
       },
       providerHint: {
         providerId: 'codex',
@@ -72,6 +82,8 @@ describe('dispatchProviderNativeFork', () => {
         vendorSessionId: 'codex_child_1',
       },
     });
+    expect((result?.metadata.agentRuntimeDescriptorV1 as any)?.provider?.homePath).toBeUndefined();
+    expect((result?.metadata.agentRuntimeDescriptorV1 as any)?.provider?.providerExtra?.runtimeAffinity?.homePath).toBeUndefined();
   });
 
   it('does not expose a Codex native fork for non-app-server or message-point requests', async () => {

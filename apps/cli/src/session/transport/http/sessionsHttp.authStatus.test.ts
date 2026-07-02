@@ -66,6 +66,19 @@ describe('sessionControl.sessionsHttp authentication status handling', () => {
     });
   });
 
+  it('preserves retryable non-auth http statuses for fetchSessionById', async () => {
+    process.env.HAPPIER_SERVER_URL = 'http://server.example.test';
+    vi.resetModules();
+    const { fetchSessionById } = await import('./sessionsHttp');
+
+    vi.spyOn(axios, 'get').mockResolvedValueOnce({ status: 503, data: {} } as never);
+
+    await expect(fetchSessionById({ token: 'token-1', sessionId: 'sess-1' })).rejects.toMatchObject({
+      name: 'HttpStatusError',
+      response: { status: 503 },
+    });
+  });
+
   it('throws a stable auth status error for commitSessionStoredMessage without losing session-not-found semantics', async () => {
     process.env.HAPPIER_SERVER_URL = 'http://server.example.test';
     vi.resetModules();

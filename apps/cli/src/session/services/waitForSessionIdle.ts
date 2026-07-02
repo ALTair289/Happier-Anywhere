@@ -47,7 +47,7 @@ export async function waitForSessionIdle(params: Readonly<{
   const initialProjectedActivity = detectSessionTurnActivityFromProjection(sessionTarget.rawSession);
   let initialTranscriptActivity: SessionTurnActivity | null = null;
   let initialTranscriptActivityUnavailable = false;
-  if (!initialProjectedActivity || !initialProjectedActivity.turnInFlight) {
+  if (!initialProjectedActivity) {
     try {
       initialTranscriptActivity = await detectSessionTurnActivity({
         token: params.credentials.token,

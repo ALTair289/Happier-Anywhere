@@ -6,6 +6,7 @@ import type { Credentials } from '@/persistence';
 import { fetchSessionById } from '@/session/transport/http/sessionsHttp';
 import { decryptTranscriptRows } from '@/session/replay/decryptTranscriptRows';
 import { fetchEncryptedTranscriptMessages } from '@/session/replay/fetchEncryptedTranscriptMessages';
+import { extractSemanticTranscriptItemFromDecryptedPayload } from '@/session/services/transcript/extractSemanticTranscriptItem';
 import { fetchLatestMemorySynopsisSystemRecord } from '@/session/systemRecords/memory/fetchMemorySystemRecords';
 import {
   resolveSessionEncryptionContextFromCredentials,
@@ -38,8 +39,7 @@ async function tryHydrateSynopsisFromSystemRecord(params: Readonly<{
     sessionId: params.sessionId,
     mode: params.mode,
     ...(params.mode === 'e2ee' ? { ctx: params.ctx } : {}),
-  }).catch((error) => {
-    if (isAuthenticationError(error)) throw error;
+  }).catch(() => {
     return null;
   });
   const text = typeof synopsis?.synopsis === 'string' ? synopsis.synopsis.trim() : '';
@@ -92,7 +92,8 @@ export async function hydrateVoiceReplayDialogFromTranscript(params: Readonly<{
   let bestSynopsis: { synopsis: string; updatedAtMs: number; seqTo: number } | null = null;
   const dialog: HappierReplayDialogItem[] = [];
 
-  for (const row of decryptedRows) {
+  for (let index = 0; index < decryptedRows.length; index += 1) {
+    const row = decryptedRows[index]!;
     const happier = row.meta && typeof row.meta === 'object' ? (row.meta as any).happier : null;
     if (happier?.kind === 'session_synopsis.v1') {
       const parsedSynopsis = SessionSynopsisV1Schema.safeParse(happier.payload);
@@ -112,7 +113,27 @@ export async function hydrateVoiceReplayDialogFromTranscript(params: Readonly<{
     const parsedTurn = VoiceAgentTurnV1Schema.safeParse(happier.payload);
     if (!parsedTurn.success || parsedTurn.data.epoch !== transcriptEpoch) continue;
 
-    const text = normalizeVoiceAgentTurnTranscriptText((row.content as any)?.text);
+    const extracted = extractSemanticTranscriptItemFromDecryptedPayload({
+      decrypted: {
+        role: row.role,
+        content: row.content,
+        ...(row.meta !== undefined ? { meta: row.meta } : {}),
+      },
+      row: {
+        seq: row.seq,
+        createdAt: row.createdAtMs,
+      },
+      index,
+      options: {
+        mode: 'transcript',
+        transcriptRoles: ['user', 'assistant'],
+        includeTools: false,
+        includeReasoning: false,
+        includeEvents: false,
+        maxTextChars: null,
+      },
+    });
+    const text = normalizeVoiceAgentTurnTranscriptText(extracted.item?.text);
     if (!text) continue;
 
     dialog.push({

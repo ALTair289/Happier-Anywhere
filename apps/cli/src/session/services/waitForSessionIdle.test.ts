@@ -75,7 +75,7 @@ describe('waitForSessionIdle', () => {
         expect(fetchEncryptedTranscriptPageAfterSeq).not.toHaveBeenCalled();
     });
 
-    it('checks transcript activity for an idle projection and lets transcript-busy win', async () => {
+    it('trusts a complete idle projection over transcript task lifecycle rows', async () => {
         const fetchEncryptedTranscriptPageLatest = vi.fn(async () => [
             {
                 id: 'm1',
@@ -125,23 +125,64 @@ describe('waitForSessionIdle', () => {
             idle: true,
         }));
 
-        expect(fetchEncryptedTranscriptPageLatest).toHaveBeenCalledWith(expect.objectContaining({
-            token: 'token',
-            sessionId: 'sess-1',
-            limit: 20,
-            timeoutMs: expect.any(Number),
-        }));
+        expect(fetchEncryptedTranscriptPageLatest).not.toHaveBeenCalled();
         expect(waitForIdleViaSocket).toHaveBeenCalledWith(expect.objectContaining({
             initialTurnActivity: {
                 pendingUserTurns: 0,
-                activeTaskInFlight: true,
-                turnInFlight: true,
+                activeTaskInFlight: false,
+                turnInFlight: false,
             },
-            initialTurnActivityRequiresTranscriptIdleEvidence: true,
+            initialTurnActivityRequiresTranscriptIdleEvidence: false,
         }));
     });
 
-    it('treats transcript fetch failure for an idle projection as unable to prove idle', async () => {
+    it('keeps wait-idle scoped to foreground turn activity when runtime activity is active', async () => {
+        const fetchEncryptedTranscriptPageLatest = vi.fn(async () => []);
+        const fetchEncryptedTranscriptPageAfterSeq = vi.fn(async () => []);
+        const waitForIdleViaSocket = vi.fn(async () => ({ idle: true as const, observedAt: 123 }));
+
+        vi.doMock('@/api/session/fetchEncryptedTranscriptWindow', () => ({
+            fetchEncryptedTranscriptPageLatest,
+            fetchEncryptedTranscriptPageAfterSeq,
+        }));
+        vi.doMock('@/session/transport/socket/sessionSocketAgentState', () => ({
+            waitForIdleViaSocket,
+        }));
+        mockTransportContext({
+            latestTurnStatus: 'completed',
+            runtimeActivityActiveCount: 1,
+            runtimeActivityObservedAt: 1_000,
+            runtimeActivityExpiresAt: Date.now() + 60_000,
+            runtimeActivitySourceClass: 'provider_detached_task',
+        });
+
+        const { waitForSessionIdle } = await import('./waitForSessionIdle');
+
+        await expect(waitForSessionIdle({
+            credentials: credentials(),
+            idOrPrefix: 'sess-1',
+            timeoutMs: 1_000,
+        })).resolves.toEqual({
+            ok: true,
+            sessionId: 'sess-1',
+            idle: true,
+            observedAt: 123,
+        });
+
+        expect(fetchEncryptedTranscriptPageLatest).not.toHaveBeenCalled();
+        expect(waitForIdleViaSocket).toHaveBeenCalledWith(expect.objectContaining({
+            initialTurnActivity: {
+                pendingUserTurns: 0,
+                activeTaskInFlight: false,
+                turnInFlight: false,
+            },
+            initialAgentStateSummary: { pendingRequestsCount: 0 },
+            initialTurnActivityRequiresTranscriptIdleEvidence: false,
+            preferProjectionUpdates: true,
+        }));
+    });
+
+    it('treats transcript fetch failure for an incomplete projection as unable to prove idle', async () => {
         const fetchEncryptedTranscriptPageLatest = vi.fn(async () => {
             throw new Error('transcript unavailable');
         });
@@ -167,7 +208,7 @@ describe('waitForSessionIdle', () => {
             waitForIdleViaSocket,
         }));
         mockTransportContext({
-            latestTurnStatus: 'completed',
+            latestTurnStatus: null,
         });
 
         const { waitForSessionIdle } = await import('./waitForSessionIdle');
@@ -209,7 +250,7 @@ describe('waitForSessionIdle', () => {
             waitForIdleViaSocket,
         }));
         mockTransportContext({
-            latestTurnStatus: 'completed',
+            latestTurnStatus: null,
         });
 
         const { waitForSessionIdle } = await import('./waitForSessionIdle');

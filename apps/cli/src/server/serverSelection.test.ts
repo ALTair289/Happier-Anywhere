@@ -11,6 +11,7 @@ describe('server selection flags', () => {
     'HAPPIER_LOCAL_SERVER_URL',
     'HAPPIER_PUBLIC_SERVER_URL',
     'HAPPIER_WEBAPP_URL',
+    'HAPPIER_ACTIVE_SERVER_ID',
   ] as const;
   let envScope = createEnvKeyScope(envKeys);
 
@@ -129,11 +130,18 @@ describe('server selection flags', () => {
         HAPPIER_LOCAL_SERVER_URL: undefined,
         HAPPIER_PUBLIC_SERVER_URL: undefined,
         HAPPIER_WEBAPP_URL: undefined,
+        HAPPIER_ACTIVE_SERVER_ID: 'stale-profile',
       });
 
       vi.resetModules();
 
       const { addServerProfile } = await import('./serverProfiles');
+      await addServerProfile({
+        name: 'stale profile',
+        serverUrl: 'https://company.example.test',
+        webappUrl: 'https://app.company.example.test',
+        use: false,
+      });
       await addServerProfile({
         name: 'company',
         serverUrl: 'https://company.example.test',
@@ -150,6 +158,8 @@ describe('server selection flags', () => {
       const config = await import('@/configuration');
       expect(config.configuration.serverUrl).toBe('https://company.example.test');
       expect(config.configuration.webappUrl).toBe('https://app.company.example.test');
+      expect(config.configuration.activeServerId).toBe('company');
+      expect(process.env.HAPPIER_ACTIVE_SERVER_ID).toBe('company');
 
       const settingsRaw = JSON.parse(readFileSync(join(homeDir, 'settings.json'), 'utf8'));
       expect(settingsRaw.activeServerId).toBe('cloud');
@@ -164,10 +174,17 @@ describe('server selection flags', () => {
         HAPPIER_LOCAL_SERVER_URL: undefined,
         HAPPIER_PUBLIC_SERVER_URL: undefined,
         HAPPIER_WEBAPP_URL: undefined,
+        HAPPIER_ACTIVE_SERVER_ID: 'stale-profile',
       });
 
       vi.resetModules();
       const { addServerProfile, getActiveServerProfile } = await import('./serverProfiles');
+      await addServerProfile({
+        name: 'stale profile',
+        serverUrl: 'https://company.example.test',
+        webappUrl: 'https://app.company.example.test',
+        use: false,
+      });
       await addServerProfile({
         name: 'company',
         serverUrl: 'https://company.example.test',
@@ -182,8 +199,10 @@ describe('server selection flags', () => {
 
       expect(config.configuration.serverUrl).toBe('https://company.example.test');
       expect(config.configuration.webappUrl).toBe('https://app.company.example.test');
+      expect(config.configuration.activeServerId).toBe('company');
       expect(process.env.HAPPIER_SERVER_URL).toBe('https://company.example.test');
       expect(process.env.HAPPIER_WEBAPP_URL).toBe('https://app.company.example.test');
+      expect(process.env.HAPPIER_ACTIVE_SERVER_ID).toBe('company');
       expect((await getActiveServerProfile()).id).toBe('cloud');
     });
   });

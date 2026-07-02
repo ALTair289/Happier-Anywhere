@@ -64,6 +64,49 @@ describe('detectSessionTurnActivity', () => {
         expect(fetchEncryptedTranscriptPageAfterSeq).not.toHaveBeenCalled();
     });
 
+    it('ignores provider runtime activity projection for foreground-idle detection', async () => {
+        const fetchEncryptedTranscriptPageLatest = vi.fn(async () => []);
+        const fetchEncryptedTranscriptPageAfterSeq = vi.fn(async () => []);
+        vi.doMock('@/api/session/fetchEncryptedTranscriptWindow', () => ({
+            fetchEncryptedTranscriptPageLatest,
+            fetchEncryptedTranscriptPageAfterSeq,
+        }));
+
+        const { detectSessionTurnActivity, detectSessionTurnInFlight } = await import('./detectSessionTurnInFlight');
+        const sessionProjection = {
+            latestTurnStatus: 'completed',
+            pendingPermissionRequestCount: 0,
+            pendingUserActionRequestCount: 0,
+            runtimeActivityActiveCount: 1,
+            runtimeActivityObservedAt: 1_000,
+            runtimeActivityExpiresAt: Date.now() + 60_000,
+            runtimeActivitySourceClass: 'provider_detached_task',
+        };
+
+        await expect(detectSessionTurnActivity({
+            token: 'token',
+            sessionId: 'sess-1',
+            encryptionMode: 'plain',
+            encryptionKey: new Uint8Array(32).fill(1),
+            encryptionVariant: 'dataKey',
+            sessionProjection,
+        })).resolves.toEqual({
+            pendingUserTurns: 0,
+            activeTaskInFlight: false,
+            turnInFlight: false,
+        });
+        await expect(detectSessionTurnInFlight({
+            token: 'token',
+            sessionId: 'sess-1',
+            encryptionMode: 'plain',
+            encryptionKey: new Uint8Array(32).fill(1),
+            encryptionVariant: 'dataKey',
+            sessionProjection,
+        })).resolves.toBe(false);
+        expect(fetchEncryptedTranscriptPageLatest).not.toHaveBeenCalled();
+        expect(fetchEncryptedTranscriptPageAfterSeq).not.toHaveBeenCalled();
+    });
+
     it('falls back to transcript scan when projection is null', async () => {
         const fetchEncryptedTranscriptPageLatest = vi.fn(async () => [
             {

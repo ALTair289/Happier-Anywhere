@@ -302,4 +302,23 @@ describe('resolveForkInheritedOverridesFromMetadata', () => {
       acpSessionModeOverrideV1: { v: 1, updatedAt: 202, modeId: null },
     });
   });
+
+  it('does not inherit session-agent spawn-only mcp selection or standalone profile id', () => {
+    const result = resolveForkInheritedOverridesFromMetadata({
+      mcpSelectionV1: {
+        v: 1,
+        managedServersEnabled: false,
+        forceIncludeServerIds: ['repo-tools'],
+        forceExcludeServerIds: ['legacy-tool'],
+      },
+      profileId: 'standalone-profile',
+    } as any);
+
+    expect(result.spawn).toEqual({});
+    expect(result.metadata).toEqual({});
+    expect('mcpSelection' in result.spawn).toBe(false);
+    expect('profileId' in result.spawn).toBe(false);
+    expect('mcpSelectionV1' in result.metadata).toBe(false);
+    expect('profileId' in result.metadata).toBe(false);
+  });
 });
