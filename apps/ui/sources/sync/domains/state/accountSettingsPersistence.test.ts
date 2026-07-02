@@ -186,7 +186,7 @@ describe('accountSettingsPersistence', () => {
         expect(mod.loadPendingAccountSettings(identityScope)).toEqual({ crashReportsOptOut: true });
     });
 
-    it('merges conflicting host-derived pending collections into an identity scope without overwriting either side', async () => {
+    it('drops host-derived pending migrated organization collections during identity scope activation', async () => {
         const mod = await loadAccountSettingsPersistenceModule();
         expect(mod, 'account settings persistence module should exist').not.toBeNull();
         if (!mod) return;
@@ -211,18 +211,59 @@ describe('accountSettingsPersistence', () => {
 
         mod.prepareAccountSettingsScopeForActivation(identityScope, [legacyScope]);
 
-        expect(mod.loadPendingAccountSettings(identityScope)).toMatchObject({
-            pinnedSessionKeysV1: ['srv_identity:legacy', 'srv_identity:canonical'],
-            sessionListGroupOrderV1: {
-                'folder:shared': ['srv_identity:legacy', 'srv_identity:canonical'],
-                'folder:legacy': ['srv_identity:legacy-only'],
-                'folder:canonical': ['srv_identity:canonical-only'],
-            },
-        });
+        expect(mod.loadPendingAccountSettings(identityScope)).toEqual({});
         expect(mod.loadPendingAccountSettings(legacyScope)).toEqual({});
     });
 
-    it('replays non-default legacy cached session presentation settings into identity pending and visible settings', async () => {
+    it('does not replay migrated session organization fields into active account pending or cached settings', async () => {
+        const mod = await loadAccountSettingsPersistenceModule();
+        expect(mod, 'account settings persistence module should exist').not.toBeNull();
+        if (!mod) return;
+
+        const identityScope = { serverId: 'srv_identity', accountId: 'account-a' };
+        const legacyScope = { serverId: 'localhost-18829', accountId: 'account-a' };
+
+        mod.saveAccountSettings(identityScope, {
+            ...settingsDefaults,
+            pinnedSessionKeysV1: ['srv_identity:identity-session'],
+        } as Settings, 22);
+        mod.saveAccountSettings(legacyScope, {
+            ...settingsDefaults,
+            pinnedSessionKeysV1: ['localhost-18829:legacy-session'],
+            sessionTagsV1: {
+                'localhost-18829:legacy-session': ['legacy-tag'],
+            },
+            sessionListGroupOrderV1: {
+                'pinned-v1': ['localhost-18829:legacy-session'],
+            },
+            workspaceLabelsV1: {
+                legacyWorkspace: 'Legacy workspace',
+            },
+        } as Settings, 17);
+        mod.savePendingAccountSettings(legacyScope, {
+            sessionFoldersV1: {
+                v: 1,
+                folders: [],
+            },
+            sessionWorkspaceOrderV1: {
+                'server:localhost-18829:workspaces': ['workspace:legacy'],
+            },
+        } as Partial<Settings>);
+
+        mod.prepareAccountSettingsScopeForActivation(identityScope, [legacyScope]);
+
+        expect(mod.loadPendingAccountSettings(identityScope)).toEqual({});
+        expect(mod.loadPendingAccountSettings(legacyScope)).toEqual({});
+        const identitySettings = mod.loadAccountSettings(identityScope).settings as Record<string, unknown>;
+        expect(identitySettings).not.toHaveProperty('pinnedSessionKeysV1');
+        expect(identitySettings).not.toHaveProperty('sessionTagsV1');
+        expect(identitySettings).not.toHaveProperty('sessionListGroupOrderV1');
+        expect(identitySettings).not.toHaveProperty('sessionWorkspaceOrderV1');
+        expect(identitySettings).not.toHaveProperty('sessionFoldersV1');
+        expect(identitySettings).not.toHaveProperty('workspaceLabelsV1');
+    });
+
+    it('does not replay non-default legacy cached organization settings into identity pending or visible settings', async () => {
         const mod = await loadAccountSettingsPersistenceModule();
         expect(mod, 'account settings persistence module should exist').not.toBeNull();
         if (!mod) return;
@@ -274,56 +315,22 @@ describe('accountSettingsPersistence', () => {
 
         mod.prepareAccountSettingsScopeForActivation(identityScope, [legacyScope]);
 
-        expect(mod.loadPendingAccountSettings(identityScope)).toMatchObject({
-            pinnedSessionKeysV1: ['legacy-session', 'identity-session'],
-            workspaceLabelsV1: {
-                shared: 'Identity label',
-                identityOnly: 'Identity only',
-                legacyOnly: 'Legacy only',
-            },
-            collapsedGroupKeysV1: {
-                shared: false,
-                identityOnly: true,
-                legacyOnly: true,
-            },
-            sessionTagsV1: {
-                sharedSession: ['legacy-tag', 'identity-tag'],
-                identitySession: ['identity-only'],
-                legacySession: ['legacy-only'],
-            },
-            sessionListGroupOrderV1: {
-                sharedGroup: ['legacy-session', 'identity-session'],
-                identityGroup: ['identity-session'],
-                legacyGroup: ['legacy-session'],
-            },
-        });
+        expect(mod.loadPendingAccountSettings(identityScope)).toEqual({});
         expect(mod.loadPendingAccountSettings(identityScope)).not.toMatchObject({
             analyticsOptOut: true,
         });
-        expect(mod.loadAccountSettings(identityScope)).toMatchObject({
-            version: 22,
-            settings: expect.objectContaining({
-                pinnedSessionKeysV1: ['legacy-session', 'identity-session'],
-                sessionTagsV1: {
-                    sharedSession: ['legacy-tag', 'identity-tag'],
-                    identitySession: ['identity-only'],
-                    legacySession: ['legacy-only'],
-                },
-            }),
-        });
+        const identitySettings = mod.loadAccountSettings(identityScope).settings as Record<string, unknown>;
+        expect(identitySettings).not.toHaveProperty('pinnedSessionKeysV1');
+        expect(identitySettings).not.toHaveProperty('workspaceLabelsV1');
+        expect(identitySettings).not.toHaveProperty('collapsedGroupKeysV1');
+        expect(identitySettings).not.toHaveProperty('sessionTagsV1');
+        expect(identitySettings).not.toHaveProperty('sessionListGroupOrderV1');
 
         mod.prepareAccountSettingsScopeForActivation(identityScope, [legacyScope]);
-        expect(mod.loadPendingAccountSettings(identityScope)).toMatchObject({
-            pinnedSessionKeysV1: ['legacy-session', 'identity-session'],
-            sessionTagsV1: {
-                sharedSession: ['legacy-tag', 'identity-tag'],
-                identitySession: ['identity-only'],
-                legacySession: ['legacy-only'],
-            },
-        });
+        expect(mod.loadPendingAccountSettings(identityScope)).toEqual({});
     });
 
-    it('does not resurrect legacy cached session presentation after the identity scope removes it', async () => {
+    it('does not resurrect legacy cached organization settings after the identity scope removes them', async () => {
         const mod = await loadAccountSettingsPersistenceModule();
         expect(mod, 'account settings persistence module should exist').not.toBeNull();
         if (!mod) return;
@@ -344,9 +351,7 @@ describe('accountSettingsPersistence', () => {
 
         mod.prepareAccountSettingsScopeForActivation(identityScope, [legacyScope]);
 
-        expect(mod.loadPendingAccountSettings(identityScope)).toMatchObject({
-            pinnedSessionKeysV1: ['srv_identity:session-a'],
-        });
+        expect(mod.loadPendingAccountSettings(identityScope)).toEqual({});
 
         mod.savePendingAccountSettings(identityScope, {});
         mod.saveAccountSettings(identityScope, {
@@ -359,11 +364,10 @@ describe('accountSettingsPersistence', () => {
         mod.prepareAccountSettingsScopeForActivation(identityScope, [legacyScope]);
 
         expect(mod.loadPendingAccountSettings(identityScope)).toEqual({});
-        expect(mod.loadAccountSettings(identityScope).settings).toMatchObject({
-            pinnedSessionKeysV1: [],
-            sessionTagsV1: {},
-            sessionListGroupOrderV1: {},
-        });
+        const identitySettings = mod.loadAccountSettings(identityScope).settings as Record<string, unknown>;
+        expect(identitySettings).not.toHaveProperty('pinnedSessionKeysV1');
+        expect(identitySettings).not.toHaveProperty('sessionTagsV1');
+        expect(identitySettings).not.toHaveProperty('sessionListGroupOrderV1');
     });
 
     it('does not replay a changed legacy cached envelope after that legacy cache was consumed', async () => {
@@ -399,15 +403,12 @@ describe('accountSettingsPersistence', () => {
         mod.prepareAccountSettingsScopeForActivation(identityScope, [legacyScope]);
 
         expect(mod.loadPendingAccountSettings(identityScope)).toEqual({});
-        expect(mod.loadAccountSettings(identityScope).settings).toMatchObject({
-            pinnedSessionKeysV1: [],
-            workspaceLabelsV1: {
-                workspaceA: 'Canonical label',
-            },
-        });
+        const identitySettings = mod.loadAccountSettings(identityScope).settings as Record<string, unknown>;
+        expect(identitySettings).not.toHaveProperty('pinnedSessionKeysV1');
+        expect(identitySettings).not.toHaveProperty('workspaceLabelsV1');
     });
 
-    it('rewrites nested legacy server ids in migrated session presentation settings', async () => {
+    it('keeps server-selection migration while dropping nested migrated organization settings', async () => {
         const mod = await loadAccountSettingsPersistenceModule();
         expect(mod, 'account settings persistence module should exist').not.toBeNull();
         if (!mod) return;
@@ -492,43 +493,11 @@ describe('accountSettingsPersistence', () => {
 
         mod.prepareAccountSettingsScopeForActivation(identityScope, [localhostScope, lanScope]);
 
-        expect(mod.loadPendingAccountSettings(identityScope)).toMatchObject({
-            pinnedSessionKeysV1: [
-                'srv_identity:session-lan',
-                'srv_identity:session-localhost',
-                'srv_identity:session-existing',
-            ],
-            sessionTagsV1: {
-                'srv_identity:session-lan': ['lan-tag'],
-                'srv_identity:session-localhost': ['localhost-tag'],
-                'srv_identity:session-existing': ['legacy-identity-tag', 'identity-tag'],
-            },
-            sessionListGroupOrderV1: {
-                'server:srv_identity:active:project:p1': [
-                    'srv_identity:session-localhost',
-                    'srv_identity:session-existing',
-                ],
-                'pinned-v1': ['srv_identity:session-localhost'],
-            },
-            sessionWorkspaceOrderV1: {
-                'server:srv_identity:workspaces': ['workspace:localhost', 'workspace:identity'],
-            },
-            sessionFoldersV1: {
-                v: 1,
-                folders: [
-                    expect.objectContaining({
-                        id: 'localhost-folder',
-                        workspace: expect.objectContaining({ serverId: 'srv_identity' }),
-                    }),
-                ],
-            },
-        });
+        expect(mod.loadPendingAccountSettings(identityScope)).toEqual({});
         expect(mod.loadPendingAccountSettings(identityScope)).not.toHaveProperty('serverSelectionGroups');
         expect(mod.loadPendingAccountSettings(identityScope)).not.toHaveProperty('serverSelectionActiveTargetKind');
         expect(mod.loadPendingAccountSettings(identityScope)).not.toHaveProperty('serverSelectionActiveTargetId');
-        expect(mod.loadPendingAccountSettings(otherAccountScope)).toEqual({
-            pinnedSessionKeysV1: ['other-server:session-other'],
-        });
+        expect(mod.loadPendingAccountSettings(otherAccountScope)).toEqual({});
         const identitySettings = mod.loadAccountSettings(identityScope).settings as Settings;
         expect(identitySettings.serverSelectionGroups).toEqual([
             expect.objectContaining({
@@ -568,11 +537,8 @@ describe('accountSettingsPersistence', () => {
 
         mod.prepareAccountSettingsScopeForActivation(identityScope);
 
-        expect(mod.loadAccountSettings(identityScope).settings).toMatchObject({
-            pinnedSessionKeysV1: ['srv_identity:session-a'],
-            sessionTagsV1: {
-                'srv_identity:session-a': ['local-tag'],
-            },
+        const identitySettings = mod.loadAccountSettings(identityScope).settings as Record<string, unknown>;
+        expect(identitySettings).toMatchObject({
             serverSelectionGroups: [{
                 id: 'group-a',
                 name: 'Group A',
@@ -580,12 +546,9 @@ describe('accountSettingsPersistence', () => {
                 presentation: 'grouped',
             }],
         });
-        expect(mod.loadPendingAccountSettings(identityScope)).toMatchObject({
-            pinnedSessionKeysV1: ['srv_identity:session-a'],
-            sessionTagsV1: {
-                'srv_identity:session-a': ['local-tag'],
-            },
-        });
+        expect(identitySettings).not.toHaveProperty('pinnedSessionKeysV1');
+        expect(identitySettings).not.toHaveProperty('sessionTagsV1');
+        expect(mod.loadPendingAccountSettings(identityScope)).toEqual({});
         expect(mod.loadPendingAccountSettings(identityScope)).not.toHaveProperty('serverSelectionGroups');
     });
 
@@ -624,7 +587,7 @@ describe('accountSettingsPersistence', () => {
         expect(mod.loadPendingAccountSettings(identityScope)).not.toHaveProperty('serverSelectionActiveTargetId');
     });
 
-    it('deduplicates migrated legacy session folders by folder id while preserving legacy-only folders', async () => {
+    it('drops migrated legacy session folders from active pending settings', async () => {
         const mod = await loadAccountSettingsPersistenceModule();
         expect(mod, 'account settings persistence module should exist').not.toBeNull();
         if (!mod) return;
@@ -693,30 +656,11 @@ describe('accountSettingsPersistence', () => {
 
         mod.prepareAccountSettingsScopeForActivation(identityScope, [legacyScope]);
 
-        expect(mod.loadPendingAccountSettings(identityScope)).toMatchObject({
-            sessionFoldersV1: {
-                v: 1,
-                folders: [
-                    expect.objectContaining({ id: 'shared-folder', name: 'Identity name' }),
-                    expect.objectContaining({ id: 'identity-only-folder', name: 'Identity only' }),
-                    expect.objectContaining({ id: 'legacy-only-folder', name: 'Legacy only' }),
-                ],
-            },
-            sessionWorkspaceOrderV1: {
-                workspaceA: ['legacy-session', 'identity-session'],
-                workspaceLegacy: ['legacy-only-session'],
-            },
-        });
-        const pending = mod.loadPendingAccountSettings(identityScope) as { sessionFoldersV1?: { folders?: Array<{ id?: string }> } };
-        expect(pending.sessionFoldersV1?.folders?.map((folder) => folder.id)).toEqual([
-            'shared-folder',
-            'identity-only-folder',
-            'legacy-only-folder',
-        ]);
+        expect(mod.loadPendingAccountSettings(identityScope)).toEqual({});
         expect(mod.loadPendingAccountSettings(legacyScope)).toEqual({});
     });
 
-    it('absorbs a later-discovered legacy sparse pending scope without dropping identity pending settings', async () => {
+    it('drops a later-discovered legacy sparse organization scope from identity pending settings', async () => {
         const mod = await loadAccountSettingsPersistenceModule();
         expect(mod, 'account settings persistence module should exist').not.toBeNull();
         if (!mod) return;
@@ -743,22 +687,14 @@ describe('accountSettingsPersistence', () => {
 
         mod.prepareAccountSettingsScopeForActivation(identityScope, [lateLegacyScope]);
 
-        expect(mod.loadPendingAccountSettings(identityScope)).toMatchObject({
-            pinnedSessionKeysV1: ['late-cached-session', 'first-legacy-session'],
-            sessionTagsV1: {
-                firstLegacySession: ['first-tag'],
-            },
-            workspaceLabelsV1: {
-                lateWorkspace: 'Late workspace',
-            },
-        });
+        expect(mod.loadPendingAccountSettings(identityScope)).toEqual({});
         expect(mod.loadPendingAccountSettings(identityScope)).not.toMatchObject({
             analyticsOptOut: true,
         });
         expect(mod.loadPendingAccountSettings(lateLegacyScope)).toEqual({});
     });
 
-    it('absorbs a legacy cached scope that appears after an earlier empty migration check', async () => {
+    it('drops a legacy cached organization scope that appears after an earlier empty migration check', async () => {
         const mod = await loadAccountSettingsPersistenceModule();
         expect(mod, 'account settings persistence module should exist').not.toBeNull();
         if (!mod) return;
@@ -778,12 +714,7 @@ describe('accountSettingsPersistence', () => {
 
         mod.prepareAccountSettingsScopeForActivation(identityScope, [lateLegacyScope]);
 
-        expect(mod.loadPendingAccountSettings(identityScope)).toMatchObject({
-            pinnedSessionKeysV1: ['srv_identity:late-session'],
-            sessionTagsV1: {
-                'srv_identity:late-session': ['late-tag'],
-            },
-        });
+        expect(mod.loadPendingAccountSettings(identityScope)).toEqual({});
     });
 
     it('does not merge unproven same-account host scopes into an identity scope', async () => {
@@ -818,14 +749,8 @@ describe('accountSettingsPersistence', () => {
             version: null,
             settings: {},
         });
-        expect(mod.loadPendingAccountSettings(orphanedHostScope)).toEqual({
-            workspaceLabelsV1: {
-                orphanedWorkspace: 'Orphaned workspace',
-            },
-        });
-        expect(mod.loadPendingAccountSettings(otherAccountScope)).toEqual({
-            pinnedSessionKeysV1: ['other-account-session'],
-        });
+        expect(mod.loadPendingAccountSettings(orphanedHostScope)).toEqual({});
+        expect(mod.loadPendingAccountSettings(otherAccountScope)).toEqual({});
     });
 
     it('does not discover same-account host scopes when activating a host-derived fallback scope', async () => {
@@ -846,12 +771,7 @@ describe('accountSettingsPersistence', () => {
         mod.prepareAccountSettingsScopeForActivation(hostScope);
 
         expect(mod.loadPendingAccountSettings(hostScope)).toEqual({});
-        expect(mod.loadPendingAccountSettings(unrelatedHostScope)).toEqual({
-            pinnedSessionKeysV1: ['staging-18829:session-staging'],
-            workspaceLabelsV1: {
-                stagingWorkspace: 'Staging workspace',
-            },
-        });
+        expect(mod.loadPendingAccountSettings(unrelatedHostScope)).toEqual({});
     });
 
     it('deletes pending settings only for the requested scope', async () => {

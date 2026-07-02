@@ -10,7 +10,7 @@ import { createPendingDomain } from '../../store/domains/pending';
 import { createPetsDomain } from '../../store/domains/pets';
 import { createProfileDomain } from '../../store/domains/profile';
 import { createRealtimeDomain } from '../../store/domains/realtime';
-import { createSessionFoldersDomain } from '../../store/domains/sessionFolders';
+import { createSessionOrganizationDomain } from '../../store/domains/sessionOrganization';
 import { createSessionsDomain } from '../../store/domains/sessions';
 import { createSettingsDomain } from '../../store/domains/settings';
 import { createTodosDomain } from '../../store/domains/todos';
@@ -27,7 +27,7 @@ export const storage = create<StorageState>()((set, get) => {
     const todosDomain = createTodosDomain<StorageState>({ set, get });
     const machinesDomain = createMachinesDomain<StorageState>({ set, get });
     const sessionsDomain = createSessionsDomain<StorageState>({ set, get });
-    const sessionFoldersDomain = createSessionFoldersDomain<StorageState>({ set, get });
+    const sessionOrganizationDomain = createSessionOrganizationDomain<StorageState>({ set, get });
     const pendingDomain = createPendingDomain<StorageState>({ set, get });
     const petsDomain = createPetsDomain<StorageState>({ set, get });
     const messagesDomain = createMessagesDomain<StorageState>({ set, get });
@@ -42,7 +42,7 @@ export const storage = create<StorageState>()((set, get) => {
         ...settingsDomain,
         ...profileDomain,
         ...sessionsDomain,
-        ...sessionFoldersDomain,
+        ...sessionOrganizationDomain,
         ...machinesDomain,
         ...artifactsDomain,
         ...automationsDomain,

@@ -1146,6 +1146,46 @@ describe('persistence', () => {
             expect((draft as any)?.agentNewSessionOptionStateByAgentId?.auggie?.allowIndexing).toBe(true);
         });
 
+        it('preserves nested connected-service binding option state when hydrating drafts', () => {
+            store.set(
+                'new-session-draft-v1',
+                JSON.stringify({
+                    input: '',
+                    selectedMachineId: null,
+                    selectedPath: null,
+                    selectedProfileId: null,
+                    agentType: 'claude',
+                    permissionMode: 'default',
+                    modelMode: 'default',
+                    sessionType: 'simple',
+                    agentNewSessionOptionStateByAgentId: {
+                        claude: {
+                            connectedServicesBindingsByServiceId: {
+                                anthropic: { source: 'native' },
+                                linear: {
+                                    source: 'connected',
+                                    selection: 'profile',
+                                    profileId: 'profile-linear',
+                                },
+                            },
+                        },
+                    },
+                    updatedAt: Date.now(),
+                }),
+            );
+
+            expect((loadNewSessionDraft() as any)?.agentNewSessionOptionStateByAgentId?.claude).toEqual({
+                connectedServicesBindingsByServiceId: {
+                    anthropic: { source: 'native' },
+                    linear: {
+                        source: 'connected',
+                        selection: 'profile',
+                        profileId: 'profile-linear',
+                    },
+                },
+            });
+        });
+
         it('clamps invalid permissionMode to default', () => {
             store.set(
                 'new-session-draft-v1',

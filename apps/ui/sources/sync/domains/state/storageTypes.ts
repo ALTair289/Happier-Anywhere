@@ -9,8 +9,10 @@ import {
     createSessionRollbackRangesV1Schema,
     createSessionTerminalMetadataSchema,
     createSessionSystemSessionV1Schema,
+    type PendingDeliveryBlockedReason,
     type PrimaryTurnStatusV1,
     type SessionMessageRole,
+    type SessionRuntimeActivitySourceClassV1,
     type SessionRuntimeIssueV1,
     type SessionTurnsProjectionV1,
     WindowsRemoteSessionLaunchModeSchema,
@@ -410,9 +412,10 @@ export interface Session {
     /**
      * Server-side pending queue (V2) summary fields.
      * Optional for mixed-version safety with older servers.
-     */
+    */
     pendingVersion?: number,
     pendingCount?: number,
+    pendingBlockedCount?: number,
     lastViewedSessionSeq?: number | null,
     pendingPermissionRequestCount?: number,
     pendingUserActionRequestCount?: number,
@@ -420,6 +423,10 @@ export interface Session {
     latestTurnId?: string | null,
     latestTurnStatus?: PrimaryTurnStatusV1 | null,
     latestTurnStatusObservedAt?: number | null,
+    runtimeActivityActiveCount?: number,
+    runtimeActivityObservedAt?: number | null,
+    runtimeActivityExpiresAt?: number | null,
+    runtimeActivitySourceClass?: SessionRuntimeActivitySourceClassV1 | null,
     lastRuntimeIssue?: SessionRuntimeIssueV1 | null,
     sessionTurns?: SessionTurnsProjectionV1 | null,
     rollbackEligibleTurnStarts?: readonly number[] | null,
@@ -470,6 +477,13 @@ export interface Session {
     canApprovePermissions?: boolean; // Whether the current user can approve permission prompts for this shared session
 }
 
+export type PendingDeliveryStatus =
+    | 'server_queued'
+    | 'server_delivering'
+    | 'blocked';
+
+export type { PendingDeliveryBlockedReason };
+
 export interface PendingMessage {
     id: string;
     localId: string | null;
@@ -477,6 +491,10 @@ export interface PendingMessage {
     updatedAt: number;
     source?: 'local_outbound' | 'server_pending';
     deliveryStatus?: 'queued' | 'accepted';
+    pendingDeliveryStatus?: PendingDeliveryStatus;
+    pendingDeliveryStatusRaw?: string;
+    pendingDeliveryBlockedReason?: PendingDeliveryBlockedReason;
+    pendingDeliveryBlockedReasonRaw?: string;
     text: string;
     displayText?: string;
     pendingDecryptFailure?: { kind: 'decrypt_failed' };

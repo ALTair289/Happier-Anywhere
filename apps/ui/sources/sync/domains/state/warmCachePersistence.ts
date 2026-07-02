@@ -1,5 +1,9 @@
 import { MMKV } from 'react-native-mmkv';
-import { PrimaryTurnStatusV1Schema, SessionRuntimeIssueV1Schema } from '@happier-dev/protocol';
+import {
+    PrimaryTurnStatusV1Schema,
+    SessionRuntimeActivitySourceClassV1Schema,
+    SessionRuntimeIssueV1Schema,
+} from '@happier-dev/protocol';
 import { z } from 'zod';
 
 import { readStorageScopeFromEnv, scopedStorageId } from '@/utils/system/storageScope';
@@ -32,11 +36,16 @@ export const SessionListCacheEntryV1Schema = z.object({
     archivedAt: z.number().nullable(),
     lastViewedSessionSeq: z.number().int().nonnegative().nullable().optional(),
     pendingCount: z.number().int().nonnegative().optional(),
+    pendingBlockedCount: z.number().int().nonnegative().optional(),
     pendingVersion: z.number().int().nonnegative().optional(),
     latestTurnId: z.string().min(1).nullable().optional(),
     latestTurnStatus: PrimaryTurnStatusV1Schema.nullable().optional(),
     latestTurnStatusObservedAt: z.number().int().nonnegative().nullable().optional(),
     lastRuntimeIssue: SessionRuntimeIssueV1Schema.nullable().optional(),
+    runtimeActivityActiveCount: z.number().int().nonnegative().nullable().optional(),
+    runtimeActivityObservedAt: z.number().int().nonnegative().nullable().optional(),
+    runtimeActivityExpiresAt: z.number().int().nonnegative().nullable().optional(),
+    runtimeActivitySourceClass: SessionRuntimeActivitySourceClassV1Schema.nullable().optional(),
     rollbackEligibleTurnStarts: z.array(z.number().int().nonnegative()).nullable().optional(),
     latestReadyEventSeq: z.number().int().nonnegative().nullable().optional(),
     latestReadyEventAt: z.number().int().nonnegative().nullable().optional(),

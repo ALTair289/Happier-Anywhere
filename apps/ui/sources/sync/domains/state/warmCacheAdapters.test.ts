@@ -219,6 +219,10 @@ describe('warmCacheAdapters', () => {
             hasPendingPermissionRequests: true,
             hasPendingUserActionRequests: false,
             pendingRequestObservedAt: 1_000,
+            runtimeActivityActiveCount: 1,
+            runtimeActivityObservedAt: 1_250,
+            runtimeActivityExpiresAt: 10_000,
+            runtimeActivitySourceClass: 'provider_detached_task',
             rollbackEligibleTurnStarts: [2, 4],
             hasUnreadMessages: true,
         } satisfies SessionListRenderableSession;
@@ -233,6 +237,10 @@ describe('warmCacheAdapters', () => {
             latestReadyEventSeq: 11,
             latestReadyEventAt: 1_100,
             pendingRequestObservedAt: 1_000,
+            runtimeActivityActiveCount: 1,
+            runtimeActivityObservedAt: 1_250,
+            runtimeActivityExpiresAt: 10_000,
+            runtimeActivitySourceClass: 'provider_detached_task',
             rollbackEligibleTurnStarts: [2, 4],
         }));
         expect(buildSessionListRenderableFromCacheEntry(entry)).toEqual(expect.objectContaining({
@@ -243,6 +251,10 @@ describe('warmCacheAdapters', () => {
             latestReadyEventSeq: 11,
             latestReadyEventAt: 1_100,
             pendingRequestObservedAt: 1_000,
+            runtimeActivityActiveCount: 1,
+            runtimeActivityObservedAt: 1_250,
+            runtimeActivityExpiresAt: 10_000,
+            runtimeActivitySourceClass: 'provider_detached_task',
             rollbackEligibleTurnStarts: [2, 4],
         }));
     });

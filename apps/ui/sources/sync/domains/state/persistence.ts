@@ -258,6 +258,33 @@ function parseDraftSecretStringOrNull(value: unknown): SecretString | null | und
     return undefined;
 }
 
+type DraftJsonValue = null | boolean | number | string | DraftJsonValue[] | { [key: string]: DraftJsonValue };
+
+function parseDraftJsonValue(value: unknown): DraftJsonValue | undefined {
+    if (value === null || typeof value === 'boolean' || typeof value === 'string') {
+        return value;
+    }
+    if (typeof value === 'number') {
+        return Number.isFinite(value) ? value : undefined;
+    }
+    if (Array.isArray(value)) {
+        const items: DraftJsonValue[] = [];
+        for (const item of value) {
+            const parsed = parseDraftJsonValue(item);
+            if (parsed !== undefined) items.push(parsed);
+        }
+        return items;
+    }
+    if (!value || typeof value !== 'object') return undefined;
+
+    const out: Record<string, DraftJsonValue> = {};
+    for (const [key, rawNestedValue] of Object.entries(value as Record<string, unknown>)) {
+        const parsed = parseDraftJsonValue(rawNestedValue);
+        if (parsed !== undefined) out[key] = parsed;
+    }
+    return out;
+}
+
 function parseDraftAgentNewSessionOptionStateByAgentId(
     input: unknown,
 ): Record<string, Record<string, unknown>> | null {
@@ -274,10 +301,8 @@ function parseDraftAgentNewSessionOptionStateByAgentId(
             const key = typeof rawKey === 'string' ? rawKey.trim() : '';
             if (!key) continue;
 
-            // Only salvage JSON-safe primitives; objects can be added later if needed.
-            if (rawValue === null || typeof rawValue === 'boolean' || typeof rawValue === 'number' || typeof rawValue === 'string') {
-                options[key] = rawValue;
-            }
+            const parsedValue = parseDraftJsonValue(rawValue);
+            if (parsedValue !== undefined) options[key] = parsedValue;
         }
 
         if (Object.keys(options).length > 0) out[targetKey] = options;

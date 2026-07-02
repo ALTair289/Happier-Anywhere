@@ -79,11 +79,16 @@ function areSessionListCacheEntriesEqual(
         && nextEntry.archivedAt === previousEntry.archivedAt
         && nextEntry.lastViewedSessionSeq === previousEntry.lastViewedSessionSeq
         && nextEntry.pendingCount === previousEntry.pendingCount
+        && nextEntry.pendingBlockedCount === previousEntry.pendingBlockedCount
         && nextEntry.pendingVersion === previousEntry.pendingVersion
         && (nextEntry.latestTurnId ?? null) === (previousEntry.latestTurnId ?? null)
         && (nextEntry.latestTurnStatus ?? null) === (previousEntry.latestTurnStatus ?? null)
         && (nextEntry.latestTurnStatusObservedAt ?? null) === (previousEntry.latestTurnStatusObservedAt ?? null)
         && areCacheJsonValuesEqual(nextEntry.lastRuntimeIssue ?? null, previousEntry.lastRuntimeIssue ?? null)
+        && (nextEntry.runtimeActivityActiveCount ?? null) === (previousEntry.runtimeActivityActiveCount ?? null)
+        && (nextEntry.runtimeActivityObservedAt ?? null) === (previousEntry.runtimeActivityObservedAt ?? null)
+        && (nextEntry.runtimeActivityExpiresAt ?? null) === (previousEntry.runtimeActivityExpiresAt ?? null)
+        && (nextEntry.runtimeActivitySourceClass ?? null) === (previousEntry.runtimeActivitySourceClass ?? null)
         && areCacheJsonValuesEqual(nextEntry.rollbackEligibleTurnStarts ?? null, previousEntry.rollbackEligibleTurnStarts ?? null)
         && (nextEntry.latestReadyEventSeq ?? null) === (previousEntry.latestReadyEventSeq ?? null)
         && (nextEntry.latestReadyEventAt ?? null) === (previousEntry.latestReadyEventAt ?? null)
@@ -145,6 +150,7 @@ export function buildSessionListRenderableFromCacheEntry(entry: SessionListCache
         activeAt: entry.activeAt,
         archivedAt: entry.archivedAt,
         pendingCount: entry.pendingCount,
+        pendingBlockedCount: entry.pendingBlockedCount,
         pendingVersion: entry.pendingVersion,
         lastViewedSessionSeq: normalizeNonNegativeInteger(entry.lastViewedSessionSeq),
         metadataVersion: entry.metadataVersion,
@@ -167,6 +173,10 @@ export function buildSessionListRenderableFromCacheEntry(entry: SessionListCache
         latestTurnStatus: entry.latestTurnStatus ?? null,
         latestTurnStatusObservedAt: normalizeNonNegativeNumber(entry.latestTurnStatusObservedAt),
         lastRuntimeIssue: entry.lastRuntimeIssue ?? null,
+        runtimeActivityActiveCount: normalizeNonNegativeInteger(entry.runtimeActivityActiveCount) ?? undefined,
+        runtimeActivityObservedAt: normalizeNonNegativeNumber(entry.runtimeActivityObservedAt),
+        runtimeActivityExpiresAt: normalizeNonNegativeNumber(entry.runtimeActivityExpiresAt),
+        runtimeActivitySourceClass: entry.runtimeActivitySourceClass ?? null,
         rollbackEligibleTurnStarts: readRollbackEligibleTurnStarts(entry.rollbackEligibleTurnStarts),
         latestReadyEventSeq: normalizeNonNegativeInteger(entry.latestReadyEventSeq),
         latestReadyEventAt: normalizeNonNegativeNumber(entry.latestReadyEventAt),
@@ -235,11 +245,16 @@ export function buildSessionListCacheEntryFromRenderable(
             ? previousEntry.lastViewedSessionSeq ?? null
             : normalizeNonNegativeInteger(session.lastViewedSessionSeq),
         pendingCount: session.pendingCount,
+        pendingBlockedCount: session.pendingBlockedCount,
         pendingVersion: session.pendingVersion,
         latestTurnId: session.latestTurnId ?? null,
         latestTurnStatus: session.latestTurnStatus ?? null,
         latestTurnStatusObservedAt: normalizeNonNegativeNumber(session.latestTurnStatusObservedAt),
         lastRuntimeIssue: session.lastRuntimeIssue ?? null,
+        runtimeActivityActiveCount: normalizeNonNegativeInteger(session.runtimeActivityActiveCount),
+        runtimeActivityObservedAt: normalizeNonNegativeNumber(session.runtimeActivityObservedAt),
+        runtimeActivityExpiresAt: normalizeNonNegativeNumber(session.runtimeActivityExpiresAt),
+        runtimeActivitySourceClass: session.runtimeActivitySourceClass ?? null,
         rollbackEligibleTurnStarts: toMutableNumberArray(readRollbackEligibleTurnStarts(session.rollbackEligibleTurnStarts)),
         latestReadyEventSeq: normalizeNonNegativeInteger(session.latestReadyEventSeq),
         latestReadyEventAt: normalizeNonNegativeNumber(session.latestReadyEventAt),
