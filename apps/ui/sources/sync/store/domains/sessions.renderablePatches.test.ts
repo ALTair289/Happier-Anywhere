@@ -303,7 +303,7 @@ describe('sessions domain: renderable patches', () => {
         expect(sessionItem?.session.metadata?.summaryText).toBe('Existing summary');
     });
 
-    it('refreshes the list source row when row-rendered pending count changes', async () => {
+    it('keeps the list source stable when overlay-rendered pending count changes', async () => {
         mockSessionsDomainBoundaries();
 
         const { createSessionsDomain } = await import('./sessions');
@@ -325,6 +325,7 @@ describe('sessions domain: renderable patches', () => {
                 hiddenSystemSession: false,
             },
         })]);
+        const initialRenderables = get().sessionListRenderables;
         const initialListViewData = get().sessionListViewData;
 
         domain.applySessionListRenderablePatches([{
@@ -334,15 +335,16 @@ describe('sessions domain: renderable patches', () => {
             },
         }]);
 
-        expect(get().sessionListViewData).not.toBe(initialListViewData);
-        const nextListViewData = get().sessionListViewData as SessionListViewItem[] | null;
-        const sessionItem = nextListViewData?.find(
-            (item): item is Extract<SessionListViewItem, { type: 'session' }> => item.type === 'session',
+        expect(get().sessionListRenderables).not.toBe(initialRenderables);
+        expect(get().sessionListRenderables.s1.pendingCount).toBe(2);
+        expect(get().sessionListViewData).toBe(initialListViewData);
+        const sessionItem = initialListViewData?.find(
+            (item: SessionListViewItem): item is Extract<SessionListViewItem, { type: 'session' }> => item.type === 'session',
         );
-        expect(sessionItem?.session.pendingCount).toBe(2);
+        expect(sessionItem?.session.pendingCount).toBe(0);
     });
 
-    it('refreshes the list source row when row-rendered pending request timing changes', async () => {
+    it('keeps the list source stable when overlay-rendered pending request timing changes', async () => {
         mockSessionsDomainBoundaries();
 
         const { createSessionsDomain } = await import('./sessions');
@@ -355,6 +357,7 @@ describe('sessions domain: renderable patches', () => {
             hasPendingPermissionRequests: true,
             pendingRequestObservedAt: 100,
         })]);
+        const initialRenderables = get().sessionListRenderables;
         const initialListViewData = get().sessionListViewData;
 
         domain.applySessionListRenderablePatches([{
@@ -364,12 +367,13 @@ describe('sessions domain: renderable patches', () => {
             },
         }]);
 
-        expect(get().sessionListViewData).not.toBe(initialListViewData);
-        const nextListViewData = get().sessionListViewData as SessionListViewItem[] | null;
-        const sessionItem = nextListViewData?.find(
-            (item): item is Extract<SessionListViewItem, { type: 'session' }> => item.type === 'session',
+        expect(get().sessionListRenderables).not.toBe(initialRenderables);
+        expect(get().sessionListRenderables.s1.pendingRequestObservedAt).toBe(500);
+        expect(get().sessionListViewData).toBe(initialListViewData);
+        const sessionItem = initialListViewData?.find(
+            (item: SessionListViewItem): item is Extract<SessionListViewItem, { type: 'session' }> => item.type === 'session',
         );
-        expect(sessionItem?.session.pendingRequestObservedAt).toBe(500);
+        expect(sessionItem?.session.pendingRequestObservedAt).toBe(100);
     });
 
     it('initializes empty replacements then treats repeated empty replacements as no-ops', async () => {
@@ -661,6 +665,14 @@ describe('sessions domain: renderable patches', () => {
         expect(warmCacheEvent?.count).toBe(1);
         expect(warmCacheEvent?.fields.renderables).toBe(1);
         expect(warmCacheEvent?.fields.immediate).toBe(1);
+        const warmCacheScheduleEvent = telemetry.snapshot().events.find(
+            (candidate) => candidate.name === 'sync.store.sessions.warmCache.schedule',
+        );
+        expect(warmCacheScheduleEvent?.fields).toEqual(expect.objectContaining({
+            scheduled: 1,
+            coalesced: 0,
+            renderables: 1,
+        }));
     });
 
     it('defers warm cache persistence when patching unhydrated session list renderables', async () => {
@@ -668,9 +680,17 @@ describe('sessions domain: renderable patches', () => {
         mockSessionsDomainBoundaries();
 
         const warmCache = await import('../../domains/state/warmCachePersistence');
+        const { syncPerformanceTelemetry: telemetry } = await import('../../runtime/syncPerformanceTelemetry');
         const { buildSessionListRenderableFromSession } = await import('../../domains/session/listing/sessionListRenderable');
         const { createSessionsDomain } = await import('./sessions');
         const { get, domain } = createHarness(createSessionsDomain);
+
+        telemetry.configure({
+            enabled: true,
+            slowThresholdMs: 1_000_000,
+            flushIntervalMs: 60_000,
+        });
+        telemetry.reset();
 
         domain.replaceSessionListRenderables([buildSessionListRenderableFromSession({
             id: 's1',
@@ -707,5 +727,15 @@ describe('sessions domain: renderable patches', () => {
         const entries = lastCall?.[2] as Record<string, any>;
         expect(entries?.s1?.active).toBe(false);
         expect(entries?.s1?.activeAt).toBe(20);
+
+        const events = telemetry.snapshot().events;
+        expect(events.find((event) => event.name === 'sync.store.sessions.warmCache.schedule')?.fields).toEqual(expect.objectContaining({
+            scheduled: 1,
+            coalesced: 0,
+            renderables: 1,
+        }));
+        expect(events.find((event) => event.name === 'sync.store.sessions.warmCache.flush')?.fields).toEqual(expect.objectContaining({
+            renderables: 1,
+        }));
     });
 });

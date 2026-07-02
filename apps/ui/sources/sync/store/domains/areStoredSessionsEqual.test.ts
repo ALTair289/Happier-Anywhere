@@ -76,4 +76,38 @@ describe('areStoredSessionsEqual', () => {
             session({ rollbackEligibleTurnStarts: [1, 3] }),
         )).toBe(false);
     });
+
+    it('detects runtime activity projection changes so raw lease updates are retained', () => {
+        expect(areStoredSessionsEqual(
+            session({
+                runtimeActivityActiveCount: 1,
+                runtimeActivityObservedAt: 100,
+                runtimeActivityExpiresAt: 200,
+                runtimeActivitySourceClass: 'provider_detached_task',
+            }),
+            session({
+                runtimeActivityActiveCount: 1,
+                runtimeActivityObservedAt: 150,
+                runtimeActivityExpiresAt: 250,
+                runtimeActivitySourceClass: 'provider_detached_task',
+            }),
+        )).toBe(false);
+    });
+
+    it('detects runtime activity start and clear transitions', () => {
+        expect(areStoredSessionsEqual(
+            session({
+                runtimeActivityActiveCount: 0,
+                runtimeActivityObservedAt: null,
+                runtimeActivityExpiresAt: null,
+                runtimeActivitySourceClass: null,
+            }),
+            session({
+                runtimeActivityActiveCount: 1,
+                runtimeActivityObservedAt: 100,
+                runtimeActivityExpiresAt: 200,
+                runtimeActivitySourceClass: 'provider_detached_task',
+            }),
+        )).toBe(false);
+    });
 });

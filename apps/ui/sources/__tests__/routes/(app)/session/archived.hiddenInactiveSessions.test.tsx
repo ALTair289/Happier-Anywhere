@@ -12,6 +12,9 @@ const mockSessions = vi.hoisted(() => ({
     listViewDataByServerId: {} as Record<string, any[] | null>,
     hideInactiveSessions: false,
     pinnedSessionKeysV1: [] as string[],
+    activeServerId: 'server-1' as string | null,
+    organizationProjection: null as any,
+    organizationProjectionByServerId: {} as Record<string, any>,
 }));
 const modalMock = vi.hoisted(() => ({
     alert: vi.fn(),
@@ -78,6 +81,11 @@ vi.mock('@/modal', async () => {
 vi.mock('@/hooks/session/useNavigateToSession', () => ({
     useNavigateToSession: () => mockNavigateToSession,
 }));
+vi.mock('@/hooks/server/useEffectiveServerSelection', () => ({
+    useResolvedActiveServerSelection: () => ({
+        activeServerId: mockSessions.activeServerId,
+    }),
+}));
 vi.mock('@/sync/ops', () => ({
     sessionUnarchiveWithServerScope: vi.fn(async () => ({ success: true, archivedAt: null })),
 }));
@@ -99,6 +107,20 @@ vi.mock('@/sync/domains/state/storage', async (importOriginal) => {
             }),
             useAllSessions: () => mockSessions.all,
             useSessionListViewDataByServerId: () => mockSessions.listViewDataByServerId,
+            useSessionOrganizationProjection: (serverId: string | null | undefined) => {
+                const normalizedServerId = typeof serverId === 'string' ? serverId.trim() : '';
+                return mockSessions.organizationProjectionByServerId[normalizedServerId] ?? mockSessions.organizationProjection;
+            },
+            useSessionOrganizationPinnedSessionKeys: () => {
+                const projections = Object.keys(mockSessions.organizationProjectionByServerId).length > 0
+                    ? Object.entries(mockSessions.organizationProjectionByServerId)
+                    : mockSessions.activeServerId
+                        ? [[mockSessions.activeServerId, mockSessions.organizationProjection]]
+                        : [];
+                return projections.flatMap(([serverId, projection]) => (
+                    (projection as any)?.pinnedSessionIds ?? []
+                ).map((sessionId: string) => `${serverId}:${sessionId}`));
+            },
             useSetting: (key: string) => {
                 if (key === 'hideInactiveSessions') return mockSessions.hideInactiveSessions;
                 if (key === 'pinnedSessionKeysV1') return mockSessions.pinnedSessionKeysV1;
@@ -122,9 +144,28 @@ describe('Archived sessions route', () => {
         (sessionUnarchiveWithServerScope as any).mockReset?.();
         mockSessions.hideInactiveSessions = false;
         mockSessions.pinnedSessionKeysV1 = [];
+        mockSessions.activeServerId = 'server-1';
+        mockSessions.organizationProjection = createOrganizationProjection();
+        mockSessions.organizationProjectionByServerId = {};
         mockSessions.all = [];
         mockSessions.listViewDataByServerId = {};
     });
+
+    function createOrganizationProjection(overrides: Record<string, unknown> = {}) {
+        return {
+            schemaVersion: 1,
+            version: 1,
+            pinnedSessionIds: [],
+            pinsBySessionId: {},
+            foldersById: {},
+            folderAssignmentsBySessionId: {},
+            tagsById: {},
+            tagAssignmentsBySessionId: {},
+            orderEntriesByScopeKey: {},
+            labelsByLabelKey: {},
+            ...overrides,
+        };
+    }
 
     it('shows inactive sessions before archived sessions only when hide inactive sessions is enabled', async () => {
         mockSessions.hideInactiveSessions = true;
@@ -157,6 +198,89 @@ describe('Archived sessions route', () => {
         );
         expect(content).not.toContain('settingsFeatures.hiddenInactiveSessionsSectionSubtitle');
         expect(content).toContain('Inactive Session');
+    });
+
+    it('filters hidden inactive sessions using server-backed organization pins instead of legacy pinned settings', async () => {
+        mockSessions.hideInactiveSessions = true;
+        mockSessions.pinnedSessionKeysV1 = ['server-1:inactive-1'];
+        mockSessions.organizationProjection = createOrganizationProjection({
+            pinnedSessionIds: [],
+        });
+        mockSessions.all = [
+            {
+                id: 'inactive-1',
+                active: false,
+                archivedAt: null,
+                updatedAt: 10,
+                metadata: { name: 'Legacy Pinned Inactive Session', path: '/tmp/inactive' },
+                serverId: 'server-1',
+            },
+        ];
+
+        const Screen = (await import('@/app/(app)/session/archived')).default;
+        const legacyOnlyScreen = await renderScreen(<Screen />);
+        expect(legacyOnlyScreen.getTextContent()).toContain('Legacy Pinned Inactive Session');
+
+        mockSessions.pinnedSessionKeysV1 = [];
+        mockSessions.organizationProjection = createOrganizationProjection({
+            pinnedSessionIds: ['inactive-1'],
+            pinsBySessionId: {
+                'inactive-1': {
+                    sessionId: 'inactive-1',
+                    sortKey: null,
+                    pinnedAt: 1,
+                },
+            },
+        });
+
+        const serverBackedScreen = await renderScreen(<Screen />);
+        expect(serverBackedScreen.getTextContent()).not.toContain('Legacy Pinned Inactive Session');
+    });
+
+    it('filters hidden inactive sessions using the pinned state for the owning server scope', async () => {
+        mockSessions.hideInactiveSessions = true;
+        mockSessions.activeServerId = 'server-a';
+        mockSessions.organizationProjectionByServerId = {
+            'server-a': createOrganizationProjection({
+                pinnedSessionIds: [],
+            }),
+            'server-b': createOrganizationProjection({
+                pinnedSessionIds: ['inactive-b'],
+                pinsBySessionId: {
+                    'inactive-b': {
+                        sessionId: 'inactive-b',
+                        sortKey: null,
+                        pinnedAt: 1,
+                    },
+                },
+            }),
+        };
+        mockSessions.organizationProjection = mockSessions.organizationProjectionByServerId['server-a'];
+        mockSessions.all = [
+            {
+                id: 'inactive-b',
+                active: false,
+                archivedAt: null,
+                updatedAt: 20,
+                metadata: { name: 'Server B Pinned Inactive Session', path: '/tmp/server-b' },
+                serverId: 'server-b',
+            },
+            {
+                id: 'inactive-a',
+                active: false,
+                archivedAt: null,
+                updatedAt: 10,
+                metadata: { name: 'Server A Unpinned Inactive Session', path: '/tmp/server-a' },
+                serverId: 'server-a',
+            },
+        ];
+
+        const Screen = (await import('@/app/(app)/session/archived')).default;
+        const screen = await renderScreen(<Screen />);
+        const content = screen.getTextContent();
+
+        expect(content).not.toContain('Server B Pinned Inactive Session');
+        expect(content).toContain('Server A Unpinned Inactive Session');
     });
 
     it('requests the archived session snapshot when the route opens', async () => {

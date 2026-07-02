@@ -75,6 +75,7 @@ describe('deriveSessionListAttentionState', () => {
         return {
             hasUnreadMessages: false,
             pendingCount: 0,
+            pendingBlockedCount: 0,
             sessionState: 'waiting' as const,
             ...overrides,
         };
@@ -93,6 +94,13 @@ describe('deriveSessionListAttentionState', () => {
 
     it('treats pending queue activity as an attention state', () => {
         expect(deriveSessionListAttentionState(input({ pendingCount: 2 }))).toBe('pending');
+    });
+
+    it('treats blocked pending delivery as action-required attention', () => {
+        expect(deriveSessionListAttentionState(input({
+            pendingCount: 2,
+            pendingBlockedCount: 1,
+        }))).toBe('action_required');
     });
 
     it('treats resuming sessions as active attention before generic pending activity', () => {

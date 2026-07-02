@@ -58,6 +58,11 @@ export type ComputeVisibleSessionListIndexParams = Readonly<{
     pinnedSessionKeysV1: ReadonlyArray<string>;
     sessionListGroupOrderV1: Readonly<Record<string, ReadonlyArray<string> | undefined>>;
     sessionWorkspaceOrderV1?: SessionWorkspaceOrderV1;
+    normalizedOrganizationProjection?: Readonly<{
+        pinnedSessionKeys: ReadonlyArray<string>;
+        sessionListGroupOrder: Readonly<Record<string, ReadonlyArray<string> | undefined>>;
+        sessionWorkspaceOrder?: SessionWorkspaceOrderV1;
+    }>;
     sessionListOrderingModeV1?: SessionListOrderingModeV1;
     sessionListSectionModeV1?: SessionListOrderingSectionMode;
     sessionListFolderSortModeV1?: SessionListFolderSortModeV1;
@@ -80,6 +85,21 @@ function countOrderedGroups(orderByGroupKey: Readonly<Record<string, ReadonlyArr
 
 function countPinnedSessionKeys(keys: ReadonlyArray<string> | undefined): number {
     return (keys ?? []).filter((key) => typeof key === 'string' && key.trim().length > 0).length;
+}
+
+function countVisiblePlaceholderRows(params: Readonly<{
+    result: ReadonlyArray<SessionListIndexItem>;
+    resolveSessionRow: ComputeVisibleSessionListIndexParams['resolveSessionRow'];
+}>): number {
+    let count = 0;
+    for (const item of params.result) {
+        if (item.type !== 'session') continue;
+        const row = resolveSessionRowForIndexItem(item, params.resolveSessionRow);
+        if (!row || row.metadata == null) {
+            count += 1;
+        }
+    }
+    return count;
 }
 
 const SESSION_LIST_ORDERING_MODE_TELEMETRY_CODE: Readonly<Record<SessionListOrderingModeV1, number>> = {
@@ -108,9 +128,26 @@ type VisibleSessionListSourceTelemetry = Readonly<{
     hasNonCustomSessionOrdering: boolean;
 }>;
 
+type VisibleSessionListProjectionTelemetry = Readonly<{
+    missingPinnedSessionKeys: number;
+    visiblePlaceholderRows: number;
+}>;
+
 type VisibleSessionListTelemetrySink = {
     sourceTelemetry?: VisibleSessionListSourceTelemetry;
+    projectionTelemetry?: VisibleSessionListProjectionTelemetry;
 };
+
+function recordSourceProjectionTelemetry(
+    telemetrySink: VisibleSessionListTelemetrySink | undefined,
+    visiblePlaceholderRows: number,
+): void {
+    if (!telemetrySink) return;
+    telemetrySink.projectionTelemetry = {
+        missingPinnedSessionKeys: 0,
+        visiblePlaceholderRows,
+    };
+}
 
 function inspectVisibleSessionListOrderingState(params: Readonly<{
     source: ReadonlyArray<SessionListIndexItem>;
@@ -207,6 +244,8 @@ function buildPinnedSessionListIndexItems(params: Readonly<{
                 groupKey: PINNED_GROUP_KEY_V1,
                 groupKind: 'pinned',
                 variant: 'default',
+                attentionPromotionReason: undefined,
+                workingPlacementReason: undefined,
             });
             continue;
         }
@@ -266,17 +305,28 @@ function orderPinnedSessionListIndexItems(params: Readonly<{
 function applyPinnedSessionListIndexFlags(params: Readonly<{
     ordered: ReadonlyArray<SessionListIndexItem>;
     pinnedSessionKeys: ReadonlyArray<string>;
-}>): SessionListIndexItem[] {
+    trackMissingPinnedSessionKeys: boolean;
+}>): Readonly<{
+    ordered: SessionListIndexItem[];
+    missingPinnedSessionKeys: number;
+}> {
     if (params.pinnedSessionKeys.length === 0 || params.ordered.length === 0) {
-        return params.ordered as SessionListIndexItem[];
+        return {
+            ordered: params.ordered as SessionListIndexItem[],
+            missingPinnedSessionKeys: params.trackMissingPinnedSessionKeys ? params.pinnedSessionKeys.length : 0,
+        };
     }
 
     const pinnedSet = new Set(params.pinnedSessionKeys);
+    const missingPinnedSet = params.trackMissingPinnedSessionKeys
+        ? new Set(params.pinnedSessionKeys)
+        : null;
     let changed = false;
     const next = params.ordered.map((item) => {
         if (item.type !== 'session') return item;
         const key = normalizeSessionListKeyParts(item.serverId, item.sessionId).sessionKey;
         if (!key || !pinnedSet.has(key)) return item;
+        missingPinnedSet?.delete(key);
         if (item.pinned === true && item.variant === 'default') return item;
         changed = true;
         return {
@@ -286,7 +336,10 @@ function applyPinnedSessionListIndexFlags(params: Readonly<{
         };
     });
 
-    return changed ? next : params.ordered as SessionListIndexItem[];
+    return {
+        ordered: changed ? next : params.ordered as SessionListIndexItem[],
+        missingPinnedSessionKeys: missingPinnedSet?.size ?? 0,
+    };
 }
 
 function computeVisibleSessionListIndexUnmeasured(
@@ -306,15 +359,20 @@ function computeVisibleSessionListIndexUnmeasured(
         orderingMode,
         folderSortMode: normalizeSessionListFolderSortModeV1(params.sessionListFolderSortModeV1),
     });
-    const pinnedSessionKeys = normalizeTrimmedStringArrayWithSharedEmpty(params.pinnedSessionKeysV1);
+    const organizationProjection = params.normalizedOrganizationProjection;
+    const groupOrder = organizationProjection?.sessionListGroupOrder ?? params.sessionListGroupOrderV1;
+    const workspaceOrder = organizationProjection?.sessionWorkspaceOrder ?? params.sessionWorkspaceOrderV1 ?? {};
+    const pinnedSessionKeys = normalizeTrimmedStringArrayWithSharedEmpty(
+        organizationProjection?.pinnedSessionKeys ?? params.pinnedSessionKeysV1,
+    );
     const presentationEnabled = params.presentation.enabled === true;
     const attentionPromotionMode = normalizeSessionListAttentionPromotionMode(params.attentionPromotion?.mode);
     const attentionPromotionEnabled = attentionPromotionMode !== 'off';
     const workingPlacementMode = normalizeSessionListWorkingPlacementMode(params.workingPlacement?.mode);
     const workingPlacementEnabled = workingPlacementMode !== 'off';
     const placementNowMs = params.nowMs ?? Date.now();
-    const hasOrderingOverrides = hasGroupOrderingOverrides(params.sessionListGroupOrderV1)
-        || hasGroupOrderingOverrides(params.sessionWorkspaceOrderV1 ?? {});
+    const hasOrderingOverrides = hasGroupOrderingOverrides(groupOrder)
+        || hasGroupOrderingOverrides(workspaceOrder);
     const sourceState = inspectVisibleSessionListIndexSourceState(source, params.resolveSessionRow);
     const hasNonCustomSessionOrdering = sourceTelemetry.hasNonCustomSessionOrdering;
 
@@ -327,13 +385,14 @@ function computeVisibleSessionListIndexUnmeasured(
         hasArchivedSessionItems: sourceState.hasArchivedSessionItems,
         hasOrphanHeaders: sourceState.hasOrphanHeaders,
     }) && !attentionPromotionEnabled && !workingPlacementEnabled && !hasNonCustomSessionOrdering) {
+        recordSourceProjectionTelemetry(telemetrySink, sourceState.visiblePlaceholderRows);
         return source as SessionListIndexItem[];
     }
 
-    const orderedByWorkspace = applySessionWorkspaceOrderV1ToIndex(source, params.sessionWorkspaceOrderV1 ?? {});
+    const orderedByWorkspace = applySessionWorkspaceOrderV1ToIndex(source, workspaceOrder);
     const orderedByGroup = orderingMode === 'custom'
-        ? applySessionListIndexGroupOrdering(orderedByWorkspace, params.sessionListGroupOrderV1 ?? {}, { folderSortMode, sectionMode })
-        : applySessionListStructuralGroupOrder(orderedByWorkspace, params.sessionListGroupOrderV1 ?? {}, { folderSortMode });
+        ? applySessionListIndexGroupOrdering(orderedByWorkspace, groupOrder ?? {}, { folderSortMode, sectionMode })
+        : applySessionListStructuralGroupOrder(orderedByWorkspace, groupOrder ?? {}, { folderSortMode });
     if (
         orderingMode === 'custom'
         && orderedByGroup === source
@@ -349,6 +408,7 @@ function computeVisibleSessionListIndexUnmeasured(
         && !workingPlacementEnabled
         && !hasNonCustomSessionOrdering
     ) {
+        recordSourceProjectionTelemetry(telemetrySink, sourceState.visiblePlaceholderRows);
         return source as SessionListIndexItem[];
     }
 
@@ -364,6 +424,7 @@ function computeVisibleSessionListIndexUnmeasured(
         && !sourceState.hasArchivedSessionItems
         && !sourceState.hasOrphanHeaders
     ) {
+        recordSourceProjectionTelemetry(telemetrySink, sourceState.visiblePlaceholderRows);
         return source as SessionListIndexItem[];
     }
 
@@ -380,6 +441,7 @@ function computeVisibleSessionListIndexUnmeasured(
         && !sourceState.hasInactiveSessionsThatNeedFiltering
         && !hasNonCustomSessionOrdering
     ) {
+        recordSourceProjectionTelemetry(telemetrySink, sourceState.visiblePlaceholderRows);
         return source as SessionListIndexItem[];
     }
 
@@ -389,9 +451,13 @@ function computeVisibleSessionListIndexUnmeasured(
         return row?.archivedAt == null;
     });
 
-    const orderedWithPinnedFlags = applyPinnedSessionListIndexFlags({
+    const {
+        ordered: orderedWithPinnedFlags,
+        missingPinnedSessionKeys,
+    } = applyPinnedSessionListIndexFlags({
         ordered: orderedWithoutArchived,
         pinnedSessionKeys,
+        trackMissingPinnedSessionKeys: telemetrySink != null,
     });
 
     const globalAttentionSource = pruneOrphanSessionListIndexHeaders(orderedWithPinnedFlags);
@@ -403,7 +469,7 @@ function computeVisibleSessionListIndexUnmeasured(
     });
     const orderedWithoutGlobalAttention = attentionPromotion
         ? pruneOrphanSessionListIndexHeaders(attentionPromotion.remainder)
-        : orderedWithPinnedFlags;
+        : globalAttentionSource;
     const workingPlacement = buildSessionListIndexWorkingPlacement({
         source: pruneOrphanSessionListIndexHeaders(orderedWithoutGlobalAttention),
         options: params.workingPlacement,
@@ -415,7 +481,7 @@ function computeVisibleSessionListIndexUnmeasured(
         ? pruneOrphanSessionListIndexHeaders(workingPlacement.remainder)
         : orderedWithoutGlobalAttention;
 
-    const { pinnedSessions, remainder } = buildPinnedSessionListIndexItems({
+    const { pinnedSessions, remainder: nonPinnedRemainder } = buildPinnedSessionListIndexItems({
         ordered: orderedWithoutGlobalWorking,
         pinnedSessionKeys,
     });
@@ -428,12 +494,12 @@ function computeVisibleSessionListIndexUnmeasured(
     const pinnedOrdered = orderPinnedSessionListIndexItems({
         pinnedSessions,
         pinnedSessionKeys,
-        groupOrderKeys: params.sessionListGroupOrderV1?.[PINNED_GROUP_KEY_V1],
+        groupOrderKeys: groupOrder?.[PINNED_GROUP_KEY_V1],
         orderingMode,
         resolveSessionRow: params.resolveSessionRow,
     });
 
-    const remainderPruned = pruneOrphanSessionListIndexHeaders(remainder);
+    const remainderPruned = pruneOrphanSessionListIndexHeaders(nonPinnedRemainder);
     const remainderAfterWorking = workingPlacementMode === 'withinGroups'
         ? applySessionListIndexWorkingPlacementWithinGroups({
             source: remainderPruned,
@@ -461,12 +527,22 @@ function computeVisibleSessionListIndexUnmeasured(
         selectedServerIds: params.presentation.selectedServerIds,
     });
 
-    return [
+    const result = [
         ...(attentionPromotion?.attentionItems ?? []),
         ...(workingPlacement?.workingItems ?? []),
         ...(pinnedHeader ? [pinnedHeader, ...pinnedOrdered] : []),
         ...remainderPresented,
     ];
+    if (telemetrySink) {
+        telemetrySink.projectionTelemetry = {
+            missingPinnedSessionKeys,
+            visiblePlaceholderRows: countVisiblePlaceholderRows({
+                result,
+                resolveSessionRow: params.resolveSessionRow,
+            }),
+        };
+    }
+    return result;
 }
 
 export function computeVisibleSessionListIndex(
@@ -492,6 +568,10 @@ export function computeVisibleSessionListIndex(
         bucketSortApplied: 0,
         hasNonCustomSessionOrdering: false,
     };
+    const projectionTelemetry = telemetrySink.projectionTelemetry ?? {
+        missingPinnedSessionKeys: 0,
+        visiblePlaceholderRows: 0,
+    };
     syncPerformanceTelemetry.recordDuration(
         'sync.sessions.list.visible.compute',
         nowMs() - startedAtMs,
@@ -505,8 +585,10 @@ export function computeVisibleSessionListIndex(
             effectiveModeOverrides: sourceTelemetry.effectiveModeOverrides,
             bucketSortApplied: sourceTelemetry.bucketSortApplied,
             hideInactive: params.hideInactiveSessions === true ? 1 : 0,
-            pins: countPinnedSessionKeys(params.pinnedSessionKeysV1),
-            customOrder: countOrderedGroups(params.sessionListGroupOrderV1),
+            pins: countPinnedSessionKeys(params.normalizedOrganizationProjection?.pinnedSessionKeys ?? params.pinnedSessionKeysV1),
+            missingPinnedSessionKeys: projectionTelemetry.missingPinnedSessionKeys,
+            visiblePlaceholderRows: projectionTelemetry.visiblePlaceholderRows,
+            customOrder: countOrderedGroups(params.normalizedOrganizationProjection?.sessionListGroupOrder ?? params.sessionListGroupOrderV1),
             presentationEnabled: params.presentation.enabled === true ? 1 : 0,
             storageFilter: params.storageFilterApplied === true ? 1 : 0,
             attentionPromotionEnabled: normalizeSessionListAttentionPromotionMode(params.attentionPromotion?.mode) === 'off' ? 0 : 1,

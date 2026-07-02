@@ -13,6 +13,7 @@ import type {
     DirectMessageBypassReason,
     PendingMessageSubmitResult,
     SessionSubmitPort,
+    SubmitPersistence,
     SubmitSessionUserMessageOptions,
     SubmitSessionUserMessageResult,
 } from './types';
@@ -34,6 +35,43 @@ function readLocalId(result: PendingMessageSubmitResult | DirectMessageSubmitRes
     return result && typeof result === 'object' && typeof result.localId === 'string'
         ? result.localId
         : undefined;
+}
+
+type DirectSubmitPersistence = Extract<SubmitPersistence, 'pending' | 'transcript_committed' | 'provider_direct'>;
+
+function readDirectSubmitPersistence(result: DirectMessageSubmitResult): DirectSubmitPersistence | undefined {
+    if (!result || typeof result !== 'object') {
+        return undefined;
+    }
+    switch (result.persistence) {
+        case 'pending':
+        case 'transcript_committed':
+        case 'provider_direct':
+            return result.persistence;
+        default:
+            return undefined;
+    }
+}
+
+function hasTranscriptCommitEvidence(result: DirectMessageSubmitResult): boolean {
+    return Boolean(
+        result
+            && typeof result === 'object'
+            && typeof result.seq === 'number'
+            && Number.isFinite(result.seq),
+    );
+}
+
+function resolveDirectSubmitPersistence(
+    result: DirectMessageSubmitResult,
+    sawLocalPendingProjection: boolean,
+): DirectSubmitPersistence {
+    return readDirectSubmitPersistence(result)
+        ?? (hasTranscriptCommitEvidence(result)
+            ? 'transcript_committed'
+            : sawLocalPendingProjection
+                ? 'pending'
+                : 'transcript_committed');
 }
 
 function resolveSubmitDecision(opts: SubmitSessionUserMessageOptions): SessionMessageDeliveryDecision {
@@ -215,14 +253,15 @@ async function directSend(
     try {
         let didMarkOutboundHandoff = false;
         let handoffLocalId: string | undefined;
-        const markOutboundHandoff = (localId?: string) => {
+        let sawLocalPendingProjection = false;
+        const markOutboundHandoff = (persistence: DirectSubmitPersistence, localId?: string) => {
             if (didMarkOutboundHandoff) {
                 return;
             }
             didMarkOutboundHandoff = true;
             handoffLocalId = localId;
             opts.onOutboundHandoff?.({
-                persistence: 'transcript_committed',
+                persistence,
                 ...(localId ? { localId } : {}),
             });
         };
@@ -231,7 +270,10 @@ async function directSend(
             localId: opts.localId ?? undefined,
             bypassPendingQueueReason,
             onLocalPendingProjectionCreated: opts.onOutboundHandoff
-                ? ({ localId }: { localId: string }) => markOutboundHandoff(localId)
+                ? ({ localId }: { localId: string }) => {
+                    sawLocalPendingProjection = true;
+                    markOutboundHandoff('pending', localId);
+                }
                 : undefined,
         };
         const sendResult = await port.sendMessage(
@@ -242,12 +284,13 @@ async function directSend(
             sendOptions,
         );
         const localId = readLocalId(sendResult) ?? handoffLocalId ?? opts.localId ?? undefined;
+        const persistence = resolveDirectSubmitPersistence(sendResult, sawLocalPendingProjection);
         if (!didMarkOutboundHandoff) {
-            markOutboundHandoff(localId);
+            markOutboundHandoff(persistence, localId);
         }
         return {
             type: 'success',
-            persistence: 'transcript_committed',
+            persistence,
             wake: { attempted: false, state: 'not_needed' },
             localId,
         };
@@ -278,12 +321,96 @@ async function enqueuePending(
 
     let enqueueResult: PendingMessageSubmitResult;
     try {
+        let didMarkOutboundHandoff = false;
+        let handoffLocalId: string | undefined;
+        const markOutboundHandoff = (localId?: string) => {
+            if (didMarkOutboundHandoff) {
+                return;
+            }
+            didMarkOutboundHandoff = true;
+            handoffLocalId = localId;
+            opts.onOutboundHandoff?.({
+                persistence: 'pending',
+                ...(localId ? { localId } : {}),
+            });
+        };
         enqueueResult = await port.enqueuePendingMessage(
             opts.sessionId,
             opts.text,
             opts.displayText,
             withSessionUserMessageDeliveryIntentMeta(opts.metaOverrides ?? null, decision.intent),
+            opts.onOutboundHandoff
+                ? {
+                    onLocalPendingProjectionCreated: ({ localId }) => markOutboundHandoff(localId),
+                }
+                : undefined,
         );
+        const localId = readLocalId(enqueueResult) ?? handoffLocalId;
+        if (!didMarkOutboundHandoff) {
+            markOutboundHandoff(localId);
+        }
+        if (enqueueResult && typeof enqueueResult === 'object' && enqueueResult.accepted === false) {
+            return {
+                type: 'wake_pending',
+                persistence: 'pending',
+                wake: { attempted: false, state: 'not_needed' },
+                localId,
+            };
+        }
+        if (!wakeOpts) {
+            return {
+                type: 'wake_pending',
+                persistence: 'pending',
+                wake: { attempted: false, state: 'not_needed' },
+                localId,
+            };
+        }
+
+        const resumeOptions = {
+            ...wakeOpts,
+            ...(opts.serverId ? { serverId: opts.serverId } : {}),
+        };
+
+        try {
+            const wakeResult = await port.resumeSession(resumeOptions);
+            if (wakeResult.type === 'error') {
+                await switchRemoteAfterPendingEnqueueIfNeeded(port, opts);
+                return {
+                    type: 'wake_failed',
+                    persistence: 'pending',
+                    wake: {
+                        attempted: true,
+                        state: 'failed',
+                        errorMessage: wakeResult.errorMessage,
+                    },
+                    errorCode: wakeResult.errorCode,
+                    errorMessage: wakeResult.errorMessage,
+                    localId,
+                };
+            }
+        } catch (error) {
+            const errorMessage = getErrorMessage(error, 'Failed to resume session');
+            await switchRemoteAfterPendingEnqueueIfNeeded(port, opts);
+            return {
+                type: 'wake_failed',
+                persistence: 'pending',
+                wake: {
+                    attempted: true,
+                    state: 'failed',
+                    errorMessage,
+                },
+                errorMessage,
+                localId,
+            };
+        }
+
+        await switchRemoteAfterPendingEnqueueIfNeeded(port, opts);
+        return {
+            type: 'success',
+            persistence: 'pending',
+            wake: { attempted: true, state: 'started' },
+            localId,
+        };
     } catch (error) {
         return {
             type: 'send_failed',
@@ -292,66 +419,6 @@ async function enqueuePending(
             errorMessage: getErrorMessage(error, 'Failed to enqueue message'),
         };
     }
-
-    const localId = readLocalId(enqueueResult);
-    opts.onOutboundHandoff?.({
-        persistence: 'pending',
-        ...(localId ? { localId } : {}),
-    });
-    if (!wakeOpts) {
-        return {
-            type: 'wake_pending',
-            persistence: 'pending',
-            wake: { attempted: false, state: 'not_needed' },
-            localId,
-        };
-    }
-
-    const resumeOptions = {
-        ...wakeOpts,
-        ...(opts.serverId ? { serverId: opts.serverId } : {}),
-    };
-
-    try {
-        const wakeResult = await port.resumeSession(resumeOptions);
-        if (wakeResult.type === 'error') {
-            await switchRemoteAfterPendingEnqueueIfNeeded(port, opts);
-            return {
-                type: 'wake_failed',
-                persistence: 'pending',
-                wake: {
-                    attempted: true,
-                    state: 'failed',
-                    errorMessage: wakeResult.errorMessage,
-                },
-                errorCode: wakeResult.errorCode,
-                errorMessage: wakeResult.errorMessage,
-                localId,
-            };
-        }
-    } catch (error) {
-        const errorMessage = getErrorMessage(error, 'Failed to resume session');
-        await switchRemoteAfterPendingEnqueueIfNeeded(port, opts);
-        return {
-            type: 'wake_failed',
-            persistence: 'pending',
-            wake: {
-                attempted: true,
-                state: 'failed',
-                errorMessage,
-            },
-            errorMessage,
-            localId,
-        };
-    }
-
-    await switchRemoteAfterPendingEnqueueIfNeeded(port, opts);
-    return {
-        type: 'success',
-        persistence: 'pending',
-        wake: { attempted: true, state: 'started' },
-        localId,
-    };
 }
 
 export async function submitSessionUserMessage(

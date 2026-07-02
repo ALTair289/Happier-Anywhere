@@ -141,6 +141,53 @@ describe('buildUpdatedSessionFromSocketUpdate (plaintext)', () => {
     expect(nextSession.latestTurnStatusObservedAt).toBe(123_456);
   });
 
+  it('clears legacy thinking when update-session marks the runtime inactive', async () => {
+    const base = createSession({ sessionId: 's1', encryptionMode: 'plain' });
+
+    const { nextSession } = await buildUpdatedSessionFromSocketUpdate({
+      session: base,
+      updateBody: {
+        runtimeActivityActiveCount: 2,
+        runtimeActivityObservedAt: 123_456,
+        runtimeActivityExpiresAt: 223_456,
+        runtimeActivitySourceClass: 'provider_detached_task',
+      },
+      updateSeq: 10,
+      updateCreatedAt: 456,
+      sessionEncryption: null,
+    });
+
+    expect(nextSession.runtimeActivityActiveCount).toBe(2);
+    expect(nextSession.runtimeActivityObservedAt).toBe(123_456);
+    expect(nextSession.runtimeActivityExpiresAt).toBe(223_456);
+    expect(nextSession.runtimeActivitySourceClass).toBe('provider_detached_task');
+  });
+
+  it('clears runtime activity source class when an update-session payload clears activity', async () => {
+    const base = {
+      ...createSession({ sessionId: 's1', encryptionMode: 'plain' }),
+      runtimeActivityActiveCount: 1,
+      runtimeActivityObservedAt: 100,
+      runtimeActivityExpiresAt: 200,
+      runtimeActivitySourceClass: 'provider_detached_task' as const,
+    };
+
+    const { nextSession } = await buildUpdatedSessionFromSocketUpdate({
+      session: base,
+      updateBody: {
+        runtimeActivityActiveCount: 0,
+      },
+      updateSeq: 10,
+      updateCreatedAt: 456,
+      sessionEncryption: null,
+    });
+
+    expect(nextSession.runtimeActivityActiveCount).toBe(0);
+    expect(nextSession.runtimeActivityObservedAt).toBeNull();
+    expect(nextSession.runtimeActivityExpiresAt).toBeNull();
+    expect(nextSession.runtimeActivitySourceClass).toBeNull();
+  });
+
   it('applies runtime activity projection fields from update-session payloads', async () => {
     const base = {
       ...createSession({ sessionId: 's1', encryptionMode: 'plain' }),

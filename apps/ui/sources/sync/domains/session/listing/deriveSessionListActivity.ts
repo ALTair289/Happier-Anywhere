@@ -55,6 +55,7 @@ export function deriveSessionListMeaningfulActivityAt(params: Readonly<{
 export function deriveSessionListAttentionState(input: Readonly<{
     hasUnreadMessages: boolean;
     pendingCount: number;
+    pendingBlockedCount?: number;
     sessionState: SessionState;
     latestTurnStatus?: PrimaryTurnStatusV1 | null;
     lastRuntimeIssue?: SessionRuntimeIssueV1 | null;
@@ -72,6 +73,7 @@ export function deriveSessionListAttentionState(input: Readonly<{
     });
     if (input.sessionState === 'action_required') return 'action_required';
     if (input.sessionState === 'permission_required') return 'permission_required';
+    if ((input.pendingBlockedCount ?? 0) > 0) return 'action_required';
     // Legacy list/session internals call active turn work "thinking"; row presentation maps this to product "working".
     if (sessionAttention === 'running') return 'thinking';
     if (sessionAttention === 'failed') return 'failed';

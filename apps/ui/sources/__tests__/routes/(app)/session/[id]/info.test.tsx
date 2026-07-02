@@ -47,10 +47,16 @@ const setPinnedSessionKeysV1Spy = vi.fn();
 const setSessionTagsV1Spy = vi.fn();
 const openMoveSheetSpy = vi.fn(async () => null as any);
 const setSessionFolderAssignmentSpy = vi.fn(async () => undefined);
+const sessionOrganizationOps = vi.hoisted(() => ({
+    setSessionPin: vi.fn(async () => undefined),
+    setSessionTagAssignments: vi.fn(async () => undefined),
+    setSessionFolderAssignment: vi.fn(async () => undefined),
+}));
 let hideInactiveSessions = false;
 let pinnedSessionKeysV1: unknown = null;
 let sessionTagsV1: unknown = null;
 let sessionFoldersV1: unknown = null;
+let sessionOrganizationProjection: any = null;
 let resolvedServerId = 'server-1';
 let sessionHandoffFeatureEnabled = false;
 let sessionFoldersFeatureEnabled = false;
@@ -184,6 +190,7 @@ installSessionRouteCommonModuleMocks({
                     }
                     return null;
                 },
+                useSessionOrganizationProjection: () => sessionOrganizationProjection,
                 useSettingMutable: (key: string) => {
                     if (key === 'pinnedSessionKeysV1') {
                         return [pinnedSessionKeysV1, setPinnedSessionKeysV1Spy];
@@ -279,13 +286,18 @@ vi.mock('@/auth/storage/tokenStorage', () => ({
     },
 }));
 vi.mock('@/sync/domains/server/serverProfiles', () => ({
-    getServerProfileById: () => ({
-        id: 'server-1',
+    getServerProfileById: (serverId: string) => ({
+        id: serverId,
         serverUrl: 'https://server.example.test',
     }),
 }));
 vi.mock('@/sync/ops/sessionFolders', () => ({
     setSessionFolderAssignment: setSessionFolderAssignmentSpy,
+}));
+vi.mock('@/sync/ops/sessionOrganization', () => ({
+    setSessionPin: sessionOrganizationOps.setSessionPin,
+    setSessionTagLabels: sessionOrganizationOps.setSessionTagAssignments,
+    setSessionFolderAssignment: sessionOrganizationOps.setSessionFolderAssignment,
 }));
 vi.mock('@/hooks/server/useSessionExecutionRunsSupported', () => ({
     useSessionExecutionRunsSupported: (sessionId: string) => useSessionExecutionRunsSupportedSpy(sessionId),
@@ -417,6 +429,9 @@ describe('/session/[id]/info', () => {
         openMoveSheetSpy.mockClear();
         openMoveSheetSpy.mockResolvedValue(null);
         setSessionFolderAssignmentSpy.mockClear();
+        sessionOrganizationOps.setSessionPin.mockClear();
+        sessionOrganizationOps.setSessionTagAssignments.mockClear();
+        sessionOrganizationOps.setSessionFolderAssignment.mockClear();
         resolvedServerId = 'server-1';
         resolveServerIdForSessionIdFromLocalCacheSpy.mockClear();
         resolvePreferredServerIdForSessionIdSpy.mockClear();
@@ -434,6 +449,7 @@ describe('/session/[id]/info', () => {
         pinnedSessionKeysV1 = null;
         sessionTagsV1 = null;
         sessionFoldersV1 = null;
+        resetSessionOrganizationProjection();
         sessionHandoffFeatureEnabled = false;
         sessionFoldersFeatureEnabled = false;
         automationsEnabled = false;
@@ -494,6 +510,26 @@ describe('/session/[id]/info', () => {
         resolveServerIdForSessionIdFromLocalCacheSpy.mockReturnValue(serverId);
         resolvePreferredServerIdForSessionIdSpy.mockReturnValue(serverId);
         usePreferredServerIdForSessionSpy.mockReturnValue(serverId);
+    }
+
+    function resetSessionOrganizationProjection(overrides: Record<string, unknown> = {}) {
+        sessionOrganizationProjection = {
+            schemaVersion: 1,
+            version: 1,
+            pinnedSessionIds: [],
+            pinsBySessionId: {},
+            foldersById: {},
+            folderAssignmentsBySessionId: {},
+            tagsById: {},
+            tagAssignmentsBySessionId: {},
+            orderEntriesByScopeKey: {},
+            labelsByLabelKey: {},
+            ...overrides,
+        };
+    }
+
+    function plainDisplay(value: Record<string, unknown>) {
+        return { t: 'plain', v: value };
     }
 
     it('shows loading while the route hydration is still in progress', async () => {
@@ -1234,8 +1270,13 @@ describe('/session/[id]/info', () => {
     it('surfaces pin and tag actions from the session view quick actions', async () => {
         mockServerId = 'server-b';
         setSessionOwnerServer('server-b');
-        pinnedSessionKeysV1 = [];
-        sessionTagsV1 = { 'server-b:session-1': ['existing'] };
+        pinnedSessionKeysV1 = ['server-b:legacy-pinned'];
+        sessionTagsV1 = { 'server-b:session-1': ['legacy'] };
+        resetSessionOrganizationProjection({
+            tagAssignmentsBySessionId: {
+                'session-1': ['existing'],
+            },
+        });
         mockSession = {
             id: 'session-1',
             active: false,
@@ -1253,7 +1294,14 @@ describe('/session/[id]/info', () => {
         const screen = await renderInfoScreen();
 
         await screen.pressByTestIdAsync('session-info-session-pin');
-        expect(setPinnedSessionKeysV1Spy).toHaveBeenCalledWith(['server-b:session-1']);
+        expect(setPinnedSessionKeysV1Spy).not.toHaveBeenCalled();
+        expect(sessionOrganizationOps.setSessionPin).toHaveBeenCalledWith({
+            credentials: { token: 'token' },
+            serverId: 'server-b',
+            serverUrl: 'https://server.example.test',
+            sessionId: 'session-1',
+            pinned: true,
+        });
 
         await screen.pressByTestIdAsync('session-info-session-tags-edit');
         expect(modalPromptSpy).toHaveBeenCalledWith(
@@ -1261,8 +1309,13 @@ describe('/session/[id]/info', () => {
             'sessionsList.selectionTagsPromptMessage',
             expect.objectContaining({ defaultValue: 'existing' }),
         );
-        expect(setSessionTagsV1Spy).toHaveBeenCalledWith({
-            'server-b:session-1': ['urgent', 'review'],
+        expect(setSessionTagsV1Spy).not.toHaveBeenCalled();
+        expect(sessionOrganizationOps.setSessionTagAssignments).toHaveBeenCalledWith({
+            credentials: { token: 'token' },
+            serverId: 'server-b',
+            serverUrl: 'https://server.example.test',
+            sessionId: 'session-1',
+            tags: ['urgent', 'review'],
         });
     });
 
@@ -1270,10 +1323,32 @@ describe('/session/[id]/info', () => {
         mockServerId = 'server-1';
         setSessionOwnerServer('server-1');
         sessionFoldersFeatureEnabled = true;
+        sessionFoldersV1 = { v: 1, folders: [] };
+        resetSessionOrganizationProjection({
+            foldersById: {
+                'folder-1': {
+                    folderId: 'folder-1',
+                    parentFolderId: null,
+                    sortKey: null,
+                    display: plainDisplay({
+                        name: 'Planning',
+                        workspace: {
+                            t: 'workspaceScope',
+                            serverId: 'server-1',
+                            machineId: 'machine-1',
+                            rootPath: '/repo',
+                        },
+                    }),
+                    archivedAt: null,
+                    createdAt: 1,
+                    updatedAt: 1,
+                },
+            },
+        });
         sessionFoldersV1 = {
             v: 1,
             folders: [{
-                id: 'folder-1',
+                id: 'legacy-folder',
                 workspace: {
                     t: 'workspaceScope',
                     serverId: 'server-1',
@@ -1281,7 +1356,7 @@ describe('/session/[id]/info', () => {
                     rootPath: '/repo',
                 },
                 parentId: null,
-                name: 'Planning',
+                name: 'Legacy',
                 createdAt: 1,
                 updatedAt: 1,
             }],
@@ -1319,8 +1394,11 @@ describe('/session/[id]/info', () => {
                 expect.objectContaining({ id: 'session-info-move-folder:folder-1', label: 'Planning' }),
             ]),
         }));
-        expect(setSessionFolderAssignmentSpy).toHaveBeenCalledWith(expect.objectContaining({
+        expect(setSessionFolderAssignmentSpy).not.toHaveBeenCalled();
+        expect(sessionOrganizationOps.setSessionFolderAssignment).toHaveBeenCalledWith(expect.objectContaining({
+            credentials: { token: 'token' },
             serverId: 'server-1',
+            serverUrl: 'https://server.example.test',
             sessionId: 'session-1',
             folderId: 'folder-1',
         }));
@@ -1363,6 +1441,28 @@ describe('/session/[id]/info', () => {
 
         expect(screen.findByTestId('session-info-mark-unread')).toBeNull();
         expect(screen.findByTestId('session-info-mark-read')).toBeNull();
+    });
+
+    it('hides pin quick action for archived sessions', async () => {
+        mockServerId = 'server-b';
+        setSessionOwnerServer('server-b');
+        mockSession = {
+            id: 'session-1',
+            active: false,
+            accessLevel: null,
+            owner: null,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            seq: 2,
+            lastViewedSessionSeq: 2,
+            archivedAt: 123,
+            metadata: {},
+        };
+
+        const screen = await renderInfoScreen();
+
+        expect(screen.findByTestId('session-info-session-pin')).toBeNull();
+        expect(screen.findByTestId('session-info-session-unpin')).toBeNull();
     });
 
     it('shows the session log path row when a sessionLogPath is present even when developer mode is disabled', async () => {
@@ -1633,7 +1733,17 @@ describe('/session/[id]/info', () => {
         mockServerId = 'server-b';
         setSessionOwnerServer('server-b');
         hideInactiveSessions = true;
-        pinnedSessionKeysV1 = ['server-b:session-1'];
+        pinnedSessionKeysV1 = [];
+        resetSessionOrganizationProjection({
+            pinnedSessionIds: ['session-1'],
+            pinsBySessionId: {
+                'session-1': {
+                    sessionId: 'session-1',
+                    sortKey: null,
+                    pinnedAt: 1,
+                },
+            },
+        });
         mockSession = {
             id: 'session-1',
             active: true,

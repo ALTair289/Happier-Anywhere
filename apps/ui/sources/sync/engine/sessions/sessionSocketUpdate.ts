@@ -8,8 +8,8 @@ import { markStreamingMessagesAppliedForSessionUiTelemetry } from '@/sync/runtim
 import { recordRealtimeFanoutSocketMessageRoute } from '@/sync/runtime/performance/realtimeFanoutTelemetry';
 import { syncPerformanceTelemetry } from '@/sync/runtime/syncPerformanceTelemetry';
 import {
-    storedSessionMessageContentAttentionImpact,
-    storedSessionMessageContentAttentionImpactOrNull,
+    storedSessionMessageAttentionImpact,
+    storedSessionMessageAttentionImpactOrNull,
 } from '@/sync/domains/messages/messageUserAttention';
 import type {
     SessionRealtimeProjectionCandidate,
@@ -136,6 +136,16 @@ type HandleSessionMessageSocketUpdateParams = {
         seq: number | null;
         messageId?: string;
     }) => void;
+    /**
+     * Invoked when a durable message update is routed away from full transcript apply
+     * (projection-only / stale marking) so side channels (e.g. SCM workspace-mutation
+     * detection) can consume the raw envelope without hydrating the transcript.
+     */
+    onTranscriptSkippedDurableMessage?: (params: Readonly<{
+        sessionId: string;
+        rawMessage: ApiMessage | undefined;
+        updateType: 'new-message' | 'message-updated';
+    }>) => void;
 };
 
 function normalizeMessageSeq(value: unknown): number | null {
@@ -191,7 +201,7 @@ function applyProjectionOnlySessionPatch(params: Readonly<{
     applyCacheOnlySessionProjectionPatch?: HandleSessionMessageSocketUpdateParams['applyCacheOnlySessionProjectionPatch'];
     fetchSessions: () => void;
 }>): void {
-    if (storedSessionMessageContentAttentionImpactOrNull(params.rawMessage?.content) === null) {
+    if (storedSessionMessageAttentionImpactOrNull(params.rawMessage) === null) {
         params.fetchSessions();
         return;
     }
@@ -270,7 +280,7 @@ function buildMessageSessionProjectionPatch(params: Readonly<{
     updateType: 'new-message' | 'message-updated';
 }>): SessionProjectionPatch {
     const currentSeq = params.session.seq ?? 0;
-    const attentionImpact = storedSessionMessageContentAttentionImpact(params.rawMessage?.content);
+    const attentionImpact = storedSessionMessageAttentionImpact(params.rawMessage);
     const nextSessionSeq = computeNextSessionSeqFromUpdate({
         currentSessionSeq: currentSeq,
         updateType: 'new-message',
@@ -408,6 +418,7 @@ async function handleSessionMessageSocketUpdate(params: HandleSessionMessageSock
             seq: normalizedMessageSeq,
             messageId: rawMessage?.id,
         });
+        params.onTranscriptSkippedDurableMessage?.({ sessionId, rawMessage, updateType });
         return;
     }
     if (realtimeProjectionMode === 'enabled' && routeDecision.route === 'markTranscriptStale') {
@@ -430,6 +441,7 @@ async function handleSessionMessageSocketUpdate(params: HandleSessionMessageSock
             seq: normalizedMessageSeq,
             messageId: rawMessage?.id,
         });
+        params.onTranscriptSkippedDurableMessage?.({ sessionId, rawMessage, updateType });
         return;
     }
 

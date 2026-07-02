@@ -3,7 +3,10 @@ import { t } from '@/text';
 import type { SessionListIndexItem } from '../sessionListIndex';
 import { resolveSessionRowForIndexItem, type ResolveSessionListIndexRow } from '../sessionListIndexSessionRows';
 import type { SessionListRenderableSession } from '../sessionListRenderable';
-import { projectSessionListPlacement } from '../placement/sessionListPlacementProjection';
+import {
+    projectSessionListPlacement,
+    resolveSessionListActionRequiredPlacementTimestamp,
+} from '../placement/sessionListPlacementProjection';
 import {
     normalizeSessionListPlacementKey,
     normalizeSessionListWorkingRetentionKeys,
@@ -113,11 +116,12 @@ function resolveAttentionCandidateFallbackTimestamp(
     row: SessionListRenderableSession,
     reason: SessionListAttentionPromotionReason,
 ): number {
-    const candidates = reason === 'action_required' || reason === 'permission_required'
-        ? [row.pendingRequestObservedAt]
-        : reason === 'failed'
-            ? [row.lastRuntimeIssue?.occurredAt, row.latestTurnStatusObservedAt]
-            : [row.latestReadyEventAt, row.latestTurnStatusObservedAt];
+    if (reason === 'action_required' || reason === 'permission_required') {
+        return resolveSessionListActionRequiredPlacementTimestamp(row) ?? 0;
+    }
+    const candidates = reason === 'failed'
+        ? [row.lastRuntimeIssue?.occurredAt, row.latestTurnStatusObservedAt]
+        : [row.latestReadyEventAt, row.latestTurnStatusObservedAt];
     for (const candidate of candidates) {
         if (typeof candidate === 'number' && Number.isFinite(candidate)) {
             return candidate;

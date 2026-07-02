@@ -5,8 +5,7 @@ export type SessionLiveTranscriptReason =
     | 'voiceTracked'
     | 'voiceReadback'
     | 'voiceBoundTarget'
-    | 'scmSameSession'
-    | 'scmSameProjectScope';
+    | 'scmSameSession';
 
 export type SessionRealtimeScmScope = Readonly<{
     sessionId?: string | null;
@@ -81,14 +80,13 @@ export function sessionNeedsLiveTranscript(input: SessionNeedsLiveTranscriptInpu
         pushReason(reasons, 'voiceBoundTarget');
     }
 
+    // Hidden sessions in the same canonical project scope intentionally do NOT become full
+    // transcript consumers: their SCM mutation signal is delivered from the durable projection
+    // path (see sessionScmMutationSignalWanted) so their transcripts stay projection-only.
     for (const scope of input.scmMountedScopes ?? []) {
         if (scope.needsMutationTranscript !== true) continue;
         if (normalizeText(scope.sessionId) === sessionId) {
             pushReason(reasons, 'scmSameSession');
-            continue;
-        }
-        if (isSameCanonicalProjectScope(input.sessionScmScope, scope)) {
-            pushReason(reasons, 'scmSameProjectScope');
         }
     }
 
@@ -97,4 +95,30 @@ export function sessionNeedsLiveTranscript(input: SessionNeedsLiveTranscriptInpu
 
 export function isSessionFullContentConsumerActive(input: SessionNeedsLiveTranscriptInput): boolean {
     return sessionNeedsLiveTranscript(input).active;
+}
+
+export type SessionScmMutationSignalInput = Readonly<{
+    sessionId: string;
+    sessionScmScope?: SessionRealtimeScmScope | null;
+    scmMountedScopes?: ReadonlyArray<SessionRealtimeScmScope>;
+}>;
+
+/**
+ * Whether a mounted SCM consumer wants workspace-mutation signals from this session.
+ *
+ * This intentionally covers hidden sessions in the same canonical project scope: instead of
+ * hydrating their full live transcript (decrypt + reducer + store apply per streaming tick),
+ * the realtime socket path feeds their durable messages to the workspace-mutation ingestion
+ * side channel when this predicate matches.
+ */
+export function sessionScmMutationSignalWanted(input: SessionScmMutationSignalInput): boolean {
+    const sessionId = normalizeText(input.sessionId);
+    if (!sessionId) return false;
+
+    for (const scope of input.scmMountedScopes ?? []) {
+        if (scope.needsMutationTranscript !== true) continue;
+        if (normalizeText(scope.sessionId) === sessionId) return true;
+        if (isSameCanonicalProjectScope(input.sessionScmScope, scope)) return true;
+    }
+    return false;
 }

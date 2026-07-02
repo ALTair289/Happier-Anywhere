@@ -10,8 +10,8 @@ type SyncSubmitRuntime = Pick<
 
 export function createSyncBackedSubmitPort(syncRuntime: SyncSubmitRuntime = defaultSync): SessionSubmitPort {
     return {
-        enqueuePendingMessage: (sessionId, text, displayText, metaOverrides) =>
-            syncRuntime.enqueuePendingMessage(sessionId, text, displayText, metaOverrides),
+        enqueuePendingMessage: (sessionId, text, displayText, metaOverrides, options) =>
+            syncRuntime.enqueuePendingMessage(sessionId, text, displayText, metaOverrides, options),
         sendMessage: (sessionId, text, displayText, metaOverrides, options) =>
             syncRuntime.sendMessage(sessionId, text, displayText, metaOverrides, options),
         abortSession: (sessionId) => syncRuntime.abortSession(sessionId),

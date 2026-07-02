@@ -10,6 +10,7 @@ function buildUpdate(params: {
     sid?: string;
     messageId: string;
     messageSeq: number;
+    attentionImpact?: { affectsUnread: boolean; affectsMeaningfulActivity: boolean };
     content?: { t: 'encrypted'; c: string } | { t: 'plain'; v: unknown };
 }): {
     id: string;
@@ -21,7 +22,8 @@ function buildUpdate(params: {
         message: {
             id: string;
             seq: number;
-                content: { t: 'encrypted'; c: string } | { t: 'plain'; v: unknown };
+            attentionImpact?: { affectsUnread: boolean; affectsMeaningfulActivity: boolean };
+            content: { t: 'encrypted'; c: string } | { t: 'plain'; v: unknown };
             localId: null;
             createdAt: number;
             updatedAt: number;
@@ -38,6 +40,7 @@ function buildUpdate(params: {
             message: {
                 id: params.messageId,
                 seq: params.messageSeq,
+                ...(params.attentionImpact ? { attentionImpact: params.attentionImpact } : {}),
                 content: params.content ?? { t: 'encrypted', c: 'x' },
                 localId: null,
                 createdAt: 1_000,
@@ -117,7 +120,12 @@ describe('handleNewMessageSocketUpdate', () => {
 
     it('preserves update message seq on normalized messages', async () => {
         const { params, applyMessages } = buildHarness({
-            updateData: buildUpdate({ sid: 's1', messageId: 'm2', messageSeq: 2 }),
+            updateData: buildUpdate({
+                sid: 's1',
+                messageId: 'm2',
+                messageSeq: 2,
+                attentionImpact: { affectsUnread: true, affectsMeaningfulActivity: true },
+            }),
             isSessionActivelyViewed: () => false,
             isSessionMessagesLoaded: () => true,
         });
@@ -130,7 +138,12 @@ describe('handleNewMessageSocketUpdate', () => {
 
     it('does not trigger catch-up when message seq is contiguous', async () => {
         const { params, fetchSessions, applyMessages, onMessageGapDetected, markSessionMaterializedMaxSeq } = buildHarness({
-            updateData: buildUpdate({ sid: 's1', messageId: 'm2', messageSeq: 2 }),
+            updateData: buildUpdate({
+                sid: 's1',
+                messageId: 'm2',
+                messageSeq: 2,
+                attentionImpact: { affectsUnread: true, affectsMeaningfulActivity: true },
+            }),
             getSessionMaterializedMaxSeq: () => 1,
             isSessionMessagesLoaded: () => true,
         });
@@ -151,7 +164,12 @@ describe('handleNewMessageSocketUpdate', () => {
             content: { role: 'user', content: { type: 'text', text: 'hi' } },
         }));
         const { params, fetchSessions, applyMessages, applySessions, onMessageGapDetected, markSessionMaterializedMaxSeq } = buildHarness({
-            updateData: buildUpdate({ sid: 's1', messageId: 'm2', messageSeq: 2 }),
+            updateData: buildUpdate({
+                sid: 's1',
+                messageId: 'm2',
+                messageSeq: 2,
+                attentionImpact: { affectsUnread: true, affectsMeaningfulActivity: true },
+            }),
             getSessionEncryption: () => ({ decryptMessage }),
             getSessionMaterializedMaxSeq: () => 2,
             isSessionMessagesLoaded: () => true,
@@ -177,7 +195,12 @@ describe('handleNewMessageSocketUpdate', () => {
         const markSessionKnownRemoteSeq = vi.fn();
         const markSessionTranscriptDeferred = vi.fn();
         const { params, applyMessages, applySessions, markSessionMaterializedMaxSeq } = buildHarness({
-            updateData: buildUpdate({ sid: 's1', messageId: 'm2', messageSeq: 2 }),
+            updateData: buildUpdate({
+                sid: 's1',
+                messageId: 'm2',
+                messageSeq: 2,
+                attentionImpact: { affectsUnread: true, affectsMeaningfulActivity: true },
+            }),
             getSession: () => ({
                 ...buildSession('s1'),
                 latestTurnStatus: 'in_progress',
@@ -219,7 +242,12 @@ describe('handleNewMessageSocketUpdate', () => {
         const markSessionKnownRemoteSeq = vi.fn();
         const markSessionTranscriptDeferred = vi.fn();
         const { params, applyMessages, applySessions, markSessionMaterializedMaxSeq } = buildHarness({
-            updateData: buildUpdate({ sid: 's1', messageId: 'm2', messageSeq: 2 }),
+            updateData: buildUpdate({
+                sid: 's1',
+                messageId: 'm2',
+                messageSeq: 2,
+                attentionImpact: { affectsUnread: true, affectsMeaningfulActivity: true },
+            }),
             getSession: () => ({
                 ...buildSession('s1'),
                 lastViewedSessionSeq: 1,
@@ -263,7 +291,12 @@ describe('handleNewMessageSocketUpdate', () => {
         const markSessionKnownRemoteSeq = vi.fn();
         const markSessionTranscriptDeferred = vi.fn();
         const { params, applyMessages, fetchSessions, markSessionMaterializedMaxSeq } = buildHarness({
-            updateData: buildUpdate({ sid: 's1', messageId: 'm2', messageSeq: 2 }),
+            updateData: buildUpdate({
+                sid: 's1',
+                messageId: 'm2',
+                messageSeq: 2,
+                attentionImpact: { affectsUnread: true, affectsMeaningfulActivity: true },
+            }),
             getSession: () => undefined,
             getSessionProjection: () => ({
                 latestTurnStatus: 'in_progress',
@@ -306,6 +339,12 @@ describe('handleNewMessageSocketUpdate', () => {
         const markSessionKnownRemoteSeq = vi.fn();
         const markSessionTranscriptDeferred = vi.fn();
         const { params, applyMessages, applySessions, markSessionMaterializedMaxSeq } = buildHarness({
+            updateData: buildUpdate({
+                sid: 's1',
+                messageId: 'm2',
+                messageSeq: 2,
+                attentionImpact: { affectsUnread: true, affectsMeaningfulActivity: true },
+            }),
             getSession: () => buildSession('s1'),
             getSessionEncryption: () => ({ decryptMessage }),
             isSessionActivelyViewed: () => false,

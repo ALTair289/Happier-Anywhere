@@ -16,6 +16,15 @@ function arePlainObjectValuesEqual(
     return true;
 }
 
+/**
+ * Deep value equality for small Session-owned values (latestUsage, todos, ...).
+ * Used by session writers to avoid producing a new Session identity when a
+ * derived value is value-identical to what the session already holds.
+ */
+export function areSessionValuesDeepEqual(previous: unknown, next: unknown): boolean {
+    return areSessionValueEqual(previous, next);
+}
+
 function areSessionValueEqual(previous: unknown, next: unknown): boolean {
     if (previous === next) return true;
     if (previous == null || next == null) return previous === next;
@@ -66,6 +75,7 @@ export function areStoredSessionsEqual(
         && (previous.archivedAt ?? null) === (next.archivedAt ?? null)
         && (previous.pendingVersion ?? null) === (next.pendingVersion ?? null)
         && (previous.pendingCount ?? null) === (next.pendingCount ?? null)
+        && (previous.pendingBlockedCount ?? null) === (next.pendingBlockedCount ?? null)
         && (previous.lastViewedSessionSeq ?? null) === (next.lastViewedSessionSeq ?? null)
         && (previous.pendingPermissionRequestCount ?? null) === (next.pendingPermissionRequestCount ?? null)
         && (previous.pendingUserActionRequestCount ?? null) === (next.pendingUserActionRequestCount ?? null)
@@ -73,6 +83,10 @@ export function areStoredSessionsEqual(
         && (previous.latestTurnId ?? null) === (next.latestTurnId ?? null)
         && (previous.latestTurnStatus ?? null) === (next.latestTurnStatus ?? null)
         && (previous.latestTurnStatusObservedAt ?? null) === (next.latestTurnStatusObservedAt ?? null)
+        && (previous.runtimeActivityActiveCount ?? null) === (next.runtimeActivityActiveCount ?? null)
+        && (previous.runtimeActivityObservedAt ?? null) === (next.runtimeActivityObservedAt ?? null)
+        && (previous.runtimeActivityExpiresAt ?? null) === (next.runtimeActivityExpiresAt ?? null)
+        && (previous.runtimeActivitySourceClass ?? null) === (next.runtimeActivitySourceClass ?? null)
         && areSessionValueEqual(previous.lastRuntimeIssue ?? null, next.lastRuntimeIssue ?? null)
         && areSessionValueEqual(previous.rollbackEligibleTurnStarts ?? null, next.rollbackEligibleTurnStarts ?? null)
         && (previous.latestReadyEventSeq ?? null) === (next.latestReadyEventSeq ?? null)

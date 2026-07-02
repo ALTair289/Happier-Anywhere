@@ -25,7 +25,9 @@ export type OrderedSessionListHydrationRows<Row extends SessionListHydrationPrio
     reasonById: ReadonlyMap<string, SessionListHydrationPriorityReason>;
 }>;
 
-function normalizeSessionIds(values: ReadonlySet<string> | readonly string[] | undefined): string[] {
+export function normalizeSessionListHydrationSessionIds(
+    values: ReadonlySet<string> | readonly string[] | undefined,
+): string[] {
     if (!values) return [];
     const rawValues = Array.isArray(values) ? values : Array.from(values);
     const seen = new Set<string>();
@@ -77,7 +79,7 @@ export function orderRowsForSessionListHydration<Row extends SessionListHydratio
     const reasonById = new Map<string, SessionListHydrationPriorityReason>();
     const orderedRows: Row[] = [];
     counts.required = appendRowsById({
-        ids: normalizeSessionIds(params.requiredSessionIds),
+        ids: normalizeSessionListHydrationSessionIds(params.requiredSessionIds),
         reason: 'required',
         reasonById,
         rowById,
@@ -85,7 +87,7 @@ export function orderRowsForSessionListHydration<Row extends SessionListHydratio
         out: orderedRows,
     });
     counts.route = appendRowsById({
-        ids: normalizeSessionIds(params.routeSessionIds),
+        ids: normalizeSessionListHydrationSessionIds(params.routeSessionIds),
         reason: 'route',
         reasonById,
         rowById,
@@ -93,7 +95,7 @@ export function orderRowsForSessionListHydration<Row extends SessionListHydratio
         out: orderedRows,
     });
     counts.active = appendRowsById({
-        ids: normalizeSessionIds(params.activeSessionIds),
+        ids: normalizeSessionListHydrationSessionIds(params.activeSessionIds),
         reason: 'active',
         reasonById,
         rowById,
@@ -101,7 +103,7 @@ export function orderRowsForSessionListHydration<Row extends SessionListHydratio
         out: orderedRows,
     });
     counts.priority = appendRowsById({
-        ids: normalizeSessionIds(params.prioritySessionIds),
+        ids: normalizeSessionListHydrationSessionIds(params.prioritySessionIds),
         reason: 'priority',
         reasonById,
         rowById,

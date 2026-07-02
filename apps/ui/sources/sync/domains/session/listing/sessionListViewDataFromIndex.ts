@@ -78,7 +78,7 @@ function canReuseSession(
     sourceSession: Extract<SessionListViewItem, { type: 'session' }>,
 ): boolean {
     const keepVisibleWhenInactive = item.keepVisibleWhenInactive === true;
-    return sourceSession.session.keepVisibleWhenInactive === keepVisibleWhenInactive
+    return (sourceSession.session.keepVisibleWhenInactive === true) === keepVisibleWhenInactive
         && areNullableValuesEqual(sourceSession.section, item.section)
         && areNullableValuesEqual(sourceSession.groupKey, item.groupKey)
         && areNullableValuesEqual(sourceSession.groupKind, item.groupKind)
@@ -102,7 +102,7 @@ function rehydrateSession(
         return sourceItem;
     }
     const keepVisibleWhenInactive = item.keepVisibleWhenInactive === true;
-    const session = sourceItem.session.keepVisibleWhenInactive === keepVisibleWhenInactive
+    const session = (sourceItem.session.keepVisibleWhenInactive === true) === keepVisibleWhenInactive
         ? sourceItem.session
         : {
             ...sourceItem.session,

@@ -1,4 +1,10 @@
-import type { PrimaryTurnStatusV1 } from '@happier-dev/protocol';
+import type {
+    PrimaryTurnStatusV1,
+    SessionRuntimeActivitySourceClassV1,
+} from '@happier-dev/protocol';
+import {
+    isSessionRuntimeActivityProjectionIdleForPendingDrain,
+} from '@happier-dev/protocol';
 
 export const SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS = 120_000;
 
@@ -9,6 +15,7 @@ export type SessionRuntimePresentationState = Readonly<{
     terminalStatus: PrimaryTurnStatusV1 | null;
     freshThinking: boolean;
     freshInProgress: boolean;
+    freshProviderRuntimeActivity: boolean;
     working: boolean;
     runtimeProjectionInProgress: boolean;
     runtimeActivelyWorking: boolean;
@@ -24,6 +31,10 @@ export type DeriveSessionRuntimePresentationStateInput = Readonly<{
     thinkingAt?: number | null;
     latestTurnStatus?: PrimaryTurnStatusV1 | null;
     latestTurnStatusObservedAt?: number | null;
+    runtimeActivityActiveCount?: number | null;
+    runtimeActivityObservedAt?: number | null;
+    runtimeActivityExpiresAt?: number | null;
+    runtimeActivitySourceClass?: SessionRuntimeActivitySourceClassV1 | null;
     meaningfulActivityAt?: number | null;
     hasPendingPermissionRequests?: boolean | null;
     hasPendingUserActionRequests?: boolean | null;
@@ -64,7 +75,8 @@ export function deriveSessionRuntimePresentationState(
         && isFreshTimestamp(thinkingAt, nowMs, SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS)
         && !blocksLegacyThinking;
     const freshInProgress = freshInProgressSignals.length > 0;
-    const working = freshInProgress || freshThinking;
+    const freshProviderRuntimeActivity = hasFreshProviderRuntimeActivity(input, nowMs);
+    const working = freshInProgress || freshThinking || freshProviderRuntimeActivity;
     const runtimeActivelyWorking = isLiveRuntime && working;
     const pendingRequestObservedAt = normalizeRuntimeStatusTimestamp(input.pendingRequestObservedAt);
     const hasFreshPendingRequest =
@@ -78,6 +90,7 @@ export function deriveSessionRuntimePresentationState(
         terminalStatus: hasTerminalMaterializedTurnStatus ? latestTurnStatus : null,
         freshThinking,
         freshInProgress,
+        freshProviderRuntimeActivity,
         working,
         runtimeProjectionInProgress: freshInProgress,
         runtimeActivelyWorking,
@@ -132,7 +145,26 @@ export function readSessionRuntimePresentationFreshnessTimestamps(
         const pendingRequestObservedAt = normalizeRuntimeStatusTimestamp(input.pendingRequestObservedAt);
         if (pendingRequestObservedAt !== null) timestamps.push(pendingRequestObservedAt);
     }
+    if (runtimeStatus.freshProviderRuntimeActivity) {
+        const runtimeActivityExpiresAt = normalizeRuntimeStatusTimestamp(input.runtimeActivityExpiresAt);
+        if (runtimeActivityExpiresAt !== null) {
+            timestamps.push(Math.max(1, runtimeActivityExpiresAt - SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS));
+        }
+    }
     return timestamps;
+}
+
+export function resolveNextSessionRuntimePresentationFreshnessAtMs(
+    input: DeriveSessionRuntimePresentationStateInput,
+    nowMs: number,
+): number | null {
+    const expirations: number[] = [];
+    for (const timestamp of readSessionRuntimePresentationFreshnessTimestamps(input, nowMs)) {
+        if (!isFreshTimestamp(timestamp, nowMs, SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS)) continue;
+        expirations.push(Math.trunc(timestamp) + SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS);
+    }
+    if (expirations.length === 0) return null;
+    return Math.min(...expirations);
 }
 
 export function resolveSessionRuntimePresenceFields(
@@ -165,4 +197,18 @@ function normalizeRuntimeStatusTimestamp(value: number | null | undefined): numb
     return typeof value === 'number' && Number.isFinite(value) && value > 0
         ? Math.trunc(value)
         : null;
+}
+
+function normalizeRuntimeActivityActiveCount(value: number | null | undefined): number {
+    return typeof value === 'number' && Number.isFinite(value)
+        ? Math.max(0, Math.trunc(value))
+        : 0;
+}
+
+function hasFreshProviderRuntimeActivity(
+    input: DeriveSessionRuntimePresentationStateInput,
+    nowMs: number,
+): boolean {
+    if (normalizeRuntimeActivityActiveCount(input.runtimeActivityActiveCount) <= 0) return false;
+    return !isSessionRuntimeActivityProjectionIdleForPendingDrain(input, nowMs);
 }

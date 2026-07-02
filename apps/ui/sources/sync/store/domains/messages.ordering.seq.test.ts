@@ -496,6 +496,65 @@ describe('messages domain: ordering', () => {
         expect(second?.text).toBe('second');
     });
 
+    it('clears matching local optimistic pending rows but keeps unresolved server pending rows when a transcript message commits with the same localId', () => {
+        const { get, domain } = createHarness({
+            sessions: {
+                s1: {
+                    id: 's1',
+                    createdAt: 1,
+                    active: false,
+                    activeAt: 1,
+                    metadataVersion: 1,
+                    metadata: null,
+                    permissionMode: null,
+                    permissionModeUpdatedAt: 0,
+                    agentState: null,
+                },
+            },
+            sessionPending: {
+                s1: {
+                    isLoaded: true,
+                    discarded: [],
+                    messages: [
+                        {
+                            id: 'pending-server-local-1',
+                            localId: 'local-1',
+                            source: 'server_pending',
+                            pendingDeliveryStatus: 'server_delivering',
+                            createdAt: 1_000,
+                            updatedAt: 1_000,
+                            text: 'accepted provider-owned prompt',
+                            rawRecord: { role: 'user', content: { type: 'text', text: 'accepted provider-owned prompt' } },
+                        },
+                        {
+                            id: 'pending-local-local-1',
+                            localId: 'local-1',
+                            source: 'local_outbound',
+                            createdAt: 1_000,
+                            updatedAt: 1_000,
+                            text: 'local optimistic duplicate',
+                            rawRecord: { role: 'user', content: { type: 'text', text: 'local optimistic duplicate' } },
+                        },
+                    ],
+                },
+            },
+        });
+
+        domain.applyMessages('s1', [
+            {
+                id: 'm1',
+                seq: 1,
+                localId: 'local-1',
+                createdAt: 2_000,
+                isSidechain: false,
+                role: 'user',
+                content: { type: 'text', text: 'committed elsewhere' },
+            } as any,
+        ]);
+
+        expect(get().sessionPending.s1.messages.map((message: any) => message.id)).toEqual(['pending-server-local-1']);
+    });
+
     it('tracks latest thinking activity time only when a thinking message changes', () => {
         const { get, domain } = createHarness({
             sessions: {

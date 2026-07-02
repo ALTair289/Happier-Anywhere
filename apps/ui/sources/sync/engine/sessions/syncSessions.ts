@@ -1,20 +1,24 @@
 import type { NormalizedMessage, RawRecord } from '@/sync/typesRaw';
-import type { SessionMessageRole } from '@happier-dev/protocol';
-import { normalizeRawMessage } from '@/sync/typesRaw';
 import { computeNextSessionSeqFromUpdate } from '@/sync/domains/session/sequence/realtimeSessionSeq';
 import type { AgentState, Metadata, Session } from '@/sync/domains/state/storageTypes';
 import { computeNextReadStateV1 } from '@/sync/domains/state/readStateV1';
-import type { ApiMessage, ApiSessionMessagesResponse } from '@/sync/api/types/apiTypes';
-import { ApiSessionMessagesResponseSchema } from '@/sync/api/types/apiTypes';
+import type { ApiSessionMessagesResponse } from '@/sync/api/types/apiTypes';
+import { buildSessionMessagesPath } from '@/sync/api/session/sessionMessagesApi';
 import { storage } from '@/sync/domains/state/storage';
 import type { Encryption } from '@/sync/encryption/encryption';
-import { readStoredSessionMessage } from '@/sync/runtime/readStoredSessionContent';
 import { writeSyncDebugLog } from '@/sync/runtime/syncDebugLogging';
 import { syncPerformanceTelemetry } from '@/sync/runtime/syncPerformanceTelemetry';
 import { nowServerMs } from '@/sync/runtime/time';
-import { getTaskLifecycleEventFromRawContent, type TaskLifecycleEvent } from './taskLifecycle';
+import type { TaskLifecycleEvent } from './taskLifecycle';
 import { parsePlainSessionAgentState, parsePlainSessionMetadata } from './parsePlainSessionPayload';
-import { isLegacyMemoryArtifactTranscriptRow } from './legacyMemoryArtifactTranscriptRows';
+import {
+    runSessionMessagesPagePipeline,
+    type SessionMessagesEncryption,
+    type SessionMessagesPageOptions,
+} from './sessionMessagesPagePipeline';
+import {
+    resolveSessionRuntimeActivityProjectionFields,
+} from './sessionRuntimeActivityProjection';
 export { handleNewMessageSocketUpdate } from './sessionSocketUpdate';
 export { handleMessageUpdatedSocketUpdate } from './sessionSocketUpdate';
 export { fetchAndApplySessions } from './sessionSnapshot';
@@ -38,24 +42,6 @@ function readFiniteTimestamp(value: unknown): number | undefined {
     return typeof value === 'number' && Number.isFinite(value)
         ? Math.trunc(value)
         : undefined;
-}
-
-function applySidechainScopeMetadata(params: Readonly<{
-    normalizedMessage: NormalizedMessage;
-    inputSidechainId: unknown;
-    scope?: 'main' | 'sidechain' | 'all';
-    requestedSidechainId?: string | null;
-}>): void {
-    const inputSidechainId = typeof params.inputSidechainId === 'string' && params.inputSidechainId.trim().length > 0
-        ? params.inputSidechainId.trim()
-        : null;
-    const requestedSidechainId = typeof params.requestedSidechainId === 'string' && params.requestedSidechainId.trim().length > 0
-        ? params.requestedSidechainId.trim()
-        : null;
-    const resolvedSidechainId = inputSidechainId ?? (params.scope === 'sidechain' ? requestedSidechainId : null);
-    if (!resolvedSidechainId) return;
-    params.normalizedMessage.sidechainId = resolvedSidechainId;
-    params.normalizedMessage.isSidechain = true;
 }
 
 type SessionEncryption = {
@@ -137,6 +123,7 @@ export function buildUpdatedSessionProjectionFromSocketUpdate(params: {
         ?? (typeof updateBody.thinking === 'boolean' || updateBody.active === false
             ? projectedActiveAt
             : session.thinkingAt);
+    const runtimeActivityProjection = resolveSessionRuntimeActivityProjectionFields(session, updateBody);
 
     return {
         ...session,
@@ -201,6 +188,10 @@ export function buildUpdatedSessionProjectionFromSocketUpdate(params: {
                 : updateBody.latestTurnStatusObservedAt === null
                     ? null
                     : session.latestTurnStatusObservedAt,
+        runtimeActivityActiveCount: runtimeActivityProjection.runtimeActivityActiveCount,
+        runtimeActivityObservedAt: runtimeActivityProjection.runtimeActivityObservedAt,
+        runtimeActivityExpiresAt: runtimeActivityProjection.runtimeActivityExpiresAt,
+        runtimeActivitySourceClass: runtimeActivityProjection.runtimeActivitySourceClass,
         lastRuntimeIssue:
             updateBody.lastRuntimeIssue === null
             || (updateBody.lastRuntimeIssue && typeof updateBody.lastRuntimeIssue === 'object')
@@ -367,247 +358,6 @@ export async function repairInvalidReadStateV1(params: {
     }
 }
 
-type SessionMessagesEncryption = {
-    decryptMessages: (messages: ApiMessage[]) => Promise<Array<DecryptedSessionMessage | null>>;
-};
-
-type SessionMessagesEncryptionMode = 'e2ee' | 'plain';
-
-type DecryptedSessionMessage = Readonly<{
-    id: string;
-    seq?: number | null;
-    localId: string | null;
-    messageRole?: SessionMessageRole | null;
-    content: unknown | null;
-    createdAt: number;
-}>;
-
-type MessageDecryptBatchOptions = {
-    initialMessageDecryptBatchSize?: number;
-    messageDecryptBatchSize?: number;
-    messageDecryptYieldDelayMs?: number;
-    yieldToMessageDecryptBatch?: (delayMs: number) => Promise<void>;
-};
-
-type SessionMessagesPageOptions = MessageDecryptBatchOptions & {
-    sessionEncryptionMode?: SessionMessagesEncryptionMode;
-};
-
-const DEFAULT_MESSAGE_DECRYPT_BATCH_SIZE = 8;
-const DEFAULT_INITIAL_MESSAGE_DECRYPT_BATCH_SIZE = 64;
-
-const plainSessionMessagesEncryption: SessionMessagesEncryption = {
-    decryptMessages: async (messages) => Promise.all(
-        messages.map((message) => readStoredSessionMessage({ message })),
-    ),
-};
-
-function normalizePositiveInteger(value: number | undefined, fallback: number): number {
-    if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
-    return Math.max(1, Math.trunc(value));
-}
-
-function normalizeNonNegativeInteger(value: number | undefined, fallback: number): number {
-    if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
-    return Math.max(0, Math.trunc(value));
-}
-
-function resolveMessageDecryptBatchSize(kind: MessagePageTelemetryKind, options: MessageDecryptBatchOptions): number {
-    if (kind === 'initial') {
-        return normalizePositiveInteger(
-            options.initialMessageDecryptBatchSize ?? options.messageDecryptBatchSize,
-            DEFAULT_INITIAL_MESSAGE_DECRYPT_BATCH_SIZE,
-        );
-    }
-    return normalizePositiveInteger(options.messageDecryptBatchSize, DEFAULT_MESSAGE_DECRYPT_BATCH_SIZE);
-}
-
-function yieldToMessageDecryptBatch(delayMs: number): Promise<void> {
-    return new Promise((resolve) => {
-        setTimeout(resolve, delayMs);
-    });
-}
-
-function resolveSessionMessagesEncryption(params: Readonly<{
-    sessionId: string;
-    sessionEncryptionMode?: SessionMessagesEncryptionMode;
-    getSessionEncryption: (sessionId: string) => SessionMessagesEncryption | null;
-}>): SessionMessagesEncryption | null {
-    if (params.sessionEncryptionMode === 'plain') {
-        return plainSessionMessagesEncryption;
-    }
-    return params.getSessionEncryption(params.sessionId);
-}
-
-type MessagePageTelemetryKind = 'initial' | 'older' | 'newer';
-type MessagePageScope = 'main' | 'sidechain' | 'all';
-
-function messagePageTelemetryFields(
-    kind: MessagePageTelemetryKind,
-    fields: Record<string, number>,
-): Record<string, number> {
-    return {
-        initial: kind === 'initial' ? 1 : 0,
-        older: kind === 'older' ? 1 : 0,
-        newer: kind === 'newer' ? 1 : 0,
-        ...fields,
-    };
-}
-
-function messagePageScopeTelemetryFields(
-    kind: MessagePageTelemetryKind,
-    scope: MessagePageScope,
-    sidechainId: string | null,
-    fields: Record<string, number> = {},
-): Record<string, number> {
-    return messagePageTelemetryFields(kind, {
-        scopeMain: scope === 'main' ? 1 : 0,
-        scopeSidechain: scope === 'sidechain' ? 1 : 0,
-        scopeAll: scope === 'all' ? 1 : 0,
-        hasSidechainId: sidechainId ? 1 : 0,
-        ...fields,
-    });
-}
-
-async function fetchSessionMessagesPageWithTelemetry(params: Readonly<{
-    kind: MessagePageTelemetryKind;
-    request: (path: string) => Promise<Response>;
-    path: string;
-    scope: MessagePageScope;
-    sidechainId: string | null;
-    limit?: number;
-    beforeSeq?: number;
-    afterSeq?: number;
-}>): Promise<ApiSessionMessagesResponse> {
-    const rangeFields: Record<string, number> = {};
-    if (typeof params.limit === 'number' && Number.isFinite(params.limit)) {
-        rangeFields.limit = Math.trunc(params.limit);
-    }
-    if (typeof params.beforeSeq === 'number' && Number.isFinite(params.beforeSeq)) {
-        rangeFields.beforeSeq = Math.trunc(params.beforeSeq);
-    }
-    if (typeof params.afterSeq === 'number' && Number.isFinite(params.afterSeq)) {
-        rangeFields.afterSeq = Math.trunc(params.afterSeq);
-    }
-
-    const requestFields = messagePageScopeTelemetryFields(
-        params.kind,
-        params.scope,
-        params.sidechainId,
-        rangeFields,
-    );
-    const response = await syncPerformanceTelemetry.measureAsync(
-        'sync.sessions.messages.request',
-        requestFields,
-        () => params.request(params.path),
-    );
-    const json = await syncPerformanceTelemetry.measureAsync(
-        'sync.sessions.messages.responseJson',
-        {
-            ...requestFields,
-            status: typeof response.status === 'number' && Number.isFinite(response.status)
-                ? Math.trunc(response.status)
-                : 0,
-        },
-        () => response.json(),
-    );
-    const parsed = syncPerformanceTelemetry.measure(
-        'sync.sessions.messages.parseResponse',
-        requestFields,
-        () => ApiSessionMessagesResponseSchema.safeParse(json),
-    );
-    if (!parsed.success) {
-        throw new Error(`Invalid /messages response: ${parsed.error.message}`);
-    }
-    return parsed.data;
-}
-
-function recordMessagePageTelemetry(kind: MessagePageTelemetryKind, fetched: number): void {
-    syncPerformanceTelemetry.count('sync.sessions.messages.page', messagePageTelemetryFields(kind, { fetched }));
-}
-
-function recordMessageDedupeTelemetry(kind: MessagePageTelemetryKind, fetched: number, toDecrypt: number): void {
-    syncPerformanceTelemetry.count('sync.sessions.messages.dedupe', messagePageTelemetryFields(kind, {
-        fetched,
-        toDecrypt,
-        skipped: Math.max(0, fetched - toDecrypt),
-    }));
-}
-
-async function decryptMessagesInBatchesWithTelemetry(
-    kind: MessagePageTelemetryKind,
-    encryption: SessionMessagesEncryption,
-    messages: ApiMessage[],
-    options: MessageDecryptBatchOptions,
-): Promise<Array<DecryptedSessionMessage | null>> {
-    const batchSize = resolveMessageDecryptBatchSize(kind, options);
-    return syncPerformanceTelemetry.measureAsync(
-        'sync.sessions.messages.decrypt',
-        messagePageTelemetryFields(kind, {
-            messages: messages.length,
-            batchSize,
-            yieldDelayMs: normalizeNonNegativeInteger(options.messageDecryptYieldDelayMs, 0),
-        }),
-        () => decryptMessagesInBatches(encryption, messages, options, batchSize),
-    );
-}
-
-function recordMessageApplyTelemetry(
-    kind: MessagePageTelemetryKind,
-    decrypted: number,
-    sessionId: string,
-    normalizedMessages: NormalizedMessage[],
-    applyMessages: (sessionId: string, messages: NormalizedMessage[]) => void,
-): void {
-    syncPerformanceTelemetry.measure(
-        'sync.sessions.messages.apply',
-        messagePageTelemetryFields(kind, {
-            decrypted,
-            normalized: normalizedMessages.length,
-        }),
-        () => applyMessages(sessionId, normalizedMessages),
-    );
-}
-
-function measureMessageNormalization<T>(
-    kind: MessagePageTelemetryKind,
-    decrypted: number,
-    normalize: () => T,
-): T {
-    return syncPerformanceTelemetry.measure(
-        'sync.sessions.messages.normalize',
-        messagePageTelemetryFields(kind, { decrypted }),
-        normalize,
-    );
-}
-
-async function decryptMessagesInBatches(
-    encryption: SessionMessagesEncryption,
-    messages: ApiMessage[],
-    options: MessageDecryptBatchOptions,
-    batchSize: number,
-): Promise<Array<DecryptedSessionMessage | null>> {
-    if (messages.length === 0) return [];
-
-    if (batchSize >= messages.length) {
-        return encryption.decryptMessages(messages);
-    }
-
-    const yieldDelayMs = normalizeNonNegativeInteger(options.messageDecryptYieldDelayMs, 0);
-    const yieldBetweenBatches = options.yieldToMessageDecryptBatch ?? yieldToMessageDecryptBatch;
-    const decryptedMessages: Array<DecryptedSessionMessage | null> = [];
-
-    for (let start = 0; start < messages.length; start += batchSize) {
-        if (start > 0) {
-            await yieldBetweenBatches(yieldDelayMs);
-        }
-        const batch = messages.slice(start, start + batchSize);
-        decryptedMessages.push(...await encryption.decryptMessages(batch));
-    }
-
-    return decryptedMessages;
-}
-
 export async function fetchAndApplyMessages(params: {
     sessionId: string;
     scope?: 'main' | 'sidechain' | 'all';
@@ -634,151 +384,60 @@ export async function fetchAndApplyMessages(params: {
             || (typeof localStorage !== 'undefined' && localStorage.getItem('happier.debug.messageDecrypt') === '1')
         );
 
-    // Get encryption - may not be ready yet if session was just created
-    // Throwing an error triggers backoff retry in InvalidateSync
-    const encryption = resolveSessionMessagesEncryption(params);
-    if (!encryption) {
-        if (params.isSessionKnown?.(sessionId) === false) {
-            writeSyncDebugLog(log, `💬 fetchMessages: Session ${sessionId} is not known on this server; skipping message fetch`);
-            return;
-        }
-        writeSyncDebugLog(log, `💬 fetchMessages: Session encryption not ready for ${sessionId}, will retry`);
-        throw new Error(`Session encryption not ready for ${sessionId}`);
-    }
-
-    // Request (apiSocket.request calibrates server time best-effort from the HTTP Date header)
     const scope = params.scope ?? 'main';
     const sidechainId = typeof params.sidechainId === 'string' && params.sidechainId.trim().length > 0 ? params.sidechainId.trim() : null;
     if (scope === 'sidechain' && sidechainId === null) {
         throw new Error('fetchMessages: sidechainId is required when scope=sidechain');
     }
-    const qs = new URLSearchParams();
-    if (scope !== 'all') {
-        qs.set('scope', scope);
-    } else {
-        qs.set('scope', 'all');
-    }
-    if (scope === 'sidechain' && sidechainId) {
-        qs.set('sidechainId', sidechainId);
-    }
-    const data = await fetchSessionMessagesPageWithTelemetry({
-        kind: 'initial',
-        request,
-        path: `/v1/sessions/${sessionId}/messages?${qs.toString()}`,
+    const requestPath = buildSessionMessagesPath({
+        sessionId,
         scope,
         sidechainId,
     });
-    params.onMessagesPage?.(data);
-    recordMessagePageTelemetry('initial', data.messages.length);
 
-    // Collect existing messages
-    let existingMessages = sessionReceivedMessages.get(sessionId);
-    if (!existingMessages) {
-        existingMessages = new Map<string, number>();
-        sessionReceivedMessages.set(sessionId, existingMessages);
-    }
-
-    // Decrypt and normalize messages
-    const normalizedMessages: NormalizedMessage[] = [];
-
-    // Filter out existing messages and prepare for batch decryption
-    const messagesToDecrypt: ApiMessage[] = [];
-    for (const msg of [...data.messages].reverse()) {
-        const msgUpdatedAt = typeof msg.updatedAt === 'number' ? msg.updatedAt : msg.createdAt;
-        const existingUpdatedAt = existingMessages.get(msg.id);
-        if (existingUpdatedAt === undefined || msgUpdatedAt > existingUpdatedAt) {
-            messagesToDecrypt.push(msg);
-        }
-    }
-    recordMessageDedupeTelemetry('initial', data.messages.length, messagesToDecrypt.length);
-
-    const decryptedMessages = await decryptMessagesInBatchesWithTelemetry('initial', encryption, messagesToDecrypt, params);
-
-    // Process decrypted messages
-    const debugDecryptStats = DEBUG_MESSAGE_DECRYPT
-        ? {
-            fetched: data.messages.length,
-            toDecrypt: messagesToDecrypt.length,
-            decryptedEntries: decryptedMessages.length,
-            decryptedWithContent: 0,
-            normalized: 0,
-        }
-        : null;
-
-    measureMessageNormalization('initial', decryptedMessages.length, () => {
-        for (let i = 0; i < decryptedMessages.length; i++) {
-            const decrypted = decryptedMessages[i];
-            const inputMessage = messagesToDecrypt[i];
-            const inputWasEncrypted = inputMessage?.content?.t === 'encrypted';
-            if (decrypted) {
-                if (debugDecryptStats && decrypted.content !== null) {
-                    debugDecryptStats.decryptedWithContent++;
-                }
-
-                const inputUpdatedAt = inputMessage
-                    ? (typeof inputMessage.updatedAt === 'number' ? inputMessage.updatedAt : inputMessage.createdAt)
-                    : decrypted.createdAt;
-                // IMPORTANT: Do not mark encrypted messages as "received" when decryption failed.
-                // Otherwise a keyless device (or a device with delayed key init) can permanently
-                // treat encrypted history as empty until runtime state is fully reset.
-                if (decrypted.content !== null || !inputWasEncrypted) {
-                    existingMessages.set(decrypted.id, inputUpdatedAt);
-                }
-
-                // Expected: encrypted history can be present even when this device lacks the secret key.
-                // In that case decryption yields null and we must not attempt to normalize/log it.
-                if (inputWasEncrypted && decrypted.content === null) {
-                    continue;
-                }
-                if (isLegacyMemoryArtifactTranscriptRow(decrypted)) {
-                    continue;
-                }
-
-                const lifecycleEvent = getTaskLifecycleEventFromRawContent(decrypted.content, decrypted.createdAt);
-                if (lifecycleEvent) {
-                    params.onTaskLifecycleEvent?.(lifecycleEvent);
-                }
-                // Normalize the decrypted message
-                const normalized = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content, {
-                    seq: decrypted.seq ?? undefined,
-                    messageRole: decrypted.messageRole ?? undefined,
-                });
-                if (normalized) {
-                    applySidechainScopeMetadata({
-                        normalizedMessage: normalized,
-                        inputSidechainId: inputMessage?.sidechainId,
-                        scope: params.scope,
-                        requestedSidechainId: params.sidechainId ?? null,
-                    });
-                    normalizedMessages.push(normalized);
-                }
-            }
-        }
+    const result = await runSessionMessagesPagePipeline({
+        sessionId,
+        purpose: 'initial',
+        page: {
+            direction: 'initial',
+            requestPath,
+            scope,
+            sidechainId,
+        },
+        lifecyclePolicy: 'emit',
+        getSessionEncryption: params.getSessionEncryption,
+        isSessionKnown: params.isSessionKnown,
+        request,
+        sessionReceivedMessages,
+        applyMessages,
+        onTaskLifecycleEvent: params.onTaskLifecycleEvent,
+        onMessagesPage: params.onMessagesPage,
+        log,
+        sessionEncryptionMode: params.sessionEncryptionMode,
+        initialMessageDecryptBatchSize: params.initialMessageDecryptBatchSize,
+        messageDecryptBatchSize: params.messageDecryptBatchSize,
+        messageDecryptYieldDelayMs: params.messageDecryptYieldDelayMs,
+        yieldToMessageDecryptBatch: params.yieldToMessageDecryptBatch,
     });
+    if (result.skippedMissingSession) {
+        return;
+    }
 
-    if (debugDecryptStats) {
-        debugDecryptStats.normalized = normalizedMessages.length;
-        const sample = messagesToDecrypt[0];
-        const sampleCipherPreview =
-            sample && sample.content?.t === 'encrypted' && typeof sample.content.c === 'string'
-                ? `${sample.content.c.slice(0, 24)}…(${sample.content.c.length})`
-                : null;
-
+    if (DEBUG_MESSAGE_DECRYPT) {
+        const stats = result.debugDecryptStats;
+        const sample = stats.sample;
         log.log(
             `[debug] fetchMessages decrypt stats for ${sessionId}: `
-                + `fetched=${debugDecryptStats.fetched} `
-                + `toDecrypt=${debugDecryptStats.toDecrypt} `
-                + `decryptedWithContent=${debugDecryptStats.decryptedWithContent} `
-                + `normalized=${debugDecryptStats.normalized}`
-                + (sample ? ` sample={id:${sample.id} seq:${sample.seq} cipher:${sampleCipherPreview}}` : '')
+                + `fetched=${stats.fetched} `
+                + `toDecrypt=${stats.toDecrypt} `
+                + `decryptedWithContent=${stats.decryptedWithContent} `
+                + `normalized=${stats.normalized}`
+                + (sample ? ` sample={id:${sample.id} seq:${sample.seq} cipher:${sample.cipherPreview}}` : '')
         );
     }
 
-    // Apply to storage
-    recordMessageApplyTelemetry('initial', decryptedMessages.length, sessionId, normalizedMessages, applyMessages);
-
     markMessagesLoaded(sessionId);
-    writeSyncDebugLog(log, `💬 fetchMessages completed for session ${sessionId} - processed ${normalizedMessages.length} messages`);
+    writeSyncDebugLog(log, `💬 fetchMessages completed for session ${sessionId} - processed ${result.applied} messages`);
 }
 
 export async function fetchAndApplyOlderMessages(params: {
@@ -799,107 +458,47 @@ export async function fetchAndApplyOlderMessages(params: {
 } & SessionMessagesPageOptions): Promise<{ applied: number; page: ApiSessionMessagesResponse }> {
     const { sessionId, beforeSeq, limit, request, sessionReceivedMessages, applyMessages, log } = params;
 
-    // Get encryption - may not be ready yet if session was just created
-    const encryption = resolveSessionMessagesEncryption(params);
-    if (!encryption) {
-        if (params.isSessionKnown?.(sessionId) === false) {
-            writeSyncDebugLog(log, `💬 fetchOlderMessages: Session ${sessionId} is not known on this server; skipping page fetch`);
-            return {
-                applied: 0,
-                page: {
-                    messages: [],
-                    hasMore: false,
-                    nextBeforeSeq: null,
-                },
-            };
-        }
-        throw new Error(`Session encryption not ready for ${sessionId}`);
-    }
-
     const scope = params.scope ?? 'main';
     const sidechainId = typeof params.sidechainId === 'string' && params.sidechainId.trim().length > 0 ? params.sidechainId.trim() : null;
     if (scope === 'sidechain' && sidechainId === null) {
         throw new Error('fetchOlderMessages: sidechainId is required when scope=sidechain');
     }
 
-    const qs = new URLSearchParams({ beforeSeq: String(beforeSeq), limit: String(limit), scope });
-    if (scope === 'sidechain' && sidechainId) {
-        qs.set('sidechainId', sidechainId);
-    }
-    const data = await fetchSessionMessagesPageWithTelemetry({
-        kind: 'older',
-        request,
-        path: `/v1/sessions/${sessionId}/messages?${qs.toString()}`,
+    const requestPath = buildSessionMessagesPath({
+        sessionId,
         scope,
         sidechainId,
-        limit,
         beforeSeq,
+        limit,
     });
-    params.onMessagesPage?.(data);
-    recordMessagePageTelemetry('older', data.messages.length);
-
-    let existingMessages = sessionReceivedMessages.get(sessionId);
-    if (!existingMessages) {
-        existingMessages = new Map<string, number>();
-        sessionReceivedMessages.set(sessionId, existingMessages);
-    }
-
-    const messagesToDecrypt: ApiMessage[] = [];
-    for (const msg of [...data.messages].reverse()) {
-        const msgUpdatedAt = typeof msg.updatedAt === 'number' ? msg.updatedAt : msg.createdAt;
-        const existingUpdatedAt = existingMessages.get(msg.id);
-        if (existingUpdatedAt === undefined || msgUpdatedAt > existingUpdatedAt) {
-            messagesToDecrypt.push(msg);
-        }
-    }
-    recordMessageDedupeTelemetry('older', data.messages.length, messagesToDecrypt.length);
-
-    const decryptedMessages = await decryptMessagesInBatchesWithTelemetry('older', encryption, messagesToDecrypt, params);
-
-    const normalizedMessages: NormalizedMessage[] = [];
-    measureMessageNormalization('older', decryptedMessages.length, () => {
-        for (let i = 0; i < decryptedMessages.length; i++) {
-            const decrypted = decryptedMessages[i];
-            if (decrypted) {
-                const inputMessage = messagesToDecrypt[i];
-                const inputWasEncrypted = inputMessage?.content?.t === 'encrypted';
-
-                const inputUpdatedAt = inputMessage
-                    ? (typeof inputMessage.updatedAt === 'number' ? inputMessage.updatedAt : inputMessage.createdAt)
-                    : decrypted.createdAt;
-                if (decrypted.content !== null || !inputWasEncrypted) {
-                    existingMessages.set(decrypted.id, inputUpdatedAt);
-                }
-                if (inputWasEncrypted && decrypted.content === null) {
-                    continue;
-                }
-                if (isLegacyMemoryArtifactTranscriptRow(decrypted)) {
-                    continue;
-                }
-                // Older pages can include historical lifecycle markers (task_complete/turn_aborted) that
-                // should not clobber current in-flight UI state. Lifecycle handling is reserved for
-                // newer/socket flows.
-                const normalized = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content, {
-                    seq: decrypted.seq ?? undefined,
-                    messageRole: decrypted.messageRole ?? undefined,
-                });
-                if (normalized) {
-                    applySidechainScopeMetadata({
-                        normalizedMessage: normalized,
-                        inputSidechainId: inputMessage?.sidechainId,
-                        scope,
-                        requestedSidechainId: sidechainId,
-                    });
-                    normalizedMessages.push(normalized);
-                }
-            }
-        }
+    const result = await runSessionMessagesPagePipeline({
+        sessionId,
+        purpose: 'older',
+        page: {
+            direction: 'older',
+            requestPath,
+            scope,
+            sidechainId,
+            beforeSeq,
+            limit,
+        },
+        lifecyclePolicy: 'suppress',
+        getSessionEncryption: params.getSessionEncryption,
+        isSessionKnown: params.isSessionKnown,
+        request,
+        sessionReceivedMessages,
+        applyMessages,
+        onMessagesPage: params.onMessagesPage,
+        onNormalizedMessages: params.onNormalizedMessages,
+        log,
+        sessionEncryptionMode: params.sessionEncryptionMode,
+        initialMessageDecryptBatchSize: params.initialMessageDecryptBatchSize,
+        messageDecryptBatchSize: params.messageDecryptBatchSize,
+        messageDecryptYieldDelayMs: params.messageDecryptYieldDelayMs,
+        yieldToMessageDecryptBatch: params.yieldToMessageDecryptBatch,
     });
-
-    params.onNormalizedMessages?.(normalizedMessages);
-    recordMessageApplyTelemetry('older', decryptedMessages.length, sessionId, normalizedMessages, applyMessages);
-    writeSyncDebugLog(log, `💬 fetchOlderMessages completed for session ${sessionId} - applied ${normalizedMessages.length} messages`);
-    return { applied: normalizedMessages.length, page: data };
+    writeSyncDebugLog(log, `💬 fetchOlderMessages completed for session ${sessionId} - applied ${result.applied} messages`);
+    return { applied: result.applied, page: result.page };
 }
 
 export async function fetchAndApplyNewerMessages(params: {
@@ -920,105 +519,46 @@ export async function fetchAndApplyNewerMessages(params: {
 } & SessionMessagesPageOptions): Promise<{ applied: number; page: ApiSessionMessagesResponse }> {
     const { sessionId, afterSeq, limit, request, sessionReceivedMessages, applyMessages, log } = params;
 
-    const encryption = resolveSessionMessagesEncryption(params);
-    if (!encryption) {
-        if (params.isSessionKnown?.(sessionId) === false) {
-            writeSyncDebugLog(log, `💬 fetchNewerMessages: Session ${sessionId} is not known on this server; skipping page fetch`);
-            return {
-                applied: 0,
-                page: {
-                    messages: [],
-                    nextAfterSeq: null,
-                },
-            };
-        }
-        throw new Error(`Session encryption not ready for ${sessionId}`);
-    }
-
     const scope = params.scope ?? 'main';
     const sidechainId = typeof params.sidechainId === 'string' && params.sidechainId.trim().length > 0 ? params.sidechainId.trim() : null;
     if (scope === 'sidechain' && sidechainId === null) {
         throw new Error('fetchNewerMessages: sidechainId is required when scope=sidechain');
     }
 
-    const qs = new URLSearchParams({ afterSeq: String(afterSeq), limit: String(limit), scope });
-    if (scope === 'sidechain' && sidechainId) {
-        qs.set('sidechainId', sidechainId);
-    }
-    const data = await fetchSessionMessagesPageWithTelemetry({
-        kind: 'newer',
-        request,
-        path: `/v1/sessions/${sessionId}/messages?${qs.toString()}`,
+    const requestPath = buildSessionMessagesPath({
+        sessionId,
         scope,
         sidechainId,
-        limit,
         afterSeq,
+        limit,
     });
-    params.onMessagesPage?.(data);
-    recordMessagePageTelemetry('newer', data.messages.length);
-
-    let existingMessages = sessionReceivedMessages.get(sessionId);
-    if (!existingMessages) {
-        existingMessages = new Map<string, number>();
-        sessionReceivedMessages.set(sessionId, existingMessages);
-    }
-
-    // Server returns ascending order in forward mode; decrypt/apply in that same order.
-    const messagesToDecrypt: ApiMessage[] = [];
-    for (const msg of data.messages) {
-        const msgUpdatedAt = typeof msg.updatedAt === 'number' ? msg.updatedAt : msg.createdAt;
-        const existingUpdatedAt = existingMessages.get(msg.id);
-        if (existingUpdatedAt === undefined || msgUpdatedAt > existingUpdatedAt) {
-            messagesToDecrypt.push(msg);
-        }
-    }
-    recordMessageDedupeTelemetry('newer', data.messages.length, messagesToDecrypt.length);
-
-    const decryptedMessages = await decryptMessagesInBatchesWithTelemetry('newer', encryption, messagesToDecrypt, params);
-
-    const normalizedMessages: NormalizedMessage[] = [];
-    measureMessageNormalization('newer', decryptedMessages.length, () => {
-        for (let i = 0; i < decryptedMessages.length; i++) {
-            const decrypted = decryptedMessages[i];
-            if (decrypted) {
-                const inputMessage = messagesToDecrypt[i];
-                const inputWasEncrypted = inputMessage?.content?.t === 'encrypted';
-
-                const inputUpdatedAt = inputMessage
-                    ? (typeof inputMessage.updatedAt === 'number' ? inputMessage.updatedAt : inputMessage.createdAt)
-                    : decrypted.createdAt;
-                if (decrypted.content !== null || !inputWasEncrypted) {
-                    existingMessages.set(decrypted.id, inputUpdatedAt);
-                }
-                if (inputWasEncrypted && decrypted.content === null) {
-                    continue;
-                }
-                if (isLegacyMemoryArtifactTranscriptRow(decrypted)) {
-                    continue;
-                }
-                const lifecycleEvent = getTaskLifecycleEventFromRawContent(decrypted.content, decrypted.createdAt);
-                if (lifecycleEvent) {
-                    params.onTaskLifecycleEvent?.(lifecycleEvent);
-                }
-                const normalized = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content, {
-                    seq: decrypted.seq ?? undefined,
-                    messageRole: decrypted.messageRole ?? undefined,
-                });
-                if (normalized) {
-                    applySidechainScopeMetadata({
-                        normalizedMessage: normalized,
-                        inputSidechainId: inputMessage?.sidechainId,
-                        scope,
-                        requestedSidechainId: sidechainId,
-                    });
-                    normalizedMessages.push(normalized);
-                }
-            }
-        }
+    const result = await runSessionMessagesPagePipeline({
+        sessionId,
+        purpose: 'newer',
+        page: {
+            direction: 'newer',
+            requestPath,
+            scope,
+            sidechainId,
+            afterSeq,
+            limit,
+        },
+        lifecyclePolicy: 'emit',
+        getSessionEncryption: params.getSessionEncryption,
+        isSessionKnown: params.isSessionKnown,
+        request,
+        sessionReceivedMessages,
+        applyMessages,
+        onTaskLifecycleEvent: params.onTaskLifecycleEvent,
+        onMessagesPage: params.onMessagesPage,
+        onNormalizedMessages: params.onNormalizedMessages,
+        log,
+        sessionEncryptionMode: params.sessionEncryptionMode,
+        initialMessageDecryptBatchSize: params.initialMessageDecryptBatchSize,
+        messageDecryptBatchSize: params.messageDecryptBatchSize,
+        messageDecryptYieldDelayMs: params.messageDecryptYieldDelayMs,
+        yieldToMessageDecryptBatch: params.yieldToMessageDecryptBatch,
     });
-
-    params.onNormalizedMessages?.(normalizedMessages);
-    recordMessageApplyTelemetry('newer', decryptedMessages.length, sessionId, normalizedMessages, applyMessages);
-    writeSyncDebugLog(log, `💬 fetchNewerMessages completed for session ${sessionId} - applied ${normalizedMessages.length} messages`);
-    return { applied: normalizedMessages.length, page: data };
+    writeSyncDebugLog(log, `💬 fetchNewerMessages completed for session ${sessionId} - applied ${result.applied} messages`);
+    return { applied: result.applied, page: result.page };
 }

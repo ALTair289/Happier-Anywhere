@@ -675,6 +675,73 @@ describe('useSessions', () => {
         }
     });
 
+    it('does not rescan unchanged server session list data when rebuilding the all-server cache', async () => {
+        const previousState = storage.getState();
+        try {
+            const stableServerData: SessionListViewItem[] = [
+                {
+                    type: 'header',
+                    title: 'Server A',
+                    headerKind: 'active',
+                    groupKey: 'server:server-a:active',
+                    serverId: 'server-a',
+                },
+            ];
+            const changingServerData: SessionListViewItem[] = [
+                {
+                    type: 'header',
+                    title: 'Server B',
+                    headerKind: 'active',
+                    groupKey: 'server:server-b:active',
+                    serverId: 'server-b',
+                },
+            ];
+
+            storage.setState((state) => ({
+                ...state,
+                isDataReady: true,
+                sessionListViewDataByServerId: {
+                    'server-a': stableServerData,
+                    'server-b': changingServerData,
+                },
+            }));
+
+            const hook = await renderHook(() => useSessionListViewDataByServerId(), {
+                flushOptions: { cycles: 1, turns: 4 },
+            });
+            const first = hook.getCurrent();
+
+            Object.defineProperty(stableServerData[0], 'title', {
+                configurable: true,
+                get: () => {
+                    throw new Error('unchanged all-server data must not be signed again');
+                },
+            });
+
+            await act(async () => {
+                storage.setState((state) => ({
+                    ...state,
+                    sessionListViewDataByServerId: {
+                        ...state.sessionListViewDataByServerId,
+                        'server-b': [{
+                            ...changingServerData[0],
+                            subtitle: 'Updated server B',
+                        }],
+                    },
+                }));
+            });
+
+            const next = hook.getCurrent();
+            expect(next).not.toBe(first);
+            expect(next['server-a']).toBe(first['server-a']);
+            expect(next['server-b']).not.toBe(first['server-b']);
+
+            await hook.unmount();
+        } finally {
+            storage.setState(previousState);
+        }
+    });
+
     it('uses the latest equivalent all-server session list reference for future fast paths', async () => {
         const previousState = storage.getState();
         try {

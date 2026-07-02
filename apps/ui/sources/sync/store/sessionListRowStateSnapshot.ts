@@ -4,10 +4,12 @@ import type {
 } from '@/components/sessions/shell/row/sessionListRowModelTypes';
 import { areServerProfileIdentifiersEquivalent } from '@/sync/domains/server/serverProfiles';
 import {
+    isSessionListRenderableRuntimeActivityLeaseOnlyChange,
     isSessionListRenderableWarmCacheProgressOnlyChange,
     type SessionListRenderableSession,
 } from '@/sync/domains/session/listing/sessionListRenderable';
 import {
+    deriveSessionRuntimePresentationState,
     SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS,
 } from '@/sync/domains/session/attention/deriveSessionRuntimePresentationState';
 import { syncPerformanceTelemetry } from '@/sync/runtime/syncPerformanceTelemetry';
@@ -32,6 +34,8 @@ type MutableSessionListRowStoreState = {
     sessionMessages: Record<string, ReturnType<typeof selectSessionListRowStateSnapshot>['messages']>;
     sessionPending: Record<string, ReturnType<typeof selectSessionListRowStateSnapshot>['pending']>;
 };
+
+const EMPTY_RUNTIME_PRIORITY_ROW_SCOPES: readonly SessionListRowStateSnapshotScope[] = Object.freeze([]);
 
 // Visible rows do not need to rebuild on every unread-stable streaming progress timestamp.
 // Keep the store fully fresh, but let the row selector expose at most ~30s progress
@@ -169,6 +173,7 @@ function shouldReusePreviousProgressRenderable(input: Readonly<{
 }>): input is Readonly<{ previous: SessionListRenderableSession; next: SessionListRenderableSession; nowMs: number }> {
     const { previous, next, nowMs } = input;
     if (!previous || !next || previous === next) return false;
+    if (isSessionListRenderableRuntimeActivityLeaseOnlyChange({ previous, next, nowMs })) return true;
     if (!isSessionListRenderableWarmCacheProgressOnlyChange(previous, next)) return false;
     if (!canReuseActiveHeartbeatAdvance({ previous, next, nowMs })) return false;
 
@@ -179,6 +184,59 @@ function shouldReusePreviousProgressRenderable(input: Readonly<{
     if (nextTimestamp - previousTimestamp >= ROW_PROGRESS_RENDERABLE_MIN_UPDATE_INTERVAL_MS) return false;
 
     return hasSameRelativeProgressLabels(previous, next, nowMs);
+}
+
+function isRuntimePriorityRenderable(renderable: SessionListRenderableSession | undefined): boolean {
+    if (!renderable) return false;
+    const runtimeStatus = deriveSessionRuntimePresentationState(renderable, Date.now());
+    return runtimeStatus.working
+        || runtimeStatus.freshPermissionRequired
+        || runtimeStatus.freshActionRequired
+        || renderable.hasPendingPermissionRequests === true
+        || renderable.hasPendingUserActionRequests === true;
+}
+
+function areScopeListsEqual(
+    previous: readonly SessionListRowStateSnapshotScope[] | null,
+    next: readonly SessionListRowStateSnapshotScope[],
+): boolean {
+    if (previous === null || previous.length !== next.length) return false;
+    for (let index = 0; index < next.length; index += 1) {
+        const previousScope = previous[index];
+        const nextScope = next[index];
+        if (!previousScope || !nextScope) return false;
+        if (previousScope.sessionId !== nextScope.sessionId) return false;
+        if ((previousScope.serverId ?? null) !== (nextScope.serverId ?? null)) return false;
+    }
+    return true;
+}
+
+export function createSessionListRuntimePriorityRowScopeSelector(
+    scopes: readonly SessionListRowStateSnapshotScope[],
+    activeServerId: string | null | undefined,
+): (state: SessionListRowStoreStateSelectorInput) => readonly SessionListRowStateSnapshotScope[] {
+    const normalizedScopes = scopes.map(normalizeScope);
+    const overlayState: SessionListRowStoreState = { activeServerId };
+    let previousOutput: readonly SessionListRowStateSnapshotScope[] | null = null;
+
+    return (state) => {
+        let nextOutput: SessionListRowStateSnapshotScope[] | null = null;
+        for (const scope of normalizedScopes) {
+            if (!shouldReadActiveServerOverlay(overlayState, scope.serverId)) continue;
+            const renderable = state.sessionListRenderables?.[scope.sessionId];
+            if (!isRuntimePriorityRenderable(renderable)) continue;
+            if (nextOutput === null) nextOutput = [];
+            nextOutput.push(scope);
+        }
+
+        const normalizedOutput = nextOutput ?? EMPTY_RUNTIME_PRIORITY_ROW_SCOPES;
+        if (areScopeListsEqual(previousOutput, normalizedOutput)) {
+            return previousOutput ?? EMPTY_RUNTIME_PRIORITY_ROW_SCOPES;
+        }
+
+        previousOutput = normalizedOutput;
+        return normalizedOutput;
+    };
 }
 
 export function createSessionListRowStoreStateSelector(

@@ -7,6 +7,7 @@ import { createReducer } from '@/sync/reducer/reducer';
 import type { SessionMessages } from './domains/messages';
 import type { SessionPending } from './domains/pending';
 import {
+    createSessionListRuntimePriorityRowScopeSelector,
     createSessionListRowStoreStateSelector,
     selectSessionListRowStateSnapshot,
 } from './sessionListRowStateSnapshot';
@@ -227,6 +228,66 @@ describe('selectSessionListRowStateSnapshot', () => {
         expect(third.sessionListRenderables?.s1).toBe(laterProgressRenderable);
     });
 
+    it('keeps focused row store state stable for runtime activity lease-only renewals', () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-05-30T12:00:00.000Z'));
+        const nowMs = Date.now();
+        const firstRenderable = {
+            ...createRenderable('s1'),
+            active: true,
+            activeAt: nowMs - 5_000,
+            presence: 'online' as const,
+            latestTurnStatus: 'completed' as const,
+            latestTurnStatusObservedAt: nowMs - 10_000,
+            runtimeActivityActiveCount: 1,
+            runtimeActivityObservedAt: nowMs - 1_000,
+            runtimeActivityExpiresAt: nowMs + 60_000,
+            runtimeActivitySourceClass: 'provider_detached_task' as const,
+        } satisfies SessionListRenderableSession;
+        const selector = createSessionListRowStoreStateSelector([{
+            sessionId: 's1',
+            serverId: 'server-a',
+        }], 'server-a');
+
+        const first = selector({
+            sessions: {},
+            sessionListRenderables: { s1: firstRenderable },
+            sessionMessages: {},
+            sessionPending: { s1: pending },
+        });
+        const renewedRenderable = {
+            ...firstRenderable,
+            runtimeActivityObservedAt: nowMs + 10_000,
+            runtimeActivityExpiresAt: nowMs + 70_000,
+        } satisfies SessionListRenderableSession;
+        const second = selector({
+            sessions: {},
+            sessionListRenderables: { s1: renewedRenderable },
+            sessionMessages: {},
+            sessionPending: { s1: pending },
+        });
+
+        expect(second).toBe(first);
+        expect(second.sessionListRenderables?.s1).toBe(firstRenderable);
+
+        const clearedRenderable = {
+            ...renewedRenderable,
+            runtimeActivityActiveCount: 0,
+            runtimeActivityObservedAt: null,
+            runtimeActivityExpiresAt: null,
+            runtimeActivitySourceClass: null,
+        } satisfies SessionListRenderableSession;
+        const third = selector({
+            sessions: {},
+            sessionListRenderables: { s1: clearedRenderable },
+            sessionMessages: {},
+            sessionPending: { s1: pending },
+        });
+
+        expect(third).not.toBe(first);
+        expect(third.sessionListRenderables?.s1).toBe(clearedRenderable);
+    });
+
     it('keeps focused row store state stable when fresh progress also advances active heartbeat', () => {
         vi.useFakeTimers();
         vi.setSystemTime(new Date('2026-05-30T12:00:00.000Z'));
@@ -403,6 +464,145 @@ describe('selectSessionListRowStateSnapshot', () => {
 
         expect(second).not.toBe(first);
         expect(second.sessionListRenderables?.s1).toBe(unreadRenderable);
+    });
+
+    it('tracks runtime-priority scopes without changing for non-priority row overlay updates', () => {
+        const s1 = createRenderable('s1');
+        const s2 = createRenderable('s2');
+        const selector = createSessionListRuntimePriorityRowScopeSelector([
+            { sessionId: 's1', serverId: 'server-a' },
+            { sessionId: 's2', serverId: 'server-a' },
+        ], 'server-a');
+
+        const first = selector({
+            sessionListRenderables: {
+                s1,
+                s2,
+            },
+        });
+        const unreadOnly = selector({
+            sessionListRenderables: {
+                s1: {
+                    ...s1,
+                    hasUnreadMessages: true,
+                    latestReadyEventSeq: 2,
+                },
+                s2,
+            },
+        });
+        const runtimeIssueOnly = selector({
+            sessionListRenderables: {
+                s1: {
+                    ...s1,
+                    lastRuntimeIssue: {
+                        v: 1,
+                        scope: 'primary_session',
+                        status: 'failed',
+                        code: 'failed',
+                        source: 'unknown',
+                        occurredAt: 123,
+                    },
+                },
+                s2,
+            },
+        });
+        const actionRequired = selector({
+            sessionListRenderables: {
+                s1: {
+                    ...s1,
+                    hasUnreadMessages: true,
+                    latestReadyEventSeq: 2,
+                    hasPendingUserActionRequests: true,
+                    pendingRequestObservedAt: 100,
+                },
+                s2,
+            },
+        });
+        const stillActionRequired = selector({
+            sessionListRenderables: {
+                s1: {
+                    ...s1,
+                    hasUnreadMessages: true,
+                    latestReadyEventSeq: 3,
+                    hasPendingUserActionRequests: true,
+                    pendingRequestObservedAt: 200,
+                },
+                s2,
+            },
+        });
+
+        expect(first).toEqual([]);
+        expect(unreadOnly).toBe(first);
+        expect(actionRequired).toEqual([{ sessionId: 's1', serverId: 'server-a' }]);
+        expect(runtimeIssueOnly).toBe(first);
+        expect(stillActionRequired).toBe(actionRequired);
+    });
+
+    it('tracks runtime-priority scopes from provider runtime activity through presentation state', () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-05-30T12:00:00.000Z'));
+        const nowMs = Date.now();
+        const s1 = createRenderable('s1');
+        const selector = createSessionListRuntimePriorityRowScopeSelector([
+            { sessionId: 's1', serverId: 'server-a' },
+        ], 'server-a');
+
+        const idle = selector({
+            sessionListRenderables: { s1 },
+        });
+        const runtimeWorking = selector({
+            sessionListRenderables: {
+                s1: {
+                    ...s1,
+                    active: true,
+                    activeAt: nowMs - 10_000,
+                    presence: 'online',
+                    latestTurnStatus: 'completed',
+                    latestTurnStatusObservedAt: nowMs - 5_000,
+                    runtimeActivityActiveCount: 1,
+                    runtimeActivityObservedAt: nowMs - 1_000,
+                    runtimeActivityExpiresAt: nowMs + 60_000,
+                    runtimeActivitySourceClass: 'provider_detached_task',
+                },
+            },
+        });
+        const liveExpiredRuntimeActivity = selector({
+            sessionListRenderables: {
+                s1: {
+                    ...s1,
+                    active: true,
+                    activeAt: nowMs - 10_000,
+                    presence: 'online',
+                    latestTurnStatus: 'completed',
+                    latestTurnStatusObservedAt: nowMs - 5_000,
+                    runtimeActivityActiveCount: 1,
+                    runtimeActivityObservedAt: nowMs - 10_000,
+                    runtimeActivityExpiresAt: nowMs - 1,
+                    runtimeActivitySourceClass: 'provider_detached_task',
+                },
+            },
+        });
+        const staleUntrustedRuntimeActivity = selector({
+            sessionListRenderables: {
+                s1: {
+                    ...s1,
+                    active: false,
+                    activeAt: nowMs - 10_000,
+                    presence: 0,
+                    latestTurnStatus: 'completed',
+                    latestTurnStatusObservedAt: nowMs - 5_000,
+                    runtimeActivityActiveCount: 1,
+                    runtimeActivityObservedAt: nowMs - 10_000,
+                    runtimeActivityExpiresAt: nowMs - 1,
+                    runtimeActivitySourceClass: 'provider_detached_task',
+                },
+            },
+        });
+
+        expect(idle).toEqual([]);
+        expect(runtimeWorking).toEqual([{ sessionId: 's1', serverId: 'server-a' }]);
+        expect(liveExpiredRuntimeActivity).toBe(idle);
+        expect(staleUntrustedRuntimeActivity).toBe(idle);
     });
 
     it('records why the row-store selector output changed when telemetry is enabled', () => {

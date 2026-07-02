@@ -5,6 +5,7 @@ export type VisibleSessionListSourceState = Readonly<{
     hasArchivedSessionItems: boolean;
     hasInactiveSessionsThatNeedFiltering: boolean;
     hasOrphanHeaders: boolean;
+    visiblePlaceholderRows: number;
 }>;
 
 type VisibleSessionListHeaderState = {
@@ -47,6 +48,7 @@ export function inspectVisibleSessionListIndexSourceState(
 ): VisibleSessionListSourceState {
     let hasArchivedSessionItems = false;
     let hasInactiveSessionsThatNeedFiltering = false;
+    let visiblePlaceholderRows = 0;
     let pendingSectionHeader: Extract<SessionListIndexItem, { type: 'header' }> | null = null;
     let pendingGroupHeader: Extract<SessionListIndexItem, { type: 'header' }> | null = null;
 
@@ -66,7 +68,12 @@ export function inspectVisibleSessionListIndexSourceState(
 
         const row = resolveSessionRowForIndexItem(item, resolveSessionRow);
         if (!row) {
+            visiblePlaceholderRows += 1;
             continue;
+        }
+
+        if (row.metadata == null) {
+            visiblePlaceholderRows += 1;
         }
 
         if (!hasArchivedSessionItems && row.archivedAt != null) {
@@ -87,6 +94,7 @@ export function inspectVisibleSessionListIndexSourceState(
         hasArchivedSessionItems,
         hasInactiveSessionsThatNeedFiltering,
         hasOrphanHeaders: pendingSectionHeader != null || pendingGroupHeader != null,
+        visiblePlaceholderRows,
     };
 }
 

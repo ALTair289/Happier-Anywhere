@@ -1,19 +1,18 @@
 import * as React from 'react';
 import { TokenStorage } from '@/auth/storage/tokenStorage';
-import { SessionListViewItem, useLocalSetting, useOpenApprovalSessionIds, useSessionFolderAssignmentsBySessionKey, useSessionListViewData, useSessionListViewDataByServerId, useSetting, useSettingMutable } from '@/sync/domains/state/storage';
+import { SessionListViewItem, useLocalSetting, useOpenApprovalSessionIds, useSessionListViewData, useSessionListViewDataByServerId, useSessionOrganizationProjection, useSetting } from '@/sync/domains/state/storage';
 import { buildSessionListShellViewItemSignature } from '@/sync/store/hooks';
+import { resolveNextSessionRuntimePresentationFreshnessAtMs } from '@/sync/domains/session/attention/deriveSessionRuntimePresentationState';
 import { resolveSessionListSourceData } from '@/sync/domains/session/listing/sessionListPresentation';
 import { computeVisibleSessionListIndex } from '@/sync/domains/session/listing/computeVisibleSessionListIndex';
 import { buildSessionListIndexFromViewData } from '@/sync/domains/session/listing/sessionListIndex';
 import { buildSessionListViewDataFromIndex } from '@/sync/domains/session/listing/sessionListViewDataFromIndex';
 import { applySessionFoldersToSessionListViewData } from '@/sync/domains/session/listing/sessionListViewData';
 import {
-    areSessionListGroupOrderMapsEqual,
     normalizeSessionListGroupOrderV1ForSource,
     normalizeSessionListGroupOrderV1ForStructuralSource,
 } from '@/sync/domains/session/listing/sessionListOrderingStateV1';
 import {
-    areSessionWorkspaceOrderMapsEqual,
     normalizeSessionWorkspaceOrderV1ForSource,
     type SessionWorkspaceOrderV1,
 } from '@/sync/domains/session/listing/sessionWorkspaceOrderStateV1';
@@ -37,13 +36,13 @@ import {
     type SessionListOrderingModeV1,
 } from '@/sync/domains/session/listing/sessionListOrderingRules';
 import type { SessionListStorageFilter } from '@/sync/domains/session/sessionStorageKind';
-import { normalizeSessionFolders, type SessionFoldersV1 } from '@/sync/domains/session/folders';
+import { normalizeSessionFolders } from '@/sync/domains/session/folders';
+import { buildSessionOrganizationListViewState } from '@/sync/domains/session/organization/viewState';
 import { getServerProfileById } from '@/sync/domains/server/serverProfiles';
-import { fetchAndApplySessionFolderAssignments } from '@/sync/ops/sessionFolders';
+import { fetchAndApplySessionFolderAssignments } from '@/sync/ops/sessionOrganization';
 import { useFeatureEnabled } from '@/hooks/server/useFeatureEnabled';
 import { useResolvedActiveServerSelection } from '@/hooks/server/useEffectiveServerSelection';
 
-const EMPTY_PINNED_SESSION_KEYS: ReadonlyArray<string> = Object.freeze([]);
 const EMPTY_SESSION_LIST_GROUP_ORDER: Readonly<Record<string, ReadonlyArray<string> | undefined>> = Object.freeze({});
 const EMPTY_SESSION_WORKSPACE_ORDER: SessionWorkspaceOrderV1 = Object.freeze({});
 const DISABLED_ATTENTION_PROMOTION_OPTIONS: SessionListAttentionPromotionOptions = Object.freeze({
@@ -168,6 +167,7 @@ function buildVisibleSessionListIndexForState(
     options: Readonly<{
         retainAttentionSessionKeys?: ReadonlyArray<string>;
         retainWorkingSessionKeys?: ReadonlyArray<string>;
+        nowMs?: number;
     }> = {},
 ): Readonly<{
     sourceIndex: NonNullable<ReturnType<typeof buildSessionListIndexFromViewData>>;
@@ -186,6 +186,11 @@ function buildVisibleSessionListIndexForState(
         pinnedSessionKeysV1: state.pinnedSessionKeysV1,
         sessionListGroupOrderV1: state.normalizedGroupOrder,
         sessionWorkspaceOrderV1: state.normalizedWorkspaceOrder,
+        normalizedOrganizationProjection: {
+            pinnedSessionKeys: state.pinnedSessionKeysV1,
+            sessionListGroupOrder: state.normalizedGroupOrder,
+            sessionWorkspaceOrder: state.normalizedWorkspaceOrder,
+        },
         sessionListFolderSortModeV1: state.sessionListFolderSortModeV1,
         sessionListOrderingModeV1: state.sessionListOrderingModeV1,
         sessionListSectionModeV1: state.sessionListSectionModeV1,
@@ -207,6 +212,7 @@ function buildVisibleSessionListIndexForState(
             }
             : DISABLED_WORKING_PLACEMENT_OPTIONS,
         retainWorkingSessionKeys: options.retainWorkingSessionKeys,
+        nowMs: options.nowMs,
     });
     if (maybeVisibleIndex === null) return null;
     const visibleIndex: NonNullable<ReturnType<typeof computeVisibleSessionListIndex>> = maybeVisibleIndex;
@@ -221,6 +227,7 @@ function buildVisibleSessionListViewData(
     options: Readonly<{
         retainAttentionSessionKeys?: ReadonlyArray<string>;
         retainWorkingSessionKeys?: ReadonlyArray<string>;
+        nowMs?: number;
     }> = {},
 ): SessionListViewItem[] | null {
     if (!state.folderSource) return state.folderSource;
@@ -278,6 +285,41 @@ function collectRetainedWorkingSessionKeys(params: Readonly<{
     return keys.length > 0 ? keys : EMPTY_WORKING_RETAIN_KEYS;
 }
 
+function resolveNextVisibleSessionListRuntimeFreshnessAtMs(
+    source: ReadonlyArray<SessionListViewItem> | null,
+    nowMs: number,
+): number | null {
+    let nextAt: number | null = null;
+    for (const item of source ?? []) {
+        if (item.type !== 'session') continue;
+        const freshnessAt = resolveNextSessionRuntimePresentationFreshnessAtMs(item.session, nowMs);
+        if (freshnessAt === null) continue;
+        nextAt = nextAt === null ? freshnessAt : Math.min(nextAt, freshnessAt);
+    }
+    return nextAt;
+}
+
+function useVisibleSessionListRuntimeNowMs(source: ReadonlyArray<SessionListViewItem> | null): number {
+    const [runtimeNowMs, setRuntimeNowMs] = React.useState(() => Date.now());
+    const nextFreshnessAtMs = React.useMemo(
+        () => resolveNextVisibleSessionListRuntimeFreshnessAtMs(source, runtimeNowMs),
+        [source, runtimeNowMs],
+    );
+
+    React.useEffect(() => {
+        if (nextFreshnessAtMs === null) return undefined;
+        const delayMs = Math.max(0, nextFreshnessAtMs - Date.now() + 1);
+        const timeoutId = setTimeout(() => {
+            setRuntimeNowMs(Date.now());
+        }, delayMs);
+        return () => {
+            clearTimeout(timeoutId);
+        };
+    }, [nextFreshnessAtMs]);
+
+    return runtimeNowMs;
+}
+
 function countRenderedSessions(data: SessionListViewItem[] | null): number {
     if (!data) return 0;
     return data.reduce((count, item) => count + (item.type === 'session' ? 1 : 0), 0);
@@ -322,6 +364,7 @@ function areVisibleSessionListRowsEquivalent(
     previousItem: SessionListViewItem | undefined,
     nextItem: SessionListViewItem,
 ): boolean {
+    if (previousItem === nextItem) return true;
     if (!previousItem || previousItem.type !== nextItem.type) return false;
     return buildSessionListShellViewItemSignature(previousItem) === buildSessionListShellViewItemSignature(nextItem);
 }
@@ -330,6 +373,9 @@ function reuseStableVisibleSessionListRows(
     previousVisible: ReadonlyArray<SessionListViewItem> | null | undefined,
     nextVisible: SessionListViewItem[] | null,
 ): SessionListViewItem[] | null {
+    if (previousVisible === nextVisible) {
+        return nextVisible;
+    }
     if (!previousVisible || !nextVisible || previousVisible.length !== nextVisible.length) {
         return nextVisible;
     }
@@ -371,16 +417,19 @@ function useSessionListDataState(
     const sessionListFolderSortModeV1 = normalizeSessionListFolderSortModeV1(useLocalSetting('sessionListFolderSortModeV1'));
     const sessionListOrderingModeV1 = normalizeSessionListOrderingModeV1(useSetting('sessionListOrderingModeV1'));
     const sessionListSectionModeV1 = normalizeSessionListOrderingSectionMode(useSetting('sessionListSectionModeV1'));
-    const pinnedSessionKeysV1 = useSetting('pinnedSessionKeysV1') ?? EMPTY_PINNED_SESSION_KEYS;
     const sessionFoldersEnabled = useFeatureEnabled('sessions.folders');
-    const sessionFoldersV1 = useSetting('sessionFoldersV1') as SessionFoldersV1 | null | undefined;
     const sessionFolderViewModeV1 = useSetting('sessionFolderViewModeV1');
-    const sessionFolderAssignmentsBySessionKey = useSessionFolderAssignmentsBySessionKey();
-    const [sessionListGroupOrderV1, setSessionListGroupOrderV1] = useSettingMutable('sessionListGroupOrderV1');
-    const [sessionWorkspaceOrderV1, setSessionWorkspaceOrderV1] = useSettingMutable('sessionWorkspaceOrderV1');
-    const groupOrder = sessionListGroupOrderV1 ?? EMPTY_SESSION_LIST_GROUP_ORDER;
-    const workspaceOrder = sessionWorkspaceOrderV1 ?? EMPTY_SESSION_WORKSPACE_ORDER;
     const selection = useResolvedActiveServerSelection();
+    const organizationProjection = useSessionOrganizationProjection(selection.activeServerId);
+    const organizationListViewState = React.useMemo(() => buildSessionOrganizationListViewState({
+        serverId: selection.activeServerId,
+        projection: organizationProjection,
+    }), [organizationProjection, selection.activeServerId]);
+    const pinnedSessionKeysV1 = organizationListViewState.pinnedSessionKeysV1;
+    const sessionFoldersV1 = organizationListViewState.sessionFoldersV1;
+    const sessionFolderAssignmentsBySessionKey = organizationListViewState.sessionFolderAssignmentsBySessionKey;
+    const groupOrder = organizationListViewState.sessionListGroupOrderV1 ?? EMPTY_SESSION_LIST_GROUP_ORDER;
+    const workspaceOrder = organizationListViewState.sessionWorkspaceOrderV1 ?? EMPTY_SESSION_WORKSPACE_ORDER;
     const selectedServerIdsKey = React.useMemo(() => selection.allowedServerIds.join('\u0000'), [selection.allowedServerIds]);
     const selectedServerIdsForCache = selection.enabled
         ? selection.allowedServerIds
@@ -500,24 +549,6 @@ function useSessionListDataState(
         };
     }, [assignmentFetchBatches, sessionFolderViewModeV1, sessionFoldersEnabled, sessionListSurfaceDataActive]);
 
-    React.useEffect(() => {
-        if (!sessionListSurfaceDataActive) return;
-        if (!folderSource) return;
-        if (areSessionListGroupOrderMapsEqual(groupOrder, normalizedGroupOrder)) {
-            return;
-        }
-        setSessionListGroupOrderV1(normalizedGroupOrder);
-    }, [folderSource, groupOrder, normalizedGroupOrder, sessionListSurfaceDataActive, setSessionListGroupOrderV1]);
-
-    React.useEffect(() => {
-        if (!sessionListSurfaceDataActive) return;
-        if (!folderSource) return;
-        if (areSessionWorkspaceOrderMapsEqual(workspaceOrder, normalizedWorkspaceOrder)) {
-            return;
-        }
-        setSessionWorkspaceOrderV1(normalizedWorkspaceOrder);
-    }, [folderSource, normalizedWorkspaceOrder, sessionListSurfaceDataActive, setSessionWorkspaceOrderV1, workspaceOrder]);
-
     return React.useMemo(() => ({
         hideInactiveSessions,
         pinnedSessionKeysV1,
@@ -603,6 +634,7 @@ export function useVisibleSessionListViewData(
     options: VisibleSessionListViewDataOptions = {},
 ): SessionListViewItem[] | null {
     const state = useSessionListDataState(storageFilter, options);
+    const runtimeNowMs = useVisibleSessionListRuntimeNowMs(state.folderSource);
     const previousVisibleRef = React.useRef<SessionListViewItem[] | null>(null);
 
     const visible = React.useMemo(() => {
@@ -620,9 +652,10 @@ export function useVisibleSessionListViewData(
                 previousVisible,
                 mode: state.sessionListWorkingPlacementMode,
             }),
+            nowMs: runtimeNowMs,
         });
         return reuseStableVisibleSessionListRows(previousVisible, nextVisible);
-    }, [options.activeSessionId, options.retainedSessionListViewData, state, storageFilter]);
+    }, [options.activeSessionId, options.retainedSessionListViewData, runtimeNowMs, state, storageFilter]);
 
     React.useEffect(() => {
         previousVisibleRef.current = visible;

@@ -61,6 +61,8 @@ export type SessionMessageCallerSurface =
     | 'review_findings_apply'
     | 'participant_composer'
     | 'message_option'
+    | 'pending_message_steer_now'
+    | 'pending_message_send_now'
     | 'sync_submit_message';
 
 export type SubmitSessionUserMessageOptions = Readonly<{
@@ -100,16 +102,20 @@ export type SubmitSessionUserMessageOptions = Readonly<{
 
 export type PendingMessageSubmitResult = Readonly<{
     localId?: string;
+    accepted?: boolean;
 }> | void;
 
 export type DirectMessageSubmitResult = Readonly<{
     localId?: string;
     seq?: number;
+    persistence?: Extract<SubmitPersistence, 'pending' | 'transcript_committed' | 'provider_direct'>;
 }> | void;
 
-export type DirectMessageLocalPendingProjection = Readonly<{
+export type SessionMessageLocalPendingProjection = Readonly<{
     localId: string;
 }>;
+
+export type DirectMessageLocalPendingProjection = SessionMessageLocalPendingProjection;
 
 export type DirectMessageBypassReason = SessionMessageDirectBypassReason;
 
@@ -119,6 +125,9 @@ export interface SessionSubmitPort {
         text: string,
         displayText?: string,
         metaOverrides?: Record<string, unknown>,
+        options?: Readonly<{
+            onLocalPendingProjectionCreated?: (event: SessionMessageLocalPendingProjection) => void;
+        }>,
     ): Promise<PendingMessageSubmitResult>;
     sendMessage(
         sessionId: string,

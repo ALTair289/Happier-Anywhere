@@ -97,6 +97,47 @@ describe('computeVisibleSessionListIndex', () => {
         expect(result).toBe(source);
     });
 
+    it('uses the normalized organization projection instead of legacy pin and order inputs', () => {
+        const groupKey = 'server:s1:active:project:repo';
+        const source: SessionListIndexItem[] = [
+            { type: 'header', headerKind: 'active', title: 'Active', serverId: 's1' },
+            { type: 'header', headerKind: 'project', title: '~/repo', serverId: 's1', groupKey },
+            { type: 'session', sessionId: 'org-pinned', serverId: 's1', section: 'active', groupKey, groupKind: 'project' },
+            { type: 'session', sessionId: 'org-first', serverId: 's1', section: 'active', groupKey, groupKind: 'project' },
+            { type: 'session', sessionId: 'legacy-pinned', serverId: 's1', section: 'active', groupKey, groupKind: 'project' },
+        ];
+
+        const result = computeVisibleSessionListIndex({
+            source,
+            resolveSessionRow: makeResolver({
+                's1:org-pinned': makeSessionRow('org-pinned', { createdAt: 10, updatedAt: 10 }),
+                's1:org-first': makeSessionRow('org-first', { createdAt: 20, updatedAt: 20 }),
+                's1:legacy-pinned': makeSessionRow('legacy-pinned', { createdAt: 30, updatedAt: 30 }),
+            }),
+            hideInactiveSessions: false,
+            pinnedSessionKeysV1: ['s1:legacy-pinned'],
+            sessionListGroupOrderV1: { [groupKey]: ['s1:legacy-pinned'] },
+            normalizedOrganizationProjection: {
+                pinnedSessionKeys: ['s1:org-pinned'],
+                sessionListGroupOrder: {
+                    [groupKey]: ['s1:org-first', 's1:legacy-pinned'],
+                },
+                sessionWorkspaceOrder: {},
+            },
+            sessionListOrderingModeV1: 'custom',
+            presentation: { enabled: false, presentation: 'grouped', selectedServerIds: [] },
+        });
+
+        expect(result?.map((item) => item.type === 'session' ? item.sessionId : `${item.headerKind}:${item.title}`)).toEqual([
+            'pinned:Pinned',
+            'org-pinned',
+            'active:Active',
+            'project:~/repo',
+            'org-first',
+            'legacy-pinned',
+        ]);
+    });
+
     it('records numeric ordering metadata when telemetry is enabled', () => {
         syncPerformanceTelemetry.configure({
             enabled: true,
@@ -142,6 +183,93 @@ describe('computeVisibleSessionListIndex', () => {
             bucketSortApplied: 1,
         });
         expect(Object.values(event?.fields ?? {}).every((value) => typeof value === 'number')).toBe(true);
+    });
+
+    it('records missing pinned keys and visible placeholder rows in compute telemetry', () => {
+        syncPerformanceTelemetry.configure({
+            enabled: true,
+            slowThresholdMs: 1_000_000,
+            flushIntervalMs: 60_000,
+        });
+        syncPerformanceTelemetry.reset();
+
+        const groupKey = 'server:s1:active:project:repo';
+        const source: SessionListIndexItem[] = [
+            { type: 'header', headerKind: 'active', title: 'Active', serverId: 's1' },
+            { type: 'header', headerKind: 'project', title: '~/repo', serverId: 's1', groupKey },
+            { type: 'session', sessionId: 'pinned-present', serverId: 's1', section: 'active', groupKey, groupKind: 'project' },
+            { type: 'session', sessionId: 'visible-placeholder', serverId: 's1', section: 'active', groupKey, groupKind: 'project' },
+        ];
+
+        computeVisibleSessionListIndex({
+            source,
+            resolveSessionRow: makeResolver({
+                's1:pinned-present': makeSessionRow('pinned-present', {
+                    createdAt: 10,
+                    updatedAt: 20,
+                    metadata: { path: '/repo' },
+                }),
+                's1:visible-placeholder': makeSessionRow('visible-placeholder', {
+                    createdAt: 20,
+                    updatedAt: 30,
+                    metadata: null,
+                }),
+            }),
+            hideInactiveSessions: false,
+            pinnedSessionKeysV1: ['s1:pinned-present', 's1:pinned-missing'],
+            sessionListGroupOrderV1: {},
+            sessionListOrderingModeV1: 'custom',
+            presentation: { enabled: false, presentation: 'grouped', selectedServerIds: [] },
+        });
+
+        const event = syncPerformanceTelemetry
+            .snapshot()
+            .events.find((candidate) => candidate.name === 'sync.sessions.list.visible.compute');
+
+        expect(event?.fields).toMatchObject({
+            missingPinnedSessionKeys: 1,
+            visiblePlaceholderRows: 1,
+        });
+    });
+
+    it('records visible placeholder rows when the projection returns the no-op source', () => {
+        syncPerformanceTelemetry.configure({
+            enabled: true,
+            slowThresholdMs: 1_000_000,
+            flushIntervalMs: 60_000,
+        });
+        syncPerformanceTelemetry.reset();
+
+        const groupKey = 'server:s1:active:project:repo';
+        const source: SessionListIndexItem[] = [
+            { type: 'header', headerKind: 'active', title: 'Active', serverId: 's1' },
+            { type: 'header', headerKind: 'project', title: '~/repo', serverId: 's1', groupKey },
+            { type: 'session', sessionId: 'visible-placeholder', serverId: 's1', section: 'active', groupKey, groupKind: 'project' },
+        ];
+
+        const result = computeVisibleSessionListIndex({
+            source,
+            resolveSessionRow: makeResolver({
+                's1:visible-placeholder': makeSessionRow('visible-placeholder', {
+                    metadata: null,
+                }),
+            }),
+            hideInactiveSessions: false,
+            pinnedSessionKeysV1: [],
+            sessionListGroupOrderV1: {},
+            sessionListOrderingModeV1: 'custom',
+            presentation: { enabled: false, presentation: 'grouped', selectedServerIds: [] },
+        });
+
+        expect(result).toBe(source);
+        const event = syncPerformanceTelemetry
+            .snapshot()
+            .events.find((candidate) => candidate.name === 'sync.sessions.list.visible.compute');
+
+        expect(event?.fields).toMatchObject({
+            missingPinnedSessionKeys: 0,
+            visiblePlaceholderRows: 1,
+        });
     });
 
     it('records telemetry without adding a source rescan', () => {
@@ -959,7 +1087,7 @@ describe('computeVisibleSessionListIndex', () => {
         ]);
     });
 
-    it('promotes sessions needing attention above pinned sessions without duplicating pinned rows', () => {
+    it('promotes pinned rows needing attention before the pinned section while preserving pinned state', () => {
         const groupKey = 'server:s1:day:2026-02-17';
         const source: SessionListIndexItem[] = [
             { type: 'header', headerKind: 'date', title: 'Today', serverId: 's1', groupKey },
@@ -1000,6 +1128,78 @@ describe('computeVisibleSessionListIndex', () => {
             's:quiet-pinned:pinned:pinned:none',
             'h:date:Today',
             's:normal:date:unpinned:none',
+        ]);
+    });
+
+    it('promotes server-backed pinned rows into global attention and working groups while preserving pinned state', () => {
+        const now = 1_000_000;
+        const groupKey = 'server:s1:active:project:repo';
+        const source: SessionListIndexItem[] = [
+            { type: 'header', headerKind: 'active', title: 'Active', serverId: 's1' },
+            { type: 'header', headerKind: 'project', title: '~/repo', serverId: 's1', groupKey },
+            { type: 'session', sessionId: 'pinned-ready', serverId: 's1', section: 'active', groupKey, groupKind: 'project' },
+            { type: 'session', sessionId: 'pinned-working', serverId: 's1', section: 'active', groupKey, groupKind: 'project' },
+            { type: 'session', sessionId: 'ready', serverId: 's1', section: 'active', groupKey, groupKind: 'project' },
+            { type: 'session', sessionId: 'working', serverId: 's1', section: 'active', groupKey, groupKind: 'project' },
+        ];
+
+        const result = computeVisibleSessionListIndex({
+            source,
+            resolveSessionRow: makeResolver({
+                's1:pinned-ready': makeSessionRow('pinned-ready', {
+                    latestReadyEventSeq: 4,
+                    latestReadyEventAt: 30,
+                    lastViewedSessionSeq: 1,
+                    updatedAt: 30,
+                }),
+                's1:pinned-working': makeSessionRow('pinned-working', {
+                    active: true,
+                    presence: 'online',
+                    latestTurnStatus: 'in_progress',
+                    latestTurnStatusObservedAt: now - 1_000,
+                    updatedAt: 20,
+                }),
+                's1:ready': makeSessionRow('ready', {
+                    latestReadyEventSeq: 4,
+                    latestReadyEventAt: 20,
+                    lastViewedSessionSeq: 1,
+                    updatedAt: 10,
+                }),
+                's1:working': makeSessionRow('working', {
+                    active: true,
+                    presence: 'online',
+                    latestTurnStatus: 'in_progress',
+                    latestTurnStatusObservedAt: now - 1_000,
+                    updatedAt: 40,
+                }),
+            }),
+            hideInactiveSessions: false,
+            pinnedSessionKeysV1: [],
+            sessionListGroupOrderV1: {},
+            normalizedOrganizationProjection: {
+                pinnedSessionKeys: ['s1:pinned-ready', 's1:pinned-working'],
+                sessionListGroupOrder: {
+                    [PINNED_GROUP_KEY_V1]: ['s1:pinned-ready', 's1:pinned-working'],
+                },
+                sessionWorkspaceOrder: {},
+            },
+            sessionListOrderingModeV1: 'custom',
+            presentation: { enabled: false, presentation: 'grouped', selectedServerIds: [] },
+            attentionPromotion: { mode: 'global' },
+            workingPlacement: { mode: 'global' },
+            nowMs: now,
+        })!;
+
+        expect(result.map((item) => (item.type === 'header'
+            ? `h:${item.headerKind ?? 'unknown'}`
+            : `s:${item.sessionId}:${item.groupKind ?? 'unknown'}:${item.pinned === true ? 'pinned' : 'unpinned'}:${item.attentionPromotionReason ?? 'none'}:${item.workingPlacementReason ?? 'none'}`
+        ))).toEqual([
+            'h:attention',
+            's:pinned-ready:attention:pinned:ready:none',
+            's:ready:attention:unpinned:ready:none',
+            'h:working',
+            's:pinned-working:working:pinned:none:working',
+            's:working:working:unpinned:none:working',
         ]);
     });
 
@@ -1201,7 +1401,7 @@ describe('computeVisibleSessionListIndex', () => {
         ]);
     });
 
-    it('groups working sessions above pinned sessions when global working placement is selected', () => {
+    it('promotes pinned working rows before the pinned section while preserving pinned state', () => {
         const now = 1_000_000;
         const groupKey = 'server:s1:active:project:repo';
         const source: SessionListIndexItem[] = [
@@ -1306,6 +1506,7 @@ describe('computeVisibleSessionListIndex', () => {
             { type: 'header', headerKind: 'project', title: '~/repo', serverId: 's1', groupKey },
             { type: 'session', sessionId: 'action-older', serverId: 's1', section: 'active', groupKey, groupKind: 'project' },
             { type: 'session', sessionId: 'action-newer', serverId: 's1', section: 'active', groupKey, groupKind: 'project' },
+            { type: 'session', sessionId: 'blocked-pending', serverId: 's1', section: 'active', groupKey, groupKind: 'project' },
             { type: 'session', sessionId: 'permission-older', serverId: 's1', section: 'active', groupKey, groupKind: 'project' },
             { type: 'session', sessionId: 'permission-newer', serverId: 's1', section: 'active', groupKey, groupKind: 'project' },
         ];
@@ -1330,6 +1531,13 @@ describe('computeVisibleSessionListIndex', () => {
                     hasPendingUserActionRequests: true,
                     pendingRequestObservedAt: now - 1_000,
                     updatedAt: now - 10_000,
+                }),
+                's1:blocked-pending': makeSessionRow('blocked-pending', {
+                    pendingBlockedCount: 1,
+                    updatedAt: now - 500,
+                    hasPendingUserActionRequests: false,
+                    hasPendingPermissionRequests: false,
+                    pendingRequestObservedAt: undefined,
                 }),
                 's1:permission-older': makeSessionRow('permission-older', {
                     active: true,
@@ -1361,6 +1569,7 @@ describe('computeVisibleSessionListIndex', () => {
 
         expect(result.filter((item): item is Extract<SessionListIndexItem, { type: 'session' }> => item.type === 'session')
             .map((item) => `${item.sessionId}:${item.attentionPromotionReason ?? 'none'}`)).toEqual([
+                'blocked-pending:action_required',
                 'action-newer:action_required',
                 'action-older:action_required',
                 'permission-newer:permission_required',

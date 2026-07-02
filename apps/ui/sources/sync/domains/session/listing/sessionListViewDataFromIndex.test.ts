@@ -67,6 +67,38 @@ describe('buildSessionListViewDataFromIndex', () => {
         expect(result).toBe(source);
     });
 
+    it('reuses source session rows when the index only normalizes omitted keep-visible flags to false', () => {
+        const source = makeSource();
+        const sessionItem = source[1];
+        expect(sessionItem?.type).toBe('session');
+        if (sessionItem?.type !== 'session') return;
+        const sessionWithoutFalseFlag = {
+            ...sessionItem,
+            session: {
+                ...sessionItem.session,
+                keepVisibleWhenInactive: undefined,
+            },
+        };
+        const normalizedSource = [
+            source[0]!,
+            sessionWithoutFalseFlag,
+            source[2]!,
+        ];
+        const sourceIndex = buildSessionListIndexFromViewData(normalizedSource);
+        expect(sourceIndex).not.toBeNull();
+        const typedSourceIndex = sourceIndex as SessionListIndexItem[];
+        const computedIndex: SessionListIndexItem[] = typedSourceIndex.map((item) => ({ ...item }));
+
+        const result = buildSessionListViewDataFromIndex({
+            index: computedIndex,
+            source: normalizedSource,
+            sourceIndex: typedSourceIndex,
+        });
+
+        expect(result?.[1]).toBe(sessionWithoutFalseFlag);
+        expect(result?.[1]?.type === 'session' ? result[1].session : null).toBe(sessionWithoutFalseFlag.session);
+    });
+
     it('rehydrates synthetic headers and projected session fields from a computed index', () => {
         const source = makeSource();
         const sourceIndex = buildSessionListIndexFromViewData(source);

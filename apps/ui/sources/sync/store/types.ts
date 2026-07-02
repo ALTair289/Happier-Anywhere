@@ -36,7 +36,7 @@ import type {
 import type { SessionActionDraft } from '../domains/sessionActions/sessionActionDraftTypes';
 import type { SessionActionDraftStatus } from '../domains/sessionActions/sessionActionDraftTypes';
 import type { SettingsAnalyticsSource } from '@/track/settingsAnalytics/types';
-import type { SessionFoldersDomain } from './domains/sessionFolders';
+import type { SessionOrganizationDomain } from './domains/sessionOrganization';
 
 export type KnownEntitlements = 'voice' | 'pro';
 export type SessionListItem = string | Session;
@@ -154,6 +154,7 @@ export interface MessagesDomainSlice {
     };
     applyMessagesLoaded: (sessionId: string) => void;
     resetSessionMessages: (sessionId: string) => void;
+    evictSessionMessages: (sessionId: string) => void;
     isMutableToolCall: (sessionId: string, callId: string) => boolean;
 }
 
@@ -162,6 +163,7 @@ export interface PendingDomainSlice {
     applyPendingLoaded: (sessionId: string) => void;
     applyPendingMessages: (sessionId: string, messages: PendingMessage[]) => void;
     applyDiscardedPendingMessages: (sessionId: string, messages: DiscardedPendingMessage[]) => void;
+    pruneServerPendingMessages: (sessionId: string) => void;
     upsertPendingMessage: (sessionId: string, message: PendingMessage) => void;
     removePendingMessage: (sessionId: string, pendingId: string) => void;
 }
@@ -307,7 +309,7 @@ export type StorageState = SettingsDomainSlice
     & ProfileDomainSlice
     & LegacySessionsSlice
     & SessionsDomainSlice
-    & SessionFoldersDomain
+    & SessionOrganizationDomain
     & MachinesDomainSlice
     & MessagesDomainSlice
     & PendingDomainSlice

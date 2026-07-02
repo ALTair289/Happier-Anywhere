@@ -2,6 +2,7 @@ import { readStoredSessionMessages } from '@/sync/domains/messages/readStoredSes
 import type { Message } from '@/sync/domains/messages/messageTypes';
 import { readRegisteredStorageState } from '@/sync/domains/state/storageStateReaderBridge';
 import type { AgentState, Session } from '@/sync/domains/state/storageTypes';
+import { buildStableJsonSignature } from '@/sync/domains/session/metadata/sessionMetadataStability';
 import { isRequestInterruptedPlaceholder } from './requestInterruptedPlaceholder';
 import {
     CLAUDE_LOCAL_PERMISSION_BRIDGE_REQUEST_SOURCE,
@@ -41,7 +42,7 @@ const PENDING_REQUEST_COVERAGE_OPTIONS = {
     equivalentCompletedReasons: [CLAUDE_LOCAL_PERMISSION_BRIDGE_STOPPED_REASON],
 } as const;
 
-type TranscriptRequestState =
+export type TranscriptRequestState =
     | Readonly<{
         status: 'pending';
         request: SessionPendingRequest;
@@ -52,6 +53,17 @@ type TranscriptRequestState =
         createdAt: number;
         terminalKind: 'hard' | 'soft_interrupted';
     }>;
+
+/**
+ * Single-use memo shared by the pending-request derivations of one caller
+ * (e.g. one session-list renderable build) so the transcript is walked at most
+ * once per derivation pass. Callers holding an incrementally-maintained
+ * aggregate (see `transcriptRenderableAggregate.ts`) pre-fill `states` so the
+ * transcript is not walked at all.
+ */
+export type TranscriptRequestStatesCache = {
+    states?: Map<string, TranscriptRequestState>;
+};
 
 const EMPTY_PENDING_REQUEST_FLAGS: PendingRequestFlags = {
     hasPendingPermissionRequests: false,
@@ -116,15 +128,18 @@ function isPendingRequestCoveredByCompleted(
     });
 }
 
-function updateTranscriptRequestState(
-    states: Map<string, TranscriptRequestState>,
-    requestId: string,
+/**
+ * Canonical transcript request-state merge. Given the state currently held for
+ * a request id and a newly observed state, returns the state that wins.
+ * Shared by the full transcript fold below and by the incremental aggregate
+ * maintenance in `sync/domains/messages/transcriptRenderableAggregate.ts`.
+ */
+export function mergeTranscriptRequestState(
+    previousState: TranscriptRequestState | undefined,
     nextState: TranscriptRequestState,
-): void {
-    const previousState = states.get(requestId);
+): TranscriptRequestState {
     if (!previousState) {
-        states.set(requestId, nextState);
-        return;
+        return nextState;
     }
 
     if (nextState.status === 'terminal') {
@@ -137,24 +152,27 @@ function updateTranscriptRequestState(
                 && previousState.terminalKind !== 'hard'
             )
         ) {
-            states.set(requestId, nextState);
+            return nextState;
         }
-        return;
+        return previousState;
     }
 
     if (previousState.status === 'terminal') {
-        if (nextState.createdAt > previousState.createdAt) {
-            states.set(requestId, nextState);
-        }
-        return;
+        return nextState.createdAt > previousState.createdAt ? nextState : previousState;
     }
 
-    if (nextState.createdAt >= previousState.createdAt) {
-        states.set(requestId, nextState);
-    }
+    return nextState.createdAt >= previousState.createdAt ? nextState : previousState;
 }
 
-function collectTranscriptRequestStates(
+function updateTranscriptRequestState(
+    states: Map<string, TranscriptRequestState>,
+    requestId: string,
+    nextState: TranscriptRequestState,
+): void {
+    states.set(requestId, mergeTranscriptRequestState(states.get(requestId), nextState));
+}
+
+export function collectTranscriptRequestStates(
     messages: ReadonlyArray<Message> | null | undefined,
     completedRequests: Record<string, unknown> | null | undefined,
     states: Map<string, TranscriptRequestState>,
@@ -219,7 +237,11 @@ function collectTranscriptRequestStates(
 function getTranscriptRequestStates(
     session: Session,
     messages?: ReadonlyArray<Message>,
+    statesCache?: TranscriptRequestStatesCache,
 ): Map<string, TranscriptRequestState> {
+    if (statesCache?.states) {
+        return statesCache.states;
+    }
     const transcriptMessages = (() => {
         if (messages) {
             return messages;
@@ -233,6 +255,9 @@ function getTranscriptRequestStates(
         (session.agentState?.completedRequests as Record<string, unknown> | null | undefined) ?? null,
         states,
     );
+    if (statesCache) {
+        statesCache.states = states;
+    }
     return states;
 }
 
@@ -336,6 +361,23 @@ function readProjectedPendingRequestObservedAt(session: Session): number | null 
         : null;
 }
 
+function buildProjectedPendingRequestCountSignature(value: unknown): string | number {
+    if (typeof value !== 'number') return 'absent';
+    return Number.isFinite(value) ? Math.trunc(value) : 'nonfinite';
+}
+
+export function buildPendingSessionRequestsSourceSignature(session: Session): string {
+    return buildStableJsonSignature({
+        active: session.active === true,
+        agentStateCompletedRequests: session.agentState?.completedRequests ?? null,
+        agentStateRequests: session.agentState?.requests ?? null,
+        pendingPermissionRequestCount: buildProjectedPendingRequestCountSignature(session.pendingPermissionRequestCount),
+        pendingRequestObservedAt: readProjectedPendingRequestObservedAt(session),
+        pendingUserActionRequestCount: buildProjectedPendingRequestCountSignature(session.pendingUserActionRequestCount),
+        sessionId: session.id,
+    });
+}
+
 function hasProjectedPendingRequests(session: Session): boolean {
     return (session.pendingPermissionRequestCount ?? 0) > 0
         || (session.pendingUserActionRequestCount ?? 0) > 0;
@@ -360,6 +402,7 @@ export function shouldReadTranscriptForPendingSessionRequests(session: Session):
 export function listPendingSessionRequests(
     session: Session,
     messages?: ReadonlyArray<Message>,
+    statesCache?: TranscriptRequestStatesCache,
 ): SessionPendingRequest[] {
     const pendingAgentStateRequests = listPendingAgentStateRequests(session.agentState);
 
@@ -367,11 +410,18 @@ export function listPendingSessionRequests(
         return pendingAgentStateRequests.filter((request) => request.kind === 'user_action');
     }
 
-    if (!messages && !shouldReadTranscriptForPendingSessionRequests(session) && !hasPendingAgentUserActionRequests(session)) {
+    // A pre-filled states cache stands in for the transcript, so the
+    // storage-read short-circuit must not fire when one is provided.
+    if (
+        !messages
+        && !statesCache?.states
+        && !shouldReadTranscriptForPendingSessionRequests(session)
+        && !hasPendingAgentUserActionRequests(session)
+    ) {
         return [];
     }
 
-    const transcriptStates = getTranscriptRequestStates(session, messages);
+    const transcriptStates = getTranscriptRequestStates(session, messages, statesCache);
     const pending = new Map<string, SessionPendingRequest>();
     const pendingTranscriptRequests = Array.from(transcriptStates.values())
         .flatMap((state) => (state.status === 'pending' ? [state.request] : []));
@@ -441,6 +491,7 @@ function latestPendingRequestCreatedAt(requests: readonly SessionPendingRequest[
 export function deriveLatestPendingRequestObservedAtFromSession(
     session: Session,
     messages?: ReadonlyArray<Message>,
+    statesCache?: TranscriptRequestStatesCache,
 ): number | null {
     if (session.active !== true) {
         return latestPendingRequestCreatedAt(
@@ -449,7 +500,7 @@ export function deriveLatestPendingRequestObservedAtFromSession(
     }
 
     if (hasProjectedPendingRequestCounts(session)) {
-        const pendingFlags = derivePendingRequestFlagsFromSession(session, messages);
+        const pendingFlags = derivePendingRequestFlagsFromSession(session, messages, statesCache);
         if (!pendingFlags.hasPendingPermissionRequests && !pendingFlags.hasPendingUserActionRequests) {
             return null;
         }
@@ -458,7 +509,7 @@ export function deriveLatestPendingRequestObservedAtFromSession(
         }
     }
 
-    return latestPendingRequestCreatedAt(listPendingSessionRequests(session, messages));
+    return latestPendingRequestCreatedAt(listPendingSessionRequests(session, messages, statesCache));
 }
 
 export function listPendingRequestListsFromSession(
@@ -484,6 +535,7 @@ export function listPendingRequestListsFromSession(
 export function derivePendingRequestFlagsFromSession(
     session: Session,
     messages?: ReadonlyArray<Message>,
+    statesCache?: TranscriptRequestStatesCache,
 ): PendingRequestFlags {
     if (session.active !== true) {
         const agentStateFlags = derivePendingRequestFlagsFromAgentState(session.agentState);
@@ -494,7 +546,7 @@ export function derivePendingRequestFlagsFromSession(
     }
 
     if (hasProjectedPendingRequestCounts(session)) {
-        const transcriptStates = getTranscriptRequestStates(session, messages);
+        const transcriptStates = getTranscriptRequestStates(session, messages, statesCache);
         if (shouldUseProjectedPendingRequestCounts(session, transcriptStates)) {
             const projectedFlags = readProjectedPendingRequestFlags(session);
             const agentStateFlags = derivePendingRequestFlagsFromAgentState(session.agentState);
@@ -515,12 +567,12 @@ export function derivePendingRequestFlagsFromSession(
         };
     }
 
-    const transcriptStates = getTranscriptRequestStates(session, messages);
+    const transcriptStates = getTranscriptRequestStates(session, messages, statesCache);
     if (shouldUseProjectedPendingRequestCounts(session, transcriptStates)) {
         return readProjectedPendingRequestFlags(session);
     }
 
-    const requests = listPendingSessionRequests(session, messages);
+    const requests = listPendingSessionRequests(session, messages, statesCache);
     if (requests.length === 0) {
         return EMPTY_PENDING_REQUEST_FLAGS;
     }

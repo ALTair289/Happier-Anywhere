@@ -1,20 +1,32 @@
 import type { Metadata, Session } from '@/sync/domains/state/storageTypes';
 import { computeHasUnreadActivity } from '@/sync/domains/messages/unread';
-import type { PrimaryTurnStatusV1, SessionRuntimeIssueV1 } from '@happier-dev/protocol';
+import type {
+    PrimaryTurnStatusV1,
+    SessionRuntimeActivitySourceClassV1,
+    SessionRuntimeIssueV1,
+} from '@happier-dev/protocol';
 import {
     deriveLatestPendingRequestObservedAtFromSession,
     derivePendingRequestFlagsFromAgentState,
     derivePendingRequestFlagsFromSession,
+    type TranscriptRequestStatesCache,
 } from '@/sync/domains/session/pending/listPendingSessionRequests';
 import type { Message } from '@/sync/domains/messages/messageTypes';
-import { messageAttentionImpact } from '@/sync/domains/messages/messageUserAttention';
+import {
+    buildTranscriptRenderableAggregate,
+    canReuseTranscriptRenderableAggregateRequestStates,
+    type TranscriptRenderableAggregate,
+} from '@/sync/domains/messages/transcriptRenderableAggregate';
 import { resolveLastViewedSessionSeq } from '@/sync/domains/session/readCursor/resolveLastViewedSessionSeq';
 import { resolveSessionReadableSeq } from '@/sync/domains/session/readCursor/resolveSessionReadableSeq';
 import { resolveSessionProjectGroupingKeyParts } from './sessionListProjectGroupingKeys';
 import { deriveSessionListMeaningfulActivityAt } from './deriveSessionListActivity';
 import type { SessionListAttentionPromotionReason } from './attentionPromotion/sessionListAttentionPromotionTypes';
 import { projectSessionListPlacement } from './placement/sessionListPlacementProjection';
-import { resolveSessionRuntimePresenceFields } from '../attention/deriveSessionRuntimePresentationState';
+import {
+    deriveSessionRuntimePresentationState,
+    resolveSessionRuntimePresenceFields,
+} from '../attention/deriveSessionRuntimePresentationState';
 
 export { derivePendingRequestFlagsFromAgentState } from '@/sync/domains/session/pending/listPendingSessionRequests';
 
@@ -50,6 +62,7 @@ export interface SessionListRenderableSession {
     archivedAt?: number | null;
     pendingVersion?: number;
     pendingCount?: number;
+    pendingBlockedCount?: number;
     lastViewedSessionSeq?: number | null;
     metadataVersion: number;
     agentStateVersion: number;
@@ -60,6 +73,10 @@ export interface SessionListRenderableSession {
     latestTurnId?: string | null;
     latestTurnStatus?: PrimaryTurnStatusV1 | null;
     latestTurnStatusObservedAt?: number | null;
+    runtimeActivityActiveCount?: number;
+    runtimeActivityObservedAt?: number | null;
+    runtimeActivityExpiresAt?: number | null;
+    runtimeActivitySourceClass?: SessionRuntimeActivitySourceClassV1 | null;
     lastRuntimeIssue?: SessionRuntimeIssueV1 | null;
     rollbackEligibleTurnStarts?: readonly number[] | null;
     latestReadyEventSeq?: number | null;
@@ -77,6 +94,8 @@ export interface SessionListRenderableSession {
     metadataUnavailable?: boolean;
 }
 
+export type SessionListRenderablePatchFields = Readonly<Partial<Omit<SessionListRenderableSession, 'id'>>>;
+
 type DirectSessionRenderableMetadata = NonNullable<SessionListRenderableMetadata['directSessionV1']>;
 type ReadStateRenderableMetadata = NonNullable<SessionListRenderableMetadata['readStateV1']>;
 
@@ -90,10 +109,11 @@ export function deriveSessionListRenderableHasUnreadMessagesFromSession(
     session: Pick<Session, 'seq' | 'metadata' | 'lastViewedSessionSeq'>
         & Partial<Pick<Session, 'latestTurnStatus' | 'latestReadyEventSeq'>>,
     messages?: ReadonlyArray<Message>,
+    transcriptAggregate?: TranscriptRenderableAggregate | null,
 ): boolean {
     return deriveSessionListRenderableHasUnreadMessagesFromReadableSeq(
         session,
-        resolveSessionListReadableSeq(session, messages),
+        resolveSessionListReadableSeq(session, messages, transcriptAggregate),
     );
 }
 
@@ -161,16 +181,24 @@ export function buildSessionListRenderableMetadata(metadata: Metadata | null | u
 export function buildSessionListRenderableFromSession(
     session: Session,
     messages?: ReadonlyArray<Message>,
+    transcriptAggregate?: TranscriptRenderableAggregate | null,
 ): SessionListRenderableSession {
-    const pending = derivePendingRequestFlagsFromSession(session, messages);
-    const latestCommittedMessageCreatedAt = Array.isArray(messages) && messages.length > 0
-        ? messages.reduce<number | null>((latest, message) => {
-            if (!messageAttentionImpact(message).affectsMeaningfulActivity) return latest;
-            const createdAt = message.createdAt;
-            if (typeof createdAt !== 'number' || !Number.isFinite(createdAt) || createdAt <= 0) return latest;
-            return latest == null ? createdAt : Math.max(latest, createdAt);
-        }, null)
-        : null;
+    // Single derivation path: the transcript folds live in the aggregate.
+    // Hot callers (streaming applyMessages) pass an incrementally-maintained
+    // aggregate; cold callers pass messages and pay one full walk here.
+    const completedRequests = (session.agentState?.completedRequests as Record<string, unknown> | null | undefined) ?? null;
+    const aggregate = (() => {
+        if (transcriptAggregate && canReuseTranscriptRenderableAggregateRequestStates(transcriptAggregate, completedRequests)) {
+            return transcriptAggregate;
+        }
+        if (Array.isArray(messages)) {
+            return buildTranscriptRenderableAggregate({ messages, completedRequests });
+        }
+        return null;
+    })();
+    const statesCache: TranscriptRequestStatesCache = aggregate ? { states: aggregate.requestStates } : {};
+    const pending = derivePendingRequestFlagsFromSession(session, messages, statesCache);
+    const latestCommittedMessageCreatedAt = aggregate ? aggregate.latestCommittedMessageCreatedAt : null;
     const latestTurnStatus = readSessionLatestTurnStatus(session);
     const latestTurnStatusObservedAt = readSessionReadyEventNumber(session, 'latestTurnStatusObservedAt');
     const runtimePresence = resolveSessionRuntimePresenceFields({
@@ -196,6 +224,7 @@ export function buildSessionListRenderableFromSession(
         archivedAt: session.archivedAt ?? null,
         pendingVersion: session.pendingVersion,
         pendingCount: session.pendingCount,
+        pendingBlockedCount: session.pendingBlockedCount,
         lastViewedSessionSeq: normalizeLastViewedSessionSeq(session.lastViewedSessionSeq),
         metadataVersion: session.metadataVersion,
         agentStateVersion: session.agentStateVersion,
@@ -206,6 +235,10 @@ export function buildSessionListRenderableFromSession(
         latestTurnId: readSessionLatestTurnId(session),
         latestTurnStatus,
         latestTurnStatusObservedAt,
+        runtimeActivityActiveCount: session.runtimeActivityActiveCount,
+        runtimeActivityObservedAt: session.runtimeActivityObservedAt ?? null,
+        runtimeActivityExpiresAt: session.runtimeActivityExpiresAt ?? null,
+        runtimeActivitySourceClass: session.runtimeActivitySourceClass ?? null,
         lastRuntimeIssue: readSessionLastRuntimeIssue(session),
         rollbackEligibleTurnStarts: readRollbackEligibleTurnStarts(session.rollbackEligibleTurnStarts),
         latestReadyEventSeq: readSessionReadyEventNumber(session, 'latestReadyEventSeq'),
@@ -217,8 +250,8 @@ export function buildSessionListRenderableFromSession(
         canApprovePermissions: session.canApprovePermissions,
         hasPendingPermissionRequests: pending.hasPendingPermissionRequests,
         hasPendingUserActionRequests: pending.hasPendingUserActionRequests,
-        pendingRequestObservedAt: deriveLatestPendingRequestObservedAtFromSession(session, messages),
-        hasUnreadMessages: deriveSessionListRenderableHasUnreadMessagesFromSession(session, messages),
+        pendingRequestObservedAt: deriveLatestPendingRequestObservedAtFromSession(session, messages, statesCache),
+        hasUnreadMessages: deriveSessionListRenderableHasUnreadMessagesFromSession(session, messages, aggregate),
     };
 }
 
@@ -342,6 +375,7 @@ export function areSessionListRenderablesEqual(
         && (previous.archivedAt ?? null) === (next.archivedAt ?? null)
         && (previous.pendingVersion ?? null) === (next.pendingVersion ?? null)
         && (previous.pendingCount ?? null) === (next.pendingCount ?? null)
+        && (previous.pendingBlockedCount ?? null) === (next.pendingBlockedCount ?? null)
         && (previous.lastViewedSessionSeq ?? null) === (next.lastViewedSessionSeq ?? null)
         && previous.metadataVersion === next.metadataVersion
         && previous.agentStateVersion === next.agentStateVersion
@@ -351,6 +385,10 @@ export function areSessionListRenderablesEqual(
         && (previous.latestTurnId ?? null) === (next.latestTurnId ?? null)
         && (previous.latestTurnStatus ?? null) === (next.latestTurnStatus ?? null)
         && (previous.latestTurnStatusObservedAt ?? null) === (next.latestTurnStatusObservedAt ?? null)
+        && (previous.runtimeActivityActiveCount ?? null) === (next.runtimeActivityActiveCount ?? null)
+        && (previous.runtimeActivityObservedAt ?? null) === (next.runtimeActivityObservedAt ?? null)
+        && (previous.runtimeActivityExpiresAt ?? null) === (next.runtimeActivityExpiresAt ?? null)
+        && (previous.runtimeActivitySourceClass ?? null) === (next.runtimeActivitySourceClass ?? null)
         && areSessionRuntimeIssuesEqual(previous.lastRuntimeIssue ?? null, next.lastRuntimeIssue ?? null)
         && areRollbackEligibleTurnStartsEqual(previous.rollbackEligibleTurnStarts, next.rollbackEligibleTurnStarts)
         && (previous.latestReadyEventSeq ?? null) === (next.latestReadyEventSeq ?? null)
@@ -367,6 +405,27 @@ export function areSessionListRenderablesEqual(
         && (previous.keepVisibleWhenInactive === true) === (next.keepVisibleWhenInactive === true)
         && (previous.metadataUnavailable === true) === (next.metadataUnavailable === true)
         && areSessionListRenderableMetadataEqual(previous.metadata, next.metadata);
+}
+
+export function applySessionListRenderablePatch(
+    renderable: SessionListRenderableSession,
+    patch: SessionListRenderablePatchFields,
+): SessionListRenderableSession {
+    return {
+        ...renderable,
+        ...patch,
+        id: renderable.id,
+    };
+}
+
+export function isSessionListRenderablePatchNoop(
+    renderable: SessionListRenderableSession,
+    patch: SessionListRenderablePatchFields,
+): boolean {
+    return areSessionListRenderablesEqual(
+        renderable,
+        applySessionListRenderablePatch(renderable, patch),
+    );
 }
 
 function readSessionLatestTurnId(session: Session): string | null {
@@ -396,9 +455,16 @@ export function readRollbackEligibleTurnStarts(value: unknown): readonly number[
 function resolveSessionListReadableSeq(
     session: Pick<Session, 'seq'> & Partial<Pick<Session, 'latestTurnStatus' | 'latestReadyEventSeq'>>,
     messages: ReadonlyArray<Message> | undefined,
+    transcriptAggregate?: TranscriptRenderableAggregate | null,
 ): number {
     return resolveSessionReadableSeq({
         messages: messages ?? null,
+        messagesProjection: transcriptAggregate
+            ? {
+                hasMessages: transcriptAggregate.messageCount > 0,
+                latestUnreadAffectingMessageSeq: transcriptAggregate.latestUnreadAffectingMessageSeq,
+            }
+            : null,
         sessionSeq: session.seq,
         latestReadyEventSeq: session.latestReadyEventSeq,
         latestTurnStatus: session.latestTurnStatus,
@@ -489,15 +555,9 @@ export function didSessionListRenderableEmbeddedListRowFieldsChange(
     next: SessionListRenderableSession,
 ): boolean {
     if (!previous) return true;
-    // High-churn runtime fields are owned by visible row subscriptions. This
-    // comparator only refreshes embedded source rows for stale identity/badge
-    // fields that otherwise remain stuck inside already-built list data.
-    if ((previous.pendingCount ?? null) !== (next.pendingCount ?? null)) return true;
-    if ((previous.lastViewedSessionSeq ?? null) !== (next.lastViewedSessionSeq ?? null)) return true;
-    if ((previous.hasPendingPermissionRequests ?? null) !== (next.hasPendingPermissionRequests ?? null)) return true;
-    if ((previous.hasPendingUserActionRequests ?? null) !== (next.hasPendingUserActionRequests ?? null)) return true;
-    if ((previous.pendingRequestObservedAt ?? null) !== (next.pendingRequestObservedAt ?? null)) return true;
-    if ((previous.hasUnreadMessages === true) !== (next.hasUnreadMessages === true)) return true;
+    // High-churn status, pending, unread, and turn-state fields are owned by
+    // row-store overlays. Keep embedded list data structural/identity-focused
+    // so live streaming does not republish the whole list array.
     if ((previous.metadataUnavailable === true) !== (next.metadataUnavailable === true)) return true;
     if (!areSessionListRenderableMetadataEqual(previous.metadata, next.metadata)) return true;
 
@@ -596,10 +656,15 @@ export function didSessionListRenderableWarmCacheFieldsChange(
     if ((previous.archivedAt ?? null) !== (next.archivedAt ?? null)) return true;
     if ((previous.lastViewedSessionSeq ?? null) !== (next.lastViewedSessionSeq ?? null)) return true;
     if ((previous.pendingCount ?? null) !== (next.pendingCount ?? null)) return true;
+    if ((previous.pendingBlockedCount ?? null) !== (next.pendingBlockedCount ?? null)) return true;
     if ((previous.pendingVersion ?? null) !== (next.pendingVersion ?? null)) return true;
     if ((previous.latestTurnId ?? null) !== (next.latestTurnId ?? null)) return true;
     if ((previous.latestTurnStatus ?? null) !== (next.latestTurnStatus ?? null)) return true;
     if ((previous.latestTurnStatusObservedAt ?? null) !== (next.latestTurnStatusObservedAt ?? null)) return true;
+    if ((previous.runtimeActivityActiveCount ?? null) !== (next.runtimeActivityActiveCount ?? null)) return true;
+    if ((previous.runtimeActivityObservedAt ?? null) !== (next.runtimeActivityObservedAt ?? null)) return true;
+    if ((previous.runtimeActivityExpiresAt ?? null) !== (next.runtimeActivityExpiresAt ?? null)) return true;
+    if ((previous.runtimeActivitySourceClass ?? null) !== (next.runtimeActivitySourceClass ?? null)) return true;
     if (!areSessionRuntimeIssuesEqual(previous.lastRuntimeIssue ?? null, next.lastRuntimeIssue ?? null)) return true;
     if (!areRollbackEligibleTurnStartsEqual(previous.rollbackEligibleTurnStarts, next.rollbackEligibleTurnStarts)) return true;
     if ((previous.latestReadyEventSeq ?? null) !== (next.latestReadyEventSeq ?? null)) return true;
@@ -643,11 +708,16 @@ export function isSessionListRenderableWarmCacheProgressOnlyChange(
     if (previous.thinking !== next.thinking) return false;
     if ((previous.archivedAt ?? null) !== (next.archivedAt ?? null)) return false;
     if ((previous.pendingCount ?? null) !== (next.pendingCount ?? null)) return false;
+    if ((previous.pendingBlockedCount ?? null) !== (next.pendingBlockedCount ?? null)) return false;
     if ((previous.pendingVersion ?? null) !== (next.pendingVersion ?? null)) return false;
     if ((previous.lastViewedSessionSeq ?? null) !== (next.lastViewedSessionSeq ?? null)) return false;
     if ((previous.latestTurnId ?? null) !== (next.latestTurnId ?? null)) return false;
     if ((previous.latestTurnStatus ?? null) !== (next.latestTurnStatus ?? null)) return false;
     if ((previous.latestTurnStatusObservedAt ?? null) !== (next.latestTurnStatusObservedAt ?? null)) return false;
+    if ((previous.runtimeActivityActiveCount ?? null) !== (next.runtimeActivityActiveCount ?? null)) return false;
+    if ((previous.runtimeActivityObservedAt ?? null) !== (next.runtimeActivityObservedAt ?? null)) return false;
+    if ((previous.runtimeActivityExpiresAt ?? null) !== (next.runtimeActivityExpiresAt ?? null)) return false;
+    if ((previous.runtimeActivitySourceClass ?? null) !== (next.runtimeActivitySourceClass ?? null)) return false;
     if (!areSessionRuntimeIssuesEqual(previous.lastRuntimeIssue ?? null, next.lastRuntimeIssue ?? null)) return false;
     if (!areRollbackEligibleTurnStartsEqual(previous.rollbackEligibleTurnStarts, next.rollbackEligibleTurnStarts)) return false;
     if ((previous.latestReadyEventSeq ?? null) !== (next.latestReadyEventSeq ?? null)) return false;
@@ -667,6 +737,54 @@ export function isSessionListRenderableWarmCacheProgressOnlyChange(
         || previous.updatedAt !== next.updatedAt
         || (previous.meaningfulActivityAt ?? null) !== (next.meaningfulActivityAt ?? null)
         || previous.activeAt !== next.activeAt;
+}
+
+export function isSessionListRenderableRuntimeActivityLeaseOnlyChange(input: Readonly<{
+    previous: SessionListRenderableSession | undefined;
+    next: SessionListRenderableSession | undefined;
+    nowMs: number;
+}>): input is Readonly<{
+    previous: SessionListRenderableSession;
+    next: SessionListRenderableSession;
+    nowMs: number;
+}> {
+    const { previous, next, nowMs } = input;
+    if (!previous || !next || previous === next) return false;
+    if ((previous.runtimeActivityActiveCount ?? null) !== (next.runtimeActivityActiveCount ?? null)) return false;
+    if ((previous.runtimeActivitySourceClass ?? null) !== (next.runtimeActivitySourceClass ?? null)) return false;
+    if (
+        (previous.runtimeActivityObservedAt ?? null) === (next.runtimeActivityObservedAt ?? null)
+        && (previous.runtimeActivityExpiresAt ?? null) === (next.runtimeActivityExpiresAt ?? null)
+    ) {
+        return false;
+    }
+
+    if (!areRuntimeActivityPresentationStatesEquivalent(previous, next, nowMs)) return false;
+    return areSessionListRenderablesEqual(
+        {
+            ...previous,
+            runtimeActivityObservedAt: next.runtimeActivityObservedAt,
+            runtimeActivityExpiresAt: next.runtimeActivityExpiresAt,
+        },
+        next,
+    );
+}
+
+function areRuntimeActivityPresentationStatesEquivalent(
+    previous: SessionListRenderableSession,
+    next: SessionListRenderableSession,
+    nowMs: number,
+): boolean {
+    const previousStatus = deriveSessionRuntimePresentationState(previous, nowMs);
+    const nextStatus = deriveSessionRuntimePresentationState(next, nowMs);
+    return previousStatus.working === nextStatus.working
+        && previousStatus.runtimeProjectionInProgress === nextStatus.runtimeProjectionInProgress
+        && previousStatus.runtimeActivelyWorking === nextStatus.runtimeActivelyWorking
+        && previousStatus.freshInProgress === nextStatus.freshInProgress
+        && previousStatus.freshThinking === nextStatus.freshThinking
+        && previousStatus.freshProviderRuntimeActivity === nextStatus.freshProviderRuntimeActivity
+        && previousStatus.freshPermissionRequired === nextStatus.freshPermissionRequired
+        && previousStatus.freshActionRequired === nextStatus.freshActionRequired;
 }
 
 function areRollbackEligibleTurnStartsEqual(

@@ -5,6 +5,16 @@ import type { Message } from '@/sync/domains/messages/messageTypes';
 
 export type ResolveSessionReadableSeqInput = Readonly<{
     messages?: ReadonlyArray<Message> | null;
+    /**
+     * Precomputed replacement for the `messages` walk, produced by the
+     * incrementally-maintained transcript aggregate
+     * (`sync/domains/messages/transcriptRenderableAggregate.ts`).
+     * Takes precedence over `messages` when provided.
+     */
+    messagesProjection?: Readonly<{
+        hasMessages: boolean;
+        latestUnreadAffectingMessageSeq: number | null;
+    }> | null;
     latestMessageSeq?: unknown;
     sessionSeq?: unknown;
     latestReadyEventSeq?: unknown;
@@ -27,8 +37,13 @@ export function resolveLatestUnreadAffectingCommittedMessageSeq(
 }
 
 export function resolveSessionReadableSeq(input: ResolveSessionReadableSeqInput): number | null {
-    const hasCommittedMessageAttentionProjection = Array.isArray(input.messages) && input.messages.length > 0;
-    let readableSeq = resolveLatestUnreadAffectingCommittedMessageSeq(input.messages);
+    const projection = input.messagesProjection ?? null;
+    const hasCommittedMessageAttentionProjection = projection
+        ? projection.hasMessages
+        : Array.isArray(input.messages) && input.messages.length > 0;
+    let readableSeq = projection
+        ? projection.latestUnreadAffectingMessageSeq
+        : resolveLatestUnreadAffectingCommittedMessageSeq(input.messages);
     if (!hasCommittedMessageAttentionProjection) {
         readableSeq = maxReadSeq(readableSeq, normalizeReadSeq(input.latestMessageSeq));
     }

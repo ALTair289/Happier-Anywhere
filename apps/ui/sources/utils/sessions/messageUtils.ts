@@ -2,12 +2,17 @@ import { type DecryptedMessage } from '@/sync/domains/state/storageTypes';
 import { type ToolCall } from '@/sync/domains/messages/messageTypes';
 
 /**
- * Extracts plain text from markdown by removing formatting
+ * Extracts plain text from markdown by removing formatting.
+ * Canonical markdown→plain-preview owner; reused by transcript navigation previews.
  */
-function stripMarkdown(text: string): string {
+export function stripMarkdown(text: string): string {
   return text
     // Remove headers
     .replace(/^#{1,6}\s+/gm, '')
+    // Remove table separator rows (|---|---| and :---: variants)
+    .replace(/^\s*\|?[\s:|-]+\|[\s:|-]*$/gm, '')
+    // Replace remaining table pipes with spaces
+    .replace(/\|/g, ' ')
     // Remove bold and italic
     .replace(/\*\*([^*]+)\*\*/g, '$1')
     .replace(/\*([^*]+)\*/g, '$1')

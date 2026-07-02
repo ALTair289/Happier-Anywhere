@@ -42,6 +42,13 @@ describe('buildSessionTranscriptRenderSignature', () => {
         })).toBe(signature);
     });
 
+    it('includes the transcript sequence cursor so parent-driven transcript updates render', () => {
+        expect(buildSessionTranscriptRenderSignature({
+            ...baseSession,
+            seq: 2,
+        })).not.toBe(buildSessionTranscriptRenderSignature(baseSession));
+    });
+
     it('includes transcript-visible session fields', () => {
         expect(buildSessionTranscriptRenderSignature({
             ...baseSession,

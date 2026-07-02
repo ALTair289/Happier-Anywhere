@@ -182,6 +182,33 @@ describe('sessionListRenderableStoreUpdate', () => {
         expect(plan.didDeferredWarmCacheRelevantRenderableChange).toBe(true);
     });
 
+    it('defers warm-cache persistence for runtime activity lease-only patches', () => {
+        const previous = makeRenderable('s1', {
+            runtimeActivityActiveCount: 1,
+            runtimeActivityObservedAt: 100,
+            runtimeActivityExpiresAt: Date.now() + 60_000,
+            runtimeActivitySourceClass: 'provider_detached_task',
+        });
+        const plan = planSessionListRenderablePatches({
+            previousRenderables: { s1: previous },
+            patches: [{
+                sessionId: 's1',
+                patch: {
+                    runtimeActivityObservedAt: 200,
+                    runtimeActivityExpiresAt: Date.now() + 120_000,
+                },
+            }],
+            isSessionListViewDataUninitialized: false,
+            rebuildOnAttentionPromotionFieldsChange: true,
+        });
+
+        expect(plan.needsSessionListViewDataRebuild).toBe(false);
+        expect(plan.listViewRowRefreshSessionIds).toEqual(['s1']);
+        expect(plan.didWarmCacheRelevantRenderableChange).toBe(true);
+        expect(plan.didImmediateWarmCacheRelevantRenderableChange).toBe(false);
+        expect(plan.didDeferredWarmCacheRelevantRenderableChange).toBe(true);
+    });
+
     it('marks latest turn projection patches as warm-cache relevant', () => {
         const previous = makeRenderable('s1', {
             latestTurnId: 'turn-1',
@@ -232,5 +259,36 @@ describe('sessionListRenderableStoreUpdate', () => {
         });
 
         expect(plan.didWarmCacheRelevantRenderableChange).toBe(true);
+    });
+
+    it('treats pending, unread, and request row updates as overlay-only when placement does not change', () => {
+        const previous = makeRenderable('s1', {
+            pendingCount: 0,
+            pendingBlockedCount: 0,
+            hasUnreadMessages: false,
+            hasPendingUserActionRequests: false,
+            pendingRequestObservedAt: null,
+        });
+        const plan = planSessionListRenderablePatches({
+            previousRenderables: { s1: previous },
+            patches: [{
+                sessionId: 's1',
+                patch: {
+                    pendingCount: 2,
+                    pendingBlockedCount: 1,
+                    hasUnreadMessages: true,
+                    hasPendingUserActionRequests: true,
+                    pendingRequestObservedAt: 200,
+                },
+            }],
+            isSessionListViewDataUninitialized: false,
+            rebuildOnAttentionPromotionFieldsChange: false,
+        });
+
+        expect(plan.changedCount).toBe(1);
+        expect(plan.needsSessionListViewDataRebuild).toBe(false);
+        expect(plan.listViewRowRefreshSessionIds).toEqual([]);
+        expect(plan.nextRenderables.s1.pendingBlockedCount).toBe(1);
+        expect(plan.nextRenderables.s1.hasPendingUserActionRequests).toBe(true);
     });
 });

@@ -89,6 +89,42 @@ describe('sessionListRenderableCommit', () => {
         expect(next.sessionListViewDataByServerId.server_target).toBeUndefined();
     });
 
+    it('keeps active list data stable for overlay-owned pending patches', () => {
+        const renderable = makeRenderable('s1', {
+            pendingCount: 0,
+            pendingBlockedCount: 0,
+            hasPendingUserActionRequests: false,
+        });
+        const activeListViewData: SessionListViewItem[] = [{
+            type: 'session',
+            session: renderable,
+            serverId: 'server_active',
+        }];
+        const state = makeState({ activeListViewData, targetRenderable: renderable });
+        const plan = planSessionListRenderablePatchesCommit({
+            state,
+            patches: [{
+                sessionId: 's1',
+                patch: {
+                    pendingCount: 2,
+                    pendingBlockedCount: 1,
+                    hasPendingUserActionRequests: true,
+                },
+            }],
+        });
+
+        const next = applySessionListRenderableCommitPlan({
+            state,
+            plan,
+        });
+
+        expect(plan.needsSessionListViewDataRebuild).toBe(false);
+        expect(plan.listViewRowRefreshSessionIds).toEqual([]);
+        expect(next.sessionListRenderables.s1.pendingBlockedCount).toBe(1);
+        expect(next.sessionListViewData).toBe(activeListViewData);
+        expect(next.sessionListViewDataByServerId.server_active).toBe(activeListViewData);
+    });
+
     it('caches rebuilt target-server data without replacing it with the active list', () => {
         const activeRenderable = makeRenderable('s1', { active: false });
         const targetRenderable = makeRenderable('s1', { active: false });

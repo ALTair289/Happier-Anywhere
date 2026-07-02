@@ -1,17 +1,21 @@
 import {
     areSessionListRenderablesEqual,
+    applySessionListRenderablePatch,
     didSessionListRenderableAttentionPromotionFieldsChange,
     didSessionListRenderableStructuralFieldsChange,
     didSessionListRenderableWarmCacheFieldsChange,
+    isSessionListRenderableRuntimeActivityLeaseOnlyChange,
     isSessionListRenderableWarmCacheProgressOnlyChange,
     preserveSessionListRenderableStaleFields,
     preserveSessionListRenderableTransientState,
+    type SessionListRenderablePatchFields,
     type SessionListRenderableSession,
 } from '../../domains/session/listing/sessionListRenderable';
+import { nowServerMs } from '../../runtime/time';
 
 export type SessionListRenderablePatch = Readonly<{
     sessionId: string;
-    patch: Partial<SessionListRenderableSession>;
+    patch: SessionListRenderablePatchFields;
 }>;
 
 export type SessionListRenderableStoreUpdatePlan = Readonly<{
@@ -67,6 +71,33 @@ function didPreservePendingFlags(
             next.hasPendingPermissionRequests === previous.hasPendingPermissionRequests
             || next.hasPendingUserActionRequests === previous.hasPendingUserActionRequests
         );
+}
+
+function isDeferredWarmCacheOnlyRenderableChange(
+    previous: SessionListRenderableSession | undefined,
+    next: SessionListRenderableSession,
+): boolean {
+    return isSessionListRenderableWarmCacheProgressOnlyChange(previous, next)
+        || isSessionListRenderableRuntimeActivityLeaseOnlyChange({
+            previous,
+            next,
+            nowMs: nowServerMs(),
+        });
+}
+
+function shouldRefreshListViewRowForRenderableChange(input: Readonly<{
+    previous: SessionListRenderableSession | undefined;
+    next: SessionListRenderableSession;
+    didListViewFieldsChange: boolean;
+    didListViewRowFieldsChange: boolean;
+}>): boolean {
+    if (input.didListViewFieldsChange) return false;
+    if (input.didListViewRowFieldsChange) return true;
+    return isSessionListRenderableRuntimeActivityLeaseOnlyChange({
+        previous: input.previous,
+        next: input.next,
+        nowMs: nowServerMs(),
+    });
 }
 
 function planSessionListRenderableIncomingRows(input: Readonly<{
@@ -129,7 +160,12 @@ function planSessionListRenderableIncomingRows(input: Readonly<{
             if (didListViewFieldsChange) {
                 listViewFieldChangeCount += 1;
             }
-            if (!didListViewFieldsChange && didListViewRowFieldsChange) {
+            if (shouldRefreshListViewRowForRenderableChange({
+                previous: previousRenderable,
+                next: nextRenderable,
+                didListViewFieldsChange,
+                didListViewRowFieldsChange,
+            })) {
                 listViewRowRefreshSessionIds.push(incomingRenderable.id);
             }
             if (didAttentionPromotionFieldsChange) {
@@ -139,7 +175,7 @@ function planSessionListRenderableIncomingRows(input: Readonly<{
                 if (
                     !didListViewFieldsChange
                     && !didAttentionPromotionFieldsChange
-                    && isSessionListRenderableWarmCacheProgressOnlyChange(previousRenderable, nextRenderable)
+                    && isDeferredWarmCacheOnlyRenderableChange(previousRenderable, nextRenderable)
                 ) {
                     didDeferredWarmCacheRelevantRenderableChange = true;
                 } else {
@@ -247,11 +283,7 @@ export function planSessionListRenderablePatches(input: Readonly<{
             continue;
         }
 
-        const nextRenderable: SessionListRenderableSession = {
-            ...previousRenderable,
-            ...patch,
-            id: previousRenderable.id,
-        };
+        const nextRenderable = applySessionListRenderablePatch(previousRenderable, patch);
 
         if (areSessionListRenderablesEqual(previousRenderable, nextRenderable)) {
             noopPatchCount += 1;
@@ -269,7 +301,12 @@ export function planSessionListRenderablePatches(input: Readonly<{
         if (didListViewFieldsChange) {
             listViewFieldChangeCount += 1;
         }
-        if (!didListViewFieldsChange && didListViewRowFieldsChange) {
+        if (shouldRefreshListViewRowForRenderableChange({
+            previous: previousRenderable,
+            next: nextRenderable,
+            didListViewFieldsChange,
+            didListViewRowFieldsChange,
+        })) {
             listViewRowRefreshSessionIds.push(sessionId);
         }
         if (didAttentionPromotionFieldsChange) {
@@ -279,7 +316,7 @@ export function planSessionListRenderablePatches(input: Readonly<{
             if (
                 !didListViewFieldsChange
                 && !didAttentionPromotionFieldsChange
-                && isSessionListRenderableWarmCacheProgressOnlyChange(previousRenderable, nextRenderable)
+                && isDeferredWarmCacheOnlyRenderableChange(previousRenderable, nextRenderable)
             ) {
                 didDeferredWarmCacheRelevantRenderableChange = true;
             } else {

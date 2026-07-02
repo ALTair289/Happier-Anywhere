@@ -158,6 +158,34 @@ describe('buildSessionListRenderableFromSession', () => {
         expect(renderable.latestTurnStatus).toBe('completed');
     });
 
+    it('projects runtime activity fields onto renderable session rows', () => {
+        const renderable = buildSessionListRenderableFromSession({
+            id: 's_runtime_activity',
+            seq: 4,
+            createdAt: 1,
+            updatedAt: 1,
+            active: true,
+            activeAt: 1,
+            archivedAt: null,
+            metadata: null,
+            metadataVersion: 1,
+            agentState: null,
+            agentStateVersion: 0,
+            thinking: false,
+            thinkingAt: 0,
+            presence: 'online',
+            runtimeActivityActiveCount: 1,
+            runtimeActivityObservedAt: 100,
+            runtimeActivityExpiresAt: 200,
+            runtimeActivitySourceClass: 'provider_detached_task',
+        } as Session);
+
+        expect(renderable.runtimeActivityActiveCount).toBe(1);
+        expect(renderable.runtimeActivityObservedAt).toBe(100);
+        expect(renderable.runtimeActivityExpiresAt).toBe(200);
+        expect(renderable.runtimeActivitySourceClass).toBe('provider_detached_task');
+    });
+
     it('projects ready unread state onto renderable session rows', () => {
         const renderable = buildSessionListRenderableFromSession({
             id: 's_unread',
@@ -403,6 +431,25 @@ describe('buildSessionListRenderableFromSession', () => {
             id: 's_ready_equality',
             latestReadyEventSeq: 5,
             latestReadyEventAt: 2_000,
+        });
+
+        expect(areSessionListRenderablesEqual(previous, next)).toBe(false);
+    });
+
+    it('treats runtime activity fields as renderable equality inputs', () => {
+        const previous = buildRenderable({
+            id: 's_runtime_activity_equality',
+            runtimeActivityActiveCount: 1,
+            runtimeActivityObservedAt: 100,
+            runtimeActivityExpiresAt: 200,
+            runtimeActivitySourceClass: 'provider_detached_task',
+        });
+        const next = buildRenderable({
+            id: 's_runtime_activity_equality',
+            runtimeActivityActiveCount: 1,
+            runtimeActivityObservedAt: 150,
+            runtimeActivityExpiresAt: 250,
+            runtimeActivitySourceClass: 'provider_detached_task',
         });
 
         expect(areSessionListRenderablesEqual(previous, next)).toBe(false);
@@ -943,5 +990,113 @@ describe('didSessionListRenderableReachabilityPeerFieldsChange', () => {
                 summaryText: 'Updated non-reachability summary',
             } as any,
         })).toBe(false);
+    });
+});
+
+describe('buildSessionListRenderableFromSession with transcript aggregate', () => {
+    function buildTranscriptFixture() {
+        const messages = [
+            {
+                id: 'u1',
+                kind: 'user-text',
+                localId: null,
+                createdAt: 1_000,
+                seq: 3,
+                text: 'run it',
+            },
+            {
+                id: 't1',
+                kind: 'tool-call',
+                localId: null,
+                createdAt: 2_000,
+                seq: 5,
+                tool: {
+                    id: 't1-tool',
+                    name: 'bash',
+                    state: 'running',
+                    input: { command: 'ls' },
+                    createdAt: 2_000,
+                    startedAt: 2_000,
+                    completedAt: null,
+                    description: null,
+                    permission: {
+                        id: 't1-perm',
+                        status: 'pending',
+                    },
+                },
+                children: [],
+            },
+            {
+                id: 'a1',
+                kind: 'agent-text',
+                localId: null,
+                createdAt: 3_000,
+                seq: 7,
+                text: 'done',
+            },
+        ] as unknown as import('@/sync/domains/messages/messageTypes').Message[];
+
+        const session = {
+            id: 's_aggregate',
+            seq: 7,
+            lastViewedSessionSeq: 3,
+            createdAt: 1,
+            updatedAt: 3_000,
+            active: true,
+            activeAt: 3_000,
+            archivedAt: null,
+            metadata: null,
+            metadataVersion: 1,
+            agentState: {
+                requests: {},
+                completedRequests: null,
+            },
+            agentStateVersion: 2,
+            thinking: false,
+            thinkingAt: 0,
+            presence: 'online',
+        } as unknown as Session;
+
+        return { session, messages };
+    }
+
+    it('derives a byte-identical renderable from the aggregate without a messages walk', async () => {
+        const { buildTranscriptRenderableAggregate } = await import('@/sync/domains/messages/transcriptRenderableAggregate');
+        const { session, messages } = buildTranscriptFixture();
+
+        const fromMessages = buildSessionListRenderableFromSession(session, messages);
+        const aggregate = buildTranscriptRenderableAggregate({
+            messages,
+            completedRequests: null,
+        });
+        const fromAggregate = buildSessionListRenderableFromSession(session, undefined, aggregate);
+
+        expect(fromAggregate).toEqual(fromMessages);
+        expect(fromMessages.hasPendingPermissionRequests).toBe(true);
+        expect(fromMessages.hasUnreadMessages).toBe(true);
+        expect(fromMessages.meaningfulActivityAt).toBe(3_000);
+        expect(fromMessages.pendingRequestObservedAt).toBe(2_000);
+    });
+
+    it('does not fall back to stored-transcript reads when an aggregate is provided', async () => {
+        const { buildTranscriptRenderableAggregate } = await import('@/sync/domains/messages/transcriptRenderableAggregate');
+        const { session, messages } = buildTranscriptFixture();
+
+        // Poison the storage bridge for this session: a stored-messages
+        // fallback would surface this bogus transcript.
+        storageState.sessionMessages[session.id] = {
+            messageIdsOldestFirst: [],
+            messagesById: {},
+            messagesVersion: 0,
+        };
+
+        const aggregate = buildTranscriptRenderableAggregate({
+            messages,
+            completedRequests: null,
+        });
+        const fromAggregate = buildSessionListRenderableFromSession(session, undefined, aggregate);
+
+        expect(fromAggregate.hasPendingPermissionRequests).toBe(true);
+        expect(fromAggregate.pendingRequestObservedAt).toBe(2_000);
     });
 });

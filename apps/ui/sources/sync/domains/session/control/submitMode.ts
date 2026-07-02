@@ -3,7 +3,7 @@ import { isNonSteerablePromptPayload } from '@happier-dev/protocol';
 import type { Session } from '@/sync/domains/state/storageTypes';
 import { isVersionSupported, MINIMUM_CLI_PENDING_QUEUE_V2_VERSION } from '@/utils/system/versionUtils';
 import { getSessionLocalControlState } from '@/sync/domains/session/control/sessionLocalControl';
-import { deriveSessionRuntimePresentationState } from '@/sync/domains/session/attention/deriveSessionRuntimePresentationState';
+import { deriveSessionInputReadinessState } from '@/sync/domains/session/control/deriveSessionInputReadinessState';
 
 export type MessageSendMode = 'agent_queue' | 'interrupt' | 'server_pending';
 
@@ -72,7 +72,8 @@ type SessionSubmitRuntimeState = Readonly<{
 function deriveSubmitRuntimeState(session: Session | null, nowMs: number): SessionSubmitRuntimeState {
     const localControl = getSessionLocalControlState(session);
     const localControlBlocksDirectSubmit = localControl?.attached === true && localControl.remoteWritable !== true;
-    const runtimeStatus = deriveSessionRuntimePresentationState({
+    const capabilities = session?.agentState?.capabilities;
+    const inputReadiness = deriveSessionInputReadinessState({
         active: session?.active,
         activeAt: session?.activeAt,
         presence: session?.presence,
@@ -80,12 +81,12 @@ function deriveSubmitRuntimeState(session: Session | null, nowMs: number): Sessi
         thinkingAt: session?.thinkingAt,
         latestTurnStatus: session?.latestTurnStatus,
         latestTurnStatusObservedAt: session?.latestTurnStatusObservedAt,
-        meaningfulActivityAt: session?.meaningfulActivityAt,
+        inFlightSteerSupported: capabilities?.inFlightSteerSupported ?? capabilities?.inFlightSteer,
+        inFlightSteerAvailable: capabilities?.inFlightSteerAvailable ?? capabilities?.inFlightSteer,
     }, nowMs);
-    const capabilities = session?.agentState?.capabilities;
     return {
         localControlBlocksDirectSubmit,
-        isBusy: runtimeStatus.working,
+        isBusy: inputReadiness.isInputBusy,
         isOnline: session?.presence === 'online',
         agentReady: Boolean(session && session.agentStateVersion > 0),
         inFlightSteerSupported: capabilities?.inFlightSteerSupported ?? capabilities?.inFlightSteer,

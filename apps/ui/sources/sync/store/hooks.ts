@@ -40,6 +40,10 @@ import {
 } from '../domains/session/readCursor/resolveSessionReadableSeq';
 import { resolveSessionWorkspacePath } from '../domains/session/resolveSessionWorkspacePath';
 import { buildSessionMetadataStabilitySignature } from '../domains/session/metadata/sessionMetadataStability';
+import {
+  buildSessionOrganizationProjection,
+  type SessionOrganizationProjection,
+} from '../domains/session/organization';
 import type { ReviewCommentDraft } from '../domains/input/reviewComments/reviewCommentTypes';
 import type { SessionActionDraft } from '../domains/sessionActions/sessionActionDraftTypes';
 import { buildSessionMessageRouteId, resolveSessionMessageRouteId } from '../domains/messages/messageRouteIds';
@@ -77,6 +81,7 @@ import {
   normalizeTranscriptSeq,
 } from '../domains/messages/transcriptOrdering';
 import { readStoredSessionMessagesFromStateLike } from '../domains/messages/readStoredSessionMessages';
+import { registerSessionTranscriptDerivedCacheClear } from '../runtime/sessionTranscriptDerivedCaches';
 import type { MachineDisplayRenderable } from '../domains/machines/machineDisplayRenderable';
 import type { AgentEvent } from '../typesRaw';
 
@@ -250,6 +255,47 @@ export function useSessionFolderAssignmentsBySessionKey(): Record<string, string
   return getStorage()(useShallow((state) => state.sessionFolderAssignmentsBySessionKey));
 }
 
+export function useSessionOrganizationProjection(serverId: string | null | undefined): SessionOrganizationProjection | null {
+  const normalizedServerId = typeof serverId === 'string' && serverId.trim().length > 0 ? serverId.trim() : null;
+  const snapshot = getStorage()(
+    useShallow((state) => ({
+      schemaVersionByServerId: state.sessionOrganizationSchemaVersionByServerId,
+      snapshotVersionByServerId: state.sessionOrganizationSnapshotVersionByServerId,
+      pinsBySessionKey: state.sessionOrganizationPinsBySessionKey,
+      foldersByFolderKey: state.sessionOrganizationFoldersByFolderKey,
+      folderAssignmentsBySessionKey: state.sessionOrganizationFolderAssignmentsBySessionKey,
+      tagsByTagKey: state.sessionOrganizationTagsByTagKey,
+      tagAssignmentsBySessionKey: state.sessionOrganizationTagAssignmentsBySessionKey,
+      orderEntriesByScopeKey: state.sessionOrganizationOrderEntriesByScopeKey,
+      labelsByLabelKey: state.sessionOrganizationLabelsByLabelKey,
+    })),
+  );
+
+  return React.useMemo(() => {
+    if (!normalizedServerId) return null;
+    return buildSessionOrganizationProjection(snapshot, normalizedServerId);
+  }, [normalizedServerId, snapshot]);
+}
+
+export function useSessionOrganizationPinnedSessionKeys(): readonly string[] {
+  return getStorage()(
+    useShallow((state) => Object.keys(state.sessionOrganizationPinsBySessionKey).sort()),
+  );
+}
+
+export function useSessionOrganizationSnapshotVersions(serverId: string | null | undefined): Readonly<{
+  schemaVersion: number | null;
+  version: number | null;
+}> {
+  const normalizedServerId = typeof serverId === 'string' && serverId.trim().length > 0 ? serverId.trim() : null;
+  return getStorage()(
+    useShallow((state) => ({
+      schemaVersion: normalizedServerId ? state.sessionOrganizationSchemaVersionByServerId[normalizedServerId] ?? null : null,
+      version: normalizedServerId ? state.sessionOrganizationSnapshotVersionByServerId[normalizedServerId] ?? null : null,
+    })),
+  );
+}
+
 export function useSessionServerId(sessionId: string): string | null {
   return getStorage()((state) => resolveServerIdForSessionIdFromLocalState({
     sessions: state.sessions as Record<string, { serverId?: unknown } | null>,
@@ -285,6 +331,16 @@ type SessionSubagentSourceMessagesCacheEntry = Readonly<{
 
 const sessionSubagentSourceMessagesCache = new Map<string, SessionSubagentSourceMessagesCacheEntry>();
 const sessionSubagentSourceMessageSignatureCache = new WeakMap<Message, string>();
+
+// These module-scoped caches root a session's materialized Message objects (and, via
+// `sourceRef`, the whole SessionMessages entry) outside the store. Register them with
+// the canonical transcript-memory release seam so bounded-retention eviction and
+// deleteSession free them together with the store entry.
+registerSessionTranscriptDerivedCacheClear((sessionId) => {
+  sessionAgentEventSourceCache.delete(sessionId);
+  sessionMessagesArrayCache.delete(sessionId);
+  sessionSubagentSourceMessagesCache.delete(sessionId);
+});
 
 function stringifySignatureValue(value: unknown): string {
   try {
@@ -1364,6 +1420,7 @@ export function buildSessionListShellViewItemSignature(item: SessionListViewItem
     item.session.archivedAt ?? '',
     item.session.keepVisibleWhenInactive === true ? '1' : '0',
     item.session.pendingCount ?? '',
+    item.session.pendingBlockedCount ?? '',
     metadata?.name ?? '',
     metadata?.summaryText ?? '',
     metadata?.path ?? '',
@@ -1439,6 +1496,17 @@ function getStableSessionListShellViewDataForServer(
   return data;
 }
 
+function getSessionListShellViewDataSignatureForServer(
+  serverId: string,
+  data: SessionListViewItem[] | null,
+): string {
+  const cached = sessionListShellViewDataPerServerCache.get(serverId);
+  if (cached?.source === data) {
+    return cached.signature;
+  }
+  return buildSessionListShellViewDataSignature(data);
+}
+
 function getSortedSessionListShellViewDataByServerIdEntries(
   dataByServerId: SessionListShellViewDataByServerId,
 ): Array<readonly [string, SessionListViewItem[] | null]> {
@@ -1480,7 +1548,7 @@ function getStableSessionListShellViewDataByServerId(
     return sessionListShellViewDataByServerIdCache.dataByServerId;
   }
   const signature = entries
-    .map(([serverId, data]) => `${serverId}\u0001${buildSessionListShellViewDataSignature(data)}`)
+    .map(([serverId, data]) => `${serverId}\u0001${getSessionListShellViewDataSignatureForServer(serverId, data)}`)
     .join('\u0002');
   if (sessionListShellViewDataByServerIdCache?.signature === signature) {
     sessionListShellViewDataByServerIdCache = {

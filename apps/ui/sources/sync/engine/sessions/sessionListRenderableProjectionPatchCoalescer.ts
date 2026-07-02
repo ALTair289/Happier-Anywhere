@@ -1,4 +1,8 @@
-import type { SessionListRenderableSession } from '@/sync/domains/session/listing/sessionListRenderable';
+import {
+    applySessionListRenderablePatch,
+    isSessionListRenderablePatchNoop,
+    type SessionListRenderableSession,
+} from '@/sync/domains/session/listing/sessionListRenderable';
 import { syncPerformanceTelemetry } from '@/sync/runtime/syncPerformanceTelemetry';
 import type { SessionListRenderablePatch } from '@/sync/store/domains/sessionListRenderableStoreUpdate';
 
@@ -67,14 +71,24 @@ export function createSessionListRenderableProjectionPatchCoalescer<Payload>(par
         if (batch.length === 0) return;
 
         const patches: SessionListRenderablePatch[] = [];
+        let missingRenderableSessions = 0;
+        let skippedEntries = 0;
+        let noPatchSessions = 0;
+        let noopSessions = 0;
         for (const [sessionId, entries] of batch) {
             const renderable = params.readRenderable(sessionId);
-            if (!renderable) continue;
+            if (!renderable) {
+                missingRenderableSessions += 1;
+                continue;
+            }
 
             let simulatedRenderable = renderable;
             let finalPatch: Partial<Omit<SessionListRenderableSession, 'id'>> | null = null;
             for (const entry of entries) {
-                if (!entry.shouldContinue()) continue;
+                if (!entry.shouldContinue()) {
+                    skippedEntries += 1;
+                    continue;
+                }
                 const patch = params.buildPatch({
                     renderable: simulatedRenderable,
                     payload: entry.payload,
@@ -83,16 +97,32 @@ export function createSessionListRenderableProjectionPatchCoalescer<Payload>(par
                     ...(finalPatch ?? {}),
                     ...patch,
                 };
-                simulatedRenderable = {
-                    ...simulatedRenderable,
-                    ...patch,
-                    id: simulatedRenderable.id,
-                };
+                simulatedRenderable = applySessionListRenderablePatch(simulatedRenderable, patch);
             }
 
-            if (finalPatch) {
+            if (finalPatch && !isSessionListRenderablePatchNoop(renderable, finalPatch)) {
                 patches.push({ sessionId, patch: finalPatch });
+                continue;
             }
+            if (finalPatch) {
+                noopSessions += 1;
+            } else {
+                noPatchSessions += 1;
+            }
+        }
+
+        const suppressedSessions = missingRenderableSessions + noPatchSessions + noopSessions;
+        if (suppressedSessions > 0 || skippedEntries > 0) {
+            syncPerformanceTelemetry.count('sync.socket.sessions.projectionPatch.coalesce.suppressed', {
+                sessions: batch.length,
+                entries: countBatchEntries(batch),
+                appliedSessions: patches.length,
+                suppressedSessions,
+                missingRenderableSessions,
+                skippedEntries,
+                noPatchSessions,
+                noopSessions,
+            });
         }
 
         if (patches.length === 0) return;

@@ -304,6 +304,35 @@ describe('chooseSubmitMode', () => {
         })).toBe('agent_queue');
     });
 
+    it('does not treat provider runtime activity as busy when foreground input is ready', () => {
+        expect(decideSessionMessageDelivery({
+            configuredMode: 'agent_queue',
+            session: {
+                active: true,
+                activeAt: now - 10_000,
+                presence: 'online',
+                thinking: false,
+                thinkingAt: 0,
+                latestTurnStatus: 'completed',
+                latestTurnStatusObservedAt: now - 5_000,
+                runtimeActivityActiveCount: 1,
+                runtimeActivityObservedAt: now - 1_000,
+                runtimeActivityExpiresAt: now + 60_000,
+                runtimeActivitySourceClass: 'provider_detached_task',
+                agentStateVersion: 1,
+                agentState: { controlledByUser: false, capabilities: { inFlightSteer: false } },
+                pendingVersion: 0,
+                pendingCount: 0,
+                metadata: {},
+            } as any,
+            nowMs: now,
+        })).toMatchObject({
+            mode: 'agent_queue',
+            reason: 'configured_mode',
+            directBypassReason: 'selected_direct',
+        });
+    });
+
     it('prefers server_pending when the session is offline but queue is supported', () => {
         expect(chooseSubmitMode({
             configuredMode: 'agent_queue',

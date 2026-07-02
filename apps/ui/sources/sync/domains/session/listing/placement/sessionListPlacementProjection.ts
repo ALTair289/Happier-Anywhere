@@ -25,10 +25,13 @@ export function projectSessionListPlacement(params: Readonly<{
 }>): SessionListPlacementProjection {
     const runtimeStatus = deriveSessionRuntimePresentationState(params.session, params.nowMs);
     if (runtimeStatus.freshActionRequired) {
-        return createPlacement('action_required', normalizePlacementTimestamp(params.session.pendingRequestObservedAt));
+        return createPlacement('action_required', resolveSessionListActionRequiredPlacementTimestamp(params.session));
     }
     if (runtimeStatus.freshPermissionRequired) {
-        return createPlacement('permission_required', normalizePlacementTimestamp(params.session.pendingRequestObservedAt));
+        return createPlacement('permission_required', resolveSessionListActionRequiredPlacementTimestamp(params.session));
+    }
+    if ((params.session.pendingBlockedCount ?? 0) > 0) {
+        return createPlacement('action_required', resolveSessionListActionRequiredPlacementTimestamp(params.session));
     }
     if (runtimeStatus.working) {
         return createPlacement('working', null);
@@ -61,6 +64,17 @@ export function projectSessionListPlacement(params: Readonly<{
     return retainedWorking
         ? { kind: 'working', timestamp: null, retainedWorking: true }
         : { kind: 'none', timestamp: null, retainedWorking: false };
+}
+
+export function resolveSessionListActionRequiredPlacementTimestamp(session: Pick<
+    SessionListRenderableSession,
+    'pendingRequestObservedAt' | 'updatedAt' | 'createdAt'
+>): number | null {
+    return normalizePlacementTimestamp(
+        session.pendingRequestObservedAt,
+        session.updatedAt,
+        session.createdAt,
+    );
 }
 
 function createPlacement(

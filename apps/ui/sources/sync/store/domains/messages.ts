@@ -19,7 +19,28 @@ import {
     hasTranscriptMessageOrderChanged,
     normalizeTranscriptSeq,
 } from '@/sync/domains/messages/transcriptOrdering';
+import { buildMessageRouteId } from '@/sync/domains/messages/messageRouteIds';
+import {
+    reconcilePersistedSessionMessagePinRouteIds,
+} from '@/sync/domains/state/sessionMessagePinsPersistence';
+import type {
+    SessionMessagePinRole,
+} from '@/sync/domains/messages/pins/sessionMessagePinIdentity';
+import type {
+    SessionMessagePinRouteHydrationFact,
+} from '@/sync/domains/messages/pins/sessionMessagePins';
+import { shouldPreservePendingProjectionAfterCommittedUserLocalId } from '@/sync/domains/pending/pendingTranscriptProjection';
+import {
+    applyMessageChangeToTranscriptRenderableAggregate,
+    buildTranscriptRenderableAggregate,
+    canReuseTranscriptRenderableAggregateRequestStates,
+    isTranscriptRenderableAggregate,
+    type TranscriptRenderableAggregate,
+} from '@/sync/domains/messages/transcriptRenderableAggregate';
 
+import { clearSessionTranscriptDerivedCachesForSession } from '../../runtime/sessionTranscriptDerivedCaches';
+
+import { areSessionValuesDeepEqual } from './areStoredSessionsEqual';
 import { persistSessionPermissionData } from './sessionPermissionPersistence';
 import type { SessionPending } from './pending';
 import type { StoreGet, StoreSet } from './_shared';
@@ -36,14 +57,22 @@ export type SessionMessages = {
     messagesMap: Record<string, Message>;
     /**
      * IMPORTANT ARCHITECTURE NOTE:
-     * `messagesById` is intentionally mutated in-place for streaming performance.
+     * `messagesById` and `messageRevisionsById` are intentionally mutated
+     * in-place for streaming performance.
      *
      * As a result:
-     * - Do NOT rely on `messagesById` referential identity changes to detect updates.
+     * - Do NOT rely on their referential identity changes to detect updates.
      * - Prefer id-based subscriptions (`useMessage(sessionId, messageId)`) or
-     *   selectors keyed on stable primitives (ids/version counters).
+     *   selectors keyed on stable primitives (ids/version counters/revisions).
      */
     reducerState: ReducerState;
+    /**
+     * Incrementally-maintained transcript aggregates backing the session-list
+     * renderable derivation. Mutated in place (see `reducerState`); absent
+     * until the first renderable refresh and after invalidating changes, in
+     * which case it is rebuilt from the full transcript on next use.
+     */
+    renderableAggregate?: TranscriptRenderableAggregate;
     /**
      * `reducerState` is mutated in-place for performance.
      * Use this version counter to subscribe to reducer-only changes.
@@ -70,6 +99,7 @@ export type MessagesDomain = {
     };
     applyMessagesLoaded: (sessionId: string) => void;
     resetSessionMessages: (sessionId: string) => void;
+    evictSessionMessages: (sessionId: string) => void;
 };
 
 type MessagesDomainDependencies = {
@@ -169,10 +199,17 @@ function coerceSessionMessages(input: unknown): SessionMessages {
             return list.slice().sort(compareTranscriptMessagesOldestFirst).map((m) => m.id);
         })();
 
+    // Intentionally reused (not copied): the record is mutated in place on the
+    // streaming hot path, matching the documented `messagesById` contract.
     const messageRevisionsById: Record<string, number> =
         raw?.messageRevisionsById && typeof raw.messageRevisionsById === 'object'
-            ? { ...(raw.messageRevisionsById as Record<string, number>) }
+            ? (raw.messageRevisionsById as Record<string, number>)
             : {};
+
+    const renderableAggregate: TranscriptRenderableAggregate | undefined =
+        isTranscriptRenderableAggregate(raw?.renderableAggregate)
+            ? raw.renderableAggregate
+            : undefined;
 
     const latestThinkingMessageId: string | null =
         typeof raw?.latestThinkingMessageId === 'string'
@@ -216,6 +253,7 @@ function coerceSessionMessages(input: unknown): SessionMessages {
         messageRevisionsById,
         messagesMap: messagesById,
         reducerState,
+        renderableAggregate,
         latestThinkingMessageId,
         latestThinkingMessageActivityAtMs,
         latestReadyEventSeq,
@@ -282,6 +320,33 @@ function deriveLatestCommittedMessageSeq(messages: ReadonlyArray<Message>): numb
     return latest;
 }
 
+function resolvePinRoleForMessage(message: Message): SessionMessagePinRole | null {
+    if (message.kind === 'user-text') return 'user';
+    if (message.kind === 'agent-text') return 'assistant';
+    if (message.kind === 'tool-call') return 'tool';
+    return null;
+}
+
+function buildPinRouteHydrationFacts(messages: ReadonlyArray<Message>): readonly SessionMessagePinRouteHydrationFact[] {
+    const facts: SessionMessagePinRouteHydrationFact[] = [];
+    for (const message of messages) {
+        const role = resolvePinRoleForMessage(message);
+        if (!role) continue;
+        const localId = typeof (message as { localId?: unknown }).localId === 'string'
+            ? (message as { localId: string }).localId.trim()
+            : '';
+        const previousRouteMessageIds = localId ? [`local:${localId}`] : [];
+        facts.push({
+            seq: normalizeTranscriptSeq((message as { seq?: unknown }).seq),
+            transcriptBlockIndex: (message as { transcriptBlockIndex?: number | null }).transcriptBlockIndex ?? null,
+            routeMessageId: buildMessageRouteId(message),
+            previousRouteMessageIds,
+            role,
+        });
+    }
+    return facts;
+}
+
 export function applyAgentStateUpdateToSessionMessages(params: Readonly<{
     existing: SessionMessages;
     agentState: Session['agentState'] | null;
@@ -295,7 +360,7 @@ export function applyAgentStateUpdateToSessionMessages(params: Readonly<{
     const processedMessages = reducerResult.messages;
 
     const messagesById = existing.messagesById;
-    const messageRevisionsById = { ...(existing.messageRevisionsById ?? {}) };
+    const messageRevisionsById = existing.messageRevisionsById ?? {};
     const idsToRemove = new Set<string>();
     const idsToInsert: string[] = [];
 
@@ -395,6 +460,9 @@ export function applyAgentStateUpdateToSessionMessages(params: Readonly<{
             messagesById,
             messageRevisionsById,
             messagesMap: messagesById,
+            // This reconcile path bypasses the incremental aggregate
+            // maintenance, so a stored aggregate must be rebuilt on next use.
+            renderableAggregate: processedMessages.length > 0 ? undefined : existing.renderableAggregate,
             reducerState: existing.reducerState,
             reducerVersion: (existing.reducerVersion ?? 0) + 1,
             latestThinkingMessageId,
@@ -534,6 +602,13 @@ export function createMessagesDomain<S extends MessagesDomain & MessagesDomainDe
                 if (typeof reducerResult.latestReadyEventAt === 'number' && Number.isFinite(reducerResult.latestReadyEventAt)) {
                     latestReadyEventAt = Math.trunc(reducerResult.latestReadyEventAt);
                 }
+                if (processedMessages.length > 0) {
+                    reconcilePersistedSessionMessagePinRouteIds(
+                        sessionId,
+                        buildPinRouteHydrationFacts(processedMessages),
+                        state.sessionLocalStateScope ?? null,
+                    );
+                }
 
                 if (DEBUG_MESSAGE_DECRYPT) {
                     const byKind: Record<string, number> = {};
@@ -557,7 +632,7 @@ export function createMessagesDomain<S extends MessagesDomain & MessagesDomainDe
                 }
 
                 const messagesById = existingSession.messagesById;
-                const messageRevisionsById = { ...(existingSession.messageRevisionsById ?? {}) };
+                const messageRevisionsById = existingSession.messageRevisionsById ?? {};
                 const idsToRemove = new Set<string>();
                 const idsToInsert: string[] = [];
 
@@ -566,9 +641,23 @@ export function createMessagesDomain<S extends MessagesDomain & MessagesDomainDe
                 let didSeeThinkingTextChange = false;
                 let latestThinkingMessageActivityAtMs = existingSession.latestThinkingMessageActivityAtMs ?? null;
                 let didSubagentSourceChange = false;
+                // Incremental transcript aggregates (O(changed) instead of a
+                // full transcript walk per apply). Invalidated when a change
+                // is non-monotone; rebuilt lazily at the renderable refresh.
+                let renderableAggregate = existingSession.renderableAggregate;
 
                 for (const message of processedMessages) {
                     const prev = messagesById[message.id];
+                    if (renderableAggregate) {
+                        const appliedToAggregate = applyMessageChangeToTranscriptRenderableAggregate({
+                            aggregate: renderableAggregate,
+                            previous: prev ?? null,
+                            next: message,
+                        });
+                        if (!appliedToAggregate) {
+                            renderableAggregate = undefined;
+                        }
+                    }
                     if ((prev && shouldIncludeSubagentSourceMessage(prev)) || shouldIncludeSubagentSourceMessage(message)) {
                         didSubagentSourceChange = true;
                     }
@@ -689,8 +778,9 @@ export function createMessagesDomain<S extends MessagesDomain & MessagesDomainDe
                 const inferredPermissionMode = inferred?.mode ?? null;
                 const inferredPermissionModeAt = inferred?.updatedAt ?? null;
 
-                // Clear server-pending items once we see the corresponding user message in the transcript.
-                // We key this off localId, which is preserved when a pending item is materialized into a SessionMessage.
+                // Under claim-until-accept, local optimistic pending projections can be cleared
+                // by a committed same-localId user message. Server-owned pending rows remain
+                // visible until the server pending state resolves them.
                 let updatedSessionPending = state.sessionPending;
                 const pendingState = state.sessionPending[sessionId];
                 if (pendingState && pendingState.messages.length > 0) {
@@ -701,7 +791,11 @@ export function createMessagesDomain<S extends MessagesDomain & MessagesDomainDe
                         }
                     }
                     if (localIdsToClear.size > 0) {
-                        const filtered = pendingState.messages.filter((p) => !p.localId || !localIdsToClear.has(p.localId));
+                        const filtered = pendingState.messages.filter((p) => (
+                            !p.localId
+                            || !localIdsToClear.has(p.localId)
+                            || shouldPreservePendingProjectionAfterCommittedUserLocalId(p)
+                        ));
                         if (filtered.length !== pendingState.messages.length) {
                             updatedSessionPending = {
                                 ...state.sessionPending,
@@ -725,7 +819,21 @@ export function createMessagesDomain<S extends MessagesDomain & MessagesDomainDe
                     session != null
                     && latestCommittedMessageSeq !== null
                     && latestCommittedMessageSeq > currentSessionSeq;
-                const needsUpdate = (reducerResult.todos !== undefined || existingSession.reducerState.latestUsage) && session;
+                // Only produce a new Session identity when a session-visible
+                // value actually changed. The reducer surfaces `todos` and
+                // holds `latestUsage` on every apply, so presence alone must
+                // not churn every `useSession` subscriber at streaming rate.
+                const reducerLatestUsage = existingSession.reducerState.latestUsage ?? null;
+                const didLatestUsageChange =
+                    session != null
+                    && reducerLatestUsage !== null
+                    && !areSessionValuesDeepEqual(session.latestUsage ?? null, reducerLatestUsage);
+                const didTodosChange =
+                    session != null
+                    && reducerResult.todos !== undefined
+                    && session.todos !== reducerResult.todos
+                    && !areSessionValuesDeepEqual(session.todos ?? null, reducerResult.todos);
+                const needsUpdate = didTodosChange || didLatestUsageChange;
                 const didApplyNewAgentStateVersion =
                     shouldApplyAgentState
                     && agentStateVersion !== null
@@ -759,11 +867,11 @@ export function createMessagesDomain<S extends MessagesDomain & MessagesDomainDe
                             latestReadyEventSeq: nextLatestReadyEventSeq,
                             latestReadyEventAt: nextLatestReadyEventAt,
                         }),
-                        ...(reducerResult.todos !== undefined && { todos: reducerResult.todos }),
+                        ...(didTodosChange && { todos: reducerResult.todos }),
                         // Copy latestUsage from reducerState to make it immediately available
-                        latestUsage: existingSession.reducerState.latestUsage ? {
-                            ...existingSession.reducerState.latestUsage
-                        } : session.latestUsage,
+                        ...(didLatestUsageChange && reducerLatestUsage
+                            ? { latestUsage: { ...reducerLatestUsage } }
+                            : {}),
                         ...(shouldWritePermissionMode && {
                             permissionMode: inferredPermissionMode,
                             permissionModeUpdatedAt: inferredPermissionModeAt
@@ -799,11 +907,25 @@ export function createMessagesDomain<S extends MessagesDomain & MessagesDomainDe
                     ),
                 );
                 if (shouldRefreshSessionListRenderable && nextSessionForRenderable && previousRenderable) {
-                    const renderableMessages = nextIds
-                        .map((id) => messagesById[id])
-                        .filter((message): message is Message => Boolean(message));
+                    const completedRequests =
+                        (nextSessionForRenderable.agentState?.completedRequests as Record<string, unknown> | null | undefined) ?? null;
+                    const canReuseAggregate =
+                        renderableAggregate != null
+                        && canReuseTranscriptRenderableAggregateRequestStates(renderableAggregate, completedRequests);
+                    telemetryFields.aggregateReused = canReuseAggregate ? 1 : 0;
+                    if (!canReuseAggregate) {
+                        // Cold start / fallback: one full transcript walk, then
+                        // the aggregate is maintained incrementally.
+                        const renderableMessages = nextIds
+                            .map((id) => messagesById[id])
+                            .filter((message): message is Message => Boolean(message));
+                        renderableAggregate = buildTranscriptRenderableAggregate({
+                            messages: renderableMessages,
+                            completedRequests,
+                        });
+                    }
                     const nextRenderable = {
-                        ...buildSessionListRenderableFromSession(nextSessionForRenderable, renderableMessages),
+                        ...buildSessionListRenderableFromSession(nextSessionForRenderable, undefined, renderableAggregate),
                         latestReadyEventSeq: nextLatestReadyEventSeq,
                         latestReadyEventAt: nextLatestReadyEventAt,
                     };
@@ -845,6 +967,7 @@ export function createMessagesDomain<S extends MessagesDomain & MessagesDomainDe
                             messagesById,
                             messageRevisionsById,
                             messagesMap: messagesById,
+                            renderableAggregate,
                             reducerState: existingSession.reducerState, // Explicitly include the mutated reducer state
                             reducerVersion: (existingSession.reducerVersion ?? 0) + 1,
                             latestThinkingMessageId,
@@ -970,6 +1093,26 @@ export function createMessagesDomain<S extends MessagesDomain & MessagesDomainDe
                         isLoaded: true
                     } satisfies SessionMessages
                 }
+            };
+        }),
+        evictSessionMessages: (sessionId: string) => set((state) => {
+            const existingSession = state.sessionMessages[sessionId];
+            if (!existingSession) {
+                return state;
+            }
+
+            // Bounded transcript retention: drop the whole materialized transcript
+            // (messages, reducer state, renderable aggregate). Re-opening the session
+            // re-runs the first-open load pipeline because the entry — and with it the
+            // `isLoaded` flag — no longer exists. Unlike `resetSessionMessages` (which
+            // keeps an empty entry for in-place truncation under a mounted view), this
+            // is only safe when no mounted surface renders the transcript; the caller
+            // (sessionTranscriptRetention) enforces that.
+            const { [sessionId]: _evicted, ...remainingSessionMessages } = state.sessionMessages;
+            clearSessionTranscriptDerivedCachesForSession(sessionId);
+            return {
+                ...state,
+                sessionMessages: remainingSessionMessages,
             };
         }),
         resetSessionMessages: (sessionId: string) => set((state) => {

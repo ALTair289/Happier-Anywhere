@@ -1,6 +1,7 @@
 import {
     V2SessionListResponseSchema,
     V2SessionByIdNotFoundSchema,
+    type SessionRuntimeActivitySourceClassV1,
     type V2SessionListResponse,
     type V2SessionRecord,
 } from '@happier-dev/protocol';
@@ -13,6 +14,9 @@ import {
 import { HappyError } from '@/utils/errors/errors';
 
 type SessionRequest = (path: string, init: RequestInit) => Promise<Response>;
+type SessionListRequestHeadersOptions = Readonly<{
+    includeSessionListTiming?: boolean;
+}>;
 type ReadJsonSafeOptions = Readonly<{
     telemetryNamePrefix?: string;
     fields?: SyncPerformanceTelemetryFields;
@@ -26,11 +30,15 @@ const V2_SESSIONS_SERVER_TIMING_FIELD_BY_NAME: Readonly<Record<string, string>> 
     happier_v2_sessions_total: 'serverTimingTotalMs',
 };
 
-function buildSessionRequestHeaders(token: string): HeadersInit {
-    return {
+function buildSessionRequestHeaders(token: string, options?: SessionListRequestHeadersOptions): HeadersInit {
+    const headers: Record<string, string> = {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
     };
+    if (options?.includeSessionListTiming === true && syncPerformanceTelemetry.isEnabled()) {
+        headers['X-Happier-Session-List-Timing'] = '1';
+    }
+    return headers;
 }
 
 async function readJsonSafe(response: Response, options?: ReadJsonSafeOptions): Promise<unknown> {
@@ -74,6 +82,16 @@ function readNullableNumber(value: unknown): number | null | undefined {
     return readNumber(value);
 }
 
+function readNonNegativeInteger(value: unknown): number | undefined {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+    return Math.max(0, Math.trunc(value));
+}
+
+function readNullableNonNegativeInteger(value: unknown): number | null | undefined {
+    if (value == null) return null;
+    return readNonNegativeInteger(value);
+}
+
 function readOptionalBoolean(value: unknown): boolean | undefined {
     return typeof value === 'boolean' ? value : undefined;
 }
@@ -85,6 +103,15 @@ function readOptionalString(value: unknown): string | undefined {
 function readNullableString(value: unknown): string | null | undefined {
     if (value == null) return null;
     return typeof value === 'string' ? value : undefined;
+}
+
+function readRuntimeActivitySourceClass(value: unknown): SessionRuntimeActivitySourceClassV1 | null | undefined {
+    if (value == null) return null;
+    return value === 'provider_detached_task'
+        || value === 'provider_autonomous_output'
+        || value === 'mixed'
+            ? value
+            : undefined;
 }
 
 function readRollbackEligibleTurnStarts(value: unknown): readonly number[] | null | undefined {
@@ -170,6 +197,8 @@ function coerceLegacySessionRecord(raw: unknown): V2SessionRecord | null {
     const shareAccessLevel = readOptionalString(shareRecord?.accessLevel) ?? topLevelAccessLevel;
     const shareCanApprovePermissions = readOptionalBoolean(shareRecord?.canApprovePermissions) ?? topLevelCanApprovePermissions;
     const rollbackEligibleTurnStarts = readRollbackEligibleTurnStarts(raw.rollbackEligibleTurnStarts);
+    const runtimeActivityActiveCount = readNonNegativeInteger(raw.runtimeActivityActiveCount);
+    const runtimeActivityIsIdle = runtimeActivityActiveCount === 0;
 
     return {
         id,
@@ -198,12 +227,23 @@ function coerceLegacySessionRecord(raw: unknown): V2SessionRecord | null {
                     ? null
                     : undefined,
         latestTurnStatusObservedAt: readNullableNumber(raw.latestTurnStatusObservedAt),
+        runtimeActivityActiveCount,
+        runtimeActivityObservedAt: runtimeActivityIsIdle
+            ? null
+            : readNullableNonNegativeInteger(raw.runtimeActivityObservedAt),
+        runtimeActivityExpiresAt: runtimeActivityIsIdle
+            ? null
+            : readNullableNonNegativeInteger(raw.runtimeActivityExpiresAt),
+        runtimeActivitySourceClass: runtimeActivityIsIdle
+            ? null
+            : readRuntimeActivitySourceClass(raw.runtimeActivitySourceClass),
         lastRuntimeIssue: raw.lastRuntimeIssue === null
             || (raw.lastRuntimeIssue && typeof raw.lastRuntimeIssue === 'object')
                 ? raw.lastRuntimeIssue as V2SessionRecord['lastRuntimeIssue']
                 : undefined,
         ...(rollbackEligibleTurnStarts !== undefined ? { rollbackEligibleTurnStarts } : {}),
         pendingCount: readNumber(raw.pendingCount) ?? undefined,
+        pendingBlockedCount: readNumber(raw.pendingBlockedCount) ?? undefined,
         pendingVersion: readNumber(raw.pendingVersion) ?? undefined,
         dataEncryptionKey: readNullableString(raw.dataEncryptionKey) ?? null,
         share:
@@ -331,9 +371,13 @@ export async function fetchSessionListPageCompat(params: Readonly<{
     }
 
     let v2ResponseChars: number | undefined;
-    const v2Response = await params.request(url.pathname + url.search, {
-        headers: buildSessionRequestHeaders(params.token),
-    });
+    const v2Response = await syncPerformanceTelemetry.measureAsync(
+        'sync.sessions.snapshot.fetchPage.request',
+        params.telemetryFields,
+        async () => params.request(url.pathname + url.search, {
+            headers: buildSessionRequestHeaders(params.token, { includeSessionListTiming: true }),
+        }),
+    );
     const v2TelemetryFields = {
         ...(params.telemetryFields ?? {}),
         ...readV2SessionsServerTimingFields(v2Response),

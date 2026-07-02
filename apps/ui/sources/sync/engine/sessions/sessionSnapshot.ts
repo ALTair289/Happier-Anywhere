@@ -26,7 +26,10 @@ import type { EncryptionScopeInput } from '@/sync/encryption/encryption';
 
 import { parsePlainSessionAgentState, parsePlainSessionMetadata } from './parsePlainSessionPayload';
 import { fetchSessionListPageCompat } from './sessionHttpCompat';
-import { orderRowsForSessionListHydration } from './sessionListHydrationPriority';
+import {
+    normalizeSessionListHydrationSessionIds,
+    orderRowsForSessionListHydration,
+} from './sessionListHydrationPriority';
 
 type SessionEncryption = {
     decryptAgentState: (version: number, value: string | null) => Promise<any>;
@@ -84,9 +87,15 @@ type SessionListRenderablePatch = Readonly<{
     sessionId: string;
     patch: Readonly<Partial<Omit<SessionListRenderableSession, 'id'>>>;
 }>;
+type HydrationCandidateAttribution = Readonly<{
+    rows: SessionListRow[];
+    fields: Record<string, number>;
+}>;
 
 const DEFAULT_SESSION_LIST_PATH = '/v2/sessions';
 const NO_SERVER_ID_ABORT_KEY = '__default__';
+const DEFAULT_BACKGROUND_HYDRATION_APPLY_BATCH_SIZE = 4;
+const DEFAULT_BACKGROUND_HYDRATION_APPLY_FLUSH_DELAY_MS = 64;
 const activeSessionListDataKeyHydrationControllers = new WeakMap<SessionDataKeyHydrationEncryption, Map<string, AbortController>>();
 
 function normalizeSessionListAbortKey(params: Readonly<{
@@ -120,27 +129,10 @@ function createSessionListDataKeyHydrationAbortController(params: Readonly<{
     return controller;
 }
 
-function normalizeSessionListPinnedSessionIds(values: ReadonlyArray<string> | undefined): string[] {
-    if (!values) return [];
-    const seen = new Set<string>();
-    const ids: string[] = [];
-    for (const value of values) {
-        const id = String(value ?? '').trim();
-        if (!id || seen.has(id)) continue;
-        seen.add(id);
-        ids.push(id);
-    }
-    return ids;
-}
-
 function buildSessionListInitialPath(params: {
-    pinnedSessionIds: readonly string[];
     includeAttentionRows: boolean;
 }): string | undefined {
     const query: string[] = [];
-    if (params.pinnedSessionIds.length > 0) {
-        query.push(`pinnedSessionIds=${encodeURIComponent(params.pinnedSessionIds.join(','))}`);
-    }
     if (params.includeAttentionRows) {
         query.push('includeAttention=true');
     }
@@ -276,6 +268,7 @@ function buildRenderableFromRowAndCache(
         activeAt: row.activeAt,
         archivedAt: row.archivedAt ?? null,
         pendingCount: row.pendingCount,
+        pendingBlockedCount: row.pendingBlockedCount,
         pendingVersion: row.pendingVersion,
         lastViewedSessionSeq,
         metadataVersion: useStaleCacheMetadata
@@ -296,6 +289,10 @@ function buildRenderableFromRowAndCache(
         hasPendingUserActionRequests,
         latestTurnStatus,
         latestTurnStatusObservedAt,
+        runtimeActivityActiveCount: row.runtimeActivityActiveCount,
+        runtimeActivityObservedAt: row.runtimeActivityObservedAt ?? null,
+        runtimeActivityExpiresAt: row.runtimeActivityExpiresAt ?? null,
+        runtimeActivitySourceClass: row.runtimeActivitySourceClass ?? null,
         lastRuntimeIssue: row.lastRuntimeIssue ?? null,
         latestReadyEventSeq,
         latestReadyEventAt,
@@ -314,6 +311,10 @@ function isCurrentRenderableCompleteForWarmHydration(
     if (currentRenderable.metadataVersion < row.metadataVersion) return false;
     if (currentRenderable.agentStateVersion < row.agentStateVersion) return false;
     if ((currentRenderable.archivedAt ?? null) !== (row.archivedAt ?? null)) return false;
+    if ((currentRenderable.runtimeActivityActiveCount ?? null) !== (row.runtimeActivityActiveCount ?? null)) return false;
+    if ((currentRenderable.runtimeActivityObservedAt ?? null) !== (row.runtimeActivityObservedAt ?? null)) return false;
+    if ((currentRenderable.runtimeActivityExpiresAt ?? null) !== (row.runtimeActivityExpiresAt ?? null)) return false;
+    if ((currentRenderable.runtimeActivitySourceClass ?? null) !== (row.runtimeActivitySourceClass ?? null)) return false;
     if (row.metadata != null && currentRenderable.metadata == null) return false;
     if (
         row.agentState != null
@@ -396,6 +397,74 @@ function countRowsWithIds(rows: readonly SessionListRow[], ids: ReadonlySet<stri
 
 function countBackgroundRows(totalRows: number, requiredRows: number): number {
     return Math.max(0, totalRows - Math.max(0, requiredRows));
+}
+
+function buildHydrationCandidateAttribution(params: Readonly<{
+    sessions: readonly SessionListRow[];
+    requiredHydrationSessionIds: ReadonlySet<string>;
+    missingEncryptedDataKeySessionIds: ReadonlySet<string>;
+    encryption: SessionListEncryption;
+    getExistingSession?: (sessionId: string) => Session | null | undefined;
+    getCurrentSessionListRenderable?: CurrentSessionListRenderableLookup;
+}>): HydrationCandidateAttribution {
+    const rows: SessionListRow[] = [];
+    let requiredRows = 0;
+    let missingDataKeyRows = 0;
+    let requiredRowsMissingDataKey = 0;
+    let alreadyWarmRows = 0;
+    let requiredAlreadyWarmRows = 0;
+    let requiredCandidateRows = 0;
+
+    for (const row of params.sessions) {
+        const isRequiredHydrationRow = params.requiredHydrationSessionIds.has(row.id);
+        if (isRequiredHydrationRow) {
+            requiredRows += 1;
+        }
+        if (!canHydrateSessionRow({
+            row,
+            missingEncryptedDataKeySessionIds: params.missingEncryptedDataKeySessionIds,
+            encryption: params.encryption,
+        })) {
+            missingDataKeyRows += 1;
+            if (isRequiredHydrationRow) {
+                requiredRowsMissingDataKey += 1;
+            }
+            continue;
+        }
+        if (!needsWarmHydration({
+            row,
+            existingSession: params.getExistingSession?.(row.id),
+            currentRenderable: params.getCurrentSessionListRenderable?.(row.id),
+            isRequiredHydrationRow,
+        })) {
+            alreadyWarmRows += 1;
+            if (isRequiredHydrationRow) {
+                requiredAlreadyWarmRows += 1;
+            }
+            continue;
+        }
+        rows.push(row);
+        if (isRequiredHydrationRow) {
+            requiredCandidateRows += 1;
+        }
+    }
+
+    return {
+        rows,
+        fields: {
+            totalRows: params.sessions.length,
+            requiredIds: params.requiredHydrationSessionIds.size,
+            requiredRows,
+            missingRequiredRows: Math.max(0, params.requiredHydrationSessionIds.size - requiredRows),
+            candidateRows: rows.length,
+            requiredCandidateRows,
+            backgroundCandidateRows: Math.max(0, rows.length - requiredCandidateRows),
+            alreadyWarmRows,
+            requiredAlreadyWarmRows,
+            missingDataKeyRows,
+            requiredRowsMissingDataKey,
+        },
+    };
 }
 
 function isDeferrableHydrationReason(reason: string | undefined): boolean {
@@ -802,6 +871,10 @@ async function decryptSessionRow(
                     pendingRequestObservedAt: normalizeSessionListTimestamp(row.pendingRequestObservedAt ?? null),
                     latestTurnStatus,
                     latestTurnStatusObservedAt,
+                    runtimeActivityActiveCount: row.runtimeActivityActiveCount,
+                    runtimeActivityObservedAt: row.runtimeActivityObservedAt ?? null,
+                    runtimeActivityExpiresAt: row.runtimeActivityExpiresAt ?? null,
+                    runtimeActivitySourceClass: row.runtimeActivitySourceClass ?? null,
                     rollbackEligibleTurnStarts: (row as Record<string, unknown>).rollbackEligibleTurnStarts === undefined
                         ? null
                         : readRollbackEligibleTurnStarts((row as Record<string, unknown>).rollbackEligibleTurnStarts),
@@ -890,6 +963,7 @@ function createHydratedSessionApplyBatcher(params: {
     shouldContinue: () => boolean;
     batchSize: number;
     flushDelayMs: number;
+    coalesceRequiredRows?: boolean;
 }): {
     enqueue: (session: HydratedSession, options?: { required?: boolean }) => void;
     flush: (reason?: HydrationApplyFlushReason) => void;
@@ -900,6 +974,7 @@ function createHydratedSessionApplyBatcher(params: {
     let pending: HydratedSession[] = [];
     let pendingRequiredRows = 0;
     let flushTimer: ReturnType<typeof setTimeout> | null = null;
+    let flushTimerReason: HydrationApplyFlushReason | null = null;
     let firstQueuedAtMs: number | null = null;
     let appliedRows = 0;
     let staleSkippedRows = 0;
@@ -908,6 +983,7 @@ function createHydratedSessionApplyBatcher(params: {
         if (!flushTimer) return;
         clearTimeout(flushTimer);
         flushTimer = null;
+        flushTimerReason = null;
     };
 
     const flush = (reason: HydrationApplyFlushReason = 'manual'): void => {
@@ -980,9 +1056,13 @@ function createHydratedSessionApplyBatcher(params: {
         }
     };
 
-    const scheduleFlush = (): void => {
-        if (flushTimer) return;
-        flushTimer = setTimeout(() => flush('timer'), flushDelayMs);
+    const scheduleFlush = (delayMs = flushDelayMs, reason: HydrationApplyFlushReason = 'timer'): void => {
+        if (flushTimer) {
+            if (reason !== 'size' || flushTimerReason === 'size') return;
+            clearFlushTimer();
+        }
+        flushTimerReason = reason;
+        flushTimer = setTimeout(() => flush(reason), delayMs);
     };
 
     return {
@@ -1004,7 +1084,15 @@ function createHydratedSessionApplyBatcher(params: {
                 backgroundRows: requiredRows === 1 ? 0 : 1,
             });
             if (pending.length >= batchSize) {
-                flush('size');
+                if (pendingRequiredRows > 0) {
+                    if (params.coalesceRequiredRows === true) {
+                        scheduleFlush();
+                    } else {
+                        flush('size');
+                    }
+                    return;
+                }
+                scheduleFlush(flushDelayMs, 'size');
                 return;
             }
             scheduleFlush();
@@ -1044,7 +1132,6 @@ export async function fetchAndApplySessions(params: {
     sessionListMaxPages?: number;
     includeActiveSessionRows?: boolean;
     includeSessionListAttentionRows?: boolean;
-    sessionListPinnedSessionIds?: ReadonlyArray<string>;
     priorityHydrationSessionIds?: ReadonlyArray<string>;
     serverId?: string | null;
     credentials: AuthCredentials;
@@ -1077,7 +1164,7 @@ export async function fetchAndApplySessions(params: {
     repairInvalidReadStateV1: (params: { sessionId: string; sessionSeqUpperBound: number }) => Promise<void>;
     log: { log: (message: string) => void };
 }): Promise<SessionListFetchResult> {
-    const { credentials, encryption, sessionDataKeys, applySessions, repairInvalidReadStateV1, log } = params;
+    const { credentials, encryption, sessionDataKeys, applySessions, repairInvalidReadStateV1 } = params;
     const snapshotStartedAtMs = nowMs();
     const request =
         params.request
@@ -1090,8 +1177,12 @@ export async function fetchAndApplySessions(params: {
     const concurrencyLimit = Math.max(1, Math.trunc(params.sessionListHydrationConcurrencyLimit ?? 4));
     const backgroundHydrationConcurrencyLimit = Math.max(1, Math.trunc(params.sessionListBackgroundHydrationConcurrencyLimit ?? 1));
     const backgroundHydrationYieldEveryRows = Math.max(1, Math.trunc(params.sessionListBackgroundHydrationYieldEveryRows ?? 1));
-    const backgroundHydrationApplyBatchSize = Math.max(1, Math.trunc(params.sessionListBackgroundHydrationApplyBatchSize ?? 1));
-    const backgroundHydrationApplyFlushDelayMs = Math.max(0, Math.trunc(params.sessionListBackgroundHydrationApplyFlushDelayMs ?? 16));
+    const backgroundHydrationApplyBatchSize = Math.max(1, Math.trunc(
+        params.sessionListBackgroundHydrationApplyBatchSize ?? DEFAULT_BACKGROUND_HYDRATION_APPLY_BATCH_SIZE,
+    ));
+    const backgroundHydrationApplyFlushDelayMs = Math.max(0, Math.trunc(
+        params.sessionListBackgroundHydrationApplyFlushDelayMs ?? DEFAULT_BACKGROUND_HYDRATION_APPLY_FLUSH_DELAY_MS,
+    ));
     const backgroundHydrationYield = params.sessionListBackgroundHydrationYield
         ?? (() => yieldToSessionListBackgroundHydration(params.sessionListBackgroundHydrationYieldDelayMs ?? 0));
     const dataKeyHydrationAbortController = createSessionListDataKeyHydrationAbortController({
@@ -1129,22 +1220,31 @@ export async function fetchAndApplySessions(params: {
         }
     };
 
-    const pinnedSessionIds = normalizeSessionListPinnedSessionIds(params.sessionListPinnedSessionIds);
     const initialSessionListPath = !cursor && !params.sessionListPath
         ? buildSessionListInitialPath({
-            pinnedSessionIds,
             includeAttentionRows: params.includeSessionListAttentionRows === true,
         })
         : undefined;
-
     if (params.includeActiveSessionRows === true && !cursor && !params.sessionListPath) {
-        const activePage = await fetchSessionListPageCompat({
-            request,
-            token: credentials.token,
-            sessionListPath: '/v2/sessions/active',
-            cursor: null,
+        const activePageFields = {
+            loadedSessions: sessions.length,
             limit: 500,
-        });
+            cursorPresent: 0,
+            activePage: 1,
+            listPage: 0,
+        };
+        const activePage = await syncPerformanceTelemetry.measureAsync(
+            'sync.sessions.snapshot.fetchPage',
+            activePageFields,
+            async () => fetchSessionListPageCompat({
+                request,
+                token: credentials.token,
+                sessionListPath: '/v2/sessions/active',
+                cursor: null,
+                limit: 500,
+                telemetryFields: activePageFields,
+            }),
+        );
         appendRows(activePage.sessions);
     }
     while (fetchedPages < sessionListMaxPages) {
@@ -1153,17 +1253,14 @@ export async function fetchAndApplySessions(params: {
             loadedSessions: sessions.length,
             limit: pageLimit,
             cursorPresent: cursor ? 1 : 0,
+            activePage: 0,
+            listPage: 1,
         };
-        const timedRequest: typeof request = (path, init) => syncPerformanceTelemetry.measureAsync(
-            'sync.sessions.snapshot.fetchPage.request',
-            fetchPageFields,
-            async () => request(path, init),
-        );
         const page = await syncPerformanceTelemetry.measureAsync(
             'sync.sessions.snapshot.fetchPage',
             fetchPageFields,
             async () => fetchSessionListPageCompat({
-                request: timedRequest,
+                request,
                 token: credentials.token,
                 sessionListPath: params.sessionListPath ?? initialSessionListPath,
                 cursor,
@@ -1215,10 +1312,14 @@ export async function fetchAndApplySessions(params: {
     }
 
     const cachedSessionListEntries = params.cachedSessionListEntries ?? {};
+    const requestedRequiredHydrationSessionIds = normalizeSessionListHydrationSessionIds(params.requiredHydrationSessionIds);
+    const nonAwaitedRequiredHydrationLimit = params.sessionListBackgroundHydrationMaxRows === undefined
+        ? Number.POSITIVE_INFINITY
+        : Math.max(0, Math.trunc(params.sessionListBackgroundHydrationMaxRows));
     const requiredHydrationSessionIds = new Set(
-        (params.requiredHydrationSessionIds ?? [])
-            .map((sessionId) => String(sessionId ?? '').trim())
-            .filter(Boolean),
+        params.awaitSessionListHydration === true
+            ? requestedRequiredHydrationSessionIds
+            : requestedRequiredHydrationSessionIds.slice(0, nonAwaitedRequiredHydrationLimit),
     );
     const shouldApplyRenderables = typeof params.applySessionListRenderables === 'function';
     let appliedRenderableCount = 0;
@@ -1324,28 +1425,27 @@ export async function fetchAndApplySessions(params: {
 
     if (shouldApplyRenderables) {
         const priorityHydrationSessionIds = new Set([
-            ...normalizeSessionListPinnedSessionIds(params.priorityHydrationSessionIds),
-            ...pinnedSessionIds,
+            ...normalizeSessionListHydrationSessionIds(params.priorityHydrationSessionIds),
         ]);
         for (const row of sessions) {
             if (isSessionListRowAttentionHydrationPriority(row)) {
                 priorityHydrationSessionIds.add(row.id);
             }
         }
+        const hydrationCandidates = buildHydrationCandidateAttribution({
+            sessions,
+            requiredHydrationSessionIds,
+            missingEncryptedDataKeySessionIds,
+            encryption,
+            getExistingSession: params.getExistingSession,
+            getCurrentSessionListRenderable: params.getCurrentSessionListRenderable,
+        });
+        syncPerformanceTelemetry.count(
+            'sync.sessions.snapshot.hydrationCandidates',
+            hydrationCandidates.fields,
+        );
         const hydrationPriority = orderRowsForSessionListHydration({
-            rows: sessions.filter((row) =>
-                canHydrateSessionRow({
-                    row,
-                    missingEncryptedDataKeySessionIds,
-                    encryption,
-                })
-                && needsWarmHydration({
-                    row,
-                    existingSession: params.getExistingSession?.(row.id),
-                    currentRenderable: params.getCurrentSessionListRenderable?.(row.id),
-                    isRequiredHydrationRow: requiredHydrationSessionIds.has(row.id),
-                }),
-            ),
+            rows: hydrationCandidates.rows,
             requiredSessionIds: requiredHydrationSessionIds,
             routeSessionIds: params.prioritizeSessionIds,
             activeSessionIds: params.activeSessionIds,
@@ -1410,6 +1510,7 @@ export async function fetchAndApplySessions(params: {
                 shouldContinue,
                 batchSize: backgroundHydrationApplyBatchSize,
                 flushDelayMs: backgroundHydrationApplyFlushDelayMs,
+                coalesceRequiredRows: params.awaitSessionListHydration === true,
             });
             const hydrationAttribution = createBackgroundHydrationAttribution();
             const hydrationPromise = syncPerformanceTelemetry.measureAsync(
@@ -1559,9 +1660,6 @@ export async function fetchAndApplySessions(params: {
                                         }
                                         const enqueueStartedAtMs = nowMs();
                                         hydratedSessionBatcher.enqueue(decryptedSession, { required: isRequiredHydrationRow });
-                                        if (isRequiredHydrationRow && params.awaitSessionListHydration === true) {
-                                            hydratedSessionBatcher.flush('required');
-                                        }
                                         addBackgroundHydrationDuration(
                                             hydrationAttribution,
                                             'applyEnqueueMs',
@@ -1569,6 +1667,13 @@ export async function fetchAndApplySessions(params: {
                                         );
                                         hydrationAttribution.enqueuedRows += 1;
                                         markRequiredHydrationResult(row, decryptedSession);
+                                        if (
+                                            isRequiredHydrationRow
+                                            && params.awaitSessionListHydration === true
+                                            && pendingRequiredHydrationIds.size === 0
+                                        ) {
+                                            hydratedSessionBatcher.flush('required');
+                                        }
                                         return decryptedSession;
                                     } catch (error) {
                                         if (pendingRequiredHydrationIds.has(row.id)) {
@@ -1592,6 +1697,12 @@ export async function fetchAndApplySessions(params: {
                         backgroundHydrationConcurrencyLimit,
                     );
                     const finalFlushStartedAtMs = nowMs();
+                    if (
+                        params.awaitSessionListHydration !== true
+                        && backgroundHydrationApplyFlushDelayMs > 0
+                    ) {
+                        await yieldToSessionListBackgroundHydration(backgroundHydrationApplyFlushDelayMs);
+                    }
                     hydratedSessionBatcher.flush('final');
                     addBackgroundHydrationDuration(
                         hydrationAttribution,
@@ -1659,7 +1770,6 @@ export async function fetchAndApplySessions(params: {
             }
         }
 
-        log.log(`📥 fetchSessions completed - rendered ${appliedRenderableCount} session list rows before selective hydration`);
         return buildFetchResult();
     }
 
@@ -1692,6 +1802,5 @@ export async function fetchAndApplySessions(params: {
         repairInvalidReadStateV1,
     });
 
-    log.log(`📥 fetchSessions completed - processed ${decryptedSessions.length} sessions`);
     return buildFetchResult();
 }

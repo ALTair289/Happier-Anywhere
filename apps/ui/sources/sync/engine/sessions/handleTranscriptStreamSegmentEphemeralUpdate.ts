@@ -6,6 +6,14 @@ import { markStreamingMessagesAppliedForSessionUiTelemetry } from '@/sync/runtim
 import { syncPerformanceTelemetry } from '@/sync/runtime/syncPerformanceTelemetry';
 import { normalizeRawMessage, type NormalizedMessage } from '@/sync/typesRaw';
 import { isLegacyMemoryArtifactTranscriptRow } from './legacyMemoryArtifactTranscriptRows';
+import {
+    applyTranscriptStreamSegmentDelta,
+    evictTranscriptStreamSegmentAssembly,
+    isTranscriptStreamSegmentAssemblyReady,
+    noteTranscriptStreamSegmentSnapshot,
+    readTranscriptStreamSegmentText,
+    withTranscriptStreamSegmentText,
+} from './transcriptStreamSegmentAssembly';
 
 export type TranscriptStreamSegmentSessionMessageEncryption = {
     decryptMessage: (message: ApiMessage) => Promise<DecryptedMessage | null>;
@@ -19,10 +27,32 @@ export type TranscriptStreamSegmentEphemeralUpdate = Readonly<{
         sidechainId?: string | null;
         messageRole?: SessionMessageRole | null;
         content: ApiMessage['content'];
+        /** Live-stream tick this snapshot corresponds to (delta-chaining checkpoint anchor). */
+        tick?: number | null;
         createdAt: number;
         updatedAt: number;
     }>;
 }>;
+
+export type TranscriptStreamSegmentDeltaEphemeralUpdate = Readonly<{
+    type: 'transcript-stream-segment-delta';
+    sessionId: string;
+    message: Readonly<{
+        localId: string;
+        sidechainId?: string | null;
+        messageRole?: SessionMessageRole | null;
+        /** Envelope carrying ONLY the text appended since the previous live emission. */
+        content: ApiMessage['content'];
+        tick: number;
+        baseLength: number;
+        createdAt: number;
+        updatedAt: number;
+    }>;
+}>;
+
+export type AnyTranscriptStreamSegmentEphemeralUpdate =
+    | TranscriptStreamSegmentEphemeralUpdate
+    | TranscriptStreamSegmentDeltaEphemeralUpdate;
 
 type TranscriptStreamSegmentTelemetryFields = Readonly<{
     encrypted: number;
@@ -32,7 +62,7 @@ type TranscriptStreamSegmentTelemetryFields = Readonly<{
 }>;
 
 type HandleTranscriptStreamSegmentEphemeralUpdateParams = Readonly<{
-    update: TranscriptStreamSegmentEphemeralUpdate;
+    update: AnyTranscriptStreamSegmentEphemeralUpdate;
     getSessionEncryption: (sessionId: string) => TranscriptStreamSegmentSessionMessageEncryption | null;
     getSession: (sessionId: string) => Session | undefined;
     applyMessages: (sessionId: string, messages: NormalizedMessage[]) => void;
@@ -46,8 +76,18 @@ async function applyTranscriptStreamSegmentEphemeralUpdate(
 ): Promise<void> {
     const { update, getSessionEncryption, getSession, applyMessages } = params;
     const sessionId = update.sessionId;
+    const isDelta = update.type === 'transcript-stream-segment-delta';
     const session = getSession(sessionId);
     if (!session) {
+        return;
+    }
+
+    // Deltas can only be chained onto known, in-sync assembly state. Check before decrypting so
+    // undecodable deltas cost nothing; the next full-snapshot checkpoint resyncs the segment.
+    if (isDelta && !isTranscriptStreamSegmentAssemblyReady(sessionId, update.message.localId)) {
+        if (telemetryFields) {
+            syncPerformanceTelemetry.count('sync.sessions.socket.transcriptStreamSegmentDelta.droppedUnchained', telemetryFields);
+        }
         return;
     }
 
@@ -88,11 +128,50 @@ async function applyTranscriptStreamSegmentEphemeralUpdate(
         return;
     }
 
+    let contentForNormalize = decrypted.content;
+    if (update.type === 'transcript-stream-segment-delta') {
+        const deltaText = readTranscriptStreamSegmentText(decrypted.content);
+        if (deltaText === null) {
+            // A delta that does not carry chainable text cannot be reconstructed; wait for the
+            // next full snapshot instead of guessing.
+            evictTranscriptStreamSegmentAssembly(sessionId, update.message.localId);
+            return;
+        }
+        const assembledText = applyTranscriptStreamSegmentDelta({
+            sessionId,
+            localId: update.message.localId,
+            deltaText,
+            tick: update.message.tick,
+            baseLength: update.message.baseLength,
+        });
+        if (assembledText === null) {
+            if (telemetryFields) {
+                syncPerformanceTelemetry.count('sync.sessions.socket.transcriptStreamSegmentDelta.droppedUnchained', telemetryFields);
+            }
+            return;
+        }
+        const patched = decrypted.content
+            ? withTranscriptStreamSegmentText(decrypted.content, assembledText)
+            : null;
+        if (!patched) {
+            evictTranscriptStreamSegmentAssembly(sessionId, update.message.localId);
+            return;
+        }
+        contentForNormalize = patched;
+    } else {
+        noteTranscriptStreamSegmentSnapshot({
+            sessionId,
+            localId: update.message.localId,
+            record: decrypted.content,
+            tick: typeof update.message.tick === 'number' ? update.message.tick : null,
+        });
+    }
+
     const normalizeMessage = () => normalizeRawMessage(
         update.message.localId,
         decrypted.localId,
         decrypted.createdAt,
-        decrypted.content,
+        contentForNormalize,
         { messageRole: decrypted.messageRole ?? undefined },
     );
 

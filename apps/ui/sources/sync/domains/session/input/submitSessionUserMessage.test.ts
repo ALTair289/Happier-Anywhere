@@ -102,8 +102,9 @@ type SubmitCall =
     | { type: 'switchRemote'; sessionId: string };
 
 function createPort(config: {
-    enqueueResult?: { localId?: string } | void;
+    enqueueResult?: { localId?: string; accepted?: boolean } | void;
     enqueueReject?: Error;
+    enqueueWait?: Promise<void>;
     sendResult?: { localId?: string; seq?: number } | void;
     resumeResult?: ResumeSessionResult;
     resumeReject?: Error;
@@ -119,9 +120,16 @@ function createPort(config: {
             text: string,
             displayText?: string,
             metaOverrides?: Record<string, unknown>,
+            options?: Readonly<{
+                onLocalPendingProjectionCreated?: (event: Readonly<{ localId: string }>) => void;
+            }>,
         ) => {
             calls.push({ type: 'enqueue', sessionId, text, displayText, metaOverrides });
             if (config.enqueueReject) throw config.enqueueReject;
+            options?.onLocalPendingProjectionCreated?.({
+                localId: (config.enqueueResult && typeof config.enqueueResult === 'object' && config.enqueueResult.localId) || 'pending-local-id',
+            });
+            await config.enqueueWait;
             return config.enqueueResult ?? { localId: 'pending-local-id' };
         },
         sendMessage: async (
@@ -243,6 +251,50 @@ describe('submitSessionUserMessage', () => {
         }));
     }, 120_000);
 
+    it('hands off pending outbound when the local pending projection is created before enqueue persistence settles', async () => {
+        const subject = await expectSubject();
+        if (!subject) return;
+        let resolveEnqueue!: () => void;
+        const enqueueWait = new Promise<void>((resolve) => {
+            resolveEnqueue = resolve;
+        });
+        const { calls, port } = createPort({ enqueueWait });
+        const outboundHandoffs: unknown[] = [];
+
+        const resultPromise = subject.submitSessionUserMessage(port, {
+            sessionId: 's1',
+            session: createSession(),
+            text: 'hello',
+            configuredMode: 'agent_queue',
+            resumeCapabilityOptions: { accountSettings: {} },
+            onOutboundHandoff: (event) => {
+                outboundHandoffs.push({
+                    event,
+                    callTypes: calls.map((call) => call.type),
+                });
+            },
+        });
+
+        await Promise.resolve();
+
+        expect(calls.map((call) => call.type)).toEqual(['enqueue']);
+        expect(outboundHandoffs).toEqual([{
+            event: {
+                persistence: 'pending',
+                localId: 'pending-local-id',
+            },
+            callTypes: ['enqueue'],
+        }]);
+
+        resolveEnqueue();
+        await expect(resultPromise).resolves.toMatchObject({
+            type: 'success',
+            persistence: 'pending',
+            localId: 'pending-local-id',
+        });
+        expect(outboundHandoffs).toHaveLength(1);
+    });
+
     it('keeps the pending row when no wake target is available', async () => {
         const subject = await expectSubject();
         if (!subject) return;
@@ -262,6 +314,36 @@ describe('submitSessionUserMessage', () => {
             wake: { attempted: false, state: 'not_needed' },
         });
         expect(calls.map((call) => call.type)).toEqual(['enqueue']);
+    });
+
+    it('does not wake the runtime when pending enqueue only has a local retry row', async () => {
+        const subject = await expectSubject();
+        if (!subject) return;
+        const { calls, port } = createPort({
+            enqueueResult: { localId: 'local-pending-retry', accepted: false },
+        });
+        const outboundHandoff = vi.fn();
+
+        const result = await subject.submitSessionUserMessage(port, {
+            sessionId: 's1',
+            session: createSession(),
+            text: 'queued locally',
+            configuredMode: 'server_pending',
+            resumeCapabilityOptions: { accountSettings: {} },
+            onOutboundHandoff: outboundHandoff,
+        });
+
+        expect(result).toMatchObject({
+            type: 'wake_pending',
+            persistence: 'pending',
+            wake: { attempted: false, state: 'not_needed' },
+            localId: 'local-pending-retry',
+        });
+        expect(calls.map((call) => call.type)).toEqual(['enqueue']);
+        expect(outboundHandoff).toHaveBeenCalledWith({
+            persistence: 'pending',
+            localId: 'local-pending-retry',
+        });
     });
 
     it('reports wake failure without falling through to direct send', async () => {
@@ -687,7 +769,7 @@ describe('submitSessionUserMessage', () => {
         expect(outboundHandoff).not.toHaveBeenCalled();
     });
 
-    it('waits for the direct send port to create a local pending projection before marking outbound handoff', async () => {
+    it('reports local pending handoff when direct send creates an optimistic projection before transcript commit', async () => {
         const subject = await expectSubject();
         if (!subject) return;
         const { calls, port } = createPort({ sendResult: { localId: 'projection-local-id', seq: 42 } });
@@ -715,11 +797,38 @@ describe('submitSessionUserMessage', () => {
         expect(calls.map((call) => call.type)).toEqual(['send']);
         expect(handoffTrace).toEqual([{
             event: {
-                persistence: 'transcript_committed',
+                persistence: 'pending',
                 localId: 'projection-local-id',
             },
             callTypes: ['send'],
         }]);
+    });
+
+    it('keeps direct send persistence pending when the port has only local projection evidence', async () => {
+        const subject = await expectSubject();
+        if (!subject) return;
+        const { calls, port } = createPort({ sendResult: { localId: 'projection-local-id' } });
+        const outboundHandoff = vi.fn();
+
+        const result = await subject.submitSessionUserMessage(port, {
+            sessionId: 's1',
+            session: createSession({ active: true, presence: 'online' }),
+            text: 'hello',
+            configuredMode: 'agent_queue',
+            resumeCapabilityOptions: { accountSettings: {} },
+            onOutboundHandoff: outboundHandoff,
+        });
+
+        expect(result).toMatchObject({
+            type: 'success',
+            persistence: 'pending',
+            localId: 'projection-local-id',
+        });
+        expect(calls.map((call) => call.type)).toEqual(['send']);
+        expect(outboundHandoff).toHaveBeenCalledWith({
+            persistence: 'pending',
+            localId: 'projection-local-id',
+        });
     });
 
     it('does not mark outbound handoff when pending enqueue fails before a pending row exists', async () => {

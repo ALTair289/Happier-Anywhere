@@ -2,11 +2,74 @@ import { describe, expect, it } from 'vitest';
 import { createSessionFixture } from '@/dev/testkit/fixtures/sessionFixtures';
 import type { Message } from '@/sync/domains/messages/messageTypes';
 import {
+    buildPendingSessionRequestsSourceSignature,
+    collectTranscriptRequestStates,
     deriveLatestPendingRequestObservedAtFromSession,
     derivePendingRequestFlagsFromSession,
     listPendingSessionRequests,
     shouldReadTranscriptForPendingSessionRequests,
+    type TranscriptRequestState,
+    type TranscriptRequestStatesCache,
 } from './listPendingSessionRequests';
+
+describe('buildPendingSessionRequestsSourceSignature', () => {
+    it('ignores session seq and timestamp churn that cannot change pending request derivation', () => {
+        const session = createSessionFixture({
+            active: true,
+            seq: 1,
+            updatedAt: 100,
+            activeAt: 100,
+            thinkingAt: 100,
+            agentState: {
+                requests: {},
+                completedRequests: null,
+            },
+            pendingPermissionRequestCount: 0,
+            pendingUserActionRequestCount: 0,
+        });
+        const signature = buildPendingSessionRequestsSourceSignature(session);
+
+        expect(buildPendingSessionRequestsSourceSignature({
+            ...session,
+            seq: 2,
+            updatedAt: 200,
+            activeAt: 200,
+            thinkingAt: 200,
+        })).toBe(signature);
+    });
+
+    it('changes when pending projection or agent request inputs change', () => {
+        const session = createSessionFixture({
+            active: true,
+            agentState: {
+                requests: {},
+                completedRequests: null,
+            },
+            pendingPermissionRequestCount: 0,
+            pendingUserActionRequestCount: 0,
+        });
+        const signature = buildPendingSessionRequestsSourceSignature(session);
+
+        expect(buildPendingSessionRequestsSourceSignature({
+            ...session,
+            pendingUserActionRequestCount: 1,
+        })).not.toBe(signature);
+        expect(buildPendingSessionRequestsSourceSignature({
+            ...session,
+            agentState: {
+                requests: {
+                    question: {
+                        tool: 'AskUserQuestion',
+                        kind: 'user_action',
+                        arguments: { question: 'Continue?' },
+                        createdAt: 10,
+                    },
+                },
+                completedRequests: null,
+            },
+        })).not.toBe(signature);
+    });
+});
 
 describe('derivePendingRequestFlagsFromSession', () => {
     it('uses projected pending request counts without scanning large transcript message lists', () => {
@@ -332,5 +395,77 @@ describe('derivePendingRequestFlagsFromSession', () => {
             hasPendingUserActionRequests: false,
         });
         expect(deriveLatestPendingRequestObservedAtFromSession(session, messages)).toBe(100);
+    });
+});
+
+describe('transcript request states cache', () => {
+    function pendingToolCallMessage(id: string, createdAt: number): Message {
+        return {
+            id,
+            kind: 'tool-call',
+            localId: null,
+            createdAt,
+            tool: {
+                id: `${id}-tool`,
+                name: 'bash',
+                state: 'running',
+                input: { command: 'ls' },
+                createdAt,
+                startedAt: createdAt,
+                completedAt: null,
+                description: null,
+                permission: {
+                    id: `${id}-perm`,
+                    status: 'pending',
+                },
+            },
+            children: [],
+        } as unknown as Message;
+    }
+
+    function activeTranscriptSession() {
+        return createSessionFixture({
+            active: true,
+            updatedAt: 100,
+            agentState: {
+                requests: {},
+                completedRequests: null,
+            },
+        });
+    }
+
+    it('derives identical results from a pre-filled cache without messages', () => {
+        const session = activeTranscriptSession();
+        const messages = [pendingToolCallMessage('m1', 50)];
+
+        const cache: TranscriptRequestStatesCache = {
+            states: (() => {
+                const states = new Map<string, TranscriptRequestState>();
+                collectTranscriptRequestStates(messages, null, states);
+                return states;
+            })(),
+        };
+
+        expect(derivePendingRequestFlagsFromSession(session, undefined, cache))
+            .toEqual(derivePendingRequestFlagsFromSession(session, messages));
+        expect(deriveLatestPendingRequestObservedAtFromSession(session, undefined, cache))
+            .toBe(deriveLatestPendingRequestObservedAtFromSession(session, messages));
+        expect(listPendingSessionRequests(session, undefined, cache))
+            .toEqual(listPendingSessionRequests(session, messages));
+    });
+
+    it('walks the transcript once per cache and reuses the collected states', () => {
+        const session = activeTranscriptSession();
+        const messages = [pendingToolCallMessage('m1', 50)];
+
+        const cache: TranscriptRequestStatesCache = {};
+        const flags = derivePendingRequestFlagsFromSession(session, messages, cache);
+        expect(flags.hasPendingPermissionRequests).toBe(true);
+        expect(cache.states?.size).toBe(1);
+
+        // A later derivation in the same pass must reuse the cached states and
+        // never re-walk the (now grown) message array.
+        messages.push(pendingToolCallMessage('m2', 80));
+        expect(deriveLatestPendingRequestObservedAtFromSession(session, messages, cache)).toBe(50);
     });
 });

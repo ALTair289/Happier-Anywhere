@@ -442,13 +442,14 @@ describe('sessions domain: sessionListViewData rebuild gating', () => {
         expect(readSessionListSessionById(next, 's1')?.updatedAt).toBe(300);
     });
 
-    it('refreshes embedded rows without rebuilding for unread updates when attention promotion is disabled', async () => {
+    it('keeps list data stable for unread updates when attention promotion is disabled while row overlay stays fresh', async () => {
         vi.doMock('../../runtime/orchestration/projectManager', () => ({
             projectManager: { updateSessions: vi.fn() },
         }));
         mockSessionPersistenceBoundaries();
 
         const { syncPerformanceTelemetry } = await import('@/sync/runtime/syncPerformanceTelemetry');
+        const { selectSessionListRowStateSnapshot } = await import('../sessionListRowStateSnapshot');
         const { createSessionsDomain } = await import('./sessions');
         const { get, domain } = createHarness(createSessionsDomain, {
             settings: { sessionListAttentionPromotionModeV1: 'off' },
@@ -506,9 +507,84 @@ describe('sessions domain: sessionListViewData rebuild gating', () => {
                 } as any,
             ]);
 
+            expect(get().sessionListViewData).toBe(initial);
+            expect(readSessionListSessionById(initial, 's1')?.latestReadyEventSeq).toBeNull();
+            expect(get().sessionListRenderables.s1.latestReadyEventSeq).toBe(2);
+            expect(selectSessionListRowStateSnapshot(get(), { sessionId: 's1' }).renderable?.latestReadyEventSeq).toBe(2);
+
+            const changedEvent = syncPerformanceTelemetry
+                .snapshot()
+                .events.find((candidate) => candidate.name === 'sync.store.sessions.apply.changed');
+            expect(changedEvent?.fields.listRebuild).toBe(0);
+            expect(changedEvent?.fields.listRowRefreshes).toBe(0);
+        } finally {
+            syncPerformanceTelemetry.configure({ enabled: false });
+        }
+    });
+
+    it('refreshes embedded list rows for runtime activity lease renewals without rebuilding placement', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-07-02T13:30:00.000Z'));
+        vi.doMock('../../runtime/orchestration/projectManager', () => ({
+            projectManager: { updateSessions: vi.fn() },
+        }));
+        mockSessionPersistenceBoundaries();
+
+        const { syncPerformanceTelemetry } = await import('@/sync/runtime/syncPerformanceTelemetry');
+        const { createSessionsDomain } = await import('./sessions');
+        const { get, domain } = createHarness(createSessionsDomain, {
+            settings: { sessionListWorkingPlacementModeV1: 'global' },
+        });
+        const now = Date.now();
+
+        syncPerformanceTelemetry.configure({
+            enabled: true,
+            slowThresholdMs: 1_000_000,
+            flushIntervalMs: 60_000,
+        });
+        syncPerformanceTelemetry.reset();
+
+        try {
+            domain.applySessions([
+                {
+                    id: 's1',
+                    seq: 1,
+                    createdAt: 1,
+                    updatedAt: 1,
+                    active: true,
+                    activeAt: now - 5_000,
+                    metadata: { machineId: 'm1', path: '/home/u/repo', homeDir: '/home/u' },
+                    metadataVersion: 1,
+                    agentState: null,
+                    agentStateVersion: 0,
+                    thinking: false,
+                    thinkingAt: 0,
+                    presence: 'online',
+                    latestTurnStatus: 'completed',
+                    latestTurnStatusObservedAt: now - 10_000,
+                    runtimeActivityActiveCount: 1,
+                    runtimeActivityObservedAt: now - 1_000,
+                    runtimeActivityExpiresAt: now + 60_000,
+                    runtimeActivitySourceClass: 'provider_detached_task',
+                } as any,
+            ]);
+
+            const initial = get().sessionListViewData;
+            expect(readSessionListSessionById(initial, 's1')?.runtimeActivityExpiresAt).toBe(now + 60_000);
+            syncPerformanceTelemetry.reset();
+
+            domain.applySessions([
+                {
+                    ...get().sessions.s1,
+                    runtimeActivityObservedAt: now + 10_000,
+                    runtimeActivityExpiresAt: now + 180_000,
+                } as any,
+            ]);
+
             const next = get().sessionListViewData;
             expect(next).not.toBe(initial);
-            expect(readSessionListSessionById(next, 's1')?.latestReadyEventSeq).toBe(2);
+            expect(readSessionListRowIds(next)).toEqual(readSessionListRowIds(initial));
+            expect(readSessionListSessionById(next, 's1')?.runtimeActivityExpiresAt).toBe(now + 180_000);
 
             const changedEvent = syncPerformanceTelemetry
                 .snapshot()
@@ -517,6 +593,83 @@ describe('sessions domain: sessionListViewData rebuild gating', () => {
             expect(changedEvent?.fields.listRowRefreshes).toBe(1);
         } finally {
             syncPerformanceTelemetry.configure({ enabled: false });
+            vi.useRealTimers();
+        }
+    });
+
+    it('rebuilds sessionListViewData when runtime activity enters or leaves global working placement', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-07-02T13:45:00.000Z'));
+        vi.doMock('../../runtime/orchestration/projectManager', () => ({
+            projectManager: { updateSessions: vi.fn() },
+        }));
+        mockSessionPersistenceBoundaries();
+
+        const { syncPerformanceTelemetry } = await import('@/sync/runtime/syncPerformanceTelemetry');
+        const { createSessionsDomain } = await import('./sessions');
+        const { domain } = createHarness(createSessionsDomain, {
+            settings: { sessionListWorkingPlacementModeV1: 'global' },
+        });
+        const now = Date.now();
+
+        syncPerformanceTelemetry.configure({
+            enabled: true,
+            slowThresholdMs: 1_000_000,
+            flushIntervalMs: 60_000,
+        });
+        syncPerformanceTelemetry.reset();
+
+        const baseSession = {
+            id: 's1',
+            seq: 1,
+            createdAt: 1,
+            updatedAt: 1,
+            active: true,
+            activeAt: now - 5_000,
+            metadata: { machineId: 'm1', path: '/home/u/repo', homeDir: '/home/u' },
+            metadataVersion: 1,
+            agentState: null,
+            agentStateVersion: 0,
+            thinking: false,
+            thinkingAt: 0,
+            presence: 'online',
+            latestTurnStatus: 'completed',
+            latestTurnStatusObservedAt: now - 10_000,
+            runtimeActivityActiveCount: 0,
+            runtimeActivityObservedAt: null,
+            runtimeActivityExpiresAt: null,
+            runtimeActivitySourceClass: null,
+        } as any;
+
+        try {
+            domain.applySessions([baseSession]);
+            syncPerformanceTelemetry.reset();
+
+            domain.applySessions([{
+                ...baseSession,
+                runtimeActivityActiveCount: 1,
+                runtimeActivityObservedAt: now - 1_000,
+                runtimeActivityExpiresAt: now + 60_000,
+                runtimeActivitySourceClass: 'provider_detached_task',
+            }]);
+
+            let changedEvent = syncPerformanceTelemetry
+                .snapshot()
+                .events.find((candidate) => candidate.name === 'sync.store.sessions.apply.changed');
+            expect(changedEvent?.fields.listRebuild).toBe(1);
+            expect(changedEvent?.fields.attentionPromotionFieldChanges).toBe(1);
+
+            syncPerformanceTelemetry.reset();
+            domain.applySessions([baseSession]);
+
+            changedEvent = syncPerformanceTelemetry
+                .snapshot()
+                .events.find((candidate) => candidate.name === 'sync.store.sessions.apply.changed');
+            expect(changedEvent?.fields.listRebuild).toBe(1);
+            expect(changedEvent?.fields.attentionPromotionFieldChanges).toBe(1);
+        } finally {
+            syncPerformanceTelemetry.configure({ enabled: false });
+            vi.useRealTimers();
         }
     });
 
@@ -1329,6 +1482,70 @@ describe('sessions domain: sessionListViewData rebuild gating', () => {
             }
 
             expect(get().sessionListViewData).toBe(initialListViewData);
+            expect(saveWarmCache).toHaveBeenCalledTimes(1);
+            vi.runOnlyPendingTimers();
+            expect(saveWarmCache).toHaveBeenCalledTimes(2);
+        } finally {
+            vi.clearAllTimers();
+            vi.useRealTimers();
+        }
+    });
+
+    it('coalesces warm cache writes for runtime activity lease renewals during applySessions updates', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(1_700_000_000_000);
+        try {
+            vi.doMock('../../runtime/orchestration/projectManager', () => ({
+                projectManager: { updateSessions: vi.fn() },
+            }));
+            mockSessionPersistenceBoundaries();
+
+            const warmCache = await import('../../domains/state/warmCachePersistence');
+            const { createSessionsDomain } = await import('./sessions');
+            const { get, domain } = createHarness(createSessionsDomain);
+
+            const buildSession = (observedAt: number, expiresAt: number) => ({
+                id: 'runtime-active',
+                seq: 1,
+                createdAt: 1,
+                updatedAt: 1,
+                active: true,
+                activeAt: 1,
+                metadata: { machineId: 'm1', path: '/home/u/repo', homeDir: '/home/u' },
+                metadataVersion: 1,
+                agentState: null,
+                agentStateVersion: 0,
+                thinking: false,
+                thinkingAt: 0,
+                presence: 'online',
+                latestTurnStatus: 'completed',
+                pendingPermissionRequestCount: 0,
+                pendingUserActionRequestCount: 0,
+                runtimeActivityActiveCount: 1,
+                runtimeActivityObservedAt: observedAt,
+                runtimeActivityExpiresAt: expiresAt,
+                runtimeActivitySourceClass: 'provider_detached_task',
+            } as any);
+
+            domain.applySessions([buildSession(1_700_000_000_000, 1_700_000_060_000)]);
+
+            const initialListViewData = get().sessionListViewData;
+            expect(Array.isArray(initialListViewData)).toBe(true);
+
+            const saveWarmCache = warmCache.saveSessionListWarmCacheEntries as unknown as ReturnType<typeof vi.fn>;
+            expect(saveWarmCache).toHaveBeenCalledTimes(1);
+
+            domain.applySessions([buildSession(1_700_000_010_000, 1_700_000_070_000)]);
+            domain.applySessions([buildSession(1_700_000_020_000, 1_700_000_080_000)]);
+
+            expect(get().sessionListViewData).not.toBe(initialListViewData);
+            expect(readSessionListRowIds(get().sessionListViewData)).toEqual(readSessionListRowIds(initialListViewData));
+            expect(get().sessionListRenderables['runtime-active']?.runtimeActivityObservedAt).toBe(1_700_000_020_000);
+            expect(get().sessionListRenderables['runtime-active']?.runtimeActivityExpiresAt).toBe(1_700_000_080_000);
+            expect(readSessionListSessionById(get().sessionListViewData, 'runtime-active')?.runtimeActivityObservedAt)
+                .toBe(1_700_000_020_000);
+            expect(readSessionListSessionById(get().sessionListViewData, 'runtime-active')?.runtimeActivityExpiresAt)
+                .toBe(1_700_000_080_000);
             expect(saveWarmCache).toHaveBeenCalledTimes(1);
             vi.runOnlyPendingTimers();
             expect(saveWarmCache).toHaveBeenCalledTimes(2);
