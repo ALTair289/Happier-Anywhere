@@ -14,7 +14,15 @@ import { expoExec } from './utils/expo/command.mjs';
 import { ensureDevExpoServer, resolveExpoTailscaleEnabled } from './utils/dev/expo_dev.mjs';
 import { resolveMobileReachableServerUrl } from './utils/server/mobile_api_url.mjs';
 import { patchIosXcodeProjectsForSigningAndIdentity, resolveIosAppXcodeProjects } from './utils/mobile/ios_xcodeproj_patch.mjs';
+import { patchIosPodfileAutolinkingForMemoryProfiling } from './utils/mobile/ios_podfile_autolinking.mjs';
+import { patchIosPodfilePropertiesForMobileBuild } from './utils/mobile/ios_podfile_properties.mjs';
 import { pickMetroPort, resolveStablePortStart } from './utils/expo/metro_ports.mjs';
+import { runIosProfilingRuntime } from './utils/mobile/ios_profiling_runtime.mjs';
+import {
+  isIosMemoryAttributionRuntime,
+  isIosProfilingRuntimeEnabled,
+  resolveIosProfilingRuntimeMode,
+} from './utils/mobile/profiling_runtime_mode.mjs';
 import {
   clearAndroidGeneratedBuildState,
   shouldClearAndroidNativeBuildState,
@@ -55,6 +63,8 @@ async function main() {
           '--app-env=development|production',
           '--prebuild [--platform=ios|all] [--clean]',
           '--run-ios [--device=<id-or-name>] [--configuration=Debug|Release]',
+          '--profiling-runtime[=memory]',
+          '--memory-attribution',
           '--run-android [--device=<id-or-name>]',
           '--metro / --no-metro',
           '--expo-tailscale',
@@ -68,6 +78,8 @@ async function main() {
         '  hstack mobile [--host=lan|localhost|tunnel] [--port=8081] [--scheme=...] [--json]',
         '  hstack mobile --restart   # force-restart Metro for this stack/worktree',
         '  hstack mobile --run-ios [--device=...] [--configuration=Debug|Release]',
+        '  hstack mobile --prebuild --run-ios --profiling-runtime [--device=<simulator-udid>]',
+        '  hstack mobile --prebuild --run-ios --profiling-runtime=memory [--device=<simulator-udid>]',
         '  hstack mobile --run-android [--device=...]',
         '  hstack mobile --prebuild [--platform=ios|all] [--clean]',
         '  hstack mobile --no-metro   # just build/install (if --run-ios) without starting Metro',
@@ -125,11 +137,17 @@ async function main() {
   const shouldStartMetro =
     flags.has('--metro') ||
     (!flags.has('--no-metro') && !flags.has('--run-ios') && !flags.has('--run-android') && !flags.has('--prebuild'));
+  const profilingRuntimeMode = resolveIosProfilingRuntimeMode({ flags, kv });
+  const profilingRuntime = isIosProfilingRuntimeEnabled(profilingRuntimeMode);
+  const memoryAttributionRuntime = isIosMemoryAttributionRuntime(profilingRuntimeMode);
 
   const env = {
     ...process.env,
     APP_ENV: appEnv,
   };
+  if (memoryAttributionRuntime) {
+    env.HAPPIER_IOS_MEMORY_PROFILING_RUNTIME = '1';
+  }
 
   const cfgBase = resolveMobileExpoConfig({ env });
   const iosAppName = (kv.get('--ios-app-name') ?? cfgBase.iosAppName ?? '').toString();
@@ -225,6 +243,8 @@ async function main() {
         port: portRaw,
         shouldPrebuild: flags.has('--prebuild'),
         shouldRunIos: flags.has('--run-ios'),
+        profilingRuntime,
+        profilingRuntimeMode,
         shouldStartMetro,
         expoTailscale,
         expoPublicHappyServerUrl: env.EXPO_PUBLIC_HAPPY_SERVER_URL ?? '',
@@ -249,15 +269,9 @@ async function main() {
     // Always patch iOS props if iOS was generated.
     if (platform === 'ios' || platform === 'all') {
       const fs = await import('node:fs/promises');
-      const podPropsPath = `${uiDir}/ios/Podfile.properties.json`;
-      try {
-        const raw = await fs.readFile(podPropsPath, 'utf-8');
-        const json = JSON.parse(raw);
-        json['ios.deploymentTarget'] = '16.0';
-        json['ios.buildReactNativeFromSource'] = 'true';
-        await fs.writeFile(podPropsPath, JSON.stringify(json, null, 2) + '\n', 'utf-8');
-      } catch {
-        // ignore if path missing (platform != ios)
+      await patchIosPodfilePropertiesForMobileBuild({ uiDir, memoryAttribution: memoryAttributionRuntime });
+      if (memoryAttributionRuntime) {
+        await patchIosPodfileAutolinkingForMemoryProfiling({ uiDir });
       }
 
       const iosProjects = await resolveIosAppXcodeProjects({ uiDir });
@@ -306,7 +320,7 @@ async function main() {
       }
     }
 
-    if (!device && process.platform === 'darwin') {
+    if (!device && process.platform === 'darwin' && !profilingRuntime) {
       // Auto-pick a connected physical iPhone/iPad if available.
       // This avoids needing to know the exact "Your iPhone" string.
       try {
@@ -348,8 +362,21 @@ async function main() {
       await patchIosXcodeProjectsForSigningAndIdentity({ uiDir, iosBundleId, iosAppName });
     }
 
-    const configuration = kv.get('--configuration') ?? 'Debug';
+    const configuration = kv.get('--configuration') ?? (profilingRuntime ? 'Release' : 'Debug');
     const metroPort = String(env.RCT_METRO_PORT ?? portRaw ?? '8081');
+    if (profilingRuntime) {
+      const result = await runIosProfilingRuntime({
+        uiDir,
+        device,
+        configuration,
+        memoryAttribution: memoryAttributionRuntime,
+        env,
+      });
+      console.log(`[mobile] profiling runtime launched: ${result.bundleId} on ${result.device.name} (${result.device.udid})`);
+      console.log(`[mobile] profiling runtime app: ${result.appPath}`);
+      return;
+    }
+
     const args = ['run:ios', '--port', metroPort, '--no-build-cache', '--configuration', configuration];
     if (device) {
       args.push('-d', device);

@@ -18,6 +18,13 @@ const TOOL_SCRIPTS = {
   import: 'scripts/import.mjs',
   review: 'scripts/review.mjs',
   edison: 'scripts/edison.mjs',
+  'profile-processes': 'scripts/profile_processes.mjs',
+  profileprocesses: 'scripts/profile_processes.mjs',
+  profileProcesses: 'scripts/profile_processes.mjs',
+
+  'profile-mobile-scenario': 'scripts/profile_mobile_scenario.mjs',
+  profilemobilescenario: 'scripts/profile_mobile_scenario.mjs',
+  profileMobileScenario: 'scripts/profile_mobile_scenario.mjs',
 };
 
 async function main() {
@@ -42,7 +49,7 @@ async function main() {
   if (wantsHelp(argv, { flags }) || !cmd || cmd === 'help') {
     printResult({
       json,
-      data: { commands: ['setup-pr', 'review-pr', 'import', 'review', 'edison'] },
+      data: { commands: ['setup-pr', 'review-pr', 'import', 'review', 'edison', 'profile-processes', 'profile-mobile-scenario'] },
       text: [
         '[tools] usage:',
         '  hstack tools setup-pr --repo=<pr-url|number> [--dev|--start] [--json] [-- ...]',
@@ -50,6 +57,8 @@ async function main() {
         '  hstack tools import [--json]',
         '  hstack tools review [ui|cli|server|all] [--json]',
         '  hstack tools edison [--stack=<name>] -- <edison args...>',
+        '  hstack tools profile-processes --pid=<pid>|--command-match=<unique substring> [--duration=30s] [--interval=1s] [--stack-sample=10s] [--memory-map] [--json]',
+        '  hstack tools profile-mobile-scenario --scenario=<name> --udid=<ios-udid> [--execute-flow] [--profile-process] [--json]',
       ].join('\n'),
     });
     return;
@@ -61,6 +70,16 @@ async function main() {
 
   const idx = argv.indexOf(cmd);
   const forwarded = idx === -1 ? argv.slice(1) : [...argv.slice(0, idx), ...argv.slice(idx + 1)];
+  if (scriptRel === 'scripts/profile_processes.mjs') {
+    const { runProfileProcessesCli } = await import('./profile_processes.mjs');
+    await runProfileProcessesCli(forwarded);
+    return;
+  }
+  if (scriptRel === 'scripts/profile_mobile_scenario.mjs') {
+    const { runProfileMobileScenarioCli } = await import('./profile_mobile_scenario.mjs');
+    await runProfileMobileScenarioCli(forwarded);
+    return;
+  }
   await run(process.execPath, [join(rootDir, scriptRel), ...forwarded], { cwd: rootDir, env: process.env });
 }
 

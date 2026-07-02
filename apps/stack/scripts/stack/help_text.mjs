@@ -24,7 +24,7 @@ const STACK_HELP_USAGE_LINES = [
   'hstack stack test <name> [component...] [--json]',
   'hstack stack doctor <name> [-- ...]',
   'hstack stack mobile <name> [-- ...]',
-  'hstack stack mobile:install <name> [--name="Happier (exp1)"] [--device=...] [--app-env=production|development] [--configuration=Debug|Release] [--json]',
+  'hstack stack mobile:install <name> [--name="Happier (exp1)"] [--device=...] [--app-env=production|development] [--configuration=Debug|Release] [--profiling-runtime] [--json]',
   'hstack stack mobile-dev-client <name> --install [--profile=internaldev|publicdev] [--platform=ios|android] [--device=...] [--clean] [--configuration=Debug|Release] [--json]',
   'hstack stack resume <name> <sessionId...> [--json]',
   'hstack stack stop <name> [--aggressive] [--sweep-owned] [--no-docker] [--json]',

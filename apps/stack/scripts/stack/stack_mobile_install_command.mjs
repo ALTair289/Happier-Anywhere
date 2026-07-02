@@ -5,17 +5,25 @@ import { ensureEnvFileUpdated } from '../utils/env/env_file.mjs';
 import { readTextOrEmpty } from '../utils/fs/ops.mjs';
 import { resolveStackEnvPath } from '../utils/paths/paths.mjs';
 import { defaultDevClientIdentity, defaultStackReleaseIdentity } from '../utils/mobile/identifiers.mjs';
+import {
+  isIosProfilingRuntimeEnabled,
+  resolveIosProfilingRuntimeMode,
+} from '../utils/mobile/profiling_runtime_mode.mjs';
 
 import { runStackScriptWithStackEnv } from './run_script_with_stack_env.mjs';
 
-function resolveRequestedAppEnv(mobileKv) {
+function resolveRequestedAppEnv(mobileKv, { profilingRuntime = false } = {}) {
   const raw = (mobileKv.get('--app-env') ?? '').toString().trim().toLowerCase();
+  if (profilingRuntime && raw === 'development') {
+    throw new Error('mobile:install --profiling-runtime requires a release-style app; omit --app-env=development.');
+  }
   return raw === 'development' ? 'development' : 'production';
 }
 
-function resolveInstallConfiguration({ appEnv, mobileKv }) {
+function resolveInstallConfiguration({ appEnv, mobileKv, profilingRuntime = false }) {
   const explicit = (mobileKv.get('--configuration') ?? '').toString().trim();
   if (explicit) return explicit;
+  if (profilingRuntime) return 'Release';
   return appEnv === 'development' ? 'Debug' : 'Release';
 }
 
@@ -29,11 +37,13 @@ function buildDevelopmentInstallExtraEnv() {
 }
 
 export function resolveStackMobileInstallPlan({ stackName, passthrough, existing, user }) {
-  const { kv: mobileKv } = parseArgs(passthrough);
+  const { flags: mobileFlags, kv: mobileKv } = parseArgs(passthrough);
+  const profilingRuntimeMode = resolveIosProfilingRuntimeMode({ flags: mobileFlags, kv: mobileKv });
+  const profilingRuntime = isIosProfilingRuntimeEnabled(profilingRuntimeMode);
   const device = (mobileKv.get('--device') ?? '').toString();
   const name = (mobileKv.get('--name') ?? mobileKv.get('--app-name') ?? '').toString().trim();
-  const appEnv = resolveRequestedAppEnv(mobileKv);
-  const configuration = resolveInstallConfiguration({ appEnv, mobileKv });
+  const appEnv = resolveRequestedAppEnv(mobileKv, { profilingRuntime });
+  const configuration = resolveInstallConfiguration({ appEnv, mobileKv, profilingRuntime });
 
   const priorNameKey =
     appEnv === 'development'
@@ -73,12 +83,15 @@ export function resolveStackMobileInstallPlan({ stackName, passthrough, existing
     '--prebuild',
     '--run-ios',
     `--configuration=${configuration}`,
+    ...(profilingRuntime ? [`--profiling-runtime${profilingRuntimeMode === 'memory' ? '=memory' : ''}`] : []),
     '--no-metro',
     ...(device ? [`--device=${device}`] : []),
   ];
 
   return {
     appEnv,
+    profilingRuntime,
+    profilingRuntimeMode,
     identity,
     envUpdates,
     args,
@@ -121,6 +134,7 @@ export async function runStackMobileInstallCommand({ rootDir, stackName, passthr
         stackName,
         installed: true,
         appEnv: plan.appEnv,
+        profilingRuntime: plan.profilingRuntime,
         identity: plan.identity,
       },
     });

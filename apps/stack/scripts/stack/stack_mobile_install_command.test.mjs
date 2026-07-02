@@ -51,3 +51,47 @@ test('resolveStackMobileInstallPlan supports a development install with Expo nat
     { key: 'HAPPIER_STACK_MOBILE_DEVELOPMENT_SCHEME', value: expectedIdentity.scheme },
   ]);
 });
+
+test('resolveStackMobileInstallPlan uses a release stack app for profiling runtime installs', () => {
+  const plan = resolveStackMobileInstallPlan({
+    stackName: 'repo-perf',
+    passthrough: ['--profiling-runtime', '--device=SIM-123'],
+    existing: {},
+    user: 'Leeroy',
+  });
+
+  const expectedIdentity = defaultStackReleaseIdentity({ stackName: 'repo-perf', user: 'Leeroy' });
+  assert.equal(plan.appEnv, 'production');
+  assert.equal(plan.profilingRuntime, true);
+  assert.deepEqual(plan.identity, expectedIdentity);
+  assert.deepEqual(plan.extraEnv, {});
+  assert.ok(plan.args.includes('--app-env=production'));
+  assert.ok(plan.args.includes('--configuration=Release'));
+  assert.ok(plan.args.includes('--profiling-runtime'));
+  assert.ok(plan.args.includes('--device=SIM-123'));
+  assert.deepEqual(plan.envUpdates, [
+    { key: 'HAPPIER_STACK_MOBILE_RELEASE_IOS_APP_NAME', value: expectedIdentity.iosAppName },
+    { key: 'HAPPIER_STACK_MOBILE_RELEASE_IOS_BUNDLE_ID', value: expectedIdentity.iosBundleId },
+    { key: 'HAPPIER_STACK_MOBILE_RELEASE_SCHEME', value: expectedIdentity.scheme },
+  ]);
+});
+
+test('resolveStackMobileInstallPlan forwards memory attribution profiling mode to the release install flow', () => {
+  const plan = resolveStackMobileInstallPlan({
+    stackName: 'repo-perf',
+    passthrough: ['--profiling-runtime=memory', '--device=SIM-123'],
+    existing: {},
+    user: 'Leeroy',
+  });
+
+  const expectedIdentity = defaultStackReleaseIdentity({ stackName: 'repo-perf', user: 'Leeroy' });
+  assert.equal(plan.appEnv, 'production');
+  assert.equal(plan.profilingRuntime, true);
+  assert.equal(plan.profilingRuntimeMode, 'memory');
+  assert.deepEqual(plan.identity, expectedIdentity);
+  assert.deepEqual(plan.extraEnv, {});
+  assert.ok(plan.args.includes('--app-env=production'));
+  assert.ok(plan.args.includes('--configuration=Release'));
+  assert.ok(plan.args.includes('--profiling-runtime=memory'));
+  assert.ok(plan.args.includes('--device=SIM-123'));
+});
