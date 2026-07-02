@@ -111,6 +111,7 @@ _.env.pipeline.production.local
 
 # Local probe/debug scratch files
 /apps/cli/tmp-*
+/*.trace/
 /.fallow/
 /.reviews/
 /.antigravitycli/
