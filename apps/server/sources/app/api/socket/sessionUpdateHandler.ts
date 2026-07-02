@@ -19,9 +19,14 @@ import {
     createSessionMessage,
     updateSessionAgentState,
     updateSessionMetadata,
+    updateSessionRuntimeActivityProjection,
 } from "@/app/session/sessionWriteService";
 import { recordSessionAlive } from "@/app/presence/presenceRecorder";
 import { materializeNextPendingMessage, readSessionPendingState } from "@/app/session/pending/pendingMessageService";
+import {
+    resolvePendingMaterializeDeliveryStateOptIn,
+    resolvePendingMaterializeDeliveryTimingOptIn,
+} from "@/app/session/pending/pendingMaterializationRequest";
 import { serializePendingMaterializedMessage } from "@/app/session/pending/serializePendingMaterializedMessage";
 import { normalizeIncomingSessionMessageContent } from "@/app/session/messageContent/normalizeIncomingSessionMessageContent";
 import { checkSessionAccess, requireAccessLevel } from "@/app/share/accessControl";
@@ -33,7 +38,10 @@ import {
     type SessionEndAckResponse,
     SessionTurnMutationV1Schema,
 } from "@happier-dev/protocol";
-import { TranscriptStreamSegmentEphemeralMessageSchema } from "@happier-dev/protocol/updates";
+import {
+    TranscriptStreamSegmentDeltaEphemeralMessageSchema,
+    TranscriptStreamSegmentEphemeralMessageSchema,
+} from "@happier-dev/protocol/updates";
 import { refreshSessionParticipantBadgePushes } from "@/app/activity/refreshAccountActivityBadgePushes";
 import { didSessionActivityBadgeContributionChange } from "@/app/activity/accountActivityBadge";
 import { canPublishFromSessionScopedSocket } from "./sessionScopedBinding";
@@ -54,7 +62,10 @@ type PendingMaterializeNoopResponse = Readonly<{
     ok: true;
     didMaterialize: false;
     pendingCount: number;
+    pendingBlockedCount: number;
     pendingVersion: number;
+    deliveryState?: Readonly<{ mode: "provider"; unresolved: boolean }>;
+    deferredReason?: "runtime_activity_active";
 }>;
 
 type PendingMaterializeNoopCacheEntry = Readonly<{
@@ -277,6 +288,79 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
             if (callback) {
                 callback({ result: 'error' });
             }
+        }
+    });
+
+    socket.on("update-runtime-activity", async (data: any, callback: (response: any) => void) => {
+        try {
+            const sid = typeof data?.sid === "string" ? data.sid : "";
+            if (!sid) {
+                callback?.({ result: "invalid-params" });
+                return;
+            }
+
+            if (!canMutateSocketSession(connection, sid)) {
+                callback?.({ result: "forbidden" });
+                return;
+            }
+
+            const result = await updateSessionRuntimeActivityProjection({
+                actorUserId: userId,
+                sessionId: sid,
+                activeCount: data?.runtimeActivityActiveCount,
+                observedAt: data?.runtimeActivityObservedAt,
+                expiresAt: data?.runtimeActivityExpiresAt,
+                sourceClass: data?.runtimeActivitySourceClass,
+            });
+
+            if (!result.ok) {
+                if (result.error === "forbidden") {
+                    callback?.({ result: "forbidden" });
+                    return;
+                }
+                if (result.error === "session-not-found") {
+                    callback?.({ result: "session-not-found" });
+                    return;
+                }
+                if (result.error === "invalid-params") {
+                    callback?.({ result: "invalid-params" });
+                    return;
+                }
+                callback?.({ result: "error" });
+                return;
+            }
+
+            if (result.didWrite) {
+                await Promise.all(result.participantCursors.map(async ({ accountId, cursor }) => {
+                    const payload = buildUpdateSessionUpdate(
+                        sid,
+                        cursor,
+                        randomKeyNaked(12),
+                        undefined,
+                        undefined,
+                        result.projection,
+                    );
+                    eventRouter.emitUpdate({
+                        userId: accountId,
+                        payload,
+                        recipientFilter: { type: "all-interested-in-session", sessionId: sid },
+                        skipSenderConnection: accountId === userId ? connection : undefined,
+                    });
+                }));
+            }
+            await refreshSessionParticipantBadgePushes({
+                badgeAttentionChanged: result.badgeAttentionChanged,
+                participantCursors: result.participantCursors,
+            });
+
+            callback?.({
+                result: "success",
+                didWrite: result.didWrite,
+                ...result.projection,
+            });
+        } catch (error) {
+            log({ module: "websocket", level: "error" }, `Error in update-runtime-activity: ${error}`);
+            callback?.({ result: "error" });
         }
     });
 
@@ -555,6 +639,58 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
         }
     });
 
+    socket.on('transcript-stream-segment-delta', async (data: any) => {
+        try {
+            websocketEventsCounter.inc({ event_type: 'transcript-stream-segment-delta' });
+
+            const sid = typeof data?.sid === 'string' ? String(data.sid).trim() : '';
+            if (!sid) return;
+
+            if (!await canPublishFromSessionScopedSocket({
+                socket,
+                connection,
+                sessionId: sid,
+                requireMachineBinding: true,
+            })) {
+                return;
+            }
+
+            const access = await checkSessionAccess(userId, sid);
+            if (!access) return;
+            if (!requireAccessLevel(access, 'edit')) {
+                return;
+            }
+            if (!access.isOwner) {
+                return;
+            }
+
+            const parsedMessage = TranscriptStreamSegmentDeltaEphemeralMessageSchema.strip().safeParse(data?.message);
+            if (!parsedMessage.success) {
+                return;
+            }
+
+            const participantUserIds = await getSessionParticipantUserIds({ sessionId: sid });
+            if (!participantUserIds || participantUserIds.length === 0) return;
+
+            const payload = {
+                type: 'transcript-stream-segment-delta' as const,
+                sessionId: sid,
+                message: parsedMessage.data,
+            };
+
+            for (const participantUserId of participantUserIds) {
+                eventRouter.emitEphemeral({
+                    userId: participantUserId,
+                    payload,
+                    recipientFilter: { type: 'all-interested-in-session', sessionId: sid },
+                    skipSenderConnection: participantUserId === userId ? connection : undefined,
+                });
+            }
+        } catch (error) {
+            log({ module: 'websocket', level: 'error' }, `Error in transcript-stream-segment-delta handler: ${error}`);
+        }
+    });
+
     const receiveMessageLock = new AsyncLock();
     const pendingMaterializeNoopThrottleMs = parseIntEnv(
         process.env.HAPPIER_SOCKET_PENDING_MATERIALIZE_NOOP_THROTTLE_MS,
@@ -644,9 +780,18 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
                 }
 
                 await Promise.all(result.participantCursors.map(async ({ accountId: participantUserId, cursor }) => {
+                    const options = result.attentionImpact ? { attentionImpact: result.attentionImpact } : undefined;
                     const payload = result.didWrite
-                        ? buildNewMessageUpdate(result.message, sid, cursor, randomKeyNaked(12))
-                        : buildMessageUpdatedUpdate(result.message, sid, cursor, randomKeyNaked(12));
+                        ? (
+                            options
+                                ? buildNewMessageUpdate(result.message, sid, cursor, randomKeyNaked(12), options)
+                                : buildNewMessageUpdate(result.message, sid, cursor, randomKeyNaked(12))
+                        )
+                        : (
+                            options
+                                ? buildMessageUpdatedUpdate(result.message, sid, cursor, randomKeyNaked(12), options)
+                                : buildMessageUpdatedUpdate(result.message, sid, cursor, randomKeyNaked(12))
+                        );
                     eventRouter.emitUpdate({
                         userId: participantUserId,
                         payload,
@@ -697,11 +842,13 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
                 const clientPendingVersion = typeof data?.pendingVersion === 'number' && Number.isSafeInteger(data.pendingVersion) && data.pendingVersion >= 0
                     ? data.pendingVersion
                     : null;
+                const deliveryState = resolvePendingMaterializeDeliveryStateOptIn(data);
+                const deliveryTiming = resolvePendingMaterializeDeliveryTimingOptIn(data);
                 const cacheKey = createPendingMaterializeNoopCacheKey(userId, sid);
                 const nowMs = Date.now();
                 pruneExpiredPendingMaterializeNoopEntries(nowMs);
                 const cachedNoop = pendingMaterializeNoopByUserSession.get(cacheKey);
-                if (cachedNoop && cachedNoop.untilMs > nowMs) {
+                if (!deliveryState && !deliveryTiming && cachedNoop && cachedNoop.untilMs > nowMs) {
                     if (clientPendingVersion === null || clientPendingVersion <= cachedNoop.response.pendingVersion) {
                         const currentPendingState = await readSessionPendingState({
                             actorUserId: userId,
@@ -710,7 +857,8 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
                         if (
                             currentPendingState.ok &&
                             currentPendingState.pendingVersion <= cachedNoop.response.pendingVersion &&
-                            currentPendingState.pendingCount <= cachedNoop.response.pendingCount
+                            currentPendingState.pendingCount <= cachedNoop.response.pendingCount &&
+                            (currentPendingState.pendingBlockedCount ?? 0) <= (cachedNoop.response.pendingBlockedCount ?? 0)
                         ) {
                             respond(cachedNoop.response);
                             return;
@@ -724,6 +872,8 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
                 const result = await materializeNextPendingMessage({
                     actorUserId: userId,
                     sessionId: sid,
+                    ...(deliveryState ? { deliveryState } : {}),
+                    ...(deliveryTiming ? { deliveryTiming } : {}),
                 });
 
                 if (!result.ok) {
@@ -736,17 +886,49 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
                         ok: true,
                         didMaterialize: false,
                         pendingCount: result.pendingCount,
+                        pendingBlockedCount: result.pendingBlockedCount,
                         pendingVersion: result.pendingVersion,
+                        ...(result.deliveryState ? { deliveryState: result.deliveryState } : {}),
+                        ...(result.deferredReason ? { deferredReason: result.deferredReason } : {}),
                     };
-                    if (pendingMaterializeNoopThrottleMs > 0) {
+                    if (!result.pendingStateChanged && !deliveryState && !deliveryTiming && pendingMaterializeNoopThrottleMs > 0) {
                         const responseAtMs = Date.now();
                         pruneExpiredPendingMaterializeNoopEntries(responseAtMs);
                         pendingMaterializeNoopByUserSession.set(cacheKey, {
                             untilMs: responseAtMs + pendingMaterializeNoopThrottleMs,
                             response,
                         });
+                    } else {
+                        pendingMaterializeNoopByUserSession.delete(cacheKey);
                     }
                     respond(response);
+                    if (result.pendingStateChanged === true) {
+                        const participantCursorsPending = result.participantCursorsPending ?? [];
+                        await Promise.all(
+                            participantCursorsPending.map(async ({ accountId, cursor }) => {
+                                const payload = buildPendingChangedUpdate(
+                                    {
+                                        sessionId: sid,
+                                        pendingCount: result.pendingCount,
+                                        pendingBlockedCount: result.pendingBlockedCount,
+                                        pendingVersion: result.pendingVersion,
+                                        changedByAccountId: userId,
+                                    },
+                                    cursor,
+                                    randomKeyNaked(12),
+                                );
+                                eventRouter.emitUpdate({
+                                    userId: accountId,
+                                    payload,
+                                    recipientFilter: { type: 'all-interested-in-session', sessionId: sid },
+                                });
+                            }),
+                        );
+                        await refreshSessionParticipantBadgePushes({
+                            badgeAttentionChanged: result.badgeAttentionChanged ?? false,
+                            participantCursors: participantCursorsPending,
+                        });
+                    }
                     return;
                 }
 
@@ -757,14 +939,20 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
                     didMaterialize: true,
                     didWrite: result.didWriteMessage,
                     pendingCount: result.pendingCount,
+                    pendingBlockedCount: result.pendingBlockedCount,
                     pendingVersion: result.pendingVersion,
+                    ...(result.deliveryState ? { deliveryState: result.deliveryState } : {}),
                     message: serializePendingMaterializedMessage(result.message),
                 });
 
-                if (result.didWriteMessage) {
+                const committedMessage =
+                    result.didWriteMessage && result.message.id !== null && result.message.seq !== null
+                        ? { ...result.message, id: result.message.id, seq: result.message.seq }
+                        : null;
+                if (committedMessage) {
                     await Promise.all(
                         result.participantCursorsMessage.map(async ({ accountId, cursor }) => {
-                            const payload = buildNewMessageUpdate(result.message, sid, cursor, randomKeyNaked(12));
+                            const payload = buildNewMessageUpdate(committedMessage, sid, cursor, randomKeyNaked(12));
                             eventRouter.emitUpdate({
                                 userId: accountId,
                                 payload,
@@ -784,6 +972,7 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
                             {
                                 sessionId: sid,
                                 pendingCount: result.pendingCount,
+                                pendingBlockedCount: result.pendingBlockedCount,
                                 pendingVersion: result.pendingVersion,
                                 meaningfulActivityAt: result.meaningfulActivityAt ?? (result.didWriteMessage ? result.message.createdAt : undefined),
                                 changedByAccountId: userId,

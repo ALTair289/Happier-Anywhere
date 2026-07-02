@@ -10,6 +10,7 @@ import {
     TranscriptRawRecordV1Schema,
     SESSION_MESSAGE_USER_ATTENTION_IMPACT,
     agentEventAttentionImpact,
+    agentEventLocalIdAttentionImpact,
     SessionTurnMutationV1Schema,
     SessionRuntimeIssueV1Schema,
     TranscriptRawAgentEventV1Schema,
@@ -42,6 +43,11 @@ import {
     parseStoredSessionTurns,
     type SessionTurnStoredRow,
 } from "./turns/parseSessionTurnState";
+import {
+    normalizeSessionRuntimeActivityProjection,
+    normalizeStoredSessionRuntimeActivityProjection,
+    type SessionRuntimeActivityProjectionUpdate,
+} from "./runtimeActivityProjection";
 
 type ParticipantCursor = SessionParticipantCursor;
 
@@ -137,6 +143,7 @@ function selectSessionActivityBadgeInputs() {
     return {
         seq: true,
         pendingCount: true,
+        pendingBlockedCount: true,
         lastViewedSessionSeq: true,
         pendingPermissionRequestCount: true,
         pendingUserActionRequestCount: true,
@@ -153,6 +160,7 @@ function toSessionActivityBadgeInputs(
     return {
         seq: value?.seq ?? 0,
         pendingCount: value?.pendingCount ?? 0,
+        pendingBlockedCount: value?.pendingBlockedCount ?? 0,
         lastViewedSessionSeq: value?.lastViewedSessionSeq ?? null,
         pendingPermissionRequestCount: value?.pendingPermissionRequestCount ?? 0,
         pendingUserActionRequestCount: value?.pendingUserActionRequestCount ?? 0,
@@ -515,6 +523,7 @@ export type CreateSessionMessageResult =
         didWrite: true;
         didUpdate: false;
         badgeAttentionChanged: boolean;
+        attentionImpact: SessionMessageAttentionImpact;
         message: SessionMessageWriteRow;
         participantCursors: ParticipantCursor[];
         readyProjection?: SessionReadyProjectionUpdate;
@@ -524,6 +533,7 @@ export type CreateSessionMessageResult =
         didWrite: false;
         didUpdate: true;
         badgeAttentionChanged: boolean;
+        attentionImpact: SessionMessageAttentionImpact;
         message: SessionMessageWriteRow;
         participantCursors: ParticipantCursor[];
       }
@@ -595,6 +605,13 @@ export async function createSessionMessage(
                 return { ok: false, error: access.error };
             }
             const resolvedRole = resolveRoleForStorageMode(access.sessionEncryptionMode);
+            const trustedLocalIdAttentionImpact = access.sessionOwnerId === actorUserId && resolvedRole === "event"
+                ? agentEventLocalIdAttentionImpact(localId)
+                : null;
+            const attentionImpact = resolveMessageAttentionImpact({
+                content,
+                explicitAttentionImpact: params.trustedAttentionImpact ?? trustedLocalIdAttentionImpact ?? undefined,
+            });
 
             const encryptionPolicy = readEncryptionFeatureEnv(process.env);
             const writeKind: SessionStoredContentKind = content.t === "plain" ? "plain" : "encrypted";
@@ -655,6 +672,7 @@ export async function createSessionMessage(
                         didWrite: false,
                         didUpdate: true,
                         badgeAttentionChanged: false,
+                        attentionImpact,
                         message: toSessionMessageWriteRow(updated),
                         participantCursors,
                     };
@@ -666,10 +684,6 @@ export async function createSessionMessage(
                 select: selectSessionActivityBadgeInputs(),
             });
             const normalizedBeforeBadgeInputs = toSessionActivityBadgeInputs(beforeBadgeInputs);
-            const attentionImpact = resolveMessageAttentionImpact({
-                content,
-                explicitAttentionImpact: params.trustedAttentionImpact,
-            });
 
             const next = await tx.session.update({
                 where: { id: sessionId },
@@ -748,6 +762,7 @@ export async function createSessionMessage(
                 didWrite: true,
                 didUpdate: false,
                 badgeAttentionChanged,
+                attentionImpact,
                 message: toSessionMessageWriteRow(created),
                 participantCursors,
                 ...(readyProjection ? { readyProjection } : {}),
@@ -771,6 +786,13 @@ export async function createSessionMessage(
                 return { ok: false, error: access.error };
             }
             const resolvedRole = resolveRoleForStorageMode(access.sessionEncryptionMode);
+            const trustedLocalIdAttentionImpact = access.sessionOwnerId === actorUserId && resolvedRole === "event"
+                ? agentEventLocalIdAttentionImpact(localId)
+                : null;
+            const attentionImpact = resolveMessageAttentionImpact({
+                content,
+                explicitAttentionImpact: params.trustedAttentionImpact ?? trustedLocalIdAttentionImpact ?? undefined,
+            });
             const existing = await db.sessionMessage.findUnique({
                 where: { sessionId_localId: { sessionId, localId } },
                 select: SESSION_MESSAGE_WRITE_SELECT,
@@ -817,6 +839,7 @@ export async function createSessionMessage(
                             didWrite: false,
                             didUpdate: true,
                             badgeAttentionChanged: false,
+                            attentionImpact,
                             message: toSessionMessageWriteRow(updated),
                             participantCursors,
                         };
@@ -948,6 +971,98 @@ export type UpdateSessionAgentStateResult =
         pendingRequestObservedAt?: number | null;
       }
     | { ok: false; error: "invalid-params" | "forbidden" | "session-not-found" | "version-mismatch" | "internal"; current?: { version: number; agentState: string | null } };
+
+export type UpdateSessionRuntimeActivityProjectionResult =
+    | {
+        ok: true;
+        didWrite: boolean;
+        projection: SessionRuntimeActivityProjectionUpdate;
+        participantCursors: ParticipantCursor[];
+        badgeAttentionChanged: false;
+      }
+    | { ok: false; error: "invalid-params" | "forbidden" | "session-not-found" | "internal" };
+
+function runtimeActivityProjectionEquals(
+    a: SessionRuntimeActivityProjectionUpdate,
+    b: SessionRuntimeActivityProjectionUpdate,
+): boolean {
+    return a.runtimeActivityActiveCount === b.runtimeActivityActiveCount
+        && a.runtimeActivityObservedAt === b.runtimeActivityObservedAt
+        && a.runtimeActivityExpiresAt === b.runtimeActivityExpiresAt
+        && a.runtimeActivitySourceClass === b.runtimeActivitySourceClass;
+}
+
+export async function updateSessionRuntimeActivityProjection(params: {
+    actorUserId: string;
+    sessionId: string;
+    activeCount: unknown;
+    observedAt: unknown;
+    expiresAt: unknown;
+    sourceClass: unknown;
+}): Promise<UpdateSessionRuntimeActivityProjectionResult> {
+    const actorUserId = typeof params.actorUserId === "string" ? params.actorUserId : "";
+    const sessionId = typeof params.sessionId === "string" ? params.sessionId : "";
+    if (!actorUserId || !sessionId) {
+        return { ok: false, error: "invalid-params" };
+    }
+
+    try {
+        return await inTx(async (tx) => {
+            const access = await ensureSessionOwnerAccess(tx, { actorUserId, sessionId });
+            if (!access.ok) {
+                return { ok: false, error: access.error };
+            }
+
+            const current = await tx.session.findUnique({
+                where: { id: sessionId },
+                select: {
+                    runtimeActivityActiveCount: true,
+                    runtimeActivityObservedAt: true,
+                    runtimeActivityExpiresAt: true,
+                    runtimeActivitySourceClass: true,
+                },
+            });
+            if (!current) {
+                return { ok: false, error: "session-not-found" };
+            }
+
+            const projection = normalizeSessionRuntimeActivityProjection(params);
+            if (runtimeActivityProjectionEquals(normalizeStoredSessionRuntimeActivityProjection(current), projection)) {
+                return {
+                    ok: true,
+                    didWrite: false,
+                    projection,
+                    participantCursors: [],
+                    badgeAttentionChanged: false,
+                };
+            }
+
+            await tx.session.updateMany({
+                where: { id: sessionId },
+                data: {
+                    runtimeActivityActiveCount: projection.runtimeActivityActiveCount,
+                    runtimeActivityObservedAt: projection.runtimeActivityObservedAt === null
+                        ? null
+                        : BigInt(projection.runtimeActivityObservedAt),
+                    runtimeActivityExpiresAt: projection.runtimeActivityExpiresAt === null
+                        ? null
+                        : BigInt(projection.runtimeActivityExpiresAt),
+                    runtimeActivitySourceClass: projection.runtimeActivitySourceClass,
+                },
+            });
+            const participantCursors = await markSessionParticipantsChanged({ tx, sessionId });
+            return {
+                ok: true,
+                didWrite: true,
+                projection,
+                participantCursors,
+                badgeAttentionChanged: false,
+            };
+        });
+    } catch {
+        return { ok: false, error: "internal" };
+    }
+}
 
 export async function updateSessionAgentState(params: {
     actorUserId: string;

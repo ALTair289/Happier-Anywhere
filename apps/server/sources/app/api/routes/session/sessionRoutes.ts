@@ -4,6 +4,7 @@ import { registerSessionDeleteRoute } from "./registerSessionDeleteRoute";
 import { registerSessionArchiveRoutes } from "./registerSessionArchiveRoutes";
 import { registerSessionListingRoutes } from "./registerSessionListingRoutes";
 import { registerSessionFolderAssignmentRoutes } from "./registerSessionFolderAssignmentRoutes";
+import { registerSessionOrganizationRoutes } from "./registerSessionOrganizationRoutes";
 import { registerSessionMessageRoutes } from "./registerSessionMessageRoutes";
 import { registerSessionPatchRoute } from "./registerSessionPatchRoute";
 import { registerSessionReadStateRoutes } from "./registerSessionReadStateRoutes";
@@ -13,6 +14,7 @@ import { registerSessionSystemRecordRoutes } from "./registerSessionSystemRecord
 
 export function sessionRoutes(app: Fastify) {
     registerSessionListingRoutes(app);
+    registerSessionOrganizationRoutes(app);
     registerSessionFolderAssignmentRoutes(app);
     registerSessionCreateOrLoadRoute(app);
     registerSessionArchiveRoutes(app);

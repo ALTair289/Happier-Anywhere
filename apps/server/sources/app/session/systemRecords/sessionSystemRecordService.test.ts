@@ -1,5 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { SESSION_WORKFLOW_RUN_SNAPSHOT_PROJECTION_VERSION } from "@happier-dev/protocol";
 import { createEnvPatcher } from "@/testkit/env";
 import { createDbMocks, installDbModuleMock } from "../../api/testkit/dbMocks";
 
@@ -60,6 +61,24 @@ function synopsisPayload(overrides: Record<string, unknown> = {}) {
         seqTo: 2,
         updatedAtMs: 3,
         synopsis: "hello",
+        ...overrides,
+    };
+}
+
+function workflowRunPayload(overrides: Record<string, unknown> = {}) {
+    return {
+        v: 1,
+        projectionVersion: SESSION_WORKFLOW_RUN_SNAPSHOT_PROJECTION_VERSION,
+        runId: "wf_demo",
+        backendId: "claude",
+        title: "Demo workflow",
+        status: "active",
+        recordRevision: "1",
+        updatedAt: 1000,
+        totalAgents: 1,
+        completedAgents: 0,
+        phases: [{ id: "phase:1", title: "Research", order: 1, agentIds: ["a1"] }],
+        agents: [{ id: "a1", title: "web_search", status: "active", phaseIndex: 1, updatedAt: 1000 }],
         ...overrides,
     };
 }
@@ -158,6 +177,174 @@ describe("sessionSystemRecordService", () => {
         expect(currentTx.sessionMessage.create).not.toHaveBeenCalled();
         expect(markSessionParticipantsChanged).not.toHaveBeenCalled();
         expect(markAccountChanged).not.toHaveBeenCalled();
+    });
+
+    it("roundtrips an encrypted activity workflow record through the same generic service", async () => {
+        const createdAt = new Date("2026-06-26T10:00:00.000Z");
+        currentTx.session.findUnique.mockResolvedValue({ encryptionMode: "e2ee", accountId: "u1" });
+        currentTx.sessionSystemRecord.findUnique.mockResolvedValue(null);
+        currentTx.sessionSystemRecord.create.mockResolvedValue({
+            id: "rec-wf",
+            accountId: "u1",
+            sessionId: "s1",
+            namespace: "activity",
+            kind: "workflow_run.v1",
+            localId: "activity:workflow_run:v1:wf_demo",
+            content: { t: "encrypted", c: "cipher" },
+            createdAt,
+            updatedAt: createdAt,
+        });
+
+        const result = await upsertSessionSystemRecord({
+            actorUserId: "u1",
+            sessionId: "s1",
+            namespace: "activity",
+            kind: "workflow_run.v1",
+            localId: "activity:workflow_run:v1:wf_demo",
+            content: { t: "encrypted", c: "cipher" },
+        });
+
+        expect(result).toEqual({
+            ok: true,
+            didCreate: true,
+            didUpdate: false,
+            record: {
+                id: "rec-wf",
+                sessionId: "s1",
+                namespace: "activity",
+                kind: "workflow_run.v1",
+                localId: "activity:workflow_run:v1:wf_demo",
+                content: { t: "encrypted", c: "cipher" },
+                createdAt,
+                updatedAt: createdAt,
+            },
+        });
+        expect(currentTx.sessionSystemRecord.create).toHaveBeenCalledWith({
+            data: {
+                accountId: "u1",
+                sessionId: "s1",
+                namespace: "activity",
+                kind: "workflow_run.v1",
+                localId: "activity:workflow_run:v1:wf_demo",
+                content: { t: "encrypted", c: "cipher" },
+            },
+            select: expect.any(Object),
+        });
+    });
+
+    it("stores activity workflow records under the session owner account for shared editors", async () => {
+        const createdAt = new Date("2026-06-26T10:00:00.000Z");
+        checkSessionAccess.mockResolvedValueOnce({ level: "edit", isOwner: false });
+        currentTx.session.findUnique.mockResolvedValue({ encryptionMode: "e2ee", accountId: "owner-account" });
+        currentTx.sessionSystemRecord.findUnique.mockResolvedValue(null);
+        currentTx.sessionSystemRecord.create.mockResolvedValue({
+            id: "rec-wf",
+            accountId: "owner-account",
+            sessionId: "s1",
+            namespace: "activity",
+            kind: "workflow_run.v1",
+            localId: "activity:workflow_run:v1:wf_demo",
+            content: { t: "encrypted", c: "cipher" },
+            createdAt,
+            updatedAt: createdAt,
+        });
+
+        const result = await upsertSessionSystemRecord({
+            actorUserId: "shared-editor",
+            sessionId: "s1",
+            namespace: "activity",
+            kind: "workflow_run.v1",
+            localId: "activity:workflow_run:v1:wf_demo",
+            content: { t: "encrypted", c: "cipher" },
+        });
+
+        expect(result).toMatchObject({ ok: true, didCreate: true });
+        expect(currentTx.sessionSystemRecord.findUnique).toHaveBeenCalledWith({
+            where: {
+                accountId_sessionId_namespace_localId: {
+                    accountId: "owner-account",
+                    sessionId: "s1",
+                    namespace: "activity",
+                    localId: "activity:workflow_run:v1:wf_demo",
+                },
+            },
+            select: expect.any(Object),
+        });
+        expect(currentTx.sessionSystemRecord.create).toHaveBeenCalledWith({
+            data: {
+                accountId: "owner-account",
+                sessionId: "s1",
+                namespace: "activity",
+                kind: "workflow_run.v1",
+                localId: "activity:workflow_run:v1:wf_demo",
+                content: { t: "encrypted", c: "cipher" },
+            },
+            select: expect.any(Object),
+        });
+    });
+
+    it("writes a plain activity workflow record for a plain session", async () => {
+        const createdAt = new Date("2026-06-26T10:00:00.000Z");
+        storagePolicyEnv.set("HAPPIER_FEATURE_ENCRYPTION__STORAGE_POLICY", "optional");
+        currentTx.session.findUnique.mockResolvedValue({ encryptionMode: "plain" });
+        currentTx.sessionSystemRecord.findUnique.mockResolvedValue(null);
+        currentTx.sessionSystemRecord.create.mockResolvedValue({
+            id: "rec-wf",
+            accountId: "u1",
+            sessionId: "s1",
+            namespace: "activity",
+            kind: "workflow_run.v1",
+            localId: "activity:workflow_run:v1:wf_demo",
+            content: { t: "plain", v: workflowRunPayload() },
+            createdAt,
+            updatedAt: createdAt,
+        });
+
+        const result = await upsertSessionSystemRecord({
+            actorUserId: "u1",
+            sessionId: "s1",
+            namespace: "activity",
+            kind: "workflow_run.v1",
+            localId: "activity:workflow_run:v1:wf_demo",
+            content: { t: "plain", v: workflowRunPayload() },
+        });
+
+        expect(result.ok).toBe(true);
+        expect(currentTx.sessionSystemRecord.create).toHaveBeenCalled();
+    });
+
+    it("rejects plain activity workflow content for an e2ee session exactly like memory records", async () => {
+        storagePolicyEnv.set("HAPPIER_FEATURE_ENCRYPTION__STORAGE_POLICY", "required_e2ee");
+        currentTx.session.findUnique.mockResolvedValue({ encryptionMode: "e2ee" });
+
+        const result = await upsertSessionSystemRecord({
+            actorUserId: "u1",
+            sessionId: "s1",
+            namespace: "activity",
+            kind: "workflow_run.v1",
+            localId: "activity:workflow_run:v1:wf_demo",
+            content: { t: "plain", v: workflowRunPayload() },
+        });
+
+        expect(result).toEqual({ ok: false, error: "invalid-params", code: "storage_policy_requires_e2ee" });
+        expect(currentTx.sessionSystemRecord.create).not.toHaveBeenCalled();
+    });
+
+    it("rejects plain activity content that does not match the workflow_run.v1 payload schema", async () => {
+        storagePolicyEnv.set("HAPPIER_FEATURE_ENCRYPTION__STORAGE_POLICY", "optional");
+        currentTx.session.findUnique.mockResolvedValue({ encryptionMode: "plain" });
+
+        const result = await upsertSessionSystemRecord({
+            actorUserId: "u1",
+            sessionId: "s1",
+            namespace: "activity",
+            kind: "workflow_run.v1",
+            localId: "activity:workflow_run:v1:wf_demo",
+            content: { t: "plain", v: workflowRunPayload({ status: "running" }) },
+        });
+
+        expect(result).toEqual({ ok: false, error: "invalid-params" });
+        expect(currentTx.sessionSystemRecord.create).not.toHaveBeenCalled();
     });
 
     it("forbids view-only access from upserting durable system records", async () => {
@@ -483,6 +670,46 @@ describe("sessionSystemRecordService", () => {
         });
     });
 
+    it("lists shared activity workflow records from the session owner account", async () => {
+        const createdAt = new Date("2026-06-26T10:00:00.000Z");
+        checkSessionAccess.mockResolvedValueOnce({ level: "view", isOwner: false });
+        currentTx.session.findUnique.mockResolvedValue({ encryptionMode: "e2ee", accountId: "owner-account" });
+        currentTx.sessionSystemRecord.findMany.mockResolvedValue([
+            {
+                id: "rec-wf",
+                accountId: "owner-account",
+                sessionId: "s1",
+                namespace: "activity",
+                kind: "workflow_run.v1",
+                localId: "activity:workflow_run:v1:wf_demo",
+                content: { t: "encrypted", c: "cipher" },
+                createdAt,
+                updatedAt: createdAt,
+            },
+        ]);
+
+        const result = await listSessionSystemRecords({
+            actorUserId: "shared-viewer",
+            sessionId: "s1",
+            namespace: "activity",
+            kind: "workflow_run.v1",
+            limit: 50,
+        });
+
+        expect(result).toMatchObject({ ok: true, records: [{ id: "rec-wf" }] });
+        expect(currentTx.sessionSystemRecord.findMany).toHaveBeenCalledWith({
+            where: {
+                accountId: "owner-account",
+                sessionId: "s1",
+                namespace: "activity",
+                kind: "workflow_run.v1",
+            },
+            orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+            take: 51,
+            select: expect.any(Object),
+        });
+    });
+
     it("returns the latest matching record owned by the authenticated account", async () => {
         const createdAt = new Date("2026-05-19T10:00:00.000Z");
         currentTx.session.findUnique.mockResolvedValue({ encryptionMode: "e2ee" });
@@ -580,5 +807,42 @@ describe("sessionSystemRecordService", () => {
         expect(currentTx.sessionMessage.create).not.toHaveBeenCalled();
         expect(markSessionParticipantsChanged).not.toHaveBeenCalled();
         expect(markAccountChanged).not.toHaveBeenCalled();
+    });
+
+    it("returns shared activity workflow records from the session owner account", async () => {
+        const createdAt = new Date("2026-06-26T10:00:00.000Z");
+        checkSessionAccess.mockResolvedValueOnce({ level: "view", isOwner: false });
+        currentTx.session.findUnique.mockResolvedValue({ encryptionMode: "e2ee", accountId: "owner-account" });
+        currentTx.sessionSystemRecord.findUnique.mockResolvedValue({
+            id: "rec-wf",
+            accountId: "owner-account",
+            sessionId: "s1",
+            namespace: "activity",
+            kind: "workflow_run.v1",
+            localId: "activity:workflow_run:v1:wf_demo",
+            content: { t: "encrypted", c: "cipher" },
+            createdAt,
+            updatedAt: createdAt,
+        });
+
+        const result = await getSessionSystemRecord({
+            actorUserId: "shared-viewer",
+            sessionId: "s1",
+            namespace: "activity",
+            localId: "activity:workflow_run:v1:wf_demo",
+        });
+
+        expect(result).toMatchObject({ ok: true, record: { id: "rec-wf" } });
+        expect(currentTx.sessionSystemRecord.findUnique).toHaveBeenCalledWith({
+            where: {
+                accountId_sessionId_namespace_localId: {
+                    accountId: "owner-account",
+                    sessionId: "s1",
+                    namespace: "activity",
+                    localId: "activity:workflow_run:v1:wf_demo",
+                },
+            },
+            select: expect.any(Object),
+        });
     });
 });

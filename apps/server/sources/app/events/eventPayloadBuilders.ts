@@ -1,7 +1,13 @@
 import { AccountProfile } from "@/types";
 import { getPublicUrl } from "@/storage/blob/files";
 import { type UpdatePayload, type EphemeralPayload } from "./eventPayloadTypes";
-import type { PrimaryTurnStatusV1, SessionMessageRole, SessionRuntimeIssueV1 } from "@happier-dev/protocol";
+import type {
+    PrimaryTurnStatusV1,
+    SessionRuntimeActivitySourceClassV1,
+    SessionMessageAttentionImpact,
+    SessionMessageRole,
+    SessionRuntimeIssueV1,
+} from "@happier-dev/protocol";
 
 type UpdateMessagePayloadInput = Readonly<{
     id: string;
@@ -14,7 +20,21 @@ type UpdateMessagePayloadInput = Readonly<{
     updatedAt: Date;
 }>;
 
-function serializeUpdateMessage(message: UpdateMessagePayloadInput) {
+type UpdateMessagePayloadOptions = Readonly<{
+    attentionImpact?: SessionMessageAttentionImpact;
+}>;
+
+function serializeOptionalMillis(value: number | bigint | null | undefined): number | null {
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0) return Math.floor(value);
+    if (typeof value === "bigint" && value >= BigInt(0) && value <= BigInt(Number.MAX_SAFE_INTEGER)) return Number(value);
+    return null;
+}
+
+function normalizeRuntimeActivityActiveCount(value: number | null | undefined): number {
+    return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : 0;
+}
+
+function serializeUpdateMessage(message: UpdateMessagePayloadInput, options?: UpdateMessagePayloadOptions) {
     return {
         id: message.id,
         seq: message.seq,
@@ -22,6 +42,7 @@ function serializeUpdateMessage(message: UpdateMessagePayloadInput) {
         localId: message.localId,
         ...(typeof message.sidechainId === "string" && message.sidechainId ? { sidechainId: message.sidechainId } : {}),
         ...(typeof message.messageRole === "string" ? { messageRole: message.messageRole } : {}),
+        ...(options?.attentionImpact ? { attentionImpact: options.attentionImpact } : {}),
         createdAt: message.createdAt.getTime(),
         updatedAt: message.updatedAt.getTime(),
     };
@@ -40,7 +61,20 @@ export function buildNewSessionUpdate(session: {
     createdAt: Date;
     updatedAt: Date;
     meaningfulActivityAt?: Date | null;
+    runtimeActivityActiveCount?: number | null;
+    runtimeActivityObservedAt?: number | bigint | null;
+    runtimeActivityExpiresAt?: number | bigint | null;
+    runtimeActivitySourceClass?: SessionRuntimeActivitySourceClassV1 | null;
 }, updateSeq: number, updateId: string): UpdatePayload {
+    const runtimeActivityActiveCount = normalizeRuntimeActivityActiveCount(session.runtimeActivityActiveCount);
+    const runtimeActivityObservedAt = runtimeActivityActiveCount > 0
+        ? serializeOptionalMillis(session.runtimeActivityObservedAt)
+        : null;
+    const runtimeActivityExpiresAt = runtimeActivityActiveCount > 0
+        ? serializeOptionalMillis(session.runtimeActivityExpiresAt)
+        : null;
+    const runtimeActivitySourceClass = runtimeActivityActiveCount > 0 ? session.runtimeActivitySourceClass ?? null : null;
+
     return {
         id: updateId,
         seq: updateSeq,
@@ -59,13 +93,23 @@ export function buildNewSessionUpdate(session: {
             activeAt: session.lastActiveAt.getTime(),
             createdAt: session.createdAt.getTime(),
             updatedAt: session.updatedAt.getTime(),
-            meaningfulActivityAt: (session.meaningfulActivityAt ?? session.createdAt).getTime()
+            meaningfulActivityAt: (session.meaningfulActivityAt ?? session.createdAt).getTime(),
+            runtimeActivityActiveCount,
+            runtimeActivityObservedAt,
+            runtimeActivityExpiresAt,
+            runtimeActivitySourceClass,
         },
         createdAt: Date.now()
     };
 }
 
-export function buildNewMessageUpdate(message: UpdateMessagePayloadInput, sessionId: string, updateSeq: number, updateId: string): UpdatePayload {
+export function buildNewMessageUpdate(
+    message: UpdateMessagePayloadInput,
+    sessionId: string,
+    updateSeq: number,
+    updateId: string,
+    options?: UpdateMessagePayloadOptions,
+): UpdatePayload {
     return {
         id: updateId,
         seq: updateSeq,
@@ -74,13 +118,19 @@ export function buildNewMessageUpdate(message: UpdateMessagePayloadInput, sessio
             sid: sessionId,
             // Compatibility: some clients use `id` for sessionId.
             id: sessionId,
-            message: serializeUpdateMessage(message),
+            message: serializeUpdateMessage(message, options),
         },
         createdAt: Date.now()
     };
 }
 
-export function buildMessageUpdatedUpdate(message: UpdateMessagePayloadInput, sessionId: string, updateSeq: number, updateId: string): UpdatePayload {
+export function buildMessageUpdatedUpdate(
+    message: UpdateMessagePayloadInput,
+    sessionId: string,
+    updateSeq: number,
+    updateId: string,
+    options?: UpdateMessagePayloadOptions,
+): UpdatePayload {
     return {
         id: updateId,
         seq: updateSeq,
@@ -89,7 +139,7 @@ export function buildMessageUpdatedUpdate(message: UpdateMessagePayloadInput, se
             sid: sessionId,
             // Compatibility: some clients use `id` for sessionId.
             id: sessionId,
-            message: serializeUpdateMessage(message),
+            message: serializeUpdateMessage(message, options),
         },
         createdAt: Date.now()
     };
@@ -114,9 +164,20 @@ export function buildUpdateSessionUpdate(
         latestTurnStatus?: PrimaryTurnStatusV1 | null;
         latestTurnStatusObservedAt?: number | null;
         lastRuntimeIssue?: SessionRuntimeIssueV1 | null;
+        runtimeActivityActiveCount?: number;
+        runtimeActivityObservedAt?: number | null;
+        runtimeActivityExpiresAt?: number | null;
+        runtimeActivitySourceClass?: SessionRuntimeActivitySourceClassV1 | null;
+        meaningfulActivityAt?: number;
         archivedAt?: number | null;
     },
 ): UpdatePayload {
+    const projectionHasRuntimeActivityActiveCount = projection && "runtimeActivityActiveCount" in projection;
+    const runtimeActivityActiveCount = projectionHasRuntimeActivityActiveCount
+        ? normalizeRuntimeActivityActiveCount(projection.runtimeActivityActiveCount)
+        : null;
+    const shouldClearRuntimeActivity = runtimeActivityActiveCount === 0;
+
     return {
         id: updateId,
         seq: updateSeq,
@@ -151,6 +212,27 @@ export function buildUpdateSessionUpdate(
                 ? { latestTurnStatusObservedAt: projection.latestTurnStatusObservedAt ?? null }
                 : {}),
             ...(projection && 'lastRuntimeIssue' in projection ? { lastRuntimeIssue: projection.lastRuntimeIssue ?? null } : {}),
+            ...(projectionHasRuntimeActivityActiveCount
+                ? { runtimeActivityActiveCount }
+                : {}),
+            ...(projection && 'runtimeActivityObservedAt' in projection
+                ? { runtimeActivityObservedAt: shouldClearRuntimeActivity ? null : projection.runtimeActivityObservedAt ?? null }
+                : shouldClearRuntimeActivity
+                    ? { runtimeActivityObservedAt: null }
+                : {}),
+            ...(projection && 'runtimeActivityExpiresAt' in projection
+                ? { runtimeActivityExpiresAt: shouldClearRuntimeActivity ? null : projection.runtimeActivityExpiresAt ?? null }
+                : shouldClearRuntimeActivity
+                    ? { runtimeActivityExpiresAt: null }
+                : {}),
+            ...(projection && 'runtimeActivitySourceClass' in projection
+                ? { runtimeActivitySourceClass: shouldClearRuntimeActivity ? null : projection.runtimeActivitySourceClass ?? null }
+                : shouldClearRuntimeActivity
+                    ? { runtimeActivitySourceClass: null }
+                : {}),
+            ...(typeof projection?.meaningfulActivityAt === "number" && Number.isFinite(projection.meaningfulActivityAt)
+                ? { meaningfulActivityAt: projection.meaningfulActivityAt }
+                : {}),
             ...(typeof projection?.archivedAt === 'number' || projection?.archivedAt === null
                 ? { archivedAt: projection.archivedAt }
                 : {}),
@@ -160,7 +242,7 @@ export function buildUpdateSessionUpdate(
 }
 
 export function buildPendingChangedUpdate(
-    data: { sessionId: string; pendingVersion: number; pendingCount: number; meaningfulActivityAt?: Date | null; changedByAccountId?: string },
+    data: { sessionId: string; pendingVersion: number; pendingCount: number; pendingBlockedCount?: number; meaningfulActivityAt?: Date | null; changedByAccountId?: string },
     updateSeq: number,
     updateId: string,
 ): UpdatePayload {
@@ -178,6 +260,7 @@ export function buildPendingChangedUpdate(
             sessionId: data.sessionId,
             pendingVersion: data.pendingVersion,
             pendingCount: data.pendingCount,
+            ...(typeof data.pendingBlockedCount === "number" ? { pendingBlockedCount: data.pendingBlockedCount } : {}),
             ...(typeof meaningfulActivityAt === "number" ? { meaningfulActivityAt } : {}),
             ...(typeof data.changedByAccountId === "string" ? { changedByAccountId: data.changedByAccountId } : {}),
         },

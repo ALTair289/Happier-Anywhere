@@ -61,16 +61,30 @@ const sessionDbMocks = createDbMocks({
     sessionShare: ["findMany"],
     sessionMessage: ["findMany", "findFirst", "findUnique"],
     sessionPendingMessage: ["count"],
+    sessionPin: ["count", "findMany"],
     sessionFolderAssignment: ["findMany"],
+    sessionOrganizationFolder: ["findMany"],
+    sessionOrganizationTag: ["findMany"],
+    sessionTagAssignment: ["findMany"],
+    sessionOrganizationOrderEntry: ["findMany"],
+    sessionOrganizationLabel: ["findMany"],
+    sessionOrganizationCheckpoint: ["findUnique"],
 } as const);
 
 const txDbMocks = createDbMocks({
     account: ["findUnique"],
-    session: ["create", "findFirst", "findUnique", "findUniqueOrThrow", "update", "updateMany"],
+    session: ["create", "findFirst", "findMany", "findUnique", "findUniqueOrThrow", "update", "updateMany"],
     sessionTurn: ["findFirst", "update"],
     sessionTurnMutationReceipt: ["create"],
     sessionPendingMessage: ["count"],
+    sessionPin: ["count", "deleteMany", "findMany", "findUnique", "upsert"],
     sessionFolderAssignment: ["deleteMany", "findMany", "updateMany", "upsert"],
+    sessionOrganizationFolder: ["count", "findMany", "updateMany", "upsert"],
+    sessionOrganizationTag: ["count", "deleteMany", "findMany", "updateMany", "upsert"],
+    sessionTagAssignment: ["createMany", "deleteMany", "findMany"],
+    sessionOrganizationOrderEntry: ["deleteMany", "findMany", "upsert"],
+    sessionOrganizationLabel: ["count", "findMany", "updateMany", "upsert"],
+    sessionOrganizationCheckpoint: ["upsert"],
 } as const);
 
 export const sessionFindMany = sessionDbMocks.db.session.findMany;
@@ -86,9 +100,18 @@ export const sessionMessageFindFirst = sessionDbMocks.db.sessionMessage.findFirs
 export const sessionMessageFindUnique = sessionDbMocks.db.sessionMessage.findUnique;
 export const sessionPendingMessageCount = sessionDbMocks.db.sessionPendingMessage.count;
 export const sessionShareFindMany = sessionDbMocks.db.sessionShare.findMany;
+export const sessionPinCount = sessionDbMocks.db.sessionPin.count;
+export const sessionPinFindMany = sessionDbMocks.db.sessionPin.findMany;
 export const sessionFolderAssignmentFindMany = sessionDbMocks.db.sessionFolderAssignment.findMany;
+export const sessionOrganizationFolderFindMany = sessionDbMocks.db.sessionOrganizationFolder.findMany;
+export const sessionOrganizationTagFindMany = sessionDbMocks.db.sessionOrganizationTag.findMany;
+export const sessionTagAssignmentFindMany = sessionDbMocks.db.sessionTagAssignment.findMany;
+export const sessionOrganizationOrderEntryFindMany = sessionDbMocks.db.sessionOrganizationOrderEntry.findMany;
+export const sessionOrganizationLabelFindMany = sessionDbMocks.db.sessionOrganizationLabel.findMany;
+export const sessionOrganizationCheckpointFindUnique = sessionDbMocks.db.sessionOrganizationCheckpoint.findUnique;
 
 export const txSessionFindFirst = txDbMocks.db.session.findFirst;
+export const txSessionFindMany = txDbMocks.db.session.findMany;
 export const txSessionFindUnique = txDbMocks.db.session.findUnique;
 export const txSessionFindUniqueOrThrow = txDbMocks.db.session.findUniqueOrThrow;
 export const txSessionCreate = txDbMocks.db.session.create;
@@ -99,10 +122,35 @@ export const txSessionTurnUpdate = txDbMocks.db.sessionTurn.update;
 export const txSessionTurnMutationReceiptCreate = txDbMocks.db.sessionTurnMutationReceipt.create;
 export const txAccountFindUnique = txDbMocks.db.account.findUnique;
 export const txSessionPendingMessageCount = txDbMocks.db.sessionPendingMessage.count;
+export const txSessionPinCount = txDbMocks.db.sessionPin.count;
+export const txSessionPinDeleteMany = txDbMocks.db.sessionPin.deleteMany;
+export const txSessionPinFindMany = txDbMocks.db.sessionPin.findMany;
+export const txSessionPinFindUnique = txDbMocks.db.sessionPin.findUnique;
+export const txSessionPinUpsert = txDbMocks.db.sessionPin.upsert;
 export const txSessionFolderAssignmentDeleteMany = txDbMocks.db.sessionFolderAssignment.deleteMany;
 export const txSessionFolderAssignmentFindMany = txDbMocks.db.sessionFolderAssignment.findMany;
 export const txSessionFolderAssignmentUpdateMany = txDbMocks.db.sessionFolderAssignment.updateMany;
 export const txSessionFolderAssignmentUpsert = txDbMocks.db.sessionFolderAssignment.upsert;
+export const txSessionOrganizationFolderFindMany = txDbMocks.db.sessionOrganizationFolder.findMany;
+export const txSessionOrganizationFolderCount = txDbMocks.db.sessionOrganizationFolder.count;
+export const txSessionOrganizationFolderUpdateMany = txDbMocks.db.sessionOrganizationFolder.updateMany;
+export const txSessionOrganizationFolderUpsert = txDbMocks.db.sessionOrganizationFolder.upsert;
+export const txSessionOrganizationTagDeleteMany = txDbMocks.db.sessionOrganizationTag.deleteMany;
+export const txSessionOrganizationTagFindMany = txDbMocks.db.sessionOrganizationTag.findMany;
+export const txSessionOrganizationTagCount = txDbMocks.db.sessionOrganizationTag.count;
+export const txSessionOrganizationTagUpdateMany = txDbMocks.db.sessionOrganizationTag.updateMany;
+export const txSessionOrganizationTagUpsert = txDbMocks.db.sessionOrganizationTag.upsert;
+export const txSessionTagAssignmentCreateMany = txDbMocks.db.sessionTagAssignment.createMany;
+export const txSessionTagAssignmentDeleteMany = txDbMocks.db.sessionTagAssignment.deleteMany;
+export const txSessionTagAssignmentFindMany = txDbMocks.db.sessionTagAssignment.findMany;
+export const txSessionOrganizationOrderEntryDeleteMany = txDbMocks.db.sessionOrganizationOrderEntry.deleteMany;
+export const txSessionOrganizationOrderEntryFindMany = txDbMocks.db.sessionOrganizationOrderEntry.findMany;
+export const txSessionOrganizationOrderEntryUpsert = txDbMocks.db.sessionOrganizationOrderEntry.upsert;
+export const txSessionOrganizationLabelFindMany = txDbMocks.db.sessionOrganizationLabel.findMany;
+export const txSessionOrganizationLabelCount = txDbMocks.db.sessionOrganizationLabel.count;
+export const txSessionOrganizationLabelUpdateMany = txDbMocks.db.sessionOrganizationLabel.updateMany;
+export const txSessionOrganizationLabelUpsert = txDbMocks.db.sessionOrganizationLabel.upsert;
+export const txSessionOrganizationCheckpointUpsert = txDbMocks.db.sessionOrganizationCheckpoint.upsert;
 
 vi.mock("@/app/events/eventRouter", () => ({
     eventRouter: { emitUpdate, emitEphemeral },
@@ -183,8 +231,17 @@ export function resetSessionRouteMocks(): void {
     sessionMessageFindUnique.mockResolvedValue(null);
     sessionPendingMessageCount.mockResolvedValue(0);
     sessionShareFindMany.mockResolvedValue([]);
+    sessionPinCount.mockResolvedValue(0);
+    sessionPinFindMany.mockResolvedValue([]);
     sessionFolderAssignmentFindMany.mockResolvedValue([]);
+    sessionOrganizationFolderFindMany.mockResolvedValue([]);
+    sessionOrganizationTagFindMany.mockResolvedValue([]);
+    sessionTagAssignmentFindMany.mockResolvedValue([]);
+    sessionOrganizationOrderEntryFindMany.mockResolvedValue([]);
+    sessionOrganizationLabelFindMany.mockResolvedValue([]);
+    sessionOrganizationCheckpointFindUnique.mockResolvedValue(null);
     txSessionFindFirst.mockResolvedValue(null);
+    txSessionFindMany.mockResolvedValue([]);
     txSessionFindUnique.mockResolvedValue(null);
     txSessionFindUniqueOrThrow.mockImplementation(async () => {
         throw new Error("txSessionFindUniqueOrThrow not configured for test");
@@ -205,12 +262,47 @@ export function resetSessionRouteMocks(): void {
     });
     txSessionTurnMutationReceiptCreate.mockResolvedValue({});
     txSessionPendingMessageCount.mockResolvedValue(0);
+    txSessionPinCount.mockResolvedValue(0);
+    txSessionPinDeleteMany.mockResolvedValue({ count: 0 });
+    txSessionPinFindMany.mockResolvedValue([]);
+    txSessionPinFindUnique.mockResolvedValue(null);
+    txSessionPinUpsert.mockImplementation(async () => {
+        throw new Error("txSessionPinUpsert not configured for test");
+    });
     txSessionFolderAssignmentDeleteMany.mockResolvedValue({ count: 0 });
     txSessionFolderAssignmentFindMany.mockResolvedValue([]);
     txSessionFolderAssignmentUpdateMany.mockResolvedValue({ count: 0 });
     txSessionFolderAssignmentUpsert.mockImplementation(async () => {
         throw new Error("txSessionFolderAssignmentUpsert not configured for test");
     });
+    txSessionOrganizationFolderCount.mockResolvedValue(0);
+    txSessionOrganizationFolderFindMany.mockResolvedValue([]);
+    txSessionOrganizationFolderUpdateMany.mockResolvedValue({ count: 0 });
+    txSessionOrganizationFolderUpsert.mockImplementation(async () => {
+        throw new Error("txSessionOrganizationFolderUpsert not configured for test");
+    });
+    txSessionOrganizationTagDeleteMany.mockResolvedValue({ count: 0 });
+    txSessionOrganizationTagCount.mockResolvedValue(0);
+    txSessionOrganizationTagFindMany.mockResolvedValue([]);
+    txSessionOrganizationTagUpdateMany.mockResolvedValue({ count: 0 });
+    txSessionOrganizationTagUpsert.mockImplementation(async () => {
+        throw new Error("txSessionOrganizationTagUpsert not configured for test");
+    });
+    txSessionTagAssignmentCreateMany.mockResolvedValue({ count: 0 });
+    txSessionTagAssignmentDeleteMany.mockResolvedValue({ count: 0 });
+    txSessionTagAssignmentFindMany.mockResolvedValue([]);
+    txSessionOrganizationOrderEntryDeleteMany.mockResolvedValue({ count: 0 });
+    txSessionOrganizationOrderEntryFindMany.mockResolvedValue([]);
+    txSessionOrganizationOrderEntryUpsert.mockImplementation(async () => {
+        throw new Error("txSessionOrganizationOrderEntryUpsert not configured for test");
+    });
+    txSessionOrganizationLabelCount.mockResolvedValue(0);
+    txSessionOrganizationLabelFindMany.mockResolvedValue([]);
+    txSessionOrganizationLabelUpdateMany.mockResolvedValue({ count: 0 });
+    txSessionOrganizationLabelUpsert.mockImplementation(async () => {
+        throw new Error("txSessionOrganizationLabelUpsert not configured for test");
+    });
+    txSessionOrganizationCheckpointUpsert.mockResolvedValue({ version: 1 });
 }
 
 let sessionRoutesModulePromise: Promise<typeof import("./sessionRoutes")> | null = null;

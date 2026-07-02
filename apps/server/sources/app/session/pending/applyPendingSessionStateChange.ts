@@ -6,15 +6,24 @@ import { didSessionActivityBadgeContributionChange } from "@/app/activity/accoun
 export async function applyPendingSessionStateChange(params: {
     tx: Tx;
     sessionId: string;
-    pendingCountDelta?: -1 | 0 | 1;
+    pendingCountDelta?: number;
+    pendingBlockedCountDelta?: number;
     meaningfulActivityAt?: Date;
-}): Promise<{ pendingCount: number; pendingVersion: number; participantCursors: SessionParticipantCursor[]; badgeAttentionChanged: boolean }> {
-    const { tx, sessionId, pendingCountDelta } = params;
+}): Promise<{ pendingCount: number; pendingBlockedCount: number; pendingVersion: number; participantCursors: SessionParticipantCursor[]; badgeAttentionChanged: boolean }> {
+    const { tx, sessionId } = params;
+    const pendingCountDelta = typeof params.pendingCountDelta === "number" && Number.isInteger(params.pendingCountDelta)
+        ? params.pendingCountDelta
+        : 0;
+    const pendingBlockedCountDelta = typeof params.pendingBlockedCountDelta === "number" && Number.isInteger(params.pendingBlockedCountDelta)
+        ? params.pendingBlockedCountDelta
+        : 0;
     const before = await tx.session.findUniqueOrThrow({
         where: { id: sessionId },
         select: {
             seq: true,
             pendingCount: true,
+            pendingBlockedCount: true,
+            pendingVersion: true,
             lastViewedSessionSeq: true,
             pendingPermissionRequestCount: true,
             pendingUserActionRequestCount: true,
@@ -32,59 +41,99 @@ export async function applyPendingSessionStateChange(params: {
         baseData.meaningfulActivityAt = params.meaningfulActivityAt;
     }
 
-    const session = pendingCountDelta === -1
-        ? await applyPendingCountDecrement({ tx, sessionId, data: baseData })
-        : await tx.session.update({
-            where: { id: sessionId },
-            data: {
-                ...baseData,
-                ...(pendingCountDelta === 1 ? { pendingCount: { increment: 1 } as const } : {}),
-            },
-            select: { pendingCount: true, pendingVersion: true },
-        });
+    const session = await applyPendingCounterUpdate({
+        tx,
+        sessionId,
+        pendingCountDelta,
+        pendingBlockedCountDelta,
+        data: baseData,
+        initialState: {
+            pendingCount: before.pendingCount,
+            pendingBlockedCount: before.pendingBlockedCount,
+            pendingVersion: before.pendingVersion,
+        },
+    });
 
     const participantCursors = await markPendingStateChangedParticipants({
         tx,
         sessionId,
         pendingVersion: session.pendingVersion,
         pendingCount: session.pendingCount,
+        pendingBlockedCount: session.pendingBlockedCount,
         meaningfulActivityAt: params.meaningfulActivityAt,
     });
 
     return {
         pendingCount: session.pendingCount,
+        pendingBlockedCount: session.pendingBlockedCount,
         pendingVersion: session.pendingVersion,
         participantCursors,
         badgeAttentionChanged: didSessionActivityBadgeContributionChange(before, {
             ...before,
             pendingCount: session.pendingCount,
+            pendingBlockedCount: session.pendingBlockedCount,
         }),
     };
 }
 
-async function applyPendingCountDecrement(params: {
+type PendingCounterState = {
+    pendingCount: number;
+    pendingBlockedCount: number;
+    pendingVersion: number;
+};
+
+async function applyPendingCounterUpdate(params: {
     tx: Tx;
     sessionId: string;
+    pendingCountDelta: number;
+    pendingBlockedCountDelta: number;
     data: {
         pendingVersion: { increment: 1 };
         meaningfulActivityAt?: Date;
     };
-}): Promise<{ pendingCount: number; pendingVersion: number }> {
-    const { tx, sessionId, data } = params;
-    const decremented = await tx.session.updateMany({
-        where: { id: sessionId, pendingCount: { gt: 0 } },
-        data: { ...data, pendingCount: { decrement: 1 } },
-    });
+    initialState: PendingCounterState;
+}): Promise<PendingCounterState> {
+    let current = params.initialState;
 
-    if (decremented.count === 0) {
-        await tx.session.updateMany({
-            where: { id: sessionId, pendingCount: { lte: 0 } },
-            data: { ...data, pendingCount: 0 },
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+        const nextPendingCount = Math.max(0, current.pendingCount + params.pendingCountDelta);
+        const nextPendingBlockedCount = Math.max(0, current.pendingBlockedCount + params.pendingBlockedCountDelta);
+        const updated = await params.tx.session.updateMany({
+            where: {
+                id: params.sessionId,
+                pendingCount: current.pendingCount,
+                pendingBlockedCount: current.pendingBlockedCount,
+                pendingVersion: current.pendingVersion,
+            },
+            data: {
+                ...params.data,
+                pendingCount: nextPendingCount,
+                pendingBlockedCount: nextPendingBlockedCount,
+            },
+        });
+
+        if (updated.count > 0) {
+            return params.tx.session.findUniqueOrThrow({
+                where: { id: params.sessionId },
+                select: { pendingCount: true, pendingBlockedCount: true, pendingVersion: true },
+            });
+        }
+
+        current = await params.tx.session.findUniqueOrThrow({
+            where: { id: params.sessionId },
+            select: { pendingCount: true, pendingBlockedCount: true, pendingVersion: true },
         });
     }
 
-    return tx.session.findUniqueOrThrow({
-        where: { id: sessionId },
-        select: { pendingCount: true, pendingVersion: true },
+    const nextPendingCount = Math.max(0, current.pendingCount + params.pendingCountDelta);
+    const nextPendingBlockedCount = Math.max(0, current.pendingBlockedCount + params.pendingBlockedCountDelta);
+    return params.tx.session.update({
+        where: { id: params.sessionId },
+        data: {
+            ...params.data,
+            pendingCount: nextPendingCount,
+            pendingBlockedCount: nextPendingBlockedCount,
+        },
+        select: { pendingCount: true, pendingBlockedCount: true, pendingVersion: true },
     });
 }

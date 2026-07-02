@@ -384,7 +384,10 @@ export function registerSessionMessageRoutes(app: Fastify) {
 
         if (result.didWrite) {
             await Promise.all(result.participantCursors.map(async ({ accountId, cursor }) => {
-                const payload = buildNewMessageUpdate(result.message, sessionId, cursor, randomKeyNaked(12));
+                const options = result.attentionImpact ? { attentionImpact: result.attentionImpact } : undefined;
+                const payload = options
+                    ? buildNewMessageUpdate(result.message, sessionId, cursor, randomKeyNaked(12), options)
+                    : buildNewMessageUpdate(result.message, sessionId, cursor, randomKeyNaked(12));
                 eventRouter.emitUpdate({
                     userId: accountId,
                     payload,
@@ -397,7 +400,10 @@ export function registerSessionMessageRoutes(app: Fastify) {
             });
         } else if (result.didUpdate) {
             await Promise.all(result.participantCursors.map(async ({ accountId, cursor }) => {
-                const payload = buildMessageUpdatedUpdate(result.message, sessionId, cursor, randomKeyNaked(12));
+                const options = result.attentionImpact ? { attentionImpact: result.attentionImpact } : undefined;
+                const payload = options
+                    ? buildMessageUpdatedUpdate(result.message, sessionId, cursor, randomKeyNaked(12), options)
+                    : buildMessageUpdatedUpdate(result.message, sessionId, cursor, randomKeyNaked(12));
                 eventRouter.emitUpdate({
                     userId: accountId,
                     payload,

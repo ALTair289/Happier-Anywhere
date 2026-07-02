@@ -4,6 +4,7 @@ import {
     SessionRuntimeIssueV1Schema,
     type V2SessionRecord,
 } from "@happier-dev/protocol";
+import { normalizeStoredSessionRuntimeActivityProjection } from "@/app/session/runtimeActivityProjection";
 
 export function parseStoredSessionRuntimeIssue(value: string | null | undefined): V2SessionRecord["lastRuntimeIssue"] {
     if (!value) return null;
@@ -59,7 +60,12 @@ const V2_SESSION_LIST_ROW_BASE_SELECT = {
     latestTurnStatus: true,
     latestTurnStatusObservedAt: true,
     lastRuntimeIssue: true,
+    runtimeActivityActiveCount: true,
+    runtimeActivityObservedAt: true,
+    runtimeActivityExpiresAt: true,
+    runtimeActivitySourceClass: true,
     pendingCount: true,
+    pendingBlockedCount: true,
     pendingVersion: true,
     dataEncryptionKey: true,
     active: true,
@@ -75,6 +81,10 @@ const {
     latestReadyEventAt: _legacySelectLatestReadyEventAt,
     thinking: _legacySelectThinking,
     thinkingAt: _legacySelectThinkingAt,
+    runtimeActivityActiveCount: _legacySelectRuntimeActivityActiveCount,
+    runtimeActivityObservedAt: _legacySelectRuntimeActivityObservedAt,
+    runtimeActivityExpiresAt: _legacySelectRuntimeActivityExpiresAt,
+    runtimeActivitySourceClass: _legacySelectRuntimeActivitySourceClass,
     ...V2_SESSION_LIST_ROW_LEGACY_SELECT
 } = V2_SESSION_LIST_ROW_BASE_SELECT;
 
@@ -128,7 +138,7 @@ function readNullableDateField(row: V2SessionListRowCompat, field: string): Date
     return value instanceof Date ? value : null;
 }
 
-function readNullableNumberField(row: V2SessionListRowCompat, field: string): number | null {
+function readNullableNumberField(row: object, field: string): number | null {
     const value = (row as Record<string, unknown>)[field];
     if (typeof value === "number" && Number.isFinite(value)) return value;
     if (typeof value === "bigint") return Number(value);
@@ -144,6 +154,18 @@ function readBooleanField(row: V2SessionListRowCompat, field: string): boolean {
     return (row as Record<string, unknown>)[field] === true;
 }
 
+export type SessionRuntimeActivityProjectionFields = Pick<
+    V2SessionRecord,
+    | "runtimeActivityActiveCount"
+    | "runtimeActivityObservedAt"
+    | "runtimeActivityExpiresAt"
+    | "runtimeActivitySourceClass"
+>;
+
+export function mapStoredSessionRuntimeActivityProjection(row: object): SessionRuntimeActivityProjectionFields {
+    return normalizeStoredSessionRuntimeActivityProjection(row);
+}
+
 export function mapV2SessionListRow(params: Readonly<{ row: V2SessionListRowCompat; userId: string }>): V2SessionRecord {
     const { row, userId } = params;
     const viewerShare = row.shares[0] ?? null;
@@ -151,6 +173,7 @@ export function mapV2SessionListRow(params: Readonly<{ row: V2SessionListRowComp
     const latestTurnStatus = parseStoredSessionLatestTurnStatus(row.latestTurnStatus);
     const latestTurnStatusObservedAt = readNullableNumberField(row, "latestTurnStatusObservedAt");
     const rawThinkingAt = readNullableDateField(row, "thinkingAt")?.getTime() ?? null;
+    const runtimeActivityProjection = mapStoredSessionRuntimeActivityProjection(row);
     const thinking = isTerminalTurnStatus(latestTurnStatus) ? false : readBooleanField(row, "thinking");
     const thinkingAt = isTerminalTurnStatus(latestTurnStatus)
         ? (latestTurnStatusObservedAt ?? rawThinkingAt)
@@ -182,7 +205,9 @@ export function mapV2SessionListRow(params: Readonly<{ row: V2SessionListRowComp
         latestTurnStatus,
         latestTurnStatusObservedAt,
         lastRuntimeIssue: parseStoredSessionRuntimeIssue(row.lastRuntimeIssue),
+        ...runtimeActivityProjection,
         pendingCount: row.pendingCount,
+        pendingBlockedCount: row.pendingBlockedCount,
         pendingVersion: row.pendingVersion,
         dataEncryptionKey: isOwner
             ? encodeSessionDataEncryptionKey(row.dataEncryptionKey)

@@ -4,6 +4,7 @@ import { createFakeSocket, getSocketHandler } from "../testkit/socketHarness";
 const createSessionMessage = vi.fn<(...args: unknown[]) => Promise<unknown>>(async () => ({ ok: false, error: "invalid-params" }));
 const updateSessionMetadata = vi.fn(async (): Promise<unknown> => ({ ok: false, error: "internal" }));
 const updateSessionAgentState = vi.fn(async (): Promise<unknown> => ({ ok: false, error: "internal" }));
+const updateSessionRuntimeActivityProjection = vi.fn<(...args: unknown[]) => Promise<unknown>>(async () => ({ ok: false, error: "internal" }));
 const applySessionTurnMutation = vi.fn(async (): Promise<unknown> => ({ ok: false, error: "internal" }));
 const applySessionReadCursorOperation = vi.fn(async (): Promise<unknown> => ({ ok: false, error: "internal" }));
 const materializeNextPendingMessage = vi.fn(async (): Promise<unknown> => ({ ok: false, error: "internal" }));
@@ -22,6 +23,11 @@ const buildMessageUpdatedUpdate = vi.fn((_message: unknown, _sessionId: string, 
     seq,
     body: { t: "message-updated" },
 }));
+const buildPendingChangedUpdate = vi.fn((_pendingState: unknown, seq: number, updateId: string) => ({
+    id: updateId,
+    seq,
+    body: { t: "pending-changed" },
+}));
 const buildUpdateSessionUpdate = vi.fn(
     (_sessionId: string, seq: number, updateId: string, _metadata: unknown, _agentState: unknown, projection?: unknown) => ({
         id: updateId,
@@ -33,6 +39,7 @@ vi.mock("@/app/session/sessionWriteService", () => ({
     createSessionMessage,
     updateSessionMetadata,
     updateSessionAgentState,
+    updateSessionRuntimeActivityProjection,
     applySessionTurnMutation,
     applySessionReadCursorOperation,
 }));
@@ -57,7 +64,7 @@ vi.mock("@/app/events/eventRouter", () => ({
     },
     buildMessageUpdatedUpdate,
     buildNewMessageUpdate,
-    buildPendingChangedUpdate: vi.fn(),
+    buildPendingChangedUpdate,
     buildSessionActivityEphemeral: vi.fn(),
     buildUpdateSessionUpdate,
 }));
@@ -101,6 +108,7 @@ describe("sessionUpdateHandler", () => {
         createSessionMessage.mockClear();
         updateSessionMetadata.mockClear();
         updateSessionAgentState.mockClear();
+        updateSessionRuntimeActivityProjection.mockClear();
         applySessionTurnMutation.mockClear();
         applySessionReadCursorOperation.mockClear();
         materializeNextPendingMessage.mockClear();
@@ -112,6 +120,7 @@ describe("sessionUpdateHandler", () => {
         emitUpdate.mockClear();
         buildNewMessageUpdate.mockClear();
         buildMessageUpdatedUpdate.mockClear();
+        buildPendingChangedUpdate.mockClear();
         buildUpdateSessionUpdate.mockClear();
         checkSessionAccess.mockClear();
         requireAccessLevel.mockClear();
@@ -275,6 +284,20 @@ describe("sessionUpdateHandler", () => {
             },
         },
         {
+            event: "update-runtime-activity",
+            payload: {
+                sid: "s-2",
+                runtimeActivityActiveCount: 1,
+                runtimeActivityObservedAt: 1_000,
+                runtimeActivityExpiresAt: 2_000,
+                runtimeActivitySourceClass: "provider_detached_task",
+            },
+            service: updateSessionRuntimeActivityProjection,
+            assertRejected: (callback: ReturnType<typeof vi.fn>) => {
+                expect(callback).toHaveBeenCalledWith({ result: "forbidden" });
+            },
+        },
+        {
             event: "session-turn-mutation",
             payload: {
                 v: 1,
@@ -384,6 +407,211 @@ describe("sessionUpdateHandler", () => {
             agentStateCiphertext: "{}",
         });
         expect(callback).toHaveBeenCalledWith({ result: "success", version: 2, agentState: "{}" });
+    });
+
+    it("writes runtime activity projection through the canonical helper and fans out only runtime fields", async () => {
+        updateSessionRuntimeActivityProjection.mockResolvedValueOnce({
+            ok: true,
+            didWrite: true,
+            projection: {
+                runtimeActivityActiveCount: 2,
+                runtimeActivityObservedAt: 1_000,
+                runtimeActivityExpiresAt: 2_000,
+                runtimeActivitySourceClass: "provider_detached_task",
+            },
+            participantCursors: [
+                { accountId: "user-1", cursor: 10 },
+                { accountId: "user-2", cursor: 11 },
+            ],
+            badgeAttentionChanged: false,
+        });
+        const socket = createFakeSocket();
+
+        registerSessionUpdateHandler(
+            "user-1",
+            socket as any,
+            { connectionType: "session-scoped", socket: socket as any, userId: "user-1", sessionId: "s-1" } as any,
+        );
+
+        const handler = getSocketHandler(socket, "update-runtime-activity");
+        const callback = vi.fn();
+        await handler({
+            sid: "s-1",
+            runtimeActivityActiveCount: 2,
+            runtimeActivityObservedAt: 1_000,
+            runtimeActivityExpiresAt: 2_000,
+            runtimeActivitySourceClass: "provider_detached_task",
+        }, callback);
+
+        expect(updateSessionRuntimeActivityProjection).toHaveBeenCalledWith({
+            actorUserId: "user-1",
+            sessionId: "s-1",
+            activeCount: 2,
+            observedAt: 1_000,
+            expiresAt: 2_000,
+            sourceClass: "provider_detached_task",
+        });
+        expect(buildUpdateSessionUpdate).toHaveBeenNthCalledWith(1, "s-1", 10, expect.any(String), undefined, undefined, {
+            runtimeActivityActiveCount: 2,
+            runtimeActivityObservedAt: 1_000,
+            runtimeActivityExpiresAt: 2_000,
+            runtimeActivitySourceClass: "provider_detached_task",
+        });
+        expect(buildUpdateSessionUpdate).toHaveBeenNthCalledWith(2, "s-1", 11, expect.any(String), undefined, undefined, {
+            runtimeActivityActiveCount: 2,
+            runtimeActivityObservedAt: 1_000,
+            runtimeActivityExpiresAt: 2_000,
+            runtimeActivitySourceClass: "provider_detached_task",
+        });
+        const projectedFields = buildUpdateSessionUpdate.mock.calls[0]?.[5] as Record<string, unknown>;
+        expect(projectedFields).not.toHaveProperty("latestTurnStatus");
+        expect(projectedFields).not.toHaveProperty("activeAt");
+        expect(projectedFields).not.toHaveProperty("meaningfulActivityAt");
+        expect(projectedFields).not.toHaveProperty("thinking");
+        expect(emitUpdate).toHaveBeenCalledTimes(2);
+        expect(callback).toHaveBeenCalledWith({
+            result: "success",
+            didWrite: true,
+            runtimeActivityActiveCount: 2,
+            runtimeActivityObservedAt: 1_000,
+            runtimeActivityExpiresAt: 2_000,
+            runtimeActivitySourceClass: "provider_detached_task",
+        });
+    });
+
+    it("does not fan out participant churn for idempotent runtime activity writes", async () => {
+        updateSessionRuntimeActivityProjection.mockResolvedValueOnce({
+            ok: true,
+            didWrite: false,
+            projection: {
+                runtimeActivityActiveCount: 0,
+                runtimeActivityObservedAt: null,
+                runtimeActivityExpiresAt: null,
+                runtimeActivitySourceClass: null,
+            },
+            participantCursors: [],
+            badgeAttentionChanged: false,
+        });
+        const socket = createFakeSocket();
+
+        registerSessionUpdateHandler(
+            "user-1",
+            socket as any,
+            { connectionType: "session-scoped", socket: socket as any, userId: "user-1", sessionId: "s-1" } as any,
+        );
+
+        const handler = getSocketHandler(socket, "update-runtime-activity");
+        const callback = vi.fn();
+        await handler({
+            sid: "s-1",
+            runtimeActivityActiveCount: 0,
+            runtimeActivityObservedAt: null,
+            runtimeActivityExpiresAt: null,
+            runtimeActivitySourceClass: null,
+        }, callback);
+
+        expect(updateSessionRuntimeActivityProjection).toHaveBeenCalledTimes(1);
+        expect(buildUpdateSessionUpdate).not.toHaveBeenCalled();
+        expect(emitUpdate).not.toHaveBeenCalled();
+        expect(callback).toHaveBeenCalledWith({
+            result: "success",
+            didWrite: false,
+            runtimeActivityActiveCount: 0,
+            runtimeActivityObservedAt: null,
+            runtimeActivityExpiresAt: null,
+            runtimeActivitySourceClass: null,
+        });
+    });
+
+    it("normalizes invalid runtime activity updates through the helper without forwarding private fields", async () => {
+        updateSessionRuntimeActivityProjection.mockResolvedValueOnce({
+            ok: true,
+            didWrite: false,
+            projection: {
+                runtimeActivityActiveCount: 0,
+                runtimeActivityObservedAt: null,
+                runtimeActivityExpiresAt: null,
+                runtimeActivitySourceClass: null,
+            },
+            participantCursors: [],
+            badgeAttentionChanged: false,
+        });
+        const socket = createFakeSocket();
+
+        registerSessionUpdateHandler(
+            "user-1",
+            socket as any,
+            { connectionType: "session-scoped", socket: socket as any, userId: "user-1", sessionId: "s-1" } as any,
+        );
+
+        const handler = getSocketHandler(socket, "update-runtime-activity");
+        const callback = vi.fn();
+        await handler({
+            sid: "s-1",
+            runtimeActivityActiveCount: -1,
+            runtimeActivityObservedAt: "bad",
+            runtimeActivityExpiresAt: null,
+            runtimeActivitySourceClass: "provider_task:task-123",
+            label: "private label",
+            taskId: "task-123",
+            prompt: "private prompt",
+            diagnostics: { raw: true },
+        }, callback);
+
+        expect(updateSessionRuntimeActivityProjection).toHaveBeenCalledWith({
+            actorUserId: "user-1",
+            sessionId: "s-1",
+            activeCount: -1,
+            observedAt: "bad",
+            expiresAt: null,
+            sourceClass: "provider_task:task-123",
+        });
+        expect(updateSessionRuntimeActivityProjection.mock.calls[0]?.[0]).not.toHaveProperty("label");
+        expect(updateSessionRuntimeActivityProjection.mock.calls[0]?.[0]).not.toHaveProperty("taskId");
+        expect(updateSessionRuntimeActivityProjection.mock.calls[0]?.[0]).not.toHaveProperty("prompt");
+        expect(updateSessionRuntimeActivityProjection.mock.calls[0]?.[0]).not.toHaveProperty("diagnostics");
+        expect(callback).toHaveBeenCalledWith({
+            result: "success",
+            didWrite: false,
+            runtimeActivityActiveCount: 0,
+            runtimeActivityObservedAt: null,
+            runtimeActivityExpiresAt: null,
+            runtimeActivitySourceClass: null,
+        });
+    });
+
+    it("rejects runtime activity updates without a session id as invalid params", async () => {
+        const socket = createFakeSocket();
+
+        registerSessionUpdateHandler(
+            "user-1",
+            socket as any,
+            { connectionType: "session-scoped", socket: socket as any, userId: "user-1", sessionId: "s-1" } as any,
+        );
+
+        const handler = getSocketHandler(socket, "update-runtime-activity");
+        const callback = vi.fn();
+        await handler({
+            runtimeActivityActiveCount: 1,
+            runtimeActivityObservedAt: 1_000,
+            runtimeActivityExpiresAt: 2_000,
+            runtimeActivitySourceClass: "provider_detached_task",
+        }, callback);
+
+        expect(updateSessionRuntimeActivityProjection).not.toHaveBeenCalled();
+        expect(callback).toHaveBeenCalledWith({ result: "invalid-params" });
+    });
+
+    it("does not register system-record writes as a session socket mutation", () => {
+        const socket = createFakeSocket();
+
+        registerSessionUpdateHandler(
+            "user-1",
+            socket as any,
+            { connectionType: "session-scoped", socket: socket as any, userId: "user-1", sessionId: "s-1" } as any,
+        );
+
+        expect(socket.handlers.has("upsert-system-record")).toBe(false);
     });
 
     it("applies session turn socket mutations and fans out materialized updates", async () => {
@@ -643,6 +871,52 @@ describe("sessionUpdateHandler", () => {
         expect(secondCallback).toHaveBeenCalledWith({ ok: true, didMaterialize: false, pendingCount: 0, pendingVersion: 5 });
     });
 
+    it("emits pending-changed when socket materialization blocks stale provider delivery without writing a message", async () => {
+        materializeNextPendingMessage.mockResolvedValueOnce({
+            ok: true,
+            didMaterialize: false,
+            pendingCount: 1,
+            pendingBlockedCount: 1,
+            pendingVersion: 8,
+            pendingStateChanged: true,
+            participantCursorsPending: [{ accountId: "user-1", cursor: 30 }],
+            badgeAttentionChanged: false,
+            deliveryState: { mode: "provider", unresolved: false },
+        });
+        const socket = createFakeSocket();
+
+        registerSessionUpdateHandler(
+            "user-1",
+            socket as any,
+            { connectionType: "session-scoped", socket: socket as any, userId: "user-1", sessionId: "s-stale-provider" } as any,
+        );
+
+        const handler = getSocketHandler(socket, "pending-materialize-next");
+        const callback = vi.fn();
+        await handler({ sid: "s-stale-provider", deliveryState: "provider" }, callback);
+
+        expect(callback).toHaveBeenCalledWith({
+            ok: true,
+            didMaterialize: false,
+            pendingCount: 1,
+            pendingBlockedCount: 1,
+            pendingVersion: 8,
+            deliveryState: { mode: "provider", unresolved: false },
+        });
+        expect(buildPendingChangedUpdate).toHaveBeenCalledWith(
+            expect.objectContaining({
+                sessionId: "s-stale-provider",
+                pendingCount: 1,
+                pendingBlockedCount: 1,
+                pendingVersion: 8,
+                changedByAccountId: "user-1",
+            }),
+            30,
+            expect.any(String),
+        );
+        expect(emitUpdate).toHaveBeenCalledTimes(1);
+    });
+
     it("throttles socket no-op pending materialization calls across reconnects for the same user and session", async () => {
         materializeNextPendingMessage.mockResolvedValueOnce({
             ok: true,
@@ -835,6 +1109,102 @@ describe("sessionUpdateHandler", () => {
 
         expect(callback).toHaveBeenCalledWith({ ok: true, didMaterialize: false, pendingCount: 0, pendingVersion: 5 });
         expect(emitUpdate).not.toHaveBeenCalled();
+    });
+
+    it("passes provider delivery-state opt-in through socket pending materialization", async () => {
+        materializeNextPendingMessage.mockResolvedValueOnce({
+            ok: true,
+            didMaterialize: true,
+            didWriteMessage: false,
+            message: {
+                id: null,
+                seq: null,
+                localId: "pending-provider",
+                messageRole: "user",
+                content: { t: "plain", v: { type: "user", text: "hello" } },
+                createdAt: new Date(1_000),
+                updatedAt: new Date(1_000),
+            },
+            pendingCount: 1,
+            pendingVersion: 8,
+            deliveryState: {
+                mode: "provider",
+                unresolved: true,
+            },
+            participantCursorsMessage: [],
+            participantCursorsPending: [],
+            badgeAttentionChanged: false,
+        });
+        const socket = createFakeSocket();
+
+        registerSessionUpdateHandler(
+            "user-1",
+            socket as any,
+            { connectionType: "session-scoped", socket: socket as any, userId: "user-1", sessionId: "s-provider" } as any,
+        );
+
+        const handler = getSocketHandler(socket, "pending-materialize-next");
+        const callback = vi.fn();
+        await handler({ sid: "s-provider", deliveryState: "provider" }, callback);
+
+        expect(materializeNextPendingMessage).toHaveBeenCalledWith({
+            actorUserId: "user-1",
+            sessionId: "s-provider",
+            deliveryState: "provider",
+        });
+        expect(callback).toHaveBeenCalledWith(expect.objectContaining({
+            ok: true,
+            didMaterialize: true,
+            didWrite: false,
+            pendingCount: 1,
+            pendingVersion: 8,
+            deliveryState: {
+                mode: "provider",
+                unresolved: true,
+            },
+            message: expect.objectContaining({
+                id: null,
+                seq: null,
+                localId: "pending-provider",
+            }),
+        }));
+        expect(buildNewMessageUpdate).not.toHaveBeenCalled();
+    });
+
+    it("passes runtime-idle delivery timing through socket pending materialization", async () => {
+        materializeNextPendingMessage.mockResolvedValueOnce({
+            ok: true,
+            didMaterialize: false,
+            pendingCount: 1,
+            pendingBlockedCount: 0,
+            pendingVersion: 8,
+            deferredReason: "runtime_activity_active",
+        });
+        const socket = createFakeSocket();
+
+        registerSessionUpdateHandler(
+            "user-1",
+            socket as any,
+            { connectionType: "session-scoped", socket: socket as any, userId: "user-1", sessionId: "s-runtime-idle" } as any,
+        );
+
+        const handler = getSocketHandler(socket, "pending-materialize-next");
+        const callback = vi.fn();
+        await handler({ sid: "s-runtime-idle", deliveryTiming: "after_runtime_idle" }, callback);
+
+        expect(materializeNextPendingMessage).toHaveBeenCalledWith({
+            actorUserId: "user-1",
+            sessionId: "s-runtime-idle",
+            deliveryTiming: "after_runtime_idle",
+        });
+        expect(callback).toHaveBeenCalledWith({
+            ok: true,
+            didMaterialize: false,
+            pendingCount: 1,
+            pendingBlockedCount: 0,
+            pendingVersion: 8,
+            deferredReason: "runtime_activity_active",
+        });
     });
 
     it("emits ready projection updates after socket pending materialization returns a ready projection", async () => {

@@ -17,6 +17,7 @@ import {
     txSessionFolderAssignmentFindMany,
     txSessionFolderAssignmentUpdateMany,
     txSessionFolderAssignmentUpsert,
+    txSessionOrganizationFolderFindMany,
 } from "./sessionRoutes.testkit";
 
 type RouteMethod = "GET" | "POST" | "PUT";
@@ -75,6 +76,7 @@ describe("session folder assignment routes", () => {
 
     it("assigns a visible owned session to a folder for the current account", async () => {
         sessionFindFirst.mockResolvedValue({ id: "s1" });
+        txSessionOrganizationFolderFindMany.mockResolvedValue([{ id: "folder-a", folderKey: "folder-a" }]);
         txSessionFolderAssignmentUpsert.mockResolvedValue({ sessionId: "s1", folderId: "folder-a" });
 
         const { response, reply } = await invokeRawRoute({
@@ -106,7 +108,14 @@ describe("session folder assignment routes", () => {
             accountId: "u1",
             kind: "session",
             entityId: "s1",
-            hint: { sessionFolderAssignment: true, folderId: "folder-a" },
+            hint: expect.objectContaining({
+                sessionFolderAssignment: true,
+                sessionOrganization: true,
+                scope: "folderAssignments",
+                sessionIds: ["s1"],
+                folderIds: ["folder-a"],
+                folderId: "folder-a",
+            }),
         });
     });
 
@@ -131,7 +140,13 @@ describe("session folder assignment routes", () => {
             accountId: "u1",
             kind: "session",
             entityId: "s1",
-            hint: { sessionFolderAssignment: true, folderId: null },
+            hint: expect.objectContaining({
+                sessionFolderAssignment: true,
+                sessionOrganization: true,
+                scope: "folderAssignments",
+                sessionIds: ["s1"],
+                folderId: null,
+            }),
         }));
     });
 
@@ -449,6 +464,7 @@ describe("session folder assignment routes", () => {
     });
 
     it("bulk moves current-account assignments and marks a bulk assignment change", async () => {
+        txSessionOrganizationFolderFindMany.mockResolvedValue([{ id: "new-folder", folderKey: "new-folder" }]);
         txSessionFolderAssignmentFindMany.mockResolvedValue([
             { sessionId: "s1", folderId: "old-a" },
             { sessionId: "s2", folderId: "old-b" },
@@ -482,11 +498,13 @@ describe("session folder assignment routes", () => {
             accountId: "u1",
             kind: "account",
             entityId: "session-folder-assignments",
-            hint: {
+            hint: expect.objectContaining({
                 sessionFolderAssignments: true,
+                sessionOrganization: true,
+                scope: "folderAssignments",
                 folderIds: ["old-a", "old-b"],
                 toFolderId: "new-folder",
-            },
+            }),
         });
     });
 

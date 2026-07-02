@@ -109,6 +109,9 @@ export function registerSessionFolderAssignmentRoutes(app: Fastify) {
             sessionId,
             folderId: parsedBody.data.folderId,
         });
+        if ("error" in result) {
+            return reply.code(400).send({ error: "invalid-session-folder-assignment" });
+        }
 
         return reply.send(result);
     });
@@ -182,6 +185,9 @@ export function registerSessionFolderAssignmentRoutes(app: Fastify) {
             fromFolderIds: parsedBody.data.fromFolderIds,
             toFolderId: parsedBody.data.toFolderId,
         });
+        if ("error" in result) {
+            return reply.code(400).send({ error: "invalid-session-folder-assignment-move" });
+        }
 
         return reply.send(result);
     });

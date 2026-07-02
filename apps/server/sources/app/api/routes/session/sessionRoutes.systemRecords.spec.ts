@@ -98,6 +98,63 @@ describe("sessionRoutes system records", () => {
         });
     });
 
+    it("upserts an activity workflow record through the same generic route", async () => {
+        const createdAt = new Date("2026-06-26T10:00:00.000Z");
+        const updatedAt = new Date("2026-06-26T10:01:00.000Z");
+        upsertSessionSystemRecord.mockResolvedValue({
+            ok: true,
+            didCreate: true,
+            didUpdate: false,
+            record: {
+                id: "rec-wf",
+                sessionId: "s1",
+                namespace: "activity",
+                kind: "workflow_run.v1",
+                localId: "activity:workflow_run:v1:wf_demo",
+                content: { t: "encrypted", c: "cipher" },
+                createdAt,
+                updatedAt,
+            },
+        });
+
+        const route = await createSessionRouteTestBuilder("PUT", "/v2/sessions/:sessionId/system-records");
+        expect(route.routeExists).toBe(true);
+
+        const { response: res } = await route.invoke({
+            params: { sessionId: "s1" },
+            body: {
+                namespace: "activity",
+                kind: "workflow_run.v1",
+                localId: "activity:workflow_run:v1:wf_demo",
+                content: { t: "encrypted", c: "cipher" },
+            },
+        });
+
+        expect(upsertSessionSystemRecord).toHaveBeenCalledWith({
+            actorUserId: "u1",
+            sessionId: "s1",
+            namespace: "activity",
+            kind: "workflow_run.v1",
+            localId: "activity:workflow_run:v1:wf_demo",
+            content: { t: "encrypted", c: "cipher" },
+        });
+        expect(res).toEqual({
+            didCreate: true,
+            didUpdate: false,
+            record: {
+                id: "rec-wf",
+                sessionId: "s1",
+                namespace: "activity",
+                kind: "workflow_run.v1",
+                localId: "activity:workflow_run:v1:wf_demo",
+                content: { t: "encrypted", c: "cipher" },
+                createdAt: createdAt.toISOString(),
+                updatedAt: updatedAt.toISOString(),
+            },
+        });
+        expect(emitUpdate).not.toHaveBeenCalled();
+    });
+
     it("lists system records through query fields", async () => {
         const createdAt = new Date("2026-05-19T10:00:00.000Z");
         listSessionSystemRecords.mockResolvedValue({

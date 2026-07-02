@@ -6,6 +6,10 @@ import { buildUpdateSessionUpdate, eventRouter } from "@/app/events/eventRouter"
 import { inTx } from "@/storage/inTx";
 import { didSessionActivityBadgeContributionChange } from "@/app/activity/accountActivityBadge";
 import { refreshSessionParticipantBadgePushes } from "@/app/activity/refreshAccountActivityBadgePushes";
+import {
+    hasNonIdleSessionRuntimeActivityProjection,
+    IDLE_SESSION_RUNTIME_ACTIVITY_PROJECTION,
+} from "@/app/session/runtimeActivityProjection";
 import { randomKeyNaked } from "@/utils/keys/randomKeyNaked";
 import { type Fastify } from "../../types";
 
@@ -37,11 +41,16 @@ export function registerSessionArchiveRoutes(app: Fastify) {
                     id: true,
                     seq: true,
                     pendingCount: true,
+                    pendingBlockedCount: true,
                     lastViewedSessionSeq: true,
                     pendingPermissionRequestCount: true,
                     pendingUserActionRequestCount: true,
                     active: true,
                     archivedAt: true,
+                    runtimeActivityActiveCount: true,
+                    runtimeActivityObservedAt: true,
+                    runtimeActivityExpiresAt: true,
+                    runtimeActivitySourceClass: true,
                 },
             });
             if (!session) {
@@ -51,9 +60,14 @@ export function registerSessionArchiveRoutes(app: Fastify) {
                 return { ok: false as const, error: "session-active" as const };
             }
 
+            const shouldClearRuntimeActivity = hasNonIdleSessionRuntimeActivityProjection(session);
+            const runtimeActivityProjection = shouldClearRuntimeActivity
+                ? IDLE_SESSION_RUNTIME_ACTIVITY_PROJECTION
+                : {};
+
             const updated = await tx.session.update({
                 where: { id: sessionId },
-                data: { archivedAt: new Date() },
+                data: { archivedAt: new Date(), ...runtimeActivityProjection },
                 select: { archivedAt: true },
             });
 
@@ -70,7 +84,9 @@ export function registerSessionArchiveRoutes(app: Fastify) {
                 badgeAttentionChanged: didSessionActivityBadgeContributionChange(session, {
                     ...session,
                     archivedAt: new Date(archivedAt),
+                    ...runtimeActivityProjection,
                 }),
+                runtimeActivityProjection,
             };
         });
 
@@ -91,7 +107,7 @@ export function registerSessionArchiveRoutes(app: Fastify) {
                 randomKeyNaked(12),
                 undefined,
                 undefined,
-                { archivedAt: res.archivedAt },
+                { archivedAt: res.archivedAt, ...res.runtimeActivityProjection },
             );
             eventRouter.emitUpdate({
                 userId: accountId,
@@ -128,6 +144,7 @@ export function registerSessionArchiveRoutes(app: Fastify) {
                     id: true,
                     seq: true,
                     pendingCount: true,
+                    pendingBlockedCount: true,
                     lastViewedSessionSeq: true,
                     pendingPermissionRequestCount: true,
                     pendingUserActionRequestCount: true,

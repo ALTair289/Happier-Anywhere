@@ -1,7 +1,14 @@
 import { log } from "@/utils/logging/log";
 import { Server, Socket } from "socket.io";
-import { RPC_ERROR_CODES, RPC_ERROR_MESSAGES } from "@happier-dev/protocol/rpc";
+import {
+    parseSocketRpcAuthorizationContext,
+    resolveSocketRpcSessionWriteAuthorizationMethod,
+    RPC_ERROR_CODES,
+    RPC_ERROR_MESSAGES,
+    type SocketRpcAuthorizationContext,
+} from "@happier-dev/protocol/rpc";
 import { SOCKET_RPC_EVENTS } from "@happier-dev/protocol/socketRpc";
+import { checkSessionAccess, requireAccessLevel } from "@/app/share/accessControl";
 import { resolveRpcForwardTimeoutMs } from "./rpcForwardTimeout";
 import { resolveRpcMethodAvailabilityGraceMs, resolveRpcMethodAvailabilityPollMs } from "./rpcMethodAvailabilityGrace";
 import { createRpcRedisRegistryCoordinator, type RpcRedisRegistryConfig } from "./rpcRedisRegistryCoordinator";
@@ -95,6 +102,14 @@ function readMachineIdPrefix(method: string): string | null {
     const separatorIndex = method.indexOf(':');
     if (separatorIndex <= 0) return null;
     return method.slice(0, separatorIndex);
+}
+
+function buildForbiddenRpcResponse() {
+    return {
+        ok: false,
+        error: RPC_ERROR_MESSAGES.FORBIDDEN,
+        errorCode: RPC_ERROR_CODES.FORBIDDEN,
+    };
 }
 
 export function rpcHandler(
@@ -194,6 +209,7 @@ export function rpcHandler(
             const method = normalizeRpcMethodName(data?.method);
             const callParams = data?.params;
             const requestedTimeoutMs = data?.timeoutMs;
+            let rpcAuthorization: SocketRpcAuthorizationContext | null = null;
 
             if (!method) {
                 if (callback) {
@@ -203,6 +219,25 @@ export function rpcHandler(
                     });
                 }
                 return;
+            }
+
+            if (resolveSocketRpcSessionWriteAuthorizationMethod(method)) {
+                const authorization = parseSocketRpcAuthorizationContext(data?.authorization);
+                if (!authorization) {
+                    if (callback) {
+                        callback(buildForbiddenRpcResponse());
+                    }
+                    return;
+                }
+
+                const access = await checkSessionAccess(userId, authorization.sessionId);
+                if (!access || !requireAccessLevel(access, 'edit')) {
+                    if (callback) {
+                        callback(buildForbiddenRpcResponse());
+                    }
+                    return;
+                }
+                rpcAuthorization = authorization;
             }
 
             const targetResolution = await resolveRpcCallTarget({
@@ -223,6 +258,11 @@ export function rpcHandler(
             let { targetUserId, targetSocket } = targetResolution;
             const forwardTimeoutMs = resolveRpcForwardTimeoutMs(method, requestedTimeoutMs);
             let attemptedTargetSocketId: string | null = null;
+            const buildForwardedRequest = () => ({
+                method,
+                params: callParams,
+                ...(rpcAuthorization ? { authorization: rpcAuthorization } : {}),
+            });
             const lookupInMemoryTargetSocket = (): Socket | null => {
                 if (targetUserId === userId && !allRpcListeners.has(userId)) {
                     return userRpcListeners.get(method) ?? null;
@@ -295,10 +335,10 @@ export function rpcHandler(
                             }
                         }
 
-                        const response = await fallbackSocket.timeout(forwardTimeoutMs).emitWithAck(SOCKET_RPC_EVENTS.REQUEST, {
-                            method,
-                            params: callParams,
-                        });
+                        const response = await fallbackSocket.timeout(forwardTimeoutMs).emitWithAck(
+                            SOCKET_RPC_EVENTS.REQUEST,
+                            buildForwardedRequest(),
+                        );
                         if (callback) {
                             callback({
                                 ok: true,
@@ -331,10 +371,10 @@ export function rpcHandler(
                     }
 
                     attemptedTargetSocketId = targetSocketId;
-                    const responses = await ctx.io.timeout(forwardTimeoutMs).to(targetSocketId).emitWithAck(SOCKET_RPC_EVENTS.REQUEST, {
-                        method,
-                        params: callParams,
-                    });
+                    const responses = await ctx.io.timeout(forwardTimeoutMs).to(targetSocketId).emitWithAck(
+                        SOCKET_RPC_EVENTS.REQUEST,
+                        buildForwardedRequest(),
+                    );
                     if (Array.isArray(responses) && responses.length === 0) {
                         // The socket mapping exists in Redis, but no socket acknowledged the call.
                         // Treat this as method unavailable and clean up stale mapping.
@@ -413,10 +453,10 @@ export function rpcHandler(
                 }
 
                 // Forward the RPC request to the target socket using emitWithAck (single-process path).
-                const response = await targetSocket.timeout(forwardTimeoutMs).emitWithAck(SOCKET_RPC_EVENTS.REQUEST, {
-                    method,
-                    params: callParams,
-                });
+                const response = await targetSocket.timeout(forwardTimeoutMs).emitWithAck(
+                    SOCKET_RPC_EVENTS.REQUEST,
+                    buildForwardedRequest(),
+                );
 
                 if (callback) {
                     callback({

@@ -1,4 +1,5 @@
 import fastify from "fastify";
+import type { FastifyCorsOptions } from "@fastify/cors";
 import { log, logger } from "@/utils/logging/log";
 import { serializerCompiler, validatorCompiler, ZodTypeProvider } from "fastify-type-provider-zod";
 import { onShutdown } from "@/utils/process/shutdown";
@@ -29,6 +30,7 @@ import { featuresRoutes } from "./routes/features/featuresRoutes";
 import { sessionPendingRoutes } from "./routes/session/pendingRoutes";
 import { bugReportDiagnosticsRoutes } from "./routes/diagnostics/bugReportDiagnosticsRoutes";
 import { automationRoutes } from "./routes/automations/automationRoutes";
+import { V2_SESSION_LIST_SERVER_TIMING_REQUEST_HEADER } from "./routes/session/v2SessionListServerTiming";
 import { resolveApiRateLimitPluginOptions, resolveApiTrustProxy } from "./utils/apiRateLimitPolicy";
 
 export function resolveApiListenHost(env: Record<string, string | undefined>): string {
@@ -37,6 +39,26 @@ export function resolveApiListenHost(env: Record<string, string | undefined>): s
 }
 
 export const DEFAULT_API_CORS_MAX_AGE_SECONDS = 600;
+export const API_CORS_ALLOWED_HEADERS = [
+    'authorization',
+    'content-type',
+    V2_SESSION_LIST_SERVER_TIMING_REQUEST_HEADER,
+];
+export const API_CORS_EXPOSED_HEADERS = [
+    'server-timing',
+];
+
+export function createApiCorsOptions(env: Record<string, string | undefined>): FastifyCorsOptions {
+    return {
+        origin: '*',
+        // Keep permissive defaults for now. Tighten via a proxy/WAF or by
+        // changing this list once deployments are stable.
+        allowedHeaders: API_CORS_ALLOWED_HEADERS,
+        exposedHeaders: API_CORS_EXPOSED_HEADERS,
+        methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+        maxAge: resolveApiCorsMaxAgeSeconds(env),
+    };
+}
 
 export function resolveApiCorsMaxAgeSeconds(env: Record<string, string | undefined>): number {
     const raw = (env.HAPPIER_API_CORS_MAX_AGE_SECONDS ?? env.HAPPY_API_CORS_MAX_AGE_SECONDS ?? '').toString().trim();
@@ -56,16 +78,10 @@ export async function startApi() {
     const app = fastify({
         loggerInstance: logger,
         bodyLimit: 1024 * 1024 * 100, // 100MB
+        forceCloseConnections: 'idle',
         ...(typeof trustProxy !== "undefined" ? { trustProxy } : null),
     });
-    app.register(import('@fastify/cors'), {
-        origin: '*',
-        // Keep permissive defaults for now. Tighten via a proxy/WAF or by
-        // changing this list once deployments are stable.
-        allowedHeaders: ['authorization', 'content-type'],
-        methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-        maxAge: resolveApiCorsMaxAgeSeconds(process.env),
-    });
+    app.register(import('@fastify/cors'), createApiCorsOptions(process.env));
     app.register(import('@fastify/rate-limit'), resolveApiRateLimitPluginOptions(process.env));
 
     enableOptionalStatics(app);
@@ -106,7 +122,7 @@ export async function startApi() {
     // Start HTTP 
     const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3005;
     await app.listen({ port, host: resolveApiListenHost(process.env) });
-    onShutdown('api', async () => {
+    onShutdown('api:http', async () => {
         await app.close();
     });
 

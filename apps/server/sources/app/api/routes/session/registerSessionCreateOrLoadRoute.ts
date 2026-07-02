@@ -1,5 +1,14 @@
-import { buildNewSessionUpdate, eventRouter } from "@/app/events/eventRouter";
+import {
+    buildNewSessionUpdate,
+    buildSessionActivityEphemeral,
+    buildUpdateSessionUpdate,
+    eventRouter,
+} from "@/app/events/eventRouter";
 import { markAccountChanged } from "@/app/changes/markAccountChanged";
+import {
+    markSessionParticipantsChanged,
+    type SessionParticipantCursor,
+} from "@/app/session/changeTracking/markSessionParticipantsChanged";
 import { afterTx, inTx } from "@/storage/inTx";
 import { log } from "@/utils/logging/log";
 import { randomKeyNaked } from "@/utils/keys/randomKeyNaked";
@@ -10,8 +19,15 @@ import {
     resolveEffectiveDefaultAccountEncryptionMode,
 } from "@happier-dev/protocol";
 import { resolveRequestedSessionModeRejectionCode } from "@/app/session/encryptionRejectionCodes";
+import { mapStoredSessionRuntimeActivityProjection } from "./v2SessionListRows";
 
 import { type Fastify } from "../../types";
+
+type ExistingSessionReactivation = Readonly<{
+    sessionId: string;
+    activeAt: number;
+    participantCursors: ReadonlyArray<SessionParticipantCursor>;
+}>;
 
 export function registerSessionCreateOrLoadRoute(app: Fastify) {
     app.post('/v1/sessions', {
@@ -41,7 +57,7 @@ export function registerSessionCreateOrLoadRoute(app: Fastify) {
             });
         }
 
-        const resolvedSession = await inTx(async (tx) => {
+        const resolved = await inTx(async (tx) => {
             const existing = await tx.session.findFirst({
                 where: {
                     accountId: userId,
@@ -54,7 +70,39 @@ export function registerSessionCreateOrLoadRoute(app: Fastify) {
                     { module: "session-create", sessionId: existing.id, userId, tag },
                     `Found existing session: ${existing.id} for tag ${tag}`,
                 );
-                return existing;
+                if (existing.active) {
+                    return { session: existing, reactivation: null };
+                }
+
+                const activeAt = Date.now();
+                const activeAtDate = new Date(activeAt);
+                const session = await tx.session.update({
+                    where: { id: existing.id },
+                    data: {
+                        active: true,
+                        lastActiveAt: activeAtDate,
+                        meaningfulActivityAt: activeAtDate,
+                    },
+                });
+                const participantCursors = await markSessionParticipantsChanged({
+                    tx,
+                    sessionId: existing.id,
+                    hint: {
+                        sessionStart: true,
+                        active: true,
+                        activeAt,
+                        meaningfulActivityAt: activeAt,
+                    },
+                });
+
+                return {
+                    session,
+                    reactivation: {
+                        sessionId: existing.id,
+                        activeAt,
+                        participantCursors,
+                    } satisfies ExistingSessionReactivation,
+                };
             }
 
             log({ module: "session-create", userId, tag }, `Creating new session for user ${userId} with tag ${tag}`);
@@ -104,7 +152,22 @@ export function registerSessionCreateOrLoadRoute(app: Fastify) {
             const cursor = await markAccountChanged(tx, { accountId: userId, kind: "session", entityId: created.id });
 
             afterTx(tx, () => {
-                const updatePayload = buildNewSessionUpdate(created, cursor, randomKeyNaked(12));
+                const runtimeActivityProjection = mapStoredSessionRuntimeActivityProjection(created);
+                const updatePayload = buildNewSessionUpdate({
+                    id: created.id,
+                    seq: created.seq,
+                    metadata: created.metadata,
+                    metadataVersion: created.metadataVersion,
+                    agentState: created.agentState,
+                    agentStateVersion: created.agentStateVersion,
+                    dataEncryptionKey: created.dataEncryptionKey,
+                    active: created.active,
+                    lastActiveAt: created.lastActiveAt,
+                    createdAt: created.createdAt,
+                    updatedAt: created.updatedAt,
+                    meaningfulActivityAt: created.meaningfulActivityAt,
+                    ...runtimeActivityProjection,
+                }, cursor, randomKeyNaked(12));
                 log(
                     {
                         module: "session-create",
@@ -123,9 +186,42 @@ export function registerSessionCreateOrLoadRoute(app: Fastify) {
                 });
             });
 
-            return created;
+            return { session: created, reactivation: null };
         });
 
+        const reactivation = resolved.reactivation;
+        if (reactivation) {
+            const projection = {
+                active: true,
+                activeAt: reactivation.activeAt,
+                meaningfulActivityAt: reactivation.activeAt,
+            };
+            await Promise.all(reactivation.participantCursors.map(async ({ accountId, cursor }) => {
+                const payload = buildUpdateSessionUpdate(
+                    reactivation.sessionId,
+                    cursor,
+                    randomKeyNaked(12),
+                    undefined,
+                    undefined,
+                    projection,
+                );
+                eventRouter.emitUpdate({
+                    userId: accountId,
+                    payload,
+                    recipientFilter: {
+                        type: "all-interested-in-session",
+                        sessionId: reactivation.sessionId,
+                    },
+                });
+            }));
+            eventRouter.emitEphemeral({
+                userId,
+                payload: buildSessionActivityEphemeral(reactivation.sessionId, true, reactivation.activeAt, false),
+                recipientFilter: { type: "user-scoped-only" },
+            });
+        }
+
+        const resolvedSession = resolved.session;
         log({ module: "session-create", sessionId: resolvedSession.id, userId }, `Session resolved: ${resolvedSession.id}`);
         return reply.send({
             session: {
@@ -140,7 +236,9 @@ export function registerSessionCreateOrLoadRoute(app: Fastify) {
                     ? Buffer.from(resolvedSession.dataEncryptionKey).toString("base64")
                     : null,
                 pendingCount: resolvedSession.pendingCount,
+                pendingBlockedCount: resolvedSession.pendingBlockedCount,
                 pendingVersion: resolvedSession.pendingVersion,
+                ...mapStoredSessionRuntimeActivityProjection(resolvedSession),
                 active: resolvedSession.active,
                 activeAt: resolvedSession.lastActiveAt.getTime(),
                 createdAt: resolvedSession.createdAt.getTime(),

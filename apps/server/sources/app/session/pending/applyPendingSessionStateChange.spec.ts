@@ -38,17 +38,20 @@ describe("applyPendingSessionStateChange", () => {
             .mockResolvedValueOnce({
                 seq: 1,
                 pendingCount: 1,
+                pendingBlockedCount: 0,
+                pendingVersion: 7,
                 lastViewedSessionSeq: 0,
                 pendingPermissionRequestCount: 0,
                 pendingUserActionRequestCount: 0,
                 active: true,
                 archivedAt: null,
             })
-            .mockResolvedValueOnce({ pendingCount: 0, pendingVersion: 8 });
+            .mockResolvedValueOnce({ pendingCount: 0, pendingBlockedCount: 0, pendingVersion: 8 })
+            .mockResolvedValueOnce({ pendingCount: 0, pendingBlockedCount: 0, pendingVersion: 9 });
         tx.session.updateMany
             .mockResolvedValueOnce({ count: 0 })
             .mockResolvedValueOnce({ count: 1 });
-        tx.session.update.mockResolvedValue({ pendingCount: -1, pendingVersion: 8 });
+        tx.session.update.mockResolvedValue({ pendingCount: -1, pendingBlockedCount: 0, pendingVersion: 8 });
 
         const result = await applyPendingSessionStateChange({
             tx: txFixture,
@@ -57,15 +60,16 @@ describe("applyPendingSessionStateChange", () => {
         });
 
         expect(tx.session.updateMany).toHaveBeenNthCalledWith(1, {
-            where: { id: "s1", pendingCount: { gt: 0 } },
-            data: { pendingCount: { decrement: 1 }, pendingVersion: { increment: 1 } },
+            where: { id: "s1", pendingCount: 1, pendingBlockedCount: 0, pendingVersion: 7 },
+            data: { pendingCount: 0, pendingBlockedCount: 0, pendingVersion: { increment: 1 } },
         });
         expect(tx.session.updateMany).toHaveBeenNthCalledWith(2, {
-            where: { id: "s1", pendingCount: { lte: 0 } },
-            data: { pendingCount: 0, pendingVersion: { increment: 1 } },
+            where: { id: "s1", pendingCount: 0, pendingBlockedCount: 0, pendingVersion: 8 },
+            data: { pendingCount: 0, pendingBlockedCount: 0, pendingVersion: { increment: 1 } },
         });
         expect(tx.session.update).not.toHaveBeenCalled();
         expect(result.pendingCount).toBe(0);
-        expect(result.pendingVersion).toBe(8);
+        expect(result.pendingBlockedCount).toBe(0);
+        expect(result.pendingVersion).toBe(9);
     });
 });

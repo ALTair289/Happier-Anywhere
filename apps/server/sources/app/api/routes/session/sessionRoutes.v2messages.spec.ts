@@ -112,6 +112,52 @@ describe("sessionRoutes v2 messages", () => {
         });
     });
 
+    it("emits trusted write-service attention impact with new-message updates", async () => {
+        const createdAt = new Date("2020-01-01T00:00:00.000Z");
+        const attentionImpact = {
+            affectsUnread: false,
+            affectsMeaningfulActivity: false,
+        };
+        createSessionMessage.mockResolvedValue({
+            ok: true,
+            didWrite: true,
+            didUpdate: false,
+            badgeAttentionChanged: false,
+            attentionImpact,
+            message: {
+                id: "m1",
+                seq: 10,
+                localId: "provider-quota-wait:openai-codex:happier:reset_at_100",
+                messageRole: "event",
+                content: { t: "encrypted", c: "c" },
+                createdAt,
+                updatedAt: createdAt,
+            },
+            participantCursors: [
+                { accountId: "u1", cursor: 111 },
+            ],
+        });
+
+        const route = await createSessionRouteTestBuilder("POST", "/v2/sessions/:sessionId/messages");
+        await route.invoke({
+            params: { sessionId: "s1" },
+            headers: {},
+            body: {
+                ciphertext: "cipher",
+                localId: "provider-quota-wait:openai-codex:happier:reset_at_100",
+                messageRole: "event",
+            },
+        });
+
+        expect(buildNewMessageUpdate).toHaveBeenCalledWith(
+            expect.anything(),
+            "s1",
+            111,
+            expect.any(String),
+            { attentionImpact },
+        );
+    });
+
     it("forwards ready event hints so the message write service can apply owner-only validation", async () => {
         const createdAt = new Date("2020-01-01T00:00:00.000Z");
         createSessionMessage.mockResolvedValue({

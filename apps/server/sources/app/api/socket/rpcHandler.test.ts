@@ -1,4 +1,4 @@
-import { RPC_ERROR_CODES } from "@happier-dev/protocol/rpc";
+import { RPC_ERROR_CODES, RPC_METHODS } from "@happier-dev/protocol/rpc";
 import { SOCKET_RPC_EVENTS } from "@happier-dev/protocol/socketRpc";
 import type { Server, Socket } from "socket.io";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -8,6 +8,8 @@ const createRpcRedisRegistryCoordinatorMock = vi.fn();
 const resolveRpcCallTargetMock = vi.fn();
 const resolveRpcMethodAvailabilityGraceMsMock = vi.fn<(method: string) => number>(() => 0);
 const resolveRpcMethodAvailabilityPollMsMock = vi.fn<() => number>(() => 1);
+const checkSessionAccessMock = vi.hoisted(() => vi.fn());
+const requireAccessLevelMock = vi.hoisted(() => vi.fn());
 const dbMockFns = vi.hoisted(() => ({
     machineFindFirst: vi.fn(async (): Promise<{ revokedAt: Date | null; replacedByMachineId: string | null }> => ({
         revokedAt: null,
@@ -31,6 +33,11 @@ vi.mock("./rpcMethodAvailabilityGrace", () => ({
 
 vi.mock("./resolveRpcCallTarget", () => ({
     resolveRpcCallTarget: (...args: unknown[]) => resolveRpcCallTargetMock(...args),
+}));
+
+vi.mock("@/app/share/accessControl", () => ({
+    checkSessionAccess: (...args: unknown[]) => checkSessionAccessMock(...args),
+    requireAccessLevel: (...args: unknown[]) => requireAccessLevelMock(...args),
 }));
 
 vi.mock("./rpcRedisRegistryCoordinator", () => ({
@@ -79,6 +86,9 @@ describe("rpcHandler", () => {
         resolveRpcMethodAvailabilityGraceMsMock.mockReturnValue(0);
         resolveRpcMethodAvailabilityPollMsMock.mockReset();
         resolveRpcMethodAvailabilityPollMsMock.mockReturnValue(1);
+        checkSessionAccessMock.mockReset();
+        requireAccessLevelMock.mockReset();
+        requireAccessLevelMock.mockReturnValue(true);
         dbMockFns.machineFindFirst.mockReset();
         dbMockFns.machineFindFirst.mockResolvedValue({ revokedAt: null, replacedByMachineId: null });
         dbMockFns.sessionFindUnique.mockReset();
@@ -374,6 +384,114 @@ describe("rpcHandler", () => {
 
         expect(secondSocket.timeout).toHaveBeenCalled();
         expect(callback).toHaveBeenCalledWith({ ok: true, result: { ok: true } });
+    });
+
+    it("rejects session-runner restart RPCs without edit authorization before forwarding", async () => {
+        const redisCoordinator = createRedisCoordinator();
+        createRpcRedisRegistryCoordinatorMock.mockReturnValue(redisCoordinator);
+
+        const callerSocket = createSocket({ id: "caller-socket" });
+        const targetSocket = createSocket({
+            id: "target-socket",
+            emitWithAck: vi.fn().mockResolvedValue({ ok: true }),
+            data: {
+                clientType: "machine-scoped",
+                machineId: "machine-1",
+            },
+        });
+        const method = `machine-1:${RPC_METHODS.DAEMON_SESSION_RUNNER_RESTART}`;
+        const userRpcListeners = new Map<string, Socket>();
+        const allRpcListeners = new Map<string, Map<string, Socket>>([
+            ["user-1", new Map<string, Socket>([[method, targetSocket as unknown as Socket]])],
+        ]);
+        const callback = vi.fn();
+        resolveRpcCallTargetMock.mockResolvedValue({
+            targetUserId: "user-1",
+            targetSocket,
+        });
+        checkSessionAccessMock.mockResolvedValue({
+            userId: "user-1",
+            sessionId: "s1",
+            level: "view",
+            isOwner: false,
+        });
+        requireAccessLevelMock.mockReturnValue(false);
+
+        rpcHandler("user-1", callerSocket as unknown as Socket, userRpcListeners, allRpcListeners, {
+            io: {} as Server,
+            redisRegistry: { enabled: false },
+        });
+
+        await triggerSocketHandler(callerSocket, SOCKET_RPC_EVENTS.CALL, {
+            method,
+            params: "encrypted-payload",
+            authorization: { kind: "session.write", sessionId: "s1" },
+        }, callback);
+
+        expect(checkSessionAccessMock).toHaveBeenCalledWith("user-1", "s1");
+        expect(requireAccessLevelMock).toHaveBeenCalledWith(expect.objectContaining({ level: "view" }), "edit");
+        expect(targetSocket.timeout).not.toHaveBeenCalled();
+        expect(callback).toHaveBeenCalledWith({
+            ok: false,
+            error: "Forbidden",
+            errorCode: RPC_ERROR_CODES.FORBIDDEN,
+        });
+    });
+
+    it("forwards session-runner restart RPC authorization after edit access succeeds", async () => {
+        const redisCoordinator = createRedisCoordinator();
+        createRpcRedisRegistryCoordinatorMock.mockReturnValue(redisCoordinator);
+
+        const callerSocket = createSocket({ id: "caller-socket" });
+        const targetEmitWithAck = vi.fn().mockResolvedValue({ ok: true, restarted: true });
+        const targetSocket = createSocket({
+            id: "target-socket",
+            emitWithAck: targetEmitWithAck,
+            data: {
+                clientType: "machine-scoped",
+                machineId: "machine-1",
+            },
+        });
+        const method = `machine-1:${RPC_METHODS.DAEMON_SESSION_RUNNER_RESTART}`;
+        const userRpcListeners = new Map<string, Socket>();
+        const allRpcListeners = new Map<string, Map<string, Socket>>([
+            ["user-1", new Map<string, Socket>([[method, targetSocket as unknown as Socket]])],
+        ]);
+        const callback = vi.fn();
+        resolveRpcCallTargetMock.mockResolvedValue({
+            targetUserId: "user-1",
+            targetSocket,
+        });
+        checkSessionAccessMock.mockResolvedValue({
+            userId: "user-1",
+            sessionId: "s1",
+            level: "edit",
+            isOwner: true,
+        });
+        requireAccessLevelMock.mockReturnValue(true);
+
+        rpcHandler("user-1", callerSocket as unknown as Socket, userRpcListeners, allRpcListeners, {
+            io: {} as Server,
+            redisRegistry: { enabled: false },
+        });
+
+        await triggerSocketHandler(callerSocket, SOCKET_RPC_EVENTS.CALL, {
+            method,
+            params: "encrypted-payload",
+            authorization: { kind: "session.write", sessionId: " s1 " },
+        }, callback);
+
+        expect(checkSessionAccessMock).toHaveBeenCalledWith("user-1", "s1");
+        expect(requireAccessLevelMock).toHaveBeenCalledWith(expect.objectContaining({ level: "edit" }), "edit");
+        expect(targetEmitWithAck).toHaveBeenCalledWith(SOCKET_RPC_EVENTS.REQUEST, {
+            method,
+            params: "encrypted-payload",
+            authorization: { kind: "session.write", sessionId: "s1" },
+        });
+        expect(callback).toHaveBeenCalledWith({
+            ok: true,
+            result: { ok: true, restarted: true },
+        });
     });
 
     it("does not let an older socket overwrite a newer per-user listener map on later register", async () => {

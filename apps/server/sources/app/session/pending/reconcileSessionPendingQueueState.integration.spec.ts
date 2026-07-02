@@ -42,7 +42,7 @@ describe("reconcileSessionPendingQueueState", () => {
                 agentState: null,
                 agentStateVersion: 0,
             },
-            select: { id: true, pendingCount: true, pendingVersion: true },
+            select: { id: true, pendingCount: true, pendingBlockedCount: true, pendingVersion: true },
         });
     };
 
@@ -72,9 +72,10 @@ describe("reconcileSessionPendingQueueState", () => {
         const advanced = await db.session.update({
             where: { id: session.id },
             data: { pendingVersion: { increment: 1 } },
-            select: { pendingCount: true, pendingVersion: true },
+            select: { pendingCount: true, pendingBlockedCount: true, pendingVersion: true },
         });
         expect(advanced.pendingCount).toBe(session.pendingCount);
+        expect(advanced.pendingBlockedCount).toBe(0);
         expect(advanced.pendingVersion).toBe(session.pendingVersion + 1);
 
         const result = await reconcileSessionPendingQueueState({
@@ -85,16 +86,18 @@ describe("reconcileSessionPendingQueueState", () => {
 
         expect(result).toEqual({
             pendingCount: 2,
+            pendingBlockedCount: 0,
             pendingVersion: advanced.pendingVersion + 1,
             didRepair: true,
         });
 
         const after = await db.session.findUniqueOrThrow({
             where: { id: session.id },
-            select: { pendingCount: true, pendingVersion: true },
+            select: { pendingCount: true, pendingBlockedCount: true, pendingVersion: true },
         });
         expect(after).toEqual({
             pendingCount: result.pendingCount,
+            pendingBlockedCount: result.pendingBlockedCount,
             pendingVersion: result.pendingVersion,
         });
     });
@@ -109,7 +112,7 @@ describe("reconcileSessionPendingQueueState", () => {
         const current = await db.session.update({
             where: { id: session.id },
             data: { pendingCount: 1, pendingVersion: 7 },
-            select: { pendingCount: true, pendingVersion: true },
+            select: { pendingCount: true, pendingBlockedCount: true, pendingVersion: true },
         });
 
         const result = await reconcileSessionPendingQueueState({
@@ -120,16 +123,18 @@ describe("reconcileSessionPendingQueueState", () => {
 
         expect(result).toEqual({
             pendingCount: 3,
+            pendingBlockedCount: 0,
             pendingVersion: current.pendingVersion + 1,
             didRepair: true,
         });
 
         const after = await db.session.findUniqueOrThrow({
             where: { id: session.id },
-            select: { pendingCount: true, pendingVersion: true },
+            select: { pendingCount: true, pendingBlockedCount: true, pendingVersion: true },
         });
         expect(after).toEqual({
             pendingCount: result.pendingCount,
+            pendingBlockedCount: result.pendingBlockedCount,
             pendingVersion: result.pendingVersion,
         });
     });
@@ -143,7 +148,7 @@ describe("reconcileSessionPendingQueueState", () => {
         const current = await db.session.update({
             where: { id: session.id },
             data: { pendingCount: 2, pendingVersion: 9 },
-            select: { pendingCount: true, pendingVersion: true },
+            select: { pendingCount: true, pendingBlockedCount: true, pendingVersion: true },
         });
 
         const result = await reconcileSessionPendingQueueState({
@@ -154,13 +159,14 @@ describe("reconcileSessionPendingQueueState", () => {
 
         expect(result).toEqual({
             pendingCount: current.pendingCount,
+            pendingBlockedCount: current.pendingBlockedCount,
             pendingVersion: current.pendingVersion,
             didRepair: false,
         });
 
         const after = await db.session.findUniqueOrThrow({
             where: { id: session.id },
-            select: { pendingCount: true, pendingVersion: true },
+            select: { pendingCount: true, pendingBlockedCount: true, pendingVersion: true },
         });
         expect(after).toEqual(current);
     });

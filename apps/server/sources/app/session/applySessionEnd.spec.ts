@@ -112,4 +112,61 @@ describe("applySessionEnd", () => {
         expect(emitUpdate).not.toHaveBeenCalled();
         expect(emitEphemeral).not.toHaveBeenCalled();
     });
+
+    it("clears runtime activity projection when marking an active session inactive", async () => {
+        currentTx.session.findUnique.mockResolvedValue({
+            id: "s1",
+            latestTurnId: null,
+            seq: 7,
+            pendingCount: 0,
+            pendingBlockedCount: 0,
+            lastViewedSessionSeq: 7,
+            pendingPermissionRequestCount: 0,
+            pendingUserActionRequestCount: 0,
+            latestTurnStatus: "completed",
+            latestTurnStatusObservedAt: BigInt(200),
+            lastRuntimeIssue: null,
+            meaningfulActivityAt: null,
+            active: true,
+            lastActiveAt: new Date(400),
+            archivedAt: null,
+            runtimeActivityActiveCount: 1,
+            runtimeActivityObservedAt: BigInt(450),
+            runtimeActivityExpiresAt: BigInt(600_000),
+            runtimeActivitySourceClass: "provider_detached_task",
+        });
+
+        const res = await applySessionEnd({
+            actorUserId: "u1",
+            sessionId: "s1",
+            now: 500,
+            time: 500,
+        });
+
+        expect(res).toMatchObject({
+            ok: true,
+            applied: true,
+            active: false,
+            activeAt: 500,
+        });
+        expect(currentTx.session.update).toHaveBeenCalledWith({
+            where: { id: "s1" },
+            data: expect.objectContaining({
+                active: false,
+                runtimeActivityActiveCount: 0,
+                runtimeActivityObservedAt: null,
+                runtimeActivityExpiresAt: null,
+                runtimeActivitySourceClass: null,
+            }),
+        });
+        expect(markSessionParticipantsChanged).toHaveBeenCalledWith(expect.objectContaining({
+            sessionId: "s1",
+            hint: expect.objectContaining({
+                runtimeActivityActiveCount: 0,
+                runtimeActivityObservedAt: null,
+                runtimeActivityExpiresAt: null,
+                runtimeActivitySourceClass: null,
+            }),
+        }));
+    });
 });

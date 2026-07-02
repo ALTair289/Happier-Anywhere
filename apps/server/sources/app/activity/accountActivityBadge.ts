@@ -9,6 +9,7 @@ import {
 export type SessionActivityBadgeInputs = Readonly<{
     seq?: number | null;
     pendingCount?: number | null;
+    pendingBlockedCount?: number | null;
     lastViewedSessionSeq?: number | null;
     pendingPermissionRequestCount?: number | null;
     pendingUserActionRequestCount?: number | null;
@@ -22,6 +23,7 @@ type SessionActivityBadgeRow = Readonly<{
     accountId: string;
     seq: number | null;
     pendingCount: number | null;
+    pendingBlockedCount: number | null;
     lastViewedSessionSeq: number | null;
     pendingPermissionRequestCount: number | null;
     pendingUserActionRequestCount: number | null;
@@ -61,6 +63,8 @@ export function computeSessionContributesToActivityBadge(session: SessionActivit
         typeof session.pendingPermissionRequestCount === "number" ? session.pendingPermissionRequestCount : 0;
     const pendingUserActionRequestCount =
         typeof session.pendingUserActionRequestCount === "number" ? session.pendingUserActionRequestCount : 0;
+    const pendingBlockedCount =
+        typeof session.pendingBlockedCount === "number" ? session.pendingBlockedCount : 0;
     const latestTurnStatus = parseStoredTurnStatus(session.latestTurnStatus);
     const lastRuntimeIssue = parseStoredRuntimeIssue(session.lastRuntimeIssue);
 
@@ -69,7 +73,11 @@ export function computeSessionContributesToActivityBadge(session: SessionActivit
             ? seq > lastViewedSessionSeq
             : seq > 0;
     const hasFailedRuntimeIssue = latestTurnStatus === "failed" && lastRuntimeIssue !== null;
-    return hasFailedRuntimeIssue || hasUnread || pendingPermissionRequestCount > 0 || pendingUserActionRequestCount > 0;
+    return hasFailedRuntimeIssue
+        || hasUnread
+        || pendingPermissionRequestCount > 0
+        || pendingUserActionRequestCount > 0
+        || pendingBlockedCount > 0;
 }
 
 export function didSessionActivityBadgeContributionChange(
@@ -97,6 +105,7 @@ export async function computeAccountActivityBadgeCounts(accountIds: ReadonlyArra
             accountId: true,
             seq: true,
             pendingCount: true,
+            pendingBlockedCount: true,
             lastViewedSessionSeq: true,
             pendingPermissionRequestCount: true,
             pendingUserActionRequestCount: true,

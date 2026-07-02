@@ -54,6 +54,10 @@ describe("eventRouter payloads (protocol container)", () => {
                 lastActiveAt: new Date(1),
                 createdAt: new Date(1),
                 updatedAt: new Date(1),
+                runtimeActivityActiveCount: 1,
+                runtimeActivityObservedAt: BigInt(2_000),
+                runtimeActivityExpiresAt: BigInt(4_000),
+                runtimeActivitySourceClass: "provider_autonomous_output",
             },
             102,
             "upd-2",
@@ -62,6 +66,40 @@ describe("eventRouter payloads (protocol container)", () => {
         expect(UpdateContainerSchema.safeParse(payload).success).toBe(true);
         expect((payload.body as any).id).toBe("s1");
         expect((payload.body as any).sid).toBe("s1");
+        expect((payload.body as any).runtimeActivityActiveCount).toBe(1);
+        expect((payload.body as any).runtimeActivityObservedAt).toBe(2_000);
+        expect((payload.body as any).runtimeActivityExpiresAt).toBe(4_000);
+        expect((payload.body as any).runtimeActivitySourceClass).toBe("provider_autonomous_output");
+    });
+
+    it("buildNewSessionUpdate clears runtime activity timestamps when the aggregate is idle", () => {
+        const payload = buildNewSessionUpdate(
+            {
+                id: "s-idle",
+                seq: 1,
+                metadata: "enc-meta",
+                metadataVersion: 1,
+                agentState: null,
+                agentStateVersion: 1,
+                dataEncryptionKey: null,
+                active: false,
+                lastActiveAt: new Date(1),
+                createdAt: new Date(1),
+                updatedAt: new Date(1),
+                runtimeActivityActiveCount: 0,
+                runtimeActivityObservedAt: BigInt(2_000),
+                runtimeActivityExpiresAt: BigInt(4_000),
+                runtimeActivitySourceClass: "provider_detached_task",
+            },
+            102,
+            "upd-idle",
+        );
+
+        expect(UpdateContainerSchema.safeParse(payload).success).toBe(true);
+        expect((payload.body as any).runtimeActivityActiveCount).toBe(0);
+        expect((payload.body as any).runtimeActivityObservedAt).toBeNull();
+        expect((payload.body as any).runtimeActivityExpiresAt).toBeNull();
+        expect((payload.body as any).runtimeActivitySourceClass).toBeNull();
     });
 
     it("buildUpdateSessionUpdate emits a full container", () => {
@@ -83,6 +121,11 @@ describe("eventRouter payloads (protocol container)", () => {
                 latestTurnId: "turn-1",
                 latestTurnStatus: "completed",
                 latestTurnStatusObservedAt: 456,
+                runtimeActivityActiveCount: 2,
+                runtimeActivityObservedAt: 500,
+                runtimeActivityExpiresAt: 800,
+                runtimeActivitySourceClass: "provider_detached_task",
+                meaningfulActivityAt: 999,
                 archivedAt: 123,
             },
         );
@@ -101,7 +144,34 @@ describe("eventRouter payloads (protocol container)", () => {
         expect((payload.body as any).latestTurnId).toBe("turn-1");
         expect((payload.body as any).latestTurnStatus).toBe("completed");
         expect((payload.body as any).latestTurnStatusObservedAt).toBe(456);
+        expect((payload.body as any).runtimeActivityActiveCount).toBe(2);
+        expect((payload.body as any).runtimeActivityObservedAt).toBe(500);
+        expect((payload.body as any).runtimeActivityExpiresAt).toBe(800);
+        expect((payload.body as any).runtimeActivitySourceClass).toBe("provider_detached_task");
+        expect((payload.body as any).meaningfulActivityAt).toBe(999);
         expect((payload.body as any).archivedAt).toBe(123);
+    });
+
+    it("buildUpdateSessionUpdate emits an absolute runtime activity clear", () => {
+        const payload = buildUpdateSessionUpdate(
+            "s1",
+            103,
+            "upd-clear",
+            undefined,
+            undefined,
+            {
+                runtimeActivityActiveCount: 0,
+                runtimeActivityObservedAt: 500,
+                runtimeActivityExpiresAt: 800,
+                runtimeActivitySourceClass: "provider_detached_task",
+            },
+        );
+
+        expect(UpdateContainerSchema.safeParse(payload).success).toBe(true);
+        expect((payload.body as any).runtimeActivityActiveCount).toBe(0);
+        expect((payload.body as any).runtimeActivityObservedAt).toBeNull();
+        expect((payload.body as any).runtimeActivityExpiresAt).toBeNull();
+        expect((payload.body as any).runtimeActivitySourceClass).toBeNull();
     });
 
     it("buildDeleteSessionUpdate emits a full container", () => {

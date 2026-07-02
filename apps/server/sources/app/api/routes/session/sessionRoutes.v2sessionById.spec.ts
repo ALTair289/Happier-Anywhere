@@ -38,6 +38,10 @@ describe("sessionRoutes v2 session by id", () => {
             latestTurnStatus: "in_progress",
             latestTurnStatusObservedAt: 1_234,
             lastRuntimeIssue: null,
+            runtimeActivityActiveCount: 2,
+            runtimeActivityObservedAt: BigInt(2_000),
+            runtimeActivityExpiresAt: BigInt(5_000),
+            runtimeActivitySourceClass: "provider_detached_task",
             dataEncryptionKey: Buffer.from([1, 2, 3]),
             active: true,
             lastActiveAt: now,
@@ -58,6 +62,10 @@ describe("sessionRoutes v2 session by id", () => {
                 latestTurnId: "turn-1",
                 latestTurnStatus: "in_progress",
                 latestTurnStatusObservedAt: 1_234,
+                runtimeActivityActiveCount: 2,
+                runtimeActivityObservedAt: 2_000,
+                runtimeActivityExpiresAt: 5_000,
+                runtimeActivitySourceClass: "provider_detached_task",
                 share: null,
                 archivedAt: null,
             }),
@@ -170,5 +178,59 @@ describe("sessionRoutes v2 session by id", () => {
 
         expect(reply.code).toHaveBeenCalledWith(404);
         expect(res).toEqual({ error: "Session not found" });
+    });
+
+    it("falls back to a legacy row select when runtime activity projection columns are not migrated yet", async () => {
+        const now = new Date(1);
+        const missingRuntimeActivityColumnError = Object.assign(
+            new Error("no such column: Session.runtimeActivityActiveCount"),
+            { code: "P2022", meta: { column: "runtimeActivityActiveCount" } },
+        );
+        sessionFindFirst
+            .mockRejectedValueOnce(missingRuntimeActivityColumnError)
+            .mockResolvedValueOnce({
+                id: "s-legacy-detail",
+                seq: 3,
+                accountId: "u1",
+                encryptionMode: "plain",
+                createdAt: now,
+                updatedAt: now,
+                meaningfulActivityAt: now,
+                archivedAt: null,
+                metadata: "{}",
+                metadataVersion: 1,
+                agentState: null,
+                agentStateVersion: 0,
+                lastViewedSessionSeq: 0,
+                pendingPermissionRequestCount: 0,
+                pendingUserActionRequestCount: 0,
+                pendingCount: 0,
+                pendingBlockedCount: 0,
+                pendingVersion: 0,
+                latestTurnId: null,
+                latestTurnStatus: null,
+                latestTurnStatusObservedAt: null,
+                lastRuntimeIssue: null,
+                dataEncryptionKey: null,
+                active: true,
+                lastActiveAt: now,
+                shares: [],
+            });
+
+        const route = await createSessionRouteTestBuilder("GET", "/v2/sessions/:sessionId");
+        const { response: res } = await route.invoke({ params: { sessionId: "s-legacy-detail" } });
+
+        expect(res).toEqual({
+            session: expect.objectContaining({
+                id: "s-legacy-detail",
+                runtimeActivityActiveCount: 0,
+                runtimeActivityObservedAt: null,
+                runtimeActivityExpiresAt: null,
+                runtimeActivitySourceClass: null,
+            }),
+        });
+        expect(sessionFindFirst).toHaveBeenCalledTimes(2);
+        expect(sessionFindFirst.mock.calls[0]?.[0]?.select).toHaveProperty("runtimeActivityActiveCount");
+        expect(sessionFindFirst.mock.calls[1]?.[0]?.select).not.toHaveProperty("runtimeActivityActiveCount");
     });
 });

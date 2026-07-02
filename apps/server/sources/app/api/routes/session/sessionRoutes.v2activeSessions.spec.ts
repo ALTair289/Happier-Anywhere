@@ -129,4 +129,18 @@ describe("sessionRoutes v2 active sessions listing", () => {
             ],
         });
     });
+
+    it("exposes diagnostic route timing headers only when explicitly requested", async () => {
+        sessionFindMany.mockResolvedValue([]);
+
+        const route = await createSessionRouteTestBuilder("GET", "/v2/sessions/active");
+        const { reply } = await route.invoke({
+            query: { limit: 2 },
+            headers: { "x-happier-session-list-timing": "1" },
+        });
+
+        expect(reply.headers.get("server-timing")).toMatch(
+            /happier_v2_sessions_cursor;dur=[0-9]+(?:\.[0-9]+)?, happier_v2_sessions_query;dur=[0-9]+(?:\.[0-9]+)?, happier_v2_sessions_page;dur=[0-9]+(?:\.[0-9]+)?, happier_v2_sessions_total;dur=[0-9]+(?:\.[0-9]+)?/,
+        );
+    });
 });

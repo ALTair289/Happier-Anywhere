@@ -6,6 +6,7 @@ export async function markPendingStateChangedParticipants(params: {
     sessionId: string;
     pendingVersion: number;
     pendingCount: number;
+    pendingBlockedCount?: number;
     meaningfulActivityAt?: Date | null;
 }): Promise<SessionParticipantCursor[]> {
     const meaningfulActivityAt =
@@ -18,6 +19,7 @@ export async function markPendingStateChangedParticipants(params: {
         hint: {
             pendingVersion: params.pendingVersion,
             pendingCount: params.pendingCount,
+            ...(typeof params.pendingBlockedCount === "number" ? { pendingBlockedCount: params.pendingBlockedCount } : {}),
             ...(typeof meaningfulActivityAt === "number" ? { meaningfulActivityAt } : {}),
         },
     });

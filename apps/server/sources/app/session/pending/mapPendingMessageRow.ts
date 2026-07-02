@@ -5,6 +5,8 @@ export type PendingMessageRow = {
     messageRole: import("@happier-dev/protocol").SessionMessageRole | null;
     content: PrismaJson.SessionPendingMessageContent;
     status: "queued" | "discarded";
+    deliveryState: string | null;
+    deliveryBlockedReason: string | null;
     position: number;
     createdAt: Date;
     updatedAt: Date;
@@ -18,6 +20,8 @@ export type PendingMessageRowRaw = {
     messageRole?: unknown;
     content: PrismaJson.SessionPendingMessageContent;
     status: "queued" | "discarded";
+    deliveryState?: string | null;
+    deliveryBlockedReason?: string | null;
     position: number;
     createdAt: Date;
     updatedAt: Date;
@@ -32,6 +36,8 @@ export function mapPendingMessageRow(row: PendingMessageRowRaw): PendingMessageR
         messageRole: parseSessionMessageRole(row.messageRole),
         content: row.content,
         status: row.status,
+        deliveryState: typeof row.deliveryState === "string" && row.deliveryState.length > 0 ? row.deliveryState : null,
+        deliveryBlockedReason: typeof row.deliveryBlockedReason === "string" && row.deliveryBlockedReason.length > 0 ? row.deliveryBlockedReason : null,
         position: row.position,
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,

@@ -34,34 +34,83 @@ export async function findV2SessionListRows(params: Readonly<{
     const { userId, orderBy, take, where } = params;
     const visibilityWhere = createV2SessionListVisibilityWhere({ userId });
 
-    try {
-        return await findV2SessionListRowsWithSelect({
+    return await runWithV2SessionListProjectionFallback(
+        () => findV2SessionListRowsWithSelect({
             orderBy,
             select: createV2SessionListRowSelect({ userId }),
             take,
             userId,
             visibilityWhere,
             where,
-        });
-    } catch (error) {
-        if (!isMissingAttentionProjectionColumnError(error)) {
-            throw error;
-        }
-        return await findV2SessionListRowsWithSelect({
+        }),
+        () => findV2SessionListRowsWithSelect({
             orderBy,
             select: createV2SessionListLegacyRowSelect({ userId }),
             take,
             userId,
             visibilityWhere,
             where,
-        });
+        }),
+    );
+}
+
+export async function runWithV2SessionListProjectionFallback<T>(
+    primary: () => Promise<T>,
+    legacy: () => Promise<T>,
+): Promise<T> {
+    try {
+        return await primary();
+    } catch (error) {
+        if (!isMissingSessionProjectionColumnError(error)) {
+            throw error;
+        }
+        return await legacy();
     }
 }
 
-function isMissingAttentionProjectionColumnError(error: unknown): boolean {
+export function isMissingSessionProjectionColumnError(error: unknown): boolean {
     const text = JSON.stringify(error, (_key, value) => value instanceof Error ? { message: value.message, name: value.name } : value);
-    return /pendingRequestObservedAt|latestReadyEventSeq|latestReadyEventAt|thinkingAt|thinking/i.test(text)
+    return /pendingRequestObservedAt|latestReadyEventSeq|latestReadyEventAt|thinkingAt|thinking|runtimeActivityActiveCount|runtimeActivityObservedAt|runtimeActivityExpiresAt|runtimeActivitySourceClass/i.test(text)
         && /column|field|P2022|no such/i.test(text);
+}
+
+export async function findV2SessionListRowById(params: Readonly<{
+    userId: string;
+    sessionId: string;
+}>): Promise<V2SessionListRowCompat | null> {
+    const { userId, sessionId } = params;
+    const visibilityWhere = createV2SessionListVisibilityWhere({ userId });
+
+    return await runWithV2SessionListProjectionFallback(
+        () => findV2SessionListRowByIdWithSelect({
+            userId,
+            sessionId,
+            visibilityWhere,
+            select: createV2SessionListRowSelect({ userId }),
+        }),
+        () => findV2SessionListRowByIdWithSelect({
+            userId,
+            sessionId,
+            visibilityWhere,
+            select: createV2SessionListLegacyRowSelect({ userId }),
+        }),
+    );
+}
+
+async function findV2SessionListRowByIdWithSelect(params: Readonly<{
+    userId: string;
+    sessionId: string;
+    visibilityWhere: Prisma.SessionWhereInput;
+    select: Prisma.SessionSelect;
+}>): Promise<V2SessionListRowCompat | null> {
+    const { sessionId, visibilityWhere, select } = params;
+    return await db.session.findFirst({
+        where: {
+            ...visibilityWhere,
+            id: sessionId,
+        },
+        select,
+    }) as V2SessionListRowCompat | null;
 }
 
 async function findV2SessionListRowsWithSelect(params: Readonly<{

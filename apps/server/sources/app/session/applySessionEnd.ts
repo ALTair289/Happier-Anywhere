@@ -13,6 +13,10 @@ import type { PrimaryTurnStatusV1, SessionRuntimeIssueV1, SessionTurnMutationV1 
 import { randomKeyNaked } from "@/utils/keys/randomKeyNaked";
 
 import { applySessionTurnMutationInTx } from "./sessionWriteService";
+import {
+    hasNonIdleSessionRuntimeActivityProjection,
+    IDLE_SESSION_RUNTIME_ACTIVITY_PROJECTION,
+} from "./runtimeActivityProjection";
 
 const SESSION_END_STALE_WINDOW_MS = 1000 * 60 * 10;
 
@@ -77,6 +81,10 @@ type SessionEndProjection = Readonly<{
     latestTurnStatus?: PrimaryTurnStatusV1 | null;
     latestTurnStatusObservedAt?: number | null;
     lastRuntimeIssue?: SessionRuntimeIssueV1 | null;
+    runtimeActivityActiveCount?: number;
+    runtimeActivityObservedAt?: null;
+    runtimeActivityExpiresAt?: null;
+    runtimeActivitySourceClass?: null;
 }>;
 
 export async function applySessionEnd(params: {
@@ -99,6 +107,7 @@ export async function applySessionEnd(params: {
                 latestTurnId: true,
                 seq: true,
                 pendingCount: true,
+                pendingBlockedCount: true,
                 lastViewedSessionSeq: true,
                 pendingPermissionRequestCount: true,
                 pendingUserActionRequestCount: true,
@@ -109,6 +118,10 @@ export async function applySessionEnd(params: {
                 active: true,
                 lastActiveAt: true,
                 archivedAt: true,
+                runtimeActivityActiveCount: true,
+                runtimeActivityObservedAt: true,
+                runtimeActivityExpiresAt: true,
+                runtimeActivitySourceClass: true,
             },
         });
         if (!session) {
@@ -131,7 +144,8 @@ export async function applySessionEnd(params: {
         }
 
         const shouldApplyTurnEnd = Boolean(session.latestTurnId && (session.active || session.latestTurnStatus === "in_progress"));
-        if (!session.active && !shouldApplyTurnEnd) {
+        const shouldClearRuntimeActivity = hasNonIdleSessionRuntimeActivityProjection(session);
+        if (!session.active && !shouldApplyTurnEnd && !shouldClearRuntimeActivity) {
             return {
                 ok: true as const,
                 applied: false,
@@ -166,6 +180,7 @@ export async function applySessionEnd(params: {
         const nextSession = {
             ...session,
             active: false,
+            ...(shouldClearRuntimeActivity ? IDLE_SESSION_RUNTIME_ACTIVITY_PROJECTION : {}),
             ...(turnResult?.didApply
                 ? {
                     latestTurnStatus: turnResult.latestTurnStatus,
@@ -175,14 +190,19 @@ export async function applySessionEnd(params: {
                 : {}),
         };
 
-        if (didMarkInactive) {
+        if (didMarkInactive || shouldClearRuntimeActivity) {
             await tx.session.update({
                 where: { id: params.sessionId },
                 data: {
-                    lastActiveAt: new Date(time),
-                    active: false,
-                    thinking: false,
-                    thinkingAt: new Date(time),
+                    ...(didMarkInactive
+                        ? {
+                            lastActiveAt: new Date(time),
+                            active: false,
+                            thinking: false,
+                            thinkingAt: new Date(time),
+                        }
+                        : {}),
+                    ...(shouldClearRuntimeActivity ? IDLE_SESSION_RUNTIME_ACTIVITY_PROJECTION : {}),
                 },
             });
         }
@@ -194,6 +214,7 @@ export async function applySessionEnd(params: {
                     activeAt: time,
                 }
                 : {}),
+            ...(shouldClearRuntimeActivity ? IDLE_SESSION_RUNTIME_ACTIVITY_PROJECTION : {}),
             ...(turnResult?.didApply
                 ? {
                     latestTurnId: turnResult.latestTurnId,
@@ -217,7 +238,7 @@ export async function applySessionEnd(params: {
 
         return {
             ok: true as const,
-            applied: didMarkInactive || turnResult?.didApply === true,
+            applied: didMarkInactive || shouldClearRuntimeActivity || turnResult?.didApply === true,
             time,
             badgeAttentionChanged: didSessionActivityBadgeContributionChange(session, nextSession),
             didMarkInactive,

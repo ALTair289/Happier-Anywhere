@@ -12,10 +12,10 @@ import {
     resetSessionRouteMocks,
     sessionFindFirst,
     sessionFindMany,
+    sessionPinFindMany,
 } from "./sessionRoutes.testkit";
 import {
     DEFAULT_V2_SESSION_LIST_INITIAL_ATTENTION_ROW_LIMIT,
-    DEFAULT_V2_SESSION_LIST_INITIAL_PINNED_ROW_LIMIT,
 } from "./v2SessionListInitialPage";
 
 function pagedSessionRow(
@@ -53,6 +53,10 @@ function pagedSessionRow(
         latestTurnId: null,
         latestTurnStatus: null,
         lastRuntimeIssue: null,
+        runtimeActivityActiveCount: 0,
+        runtimeActivityObservedAt: null,
+        runtimeActivityExpiresAt: null,
+        runtimeActivitySourceClass: null,
         pendingCount: 0,
         pendingVersion: 0,
         dataEncryptionKey: null,
@@ -128,6 +132,10 @@ describe("sessionRoutes v2 sessions snapshot", () => {
                 pendingRequestObservedAt: new Date(1_222),
                 latestReadyEventSeq: 9,
                 latestReadyEventAt: new Date(1_333),
+                runtimeActivityActiveCount: 2,
+                runtimeActivityObservedAt: BigInt(1_444),
+                runtimeActivityExpiresAt: BigInt(2_444),
+                runtimeActivitySourceClass: "provider_detached_task",
             } as any,
         });
 
@@ -136,6 +144,52 @@ describe("sessionRoutes v2 sessions snapshot", () => {
         expect(mapped.pendingRequestObservedAt).toBe(1_222);
         expect(mapped.latestReadyEventSeq).toBe(9);
         expect(mapped.latestReadyEventAt).toBe(1_333);
+        expect(mapped.runtimeActivityActiveCount).toBe(2);
+        expect(mapped.runtimeActivityObservedAt).toBe(1_444);
+        expect(mapped.runtimeActivityExpiresAt).toBe(2_444);
+        expect(mapped.runtimeActivitySourceClass).toBe("provider_detached_task");
+    });
+
+    it("fails closed for active runtime activity rows without a valid expiry", () => {
+        const now = new Date(1_000);
+        const mapped = mapV2SessionListRow({
+            userId: "u1",
+            row: {
+                ...pagedSessionRow("s_malformed_runtime_activity", { createdAt: now, active: true }),
+                runtimeActivityActiveCount: 2,
+                runtimeActivityObservedAt: BigInt(1_444),
+                runtimeActivityExpiresAt: null,
+                runtimeActivitySourceClass: "provider_detached_task",
+            } as any,
+        });
+
+        expect(mapped.runtimeActivityActiveCount).toBe(0);
+        expect(mapped.runtimeActivityObservedAt).toBeNull();
+        expect(mapped.runtimeActivityExpiresAt).toBeNull();
+        expect(mapped.runtimeActivitySourceClass).toBeNull();
+    });
+
+    it.each([
+        ["observed timestamp", { runtimeActivityObservedAt: null }],
+        ["source class", { runtimeActivitySourceClass: "unknown_source" }],
+    ])("fails closed for active runtime activity rows without a valid %s", (_label, override) => {
+        const now = new Date(1_000);
+        const mapped = mapV2SessionListRow({
+            userId: "u1",
+            row: {
+                ...pagedSessionRow("s_malformed_runtime_activity", { createdAt: now, active: true }),
+                runtimeActivityActiveCount: 2,
+                runtimeActivityObservedAt: BigInt(1_444),
+                runtimeActivityExpiresAt: BigInt(2_444),
+                runtimeActivitySourceClass: "provider_detached_task",
+                ...override,
+            } as any,
+        });
+
+        expect(mapped.runtimeActivityActiveCount).toBe(0);
+        expect(mapped.runtimeActivityObservedAt).toBeNull();
+        expect(mapped.runtimeActivityExpiresAt).toBeNull();
+        expect(mapped.runtimeActivitySourceClass).toBeNull();
     });
 
     it("treats terminal turn projection as authoritative over stale legacy thinking rows", () => {
@@ -299,7 +353,7 @@ describe("sessionRoutes v2 sessions snapshot", () => {
         }));
     });
 
-    it("includes initial pinned rows and durable attention rows without consuming the regular page", async () => {
+    it("includes server-backed initial pinned rows and durable attention rows without consuming the regular page", async () => {
         const normalFirstPageRow = pagedSessionRow("s_normal_first_page", { meaningfulActivityAt: new Date(1_000) });
         const normalSecondPageRow = pagedSessionRow("s_normal_second_page", { meaningfulActivityAt: new Date(950) });
         const firstPinned = pagedSessionRow("s_pinned_old", { meaningfulActivityAt: new Date(100) });
@@ -311,6 +365,10 @@ describe("sessionRoutes v2 sessions snapshot", () => {
             latestReadyEventSeq: 8,
             latestReadyEventAt: new Date(900),
         };
+        sessionPinFindMany.mockResolvedValue([
+            { sessionId: "s_pinned_old", sortKey: "a", pinnedAt: new Date(1_000) },
+            { sessionId: "s_pinned_older", sortKey: "b", pinnedAt: new Date(2_000) },
+        ]);
         sessionFindMany
             .mockResolvedValueOnce([normalFirstPageRow, normalSecondPageRow])
             .mockResolvedValueOnce([])
@@ -324,7 +382,6 @@ describe("sessionRoutes v2 sessions snapshot", () => {
         const route = await createSessionRouteTestBuilder("GET", "/v2/sessions");
         const { response } = await route.invoke({
             query: {
-                pinnedSessionIds: "s_pinned_old,s_pinned_older",
                 includeAttention: "true",
                 limit: 1,
             },
@@ -339,6 +396,44 @@ describe("sessionRoutes v2 sessions snapshot", () => {
         expect(response).toEqual(expect.objectContaining({
             nextCursor: encodeV2SessionListCursorV2({ sessionId: "s_normal_first_page", meaningfulActivityAt: 1_000 }),
             hasNext: true,
+        }));
+        expect(sessionPinFindMany).toHaveBeenCalledWith(expect.objectContaining({
+            where: expect.objectContaining({
+                accountId: "u1",
+                session: expect.objectContaining({
+                    archivedAt: null,
+                    OR: [
+                        { accountId: "u1" },
+                        { shares: { some: { sharedWithUserId: "u1" } } },
+                    ],
+                }),
+            }),
+            orderBy: [{ sortKey: "asc" }, { pinnedAt: "asc" }],
+            select: { sessionId: true, sortKey: true, pinnedAt: true },
+        }));
+    });
+
+    it("ignores client-provided pinned ids when no server pins exist", async () => {
+        sessionPinFindMany.mockResolvedValue([]);
+        sessionFindMany
+            .mockResolvedValueOnce([pagedSessionRow("s_normal_first_page", { meaningfulActivityAt: new Date(1_000) })])
+            .mockResolvedValueOnce([])
+            .mockResolvedValueOnce([]);
+
+        const route = await createSessionRouteTestBuilder("GET", "/v2/sessions");
+        const { response } = await route.invoke({
+            query: {
+                pinnedSessionIds: "s_legacy_pinned",
+                limit: 1,
+            },
+        });
+
+        expect((response as { sessions: Array<{ id: string }> }).sessions.map((session) => session.id)).toEqual([
+            "s_normal_first_page",
+        ]);
+        expect(sessionFindMany).toHaveBeenCalledTimes(2);
+        expect(sessionFindMany).not.toHaveBeenCalledWith(expect.objectContaining({
+            where: expect.objectContaining({ id: { in: ["s_legacy_pinned"] } }),
         }));
     });
 
@@ -418,10 +513,11 @@ describe("sessionRoutes v2 sessions snapshot", () => {
         expect(sessionFindMany).toHaveBeenNthCalledWith(4, expect.objectContaining({ take: expectedBranchTake }));
     });
 
-    it("caps initial pinned session expansion queries", async () => {
+    it("does not run legacy pinned expansion queries from client-provided pinned ids", async () => {
         sessionFindMany.mockResolvedValue([]);
+        const pinnedCount = 101;
         const pinnedSessionIds = Array.from(
-            { length: DEFAULT_V2_SESSION_LIST_INITIAL_PINNED_ROW_LIMIT + 50 },
+            { length: pinnedCount },
             (_value, index) => `s_pinned_${index}`,
         ).join(",");
 
@@ -433,15 +529,11 @@ describe("sessionRoutes v2 sessions snapshot", () => {
             },
         });
 
-        const pinnedQuery = sessionFindMany.mock.calls[2]?.[0];
-        expect(pinnedQuery).toEqual(expect.objectContaining({
-            take: DEFAULT_V2_SESSION_LIST_INITIAL_PINNED_ROW_LIMIT,
-        }));
-        const pinnedWhere = pinnedQuery?.where as { id?: { in?: string[] } } | undefined;
-        const pinnedIds = pinnedWhere?.id?.in ?? [];
-        expect(pinnedIds).toHaveLength(DEFAULT_V2_SESSION_LIST_INITIAL_PINNED_ROW_LIMIT);
-        expect(pinnedIds).toContain("s_pinned_0");
-        expect(pinnedIds).not.toContain(`s_pinned_${DEFAULT_V2_SESSION_LIST_INITIAL_PINNED_ROW_LIMIT}`);
+        expect(sessionFindMany).toHaveBeenCalledTimes(2);
+        for (const call of sessionFindMany.mock.calls) {
+            const where = call[0]?.where as { id?: { in?: string[] } } | undefined;
+            expect(where?.id?.in).toBeUndefined();
+        }
     });
 
     it("falls back to a legacy row select when attention projection columns are not migrated yet", async () => {
@@ -613,5 +705,33 @@ describe("sessionRoutes v2 sessions snapshot", () => {
         });
 
         expect(reply.headers.get("server-timing")).toBeUndefined();
+    });
+
+    it("exposes diagnostic route timing headers only when explicitly requested", async () => {
+        sessionFindMany.mockResolvedValue([]);
+
+        const route = await createSessionRouteTestBuilder("GET", "/v2/sessions");
+        const { reply } = await route.invoke({
+            query: { limit: 10 },
+            headers: { "x-happier-session-list-timing": "1" },
+        });
+
+        expect(reply.headers.get("server-timing")).toMatch(
+            /happier_v2_sessions_cursor;dur=[0-9]+(?:\.[0-9]+)?, happier_v2_sessions_query;dur=[0-9]+(?:\.[0-9]+)?, happier_v2_sessions_page;dur=[0-9]+(?:\.[0-9]+)?, happier_v2_sessions_total;dur=[0-9]+(?:\.[0-9]+)?/,
+        );
+    });
+
+    it("exposes diagnostic route timing headers on archived session listing when explicitly requested", async () => {
+        sessionFindMany.mockResolvedValue([]);
+
+        const route = await createSessionRouteTestBuilder("GET", "/v2/sessions/archived");
+        const { reply } = await route.invoke({
+            query: { limit: 10 },
+            headers: { "x-happier-session-list-timing": "1" },
+        });
+
+        expect(reply.headers.get("server-timing")).toMatch(
+            /happier_v2_sessions_cursor;dur=[0-9]+(?:\.[0-9]+)?, happier_v2_sessions_query;dur=[0-9]+(?:\.[0-9]+)?, happier_v2_sessions_page;dur=[0-9]+(?:\.[0-9]+)?, happier_v2_sessions_total;dur=[0-9]+(?:\.[0-9]+)?/,
+        );
     });
 });

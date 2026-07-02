@@ -11,19 +11,19 @@ import {
     parseStoredSessionRuntimeIssue,
     type V2SessionListRowCompat,
 } from "./v2SessionListRows";
+import type { V2SessionListInitialPageTiming } from "./v2SessionListServerTiming";
 
 type V2SessionListInitialPageParams = Readonly<{
     userId: string;
     pageRows: ReadonlyArray<V2SessionListRowCompat>;
     limit: number;
     pinnedSessionIds: readonly string[];
-    pinnedRowsLimit?: number;
     includeAttentionRows: boolean;
     attentionRowsLimit?: number;
+    timing?: V2SessionListInitialPageTiming;
 }>;
 
 export const DEFAULT_V2_SESSION_LIST_INITIAL_ATTENTION_ROW_LIMIT = 100;
-export const DEFAULT_V2_SESSION_LIST_INITIAL_PINNED_ROW_LIMIT = 100;
 
 function readNumberField(row: V2SessionListRowCompat, field: string): number | null {
     const value = (row as Record<string, unknown>)[field];
@@ -101,41 +101,42 @@ function mergeInitialRows(params: Readonly<{
 
 export async function createV2SessionListInitialPage(params: V2SessionListInitialPageParams) {
     const attentionRowsLimit = params.attentionRowsLimit ?? DEFAULT_V2_SESSION_LIST_INITIAL_ATTENTION_ROW_LIMIT;
-    const pinnedRowsLimit = params.pinnedRowsLimit ?? DEFAULT_V2_SESSION_LIST_INITIAL_PINNED_ROW_LIMIT;
-    const pinnedSessionIds = params.pinnedSessionIds.slice(0, pinnedRowsLimit);
+    const pinnedSessionIds = params.pinnedSessionIds;
+    const measureQuery = params.timing?.measureQuery ?? (<T>(fn: () => Promise<T>) => fn());
+    const measurePage = params.timing?.measurePage ?? (<T>(fn: () => T) => fn());
     const [pinnedRows, attentionRows] = await Promise.all([
         pinnedSessionIds.length > 0
-            ? findV2SessionListRows({
+            ? measureQuery(() => findV2SessionListRows({
                 userId: params.userId,
                 where: { archivedAt: null, id: { in: [...pinnedSessionIds] } },
                 orderBy: { id: "desc" },
                 take: pinnedSessionIds.length,
-            })
+            }))
             : Promise.resolve([]),
         params.includeAttentionRows
-            ? findV2SessionListRows({
+            ? measureQuery(() => findV2SessionListRows({
                 userId: params.userId,
                 where: createAttentionRowsWhere(),
                 orderBy: V2_SESSION_LIST_ORDER_BY,
                 take: attentionRowsLimit,
-            })
+            }))
             : Promise.resolve([]),
     ]);
-    const page = createV2SessionListPage({
+    const page = measurePage(() => createV2SessionListPage({
         rows: params.pageRows,
         userId: params.userId,
         limit: params.limit,
-    });
+    }));
     const pageRows = params.pageRows.slice(0, params.limit);
-    const mergedRows = mergeInitialRows({
+    const mergedRows = measurePage(() => mergeInitialRows({
         pinnedSessionIds,
         pinnedRows,
         attentionRows,
         pageRows,
-    });
+    }));
 
-    return {
+    return measurePage(() => ({
         ...page,
         sessions: mapV2SessionListRows({ rows: mergedRows, userId: params.userId }),
-    };
+    }));
 }

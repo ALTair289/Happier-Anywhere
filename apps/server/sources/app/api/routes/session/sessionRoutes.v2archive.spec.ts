@@ -21,7 +21,15 @@ describe("sessionRoutes v2 archive", () => {
         const now = new Date(1234);
         checkSessionAccess.mockResolvedValue({ level: "admin" });
         getSessionParticipantUserIds.mockResolvedValue(["owner", "u2"]);
-        txSessionFindUnique.mockResolvedValue({ id: "s1", active: false, archivedAt: null });
+        txSessionFindUnique.mockResolvedValue({
+            id: "s1",
+            active: false,
+            archivedAt: null,
+            runtimeActivityActiveCount: 1,
+            runtimeActivityObservedAt: BigInt(1_000),
+            runtimeActivityExpiresAt: BigInt(60_000),
+            runtimeActivitySourceClass: "provider_detached_task",
+        });
         txSessionUpdate.mockResolvedValue({ id: "s1", archivedAt: now });
 
         const route = await createSessionRouteTestBuilder("POST", "/v2/sessions/:sessionId/archive");
@@ -29,6 +37,15 @@ describe("sessionRoutes v2 archive", () => {
 
         expect(reply.code).not.toHaveBeenCalledWith(403);
         expect(res).toEqual({ success: true, archivedAt: now.getTime() });
+        expect(txSessionUpdate).toHaveBeenCalledWith(expect.objectContaining({
+            where: { id: "s1" },
+            data: expect.objectContaining({
+                runtimeActivityActiveCount: 0,
+                runtimeActivityObservedAt: null,
+                runtimeActivityExpiresAt: null,
+                runtimeActivitySourceClass: null,
+            }),
+        }));
         expect(markAccountChanged).toHaveBeenCalledTimes(2);
         expect(buildUpdateSessionUpdate).toHaveBeenCalledTimes(2);
         expect(buildUpdateSessionUpdate).toHaveBeenCalledWith(
@@ -37,7 +54,13 @@ describe("sessionRoutes v2 archive", () => {
             expect.any(String),
             undefined,
             undefined,
-            expect.objectContaining({ archivedAt: now.getTime() }),
+            expect.objectContaining({
+                archivedAt: now.getTime(),
+                runtimeActivityActiveCount: 0,
+                runtimeActivityObservedAt: null,
+                runtimeActivityExpiresAt: null,
+                runtimeActivitySourceClass: null,
+            }),
         );
         expect(emitUpdate).toHaveBeenCalledWith(expect.objectContaining({
             recipientFilter: { type: "all-interested-in-session", sessionId: "s1" },

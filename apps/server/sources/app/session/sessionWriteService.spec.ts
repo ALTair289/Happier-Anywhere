@@ -29,6 +29,7 @@ installDbModuleMock({ db: dbMocks.db });
 let createSessionMessage: typeof import("./sessionWriteService").createSessionMessage;
 let patchSession: typeof import("./sessionWriteService").patchSession;
 let updateSessionAgentState: typeof import("./sessionWriteService").updateSessionAgentState;
+let updateSessionRuntimeActivityProjection: typeof import("./sessionWriteService").updateSessionRuntimeActivityProjection;
 let updateSessionMetadata: typeof import("./sessionWriteService").updateSessionMetadata;
 let updateSessionReadCursor: typeof import("./sessionWriteService").updateSessionReadCursor;
 let applySessionReadCursorOperation: typeof import("./sessionWriteService").applySessionReadCursorOperation;
@@ -44,6 +45,7 @@ describe("sessionWriteService", () => {
             createSessionMessage,
             patchSession,
             updateSessionAgentState,
+            updateSessionRuntimeActivityProjection,
             updateSessionMetadata,
             updateSessionReadCursor,
             applySessionReadCursorOperation,
@@ -86,6 +88,95 @@ describe("sessionWriteService", () => {
 
     afterEach(() => {
         vi.useRealTimers();
+    });
+
+    describe("updateSessionRuntimeActivityProjection", () => {
+        it("persists a minimal runtime activity projection without touching foreground or ordering fields", async () => {
+            currentTx.session.findUnique
+                .mockResolvedValueOnce({ accountId: "u1", encryptionMode: "e2ee" })
+                .mockResolvedValueOnce({
+                    runtimeActivityActiveCount: 0,
+                    runtimeActivityObservedAt: null,
+                    runtimeActivityExpiresAt: null,
+                    runtimeActivitySourceClass: null,
+                });
+            currentTx.session.updateMany.mockResolvedValue({ count: 1 });
+            getSessionParticipantUserIds.mockResolvedValue(["u1", "u2"]);
+            markAccountChanged.mockResolvedValueOnce(201).mockResolvedValueOnce(202);
+
+            const res = await updateSessionRuntimeActivityProjection({
+                actorUserId: "u1",
+                sessionId: "s1",
+                activeCount: 2,
+                observedAt: 500,
+                expiresAt: 900,
+                sourceClass: "provider_detached_task",
+            });
+
+            expect(currentTx.session.updateMany).toHaveBeenCalledWith({
+                where: { id: "s1" },
+                data: {
+                    runtimeActivityActiveCount: 2,
+                    runtimeActivityObservedAt: BigInt(500),
+                    runtimeActivityExpiresAt: BigInt(900),
+                    runtimeActivitySourceClass: "provider_detached_task",
+                },
+            });
+            expect(currentTx.session.updateMany.mock.calls[0]?.[0].data).not.toHaveProperty("thinking");
+            expect(currentTx.session.updateMany.mock.calls[0]?.[0].data).not.toHaveProperty("active");
+            expect(currentTx.session.updateMany.mock.calls[0]?.[0].data).not.toHaveProperty("activeAt");
+            expect(currentTx.session.updateMany.mock.calls[0]?.[0].data).not.toHaveProperty("meaningfulActivityAt");
+            expect(currentTx.session.updateMany.mock.calls[0]?.[0].data).not.toHaveProperty("latestTurnStatus");
+            expect(res).toEqual({
+                ok: true,
+                didWrite: true,
+                projection: {
+                    runtimeActivityActiveCount: 2,
+                    runtimeActivityObservedAt: 500,
+                    runtimeActivityExpiresAt: 900,
+                    runtimeActivitySourceClass: "provider_detached_task",
+                },
+                participantCursors: [
+                    { accountId: "u1", cursor: 201 },
+                    { accountId: "u2", cursor: 202 },
+                ],
+                badgeAttentionChanged: false,
+            });
+        });
+
+        it("clears runtime activity absolutely and treats identical clears as no-ops", async () => {
+            currentTx.session.findUnique
+                .mockResolvedValueOnce({ accountId: "u1", encryptionMode: "e2ee" })
+                .mockResolvedValueOnce({
+                    runtimeActivityActiveCount: 0,
+                    runtimeActivityObservedAt: null,
+                    runtimeActivityExpiresAt: null,
+                    runtimeActivitySourceClass: null,
+                });
+
+            const res = await updateSessionRuntimeActivityProjection({
+                actorUserId: "u1",
+                sessionId: "s1",
+                activeCount: 0,
+                observedAt: 500,
+                expiresAt: 900,
+                sourceClass: "provider_detached_task",
+            });
+
+            expect(currentTx.session.updateMany).not.toHaveBeenCalled();
+            expect(res).toEqual({
+                ok: true,
+                didWrite: false,
+                projection: {
+                    runtimeActivityActiveCount: 0,
+                    runtimeActivityObservedAt: null,
+                    runtimeActivityExpiresAt: null,
+                    runtimeActivitySourceClass: null,
+                },
+                participantCursors: [],
+                badgeAttentionChanged: false,
+            });
+        });
     });
 
     describe("createSessionMessage", () => {
@@ -204,6 +295,10 @@ describe("sessionWriteService", () => {
                 didWrite: false,
                 didUpdate: true,
                 badgeAttentionChanged: false,
+                attentionImpact: {
+                    affectsUnread: true,
+                    affectsMeaningfulActivity: true,
+                },
                 message: expect.objectContaining({ id: "m1", seq: 4, localId: "l1" }),
                 participantCursors: [
                     { accountId: "u1", cursor: 101 },
@@ -376,6 +471,177 @@ describe("sessionWriteService", () => {
                 data: { lastViewedSessionSeq: 10 },
             });
             expect(currentTx.session.update).toHaveBeenCalledTimes(1);
+        });
+
+        it("derives non-unread attention for owner-authored encrypted maintenance event local ids", async () => {
+            const createdAt = new Date("2020-01-01T00:00:00.000Z");
+
+            currentTx.sessionMessage.findUnique.mockResolvedValue(null);
+            currentTx.session.findUnique
+                .mockResolvedValueOnce({ accountId: "u1", encryptionMode: "e2ee" })
+                .mockResolvedValueOnce({
+                    seq: 9,
+                    lastViewedSessionSeq: 9,
+                    pendingCount: 0,
+                    pendingPermissionRequestCount: 0,
+                    pendingUserActionRequestCount: 0,
+                    active: true,
+                    archivedAt: null,
+                });
+            currentTx.session.update.mockResolvedValueOnce({ seq: 10 });
+            currentTx.session.updateMany.mockResolvedValue({ count: 1 });
+            currentTx.sessionMessage.create.mockResolvedValue({
+                id: "m-quota",
+                seq: 10,
+                localId: "provider-quota-wait:quota-blocked_openai-codex_main:reset_at_1900000:connected_service_group_quota_exhausted",
+                sidechainId: null,
+                messageRole: "event",
+                content: { t: "encrypted", c: "cipher" },
+                createdAt,
+                updatedAt: createdAt,
+            });
+            getSessionParticipantUserIds.mockResolvedValue(["u1"]);
+            markAccountChanged.mockResolvedValueOnce(101);
+
+            const res = await createSessionMessage({
+                actorUserId: "u1",
+                sessionId: "s1",
+                ciphertext: "cipher",
+                localId: "provider-quota-wait:quota-blocked_openai-codex_main:reset_at_1900000:connected_service_group_quota_exhausted",
+                messageRole: "event",
+            } as Parameters<typeof createSessionMessage>[0]);
+
+            expect(res.ok).toBe(true);
+            if (!res.ok || res.didWrite === false) throw new Error("expected ok + didWrite");
+            expect(res.badgeAttentionChanged).toBe(false);
+            expect(currentTx.session.updateMany).toHaveBeenCalledTimes(1);
+            expect(currentTx.session.updateMany).toHaveBeenCalledWith({
+                where: {
+                    id: "s1",
+                    OR: [{ lastViewedSessionSeq: { lt: 10 } }, { lastViewedSessionSeq: null }],
+                },
+                data: { lastViewedSessionSeq: 10 },
+            });
+        });
+
+        it("derives non-unread attention for owner-authored plaintext maintenance events", async () => {
+            const createdAt = new Date("2020-01-01T00:00:00.000Z");
+            const content = {
+                t: "plain",
+                v: {
+                    role: "agent",
+                    content: {
+                        type: "event",
+                        id: "quota-wait-event",
+                        data: {
+                            type: "provider-quota-wait",
+                            serviceId: "openai-codex",
+                            groupId: "main",
+                            resetAtMs: 1_900_000,
+                            reason: "connected_service_group_quota_exhausted",
+                        },
+                    },
+                },
+            } satisfies PrismaJson.SessionMessageContent;
+
+            currentTx.sessionMessage.findUnique.mockResolvedValue(null);
+            currentTx.session.findUnique
+                .mockResolvedValueOnce({ accountId: "u1", encryptionMode: "plain" })
+                .mockResolvedValueOnce({
+                    seq: 9,
+                    lastViewedSessionSeq: 9,
+                    pendingCount: 0,
+                    pendingPermissionRequestCount: 0,
+                    pendingUserActionRequestCount: 0,
+                    active: true,
+                    archivedAt: null,
+                });
+            currentTx.session.update.mockResolvedValueOnce({ seq: 10 });
+            currentTx.session.updateMany.mockResolvedValue({ count: 1 });
+            currentTx.sessionMessage.create.mockResolvedValue({
+                id: "m-quota-plain",
+                seq: 10,
+                localId: "provider-quota-wait:quota-blocked_openai-codex_main:reset_at_1900000:connected_service_group_quota_exhausted",
+                sidechainId: null,
+                messageRole: "event",
+                content,
+                createdAt,
+                updatedAt: createdAt,
+            });
+            getSessionParticipantUserIds.mockResolvedValue(["u1"]);
+            markAccountChanged.mockResolvedValueOnce(101);
+
+            const res = await createSessionMessage({
+                actorUserId: "u1",
+                sessionId: "s1",
+                content,
+                localId: "provider-quota-wait:quota-blocked_openai-codex_main:reset_at_1900000:connected_service_group_quota_exhausted",
+                messageRole: "event",
+            });
+
+            expect(res.ok).toBe(true);
+            if (!res.ok || res.didWrite === false) throw new Error("expected ok + didWrite");
+            expect(res.badgeAttentionChanged).toBe(false);
+            expect(res.attentionImpact).toEqual({
+                affectsUnread: false,
+                affectsMeaningfulActivity: false,
+            });
+            expect(currentTx.session.updateMany).toHaveBeenCalledTimes(1);
+            expect(currentTx.session.updateMany).toHaveBeenCalledWith({
+                where: {
+                    id: "s1",
+                    OR: [{ lastViewedSessionSeq: { lt: 10 } }, { lastViewedSessionSeq: null }],
+                },
+                data: { lastViewedSessionSeq: 10 },
+            });
+        });
+
+        it("does not derive non-unread attention from maintenance local ids for shared editors", async () => {
+            const createdAt = new Date("2020-01-01T00:00:00.000Z");
+
+            currentTx.sessionMessage.findUnique.mockResolvedValue(null);
+            currentTx.session.findUnique
+                .mockResolvedValueOnce({ accountId: "u1", encryptionMode: "e2ee" })
+                .mockResolvedValueOnce({
+                    seq: 9,
+                    lastViewedSessionSeq: 9,
+                    pendingCount: 0,
+                    pendingPermissionRequestCount: 0,
+                    pendingUserActionRequestCount: 0,
+                    active: true,
+                    archivedAt: null,
+                });
+            currentTx.sessionShare.findUnique.mockResolvedValue({ accessLevel: "edit" });
+            currentTx.session.update.mockResolvedValueOnce({ seq: 10 });
+            currentTx.session.updateMany.mockResolvedValue({ count: 1 });
+            currentTx.sessionMessage.create.mockResolvedValue({
+                id: "m-quota",
+                seq: 10,
+                localId: "provider-quota-recovered:quota-blocked_openai-codex_main:reset_at_1900000:fresh_quota_evidence",
+                sidechainId: null,
+                messageRole: "event",
+                content: { t: "encrypted", c: "cipher" },
+                createdAt,
+                updatedAt: createdAt,
+            });
+            getSessionParticipantUserIds.mockResolvedValue(["u1", "u2"]);
+            markAccountChanged.mockResolvedValueOnce(101).mockResolvedValueOnce(102);
+
+            const res = await createSessionMessage({
+                actorUserId: "u2",
+                sessionId: "s1",
+                ciphertext: "cipher",
+                localId: "provider-quota-recovered:quota-blocked_openai-codex_main:reset_at_1900000:fresh_quota_evidence",
+                messageRole: "event",
+            } as Parameters<typeof createSessionMessage>[0]);
+
+            expect(res.ok).toBe(true);
+            if (!res.ok || res.didWrite === false) throw new Error("expected ok + didWrite");
+            expect(currentTx.session.updateMany).toHaveBeenCalledTimes(1);
+            expect(currentTx.session.updateMany).toHaveBeenCalledWith({
+                where: { id: "s1", seq: 10 },
+                data: { meaningfulActivityAt: createdAt },
+            });
         });
 
         it("does not let a non-unread system message clear pre-existing unread activity", async () => {
@@ -961,6 +1227,10 @@ describe("sessionWriteService", () => {
                 didWrite: false,
                 didUpdate: true,
                 badgeAttentionChanged: false,
+                attentionImpact: {
+                    affectsUnread: true,
+                    affectsMeaningfulActivity: true,
+                },
                 message: {
                     id: "mExisting",
                     seq: 9,
@@ -1184,6 +1454,10 @@ describe("sessionWriteService", () => {
                 didWrite: true,
                 didUpdate: false,
                 badgeAttentionChanged: true,
+                attentionImpact: {
+                    affectsUnread: true,
+                    affectsMeaningfulActivity: true,
+                },
                 message: {
                     id: "m1",
                     seq: 10,
