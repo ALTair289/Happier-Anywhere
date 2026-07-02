@@ -6,7 +6,7 @@ import type { ResumeCapabilityOptions } from '@/agents/runtime/resumeCapabilitie
 import type { PermissionModeOverrideForSpawn } from '@/sync/domains/permissions/permissionModeOverride';
 import { buildResumeSessionBaseOptionsFromSession } from '@/sync/domains/session/resume/resumeSessionBase';
 import { readMachineControlTargetForSession } from '@/sync/ops/sessionMachineTarget';
-import { deriveSessionRuntimePresentationState } from '@/sync/domains/session/attention/deriveSessionRuntimePresentationState';
+import { deriveSessionInputReadinessState } from '@/sync/domains/session/control/deriveSessionInputReadinessState';
 import {
     deriveLatestPendingRequestObservedAtFromSession,
 } from '@/sync/domains/session/pending/listPendingSessionRequests';
@@ -44,7 +44,7 @@ export function getPendingQueueWakeResumeOptions(opts: {
     if (isSessionActive) {
         const requests = session.agentState?.requests;
         const hasRuntimeRequests = Boolean(requests && Object.keys(requests).length > 0);
-        const runtimeStatus = deriveSessionRuntimePresentationState({
+        const inputReadiness = deriveSessionInputReadinessState({
             active: session.active,
             activeAt: session.activeAt,
             presence: session.presence,
@@ -52,16 +52,11 @@ export function getPendingQueueWakeResumeOptions(opts: {
             thinkingAt: session.thinkingAt,
             latestTurnStatus: session.latestTurnStatus,
             latestTurnStatusObservedAt: session.latestTurnStatusObservedAt,
-            meaningfulActivityAt: session.meaningfulActivityAt,
             hasPendingPermissionRequests: hasRuntimeRequests,
             hasPendingUserActionRequests: hasRuntimeRequests,
             pendingRequestObservedAt: deriveLatestPendingRequestObservedAtFromSession(session),
         }, opts.nowMs ?? Date.now());
-        if (
-            runtimeStatus.working
-            || runtimeStatus.freshPermissionRequired
-            || runtimeStatus.freshActionRequired
-        ) {
+        if (!inputReadiness.canWakePendingQueue) {
             return null;
         }
     }

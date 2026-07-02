@@ -253,6 +253,32 @@ describe('getPendingQueueWakeResumeOptions', () => {
         });
     });
 
+    it('does not block wake for display-only provider runtime activity after foreground completion', () => {
+        const session: any = {
+            thinking: false,
+            thinkingAt: 0,
+            active: true,
+            activeAt: now - 10_000,
+            latestTurnStatus: 'completed',
+            latestTurnStatusObservedAt: now - 5_000,
+            runtimeActivityActiveCount: 1,
+            runtimeActivityObservedAt: now - 1_000,
+            runtimeActivityExpiresAt: now + 60_000,
+            runtimeActivitySourceClass: 'provider_detached_task',
+            agentState: null,
+            presence: 'online',
+            metadata: { machineId: 'm1', path: '/tmp', flavor: 'claude', claudeSessionId: 'c1' },
+        };
+
+        expect(getPendingQueueWakeResumeOptions({ sessionId: 's1', session, resumeCapabilityOptions: { accountSettings: {} }, nowMs: now })).toEqual({
+            sessionId: 's1',
+            machineId: 'm1',
+            directory: '/tmp',
+            backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+            resume: 'c1',
+        });
+    });
+
     it('does not block wake for inactive sessions with stale active-turn projection', () => {
         const session: any = {
             active: false,

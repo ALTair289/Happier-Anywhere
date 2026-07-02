@@ -49,4 +49,56 @@ describe('getPendingMessageVisualState', () => {
             iconName: 'navigate-outline',
         });
     });
+
+    it('treats server-delivering rows as delivery-owned work', () => {
+        expect(getPendingMessageVisualState(pendingMessage({
+            pendingDeliveryStatus: 'server_delivering',
+        }))).toEqual({
+            kind: 'delivering',
+            showSpinner: true,
+            iconName: 'navigate-outline',
+        });
+    });
+
+    it('attaches reason-specific presentation to blocked delivery rows', () => {
+        expect(getPendingMessageVisualState(pendingMessage({
+            pendingDeliveryStatus: 'blocked',
+            pendingDeliveryBlockedReason: 'payload_too_large',
+        }))).toEqual({
+            kind: 'blocked',
+            showSpinner: false,
+            iconName: 'alert-circle-outline',
+            deliveryBlockedPresentation: {
+                labelKey: 'session.pendingMessages.deliveryBlockedReasons.payloadTooLarge',
+                isUnknown: false,
+            },
+        });
+
+        expect(getPendingMessageVisualState(pendingMessage({
+            pendingDeliveryStatus: 'blocked',
+            pendingDeliveryBlockedReason: 'provider_unavailable_before_acceptance',
+        }))).toEqual({
+            kind: 'blocked',
+            showSpinner: false,
+            iconName: 'alert-circle-outline',
+            deliveryBlockedPresentation: {
+                labelKey: 'session.pendingMessages.deliveryBlockedReasons.providerUnavailableBeforeAcceptance',
+                isUnknown: false,
+            },
+        });
+
+        expect(getPendingMessageVisualState(pendingMessage({
+            pendingDeliveryStatus: 'blocked',
+            pendingDeliveryBlockedReason: 'unknown',
+            pendingDeliveryBlockedReasonRaw: 'newer_runtime_reason',
+        }))).toEqual({
+            kind: 'blocked',
+            showSpinner: false,
+            iconName: 'alert-circle-outline',
+            deliveryBlockedPresentation: {
+                labelKey: 'session.pendingMessages.deliveryBlockedReasons.unknown',
+                isUnknown: true,
+            },
+        });
+    });
 });

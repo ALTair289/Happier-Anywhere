@@ -31,6 +31,8 @@ vi.mock('./PendingMessagesDragReorderList', () => ({
 const sendPendingMessageNow = vi.fn();
 const deletePendingMessage = vi.fn();
 const discardPendingMessage = vi.fn();
+const retryPendingDelivery = vi.fn();
+const markPendingDeliveryHandled = vi.fn();
 const sessionAbort = vi.fn();
 const modalConfirm = vi.fn();
 const modalAlert = vi.fn();
@@ -113,6 +115,8 @@ vi.mock('@/sync/sync', () => ({
         sendPendingMessageNow: (...args: any[]) => sendPendingMessageNow(...args),
         deletePendingMessage: (...args: any[]) => deletePendingMessage(...args),
         discardPendingMessage: (...args: any[]) => discardPendingMessage(...args),
+        retryPendingDelivery: (...args: any[]) => retryPendingDelivery(...args),
+        markPendingDeliveryHandled: (...args: any[]) => markPendingDeliveryHandled(...args),
         updatePendingMessage: vi.fn(),
         restoreDiscardedPendingMessage: vi.fn(),
         deleteDiscardedPendingMessage: vi.fn(),
@@ -180,6 +184,8 @@ describe('PendingMessagesTranscriptBlock', () => {
         sendPendingMessageNow.mockResolvedValue({ type: 'committed' });
         deletePendingMessage.mockReset();
         discardPendingMessage.mockReset();
+        retryPendingDelivery.mockReset();
+        markPendingDeliveryHandled.mockReset();
         sessionAbort.mockReset();
         modalConfirm.mockReset();
         modalAlert.mockReset();
@@ -215,7 +221,7 @@ describe('PendingMessagesTranscriptBlock', () => {
         });
     }
 
-    it('aborts+send+delete in order when send-now is pressed', async () => {
+    it('delegates send-now interrupt intent to the pending delivery owner before delete', async () => {
         const PendingMessagesTranscriptBlock = await loadPendingMessagesTranscriptBlock();
         modalConfirm.mockResolvedValueOnce(true);
         sessionAbort.mockResolvedValueOnce(undefined);
@@ -236,16 +242,17 @@ describe('PendingMessagesTranscriptBlock', () => {
 
         await screen.pressByTestIdAsync('pendingMessages.sendNow:p1');
 
-        expect(sessionAbort).toHaveBeenCalledTimes(1);
+        expect(sessionAbort).toHaveBeenCalledTimes(0);
         expect(sendPendingMessageNow).toHaveBeenCalledTimes(1);
-        expect(sendPendingMessageNow).toHaveBeenCalledWith('s1', expect.objectContaining({ localId: 'p1' }));
+        expect(sendPendingMessageNow).toHaveBeenCalledWith('s1', expect.objectContaining({
+            localId: 'p1',
+            deliveryIntent: 'interrupt_and_send',
+        }));
         expect(deletePendingMessage).toHaveBeenCalledTimes(1);
 
-        const abortOrder = sessionAbort.mock.invocationCallOrder[0]!;
         const sendOrder = sendPendingMessageNow.mock.invocationCallOrder[0]!;
         const deleteOrder = deletePendingMessage.mock.invocationCallOrder[0]!;
 
-        expect(abortOrder).toBeLessThan(sendOrder);
         expect(sendOrder).toBeLessThan(deleteOrder);
     });
 
@@ -286,6 +293,341 @@ describe('PendingMessagesTranscriptBlock', () => {
         expect(affordanceStyle.position).toBe('absolute');
         expect(affordanceStyle.borderWidth).toBe(0);
         expect(affordanceStyle.paddingVertical).toBe(1);
+    });
+
+    it('renders unknown delivery states as visible blocked pending rows', async () => {
+        const PendingMessagesTranscriptBlock = await loadPendingMessagesTranscriptBlock();
+        const screen = await renderScreen(React.createElement(PendingMessagesTranscriptBlock, {
+                sessionId: 's1',
+                pendingMessages: [{
+                    id: 'p1',
+                    text: 'hello',
+                    displayText: undefined,
+                    createdAt: 0,
+                    updatedAt: 0,
+                    localId: 'p1',
+                    source: 'server_pending',
+                    pendingDeliveryStatus: 'blocked',
+                    pendingDeliveryBlockedReason: 'unknown',
+                    pendingDeliveryStatusRaw: 'awaiting_moon_phase',
+                    rawRecord: {},
+                }],
+                discardedMessages: [],
+            }));
+
+        expect(screen.findByTestId('pendingMessages.row:p1')).toBeTruthy();
+        expect(screen.findByTestId('pendingMessages.blockedDeliveryNotice:p1')).toBeTruthy();
+        expect(screen.findByTestId('pendingMessages.unknownDeliveryStatus:p1')).toBeTruthy();
+    });
+
+    it('retries blocked pending delivery without replaying or deleting the row', async () => {
+        const PendingMessagesTranscriptBlock = await loadPendingMessagesTranscriptBlock();
+        retryPendingDelivery.mockResolvedValueOnce(undefined);
+        const screen = await renderScreen(React.createElement(PendingMessagesTranscriptBlock, {
+                sessionId: 's1',
+                pendingMessages: [{
+                    id: 'p1',
+                    text: 'hello',
+                    displayText: undefined,
+                    createdAt: 0,
+                    updatedAt: 0,
+                    localId: 'p1',
+                    source: 'server_pending',
+                    pendingDeliveryStatus: 'blocked',
+                    pendingDeliveryBlockedReason: 'payload_too_large',
+                    rawRecord: {},
+                }],
+                discardedMessages: [],
+            }));
+
+        await hoverPendingMessageRow(screen, 'p1');
+        expect(screen.findByTestId('pendingMessages.retryDelivery:p1')).toBeTruthy();
+
+        await screen.pressByTestIdAsync('pendingMessages.retryDelivery:p1');
+
+        expect(retryPendingDelivery).toHaveBeenCalledWith('s1', 'p1');
+        expect(sendPendingMessageNow).not.toHaveBeenCalled();
+        expect(deletePendingMessage).not.toHaveBeenCalled();
+        expect(discardPendingMessage).not.toHaveBeenCalled();
+    });
+
+    it('ignores duplicate retry presses while the pending delivery retry is in flight', async () => {
+        const PendingMessagesTranscriptBlock = await loadPendingMessagesTranscriptBlock();
+        const retryDeferred = createDeferred<void>();
+        retryPendingDelivery.mockReturnValueOnce(retryDeferred.promise);
+        const screen = await renderScreen(React.createElement(PendingMessagesTranscriptBlock, {
+                sessionId: 's1',
+                pendingMessages: [{
+                    id: 'p1',
+                    text: 'hello',
+                    displayText: undefined,
+                    createdAt: 0,
+                    updatedAt: 0,
+                    localId: 'p1',
+                    source: 'server_pending',
+                    pendingDeliveryStatus: 'blocked',
+                    pendingDeliveryBlockedReason: 'payload_too_large',
+                    rawRecord: {},
+                }],
+                discardedMessages: [],
+            }));
+
+        await hoverPendingMessageRow(screen, 'p1');
+        const retry = screen.findByTestId('pendingMessages.retryDelivery:p1');
+        expect(retry).toBeTruthy();
+
+        await act(async () => {
+            invokeTestInstanceHandler(retry, 'onPress', undefined, 'pendingMessages.retryDelivery:p1');
+            invokeTestInstanceHandler(retry, 'onPress', undefined, 'pendingMessages.retryDelivery:p1');
+            await Promise.resolve();
+        });
+
+        expect(retryPendingDelivery).toHaveBeenCalledTimes(1);
+
+        await act(async () => {
+            retryDeferred.resolve();
+            await retryDeferred.promise;
+        });
+    });
+
+    it('marks blocked pending delivery handled without replaying the row', async () => {
+        const PendingMessagesTranscriptBlock = await loadPendingMessagesTranscriptBlock();
+        modalConfirm.mockResolvedValueOnce(true);
+        markPendingDeliveryHandled.mockResolvedValueOnce(undefined);
+        const screen = await renderScreen(React.createElement(PendingMessagesTranscriptBlock, {
+                sessionId: 's1',
+                pendingMessages: [{
+                    id: 'p1',
+                    text: 'hello',
+                    displayText: undefined,
+                    createdAt: 0,
+                    updatedAt: 0,
+                    localId: 'p1',
+                    source: 'server_pending',
+                    pendingDeliveryStatus: 'blocked',
+                    pendingDeliveryBlockedReason: 'provider_acceptance_timeout',
+                    rawRecord: {},
+                }],
+                discardedMessages: [],
+            }));
+
+        await hoverPendingMessageRow(screen, 'p1');
+        expect(screen.findByTestId('pendingMessages.markDeliveryHandled:p1')).toBeTruthy();
+
+        await screen.pressByTestIdAsync('pendingMessages.markDeliveryHandled:p1');
+
+        expect(markPendingDeliveryHandled).toHaveBeenCalledWith('s1', 'p1');
+        expect(sendPendingMessageNow).not.toHaveBeenCalled();
+        expect(deletePendingMessage).not.toHaveBeenCalled();
+    });
+
+    it('ignores duplicate mark-handled presses while the confirmation is unresolved', async () => {
+        const PendingMessagesTranscriptBlock = await loadPendingMessagesTranscriptBlock();
+        const confirmDeferred = createDeferred<boolean>();
+        modalConfirm.mockReturnValueOnce(confirmDeferred.promise);
+        markPendingDeliveryHandled.mockResolvedValueOnce(undefined);
+        const screen = await renderScreen(React.createElement(PendingMessagesTranscriptBlock, {
+                sessionId: 's1',
+                pendingMessages: [{
+                    id: 'p1',
+                    text: 'hello',
+                    displayText: undefined,
+                    createdAt: 0,
+                    updatedAt: 0,
+                    localId: 'p1',
+                    source: 'server_pending',
+                    pendingDeliveryStatus: 'blocked',
+                    pendingDeliveryBlockedReason: 'provider_acceptance_timeout',
+                    rawRecord: {},
+                }],
+                discardedMessages: [],
+            }));
+
+        await hoverPendingMessageRow(screen, 'p1');
+        const markHandled = screen.findByTestId('pendingMessages.markDeliveryHandled:p1');
+        expect(markHandled).toBeTruthy();
+
+        await act(async () => {
+            invokeTestInstanceHandler(markHandled, 'onPress', undefined, 'pendingMessages.markDeliveryHandled:p1');
+            invokeTestInstanceHandler(markHandled, 'onPress', undefined, 'pendingMessages.markDeliveryHandled:p1');
+            await Promise.resolve();
+        });
+
+        expect(modalConfirm).toHaveBeenCalledTimes(1);
+        expect(markPendingDeliveryHandled).not.toHaveBeenCalled();
+
+        await act(async () => {
+            confirmDeferred.resolve(true);
+            await confirmDeferred.promise;
+            await Promise.resolve();
+        });
+
+        expect(markPendingDeliveryHandled).toHaveBeenCalledTimes(1);
+        expect(markPendingDeliveryHandled).toHaveBeenCalledWith('s1', 'p1');
+    });
+
+    it('keeps direct send and steer actions available for blocked pending delivery rows', async () => {
+        const PendingMessagesTranscriptBlock = await loadPendingMessagesTranscriptBlock();
+        sessionValue = {
+            thinking: true,
+            thinkingAt: Date.now(),
+            active: true,
+            presence: 'online',
+            agentStateVersion: 1,
+            agentState: { controlledByUser: false, capabilities: { inFlightSteer: true } },
+        };
+
+        const screen = await renderScreen(React.createElement(PendingMessagesTranscriptBlock, {
+                sessionId: 's1',
+                pendingMessages: [{
+                    id: 'p1',
+                    text: 'hello',
+                    displayText: undefined,
+                    createdAt: 0,
+                    updatedAt: 0,
+                    localId: 'p1',
+                    source: 'server_pending',
+                    pendingDeliveryStatus: 'blocked',
+                    pendingDeliveryBlockedReason: 'ambiguous_terminal_delivery',
+                    rawRecord: {},
+                }],
+                discardedMessages: [],
+            }));
+
+        await hoverPendingMessageRow(screen, 'p1');
+
+        expect(screen.findByTestId('pendingMessages.retryDelivery:p1')).toBeTruthy();
+        expect(screen.findByTestId('pendingMessages.markDeliveryHandled:p1')).toBeTruthy();
+        expect(screen.findByTestId('pendingMessages.steerNow:p1')).toBeTruthy();
+        expect(screen.findByTestId('pendingMessages.sendNow:p1')).toBeTruthy();
+        expect(sendPendingMessageNow).not.toHaveBeenCalled();
+        expect(sessionAbort).not.toHaveBeenCalled();
+    });
+
+    it('keeps direct send and steer actions available for server-delivering rows', async () => {
+        const PendingMessagesTranscriptBlock = await loadPendingMessagesTranscriptBlock();
+        sessionValue = {
+            thinking: true,
+            thinkingAt: Date.now(),
+            active: true,
+            presence: 'online',
+            agentStateVersion: 1,
+            agentState: { controlledByUser: false, capabilities: { inFlightSteer: true } },
+        };
+
+        const screen = await renderScreen(React.createElement(PendingMessagesTranscriptBlock, {
+                sessionId: 's1',
+                pendingMessages: [{
+                    id: 'p1',
+                    text: 'hello',
+                    displayText: undefined,
+                    createdAt: 0,
+                    updatedAt: 0,
+                    localId: 'p1',
+                    source: 'server_pending',
+                    pendingDeliveryStatus: 'server_delivering',
+                    rawRecord: {},
+                }],
+                discardedMessages: [],
+            }));
+
+        await hoverPendingMessageRow(screen, 'p1');
+
+        expect(screen.findByTestId('pendingMessages.retryDelivery:p1')).toBeTruthy();
+        expect(screen.findByTestId('pendingMessages.markDeliveryHandled:p1')).toBeTruthy();
+        expect(screen.findByTestId('pendingMessages.discardDelivery:p1')).toBeTruthy();
+        expect(screen.findByTestId('pendingMessages.steerNow:p1')).toBeTruthy();
+        expect(screen.findByTestId('pendingMessages.sendNow:p1')).toBeTruthy();
+        expect(screen.findByTestId('pendingMessages.remove:p1')).toBeNull();
+
+        await screen.pressByTestIdAsync('pendingMessages.steerNow:p1');
+
+        expect(sendPendingMessageNow).toHaveBeenCalledWith('s1', expect.objectContaining({
+            localId: 'p1',
+            deliveryIntent: 'steer_now',
+        }));
+        expect(sessionAbort).not.toHaveBeenCalled();
+    });
+
+    it('keeps direct send and steer actions available for server-owned queued rows', async () => {
+        const PendingMessagesTranscriptBlock = await loadPendingMessagesTranscriptBlock();
+        sessionValue = {
+            thinking: true,
+            thinkingAt: Date.now(),
+            active: true,
+            presence: 'online',
+            agentStateVersion: 1,
+            agentState: { controlledByUser: false, capabilities: { inFlightSteer: true } },
+        };
+
+        const screen = await renderScreen(React.createElement(PendingMessagesTranscriptBlock, {
+                sessionId: 's1',
+                pendingMessages: [{
+                    id: 'p1',
+                    text: 'hello',
+                    displayText: undefined,
+                    createdAt: 0,
+                    updatedAt: 0,
+                    localId: 'p1',
+                    source: 'server_pending',
+                    pendingDeliveryStatus: 'server_queued',
+                    rawRecord: {},
+                }],
+                discardedMessages: [],
+            }));
+
+        await hoverPendingMessageRow(screen, 'p1');
+
+        expect(screen.findByTestId('pendingMessages.steerNow:p1')).toBeTruthy();
+        expect(screen.findByTestId('pendingMessages.sendNow:p1')).toBeTruthy();
+        expect(sendPendingMessageNow).not.toHaveBeenCalled();
+        expect(deletePendingMessage).not.toHaveBeenCalled();
+        expect(discardPendingMessage).not.toHaveBeenCalled();
+        expect(sessionAbort).not.toHaveBeenCalled();
+    });
+
+    it('ignores duplicate discard presses while the confirmation is unresolved', async () => {
+        const PendingMessagesTranscriptBlock = await loadPendingMessagesTranscriptBlock();
+        const confirmDeferred = createDeferred<boolean>();
+        modalConfirm.mockReturnValueOnce(confirmDeferred.promise);
+        discardPendingMessage.mockResolvedValueOnce(undefined);
+        const screen = await renderScreen(React.createElement(PendingMessagesTranscriptBlock, {
+                sessionId: 's1',
+                pendingMessages: [{
+                    id: 'p1',
+                    text: 'hello',
+                    displayText: undefined,
+                    createdAt: 0,
+                    updatedAt: 0,
+                    localId: 'p1',
+                    source: 'server_pending',
+                    pendingDeliveryStatus: 'server_delivering',
+                    rawRecord: {},
+                }],
+                discardedMessages: [],
+            }));
+
+        await hoverPendingMessageRow(screen, 'p1');
+        const discard = screen.findByTestId('pendingMessages.discardDelivery:p1');
+        expect(discard).toBeTruthy();
+
+        await act(async () => {
+            invokeTestInstanceHandler(discard, 'onPress', undefined, 'pendingMessages.discardDelivery:p1');
+            invokeTestInstanceHandler(discard, 'onPress', undefined, 'pendingMessages.discardDelivery:p1');
+            await Promise.resolve();
+        });
+
+        expect(modalConfirm).toHaveBeenCalledTimes(1);
+        expect(discardPendingMessage).not.toHaveBeenCalled();
+
+        await act(async () => {
+            confirmDeferred.resolve(true);
+            await confirmDeferred.promise;
+            await Promise.resolve();
+        });
+
+        expect(discardPendingMessage).toHaveBeenCalledTimes(1);
+        expect(discardPendingMessage).toHaveBeenCalledWith('s1', 'p1');
     });
 
     it('uses the transcript markdown typography for pending message markdown rows', async () => {
@@ -395,7 +737,10 @@ describe('PendingMessagesTranscriptBlock', () => {
         expect(modalConfirm).toHaveBeenCalledTimes(0);
         expect(sessionAbort).toHaveBeenCalledTimes(0);
         expect(sendPendingMessageNow).toHaveBeenCalledTimes(1);
-	        expect(sendPendingMessageNow).toHaveBeenCalledWith('s1', expect.objectContaining({ localId: 'p1' }));
+	        expect(sendPendingMessageNow).toHaveBeenCalledWith('s1', expect.objectContaining({
+	            localId: 'p1',
+	            deliveryIntent: 'steer_now',
+	        }));
         expect(deletePendingMessage).toHaveBeenCalledTimes(1);
     });
 
@@ -481,8 +826,11 @@ describe('PendingMessagesTranscriptBlock', () => {
 
 	        await screen.pressByTestIdAsync('pendingMessages.sendNow:p1');
 
-	        expect(sessionAbort).toHaveBeenCalledTimes(1);
-	        expect(sendPendingMessageNow).toHaveBeenCalledWith('s1', expect.objectContaining({ localId: 'p1' }));
+	        expect(sessionAbort).toHaveBeenCalledTimes(0);
+	        expect(sendPendingMessageNow).toHaveBeenCalledWith('s1', expect.objectContaining({
+	            localId: 'p1',
+	            deliveryIntent: 'interrupt_and_send',
+	        }));
 	    });
 
     it('shows the terminal-draft variant of the notice when the CLI published user_terminal_draft (lane X)', async () => {
@@ -618,6 +966,7 @@ describe('PendingMessagesTranscriptBlock', () => {
                     inFlightSteerSupported: true,
                     inFlightSteerAvailable: false,
                     inFlightSteerUnavailableReason: 'user_terminal_draft',
+                    inFlightSteerStateAt: 42,
                 },
             },
         };
@@ -633,7 +982,7 @@ describe('PendingMessagesTranscriptBlock', () => {
         expect(actionExecute).toHaveBeenCalledTimes(1);
         expect(actionExecute).toHaveBeenCalledWith(
             'session.terminalComposer.clear',
-            { sessionId: 's1' },
+            { sessionId: 's1', expectedStateAtMs: 42 },
             expect.objectContaining({
                 defaultSessionId: 's1',
                 surface: 'ui_button',
@@ -760,7 +1109,48 @@ describe('PendingMessagesTranscriptBlock', () => {
         }
     });
 
-    it('does not offer steer or send-now when a recent in-progress turn is no longer live', async () => {
+    it('keeps force-send available without steer when the active flag lags a fresh in-progress turn', async () => {
+        const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(130_000);
+        const PendingMessagesTranscriptBlock = await loadPendingMessagesTranscriptBlock();
+        sessionValue = {
+            thinking: false,
+            active: false,
+            activeAt: 100_000,
+            presence: 'online',
+            latestTurnStatus: 'in_progress',
+            latestTurnStatusObservedAt: 129_500,
+            agentStateVersion: 1,
+            agentState: {
+                controlledByUser: false,
+                capabilities: {
+                    inFlightSteer: true,
+                    inFlightSteerSupported: true,
+                    inFlightSteerAvailable: true,
+                },
+            },
+        };
+
+        try {
+            const screen = await renderScreen(React.createElement(PendingMessagesTranscriptBlock, {
+                sessionId: 's1',
+                pendingMessages: [{ id: 'p1', text: 'hello', displayText: undefined, createdAt: 0, updatedAt: 0, localId: 'p1', rawRecord: {} }],
+                discardedMessages: [],
+            }));
+
+            expect(screen.findByTestId('pendingMessages.nonSteerableNotice')).toBeNull();
+
+            await hoverPendingMessageRow(screen, 'p1');
+
+            expect(screen.findByTestId('pendingMessages.steerNow:p1')).toBeNull();
+            expect(screen.findByTestId('pendingMessages.sendNow:p1')).toBeTruthy();
+            expect(screen.findByTestId('pendingMessages.edit:p1')).toBeTruthy();
+            expect(screen.findByTestId('pendingMessages.remove:p1')).toBeTruthy();
+        } finally {
+            nowSpy.mockRestore();
+        }
+    });
+
+    it('keeps force-send available when a recent in-progress turn is no longer live', async () => {
         const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(130_000);
         const PendingMessagesTranscriptBlock = await loadPendingMessagesTranscriptBlock();
         sessionValue = {
@@ -793,7 +1183,7 @@ describe('PendingMessagesTranscriptBlock', () => {
             await hoverPendingMessageRow(screen, 'p1');
 
             expect(screen.findByTestId('pendingMessages.steerNow:p1')).toBeNull();
-            expect(screen.findByTestId('pendingMessages.sendNow:p1')).toBeNull();
+            expect(screen.findByTestId('pendingMessages.sendNow:p1')).toBeTruthy();
             expect(sessionAbort).toHaveBeenCalledTimes(0);
         } finally {
             nowSpy.mockRestore();
@@ -1047,6 +1437,79 @@ describe('PendingMessagesTranscriptBlock', () => {
 
         expect(screen.findByTestId('pendingMessages.acceptedIndicator:p1')).toBeNull();
         expect(screen.findByTestId('pendingMessages.pendingAffordanceLabel:p1')).toBeTruthy();
+    });
+
+    it('does not expose legacy send or steer actions for server-accepted pending rows', async () => {
+        const PendingMessagesTranscriptBlock = await loadPendingMessagesTranscriptBlock();
+        sessionValue = {
+            thinking: true,
+            thinkingAt: Date.now(),
+            active: true,
+            presence: 'online',
+            agentStateVersion: 1,
+            agentState: { controlledByUser: false, capabilities: { inFlightSteer: true } },
+        };
+
+        const screen = await renderScreen(React.createElement(PendingMessagesTranscriptBlock, {
+                sessionId: 's1',
+                pendingMessages: [{
+                    id: 'p1',
+                    text: 'hello',
+                    displayText: undefined,
+                    createdAt: 0,
+                    updatedAt: 0,
+                    localId: 'p1',
+                    source: 'local_outbound',
+                    deliveryStatus: 'accepted',
+                    rawRecord: {},
+                }],
+                discardedMessages: [],
+            }));
+
+        await hoverPendingMessageRow(screen, 'p1');
+
+        expect(screen.findByTestId('pendingMessages.steerNow:p1')).toBeNull();
+        expect(screen.findByTestId('pendingMessages.sendNow:p1')).toBeNull();
+    });
+
+    it('keeps direct actions available for accepted server-owned rows with stale client delivery metadata', async () => {
+        const PendingMessagesTranscriptBlock = await loadPendingMessagesTranscriptBlock();
+        sessionValue = {
+            thinking: true,
+            thinkingAt: Date.now(),
+            active: true,
+            presence: 'online',
+            agentStateVersion: 1,
+            agentState: { controlledByUser: false, capabilities: { inFlightSteer: true } },
+        };
+
+        const screen = await renderScreen(React.createElement(PendingMessagesTranscriptBlock, {
+                sessionId: 's1',
+                pendingMessages: [{
+                    id: 'p1',
+                    text: 'accepted blocked',
+                    displayText: undefined,
+                    createdAt: 0,
+                    updatedAt: 0,
+                    localId: 'p1',
+                    source: 'server_pending',
+                    deliveryStatus: 'accepted',
+                    pendingDeliveryStatus: 'blocked',
+                    pendingDeliveryBlockedReason: 'provider_acceptance_timeout',
+                    rawRecord: {},
+                }],
+                discardedMessages: [],
+            }));
+
+        await hoverPendingMessageRow(screen, 'p1');
+
+        expect(screen.findByTestId('pendingMessages.retryDelivery:p1')).toBeTruthy();
+        expect(screen.findByTestId('pendingMessages.markDeliveryHandled:p1')).toBeTruthy();
+        expect(screen.findByTestId('pendingMessages.discardDelivery:p1')).toBeTruthy();
+        expect(screen.findByTestId('pendingMessages.edit:p1')).toBeNull();
+        expect(screen.findByTestId('pendingMessages.remove:p1')).toBeNull();
+        expect(screen.findByTestId('pendingMessages.steerNow:p1')).toBeTruthy();
+        expect(screen.findByTestId('pendingMessages.sendNow:p1')).toBeTruthy();
     });
 
     it('shows a saving indicator for local outbound rows that are still being persisted', async () => {

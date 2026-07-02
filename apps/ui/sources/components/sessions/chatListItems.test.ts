@@ -8,12 +8,16 @@ function buildPending(params: {
     localId: string | null;
     createdAt: number;
     text?: string;
+    source?: PendingMessage['source'];
+    pendingDeliveryStatus?: PendingMessage['pendingDeliveryStatus'];
 }): PendingMessage {
     return {
         id: params.id,
         localId: params.localId,
         createdAt: params.createdAt,
         updatedAt: params.createdAt,
+        ...(params.source ? { source: params.source } : {}),
+        ...(params.pendingDeliveryStatus ? { pendingDeliveryStatus: params.pendingDeliveryStatus } : {}),
         text: params.text ?? params.id,
         rawRecord: {},
     };
@@ -874,5 +878,65 @@ describe('buildChatListItemsCached', () => {
             }
         });
         expect(ids2).toEqual(['m-user', 'm2']);
+    });
+
+    it('keeps unresolved server pending rows visible when their committed transcript row exists', () => {
+        const messages: Message[] = [
+            { kind: 'user-text', id: 'm-user', localId: 'p1', createdAt: 20, text: 'materialized user' },
+        ];
+        const messagesById = Object.fromEntries(messages.map((m) => [m.id, m]));
+        const pending: PendingMessage[] = [
+            buildPending({
+                id: 'p1-server',
+                localId: 'p1',
+                createdAt: 10,
+                source: 'server_pending',
+                pendingDeliveryStatus: 'server_delivering',
+            }),
+            buildPending({
+                id: 'p1-local',
+                localId: 'p1',
+                createdAt: 11,
+                source: 'local_outbound',
+            }),
+        ];
+
+        const items = buildChatListItems({
+            messageIdsOldestFirst: ['m-user'],
+            messagesById,
+            pendingMessages: pending,
+        });
+
+        expect(items.map((item) => item.kind)).toEqual(['pending-queue']);
+        expect(items[0]?.kind === 'pending-queue' && items[0].pendingMessages.map((message) => message.id))
+            .toEqual(['p1-server']);
+    });
+
+    it('keeps discarded server pending rows authoritative over their provisional committed transcript row', () => {
+        const messages: Message[] = [
+            { kind: 'user-text', id: 'm-user', localId: 'p1', createdAt: 20, text: 'materialized user' },
+        ];
+        const messagesById = Object.fromEntries(messages.map((m) => [m.id, m]));
+        const discarded = [{
+            ...buildPending({
+                id: 'p1-server',
+                localId: 'p1',
+                createdAt: 10,
+                source: 'server_pending',
+            }),
+            discardedAt: 30,
+            discardedReason: 'manual' as const,
+        }];
+
+        const items = buildChatListItems({
+            messageIdsOldestFirst: ['m-user'],
+            messagesById,
+            pendingMessages: [],
+            discardedMessages: discarded,
+        });
+
+        expect(items.map((item) => item.kind)).toEqual(['pending-queue']);
+        expect(items[0]?.kind === 'pending-queue' && items[0].discardedMessages.map((message) => message.id))
+            .toEqual(['p1-server']);
     });
 });
