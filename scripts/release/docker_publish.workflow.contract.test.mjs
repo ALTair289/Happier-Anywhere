@@ -81,7 +81,31 @@ test('publish-docker supports workflow_call and is wired from release workflow',
 
   const release = await loadWorkflow('release.yml');
   assert.match(release, /publish_docker:/);
+  assert.match(release, /publish_cli_binaries:/);
+  assert.match(
+    release,
+    /publish_server_runtime:[\s\S]*?\(needs\.plan\.outputs\.publish_server == 'true' \|\| inputs\.force_deploy == true \|\| needs\.plan\.outputs\.changed_server == 'true' \|\| needs\.plan\.outputs\.changed_shared == 'true'\)/,
+    'server runtime artifacts should publish when relay Docker needs fresh server bits',
+  );
+  assert.match(
+    release,
+    /publish_ui_web:[\s\S]*?\(contains\(format\(',\{0\},', inputs\.deploy_targets\), ',ui,'\) \|\| inputs\.force_deploy == true \|\| needs\.plan\.outputs\.changed_ui == 'true' \|\| needs\.plan\.outputs\.changed_shared == 'true'\)/,
+    'UI web artifacts should publish when relay Docker needs a fresh embedded UI bundle',
+  );
   assert.match(release, /uses:\s+\.\/\.github\/workflows\/publish-docker\.yml/);
+  assert.match(release, /publish_docker:[\s\S]*?needs:\s*\[plan, bump_versions_dev, promote_preview, promote_main, publish_cli_binaries, publish_server_runtime, publish_ui_web\]/);
+  assert.match(release, /publish_docker:[\s\S]*?needs\.publish_cli_binaries\.result == 'success' \|\| needs\.publish_cli_binaries\.result == 'skipped'/);
+  assert.match(release, /publish_docker:[\s\S]*?needs\.publish_server_runtime\.result == 'success' \|\| needs\.publish_server_runtime\.result == 'skipped'/);
+  assert.match(release, /publish_docker:[\s\S]*?needs\.publish_ui_web\.result == 'success' \|\| needs\.publish_ui_web\.result == 'skipped'/);
   assert.match(release, /build_relay:/);
   assert.match(release, /build_dev_box:/);
+  assert.doesNotMatch(release, /build_dev_box:\s*\$\{\{[^\n]*changed_stack/);
+});
+
+test('nightly dev docker waits for the release artifacts it consumes', async () => {
+  const nightly = await loadWorkflow('nightly-dev.yml');
+  assert.match(
+    nightly,
+    /docker:[\s\S]*?needs:\s*\[cli, server_runtime, ui_web\][\s\S]*?uses:\s+\.\/\.github\/workflows\/publish-docker\.yml/,
+  );
 });

@@ -74,6 +74,42 @@ test('preview: changed cli publishes docker dev-box but not relay', () => {
   assert.equal(plan.dockerBuildRelay, false);
 });
 
+test('preview: changed stack alone does not publish docker images', () => {
+  const plan = computeReleaseExecutionPlan({
+    environment: 'preview',
+    dryRun: false,
+    forceDeploy: false,
+    deployTargets: ['stack'],
+    uiExpoAction: 'none',
+    desktopMode: 'none',
+    changed: {
+      changed_ui: false,
+      changed_cli: false,
+      changed_server: false,
+      changed_website: false,
+      changed_docs: false,
+      changed_shared: false,
+      changed_stack: true,
+    },
+    bumpPlan: {
+      bump_app: 'none',
+      bump_cli: 'none',
+      bump_stack: 'patch',
+      bump_server: 'none',
+      bump_website: 'none',
+      should_bump: true,
+      publish_cli: false,
+      publish_stack: true,
+      publish_server: false,
+    },
+    deployPlan: null,
+  });
+
+  assert.equal(plan.runPublishDocker, false);
+  assert.equal(plan.dockerBuildDevBox, false);
+  assert.equal(plan.dockerBuildRelay, false);
+});
+
 test('production: ui deploy runs when deploy plan says needed', () => {
   const plan = computeReleaseExecutionPlan({
     environment: 'production',

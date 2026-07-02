@@ -64,9 +64,9 @@ test("Dockerfile deps stages copy shared workspace build tooling for derived wor
   }
 });
 
-test("dev-box Dockerfile includes the root postinstall script (eas-postinstall.mjs) so yarn install can run in minimal build contexts", () => {
+test("dev-box Dockerfile no longer runs a source yarn install", () => {
   const dockerfilePath = path.join(repoRoot, "docker", "dev-box", "Dockerfile");
   const raw = fs.readFileSync(dockerfilePath, "utf8");
-  const section = extractStageSection(raw, "FROM node:${NODE_VERSION}-bookworm AS cli-builder");
-  assert.match(section, /COPY scripts\/pipeline\/expo\/eas-postinstall\.mjs scripts\/pipeline\/expo\//);
+  assert.doesNotMatch(raw, /yarn-install-with-retry/);
+  assert.doesNotMatch(raw, /COPY scripts\/pipeline\/expo\/eas-postinstall\.mjs scripts\/pipeline\/expo\//);
 });

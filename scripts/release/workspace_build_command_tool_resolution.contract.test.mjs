@@ -56,7 +56,7 @@ test('first-party TypeScript package scripts use workspace tool resolution inste
       if (script.includes('tsconfig') || /\b--noEmit\b/.test(script)) {
         assert.match(
           script,
-          /scripts\/workspaces\/runTypeScriptCli\.mjs\b|node scripts\/build\.mjs\b/,
+          /scripts\/workspaces\/(?:runTypeScriptCli|buildTypeScriptPackageDist)\.mjs\b|node scripts\/build\.mjs\b/,
           `${packagePath} ${scriptName} must resolve TypeScript through shared workspace tooling`,
         );
       }

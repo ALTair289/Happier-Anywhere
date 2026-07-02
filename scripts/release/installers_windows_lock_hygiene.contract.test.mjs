@@ -7,6 +7,13 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..', '..');
 
+function extractInstallerFunction(raw, name) {
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = raw.match(new RegExp(`function ${escapedName}\\s*\\{[\\s\\S]*?\\n\\}(?=\\n\\nfunction )`));
+  assert.ok(match, `expected ${name} to exist`);
+  return match[0];
+}
+
 test('install.ps1 performs deterministic Windows lock hygiene before payload promotion', async () => {
   const path = join(repoRoot, 'scripts', 'release', 'installers', 'install.ps1');
   const raw = await readFile(path, 'utf8');
@@ -92,6 +99,132 @@ test('install.ps1 returns scoped process matches as an object array', async () =
     functionMatch[0],
     /return\s+@\(\$matched\)/i,
     'return @($matched) wraps the generic list and throws on Windows when lock hygiene returns',
+  );
+});
+
+test('install.ps1 matches scoped process paths by path boundary, not sibling-prefix substring', async () => {
+  const path = join(repoRoot, 'scripts', 'release', 'installers', 'install.ps1');
+  const raw = await readFile(path, 'utf8');
+  const scopeHelper = extractInstallerFunction(raw, 'Test-InstallerLockHygienePathInScope');
+  const commandLineParser = extractInstallerFunction(raw, 'Resolve-InstallerLockHygieneExecutablePathFromCommandLine');
+  const processHelper = extractInstallerFunction(raw, 'Get-InstallerScopedHappierProcesses');
+
+  assert.match(
+    scopeHelper,
+    /-or\s+\$candidate\s+-eq\s+\$scope/i,
+    'scoped matching should include exact normalized path equality',
+  );
+  assert.match(
+    scopeHelper,
+    /\$scopePrefix\s*=\s*"\$scope\/"[\s\S]*\.StartsWith\(\$scopePrefix\)/i,
+    'scoped matching should require a path separator after the install root so .happier2 is not in scope for .happier',
+  );
+  assert.match(
+    commandLineParser,
+    /StartsWith\(["']"["']\)[\s\S]*IndexOf\(["']"["'],\s*1\)/i,
+    'process command lines should parse a quoted executable path before scope matching',
+  );
+  assert.match(
+    processHelper,
+    /Resolve-InstallerLockHygieneExecutablePathFromCommandLine\s+-CommandLine\s+\(\[string\]\$process\.CommandLine\)/i,
+    'process matching should parse the executable path from CommandLine when available',
+  );
+  assert.match(
+    processHelper,
+    /Test-InstallerLockHygienePathInScope\s+-CandidatePath\s+\$executablePath\s+-MatchNeedles\s+\$MatchNeedles/i,
+    'process matching should scope the reported executable path with the boundary-aware helper',
+  );
+  assert.match(
+    processHelper,
+    /Test-InstallerLockHygienePathInScope\s+-CandidatePath\s+\$commandExecutablePath\s+-MatchNeedles\s+\$MatchNeedles/i,
+    'process matching should scope the parsed command executable with the boundary-aware helper',
+  );
+  assert.doesNotMatch(
+    processHelper,
+    /\.Contains\(\$needle\)/i,
+    'process matching must not use substring scope checks because .happier2 contains .happier',
+  );
+});
+
+test('install.ps1 matches scoped service paths by path boundary, not sibling-prefix substring', async () => {
+  const path = join(repoRoot, 'scripts', 'release', 'installers', 'install.ps1');
+  const raw = await readFile(path, 'utf8');
+  const labelHelper = extractInstallerFunction(raw, 'Test-InstallerLockHygieneDaemonServiceLabelInScope');
+  const serviceHelper = extractInstallerFunction(raw, 'Get-InstallerScopedHappierServices');
+  const scheduledTaskHelper = extractInstallerFunction(raw, 'Get-InstallerScopedHappierScheduledTasks');
+  const preInstall = extractInstallerFunction(raw, 'Invoke-InstallerPreInstallLockHygiene');
+
+  assert.match(
+    labelHelper,
+    /\$leafLabel\s+-eq\s+["']happier-daemon["'][\s\S]*\.StartsWith\(["']happier-daemon\.["']\)/i,
+    'native service/task verification should only consider CLI daemon labels, not sibling services such as happier-server',
+  );
+  assert.match(serviceHelper, /Win32_Service/i, 'service detection should use native Windows service inventory');
+  assert.match(
+    serviceHelper,
+    /Test-InstallerLockHygieneDaemonServiceLabelInScope\s+-Label\s+\$service\.Name/i,
+    'service matching should require a daemon-owned service name before checking scoped paths',
+  );
+  assert.match(
+    serviceHelper,
+    /running[\s\S]*start pending[\s\S]*stop pending/i,
+    'service matching should only treat active or transitioning services as lock holders',
+  );
+  assert.match(
+    serviceHelper,
+    /\$servicePathText\s*=\s*\[string\]\$service\.PathName[\s\S]*Resolve-InstallerLockHygieneExecutablePathFromCommandLine\s+-CommandLine\s+\$servicePathText/i,
+    'service matching should parse the executable path from service PathName when available',
+  );
+  assert.match(
+    serviceHelper,
+    /Test-InstallerLockHygienePathInScope\s+-CandidatePath\s+\$serviceExecutablePath\s+-MatchNeedles\s+\$MatchNeedles/i,
+    'service matching should scope the parsed service executable with the boundary-aware helper',
+  );
+  assert.match(
+    serviceHelper,
+    /Test-InstallerLockHygieneTextContainsScopedPath\s+-Text\s+\$servicePathText\s+-MatchNeedles\s+\$MatchNeedles/i,
+    'service matching should scope the full service PathName text so hosted PowerShell/node services remain visible',
+  );
+  assert.doesNotMatch(
+    serviceHelper,
+    /\.Contains\(\$needle\)/i,
+    'service matching must not use substring scope checks because .happier2 contains .happier',
+  );
+  assert.match(
+    scheduledTaskHelper,
+    /Get-ScheduledTask[\s\S]*-TaskPath\s+["']\\Happier\\["']/i,
+    'scheduled task detection should inspect the Happier task folder used by the Windows background-service backend',
+  );
+  assert.match(
+    scheduledTaskHelper,
+    /Test-InstallerLockHygieneDaemonServiceLabelInScope\s+-Label\s+\$taskLabel/i,
+    'scheduled task matching should require a daemon-owned task label before checking scoped paths',
+  );
+  assert.match(
+    scheduledTaskHelper,
+    /Test-InstallerLockHygieneTextContainsScopedPath\s+-Text\s+\$actionText\s+-MatchNeedles\s+\$MatchNeedles/i,
+    'scheduled task action arguments should be scoped with boundary-aware text matching',
+  );
+  assert.doesNotMatch(
+    scheduledTaskHelper,
+    /\.Contains\(\$needle\)/i,
+    'scheduled task matching must not use substring scope checks because .happier2 contains .happier',
+  );
+  assert.match(
+    preInstall,
+    /if\s*\(\$existingInvoker\)\s*\{[\s\S]*Invoke-InstallerCommandWithDaemonServiceContextCapturingOutputWithTimeout/i,
+    'old-CLI stop commands must still run whenever an existing invoker is present because not all daemon shapes are visible to native process/service matching',
+  );
+  assert.doesNotMatch(preInstall, /Test-InstallerPreInstallOldCliStopNeeded|shouldRunOldCliStopCommands/i);
+  assert.match(
+    preInstall,
+    /Get-InstallerScopedHappierServices\s+-MatchNeedles\s+\$matchNeedles/i,
+    'pre-install hygiene should still verify scoped running services with boundary-aware matching after old-CLI cleanup',
+  );
+  assert.match(
+    preInstall,
+    /Get-InstallerScopedHappierScheduledTasks\s+-MatchNeedles\s+\$matchNeedles/i,
+    'pre-install hygiene should verify active scheduled-task backed services with boundary-aware matching after old-CLI cleanup',
   );
 });
 
