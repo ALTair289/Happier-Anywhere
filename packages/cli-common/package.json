@@ -10,6 +10,11 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./jsonOwnerBuildLockState": {
+      "import": "./jsonOwnerBuildLockState.cjs",
+      "require": "./jsonOwnerBuildLockState.cjs",
+      "default": "./jsonOwnerBuildLockState.cjs"
+    },
     "./links": {
       "types": "./dist/links.d.ts",
       "default": "./dist/links.js"

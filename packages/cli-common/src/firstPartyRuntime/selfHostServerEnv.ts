@@ -24,6 +24,10 @@ const SELF_HOST_SERVER_ENV_MANAGED_KEYS = new Set<string>([
     'PRISMA_CLIENT_ENGINE_TYPE',
     'PRISMA_QUERY_ENGINE_LIBRARY',
 ]);
+const SELF_HOST_SERVER_ENV_INSTALLER_OWNED_OVERRIDE_KEYS = new Set<string>([
+    'HAPPIER_SERVER_UI_DIR',
+    'HAPPIER_SERVER_LIGHT_UI_DIR',
+]);
 
 export function renderSelfHostServerEnvTextFromResolvedValues(params: Readonly<{
     port: number;
@@ -375,9 +379,22 @@ export function mergeSelfHostServerEnvText(params: Readonly<{
         merged = applyEnvOverridesToEnvText(merged, preservedExistingEntries);
     }
     if (params.overrides && Object.keys(params.overrides).length > 0) {
+        assertNoInstallerOwnedSelfHostServerEnvOverrides(params.overrides);
         merged = applyEnvOverridesToEnvText(merged, params.overrides);
     }
     return merged;
+}
+
+function assertNoInstallerOwnedSelfHostServerEnvOverrides(overrides: Readonly<Record<string, string>>): void {
+    for (const rawKey of Object.keys(overrides ?? {})) {
+        const key = String(rawKey ?? '').trim();
+        if (!key) continue;
+        assertValidEnvOverrideKey(key);
+        if (!SELF_HOST_SERVER_ENV_INSTALLER_OWNED_OVERRIDE_KEYS.has(key)) continue;
+        throw new Error(
+            `Invalid env override: ${key} is owned by the relay runtime installer and cannot be overridden.`,
+        );
+    }
 }
 
 function assertValidEnvOverrideKey(key: string): void {

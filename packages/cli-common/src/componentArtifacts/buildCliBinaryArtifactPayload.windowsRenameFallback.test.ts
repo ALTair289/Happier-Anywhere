@@ -89,6 +89,7 @@ describe('buildCliBinaryArtifactPayload Windows rename fallback', () => {
             ['apps', 'cli', 'scripts', 'ripgrep_launcher.cjs'],
             ['apps', 'cli', 'scripts', 'statusline_forwarder.cjs'],
             ['apps', 'cli', 'scripts', 'terminal_launch_spec_runner.cjs'],
+            ['apps', 'cli', 'scripts', 'node_pty_relay.cjs'],
             ['apps', 'cli', 'scripts', 'runtime', 'placeholder.txt'],
             ['apps', 'cli', 'scripts', 'shims', 'placeholder.txt'],
         ]) {

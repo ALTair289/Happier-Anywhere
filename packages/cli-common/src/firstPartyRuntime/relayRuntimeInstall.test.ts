@@ -201,6 +201,35 @@ describe('installOrUpdateRelayRuntimeLocal', () => {
     }
   });
 
+  it('rejects HAPPIER_SERVER_UI_DIR overrides instead of persisting a volatile UI source path', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'happier-cli-common-relay-runtime-'));
+    try {
+      const payloadRoot = join(homeDir, 'payload');
+      const migrationsSourceDir = join(payloadRoot, 'prisma', 'sqlite', 'migrations', '20200101000000_init');
+      await mkdir(migrationsSourceDir, { recursive: true });
+      await writeFile(join(migrationsSourceDir, 'migration.sql'), '-- init\n', 'utf8');
+
+      const serverBinaryPath = join(payloadRoot, 'happier-server');
+      await writeFile(serverBinaryPath, '#!/bin/sh\necho ok\n', 'utf8');
+
+      await expect(installOrUpdateRelayRuntimeLocal({
+        serverBinaryPath,
+        channel: 'preview',
+        mode: 'user',
+        platform: 'linux',
+        arch: 'arm64',
+        homeDir,
+        env: {
+          HAPPIER_SERVER_UI_DIR: join(tmpdir(), 'happier-ui-web-volatile'),
+        },
+        runServiceCommands: false,
+        skipHealthCheck: true,
+      })).rejects.toThrow(/owned by the relay runtime installer/i);
+    } finally {
+      await rm(homeDir, { recursive: true, force: true });
+    }
+  });
+
   it('removes managed payload sidecars that are no longer present in the new runtime payload', async () => {
     const homeDir = await mkdtemp(join(tmpdir(), 'happier-cli-common-relay-runtime-'));
     try {

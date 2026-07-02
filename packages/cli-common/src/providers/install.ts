@@ -523,7 +523,7 @@ async function materializeOpenCodeManagedPackageBinary(params: Readonly<{
   const rawPackageJson = await readFile(packageJsonPath, 'utf8');
   const optionalDependencyNames = readOptionalDependencyNames(JSON.parse(rawPackageJson));
   const sourceBinary = params.platform === 'win32' ? 'opencode.exe' : 'opencode';
-  const targetBinary = join(packageDir, 'bin', sourceBinary);
+  const targetBinary = join(packageDir, 'bin', 'opencode.exe');
   const candidates = resolveOpenCodePlatformPackageCandidates({
     platform: params.platform,
     arch: process.arch,

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { spawnSync as spawnLocalCommand } from 'node:child_process';
+import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
 import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -201,7 +202,7 @@ describe('installProviderCli vendor_recipe execution gating', () => {
     }
   });
 
-  it('repairs the Unix OpenCode package binary at the launcher target path', async () => {
+  it('materializes the Unix OpenCode package bin target so the managed launcher is runnable', async () => {
     if (!originalPlatformDescriptor || !originalArchDescriptor) {
       throw new Error('Expected process.platform to be configurable for this test');
     }
@@ -222,18 +223,34 @@ describe('installProviderCli vendor_recipe execution gating', () => {
           const workspaceDir = options.cwd;
           const opencodePackageDir = join(workspaceDir, 'node_modules', 'opencode-ai');
           const opencodeBinDir = join(opencodePackageDir, 'bin');
+          const nodeModulesBinDir = join(workspaceDir, 'node_modules', '.bin');
           mkdirSync(opencodeBinDir, { recursive: true });
+          mkdirSync(nodeModulesBinDir, { recursive: true });
           writeFileSync(
             join(opencodePackageDir, 'package.json'),
             JSON.stringify({
               name: 'opencode-ai',
+              bin: {
+                opencode: 'bin/opencode.exe',
+              },
               optionalDependencies: {
                 'opencode-darwin-arm64': '1.17.8',
               },
             }, null, 2),
             'utf8',
           );
-          writeFileSync(join(opencodeBinDir, 'opencode'), 'Error: opencode-ai postinstall was not run.\n', 'utf8');
+          writeFileSync(
+            join(opencodeBinDir, 'opencode.exe'),
+            '#!/bin/sh\necho "Error: opencode-ai\'s postinstall script was not run." >&2\nexit 1\n',
+            'utf8',
+          );
+          chmodSync(join(opencodeBinDir, 'opencode.exe'), 0o755);
+          writeFileSync(
+            join(nodeModulesBinDir, 'opencode'),
+            '#!/bin/sh\nshim_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\nexec "$shim_dir/../opencode-ai/bin/opencode.exe" "$@"\n',
+            'utf8',
+          );
+          chmodSync(join(nodeModulesBinDir, 'opencode'), 0o755);
           const platformPackageDir = join(
             workspaceDir,
             'node_modules',
@@ -245,7 +262,12 @@ describe('installProviderCli vendor_recipe execution gating', () => {
           const platformBinDir = join(platformPackageDir, 'bin');
           mkdirSync(platformBinDir, { recursive: true });
           writeFileSync(join(platformPackageDir, 'package.json'), JSON.stringify({ name: 'opencode-darwin-arm64' }, null, 2), 'utf8');
-          writeFileSync(join(platformBinDir, 'opencode'), 'REAL OPENCODE BINARY opencode-darwin-arm64\n', 'utf8');
+          writeFileSync(
+            join(platformBinDir, 'opencode'),
+            '#!/bin/sh\necho "REAL OPENCODE BINARY opencode-darwin-arm64 $*"\n',
+            'utf8',
+          );
+          chmodSync(join(platformBinDir, 'opencode'), 0o755);
         }
         return {
           pid: 0,
@@ -276,11 +298,23 @@ describe('installProviderCli vendor_recipe execution gating', () => {
 
       expect(res.ok).toBe(true);
       if (!res.ok) return;
-      const materializedBinary = await readFile(
-        join(homeDir, 'tools', 'providers', 'opencode', 'current', 'workspace', 'node_modules', 'opencode-ai', 'bin', 'opencode'),
+      const launcherPath = join(homeDir, 'tools', 'providers', 'opencode', 'current', 'bin', 'opencode');
+      const launched = spawnLocalCommand(launcherPath, ['--version'], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: '/usr/bin:/bin',
+        },
+      });
+      const combinedOutput = `${launched.stdout ?? ''}${launched.stderr ?? ''}`;
+      expect(combinedOutput).not.toContain("opencode-ai's postinstall script was not run");
+      expect(launched.status).toBe(0);
+      expect(combinedOutput).toContain('REAL OPENCODE BINARY opencode-darwin-arm64 --version');
+      const materializedPackageBinTarget = await readFile(
+        join(homeDir, 'tools', 'providers', 'opencode', 'current', 'workspace', 'node_modules', 'opencode-ai', 'bin', 'opencode.exe'),
         'utf8',
       );
-      expect(materializedBinary).toContain('REAL OPENCODE BINARY');
+      expect(materializedPackageBinTarget).toContain('REAL OPENCODE BINARY');
     } finally {
       Object.defineProperty(process, 'platform', originalPlatformDescriptor);
       Object.defineProperty(process, 'arch', originalArchDescriptor);

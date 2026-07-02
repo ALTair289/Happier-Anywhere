@@ -26,6 +26,7 @@ const CLI_RUNTIME_SIDECAR_ENTRIES = [
   ['ripgrep_launcher.cjs'],
   ['statusline_forwarder.cjs'],
   ['terminal_launch_spec_runner.cjs'],
+  ['node_pty_relay.cjs'],
   ['runtime'],
   ['shims'],
 ] as const;

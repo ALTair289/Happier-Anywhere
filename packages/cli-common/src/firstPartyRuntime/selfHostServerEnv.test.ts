@@ -78,6 +78,47 @@ describe('mergeSelfHostServerEnvText', () => {
     expect(merged).not.toContain('HAPPIER_SQLITE_MIGRATIONS_DIR=/old/migrations');
     expect(merged).not.toContain('HAPPIER_SERVER_UI_DIR=/old/ui');
   });
+
+  it('rejects explicit UI-dir overrides owned by the relay runtime installer', () => {
+    expect(() => mergeSelfHostServerEnvText({
+      baseEnvText: [
+        'PORT=3005',
+        'HAPPIER_SERVER_UI_DIR=/managed/ui',
+        '',
+      ].join('\n'),
+      overrides: {
+        HAPPIER_SERVER_UI_DIR: '/tmp/volatile-ui',
+      },
+    })).toThrow(/owned by the relay runtime installer/i);
+
+    expect(() => mergeSelfHostServerEnvText({
+      baseEnvText: [
+        'PORT=3005',
+        'HAPPIER_SERVER_UI_DIR=/managed/ui',
+        '',
+      ].join('\n'),
+      overrides: {
+        HAPPIER_SERVER_LIGHT_UI_DIR: '/tmp/legacy-volatile-ui',
+      },
+    })).toThrow(/owned by the relay runtime installer/i);
+  });
+
+  it('continues to allow non-UI runtime overrides used by relay smoke tests', () => {
+    const merged = mergeSelfHostServerEnvText({
+      baseEnvText: [
+        'PORT=3005',
+        'HAPPIER_DB_PROVIDER=sqlite',
+        'DATABASE_URL=file:/managed.sqlite',
+        'HAPPIER_SERVER_UI_DIR=/managed/ui',
+        '',
+      ].join('\n'),
+      overrides: {
+        HAPPIER_DB_PROVIDER: 'postgres',
+      },
+    });
+
+    expect(merged).toContain('HAPPIER_DB_PROVIDER=postgres');
+  });
 });
 
 describe('renderSelfHostServerEnvText', () => {
