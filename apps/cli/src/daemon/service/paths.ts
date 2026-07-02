@@ -23,6 +23,7 @@ export type DaemonServiceCliRuntime = Readonly<{
   channel: PublicReleaseRingId;
   targetMode: DaemonServiceTargetMode;
   instanceId: string;
+  activeServerId: string;
   uid: number | null;
   userHomeDir: string;
   happierHomeDir: string;

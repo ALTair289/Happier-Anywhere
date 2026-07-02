@@ -119,7 +119,9 @@ export async function spawnDetachedDaemonStartSync(
   if (!String(env.HAPPIER_PUBLIC_RELEASE_CHANNEL ?? '').trim()) {
     env.HAPPIER_PUBLIC_RELEASE_CHANNEL = getReleaseRingCatalogEntry(configuration.publicReleaseRing).publicLabel;
   }
-  if (!String(env.HAPPIER_DAEMON_STARTUP_SOURCE ?? '').trim()) {
+  if (startupSource) {
+    env.HAPPIER_DAEMON_STARTUP_SOURCE = startupSource;
+  } else if (!String(env.HAPPIER_DAEMON_STARTUP_SOURCE ?? '').trim()) {
     env.HAPPIER_DAEMON_STARTUP_SOURCE = startupSource ?? 'manual';
   }
 

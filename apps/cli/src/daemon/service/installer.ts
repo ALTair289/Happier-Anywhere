@@ -124,6 +124,7 @@ export async function previewDaemonServiceInstall(options: Readonly<{
   targetMode?: DaemonServiceTargetMode;
   darwinInstallMode?: 'rebootstrap' | 'kickstart';
   instanceId?: string;
+  activeServerId?: string;
   strategy?: DaemonServiceInstallStrategy;
   serverUrl?: string;
   webappUrl?: string;
@@ -142,6 +143,7 @@ export async function previewDaemonServiceInstall(options: Readonly<{
   const userHomeDir = options.userHomeDir ?? homedir();
   const happierHomeDir = options.happierHomeDir ?? configuration.happyHomeDir;
   const instanceId = options.instanceId ?? configuration.activeServerId;
+  const activeServerId = options.activeServerId ?? configuration.activeServerId;
   const channel = await resolveDaemonServiceReleaseChannel({ channel: options.channel });
   const targetMode: DaemonServiceTargetMode = options.targetMode ?? 'default-following';
   const serverUrl = options.serverUrl ?? configuration.apiServerUrl;
@@ -154,6 +156,7 @@ export async function previewDaemonServiceInstall(options: Readonly<{
     explicitNodePath,
     explicitEntryPath,
     targetMode,
+    channel,
     processEnv: process.env,
   });
   const strategy: DaemonServiceInstallStrategy = options.strategy
@@ -197,6 +200,7 @@ export async function previewDaemonServiceInstall(options: Readonly<{
     targetMode,
     darwinInstallMode: options.darwinInstallMode,
     instanceId,
+    activeServerId,
     uid,
     userHomeDir,
     happierHomeDir,
@@ -273,6 +277,7 @@ export async function installDaemonService(options: Readonly<{
   targetMode?: DaemonServiceTargetMode;
   darwinInstallMode?: 'rebootstrap' | 'kickstart';
   instanceId?: string;
+  activeServerId?: string;
   strategy?: DaemonServiceInstallStrategy;
   serverUrl?: string;
   webappUrl?: string;

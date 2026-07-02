@@ -65,6 +65,53 @@ describe('discoverInstalledDaemonServiceEntries', () => {
     });
   });
 
+  it('keeps explicit pinned service identity separate from the active relay profile id', async () => {
+    await withTempDir('happier-discover-service-entry-pinned-active-profile-', async (homeDir) => {
+      const servicesDir = join(homeDir, '.config', 'systemd', 'user');
+      mkdirSync(servicesDir, { recursive: true });
+      const path = join(servicesDir, 'happier-daemon.service-instance.service');
+      writeFileSync(
+        path,
+        renderSystemdServiceUnit({
+          description: 'Happier Daemon',
+          execStart: ['/Users/tester/.happier/cli/current/happier', 'daemon', 'start-sync'],
+          env: {
+            HAPPIER_ACTIVE_SERVER_ID: 'company-profile',
+            HAPPIER_DAEMON_STARTUP_SOURCE: 'background-service',
+            HAPPIER_DAEMON_SERVICE_TARGET_MODE: 'pinned',
+            HAPPIER_PUBLIC_RELEASE_CHANNEL: 'stable',
+          },
+          wantedBy: 'default.target',
+        }),
+        'utf-8',
+      );
+
+      const entries = await discoverInstalledDaemonServiceEntries({
+        platform: 'linux',
+        userHomeDir: homeDir,
+        happierHomeDir: join(homeDir, '.happier'),
+        mode: 'user',
+        serversById: {
+          'company-profile': {
+            name: 'Company profile',
+            serverUrl: 'https://company.example.test',
+          },
+        },
+      });
+
+      expect(entries).toEqual([
+        expect.objectContaining({
+          serverId: 'service-instance',
+          activeServerId: 'company-profile',
+          name: 'Company profile',
+          relayUrl: 'https://company.example.test',
+          targetMode: 'pinned',
+          path,
+        }),
+      ]);
+    });
+  });
+
   it('ignores invalid darwin launch-agent files that only match by filename', async () => {
     await withTempDir('happier-discover-service-entry-darwin-invalid-', async (homeDir) => {
       const servicesDir = join(homeDir, 'Library', 'LaunchAgents');

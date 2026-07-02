@@ -24,6 +24,11 @@ export function resolveDaemonStartupSourceFromEnv(
   env: NodeJS.ProcessEnv = process.env,
 ): DaemonStartupSource {
   const explicit = normalizeDaemonStartupSource(env.HAPPIER_DAEMON_STARTUP_SOURCE);
+  if (String(env.HAPPIER_DAEMON_RUNTIME_ID ?? '').trim()) {
+    if (!explicit || explicit === 'manual') {
+      return 'self-restart';
+    }
+  }
   if (explicit) {
     return explicit;
   }

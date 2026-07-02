@@ -1,6 +1,7 @@
 import { basename, join, win32 as win32Path } from 'node:path';
 
 import { getReleaseRingCatalogEntry, type PublicReleaseRingId } from '@happier-dev/release-runtime/releaseRings';
+import { isServerIdFilesystemSafe } from '@/server/serverId';
 
 import { buildLaunchAgentPlistXml, buildLaunchdPath } from './darwin';
 import { buildServicePath, planServiceAction, renderSystemdServiceUnit, renderWindowsScheduledTaskWrapperPs1 } from '@happier-dev/cli-common/service';
@@ -224,6 +225,18 @@ function buildDaemonServiceProgramArgs(params: Readonly<{ nodePath: string; entr
   return [nodePath, 'daemon', 'start-sync', '--takeover'];
 }
 
+function resolvePinnedActiveServerId(params: Readonly<{
+  targetMode: DaemonServiceTargetMode;
+  activeServerId?: string | null;
+}>): string | null {
+  if (params.targetMode === 'default-following') return null;
+  const activeServerId = String(params.activeServerId ?? '').trim();
+  if (!isServerIdFilesystemSafe(activeServerId)) {
+    throw new Error('active server id is required for pinned daemon service installs');
+  }
+  return activeServerId;
+}
+
 export function planDaemonServiceInstall(params: Readonly<{
   platform: DaemonServicePlatform;
   mode?: DaemonServiceMode;
@@ -232,6 +245,7 @@ export function planDaemonServiceInstall(params: Readonly<{
   targetMode?: DaemonServiceTargetMode;
   darwinInstallMode?: 'rebootstrap' | 'kickstart';
   instanceId: string;
+  activeServerId?: string | null;
   userHomeDir: string;
   happierHomeDir: string;
   serverUrl: string;
@@ -242,9 +256,12 @@ export function planDaemonServiceInstall(params: Readonly<{
   uid?: number;
 }>): DaemonServiceInstallPlan {
   const instanceId = sanitizeServiceInstanceId(params.instanceId);
-  const activeServerId = String(params.instanceId ?? '').trim();
   const channel: PublicReleaseRingId = params.channel ?? 'stable';
   const targetMode: DaemonServiceTargetMode = params.targetMode ?? 'pinned';
+  const activeServerId = resolvePinnedActiveServerId({
+    targetMode,
+    activeServerId: params.activeServerId,
+  });
   const publicReleaseChannel = getReleaseRingCatalogEntry(channel).publicLabel;
   const logInstanceId = targetMode === 'default-following' ? 'default' : instanceId;
   const logPrefix = targetMode === 'default-following'
@@ -270,7 +287,7 @@ export function planDaemonServiceInstall(params: Readonly<{
   const pinnedTargetEnv: Record<string, string> = targetMode === 'default-following'
     ? {}
     : {
-        HAPPIER_ACTIVE_SERVER_ID: activeServerId,
+        HAPPIER_ACTIVE_SERVER_ID: activeServerId!,
         HAPPIER_SERVER_URL: params.serverUrl,
         HAPPIER_WEBAPP_URL: params.webappUrl,
         HAPPIER_PUBLIC_SERVER_URL: params.publicServerUrl,

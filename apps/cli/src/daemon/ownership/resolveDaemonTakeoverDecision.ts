@@ -26,12 +26,27 @@ function canImplicitlyReplaceConflictingManualOwner(
   return !owner.versionMatches || !owner.releaseChannelMatches;
 }
 
+function canOverlapSelfRestartOwner(
+  owner: CurrentDaemonOwner,
+  startupSource: DaemonStartupSource,
+  takeoverRequested: boolean,
+): boolean {
+  return startupSource === 'self-restart'
+    && takeoverRequested
+    && owner.source === 'state'
+    && owner.serviceManaged !== true;
+}
+
 export function resolveDaemonTakeoverDecision(params: Readonly<{
   ownership: DaemonOwnerEvaluation;
   takeoverRequested: boolean;
   startupSource: DaemonStartupSource;
 }>): DaemonTakeoverDecision {
   if (params.ownership.kind === 'none' || params.ownership.kind === 'compatible') {
+    return { kind: 'ok' };
+  }
+
+  if (canOverlapSelfRestartOwner(params.ownership.owner, params.startupSource, params.takeoverRequested)) {
     return { kind: 'ok' };
   }
 

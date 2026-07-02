@@ -9,6 +9,7 @@ import type { DaemonServiceMode, DaemonServiceTargetMode } from './plan';
 
 export type InstalledDaemonServiceEntry = Readonly<{
   serverId: string;
+  activeServerId?: string | null;
   name: string;
   relayUrl?: string | null;
   installed: true;
@@ -83,6 +84,24 @@ function normalizeParsedReleaseChannel(value: string | null): PublicReleaseRingI
   if (value === 'dev') return 'publicdev';
   if (value === 'stable') return 'stable';
   return null;
+}
+
+function isLegacyEnvHashServiceId(serverId: string): boolean {
+  return /^env_[0-9a-f]+$/iu.test(String(serverId ?? '').trim());
+}
+
+function resolveDiscoveredServiceIdentity(params: Readonly<{
+  parsed: InstalledServicePathMatch;
+  activeServerId: string | null;
+}>): string {
+  if (
+    params.parsed.targetMode === 'pinned'
+    && params.activeServerId
+    && isLegacyEnvHashServiceId(params.parsed.serverId)
+  ) {
+    return params.activeServerId;
+  }
+  return params.parsed.serverId;
 }
 
 function readInstalledServiceFile(path: string): string | null {
@@ -355,7 +374,7 @@ function parseInstalledServiceMetadata(params: Readonly<{
   initialReleaseChannel: PublicReleaseRingId;
   initialTargetMode: DaemonServiceTargetMode;
 }>): Readonly<{
-  serverId: string | null;
+  activeServerId: string | null;
   happierHomeDir: string | null;
   relayUrl: string | null;
   releaseChannel: PublicReleaseRingId;
@@ -364,7 +383,7 @@ function parseInstalledServiceMetadata(params: Readonly<{
   const contents = readInstalledServiceFile(params.path);
   if (!contents) {
     return {
-      serverId: null,
+      activeServerId: null,
       happierHomeDir: null,
       relayUrl: null,
       releaseChannel: params.initialReleaseChannel,
@@ -384,7 +403,7 @@ function parseInstalledServiceMetadata(params: Readonly<{
   const parsedRelayUrl = readValue('HAPPIER_PUBLIC_SERVER_URL') ?? readValue('HAPPIER_SERVER_URL');
   const parsedReleaseChannel = normalizeParsedReleaseChannel(readValue('HAPPIER_PUBLIC_RELEASE_CHANNEL'));
   return {
-    serverId: parsedServerId,
+    activeServerId: parsedServerId,
     happierHomeDir: parsedHappierHomeDir,
     relayUrl: parsedRelayUrl,
     releaseChannel: parsedReleaseChannel ?? params.initialReleaseChannel,
@@ -442,8 +461,10 @@ export async function discoverInstalledDaemonServiceEntries(params: Readonly<{
         initialReleaseChannel: parsed.releaseChannel,
         initialTargetMode: parsed.targetMode,
       });
-      const resolvedServerId = String(metadata.serverId ?? '').trim() || parsed.serverId;
-      const profile = params.serversById[resolvedServerId];
+      const activeServerId = String(metadata.activeServerId ?? '').trim() || null;
+      const serviceServerId = resolveDiscoveredServiceIdentity({ parsed, activeServerId });
+      const profileServerId = activeServerId ?? serviceServerId;
+      const profile = params.serversById[profileServerId];
       const profileRelayUrl = typeof profile === 'object'
         && profile
         && !Array.isArray(profile)
@@ -453,10 +474,11 @@ export async function discoverInstalledDaemonServiceEntries(params: Readonly<{
       const name = metadata.targetMode === 'default-following'
         ? 'Default automatic startup'
         : typeof profile === 'object' && profile && !Array.isArray(profile) && typeof (profile as { name?: unknown }).name === 'string'
-          ? String((profile as { name: string }).name).trim() || resolvedServerId
-          : resolvedServerId;
+          ? String((profile as { name: string }).name).trim() || profileServerId
+          : profileServerId;
       return [{
-        serverId: resolvedServerId,
+        serverId: serviceServerId,
+        ...(activeServerId ? { activeServerId } : {}),
         name,
         relayUrl: metadata.relayUrl ?? profileRelayUrl,
         installed: true as const,

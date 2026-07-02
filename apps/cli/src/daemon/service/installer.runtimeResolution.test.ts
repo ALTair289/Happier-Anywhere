@@ -152,6 +152,34 @@ describe('installDaemonService runtime resolution', () => {
     expect(ensureJavaScriptRuntimeExecutableMock).not.toHaveBeenCalled();
   });
 
+  it('uses the selected managed release-channel shim for pinned installs', async () => {
+    resolveDesiredShimTargetsMock.mockResolvedValueOnce([{ shimPath: process.execPath, binaryPath: '/managed/hprev' }]);
+
+    const { previewDaemonServiceInstall } = await import('./installer');
+
+    await previewDaemonServiceInstall({
+      platform: 'linux',
+      uid: 123,
+      userHomeDir: '/home/test',
+      happierHomeDir: '/home/test/.happier',
+      channel: 'preview',
+      targetMode: 'pinned',
+      instanceId: 'qa_win_retry_profile',
+      activeServerId: 'qa_win_retry_profile',
+    });
+
+    expect(resolveDesiredShimTargetsMock).toHaveBeenCalledWith({
+      componentId: 'happier-daemon',
+      channel: 'preview',
+      processEnv: process.env,
+    });
+    expect(resolveDaemonServiceRuntimeTargetMock).toHaveBeenCalledWith({
+      currentExecPath: process.execPath,
+      explicitNodePath: process.execPath,
+    });
+    expect(ensureJavaScriptRuntimeExecutableMock).not.toHaveBeenCalled();
+  });
+
   it('uses the persisted default release channel when daemon service install has no explicit channel', async () => {
     const previousEnv = {
       HAPPIER_HOME_DIR: process.env.HAPPIER_HOME_DIR,

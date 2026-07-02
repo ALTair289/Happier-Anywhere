@@ -70,6 +70,17 @@ describe('resolveDaemonTakeoverDecision', () => {
         });
     });
 
+    it('allows explicit self-restart takeover to overlap a state-tracked manual owner', () => {
+        expect(resolveDaemonTakeoverDecision({
+            ownership: buildEvaluation('conflict', buildOwner({
+                serviceManaged: false,
+                startupSource: 'manual',
+            })),
+            takeoverRequested: true,
+            startupSource: 'self-restart',
+        })).toEqual({ kind: 'ok' });
+    });
+
     it('allows replacing a stale manual relay runtime without an explicit takeover flag', () => {
         expect(resolveDaemonTakeoverDecision({
             ownership: buildEvaluation('conflict', buildOwner({
@@ -85,6 +96,25 @@ describe('resolveDaemonTakeoverDecision', () => {
                 serviceManaged: false,
                 startupSource: 'manual',
                 versionMatches: false,
+            }),
+        });
+    });
+
+    it('does not overlap self-restart takeover with process-only owners', () => {
+        expect(resolveDaemonTakeoverDecision({
+            ownership: buildEvaluation('conflict', buildOwner({
+                source: 'process',
+                serviceManaged: false,
+                startupSource: 'manual',
+            })),
+            takeoverRequested: true,
+            startupSource: 'self-restart',
+        })).toEqual({
+            kind: 'manual-owner-takeover',
+            owner: buildOwner({
+                source: 'process',
+                serviceManaged: false,
+                startupSource: 'manual',
             }),
         });
     });

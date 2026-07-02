@@ -15,6 +15,23 @@ describe('resolveDaemonStartupSourceFromEnv', () => {
     ).toBe('manual');
   });
 
+  it('treats an inherited daemon runtime id as self-restart intent', () => {
+    expect(
+      resolveDaemonStartupSourceFromEnv({
+        HAPPIER_DAEMON_RUNTIME_ID: 'runtime-1',
+      } as NodeJS.ProcessEnv),
+    ).toBe('self-restart');
+  });
+
+  it('lets an inherited daemon runtime id override an inherited manual startup source', () => {
+    expect(
+      resolveDaemonStartupSourceFromEnv({
+        HAPPIER_DAEMON_STARTUP_SOURCE: 'manual',
+        HAPPIER_DAEMON_RUNTIME_ID: 'runtime-1',
+      } as NodeJS.ProcessEnv),
+    ).toBe('self-restart');
+  });
+
   it('honors an explicit background-service startup source marker', () => {
     expect(
       resolveDaemonStartupSourceFromEnv({

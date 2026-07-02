@@ -478,6 +478,7 @@ describe('daemonServiceInventory', () => {
                 channel: 'preview',
                 targetMode: 'default-following',
                 instanceId: 'cloud',
+                activeServerId: 'cloud',
                 uid: null,
                 userHomeDir: '/c/Users/test_qa',
                 happierHomeDir: runtimeHomeDir,

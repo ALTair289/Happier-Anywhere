@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { createEnvKeyScope } from '@/testkit/env/envScope';
+import { reserveEphemeralPort } from '@/testkit/http/portUtils';
 
-import { spawnSleepyDetachedProcess } from './testkit/fakeDaemonLifecycle.testkit';
+import { spawnSleepyDetachedProcess, spawnStoppableHttpDaemon } from './testkit/fakeDaemonLifecycle.testkit';
 
 const envScope = createEnvKeyScope([
   'HAPPIER_HOME_DIR',
@@ -219,6 +220,170 @@ describe('multiDaemon release ring scoping', () => {
       expect(cloud?.daemon.staleStateFile).toBe(false);
     } finally {
       await sleepy.kill();
+    }
+  });
+
+  it('reaps live same-home orphan daemon states without stopping the active daemon pid', async () => {
+    homeDir = join(tmpdir(), `happier-multi-daemon-orphan-reap-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    envScope.patch({
+      HAPPIER_HOME_DIR: homeDir,
+      HAPPIER_RELEASE_RING: 'dev',
+      HAPPIER_ACTIVE_SERVER_ID: 'cloud',
+      HAPPIER_SERVER_URL: 'https://api.happier.dev',
+      HAPPIER_WEBAPP_URL: 'https://app.happier.dev',
+    });
+
+    mkdirSync(homeDir, { recursive: true });
+    writeFileSync(
+      join(homeDir, 'settings.json'),
+      JSON.stringify(
+        {
+          activeServerId: 'cloud',
+          servers: {
+            cloud: {
+              id: 'cloud',
+              name: 'Cloud',
+              serverUrl: 'https://api.happier.dev',
+              webappUrl: 'https://app.happier.dev',
+            },
+            company: {
+              id: 'company',
+              name: 'Company',
+              serverUrl: 'https://company.example.test',
+              webappUrl: 'https://company.example.test',
+            },
+          },
+        },
+        null,
+        2,
+      ),
+      'utf-8',
+    );
+
+    const activeServerDir = join(homeDir, 'servers', 'cloud');
+    mkdirSync(activeServerDir, { recursive: true });
+    writeFileSync(
+      join(activeServerDir, 'daemon.state.json'),
+      JSON.stringify(
+        {
+          pid: process.pid,
+          httpPort: 7790,
+          startedAt: Date.now(),
+          startedWithCliVersion: '0.1.5',
+          controlToken: 'active-token',
+        },
+        null,
+        2,
+      ),
+      'utf-8',
+    );
+
+    const orphanPort = await reserveEphemeralPort();
+    const orphan = spawnStoppableHttpDaemon(orphanPort);
+    try {
+      const orphanServerDir = join(homeDir, 'servers', 'company');
+      mkdirSync(orphanServerDir, { recursive: true });
+      const orphanState = JSON.stringify(
+        {
+          pid: orphan.pid,
+          httpPort: orphanPort,
+          startedAt: Date.now(),
+          startedWithCliVersion: '0.1.4',
+          controlToken: 'orphan-token',
+        },
+        null,
+        2,
+      );
+      const canonicalOrphanStatePath = join(orphanServerDir, 'daemon.state.json');
+      const legacyOrphanStatePath = join(orphanServerDir, 'daemon.dev.state.json');
+      writeFileSync(canonicalOrphanStatePath, orphanState, 'utf-8');
+      writeFileSync(legacyOrphanStatePath, orphanState, 'utf-8');
+
+      vi.resetModules();
+      const { reapSameHomeDaemonOrphansBeforeStart } = await import('./multiDaemon');
+
+      const result = await reapSameHomeDaemonOrphansBeforeStart({ preservePids: [process.pid] });
+
+      expect(result.stoppedPids).toContain(orphan.pid);
+      expect(result.preservedPids).toContain(process.pid);
+      expect(() => process.kill(process.pid, 0)).not.toThrow();
+      expect(() => process.kill(orphan.pid, 0)).toThrow();
+      expect(existsSync(canonicalOrphanStatePath)).toBe(false);
+      expect(existsSync(legacyOrphanStatePath)).toBe(false);
+    } finally {
+      await orphan.kill();
+    }
+  });
+
+  it('does not stop live same-home daemon states when authenticated control is unavailable', async () => {
+    homeDir = join(tmpdir(), `happier-multi-daemon-tokenless-orphan-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    envScope.patch({
+      HAPPIER_HOME_DIR: homeDir,
+      HAPPIER_RELEASE_RING: 'dev',
+      HAPPIER_ACTIVE_SERVER_ID: 'cloud',
+      HAPPIER_SERVER_URL: 'https://api.happier.dev',
+      HAPPIER_WEBAPP_URL: 'https://app.happier.dev',
+    });
+
+    mkdirSync(homeDir, { recursive: true });
+    writeFileSync(
+      join(homeDir, 'settings.json'),
+      JSON.stringify(
+        {
+          activeServerId: 'cloud',
+          servers: {
+            cloud: {
+              id: 'cloud',
+              name: 'Cloud',
+              serverUrl: 'https://api.happier.dev',
+              webappUrl: 'https://app.happier.dev',
+            },
+            company: {
+              id: 'company',
+              name: 'Company',
+              serverUrl: 'https://company.example.test',
+              webappUrl: 'https://company.example.test',
+            },
+          },
+        },
+        null,
+        2,
+      ),
+      'utf-8',
+    );
+
+    const orphanPort = await reserveEphemeralPort();
+    const orphan = spawnStoppableHttpDaemon(orphanPort);
+    try {
+      const orphanServerDir = join(homeDir, 'servers', 'company');
+      mkdirSync(orphanServerDir, { recursive: true });
+      const orphanStatePath = join(orphanServerDir, 'daemon.state.json');
+      writeFileSync(
+        orphanStatePath,
+        JSON.stringify(
+          {
+            pid: orphan.pid,
+            httpPort: orphanPort,
+            startedAt: Date.now(),
+            startedWithCliVersion: '0.1.6',
+          },
+          null,
+          2,
+        ),
+        'utf-8',
+      );
+
+      vi.resetModules();
+      const { reapSameHomeDaemonOrphansBeforeStart } = await import('./multiDaemon');
+
+      const result = await reapSameHomeDaemonOrphansBeforeStart();
+
+      expect(result.stoppedPids).not.toContain(orphan.pid);
+      expect(result.failedPids).toContain(orphan.pid);
+      expect(existsSync(orphanStatePath)).toBe(true);
+      expect(() => process.kill(orphan.pid, 0)).not.toThrow();
+    } finally {
+      await orphan.kill();
     }
   });
 });
