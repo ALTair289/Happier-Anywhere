@@ -12,9 +12,16 @@ type DaemonStartupServiceConflictEvaluation =
     | Readonly<{ kind: 'installed-background-service-conflict'; services: readonly DaemonServiceListEntry[] }>;
 const {
     evaluateDaemonStartupServiceConflictMock,
+    reapSameHomeDaemonOrphansBeforeStartMock,
     renderDaemonInstalledServiceConflictMock,
 } = vi.hoisted(() => ({
     evaluateDaemonStartupServiceConflictMock: vi.fn(async (): Promise<DaemonStartupServiceConflictEvaluation> => ({ kind: 'none' })),
+    reapSameHomeDaemonOrphansBeforeStartMock: vi.fn(async () => ({
+        stoppedPids: [],
+        preservedPids: [],
+        removedStaleStatePaths: [],
+        failedPids: [],
+    })),
     renderDaemonInstalledServiceConflictMock: vi.fn(() => ({
         title: 'A background service is already installed for the selected relay.',
         lines: [
@@ -27,6 +34,14 @@ const {
 vi.mock('./startup/waitForInitialCredentials', () => ({
     waitForInitialCredentials: waitForInitialCredentialsMock,
 }));
+
+vi.mock('./multiDaemon', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('./multiDaemon')>();
+    return {
+        ...actual,
+        reapSameHomeDaemonOrphansBeforeStart: reapSameHomeDaemonOrphansBeforeStartMock,
+    };
+});
 
 vi.mock('@/daemon/ownership/daemonServiceInventory', async (importOriginal) => {
     const actual = await importOriginal<typeof import('@/daemon/ownership/daemonServiceInventory')>();
@@ -43,6 +58,7 @@ describe('startDaemon ownership preflight', () => {
         'HAPPIER_ACTIVE_SERVER_ID',
         'HAPPIER_PUBLIC_RELEASE_CHANNEL',
         'HAPPIER_DAEMON_STARTUP_SOURCE',
+        'HAPPIER_DAEMON_RUNTIME_ID',
         'HAPPIER_DAEMON_TAKEOVER',
         'HAPPIER_DAEMON_PROCESS_INVENTORY_FALLBACK',
         'HAPPIER_DAEMON_SERVICE_PLATFORM',
@@ -70,9 +86,37 @@ describe('startDaemon ownership preflight', () => {
             ],
         }));
         fetchMock.mockReset();
+        reapSameHomeDaemonOrphansBeforeStartMock.mockReset();
+        reapSameHomeDaemonOrphansBeforeStartMock.mockImplementation(async () => ({
+            stoppedPids: [],
+            preservedPids: [],
+            removedStaleStatePaths: [],
+            failedPids: [],
+        }));
         vi.unstubAllGlobals();
         vi.resetModules();
     });
+
+    it('reaps same-home daemon orphans before waiting for auth setup', async () => {
+        await withTempDir('happier-start-daemon-orphan-reaper-', async (homeDir) => {
+            envScope.patch({
+                HAPPIER_HOME_DIR: homeDir,
+                HAPPIER_ACTIVE_SERVER_ID: 'cloud',
+                HAPPIER_PUBLIC_RELEASE_CHANNEL: 'stable',
+            });
+            vi.resetModules();
+
+            const { startDaemon } = await import('./startDaemon');
+
+            await expect(startDaemon()).resolves.toBeUndefined();
+
+            expect(reapSameHomeDaemonOrphansBeforeStartMock).toHaveBeenCalledTimes(1);
+            expect(waitForInitialCredentialsMock).toHaveBeenCalledTimes(1);
+            expect(reapSameHomeDaemonOrphansBeforeStartMock.mock.invocationCallOrder[0]).toBeLessThan(
+                waitForInitialCredentialsMock.mock.invocationCallOrder[0],
+            );
+        });
+    }, 60_000);
 
     it('fails closed before auth setup when a different daemon is already running for the selected relay', async () => {
         await withTempDir('happier-start-daemon-owner-conflict-', async (homeDir) => {
@@ -255,7 +299,7 @@ describe('startDaemon ownership preflight', () => {
         });
     });
 
-    it('allows a self-restart to replace the current manual daemon runtime without an explicit takeover flag', async () => {
+    it('allows a self-restart to overlap the current state-tracked manual daemon runtime without stopping it first', async () => {
         await withTempDir('happier-start-daemon-self-restart-', async (homeDir) => {
             envScope.patch({
                 HAPPIER_HOME_DIR: homeDir,
@@ -284,7 +328,41 @@ describe('startDaemon ownership preflight', () => {
 
             await expect(startDaemon()).resolves.toBeUndefined();
             const fetchCalls = fetchMock.mock.calls as Array<readonly unknown[]>;
-            expect(fetchCalls.some((call) => String(call[0] ?? '').includes('/stop'))).toBe(true);
+            expect(fetchCalls.some((call) => String(call[0] ?? '').includes('/stop'))).toBe(false);
+            expect(waitForInitialCredentialsMock).toHaveBeenCalledTimes(1);
+        });
+    });
+
+    it('lets self-restart runtime-id intent override a parsed false takeover option', async () => {
+        await withTempDir('happier-start-daemon-self-restart-false-takeover-', async (homeDir) => {
+            envScope.patch({
+                HAPPIER_HOME_DIR: homeDir,
+                HAPPIER_ACTIVE_SERVER_ID: 'cloud',
+                HAPPIER_PUBLIC_RELEASE_CHANNEL: 'stable',
+                HAPPIER_DAEMON_RUNTIME_ID: 'runtime-manual',
+            });
+            vi.resetModules();
+            vi.stubGlobal('fetch', fetchMock);
+
+            const [{ writeDaemonState }, { startDaemon }] = await Promise.all([
+                import('@/persistence'),
+                import('./startDaemon'),
+            ]);
+
+            writeDaemonState({
+                pid: process.pid,
+                httpPort: 43116,
+                startedAt: Date.now(),
+                controlToken: 'control-token',
+                startedWithCliVersion: '0.0.0-other',
+                startedWithPublicReleaseChannel: 'preview',
+                startupSource: 'manual',
+                runtimeId: 'runtime-manual',
+            });
+
+            await expect(startDaemon({ takeover: false })).resolves.toBeUndefined();
+            const fetchCalls = fetchMock.mock.calls as Array<readonly unknown[]>;
+            expect(fetchCalls.some((call) => String(call[0] ?? '').includes('/stop'))).toBe(false);
             expect(waitForInitialCredentialsMock).toHaveBeenCalledTimes(1);
         });
     });

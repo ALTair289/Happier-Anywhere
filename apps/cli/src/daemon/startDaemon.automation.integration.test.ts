@@ -3,6 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 type ShutdownSource = 'happier-app' | 'happier-cli' | 'os-signal' | 'exception';
 type BuildHappyCliSubprocessLaunchSpec = typeof import('@/utils/spawnHappyCLI').buildHappyCliSubprocessLaunchSpec;
 
+const automationCredentials = {
+  token: 'token-automation',
+  encryption: { type: 'legacy' as const, secret: new Uint8Array(32).fill(7) },
+};
+
 function createRegisteredMachine(machineId: string) {
   return {
     id: machineId,
@@ -18,11 +23,12 @@ function createRegisteredMachine(machineId: string) {
 async function waitForCondition(
   predicate: () => boolean,
   message: string,
-  attempts: number = 40,
+  attempts: number = 400,
+  intervalMs: number = 5,
 ): Promise<void> {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }
   throw new Error(message);
 }
@@ -128,6 +134,7 @@ const harness = vi.hoisted(() => {
     updateDaemonState: vi.fn(async () => {}),
     shutdown: vi.fn(),
   };
+  const machineSyncClient = vi.fn(() => apiMachine);
 
   const lockHandle = { release: vi.fn(async () => {}) };
 
@@ -152,6 +159,7 @@ const harness = vi.hoisted(() => {
     automationWorkerPause,
     automationWorkerResume,
     apiMachine,
+    machineSyncClient,
     lockHandle,
     startConnectedServiceQuotasLoop,
     connectedServiceQuotasPause,
@@ -188,7 +196,7 @@ const harness = vi.hoisted(() => {
 vi.mock('@/api/api', () => ({
   ApiClient: {
     create: vi.fn(async () => ({
-      machineSyncClient: () => harness.apiMachine,
+      machineSyncClient: harness.machineSyncClient,
     })),
   },
   isMachineContentPublicKeyMismatchError: vi.fn(() => false),
@@ -214,7 +222,7 @@ vi.mock('@/ui/logger', () => ({
 
 vi.mock('@/ui/auth', () => ({
   authAndSetupMachineIfNeeded: vi.fn(async () => ({
-    credentials: { token: 'token-automation', encryption: { publicKey: 'a', machineKey: 'b' } },
+    credentials: automationCredentials,
     machineId: 'machine-automation',
   })),
 }));
@@ -308,6 +316,7 @@ vi.mock('@/settings/accountSettings/refreshAccountSettingsForMinimumVersion', ()
 vi.mock('./controlClient', () => ({
   cleanupDaemonState: vi.fn(async () => {}),
   isDaemonRunningCurrentlyInstalledHappyVersion: vi.fn(async () => false),
+  resolveDaemonSpawnSessionByNonce: vi.fn(async () => null),
   stopDaemon: vi.fn(async () => {}),
 }));
 
@@ -435,8 +444,23 @@ vi.mock('./automation/automationWorker', () => ({
   startAutomationWorker: harness.startAutomationWorker,
 }));
 
+vi.mock('./memory/memoryWorker', () => ({
+  startMemoryWorker: vi.fn(async () => null),
+}));
+
 vi.mock('./connectedServices/quotas/ConnectedServiceQuotasCoordinator', () => ({
-  ConnectedServiceQuotasCoordinator: vi.fn(),
+  ConnectedServiceQuotasCoordinator: vi.fn(() => ({
+    flushInBandQuotaPersistence: vi.fn(async () => ({ timedOut: false })),
+    notifyQuotaPersistenceConnectivityChanged: vi.fn(),
+    dispose: vi.fn(),
+    registerSpawnTarget: vi.fn(),
+    unregisterPid: vi.fn(),
+    transferPid: vi.fn(),
+    hydratePersistedQuotaSnapshotsForGroup: vi.fn(async () => {}),
+    probeGroupQuotaSnapshots: vi.fn(async () => {}),
+    handleAccountUsageChanged: vi.fn(async () => {}),
+    consumeRecoveryCreditForProfile: vi.fn(async () => null),
+  })),
 }));
 
 vi.mock('./connectedServices/quotas/createConnectedServiceQuotaFetchers', () => ({
@@ -460,6 +484,10 @@ vi.mock('./connectedServices/quotas/resolveConnectedServicesQuotasDaemonEnabled'
 
 vi.mock('./connectedServices/quotas/startConnectedServiceQuotasLoop', () => ({
   startConnectedServiceQuotasLoop: harness.startConnectedServiceQuotasLoop,
+}));
+
+vi.mock('./connectedServices/accountUsage/hydration', () => ({
+  hydrateProviderAccountUsageStoreFromSessionMetadata: vi.fn(async () => ({ hydratedRecordIds: [] })),
 }));
 
 vi.mock('./shutdownPolicy', () => ({
@@ -694,6 +722,49 @@ describe('startDaemon automation wiring (integration)', () => {
     }
   });
 
+  it('writes daemon state before passive provider-account usage hydration completes', async () => {
+    vi.useRealTimers();
+    harness.setAutoShutdownAfterAutomationStart(false);
+
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const hydration = createDeferred<{ hydratedRecordIds: string[] }>();
+    const startupSourceOriginal = process.env.HAPPIER_DAEMON_STARTUP_SOURCE;
+    let run: Promise<void> | null = null;
+
+    try {
+      process.env.HAPPIER_DAEMON_STARTUP_SOURCE = 'self-restart';
+      const { hydrateProviderAccountUsageStoreFromSessionMetadata } = await import('./connectedServices/accountUsage/hydration');
+      vi.mocked(hydrateProviderAccountUsageStoreFromSessionMetadata).mockImplementationOnce(async () => hydration.promise);
+
+      const { writeDaemonState } = await import('@/persistence');
+      const { startDaemon } = await import('./startDaemon');
+
+      run = startDaemon();
+      const writeDaemonStateMock = writeDaemonState as unknown as { mock: { calls: unknown[][] } };
+      await waitForCondition(
+        () => writeDaemonStateMock.mock.calls.length >= 1,
+        'Expected daemon state to be written before passive provider-account usage hydration completes',
+      );
+      await waitForCondition(
+        () => vi.mocked(hydrateProviderAccountUsageStoreFromSessionMetadata).mock.calls.length >= 1,
+        'Expected passive provider-account usage hydration to start after daemon state is written',
+      );
+
+      expect(writeDaemonState).toHaveBeenCalledTimes(1);
+      expect(hydrateProviderAccountUsageStoreFromSessionMetadata).toHaveBeenCalledTimes(1);
+    } finally {
+      hydration.resolve({ hydratedRecordIds: [] });
+      harness.requestShutdown('happier-cli');
+      if (run) await run;
+      if (startupSourceOriginal === undefined) {
+        delete process.env.HAPPIER_DAEMON_STARTUP_SOURCE;
+      } else {
+        process.env.HAPPIER_DAEMON_STARTUP_SOURCE = startupSourceOriginal;
+      }
+      exitSpy.mockRestore();
+    }
+  });
+
   it('starts automation worker after machine sync bootstrap and stops it on shutdown', async () => {
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
 
@@ -717,6 +788,10 @@ describe('startDaemon automation wiring (integration)', () => {
       expect(harness.apiMachine.connect).toHaveBeenCalledTimes(1);
       expect(harness.apiMachine.updateMachineMetadata).toHaveBeenCalledTimes(1);
       expect(harness.automationWorkerRefreshAssignments).toHaveBeenCalledTimes(2);
+      await waitForCondition(
+        () => harness.automationWorkerStop.mock.calls.length >= 1,
+        'Expected automation worker to stop during daemon shutdown cleanup',
+      );
       expect(harness.automationWorkerStop).toHaveBeenCalledTimes(1);
       expect(exitSpy).toHaveBeenCalledWith(0);
     } finally {
@@ -774,6 +849,7 @@ describe('startDaemon automation wiring (integration)', () => {
         () => harness.machineUpdateListeners.length >= 2,
         'Expected daemon machine update listeners to be registered',
       );
+      harness.bootstrapAccountSettingsContext.mockClear();
 
       for (const listener of harness.machineUpdateListeners) {
         listener({
@@ -791,7 +867,7 @@ describe('startDaemon automation wiring (integration)', () => {
 
       expect(harness.bootstrapAccountSettingsContext).toHaveBeenCalledWith(
         expect.objectContaining({
-          credentials: { token: 'token-automation', encryption: { publicKey: 'a', machineKey: 'b' } },
+          credentials: automationCredentials,
           minSettingsVersion: 3,
           mode: 'blocking',
           refresh: 'auto',
@@ -818,6 +894,7 @@ describe('startDaemon automation wiring (integration)', () => {
         () => harness.machineUpdateListeners.length >= 2,
         'Expected daemon machine update listeners to be registered',
       );
+      harness.bootstrapAccountSettingsContext.mockClear();
 
       for (const listener of harness.machineUpdateListeners) {
         listener({
@@ -863,7 +940,7 @@ describe('startDaemon automation wiring (integration)', () => {
       );
 
       expect(refreshAccountSettingsForMinimumVersion).toHaveBeenCalledWith(expect.objectContaining({
-        credentials: { token: 'token-automation', encryption: { publicKey: 'a', machineKey: 'b' } },
+        credentials: automationCredentials,
         minSettingsVersion: null,
         mode: 'blocking',
         forceRefresh: true,

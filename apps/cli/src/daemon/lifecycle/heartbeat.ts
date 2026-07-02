@@ -8,8 +8,11 @@ import { logger } from '@/ui/logger';
 import { gcExecutionRunMarkers } from '@/daemon/executionRunRegistry';
 import { findHappyProcessByPid } from '@/daemon/doctor';
 import { resolveComparableCliVersion } from '@/daemon/resolveComparableCliVersion';
-import { spawnDetachedDaemonStartSync } from '@/daemon/runtime/spawnDetachedDaemonStartSync';
 import { configuration } from '@/configuration';
+import {
+  readDaemonRestartVerifyPollMs,
+  readDaemonRestartVerifyTimeoutMs,
+} from '@/daemon/startupWaitDefaults';
 import {
   gcWorkspaceReplicationCas,
   gcWorkspaceReplicationJobs,
@@ -26,6 +29,9 @@ import {
   storedProcessHashProvesPidReuse,
   type SessionRunnerProcessIdentity,
 } from '../sessionRunnerProcessIdentity';
+import { requestDaemonSelfRestart } from './requestDaemonSelfRestart';
+
+type RequestDaemonSelfRestart = typeof requestDaemonSelfRestart;
 
 function parsePositiveInt(rawValue: string | undefined, fallback: number): number {
   const parsed = Number.parseInt(rawValue ?? '', 10);
@@ -77,28 +83,6 @@ export function getTrackedSessionHeartbeatPruneReason(params: Readonly<{
   return 'process-reused';
 }
 
-async function waitForReplacementDaemon(params: Readonly<{
-  ownPid: number;
-  expectedCliVersion: string;
-  timeoutMs: number;
-  pollMs: number;
-}>): Promise<boolean> {
-  const { ownPid, expectedCliVersion, timeoutMs, pollMs } = params;
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const daemonState = await readDaemonState();
-    if (
-      daemonState &&
-      daemonState.pid !== ownPid &&
-      daemonState.startedWithCliVersion === expectedCliVersion
-    ) {
-      return true;
-    }
-    await new Promise((resolve) => setTimeout(resolve, pollMs));
-  }
-  return false;
-}
-
 export function startDaemonHeartbeatLoop(params: Readonly<{
   pidToTrackedSession: Map<number, TrackedSession>;
   spawnResourceCleanupByPid: Map<number, () => void>;
@@ -111,6 +95,7 @@ export function startDaemonHeartbeatLoop(params: Readonly<{
   requestShutdown: (source: 'happier-app' | 'happier-cli' | 'os-signal' | 'exception', errorMessage?: string) => void;
   isShuttingDown?: () => boolean;
   readSessionRunnerProcessIdentity?: ReadSessionRunnerProcessIdentity;
+  requestSelfRestart?: RequestDaemonSelfRestart;
 }>): NodeJS.Timeout {
   const {
     pidToTrackedSession,
@@ -124,6 +109,7 @@ export function startDaemonHeartbeatLoop(params: Readonly<{
     requestShutdown,
     isShuttingDown,
     readSessionRunnerProcessIdentity,
+    requestSelfRestart = requestDaemonSelfRestart,
   } = params;
   const readSessionRunnerProcessIdentityForHeartbeat =
     readSessionRunnerProcessIdentity ?? readSessionRunnerProcessIdentityDefault;
@@ -143,8 +129,8 @@ export function startDaemonHeartbeatLoop(params: Readonly<{
   // 3. If outdated, restart with latest version
   // 4. Write heartbeat
   const heartbeatIntervalMs = parsePositiveInt(process.env.HAPPIER_DAEMON_HEARTBEAT_INTERVAL, 60000);
-  const restartVerifyTimeoutMs = parsePositiveInt(process.env.HAPPIER_DAEMON_RESTART_VERIFY_TIMEOUT_MS, 10000);
-  const restartVerifyPollMs = parsePositiveInt(process.env.HAPPIER_DAEMON_RESTART_VERIFY_POLL_MS, 250);
+  const restartVerifyTimeoutMs = readDaemonRestartVerifyTimeoutMs();
+  const restartVerifyPollMs = readDaemonRestartVerifyPollMs();
   const executionRunTerminalTtlMs = parseNonNegativeInt(
     process.env.HAPPIER_DAEMON_EXECUTION_RUN_TERMINAL_TTL_MS,
     6 * 60 * 60 * 1000,
@@ -312,39 +298,14 @@ export function startDaemonHeartbeatLoop(params: Readonly<{
       if (projectVersion && projectVersion !== currentCliVersion) {
         logger.debug('[DAEMON RUN] Daemon is outdated, triggering self-restart with latest version');
 
-        let spawnStarted = false;
-        try {
-          const spawned = await spawnDetachedDaemonStartSync({
-            startupSource: 'self-restart',
-            env: fileState.runtimeId
-              ? {
-                ...process.env,
-                HAPPIER_DAEMON_RUNTIME_ID: fileState.runtimeId,
-              }
-              : process.env,
-          });
-          spawned.unref?.();
-          spawnStarted = true;
-        } catch (error) {
-          logger.debug(
-            '[DAEMON RUN] Failed to spawn new daemon, this is quite likely to happen during integration tests as we are cleaning out dist/ directory',
-            error,
-          );
-        }
-
-        if (spawnStarted) {
-          const replacementConfirmed = await waitForReplacementDaemon({
-            ownPid: process.pid,
-            expectedCliVersion: projectVersion,
-            timeoutMs: restartVerifyTimeoutMs,
-            pollMs: restartVerifyPollMs,
-          });
-          if (replacementConfirmed) {
-            logger.debug('[DAEMON RUN] Replacement daemon confirmed. Exiting outdated daemon process.');
-            process.exit(0);
-          }
-          logger.debug('[DAEMON RUN] Replacement daemon was not confirmed before timeout. Keeping current daemon alive.');
-        }
+        await requestSelfRestart({
+          runtimeId: fileState.runtimeId,
+          expectedCliVersion: projectVersion,
+          ownPid: process.pid,
+          timeoutMs: restartVerifyTimeoutMs,
+          pollMs: restartVerifyPollMs,
+          takeover: true,
+        });
       }
 
       // Before recklessly overwriting the daemon state file, we should check if we are the ones who own it

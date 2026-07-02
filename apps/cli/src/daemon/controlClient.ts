@@ -17,11 +17,40 @@ import {
   type CodexChatGptAuthTokensRefreshResponse,
   type CodexChatGptAuthTokensRefreshSelection,
 } from '@/backends/codex/connectedServices/codexChatGptAuthTokensRefreshBridgeContract';
+import {
+  CLAUDE_SUBSCRIPTION_AUTH_TOKENS_REFRESH_PATH,
+  ClaudeSubscriptionAuthTokensRefreshResponseSchema,
+  type ClaudeSubscriptionAuthTokensRefreshResponse,
+  type ClaudeSubscriptionAuthTokensRefreshSelection,
+} from '@/backends/claude/connectedServices/claudeSubscriptionAuthTokensRefreshBridgeContract';
+import { deriveConnectedServiceBrokerRefreshToken } from '@/daemon/connectedServices/broker/brokerRefreshCapabilityToken';
 import { resolveComparableCliVersion } from './resolveComparableCliVersion';
-import type { ConnectedServiceBindingsV1, ConnectedServiceId } from '@happier-dev/protocol';
+import {
+  RestartAllSessionRunnersRequestV1Schema,
+  RestartAllSessionRunnersResultV1Schema,
+  RestartSessionRunnerRequestV1Schema,
+  RestartSessionRunnerResultV1Schema,
+  SessionRunnerRuntimeStateV1Schema,
+  SessionRunnerStatusGetRequestV1Schema,
+  type ConnectedServiceBindingsV1,
+  type ConnectedServiceId,
+  type RestartAllSessionRunnersRequestV1,
+  type RestartAllSessionRunnersResultV1,
+  type RestartSessionRunnerRequestV1,
+  type RestartSessionRunnerResultV1,
+  type SessionRunnerRestartModeV1,
+  type SessionRunnerRuntimeStateV1,
+  type SessionRunnerStatusGetRequestV1,
+} from '@happier-dev/protocol';
 
 export type DaemonControlRequestOptions = {
   timeoutMs?: number;
+};
+
+type DaemonPostAuthScope = 'daemon-control' | 'connected-service-broker-refresh';
+
+type DaemonPostOptions = DaemonControlRequestOptions & {
+  authScope?: DaemonPostAuthScope;
 };
 
 const DEFAULT_DAEMON_HTTP_TIMEOUT_MS = 10_000;
@@ -30,6 +59,7 @@ const DEFAULT_DAEMON_PING_TIMEOUT_MS = 3_000;
 const DEFAULT_DAEMON_STOP_WAIT_FOR_DEATH_TIMEOUT_MS = 12_000;
 const DEFAULT_DAEMON_SHUTDOWN_SPAWN_DRAIN_GRACE_MS = 10_000;
 const DAEMON_PING_UNREACHABLE_STARTUP_GRACE_MS = 60_000;
+const DAEMON_LOCK_UNCLASSIFIED_STARTUP_GRACE_MS = 60_000;
 const DAEMON_HTTP_TIMEOUT_ENV_KEY = 'HAPPIER_DAEMON_HTTP_TIMEOUT';
 const DAEMON_SPAWN_HTTP_TIMEOUT_ENV_KEY = 'HAPPIER_DAEMON_SPAWN_HTTP_TIMEOUT';
 const DAEMON_PING_TIMEOUT_ENV_KEY = 'HAPPIER_DAEMON_PING_TIMEOUT_MS';
@@ -38,6 +68,11 @@ const DAEMON_SHUTDOWN_SPAWN_DRAIN_GRACE_ENV_KEY = 'HAPPIER_DAEMON_SHUTDOWN_SPAWN
 
 export type OpenAiCodexDaemonRefreshSelection = CodexChatGptAuthTokensRefreshSelection;
 export type OpenAiCodexChatGptAuthTokensRefreshResult = CodexChatGptAuthTokensRefreshResponse;
+export type DaemonSessionRunnerRestartMode = SessionRunnerRestartModeV1;
+export type RestartAllDaemonSessionRunnersRequest = RestartAllSessionRunnersRequestV1;
+export type RestartAllDaemonSessionRunnersResult = RestartAllSessionRunnersResultV1;
+export type GetDaemonSessionRunnerStatusRequest = SessionRunnerStatusGetRequestV1;
+export type GetDaemonSessionRunnerStatusResult = SessionRunnerRuntimeStateV1;
 
 function resolveDaemonStateAgeMs(state: unknown): number | null {
   if (state && typeof state === 'object') {
@@ -57,6 +92,18 @@ function resolveDaemonStateAgeMs(state: unknown): number | null {
     // ignore
   }
 
+  return null;
+}
+
+function resolveDaemonLockAgeMs(): number | null {
+  try {
+    const stat = statSync(configuration.daemonLockFile);
+    if (Number.isFinite(stat.mtimeMs)) {
+      return Math.max(0, Date.now() - stat.mtimeMs);
+    }
+  } catch {
+    // ignore
+  }
   return null;
 }
 
@@ -147,7 +194,18 @@ async function inspectDaemonLockStartupProgress(): Promise<DaemonRunningInspecti
   const { findHappyProcessByPid } = await import('@/daemon/doctor');
   const proc = await findHappyProcessByPid(lockPid).catch(() => null);
   const safeToTreatAsStarting = proc?.type === 'daemon' || proc?.type === 'dev-daemon';
-  if (!safeToTreatAsStarting) return null;
+  if (!safeToTreatAsStarting) {
+    if (proc) return null;
+
+    const lockAgeMs = resolveDaemonLockAgeMs();
+    if (lockAgeMs !== null && lockAgeMs <= DAEMON_LOCK_UNCLASSIFIED_STARTUP_GRACE_MS) {
+      logger.debug('[DAEMON RUN] Daemon lock is held by a fresh live unclassified process before state was written, treating startup as in progress');
+      return { status: 'starting', pid: lockPid };
+    }
+
+    logger.debug('[DAEMON RUN] Daemon lock is held by a stale live unclassified process before state was written, ignoring startup lock');
+    return null;
+  }
 
   logger.debug('[DAEMON RUN] Daemon lock is held by a live daemon before state was written, treating startup as in progress');
   return { status: 'starting', pid: lockPid };
@@ -199,7 +257,7 @@ export async function inspectDaemonRunningStateAndCleanupStaleState(): Promise<D
   }
 }
 
-async function daemonPost(path: string, body?: any, options: DaemonControlRequestOptions = {}): Promise<{ error?: string } | any> {
+async function daemonPost(path: string, body?: any, options: DaemonPostOptions = {}): Promise<{ error?: string } | any> {
   const state = await readDaemonState();
   if (!state?.httpPort) {
     const errorMessage = 'No daemon running, no state file found';
@@ -222,8 +280,11 @@ async function daemonPost(path: string, body?: any, options: DaemonControlReques
   try {
     const timeout = resolveDaemonControlTimeoutMs(path, options);
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (state.controlToken) {
-      headers['x-happier-daemon-token'] = state.controlToken;
+    const authToken = options.authScope === 'connected-service-broker-refresh'
+      ? deriveConnectedServiceBrokerRefreshToken(state.controlToken)
+      : state.controlToken;
+    if (authToken) {
+      headers['x-happier-daemon-token'] = authToken;
     }
     const response = await fetch(`http://127.0.0.1:${state.httpPort}${path}`, {
       method: 'POST',
@@ -375,6 +436,8 @@ export async function notifyDaemonConnectedServiceQuotaSnapshot(
   body: Readonly<{
     sessionId: string;
     serviceId: string;
+    groupId?: string | null;
+    groupGeneration?: number | null;
     snapshot: unknown;
   }>,
   options: DaemonControlRequestOptions = {},
@@ -382,6 +445,8 @@ export async function notifyDaemonConnectedServiceQuotaSnapshot(
   return await daemonPost('/connected-service-quota-snapshot', {
     sessionId: body.sessionId,
     serviceId: body.serviceId,
+    ...(body.groupId !== undefined ? { groupId: body.groupId } : {}),
+    ...(body.groupGeneration !== undefined ? { groupGeneration: body.groupGeneration } : {}),
     snapshot: body.snapshot,
   }, options);
 }
@@ -415,7 +480,7 @@ export async function refreshDaemonOpenAiCodexChatGptAuthTokensForBridge(
     sessionId: body.sessionId,
     selection: body.selection,
     chatgptPlanType: body.chatgptPlanType,
-  }, options);
+  }, { ...options, authScope: 'connected-service-broker-refresh' });
   if (result?.error) {
     throw new Error(String(result.error));
   }
@@ -426,6 +491,44 @@ export async function refreshDaemonOpenAiCodexChatGptAuthTokensForBridge(
     throw new Error('Invalid daemon Codex ChatGPT refresh response');
   }
   return parsed.data;
+}
+
+export async function refreshDaemonClaudeSubscriptionAnthropicAuthTokensForBridge(
+  body: Readonly<{
+    sessionId: string;
+    selection: ClaudeSubscriptionAuthTokensRefreshSelection;
+  }>,
+  options: DaemonControlRequestOptions = {},
+): Promise<ClaudeSubscriptionAuthTokensRefreshResponse> {
+  const result = await daemonPost(CLAUDE_SUBSCRIPTION_AUTH_TOKENS_REFRESH_PATH, {
+    sessionId: body.sessionId,
+    selection: body.selection,
+  }, { ...options, authScope: 'connected-service-broker-refresh' });
+  if (result?.error) {
+    throw new Error(String(result.error));
+  }
+  const parsed = ClaudeSubscriptionAuthTokensRefreshResponseSchema.safeParse(
+    (result as { result?: unknown } | null)?.result,
+  );
+  if (!parsed.success) {
+    throw new Error('Invalid daemon Claude subscription refresh response');
+  }
+  return parsed.data;
+}
+
+/**
+ * Query the daemon whether the OpenCode broker plugin reported its load handshake (F4) for a given
+ * connected-service selection identity. Uses the broad daemon control token (Happier's own trusted
+ * query — distinct from the broker's scoped registration). Returns false on any error/unreachable.
+ */
+export async function queryDaemonOpenCodeBrokerLoadHandshake(
+  selectionIdentity: string,
+  loadNonce: string,
+  options: DaemonControlRequestOptions = {},
+): Promise<boolean> {
+  const result = await daemonPost('/connected-service-auth/opencode-broker/loaded-status', { selectionIdentity, loadNonce }, options);
+  if (!result || typeof result !== 'object' || (result as { error?: unknown }).error) return false;
+  return (result as { observed?: unknown }).observed === true;
 }
 
 export async function listDaemonSessions(): Promise<any[]> {
@@ -489,11 +592,75 @@ export async function resolveDaemonSpawnSessionByNonce(spawnNonce: string): Prom
   return { status: 'not_found' };
 }
 
+export async function requestDaemonSessionRunnerRestart(
+  request: RestartSessionRunnerRequestV1,
+  options: DaemonControlRequestOptions = {},
+): Promise<RestartSessionRunnerResultV1> {
+  const body = RestartSessionRunnerRequestV1Schema.parse(request);
+  const result = await daemonPost('/session-runners/restart', body, options);
+  if (result?.error) {
+    throw new Error(String(result.error));
+  }
+  const parsed = RestartSessionRunnerResultV1Schema.safeParse(result);
+  if (!parsed.success) {
+    throw new Error('Invalid daemon session runner restart response');
+  }
+  return parsed.data;
+}
+
+export async function restartAllDaemonSessionRunners(
+  request: RestartAllDaemonSessionRunnersRequest,
+  options: DaemonControlRequestOptions = {},
+): Promise<RestartAllDaemonSessionRunnersResult> {
+  const body = RestartAllSessionRunnersRequestV1Schema.parse(request);
+  const result = await daemonPost('/session-runners/restart-all', body, options);
+  if (result?.error) {
+    throw new Error(String(result.error));
+  }
+  const parsed = RestartAllSessionRunnersResultV1Schema.safeParse(result);
+  if (!parsed.success) {
+    throw new Error('Invalid daemon session runner restart response');
+  }
+  return parsed.data;
+}
+
+export async function getDaemonSessionRunnerStatus(
+  request: GetDaemonSessionRunnerStatusRequest,
+  options: DaemonControlRequestOptions = {},
+): Promise<GetDaemonSessionRunnerStatusResult> {
+  const body = SessionRunnerStatusGetRequestV1Schema.parse(request);
+  const result = await daemonPost('/session-runners/status', body, options);
+  if (result?.error) {
+    throw new Error(String(result.error));
+  }
+  const parsed = SessionRunnerRuntimeStateV1Schema.safeParse(result);
+  if (!parsed.success) {
+    throw new Error('Invalid daemon session runner status response');
+  }
+  return parsed.data;
+}
+
 export async function stopDaemonHttp(params: { stopSessions?: boolean } = {}): Promise<void> {
   const result = await daemonPost('/stop', params.stopSessions ? { stopSessions: true } : {});
   if (result?.error) {
     throw new Error(result.error);
   }
+}
+
+export async function restartDaemonHttp(): Promise<{ status: 'restarting' | 'already_restarting' }> {
+  const result = await daemonPost('/restart', {});
+  if (result?.error) {
+    throw new Error(String(result.error));
+  }
+  if (
+    result &&
+    typeof result === 'object' &&
+    ((result as { status?: unknown }).status === 'restarting'
+      || (result as { status?: unknown }).status === 'already_restarting')
+  ) {
+    return { status: (result as { status: 'restarting' | 'already_restarting' }).status };
+  }
+  throw new Error('Invalid daemon restart response');
 }
 
 /**
@@ -618,6 +785,12 @@ export async function stopDaemon(params: { stopSessions?: boolean } = {}) {
   try {
     const state = await readDaemonState();
     if (!state) {
+      const lockStartup = await inspectDaemonLockStartupProgress();
+      if (lockStartup) {
+        logger.debug('[CONTROL CLIENT] Daemon is still starting without state; refusing to stop startup lock PID');
+        return;
+      }
+
       const lockPid = readDaemonLockPid();
       if (!lockPid) {
         logger.debug('No daemon state found');

@@ -17,6 +17,20 @@ import {
   type CodexChatGptAuthTokensRefreshResponse,
   type CodexChatGptAuthTokensRefreshSelection,
 } from '@/backends/codex/connectedServices/codexChatGptAuthTokensRefreshBridgeContract';
+import {
+  CLAUDE_SUBSCRIPTION_AUTH_TOKENS_REFRESH_PATH,
+  ClaudeSubscriptionAuthTokensRefreshResponseSchema,
+  ClaudeSubscriptionAuthTokensRefreshSelectionSchema,
+  type ClaudeSubscriptionAuthTokensRefreshResponse,
+  type ClaudeSubscriptionAuthTokensRefreshSelection,
+} from '@/backends/claude/connectedServices/claudeSubscriptionAuthTokensRefreshBridgeContract';
+import {
+  OPEN_CODE_BROKER_LOADED_HANDSHAKE_PATH,
+  OpenCodeBrokerLoadHandshakeRequestSchema,
+  isValidOpenCodeBrokerRefreshToken,
+  recordOpenCodeBrokerLoadHandshake,
+  wasOpenCodeBrokerLoadHandshakeObserved,
+} from '@/backends/opencode/brokerPlugin';
 import { TrackedSession } from './types';
 import { SPAWN_SESSION_ERROR_CODES, SpawnSessionOptions, SpawnSessionResult } from '@/rpc/handlers/registerSessionHandlers';
 import {
@@ -30,10 +44,22 @@ import {
   ConnectedServiceIdSchema,
   ConnectedServiceQuotaRecoveryCreditConsumeRequestV1Schema,
   ConnectedServiceQuotaSnapshotV1Schema,
+  RestartAllSessionRunnersRequestV1Schema,
+  RestartAllSessionRunnersResultV1Schema,
+  RestartSessionRunnerRequestV1Schema,
+  RestartSessionRunnerResultV1Schema,
   SessionConnectedServiceAuthSwitchRpcParamsSchema,
+  SessionRunnerRuntimeStateV1Schema,
+  SessionRunnerStatusGetRequestV1Schema,
   type ConnectedServiceId,
   type ConnectedServiceQuotaSnapshotV1,
+  type RestartAllSessionRunnersRequestV1,
+  type RestartAllSessionRunnersResultV1,
+  type RestartSessionRunnerRequestV1,
+  type RestartSessionRunnerResultV1,
   type SessionConnectedServiceAuthSwitchRpcParams,
+  type SessionRunnerRuntimeStateV1,
+  type SessionRunnerStatusGetRequestV1,
 } from '@happier-dev/protocol';
 import {
   ConnectedServiceRuntimeAuthFailureKindSchema,
@@ -254,11 +280,16 @@ export function createDaemonControlApp({
   handleConnectedServiceTurnLifecycle,
   handleConnectedServiceUsageLimitWaitResumeCancel,
   handleSessionConnectedServiceAuthSwitch,
+  handleSessionRunnerRestart,
+  handleSessionRunnerRestartAll,
+  handleSessionRunnerStatusGet,
   handleConnectedServiceQuotaSnapshot,
   handleConnectedServiceQuotaRecoveryCreditConsume,
   handleCodexChatGptAuthTokensRefresh,
+  handleClaudeSubscriptionAuthTokensRefresh,
   runtimeAuthRecoveryScheduler,
   isShuttingDown,
+  requestSelfRestart,
 }: {
   getChildren: () => TrackedSession[];
   machineId: string;
@@ -291,9 +322,16 @@ export function createDaemonControlApp({
     sessionId: string;
   }>) => Promise<unknown>;
   handleSessionConnectedServiceAuthSwitch?: (input: Readonly<SessionConnectedServiceAuthSwitchRpcParams>) => Promise<unknown>;
+  handleSessionRunnerRestart?: (input: RestartSessionRunnerRequestV1) => Promise<RestartSessionRunnerResultV1>;
+  handleSessionRunnerRestartAll?: (
+    input: RestartAllSessionRunnersRequestV1,
+  ) => Promise<RestartAllSessionRunnersResultV1>;
+  handleSessionRunnerStatusGet?: (input: SessionRunnerStatusGetRequestV1) => Promise<SessionRunnerRuntimeStateV1>;
   handleConnectedServiceQuotaSnapshot?: (input: Readonly<{
     sessionId: string;
     serviceId: ConnectedServiceId;
+    groupId?: string | null;
+    groupGeneration?: number | null;
     snapshot: ConnectedServiceQuotaSnapshotV1;
   }>) => Promise<unknown>;
   handleConnectedServiceQuotaRecoveryCreditConsume?: (input: Readonly<{
@@ -306,7 +344,14 @@ export function createDaemonControlApp({
     sessionId: string;
     selection: CodexChatGptAuthTokensRefreshSelection;
     chatgptPlanType: string | null;
+    forceRefresh: boolean;
   }>) => Promise<CodexChatGptAuthTokensRefreshResponse>;
+  handleClaudeSubscriptionAuthTokensRefresh?: (input: Readonly<{
+    sessionId: string;
+    selection: ClaudeSubscriptionAuthTokensRefreshSelection;
+    forceRefresh: boolean;
+  }>) => Promise<ClaudeSubscriptionAuthTokensRefreshResponse>;
+  requestSelfRestart?: () => Promise<unknown>;
 }): FastifyInstance {
   void machineId;
   const normalizedControlToken = controlToken.trim();
@@ -421,6 +466,19 @@ export function createDaemonControlApp({
     }
   };
 
+  // Least-privilege gate for the broker-only endpoints (F2): they accept ONLY the SCOPED broker-refresh
+  // capability token derived from the master control token, NOT the broad master token itself. The
+  // broker plugin holds only this scoped token, so a leaked broker token cannot reach the broad surface.
+  const requireBrokerRefreshAuth = async (request: { headers: Record<string, unknown> }, reply: any): Promise<void> => {
+    const rawHeader = (request.headers as any)['x-happier-daemon-token'];
+    const provided = typeof rawHeader === 'string' ? rawHeader : Array.isArray(rawHeader) ? rawHeader[0] : null;
+    if (!isValidOpenCodeBrokerRefreshToken(provided, normalizedControlToken)) {
+      reply.code(401);
+      return reply.send({ success: false as const, error: 'Unauthorized' });
+    }
+  };
+  let restartState: 'idle' | 'restarting' = 'idle';
+
   typed.post('/ping', {
     schema: {
       response: {
@@ -459,6 +517,78 @@ export function createDaemonControlApp({
     }
     const result = await handleSessionConnectedServiceAuthSwitch(request.body);
     return { ok: true as const, result };
+  });
+
+  typed.post('/session-runners/restart', {
+    schema: {
+      body: RestartSessionRunnerRequestV1Schema,
+      response: {
+        200: RestartSessionRunnerResultV1Schema,
+        401: authSchema401,
+        501: z.object({
+          ok: z.literal(false),
+          errorCode: z.literal('session_runner_restart_handler_unavailable'),
+        }),
+      },
+    },
+    preHandler: requireAuth,
+  }, async (request, reply) => {
+    if (!handleSessionRunnerRestart) {
+      reply.code(501);
+      return {
+        ok: false as const,
+        errorCode: 'session_runner_restart_handler_unavailable' as const,
+      };
+    }
+    return await handleSessionRunnerRestart(request.body);
+  });
+
+  typed.post('/session-runners/restart-all', {
+    schema: {
+      body: RestartAllSessionRunnersRequestV1Schema,
+      response: {
+        200: RestartAllSessionRunnersResultV1Schema,
+        401: authSchema401,
+        501: z.object({
+          ok: z.literal(false),
+          errorCode: z.literal('session_runner_restart_all_handler_unavailable'),
+        }),
+      },
+    },
+    preHandler: requireAuth,
+  }, async (request, reply) => {
+    if (!handleSessionRunnerRestartAll) {
+      reply.code(501);
+      return {
+        ok: false as const,
+        errorCode: 'session_runner_restart_all_handler_unavailable' as const,
+      };
+    }
+    return await handleSessionRunnerRestartAll(request.body);
+  });
+
+  typed.post('/session-runners/status', {
+    schema: {
+      body: SessionRunnerStatusGetRequestV1Schema,
+      response: {
+        200: SessionRunnerRuntimeStateV1Schema,
+        401: authSchema401,
+        501: z.object({
+          ok: z.literal(false),
+          errorCode: z.literal('session_runner_status_handler_unavailable'),
+        }),
+      },
+    },
+    preHandler: requireAuth,
+  }, async (request, reply) => {
+    if (!handleSessionRunnerStatusGet) {
+      reply.code(501);
+      return {
+        ok: false as const,
+        errorCode: 'session_runner_status_handler_unavailable' as const,
+      };
+    }
+    return await handleSessionRunnerStatusGet(request.body);
   });
 
   // Session reports itself after creation
@@ -843,6 +973,8 @@ export function createDaemonControlApp({
       body: z.object({
         sessionId: z.string().min(1),
         serviceId: ConnectedServiceIdSchema,
+        groupId: z.string().trim().min(1).nullable().optional(),
+        groupGeneration: z.number().int().nonnegative().nullable().optional(),
         snapshot: ConnectedServiceQuotaSnapshotV1Schema,
       }).superRefine((body, ctx) => {
         if (body.snapshot.serviceId !== body.serviceId) {
@@ -888,6 +1020,8 @@ export function createDaemonControlApp({
     const result = await handleConnectedServiceQuotaSnapshot({
       sessionId: request.body.sessionId,
       serviceId: request.body.serviceId,
+      ...(request.body.groupId !== undefined ? { groupId: request.body.groupId } : {}),
+      ...(request.body.groupGeneration !== undefined ? { groupGeneration: request.body.groupGeneration } : {}),
       snapshot: request.body.snapshot,
     });
     return { ok: true as const, result };
@@ -943,6 +1077,9 @@ export function createDaemonControlApp({
         sessionId: z.string().min(1),
         selection: CodexChatGptAuthTokensRefreshSelectionSchema,
         chatgptPlanType: z.string().nullable().optional(),
+        // F6: the broker sets this ONLY on its 401-retry path; a cold cache-miss leaves it false so
+        // the daemon returns the current (valid) token instead of rotating the single-use refresh token.
+        forceRefresh: z.boolean().optional(),
       }),
       response: {
         200: z.object({
@@ -956,7 +1093,7 @@ export function createDaemonControlApp({
         }),
       },
     },
-    preHandler: requireAuth,
+    preHandler: requireBrokerRefreshAuth,
   }, async (request, reply) => {
     if (!handleCodexChatGptAuthTokensRefresh) {
       reply.code(501);
@@ -969,8 +1106,84 @@ export function createDaemonControlApp({
       sessionId: request.body.sessionId,
       selection: request.body.selection,
       chatgptPlanType: request.body.chatgptPlanType ?? null,
+      forceRefresh: request.body.forceRefresh === true,
     });
     return { ok: true as const, result };
+  });
+
+  typed.post(CLAUDE_SUBSCRIPTION_AUTH_TOKENS_REFRESH_PATH, {
+    schema: {
+      body: z.object({
+        sessionId: z.string().min(1),
+        selection: ClaudeSubscriptionAuthTokensRefreshSelectionSchema,
+        forceRefresh: z.boolean().optional(),
+      }),
+      response: {
+        200: z.object({
+          ok: z.literal(true),
+          result: ClaudeSubscriptionAuthTokensRefreshResponseSchema,
+        }),
+        401: authSchema401,
+        501: z.object({
+          ok: z.literal(false),
+          errorCode: z.literal('connected_service_claude_subscription_refresh_handler_unavailable'),
+        }),
+      },
+    },
+    preHandler: requireBrokerRefreshAuth,
+  }, async (request, reply) => {
+    if (!handleClaudeSubscriptionAuthTokensRefresh) {
+      reply.code(501);
+      return {
+        ok: false as const,
+        errorCode: 'connected_service_claude_subscription_refresh_handler_unavailable' as const,
+      };
+    }
+    const result = await handleClaudeSubscriptionAuthTokensRefresh({
+      sessionId: request.body.sessionId,
+      selection: request.body.selection,
+      forceRefresh: request.body.forceRefresh === true,
+    });
+    return { ok: true as const, result };
+  });
+
+  // F4: broker load handshake. The broker plugin pings this on activation (scoped token only) so the
+  // daemon records that the plugin actually loaded; the preflight then verifies it via loaded-status.
+  typed.post(OPEN_CODE_BROKER_LOADED_HANDSHAKE_PATH, {
+    schema: {
+      body: OpenCodeBrokerLoadHandshakeRequestSchema,
+      response: {
+        200: z.object({ ok: z.literal(true), result: z.object({ acknowledged: z.literal(true) }) }),
+        401: authSchema401,
+      },
+    },
+    preHandler: requireBrokerRefreshAuth,
+  }, async (request) => {
+    recordOpenCodeBrokerLoadHandshake({
+      selectionIdentity: request.body.selectionIdentity,
+      loadNonce: request.body.loadNonce,
+      providers: request.body.providers,
+      ...(request.body.pluginVersion ? { pluginVersion: request.body.pluginVersion } : {}),
+    });
+    return { ok: true as const, result: { acknowledged: true as const } };
+  });
+
+  // F4: broker load-handshake status query. Used by the connected-session preflight (Happier's own
+  // trusted query) over the broad control token — distinct from the broker's scoped registration above.
+  typed.post('/connected-service-auth/opencode-broker/loaded-status', {
+    schema: {
+      body: z.object({ selectionIdentity: z.string().min(1), loadNonce: z.string().min(1) }),
+      response: {
+        200: z.object({ ok: z.literal(true), observed: z.boolean() }),
+        401: authSchema401,
+      },
+    },
+    preHandler: requireAuth,
+  }, async (request) => {
+    return { ok: true as const, observed: wasOpenCodeBrokerLoadHandshakeObserved({
+      selectionIdentity: request.body.selectionIdentity,
+      loadNonce: request.body.loadNonce,
+    }) };
   });
 
   // List all tracked sessions
@@ -1329,6 +1542,69 @@ export function createDaemonControlApp({
   });
 
   // Stop daemon
+  typed.post('/restart', {
+    schema: {
+      body: z
+        .object({
+          stopSessions: z.boolean().optional(),
+          restartSessionRunners: z.boolean().optional(),
+        })
+        .nullish(),
+      response: {
+        202: z.object({
+          status: z.enum(['restarting', 'already_restarting']),
+        }),
+        401: authSchema401,
+        409: z.object({
+          status: z.literal('shutting_down'),
+        }),
+        400: z.object({
+          status: z.literal('unsupported_restart_options'),
+        }),
+        501: z.object({
+          status: z.literal('restart_unavailable'),
+        }),
+      },
+    },
+    preHandler: requireAuth,
+  }, async (request, reply) => {
+    if (isShuttingDown?.() === true) {
+      reply.code(409);
+      return { status: 'shutting_down' as const };
+    }
+    if (!requestSelfRestart) {
+      reply.code(501);
+      return { status: 'restart_unavailable' as const };
+    }
+    if (
+      request.body &&
+      (request.body.stopSessions !== undefined || request.body.restartSessionRunners !== undefined)
+    ) {
+      reply.code(400);
+      return { status: 'unsupported_restart_options' as const };
+    }
+    if (restartState === 'restarting') {
+      reply.code(202);
+      return { status: 'already_restarting' as const };
+    }
+
+    restartState = 'restarting';
+    setTimeout(() => {
+      void (async () => {
+        try {
+          await requestSelfRestart();
+        } catch (error) {
+          logger.debug('[CONTROL SERVER] Daemon self-restart request failed; keeping current daemon alive', error);
+        } finally {
+          restartState = 'idle';
+        }
+      })();
+    }, 50);
+
+    reply.code(202);
+    return { status: 'restarting' as const };
+  });
+
   typed.post('/stop', {
     schema: {
       body: z
@@ -1414,11 +1690,16 @@ export function startDaemonControlServer({
   handleConnectedServiceTurnLifecycle,
   handleConnectedServiceUsageLimitWaitResumeCancel,
   handleSessionConnectedServiceAuthSwitch,
+  handleSessionRunnerRestart,
+  handleSessionRunnerRestartAll,
+  handleSessionRunnerStatusGet,
   handleConnectedServiceQuotaSnapshot,
   handleConnectedServiceQuotaRecoveryCreditConsume,
   handleCodexChatGptAuthTokensRefresh,
+  handleClaudeSubscriptionAuthTokensRefresh,
   runtimeAuthRecoveryScheduler,
   isShuttingDown,
+  requestSelfRestart,
 }: {
   getChildren: () => TrackedSession[];
   machineId: string;
@@ -1448,9 +1729,16 @@ export function startDaemonControlServer({
     sessionId: string;
   }>) => Promise<unknown>;
   handleSessionConnectedServiceAuthSwitch?: (input: Readonly<SessionConnectedServiceAuthSwitchRpcParams>) => Promise<unknown>;
+  handleSessionRunnerRestart?: (input: RestartSessionRunnerRequestV1) => Promise<RestartSessionRunnerResultV1>;
+  handleSessionRunnerRestartAll?: (
+    input: RestartAllSessionRunnersRequestV1,
+  ) => Promise<RestartAllSessionRunnersResultV1>;
+  handleSessionRunnerStatusGet?: (input: SessionRunnerStatusGetRequestV1) => Promise<SessionRunnerRuntimeStateV1>;
   handleConnectedServiceQuotaSnapshot?: (input: Readonly<{
     sessionId: string;
     serviceId: ConnectedServiceId;
+    groupId?: string | null;
+    groupGeneration?: number | null;
     snapshot: ConnectedServiceQuotaSnapshotV1;
   }>) => Promise<unknown>;
   handleConnectedServiceQuotaRecoveryCreditConsume?: (input: Readonly<{
@@ -1463,7 +1751,14 @@ export function startDaemonControlServer({
     sessionId: string;
     selection: CodexChatGptAuthTokensRefreshSelection;
     chatgptPlanType: string | null;
+    forceRefresh: boolean;
   }>) => Promise<CodexChatGptAuthTokensRefreshResponse>;
+  handleClaudeSubscriptionAuthTokensRefresh?: (input: Readonly<{
+    sessionId: string;
+    selection: ClaudeSubscriptionAuthTokensRefreshSelection;
+    forceRefresh: boolean;
+  }>) => Promise<ClaudeSubscriptionAuthTokensRefreshResponse>;
+  requestSelfRestart?: () => Promise<unknown>;
 }): Promise<{ port: number; stop: () => Promise<void> }> {
   return new Promise((resolve) => {
     const app = createDaemonControlApp({
@@ -1480,11 +1775,16 @@ export function startDaemonControlServer({
       handleConnectedServiceTurnLifecycle,
       handleConnectedServiceUsageLimitWaitResumeCancel,
       handleSessionConnectedServiceAuthSwitch,
+      handleSessionRunnerRestart,
+      handleSessionRunnerRestartAll,
+      handleSessionRunnerStatusGet,
       handleConnectedServiceQuotaSnapshot,
       handleConnectedServiceQuotaRecoveryCreditConsume,
       handleCodexChatGptAuthTokensRefresh,
+      handleClaudeSubscriptionAuthTokensRefresh,
       runtimeAuthRecoveryScheduler,
       isShuttingDown,
+      requestSelfRestart,
     });
 
     app.listen({ port: 0, host: '127.0.0.1' }, (err, address) => {

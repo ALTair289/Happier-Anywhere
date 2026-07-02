@@ -283,9 +283,27 @@ const sessionRespawnManagerCapture = vi.hoisted(() => {
       markStopRequested: ReturnType<typeof vi.fn>;
       clearStopRequested: ReturnType<typeof vi.fn>;
       handleUnexpectedExit: ReturnType<typeof vi.fn>;
-      __params: { enabled: boolean };
+      __params: {
+        enabled: boolean;
+        onRespawnSuccess?: (input: { sessionId: string; previousPid: number; result: unknown }) => void;
+        onRespawnTerminal?: (input: {
+          sessionId: string;
+          previousPid: number;
+          reason: string;
+          detail?: string;
+        }) => void;
+      };
     }>,
-    createSessionRunnerRespawnManager: vi.fn((params: { enabled: boolean }) => {
+    createSessionRunnerRespawnManager: vi.fn((params: {
+      enabled: boolean;
+      onRespawnSuccess?: (input: { sessionId: string; previousPid: number; result: unknown }) => void;
+      onRespawnTerminal?: (input: {
+        sessionId: string;
+        previousPid: number;
+        reason: string;
+        detail?: string;
+      }) => void;
+    }) => {
       const manager = {
         markStopRequested: vi.fn(),
         clearStopRequested: vi.fn(),
@@ -298,6 +316,11 @@ const sessionRespawnManagerCapture = vi.hoisted(() => {
   };
   return capture;
 });
+const sessionRegistryCapture = vi.hoisted(() => ({
+  clearSessionMarkerConnectedServiceRestartIntent: vi.fn(async (_pid: number) => {}),
+  refreshSessionMarkerRespawn: vi.fn(async () => {}),
+  removeSessionMarker: vi.fn(async (_pid: number) => {}),
+}));
 const providerActivityRecorderCapture = vi.hoisted(() => ({
   record: vi.fn(async () => {}),
   createConnectedServiceProviderActivityProofRecorder: vi.fn(() => providerActivityRecorderCapture.record),
@@ -343,6 +366,17 @@ vi.mock('./platform/linux/buildCgroupSelfMigratingHappyCliLaunchSpec', () => ({
 vi.mock('./processSupervision/sessionRunnerRespawn', () => ({
   createSessionRunnerRespawnManager: sessionRespawnManagerCapture.createSessionRunnerRespawnManager,
 }));
+
+vi.mock('./sessionRegistry', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./sessionRegistry')>();
+  return {
+    ...actual,
+    clearSessionMarkerConnectedServiceRestartIntent:
+      sessionRegistryCapture.clearSessionMarkerConnectedServiceRestartIntent,
+    refreshSessionMarkerRespawn: sessionRegistryCapture.refreshSessionMarkerRespawn,
+    removeSessionMarker: sessionRegistryCapture.removeSessionMarker,
+  };
+});
 
 vi.mock('./connectedServices/recovery/providerActivityProofRecorder', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./connectedServices/recovery/providerActivityProofRecorder')>();
@@ -635,6 +669,9 @@ describe('startDaemon spawn resume wiring (integration)', () => {
     cgroupMigrationCapture.lastParams = null;
     sessionRespawnManagerCapture.createSessionRunnerRespawnManager.mockClear();
     sessionRespawnManagerCapture.instances.length = 0;
+    sessionRegistryCapture.clearSessionMarkerConnectedServiceRestartIntent.mockClear();
+    sessionRegistryCapture.refreshSessionMarkerRespawn.mockClear();
+    sessionRegistryCapture.removeSessionMarker.mockClear();
     providerActivityRecorderCapture.createConnectedServiceProviderActivityProofRecorder.mockClear();
     providerActivityRecorderCapture.record.mockClear();
     vi.mocked(materializeNextPendingQueueV2MessageViaHttp).mockClear();
@@ -916,7 +953,56 @@ describe('startDaemon spawn resume wiring (integration)', () => {
     }
   });
 
-  it('ignores dead startup session restart intents without respawning', async () => {
+  it('does not force-respawn orphaned dead OpenCode startup markers', async () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const refreshEnvOriginal = process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED;
+    process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED = 'false';
+    let run: Promise<void> | null = null;
+
+    try {
+      const reattachModule = await import('./sessions/reattachFromMarkers');
+      vi.mocked(reattachModule.reattachTrackedSessionsFromMarkers).mockImplementation(async () => ({
+        orphanedDeadDaemonSessions: [
+          {
+            sessionId: 'sess-opencode-startup-restart',
+            pid: 7302,
+          },
+        ],
+        connectedServiceRestartIntents: [],
+      }));
+
+      const { startDaemon } = await import('./startDaemon');
+      run = startDaemon();
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const manager = sessionRespawnManagerCapture.instances[0];
+      expect(manager?.handleUnexpectedExit).not.toHaveBeenCalled();
+      expect(sessionRegistryCapture.removeSessionMarker).not.toHaveBeenCalledWith(7302);
+
+      harness.requestShutdown('happier-cli');
+      await run;
+      run = null;
+    } finally {
+      if (run) {
+        harness.requestShutdown('happier-cli');
+        await run;
+      }
+      const reattachModule = await import('./sessions/reattachFromMarkers');
+      vi.mocked(reattachModule.reattachTrackedSessionsFromMarkers).mockImplementation(async () => ({
+        orphanedDeadDaemonSessions: [],
+        connectedServiceRestartIntents: [],
+      }));
+      if (refreshEnvOriginal === undefined) {
+        delete process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED;
+      } else {
+        process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED = refreshEnvOriginal;
+      }
+      exitSpy.mockRestore();
+    }
+  });
+
+  it('ignores startup session restart intents without respawning', async () => {
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
     const refreshEnvOriginal = process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED;
     process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED = 'false';
@@ -931,15 +1017,15 @@ describe('startDaemon spawn resume wiring (integration)', () => {
           {
             kind: 'dead',
             reason: 'terminal_prompt_injection_rehydrate',
-            sessionId: 'sess-durable-terminal-restart',
-            pid: 7302,
+            sessionId: 'sess-terminal-startup-restart',
+            pid: 7304,
             spawnOptions: {
-              directory: '/tmp/workspace-terminal',
+              directory: 'C:\\Users\\alice\\repo',
               backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
-              resume: 'claude-terminal-thread',
+              resume: 'claude-startup-thread',
               approvedNewDirectoryCreation: true,
             },
-            vendorResumeId: 'claude-terminal-thread',
+            vendorResumeId: 'claude-startup-thread',
           },
         ],
       }));
@@ -947,7 +1033,10 @@ describe('startDaemon spawn resume wiring (integration)', () => {
       const { startDaemon } = await import('./startDaemon');
       run = startDaemon();
 
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      for (let attempt = 0; attempt < 80; attempt += 1) {
+        if (sessionRespawnManagerCapture.createSessionRunnerRespawnManager.mock.calls.length > 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
 
       const manager = sessionRespawnManagerCapture.instances[0];
       expect(manager?.handleUnexpectedExit).not.toHaveBeenCalled();
@@ -2889,7 +2978,7 @@ describe('startDaemon spawn resume wiring (integration)', () => {
     }
   });
 
-  it('passes the canonical existing session id hint through to the webhook waiter for attach spawns', async () => {
+  it('waits for webhook proof instead of passing an existing session id shortcut for attach spawns', async () => {
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
     const refreshEnvOriginal = process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED;
     process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED = 'false';
@@ -2922,8 +3011,7 @@ describe('startDaemon spawn resume wiring (integration)', () => {
       expect(result).toEqual({ type: 'success', sessionId: 'sess_plain' });
       expect(waitForSessionWebhookMock).toHaveBeenCalledTimes(1);
       const firstCall = waitForSessionWebhookMock.mock.calls[0]?.[0];
-      expect(typeof firstCall?.resolveExistingSessionId).toBe('function');
-      expect(firstCall?.resolveExistingSessionId?.()).toBe('sess_plain');
+      expect(firstCall).not.toHaveProperty('resolveExistingSessionId');
 
       harness.requestShutdown('happier-cli');
       await run;

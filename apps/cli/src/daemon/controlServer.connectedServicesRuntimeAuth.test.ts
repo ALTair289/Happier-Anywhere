@@ -3,7 +3,14 @@ import { SPAWN_SESSION_ERROR_CODES } from '@happier-dev/protocol';
 
 import { logger } from '@/ui/logger';
 import { createTempDir, removeTempDir } from '@/testkit/fs/tempDir';
+import {
+  deriveOpenCodeBrokerRefreshToken,
+  resetOpenCodeBrokerLoadHandshakesForTests,
+} from '@/backends/opencode/brokerPlugin';
 import { createDaemonControlApp, startDaemonControlServer } from './controlServer';
+
+/** Scoped broker-refresh token for the master control token the bridge endpoints now require (F2). */
+const BROKER_SCOPED_TOKEN = deriveOpenCodeBrokerRefreshToken('token');
 import { buildRuntimeAuthRecoveryKey } from './connectedServices/runtimeAuth/recoveryKey/runtimeAuthRecoveryKey';
 import {
   RuntimeAuthRecoveryScheduler,
@@ -1910,6 +1917,8 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
         payload: {
           sessionId: 'sess_1',
           serviceId: 'openai-codex',
+          groupId: 'main',
+          groupGeneration: 7,
           snapshot: {
             v: 1,
             serviceId: 'openai-codex',
@@ -1931,6 +1940,8 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
       expect(handleConnectedServiceQuotaSnapshot).toHaveBeenCalledWith({
         sessionId: 'sess_1',
         serviceId: 'openai-codex',
+        groupId: 'main',
+        groupGeneration: 7,
         snapshot: expect.objectContaining({
           serviceId: 'openai-codex',
           profileId: 'primary',
@@ -2258,7 +2269,8 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
       const response = await app.inject({
         method: 'POST',
         url: '/connected-service-auth/openai-codex/chatgpt-auth-tokens/refresh',
-        headers: { 'x-happier-daemon-token': 'token' },
+        // The bridge now requires the SCOPED broker-refresh token (NOT the broad master token).
+        headers: { 'x-happier-daemon-token': BROKER_SCOPED_TOKEN },
         payload: {
           sessionId: 'sess_1',
           selection: {
@@ -2270,6 +2282,7 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
             generation: 7,
           },
           chatgptPlanType: 'plus',
+          forceRefresh: false,
         },
       });
 
@@ -2294,6 +2307,7 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
           generation: 7,
         },
         chatgptPlanType: 'plus',
+        forceRefresh: false,
       });
     } finally {
       await app.close();
@@ -2325,7 +2339,7 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
       const response = await app.inject({
         method: 'POST',
         url: '/connected-service-auth/openai-codex/chatgpt-auth-tokens/refresh',
-        headers: { 'x-happier-daemon-token': 'token' },
+        headers: { 'x-happier-daemon-token': BROKER_SCOPED_TOKEN },
         payload: {
           sessionId: 'sess_1',
           selection: {
@@ -2343,6 +2357,208 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
       expect(response.statusCode).toBe(400);
       expect(handleCodexChatGptAuthTokensRefresh).not.toHaveBeenCalled();
     } finally {
+      await app.close();
+    }
+  });
+
+  it('dispatches Claude subscription Anthropic refresh bridge requests to the daemon handler (access-only response)', async () => {
+    const handleClaudeSubscriptionAuthTokensRefresh = vi.fn(async () => ({
+      accessToken: 'fresh-claude-access',
+      anthropicAccountId: 'anthropic-acct',
+      expiresAt: 123_456,
+    }));
+    const app = createDaemonControlApp({
+      getChildren: () => [],
+      machineId: 'machine',
+      stopSession: async () => false,
+      spawnSession: async () => ({
+        type: 'error',
+        errorCode: SPAWN_SESSION_ERROR_CODES.UNEXPECTED,
+        errorMessage: 'unused',
+      }),
+      requestShutdown: () => {},
+      onHappySessionWebhook: () => {},
+      controlToken: 'token',
+      handleClaudeSubscriptionAuthTokensRefresh,
+    });
+
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/connected-service-auth/claude-subscription/anthropic-auth-tokens/refresh',
+        headers: { 'x-happier-daemon-token': BROKER_SCOPED_TOKEN },
+        payload: {
+          sessionId: 'sess_1',
+          selection: {
+            kind: 'group',
+            serviceId: 'claude-subscription',
+            groupId: 'main',
+            activeProfileId: 'backup',
+            fallbackProfileId: 'work',
+            generation: 7,
+          },
+          forceRefresh: true,
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      // The bridge returns ONLY the access token (+ non-secret account/expiry); never a refresh token.
+      expect(response.json()).toEqual({
+        ok: true,
+        result: {
+          accessToken: 'fresh-claude-access',
+          anthropicAccountId: 'anthropic-acct',
+          expiresAt: 123_456,
+        },
+      });
+      expect(response.json().result).not.toHaveProperty('refreshToken');
+      expect(handleClaudeSubscriptionAuthTokensRefresh).toHaveBeenCalledWith({
+        sessionId: 'sess_1',
+        selection: {
+          kind: 'group',
+          serviceId: 'claude-subscription',
+          groupId: 'main',
+          activeProfileId: 'backup',
+          fallbackProfileId: 'work',
+          generation: 7,
+        },
+        forceRefresh: true,
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('fails closed on the auth-token refresh bridges without the SCOPED broker token, and rejects the MASTER token (least privilege, F2)', async () => {
+    // Security boundary (no-leak, plan §5 item 6 / Lane C + F2 least privilege): the access-token
+    // bridges MUST reject any call lacking the SCOPED broker-refresh token and never run the refresh
+    // handler. A missing token, a wrong token, AND the broad MASTER control token all fail closed with
+    // 401 before the handler can mint/return an access token — only the scoped capability token passes.
+    const handleCodexChatGptAuthTokensRefresh = vi.fn(async () => ({
+      accessToken: 'must-not-be-minted',
+      chatgptAccountId: null,
+      chatgptPlanType: null,
+    }));
+    const handleClaudeSubscriptionAuthTokensRefresh = vi.fn(async () => ({
+      accessToken: 'must-not-be-minted',
+      anthropicAccountId: null,
+      expiresAt: null,
+    }));
+    const app = createDaemonControlApp({
+      getChildren: () => [],
+      machineId: 'machine',
+      stopSession: async () => false,
+      spawnSession: async () => ({
+        type: 'error',
+        errorCode: SPAWN_SESSION_ERROR_CODES.UNEXPECTED,
+        errorMessage: 'unused',
+      }),
+      requestShutdown: () => {},
+      onHappySessionWebhook: () => {},
+      controlToken: 'token',
+      handleCodexChatGptAuthTokensRefresh,
+      handleClaudeSubscriptionAuthTokensRefresh,
+    });
+
+    try {
+      const cases: ReadonlyArray<{ url: string; headers: Record<string, string> }> = [
+        { url: '/connected-service-auth/claude-subscription/anthropic-auth-tokens/refresh', headers: {} },
+        { url: '/connected-service-auth/claude-subscription/anthropic-auth-tokens/refresh', headers: { 'x-happier-daemon-token': 'wrong' } },
+        // The broad MASTER control token must NOT authorize the scoped broker endpoints.
+        { url: '/connected-service-auth/claude-subscription/anthropic-auth-tokens/refresh', headers: { 'x-happier-daemon-token': 'token' } },
+        { url: '/connected-service-auth/openai-codex/chatgpt-auth-tokens/refresh', headers: {} },
+        { url: '/connected-service-auth/openai-codex/chatgpt-auth-tokens/refresh', headers: { 'x-happier-daemon-token': 'wrong' } },
+        { url: '/connected-service-auth/openai-codex/chatgpt-auth-tokens/refresh', headers: { 'x-happier-daemon-token': 'token' } },
+      ];
+      for (const testCase of cases) {
+        const response = await app.inject({
+          method: 'POST',
+          url: testCase.url,
+          headers: testCase.headers,
+          payload: {
+            sessionId: 'sess_1',
+            selection: { kind: 'profile', serviceId: testCase.url.includes('claude') ? 'claude-subscription' : 'openai-codex', profileId: 'work' },
+          },
+        });
+        expect(response.statusCode).toBe(401);
+        expect(response.json()).toEqual({ success: false, error: 'Unauthorized' });
+      }
+      expect(handleClaudeSubscriptionAuthTokensRefresh).not.toHaveBeenCalled();
+      expect(handleCodexChatGptAuthTokensRefresh).not.toHaveBeenCalled();
+
+      // The SCOPED token is accepted (and reaches the handler).
+      const ok = await app.inject({
+        method: 'POST',
+        url: '/connected-service-auth/openai-codex/chatgpt-auth-tokens/refresh',
+        headers: { 'x-happier-daemon-token': BROKER_SCOPED_TOKEN },
+        payload: { sessionId: 'sess_1', selection: { kind: 'profile', serviceId: 'openai-codex', profileId: 'work' } },
+      });
+      expect(ok.statusCode).toBe(200);
+      expect(handleCodexChatGptAuthTokensRefresh).toHaveBeenCalledTimes(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('records the broker load handshake under the SCOPED token and exposes it via the loaded-status query (F4)', async () => {
+    resetOpenCodeBrokerLoadHandshakesForTests();
+    const app = createDaemonControlApp({
+      getChildren: () => [],
+      machineId: 'machine',
+      stopSession: async () => false,
+      spawnSession: async () => ({
+        type: 'error',
+        errorCode: SPAWN_SESSION_ERROR_CODES.UNEXPECTED,
+        errorMessage: 'unused',
+      }),
+      requestShutdown: () => {},
+      onHappySessionWebhook: () => {},
+      controlToken: 'token',
+    });
+
+    try {
+      const identity = 'opencode|connected|broker:1|openai-codex:p:';
+      const loadNonce = 'spawn-control-server-test';
+
+      // Before any handshake, loaded-status (master-token query) reports not-observed.
+      const before = await app.inject({
+        method: 'POST',
+        url: '/connected-service-auth/opencode-broker/loaded-status',
+        headers: { 'x-happier-daemon-token': 'token' },
+        payload: { selectionIdentity: identity, loadNonce },
+      });
+      expect(before.statusCode).toBe(200);
+      expect(before.json()).toEqual({ ok: true, observed: false });
+
+      // The broker registers its handshake using the SCOPED token (master token is rejected here).
+      const masterRejected = await app.inject({
+        method: 'POST',
+        url: '/connected-service-auth/broker/loaded',
+        headers: { 'x-happier-daemon-token': 'token' },
+        payload: { selectionIdentity: identity, loadNonce, providers: ['openai'] },
+      });
+      expect(masterRejected.statusCode).toBe(401);
+
+      const registered = await app.inject({
+        method: 'POST',
+        url: '/connected-service-auth/broker/loaded',
+        headers: { 'x-happier-daemon-token': BROKER_SCOPED_TOKEN },
+        payload: { selectionIdentity: identity, loadNonce, providers: ['openai'] },
+      });
+      expect(registered.statusCode).toBe(200);
+      expect(registered.json()).toEqual({ ok: true, result: { acknowledged: true } });
+
+      // loaded-status now reports observed.
+      const after = await app.inject({
+        method: 'POST',
+        url: '/connected-service-auth/opencode-broker/loaded-status',
+        headers: { 'x-happier-daemon-token': 'token' },
+        payload: { selectionIdentity: identity, loadNonce },
+      });
+      expect(after.statusCode).toBe(200);
+      expect(after.json()).toEqual({ ok: true, observed: true });
+    } finally {
+      resetOpenCodeBrokerLoadHandshakesForTests();
       await app.close();
     }
   });
@@ -2564,7 +2780,7 @@ describe('startDaemonControlServer connected-service runtime wiring', () => {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'x-happier-daemon-token': 'token',
+          'x-happier-daemon-token': BROKER_SCOPED_TOKEN,
         },
         body: JSON.stringify({
           sessionId: 'sess_1',
@@ -2593,6 +2809,7 @@ describe('startDaemonControlServer connected-service runtime wiring', () => {
           profileId: 'work',
         },
         chatgptPlanType: null,
+        forceRefresh: false,
       });
     } finally {
       await server.stop();

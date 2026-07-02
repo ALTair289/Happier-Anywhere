@@ -1,5 +1,4 @@
 import { logger } from '@/ui/logger';
-import { readPositiveIntEnv } from '@/utils/readPositiveIntEnv';
 import { readStartedByArg } from '@/cli/readStartedByArg';
 
 import { isDaemonRunningCurrentlyInstalledHappyVersion } from '@/daemon/controlClient';
@@ -12,9 +11,11 @@ import {
 } from '@/daemon/ownership/daemonOwnershipMetadata';
 import { resolveDaemonServiceCliRuntimeFromEnv } from '@/daemon/service/cli';
 import { spawnDetachedDaemonStartSync } from '@/daemon/runtime/spawnDetachedDaemonStartSync';
-
-const DEFAULT_STARTUP_WAIT_TIMEOUT_MS = 5000;
-const DEFAULT_STARTUP_POLL_MS = 250;
+import {
+  DEFAULT_SESSION_AUTOSTART_DAEMON_WAIT_POLL_MS,
+  readDaemonStartWaitPollMs,
+  readDaemonStartWaitTimeoutMs,
+} from '@/daemon/startupWaitDefaults';
 
 export function shouldEnsureDaemonForInvocation(params: Readonly<{ args: string[] }>): boolean {
   const args = Array.isArray(params.args) ? params.args : [];
@@ -107,8 +108,8 @@ export async function ensureDaemonRunningForSessionCommand(): Promise<void> {
     const daemonProcess = await spawnDetachedDaemonStartSync();
     daemonProcess.unref();
 
-    const timeoutMs = readPositiveIntEnv('HAPPIER_DAEMON_START_WAIT_TIMEOUT_MS', DEFAULT_STARTUP_WAIT_TIMEOUT_MS);
-    const pollMs = readPositiveIntEnv('HAPPIER_DAEMON_START_WAIT_POLL_MS', DEFAULT_STARTUP_POLL_MS);
+    const timeoutMs = readDaemonStartWaitTimeoutMs();
+    const pollMs = readDaemonStartWaitPollMs(DEFAULT_SESSION_AUTOSTART_DAEMON_WAIT_POLL_MS);
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, pollMs));

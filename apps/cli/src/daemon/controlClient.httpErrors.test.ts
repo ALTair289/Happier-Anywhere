@@ -9,6 +9,7 @@ import {
   resolveDaemonSpawnSessionByNonce,
   spawnDaemonSession,
 } from '@/daemon/controlClient';
+import { deriveConnectedServiceBrokerRefreshToken } from '@/daemon/connectedServices/broker/brokerRefreshCapabilityToken';
 import type { SpawnDaemonSessionRequest } from '@/rpc/handlers/spawnSessionOptionsContract';
 import { createEnvKeyScope } from '@/testkit/env/envScope';
 import { createTempDir, removeTempDir } from '@/testkit/fs/tempDir';
@@ -460,8 +461,11 @@ describe('daemon control client (HTTP error responses)', () => {
 
   it('posts Codex ChatGPT refresh bridge requests to daemon control server', async () => {
     let observedBody: Record<string, unknown> | null = null;
+    let observedAuthToken: string | undefined;
     const server = http.createServer((req, res) => {
       if (req.method === 'POST' && req.url === '/connected-service-auth/openai-codex/chatgpt-auth-tokens/refresh') {
+        const rawAuthToken = req.headers['x-happier-daemon-token'];
+        observedAuthToken = Array.isArray(rawAuthToken) ? rawAuthToken.join(',') : rawAuthToken;
         let rawBody = '';
         req.setEncoding('utf8');
         req.on('data', (chunk) => {
@@ -529,6 +533,8 @@ describe('daemon control client (HTTP error responses)', () => {
         },
         chatgptPlanType: 'plus',
       });
+      expect(observedAuthToken).toBe(deriveConnectedServiceBrokerRefreshToken('test-token'));
+      expect(observedAuthToken).not.toBe('test-token');
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }

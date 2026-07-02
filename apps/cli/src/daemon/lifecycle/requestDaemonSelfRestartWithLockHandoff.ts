@@ -1,0 +1,64 @@
+import type { DaemonShutdownSource } from './shutdown';
+import {
+  requestDaemonSelfRestart,
+  type RequestDaemonSelfRestartResult,
+} from './requestDaemonSelfRestart';
+import { reacquireDaemonLockAfterFailedSelfRestart } from './reacquireDaemonLockAfterFailedSelfRestart';
+
+type RequestShutdown = (source: DaemonShutdownSource, errorMessage?: string) => void;
+
+type RequestDaemonSelfRestart = typeof requestDaemonSelfRestart;
+
+export async function requestDaemonSelfRestartWithLockHandoff<TLockHandle>({
+  getCurrentDaemonLockHandle,
+  setCurrentDaemonLockHandle,
+  releaseDaemonLock,
+  acquireDaemonLock,
+  requestShutdown,
+  requestSelfRestart = requestDaemonSelfRestart,
+  selfRestartParams,
+}: Readonly<{
+  getCurrentDaemonLockHandle: () => TLockHandle | null;
+  setCurrentDaemonLockHandle: (lockHandle: TLockHandle | null) => void;
+  releaseDaemonLock: (lockHandle: TLockHandle) => Promise<void>;
+  acquireDaemonLock: () => Promise<TLockHandle | null>;
+  requestShutdown: RequestShutdown;
+  requestSelfRestart?: RequestDaemonSelfRestart;
+  selfRestartParams: Parameters<RequestDaemonSelfRestart>[0];
+}>): Promise<RequestDaemonSelfRestartResult> {
+  let releasedDaemonLockForRestart = false;
+  const daemonLockHandle = getCurrentDaemonLockHandle();
+  if (daemonLockHandle) {
+    await releaseDaemonLock(daemonLockHandle);
+    setCurrentDaemonLockHandle(null);
+    releasedDaemonLockForRestart = true;
+  }
+
+  let result: RequestDaemonSelfRestartResult;
+  try {
+    result = await requestSelfRestart(selfRestartParams);
+  } catch (error) {
+    const reacquired = await reacquireDaemonLockAfterFailedSelfRestart({
+      releasedDaemonLockForRestart,
+      currentDaemonLockHandle: getCurrentDaemonLockHandle(),
+      acquireDaemonLock,
+      requestShutdown,
+      resultStatus: 'threw',
+    });
+    setCurrentDaemonLockHandle(reacquired);
+    throw error;
+  }
+
+  if (result.status !== 'exited') {
+    const reacquired = await reacquireDaemonLockAfterFailedSelfRestart({
+      releasedDaemonLockForRestart,
+      currentDaemonLockHandle: getCurrentDaemonLockHandle(),
+      acquireDaemonLock,
+      requestShutdown,
+      resultStatus: result.status,
+    });
+    setCurrentDaemonLockHandle(reacquired);
+  }
+
+  return result;
+}

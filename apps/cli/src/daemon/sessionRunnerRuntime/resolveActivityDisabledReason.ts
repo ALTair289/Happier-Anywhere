@@ -1,0 +1,23 @@
+import type { SessionRunnerRestartDisabledReason } from '@happier-dev/protocol';
+
+export type SessionRunnerActivityDisabledReasonReaders = Readonly<{
+  isTurnInProgress?: (sessionId: string) => boolean;
+  hasPendingApproval?: (sessionId: string) => boolean;
+  isTerminalDetached?: (sessionId: string) => boolean;
+  isTerminalHostAttached?: (sessionId: string) => boolean;
+}>;
+
+export function resolveSessionRunnerActivityDisabledReason(
+  sessionId: string,
+  readers: SessionRunnerActivityDisabledReasonReaders,
+): SessionRunnerRestartDisabledReason | null {
+  const normalizedSessionId = typeof sessionId === 'string' ? sessionId.trim() : '';
+  if (!normalizedSessionId) return null;
+
+  if (readers.isTurnInProgress?.(normalizedSessionId) === true) return 'turn_in_progress';
+  if (readers.hasPendingApproval?.(normalizedSessionId) === true) return 'approval_pending';
+  if (readers.isTerminalDetached?.(normalizedSessionId) === true) return 'terminal_detached';
+  if (readers.isTerminalHostAttached?.(normalizedSessionId) === true) return 'terminal_host_attached';
+
+  return null;
+}

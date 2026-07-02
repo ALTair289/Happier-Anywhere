@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, utimesSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 import { createEnvKeyScope } from '@/testkit/env/envScope';
@@ -23,6 +23,7 @@ describe('daemon control client startup lock inspection', () => {
     envScope.restore();
     envScope = createEnvKeyScope(['HAPPIER_HOME_DIR']);
     vi.resetModules();
+    vi.doUnmock('@/daemon/doctor');
   });
 
   it('reports startup in progress when a live daemon lock exists before state is written', async () => {
@@ -55,6 +56,106 @@ describe('daemon control client startup lock inspection', () => {
       });
       expect(existsSync(configuration.daemonLockFile)).toBe(true);
     } finally {
+      removeTempDirSync(homeDir);
+    }
+  });
+
+  it('treats a fresh live unclassified lock holder as startup in progress', async () => {
+    const homeDir = createTempDirSync('happier-cli-daemon-starting-lock-unclassified-');
+    envScope.patch({
+      HAPPIER_HOME_DIR: homeDir,
+    });
+
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true as any);
+    vi.doMock('@/daemon/doctor', () => ({
+      findHappyProcessByPid: vi.fn(async () => null),
+    }));
+
+    try {
+      vi.resetModules();
+      const [{ configuration }, { inspectDaemonRunningStateAndCleanupStaleState }] = await Promise.all([
+        import('@/configuration'),
+        import('./controlClient'),
+      ]);
+
+      mkdirSync(dirname(configuration.daemonLockFile), { recursive: true });
+      writeFileSync(configuration.daemonLockFile, '424242', 'utf-8');
+
+      await expect(inspectDaemonRunningStateAndCleanupStaleState()).resolves.toEqual({
+        status: 'starting',
+        pid: 424242,
+      });
+      expect(existsSync(configuration.daemonLockFile)).toBe(true);
+    } finally {
+      killSpy.mockRestore();
+      removeTempDirSync(homeDir);
+    }
+  });
+
+  it('does not report startup forever for a stale live unclassified lock holder', async () => {
+    const homeDir = createTempDirSync('happier-cli-daemon-stale-live-lock-unclassified-');
+    envScope.patch({
+      HAPPIER_HOME_DIR: homeDir,
+    });
+
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true as any);
+    vi.doMock('@/daemon/doctor', () => ({
+      findHappyProcessByPid: vi.fn(async () => null),
+    }));
+
+    try {
+      vi.resetModules();
+      const [{ configuration }, { inspectDaemonRunningStateAndCleanupStaleState }] = await Promise.all([
+        import('@/configuration'),
+        import('./controlClient'),
+      ]);
+
+      mkdirSync(dirname(configuration.daemonLockFile), { recursive: true });
+      writeFileSync(configuration.daemonLockFile, '424243', 'utf-8');
+      const stale = new Date(Date.now() - 10 * 60_000);
+      utimesSync(configuration.daemonLockFile, stale, stale);
+
+      await expect(inspectDaemonRunningStateAndCleanupStaleState()).resolves.toEqual({
+        status: 'not-running',
+      });
+      expect(existsSync(configuration.daemonLockFile)).toBe(true);
+    } finally {
+      killSpy.mockRestore();
+      removeTempDirSync(homeDir);
+    }
+  });
+
+  it('does not stop a fresh live daemon startup lock before state is written', async () => {
+    const homeDir = createTempDirSync('happier-cli-daemon-stop-starting-lock-');
+    envScope.patch({
+      HAPPIER_HOME_DIR: homeDir,
+    });
+
+    const killCalls: Array<{ pid: number; signal?: NodeJS.Signals | 0 }> = [];
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation((pid, signal) => {
+      killCalls.push({ pid: Number(pid), signal: signal as NodeJS.Signals | 0 | undefined });
+      return true as any;
+    });
+    vi.doMock('@/daemon/doctor', () => ({
+      findHappyProcessByPid: vi.fn(async () => ({ type: 'dev-daemon' })),
+    }));
+
+    try {
+      vi.resetModules();
+      const [{ configuration }, { stopDaemon }] = await Promise.all([
+        import('@/configuration'),
+        import('./controlClient'),
+      ]);
+
+      mkdirSync(dirname(configuration.daemonLockFile), { recursive: true });
+      writeFileSync(configuration.daemonLockFile, '424244', 'utf-8');
+
+      await stopDaemon();
+
+      expect(killCalls).toEqual([{ pid: 424244, signal: 0 }]);
+      expect(existsSync(configuration.daemonLockFile)).toBe(true);
+    } finally {
+      killSpy.mockRestore();
       removeTempDirSync(homeDir);
     }
   });
