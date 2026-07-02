@@ -17,6 +17,19 @@ function stableJsonStringify(value: JsonValue): string {
     .join(',')}}`;
 }
 
+/**
+ * Replaces potentially multi-megabyte file texts with `{length, sha256}` digests so the identity
+ * hash never has to stable-stringify the full payload. Content sensitivity is preserved via the
+ * per-text digest.
+ */
+function digestOptionalText(text: string | null | undefined): JsonValue {
+  if (typeof text !== 'string') return null;
+  return {
+    length: text.length,
+    sha256: createHash('sha256').update(text).digest('hex'),
+  };
+}
+
 function normalizeFileEvidence(file: TurnChangeSet['files'][number]): JsonValue {
   return {
     binary: file.binary === true,
@@ -24,14 +37,14 @@ function normalizeFileEvidence(file: TurnChangeSet['files'][number]): JsonValue 
     confidence: file.confidence,
     description: file.description ?? null,
     filePath: file.filePath,
-    newText: file.newText ?? null,
-    oldText: file.oldText ?? null,
+    newText: digestOptionalText(file.newText),
+    oldText: digestOptionalText(file.oldText),
     previousFilePath: file.previousFilePath ?? null,
     provider: file.provider,
     providerMessageId: file.providerMessageId ?? null,
     providerTurnId: file.providerTurnId ?? null,
     source: file.source,
-    unifiedDiff: file.unifiedDiff ?? null,
+    unifiedDiff: digestOptionalText(file.unifiedDiff),
   };
 }
 
