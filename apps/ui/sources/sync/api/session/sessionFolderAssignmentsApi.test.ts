@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { SESSION_FOLDER_ASSIGNMENT_QUERY_MAX_SESSION_IDS } from '@happier-dev/protocol';
+import { SESSION_ORGANIZATION_MAX_SCOPED_SNAPSHOT_IDS } from '@happier-dev/protocol';
 
 const mocks = vi.hoisted(() => ({
     serverFetch: vi.fn(),
@@ -23,6 +23,22 @@ function jsonResponse(body: unknown, status = 200): Response {
     });
 }
 
+function organizationSnapshotResponse(assignments: unknown[]) {
+    return {
+        snapshot: {
+            schemaVersion: 1,
+            version: 1,
+            pins: [],
+            folders: [],
+            folderAssignments: assignments,
+            tags: [],
+            tagAssignments: [],
+            orderEntries: [],
+            labels: [],
+        },
+    };
+}
+
 describe('sessionFolderAssignmentsApi', () => {
     beforeEach(() => {
         mocks.serverFetch.mockReset();
@@ -31,11 +47,9 @@ describe('sessionFolderAssignmentsApi', () => {
 
     it('fetches assignments for visible sessions', async () => {
         const { fetchSessionFolderAssignmentsForSessions } = await import('./sessionFolderAssignmentsApi');
-        mocks.serverFetch.mockResolvedValueOnce(jsonResponse({
-            assignments: [
+        mocks.serverFetch.mockResolvedValueOnce(jsonResponse(organizationSnapshotResponse([
                 { sessionId: 's1', folderId: 'folder-a' },
-            ],
-        }));
+        ])));
 
         const response = await fetchSessionFolderAssignmentsForSessions({
             credentials,
@@ -46,7 +60,7 @@ describe('sessionFolderAssignmentsApi', () => {
             { sessionId: 's1', folderId: 'folder-a' },
         ]);
         expect(mocks.serverFetch).toHaveBeenCalledWith(
-            '/v2/session-folder-assignments?sessionIds=s1%2Cs2',
+            '/v2/session-organization?includeFolders=false&includeTags=false&includeLabels=false&assignmentSessionIds=s1%2Cs2',
             expect.objectContaining({
                 headers: expect.objectContaining({ Authorization: 'Bearer token-a' }),
             }),
@@ -57,16 +71,12 @@ describe('sessionFolderAssignmentsApi', () => {
     it('chunks visible-session assignment fetches to the shared server limit', async () => {
         const { fetchSessionFolderAssignmentsForSessions } = await import('./sessionFolderAssignmentsApi');
         const sessionIds = Array.from(
-            { length: SESSION_FOLDER_ASSIGNMENT_QUERY_MAX_SESSION_IDS + 2 },
+            { length: SESSION_ORGANIZATION_MAX_SCOPED_SNAPSHOT_IDS + 2 },
             (_value, index) => `s${index}`,
         );
         mocks.serverFetch
-            .mockResolvedValueOnce(jsonResponse({
-                assignments: [{ sessionId: 's0', folderId: 'folder-a' }],
-            }))
-            .mockResolvedValueOnce(jsonResponse({
-                assignments: [{ sessionId: `s${SESSION_FOLDER_ASSIGNMENT_QUERY_MAX_SESSION_IDS}`, folderId: 'folder-b' }],
-            }));
+            .mockResolvedValueOnce(jsonResponse(organizationSnapshotResponse([{ sessionId: 's0', folderId: 'folder-a' }])))
+            .mockResolvedValueOnce(jsonResponse(organizationSnapshotResponse([{ sessionId: `s${SESSION_ORGANIZATION_MAX_SCOPED_SNAPSHOT_IDS}`, folderId: 'folder-b' }])));
 
         const response = await fetchSessionFolderAssignmentsForSessions({
             credentials,
@@ -75,14 +85,14 @@ describe('sessionFolderAssignmentsApi', () => {
 
         expect(response.assignments).toEqual([
             { sessionId: 's0', folderId: 'folder-a' },
-            { sessionId: `s${SESSION_FOLDER_ASSIGNMENT_QUERY_MAX_SESSION_IDS}`, folderId: 'folder-b' },
+            { sessionId: `s${SESSION_ORGANIZATION_MAX_SCOPED_SNAPSHOT_IDS}`, folderId: 'folder-b' },
         ]);
         expect(mocks.serverFetch).toHaveBeenCalledTimes(2);
         expect(decodeURIComponent(String(mocks.serverFetch.mock.calls[0]?.[0]))).toContain(
-            `sessionIds=${sessionIds.slice(0, SESSION_FOLDER_ASSIGNMENT_QUERY_MAX_SESSION_IDS).join(',')}`,
+            `assignmentSessionIds=${sessionIds.slice(0, SESSION_ORGANIZATION_MAX_SCOPED_SNAPSHOT_IDS).join(',')}`,
         );
         expect(decodeURIComponent(String(mocks.serverFetch.mock.calls[1]?.[0]))).toContain(
-            `sessionIds=${sessionIds.slice(SESSION_FOLDER_ASSIGNMENT_QUERY_MAX_SESSION_IDS).join(',')}`,
+            `assignmentSessionIds=${sessionIds.slice(SESSION_ORGANIZATION_MAX_SCOPED_SNAPSHOT_IDS).join(',')}`,
         );
     });
 
@@ -98,7 +108,7 @@ describe('sessionFolderAssignmentsApi', () => {
 
         expect(mocks.serverFetch).toHaveBeenNthCalledWith(
             1,
-            '/v2/session-folder-assignments/s1',
+            '/v2/session-organization/folder-assignments/s1',
             expect.objectContaining({
                 method: 'PUT',
                 body: JSON.stringify({ folderId: 'folder-a' }),
@@ -122,7 +132,7 @@ describe('sessionFolderAssignmentsApi', () => {
         expect(mocks.runtimeFetchWithServerReachability).toHaveBeenCalledWith({
             serverUrl: 'https://row-server.example.test/api',
             token: 'token-a',
-            url: 'https://row-server.example.test/api/v2/session-folder-assignments/s1',
+            url: 'https://row-server.example.test/api/v2/session-organization/folder-assignments/s1',
             init: expect.objectContaining({
                 method: 'PUT',
                 body: JSON.stringify({ folderId: 'folder-a' }),

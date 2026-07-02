@@ -1,19 +1,22 @@
 import type { AuthCredentials } from '@/auth/storage/tokenStorage';
 import { HappyError } from '@/utils/errors/errors';
+import {
+    fetchSessionFolderAssignmentsForSessions as fetchOrganizationAssignmentsForSessions,
+    moveSessionFolderAssignments as moveOrganizationSessionFolderAssignments,
+    setSessionFolderAssignment as setOrganizationSessionFolderAssignment,
+} from '@/sync/api/session/sessionOrganizationApi';
 import { serverFetch } from '@/sync/http/client';
 import { runtimeFetchWithServerReachability } from '@/sync/runtime/connectivity/serverReachabilityRuntimeFetch';
 import {
     MoveSessionFolderAssignmentsResponseSchema,
     QuerySessionFolderSessionsResponseSchema,
-    SESSION_FOLDER_ASSIGNMENT_QUERY_MAX_SESSION_IDS,
-    SessionFolderAssignmentListResponseSchema,
     SetSessionFolderAssignmentResponseSchema,
     type MoveSessionFolderAssignmentsResponse,
     type QuerySessionFolderSessionsResponse,
     type SessionFolderAssignment,
-    type SessionFolderAssignmentListResponse,
     type SetSessionFolderAssignmentResponse,
 } from '@happier-dev/protocol/sessionFolders';
+import type { SessionFolderAssignmentListResponse } from '@happier-dev/protocol';
 import type { z } from 'zod';
 
 export type SessionFolderAssignmentResponse = SessionFolderAssignment;
@@ -27,8 +30,6 @@ function buildServerScopedPath(serverUrl: string | null | undefined, path: strin
 function normalizeServerUrl(serverUrl: string | null | undefined): string {
     return String(serverUrl ?? '').trim().replace(/\/+$/, '');
 }
-
-const SESSION_FOLDER_ASSIGNMENTS_ROUTE = '/v2/session-folder-assignments';
 
 async function readJsonBody(response: Response): Promise<unknown> {
     try {
@@ -51,21 +52,6 @@ function readErrorMessage(raw: unknown, fallbackMessage: string): string {
         return (raw as { error: string }).error;
     }
     return fallbackMessage;
-}
-
-function looksLikeMissingSessionFolderAssignmentsRoute(status: number, raw: unknown): boolean {
-    if (status === 405 || status === 501) return true;
-    if (status !== 404 || !raw || typeof raw !== 'object') return false;
-    const record = raw as Record<string, unknown>;
-    const error = typeof record.error === 'string' ? record.error : '';
-    const path = typeof record.path === 'string' ? record.path : '';
-    const message = typeof record.message === 'string' ? record.message : '';
-    return error === 'Not found'
-        && (
-            (path === '' && message === '')
-            || path.includes(SESSION_FOLDER_ASSIGNMENTS_ROUTE)
-            || message.includes(SESSION_FOLDER_ASSIGNMENTS_ROUTE)
-        );
 }
 
 async function parseJsonResponse<T>(response: Response, schema: z.ZodType<T>, fallbackMessage: string): Promise<T> {
@@ -106,28 +92,7 @@ export async function fetchSessionFolderAssignmentsForSessions(params: Readonly<
     serverUrl?: string;
     sessionIds: readonly string[];
 }>): Promise<SessionFolderAssignmentListResponse> {
-    if (params.sessionIds.length === 0) return { assignments: [] };
-
-    const assignments: SessionFolderAssignmentListResponse['assignments'] = [];
-    for (let index = 0; index < params.sessionIds.length; index += SESSION_FOLDER_ASSIGNMENT_QUERY_MAX_SESSION_IDS) {
-        const chunk = params.sessionIds.slice(index, index + SESSION_FOLDER_ASSIGNMENT_QUERY_MAX_SESSION_IDS);
-        const encoded = encodeURIComponent(chunk.join(','));
-        const response = await fetchSessionFolderAssignmentRoute({
-            credentials: params.credentials,
-            serverUrl: params.serverUrl,
-            path: `/v2/session-folder-assignments?sessionIds=${encoded}`,
-            init: { headers: authHeaders(params.credentials) },
-        });
-        const raw = await readJsonBody(response);
-        if (!response.ok) {
-            if (looksLikeMissingSessionFolderAssignmentsRoute(response.status, raw)) {
-                return { assignments: [] };
-            }
-            throw new HappyError(readErrorMessage(raw, 'Failed to fetch session folder assignments'), false);
-        }
-        assignments.push(...parseJsonBody(raw, SessionFolderAssignmentListResponseSchema, 'Failed to fetch session folder assignments').assignments);
-    }
-    return { assignments };
+    return fetchOrganizationAssignmentsForSessions(params);
 }
 
 export async function setSessionFolderAssignment(params: Readonly<{
@@ -136,17 +101,12 @@ export async function setSessionFolderAssignment(params: Readonly<{
     sessionId: string;
     folderId: string | null;
 }>): Promise<SetSessionFolderAssignmentResponse> {
-    const response = await fetchSessionFolderAssignmentRoute({
+    return SetSessionFolderAssignmentResponseSchema.parse(await setOrganizationSessionFolderAssignment({
         credentials: params.credentials,
         serverUrl: params.serverUrl,
-        path: `/v2/session-folder-assignments/${encodeURIComponent(params.sessionId)}`,
-        init: {
-            method: 'PUT',
-            headers: authHeaders(params.credentials),
-            body: JSON.stringify({ folderId: params.folderId }),
-        },
-    });
-    return parseJsonResponse(response, SetSessionFolderAssignmentResponseSchema, 'Failed to set session folder assignment');
+        sessionId: params.sessionId,
+        request: { folderId: params.folderId },
+    }));
 }
 
 export async function querySessionsByFolderScope(params: Readonly<{
@@ -181,18 +141,12 @@ export async function moveSessionFolderAssignments(params: Readonly<{
     fromFolderIds: readonly string[];
     toFolderId: string | null;
 }>): Promise<MoveSessionFolderAssignmentsResponse> {
-    const response = await fetchSessionFolderAssignmentRoute({
+    return MoveSessionFolderAssignmentsResponseSchema.parse(await moveOrganizationSessionFolderAssignments({
         credentials: params.credentials,
         serverUrl: params.serverUrl,
-        path: '/v2/session-folder-assignments/move',
-        init: {
-            method: 'POST',
-            headers: authHeaders(params.credentials),
-            body: JSON.stringify({
-                fromFolderIds: params.fromFolderIds,
-                toFolderId: params.toFolderId,
-            }),
+        request: {
+            fromFolderIds: [...params.fromFolderIds],
+            toFolderId: params.toFolderId,
         },
-    });
-    return parseJsonResponse(response, MoveSessionFolderAssignmentsResponseSchema, 'Failed to move session folder assignments');
+    }));
 }
