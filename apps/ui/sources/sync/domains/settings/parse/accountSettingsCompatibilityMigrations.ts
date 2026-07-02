@@ -98,6 +98,10 @@ export function applyAccountSettingsCompatibilityMigrations<TSettings extends Re
         next.transcriptMessageTimestampDisplayMode = 'hover_web_hidden_mobile';
     }
 
+    if (next.transcriptListImplementation === 'flatlist_legacy') {
+        next.transcriptListImplementation = 'flash_v2';
+    }
+
     if (!('backendEnabledByTargetKey' in input)) {
         const byTargetKey = next.backendEnabledByTargetKey && typeof next.backendEnabledByTargetKey === 'object'
             ? { ...(next.backendEnabledByTargetKey as Record<string, boolean>) }

@@ -331,7 +331,7 @@ export const ACCOUNT_TRANSCRIPT_TOOL_SETTING_DEFINITIONS = defineSettingDefiniti
     },
     transcriptListImplementation: {
         schema: z.enum(['flash_v2', 'flatlist_legacy', 'flash_v2_inverted']),
-        default: 'flash_v2_inverted',
+        default: 'flash_v2',
         description: 'Which transcript list implementation to use',
         storageScope: 'account',
         analytics: { trackCurrentState: true, trackChanges: true, valueKind: 'enum', privacy: 'safe', identityScope: 'person' },

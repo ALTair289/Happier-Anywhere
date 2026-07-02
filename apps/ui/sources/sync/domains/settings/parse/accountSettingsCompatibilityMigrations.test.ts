@@ -142,6 +142,22 @@ describe('applyAccountSettingsCompatibilityMigrations', () => {
         expect(migrated.glassBlurEnabled).toBe(true);
     });
 
+    it('normalizes persisted transcript legacy list implementation to canonical FlashList', () => {
+        const migrated = applyAccountSettingsCompatibilityMigrations({
+            input: {
+                transcriptListImplementation: 'flatlist_legacy',
+            },
+            settings: {
+                ...settingsDefaults,
+                transcriptListImplementation: 'flatlist_legacy',
+            },
+            inputSchemaVersion: 8,
+            supportedSchemaVersion: 8,
+        });
+
+        expect(migrated.transcriptListImplementation).toBe('flash_v2');
+    });
+
     it('preserves an existing codex backend mode when migrating a pre-v6 payload', () => {
         const migrated = applyAccountSettingsCompatibilityMigrations({
             input: {
