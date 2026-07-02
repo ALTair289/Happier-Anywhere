@@ -12,8 +12,10 @@ import { SessionRightPanelAgentsView } from '@/components/sessions/panes/agents/
 import { SessionBrowseFilesSurface } from '@/components/sessions/panes/surfaces/SessionBrowseFilesSurface';
 import { SessionGitSurface } from '@/components/sessions/panes/surfaces/SessionGitSurface';
 import { SessionTerminalSurface } from '@/components/sessions/panes/surfaces/SessionTerminalSurface';
+import { SessionTranscriptNavigationPane } from '@/components/sessions/panes/SessionTranscriptNavigationPane';
 import { useSessionFileDetailsOpener } from '@/components/sessions/panes/useSessionFileDetailsOpener';
 import { useSessionTerminalAvailability } from '@/components/sessions/terminal/useSessionTerminalAvailability';
+import { useTranscriptNavigationPaneSnapshot } from '@/components/sessions/transcript/navigation/transcriptNavigationPaneStore';
 import { t } from '@/text';
 import { resolveOptionalSessionScreenTestId, useSessionScreenTestIdsEnabled } from '../shell/sessionScreenTestIds';
 
@@ -29,7 +31,7 @@ export type SessionRightPanelProps = Readonly<{
     onRequestClose?: () => void;
 }>;
 
-type RightTabId = 'git' | 'files' | 'agents' | 'terminal';
+type RightTabId = 'git' | 'files' | 'navigation' | 'agents' | 'terminal';
 
 const stylesheet = StyleSheet.create((theme) => ({
     container: {
@@ -76,6 +78,7 @@ export const SessionRightPanel = React.memo((props: SessionRightPanelProps) => {
     const { theme } = useUnistyles();
     const pane = useAppPaneScope(props.scopeId);
     const scopeState = pane.scopeState;
+    const transcriptNavigationPaneSnapshot = useTranscriptNavigationPaneSnapshot(props.sessionId);
     const { openFileInDetails, openFileInDetailsPinned } = useSessionFileDetailsOpener(props.scopeId);
 
     const terminalAvailability = useSessionTerminalAvailability({
@@ -110,6 +113,7 @@ export const SessionRightPanel = React.memo((props: SessionRightPanelProps) => {
         const base: SegmentedTab<RightTabId>[] = [
             { id: 'git', label: t('session.rightPanel.tabs.git') },
             { id: 'files', label: t('common.files') },
+            { id: 'navigation', label: t('session.transcriptNavigation.title') },
             { id: 'agents', label: t('session.subagents.panel.title') },
         ];
         if (terminalTabAvailable) {
@@ -165,6 +169,19 @@ export const SessionRightPanel = React.memo((props: SessionRightPanelProps) => {
                                 onOpenFilePinned={openFileInDetailsPinned}
                             />
                         </React.Suspense>
+                    </RightTabSurface>
+                    <RightTabSurface
+                        isActive={activeTab === 'navigation'}
+                        testID={resolveOptionalSessionScreenTestId(sessionScreenTestIdsEnabled, 'session-rightpanel-surface-navigation')}
+                    >
+                        <SessionTranscriptNavigationPane
+                            activeEntryId={transcriptNavigationPaneSnapshot.activeEntryId}
+                            entries={transcriptNavigationPaneSnapshot.entries}
+                            onEntryPress={transcriptNavigationPaneSnapshot.onEntryPress ?? (() => {})}
+                            onRequestClose={props.onRequestClose ?? pane.closeRight}
+                            sessionId={props.sessionId}
+                            testIDPrefix="session-transcript-navigation"
+                        />
                     </RightTabSurface>
                     <RightTabSurface
                         isActive={activeTab === 'agents'}

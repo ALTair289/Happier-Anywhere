@@ -84,6 +84,12 @@ vi.mock('@/components/sessions/panes/agents/SessionRightPanelAgentsView', () => 
     SessionRightPanelAgentsView: () => React.createElement('AgentsView'),
 }));
 
+vi.mock('@/components/sessions/panes/SessionTranscriptNavigationPane', () => ({
+    SessionTranscriptNavigationPane: (props: Record<string, unknown>) => (
+        React.createElement('SessionTranscriptNavigationPane', props)
+    ),
+}));
+
 vi.mock('@/components/sessions/panes/terminal/SessionRightPanelTerminalView', () => ({
     SessionRightPanelTerminalView: () => React.createElement('TerminalView'),
 }));
@@ -111,19 +117,37 @@ describe('SessionRightPanel (core tabs)', () => {
         vi.clearAllMocks();
     });
 
-    it('renders git, files, and agents tabs and shows the git surface by default', async () => {
+    it('renders git, files, navigation, and agents tabs and shows the git surface by default', async () => {
         const { SessionRightPanel } = await import('./SessionRightPanel');
 
         const screen = await renderScreen(<SessionRightPanel sessionId="s1" scopeId="session:s1" />);
 
         expect(screen.findByTestId('session-rightpanel-tab:git')).toBeTruthy();
         expect(screen.findByTestId('session-rightpanel-tab:files')).toBeTruthy();
+        expect(screen.findByTestId('session-rightpanel-tab:navigation')).toBeTruthy();
         expect(screen.findByTestId('session-rightpanel-tab:agents')).toBeTruthy();
         expect(screen.findByTestId('session-rightpanel-tab:terminal')).toBeNull();
 
         const gitSurface = findHostByTestId(screen, 'session-rightpanel-surface-git');
         expect(gitSurface).not.toBeNull();
         expect(gitSurface?.props.pointerEvents).toBe('auto');
+        expect(findHostByTestId(screen, 'session-rightpanel-surface-files')).toBeNull();
+        expect(findHostByTestId(screen, 'session-rightpanel-surface-navigation')).toBeNull();
+        expect(findHostByTestId(screen, 'session-rightpanel-surface-agents')).toBeNull();
+    });
+
+    it('renders the transcript navigation surface when the navigation tab is active', async () => {
+        scopeState = { right: { isOpen: true, activeTabId: 'navigation', tabState: {} } };
+        const { SessionRightPanel } = await import('./SessionRightPanel');
+
+        const screen = await renderScreen(<SessionRightPanel sessionId="s1" scopeId="session:s1" />);
+
+        const navigationSurface = findHostByTestId(screen, 'session-rightpanel-surface-navigation');
+        expect(navigationSurface).not.toBeNull();
+        expect(navigationSurface?.props.pointerEvents).toBe('auto');
+        expect(screen.findAllByType('SessionTranscriptNavigationPane')).toHaveLength(1);
+        expect(screen.findByType('SessionTranscriptNavigationPane')?.props.sessionId).toBe('s1');
+        expect(findHostByTestId(screen, 'session-rightpanel-surface-git')).toBeNull();
         expect(findHostByTestId(screen, 'session-rightpanel-surface-files')).toBeNull();
         expect(findHostByTestId(screen, 'session-rightpanel-surface-agents')).toBeNull();
     });
