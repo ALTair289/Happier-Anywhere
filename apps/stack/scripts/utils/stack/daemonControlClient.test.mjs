@@ -262,7 +262,7 @@ test('restartDaemonViaControlServer passes stack identity to initial and replace
   }
 });
 
-test('restartDaemonViaControlServer keeps daemon control posts bounded while using a longer replacement budget', async () => {
+test('restartDaemonViaControlServer keeps daemon control posts bounded but long enough for loaded local daemons', async () => {
   const observedPosts = [];
   let readCount = 0;
 
@@ -293,8 +293,8 @@ test('restartDaemonViaControlServer keeps daemon control posts bounded while usi
   });
 
   assert.deepEqual(observedPosts, [
-    { path: '/restart', timeoutMs: 1500 },
-    { path: '/ping', timeoutMs: 1500 },
+    { path: '/restart', timeoutMs: 10_000 },
+    { path: '/ping', timeoutMs: 10_000 },
   ]);
 });
 

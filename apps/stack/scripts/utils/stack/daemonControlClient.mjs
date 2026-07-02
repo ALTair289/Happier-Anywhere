@@ -6,7 +6,7 @@ import { resolvePidStackOwnership } from '../proc/ownership.mjs';
 
 const DEFAULT_RESTART_CONFIRM_POLL_MS = 200;
 const DEFAULT_RESTART_CONFIRM_TIMEOUT_MS = 60_000;
-const DEFAULT_DAEMON_CONTROL_POST_TIMEOUT_MS = 1500;
+const DEFAULT_DAEMON_CONTROL_POST_TIMEOUT_MS = 10_000;
 
 export class DaemonControlPostError extends Error {
   constructor({ path, status, responseText }) {
@@ -22,7 +22,7 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
 }
 
-export async function daemonControlPost({ httpPort, path, body = {}, controlToken = '', timeoutMs = 1500 }) {
+export async function daemonControlPost({ httpPort, path, body = {}, controlToken = '', timeoutMs = DEFAULT_DAEMON_CONTROL_POST_TIMEOUT_MS }) {
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), Math.max(100, timeoutMs));
   try {
@@ -216,7 +216,7 @@ export async function restartDaemonViaControlServer({
         httpPort: replacementState.httpPort,
         path: '/ping',
         controlToken: replacementState.controlToken,
-        timeoutMs: Math.min(Math.max(100, controlPostTimeoutMs), DEFAULT_DAEMON_CONTROL_POST_TIMEOUT_MS),
+        timeoutMs: controlPostTimeoutMs,
       });
       return {
         status: restartStatus,

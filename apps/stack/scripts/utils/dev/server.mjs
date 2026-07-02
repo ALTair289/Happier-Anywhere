@@ -3,7 +3,11 @@ import { join, resolve } from 'node:path';
 
 import { ensureDepsInstalled, pmSpawnScript } from '../proc/pm.mjs';
 import { killProcessTree, markSpawnedProcessPlannedExit, run } from '../proc/proc.mjs';
-import { readDevReloadWatchChangeSignature, resolveDevReloadPollIntervalMs } from './devReloadCoordinator.mjs';
+import {
+  isDevRuntimeReloadIgnoredPath,
+  readDevReloadWatchChangeSignature,
+  resolveDevReloadPollIntervalMs,
+} from './devReloadCoordinator.mjs';
 import { applyHappyServerMigrations, ensureHappyServerManagedInfra } from '../server/infra/happy_server_infra.mjs';
 import { applyServerLightEnvDefaults } from '../server/apply_server_light_env_defaults.mjs';
 import { resolveServerDevScript } from '../server/flavor_scripts.mjs';
@@ -200,13 +204,15 @@ function hasPackageScript(dir, scriptName) {
 export function createDevServerReloadDescriptors({ serverDir, existsSyncImpl = existsSync } = {}) {
   const repoRoot = resolve(serverDir, '..', '..');
   const sharedPackages = ['agents', 'cli-common', 'protocol'];
-  const serverPaths = [
+  const serverAppPaths = [
     join(serverDir, 'sources'),
     join(serverDir, 'scripts'),
-    join(serverDir, 'prisma'),
     join(serverDir, 'package.json'),
     join(serverDir, 'tsconfig.json'),
     join(serverDir, 'tsconfig.build.json'),
+  ];
+  const serverPrismaPaths = [
+    join(serverDir, 'prisma'),
   ];
   const makeDescriptor = (id, target, paths) => {
     const existingPaths = paths.filter((p) => existsSyncImpl(p));
@@ -219,7 +225,8 @@ export function createDevServerReloadDescriptors({ serverDir, existsSyncImpl = e
   };
 
   return [
-    makeDescriptor('server:app', 'server', serverPaths),
+    makeDescriptor('server:app', 'server', serverAppPaths),
+    makeDescriptor('server:prisma', 'server', serverPrismaPaths),
     ...sharedPackages.map((pkg) => makeDescriptor(
       `shared:${pkg}`,
       'shared',
@@ -237,7 +244,32 @@ function resolveDevServerWatchPaths({ serverDir, existsSyncImpl = existsSync }) 
 }
 
 function readDevServerWatchChangeSignature(paths) {
-  return readDevReloadWatchChangeSignature(paths);
+  return readDevReloadWatchChangeSignature(paths, { ignorePath: isDevRuntimeReloadIgnoredPath });
+}
+
+function deriveServerRestartModeContext(baseContext = {}, reloadContext = {}) {
+  const changedDescriptors = Array.isArray(reloadContext?.changedDescriptors)
+    ? reloadContext.changedDescriptors
+    : null;
+  const migrationsChanged =
+    typeof baseContext.migrationsChanged === 'boolean'
+      ? baseContext.migrationsChanged
+      : changedDescriptors
+        ? changedDescriptors.includes('server:prisma')
+        : undefined;
+
+  return {
+    ...baseContext,
+    ...(typeof migrationsChanged === 'boolean' ? { migrationsChanged } : {}),
+    sqliteRuntimeMigrationsNoop:
+      typeof baseContext.sqliteRuntimeMigrationsNoop === 'boolean'
+        ? baseContext.sqliteRuntimeMigrationsNoop
+        : migrationsChanged === false,
+    overlapSafeStartup:
+      typeof baseContext.overlapSafeStartup === 'boolean'
+        ? baseContext.overlapSafeStartup
+        : migrationsChanged === false,
+  };
 }
 
 export async function resolveStackOwnedServerListenPid(
@@ -993,8 +1025,8 @@ export function createDevServerReloadExecutor({
     });
   };
 
-  const spawnServerBackend = async ({ port, recentLineBuffer }) => {
-    const nextEnv = { ...serverEnv, PORT: String(port) };
+  const spawnServerBackend = async ({ port, recentLineBuffer, envOverrides = {} }) => {
+    const nextEnv = { ...serverEnv, ...envOverrides, PORT: String(port) };
     let next = null;
     try {
       next = await pmSpawnScriptImpl({
@@ -1258,7 +1290,11 @@ export function createDevServerReloadExecutor({
 
     let replacement = null;
     try {
-      replacement = await spawnServerBackend({ port: nextBackendPort, recentLineBuffer });
+      replacement = await spawnServerBackend({
+        port: nextBackendPort,
+        recentLineBuffer,
+        envOverrides: { HAPPIER_STACK_MIGRATE_MODE: 'skip' },
+      });
     } catch (error) {
       throw annotateServerRestartError(
         error,
@@ -1327,11 +1363,11 @@ export function createDevServerReloadExecutor({
     return true;
   };
 
-  const restartOnce = async () => {
+  const restartOnce = async (context = {}) => {
     if (proxyController) {
       const restartMode = selectDevServerRestartMode({
         dbProvider: getDbProviderFromServerEnv(serverEnv),
-        ...serverRestartModeContext,
+        ...deriveServerRestartModeContext(serverRestartModeContext, context),
       });
       if (restartMode === 'blueGreen') {
         return await restartWithBlueGreenProxy();
@@ -1490,7 +1526,7 @@ export function createDevServerReloadExecutor({
       await preflightDevServerRestartImpl({ serverDir, serverComponentName, serverEnv, logger });
       return { ok: true };
     },
-    async restart() {
+    async restart(context = {}) {
       if (!enabled || isShuttingDown?.()) return { skipped: true };
       const backoffRemainingMs = restartFailureTracker.getBackoffRemainingMs();
       if (backoffRemainingMs > 0) {
@@ -1501,7 +1537,7 @@ export function createDevServerReloadExecutor({
       }
 
       try {
-        const restarted = await restartOnce();
+        const restarted = await restartOnce(context);
         if (restarted) restartFailureTracker.reset();
         return { restarted };
       } catch (e) {

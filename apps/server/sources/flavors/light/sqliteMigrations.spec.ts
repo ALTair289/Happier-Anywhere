@@ -147,6 +147,27 @@ describe('light sqlite migrations (unit)', () => {
     expect(state.applied.has('20260201000000_second')).toBe(true);
   });
 
+  it('applySqliteMigrationsIfNeeded no-ops when auto-migrate is disabled', async () => {
+    vi.stubGlobal('Bun', {});
+    const dir = await mkdtemp(join(tmpdir(), 'happier-sqlite-migrations-disabled-'));
+    const m1 = join(dir, '20260101000000_first');
+    await mkdir(m1, { recursive: true });
+    await writeFile(join(m1, 'migration.sql'), 'CREATE TABLE Account(id INTEGER);\n', 'utf8');
+
+    const dataDir = await mkdtemp(join(tmpdir(), 'happier-sqlite-data-disabled-'));
+    const dbPath = join(dataDir, 'happier.sqlite');
+    const env = {
+      HAPPIER_SQLITE_AUTO_MIGRATE: '0',
+      HAPPIER_SQLITE_MIGRATIONS_DIR: dir,
+      DATABASE_URL: `file:${dbPath}`,
+    };
+
+    const res = await applySqliteMigrationsIfNeeded({ env, dataDir });
+
+    expect(res.applied).toEqual([]);
+    expect(sqliteStore.has(dbPath)).toBe(false);
+  });
+
   it('applySqliteMigrationsIfNeeded closes the Bun sqlite connection before Prisma starts', async () => {
     vi.stubGlobal('Bun', {});
     const dir = await mkdtemp(join(tmpdir(), 'happier-sqlite-migrations-close-'));

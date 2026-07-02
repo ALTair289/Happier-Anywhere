@@ -5,8 +5,36 @@ import { watchDebounced } from '../proc/watch.mjs';
 export { resolveDevReloadPollIntervalMs } from './reloadPollInterval.mjs';
 
 const RESTART_ORDER = ['server', 'daemon'];
+const TEST_ONLY_DIRECTORY_NAMES = new Set([
+  '__fixtures__',
+  '__snapshots__',
+  '__tests__',
+  'coverage',
+  'fixtures',
+  'snapshots',
+  'test',
+  'tests',
+]);
+const TEST_ONLY_FILE_RE = /(?:^|[._-])(?:test|spec|bench|benchmark)\.[cm]?[jt]sx?$/;
 
-export function appendWatchSignatureEntries(path, entries) {
+export function isDevRuntimeReloadIgnoredPath(path) {
+  const normalized = String(path ?? '').replaceAll('\\', '/');
+  if (!normalized) return false;
+  const parts = normalized.split('/').filter(Boolean);
+  if (parts.some((part) => TEST_ONLY_DIRECTORY_NAMES.has(part))) return true;
+  const base = parts.at(-1) ?? '';
+  return (
+    TEST_ONLY_FILE_RE.test(base)
+    || base === 'vitest.config.ts'
+    || base.startsWith('vitest.')
+    || base.startsWith('test-setup.')
+    || base.endsWith('.snap')
+  );
+}
+
+export function appendWatchSignatureEntries(path, entries, { ignorePath = null } = {}) {
+  if (typeof ignorePath === 'function' && ignorePath(path)) return false;
+
   let stats;
   try {
     stats = lstatSync(path);
@@ -26,7 +54,7 @@ export function appendWatchSignatureEntries(path, entries) {
       return true;
     }
     for (const name of names) {
-      appendWatchSignatureEntries(join(path, name), entries);
+      appendWatchSignatureEntries(join(path, name), entries, { ignorePath });
     }
     return true;
   }
@@ -40,11 +68,11 @@ export function appendWatchSignatureEntries(path, entries) {
   return true;
 }
 
-export function readDevReloadWatchChangeSignature(paths) {
+export function readDevReloadWatchChangeSignature(paths, { ignorePath = null } = {}) {
   const entries = [];
   let observed = false;
   for (const path of paths) {
-    observed = appendWatchSignatureEntries(path, entries) || observed;
+    observed = appendWatchSignatureEntries(path, entries, { ignorePath }) || observed;
   }
   return observed ? entries.join('\n') : null;
 }

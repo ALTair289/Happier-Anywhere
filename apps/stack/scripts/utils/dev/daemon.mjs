@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { ensureCliBuilt, ensureDepsInstalled } from '../proc/pm.mjs';
 import { watchDebounced } from '../proc/watch.mjs';
 import {
+  isDevRuntimeReloadIgnoredPath,
   readDevReloadWatchChangeSignature,
   resolveDevReloadPollIntervalMs,
   startDevReloadCoordinator,
@@ -63,7 +64,7 @@ function resolveHappyCliWatchPaths({ cliDir, existsSyncImpl = existsSync }) {
 }
 
 function readHappyCliWatchChangeSignature(paths) {
-  return readDevReloadWatchChangeSignature(paths);
+  return readDevReloadWatchChangeSignature(paths, { ignorePath: isDevRuntimeReloadIgnoredPath });
 }
 
 function collectRuntimeDaemonPids(runtimeState) {

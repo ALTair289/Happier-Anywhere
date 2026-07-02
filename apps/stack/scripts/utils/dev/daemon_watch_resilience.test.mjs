@@ -483,6 +483,67 @@ test('watch ignores no-op manifest events without missing real source edits', as
   assert.equal(restartCalls, 1);
 });
 
+test('watch ignores CLI test-only source edits without missing real runtime source edits', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hs-daemon-watch-test-only-'));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const cliDir = join(root, 'apps', 'cli');
+  const cliSrcDir = join(cliDir, 'src');
+  const cliDistIndex = join(cliDir, 'dist', 'index.mjs');
+  await mkdir(cliSrcDir, { recursive: true });
+  await mkdir(dirname(cliDistIndex), { recursive: true });
+  await writeFile(join(cliDir, 'package.json'), '{ "name": "@happier-dev/cli" }\n', 'utf-8');
+  await writeFile(join(cliSrcDir, 'runtime.ts'), 'export const value = 1;\n', 'utf-8');
+  await writeFile(cliDistIndex, 'export const daemon = true;\n', 'utf-8');
+
+  let capturedOnChange = null;
+  let buildCalls = 0;
+  let restartCalls = 0;
+
+  watchHappyCliAndRestartDaemon(
+    {
+      enabled: true,
+      startDaemon: true,
+      buildCli: true,
+      cliDir,
+      cliBin: join(cliDir, 'bin', 'happier.mjs'),
+      cliHomeDir: join(root, 'home'),
+      internalServerUrl: 'http://127.0.0.1:3009',
+      publicServerUrl: 'http://localhost:3009',
+      isShuttingDown: () => false,
+    },
+    {
+      watchDebouncedImpl: ({ onChange }) => {
+        capturedOnChange = onChange;
+        return { close() {} };
+      },
+      ensureCliBuiltImpl: async () => {
+        buildCalls += 1;
+        return { built: true, reason: 'test' };
+      },
+      pingDaemonImpl: async () => ({ ok: true }),
+      restartDaemonViaControlServerImpl: async () => {
+        restartCalls += 1;
+      },
+      logger: { log() {}, warn() {}, error() {} },
+    },
+  );
+
+  assert.equal(typeof capturedOnChange, 'function');
+
+  await writeFile(join(cliSrcDir, 'runtime.test.ts'), 'export const testOnly = true;\n', 'utf-8');
+  await capturedOnChange({ eventType: 'change', filename: 'runtime.test.ts' });
+  assert.equal(buildCalls, 0);
+  assert.equal(restartCalls, 0);
+
+  await writeFile(join(cliSrcDir, 'runtime.ts'), 'export const value = 2;\n', 'utf-8');
+  await capturedOnChange({ eventType: 'change', filename: 'runtime.ts' });
+  assert.equal(buildCalls, 1);
+  assert.equal(restartCalls, 1);
+});
+
 test('watch does not include cliDir/yarn.lock in watched paths (prevents rebuild loops)', async () => {
   let capturedPaths = null;
 

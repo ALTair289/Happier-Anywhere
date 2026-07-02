@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { createDevServerReloadExecutor, selectDevServerRestartMode } from './server.mjs';
+import { createDevServerReloadDescriptors, createDevServerReloadExecutor, selectDevServerRestartMode } from './server.mjs';
 import { getSpawnedProcessPlannedExitReason } from '../proc/proc.mjs';
 
 async function withTempServerDir(t, fn) {
@@ -49,6 +49,49 @@ test('selectDevServerRestartMode fails closed to exclusiveDb unless blue-green s
     }),
     'blueGreen'
   );
+});
+
+test('server reload descriptors keep app and prisma changes distinguishable', async (t) => {
+  await withTempServerDir(t, async (serverDir) => {
+    await import('node:fs/promises').then(async ({ mkdir, writeFile }) => {
+      await mkdir(join(serverDir, 'sources'), { recursive: true });
+      await mkdir(join(serverDir, 'prisma'), { recursive: true });
+      await writeFile(join(serverDir, 'sources', 'main.ts'), 'export {};\n', 'utf-8');
+      await writeFile(join(serverDir, 'prisma', 'schema.prisma'), 'datasource db { provider = "sqlite" }\n', 'utf-8');
+    });
+
+    const descriptors = createDevServerReloadDescriptors({ serverDir });
+    const byId = new Map(descriptors.map((descriptor) => [descriptor.id, descriptor]));
+
+    assert.ok(byId.has('server:app'));
+    assert.ok(byId.has('server:prisma'));
+    assert.deepEqual(byId.get('server:app').paths.map((p) => p.slice(serverDir.length + 1)).sort(), ['sources']);
+    assert.deepEqual(byId.get('server:prisma').paths.map((p) => p.slice(serverDir.length + 1)).sort(), ['prisma']);
+  });
+});
+
+test('server reload descriptors ignore test-only source edits without missing runtime source edits', async (t) => {
+  await withTempServerDir(t, async (serverDir) => {
+    const { mkdir, writeFile } = await import('node:fs/promises');
+    await mkdir(join(serverDir, 'sources', 'app', 'session'), { recursive: true });
+    await mkdir(join(serverDir, 'prisma'), { recursive: true });
+    await writeFile(join(serverDir, 'sources', 'app', 'session', 'runtime.ts'), 'export const value = 1;\n', 'utf-8');
+    await writeFile(join(serverDir, 'prisma', 'schema.prisma'), 'datasource db { provider = "sqlite" }\n', 'utf-8');
+
+    const descriptor = createDevServerReloadDescriptors({ serverDir }).find((item) => item.id === 'server:app');
+    assert.ok(descriptor);
+
+    const before = descriptor.readSignature();
+    await writeFile(
+      join(serverDir, 'sources', 'app', 'session', 'runtime.pendingCountZero.spec.ts'),
+      'export const testOnly = true;\n',
+      'utf-8',
+    );
+    assert.equal(descriptor.readSignature(), before);
+
+    await writeFile(join(serverDir, 'sources', 'app', 'session', 'runtime.ts'), 'export const value = 2;\n', 'utf-8');
+    assert.notEqual(descriptor.readSignature(), before);
+  });
 });
 
 test('proxy exclusiveDb restart enters maintenance, replaces backend on an ephemeral port, flips, and records runtime state', async (t) => {
@@ -427,6 +470,70 @@ test('proxy blueGreen restart boots replacement before flipping and draining the
           fallbackReason: null,
         },
       },
+    ]);
+  });
+});
+
+test('proxy blueGreen restart is selected for sqlite app-only reload descriptors', async (t) => {
+  await withTempServerDir(t, async (serverDir) => {
+    const calls = [];
+    const proxy = {
+      pid: process.pid,
+      enterMaintenance() {
+        calls.push(['maintenance']);
+      },
+      flipUpstream({ targetPort }) {
+        calls.push(['flip', targetPort]);
+      },
+      drainConnections(args) {
+        calls.push(['drain', args?.targetPort ?? null, args?.graceMs ?? null]);
+      },
+    };
+
+    const executor = createDevServerReloadExecutor(
+      createExecutorOptions(serverDir, {
+        proxyController: proxy,
+        serverEnv: {
+          HAPPIER_DB_PROVIDER: 'sqlite',
+          PORT: '5101',
+          HAPPIER_STACK_DEV_PROXY_DRAIN_MS: '0',
+        },
+      }),
+      {
+        preflightDevServerRestartImpl: async () => {},
+        pickNextFreeTcpPortImpl: async () => 5102,
+        pmSpawnScriptImpl: async ({ env }) => {
+          calls.push(['spawn', Number(env.PORT), env.HAPPIER_STACK_MIGRATE_MODE ?? null]);
+          return { pid: 202, exitCode: null };
+        },
+        waitForServerReadyImpl: async (url) => {
+          calls.push(['ready', url]);
+        },
+        listListenPidsImpl: async (port) => (Number(port) === 5101 ? [301] : [302]),
+        getProcessGroupIdImpl: async (pid) => (
+          Number(pid) === 101 || Number(pid) === 301 ? 7 :
+          Number(pid) === 202 || Number(pid) === 302 ? 44 :
+          Number(pid)
+        ),
+        killProcessGroupOwnedByStackImpl: async (pid) => {
+          calls.push(['kill', pid]);
+          return { killed: true };
+        },
+        recordStackRuntimeUpdateImpl: async () => {},
+        sleepImpl: async () => {},
+        logger: { log() {}, warn() {}, error() {} },
+      }
+    );
+
+    await executor.build({ changedDescriptors: ['server:app'] });
+    await executor.restart({ changedDescriptors: ['server:app'] });
+
+    assert.deepEqual(calls, [
+      ['spawn', 5102, 'skip'],
+      ['ready', 'http://127.0.0.1:5102'],
+      ['flip', 5102],
+      ['drain', 5101, 0],
+      ['kill', 101],
     ]);
   });
 });
