@@ -4,6 +4,8 @@ const fs = require('node:fs/promises');
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 
+const terminalSignalNames = ['SIGINT', 'SIGQUIT'];
+
 function isPlainObject(value) {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -73,6 +75,35 @@ async function readLaunchSpecFile(specPath) {
     };
 }
 
+function installTerminalSignalGuards() {
+    const installed = [];
+    for (const signal of terminalSignalNames) {
+        const listener = () => {};
+        try {
+            process.on(signal, listener);
+            installed.push([signal, listener]);
+        } catch {
+            // Some platforms do not support all terminal control signals.
+        }
+    }
+    let removed = false;
+    return () => {
+        if (removed) return;
+        removed = true;
+        for (const [signal, listener] of installed) {
+            try {
+                if (typeof process.off === 'function') {
+                    process.off(signal, listener);
+                } else {
+                    process.removeListener(signal, listener);
+                }
+            } catch {
+                // Best-effort cleanup; the child has already settled.
+            }
+        }
+    };
+}
+
 function runLaunchSpec(spec) {
     return new Promise((resolve, reject) => {
         const child = spawn(spec.command, spec.args, {
@@ -82,17 +113,27 @@ function runLaunchSpec(spec) {
             stdio: 'inherit',
             windowsHide: true,
         });
-        child.on('error', reject);
+        const removeSignalGuards = installTerminalSignalGuards();
+        let settled = false;
+        const settle = (fn) => {
+            if (settled) return;
+            settled = true;
+            removeSignalGuards();
+            fn();
+        };
+        child.on('error', (error) => {
+            settle(() => reject(error));
+        });
         child.on('close', (code, signal) => {
             if (typeof code === 'number') {
-                resolve(code);
+                settle(() => resolve(code));
                 return;
             }
             if (signal) {
-                resolve(1);
+                settle(() => resolve(1));
                 return;
             }
-            resolve(1);
+            settle(() => resolve(1));
         });
     });
 }
@@ -111,6 +152,7 @@ async function main(argv) {
 
 module.exports = {
     readLaunchSpecFile,
+    runLaunchSpec,
     runLaunchSpecFile,
 };
 

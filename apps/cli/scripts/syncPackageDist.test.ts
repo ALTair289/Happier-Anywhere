@@ -89,4 +89,27 @@ describe('syncPackageDist', () => {
       rmSync(packageRoot, { recursive: true, force: true });
     }
   });
+
+  it('can skip package-dist promotion for a staged dist build', () => {
+    const packageRoot = createTempDirSync('happier-cli-sync-package-dist-skip-');
+    try {
+      const stagedDistDir = join(packageRoot, '.tmp.cli-dist-build');
+      const packageDistDir = join(packageRoot, 'package-dist');
+      mkdirSync(stagedDistDir, { recursive: true });
+      mkdirSync(packageDistDir, { recursive: true });
+      writeFileSync(join(stagedDistDir, 'index.mjs'), 'export const next = true;\n', 'utf8');
+      writeFileSync(join(packageDistDir, 'index.mjs'), 'export const previous = true;\n', 'utf8');
+
+      const result = syncPackageDist({
+        packageRoot,
+        distDir: stagedDistDir,
+        env: { HAPPIER_CLI_SKIP_PACKAGE_DIST_SYNC: '1' },
+      });
+
+      expect(result.skipped).toBe(true);
+      expect(readFileSync(join(packageDistDir, 'index.mjs'), 'utf8')).toBe('export const previous = true;\n');
+    } finally {
+      rmSync(packageRoot, { recursive: true, force: true });
+    }
+  });
 });

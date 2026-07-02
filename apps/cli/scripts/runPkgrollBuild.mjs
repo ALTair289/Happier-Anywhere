@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { dirname, resolve } from 'node:path';
 
 const require = createRequire(import.meta.url);
 const DEFAULT_PKGROLL_TIMEOUT_MS = 600_000;
@@ -16,21 +17,80 @@ function resolvePkgrollTimeoutMs(env, explicitTimeoutMs) {
   return Math.min(1_800_000, Math.max(60_000, parsed));
 }
 
-function rewritePackageDistPath(value) {
+function normalizePkgrollOutputDir(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return 'dist';
+  if (raw.startsWith('-')) return 'dist';
+  const normalized = raw.replace(/\\/g, '/').replace(/^\.\/+/, '');
+  const segments = normalized.split('/').filter(Boolean);
+  if (!segments.length) return 'dist';
+  if (segments.includes('.') || segments.includes('..')) return 'dist';
+  if (normalized.startsWith('/')) return 'dist';
+  return segments.join('/');
+}
+
+function rewritePackageDistPath(value, outputDir = 'dist') {
   if (typeof value !== 'string') return value;
-  if (value === './package-dist') return './dist';
+  const outputRoot = `./${normalizePkgrollOutputDir(outputDir)}`;
+  if (value === './package-dist') return outputRoot;
   if (value.startsWith('./package-dist/')) {
-    return `./dist/${value.slice('./package-dist/'.length)}`;
+    return `${outputRoot}/${value.slice('./package-dist/'.length)}`;
   }
   return value;
 }
 
-export function preparePkgrollPackageManifest(value) {
+function rebasePackageEntrypointOutputPath(value, outputDir = 'dist') {
+  if (typeof value !== 'string') return null;
+  const normalized = value.replace(/\\/g, '/').replace(/^\.\/+/, '');
+  const outputRoot = normalizePkgrollOutputDir(outputDir);
+  for (const sourceRoot of ['dist', 'package-dist']) {
+    if (normalized === sourceRoot) {
+      return outputRoot;
+    }
+    const prefix = `${sourceRoot}/`;
+    if (normalized.startsWith(prefix)) {
+      return `${outputRoot}/${normalized.slice(prefix.length)}`;
+    }
+  }
+  return null;
+}
+
+function collectEntrypointOutputPaths(value, outputDir, out) {
+  const outputPath = rebasePackageEntrypointOutputPath(value, outputDir);
+  if (outputPath) {
+    out.add(outputPath);
+    return;
+  }
   if (Array.isArray(value)) {
-    return value.map((item) => preparePkgrollPackageManifest(item));
+    for (const item of value) {
+      collectEntrypointOutputPaths(item, outputDir, out);
+    }
+    return;
+  }
+  if (!value || typeof value !== 'object') return;
+  for (const entryValue of Object.values(value)) {
+    collectEntrypointOutputPaths(entryValue, outputDir, out);
+  }
+}
+
+export function collectPkgrollInputPaths(manifest, options = {}) {
+  const outputDir = normalizePkgrollOutputDir(options.outputDir);
+  const paths = new Set();
+  for (const key of ['main', 'module', 'types', 'exports', 'imports']) {
+    if (Object.prototype.hasOwnProperty.call(manifest, key)) {
+      collectEntrypointOutputPaths(manifest[key], outputDir, paths);
+    }
+  }
+  return [...paths].sort();
+}
+
+export function preparePkgrollPackageManifest(value, options = {}) {
+  const outputDir = normalizePkgrollOutputDir(options.outputDir);
+  if (Array.isArray(value)) {
+    return value.map((item) => preparePkgrollPackageManifest(item, { outputDir }));
   }
   if (!value || typeof value !== 'object') {
-    return rewritePackageDistPath(value);
+    return rewritePackageDistPath(value, outputDir);
   }
 
   const out = {};
@@ -43,7 +103,7 @@ export function preparePkgrollPackageManifest(value) {
       out[key] = entryValue;
       continue;
     }
-    out[key] = preparePkgrollPackageManifest(entryValue);
+    out[key] = preparePkgrollPackageManifest(entryValue, { outputDir });
   }
   return out;
 }
@@ -53,34 +113,39 @@ export function resolvePkgrollCliPath() {
 }
 
 export function runPkgrollBuild(options = {}) {
-  const packageJsonPath = options.packageJsonPath ?? 'package.json';
+  const packageJsonPath = resolve(String(options.packageJsonPath ?? 'package.json'));
   const spawn = options.spawn ?? spawnSync;
   const nodeExecutable = options.nodeExecutable ?? process.execPath;
   const env = options.env ?? process.env;
   const timeoutMs = resolvePkgrollTimeoutMs(env, options.timeoutMs);
+  const outputDir = normalizePkgrollOutputDir(options.outputDir ?? env?.HAPPIER_CLI_BUILD_OUTPUT_DIR);
   const original = readFileSync(packageJsonPath, 'utf8');
   const manifest = JSON.parse(original);
-  const pkgrollManifest = `${JSON.stringify(preparePkgrollPackageManifest(manifest), null, 2)}\n`;
   const pkgrollCliPath = options.pkgrollCliPath ?? resolvePkgrollCliPath();
+  const inputPaths = collectPkgrollInputPaths(manifest, { outputDir });
+  if (inputPaths.length === 0) {
+    throw new Error('No package entrypoints found for pkgroll build');
+  }
 
-  writeFileSync(packageJsonPath, pkgrollManifest, 'utf8');
-  try {
-    const result = spawn(nodeExecutable, [pkgrollCliPath], {
-      stdio: ['ignore', 'inherit', 'inherit'],
-      timeout: timeoutMs,
-    });
-    if (typeof result.status === 'number' && result.status !== 0) {
-      throw new Error(`pkgroll exited with status ${result.status}`);
+  const pkgrollArgs = [pkgrollCliPath, '--packagejson=false', '--srcdist', `src:${outputDir}`];
+  for (const inputPath of inputPaths) {
+    pkgrollArgs.push('--input', inputPath);
+  }
+
+  const result = spawn(nodeExecutable, pkgrollArgs, {
+    cwd: dirname(packageJsonPath),
+    stdio: ['ignore', 'inherit', 'inherit'],
+    timeout: timeoutMs,
+  });
+  if (typeof result.status === 'number' && result.status !== 0) {
+    throw new Error(`pkgroll exited with status ${result.status}`);
+  }
+  if (result.error) {
+    const errorCode = typeof result.error?.code === 'string' ? result.error.code : '';
+    if (errorCode === 'ETIMEDOUT') {
+      throw new Error(`pkgroll timed out after ${timeoutMs}ms`);
     }
-    if (result.error) {
-      const errorCode = typeof result.error?.code === 'string' ? result.error.code : '';
-      if (errorCode === 'ETIMEDOUT') {
-        throw new Error(`pkgroll timed out after ${timeoutMs}ms`);
-      }
-      throw result.error;
-    }
-  } finally {
-    writeFileSync(packageJsonPath, original, 'utf8');
+    throw result.error;
   }
 }
 

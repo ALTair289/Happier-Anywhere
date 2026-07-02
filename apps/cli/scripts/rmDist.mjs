@@ -3,8 +3,8 @@ import { isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { withOptionalCliSharedDepsBuildLock } from './optionalWorkspaceBundleLock.mjs';
 
-export function resolveDistDir(argv = process.argv) {
-  const candidate = String(argv?.[2] ?? '').trim();
+export function resolveDistDir(argv = process.argv, env = process.env) {
+  const candidate = String(argv?.[2] ?? env?.HAPPIER_CLI_BUILD_OUTPUT_DIR ?? '').trim();
   if (!candidate || candidate.startsWith('-')) return 'dist';
   if (isAbsolute(candidate)) return 'dist';
   const segments = candidate.split(/[\\/]+/g).filter(Boolean);
@@ -14,7 +14,7 @@ export function resolveDistDir(argv = process.argv) {
 }
 
 export async function main(argv = process.argv, options = {}) {
-  const dir = resolveDistDir(argv);
+  const dir = resolveDistDir(argv, options.env ?? process.env);
   await withOptionalCliSharedDepsBuildLock(() => {
     rmDirSafeSync(dir, {
       // Local dev can run with other watchers rebuilding dist; give ourselves a bit of headroom.

@@ -23,3 +23,14 @@ test('apps/cli npm files list ships archives (not unpacked tools)', () => {
   assert.ok(!files.includes('tools'), 'expected not to ship entire tools/ tree (would include unpacked binaries)');
   assert.ok(!files.includes('tools/unpacked'), 'expected tools/unpacked to be excluded');
 });
+
+test('apps/cli package exposes the published CLI binaries', () => {
+  const pkgPath = new URL('../package.json', import.meta.url);
+  const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
+
+  assert.deepEqual(pkg.bin, {
+    happier: './bin/happier.mjs',
+    'happier-dev': './bin/happier-dev.mjs',
+    'happier-mcp': './bin/happier-mcp.mjs',
+  });
+});

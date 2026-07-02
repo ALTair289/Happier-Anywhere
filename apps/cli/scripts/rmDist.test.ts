@@ -19,6 +19,12 @@ describe('rmDist', () => {
     expect(resolveDistDir(['node', 'rmDist.mjs', 'build-out'])).toBe('build-out');
   });
 
+  it('uses an explicit build output directory from env when no arg is provided', () => {
+    expect(resolveDistDir(['node', 'rmDist.mjs'], { HAPPIER_CLI_BUILD_OUTPUT_DIR: '.tmp.cli-dist-build' })).toBe(
+      '.tmp.cli-dist-build',
+    );
+  });
+
   it('rejects absolute paths', () => {
     expect(resolveDistDir(['node', 'rmDist.mjs', '/'])).toBe('dist');
   });

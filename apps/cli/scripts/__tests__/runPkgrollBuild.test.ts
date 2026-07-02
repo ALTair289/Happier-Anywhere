@@ -51,27 +51,60 @@ describe('runPkgrollBuild', () => {
     expect(manifest).not.toHaveProperty('bin');
   });
 
-  it('restores the original package manifest after pkgroll finishes', () => {
+  it('can rewrite package-dist entrypoints to an explicit build output directory', () => {
+    const manifest = preparePkgrollPackageManifest(
+      {
+        main: './package-dist/index.cjs',
+        module: './package-dist/index.mjs',
+        exports: {
+          '.': {
+            import: {
+              default: './package-dist/index.mjs',
+            },
+          },
+        },
+        bin: {
+          happier: './bin/happier.mjs',
+        },
+      },
+      { outputDir: '.tmp.cli-dist-build' },
+    );
+
+    expect(manifest).toMatchObject({
+      main: './.tmp.cli-dist-build/index.cjs',
+      module: './.tmp.cli-dist-build/index.mjs',
+      exports: {
+        '.': {
+          import: {
+            default: './.tmp.cli-dist-build/index.mjs',
+          },
+        },
+      },
+    });
+    expect(manifest).not.toHaveProperty('bin');
+  });
+
+  it('keeps the original package manifest unchanged while pkgroll runs', () => {
     const dir = createTempDirSync('happier-cli-pkgroll-manifest-');
     const packageJsonPath = join(dir, 'package.json');
     const original = {
-      main: './package-dist/index.cjs',
+      main: './dist/index.cjs',
       bin: {
         happier: './bin/happier.mjs',
       },
       exports: {
         '.': {
           import: {
-            default: './package-dist/index.mjs',
+            default: './dist/index.mjs',
           },
         },
       },
     };
     writeFileSync(packageJsonPath, `${JSON.stringify(original, null, 2)}\n`, 'utf8');
 
-    let pkgrollManifest: any = null;
+    let manifestDuringPkgroll: any = null;
     const spawn = vi.fn(() => {
-      pkgrollManifest = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
+      manifestDuringPkgroll = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
       return { status: 0 };
     });
 
@@ -79,14 +112,55 @@ describe('runPkgrollBuild', () => {
 
     expect(spawn).toHaveBeenCalledWith(
       process.execPath,
-      [expect.stringContaining('pkgroll/dist/cli.mjs')],
+      expect.arrayContaining([
+        expect.stringContaining('pkgroll/dist/cli.mjs'),
+        '--packagejson=false',
+        '--srcdist',
+        'src:dist',
+      ]),
       expect.objectContaining({
+        cwd: dir,
         stdio: ['ignore', 'inherit', 'inherit'],
         timeout: 600_000,
       }),
     );
-    expect(pkgrollManifest).toBeTruthy();
-    expect(pkgrollManifest).not.toHaveProperty('bin');
+    expect(spawn.mock.calls[0]?.[1]).toEqual(
+      expect.arrayContaining(['--packagejson=false', '--srcdist', 'src:dist', '--input', 'dist/index.cjs']),
+    );
+    expect(manifestDuringPkgroll).toEqual(original);
+    expect(JSON.parse(readFileSync(packageJsonPath, 'utf8'))).toEqual(original);
+  });
+
+  it('passes an explicit output directory to pkgroll without rewriting the package manifest', () => {
+    const dir = createTempDirSync('happier-cli-pkgroll-output-dir-');
+    const packageJsonPath = join(dir, 'package.json');
+    const original = {
+      module: './dist/index.mjs',
+      exports: {
+        '.': {
+          import: {
+            default: './dist/index.mjs',
+          },
+        },
+      },
+    };
+    writeFileSync(packageJsonPath, `${JSON.stringify(original, null, 2)}\n`, 'utf8');
+
+    const spawn = vi.fn(() => {
+      return { status: 0 };
+    });
+
+    runPkgrollBuild({ packageJsonPath, spawn, outputDir: '.tmp.cli-dist-build' });
+
+    expect(spawn.mock.calls[0]?.[1]).toEqual(
+      expect.arrayContaining([
+        '--packagejson=false',
+        '--srcdist',
+        'src:.tmp.cli-dist-build',
+        '--input',
+        '.tmp.cli-dist-build/index.mjs',
+      ]),
+    );
     expect(JSON.parse(readFileSync(packageJsonPath, 'utf8'))).toEqual(original);
   });
 
@@ -105,8 +179,14 @@ describe('runPkgrollBuild', () => {
 
     expect(spawn).toHaveBeenCalledWith(
       process.execPath,
-      [expect.stringContaining('pkgroll/dist/cli.mjs')],
+      expect.arrayContaining([
+        expect.stringContaining('pkgroll/dist/cli.mjs'),
+        '--packagejson=false',
+        '--srcdist',
+        'src:dist',
+      ]),
       expect.objectContaining({
+        cwd: dir,
         timeout: 120_000,
       }),
     );
