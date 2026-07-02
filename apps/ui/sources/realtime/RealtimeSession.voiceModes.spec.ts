@@ -263,45 +263,51 @@ describe('Realtime voice modes', () => {
 
   describe('happier voice lifecycle', () => {
     it('records the session limit and announces when the server-minted lease is near expiry', async () => {
-      fetchHappierVoiceToken.mockResolvedValueOnce({
-        allowed: true,
-        token: 'conv_token',
-        leaseId: 'lease_1',
-        expiresAtMs: Date.now() + 40,
-      });
-
       const { registerVoiceSession, startRealtimeSession, stopRealtimeSession } = await import('./RealtimeSession');
       const { session } = makeVoiceSession('conv_0');
       registerVoiceSession(session);
 
-      await startRealtimeSession('s1', 'BASE_CTX');
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-07-01T00:00:00.000Z'));
 
-      expect(appendVoiceConversationNoteText).toHaveBeenCalledWith(
-        expect.objectContaining({
-          conversationSessionId: 'voice-conversation-1',
-          text: 'errors.voiceSessionLimitStarted',
-        }),
-      );
+      try {
+        fetchHappierVoiceToken.mockResolvedValueOnce({
+          allowed: true,
+          token: 'conv_token',
+          leaseId: 'lease_1',
+          expiresAtMs: Date.now() + 40,
+        });
 
-      await sleep(20);
+        await startRealtimeSession('s1', 'BASE_CTX');
 
-      expect(appendVoiceConversationNoteText).toHaveBeenCalledWith(
-        expect.objectContaining({
-          conversationSessionId: 'voice-conversation-1',
-          text: 'errors.voiceSessionLimitExpiring',
-        }),
-      );
+        expect(appendVoiceConversationNoteText).toHaveBeenCalledWith(
+          expect.objectContaining({
+            conversationSessionId: 'voice-conversation-1',
+            text: 'errors.voiceSessionLimitStarted',
+          }),
+        );
 
-      await sleep(50);
+        expect(appendVoiceConversationNoteText).toHaveBeenCalledWith(
+          expect.objectContaining({
+            conversationSessionId: 'voice-conversation-1',
+            text: 'errors.voiceSessionLimitExpiring',
+          }),
+        );
 
-      expect(appendVoiceConversationNoteText).toHaveBeenCalledWith(
-        expect.objectContaining({
-          conversationSessionId: 'voice-conversation-1',
-          text: 'errors.voiceSessionLimitExpired',
-        }),
-      );
+        await vi.advanceTimersByTimeAsync(40);
 
-      await stopRealtimeSession();
+        expect(appendVoiceConversationNoteText).toHaveBeenCalledWith(
+          expect.objectContaining({
+            conversationSessionId: 'voice-conversation-1',
+            text: 'errors.voiceSessionLimitExpired',
+          }),
+        );
+
+        await stopRealtimeSession();
+      } finally {
+        vi.clearAllTimers();
+        vi.useRealTimers();
+      }
     });
 
     it('appends welcome instructions to the initial context when enabled (immediate)', async () => {
@@ -494,7 +500,7 @@ describe('Realtime voice modes', () => {
           allowed: true,
           token: 'conv_token',
           leaseId: 'lease_1',
-          expiresAtMs: Date.now() + 40,
+          expiresAtMs: Date.now() + 60_000,
         });
 
       const { registerVoiceSession, startRealtimeSession } = await import('./RealtimeSession');

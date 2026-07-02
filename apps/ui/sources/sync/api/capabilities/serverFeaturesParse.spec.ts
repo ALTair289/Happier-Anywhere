@@ -12,6 +12,7 @@ function createValidFeaturesResponse() {
                 public: { enabled: true },
                 contentKeys: { enabled: true },
                 pendingQueueV2: { enabled: false },
+                pendingDeliveryState: { enabled: false },
             },
             voice: { enabled: false },
             social: { friends: { enabled: true } },
@@ -54,6 +55,12 @@ function createValidFeaturesResponse() {
                 },
             },
             social: { friends: { allowUsername: false, requiredIdentityProviderId: 'github' } },
+            sharing: {
+                pendingQueueV2: {
+                    deliveryState: false,
+                    deliveryBlockedReason: false,
+                },
+            },
             oauth: { providers: { github: { enabled: true, configured: true } } },
             auth: {
                 signup: { methods: [{ id: 'anonymous', enabled: true }] },
@@ -107,6 +114,24 @@ describe('serverFeaturesParse', () => {
         expect(out?.features.sharing.public.enabled).toBe(true);
         expect(out?.features.sharing.contentKeys.enabled).toBe(false);
         expect(out?.features.sharing.pendingQueueV2.enabled).toBe(false);
+        expect(out?.features.sharing.pendingDeliveryState.enabled).toBe(false);
+        expect(out?.capabilities.sharing.pendingQueueV2.deliveryState).toBe(false);
+        expect(out?.capabilities.sharing.pendingQueueV2.deliveryBlockedReason).toBe(false);
+    });
+
+    it('parses additive pending delivery-state field capabilities from /v1/features', () => {
+        const payload = createValidFeaturesResponse();
+        payload.features.sharing.pendingQueueV2.enabled = true;
+        payload.features.sharing.pendingDeliveryState.enabled = true;
+        payload.capabilities.sharing.pendingQueueV2.deliveryState = true;
+        payload.capabilities.sharing.pendingQueueV2.deliveryBlockedReason = true;
+
+        const out = parseServerFeatures(payload);
+
+        expect(out?.features.sharing.pendingQueueV2.enabled).toBe(true);
+        expect(out?.features.sharing.pendingDeliveryState.enabled).toBe(true);
+        expect(out?.capabilities.sharing.pendingQueueV2.deliveryState).toBe(true);
+        expect(out?.capabilities.sharing.pendingQueueV2.deliveryBlockedReason).toBe(true);
     });
 
     it('accepts provider-agnostic offboarding sources in /v1/features', () => {

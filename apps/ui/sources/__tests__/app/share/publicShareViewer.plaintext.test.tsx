@@ -124,6 +124,18 @@ describe('PublicShareViewerScreen (plaintext)', () => {
             expect.objectContaining({ includeAuth: false }),
         );
         expect(transcriptListSpy).toHaveBeenCalled();
+        const last = transcriptListSpy.mock.calls[transcriptListSpy.mock.calls.length - 1]?.[0];
+        expect(last).toEqual(expect.objectContaining({
+            sessionId: 's1',
+            metadata: expect.objectContaining({ name: 'Plain Session' }),
+            messages: expect.any(Array),
+            bottomNotice: expect.objectContaining({
+                title: expect.any(String),
+                body: expect.any(String),
+            }),
+            isLoaded: true,
+        }));
+        expect(last).not.toHaveProperty('interaction');
     });
 
     it('offsets transcript content below the absolute share header', async () => {

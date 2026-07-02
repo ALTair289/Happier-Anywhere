@@ -494,8 +494,8 @@ export type ConnectedServiceQuotaProfileRefProvenance =
     | 'connected_binding_profile'
     | 'published_quota_ref';
 
-// Mirrors the CLI's `buildNativeQuotaProfileId` shapes (`acct:<hash>` /
-// `native:<hash>`) used when a runtime publishes a quota ref for native auth.
+// Mirrors native provider account-usage alias profile ids (`acct:<hash>` /
+// `native:<hash>`) used when a runtime publishes native-auth usage refs.
 const NATIVE_QUOTA_PROFILE_ID_PATTERN = /^(?:acct|native):/;
 
 function classifyConnectedServiceGaugeSourceKind(params: Readonly<{
@@ -536,6 +536,21 @@ function withRecoveryCredits(
     return { ...snapshot, recoveryCredits };
 }
 
+function quotaSnapshotFetchedAtMs(snapshot: ConnectedServiceQuotaSnapshotV1): number {
+    return snapshot.fetchedAtMs ?? snapshot.fetchedAt;
+}
+
+function shouldPreferRuntimeIssueQuotaSnapshot(params: Readonly<{
+    runtimeSnapshot: ConnectedServiceQuotaSnapshotV1;
+    connectedSnapshot: ConnectedServiceQuotaSnapshotV1 | null;
+}>): boolean {
+    if (!params.connectedSnapshot) return true;
+    const runtimeFetchedAtMs = quotaSnapshotFetchedAtMs(params.runtimeSnapshot);
+    const runtimeStaleAtMs = runtimeFetchedAtMs + params.runtimeSnapshot.staleAfterMs;
+    const connectedFetchedAtMs = quotaSnapshotFetchedAtMs(params.connectedSnapshot);
+    return runtimeFetchedAtMs >= connectedFetchedAtMs || runtimeStaleAtMs >= connectedFetchedAtMs;
+}
+
 /**
  * Production owner of the session provider-usage gauge source: routes both the
  * runtime-evidence projection and the polled connected-service snapshot
@@ -551,7 +566,10 @@ export function selectConnectedServiceSessionProviderUsageGaugeSource(params: Re
     runtimeIssue: SessionRuntimeIssueV1 | null | undefined;
 }>): ConnectedServiceQuotaGaugeSource | null {
     const runtimeIssueQuotaSnapshot = deriveConnectedServiceQuotaSnapshotFromRuntimeIssue(params.runtimeIssue);
-    if (runtimeIssueQuotaSnapshot) {
+    if (runtimeIssueQuotaSnapshot && shouldPreferRuntimeIssueQuotaSnapshot({
+        runtimeSnapshot: runtimeIssueQuotaSnapshot,
+        connectedSnapshot: params.connectedServiceSnapshot,
+    })) {
         const recoveryCredits = params.connectedServiceSnapshot
             && snapshotsIdentifySameQuotaProfile(runtimeIssueQuotaSnapshot, params.connectedServiceSnapshot)
             ? params.connectedServiceSnapshot.recoveryCredits ?? null

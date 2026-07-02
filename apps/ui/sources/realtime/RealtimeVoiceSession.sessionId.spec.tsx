@@ -132,7 +132,7 @@ vi.mock('./realtimeVoiceTranscriptBridge', () => ({
   appendRealtimeVoiceTranscriptEvent: (params: any) => appendRealtimeVoiceTranscriptEvent(params),
 }));
 
-const sendMessage = vi.fn(async (..._args: any[]) => {});
+const sendSessionMessageWithServerScope = vi.fn(async (_args: any) => ({ ok: true }));
 
 vi.mock('@/sync/sync', () => ({
   sync: {
@@ -142,11 +142,14 @@ vi.mock('@/sync/sync', () => ({
       return typeof maybeValue === 'string' ? maybeValue : null;
     },
     presentPaywall: vi.fn(async () => ({ success: true, purchased: false })),
-    sendMessage: (...args: any[]) => sendMessage(...args),
     encryption: {
       getSessionEncryption: vi.fn(() => ({})),
     },
   },
+}));
+
+vi.mock('@/sync/runtime/orchestration/serverScopedRpc/serverScopedSessionSendMessage', () => ({
+  sendSessionMessageWithServerScope: (args: any) => sendSessionMessageWithServerScope(args),
 }));
 
 describe('RealtimeVoiceSession (native) sessionId tracking', () => {
@@ -169,7 +172,8 @@ describe('RealtimeVoiceSession (native) sessionId tracking', () => {
     getBindingByControlSessionId.mockReset();
     getBindingByControlSessionId.mockReturnValue(null);
     ensureVoiceBinding.mockReset();
-    sendMessage.mockReset();
+    sendSessionMessageWithServerScope.mockReset();
+    sendSessionMessageWithServerScope.mockResolvedValue({ ok: true });
     (globalThis as any).fetch = vi.fn(async () => ({
       ok: true,
       status: 200,
@@ -217,9 +221,11 @@ describe('RealtimeVoiceSession (native) sessionId tracking', () => {
 
     const { realtimeClientTools } = await import('./realtimeClientTools');
     await realtimeClientTools.sendSessionMessage({ message: 'hello' });
-    expect(sendMessage).toHaveBeenCalledTimes(1);
-    expect(sendMessage.mock.lastCall?.[0]).toBe('s1');
-    expect(sendMessage.mock.lastCall?.[1]).toBe('hello');
+    expect(sendSessionMessageWithServerScope).toHaveBeenCalledTimes(1);
+    expect(sendSessionMessageWithServerScope).toHaveBeenCalledWith(expect.objectContaining({
+      message: 'hello',
+      sessionId: 's1',
+    }));
 
     await act(async () => {
       tree.unmount();
@@ -241,9 +247,11 @@ describe('RealtimeVoiceSession (native) sessionId tracking', () => {
 
     const { realtimeClientTools } = await import('./realtimeClientTools');
     await realtimeClientTools.sendSessionMessage({ message: 'hello' });
-    expect(sendMessage).toHaveBeenCalledTimes(1);
-    expect(sendMessage.mock.lastCall?.[0]).toBe('s2');
-    expect(sendMessage.mock.lastCall?.[1]).toBe('hello');
+    expect(sendSessionMessageWithServerScope).toHaveBeenCalledTimes(1);
+    expect(sendSessionMessageWithServerScope).toHaveBeenCalledWith(expect.objectContaining({
+      message: 'hello',
+      sessionId: 's2',
+    }));
 
     await act(async () => {
       tree.unmount();

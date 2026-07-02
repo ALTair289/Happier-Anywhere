@@ -104,6 +104,7 @@ export function buildServerFeaturesResponse(overrides: FixtureOverrides = {}): F
                 public: { enabled: true },
                 contentKeys: { enabled: true },
                 pendingQueueV2: { enabled: false },
+                pendingDeliveryState: { enabled: false },
             },
             sessions: {
                 enabled: false,
@@ -173,6 +174,12 @@ export function buildServerFeaturesResponse(overrides: FixtureOverrides = {}): F
                 disabledByBuildPolicy: false,
             },
             pets: DEFAULT_PETS_CAPABILITIES,
+            sharing: {
+                pendingQueueV2: {
+                    deliveryState: false,
+                    deliveryBlockedReason: false,
+                },
+            },
             encryption: {
                 storagePolicy: 'required_e2ee',
                 allowAccountOptOut: false,

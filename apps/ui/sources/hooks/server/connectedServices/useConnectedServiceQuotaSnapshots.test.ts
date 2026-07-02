@@ -2,11 +2,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import * as React from 'react';
 import renderer, { act } from 'react-test-renderer';
-import { ConnectedServiceQuotaSnapshotV1Schema } from '@happier-dev/protocol';
+import {
+  buildProviderAccountUsageRecordId,
+  ConnectedServiceQuotaSnapshotV1Schema,
+  ProviderAccountUsageSnapshotV1Schema,
+  type ProviderAccountUsageSnapshotV1,
+} from '@happier-dev/protocol';
 import type { fetchAccountEncryptionMode } from '@/sync/api/account/apiAccountEncryptionMode';
 import type { getConnectedServiceQuotaSnapshotSealed } from '@/sync/api/account/apiConnectedServicesQuotasV2';
 import type { getConnectedServiceQuotaSnapshotPlain } from '@/sync/api/account/apiConnectedServicesQuotasV3';
 import { flushHookEffects, renderHook } from '@/dev/testkit';
+import { resolveAuthCredentialsScopeKey } from '@/auth/storage/resolveAuthCredentialsScopeKey';
+import type { ConnectedServiceQuotaSnapshotsResult } from './useConnectedServiceQuotaSnapshots';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -83,6 +90,45 @@ function makeQuotaSnapshot(params: Readonly<{
   });
 }
 
+function makeProviderAccountUsageSnapshot(params: Readonly<{
+  meterId: string;
+  used: number;
+}>): ProviderAccountUsageSnapshotV1 {
+  const recordKey = {
+    providerId: 'codex',
+    accountSubjectId: 'provider-account-1',
+    subjectKind: 'account',
+    quotaScope: 'account',
+  } as const;
+  return ProviderAccountUsageSnapshotV1Schema.parse({
+    v: 1,
+    recordId: buildProviderAccountUsageRecordId(recordKey),
+    recordKey,
+    providerId: 'codex',
+    accountSubject: { kind: 'providerSubject', id: 'provider-account-1' },
+    observedAtMs: 1_000,
+    fetchedAtMs: 1_000,
+    staleAfterMs: 60_000,
+    source: 'providerHttp',
+    confidence: 'confirmed',
+    state: 'loaded_data',
+    planLabel: 'Pro',
+    accountLabel: 'Provider account',
+    meters: [{
+      meterId: params.meterId,
+      label: params.meterId,
+      used: params.used,
+      limit: 100,
+      unit: 'count',
+      utilizationPct: null,
+      resetsAt: null,
+      status: 'ok',
+      confidence: 'exact',
+      details: { limitCategory: 'usage_limit' },
+    }],
+  });
+}
+
 function createDeferredPlainSnapshot() {
   let resolve!: (value: PlainQuotaSnapshotResult) => void;
   const promise = new Promise<PlainQuotaSnapshotResult>((nextResolve) => {
@@ -100,11 +146,15 @@ function createDeferredAccountMode() {
 }
 
 describe('useConnectedServiceQuotaSnapshots', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     currentCredentials = stableCredentials;
     vi.clearAllMocks();
     useFeatureEnabledSpy.mockReturnValue(true);
     fetchAccountEncryptionModeSpy.mockResolvedValue({ mode: 'plain', updatedAt: 0 });
+    const { __resetConnectedServiceQuotaSnapshotStore } = await import('./connectedServiceQuotaSnapshotStore');
+    __resetConnectedServiceQuotaSnapshotStore();
+    const { __resetProviderAccountUsageSnapshotCache } = await import('@/sync/domains/connectedServices/accountUsage/cache');
+    __resetProviderAccountUsageSnapshotCache();
   });
 
   afterEach(() => {
@@ -136,7 +186,7 @@ describe('useConnectedServiceQuotaSnapshots', () => {
     getConnectedServiceQuotaSnapshotPlainSpy.mockResolvedValue(makeQuotaSnapshot({ serviceId: 'anthropic', meterId: 'old-token' }));
 
     const { useConnectedServiceQuotaSnapshots } = await import('./useConnectedServiceQuotaSnapshots');
-    const valuesDuringCredentialChange: Array<Record<string, PlainQuotaSnapshotResult>> = [];
+    const valuesDuringCredentialChange: ConnectedServiceQuotaSnapshotsResult[] = [];
     let captureCredentialChangeRender = false;
 
     function Harness() {
@@ -159,7 +209,8 @@ describe('useConnectedServiceQuotaSnapshots', () => {
       tree.update(React.createElement(Harness));
     });
 
-    expect(valuesDuringCredentialChange[0]?.['anthropic/work']).toBeNull();
+    expect(valuesDuringCredentialChange[0]?.snapshotsByKey['anthropic/work']).toBeNull();
+    expect(valuesDuringCredentialChange[0]?.loadingByKey['anthropic/work']).toBe(false);
 
     await act(async () => {
       tree.unmount();
@@ -194,14 +245,15 @@ describe('useConnectedServiceQuotaSnapshots', () => {
       oldCredentialSnapshot.resolve(makeQuotaSnapshot({ serviceId: 'anthropic', meterId: 'old-secret' }));
     });
     await flushHookEffects({ cycles: 5, turns: 5 });
-    expect(hook.getCurrent()['anthropic/work']).toBeNull();
+    expect(hook.getCurrent().snapshotsByKey['anthropic/work']).toBeNull();
 
     await act(async () => {
       newCredentialSnapshot.resolve(makeQuotaSnapshot({ serviceId: 'anthropic', meterId: 'new-secret' }));
     });
     await flushHookEffects({ cycles: 10, turns: 10 });
 
-    expect(hook.getCurrent()['anthropic/work']?.meters[0]?.meterId).toBe('new-secret');
+    expect(hook.getCurrent().snapshotsByKey['anthropic/work']?.meters[0]?.meterId).toBe('new-secret');
+    expect(hook.getCurrent().loadingByKey['anthropic/work']).toBe(false);
     await hook.unmount();
   });
 
@@ -275,7 +327,7 @@ describe('useConnectedServiceQuotaSnapshots', () => {
     await flushHookEffects({ cycles: 5, turns: 5 });
 
     expect(getConnectedServiceQuotaSnapshotSealedSpy).not.toHaveBeenCalled();
-    expect(hook.getCurrent()['anthropic/work']?.meters[0]?.meterId).toBe('new-account');
+    expect(hook.getCurrent().snapshotsByKey['anthropic/work']?.meters[0]?.meterId).toBe('new-account');
     await hook.unmount();
   });
 
@@ -301,7 +353,8 @@ describe('useConnectedServiceQuotaSnapshots', () => {
     });
     await flushHookEffects({ cycles: 10, turns: 10 });
 
-    expect(hook.getCurrent()['anthropic/work']?.meters[0]?.meterId).toBe('weekly');
+    expect(hook.getCurrent().snapshotsByKey['anthropic/work']?.meters[0]?.meterId).toBe('weekly');
+    expect(hook.getCurrent().loadingByKey['anthropic/work']).toBe(false);
     await hook.unmount();
   });
 
@@ -330,7 +383,7 @@ describe('useConnectedServiceQuotaSnapshots', () => {
     });
     await flushHookEffects({ cycles: 10, turns: 10 });
 
-    expect(hook.getCurrent()['anthropic/work']?.meters[0]?.meterId).toBe('weekly');
+    expect(hook.getCurrent().snapshotsByKey['anthropic/work']?.meters[0]?.meterId).toBe('weekly');
     await hook.unmount();
   });
 
@@ -374,8 +427,8 @@ describe('useConnectedServiceQuotaSnapshots', () => {
     });
     await flushHookEffects({ cycles: 10, turns: 10 });
 
-    expect(hook.getCurrent()['anthropic/work']?.meters[0]?.meterId).toBe('weekly');
-    expect(hook.getCurrent()['openai-codex/work']?.meters[0]?.meterId).toBe('monthly');
+    expect(hook.getCurrent().snapshotsByKey['anthropic/work']?.meters[0]?.meterId).toBe('weekly');
+    expect(hook.getCurrent().snapshotsByKey['openai-codex/work']?.meters[0]?.meterId).toBe('monthly');
     await hook.unmount();
   });
 
@@ -416,7 +469,7 @@ describe('useConnectedServiceQuotaSnapshots', () => {
     });
     await flushHookEffects({ cycles: 10, turns: 10 });
 
-    expect(hook.getCurrent()['anthropic/work']?.meters[0]?.meterId).toBe('weekly');
+    expect(hook.getCurrent().snapshotsByKey['anthropic/work']?.meters[0]?.meterId).toBe('weekly');
     await hook.unmount();
   });
 
@@ -432,8 +485,85 @@ describe('useConnectedServiceQuotaSnapshots', () => {
     expect(getConnectedServiceQuotaSnapshotPlainSpy).toHaveBeenCalledWith(stableCredentials, {
       serviceId: 'anthropic',
       profileId: 'work',
-    }, { signal: expect.any(AbortSignal) });
-    expect(hook.getCurrent()['anthropic/work']?.meters[0]?.meterId).toBe('weekly');
+    });
+    expect(hook.getCurrent().snapshotsByKey['anthropic/work']?.meters[0]?.meterId).toBe('weekly');
+    await hook.unmount();
+  });
+
+  it('retries missing quota snapshots while the connected profile remains mounted', async () => {
+    vi.useFakeTimers();
+    fetchAccountEncryptionModeSpy.mockResolvedValue({ mode: 'plain', updatedAt: 0 });
+    getConnectedServiceQuotaSnapshotPlainSpy
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(makeQuotaSnapshot({ serviceId: 'anthropic', meterId: 'retried-weekly' }));
+
+    const { useConnectedServiceQuotaSnapshots } = await import('./useConnectedServiceQuotaSnapshots');
+    const hook = await renderHook(() => useConnectedServiceQuotaSnapshots([
+      { serviceId: 'anthropic', profileId: 'work' },
+    ]));
+    await flushHookEffects({ cycles: 5, turns: 5 });
+
+    expect(getConnectedServiceQuotaSnapshotPlainSpy).toHaveBeenCalledTimes(1);
+    expect(hook.getCurrent().snapshotsByKey['anthropic/work']).toBeNull();
+
+    await flushHookEffects({ cycles: 1, turns: 2, advanceTimersMs: 30_001 });
+    await flushHookEffects({ cycles: 5, turns: 5 });
+
+    expect(getConnectedServiceQuotaSnapshotPlainSpy).toHaveBeenCalledTimes(2);
+    expect(hook.getCurrent().snapshotsByKey['anthropic/work']?.meters[0]?.meterId).toBe('retried-weekly');
+    await hook.unmount();
+  });
+
+  it('uses the connected-service quota view for a connected-service profile request even when cached account usage exists', async () => {
+    getConnectedServiceQuotaSnapshotPlainSpy.mockResolvedValue(makeQuotaSnapshot({
+      serviceId: 'openai-codex',
+      meterId: 'view-weekly',
+    }));
+    const accountUsage = makeProviderAccountUsageSnapshot({ meterId: 'account-usage-weekly', used: 65 });
+    const { writeProviderAccountUsageSnapshotToCache } = await import('@/sync/domains/connectedServices/accountUsage/cache');
+    writeProviderAccountUsageSnapshotToCache({
+      credentialScope: resolveAuthCredentialsScopeKey(stableCredentials),
+      snapshot: accountUsage,
+    });
+
+    const { useConnectedServiceQuotaSnapshots } = await import('./useConnectedServiceQuotaSnapshots');
+    const hook = await renderHook(() => useConnectedServiceQuotaSnapshots([
+      { serviceId: 'openai-codex', profileId: 'work' },
+    ]));
+    await flushHookEffects({ cycles: 5, turns: 5 });
+
+    expect(getConnectedServiceQuotaSnapshotPlainSpy).toHaveBeenCalledWith(stableCredentials, {
+      serviceId: 'openai-codex',
+      profileId: 'work',
+    });
+    expect(hook.getCurrent().snapshotsByKey['openai-codex/work']).toEqual(expect.objectContaining({
+      serviceId: 'openai-codex',
+      profileId: 'work',
+    }));
+    expect(hook.getCurrent().snapshotsByKey['openai-codex/work']?.meters[0]?.meterId).toBe('view-weekly');
+    await hook.unmount();
+  });
+
+  it('prefers the connected-service quota view ahead of cached account usage for connected bindings', async () => {
+    getConnectedServiceQuotaSnapshotPlainSpy.mockResolvedValue(makeQuotaSnapshot({
+      serviceId: 'openai-codex',
+      meterId: 'view-weekly',
+    }));
+    const accountUsage = makeProviderAccountUsageSnapshot({ meterId: 'account-usage-weekly', used: 95 });
+    const { writeProviderAccountUsageSnapshotToCache } = await import('@/sync/domains/connectedServices/accountUsage/cache');
+    writeProviderAccountUsageSnapshotToCache({
+      credentialScope: resolveAuthCredentialsScopeKey(stableCredentials),
+      snapshot: accountUsage,
+    });
+
+    const { useConnectedServiceQuotaSnapshots } = await import('./useConnectedServiceQuotaSnapshots');
+    const hook = await renderHook(() => useConnectedServiceQuotaSnapshots([
+      { serviceId: 'openai-codex', profileId: 'work' },
+    ]));
+    await flushHookEffects({ cycles: 5, turns: 5 });
+
+    expect(getConnectedServiceQuotaSnapshotPlainSpy).toHaveBeenCalledTimes(1);
+    expect(hook.getCurrent().snapshotsByKey['openai-codex/work']?.meters[0]?.meterId).toBe('view-weekly');
     await hook.unmount();
   });
 });

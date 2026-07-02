@@ -2,7 +2,13 @@ import * as React from 'react';
 import { act } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { ConnectedServiceQuotaSnapshotV1Schema } from '@happier-dev/protocol';
+import {
+  buildProviderAccountUsageRecordId,
+  ConnectedServiceQuotaSnapshotV1Schema,
+  ProviderAccountUsageSnapshotV1Schema,
+  sealProviderAccountUsageSnapshotCiphertext,
+  type ProviderAccountUsageSnapshotV1,
+} from '@happier-dev/protocol';
 import type { ConnectedServiceId } from '@happier-dev/protocol';
 import type { fetchAccountEncryptionMode } from '@/sync/api/account/apiAccountEncryptionMode';
 import type {
@@ -17,6 +23,8 @@ import type {
 import { flushHookEffects, renderHook, renderScreen } from '@/dev/testkit';
 import { useConnectedServiceQuotaSnapshot } from './useConnectedServiceQuotaSnapshot';
 import { __resetConnectedServiceQuotaSnapshotStore } from './connectedServiceQuotaSnapshotStore';
+import { resolveAuthCredentialsScopeKey } from '@/auth/storage/resolveAuthCredentialsScopeKey';
+import { __resetProviderAccountUsageSnapshotCache } from '@/sync/domains/connectedServices/accountUsage/cache';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -103,6 +111,10 @@ function createDeferredAccountMode() {
   return { promise, resolve } as const;
 }
 
+function fixedRandomBytes(byte: number) {
+  return (length: number) => new Uint8Array(length).fill(byte);
+}
+
 function snapshotFor(
   profileId: string,
   fetchedAt: number,
@@ -122,6 +134,50 @@ function snapshotFor(
   });
 }
 
+function accountUsageSnapshot(params: Readonly<{
+  serviceId?: 'anthropic' | 'openai-codex';
+  profileId?: string;
+  meterId?: string;
+  used?: number;
+  recoveryCredits?: ProviderAccountUsageSnapshotV1['recoveryCredits'];
+}> = {}): ProviderAccountUsageSnapshotV1 {
+  const providerId = params.serviceId === 'openai-codex' ? 'codex' : 'claude';
+  const accountSubjectId = `${providerId}-account-1`;
+  const recordKey = {
+    providerId,
+    accountSubjectId,
+    subjectKind: 'account',
+    quotaScope: 'account',
+  } as const;
+  return ProviderAccountUsageSnapshotV1Schema.parse({
+    v: 1,
+    recordId: buildProviderAccountUsageRecordId(recordKey),
+    recordKey,
+    providerId,
+    accountSubject: { kind: 'providerSubject', id: accountSubjectId },
+    observedAtMs: 1,
+    fetchedAtMs: 1,
+    staleAfterMs: 60_000,
+    source: 'providerHttp',
+    confidence: 'confirmed',
+    state: 'loaded_data',
+    planLabel: 'Team',
+    accountLabel: 'Usage account',
+    ...(params.recoveryCredits ? { recoveryCredits: params.recoveryCredits } : {}),
+    meters: [{
+      meterId: params.meterId ?? 'account-usage-weekly',
+      label: params.meterId ?? 'Account usage weekly',
+      used: params.used ?? 72,
+      limit: 100,
+      unit: 'count',
+      utilizationPct: null,
+      resetsAt: null,
+      status: 'ok',
+      details: { limitCategory: 'usage_limit' },
+    }],
+  });
+}
+
 type HookProps = Readonly<{ serviceId: ConnectedServiceId; profileId: string }>;
 
 async function mountHook(props: HookProps) {
@@ -134,6 +190,7 @@ async function mountHook(props: HookProps) {
 describe('useConnectedServiceQuotaSnapshot', () => {
   beforeEach(() => {
     __resetConnectedServiceQuotaSnapshotStore();
+    __resetProviderAccountUsageSnapshotCache();
     pinnedFixture.value = {};
     currentCredentials = stableCredentials;
     vi.clearAllMocks();
@@ -248,6 +305,40 @@ describe('useConnectedServiceQuotaSnapshot', () => {
     );
   });
 
+  it('opens provider-account usage ciphertext returned by the connected-service quota view route', async () => {
+    fetchAccountEncryptionModeSpy.mockResolvedValue({ mode: 'e2ee', updatedAt: 0 });
+    const canonicalSnapshot = accountUsageSnapshot({
+      serviceId: 'openai-codex',
+      profileId: 'work',
+      meterId: 'canonical-weekly',
+      used: 64,
+    });
+    const ciphertext = sealProviderAccountUsageSnapshotCiphertext({
+      material: { type: 'legacy', secret: new Uint8Array(32).fill(3) },
+      payload: canonicalSnapshot,
+      randomBytes: fixedRandomBytes(6),
+    });
+    getConnectedServiceQuotaSnapshotSealedSpy.mockResolvedValue({
+      sealed: { format: 'account_scoped_v1', ciphertext },
+      metadata: {
+        fetchedAt: canonicalSnapshot.fetchedAtMs,
+        staleAfterMs: canonicalSnapshot.staleAfterMs,
+        status: 'ok',
+      },
+    });
+
+    const hook = await mountHook({ serviceId: 'openai-codex', profileId: 'work' });
+    await flushHookEffects({ turns: 5 });
+
+    expect(hook.getCurrent().snapshot).toEqual(expect.objectContaining({
+      serviceId: 'openai-codex',
+      profileId: 'work',
+      providerId: 'codex',
+      activeAccountId: 'codex-account-1',
+    }));
+    expect(hook.getCurrent().snapshot?.meters[0]?.meterId).toBe('canonical-weekly');
+  });
+
   it('ignores stale automatic load results after the quota profile changes', async () => {
     fetchAccountEncryptionModeSpy.mockResolvedValue({ mode: 'plain', updatedAt: 0 });
     let resolveWork!: (value: Awaited<ReturnType<typeof getConnectedServiceQuotaSnapshotPlain>>) => void;
@@ -357,5 +448,72 @@ describe('useConnectedServiceQuotaSnapshot', () => {
     await flushHookEffects({ turns: 3 });
 
     expect(hook.getCurrent().error).toBeNull();
+  });
+
+  it('uses the connected-service quota view for a settings account card even when cached provider account usage exists', async () => {
+    fetchAccountEncryptionModeSpy.mockResolvedValue({ mode: 'plain', updatedAt: 0 });
+    getConnectedServiceQuotaSnapshotPlainSpy.mockResolvedValue(snapshotFor('work', 2, 'View', {
+      meters: [{
+        meterId: 'view-weekly',
+        label: 'View weekly',
+        used: 48,
+        limit: 100,
+        unit: 'count',
+        utilizationPct: null,
+        resetsAt: null,
+        status: 'ok',
+        details: { limitCategory: 'usage_limit' },
+      }],
+    }));
+    const snapshot = accountUsageSnapshot({ serviceId: 'anthropic', profileId: 'work', meterId: 'account-usage-weekly' });
+    const { writeProviderAccountUsageSnapshotToCache } = await import('@/sync/domains/connectedServices/accountUsage/cache');
+    writeProviderAccountUsageSnapshotToCache({
+      credentialScope: resolveAuthCredentialsScopeKey(stableCredentials),
+      snapshot,
+    });
+
+    const hook = await mountHook({ serviceId: 'anthropic', profileId: 'work' });
+
+    expect(getConnectedServiceQuotaSnapshotPlainSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ token: 't' }),
+      { serviceId: 'anthropic', profileId: 'work' },
+    );
+    expect(hook.getCurrent().snapshot).toEqual(expect.objectContaining({
+      serviceId: 'anthropic',
+      profileId: 'work',
+    }));
+    expect(hook.getCurrent().snapshot?.meters[0]?.meterId).toBe('view-weekly');
+    expect(hook.getCurrent().canRefresh).toBe(true);
+  });
+
+  it('consumes recovery credit through the connected-service quota view path', async () => {
+    fetchAccountEncryptionModeSpy.mockResolvedValue({ mode: 'plain', updatedAt: 0 });
+    const recoveryCredits = {
+      kind: 'usage_limit_resets',
+      availableCount: 1,
+      nextExpiresAtMs: Date.now() + 60_000,
+      credits: [{
+        kind: 'usage_limit_reset',
+        status: 'available',
+        providerCreditId: 'pc-1',
+        expiresAtMs: Date.now() + 60_000,
+      }],
+    } as const;
+    getConnectedServiceQuotaSnapshotPlainSpy.mockResolvedValue(snapshotFor('work', 1, null, { recoveryCredits }));
+
+    const hook = await mountHook({ serviceId: 'anthropic', profileId: 'work' });
+
+    expect(hook.getCurrent().recoveryCreditSummary).toEqual(expect.objectContaining({ availableCount: 1 }));
+    expect(hook.getCurrent().canConsumeRecoveryCredit).toBe(true);
+
+    await act(async () => { await hook.getCurrent().consumeRecoveryCredit('pc-1'); });
+
+    expect(consumeQuotaRecoveryCreditSpy).toHaveBeenCalledWith(expect.objectContaining({
+      serviceId: 'anthropic',
+      profileId: 'work',
+      machineId: 'machine-1',
+      providerCreditId: 'pc-1',
+      sourceSnapshotFetchedAtMs: 1,
+    }));
   });
 });

@@ -1,52 +1,90 @@
+import * as React from 'react';
+
 import { useFeatureEnabled } from '@/hooks/server/useFeatureEnabled';
 import { computeConnectedServiceQuotaSummaryBadges } from '@/sync/domains/connectedServices/connectedServiceQuotaBadges';
 import { connectedServiceProfileKey } from '@/sync/domains/connectedServices/connectedServiceProfilePreferences';
 import { useSettings } from '@/sync/store/hooks';
 
-import { ConnectedServiceIdSchema } from '@happier-dev/protocol';
+import { ConnectedServiceIdSchema, type ConnectedServiceId } from '@happier-dev/protocol';
 
-import { useConnectedServiceQuotaSnapshots } from './useConnectedServiceQuotaSnapshots';
+import {
+    useConnectedServiceQuotaSnapshots,
+    type ConnectedServiceQuotaSnapshotsFetchPolicy,
+} from './useConnectedServiceQuotaSnapshots';
 
 type ProfileRef = Readonly<{ serviceId: string; profileId: string }>;
+type NormalizedProfileRef = Readonly<{
+    key: string;
+    serviceId: ConnectedServiceId;
+    profileId: string;
+}>;
+
+type UseConnectedServiceQuotaBadgesOptions = Readonly<{
+    fetchPolicy?: ConnectedServiceQuotaSnapshotsFetchPolicy;
+}>;
+
+function normalizeProfileRefs(profiles: ReadonlyArray<ProfileRef>): NormalizedProfileRef[] {
+    const next: NormalizedProfileRef[] = [];
+    const seenKeys = new Set<string>();
+    for (const profile of profiles) {
+        const serviceIdRaw = String(profile.serviceId ?? '').trim();
+        const serviceIdParsed = ConnectedServiceIdSchema.safeParse(serviceIdRaw);
+        const profileId = String(profile.profileId ?? '').trim();
+        if (!serviceIdParsed.success || !profileId) continue;
+
+        const serviceId = serviceIdParsed.data;
+        const key = connectedServiceProfileKey({ serviceId, profileId });
+        if (seenKeys.has(key)) continue;
+        seenKeys.add(key);
+        next.push({ key, serviceId, profileId });
+    }
+    return next;
+}
 
 export function useConnectedServiceQuotaBadges(
     profiles: ReadonlyArray<ProfileRef>,
+    options: UseConnectedServiceQuotaBadgesOptions = {},
 ): Record<string, Array<{ meterId: string; text: string }>> {
     const settings = useSettings();
     const quotasEnabled = useFeatureEnabled('connectedServices.quotas');
 
     const pinnedByKey = settings.connectedServicesQuotaPinnedMeterIdsByKey;
     const strategyByKey = settings.connectedServicesQuotaSummaryStrategyByKey;
-    const requestedProfiles = quotasEnabled
-        ? profiles.filter((profile) => {
-            const serviceIdParsed = ConnectedServiceIdSchema.safeParse(String(profile.serviceId ?? '').trim());
-            const profileId = String(profile.profileId ?? '').trim();
-            if (!serviceIdParsed.success || !profileId) return false;
-            return true;
-        })
-        : [];
-    const snapshotsByKey = useConnectedServiceQuotaSnapshots(requestedProfiles);
 
-    const badgesByKey: Record<string, Array<{ meterId: string; text: string }>> = {};
-    if (!quotasEnabled) return badgesByKey;
+    const normalizedProfiles = React.useMemo(() => normalizeProfileRefs(profiles), [profiles]);
 
-    for (const profile of profiles) {
-        const serviceIdRaw = String(profile.serviceId ?? '').trim();
-        const serviceIdParsed = ConnectedServiceIdSchema.safeParse(serviceIdRaw);
-        const profileId = String(profile.profileId ?? '').trim();
-        if (!serviceIdParsed.success || !profileId) continue;
-        const serviceId = serviceIdParsed.data;
+    const fetchPolicy = options.fetchPolicy ?? 'poll';
+    const { snapshotsByKey } = useConnectedServiceQuotaSnapshots(normalizedProfiles, { fetchPolicy });
 
-        const key = connectedServiceProfileKey({ serviceId, profileId });
-        const pinnedMeterIds = pinnedByKey[key] ?? [];
-        const rawStrategy = strategyByKey[key];
-        const strategy = rawStrategy === 'primary' && pinnedMeterIds.length > 0 ? 'primary' : 'min_remaining';
-        badgesByKey[key] = computeConnectedServiceQuotaSummaryBadges({
-            snapshot: snapshotsByKey[key] ?? null,
-            pinnedMeterIds,
-            strategy,
-        });
-    }
+    return React.useMemo(() => {
+        const badgesByKey: Record<string, Array<{ meterId: string; text: string }>> = {};
+        if (!quotasEnabled) return badgesByKey;
 
-    return badgesByKey;
+        for (const profile of normalizedProfiles) {
+            const key = profile.key;
+            const pinnedMeterIds = pinnedByKey[key] ?? [];
+            const snapshot = snapshotsByKey[key] ?? null;
+            if (fetchPolicy === 'cache_only' && !snapshot) {
+                badgesByKey[key] = [];
+                continue;
+            }
+
+            const rawStrategy = strategyByKey[key];
+            const strategy = rawStrategy === 'primary' && pinnedMeterIds.length > 0 ? 'primary' : 'min_remaining';
+            badgesByKey[key] = computeConnectedServiceQuotaSummaryBadges({
+                snapshot,
+                pinnedMeterIds,
+                strategy,
+            });
+        }
+
+        return badgesByKey;
+    }, [
+        fetchPolicy,
+        normalizedProfiles,
+        pinnedByKey,
+        quotasEnabled,
+        snapshotsByKey,
+        strategyByKey,
+    ]);
 }

@@ -17,8 +17,8 @@ import { useCredentialScopedAccountModeResolver } from './useCredentialScopedAcc
 import {
     buildQuotaSnapshotScopeKey,
     consumeQuotaRecoveryCredit,
-    ensureQuotaSnapshotLoaded,
     getQuotaSnapshotEntry,
+    retainQuotaSnapshotPolling,
     refreshQuotaSnapshot,
     subscribeQuotaSnapshotEntry,
     type QuotaSnapshotLoadContext,
@@ -32,6 +32,9 @@ export type UseConnectedServiceQuotaSnapshotResult = Readonly<{
     nowMs: number;
     recoveryCreditSummary: ConnectedServiceQuotaRecoveryCreditSummary | null;
     recoveryCreditMachineId: string | null;
+    canConsumeRecoveryCredit: boolean;
+    /** False when this hook is displaying a provider-account-usage projection without a source-correct refresh path. */
+    canRefresh: boolean;
     /** True while a force-refresh (server refresh + reload poll) is in flight. */
     isRefreshing: boolean;
     refresh: () => Promise<void>;
@@ -82,12 +85,13 @@ export function useConnectedServiceQuotaSnapshot(params: Readonly<{
 
     React.useEffect(() => {
         if (!key || !loadContext) return;
-        ensureQuotaSnapshotLoaded(key, loadContext);
+        return retainQuotaSnapshotPolling(key, loadContext);
     }, [key, loadContext]);
 
     const snapshot = entry.snapshot;
     const nowMs = Date.now();
     const isStale = snapshot ? nowMs - snapshot.fetchedAt > snapshot.staleAfterMs : false;
+    const canConsumeRecoveryCredit = snapshot !== null;
     const recoveryCreditSummary = summarizeConnectedServiceQuotaRecoveryCredits(snapshot?.recoveryCredits, nowMs);
     const recoveryCreditMachineId = React.useMemo(() => (
         machines.find((machine) => machine.active === true)?.id
@@ -115,6 +119,7 @@ export function useConnectedServiceQuotaSnapshot(params: Readonly<{
     }, [key, loadContext]);
 
     const consumeRecoveryCredit = React.useCallback(async (providerCreditId?: string | null) => {
+        if (!canConsumeRecoveryCredit) return;
         if (!recoveryCreditSummary) return;
         if (!recoveryCreditMachineId) {
             setActionError(t('connectedServices.quota.recoveryCreditMachineUnavailable'));
@@ -137,7 +142,7 @@ export function useConnectedServiceQuotaSnapshot(params: Readonly<{
         } finally {
             setConsumeRecoveryCreditPendingTarget(null);
         }
-    }, [key, loadContext, recoveryCreditMachineId, recoveryCreditSummary]);
+    }, [canConsumeRecoveryCredit, key, loadContext, recoveryCreditMachineId, recoveryCreditSummary]);
 
     const pinnedByKey = useSetting('connectedServicesQuotaPinnedMeterIdsByKey');
     const applySettings = useApplySettings();
@@ -159,12 +164,14 @@ export function useConnectedServiceQuotaSnapshot(params: Readonly<{
 
     return {
         snapshot,
-        loading: entry.loading,
+        loading: snapshot ? false : entry.loading,
         error: actionError ?? entry.error,
         isStale,
         nowMs,
         recoveryCreditSummary,
         recoveryCreditMachineId,
+        canConsumeRecoveryCredit,
+        canRefresh: true,
         isRefreshing: entry.refreshing,
         refresh,
         consumeRecoveryCredit,

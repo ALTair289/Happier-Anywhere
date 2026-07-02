@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import React from 'react';
-import { act } from 'react-test-renderer';
-import { ConnectedServiceQuotaSnapshotV1Schema, sealAccountScopedBlobCiphertext } from '@happier-dev/protocol';
+import { ConnectedServiceQuotaSnapshotV1Schema } from '@happier-dev/protocol';
+import { sealLegacyConnectedServiceQuotaSnapshotFixtureCiphertext } from '@happier-dev/protocol/testing/accountScopedCipherFixtures';
 import type { fetchAccountEncryptionMode } from '@/sync/api/account/apiAccountEncryptionMode';
 import type { getConnectedServiceQuotaSnapshotSealed } from '@/sync/api/account/apiConnectedServicesQuotasV2';
 import type { getConnectedServiceQuotaSnapshotPlain } from '@/sync/api/account/apiConnectedServicesQuotasV3';
@@ -66,8 +66,12 @@ beforeEach(() => {
 });
 
 describe('useConnectedServiceQuotaBadges', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
+    const { __resetConnectedServiceQuotaSnapshotStore } = await import('./connectedServiceQuotaSnapshotStore');
+    __resetConnectedServiceQuotaSnapshotStore();
+    const { __resetProviderAccountUsageSnapshotCache } = await import('@/sync/domains/connectedServices/accountUsage/cache');
+    __resetProviderAccountUsageSnapshotCache();
   });
 
   it('returns badges for pinned meters after snapshot fetch', async () => {
@@ -98,8 +102,7 @@ describe('useConnectedServiceQuotaBadges', () => {
       ],
     });
 
-    const ciphertext = sealAccountScopedBlobCiphertext({
-      kind: 'connected_service_quota_snapshot',
+    const ciphertext = sealLegacyConnectedServiceQuotaSnapshotFixtureCiphertext({
       material: { type: 'legacy', secret: secretBytes },
       payload: snapshot,
       randomBytes: (length) => new Uint8Array(length).fill(7),
@@ -229,87 +232,37 @@ describe('useConnectedServiceQuotaBadges', () => {
     expect(last['anthropic/work']).toEqual([{ meterId: 'weekly', text: '8%' }]);
   });
 
-  it('retries a pinned key after an initial miss', async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(1_000_000);
-    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
-    try {
-      useFeatureEnabledSpy.mockReturnValue(true);
-      fetchAccountEncryptionModeSpy.mockResolvedValue({ mode: 'e2ee', updatedAt: 0 });
+  it('keeps pinned badge placeholders after a connected-service quota miss', async () => {
+    useFeatureEnabledSpy.mockReturnValue(true);
+    fetchAccountEncryptionModeSpy.mockResolvedValue({ mode: 'e2ee', updatedAt: 0 });
 
-      const secretBytes = new Uint8Array(32).fill(3);
-      const snapshot = ConnectedServiceQuotaSnapshotV1Schema.parse({
-        v: 1,
-        serviceId: 'anthropic',
-        profileId: 'work',
-        fetchedAt: 1,
-        staleAfterMs: 60_000,
-        planLabel: 'Pro',
-        accountLabel: null,
-        meters: [
-          {
-            meterId: 'weekly',
-            label: 'Weekly',
-            used: 82,
-            limit: 100,
-            unit: 'count',
-            utilizationPct: null,
-            resetsAt: null,
-            status: 'ok',
-            details: {},
-          },
-        ],
-      });
+    useSettingsSpy.mockReturnValue({
+      connectedServicesQuotaPinnedMeterIdsByKey: { 'anthropic/work': ['weekly'] },
+      connectedServicesQuotaSummaryStrategyByKey: {},
+      connectedServicesProfileLabelByKey: {},
+      connectedServicesDefaultProfileByServiceId: {},
+    });
 
-      const ciphertext = sealAccountScopedBlobCiphertext({
-        kind: 'connected_service_quota_snapshot',
-        material: { type: 'legacy', secret: secretBytes },
-        payload: snapshot,
-        randomBytes: (length) => new Uint8Array(length).fill(7),
-      });
+    getConnectedServiceQuotaSnapshotSealedSpy.mockResolvedValue(null);
 
-      useSettingsSpy.mockReturnValue({
-        connectedServicesQuotaPinnedMeterIdsByKey: { 'anthropic/work': ['weekly'] },
-        connectedServicesQuotaSummaryStrategyByKey: {},
-        connectedServicesProfileLabelByKey: {},
-        connectedServicesDefaultProfileByServiceId: {},
-      });
+    const { useConnectedServiceQuotaBadges } = await import('./useConnectedServiceQuotaBadges');
+    const seen: ReturnType<typeof useConnectedServiceQuotaBadges>[] = [];
+    const hook = await renderHook(() => {
+      const value = useConnectedServiceQuotaBadges([
+        { serviceId: 'anthropic', profileId: 'work' },
+      ]);
+      React.useEffect(() => {
+        seen.push(value);
+      }, [value]);
+      return value;
+    });
 
-      getConnectedServiceQuotaSnapshotSealedSpy
-        .mockResolvedValueOnce(null)
-        .mockResolvedValueOnce({
-          sealed: { format: 'account_scoped_v1', ciphertext },
-          metadata: { fetchedAt: snapshot.fetchedAt, staleAfterMs: snapshot.staleAfterMs, status: 'ok' },
-        });
+    await flushHookEffects({ cycles: 4, turns: 1 });
 
-      const { useConnectedServiceQuotaBadges } = await import('./useConnectedServiceQuotaBadges');
-      const seen: ReturnType<typeof useConnectedServiceQuotaBadges>[] = [];
-      const hook = await renderHook(() => {
-        const value = useConnectedServiceQuotaBadges([
-          { serviceId: 'anthropic', profileId: 'work' },
-        ]);
-        React.useEffect(() => {
-          seen.push(value);
-        }, [value]);
-        return value;
-      });
-
-      expect(setIntervalSpy).not.toHaveBeenCalled();
-      expect(getConnectedServiceQuotaSnapshotSealedSpy).toHaveBeenCalledTimes(1);
-
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(30_000);
-        await flushHookEffects();
-      });
-
-      expect(getConnectedServiceQuotaSnapshotSealedSpy).toHaveBeenCalledTimes(2);
-      const last = seen.at(-1) ?? {};
-      expect(last['anthropic/work']?.map((b) => b.text)).toContain('18%');
-      await hook.unmount();
-      await flushHookEffects({ cycles: 1, turns: 1 });
-    } finally {
-      setIntervalSpy.mockRestore();
-      vi.useRealTimers();
-    }
+    expect(getConnectedServiceQuotaSnapshotSealedSpy).toHaveBeenCalledTimes(1);
+    const last = seen.at(-1) ?? {};
+    expect(last['anthropic/work']).toEqual([{ meterId: 'weekly', text: '—' }]);
+    await hook.unmount();
+    await flushHookEffects({ cycles: 1, turns: 1 });
   });
 });

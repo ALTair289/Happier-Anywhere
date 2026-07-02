@@ -31,6 +31,14 @@ function getPublicConfig() {
     return getConfig(getUiDir(), { skipSDKVersionRequirement: true, isPublicConfig: true }).exp;
 }
 
+type ExpoConfigWithAutolinking = ReturnType<typeof getPublicConfig> & {
+    autolinking?: {
+        ios?: {
+            exclude?: readonly string[];
+        };
+    };
+};
+
 function getPluginOptions(exp: ReturnType<typeof getPublicConfig>, pluginName: string) {
     const pluginEntry = Array.isArray(exp.plugins)
         ? exp.plugins.find((entry) => Array.isArray(entry) && entry[0] === pluginName)
@@ -62,6 +70,7 @@ function withCleanEnv<T>(fn: () => T): T {
         'HAPPIER_ANDROID_USES_CLEARTEXT_TRAFFIC',
         'HAPPIER_EXPO_DEVCLIENT_LAUNCH_MODE',
         'HAPPIER_EXPO_DEVCLIENT_SILENT_LAUNCH',
+        'HAPPIER_IOS_MEMORY_PROFILING_RUNTIME',
         'HAPPIER_EXPO_USE_NATIVE_DEBUG',
         'EX_UPDATES_NATIVE_DEBUG',
         'EXPO_PUBLIC_HAPPIER_SYNC_TUNING_JSON',
@@ -417,6 +426,27 @@ describe('app.config.js', () => {
         expect(devClientPlugin).toEqual(['expo-dev-client', expect.objectContaining({ launchMode: 'most-recent' })]);
         expect(exp.developmentClient?.silentLaunch).toBe(true);
         expect(exp.updates?.useNativeDebug).toBe(true);
+    });
+
+    it('suppresses dev-client config-only behavior for memory profiling runtimes', () => {
+        const regularExp: ExpoConfigWithAutolinking = withCleanEnv(() => {
+            process.env.APP_ENV = 'development';
+            return getPublicConfig();
+        });
+        expect(regularExp.autolinking?.ios?.exclude).toBeUndefined();
+
+        const memoryExp: ExpoConfigWithAutolinking = withCleanEnv(() => {
+            process.env.APP_ENV = 'development';
+            process.env.HAPPIER_IOS_MEMORY_PROFILING_RUNTIME = '1';
+            process.env.HAPPIER_EXPO_DEVCLIENT_LAUNCH_MODE = 'most-recent';
+            process.env.HAPPIER_EXPO_DEVCLIENT_SILENT_LAUNCH = 'true';
+            return getPublicConfig();
+        });
+
+        const pluginNames = (memoryExp.plugins ?? []).map((entry: any) => (Array.isArray(entry) ? entry[0] : entry));
+        expect(pluginNames).not.toContain('expo-dev-client');
+        expect(memoryExp.developmentClient?.silentLaunch).toBeUndefined();
+        expect(memoryExp.autolinking?.ios?.exclude).toBeUndefined();
     });
 
     it('does not include unused optional native plugins in the default config', () => {
