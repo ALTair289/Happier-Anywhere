@@ -97,7 +97,7 @@ describe('PermissionFooter (codexDecision)', () => {
         const stopButtonStyles = getStyleFragments(stop);
 
         expect(allowStyles.some((style) => style.color === lightTheme.colors.permissionButton.allow.text)).toBe(true);
-        expect(allowForSessionStyles.some((style) => style.color === lightTheme.colors.permissionButton.allowAll.text)).toBe(true);
+        expect(allowForSessionStyles.some((style) => style.color === lightTheme.colors.permissionButton.allow.text)).toBe(true);
         expect(denyStyles.some((style) => style.color === lightTheme.colors.permissionButton.deny.text)).toBe(true);
         expect(stopStyles.some((style) => style.color === lightTheme.colors.permissionButton.deny.text)).toBe(true);
         expectTextOnlyActionButton(allowButtonStyles, lightTheme.colors.permissionButton.allow.background);

@@ -28,6 +28,7 @@ import { MCPToolView } from '../system/MCPToolView';
 import { UnknownToolView } from '../system/UnknownToolView';
 import { SubAgentRunView } from '../workflow/SubAgentRunView';
 import { AgentTeamView } from '../workflow/AgentTeamView';
+import { WorkflowActivityView } from '../workflow/WorkflowActivityView';
 import { KnownCanonicalToolNameV2Schema, type KnownCanonicalToolNameV2 } from '@happier-dev/protocol';
 import { normalizeToolNameForView } from '@/components/tools/normalization/policy/normalizeToolNameForView';
 
@@ -72,6 +73,7 @@ export const toolViewRegistry: Record<KnownCanonicalToolNameV2, ToolViewComponen
     EnterPlanMode: EnterPlanModeView,
     ExitPlanMode: ExitPlanToolView,
     MultiEdit: MultiEditView,
+    Workflow: WorkflowActivityView,
     Task: SubAgentView,
     AskUserQuestion: AskUserQuestionView,
     AcpHistoryImport: AcpHistoryImportView,
@@ -116,3 +118,4 @@ export { DeleteView } from '../fileOps/DeleteView';
 export { MCPToolView } from '../system/MCPToolView';
 export { UnknownToolView } from '../system/UnknownToolView';
 export { SubAgentRunView } from '../workflow/SubAgentRunView';
+export { WorkflowActivityView } from '../workflow/WorkflowActivityView';

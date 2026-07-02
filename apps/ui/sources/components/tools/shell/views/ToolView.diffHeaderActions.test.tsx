@@ -10,7 +10,7 @@ import {
     makeToolCall,
 } from './ToolView.testHelpers';
 
-(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 installToolShellCommonModuleMocks({
     expoRouter: async () => {
@@ -162,5 +162,31 @@ describe('ToolView (diff header actions)', () => {
         const screen = await renderScreen(React.createElement(ToolView, { tool, metadata: null, messages: [] }));
 
         expect(findPressableByText(screen.tree, 'machineLauncher.showAll')).toBeDefined();
+    });
+
+    it('keeps parent-supplied header actions alongside renderer actions and the secondary action', async () => {
+        const { ToolView } = await import('./ToolView');
+
+        const tool = makeToolCall({
+            name: 'Diff',
+            state: 'completed',
+            input: { unified_diff: 'diff --git a/a.ts b/a.ts\ndiff --git a/b.ts b/b.ts' },
+            result: null,
+        });
+
+        const screen = await renderScreen(
+            <ToolView
+                tool={tool}
+                metadata={null}
+                messages={[]}
+                sessionId="s1"
+                messageId="server:message-1"
+                headerAction={React.createElement('Pressable', { testID: 'tool-parent-pin-action' })}
+            />,
+        );
+
+        expect(screen.findByTestId('tool-parent-pin-action')).toBeTruthy();
+        expect(findPressableByText(screen.tree, 'machineLauncher.showAll')).toBeDefined();
+        expect(screen.findByTestId('tool-view-header-secondary')).toBeTruthy();
     });
 });

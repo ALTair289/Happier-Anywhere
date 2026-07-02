@@ -125,6 +125,10 @@ const stylesheet = StyleSheet.create((theme) => ({
         color: theme.colors.permissionButton.allowAll.text,
         fontWeight: '500',
     },
+    buttonTextAllowRule: {
+        color: theme.colors.permissionButton.allow.text,
+        fontWeight: '500',
+    },
     loadingIndicatorAllow: {
         color: theme.colors.permissionButton.allow.text,
     },
@@ -136,6 +140,9 @@ const stylesheet = StyleSheet.create((theme) => ({
     },
     loadingIndicatorForSession: {
         color: theme.colors.permissionButton.allowAll.text,
+    },
+    loadingIndicatorAllowRule: {
+        color: theme.colors.permissionButton.allow.text,
     },
     iconApproved: {
         color: theme.colors.permissionButton.allow.text,
@@ -697,13 +704,13 @@ export const PermissionFooter: React.FC<PermissionFooterProps> = ({
                     >
                         {loadingForSession && isPending ? (
                             <View style={[styles.buttonContent, { width: 40, height: 20, justifyContent: 'center' }]}>
-                                <ActivitySpinner size={Platform.OS === 'ios' ? "small" : 14} color={styles.loadingIndicatorForSession.color} />
+                                <ActivitySpinner size={Platform.OS === 'ios' ? "small" : 14} color={styles.loadingIndicatorAllowRule.color} />
                             </View>
                         ) : (
                             <View style={styles.buttonContent}>
                                 <Text style={[
                                     styles.buttonText,
-                                    isPending && styles.buttonTextForSession,
+                                    isPending && styles.buttonTextAllowRule,
                                     isCodexApprovedForSession && styles.buttonTextSelected
                                 ]} numberOfLines={1} ellipsizeMode="tail">
                                     {t(copy.yesForSessionKey)}
@@ -871,13 +878,13 @@ export const PermissionFooter: React.FC<PermissionFooterProps> = ({
                     >
                         {loadingForSession && isPending ? (
                             <View style={[styles.buttonContent, { width: 40, height: 20, justifyContent: 'center' }]}>
-                                <ActivitySpinner size={Platform.OS === 'ios' ? "small" : 14} color={styles.loadingIndicatorForSession.color} />
+                                <ActivitySpinner size={Platform.OS === 'ios' ? "small" : 14} color={styles.loadingIndicatorAllowRule.color} />
                             </View>
                         ) : (
                             <View style={styles.buttonContent}>
                                 <Text style={[
                                     styles.buttonText,
-                                    isPending && styles.buttonTextForSession,
+                                    isPending && styles.buttonTextAllowRule,
                                     (isShellTool ? isApprovedForSessionToolWide : isApprovedForSession) && styles.buttonTextSelected
                                 ]} numberOfLines={1} ellipsizeMode="tail">
                                     {t(copy.yesForToolKey)}
@@ -903,13 +910,13 @@ export const PermissionFooter: React.FC<PermissionFooterProps> = ({
                     >
                         {loadingForSessionPrefix && isPending ? (
                             <View style={[styles.buttonContent, { width: 40, height: 20, justifyContent: 'center' }]}>
-                                <ActivitySpinner size={Platform.OS === 'ios' ? "small" : 14} color={styles.loadingIndicatorForSession.color} />
+                                <ActivitySpinner size={Platform.OS === 'ios' ? "small" : 14} color={styles.loadingIndicatorAllowRule.color} />
                             </View>
                         ) : (
                             <View style={styles.buttonContent}>
                                 <Text style={[
                                     styles.buttonText,
-                                    isPending && styles.buttonTextForSession,
+                                    isPending && styles.buttonTextAllowRule,
                                     (isApprovedForSessionSubcommand && !isApprovedForSessionCommandName) && styles.buttonTextSelected
                                 ]} numberOfLines={1} ellipsizeMode="tail">
                                     {(() => {
@@ -941,13 +948,13 @@ export const PermissionFooter: React.FC<PermissionFooterProps> = ({
                     >
                         {loadingForSessionCommandName && isPending ? (
                             <View style={[styles.buttonContent, { width: 40, height: 20, justifyContent: 'center' }]}>
-                                <ActivitySpinner size={Platform.OS === 'ios' ? "small" : 14} color={styles.loadingIndicatorForSession.color} />
+                                <ActivitySpinner size={Platform.OS === 'ios' ? "small" : 14} color={styles.loadingIndicatorAllowRule.color} />
                             </View>
                         ) : (
                             <View style={styles.buttonContent}>
                                 <Text style={[
                                     styles.buttonText,
-                                    isPending && styles.buttonTextForSession,
+                                    isPending && styles.buttonTextAllowRule,
                                     isApprovedForSessionCommandName && styles.buttonTextSelected
                                 ]} numberOfLines={1} ellipsizeMode="tail">
                                     {t('claude.permissions.yesForCommandName')}{typeof commandForShell === 'string' ? ` (${stripSimpleEnvPrelude(commandForShell).split(/\s+/).filter(Boolean)[0] ?? ''})` : ''}

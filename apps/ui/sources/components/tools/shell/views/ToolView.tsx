@@ -13,7 +13,7 @@ import { ApprovalPromptCard } from '../approvals/ApprovalPromptCard';
 import { parseToolUseError } from '@/utils/errors/toolErrorParser';
 import { t } from '@/text';
 import { useSetting } from '@/sync/domains/state/storage';
-import { resolveToolViewDetailLevel } from '@/components/tools/normalization/policy/resolveToolViewDetailLevel';
+import { resolveToolViewDetailLevel, type ToolViewDetailLevel } from '@/components/tools/normalization/policy/resolveToolViewDetailLevel';
 import { Text } from '@/components/ui/text/Text';
 import { ToolInlineBody } from './ToolInlineBody';
 import { TranscriptCollapsible } from '@/components/sessions/transcript/motion/TranscriptCollapsible';
@@ -50,6 +50,7 @@ interface ToolViewProps {
     onPress?: () => void;
     sessionId?: string;
     messageId?: string;
+    headerAction?: React.ReactNode | null;
     approvalRequests?: readonly OpenApprovalArtifactForSession[];
     forcePermissionPromptsInTranscript?: boolean;
     /**
@@ -178,11 +179,11 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
               toolInput: toolForRendering.input,
               detailLevelDefault: resolvedDetailLevelDefault,
               detailLevelDefaultLocalControl: toolViewDetailLevelDefaultLocalControl,
-              detailLevelByToolName: toolViewDetailLevelByToolName as any,
+              detailLevelByToolName: toolViewDetailLevelByToolName as Record<string, ToolViewDetailLevel> | null | undefined,
           });
 
     const expandedDetailLevel: 'summary' | 'full' =
-        (toolViewExpandedDetailLevelByToolName as any)?.[normalizedToolName] ?? resolvedExpandedDetailLevelDefault;
+        (toolViewExpandedDetailLevelByToolName as Record<string, 'summary' | 'full'> | null | undefined)?.[normalizedToolName] ?? resolvedExpandedDetailLevelDefault;
 
     const effectiveDetailLevel = isExpanded ? expandedDetailLevel : collapsedDetailLevel;
 
@@ -379,8 +380,9 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
                             </Text>
                         </View>
                     ) : null}
-                    {headerActions ? (
+                    {props.headerAction || headerActions ? (
                         <View style={styles.headerActionsContainer}>
+                            {props.headerAction}
                             {headerActions}
                         </View>
                     ) : null}

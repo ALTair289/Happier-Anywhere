@@ -9,7 +9,7 @@ import type { Message, ToolCall } from '@/sync/domains/messages/messageTypes';
 import type { Metadata } from '@/sync/domains/state/storageTypes';
 import type { OpenApprovalArtifactForSession } from '@/sync/domains/artifacts/approvalArtifacts';
 
-import { resolveToolViewDetailLevel } from '@/components/tools/normalization/policy/resolveToolViewDetailLevel';
+import { resolveToolViewDetailLevel, type ToolViewDetailLevel } from '@/components/tools/normalization/policy/resolveToolViewDetailLevel';
 import { useSetting } from '@/sync/domains/state/storage';
 import { ToolInlineBody } from '@/components/tools/shell/views/ToolInlineBody';
 import { TranscriptCollapsible } from '@/components/sessions/transcript/motion/TranscriptCollapsible';
@@ -49,6 +49,7 @@ export const ToolTimelineRow = React.memo((props: {
     messages?: Message[];
     sessionId?: string;
     messageId?: string;
+    headerAction?: React.ReactNode | null;
     approvalRequests?: readonly OpenApprovalArtifactForSession[];
     forcePermissionPromptsInTranscript?: boolean;
     interaction?: {
@@ -170,11 +171,11 @@ export const ToolTimelineRow = React.memo((props: {
                   toolInput: toolForRendering.input,
                   detailLevelDefault: resolvedDetailLevelDefault,
                   detailLevelDefaultLocalControl: toolViewDetailLevelDefaultLocalControl,
-                  detailLevelByToolName: toolViewDetailLevelByToolName as any,
+                  detailLevelByToolName: toolViewDetailLevelByToolName as Record<string, ToolViewDetailLevel> | null | undefined,
               });
 
     const expandedDetailLevel: 'summary' | 'full' =
-        (toolViewExpandedDetailLevelByToolName as any)?.[normalizedToolName] ?? resolvedExpandedDetailLevelDefault;
+        (toolViewExpandedDetailLevelByToolName as Record<string, 'summary' | 'full'> | null | undefined)?.[normalizedToolName] ?? resolvedExpandedDetailLevelDefault;
 
     const effectiveIsExpanded = forceExpandedForPendingUserAction ? true : isExpanded;
 
@@ -220,13 +221,16 @@ export const ToolTimelineRow = React.memo((props: {
                 ? <ActivitySpinner testID="tool-timeline-row-running" size="small" color={theme.colors.text.secondary} />
                 : null;
     const headerPrimaryActions = headerActions ?? null;
+    const parentHeaderAction = props.headerAction ?? null;
+    const headerRightElements = [headerStatusIndicator, parentHeaderAction, headerPrimaryActions].filter(Boolean);
     const headerRightElement =
-        headerStatusIndicator && headerPrimaryActions ? (
+        headerRightElements.length > 1 ? (
             <View style={styles.headerRightContent}>
-                {headerStatusIndicator}
-                {headerPrimaryActions}
+                {headerRightElements.map((element, index) => (
+                    <React.Fragment key={index}>{element}</React.Fragment>
+                ))}
             </View>
-        ) : (headerStatusIndicator ?? headerPrimaryActions);
+        ) : (headerRightElements[0] ?? null);
 
     const isBodyVisible = inlineDetailLevel !== 'title' && inlineDetailLevel !== 'compact';
     const bodyDetailLevel: 'summary' | 'full' = inlineDetailLevel === 'full' ? 'full' : 'summary';

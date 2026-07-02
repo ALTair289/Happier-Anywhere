@@ -4,8 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { findTestInstanceByTypeWithProps, flushHookEffects, renderScreen, standardCleanup } from '@/dev/testkit';
 import { installToolShellCommonModuleMocks } from './ToolView.testHelpers';
+import type { ToolCall } from '@/sync/domains/messages/messageTypes';
 
-(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const ensureSidechainMessagesLoadedMock = vi.fn(async () => 'loaded');
 const pushSpy = vi.fn();
@@ -126,7 +127,7 @@ let settings: Record<string, unknown> = {};
 
 async function renderToolTimelineRow(overrides: Record<string, unknown> = {}) {
     const { ToolTimelineRow } = await import('./ToolTimelineRow');
-    const tool = {
+    const tool: ToolCall = {
         name: 'read',
         state: 'completed',
         input: {},
@@ -136,7 +137,7 @@ async function renderToolTimelineRow(overrides: Record<string, unknown> = {}) {
         description: null,
         result: {},
         ...(overrides.tool as Record<string, unknown> | undefined),
-    } as any;
+    };
 
     return renderScreen(
         <ToolTimelineRow
@@ -148,7 +149,7 @@ async function renderToolTimelineRow(overrides: Record<string, unknown> = {}) {
 }
 
 function findHeaderTitleFontSize(screen: Awaited<ReturnType<typeof renderToolTimelineRow>>) {
-    const titleText = findTestInstanceByTypeWithProps(screen, 'Text' as any, { numberOfLines: 1 });
+    const titleText = findTestInstanceByTypeWithProps(screen, 'Text' as React.ElementType, { numberOfLines: 1 });
     expect(titleText).toBeTruthy();
     const style = titleText!.props?.style;
     const styleArray = Array.isArray(style) ? style : [style];
@@ -185,14 +186,14 @@ describe('ToolTimelineRow (tap action)', () => {
         });
 
         expect(screen.findByTestId('tool-timeline-body')).toBeNull();
-        expect(screen.findAllByType('SpecificToolView' as any)).toHaveLength(0);
+        expect(screen.findAllByType('SpecificToolView' as React.ElementType)).toHaveLength(0);
 
         await act(async () => {
             screen.pressByTestId('tool-timeline-row');
         });
 
         expect(screen.findByTestId('tool-timeline-body')).not.toBeNull();
-        expect(screen.findAllByType('SpecificToolView' as any)).toHaveLength(1);
+        expect(screen.findAllByType('SpecificToolView' as React.ElementType)).toHaveLength(1);
     });
 
     it('keeps the header density stable when toggling expand', async () => {
@@ -228,7 +229,7 @@ describe('ToolTimelineRow (tap action)', () => {
         expect(navigateWithBlurOnWebSpy).toHaveBeenCalledTimes(1);
         expect(pushSpy).toHaveBeenCalledTimes(1);
         expect(pushSpy).toHaveBeenCalledWith('/session/s1/message/server%3Aserver-msg-1');
-        expect(screen.findAllByType('SpecificToolView' as any)).toHaveLength(0);
+        expect(screen.findAllByType('SpecificToolView' as React.ElementType)).toHaveLength(0);
     });
 
     it('suppresses open-details routing when tool navigation is disabled, even if the tool has its own id', async () => {
@@ -250,7 +251,7 @@ describe('ToolTimelineRow (tap action)', () => {
         });
 
         expect(pushSpy).not.toHaveBeenCalled();
-        expect(screen.findAllByType('SpecificToolView' as any)).toHaveLength(1);
+        expect(screen.findAllByType('SpecificToolView' as React.ElementType)).toHaveLength(1);
     });
 
     it('auto-expands and shows action-required status for pending user-action tools', async () => {
@@ -270,7 +271,7 @@ describe('ToolTimelineRow (tap action)', () => {
         });
 
         expect(screen.findByTestId('tool-timeline-body')).not.toBeNull();
-        expect(screen.findAllByType('SpecificToolView' as any)).toHaveLength(1);
+        expect(screen.findAllByType('SpecificToolView' as React.ElementType)).toHaveLength(1);
         expect(screen.getTextContent()).toContain('status.actionRequired');
     });
 
@@ -300,6 +301,22 @@ describe('ToolTimelineRow (tap action)', () => {
         });
 
         expect(completedScreen.findByTestId('tool-timeline-row-error')).toBeNull();
+    });
+
+    it('renders a parent-supplied header action alongside status indicators', async () => {
+        const screen = await renderToolTimelineRow({
+            tool: {
+                name: 'SearchContent',
+                state: 'error',
+                result: {
+                    content: 'ripgrep timed out',
+                },
+            },
+            headerAction: React.createElement('Pressable', { testID: 'tool-parent-pin-action' }),
+        });
+
+        expect(screen.findByTestId('tool-parent-pin-action')).toBeTruthy();
+        expect(screen.findByTestId('tool-timeline-row-error')).toBeTruthy();
     });
 
     it('shows a header error indicator when tool_use_result is an error string even if the tool state is completed', async () => {

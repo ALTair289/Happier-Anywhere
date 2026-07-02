@@ -68,6 +68,11 @@ describe('toolViewRegistry', () => {
         expect(getToolViewComponent('SubAgent')).toBe(SubAgentView);
     });
 
+    it('maps Workflow to the workflow activity renderer', async () => {
+        const [{ getToolViewComponent }, { WorkflowActivityView }] = await Promise.all([import('./_registry'), import('./_registry')]);
+        expect(getToolViewComponent('Workflow')).toBe(WorkflowActivityView);
+    });
+
     it('returns a renderer for canonical Patch tools', async () => {
         const { getToolViewComponent } = await loadRegistry();
         expect(getToolViewComponent('Patch')).not.toBeNull();
