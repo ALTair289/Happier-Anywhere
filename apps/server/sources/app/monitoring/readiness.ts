@@ -6,11 +6,12 @@ import {
 } from "@/app/monitoring/metrics2";
 import { db } from "@/storage/db";
 import { log } from "@/utils/logging/log";
+import { isShutdown } from "@/utils/process/shutdown";
 
 const MONITORING_SERVICE_NAME = 'happier-server';
 const DB_READINESS_ERROR = 'Database connectivity failed';
 const DB_READINESS_TIMEOUT_MS_ENV = 'HAPPIER_DB_READINESS_TIMEOUT_MS';
-const DEFAULT_DB_READINESS_TIMEOUT_MS = 1_000;
+const DEFAULT_DB_READINESS_TIMEOUT_MS = 15_000;
 
 type DbReadinessResult = "ok" | "error";
 type DbReadinessReason = "none" | "db_error" | "db_timeout" | "backpressure" | "unknown";
@@ -32,6 +33,8 @@ function resolveDbReadinessTimeoutMs(env: NodeJS.ProcessEnv = process.env): numb
     return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_DB_READINESS_TIMEOUT_MS;
 }
 
+let inFlightDbReadinessCheck: Promise<void> | null = null;
+
 async function withDbReadinessTimeout<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -50,6 +53,10 @@ async function withDbReadinessTimeout<T>(operation: Promise<T>, timeoutMs: numbe
     }
 }
 
+async function runDatabaseReadinessQuery(): Promise<void> {
+    await db.$queryRaw`SELECT 1`;
+}
+
 export function createHealthyMonitoringResponse() {
     return {
         status: 'ok',
@@ -58,8 +65,34 @@ export function createHealthyMonitoringResponse() {
     };
 }
 
+export function createShuttingDownMonitoringResponse() {
+    return {
+        status: 'error',
+        timestamp: new Date().toISOString(),
+        service: MONITORING_SERVICE_NAME,
+        reason: 'shutting_down',
+    };
+}
+
+export function sendLivenessResponse(reply: FastifyReply): void {
+    if (isShutdown()) {
+        reply.code(503).send(createShuttingDownMonitoringResponse());
+        return;
+    }
+    reply.send(createHealthyMonitoringResponse());
+}
+
 async function checkDatabaseReadiness() {
-    await withDbReadinessTimeout(db.$queryRaw`SELECT 1`, resolveDbReadinessTimeoutMs());
+    if (!inFlightDbReadinessCheck) {
+        const check = withDbReadinessTimeout(runDatabaseReadinessQuery(), resolveDbReadinessTimeoutMs());
+        const sharedCheck = check.finally(() => {
+            if (inFlightDbReadinessCheck === sharedCheck) {
+                inFlightDbReadinessCheck = null;
+            }
+        });
+        inFlightDbReadinessCheck = sharedCheck;
+    }
+    await inFlightDbReadinessCheck;
 }
 
 function isPrismaPoolTimeout(error: unknown): boolean {
@@ -112,6 +145,11 @@ function resolveDbReadinessLogContext(error: unknown): Readonly<{ errorName?: st
 }
 
 export async function sendDatabaseReadinessResponse(reply: FastifyReply): Promise<void> {
+    if (isShutdown()) {
+        reply.code(503).send(createShuttingDownMonitoringResponse());
+        return;
+    }
+
     const startedAtMs = Date.now();
     try {
         await checkDatabaseReadiness();

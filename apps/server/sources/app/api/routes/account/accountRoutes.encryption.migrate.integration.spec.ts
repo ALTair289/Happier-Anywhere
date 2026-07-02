@@ -6,6 +6,11 @@ import { db } from "@/storage/db";
 import { registerAccountEncryptionMigrateRoutes } from "./registerAccountEncryptionMigrateRoutes";
 import { registerAccountSettingsHistoryRoutes } from "./registerAccountSettingsHistoryRoutes";
 import { registerAccountSettingsRoutes } from "./registerAccountSettingsRoutes";
+import { writeProviderAccountUsageRecordAndLinkConnectedServiceUsageSource } from "../connect/providerAccountUsage";
+import {
+    createProviderAccountUsageRecordKey,
+    createUsageSnapshot,
+} from "../connect/providerAccountUsageTestkit";
 import tweetnacl from "tweetnacl";
 import * as privacyKit from "privacy-kit";
 
@@ -48,6 +53,8 @@ describe("registerAccountEncryptionMigrateRoutes (integration)", () => {
     afterEach(async () => {
         emitUpdate.mockClear();
         harness.resetEnv();
+        await db.connectedServiceUsageSource.deleteMany().catch(() => {});
+        await db.providerAccountUsageRecord.deleteMany().catch(() => {});
         await db.serviceAccountToken.deleteMany().catch(() => {});
         await db.automation.deleteMany().catch(() => {});
         await db.account.deleteMany().catch(() => {});
@@ -126,6 +133,80 @@ describe("registerAccountEncryptionMigrateRoutes (integration)", () => {
         expect(getV2.json()).toMatchObject({ version: 1, content: { t: "plain" } });
 
         await app.close();
+    });
+
+    it("removes connected-service usage source links when connected services are cleared during migration", async () => {
+        harness.resetEnv({
+            HAPPIER_FEATURE_ENCRYPTION__STORAGE_POLICY: "optional",
+            HAPPIER_FEATURE_ENCRYPTION__ALLOW_ACCOUNT_OPTOUT: "1",
+            HAPPIER_FEATURE_ENCRYPTION__PLAIN_ACCOUNT_SETTINGS_AT_REST: "none",
+            HAPPIER_FEATURE_ENCRYPTION__PLAIN_ACCOUNT_CREDENTIALS_AT_REST: "none",
+        });
+
+        const account = await db.account.create({
+            data: { publicKey: "pk-clear-source", encryptionMode: "e2ee", settings: "ciphertext", settingsVersion: 0 },
+            select: { id: true },
+        });
+        await db.serviceAccountToken.create({
+            data: {
+                accountId: account.id,
+                vendor: "openai-codex",
+                profileId: "work",
+                token: Buffer.from("token:openai-codex:work", "utf8"),
+                metadata: { kind: "oauth", providerAccountId: "acct_clear_connected_services" },
+            },
+        });
+        const snapshot = createUsageSnapshot({
+            fetchedAt: Date.now(),
+            recordKey: createProviderAccountUsageRecordKey({ accountSubjectId: "acct_clear_connected_services" }),
+        });
+        await writeProviderAccountUsageRecordAndLinkConnectedServiceUsageSource({
+            accountId: account.id,
+            recordId: snapshot.recordId,
+            recordKey: snapshot.recordKey,
+            payloadMode: "plain_json_v1",
+            status: "ok",
+            fetchedAt: snapshot.fetchedAtMs,
+            staleAfterMs: snapshot.staleAfterMs,
+            materialFingerprint: "usage:account-clear-source",
+            snapshot,
+            source: {
+                serviceId: "openai-codex",
+                profileId: "work",
+                bindingKind: "profile",
+            },
+        });
+
+        const app = createTestApp();
+        registerAccountSettingsRoutes(app as any);
+        registerAccountSettingsHistoryRoutes(app as any);
+        registerAccountEncryptionMigrateRoutes(app as any);
+        await app.ready();
+
+        const res = await app.inject({
+            method: "POST",
+            url: "/v1/account/encryption/migrate",
+            headers: { "content-type": "application/json", "x-test-user-id": account.id },
+            payload: {
+                toMode: "plain",
+                expectedSettingsVersion: 0,
+                settingsContent: { t: "plain", v: { schemaVersion: 2 } },
+                connectedServices: { action: "clear" },
+                automations: { action: "assert_empty" },
+            },
+        });
+
+        expect(res.statusCode).toBe(200);
+        expect(await db.connectedServiceUsageSource.findUnique({
+            where: {
+                accountId_serviceId_profileId: {
+                    accountId: account.id,
+                    serviceId: "openai-codex",
+                    profileId: "work",
+                },
+            },
+            select: { id: true },
+        })).toBeNull();
     });
 
     it("does not emit a settings version hint when migration preconditions fail", async () => {

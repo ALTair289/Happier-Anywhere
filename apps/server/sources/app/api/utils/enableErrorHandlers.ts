@@ -1,11 +1,27 @@
 import { log } from "@/utils/logging/log";
-import { FastifyError } from "fastify";
+import { FastifyError, type FastifyReply } from "fastify";
 import { Fastify } from "../types";
 import { readFile, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { resolveUiConfig } from "@/app/api/uiConfig";
 import { captureFastifyExceptionForSentry } from "@/app/monitoring/sentry";
 import { isServerApiRequestPath } from "./serverApiPath";
+
+function sendGlobalErrorResponse(
+    reply: FastifyReply,
+    statusCode: number,
+    payload: Readonly<Record<string, unknown>>,
+) {
+    return reply
+        .code(statusCode)
+        .type("application/json; charset=utf-8")
+        .serializer((value) => JSON.stringify(value))
+        .send(payload);
+}
+
+function isFastifyValidationError(error: FastifyError): boolean {
+    return Array.isArray((error as FastifyError & { validation?: unknown }).validation);
+}
 
 export function enableErrorHandlers(app: Fastify) {
     // Global error handler
@@ -34,14 +50,18 @@ export function enableErrorHandlers(app: Fastify) {
         if (statusCode >= 500) {
             captureFastifyExceptionForSentry(error, request as any);
             // Internal server errors - don't expose details
-            return reply.code(statusCode).send({
+            return sendGlobalErrorResponse(reply, statusCode, {
                 error: 'Internal Server Error',
                 message: 'An unexpected error occurred',
                 statusCode
             });
+        } else if (statusCode === 400 && isFastifyValidationError(error)) {
+            return sendGlobalErrorResponse(reply, statusCode, {
+                error: 'invalid-params',
+            });
         } else {
             // Client errors - can expose more details
-            return reply.code(statusCode).send({
+            return sendGlobalErrorResponse(reply, statusCode, {
                 error: error.name || 'Error',
                 message: error.message || 'An error occurred',
                 statusCode

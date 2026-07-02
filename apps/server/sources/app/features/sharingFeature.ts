@@ -8,6 +8,15 @@ export function resolveSharingFeature(): FeaturesPayloadDelta {
                 public: { enabled: true },
                 contentKeys: { enabled: true },
                 pendingQueueV2: { enabled: true },
+                pendingDeliveryState: { enabled: true },
+            },
+        },
+        capabilities: {
+            sharing: {
+                pendingQueueV2: {
+                    deliveryState: true,
+                    deliveryBlockedReason: true,
+                },
             },
         },
     };

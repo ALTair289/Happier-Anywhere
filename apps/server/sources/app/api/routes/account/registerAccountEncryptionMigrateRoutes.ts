@@ -17,6 +17,7 @@ import tweetnacl from "tweetnacl";
 import { encodeCredentialTokenBytes } from "@/app/api/routes/connect/connectedServicesV2/credentialTokenCodec";
 import { encryptString } from "@/modules/encrypt";
 import { encodeUtf8Bytes } from "@/app/api/routes/connect/connectedServicesV3/bytesCodec";
+import { deleteConnectedServiceUsageSourcesForAccount } from "@/app/api/routes/connect/providerAccountUsage";
 import { AutomationValidationError, parseAutomationPatchInput } from "@/app/automations/automationValidation";
 import { markAccountChanged } from "@/app/changes/markAccountChanged";
 import { eventRouter } from "@/app/events/eventRouter";
@@ -165,8 +166,8 @@ export function registerAccountEncryptionMigrateRoutes(app: Fastify): void {
                     const count = await tx.serviceAccountToken.count({ where: { accountId: userId } });
                     if (count > 0) return { type: "connected-services-not-empty" as const };
                 } else if (connectedServices.action === "clear") {
+                    await deleteConnectedServiceUsageSourcesForAccount({ accountId: userId }, tx);
                     await tx.serviceAccountToken.deleteMany({ where: { accountId: userId } });
-                    await tx.serviceAccountQuotaSnapshot.deleteMany({ where: { accountId: userId } });
                 } else if (connectedServices.action === "migrate") {
                     const existing = await tx.serviceAccountToken.findMany({
                         where: { accountId: userId },

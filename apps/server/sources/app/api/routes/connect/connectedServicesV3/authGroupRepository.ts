@@ -12,6 +12,7 @@ import {
     ConnectedServiceAuthGroupMemberStateSchema,
     ConnectedServiceAuthGroupStateSchema,
 } from "./authGroupSchemas";
+import { deleteConnectedServiceUsageSourcesForProfile } from "../providerAccountUsage";
 
 type AuthGroupState = z.infer<typeof ConnectedServiceAuthGroupStateSchema>;
 type AuthGroupMemberState = z.infer<typeof ConnectedServiceAuthGroupMemberStateSchema>;
@@ -284,6 +285,11 @@ export async function deleteConnectedServiceCredentialInTx(tx: Tx, params: {
         });
     }
 
+    await deleteConnectedServiceUsageSourcesForProfile({
+        accountId: params.accountId,
+        serviceId: params.serviceId,
+        profileId: params.profileId,
+    }, tx);
     await tx.serviceAccountToken.delete({ where: { id: existing.id } });
     return "deleted";
 }

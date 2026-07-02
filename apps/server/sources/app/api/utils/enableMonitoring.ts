@@ -4,7 +4,10 @@ import {
     httpRequestsCounter,
     httpRequestDurationHistogram,
 } from "@/app/monitoring/metrics2";
-import { createHealthyMonitoringResponse, sendDatabaseReadinessResponse } from "@/app/monitoring/readiness";
+import {
+    sendDatabaseReadinessResponse,
+    sendLivenessResponse,
+} from "@/app/monitoring/readiness";
 
 export function enableMonitoring(app: Fastify) {
     // Add metrics hooks
@@ -26,7 +29,9 @@ export function enableMonitoring(app: Fastify) {
         httpRequestDurationHistogram.observe({ method, route, status }, duration);
     });
 
-    const livenessHandler = async (_request: FastifyRequest) => createHealthyMonitoringResponse();
+    const livenessHandler = async (_request: FastifyRequest, reply: FastifyReply) => {
+        sendLivenessResponse(reply);
+    };
 
     const readinessHandler = async (_request: FastifyRequest, reply: FastifyReply) => {
         await sendDatabaseReadinessResponse(reply);

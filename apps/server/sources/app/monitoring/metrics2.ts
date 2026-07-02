@@ -105,13 +105,6 @@ export const sessionMessageRoleMismatchCounter = getOrCreateMetric('session_mess
     registers: [register]
 }));
 
-export const quotaSnapshotStaleWriteRejectedCounter = getOrCreateMetric('quota_snapshot_stale_write_rejected_total', () => new Counter({
-    name: 'quota_snapshot_stale_write_rejected_total',
-    help: 'Total connected-service quota snapshot writes rejected because stored quota material is newer',
-    labelNames: ['route'] as const,
-    registers: [register]
-}));
-
 export const usageReportWritesCounter = getOrCreateMetric('usage_report_writes_total', () => new Counter({
     name: 'usage_report_writes_total',
     help: 'Total usage report write attempts by scope and result',

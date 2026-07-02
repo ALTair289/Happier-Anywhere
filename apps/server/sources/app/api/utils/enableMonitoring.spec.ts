@@ -115,6 +115,39 @@ describe('enableMonitoring (unit)', () => {
         }
     });
 
+    it('coalesces concurrent database readiness checks into a single probe', async () => {
+        const query = { resolve: null as ((value: unknown) => void) | null };
+        mockQueryRaw.mockReturnValueOnce(new Promise((resolve) => {
+            query.resolve = resolve;
+        }));
+
+        const { enableMonitoring } = await import('./enableMonitoring');
+        const app = createMonitoringApp();
+
+        try {
+            enableMonitoring(app);
+            await app.ready();
+
+            const first = app.inject({ method: 'GET', url: '/ready' });
+            const second = app.inject({ method: 'GET', url: '/ready' });
+
+            await vi.waitFor(() => {
+                expect(mockQueryRaw).toHaveBeenCalledTimes(1);
+            });
+
+            query.resolve?.([{ one: 1 }]);
+            const [firstRes, secondRes] = await Promise.all([first, second]);
+
+            expect(firstRes.statusCode).toBe(200);
+            expect(secondRes.statusCode).toBe(200);
+            expect(mockQueryRaw).toHaveBeenCalledTimes(1);
+            expect(mockDbReadinessChecksInc).toHaveBeenCalledTimes(2);
+            expect(mockDbReadinessDurationObserve).toHaveBeenCalledTimes(2);
+        } finally {
+            await app.close().catch(() => {});
+        }
+    });
+
     it('returns 503 with a structured database readiness error body when /ready query fails', async () => {
         mockQueryRaw.mockRejectedValueOnce(new Error('SQLITE_CANTOPEN: cannot open database'));
 
@@ -209,6 +242,88 @@ describe('enableMonitoring (unit)', () => {
                 { result: 'error', reason: 'db_timeout' },
                 expect.any(Number),
             );
+        } finally {
+            await app.close().catch(() => {});
+        }
+    });
+
+    it('uses a 15s default database readiness timeout', async () => {
+        vi.useFakeTimers();
+        delete process.env.HAPPIER_DB_READINESS_TIMEOUT_MS;
+        mockQueryRaw.mockReturnValueOnce(new Promise(() => {}));
+
+        const { enableMonitoring } = await import('./enableMonitoring');
+        const app = createMonitoringApp();
+
+        try {
+            enableMonitoring(app);
+            await app.ready();
+
+            const response = app.inject({ method: 'GET', url: '/ready' });
+            let settled = false;
+            void response.finally(() => {
+                settled = true;
+            });
+
+            await vi.advanceTimersByTimeAsync(5_000);
+            expect(settled).toBe(false);
+
+            await vi.advanceTimersByTimeAsync(10_000);
+            const res = await response;
+            expect(res.statusCode).toBe(503);
+            const body = res.json() as { reason?: string };
+            expect(body.reason).toBe('db_timeout');
+        } finally {
+            await app.close().catch(() => {});
+        }
+    });
+
+    it('returns 503 from /health during shutdown without querying the database', async () => {
+        vi.resetModules();
+        mockQueryRaw.mockResolvedValueOnce([{ one: 1 }]);
+
+        const { enableMonitoring } = await import('./enableMonitoring');
+        const { initiateShutdown } = await import('@/utils/process/shutdown');
+        const app = createMonitoringApp();
+
+        try {
+            enableMonitoring(app);
+            await app.ready();
+            await initiateShutdown('test');
+
+            const res = await app.inject({ method: 'GET', url: '/health' });
+            expect(res.statusCode).toBe(503);
+            const body = res.json() as { status?: string; service?: string; reason?: string };
+            expect(body.status).toBe('error');
+            expect(body.service).toBe('happier-server');
+            expect(body.reason).toBe('shutting_down');
+            expect(mockQueryRaw).not.toHaveBeenCalled();
+        } finally {
+            await app.close().catch(() => {});
+        }
+    });
+
+    it('returns 503 from /ready during shutdown without querying the database', async () => {
+        vi.resetModules();
+        mockQueryRaw.mockResolvedValueOnce([{ one: 1 }]);
+
+        const { enableMonitoring } = await import('./enableMonitoring');
+        const { initiateShutdown } = await import('@/utils/process/shutdown');
+        const app = createMonitoringApp();
+
+        try {
+            enableMonitoring(app);
+            await app.ready();
+            await initiateShutdown('test');
+
+            const res = await app.inject({ method: 'GET', url: '/ready' });
+            expect(res.statusCode).toBe(503);
+            const body = res.json() as { status?: string; service?: string; reason?: string };
+            expect(body.status).toBe('error');
+            expect(body.service).toBe('happier-server');
+            expect(body.reason).toBe('shutting_down');
+            expect(mockQueryRaw).not.toHaveBeenCalled();
+            expect(mockDbReadinessChecksInc).not.toHaveBeenCalled();
         } finally {
             await app.close().catch(() => {});
         }

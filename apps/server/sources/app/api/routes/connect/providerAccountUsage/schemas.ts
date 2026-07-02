@@ -1,0 +1,124 @@
+import { z } from "zod";
+
+import {
+    ProviderAccountUsageRecordIdSchema,
+    ProviderAccountUsageRecordKeyV1Schema,
+    ProviderAccountUsageSnapshotV1Schema,
+    SealedProviderAccountUsageSnapshotV1Schema,
+    buildProviderAccountUsageRecordId,
+} from "@happier-dev/protocol";
+import type {
+    ConnectedServiceUsageBindingKind,
+    ProviderAccountUsagePayloadMode,
+    ProviderAccountUsageStatus,
+} from "./types";
+
+export const ProviderAccountUsagePayloadModeSchema = z.enum([
+    "plain_json_v1",
+    "sealed_account_scoped_v1",
+]) satisfies z.ZodType<ProviderAccountUsagePayloadMode>;
+
+export const ProviderAccountUsageStatusSchema = z.enum([
+    "ok",
+    "unavailable",
+    "estimated",
+    "error",
+    "refresh_requested",
+]) satisfies z.ZodType<ProviderAccountUsageStatus>;
+
+export const ProviderAccountUsageRecordMetadataSchema = z.object({
+    materialFingerprint: z.string().trim().min(1).max(256).optional(),
+}).strict();
+
+export const UpsertProviderAccountUsageRecordSchema = z.object({
+    accountId: z.string().trim().min(1),
+    recordId: ProviderAccountUsageRecordIdSchema,
+    recordKey: ProviderAccountUsageRecordKeyV1Schema,
+    payloadMode: ProviderAccountUsagePayloadModeSchema,
+    status: ProviderAccountUsageStatusSchema,
+    snapshot: ProviderAccountUsageSnapshotV1Schema.optional(),
+    sealedPayload: SealedProviderAccountUsageSnapshotV1Schema.optional(),
+    fetchedAt: z.number().int().nonnegative().optional(),
+    staleAfterMs: z.number().int().nonnegative().optional(),
+    refreshRequestedAt: z.number().int().nonnegative().optional(),
+    metadata: ProviderAccountUsageRecordMetadataSchema.optional(),
+}).strict();
+
+export const ConnectedServiceUsageBindingKindSchema = z.enum([
+    "profile",
+    "group_member",
+]) satisfies z.ZodType<ConnectedServiceUsageBindingKind>;
+
+export const ProviderAccountUsageInvalidParamsReasonSchema = z.enum([
+    "provider_account_usage_e2ee_required",
+    "provider_account_usage_plaintext_required",
+    "provider_account_usage_legacy_aliases_rejected",
+    "provider_account_usage_record_id_mismatch",
+    "provider_account_usage_payload_invalid",
+    "connected_service_usage_source_incompatible",
+    "connected_service_usage_source_invalid",
+]);
+
+export type ProviderAccountUsageInvalidParamsReason =
+    z.infer<typeof ProviderAccountUsageInvalidParamsReasonSchema>;
+
+export const ProviderAccountUsageInvalidParamsResponseSchema = z.union([
+    z.object({
+        error: z.literal("invalid-params"),
+        reason: ProviderAccountUsageInvalidParamsReasonSchema.optional(),
+    }),
+    z.object({
+        statusCode: z.literal(400),
+        error: z.string().min(1),
+        message: z.string().min(1),
+    }).passthrough(),
+]);
+
+export const UpsertConnectedServiceUsageSourceSchema = z.object({
+    accountId: z.string().trim().min(1),
+    serviceId: z.string().trim().min(1).max(128),
+    profileId: z.string().trim().min(1).max(128),
+    providerAccountUsageRecordId: ProviderAccountUsageRecordIdSchema,
+    bindingKind: ConnectedServiceUsageBindingKindSchema,
+    groupId: z.string().trim().min(1).max(128).optional(),
+    groupGeneration: z.number().int().nonnegative().optional(),
+}).strict();
+
+export function validateProviderAccountUsageRecordWrite(raw: unknown) {
+    const parsed = UpsertProviderAccountUsageRecordSchema.parse(raw);
+    if (parsed.recordId !== buildProviderAccountUsageRecordId(parsed.recordKey)) {
+        throw new Error("Provider account usage recordId must match recordKey");
+    }
+    if (parsed.status === "refresh_requested") {
+        if (parsed.snapshot || parsed.sealedPayload) {
+            throw new Error("Refresh-requested provider account usage records must not carry snapshot payload");
+        }
+        return parsed;
+    }
+    if (parsed.payloadMode === "plain_json_v1") {
+        if (!parsed.snapshot || parsed.sealedPayload) {
+            throw new Error("Plain provider account usage records require exactly one plain snapshot payload");
+        }
+        if (parsed.snapshot.recordId !== parsed.recordId) {
+            throw new Error("Provider account usage snapshot recordId must match the write recordId");
+        }
+    }
+    if (parsed.payloadMode === "sealed_account_scoped_v1") {
+        if (!parsed.sealedPayload || parsed.snapshot) {
+            throw new Error("Sealed provider account usage records require exactly one sealed payload");
+        }
+    }
+    if (
+        parsed.payloadMode === "plain_json_v1"
+        && (!parsed.snapshot || parsed.sealedPayload)
+    ) {
+        throw new Error("Loaded plain provider account usage records require a plain payload");
+    }
+    if (
+        parsed.payloadMode === "sealed_account_scoped_v1"
+        && (!parsed.sealedPayload || parsed.snapshot)
+    ) {
+        throw new Error("Loaded sealed provider account usage records require a sealed payload");
+    }
+    return parsed;
+}

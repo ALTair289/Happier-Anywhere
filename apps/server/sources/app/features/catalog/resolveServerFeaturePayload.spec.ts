@@ -156,6 +156,15 @@ describe("resolveServerFeaturePayload", () => {
         expect(payload.features.connectedServices.accountFallback.enabled).toBe(true);
     });
 
+    it("advertises pending delivery-state support separately from the basic pending queue gate", () => {
+        const payload = resolveServerFeaturePayload({} as NodeJS.ProcessEnv, serverFeatureRegistry);
+
+        expect(payload.features.sharing.pendingQueueV2.enabled).toBe(true);
+        expect(payload.features.sharing.pendingDeliveryState.enabled).toBe(true);
+        expect(payload.capabilities.sharing.pendingQueueV2.deliveryState).toBe(true);
+        expect(payload.capabilities.sharing.pendingQueueV2.deliveryBlockedReason).toBe(true);
+    });
+
     it("advertises indexed session message role query support", () => {
         const payload = resolveServerFeaturePayload({} as NodeJS.ProcessEnv, serverFeatureRegistry);
 
