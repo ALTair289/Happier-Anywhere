@@ -124,6 +124,11 @@ type ClaudeUnifiedTerminalQueuedInput<Mode> = Readonly<{
   /** Owed-delivery watermark attribution (A3-HIGH-1); see ClaudeUnifiedPromptBatch. */
   maxUserMessageSeq?: number | null;
   userMessageLocalIds?: readonly string[] | null;
+  /**
+   * True when the prompt comes from a durable provider-acceptance pending handoff. The terminal
+   * may already contain this prompt, or a partial residue of it, before the arbiter injects.
+   */
+  providerAcceptancePending?: boolean | null;
 }>;
 
 type ClaudeUnifiedTerminalAcceptedInput<Mode> =
@@ -390,6 +395,7 @@ export type ClaudeUnifiedTuiRuntimeControlOptions<Mode extends EnhancedMode = En
 
 const DEFAULT_RUNTIME_CONTROL_BLOCKED_INJECTION_RETRY_MS = 250;
 const MAX_RECENT_ACCEPTED_TRANSCRIPT_CANDIDATES = 64;
+const PROVIDER_ACCEPTANCE_PENDING_PREFIX_RESIDUE_MIN_CHARS = 16;
 
 function sanitizeSessionName(value: string): string {
   const sanitized = value.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
@@ -592,6 +598,7 @@ function normalizeMessageBatch<Mode>(input: ClaudeUnifiedTerminalQueuedInput<Mod
     hash: 'claude-unified-terminal',
     maxUserMessageSeq: input.maxUserMessageSeq ?? null,
     userMessageLocalIds: input.userMessageLocalIds ?? [],
+    providerAcceptancePending: input.providerAcceptancePending === true,
   };
 }
 
@@ -1428,10 +1435,14 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
             mode: batch.mode,
             maxUserMessageSeq: batch.maxUserMessageSeq ?? null,
             userMessageLocalIds: batch.userMessageLocalIds ?? [],
+            providerAcceptancePending: batch.providerAcceptancePending === true,
           });
         },
         onProviderAcceptancePendingPrompt: (batch) => {
           ownComposerTextLog.record(batch.message);
+          ownComposerTextLog.recordPossiblePartialResidue(batch.message, {
+            minPrefixChars: PROVIDER_ACCEPTANCE_PENDING_PREFIX_RESIDUE_MIN_CHARS,
+          });
         },
       });
       const observeMetadataApplySafeBoundary = async (): Promise<void> => {

@@ -1242,10 +1242,15 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                 const takeBatchDeliveryAttributionForProvider = (batch: MessageBatch<EnhancedMode, string>): {
                     maxUserMessageSeq: number | null;
                     userMessageLocalIds: readonly string[];
+                    providerAcceptancePending: boolean;
                 } => {
                     const maxUserMessageSeq = batch.maxUserMessageSeq ?? null;
                     const userMessageLocalIds = batch.userMessageLocalIds ?? [];
-                    return { maxUserMessageSeq, userMessageLocalIds };
+                    return {
+                        maxUserMessageSeq,
+                        userMessageLocalIds,
+                        providerAcceptancePending: batch.providerAcceptancePending === true,
+                    };
                 };
 
                 if (waitForMessageBeforeNextLaunch) {

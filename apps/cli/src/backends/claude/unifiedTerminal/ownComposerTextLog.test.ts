@@ -77,6 +77,27 @@ describe('createClaudeOwnComposerTextLog (lane X, incident cmq8y3nlx user_draft 
     expect(log.matches(shortResidue)).toBe(false);
   });
 
+  it('keeps very short prefix clearing scoped to durable provider-claimed residue', () => {
+    let nowMs = 10_000;
+    const log = createClaudeOwnComposerTextLog({
+      nowMs: () => nowMs,
+      prefixResidueWindowMs: 5_000,
+    });
+    const longPrompt = `continue the exact pending message ${'x'.repeat(320)}`;
+    const shortProviderResidue = longPrompt.slice(0, 19);
+    log.record(longPrompt);
+
+    log.recordPossiblePartialResidue(longPrompt);
+    expect(log.matches(shortProviderResidue)).toBe(false);
+
+    log.recordPossiblePartialResidue(longPrompt, { minPrefixChars: 16 });
+    expect(log.matches(shortProviderResidue)).toBe(true);
+    expect(log.matches('continue a different')).toBe(false);
+
+    nowMs += 5_001;
+    expect(log.matches(shortProviderResidue)).toBe(false);
+  });
+
   it('matches a recent Claude collapsed paste marker for a recorded multiline injection', () => {
     let nowMs = 10_000;
     const log = createClaudeOwnComposerTextLog({

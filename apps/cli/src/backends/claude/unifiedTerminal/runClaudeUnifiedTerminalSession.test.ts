@@ -288,6 +288,78 @@ describe('runClaudeUnifiedTerminalSession', () => {
     }
   });
 
+  it('marks provider-acceptance pending prompts as possible short own composer residue', async () => {
+    const abortController = createAbortableSignal();
+    const telemetry = { emit: vi.fn() };
+    const ownComposerTexts = {
+      record: vi.fn(),
+      matches: vi.fn(() => false),
+      recordPossiblePartialResidue: vi.fn(),
+    };
+    const handle: TerminalHostHandle = {
+      kind: 'tmux',
+      sessionName: 'happier-claude-session-test',
+      paneId: '%1',
+      attachMetadata: {
+        attachStrategy: 'terminal_host',
+        topology: 'shared',
+        locality: 'same_machine',
+        liveProbe: 'required',
+      },
+    };
+    const providerPendingPrompt = `please continue from the pending prompt ${'x'.repeat(320)}`;
+    const providerPendingInput = {
+      message: providerPendingPrompt,
+      mode: {
+        permissionMode: 'default',
+        claudeUnifiedTerminalHost: 'tmux',
+      },
+      providerAcceptancePending: true,
+    } as const;
+    const adapter: TerminalHostAdapter = {
+      kind: 'tmux',
+      createOrAttachHost: vi.fn(async () => handle),
+      injectUserPrompt: vi.fn(async (_handle, input) => {
+        abortController.abort();
+        return { status: 'injected', at: 1, bytesWritten: input.text.length } as const;
+      }),
+      evaluateLiveness: vi.fn(async () => ({ paneAlive: true, observedAt: 1 })),
+      captureInputState: vi.fn(async () => ({ stable: true, currentInput: interactiveClaudeScreen, observedAt: Date.now() })),
+      interruptTurn: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    };
+
+    let consumed = false;
+    const sessionPromise = runClaudeUnifiedTerminalSession({
+      path: '/workspace/project',
+      signal: abortController.signal,
+      nextMessage: async () => {
+        if (consumed) return null;
+        consumed = true;
+        return providerPendingInput;
+      },
+      ownComposerTexts: ownComposerTexts as unknown as ReturnType<typeof createClaudeOwnComposerTextLog>,
+      resolveHostAdapter: async () => ({ status: 'resolved', adapter, reason: 'test' }),
+      buildSpawn: async () => ({
+        spawnArgv: ['/bin/claude'],
+        spawnEnv: {},
+      }),
+      createSessionName: () => 'happier-claude-session-test',
+      telemetry,
+    });
+
+    try {
+      await waitUntil(() => ownComposerTexts.recordPossiblePartialResidue.mock.calls.length === 1, 1_000);
+      expect(ownComposerTexts.record).toHaveBeenCalledWith(providerPendingPrompt);
+      expect(ownComposerTexts.recordPossiblePartialResidue).toHaveBeenCalledWith(providerPendingPrompt, {
+        minPrefixChars: 16,
+      });
+    } finally {
+      abortController.abort();
+      await sessionPromise.catch(() => undefined);
+    }
+  });
+
   it('normalizes native Windows tmux preference to auto before resolving a host', async () => {
     setProcessPlatform('win32');
     const abortController = createAbortableSignal();

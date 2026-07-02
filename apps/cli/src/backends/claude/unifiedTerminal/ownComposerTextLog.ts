@@ -21,7 +21,7 @@ export type ClaudeOwnComposerTextLog = Readonly<{
    * This enables a short-prefix match for the same bounded residue window; ordinary records keep
    * rejecting short prefixes so genuine user drafts remain protected.
    */
-  recordPossiblePartialResidue: (text: string) => void;
+  recordPossiblePartialResidue: (text: string, opts?: { minPrefixChars?: number | undefined }) => void;
   /**
    * True when the composer draft matches recorded own text, or a recent long prefix residue from
    * an interrupted own injection. Short/old prefixes are intentionally rejected so a genuine user
@@ -50,6 +50,7 @@ type OwnComposerTextLogEntry = Readonly<{
   collapsedPasteLineCount?: number | undefined;
   recordedAtMs: number;
   shortPrefixResidueUntilMs?: number | undefined;
+  minShortPrefixResidueChars: number;
 }>;
 
 function entryHasPrefix(entry: OwnComposerTextLogEntry, draft: string): boolean {
@@ -67,7 +68,7 @@ function isRecentPrefixResidue(params: Readonly<{
 }>): boolean {
   const longPrefixResidue = params.normalizedDraft.length >= MIN_PREFIX_RESIDUE_CHARS
     && params.nowMs - params.entry.recordedAtMs <= params.prefixResidueWindowMs;
-  const contextualShortPrefixResidue = params.normalizedDraft.length >= MIN_CONTEXTUAL_PREFIX_RESIDUE_CHARS
+  const contextualShortPrefixResidue = params.normalizedDraft.length >= params.entry.minShortPrefixResidueChars
     && params.entry.shortPrefixResidueUntilMs !== undefined
     && params.nowMs <= params.entry.shortPrefixResidueUntilMs;
   return (longPrefixResidue || contextualShortPrefixResidue)
@@ -122,6 +123,7 @@ export function createClaudeOwnComposerTextLog(opts?: Readonly<{
     normalized: string,
     recordedAtMs: number,
     shortPrefixResidueUntilMs?: number | undefined,
+    minShortPrefixResidueChars = MIN_CONTEXTUAL_PREFIX_RESIDUE_CHARS,
   ): OwnComposerTextLogEntry => {
     const collapsedText = collapseWhitespace(normalized);
     const newlineCount = countPromptNewlines(normalized);
@@ -134,6 +136,7 @@ export function createClaudeOwnComposerTextLog(opts?: Readonly<{
       ...(newlineCount > 0 ? { collapsedPasteLineCount: newlineCount } : {}),
       recordedAtMs,
       shortPrefixResidueUntilMs,
+      minShortPrefixResidueChars,
     };
   };
 
@@ -148,11 +151,15 @@ export function createClaudeOwnComposerTextLog(opts?: Readonly<{
       entries.push(createEntry(normalized, nowMs()));
       trimToLimit();
     },
-    recordPossiblePartialResidue(text) {
+    recordPossiblePartialResidue(text, recordOpts) {
       const normalized = normalize(text);
       if (normalized.length === 0) return;
       const now = nowMs();
       const shortPrefixResidueUntilMs = now + prefixResidueWindowMs;
+      const minShortPrefixResidueChars = Math.max(
+        1,
+        Math.trunc(recordOpts?.minPrefixChars ?? MIN_CONTEXTUAL_PREFIX_RESIDUE_CHARS),
+      );
       const existingIndex = entries.findIndex((entry) => entry.text === normalized);
       if (existingIndex >= 0) {
         const existing = entries[existingIndex];
@@ -160,11 +167,12 @@ export function createClaudeOwnComposerTextLog(opts?: Readonly<{
           entries[existingIndex] = {
             ...existing,
             shortPrefixResidueUntilMs,
+            minShortPrefixResidueChars: Math.min(existing.minShortPrefixResidueChars, minShortPrefixResidueChars),
           };
         }
         return;
       }
-      entries.push(createEntry(normalized, now, shortPrefixResidueUntilMs));
+      entries.push(createEntry(normalized, now, shortPrefixResidueUntilMs, minShortPrefixResidueChars));
       trimToLimit();
     },
     matches(draft) {
