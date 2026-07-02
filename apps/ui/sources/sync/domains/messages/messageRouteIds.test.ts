@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
 import type { ToolCallMessage } from './messageTypes';
-import { buildSessionMessageRouteId, resolveMessageRouteIdForDisplay, resolveSessionMessageRouteId } from './messageRouteIds';
+import {
+    buildSessionMessageRouteId,
+    parseStableSessionMessageRouteId,
+    resolveMessageRouteIdForDisplay,
+    resolveSessionMessageRouteId,
+} from './messageRouteIds';
 import { createReducer, reducer } from '@/sync/reducer/reducer';
 import type { NormalizedMessage } from '@/sync/typesRaw';
 
@@ -28,6 +33,23 @@ function makeToolMessage(id: string): ToolCallMessage {
 }
 
 describe('messageRouteIds', () => {
+    it('parses stable route ids through the canonical route-id owner', () => {
+        expect(parseStableSessionMessageRouteId('server:server-msg-1')).toEqual({
+            kind: 'server',
+            value: 'server-msg-1',
+        });
+        expect(parseStableSessionMessageRouteId('local:local-msg-1')).toEqual({
+            kind: 'local',
+            value: 'local-msg-1',
+        });
+        expect(parseStableSessionMessageRouteId('tool:call_read_1')).toEqual({
+            kind: 'tool',
+            value: 'call_read_1',
+        });
+        expect(parseStableSessionMessageRouteId('server:   ')).toBeNull();
+        expect(parseStableSessionMessageRouteId('plain-message-id')).toBeNull();
+    });
+
     it('builds a durable server route for an internal message id when reducer state knows the original id', () => {
         const reducerState = createReducer();
         reducerState.messageIds.set('server-msg-1', 'internal-1');
