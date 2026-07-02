@@ -29,8 +29,6 @@ import {
 } from "@/app/session/pending/pendingMaterializationRequest";
 import { serializePendingMaterializedMessage } from "@/app/session/pending/serializePendingMaterializedMessage";
 import { normalizeIncomingSessionMessageContent } from "@/app/session/messageContent/normalizeIncomingSessionMessageContent";
-import { checkSessionAccess, requireAccessLevel } from "@/app/share/accessControl";
-import { getSessionParticipantUserIds } from "@/app/share/sessionParticipants";
 import { parseIntEnv } from "@/config/env";
 import { parseSessionMessageSidechainId } from "@/app/session/parseSessionMessageSidechainId";
 import {
@@ -44,7 +42,7 @@ import {
 } from "@happier-dev/protocol/updates";
 import { refreshSessionParticipantBadgePushes } from "@/app/activity/refreshAccountActivityBadgePushes";
 import { didSessionActivityBadgeContributionChange } from "@/app/activity/accountActivityBadge";
-import { canPublishFromSessionScopedSocket } from "./sessionScopedBinding";
+import { authorizeSessionRelayPublish } from "./sessionRelayAuthCache";
 import { publishSessionReadCursorUpdate } from "@/app/session/readCursor/publishSessionReadCursorUpdate";
 import { publishSessionTurnUpdate } from "@/app/session/turns/publishSessionTurnUpdate";
 import { applySessionEnd } from "@/app/session/applySessionEnd";
@@ -52,6 +50,12 @@ import { publishSessionReadyProjectionUpdate } from "@/app/session/ready/publish
 
 const DEFAULT_SOCKET_PENDING_MATERIALIZE_NOOP_THROTTLE_MS = 1_500;
 const LEGACY_UI_USER_MESSAGE_SENT_FROM = new Set(["web", "ios", "android", "mac", "pending_send_now", "retry"]);
+
+// Hoisted stripped-schema instances: `.strip()` builds a new Zod schema object on every call, and
+// these run on the 25Hz relay hot path.
+const StrippedExecutionRunPublicStateSchema = ExecutionRunPublicStateSchema.strip();
+const StrippedTranscriptStreamSegmentSchema = TranscriptStreamSegmentEphemeralMessageSchema.strip();
+const StrippedTranscriptStreamSegmentDeltaSchema = TranscriptStreamSegmentDeltaEphemeralMessageSchema.strip();
 
 function shouldLogSocketMessageDiagnostics(): boolean {
     return process.env.HAPPIER_SOCKET_MESSAGE_DIAGNOSTIC_LOGS === "1"
@@ -540,32 +544,19 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
             const runRaw = data?.run;
             if (!sid) return;
 
-            if (!await canPublishFromSessionScopedSocket({
+            const participantUserIds = await authorizeSessionRelayPublish({
                 socket,
                 connection,
+                userId,
                 sessionId: sid,
-                requireMachineBinding: true,
-            })) {
-                return;
-            }
-
-            const access = await checkSessionAccess(userId, sid);
-            if (!access) return;
-            if (!requireAccessLevel(access, 'edit')) {
-                return;
-            }
-            if (!access.isOwner) {
-                return;
-            }
+            });
+            if (!participantUserIds) return;
 
             // Strip unknown fields before rebroadcasting (clients treat this as a hint; keep the payload tight).
-            const parsedRun = ExecutionRunPublicStateSchema.strip().safeParse(runRaw);
+            const parsedRun = StrippedExecutionRunPublicStateSchema.safeParse(runRaw);
             if (!parsedRun.success) {
                 return;
             }
-
-            const participantUserIds = await getSessionParticipantUserIds({ sessionId: sid });
-            if (!participantUserIds || participantUserIds.length === 0) return;
 
             const payload = {
                 type: 'execution-run-updated' as const,
@@ -594,31 +585,18 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
             const sid = typeof data?.sid === 'string' ? String(data.sid).trim() : '';
             if (!sid) return;
 
-            if (!await canPublishFromSessionScopedSocket({
+            const participantUserIds = await authorizeSessionRelayPublish({
                 socket,
                 connection,
+                userId,
                 sessionId: sid,
-                requireMachineBinding: true,
-            })) {
-                return;
-            }
+            });
+            if (!participantUserIds) return;
 
-            const access = await checkSessionAccess(userId, sid);
-            if (!access) return;
-            if (!requireAccessLevel(access, 'edit')) {
-                return;
-            }
-            if (!access.isOwner) {
-                return;
-            }
-
-            const parsedMessage = TranscriptStreamSegmentEphemeralMessageSchema.strip().safeParse(data?.message);
+            const parsedMessage = StrippedTranscriptStreamSegmentSchema.safeParse(data?.message);
             if (!parsedMessage.success) {
                 return;
             }
-
-            const participantUserIds = await getSessionParticipantUserIds({ sessionId: sid });
-            if (!participantUserIds || participantUserIds.length === 0) return;
 
             const payload = {
                 type: 'transcript-stream-segment' as const,
@@ -646,31 +624,18 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
             const sid = typeof data?.sid === 'string' ? String(data.sid).trim() : '';
             if (!sid) return;
 
-            if (!await canPublishFromSessionScopedSocket({
+            const participantUserIds = await authorizeSessionRelayPublish({
                 socket,
                 connection,
+                userId,
                 sessionId: sid,
-                requireMachineBinding: true,
-            })) {
-                return;
-            }
+            });
+            if (!participantUserIds) return;
 
-            const access = await checkSessionAccess(userId, sid);
-            if (!access) return;
-            if (!requireAccessLevel(access, 'edit')) {
-                return;
-            }
-            if (!access.isOwner) {
-                return;
-            }
-
-            const parsedMessage = TranscriptStreamSegmentDeltaEphemeralMessageSchema.strip().safeParse(data?.message);
+            const parsedMessage = StrippedTranscriptStreamSegmentDeltaSchema.safeParse(data?.message);
             if (!parsedMessage.success) {
                 return;
             }
-
-            const participantUserIds = await getSessionParticipantUserIds({ sessionId: sid });
-            if (!participantUserIds || participantUserIds.length === 0) return;
 
             const payload = {
                 type: 'transcript-stream-segment-delta' as const,

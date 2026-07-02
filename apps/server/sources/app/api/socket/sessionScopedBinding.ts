@@ -114,42 +114,29 @@ export function canRegisterSessionScopedRpcMethod(params: Readonly<{
     return params.method.slice(0, lastColon) === binding.sessionId;
 }
 
-export async function canPublishFromSessionScopedSocket(params: Readonly<{
+/**
+ * Resolve the machine-bound session binding a session-scoped socket must present before publishing
+ * relay events (transcript stream segments, execution-run updates) for a session.
+ *
+ * This is the synchronous (in-memory) half of publish authorization: it proves the socket handshake
+ * bound this exact session through a machine access key. The access key's continued existence and
+ * the sender's session access are re-verified by the TTL cache in `sessionRelayAuthCache.ts`.
+ */
+export function resolveSessionScopedMachinePublishBinding(params: Readonly<{
     socket: Socket;
     connection: ClientConnection;
     sessionId: string;
-    requireMachineBinding?: boolean;
-}>): Promise<boolean> {
+}>): Readonly<{ sessionId: string; machineId: string }> | null {
     if (params.connection.connectionType !== "session-scoped") {
-        return false;
+        return null;
     }
 
     const binding = readSessionScopedSocketBinding(params.socket);
     if (!binding || binding.sessionId !== params.sessionId) {
-        return false;
+        return null;
     }
-    if (params.requireMachineBinding === true) {
-        if (binding.proof !== "machine-access-key") {
-            return false;
-        }
-        const machineId = binding.machineId;
-        if (!machineId) {
-            return false;
-        }
-
-        const accessKey = await db.accessKey.findUnique({
-            where: {
-                accountId_machineId_sessionId: {
-                    accountId: params.connection.userId,
-                    machineId,
-                    sessionId: binding.sessionId,
-                },
-            },
-            select: { machineId: true },
-        });
-        if (!accessKey) {
-            return false;
-        }
+    if (binding.proof !== "machine-access-key" || !binding.machineId) {
+        return null;
     }
-    return true;
+    return { sessionId: binding.sessionId, machineId: binding.machineId };
 }

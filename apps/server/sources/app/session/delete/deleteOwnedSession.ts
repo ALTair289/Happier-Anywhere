@@ -2,6 +2,8 @@ import { afterTx, inTx } from '@/storage/inTx';
 import { log } from '@/utils/logging/log';
 import { markAccountChanged } from '@/app/changes/markAccountChanged';
 
+import { invalidateSessionRelayAuthorizationForSession } from '@/app/api/socket/sessionRelayAuthCache';
+
 import { deleteSessionTree, SessionDeleteConditionLostError } from './deleteSessionTree';
 import { emitSessionDeletedUpdate } from './emitSessionDeletedUpdate';
 import { loadSessionDeleteRecipients } from './loadSessionDeleteRecipients';
@@ -56,6 +58,8 @@ export async function deleteOwnedSession(params: {
             });
 
             afterTx(tx as any, async () => {
+                // The session and its access keys are gone: cached relay publish authorizations are stale.
+                invalidateSessionRelayAuthorizationForSession(params.sessionId);
                 log(
                     {
                         module: 'session-delete',

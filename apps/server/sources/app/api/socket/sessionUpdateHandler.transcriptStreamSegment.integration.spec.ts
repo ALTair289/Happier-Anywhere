@@ -112,7 +112,9 @@ function createOwnerSessionSocket() {
 }
 
 describe("sessionUpdateHandler (transcript-stream-segment relay)", () => {
-    beforeEach(() => {
+    beforeEach(async () => {
+        const { clearSessionRelayAuthorizationCache } = await import("./sessionRelayAuthCache");
+        clearSessionRelayAuthorizationCache();
         emitEphemeral.mockReset();
         websocketEventsCounterInc.mockReset();
         checkSessionAccess.mockReset();
@@ -208,6 +210,45 @@ describe("sessionUpdateHandler (transcript-stream-segment relay)", () => {
             .map((call) => call[0])
             .find((payload) => payload?.userId === "u1");
         expect(ownerCall?.skipSenderConnection).toBe(connection);
+    });
+
+    it("verifies relay authorization once and serves subsequent stream events from the cached binding", async () => {
+        const { sessionUpdateHandler } = await import("./sessionUpdateHandler");
+        const { invalidateSessionRelayAuthorizationForSession } = await import("./sessionRelayAuthCache");
+
+        const socket = createOwnerSessionSocket();
+        const connection = { connectionType: "session-scoped", socket: socket as any, userId: "u1", sessionId: "s1" } as any;
+        sessionUpdateHandler("u1", socket as any, connection);
+
+        const handler = getSocketHandler(socket, "transcript-stream-segment-delta");
+        const deltaEvent = (tick: number) => ({
+            sid: "s1",
+            message: {
+                localId: "segment-1",
+                messageRole: "agent",
+                tick,
+                baseLength: 5,
+                content: { t: "encrypted", c: "cipher-of-delta" },
+                createdAt: 1_000,
+                updatedAt: 1_040,
+            },
+        });
+
+        await handler(deltaEvent(1));
+        await handler(deltaEvent(2));
+
+        expect(accessKeyFindUnique).toHaveBeenCalledTimes(1);
+        expect(checkSessionAccess).toHaveBeenCalledTimes(1);
+        expect(getSessionParticipantUserIds).toHaveBeenCalledTimes(1);
+        expect(emitEphemeral).toHaveBeenCalledTimes(4);
+
+        invalidateSessionRelayAuthorizationForSession("s1");
+        await handler(deltaEvent(3));
+
+        expect(accessKeyFindUnique).toHaveBeenCalledTimes(2);
+        expect(checkSessionAccess).toHaveBeenCalledTimes(2);
+        expect(getSessionParticipantUserIds).toHaveBeenCalledTimes(2);
+        expect(emitEphemeral).toHaveBeenCalledTimes(6);
     });
 
     it("drops transcript-stream-segment-delta payloads missing chaining fields", async () => {

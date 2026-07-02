@@ -9,6 +9,7 @@ import { randomKeyNaked } from "@/utils/keys/randomKeyNaked";
 import { afterTx, inTx } from "@/storage/inTx";
 import { markAccountChanged } from "@/app/changes/markAccountChanged";
 import { resolveApiHotEndpointRateLimit } from "@/app/api/utils/apiRateLimitCatalog";
+import { invalidateSessionRelayAuthorizationForSession } from "@/app/api/socket/sessionRelayAuthCache";
 
 type SessionShareRow = Awaited<ReturnType<typeof db.sessionShare.findFirst>>;
 
@@ -193,6 +194,8 @@ export function shareRoutes(app: Fastify) {
             const recipientCursor = Math.max(recipientShareCursor, recipientSessionCursor);
 
             afterTx(tx, () => {
+                // Participant list changed: cached relay fan-out targets for this session are stale.
+                invalidateSessionRelayAuthorizationForSession(sessionId);
                 const updatePayload = buildSessionSharedUpdate(share, recipientCursor, randomKeyNaked(12));
                 eventRouter.emitUpdate({
                     userId: userId,
@@ -285,6 +288,7 @@ export function shareRoutes(app: Fastify) {
             const recipientCursor = Math.max(recipientShareCursor, recipientSessionCursor);
 
             afterTx(tx, () => {
+                invalidateSessionRelayAuthorizationForSession(sessionId);
                 const updatePayload = buildSessionShareUpdatedUpdate(
                     share.id,
                     share.sessionId,
@@ -355,6 +359,8 @@ export function shareRoutes(app: Fastify) {
             const recipientCursor = Math.max(recipientShareCursor, recipientSessionCursor);
 
             afterTx(tx, async () => {
+                // Participant list changed: cached relay fan-out targets for this session are stale.
+                invalidateSessionRelayAuthorizationForSession(sessionId);
                 const updatePayload = buildSessionShareRevokedUpdate(
                     share.id,
                     share.sessionId,

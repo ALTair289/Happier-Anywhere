@@ -99,7 +99,9 @@ vi.mock("@/utils/runtime/lock", () => ({
 }));
 
 describe("sessionUpdateHandler (execution-run-updated)", () => {
-    beforeEach(() => {
+    beforeEach(async () => {
+        const { clearSessionRelayAuthorizationCache } = await import("./sessionRelayAuthCache");
+        clearSessionRelayAuthorizationCache();
         emitEphemeral.mockReset();
         websocketEventsCounterInc.mockReset();
         checkSessionAccess.mockReset();
@@ -517,7 +519,9 @@ describe("sessionUpdateHandler (execution-run-updated)", () => {
 });
 
 describe("sessionUpdateHandler (transcript-stream-segment)", () => {
-    beforeEach(() => {
+    beforeEach(async () => {
+        const { clearSessionRelayAuthorizationCache } = await import("./sessionRelayAuthCache");
+        clearSessionRelayAuthorizationCache();
         emitEphemeral.mockReset();
         websocketEventsCounterInc.mockReset();
         checkSessionAccess.mockReset();

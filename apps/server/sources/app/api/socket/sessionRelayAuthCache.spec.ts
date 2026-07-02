@@ -1,0 +1,281 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+type CheckSessionAccessFn = typeof import("@/app/share/accessControl").checkSessionAccess;
+type RequireAccessLevelFn = typeof import("@/app/share/accessControl").requireAccessLevel;
+type GetSessionParticipantUserIdsFn = typeof import("@/app/share/sessionParticipants").getSessionParticipantUserIds;
+
+const checkSessionAccess = vi.fn<CheckSessionAccessFn>();
+const requireAccessLevel = vi.fn<RequireAccessLevelFn>();
+vi.mock("@/app/share/accessControl", () => ({
+    checkSessionAccess,
+    requireAccessLevel,
+}));
+
+const getSessionParticipantUserIds = vi.fn<GetSessionParticipantUserIdsFn>();
+vi.mock("@/app/share/sessionParticipants", () => ({
+    getSessionParticipantUserIds,
+}));
+
+const accessKeyFindUnique = vi.hoisted(() => vi.fn(async (): Promise<{ machineId: string } | null> => ({ machineId: "m1" })));
+vi.mock("@/storage/db", () => ({
+    db: {
+        accessKey: {
+            findUnique: accessKeyFindUnique,
+        },
+    },
+}));
+
+function createBoundSocket(overrides: Partial<{ sessionId: string; machineId: string | null; proof: string }> = {}) {
+    return {
+        data: {
+            sessionScopedBinding: {
+                sessionId: "s1",
+                machineId: "m1",
+                proof: "machine-access-key",
+                ...overrides,
+            },
+        },
+    };
+}
+
+function createConnection(socket: unknown, overrides: Partial<{ connectionType: string; sessionId: string }> = {}) {
+    return {
+        connectionType: "session-scoped",
+        socket,
+        userId: "u1",
+        sessionId: "s1",
+        ...overrides,
+    };
+}
+
+async function loadModule() {
+    return await import("./sessionRelayAuthCache");
+}
+
+describe("sessionRelayAuthCache", () => {
+    beforeEach(async () => {
+        checkSessionAccess.mockReset();
+        requireAccessLevel.mockReset();
+        getSessionParticipantUserIds.mockReset();
+        accessKeyFindUnique.mockReset();
+        accessKeyFindUnique.mockResolvedValue({ machineId: "m1" });
+        checkSessionAccess.mockImplementation(async (userId, sessionId) => ({
+            userId,
+            sessionId,
+            level: "owner",
+            isOwner: true,
+        } as any));
+        requireAccessLevel.mockReturnValue(true);
+        getSessionParticipantUserIds.mockResolvedValue(["u1", "u2"]);
+        const { clearSessionRelayAuthorizationCache } = await loadModule();
+        clearSessionRelayAuthorizationCache();
+    });
+
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
+    it("returns null without touching the database when the socket has no machine-bound session proof", async () => {
+        const { authorizeSessionRelayPublish } = await loadModule();
+        const socket = createBoundSocket({ machineId: null, proof: "owner-session" });
+
+        const result = await authorizeSessionRelayPublish({
+            socket: socket as any,
+            connection: createConnection(socket) as any,
+            userId: "u1",
+            sessionId: "s1",
+        });
+
+        expect(result).toBeNull();
+        expect(accessKeyFindUnique).not.toHaveBeenCalled();
+        expect(checkSessionAccess).not.toHaveBeenCalled();
+    });
+
+    it("returns null without touching the database when the event targets a different session than the binding", async () => {
+        const { authorizeSessionRelayPublish } = await loadModule();
+        const socket = createBoundSocket();
+
+        const result = await authorizeSessionRelayPublish({
+            socket: socket as any,
+            connection: createConnection(socket) as any,
+            userId: "u1",
+            sessionId: "s2",
+        });
+
+        expect(result).toBeNull();
+        expect(accessKeyFindUnique).not.toHaveBeenCalled();
+    });
+
+    it("returns null for non-session-scoped connections", async () => {
+        const { authorizeSessionRelayPublish } = await loadModule();
+        const socket = createBoundSocket();
+
+        const result = await authorizeSessionRelayPublish({
+            socket: socket as any,
+            connection: createConnection(socket, { connectionType: "user-scoped" }) as any,
+            userId: "u1",
+            sessionId: "s1",
+        });
+
+        expect(result).toBeNull();
+        expect(accessKeyFindUnique).not.toHaveBeenCalled();
+    });
+
+    it("verifies access key, owner access, and participants once, then serves subsequent calls from cache", async () => {
+        const { authorizeSessionRelayPublish } = await loadModule();
+        const socket = createBoundSocket();
+        const params = {
+            socket: socket as any,
+            connection: createConnection(socket) as any,
+            userId: "u1",
+            sessionId: "s1",
+        };
+
+        const first = await authorizeSessionRelayPublish(params);
+        const second = await authorizeSessionRelayPublish(params);
+
+        expect(first).toEqual(["u1", "u2"]);
+        expect(second).toEqual(["u1", "u2"]);
+        expect(accessKeyFindUnique).toHaveBeenCalledTimes(1);
+        expect(accessKeyFindUnique).toHaveBeenCalledWith({
+            where: {
+                accountId_machineId_sessionId: {
+                    accountId: "u1",
+                    machineId: "m1",
+                    sessionId: "s1",
+                },
+            },
+            select: { machineId: true },
+        });
+        expect(checkSessionAccess).toHaveBeenCalledTimes(1);
+        expect(checkSessionAccess).toHaveBeenCalledWith("u1", "s1");
+        expect(getSessionParticipantUserIds).toHaveBeenCalledTimes(1);
+    });
+
+    it("re-verifies after the cache TTL elapses", async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(1_000_000);
+        const { authorizeSessionRelayPublish, SESSION_RELAY_AUTH_CACHE_TTL_MS } = await loadModule();
+        const socket = createBoundSocket();
+        const params = {
+            socket: socket as any,
+            connection: createConnection(socket) as any,
+            userId: "u1",
+            sessionId: "s1",
+        };
+
+        await authorizeSessionRelayPublish(params);
+        vi.setSystemTime(1_000_000 + SESSION_RELAY_AUTH_CACHE_TTL_MS + 1);
+        await authorizeSessionRelayPublish(params);
+
+        expect(accessKeyFindUnique).toHaveBeenCalledTimes(2);
+        expect(checkSessionAccess).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not cache negative results", async () => {
+        accessKeyFindUnique.mockResolvedValueOnce(null);
+        const { authorizeSessionRelayPublish } = await loadModule();
+        const socket = createBoundSocket();
+        const params = {
+            socket: socket as any,
+            connection: createConnection(socket) as any,
+            userId: "u1",
+            sessionId: "s1",
+        };
+
+        const first = await authorizeSessionRelayPublish(params);
+        const second = await authorizeSessionRelayPublish(params);
+
+        expect(first).toBeNull();
+        expect(second).toEqual(["u1", "u2"]);
+        expect(accessKeyFindUnique).toHaveBeenCalledTimes(2);
+    });
+
+    it("returns null and does not cache when the sender is not the session owner", async () => {
+        checkSessionAccess.mockResolvedValue({
+            userId: "u1",
+            sessionId: "s1",
+            level: "edit",
+            isOwner: false,
+        } as any);
+        const { authorizeSessionRelayPublish } = await loadModule();
+        const socket = createBoundSocket();
+        const params = {
+            socket: socket as any,
+            connection: createConnection(socket) as any,
+            userId: "u1",
+            sessionId: "s1",
+        };
+
+        expect(await authorizeSessionRelayPublish(params)).toBeNull();
+        expect(await authorizeSessionRelayPublish(params)).toBeNull();
+        expect(checkSessionAccess).toHaveBeenCalledTimes(2);
+    });
+
+    it("returns null when edit access is missing", async () => {
+        requireAccessLevel.mockReturnValue(false);
+        const { authorizeSessionRelayPublish } = await loadModule();
+        const socket = createBoundSocket();
+
+        const result = await authorizeSessionRelayPublish({
+            socket: socket as any,
+            connection: createConnection(socket) as any,
+            userId: "u1",
+            sessionId: "s1",
+        });
+
+        expect(result).toBeNull();
+        expect(requireAccessLevel).toHaveBeenCalledWith(expect.objectContaining({ level: "owner" }), "edit");
+    });
+
+    it("re-verifies after session-scoped invalidation", async () => {
+        const { authorizeSessionRelayPublish, invalidateSessionRelayAuthorizationForSession } = await loadModule();
+        const socket = createBoundSocket();
+        const params = {
+            socket: socket as any,
+            connection: createConnection(socket) as any,
+            userId: "u1",
+            sessionId: "s1",
+        };
+
+        await authorizeSessionRelayPublish(params);
+        invalidateSessionRelayAuthorizationForSession("s1");
+        await authorizeSessionRelayPublish(params);
+
+        expect(checkSessionAccess).toHaveBeenCalledTimes(2);
+    });
+
+    it("re-verifies after machine-scoped invalidation", async () => {
+        const { authorizeSessionRelayPublish, invalidateSessionRelayAuthorizationForMachine } = await loadModule();
+        const socket = createBoundSocket();
+        const params = {
+            socket: socket as any,
+            connection: createConnection(socket) as any,
+            userId: "u1",
+            sessionId: "s1",
+        };
+
+        await authorizeSessionRelayPublish(params);
+        invalidateSessionRelayAuthorizationForMachine("m1");
+        await authorizeSessionRelayPublish(params);
+
+        expect(accessKeyFindUnique).toHaveBeenCalledTimes(2);
+    });
+
+    it("keeps unrelated cache entries when invalidating another session", async () => {
+        const { authorizeSessionRelayPublish, invalidateSessionRelayAuthorizationForSession } = await loadModule();
+        const socket = createBoundSocket();
+        const params = {
+            socket: socket as any,
+            connection: createConnection(socket) as any,
+            userId: "u1",
+            sessionId: "s1",
+        };
+
+        await authorizeSessionRelayPublish(params);
+        invalidateSessionRelayAuthorizationForSession("s-other");
+        await authorizeSessionRelayPublish(params);
+
+        expect(checkSessionAccess).toHaveBeenCalledTimes(1);
+    });
+});
