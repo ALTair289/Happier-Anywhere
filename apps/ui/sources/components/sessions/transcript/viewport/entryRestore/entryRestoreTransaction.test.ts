@@ -6,7 +6,7 @@ import {
     type EntryRestoreTransactionTarget,
 } from './entryRestoreTransaction';
 
-const anchorTarget: EntryRestoreTransactionTarget = { kind: 'anchor', index: 12, viewOffset: -84 };
+const anchorTarget: EntryRestoreTransactionTarget = { kind: 'anchor', index: 12, itemOffsetPx: 84 };
 
 function buildTransaction(overrides: Partial<{
     target: EntryRestoreTransactionTarget;

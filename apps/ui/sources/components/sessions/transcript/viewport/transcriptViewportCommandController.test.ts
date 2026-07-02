@@ -100,11 +100,11 @@ describe('transcript viewport command controller', () => {
         const prependAdapter = makeAdapter({ isWeb: true, webPrependWindowOpen: true });
 
         expect(controller.execute({
-            kind: 'restore-offset',
+            kind: 'restore-distance',
             sessionId: 'session-a',
             reason: 'prepend-restore',
             mode: 'restore-distance',
-            offsetY: 120,
+            distanceFromLiveTailPx: 120,
         }, prependAdapter.adapter)).toBe(true);
         expect(controller.activeOwner()).toBe('prepend');
 

@@ -1,5 +1,3 @@
-import { planNativeTranscriptViewportAnchorRestore } from '@/components/sessions/transcript/transcriptNativeViewportAnchor';
-
 export type EntryRestoreAnchorSnapshot = Readonly<{
     messageId?: string | null;
     /** Message seq stamped on hydrated (persisted) anchors; identity-first restore. */
@@ -11,7 +9,7 @@ export type EntryRestoreAnchorSnapshot = Readonly<{
 export type EntryRestoreSnapshot = Readonly<{
     shouldFollowBottom: boolean;
     /** Remembered distance from the bottom of the transcript, in px. */
-    offsetY: number;
+    offsetY: number | null;
     anchor: EntryRestoreAnchorSnapshot | null;
 }>;
 
@@ -24,7 +22,8 @@ export type EntryRestoreContentMeasurement = Readonly<{
 export type EntryRestoreFinalNoneReason =
     | 'empty-transcript'
     | 'content-fits-viewport'
-    | 'missing-durable-anchor';
+    | 'missing-durable-anchor'
+    | 'missing-restored-distance';
 
 /** Wait verdicts: re-resolve later (after fill settle / first content measurement). */
 export type EntryRestoreWaitNoneReason =
@@ -35,7 +34,7 @@ export type EntryRestoreNoneReason = EntryRestoreFinalNoneReason | EntryRestoreW
 
 export type EntryRestoreTarget =
     | Readonly<{ kind: 'bottom' }>
-    | Readonly<{ kind: 'anchor'; index: number; viewOffset: number }>
+    | Readonly<{ kind: 'anchor'; index: number; itemOffsetPx: number }>
     | Readonly<{ kind: 'materialize-then-anchor'; anchorSeqHint: number | null }>
     | Readonly<{ kind: 'distance-oneshot'; targetOffsetY: number }>
     | Readonly<{ kind: 'none'; reason: EntryRestoreNoneReason }>;
@@ -136,10 +135,11 @@ export function resolveEntryRestoreTarget<TItem>(
         );
         if (exactTarget) return exactTarget;
 
-        if (params.canMaterializeOlder) {
+        const anchorSeqHint = resolveDurableAnchorSeqHint(anchor, params.anchorSeqResolver);
+        if (params.canMaterializeOlder && anchorSeqHint !== null) {
             return {
                 kind: 'materialize-then-anchor',
-                anchorSeqHint: params.anchorSeqResolver?.(anchor) ?? null,
+                anchorSeqHint,
             };
         }
 
@@ -158,9 +158,11 @@ export function resolveEntryRestoreTarget<TItem>(
         return { kind: 'none', reason: 'content-unmeasured' };
     }
 
-    const distanceFromBottom = Number.isFinite(params.snapshot.offsetY)
-        ? Math.max(0, Math.trunc(params.snapshot.offsetY))
-        : 0;
+    const restoredDistanceFromBottom = params.snapshot.offsetY;
+    if (typeof restoredDistanceFromBottom !== 'number' || !Number.isFinite(restoredDistanceFromBottom)) {
+        return { kind: 'none', reason: 'missing-restored-distance' };
+    }
+    const distanceFromBottom = Math.max(0, Math.trunc(restoredDistanceFromBottom));
     const maxOffsetY = Math.max(0, Math.trunc(contentHeight - layoutHeight));
     return {
         kind: 'distance-oneshot',
@@ -175,15 +177,28 @@ function toAnchorTarget(
 ): Extract<EntryRestoreTarget, { kind: 'anchor' }> | null {
     if (index == null || !Number.isInteger(index) || index < 0 || index >= itemCount) return null;
 
-    const plan = planNativeTranscriptViewportAnchorRestore({
+    return {
+        kind: 'anchor',
         index,
-        itemOffsetPx: Number.isFinite(itemOffsetPx) ? itemOffsetPx : 0,
-    });
-    if (plan.status !== 'planned') return null;
-
-    return { kind: 'anchor', index: plan.index, viewOffset: plan.viewOffset };
+        itemOffsetPx: Number.isFinite(itemOffsetPx) ? Math.trunc(itemOffsetPx) : 0,
+    };
 }
 
 function normalizeDimension(value: number): number {
     return Number.isFinite(value) ? value : 0;
+}
+
+function resolveDurableAnchorSeqHint(
+    anchor: EntryRestoreAnchorSnapshot,
+    resolver: ((anchor: EntryRestoreAnchorSnapshot) => number | null) | undefined,
+): number | null {
+    const stampedSeq = normalizeSeq(anchor.seq);
+    if (stampedSeq !== null) return stampedSeq;
+    return normalizeSeq(resolver?.(anchor));
+}
+
+function normalizeSeq(value: unknown): number | null {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+    const seq = Math.trunc(value);
+    return seq > 0 ? seq : null;
 }
