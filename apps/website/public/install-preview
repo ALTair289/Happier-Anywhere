@@ -1505,7 +1505,7 @@ action_version() {
     fi
   fi
   local asset_source=""
-  asset_source="$(resolve_release_asset_source "${release_json}" "${asset_regex}")"
+  asset_source="$(resolve_release_asset_source "${release_json}" "${asset_regex}" || true)"
   if [[ -z "${asset_source}" ]]; then
     echo "Unable to locate release assets for ${os}-${arch} on tag ${tag}." >&2
     return 1
@@ -2250,7 +2250,7 @@ if [[ -z "${RELEASE_ASSETS_DIR}" ]]; then
   fi
 fi
 
-ASSET_SOURCE="$(resolve_release_asset_source "${RELEASE_JSON}" "${ASSET_REGEX}")"
+ASSET_SOURCE="$(resolve_release_asset_source "${RELEASE_JSON}" "${ASSET_REGEX}" || true)"
 if [[ -z "${ASSET_SOURCE}" ]]; then
   echo "Unable to locate release assets for ${OS}-${ARCH} on tag ${TAG}." >&2
   exit 1
@@ -2266,8 +2266,8 @@ fi
 
 CHECKSUMS_REGEX="^${CHECKSUMS_PREFIX}${VERSION}[.]txt$"
 SIG_REGEX="^${CHECKSUMS_PREFIX}${VERSION}[.]txt[.]minisig$"
-CHECKSUMS_SOURCE="$(resolve_release_asset_source "${RELEASE_JSON}" "${CHECKSUMS_REGEX}")"
-SIG_SOURCE="$(resolve_release_asset_source "${RELEASE_JSON}" "${SIG_REGEX}")"
+CHECKSUMS_SOURCE="$(resolve_release_asset_source "${RELEASE_JSON}" "${CHECKSUMS_REGEX}" || true)"
+SIG_SOURCE="$(resolve_release_asset_source "${RELEASE_JSON}" "${SIG_REGEX}" || true)"
 if [[ -z "${CHECKSUMS_SOURCE}" || -z "${SIG_SOURCE}" ]]; then
   echo "Unable to locate release assets for ${OS}-${ARCH} on tag ${TAG}." >&2
   exit 1

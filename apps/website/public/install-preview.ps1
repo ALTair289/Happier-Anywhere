@@ -1446,7 +1446,156 @@ function Normalize-InstallerLockHygienePathNeedle {
     return ""
   }
 
-  return ([string]$Value).Trim().Replace('\', '/').ToLowerInvariant()
+  $normalized = ([string]$Value).Trim()
+  if ($normalized.Length -ge 2) {
+    if (($normalized.StartsWith('"') -and $normalized.EndsWith('"')) -or ($normalized.StartsWith("'") -and $normalized.EndsWith("'"))) {
+      $normalized = $normalized.Substring(1, $normalized.Length - 2).Trim()
+    }
+  }
+
+  $normalized = $normalized.Replace('\', '/').ToLowerInvariant()
+  while ($normalized.Length -gt 1 -and $normalized.EndsWith('/')) {
+    $normalized = $normalized.Substring(0, $normalized.Length - 1)
+  }
+
+  return $normalized
+}
+
+function Resolve-InstallerLockHygieneExecutablePathFromCommandLine {
+  param (
+    [string] $CommandLine
+  )
+
+  if (-not $CommandLine) {
+    return ""
+  }
+
+  $trimmed = ([string]$CommandLine).Trim()
+  if (-not $trimmed) {
+    return ""
+  }
+
+  if ($trimmed.StartsWith('"')) {
+    $endQuote = $trimmed.IndexOf('"', 1)
+    if ($endQuote -gt 1) {
+      return $trimmed.Substring(1, $endQuote - 1)
+    }
+  }
+
+  if ($trimmed.StartsWith("'")) {
+    $endQuote = $trimmed.IndexOf("'", 1)
+    if ($endQuote -gt 1) {
+      return $trimmed.Substring(1, $endQuote - 1)
+    }
+  }
+
+  $firstSpace = $trimmed.IndexOf(' ')
+  if ($firstSpace -gt 0) {
+    return $trimmed.Substring(0, $firstSpace)
+  }
+
+  return $trimmed
+}
+
+function Test-InstallerLockHygienePathInScope {
+  param (
+    [string] $CandidatePath,
+    [Parameter(Mandatory = $true)] [string[]] $MatchNeedles
+  )
+
+  $candidate = Normalize-InstallerLockHygienePathNeedle -Value $CandidatePath
+  if (-not $candidate) {
+    return $false
+  }
+
+  foreach ($needle in $MatchNeedles) {
+    $scope = Normalize-InstallerLockHygienePathNeedle -Value $needle
+    if (-not $scope) {
+      continue
+    }
+
+    $scopePrefix = "$scope/"
+    if ($candidate.StartsWith($scopePrefix) -or $candidate -eq $scope) {
+      return $true
+    }
+  }
+
+  return $false
+}
+
+function Test-InstallerLockHygieneTextBoundaryCharacter {
+  param (
+    [string] $Character
+  )
+
+  if (-not $Character) {
+    return $true
+  }
+
+  $boundaryCharacters = @(" ", "`t", "`r", "`n", '"', "'", "=", ";", ",", "(", ")", "[", "]", "{", "}")
+  return $boundaryCharacters.Contains($Character)
+}
+
+function Test-InstallerLockHygieneTextContainsScopedPath {
+  param (
+    [string] $Text,
+    [Parameter(Mandatory = $true)] [string[]] $MatchNeedles
+  )
+
+  $searchText = Normalize-InstallerLockHygienePathNeedle -Value $Text
+  if (-not $searchText) {
+    return $false
+  }
+
+  foreach ($needle in $MatchNeedles) {
+    $scope = Normalize-InstallerLockHygienePathNeedle -Value $needle
+    if (-not $scope) {
+      continue
+    }
+
+    $startIndex = 0
+    while ($startIndex -lt $searchText.Length) {
+      $index = $searchText.IndexOf($scope, $startIndex, [System.StringComparison]::Ordinal)
+      if ($index -lt 0) {
+        break
+      }
+
+      $before = if ($index -eq 0) { "" } else { $searchText.Substring($index - 1, 1) }
+      $afterIndex = $index + $scope.Length
+      $after = if ($afterIndex -ge $searchText.Length) { "" } else { $searchText.Substring($afterIndex, 1) }
+      $beforeOk = Test-InstallerLockHygieneTextBoundaryCharacter -Character $before
+      $afterOk = $after -eq "/" -or (Test-InstallerLockHygieneTextBoundaryCharacter -Character $after)
+      if ($beforeOk -and $afterOk) {
+        return $true
+      }
+
+      $startIndex = $index + $scope.Length
+    }
+  }
+
+  return $false
+}
+
+function Test-InstallerLockHygieneDaemonServiceLabelInScope {
+  param (
+    [string] $Label
+  )
+
+  $normalizedLabel = ([string]$Label).Trim().ToLowerInvariant().Replace("/", "\")
+  if (-not $normalizedLabel) {
+    return $false
+  }
+
+  $leafLabel = $normalizedLabel
+  $lastSeparatorIndex = $leafLabel.LastIndexOf('\')
+  if ($lastSeparatorIndex -ge 0) {
+    if ($lastSeparatorIndex -ge ($leafLabel.Length - 1)) {
+      return $false
+    }
+    $leafLabel = $leafLabel.Substring($lastSeparatorIndex + 1)
+  }
+
+  return $leafLabel -eq "happier-daemon" -or $leafLabel.StartsWith("happier-daemon.")
 }
 
 function Resolve-InstallerLockHygieneWaitMs {
@@ -1527,20 +1676,107 @@ function Get-InstallerScopedHappierProcesses {
       continue
     }
 
-    $commandLine = Normalize-InstallerLockHygienePathNeedle -Value ([string]$process.CommandLine)
-    $executablePath = Normalize-InstallerLockHygienePathNeedle -Value ([string]$process.ExecutablePath)
-    $searchText = "$commandLine $executablePath"
-
-    $matchesScope = $false
-    foreach ($needle in $MatchNeedles) {
-      if ($needle -and $searchText.Contains($needle)) {
-        $matchesScope = $true
-        break
-      }
-    }
+    $commandExecutablePath = Resolve-InstallerLockHygieneExecutablePathFromCommandLine -CommandLine ([string]$process.CommandLine)
+    $executablePath = [string]$process.ExecutablePath
+    $matchesScope = (Test-InstallerLockHygienePathInScope -CandidatePath $executablePath -MatchNeedles $MatchNeedles) -or (Test-InstallerLockHygienePathInScope -CandidatePath $commandExecutablePath -MatchNeedles $MatchNeedles)
 
     if ($matchesScope) {
       $matched.Add($process)
+    }
+  }
+
+  return $matched.ToArray()
+}
+
+function Get-InstallerScopedHappierServices {
+  param (
+    [Parameter(Mandatory = $true)] [string[]] $MatchNeedles
+  )
+
+  $services = Get-CimInstance Win32_Service -ErrorAction SilentlyContinue
+  if (-not $services) {
+    return @()
+  }
+
+  $matched = New-Object System.Collections.Generic.List[object]
+  foreach ($service in $services) {
+    if ($null -eq $service) {
+      continue
+    }
+
+    $matchesDaemonServiceLabel =
+      (Test-InstallerLockHygieneDaemonServiceLabelInScope -Label $service.Name) -or
+      (Test-InstallerLockHygieneDaemonServiceLabelInScope -Label $service.DisplayName)
+    if (-not $matchesDaemonServiceLabel) {
+      continue
+    }
+
+    $activeServiceStates = @("running", "start pending", "stop pending", "continue pending", "pause pending")
+    $serviceState = ([string]$service.State).Trim().ToLowerInvariant()
+    if ($serviceState -and -not $activeServiceStates.Contains($serviceState)) {
+      continue
+    }
+
+    $servicePathText = [string]$service.PathName
+    $serviceExecutablePath = Resolve-InstallerLockHygieneExecutablePathFromCommandLine -CommandLine $servicePathText
+    if (
+      (Test-InstallerLockHygienePathInScope -CandidatePath $serviceExecutablePath -MatchNeedles $MatchNeedles) -or
+      (Test-InstallerLockHygieneTextContainsScopedPath -Text $servicePathText -MatchNeedles $MatchNeedles)
+    ) {
+      $matched.Add($service)
+    }
+  }
+
+  return $matched.ToArray()
+}
+
+function Get-InstallerScopedHappierScheduledTasks {
+  param (
+    [Parameter(Mandatory = $true)] [string[]] $MatchNeedles
+  )
+
+  $tasks = @()
+  try {
+    $tasks = Get-ScheduledTask -TaskPath "\Happier\" -ErrorAction SilentlyContinue
+  }
+  catch {
+    return @()
+  }
+  if (-not $tasks) {
+    return @()
+  }
+
+  $activeTaskStates = @("running", "queued")
+  $matched = New-Object System.Collections.Generic.List[object]
+  foreach ($task in $tasks) {
+    if ($null -eq $task) {
+      continue
+    }
+
+    $taskLabel = "$([string]$task.TaskPath)$([string]$task.TaskName)"
+    if (-not (Test-InstallerLockHygieneDaemonServiceLabelInScope -Label $taskLabel)) {
+      continue
+    }
+
+    $taskState = ([string]$task.State).Trim().ToLowerInvariant()
+    if ($taskState -and -not $activeTaskStates.Contains($taskState)) {
+      continue
+    }
+
+    foreach ($action in @($task.Actions)) {
+      if ($null -eq $action) {
+        continue
+      }
+
+      $actionExecutablePath = Resolve-InstallerLockHygieneExecutablePathFromCommandLine -CommandLine ([string]$action.Execute)
+      $actionText = "$([string]$action.Execute) $([string]$action.Arguments)"
+      if (
+        (Test-InstallerLockHygienePathInScope -CandidatePath $actionExecutablePath -MatchNeedles $MatchNeedles) -or
+        (Test-InstallerLockHygieneTextContainsScopedPath -Text $actionText -MatchNeedles $MatchNeedles)
+      ) {
+        $matched.Add($task)
+        break
+      }
     }
   }
 
@@ -1638,6 +1874,26 @@ function Invoke-InstallerPreInstallLockHygiene {
       } |
       Sort-Object -Unique
     throw "Pre-install lock hygiene failed to quiesce managed runtime holders within $waitMs ms: $($details -join ', ')"
+  }
+
+  $remainingServices = Get-InstallerScopedHappierServices -MatchNeedles $matchNeedles
+  if ($remainingServices.Count -gt 0) {
+    $details = $remainingServices |
+      ForEach-Object {
+        "$([string]$_.Name):$([string]$_.State)"
+      } |
+      Sort-Object -Unique
+    throw "Pre-install lock hygiene found scoped managed services still active after cleanup: $($details -join ', ')"
+  }
+
+  $remainingScheduledTasks = Get-InstallerScopedHappierScheduledTasks -MatchNeedles $matchNeedles
+  if ($remainingScheduledTasks.Count -gt 0) {
+    $details = $remainingScheduledTasks |
+      ForEach-Object {
+        "$([string]$_.TaskPath)$([string]$_.TaskName):$([string]$_.State)"
+      } |
+      Sort-Object -Unique
+    throw "Pre-install lock hygiene found scoped managed scheduled tasks still active after cleanup: $($details -join ', ')"
   }
 
   Remove-StaleInstallerVersionBackups -InstallHomeDir $InstallHomeDir
