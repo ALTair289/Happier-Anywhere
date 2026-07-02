@@ -3,6 +3,10 @@ import * as React from 'react';
 import { View, Platform, useWindowDimensions, ViewStyle, Pressable, ScrollView } from 'react-native';
 import { layout } from '@/components/ui/layout/layout';
 import { MultiTextInput, KeyPressEvent, type MultiTextInputSubmitBehavior } from '@/components/ui/forms/MultiTextInput';
+import {
+    TEXT_INPUT_LARGE_TEXT_CHANGE_DEBOUNCE_MS,
+    isLargeTextInputValueLength,
+} from '@/components/ui/forms/largeTextInputPolicy';
 import { MULTI_TEXT_INPUT_BASE_FONT_SIZE } from '@/components/ui/forms/multiTextInputTypography';
 import {
     areActiveWordsEqual,
@@ -88,6 +92,7 @@ import { AgentInputOverlayLayer } from './components/AgentInputOverlayLayer';
 import { useCommandMenuKeyboard, type CommandMenuAnchor } from '@/components/ui/commandMenu';
 import { AgentInputCommandMenu } from './commandMenu/AgentInputCommandMenu';
 import { useAgentInputCommandMenu } from './commandMenu/useAgentInputCommandMenu';
+import { recordLargeTextInputDiagnostic } from '@/utils/system/userInteractionDiagnostics';
 import { resolveAgentInputCommandMenuAnchor } from './commandMenu/resolveAgentInputCommandMenuAnchor';
 import { useTextInputCaretRect } from '@/hooks/ui/textInputCaretRect';
 import { createBackdropNativeStyle, createBackdropWebStyle } from '@/components/ui/overlays/createBackdropLayerStyle';
@@ -228,6 +233,23 @@ function updateLayoutHeight(
 ): void {
     const nextHeight = normalizeLayoutHeightPx(height);
     setHeight((currentHeight) => (currentHeight === nextHeight ? currentHeight : nextHeight));
+}
+
+type AgentInputPendingParentTextSync = {
+    text: string;
+    hasFlushed: boolean;
+};
+
+function shouldDeferAgentInputParentTextSync(
+    parentText: string,
+    nextText: string,
+): boolean {
+    if (!isLargeTextInputValueLength(nextText.length)) {
+        return false;
+    }
+    const parentStatus = resolveLiveInputTextStatus(parentText);
+    const nextStatus = resolveLiveInputTextStatus(nextText);
+    return parentStatus.hasText === nextStatus.hasText;
 }
 
 type ProgrammaticHistoryInputState = Readonly<{
@@ -1354,11 +1376,64 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
     ));
     const [hasAutocompleteTextInteraction, setHasAutocompleteTextInteraction] = React.useState(false);
     const lastControlledValueRef = React.useRef(props.value);
+    const onChangeTextRef = React.useRef(props.onChangeText);
+    const deferredParentTextSyncRef = React.useRef<AgentInputPendingParentTextSync | null>(null);
+    const deferredParentTextSyncTimerRef = React.useRef<ReturnType<typeof globalThis.setTimeout> | null>(null);
     const inputScopeKeyRef = React.useRef<string | null>(props.sessionId ?? null);
     const [uncontrolledStructuredInputMentions, setUncontrolledStructuredInputMentions] = React.useState<ComposerStructuredInputMention[]>([]);
     const structuredInputMentions = props.structuredInputMentions ?? uncontrolledStructuredInputMentions;
     const structuredInputMentionsRef = React.useRef<readonly ComposerStructuredInputMention[]>(structuredInputMentions);
     const historyAppliedInputStateRef = React.useRef<ProgrammaticHistoryInputState | null>(null);
+
+    React.useEffect(() => {
+        onChangeTextRef.current = props.onChangeText;
+    }, [props.onChangeText]);
+
+    const clearDeferredParentTextSync = React.useCallback(() => {
+        if (deferredParentTextSyncTimerRef.current !== null) {
+            globalThis.clearTimeout(deferredParentTextSyncTimerRef.current);
+            deferredParentTextSyncTimerRef.current = null;
+        }
+        deferredParentTextSyncRef.current = null;
+    }, []);
+
+    const flushDeferredParentTextSync = React.useCallback(() => {
+        const pending = deferredParentTextSyncRef.current;
+        if (!pending) return null;
+        if (deferredParentTextSyncTimerRef.current !== null) {
+            globalThis.clearTimeout(deferredParentTextSyncTimerRef.current);
+            deferredParentTextSyncTimerRef.current = null;
+        }
+        if (!pending.hasFlushed) {
+            pending.hasFlushed = true;
+            onChangeTextRef.current(pending.text);
+        }
+        return pending.text;
+    }, []);
+
+    const scheduleDeferredParentTextSync = React.useCallback((text: string) => {
+        deferredParentTextSyncRef.current = {
+            text,
+            hasFlushed: false,
+        };
+        if (deferredParentTextSyncTimerRef.current !== null) {
+            globalThis.clearTimeout(deferredParentTextSyncTimerRef.current);
+        }
+        deferredParentTextSyncTimerRef.current = globalThis.setTimeout(() => {
+            deferredParentTextSyncTimerRef.current = null;
+            const pending = deferredParentTextSyncRef.current;
+            if (!pending || pending.hasFlushed) return;
+            pending.hasFlushed = true;
+            onChangeTextRef.current(pending.text);
+        }, TEXT_INPUT_LARGE_TEXT_CHANGE_DEBOUNCE_MS);
+    }, []);
+
+    React.useEffect(() => () => {
+        if (deferredParentTextSyncTimerRef.current !== null) {
+            globalThis.clearTimeout(deferredParentTextSyncTimerRef.current);
+            deferredParentTextSyncTimerRef.current = null;
+        }
+    }, []);
 
     React.useEffect(() => {
         structuredInputMentionsRef.current = structuredInputMentions;
@@ -1440,6 +1515,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
 
     React.useEffect(() => {
         if (props.value === lastControlledValueRef.current) return;
+        clearDeferredParentTextSync();
         lastControlledValueRef.current = props.value;
 
         const current = inputStateRef.current;
@@ -1471,7 +1547,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
             setLiveTextStatus(nextStatus);
         }
         updateInputSelectionState(nextSelection);
-    }, [props.value, updateActiveWordState, updateInputSelectionState, updateStructuredInputMentions]);
+    }, [clearDeferredParentTextSync, props.value, updateActiveWordState, updateInputSelectionState, updateStructuredInputMentions]);
 
     React.useEffect(() => {
         updateActiveWordState(inputStateRef.current);
@@ -1511,12 +1587,27 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
 
     const handleComposerTextChange = React.useCallback((text: string) => {
         setHasAutocompleteTextInteraction(true);
-        props.onChangeText(text);
-    }, [props.onChangeText]);
+        const isProgrammaticHistoryApply = historyAppliedInputStateRef.current?.state.text === text;
+        if (isProgrammaticHistoryApply || !shouldDeferAgentInputParentTextSync(lastControlledValueRef.current, text)) {
+            clearDeferredParentTextSync();
+            props.onChangeText(text);
+            return;
+        }
+        scheduleDeferredParentTextSync(text);
+    }, [clearDeferredParentTextSync, props.onChangeText, scheduleDeferredParentTextSync]);
 
     React.useEffect(() => {
         const selection = props.inputPersistence?.initialSelection;
         if (!selection) return;
+        const liveTextLength = inputRef.current?.getText?.().length ?? props.value.length;
+        recordLargeTextInputDiagnostic({
+            phase: 'selection-restore',
+            platform: Platform.OS,
+            surface: 'agentInput',
+            textLength: liveTextLength,
+            selection,
+            valueLength: props.value.length,
+        });
         inputRef.current?.setSelection(selection);
     }, [props.inputPersistence?.restoreToken]);
 
@@ -1530,9 +1621,19 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
         if (sendActionDisabled) {
             return;
         }
-        const liveInputText = inputRef.current?.flushPendingTextChange?.()
+        const liveInputText = flushDeferredParentTextSync()
+            ?? inputRef.current?.flushPendingTextChange?.()
             ?? inputRef.current?.getText?.()
             ?? inputStateRef.current.text;
+        recordLargeTextInputDiagnostic({
+            phase: 'send-flush',
+            platform: Platform.OS,
+            surface: 'agentInput',
+            textLength: liveInputText.length,
+            selection: inputStateRef.current.selection,
+            valueLength: props.value.length,
+            liveTextLength: liveInputText.length,
+        });
         if (inputStateRef.current.text !== liveInputText) {
             const nextState = {
                 text: liveInputText,
@@ -1565,6 +1666,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
         );
     }, [
         messageHistory,
+        flushDeferredParentTextSync,
         props.onSend,
         props.sessionId,
         props.value,
@@ -1624,9 +1726,10 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
     }, [composerKeyboardLayoutForFocus, messageHistory, props.autocompletePrefixes]);
 
     const handleComposerBlur = React.useCallback(() => {
+        flushDeferredParentTextSync();
         composerKeyboardLayoutForFocus?.setComposerInputFocused?.(false);
         setIsInputFocused(false);
-    }, [composerKeyboardLayoutForFocus]);
+    }, [composerKeyboardLayoutForFocus, flushDeferredParentTextSync]);
 
     const applyHistoryInputText = React.useCallback((next: string) => {
         const nextState = { text: next, selection: { start: next.length, end: next.length } };
@@ -2707,6 +2810,10 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
         theme.colors.overlay.scrimWizard,
         uiBackdropBlurEnabled,
     ]);
+    const deferredParentTextSync = deferredParentTextSyncRef.current;
+    const renderedComposerInputValue = deferredParentTextSync && props.value === lastControlledValueRef.current
+        ? deferredParentTextSync.text
+        : props.value;
 
     const renderComposerInput = () => (
         <View
@@ -2722,7 +2829,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                 ref={inputRef}
                 testID={props.sessionId ? AGENT_INPUT_TEST_IDS.sessionInput : AGENT_INPUT_TEST_IDS.newSessionInput}
                 textStyle={props.sessionId ? styles.sessionInputText : styles.newSessionInputText}
-                value={props.value}
+                value={renderedComposerInputValue}
                 paddingTop={Platform.OS === 'web' ? 10 : 8}
                 paddingBottom={Platform.OS === 'web' ? 10 : 8}
                 paddingRight={shouldReserveInputExpansionToggleSpace ? INPUT_EXPANSION_TOGGLE_INPUT_PADDING_RIGHT : undefined}
