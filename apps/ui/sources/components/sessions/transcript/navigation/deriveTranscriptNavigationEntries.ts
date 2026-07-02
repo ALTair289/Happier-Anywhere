@@ -2,8 +2,8 @@ import {
     resolveSessionMessagePinRowIdentityKey,
     sessionMessagePinRowsMatch,
 } from '@/sync/domains/messages/pins/sessionMessagePinIdentity';
-import { stripMarkdown } from '@/utils/sessions/messageUtils';
 
+import { normalizeTranscriptNavigationTextPreview } from './transcriptNavigationTextPreview';
 import type {
     DeriveTranscriptNavigationEntriesParams,
     TranscriptNavigationEntry,
@@ -14,8 +14,6 @@ import type {
     TranscriptNavigationRemoteUserTurn,
     TranscriptNavigationRole,
 } from './transcriptNavigationTypes';
-
-const PREVIEW_MAX_LENGTH = 220;
 
 type NavigationEntryWithOrder = Readonly<{
     entry: TranscriptNavigationEntry;
@@ -47,11 +45,7 @@ function normalizeFiniteInteger(value: number | null | undefined): number | null
 }
 
 function normalizeTextPreview(value: string | null | undefined): string | null {
-    if (typeof value !== 'string') return null;
-    const normalized = stripMarkdown(value);
-    if (!normalized) return null;
-    if (normalized.length <= PREVIEW_MAX_LENGTH) return normalized;
-    return `${normalized.slice(0, PREVIEW_MAX_LENGTH - 3).trimEnd()}...`;
+    return normalizeTranscriptNavigationTextPreview(value);
 }
 
 function normalizeRole(role: TranscriptNavigationRole): TranscriptNavigationRole {
@@ -179,6 +173,34 @@ function buildUniquePins(sessionId: string, pins: readonly TranscriptNavigationP
     return out;
 }
 
+function normalizeLoadedMessage(message: TranscriptNavigationLoadedMessage): TranscriptNavigationLoadedMessage {
+    const facts = message.derivationFacts;
+    if (facts) {
+        return {
+            sessionId: facts.sessionId,
+            messageId: message.messageId,
+            routeMessageId: facts.routeMessageId,
+            seq: facts.seq,
+            transcriptBlockIndex: facts.transcriptBlockIndex,
+            role: facts.role,
+            text: facts.textPreview,
+            createdAtMs: facts.createdAtMs,
+            loaded: message.loaded,
+            derivationFacts: facts,
+        };
+    }
+
+    return {
+        ...message,
+        seq: normalizeFiniteInteger(message.seq),
+        transcriptBlockIndex: normalizeFiniteInteger(message.transcriptBlockIndex),
+        role: normalizeRole(message.role),
+        createdAtMs: normalizeFiniteInteger(message.createdAtMs),
+        routeMessageId: normalizeTextPreview(message.routeMessageId),
+        text: normalizeTextPreview(message.text),
+    };
+}
+
 function findPinForUserSeq(pins: readonly TranscriptNavigationPin[], seq: number): TranscriptNavigationPin | null {
     return pins.find((pin) => pin.role === 'user' && normalizeFiniteInteger(pin.seq) === seq) ?? null;
 }
@@ -194,7 +216,7 @@ function deriveLoadedUserTurns(
     const commitActiveUser = () => {
         if (!activeUser) return;
         const seq = normalizeFiniteInteger(activeUser.seq);
-        const promptPreview = normalizeTextPreview(activeUser.text);
+        const promptPreview = activeUser.text;
         if (seq === null || !promptPreview) {
             activeUser = null;
             activeResponsePreview = null;
@@ -204,7 +226,7 @@ function deriveLoadedUserTurns(
         turnsBySeq.set(seq, {
             sessionId,
             seq,
-            routeMessageId: normalizeTextPreview(activeUser.routeMessageId),
+            routeMessageId: activeUser.routeMessageId,
             promptPreview,
             responsePreview: activeResponsePreview,
             createdAtMs: normalizeFiniteInteger(activeUser.createdAtMs),
@@ -231,7 +253,7 @@ function deriveLoadedUserTurns(
         const assistantSeq = normalizeFiniteInteger(message.seq);
         const activeUserSeq = normalizeFiniteInteger(activeUser.seq);
         if (assistantSeq !== null && activeUserSeq !== null && assistantSeq < activeUserSeq) continue;
-        const responsePreview = normalizeTextPreview(message.text);
+        const responsePreview = message.text;
         if (responsePreview) {
             activeResponsePreview = responsePreview;
         }
@@ -356,7 +378,7 @@ function buildPinnedEntry(params: Readonly<{
     const seq = normalizeFiniteInteger(params.pin.seq);
     if (seq === null) return null;
 
-    const loadedPreview = normalizeTextPreview(params.loadedMessage?.text);
+    const loadedPreview = params.loadedMessage?.text ?? null;
     const label = normalizeTextPreview(params.pin.label) ?? loadedPreview ?? params.nearestUserTurn?.promptPreview ?? '';
     const fallbackLabelKind = label ? null : fallbackLabelKindForPinnedRole(role);
     const isUser = role === 'user';
@@ -378,7 +400,7 @@ function buildPinnedEntry(params: Readonly<{
             id: pinnedEntryId(params.sessionId, params.pin),
             sessionId: params.sessionId,
             seq,
-            routeMessageId: normalizeTextPreview(params.pin.routeMessageId) ?? normalizeTextPreview(params.loadedMessage?.routeMessageId),
+            routeMessageId: normalizeTextPreview(params.pin.routeMessageId) ?? params.loadedMessage?.routeMessageId ?? null,
             transcriptBlockIndex: identityBlockIndex,
             kind: pinnedKindForRole(role),
             role,
@@ -400,14 +422,7 @@ export function deriveTranscriptNavigationEntries(params: DeriveTranscriptNaviga
 
     const loadedMessages = params.loadedMessages
         .filter((message) => normalizeSessionId(message.sessionId) === sessionId)
-        .map((message): TranscriptNavigationLoadedMessage => ({
-            ...message,
-            seq: normalizeFiniteInteger(message.seq),
-            transcriptBlockIndex: normalizeFiniteInteger(message.transcriptBlockIndex),
-            role: normalizeRole(message.role),
-            createdAtMs: normalizeFiniteInteger(message.createdAtMs),
-            routeMessageId: normalizeTextPreview(message.routeMessageId),
-        }))
+        .map(normalizeLoadedMessage)
         .sort(compareLoadedMessage);
     const pins = buildUniquePins(sessionId, params.pins);
     const turnsBySeq = deriveLoadedUserTurns(sessionId, loadedMessages);
@@ -438,5 +453,57 @@ export function deriveTranscriptNavigationEntries(params: DeriveTranscriptNaviga
         if (pinnedEntry) entries.push(pinnedEntry);
     }
 
-    return entries.sort(compareEntries).map((item) => item.entry);
+    return shareTranscriptNavigationEntries(
+        entries.sort(compareEntries).map((item) => item.entry),
+        params.previousEntries,
+    );
+}
+
+function transcriptNavigationEntriesMatch(
+    a: TranscriptNavigationEntry,
+    b: TranscriptNavigationEntry,
+): boolean {
+    return a.id === b.id
+        && a.sessionId === b.sessionId
+        && a.seq === b.seq
+        && a.routeMessageId === b.routeMessageId
+        && a.transcriptBlockIndex === b.transcriptBlockIndex
+        && a.kind === b.kind
+        && a.role === b.role
+        && a.label === b.label
+        && a.fallbackLabelKind === b.fallbackLabelKind
+        && a.promptPreview === b.promptPreview
+        && a.responsePreview === b.responsePreview
+        && a.createdAtMs === b.createdAtMs
+        && a.pinned === b.pinned
+        && a.pinnedAtMs === b.pinnedAtMs
+        && a.loaded === b.loaded;
+}
+
+function shareTranscriptNavigationEntries(
+    nextEntries: TranscriptNavigationEntry[],
+    previousEntries: readonly TranscriptNavigationEntry[] | null | undefined,
+): TranscriptNavigationEntry[] {
+    if (!previousEntries || previousEntries.length === 0) return nextEntries;
+
+    const previousById = new Map<string, TranscriptNavigationEntry>();
+    for (const entry of previousEntries) {
+        previousById.set(entry.id, entry);
+    }
+
+    let allEntriesMatchPreviousOrder = previousEntries.length === nextEntries.length;
+    const sharedEntries = nextEntries.map((entry, index) => {
+        const previousEntry = previousById.get(entry.id);
+        const sharedEntry = previousEntry && transcriptNavigationEntriesMatch(previousEntry, entry)
+            ? previousEntry
+            : entry;
+        if (allEntriesMatchPreviousOrder && previousEntries[index] !== sharedEntry) {
+            allEntriesMatchPreviousOrder = false;
+        }
+        return sharedEntry;
+    });
+
+    return allEntriesMatchPreviousOrder
+        ? previousEntries as TranscriptNavigationEntry[]
+        : sharedEntries;
 }

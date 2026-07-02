@@ -44,6 +44,17 @@ export type TranscriptNavigationLoadedMessage = Readonly<{
     text: string | null;
     createdAtMs: number | null;
     loaded?: boolean;
+    derivationFacts?: TranscriptNavigationLoadedMessageDerivationFacts;
+}>;
+
+export type TranscriptNavigationLoadedMessageDerivationFacts = Readonly<{
+    sessionId: string;
+    routeMessageId: string | null;
+    seq: number | null;
+    transcriptBlockIndex: number | null;
+    role: TranscriptNavigationRole;
+    textPreview: string | null;
+    createdAtMs: number | null;
 }>;
 
 export type TranscriptNavigationRemoteUserTurn = Readonly<{
@@ -72,6 +83,7 @@ export type DeriveTranscriptNavigationEntriesParams = Readonly<{
     loadedMessages: readonly TranscriptNavigationLoadedMessage[];
     remoteUserTurns: readonly TranscriptNavigationRemoteUserTurn[];
     pins: readonly TranscriptNavigationPin[];
+    previousEntries?: readonly TranscriptNavigationEntry[] | null;
 }>;
 
 /**

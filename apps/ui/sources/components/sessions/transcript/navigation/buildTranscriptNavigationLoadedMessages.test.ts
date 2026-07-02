@@ -1,6 +1,57 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildTranscriptNavigationLoadedMessages } from './buildTranscriptNavigationLoadedMessages';
+import {
+    buildTranscriptNavigationLoadedMessages,
+    createTranscriptNavigationLoadedMessagesCache,
+    deriveTranscriptNavigationEntriesWithLoadedMessageCache,
+} from './buildTranscriptNavigationLoadedMessages';
+import type { TranscriptNavigationEntry } from './transcriptNavigationTypes';
+
+type TestMessage = Parameters<typeof buildTranscriptNavigationLoadedMessages>[0]['messagesById'][string];
+
+function userMessage(id: string, seq: number, text: string): TestMessage {
+    return {
+        id,
+        kind: 'user-text',
+        seq,
+        text,
+        createdAt: seq * 100,
+        transcriptBlockIndex: 0,
+    } as TestMessage;
+}
+
+function assistantMessage(id: string, seq: number, text: string): TestMessage {
+    return {
+        id,
+        kind: 'agent-text',
+        seq,
+        text,
+        createdAt: seq * 100,
+        transcriptBlockIndex: 1,
+    } as TestMessage;
+}
+
+function deriveEntries(params: Readonly<{
+    cache: ReturnType<typeof createTranscriptNavigationLoadedMessagesCache>;
+    messageIdsOldestFirst: readonly string[];
+    messagesById: Readonly<Record<string, TestMessage>>;
+}>): readonly TranscriptNavigationEntry[] {
+    const loadedMessages = buildTranscriptNavigationLoadedMessages({
+        cache: params.cache,
+        sessionId: 'session-1',
+        messageIdsOldestFirst: params.messageIdsOldestFirst,
+        messagesById: params.messagesById,
+    });
+
+    return deriveTranscriptNavigationEntriesWithLoadedMessageCache({
+        cache: params.cache,
+        sessionId: 'session-1',
+        mode: 'all',
+        loadedMessages,
+        remoteUserTurns: [],
+        pins: [],
+    });
+}
 
 describe('buildTranscriptNavigationLoadedMessages', () => {
     it('keeps loaded message facts ordered by transcript ids and normalizes missing optional fields', () => {
@@ -73,5 +124,108 @@ describe('buildTranscriptNavigationLoadedMessages', () => {
                 loaded: true,
             },
         ]);
+    });
+
+    it('returns the same loaded message and derived entry references for the same host inputs', () => {
+        const cache = createTranscriptNavigationLoadedMessagesCache();
+        const messageIdsOldestFirst = ['user-1', 'assistant-1'];
+        const messagesById = {
+            'user-1': userMessage('user-1', 1, 'Explain **memoization**'),
+            'assistant-1': assistantMessage('assistant-1', 2, 'Use a row cache'),
+        };
+
+        const firstLoaded = buildTranscriptNavigationLoadedMessages({
+            cache,
+            sessionId: 'session-1',
+            messageIdsOldestFirst,
+            messagesById,
+        });
+        const firstEntries = deriveTranscriptNavigationEntriesWithLoadedMessageCache({
+            cache,
+            sessionId: 'session-1',
+            mode: 'all',
+            loadedMessages: firstLoaded,
+            remoteUserTurns: [],
+            pins: [],
+        });
+
+        const secondLoaded = buildTranscriptNavigationLoadedMessages({
+            cache,
+            sessionId: 'session-1',
+            messageIdsOldestFirst,
+            messagesById,
+        });
+        const secondEntries = deriveTranscriptNavigationEntriesWithLoadedMessageCache({
+            cache,
+            sessionId: 'session-1',
+            mode: 'all',
+            loadedMessages: secondLoaded,
+            remoteUserTurns: [],
+            pins: [],
+        });
+
+        expect(secondLoaded).toBe(firstLoaded);
+        expect(secondEntries).toBe(firstEntries);
+    });
+
+    it('keeps previously derived entry objects stable when appending a message', () => {
+        const cache = createTranscriptNavigationLoadedMessagesCache();
+        const user1 = userMessage('user-1', 1, 'First prompt');
+        const assistant1 = assistantMessage('assistant-1', 2, 'First answer');
+        const user2 = userMessage('user-2', 3, 'Second prompt');
+
+        const before = deriveEntries({
+            cache,
+            messageIdsOldestFirst: ['user-1', 'assistant-1'],
+            messagesById: {
+                'user-1': user1,
+                'assistant-1': assistant1,
+            },
+        });
+        const after = deriveEntries({
+            cache,
+            messageIdsOldestFirst: ['user-1', 'assistant-1', 'user-2'],
+            messagesById: {
+                'user-1': user1,
+                'assistant-1': assistant1,
+                'user-2': user2,
+            },
+        });
+
+        expect(after).toHaveLength(2);
+        expect(after[0]).toBe(before[0]);
+        expect(after[1]?.promptPreview).toBe('Second prompt');
+    });
+
+    it('replaces only the edited message entry object when message text identity changes', () => {
+        const cache = createTranscriptNavigationLoadedMessagesCache();
+        const user1 = userMessage('user-1', 1, 'First prompt');
+        const assistant1 = assistantMessage('assistant-1', 2, 'First answer');
+        const user2 = userMessage('user-2', 3, 'Second prompt');
+
+        const before = deriveEntries({
+            cache,
+            messageIdsOldestFirst: ['user-1', 'assistant-1', 'user-2'],
+            messagesById: {
+                'user-1': user1,
+                'assistant-1': assistant1,
+                'user-2': user2,
+            },
+        });
+        const editedUser2 = userMessage('user-2', 3, 'Second prompt edited');
+        const after = deriveEntries({
+            cache,
+            messageIdsOldestFirst: ['user-1', 'assistant-1', 'user-2'],
+            messagesById: {
+                'user-1': user1,
+                'assistant-1': assistant1,
+                'user-2': editedUser2,
+            },
+        });
+
+        expect(after).toHaveLength(2);
+        expect(after[0]).toBe(before[0]);
+        expect(after[1]).not.toBe(before[1]);
+        expect(after[1]?.promptPreview).toBe('Second prompt edited');
     });
 });
