@@ -4,6 +4,8 @@ import { basename, join } from 'node:path';
 export type PruneLogsByCountParams = Readonly<{
   dir: string;
   suffix: string;
+  /** Entries matching this suffix are ignored entirely (not pruned, not counted against keepCount). */
+  excludeSuffix?: string;
   keepCount: number;
   keepPath?: string;
 }>;
@@ -27,6 +29,7 @@ export async function pruneLogsByCount(params: PruneLogsByCountParams): Promise<
     const keepName = params.keepPath ? basename(params.keepPath) : null;
     const entries = (await readdir(params.dir))
       .filter((entry) => entry.endsWith(params.suffix))
+      .filter((entry) => !params.excludeSuffix || !entry.endsWith(params.excludeSuffix))
       .sort(sortNewestFirst);
 
     const keep = new Set(entries.slice(0, keepCount));

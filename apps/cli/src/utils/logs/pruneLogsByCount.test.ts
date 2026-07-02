@@ -67,6 +67,34 @@ describe('pruneLogsByCount', () => {
     });
   });
 
+  it('excludes files matching excludeSuffix from both pruning and the keep budget', async () => {
+    await withTempDir('happier-cli-prune-logs-exclude-', async (root) => {
+      const dir = join(root, 'logs');
+      await writeFiles(dir, [
+        '2026-06-22-10-00-00-pid-1.log',
+        '2026-06-22-11-00-00-pid-2.log',
+        '2026-06-22-12-00-00-pid-3.log',
+        '2026-06-22-09-00-00-pid-4-daemon.log',
+        '2026-06-22-13-00-00-pid-5-daemon.log',
+      ]);
+
+      const result = await pruneLogsByCount({
+        dir,
+        suffix: '.log',
+        excludeSuffix: '-daemon.log',
+        keepCount: 2,
+      });
+
+      expect(result).toEqual({ pruned: 1 });
+      expect(await listNames(dir)).toEqual([
+        '2026-06-22-09-00-00-pid-4-daemon.log',
+        '2026-06-22-11-00-00-pid-2.log',
+        '2026-06-22-12-00-00-pid-3.log',
+        '2026-06-22-13-00-00-pid-5-daemon.log',
+      ]);
+    });
+  });
+
   it('returns zero and never throws when the directory is missing', async () => {
     await withTempDir('happier-cli-prune-logs-missing-', async (root) => {
       await expect(pruneLogsByCount({

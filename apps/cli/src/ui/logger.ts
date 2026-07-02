@@ -3,16 +3,27 @@
  * - Logging should be done only through file for debugging, otherwise we might disturb the claude session when in interactive mode
  * - Use info for logs that are useful to the user - this is our UI
  * - File output location: $HAPPIER_HOME_DIR/logs/<date time in local timezone>.log
+ * - The file log level is resolved once per process (see logFileLevel.ts) so disabled
+ *   debug calls are a near-zero-cost early return (no timestamp, no JSON.stringify).
+ * - File writes go through a buffered async appender (see logFileAppender.ts); the buffer
+ *   is flushed synchronously on process exit and fatal errors to preserve crash forensics.
  */
 
 import chalk from 'chalk'
-import { appendFileSync } from 'fs'
 import { configuration } from '@/configuration'
-import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { inspect } from 'node:util'
 import { writeConsoleErrorBestEffort, writeConsoleLogBestEffort } from '@/utils/writeConsoleBestEffort'
 import { pruneLogsByCount } from '@/utils/logs/pruneLogsByCount'
+import {
+  DAEMON_LOG_SUFFIX,
+  LOG_FILE_SUFFIX,
+  resolveDaemonLogKeepCount,
+  resolveSessionLogKeepCount,
+} from '@/utils/logs/logRetention'
+import { BufferedFileAppender } from './logFileAppender'
+import { isFileLogLevelEnabled, resolveFileLogLevel, type FileLogLevel } from './logFileLevel'
 // Note: readDaemonState is imported lazily inside listDaemonLogFiles() to avoid
 // circular dependency: logger.ts ↔ persistence.ts
 
@@ -20,10 +31,10 @@ import { pruneLogsByCount } from '@/utils/logs/pruneLogsByCount'
  * Consistent date/time formatting functions
  */
 function createTimestampForFilename(date: Date = new Date()): string {
-  return date.toLocaleString('sv-SE', { 
+  return date.toLocaleString('sv-SE', {
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     year: 'numeric',
-    month: '2-digit', 
+    month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
@@ -32,7 +43,7 @@ function createTimestampForFilename(date: Date = new Date()): string {
 }
 
 function createTimestampForLogEntry(date: Date = new Date()): string {
-  return date.toLocaleTimeString('en-US', { 
+  return date.toLocaleTimeString('en-US', {
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     hour12: false,
     hour: '2-digit',
@@ -44,17 +55,11 @@ function createTimestampForLogEntry(date: Date = new Date()): string {
 
 function getSessionLogPath(): string {
   const timestamp = createTimestampForFilename()
-  const filename = configuration.isDaemonProcess ? `${timestamp}-daemon.log` : `${timestamp}.log`
+  const filename = configuration.isDaemonProcess ? `${timestamp}${DAEMON_LOG_SUFFIX}` : `${timestamp}${LOG_FILE_SUFFIX}`
   return join(configuration.logsDir, filename)
 }
 
-function resolveLogKeepCount(rawValue: string | undefined, fallback: number): number {
-  const value = Number(rawValue)
-  return Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback
-}
-
 async function pruneDaemonLogsForCurrentLogger(logFilePath: string): Promise<void> {
-  if (!configuration.isDaemonProcess) return
   try {
     mkdirSync(dirname(logFilePath), { recursive: true })
     appendFileSync(logFilePath, '')
@@ -63,23 +68,99 @@ async function pruneDaemonLogsForCurrentLogger(logFilePath: string): Promise<voi
   }
   await pruneLogsByCount({
     dir: configuration.logsDir,
-    suffix: '-daemon.log',
-    keepCount: resolveLogKeepCount(process.env.HAPPIER_DAEMON_LOG_KEEP_COUNT, 50),
+    suffix: DAEMON_LOG_SUFFIX,
+    keepCount: resolveDaemonLogKeepCount(),
     keepPath: logFilePath,
   }).catch(() => ({ pruned: 0 }))
+}
+
+async function pruneSessionLogsForCurrentLogger(logFilePath: string): Promise<void> {
+  await pruneLogsByCount({
+    dir: configuration.logsDir,
+    suffix: LOG_FILE_SUFFIX,
+    excludeSuffix: DAEMON_LOG_SUFFIX,
+    keepCount: resolveSessionLogKeepCount(),
+    keepPath: logFilePath,
+  }).catch(() => ({ pruned: 0 }))
+}
+
+function pruneLogsForCurrentLogger(logFilePath: string): void {
+  if (configuration.isDaemonProcess) {
+    void pruneDaemonLogsForCurrentLogger(logFilePath)
+    return
+  }
+  void pruneSessionLogsForCurrentLogger(logFilePath)
+}
+
+type LoggerFlushHookState = {
+  registered: boolean
+  flushers: Set<() => void>
+}
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __HAPPIER_LOGGER_FLUSH_HOOK_STATE__: LoggerFlushHookState | undefined
+}
+
+function getLoggerFlushHookState(): LoggerFlushHookState {
+  if (!globalThis.__HAPPIER_LOGGER_FLUSH_HOOK_STATE__) {
+    globalThis.__HAPPIER_LOGGER_FLUSH_HOOK_STATE__ = {
+      registered: false,
+      flushers: new Set(),
+    }
+  }
+  return globalThis.__HAPPIER_LOGGER_FLUSH_HOOK_STATE__
+}
+
+function registerLoggerFlushHook(flush: () => void): void {
+  const state = getLoggerFlushHookState()
+  state.flushers.add(flush)
+  if (state.registered) return
+
+  const flushAll = () => {
+    for (const flusher of state.flushers) {
+      try {
+        flusher()
+      } catch {
+        // Never let flush coordination break process exit.
+      }
+    }
+  }
+
+  process.on('exit', flushAll)
+  process.on('uncaughtExceptionMonitor', flushAll)
+  state.registered = true
 }
 
 class Logger {
   private dangerouslyUnencryptedServerLoggingUrl: string | undefined
   private hasLoggedFileWriteError: boolean = false
+  private readonly fileLogLevel: FileLogLevel
+  private readonly debugFileEnabled: boolean
+  private readonly infoFileEnabled: boolean
+  private readonly warnFileEnabled: boolean
+  private readonly fileAppender: BufferedFileAppender
 
   constructor(
     public readonly logFilePath = getSessionLogPath()
   ) {
-    void pruneDaemonLogsForCurrentLogger(this.logFilePath)
+    pruneLogsForCurrentLogger(this.logFilePath)
+
+    this.fileLogLevel = resolveFileLogLevel({ env: process.env, isDaemonProcess: configuration.isDaemonProcess })
+    this.debugFileEnabled = isFileLogLevelEnabled(this.fileLogLevel, 'debug')
+    this.infoFileEnabled = isFileLogLevelEnabled(this.fileLogLevel, 'info')
+    this.warnFileEnabled = isFileLogLevelEnabled(this.fileLogLevel, 'warn')
+    this.fileAppender = new BufferedFileAppender({
+      filePath: this.logFilePath,
+      onWriteError: (error) => this.handleFileWriteError(error),
+    })
+
+    // Crash forensics: drain the buffered appender synchronously on process exit and on
+    // fatal errors. `uncaughtExceptionMonitor` observes without altering crash semantics.
+    registerLoggerFlushHook(() => this.flushSync())
 
     // Remote logging enabled only when explicitly set with server URL
-    if (process.env.DANGEROUSLY_LOG_TO_SERVER_FOR_AI_AUTO_DEBUGGING 
+    if (process.env.DANGEROUSLY_LOG_TO_SERVER_FOR_AI_AUTO_DEBUGGING
       && process.env.HAPPIER_SERVER_URL) {
       this.dangerouslyUnencryptedServerLoggingUrl = process.env.HAPPIER_SERVER_URL
       writeConsoleLogBestEffort(chalk.yellow('[REMOTE LOGGING] Sending logs to server for AI debugging'))
@@ -93,16 +174,9 @@ class Logger {
   }
 
   debug(message: string, ...args: unknown[]): void {
+    // Near-zero-cost when debug file logging is disabled: no timestamp, no stringify.
+    if (!this.debugFileEnabled) return
     this.logToFile(`[${this.localTimezoneTimestamp()}]`, message, ...args)
-
-    // NOTE: @kirill does not think its a good ideas,
-    // as it will break us using claude in interactive mode.
-    // Instead simply open the debug file in a new editor window.
-    //
-    // Also log to console in development mode
-    // if (process.env.DEBUG) {
-    //   this.logToConsole('debug', '', message, ...args)
-    // }
   }
 
   debugLargeJson(
@@ -111,13 +185,15 @@ class Logger {
     maxStringLength: number = 100,
     maxArrayLength: number = 10,
   ): void {
+    // Large-payload logging stays behind the explicit DEBUG opt-in (independent of the
+    // daemon's default debug level) because even truncated payload dumps are expensive.
     if (!process.env.DEBUG) return;
 
     // Some of our messages are huge, but we still want to show them in the logs
     const visited = new WeakSet<object>()
     const truncateStrings = (obj: unknown): unknown => {
       if (typeof obj === 'string') {
-        return obj.length > maxStringLength 
+        return obj.length > maxStringLength
           ? obj.substring(0, maxStringLength) + '... [truncated for logs]'
           : obj
       }
@@ -125,7 +201,7 @@ class Logger {
       if (typeof obj === 'bigint') {
         return `${obj.toString()}n`
       }
-      
+
       if (Array.isArray(obj)) {
         if (visited.has(obj)) return '[Circular]'
         visited.add(obj)
@@ -135,7 +211,7 @@ class Logger {
         }
         return truncatedArray
       }
-      
+
       if (obj && typeof obj === 'object') {
         if (visited.has(obj)) return '[Circular]'
         visited.add(obj)
@@ -149,7 +225,7 @@ class Logger {
         }
         return result
       }
-      
+
       return obj
     }
 
@@ -162,31 +238,41 @@ class Logger {
     }
     this.logToFile(`[${this.localTimezoneTimestamp()}]`, message, '\n', json)
   }
-  
+
   info(message: string, ...args: unknown[]): void {
     this.logToConsole('info', '', message, ...args)
-    this.debug(message, args)
+    if (!this.infoFileEnabled) return
+    this.logToFile(`[${this.localTimezoneTimestamp()}]`, message, ...args)
   }
-  
+
   infoDeveloper(message: string, ...args: unknown[]): void {
-    // Always write to debug
+    // Developer diagnostics are debug-level file entries.
     this.debug(message, ...args)
-    
+
     // Write to info if DEBUG mode is on
     if (process.env.DEBUG) {
       this.logToConsole('info', '[DEV]', message, ...args)
     }
   }
-  
+
   warn(message: string, ...args: unknown[]): void {
     this.logToConsole('warn', '', message, ...args)
-    this.debug(`[WARN] ${message}`, ...args)
+    if (!this.warnFileEnabled) return
+    this.logToFile(`[${this.localTimezoneTimestamp()}]`, `[WARN] ${message}`, ...args)
   }
-  
+
   getLogPath(): string {
     return this.logFilePath
   }
-  
+
+  /**
+   * Synchronously drain buffered log lines to disk. Wired to exit/fatal handlers;
+   * also useful in tests and right before intentional hard exits. Never throws.
+   */
+  flushSync(): void {
+    this.fileAppender.flushSync()
+  }
+
   private logToConsole(level: 'debug' | 'error' | 'info' | 'warn', prefix: string, message: string, ...args: unknown[]): void {
     switch (level) {
       case 'debug': {
@@ -219,7 +305,7 @@ class Logger {
 
   private async sendToRemoteServer(level: string, message: string, ...args: unknown[]): Promise<void> {
     if (!this.dangerouslyUnencryptedServerLoggingUrl) return
-    
+
     try {
       await fetch(this.dangerouslyUnencryptedServerLoggingUrl + '/logs-combined-from-cli-and-mobile-for-simple-ai-debugging', {
         method: 'POST',
@@ -257,7 +343,7 @@ class Logger {
         return String(arg)
       }
     }).join(' ')}\n`
-    
+
     // Send to remote server if configured
     if (this.dangerouslyUnencryptedServerLoggingUrl) {
       // Determine log level from prefix
@@ -270,32 +356,19 @@ class Logger {
         // Silently ignore remote logging errors to prevent loops
       })
     }
-    
-    // Handle async file path
-    try {
-      appendFileSync(this.logFilePath, logLine)
-    } catch (appendError) {
-      // Most common failure in tests/first-run is missing logs directory.
-      // Create it and retry once, but never throw from logging.
-      const err = appendError as NodeJS.ErrnoException
-      if (err?.code === 'ENOENT') {
-        try {
-          mkdirSync(dirname(this.logFilePath), { recursive: true })
-          appendFileSync(this.logFilePath, logLine)
-          return
-        } catch (retryError) {
-          appendError = retryError
-        }
-      }
 
-      // Never throw from logging: log files are best-effort and should not break the CLI.
-      // When DEBUG is set, surface the first write failure for easier debugging.
-      if (process.env.DEBUG && !this.hasLoggedFileWriteError) {
-        writeConsoleErrorBestEffort('[DEV MODE ONLY] Failed to append to log file:', appendError)
-        this.hasLoggedFileWriteError = true
-      }
-      // In production (and after the first DEBUG warning), fail silently to avoid disturbing the session.
+    // Buffered async append; flushed on a short interval and synchronously on exit.
+    this.fileAppender.append(logLine)
+  }
+
+  private handleFileWriteError(error: unknown): void {
+    // Never throw from logging: log files are best-effort and should not break the CLI.
+    // When DEBUG is set, surface the first write failure for easier debugging.
+    if (process.env.DEBUG && !this.hasLoggedFileWriteError) {
+      writeConsoleErrorBestEffort('[DEV MODE ONLY] Failed to append to log file:', error)
+      this.hasLoggedFileWriteError = true
     }
+    // In production (and after the first DEBUG warning), fail silently to avoid disturbing the session.
   }
 }
 
@@ -323,7 +396,7 @@ export async function listDaemonLogFiles(limit: number = 50): Promise<LogFileInf
     }
 
     const logs = readdirSync(logsDir)
-      .filter(file => file.endsWith('-daemon.log'))
+      .filter(file => file.endsWith(DAEMON_LOG_SUFFIX))
       .map(file => {
         const fullPath = join(logsDir, file);
         const stats = statSync(fullPath);
