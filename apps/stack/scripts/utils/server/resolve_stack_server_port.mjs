@@ -1,6 +1,9 @@
-import { isTcpPortFree, pickNextFreeTcpPort } from '../net/ports.mjs';
+import { isTcpPortFree, listListenPids, pickNextFreeTcpPort } from '../net/ports.mjs';
 import { resolveStablePortStart } from '../expo/metro_ports.mjs';
-import { readStackRuntimeStateFile } from '../stack/runtime_state.mjs';
+import { isPidAlive, readStackRuntimeStateFile } from '../stack/runtime_state.mjs';
+import { isPidOwnedByStack } from '../proc/ownership.mjs';
+import { resolveActiveStackEnvFilePath } from '../paths/paths.mjs';
+import { resolveStackOwnedListenPid } from './listener_ownership.mjs';
 import { isHappierServerRunning } from './server.mjs';
 import { resolveServerPortFromEnv } from './port.mjs';
 
@@ -22,6 +25,41 @@ function isWithinRange(port, base, range) {
   return p >= b && p < b + r;
 }
 
+export async function isRuntimePortOwnedByStackDevProxy({
+  env,
+  port,
+  stackName,
+  runtimeStatePath,
+}) {
+  const runtime = runtimeStatePath ? await readStackRuntimeStateFile(runtimeStatePath) : null;
+  if (!runtime) return false;
+
+  const runtimeStackName = String(runtime.stackName ?? '').trim();
+  if (runtimeStackName && runtimeStackName !== stackName) return false;
+  if (runtime?.serverProxy?.enabled !== true) return false;
+  if (coercePort(runtime?.ports?.server) !== port) return false;
+
+  const proxyPid = coercePositiveInt(runtime?.processes?.proxyPid);
+  if (!proxyPid || !isPidAlive(proxyPid)) return false;
+
+  const envPath = resolveActiveStackEnvFilePath(stackName, env);
+  if (!await isPidOwnedByStack(proxyPid, { stackName, envPath }).catch(() => false)) {
+    return false;
+  }
+
+  const listenPids = await listListenPids(port, { timeoutMs: 1000 }).catch(() => []);
+  return listenPids.includes(proxyPid);
+}
+
+async function isHealthyServerPortOwnedByStack({ env, port, stackName }) {
+  const url = `http://127.0.0.1:${port}`;
+  if (!await isHappierServerRunning(url)) return false;
+
+  const envPath = resolveActiveStackEnvFilePath(stackName, env);
+  const listenPid = await resolveStackOwnedListenPid({ port, stackName, envPath });
+  return Number.isFinite(Number(listenPid)) && Number(listenPid) > 1;
+}
+
 export async function resolveLocalServerPortForStack({
   env = process.env,
   stackMode,
@@ -39,8 +77,27 @@ export async function resolveLocalServerPortForStack({
     // an unrelated process and get confusing behavior.)
     if (inStackMode && name !== 'main') {
       const url = `http://127.0.0.1:${explicitPort}`;
-      if (await isHappierServerRunning(url)) {
+      if (await isHealthyServerPortOwnedByStack({ env, port: explicitPort, stackName: name })) {
         return explicitPort;
+      }
+      if (
+        await isRuntimePortOwnedByStackDevProxy({
+          env,
+          port: explicitPort,
+          stackName: name,
+          runtimeStatePath,
+        })
+      ) {
+        return explicitPort;
+      }
+      const healthyButUnowned = await isHappierServerRunning(url);
+      if (healthyButUnowned) {
+        throw new Error(
+          `[stack] ${name}: pinned server port ${explicitPort} is not available (in use by another process).\n` +
+            `[stack] Fix: stop the process using it, or reallocate by unsetting the pin:\n` +
+            `  yarn env unset HAPPIER_STACK_SERVER_PORT\n` +
+            `  # (or) hstack env unset HAPPIER_STACK_SERVER_PORT`
+        );
       }
       const free = await isTcpPortFree(explicitPort, { host: '127.0.0.1' }).catch(() => false);
       if (!free) {
@@ -75,8 +132,17 @@ export async function resolveLocalServerPortForStack({
   const stableRange = coercePositiveInt(rangeRaw) ?? 1000;
 
   if (runtimePort && (!hasExplicitStableRange || isWithinRange(runtimePort, stableBase, stableRange))) {
-    const url = `http://127.0.0.1:${runtimePort}`;
-    if (await isHappierServerRunning(url)) {
+    if (await isHealthyServerPortOwnedByStack({ env, port: runtimePort, stackName: name })) {
+      return runtimePort;
+    }
+    if (
+      await isRuntimePortOwnedByStackDevProxy({
+        env,
+        port: runtimePort,
+        stackName: name,
+        runtimeStatePath,
+      })
+    ) {
       return runtimePort;
     }
     if (await isTcpPortFree(runtimePort, { host: '127.0.0.1' })) {

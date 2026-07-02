@@ -10,29 +10,11 @@ function isServerStartupHealthPayload(payload) {
   return payload?.status === 'ok';
 }
 
-export function getServerComponentName({ kv } = {}) {
-  const fromArgRaw = kv?.get('--server')?.trim() ? kv.get('--server').trim() : '';
-  const fromEnvRaw = process.env.HAPPIER_STACK_SERVER_COMPONENT?.trim() ? process.env.HAPPIER_STACK_SERVER_COMPONENT.trim() : '';
-  const raw = fromArgRaw || fromEnvRaw || 'happier-server-light';
-  const v = raw.toLowerCase();
-  if (v === 'light' || v === 'server-light' || v === 'happier-server-light' || v === 'happy-server-light') {
-    return 'happier-server-light';
-  }
-  if (v === 'server' || v === 'full' || v === 'happier-server' || v === 'happy-server') {
-    return 'happier-server';
-  }
-  if (v === 'both') {
-    return 'both';
-  }
-  // Allow explicit component dir names (advanced).
-  return raw;
-}
-
-export async function fetchHappierHealth(baseUrl) {
+async function fetchHappierMonitoringEndpoint(baseUrl, endpoint) {
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), 1500);
   try {
-    const url = baseUrl.replace(/\/+$/, '') + '/health';
+    const url = baseUrl.replace(/\/+$/, '') + endpoint;
     const res = await fetch(url, { method: 'GET', signal: ctl.signal });
     const text = await res.text();
     let json = null;
@@ -53,6 +35,32 @@ export async function fetchHappierHealth(baseUrl) {
   } finally {
     clearTimeout(t);
   }
+}
+
+export function getServerComponentName({ kv } = {}) {
+  const fromArgRaw = kv?.get('--server')?.trim() ? kv.get('--server').trim() : '';
+  const fromEnvRaw = process.env.HAPPIER_STACK_SERVER_COMPONENT?.trim() ? process.env.HAPPIER_STACK_SERVER_COMPONENT.trim() : '';
+  const raw = fromArgRaw || fromEnvRaw || 'happier-server-light';
+  const v = raw.toLowerCase();
+  if (v === 'light' || v === 'server-light' || v === 'happier-server-light' || v === 'happy-server-light') {
+    return 'happier-server-light';
+  }
+  if (v === 'server' || v === 'full' || v === 'happier-server' || v === 'happy-server') {
+    return 'happier-server';
+  }
+  if (v === 'both') {
+    return 'both';
+  }
+  // Allow explicit component dir names (advanced).
+  return raw;
+}
+
+export async function fetchHappierHealth(baseUrl) {
+  return await fetchHappierMonitoringEndpoint(baseUrl, '/health');
+}
+
+export async function fetchHappierReadiness(baseUrl) {
+  return await fetchHappierMonitoringEndpoint(baseUrl, '/ready');
 }
 
 export async function isHappierServerRunning(baseUrl) {
@@ -109,22 +117,12 @@ export async function waitForServerReady(url, { timeoutMs = 60_000, intervalMs =
       if (earlyExitError) {
         throw earlyExitError;
       }
-      // Runtime-backed stacks and modern server builds expose startup liveness on /health even when
-      // the root route serves the app shell instead of the legacy welcome page.
-      // Prefer that contract, but keep the older root-page probe as a fallback for source/dev flows.
+      // Runtime-backed stacks and modern server builds expose startup readiness on /ready.
+      // Promotion must not accept root-page liveness because the app shell can serve before DB readiness.
       // eslint-disable-next-line no-await-in-loop
-      const health = await fetchHappierHealth(url);
-      if (health.ready) {
+      const readiness = await fetchHappierReadiness(url);
+      if (readiness.ready) {
         return;
-      }
-      try {
-        const res = await fetch(url, { method: 'GET' });
-        const text = await res.text();
-        if (res.ok && text.includes('Welcome to Happier Server!')) {
-          return;
-        }
-      } catch {
-        // ignore
       }
       await delay(intervalMs);
     }

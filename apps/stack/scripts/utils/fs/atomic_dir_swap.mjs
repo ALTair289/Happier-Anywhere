@@ -1,4 +1,4 @@
-import { mkdir, rename, rm } from 'node:fs/promises';
+import { cp, mkdir, rename, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 function rand() {
@@ -12,9 +12,19 @@ export async function buildIntoTempThenReplace(targetDir, buildFn) {
 
   const parent = dirname(outDir);
   const tmpDir = join(parent, `.tmp.${Date.now()}.${process.pid}.${rand()}`);
+  const restoreDir = join(parent, `.restore.${Date.now()}.${process.pid}.${rand()}`);
 
   await rm(tmpDir, { recursive: true, force: true });
+  await rm(restoreDir, { recursive: true, force: true });
   await mkdir(tmpDir, { recursive: true });
+
+  let hasRestore = false;
+  try {
+    await cp(outDir, restoreDir, { recursive: true, force: false, errorOnExist: true });
+    hasRestore = true;
+  } catch (err) {
+    if (err?.code !== 'ENOENT') throw err;
+  }
 
   let ok = false;
   try {
@@ -23,6 +33,12 @@ export async function buildIntoTempThenReplace(targetDir, buildFn) {
   } finally {
     if (!ok) {
       await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+      if (hasRestore) {
+        await rm(outDir, { recursive: true, force: true }).catch(() => {});
+        await rename(restoreDir, outDir);
+      } else {
+        await rm(outDir, { recursive: true, force: true }).catch(() => {});
+      }
     }
   }
 
@@ -51,5 +67,8 @@ export async function buildIntoTempThenReplace(targetDir, buildFn) {
 
   if (hadExisting) {
     await rm(backupDir, { recursive: true, force: true }).catch(() => {});
+  }
+  if (hasRestore) {
+    await rm(restoreDir, { recursive: true, force: true }).catch(() => {});
   }
 }

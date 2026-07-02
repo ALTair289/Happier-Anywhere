@@ -56,6 +56,7 @@ test('stopStackWithEnv repo-local fallback sweeps legacy infra without stopping 
       ...process.env,
       HAPPIER_STACK_STACK: stackName,
       HAPPIER_STACK_REPO_DIR: repoDir,
+      HAPPIER_STACK_PROCESS_KIND: undefined,
       npm_lifecycle_event: 'dev:light',
       npm_package_name: '@happier-dev/server',
     },
@@ -88,6 +89,26 @@ test('stopStackWithEnv repo-local fallback sweeps legacy infra without stopping 
   });
   assert.ok(isAlive(sessionLike.pid), 'expected session-like process to be alive');
 
+  const sessionWithLegacyServerMarkers = spawnOwnedSleep({
+    env: {
+      ...process.env,
+      HAPPIER_STACK_STACK: stackName,
+      HAPPIER_STACK_REPO_DIR: repoDir,
+      HAPPIER_STACK_PROCESS_KIND: 'session',
+      npm_lifecycle_event: 'dev:light',
+      npm_package_name: '@happier-dev/server',
+    },
+  });
+  children.push(sessionWithLegacyServerMarkers);
+  assert.ok(Number(sessionWithLegacyServerMarkers.pid) > 1, 'expected session-with-server-markers pid');
+  await waitForProcessAlive({
+    pid: sessionWithLegacyServerMarkers.pid,
+    timeoutMs: 2_000,
+    intervalMs: 25,
+    label: 'repo-local session with legacy server markers (pre-stop)',
+  });
+  assert.ok(isAlive(sessionWithLegacyServerMarkers.pid), 'expected session with legacy server markers to be alive');
+
   await stopStackWithEnv({
     rootDir,
     stackName,
@@ -114,4 +135,8 @@ test('stopStackWithEnv repo-local fallback sweeps legacy infra without stopping 
   });
   assert.ok(!isAlive(legacyInfra.pid), `expected legacy infra pid ${legacyInfra.pid} to be swept by repo-local infra signature`);
   assert.ok(isAlive(sessionLike.pid), `expected session-like pid ${sessionLike.pid} to still be alive`);
+  assert.ok(
+    isAlive(sessionWithLegacyServerMarkers.pid),
+    `expected session-with-server-markers pid ${sessionWithLegacyServerMarkers.pid} to still be alive`,
+  );
 });

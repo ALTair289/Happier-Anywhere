@@ -134,10 +134,18 @@ test('waitForHappierHealthOk keeps waiting when /health returns unrelated 2xx re
   }
 });
 
-test('waitForServerReady accepts an extended timeout for delayed healthy startups', async () => {
+test('waitForServerReady polls /ready for delayed database-ready startups', async () => {
   let readyAt = 0;
+  const seenUrls = [];
   const fixture = await listenServer((req, res) => {
+    seenUrls.push(req.url);
     if (req.url === '/health') {
+      res.statusCode = 200;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ status: 'ok', service: 'happier-server' }));
+      return;
+    }
+    if (req.url === '/ready') {
       if (!readyAt) readyAt = Date.now() + 120;
       if (Date.now() >= readyAt) {
         res.statusCode = 200;
@@ -154,24 +162,61 @@ test('waitForServerReady accepts an extended timeout for delayed healthy startup
   });
   try {
     await waitForServerReady(fixture.url, { timeoutMs: 400, intervalMs: 25 });
+    assert.ok(seenUrls.includes('/ready'), 'expected waitForServerReady to poll /ready');
   } finally {
     await fixture.close();
   }
 });
 
-test('waitForServerReady accepts generic ok health payloads for runtime startup readiness', async () => {
+test('waitForServerReady does not accept /health liveness while /ready is unavailable', async () => {
   const fixture = await listenServer((req, res) => {
     if (req.url === '/health') {
       res.statusCode = 200;
       res.setHeader('content-type', 'application/json');
-      res.end(JSON.stringify({ status: 'ok', marker: 'runtime-snapshot' }));
+      res.end(JSON.stringify({ status: 'ok', service: 'happier-server' }));
+      return;
+    }
+    if (req.url === '/ready') {
+      res.statusCode = 503;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ status: 'error', service: 'happier-server', reason: 'db_error' }));
       return;
     }
     res.statusCode = 404;
     res.end('not found');
   });
   try {
-    await waitForServerReady(fixture.url, { timeoutMs: 200, intervalMs: 25 });
+    await assert.rejects(
+      () => waitForServerReady(fixture.url, { timeoutMs: 80, intervalMs: 20 }),
+      /Timed out waiting for server/,
+    );
+  } finally {
+    await fixture.close();
+  }
+});
+
+test('waitForServerReady does not accept the root welcome page while /ready is unavailable', async () => {
+  const fixture = await listenServer((req, res) => {
+    if (req.url === '/ready') {
+      res.statusCode = 503;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ status: 'error', service: 'happier-server', reason: 'db_error' }));
+      return;
+    }
+    if (req.url === '/') {
+      res.statusCode = 200;
+      res.setHeader('content-type', 'text/html');
+      res.end('<!doctype html><body>Welcome to Happier Server!</body>');
+      return;
+    }
+    res.statusCode = 404;
+    res.end('not found');
+  });
+  try {
+    await assert.rejects(
+      () => waitForServerReady(fixture.url, { timeoutMs: 80, intervalMs: 20 }),
+      /Timed out waiting for server/,
+    );
   } finally {
     await fixture.close();
   }

@@ -49,6 +49,7 @@
     "mobile:prebuild": "node ./scripts/mobile.mjs --prebuild --clean --no-metro",
     "mobile:ios": "node ./scripts/mobile.mjs --run-ios --no-metro",
     "mobile:ios:release": "node ./scripts/mobile.mjs --run-ios --no-metro --configuration=Release",
+    "mobile:ios:profile": "node ./scripts/mobile.mjs --prebuild --run-ios --no-metro --configuration=Release --profiling-runtime",
     "mobile:install": "node ./scripts/mobile.mjs --run-ios --no-metro --configuration=Release",
     "mobile:devices": "xcrun xcdevice list",
     "cli:link": "node ./scripts/cli-link.mjs",
