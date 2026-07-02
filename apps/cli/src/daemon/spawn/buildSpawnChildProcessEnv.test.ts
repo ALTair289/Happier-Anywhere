@@ -101,4 +101,36 @@ describe('buildSpawnChildProcessEnv', () => {
     expect(env[HAPPIER_DAEMON_SPAWN_SELF_MIGRATE_CGROUP_ENV_KEY]).toBeUndefined();
   });
 
+  it('does not leak daemon lifecycle ownership env into child runners', () => {
+    const env = buildSpawnChildProcessEnv({
+      processEnv: {
+        PATH: '/bin',
+        HAPPIER_DAEMON_RUNTIME_ID: 'runtime-parent',
+        HAPPIER_DAEMON_STARTUP_SOURCE: 'self-restart',
+        HAPPIER_DAEMON_TAKEOVER: '1',
+      },
+      extraEnv: {},
+    });
+
+    expect(env.PATH).toBe('/bin');
+    expect(env.HAPPIER_DAEMON_RUNTIME_ID).toBeUndefined();
+    expect(env.HAPPIER_DAEMON_STARTUP_SOURCE).toBeUndefined();
+    expect(env.HAPPIER_DAEMON_TAKEOVER).toBeUndefined();
+  });
+
+  it('marks daemon-spawned stack child runners as session processes', () => {
+    const env = buildSpawnChildProcessEnv({
+      processEnv: {
+        PATH: '/bin',
+        HAPPIER_STACK_STACK: 'repo-remote-dev',
+        HAPPIER_STACK_ENV_FILE: '/tmp/repo-remote-dev/env',
+        HAPPIER_STACK_PROCESS_KIND: 'infra',
+      },
+      extraEnv: {},
+    });
+
+    expect(env.HAPPIER_STACK_STACK).toBe('repo-remote-dev');
+    expect(env.HAPPIER_STACK_ENV_FILE).toBe('/tmp/repo-remote-dev/env');
+    expect(env.HAPPIER_STACK_PROCESS_KIND).toBe('session');
+  });
 });

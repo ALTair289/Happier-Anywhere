@@ -4,6 +4,7 @@ import {
   resolveHappierRuntimeContextEnv,
   type HappierRuntimeServerContext,
 } from '@/utils/env/resolveHappierRuntimeContextEnv';
+import { resolveStackProcessKindOverrideForSessionSpawn } from './resolveStackProcessKindOverrideForSessionSpawn';
 
 type ChildServerSelectionEnv = HappierRuntimeServerContext;
 
@@ -20,6 +21,12 @@ export function buildSpawnChildProcessEnv(params: {
   } else {
     delete env[HAPPIER_DAEMON_SPAWN_SELF_MIGRATE_CGROUP_ENV_KEY];
   }
+  delete env.HAPPIER_DAEMON_RUNTIME_ID;
+  delete env.HAPPIER_DAEMON_STARTUP_SOURCE;
+  delete env.HAPPIER_DAEMON_TAKEOVER;
+
+  delete env.HAPPIER_STACK_PROCESS_KIND;
+  Object.assign(env, resolveStackProcessKindOverrideForSessionSpawn(env));
 
   if (params.serverSelectionEnv) {
     // Clear any stale inherited split URLs, then apply the authoritative selection

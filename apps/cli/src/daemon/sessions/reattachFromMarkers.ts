@@ -369,10 +369,51 @@ type OrphanedDeadDaemonSession = Readonly<{
   pid: number;
 }>;
 
+type IgnoredStartupSessionRestartIntent = Readonly<{
+  kind: 'dead' | 'live';
+  reason: 'terminal_prompt_injection_rehydrate';
+  sessionId: string;
+  pid: number;
+  spawnOptions?: SpawnSessionOptions;
+  vendorResumeId?: string | null;
+}>;
+
+export type StartupSessionRestartIntent = IgnoredStartupSessionRestartIntent;
+
 export type ReattachTrackedSessionsFromMarkersResult = Readonly<{
   orphanedDeadDaemonSessions: ReadonlyArray<OrphanedDeadDaemonSession>;
   connectedServiceRestartIntents: ReadonlyArray<never>;
+  sessionRestartIntents?: ReadonlyArray<StartupSessionRestartIntent>;
 }>;
+
+function buildReattachResult(params: Readonly<{
+  orphanedDeadDaemonSessions: ReadonlyArray<OrphanedDeadDaemonSession>;
+  recoveredLiveSessionIds: ReadonlySet<string>;
+  sessionRestartIntents?: ReadonlyArray<StartupSessionRestartIntent>;
+}>): ReattachTrackedSessionsFromMarkersResult {
+  const orphanedDeadDaemonSessions = Array.from(
+    new Map(
+      params.orphanedDeadDaemonSessions
+        .filter((session) => !params.recoveredLiveSessionIds.has(session.sessionId))
+        .map((session) => [session.sessionId, session] as const),
+    ).values(),
+  );
+  const sessionRestartIntentsBySessionId = new Map<string, StartupSessionRestartIntent>();
+  for (const intent of params.sessionRestartIntents ?? []) {
+    if (params.recoveredLiveSessionIds.has(intent.sessionId)) continue;
+    const existing = sessionRestartIntentsBySessionId.get(intent.sessionId);
+    if (!existing) {
+      sessionRestartIntentsBySessionId.set(intent.sessionId, intent);
+    }
+  }
+  const sessionRestartIntents = Array.from(sessionRestartIntentsBySessionId.values());
+
+  return {
+    orphanedDeadDaemonSessions,
+    connectedServiceRestartIntents: [],
+    ...(sessionRestartIntents.length > 0 ? { sessionRestartIntents } : {}),
+  };
+}
 
 export async function reattachTrackedSessionsFromMarkers(params: Readonly<{
   pidToTrackedSession: Map<number, TrackedSession>;
@@ -380,13 +421,12 @@ export async function reattachTrackedSessionsFromMarkers(params: Readonly<{
 }>): Promise<ReattachTrackedSessionsFromMarkersResult> {
   const { pidToTrackedSession, credentials } = params;
   const orphanedDeadDaemonSessions: OrphanedDeadDaemonSession[] = [];
+  const sessionRestartIntents: StartupSessionRestartIntent[] = [];
   // On daemon restart, reattach to still-running sessions via disk markers (stack-scoped by HAPPIER_HOME_DIR).
   try {
     const markers = await listSessionMarkers();
-    const happyProcesses = await findAllHappyProcesses();
     logger.debug('[DAEMON RUN] Startup reattach inputs collected', {
       markerCount: markers.length,
-      happyProcessCount: happyProcesses.length,
     });
     const aliveMarkers = [];
     for (const marker of markers) {
@@ -408,6 +448,9 @@ export async function reattachTrackedSessionsFromMarkers(params: Readonly<{
     logger.debug('[DAEMON RUN] Startup reattach alive marker scan finished', {
       aliveMarkerCount: aliveMarkers.length,
     });
+    const markerlessRecoveryEnabled = shouldRecoverMarkerlessDaemonSpawnedSessions();
+    const shouldRunFullProcessScan = markerlessRecoveryEnabled && aliveMarkers.length === 0;
+    const happyProcesses = shouldRunFullProcessScan ? await findAllHappyProcesses() : [];
     const happyProcessesForReattach = await includePidSpecificProcessesForAliveMarkers({
       happyProcesses,
       aliveMarkers,
@@ -457,7 +500,7 @@ export async function reattachTrackedSessionsFromMarkers(params: Readonly<{
           },
         ] as const),
     );
-    const recoveredMarkerlessCount = shouldRecoverMarkerlessDaemonSpawnedSessions()
+    const recoveredMarkerlessCount = markerlessRecoveryEnabled
       ? await recoverMarkerlessDaemonSpawnedSessions({
           happyProcesses: happyProcessesForReattach,
           incompleteMarkerByPid,
@@ -497,16 +540,11 @@ export async function reattachTrackedSessionsFromMarkers(params: Readonly<{
         logger.debug('[DAEMON RUN] Failed to clear stale connected-service restart intent during startup reattach reconciliation', error);
       });
     }
-    return {
-      orphanedDeadDaemonSessions: Array.from(
-        new Map(
-          orphanedDeadDaemonSessions
-            .filter((session) => !recoveredLiveSessionIds.has(session.sessionId))
-            .map((session) => [session.sessionId, session] as const),
-        ).values(),
-      ),
-      connectedServiceRestartIntents: [],
-    };
+    return buildReattachResult({
+      orphanedDeadDaemonSessions,
+      recoveredLiveSessionIds,
+      sessionRestartIntents,
+    });
   } catch (e) {
     logger.debug('[DAEMON RUN] Failed to reattach sessions from disk markers', e);
   }
@@ -518,14 +556,9 @@ export async function reattachTrackedSessionsFromMarkers(params: Readonly<{
       .map((sessionId) => sessionId.trim()),
   );
 
-  return {
-    orphanedDeadDaemonSessions: Array.from(
-      new Map(
-        orphanedDeadDaemonSessions
-          .filter((session) => !recoveredLiveSessionIds.has(session.sessionId))
-        .map((session) => [session.sessionId, session] as const),
-      ).values(),
-    ),
-    connectedServiceRestartIntents: [],
-  };
+  return buildReattachResult({
+    orphanedDeadDaemonSessions,
+    recoveredLiveSessionIds,
+    sessionRestartIntents,
+  });
 }

@@ -24,5 +24,20 @@ describe('resolveStackProcessKindOverrideForSessionSpawn', () => {
       }),
     ).toEqual({ HAPPIER_STACK_PROCESS_KIND: 'session' });
   });
-});
 
+  it('uses the same stack context markers as the child process env builder', () => {
+    expect(
+      resolveStackProcessKindOverrideForSessionSpawn({
+        HAPPIER_STACK_STACK: 'repo-remote-dev',
+        HAPPIER_STACK_PROCESS_KIND: 'infra',
+      }),
+    ).toEqual({ HAPPIER_STACK_PROCESS_KIND: 'session' });
+
+    expect(
+      resolveStackProcessKindOverrideForSessionSpawn({
+        HAPPIER_STACK_REPO_DIR: '/tmp/repo',
+        HAPPIER_STACK_PROCESS_KIND: 'infra',
+      }),
+    ).toEqual({ HAPPIER_STACK_PROCESS_KIND: 'session' });
+  });
+});

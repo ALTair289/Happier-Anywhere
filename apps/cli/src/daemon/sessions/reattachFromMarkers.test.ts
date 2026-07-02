@@ -23,6 +23,11 @@ const emptyAdoptResult = {
   respawnRestoreErrors: [],
 } satisfies ReturnType<typeof adoptSessionsFromMarkers>;
 
+function mockHappyProcessesForDiscovery(processes: ReadonlyArray<HappyProcessInfo>): void {
+  vi.mocked(findAllHappyProcesses).mockResolvedValue([...processes]);
+  vi.mocked(findHappyProcessByPid).mockImplementation(async (pid) => processes.find((processInfo) => processInfo.pid === pid) ?? null);
+}
+
 type TestConnectedServiceRestartIntentMarker = DaemonSessionMarker & Readonly<{
   connectedServiceRestartIntent: Readonly<{
     v: 1;
@@ -72,7 +77,7 @@ describe('reattachTrackedSessionsFromMarkers', () => {
     };
 
     vi.mocked(listSessionMarkers).mockResolvedValue([marker satisfies DaemonSessionMarker]);
-    vi.mocked(findAllHappyProcesses).mockResolvedValue([]);
+    mockHappyProcessesForDiscovery([]);
     vi.spyOn(process, 'kill').mockImplementation(() => {
       throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
     });
@@ -95,6 +100,100 @@ describe('reattachTrackedSessionsFromMarkers', () => {
       happyProcesses: [],
       pidToTrackedSession,
     });
+  });
+
+  it('treats a dead OpenCode daemon marker as passive orphan cleanup state', async () => {
+    const marker = {
+      pid: 43211,
+      happySessionId: 'session-opencode-dead',
+      happyHomeDir: '/tmp/happy',
+      createdAt: 1,
+      updatedAt: 1,
+      startedBy: 'daemon' as const,
+      cwd: 'C:\\Users\\alice\\repo',
+      metadata: {
+        flavor: 'opencode',
+        opencodeSessionId: 'opencode-thread-from-marker-metadata',
+      },
+      respawn: {
+        version: 1,
+        directory: 'C:\\Users\\alice\\repo',
+        backendTarget: { kind: 'builtInAgent', agentId: 'opencode' },
+      },
+    } satisfies DaemonSessionMarker;
+
+    vi.mocked(listSessionMarkers).mockResolvedValue([marker]);
+    mockHappyProcessesForDiscovery([]);
+    vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+    });
+
+    const pidToTrackedSession = new Map<number, TrackedSession>();
+    const result = await reattachTrackedSessionsFromMarkers({ pidToTrackedSession });
+
+    expect(pidToTrackedSession.size).toBe(0);
+    expect(result.orphanedDeadDaemonSessions).toEqual([
+      {
+        sessionId: 'session-opencode-dead',
+        pid: 43211,
+      },
+    ]);
+    expect(result.sessionRestartIntents).toBeUndefined();
+    expect(removeSessionMarker).toHaveBeenCalledWith(43211);
+    expect(adoptSessionsFromMarkers).toHaveBeenCalledWith({
+      markers: [],
+      happyProcesses: [],
+      pidToTrackedSession,
+    });
+  });
+
+  it('dedupes duplicate dead OpenCode daemon markers as passive orphan cleanup state', async () => {
+    const firstMarker = {
+      pid: 43212,
+      happySessionId: 'session-opencode-duplicate-dead',
+      happyHomeDir: '/tmp/happy',
+      createdAt: 1,
+      updatedAt: 1,
+      startedBy: 'daemon' as const,
+      cwd: 'C:\\Users\\alice\\repo',
+      metadata: {
+        flavor: 'opencode',
+        opencodeSessionId: 'opencode-thread-from-first-marker',
+      },
+      respawn: {
+        version: 1,
+        directory: 'C:\\Users\\alice\\repo',
+        backendTarget: { kind: 'builtInAgent', agentId: 'opencode' },
+      },
+    } satisfies DaemonSessionMarker;
+    const secondMarker = {
+      ...firstMarker,
+      pid: 43213,
+      updatedAt: 2,
+      metadata: {
+        flavor: 'opencode',
+        opencodeSessionId: 'opencode-thread-from-second-marker',
+      },
+    } satisfies DaemonSessionMarker;
+
+    vi.mocked(listSessionMarkers).mockResolvedValue([firstMarker, secondMarker]);
+    mockHappyProcessesForDiscovery([]);
+    vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+    });
+
+    const pidToTrackedSession = new Map<number, TrackedSession>();
+    const result = await reattachTrackedSessionsFromMarkers({ pidToTrackedSession });
+
+    expect(result.orphanedDeadDaemonSessions).toEqual([
+      {
+        sessionId: 'session-opencode-duplicate-dead',
+        pid: 43213,
+      },
+    ]);
+    expect(result.sessionRestartIntents).toBeUndefined();
+    expect(removeSessionMarker).toHaveBeenCalledWith(43212);
+    expect(removeSessionMarker).toHaveBeenCalledWith(43213);
   });
 
   it('reattaches a live marker and clears a stale connected-service restart intent without replaying it', async () => {
@@ -120,7 +219,7 @@ describe('reattachTrackedSessionsFromMarkers', () => {
         },
       } satisfies TestConnectedServiceRestartIntentMarker,
     ]);
-    vi.mocked(findAllHappyProcesses).mockResolvedValue([
+    mockHappyProcessesForDiscovery([
       {
         pid: 24680,
         type: 'daemon-spawned-session',
@@ -167,7 +266,7 @@ describe('reattachTrackedSessionsFromMarkers', () => {
         },
       } satisfies TestConnectedServiceRestartIntentMarker,
     ]);
-    vi.mocked(findAllHappyProcesses).mockResolvedValue([]);
+    mockHappyProcessesForDiscovery([]);
     vi.spyOn(process, 'kill').mockImplementation(() => {
       throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
     });
@@ -213,7 +312,7 @@ describe('reattachTrackedSessionsFromMarkers', () => {
         },
       } satisfies TestConnectedServiceRestartIntentMarker,
     ]);
-    vi.mocked(findAllHappyProcesses).mockResolvedValue([]);
+    mockHappyProcessesForDiscovery([]);
     vi.spyOn(process, 'kill').mockImplementation(() => {
       throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
     });
@@ -257,7 +356,7 @@ describe('reattachTrackedSessionsFromMarkers', () => {
         },
       } satisfies TestConnectedServiceRestartIntentMarker,
     ]);
-    vi.mocked(findAllHappyProcesses).mockResolvedValue([]);
+    mockHappyProcessesForDiscovery([]);
     vi.spyOn(process, 'kill').mockImplementation(() => {
       throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
     });
@@ -299,7 +398,7 @@ describe('reattachTrackedSessionsFromMarkers', () => {
         },
       } satisfies DaemonSessionMarker,
     ]);
-    vi.mocked(findAllHappyProcesses).mockResolvedValue([]);
+    mockHappyProcessesForDiscovery([]);
     vi.spyOn(process, 'kill').mockImplementation(() => {
       throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
     });
@@ -342,7 +441,7 @@ describe('reattachTrackedSessionsFromMarkers', () => {
         },
       } satisfies DaemonSessionMarker,
     ]);
-    vi.mocked(findAllHappyProcesses).mockResolvedValue([
+    mockHappyProcessesForDiscovery([
       {
         pid: 24684,
         type: 'daemon-spawned-session',
@@ -389,7 +488,7 @@ describe('reattachTrackedSessionsFromMarkers', () => {
 
   it('recovers a markerless daemon-spawned session from the live process command and heals its marker', async () => {
     vi.mocked(listSessionMarkers).mockResolvedValue([]);
-    vi.mocked(findAllHappyProcesses).mockResolvedValue([
+    mockHappyProcessesForDiscovery([
       {
         pid: 12345,
         type: 'daemon-spawned-session',
@@ -475,7 +574,7 @@ describe('reattachTrackedSessionsFromMarkers', () => {
     } satisfies HappyProcessInfo;
 
     vi.mocked(listSessionMarkers).mockResolvedValue([]);
-    vi.mocked(findAllHappyProcesses).mockResolvedValue([markerlessDaemonSessionProcess]);
+    mockHappyProcessesForDiscovery([markerlessDaemonSessionProcess]);
     vi.spyOn(process, 'kill').mockImplementation(() => true);
 
     const pidToTrackedSession = new Map<number, TrackedSession>();
@@ -497,7 +596,7 @@ describe('reattachTrackedSessionsFromMarkers', () => {
         cwd: '/tmp/project',
       } as any,
     ]);
-    vi.mocked(findAllHappyProcesses).mockResolvedValue([
+    mockHappyProcessesForDiscovery([
       {
         pid: 12345,
         type: 'daemon-spawned-session',
@@ -565,7 +664,7 @@ describe('reattachTrackedSessionsFromMarkers', () => {
         },
       } as any,
     ]);
-    vi.mocked(findAllHappyProcesses).mockResolvedValue([
+    mockHappyProcessesForDiscovery([
       {
         pid: 23456,
         type: 'daemon-spawned-session',
@@ -634,7 +733,7 @@ describe('reattachTrackedSessionsFromMarkers', () => {
         },
       } satisfies DaemonSessionMarker,
     ]);
-    vi.mocked(findAllHappyProcesses).mockResolvedValue([
+    mockHappyProcessesForDiscovery([
       {
         pid: 12346,
         type: 'daemon-spawned-session',
@@ -683,7 +782,7 @@ describe('reattachTrackedSessionsFromMarkers', () => {
         cwd: '/tmp/project',
       } as any,
     ]);
-    vi.mocked(findAllHappyProcesses).mockResolvedValue([
+    mockHappyProcessesForDiscovery([
       {
         pid: 12345,
         type: 'daemon-spawned-session',
@@ -749,7 +848,7 @@ describe('reattachTrackedSessionsFromMarkers', () => {
         },
       } as any,
     ]);
-    vi.mocked(findAllHappyProcesses).mockResolvedValue([
+    mockHappyProcessesForDiscovery([
       {
         pid: 12345,
         type: 'user-session',
@@ -801,7 +900,7 @@ describe('reattachTrackedSessionsFromMarkers', () => {
         },
       } as any,
     ]);
-    vi.mocked(findAllHappyProcesses).mockResolvedValue([
+    mockHappyProcessesForDiscovery([
       {
         pid: 12345,
         type: 'user-session',
@@ -871,7 +970,7 @@ describe('reattachTrackedSessionsFromMarkers', () => {
         processCommandHash: 'hash:/some/other/process',
       } as any,
     ]);
-    vi.mocked(findAllHappyProcesses).mockResolvedValue([
+    mockHappyProcessesForDiscovery([
       {
         pid: 12345,
         type: 'daemon-spawned-session',
@@ -892,7 +991,7 @@ describe('reattachTrackedSessionsFromMarkers', () => {
   it('does not recover a markerless daemon-spawned session when the live command belongs to a different cli runtime root', async () => {
     isOwnedLiveDaemonSessionProcessCommandMock.mockReturnValue(false);
     vi.mocked(listSessionMarkers).mockResolvedValue([]);
-    vi.mocked(findAllHappyProcesses).mockResolvedValue([
+    mockHappyProcessesForDiscovery([
       {
         pid: 54321,
         type: 'daemon-spawned-session',
@@ -922,7 +1021,7 @@ describe('reattachTrackedSessionsFromMarkers', () => {
         cwd: '/tmp/project',
       } satisfies DaemonSessionMarker,
     ]);
-    vi.mocked(findAllHappyProcesses).mockResolvedValue([
+    mockHappyProcessesForDiscovery([
       {
         pid: 54321,
         type: 'daemon-spawned-session',
@@ -966,7 +1065,7 @@ describe('reattachTrackedSessionsFromMarkers', () => {
         cwd: '/tmp/project',
       } as any,
     ]);
-    vi.mocked(findAllHappyProcesses).mockResolvedValue([
+    mockHappyProcessesForDiscovery([
       {
         pid: 65432,
         type: 'user-session',
@@ -1008,7 +1107,7 @@ describe('reattachTrackedSessionsFromMarkers', () => {
         },
       } as any,
     ]);
-    vi.mocked(findAllHappyProcesses).mockResolvedValue([
+    mockHappyProcessesForDiscovery([
       {
         pid: 76543,
         type: 'user-session',
@@ -1049,7 +1148,7 @@ describe('reattachTrackedSessionsFromMarkers', () => {
         },
       } satisfies DaemonSessionMarker,
     ]);
-    vi.mocked(findAllHappyProcesses).mockResolvedValue([]);
+    mockHappyProcessesForDiscovery([]);
     vi.mocked(findHappyProcessByPid).mockResolvedValue({
       pid: 76544,
       type: 'user-session',
@@ -1072,6 +1171,82 @@ describe('reattachTrackedSessionsFromMarkers', () => {
     );
   });
 
+  it('uses marker pid lookups without a full process-table scan when markerless recovery is disabled', async () => {
+    process.env.HAPPIER_DAEMON_MARKERLESS_REATTACH_ENABLED = '0';
+    isOwnedLiveDaemonSessionProcessCommandMock.mockReturnValue(false);
+    vi.mocked(listSessionMarkers).mockResolvedValue([
+      {
+        pid: 76545,
+        happySessionId: 'session-marker-first',
+        happyHomeDir: '/tmp/happy',
+        createdAt: 1,
+        updatedAt: 1,
+        startedBy: 'daemon',
+        cwd: '/tmp/project',
+        respawn: {
+          version: 1,
+          directory: '/tmp/project',
+          backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+        },
+      } satisfies DaemonSessionMarker,
+    ]);
+    mockHappyProcessesForDiscovery([]);
+    vi.mocked(findHappyProcessByPid).mockResolvedValue({
+      pid: 76545,
+      type: 'user-session',
+      cwd: '/tmp/project',
+      command: 'node',
+    } satisfies HappyProcessInfo);
+    vi.spyOn(process, 'kill').mockImplementation(() => true);
+
+    const pidToTrackedSession = new Map<number, TrackedSession>();
+    await reattachTrackedSessionsFromMarkers({ pidToTrackedSession });
+
+    expect(findHappyProcessByPid).toHaveBeenCalledWith(76545);
+    expect(findAllHappyProcesses).not.toHaveBeenCalled();
+  });
+
+  it('uses marker pid lookups without a full process-table scan when live markers exist', async () => {
+    isOwnedLiveDaemonSessionProcessCommandMock.mockReturnValue(false);
+    vi.mocked(listSessionMarkers).mockResolvedValue([
+      {
+        pid: 76546,
+        happySessionId: 'session-marker-default',
+        happyHomeDir: '/tmp/happy',
+        createdAt: 1,
+        updatedAt: 1,
+        startedBy: 'daemon',
+        cwd: '/tmp/project',
+        respawn: {
+          version: 1,
+          directory: '/tmp/project',
+          backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+        },
+      } satisfies DaemonSessionMarker,
+    ]);
+    mockHappyProcessesForDiscovery([
+      {
+        pid: 99991,
+        type: 'daemon-spawned-session',
+        cwd: '/tmp/other',
+        command: 'happier codex --started-by daemon --existing-session session-markerless',
+      } satisfies HappyProcessInfo,
+    ]);
+    vi.mocked(findHappyProcessByPid).mockResolvedValue({
+      pid: 76546,
+      type: 'user-session',
+      cwd: '/tmp/project',
+      command: 'node',
+    } satisfies HappyProcessInfo);
+    vi.spyOn(process, 'kill').mockImplementation(() => true);
+
+    const pidToTrackedSession = new Map<number, TrackedSession>();
+    await reattachTrackedSessionsFromMarkers({ pidToTrackedSession });
+
+    expect(findHappyProcessByPid).toHaveBeenCalledWith(76546);
+    expect(findAllHappyProcesses).not.toHaveBeenCalled();
+  });
+
   it('does not report an orphaned dead daemon session when the same happy session was recovered live during startup', async () => {
     vi.mocked(listSessionMarkers).mockResolvedValue([
       {
@@ -1084,7 +1259,7 @@ describe('reattachTrackedSessionsFromMarkers', () => {
         cwd: '/tmp/project',
       } as any,
     ]);
-    vi.mocked(findAllHappyProcesses).mockResolvedValue([
+    mockHappyProcessesForDiscovery([
       {
         pid: 22222,
         type: 'daemon-spawned-session',
@@ -1135,7 +1310,7 @@ describe('reattachTrackedSessionsFromMarkers', () => {
         processCommandHash: 'b'.repeat(64),
       } satisfies DaemonSessionMarker,
     ]);
-    vi.mocked(findAllHappyProcesses).mockResolvedValue([
+    mockHappyProcessesForDiscovery([
       {
         pid: 22222,
         type: 'user-session',
@@ -1169,6 +1344,78 @@ describe('reattachTrackedSessionsFromMarkers', () => {
     expect(pidToTrackedSession.get(22222)).toEqual(expect.objectContaining({
       happySessionId: 'session-123',
       pid: 22222,
+    }));
+    expect(result).toEqual({
+      orphanedDeadDaemonSessions: [],
+      connectedServiceRestartIntents: [],
+    });
+  });
+
+  it('does not return a startup restart intent when the same OpenCode session has a recovered live owner', async () => {
+    vi.mocked(listSessionMarkers).mockResolvedValue([
+      {
+        pid: 11113,
+        happySessionId: 'session-opencode-live-owner',
+        happyHomeDir: '/tmp/happy',
+        createdAt: 1,
+        updatedAt: 1,
+        startedBy: 'daemon',
+        cwd: '/tmp/project',
+        metadata: {
+          flavor: 'opencode',
+          opencodeSessionId: 'opencode-live-owner-thread',
+        },
+        respawn: {
+          version: 1,
+          directory: '/tmp/project',
+          backendTarget: { kind: 'builtInAgent', agentId: 'opencode' },
+        },
+      } satisfies DaemonSessionMarker,
+      {
+        pid: 22223,
+        happySessionId: 'session-opencode-live-owner',
+        happyHomeDir: '/tmp/happy',
+        createdAt: 1,
+        updatedAt: 1,
+        startedBy: 'terminal',
+        cwd: '/tmp/project',
+        processCommandHash: 'c'.repeat(64),
+      } satisfies DaemonSessionMarker,
+    ]);
+    mockHappyProcessesForDiscovery([
+      {
+        pid: 22223,
+        type: 'user-session',
+        cwd: '/tmp/project',
+        command: 'happy opencode --existing-session session-opencode-live-owner',
+      } satisfies HappyProcessInfo,
+    ]);
+    vi.mocked(adoptSessionsFromMarkers).mockImplementationOnce(({ pidToTrackedSession }) => {
+      pidToTrackedSession.set(22223, {
+        pid: 22223,
+        startedBy: 'terminal',
+        happySessionId: 'session-opencode-live-owner',
+        reattachedFromDiskMarker: true,
+      });
+      return {
+        ...emptyAdoptResult,
+        adopted: 1,
+        adoptedPids: [22223],
+      };
+    });
+    vi.spyOn(process, 'kill').mockImplementation((pid) => {
+      if (pid === 11113) {
+        throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+      }
+      return true;
+    });
+
+    const pidToTrackedSession = new Map<number, TrackedSession>();
+    const result = await reattachTrackedSessionsFromMarkers({ pidToTrackedSession });
+
+    expect(pidToTrackedSession.get(22223)).toEqual(expect.objectContaining({
+      happySessionId: 'session-opencode-live-owner',
+      pid: 22223,
     }));
     expect(result).toEqual({
       orphanedDeadDaemonSessions: [],

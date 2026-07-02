@@ -1,14 +1,13 @@
-import { inferAgentIdFromSessionMetadata } from '@happier-dev/agents';
-
 import type { Metadata } from '@/api/types';
+import { CATALOG_AGENT_IDS } from '@/backends/types';
 import {
     createSessionHandoffMetadataSplit,
     pickSessionHandoffRuntimeLocalMetadata,
     type SessionHandoffLocalMetadataSource,
 } from '@/session/handoff/metadata/runtimeLocalSessionHandoffMetadata';
+import { buildRuntimeLocalHandoffMetadataForAgent } from '@/session/handoff/metadata/catalogHooks';
 import type { TrackedSession } from '../types';
-import { resolveConfiguredClaudeConfigDir } from '@/backends/claude/directSessions/resolveClaudeConfigDir';
-import { resolveClaudeProjectId } from '@/backends/claude/utils/path';
+import { resolveTrackedSessionCatalogAgentId } from './resolveTrackedSessionCatalogAgentId';
 
 function asMetadataRecord(value: unknown): Metadata | null {
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -36,7 +35,7 @@ function resolveTrackedSessionFallbackMetadata(params: Readonly<{
     const flavor =
         backendTarget?.kind === 'builtInAgent'
         && typeof backendTarget.agentId === 'string'
-        && ['claude', 'codex', 'opencode'].includes(backendTarget.agentId)
+        && (CATALOG_AGENT_IDS as readonly string[]).includes(backendTarget.agentId)
             ? backendTarget.agentId
             : '';
     if (!sourcePath || !machineId || !homeDir || !flavor) {
@@ -79,50 +78,16 @@ export function buildHandoffSessionMetadataFromTrackedSession(params: Readonly<{
         });
     }
 
-    const agentId = inferAgentIdFromSessionMetadata(metadata);
-
-    switch (agentId) {
-        case 'claude': {
-            if (!runtimeLocalMetadata.claudeSessionId) {
-                runtimeLocalMetadata.claudeSessionId = vendorResumeId;
-            }
-            if (!runtimeLocalMetadata.directSessionV1 && params.trackedSession.spawnOptions?.transcriptStorage === 'direct') {
-                const configDir = resolveConfiguredClaudeConfigDir({
-                    env: {
-                        ...process.env,
-                        ...(params.trackedSession.spawnOptions.environmentVariables ?? {}),
-                    },
-                });
-                const machineId = typeof metadata.machineId === 'string' ? metadata.machineId.trim() : '';
-                runtimeLocalMetadata.directSessionV1 = {
-                    v: 1,
-                    providerId: 'claude',
-                    machineId,
-                    remoteSessionId: vendorResumeId,
-                    source: {
-                        kind: 'claudeConfig',
-                        configDir,
-                        ...(typeof metadata.path === 'string' && metadata.path.trim()
-                            ? { projectId: resolveClaudeProjectId(metadata.path.trim()) }
-                            : {}),
-                    },
-                    linkedAtMs: Date.now(),
-                };
-            }
-            break;
-        }
-        case 'codex':
-            if (!runtimeLocalMetadata.codexSessionId) {
-                runtimeLocalMetadata.codexSessionId = vendorResumeId;
-            }
-            break;
-        case 'opencode':
-            if (!runtimeLocalMetadata.opencodeSessionId) {
-                runtimeLocalMetadata.opencodeSessionId = vendorResumeId;
-            }
-            break;
-        default:
-            break;
+    const providerRuntimeLocalMetadata = buildRuntimeLocalHandoffMetadataForAgent(
+        resolveTrackedSessionCatalogAgentId(params.trackedSession),
+        {
+            metadata,
+            trackedSession: params.trackedSession,
+            vendorResumeId,
+        },
+    );
+    if (providerRuntimeLocalMetadata) {
+        Object.assign(runtimeLocalMetadata, providerRuntimeLocalMetadata);
     }
 
     return createSessionHandoffMetadataSplit({

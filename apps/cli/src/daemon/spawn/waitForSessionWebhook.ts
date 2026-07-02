@@ -15,7 +15,6 @@ type WaitForSessionWebhookParams = {
   timeoutErrorMessage: string;
   onTimeout?: () => void;
   onSuccess?: (session: TrackedSession) => void;
-  resolveExistingSessionId?: () => string | null | undefined;
 };
 
 function resolveTimeoutMs(explicitTimeoutMs: number | undefined): number {
@@ -39,17 +38,6 @@ function resolveTimeoutMs(explicitTimeoutMs: number | undefined): number {
 export function waitForSessionWebhook(
   params: WaitForSessionWebhookParams,
 ): Promise<SpawnSessionResult> {
-  const existingSessionId =
-    typeof params.resolveExistingSessionId === 'function'
-      ? String(params.resolveExistingSessionId() ?? '').trim()
-      : '';
-  if (existingSessionId) {
-    return Promise.resolve({
-      type: 'success',
-      sessionId: existingSessionId,
-    });
-  }
-
   const timeoutMs = resolveTimeoutMs(params.timeoutMs);
 
   return new Promise((resolve) => {

@@ -9,15 +9,19 @@ function createFakeDisposable(): Disposable {
 
 class FakePty implements PtyProcess {
   public readonly writes: string[] = [];
+  public readonly resizes: Array<Readonly<{ cols: number; rows: number }>> = [];
   private readonly onDataListeners = new Set<(data: string) => void>();
   private readonly onExitListeners = new Set<(e: PtyExitEvent) => void>();
+
+  constructor(private readonly resizeError?: Error) {}
 
   write(data: string): void {
     this.writes.push(String(data));
   }
 
-  resize(): void {
-    // noop
+  resize(cols: number, rows: number): void {
+    if (this.resizeError) throw this.resizeError;
+    this.resizes.push({ cols, rows });
   }
 
   kill(): void {
@@ -50,8 +54,10 @@ class FakePty implements PtyProcess {
 class FakePtyProvider implements PtyProvider {
   public readonly spawned: Array<{ params: PtySpawnParams; pty: FakePty }> = [];
 
+  constructor(private readonly createPty: () => FakePty = () => new FakePty()) {}
+
   spawn(params: PtySpawnParams): PtyProcess {
-    const pty = new FakePty();
+    const pty = this.createPty();
     this.spawned.push({ params, pty });
     return pty;
   }
@@ -78,7 +84,7 @@ describe('TerminalPtySessionManager', () => {
       ptyProvider: provider,
       config: defaultConfig(),
       now: () => 0,
-      env: { SHELL: '/bin/bash' } as any,
+      env: { SHELL: '/bin/bash' },
       platform: 'linux',
     });
 
@@ -90,13 +96,40 @@ describe('TerminalPtySessionManager', () => {
     expect(second).toEqual({ ok: true, terminalId: first.terminalId, reused: true });
   });
 
+  it('reports resize-unavailable without recording unsupported dimensions', () => {
+    const provider = new FakePtyProvider(() => new FakePty(new Error('terminal_resize_unavailable')));
+    const manager = createTerminalPtySessionManager({
+      ptyProvider: provider,
+      config: defaultConfig(),
+      now: () => 0,
+      env: { SHELL: '/bin/bash' },
+      platform: 'linux',
+    });
+
+    const ensured = manager.ensure({ terminalKey: 'k-resize', cwd: '/tmp', cols: 80, rows: 24 });
+    expect(ensured.ok).toBe(true);
+    if (!ensured.ok) throw new Error('expected ok');
+
+    expect(manager.resize({ terminalId: ensured.terminalId, cols: 120, rows: 40 })).toEqual({
+      ok: false,
+      errorCode: 'terminal_resize_unavailable',
+      error: 'terminal_resize_unavailable',
+    });
+    expect(manager.ensure({ terminalKey: 'k-resize', cwd: '/tmp' })).toEqual({
+      ok: true,
+      terminalId: ensured.terminalId,
+      reused: true,
+    });
+    expect(provider.spawned[0]?.pty.resizes).toEqual([]);
+  });
+
   it('streams PTY output via cursor reads', () => {
     const provider = new FakePtyProvider();
     const manager = createTerminalPtySessionManager({
       ptyProvider: provider,
       config: defaultConfig({ bufferMaxEvents: 10 }),
       now: () => 0,
-      env: { SHELL: '/bin/bash' } as any,
+      env: { SHELL: '/bin/bash' },
       platform: 'linux',
     });
 
@@ -175,7 +208,7 @@ describe('TerminalPtySessionManager', () => {
       ptyProvider: provider,
       config: defaultConfig({ bufferMaxEvents: 2 }),
       now: () => 0,
-      env: { SHELL: '/bin/bash' } as any,
+      env: { SHELL: '/bin/bash' },
       platform: 'linux',
     });
 
@@ -206,7 +239,7 @@ describe('TerminalPtySessionManager', () => {
       ptyProvider: provider,
       config: defaultConfig(),
       now: () => 0,
-      env: { SHELL: '/bin/bash' } as any,
+      env: { SHELL: '/bin/bash' },
       platform: 'linux',
     });
 

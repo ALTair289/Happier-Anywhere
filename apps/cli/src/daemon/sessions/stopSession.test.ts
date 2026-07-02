@@ -2,6 +2,18 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { TerminalAttachmentInfo } from '@/terminal/attachment/terminalAttachmentInfo';
 
+const { spawnSyncMock } = vi.hoisted(() => ({
+  spawnSyncMock: vi.fn(() => ({ status: 0, stdout: '', stderr: '' })),
+}));
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    spawnSync: spawnSyncMock,
+  };
+});
+
 const isPidSafeHappySessionProcess = vi.fn(async () => true);
 vi.mock('../pidSafety', () => ({
   isPidSafeHappySessionProcess,
@@ -64,6 +76,17 @@ vi.mock('@/integrations/tmux/TmuxUtilities', () => ({
     }
   },
 }));
+
+function withProcessPlatform<T>(platform: NodeJS.Platform, fn: () => Promise<T>): Promise<T> {
+  const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
+  if (!originalPlatformDescriptor?.configurable) {
+    throw new Error('Expected process.platform to be configurable for this test');
+  }
+  Object.defineProperty(process, 'platform', { ...originalPlatformDescriptor, value: platform });
+  return fn().finally(() => {
+    Object.defineProperty(process, 'platform', originalPlatformDescriptor);
+  });
+}
 
 describe('createStopSession', () => {
   it('keeps matched tracked sessions until exit is observed', async () => {
@@ -385,5 +408,98 @@ describe('createStopSession', () => {
     expect(pidToTrackedSession.get(555)?.stopRequestedAtMs).toBe(123456789);
 
     nowSpy.mockRestore();
+  });
+
+  it('refuses Windows daemon-child tree kill when PID safety does not match the tracked command hash', async () => {
+    await withProcessPlatform('win32', async () => {
+      vi.resetModules();
+      spawnSyncMock.mockReset();
+      isPidSafeHappySessionProcess.mockReset();
+      isPidSafeHappySessionProcess.mockResolvedValueOnce(false);
+      const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
+        throw new Error('process.kill should not run for Windows daemon children');
+      });
+
+      const { createStopSession } = await import('./stopSession');
+      const childKill = vi.fn();
+      const pidToTrackedSession = new Map<number, any>([
+        [
+          777,
+          {
+            startedBy: 'daemon',
+            pid: 777,
+            happySessionId: 'sess-win',
+            childProcess: {
+              pid: 777,
+              exitCode: null,
+              signalCode: null,
+              kill: childKill,
+            },
+            processCommandHash: 'expected-hash',
+          },
+        ],
+      ]);
+
+      const stop = createStopSession({ pidToTrackedSession });
+      const ok = await stop('sess-win');
+
+      expect(ok).toBe(false);
+      expect(isPidSafeHappySessionProcess).toHaveBeenCalledWith({
+        pid: 777,
+        expectedProcessCommandHash: 'expected-hash',
+      });
+      expect(spawnSyncMock).not.toHaveBeenCalled();
+      expect(childKill).not.toHaveBeenCalled();
+      expect(killSpy).not.toHaveBeenCalled();
+      killSpy.mockRestore();
+    });
+  });
+
+  it('uses Windows taskkill for a verified daemon-child process tree', async () => {
+    await withProcessPlatform('win32', async () => {
+      vi.resetModules();
+      spawnSyncMock.mockReset();
+      isPidSafeHappySessionProcess.mockReset();
+      spawnSyncMock.mockReturnValueOnce({ status: 0, stdout: '', stderr: '' });
+      isPidSafeHappySessionProcess.mockResolvedValueOnce(true);
+      const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
+        throw new Error('process.kill should not run for Windows daemon children');
+      });
+
+      const { createStopSession } = await import('./stopSession');
+      const childKill = vi.fn();
+      const pidToTrackedSession = new Map<number, any>([
+        [
+          778,
+          {
+            startedBy: 'daemon',
+            pid: 778,
+            happySessionId: 'sess-win',
+            childProcess: {
+              pid: 778,
+              exitCode: null,
+              signalCode: null,
+              kill: childKill,
+            },
+            processCommandHash: 'expected-hash',
+          },
+        ],
+      ]);
+
+      const stop = createStopSession({ pidToTrackedSession });
+      const ok = await stop('sess-win');
+
+      expect(ok).toBe(true);
+      expect(isPidSafeHappySessionProcess).toHaveBeenCalledWith({
+        pid: 778,
+        expectedProcessCommandHash: 'expected-hash',
+      });
+      expect(spawnSyncMock).toHaveBeenCalledWith('taskkill', ['/F', '/T', '/PID', '778'], expect.objectContaining({
+        stdio: 'ignore',
+      }));
+      expect(childKill).not.toHaveBeenCalled();
+      expect(killSpy).not.toHaveBeenCalled();
+      killSpy.mockRestore();
+    });
   });
 });

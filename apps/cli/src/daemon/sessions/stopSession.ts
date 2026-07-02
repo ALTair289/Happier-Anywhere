@@ -1,4 +1,5 @@
 import { logger } from '@/ui/logger';
+import { spawnSync } from 'node:child_process';
 import { TmuxUtilities } from '@/integrations/tmux/TmuxUtilities';
 import { defaultZellijActions } from '@/integrations/zellij/actions';
 import { resolveZellijRuntimeBinary } from '@/integrations/zellij/runtimeBinary';
@@ -54,6 +55,43 @@ async function stopRecordedZellijTerminalHost(sessionId: string): Promise<boolea
 
   logger.debug(`[DAEMON RUN] zellij kill-session failed for ${sessionId}: ${result.stderr || result.stdout}`);
   return false;
+}
+
+function isTrackedChildStillLiveForPid(session: TrackedSession, pid: number): boolean {
+  const child = session.childProcess;
+  if (!child || child.pid !== pid) return false;
+  if (child.exitCode !== null || child.signalCode !== null) return false;
+  return true;
+}
+
+async function taskkillWindowsDaemonChild(params: Readonly<{
+  pid: number;
+  session: TrackedSession;
+  normalizedSessionId: string;
+}>): Promise<boolean> {
+  if (!isTrackedChildStillLiveForPid(params.session, params.pid)) {
+    logger.warn(`[DAEMON RUN] Refusing to taskkill PID ${params.pid} for session ${params.normalizedSessionId} (tracked child is no longer live)`);
+    return false;
+  }
+
+  const safe = await isPidSafeHappySessionProcess({
+    pid: params.pid,
+    expectedProcessCommandHash: params.session.processCommandHash,
+  });
+  if (!safe) {
+    logger.warn(`[DAEMON RUN] Refusing to taskkill PID ${params.pid} for session ${params.normalizedSessionId} (PID reuse safety)`);
+    return false;
+  }
+
+  const result = spawnSync('taskkill', ['/F', '/T', '/PID', String(params.pid)], { stdio: 'ignore' });
+  if ((result.status ?? 1) !== 0) {
+    logger.debug(`[DAEMON RUN] taskkill failed for daemon-spawned session ${params.normalizedSessionId} (pid=${params.pid})`);
+    return false;
+  }
+
+  params.session.stopRequestedAtMs = Date.now();
+  logger.debug(`[DAEMON RUN] taskkill requested for daemon-spawned session process tree ${params.normalizedSessionId} (pid=${params.pid})`);
+  return true;
 }
 
 export function createStopSession(params: Readonly<{
@@ -152,6 +190,13 @@ export function createStopSession(params: Readonly<{
       }
 
       if (session.startedBy === 'daemon' && session.childProcess) {
+        if (process.platform === 'win32') {
+          if (await taskkillWindowsDaemonChild({ pid, session, normalizedSessionId })) {
+            stoppedAny = true;
+          }
+          continue;
+        }
+
         try {
           try {
             // Prefer killing the full process group when the daemon spawned a detached session runner.

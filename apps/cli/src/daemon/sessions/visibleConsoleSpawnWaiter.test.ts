@@ -147,7 +147,11 @@ describe('waitForVisibleConsoleSessionWebhook', () => {
     });
   });
 
-  it('resolves immediately when a canonical session id is already available', async () => {
+  it('continues waiting for webhook proof before resolving success', async () => {
+    vi.useFakeTimers();
+    const aliveRef = { alive: true };
+    installProcessKillMock(aliveRef);
+
     const pid = 9876;
     const { pidToAwaiter, pidToSpawnResultResolver, pidToSpawnWebhookTimeout, onChildExited } = createWaiterState();
 
@@ -158,13 +162,23 @@ describe('waitForVisibleConsoleSessionWebhook', () => {
       pidToSpawnResultResolver,
       pidToSpawnWebhookTimeout,
       onChildExited,
-      resolveExistingSessionId: () => 'session-visible-9876',
     });
 
-    expect(pidToAwaiter.size).toBe(0);
-    expect(pidToSpawnResultResolver.size).toBe(0);
-    expect(pidToSpawnWebhookTimeout.size).toBe(0);
+    expect(pidToAwaiter.has(pid)).toBe(true);
+    expect(pidToSpawnResultResolver.has(pid)).toBe(true);
+    expect(pidToSpawnWebhookTimeout.has(pid)).toBe(true);
+
+    pidToAwaiter.get(pid)?.({ startedBy: 'daemon', pid, happySessionId: 'session-visible-9876' });
+
     await expect(promise).resolves.toEqual({ type: 'success', sessionId: 'session-visible-9876' });
-    expect(onChildExited).not.toHaveBeenCalled();
+
+    aliveRef.alive = false;
+    await vi.advanceTimersByTimeAsync(20);
+
+    expect(onChildExited).toHaveBeenCalledWith(pid, {
+      reason: 'process-exited',
+      code: null,
+      signal: null,
+    });
   });
 });

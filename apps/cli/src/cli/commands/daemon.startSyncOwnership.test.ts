@@ -155,6 +155,57 @@ describe('handleDaemonCliCommand: daemon start-sync', () => {
         expect(startDaemonMock).toHaveBeenCalledWith({ takeover: false });
     });
 
+    it('does not short-circuit a self-restart replacement when the current daemon is compatible', async () => {
+        envScope.patch({
+            HAPPIER_DAEMON_STARTUP_SOURCE: 'self-restart',
+            HAPPIER_DAEMON_RUNTIME_ID: 'runtime-compatible',
+        });
+        const compatibleInspection: DaemonRunningInspection = {
+            status: 'running',
+            state: {
+                pid: process.pid,
+                httpPort: 43113,
+                startedAt: Date.now(),
+                startedWithCliVersion: '0.2.8',
+                startedWithPublicReleaseChannel: 'stable',
+                startupSource: 'manual',
+                runtimeId: 'runtime-compatible',
+            },
+        };
+
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+            throw new Error(`exit:${code ?? ''}`);
+        }) as never);
+        vi.resetModules();
+        vi.doMock('@/daemon/ownership/evaluateCurrentDaemonOwner', () => ({
+            evaluateCurrentDaemonOwner: vi.fn(async () => ({
+                kind: 'compatible' as const,
+                owner: {
+                    status: 'running' as const,
+                    state: compatibleInspection.state,
+                    currentCliVersion: '0.2.8',
+                    currentPublicReleaseChannel: 'stable' as const,
+                    versionMatches: true,
+                    releaseChannelMatches: true,
+                    serviceManaged: false,
+                    startupSource: 'manual' as const,
+                },
+            })),
+        }));
+        const { handleDaemonCliCommand } = await import('./daemon');
+
+        try {
+            await expect(handleDaemonCliCommand({
+                args: ['daemon', 'start-sync'],
+            } as never)).rejects.toThrow(/exit:0/);
+        } finally {
+            exitSpy.mockRestore();
+        }
+
+        expect(startDaemonMock).toHaveBeenCalledTimes(1);
+        expect(startDaemonMock).toHaveBeenCalledWith({ takeover: false });
+    });
+
     it('fails closed when a background service is installed for the active relay', async () => {
         await withTempDir('happier-daemon-start-sync-installed-', async (homeDir) => {
             envScope.patch({

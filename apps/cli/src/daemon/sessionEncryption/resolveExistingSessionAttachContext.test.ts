@@ -87,6 +87,55 @@ describe('resolveExistingSessionAttachContext', () => {
     });
   });
 
+  it('uses the provider-accepted watermark instead of legacy delivered metadata for provider-acceptance sessions', async () => {
+    vi.mocked(fetchSessionByIdCompat).mockResolvedValueOnce(
+      createSessionRecordFixture({
+        id: 'sess_provider_acceptance',
+        seq: 42,
+        encryptionMode: 'plain',
+        metadata: JSON.stringify({
+          flavor: 'claude',
+          path: '/tmp',
+          userMessageDeliveryWatermarkModeV1: 'providerAcceptance',
+          deliveredUserMessageSeqV1: 5,
+          providerAcceptedUserMessageSeqV1: 3,
+        }),
+        dataEncryptionKey: null,
+      }),
+    );
+
+    const out = await resolveExistingSessionAttachContext({ token: 't', sessionId: 'sess_provider_acceptance', agent: 'claude', credentials: null });
+    expect(out).toMatchObject({
+      ok: true,
+      attachPayload: { v: 2, encryptionMode: 'plain', lastObservedMessageSeq: 3 },
+      deliveredUserMessageSeq: 3,
+    });
+  });
+
+  it('replays from the beginning for provider-acceptance sessions without explicit provider custody', async () => {
+    vi.mocked(fetchSessionByIdCompat).mockResolvedValueOnce(
+      createSessionRecordFixture({
+        id: 'sess_provider_acceptance_no_custody',
+        seq: 42,
+        encryptionMode: 'plain',
+        metadata: JSON.stringify({
+          flavor: 'claude',
+          path: '/tmp',
+          userMessageDeliveryWatermarkModeV1: 'providerAcceptance',
+          deliveredUserMessageSeqV1: 5,
+        }),
+        dataEncryptionKey: null,
+      }),
+    );
+
+    const out = await resolveExistingSessionAttachContext({ token: 't', sessionId: 'sess_provider_acceptance_no_custody', agent: 'claude', credentials: null });
+    expect(out).toMatchObject({
+      ok: true,
+      attachPayload: { v: 2, encryptionMode: 'plain', lastObservedMessageSeq: 0 },
+      deliveredUserMessageSeq: 0,
+    });
+  });
+
   it('keeps the session seq as the attach cursor when no delivered watermark exists (legacy sessions)', async () => {
     vi.mocked(fetchSessionByIdCompat).mockResolvedValueOnce(
       createSessionRecordFixture({

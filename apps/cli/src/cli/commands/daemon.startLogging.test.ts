@@ -22,7 +22,7 @@ const {
   evaluateDaemonStartupServiceConflictMock: vi.fn(async () => ({ kind: 'none' as const })),
   inspectDaemonRunningStateMock: vi.fn(async (): Promise<DaemonRunningInspection> => ({ status: 'not-running' })),
   getLatestDaemonLogMock: vi.fn(async () => null as null | { path: string }),
-  restartDaemonAndWaitMock: vi.fn(async () => true),
+  restartDaemonAndWaitMock: vi.fn(async (): Promise<boolean | { ok: boolean; status?: 'starting' }> => true),
   spawnDetachedDaemonStartSyncMock: vi.fn(async (): Promise<{ pid?: number; unref: () => void }> => ({ unref: () => {} })),
 }));
 
@@ -441,6 +441,62 @@ describe('happier daemon start output', () => {
           ok: false,
           error: 'restart_failed',
           message: 'Failed to restart daemon',
+          relay: 'http://localhost:4321',
+          relayId: 'env_test',
+          latestDaemonLogPath: '/tmp/happier-daemon.log',
+        });
+      } finally {
+        exitSpy.mockRestore();
+        output.restore();
+      }
+    } finally {
+      envScope.restore();
+    }
+  }, 60_000);
+
+  it('prints structured JSON for daemon restart --json when restart is still in progress', async () => {
+    vi.useRealTimers();
+    restartDaemonAndWaitMock.mockResolvedValue({
+      ok: true,
+      status: 'starting',
+    });
+    getLatestDaemonLogMock.mockResolvedValue({ path: '/tmp/happier-daemon.log' });
+
+    const envScope = createEnvKeyScope([
+      'HAPPIER_SERVER_URL',
+      'HAPPIER_WEBAPP_URL',
+      'HAPPIER_ACTIVE_SERVER_ID',
+    ]);
+
+    try {
+      vi.resetModules();
+      envScope.patch({
+        HAPPIER_SERVER_URL: 'http://localhost:4321',
+        HAPPIER_WEBAPP_URL: 'http://localhost:9999',
+        HAPPIER_ACTIVE_SERVER_ID: 'env_test',
+      });
+
+      const output = captureStdoutJsonOutput<{
+        ok: boolean;
+        status: string;
+        relay: string;
+        relayId: string;
+        latestDaemonLogPath?: string;
+      }>();
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+        throw new Error(`exit:${code ?? ''}`);
+      }) as any);
+      try {
+        const { handleDaemonCliCommand } = await import('./daemon');
+        await expect(handleDaemonCliCommand({
+          args: ['daemon', 'restart', '--json'],
+          rawArgv: [],
+          terminalRuntime: null,
+        })).rejects.toThrow(/exit:0/);
+
+        expect(output.json()).toEqual({
+          ok: true,
+          status: 'starting',
           relay: 'http://localhost:4321',
           relayId: 'env_test',
           latestDaemonLogPath: '/tmp/happier-daemon.log',

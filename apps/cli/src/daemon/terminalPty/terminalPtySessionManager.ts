@@ -41,6 +41,10 @@ function okDisabled(errorCode: DaemonTerminalErrorCode): ErrorResult {
   return { ok: false, errorCode, error: errorCode };
 }
 
+function isTerminalResizeUnavailableError(error: unknown): boolean {
+  return error instanceof Error && error.message === 'terminal_resize_unavailable';
+}
+
 type EventBuffer = {
   baseCursor: number;
   events: DaemonTerminalStreamEvent[];
@@ -395,8 +399,8 @@ export function createTerminalPtySessionManager(params: Readonly<{
       session.cols = input.cols;
       session.rows = input.rows;
       return { ok: true };
-    } catch {
-      return okDisabled('terminal_not_found');
+    } catch (error) {
+      return okDisabled(isTerminalResizeUnavailableError(error) ? 'terminal_resize_unavailable' : 'terminal_not_found');
     }
   };
 
