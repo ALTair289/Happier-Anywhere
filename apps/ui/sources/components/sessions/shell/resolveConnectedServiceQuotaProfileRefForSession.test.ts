@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { resolveConnectedServiceQuotaProfileRefForSession } from './resolveConnectedServiceQuotaProfileRefForSession';
 
 describe('resolveConnectedServiceQuotaProfileRefForSession', () => {
-    it('falls back to session quota refs when a native session has no connected-service binding', () => {
+    it('ignores legacy session quota refs when a native session has no connected-service binding', () => {
         expect(resolveConnectedServiceQuotaProfileRefForSession({
             agentId: 'codex',
             accountProfileConnectedServicesV2: [],
@@ -21,11 +21,7 @@ describe('resolveConnectedServiceQuotaProfileRefForSession', () => {
                     updatedAtMs: 1_000,
                 },
             },
-        })).toEqual({
-            serviceId: 'openai-codex',
-            profileId: 'acct:native-codex',
-            provenance: 'published_quota_ref',
-        });
+        })).toBeNull();
     });
 
     it('keeps connected-service bindings ahead of native quota refs', () => {

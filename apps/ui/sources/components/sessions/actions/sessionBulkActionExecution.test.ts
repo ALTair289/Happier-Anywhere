@@ -65,8 +65,8 @@ describe('executeSessionBulkAction', () => {
         }
     });
 
-    it('pins selected sessions with one merged settings write', async () => {
-        const setPinnedSessionKeysV1 = vi.fn(async () => undefined);
+    it('pins selected sessions through per-target organization operations', async () => {
+        const setSessionPin = vi.fn(async () => undefined);
 
         const result = await executeSessionBulkAction({
             action: { id: SESSION_BULK_ACTION_IDS.pin },
@@ -75,20 +75,26 @@ describe('executeSessionBulkAction', () => {
                 target({ key: 'server-a:s2', sessionId: 's2', pinned: true }),
             ],
             context: {
-                pinnedSessionKeysV1: ['server-a:s2', 'server-a:s3'],
-                setPinnedSessionKeysV1,
+                setSessionPin,
             },
         });
 
-        expect(setPinnedSessionKeysV1).toHaveBeenCalledTimes(1);
-        expect(setPinnedSessionKeysV1).toHaveBeenCalledWith(['server-a:s2', 'server-a:s3', 'server-a:s1']);
+        expect(setSessionPin).toHaveBeenCalledTimes(2);
+        expect(setSessionPin).toHaveBeenNthCalledWith(1, {
+            target: expect.objectContaining({ key: 'server-a:s1', sessionId: 's1' }),
+            pinned: true,
+        });
+        expect(setSessionPin).toHaveBeenNthCalledWith(2, {
+            target: expect.objectContaining({ key: 'server-a:s2', sessionId: 's2' }),
+            pinned: true,
+        });
         expect(result.succeeded.map((entry) => entry.target.key)).toEqual(['server-a:s1', 'server-a:s2']);
         expect(result.failed).toEqual([]);
         expect(result.remainingSelectedKeys).toEqual([]);
     });
 
-    it('removes tags from selected sessions with one merged settings write and deletes empty tag entries', async () => {
-        const setSessionTagsV1 = vi.fn(async () => undefined);
+    it('removes tags from selected sessions through per-target organization operations and sends empty tag assignments', async () => {
+        const setSessionTagAssignments = vi.fn(async () => undefined);
 
         const result = await executeSessionBulkAction({
             action: {
@@ -96,23 +102,22 @@ describe('executeSessionBulkAction', () => {
                 tags: ['important', 'later'],
             },
             targets: [
-                target({ key: 'server-a:s1', sessionId: 's1' }),
-                target({ key: 'server-a:s2', sessionId: 's2' }),
+                target({ key: 'server-a:s1', sessionId: 's1', tags: ['important', 'keep'] }),
+                target({ key: 'server-a:s2', sessionId: 's2', tags: ['later'] }),
             ],
             context: {
-                sessionTagsV1: {
-                    'server-a:s1': ['important', 'keep'],
-                    'server-a:s2': ['later'],
-                    'server-a:s3': ['important'],
-                },
-                setSessionTagsV1,
+                setSessionTagAssignments,
             },
         });
 
-        expect(setSessionTagsV1).toHaveBeenCalledTimes(1);
-        expect(setSessionTagsV1).toHaveBeenCalledWith({
-            'server-a:s1': ['keep'],
-            'server-a:s3': ['important'],
+        expect(setSessionTagAssignments).toHaveBeenCalledTimes(2);
+        expect(setSessionTagAssignments).toHaveBeenNthCalledWith(1, {
+            target: expect.objectContaining({ key: 'server-a:s1', sessionId: 's1' }),
+            tags: ['keep'],
+        });
+        expect(setSessionTagAssignments).toHaveBeenNthCalledWith(2, {
+            target: expect.objectContaining({ key: 'server-a:s2', sessionId: 's2' }),
+            tags: [],
         });
         expect(result.succeeded.map((entry) => entry.target.key)).toEqual(['server-a:s1', 'server-a:s2']);
     });

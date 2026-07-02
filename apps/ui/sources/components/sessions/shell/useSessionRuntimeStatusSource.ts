@@ -13,6 +13,10 @@ type SessionRuntimeStatusFields = Pick<
     | 'thinkingAt'
     | 'latestTurnStatus'
     | 'latestTurnStatusObservedAt'
+    | 'runtimeActivityActiveCount'
+    | 'runtimeActivityObservedAt'
+    | 'runtimeActivityExpiresAt'
+    | 'runtimeActivitySourceClass'
     | 'meaningfulActivityAt'
     | 'lastRuntimeIssue'
     | 'pendingPermissionRequestCount'
@@ -31,6 +35,10 @@ function selectSessionRuntimeStatusFields(session: Session): SessionRuntimeStatu
         thinkingAt: session.thinkingAt,
         latestTurnStatus: session.latestTurnStatus,
         latestTurnStatusObservedAt: session.latestTurnStatusObservedAt,
+        runtimeActivityActiveCount: session.runtimeActivityActiveCount,
+        runtimeActivityObservedAt: session.runtimeActivityObservedAt,
+        runtimeActivityExpiresAt: session.runtimeActivityExpiresAt,
+        runtimeActivitySourceClass: session.runtimeActivitySourceClass,
         meaningfulActivityAt: session.meaningfulActivityAt,
         lastRuntimeIssue: session.lastRuntimeIssue,
         pendingPermissionRequestCount: session.pendingPermissionRequestCount,

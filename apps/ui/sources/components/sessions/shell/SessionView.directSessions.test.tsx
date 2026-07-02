@@ -2,14 +2,23 @@ import { flushHookEffects } from '@/dev/testkit/hooks/flushHookEffects';
 import * as React from 'react';
 import { act } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildSystemSessionMetadataV1, ConnectedServiceQuotaSnapshotV1Schema } from '@happier-dev/protocol';
+import {
+  buildProviderAccountUsageRecordId,
+  buildSystemSessionMetadataV1,
+  ConnectedServiceQuotaSnapshotV1Schema,
+  ProviderAccountUsageSnapshotV1Schema,
+  SESSION_RUNNER_RUNTIME_STATE_FIELD_ID,
+  type ProviderAccountUsageSnapshotV1,
+} from '@happier-dev/protocol';
 import type { connectedServiceQuotaRecoveryCreditConsume } from '@/sync/ops/connectedServiceQuotaRecoveryCredits';
+import type { RestartStaleSessionRunnerResult } from '@/sync/ops/sessionRunnerRestart';
 
 import { AppPaneProvider } from '@/components/appShell/panes/AppPaneProvider';
 import { pressTestInstanceAsync, renderScreen, standardCleanup } from '@/dev/testkit';
 import { localSettingsDefaults, type LocalSettings } from '@/sync/domains/settings/localSettings';
 import { settingsDefaults, type Settings } from '@/sync/domains/settings/settings';
 import { listOpenApprovalArtifactsForSession } from '@/sync/domains/artifacts/approvalArtifacts';
+import { connectedServiceProfileKey } from '@/sync/domains/connectedServices/connectedServiceProfilePreferences';
 import { installSessionShellCommonModuleMocks } from './sessionShellTestHelpers';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -89,6 +98,14 @@ const connectedServiceQuotaRecoveryCreditConsumeSpy = vi.hoisted(() =>
     (...args: Parameters<typeof connectedServiceQuotaRecoveryCreditConsume>) => ReturnType<typeof connectedServiceQuotaRecoveryCreditConsume>
   >(async () => ({ ok: false, errorCode: 'no_recovery_credit_available', error: 'no_recovery_credit_available' })),
 );
+const restartStaleSessionRunnerSpy = vi.hoisted(() =>
+  vi.fn<(_request: unknown) => Promise<RestartStaleSessionRunnerResult>>(
+    async (_request: unknown) => ({ ok: true, status: 'restarted', sessionId: 's1' }),
+  ),
+);
+const getSessionRunnerRuntimeStatusSpy = vi.hoisted(() =>
+  vi.fn<(_request: unknown) => Promise<unknown>>(async () => null),
+);
 const setUsageLimitRecoverySettingsSpy = vi.hoisted(() => vi.fn());
 const deleteSessionReviewCommentDraftSpy = vi.hoisted(() => vi.fn());
 const clearSessionReviewCommentDraftsSpy = vi.hoisted(() => vi.fn());
@@ -134,6 +151,10 @@ const draftHookState = vi.hoisted(() => ({
 const quotaSnapshotsState = vi.hoisted(() => ({
   current: {} as Record<string, any>,
   requestedProfiles: [] as ReadonlyArray<Readonly<{ serviceId: string; profileId: string }>>,
+}));
+const providerAccountUsageSnapshotsState = vi.hoisted(() => ({
+  current: {} as Record<string, ProviderAccountUsageSnapshotV1 | null>,
+  requestedRecordIds: [] as readonly string[],
 }));
 const storageState = vi.hoisted(() => ({
   sessions: {
@@ -191,6 +212,21 @@ const recipientStateState = vi.hoisted(() => ({
 vi.mock('react-native-reanimated', () => ({}));
 vi.mock('expo-linear-gradient', () => ({
   LinearGradient: 'LinearGradient',
+}));
+vi.mock('expo-haptics', () => ({
+  impactAsync: vi.fn(),
+  notificationAsync: vi.fn(),
+  selectionAsync: vi.fn(),
+  ImpactFeedbackStyle: {
+    Light: 'light',
+    Medium: 'medium',
+    Heavy: 'heavy',
+  },
+  NotificationFeedbackType: {
+    Success: 'success',
+    Warning: 'warning',
+    Error: 'error',
+  },
 }));
 vi.mock('@expo/vector-icons', () => ({
   Ionicons: 'Ionicons',
@@ -335,7 +371,17 @@ vi.mock('@/auth/context/AuthContext', () => ({
 vi.mock('@/hooks/server/connectedServices/useConnectedServiceQuotaSnapshots', () => ({
   useConnectedServiceQuotaSnapshots: (profiles: ReadonlyArray<Readonly<{ serviceId: string; profileId: string }>>) => {
     quotaSnapshotsState.requestedProfiles = profiles;
-    return quotaSnapshotsState.current;
+    return {
+      snapshotsByKey: quotaSnapshotsState.current,
+      loadingByKey: {},
+    };
+  },
+}));
+
+vi.mock('@/hooks/server/connectedServices/useProviderAccountUsageSnapshots', () => ({
+  useProviderAccountUsageSnapshots: (recordIds: readonly string[]) => {
+    providerAccountUsageSnapshotsState.requestedRecordIds = recordIds;
+    return providerAccountUsageSnapshotsState.current;
   },
 }));
 
@@ -538,6 +584,10 @@ vi.mock('@/sync/ops/sessionUsageLimitRecovery', () => ({
   sessionUsageLimitConsumeResetCredit: (sessionId: string, opts?: unknown) =>
     sessionUsageLimitConsumeResetCreditSpy(sessionId, opts),
 }));
+vi.mock('@/sync/ops/sessionRunnerRestart', () => ({
+  getSessionRunnerRuntimeStatus: (request: unknown) => getSessionRunnerRuntimeStatusSpy(request),
+  restartStaleSessionRunner: (request: unknown) => restartStaleSessionRunnerSpy(request),
+}));
 vi.mock('@/sync/ops/connectedServiceQuotaRecoveryCredits', () => ({
   connectedServiceQuotaRecoveryCreditConsume: connectedServiceQuotaRecoveryCreditConsumeSpy,
 }));
@@ -643,19 +693,78 @@ describe('SessionView (direct sessions)', () => {
       badge.key === 'session-usage-limit-recovery');
   }
 
+  function findStaleRunnerStatusBadge(screen: Awaited<ReturnType<typeof renderSessionView>>) {
+    return findAgentInput(screen).props.statusBadges.find((badge: { key?: string }) =>
+      badge.key === 'session-stale-runner');
+  }
+
+  function installStaleSessionRunnerStatus() {
+    storageState.machines['machine-1'] = {
+      id: 'machine-1',
+      active: true,
+      metadata: { host: 'happy-host', homeDir: '/tmp' },
+    } as any;
+    storageState.sessions.s1 = {
+      ...storageState.sessions.s1,
+      active: true,
+      metadata: {
+        ...storageState.sessions.s1.metadata,
+        [SESSION_RUNNER_RUNTIME_STATE_FIELD_ID]: {
+          v: 1,
+          sessionId: 's1',
+          machineId: 'machine-1',
+          observedAtMs: 1,
+          runner: {
+            pid: 123,
+            runtimeId: 'version:cli-old',
+            processCommandHash: 'hash-old',
+            entrypointVersion: 'cli-old',
+            entrypointSource: 'process_command',
+            startedBy: 'daemon',
+            startingMode: 'remote',
+          },
+          daemon: {
+            currentEntrypointVersion: 'version:cli-new',
+            currentEntrypointSource: 'launch_spec',
+          },
+          versionState: 'stale',
+          statusSource: 'daemon_tracking',
+          plannedRestart: {
+            supported: true,
+            eligible: true,
+          },
+        },
+      },
+    };
+  }
+
+  function installUnknownIdentityStaleSessionRunnerStatus() {
+    installStaleSessionRunnerStatus();
+    const metadata = storageState.sessions.s1.metadata as Record<string, any>;
+    metadata[SESSION_RUNNER_RUNTIME_STATE_FIELD_ID] = {
+      ...metadata[SESSION_RUNNER_RUNTIME_STATE_FIELD_ID],
+      daemon: {
+        currentEntrypointVersion: null,
+        currentEntrypointSource: 'unknown',
+      },
+    };
+  }
+
   function buildOpenAiCodexWorkQuotaSnapshot(params: Readonly<{
     fetchedAt: number;
     used: number;
+    profileId?: string;
+    accountLabel?: string;
     recoveryCredits?: unknown;
   }>) {
     return ConnectedServiceQuotaSnapshotV1Schema.parse({
       v: 1,
       serviceId: 'openai-codex',
-      profileId: 'work',
+      profileId: params.profileId ?? 'work',
       fetchedAt: params.fetchedAt,
       staleAfterMs: 60_000,
       planLabel: null,
-      accountLabel: null,
+      accountLabel: params.accountLabel ?? null,
       ...(typeof params.recoveryCredits !== 'undefined' ? { recoveryCredits: params.recoveryCredits } : {}),
       meters: [{
         meterId: 'weekly',
@@ -668,6 +777,49 @@ describe('SessionView (direct sessions)', () => {
         resetsAt: null,
         status: 'ok',
         details: {},
+      }],
+    });
+  }
+
+  function buildProviderAccountUsageSnapshot(params: Readonly<{
+    accountSubjectId?: string;
+    accountLabel?: string;
+    used: number;
+    recoveryCredits?: unknown;
+  }>): ProviderAccountUsageSnapshotV1 {
+    const accountSubjectId = params.accountSubjectId ?? 'provider-account-1';
+    const recordKey = {
+      providerId: 'codex',
+      accountSubjectId,
+      subjectKind: 'account',
+      quotaScope: 'account',
+    } as const;
+    return ProviderAccountUsageSnapshotV1Schema.parse({
+      v: 1,
+      recordId: buildProviderAccountUsageRecordId(recordKey),
+      recordKey,
+      providerId: 'codex',
+      accountSubject: { kind: 'providerSubject', id: accountSubjectId },
+      observedAtMs: 1_000,
+      fetchedAtMs: 1_000,
+      staleAfterMs: 60_000,
+      source: 'providerHttp',
+      confidence: 'confirmed',
+      state: 'loaded_data',
+      planLabel: 'Pro',
+      accountLabel: params.accountLabel ?? 'Provider account',
+      ...(typeof params.recoveryCredits !== 'undefined' ? { recoveryCredits: params.recoveryCredits } : {}),
+      meters: [{
+        meterId: 'weekly',
+        label: 'Weekly',
+        used: params.used,
+        limit: 100,
+        unit: 'count',
+        utilizationPct: null,
+        remainingPct: null,
+        resetsAt: null,
+        status: 'ok',
+        details: { limitCategory: 'usage_limit' },
       }],
     });
   }
@@ -769,6 +921,10 @@ describe('SessionView (direct sessions)', () => {
     sessionUsageLimitSwitchAccountNowSpy.mockClear();
     sessionUsageLimitConsumeResetCreditSpy.mockReset();
     sessionUsageLimitConsumeResetCreditSpy.mockResolvedValue({ ok: true });
+    restartStaleSessionRunnerSpy.mockReset();
+    restartStaleSessionRunnerSpy.mockResolvedValue({ ok: true, status: 'restarted', sessionId: 's1' });
+    getSessionRunnerRuntimeStatusSpy.mockReset();
+    getSessionRunnerRuntimeStatusSpy.mockResolvedValue(null);
     connectedServiceQuotaRecoveryCreditConsumeSpy.mockReset();
     connectedServiceQuotaRecoveryCreditConsumeSpy.mockResolvedValue({ ok: false, errorCode: 'no_recovery_credit_available', error: 'no_recovery_credit_available' });
     setUsageLimitRecoverySettingsSpy.mockClear();
@@ -791,6 +947,8 @@ describe('SessionView (direct sessions)', () => {
     draftHookState.valuesBySessionId.clear();
     quotaSnapshotsState.current = {};
     quotaSnapshotsState.requestedProfiles = [];
+    providerAccountUsageSnapshotsState.current = {};
+    providerAccountUsageSnapshotsState.requestedRecordIds = [];
     storageState.sessions.s1 = {
       id: 's1',
       seq: 1,
@@ -918,6 +1076,208 @@ describe('SessionView (direct sessions)', () => {
       mode: 'auto_wait',
       resumePromptMode: 'off',
     }));
+  });
+
+  it('renders stale-runner composer notice and badge from canonical daemon status', async () => {
+    installStaleSessionRunnerStatus();
+
+    const screen = await renderSessionViewAndSettle({ routeServerId: 'server-route-1' });
+    const staleRunnerBadge = findStaleRunnerStatusBadge(screen);
+
+    expect(screen.findByTestId('session-staleRunner-version')).toBeTruthy();
+    expect(staleRunnerBadge).toEqual(expect.objectContaining({
+      testID: 'session-staleRunner-status-badge',
+      tone: 'warning',
+    }));
+  });
+
+  it('renders stale-runner composer notice from daemon status RPC when metadata is not seeded', async () => {
+    storageState.machines['machine-1'] = {
+      id: 'machine-1',
+      active: true,
+      metadata: { host: 'happy-host', homeDir: '/tmp' },
+    } as any;
+    storageState.sessions.s1 = {
+      ...storageState.sessions.s1,
+      active: true,
+      metadata: {
+        ...storageState.sessions.s1.metadata,
+        machineId: 'machine-1',
+      },
+    };
+    getSessionRunnerRuntimeStatusSpy.mockResolvedValueOnce({
+      v: 1,
+      sessionId: 's1',
+      machineId: 'machine-1',
+      observedAtMs: 1,
+      runner: {
+        pid: 123,
+        runtimeId: 'version:cli-old',
+        processCommandHash: 'hash-old',
+        entrypointVersion: 'cli-old',
+        entrypointSource: 'process_command',
+        startedBy: 'daemon',
+        startingMode: 'remote',
+      },
+      daemon: {
+        currentEntrypointVersion: 'version:cli-new',
+        currentEntrypointSource: 'launch_spec',
+      },
+      versionState: 'stale',
+      statusSource: 'daemon_tracking',
+      plannedRestart: {
+        supported: true,
+        eligible: true,
+      },
+    });
+
+    const screen = await renderSessionViewAndSettle({ routeServerId: 'server-route-1' });
+    await settleDirectSessionView();
+
+    expect(getSessionRunnerRuntimeStatusSpy).toHaveBeenCalledWith({
+      sessionId: 's1',
+      machineId: 'machine-1',
+      serverId: 'server-route-1',
+    });
+    expect(screen.findByTestId('session-staleRunner-version')).toBeTruthy();
+    await pressTestInstanceAsync(screen.findByTestId('session-staleRunner-version-restart'));
+    expect(restartStaleSessionRunnerSpy).toHaveBeenCalledWith({
+      sessionId: 's1',
+      machineId: 'machine-1',
+      serverId: 'server-route-1',
+      expectedRunnerPid: 123,
+      expectedProcessCommandHash: 'hash-old',
+      expectedRunnerEntrypointIdentity: 'version:cli-old',
+    });
+  });
+
+  it('does not render stale-runner composer notice when canonical identity is unknown', async () => {
+    installUnknownIdentityStaleSessionRunnerStatus();
+
+    const screen = await renderSessionViewAndSettle({ routeServerId: 'server-route-1' });
+
+    expect(screen.findByTestId('session-staleRunner-version')).toBeNull();
+    expect(findStaleRunnerStatusBadge(screen)).toBeUndefined();
+  });
+
+  it('lets the stale-runner status badge hide and show the composer notice', async () => {
+    installStaleSessionRunnerStatus();
+
+    const screen = await renderSessionViewAndSettle({ routeServerId: 'server-route-1' });
+    const staleRunnerBadge = findStaleRunnerStatusBadge(screen);
+
+    expect(screen.findByTestId('session-staleRunner-version')).toBeTruthy();
+
+    await act(async () => {
+      staleRunnerBadge.onPress();
+    });
+    expect(screen.findByTestId('session-staleRunner-version')).toBeNull();
+
+    await act(async () => {
+      staleRunnerBadge.onPress();
+    });
+    expect(screen.findByTestId('session-staleRunner-version')).toBeTruthy();
+  });
+
+  it('invokes the daemon-owned stale-runner restart operation with expected runner identity', async () => {
+    installStaleSessionRunnerStatus();
+    restartStaleSessionRunnerSpy.mockResolvedValueOnce({ ok: true, status: 'restarted', sessionId: 's1' });
+
+    const screen = await renderSessionViewAndSettle({ routeServerId: 'server-route-1' });
+    await pressTestInstanceAsync(screen.findByTestId('session-staleRunner-version-restart'));
+
+    expect(restartStaleSessionRunnerSpy).toHaveBeenCalledWith({
+      sessionId: 's1',
+      machineId: 'machine-1',
+      serverId: 'server-route-1',
+      expectedRunnerPid: 123,
+      expectedProcessCommandHash: 'hash-old',
+      expectedRunnerEntrypointIdentity: 'version:cli-old',
+    });
+    expect(screen.findByTestId('session-staleRunner-version')).toBeNull();
+  });
+
+  it('keeps stale-runner restart disabled for view-only shared sessions', async () => {
+    installStaleSessionRunnerStatus();
+    storageState.sessions.s1 = {
+      ...storageState.sessions.s1,
+      accessLevel: 'view',
+    };
+
+    const screen = await renderSessionViewAndSettle({ routeServerId: 'server-route-1' });
+
+    expect(screen.findByTestId('session-staleRunner-version')).toBeTruthy();
+    await pressTestInstanceAsync(screen.findByTestId('session-staleRunner-version-restart'));
+
+    expect(restartStaleSessionRunnerSpy).not.toHaveBeenCalled();
+    expect(screen.findByTestId('session-staleRunner-version')).toBeTruthy();
+  });
+
+  it('dismisses the stale-runner notice when restart reports already current', async () => {
+    installStaleSessionRunnerStatus();
+    restartStaleSessionRunnerSpy.mockResolvedValueOnce({ ok: true, status: 'already_current', sessionId: 's1' });
+
+    const screen = await renderSessionViewAndSettle({ routeServerId: 'server-route-1' });
+    await pressTestInstanceAsync(screen.findByTestId('session-staleRunner-version-restart'));
+
+    expect(restartStaleSessionRunnerSpy).toHaveBeenCalledTimes(1);
+    expect(screen.findByTestId('session-staleRunner-version')).toBeNull();
+  });
+
+  it('keeps the stale-runner notice visible and reports daemon restart failures', async () => {
+    installStaleSessionRunnerStatus();
+    restartStaleSessionRunnerSpy.mockResolvedValueOnce({ ok: false, status: 'failure', sessionId: 's1' });
+
+    const screen = await renderSessionViewAndSettle({ routeServerId: 'server-route-1' });
+    await pressTestInstanceAsync(screen.findByTestId('session-staleRunner-version-restart'));
+
+    expect(restartStaleSessionRunnerSpy).toHaveBeenCalledTimes(1);
+    expect(modalAlertSpy).toHaveBeenCalledWith(
+      'session.staleRunner.errorTitle',
+      'session.staleRunner.errorBody',
+    );
+    expect(screen.findByTestId('session-staleRunner-version')).toBeTruthy();
+  });
+
+  it('keeps usage-limit status badge behavior when stale-runner status is also visible', async () => {
+    installStaleSessionRunnerStatus();
+    featureEnabledState['sessions.usageLimitRecovery'] = true;
+    settingByKeyState.current.usageLimitRecoverySettingsV1 = { v: 1, mode: 'ask', resumePromptMode: 'off' };
+    storageState.sessions.s1 = {
+      ...storageState.sessions.s1,
+      lastRuntimeIssue: {
+        v: 1,
+        scope: 'primary_session',
+        status: 'failed',
+        code: 'usage_limit',
+        source: 'usage_limit',
+        occurredAt: 1,
+        provider: 'opencode',
+        usageLimit: {
+          v: 1,
+          resetAtMs: Date.UTC(2026, 4, 17, 17, 30, 0),
+          retryAfterMs: null,
+          quotaScope: 'account',
+          recoverability: 'wait',
+        },
+      },
+    };
+
+    const screen = await renderSessionViewAndSettle({ routeServerId: 'server-route-1' });
+
+    expect(findUsageLimitStatusBadge(screen)).toEqual(expect.objectContaining({
+      key: 'session-usage-limit-recovery',
+      testID: 'session-usageLimit-status-badge',
+    }));
+    expect(findStaleRunnerStatusBadge(screen)).toEqual(expect.objectContaining({
+      key: 'session-stale-runner',
+      testID: 'session-staleRunner-status-badge',
+    }));
+
+    await pressTestInstanceAsync(screen.findByTestId('session-usageLimit-recovery-remember'));
+
+    expect(sessionUsageLimitWaitResumeEnableSpy).toHaveBeenCalledTimes(1);
+    expect(restartStaleSessionRunnerSpy).not.toHaveBeenCalled();
   });
 
   it('lets the usage-limit status badge collapse and reopen the recovery banner', async () => {
@@ -1576,6 +1936,92 @@ describe('SessionView (direct sessions)', () => {
     }));
   });
 
+  it('falls back to native provider account usage metadata for the provider usage badge without a connected binding', async () => {
+    featureEnabledState['connectedServices.quotas'] = true;
+    const snapshot = buildProviderAccountUsageSnapshot({
+      used: 62,
+      accountLabel: 'Native Codex account',
+    });
+    providerAccountUsageSnapshotsState.current = {
+      [snapshot.recordId]: snapshot,
+    };
+    storageState.sessions.s1 = {
+      ...storageState.sessions.s1,
+      metadata: {
+        ...storageState.sessions.s1.metadata,
+        providerAccountUsageRefsV1: {
+          v: 1,
+          recordIds: [snapshot.recordId],
+          updatedAtMs: 1_000,
+        },
+      },
+    };
+
+    const screen = await renderSessionViewAndSettle();
+
+    expect(providerAccountUsageSnapshotsState.requestedRecordIds).toEqual([snapshot.recordId]);
+    expect(quotaSnapshotsState.requestedProfiles).toEqual([]);
+    expect(findAgentInput(screen).props.providerUsageGauge).toEqual(expect.objectContaining({
+      serviceId: 'openai-codex',
+      providerDisplayName: 'connectedServices.serviceNames.openaiCodex',
+      activeAccountDisplayLabel: 'Native Codex account',
+      ringValueLabel: '38',
+    }));
+  });
+
+  it('prefers the connected-service quota view ahead of connected account-usage metadata for connected bindings', async () => {
+    featureEnabledState['connectedServices.quotas'] = true;
+    const snapshot = buildProviderAccountUsageSnapshot({
+      used: 64,
+      accountLabel: 'Connected Codex account',
+    });
+    providerAccountUsageSnapshotsState.current = {
+      [snapshot.recordId]: snapshot,
+    };
+    storageState.sessions.s1 = {
+      ...storageState.sessions.s1,
+      metadata: {
+        ...storageState.sessions.s1.metadata,
+        connectedServices: {
+          bindingsByServiceId: {
+            'openai-codex': {
+              source: 'connected',
+              selection: 'profile',
+              profileId: 'work',
+            },
+          },
+        },
+        providerAccountUsageRefsV1: {
+          v: 1,
+          recordIds: [snapshot.recordId],
+          updatedAtMs: 1_000,
+        },
+      },
+    };
+    quotaSnapshotsState.current = {
+      'openai-codex/work': buildOpenAiCodexWorkQuotaSnapshot({
+        fetchedAt: 2_000,
+        used: 82,
+        accountLabel: 'View-backed Codex account',
+      }),
+    };
+
+    const screen = await renderSessionViewAndSettle();
+
+    expect(providerAccountUsageSnapshotsState.requestedRecordIds).toEqual([snapshot.recordId]);
+    expect(quotaSnapshotsState.requestedProfiles).toEqual([
+      expect.objectContaining({
+        serviceId: 'openai-codex',
+        profileId: 'work',
+      }),
+    ]);
+    expect(findAgentInput(screen).props.providerUsageGauge).toEqual(expect.objectContaining({
+      serviceId: 'openai-codex',
+      activeAccountDisplayLabel: 'View-backed Codex account',
+      ringValueLabel: '18',
+    }));
+  });
+
   it('uses the active group profile for provider usage when the binding stores only a group id', async () => {
     featureEnabledState['connectedServices.quotas'] = true;
     storageState.profile = {
@@ -1709,6 +2155,94 @@ describe('SessionView (direct sessions)', () => {
     expect(screen.findByTestId('session-usageLimit-recovery-consumeResetCredit')).toBeNull();
   });
 
+  it('uses connected-service reset-credit consumption from the connected-service quota view for connected-service-bound account usage', async () => {
+    featureEnabledState['connectedServices.quotas'] = true;
+    featureEnabledState['sessions.usageLimitRecovery'] = true;
+    settingByKeyState.current.usageLimitRecoverySettingsV1 = { v: 1, mode: 'ask', resumePromptMode: 'off' };
+    installConnectedServiceWorkProfileRecoveryCreditSession();
+    quotaSnapshotsState.current = {
+      'openai-codex/work': buildOpenAiCodexWorkQuotaSnapshot({
+        fetchedAt: 2_000,
+        used: 82,
+        accountLabel: 'Connected Codex account',
+        recoveryCredits: {
+          kind: 'usage_limit_resets',
+          availableCount: 1,
+          credits: [{ kind: 'usage_limit_reset', status: 'available' }],
+        },
+      }),
+    };
+    connectedServiceQuotaRecoveryCreditConsumeSpy.mockResolvedValue({
+      ok: true,
+      receipt: {
+        idempotencyKey: 'reset-credit-1',
+        status: 'consumed',
+      },
+      snapshot: null,
+    });
+
+    const screen = await renderSessionViewAndSettle({ routeServerId: 'server-route-1' });
+    expect(findAgentInput(screen).props.providerUsageGauge).toEqual(expect.objectContaining({
+      activeAccountDisplayLabel: 'Connected Codex account',
+      recoveryCreditSummary: expect.objectContaining({ availableCount: 1 }),
+    }));
+
+    await act(async () => {
+      await findAgentInput(screen).props.onProviderUsageRecoveryCreditPress();
+    });
+    await settleDirectSessionView();
+
+    expect(connectedServiceQuotaRecoveryCreditConsumeSpy).toHaveBeenCalledWith({
+      machineId: 'machine-1',
+      serverId: 'server-route-1',
+      serviceId: 'openai-codex',
+      profileId: 'work',
+      sourceSnapshotFetchedAtMs: 2_000,
+    });
+    expect(sessionUsageLimitConsumeResetCreditSpy).not.toHaveBeenCalled();
+  });
+
+  it('uses connected-service reset-credit consumption from the recovery banner for connected-service-bound account usage', async () => {
+    featureEnabledState['connectedServices.quotas'] = true;
+    featureEnabledState['sessions.usageLimitRecovery'] = true;
+    settingByKeyState.current.usageLimitRecoverySettingsV1 = { v: 1, mode: 'ask', resumePromptMode: 'off' };
+    installConnectedServiceWorkProfileRecoveryCreditSession();
+    quotaSnapshotsState.current = {
+      'openai-codex/work': buildOpenAiCodexWorkQuotaSnapshot({
+        fetchedAt: 2_000,
+        used: 82,
+        accountLabel: 'Connected Codex account',
+        recoveryCredits: {
+          kind: 'usage_limit_resets',
+          availableCount: 1,
+          credits: [{ kind: 'usage_limit_reset', status: 'available' }],
+        },
+      }),
+    };
+    connectedServiceQuotaRecoveryCreditConsumeSpy.mockResolvedValue({
+      ok: true,
+      receipt: {
+        idempotencyKey: 'reset-credit-1',
+        status: 'consumed',
+      },
+      snapshot: null,
+    });
+
+    const screen = await renderSessionViewAndSettle({ routeServerId: 'server-route-1' });
+
+    await pressTestInstanceAsync(screen.findByTestId('session-usageLimit-recovery-consumeResetCredit'));
+    await settleDirectSessionView();
+
+    expect(connectedServiceQuotaRecoveryCreditConsumeSpy).toHaveBeenCalledWith({
+      machineId: 'machine-1',
+      serverId: 'server-route-1',
+      serviceId: 'openai-codex',
+      profileId: 'work',
+      sourceSnapshotFetchedAtMs: 2_000,
+    });
+    expect(sessionUsageLimitConsumeResetCreditSpy).not.toHaveBeenCalled();
+  });
+
   it('uses later polled quota after connected-service reset-credit consume returns no snapshot', async () => {
     featureEnabledState['connectedServices.quotas'] = true;
     featureEnabledState['sessions.usageLimitRecovery'] = true;
@@ -1775,6 +2309,53 @@ describe('SessionView (direct sessions)', () => {
     }));
     expect(findAgentInput(screen).props.onProviderUsageRecoveryCreditPress).toBeUndefined();
     expect(screen.findByTestId('session-usageLimit-recovery-consumeResetCredit')).toBeNull();
+  });
+
+  it('does not expose connected-service reset-credit consumption for native provider account usage refs', async () => {
+    featureEnabledState['connectedServices.quotas'] = true;
+    featureEnabledState['sessions.usageLimitRecovery'] = true;
+    const snapshot = buildProviderAccountUsageSnapshot({
+      used: 82,
+      recoveryCredits: {
+        kind: 'usage_limit_resets',
+        availableCount: 1,
+        credits: [{ kind: 'usage_limit_reset', status: 'available' }],
+      },
+    });
+    providerAccountUsageSnapshotsState.current = {
+      [snapshot.recordId]: snapshot,
+    };
+    storageState.sessions.s1 = {
+      ...storageState.sessions.s1,
+      metadata: {
+        ...storageState.sessions.s1.metadata,
+        providerAccountUsageRefsV1: {
+          v: 1,
+          recordIds: [snapshot.recordId],
+          updatedAtMs: 1_000,
+        },
+      },
+    };
+
+    const screen = await renderSessionViewAndSettle({ routeServerId: 'server-route-1' });
+
+    expect(providerAccountUsageSnapshotsState.requestedRecordIds).toEqual([snapshot.recordId]);
+    expect(quotaSnapshotsState.requestedProfiles).toEqual([]);
+    expect(findAgentInput(screen).props.providerUsageGauge).toEqual(expect.objectContaining({
+      recoveryCreditSummary: expect.objectContaining({ availableCount: 1 }),
+    }));
+    await act(async () => {
+      await findAgentInput(screen).props.onProviderUsageRecoveryCreditPress();
+    });
+    expect(screen.findByTestId('session-usageLimit-recovery-consumeResetCredit')).toBeNull();
+    expect(connectedServiceQuotaRecoveryCreditConsumeSpy).not.toHaveBeenCalled();
+    expect(sessionUsageLimitConsumeResetCreditSpy).toHaveBeenCalledWith(
+      's1',
+      expect.objectContaining({
+        serverId: 'server-route-1',
+        refreshMachineTargets: expect.any(Function),
+      }),
+    );
   });
 
   it('falls back to session consume-reset-credit when provider usage has no connected-service profile ref', async () => {

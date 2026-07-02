@@ -10,7 +10,6 @@ import {
     useVisibleSessionListPaneState,
     type VisibleSessionListViewDataOptions,
 } from '@/hooks/session/useVisibleSessionListViewData';
-import type { SessionListViewItem } from '@/sync/domains/session/listing/sessionListViewData';
 import { HiddenInactiveSessionsEmptyState } from '@/components/sessions/guidance/HiddenInactiveSessionsEmptyState';
 import { SessionsListContent } from '@/components/sessions/shell/SessionsList';
 import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
@@ -20,6 +19,13 @@ import {
     resolveSessionListSurfaceOwnership,
     SESSION_LIST_SURFACE_OWNER_PHONE_ROOT,
 } from '@/components/sessions/shell/surface/sessionListSurfaceOwnership';
+import {
+    areRetainedSessionListPaneStatesEqual,
+    readRetainedSessionListPaneSnapshot,
+    retainSessionListPaneSnapshot,
+    updateRetainedSessionListPaneActiveSessionId,
+    useSessionListPaneSourceScopeKey,
+} from '@/components/sessions/shell/surface/sessionListPaneRetention';
 
 const stylesheet = StyleSheet.create((theme) => ({
     container: {
@@ -106,12 +112,7 @@ const SessionsListWrapperContent = React.memo((props: { pathname: string; surfac
     const { directSessionsEnabled, storageKind, setStorageKind } = useSessionListStorageKind();
     const pathname = props.pathname;
     const surfaceRoutePathname = props.surfaceRoutePathname;
-    const retainedPaneStateRef = React.useRef<Readonly<{
-        storageKind: typeof storageKind;
-        sessionListViewData: SessionListViewItem[] | null;
-        activeSessionId: string | null;
-    }> | null>(null);
-    const paneStateStorageKindRef = React.useRef<typeof storageKind | null>(null);
+    const sourceScopeKey = useSessionListPaneSourceScopeKey();
     const surfaceOwnership = React.useMemo(
         () => resolveSessionListSurfaceOwnership({
             ownerKey: SESSION_LIST_SURFACE_OWNER_PHONE_ROOT,
@@ -126,25 +127,59 @@ const SessionsListWrapperContent = React.memo((props: { pathname: string; surfac
         () => readSessionIdFromPathname(surfaceRoutePathname),
         [surfaceRoutePathname],
     );
+    const paneStateStorageKindRef = React.useRef<typeof storageKind | null>(null);
+    const paneStateSourceScopeKeyRef = React.useRef<string | null>(null);
     const [paneState, setPaneState] = React.useState<SessionsListPaneState>(EMPTY_SESSIONS_LIST_PANE_STATE);
     const handlePaneState = React.useCallback((nextPaneState: SessionsListPaneState) => {
         paneStateStorageKindRef.current = storageKind;
-        setPaneState((currentPaneState) => (currentPaneState === nextPaneState ? currentPaneState : nextPaneState));
-    }, [storageKind]);
+        paneStateSourceScopeKeyRef.current = sourceScopeKey;
+        retainSessionListPaneSnapshot({
+            activeSessionId: routeActiveSessionId,
+            paneState: nextPaneState,
+            pathname,
+            sourceScopeKey,
+            storageKind,
+        });
+        setPaneState((currentPaneState) => (
+            areRetainedSessionListPaneStatesEqual(currentPaneState, nextPaneState)
+                ? currentPaneState
+                : nextPaneState
+        ));
+    }, [pathname, routeActiveSessionId, sourceScopeKey, storageKind]);
     React.useEffect(() => {
         if (surfaceOwnership.dataActive) return;
-        retainedPaneStateRef.current = {
-            storageKind: paneStateStorageKindRef.current ?? storageKind,
-            sessionListViewData: paneState.sessionListViewData,
-            activeSessionId: foregroundRouteSessionId,
-        };
-    }, [foregroundRouteSessionId, paneState.sessionListViewData, storageKind, surfaceOwnership.dataActive]);
-    const retainedPaneStateForActivation = surfaceOwnership.dataActive
-        && retainedPaneStateRef.current?.storageKind === storageKind
-        ? retainedPaneStateRef.current
+        if (
+            paneStateStorageKindRef.current === storageKind
+            && paneStateSourceScopeKeyRef.current === sourceScopeKey
+        ) {
+            retainSessionListPaneSnapshot({
+                activeSessionId: foregroundRouteSessionId,
+                paneState,
+                pathname,
+                sourceScopeKey,
+                storageKind,
+            });
+        }
+        updateRetainedSessionListPaneActiveSessionId({ pathname, sourceScopeKey, storageKind }, foregroundRouteSessionId);
+    }, [foregroundRouteSessionId, paneState, pathname, sourceScopeKey, storageKind, surfaceOwnership.dataActive]);
+    const retainedPaneStateForActivationCandidate = surfaceOwnership.dataActive
+        ? readRetainedSessionListPaneSnapshot({ pathname, sourceScopeKey, storageKind })
         : null;
+    const retainedPaneStateForActivation = retainedPaneStateForActivationCandidate;
+    const paneStateMatchesSource = paneStateSourceScopeKeyRef.current === null
+        || paneStateSourceScopeKeyRef.current === sourceScopeKey;
+    const paneStateMatchesStorageKind = paneStateStorageKindRef.current === null
+        || paneStateStorageKindRef.current === storageKind;
+    const shouldSeedRetainedSessionListViewData = retainedPaneStateForActivation !== null
+        && (
+            !paneStateMatchesStorageKind
+            || !paneStateMatchesSource
+            || paneState.sessionListViewData === null
+        );
     const paneStateOptions = React.useMemo<VisibleSessionListViewDataOptions>(() => {
-        const retainedSessionListViewData = retainedPaneStateForActivation?.sessionListViewData ?? null;
+        const retainedSessionListViewData = shouldSeedRetainedSessionListViewData
+            ? retainedPaneStateForActivation?.paneState.sessionListViewData ?? null
+            : null;
         return {
             activeSessionId: routeActiveSessionId ?? retainedPaneStateForActivation?.activeSessionId ?? null,
             ...(retainedSessionListViewData
@@ -152,12 +187,13 @@ const SessionsListWrapperContent = React.memo((props: { pathname: string; surfac
                 : {}),
             sessionListSurfaceDataActive: true,
         };
-    }, [retainedPaneStateForActivation, routeActiveSessionId]);
-    React.useEffect(() => {
-        if (!surfaceOwnership.dataActive) return;
-        retainedPaneStateRef.current = null;
-    }, [paneStateOptions, surfaceOwnership.dataActive]);
-    const { sessionListViewData, visibleSessionCount, hasHiddenInactiveSessions } = paneState;
+    }, [retainedPaneStateForActivation, routeActiveSessionId, shouldSeedRetainedSessionListViewData]);
+    const retainedDisplayPaneState = !surfaceOwnership.dataActive
+        ? readRetainedSessionListPaneSnapshot({ pathname, sourceScopeKey, storageKind })?.paneState ?? null
+        : null;
+    const displayPaneState = retainedDisplayPaneState
+        ?? (paneStateMatchesStorageKind && paneStateMatchesSource ? paneState : EMPTY_SESSIONS_LIST_PANE_STATE);
+    const { sessionListViewData, visibleSessionCount, hasHiddenInactiveSessions } = displayPaneState;
     const styles = stylesheet;
     const storageChrome = (
         <SessionsListStorageChrome

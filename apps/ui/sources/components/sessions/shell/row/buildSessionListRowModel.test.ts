@@ -107,6 +107,22 @@ function createPending(createdAtValues: readonly number[] = []): SessionPending 
     };
 }
 
+function createBlockedPending(createdAt: number): SessionPending {
+    return {
+        messages: [{
+            id: 'pending-blocked',
+            localId: null,
+            createdAt,
+            updatedAt: createdAt,
+            text: 'blocked pending',
+            rawRecord: null,
+            pendingDeliveryStatus: 'blocked',
+        }],
+        discarded: [],
+        isLoaded: true,
+    };
+}
+
 function createSettings(
     overrides: Partial<SessionListRowPresentationSettings> = {},
 ): SessionListRowPresentationSettings {
@@ -213,6 +229,55 @@ describe('buildSessionListRowModel', () => {
         expect((model.session as SessionListRenderableSession).meaningfulActivityAt).toBe(900);
     });
 
+    it('preserves row-only blocked pending state when merging the store renderable overlay', () => {
+        const rowSession = createRenderable('s1', {
+            pendingCount: 2,
+            pendingBlockedCount: 1,
+        });
+        const storeRenderable = createRenderable('s1', {
+            pendingCount: 2,
+        });
+
+        const model = buildSessionListRowModel({
+            item: createSessionItem(rowSession),
+            state: { renderable: storeRenderable },
+            dataIndex: 0,
+            isFirst: true,
+            isLast: true,
+            isSingle: true,
+            settings: createSettings(),
+        });
+
+        expect(model.pendingBlockedCount).toBe(1);
+        expect((model.session as SessionListRenderableSession).pendingBlockedCount).toBe(1);
+        expect(model.attention.listState).toBe('action_required');
+    });
+
+    it('treats explicit store-renderable blocked pending zero as authoritative over stale row state', () => {
+        const rowSession = createRenderable('s1', {
+            pendingCount: 1,
+            pendingBlockedCount: 1,
+        });
+        const storeRenderable = createRenderable('s1', {
+            pendingCount: 1,
+            pendingBlockedCount: 0,
+        });
+
+        const model = buildSessionListRowModel({
+            item: createSessionItem(rowSession),
+            state: { renderable: storeRenderable },
+            dataIndex: 0,
+            isFirst: true,
+            isLast: true,
+            isSingle: true,
+            settings: createSettings(),
+        });
+
+        expect(model.pendingBlockedCount).toBe(0);
+        expect((model.session as SessionListRenderableSession).pendingBlockedCount).toBe(0);
+        expect(model.attention.listState).toBe('pending');
+    });
+
     it('derives date-group row activity from the raw updated-at timestamp', () => {
         const session = createRenderable('s1', {
             createdAt: NOW_MS - 900_000,
@@ -257,6 +322,33 @@ describe('buildSessionListRowModel', () => {
         expect(model.attention.rowState).toBe('working');
         expect(model.presentation.secondaryLine).toBe('status');
         expect(model.status.state).toBe('thinking');
+    });
+
+    it('uses provider runtime activity for the same working row status and attention placement', () => {
+        const model = buildSessionListRowModel({
+            item: createSessionItem(createRenderable('s1', {
+                active: true,
+                activeAt: NOW_MS - 10_000,
+                thinking: false,
+                thinkingAt: 0,
+                latestTurnStatus: 'completed',
+                latestTurnStatusObservedAt: NOW_MS - 5_000,
+                runtimeActivityActiveCount: 1,
+                runtimeActivityObservedAt: NOW_MS - 1_000,
+                runtimeActivityExpiresAt: NOW_MS + 60_000,
+                runtimeActivitySourceClass: 'provider_detached_task',
+            }), { groupKind: 'date' }),
+            state: {},
+            dataIndex: 0,
+            isFirst: true,
+            isLast: true,
+            isSingle: true,
+            settings: createSettings({ runtimeNowMs: NOW_MS }),
+        });
+
+        expect(model.status.state).toBe('thinking');
+        expect(model.attention.rowState).toBe('working');
+        expect(model.presentation.secondaryLine).toBe('status');
     });
 
     it('schedules runtime freshness from fresh active heartbeat when an in-progress observation is stale', () => {
@@ -442,5 +534,79 @@ describe('buildSessionListRowModel', () => {
         expect(model.folder.depth).toBe(2);
         expect(model.tags).toEqual(['review', 'urgent']);
         expect(model.adjacency).toEqual({ isFirst: false, isLast: true, isSingle: false });
+    });
+
+    it('promotes blocked pending delivery to action-required row attention from the server aggregate', () => {
+        const session = createRenderable('s-blocked', {
+            pendingCount: 2,
+            pendingBlockedCount: 1,
+        });
+        const model = buildSessionListRowModel({
+            item: createSessionItem(session),
+            state: {},
+            dataIndex: 0,
+            isFirst: true,
+            isLast: true,
+            isSingle: true,
+            settings: createSettings(),
+        });
+
+        expect(model.pendingCount).toBe(2);
+        expect(model.pendingBlockedCount).toBe(1);
+        expect(model.attention.listState).toBe('action_required');
+    });
+
+    it('promotes blocked pending delivery to action-required row attention from loaded pending details', () => {
+        const session = createRenderable('s-blocked-detail', {
+            pendingCount: 1,
+        });
+        const model = buildSessionListRowModel({
+            item: createSessionItem(session),
+            state: { pending: createBlockedPending(NOW_MS - 50_000) },
+            dataIndex: 0,
+            isFirst: true,
+            isLast: true,
+            isSingle: true,
+            settings: createSettings(),
+        });
+
+        expect(model.pendingBlockedCount).toBe(1);
+        expect(model.attention.listState).toBe('action_required');
+    });
+
+    it('uses the server blocked-pending aggregate over stale loaded pending details', () => {
+        const blockedAggregateSession = createRenderable('s-blocked-aggregate-authoritative', {
+            pendingCount: 1,
+            pendingBlockedCount: 1,
+        });
+        const blockedModel = buildSessionListRowModel({
+            item: createSessionItem(blockedAggregateSession),
+            state: { pending: createPending([NOW_MS - 50_000]) },
+            dataIndex: 0,
+            isFirst: true,
+            isLast: true,
+            isSingle: true,
+            settings: createSettings(),
+        });
+
+        expect(blockedModel.pendingBlockedCount).toBe(1);
+        expect(blockedModel.attention.listState).toBe('action_required');
+
+        const unblockedAggregateSession = createRenderable('s-unblocked-aggregate-authoritative', {
+            pendingCount: 1,
+            pendingBlockedCount: 0,
+        });
+        const unblockedModel = buildSessionListRowModel({
+            item: createSessionItem(unblockedAggregateSession),
+            state: { pending: createBlockedPending(NOW_MS - 50_000) },
+            dataIndex: 0,
+            isFirst: true,
+            isLast: true,
+            isSingle: true,
+            settings: createSettings(),
+        });
+
+        expect(unblockedModel.pendingBlockedCount).toBe(0);
+        expect(unblockedModel.attention.listState).toBe('pending');
     });
 });

@@ -12,6 +12,8 @@ type SessionMachineTargetTestValue = { machineId: string; basePath: string } | n
 
 const headerActionMenuSpy = vi.hoisted(() => vi.fn());
 const sessionConnectedServicesAuthSwitchSpy = vi.hoisted(() => vi.fn());
+const openRightSpy = vi.hoisted(() => vi.fn());
+const setRightTabSpy = vi.hoisted(() => vi.fn());
 const readMachineTargetForSessionSpy = vi.hoisted(() =>
   vi.fn<(sessionId: string) => SessionMachineTargetTestValue>(() => null),
 );
@@ -52,6 +54,12 @@ const automationsSupportState = vi.hoisted(() => ({ enabled: false, serverId: nu
 const mobileWorkspaceExperienceState = vi.hoisted(() => ({
   value: undefined as 'classic' | 'cockpit' | undefined,
   setValue: vi.fn(),
+}));
+const cockpitRegistrationState = vi.hoisted(() => ({
+  registration: null as null | Readonly<{
+    sessionId: string;
+    switchSurface: (surface: 'chat' | 'browse' | 'git' | 'navigation' | 'tabs' | 'terminal') => void;
+  }>,
 }));
 const sessionState = vi.hoisted(() => ({
   session: {
@@ -105,9 +113,12 @@ vi.mock('@/components/sessions/panes/useRegisterSessionPaneDriver', () => ({
 vi.mock('@/components/appShell/panes/hooks/useAppPaneScope', () => ({
   useAppPaneScope: () => ({
     scopeState: null,
-    openRight: vi.fn(),
-    setRightTab: vi.fn(),
+    openRight: openRightSpy,
+    setRightTab: setRightTabSpy,
   }),
+}));
+vi.mock('@/components/workspaceCockpit/session/SessionCockpitChromeRegistry', () => ({
+  useSessionCockpitChromeRegistration: () => cockpitRegistrationState.registration,
 }));
 vi.mock('@/components/sessions/panes/url/useSessionPaneUrlSync', () => ({
   useSessionPaneUrlSync: () => {},
@@ -447,7 +458,10 @@ describe('SessionView header action menu visibility', () => {
     automationsSupportState.serverId = null;
     mobileWorkspaceExperienceState.value = undefined;
     mobileWorkspaceExperienceState.setValue.mockReset();
+    cockpitRegistrationState.registration = null;
     keyboardDismissSpy.mockReset();
+    openRightSpy.mockReset();
+    setRightTabSpy.mockReset();
     headerActionMenuSpy.mockClear();
     sessionConnectedServicesAuthSwitchSpy.mockClear();
     readMachineTargetForSessionSpy.mockReset();
@@ -577,6 +591,35 @@ describe('SessionView header action menu visibility', () => {
     }));
   });
 
+  it('does not block connected-services auth switching for display-only provider runtime activity', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(1_000_000));
+    sessionState.session = {
+      ...sessionState.session,
+      active: true,
+      activeAt: 990_000,
+      presence: 'online',
+      thinking: false,
+      thinkingAt: 0,
+      latestTurnStatus: 'completed',
+      latestTurnStatusObservedAt: 995_000,
+      runtimeActivityActiveCount: 1,
+      runtimeActivityObservedAt: 999_000,
+      runtimeActivityExpiresAt: 1_060_000,
+      runtimeActivitySourceClass: 'provider_detached_task',
+      pendingPermissionRequestCount: 0,
+      pendingUserActionRequestCount: 0,
+      pendingRequestObservedAt: null,
+    };
+
+    await renderSessionView();
+
+    expect(sessionConnectedServicesAuthSwitchSpy).toHaveBeenCalledWith(expect.objectContaining({
+      switchingDisabledReason: null,
+    }));
+    vi.useRealTimers();
+  });
+
   it('refreshes connected-services auth switching when only runtime heartbeat freshness changes', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(1_000_000));
@@ -695,6 +738,51 @@ describe('SessionView header action menu visibility', () => {
     expect(extraIds).toContain('header.openRuns');
     expect(extraIds).toContain('header.openAutomations');
     expect(extraIds).toContain('header.openSubagents');
+    expect(extraIds).toContain('header.openTranscriptNavigation');
+  });
+
+  it('renders a direct transcript navigation header button when header actions are not folded', async () => {
+    platformState.os = 'web';
+    responsiveState.deviceType = 'phone';
+    responsiveState.isLandscape = false;
+    windowDimensionsState.width = 800;
+
+    const screen = await renderSessionView();
+    const openNavigationButton = findPressableByAccessibilityLabel(screen, 'session.openTranscriptNavigation');
+
+    expect(openNavigationButton).toBeDefined();
+  });
+
+  it('opens the navigation right-panel tab from the folded header action menu', async () => {
+    platformState.os = 'web';
+    responsiveState.deviceType = 'phone';
+    responsiveState.isLandscape = false;
+    windowDimensionsState.width = 420;
+
+    await renderSessionView();
+
+    expect(getLastHeaderActionMenuProps().onSelectExtraItem('header.openTranscriptNavigation')).toBe(true);
+    expect(openRightSpy).toHaveBeenCalledWith({ tabId: 'navigation' });
+    expect(setRightTabSpy).toHaveBeenCalledWith('navigation');
+  });
+
+  it('switches to the cockpit navigation surface from the folded header action menu when cockpit owns the session', async () => {
+    platformState.os = 'web';
+    responsiveState.deviceType = 'phone';
+    responsiveState.isLandscape = false;
+    windowDimensionsState.width = 420;
+    const switchSurface = vi.fn();
+    cockpitRegistrationState.registration = {
+      sessionId: 's1',
+      switchSurface,
+    };
+
+    await renderSessionView();
+
+    expect(getLastHeaderActionMenuProps().onSelectExtraItem('header.openTranscriptNavigation')).toBe(true);
+    expect(switchSurface).toHaveBeenCalledWith('navigation');
+    expect(openRightSpy).not.toHaveBeenCalled();
+    expect(setRightTabSpy).not.toHaveBeenCalled();
   });
 
   it('keeps folded header action menu items stable across unrelated session header updates', async () => {

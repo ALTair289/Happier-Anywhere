@@ -215,6 +215,7 @@ function createMetadataPendingRowModel(id: string): SessionListRowModel {
         isActive: false,
         hasUnreadMessages: false,
         pendingCount: 0,
+        pendingBlockedCount: 0,
         tags: [],
         allKnownTags: [],
         tagsEnabled: false,

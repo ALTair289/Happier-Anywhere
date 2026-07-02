@@ -4,6 +4,7 @@ import {
     markSessionHidden,
     markSessionVisible,
 } from '@/sync/domains/session/activeViewingSession';
+import { registerSessionTranscriptRetentionConsumer } from '@/sync/runtime/sessionRealtimeTranscriptConsumers';
 
 export type UseSessionSurfaceActivationInput = Readonly<{
     sessionId: string;
@@ -33,6 +34,14 @@ export function useSessionSurfaceActivation(
             markSessionHidden(sessionId, input.serverId);
         };
     }, [input.serverId, input.surfaceVisible, sessionId]);
+
+    // Mount-lifetime transcript retention hold (NOT gated on surfaceVisible): a
+    // hidden-but-mounted back-stack SessionView still renders its transcript, so the
+    // eviction sweep must treat it as a mounted consumer until real unmount.
+    React.useEffect(() => {
+        if (!sessionId) return;
+        return registerSessionTranscriptRetentionConsumer(sessionId, input.serverId);
+    }, [input.serverId, sessionId]);
 
     const hasVisibleSession = sessionId.length > 0 && input.surfaceVisible;
     return React.useMemo(() => ({

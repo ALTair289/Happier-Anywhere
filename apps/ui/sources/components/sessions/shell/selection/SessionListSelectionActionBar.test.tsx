@@ -57,8 +57,7 @@ function ActionBarHarness() {
             <SessionListSelectionActionBarHost
                 targetsByKey={targetsByKey}
                 bulkActionContext={{
-                    pinnedSessionKeysV1: [],
-                    setPinnedSessionKeysV1: async () => undefined,
+                    setSessionPin: async () => undefined,
                     setManualReadState: async (target) => target.sessionId === 'session-b'
                         ? { success: false, message: 'failed' }
                         : { success: true },
@@ -138,7 +137,7 @@ describe('SessionListSelectionActionBarHost', () => {
     });
 
     it('executes a bulk local action and renders a result selector before dismissing', async () => {
-        const pinnedWrites: string[][] = [];
+        const setSessionPin = vi.fn(async () => undefined);
         const targetsByKey = new Map<string, SessionBulkActionTarget>([
             ['session-a', {
                 key: 'session-a',
@@ -153,10 +152,7 @@ describe('SessionListSelectionActionBarHost', () => {
                 <SessionListSelectionActionBarHost
                     targetsByKey={targetsByKey}
                     bulkActionContext={{
-                        pinnedSessionKeysV1: [],
-                        setPinnedSessionKeysV1: async (next) => {
-                            pinnedWrites.push(next);
-                        },
+                        setSessionPin,
                     }}
                 />
             </SessionListSelectionProvider>,
@@ -165,7 +161,10 @@ describe('SessionListSelectionActionBarHost', () => {
         await pressByTestId(screen, 'select-session-a');
         await pressByTestId(screen, 'session-list-selection-action-session-pin');
 
-        expect(pinnedWrites).toEqual([['session-a']]);
+        expect(setSessionPin).toHaveBeenCalledWith({
+            target: expect.objectContaining({ key: 'session-a', sessionId: 'session-a' }),
+            pinned: true,
+        });
         const result = screen.findByProps({ testID: 'session-list-selection-result' });
         expect(result.props['data-action-id']).toBe(SESSION_BULK_ACTION_IDS.pin);
         expect(result.props['data-succeeded-count']).toBe(1);
@@ -350,7 +349,7 @@ describe('SessionListSelectionActionBarHost', () => {
     });
 
     it('executes actions for selected targets hidden by a collapsed group', async () => {
-        const setPinnedSessionKeysV1 = vi.fn();
+        const setSessionPin = vi.fn(async () => undefined);
         const targetsByKey = new Map<string, SessionBulkActionTarget>([
             ['session-a', {
                 key: 'session-a',
@@ -378,8 +377,7 @@ describe('SessionListSelectionActionBarHost', () => {
                 <SessionListSelectionActionBarHost
                     targetsByKey={targetsByKey}
                     bulkActionContext={{
-                        pinnedSessionKeysV1: [],
-                        setPinnedSessionKeysV1,
+                        setSessionPin,
                     }}
                 />
             );
@@ -397,6 +395,9 @@ describe('SessionListSelectionActionBarHost', () => {
 
         await pressByTestId(screen, 'session-list-selection-action-session-pin');
 
-        expect(setPinnedSessionKeysV1).toHaveBeenCalledWith(['session-b']);
+        expect(setSessionPin).toHaveBeenCalledWith({
+            target: expect.objectContaining({ key: 'session-b', sessionId: 'session-b' }),
+            pinned: true,
+        });
     });
 });

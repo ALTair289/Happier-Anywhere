@@ -70,6 +70,20 @@ export type SessionBulkFolderAssignmentOperation = (
     }>,
 ) => Promise<void>;
 
+export type SessionBulkPinOperation = (
+    params: Readonly<{
+        target: SessionBulkActionTarget;
+        pinned: boolean;
+    }>,
+) => Promise<void>;
+
+export type SessionBulkTagAssignmentOperation = (
+    params: Readonly<{
+        target: SessionBulkActionTarget;
+        tags: readonly string[];
+    }>,
+) => Promise<void>;
+
 export type SessionBulkStopAndArchiveOperation = (
     params: Readonly<{
         target: SessionBulkActionTarget;
@@ -107,11 +121,8 @@ export type SessionBulkActionExecutionContext = Readonly<{
     cancelSignal?: SessionBulkActionCancelSignal;
     onProgress?: SessionBulkActionProgressListener;
 
-    pinnedSessionKeysV1?: readonly string[] | null;
-    setPinnedSessionKeysV1?: (next: string[]) => void | Promise<void>;
-
-    sessionTagsV1?: Readonly<Record<string, readonly string[]>> | null;
-    setSessionTagsV1?: (next: Record<string, string[]>) => void | Promise<void>;
+    setSessionPin?: SessionBulkPinOperation;
+    setSessionTagAssignments?: SessionBulkTagAssignmentOperation;
 
     hideInactiveSessions?: boolean;
     stopSession?: SessionBulkOperation;

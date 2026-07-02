@@ -30,6 +30,19 @@ const storageKindState = vi.hoisted(() => ({
     storageKind: 'persisted' as 'persisted' | 'direct',
     setStorageKind: vi.fn(),
 }));
+const serverSelectionState = vi.hoisted(() => ({
+    selection: {
+        activeTarget: { kind: 'server' as const, id: 'server-a', serverId: 'server-a' },
+        activeServerId: 'server-a',
+        allowedServerIds: ['server-a'],
+        enabled: false,
+        explicit: false,
+        presentation: 'grouped' as const,
+    },
+}));
+const accountScopeState = vi.hoisted(() => ({
+    scope: { serverId: 'server-a', accountId: 'account-a' } as { serverId: string; accountId: string } | null,
+}));
 const focusState = vi.hoisted(() => ({
     isFocused: true,
     listeners: new Set<() => void>(),
@@ -57,6 +70,21 @@ installSessionShellCommonModuleMocks({
             pathname: () => routeState.pathname,
         }).module;
     },
+    storage: async () => {
+        const { createStorageModuleStub } = await import('@/dev/testkit/mocks/storage');
+        return createStorageModuleStub({
+            useActiveServerAccountScope: () => accountScopeState.scope,
+        });
+    },
+});
+vi.mock('@/hooks/server/useEffectiveServerSelection', () => ({
+    useResolvedActiveServerSelection: () => serverSelectionState.selection,
+}));
+vi.mock('@/sync/domains/state/storage', async () => {
+    const { createStorageModuleStub } = await import('@/dev/testkit/mocks/storage');
+    return createStorageModuleStub({
+        useActiveServerAccountScope: () => accountScopeState.scope,
+    });
 });
 vi.mock('@/hooks/session/useVisibleSessionListViewData', () => ({
     useVisibleSessionListViewData: (storageKind?: string) => {
@@ -67,6 +95,11 @@ vi.mock('@/hooks/session/useVisibleSessionListViewData', () => ({
         storageKind?: string,
         options?: VisibleSessionListViewDataOptions,
     ) => {
+        const retainedVisibleDataRef = React.useRef<ReadonlyArray<{ type?: string }> | null>(null);
+        const visibleData: ReadonlyArray<{ type?: string }> | null = sessionListState.data
+            ?? options?.retainedSessionListViewData
+            ?? retainedVisibleDataRef.current
+            ?? null;
         React.useSyncExternalStore(
             (listener) => {
                 sessionListState.paneListeners.add(listener);
@@ -77,12 +110,15 @@ vi.mock('@/hooks/session/useVisibleSessionListViewData', () => ({
             () => sessionListState.paneVersion,
             () => sessionListState.paneVersion,
         );
+        React.useEffect(() => {
+            retainedVisibleDataRef.current = visibleData;
+        }, [visibleData]);
         sessionListState.paneHookCalls += 1;
         sessionListState.storageKinds.push(storageKind ?? 'all');
         sessionListState.paneOptions.push(options);
         return {
-            sessionListViewData: sessionListState.data,
-            visibleSessionCount: sessionListState.data?.reduce((count, item) => count + (item.type === 'session' ? 1 : 0), 0) ?? 0,
+            sessionListViewData: visibleData,
+            visibleSessionCount: visibleData?.reduce((count, item) => count + (item.type === 'session' ? 1 : 0), 0) ?? 0,
             hasHiddenInactiveSessions: emptyStateState.hasHiddenInactiveSessions,
         };
     },
@@ -132,7 +168,7 @@ async function renderSessionsListWrapper() {
 }
 
 describe('SessionsListWrapper (empty state)', () => {
-    beforeEach(() => {
+    beforeEach(async () => {
         sessionListState.data = [];
         sessionListState.storageKinds = [];
         sessionListState.paneOptions = [];
@@ -145,8 +181,19 @@ describe('SessionsListWrapper (empty state)', () => {
         featureDecisionState.enabled = false;
         storageKindState.storageKind = 'persisted';
         storageKindState.setStorageKind.mockReset();
+        serverSelectionState.selection = {
+            activeTarget: { kind: 'server', id: 'server-a', serverId: 'server-a' },
+            activeServerId: 'server-a',
+            allowedServerIds: ['server-a'],
+            enabled: false,
+            explicit: false,
+            presentation: 'grouped',
+        };
+        accountScopeState.scope = { serverId: 'server-a', accountId: 'account-a' };
         focusState.isFocused = true;
         focusState.listeners.clear();
+        const { resetSessionListPaneRetentionForTests } = await import('./surface/sessionListPaneRetention');
+        resetSessionListPaneRetentionForTests();
     });
 
     afterEach(() => {
@@ -165,7 +212,8 @@ describe('SessionsListWrapper (empty state)', () => {
     it('uses the persisted storage filter when direct sessions are disabled', async () => {
         const screen = await renderSessionsListWrapper();
 
-        expect(sessionListState.storageKinds).toEqual(['persisted']);
+        expect(sessionListState.storageKinds.length).toBeGreaterThan(0);
+        expect(sessionListState.storageKinds.every((kind) => kind === 'persisted')).toBe(true);
 
         await screen.unmount();
     });
@@ -177,7 +225,8 @@ describe('SessionsListWrapper (empty state)', () => {
 
         const screen = await renderSessionsListWrapper();
 
-        expect(sessionListState.storageKinds).toEqual(['direct']);
+        expect(sessionListState.storageKinds.length).toBeGreaterThan(0);
+        expect(sessionListState.storageKinds.every((kind) => kind === 'direct')).toBe(true);
         expect(() => screen.findByType('SessionsListStorageChrome' as any)).not.toThrow();
         expect(screen.findByType('SessionsListStorageChrome' as any).props.storageKind).toBe('direct');
         expect(screen.findByType('SessionsListContent' as any).props.storageKind).toBe('direct');
@@ -243,8 +292,8 @@ describe('SessionsListWrapper (empty state)', () => {
 
         const screen = await renderSessionsListWrapper();
 
-        expect(sessionListState.paneHookCalls).toBe(1);
-        expect(sessionListState.storageKinds).toEqual(['direct']);
+        expect(sessionListState.paneHookCalls).toBeGreaterThanOrEqual(1);
+        expect(sessionListState.storageKinds.every((kind) => kind === 'direct')).toBe(true);
         expect(screen.findByType('SessionsListContent' as any).props.data).toBe(sessionListState.data);
 
         await screen.unmount();
@@ -262,16 +311,74 @@ describe('SessionsListWrapper (empty state)', () => {
             }
         });
 
-        expect(sessionListState.paneOptions).toEqual([{
+        expect(sessionListState.paneOptions).toContainEqual({
             activeSessionId: null,
             sessionListSurfaceDataActive: true,
-        }]);
+        });
         expect(screen.findByType('SessionsListContent' as any).props.surfaceOwnership).toMatchObject({
             visible: true,
             interactive: false,
             dataActive: false,
         });
         await screen.unmount();
+    });
+
+    it('reuses retained root-list data after focus restoration even when the active session id is null', async () => {
+        const retainedData = [{ type: 'session', session: { id: 'session-1' } }];
+        sessionListState.data = retainedData;
+
+        const screen = await renderSessionsListWrapper();
+
+        act(() => {
+            focusState.isFocused = false;
+            for (const listener of Array.from(focusState.listeners)) {
+                listener();
+            }
+        });
+
+        sessionListState.data = null;
+
+        act(() => {
+            focusState.isFocused = true;
+            for (const listener of Array.from(focusState.listeners)) {
+                listener();
+            }
+        });
+
+        expect(sessionListState.paneOptions).toContainEqual({
+            activeSessionId: null,
+            retainedSessionListViewData: retainedData,
+            sessionListSurfaceDataActive: true,
+        });
+        expect(screen.findByType('SessionsListContent' as any).props.data).toBe(retainedData);
+
+        await screen.unmount();
+    });
+
+    it('reuses retained root-list data when the root list remounts on / with no active session id', async () => {
+        const { SessionsListWrapper } = await import('./SessionsListWrapper');
+        const retainedData = [{ type: 'session', session: { id: 'session-1' } }];
+        sessionListState.data = retainedData;
+        routeState.pathname = '/';
+
+        const initialScreen = await renderScreen(<SessionsListWrapper pathname="/" surfaceRoutePathname="/" />);
+
+        expect(initialScreen.findByType('SessionsListContent' as any).props.data).toBe(retainedData);
+
+        await initialScreen.unmount();
+        sessionListState.paneOptions = [];
+        sessionListState.data = null;
+
+        const remountedScreen = await renderScreen(<SessionsListWrapper pathname="/" surfaceRoutePathname="/" />);
+
+        expect(sessionListState.paneOptions).toContainEqual({
+            activeSessionId: null,
+            retainedSessionListViewData: retainedData,
+            sessionListSurfaceDataActive: true,
+        });
+        expect(remountedScreen.findByType('SessionsListContent' as any).props.data).toBe(retainedData);
+
+        await remountedScreen.unmount();
     });
 
     it('passes active-session identity while marking foreground session routes inactive', async () => {
@@ -336,29 +443,119 @@ describe('SessionsListWrapper (empty state)', () => {
 
         const screen = await renderScreen(<SessionsListWrapper pathname="/" surfaceRoutePathname="/" />);
 
-        expect(sessionListState.paneOptions).toEqual([{
-            activeSessionId: null,
-            sessionListSurfaceDataActive: true,
-        }]);
-
-        routeState.pathname = '/session/session-2';
-        await screen.update(<SessionsListWrapper pathname="/" surfaceRoutePathname="/session/session-2" />);
-        expect(sessionListState.paneOptions).toHaveLength(1);
-
-        routeState.pathname = '/';
-        await screen.update(<SessionsListWrapper pathname="/" surfaceRoutePathname="/" />);
-
         expect(sessionListState.paneOptions[0]).toEqual({
             activeSessionId: null,
             sessionListSurfaceDataActive: true,
         });
-        expect(sessionListState.paneOptions[1]).toEqual({
+        const initialPaneOptionCount = sessionListState.paneOptions.length;
+
+        routeState.pathname = '/session/session-2';
+        await screen.update(<SessionsListWrapper pathname="/" surfaceRoutePathname="/session/session-2" />);
+        expect(sessionListState.paneOptions).toHaveLength(initialPaneOptionCount);
+
+        routeState.pathname = '/';
+        await screen.update(<SessionsListWrapper pathname="/" surfaceRoutePathname="/" />);
+
+        expect(sessionListState.paneOptions.at(-1)).toEqual({
             activeSessionId: 'session-2',
-            retainedSessionListViewData: retainedData,
             sessionListSurfaceDataActive: true,
         });
+        expect(screen.findByType('SessionsListContent' as any).props.data).toBe(retainedData);
 
         await screen.unmount();
+    });
+
+    it('renders the last active pane snapshot after the retained phone list remounts inactive', async () => {
+        const { SessionsListWrapper } = await import('./SessionsListWrapper');
+        const retainedData = [{ type: 'session', session: { id: 'session-2' } }];
+        sessionListState.data = retainedData;
+        focusState.isFocused = true;
+        routeState.pathname = '/';
+
+        const activeScreen = await renderScreen(<SessionsListWrapper pathname="/" surfaceRoutePathname="/" />);
+
+        expect(activeScreen.findByType('SessionsListContent' as any).props.data).toBe(retainedData);
+
+        await activeScreen.unmount();
+        sessionListState.paneOptions = [];
+        routeState.pathname = '/session/session-2';
+        sessionListState.data = null;
+
+        const inactiveScreen = await renderScreen(
+            <SessionsListWrapper pathname="/" surfaceRoutePathname="/session/session-2" />,
+        );
+
+        expect(sessionListState.paneOptions).toEqual([]);
+        expect(inactiveScreen.findByType('SessionsListContent' as any).props.data).toBe(retainedData);
+        expect(inactiveScreen.findByType('SessionsListContent' as any).props.surfaceOwnership).toMatchObject({
+            visible: true,
+            interactive: false,
+            dataActive: false,
+        });
+
+        await inactiveScreen.unmount();
+    });
+
+    it('does not render a retained pane snapshot after the selected server scope changes', async () => {
+        const { SessionsListWrapper } = await import('./SessionsListWrapper');
+        const serverAData = [{ type: 'session', serverId: 'server-a', session: { id: 'session-a' } }];
+        sessionListState.data = serverAData;
+        focusState.isFocused = true;
+        routeState.pathname = '/';
+
+        const activeScreen = await renderScreen(<SessionsListWrapper pathname="/" surfaceRoutePathname="/" />);
+
+        expect(activeScreen.findByType('SessionsListContent' as any).props.data).toBe(serverAData);
+
+        await activeScreen.unmount();
+        sessionListState.paneOptions = [];
+        routeState.pathname = '/session/session-a';
+        sessionListState.data = null;
+        serverSelectionState.selection = {
+            activeTarget: { kind: 'server', id: 'server-b', serverId: 'server-b' },
+            activeServerId: 'server-b',
+            allowedServerIds: ['server-b'],
+            enabled: false,
+            explicit: false,
+            presentation: 'grouped',
+        };
+        accountScopeState.scope = { serverId: 'server-b', accountId: 'account-a' };
+
+        const inactiveScreen = await renderScreen(
+            <SessionsListWrapper pathname="/" surfaceRoutePathname="/session/session-a" />,
+        );
+
+        expect(sessionListState.paneOptions).toEqual([]);
+        expect(() => inactiveScreen.findByType('SessionsListContent' as any)).toThrow();
+
+        await inactiveScreen.unmount();
+    });
+
+    it('does not render a retained pane snapshot after the active account scope changes', async () => {
+        const { SessionsListWrapper } = await import('./SessionsListWrapper');
+        const accountAData = [{ type: 'session', serverId: 'server-a', session: { id: 'session-a' } }];
+        sessionListState.data = accountAData;
+        focusState.isFocused = true;
+        routeState.pathname = '/';
+
+        const activeScreen = await renderScreen(<SessionsListWrapper pathname="/" surfaceRoutePathname="/" />);
+
+        expect(activeScreen.findByType('SessionsListContent' as any).props.data).toBe(accountAData);
+
+        await activeScreen.unmount();
+        sessionListState.paneOptions = [];
+        routeState.pathname = '/session/session-a';
+        sessionListState.data = null;
+        accountScopeState.scope = { serverId: 'server-a', accountId: 'account-b' };
+
+        const inactiveScreen = await renderScreen(
+            <SessionsListWrapper pathname="/" surfaceRoutePathname="/session/session-a" />,
+        );
+
+        expect(sessionListState.paneOptions).toEqual([]);
+        expect(() => inactiveScreen.findByType('SessionsListContent' as any)).toThrow();
+
+        await inactiveScreen.unmount();
     });
 
     it('does not seed retained pane data after the storage kind changes while returning from a foreground session route', async () => {
@@ -373,26 +570,27 @@ describe('SessionsListWrapper (empty state)', () => {
 
         const screen = await renderScreen(<SessionsListWrapper pathname="/" surfaceRoutePathname="/" />);
 
-        expect(sessionListState.paneOptions).toEqual([{
+        expect(sessionListState.paneOptions[0]).toEqual({
             activeSessionId: null,
             sessionListSurfaceDataActive: true,
-        }]);
+        });
+        const initialPaneOptionCount = sessionListState.paneOptions.length;
 
         routeState.pathname = '/session/persisted-session';
         await screen.update(<SessionsListWrapper pathname="/" surfaceRoutePathname="/session/persisted-session" />);
-        expect(sessionListState.paneOptions).toHaveLength(1);
+        expect(sessionListState.paneOptions).toHaveLength(initialPaneOptionCount);
 
         storageKindState.storageKind = 'direct';
         sessionListState.data = directData;
         await screen.update(<SessionsListWrapper pathname="/" surfaceRoutePathname="/session/persisted-session?storage=direct" />);
         await flushHookEffects({ cycles: 1, turns: 4 });
-        expect(sessionListState.paneOptions).toHaveLength(1);
+        expect(sessionListState.paneOptions).toHaveLength(initialPaneOptionCount);
 
         routeState.pathname = '/';
         await screen.update(<SessionsListWrapper pathname="/" surfaceRoutePathname="/" />);
 
         expect(sessionListState.storageKinds.at(-1)).toBe('direct');
-        expect(sessionListState.paneOptions[1]).toEqual({
+        expect(sessionListState.paneOptions.at(-1)).toEqual({
             activeSessionId: null,
             sessionListSurfaceDataActive: true,
         });

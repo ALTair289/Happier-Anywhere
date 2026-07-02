@@ -20,20 +20,76 @@ export type SessionListRowStorePriorityReason =
 
 export type SessionListRowStorePriorityReasonCounts = Readonly<Partial<Record<SessionListRowStorePriorityReason, number>>>;
 
+const UNKNOWN_VIEWABILITY_EAGER_SUBSCRIPTION_MAX_ROWS = 50;
+
+type SessionListEmbeddedPriorityRowItem = Readonly<{
+    attentionPromotionReason?: unknown | null;
+    selected?: boolean | null;
+    serverId?: string | null;
+    session?: Readonly<{
+        hasPendingPermissionRequests?: boolean | null;
+        hasPendingUserActionRequests?: boolean | null;
+        id?: string | null;
+        lastRuntimeIssue?: unknown | null;
+        latestTurnStatus?: unknown | null;
+        thinking?: boolean | null;
+    }> | null;
+    type: string;
+    workingPlacementReason?: string | null;
+}>;
+
 export function resolveSessionListRowStoreSubscriptionMode(params: Readonly<{
+    nativeAllRenderedMaxRows?: number;
     platformOS: string;
     renderedSessionRows: number;
     webNonVirtualizedMaxRows: number;
 }>): SessionListRowStoreSubscriptionMode {
-    return params.platformOS === 'web' && params.renderedSessionRows <= params.webNonVirtualizedMaxRows
-        ? 'all-rendered'
-        : 'viewable';
+    if (params.platformOS === 'web') {
+        return params.renderedSessionRows <= params.webNonVirtualizedMaxRows
+            ? 'all-rendered'
+            : 'viewable';
+    }
+
+    const nativeAllRenderedMaxRows = params.nativeAllRenderedMaxRows;
+    if (
+        typeof nativeAllRenderedMaxRows === 'number'
+        && Number.isFinite(nativeAllRenderedMaxRows)
+        && params.renderedSessionRows <= Math.max(0, nativeAllRenderedMaxRows)
+    ) {
+        return 'all-rendered';
+    }
+
+    return 'viewable';
 }
 
 export function resolveSessionListRowStoreScopeKey(scope: SessionListRowStoreSubscriptionScope): string {
     const sessionId = String(scope.sessionId ?? '').trim();
     const serverId = typeof scope.serverId === 'string' ? scope.serverId.trim() : '';
     return serverId && sessionId ? sessionTagKey(serverId, sessionId) : sessionId;
+}
+
+function isEmbeddedPriorityRowStoreItem(item: SessionListEmbeddedPriorityRowItem): boolean {
+    return item.type === 'session'
+        && (
+            item.workingPlacementReason === 'working'
+            || item.selected === true
+        );
+}
+
+export function buildSessionListEmbeddedPriorityRowKeys(
+    items: ReadonlyArray<SessionListEmbeddedPriorityRowItem>,
+): ReadonlySet<string> {
+    const priorityKeys = new Set<string>();
+    for (const item of items) {
+        if (!isEmbeddedPriorityRowStoreItem(item)) continue;
+        const sessionId = typeof item.session?.id === 'string' ? item.session.id : '';
+        const key = resolveSessionListRowStoreScopeKey({
+            sessionId,
+            serverId: item.serverId ?? null,
+        });
+        if (key) priorityKeys.add(key);
+    }
+    return priorityKeys;
 }
 
 export function reuseSessionListRowStoreSubscriptionScopes<T extends ReadonlyArray<SessionListRowStoreSubscriptionScope>>(
@@ -70,8 +126,12 @@ export function resolveSessionListRowStoreSubscriptionScopes(
     priorityRowKeys: ReadonlySet<string> | null = null,
 ): ReadonlyArray<SessionListRowStoreSubscriptionScope> {
     if (mode === 'all-rendered') return scopes;
-    if (visibleRowKeys === null) return scopes;
+    if (visibleRowKeys === null && scopes.length <= UNKNOWN_VIEWABILITY_EAGER_SUBSCRIPTION_MAX_ROWS) return scopes;
     if (scopes.length === 0) return [];
+    if (visibleRowKeys === null) {
+        if (priorityRowKeys == null || priorityRowKeys.size === 0) return [];
+        return scopes.filter((scope) => priorityRowKeys.has(resolveSessionListRowStoreScopeKey(scope)));
+    }
     const hasVisibleRows = visibleRowKeys.size > 0;
     const hasPriorityRows = priorityRowKeys != null && priorityRowKeys.size > 0;
     if (!hasVisibleRows && !hasPriorityRows) return [];

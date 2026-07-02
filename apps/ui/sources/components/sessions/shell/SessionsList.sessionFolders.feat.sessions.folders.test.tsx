@@ -9,6 +9,7 @@ import {
     renderScreen,
     standardCleanup,
 } from '@/dev/testkit';
+import type { SessionOrganizationProjection } from '@/sync/domains/session/organization/types';
 import { driveSessionListDragGesture } from './__tests__/driveSessionListDragGesture';
 import { installSessionShellCommonModuleMocks } from './sessionShellTestHelpers';
 
@@ -27,11 +28,20 @@ const modalConfirmSpy = vi.hoisted(() => vi.fn(async () => false));
 const modalShowSpy = vi.hoisted(() => vi.fn((_config: unknown) => 'move-sheet-modal'));
 const modalHideSpy = vi.hoisted(() => vi.fn());
 const getCredentialsForServerUrlSpy = vi.hoisted(() => vi.fn(async () => ({ accessToken: 'token-a' })));
-const getServerProfileByIdSpy = vi.hoisted(() => vi.fn((serverId: string) => serverId === 'server_a'
-    ? { id: 'server_a', serverUrl: 'https://server-a.test' }
+const serverProfileState = vi.hoisted(() => ({
+    activeServerId: 'server_a',
+    profileId: 'server_a',
+}));
+const getServerProfileByIdSpy = vi.hoisted(() => vi.fn((serverId: string) => (
+    serverId === serverProfileState.activeServerId || serverId === serverProfileState.profileId
+)
+    ? { id: serverProfileState.profileId, serverIdentityId: serverProfileState.activeServerId, serverUrl: 'https://server-a.test' }
     : null));
 const setSessionFolderAssignmentSpy = vi.hoisted(() => vi.fn(async () => undefined));
 const moveSessionFolderAssignmentsSpy = vi.hoisted(() => vi.fn(async () => undefined));
+const reorderSessionOrganizationSpy = vi.hoisted(() => vi.fn(async () => undefined));
+const upsertSessionFolderSpy = vi.hoisted(() => vi.fn(async () => undefined));
+const deleteSessionFolderSpy = vi.hoisted(() => vi.fn(async () => undefined));
 
 let sessionFolderViewModeV1: 'off' | 'tree' = 'tree';
 let sessionListFolderSortModeV1: 'foldersFirst' | 'mixed' = 'foldersFirst';
@@ -92,9 +102,10 @@ installSessionShellCommonModuleMocks({
             if (key === 'sessionListSectionModeV1') return 'activity';
             return null;
         },
+        useSessionOrganizationProjection: () => buildOrganizationProjectionFromFolders(sessionFoldersV1),
         useSettingMutable: (key: string) => {
             if (key === 'sessionListGroupOrderV1') return [{}, setSessionListGroupOrderV1];
-            if (key === 'collapsedGroupKeysV1') return [collapsedGroupKeysV1, setCollapsedGroupKeysV1];
+            if (key === 'collapsedGroupKeysV1') throw new Error('collapsedGroupKeysV1 must stay in local settings');
             if (key === 'sessionFolderViewModeV1') return [sessionFolderViewModeV1, setSessionFolderViewModeV1];
             if (key === 'sessionFoldersV1') return [sessionFoldersV1, setSessionFoldersV1];
             if (key === 'sessionTagsV1') return [{}, setSessionTagsV1];
@@ -117,6 +128,9 @@ installSessionShellCommonModuleMocks({
             }
             if (key === 'sessionListFolderSortModeV1') {
                 return [sessionListFolderSortModeV1, setSessionListFolderSortModeV1];
+            }
+            if (key === 'collapsedGroupKeysV1') {
+                return [collapsedGroupKeysV1, setCollapsedGroupKeysV1];
             }
             return [[], vi.fn()];
         },
@@ -146,8 +160,8 @@ vi.mock('@/hooks/server/useEffectiveServerSelection', () => ({
     useResolvedActiveServerSelection: () => ({
         enabled: true,
         presentation: 'grouped',
-        activeServerId: 'server_a',
-        allowedServerIds: ['server_a'],
+        activeServerId: serverProfileState.activeServerId,
+        allowedServerIds: [serverProfileState.activeServerId],
     }),
 }));
 
@@ -175,15 +189,20 @@ vi.mock('@/sync/domains/server/serverProfiles', () => ({
     // `serverRuntime.getActiveServerSnapshot` re-exports this; the session-list
     // memory-search augmentation reads it during render.
     getActiveServerSnapshot: () => ({
-        serverId: 'server_a',
+        serverId: serverProfileState.activeServerId,
         serverUrl: 'https://server-a.example',
         generation: 0,
     }),
 }));
 
-vi.mock('@/sync/ops/sessionFolders', () => ({
+vi.mock('@/sync/ops/sessionOrganization', () => ({
+    deleteSessionFolder: deleteSessionFolderSpy,
     setSessionFolderAssignment: setSessionFolderAssignmentSpy,
     moveSessionFolderAssignments: moveSessionFolderAssignmentsSpy,
+    reorderSessionOrganization: reorderSessionOrganizationSpy,
+    setSessionPin: vi.fn(async () => undefined),
+    setSessionTagLabels: vi.fn(async () => undefined),
+    upsertSessionFolder: upsertSessionFolderSpy,
 }));
 
 vi.mock('@/components/account/RecoveryKeyReminderBanner', () => ({
@@ -223,6 +242,41 @@ const projectGroupKey = 'server:server_a:active:project:project_a';
 const folderGroupKey = `${projectGroupKey}:folder:folder_a`;
 const sessionA = { id: 'sess_a', createdAt: 1, active: true, presence: 'online', metadata: null };
 const sessionB = { id: 'sess_b', createdAt: 2, active: true, presence: 'online', metadata: null };
+
+function buildOrganizationProjectionFromFolders(folders: typeof sessionFoldersV1): SessionOrganizationProjection {
+    const foldersById = Object.fromEntries((folders.folders ?? []).map((folder: any) => [
+        folder.id,
+        {
+            folderId: folder.id,
+            folderKey: folder.id,
+            parentFolderId: folder.parentId ?? null,
+            parentFolderKey: folder.parentId ?? null,
+            sortKey: folder.sortKey ?? null,
+            display: {
+                t: 'plain' as const,
+                v: {
+                    name: folder.name,
+                    workspace: folder.workspace,
+                },
+            },
+            archivedAt: null,
+            createdAt: folder.createdAt ?? 1,
+            updatedAt: folder.updatedAt ?? 1,
+        },
+    ]));
+    return {
+        schemaVersion: 1,
+        version: 1,
+        pinnedSessionIds: [],
+        pinsBySessionId: {},
+        foldersById,
+        folderAssignmentsBySessionId: foldersById.folder_a ? { sess_a: 'folder_a' } : {},
+        tagsById: {},
+        tagAssignmentsBySessionId: {},
+        orderEntriesByScopeKey: {},
+        labelsByLabelKey: {},
+    };
+}
 
 function resetFolderData() {
     mockVisibleSessionListViewData = [
@@ -363,6 +417,8 @@ describe('SessionsList session folders shell', () => {
         setSessionFoldersV1.mockClear();
         setSessionTagsV1.mockClear();
         setSessionListFocusedFolderV1.mockClear();
+        serverProfileState.activeServerId = 'server_a';
+        serverProfileState.profileId = 'server_a';
         modalPromptSpy.mockReset();
         modalPromptSpy.mockResolvedValue(null);
         modalConfirmSpy.mockReset();
@@ -374,6 +430,9 @@ describe('SessionsList session folders shell', () => {
         getServerProfileByIdSpy.mockClear();
         setSessionFolderAssignmentSpy.mockClear();
         moveSessionFolderAssignmentsSpy.mockClear();
+        reorderSessionOrganizationSpy.mockClear();
+        upsertSessionFolderSpy.mockClear();
+        deleteSessionFolderSpy.mockClear();
         resetFolderData();
         standardCleanup();
     });
@@ -728,6 +787,38 @@ describe('SessionsList session folders shell', () => {
         });
     });
 
+    it('persists folder assignment with the organization server identity when the credential profile id differs', async () => {
+        serverProfileState.profileId = 'server_profile_a';
+        const screen = await renderSessionsList();
+        const row = screen.findByTestId('session-list-session:sess_b');
+
+        await act(async () => {
+            row?.props.onMoveToFolder();
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        await vi.waitFor(() => {
+            expect(modalShowSpy).toHaveBeenCalled();
+        });
+        const modalConfig = modalShowSpy.mock.calls[0]?.[0] as { props?: { targets?: readonly any[]; onSelectTarget?: (target: any) => void } };
+        const target = modalConfig.props?.targets?.find((entry) => entry.id === 'folder:folder_a');
+        expect(target).toBeTruthy();
+
+        await act(async () => {
+            modalConfig.props?.onSelectTarget?.(target);
+            await Promise.resolve();
+        });
+
+        expect(getCredentialsForServerUrlSpy).toHaveBeenCalledWith('https://server-a.test', { serverId: 'server_profile_a' });
+        expect(setSessionFolderAssignmentSpy).toHaveBeenCalledWith({
+            credentials: { accessToken: 'token-a' },
+            serverId: 'server_a',
+            serverUrl: 'https://server-a.test',
+            sessionId: 'sess_b',
+            folderId: 'folder_a',
+        });
+    });
+
     it('reorders a session row down through the same tree drop commit path', async () => {
         mockVisibleSessionListViewData.splice(4, 0, {
             type: 'session',
@@ -746,8 +837,56 @@ describe('SessionsList session folders shell', () => {
             await Promise.resolve();
         });
 
-        expect(setSessionListGroupOrderV1).toHaveBeenCalledWith({
-            [folderGroupKey]: ['server_a:sess_c', 'server_a:sess_a'],
+        await vi.waitFor(() => {
+            expect(reorderSessionOrganizationSpy).toHaveBeenCalledWith({
+                credentials: { accessToken: 'token-a' },
+                serverId: 'server_a',
+                serverUrl: 'https://server-a.test',
+                request: {
+                    scopeKind: 'group',
+                    scopeKey: folderGroupKey,
+                    entries: [
+                        { itemKind: 'session', itemKey: 'sess_c', sortKey: '00000001' },
+                        { itemKind: 'session', itemKey: 'sess_a', sortKey: '00000002' },
+                    ],
+                },
+            });
+        });
+    });
+
+    it('persists order with the organization server identity when the credential profile id differs', async () => {
+        serverProfileState.profileId = 'server_profile_a';
+        mockVisibleSessionListViewData.splice(4, 0, {
+            type: 'session',
+            session: { id: 'sess_c', createdAt: 3, active: true, presence: 'online', metadata: null },
+            groupKey: folderGroupKey,
+            groupKind: 'folder',
+            folderId: 'folder_a',
+            folderDepth: 1,
+            serverId: serverProfileState.activeServerId,
+        });
+        const screen = await renderSessionsList();
+        const row = screen.findByTestId('session-list-session:sess_a');
+
+        await act(async () => {
+            row?.props.onMoveDown();
+            await Promise.resolve();
+        });
+
+        await vi.waitFor(() => {
+            expect(reorderSessionOrganizationSpy).toHaveBeenCalledWith({
+                credentials: { accessToken: 'token-a' },
+                serverId: 'server_a',
+                serverUrl: 'https://server-a.test',
+                request: {
+                    scopeKind: 'group',
+                    scopeKey: folderGroupKey,
+                    entries: [
+                        { itemKind: 'session', itemKey: 'sess_c', sortKey: '00000001' },
+                        { itemKind: 'session', itemKey: 'sess_a', sortKey: '00000002' },
+                    ],
+                },
+            });
         });
     });
 
@@ -892,17 +1031,24 @@ describe('SessionsList session folders shell', () => {
             await workspaceMenu?.props.onSelect('add-folder');
         });
 
-        expect(setSessionFoldersV1).toHaveBeenCalledWith(expect.objectContaining({
-            v: 1,
-            folders: expect.arrayContaining([
-                expect.objectContaining({
-                    name: 'Roadmap',
-                    parentId: null,
-                    workspace,
-                    renderWorkspaceKey: 'project_a',
+        await vi.waitFor(() => {
+            expect(upsertSessionFolderSpy).toHaveBeenCalledWith(expect.objectContaining({
+                credentials: { accessToken: 'token-a' },
+                serverId: 'server_a',
+                serverUrl: 'https://server-a.test',
+                request: expect.objectContaining({
+                    parentFolderId: null,
+                    parentFolderKey: null,
+                    display: {
+                        t: 'plain',
+                        v: {
+                            name: 'Roadmap',
+                            workspace,
+                        },
+                    },
                 }),
-            ]),
-        }));
+            }));
+        });
     });
 
     it('creates and renames subfolders from the folder menu', async () => {
@@ -914,25 +1060,45 @@ describe('SessionsList session folders shell', () => {
         await act(async () => {
             await folderMenu?.props.onSelect('add-subfolder');
         });
-        expect(setSessionFoldersV1).toHaveBeenCalledWith(expect.objectContaining({
-            folders: expect.arrayContaining([
-                expect.objectContaining({ name: 'Implementation', parentId: 'folder_a' }),
-            ]),
-        }));
+        await vi.waitFor(() => {
+            expect(upsertSessionFolderSpy).toHaveBeenCalledWith(expect.objectContaining({
+                request: expect.objectContaining({
+                    parentFolderId: 'folder_a',
+                    parentFolderKey: 'folder_a',
+                    display: {
+                        t: 'plain',
+                        v: {
+                            name: 'Implementation',
+                            workspace,
+                        },
+                    },
+                }),
+            }));
+        });
 
-        setSessionFoldersV1.mockClear();
+        upsertSessionFolderSpy.mockClear();
         modalPromptSpy.mockResolvedValueOnce('Renamed planning');
         await act(async () => {
             await folderMenu?.props.onSelect('rename');
         });
-        expect(setSessionFoldersV1).toHaveBeenCalledWith(expect.objectContaining({
-            folders: expect.arrayContaining([
-                expect.objectContaining({ id: 'folder_a', name: 'Renamed planning' }),
-            ]),
-        }));
+        await vi.waitFor(() => {
+            expect(upsertSessionFolderSpy).toHaveBeenCalledWith(expect.objectContaining({
+                request: expect.objectContaining({
+                    folderId: 'folder_a',
+                    folderKey: 'folder_a',
+                    display: {
+                        t: 'plain',
+                        v: {
+                            name: 'Renamed planning',
+                            workspace,
+                        },
+                    },
+                }),
+            }));
+        });
     });
 
-    it('moves assignments before deleting a folder subtree', async () => {
+    it('deletes a folder subtree through the canonical delete mutation without a separate assignment move', async () => {
         modalConfirmSpy.mockResolvedValueOnce(true);
         const screen = await renderSessionsList();
         const folderMenu = screen.findAllByType('DropdownMenu' as React.ElementType)
@@ -942,15 +1108,17 @@ describe('SessionsList session folders shell', () => {
             await folderMenu?.props.onSelect('delete');
         });
 
-        expect(moveSessionFolderAssignmentsSpy).toHaveBeenCalledWith({
-            credentials: { accessToken: 'token-a' },
-            serverId: 'server_a',
-            serverUrl: 'https://server-a.test',
-            fromFolderIds: ['folder_a'],
-            toFolderId: null,
+        expect(moveSessionFolderAssignmentsSpy).not.toHaveBeenCalled();
+        await vi.waitFor(() => {
+            expect(deleteSessionFolderSpy).toHaveBeenCalledWith({
+                credentials: { accessToken: 'token-a' },
+                serverId: 'server_a',
+                serverUrl: 'https://server-a.test',
+                request: {
+                    folderId: 'folder_a',
+                    assignmentBehavior: 'moveAssignmentsToParent',
+                },
+            });
         });
-        expect(setSessionFoldersV1).toHaveBeenCalledWith(expect.objectContaining({
-            folders: [],
-        }));
     });
 });

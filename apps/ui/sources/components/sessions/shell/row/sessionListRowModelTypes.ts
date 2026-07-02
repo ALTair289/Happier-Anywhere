@@ -8,6 +8,7 @@ import type { SessionListSecondaryLineMode } from '@/sync/domains/session/listin
 import type { SessionRowAttentionState, SessionRowDensity, SessionRowPresentation } from './resolveSessionRowPresentation';
 
 export type SessionListRowSessionItem = Extract<SessionListViewItem, { type: 'session' }>;
+export type SessionListSessionItem = SessionListRowSessionItem & { selected?: boolean };
 
 export type SessionListRowStateSnapshot = Readonly<{
     session: Session | undefined;
@@ -99,6 +100,7 @@ export type SessionListRowModel = Readonly<{
     isActive: boolean;
     hasUnreadMessages: boolean;
     pendingCount: number;
+    pendingBlockedCount: number;
     tags: readonly string[];
     allKnownTags: readonly string[];
     tagsEnabled: boolean;

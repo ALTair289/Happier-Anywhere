@@ -13,11 +13,9 @@ import {
     getSessionName,
     getSessionStatus,
     getSessionSubtitle,
-    SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS,
-    isFreshTimestamp,
 } from '@/utils/sessions/sessionUtils';
 import {
-    readSessionRuntimePresentationFreshnessTimestamps,
+    resolveNextSessionRuntimePresentationFreshnessAtMs,
 } from '@/sync/domains/session/attention/deriveSessionRuntimePresentationState';
 import { formatShortRelativeTimeAt } from '@/utils/time/formatShortRelativeTime';
 import { t } from '@/text';
@@ -58,12 +56,26 @@ function normalizeFiniteTimestamp(value: unknown): number | null {
         : null;
 }
 
+function normalizeFiniteCount(value: unknown): number | null {
+    return typeof value === 'number' && Number.isFinite(value)
+        ? Math.max(0, Math.trunc(value))
+        : null;
+}
+
 function readPendingCount(snapshot: Partial<SessionListRowStateSnapshot>, session: SessionStatusSource): number {
     const pendingMessages = snapshot.pending?.messages;
     if (Array.isArray(pendingMessages)) return pendingMessages.length;
     const renderableCount = (session as SessionListRenderableSession).pendingCount;
-    if (typeof renderableCount === 'number' && Number.isFinite(renderableCount)) {
-        return Math.max(0, Math.trunc(renderableCount));
+    return normalizeFiniteCount(renderableCount) ?? 0;
+}
+
+function readPendingBlockedCount(snapshot: Partial<SessionListRowStateSnapshot>, session: SessionStatusSource): number {
+    const renderableCount = (session as SessionListRenderableSession).pendingBlockedCount ?? (session as Session).pendingBlockedCount;
+    const normalizedRenderableCount = normalizeFiniteCount(renderableCount);
+    if (normalizedRenderableCount !== null) return normalizedRenderableCount;
+    const pendingMessages = snapshot.pending?.messages;
+    if (Array.isArray(pendingMessages)) {
+        return pendingMessages.reduce((count, message) => message.pendingDeliveryStatus === 'blocked' ? count + 1 : count, 0);
     }
     return 0;
 }
@@ -112,6 +124,9 @@ function resolveSessionListRowSession(
         rowRenderable.hasPendingUserActionRequests === true || storeSession.hasPendingUserActionRequests === true;
     const keepVisibleWhenInactive =
         rowRenderable.keepVisibleWhenInactive === true || storeSession.keepVisibleWhenInactive === true;
+    const rowPendingBlockedCount = normalizeFiniteCount(rowRenderable.pendingBlockedCount);
+    const storePendingBlockedCount = normalizeFiniteCount(storeSession.pendingBlockedCount);
+    const pendingBlockedCount = storePendingBlockedCount ?? rowPendingBlockedCount;
     const meaningfulActivityAt =
         typeof rowRenderable.meaningfulActivityAt === 'number'
         && Number.isFinite(rowRenderable.meaningfulActivityAt)
@@ -126,6 +141,7 @@ function resolveSessionListRowSession(
         hasPendingPermissionRequests === storeSession.hasPendingPermissionRequests
         && hasPendingUserActionRequests === storeSession.hasPendingUserActionRequests
         && keepVisibleWhenInactive === storeSession.keepVisibleWhenInactive
+        && pendingBlockedCount === normalizeFiniteCount(storeSession.pendingBlockedCount)
         && meaningfulActivityAt === (storeSession.meaningfulActivityAt ?? null)
     ) {
         return storeSession;
@@ -136,6 +152,7 @@ function resolveSessionListRowSession(
         hasPendingPermissionRequests,
         hasPendingUserActionRequests,
         keepVisibleWhenInactive,
+        ...(pendingBlockedCount === null ? {} : { pendingBlockedCount }),
         meaningfulActivityAt,
     };
 }
@@ -177,14 +194,7 @@ function resolveHasUnreadMessages(
 
 function resolveNextRuntimeFreshnessAtMs(session: SessionStatusSource, nowMs: number): number | null {
     if (session.active !== true || session.presence !== 'online') return null;
-
-    const expirations: number[] = [];
-    const addExpiration = (timestamp: number | null | undefined) => {
-        if (!isFreshTimestamp(timestamp, nowMs, SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS)) return;
-        expirations.push(Math.trunc(timestamp as number) + SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS);
-    };
-
-    for (const timestamp of readSessionRuntimePresentationFreshnessTimestamps({
+    return resolveNextSessionRuntimePresentationFreshnessAtMs({
         active: session.active,
         activeAt: session.activeAt,
         presence: session.presence,
@@ -192,15 +202,14 @@ function resolveNextRuntimeFreshnessAtMs(session: SessionStatusSource, nowMs: nu
         thinkingAt: session.thinkingAt,
         latestTurnStatus: session.latestTurnStatus,
         latestTurnStatusObservedAt: session.latestTurnStatusObservedAt,
+        runtimeActivityActiveCount: session.runtimeActivityActiveCount,
+        runtimeActivityObservedAt: session.runtimeActivityObservedAt,
+        runtimeActivityExpiresAt: session.runtimeActivityExpiresAt,
+        runtimeActivitySourceClass: session.runtimeActivitySourceClass,
         hasPendingPermissionRequests: (session as SessionListRenderableSession).hasPendingPermissionRequests === true,
         hasPendingUserActionRequests: (session as SessionListRenderableSession).hasPendingUserActionRequests === true,
         pendingRequestObservedAt: (session as SessionListRenderableSession).pendingRequestObservedAt ?? null,
-    }, nowMs)) {
-        addExpiration(timestamp);
-    }
-
-    if (expirations.length === 0) return null;
-    return Math.min(...expirations);
+    }, nowMs);
 }
 
 function buildStatusSignature(status: ReturnType<typeof getSessionStatus>, nextRuntimeFreshnessAtMs: number | null): string {
@@ -272,10 +281,12 @@ export function buildSessionListRowModel(input: BuildSessionListRowModelInput): 
         statusColors: settings.statusColors,
     });
     const pendingCount = readPendingCount(input.state ?? {}, resolvedSession);
+    const pendingBlockedCount = readPendingBlockedCount(input.state ?? {}, resolvedSession);
     const hasUnreadMessages = resolveHasUnreadMessages(input.state ?? {}, resolvedSession);
     const attentionState = deriveSessionListAttentionState({
         hasUnreadMessages,
         pendingCount,
+        pendingBlockedCount,
         sessionState: status.state,
         latestTurnStatus: resolvedSession.latestTurnStatus ?? null,
         latestTurnStatusObservedAt: normalizeFiniteTimestamp(resolvedSession.latestTurnStatusObservedAt),
@@ -363,6 +374,7 @@ export function buildSessionListRowModel(input: BuildSessionListRowModelInput): 
         isActive: resolvedSession.active === true,
         hasUnreadMessages,
         pendingCount,
+        pendingBlockedCount,
         tags: settings.sessionTagsByKey[rowKey] ?? [],
         allKnownTags: settings.allKnownTags,
         tagsEnabled: settings.tagsEnabled,

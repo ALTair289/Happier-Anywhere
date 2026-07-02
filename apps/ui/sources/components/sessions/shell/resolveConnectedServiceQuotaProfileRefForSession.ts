@@ -1,7 +1,6 @@
 import type { AccountProfile } from '@happier-dev/protocol';
 import {
     buildBackendTargetKey,
-    readConnectedServiceQuotaRefsFromMetadata,
 } from '@happier-dev/protocol';
 
 import { getAgentCore, isAgentId } from '@/agents/catalog/catalog';
@@ -135,16 +134,6 @@ export function resolveConnectedServiceQuotaProfileRefForSession(params: Readonl
             serviceId,
             profileId: binding.profileId,
             provenance: binding.selection === 'group' ? 'connected_binding_group' : 'connected_binding_profile',
-        };
-    }
-
-    const quotaRefs = readConnectedServiceQuotaRefsFromMetadata(metadata);
-    for (const ref of [...quotaRefs].reverse()) {
-        if (!supportedServiceIds.includes(ref.serviceId)) continue;
-        return {
-            serviceId: ref.serviceId,
-            profileId: ref.profileId,
-            provenance: 'published_quota_ref',
         };
     }
 

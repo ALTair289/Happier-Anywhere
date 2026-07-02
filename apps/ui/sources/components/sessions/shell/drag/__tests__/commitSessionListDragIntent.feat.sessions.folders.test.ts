@@ -149,6 +149,58 @@ function reorderInsideAfterRootAIntent(): SessionListDragIntent {
 }
 
 describe('commitSessionListDragIntent', () => {
+    it('persists a root session before a root folder as explicit mixed group order', async () => {
+        const intent: SessionListDragIntent = {
+            sourceRowId: treeRowId.session('server-a', 'root-a'),
+            sourceKind: 'leaf',
+            instructionKind: 'reorder-before',
+            targetRowId: treeRowId.folder('folder-a'),
+            containerId: treeRowId.workspaceRoot('project-a'),
+            parentRowId: null,
+            depth: 0,
+            edge: 'top',
+            rootPlacement: null,
+            sourceSnapshotSignature: 'snapshot-stale',
+        };
+        const context = buildContext();
+
+        const result = await commitSessionListDragIntent({ intent, context });
+
+        expect(result).toEqual({ ok: true });
+        expect(context.setSessionFolderAssignment).not.toHaveBeenCalled();
+        expect(context.setSessionListGroupOrderV1).toHaveBeenCalledWith({
+            'project-a': ['server-a:root-a', 'folder:folder-a', 'folder:folder-b', 'server-a:root-b'],
+        });
+    });
+
+    it('persists a root folder before another root folder as explicit mixed group order', async () => {
+        const intent: SessionListDragIntent = {
+            sourceRowId: treeRowId.folder('folder-b'),
+            sourceKind: 'container',
+            instructionKind: 'reorder-before',
+            targetRowId: treeRowId.folder('folder-a'),
+            containerId: treeRowId.workspaceRoot('project-a'),
+            parentRowId: null,
+            depth: 0,
+            edge: 'top',
+            rootPlacement: null,
+            sourceSnapshotSignature: 'snapshot-stale',
+        };
+        const context = buildContext({
+            sessionListGroupOrderV1: {
+                'project-a': ['server-a:root-a', 'folder:folder-a', 'folder:folder-b', 'server-a:root-b'],
+            },
+        });
+
+        const result = await commitSessionListDragIntent({ intent, context });
+
+        expect(result).toEqual({ ok: true });
+        expect(context.setSessionFoldersV1).toHaveBeenCalledTimes(1);
+        expect(context.setSessionListGroupOrderV1).toHaveBeenCalledWith({
+            'project-a': ['server-a:root-a', 'folder:folder-b', 'folder:folder-a', 'server-a:root-b'],
+        });
+    });
+
     it('commits a frozen-snapshot intent against a later mutated order map', async () => {
         const context = buildContext({
             // background reorder mutated project-a order before commit.

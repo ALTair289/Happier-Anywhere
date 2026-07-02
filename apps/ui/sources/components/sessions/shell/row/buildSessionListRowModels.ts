@@ -1,11 +1,8 @@
-import { syncPerformanceTelemetry } from '@/sync/runtime/syncPerformanceTelemetry';
-import { selectSessionListRowStateSnapshot } from '@/sync/store/sessionListRowStateSnapshot';
 import type {
     SessionListRowModel,
     SessionListRowPresentationSettings,
     SessionListRowSessionItem,
     SessionListRowStateSnapshot,
-    SessionListRowStoreState,
 } from './sessionListRowModelTypes';
 import { buildSessionListRowModel } from './buildSessionListRowModel';
 import type { SessionListViewItem } from '@/sync/domains/session/listing/sessionListViewData';
@@ -16,6 +13,10 @@ import { sessionTagKey } from '../sessionTagUtils';
 type CacheEntry = Readonly<{
     model: SessionListRowModel;
     inputSignature: string;
+    itemRef: SessionListRowSessionItem;
+    dataIndex: number;
+    adjacency: Readonly<{ isFirst: boolean; isLast: boolean; isSingle: boolean }>;
+    stableSettings: StablePresentationSettingsRefs;
     itemSessionRef: SessionListRowSessionItem['session'];
     sessionRef: SessionListRowStateSnapshot['session'];
     renderableRef: SessionListRowStateSnapshot['renderable'];
@@ -27,9 +28,33 @@ export type SessionListRowModelsCache = {
     entries: Map<string, CacheEntry>;
 };
 
-export type BuildSessionListRowModelsInput = Readonly<{
-    items: ReadonlyArray<SessionListViewItem>;
-    state: SessionListRowStoreState;
+type StablePresentationSettingsRefs = Readonly<{
+    currentUserId: SessionListRowPresentationSettings['currentUserId'];
+    density: SessionListRowPresentationSettings['density'];
+    compact: SessionListRowPresentationSettings['compact'];
+    compactMinimal: SessionListRowPresentationSettings['compactMinimal'];
+    identityDisplay: SessionListRowPresentationSettings['identityDisplay'];
+    activeColorMode: SessionListRowPresentationSettings['activeColorMode'];
+    workingIndicatorMode: SessionListRowPresentationSettings['workingIndicatorMode'];
+    workingTextMode: SessionListRowPresentationSettings['workingTextMode'];
+    hideInactiveSessions: SessionListRowPresentationSettings['hideInactiveSessions'];
+    showServerBadge: SessionListRowPresentationSettings['showServerBadge'];
+    showPinnedServerBadge: SessionListRowPresentationSettings['showPinnedServerBadge'];
+    tagsEnabled: SessionListRowPresentationSettings['tagsEnabled'];
+    sessionTagsByKey: SessionListRowPresentationSettings['sessionTagsByKey'];
+    allKnownTags: SessionListRowPresentationSettings['allKnownTags'];
+    pinnedSessionKeys: SessionListRowPresentationSettings['pinnedSessionKeys'];
+    hasMultipleMachines: SessionListRowPresentationSettings['hasMultipleMachines'];
+    reachableSessionDisplayByKey: SessionListRowPresentationSettings['reachableSessionDisplayByKey'];
+    folderViewEnabled: SessionListRowPresentationSettings['folderViewEnabled'];
+    statusColors: SessionListRowPresentationSettings['statusColors'];
+}>;
+
+export type BuildCachedSessionListRowModelInput = Readonly<{
+    item: SessionListRowSessionItem;
+    snapshot: SessionListRowStateSnapshot;
+    dataIndex: number;
+    adjacency: Readonly<{ isFirst: boolean; isLast: boolean; isSingle: boolean }>;
     settings: SessionListRowPresentationSettings;
     cache: SessionListRowModelsCache;
 }>;
@@ -62,6 +87,57 @@ function resolveRowKey(item: SessionListRowSessionItem): string {
     const sessionId = String(item.session.id);
     const serverId = normalizeServerId(item.serverId);
     return serverId ? sessionTagKey(serverId, sessionId) : sessionId;
+}
+
+function buildStablePresentationSettingsRefs(
+    settings: SessionListRowPresentationSettings,
+): StablePresentationSettingsRefs {
+    return {
+        currentUserId: settings.currentUserId,
+        density: settings.density,
+        compact: settings.compact,
+        compactMinimal: settings.compactMinimal,
+        identityDisplay: settings.identityDisplay,
+        activeColorMode: settings.activeColorMode,
+        workingIndicatorMode: settings.workingIndicatorMode,
+        workingTextMode: settings.workingTextMode,
+        hideInactiveSessions: settings.hideInactiveSessions,
+        showServerBadge: settings.showServerBadge,
+        showPinnedServerBadge: settings.showPinnedServerBadge,
+        tagsEnabled: settings.tagsEnabled,
+        sessionTagsByKey: settings.sessionTagsByKey,
+        allKnownTags: settings.allKnownTags,
+        pinnedSessionKeys: settings.pinnedSessionKeys,
+        hasMultipleMachines: settings.hasMultipleMachines,
+        reachableSessionDisplayByKey: settings.reachableSessionDisplayByKey,
+        folderViewEnabled: settings.folderViewEnabled,
+        statusColors: settings.statusColors,
+    };
+}
+
+function areStablePresentationSettingsRefsEqual(
+    previous: StablePresentationSettingsRefs,
+    next: StablePresentationSettingsRefs,
+): boolean {
+    return previous.currentUserId === next.currentUserId
+        && previous.density === next.density
+        && previous.compact === next.compact
+        && previous.compactMinimal === next.compactMinimal
+        && previous.identityDisplay === next.identityDisplay
+        && previous.activeColorMode === next.activeColorMode
+        && previous.workingIndicatorMode === next.workingIndicatorMode
+        && previous.workingTextMode === next.workingTextMode
+        && previous.hideInactiveSessions === next.hideInactiveSessions
+        && previous.showServerBadge === next.showServerBadge
+        && previous.showPinnedServerBadge === next.showPinnedServerBadge
+        && previous.tagsEnabled === next.tagsEnabled
+        && previous.sessionTagsByKey === next.sessionTagsByKey
+        && previous.allKnownTags === next.allKnownTags
+        && previous.pinnedSessionKeys === next.pinnedSessionKeys
+        && previous.hasMultipleMachines === next.hasMultipleMachines
+        && previous.reachableSessionDisplayByKey === next.reachableSessionDisplayByKey
+        && previous.folderViewEnabled === next.folderViewEnabled
+        && previous.statusColors === next.statusColors;
 }
 
 function buildInputSignature(input: Readonly<{
@@ -162,89 +238,31 @@ function canReuseEntry(
         && isCachedRuntimeFresh(entry.model, settings.runtimeNowMs);
 }
 
-type RowModelTelemetryTotals = {
-    sessionRows: number;
-    reusedRows: number;
-    rebuiltRows: number;
-    cacheMisses: number;
-    signatureChanges: number;
-    itemSessionRefChanges: number;
-    sessionRefChanges: number;
-    renderableRefChanges: number;
-    messagesRefChanges: number;
-    pendingRefChanges: number;
-    activityFreshnessMisses: number;
-    runtimeFreshnessMisses: number;
-};
-
-function createRowModelTelemetryTotals(): RowModelTelemetryTotals {
-    return {
-        sessionRows: 0,
-        reusedRows: 0,
-        rebuiltRows: 0,
-        cacheMisses: 0,
-        signatureChanges: 0,
-        itemSessionRefChanges: 0,
-        sessionRefChanges: 0,
-        renderableRefChanges: 0,
-        messagesRefChanges: 0,
-        pendingRefChanges: 0,
-        activityFreshnessMisses: 0,
-        runtimeFreshnessMisses: 0,
-    };
+function canReuseEntryWithoutSignature(input: Readonly<{
+    entry: CacheEntry;
+    snapshot: SessionListRowStateSnapshot;
+    item: SessionListRowSessionItem;
+    dataIndex: number;
+    adjacency: Readonly<{ isFirst: boolean; isLast: boolean; isSingle: boolean }>;
+    settings: SessionListRowPresentationSettings;
+    stableSettings: StablePresentationSettingsRefs;
+}>): boolean {
+    const entry = input.entry;
+    return entry.itemRef === input.item
+        && entry.dataIndex === input.dataIndex
+        && entry.adjacency.isFirst === input.adjacency.isFirst
+        && entry.adjacency.isLast === input.adjacency.isLast
+        && entry.adjacency.isSingle === input.adjacency.isSingle
+        && entry.sessionRef === resolveCacheSessionRef(input.snapshot)
+        && entry.renderableRef === input.snapshot.renderable
+        && entry.messagesRef === input.snapshot.messages
+        && entry.pendingRef === input.snapshot.pending
+        && areStablePresentationSettingsRefsEqual(entry.stableSettings, input.stableSettings)
+        && isCachedActivityFresh(entry.model, input.settings.relativeNowMs)
+        && isCachedRuntimeFresh(entry.model, input.settings.runtimeNowMs);
 }
 
-function recordRowModelReuseMiss(
-    totals: RowModelTelemetryTotals,
-    entry: CacheEntry | undefined,
-    snapshot: SessionListRowStateSnapshot,
-    item: SessionListRowSessionItem,
-    inputSignature: string,
-    settings: SessionListRowPresentationSettings,
-): void {
-    totals.rebuiltRows += 1;
-    if (!entry) {
-        totals.cacheMisses += 1;
-        return;
-    }
-    if (entry.inputSignature !== inputSignature) totals.signatureChanges += 1;
-    if (!canReuseItemSession(entry, item)) totals.itemSessionRefChanges += 1;
-    if (entry.sessionRef !== resolveCacheSessionRef(snapshot)) totals.sessionRefChanges += 1;
-    if (entry.renderableRef !== snapshot.renderable) totals.renderableRefChanges += 1;
-    if (entry.messagesRef !== snapshot.messages) totals.messagesRefChanges += 1;
-    if (entry.pendingRef !== snapshot.pending) totals.pendingRefChanges += 1;
-    if (!isCachedActivityFresh(entry.model, settings.relativeNowMs)) totals.activityFreshnessMisses += 1;
-    if (!isCachedRuntimeFresh(entry.model, settings.runtimeNowMs)) totals.runtimeFreshnessMisses += 1;
-}
-
-function recordRowModelBuildTelemetry(
-    itemCount: number,
-    cacheEntryCount: number,
-    nextRuntimeFreshnessAtMs: number | null,
-    totals: RowModelTelemetryTotals,
-): void {
-    if (!syncPerformanceTelemetry.isEnabled()) return;
-    syncPerformanceTelemetry.count('ui.sessionsList.rows.modelBuild', {
-        items: itemCount,
-        nonSessionRows: itemCount - totals.sessionRows,
-        sessionRows: totals.sessionRows,
-        reusedRows: totals.reusedRows,
-        rebuiltRows: totals.rebuiltRows,
-        cacheMisses: totals.cacheMisses,
-        signatureChanges: totals.signatureChanges,
-        itemSessionRefChanges: totals.itemSessionRefChanges,
-        sessionRefChanges: totals.sessionRefChanges,
-        renderableRefChanges: totals.renderableRefChanges,
-        messagesRefChanges: totals.messagesRefChanges,
-        pendingRefChanges: totals.pendingRefChanges,
-        activityFreshnessMisses: totals.activityFreshnessMisses,
-        runtimeFreshnessMisses: totals.runtimeFreshnessMisses,
-        cacheEntries: cacheEntryCount,
-        hasNextRuntimeFreshness: nextRuntimeFreshnessAtMs === null ? 0 : 1,
-    });
-}
-
-function resolveAdjacency(
+export function resolveSessionListRowModelAdjacency(
     items: ReadonlyArray<SessionListViewItem>,
     index: number,
 ): Readonly<{ isFirst: boolean; isLast: boolean; isSingle: boolean }> {
@@ -263,81 +281,60 @@ function resolveAdjacency(
     };
 }
 
-export function buildSessionListRowModels(input: BuildSessionListRowModelsInput): Readonly<{
-    rows: readonly SessionListRowModel[];
-    modelsByRowKey: ReadonlyMap<string, SessionListRowModel>;
-    nextRuntimeFreshnessAtMs: number | null;
-}> {
-    const rows: SessionListRowModel[] = [];
-    const modelsByRowKey = new Map<string, SessionListRowModel>();
-    let nextRuntimeFreshnessAtMs: number | null = null;
-    const telemetryTotals = createRowModelTelemetryTotals();
-
-    for (let index = 0; index < input.items.length; index += 1) {
-        const item = input.items[index];
-        if (!isSessionItem(item)) continue;
-        telemetryTotals.sessionRows += 1;
-        const snapshot = selectSessionListRowStateSnapshot(input.state, {
-            sessionId: item.session.id,
-            serverId: item.serverId,
-        });
-        const adjacency = resolveAdjacency(input.items, index);
-        const rowKey = resolveRowKey(item);
-        const inputSignature = buildInputSignature({
-            item,
-            rowKey,
-            dataIndex: index,
-            adjacency,
-            snapshot,
-            settings: input.settings,
-        });
-        const cached = input.cache.entries.get(rowKey);
-        const canReuseCachedModel = canReuseEntry(cached, snapshot, item, inputSignature, input.settings);
-        const model = canReuseCachedModel
-            ? cached.model
-            : buildSessionListRowModel({
-                item,
-                state: snapshot,
-                dataIndex: index,
-                isFirst: adjacency.isFirst,
-                isLast: adjacency.isLast,
-                isSingle: adjacency.isSingle,
-                settings: input.settings,
-            });
-        if (canReuseCachedModel) {
-            telemetryTotals.reusedRows += 1;
-        } else {
-            recordRowModelReuseMiss(telemetryTotals, cached, snapshot, item, inputSignature, input.settings);
-        }
-        input.cache.entries.set(rowKey, {
-            model,
-            inputSignature,
-            itemSessionRef: item.session,
-            sessionRef: resolveCacheSessionRef(snapshot),
-            renderableRef: snapshot.renderable,
-            messagesRef: snapshot.messages,
-            pendingRef: snapshot.pending,
-        });
-        rows.push(model);
-        modelsByRowKey.set(model.rowKey, model);
-        const freshnessAt = model.nextRuntimeFreshnessAtMs;
-        if (freshnessAt !== null) {
-            nextRuntimeFreshnessAtMs = nextRuntimeFreshnessAtMs === null
-                ? freshnessAt
-                : Math.min(nextRuntimeFreshnessAtMs, freshnessAt);
-        }
+export function buildCachedSessionListRowModel(input: BuildCachedSessionListRowModelInput): SessionListRowModel {
+    const rowKey = resolveRowKey(input.item);
+    const cached = input.cache.entries.get(rowKey);
+    const stableSettings = buildStablePresentationSettingsRefs(input.settings);
+    if (cached && canReuseEntryWithoutSignature({
+        entry: cached,
+        snapshot: input.snapshot,
+        item: input.item,
+        dataIndex: input.dataIndex,
+        adjacency: input.adjacency,
+        settings: input.settings,
+        stableSettings,
+    })) {
+        return cached.model;
     }
 
-    recordRowModelBuildTelemetry(
-        input.items.length,
-        input.cache.entries.size,
-        nextRuntimeFreshnessAtMs,
-        telemetryTotals,
+    const inputSignature = buildInputSignature({
+        item: input.item,
+        rowKey,
+        dataIndex: input.dataIndex,
+        adjacency: input.adjacency,
+        snapshot: input.snapshot,
+        settings: input.settings,
+    });
+    const canReuseCachedModel = canReuseEntry(
+        cached,
+        input.snapshot,
+        input.item,
+        inputSignature,
+        input.settings,
     );
-
-    return {
-        rows,
-        modelsByRowKey,
-        nextRuntimeFreshnessAtMs,
-    };
+    const model = canReuseCachedModel
+        ? cached.model
+        : buildSessionListRowModel({
+            item: input.item,
+            state: input.snapshot,
+            dataIndex: input.dataIndex,
+            isFirst: input.adjacency.isFirst,
+            isLast: input.adjacency.isLast,
+            isSingle: input.adjacency.isSingle,
+            settings: input.settings,
+        });
+    input.cache.entries.set(rowKey, {
+        model,
+        inputSignature,
+        itemRef: input.item,
+        dataIndex: input.dataIndex,
+        adjacency: input.adjacency,
+        stableSettings,
+        itemSessionRef: input.item.session,
+        sessionRef: resolveCacheSessionRef(input.snapshot),
+        renderableRef: input.snapshot.renderable,
+        messagesRef: input.snapshot.messages,
+        pendingRef: input.snapshot.pending,
+    });
+    return model;
 }

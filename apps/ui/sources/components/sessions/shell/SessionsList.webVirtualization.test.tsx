@@ -21,16 +21,14 @@ import { treeRowId } from './drop-resolution/treeRowId';
  * sections 3.6, 13.6).
  *
  * Three properties:
- * (a) the web `FlatList` does NOT mount every row for a large list — it carries
- *     bounded virtualization props, so the mounted region is the viewport plus
- *     a small overscan;
+ * (a) large web lists use the app's FlashListCompat path and do NOT mount
+ *     every row, so the mounted region stays bounded;
  * (b) dragging after a scroll still resolves the correct target;
  * (c) autoscroll drag to a previously offscreen target, INCLUDING a variable-
  *     height folder header, still resolves correctly.
  *
- * (a) renders `SessionsList` on web behind a `FlatList` mock that windows its
- * `data` exactly as React Native Web's `VirtualizedList` does for the given
- * `windowSize`/`initialNumToRender`. (b)/(c) drive the real drag model
+ * (a) renders `SessionsList` on web behind a `FlashListCompat` mock that
+ * windows its `data` the way the real browser list must. (b)/(c) drive the real drag model
  * (`buildSessionListDragSnapshot` + the live `useTreeDropRegistry` +
  * `resolveSessionListDragPointer`): the target row/header is registered only
  * AFTER a scroll — i.e. it mounts late, the way a virtualized row does — and
@@ -39,11 +37,12 @@ import { treeRowId } from './drop-resolution/treeRowId';
  */
 
 // ---------------------------------------------------------------------------
-// (a) Windowing web FlatList mock + SessionsList render
+// (a) Windowing web list mocks + SessionsList render
 // ---------------------------------------------------------------------------
 
 // Captured props of the web FlatList for the most recent render.
 let capturedWebFlatListProps: any | null = null;
+let capturedWebFlashListProps: any | null = null;
 // Approximate viewport height in rows the windowing mock simulates.
 const WINDOWING_VIEWPORT_ROW_COUNT = 8;
 
@@ -124,7 +123,7 @@ function makeSession(id: string, overrides: Record<string, unknown> = {}) {
     } as any;
 }
 
-const LARGE_SESSION_COUNT = 60;
+const LARGE_SESSION_COUNT = 130;
 
 function buildLargeVisibleSessionListViewData(): SessionListViewItem[] {
     const items: SessionListViewItem[] = [
@@ -153,17 +152,19 @@ function buildLargeVisibleSessionListViewData(): SessionListViewItem[] {
 let mockVisibleSessionListViewData: SessionListViewItem[] = buildLargeVisibleSessionListViewData();
 
 /**
- * A `FlatList` test double that virtualizes its `data` the way React Native
- * Web's `VirtualizedList` does: it mounts roughly `windowSize` viewport-heights
- * of rows around the (initially top) visible region, capped at
- * `initialNumToRender` on first paint, never the whole list. This lets the test
- * observe the *bounded mount* the tuned props produce — which is the property
- * plan section 1.2 found broken (all 148 rows mounted at the default
- * `windowSize` of 21).
+ * List test doubles that keep mounted rows bounded. The FlatList variant
+ * preserves the React Native Web VirtualizedList approximation used by the
+ * small-list drag tests; the FlashList variant models the large-list browser
+ * path that production now uses after RNW FlatList mounted every real row.
  */
-function createWindowingFlatList() {
-    return function WindowingFlatList(props: any) {
-        capturedWebFlatListProps = props;
+function createWindowingList(params: Readonly<{
+    componentName: string;
+    itemWrapperName: string;
+    captureProps: (props: any) => void;
+    defaultWindowedCount?: number;
+}>) {
+    return function WindowingList(props: any) {
+        params.captureProps(props);
         const data: any[] = Array.isArray(props.data) ? props.data : [];
 
         const windowSize = typeof props.windowSize === 'number' ? props.windowSize : 21;
@@ -171,13 +172,14 @@ function createWindowingFlatList() {
             ? props.initialNumToRender
             : 10;
 
-        // VirtualizedList mounts `windowSize` viewport-heights of cells; with no
-        // scroll the visible region is the top of the list. Approximate that as
-        // windowSize * viewport-row-count, then cap by initialNumToRender so the
-        // first paint matches the configured initial batch.
+        // VirtualizedList mounts `windowSize` viewport-heights of cells. FlashList
+        // owns its window internally, so the test double uses a small fixed first
+        // window unless the caller explicitly supplies RN-style batch props.
         const windowedCount = Math.min(
             data.length,
-            Math.max(initialNumToRender, windowSize * WINDOWING_VIEWPORT_ROW_COUNT),
+            typeof params.defaultWindowedCount === 'number'
+                ? params.defaultWindowedCount
+                : Math.max(initialNumToRender, windowSize * WINDOWING_VIEWPORT_ROW_COUNT),
         );
         const mounted = data.slice(0, windowedCount);
 
@@ -194,11 +196,11 @@ function createWindowingFlatList() {
             const child = typeof props.renderItem === 'function'
                 ? props.renderItem({ item, index })
                 : null;
-            return React.createElement('WindowingFlatListItem', { key }, child);
+            return React.createElement(params.itemWrapperName, { key }, child);
         });
 
         return React.createElement(
-            'FlatList',
+            params.componentName,
             props,
             renderAux(props.ListHeaderComponent),
             ...rows,
@@ -207,7 +209,21 @@ function createWindowingFlatList() {
     };
 }
 
-const windowingFlatList = createWindowingFlatList();
+const windowingFlatList = createWindowingList({
+    componentName: 'FlatList',
+    itemWrapperName: 'WindowingFlatListItem',
+    captureProps: (props) => {
+        capturedWebFlatListProps = props;
+    },
+});
+const windowingFlashList = createWindowingList({
+    componentName: 'FlashListCompat',
+    itemWrapperName: 'WindowingFlashListItem',
+    defaultWindowedCount: 12,
+    captureProps: (props) => {
+        capturedWebFlashListProps = props;
+    },
+});
 
 installSessionShellCommonModuleMocks({
     reactNative: async () => {
@@ -263,6 +279,10 @@ installSessionShellCommonModuleMocks({
         });
     },
 });
+
+vi.mock('@/components/ui/lists/flashListCompat/FlashListCompat', () => ({
+    FlashList: (props: any) => windowingFlashList(props),
+}));
 
 vi.mock('react-native-reanimated', () => ({
     default: { View: (props: any) => React.createElement('Animated.View', props) },
@@ -568,6 +588,7 @@ function contentRowAtIndex(params: Readonly<{
 describe('SessionsList web virtualization', () => {
     beforeEach(() => {
         capturedWebFlatListProps = null;
+        capturedWebFlashListProps = null;
         pinnedSessionKeysV1 = [];
         sessionTagsV1 = {};
         workspaceLabelsV1 = {};
@@ -602,37 +623,26 @@ describe('SessionsList web virtualization', () => {
             typeof node.props?.testID === 'string'
             && node.props.testID.startsWith('session-list-session:'));
 
-        // The full list has 60 session rows; a windowed list mounts only a
-        // bounded slice around the viewport, never the whole list.
-        expect(LARGE_SESSION_COUNT).toBe(60);
+        // The full list has 130 session rows; the FlashList-backed web path
+        // mounts only a bounded slice around the viewport, never the whole list.
+        expect(capturedWebFlashListProps).toBeTruthy();
+        expect(capturedWebFlatListProps).toBeNull();
+        expect(LARGE_SESSION_COUNT).toBe(130);
         expect(mountedSessionRows.length).toBeGreaterThan(0);
         expect(mountedSessionRows.length).toBeLessThan(LARGE_SESSION_COUNT);
     });
 
-    it('configures the web FlatList with bounded virtualization props instead of full-list windowing', async () => {
+    it('uses FlashListCompat for large web session lists instead of React Native Web FlatList', async () => {
         await renderSessionsList();
 
-        expect(capturedWebFlatListProps).toBeTruthy();
-        const props = capturedWebFlatListProps!;
-
-        // windowSize must be far below VirtualizedList's default of 21 so the
-        // mounted region is the viewport plus a small overscan, not the list.
-        expect(typeof props.windowSize).toBe('number');
-        expect(props.windowSize).toBeGreaterThan(0);
-        expect(props.windowSize).toBeLessThanOrEqual(5);
-
-        // An explicit initial batch + incremental batched fill.
-        expect(typeof props.initialNumToRender).toBe('number');
-        expect(props.initialNumToRender).toBeGreaterThan(0);
-        expect(props.initialNumToRender).toBeLessThan(LARGE_SESSION_COUNT);
-
-        expect(typeof props.maxToRenderPerBatch).toBe('number');
-        expect(props.maxToRenderPerBatch).toBeGreaterThan(0);
-
-        expect(typeof props.updateCellsBatchingPeriod).toBe('number');
-        expect(props.updateCellsBatchingPeriod).toBeGreaterThan(0);
-
+        expect(capturedWebFlatListProps).toBeNull();
+        expect(capturedWebFlashListProps).toBeTruthy();
+        const props = capturedWebFlashListProps!;
+        expect(props.getItemType?.(mockVisibleSessionListViewData[0])).toBe('header:date');
+        expect(props.getItemType?.(mockVisibleSessionListViewData[1])).toBe('session');
         expect(props.scrollEventThrottle).toBe(32);
+        expect(typeof props.overrideProps?.onWheel).toBe('function');
+        expect(typeof props.overrideProps?.onTouchMove).toBe('function');
     });
 
     it('does not pass a full-list getItemLayout to the mixed-height web list', async () => {
@@ -641,8 +651,8 @@ describe('SessionsList web virtualization', () => {
         // getItemLayout would report wrong offsets for every header.
         await renderSessionsList();
 
-        expect(capturedWebFlatListProps).toBeTruthy();
-        expect(capturedWebFlatListProps!.getItemLayout).toBeUndefined();
+        expect(capturedWebFlashListProps).toBeTruthy();
+        expect(capturedWebFlashListProps!.getItemLayout).toBeUndefined();
     });
 
     it('does not enable removeClippedSubviews on the web list', async () => {
@@ -651,16 +661,16 @@ describe('SessionsList web virtualization', () => {
         // coordinate geometry the drag depends on.
         await renderSessionsList();
 
-        expect(capturedWebFlatListProps).toBeTruthy();
-        expect(Boolean(capturedWebFlatListProps!.removeClippedSubviews)).toBe(false);
+        expect(capturedWebFlashListProps).toBeTruthy();
+        expect(Boolean(capturedWebFlashListProps!.removeClippedSubviews)).toBe(false);
     });
 
-    it('keeps web load-more on the FlatList end-reached path instead of scroll proximity', async () => {
+    it('keeps web load-more on the list end-reached path instead of scroll proximity', async () => {
         await renderSessionsList();
 
-        expect(capturedWebFlatListProps).toBeTruthy();
+        expect(capturedWebFlashListProps).toBeTruthy();
         act(() => {
-            capturedWebFlatListProps!.onScroll?.({
+            capturedWebFlashListProps!.onScroll?.({
                 nativeEvent: {
                     contentOffset: { y: 720 },
                     contentSize: { height: 1000 },
@@ -673,7 +683,7 @@ describe('SessionsList web virtualization', () => {
         expect(fetchMoreSessionsMock).not.toHaveBeenCalled();
     });
 
-    it('keeps long-web-list priority row attention animations live when viewability omits mounted rows', async () => {
+    it('keeps long-web-list working row attention animations live without subscribing every attention row', async () => {
         const items: SessionListViewItem[] = [
             {
                 type: 'header',
@@ -715,9 +725,9 @@ describe('SessionsList web virtualization', () => {
         mockVisibleSessionListViewData = items;
 
         const screen = await renderSessionsList();
-        const firstSessionItem = capturedWebFlatListProps!.data.find((item: any) => item?.session?.id === 'long_0');
+        const firstSessionItem = capturedWebFlashListProps!.data.find((item: any) => item?.session?.id === 'long_0');
         await act(async () => {
-            capturedWebFlatListProps!.onViewableItemsChanged?.({
+            capturedWebFlashListProps!.onViewableItemsChanged?.({
                 viewableItems: [{ isViewable: true, item: firstSessionItem }],
             });
         });
@@ -726,7 +736,7 @@ describe('SessionsList web virtualization', () => {
         const omittedMountedAttentionRow = screen.root.findByProps({ testID: 'session-list-session:long_attention' });
         const omittedMountedActiveOnlyRow = screen.root.findByProps({ testID: 'session-list-session:long_active_only' });
         expect(omittedMountedWorkingRow.props.rowAttentionAnimationEnabled).toBe(true);
-        expect(omittedMountedAttentionRow.props.rowAttentionAnimationEnabled).toBe(true);
+        expect(omittedMountedAttentionRow.props.rowAttentionAnimationEnabled).toBe(false);
         expect(omittedMountedActiveOnlyRow.props.rowAttentionAnimationEnabled).toBe(false);
     });
 
@@ -778,26 +788,35 @@ describe('SessionsList web virtualization', () => {
             mockVisibleSessionListViewData = items;
 
             const screen = await renderSessionsList();
-            const firstSessionItem = capturedWebFlatListProps!.data.find((item: any) => item?.session?.id === 'long_0');
+            const firstSessionItem = capturedWebFlashListProps!.data.find((item: any) => item?.session?.id === 'long_0');
             syncPerformanceTelemetry.reset();
             await act(async () => {
-                capturedWebFlatListProps!.onViewableItemsChanged?.({
+                capturedWebFlashListProps!.onViewableItemsChanged?.({
                     viewableItems: [{ isViewable: true, item: firstSessionItem }],
                 });
             });
 
             expect(screen.root.findByProps({ testID: 'session-list-session:long_working' }).props.rowAttentionAnimationEnabled).toBe(true);
-            expect(screen.root.findByProps({ testID: 'session-list-session:long_attention' }).props.rowAttentionAnimationEnabled).toBe(true);
+            expect(screen.root.findByProps({ testID: 'session-list-session:long_attention' }).props.rowAttentionAnimationEnabled).toBe(false);
 
             const subscriptionEvent = syncPerformanceTelemetry.snapshot().events
                 .filter((event) => event.name === 'ui.sessionsList.rowStoreSubscriptions')
                 .at(-1);
             expect(subscriptionEvent?.fields).toEqual(expect.objectContaining({
                 priorityAttentionRows: 1,
-                prioritySubscribedRows: 2,
+                prioritySubscribedRows: 1,
                 priorityWorkingPlacementRows: 1,
-                subscribedRows: 3,
+                subscribedRows: 2,
                 visibleRows: 1,
+            }));
+            const viewabilityEvent = syncPerformanceTelemetry.snapshot().events
+                .filter((event) => event.name === 'ui.sessionsList.viewableRows.changed')
+                .at(-1);
+            expect(viewabilityEvent?.fields).toEqual(expect.objectContaining({
+                changed: 1,
+                nextVisibleRows: 1,
+                previousKnown: 0,
+                previousVisibleRows: 0,
             }));
         } finally {
             syncPerformanceTelemetry.configure({ enabled: false });

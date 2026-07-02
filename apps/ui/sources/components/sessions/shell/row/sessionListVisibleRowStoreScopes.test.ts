@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+    buildSessionListEmbeddedPriorityRowKeys,
     buildSessionListRowStoreSubscriptionTelemetryFields,
     resolveSessionListRowStoreScopeKey,
     resolveSessionListRowStoreSubscriptionMode,
@@ -34,7 +35,7 @@ describe('session list visible row store scopes', () => {
         )).toBe(scopes);
     });
 
-    it('selects all rendered row subscriptions for small non-virtualized web lists', () => {
+    it('selects all rendered row subscriptions for small non-virtualized web lists and bounded native lists', () => {
         expect(resolveSessionListRowStoreSubscriptionMode({
             platformOS: 'web',
             renderedSessionRows: 80,
@@ -43,6 +44,18 @@ describe('session list visible row store scopes', () => {
         expect(resolveSessionListRowStoreSubscriptionMode({
             platformOS: 'web',
             renderedSessionRows: 81,
+            webNonVirtualizedMaxRows: 80,
+        })).toBe('viewable');
+        expect(resolveSessionListRowStoreSubscriptionMode({
+            platformOS: 'ios',
+            renderedSessionRows: 10,
+            nativeAllRenderedMaxRows: 200,
+            webNonVirtualizedMaxRows: 80,
+        })).toBe('all-rendered');
+        expect(resolveSessionListRowStoreSubscriptionMode({
+            platformOS: 'ios',
+            renderedSessionRows: 201,
+            nativeAllRenderedMaxRows: 200,
             webNonVirtualizedMaxRows: 80,
         })).toBe('viewable');
         expect(resolveSessionListRowStoreSubscriptionMode({
@@ -68,6 +81,98 @@ describe('session list visible row store scopes', () => {
             { serverId: 'server-a', sessionId: 's1' },
             { serverId: 'server-a', sessionId: 's3' },
         ]);
+    });
+
+    it('does not eagerly subscribe every row in a large list before viewability is known', () => {
+        const scopes = Array.from({ length: 75 }, (_value, index) => ({
+            serverId: 'server-a',
+            sessionId: `s${index}`,
+        }));
+
+        expect(resolveSessionListRowStoreSubscriptionScopes(
+            scopes,
+            null,
+            'viewable',
+            new Set(['server-a:s3', 'server-a:s70']),
+        )).toEqual([
+            { serverId: 'server-a', sessionId: 's3' },
+            { serverId: 'server-a', sessionId: 's70' },
+        ]);
+    });
+
+    it('does not treat stale embedded runtime fields or attention placement as priority subscription keys', () => {
+        const embeddedPriorityKeys = buildSessionListEmbeddedPriorityRowKeys([
+            {
+                type: 'session',
+                serverId: 'server-a',
+                session: {
+                    id: 'stale-completed-row',
+                    latestTurnStatus: 'in_progress',
+                    thinking: true,
+                    hasPendingPermissionRequests: true,
+                    hasPendingUserActionRequests: true,
+                    lastRuntimeIssue: { message: 'stale issue' },
+                },
+            },
+            {
+                type: 'session',
+                serverId: 'server-a',
+                selected: true,
+                session: { id: 'selected-row' },
+            },
+            {
+                type: 'session',
+                serverId: 'server-a',
+                workingPlacementReason: 'working',
+                session: { id: 'working-row' },
+            },
+            {
+                type: 'session',
+                serverId: 'server-a',
+                attentionPromotionReason: 'unread',
+                session: { id: 'attention-row' },
+            },
+        ]);
+
+        expect(embeddedPriorityKeys).toEqual(new Set([
+            'server-a:selected-row',
+            'server-a:working-row',
+        ]));
+        expect(resolveSessionListRowStoreSubscriptionScopes(
+            [
+                { serverId: 'server-a', sessionId: 'stale-completed-row' },
+                { serverId: 'server-a', sessionId: 'selected-row' },
+                { serverId: 'server-a', sessionId: 'working-row' },
+                { serverId: 'server-a', sessionId: 'attention-row' },
+            ],
+            new Set(),
+            'viewable',
+            embeddedPriorityKeys,
+        )).toEqual([
+            { serverId: 'server-a', sessionId: 'selected-row' },
+            { serverId: 'server-a', sessionId: 'working-row' },
+        ]);
+    });
+
+    it('does not subscribe every attention row in an attention-heavy virtualized list before viewability is known', () => {
+        const scopes = Array.from({ length: 130 }, (_, index) => ({
+            serverId: 'server-a',
+            sessionId: `attention-${index}`,
+        }));
+        const embeddedPriorityKeys = buildSessionListEmbeddedPriorityRowKeys(scopes.map((scope) => ({
+            type: 'session',
+            serverId: scope.serverId,
+            attentionPromotionReason: 'failed',
+            session: { id: scope.sessionId },
+        })));
+
+        expect(embeddedPriorityKeys.size).toBe(0);
+        expect(resolveSessionListRowStoreSubscriptionScopes(
+            scopes,
+            null,
+            'viewable',
+            embeddedPriorityKeys,
+        )).toEqual([]);
     });
 
     it('narrows subscriptions to viewable session rows', () => {

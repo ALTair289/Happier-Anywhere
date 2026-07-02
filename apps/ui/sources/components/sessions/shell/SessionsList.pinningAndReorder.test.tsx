@@ -10,6 +10,7 @@ import {
     standardCleanup,
 } from '@/dev/testkit';
 import { createCapturingFlatListMock } from '@/dev/testkit/mocks/flashList';
+import type { SessionOrganizationProjection } from '@/sync/domains/session/organization/types';
 import { installSessionShellCommonModuleMocks } from './sessionShellTestHelpers';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -30,7 +31,20 @@ let workspaceLabelsV1: Record<string, string> = {};
 const setWorkspaceLabelsV1 = vi.fn();
 const readMachineTargetForSessionMock = vi.hoisted(() => vi.fn());
 const mockMachinesState = vi.hoisted(() => ({ current: [] as any[] }));
+const sessionOrganizationOps = vi.hoisted(() => ({
+    deleteSessionFolder: vi.fn(async () => undefined),
+    deleteSessionLabel: vi.fn(async () => undefined),
+    reorderSessionOrganization: vi.fn(async () => undefined),
+    setSessionPin: vi.fn(async () => undefined),
+    setSessionTagLabels: vi.fn(async () => undefined),
+    upsertSessionFolder: vi.fn(async () => undefined),
+    upsertSessionLabel: vi.fn(async () => undefined),
+}));
+const tokenStorageMocks = vi.hoisted(() => ({
+    getCredentialsForServerUrl: vi.fn(async () => ({ token: 'token-a', secret: 'secret-a' })),
+}));
 const flatListMock = createCapturingFlatListMock({ renderItems: true });
+let sessionOrganizationProjection: SessionOrganizationProjection | null = null;
 
 const groupKey = 'server:server_a:day:2026-02-17';
 
@@ -99,6 +113,7 @@ installSessionShellCommonModuleMocks({
                     if (key === 'hideInactiveSessions') return hideInactiveSessions;
                     return null;
                 },
+                useSessionOrganizationProjection: () => sessionOrganizationProjection,
                 useHasUnreadMessages: () => false,
                 useSession: () => null,
                 useProfile: () => ({
@@ -208,6 +223,30 @@ vi.mock('@/hooks/ui/useHappyAction', () => ({
     useHappyAction: (_fn: unknown) => [false, vi.fn()],
 }));
 
+vi.mock('@/auth/storage/tokenStorage', () => ({
+    TokenStorage: {
+        getCredentialsForServerUrl: tokenStorageMocks.getCredentialsForServerUrl,
+    },
+}));
+
+vi.mock('@/sync/domains/server/serverProfiles', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('@/sync/domains/server/serverProfiles')>();
+    return {
+        ...actual,
+        getServerProfileById: (serverId: string) => {
+            if (serverId !== 'server_a') return null;
+            return {
+                id: 'server_a',
+                name: 'Server A',
+                serverUrl: 'https://server-a.example',
+                createdAt: 0,
+                updatedAt: 0,
+                lastUsedAt: 0,
+            };
+        },
+    };
+});
+
 vi.mock('@/sync/ops', async (importOriginal) => {
     const { createSyncOpsModuleMock } = await import('@/dev/testkit/mocks/syncOps');
     return createSyncOpsModuleMock({
@@ -218,6 +257,8 @@ vi.mock('@/sync/ops', async (importOriginal) => {
         },
     });
 });
+
+vi.mock('@/sync/ops/sessionOrganization', () => sessionOrganizationOps);
 
 vi.mock('@/sync/ops/sessionMachineTarget', () => ({
     readMachineTargetForSession: (sessionId: string) => readMachineTargetForSessionMock(sessionId),
@@ -349,6 +390,21 @@ function expectPresent<T>(value: T | null | undefined, label: string): T {
     return value;
 }
 
+function createEmptySessionOrganizationProjection(): SessionOrganizationProjection {
+    return {
+        schemaVersion: 1,
+        version: 1,
+        pinnedSessionIds: [],
+        pinsBySessionId: {},
+        foldersById: {},
+        folderAssignmentsBySessionId: {},
+        tagsById: {},
+        tagAssignmentsBySessionId: {},
+        orderEntriesByScopeKey: {},
+        labelsByLabelKey: {},
+    };
+}
+
 describe('SessionsList pinning + per-group ordering', () => {
     beforeEach(() => {
         pinnedSessionKeysV1 = [];
@@ -359,12 +415,15 @@ describe('SessionsList pinning + per-group ordering', () => {
         setSessionListGroupOrderV1.mockClear();
         setSessionTagsV1.mockClear();
         setWorkspaceLabelsV1.mockClear();
+        Object.values(sessionOrganizationOps).forEach((spy) => spy.mockClear());
+        tokenStorageMocks.getCredentialsForServerUrl.mockClear();
         routerPushSpy.mockReset();
         mockAllowedServerIds = ['server_a'];
         capturedRootFlatListProps = null;
         hideInactiveSessions = false;
         readMachineTargetForSessionMock.mockReset();
         mockMachinesState.current = [];
+        sessionOrganizationProjection = createEmptySessionOrganizationProjection();
         resetVisibleSessionListViewData();
     });
 
@@ -415,8 +474,11 @@ describe('SessionsList pinning + per-group ordering', () => {
         expect(stopPropagation).toHaveBeenCalledTimes(1);
     });
 
-    it('passes session tags from settings into session items when enabled', async () => {
-        sessionTagsV1 = { 'server_a:sess_a': ['important'] };
+    it('passes server-backed session organization tags into session items when enabled', async () => {
+        sessionOrganizationProjection = {
+            ...createEmptySessionOrganizationProjection(),
+            tagAssignmentsBySessionId: { sess_a: ['important'] },
+        };
         const screen = await renderSessionsList();
 
         const row = expectPresent(
@@ -470,8 +532,11 @@ describe('SessionsList pinning + per-group ordering', () => {
         expect(row.props.activityTimeMode).toBeUndefined();
     });
 
-    it('writes updated session tags back to settings as a value (not an updater function)', async () => {
-        sessionTagsV1 = { 'server_a:sess_a': ['important'] };
+    it('writes updated session tags through the session organization ops boundary', async () => {
+        sessionOrganizationProjection = {
+            ...createEmptySessionOrganizationProjection(),
+            tagAssignmentsBySessionId: { sess_a: ['important'] },
+        };
         const screen = await renderSessionsList();
 
         const row = expectPresent(
@@ -479,17 +544,31 @@ describe('SessionsList pinning + per-group ordering', () => {
             'expected sess_a session row',
         );
 
-        invokeTestInstanceHandler(row, 'onSetTags', ['urgent'], 'expected sess_a session row');
+        await act(async () => {
+            invokeTestInstanceHandler(row, 'onSetTags', ['urgent'], 'expected sess_a session row');
+            await Promise.resolve();
+            await Promise.resolve();
+        });
 
-        expect(setSessionTagsV1).toHaveBeenCalledTimes(1);
-        expect(setSessionTagsV1.mock.calls[0]?.[0]).toEqual({
-            'server_a:sess_a': ['urgent'],
+        expect(setSessionTagsV1).not.toHaveBeenCalled();
+        expect(sessionOrganizationOps.setSessionTagLabels).toHaveBeenCalledTimes(1);
+        expect(sessionOrganizationOps.setSessionTagLabels).toHaveBeenCalledWith({
+            credentials: { token: 'token-a', secret: 'secret-a' },
+            serverId: 'server_a',
+            serverUrl: 'https://server-a.example',
+            sessionId: 'sess_a',
+            tags: ['urgent'],
         });
     });
 
     it('shows pinned server badges only when multiple servers are selected', async () => {
-        pinnedSessionKeysV1 = ['server_a:sess_a'];
-        sessionTagsV1 = {};
+        sessionOrganizationProjection = {
+            ...createEmptySessionOrganizationProjection(),
+            pinnedSessionIds: ['sess_a'],
+            pinsBySessionId: {
+                sess_a: { sessionId: 'sess_a', sortKey: 'rank-a', pinnedAt: 1 },
+            },
+        };
         const screen = await renderSessionsList();
 
         const pinnedRow = expectPresent(
@@ -509,7 +588,7 @@ describe('SessionsList pinning + per-group ordering', () => {
         expect(pinnedRow2.props.showServerBadge).toBe(true);
     });
 
-    it('wires pin toggling via pinnedSessionKeysV1', async () => {
+    it('wires pin toggling through the session organization ops boundary', async () => {
         setPinnedSessionKeysV1.mockClear();
 
         const screen = await renderSessionsList();
@@ -521,13 +600,23 @@ describe('SessionsList pinning + per-group ordering', () => {
 
         await act(async () => {
             invokeTestInstanceHandler(row, 'onTogglePinned', undefined, 'expected sess_a session row');
+            await Promise.resolve();
+            await Promise.resolve();
         });
 
-        expect(setPinnedSessionKeysV1).toHaveBeenCalledTimes(1);
-        expect(setPinnedSessionKeysV1).toHaveBeenCalledWith(['server_a:sess_a']);
+        expect(setPinnedSessionKeysV1).not.toHaveBeenCalled();
+        expect(sessionOrganizationOps.setSessionPin).toHaveBeenCalledTimes(1);
+        expect(sessionOrganizationOps.setSessionPin).toHaveBeenCalledWith({
+            credentials: { token: 'token-a', secret: 'secret-a' },
+            serverId: 'server_a',
+            serverUrl: 'https://server-a.example',
+            sessionId: 'sess_a',
+            pinned: true,
+            sortKey: undefined,
+        });
     });
 
-    it('does not render project headers and forces path/machine subtitles into rows', async () => {
+    it('renders project headers and keeps path/machine subtitles available on project rows', async () => {
         const sess1 = {
             ...sessionA,
             id: 'sess_p1',
@@ -567,7 +656,8 @@ describe('SessionsList pinning + per-group ordering', () => {
             'expected sess_p1 session row',
         );
         expect(row1.props.variant).toBe('no-path');
-        expect(row1.props.subtitleOverride ?? null).toBe(null);
+        expect(row1.props.secondaryLineMode).toBe('status');
+        expect(row1.props.subtitleOverride).toBe('m1 · repoA');
     });
 
     it('derives row subtitles from reachable machine targets when session metadata is stale after handoff', async () => {
@@ -633,9 +723,26 @@ describe('SessionsList pinning + per-group ordering', () => {
     });
 
     it('uses renamed workspace labels for inactive date-grouped row subtitles', async () => {
-        workspaceLabelsV1 = {
-            wl_22e4d12c: 'Renamed Live Workspace',
-            wl_e9fff200: 'Renamed Live Workspace',
+        sessionOrganizationProjection = {
+            ...createEmptySessionOrganizationProjection(),
+            labelsByLabelKey: {
+                'server_a:workspace:wl_22e4d12c': {
+                    labelKind: 'workspace',
+                    scopeKey: 'wl_22e4d12c',
+                    display: { t: 'plain', v: { label: 'Renamed Live Workspace' } },
+                    archivedAt: null,
+                    createdAt: 1,
+                    updatedAt: 1,
+                },
+                'server_a:workspace:wl_e9fff200': {
+                    labelKind: 'workspace',
+                    scopeKey: 'wl_e9fff200',
+                    display: { t: 'plain', v: { label: 'Renamed Live Workspace' } },
+                    archivedAt: null,
+                    createdAt: 1,
+                    updatedAt: 1,
+                },
+            },
         };
         mockMachinesState.current = [
             { id: 'machine-live-1', metadata: { displayName: 'Rebound workstation' } },

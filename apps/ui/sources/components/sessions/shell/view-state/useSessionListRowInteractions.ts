@@ -5,7 +5,7 @@ import { useSharedValue } from 'react-native-reanimated';
 import { TokenStorage } from '@/auth/storage/tokenStorage';
 import { getServerProfileById } from '@/sync/domains/server/serverProfiles';
 import type { SessionFoldersV1 } from '@/sync/domains/session/folders';
-import { setSessionFolderAssignment } from '@/sync/ops/sessionFolders';
+import { setSessionFolderAssignment } from '@/sync/ops/sessionOrganization';
 import { useHappyAction } from '@/hooks/ui/useHappyAction';
 import {
     measureWindowBounds,
@@ -396,7 +396,7 @@ export function useSessionListRowInteractions({
         if (!credentials) throw new Error('Missing server credentials for session folder assignment');
         await setSessionFolderAssignment({
             credentials,
-            serverId: serverProfile.id,
+            serverId: assignment.serverId,
             serverUrl: serverProfile.serverUrl,
             sessionId: assignment.sessionId,
             folderId: assignment.folderId,

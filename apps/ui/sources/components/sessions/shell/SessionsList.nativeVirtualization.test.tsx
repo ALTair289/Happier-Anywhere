@@ -23,7 +23,12 @@ const resolveWorkspaceFaviconMock = vi.hoisted(() => vi.fn());
 const routerPushSpy = vi.hoisted(() => vi.fn());
 const navigateToSessionSpy = vi.hoisted(() => vi.fn());
 const fetchMoreSessionsMock = vi.hoisted(() => vi.fn(async () => undefined));
+const refreshSessionsMock = vi.hoisted(() => vi.fn<() => Promise<void>>(async () => undefined));
 const markSessionListScrollActivityMock = vi.hoisted(() => vi.fn());
+const sessionOrganizationOps = vi.hoisted(() => ({
+    setSessionPin: vi.fn(async () => undefined),
+    setSessionTagLabels: vi.fn(async () => undefined),
+}));
 const keyboardShortcutHandlersRef = vi.hoisted(() => ({
     current: null as Record<string, (() => void)> | null,
 }));
@@ -42,6 +47,7 @@ let sessionListOrderingModeV1: 'custom' | 'created' | 'updated' = 'custom';
 const setSessionListOrderingModeV1 = vi.fn();
 let sessionFolderAssignmentsBySessionKey: Record<string, string | null> = {};
 let rememberLastProjectSessionSelections: boolean | null = null;
+let organizationProjectionCache: { signature: string; projection: any } | null = null;
 let allMachines = [
     {
         id: 'machine-target',
@@ -115,16 +121,89 @@ let machineDisplayById: Record<string, any> = {
     },
 };
 
+function stripServerScopedSessionKey(key: string): string {
+    const prefix = 'server_a:';
+    return key.startsWith(prefix) ? key.slice(prefix.length) : key;
+}
+
+function buildOrganizationProjectionFromLegacyState() {
+    const signature = JSON.stringify({
+        pinnedSessionKeysV1,
+        sessionFoldersV1,
+        sessionFolderAssignmentsBySessionKey,
+        sessionTagsV1,
+        workspaceLabelsV1,
+    });
+    if (organizationProjectionCache?.signature === signature) {
+        return organizationProjectionCache.projection;
+    }
+    const pinsBySessionId: Record<string, { sessionId: string; sortKey: string | null; pinnedAt: number }> = {};
+    const pinnedSessionIds = pinnedSessionKeysV1.map((key, index) => {
+        const sessionId = stripServerScopedSessionKey(key);
+        pinsBySessionId[sessionId] = { sessionId, sortKey: String(index + 1).padStart(8, '0'), pinnedAt: index + 1 };
+        return sessionId;
+    });
+    const foldersById = Object.fromEntries((sessionFoldersV1?.folders ?? []).map((folder: any) => [
+        folder.id,
+        {
+            folderId: folder.id,
+            folderKey: folder.id,
+            parentFolderId: folder.parentId ?? null,
+            parentFolderKey: folder.parentId ?? null,
+            sortKey: folder.sortKey ?? null,
+            display: { t: 'plain', v: { name: folder.name, workspace: folder.workspace } },
+            archivedAt: null,
+            createdAt: folder.createdAt ?? 1,
+            updatedAt: folder.updatedAt ?? 1,
+        },
+    ]));
+    const projection = {
+        schemaVersion: 1,
+        version: 1,
+        pinnedSessionIds,
+        pinsBySessionId,
+        foldersById,
+        folderAssignmentsBySessionId: Object.fromEntries(Object.entries(sessionFolderAssignmentsBySessionKey).map(([key, folderId]) => [
+            stripServerScopedSessionKey(key),
+            folderId,
+        ])),
+        tagsById: {},
+        tagAssignmentsBySessionId: Object.fromEntries(Object.entries(sessionTagsV1).map(([key, tags]) => [
+            stripServerScopedSessionKey(key),
+            tags,
+        ])),
+        orderEntriesByScopeKey: {},
+        labelsByLabelKey: Object.fromEntries(Object.entries(workspaceLabelsV1).map(([scopeKey, label], index) => [
+            `server_a:workspace:${scopeKey}`,
+            {
+                labelKind: 'workspace',
+                scopeKey,
+                display: { t: 'plain', v: { label } },
+                archivedAt: null,
+                createdAt: index + 1,
+                updatedAt: index + 1,
+            },
+        ])),
+    };
+    organizationProjectionCache = { signature, projection };
+    return projection;
+}
+
 function useLocalSettingMutableMock<K extends keyof LocalSettings>(
     key: K,
 ): [LocalSettings[K], (value: LocalSettings[K]) => void] {
     const localSettings = {
         ...localSettingsDefaults,
         sessionMruOrderV1,
+        collapsedGroupKeysV1,
     };
     const setValue = (value: LocalSettings[K]) => {
         if (key === 'sessionMruOrderV1') {
             setSessionMruOrderV1(value);
+            return;
+        }
+        if (key === 'collapsedGroupKeysV1') {
+            setCollapsedGroupKeysV1(value as Record<string, boolean>);
             return;
         }
         setDefaultLocalSettingValue(value);
@@ -407,6 +486,7 @@ installSessionShellCommonModuleMocks({
                 useHasUnreadMessages: () => false,
                 useAllMachines: () => allMachines,
                 useMachineDisplayById: () => machineDisplayById,
+                useSessionOrganizationProjection: () => buildOrganizationProjectionFromLegacyState(),
                 useSettingMutable: (key: string) => {
                     if (key === 'pinnedSessionKeysV1') return [pinnedSessionKeysV1, setPinnedSessionKeysV1];
                     if (key === 'sessionFolderViewModeV1') return [sessionFolderViewModeV1, setSessionFolderViewModeV1];
@@ -417,7 +497,9 @@ installSessionShellCommonModuleMocks({
                     }
                     if (key === 'sessionTagsV1') return [sessionTagsV1, setSessionTagsV1];
                     if (key === 'workspaceLabelsV1') return [workspaceLabelsV1, setWorkspaceLabelsV1];
-                    if (key === 'collapsedGroupKeysV1') return [collapsedGroupKeysV1, setCollapsedGroupKeysV1];
+                    if (key === 'collapsedGroupKeysV1') {
+                        throw new Error('collapsedGroupKeysV1 must stay in local settings');
+                    }
                     if (key === 'sessionListGroupOrderV1') return [{}, vi.fn()];
                     return [null, vi.fn()];
                 },
@@ -455,6 +537,7 @@ vi.mock('@/sync/ops', async (importOriginal) => {
 vi.mock('@/sync/sync', () => ({
     sync: {
         fetchMoreSessions: fetchMoreSessionsMock,
+        refreshSessions: refreshSessionsMock,
         markSessionListScrollActivity: markSessionListScrollActivityMock,
     },
 }));
@@ -472,6 +555,32 @@ vi.mock('@/sync/ops/sessionMachineTarget', () => ({
         return machineId && basePath ? { machineId, basePath } : null;
     },
 }));
+
+vi.mock('@/sync/ops/sessionOrganization', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('@/sync/ops/sessionOrganization')>();
+    return {
+        ...actual,
+        setSessionPin: sessionOrganizationOps.setSessionPin,
+        setSessionTagLabels: sessionOrganizationOps.setSessionTagLabels,
+    };
+});
+
+vi.mock('@/auth/storage/tokenStorage', () => ({
+    TokenStorage: {
+        getCredentialsForServerUrl: vi.fn(async () => ({ token: 'token' })),
+    },
+}));
+
+vi.mock('@/sync/domains/server/serverProfiles', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('@/sync/domains/server/serverProfiles')>();
+    return {
+        ...actual,
+        getServerProfileById: (serverId: string) => ({
+            id: serverId,
+            serverUrl: 'https://server.example.test',
+        }),
+    };
+});
 
 vi.mock('@/hooks/session/useNavigateToSession', () => ({
     useNavigateToSession: () => navigateToSessionSpy,
@@ -677,6 +786,7 @@ describe('SessionsList (native virtualization)', () => {
         sessionListOrderingModeV1 = 'custom';
         sessionFolderAssignmentsBySessionKey = {};
         rememberLastProjectSessionSelections = null;
+        organizationProjectionCache = null;
         machineDisplayById = {
             'machine-target': {
                 id: 'machine-target',
@@ -716,7 +826,11 @@ describe('SessionsList (native virtualization)', () => {
         setSessionListOrderingModeV1.mockClear();
         navigateToSessionSpy.mockClear();
         fetchMoreSessionsMock.mockClear();
+        refreshSessionsMock.mockReset();
+        refreshSessionsMock.mockResolvedValue(undefined);
         markSessionListScrollActivityMock.mockClear();
+        sessionOrganizationOps.setSessionPin.mockClear();
+        sessionOrganizationOps.setSessionTagLabels.mockClear();
         keyboardShortcutHandlersRef.current = null;
         routerPushSpy.mockClear();
         mockAllowedServerIds = ['server_a'];
@@ -1275,7 +1389,7 @@ describe('SessionsList (native virtualization)', () => {
         expect(list.props.disableVirtualization).toBe(true);
     });
 
-    it('keeps web FlatList virtualization enabled for large lists', async () => {
+    it('uses FlashListCompat for large web lists instead of relying on React Native Web FlatList virtualization', async () => {
         platformOs = 'web';
         const header = expectPresent(
             mockVisibleSessionListViewData?.find((item) => item.type === 'header'),
@@ -1298,12 +1412,85 @@ describe('SessionsList (native virtualization)', () => {
         ];
 
         const screen = await renderSessionsList();
-        const list = expectPresent(
-            screen.root.findAll((node) => String(node.type) === 'FlatList')[0],
-            'expected web FlatList',
+        const flashList = expectPresent(
+            screen.root.findAll((node) => String(node.type) === 'FlashListCompat')[0],
+            'expected large web list to use FlashListCompat',
         );
 
-        expect(list.props.disableVirtualization).toBe(false);
+        expect(screen.root.findAll((node) => String(node.type) === 'FlatList')).toHaveLength(0);
+        expect(flashList.props.getItemType?.(mockVisibleSessionListViewData[0])).toBe('header:date');
+        expect(flashList.props.getItemType?.(mockVisibleSessionListViewData[1])).toBe('session');
+    });
+
+    it('renders the full priority prefix before inactive history on large web lists', async () => {
+        platformOs = 'web';
+        const makeHeader = (
+            title: string,
+            headerKind: string,
+            groupKeyValue: string,
+        ) => ({
+            type: 'header',
+            title,
+            headerKind,
+            groupKey: groupKeyValue,
+            serverId: 'server_a',
+            serverName: 'Server A',
+        });
+        const makeSession = (
+            id: string,
+            groupKeyValue: string,
+            groupKind: string,
+            section: 'active' | 'inactive',
+            index: number,
+        ) => ({
+            type: 'session',
+            session: {
+                ...sessionA,
+                id,
+                active: section === 'active',
+                updatedAt: sessionA.updatedAt + index,
+            },
+            groupKey: groupKeyValue,
+            groupKind,
+            section,
+            serverId: 'server_a',
+            serverName: 'Server A',
+        });
+        const attentionRows = Array.from({ length: 6 }, (_, index) =>
+            makeSession(`sess_attention_${index}`, 'attention-promotion-v1', 'attention', 'active', index));
+        const workingRows = Array.from({ length: 10 }, (_, index) =>
+            makeSession(`sess_working_${index}`, 'working-placement-v1', 'working', 'active', 100 + index));
+        const pinnedRows = Array.from({ length: 205 }, (_, index) =>
+            makeSession(`sess_pinned_${index}`, 'pinned-v1', 'pinned', 'inactive', 200 + index));
+        const activeRows = Array.from({ length: 15 }, (_, index) =>
+            makeSession(`sess_active_${index}`, 'active', 'active', 'inactive', 500 + index));
+        const inactiveRows = Array.from({ length: 40 }, (_, index) =>
+            makeSession(`sess_inactive_${index}`, 'inactive', 'date', 'inactive', 700 + index));
+        mockVisibleSessionListViewData = [
+            makeHeader('Needs attention', 'attention', 'attention-promotion-v1'),
+            ...attentionRows,
+            makeHeader('Working', 'working', 'working-placement-v1'),
+            ...workingRows,
+            makeHeader('Pinned', 'pinned', 'pinned-v1'),
+            ...pinnedRows,
+            makeHeader('Active', 'active', 'active'),
+            ...activeRows,
+            makeHeader('Inactive', 'inactive', 'inactive'),
+            ...inactiveRows,
+        ];
+
+        const screen = await renderSessionsList();
+        const list = expectPresent(
+            screen.root.findAll((node) => String(node.type) === 'FlashListCompat')[0],
+            'expected large web list to use FlashListCompat',
+        );
+
+        const priorityPrefixLength = 1 + 6 + 1 + 10 + 1 + 205 + 1 + 15;
+        expect(screen.root.findAll((node) => String(node.type) === 'FlatList')).toHaveLength(0);
+        expect(list.props.data.findIndex((item: any) =>
+            item?.type === 'header' && item.headerKind === 'inactive')).toBe(priorityPrefixLength);
+        expect(list.props.data.slice(0, priorityPrefixLength).some((item: any) =>
+            item?.type === 'header' && item.headerKind === 'inactive')).toBe(false);
     });
 
     it('keeps native list render props stable across unrelated rerenders', async () => {
@@ -1415,6 +1602,122 @@ describe('SessionsList (native virtualization)', () => {
         expect(updatedRow.props.onSelectFolderMoveMenuItem).toBe(initialRow.props.onSelectFolderMoveMenuItem);
     });
 
+    it('keeps native FlashList structural data stable when a row overlay update changes one row model', async () => {
+        platformOs = 'android';
+
+        const screen = await renderSessionsList();
+        const initialList = expectPresent(
+            screen.root.findAll((node) => String(node.type) === 'FlashListCompat')[0],
+            'expected native FlashListCompat',
+        );
+        const initialData = initialList.props.data;
+        const initialExtraData = initialList.props.extraData;
+        const initialSessionItem = expectPresent(
+            findSessionItem(screen, 'sess_a'),
+            'expected initial sess_a row',
+        );
+        expect(initialSessionItem.props.rowModel.session.thinking).toBe(false);
+
+        const { SessionsList } = await import('./SessionsList');
+        const { storage } = await import('@/sync/domains/state/storage');
+        const storeState = storage.getState() as any;
+        storeState.sessionListRenderables = {
+            ...storeState.sessionListRenderables,
+            sess_a: {
+                ...sessionA,
+                active: true,
+                activeAt: 2_000,
+                thinking: true,
+                thinkingAt: 2_000,
+                presence: 'online',
+                latestTurnStatus: 'in_progress',
+                latestTurnStatusObservedAt: 2_000,
+            },
+        };
+        await screen.update(<SessionsList />);
+
+        const updatedList = expectPresent(
+            screen.root.findAll((node) => String(node.type) === 'FlashListCompat')[0],
+            'expected updated native FlashListCompat',
+        );
+        expect(updatedList.props.data).toBe(initialData);
+        expect(updatedList.props.extraData).toBe(initialExtraData);
+    });
+
+    it('does not invalidate native FlashList rows when viewability changes for the profiled session-list size', async () => {
+        platformOs = 'ios';
+        sessionFolderViewModeV1 = 'tree';
+        const header = expectPresent(
+            mockVisibleSessionListViewData?.find((item) => item.type === 'header'),
+            'expected header item',
+        );
+        mockVisibleSessionListViewData = [
+            header,
+            ...Array.from({ length: 145 }, (_, index) => ({
+                type: 'session',
+                session: {
+                    ...sessionA,
+                    id: `sess_profiled_${index}`,
+                    updatedAt: sessionA.updatedAt + index,
+                },
+                groupKey,
+                groupKind: 'date',
+                serverId: 'server_a',
+                serverName: 'Server A',
+            })),
+        ];
+
+        const screen = await renderSessionsList();
+        const initialList = expectPresent(
+            screen.root.findAll((node) => String(node.type) === 'FlashListCompat')[0],
+            'expected native FlashListCompat',
+        );
+        const initialExtraData = initialList.props.extraData;
+        const initialData = initialList.props.data as Array<SessionListViewItem & { rowModel?: unknown }>;
+        const initialSessionItem = expectPresent(
+            initialData.find((item) => item.type === 'session' && item.session.id === 'sess_profiled_80'),
+            'expected initial profiled session row',
+        );
+        const initialRow = initialList.props.renderItem({
+            item: initialSessionItem,
+            index: initialData.indexOf(initialSessionItem),
+        });
+
+        await act(async () => {
+            initialList.props.onViewableItemsChanged({
+                changed: [],
+                viewableItems: initialData
+                    .filter((item) => item.type === 'session')
+                    .slice(75, 88)
+                    .map((item, index) => ({
+                        index: 76 + index,
+                        isViewable: true,
+                        item,
+                        key: `session:server_a:${item.session.id}`,
+                    })),
+            });
+        });
+
+        const updatedList = expectPresent(
+            screen.root.findAll((node) => String(node.type) === 'FlashListCompat')[0],
+            'expected updated native FlashListCompat',
+        );
+        const updatedData = updatedList.props.data as Array<SessionListViewItem & { rowModel?: unknown }>;
+        const updatedSessionItem = expectPresent(
+            updatedData.find((item) => item.type === 'session' && item.session.id === 'sess_profiled_80'),
+            'expected updated profiled session row',
+        );
+        const updatedRow = updatedList.props.renderItem({
+            item: updatedSessionItem,
+            index: updatedData.indexOf(updatedSessionItem),
+        });
+
+        expect(updatedList.props.extraData).toBe(initialExtraData);
+        expect(updatedData).toBe(initialData);
+        expect(updatedRow.props.rowModel).toBe(initialRow.props.rowModel);
+        expect(updatedRow.props.rowAttentionAnimationEnabled).toBe(initialRow.props.rowAttentionAnimationEnabled);
+    });
+
     it('keeps row action props stable when FlashList re-renders the same item', async () => {
         platformOs = 'android';
         sessionFolderViewModeV1 = 'tree';
@@ -1442,7 +1745,7 @@ describe('SessionsList (native virtualization)', () => {
         expect(secondRow.props.allKnownTags).toBe(firstRow.props.allKnownTags);
     });
 
-    it('passes model-backed session rows through virtualized data without widening row extra data', async () => {
+    it('passes structural session rows through virtualized data without widening row extra data', async () => {
         platformOs = 'android';
 
         const screen = await renderSessionsList();
@@ -1455,9 +1758,8 @@ describe('SessionsList (native virtualization)', () => {
 
         expect(data[0]?.type).toBe('header');
         expect(data[0]).toBe(mockVisibleSessionListViewData?.[0]);
-        expect(data[1]?.rowModel).toBeTruthy();
-        expect((data[1]?.rowModel as any)?.rowKey).toBe('server_a:sess_a');
-        expect(sessionItem.props.rowModel).toBe(data[1]?.rowModel);
+        expect(data[1]?.rowModel).toBeUndefined();
+        expect(sessionItem.props.rowModel?.rowKey).toBe('server_a:sess_a');
         expect(list.props.extraData.rowModels).toBeUndefined();
         expect(list.props.extraData.relativeNowMs).toBeUndefined();
         expect(list.props.extraData.runtimeNowMs).toBeUndefined();
@@ -1513,8 +1815,8 @@ describe('SessionsList (native virtualization)', () => {
             );
             const initialData = initialList.props.data as Array<SessionListViewItem & { rowModel?: any }>;
             const initialExtraData = initialList.props.extraData;
-            expect(initialData[1]?.rowModel?.activity.label).toBe('now');
-            expect(initialData[2]?.rowModel?.activity.label).toBe('');
+            expect(findSessionItem(screen, 'recent-row')?.props.rowModel?.activity.label).toBe('now');
+            expect(findSessionItem(screen, 'timeless-row')?.props.rowModel?.activity.label).toBe('');
 
             await act(async () => {
                 vi.advanceTimersByTime(60_000);
@@ -1526,10 +1828,8 @@ describe('SessionsList (native virtualization)', () => {
             );
             const updatedData = updatedList.props.data as Array<SessionListViewItem & { rowModel?: any }>;
             expect(updatedList.props.extraData).toBe(initialExtraData);
-            expect(updatedData[0]).toBe(initialData[0]);
-            expect(updatedData[1]).not.toBe(initialData[1]);
-            expect(updatedData[2]).toBe(initialData[2]);
-            expect(updatedData[1]?.rowModel?.activity.label).toBe('1m');
+            expect(updatedData).toBe(initialData);
+            expect(findSessionItem(screen, 'recent-row')?.props.rowModel?.activity.label).toBe('1m');
         } finally {
             vi.useRealTimers();
         }
@@ -1850,7 +2150,7 @@ describe('SessionsList (native virtualization)', () => {
         expect(navigateToSessionSpy).not.toHaveBeenCalled();
     });
 
-    it('freezes rendered data while the surface is not data-active and catches up when active again', async () => {
+    it('keeps the last active render data while the surface is visible but inactive', async () => {
         const screen = await renderSessionsListWithSurfaceOwnership({
             ownerKey: 'phone-root',
             visible: true,
@@ -1889,7 +2189,7 @@ describe('SessionsList (native virtualization)', () => {
             <SessionsList
                 surfaceOwnership={{
                     ownerKey: 'phone-root',
-                    visible: false,
+                    visible: true,
                     interactive: false,
                     dataActive: false,
                 }}
@@ -1932,6 +2232,158 @@ describe('SessionsList (native virtualization)', () => {
         );
 
         expect(list.props.onEndReached).toBeUndefined();
+    });
+
+    it('disables native FlashList maintain-visible-content-position for the session list surface', async () => {
+        const screen = await renderSessionsListWithSurfaceOwnership({
+            ownerKey: 'phone-root',
+            visible: true,
+            interactive: true,
+            dataActive: true,
+        });
+        const list = expectPresent(
+            screen.root.findAll((node) => String(node.type) === 'FlashListCompat')[0],
+            'expected native FlashListCompat',
+        );
+
+        expect(list.props.maintainVisibleContentPosition).toEqual({ disabled: true });
+    });
+
+    it('refreshes sessions from native pull-to-refresh and keeps the indicator active while pending', async () => {
+        let resolveRefresh: (() => void) | null = null;
+        const refreshPromise = new Promise<void>((resolve) => {
+            resolveRefresh = resolve;
+        });
+        refreshSessionsMock.mockReturnValueOnce(refreshPromise);
+        const screen = await renderSessionsListWithSurfaceOwnership({
+            ownerKey: 'phone-root',
+            visible: true,
+            interactive: true,
+            dataActive: true,
+        });
+        const list = expectPresent(
+            screen.root.findAll((node) => String(node.type) === 'FlashListCompat')[0],
+            'expected native FlashListCompat',
+        );
+        const refreshControl = expectPresent(
+            list.props.refreshControl,
+            'expected native refresh control',
+        );
+        const onRefresh = expectPresent(
+            refreshControl.props.onRefresh,
+            'expected native refresh handler',
+        );
+
+        expect(String(refreshControl.type)).toBe('RefreshControl');
+        expect(refreshControl.props.refreshing).toBe(false);
+
+        await act(async () => {
+            void onRefresh();
+            await Promise.resolve();
+        });
+
+        expect(refreshSessionsMock).toHaveBeenCalledTimes(1);
+
+        const refreshingList = expectPresent(
+            screen.root.findAll((node) => String(node.type) === 'FlashListCompat')[0],
+            'expected refreshing native FlashListCompat',
+        );
+        expect(refreshingList.props.refreshControl.props.refreshing).toBe(true);
+
+        await act(async () => {
+            resolveRefresh?.();
+            await refreshPromise;
+        });
+
+        const refreshedList = expectPresent(
+            screen.root.findAll((node) => String(node.type) === 'FlashListCompat')[0],
+            'expected refreshed native FlashListCompat',
+        );
+        expect(refreshedList.props.refreshControl.props.refreshing).toBe(false);
+    });
+
+    it('does not expose native pull-to-refresh when the surface is not data-active', async () => {
+        const screen = await renderSessionsListWithSurfaceOwnership({
+            ownerKey: 'phone-root',
+            visible: false,
+            interactive: false,
+            dataActive: false,
+        });
+        const list = expectPresent(
+            screen.root.findAll((node) => String(node.type) === 'FlashListCompat')[0],
+            'expected native FlashListCompat',
+        );
+
+        expect(list.props.refreshControl).toBeUndefined();
+    });
+
+    it('deduplicates native pull-to-refresh while a session refresh is already pending', async () => {
+        let resolveRefresh: (() => void) | null = null;
+        const refreshPromise = new Promise<void>((resolve) => {
+            resolveRefresh = resolve;
+        });
+        refreshSessionsMock.mockReturnValueOnce(refreshPromise);
+        const screen = await renderSessionsListWithSurfaceOwnership({
+            ownerKey: 'phone-root',
+            visible: true,
+            interactive: true,
+            dataActive: true,
+        });
+        const list = expectPresent(
+            screen.root.findAll((node) => String(node.type) === 'FlashListCompat')[0],
+            'expected native FlashListCompat',
+        );
+        const onRefresh = expectPresent(
+            list.props.refreshControl?.props?.onRefresh,
+            'expected active native refresh handler',
+        );
+
+        await act(async () => {
+            void onRefresh();
+            void onRefresh();
+            await Promise.resolve();
+        });
+
+        expect(refreshSessionsMock).toHaveBeenCalledTimes(1);
+
+        await act(async () => {
+            resolveRefresh?.();
+            await refreshPromise;
+        });
+    });
+
+    it('ignores stale native pull-to-refresh callbacks after the surface becomes inactive', async () => {
+        const screen = await renderSessionsListWithSurfaceOwnership({
+            ownerKey: 'phone-root',
+            visible: true,
+            interactive: true,
+            dataActive: true,
+        });
+        const list = expectPresent(
+            screen.root.findAll((node) => String(node.type) === 'FlashListCompat')[0],
+            'expected native FlashListCompat',
+        );
+        const staleOnRefresh = expectPresent(
+            list.props.refreshControl?.props?.onRefresh,
+            'expected active native refresh handler',
+        );
+        const { SessionsList } = await import('./SessionsList');
+
+        await screen.update(
+            <SessionsList
+                surfaceOwnership={{
+                    ownerKey: 'phone-root',
+                    visible: false,
+                    interactive: false,
+                    dataActive: false,
+                }}
+            />,
+        );
+        await act(async () => {
+            await staleOnRefresh();
+        });
+
+        expect(refreshSessionsMock).not.toHaveBeenCalled();
     });
 
     it('loads more sessions from native scroll proximity when FlashList does not emit onEndReached', async () => {
@@ -2894,8 +3346,8 @@ describe('SessionsList (native virtualization)', () => {
         expect(Number(activeTextStyle.fontSize)).toBeGreaterThan(Number(yesterdayTextStyle.fontSize));
     });
 
-    it('wires pin toggling via pinnedSessionKeysV1', async () => {
-        setPinnedSessionKeysV1.mockClear();
+    it('wires pin toggling through server-backed organization ops', async () => {
+        sessionOrganizationOps.setSessionPin.mockClear();
 
         const screen = await renderSessionsList();
         const first = expectPresent(findSessionItem(screen, 'sess_a'), 'expected first session item');
@@ -2905,23 +3357,31 @@ describe('SessionsList (native virtualization)', () => {
             first.props.onTogglePinned();
         });
 
-        expect(setPinnedSessionKeysV1).toHaveBeenCalledTimes(1);
-        expect(setPinnedSessionKeysV1).toHaveBeenCalledWith(['server_a:sess_a']);
+        expect(sessionOrganizationOps.setSessionPin).toHaveBeenCalledTimes(1);
+        expect(sessionOrganizationOps.setSessionPin).toHaveBeenCalledWith(expect.objectContaining({
+            sessionId: 'sess_a',
+            pinned: true,
+        }));
+        expect(setPinnedSessionKeysV1).not.toHaveBeenCalled();
     });
 
-    it('writes session tags back to settings as a value (not an updater function)', async () => {
+    it('writes session tags through server-backed organization ops', async () => {
         sessionTagsV1 = { 'server_a:sess_a': ['important'] };
-        setSessionTagsV1.mockClear();
+        sessionOrganizationOps.setSessionTagLabels.mockClear();
 
         const screen = await renderSessionsList();
         const first = expectPresent(findSessionItem(screen, 'sess_a'), 'expected first session item');
         expect(typeof first.props.onSetTags).toBe('function');
-        first.props.onSetTags(['urgent']);
-
-        expect(setSessionTagsV1).toHaveBeenCalledTimes(1);
-        expect(setSessionTagsV1.mock.calls[0]?.[0]).toEqual({
-            'server_a:sess_a': ['urgent'],
+        await act(async () => {
+            first.props.onSetTags(['urgent']);
         });
+
+        expect(sessionOrganizationOps.setSessionTagLabels).toHaveBeenCalledTimes(1);
+        expect(sessionOrganizationOps.setSessionTagLabels).toHaveBeenCalledWith(expect.objectContaining({
+            sessionId: 'sess_a',
+            tags: ['urgent'],
+        }));
+        expect(setSessionTagsV1).not.toHaveBeenCalled();
     });
 
     it('shows pinned server badges only when multiple servers are selected', async () => {

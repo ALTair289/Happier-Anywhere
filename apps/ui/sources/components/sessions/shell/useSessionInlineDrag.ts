@@ -40,6 +40,20 @@ const IDLE_RESOLVED_DROP: UseSessionInlineDragResolvedDrop = Object.freeze({
     geometry: Object.freeze({ kind: 'none' }),
 });
 
+function isCommitEligibleResolvedDrop(resolved: UseSessionInlineDragResolvedDrop): boolean {
+    const kind = resolved.result.instruction.kind;
+    return kind !== 'idle' && kind !== 'blocked';
+}
+
+function shouldFallbackToLastResolvedDrop(resolved: UseSessionInlineDragResolvedDrop): boolean {
+    const instruction = resolved.result.instruction;
+    return instruction.kind === 'idle'
+        || (
+            instruction.kind === 'blocked'
+            && (instruction.reason === 'no-target' || instruction.reason === 'same-position')
+        );
+}
+
 export type UseSessionInlineDragResolveDropResultEvent = Readonly<{
     sessionKey: string;
     groupKey: string;
@@ -171,6 +185,7 @@ export function useSessionInlineDrag(params: UseSessionInlineDragParams): UseSes
     const didStartDrag = useSharedValue(false);
     const didDragDuringTouch = useSharedValue(false);
     const didActivateLongPress = useSharedValue(false);
+    const lastCommitEligibleResolvedDropRef = useRef<UseSessionInlineDragResolvedDrop | null>(null);
 
     const gesture = useMemo(() => {
         if (!sessionKey || enabled === false) return undefined;
@@ -196,6 +211,11 @@ export function useSessionInlineDrag(params: UseSessionInlineDragParams): UseSes
 
         const fireDragUpdate = (sk: string, gk: string, absoluteX: number, absoluteY: number) => {
             const resolved = resolveDropForPointer(sk, gk, absoluteX, absoluteY);
+            if (isCommitEligibleResolvedDrop(resolved)) {
+                lastCommitEligibleResolvedDropRef.current = resolved;
+            } else {
+                lastCommitEligibleResolvedDropRef.current = null;
+            }
             writeOverlayGeometry(overlayShared, resolved.geometry);
             onDragUpdateRef.current?.({
                 sessionKey: sk,
@@ -206,15 +226,20 @@ export function useSessionInlineDrag(params: UseSessionInlineDragParams): UseSes
         };
         const fireDragComplete = (sk: string, gk: string, absoluteX: number | null, absoluteY: number | null) => {
             const resolved = resolveDropForPointer(sk, gk, absoluteX, absoluteY);
+            const committed = shouldFallbackToLastResolvedDrop(resolved)
+                ? lastCommitEligibleResolvedDropRef.current ?? resolved
+                : resolved;
+            lastCommitEligibleResolvedDropRef.current = null;
             hideOverlay(overlayShared);
             onDropResultRef.current({
                 sessionKey: sk,
                 groupKey: gk,
                 dataIndex,
-                result: resolved.result,
+                result: committed.result,
             });
         };
         const fireDragCancel = (sk: string, gk: string) => {
+            lastCommitEligibleResolvedDropRef.current = null;
             hideOverlay(overlayShared);
             onDragCancelRef.current?.({
                 sessionKey: sk,
@@ -223,6 +248,7 @@ export function useSessionInlineDrag(params: UseSessionInlineDragParams): UseSes
             });
         };
         const clearOverlay = () => {
+            lastCommitEligibleResolvedDropRef.current = null;
             hideOverlay(overlayShared);
         };
         const fireLongPressActivated = (sk: string) => {

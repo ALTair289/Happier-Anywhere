@@ -33,6 +33,7 @@ const resolveServerIdForSessionIdFromLocalCacheSpy = vi.hoisted(() =>
 );
 
 let workspaceLabelsV1: Record<string, string> = {};
+let sessionOrganizationProjection: any = null;
 let subagentSourceMessages: readonly any[] = [];
 
 installSessionShellCommonModuleMocks({
@@ -110,6 +111,7 @@ installSessionShellCommonModuleMocks({
             useSessionReviewCommentsDrafts: () => [],
             useWorkspaceReviewCommentsDrafts: () => [],
             useSessionUsage: () => null,
+            useSessionOrganizationProjection: () => sessionOrganizationProjection,
             useLocalSetting: <K extends keyof LocalSettings>(key: K) => localSettingsDefaults[key],
             useLocalSettingMutable: <K extends keyof LocalSettings>(key: K) => [
                 localSettingsDefaults[key],
@@ -361,6 +363,18 @@ describe('SessionView info navigation', () => {
         ensureSidechainMessagesLoadedSpy.mockClear();
         ensureSidechainsLoadedCalls.length = 0;
         workspaceLabelsV1 = {};
+        sessionOrganizationProjection = {
+            schemaVersion: 1,
+            version: 1,
+            pinnedSessionIds: [],
+            pinsBySessionId: {},
+            foldersById: {},
+            folderAssignmentsBySessionId: {},
+            tagsById: {},
+            tagAssignmentsBySessionId: {},
+            orderEntriesByScopeKey: {},
+            labelsByLabelKey: {},
+        };
         subagentSourceMessages = [];
         resolveServerIdForSessionIdFromLocalCacheSpy.mockReset();
         resolveServerIdForSessionIdFromLocalCacheSpy.mockImplementation((sessionId: string) =>
@@ -485,9 +499,22 @@ describe('SessionView info navigation', () => {
         }));
     });
 
-    it('uses the renamed workspace label for the session header subtitle', async () => {
+    it('uses the server-backed renamed workspace label for the session header subtitle', async () => {
         workspaceLabelsV1 = {
-            wl_07600b8c: 'Renamed Workspace',
+            wl_07600b8c: 'Legacy Workspace',
+        };
+        sessionOrganizationProjection = {
+            ...sessionOrganizationProjection,
+            labelsByLabelKey: {
+                'server-cache:workspace:wl_07600b8c': {
+                    labelKind: 'workspace',
+                    scopeKey: 'wl_07600b8c',
+                    display: { t: 'plain', v: { label: 'Renamed Workspace' } },
+                    archivedAt: null,
+                    createdAt: 1,
+                    updatedAt: 2,
+                },
+            },
         };
         const { SessionView } = await import('./SessionView');
 

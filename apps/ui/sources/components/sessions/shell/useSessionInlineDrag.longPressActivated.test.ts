@@ -184,6 +184,16 @@ describe('useSessionInlineDrag (onLongPressActivated)', () => {
         return { result, geometry };
     }
 
+    function blockedSamePositionResolved(): UseSessionInlineDragResolvedDrop {
+        return {
+            result: {
+                instruction: { kind: 'blocked', reason: 'same-position' },
+                visual: { kind: 'none' },
+            },
+            geometry: { kind: 'none' },
+        };
+    }
+
     function dragParams(overrides: Partial<UseSessionInlineDragParams> = {}): UseSessionInlineDragParams {
         const base: UseSessionInlineDragParams = {
             sessionKey: 's1',
@@ -294,6 +304,90 @@ describe('useSessionInlineDrag (onLongPressActivated)', () => {
         // The overlay hides once the drag completes.
         expect(overlay.overlayVisible.value).toBe(0);
         expect(overlay.overlayKind.value).toBe(TREE_DROP_OVERLAY_KIND_NONE);
+
+        await hook.unmount();
+    });
+
+    it('commits the last live drop result when the final pointer no longer resolves a target', async () => {
+        const { useSessionInlineDrag } = await import('./useSessionInlineDrag');
+
+        const overlay = overlayShared();
+        const onDropResult = vi.fn();
+        const resolveDropResult = vi.fn((event: { pointer: { x: number; y: number } | null }) => {
+            if (event.pointer?.y === 120) return lineResolved('folder:live-target', 0);
+            return idleResolved;
+        });
+
+        const hook = await renderHook(() => useSessionInlineDrag(dragParams({
+            overlayShared: overlay,
+            resolveDropResult,
+            onDropResult,
+        })));
+
+        const gesture = hook.getCurrent().gesture as unknown as MockGesture;
+        gesture.handlers.onStart?.();
+        gesture.handlers.onUpdate?.({
+            translationY: 80,
+            absoluteX: 24,
+            absoluteY: 120,
+        });
+        gesture.handlers.onEnd?.({
+            translationY: 90,
+            absoluteX: null,
+            absoluteY: null,
+        });
+
+        expect(resolveDropResult).toHaveBeenLastCalledWith({
+            sessionKey: 's1',
+            groupKey: 'g1',
+            dataIndex: 1,
+            pointer: null,
+        });
+        expect(onDropResult).toHaveBeenCalledWith({
+            sessionKey: 's1',
+            groupKey: 'g1',
+            dataIndex: 1,
+            result: lineResolved('folder:live-target', 0).result,
+        });
+
+        await hook.unmount();
+    });
+
+    it('commits the last live drop result when the final pointer resolves to the dragged row', async () => {
+        const { useSessionInlineDrag } = await import('./useSessionInlineDrag');
+
+        const overlay = overlayShared();
+        const onDropResult = vi.fn();
+        const resolveDropResult = vi.fn((event: { pointer: { x: number; y: number } | null }) => {
+            if (event.pointer?.y === 120) return lineResolved('folder:live-target', 0);
+            return blockedSamePositionResolved();
+        });
+
+        const hook = await renderHook(() => useSessionInlineDrag(dragParams({
+            overlayShared: overlay,
+            resolveDropResult,
+            onDropResult,
+        })));
+
+        const gesture = hook.getCurrent().gesture as unknown as MockGesture;
+        gesture.handlers.onStart?.();
+        gesture.handlers.onUpdate?.({
+            translationY: 80,
+            absoluteX: 24,
+            absoluteY: 120,
+        });
+        gesture.handlers.onEnd?.({
+            translationY: 90,
+            absoluteX: 24,
+            absoluteY: 140,
+        });
+
+        expect(onDropResult).toHaveBeenCalledWith({
+            sessionKey: 's1',
+            groupKey: 'g1',
+            dataIndex: 1,
+            result: lineResolved('folder:live-target', 0).result,
+        });
 
         await hook.unmount();
     });

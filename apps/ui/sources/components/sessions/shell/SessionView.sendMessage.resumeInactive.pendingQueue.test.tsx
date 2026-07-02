@@ -760,9 +760,13 @@ describe('SessionView (sendMessage resumeInactive pendingQueue)', () => {
         });
 
         expect(enqueuePendingMessageSpy).toHaveBeenCalledTimes(1);
-        expect(enqueuePendingMessageSpy).toHaveBeenCalledWith('s1', 'hello now', undefined, {
-            happierDeliveryIntentV1: 'explicit_immediate',
-        });
+        expect(enqueuePendingMessageSpy.mock.calls[0]).toEqual([
+            's1',
+            'hello now',
+            undefined,
+            { happierDeliveryIntentV1: 'explicit_immediate' },
+            { onLocalPendingProjectionCreated: expect.any(Function) },
+        ]);
         expect(submitMessageSpy).not.toHaveBeenCalled();
         expect(sendMessageSpy).not.toHaveBeenCalled();
         expect(resumeSessionSpy).toHaveBeenCalledWith(
