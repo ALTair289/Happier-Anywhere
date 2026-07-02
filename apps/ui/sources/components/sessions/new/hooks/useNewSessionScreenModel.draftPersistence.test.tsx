@@ -91,6 +91,29 @@ describe('useNewSessionScreenModel (draft hydration — core)', () => {
         expect((settingsState as any).lastEngineSelectionsByScopeV1?.[scopeKey]?.acpSessionModeId).toBeNull();
     });
 
+    it('drops a persisted Claude model when a route-selected Codex backend owns the new session', async () => {
+        searchParamsState.value = {
+            backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+        };
+        persistedDraft.agentType = 'claude';
+        persistedDraft.backendTarget = { kind: 'builtInAgent', agentId: 'claude' };
+        persistedDraft.modelMode = 'claude-opus-4-8';
+
+        let model: any = null;
+        await renderNewSessionScreenModel((nextModel) => {
+            model = nextModel;
+        });
+
+        expect(model?.simpleProps?.agentType).toBe('codex');
+        expect(model?.simpleProps?.modelMode).toBe('default');
+        expect(useCreateNewSessionArgsRef.current).toEqual(expect.objectContaining({
+            authoringDraft: expect.objectContaining({
+                backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+                modelId: null,
+            }),
+        }));
+    });
+
     it('hydrates permission, agent, and path from the persisted draft', async () => {
         let model: any = null;
         await renderNewSessionScreenModel((nextModel) => {
@@ -450,7 +473,7 @@ describe('useNewSessionScreenModel (draft hydration — core)', () => {
             baseRef: 'main',
             branchMode: 'new',
         });
-        expect(getCheckoutChipLabel(model)).toBe('newSession.checkout.newWorktree');
+        expect(getCheckoutChipLabel(model)).toBe('newSession.checkout.newWorktree: feature/first-render-fix');
         const getServerChip = () => model?.simpleProps?.agentInputExtraActionChips?.find(
             (chip: any) => chip?.key === 'new-session-target-server',
         );

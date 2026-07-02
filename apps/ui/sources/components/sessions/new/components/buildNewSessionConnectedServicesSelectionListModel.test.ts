@@ -190,7 +190,7 @@ describe('buildNewSessionConnectedServicesSelectionListModel', () => {
         expect(model.selectedOptionId).toBe(groupOptionId);
         expect(groupOption).toEqual(expect.objectContaining({
             label: 'Primary pool',
-            subtitle: 'Active work@example.com',
+            subtitle: 'Active work@example.com · work',
         }));
         expect(setBindingForService).toHaveBeenCalledWith('anthropic', {
             source: 'connected',
@@ -251,7 +251,7 @@ describe('buildNewSessionConnectedServicesSelectionListModel', () => {
         const groupOption = firstStaticSection(model).options.find((option) =>
             option.id === createConnectedServiceGroupOptionId('anthropic', 'primary'));
 
-        expect(groupOption?.subtitle).toBe('Active Work account · work@example.com');
+        expect(groupOption?.subtitle).toBe('Active Work account · work@example.com · work');
     });
 
     it('keeps a group option selected when the group active profile changed after the binding was stored', () => {
@@ -318,7 +318,7 @@ describe('buildNewSessionConnectedServicesSelectionListModel', () => {
         expect(model.selectedOptionId).toBe(groupOptionId);
         expect(groupOption).toEqual(expect.objectContaining({
             label: 'Primary pool',
-            subtitle: 'Active work@example.com',
+            subtitle: 'Active work@example.com · work',
         }));
         expect(setBindingForService).toHaveBeenCalledWith('anthropic', {
             source: 'connected',

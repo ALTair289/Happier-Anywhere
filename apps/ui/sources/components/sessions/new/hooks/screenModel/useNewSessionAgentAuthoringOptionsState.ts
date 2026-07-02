@@ -1,16 +1,22 @@
 import * as React from 'react';
 
-import { getAgentCore, type AgentId } from '@/agents/catalog/catalog';
+import { AGENT_IDS, getAgentCore, type AgentId } from '@/agents/catalog/catalog';
 import { resolveInitialNewSessionModelMode } from '@/components/sessions/new/hooks/newSessionModelModePolicy';
 import type { ModelMode } from '@/sync/domains/permissions/permissionTypes';
 import {
+    BackendTargetRefSchema,
+    buildBackendTargetKey,
     SessionMcpSelectionV1Schema,
     type SessionMcpSelectionV1,
     type AcpConfigOptionOverridesV1,
+    type BackendTargetRefV1,
 } from '@happier-dev/protocol';
 import type { RememberedEngineSelectionV1 } from '@/sync/domains/sessionAuthoring/rememberedEngineSelections';
 
 type PersistedAuthoringDraftLike = Readonly<{
+    agentId?: string | null;
+    agentType?: string | null;
+    backendTarget?: unknown;
     modelId?: string | null;
     acpSessionModeId?: string | null;
     sessionConfigOptionOverrides?: AcpConfigOptionOverridesV1 | null;
@@ -19,6 +25,9 @@ type PersistedAuthoringDraftLike = Readonly<{
 }> | null | undefined;
 
 type TempAuthoringDraftLike = Readonly<{
+    agentId?: string | null;
+    agentType?: string | null;
+    backendTarget?: unknown;
     modelId?: string | null;
     acpSessionModeId?: string | null;
     sessionConfigOptionOverrides?: AcpConfigOptionOverridesV1 | null;
@@ -53,8 +62,80 @@ function areSessionConfigOptionOverridesEqual(
     return true;
 }
 
+type DraftBackendTargetOwnership = 'match' | 'mismatch' | 'unknown';
+
+function resolveDraftBackendTargetOwnership(
+    draft: TempAuthoringDraftLike | PersistedAuthoringDraftLike,
+    backendTarget: BackendTargetRefV1,
+): DraftBackendTargetOwnership {
+    if (!draft) return 'mismatch';
+
+    const parsedBackendTarget = BackendTargetRefSchema.safeParse(draft.backendTarget);
+    if (parsedBackendTarget.success) {
+        return buildBackendTargetKey(parsedBackendTarget.data) === buildBackendTargetKey(backendTarget)
+            ? 'match'
+            : 'mismatch';
+    }
+
+    const draftAgentId =
+        typeof draft.agentId === 'string' && draft.agentId.trim().length > 0 ? draft.agentId.trim()
+        : typeof draft.agentType === 'string' && draft.agentType.trim().length > 0 ? draft.agentType.trim()
+        : null;
+    if (draftAgentId) {
+        return backendTarget.kind === 'builtInAgent' && draftAgentId === backendTarget.agentId
+            ? 'match'
+            : 'mismatch';
+    }
+
+    return 'unknown';
+}
+
+function isKnownStaticModelForDifferentAgent(modelId: string, agentType: AgentId): boolean {
+    const normalizedModelId = modelId.trim();
+    if (!normalizedModelId || normalizedModelId === 'default') return false;
+    for (const candidateAgentId of AGENT_IDS) {
+        const candidateCore = getAgentCore(candidateAgentId);
+        const staticModes = candidateCore.model.allowedModes ?? [];
+        if (!staticModes.includes(normalizedModelId as any)) {
+            continue;
+        }
+        if (candidateAgentId !== agentType) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function readScopedDraftModelId(
+    draft: TempAuthoringDraftLike | PersistedAuthoringDraftLike,
+    agentType: AgentId,
+    backendTarget: BackendTargetRefV1,
+): string | null {
+    const modelId = typeof draft?.modelId === 'string' ? draft.modelId.trim() : '';
+    if (!modelId) return null;
+    const ownership = resolveDraftBackendTargetOwnership(draft, backendTarget);
+    if (ownership === 'mismatch') return null;
+    return ownership === 'unknown' && isKnownStaticModelForDifferentAgent(modelId, agentType)
+        ? null
+        : modelId;
+}
+
+function readScopedAcpSessionModeId(
+    draft: TempAuthoringDraftLike | PersistedAuthoringDraftLike,
+): string | null | undefined {
+    if (!draft || !('acpSessionModeId' in draft)) {
+        return undefined;
+    }
+    const raw = draft.acpSessionModeId;
+    if (raw === null) return null;
+    if (typeof raw !== 'string') return undefined;
+    const trimmed = raw.trim();
+    return trimmed.length > 0 ? trimmed : null;
+}
+
 export function useNewSessionAgentAuthoringOptionsState(params: Readonly<{
     agentType: AgentId;
+    backendTarget: BackendTargetRefV1;
     hydratedTempAuthoringDraft: TempAuthoringDraftLike;
     hydratedPersistedAuthoringDraft: PersistedAuthoringDraftLike;
     rememberedEngineSelection?: RememberedEngineSelectionV1 | null;
@@ -69,10 +150,11 @@ export function useNewSessionAgentAuthoringOptionsState(params: Readonly<{
     mcpSelection: SessionMcpSelectionV1;
     setMcpSelection: React.Dispatch<React.SetStateAction<SessionMcpSelectionV1>>;
 }> {
-    const [modelMode, setModelMode] = React.useState<ModelMode>(() => {
+    const backendTargetKey = React.useMemo(() => buildBackendTargetKey(params.backendTarget), [params.backendTarget]);
+    const initialModelMode = React.useMemo<ModelMode>(() => {
         const core = getAgentCore(params.agentType);
-        const tempMode = typeof params.hydratedTempAuthoringDraft?.modelId === 'string' ? params.hydratedTempAuthoringDraft.modelId : null;
-        const draftMode = typeof params.hydratedPersistedAuthoringDraft?.modelId === 'string' ? params.hydratedPersistedAuthoringDraft.modelId : null;
+        const tempMode = readScopedDraftModelId(params.hydratedTempAuthoringDraft, params.agentType, params.backendTarget);
+        const draftMode = readScopedDraftModelId(params.hydratedPersistedAuthoringDraft, params.agentType, params.backendTarget);
         const rememberedMode = typeof params.rememberedEngineSelection?.modelId === 'string' ? params.rememberedEngineSelection.modelId : null;
         return resolveInitialNewSessionModelMode({
             draftModelMode: tempMode ?? draftMode ?? rememberedMode,
@@ -83,26 +165,34 @@ export function useNewSessionAgentAuthoringOptionsState(params: Readonly<{
                 dynamicProbe: core.model.dynamicProbe ?? 'auto',
             },
         }) as ModelMode;
-    });
+    }, [
+        params.agentType,
+        backendTargetKey,
+        params.hydratedPersistedAuthoringDraft,
+        params.hydratedTempAuthoringDraft,
+        params.rememberedEngineSelection?.modelId,
+    ]);
 
-    const [acpSessionModeId, setAcpSessionModeId] = React.useState<string | null>(() => {
-        if (typeof params.hydratedTempAuthoringDraft?.acpSessionModeId === 'string') {
-            const trimmed = params.hydratedTempAuthoringDraft.acpSessionModeId.trim();
-            return trimmed.length > 0 ? trimmed : null;
-        }
-        const raw = params.hydratedPersistedAuthoringDraft?.acpSessionModeId;
-        if (raw === null) return null;
-        if (typeof raw === 'string') {
-            const trimmed = raw.trim();
-            return trimmed.length > 0 ? trimmed : null;
-        }
+    const [modelMode, setModelMode] = React.useState<ModelMode>(() => initialModelMode);
+
+    const initialAcpSessionModeId = React.useMemo<string | null>(() => {
+        const temp = readScopedAcpSessionModeId(params.hydratedTempAuthoringDraft);
+        if (temp !== undefined) return temp;
+        const persisted = readScopedAcpSessionModeId(params.hydratedPersistedAuthoringDraft);
+        if (persisted !== undefined) return persisted;
         const remembered = params.rememberedEngineSelection?.acpSessionModeId;
         if (typeof remembered === 'string') {
             const trimmed = remembered.trim();
             return trimmed.length > 0 ? trimmed : null;
         }
         return null;
-    });
+    }, [
+        params.hydratedPersistedAuthoringDraft,
+        params.hydratedTempAuthoringDraft,
+        params.rememberedEngineSelection?.acpSessionModeId,
+    ]);
+
+    const [acpSessionModeId, setAcpSessionModeId] = React.useState<string | null>(() => initialAcpSessionModeId);
 
     const initialSessionConfigOptionOverrides = React.useMemo(() => {
         if (params.hydratedTempAuthoringDraft && 'sessionConfigOptionOverrides' in params.hydratedTempAuthoringDraft) {
@@ -132,11 +222,13 @@ export function useNewSessionAgentAuthoringOptionsState(params: Readonly<{
         });
     }, [initialSessionConfigOptionOverrides]);
 
-    const [mcpSelection, setMcpSelection] = React.useState<SessionMcpSelectionV1>(() => {
+    const initialMcpSelection = React.useMemo<SessionMcpSelectionV1>(() => {
         return SessionMcpSelectionV1Schema.parse(
             params.hydratedTempAuthoringDraft?.mcpSelection ?? params.hydratedPersistedAuthoringDraft?.mcpSelection ?? {},
         );
-    });
+    }, [params.hydratedPersistedAuthoringDraft, params.hydratedTempAuthoringDraft]);
+
+    const [mcpSelection, setMcpSelection] = React.useState<SessionMcpSelectionV1>(() => initialMcpSelection);
 
     const setAcpConfigOptionOverride = React.useCallback((configId: string, value: string) => {
         const normalizedConfigId = typeof configId === 'string' ? configId.trim() : '';

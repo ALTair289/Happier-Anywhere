@@ -5,10 +5,13 @@ import { describe, expect, it, vi } from 'vitest';
 import { renderScreen } from '@/dev/testkit';
 import { Text } from '@/components/ui/text/Text';
 import type { RememberedEngineSelectionV1 } from '@/sync/domains/sessionAuthoring/rememberedEngineSelections';
+import type { BackendTargetRefV1 } from '@happier-dev/protocol';
 
 import { useNewSessionAgentAuthoringOptionsState } from './useNewSessionAgentAuthoringOptionsState';
 
 type PersistedDraft = Readonly<{
+    agentType?: 'claude' | 'codex' | null;
+    backendTarget?: unknown;
     modelId?: string | null;
     acpSessionModeId?: string | null;
     sessionConfigOptionOverrides?: Readonly<{
@@ -22,6 +25,7 @@ let latestSetAcpConfigOptionOverride: ((configId: string, value: string) => void
 
 function HookProbe(props: Readonly<{
     agentType?: 'claude' | 'codex';
+    backendTarget?: BackendTargetRefV1;
     persistedDraft: PersistedDraft | null;
     rememberedSelection?: RememberedEngineSelectionV1 | null;
 }>) {
@@ -30,6 +34,7 @@ function HookProbe(props: Readonly<{
         hydratedTempAuthoringDraft: null,
         hydratedPersistedAuthoringDraft: props.persistedDraft,
         rememberedEngineSelection: props.rememberedSelection ?? null,
+        backendTarget: props.backendTarget ?? { kind: 'builtInAgent', agentId: props.agentType ?? 'claude' },
     };
     const state = useNewSessionAgentAuthoringOptionsState(params);
     latestSetAcpConfigOptionOverride = state.setAcpConfigOptionOverride;
@@ -117,6 +122,23 @@ describe('useNewSessionAgentAuthoringOptionsState', () => {
         expect(screen.findByTestId('model-mode')?.props.children).toBe('claude-opus-4-6');
         expect(screen.findByTestId('session-mode-id')?.props.children).toBe('ask');
         expect(screen.findByTestId('overrides-json')?.props.children).toBe('null');
+    });
+
+    it('drops persisted draft model ids that belong to a different backend target', async () => {
+        const screen = await renderScreen(<HookProbe
+            agentType="codex"
+            backendTarget={{ kind: 'builtInAgent', agentId: 'codex' }}
+            persistedDraft={{
+                agentType: 'claude',
+                backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+                modelId: 'claude-opus-4-6',
+                acpSessionModeId: null,
+                sessionConfigOptionOverrides: null,
+            }}
+            rememberedSelection={null}
+        />);
+
+        expect(screen.findByTestId('model-mode')?.props.children).toBe('default');
     });
 
     it('does not issue an extra commit when equal session config overrides are re-passed with a fresh object', async () => {

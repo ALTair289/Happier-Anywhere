@@ -612,6 +612,7 @@ export function useNewSessionScreenModel(): NewSessionScreenModel {
         setMcpSelection,
     } = useNewSessionAgentAuthoringOptionsState({
         agentType,
+        backendTarget,
         hydratedTempAuthoringDraft,
         hydratedPersistedAuthoringDraft,
         rememberedEngineSelection,
