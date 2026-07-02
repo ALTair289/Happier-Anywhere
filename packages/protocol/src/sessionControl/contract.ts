@@ -15,6 +15,7 @@ import {
   SessionRuntimeIssueV1Schema,
   SessionRuntimeTemporaryThrottleDetailsV1Schema,
 } from '../sessions/control/runtimeIssueV1.js';
+import { SessionRuntimeActivitySourceClassV1Schema } from '../sessionRuntimeActivity/sessionRuntimeActivityV1.js';
 import {
   SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY,
   SessionUsageLimitRecoveryV1Schema,
@@ -24,9 +25,11 @@ import {
   SessionContinuationRecoveryV1Schema,
 } from '../sessionMetadata/sessionContinuationRecoveryV1.js';
 import {
-  CONNECTED_SERVICE_QUOTA_REFS_METADATA_KEY,
-  ConnectedServiceQuotaRefsV1Schema,
-} from '../sessionMetadata/connectedServiceQuotaRefsV1.js';
+  PROVIDER_ACCOUNT_USAGE_REFS_METADATA_KEY,
+  ProviderAccountUsageRefsV1Schema,
+} from '../sessionMetadata/providerAccountUsageRefsV1.js';
+
+const LEGACY_CONNECTED_SERVICE_QUOTA_REFS_METADATA_KEY = 'connectedServiceQuotaRefsV1' as const;
 export {
   SessionTurnIdentifierV1Schema,
   SessionTurnLifecycleStatusV1Schema,
@@ -193,6 +196,7 @@ export const SessionSummarySchema = z.object({
   activeAt: z.number().int().nonnegative(),
   archivedAt: z.number().int().nonnegative().nullable().optional(),
   pendingCount: z.number().int().nonnegative().optional(),
+  pendingBlockedCount: z.number().int().nonnegative().optional(),
   tag: z.string().optional(),
   title: z.string().min(1).optional(),
   path: z.string().optional(),
@@ -210,6 +214,10 @@ export const SessionSummarySchema = z.object({
   latestTurnId: z.string().min(1).nullable().optional(),
   latestTurnStatus: PrimaryTurnStatusV1Schema.nullable().optional(),
   lastRuntimeIssue: SessionRuntimeIssueV1Schema.nullable().optional(),
+  runtimeActivityActiveCount: z.number().int().nonnegative().optional(),
+  runtimeActivityObservedAt: z.number().int().nonnegative().nullable().optional(),
+  runtimeActivityExpiresAt: z.number().int().nonnegative().nullable().optional(),
+  runtimeActivitySourceClass: SessionRuntimeActivitySourceClassV1Schema.nullable().optional(),
 }).passthrough();
 export type SessionSummary = z.infer<typeof SessionSummarySchema>;
 
@@ -237,9 +245,16 @@ export function createSessionMetadataSchema(zod: typeof z) {
       // This metadata key is the compatible storage binding for runtime.usageLimitRecovery.
       [SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY]: SessionUsageLimitRecoveryV1Schema.optional(),
       [SESSION_CONTINUATION_RECOVERY_METADATA_KEY]: SessionContinuationRecoveryV1Schema.optional(),
-      [CONNECTED_SERVICE_QUOTA_REFS_METADATA_KEY]: ConnectedServiceQuotaRefsV1Schema.optional(),
+      [PROVIDER_ACCOUNT_USAGE_REFS_METADATA_KEY]: ProviderAccountUsageRefsV1Schema.optional(),
     })
-    .passthrough();
+    .passthrough()
+    .transform((metadata) => {
+      const {
+        [LEGACY_CONNECTED_SERVICE_QUOTA_REFS_METADATA_KEY]: _legacyConnectedServiceQuotaRefs,
+        ...nextMetadata
+      } = metadata;
+      return nextMetadata;
+    });
 }
 
 export const SessionMetadataSchema = createSessionMetadataSchema(z);
@@ -306,6 +321,7 @@ export const V2SessionRecordSchema = z
     thinking: z.boolean().optional(),
     thinkingAt: z.number().int().nonnegative().nullable().optional(),
     pendingCount: z.number().int().min(0).optional(),
+    pendingBlockedCount: z.number().int().min(0).optional(),
     pendingVersion: z.number().int().min(0).optional(),
     dataEncryptionKey: z.string().nullable(),
     share: SessionShareSchema.nullable().optional(),
@@ -313,6 +329,10 @@ export const V2SessionRecordSchema = z
     latestTurnStatus: PrimaryTurnStatusV1Schema.nullable().optional(),
     latestTurnStatusObservedAt: z.number().int().nonnegative().nullable().optional(),
     lastRuntimeIssue: SessionRuntimeIssueV1Schema.nullable().optional(),
+    runtimeActivityActiveCount: z.number().int().nonnegative().optional(),
+    runtimeActivityObservedAt: z.number().int().nonnegative().nullable().optional(),
+    runtimeActivityExpiresAt: z.number().int().nonnegative().nullable().optional(),
+    runtimeActivitySourceClass: SessionRuntimeActivitySourceClassV1Schema.nullable().optional(),
   })
   .passthrough();
 export type V2SessionRecord = z.infer<typeof V2SessionRecordSchema>;

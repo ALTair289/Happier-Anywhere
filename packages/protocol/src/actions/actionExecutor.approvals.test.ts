@@ -100,7 +100,16 @@ describe('createActionExecutor (approvals)', () => {
       { surface: 'mcp' },
     );
 
-    expect(res).toEqual({ ok: false, errorCode: 'action_disabled', error: 'action_disabled' });
+    expect(res).toEqual({
+      ok: false,
+      errorCode: 'action_disabled',
+      error: 'action_disabled',
+      details: expect.objectContaining({
+        actionId: 'ui.voice_global.reset',
+        surface: 'mcp',
+        reason: 'unsupported_surface',
+      }),
+    });
     expect(approvalsCreate).not.toHaveBeenCalled();
   });
 

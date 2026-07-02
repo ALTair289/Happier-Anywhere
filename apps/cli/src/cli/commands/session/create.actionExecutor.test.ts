@@ -23,7 +23,7 @@ describe('happier session create (action executor)', () => {
       });
 
       expect(execute).not.toHaveBeenCalled();
-      expect(output.text()).toContain('happier session create [--path <path>] [--backend <backend-target>] [--title <title>] [--tag <tag>] [--prompt <text>|--message <text>] [--json]');
+      expect(output.text()).toContain('happier session create [--path <path>] [--backend <backend-target>] [--title <title>] [--tag <tag>] [--prompt <text>|--message <text>] [--model <model-id>] [--permission-mode <mode>] [--mode <agent-mode-id>] [--config-option <id=value>] [--reasoning-effort <value>] [--ultracode] [--config-overrides-json <json>] [--json]');
     } finally {
       output.restore();
     }

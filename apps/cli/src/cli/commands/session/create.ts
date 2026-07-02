@@ -1,34 +1,22 @@
 import chalk from 'chalk';
 
-import { DEFAULT_CATALOG_AGENT_ID } from '@/backends/types';
-import { readFlagValue, hasFlag } from '@/cli/commands/shared/argvFlags';
-import { normalizeBackendTargetKeysFromCsv } from '@/cli/commands/session/shared/normalizeBackendTargetKeys';
+import { hasFlag } from '@/cli/commands/shared/argvFlags';
 import { wantsJson, printJsonEnvelope } from '@/cli/output/jsonEnvelope';
 import { mapUnknownErrorToControlError } from '@/cli/control/controlErrorMapping';
 import type { Credentials } from '@/persistence';
 import { createCliActionExecutorFromCredentials } from '@/session/actions/createCliActionExecutorFromCredentials';
 import { normalizeActionExecuteResult } from '@/cli/commands/session/shared/normalizeActionExecuteResult';
 import { tryHandleApprovalRequestCreated } from '@/cli/commands/session/shared/tryHandleApprovalRequestCreated';
-import { resolveRequestedSessionDirectory } from '@/agent/runtime/resolveRequestedSessionDirectory';
+import { parseSessionCreateSpawnOptions, SESSION_CREATE_USAGE } from './create/parseSessionCreateSpawnOptions';
 
 export async function cmdSessionCreate(
   argv: string[],
   deps: Readonly<{ readCredentialsFn: () => Promise<Credentials | null> }>,
 ): Promise<void> {
   const json = wantsJson(argv);
-  const path = resolveRequestedSessionDirectory({
-    requestedDirectory: readFlagValue(argv, '--path') ?? null,
-  });
-  const tag = (readFlagValue(argv, '--tag') ?? '').trim();
-  const title = (readFlagValue(argv, '--title') ?? '').trim();
-  const initialPrompt = (readFlagValue(argv, '--message') ?? readFlagValue(argv, '--prompt') ?? '').trim();
-  const backendRaw = (readFlagValue(argv, '--backend') ?? readFlagValue(argv, '--agent') ?? '').trim();
-  const backendTargetKeys = normalizeBackendTargetKeysFromCsv(backendRaw);
-  const backendTargetKey = backendTargetKeys.length === 1 ? backendTargetKeys[0] : null;
+  const parsedOptions = parseSessionCreateSpawnOptions(argv);
   if (hasFlag(argv, '--help') || hasFlag(argv, '-h')) {
-    throw new Error(
-      'Usage: happier session create [--path <path>] [--backend <backend-target>] [--title <text>] [--tag <tag>] [--prompt <text>|--message <text>] [--json]',
-    );
+    throw new Error(`Usage: ${SESSION_CREATE_USAGE}`);
   }
 
   const credentials = await deps.readCredentialsFn();
@@ -41,10 +29,8 @@ export async function cmdSessionCreate(
     process.exit(1);
   }
 
-  if (backendRaw && !backendTargetKey) {
-    throw new Error(
-      'Usage: happier session create [--path <path>] [--backend <backend-target>] [--title <text>] [--tag <tag>] [--prompt <text>|--message <text>] [--json]',
-    );
+  if (parsedOptions.backendRaw && !parsedOptions.backendTargetKey) {
+    throw new Error(`Usage: ${SESSION_CREATE_USAGE}`);
   }
 
   const executor = createCliActionExecutorFromCredentials({ credentials });
@@ -52,13 +38,7 @@ export async function cmdSessionCreate(
   try {
     actionRes = await executor.execute(
       'session.spawn_new',
-      {
-        path,
-        ...(backendTargetKey ? { backendTargetKey } : { agentId: DEFAULT_CATALOG_AGENT_ID }),
-        ...(title ? { title } : {}),
-        ...(tag ? { tag } : {}),
-        ...(initialPrompt ? { initialMessage: initialPrompt } : {}),
-      },
+      parsedOptions.actionInput,
       { surface: 'cli', defaultSessionId: null },
     );
   } catch (error) {

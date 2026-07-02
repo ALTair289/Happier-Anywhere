@@ -80,7 +80,7 @@ describe('built-in Happier tools', () => {
       },
     });
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       ok: false,
       errorCode: 'action_disabled',
       error: 'Action is disabled',
@@ -199,7 +199,7 @@ describe('built-in Happier tools', () => {
       },
     });
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       ok: false,
       errorCode: 'action_disabled',
       error: 'Action is disabled',
@@ -251,17 +251,104 @@ describe('built-in Happier tools', () => {
       },
     });
 
-    expect(getResult).toEqual({
+    expect(getResult).toMatchObject({
       ok: false,
       errorCode: 'action_disabled',
       error: 'Action is disabled',
     });
   });
 
+  it('includes structured availability details when action_spec_get is disabled by caller policy', async () => {
+    const getResult = await dispatchBuiltInHappierTool({
+      toolName: 'action_spec_get',
+      args: { id: 'review.start' },
+      sessionId: 'sess-1',
+      deps: {
+        changeTitle: async () => ({ success: true }),
+        startExecutionRun: async () => unsupported(),
+        executeActionByToolName: async () => unsupported(),
+        isActionEnabled: (id) => id !== 'review.start',
+      },
+    });
+
+    expect(getResult).toMatchObject({
+      ok: false,
+      errorCode: 'action_disabled',
+      error: 'Action is disabled',
+      details: {
+        actionId: 'review.start',
+        surface: 'session_agent',
+        reason: 'disabled_by_policy',
+      },
+    });
+  });
+
+  it('includes structured availability details when action_options_resolve targets a disabled action field', async () => {
+    const getResult = await dispatchBuiltInHappierTool({
+      toolName: 'action_options_resolve',
+      args: { actionId: 'subagents.plan.start', fieldPath: 'backendTargetKeys' },
+      sessionId: 'sess-1',
+      deps: {
+        changeTitle: async () => ({ success: true }),
+        startExecutionRun: async () => unsupported(),
+        executeActionByToolName: async () => unsupported(),
+        resolveActionOptions: async () => ({
+          ok: true,
+          result: {
+            actionId: 'subagents.plan.start',
+            fieldPath: 'backendTargetKeys',
+            optionsSourceId: 'execution.backends.enabled',
+            options: [],
+          },
+        }),
+        isActionEnabled: (id) => id !== 'subagents.plan.start',
+      },
+    });
+
+    expect(getResult).toMatchObject({
+      ok: false,
+      errorCode: 'action_disabled',
+      error: 'Action is disabled',
+      details: {
+        actionId: 'subagents.plan.start',
+        surface: 'session_agent',
+        reason: 'disabled_by_policy',
+      },
+    });
+  });
+
+  it('includes structured availability details when action_execute targets an unsupported surface', async () => {
+    const executeActionByToolName = vi.fn(async () => ok({ unreachable: true }));
+
+    const result = await dispatchBuiltInHappierTool({
+      toolName: 'action_execute',
+      args: { actionId: 'action.spec.search', input: { query: 'review' } },
+      sessionId: 'sess-1',
+      surface: 'cli',
+      deps: {
+        changeTitle: async () => ({ success: true }),
+        startExecutionRun: async () => unsupported(),
+        executeActionByToolName,
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      errorCode: 'action_disabled',
+      error: 'Action is disabled',
+      details: {
+        actionId: 'action.spec.search',
+        surface: 'cli',
+        reason: 'unsupported_surface',
+      },
+    });
+    expect(executeActionByToolName).not.toHaveBeenCalled();
+  });
+
   it('does not expose non-MCP action specs through the shared discovery tools', async () => {
     const getResult = await dispatchBuiltInHappierTool({
       toolName: 'action_spec_get',
-      args: { id: 'session.mode.set' },
+      args: { id: 'memory.search' },
       sessionId: 'sess-1',
       surface: 'mcp',
       deps: {
@@ -271,10 +358,15 @@ describe('built-in Happier tools', () => {
       },
     });
 
-    expect(getResult).toEqual({
+    expect(getResult).toMatchObject({
       ok: false,
       errorCode: 'action_disabled',
       error: 'Action is disabled',
+      details: {
+        actionId: 'memory.search',
+        surface: 'mcp',
+        reason: 'unsupported_surface',
+      },
     });
   });
 
@@ -340,7 +432,7 @@ describe('built-in Happier tools', () => {
       },
     });
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       ok: false,
       errorCode: 'action_disabled',
       error: 'Action is disabled',
@@ -363,7 +455,7 @@ describe('built-in Happier tools', () => {
       },
     });
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       ok: false,
       errorCode: 'action_disabled',
       error: 'Action is disabled',
@@ -386,7 +478,7 @@ describe('built-in Happier tools', () => {
       },
     });
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       ok: false,
       errorCode: 'action_disabled',
       error: 'Action is disabled',
@@ -409,7 +501,7 @@ describe('built-in Happier tools', () => {
       },
     });
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       ok: false,
       errorCode: 'action_disabled',
       error: 'Action is disabled',
@@ -615,7 +707,7 @@ describe('built-in Happier tools', () => {
       },
     });
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       ok: false,
       errorCode: 'action_disabled',
       error: 'Action is disabled',

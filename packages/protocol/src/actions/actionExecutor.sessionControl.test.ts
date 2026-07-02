@@ -618,6 +618,42 @@ describe('createActionExecutor (session control)', () => {
     }));
   });
 
+  it('preserves structured session.spawn_new policy failure details returned by deps.sessionSpawnNew', async () => {
+    const sessionSpawnNew = vi.fn(async () => ({
+      type: 'error',
+      errorCode: 'spawn_policy_denied',
+      errorMessage: 'spawn_policy_denied',
+      details: {
+        field: 'environmentVariables',
+        surface: 'session_agent',
+      },
+    }));
+    const executor = createExecutor({ sessionSpawnNew });
+
+    const res = await executor.execute(
+      'session.spawn_new' as any,
+      {
+        path: '/repo',
+        environmentVariables: { SECRET_TOKEN: 'do-not-leak' },
+      },
+      { surface: 'session_agent', defaultSessionId: null },
+    );
+
+    expect(res).toEqual({
+      ok: true,
+      result: {
+        type: 'error',
+        errorCode: 'spawn_policy_denied',
+        errorMessage: 'spawn_policy_denied',
+        details: {
+          field: 'environmentVariables',
+          surface: 'session_agent',
+        },
+      },
+    });
+    expect(JSON.stringify(res)).not.toContain('do-not-leak');
+  });
+
   it('executes session.list via deps.sessionList (including cli filter flags)', async () => {
     const sessionList = vi.fn(async () => ({ sessions: [] }));
     const executor = createExecutor({ sessionList });

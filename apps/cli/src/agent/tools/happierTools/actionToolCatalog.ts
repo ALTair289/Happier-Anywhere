@@ -1,7 +1,9 @@
 import {
   isActionDirectToolExposedOn,
   listActionSpecs,
+  resolveActionSurfaceAvailability,
   type ActionId,
+  type ActionSurfaceAvailability,
   type ActionsSettingsV1,
 } from '@happier-dev/protocol';
 
@@ -23,9 +25,6 @@ const ACTION_TOOL_ENTRIES = Object.freeze(
 const ACTION_TOOL_NAME_TO_ID = new Map(
   ACTION_TOOL_ENTRIES.map((entry) => [entry.toolName, entry.id] as const),
 );
-const ACTION_SURFACES_BY_ID = new Map(
-  listActionSpecs().map((spec) => [spec.id as ActionId, spec.surfaces] as const),
-);
 const ACTION_SPECS_BY_ID = new Map(
   listActionSpecs().map((spec) => [spec.id as ActionId, spec] as const),
 );
@@ -45,14 +44,25 @@ export function isActionAvailableOnToolSurface(params: Readonly<{
   actionId: ActionId;
   surface?: HappierBuiltInToolSurface;
   isActionEnabled?: ActionEnabledPredicate;
+  actionsSettings?: ActionsSettingsV1 | null;
 }>): boolean {
+  return resolveActionAvailabilityOnToolSurface(params).available;
+}
+
+export function resolveActionAvailabilityOnToolSurface(params: Readonly<{
+  actionId: ActionId;
+  surface?: HappierBuiltInToolSurface;
+  isActionEnabled?: ActionEnabledPredicate;
+  actionsSettings?: ActionsSettingsV1 | null;
+}>): ActionSurfaceAvailability {
   const surface = params.surface ?? 'session_agent';
   const isActionEnabled = params.isActionEnabled ?? (() => true);
-  const surfaces = ACTION_SURFACES_BY_ID.get(params.actionId);
-  if (!surfaces) {
-    return false;
-  }
-  return surfaces[surface] === true && isActionEnabled(params.actionId);
+  return resolveActionSurfaceAvailability({
+    actionId: params.actionId,
+    surface,
+    settings: params.actionsSettings ?? null,
+    isActionEnabled,
+  });
 }
 
 export function isActionDirectToolAvailableOnToolSurface(params: Readonly<{
@@ -97,6 +107,7 @@ function isDirectManualToolAvailable(params: Readonly<{
   actionId: ActionId;
   surface?: HappierBuiltInToolSurface;
   isActionEnabled?: ActionEnabledPredicate;
+  actionsSettings?: ActionsSettingsV1 | null;
 }>): boolean {
   if (!DIRECT_MANUAL_TOOL_NAMES.has(params.toolName)) {
     return false;
@@ -106,6 +117,7 @@ function isDirectManualToolAvailable(params: Readonly<{
     actionId: params.actionId,
     surface: params.surface,
     isActionEnabled: params.isActionEnabled,
+    actionsSettings: params.actionsSettings ?? null,
   });
 }
 
@@ -125,6 +137,7 @@ export function filterBuiltInToolsForSurface(
       actionId,
       surface: params?.surface,
       isActionEnabled: params?.isActionEnabled,
+      actionsSettings: params?.actionsSettings ?? null,
     })) {
       return true;
     }

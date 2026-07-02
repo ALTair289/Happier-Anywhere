@@ -1,8 +1,12 @@
 import type { ActionId } from './actionIds.js';
-import { isActionEnabledByActionsSettings, type ActionsSettingsV1 } from './actionSettings.js';
+import type { ActionsSettingsV1 } from './actionSettings.js';
+import {
+  ACTION_TOOL_EXPOSURE_SURFACES,
+  resolveActionSurfaceAvailability,
+} from './actionSurfaceAvailability.js';
 import type { ActionSpec, ActionToolExposureMode, ActionToolExposureSurface } from './actionSpecs.js';
 
-export const ACTION_TOOL_EXPOSURE_SURFACES = ['session_agent', 'mcp', 'cli'] as const satisfies readonly ActionToolExposureSurface[];
+export { ACTION_TOOL_EXPOSURE_SURFACES };
 
 export const SESSION_AGENT_DIRECT_ACTION_TOOL_ALLOW_LIST = [
   'action.spec.search',
@@ -40,16 +44,12 @@ function isActionAvailableOnToolExposureSurface(
   surface: ActionToolExposureSurface,
   context?: ActionToolExposureResolutionContext | null,
 ): boolean {
-  if (spec.surfaces[surface] !== true) return false;
-
-  const actionId = spec.id as ActionId;
-  if (context?.settings && !isActionEnabledByActionsSettings(actionId, context.settings, { surface })) {
-    return false;
-  }
-  if (context?.isActionEnabled && !context.isActionEnabled(actionId)) {
-    return false;
-  }
-  return true;
+  return resolveActionSurfaceAvailability({
+    actionId: spec.id as ActionId,
+    surface,
+    settings: context?.settings ?? null,
+    isActionEnabled: context?.isActionEnabled ?? null,
+  }).available;
 }
 
 export function resolveActionToolExposureMode(
@@ -65,8 +65,13 @@ export function isActionDirectToolExposedOn(
   surface: ActionToolExposureSurface,
   context?: ActionToolExposureResolutionContext | null,
 ): boolean {
-  return Boolean(spec.bindings?.mcpToolName)
-    && isActionAvailableOnToolExposureSurface(spec, surface, context)
+  return resolveActionSurfaceAvailability({
+    actionId: spec.id as ActionId,
+    surface,
+    settings: context?.settings ?? null,
+    isActionEnabled: context?.isActionEnabled ?? null,
+    requireToolBinding: true,
+  }).available
     && resolveActionToolExposureMode(spec, surface, context) === 'direct';
 }
 
@@ -75,6 +80,5 @@ export function isActionDiscoverableOnToolSurface(
   surface: ActionToolExposureSurface,
   context?: ActionToolExposureResolutionContext | null,
 ): boolean {
-  return Boolean(spec.bindings?.mcpToolName)
-    && isActionAvailableOnToolExposureSurface(spec, surface, context);
+  return isActionAvailableOnToolExposureSurface(spec, surface, context);
 }

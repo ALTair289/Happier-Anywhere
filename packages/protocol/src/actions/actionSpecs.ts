@@ -8,7 +8,7 @@ import { MemorySearchQueryV1Schema } from '../memory/memorySearch.js';
 import { ApprovalRequestCreatedBySchema, ApprovalRequestOriginV1Schema } from '../approvals/approvalRequestV1.js';
 import { PromptRegistryConfiguredSourceV1Schema } from '../promptLibrary/promptRegistriesV1.js';
 import { PromptAssetInstallModeV1Schema, PromptAssetScopeV1Schema } from '../promptLibrary/promptAssetsV1.js';
-import { BackendTargetKeySchema, BackendTargetRefSchema, parseBackendTargetKey } from '../backendTargets/backendTargetRef.js';
+import { BackendTargetKeySchema, BackendTargetRefSchema, buildBackendTargetKey, parseBackendTargetKey } from '../backendTargets/backendTargetRef.js';
 import { ExecutionRunListRequestSchema } from '../executionRunListRequest.js';
 import { ExecutionRunStartRequestSchema } from '../executionRunStartRequest.js';
 import { SessionRollbackTargetSchema } from '../sessionRollback.js';
@@ -22,6 +22,10 @@ import {
 } from '../sessionWorkState/sessionWorkStateRpc.js';
 import { SessionTerminalComposerClearRequestV1Schema } from '../sessionControl/sessionTerminalComposerClearV1.js';
 import { SessionWorkStateStatusV1Schema } from '../sessionWorkState/sessionWorkStateV1.js';
+import { AcpConfigOptionOverridesV1Schema } from '../sessionMetadata/metadataOverridesV1.js';
+import { SessionPermissionModeSchema } from '../sessionMetadata/sessionPermissionModes.js';
+import { SessionMcpSelectionV1Schema } from '../mcpServers/sessionSelectionV1.js';
+import { ConnectedServiceBindingsV1Schema } from '../connect/connectedServiceBindings.js';
 
 export {
   ActionApprovalFlowSchema,
@@ -470,16 +474,124 @@ const SessionHandoffInputSchema = z.object({
   workspaceTransfer: SessionHandoffWorkspaceTransferSchema.optional(),
 }).passthrough();
 
+const SpawnConfigOptionValueSchema = z.union([z.string(), z.number(), z.boolean(), z.null()]);
+
+const SessionSpawnTerminalInputSchema = z.object({
+  mode: z.enum(['plain', 'tmux', 'windows_terminal', 'windows_console']).optional(),
+  tmux: z.object({
+    sessionName: z.string().optional(),
+    isolated: z.boolean().optional(),
+    tmpDir: z.string().nullable().optional(),
+  }).strict().optional(),
+}).strict();
+
+function normalizeSpawnTargetAlias(value: string): string {
+  const trimmed = value.trim();
+  if (BackendTargetKeySchema.safeParse(trimmed).success) return trimmed;
+  return trimmed === 'customAcp' ? trimmed : `agent:${trimmed}`;
+}
+
 const SessionSpawnNewInputSchema = z.object({
   tag: z.string().min(1).optional(),
-  agentId: z.string().min(1).optional(),
+  tags: z.array(z.string().min(1)).optional(),
+  agentId: z.string().trim().min(1).optional(),
+  backend: z.string().trim().min(1).optional(),
+  target: z.string().trim().min(1).optional(),
   modelId: z.string().min(1).optional(),
-  backendTargetKey: z.string().min(1).optional(),
+  backendTargetKey: BackendTargetKeySchema.optional(),
+  backendTarget: BackendTargetRefSchema.optional(),
   title: z.string().min(1).optional(),
   path: z.string().min(1).optional(),
+  directory: z.string().min(1).optional(),
   host: z.string().min(1).optional(),
+  machineId: z.string().min(1).optional(),
+  prompt: z.string().min(1).optional(),
+  initialPrompt: z.string().min(1).optional(),
   initialMessage: z.string().min(1).optional(),
-}).passthrough();
+  permissionMode: SessionPermissionModeSchema.optional(),
+  agentModeId: z.string().min(1).optional(),
+  sessionConfigOptionOverrides: AcpConfigOptionOverridesV1Schema.optional(),
+  configOptions: z.record(z.string().min(1), SpawnConfigOptionValueSchema).optional(),
+  profileId: z.string().min(1).optional(),
+  environmentVariables: z.record(z.string().min(1), z.string()).optional(),
+  connectedServices: ConnectedServiceBindingsV1Schema.optional(),
+  connectedServicesUpdatedAt: z.number().int().optional(),
+  mcpSelection: SessionMcpSelectionV1Schema.optional(),
+  transcriptStorage: z.enum(['persisted', 'direct']).optional(),
+  terminal: SessionSpawnTerminalInputSchema.optional(),
+  windowsRemoteSessionLaunchMode: z.enum(['hidden', 'windows_terminal', 'console']).optional(),
+  windowsRemoteSessionConsole: z.enum(['hidden', 'visible']).optional(),
+  windowsTerminalWindowName: z.string().min(1).optional(),
+}).strict().superRefine((value, ctx) => {
+  const record = value as Record<string, unknown>;
+  const rejectConflictingAliases = (fields: readonly string[]) => {
+    const defined = fields
+      .map((field) => ({ field, value: record[field] }))
+      .filter((entry): entry is { field: string; value: string } => typeof entry.value === 'string');
+    if (defined.length < 2) return;
+    const first = defined[0]?.value;
+    if (defined.every((entry) => entry.value === first)) return;
+    for (const entry of defined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `${fields.join('/')} aliases must agree`,
+        path: [entry.field],
+      });
+    }
+  };
+  const rejectConflictingTargetAliases = () => {
+    const aliases: { field: string; value: string }[] = [];
+    if (typeof value.agentId === 'string') aliases.push({ field: 'agentId', value: normalizeSpawnTargetAlias(value.agentId) });
+    if (typeof value.backend === 'string') aliases.push({ field: 'backend', value: normalizeSpawnTargetAlias(value.backend) });
+    if (typeof value.target === 'string') aliases.push({ field: 'target', value: normalizeSpawnTargetAlias(value.target) });
+    if (typeof value.backendTargetKey === 'string') {
+      aliases.push({ field: 'backendTargetKey', value: value.backendTargetKey });
+    }
+    if (value.backendTarget) {
+      aliases.push({ field: 'backendTarget', value: buildBackendTargetKey(value.backendTarget) });
+    }
+    const concreteValues = aliases.map((alias) => alias.value).filter((alias) => alias !== 'customAcp');
+    const hasCustomAcpAlias = aliases.some((alias) => alias.value === 'customAcp');
+    if (aliases.length < 2 && !hasCustomAcpAlias) return;
+
+    const hasConflictingConcreteTargets = new Set(concreteValues).size > 1;
+    const hasBuiltInTarget = concreteValues.some((alias) => alias.startsWith('agent:'));
+    const hasConcreteAcpTarget = concreteValues.some((alias) => alias.startsWith('acpBackend:'));
+    if (!hasConflictingConcreteTargets && !(hasCustomAcpAlias && hasBuiltInTarget) && !(hasCustomAcpAlias && !hasConcreteAcpTarget)) return;
+
+    for (const alias of aliases) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'spawn target aliases must agree',
+        path: [alias.field],
+      });
+    }
+  };
+  const rejectConflictingConfigAliases = () => {
+    if (!value.sessionConfigOptionOverrides || !value.configOptions) return;
+
+    for (const [optionId, shorthandValue] of Object.entries(value.configOptions)) {
+      const structuredOverride = value.sessionConfigOptionOverrides.overrides[optionId];
+      if (!structuredOverride || Object.is(structuredOverride.value, shorthandValue)) continue;
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'configOptions must agree with sessionConfigOptionOverrides',
+        path: ['configOptions', optionId],
+      });
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'sessionConfigOptionOverrides must agree with configOptions',
+        path: ['sessionConfigOptionOverrides', 'overrides', optionId, 'value'],
+      });
+    }
+  };
+
+  rejectConflictingAliases(['path', 'directory']);
+  rejectConflictingAliases(['prompt', 'initialPrompt', 'initialMessage']);
+  rejectConflictingTargetAliases();
+  rejectConflictingConfigAliases();
+});
+export type SessionSpawnNewInput = z.infer<typeof SessionSpawnNewInputSchema>;
 
 const SessionSpawnPickerInputSchema = z.object({
   tag: z.string().min(1).optional(),
@@ -541,6 +653,63 @@ const AgentsModelsListInputSchema = z.object({
         path: ['agentId'],
       });
     }
+  }
+});
+
+const AgentsSessionModesListInputSchema = AgentsModelsListInputSchema;
+const AgentsConfigOptionsListInputSchema = AgentsModelsListInputSchema;
+
+const SpawnDiscoveryAgentContextInputSchema = z.object({
+  agentId: z.string().min(1).optional(),
+  backendTargetKey: BackendTargetKeySchema.optional(),
+  includeDisabled: z.boolean().optional(),
+  includeUnavailable: z.boolean().optional(),
+  limit: z.number().int().min(1).max(200).optional(),
+}).passthrough().superRefine((value, ctx) => {
+  if (value.agentId && value.backendTargetKey) {
+    const parsedTarget = parseBackendTargetKey(value.backendTargetKey);
+    const derivedAgentId = parsedTarget.kind === 'builtInAgent' ? parsedTarget.agentId : 'customAcp';
+    if (value.agentId !== derivedAgentId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'agentId must match backendTargetKey when both are provided',
+        path: ['agentId'],
+      });
+    }
+  }
+});
+
+const SessionsSpawnProfilesListInputSchema = SpawnDiscoveryAgentContextInputSchema;
+const SessionsSpawnConnectedServicesListInputSchema = SpawnDiscoveryAgentContextInputSchema;
+
+const SessionsSpawnMcpServersPreviewInputSchema = z.object({
+  agentId: z.string().min(1).optional(),
+  backendTargetKey: BackendTargetKeySchema.optional(),
+  machineId: z.string().min(1).optional(),
+  serverId: z.string().min(1).optional(),
+  path: z.string().min(1).optional(),
+  directory: z.string().min(1).optional(),
+  mcpSelection: SessionMcpSelectionV1Schema.optional(),
+  selection: SessionMcpSelectionV1Schema.optional(),
+  limit: z.number().int().min(1).max(200).optional(),
+}).passthrough().superRefine((value, ctx) => {
+  if (value.agentId && value.backendTargetKey) {
+    const parsedTarget = parseBackendTargetKey(value.backendTargetKey);
+    const derivedAgentId = parsedTarget.kind === 'builtInAgent' ? parsedTarget.agentId : 'customAcp';
+    if (value.agentId !== derivedAgentId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'agentId must match backendTargetKey when both are provided',
+        path: ['agentId'],
+      });
+    }
+  }
+  if (value.path && value.directory && value.path !== value.directory) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'path and directory aliases must agree',
+      path: ['directory'],
+    });
   }
 });
 
@@ -1071,7 +1240,7 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
       ui_slash_command: false,
       voice_tool: true,
       voice_action_block: true,
-      session_agent: true,
+      session_agent: false,
       mcp: true,
       cli: true,
     },
@@ -1176,7 +1345,7 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
       ui_slash_command: false,
       voice_tool: true,
       voice_action_block: true,
-      session_agent: true,
+      session_agent: false,
       mcp: true,
       cli: true,
     },
@@ -1422,25 +1591,32 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
     examples: {
       voice: { argsExample: '{"tag":"voice-qa","agentId":"claude","modelId":"default","initialMessage":"Help me inspect this workspace."}' },
     },
-	    surfaces: {
-	      ui_button: true,
-	      ui_slash_command: false,
-	      voice_tool: true,
-	      voice_action_block: true,
-	      session_agent: false,
-	      mcp: true,
-	      cli: true,
-	    },
-	    inputHints: {
-	      title: 'Create a new session',
-	      fields: [
-	        { path: 'tag', title: 'Tag', widget: 'text' },
+    surfaces: {
+      ui_button: true,
+      ui_slash_command: false,
+      voice_tool: true,
+      voice_action_block: true,
+      session_agent: true,
+      mcp: true,
+      cli: true,
+    },
+    inputHints: {
+      title: 'Create a new session',
+      fields: [
+        { path: 'tag', title: 'Tag', widget: 'text' },
         { path: 'agentId', title: 'Agent id', widget: 'text' },
-        { path: 'modelId', title: 'Model id', widget: 'text' },
-        { path: 'backendTargetKey', title: 'Backend target key', widget: 'text' },
+        { path: 'modelId', title: 'Model id', widget: 'text', optionsSourceId: 'agents.models.available' },
+        { path: 'backendTargetKey', title: 'Backend target key', widget: 'text', optionsSourceId: 'agents.backends.enabled' },
         { path: 'title', title: 'Title', widget: 'text' },
-        { path: 'path', title: 'Path', widget: 'text' },
+        { path: 'path', title: 'Path', widget: 'text', optionsSourceId: 'sessions.spawn.paths.recent' },
+        { path: 'machineId', title: 'Machine id', widget: 'text', optionsSourceId: 'sessions.spawn.machines.available' },
         { path: 'host', title: 'Host', widget: 'text' },
+        { path: 'permissionMode', title: 'Permission mode', widget: 'text' },
+        { path: 'agentModeId', title: 'Agent mode id', widget: 'text', optionsSourceId: 'agents.session_modes.available' },
+        { path: 'sessionConfigOptionOverrides', title: 'Config option overrides', widget: 'text', optionsSourceId: 'agents.config_options.available' },
+        { path: 'profileId', title: 'Profile id', widget: 'text', optionsSourceId: 'sessions.spawn.profiles.available' },
+        { path: 'connectedServices', title: 'Connected services', widget: 'text', optionsSourceId: 'sessions.spawn.connected_services.available' },
+        { path: 'mcpSelection', title: 'MCP selection', widget: 'text', optionsSourceId: 'sessions.spawn.mcp_servers.preview' },
         { path: 'initialMessage', title: 'Initial message', widget: 'textarea' },
       ],
     },
@@ -1494,7 +1670,7 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
       ui_slash_command: false,
       voice_tool: true,
       voice_action_block: true,
-      session_agent: false,
+      session_agent: true,
       mcp: true,
       cli: true,
     },
@@ -1523,9 +1699,9 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
       ui_slash_command: false,
       voice_tool: true,
       voice_action_block: true,
-      session_agent: false,
-      mcp: false,
-      cli: false,
+      session_agent: true,
+      mcp: true,
+      cli: true,
     },
     inputHints: {
       title: 'List machines',
@@ -1549,9 +1725,9 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
       ui_slash_command: false,
       voice_tool: true,
       voice_action_block: true,
-      session_agent: false,
-      mcp: false,
-      cli: false,
+      session_agent: true,
+      mcp: true,
+      cli: true,
     },
     inputHints: {
       title: 'List servers',
@@ -1649,6 +1825,168 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
       ],
     },
     inputSchema: AgentsModelsListInputSchema,
+  },
+  {
+    id: 'agents.session_modes.list',
+    title: 'List agent session modes',
+    description: 'List available session modes for an agent backend.',
+    safety: 'safe',
+    approval: APPROVAL_RESULT_REQUIRED,
+    placements: ['voice_panel'],
+    prompting: { voiceHotPath: true },
+    bindings: { voiceClientToolName: 'listAgentSessionModes', mcpToolName: 'agents_session_modes_list' },
+    examples: {
+      voice: { argsExample: '{"backendTargetKey":"agent:claude","limit":10}' },
+    },
+    surfaces: {
+      ui_button: false,
+      ui_slash_command: false,
+      voice_tool: true,
+      voice_action_block: true,
+      session_agent: true,
+      mcp: true,
+      cli: true,
+    },
+    inputHints: {
+      title: 'List agent session modes',
+      fields: [
+        { path: 'agentId', title: 'Agent id', widget: 'text' },
+        { path: 'backendTargetKey', title: 'Backend target key', widget: 'text' },
+        { path: 'machineId', title: 'Machine id (optional)', widget: 'text' },
+        { path: 'limit', title: 'Max results', widget: 'text' },
+      ],
+    },
+    inputSchema: AgentsSessionModesListInputSchema,
+  },
+  {
+    id: 'agents.config_options.list',
+    title: 'List agent config options',
+    description: 'List configurable session options for an agent backend without exposing secret values.',
+    safety: 'safe',
+    approval: APPROVAL_RESULT_REQUIRED,
+    placements: ['voice_panel'],
+    prompting: { voiceHotPath: true },
+    bindings: { voiceClientToolName: 'listAgentConfigOptions', mcpToolName: 'agents_config_options_list' },
+    examples: {
+      voice: { argsExample: '{"backendTargetKey":"agent:claude","limit":10}' },
+    },
+    surfaces: {
+      ui_button: false,
+      ui_slash_command: false,
+      voice_tool: true,
+      voice_action_block: true,
+      session_agent: true,
+      mcp: true,
+      cli: true,
+    },
+    inputHints: {
+      title: 'List agent config options',
+      fields: [
+        { path: 'agentId', title: 'Agent id', widget: 'text' },
+        { path: 'backendTargetKey', title: 'Backend target key', widget: 'text' },
+        { path: 'machineId', title: 'Machine id (optional)', widget: 'text' },
+        { path: 'limit', title: 'Max results', widget: 'text' },
+      ],
+    },
+    inputSchema: AgentsConfigOptionsListInputSchema,
+  },
+  {
+    id: 'sessions.spawn.profiles.list',
+    title: 'List spawn profiles',
+    description: 'List backend profiles available for creating a new session without exposing environment values or secret bindings.',
+    safety: 'safe',
+    approval: APPROVAL_RESULT_REQUIRED,
+    placements: ['voice_panel'],
+    prompting: { voiceHotPath: true },
+    bindings: { voiceClientToolName: 'listSpawnProfiles', mcpToolName: 'sessions_spawn_profiles_list' },
+    examples: {
+      voice: { argsExample: '{"backendTargetKey":"agent:claude","limit":10}' },
+    },
+    surfaces: {
+      ui_button: false,
+      ui_slash_command: false,
+      voice_tool: true,
+      voice_action_block: true,
+      session_agent: true,
+      mcp: true,
+      cli: true,
+    },
+    inputHints: {
+      title: 'List spawn profiles',
+      fields: [
+        { path: 'agentId', title: 'Agent id', widget: 'text' },
+        { path: 'backendTargetKey', title: 'Backend target key', widget: 'text' },
+        { path: 'includeDisabled', title: 'Include incompatible', widget: 'toggle' },
+        { path: 'limit', title: 'Max results', widget: 'text' },
+      ],
+    },
+    inputSchema: SessionsSpawnProfilesListInputSchema,
+  },
+  {
+    id: 'sessions.spawn.connected_services.list',
+    title: 'List spawn connected services',
+    description: 'List non-secret connected-service profile and group choices available for creating a new session.',
+    safety: 'safe',
+    approval: APPROVAL_RESULT_REQUIRED,
+    placements: ['voice_panel'],
+    prompting: { voiceHotPath: true },
+    bindings: { voiceClientToolName: 'listSpawnConnectedServices', mcpToolName: 'sessions_spawn_connected_services_list' },
+    examples: {
+      voice: { argsExample: '{"backendTargetKey":"agent:claude","includeUnavailable":false}' },
+    },
+    surfaces: {
+      ui_button: false,
+      ui_slash_command: false,
+      voice_tool: true,
+      voice_action_block: true,
+      session_agent: true,
+      mcp: true,
+      cli: true,
+    },
+    inputHints: {
+      title: 'List spawn connected services',
+      fields: [
+        { path: 'agentId', title: 'Agent id', widget: 'text' },
+        { path: 'backendTargetKey', title: 'Backend target key', widget: 'text' },
+        { path: 'includeUnavailable', title: 'Include unavailable', widget: 'toggle' },
+        { path: 'limit', title: 'Max results', widget: 'text' },
+      ],
+    },
+    inputSchema: SessionsSpawnConnectedServicesListInputSchema,
+  },
+  {
+    id: 'sessions.spawn.mcp_servers.preview',
+    title: 'Preview spawn MCP servers',
+    description: 'Preview the sanitized MCP server set that would be available to a new session.',
+    safety: 'safe',
+    approval: APPROVAL_RESULT_REQUIRED,
+    placements: ['voice_panel'],
+    prompting: { voiceHotPath: true },
+    bindings: { voiceClientToolName: 'previewSpawnMcpServers', mcpToolName: 'sessions_spawn_mcp_servers_preview' },
+    examples: {
+      voice: { argsExample: '{"agentId":"claude","machineId":"{{machineId}}","path":"{{path}}"}' },
+    },
+    surfaces: {
+      ui_button: false,
+      ui_slash_command: false,
+      voice_tool: true,
+      voice_action_block: true,
+      session_agent: true,
+      mcp: true,
+      cli: true,
+    },
+    inputHints: {
+      title: 'Preview spawn MCP servers',
+      fields: [
+        { path: 'agentId', title: 'Agent id', widget: 'text' },
+        { path: 'backendTargetKey', title: 'Backend target key', widget: 'text' },
+        { path: 'machineId', title: 'Machine id', widget: 'text' },
+        { path: 'serverId', title: 'Server id', widget: 'text' },
+        { path: 'path', title: 'Path', widget: 'text' },
+        { path: 'mcpSelection', title: 'MCP selection', widget: 'text' },
+      ],
+    },
+    inputSchema: SessionsSpawnMcpServersPreviewInputSchema,
   },
   {
     id: 'session.message.send',

@@ -7,4 +7,4 @@ export type HappierBuiltInToolDefinition = Readonly<{
 
 export type HappierBuiltInToolDispatchResult =
   | Readonly<{ ok: true; result: unknown }>
-  | Readonly<{ ok: false; errorCode: string; error: string; candidates?: string[] }>;
+  | Readonly<{ ok: false; errorCode: string; error: string; candidates?: string[]; details?: unknown }>;

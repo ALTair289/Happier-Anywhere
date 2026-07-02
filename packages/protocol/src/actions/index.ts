@@ -71,6 +71,13 @@ export {
   resolveActionToolExposureMode,
   type ActionToolExposureResolutionContext,
 } from './actionToolExposure.js';
+export {
+  resolveActionSurfaceAvailability,
+  type ActionSurfaceAvailability,
+  type ActionSurfaceAvailabilityReason,
+  type ActionSurfaceSettingsState,
+  type ResolveActionSurfaceAvailabilityArgs,
+} from './actionSurfaceAvailability.js';
 
 export {
   createActionExecutor,

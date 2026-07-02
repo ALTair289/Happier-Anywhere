@@ -1,14 +1,15 @@
 import {
   findActionInputFieldHint,
   filterResolvedActionOptions,
-  getActionSpecForCatalogSurface,
-  getSerializedActionSpecForSurface,
   searchSerializedActionSpecsForSurface,
   serializeActionFieldOptions,
+  serializeActionSpec,
 } from './actionCatalog.js';
 import { resolveActionApprovalRouting } from './actionApprovalPolicy.js';
+import { resolveActionOptionSourceRoute } from './actionOptionSources.js';
 import { resolveRequestedSessionModeId } from './sessionModeIds.js';
-import { ActionSurfaceSchema, getActionSpec, isActionSpecSurfacedOn, type ActionSpec, type ActionSurfaces } from './actionSpecs.js';
+import { ActionSurfaceSchema, getActionSpec, type ActionSpec, type ActionSurfaces, type SessionSpawnNewInput } from './actionSpecs.js';
+import { resolveActionSurfaceAvailability, type ActionSurfaceAvailability } from './actionSurfaceAvailability.js';
 import { resolveActionApprovalFlow } from './actionApprovalMetadata.js';
 import type { ActionId } from './actionIds.js';
 import type { ActionUiPlacement } from './actionUiPlacements.js';
@@ -16,7 +17,7 @@ import type { MemorySearchQueryV1, MemorySearchResultV1 } from '../memory/memory
 import type { MemoryWindowV1 } from '../memory/memoryWindow.js';
 import { ApprovalRequestOriginV1Schema, ApprovalRequestV1Schema, type ApprovalRequestOriginV1, type ApprovalRequestV1 } from '../approvals/approvalRequestV1.js';
 import type { PromptRegistryConfiguredSourceV1 } from '../promptLibrary/promptRegistriesV1.js';
-import { BackendTargetKeySchema, buildBackendTargetKey, parseBackendTargetKey, type BackendTargetRefV1 } from '../backendTargets/backendTargetRef.js';
+import { BackendTargetKeySchema, BackendTargetRefSchema, buildBackendTargetKey, parseBackendTargetKey, type BackendTargetRefV1 } from '../backendTargets/backendTargetRef.js';
 import type { SessionRollbackTarget } from '../sessionRollback.js';
 import {
   SessionHandoffWorkspaceTransferSchema,
@@ -27,10 +28,13 @@ import {
   normalizeSessionUsageLimitRecoveryOperationResultV1,
 } from '../sessionControl/contract.js';
 import type { ReviewStartInput } from '../reviews/reviewStart.js';
+import type { AcpConfigOptionOverridesV1 } from '../sessionMetadata/metadataOverridesV1.js';
+import type { ConnectedServiceBindingsV1 } from '../connect/connectedServiceBindings.js';
+import type { SessionMcpSelectionV1 } from '../mcpServers/sessionSelectionV1.js';
 
 export type ActionExecuteResult =
   | Readonly<{ ok: true; result: unknown }>
-  | Readonly<{ ok: false; errorCode: string; error: string }>;
+  | Readonly<{ ok: false; errorCode: string; error: string; details?: unknown }>;
 
 export type ActionExecutorContext = Readonly<{
   /**
@@ -104,13 +108,36 @@ export type ActionExecutorDeps = Readonly<{
   }>) => Promise<unknown>;
   sessionSpawnNew: (args: Readonly<{
     tag?: string;
+    tags?: readonly string[];
     agentId?: string;
+    backend?: string;
+    target?: string;
     modelId?: string;
     backendTargetKey?: string;
+    backendTarget?: BackendTargetRefV1;
     title?: string;
     path?: string;
+    directory?: string;
     host?: string;
+    machineId?: string;
+    prompt?: string;
+    initialPrompt?: string;
     initialMessage?: string;
+    permissionMode?: string;
+    agentModeId?: string;
+    sessionConfigOptionOverrides?: AcpConfigOptionOverridesV1;
+    configOptions?: Record<string, string | number | boolean | null>;
+    profileId?: string;
+    environmentVariables?: Record<string, string>;
+    connectedServices?: ConnectedServiceBindingsV1;
+    connectedServicesUpdatedAt?: number;
+    mcpSelection?: SessionMcpSelectionV1;
+    transcriptStorage?: 'persisted' | 'direct';
+    terminal?: SessionSpawnNewInput['terminal'];
+    windowsRemoteSessionLaunchMode?: 'hidden' | 'windows_terminal' | 'console';
+    windowsRemoteSessionConsole?: 'hidden' | 'visible';
+    windowsTerminalWindowName?: string;
+    surface?: keyof ActionSurfaces | null;
   }>) => Promise<unknown>;
   sessionSpawnPicker: (args: Readonly<{ tag?: string; agentId?: string; modelId?: string; initialMessage?: string }>) => Promise<unknown>;
 
@@ -121,6 +148,32 @@ export type ActionExecutorDeps = Readonly<{
   reviewEnginesList: (args: Readonly<{ sessionId: string; includeDisabled?: boolean }>) => Promise<unknown>;
   agentsBackendsList: (args: Readonly<{ includeDisabled?: boolean; limit?: number }>) => Promise<unknown>;
   agentsModelsList: (args: Readonly<{ agentId: string; machineId?: string; limit?: number; backendTargetKey?: string }>) => Promise<unknown>;
+  agentsConfigOptionsList?: (args: Readonly<{ agentId: string; machineId?: string; limit?: number; backendTargetKey?: string; modelId?: string }>) => Promise<unknown>;
+  agentsSessionModesList?: (args: Readonly<{ agentId: string; machineId?: string; limit?: number; backendTargetKey?: string }>) => Promise<unknown>;
+  sessionsSpawnProfilesList?: (args: Readonly<{
+    agentId?: string;
+    backendTargetKey?: string;
+    includeDisabled?: boolean;
+    limit?: number;
+  }>) => Promise<unknown>;
+  sessionsSpawnConnectedServicesList?: (args: Readonly<{
+    agentId?: string;
+    backendTargetKey?: string;
+    includeDisabled?: boolean;
+    includeUnavailable?: boolean;
+    limit?: number;
+  }>) => Promise<unknown>;
+  sessionsSpawnMcpServersPreview?: (args: Readonly<{
+    agentId?: string;
+    backendTargetKey?: string;
+    machineId?: string;
+    serverId?: string;
+    path?: string;
+    directory?: string;
+    mcpSelection?: SessionMcpSelectionV1;
+    selection?: SessionMcpSelectionV1;
+    limit?: number;
+  }>) => Promise<unknown>;
 
   // Session messaging (socket message event, server-scoped)
   sessionSendMessage: (args: Readonly<{
@@ -582,6 +635,142 @@ function normalizeExecutionBackendOptionValue(value: string): string {
   return buildBackendTargetKey({ kind: 'builtInAgent', agentId: value });
 }
 
+function normalizeSpawnTargetOptionAlias(value: string): string {
+  const trimmed = value.trim();
+  return trimmed === 'customAcp' ? trimmed : normalizeExecutionBackendOptionValue(trimmed);
+}
+
+type AgentInventoryRequest =
+  | Readonly<{
+      ok: true;
+      value: Readonly<{
+        agentId: string;
+        machineId?: string;
+        limit?: number;
+        backendTargetKey?: string;
+        modelId?: string;
+      }>;
+    }>
+  | Readonly<{ ok: false }>;
+
+type SpawnTargetSelection =
+  | Readonly<{
+      ok: true;
+      agentId?: string;
+      backendTargetKey?: string;
+    }>
+  | Readonly<{ ok: false }>;
+
+function resolveSpawnTargetSelection(input: Record<string, unknown>): SpawnTargetSelection {
+  const targetKeys: string[] = [];
+  const agentId = normalizeId(input.agentId);
+
+  for (const field of ['backend', 'target'] as const) {
+    const rawAlias = normalizeId(input[field]);
+    if (rawAlias) targetKeys.push(normalizeSpawnTargetOptionAlias(rawAlias));
+  }
+
+  const backendTargetKeyRaw = normalizeId(input.backendTargetKey);
+  if (backendTargetKeyRaw) {
+    const parsedKey = BackendTargetKeySchema.safeParse(backendTargetKeyRaw);
+    if (!parsedKey.success) return { ok: false };
+    targetKeys.push(parsedKey.data);
+  }
+
+  const backendTargetParsed = BackendTargetRefSchema.safeParse(input.backendTarget);
+  if (backendTargetParsed.success) {
+    targetKeys.push(buildBackendTargetKey(backendTargetParsed.data));
+  } else if (input.backendTarget !== undefined) {
+    return { ok: false };
+  }
+
+  const concreteTargetKeys = targetKeys.filter((targetKey) => targetKey !== 'customAcp');
+  const uniqueConcreteTargetKeys = [...new Set(concreteTargetKeys)];
+  if (uniqueConcreteTargetKeys.length > 1) return { ok: false };
+  const hasCustomAcpAlias = targetKeys.includes('customAcp');
+
+  const backendTargetKey = uniqueConcreteTargetKeys[0];
+  if ((agentId === 'customAcp' || hasCustomAcpAlias) && backendTargetKey?.startsWith('agent:')) return { ok: false };
+  if (hasCustomAcpAlias && agentId && agentId !== 'customAcp') return { ok: false };
+  if (!backendTargetKey) return { ok: true, ...((agentId || hasCustomAcpAlias) ? { agentId: agentId || 'customAcp' } : {}) };
+
+  const parsedTarget = parseBackendTargetKey(backendTargetKey);
+  const derivedAgentId = parsedTarget.kind === 'builtInAgent' ? parsedTarget.agentId : 'customAcp';
+  if (hasCustomAcpAlias && derivedAgentId !== 'customAcp') return { ok: false };
+  if (agentId && agentId !== derivedAgentId) return { ok: false };
+  return { ok: true, agentId: derivedAgentId, backendTargetKey };
+}
+
+function resolveAgentInventoryRequest(input: Record<string, unknown>): AgentInventoryRequest {
+  const targetSelection = resolveSpawnTargetSelection(input);
+  if (!targetSelection.ok) return { ok: false };
+  const resolvedAgentId = targetSelection.agentId;
+  const backendTargetKey = targetSelection.backendTargetKey;
+  if (resolvedAgentId === 'customAcp' && !backendTargetKey) {
+    return { ok: false };
+  }
+  if (!resolvedAgentId) {
+    return { ok: false };
+  }
+  const modelId = normalizeId(input.modelId);
+
+  return {
+    ok: true,
+    value: {
+      agentId: resolvedAgentId,
+      ...(input.machineId ? { machineId: String(input.machineId) } : {}),
+      ...(typeof input.limit === 'number' ? { limit: input.limit } : {}),
+      ...(backendTargetKey ? { backendTargetKey } : {}),
+      ...(modelId ? { modelId } : {}),
+    },
+  };
+}
+
+type SpawnDiscoveryRequest =
+  | Readonly<{
+      ok: true;
+      value: Readonly<{
+        agentId?: string;
+        backendTargetKey?: string;
+        machineId?: string;
+        serverId?: string;
+        path?: string;
+        directory?: string;
+        includeDisabled?: boolean;
+        includeUnavailable?: boolean;
+        limit?: number;
+        mcpSelection?: SessionMcpSelectionV1;
+        selection?: SessionMcpSelectionV1;
+      }>;
+    }>
+  | Readonly<{ ok: false }>;
+
+function resolveSpawnDiscoveryRequest(input: Record<string, unknown>): SpawnDiscoveryRequest {
+  const targetSelection = resolveSpawnTargetSelection(input);
+  if (!targetSelection.ok) return { ok: false };
+
+  const path = normalizeId(input.path);
+  const directory = normalizeId(input.directory);
+  if (path && directory && path !== directory) return { ok: false };
+
+  return {
+    ok: true,
+    value: {
+      ...(targetSelection.agentId ? { agentId: targetSelection.agentId } : {}),
+      ...(targetSelection.backendTargetKey ? { backendTargetKey: targetSelection.backendTargetKey } : {}),
+      ...(input.machineId ? { machineId: String(input.machineId) } : {}),
+      ...(input.serverId ? { serverId: String(input.serverId) } : {}),
+      ...(path ? { path } : {}),
+      ...(directory ? { directory } : {}),
+      ...(typeof input.includeDisabled === 'boolean' ? { includeDisabled: input.includeDisabled } : {}),
+      ...(typeof input.includeUnavailable === 'boolean' ? { includeUnavailable: input.includeUnavailable } : {}),
+      ...(typeof input.limit === 'number' ? { limit: input.limit } : {}),
+      ...((input.mcpSelection) ? { mcpSelection: input.mcpSelection as SessionMcpSelectionV1 } : {}),
+      ...((input.selection) ? { selection: input.selection as SessionMcpSelectionV1 } : {}),
+    },
+  };
+}
+
 async function resolveDynamicActionOptions(params: Readonly<{
   deps: ActionExecutorDeps;
   ctx: ActionExecutorContext;
@@ -589,8 +778,12 @@ async function resolveDynamicActionOptions(params: Readonly<{
   input: Record<string, unknown>;
 }>): Promise<ActionExecuteResult> {
   const { deps, ctx, optionsSourceId, input } = params;
+  const route = resolveActionOptionSourceRoute(optionsSourceId);
+  if (!route) {
+    return { ok: false, errorCode: 'options_source_not_supported', error: 'options_source_not_supported' };
+  }
 
-  if (optionsSourceId === 'execution.backends.enabled') {
+  if (route.kind === 'executionBackends') {
     const result = await deps.agentsBackendsList({
       ...(typeof input.includeDisabled === 'boolean' ? { includeDisabled: input.includeDisabled } : { includeDisabled: false }),
       ...(typeof input.limit === 'number' ? { limit: input.limit } : {}),
@@ -604,7 +797,7 @@ async function resolveDynamicActionOptions(params: Readonly<{
     };
   }
 
-  if (optionsSourceId === 'review.engines.available') {
+  if (route.kind === 'reviewEngines') {
     const sessionId = resolveSessionIdFromInput(input, ctx);
     if (!sessionId) return { ok: false, errorCode: 'session_not_selected', error: 'session_not_selected' };
     const result = await deps.reviewEnginesList({
@@ -614,10 +807,56 @@ async function resolveDynamicActionOptions(params: Readonly<{
     return { ok: true, result: normalizeResolvedOptions(result) };
   }
 
-  if (optionsSourceId === 'session.modes.available') {
+  if (route.kind === 'sessionModes') {
     const sessionId = resolveSessionIdFromInput(input, ctx);
     if (!sessionId) return { ok: false, errorCode: 'session_not_selected', error: 'session_not_selected' };
     const result = await deps.sessionModesList({ sessionId });
+    return { ok: true, result: normalizeResolvedOptions(result) };
+  }
+
+  if (route.kind === 'agentInventory') {
+    const handler = deps[route.depsKey];
+    if (!handler) {
+      return {
+        ok: false,
+        errorCode: 'unsupported_action',
+        error: `unsupported_action:${route.unsupportedActionId}`,
+      };
+    }
+    const resolved = resolveAgentInventoryRequest(input);
+    if (!resolved.ok) return { ok: false, errorCode: 'invalid_parameters', error: 'invalid_parameters' };
+    const result = await handler(resolved.value);
+    return { ok: true, result: normalizeResolvedOptions(result) };
+  }
+
+  if (route.kind === 'localInventory') {
+    const handler = deps[route.depsKey];
+    if (!handler) {
+      return {
+        ok: false,
+        errorCode: 'unsupported_action',
+        error: `unsupported_action:${route.unsupportedActionId}`,
+      };
+    }
+    const result = await handler({
+      ...(input.machineId ? { machineId: String(input.machineId) } : {}),
+      ...(typeof input.limit === 'number' ? { limit: input.limit } : {}),
+    } as never);
+    return { ok: true, result: normalizeResolvedOptions(result) };
+  }
+
+  if (route.kind === 'spawnDiscovery') {
+    const handler = deps[route.depsKey];
+    if (!handler) {
+      return {
+        ok: false,
+        errorCode: 'unsupported_action',
+        error: `unsupported_action:${route.unsupportedActionId}`,
+      };
+    }
+    const resolved = resolveSpawnDiscoveryRequest(input);
+    if (!resolved.ok) return { ok: false, errorCode: 'invalid_parameters', error: 'invalid_parameters' };
+    const result = await handler(resolved.value as never);
     return { ok: true, result: normalizeResolvedOptions(result) };
   }
 
@@ -788,9 +1027,19 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
 }> {
   const liveBlockingApprovalArtifactIds = new Set<string>();
   const policyAllowsAction = deps.isActionEnabled ?? ((_id: ActionId, _ctx: ActionExecutorContext) => true);
-  const isActionEnabledByPolicy = (spec: ActionSpec, ctx: ActionExecutorContext) => policyAllowsAction(spec.id, ctx);
-  const isActionEnabledBySurface = (spec: ActionSpec, ctx: ActionExecutorContext) => isActionSpecSurfacedOn(spec, ctx.surface);
-  const isActionEnabled = (spec: ActionSpec, ctx: ActionExecutorContext) => isActionEnabledBySurface(spec, ctx) && isActionEnabledByPolicy(spec, ctx);
+  const resolveAvailability = (spec: ActionSpec, ctx: ActionExecutorContext) =>
+    resolveActionSurfaceAvailability({
+      actionId: spec.id as ActionId,
+      surface: ctx.surface ?? null,
+      isActionEnabled: (id) => policyAllowsAction(id, ctx),
+    });
+  const isActionEnabled = (spec: ActionSpec, ctx: ActionExecutorContext) => resolveAvailability(spec, ctx).available;
+  const actionDisabled = (availability: ActionSurfaceAvailability): ActionExecuteResult => ({
+    ok: false,
+    errorCode: 'action_disabled',
+    error: 'action_disabled',
+    details: availability,
+  });
 
   async function executeApprovedActionForRequest(args: Readonly<{
     artifactId: string;
@@ -863,6 +1112,8 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
     const ctx: ActionExecutorContext = context ?? {};
 
     const spec = getActionSpec(actionId);
+    const availability = resolveAvailability(spec, ctx);
+    if (!availability.available) return actionDisabled(availability);
     const approvalRouting = resolveActionApprovalRouting({
       actionId,
       spec,
@@ -870,9 +1121,6 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
       requiredByPolicy: ctx.bypassApprovals ? false : deps.isActionApprovalRequired?.(actionId, ctx) === true,
     });
     const isApprovalAction = isApprovalActionId(actionId);
-    if (!isActionEnabled(spec, ctx)) {
-      return { ok: false, errorCode: 'action_disabled', error: 'action_disabled' };
-    }
     const parsed = (spec.inputSchema as any).safeParse(input ?? {});
     if (!parsed.success) {
       return { ok: false, errorCode: 'invalid_parameters', error: 'invalid_parameters' };
@@ -1103,15 +1351,10 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
 
         if (actionId === 'action.spec.get') {
           try {
-            const requested = getSerializedActionSpecForSurface({
-              id: String((parsed.data as any).id) as ActionId,
-              surface: ctx.surface ?? null,
-              isActionEnabled: (id) => isActionEnabled(getActionSpec(id), ctx),
-            });
-            if (!requested) {
-              return { ok: false, errorCode: 'action_disabled', error: 'action_disabled' };
-            }
-            return { ok: true, result: { actionSpec: requested } };
+            const requestedSpec = getActionSpec(String((parsed.data as any).id) as ActionId);
+            const requestedAvailability = resolveAvailability(requestedSpec, ctx);
+            if (!requestedAvailability.available) return actionDisabled(requestedAvailability);
+            return { ok: true, result: { actionSpec: serializeActionSpec(requestedSpec) } };
           } catch {
             return { ok: false, errorCode: 'invalid_parameters', error: 'invalid_parameters' };
           }
@@ -1129,14 +1372,9 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
             } catch {
               return { ok: false, errorCode: 'invalid_parameters', error: 'invalid_parameters' };
             }
-            const requestedSpec = getActionSpecForCatalogSurface({
-              id: actionIdRaw as ActionId,
-              surface: ctx.surface ?? null,
-              isActionEnabled: (id) => isActionEnabled(getActionSpec(id), ctx),
-            });
-            if (!requestedSpec) {
-              return { ok: false, errorCode: 'action_disabled', error: 'action_disabled' };
-            }
+            const requestedSpec = getActionSpec(actionIdRaw as ActionId);
+            const requestedAvailability = resolveAvailability(requestedSpec, ctx);
+            if (!requestedAvailability.available) return actionDisabled(requestedAvailability);
             const field = findActionInputFieldHint(requestedSpec, fieldPath);
             if (!field) {
               return { ok: false, errorCode: 'invalid_parameters', error: 'invalid_parameters' };
@@ -1318,15 +1556,10 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
         }
 
         if (actionId === 'session.spawn_new') {
+          const spawnInput = parsed.data as SessionSpawnNewInput;
           const res = await deps.sessionSpawnNew({
-            ...(((parsed.data as any).tag) ? { tag: String((parsed.data as any).tag) } : {}),
-            ...(((parsed.data as any).agentId) ? { agentId: String((parsed.data as any).agentId) } : {}),
-            ...(((parsed.data as any).modelId) ? { modelId: String((parsed.data as any).modelId) } : {}),
-            ...(((parsed.data as any).backendTargetKey) ? { backendTargetKey: String((parsed.data as any).backendTargetKey) } : {}),
-            ...(((parsed.data as any).title) ? { title: String((parsed.data as any).title) } : {}),
-            ...(((parsed.data as any).path) ? { path: String((parsed.data as any).path) } : {}),
-            ...(((parsed.data as any).host) ? { host: String((parsed.data as any).host) } : {}),
-            ...(((parsed.data as any).initialMessage) ? { initialMessage: String((parsed.data as any).initialMessage) } : {}),
+            ...spawnInput,
+            surface: ctx.surface ?? null,
           });
           return { ok: true, result: res };
         }
@@ -1382,28 +1615,49 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
         }
 
         if (actionId === 'agents.models.list') {
-          const backendTargetKey = normalizeId((parsed.data as any).backendTargetKey);
-          let resolvedAgentId = normalizeId((parsed.data as any).agentId);
-          if (backendTargetKey) {
-            const parsedTarget = parseBackendTargetKey(backendTargetKey);
-            const derivedAgentId = parsedTarget.kind === 'builtInAgent' ? parsedTarget.agentId : 'customAcp';
-            if (resolvedAgentId && resolvedAgentId !== derivedAgentId) {
-              return { ok: false, errorCode: 'invalid_parameters', error: 'invalid_parameters' };
-            }
-            resolvedAgentId = derivedAgentId;
-          }
-          if (resolvedAgentId === 'customAcp' && !backendTargetKey) {
-            return { ok: false, errorCode: 'invalid_parameters', error: 'invalid_parameters' };
-          }
-          if (!resolvedAgentId) {
-            return { ok: false, errorCode: 'invalid_parameters', error: 'invalid_parameters' };
-          }
-          const res = await deps.agentsModelsList({
-            agentId: resolvedAgentId,
-            ...(((parsed.data as any).machineId) ? { machineId: String((parsed.data as any).machineId) } : {}),
-            ...(typeof (parsed.data as any).limit === 'number' ? { limit: (parsed.data as any).limit } : {}),
-            ...(backendTargetKey ? { backendTargetKey } : {}),
-          });
+          const resolved = resolveAgentInventoryRequest(parsed.data as Record<string, unknown>);
+          if (!resolved.ok) return { ok: false, errorCode: 'invalid_parameters', error: 'invalid_parameters' };
+          const res = await deps.agentsModelsList(resolved.value);
+          return { ok: true, result: res };
+        }
+
+        if (actionId === 'agents.session_modes.list') {
+          if (!deps.agentsSessionModesList) return { ok: false, errorCode: 'unsupported_action', error: 'unsupported_action:agents.session_modes.list' };
+          const resolved = resolveAgentInventoryRequest(parsed.data as Record<string, unknown>);
+          if (!resolved.ok) return { ok: false, errorCode: 'invalid_parameters', error: 'invalid_parameters' };
+          const res = await deps.agentsSessionModesList(resolved.value);
+          return { ok: true, result: res };
+        }
+
+        if (actionId === 'agents.config_options.list') {
+          if (!deps.agentsConfigOptionsList) return { ok: false, errorCode: 'unsupported_action', error: 'unsupported_action:agents.config_options.list' };
+          const resolved = resolveAgentInventoryRequest(parsed.data as Record<string, unknown>);
+          if (!resolved.ok) return { ok: false, errorCode: 'invalid_parameters', error: 'invalid_parameters' };
+          const res = await deps.agentsConfigOptionsList(resolved.value);
+          return { ok: true, result: res };
+        }
+
+        if (actionId === 'sessions.spawn.profiles.list') {
+          if (!deps.sessionsSpawnProfilesList) return { ok: false, errorCode: 'unsupported_action', error: 'unsupported_action:sessions.spawn.profiles.list' };
+          const resolved = resolveSpawnDiscoveryRequest(parsed.data as Record<string, unknown>);
+          if (!resolved.ok) return { ok: false, errorCode: 'invalid_parameters', error: 'invalid_parameters' };
+          const res = await deps.sessionsSpawnProfilesList(resolved.value);
+          return { ok: true, result: res };
+        }
+
+        if (actionId === 'sessions.spawn.connected_services.list') {
+          if (!deps.sessionsSpawnConnectedServicesList) return { ok: false, errorCode: 'unsupported_action', error: 'unsupported_action:sessions.spawn.connected_services.list' };
+          const resolved = resolveSpawnDiscoveryRequest(parsed.data as Record<string, unknown>);
+          if (!resolved.ok) return { ok: false, errorCode: 'invalid_parameters', error: 'invalid_parameters' };
+          const res = await deps.sessionsSpawnConnectedServicesList(resolved.value);
+          return { ok: true, result: res };
+        }
+
+        if (actionId === 'sessions.spawn.mcp_servers.preview') {
+          if (!deps.sessionsSpawnMcpServersPreview) return { ok: false, errorCode: 'unsupported_action', error: 'unsupported_action:sessions.spawn.mcp_servers.preview' };
+          const resolved = resolveSpawnDiscoveryRequest(parsed.data as Record<string, unknown>);
+          if (!resolved.ok) return { ok: false, errorCode: 'invalid_parameters', error: 'invalid_parameters' };
+          const res = await deps.sessionsSpawnMcpServersPreview(resolved.value);
           return { ok: true, result: res };
         }
 

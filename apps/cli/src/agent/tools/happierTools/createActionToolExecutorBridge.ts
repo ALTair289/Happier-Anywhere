@@ -9,7 +9,7 @@ import { normalizeExecutionRunToolResult } from './normalizeExecutionRunToolResu
 
 type ActionExecutorResult = Readonly<
   | { ok: true; result: unknown }
-  | { ok: false; errorCode: string; error: string }
+  | { ok: false; errorCode: string; error: string; details?: unknown }
 >;
 
 type ActionExecutorLike = Readonly<{
@@ -30,7 +30,7 @@ export type ActionToolExecutionOptions = Readonly<{
 
 type ActionToolBridgeResult =
   | Readonly<{ ok: true; result: unknown }>
-  | Readonly<{ ok: false; errorCode: string; error: string }>;
+  | Readonly<{ ok: false; errorCode: string; error: string; details?: unknown }>;
 
 type DynamicActionOptionsResult = Readonly<{
   actionId: ActionId | null;
@@ -41,12 +41,17 @@ type DynamicActionOptionsResult = Readonly<{
 
 type DynamicActionOptionsBridgeResult =
   | Readonly<{ ok: true; result: DynamicActionOptionsResult }>
-  | Readonly<{ ok: false; errorCode: string; error: string }>;
+  | Readonly<{ ok: false; errorCode: string; error: string; details?: unknown }>;
 
 function normalizeActionExecutorResult(result: ActionExecutorResult): ActionToolBridgeResult {
   return result.ok
     ? { ok: true, result: result.result }
-    : { ok: false, errorCode: result.errorCode, error: result.error };
+    : {
+        ok: false,
+        errorCode: result.errorCode,
+        error: result.error,
+        ...(result.details === undefined ? {} : { details: result.details }),
+      };
 }
 
 function normalizeActionToolResult(actionId: ActionId, result: ActionExecutorResult): ActionToolBridgeResult {
@@ -58,7 +63,7 @@ function normalizeActionToolResult(actionId: ActionId, result: ActionExecutorRes
   }
 
   if (!result.ok) {
-    return { ok: false, errorCode: result.errorCode, error: result.error };
+    return normalizeActionExecutorResult(result);
   }
 
   return normalizeExecutionRunToolResult(result.result as Parameters<typeof normalizeExecutionRunToolResult>[0]);
@@ -82,6 +87,7 @@ export function createActionToolExecutorBridge(params: Readonly<{
   isActionEnabled?: (id: ActionId) => boolean;
   surface?: 'mcp' | 'cli' | 'session_agent';
   actionsSettings?: ActionsSettingsV1 | null;
+  getActionsSettings?: (() => ActionsSettingsV1 | null) | null;
 }>): Readonly<{
   executeActionByToolName: (toolName: string, toolArgs: unknown, defaultSessionId: string, options?: ActionToolExecutionOptions) => Promise<ActionToolBridgeResult>;
   resolveActionOptions: (args: Readonly<{
@@ -96,11 +102,7 @@ export function createActionToolExecutorBridge(params: Readonly<{
 }> {
   const isActionEnabled = params.isActionEnabled ?? (() => true);
   const surface = params.surface ?? 'session_agent';
-  const actionToolNameToId = createActionToolNameToIdMap({
-    surface,
-    isActionEnabled,
-    actionsSettings: params.actionsSettings ?? null,
-  });
+  const readActionsSettings = () => params.getActionsSettings?.() ?? params.actionsSettings ?? null;
 
   return {
     executeActionByToolName: async (toolName, toolArgs, defaultSessionId, options) => {
@@ -123,6 +125,11 @@ export function createActionToolExecutorBridge(params: Readonly<{
         ));
       }
 
+      const actionToolNameToId = createActionToolNameToIdMap({
+        surface,
+        isActionEnabled,
+        actionsSettings: readActionsSettings(),
+      });
       const actionId = actionToolNameToId.get(toolName);
       if (!actionId) {
         return { ok: false, errorCode: 'unknown_tool', error: `Unknown action-backed tool: ${toolName}` };
@@ -149,7 +156,12 @@ export function createActionToolExecutorBridge(params: Readonly<{
         { defaultSessionId, surface },
       );
       if (!result.ok) {
-        return { ok: false, errorCode: result.errorCode, error: result.error };
+        return {
+          ok: false,
+          errorCode: result.errorCode,
+          error: result.error,
+          ...(result.details === undefined ? {} : { details: result.details }),
+        };
       }
 
       const payload = result.result;

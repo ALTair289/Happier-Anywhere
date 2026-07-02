@@ -93,6 +93,30 @@ describe('sessionControl contract exports', () => {
     expect(summaryParsed.success).toBe(true);
   });
 
+  it('declares minimal runtime activity projection fields on session summaries', () => {
+    const summaryShape = (protocol as any).SessionSummarySchema.shape;
+    expect(typeof summaryShape.runtimeActivityActiveCount?.safeParse).toBe('function');
+    expect(typeof summaryShape.runtimeActivityObservedAt?.safeParse).toBe('function');
+    expect(typeof summaryShape.runtimeActivityExpiresAt?.safeParse).toBe('function');
+    expect(typeof summaryShape.runtimeActivitySourceClass?.safeParse).toBe('function');
+
+    const summaryParsed = (protocol as any).SessionSummarySchema.safeParse({
+      id: 'sess_runtime_activity',
+      createdAt: 1,
+      updatedAt: 2,
+      active: false,
+      activeAt: 0,
+      encryption: { type: 'dataKey' },
+      runtimeActivityActiveCount: 2,
+      runtimeActivityObservedAt: 1_000,
+      runtimeActivityExpiresAt: 2_000,
+      runtimeActivitySourceClass: 'provider_detached_task',
+    });
+    expect(summaryParsed.success).toBe(true);
+    expect(summaryParsed.data.runtimeActivityActiveCount).toBe(2);
+    expect(summaryParsed.data.runtimeActivitySourceClass).toBe('provider_detached_task');
+  });
+
   it('exports and validates session turn schemas', () => {
     expect(typeof (protocol as any).SessionTurnMutationV1Schema?.safeParse).toBe('function');
     expect(typeof (protocol as any).SessionTurnsProjectionV1Schema?.safeParse).toBe('function');
@@ -454,6 +478,10 @@ describe('sessionControl contract exports', () => {
       latestTurnStatus: 'failed',
       latestTurnStatusObservedAt: 456,
       lastRuntimeIssue: runtimeIssue,
+      runtimeActivityActiveCount: 2,
+      runtimeActivityObservedAt: 1_000,
+      runtimeActivityExpiresAt: 2_000,
+      runtimeActivitySourceClass: 'provider_detached_task',
     });
 
     expect(parsed.success).toBe(true);
@@ -491,6 +519,25 @@ describe('sessionControl contract exports', () => {
       thinkingAt: -1,
     });
     expect(invalidAttentionProjectionParsed.success).toBe(false);
+
+    const invalidRuntimeActivityParsed = (protocol as any).V2SessionRecordSchema.safeParse({
+      id: 'sess_123',
+      seq: 7,
+      createdAt: 1,
+      updatedAt: 2,
+      active: true,
+      activeAt: 2,
+      metadata: '{}',
+      metadataVersion: 1,
+      agentState: null,
+      agentStateVersion: 1,
+      dataEncryptionKey: null,
+      runtimeActivityActiveCount: 1,
+      runtimeActivityObservedAt: 1_000,
+      runtimeActivityExpiresAt: -1,
+      runtimeActivitySourceClass: 'provider_detached_task',
+    });
+    expect(invalidRuntimeActivityParsed.success).toBe(false);
 
     const invalidActivityParsed = (protocol as any).V2SessionRecordSchema.safeParse({
       id: 'sess_123',
@@ -698,6 +745,29 @@ describe('sessionControl contract exports', () => {
     expect((protocol as any).isHiddenSystemSession({ metadata: null })).toBe(false);
     expect((protocol as any).isHiddenSystemSession({ metadata: { systemSessionV1: { v: 1, key: 'carrier' } } })).toBe(false);
     expect((protocol as any).isHiddenSystemSession({ metadata: { systemSessionV1: { v: 1, key: 'carrier', hidden: true } } })).toBe(true);
+  });
+
+  it('drops legacy connected-service quota refs from parsed session metadata while preserving provider-account usage refs', () => {
+    const parsed = (protocol as any).SessionMetadataSchema.safeParse({
+      connectedServiceQuotaRefsV1: {
+        v: 1,
+        refs: [{ v: 1, serviceId: 'openai-codex', profileId: 'work' }],
+        updatedAtMs: 123,
+      },
+      providerAccountUsageRefsV1: {
+        v: 1,
+        recordIds: ['paug_v1_McZJ2eL8Y7kqW-CJ0J0vNuQ7cQmMMn9M2f2KqGm2jQ0'],
+        updatedAtMs: 456,
+      },
+    });
+
+    expect(parsed.success).toBe(true);
+    expect(parsed.data.providerAccountUsageRefsV1).toEqual({
+      v: 1,
+      recordIds: ['paug_v1_McZJ2eL8Y7kqW-CJ0J0vNuQ7cQmMMn9M2f2KqGm2jQ0'],
+      updatedAtMs: 456,
+    });
+    expect('connectedServiceQuotaRefsV1' in parsed.data).toBe(false);
   });
 
   it('encodes and decodes v2 session list cursors', () => {

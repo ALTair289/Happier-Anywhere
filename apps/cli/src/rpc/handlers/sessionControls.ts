@@ -38,6 +38,7 @@ import {
 
 import type { Metadata } from '@/api/types';
 import type { RpcHandlerRegistrar } from '@/api/rpc/types';
+import type { SessionPendingQueueMaterializeNextResponse } from './sessionPendingQueueMaterializeNext';
 
 export type SessionRuntimeControls = {
   refreshGoal?: () => unknown;
@@ -59,6 +60,9 @@ export type SessionRuntimeControls = {
   readConnectedServiceRuntimeIdentity?: (
     request: Readonly<SessionConnectedServiceAuthReadRuntimeIdentityRequestV1>,
   ) => Promise<unknown> | unknown;
+  materializeNextPendingMessageSafely?: (
+    request?: Readonly<{ reconcileWhenEmpty?: 'force' | 'throttled' | 'skip' }>,
+  ) => Promise<SessionPendingQueueMaterializeNextResponse> | SessionPendingQueueMaterializeNextResponse;
   enableUsageLimitWaitResume?: (request: Readonly<{
     sessionId: string;
     issueFingerprint?: string;

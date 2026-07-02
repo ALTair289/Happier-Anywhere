@@ -24,6 +24,11 @@ function createDeps(): ActionExecutorDeps {
     reviewEnginesList: vi.fn(async () => ({ items: [] })),
     agentsBackendsList: vi.fn(async () => ({ items: [] })),
     agentsModelsList: vi.fn(async () => ({ items: [] })),
+    agentsConfigOptionsList: vi.fn(async () => ({ items: [] })),
+    agentsSessionModesList: vi.fn(async () => ({ items: [] })),
+    sessionsSpawnProfilesList: vi.fn(async () => ({ items: [] })),
+    sessionsSpawnConnectedServicesList: vi.fn(async () => ({ items: [] })),
+    sessionsSpawnMcpServersPreview: vi.fn(async () => ({ ok: true, builtIn: [], managed: [], detected: [] })),
 
     sessionSendMessage: vi.fn(async () => ({})),
     sessionPermissionRespond: vi.fn(async () => ({})),
@@ -176,6 +181,7 @@ describe('createActionExecutor (inventory/discovery)', () => {
       path: '/repo/project',
       host: 'leeroy-mbp',
       tag: 't',
+      surface: null,
     });
   });
 
@@ -185,7 +191,138 @@ describe('createActionExecutor (inventory/discovery)', () => {
 
     const res = await executor.execute('session.spawn_new', { agentId: 'codex', modelId: 'gpt-5' });
     expect(res.ok).toBe(true);
-    expect(deps.sessionSpawnNew).toHaveBeenCalledWith({ agentId: 'codex', modelId: 'gpt-5' });
+    expect(deps.sessionSpawnNew).toHaveBeenCalledWith({ agentId: 'codex', modelId: 'gpt-5', surface: null });
+  });
+
+  it('forwards rich session.spawn_new fields without provider-specific core fields', async () => {
+    const deps = createDeps();
+    const executor = createActionExecutor(deps);
+
+    const res = await executor.execute('session.spawn_new', {
+      backendTargetKey: 'agent:claude',
+      permissionMode: 'acceptEdits',
+      agentModeId: 'plan',
+      sessionConfigOptionOverrides: {
+        v: 1,
+        updatedAt: 10,
+        overrides: {
+          reasoning_effort: { updatedAt: 10, value: 'xhigh' },
+          ultracode: { updatedAt: 10, value: true },
+        },
+      },
+      profileId: 'profile-1',
+      environmentVariables: { FEATURE_FLAG: 'enabled' },
+      mcpSelection: {
+        v: 1,
+        managedServersEnabled: false,
+        forceIncludeServerIds: ['repo-tools'],
+        forceExcludeServerIds: [],
+      },
+      transcriptStorage: 'persisted',
+    });
+
+    expect(res.ok).toBe(true);
+    expect(deps.sessionSpawnNew).toHaveBeenCalledWith(expect.objectContaining({
+      backendTargetKey: 'agent:claude',
+      permissionMode: 'acceptEdits',
+      agentModeId: 'plan',
+      sessionConfigOptionOverrides: {
+        v: 1,
+        updatedAt: 10,
+        overrides: {
+          reasoning_effort: { updatedAt: 10, value: 'xhigh' },
+          ultracode: { updatedAt: 10, value: true },
+        },
+      },
+      profileId: 'profile-1',
+      environmentVariables: { FEATURE_FLAG: 'enabled' },
+      mcpSelection: {
+        v: 1,
+        managedServersEnabled: false,
+        forceIncludeServerIds: ['repo-tools'],
+        forceExcludeServerIds: [],
+      },
+      transcriptStorage: 'persisted',
+      surface: null,
+    }));
+  });
+
+  it('forwards public session.spawn_new aliases and rich runtime fields to deps.sessionSpawnNew', async () => {
+    const deps = createDeps();
+    const executor = createActionExecutor(deps);
+
+    const res = await executor.execute('session.spawn_new', {
+      directory: '/repo/project',
+      prompt: 'Inspect this workspace.',
+      initialPrompt: 'Inspect this workspace.',
+      initialMessage: 'Inspect this workspace.',
+      machineId: 'machine-1',
+      tags: ['qa', 'spawn'],
+      backend: 'agent:claude',
+      target: 'agent:claude',
+      backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+      configOptions: { reasoning_effort: 'xhigh', ultracode: true },
+      terminal: {
+        mode: 'tmux',
+        tmux: { sessionName: 'spawn-qa', isolated: true, tmpDir: null },
+      },
+      windowsRemoteSessionLaunchMode: 'hidden',
+      windowsRemoteSessionConsole: 'hidden',
+      windowsTerminalWindowName: 'Happier',
+    });
+
+    expect(res.ok).toBe(true);
+    expect(deps.sessionSpawnNew).toHaveBeenCalledWith(expect.objectContaining({
+      directory: '/repo/project',
+      prompt: 'Inspect this workspace.',
+      initialPrompt: 'Inspect this workspace.',
+      initialMessage: 'Inspect this workspace.',
+      machineId: 'machine-1',
+      tags: ['qa', 'spawn'],
+      backend: 'agent:claude',
+      target: 'agent:claude',
+      backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+      configOptions: { reasoning_effort: 'xhigh', ultracode: true },
+      terminal: {
+        mode: 'tmux',
+        tmux: { sessionName: 'spawn-qa', isolated: true, tmpDir: null },
+      },
+      windowsRemoteSessionLaunchMode: 'hidden',
+      windowsRemoteSessionConsole: 'hidden',
+      windowsTerminalWindowName: 'Happier',
+      surface: null,
+    }));
+  });
+
+  it('rejects internal or unknown session.spawn_new input before deps.sessionSpawnNew runs', async () => {
+    const deps = createDeps();
+    const executor = createActionExecutor(deps);
+
+    const internal = await executor.execute('session.spawn_new', {
+      initialMessage: 'Hello',
+      spawnNonce: 'nonce-public-bypass',
+    });
+    const unknown = await executor.execute('session.spawn_new', {
+      initialMessage: 'Hello',
+      unsupportedSpawnField: true,
+    });
+
+    expect(internal).toEqual({ ok: false, errorCode: 'invalid_parameters', error: 'invalid_parameters' });
+    expect(unknown).toEqual({ ok: false, errorCode: 'invalid_parameters', error: 'invalid_parameters' });
+    expect(deps.sessionSpawnNew).not.toHaveBeenCalled();
+  });
+
+  it('rejects conflicting session.spawn_new target aliases before deps.sessionSpawnNew runs', async () => {
+    const deps = createDeps();
+    const executor = createActionExecutor(deps);
+
+    const res = await executor.execute('session.spawn_new', {
+      agentId: 'codex',
+      backendTargetKey: 'agent:claude',
+    });
+
+    expect(res).toEqual({ ok: false, errorCode: 'invalid_parameters', error: 'invalid_parameters' });
+    expect(deps.sessionSpawnNew).not.toHaveBeenCalled();
   });
 
   it('routes paths.list_recent to deps.pathsListRecent', async () => {
@@ -195,6 +332,160 @@ describe('createActionExecutor (inventory/discovery)', () => {
     const res = await executor.execute('paths.list_recent', { machineId: 'm1', limit: 3 });
     expect(res.ok).toBe(true);
     expect(deps.pathsListRecent).toHaveBeenCalledWith({ machineId: 'm1', limit: 3 });
+  });
+
+  it('routes spawn profile, connected-service, and MCP discovery actions to deps', async () => {
+    const deps = createDeps();
+    const executor = createActionExecutor(deps);
+
+    const profiles = await executor.execute('sessions.spawn.profiles.list' as any, {
+      agentId: 'claude',
+      backendTargetKey: 'agent:claude',
+      limit: 5,
+    });
+    const connectedServices = await executor.execute('sessions.spawn.connected_services.list' as any, {
+      agentId: 'claude',
+      backendTargetKey: 'agent:claude',
+      includeDisabled: true,
+      limit: 10,
+    });
+    const mcp = await executor.execute('sessions.spawn.mcp_servers.preview' as any, {
+      agentId: 'claude',
+      machineId: 'machine-1',
+      path: '/repo',
+      mcpSelection: {
+        v: 1,
+        managedServersEnabled: true,
+        forceIncludeServerIds: [],
+        forceExcludeServerIds: [],
+      },
+    });
+
+    expect(profiles.ok).toBe(true);
+    expect(connectedServices.ok).toBe(true);
+    expect(mcp.ok).toBe(true);
+    expect(deps.sessionsSpawnProfilesList).toHaveBeenCalledWith({
+      agentId: 'claude',
+      backendTargetKey: 'agent:claude',
+      limit: 5,
+    });
+    expect(deps.sessionsSpawnConnectedServicesList).toHaveBeenCalledWith({
+      agentId: 'claude',
+      backendTargetKey: 'agent:claude',
+      includeDisabled: true,
+      limit: 10,
+    });
+    expect(deps.sessionsSpawnMcpServersPreview).toHaveBeenCalledWith({
+      agentId: 'claude',
+      machineId: 'machine-1',
+      path: '/repo',
+      mcpSelection: {
+        v: 1,
+        managedServersEnabled: true,
+        forceIncludeServerIds: [],
+        forceExcludeServerIds: [],
+      },
+    });
+  });
+
+  it('routes spawn discovery option sources through matching list deps', async () => {
+    const deps = createDeps();
+    const executor = createActionExecutor(deps);
+
+    await executor.execute('action.options.resolve', {
+      actionId: 'session.spawn_new',
+      fieldPath: 'profileId',
+      optionsSourceId: 'sessions.spawn.profiles.available',
+      agentId: 'claude',
+      backendTargetKey: 'agent:claude',
+      limit: 3,
+    });
+    await executor.execute('action.options.resolve', {
+      actionId: 'session.spawn_new',
+      fieldPath: 'connectedServices',
+      optionsSourceId: 'sessions.spawn.connected_services.available',
+      agentId: 'claude',
+      backendTargetKey: 'agent:claude',
+      includeDisabled: false,
+    });
+    await executor.execute('action.options.resolve', {
+      actionId: 'session.spawn_new',
+      fieldPath: 'mcpSelection',
+      optionsSourceId: 'sessions.spawn.mcp_servers.preview',
+      agentId: 'claude',
+      machineId: 'machine-1',
+      path: '/repo',
+    });
+
+    expect(deps.sessionsSpawnProfilesList).toHaveBeenCalledWith({
+      agentId: 'claude',
+      backendTargetKey: 'agent:claude',
+      limit: 3,
+    });
+    expect(deps.sessionsSpawnConnectedServicesList).toHaveBeenCalledWith({
+      agentId: 'claude',
+      backendTargetKey: 'agent:claude',
+      includeDisabled: false,
+    });
+    expect(deps.sessionsSpawnMcpServersPreview).toHaveBeenCalledWith({
+      agentId: 'claude',
+      machineId: 'machine-1',
+      path: '/repo',
+    });
+  });
+
+  it('resolves spawn option sources from public target aliases accepted by session.spawn_new', async () => {
+    const deps = createDeps();
+    const executor = createActionExecutor(deps);
+
+    await executor.execute('action.options.resolve', {
+      actionId: 'session.spawn_new',
+      fieldPath: 'modelId',
+      target: 'agent:claude',
+      limit: 5,
+    });
+    await executor.execute('action.options.resolve', {
+      actionId: 'session.spawn_new',
+      fieldPath: 'profileId',
+      backend: 'claude',
+      limit: 3,
+    });
+    await executor.execute('action.options.resolve', {
+      actionId: 'session.spawn_new',
+      fieldPath: 'modelId',
+      backend: 'customAcp',
+      backendTargetKey: 'acpBackend:review-bot',
+      limit: 2,
+    });
+    const bareCustomAcp = await executor.execute('action.options.resolve', {
+      actionId: 'session.spawn_new',
+      fieldPath: 'modelId',
+      target: 'customAcp',
+    });
+    const conflictingCustomAcp = await executor.execute('action.options.resolve', {
+      actionId: 'session.spawn_new',
+      fieldPath: 'modelId',
+      agentId: 'claude',
+      target: 'customAcp',
+    });
+
+    expect(deps.agentsModelsList).toHaveBeenCalledWith({
+      agentId: 'claude',
+      backendTargetKey: 'agent:claude',
+      limit: 5,
+    });
+    expect(deps.sessionsSpawnProfilesList).toHaveBeenCalledWith({
+      agentId: 'claude',
+      backendTargetKey: 'agent:claude',
+      limit: 3,
+    });
+    expect(deps.agentsModelsList).toHaveBeenCalledWith({
+      agentId: 'customAcp',
+      backendTargetKey: 'acpBackend:review-bot',
+      limit: 2,
+    });
+    expect(bareCustomAcp).toEqual({ ok: false, errorCode: 'invalid_parameters', error: 'invalid_parameters' });
+    expect(conflictingCustomAcp).toEqual({ ok: false, errorCode: 'invalid_parameters', error: 'invalid_parameters' });
   });
 
   it('routes machines.list to deps.machinesList', async () => {
@@ -312,6 +603,37 @@ describe('createActionExecutor (inventory/discovery)', () => {
       backendTargetKey: 'acpBackend:review-bot',
       machineId: 'm1',
       limit: 2,
+    });
+  });
+
+  it('routes agents.session_modes.list and agents.config_options.list to provider option deps', async () => {
+    const deps = createDeps();
+    const executor = createActionExecutor(deps);
+
+    const modes = await executor.execute('agents.session_modes.list' as any, {
+      backendTargetKey: 'agent:claude',
+      limit: 20,
+    });
+    const configOptions = await executor.execute('agents.config_options.list' as any, {
+      backendTargetKey: 'agent:claude',
+      modelId: 'claude-opus-4-8',
+      limit: 20,
+    });
+
+    expect(modes.ok).toBe(true);
+    expect(configOptions.ok).toBe(true);
+    expect(deps.agentsSessionModesList).toHaveBeenCalledWith({
+      agentId: 'claude',
+      backendTargetKey: 'agent:claude',
+      machineId: undefined,
+      limit: 20,
+    });
+    expect(deps.agentsConfigOptionsList).toHaveBeenCalledWith({
+      agentId: 'claude',
+      backendTargetKey: 'agent:claude',
+      modelId: 'claude-opus-4-8',
+      machineId: undefined,
+      limit: 20,
     });
   });
 
@@ -577,6 +899,49 @@ describe('createActionExecutor (inventory/discovery)', () => {
     });
   });
 
+  it('resolves session.spawn_new model, mode, and config dynamic options from provider deps', async () => {
+    const deps = createDeps();
+    const executor = createActionExecutor(deps);
+    (deps.agentsModelsList as any).mockResolvedValueOnce({
+      items: [{ id: 'claude-opus-4-8', label: 'Claude Opus 4.8' }],
+    });
+    (deps.agentsSessionModesList as any).mockResolvedValueOnce({
+      items: [{ id: 'plan', label: 'Plan' }],
+    });
+    (deps.agentsConfigOptionsList as any).mockResolvedValueOnce({
+      items: [{ id: 'reasoning_effort', label: 'Reasoning effort' }],
+    });
+
+    const modelOptions = await executor.execute('action.options.resolve', {
+      actionId: 'session.spawn_new',
+      fieldPath: 'modelId',
+      backendTargetKey: 'agent:claude',
+    });
+    const modeOptions = await executor.execute('action.options.resolve', {
+      actionId: 'session.spawn_new',
+      fieldPath: 'agentModeId',
+      backendTargetKey: 'agent:claude',
+    });
+    const configOptions = await executor.execute('action.options.resolve', {
+      actionId: 'session.spawn_new',
+      fieldPath: 'sessionConfigOptionOverrides',
+      backendTargetKey: 'agent:claude',
+    });
+
+    expect(modelOptions).toMatchObject({
+      ok: true,
+      result: { options: [{ value: 'claude-opus-4-8', label: 'Claude Opus 4.8' }] },
+    });
+    expect(modeOptions).toMatchObject({
+      ok: true,
+      result: { options: [{ value: 'plan', label: 'Plan' }] },
+    });
+    expect(configOptions).toMatchObject({
+      ok: true,
+      result: { options: [{ value: 'reasoning_effort', label: 'Reasoning effort' }] },
+    });
+  });
+
   it('routes session.mode.set to deps.sessionModeSet', async () => {
     const deps = createDeps();
     const executor = createActionExecutor(deps);
@@ -654,6 +1019,11 @@ describe('createActionExecutor (inventory/discovery)', () => {
       ok: false,
       errorCode: 'action_disabled',
       error: 'action_disabled',
+      details: expect.objectContaining({
+        actionId: 'ui.voice_global.reset',
+        surface: 'mcp',
+        reason: 'unsupported_surface',
+      }),
     });
   });
 
@@ -667,6 +1037,11 @@ describe('createActionExecutor (inventory/discovery)', () => {
       ok: false,
       errorCode: 'action_disabled',
       error: 'action_disabled',
+      details: expect.objectContaining({
+        actionId: 'action.spec.search',
+        surface: 'cli',
+        reason: 'unsupported_surface',
+      }),
     });
   });
 
@@ -680,7 +1055,32 @@ describe('createActionExecutor (inventory/discovery)', () => {
       ok: false,
       errorCode: 'action_disabled',
       error: 'action_disabled',
+      details: expect.objectContaining({
+        actionId: 'ui.voice_global.reset',
+        surface: 'mcp',
+        reason: 'unsupported_surface',
+      }),
     });
+  });
+
+  it('rejects executing actions disabled by injected policy with structured details', async () => {
+    const deps = createDeps();
+    deps.isActionEnabled = vi.fn((actionId) => actionId !== 'session.message.send');
+    const executor = createActionExecutor(deps);
+
+    const res = await executor.execute('session.message.send', { sessionId: 's1', message: 'Hello' }, { surface: 'session_agent' });
+
+    expect(res).toEqual({
+      ok: false,
+      errorCode: 'action_disabled',
+      error: 'action_disabled',
+      details: expect.objectContaining({
+        actionId: 'session.message.send',
+        surface: 'session_agent',
+        reason: 'disabled_by_policy',
+      }),
+    });
+    expect(deps.sessionSendMessage).not.toHaveBeenCalled();
   });
 
   it('preserves allowlisted thrown error codes and messages when deps throw plain objects', async () => {
