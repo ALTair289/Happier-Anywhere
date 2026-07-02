@@ -212,6 +212,80 @@ describe('ToolCallsGroupView (structured tool-call rendering)', () => {
         expect(renderedToolTimelineRows.some((props) => props?.tool?.name === 'SubAgentRun')).toBe(true);
     });
 
+    it('passes tool pin actions to collapsed whole-group activity-feed preview rows', async () => {
+        renderedMessageViews.length = 0;
+        renderedToolTimelineRows.length = 0;
+        toolChromeMode = 'activity_feed';
+        collapsedPreviewCount = 1;
+        const onToggleToolPin = vi.fn();
+        const message = createToolCallMessageFixture({
+            id: 'tool-msg-available',
+            localId: 'local-tool-msg-available',
+            createdAt: 1,
+            seq: 12,
+            transcriptBlockIndex: 4,
+            tool: {
+                id: 'read-1',
+                name: 'Read',
+                state: 'completed',
+                input: {},
+                createdAt: 1,
+                startedAt: 1,
+                completedAt: 2,
+                description: null,
+                result: {},
+            },
+            children: [],
+        });
+
+        await renderToolCallsGroupView({
+            status: 'completed',
+            toolMessages: [message],
+            expanded: false,
+            onToggleToolPin,
+        });
+
+        expect(renderedMessageViews).toHaveLength(0);
+        expect(renderedToolTimelineRows.some((props) => props?.headerAction)).toBe(true);
+    });
+
+    it('passes tool pin actions to expanded whole-group activity-feed rows', async () => {
+        renderedMessageViews.length = 0;
+        renderedToolTimelineRows.length = 0;
+        toolChromeMode = 'activity_feed';
+        collapsedPreviewCount = 0;
+        const onToggleToolPin = vi.fn();
+        const message = createToolCallMessageFixture({
+            id: 'tool-msg-expanded-pin',
+            localId: 'local-tool-msg-expanded-pin',
+            createdAt: 1,
+            seq: 13,
+            transcriptBlockIndex: 5,
+            tool: {
+                id: 'read-2',
+                name: 'Read',
+                state: 'completed',
+                input: {},
+                createdAt: 1,
+                startedAt: 1,
+                completedAt: 2,
+                description: null,
+                result: {},
+            },
+            children: [],
+        });
+
+        await renderToolCallsGroupView({
+            status: 'completed',
+            toolMessages: [message],
+            expanded: true,
+            onToggleToolPin,
+        });
+
+        expect(renderedMessageViews).toHaveLength(0);
+        expect(renderedToolTimelineRows.some((props) => props?.headerAction)).toBe(true);
+    });
+
     it('keeps expanded childless SubAgentRun rows on MessageView in activity feed mode before child transcript items arrive', async () => {
         renderedMessageViews.length = 0;
         renderedToolTimelineRows.length = 0;

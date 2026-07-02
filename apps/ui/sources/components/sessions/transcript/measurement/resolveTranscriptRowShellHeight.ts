@@ -3,6 +3,7 @@ import type {
     TranscriptMeasurementReconciler,
     TranscriptRowHeightReservation,
 } from './transcriptMeasurementReconciler';
+import { isStructuralSignatureDelta } from './transcriptMeasurementReconciler';
 
 /**
  * C1: the row-shell reservation is sourced from the single measurement reconciler. Stable rows get
@@ -12,8 +13,17 @@ import type {
  * authoritative onLayout measurement. No FlashList estimate props are ever exposed.
  */
 export function resolveTranscriptRowShellHeight(params: Readonly<{
+    previousSignature?: TranscriptItemHeightValiditySignature;
     reconciler: TranscriptMeasurementReconciler;
     signature: TranscriptItemHeightValiditySignature;
 }>): TranscriptRowHeightReservation | undefined {
-    return params.reconciler.resolveReservation(params.signature);
+    const reservation = params.reconciler.resolveReservation(params.signature);
+    if (
+        reservation?.kind === 'floor' &&
+        params.previousSignature !== undefined &&
+        isStructuralSignatureDelta(params.previousSignature, params.signature)
+    ) {
+        return undefined;
+    }
+    return reservation;
 }

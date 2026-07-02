@@ -13,7 +13,7 @@ import { ToolView } from '@/components/tools/shell/views/ToolView';
 import { ToolTimelineRow } from '@/components/tools/shell/views/ToolTimelineRow';
 import { resolveToolStatusIndicatorKind } from '@/components/tools/shell/presentation/resolveToolStatusIndicatorKind';
 import { resolveInactiveSessionToolCallFailure } from '@/components/tools/shell/permissions/resolveInactiveSessionToolCallFailure';
-import { resolveMessageRouteIdForDisplay } from '@/sync/domains/messages/messageRouteIds';
+import { buildMessageRouteId, resolveMessageRouteIdForDisplay } from '@/sync/domains/messages/messageRouteIds';
 import { sync } from '@/sync/sync';
 import { Option, type OptionLongPressHandler } from '@/components/markdown/MarkdownView';
 import { isCommittedMessageDiscarded } from "@/utils/sessions/discardedCommittedMessages";
@@ -51,7 +51,12 @@ import {
   unwrapLegacyThinkingWrapper,
 } from '@/components/sessions/transcript/messageSelection/resolveSelectableMessageText';
 import { TranscriptRollbackActionButton } from '@/components/sessions/transcript/TranscriptRollbackActionButton';
+import { MessageActionRow } from '@/components/sessions/transcript/messageActions/MessageActionRow';
+import { MessagePinButton } from '@/components/sessions/transcript/messageActions/MessagePinButton';
+import { resolveMessagePinAvailability } from '@/components/sessions/transcript/messageActions/resolveMessagePinAvailability';
+import { ToolCallPinAction } from '@/components/sessions/transcript/toolCalls/ToolCallPinAction';
 import type { TranscriptRollbackAction } from '@/sync/domains/sessionRollback/rollbackUiSupport';
+import type { PersistedSessionMessagePinV1 } from '@/sync/domains/messages/pins/sessionMessagePins';
 import { setClipboardStringSafe } from '@/utils/ui/clipboard';
 import { settingsDefaults } from '@/sync/domains/settings/settings';
 import { useStreamingTextSmoothing } from '@/components/sessions/transcript/streaming/useStreamingTextSmoothing';
@@ -68,6 +73,7 @@ import type {
   TranscriptToolRouteCommon,
 } from '@/components/sessions/transcript/transcriptSessionCommon';
 import { useTranscriptSessionCommon } from '@/components/sessions/transcript/transcriptSessionCommon';
+import { TranscriptJumpHighlightOverlay } from '@/components/sessions/transcript/navigation/TranscriptJumpHighlightOverlay';
 
 type StreamSegmentStateForRendering = 'streaming' | 'complete' | 'interrupted';
 const TRANSCRIPT_SELECTION_CHECKBOX_ANCHOR_TOP = 0;
@@ -146,6 +152,19 @@ function formatTranscriptMessageTimestamp(createdAt: number): string | null {
 }
 
 type TranscriptMessageTimestampDisplayMode = TranscriptMessageDisplayCommon['transcriptMessageTimestampDisplayMode'];
+type SessionMessagePinToggleHandler = (pin: PersistedSessionMessagePinV1) => void;
+
+function resolveTranscriptMessageSeq(message: Message): number | null {
+  if (typeof message.seq !== 'number' || !Number.isFinite(message.seq)) return null;
+  const normalized = Math.trunc(message.seq);
+  return normalized >= 0 ? normalized : null;
+}
+
+function resolveTranscriptMessageBlockIndex(message: Message): number | null {
+  if (typeof message.transcriptBlockIndex !== 'number' || !Number.isFinite(message.transcriptBlockIndex)) return null;
+  const normalized = Math.trunc(message.transcriptBlockIndex);
+  return normalized >= 0 ? normalized : null;
+}
 
 function resolveMessageTimestampPresentation(input: {
   displayMode: TranscriptMessageTimestampDisplayMode;
@@ -177,6 +196,9 @@ type MessageViewProps = {
   onThinkingExpandedChange?: (next: boolean) => void;
   getMessageById?: (id: string) => Message | null;
   rollbackAction?: TranscriptRollbackAction | null;
+  messagePins?: readonly PersistedSessionMessagePinV1[];
+  onToggleMessagePin?: SessionMessagePinToggleHandler;
+  onToggleToolPin?: SessionMessagePinToggleHandler;
   historical?: boolean;
   interaction?: {
     canSendMessages: boolean;
@@ -208,6 +230,11 @@ export const MessageViewWithSessionCommon = (props: MessageViewProps & {
   if (shouldHideVoiceAgentTurnMessage(props.message)) return null;
   return (
     <View style={styles.messageContainer} renderToHardwareTextureAndroid={true}>
+      <TranscriptJumpHighlightOverlay
+        sessionId={props.sessionId}
+        routeMessageId={buildMessageRouteId(props.message)}
+        seq={resolveTranscriptMessageSeq(props.message)}
+      />
       <View style={styles.messageContent}>
         <RenderBlock
           message={props.message}
@@ -221,6 +248,9 @@ export const MessageViewWithSessionCommon = (props: MessageViewProps & {
           onThinkingExpandedChange={props.onThinkingExpandedChange}
           getMessageById={props.getMessageById}
           rollbackAction={props.rollbackAction}
+          messagePins={props.messagePins}
+          onToggleMessagePin={props.onToggleMessagePin}
+          onToggleToolPin={props.onToggleToolPin}
           historical={props.historical}
           interaction={props.interaction}
           forkCommon={props.forkCommon}
@@ -252,6 +282,9 @@ function RenderBlock(props: {
     disableToolNavigation?: boolean;
   };
   rollbackAction?: TranscriptRollbackAction | null;
+  messagePins?: readonly PersistedSessionMessagePinV1[];
+  onToggleMessagePin?: SessionMessagePinToggleHandler;
+  onToggleToolPin?: SessionMessagePinToggleHandler;
   historical?: boolean;
   forkCommon: TranscriptForkCommon;
   messageDisplayCommon: TranscriptMessageDisplayCommon;
@@ -267,7 +300,10 @@ function RenderBlock(props: {
           sessionId={props.sessionId}
           canSendMessages={props.interaction?.canSendMessages ?? true}
           rollbackAction={props.rollbackAction}
+          messagePins={props.messagePins}
+          onToggleMessagePin={props.onToggleMessagePin}
           historical={props.historical}
+          pinReadOnlyContext={props.interaction?.permissionDisabledReason === 'readOnly'}
           forkCommon={props.forkCommon}
           messageDisplayCommon={props.messageDisplayCommon}
         />
@@ -284,7 +320,10 @@ function RenderBlock(props: {
           thinkingExpanded={props.thinkingExpanded}
           onThinkingExpandedChange={props.onThinkingExpandedChange}
           rollbackAction={props.rollbackAction}
+          messagePins={props.messagePins}
+          onToggleMessagePin={props.onToggleMessagePin}
           historical={props.historical}
+          pinReadOnlyContext={props.interaction?.permissionDisabledReason === 'readOnly'}
           forkCommon={props.forkCommon}
           messageDisplayCommon={props.messageDisplayCommon}
         />
@@ -302,6 +341,8 @@ function RenderBlock(props: {
         getMessageById={props.getMessageById}
         interaction={props.interaction}
         rollbackAction={props.rollbackAction}
+        messagePins={props.messagePins}
+        onToggleToolPin={props.onToggleToolPin}
         historical={props.historical}
         messageDisplayCommon={props.messageDisplayCommon}
         toolChromeCommon={props.toolChromeCommon}
@@ -325,7 +366,10 @@ function UserTextBlock(props: {
   sessionId: string;
   canSendMessages: boolean;
   rollbackAction?: TranscriptRollbackAction | null;
+  messagePins?: readonly PersistedSessionMessagePinV1[];
+  onToggleMessagePin?: SessionMessagePinToggleHandler;
   historical?: boolean;
+  pinReadOnlyContext?: boolean;
   forkCommon: TranscriptForkCommon;
   messageDisplayCommon: TranscriptMessageDisplayCommon;
 }) {
@@ -414,19 +458,6 @@ function UserTextBlock(props: {
   const selectionEnabled = props.messageDisplayCommon.transcriptMessageSelectionEnabled === true && selectableMessage != null;
   const selectionRow = useOptionalTranscriptSelectionRow(props.message.id);
   const selectionModeActionsVisible = selectionEnabled && selectionRow.isSelectionMode;
-  const showCopyButton = shouldShowMessageCopyButton({ platformOS: Platform.OS, isMessageHovered, isCopyButtonHovered, selectionModeActive: selectionModeActionsVisible });
-  const showSelectButton = selectionEnabled && shouldShowMessageSelectButton({ platformOS: Platform.OS, isMessageHovered, isCopyButtonHovered, selectionModeActive: selectionModeActionsVisible });
-  const showMessageActions = showCopyButton || showSelectButton;
-  const copyText = selectableMessage?.text ?? (isStructuredOnly ? props.message.text : (markdownText ?? props.message.displayText ?? props.message.text));
-  const actionPointerEvents = resolveMessageActionPointerEvents({ showActions: showMessageActions });
-  const timestampPresentation = resolveMessageTimestampPresentation({
-    displayMode: props.messageDisplayCommon.transcriptMessageTimestampDisplayMode,
-    isWeb,
-    showActions: showMessageActions,
-  });
-  const timestampText = timestampPresentation.showTimestamp
-    ? formatTranscriptMessageTimestamp(props.message.createdAt)
-    : null;
   const sessionReplayEnabled = props.forkCommon.sessionReplayEnabled;
   const sessionForkSupportSource = props.forkCommon.sessionForkSupportSource;
   const workspacePath = props.messageDisplayCommon.workspacePath;
@@ -441,15 +472,35 @@ function UserTextBlock(props: {
     });
     return true;
   }, [pathname, props.sessionId, router, workspacePath]);
-  const seq =
-    typeof (props.message as any).seq === 'number' && Number.isFinite((props.message as any).seq)
-      ? Math.trunc((props.message as any).seq)
-      : null;
+  const seq = resolveTranscriptMessageSeq(props.message);
   const showForkButton = canForkFromMessage({ session: sessionForkSupportSource, messageSeq: seq, replayEnabled: sessionReplayEnabled });
   const forkSemantics = React.useMemo(() => {
     if (seq == null) return null;
     return resolveForkFromMessageSemantics({ message: props.message, messageSeqInclusive: seq });
   }, [props.message, seq]);
+  const messagePinAvailability = React.useMemo(() => resolveMessagePinAvailability({
+    sessionId: props.sessionId,
+    seq,
+    transcriptBlockIndex: resolveTranscriptMessageBlockIndex(props.message),
+    routeMessageId: buildMessageRouteId(props.message),
+    role: 'user',
+    pins: props.messagePins ?? [],
+    readOnlyContext: props.pinReadOnlyContext === true,
+  }), [props.message, props.messagePins, props.pinReadOnlyContext, props.sessionId, seq]);
+  const showPinButton = props.onToggleMessagePin != null && messagePinAvailability.status === 'available';
+  const showCopyButton = shouldShowMessageCopyButton({ platformOS: Platform.OS, isMessageHovered, isCopyButtonHovered, selectionModeActive: selectionModeActionsVisible });
+  const showSelectButton = selectionEnabled && shouldShowMessageSelectButton({ platformOS: Platform.OS, isMessageHovered, isCopyButtonHovered, selectionModeActive: selectionModeActionsVisible });
+  const showMessageActions = showCopyButton || showSelectButton || showPinButton;
+  const copyText = selectableMessage?.text ?? (isStructuredOnly ? props.message.text : (markdownText ?? props.message.displayText ?? props.message.text));
+  const actionPointerEvents = resolveMessageActionPointerEvents({ showActions: showMessageActions });
+  const timestampPresentation = resolveMessageTimestampPresentation({
+    displayMode: props.messageDisplayCommon.transcriptMessageTimestampDisplayMode,
+    isWeb,
+    showActions: showMessageActions,
+  });
+  const timestampText = timestampPresentation.showTimestamp
+    ? formatTranscriptMessageTimestamp(props.message.createdAt)
+    : null;
 
   if (isVoiceAgentTurn && (markdownText == null || markdownText.trim().length === 0)) {
     return null;
@@ -536,6 +587,14 @@ function UserTextBlock(props: {
                 invertedActionsLayout={timestampPresentation.invertTimestampAndActions}
               />
             ) : null}
+            <MessagePinButton
+              availability={messagePinAvailability}
+              onTogglePin={props.onToggleMessagePin}
+              testID={`transcript-message-pin:${props.message.id}`}
+              onHoverIn={isWeb ? () => setIsCopyButtonHovered(true) : undefined}
+              onHoverOut={isWeb ? () => setIsCopyButtonHovered(false) : undefined}
+              invertedActionsLayout={timestampPresentation.invertTimestampAndActions}
+            />
             {selectableMessage ? (
               <SelectMessageButton
                 messageId={props.message.id}
@@ -591,7 +650,7 @@ function UserTextBlock(props: {
           <View style={styles.userMessageBubbleAligner}>
             <View style={[styles.userMessageBubble, isDiscarded && styles.userMessageBubbleDiscarded]}>
               <StructuredMessageBlock
-                message={props.message as any}
+                message={props.message}
                 sessionId={props.sessionId}
                 onJumpToAnchor={handleJumpToAnchor}
               />
@@ -654,6 +713,14 @@ function UserTextBlock(props: {
                 invertedActionsLayout={timestampPresentation.invertTimestampAndActions}
               />
             ) : null}
+            <MessagePinButton
+              availability={messagePinAvailability}
+              onTogglePin={props.onToggleMessagePin}
+              testID={`transcript-message-pin:${props.message.id}`}
+              onHoverIn={isWeb ? () => setIsCopyButtonHovered(true) : undefined}
+              onHoverOut={isWeb ? () => setIsCopyButtonHovered(false) : undefined}
+              invertedActionsLayout={timestampPresentation.invertTimestampAndActions}
+            />
             {selectableMessage ? (
               <SelectMessageButton
                 messageId={props.message.id}
@@ -690,7 +757,10 @@ function AgentTextBlock(props: {
   thinkingExpanded?: boolean;
   onThinkingExpandedChange?: (next: boolean) => void;
   rollbackAction?: TranscriptRollbackAction | null;
+  messagePins?: readonly PersistedSessionMessagePinV1[];
+  onToggleMessagePin?: SessionMessagePinToggleHandler;
   historical?: boolean;
+  pinReadOnlyContext?: boolean;
   forkCommon: TranscriptForkCommon;
   messageDisplayCommon: TranscriptMessageDisplayCommon;
 }) {
@@ -788,18 +858,6 @@ function AgentTextBlock(props: {
     return null;
   }
 
-  const showCopyButton = shouldShowMessageCopyButton({ platformOS: Platform.OS, isMessageHovered, isCopyButtonHovered, selectionModeActive: selectionModeActionsVisible });
-  const showSelectButton = selectionEnabled && shouldShowMessageSelectButton({ platformOS: Platform.OS, isMessageHovered, isCopyButtonHovered, selectionModeActive: selectionModeActionsVisible });
-  const showMessageActions = showCopyButton || showSelectButton;
-  const actionPointerEvents = resolveMessageActionPointerEvents({ showActions: showMessageActions });
-  const timestampPresentation = resolveMessageTimestampPresentation({
-    displayMode: props.messageDisplayCommon.transcriptMessageTimestampDisplayMode,
-    isWeb,
-    showActions: showMessageActions,
-  });
-  const timestampText = timestampPresentation.showTimestamp
-    ? formatTranscriptMessageTimestamp(props.message.createdAt)
-    : null;
   const sessionReplayEnabled = props.forkCommon.sessionReplayEnabled;
   const sessionForkSupportSource = props.forkCommon.sessionForkSupportSource;
   const workspacePath = props.messageDisplayCommon.workspacePath;
@@ -814,15 +872,34 @@ function AgentTextBlock(props: {
     });
     return true;
   }, [pathname, props.sessionId, router, workspacePath]);
-  const seq =
-    typeof (props.message as any).seq === 'number' && Number.isFinite((props.message as any).seq)
-      ? Math.trunc((props.message as any).seq)
-      : null;
+  const seq = resolveTranscriptMessageSeq(props.message);
   const showForkButton = canForkFromMessage({ session: sessionForkSupportSource, messageSeq: seq, replayEnabled: sessionReplayEnabled });
   const forkSemantics = React.useMemo(() => {
     if (seq == null) return null;
     return resolveForkFromMessageSemantics({ message: props.message, messageSeqInclusive: seq });
   }, [props.message, seq]);
+  const messagePinAvailability = React.useMemo(() => resolveMessagePinAvailability({
+    sessionId: props.sessionId,
+    seq,
+    transcriptBlockIndex: resolveTranscriptMessageBlockIndex(props.message),
+    routeMessageId: buildMessageRouteId(props.message),
+    role: 'assistant',
+    pins: props.messagePins ?? [],
+    readOnlyContext: props.pinReadOnlyContext === true,
+  }), [props.message, props.messagePins, props.pinReadOnlyContext, props.sessionId, seq]);
+  const showPinButton = props.onToggleMessagePin != null && messagePinAvailability.status === 'available';
+  const showCopyButton = shouldShowMessageCopyButton({ platformOS: Platform.OS, isMessageHovered, isCopyButtonHovered, selectionModeActive: selectionModeActionsVisible });
+  const showSelectButton = selectionEnabled && shouldShowMessageSelectButton({ platformOS: Platform.OS, isMessageHovered, isCopyButtonHovered, selectionModeActive: selectionModeActionsVisible });
+  const showMessageActions = showCopyButton || showSelectButton || showPinButton;
+  const actionPointerEvents = resolveMessageActionPointerEvents({ showActions: showMessageActions });
+  const timestampPresentation = resolveMessageTimestampPresentation({
+    displayMode: props.messageDisplayCommon.transcriptMessageTimestampDisplayMode,
+    isWeb,
+    showActions: showMessageActions,
+  });
+  const timestampText = timestampPresentation.showTimestamp
+    ? formatTranscriptMessageTimestamp(props.message.createdAt)
+    : null;
   const renderThinkingAsToolCard = props.message.isThinking && sessionThinkingDisplayMode === 'tool';
   const renderThinkingInline = props.message.isThinking === true && !renderThinkingAsToolCard;
     const normalizedThinkingInlinePresentation: 'full' | 'summary' =
@@ -1067,6 +1144,14 @@ function AgentTextBlock(props: {
               invertedActionsLayout={timestampPresentation.invertTimestampAndActions}
             />
           ) : null}
+          <MessagePinButton
+            availability={messagePinAvailability}
+            onTogglePin={props.onToggleMessagePin}
+            testID={`transcript-message-pin:${props.message.id}`}
+            onHoverIn={isWeb ? () => setIsCopyButtonHovered(true) : undefined}
+            onHoverOut={isWeb ? () => setIsCopyButtonHovered(false) : undefined}
+            invertedActionsLayout={timestampPresentation.invertTimestampAndActions}
+          />
           {selectableMessage ? (
             <SelectMessageButton
               messageId={props.message.id}
@@ -1090,54 +1175,6 @@ function AgentTextBlock(props: {
         </MessageActionRow>
       </View>
     </Pressable>
-  );
-}
-
-function MessageActionRow(props: {
-  children: React.ReactNode;
-  isWeb: boolean;
-  invertTimestampAndActions: boolean;
-  messageId: string;
-  pointerEvents: 'auto' | 'none';
-  showActions: boolean;
-  timestampText: string | null;
-}) {
-  const hasTimestamp = typeof props.timestampText === 'string' && props.timestampText.length > 0;
-  const shouldHideRow = !hasTimestamp && !props.showActions;
-  return (
-    <View
-      {...(props.isWeb ? {} : { pointerEvents: props.pointerEvents })}
-      style={[
-        styles.messageActionContainer,
-        props.invertTimestampAndActions && styles.messageActionContainerInverted,
-        shouldHideRow && styles.messageActionContainerHidden,
-        props.isWeb ? { pointerEvents: props.pointerEvents } : null,
-      ]}
-      testID={`transcript-message-actions-row:${props.messageId}`}
-    >
-      {hasTimestamp ? (
-        <Text
-          testID={`transcript-message-timestamp:${props.messageId}`}
-          style={[
-            styles.messageTimestampText,
-            props.invertTimestampAndActions && styles.messageTimestampTextInverted,
-          ]}
-        >
-          {props.timestampText}
-        </Text>
-      ) : null}
-      <View
-        accessibilityElementsHidden={!props.showActions}
-        importantForAccessibility={props.showActions ? 'auto' : 'no-hide-descendants'}
-        style={[
-          styles.messageActionButtons,
-          !props.showActions && styles.messageActionContainerHidden,
-        ]}
-        testID={`transcript-message-actions:${props.messageId}`}
-      >
-        {props.children}
-      </View>
-    </View>
   );
 }
 
@@ -1186,7 +1223,7 @@ function ForkMessageButton(props: {
       await completeSessionForkNavigation({
         childSessionId: result.childSessionId,
         parentSessionId: props.sessionId,
-        navigate: (childSessionId) => router.push((`/session/${childSessionId}`) as any),
+        navigate: (childSessionId) => router.push(`/session/${childSessionId}` as never),
         restoredDraftText: restored,
         sourceMessageId: props.messageId,
         writeForkInitialPrompt: true,
@@ -1319,6 +1356,8 @@ function ToolCallBlock(props: {
     disableToolNavigation?: boolean;
   };
   rollbackAction?: TranscriptRollbackAction | null;
+  messagePins?: readonly PersistedSessionMessagePinV1[];
+  onToggleToolPin?: SessionMessagePinToggleHandler;
   historical?: boolean;
   messageDisplayCommon: TranscriptMessageDisplayCommon;
   toolChromeCommon: TranscriptToolChromeCommon;
@@ -1356,6 +1395,22 @@ function ToolCallBlock(props: {
         messagesById,
         reducerState,
       });
+  const toolPinAvailability = React.useMemo(() => resolveMessagePinAvailability({
+    sessionId: props.sessionId,
+    seq: resolveTranscriptMessageSeq(props.message),
+    transcriptBlockIndex: resolveTranscriptMessageBlockIndex(props.message),
+    routeMessageId: toolRouteMessageId ?? null,
+    role: 'tool',
+    pins: props.messagePins ?? [],
+    readOnlyContext: props.interaction?.permissionDisabledReason === 'readOnly',
+  }), [props.interaction?.permissionDisabledReason, props.message, props.messagePins, props.sessionId, toolRouteMessageId]);
+  const toolPinAction = props.onToggleToolPin && toolPinAvailability.status === 'available' ? (
+    <ToolCallPinAction
+      availability={toolPinAvailability}
+      onTogglePin={props.onToggleToolPin}
+      testID={`transcript-tool-call-pin:${props.message.id}`}
+    />
+  ) : null;
   return (
     <View
       style={[
@@ -1367,6 +1422,11 @@ function ToolCallBlock(props: {
       ]}
     >
       {structuredNode}
+      {!shouldRenderToolChrome && toolPinAction ? (
+        <View style={styles.structuredToolPinAction}>
+          {toolPinAction}
+        </View>
+      ) : null}
       {shouldRenderToolChrome ? (toolViewTimelineChromeMode === 'activity_feed' ? (
         <ToolTimelineRow
           tool={props.message.tool}
@@ -1374,6 +1434,7 @@ function ToolCallBlock(props: {
           messages={props.message.children}
           sessionId={props.sessionId}
           messageId={toolRouteMessageId}
+          headerAction={toolPinAction}
           approvalRequests={props.approvalRequests}
           forcePermissionPromptsInTranscript={props.forcePermissionPromptsInTranscript}
           interaction={props.interaction}
@@ -1385,6 +1446,7 @@ function ToolCallBlock(props: {
           messages={props.message.children}
           sessionId={props.sessionId}
           messageId={toolRouteMessageId}
+          headerAction={toolPinAction}
           approvalRequests={props.approvalRequests}
           forcePermissionPromptsInTranscript={props.forcePermissionPromptsInTranscript}
           interaction={props.interaction}
@@ -1484,6 +1546,10 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: 'flex-end',
     paddingBottom: 6,
   },
+  structuredToolPinAction: {
+    alignSelf: 'flex-end',
+    marginTop: 4,
+  },
   toolContainerCards: {
     paddingBottom: 0,
   },
@@ -1493,39 +1559,11 @@ const styles = StyleSheet.create((theme) => ({
   toolContainerFeedEmbedded: {
     paddingBottom: 0,
   },
-  messageActionContainer: {
-    position: 'absolute',
-    right: 0,
-    bottom: 0,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'flex-end',
-  },
-  messageActionContainerInverted: {
-    flexDirection: 'row-reverse',
-  },
-  messageActionContainerHidden: {
-    opacity: 0,
-  },
-  messageActionButtons: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
   messageSelectionCheckboxSlot: {
     position: 'absolute',
     top: TRANSCRIPT_SELECTION_CHECKBOX_ANCHOR_TOP,
     right: TRANSCRIPT_SELECTION_CHECKBOX_ANCHOR_RIGHT,
     zIndex: TRANSCRIPT_SELECTION_CHECKBOX_ANCHOR_Z_INDEX,
-  },
-  messageTimestampText: {
-    color: theme.colors.text.tertiary,
-    fontSize: 11,
-    lineHeight: 16,
-    marginRight: 8,
-  },
-  messageTimestampTextInverted: {
-    marginLeft: 12,
-    marginRight: 0,
   },
   webActionButton: {
     padding: 6,
@@ -1558,10 +1596,6 @@ const styles = StyleSheet.create((theme) => ({
   },
   copyMessageButtonPressed: {
     opacity: 1,
-  },
-  debugText: {
-    color: theme.colors.message.event.foreground,
-    fontSize: 12,
   },
   transcriptMarkdownText: {
     ...transcriptMarkdownTextStyle,

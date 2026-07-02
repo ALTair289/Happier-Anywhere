@@ -4,6 +4,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import * as FlashListCompat from '@/components/ui/lists/flashListCompat/FlashListCompat';
 
 import type { ToolCallMessage } from '@/sync/domains/messages/messageTypes';
+import type { PersistedSessionMessagePinV1 } from '@/sync/domains/messages/pins/sessionMessagePins';
 import type { Metadata } from '@/sync/domains/state/storageTypes';
 import type { OpenApprovalArtifactForSession } from '@/sync/domains/artifacts/approvalArtifacts';
 
@@ -25,6 +26,8 @@ import {
     renderGroupedToolCallRowContent,
     resolveGroupedPreviewSidechainIds,
 } from '@/components/sessions/transcript/toolCalls/units/groupedToolCallRowContent';
+import { ToolCallPinAction } from '@/components/sessions/transcript/toolCalls/ToolCallPinAction';
+import { resolveMessagePinAvailability } from '@/components/sessions/transcript/messageActions/resolveMessagePinAvailability';
 import {
     ToolCallsGroupExpandMoreChrome,
     ToolCallsGroupHeaderChrome,
@@ -60,6 +63,8 @@ type ToolCallsGroupViewProps = Readonly<{
     approvalRequests?: readonly OpenApprovalArtifactForSession[];
     expanded: boolean;
     setExpanded: (expanded: boolean) => void;
+    messagePins?: readonly PersistedSessionMessagePinV1[];
+    onToggleToolPin?: (pin: PersistedSessionMessagePinV1) => void;
     interaction: TranscriptInteraction;
 }>;
 
@@ -169,6 +174,26 @@ export const ToolCallsGroupViewWithSessionCommon = React.memo((props: ToolCallsG
             reducerState,
         });
     }, [messagesById, props.interaction.disableToolNavigation, reducerState]);
+    const renderToolPinAction = React.useCallback((message: ToolCallMessage, nestedMessageId: string | undefined) => {
+        if (!props.onToggleToolPin) return null;
+        const toolPinAvailability = resolveMessagePinAvailability({
+            sessionId: props.sessionId,
+            seq: message.seq ?? null,
+            transcriptBlockIndex: message.transcriptBlockIndex ?? null,
+            routeMessageId: nestedMessageId ?? null,
+            role: 'tool',
+            pins: props.messagePins ?? [],
+            readOnlyContext: props.interaction.permissionDisabledReason === 'readOnly',
+        });
+        if (toolPinAvailability.status !== 'available') return null;
+        return (
+            <ToolCallPinAction
+                availability={toolPinAvailability}
+                onTogglePin={props.onToggleToolPin}
+                testID={`transcript-tool-call-pin:${message.id}`}
+            />
+        );
+    }, [props.interaction.permissionDisabledReason, props.messagePins, props.onToggleToolPin, props.sessionId]);
 
     return (
         <View
@@ -200,6 +225,7 @@ export const ToolCallsGroupViewWithSessionCommon = React.memo((props: ToolCallsG
                             ) : null}
                             {showCollapsedPreview ? previewMessages.map((m, index) => {
                                 const nestedMessageId = resolveToolRouteMessageId(m);
+                                const toolPinAction = renderToolPinAction(m, nestedMessageId);
                                 return (
                                 <View
                                     key={getMappingKey(`preview:${m.id}`, index)}
@@ -218,6 +244,9 @@ export const ToolCallsGroupViewWithSessionCommon = React.memo((props: ToolCallsG
                                             nestedMessageId,
                                             forcePermissionPromptsInTranscript: props.forcePermissionPromptsInTranscript,
                                             approvalRequests: props.approvalRequests,
+                                            messagePins: props.messagePins,
+                                            onToggleToolPin: props.onToggleToolPin,
+                                            toolPinAction,
                                             interaction: props.interaction,
                                             forkCommon: props.forkCommon,
                                             messageDisplayCommon: props.messageDisplayCommon,
@@ -236,6 +265,7 @@ export const ToolCallsGroupViewWithSessionCommon = React.memo((props: ToolCallsG
                             <View style={[styles.body, normalizedChromeMode === 'activity_feed' ? styles.bodyFeed : styles.bodyCards]}>
                                 {props.toolMessages.map((m, index) => {
                                     const nestedMessageId = resolveToolRouteMessageId(m);
+                                    const toolPinAction = renderToolPinAction(m, nestedMessageId);
                                     return (
                                     <TranscriptEnterWrapper key={getMappingKey(m.id, index)} id={m.id} createdAt={m.createdAt}>
                                         <View
@@ -254,6 +284,9 @@ export const ToolCallsGroupViewWithSessionCommon = React.memo((props: ToolCallsG
                                                     nestedMessageId,
                                                     forcePermissionPromptsInTranscript: props.forcePermissionPromptsInTranscript,
                                                     approvalRequests: props.approvalRequests,
+                                                    messagePins: props.messagePins,
+                                                    onToggleToolPin: props.onToggleToolPin,
+                                                    toolPinAction,
                                                     interaction: props.interaction,
                                                     forkCommon: props.forkCommon,
                                                     messageDisplayCommon: props.messageDisplayCommon,

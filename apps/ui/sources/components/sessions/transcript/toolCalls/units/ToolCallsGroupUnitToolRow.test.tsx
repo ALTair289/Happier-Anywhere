@@ -6,7 +6,7 @@ import type { ToolCallMessage } from '@/sync/domains/messages/messageTypes';
 import { installToolCallsGroupViewCommonModuleMocks } from '@/components/sessions/transcript/turns/toolCalls/toolCallsGroupViewTestHelpers';
 import { createTranscriptSessionCommonPropsFixture, flattenStyleProp } from './toolCallsGroupUnitsTestFixtures';
 
-(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const messageViewCalls = vi.hoisted(() => [] as Array<Record<string, unknown>>);
 const ensureSidechainsLoadedCalls = vi.hoisted(() => [] as Array<Record<string, unknown>>);
@@ -15,7 +15,7 @@ installToolCallsGroupViewCommonModuleMocks({
     reactNative: async () => {
         const { createReactNativeWebMock } = await import('@/dev/testkit/mocks/reactNative');
         return createReactNativeWebMock({
-            Platform: { OS: 'ios', select: (values: any) => values?.ios ?? values?.default ?? null },
+            Platform: { OS: 'ios', select: (values: Record<string, unknown>) => values?.ios ?? values?.default ?? null },
         });
     },
     text: async () => {
@@ -72,7 +72,7 @@ function makeSubAgentMessage(): ToolCallMessage {
 
 async function renderToolRow(props: Record<string, unknown>) {
     const { ToolCallsGroupUnitToolRowWithSessionCommon } = await import('./ToolCallsGroupUnitToolRow');
-    return renderScreen(React.createElement(ToolCallsGroupUnitToolRowWithSessionCommon, {
+    const rowProps = {
         sessionId: 's1',
         groupId: 'toolCalls:t1:m1',
         metadata: null,
@@ -81,7 +81,8 @@ async function renderToolRow(props: Record<string, unknown>) {
         expanded: true,
         ...createTranscriptSessionCommonPropsFixture(),
         ...props,
-    } as any));
+    } as React.ComponentProps<typeof ToolCallsGroupUnitToolRowWithSessionCommon>;
+    return renderScreen(React.createElement(ToolCallsGroupUnitToolRowWithSessionCommon, rowProps));
 }
 
 describe('ToolCallsGroupUnitToolRow', () => {
@@ -92,7 +93,7 @@ describe('ToolCallsGroupUnitToolRow', () => {
             expanded: false,
         });
 
-        expect(screen.findAllByType('ToolTimelineRow' as any)).toHaveLength(1);
+        expect(screen.findAllByType('ToolTimelineRow' as React.ElementType)).toHaveLength(1);
         expect(messageViewCalls).toHaveLength(0);
         expect(screen.findByTestId('transcript-anchor-tool-call-m1')).not.toBeNull();
         expect(screen.findByTestId('transcript-tool-calls-tool-row')).not.toBeNull();
@@ -147,7 +148,7 @@ describe('ToolCallsGroupUnitToolRow', () => {
             expanded: false,
         });
 
-        expect(screen.findAllByType('ToolTimelineRow' as any)).toHaveLength(1);
+        expect(screen.findAllByType('ToolTimelineRow' as React.ElementType)).toHaveLength(1);
         expect(messageViewCalls).toHaveLength(0);
         expect(ensureSidechainsLoadedCalls).toEqual(
             expect.arrayContaining([
@@ -184,7 +185,7 @@ describe('ToolCallsGroupUnitToolRow', () => {
             },
         });
 
-        const rows = screen.findAllByType('ToolTimelineRow' as any);
+        const rows = screen.findAllByType('ToolTimelineRow' as React.ElementType);
         expect(rows).toHaveLength(1);
         expect(rows[0]?.props.messageId).toBeUndefined();
         expect(ensureSidechainsLoadedCalls.every((call) => call.enabled === false)).toBe(true);
@@ -200,9 +201,46 @@ describe('ToolCallsGroupUnitToolRow', () => {
             expanded: true,
         });
 
-        const rows = screen.findAllByType('ToolTimelineRow' as any);
+        const rows = screen.findAllByType('ToolTimelineRow' as React.ElementType);
         expect(rows).toHaveLength(1);
         expect(rows[0]?.props.messageId).toBe('server:server-msg-1');
+    });
+
+    it('passes a pin action to direct grouped feed rows when row identity facts are available', async () => {
+        const onToggleToolPin = vi.fn();
+        const screen = await renderToolRow({
+            message: {
+                ...createToolCallMessageFixture({ id: 'internal-1', createdAt: 1 }),
+                realID: 'server-msg-1',
+                seq: 11,
+                transcriptBlockIndex: 3,
+                tool: { ...createToolCallMessageFixture({ id: 'internal-1', createdAt: 1 }).tool, id: 'call_read_1' },
+            },
+            expanded: false,
+            onToggleToolPin,
+        });
+
+        const rows = screen.findAllByType('ToolTimelineRow' as React.ElementType);
+        expect(rows).toHaveLength(1);
+        expect(rows[0]?.props.headerAction).toBeTruthy();
+    });
+
+    it('does not reserve a grouped feed header action slot when tool pin identity facts are unavailable', async () => {
+        const onToggleToolPin = vi.fn();
+        const screen = await renderToolRow({
+            message: {
+                ...createToolCallMessageFixture({ id: 'internal-1', createdAt: 1 }),
+                seq: undefined,
+                transcriptBlockIndex: undefined,
+                tool: { ...createToolCallMessageFixture({ id: 'internal-1', createdAt: 1 }).tool, id: 'call_read_1' },
+            },
+            expanded: false,
+            onToggleToolPin,
+        });
+
+        const rows = screen.findAllByType('ToolTimelineRow' as React.ElementType);
+        expect(rows).toHaveLength(1);
+        expect(rows[0]?.props.headerAction).toBeNull();
     });
 
     it('maps pending-permission running tools to canceled failures for inactive sessions', async () => {
@@ -210,7 +248,17 @@ describe('ToolCallsGroupUnitToolRow', () => {
             message: createToolCallMessageFixture({
                 id: 'm1',
                 createdAt: 1,
-                tool: { state: 'running', permission: { id: 'p1', status: 'pending' } } as any,
+                tool: {
+                    id: 'pending-tool-1',
+                    name: 'AskUserQuestion',
+                    state: 'running',
+                    input: {},
+                    createdAt: 1,
+                    startedAt: 1,
+                    completedAt: null,
+                    description: null,
+                    permission: { id: 'p1', status: 'pending' },
+                },
             }),
             expanded: false,
             interaction: {
@@ -220,7 +268,7 @@ describe('ToolCallsGroupUnitToolRow', () => {
             },
         });
 
-        const rows = screen.findAllByType('ToolTimelineRow' as any);
+        const rows = screen.findAllByType('ToolTimelineRow' as React.ElementType);
         expect(rows).toHaveLength(1);
         expect(rows[0]?.props.tool?.state).toBe('error');
         expect(rows[0]?.props.tool?.permission?.status).toBe('canceled');
@@ -236,7 +284,7 @@ describe('ToolCallsGroupUnitToolRow', () => {
                 }),
             });
 
-            const container = screen.findByTestId('transcript-tool-calls-unit-tool') as any;
+            const container = screen.findByTestId('transcript-tool-calls-unit-tool');
             const style = flattenStyleProp(container?.props.style);
             expect(style.marginHorizontal).toBe(16);
             expect(style.borderTopLeftRadius).toBeUndefined();
@@ -244,7 +292,7 @@ describe('ToolCallsGroupUnitToolRow', () => {
             expect(style.backgroundColor).toBeTruthy();
             expect(style.marginBottom).toBeUndefined();
 
-            const gutterLine = screen.findByTestId('transcript-tool-calls-unit-gutter-line') as any;
+            const gutterLine = screen.findByTestId('transcript-tool-calls-unit-gutter-line');
             expect(gutterLine).not.toBeNull();
             expect(flattenStyleProp(gutterLine?.props.style).marginBottom).toBeUndefined();
         }
@@ -263,7 +311,7 @@ describe('ToolCallsGroupUnitToolRow', () => {
                 }),
             });
 
-            const toolRow = screen.findByTestId('transcript-tool-calls-tool-row') as any;
+            const toolRow = screen.findByTestId('transcript-tool-calls-tool-row');
             const style = flattenStyleProp(toolRow?.props.style);
             expect(style.paddingBottom ?? 0).toBe(0);
             expect(style.marginBottom ?? 0).toBe(0);

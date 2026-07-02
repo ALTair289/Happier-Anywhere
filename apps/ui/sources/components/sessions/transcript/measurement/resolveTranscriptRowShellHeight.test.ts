@@ -65,6 +65,29 @@ describe('resolveTranscriptRowShellHeight', () => {
         expect(reservation?.kind).not.toBe('exact');
     });
 
+    it('suppresses an inherited floor during a shrink-capable structural transition render', () => {
+        const reconciler = createTestTranscriptMeasurementReconciler();
+        const runningHeader = stableSignature({
+            itemId: 'group-1#header',
+            kind: 'tool-group-header',
+            structuralKey: 'group-1|status:running',
+        });
+        const completedHeader = stableSignature({
+            itemId: 'group-1#header',
+            kind: 'tool-group-header',
+            structuralKey: 'group-1|status:completed',
+        });
+        reconciler.recordMeasuredHeight({ signature: runningHeader, heightPx: 36 });
+
+        const reservation = resolveTranscriptRowShellHeight({
+            previousSignature: runningHeader,
+            reconciler,
+            signature: completedHeader,
+        });
+
+        expect(reservation).toBeUndefined();
+    });
+
     it('returns undefined for an unknown streaming row with no sample', () => {
         const reconciler = createTestTranscriptMeasurementReconciler();
         const signature = stableSignature({ rowState: 'streaming' });

@@ -114,7 +114,8 @@ vi.mock('@/utils/system/fireAndForget', () => ({
     fireAndForget: (promise: any) => promise,
 }));
 
-vi.mock('@/sync/domains/messages/messageRouteIds', () => ({
+vi.mock('@/sync/domains/messages/messageRouteIds', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('@/sync/domains/messages/messageRouteIds')>()),
     resolveMessageRouteIdForDisplay: () => null,
 }));
 

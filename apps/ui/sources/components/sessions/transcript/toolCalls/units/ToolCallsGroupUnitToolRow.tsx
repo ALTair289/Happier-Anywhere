@@ -11,7 +11,10 @@ import {
     type TranscriptSessionCommonProps,
     useTranscriptSessionCommon,
 } from '@/components/sessions/transcript/transcriptSessionCommon';
+import { ToolCallPinAction } from '@/components/sessions/transcript/toolCalls/ToolCallPinAction';
+import { resolveMessagePinAvailability } from '@/components/sessions/transcript/messageActions/resolveMessagePinAvailability';
 import { resolveMessageRouteIdForDisplay } from '@/sync/domains/messages/messageRouteIds';
+import type { PersistedSessionMessagePinV1 } from '@/sync/domains/messages/pins/sessionMessagePins';
 import { useEnsureSidechainsLoaded } from '@/hooks/session/useEnsureSidechainsLoaded';
 
 import {
@@ -32,6 +35,8 @@ type ToolCallsGroupUnitToolRowProps = ToolCallsGroupUnitRowCommonProps & Readonl
     expanded: boolean;
     forcePermissionPromptsInTranscript?: boolean;
     approvalRequests?: readonly OpenApprovalArtifactForSession[];
+    messagePins?: readonly PersistedSessionMessagePinV1[];
+    onToggleToolPin?: (pin: PersistedSessionMessagePinV1) => void;
 }>;
 
 export const ToolCallsGroupUnitToolRow = React.memo(function ToolCallsGroupUnitToolRow(
@@ -81,6 +86,22 @@ export const ToolCallsGroupUnitToolRowWithSessionCommon = React.memo(function To
     const nestedMessageId = props.interaction.disableToolNavigation
         ? undefined
         : resolveMessageRouteIdForDisplay({ message, messagesById, reducerState });
+    const toolPinAvailability = React.useMemo(() => resolveMessagePinAvailability({
+        sessionId: props.sessionId,
+        seq: message.seq ?? null,
+        transcriptBlockIndex: message.transcriptBlockIndex ?? null,
+        routeMessageId: nestedMessageId ?? null,
+        role: 'tool',
+        pins: props.messagePins ?? [],
+        readOnlyContext: props.interaction.permissionDisabledReason === 'readOnly',
+    }), [message.seq, message.transcriptBlockIndex, nestedMessageId, props.interaction.permissionDisabledReason, props.messagePins, props.sessionId]);
+    const toolPinAction = props.onToggleToolPin && toolPinAvailability.status === 'available' ? (
+        <ToolCallPinAction
+            availability={toolPinAvailability}
+            onTogglePin={props.onToggleToolPin}
+            testID={`transcript-tool-call-pin:${message.id}`}
+        />
+    ) : null;
 
     return (
         <ToolCallsGroupUnitRowFrame
@@ -104,6 +125,9 @@ export const ToolCallsGroupUnitToolRowWithSessionCommon = React.memo(function To
                                 nestedMessageId,
                                 forcePermissionPromptsInTranscript: props.forcePermissionPromptsInTranscript,
                                 approvalRequests: props.approvalRequests,
+                                messagePins: props.messagePins,
+                                onToggleToolPin: props.onToggleToolPin,
+                                toolPinAction,
                                 interaction: props.interaction,
                                 forkCommon: props.forkCommon,
                                 messageDisplayCommon: props.messageDisplayCommon,
