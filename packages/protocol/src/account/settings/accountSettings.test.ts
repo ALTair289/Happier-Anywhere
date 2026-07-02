@@ -105,6 +105,16 @@ describe('accountSettings', () => {
     expect(accountSettingsParse({ sessionPendingQueueDrainMode: 'everything' }).sessionPendingQueueDrainMode).toBe('one_at_a_time');
   });
 
+  it('defaults pending queue delivery timing to foreground-ready and falls back for malformed values', () => {
+    expect(accountSettingsParse({}).sessionPendingQueueDeliveryTiming).toBe('after_foreground_ready');
+    expect(accountSettingsParse({
+      sessionPendingQueueDeliveryTiming: 'after_runtime_idle',
+    }).sessionPendingQueueDeliveryTiming).toBe('after_runtime_idle');
+    expect(accountSettingsParse({
+      sessionPendingQueueDeliveryTiming: 'after_everything',
+    }).sessionPendingQueueDeliveryTiming).toBe('after_foreground_ready');
+  });
+
   it('defaults connected-service provider state sharing to shared configuration and shared session state', () => {
     const parsed = accountSettingsParse({});
 
@@ -593,7 +603,7 @@ describe('accountSettings', () => {
     expect(parsed.futureField).toEqual({ keep: true });
   });
 
-  it('disables cross-session session-agent controls by default (opt-in)', () => {
+  it('defaults session-agent coordination controls to allowed while keeping destructive controls disabled', () => {
     const parsed = accountSettingsParse({});
     const settings = parsed.actionsSettingsV1;
 
@@ -601,20 +611,84 @@ describe('accountSettings', () => {
     expect(isActionEnabledByActionsSettings('session.stop' as any, settings, { surface: 'mcp' } as any)).toBe(true);
     expect(isActionEnabledByActionsSettings('session.stop' as any, settings, { surface: 'cli' } as any)).toBe(true);
 
-    // Session agents controlling other sessions is opt-in and must be fail-closed by default.
+    // Destructive/product-courtesy controls remain opt-in.
     expect(isActionEnabledByActionsSettings('session.stop' as any, settings, { surface: 'session_agent' } as any)).toBe(false);
-    // Title changes are safe and are required for provider UX (auto-title on first message).
+    expect(isActionEnabledByActionsSettings('session.archive' as any, settings, { surface: 'session_agent' } as any)).toBe(false);
+    expect(isActionEnabledByActionsSettings('session.unarchive' as any, settings, { surface: 'session_agent' } as any)).toBe(false);
+    expect(isActionEnabledByActionsSettings('session.permission.respond' as any, settings, { surface: 'session_agent' } as any)).toBe(false);
+    expect(isActionEnabledByActionsSettings('session.user_action.answer' as any, settings, { surface: 'session_agent' } as any)).toBe(false);
+    expect(isActionEnabledByActionsSettings('session.usageLimit.consumeResetCredit' as any, settings, { surface: 'session_agent' } as any)).toBe(false);
+
+    // Spawn, coordination, reads, and useful runtime mutations are allowed by default.
+    expect(isActionEnabledByActionsSettings('session.spawn_new' as any, settings, { surface: 'session_agent' } as any)).toBe(true);
     expect(isActionEnabledByActionsSettings('session.title.set' as any, settings, { surface: 'session_agent' } as any)).toBe(true);
-    expect(isActionEnabledByActionsSettings('session.message.send' as any, settings, { surface: 'session_agent' } as any)).toBe(false);
-    expect(isActionEnabledByActionsSettings('session.list' as any, settings, { surface: 'session_agent' } as any)).toBe(false);
-    expect(isActionEnabledByActionsSettings('session.transcript.get' as any, settings, { surface: 'session_agent' } as any)).toBe(false);
-    expect(isActionEnabledByActionsSettings('session.events.get' as any, settings, { surface: 'session_agent' } as any)).toBe(false);
-    expect(isActionEnabledByActionsSettings('session.usageLimit.waitResume.enable' as any, settings, { surface: 'session_agent' } as any)).toBe(false);
-    expect(isActionEnabledByActionsSettings('session.usageLimit.waitResume.cancel' as any, settings, { surface: 'session_agent' } as any)).toBe(false);
-    expect(isActionEnabledByActionsSettings('session.usageLimit.checkNow' as any, settings, { surface: 'session_agent' } as any)).toBe(false);
+    expect(isActionEnabledByActionsSettings('session.message.send' as any, settings, { surface: 'session_agent' } as any)).toBe(true);
+    expect(isActionEnabledByActionsSettings('session.list' as any, settings, { surface: 'session_agent' } as any)).toBe(true);
+    expect(isActionEnabledByActionsSettings('session.status.get' as any, settings, { surface: 'session_agent' } as any)).toBe(true);
+    expect(isActionEnabledByActionsSettings('session.transcript.get' as any, settings, { surface: 'session_agent' } as any)).toBe(true);
+    expect(isActionEnabledByActionsSettings('session.events.get' as any, settings, { surface: 'session_agent' } as any)).toBe(true);
+    expect(isActionEnabledByActionsSettings('session.permission_mode.set' as any, settings, { surface: 'session_agent' } as any)).toBe(true);
+    expect(isActionEnabledByActionsSettings('session.model.set' as any, settings, { surface: 'session_agent' } as any)).toBe(true);
+    expect(isActionEnabledByActionsSettings('session.mode.set' as any, settings, { surface: 'session_agent' } as any)).toBe(true);
+    expect(isActionEnabledByActionsSettings('session.usageLimit.waitResume.enable' as any, settings, { surface: 'session_agent' } as any)).toBe(true);
+    expect(isActionEnabledByActionsSettings('session.usageLimit.waitResume.cancel' as any, settings, { surface: 'session_agent' } as any)).toBe(true);
+    expect(isActionEnabledByActionsSettings('session.usageLimit.checkNow' as any, settings, { surface: 'session_agent' } as any)).toBe(true);
   });
 
-  it('migrates legacy default session-agent action settings to keep session.title.set enabled', () => {
+  it('defaults session-agent spawn override policy to allowing explicit overrides', () => {
+    const parsed = accountSettingsParse({});
+
+    expect(parsed.sessionAgentSpawnPolicyV1).toEqual({
+      v: 1,
+      allowCustomDirectory: true,
+      allowCrossMachine: true,
+      allowBackendTargetOverride: true,
+      allowModelOverride: true,
+      allowPermissionModeOverride: true,
+      allowAgentModeOverride: true,
+      allowConfigOptionOverrides: true,
+      allowProfileOverride: true,
+      allowEnvironmentVariables: true,
+      allowConnectedServicesOverride: true,
+      allowMcpSelectionOverride: true,
+      allowTranscriptStorageOverride: true,
+      permissionCeiling: null,
+    });
+  });
+
+  it('accepts session-agent spawn override policy restrictions', () => {
+    const parsed = accountSettingsParse({
+      sessionAgentSpawnPolicyV1: {
+        v: 1,
+        allowCustomDirectory: false,
+        allowEnvironmentVariables: false,
+        allowMcpSelectionOverride: false,
+        permissionCeiling: 'acceptEdits',
+      },
+    });
+
+    expect(parsed.sessionAgentSpawnPolicyV1).toMatchObject({
+      allowCustomDirectory: false,
+      allowEnvironmentVariables: false,
+      allowMcpSelectionOverride: false,
+      permissionCeiling: 'acceptEdits',
+    });
+    expect(parsed.sessionAgentSpawnPolicyV1.allowModelOverride).toBe(true);
+    expect(parsed.sessionAgentSpawnPolicyV1.allowConnectedServicesOverride).toBe(true);
+  });
+
+  it('falls back to no session-agent spawn permission ceiling for invalid policy values', () => {
+    const parsed = accountSettingsParse({
+      sessionAgentSpawnPolicyV1: {
+        v: 1,
+        permissionCeiling: 'not-a-permission-mode',
+      },
+    });
+
+    expect(parsed.sessionAgentSpawnPolicyV1.permissionCeiling).toBeNull();
+  });
+
+  it('migrates legacy default session-agent action settings to the current default-open matrix', () => {
     const legacyDefaultDisabled = [
       'session.stop',
       'session.title.set',
@@ -646,9 +720,13 @@ describe('accountSettings', () => {
 
     expect(isActionEnabledByActionsSettings('session.stop' as any, settings, { surface: 'session_agent' } as any)).toBe(false);
     expect(isActionEnabledByActionsSettings('session.title.set' as any, settings, { surface: 'session_agent' } as any)).toBe(true);
+    expect(isActionEnabledByActionsSettings('session.message.send' as any, settings, { surface: 'session_agent' } as any)).toBe(true);
+    expect(isActionEnabledByActionsSettings('session.permission_mode.set' as any, settings, { surface: 'session_agent' } as any)).toBe(true);
+    expect(isActionEnabledByActionsSettings('session.model.set' as any, settings, { surface: 'session_agent' } as any)).toBe(true);
+    expect(isActionEnabledByActionsSettings('session.archive' as any, settings, { surface: 'session_agent' } as any)).toBe(false);
   });
 
-  it('keeps session.title.set enabled even when legacy actions settings also contain approval requirements', () => {
+  it('migrates legacy session-agent defaults without dropping unrelated action settings fields', () => {
     const legacyDefaultDisabled = [
       'session.stop',
       'session.title.set',
@@ -679,6 +757,7 @@ describe('accountSettings', () => {
     });
 
     expect(isActionEnabledByActionsSettings('session.title.set' as any, parsed.actionsSettingsV1, { surface: 'session_agent' } as any)).toBe(true);
-    expect(isActionEnabledByActionsSettings('session.message.send' as any, parsed.actionsSettingsV1, { surface: 'session_agent' } as any)).toBe(false);
+    expect(isActionEnabledByActionsSettings('session.message.send' as any, parsed.actionsSettingsV1, { surface: 'session_agent' } as any)).toBe(true);
+    expect(parsed.actionsSettingsV1.actions['session.message.send' as any]?.approvalRequiredSurfaces).toEqual(['cli']);
   });
 });

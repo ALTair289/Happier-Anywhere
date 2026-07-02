@@ -38,6 +38,10 @@
       "types": "./dist/installablesPolicy.d.ts",
       "default": "./dist/installablesPolicy.js"
     },
+    "./testing/accountScopedCipherFixtures": {
+      "types": "./dist/testing/accountScopedCipherFixtures.d.ts",
+      "default": "./dist/testing/accountScopedCipherFixtures.js"
+    },
     "./capabilities": {
       "types": "./dist/capabilities.d.ts",
       "default": "./dist/capabilities.js"
@@ -69,7 +73,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "node -e \"const fs=require('node:fs');fs.rmSync('dist', { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });\" && node scripts/generate-embedded-feature-policies.mjs && node ../../scripts/workspaces/runTypeScriptCli.mjs -p tsconfig.json",
+    "build": "node scripts/generate-embedded-feature-policies.mjs && node ../../scripts/workspaces/buildTypeScriptPackageDist.mjs -p tsconfig.json",
     "test": "node ../../node_modules/vitest/vitest.mjs run --config ../../vitest.config.ts",
     "pretypecheck": "node scripts/generate-embedded-feature-policies.mjs",
     "postinstall:real": "yarn -s build",

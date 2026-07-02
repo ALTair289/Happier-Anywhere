@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   agentEventAttentionImpact,
+  agentEventLocalIdAttentionImpact,
   TranscriptRawAgentEventV1Schema,
   TranscriptRawRecordV1Schema,
   type TranscriptRawAgentEventV1,
@@ -9,6 +10,7 @@ import {
   type RuntimeConfigOutcomeStatusV1,
   type RuntimeConfigOutcomeTimingV1,
 } from './transcriptRawRecordV1.js';
+import * as transcriptProtocol from './transcriptRawRecordV1.js';
 
 describe('TranscriptRawRecordV1Schema', () => {
   it('parses user text records with extra fields', () => {
@@ -97,6 +99,8 @@ describe('TranscriptRawRecordV1Schema', () => {
       'connected-service-account-switch-deferral-superseded',
       'connected-service-account-switch-attempt',
       'provider-state-sharing-degraded',
+      'provider-quota-wait',
+      'provider-quota-recovered',
     ] as const satisfies ReadonlyArray<TranscriptRawAgentEventV1['type']>;
 
     for (const type of maintenanceEventTypes) {
@@ -112,6 +116,91 @@ describe('TranscriptRawRecordV1Schema', () => {
       affectsUnread: true,
       affectsMeaningfulActivity: true,
     });
+  });
+
+  it('classifies maintenance event local ids as non-unread system activity', () => {
+    expect(agentEventLocalIdAttentionImpact('provider-quota-wait:quota-blocked_openai-codex_main:reset_at_1900000:connected_service_group_quota_exhausted')).toEqual({
+      affectsUnread: false,
+      affectsMeaningfulActivity: false,
+    });
+    expect(agentEventLocalIdAttentionImpact('provider-quota-recovered:quota-blocked_openai-codex_main:reset_at_1900000:fresh_quota_evidence')).toEqual({
+      affectsUnread: false,
+      affectsMeaningfulActivity: false,
+    });
+    expect(agentEventLocalIdAttentionImpact('ready:local')).toBeNull();
+    expect(agentEventLocalIdAttentionImpact('not-an-event')).toBeNull();
+  });
+
+  it('builds deterministic sanitized agent event local ids', () => {
+    const buildAgentEventLocalId = (transcriptProtocol as Record<string, unknown>).buildAgentEventLocalId;
+    expect(typeof buildAgentEventLocalId).toBe('function');
+    if (typeof buildAgentEventLocalId !== 'function') return;
+
+    expect(buildAgentEventLocalId('provider-quota-wait', [
+      'openai-codex',
+      'main group',
+      'reset_at_1900000',
+    ])).toBe('provider-quota-wait:openai-codex:main_group:reset_at_1900000');
+    expect(buildAgentEventLocalId('provider-quota-wait', [
+      'openai-codex',
+      'main group',
+      'reset_at_1900000',
+    ])).toBe(buildAgentEventLocalId('provider-quota-wait', [
+      'openai-codex',
+      'main group',
+      'reset_at_1900000',
+    ]));
+  });
+
+  it('classifies runtime-auth recovery maintenance attention by status', () => {
+    expect(agentEventAttentionImpact({
+      type: 'connected-service-runtime-auth-recovery',
+      status: 'retry_scheduled',
+    })).toEqual({
+      affectsUnread: false,
+      affectsMeaningfulActivity: false,
+    });
+    expect(agentEventAttentionImpact({
+      type: 'connected-service-runtime-auth-recovery',
+      status: 'recovered',
+    })).toEqual({
+      affectsUnread: false,
+      affectsMeaningfulActivity: false,
+    });
+    expect(agentEventAttentionImpact({
+      type: 'connected-service-runtime-auth-recovery',
+      status: 'cancelled',
+    })).toEqual({
+      affectsUnread: false,
+      affectsMeaningfulActivity: false,
+    });
+    expect(agentEventAttentionImpact({
+      type: 'connected-service-runtime-auth-recovery',
+      status: 'dead_lettered',
+    })).toEqual({
+      affectsUnread: true,
+      affectsMeaningfulActivity: true,
+    });
+    expect(agentEventLocalIdAttentionImpact(
+      'connected-service-runtime-auth-recovery:openai-codex:work:retry_scheduled',
+    )).toEqual({
+      affectsUnread: false,
+      affectsMeaningfulActivity: false,
+    });
+    expect(agentEventLocalIdAttentionImpact(
+      'connected-service-runtime-auth-recovery:openai-codex:work:dead_lettered',
+    )).toEqual({
+      affectsUnread: true,
+      affectsMeaningfulActivity: true,
+    });
+    for (const reason of ['retry_scheduled', 'recovered', 'cancelled'] as const) {
+      expect(agentEventLocalIdAttentionImpact(
+        `connected-service-runtime-auth-recovery:openai-codex:group:profile:dead_lettered:1:false:${reason}`,
+      )).toEqual({
+        affectsUnread: true,
+        affectsMeaningfulActivity: true,
+      });
+    }
   });
 
   it('parses codex turn_aborted lifecycle records', () => {

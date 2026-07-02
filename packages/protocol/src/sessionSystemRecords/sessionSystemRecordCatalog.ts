@@ -1,7 +1,9 @@
 import { z } from 'zod';
 
+import { SessionWorkflowRunSnapshotV1Schema } from '../sessionWorkflowActivity/sessionWorkflowRunSnapshotV1.js';
 import { SessionSummaryShardV1Schema } from '../structuredMessages/sessionSummaryShardV1.js';
 import { SessionSynopsisV1Schema } from '../structuredMessages/sessionSynopsisV1.js';
+import { SESSION_SYSTEM_RECORD_ACTIVITY_NAMESPACE } from './activity/activitySystemRecordKinds.js';
 import { SESSION_SYSTEM_RECORD_MEMORY_NAMESPACE } from './memory/memorySystemRecordKinds.js';
 
 export type SessionSystemRecordKindDefinition = Readonly<{
@@ -26,6 +28,13 @@ export const SESSION_SYSTEM_RECORD_CATALOG = defineSessionSystemRecordCatalog({
       },
       'synopsis.v1': {
         payloadSchema: SessionSynopsisV1Schema,
+      },
+    },
+  },
+  [SESSION_SYSTEM_RECORD_ACTIVITY_NAMESPACE]: {
+    kinds: {
+      'workflow_run.v1': {
+        payloadSchema: SessionWorkflowRunSnapshotV1Schema,
       },
     },
   },

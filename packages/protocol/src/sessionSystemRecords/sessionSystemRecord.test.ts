@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import * as protocol from '../index.js';
+import { SESSION_WORKFLOW_RUN_SNAPSHOT_PROJECTION_VERSION } from '../sessionWorkflowActivity/sessionWorkflowRunSnapshotV1.js';
 
 type SafeParseResult = Readonly<{ success: boolean; data?: unknown }>;
 type ProtocolSchemaExport = Readonly<{ safeParse: (value: unknown) => SafeParseResult; parse: (value: unknown) => unknown }>;
@@ -44,6 +45,23 @@ function validRecord() {
     content: { t: 'encrypted', c: 'ciphertext' },
     createdAt: '2026-05-19T12:00:00.000Z',
     updatedAt: '2026-05-19T12:01:00.000Z',
+  };
+}
+
+function validWorkflowRunPayload() {
+  return {
+    v: 1,
+    projectionVersion: SESSION_WORKFLOW_RUN_SNAPSHOT_PROJECTION_VERSION,
+    runId: 'wf_demo',
+    backendId: 'claude',
+    title: 'Demo workflow',
+    status: 'active',
+    recordRevision: '1',
+    updatedAt: 1000,
+    totalAgents: 1,
+    completedAgents: 0,
+    phases: [{ id: 'phase:1', title: 'Research', order: 1, agentIds: ['a1'] }],
+    agents: [{ id: 'a1', title: 'web_search', status: 'active', phaseIndex: 1, updatedAt: 1000 }],
   };
 }
 
@@ -95,6 +113,78 @@ describe('session system record protocol schemas', () => {
         },
       },
     }).success).toBe(false);
+  });
+
+  it('accepts encrypted system-record upsert content for the registered activity workflow kind', () => {
+    const schema = protocolSchema('SessionSystemRecordUpsertRequestSchema');
+
+    const parsed = schema.safeParse({
+      namespace: 'activity',
+      kind: 'workflow_run.v1',
+      localId: 'activity:workflow_run:v1:wf_demo',
+      content: { t: 'encrypted', c: 'ciphertext' },
+    });
+
+    expect(parsed.success).toBe(true);
+  });
+
+  it('accepts plain system-record upsert content for the registered activity workflow kind', () => {
+    const schema = protocolSchema('SessionSystemRecordUpsertRequestSchema');
+
+    const parsed = schema.safeParse({
+      namespace: 'activity',
+      kind: 'workflow_run.v1',
+      localId: 'activity:workflow_run:v1:wf_demo',
+      content: { t: 'plain', v: validWorkflowRunPayload() },
+    });
+
+    expect(parsed.success).toBe(true);
+  });
+
+  it('rejects plain activity content that does not match the workflow_run.v1 payload', () => {
+    const schema = protocolSchema('SessionSystemRecordUpsertRequestSchema');
+
+    expect(schema.safeParse({
+      namespace: 'activity',
+      kind: 'workflow_run.v1',
+      localId: 'activity:workflow_run:v1:wf_demo',
+      content: { t: 'plain', v: { ...validWorkflowRunPayload(), status: 'running' } },
+    }).success).toBe(false);
+    expect(schema.safeParse({
+      namespace: 'activity',
+      kind: 'workflow_run.v1',
+      localId: 'activity:workflow_run:v1:wf_demo',
+      content: { t: 'plain', v: { anything: true } },
+    }).success).toBe(false);
+  });
+
+  it('rejects cross-namespace/kind pairs that are not registered together', () => {
+    const schema = protocolSchema('SessionSystemRecordUpsertRequestSchema');
+
+    // workflow kind under the memory namespace is not a registered pair.
+    expect(schema.safeParse({
+      namespace: 'memory',
+      kind: 'workflow_run.v1',
+      localId: 'memory:workflow_run:v1:wf_demo',
+      content: { t: 'encrypted', c: 'ciphertext' },
+    }).success).toBe(false);
+    // memory kind under the activity namespace is not a registered pair.
+    expect(schema.safeParse({
+      namespace: 'activity',
+      kind: 'synopsis.v1',
+      localId: 'activity:synopsis:v1:25',
+      content: { t: 'encrypted', c: 'ciphertext' },
+    }).success).toBe(false);
+  });
+
+  it('exposes the activity namespace and workflow kind through the catalog', () => {
+    const isRegistered = (protocol as Record<string, unknown>).isRegisteredSessionSystemRecordKind as (
+      namespace: string,
+      kind: string,
+    ) => boolean;
+    expect(isRegistered('activity', 'workflow_run.v1')).toBe(true);
+    expect(isRegistered('memory', 'workflow_run.v1')).toBe(false);
+    expect(isRegistered('activity', 'synopsis.v1')).toBe(false);
   });
 
   it('rejects unregistered namespaces, kinds, and blank local ids', () => {

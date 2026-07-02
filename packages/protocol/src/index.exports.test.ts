@@ -123,6 +123,26 @@ describe('protocol package root exports', () => {
         expect(typeof (protocol as any).SetSessionFolderAssignmentRequestSchema?.safeParse).toBe('function');
     });
 
+    it('exports session organization schemas', () => {
+        expect(typeof (protocol as any).SessionOrganizationSnapshotRequestSchema?.safeParse).toBe('function');
+        expect(typeof (protocol as any).SessionOrganizationSnapshotResponseSchema?.safeParse).toBe('function');
+        expect(typeof (protocol as any).SessionOrganizationPinSchema?.safeParse).toBe('function');
+        expect(typeof (protocol as any).SessionOrganizationFolderSchema?.safeParse).toBe('function');
+        expect(typeof (protocol as any).SessionOrganizationTagSchema?.safeParse).toBe('function');
+        expect(typeof (protocol as any).SessionOrganizationOrderEntrySchema?.safeParse).toBe('function');
+        expect(typeof (protocol as any).SessionOrganizationLabelSchema?.safeParse).toBe('function');
+        expect(typeof (protocol as any).SetSessionPinRequestSchema?.safeParse).toBe('function');
+        expect(typeof (protocol as any).ReorderSessionOrganizationRequestSchema?.safeParse).toBe('function');
+        expect(typeof (protocol as any).CreateOrUpdateSessionOrganizationFolderRequestSchema?.safeParse).toBe('function');
+        expect(typeof (protocol as any).DeleteSessionOrganizationFolderRequestSchema?.safeParse).toBe('function');
+        expect(typeof (protocol as any).CreateOrUpdateSessionOrganizationTagRequestSchema?.safeParse).toBe('function');
+        expect(typeof (protocol as any).DeleteSessionOrganizationTagRequestSchema?.safeParse).toBe('function');
+        expect(typeof (protocol as any).SetSessionTagAssignmentsRequestSchema?.safeParse).toBe('function');
+        expect(typeof (protocol as any).UpsertSessionOrganizationLabelRequestSchema?.safeParse).toBe('function');
+        expect(typeof (protocol as any).DeleteSessionOrganizationLabelRequestSchema?.safeParse).toBe('function');
+        expect(typeof (protocol as any).ImportLegacySessionOrganizationRequestSchema?.safeParse).toBe('function');
+    });
+
     it('does not export the removed sync-only workspace replication RPC surface', () => {
         expect((protocol as any).WorkspaceReplicationEndpointSchema).toBeUndefined();
         expect((protocol as any).WorkspaceReplicationDiffSummarySchema).toBeUndefined();

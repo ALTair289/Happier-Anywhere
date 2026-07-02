@@ -73,6 +73,8 @@ export {
   SubAgentResultV2Schema,
   TaskInputV2Schema,
   TaskResultV2Schema,
+  WorkflowInputV2Schema,
+  WorkflowResultV2Schema,
   ReasoningInputV2Schema,
   ReasoningResultV2Schema,
   EnterPlanModeInputV2Schema,

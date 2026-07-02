@@ -53,6 +53,22 @@ export {
   type MemorySessionSystemRecordKind,
 } from './memory/memorySystemRecordKinds.js';
 export {
+  ACTIVITY_SESSION_SYSTEM_RECORD_KINDS,
+  SESSION_SYSTEM_RECORD_ACTIVITY_NAMESPACE,
+  ActivitySessionSystemRecordKindSchema,
+  buildWorkflowRunSystemRecordLocalId,
+  type ActivitySessionSystemRecordKind,
+} from './activity/activitySystemRecordKinds.js';
+export {
+  ActivitySessionSystemRecordPayloadSchema,
+  ActivitySessionSystemRecordRawPayloadSchema,
+  ActivityWorkflowRunSystemRecordPayloadSchema,
+  isActivitySessionSystemRecordKind,
+  type ActivitySessionSystemRecordPayload,
+  type ActivitySessionSystemRecordRawPayload,
+  type ActivityWorkflowRunSystemRecordPayload,
+} from './activity/activitySystemRecordPayload.js';
+export {
   MemorySessionSystemRecordPayloadSchema,
   MemorySummaryShardSystemRecordPayloadSchema,
   MemorySynopsisSystemRecordPayloadSchema,

@@ -1042,6 +1042,14 @@ const AGENT_EVENT_TYPES_WITHOUT_USER_ATTENTION = new Set<TranscriptRawAgentEvent
   'connected-service-account-switch-deferral-superseded',
   'connected-service-account-switch-attempt',
   'provider-state-sharing-degraded',
+  'provider-quota-wait',
+  'provider-quota-recovered',
+]);
+
+const RUNTIME_AUTH_RECOVERY_STATUSES_WITHOUT_USER_ATTENTION = new Set<ConnectedServiceRuntimeAuthRecoveryTranscriptStatusV1>([
+  'retry_scheduled',
+  'recovered',
+  'cancelled',
 ]);
 
 function readAgentEventType(value: Pick<TranscriptRawAgentEventV1, 'type'> | null | undefined): TranscriptRawAgentEventV1['type'] | null {
@@ -1050,11 +1058,77 @@ function readAgentEventType(value: Pick<TranscriptRawAgentEventV1, 'type'> | nul
     : null;
 }
 
-export function agentEventAttentionImpact(event: Pick<TranscriptRawAgentEventV1, 'type'> | null | undefined): SessionMessageAttentionImpact {
+function sanitizeAgentEventLocalIdPart(value: unknown): string | null {
+  const normalized = String(value ?? '').trim().replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '');
+  return normalized.length > 0 ? normalized : null;
+}
+
+export function buildAgentEventLocalId(
+  type: TranscriptRawAgentEventV1['type'],
+  parts: ReadonlyArray<unknown>,
+): string {
+  const normalizedType = sanitizeAgentEventLocalIdPart(type);
+  if (!normalizedType) {
+    throw new Error('Agent event local id type must not be empty');
+  }
+  const normalizedParts = parts.map(sanitizeAgentEventLocalIdPart).filter((part): part is string => part !== null);
+  return [normalizedType, ...normalizedParts].join(':');
+}
+
+function readAgentEventLocalIdType(value: string | null | undefined): TranscriptRawAgentEventV1['type'] | null {
+  if (typeof value !== 'string') return null;
+  const candidateType = value.trim().split(':', 1)[0];
+  if (candidateType === 'connected-service-runtime-auth-recovery') {
+    return candidateType;
+  }
+  return AGENT_EVENT_TYPES_WITHOUT_USER_ATTENTION.has(candidateType as TranscriptRawAgentEventV1['type'])
+    ? candidateType as TranscriptRawAgentEventV1['type']
+    : null;
+}
+
+function readRuntimeAuthRecoveryStatusFromLocalId(localId: string): ConnectedServiceRuntimeAuthRecoveryTranscriptStatusV1 | null {
+  const parts = localId.trim().split(':');
+  const currentShapeStatus = ConnectedServiceRuntimeAuthRecoveryTranscriptStatusV1Schema.safeParse(parts[4]);
+  if (currentShapeStatus.success) return currentShapeStatus.data;
+
+  for (let index = 1; index < parts.length - 1; index++) {
+    if (parts[index] !== 'status') continue;
+    const labelledStatus = ConnectedServiceRuntimeAuthRecoveryTranscriptStatusV1Schema.safeParse(parts[index + 1]);
+    if (labelledStatus.success) return labelledStatus.data;
+  }
+
+  if (parts.length <= 4) {
+    const compactShapeStatus = ConnectedServiceRuntimeAuthRecoveryTranscriptStatusV1Schema.safeParse(parts[parts.length - 1]);
+    if (compactShapeStatus.success) return compactShapeStatus.data;
+  }
+  return null;
+}
+
+export function agentEventAttentionImpact(
+  event: (Pick<TranscriptRawAgentEventV1, 'type'> & { status?: unknown }) | null | undefined,
+): SessionMessageAttentionImpact {
   const type = readAgentEventType(event);
+  if (type === 'connected-service-runtime-auth-recovery') {
+    const parsedStatus = ConnectedServiceRuntimeAuthRecoveryTranscriptStatusV1Schema.safeParse(event?.status);
+    return parsedStatus.success && RUNTIME_AUTH_RECOVERY_STATUSES_WITHOUT_USER_ATTENTION.has(parsedStatus.data)
+      ? SESSION_MESSAGE_NO_USER_ATTENTION_IMPACT
+      : SESSION_MESSAGE_USER_ATTENTION_IMPACT;
+  }
   return type !== null && AGENT_EVENT_TYPES_WITHOUT_USER_ATTENTION.has(type)
     ? SESSION_MESSAGE_NO_USER_ATTENTION_IMPACT
     : SESSION_MESSAGE_USER_ATTENTION_IMPACT;
+}
+
+export function agentEventLocalIdAttentionImpact(localId: string | null | undefined): SessionMessageAttentionImpact | null {
+  const type = readAgentEventLocalIdType(localId);
+  if (type === null || typeof localId !== 'string') return null;
+  if (type === 'connected-service-runtime-auth-recovery') {
+    return agentEventAttentionImpact({
+      type,
+      status: readRuntimeAuthRecoveryStatusFromLocalId(localId),
+    });
+  }
+  return agentEventAttentionImpact({ type });
 }
 
 export const TranscriptRawAgentContentV1Schema = RawAgentContentSchema;
