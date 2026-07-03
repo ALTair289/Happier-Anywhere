@@ -21,12 +21,28 @@ function normalizeNonNegativeInteger(value: number): number {
 export function resolveJumpToBottomAffordanceState(params: Readonly<{
     distanceFromBottom: number;
     enabled: boolean;
+    /**
+     * Target-window mode with unloaded newer content: the session's live tail is below the
+     * rendered window, so local pin/distance facts cannot justify hiding the affordance.
+     */
+    hasMoreNewerBeyondRenderedWindow?: boolean;
     isPinned: boolean;
     minNewActivityCount: number;
     newActivityCount: number;
     revealThresholdPx: number;
 }>): JumpToBottomAffordanceState {
-    if (!params.enabled || params.isPinned) return HIDDEN_JUMP_TO_BOTTOM_AFFORDANCE;
+    if (!params.enabled) return HIDDEN_JUMP_TO_BOTTOM_AFFORDANCE;
+    if (params.hasMoreNewerBeyondRenderedWindow === true) {
+        const windowNewActivityCount = normalizeNonNegativeInteger(params.newActivityCount);
+        const windowMinNewActivityCount = Math.max(1, normalizeNonNegativeInteger(params.minNewActivityCount));
+        const hasWindowActivityBadge = windowNewActivityCount >= windowMinNewActivityCount;
+        return {
+            count: hasWindowActivityBadge ? windowNewActivityCount : 0,
+            isVisible: true,
+            presentation: 'standard',
+        };
+    }
+    if (params.isPinned) return HIDDEN_JUMP_TO_BOTTOM_AFFORDANCE;
 
     const distanceFromBottom = normalizeNonNegativeInteger(params.distanceFromBottom);
     const revealThresholdPx = normalizeNonNegativeInteger(params.revealThresholdPx);

@@ -3125,6 +3125,13 @@ const ChatListInternal = React.memo((props: {
     const promotePendingJumpSeqViewportSnapshot = React.useCallback((params: Readonly<{
         distanceFromBottom: number;
         metrics: WebTranscriptScrollMetrics;
+        /**
+         * 'interim' commits ONLY local visibility/pin state from a mid-landing write (keeps
+         * the pending promotion armed, never emits/persists the anchor — mid-landing metrics
+         * race window materialization). 'settled' (default) is the single full promotion
+         * taken from the final landing.
+         */
+        phase?: 'interim' | 'settled';
         requireRestorableAnchor?: boolean;
         scrollOffsetPx: number;
     }>): boolean => {
@@ -3146,16 +3153,22 @@ const ChatListInternal = React.memo((props: {
             pendingJumpSeqViewportPromotionRef.current = null;
             return false;
         }
+        if (promotion.status === 'wrong-space-anchor') {
+            // Wrong-space capture: commit nothing, keep the pending promotion armed for a
+            // later, correct capture (settled landing or a post-landing observation).
+            return false;
+        }
         const { state: viewportState } = promotion;
-        if (promotion.status === 'needs-restorable-anchor') {
+        if (promotion.status === 'needs-restorable-anchor' || params.phase === 'interim') {
             const distanceFromBottom = viewportState.offsetY;
-            wantsPinnedRef.current = false;
-            isPinnedRef.current = false;
+            const interimIsPinned = params.phase === 'interim' && viewportState.isPinned;
+            wantsPinnedRef.current = interimIsPinned;
+            isPinnedRef.current = interimIsPinned;
             lastPinOffsetForIntentRef.current = distanceFromBottom;
             lastScrollOffsetForIntentRef.current = promotion.scrollOffsetPx;
-            commitBottomFollowModeState({ dragSession: null, mode: 'released' });
+            commitBottomFollowModeState({ dragSession: null, mode: interimIsPinned ? 'following' : 'released' });
             commitJumpToBottomDistanceForVisibility(distanceFromBottom);
-            commitScrollPinState({ ...scrollPinRef.current, isPinned: false });
+            commitScrollPinState({ ...scrollPinRef.current, isPinned: interimIsPinned });
             return false;
         }
         pendingJumpSeqViewportPromotionRef.current = null;
@@ -3810,9 +3823,14 @@ const ChatListInternal = React.memo((props: {
             })
         );
     }, [jumpRevealOffsetThresholdPx]);
+    const jumpToBottomTargetWindowState = sync.getSessionTargetWindowState(props.sessionId);
     const jumpToBottomAffordance = resolveJumpToBottomAffordanceState({
         distanceFromBottom: jumpToBottomDistanceFromBottom,
         enabled: jumpEnabled,
+        // Any active target window means the rendered bottom is NOT the session's live tail
+        // (the window exits through markSessionLiveTailIntent, never by plain scrolling), so
+        // the affordance must stay offered regardless of local pin/distance facts.
+        hasMoreNewerBeyondRenderedWindow: jumpToBottomTargetWindowState.isWindowMode,
         isPinned: scrollPin.isPinned,
         minNewActivityCount: jumpMinNewCount,
         newActivityCount: scrollPin.newActivityCount,
@@ -9607,15 +9625,26 @@ const ChatListInternal = React.memo((props: {
             });
             const applied = executeViewportCommandWithAnimation(command, true);
             if (applied && Platform.OS === 'web') {
-                // Arm the promotion only; it is resolved ONCE from the SETTLED landing after
-                // the jump executor returns. Mid-landing snapshots race window materialization
-                // (transient dfb=0 states committed a pinned bottom-follow while the real
-                // viewport was released thousands of px up — live RG4 evidence).
                 pendingJumpSeqViewportPromotionRef.current = {
                     emitViewportChange: onViewportChangeRef.current,
                     seq: normalizedTargetSeq,
                     sessionId,
                 };
+                const metrics = resolveWebScrollMetrics();
+                if (metrics) {
+                    // Interim commit: local pin/pill state only. The FULL promotion (anchor
+                    // emit + pending consumption) happens once from the settled landing —
+                    // mid-landing snapshots race window materialization (transient dfb=0
+                    // states committed a pinned bottom-follow while the real viewport was
+                    // released thousands of px up — live RG4 evidence).
+                    promotePendingJumpSeqViewportSnapshot({
+                        distanceFromBottom: getWebTranscriptDistanceFromBottom(metrics),
+                        metrics,
+                        phase: 'interim',
+                        requireRestorableAnchor: true,
+                        scrollOffsetPx: metrics.scrollTop,
+                    });
+                }
             }
             return applied;
         };

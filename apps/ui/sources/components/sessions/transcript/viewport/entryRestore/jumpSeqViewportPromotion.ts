@@ -29,6 +29,7 @@ export function resolveJumpSeqViewportPromotionState(params: Readonly<{
 
 export type JumpSeqViewportPromotionResolution =
     | Readonly<{ status: 'wrong-session' }>
+    | Readonly<{ status: 'wrong-space-anchor' }>
     | Readonly<{ status: 'needs-restorable-anchor'; scrollOffsetPx: number; state: JumpSeqViewportPromotionState }>
     | Readonly<{ status: 'promote'; scrollOffsetPx: number; state: JumpSeqViewportPromotionState }>;
 
@@ -60,10 +61,13 @@ export function resolveJumpSeqViewportPromotion(params: Readonly<{
         && stampedAnchorSeq !== null
         && Math.abs(stampedAnchorSeq - params.pendingSeq) > JUMP_SEQ_PROMOTION_ANCHOR_SEQ_SLACK;
     if (anchorIsWrongSpace) {
-        // Drop the wrong-space anchor but keep the promotion alive: the viewport
-        // classification (pinned/released + distance) is still the landing's truth.
-        state = { ...state, anchor: null };
-    } else if (stampedAnchor !== state.anchor) {
+        // A capture anchored far from the target is a wrong-space viewport (mid-landing
+        // re-slice, or a later observation of some other viewport). Neither its anchor nor
+        // its viewport classification may promote — and the pending promotion stays armed
+        // so a later, correct capture can still resolve it.
+        return { status: 'wrong-space-anchor' };
+    }
+    if (stampedAnchor !== state.anchor) {
         state = { ...state, anchor: stampedAnchor };
     }
     const scrollOffsetPx = Math.max(0, Math.trunc(params.scrollOffsetPx));

@@ -22,6 +22,34 @@ describe('resolveJumpToBottomAffordanceState', () => {
         }).isVisible).toBe(false);
     });
 
+    it('shows the affordance in target-window mode with more-newer content regardless of local distance', () => {
+        // A jump landing can sit at the RENDERED window's bottom edge (local dfb=0) while the
+        // session tail is far below (hasMoreNewer). The affordance must offer the way back to
+        // the live tail (live RG4 cold-route evidence: pill absent after a correct landing).
+        expect(resolveJumpToBottomAffordanceState({
+            distanceFromBottom: 0,
+            enabled: true,
+            hasMoreNewerBeyondRenderedWindow: true,
+            isPinned: true,
+            minNewActivityCount: 1,
+            newActivityCount: 0,
+            revealThresholdPx: 500,
+        })).toEqual({
+            count: 0,
+            isVisible: true,
+            presentation: 'standard',
+        });
+        expect(resolveJumpToBottomAffordanceState({
+            distanceFromBottom: 0,
+            enabled: false,
+            hasMoreNewerBeyondRenderedWindow: true,
+            isPinned: true,
+            minNewActivityCount: 1,
+            newActivityCount: 0,
+            revealThresholdPx: 500,
+        }).isVisible).toBe(false);
+    });
+
     it('keeps the full jump affordance hidden in the near-bottom dead-zone without new activity', () => {
         expect(resolveJumpToBottomAffordanceState({
             distanceFromBottom: 300,

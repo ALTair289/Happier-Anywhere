@@ -155,11 +155,16 @@ export function performWebDomViewportCommand(
         if (!itemId) return false;
         const metrics = deps.resolveWebScrollMetrics();
         if (!metrics) return false;
-        if (!hotFooterItemId && !findWebTranscriptItemElement({ container: metrics.element, itemId })) {
-            // Unmounted recycler target: after a data replacement (target-window activation)
-            // the web recycler can keep its render window pinned to the previously measured
-            // range and never mount the target index at any scrollTop. Ask the renderer to
-            // re-anchor its window at the target; the DOM write below stays the offset owner.
+        if (
+            command.kind === 'jump-to-seq'
+            && !hotFooterItemId
+            && !findWebTranscriptItemElement({ container: metrics.element, itemId })
+        ) {
+            // Unmounted jump target: after a data replacement (target-window activation) the
+            // web recycler can keep its render window pinned to the previously measured range
+            // and never mount the target index at any scrollTop. Ask the renderer to re-anchor
+            // its window at the target; prepend/entry restores intentionally stay DOM-only so
+            // they preserve the existing anchor-recovery ownership contract.
             try {
                 deps.listRef.current?.scrollToIndex?.({ index, animated: false });
             } catch {

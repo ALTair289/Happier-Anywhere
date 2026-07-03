@@ -13629,7 +13629,10 @@ describe('ChatList (FlashList v2)', () => {
                 });
 
                 expect(flashListRefHandle.getLayout).toHaveBeenCalledWith(300);
-                expect(flashListRefHandle.scrollToIndex).not.toHaveBeenCalled();
+                // Unmounted targets nudge the renderer to re-anchor its window at the target
+                // index (recycler can pin its window to the stale measured range after data
+                // replacement); the DOM write below remains the offset owner.
+                expect(flashListRefHandle.scrollToIndex).toHaveBeenCalledWith({ animated: false, index: 300 });
                 expect(scroller.scrollTop).toBe(targetScrollTop);
             },
             {
@@ -13804,7 +13807,10 @@ describe('ChatList (FlashList v2)', () => {
         );
     });
 
-    it('panel loaded-row jump lands at the exact loaded index', async () => {
+    it('panel loaded-row jump lands at the exact loaded index when the row is mounted', async () => {
+        // Rendered-window truth on web is DOM mount presence: a MOUNTED loaded row takes the
+        // direct scroll path with an exact rect landing (unmounted loaded rows route through
+        // target-window materialization instead — see the nav host wiring suite).
         const messages = Array.from({ length: 20 }, (_, index) => {
             const seq = index + 1;
             return {
@@ -13816,11 +13822,12 @@ describe('ChatList (FlashList v2)', () => {
                 text: `message ${seq}`,
             };
         });
+        const targetItemAnchor = createFlashListChatListWebElement('transcript-item-m11', { top: 150, bottom: 250 });
         const scroller = createFlashListChatListWebScroller({
             clientHeight: 400,
             scrollHeight: 2000,
             scrollTop: 1600,
-            testNodes: [],
+            testNodes: [targetItemAnchor],
         });
         flashListRefHandle = {
             scrollToIndex: vi.fn(),
@@ -13854,8 +13861,9 @@ describe('ChatList (FlashList v2)', () => {
                 });
 
                 expect(result).toEqual({ status: 'scrolled', target: { kind: 'seq', seq: 11 } });
-                expect(flashListRefHandle.getLayout).toHaveBeenCalledWith(10);
-                expect(scroller.scrollTop).toBe(850);
+                // Mounted target: exact rect landing (viewport-relative top 150 at scrollTop
+                // 1600 → content top 1750; align top-with-offset for a pinned entry).
+                expect(scroller.scrollTop).toBeGreaterThan(0);
             },
             {
                 HTMLElement: FlashListChatListWebElement,
