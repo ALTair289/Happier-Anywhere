@@ -304,6 +304,7 @@ import {
     resolveTranscriptJumpTargetRequest,
     resolveTranscriptNavigationJumpPlan,
     resolveTranscriptNavigationPaneJumpRequest,
+    resolveTranscriptNavigationTargetInRenderedWindow,
     resolveTranscriptRouteJumpSeqPlan,
     resolveTranscriptTargetWindowLoadTarget,
 } from '@/components/sessions/transcript/viewport/window/useTranscriptTargetWindowHostAdapter';
@@ -3144,10 +3145,6 @@ const ChatListInternal = React.memo((props: {
         if (promotion.status === 'wrong-session') {
             pendingJumpSeqViewportPromotionRef.current = null;
             return false;
-        }
-        if (promotion.status === 'stale-anchor') {
-            pendingJumpSeqViewportPromotionRef.current = null;
-            return true;
         }
         const { state: viewportState } = promotion;
         if (promotion.status === 'needs-restorable-anchor') {
@@ -9610,20 +9607,15 @@ const ChatListInternal = React.memo((props: {
             });
             const applied = executeViewportCommandWithAnimation(command, true);
             if (applied && Platform.OS === 'web') {
+                // Arm the promotion only; it is resolved ONCE from the SETTLED landing after
+                // the jump executor returns. Mid-landing snapshots race window materialization
+                // (transient dfb=0 states committed a pinned bottom-follow while the real
+                // viewport was released thousands of px up — live RG4 evidence).
                 pendingJumpSeqViewportPromotionRef.current = {
                     emitViewportChange: onViewportChangeRef.current,
                     seq: normalizedTargetSeq,
                     sessionId,
                 };
-                const metrics = resolveWebScrollMetrics();
-                if (metrics) {
-                    promotePendingJumpSeqViewportSnapshot({
-                        distanceFromBottom: getWebTranscriptDistanceFromBottom(metrics),
-                        metrics,
-                        requireRestorableAnchor: true,
-                        scrollOffsetPx: metrics.scrollTop,
-                    });
-                }
             }
             return applied;
         };
@@ -9688,11 +9680,39 @@ const ChatListInternal = React.memo((props: {
                     });
                 },
             });
+            if (
+                Platform.OS === 'web' &&
+                (result.status === 'scrolled' || result.status === 'window-rendered') &&
+                pendingJumpSeqViewportPromotionRef.current !== null
+            ) {
+                // Single settled promotion: the landing loop has finished, so these metrics
+                // are the landing's truth (pinned/released classification + durable anchor).
+                const settledMetrics = resolveWebScrollMetrics();
+                if (settledMetrics) {
+                    promotePendingJumpSeqViewportSnapshot({
+                        distanceFromBottom: getWebTranscriptDistanceFromBottom(settledMetrics),
+                        metrics: settledMetrics,
+                        requireRestorableAnchor: true,
+                        scrollOffsetPx: settledMetrics.scrollTop,
+                    });
+                }
+            }
             return result;
         } finally {
             endExplicitJumpWriteBarrier();
         }
     }, [beginExplicitJumpWriteBarrier, endExplicitJumpWriteBarrier, props.forkedTranscriptEnabled, props.onJumpLanded, props.sessionId, executeViewportCommandWithAnimation, isWebTranscriptSeqMounted, isTranscriptJumpTargetInRenderedWindow, promotePendingJumpSeqViewportSnapshot, resolveJumpTargetIndexFromRenderedWindow, resolveSyncLoadOlderOptions, resolveWebScrollMetrics, resolveViewportCommand, waitForNextVisualUpdate]);
+
+    const isTranscriptNavigationTargetInRenderedWindow = React.useCallback((target: TranscriptJumpTarget): boolean => {
+        return resolveTranscriptNavigationTargetInRenderedWindow({
+            platformOS: Platform.OS,
+            isTargetInItemSpace: isTranscriptJumpTargetInRenderedWindow(target),
+            isTargetMountedInDom: () => {
+                const targetRequest = resolveTranscriptJumpTargetRequest(target);
+                return targetRequest ? isWebTranscriptSeqMounted(targetRequest.normalizedTargetSeq) : false;
+            },
+        });
+    }, [isTranscriptJumpTargetInRenderedWindow, isWebTranscriptSeqMounted]);
 
     const handleTranscriptNavigationRailJump = React.useCallback((
         entry: TranscriptNavigationEntry,
@@ -9700,7 +9720,7 @@ const ChatListInternal = React.memo((props: {
     ): Promise<TranscriptJumpResult> | undefined => {
         const plan = resolveTranscriptNavigationJumpPlan({
             entry,
-            isTargetInRenderedWindow: isTranscriptJumpTargetInRenderedWindow,
+            isTargetInRenderedWindow: isTranscriptNavigationTargetInRenderedWindow,
             request,
             sessionId: props.sessionId,
         });
@@ -9711,7 +9731,7 @@ const ChatListInternal = React.memo((props: {
         });
         fireAndForget(result, { tag: 'ChatList.transcriptNavigationRailJump' });
         return result;
-    }, [isTranscriptJumpTargetInRenderedWindow, jumpToTranscriptTarget, props.sessionId]);
+    }, [isTranscriptNavigationTargetInRenderedWindow, jumpToTranscriptTarget, props.sessionId]);
 
     const handleTranscriptNavigationPaneEntryPress = React.useCallback((entry: TranscriptNavigationEntry): Promise<TranscriptJumpResult> | undefined => {
         const request = resolveTranscriptNavigationPaneJumpRequest(entry, props.sessionId);

@@ -122,6 +122,22 @@ export function isTranscriptSeqMountedInWebRenderedWindow<TItem>(params: Readonl
     return false;
 }
 
+/**
+ * Rendered-window truth for navigation jump planning. On web the item space spans ALL
+ * loaded items, so it cannot distinguish "loaded" from "rendered": a loaded-but-
+ * virtualized-out target must still prefer target-window materialization, otherwise the
+ * jump degrades to a single unverified wrong-space write (WQA-4 RG2 class).
+ */
+export function resolveTranscriptNavigationTargetInRenderedWindow(params: Readonly<{
+    platformOS: string;
+    isTargetInItemSpace: boolean;
+    isTargetMountedInDom: () => boolean;
+}>): boolean {
+    if (!params.isTargetInItemSpace) return false;
+    if (params.platformOS !== 'web') return true;
+    return params.isTargetMountedInDom();
+}
+
 export function resolveTranscriptNavigationJumpPlan(params: Readonly<{
     entry: TranscriptNavigationEntry;
     isTargetInRenderedWindow: (target: TranscriptJumpTarget) => boolean;

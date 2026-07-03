@@ -29,9 +29,16 @@ export function resolveJumpSeqViewportPromotionState(params: Readonly<{
 
 export type JumpSeqViewportPromotionResolution =
     | Readonly<{ status: 'wrong-session' }>
-    | Readonly<{ status: 'stale-anchor' }>
     | Readonly<{ status: 'needs-restorable-anchor'; scrollOffsetPx: number; state: JumpSeqViewportPromotionState }>
     | Readonly<{ status: 'promote'; scrollOffsetPx: number; state: JumpSeqViewportPromotionState }>;
+
+/**
+ * A landed jump anchors on whatever row is first visible — a NEIGHBOR of the target seq
+ * (center/top alignment puts the target below the first visible row). Anchors within this
+ * slack are valid captures of the landing; anchors far outside it are wrong-space captures
+ * (mid-materialization re-slice) and must never persist.
+ */
+const JUMP_SEQ_PROMOTION_ANCHOR_SEQ_SLACK = 16;
 
 export function resolveJumpSeqViewportPromotion(params: Readonly<{
     currentSessionId: string;
@@ -49,10 +56,16 @@ export function resolveJumpSeqViewportPromotion(params: Readonly<{
     let state = resolveJumpSeqViewportPromotionState(params);
     const stampedAnchor = params.stampAnchor(state.anchor);
     const stampedAnchorSeq = params.resolveAnchorSeq(stampedAnchor);
-    if (stampedAnchor && stampedAnchorSeq !== null && stampedAnchorSeq !== params.pendingSeq) {
-        return { status: 'stale-anchor' };
+    const anchorIsWrongSpace = stampedAnchor !== null
+        && stampedAnchorSeq !== null
+        && Math.abs(stampedAnchorSeq - params.pendingSeq) > JUMP_SEQ_PROMOTION_ANCHOR_SEQ_SLACK;
+    if (anchorIsWrongSpace) {
+        // Drop the wrong-space anchor but keep the promotion alive: the viewport
+        // classification (pinned/released + distance) is still the landing's truth.
+        state = { ...state, anchor: null };
+    } else if (stampedAnchor !== state.anchor) {
+        state = { ...state, anchor: stampedAnchor };
     }
-    if (stampedAnchor !== state.anchor) state = { ...state, anchor: stampedAnchor };
     const scrollOffsetPx = Math.max(0, Math.trunc(params.scrollOffsetPx));
     if (params.requireRestorableAnchor === true && !state.isPinned && !state.anchor) {
         return { status: 'needs-restorable-anchor', scrollOffsetPx, state };

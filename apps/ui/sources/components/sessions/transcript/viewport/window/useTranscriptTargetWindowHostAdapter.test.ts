@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
     executeTranscriptTargetWindowJump,
+    resolveTranscriptNavigationTargetInRenderedWindow,
     resolveTranscriptTargetWindowHostFacts,
 } from './useTranscriptTargetWindowHostAdapter';
 import type { TranscriptTargetWindowState } from './transcriptTargetWindowTypes';
@@ -18,6 +19,38 @@ const inactiveState: TranscriptTargetWindowState = {
     windowMaxSeq: null,
     windowMinSeq: null,
 };
+
+describe('resolveTranscriptNavigationTargetInRenderedWindow', () => {
+    it('requires live DOM presence on web even when the item space claims the target', () => {
+        // Live RG2 class: on web the item space covers ALL loaded items, so a
+        // loaded-but-virtualized-out rail target reads as "in the rendered window" and the
+        // jump plan skips target-window materialization entirely, accepting a wrong-space
+        // write. Rendered-window truth on web is DOM mount presence.
+        expect(resolveTranscriptNavigationTargetInRenderedWindow({
+            platformOS: 'web',
+            isTargetInItemSpace: true,
+            isTargetMountedInDom: () => false,
+        })).toBe(false);
+        expect(resolveTranscriptNavigationTargetInRenderedWindow({
+            platformOS: 'web',
+            isTargetInItemSpace: true,
+            isTargetMountedInDom: () => true,
+        })).toBe(true);
+    });
+
+    it('keeps item-space truth on native and for absent targets', () => {
+        expect(resolveTranscriptNavigationTargetInRenderedWindow({
+            platformOS: 'ios',
+            isTargetInItemSpace: true,
+            isTargetMountedInDom: () => false,
+        })).toBe(true);
+        expect(resolveTranscriptNavigationTargetInRenderedWindow({
+            platformOS: 'web',
+            isTargetInItemSpace: false,
+            isTargetMountedInDom: () => true,
+        })).toBe(false);
+    });
+});
 
 describe('transcript target-window host adapter', () => {
     it('keeps tail display inactive when the session has no active target window', () => {
