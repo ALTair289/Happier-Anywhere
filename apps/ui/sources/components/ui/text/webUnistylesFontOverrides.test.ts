@@ -1,9 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { JSDOM } from 'jsdom';
 
 import {
     scanDocumentForUnistylesFontMetrics,
     ensureOverrideStyleElement,
+    observeWebUnistylesFontMetricSources,
     syncOverrideStyleElement,
     setRootCssVar,
     HAPPIER_UI_FONT_SCALE_CSS_VAR,
@@ -71,5 +72,97 @@ describe('webUnistylesFontOverrides', () => {
         const css = overrideEl.textContent ?? '';
         const occurrences = css.split('.unistyles_a1').length - 1;
         expect(occurrences).toBe(1);
+    });
+
+    it('observes only bounded stylesheet sources and root font-size mutations', () => {
+        const dom = new JSDOM(`<!doctype html><html><head></head><body></body></html>`);
+        const { document } = dom.window;
+        const originalMutationObserver = globalThis.MutationObserver;
+        const observed: Array<{
+            target: Node;
+            options: MutationObserverInit;
+            callback: MutationCallback;
+            disconnected: boolean;
+        }> = [];
+
+        class FakeMutationObserver {
+            private readonly callback: MutationCallback;
+
+            constructor(callback: MutationCallback) {
+                this.callback = callback;
+            }
+
+            observe(target: Node, options: MutationObserverInit) {
+                observed.push({
+                    target,
+                    options,
+                    callback: this.callback,
+                    disconnected: false,
+                });
+            }
+
+            disconnect() {
+                for (const entry of observed) {
+                    if (entry.callback === this.callback) entry.disconnected = true;
+                }
+            }
+        }
+
+        try {
+            (globalThis as unknown as { MutationObserver: typeof MutationObserver }).MutationObserver =
+                FakeMutationObserver as unknown as typeof MutationObserver;
+            const onChange = vi.fn();
+            const dispose = observeWebUnistylesFontMetricSources(document, onChange);
+
+            expect(observed).toHaveLength(2);
+            expect(observed[0]).toMatchObject({
+                target: document.head,
+                options: { childList: true },
+            });
+            expect(observed[0]?.options.subtree).toBeUndefined();
+            expect(observed[0]?.options.characterData).toBeUndefined();
+            expect(observed[0]?.options.attributes).toBeUndefined();
+            expect(observed[1]).toMatchObject({
+                target: document.documentElement,
+                options: { attributes: true, attributeFilter: ['style'] },
+            });
+            expect(observed[1]?.options.subtree).toBeUndefined();
+            expect(observed[1]?.options.characterData).toBeUndefined();
+
+            const meta = document.createElement('meta');
+            observed[0]?.callback([
+                { type: 'childList', addedNodes: [meta] } as unknown as MutationRecord,
+            ], {} as MutationObserver);
+            expect(onChange).not.toHaveBeenCalled();
+
+            const override = ensureOverrideStyleElement(document);
+            observed[0]?.callback([
+                { type: 'childList', addedNodes: [override] } as unknown as MutationRecord,
+            ], {} as MutationObserver);
+            expect(onChange).not.toHaveBeenCalled();
+
+            const style = document.createElement('style');
+            observed[0]?.callback([
+                { type: 'childList', addedNodes: [style] } as unknown as MutationRecord,
+            ], {} as MutationObserver);
+            expect(onChange).toHaveBeenCalledTimes(1);
+
+            setRootCssVar(document, 1.15);
+            observed[1]?.callback([
+                { type: 'attributes', target: document.documentElement, attributeName: 'style' } as unknown as MutationRecord,
+            ], {} as MutationObserver);
+            expect(onChange).toHaveBeenCalledTimes(1);
+
+            document.documentElement.style.fontSize = '18px';
+            observed[1]?.callback([
+                { type: 'attributes', target: document.documentElement, attributeName: 'style' } as unknown as MutationRecord,
+            ], {} as MutationObserver);
+            expect(onChange).toHaveBeenCalledTimes(2);
+
+            dispose();
+            expect(observed.every((entry) => entry.disconnected)).toBe(true);
+        } finally {
+            globalThis.MutationObserver = originalMutationObserver;
+        }
     });
 });

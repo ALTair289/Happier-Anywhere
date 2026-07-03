@@ -2,9 +2,28 @@ import * as React from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { renderScreen } from '@/dev/testkit';
 
+const nativeAnimatedState = vi.hoisted(() => ({
+    loop: vi.fn((animation: unknown) => ({
+        animation,
+        start: vi.fn(),
+        stop: vi.fn(),
+    })),
+    sequence: vi.fn((animations: readonly unknown[]) => ({ animations })),
+    timing: vi.fn((value: unknown, config: unknown) => ({ value, config })),
+}));
+
 vi.mock('react-native', async () => {
     const { createReactNativeWebMock } = await import('@/dev/testkit/mocks/reactNative');
     return createReactNativeWebMock({
+        Animated: {
+            Value: class AnimatedValue {
+                constructor(public readonly value: number) {}
+            },
+            View: 'NativeAnimatedView',
+            loop: nativeAnimatedState.loop,
+            sequence: nativeAnimatedState.sequence,
+            timing: nativeAnimatedState.timing,
+        },
         View: 'View',
         Platform: {
             OS: 'ios',
@@ -38,6 +57,9 @@ function flattenStyle(style: unknown): Record<string, unknown> {
 
 describe('StatusDot (native)', () => {
     it('renders a plain View with no Reanimated hooks for a non-pulsing native dot', async () => {
+        nativeAnimatedState.loop.mockClear();
+        nativeAnimatedState.sequence.mockClear();
+        nativeAnimatedState.timing.mockClear();
         useSharedValueSpy.mockClear();
         useAnimatedStyleSpy.mockClear();
         const { StatusDot } = await import('./StatusDot');
@@ -52,6 +74,9 @@ describe('StatusDot (native)', () => {
         const dot = screen.findByTestId('status-dot');
         expect(dot).toBeTruthy();
         expect(dot?.type).toBe('View');
+        expect(nativeAnimatedState.loop).not.toHaveBeenCalled();
+        expect(nativeAnimatedState.sequence).not.toHaveBeenCalled();
+        expect(nativeAnimatedState.timing).not.toHaveBeenCalled();
         expect(useSharedValueSpy).not.toHaveBeenCalled();
         expect(useAnimatedStyleSpy).not.toHaveBeenCalled();
 
@@ -62,7 +87,10 @@ describe('StatusDot (native)', () => {
         expect(style.backgroundColor).toBe('green');
     });
 
-    it('renders an Animated.View driven by Reanimated for a pulsing native dot', async () => {
+    it('renders a native-driver Animated.View for a pulsing native dot without Reanimated hooks', async () => {
+        nativeAnimatedState.loop.mockClear();
+        nativeAnimatedState.sequence.mockClear();
+        nativeAnimatedState.timing.mockClear();
         useSharedValueSpy.mockClear();
         useAnimatedStyleSpy.mockClear();
         const { StatusDot } = await import('./StatusDot');
@@ -76,9 +104,22 @@ describe('StatusDot (native)', () => {
 
         const dot = screen.findByTestId('status-dot');
         expect(dot).toBeTruthy();
-        expect(dot?.type).toBe('AnimatedView');
-        expect(useSharedValueSpy).toHaveBeenCalled();
-        expect(useAnimatedStyleSpy).toHaveBeenCalled();
+        expect(dot?.type).toBe('NativeAnimatedView');
+        expect(nativeAnimatedState.loop).toHaveBeenCalledTimes(1);
+        expect(nativeAnimatedState.sequence).toHaveBeenCalledTimes(1);
+        expect(nativeAnimatedState.timing).toHaveBeenCalledTimes(2);
+        expect(nativeAnimatedState.timing.mock.calls[0]?.[1]).toEqual({
+            duration: 1000,
+            toValue: 0.3,
+            useNativeDriver: true,
+        });
+        expect(nativeAnimatedState.timing.mock.calls[1]?.[1]).toEqual({
+            duration: 1000,
+            toValue: 1,
+            useNativeDriver: true,
+        });
+        expect(useSharedValueSpy).not.toHaveBeenCalled();
+        expect(useAnimatedStyleSpy).not.toHaveBeenCalled();
 
         const style = flattenStyle(dot?.props.style);
         expect(style.width).toBe(10);

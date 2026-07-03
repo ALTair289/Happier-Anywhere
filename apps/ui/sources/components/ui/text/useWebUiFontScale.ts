@@ -5,6 +5,7 @@ import { useLocalSetting } from '@/sync/store/hooks';
 
 import {
     ensureOverrideStyleElement,
+    observeWebUnistylesFontMetricSources,
     scanDocumentForUnistylesFontMetrics,
     setRootCssVar,
     syncOverrideStyleElement,
@@ -62,13 +63,8 @@ function installObserverOnce() {
             }
         }
 
-        // Fallback: also observe <style> / <link> changes in case the engine swaps sheets.
-        if (typeof MutationObserver === 'function') {
-            const observer = new MutationObserver(() => {
-                scheduleSync();
-            });
-            observer.observe(document.head, { childList: true, subtree: true });
-        }
+        // Fallback: observe bounded stylesheet source changes in case the engine swaps sheets.
+        observeWebUnistylesFontMetricSources(document, scheduleSync);
     } catch {
         // ignore
     }

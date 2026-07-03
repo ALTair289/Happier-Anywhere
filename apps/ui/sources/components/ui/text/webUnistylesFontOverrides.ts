@@ -115,6 +115,73 @@ export function ensureOverrideStyleElement(document: Document): HTMLStyleElement
     return style;
 }
 
+function isFontMetricStyleSourceNode(node: Node | null | undefined): boolean {
+    if (!node || node.nodeType !== 1) return false;
+    const element = node as Element;
+    if (element.id === HAPPIER_UI_FONT_OVERRIDE_STYLE_ELEMENT_ID) return false;
+    const tagName = element.tagName.toLowerCase();
+    return tagName === 'style' || tagName === 'link';
+}
+
+function mutationHasFontMetricStyleSource(mutation: MutationRecord): boolean {
+    if (mutation.type !== 'childList') return false;
+    for (const node of Array.from(mutation.addedNodes ?? [])) {
+        if (isFontMetricStyleSourceNode(node)) return true;
+    }
+    for (const node of Array.from(mutation.removedNodes ?? [])) {
+        if (isFontMetricStyleSourceNode(node)) return true;
+    }
+    return false;
+}
+
+function readRootInlineFontSize(document: Document): string {
+    return String(document.documentElement?.style?.fontSize ?? '').trim();
+}
+
+export function observeWebUnistylesFontMetricSources(
+    document: Document,
+    onChange: () => void,
+): () => void {
+    if (typeof MutationObserver !== 'function') return () => {};
+    const observers: MutationObserver[] = [];
+
+    if (document.head) {
+        const headObserver = new MutationObserver((mutations) => {
+            if (!mutations.some(mutationHasFontMetricStyleSource)) return;
+            onChange();
+        });
+        headObserver.observe(document.head, { childList: true });
+        observers.push(headObserver);
+    }
+
+    if (document.documentElement) {
+        let lastRootFontSize = readRootInlineFontSize(document);
+        const rootObserver = new MutationObserver((mutations) => {
+            const hasRootStyleMutation = mutations.some((mutation) => (
+                mutation.type === 'attributes'
+                && mutation.target === document.documentElement
+                && mutation.attributeName === 'style'
+            ));
+            if (!hasRootStyleMutation) return;
+            const nextRootFontSize = readRootInlineFontSize(document);
+            if (nextRootFontSize === lastRootFontSize) return;
+            lastRootFontSize = nextRootFontSize;
+            onChange();
+        });
+        rootObserver.observe(document.documentElement, {
+            attributes: true,
+            attributeFilter: ['style'],
+        });
+        observers.push(rootObserver);
+    }
+
+    return () => {
+        for (const observer of observers) {
+            observer.disconnect();
+        }
+    };
+}
+
 function getInjectedSet(styleEl: HTMLStyleElement): Set<string> {
     const anyEl = styleEl as any;
     if (!anyEl.__happierInjectedUnistylesFontClasses) {

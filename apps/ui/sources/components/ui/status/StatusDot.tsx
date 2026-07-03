@@ -1,6 +1,5 @@
 import * as React from 'react';
-import { Platform, View, type ViewStyle } from 'react-native';
-import Animated, { useSharedValue, useAnimatedStyle, withRepeat, withTiming } from 'react-native-reanimated';
+import { Animated, Platform, View, type ViewStyle } from 'react-native';
 
 const WEB_PULSE_TIMING_FUNCTION = 'steps(6, end)';
 
@@ -65,28 +64,35 @@ function StaticStatusDot({ color, size = 6, style, testID }: StatusDotProps) {
 }
 
 function PulsingStatusDot({ color, size = 6, style, testID }: StatusDotProps) {
-    const opacity = useSharedValue(1);
+    const opacity = React.useRef(new Animated.Value(1)).current;
 
     React.useEffect(() => {
-        opacity.value = withRepeat(
-            withTiming(0.3, { duration: 1000 }),
-            -1, // infinite
-            true // reverse
+        const animation = Animated.loop(
+            Animated.sequence([
+                Animated.timing(opacity, {
+                    duration: 1000,
+                    toValue: 0.3,
+                    useNativeDriver: true,
+                }),
+                Animated.timing(opacity, {
+                    duration: 1000,
+                    toValue: 1,
+                    useNativeDriver: true,
+                }),
+            ]),
         );
-    }, [opacity]);
-
-    const animatedStyle = useAnimatedStyle(() => {
-        return {
-            opacity: opacity.value,
+        animation.start();
+        return () => {
+            animation.stop();
         };
-    });
+    }, [opacity]);
 
     return (
         <Animated.View
             testID={testID}
             style={[
                 resolveBaseDotStyle(color, size),
-                animatedStyle,
+                { opacity },
                 style,
             ]}
         />
