@@ -29,6 +29,7 @@ import {
     subscribeServerReachabilityState,
 } from '@/sync/runtime/connectivity/serverReachabilitySupervisorPool';
 import { runtimeFetchWithServerReachability } from '@/sync/runtime/connectivity/serverReachabilityRuntimeFetch';
+import { startRuntimeActiveGatedInterval } from '@/utils/runtime/isRuntimeActive';
 import {
     createConcurrentServerSocketTransport,
     type ConcurrentServerSocket,
@@ -95,7 +96,7 @@ function areAuthCredentialsEquivalent(a: AuthCredentials, b: AuthCredentials): b
 let started = false;
 let storageUnsubscribe: (() => void) | null = null;
 let activeServerUnsubscribe: (() => void) | null = null;
-let periodicRefreshTimer: ReturnType<typeof setInterval> | null = null;
+let stopPeriodicRefresh: (() => void) | null = null;
 let reconcileTimer: ReturnType<typeof setTimeout> | null = null;
 
 function normalizeServerUrl(url: string): string {
@@ -562,7 +563,7 @@ export function startConcurrentSessionCacheSync(): void {
         scheduleReconcile();
     });
 
-    periodicRefreshTimer = setInterval(() => {
+    stopPeriodicRefresh = startRuntimeActiveGatedInterval(() => {
         for (const entry of managedServers.values()) {
             queueRefresh(entry);
         }
@@ -580,9 +581,9 @@ export function stopConcurrentSessionCacheSync(): void {
         clearTimeout(reconcileTimer);
         reconcileTimer = null;
     }
-    if (periodicRefreshTimer) {
-        clearInterval(periodicRefreshTimer);
-        periodicRefreshTimer = null;
+    if (stopPeriodicRefresh) {
+        stopPeriodicRefresh();
+        stopPeriodicRefresh = null;
     }
     if (storageUnsubscribe) {
         storageUnsubscribe();

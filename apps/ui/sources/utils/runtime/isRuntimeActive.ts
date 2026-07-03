@@ -34,3 +34,71 @@ export function isRuntimeActive(): boolean {
 
     return true;
 }
+
+function readDocument(): (Document & {
+    addEventListener?: Document['addEventListener'];
+    removeEventListener?: Document['removeEventListener'];
+}) | undefined {
+    try {
+        return (globalThis as unknown as { document?: Document }).document;
+    } catch {
+        return undefined;
+    }
+}
+
+/**
+ * Runs an interval only while the runtime is active. If regular ticks were
+ * skipped while inactive, the callback runs once immediately when the runtime
+ * returns to active and the interval is overdue.
+ */
+export function startRuntimeActiveGatedInterval(
+    tick: () => void,
+    intervalMs: number,
+): () => void {
+    const delayMs = Math.max(1, Math.trunc(intervalMs));
+    let stopped = false;
+    let lastRunAt = Date.now();
+
+    const runNow = () => {
+        if (stopped || !isRuntimeActive()) return;
+        lastRunAt = Date.now();
+        tick();
+    };
+
+    const runIfOverdue = () => {
+        if (stopped || !isRuntimeActive()) return;
+        const now = Date.now();
+        if (now - lastRunAt < delayMs) return;
+        lastRunAt = now;
+        tick();
+    };
+
+    const interval = setInterval(runNow, delayMs);
+
+    const detach: Array<() => void> = [];
+    const doc = readDocument();
+    if (typeof doc?.addEventListener === 'function' && typeof doc.removeEventListener === 'function') {
+        doc.addEventListener('visibilitychange', runIfOverdue);
+        detach.push(() => {
+            doc.removeEventListener?.('visibilitychange', runIfOverdue);
+        });
+    }
+
+    try {
+        const subscription = AppState.addEventListener?.('change', runIfOverdue);
+        if (subscription && typeof subscription.remove === 'function') {
+            detach.push(() => subscription.remove());
+        }
+    } catch {
+        // ignore
+    }
+
+    return () => {
+        if (stopped) return;
+        stopped = true;
+        clearInterval(interval);
+        for (const stop of detach.splice(0)) {
+            stop();
+        }
+    };
+}

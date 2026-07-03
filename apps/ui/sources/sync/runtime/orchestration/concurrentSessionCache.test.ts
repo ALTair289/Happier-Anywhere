@@ -1,5 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { resolveConcurrentTargets } from './concurrentSessionCache';
+
+afterEach(() => {
+    vi.resetModules();
+    vi.clearAllMocks();
+});
 
 describe('resolveConcurrentTargets', () => {
     const profiles = [
@@ -84,5 +89,23 @@ describe('resolveConcurrentTargets', () => {
                 serverName: 'Server C',
             },
         ]);
+    });
+
+    it('starts periodic refresh through the runtime-active gated interval', async () => {
+        vi.resetModules();
+        const stopInterval = vi.fn();
+        const startRuntimeActiveGatedInterval = vi.fn(() => stopInterval);
+        vi.doMock('@/utils/runtime/isRuntimeActive', () => ({
+            isRuntimeActive: () => true,
+            startRuntimeActiveGatedInterval,
+        }));
+
+        const { startConcurrentSessionCacheSync, stopConcurrentSessionCacheSync } = await import('./concurrentSessionCache');
+        startConcurrentSessionCacheSync();
+
+        expect(startRuntimeActiveGatedInterval).toHaveBeenCalledWith(expect.any(Function), expect.any(Number));
+
+        stopConcurrentSessionCacheSync();
+        expect(stopInterval).toHaveBeenCalledTimes(1);
     });
 });

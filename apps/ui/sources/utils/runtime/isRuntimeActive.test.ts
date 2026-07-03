@@ -61,4 +61,43 @@ describe('isRuntimeActive', () => {
 
         expect(isRuntimeActive()).toBe(true);
     });
+
+    it('skips interval ticks while hidden and runs immediately when visible after overdue', async () => {
+        vi.useFakeTimers();
+        const visibilityListeners = new Set<() => void>();
+        const documentStub = {
+            visibilityState: 'hidden',
+            addEventListener: vi.fn((event: string, listener: () => void) => {
+                if (event === 'visibilitychange') visibilityListeners.add(listener);
+            }),
+            removeEventListener: vi.fn((event: string, listener: () => void) => {
+                if (event === 'visibilitychange') visibilityListeners.delete(listener);
+            }),
+        };
+        globalWithDocument.document = documentStub as unknown as Document;
+
+        const { startRuntimeActiveGatedInterval } = await import('./isRuntimeActive') as {
+            startRuntimeActiveGatedInterval: (tick: () => void, intervalMs: number) => () => void;
+        };
+
+        const tick = vi.fn();
+        const stop = startRuntimeActiveGatedInterval(tick, 1_000);
+
+        await vi.advanceTimersByTimeAsync(3_000);
+        expect(tick).not.toHaveBeenCalled();
+
+        documentStub.visibilityState = 'visible';
+        for (const listener of visibilityListeners) listener();
+        expect(tick).toHaveBeenCalledTimes(1);
+
+        await vi.advanceTimersByTimeAsync(999);
+        expect(tick).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(tick).toHaveBeenCalledTimes(2);
+
+        stop();
+        expect(documentStub.removeEventListener).toHaveBeenCalledWith('visibilitychange', expect.any(Function));
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(tick).toHaveBeenCalledTimes(2);
+    });
 });
