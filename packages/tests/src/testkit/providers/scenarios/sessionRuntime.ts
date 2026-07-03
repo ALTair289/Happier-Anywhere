@@ -191,7 +191,7 @@ export async function waitForAssistantMessageContaining(params: {
         const decrypted = decryptLegacyBase64(row.content.c, params.secret) as Record<string, unknown> | null;
         if (!decrypted || typeof decrypted !== 'object') continue;
         const role = typeof decrypted.role === 'string' ? decrypted.role : '';
-        if (params.allowAnyAssistantMessage === true) return;
+        if (params.allowAnyAssistantMessage === true && (role === 'assistant' || role === 'agent')) return;
 
         const candidateTexts: string[] = [];
         const meta = decrypted.meta && typeof decrypted.meta === 'object' ? (decrypted.meta as Record<string, unknown>) : null;

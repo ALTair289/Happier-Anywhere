@@ -24,7 +24,17 @@ function trackedSessionMatchesExistingSessionId(trackedSession: TrackedSession, 
 function collectStopRequestedMatchingPids(params: Readonly<{
   sessionId: string;
   pidToTrackedSession: ReadonlyMap<number, TrackedSession>;
+  trackedPids?: ReadonlyArray<number>;
 }>): number[] {
+  const explicitTrackedPids = Array.isArray(params.trackedPids)
+    ? params.trackedPids.filter((pid): pid is number => typeof pid === 'number' && Number.isInteger(pid) && pid > 0)
+    : [];
+  if (explicitTrackedPids.length > 0) {
+    return explicitTrackedPids.filter((pid) => {
+      const trackedSession = params.pidToTrackedSession.get(pid);
+      return !!trackedSession && trackedSessionMatchesExistingSessionId(trackedSession, params.sessionId);
+    });
+  }
   const pids: number[] = [];
   for (const [pid, trackedSession] of params.pidToTrackedSession.entries()) {
     if (!trackedSessionMatchesExistingSessionId(trackedSession, params.sessionId)) {
@@ -43,6 +53,7 @@ export async function waitForExistingSessionExitIfStopRequested(params: Readonly
   isSessionRunnerActive: (sessionId: string) => Promise<boolean>;
   timeoutMs: number;
   pollIntervalMs: number;
+  trackedPids?: ReadonlyArray<number>;
   onExitObserved?: (pid: number, exit: ExitObservation) => void;
 }>): Promise<void> {
   const normalizedSessionId = String(params.sessionId ?? '').trim();
@@ -51,6 +62,7 @@ export async function waitForExistingSessionExitIfStopRequested(params: Readonly
   const initialMatchingPids = collectStopRequestedMatchingPids({
     sessionId: normalizedSessionId,
     pidToTrackedSession: params.pidToTrackedSession,
+    trackedPids: params.trackedPids,
   });
   if (initialMatchingPids.length === 0) return;
 
@@ -62,6 +74,7 @@ export async function waitForExistingSessionExitIfStopRequested(params: Readonly
       const matchingPids = collectStopRequestedMatchingPids({
         sessionId: normalizedSessionId,
         pidToTrackedSession: params.pidToTrackedSession,
+        trackedPids: params.trackedPids,
       });
       for (const pid of matchingPids) {
         params.onExitObserved?.(pid, { reason: 'process-missing', code: null, signal: null });

@@ -71,4 +71,30 @@ describe('waitForExistingSessionExitIfStopRequested', () => {
       signal: null,
     });
   });
+
+  it('can observe explicit tracked pids even when no stopRequestedAtMs marker exists', async () => {
+    const { waitForExistingSessionExitIfStopRequested } = await import('./waitForExistingSessionExitIfStopRequested');
+
+    const isSessionRunnerActive = vi.fn(async () => false);
+    const onExitObserved = vi.fn();
+    const pidToTrackedSession = new Map<number, any>([
+      [6480, { happySessionId: 'sess-reattached' }],
+    ]);
+
+    await waitForExistingSessionExitIfStopRequested({
+      sessionId: 'sess-reattached',
+      pidToTrackedSession,
+      isSessionRunnerActive,
+      timeoutMs: 1_000,
+      pollIntervalMs: 50,
+      trackedPids: [6480],
+      onExitObserved,
+    });
+
+    expect(onExitObserved).toHaveBeenCalledWith(6480, {
+      reason: 'process-missing',
+      code: null,
+      signal: null,
+    });
+  });
 });

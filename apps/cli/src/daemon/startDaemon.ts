@@ -4048,6 +4048,19 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
               completionWaiter.cancel();
               return restart;
             }
+            if (!input.tracked.childProcess && configuration.daemonSpawnExistingSessionWaitForExitMs > 0) {
+              void waitForExistingSessionExitIfStopRequested({
+                sessionId: input.sessionId,
+                pidToTrackedSession,
+                isSessionRunnerActive,
+                timeoutMs: configuration.daemonSpawnExistingSessionWaitForExitMs,
+                pollIntervalMs: configuration.daemonSpawnExistingSessionWaitForExitPollIntervalMs,
+                trackedPids: [input.tracked.pid],
+                onExitObserved: (pid, exit) => onChildExited(pid, exit),
+              }).catch((error) => {
+                logger.debug('[DAEMON RUN] Failed to observe planned runner restart exit for reattached session', error);
+              });
+            }
             return {
               ...restart,
               completion: await completionWaiter.promise,
