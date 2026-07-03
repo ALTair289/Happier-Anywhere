@@ -95,6 +95,25 @@ vi.mock('./api/session/apiChanges', () => ({
     fetchCurrentChangesCursor: vi.fn(async () => ({ status: 'ok' as const, cursor: '0' })),
 }));
 
+function emptySessionOrganizationSnapshotResponse(): Response {
+    return new Response(
+        JSON.stringify({
+            snapshot: {
+                schemaVersion: 1,
+                version: 1,
+                pins: [],
+                folders: [],
+                folderAssignments: [],
+                tags: [],
+                tagAssignments: [],
+                orderEntries: [],
+                labels: [],
+            },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+}
+
 describe('sync resumeSync background interruption', () => {
     beforeEach(() => {
         vi.resetModules();
@@ -115,6 +134,9 @@ describe('sync resumeSync background interruption', () => {
                         ? String(input.url)
                         : input.toString();
 
+            if (url.includes('/v2/session-organization')) {
+                return emptySessionOrganizationSnapshotResponse();
+            }
             if (url.includes('/v2/sessions')) {
                 return new Response(
                     JSON.stringify({ sessions: [], nextCursor: null, hasNext: false }),

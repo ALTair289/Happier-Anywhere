@@ -28,7 +28,7 @@ vi.mock('react-native-mmkv', () => {
 
 const statusListeners = vi.hoisted(() => new Set<(status: 'disconnected' | 'connecting' | 'connected' | 'error') => void>());
 const apiSocketRequestMock = vi.hoisted(() =>
-  vi.fn(async () => new Response(
+  vi.fn<(path: string, init?: RequestInit) => Promise<Response>>(async () => new Response(
     JSON.stringify({ messages: [], nextAfterSeq: null }),
     { status: 200, headers: { 'Content-Type': 'application/json' } },
   )),
@@ -138,6 +138,7 @@ import {
 import { WEB_SYNC_INSTANCE_ID_SESSION_KEY } from '@/sync/runtime/webSyncClientIdentity';
 import { syncReliabilityTelemetry } from '@/sync/runtime/syncReliabilityTelemetry';
 import { loadSyncTuning } from '@/sync/runtime/syncTuning';
+import { syncPerformanceTelemetry } from '@/sync/runtime/syncPerformanceTelemetry';
 
 class MemoryWebStorage implements Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> {
   readonly values = new Map<string, string>();
@@ -155,6 +156,25 @@ class MemoryWebStorage implements Pick<Storage, 'getItem' | 'setItem' | 'removeI
   }
 }
 
+function emptySessionOrganizationSnapshotResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      snapshot: {
+        schemaVersion: 1,
+        version: 1,
+        pins: [],
+        folders: [],
+        folderAssignments: [],
+        tags: [],
+        tagAssignments: [],
+        orderEntries: [],
+        labels: [],
+      },
+    }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } },
+  );
+}
+
 function stubSnapshotRefreshFetch(): ReturnType<typeof vi.fn> {
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url: string =
@@ -165,6 +185,9 @@ function stubSnapshotRefreshFetch(): ReturnType<typeof vi.fn> {
           : 'url' in input
             ? String(input.url)
             : input.toString();
+    if (url.includes('/v2/session-organization')) {
+      return emptySessionOrganizationSnapshotResponse();
+    }
     if (url.includes('/v2/sessions')) {
       return new Response(
         JSON.stringify({ sessions: [], nextCursor: null, hasNext: false }),
@@ -187,6 +210,30 @@ function stubSnapshotRefreshFetch(): ReturnType<typeof vi.fn> {
   });
   vi.stubGlobal('fetch', fetchMock);
   return fetchMock;
+}
+
+function expectApiSocketMessageRequest(params: {
+  sessionId: string;
+  afterSeq: string;
+  limit: string;
+}): void {
+  const requestPath = `/v1/sessions/${encodeURIComponent(params.sessionId)}/messages`;
+  const calls = apiSocketRequestMock.mock.calls as Array<[string, RequestInit | undefined]>;
+  const call = calls.find(([path]) => String(path).startsWith(`${requestPath}?`));
+  expect(call).toBeDefined();
+  if (!call) {
+    throw new Error(`Expected apiSocket request for ${requestPath}`);
+  }
+  const [path, init] = call;
+  expect(init).toEqual({ method: 'GET' });
+
+  const [, query = ''] = String(path).split('?');
+  const searchParams = new URLSearchParams(query);
+  expect(searchParams.get('scope')).toBe('main');
+  expect(searchParams.get('afterSeq')).toBe(params.afterSeq);
+  expect(searchParams.get('limit')).toBe(params.limit);
+  expect(searchParams.has('beforeSeq')).toBe(false);
+  expect(searchParams.has('sidechainId')).toBe(false);
 }
 
 describe('sync socket offline tracking', () => {
@@ -293,10 +340,7 @@ describe('sync socket offline tracking', () => {
 
     await (sync as any).fetchMessages('s_reconnect_gap');
 
-    expect(apiSocketRequestMock).toHaveBeenCalledWith(
-      '/v1/sessions/s_reconnect_gap/messages?afterSeq=20&limit=150&scope=main',
-      { method: 'GET' },
-    );
+    expectApiSocketMessageRequest({ sessionId: 's_reconnect_gap', afterSeq: '20', limit: '150' });
   }, 60_000);
 
   it('uses configured message page size for loaded transcript catch-up fetches', async () => {
@@ -325,10 +369,7 @@ describe('sync socket offline tracking', () => {
 
     await (sync as any).fetchMessages('s_tuned_page_size');
 
-    expect(apiSocketRequestMock).toHaveBeenCalledWith(
-      '/v1/sessions/s_tuned_page_size/messages?afterSeq=20&limit=42&scope=main',
-      { method: 'GET' },
-    );
+    expectApiSocketMessageRequest({ sessionId: 's_tuned_page_size', afterSeq: '20', limit: '42' });
   }, 60_000);
 
   it('uses deferred durable transcript seq for visible catch-up when the stored session seq is stale', async () => {
@@ -358,10 +399,7 @@ describe('sync socket offline tracking', () => {
 
     await (sync as any).fetchMessages('s_deferred_durable_gap');
 
-    expect(apiSocketRequestMock).toHaveBeenCalledWith(
-      '/v1/sessions/s_deferred_durable_gap/messages?afterSeq=7&limit=150&scope=main',
-      { method: 'GET' },
-    );
+    expectApiSocketMessageRequest({ sessionId: 's_deferred_durable_gap', afterSeq: '7', limit: '150' });
   }, 60_000);
 
   it('does not reuse captured offline duration for the same loaded transcript after catch-up succeeds', async () => {
@@ -546,6 +584,9 @@ describe('sync socket offline tracking', () => {
           : 'url' in input
             ? String(input.url)
             : input.toString();
+      if (url.includes('/v2/session-organization')) {
+        return emptySessionOrganizationSnapshotResponse();
+      }
       if (url.includes('/v2/sessions')) {
         await sessionResponseReady;
         return new Response(
@@ -600,6 +641,9 @@ describe('sync socket offline tracking', () => {
           : 'url' in input
             ? String(input.url)
             : input.toString();
+      if (url.includes('/v2/session-organization')) {
+        return emptySessionOrganizationSnapshotResponse();
+      }
       if (url.includes('/v2/sessions')) {
         return new Response(
           JSON.stringify({
@@ -653,6 +697,358 @@ describe('sync socket offline tracking', () => {
             : input.toString();
       return url.includes('/v2/session-folder-assignments');
     })).toBe(false);
+  });
+
+  it('marks server-backed pinned rows as required hydration during session list fetches', async () => {
+    const profile = upsertAndActivateServer({ serverUrl: 'http://localhost:53288', scope: 'tab' });
+    storage.getState().applySessionOrganizationSnapshot(profile.id, {
+      schemaVersion: 1,
+      version: 7,
+      pins: [{ sessionId: 'server-pinned-session', sortKey: 'rank-a', pinnedAt: 1 }],
+      folders: [],
+      folderAssignments: [],
+      tags: [],
+      tagAssignments: [],
+      orderEntries: [],
+      labels: [],
+    });
+    const legacyPinnedQueryKey = 'pinned' + 'SessionIds';
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string'
+        ? input
+        : input instanceof Request
+          ? input.url
+          : 'url' in input
+            ? String(input.url)
+            : input.toString();
+      if (url.includes('/v2/session-organization')) {
+        const organizationUrl = new URL(url, 'http://localhost');
+        const includeAllTagAssignments = organizationUrl.searchParams.get('includeAllTagAssignments') === 'true';
+        return new Response(
+          JSON.stringify({
+            snapshot: {
+              schemaVersion: 1,
+              version: 7,
+              pins: [{ sessionId: 'server-pinned-session', sortKey: 'rank-a', pinnedAt: 1 }],
+              folders: [],
+              folderAssignments: [],
+              tags: [{
+                tagId: 'tag-important',
+                tagKey: 'opaque-tag-important',
+                sortKey: null,
+                display: { t: 'plain', v: { label: 'Important' } },
+                archivedAt: null,
+                createdAt: 1,
+                updatedAt: 1,
+              }],
+              tagAssignments: includeAllTagAssignments
+                ? [{ sessionId: 'server-pinned-session', tagIds: ['tag-important'] }]
+                : [],
+              orderEntries: [],
+              labels: [],
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      if (url.includes('/v2/sessions')) {
+        expect(url.includes(legacyPinnedQueryKey)).toBe(false);
+        return new Response(
+          JSON.stringify({
+            sessions: [{
+              id: 'server-pinned-session',
+              seq: 1,
+              createdAt: 1,
+              updatedAt: 2,
+              active: false,
+              activeAt: 1,
+              archivedAt: null,
+              encryptionMode: 'plain',
+              metadata: JSON.stringify({ path: '/pinned', host: 'host' }),
+              metadataVersion: 2,
+              agentState: null,
+              agentStateVersion: 0,
+              dataEncryptionKey: null,
+              share: null,
+            }],
+            nextCursor: null,
+            hasNext: false,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      return new Response(JSON.stringify({}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    (sync as any).credentials = { token: 'hdr.eyJzdWIiOiJ0ZXN0In0.sig', secret: 'secret' };
+    (sync as any).encryption = {
+      decryptEncryptionKey: async () => null,
+      decryptEncryptionKeys: async () => [],
+      initializeSessions: async () => {},
+      removeSessionEncryption: () => {},
+      getSessionEncryption: () => null,
+    };
+    (sync as any).syncTuning = {
+      ...loadSyncTuning(),
+      sessionListEagerHydrationCount: 0,
+      sessionListBackgroundHydrationMaxRows: 0,
+    };
+    syncPerformanceTelemetry.configure({
+      enabled: true,
+      slowThresholdMs: 1_000_000,
+      flushIntervalMs: 60_000,
+    });
+    syncPerformanceTelemetry.reset();
+
+    await (sync as any).fetchSessions();
+
+    expect(storage.getState().sessionOrganizationPinsBySessionKey[`${profile.id}:server-pinned-session`]?.sortKey).toBe('rank-a');
+    expect(fetchMock.mock.calls.some((call) => {
+      const input = call[0];
+      const url = typeof input === 'string'
+        ? input
+        : input instanceof Request
+          ? input.url
+          : 'url' in input
+            ? String(input.url)
+            : input.toString();
+      return url.includes('/v2/session-organization') && url.includes('includeAllTagAssignments=true');
+    })).toBe(true);
+    const priorityEvent = syncPerformanceTelemetry.snapshot().events.find(
+      (event) => event.name === 'sync.sessions.snapshot.hydrationPriority',
+    );
+    expect(priorityEvent?.fields).toEqual(expect.objectContaining({
+      required: 1,
+      priority: 0,
+      skippedBackground: 0,
+    }));
+  });
+
+  it('refetches the session list after first-run legacy organization import adds pinned sessions', async () => {
+    const profile = upsertAndActivateServer({ serverUrl: 'http://localhost:53288', scope: 'tab' });
+    let importedLegacyOrganization = false;
+    let sessionFetchCount = 0;
+    let resolveFirstSessionFetch!: () => void;
+    const firstSessionFetchSeen = new Promise<void>((resolve) => {
+      resolveFirstSessionFetch = resolve;
+    });
+
+    const legacyPinnedSession = {
+      id: 'legacy-pinned-session',
+      seq: 1,
+      createdAt: 1,
+      updatedAt: 2,
+      active: false,
+      activeAt: 1,
+      archivedAt: null,
+      encryptionMode: 'plain',
+      metadata: JSON.stringify({ path: '/legacy-pinned', host: 'host' }),
+      metadataVersion: 2,
+      agentState: null,
+      agentStateVersion: 0,
+      dataEncryptionKey: null,
+      share: null,
+    };
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string'
+        ? input
+        : input instanceof Request
+          ? input.url
+          : 'url' in input
+            ? String(input.url)
+            : input.toString();
+
+      if (url.includes('/v1/account/encryption')) {
+        return new Response(JSON.stringify({ mode: 'plain', updatedAt: 1 }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url.includes('/v2/account/settings') && (init?.method ?? 'GET') === 'GET') {
+        return new Response(
+          JSON.stringify({
+            content: {
+              t: 'plain',
+              v: {
+                pinnedSessionKeysV1: [`${profile.id}:legacy-pinned-session`],
+              },
+            },
+            version: 1,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      if (url.includes('/v2/account/settings') && init?.method === 'POST') {
+        return new Response(JSON.stringify({ success: true, version: 2 }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url.includes('/v2/session-organization/import')) {
+        await firstSessionFetchSeen;
+        importedLegacyOrganization = true;
+        return new Response(
+          JSON.stringify({
+            imported: { pins: 1, folders: 0, tags: 0, orderEntries: 0, labels: 0 },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      if (url.includes('/v2/session-organization')) {
+        return new Response(
+          JSON.stringify({
+            snapshot: {
+              schemaVersion: 1,
+              version: importedLegacyOrganization ? 2 : 1,
+              pins: importedLegacyOrganization
+                ? [{ sessionId: 'legacy-pinned-session', sortKey: '00000001', pinnedAt: 1 }]
+                : [],
+              folders: [],
+              folderAssignments: [],
+              tags: [],
+              tagAssignments: [],
+              orderEntries: [],
+              labels: [],
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      if (url.includes('/v2/sessions')) {
+        sessionFetchCount += 1;
+        resolveFirstSessionFetch();
+        return new Response(
+          JSON.stringify({
+            sessions: importedLegacyOrganization ? [legacyPinnedSession] : [],
+            nextCursor: null,
+            hasNext: false,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      if (url.includes('/v1/account/profile')) {
+        return new Response(JSON.stringify({ ...profileDefaults, id: 'test' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url.includes('/v1/machines') || url.includes('/v1/purchases')) {
+        return new Response(JSON.stringify([]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      if (url.includes('/v1/artifacts')) {
+        return new Response(JSON.stringify([]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      if (url.includes('/v1/feed')) {
+        return new Response(JSON.stringify({ items: [], hasMore: false }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url.includes('/v1/push-token')) {
+        return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      if (url.includes('/v1/native-update')) {
+        return new Response(JSON.stringify({ updateAvailable: false }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    (sync as any).credentials = { token: 'hdr.eyJzdWIiOiJ0ZXN0In0.sig', secret: 'secret' };
+    (sync as any).serverID = 'test';
+    (sync as any).pendingSettingsScope = { serverId: profile.id, accountId: 'test' };
+    (sync as any).pendingSettings = {};
+    (sync as any).encryption = {
+      decryptEncryptionKey: async () => null,
+      decryptEncryptionKeys: async () => [],
+      initializeSessions: async () => {},
+      initializeMachines: async () => {},
+      removeSessionEncryption: () => {},
+      getSessionEncryption: () => null,
+      getMachineEncryption: () => null,
+      getContentPrivateKey: () => new Uint8Array(32),
+      decryptRaw: async () => null,
+    };
+
+    await (sync as any).bootstrapSync();
+
+    expect(sessionFetchCount).toBeGreaterThanOrEqual(2);
+    expect(storage.getState().sessionListRenderables['legacy-pinned-session']).toBeDefined();
+  }, 60_000);
+
+  it('does not replace the first session list when the initial organization snapshot cannot load', async () => {
+    upsertAndActivateServer({ serverUrl: 'http://localhost:53289', scope: 'tab' });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string'
+        ? input
+        : input instanceof Request
+          ? input.url
+          : 'url' in input
+            ? String(input.url)
+            : input.toString();
+      if (url.includes('/v2/session-organization')) {
+        return new Response(JSON.stringify({ error: 'temporarily unavailable' }), {
+          status: 503,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url.includes('/v2/session-organization')) {
+        return emptySessionOrganizationSnapshotResponse();
+      }
+      if (url.includes('/v2/sessions')) {
+        return new Response(
+          JSON.stringify({
+            sessions: [{
+              id: 'server-pinned-session',
+              seq: 1,
+              createdAt: 1,
+              updatedAt: 2,
+              active: false,
+              activeAt: 1,
+              archivedAt: null,
+              encryptionMode: 'plain',
+              metadata: JSON.stringify({ path: '/pinned', host: 'host' }),
+              metadataVersion: 2,
+              agentState: null,
+              agentStateVersion: 0,
+              dataEncryptionKey: null,
+              share: null,
+            }],
+            nextCursor: null,
+            hasNext: false,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      return new Response(JSON.stringify({}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    (sync as any).credentials = { token: 'hdr.eyJzdWIiOiJ0ZXN0In0.sig', secret: 'secret' };
+    (sync as any).encryption = {
+      decryptEncryptionKey: async () => null,
+      decryptEncryptionKeys: async () => [],
+      initializeSessions: async () => {},
+      removeSessionEncryption: () => {},
+      getSessionEncryption: () => null,
+    };
+
+    await expect((sync as any).fetchSessions()).rejects.toThrow();
+
+    expect(fetchMock.mock.calls.some((call) => {
+      const input = call[0];
+      const url = typeof input === 'string'
+        ? input
+        : input instanceof Request
+          ? input.url
+          : 'url' in input
+            ? String(input.url)
+            : input.toString();
+      return url.includes('/v2/sessions');
+    })).toBe(false);
+    expect(storage.getState().sessionListRenderables['server-pinned-session']).toBeUndefined();
   });
 
   it('replaces the active machine snapshot so an empty account list clears stale machines', async () => {
@@ -724,6 +1120,9 @@ describe('sync socket offline tracking', () => {
             : 'url' in input
               ? String(input.url)
               : input.toString();
+      if (url.includes('/v2/session-organization')) {
+        return emptySessionOrganizationSnapshotResponse();
+      }
       if (url.includes('/v2/sessions')) {
         return new Response(
           JSON.stringify({ sessions: [], nextCursor: null, hasNext: false }),
@@ -752,9 +1151,10 @@ describe('sync socket offline tracking', () => {
 
     await (sync as any).resumeSync('socket-reconnect');
 
-    expect(fetchMock.mock.calls.map((call) => String(call[0]))).toEqual(
-      expect.arrayContaining([expect.stringContaining('/v2/sessions')]),
-    );
+    await expect.poll(
+      () => fetchMock.mock.calls.map((call) => String(call[0])).some((url) => url.includes('/v2/sessions')),
+      { timeout: 2_000 },
+    ).toBe(true);
   }, 60_000);
 
   it('captures a fresh snapshot-base cursor before cursor-gone snapshot repair', async () => {

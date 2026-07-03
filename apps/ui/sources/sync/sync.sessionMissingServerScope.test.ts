@@ -160,6 +160,27 @@ function findRuntimeFetchCall(url: string) {
     return call;
 }
 
+function expectRuntimeFetchMessagePageCall(
+    call: unknown[] | undefined,
+    params: { baseUrl: string; sessionId: string; beforeSeq: string; limit: string },
+): void {
+    expect(call).toBeDefined();
+    if (!call) {
+        throw new Error(`Expected runtimeFetch message page call for ${params.sessionId}`);
+    }
+    const [url, init] = call;
+    const requestUrl = new URL(String(url));
+    expect(`${requestUrl.origin}${requestUrl.pathname}`).toBe(
+        `${params.baseUrl}/v1/sessions/${encodeURIComponent(params.sessionId)}/messages`,
+    );
+    expect(requestUrl.searchParams.get('scope')).toBe('main');
+    expect(requestUrl.searchParams.get('beforeSeq')).toBe(params.beforeSeq);
+    expect(requestUrl.searchParams.get('limit')).toBe(params.limit);
+    expect(requestUrl.searchParams.has('afterSeq')).toBe(false);
+    expect(requestUrl.searchParams.has('sidechainId')).toBe(false);
+    expect(init).toEqual(expect.objectContaining({ method: 'GET' }));
+}
+
 function buildTokenWithSub(sub: string): string {
     const payload = encodeBase64(encodeUTF8(JSON.stringify({ sub })), 'base64');
     return `hdr.${payload}.sig`;
@@ -186,8 +207,12 @@ describe('sync.fetchMessages server-scoped known-session checks', () => {
         vi.clearAllMocks();
     });
 
-    it('does not delete local session when snapshot is loaded and session is absent on active server', async () => {
-        const sessionId = 'stale_session_id';
+    it('keeps storage-present sessions absent from the active-server snapshot on the normal fetch path', async () => {
+        // The active-server list snapshot is partial (archived sessions and rows beyond the
+        // snapshot page are absent). A storage-present session resolved to the active server
+        // must stay on the normal fetch path (retry semantics, same as its snapshot-listed
+        // siblings) instead of being classified as missing, and must never be deleted locally.
+        const sessionId = 'off_snapshot_session_id';
         storage.getState().applySessions([createSession(sessionId)]);
 
         const { sync } = await import('./sync');
@@ -197,10 +222,10 @@ describe('sync.fetchMessages server-scoped known-session checks', () => {
         (sync as any).activeServerSessionIds = new Set<string>();
         (sync as any).hasFetchedSessionsSnapshotForActiveServer = true;
 
-        await expect((sync as any).fetchMessages(sessionId)).resolves.toBeUndefined();
+        await expect((sync as any).fetchMessages(sessionId)).rejects.toThrow(
+            `Session encryption not ready for ${sessionId}`,
+        );
         expect(storage.getState().sessions[sessionId]).not.toBeUndefined();
-        // Ensure we don't get stuck in a perpetual loading state.
-        expect(storage.getState().sessionMessages[sessionId]?.isLoaded).toBe(true);
     });
 
     it('keeps retry semantics before first session snapshot for the active server', async () => {
@@ -484,13 +509,12 @@ describe('sync.fetchMessages server-scoped known-session checks', () => {
 
         expect(result).toEqual({ loaded: 1, hasMore: false, status: 'no_more' });
         expect(requestMock).not.toHaveBeenCalled();
-        expect(runtimeFetchMock).toHaveBeenNthCalledWith(
-            2,
-            `https://owner.example/v1/sessions/${sessionId}/messages?beforeSeq=2&limit=150&scope=main`,
-            expect.objectContaining({
-                method: 'GET',
-            }),
-        );
+        expectRuntimeFetchMessagePageCall(runtimeFetchMock.mock.calls[1], {
+            baseUrl: 'https://owner.example',
+            sessionId,
+            beforeSeq: '2',
+            limit: '150',
+        });
         expectHeaderValue(runtimeFetchMock.mock.calls[1]?.[1]?.headers, 'Authorization', 'Bearer owner-token');
     });
 
@@ -572,7 +596,11 @@ describe('sync.fetchMessages server-scoped known-session checks', () => {
             getSessionEncryption: () => null,
         };
 
-        await expect((sync as any).enqueuePendingMessage(sessionId, 'hello pending')).resolves.toBeUndefined();
+        const enqueueResult = await (sync as any).enqueuePendingMessage(sessionId, 'hello pending');
+        expect(enqueueResult).toEqual({
+            localId: expect.any(String),
+            accepted: true,
+        });
 
         expect(requestMock).not.toHaveBeenCalled();
         expect(runtimeFetchMock).toHaveBeenCalledWith(
@@ -584,7 +612,9 @@ describe('sync.fetchMessages server-scoped known-session checks', () => {
         const ownerPendingCall = findRuntimeFetchCall(`https://owner.example/v2/sessions/${sessionId}/pending`);
         expectHeaderValue(ownerPendingCall?.[1]?.headers, 'Authorization', 'Bearer owner-token');
         expectHeaderValue(ownerPendingCall?.[1]?.headers, 'Content-Type', 'application/json');
-        expect(storage.getState().sessionPending[sessionId]?.messages.map((message) => message.text)).toEqual(['hello pending']);
+        const pendingMessages = storage.getState().sessionPending[sessionId]?.messages ?? [];
+        expect(pendingMessages.map((message) => message.text)).toEqual(['hello pending']);
+        expect(pendingMessages[0]?.localId).toBe(enqueueResult.localId);
     });
 
     it('routes abortSession through the preferred owner server scope', async () => {

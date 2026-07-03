@@ -675,6 +675,73 @@ describe('sync.sendMessage optimistic thinking', () => {
         },
     );
 
+    it('retries runtime RPC readiness for messages that require provider delivery instead of using transcript fallback', async () => {
+        vi.useFakeTimers();
+        try {
+            const sessionId = 's_required_runtime_rpc';
+            storage.getState().applySessions([{
+                ...createSession({ sessionId }),
+                encryptionMode: 'plain',
+            } as Session]);
+
+            const encryption = await Encryption.create(new Uint8Array(32).fill(9));
+            await encryption.initializeSessions(new Map([[sessionId, null]]));
+
+            const sessionRpcSpy = vi.spyOn(apiSocket, 'sessionRPC')
+                .mockRejectedValueOnce(createRpcMethodNotAvailableError())
+                .mockResolvedValueOnce({ ok: true } as any);
+            const emitWithAck = vi.fn(async () => ({
+                ok: true,
+                id: 'm-should-not-commit',
+                seq: 7,
+                localId: null,
+                didWrite: true,
+            })) as any;
+
+            const { sync } = await import('./sync');
+            sync.encryption = encryption;
+            sync.setMessageTransport({
+                emitWithAck,
+                send: vi.fn(),
+            });
+
+            const sendPromise = sync.sendMessage(
+                sessionId,
+                'first prompt must reach runtime',
+                undefined,
+                undefined,
+                {
+                    localId: 'first-turn-local',
+                    bypassPendingQueueReason: 'spawned_session_follow_up',
+                    runtimeRpcDeliveryMode: 'required',
+                },
+            );
+
+            await Promise.resolve();
+            await Promise.resolve();
+            expect(sessionRpcSpy).toHaveBeenCalledTimes(1);
+            expect(emitWithAck).not.toHaveBeenCalled();
+
+            await vi.advanceTimersByTimeAsync(250);
+            await sendPromise;
+
+            expect(sessionRpcSpy).toHaveBeenCalledTimes(2);
+            expect(emitWithAck).not.toHaveBeenCalled();
+            expect(storage.getState().sessionPending[sessionId]?.messages).toEqual([
+                expect.objectContaining({
+                    id: 'first-turn-local',
+                    localId: 'first-turn-local',
+                    deliveryStatus: 'accepted',
+                    text: 'first prompt must reach runtime',
+                }),
+            ]);
+
+            sessionRpcSpy.mockRestore();
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
     it('skips session runtime RPC for older attached CLI versions and uses the legacy socket commit path directly', async () => {
         const sessionId = 's_active_legacy_cli';
         storage.getState().applySessions([createSession({
@@ -751,7 +818,7 @@ describe('sync.sendMessage optimistic thinking', () => {
         expect(emitWithAck).not.toHaveBeenCalled();
     });
 
-    it('sendPendingMessageNow preserves the pending localId in the outbound payload and does not remove the queued row', async () => {
+    it('sendPendingMessageNow routes explicit steer-now through the active session submit path', async () => {
         const sessionId = 's_pending_send_now';
         storage.getState().applySessions([createSession({ sessionId })]);
 
@@ -773,6 +840,7 @@ describe('sync.sendMessage optimistic thinking', () => {
             rawRecord,
         });
 
+        const sessionRpcSpy = vi.spyOn(apiSocket, 'sessionRPC').mockResolvedValue({ ok: true } as any);
         const emitWithAck = vi.fn(async () => ({
             ok: true,
             id: 'm1',
@@ -791,26 +859,31 @@ describe('sync.sendMessage optimistic thinking', () => {
         const pendingBefore = (storage.getState().sessionPending[sessionId]?.messages ?? []).map((m) => m.id);
         expect(pendingBefore).toContain('p1');
 
-        await sync.sendPendingMessageNow(sessionId, {
+        const result = await sync.sendPendingMessageNow(sessionId, {
             localId: 'p1',
             createdAt: 111,
             rawRecord,
             text: 'hello',
+            deliveryIntent: 'steer_now',
         });
 
-        expect(emitWithAck).toHaveBeenCalledWith(
-            'message',
+        expect(result).toEqual({ type: 'committed' });
+        expect(sessionRpcSpy).toHaveBeenCalledWith(
+            sessionId,
+            SESSION_RPC_METHODS.SESSION_USER_MESSAGE_SEND,
             expect.objectContaining({
-                sid: sessionId,
+                text: 'hello',
                 localId: 'p1',
-                messageRole: 'user',
+                meta: expect.any(Object),
             }),
-            expect.anything(),
+            { timeoutMs: 7_500 },
         );
+        expect(emitWithAck).not.toHaveBeenCalled();
 
         // No duplicate pending row should be created (localId is preserved).
-        const pendingAfter = (storage.getState().sessionPending[sessionId]?.messages ?? []).map((m) => m.id);
-        expect(pendingAfter.every((id) => id === 'p1')).toBe(true);
+        const pendingAfter = storage.getState().sessionPending[sessionId]?.messages ?? [];
+        expect(pendingAfter.map((message) => message.id)).toEqual(['p1']);
+        expect(pendingAfter.map((message) => message.deliveryStatus)).toEqual(['accepted']);
 
         expect(storage.getState().sessions[sessionId].optimisticThinkingAt ?? null).not.toBeNull();
 

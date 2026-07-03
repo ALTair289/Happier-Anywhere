@@ -402,6 +402,25 @@ describe('sync session viewport', () => {
         });
     });
 
+    it('preserves an incoming durable anchor seq before identity stamping can run', async () => {
+        const { sync } = await import('./sync');
+
+        sync.onSessionViewportChange('session-1', {
+            isPinned: false,
+            offsetY: 420,
+            shouldRestoreViewport: true,
+            anchor: {
+                ...validViewportAnchor,
+                messageId: 'server-message-1',
+                seq: 7,
+            },
+        });
+
+        expect(sync.getSessionViewport('session-1')).toMatchObject({
+            anchor: { messageId: 'server-message-1', seq: 7 },
+        });
+    });
+
     it('hydrates an anchor whose message is no longer materialized (deleted/pruned window degrades downstream)', async () => {
         const { sync } = await import('./sync');
 

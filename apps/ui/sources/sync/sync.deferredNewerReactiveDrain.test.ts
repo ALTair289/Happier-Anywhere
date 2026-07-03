@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createDeferred } from '@/dev/testkit';
 
 // C6/D3 (reactive deferred-newer drain): the deferred-forward-loading backlog (mechanism B)
 // must have a sync-owned reactive drain — not depend solely on ChatList.onScroll. A sync-owned
@@ -209,6 +210,27 @@ describe('sync reactive deferred-newer drain (C6/D3)', () => {
         await Promise.resolve();
         expect(messagesRequestPaths()).toHaveLength(0);
         expect(sync.hasDeferredNewerMessages(SESSION_ID)).toBe(true);
+        markSessionHidden(SESSION_ID);
+    });
+
+    it('dedupes repeated near-bottom drain attempts while the newer page request is in flight', async () => {
+        const { sync } = await seedDeferredNewerSession();
+        const response = createDeferred<Response>();
+        requestMock.mockImplementation(() => response.promise);
+
+        sync.maybeDrainDeferredNewerMessages(SESSION_ID, { isPinned: false, distanceFromBottomPx: 10 });
+        sync.maybeDrainDeferredNewerMessages(SESSION_ID, { isPinned: false, distanceFromBottomPx: 10 });
+
+        await vi.waitFor(() => {
+            expect(messagesRequestPaths()).toHaveLength(1);
+        });
+        expect(sync.hasDeferredNewerMessages(SESSION_ID)).toBe(true);
+
+        response.resolve(emptyMessagesResponse());
+
+        await vi.waitFor(() => {
+            expect(sync.hasDeferredNewerMessages(SESSION_ID)).toBe(false);
+        });
         markSessionHidden(SESSION_ID);
     });
 });
