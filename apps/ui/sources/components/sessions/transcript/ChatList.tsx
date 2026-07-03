@@ -9682,12 +9682,18 @@ const ChatListInternal = React.memo((props: {
                 scrollToTarget,
                 target,
                 targetSeq: normalizedTargetSeq,
+                hasGenuineUserMovementSince: (sinceMs) =>
+                    lastRouteJumpProtectionClearingWebMovementAtMsRef.current > sinceMs,
+                waitForNextLandingFrame: () => waitForVisualUpdateWithTimeout({
+                    waitForNextVisualUpdate,
+                    timeoutMs: TRANSCRIPT_VISUAL_UPDATE_FALLBACK_TIMEOUT_MS,
+                }),
             });
             return result;
         } finally {
             endExplicitJumpWriteBarrier();
         }
-    }, [beginExplicitJumpWriteBarrier, endExplicitJumpWriteBarrier, props.forkedTranscriptEnabled, props.onJumpLanded, props.sessionId, executeViewportCommandWithAnimation, isWebTranscriptSeqMounted, isTranscriptJumpTargetInRenderedWindow, promotePendingJumpSeqViewportSnapshot, resolveJumpTargetIndexFromRenderedWindow, resolveSyncLoadOlderOptions, resolveWebScrollMetrics, resolveViewportCommand]);
+    }, [beginExplicitJumpWriteBarrier, endExplicitJumpWriteBarrier, props.forkedTranscriptEnabled, props.onJumpLanded, props.sessionId, executeViewportCommandWithAnimation, isWebTranscriptSeqMounted, isTranscriptJumpTargetInRenderedWindow, promotePendingJumpSeqViewportSnapshot, resolveJumpTargetIndexFromRenderedWindow, resolveSyncLoadOlderOptions, resolveWebScrollMetrics, resolveViewportCommand, waitForNextVisualUpdate]);
 
     const handleTranscriptNavigationRailJump = React.useCallback((
         entry: TranscriptNavigationEntry,

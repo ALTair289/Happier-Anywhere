@@ -337,6 +337,74 @@ describe('transcript target-window host adapter', () => {
         expect(onJumpLanded).toHaveBeenCalledTimes(1);
     });
 
+    it('keeps correcting through renderer-induced scrollTop drift when the genuine-movement owner reports none', async () => {
+        // Live RG1 rerun evidence: while the target window is still materializing, FlashList
+        // re-slices and browser scroll anchoring move scrollTop without any user input. With the
+        // host genuine-movement signal available and quiet, the landing loop must keep approaching
+        // instead of treating renderer drift as a foreign writer.
+        const onJumpLanded = vi.fn();
+        const scrollToTarget = vi.fn(() => true);
+        const isTargetMounted = vi.fn(() => true)
+            .mockReturnValueOnce(false) // landing frame 1: still unmounted (approach write)
+            .mockReturnValueOnce(false); // landing frame 2: renderer drifted scrollTop, still unmounted
+        const readScrollTop = vi.fn()
+            .mockReturnValueOnce(0) // metrics availability probe
+            .mockReturnValueOnce(0) // frame 1 pre-write
+            .mockReturnValueOnce(500) // frame 1 post-write
+            .mockReturnValueOnce(760) // frame 2 pre-write: renderer moved viewport (NOT the user)
+            .mockReturnValueOnce(760) // frame 2 post-write
+            .mockReturnValueOnce(760) // frame 3 pre-write
+            .mockReturnValueOnce(760) // frame 3 post-write (mounted exact, stable x1)
+            .mockReturnValueOnce(760) // frame 4 pre-write
+            .mockReturnValueOnce(760); // frame 4 post-write (stable x2 -> settled)
+
+        await executeTranscriptTargetWindowJump({
+            canRenderTargetWindow: true,
+            hasGenuineUserMovementSince: () => false,
+            isTargetInRenderedWindow: () => true,
+            isTargetMounted,
+            loadTargetWindow: async () => ({ windowId: 'window-331' }),
+            onJumpLanded,
+            platformOS: 'web',
+            readScrollTop,
+            resolveTargetIndex: () => ({ status: 'not-found', reason: 'unavailable' }),
+            scrollToTarget,
+            target: { kind: 'seq', seq: 331 },
+            targetSeq: 331,
+            waitForNextLandingFrame: () => Promise.resolve(),
+        });
+
+        expect(scrollToTarget.mock.calls.length).toBeGreaterThanOrEqual(3);
+        expect(onJumpLanded).toHaveBeenCalledTimes(1);
+    });
+
+    it('aborts landing corrections when the genuine-movement owner reports user movement', async () => {
+        const onJumpLanded = vi.fn();
+        const scrollToTarget = vi.fn(() => true);
+        const hasGenuineUserMovementSince = vi.fn()
+            .mockReturnValueOnce(false)
+            .mockReturnValue(true);
+
+        await executeTranscriptTargetWindowJump({
+            canRenderTargetWindow: true,
+            hasGenuineUserMovementSince,
+            isTargetInRenderedWindow: () => true,
+            isTargetMounted: () => true,
+            loadTargetWindow: async () => ({ windowId: 'window-331' }),
+            onJumpLanded,
+            platformOS: 'web',
+            readScrollTop: () => 100,
+            resolveTargetIndex: () => ({ status: 'not-found', reason: 'unavailable' }),
+            scrollToTarget,
+            target: { kind: 'seq', seq: 331 },
+            targetSeq: 331,
+            waitForNextLandingFrame: () => Promise.resolve(),
+        });
+
+        expect(scrollToTarget).toHaveBeenCalledTimes(1);
+        expect(onJumpLanded).toHaveBeenCalledTimes(1);
+    });
+
     it('pages nearby unresolved targets before replacing the list with a target window', async () => {
         const pageTowardTarget = vi.fn(async () => ({
             status: 'scrolled' as const,

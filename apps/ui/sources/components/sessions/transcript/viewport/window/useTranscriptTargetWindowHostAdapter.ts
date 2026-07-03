@@ -228,6 +228,13 @@ export async function executeTranscriptTargetWindowJump(params: Readonly<{
     targetSeq: number;
     waitForNextLandingFrame?: () => Promise<void>;
     landingSettleDeadlineMs?: number;
+    /**
+     * Host genuine-user-movement signal (web): returns true when the user genuinely scrolled
+     * after `sinceMs`. When provided, it is the ONLY landing-abort signal — renderer-induced
+     * scrollTop drift (re-slices, browser scroll anchoring during window materialization) must
+     * not abort the landing. Without it, the loop falls back to a raw scrollTop-delta check.
+     */
+    hasGenuineUserMovementSince?: (sinceMs: number) => boolean;
 }>): Promise<TranscriptJumpResult> {
     const scrollToTarget = (options: Readonly<{ allowVirtualizedRenderedTarget?: boolean }> = {}): boolean => {
         const applied = params.scrollToTarget();
@@ -278,12 +285,16 @@ export async function executeTranscriptTargetWindowJump(params: Readonly<{
 
         const waitFrame = params.waitForNextLandingFrame
             ?? (() => new Promise<void>((resolve) => setTimeout(resolve, 80)));
-        const deadlineAt = Date.now() + Math.max(0, params.landingSettleDeadlineMs ?? 1800);
+        const landingStartedAtMs = Date.now();
+        const deadlineAt = landingStartedAtMs + Math.max(0, params.landingSettleDeadlineMs ?? 1800);
         let lastObservedAfterWrite: number | null = null;
         let stableFrames = 0;
         for (let iteration = 0; iteration < 60; iteration += 1) {
             const observedBefore = params.readScrollTop();
-            if (
+            if (params.hasGenuineUserMovementSince) {
+                // The user owns the viewport the moment they genuinely move it.
+                if (params.hasGenuineUserMovementSince(landingStartedAtMs)) break;
+            } else if (
                 lastObservedAfterWrite !== null &&
                 typeof observedBefore === 'number' &&
                 Math.abs(observedBefore - lastObservedAfterWrite) > 1
