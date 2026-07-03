@@ -16,6 +16,7 @@ import {
     sessionRpcWithServerScope,
     setActiveServerAndSwitch,
     sessionExecutionRunStart,
+    sendSessionMessageWithServerScope,
     sendMessage,
 } from './localVoiceEngine.testHarness';
 import { RPC_ERROR_CODES } from '@happier-dev/protocol/rpc';
@@ -212,6 +213,7 @@ describe('local voice engine agent behavior', () => {
                 ok: true,
                 json: async () => ({ choices: [{ message: { content: 'Done.' } }] }),
             });
+        sendSessionMessageWithServerScope.mockResolvedValue({ ok: true });
 
         const { toggleLocalVoiceTurn } = localVoiceEngine;
 
@@ -222,9 +224,12 @@ describe('local voice engine agent behavior', () => {
         await waitForMockCalls(fetchMock, 3);
         await stopPromise;
 
-        expect(sendMessage).toHaveBeenCalledTimes(1);
-        expect(sendMessage.mock.calls[0]?.[0]).toBe('s1');
-        expect(sendMessage.mock.calls[0]?.[1]).toBe('Please do X.');
+        expect(sendSessionMessageWithServerScope).toHaveBeenCalledTimes(1);
+        expect(sendSessionMessageWithServerScope).toHaveBeenCalledWith(expect.objectContaining({
+            sessionId: 's1',
+            message: 'Please do X.',
+        }));
+        expect(sendMessage).not.toHaveBeenCalled();
     });
 
     it('agent mode can update tracked sessions via tool actions', async () => {

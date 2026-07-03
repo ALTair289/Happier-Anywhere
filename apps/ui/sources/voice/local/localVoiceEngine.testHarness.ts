@@ -15,6 +15,7 @@ export const sessionExecutionRunList = vi.fn();
 export const sessionExecutionRunGet = vi.fn();
 export const sessionExecutionRunSend = vi.fn();
 export const sessionExecutionRunStop = vi.fn();
+export const sendSessionMessageWithServerScope = vi.fn();
 export const sessionRpcWithServerScope = vi.fn();
 export const createdAudioPlayers: any[] = [];
 export const fileDelete = vi.fn(async () => {});
@@ -268,6 +269,10 @@ vi.mock('@/sync/runtime/orchestration/serverScopedRpc/serverScopedSessionRpc', (
     sessionRpcWithServerScope: (args: any) => sessionRpcWithServerScope(args),
 }));
 
+vi.mock('@/sync/runtime/orchestration/serverScopedRpc/serverScopedSessionSendMessage', () => ({
+    sendSessionMessageWithServerScope: (args: any) => sendSessionMessageWithServerScope(args),
+}));
+
 vi.mock('@/sync/domains/server/activeServerSwitch', () => ({
     setActiveServerAndSwitch: (params: any) => setActiveServerAndSwitch(params),
 }));
@@ -488,6 +493,7 @@ export function registerLocalVoiceEngineHarnessHooks() {
         daemonVoiceAgentCancelTurnStream.mockReset();
         daemonVoiceAgentCommit.mockReset();
         daemonVoiceAgentStop.mockReset();
+        sendSessionMessageWithServerScope.mockReset();
         sessionRpcWithServerScope.mockReset();
         platformOs = 'ios';
         createdAudioPlayers.length = 0;
