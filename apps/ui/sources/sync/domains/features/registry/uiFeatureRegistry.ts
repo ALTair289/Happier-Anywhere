@@ -141,6 +141,9 @@ export const UI_FEATURE_REGISTRY = {
     'sharing.pendingQueueV2': {
         settingsToggle: undefined,
     },
+    'sharing.pendingDeliveryState': {
+        settingsToggle: undefined,
+    },
     sessions: {
         settingsToggle: undefined,
     },
@@ -208,6 +211,9 @@ export const UI_FEATURE_REGISTRY = {
             subtitleKey: 'settingsFeatures.expSessionsDirectSubtitle',
             icon: { ioniconName: 'albums-outline', color: '#34C759' },
         },
+    },
+    'agent.goals': {
+        settingsToggle: undefined,
     },
     'providers.codex.appServer.goals': {
         settingsToggle: undefined,

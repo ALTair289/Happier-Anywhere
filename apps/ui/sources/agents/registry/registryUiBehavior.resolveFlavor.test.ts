@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { resolveAgentUiBehaviorFromFlavor, supportsEditableSessionGoals } from './registryUiBehavior';
+import { resolveAgentUiBehaviorFromFlavor, resolveSessionGoalActionCapabilityProfile, supportsEditableSessionGoals } from './registryUiBehavior';
 import type { Session } from '@/sync/domains/state/storageTypes';
 
 function createRegistryBehaviorSession(metadata: Session['metadata']): Session {
@@ -56,6 +56,34 @@ describe('resolveAgentUiBehaviorFromFlavor', () => {
                 codexBackendMode: 'acp',
             }),
         })).toBe(false);
+    });
+
+    it('does NOT restrict the goal action profile for Codex (full controls preserved — no regression)', () => {
+        // Codex declares no goal-action capability profile, so the fallback is null → the goal
+        // popover keeps the full control surface (pause/resume/complete/budget). QA-8.
+        expect(resolveSessionGoalActionCapabilityProfile({
+            agentId: 'codex',
+            session: createRegistryBehaviorSession({
+                flavor: 'codex', path: '/repo', host: 'host', codexBackendMode: 'appServer',
+            }),
+        })).toBeNull();
+    });
+
+    it('restricts the goal action profile for an editable Claude session (edit/clear only, no budget)', () => {
+        const profile = resolveSessionGoalActionCapabilityProfile({
+            agentId: 'claude',
+            session: createRegistryBehaviorSession({
+                flavor: 'claude', path: '/repo', host: 'host', slashCommands: ['goal', 'help'],
+            }),
+        });
+        expect(profile).toEqual({ canEdit: true, canStop: false, canClear: true, canConfigureBudget: false });
+    });
+
+    it('returns no goal action profile for a Claude session without /goal capability', () => {
+        expect(resolveSessionGoalActionCapabilityProfile({
+            agentId: 'claude',
+            session: createRegistryBehaviorSession({ flavor: 'claude', path: '/repo', host: 'host' }),
+        })).toBeNull();
     });
 
     it('allows live codex sessions without persisted runtime identity to attempt native goal controls', () => {

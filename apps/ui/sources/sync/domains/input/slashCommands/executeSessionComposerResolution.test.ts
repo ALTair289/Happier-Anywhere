@@ -275,7 +275,11 @@ describe('executeSessionComposerResolution', () => {
     expect(modalAlert).toHaveBeenCalledWith('Goal unavailable', 'This backend does not support editable session goals yet.');
   });
 
-  it('normalizes unsupported goal operation failures to goal unavailable feedback', async () => {
+  it('treats a transient unsupported_session_runtime_method as a not-ready (retry) state, not a permanent unsupport', async () => {
+    // A freshly-opened active session can return `unsupported_session_runtime_method` from the live
+    // session RPC before its runtime goal controls have registered. That is a transient load race,
+    // not a genuine backend limitation, so the user must see a retryable "not ready yet" message
+    // rather than the permanent-sounding "does not support goals" message.
     const executeSessionComposerResolution = await loadSubject();
     const modalAlert = vi.fn();
     const setSessionGoal = vi.fn(async () => ({
@@ -301,7 +305,8 @@ describe('executeSessionComposerResolution', () => {
     } as any);
 
     expect(handled).toBe(true);
-    expect(modalAlert).toHaveBeenCalledWith('Goal unavailable', 'This backend does not support editable session goals yet.');
+    expect(modalAlert).toHaveBeenCalledWith('Goal controls not ready yet', 'This session is still starting up. Try setting the goal again in a moment.');
+    expect(modalAlert).not.toHaveBeenCalledWith('Goal unavailable', 'This backend does not support editable session goals yet.');
   });
 
   it('normalizes disabled goal feature failures to goal unavailable feedback', async () => {

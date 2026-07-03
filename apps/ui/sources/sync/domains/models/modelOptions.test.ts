@@ -56,10 +56,8 @@ describe('modelOptions', () => {
         expect(getModelOptionsForAgentType('kimi').map((o) => o.value)).toEqual(['default']);
     });
 
-    it('returns basic options for codex (preflight can extend the list)', () => {
-        const out = getModelOptionsForAgentType('codex');
-        expect(out[0]?.value).toBe('default');
-        expect(out.length).toBeGreaterThan(1);
+    it('returns default-only static options for codex so preflight can provide account-specific models', () => {
+        expect(getModelOptionsForAgentType('codex').map((o) => o.value)).toEqual(['default']);
     });
 
     it('includes a curated static list for Claude while still allowing freeform models', () => {
