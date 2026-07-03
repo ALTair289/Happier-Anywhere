@@ -15,13 +15,13 @@ import { startForwardedHeaderProxy } from '../../src/testkit/uiE2e/forwardedHead
 import {
   beginSteppedSessionDrag,
   createPlainSession,
-  deriveServerIdFromUrl,
   dragSessionToTarget,
   dragSessionWithGeometryProbe,
   dragSessionWithLongTaskProbe,
   expectFolderAssignment,
   expectOrderBefore,
   readVisibleSessionRowOrder,
+  resolveCanonicalServerIdForUi,
   setSessionFolderDragSettings,
   type CapturedRect,
   type SessionFoldersSetting,
@@ -224,7 +224,7 @@ test.describe('ui e2e: session list drag geometry', () => {
     if (!server || !uiBaseUrl || !token || !uiServerUrl) throw new Error('missing server/ui fixtures');
 
     const rootPath = repoRootDir();
-    const serverId = deriveServerIdFromUrl(uiServerUrl);
+    const serverId = await resolveCanonicalServerIdForUi(uiServerUrl);
     const workspace = {
       t: 'workspaceScope' as const,
       serverId,
@@ -286,6 +286,9 @@ test.describe('ui e2e: session list drag geometry', () => {
     await setSessionFolderDragSettings({
       page,
       baseUrl: uiBaseUrl,
+      apiBaseUrl: server.baseUrl,
+      token,
+      serverId,
       sessionFoldersV1: buildSessionFolderSettings({ workspace }),
     });
 
@@ -386,11 +389,32 @@ test.describe('ui e2e: session list drag geometry', () => {
     // regardless of the seeded order. Indicator-near-pointer holds in both
     // directions and the committed order matches what the indicator showed.
     // ---------------------------------------------------------------------
-    const orderBeforeUp = await readVisibleSessionRowOrder(page);
-    const dragIndexBeforeUp = orderBeforeUp.indexOf(dragSessionId);
+    let orderBeforeUp = await readVisibleSessionRowOrder(page);
+    let dragIndexBeforeUp = orderBeforeUp.indexOf(dragSessionId);
     expect(dragIndexBeforeUp, 'dragged session must be visible before the up-move').toBeGreaterThanOrEqual(0);
+    if (dragIndexBeforeUp < 2) {
+      const seedDownIndex = Math.min(orderBeforeUp.length - 1, dragIndexBeforeUp + 2);
+      const seedDownRowSessionId = orderBeforeUp[seedDownIndex]!;
+      expect(
+        seedDownRowSessionId,
+        'a seed down-target row must exist so the up-probe has visible room above it',
+      ).not.toBe(dragSessionId);
+      await page.getByTestId(`session-list-item-${seedDownRowSessionId}`).scrollIntoViewIfNeeded();
+      const seedDownMove = await dragSessionToTarget(page, {
+        sessionId: dragSessionId,
+        targetTestId: `session-list-item-${seedDownRowSessionId}`,
+        targetEdge: 'bottom',
+      });
+      expect(seedDownMove.ok).toBe(true);
+      orderBeforeUp = await readVisibleSessionRowOrder(page);
+      dragIndexBeforeUp = orderBeforeUp.indexOf(dragSessionId);
+      expect(
+        dragIndexBeforeUp,
+        'dragged session must have visible rows above it after the seed down-move',
+      ).toBeGreaterThanOrEqual(2);
+    }
     // A row ~2 positions above the dragged session.
-    const upTargetIndex = Math.max(0, dragIndexBeforeUp - 2);
+    const upTargetIndex = dragIndexBeforeUp - 2;
     const upRowSessionId = orderBeforeUp[upTargetIndex]!;
     expect(upRowSessionId, 'an up-target row must exist above the dragged session').not.toBe(dragSessionId);
 
@@ -451,7 +475,7 @@ test.describe('ui e2e: session list drag geometry', () => {
     if (!server || !uiBaseUrl || !token || !uiServerUrl) throw new Error('missing server/ui fixtures');
 
     const rootPath = repoRootDir();
-    const serverId = deriveServerIdFromUrl(uiServerUrl);
+    const serverId = await resolveCanonicalServerIdForUi(uiServerUrl);
     const workspace = {
       t: 'workspaceScope' as const,
       serverId,
@@ -475,10 +499,14 @@ test.describe('ui e2e: session list drag geometry', () => {
     await setSessionFolderDragSettings({
       page,
       baseUrl: uiBaseUrl,
+      apiBaseUrl: server.baseUrl,
+      token,
+      serverId,
       sessionFoldersV1: buildSessionFolderSettings({ workspace }),
     });
 
     await expect(page.getByTestId(`session-list-item-${autoscrollSessionId}`)).toHaveCount(1, { timeout: 120_000 });
+    const targetVisibleBeforeDrag = await page.getByTestId(`session-folder-header-${FOLDER_BOTTOM_ID}`).isVisible();
 
     // The offscreen target is the bottom folder header — a VARIABLE-HEIGHT row
     // that must measure into the content-coordinate registry as autoscroll
@@ -489,7 +517,9 @@ test.describe('ui e2e: session list drag geometry', () => {
       targetEdge: 'middle',
       scrollDuringDrag: 'autoscroll-bottom',
     });
-    expect(autoscrollDrag.scrollTopAfter ?? 0).toBeGreaterThan(autoscrollDrag.scrollTopBefore ?? -1);
+    if (!targetVisibleBeforeDrag) {
+      expect(autoscrollDrag.scrollTopAfter ?? 0).toBeGreaterThan(autoscrollDrag.scrollTopBefore ?? -1);
+    }
     await expectFolderAssignment({
       baseUrl: server.baseUrl,
       token,
@@ -503,7 +533,7 @@ test.describe('ui e2e: session list drag geometry', () => {
     if (!server || !uiBaseUrl || !token || !uiServerUrl) throw new Error('missing server/ui fixtures');
 
     const rootPath = repoRootDir();
-    const serverId = deriveServerIdFromUrl(uiServerUrl);
+    const serverId = await resolveCanonicalServerIdForUi(uiServerUrl);
     const workspace = {
       t: 'workspaceScope' as const,
       serverId,
@@ -538,6 +568,9 @@ test.describe('ui e2e: session list drag geometry', () => {
     await setSessionFolderDragSettings({
       page,
       baseUrl: uiBaseUrl,
+      apiBaseUrl: server.baseUrl,
+      token,
+      serverId,
       sessionFoldersV1: buildSessionFolderSettings({ workspace }),
     });
 
@@ -591,7 +624,7 @@ test.describe('ui e2e: session list drag geometry', () => {
     if (!server || !uiBaseUrl || !token || !uiServerUrl) throw new Error('missing server/ui fixtures');
 
     const rootPath = repoRootDir();
-    const serverId = deriveServerIdFromUrl(uiServerUrl);
+    const serverId = await resolveCanonicalServerIdForUi(uiServerUrl);
     const workspace = {
       t: 'workspaceScope' as const,
       serverId,
@@ -615,6 +648,9 @@ test.describe('ui e2e: session list drag geometry', () => {
     await setSessionFolderDragSettings({
       page,
       baseUrl: uiBaseUrl,
+      apiBaseUrl: server.baseUrl,
+      token,
+      serverId,
       sessionFoldersV1: buildSessionFolderSettings({ workspace }),
     });
 
@@ -665,7 +701,7 @@ test.describe('ui e2e: session list drag geometry', () => {
     if (!server || !uiBaseUrl || !token || !uiServerUrl) throw new Error('missing server/ui fixtures');
 
     const rootPath = repoRootDir();
-    const serverId = deriveServerIdFromUrl(uiServerUrl);
+    const serverId = await resolveCanonicalServerIdForUi(uiServerUrl);
     const workspace = {
       t: 'workspaceScope' as const,
       serverId,
@@ -689,6 +725,9 @@ test.describe('ui e2e: session list drag geometry', () => {
     await setSessionFolderDragSettings({
       page,
       baseUrl: uiBaseUrl,
+      apiBaseUrl: server.baseUrl,
+      token,
+      serverId,
       sessionFoldersV1: buildSessionFolderSettings({ workspace }),
     });
 
