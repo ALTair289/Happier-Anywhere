@@ -7,12 +7,14 @@ import {
     TextStyle,
     findNodeHandle,
     type LayoutChangeEvent,
+    Platform,
 } from 'react-native';
 import { useUnistyles } from 'react-native-unistyles';
 import { Typography } from '@/constants/Typography';
 import { TextInput } from '@/components/ui/text/Text';
 import { normalizeKeyboardKeyPressEvent, type KeyPressEvent as KeyboardKeyPressEvent } from '@/keyboard/events';
 import { useLocalSetting } from '@/sync/store/hooks';
+import { recordLargeTextInputDiagnostic } from '@/utils/system/userInteractionDiagnostics';
 import {
     normalizeNativeMultiTextInputMaxHeight,
     resolveNativeMultiTextInputMinHeight,
@@ -91,7 +93,10 @@ function clampTextSelection(selection: { start: number; end: number }, textLengt
     return { start, end };
 }
 
-function resolveCursorFromTextDiff(previousText: string, nextText: string): { start: number; end: number } {
+function resolveTextDiffBounds(previousText: string, nextText: string): Readonly<{
+    commonPrefixLength: number;
+    commonSuffixLength: number;
+}> {
     const previousLength = previousText.length;
     const nextLength = nextText.length;
     const sharedLength = Math.min(previousLength, nextLength);
@@ -113,6 +118,13 @@ function resolveCursorFromTextDiff(previousText: string, nextText: string): { st
     ) {
         commonSuffixLength += 1;
     }
+
+    return { commonPrefixLength, commonSuffixLength };
+}
+
+function resolveCursorFromTextDiff(previousText: string, nextText: string): { start: number; end: number } {
+    const nextLength = nextText.length;
+    const { commonPrefixLength, commonSuffixLength } = resolveTextDiffBounds(previousText, nextText);
 
     const insertedLength = Math.max(0, nextLength - commonPrefixLength - commonSuffixLength);
     const cursor = commonPrefixLength + insertedLength;
@@ -254,10 +266,11 @@ export const MultiTextInput = React.forwardRef<MultiTextInputHandle, MultiTextIn
         paddingTop: props.paddingTop,
         paddingBottom: props.paddingBottom,
     });
-    // Track latest selection in a ref
+    // Track latest selection in a ref.
     const selectionRef = React.useRef({ start: value.length, end: value.length });
     const latestNativeTextRef = React.useRef(value);
     const controlledValueRef = React.useRef(value);
+    const inputRef = React.useRef<React.ElementRef<typeof TextInput> | null>(null);
     if (controlledValueRef.current !== value) {
         const previousValue = controlledValueRef.current;
         const wasSelectionAtPreviousEnd = selectionRef.current.start === previousValue.length
@@ -268,39 +281,49 @@ export const MultiTextInput = React.forwardRef<MultiTextInputHandle, MultiTextIn
         controlledValueRef.current = value;
     }
     latestNativeTextRef.current = value;
-    const inputRef = React.useRef<React.ElementRef<typeof TextInput> | null>(null);
     const lastReportedContentHeightRef = React.useRef<number | null>(null);
 
     const handleKeyPress = React.useCallback((e: NativeSyntheticEvent<TextInputKeyPressEventData>) => {
-        if (!onKeyPress) return;
-
         const nativeEvent = e.nativeEvent as TextInputKeyPressEventData & Partial<KeyboardKeyPressEvent>;
         const keyEvent = normalizeKeyboardKeyPressEvent(nativeEvent);
-        if (!keyEvent) return;
+        let handled = false;
 
-        const handled = onKeyPress({
-            ...keyEvent,
-            inputState: {
-                text: value,
-                selection: { ...selectionRef.current },
-            },
-        });
+        if (onKeyPress && keyEvent) {
+            handled = onKeyPress({
+                ...keyEvent,
+                inputState: {
+                    text: latestNativeTextRef.current,
+                    selection: { ...selectionRef.current },
+                },
+            });
+        }
         if (handled) {
             e.preventDefault();
+            return;
         }
-    }, [onKeyPress, value]);
+    }, [onKeyPress]);
 
     const handleTextChange = React.useCallback((text: string) => {
+        const previousText = latestNativeTextRef.current;
         const selection = resolveNativeChangedTextSelection({
-            previousText: latestNativeTextRef.current,
+            previousText,
             previousSelection: selectionRef.current,
             nextText: text,
         });
         latestNativeTextRef.current = text;
         selectionRef.current = selection;
 
+        recordLargeTextInputDiagnostic({
+            phase: 'native-change',
+            platform: Platform.OS,
+            surface: 'agentInput',
+            textLength: text.length,
+            selection,
+            valueLength: controlledValueRef.current.length,
+        });
+
         onChangeText(text);
-        
+
         if (onStateChange) {
             onStateChange({ text, selection });
         }
@@ -319,8 +342,16 @@ export const MultiTextInput = React.forwardRef<MultiTextInputHandle, MultiTextIn
             return;
         }
         lastReportedContentHeightRef.current = nextHeight;
+        recordLargeTextInputDiagnostic({
+            phase: 'native-content-size',
+            platform: Platform.OS,
+            surface: 'agentInput',
+            textLength: latestNativeTextRef.current.length,
+            contentHeight: nextHeight,
+            maxHeight: normalizedMaxHeight,
+        });
         onContentHeightChange?.(nextHeight);
-    }, [onContentHeightChange]);
+    }, [normalizedMaxHeight, onContentHeightChange]);
 
     const handleSelectionChange = React.useCallback((e: NativeSyntheticEvent<TextInputSelectionChangeEventData>) => {
         if (e.nativeEvent.selection) {
@@ -347,10 +378,10 @@ export const MultiTextInput = React.forwardRef<MultiTextInputHandle, MultiTextIn
             const nextSelection = clampTextSelection(selection, text.length);
             latestNativeTextRef.current = text;
             if (inputRef.current) {
-                // Use setNativeProps for direct manipulation
+                // Use setNativeProps for direct manipulation.
                 inputRef.current.setNativeProps({
-                    text: text,
-                    selection: nextSelection
+                    text,
+                    selection: nextSelection,
                 });
             }
 
@@ -373,7 +404,7 @@ export const MultiTextInput = React.forwardRef<MultiTextInputHandle, MultiTextIn
             const nextSelection = clampTextSelection(selection, value.length);
             if (inputRef.current) {
                 inputRef.current.setNativeProps({
-                    selection: nextSelection
+                    selection: nextSelection,
                 });
             }
 

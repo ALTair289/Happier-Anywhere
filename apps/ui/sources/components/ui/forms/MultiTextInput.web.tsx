@@ -7,6 +7,7 @@ import { scaleTextStyle } from '@/components/ui/text/uiFontScale';
 import { useLocalSetting } from '@/sync/store/hooks';
 import { extractWebAttachmentFilesFromDataTransfer } from '@/utils/files/webAttachmentDataTransfer';
 import { normalizeKeyboardKeyPressEvent, type KeyPressEvent as KeyboardKeyPressEvent } from '@/keyboard/events';
+import { recordLargeTextInputDiagnostic } from '@/utils/system/userInteractionDiagnostics';
 import { MULTI_TEXT_INPUT_BASE_FONT_SIZE } from './multiTextInputTypography';
 import {
     WEB_TEXTAREA_AUTOSIZE_VALUE_LENGTH_LIMIT,
@@ -262,7 +263,38 @@ export const MultiTextInput = React.forwardRef<MultiTextInputHandle, MultiTextIn
             return;
         }
 
+        const pendingText = pendingChangeTextRef.current;
+        if (
+            pendingText !== null
+            && pendingText === liveValueRef.current
+            && value !== pendingText
+            && value !== lastEmittedValueRef.current
+        ) {
+            recordLargeTextInputDiagnostic({
+                phase: 'web-stale-props-skip',
+                platform: 'web',
+                surface: 'agentInput',
+                textLength: pendingText.length,
+                valueLength: value.length,
+                liveTextLength: liveValueRef.current.length,
+                lastEmittedTextLength: lastEmittedValueRef.current.length,
+                pendingTextLength: pendingText.length,
+            });
+            applyTextareaHeight(node, pendingText.length);
+            return;
+        }
+
         clearPendingChangeTimer();
+        recordLargeTextInputDiagnostic({
+            phase: 'web-props-reconcile',
+            platform: 'web',
+            surface: 'agentInput',
+            textLength: value.length,
+            valueLength: value.length,
+            liveTextLength: liveValueRef.current.length,
+            lastEmittedTextLength: lastEmittedValueRef.current.length,
+            pendingTextLength: pendingChangeTextRef.current?.length,
+        });
         pendingChangeTextRef.current = null;
         liveValueRef.current = value;
         lastEmittedValueRef.current = value;
@@ -329,6 +361,16 @@ export const MultiTextInput = React.forwardRef<MultiTextInputHandle, MultiTextIn
         liveValueRef.current = text;
         applyTextareaHeight(e.currentTarget, text.length);
         scheduleChangeText(text);
+        recordLargeTextInputDiagnostic({
+            phase: 'web-change',
+            platform: 'web',
+            surface: 'agentInput',
+            textLength: text.length,
+            selection,
+            valueLength: value.length,
+            liveTextLength: text.length,
+            pendingTextLength: isLargeTextInputValueLength(text.length) ? text.length : undefined,
+        });
         
         if (onStateChange) {
             onStateChange({ text, selection });

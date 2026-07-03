@@ -13,12 +13,17 @@ import { TEXT_INPUT_LARGE_TEXT_VALUE_LENGTH_LIMIT } from './largeTextInputPolicy
 const localSettingState = vi.hoisted(() => ({
     uiFontScale: 1,
 }));
+const recordLargeTextInputDiagnosticMock = vi.hoisted(() => vi.fn());
 
 vi.mock('@/sync/store/hooks', () => ({
     useLocalSetting: (key: string) => {
         if (key === 'uiFontScale') return localSettingState.uiFontScale;
         return undefined;
     },
+}));
+
+vi.mock('@/utils/system/userInteractionDiagnostics', () => ({
+    recordLargeTextInputDiagnostic: (...args: unknown[]) => recordLargeTextInputDiagnosticMock(...args),
 }));
 
 installFormsCommonModuleMocks({
@@ -51,6 +56,7 @@ function flattenStyle(style: unknown): Record<string, unknown> {
 describe('MultiTextInput', () => {
     afterEach(() => {
         localSettingState.uiFontScale = 1;
+        recordLargeTextInputDiagnosticMock.mockReset();
     });
 
     it('forwards testID to the TextInput', async () => {
@@ -126,6 +132,59 @@ describe('MultiTextInput', () => {
         expect(typeof style.minHeight).toBe('number');
         expect(style.maxHeight).toBe(144);
         expect(input.props.scrollEnabled).toBe(true);
+    });
+
+    it('records native large-text changes with selection metadata only', async () => {
+        const { MultiTextInput } = await import('./MultiTextInput');
+        const screen = await renderScreen(<MultiTextInput
+            testID="composer-input"
+            value=""
+            onChangeText={() => {}}
+        />);
+        const input = screen.tree.findByType('TextInput' as any);
+        const largeText = 'x'.repeat(TEXT_INPUT_LARGE_TEXT_VALUE_LENGTH_LIMIT + 1);
+
+        await act(async () => {
+            input.props.onChangeText(largeText);
+        });
+
+        expect(recordLargeTextInputDiagnosticMock).toHaveBeenCalledWith({
+            phase: 'native-change',
+            platform: 'web',
+            surface: 'agentInput',
+            textLength: largeText.length,
+            selection: { start: largeText.length, end: largeText.length },
+            valueLength: 0,
+        });
+    });
+
+    it('records native large-text content-size changes with height metadata only', async () => {
+        const { MultiTextInput } = await import('./MultiTextInput');
+        const largeText = 'x'.repeat(TEXT_INPUT_LARGE_TEXT_VALUE_LENGTH_LIMIT + 1);
+        const screen = await renderScreen(<MultiTextInput
+            testID="composer-input"
+            value={largeText}
+            maxHeight={144}
+            onChangeText={() => {}}
+        />);
+        const input = screen.tree.findByType('TextInput' as any);
+
+        await act(async () => {
+            input.props.onContentSizeChange({
+                nativeEvent: {
+                    contentSize: { height: 220.4 },
+                },
+            });
+        });
+
+        expect(recordLargeTextInputDiagnosticMock).toHaveBeenCalledWith({
+            phase: 'native-content-size',
+            platform: 'web',
+            surface: 'agentInput',
+            textLength: largeText.length,
+            contentHeight: 221,
+            maxHeight: 144,
+        });
     });
 
     it('keeps native autogrow as the layout owner after content-size reports', async () => {
@@ -231,14 +290,62 @@ describe('MultiTextInput', () => {
         });
     });
 
-    it('infers the cursor at the end when native appends to a large input after stale selection state', async () => {
+    it('keeps initially oversized native text as the full editable TextInput value', async () => {
+        const { MultiTextInput } = await import('./MultiTextInput');
+        const ref = React.createRef<NativeMultiTextInputHandle>();
+        const largeText = `${'x'.repeat(TEXT_INPUT_LARGE_TEXT_VALUE_LENGTH_LIMIT + 1)}TAIL`;
+
+        const screen = await renderScreen(<MultiTextInput
+            ref={ref}
+            testID="composer-input"
+            value={largeText}
+            onChangeText={() => {}}
+        />);
+        const input = screen.tree.findByType('TextInput' as any);
+
+        expect(input.props.value).toBe(largeText);
+        expect(input.props.defaultValue).toBeUndefined();
+        expect(input.props.maxLength).toBeUndefined();
+        expect(ref.current?.getText()).toBe(largeText);
+    });
+
+    it('propagates oversized native text changes immediately without capping the native value', async () => {
+        const { MultiTextInput } = await import('./MultiTextInput');
+        const ref = React.createRef<NativeMultiTextInputHandle>();
+        const onChangeText = vi.fn();
+        const onStateChange = vi.fn();
+        const largeText = 'x'.repeat(TEXT_INPUT_LARGE_TEXT_VALUE_LENGTH_LIMIT + 1);
+
+        const screen = await renderScreen(<MultiTextInput
+            ref={ref}
+            testID="composer-input"
+            value=""
+            onChangeText={onChangeText}
+            onStateChange={onStateChange}
+        />);
+        const input = screen.tree.findByType('TextInput' as any);
+        expect(input.props.maxLength).toBeUndefined();
+
+        await act(async () => {
+            input.props.onChangeText(largeText);
+        });
+
+        expect(ref.current?.getText()).toBe(largeText);
+        expect(onChangeText).toHaveBeenCalledWith(largeText);
+        expect(onStateChange).toHaveBeenLastCalledWith({
+            text: largeText,
+            selection: { start: largeText.length, end: largeText.length },
+        });
+    });
+
+    it('tracks native appends after an initially oversized value reports its live selection', async () => {
         const { MultiTextInput } = await import('./MultiTextInput');
         const onStateChange = vi.fn();
         const initialText = Array.from(
             { length: TEXT_INPUT_LARGE_TEXT_VALUE_LENGTH_LIMIT + 1 },
             (_, index) => String.fromCharCode(97 + (index % 26)),
         ).join('');
-        const nextText = `${initialText} /r`;
+        const nextText = `${initialText}A`;
         const screen = await renderScreen(<MultiTextInput
             testID="composer-input"
             value={initialText}
@@ -246,10 +353,12 @@ describe('MultiTextInput', () => {
             onStateChange={onStateChange}
         />);
         const input = screen.tree.findByType('TextInput' as any);
+        expect(input.props.value).toBe(initialText);
+        expect(input.props.onChangeText).toEqual(expect.any(Function));
 
         await act(async () => {
             input.props.onSelectionChange({
-                nativeEvent: { selection: { start: 0, end: 0 } },
+                nativeEvent: { selection: { start: initialText.length, end: initialText.length } },
             });
             input.props.onChangeText(nextText);
         });
@@ -293,6 +402,39 @@ describe('MultiTextInput', () => {
                 end: nextText.length,
             },
         });
+    });
+
+    it('applies externally controlled oversized native text as the full native value', async () => {
+        const { MultiTextInput } = await import('./MultiTextInput');
+        const nativeInputNode = {
+            setNativeProps: vi.fn(),
+            measureInWindow: vi.fn(),
+            focus: vi.fn(),
+            blur: vi.fn(),
+        };
+        const largeText = 'x'.repeat(TEXT_INPUT_LARGE_TEXT_VALUE_LENGTH_LIMIT + 1);
+
+        const screen = await renderScreen(<MultiTextInput
+            testID="composer-input"
+            value="short"
+            onChangeText={() => {}}
+        />, {
+            createNodeMock: (element) => (element.type === 'TextInput' ? nativeInputNode : null),
+        });
+
+        await screen.update(<MultiTextInput
+            testID="composer-input"
+            value={largeText}
+            onChangeText={() => {}}
+        />);
+
+        const input = screen.tree.findByType('TextInput' as any);
+        expect(input.props.value).toBe(largeText);
+        expect(input.props.defaultValue).toBeUndefined();
+        expect(input.props.maxLength).toBeUndefined();
+        expect(nativeInputNode.setNativeProps).not.toHaveBeenCalledWith(expect.objectContaining({
+            text: expect.any(String),
+        }));
     });
 
     it('forwards testID as data-testid on web textarea', async () => {
@@ -476,6 +618,135 @@ describe('MultiTextInput', () => {
 
         expect(flushed).toBe(largeText);
         expect(onChangeText).toHaveBeenCalledWith(largeText);
+    });
+
+    it('does not overwrite a newer pending oversized web edit with a stale controlled value replay', async () => {
+        vi.useFakeTimers();
+        try {
+            const { MultiTextInput } = await import('./MultiTextInput.web');
+            const onChangeText = vi.fn();
+            const baseText = 'x'.repeat(TEXT_INPUT_LARGE_TEXT_VALUE_LENGTH_LIMIT + 1);
+            const firstEdit = `${baseText}\nQRST`;
+            const secondEdit = `${firstEdit}UV`;
+            const mockTextarea = {
+                value: baseText,
+                selectionStart: baseText.length,
+                selectionEnd: baseText.length,
+                scrollTop: 0,
+                scrollHeight: 120,
+                style: {} as Record<string, string>,
+                setSelectionRange: vi.fn((start: number, end: number) => {
+                    mockTextarea.selectionStart = start;
+                    mockTextarea.selectionEnd = end;
+                }),
+                dispatchEvent: vi.fn(),
+                focus: vi.fn(),
+                blur: vi.fn(),
+                getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 40 }),
+            };
+
+            let tree: renderer.ReactTestRenderer | null = null;
+            await act(async () => {
+                tree = renderer.create(
+                    <MultiTextInput
+                        testID="composer-input"
+                        value={baseText}
+                        onChangeText={onChangeText}
+                    />,
+                    {
+                        createNodeMock: (element) => {
+                            if (element.type === 'textarea') return mockTextarea;
+                            return null;
+                        },
+                    },
+                );
+            });
+            const input = tree!.root.findByType('textarea' as any);
+
+            mockTextarea.value = firstEdit;
+            mockTextarea.selectionStart = firstEdit.length;
+            mockTextarea.selectionEnd = firstEdit.length;
+            await act(async () => {
+                input.props.onChange({
+                    target: mockTextarea,
+                    currentTarget: mockTextarea,
+                });
+                await vi.advanceTimersByTimeAsync(500);
+            });
+            expect(onChangeText).toHaveBeenCalledWith(firstEdit);
+
+            await act(async () => {
+                tree!.update(
+                    <MultiTextInput
+                        testID="composer-input"
+                        value={firstEdit}
+                        onChangeText={onChangeText}
+                    />,
+                );
+            });
+
+            mockTextarea.value = secondEdit;
+            mockTextarea.selectionStart = secondEdit.length;
+            mockTextarea.selectionEnd = secondEdit.length;
+            await act(async () => {
+                input.props.onChange({
+                    target: mockTextarea,
+                    currentTarget: mockTextarea,
+                });
+            });
+
+            await act(async () => {
+                tree!.update(
+                    <MultiTextInput
+                        testID="composer-input"
+                        value={baseText}
+                        onChangeText={onChangeText}
+                    />,
+                );
+            });
+
+            expect(mockTextarea.value).toBe(secondEdit);
+            expect(mockTextarea.selectionStart).toBe(secondEdit.length);
+            expect(mockTextarea.selectionEnd).toBe(secondEdit.length);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('records web large-text changes with live value metadata only', async () => {
+        const { MultiTextInput } = await import('./MultiTextInput.web');
+        const tree = (await renderScreen(React.createElement(MultiTextInput as unknown as React.ComponentType<Record<string, unknown>>, {
+            testID: 'composer-input',
+            value: '',
+            onChangeText: () => {},
+        }))).tree;
+        const input = tree.findByType('textarea' as any);
+        const largeText = 'x'.repeat(TEXT_INPUT_LARGE_TEXT_VALUE_LENGTH_LIMIT + 1);
+        const currentTarget = {
+            value: largeText,
+            selectionStart: largeText.length,
+            selectionEnd: largeText.length,
+            scrollHeight: 120,
+            style: {} as Record<string, string>,
+        };
+
+        await act(async () => {
+            input.props.onChange({
+                target: currentTarget,
+                currentTarget,
+            });
+        });
+
+        expect(recordLargeTextInputDiagnosticMock).toHaveBeenCalledWith({
+            phase: 'web-change',
+            platform: 'web',
+            surface: 'agentInput',
+            textLength: largeText.length,
+            selection: { start: largeText.length, end: largeText.length },
+            valueLength: 0,
+            liveTextLength: largeText.length,
+            pendingTextLength: largeText.length,
+        });
     });
 
     it('drops pending oversized web text changes on unmount instead of emitting stale text', async () => {
