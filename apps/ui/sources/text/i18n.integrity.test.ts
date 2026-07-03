@@ -44,7 +44,6 @@ const IGNORED_UNTRANSLATED_KEYS = new Set([
     'settingsSession.promptPersonalization.askAgentToSuggestReplyOptionsDisabledSubtitle',
     'newSession.worktree.backToRoot',
     'welcome.welcomeFooterRelay',
-    'session.workState.goal.budgetToggle',
     'settingsSession.sessionList.narrowWorkingIndicatorSpinnerTitle',
     'settingsSession.sessionList.workingIndicatorSpinnerTitle',
     'settingsSession.sessionList.identityDisplayAvatarTitle',
