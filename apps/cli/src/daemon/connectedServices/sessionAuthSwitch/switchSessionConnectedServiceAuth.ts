@@ -5,6 +5,7 @@ import {
   ConnectedServiceIdSchema,
   isConnectedServiceCredentialHealthStatusReconnectRequired,
   isConnectedServiceCredentialHealthStatusUsable,
+  normalizeConnectedServiceCredentialHealthStatus,
   type ConnectedServiceUxDiagnosticV1,
   type ConnectedServiceAuthGroupV1,
   type ConnectedServiceBindingsV1,
@@ -770,7 +771,8 @@ async function validateConnectedProfile(input: Readonly<{
   if (!profile) {
     return { ok: false, errorCode: 'profile_missing', serviceId: input.serviceId };
   }
-  if (isConnectedServiceCredentialHealthStatusReconnectRequired(profile.status)) {
+  const healthStatus = normalizeConnectedServiceCredentialHealthStatus(profile.status);
+  if (isConnectedServiceCredentialHealthStatusReconnectRequired(healthStatus)) {
 	    return failureResult('profile_action_required', {
 	      serviceId: input.serviceId,
 	      failurePhase: 'normalization',
@@ -778,11 +780,11 @@ async function validateConnectedProfile(input: Readonly<{
 	      actionRequired: {
         kind: 'reconnect_profile',
         profileId: input.profileId,
-        healthStatus: profile.status,
+        healthStatus: 'needs_reauth',
       },
     });
   }
-  if (!isConnectedServiceCredentialHealthStatusUsable(profile.status)) {
+  if (!isConnectedServiceCredentialHealthStatusUsable(healthStatus)) {
     return { ok: false, errorCode: 'profile_disconnected', serviceId: input.serviceId };
   }
   return null;
