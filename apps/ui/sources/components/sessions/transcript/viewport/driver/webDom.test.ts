@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
     restoreWebDomPrependGrowth,
     restoreWebDomLocalHeightChange,
+    resolveWebBandExtrapolatedTranscriptItemLayout,
     scrollWebDomToTranscriptItem,
 } from './webDom';
 import { createWebDomScrollObservation } from './webDomObservation';
@@ -124,6 +125,83 @@ function createMetrics(params: Readonly<{
         item,
     };
 }
+
+describe('resolveWebBandExtrapolatedTranscriptItemLayout', () => {
+    function createBandContainer(params: Readonly<{
+        mounted: readonly Readonly<{ itemId: string; top: number; height: number }>[];
+        scrollTop?: number;
+    }>) {
+        const container = new FakeElement(null, { top: 100, bottom: 500, height: 400 }, {
+            clientHeight: 400,
+            scrollHeight: 20_000,
+            scrollTop: params.scrollTop ?? 0,
+        });
+        for (const row of params.mounted) {
+            // rects are viewport-relative: content offset = rect.top - container.top + scrollTop
+            container.appendChild(new FakeElement(`transcript-item-${row.itemId}`, {
+                top: 100 + row.top - (params.scrollTop ?? 0),
+                bottom: 100 + row.top + row.height - (params.scrollTop ?? 0),
+                height: row.height,
+            }));
+        }
+        return container;
+    }
+
+    const listData = Array.from({ length: 100 }, (_, index) => ({ id: `it-${index}` }));
+
+    it('interpolates the unmounted target position between mounted neighbors by index', () => {
+        const container = createBandContainer({
+            scrollTop: 5_000,
+            mounted: [
+                { itemId: 'it-40', top: 5_000, height: 100 },
+                { itemId: 'it-50', top: 6_000, height: 100 },
+            ],
+        });
+
+        const layout = resolveWebBandExtrapolatedTranscriptItemLayout({
+            container: container as unknown as HTMLElement,
+            listData: listData as never,
+            scrollTop: 5_000,
+            targetIndex: 45,
+        });
+
+        expect(layout).not.toBeNull();
+        expect(Math.round(layout!.y)).toBe(5_500);
+    });
+
+    it('extrapolates past the mounted band edge using the measured band average row height', () => {
+        // Band rows 40..49 measured at 200px each; target index 30 sits ten rows above the band.
+        const mounted = Array.from({ length: 10 }, (_, i) => ({
+            itemId: `it-${40 + i}`,
+            top: 8_000 + i * 200,
+            height: 200,
+        }));
+        const container = createBandContainer({ scrollTop: 8_000, mounted });
+
+        const layout = resolveWebBandExtrapolatedTranscriptItemLayout({
+            container: container as unknown as HTMLElement,
+            listData: listData as never,
+            scrollTop: 8_000,
+            targetIndex: 30,
+        });
+
+        expect(layout).not.toBeNull();
+        expect(Math.round(layout!.y)).toBe(8_000 - 10 * 200);
+    });
+
+    it('returns null when no listData rows are mounted', () => {
+        const container = createBandContainer({ mounted: [] });
+
+        const layout = resolveWebBandExtrapolatedTranscriptItemLayout({
+            container: container as unknown as HTMLElement,
+            listData: listData as never,
+            scrollTop: 0,
+            targetIndex: 45,
+        });
+
+        expect(layout).toBeNull();
+    });
+});
 
 describe('web DOM viewport driver', () => {
     it('uses exact transcript item lookup instead of scanning every test id descendant', () => {

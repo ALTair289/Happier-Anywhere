@@ -146,7 +146,14 @@ export function performWebDomViewportCommand(
         if (!itemId) return false;
         const metrics = deps.resolveWebScrollMetrics();
         if (!metrics) return false;
-        const itemLayout = readScrollableChatListItemLayout(deps.listRef.current, index);
+        // Prefer measured-band extrapolation over the renderer's estimated layout for
+        // unmounted targets; the estimate goes stale once measured rows shift content.
+        const itemLayout = resolveWebBandExtrapolatedTranscriptItemLayout({
+            container: metrics.element,
+            listData: deps.listDataRef.current,
+            scrollTop: metrics.scrollTop,
+            targetIndex: index,
+        }) ?? readScrollableChatListItemLayout(deps.listRef.current, index);
         const result = scrollWebDomToTranscriptItem({
             align: command.kind === 'jump-to-seq'
                 ? command.align ?? { kind: 'center' }
@@ -416,6 +423,77 @@ export function restoreWebDomPrependGrowth(params: Readonly<{
         previousScrollTop,
         targetScrollTop,
     };
+}
+
+/**
+ * Position estimate for an UNMOUNTED listData row, extrapolated from the rows that ARE
+ * mounted in the DOM. FlashList layout estimates go stale the moment measured rows shift
+ * real content — an estimate-space write then parks the viewport inside an unrendered gap
+ * and re-issuing the same estimate never converges (live RG1/RG2 evidence). Measured
+ * neighbors give a monotonically improving aim: interpolate between the nearest mounted
+ * rows on each side of the target index, or extrapolate past the band edge using the
+ * measured band's average row height.
+ */
+export function resolveWebBandExtrapolatedTranscriptItemLayout(params: Readonly<{
+    container: HTMLElement;
+    listData: TranscriptViewportListData;
+    scrollTop: number;
+    targetIndex: number;
+}>): WebDomMeasuredItemLayout | null {
+    if (typeof params.container.getBoundingClientRect !== 'function') return null;
+    if (typeof params.container.querySelectorAll !== 'function') return null;
+    const containerRect = params.container.getBoundingClientRect();
+    const indexByTestId = new Map<string, number>();
+    for (let index = 0; index < params.listData.length; index += 1) {
+        const itemId = params.listData[index]?.id;
+        if (typeof itemId === 'string' && itemId.length > 0) {
+            indexByTestId.set(`${TRANSCRIPT_WEB_PREPEND_ANCHOR_TEST_ID_PREFIX}${itemId}`, index);
+        }
+    }
+    if (indexByTestId.size === 0) return null;
+
+    let before: Readonly<{ index: number; top: number; height: number }> | null = null;
+    let after: Readonly<{ index: number; top: number; height: number }> | null = null;
+    let bandRowCount = 0;
+    let bandHeightSum = 0;
+    for (const node of params.container.querySelectorAll('[data-testid]')) {
+        const element = node as unknown as TestIdElement;
+        const testId = element.getAttribute?.('data-testid');
+        if (!testId) continue;
+        const index = indexByTestId.get(testId);
+        if (index === undefined || typeof element.getBoundingClientRect !== 'function') continue;
+        const rect = element.getBoundingClientRect();
+        const top = rect.top - containerRect.top + params.scrollTop;
+        const height = Math.max(0, typeof rect.height === 'number' && Number.isFinite(rect.height)
+            ? rect.height
+            : rect.bottom - rect.top);
+        bandRowCount += 1;
+        bandHeightSum += height;
+        if (index === params.targetIndex) {
+            return { y: top, height };
+        }
+        if (index < params.targetIndex) {
+            if (!before || index > before.index) before = { index, top, height };
+        } else if (!after || index < after.index) {
+            after = { index, top, height };
+        }
+    }
+    if (!before && !after) return null;
+    const averageRowHeight = bandRowCount > 0 ? bandHeightSum / bandRowCount : 0;
+    if (before && after && after.index > before.index) {
+        const fraction = (params.targetIndex - before.index) / (after.index - before.index);
+        return {
+            y: before.top + fraction * (after.top - before.top),
+            height: averageRowHeight || before.height,
+        };
+    }
+    if (before) {
+        const rowHeight = averageRowHeight || before.height;
+        return { y: before.top + (params.targetIndex - before.index) * rowHeight, height: rowHeight };
+    }
+    const anchor = after as Readonly<{ index: number; top: number; height: number }>;
+    const rowHeight = averageRowHeight || anchor.height;
+    return { y: anchor.top - (anchor.index - params.targetIndex) * rowHeight, height: rowHeight };
 }
 
 export function scrollWebDomToTranscriptItem(params: Readonly<{
