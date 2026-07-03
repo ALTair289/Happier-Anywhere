@@ -95,12 +95,20 @@ export type SessionAgentEventSource = Readonly<{
 }>;
 
 type SessionAgentEventSourceCacheEntry = Readonly<{
-  sourceRef: StorageState['sessionMessages'][string];
+  sourceVersion: number;
   signature: string;
   events: ReadonlyArray<SessionAgentEventSource>;
 }>;
 
 const sessionAgentEventSourceCache = new Map<string, SessionAgentEventSourceCacheEntry>();
+
+function trimSessionAgentEventSourceCache(): void {
+  while (sessionAgentEventSourceCache.size > SESSION_MESSAGES_ARRAY_CACHE_MAX) {
+    const oldestKey = sessionAgentEventSourceCache.keys().next().value;
+    if (typeof oldestKey !== 'string') break;
+    sessionAgentEventSourceCache.delete(oldestKey);
+  }
+}
 
 function buildConnectedServiceAccountSwitchEventSignature(
   message: Extract<Message, { kind: 'agent-event' }>,
@@ -598,16 +606,20 @@ export function useSessionConnectedServiceAccountSwitchEvents(
       if (!enabled) return EMPTY_SESSION_AGENT_EVENTS;
       const sessionMessages = state.sessionMessages[sessionId];
       const cached = sessionAgentEventSourceCache.get(sessionId);
-      if (cached && cached.sourceRef === sessionMessages) {
+      const sourceVersion = sessionMessages?.agentEventSourceVersion ?? sessionMessages?.messagesVersion ?? 0;
+      if (cached && cached.sourceVersion === sourceVersion) {
+        sessionAgentEventSourceCache.delete(sessionId);
+        sessionAgentEventSourceCache.set(sessionId, cached);
         return cached.events;
       }
       if (!sessionMessages || sessionMessages.messageIdsOldestFirst.length === 0) {
         if (sessionMessages) {
           sessionAgentEventSourceCache.set(sessionId, {
-            sourceRef: sessionMessages,
+            sourceVersion,
             signature: 'empty',
             events: EMPTY_SESSION_AGENT_EVENTS,
           });
+          trimSessionAgentEventSourceCache();
         } else {
           sessionAgentEventSourceCache.delete(sessionId);
         }
@@ -629,29 +641,32 @@ export function useSessionConnectedServiceAccountSwitchEvents(
 
       if (events.length === 0) {
         sessionAgentEventSourceCache.set(sessionId, {
-          sourceRef: sessionMessages,
+          sourceVersion,
           signature: 'none',
           events: EMPTY_SESSION_AGENT_EVENTS,
         });
+        trimSessionAgentEventSourceCache();
         return EMPTY_SESSION_AGENT_EVENTS;
       }
 
       const signature = signatureParts.join('|');
       if (cached?.signature === signature) {
         sessionAgentEventSourceCache.set(sessionId, {
-          sourceRef: sessionMessages,
+          sourceVersion,
           signature,
           events: cached.events,
         });
+        trimSessionAgentEventSourceCache();
         return cached.events;
       }
 
       const next = events;
       sessionAgentEventSourceCache.set(sessionId, {
-        sourceRef: sessionMessages,
+        sourceVersion,
         signature,
         events: next,
       });
+      trimSessionAgentEventSourceCache();
       return next;
     })
   );

@@ -850,6 +850,21 @@ function shouldApplyCacheOnlyActivityRenderablePatch(
     return true;
 }
 
+// Legacy-server fallback: hidden durable messages whose fan-out payload lacks
+// attentionImpact (or whose session shell is unknown) trigger a targeted
+// per-session shell refresh instead of a full session-list refetch. The floor
+// bounds refresh traffic for bursts while the trailing trigger guarantees
+// convergence. The hydration closure is refreshed per socket update (same
+// pattern as `socketMessageApplyHandlers`).
+const SESSION_SHELL_REFRESH_FLOOR_MS = 5_000;
+let sessionShellRefreshHydration: ((sessionId: string) => void) | null = null;
+const sessionShellRefreshCoalescer = createSessionShellRefreshCoalescer({
+    floorMs: SESSION_SHELL_REFRESH_FLOOR_MS,
+    trigger: (sessionId) => {
+        sessionShellRefreshHydration?.(sessionId);
+    },
+});
+
 const socketMessageApplyCoalescer = createSessionMessageApplyCoalescer({
     getConfig: getSocketMessageApplyConfig,
     applyBatch: (sessionId, messages) => {
@@ -1243,6 +1258,17 @@ export async function handleUpdateContainer(params: {
                 if (!shouldContinue()) return;
                 fetchSessions();
             },
+            requestSessionShellRefresh: (sessionId) => {
+                if (!shouldContinue()) return;
+                sessionShellRefreshHydration = (targetSessionId) => requestTargetedSessionHydration({
+                    sessionId: targetSessionId,
+                    reason: 'socket-update-attention-unknown',
+                    hydrateSessionById,
+                    invalidateSessions,
+                    invalidationReason: 'socketMessageAttentionUnknown',
+                });
+                sessionShellRefreshCoalescer.request(sessionId);
+            },
             applyMessages: (sessionId, messages) => {
                 if (!shouldContinue()) return;
                 applyMessages(sessionId, messages);
@@ -1317,6 +1343,17 @@ export async function handleUpdateContainer(params: {
             fetchSessions: () => {
                 if (!shouldContinue()) return;
                 fetchSessions();
+            },
+            requestSessionShellRefresh: (sessionId) => {
+                if (!shouldContinue()) return;
+                sessionShellRefreshHydration = (targetSessionId) => requestTargetedSessionHydration({
+                    sessionId: targetSessionId,
+                    reason: 'socket-update-attention-unknown',
+                    hydrateSessionById,
+                    invalidateSessions,
+                    invalidationReason: 'socketMessageAttentionUnknown',
+                });
+                sessionShellRefreshCoalescer.request(sessionId);
             },
             applyMessages: (sessionId, messages) => {
                 if (!shouldContinue()) return;

@@ -6,6 +6,7 @@ export type SessionInvalidationTelemetryReason =
     | 'socketUpdateSessionMissingVisible'
     | 'socketUpdateSessionMissingUnpatchable'
     | 'socketUpdateSessionTurnsProjection'
+    | 'socketMessageAttentionUnknown'
     | 'socketSharingChanged';
 
 const REASON_FIELD_BY_REASON: Readonly<Record<SessionInvalidationTelemetryReason, string>> = {
@@ -14,6 +15,7 @@ const REASON_FIELD_BY_REASON: Readonly<Record<SessionInvalidationTelemetryReason
     socketUpdateSessionMissingVisible: 'reason_socketUpdateSessionMissingVisible',
     socketUpdateSessionMissingUnpatchable: 'reason_socketUpdateSessionMissingUnpatchable',
     socketUpdateSessionTurnsProjection: 'reason_socketUpdateSessionTurnsProjection',
+    socketMessageAttentionUnknown: 'reason_socketMessageAttentionUnknown',
     socketSharingChanged: 'reason_socketSharingChanged',
 };
 

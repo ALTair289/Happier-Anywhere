@@ -84,6 +84,14 @@ export type SessionMessages = {
     latestReadyEventAt: number | null;
     messagesVersion: number;
     subagentSourceVersion?: number;
+    /**
+     * Version counter that advances only when an `agent-event` transcript
+     * message is added or updated. Selectors deriving from agent events
+     * (e.g. `useSessionConnectedServiceAccountSwitchEvents`) key their memo
+     * caches on it so ordinary streaming appends cost O(1) instead of a full
+     * transcript rescan.
+     */
+    agentEventSourceVersion?: number;
     lastAppliedAgentStateVersion?: number | null;
     isLoaded: boolean;
 };
@@ -239,6 +247,10 @@ function coerceSessionMessages(input: unknown): SessionMessages {
         typeof raw?.subagentSourceVersion === 'number' && Number.isFinite(raw.subagentSourceVersion)
             ? Math.trunc(raw.subagentSourceVersion)
             : messagesVersion;
+    const agentEventSourceVersion: number =
+        typeof raw?.agentEventSourceVersion === 'number' && Number.isFinite(raw.agentEventSourceVersion)
+            ? Math.trunc(raw.agentEventSourceVersion)
+            : messagesVersion;
 
     const lastAppliedAgentStateVersion: number | null =
         typeof raw?.lastAppliedAgentStateVersion === 'number' && Number.isFinite(raw.lastAppliedAgentStateVersion)
@@ -260,6 +272,7 @@ function coerceSessionMessages(input: unknown): SessionMessages {
         latestReadyEventAt,
         messagesVersion,
         subagentSourceVersion,
+        agentEventSourceVersion,
         lastAppliedAgentStateVersion,
         isLoaded,
     };
@@ -369,11 +382,15 @@ export function applyAgentStateUpdateToSessionMessages(params: Readonly<{
     let didSeeThinkingTextChange = false;
     let latestThinkingMessageActivityAtMs = existing.latestThinkingMessageActivityAtMs ?? null;
     let didSubagentSourceChange = false;
+    let didAgentEventSourceChange = false;
 
     for (const message of processedMessages) {
         const prev = messagesById[message.id];
         if ((prev && shouldIncludeSubagentSourceMessage(prev)) || shouldIncludeSubagentSourceMessage(message)) {
             didSubagentSourceChange = true;
+        }
+        if (prev?.kind === 'agent-event' || message.kind === 'agent-event') {
+            didAgentEventSourceChange = true;
         }
         if (!prev) {
             idsToInsert.push(message.id);
@@ -471,6 +488,7 @@ export function applyAgentStateUpdateToSessionMessages(params: Readonly<{
             latestReadyEventAt: nextLatestReadyEventAt,
             messagesVersion: existing.messagesVersion + (processedMessages.length > 0 ? 1 : 0),
             subagentSourceVersion: (existing.subagentSourceVersion ?? existing.messagesVersion) + (didSubagentSourceChange ? 1 : 0),
+            agentEventSourceVersion: (existing.agentEventSourceVersion ?? existing.messagesVersion) + (didAgentEventSourceChange ? 1 : 0),
             lastAppliedAgentStateVersion: existing.lastAppliedAgentStateVersion,
         },
         sessionLatestUsage: latestUsage,
@@ -493,6 +511,7 @@ function createEmptySessionMessages(): SessionMessages {
         latestReadyEventAt: null,
         messagesVersion: 0,
         subagentSourceVersion: 0,
+        agentEventSourceVersion: 0,
         lastAppliedAgentStateVersion: null,
         isLoaded: false,
     };
@@ -641,6 +660,7 @@ export function createMessagesDomain<S extends MessagesDomain & MessagesDomainDe
                 let didSeeThinkingTextChange = false;
                 let latestThinkingMessageActivityAtMs = existingSession.latestThinkingMessageActivityAtMs ?? null;
                 let didSubagentSourceChange = false;
+                let didAgentEventSourceChange = false;
                 // Incremental transcript aggregates (O(changed) instead of a
                 // full transcript walk per apply). Invalidated when a change
                 // is non-monotone; rebuilt lazily at the renderable refresh.
@@ -660,6 +680,9 @@ export function createMessagesDomain<S extends MessagesDomain & MessagesDomainDe
                     }
                     if ((prev && shouldIncludeSubagentSourceMessage(prev)) || shouldIncludeSubagentSourceMessage(message)) {
                         didSubagentSourceChange = true;
+                    }
+                    if (prev?.kind === 'agent-event' || message.kind === 'agent-event') {
+                        didAgentEventSourceChange = true;
                     }
                     if (!prev) {
                         idsToInsert.push(message.id);
@@ -976,6 +999,7 @@ export function createMessagesDomain<S extends MessagesDomain & MessagesDomainDe
                             latestReadyEventAt: nextLatestReadyEventAt,
                             messagesVersion: existingSession.messagesVersion + (processedMessages.length > 0 ? 1 : 0),
                             subagentSourceVersion: (existingSession.subagentSourceVersion ?? existingSession.messagesVersion) + (didSubagentSourceChange ? 1 : 0),
+                            agentEventSourceVersion: (existingSession.agentEventSourceVersion ?? existingSession.messagesVersion) + (didAgentEventSourceChange ? 1 : 0),
                             lastAppliedAgentStateVersion: shouldApplyAgentState
                                 ? agentStateVersion
                                 : existingSession.lastAppliedAgentStateVersion,
@@ -1025,6 +1049,7 @@ export function createMessagesDomain<S extends MessagesDomain & MessagesDomainDe
                 let latestThinkingMessageActivityAtMs: number | null = null;
                 let messagesVersion = 0;
                 let subagentSourceVersion = 0;
+                let agentEventSourceVersion = 0;
 
                 if (agentState) {
                     // Process AgentState through reducer to get initial permission messages
@@ -1042,6 +1067,7 @@ export function createMessagesDomain<S extends MessagesDomain & MessagesDomainDe
                     latestThinkingMessageActivityAtMs = latestThinkingMessageId ? Date.now() : null;
                     if (processedMessages.length > 0) messagesVersion = 1;
                     if (processedMessages.some(shouldIncludeSubagentSourceMessage)) subagentSourceVersion = 1;
+                    if (processedMessages.some((message) => message.kind === 'agent-event')) agentEventSourceVersion = 1;
                 }
 
                 // Extract latestUsage from reducerState if available and update session
@@ -1074,6 +1100,7 @@ export function createMessagesDomain<S extends MessagesDomain & MessagesDomainDe
                             latestReadyEventAt: null,
                             messagesVersion,
                             subagentSourceVersion,
+                            agentEventSourceVersion,
                             lastAppliedAgentStateVersion:
                                 typeof session?.agentStateVersion === 'number' && Number.isFinite(session.agentStateVersion)
                                     ? Math.trunc(session.agentStateVersion)
@@ -1123,6 +1150,7 @@ export function createMessagesDomain<S extends MessagesDomain & MessagesDomainDe
 
             const messagesById: Record<string, Message> = {};
             const messageRevisionsById: Record<string, number> = {};
+            clearSessionTranscriptDerivedCachesForSession(sessionId);
             return {
                 ...state,
                 sessionMessages: {
@@ -1140,6 +1168,7 @@ export function createMessagesDomain<S extends MessagesDomain & MessagesDomainDe
                         latestReadyEventAt: null,
                         messagesVersion: 0,
                         subagentSourceVersion: 0,
+                        agentEventSourceVersion: 0,
                         lastAppliedAgentStateVersion: null,
                         isLoaded: false,
                     } satisfies SessionMessages,

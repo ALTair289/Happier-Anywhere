@@ -564,8 +564,10 @@ describe('socket new-message + coalescer: materialized max seq', () => {
             log: { log: vi.fn() },
         };
 
+        const hydrateSessionById = vi.fn();
         await handleUpdateContainer({
             ...baseParams,
+            hydrateSessionById,
             updateData: buildNewMessageUpdate({
                 sessionId: 's-cache-encrypted-maintenance',
                 messageId: 'm-encrypted-maintenance',
@@ -573,7 +575,9 @@ describe('socket new-message + coalescer: materialized max seq', () => {
             }),
         });
 
-        expect(fetchSessions).toHaveBeenCalledTimes(1);
+        expect(hydrateSessionById).toHaveBeenCalledTimes(1);
+        expect(hydrateSessionById).toHaveBeenCalledWith('s-cache-encrypted-maintenance', 'socket-update-attention-unknown');
+        expect(fetchSessions).not.toHaveBeenCalled();
         expect(applyMessages).not.toHaveBeenCalled();
         expect(storage.getState().sessionListRenderables['s-cache-encrypted-maintenance']).toEqual(
             expect.objectContaining({

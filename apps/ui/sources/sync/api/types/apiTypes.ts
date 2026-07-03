@@ -1,6 +1,10 @@
 import { z } from 'zod';
 import { ChangeEntrySchema, ChangesResponseSchema } from '@happier-dev/protocol/changes';
-import { SessionMessageRoleSchema, SessionStoredMessageContentSchema } from '@happier-dev/protocol';
+import {
+    SessionMessageAttentionImpactSchema,
+    SessionMessageRoleSchema,
+    SessionStoredMessageContentSchema,
+} from '@happier-dev/protocol';
 import { EphemeralUpdateSchema, type EphemeralUpdate, UpdateBodySchema, UpdateContainerSchema } from '@happier-dev/protocol/updates';
 
 //
@@ -13,6 +17,7 @@ export const ApiMessageSchema = z.object({
     localId: z.string().nullish(),
     sidechainId: z.string().nullable().optional(),
     messageRole: SessionMessageRoleSchema.nullable().optional(),
+    attentionImpact: SessionMessageAttentionImpactSchema.optional(),
     content: SessionStoredMessageContentSchema,
     createdAt: z.number(),
     updatedAt: z.number().optional(),
