@@ -239,6 +239,30 @@ describe('ConnectedServiceProfileDetailView', () => {
     expect(quotaHookState.callSpy).toHaveBeenCalled();
   });
 
+  it('renders the shared AccountBlock for retryable refresh-failure profiles', async () => {
+    profileState.current = {
+      connectedServicesV2: [
+        {
+          serviceId: 'openai-codex',
+          profiles: [{
+            profileId: 'work',
+            status: 'refresh_failed_retryable',
+            kind: 'oauth',
+            providerEmail: 'me@example.com',
+            providerAccountId: 'acct-1',
+          }],
+          groups: [],
+        },
+      ],
+    };
+    const { ConnectedServiceProfileDetailView } = await import('./ConnectedServiceProfileDetailView');
+    const screen = await renderScreen(<ConnectedServiceProfileDetailView />);
+
+    expect(findByTestId(screen.tree, 'connected-service-profile-account')).toBeTruthy();
+    expect(findByTestId(screen.tree, 'connected-services-profile-action:reconnect')).toBeFalsy();
+    expect(quotaHookState.callSpy).toHaveBeenCalled();
+  });
+
   it('keeps the stable profile id visible when a custom label masks the profile identity', async () => {
     routeParams.profileId = 'leeroy';
     profileState.current = {

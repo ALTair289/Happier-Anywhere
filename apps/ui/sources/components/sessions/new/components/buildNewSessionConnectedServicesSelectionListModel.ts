@@ -18,7 +18,10 @@ import type {
     ConnectedServicesProfileOption,
     ConnectedServicesProfileOptionsByServiceId,
 } from '@/components/sessions/new/modules/connectedServicesNewSessionBindings';
-import { resolveConnectedServiceAccountGroupViableProfileId } from '@/components/sessions/new/modules/connectedServicesNewSessionBindings';
+import {
+    isConnectedServiceProfileOptionSelectable,
+    resolveConnectedServiceAccountGroupViableProfileId,
+} from '@/components/sessions/new/modules/connectedServicesNewSessionBindings';
 
 export type ConnectedServicesSelectionListBadge = Readonly<{
     meterId: string;
@@ -183,9 +186,9 @@ export function buildNewSessionConnectedServicesSelectionListModel(
     const sections: SelectionListSectionDescriptor[] = params.supportedServiceIds.map((serviceId) => {
         const serviceTitle = params.resolveServiceTitle(serviceId);
         const serviceOptions = params.profileOptionsByServiceId[serviceId] ?? [];
-        const connectedProfiles = serviceOptions.filter((option) => option.status === 'connected');
-        const needsReauthProfiles = serviceOptions.filter((option) => option.status !== 'connected');
-        const connectedProfileIds = connectedProfiles.map((option) => option.profileId.trim()).filter(Boolean);
+        const selectableProfiles = serviceOptions.filter(isConnectedServiceProfileOptionSelectable);
+        const unavailableProfiles = serviceOptions.filter((option) => !isConnectedServiceProfileOptionSelectable(option));
+        const selectableProfileIds = selectableProfiles.map((option) => option.profileId.trim()).filter(Boolean);
         const binding = params.bindingsByServiceId[serviceId];
         const groupOptions = params.accountGroupOptionsByServiceId?.[serviceId] ?? [];
         const explicitProfileId = binding?.source === 'connected' && binding.selection !== 'group'
@@ -200,12 +203,12 @@ export function buildNewSessionConnectedServicesSelectionListModel(
         const unresolvedGroupBinding = binding?.source === 'connected' && binding.selection === 'group' && explicitGroupId && !selectedGroup;
         const effectiveProfileId = binding?.source === 'connected' && !unresolvedGroupBinding
             ? selectedGroup
-                ? resolveConnectedServiceAccountGroupViableProfileId({ group: selectedGroup, connectedProfileIds })
-                : explicitProfileId && connectedProfileIds.includes(explicitProfileId)
+                ? resolveConnectedServiceAccountGroupViableProfileId({ group: selectedGroup, connectedProfileIds: selectableProfileIds })
+                : explicitProfileId && selectableProfileIds.includes(explicitProfileId)
                 ? explicitProfileId
                 : resolveConnectedServiceDefaultProfileId({
                     serviceId,
-                    connectedProfileIds,
+                    connectedProfileIds: selectableProfileIds,
                     defaultProfileByServiceId: params.defaultProfileIdByServiceId ?? {},
                 })
             : null;
@@ -214,7 +217,7 @@ export function buildNewSessionConnectedServicesSelectionListModel(
 
         for (const group of groupOptions) {
             const groupId = group.groupId.trim();
-            const fallbackProfileId = resolveConnectedServiceAccountGroupViableProfileId({ group, connectedProfileIds });
+            const fallbackProfileId = resolveConnectedServiceAccountGroupViableProfileId({ group, connectedProfileIds: selectableProfileIds });
             if (!groupId) continue;
             const selected = selectedGroup?.groupId === groupId;
             const optionId = createConnectedServiceGroupOptionId(serviceId, groupId);
@@ -259,7 +262,7 @@ export function buildNewSessionConnectedServicesSelectionListModel(
             });
         }
 
-        for (const option of connectedProfiles) {
+        for (const option of selectableProfiles) {
             const profileId = option.profileId.trim();
             if (!profileId) continue;
             const optionId = createConnectedServiceOptionId(serviceId, profileId);
@@ -283,7 +286,7 @@ export function buildNewSessionConnectedServicesSelectionListModel(
                 accessibilityLabel: resolveServiceOptionAccessibilityLabel({ serviceTitle, optionLabel: label }),
                 icon: params.renderSelectionIcon({
                     selected,
-                    variant: availability.disabled ? 'warning' : 'default',
+                    variant: availability.disabled || option.status !== 'connected' ? 'warning' : 'default',
                 }),
                 disabled: availability.disabled === true,
                 rightAccessory: quotaBadges.length > 0
@@ -293,7 +296,7 @@ export function buildNewSessionConnectedServicesSelectionListModel(
             });
         }
 
-        for (const option of needsReauthProfiles) {
+        for (const option of unavailableProfiles) {
             const profileId = option.profileId.trim();
             if (!profileId) continue;
             const unsupportedKind = option.status === 'unsupported_kind';
@@ -339,7 +342,7 @@ export function buildNewSessionConnectedServicesSelectionListModel(
             onSelect: () => params.setBindingForService(serviceId, { source: 'native' }),
         });
 
-        if (connectedProfiles.length === 0) {
+        if (selectableProfiles.length === 0) {
             const connectLabel = params.translate('connectedServices.authModal.notConnectedTitle');
             options.push({
                 id: createConnectServiceOptionId(serviceId),

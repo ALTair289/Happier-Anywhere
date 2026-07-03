@@ -41,6 +41,8 @@ import { t } from '@/text';
 import {
     ConnectedServiceAuthGroupIdSchema,
     ConnectedServiceIdSchema,
+    isConnectedServiceCredentialHealthStatusUsable,
+    normalizeConnectedServiceCredentialHealthStatus,
     type ConnectedServiceAuthGroupPolicyPatchV1,
     type ConnectedServiceAuthGroupPolicyV1,
     type ConnectedServiceAuthGroupV1,
@@ -191,7 +193,9 @@ function readProfileId(profile: ConnectedServiceGroupProfileLike): string {
 }
 
 function isConnectedProfile(profile: ConnectedServiceGroupProfileLike): boolean {
-    return (profile as { status?: unknown }).status === 'connected';
+    return isConnectedServiceCredentialHealthStatusUsable(
+        normalizeConnectedServiceCredentialHealthStatus((profile as { status?: unknown }).status),
+    );
 }
 
 function resolveNextMemberPriority(group: ConnectedServiceAuthGroupV1): number {

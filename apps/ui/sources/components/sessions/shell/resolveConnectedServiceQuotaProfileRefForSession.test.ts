@@ -97,4 +97,46 @@ describe('resolveConnectedServiceQuotaProfileRefForSession', () => {
             provenance: 'connected_binding_group',
         });
     });
+
+    it('resolves group provenance through retryable refresh-failure members', () => {
+        const accountProfileConnectedServicesV2 = AccountProfileSchema.parse({
+            id: 'acct',
+            connectedServicesV2: [{
+                serviceId: 'openai-codex',
+                profiles: [
+                    { profileId: 'member-a', status: 'refresh_failed_retryable', kind: 'oauth', providerEmail: 'a@b.com', expiresAt: 1 },
+                ],
+                groups: [{
+                    groupId: 'codex-main',
+                    displayName: 'Codex main',
+                    activeProfileId: 'member-a',
+                    generation: 1,
+                    memberProfileIds: ['member-a'],
+                }],
+            }],
+        }).connectedServicesV2;
+
+        expect(resolveConnectedServiceQuotaProfileRefForSession({
+            agentId: 'codex',
+            accountProfileConnectedServicesV2,
+            metadata: {
+                path: '/tmp/project',
+                host: 'local',
+                connectedServices: {
+                    v: 1,
+                    bindingsByServiceId: {
+                        'openai-codex': {
+                            source: 'connected',
+                            selection: 'group',
+                            groupId: 'codex-main',
+                        },
+                    },
+                },
+            },
+        })).toEqual({
+            serviceId: 'openai-codex',
+            profileId: 'member-a',
+            provenance: 'connected_binding_group',
+        });
+    });
 });

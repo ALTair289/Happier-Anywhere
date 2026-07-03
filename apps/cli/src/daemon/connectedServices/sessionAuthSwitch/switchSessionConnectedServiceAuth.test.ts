@@ -2019,14 +2019,17 @@ describe('switchSessionConnectedServiceAuth', () => {
     }));
   });
 
-  it('rejects retryable-refresh profiles as disconnected during manual auth switch validation', async () => {
+  it('allows retryable-refresh profiles during manual auth switch validation', async () => {
+    const tracked = trackedSession();
+    const restartSession = vi.fn();
+
     await expect(switchSessionConnectedServiceAuth({
       core: createCore(),
       postSwitchVerificationMode: {
         kind: 'disabled_for_test_only',
         reason: 'existing switch fixture does not exercise provider adoption verification',
       },
-      getChildren: () => [trackedSession()],
+      getChildren: () => [tracked],
       api: {
         listConnectedServiceProfiles: async () => ({
           serviceId: 'anthropic',
@@ -2034,15 +2037,9 @@ describe('switchSessionConnectedServiceAuth', () => {
         }),
         getConnectedServiceAuthGroup: async () => null,
       },
-      resolveContinuity: async () => {
-        throw new Error('Disconnected profiles should not resolve continuity');
-      },
-      restartSession: async () => {
-        throw new Error('Disconnected profiles should not restart');
-      },
-      hotApply: async () => {
-        throw new Error('Disconnected profiles should not hot-apply');
-      },
+      resolveContinuity: async () => ({ mode: 'restart_rematerialize' }),
+      restartSession,
+      hotApply: async () => ({ ok: true }),
       registerHotApplyTargets: () => {},
       emitSessionEvent: vi.fn(),
       persistSessionBindings: vi.fn(),
@@ -2052,10 +2049,11 @@ describe('switchSessionConnectedServiceAuth', () => {
         bindings: bindings('new-profile'),
       },
     })).resolves.toMatchObject({
-      ok: false,
-      errorCode: 'profile_disconnected',
-      serviceId: 'anthropic',
+      ok: true,
+      action: 'restart_requested',
     });
+
+    expect(restartSession).toHaveBeenCalledWith(tracked);
   });
 
   it('returns action-required for reconnect-required profile selection', async () => {

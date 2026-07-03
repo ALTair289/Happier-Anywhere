@@ -1,5 +1,8 @@
 import type { ItemAction } from '@/components/ui/lists/itemActions';
-import type { ConnectedServiceCredentialHealthStatusV1 } from '@happier-dev/protocol';
+import {
+    isConnectedServiceCredentialHealthStatusUsable,
+    type ConnectedServiceCredentialHealthStatusV1,
+} from '@happier-dev/protocol';
 import { t } from '@/text';
 
 /**
@@ -37,7 +40,7 @@ export function buildConnectedServiceAccountRowActions(params: Readonly<{
     onReplaceToken?: () => void;
     /** Re-run the OAuth connect flow (oauth accounts only). */
     onReconnect?: () => void;
-    /** Disconnect / remove the credential (connected accounts only). */
+    /** Disconnect / remove the credential (usable account records only). */
     onDisconnect?: () => void;
 }>): ItemAction[] {
     const { kind, status } = params;
@@ -75,7 +78,7 @@ export function buildConnectedServiceAccountRowActions(params: Readonly<{
             onPress: params.onReconnect,
         });
     }
-    if (status === 'connected' && params.onDisconnect) {
+    if (isConnectedServiceCredentialHealthStatusUsable(status) && params.onDisconnect) {
         actions.push({
             id: 'disconnect',
             title: t('modals.disconnect'),

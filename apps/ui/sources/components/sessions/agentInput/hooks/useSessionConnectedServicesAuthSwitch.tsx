@@ -40,6 +40,7 @@ import {
 import {
     buildConnectedServiceAccountGroupOptionsByServiceId,
     buildConnectedServiceProfileOptionsByServiceId,
+    isConnectedServiceProfileOptionSelectable,
     resolveAgentSupportedConnectedServiceIds,
 } from '@/components/sessions/new/modules/connectedServicesNewSessionBindings';
 import { useProfile } from '@/sync/store/hooks';
@@ -487,7 +488,7 @@ export function useSessionConnectedServicesAuthSwitch(params: Readonly<{
                 continue;
             }
             next[serviceId] = options.map((option) => (
-                option.profileId === binding.profileId && option.status !== 'connected'
+                option.profileId === binding.profileId && !isConnectedServiceProfileOptionSelectable(option)
                     ? { ...option, status: 'connected' as const }
                     : option
             ));

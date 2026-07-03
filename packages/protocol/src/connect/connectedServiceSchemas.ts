@@ -47,6 +47,29 @@ export const ConnectedServiceCredentialHealthStatusV1Schema = z.enum([
 ]);
 export type ConnectedServiceCredentialHealthStatusV1 = z.infer<typeof ConnectedServiceCredentialHealthStatusV1Schema>;
 
+export function normalizeConnectedServiceCredentialHealthStatus(
+    raw: unknown,
+): ConnectedServiceCredentialHealthStatusV1 {
+    if (raw === 'connected') return 'connected';
+    if (raw === 'refreshing') return 'refreshing';
+    if (raw === 'refresh_failed_retryable') return 'refresh_failed_retryable';
+    return 'needs_reauth';
+}
+
+export function isConnectedServiceCredentialHealthStatusReconnectRequired(
+    status: ConnectedServiceCredentialHealthStatusV1 | null | undefined,
+): boolean {
+    return status === 'needs_reauth';
+}
+
+export function isConnectedServiceCredentialHealthStatusUsable(
+    status: ConnectedServiceCredentialHealthStatusV1 | null | undefined,
+): boolean {
+    return status === 'connected'
+        || status === 'refreshing'
+        || status === 'refresh_failed_retryable';
+}
+
 export const ConnectedServiceCredentialRefreshFailureKindV1Schema = z.enum([
     'invalid_grant',
     'invalid_client',

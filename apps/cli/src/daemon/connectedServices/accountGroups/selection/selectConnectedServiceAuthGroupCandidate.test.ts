@@ -808,7 +808,7 @@ describe('selectConnectedServiceAuthGroupCandidate', () => {
     });
   });
 
-  it('excludes any known non-connected credential health before automatic selection', () => {
+  it('keeps retryable credential-health states selectable while excluding reconnect-required health', () => {
     const result = selectConnectedServiceAuthGroupCandidate({
       nowMs: 1_000,
       quotaFreshnessMs: 60_000,
@@ -828,11 +828,13 @@ describe('selectConnectedServiceAuthGroupCandidate', () => {
       ]),
     });
 
-    expect(result.selected?.profileId).toBe('healthy');
+    expect(result.selected?.profileId).toBe('refreshing');
     expect(result.excluded).toEqual(expect.arrayContaining([
+      { profileId: 'reauth', reason: 'auth_invalid' },
+    ]));
+    expect(result.excluded).not.toEqual(expect.arrayContaining([
       { profileId: 'refreshing', reason: 'auth_invalid' },
       { profileId: 'retryable-refresh-failed', reason: 'auth_invalid' },
-      { profileId: 'reauth', reason: 'auth_invalid' },
     ]));
   });
 

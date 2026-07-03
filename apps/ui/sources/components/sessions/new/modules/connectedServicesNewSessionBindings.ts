@@ -3,6 +3,8 @@ import {
   buildConnectedServiceAccountGroupOptionsByServiceId,
   buildConnectedServiceProfileOptionsByServiceId as buildCoreConnectedServiceProfileOptionsByServiceId,
   buildConnectedServicesBindingsPayload,
+  isConnectedServiceProfileOptionSelectable,
+  isConnectedServiceProfileStatusSelectable,
   resolveAgentSupportedConnectedServiceIds,
   resolveConnectedServiceAccountGroupViableProfileId,
   type ConnectedServiceSessionProjection,
@@ -19,6 +21,8 @@ import { getConnectedServiceRegistryEntry } from '@/sync/domains/connectedServic
 export {
   buildConnectedServiceAccountGroupOptionsByServiceId,
   buildConnectedServicesBindingsPayload,
+  isConnectedServiceProfileOptionSelectable,
+  isConnectedServiceProfileStatusSelectable,
   resolveAgentSupportedConnectedServiceIds,
   resolveConnectedServiceAccountGroupViableProfileId,
 };

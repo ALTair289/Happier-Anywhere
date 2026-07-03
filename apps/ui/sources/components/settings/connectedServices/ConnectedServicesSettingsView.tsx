@@ -17,6 +17,7 @@ import { CONNECTED_SERVICES_REGISTRY, getConnectedServiceRegistryEntry } from '@
 import { AGENT_IDS, getAgentCore } from '@/agents/catalog/catalog';
 import {
     ConnectedServicesProviderStateSharingSettingsV1Schema,
+    isConnectedServiceCredentialHealthStatusUsable,
     type ConnectedServiceId,
 } from '@happier-dev/protocol';
 import { useFeatureEnabled } from '@/hooks/server/useFeatureEnabled';
@@ -109,7 +110,9 @@ export const ConnectedServicesSettingsView = React.memo(function ConnectedServic
     for (const serviceId of allServiceIds) {
       const svc = services.find((s) => s.serviceId === serviceId) ?? null;
       const profiles = svc?.profiles ?? [];
-      const connectedIds = profiles.filter((p) => p.status === 'connected').map((p) => p.profileId);
+      const connectedIds = profiles
+        .filter((p) => isConnectedServiceCredentialHealthStatusUsable(resolveConnectedServiceCredentialHealthStatus(p.status)))
+        .map((p) => p.profileId);
       const effectiveProfileId = resolveConnectedServiceDefaultProfileId({
         serviceId,
         connectedProfileIds: connectedIds,
@@ -143,7 +146,9 @@ export const ConnectedServicesSettingsView = React.memo(function ConnectedServic
       const entry = getConnectedServiceRegistryEntry(serviceId);
       const label = resolveConnectedServiceDisplayName(serviceId, t);
       const profiles = svc?.profiles ?? [];
-      const connected = profiles.filter((p) => p.status === 'connected');
+      const connected = profiles.filter((p) =>
+        isConnectedServiceCredentialHealthStatusUsable(resolveConnectedServiceCredentialHealthStatus(p.status))
+      );
       const connectedIds = connected.map((p) => p.profileId);
       const effectiveProfileId = resolveConnectedServiceDefaultProfileId({
         serviceId,

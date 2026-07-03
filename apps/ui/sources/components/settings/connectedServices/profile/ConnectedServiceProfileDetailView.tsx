@@ -28,7 +28,13 @@ import {
 } from '@/sync/domains/connectedServices/connectedServiceProfilePreferences';
 import { getConnectedServiceRegistryEntry } from '@/sync/domains/connectedServices/connectedServiceRegistry';
 import { resolveConnectedServiceCredentialHealthStatus } from '@/sync/domains/connectedServices/resolveConnectedServiceCredentialHealthStatus';
-import { buildConnectedServiceCredentialRecord, ConnectedServiceIdSchema, type ConnectedServiceCredentialHealthStatusV1, type ConnectedServiceId } from '@happier-dev/protocol';
+import {
+  buildConnectedServiceCredentialRecord,
+  ConnectedServiceIdSchema,
+  isConnectedServiceCredentialHealthStatusUsable,
+  type ConnectedServiceCredentialHealthStatusV1,
+  type ConnectedServiceId,
+} from '@happier-dev/protocol';
 
 import { AccountBlock } from '../account/AccountBlock';
 import {
@@ -195,7 +201,7 @@ export const ConnectedServiceProfileDetailView = React.memo(function ConnectedSe
   const profileConfirmationLabel = identityDisplay.diagnosticLabel;
 
   const isDefault = (settings.connectedServicesDefaultProfileByServiceId[serviceId] ?? '') === profileId;
-  const isConnected = status === 'connected';
+  const isUsable = isConnectedServiceCredentialHealthStatusUsable(status);
 
   const poolLabels = accountGroupsEnabled
     ? resolveConnectedServiceProfileGroupReferenceLabels({ profileId, projectedGroups: svc.groups })
@@ -345,7 +351,8 @@ export const ConnectedServiceProfileDetailView = React.memo(function ConnectedSe
   };
 
   // Header kebab actions reuse the canonical mutation flows (replace token,
-  // reconnect). The connected/needs-re-auth split mirrors the actions section.
+  // reconnect). Usable retryable profiles stay in the account block; only
+  // reconnect-required profiles fall through to the re-auth section below.
   const headerActions = buildConnectedServiceAccountRowActions({
     kind,
     status,
@@ -355,7 +362,7 @@ export const ConnectedServiceProfileDetailView = React.memo(function ConnectedSe
 
   return (
     <ItemList>
-      {isConnected ? (
+      {isUsable ? (
         <ItemGroup>
           <AccountBlock
             testID="connected-service-profile-account"
@@ -465,7 +472,7 @@ export const ConnectedServiceProfileDetailView = React.memo(function ConnectedSe
         />
       </ItemGroup>
 
-      {isConnected ? (
+      {isUsable ? (
         <ConnectionSection
           serviceId={serviceId}
           profileId={profileId}

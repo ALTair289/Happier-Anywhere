@@ -83,6 +83,34 @@ describe('connected-service session options', () => {
         expect(JSON.stringify(options)).not.toContain('SECRET');
     });
 
+    it('preserves retryable credential-health statuses as selectable profile options', () => {
+        const options = buildConnectedServiceProfileOptionsByServiceId({
+            accountProfileConnectedServicesV2: [
+                {
+                    serviceId: 'openai-codex',
+                    profiles: [
+                        {
+                            profileId: 'retryable',
+                            status: 'refresh_failed_retryable',
+                            kind: 'oauth',
+                            providerEmail: 'retryable@example.com',
+                        },
+                    ],
+                },
+            ],
+            agentCore,
+            supportedConnectedServiceIds: ['openai-codex'],
+            labelsByKey: {},
+        });
+
+        expect(options['openai-codex']).toEqual([
+            expect.objectContaining({
+                profileId: 'retryable',
+                status: 'refresh_failed_retryable',
+            }),
+        ]);
+    });
+
     it('projects account groups and resolves a viable connected member', () => {
         const groups = buildConnectedServiceAccountGroupOptionsByServiceId({
             accountGroupsFeatureEnabled: true,

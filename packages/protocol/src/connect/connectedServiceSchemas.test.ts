@@ -108,6 +108,16 @@ describe('connectedServiceSchemas', () => {
         }).success).toBe(false);
     });
 
+    it('classifies retryable credential health as usable but not reconnect-required', () => {
+        expect(schemas.isConnectedServiceCredentialHealthStatusUsable('connected')).toBe(true);
+        expect(schemas.isConnectedServiceCredentialHealthStatusUsable('refreshing')).toBe(true);
+        expect(schemas.isConnectedServiceCredentialHealthStatusUsable('refresh_failed_retryable')).toBe(true);
+        expect(schemas.isConnectedServiceCredentialHealthStatusUsable('needs_reauth')).toBe(false);
+
+        expect(schemas.isConnectedServiceCredentialHealthStatusReconnectRequired('needs_reauth')).toBe(true);
+        expect(schemas.isConnectedServiceCredentialHealthStatusReconnectRequired('refresh_failed_retryable')).toBe(false);
+    });
+
     it('parses connected service quota snapshots', () => {
         const now = Date.now();
         const parsed = ConnectedServiceQuotaSnapshotV1Schema.parse({

@@ -1,4 +1,7 @@
-import type { ConnectedServiceCredentialHealthStatusV1 } from '@happier-dev/protocol';
+import {
+    normalizeConnectedServiceCredentialHealthStatus,
+    type ConnectedServiceCredentialHealthStatusV1,
+} from '@happier-dev/protocol';
 
 /**
  * Map a raw connected-service profile status onto the canonical credential
@@ -10,8 +13,5 @@ import type { ConnectedServiceCredentialHealthStatusV1 } from '@happier-dev/prot
 export function resolveConnectedServiceCredentialHealthStatus(
     raw: unknown,
 ): ConnectedServiceCredentialHealthStatusV1 {
-    if (raw === 'connected') return 'connected';
-    if (raw === 'refreshing') return 'refreshing';
-    if (raw === 'refresh_failed_retryable') return 'refresh_failed_retryable';
-    return 'needs_reauth';
+    return normalizeConnectedServiceCredentialHealthStatus(raw);
 }

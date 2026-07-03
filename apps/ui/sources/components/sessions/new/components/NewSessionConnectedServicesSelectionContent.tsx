@@ -18,6 +18,7 @@ import type {
     ConnectedServicesAccountGroupOptionsByServiceId,
     ConnectedServicesProfileOptionsByServiceId,
 } from '@/components/sessions/new/modules/connectedServicesNewSessionBindings';
+import { isConnectedServiceProfileOptionSelectable } from '@/components/sessions/new/modules/connectedServicesNewSessionBindings';
 import { buildNewSessionConnectedServicesSelectionListModel } from './buildNewSessionConnectedServicesSelectionListModel';
 import type { ConnectedServicesSelectionOptionAvailability } from './buildNewSessionConnectedServicesSelectionListModel';
 
@@ -74,7 +75,7 @@ export function NewSessionConnectedServicesSelectionContent(props: NewSessionCon
         for (const serviceId of props.supportedServiceIds) {
             const options = props.profileOptionsByServiceId[serviceId] ?? [];
             for (const option of options) {
-                if (option.status !== 'connected') continue;
+                if (!isConnectedServiceProfileOptionSelectable(option)) continue;
                 const profileId = option.profileId.trim();
                 if (!profileId) continue;
                 next.push({ serviceId, profileId });

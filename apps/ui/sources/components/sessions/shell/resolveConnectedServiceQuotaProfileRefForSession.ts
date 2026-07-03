@@ -1,6 +1,8 @@
 import type { AccountProfile } from '@happier-dev/protocol';
 import {
     buildBackendTargetKey,
+    isConnectedServiceCredentialHealthStatusUsable,
+    normalizeConnectedServiceCredentialHealthStatus,
 } from '@happier-dev/protocol';
 
 import { getAgentCore, isAgentId } from '@/agents/catalog/catalog';
@@ -34,7 +36,9 @@ function resolveActiveGroupProfileId(params: Readonly<{
 
     const connectedProfileIds = new Set(
         service.profiles
-            .filter((profile) => profile.status === 'connected')
+            .filter((profile) =>
+                isConnectedServiceCredentialHealthStatusUsable(normalizeConnectedServiceCredentialHealthStatus(profile.status))
+            )
             .map((profile) => profile.profileId.trim())
             .filter(Boolean),
     );

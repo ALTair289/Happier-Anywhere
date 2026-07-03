@@ -359,6 +359,47 @@ describe('PoolDetailView', () => {
         );
     });
 
+    it('allows retryable refresh-failure profiles to be added to a pool', async () => {
+        authoritativeGroupState.groups = [createAuthoritativeGroup({
+            activeProfileId: null,
+            generation: 2,
+            members: [],
+        })];
+        profileState.current = {
+            connectedServicesV2: [
+                {
+                    serviceId: 'openai-codex',
+                    profiles: [
+                        { profileId: 'retryable', status: 'refresh_failed_retryable', providerEmail: 'retryable@example.com' },
+                    ],
+                },
+            ],
+        };
+        const screen = await renderPoolDetail();
+
+        await screen.pressByTestIdAsync('connected-services-pool-detail:add-member');
+        const pickerButtons = modalSpies.alert.mock.calls[0]?.[2] as
+            | ReadonlyArray<{ text?: string; onPress?: () => void }>
+            | undefined;
+        const retryableOption = pickerButtons?.find((button) => button.text?.includes('retryable'));
+        expect(retryableOption).toBeTruthy();
+
+        await act(async () => {
+            retryableOption?.onPress?.();
+            await flushAsyncHandlers();
+        });
+
+        expect(authGroupApiSpies.addConnectedServiceAuthGroupMemberV3).toHaveBeenCalledWith(
+            expect.objectContaining({ token: 't' }),
+            expect.objectContaining({
+                serviceId: 'openai-codex',
+                groupId: 'primary',
+                profileId: 'retryable',
+                expectedGeneration: 2,
+            }),
+        );
+    });
+
     it('removes an existing member after confirmation with the current generation', async () => {
         modalSpies.confirm.mockResolvedValueOnce(true);
         const screen = await renderPoolDetail();

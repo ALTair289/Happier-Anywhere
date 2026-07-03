@@ -26,6 +26,17 @@ installConnectedServicesCommonModuleMocks({
             },
         });
     },
+    text: async () => {
+        const { createTextModuleMock } = await import('@/dev/testkit/mocks/text');
+        return createTextModuleMock({
+            translate: (key, params) => {
+                if (key === 'connectedServices.list.connectedCount') {
+                    return `${(params as { count?: number } | undefined)?.count ?? 0} connected`;
+                }
+                return key;
+            },
+        });
+    },
 });
 
 vi.mock('@expo/vector-icons', () => ({
@@ -79,6 +90,17 @@ vi.mock('@/hooks/server/connectedServices/useConnectedServiceQuotaBadges', () =>
 describe('ConnectedServicesSettingsView', () => {
     beforeEach(() => {
         resetConnectedServicesCommonModuleMockState();
+        connectedServicesModuleState.options.text = async () => {
+            const { createTextModuleMock } = await import('@/dev/testkit/mocks/text');
+            return createTextModuleMock({
+                translate: (key, params) => {
+                    if (key === 'connectedServices.list.connectedCount') {
+                        return `${(params as { count?: number } | undefined)?.count ?? 0} connected`;
+                    }
+                    return key;
+                },
+            });
+        };
         useFeatureEnabledSpy.mockReset();
         useFeatureEnabledSpy.mockReturnValue(false);
         useProfileSpy.mockReset();
@@ -138,6 +160,29 @@ describe('ConnectedServicesSettingsView', () => {
         const items = screen.tree.findAllByType('Item' as any);
         expect(items.length).toBeGreaterThan(0);
         expect(screen.getTextContent()).not.toContain('connectedServices.list.empty');
+    });
+
+    it('counts retryable refresh-failure profiles as connected on the provider summary row', async () => {
+        useFeatureEnabledSpy.mockReturnValue(true);
+        useProfileSpy.mockReturnValue({
+            connectedServicesV2: [
+                {
+                    serviceId: 'openai-codex',
+                    profiles: [
+                        { profileId: 'connected', status: 'connected', kind: 'oauth' },
+                        { profileId: 'retryable', status: 'refresh_failed_retryable', kind: 'oauth' },
+                        { profileId: 'reauth', status: 'needs_reauth', kind: 'oauth' },
+                    ],
+                },
+            ],
+        });
+
+        const { ConnectedServicesSettingsView } = await import('./ConnectedServicesSettingsView');
+        const screen = await renderScreen(React.createElement(ConnectedServicesSettingsView));
+
+        const row = screen.tree.findAllByType('Item' as any)
+            .find((node) => node.props?.subtitle === '2 connected');
+        expect(row?.props?.subtitle).toBe('2 connected');
     });
 
     it('opens the profile recovery flow for default-auth reauth selections', async () => {

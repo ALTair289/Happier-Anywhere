@@ -3,6 +3,8 @@ import {
   ConnectedServiceUxDiagnosticCodeV1Schema,
   ConnectedServiceBindingsV1Schema,
   ConnectedServiceIdSchema,
+  isConnectedServiceCredentialHealthStatusReconnectRequired,
+  isConnectedServiceCredentialHealthStatusUsable,
   type ConnectedServiceUxDiagnosticV1,
   type ConnectedServiceAuthGroupV1,
   type ConnectedServiceBindingsV1,
@@ -768,7 +770,7 @@ async function validateConnectedProfile(input: Readonly<{
   if (!profile) {
     return { ok: false, errorCode: 'profile_missing', serviceId: input.serviceId };
   }
-  if (profile.status === 'needs_reauth') {
+  if (isConnectedServiceCredentialHealthStatusReconnectRequired(profile.status)) {
 	    return failureResult('profile_action_required', {
 	      serviceId: input.serviceId,
 	      failurePhase: 'normalization',
@@ -780,7 +782,7 @@ async function validateConnectedProfile(input: Readonly<{
       },
     });
   }
-  if (profile.status !== 'connected') {
+  if (!isConnectedServiceCredentialHealthStatusUsable(profile.status)) {
     return { ok: false, errorCode: 'profile_disconnected', serviceId: input.serviceId };
   }
   return null;

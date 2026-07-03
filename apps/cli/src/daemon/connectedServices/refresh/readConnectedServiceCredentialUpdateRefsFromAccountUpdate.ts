@@ -1,4 +1,9 @@
-import { ConnectedServiceIdSchema, type ConnectedServiceId } from '@happier-dev/protocol';
+import {
+  ConnectedServiceIdSchema,
+  isConnectedServiceCredentialHealthStatusUsable,
+  normalizeConnectedServiceCredentialHealthStatus,
+  type ConnectedServiceId,
+} from '@happier-dev/protocol';
 
 export type ConnectedServiceCredentialUpdateRef = Readonly<{
   serviceId: ConnectedServiceId;
@@ -22,7 +27,9 @@ export function readConnectedServiceCredentialUpdateRefsFromAccountUpdate(update
     for (const rawProfile of serviceRecord.profiles) {
       if (!rawProfile || typeof rawProfile !== 'object') continue;
       const profileRecord = rawProfile as Readonly<{ profileId?: unknown; status?: unknown }>;
-      if (profileRecord.status !== 'connected') continue;
+      if (!isConnectedServiceCredentialHealthStatusUsable(
+        normalizeConnectedServiceCredentialHealthStatus(profileRecord.status),
+      )) continue;
       const profileId = typeof profileRecord.profileId === 'string' ? profileRecord.profileId.trim() : '';
       if (!profileId) continue;
       const key = `${parsedServiceId.data}\u0000${profileId}`;

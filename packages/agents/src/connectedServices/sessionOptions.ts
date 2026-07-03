@@ -1,5 +1,8 @@
 import {
     ConnectedServiceBindingsV1Schema,
+    isConnectedServiceCredentialHealthStatusUsable,
+    normalizeConnectedServiceCredentialHealthStatus,
+    type ConnectedServiceCredentialHealthStatusV1,
     type ConnectedServiceBindingSelectionV1,
     type ConnectedServiceBindingsV1,
 } from '@happier-dev/protocol';
@@ -26,7 +29,7 @@ export type ConnectedServiceProfileProjectionInput = Readonly<{
 
 type ConnectedServiceProfileFilterProjection = Readonly<{
     profileId: string;
-    status: 'connected' | 'needs_reauth';
+    status: ConnectedServiceCredentialHealthStatusV1;
     kind?: ConnectedServiceKind | null;
     providerEmail?: string | null;
 }>;
@@ -39,7 +42,7 @@ export type ConnectedServiceSessionProjection = Readonly<{
 
 export type ConnectedServicesProfileOption = Readonly<{
     profileId: string;
-    status: 'connected' | 'needs_reauth' | 'unsupported_kind';
+    status: ConnectedServiceCredentialHealthStatusV1 | 'unsupported_kind';
     kind?: 'oauth' | 'token' | null;
     providerEmail?: string | null;
     label?: string | null;
@@ -115,6 +118,19 @@ export function resolveConnectedServiceDefaultProfileId(params: Readonly<{
     return params.connectedProfileIds.includes(preferred) ? preferred : fallback;
 }
 
+export function isConnectedServiceProfileStatusSelectable(
+    status: ConnectedServicesProfileOption['status'],
+): boolean {
+    return status !== 'unsupported_kind'
+        && isConnectedServiceCredentialHealthStatusUsable(status);
+}
+
+export function isConnectedServiceProfileOptionSelectable(
+    option: Pick<ConnectedServicesProfileOption, 'status'>,
+): boolean {
+    return isConnectedServiceProfileStatusSelectable(option.status);
+}
+
 export function isConnectedServiceProfileKindSupportedForAgent(params: Readonly<{
     agentCore: ConnectedServicesSessionAgentCore | null;
     serviceId: ConnectedServiceId;
@@ -162,7 +178,7 @@ export function buildConnectedServiceProfileOptionsByServiceId(params: Readonly<
         if (params.supportedConnectedServiceIds.length > 0 && !params.supportedConnectedServiceIds.includes(serviceId)) continue;
         const rawProfiles: ConnectedServiceProfileFilterProjection[] = (entry.profiles ?? []).map((profile) => ({
             profileId: profile.profileId,
-            status: profile.status === 'connected' ? 'connected' : 'needs_reauth',
+            status: normalizeConnectedServiceCredentialHealthStatus(profile.status),
             kind: profile.kind ?? null,
             providerEmail: profile.providerEmail ?? null,
         }));
@@ -185,7 +201,7 @@ export function buildConnectedServiceProfileOptionsByServiceId(params: Readonly<
                 return {
                     profileId,
                     status: kindSupported
-                        ? profile.status === 'connected' ? 'connected' : 'needs_reauth'
+                        ? profile.status
                         : 'unsupported_kind',
                     kind,
                     providerEmail: profile.providerEmail ?? null,
@@ -348,7 +364,7 @@ export function buildConnectedServicesBindingsPayload(params: Readonly<{
 
     for (const serviceId of params.supportedConnectedServiceIds) {
         const options = params.connectedServiceProfileOptionsByServiceId[serviceId] ?? [];
-        const connected = options.filter((option) => option.status === 'connected');
+        const connected = options.filter(isConnectedServiceProfileOptionSelectable);
         const binding = params.connectedServicesBindingsByServiceId[serviceId];
         const mode = binding?.source === 'connected' ? 'connected' : 'native';
 

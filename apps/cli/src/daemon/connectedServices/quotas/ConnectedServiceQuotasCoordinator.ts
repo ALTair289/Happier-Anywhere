@@ -1,5 +1,6 @@
 import {
   ConnectedServiceIdSchema,
+  isConnectedServiceCredentialHealthStatusUsable,
   type ConnectedServiceAuthGroupRuntimeStatePatchRequestV1,
   type ConnectedServiceAuthGroupV1,
   openConnectedServiceCredentialCiphertext,
@@ -3870,7 +3871,7 @@ export class ConnectedServiceQuotasCoordinator {
           try {
             const profiles = await loadProfileHealth(serviceId);
             for (const [profileId, status] of profiles.entries()) {
-              if (status !== 'connected') continue;
+              if (!isConnectedServiceCredentialHealthStatusUsable(status)) continue;
               if (!profileId) continue;
               const existing = bindingsByServiceId.get(serviceId);
               if (existing) {

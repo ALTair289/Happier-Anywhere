@@ -158,6 +158,39 @@ describe('buildNewSessionConnectedServicesSelectionListModel', () => {
         expect(accountOption?.rightAccessory).toBe('badges:w. 18%');
     });
 
+    it('keeps retryable refresh-failure profiles selectable instead of routing them to reconnect', () => {
+        const setBindingForService = vi.fn();
+        const model = buildModel({
+            profileOptionsByServiceId: {
+                anthropic: [{
+                    profileId: 'retryable',
+                    status: 'refresh_failed_retryable',
+                    providerEmail: 'retryable@example.com',
+                }],
+            },
+            bindingsByServiceId: { anthropic: { source: 'native' } },
+            quotaBadgesByKey: {
+                'anthropic/retryable': [{ meterId: 'weekly', text: 'w. 44%' }],
+            },
+            setBindingForService,
+            renderSelectionIcon: ({ selected, variant }) => `${selected ? 'selected' : 'unselected'}:${variant ?? 'default'}`,
+        });
+
+        const accountOption = firstStaticSection(model).options[0];
+        accountOption?.onSelect?.();
+
+        expect(accountOption).toEqual(expect.objectContaining({
+            id: createConnectedServiceOptionId('anthropic', 'retryable'),
+            icon: 'unselected:warning',
+            rightAccessory: 'badges:w. 44%',
+        }));
+        expect(setBindingForService).toHaveBeenCalledWith('anthropic', {
+            source: 'connected',
+            selection: 'profile',
+            profileId: 'retryable',
+        });
+    });
+
     it('offers connected account groups as a distinct auth selection without storing a fallback profile id', () => {
         const setBindingForService = vi.fn();
         const model = buildModel({

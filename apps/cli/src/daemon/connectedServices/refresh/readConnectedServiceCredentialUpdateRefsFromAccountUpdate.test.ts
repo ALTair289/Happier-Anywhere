@@ -27,6 +27,27 @@ describe('readConnectedServiceCredentialUpdateRefsFromAccountUpdate', () => {
     ]);
   });
 
+  it('returns retryable refresh-failure profile refs because they remain usable', () => {
+    expect(readConnectedServiceCredentialUpdateRefsFromAccountUpdate({
+      body: {
+        t: 'update-account',
+        connectedServicesV2: [
+          {
+            serviceId: 'openai-codex',
+            profiles: [
+              { profileId: 'retry', status: 'refresh_failed_retryable' },
+              { profileId: 'refreshing', status: 'refreshing' },
+              { profileId: 'expired', status: 'needs_reauth' },
+            ],
+          },
+        ],
+      },
+    })).toEqual([
+      { serviceId: 'openai-codex', profileId: 'retry' },
+      { serviceId: 'openai-codex', profileId: 'refreshing' },
+    ]);
+  });
+
   it('ignores non-account updates and malformed connected-service entries', () => {
     expect(readConnectedServiceCredentialUpdateRefsFromAccountUpdate({
       body: {
@@ -45,7 +66,6 @@ describe('readConnectedServiceCredentialUpdateRefsFromAccountUpdate', () => {
         connectedServicesV2: [
           { serviceId: 'not-a-known-service', profiles: [{ profileId: 'work', status: 'connected' }] },
           { serviceId: 'openai-codex', profiles: [{ profileId: '', status: 'connected' }] },
-          { serviceId: 'openai-codex', profiles: [{ profileId: 'retry', status: 'refresh_failed_retryable' }] },
         ],
       },
     })).toEqual([]);

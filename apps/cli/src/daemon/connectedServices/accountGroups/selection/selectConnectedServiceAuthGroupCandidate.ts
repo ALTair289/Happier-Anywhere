@@ -1,5 +1,8 @@
 import type { ProviderLimitCategory } from '../../quotas/normalization';
-import type { ConnectedServiceCredentialHealthStatusV1 } from '@happier-dev/protocol';
+import {
+  isConnectedServiceCredentialHealthStatusUsable,
+  type ConnectedServiceCredentialHealthStatusV1,
+} from '@happier-dev/protocol';
 
 export type ConnectedServiceAuthGroupPolicyV1 = Readonly<{
   v: 1;
@@ -199,7 +202,9 @@ function resolveStateBlocker(
 }
 
 function credentialHealthAllowsSelection(status: ConnectedServiceCredentialHealthStatusV1 | null | undefined): boolean {
-  return status === null || status === undefined || status === 'connected';
+  return status === null
+    || status === undefined
+    || isConnectedServiceCredentialHealthStatusUsable(status);
 }
 
 function resolveQuotaRuntimeExhaustion(
