@@ -19,7 +19,6 @@ describe('buildAccountSettingsSnapshot', () => {
             favoriteProfiles: ['default', 'custom:work'],
             pinnedSessionKeysV1: ['srv1:s1', 'srv2:s2'],
             workspaceLabelsV1: { wl_one: 'Alpha', wl_two: 'Beta' },
-            collapsedGroupKeysV1: { g1: true, g2: true, g3: false },
             sessionTagsV1: {
                 'srv1:s1': ['bug', 'urgent'],
                 'srv2:s2': ['followup'],
@@ -28,19 +27,23 @@ describe('buildAccountSettingsSnapshot', () => {
                 groupA: ['srv1:s1', 'srv1:s2'],
                 groupB: ['srv2:s1'],
             },
+            collapsedGroupKeysV1: {
+                groupA: true,
+                groupB: false,
+            },
         });
 
         expect(snapshot.properties.acct_setting__recentMachinePaths).toBe(2);
         expect(snapshot.properties.acct_setting__favoriteDirectories).toBe(3);
         expect(snapshot.properties.acct_setting__favoriteMachines).toBe(1);
         expect(snapshot.properties.acct_setting__favoriteProfiles).toBe(2);
-        expect(snapshot.properties.acct_setting__pinnedSessionKeysV1).toBe(2);
-        expect(snapshot.properties.acct_setting__workspaceLabelsV1).toBe(2);
-        expect(snapshot.properties.acct_setting__collapsedGroupKeysV1).toBe(3);
-        expect(snapshot.properties.acct_setting__sessionTagsV1__taggedSessionCount).toBe(2);
-        expect(snapshot.properties.acct_setting__sessionTagsV1__totalTagsCount).toBe(3);
-        expect(snapshot.properties.acct_setting__sessionListGroupOrderV1__groupOverrideCount).toBe(2);
-        expect(snapshot.properties.acct_setting__sessionListGroupOrderV1__totalOrderedKeyCount).toBe(3);
+        expect(snapshot.properties).not.toHaveProperty('acct_setting__pinnedSessionKeysV1');
+        expect(snapshot.properties).not.toHaveProperty('acct_setting__workspaceLabelsV1');
+        expect(snapshot.properties).not.toHaveProperty('acct_setting__sessionTagsV1__taggedSessionCount');
+        expect(snapshot.properties).not.toHaveProperty('acct_setting__sessionTagsV1__totalTagsCount');
+        expect(snapshot.properties).not.toHaveProperty('acct_setting__sessionListGroupOrderV1__groupOverrideCount');
+        expect(snapshot.properties).not.toHaveProperty('acct_setting__sessionListGroupOrderV1__totalOrderedKeyCount');
+        expect(snapshot.properties).not.toHaveProperty('acct_setting__collapsedGroupKeysV1');
     });
 
     it('tracks dismissed cli warnings through canonical analytics serializers', () => {
