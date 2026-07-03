@@ -436,7 +436,7 @@ describe('AgentInput (context usage badge)', () => {
                     outputTokens: 0,
                     cacheCreation: 0,
                     cacheRead: 0,
-                    contextSize: 198_000,
+                    contextSize: 38_691,
                     contextWindowTokens: 200_000,
                 }}
                 alwaysShowContextSize={true}
