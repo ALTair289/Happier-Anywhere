@@ -112,10 +112,19 @@ export function performWebDomViewportCommand(
                 : deps.resolveJumpToSeqIndex(command.seq))
             : deps.resolveRestoreAnchorIndex(command.target.anchor);
         if (typeof index !== 'number' || !Number.isFinite(index)) return false;
-        if (deps.shouldUseWebHotColdSplit) {
+        const webHotColdCounts = deps.webHotColdCountsRef.current;
+        let hotFooterItemId: string | null = null;
+        if (webHotColdCounts.hotCount > 0 && index >= webHotColdCounts.coldCount) {
+            // Web hot-tail footer target: footer rows render outside the recycler but still
+            // mount their `transcript-item-<id>` testids, so an exact rect scroll onto the
+            // target row itself beats the legacy "last cold row" clamp (which strands the
+            // viewport one footer-height above the target).
+            hotFooterItemId = resolveTranscriptViewportListDataItemIdAtIndex(deps.itemsRef.current, index);
+        }
+        if (webHotColdCounts.hotCount > 0 && !hotFooterItemId) {
             const target = resolveWebColdListScrollTarget({
                 fullIndex: index,
-                coldCount: deps.coldItemCount,
+                coldCount: webHotColdCounts.coldCount,
                 reason: command.kind === 'jump-to-seq'
                     ? 'jump-to-seq'
                     : command.reason === 'prepend-restore'
@@ -142,18 +151,35 @@ export function performWebDomViewportCommand(
             index = target.index;
         }
 
-        const itemId = resolveTranscriptViewportListDataItemIdAtIndex(deps.listDataRef.current, index);
+        const itemId = hotFooterItemId ?? resolveTranscriptViewportListDataItemIdAtIndex(deps.listDataRef.current, index);
         if (!itemId) return false;
         const metrics = deps.resolveWebScrollMetrics();
         if (!metrics) return false;
+        if (!hotFooterItemId && !findWebTranscriptItemElement({ container: metrics.element, itemId })) {
+            // Unmounted recycler target: after a data replacement (target-window activation)
+            // the web recycler can keep its render window pinned to the previously measured
+            // range and never mount the target index at any scrollTop. Ask the renderer to
+            // re-anchor its window at the target; the DOM write below stays the offset owner.
+            try {
+                deps.listRef.current?.scrollToIndex?.({ index, animated: false });
+            } catch {
+                // Renderer refusal is non-fatal; the DOM estimate write still applies.
+            }
+        }
         // Prefer measured-band extrapolation over the renderer's estimated layout for
         // unmounted targets; the estimate goes stale once measured rows shift content.
-        const itemLayout = resolveWebBandExtrapolatedTranscriptItemLayout({
-            container: metrics.element,
-            listData: deps.listDataRef.current,
-            scrollTop: metrics.scrollTop,
-            targetIndex: index,
-        }) ?? readScrollableChatListItemLayout(deps.listRef.current, index);
+        // (Footer targets are always mounted, so no layout fallback is needed for them.)
+        const bandLayout = hotFooterItemId
+            ? null
+            : resolveWebBandExtrapolatedTranscriptItemLayout({
+                container: metrics.element,
+                listData: deps.listDataRef.current,
+                scrollTop: metrics.scrollTop,
+                targetIndex: index,
+            });
+        const itemLayout = hotFooterItemId
+            ? null
+            : bandLayout ?? readScrollableChatListItemLayout(deps.listRef.current, index);
         const result = scrollWebDomToTranscriptItem({
             align: command.kind === 'jump-to-seq'
                 ? command.align ?? { kind: 'center' }

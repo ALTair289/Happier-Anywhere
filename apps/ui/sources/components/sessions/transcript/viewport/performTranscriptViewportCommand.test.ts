@@ -193,6 +193,7 @@ type DepsOverrides = {
     listLayoutHeight?: number;
     listDataLength?: number;
     listData?: readonly { readonly id: string }[];
+    items?: readonly { readonly id: string }[];
     itemsLength?: number;
     composerInsetHeight?: number;
     nativeHotTailHeight?: number;
@@ -229,7 +230,7 @@ function buildDeps(overrides: DepsOverrides = {}): DepsBundle {
         listContentHeightRef: { current: overrides.listContentHeight ?? 1000 },
         listLayoutHeightRef: { current: overrides.listLayoutHeight ?? 400 },
         listDataRef: { current: overrides.listData ?? { length: overrides.listDataLength ?? 5 } },
-        itemsRef: { current: { length: overrides.itemsLength ?? 5 } },
+        itemsRef: { current: overrides.items ?? { length: overrides.itemsLength ?? 5 } },
         composerInsetHeightRef: { current: overrides.composerInsetHeight ?? 0 },
         nativeHotTailHeightRef: { current: overrides.nativeHotTailHeight ?? 0 },
         lastPinOffsetForIntentRef: { current: null },
@@ -238,9 +239,13 @@ function buildDeps(overrides: DepsOverrides = {}): DepsBundle {
         lastNativeRestoreIndexCommandRef,
         nativeMountSettleStable: true,
         telemetryPlatform: overrides.telemetryPlatform ?? 'ios',
-        shouldUseWebHotColdSplit: overrides.shouldUseWebHotColdSplit ?? false,
         shouldUseNativeHotColdSplit: overrides.shouldUseNativeHotColdSplit ?? false,
-        coldItemCount: overrides.coldItemCount ?? 0,
+        webHotColdCountsRef: {
+            current: {
+                coldCount: overrides.coldItemCount ?? 0,
+                hotCount: (overrides.shouldUseWebHotColdSplit ?? false) ? 1 : 0,
+            },
+        },
         clearWebPrependRangeReserve,
         resolveWebScrollMetrics: () => overrides.webMetrics ?? null,
         resolveRestoreAnchorIndex: overrides.resolveRestoreAnchorIndex ?? (() => null),
@@ -826,6 +831,111 @@ describe('performTranscriptViewportCommand', () => {
             expect(write.targetOffsetY).toBe(190);
         });
 
+        it('jump-to-seq reads the LIVE web hot/cold counts at command time (stale-closure guard)', () => {
+            // Jump commands run inside long async flows (window materialization + landing
+            // settle); a captured split flag/count remaps the write into the wrong index space
+            // when the window re-slices mid-flight (live RG1/RG2 wrong-space class).
+            const node = createFakeScrollNode();
+            const webMetrics = createFakeWebScrollMetrics({
+                anchors: [{ testId: 'transcript-item-row-4', top: 220, bottom: 320 }],
+                scrollTop: 50,
+                scrollHeight: 1600,
+                clientHeight: 400,
+            });
+            const bundle = buildDeps({
+                node,
+                webMetrics,
+                listData: [
+                    { id: 'row-0' },
+                    { id: 'row-1' },
+                    { id: 'row-2' },
+                    { id: 'row-3' },
+                    { id: 'row-4' },
+                ],
+                shouldUseWebHotColdSplit: false,
+                coldItemCount: 0,
+                resolveJumpToSeqIndex: () => 6,
+                telemetryPlatform: 'web',
+            });
+            // Split activates AFTER deps were built (mid-flight re-slice): full index 6 is a
+            // hot-tail row and must remap to the last cold row under the LIVE counts. With the
+            // stale captured counts (split inactive), index 6 has no listData row and the
+            // command dies as a wrong-space no-op.
+            (bundle.deps.webHotColdCountsRef as { current: { coldCount: number; hotCount: number } }).current = {
+                coldCount: 5,
+                hotCount: 2,
+            };
+            const result = performTranscriptViewportCommand(
+                {
+                    kind: 'jump-to-seq',
+                    sessionId: BASE_SESSION,
+                    reason: 'jump-to-seq',
+                    mode: 'jump-to-seq',
+                    seq: 331,
+                },
+                bundle.deps,
+            );
+            expect(result).toBe(true);
+            const write = lastWrite(bundle.recorded);
+            expect(write.writer).toBe('web-dom-restore');
+        });
+
+        it('jump-to-seq lands exactly on a mounted hot-tail footer target instead of clamping to the last cold row', () => {
+            // The web hot/cold split renders the tail outside the recycler, but footer rows
+            // still mount `transcript-item-<id>` testids. A jump whose target sits in the hot
+            // region must rect-scroll to the target row itself; the legacy last-cold-row clamp
+            // strands the viewport one footer above the target (live RG1 in-app evidence).
+            const node = createFakeScrollNode();
+            const webMetrics = createFakeWebScrollMetrics({
+                anchors: [
+                    { testId: 'transcript-item-row-4', top: 220, bottom: 320 },
+                    { testId: 'transcript-item-hot-6', top: 900, bottom: 1000 },
+                ],
+                scrollTop: 50,
+                scrollHeight: 1600,
+                clientHeight: 400,
+            });
+            const bundle = buildDeps({
+                node,
+                webMetrics,
+                listData: [
+                    { id: 'row-0' },
+                    { id: 'row-1' },
+                    { id: 'row-2' },
+                    { id: 'row-3' },
+                    { id: 'row-4' },
+                ],
+                items: [
+                    { id: 'row-0' },
+                    { id: 'row-1' },
+                    { id: 'row-2' },
+                    { id: 'row-3' },
+                    { id: 'row-4' },
+                    { id: 'hot-5' },
+                    { id: 'hot-6' },
+                ],
+                shouldUseWebHotColdSplit: true,
+                coldItemCount: 5,
+                resolveJumpToSeqIndex: () => 6,
+                telemetryPlatform: 'web',
+            });
+            const result = performTranscriptViewportCommand(
+                {
+                    kind: 'jump-to-seq',
+                    sessionId: BASE_SESSION,
+                    reason: 'jump-to-seq',
+                    mode: 'jump-to-seq',
+                    seq: 331,
+                },
+                bundle.deps,
+            );
+            expect(result).toBe(true);
+            const write = lastWrite(bundle.recorded);
+            expect(write.writer).toBe('web-dom-restore');
+            // Centered on the hot-6 rect (top 900 rel. viewport, height 100), not row-4's rect.
+            expect(webMetrics.element.scrollTop).toBeGreaterThan(500);
+        });
+
         it('visible anchor correction derives the DOM target inside the web driver', () => {
             const node = createFakeScrollNode();
             const webMetrics = createFakeWebScrollMetrics({
@@ -947,7 +1057,8 @@ describe('performTranscriptViewportCommand', () => {
 
             expect(result).toBe(true);
             expect(getLayout).toHaveBeenCalledWith(2);
-            expect(node.indexCalls).toHaveLength(0);
+            // The unmounted-target render-window re-anchor nudge is allowed; the DOM write below stays the offset owner.
+            expect(node.indexCalls).toEqual([{ index: 2, animated: false }]);
             expect(webMetrics.element.scrollTop).toBe(820);
             expect(bundle.webDomObservation.getState()).toMatchObject({
                 observedScrollHeight: 1800,
@@ -1000,7 +1111,8 @@ describe('performTranscriptViewportCommand', () => {
             expect(result).toBe(true);
             expect(resolveRestoreAnchorIndex).toHaveBeenCalledWith(RESTORE_ANCHOR);
             expect(getLayout).toHaveBeenCalledWith(4);
-            expect(node.indexCalls).toHaveLength(0);
+            // The unmounted-target render-window re-anchor nudge is allowed; the DOM write below stays the offset owner.
+            expect(node.indexCalls).toEqual([{ index: 4, animated: false }]);
             expect(bundle.webDomObservation.getState().observedScrollTop).toBe(1320);
             expect(lastWrite(bundle.recorded)).toMatchObject({
                 writer: 'web-dom-restore',
@@ -1128,7 +1240,8 @@ describe('performTranscriptViewportCommand', () => {
             expect(result).toBe(true);
             expect(resolveJumpToSeqIndex).toHaveBeenCalledWith(42);
             expect(getLayout).toHaveBeenCalledWith(3);
-            expect(node.indexCalls).toHaveLength(0);
+            // The unmounted-target render-window re-anchor nudge is allowed; the DOM write below stays the offset owner.
+            expect(node.indexCalls).toEqual([{ index: 3, animated: false }]);
             expect(bundle.webDomObservation.getState()).toMatchObject({
                 observedScrollHeight: 2200,
                 observedScrollTop: 1070,

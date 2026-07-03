@@ -5011,9 +5011,8 @@ const ChatListInternal = React.memo((props: {
             lastNativeRestoreIndexCommandRef,
             nativeMountSettleStable,
             telemetryPlatform,
-            shouldUseWebHotColdSplit,
             shouldUseNativeHotColdSplit,
-            coldItemCount: transcriptHotColdSegments.coldItems.length,
+            webHotColdCountsRef,
             clearWebPrependRangeReserve,
             resolveRestoreAnchorIndex: (anchor) => resolveRestoreAnchorIndexForCommandRef.current(anchor),
             resolveJumpToSeqIndex: (seq, routeMessageId, transcriptBlockIndex, role) => (
@@ -5033,9 +5032,7 @@ const ChatListInternal = React.memo((props: {
             resolveWebViewportTelemetryDiagnostics,
             resolveWebScrollMetrics,
             shouldUseNativeHotColdSplit,
-            shouldUseWebHotColdSplit,
             telemetryPlatform,
-            transcriptHotColdSegments.coldItems.length,
             webDomObservation,
         ]);
 
@@ -9684,10 +9681,12 @@ const ChatListInternal = React.memo((props: {
                 targetSeq: normalizedTargetSeq,
                 hasGenuineUserMovementSince: (sinceMs) =>
                     lastRouteJumpProtectionClearingWebMovementAtMsRef.current > sinceMs,
-                waitForNextLandingFrame: () => waitForVisualUpdateWithTimeout({
-                    waitForNextVisualUpdate,
-                    timeoutMs: TRANSCRIPT_VISUAL_UPDATE_FALLBACK_TIMEOUT_MS,
-                }),
+                waitForNextLandingFrame: async () => {
+                    await waitForVisualUpdateWithTimeout({
+                        waitForNextVisualUpdate,
+                        timeoutMs: TRANSCRIPT_VISUAL_UPDATE_FALLBACK_TIMEOUT_MS,
+                    });
+                },
             });
             return result;
         } finally {
