@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as React from 'react';
-import { InteractionManager, Pressable, View, Platform } from 'react-native';
+import { Pressable, View, Platform } from 'react-native';
 
 import type { AgentInputExtraActionChip, AgentInputExtraActionChipRenderContext } from '@/components/sessions/agentInput/agentInputContracts';
 import { Text } from '@/components/ui/text/Text';
@@ -8,6 +8,7 @@ import { normalizeNodeForView } from '@/components/ui/rendering/normalizeNodeFor
 import { ActionListSection } from '@/components/ui/lists/ActionListSection';
 import { t } from '@/text';
 import { blurActiveElementOnWeb } from '@/utils/platform/deferOnWeb';
+import { runAfterInteractionsWithFallback } from '@/utils/timing/runAfterInteractionsWithFallback';
 
 const WEB_PICKER_DOUBLE_OPEN_COOLDOWN_MS = 500;
 const NATIVE_PICKER_OPEN_AFTER_POPOVER_DISMISS_DELAY_MS = 250;
@@ -17,7 +18,9 @@ function runAfterNativePopoverDismiss(action: () => void): void {
         action();
         return;
     }
-    InteractionManager.runAfterInteractions(() => {
+    // A saturated JS thread can starve InteractionManager indefinitely; the fallback
+    // guarantees the picker still opens after a bounded delay.
+    runAfterInteractionsWithFallback(() => {
         setTimeout(action, NATIVE_PICKER_OPEN_AFTER_POPOVER_DISMISS_DELAY_MS);
     });
 }
