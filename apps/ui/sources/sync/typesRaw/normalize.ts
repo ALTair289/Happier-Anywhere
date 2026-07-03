@@ -166,23 +166,12 @@ function filterNormalizedEventRoleOutput(
     return shouldKeepNormalizedEventRoleOutput(message, messageRole) ? message : null;
 }
 
-function isCompactHookLocalCommandStdoutText(text: unknown): boolean {
-    if (typeof text !== 'string') return false;
-    const trimmed = text.trim();
-    if (!trimmed.startsWith('<local-command-stdout>')) return false;
-    return /\b(?:PreCompact|PostCompact)\b/.test(trimmed);
-}
-
-function isCompactHookLocalCommandStdout(value: unknown): boolean {
-    return isCompactHookLocalCommandStdoutText(firstMessageText(value));
-}
-
 function isClaudeLocalCommandText(text: unknown): boolean {
     if (typeof text !== 'string') return false;
     const trimmed = text.trim();
     if (trimmed.startsWith('<local-command-caveat>')) return true;
-    if (trimmed.includes('<command-name>/compact</command-name>')) return true;
-    return isCompactHookLocalCommandStdoutText(trimmed);
+    if (trimmed.startsWith('<local-command-stdout>')) return true;
+    return trimmed.startsWith('<command-name>');
 }
 
 function isClaudeLocalCommandTranscriptValue(value: unknown): boolean {
