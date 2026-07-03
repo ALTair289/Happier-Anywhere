@@ -41,6 +41,7 @@ describe('isRuntimeActive', () => {
     });
 
     afterEach(() => {
+        vi.useRealTimers();
         globalWithDocument.document = originalDocument;
     });
 
