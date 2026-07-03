@@ -144,6 +144,7 @@ function buildSessionActivitySignature(session: Session): string {
         readNumber(readState?.sessionSeq) ?? '',
         readNumber(readState?.pendingActivityAt) ?? '',
         metadata?.systemSessionV1?.hidden === true ? 1 : 0,
+        readNumber(session.pendingBlockedCount) ?? '',
         readNumber(session.pendingPermissionRequestCount) ?? '',
         readNumber(session.pendingUserActionRequestCount) ?? '',
         readNumber(session.pendingRequestObservedAt) ?? '',
@@ -174,6 +175,7 @@ function buildRenderableActivitySignature(renderable: SessionListRenderableSessi
         renderable.hasPendingPermissionRequests === true ? 1 : 0,
         renderable.hasPendingUserActionRequests === true ? 1 : 0,
         readNumber(renderable.pendingRequestObservedAt) ?? '',
+        readNumber(renderable.pendingBlockedCount) ?? '',
     ].join('\u001f');
 }
 

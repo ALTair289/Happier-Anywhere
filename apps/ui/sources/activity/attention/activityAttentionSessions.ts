@@ -33,6 +33,7 @@ export type ActivityAttentionFlags = Readonly<{
     hasUnread: boolean;
     hasPendingPermissionRequests: boolean;
     hasPendingUserActionRequests: boolean;
+    hasBlockedPendingDelivery: boolean;
     hasQueuedUserInput: boolean;
 }>;
 
@@ -184,11 +185,13 @@ export function deriveActivityAttentionFlags(
     const hasQueuedUserInput = options?.showQueuedUserInput === false
         ? false
         : (session.pendingCount ?? 0) > 0;
+    const hasBlockedPendingDelivery = (session.pendingBlockedCount ?? 0) > 0;
 
     return {
         hasUnread,
         hasPendingPermissionRequests,
         hasPendingUserActionRequests,
+        hasBlockedPendingDelivery,
         hasQueuedUserInput,
     };
 }
@@ -202,5 +205,6 @@ export function hasActivityAttention(
         flags.hasUnread
         || flags.hasPendingPermissionRequests
         || flags.hasPendingUserActionRequests
+        || flags.hasBlockedPendingDelivery
     );
 }
