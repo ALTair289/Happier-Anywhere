@@ -49,6 +49,7 @@ import { Text, TextInput } from '@/components/ui/text/Text';
 import { useMountedShouldContinue } from '@/hooks/ui/useMountedShouldContinue';
 import { PathInputBrowseButton } from '@/components/ui/pathBrowser/PathInputBrowseButton';
 import { openMachinePathBrowserModal } from '@/components/ui/pathBrowser/openMachinePathBrowserModal';
+import { runRefreshDiagnosticAction } from '@/utils/system/userInteractionDiagnostics';
 import { DEFAULT_AGENT_ID, isAgentId } from '@/agents/catalog/catalog';
 import { DropdownMenu } from '@/components/ui/forms/dropdown/DropdownMenu';
 import { WINDOWS_REMOTE_SESSION_LAUNCH_MODE_OPTIONS } from '@/sync/domains/session/spawn/windowsRemoteSessionLaunchModeOptions';
@@ -547,17 +548,22 @@ export default function MachineDetailScreen() {
     const handleRefresh = async () => {
         setIsRefreshing(true);
         try {
-            await sync.refreshMachines();
-            refreshDetectedCapabilities({ bypassCache: true });
-            if (machineId && isOnline && !isServerSwitching) {
-                setExecutionRunsState((prev) => ({ status: 'loading', runs: prev.runs }));
-                const res = await machineExecutionRunsList(machineId, { serverId: activeServerId });
-                if (res.ok) {
-                    setExecutionRunsState({ status: 'loaded', runs: res.runs });
-                } else {
-                    setExecutionRunsState((prev) => ({ status: 'error', runs: prev.runs, error: res.error }));
+            await runRefreshDiagnosticAction({
+                action: 'pull_to_refresh',
+                screen: 'machine_detail',
+            }, async () => {
+                await sync.refreshMachines();
+                refreshDetectedCapabilities({ bypassCache: true });
+                if (machineId && isOnline && !isServerSwitching) {
+                    setExecutionRunsState((prev) => ({ status: 'loading', runs: prev.runs }));
+                    const res = await machineExecutionRunsList(machineId, { serverId: activeServerId });
+                    if (res.ok) {
+                        setExecutionRunsState({ status: 'loaded', runs: res.runs });
+                    } else {
+                        setExecutionRunsState((prev) => ({ status: 'error', runs: prev.runs, error: res.error }));
+                    }
                 }
-            }
+            });
         } finally {
             setIsRefreshing(false);
         }
