@@ -21,7 +21,6 @@ import { ChatHeaderView } from '@/components/sessions/transcript/ChatHeaderView'
 import type { Message } from '@/sync/domains/messages/messageTypes';
 import { serverFetch } from '@/sync/http/client';
 import type { Metadata } from '@/sync/domains/state/storageTypes';
-import { deriveTranscriptInteraction } from '@/utils/sessions/deriveTranscriptInteraction';
 import { sortNormalizedMessagesOldestFirst } from '@/utils/sessions/sortNormalizedMessagesOldestFirst';
 import { parsePlainSessionAgentState, parsePlainSessionMetadata } from '@/sync/engine/sessions/parsePlainSessionPayload';
 import { readStoredSessionRawRecord } from '@/sync/runtime/readStoredSessionContent';
@@ -335,7 +334,6 @@ export default memo(function PublicShareViewerScreen() {
 
     const ownerName = getOwnerDisplayName(share.owner);
     const sessionName = decryptedMetadata?.name || decryptedMetadata?.path || t('session.sharing.session');
-    const interaction = deriveTranscriptInteraction({ kind: 'public', disableToolNavigation: true });
 
     return (
         <>
@@ -355,7 +353,6 @@ export default memo(function PublicShareViewerScreen() {
                         sessionId={share.session.id}
                         metadata={decryptedMetadata}
                         messages={messages}
-                        interaction={interaction}
                         bottomNotice={{
                             title: t('session.sharing.publicReadOnlyTitle'),
                             body: t('session.sharing.publicReadOnlyBody'),
