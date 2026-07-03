@@ -10,6 +10,7 @@ import type { Message } from '@/sync/domains/messages/messageTypes';
 
 afterEach(() => {
     clearSessionTranscriptDerivedCachesForSession('s-1');
+    clearSessionTranscriptDerivedCachesForSession('s-2');
     standardCleanup();
 });
 
@@ -183,6 +184,41 @@ describe('useSessionConnectedServiceAccountSwitchEvents', () => {
             });
 
             expect(hook.getCurrent()).toHaveLength(2);
+
+            await hook.unmount();
+        } finally {
+            storage.setState(previousState);
+        }
+    });
+
+    it('does not return cached events after the session messages entry is removed', async () => {
+        const previousState = storage.getState();
+        try {
+            const eventMessage = buildCountingSwitchEventMessage('event-1', () => {});
+            seedSessionMessages(
+                's-2',
+                { 'event-1': eventMessage },
+                ['event-1'],
+                { messagesVersion: 0, agentEventSourceVersion: 0 },
+            );
+
+            const hook = await renderHook(
+                () => useSessionConnectedServiceAccountSwitchEvents('s-2'),
+                { flushOptions: { cycles: 1, turns: 4 } },
+            );
+            expect(hook.getCurrent()).toHaveLength(1);
+
+            await act(async () => {
+                storage.setState((state) => {
+                    const { ['s-2']: _removed, ...remaining } = state.sessionMessages;
+                    return {
+                        ...state,
+                        sessionMessages: remaining,
+                    };
+                });
+            });
+
+            expect(hook.getCurrent()).toHaveLength(0);
 
             await hook.unmount();
         } finally {

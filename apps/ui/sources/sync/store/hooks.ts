@@ -340,10 +340,10 @@ type SessionSubagentSourceMessagesCacheEntry = Readonly<{
 const sessionSubagentSourceMessagesCache = new Map<string, SessionSubagentSourceMessagesCacheEntry>();
 const sessionSubagentSourceMessageSignatureCache = new WeakMap<Message, string>();
 
-// These module-scoped caches root a session's materialized Message objects (and, via
-// `sourceRef`, the whole SessionMessages entry) outside the store. Register them with
-// the canonical transcript-memory release seam so bounded-retention eviction and
-// deleteSession free them together with the store entry.
+// These module-scoped caches can root a session's materialized Message objects
+// outside the store. Register them with the canonical transcript-memory release
+// seam so bounded-retention eviction and deleteSession free them together with
+// the store entry.
 registerSessionTranscriptDerivedCacheClear((sessionId) => {
   sessionAgentEventSourceCache.delete(sessionId);
   sessionMessagesArrayCache.delete(sessionId);
@@ -607,7 +607,7 @@ export function useSessionConnectedServiceAccountSwitchEvents(
       const sessionMessages = state.sessionMessages[sessionId];
       const cached = sessionAgentEventSourceCache.get(sessionId);
       const sourceVersion = sessionMessages?.agentEventSourceVersion ?? sessionMessages?.messagesVersion ?? 0;
-      if (cached && cached.sourceVersion === sourceVersion) {
+      if (sessionMessages && cached && cached.sourceVersion === sourceVersion) {
         sessionAgentEventSourceCache.delete(sessionId);
         sessionAgentEventSourceCache.set(sessionId, cached);
         return cached.events;
