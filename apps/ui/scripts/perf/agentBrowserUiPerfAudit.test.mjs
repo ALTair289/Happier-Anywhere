@@ -741,6 +741,78 @@ test('browser probe summary reports long tasks and frame gaps', async () => {
   });
 });
 
+test('fallback scenario snapshot script preserves sync telemetry when the audit probe is unavailable', async () => {
+  const { buildFallbackScenarioSnapshotScript } = await loadModule();
+  const context = {
+    window: {
+      __HAPPIER_SYNC_PERFORMANCE__: {
+        snapshot: () => ({
+          events: [{ name: 'sync.store.sessions.apply', count: 2, totalMs: 10, maxMs: 7 }],
+        }),
+      },
+      __HAPPIER_SYNC_RELIABILITY__: {
+        snapshot: () => ({ droppedEvents: 0 }),
+      },
+      __HAPPIER_TRANSCRIPT_VIEWPORT_EVENTS__: () => ({ droppedCount: 0, events: [] }),
+    },
+    location: { href: 'http://app.local/session/session-1' },
+    performance: {
+      now: () => 1234,
+      memory: {
+        usedJSHeapSize: 10,
+        totalJSHeapSize: 20,
+        jsHeapSizeLimit: 30,
+      },
+    },
+  };
+
+  const snapshot = vm.runInNewContext(
+    buildFallbackScenarioSnapshotScript('Browser perf probe snapshot was not available'),
+    context,
+  );
+
+  assert.equal(snapshot.auditProbeAvailable, false);
+  assert.equal(snapshot.auditProbeError, 'Browser perf probe snapshot was not available');
+  assert.equal(snapshot.url, 'http://app.local/session/session-1');
+  assert.deepEqual(JSON.parse(JSON.stringify(snapshot.memory)), {
+    usedJSHeapSize: 10,
+    totalJSHeapSize: 20,
+    jsHeapSizeLimit: 30,
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(snapshot.syncPerformance.events)), [
+    { name: 'sync.store.sessions.apply', count: 2, totalMs: 10, maxMs: 7 },
+  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(snapshot.syncReliability)), { droppedEvents: 0 });
+  assert.deepEqual(JSON.parse(JSON.stringify(snapshot.transcriptViewport)), { droppedCount: 0, events: [] });
+});
+
+test('scenario snapshot result keeps sync telemetry for fallback snapshots', async () => {
+  const { buildScenarioSnapshotResult } = await loadModule();
+
+  const result = buildScenarioSnapshotResult({
+    auditProbeAvailable: false,
+    auditProbeError: 'Browser perf probe snapshot was not available',
+    startedAtMs: 0,
+    finishedAtMs: 10,
+    longTasks: [],
+    frameGaps: [],
+    syncPerformance: {
+      events: [
+        { name: 'sync.socket.event', count: 3, totalMs: 9.1234, maxMs: 6.789 },
+        { name: 'sync.store.sessions.apply', count: 1, totalMs: 12, maxMs: 12 },
+      ],
+    },
+  });
+
+  assert.equal(result.browserSummary, null);
+  assert.equal(result.snapshotWarning, 'Browser perf probe snapshot was not available');
+  assert.deepEqual(result.syncTopEvents.map((event) => event.name), [
+    'sync.store.sessions.apply',
+    'sync.socket.event',
+  ]);
+  assert.equal(result.syncTopEvents[1].totalMs, 9.123);
+});
+
 test('detects recoverable agent-browser runtime errors', async () => {
   const {
     isAgentBrowserCaptureAlreadyActiveError,

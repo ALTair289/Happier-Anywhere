@@ -9,7 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const APP_URL_ENV_NAME = 'HAPPIER_UI_PERF_APP_URL';
 const DEV_KEY_ENV_NAME = 'HAPPIER_UI_PERF_DEV_KEY';
 const DEFAULT_AGENT_BROWSER_SESSION = 'happier-ui-perf';
-const SYNC_TUNING_STORAGE_KEY = 'HAPPIER_SYNC_TUNING_JSON';
+export const SYNC_TUNING_STORAGE_KEY = 'HAPPIER_SYNC_TUNING_JSON';
 const AUDIT_GLOBAL = '__HAPPIER_AGENT_BROWSER_PERF_AUDIT__';
 const SCROLL_GLOBAL = '__HAPPIER_AGENT_BROWSER_PERF_SCROLL__';
 
@@ -387,6 +387,60 @@ function summarizeSyncTelemetry(syncSnapshot) {
     }))
     .filter((event) => event.name)
     .sort((left, right) => right.totalMs - left.totalMs || right.count - left.count || left.name.localeCompare(right.name));
+}
+
+export function buildFallbackScenarioSnapshotScript(probeError = 'Browser perf probe snapshot was not available') {
+  return `(() => {
+    const errors = [];
+    const readError = ${JSON.stringify(String(probeError ?? 'Browser perf probe snapshot was not available'))};
+    function snapshotOrNull(read) {
+      try {
+        return read();
+      } catch (error) {
+        errors.push(String(error?.message ?? error));
+        return null;
+      }
+    }
+    function readTranscriptViewportTelemetry() {
+      return snapshotOrNull(() => {
+        const telemetry = window.__HAPPIER_TRANSCRIPT_VIEWPORT_EVENTS__;
+        if (typeof telemetry === 'function') return telemetry();
+        if (telemetry && typeof telemetry.snapshot === 'function') return telemetry.snapshot();
+        return null;
+      });
+    }
+    const perf = typeof performance === 'object' && performance ? performance : null;
+    const memory = perf?.memory ? {
+      usedJSHeapSize: perf.memory.usedJSHeapSize,
+      totalJSHeapSize: perf.memory.totalJSHeapSize,
+      jsHeapSizeLimit: perf.memory.jsHeapSizeLimit,
+    } : null;
+    return {
+      auditProbeAvailable: false,
+      auditProbeError: readError,
+      startedAtMs: 0,
+      finishedAtMs: typeof perf?.now === 'function' ? perf.now() : 0,
+      longTasks: [],
+      frameGaps: [],
+      ws: null,
+      memory,
+      errors,
+      url: typeof location === 'object' && location ? String(location.href ?? '') : '',
+      syncPerformance: snapshotOrNull(() => window.__HAPPIER_SYNC_PERFORMANCE__?.snapshot?.() ?? null),
+      syncReliability: snapshotOrNull(() => window.__HAPPIER_SYNC_RELIABILITY__?.snapshot?.() ?? null),
+      transcriptViewport: readTranscriptViewportTelemetry(),
+    };
+  })()`;
+}
+
+export function buildScenarioSnapshotResult(raw) {
+  const auditProbeAvailable = raw?.auditProbeAvailable !== false;
+  return {
+    raw,
+    browserSummary: auditProbeAvailable ? summarizeBrowserProbe(raw) : null,
+    syncTopEvents: summarizeSyncTelemetry(raw?.syncPerformance).slice(0, 80),
+    snapshotWarning: auditProbeAvailable ? null : String(raw?.auditProbeError ?? 'Browser perf probe snapshot was not available'),
+  };
 }
 
 export function resolvePerfAuditEnvironmentDefaults(env = process.env) {
@@ -1771,13 +1825,24 @@ async function runMeasuredScenarioAction(ctx, scenario, phases) {
 }
 
 async function collectScenarioSnapshot(ctx) {
-  const raw = await browserEval(ctx.session, `window.${AUDIT_GLOBAL}?.snapshot?.() ?? null`, { timeout: 60000 });
-  if (!raw) throw new Error('Browser perf probe snapshot was not available');
-  return {
-    raw,
-    browserSummary: summarizeBrowserProbe(raw),
-    syncTopEvents: summarizeSyncTelemetry(raw.syncPerformance).slice(0, 80),
-  };
+  let probeError = 'Browser perf probe snapshot was not available';
+  try {
+    const raw = await browserEval(ctx.session, `window.${AUDIT_GLOBAL}?.snapshot?.() ?? null`, { timeout: 60000 });
+    if (raw) return buildScenarioSnapshotResult(raw);
+  } catch (caught) {
+    probeError = caught?.message ?? String(caught);
+  }
+
+  try {
+    const fallbackRaw = await browserEval(ctx.session, buildFallbackScenarioSnapshotScript(probeError), { timeout: 60000 });
+    if (fallbackRaw) return buildScenarioSnapshotResult(fallbackRaw);
+  } catch (caught) {
+    throw new Error(
+      `${probeError}; fallback telemetry snapshot failed: ${caught?.message ?? String(caught)}`,
+    );
+  }
+
+  throw new Error(probeError);
 }
 
 async function runScenario(ctx, scenario) {
