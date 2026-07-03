@@ -24,7 +24,8 @@ const TRANSCRIPT_VIEWPORT_FACTS = readFileSync(new URL('../driver/transcriptView
 const NATIVE_INVERTED_FLASH_LIST = readFileSync(new URL('../driver/nativeInvertedFlashList.ts', import.meta.url), 'utf8');
 const NATIVE_INVERTED_FLASH_LIST_FACTS = readFileSync(new URL('../driver/nativeInvertedFlashListFacts.ts', import.meta.url), 'utf8');
 const NATIVE_INVERTED_FLASH_LIST_FACTS_TEST = readFileSync(new URL('../driver/nativeInvertedFlashListFacts.test.ts', import.meta.url), 'utf8');
-const NATIVE_VIEWPORT_ANCHOR = readFileSync(new URL('../../transcriptNativeViewportAnchor.ts', import.meta.url), 'utf8');
+const NATIVE_VIEWPORT_ANCHOR = readFileSync(new URL('../driver/transcriptNativeViewportAnchor.ts', import.meta.url), 'utf8');
+const RENDER_WINDOW_PROJECTION = readFileSync(new URL('../window/resolveTranscriptRenderWindowProjection.ts', import.meta.url), 'utf8');
 const SIDECHAIN_OLDER_LOAD_OBSERVATION = readFileSync(new URL('./sidechainOlderLoadObservation.ts', import.meta.url), 'utf8');
 const FLASH_LIST_RUNTIME_MODEL = readFileSync(new URL('../../../../../dev/testkit/transcript/runtimeContract/flashListRuntimeModel.ts', import.meta.url), 'utf8');
 const VIEWPORT_COMMAND_PERFORMER = readFileSync(new URL('../performTranscriptViewportCommand.ts', import.meta.url), 'utf8');
@@ -41,6 +42,11 @@ const LIFECYCLE_SCROLL_OBSERVATION_APPLIER = readFileSync(
     new URL('../lifecycle/lifecycleHostScrollObservationApplier.ts', import.meta.url),
     'utf8',
 );
+const SCROLL_INGRESS_OBSERVATION = readFileSync(
+    new URL('../lifecycle/scrollIngressObservation.ts', import.meta.url),
+    'utf8',
+);
+const SCROLL_INGRESS_DRIVER = readFileSync(new URL('../driver/scrollIngress.ts', import.meta.url), 'utf8');
 const LAYOUT_CONTENT_SIZE_OBSERVATION_APPLIER_URL = new URL(
     '../lifecycle/layoutContentSizeObservationApplier.ts',
     import.meta.url,
@@ -763,20 +769,14 @@ describe('TranscriptListShell', () => {
         }
     });
 
-    it('routes content-growth live-tail scheduling policy through the lifecycle host', () => {
-        const schedulePinToBottomBody = readHookBody(
-            CHAT_LIST,
-            'schedulePinToBottom',
-            'useCallback',
-        );
-
-        expect(CHAT_LIST).toContain('lifecycleHost.planContentGrowthLiveTailPinSchedule');
-        expect(CHAT_LIST).toContain('lifecycleHost.planContentGrowthLiveTailScheduledPinFire');
-        expect(LIFECYCLE_HOST).toContain('planContentGrowthLiveTailPinSchedule');
-        expect(LIFECYCLE_HOST).toContain('planContentGrowthLiveTailScheduledPinFire');
-        expect(schedulePinToBottomBody).not.toContain('shouldSupersedeStaleNativePin');
-        expect(schedulePinToBottomBody).not.toContain("scheduled.reason !== 'stream-append'");
-        expect(schedulePinToBottomBody).not.toContain("waitMs === 0 && typeof raf === 'function'");
+    it('routes content-growth live-tail scheduling policy through the bottom-follow write scheduler', () => {
+        expect(CHAT_LIST).toContain('requestBottomFollowScheduledWrite');
+        expect(CHAT_LIST).toContain('planBottomFollowWriteSchedulerEvent');
+        expect(CHAT_LIST).not.toContain('lifecycleHost.planContentGrowthLiveTailPinSchedule');
+        expect(CHAT_LIST).not.toContain('lifecycleHost.planContentGrowthLiveTailScheduledPinFire');
+        expect(LIFECYCLE_HOST).not.toContain('planContentGrowthLiveTailPinSchedule');
+        expect(LIFECYCLE_HOST).not.toContain('planContentGrowthLiveTailScheduledPinFire');
+        expect(LIFECYCLE_HOST).not.toContain('contentGrowthLiveTailScheduler');
     });
 
     it('routes measurement and layout-cache host policy through the measurement host', () => {
@@ -797,7 +797,8 @@ describe('TranscriptListShell', () => {
     });
 
     it('routes scroll-observation arbitration through the lifecycle host', () => {
-        expect(CHAT_LIST).toContain('lifecycleHost.observeScroll');
+        expect(CHAT_LIST).toContain('observeTranscriptScrollIngress');
+        expect(SCROLL_INGRESS_OBSERVATION).toContain('lifecycleHost.observeScroll');
         expect(CHAT_LIST).toContain('applyTranscriptLifecycleScrollObservationPlan');
         expect(LIFECYCLE_SCROLL_OBSERVATION_APPLIER).toContain('nativePassiveScrollObservationEffect');
         expect(LIFECYCLE_SCROLL_OBSERVATION_APPLIER).toContain('nativeBottomFollowCompletionEffects');
@@ -930,9 +931,7 @@ describe('TranscriptListShell', () => {
     it('keeps bottom-follow decision resolvers out of ChatList while preserving mode state typing', () => {
         expect(CHAT_LIST).not.toContain('resolveTranscriptBottomFollowIntent');
         expect(CHAT_LIST).not.toContain('resolveTranscriptBottomFollowMode');
-        expect(CHAT_LIST).toMatch(
-            /import\s+type\s+\{\s*TranscriptBottomFollowModeState\s*\}\s+from\s+['"]@\/components\/sessions\/transcript\/scroll\/transcriptBottomFollowMode['"]/,
-        );
+        expect(CHAT_LIST).toContain('TranscriptBottomFollowModeState');
         expect(CHAT_LIST).toContain('React.useRef<TranscriptBottomFollowModeState>');
         expect(CHAT_LIST).toContain("TranscriptBottomFollowModeState['mode']");
     });
@@ -1020,15 +1019,16 @@ describe('TranscriptListShell', () => {
         expect(CHAT_LIST).not.toContain('const resolveCanonicalScrollOffset = React.useCallback');
         expect(CHAT_LIST).not.toContain('resolveNativeInvertedBottomRawOffset');
         expect(CHAT_LIST).toContain('const resolveNativeObservedScrollOffset = React.useCallback');
+        expect(CHAT_LIST).toContain('observeTranscriptScrollIngress');
         expect(TRANSCRIPT_VIEWPORT_FACTS).toContain('resolveObservedOffset');
         expect(NATIVE_INVERTED_FLASH_LIST_FACTS).toContain('resolveObservedOffset(rawOffsetY');
         expect(NATIVE_INVERTED_FLASH_LIST_FACTS_TEST).toContain('resolveObservedOffset(300');
+        expect(SCROLL_INGRESS_DRIVER).toContain('toNativeInvertedCanonicalOffset');
+        expect(SCROLL_INGRESS_DRIVER).toContain('getWebTranscriptDistanceFromBottom(metrics)');
         expect(reachedEdgeResolverSource).toMatch(
             /if\s*\(\s*Platform\.OS\s*===\s*'web'\s*\)\s*return\s+edge\s*===\s*'start'\s*\?\s*'older'\s*:\s*'newer';/,
         );
-        expect(CHAT_LIST).toContain(
-            'const rawObservedOffsetY = liveWebMetrics ? liveWebMetrics.scrollTop : nativeEvent?.contentOffset?.y;',
-        );
+        expect(CHAT_LIST).not.toContain('const rawObservedOffsetY = liveWebMetrics ? liveWebMetrics.scrollTop');
         expect(SIDECHAIN_OLDER_LOAD_OBSERVATION).not.toContain('readNativeAbsoluteScrollOffset');
         expect(SIDECHAIN_OLDER_LOAD_OBSERVATION).not.toContain('ScrollableChatListRef');
         expect(SIDECHAIN_OLDER_LOAD_OBSERVATION).not.toContain('scrollableExtent - params.offsetY');
@@ -1079,7 +1079,7 @@ describe('TranscriptListShell', () => {
             'recordNativeGestureTakeover',
             'useCallback',
         );
-        const hotColdSegmentsSource = readHookBody(CHAT_LIST, 'transcriptHotColdSegments', 'useMemo');
+        const hotColdSegmentsSource = RENDER_WINDOW_PROJECTION;
         const nativeHotTailPinSource = readHookBody(
             CHAT_LIST,
             'pinNativeLiveTailForHotTailHeight',
@@ -1099,9 +1099,8 @@ describe('TranscriptListShell', () => {
         expect(CHAT_LIST).not.toMatch(
             /Platform\.OS === 'web'\s*&&\s*listOrientationRef\.current !== 'inverted'\s*&&\s*typeof effectiveScrollOffset === 'number'\s*\?\s*resolveWebDomOlderLoadObservationTrigger/,
         );
-        expect(CHAT_LIST).toMatch(
-            /Platform\.OS === 'web'\s*&&\s*typeof effectiveScrollOffset === 'number'\s*\?\s*resolveWebDomOlderLoadObservationTrigger/,
-        );
+        expect(SCROLL_INGRESS_OBSERVATION).toContain('resolveWebDomOlderLoadObservationTrigger');
+        expect(CHAT_LIST).not.toContain('resolveWebDomOlderLoadObservationTrigger');
     });
 
     it('does not keep an explicit native jump-to-bottom orientation gate', () => {

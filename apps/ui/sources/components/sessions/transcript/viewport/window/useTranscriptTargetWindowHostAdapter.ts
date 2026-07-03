@@ -145,10 +145,7 @@ export function resolveTranscriptNavigationJumpPlan(params: Readonly<{
             anchorKind: entry.kind,
             requestedAlign: request.align,
         }),
-        preferTargetWindow: entry.loaded === false || (
-            target.kind === 'route-message-id' &&
-            !params.isTargetInRenderedWindow(target)
-        ),
+        preferTargetWindow: entry.loaded === false || !params.isTargetInRenderedWindow(target),
         target,
     };
 }
@@ -229,28 +226,93 @@ export async function executeTranscriptTargetWindowJump(params: Readonly<{
     scrollToTarget: () => boolean;
     target: TranscriptJumpTarget;
     targetSeq: number;
+    waitForNextLandingFrame?: () => Promise<void>;
+    landingSettleDeadlineMs?: number;
 }>): Promise<TranscriptJumpResult> {
-    const scrollToTarget = (): boolean => {
-        const beforeScrollTop = params.canRenderTargetWindow && params.platformOS === 'web'
-            ? params.readScrollTop()
-            : null;
+    const scrollToTarget = (options: Readonly<{ allowVirtualizedRenderedTarget?: boolean }> = {}): boolean => {
         const applied = params.scrollToTarget();
         if (!applied) return false;
         if (params.canRenderTargetWindow && params.platformOS === 'web') {
             const targetInRenderedWindow = params.isTargetInRenderedWindow?.() ?? params.isTargetMounted();
             if (!targetInRenderedWindow) return false;
-        }
-        if (params.canRenderTargetWindow && params.platformOS === 'web' && !params.isTargetMounted()) {
-            const afterScrollTop = params.readScrollTop();
-            if (
-                beforeScrollTop != null &&
-                afterScrollTop != null &&
-                Math.abs(afterScrollTop - beforeScrollTop) <= 1
-            ) {
-                return false;
-            }
+            if (!options.allowVirtualizedRenderedTarget && !params.isTargetMounted()) return false;
         }
         return true;
+    };
+
+    /**
+     * Web landing after a target window renders. The first write can only aim at estimated
+     * row layouts (the target row is not mounted yet), so this loop:
+     *  1. issues approach writes while the target is unmounted (forcing the renderer band
+     *     near the estimated target position; estimates converge as rows get measured),
+     *  2. once mounted, re-runs the exact rect-based landing write until the viewport is
+     *     stable across two consecutive frames (late measurements shift content under the
+     *     first exact write),
+     *  3. aborts as soon as a foreign writer (user scroll, another owner) moves the viewport
+     *     away from this jump's own last write.
+     * Runs inside the explicit-jump write barrier held by the caller for the whole jump.
+     */
+    const performWebWindowLanding = async (
+        landedResult: Extract<TranscriptJumpResult, { status: 'scrolled' | 'window-rendered' }>,
+    ): Promise<void> => {
+        let landed = false;
+        const landOnce = (): void => {
+            if (scrollToTarget({ allowVirtualizedRenderedTarget: true }) && !landed) {
+                landed = true;
+                params.onJumpLanded?.(landedResult);
+            }
+        };
+        if (typeof params.readScrollTop() !== 'number') {
+            // No usable scroll metrics (host harness or detached container): single-shot landing.
+            if (params.isTargetMounted()) {
+                landOnce();
+                return;
+            }
+            await Promise.resolve();
+            await Promise.resolve();
+            if (params.isTargetMounted() || params.isTargetInRenderedWindow?.()) {
+                landOnce();
+            }
+            return;
+        }
+
+        const waitFrame = params.waitForNextLandingFrame
+            ?? (() => new Promise<void>((resolve) => setTimeout(resolve, 80)));
+        const deadlineAt = Date.now() + Math.max(0, params.landingSettleDeadlineMs ?? 1800);
+        let lastObservedAfterWrite: number | null = null;
+        let stableFrames = 0;
+        for (let iteration = 0; iteration < 60; iteration += 1) {
+            const observedBefore = params.readScrollTop();
+            if (
+                lastObservedAfterWrite !== null &&
+                typeof observedBefore === 'number' &&
+                Math.abs(observedBefore - lastObservedAfterWrite) > 1
+            ) {
+                break;
+            }
+            if (params.isTargetMounted()) {
+                landOnce();
+                const observedAfter = params.readScrollTop();
+                if (typeof observedAfter !== 'number') break;
+                stableFrames = typeof observedBefore === 'number' && Math.abs(observedAfter - observedBefore) <= 1
+                    ? stableFrames + 1
+                    : 0;
+                lastObservedAfterWrite = observedAfter;
+                if (stableFrames >= 2) {
+                    break;
+                }
+            } else {
+                stableFrames = 0;
+                scrollToTarget();
+                const observedAfter = params.readScrollTop();
+                if (typeof observedAfter !== 'number') break;
+                lastObservedAfterWrite = observedAfter;
+            }
+            if (Date.now() > deadlineAt) {
+                break;
+            }
+            await waitFrame();
+        }
     };
     const renderTargetWindow = async (
         request: Readonly<{
@@ -300,15 +362,7 @@ export async function executeTranscriptTargetWindowJump(params: Readonly<{
         return result;
     }
     if (result.status === 'window-rendered' && params.platformOS === 'web') {
-        if (params.isTargetMounted()) {
-            params.onJumpLanded?.(result);
-            return result;
-        }
-        await Promise.resolve();
-        await Promise.resolve();
-        if (params.isTargetMounted()) {
-            params.onJumpLanded?.(result);
-        }
+        await performWebWindowLanding(result);
         return result;
     }
     if (
@@ -328,14 +382,10 @@ export async function executeTranscriptTargetWindowJump(params: Readonly<{
             },
         });
         if (fallbackResult.status === 'window-rendered') {
-            if (params.platformOS !== 'web' || params.isTargetMounted()) {
+            if (params.platformOS !== 'web') {
                 params.onJumpLanded?.(fallbackResult);
             } else {
-                await Promise.resolve();
-                await Promise.resolve();
-                if (params.isTargetMounted()) {
-                    params.onJumpLanded?.(fallbackResult);
-                }
+                await performWebWindowLanding(fallbackResult);
             }
         }
         return fallbackResult;

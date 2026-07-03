@@ -6,7 +6,7 @@ import {
     TRANSCRIPT_WEB_PREPEND_ANCHOR_TEST_ID_PREFIX,
     type WebTranscriptPrependRestoreResult,
     type WebTranscriptViewportAnchorRestoreResult,
-} from '@/components/sessions/transcript/webTranscriptPrependAnchor';
+} from '@/components/sessions/transcript/viewport/prepend/webTranscriptPrependAnchor';
 import {
     getWebTranscriptDistanceFromBottom,
     isWebTranscriptScrollable,
@@ -62,6 +62,8 @@ export function performWebDomViewportCommand(
             metrics,
             mode: command.mode,
             reason: command.reason,
+            schedulerAuthorityReason: command.schedulerAuthorityReason,
+            schedulerAuthorityWriter: command.schedulerAuthorityWriter,
             targetScrollTop,
             trigger: 'restore',
             writer: 'web-dom-bottom',
@@ -461,6 +463,8 @@ function writeWebDomScrollTop(params: Readonly<{
     metrics: WebTranscriptScrollMetrics;
     mode: TranscriptViewportCommand['mode'];
     reason: Exclude<TranscriptViewportCommand, Readonly<{ kind: 'none' }> | Readonly<{ kind: 'skip-native-js-pin' }>>['reason'];
+    schedulerAuthorityReason?: Extract<TranscriptViewportCommand, { kind: 'preserve-live-tail-distance' }>['schedulerAuthorityReason'];
+    schedulerAuthorityWriter?: Extract<TranscriptViewportCommand, { kind: 'preserve-live-tail-distance' }>['schedulerAuthorityWriter'];
     targetScrollTop: number;
     trigger: 'prepend-restore' | 'jump' | 'restore';
     writer: 'web-dom-bottom' | 'web-dom-restore';
@@ -478,6 +482,8 @@ function writeWebDomScrollTop(params: Readonly<{
         mode: params.mode,
         targetOffsetY: write.landedScrollTop,
         previousOffsetY,
+        ...(params.schedulerAuthorityReason ? { schedulerAuthorityReason: params.schedulerAuthorityReason } : {}),
+        ...(params.schedulerAuthorityWriter ? { schedulerAuthorityWriter: params.schedulerAuthorityWriter } : {}),
         layoutHeight: params.metrics.clientHeight,
         contentHeight: params.metrics.scrollHeight,
         distanceFromBottom: params.distanceFromBottom(write.landedScrollTop),

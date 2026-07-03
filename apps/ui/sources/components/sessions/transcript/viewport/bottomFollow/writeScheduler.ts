@@ -22,11 +22,16 @@ export type BottomFollowScheduledWrite<PreviousWebMetrics = unknown> = Readonly<
 }>;
 
 export type BottomFollowWriteSchedulerState<PreviousWebMetrics = unknown> = Readonly<{
+    explicitJumpActive: boolean;
     gestureActive: boolean;
     pending: BottomFollowScheduledWrite<PreviousWebMetrics> | null;
 }>;
 
 export type BottomFollowWriteSchedulerEvent<PreviousWebMetrics = unknown> =
+    | Readonly<{
+        active: boolean;
+        type: 'set-explicit-jump-active';
+    }>
     | Readonly<{
         active: boolean;
         type: 'set-gesture-active';
@@ -77,7 +82,7 @@ export type BottomFollowWriteSchedulerEffect<PreviousWebMetrics = unknown> =
     }>
     | Readonly<{
         observedRawOffsetY?: number;
-        reason: 'auto-follow-blocked' | 'auto-follow-not-ready' | 'gesture-active' | 'negative-raw-offset' | 'no-pending-write';
+        reason: 'auto-follow-blocked' | 'auto-follow-not-ready' | 'explicit-jump-active' | 'gesture-active' | 'negative-raw-offset' | 'no-pending-write';
         type: 'drop-write';
         write?: BottomFollowScheduledWrite<PreviousWebMetrics>;
     }>
@@ -85,6 +90,8 @@ export type BottomFollowWriteSchedulerEffect<PreviousWebMetrics = unknown> =
         command?: 'native-respecting-mount-settle' | 'pin-to-bottom';
         nativePrevFollowAtBottom?: boolean;
         reason: TranscriptViewportScrollReason;
+        schedulerAuthorityReason: TranscriptViewportScrollReason;
+        schedulerAuthorityWriter: BottomFollowAutomaticWriter;
         type: 'authorize-write';
         writer: BottomFollowAutomaticWriter;
     }>
@@ -92,6 +99,8 @@ export type BottomFollowWriteSchedulerEffect<PreviousWebMetrics = unknown> =
         command: 'web-bottom-follow-adjustment';
         previousWebMetrics: PreviousWebMetrics;
         reason: TranscriptViewportScrollReason;
+        schedulerAuthorityReason: TranscriptViewportScrollReason;
+        schedulerAuthorityWriter: BottomFollowAutomaticWriter;
         type: 'authorize-write';
         writer: BottomFollowAutomaticWriter;
     }>;
@@ -106,6 +115,8 @@ export function planBottomFollowWriteSchedulerEvent<PreviousWebMetrics = unknown
     event: BottomFollowWriteSchedulerEvent<PreviousWebMetrics>,
 ): BottomFollowWriteSchedulerPlan<PreviousWebMetrics> {
     switch (event.type) {
+        case 'set-explicit-jump-active':
+            return planExplicitJumpActiveChange(state, event.active);
         case 'set-gesture-active':
             return planGestureActiveChange(state, event.active);
         case 'request-write':
@@ -113,6 +124,16 @@ export function planBottomFollowWriteSchedulerEvent<PreviousWebMetrics = unknown
         case 'fire-pending':
             return planPendingWriteFire(state, event);
         case 'authorize-immediate-write':
+            if (state.explicitJumpActive) {
+                const effect: BottomFollowWriteSchedulerEffect<PreviousWebMetrics> = {
+                    reason: 'explicit-jump-active',
+                    type: 'drop-write',
+                };
+                return {
+                    effects: [effect],
+                    state,
+                };
+            }
             if (state.gestureActive) {
                 const effect: BottomFollowWriteSchedulerEffect<PreviousWebMetrics> = {
                     reason: 'gesture-active',
@@ -127,6 +148,8 @@ export function planBottomFollowWriteSchedulerEvent<PreviousWebMetrics = unknown
                 effects: [
                     {
                         reason: event.reason,
+                        schedulerAuthorityReason: event.reason,
+                        schedulerAuthorityWriter: event.writer,
                         type: 'authorize-write',
                         writer: event.writer,
                     },
@@ -142,6 +165,22 @@ export function planBottomFollowWriteSchedulerEvent<PreviousWebMetrics = unknown
                 },
             };
     }
+}
+
+function planExplicitJumpActiveChange<PreviousWebMetrics>(
+    state: BottomFollowWriteSchedulerState<PreviousWebMetrics>,
+    active: boolean,
+): BottomFollowWriteSchedulerPlan<PreviousWebMetrics> {
+    if (state.explicitJumpActive === active) {
+        return { effects: [], state };
+    }
+    return {
+        effects: [],
+        state: {
+            ...state,
+            explicitJumpActive: active,
+        },
+    };
 }
 
 function planGestureActiveChange<PreviousWebMetrics>(
@@ -176,6 +215,17 @@ function planWriteRequest<PreviousWebMetrics>(
     state: BottomFollowWriteSchedulerState<PreviousWebMetrics>,
     event: Extract<BottomFollowWriteSchedulerEvent<PreviousWebMetrics>, { type: 'request-write' }>,
 ): BottomFollowWriteSchedulerPlan<PreviousWebMetrics> {
+    if (state.explicitJumpActive) {
+        return {
+            effects: [
+                {
+                    reason: 'explicit-jump-active',
+                    type: 'drop-write',
+                },
+            ],
+            state,
+        };
+    }
     if (event.waitMs === null) {
         return {
             effects: [
@@ -274,6 +324,30 @@ function planPendingWriteFire<PreviousWebMetrics>(
             state: nextState,
         };
     }
+    if (state.gestureActive) {
+        return {
+            effects: [
+                {
+                    reason: 'gesture-active',
+                    type: 'defer-write',
+                    write,
+                },
+            ],
+            state,
+        };
+    }
+    if (state.explicitJumpActive) {
+        return {
+            effects: [
+                {
+                    reason: 'explicit-jump-active',
+                    type: 'drop-write',
+                    write,
+                },
+            ],
+            state: nextState,
+        };
+    }
     if (
         typeof event.observedRawOffsetY === 'number' &&
         Number.isFinite(event.observedRawOffsetY) &&
@@ -310,6 +384,8 @@ function planPendingWriteFire<PreviousWebMetrics>(
             command: 'web-bottom-follow-adjustment',
             previousWebMetrics: write.previousWebMetrics,
             reason: write.reason,
+            schedulerAuthorityReason: write.reason,
+            schedulerAuthorityWriter: write.writer,
             type: 'authorize-write',
             writer: write.writer,
         });
@@ -319,12 +395,16 @@ function planPendingWriteFire<PreviousWebMetrics>(
             command: 'native-respecting-mount-settle',
             nativePrevFollowAtBottom: write.nativePrevFollowAtBottom,
             reason: write.reason,
+            schedulerAuthorityReason: write.reason,
+            schedulerAuthorityWriter: write.writer,
             type: 'authorize-write',
             writer: write.writer,
         }
         : {
             command: 'pin-to-bottom',
             reason: write.reason,
+            schedulerAuthorityReason: write.reason,
+            schedulerAuthorityWriter: write.writer,
             type: 'authorize-write',
             writer: write.writer,
         });

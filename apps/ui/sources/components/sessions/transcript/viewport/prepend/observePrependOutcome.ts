@@ -1,8 +1,8 @@
-import { planNativeTranscriptViewportAnchorMeasuredOffsetRestore } from '@/components/sessions/transcript/transcriptNativeViewportAnchor';
+import { planNativeTranscriptViewportAnchorMeasuredOffsetRestore } from '@/components/sessions/transcript/viewport/driver/transcriptNativeViewportAnchor';
 import {
     resolveTranscriptViewportAnchorIndex,
     type TranscriptViewportAnchorResolvableItem,
-} from '@/components/sessions/transcript/transcriptViewportAnchorResolution';
+} from '@/components/sessions/transcript/viewport/entryRestore/transcriptViewportAnchorResolution';
 
 /**
  * Default alignment tolerance for classifying a prepend as MVCP-preserved.

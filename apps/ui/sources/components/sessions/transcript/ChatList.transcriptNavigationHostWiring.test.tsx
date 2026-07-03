@@ -573,6 +573,65 @@ describe('ChatList transcript navigation host wiring', () => {
         await screen.unmount();
     });
 
+    it('routes loaded seq-kind rail entries through the target-window path when the row is sliced out', async () => {
+        seedTranscriptMessages();
+        loadTargetWindowMessagesMock.mockResolvedValue({
+            status: 'loaded',
+            windowId: 'target:session-1:335',
+            targetSeq: 335,
+            targetPresent: true,
+            rawSeqs: [333, 334, 335, 336],
+            appliedSeqs: [333, 334, 335, 336],
+            olderCursor: 333,
+            newerCursor: 336,
+            hasMoreOlder: true,
+            hasMoreNewer: true,
+        });
+
+        const screen = await renderFlashListChatListSession();
+        const latestRailProps = capturedNavigationRailProps.at(-1);
+        expect(latestRailProps).toBeDefined();
+        const entry: TranscriptNavigationEntry = {
+            id: 'user-turn:335',
+            sessionId: 'session-1',
+            kind: 'user-turn',
+            role: 'user',
+            seq: 335,
+            transcriptBlockIndex: 0,
+            routeMessageId: null,
+            pinned: false,
+            pinnedAtMs: null,
+            promptPreview: 'Loaded seq target outside rendered rows',
+            responsePreview: null,
+            label: 'Loaded seq target outside rendered rows',
+            createdAtMs: 335,
+            loaded: true,
+        };
+
+        await act(async () => {
+            await (latestRailProps!.onJumpToEntry(entry, {
+                align: 'top',
+                scope: { kind: 'main', sessionId: 'session-1' },
+                source: 'rail',
+                target: { kind: 'seq', seq: 335 },
+            }) as unknown as Promise<unknown>);
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+
+        expect(loadTargetWindowMessagesMock).toHaveBeenCalledWith(
+            'session-1',
+            { kind: 'seq', seq: 335 },
+            expect.objectContaining({ direction: 'initial' }),
+        );
+        expect(performTranscriptViewportCommandMock).not.toHaveBeenCalledWith(expect.objectContaining({
+            kind: 'jump-to-seq',
+            seq: 335,
+        }));
+
+        await screen.unmount();
+    });
+
     it('adds remote prior user turns from the shared history API to mounted navigation entries', async () => {
         seedTranscriptMessages();
         fetchUserMessageHistoryPageMock.mockResolvedValue({

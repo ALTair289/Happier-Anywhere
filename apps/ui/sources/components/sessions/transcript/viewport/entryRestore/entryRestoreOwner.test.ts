@@ -335,7 +335,7 @@ describe('entry restore owner', () => {
         expect(owner.telemetryState('session-a')).toBe('closed');
     });
 
-    it('rechecks web bottom confirmation after late content-height settle and spends one corrective repin', () => {
+    it('rechecks web bottom confirmation after late content-height settle and requests one corrective repin', () => {
         const owner = createEntryRestoreOwner();
 
         owner.beginWebBottom({
@@ -354,6 +354,7 @@ describe('entry restore owner', () => {
             resolveAnchorObservation: () => null,
             sessionId: 'session-a',
             tolerancePx: 72,
+            wantsPinned: true,
         });
 
         expect(effectTypes(initiallyAligned)).toContain('close-entry-ownership');
@@ -367,6 +368,7 @@ describe('entry restore owner', () => {
             resolveAnchorObservation: () => null,
             sessionId: 'session-a',
             tolerancePx: 72,
+            wantsPinned: true,
         });
         const repeatedLateSettled = owner.observeWebHostFacts({
             contentHeight: 11_548,
@@ -376,21 +378,98 @@ describe('entry restore owner', () => {
             resolveAnchorObservation: () => null,
             sessionId: 'session-a',
             tolerancePx: 72,
+            wantsPinned: true,
         });
 
-        expect(executeEffects(lateSettled)).toEqual([
+        expect(executeEffects(lateSettled)).toEqual([]);
+        expect(lateSettled).toEqual([
             {
-                command: {
-                    animated: false,
-                    contentHeight: 11_548,
-                    distanceFromLiveTailPx: 0,
-                    reason: 'entry-restore',
-                    sessionId: 'session-a',
-                    type: 'restore-distance',
-                },
-                type: 'execute-command',
+                reason: 'mount-settle',
+                sessionId: 'session-a',
+                type: 'request-bottom-follow-write',
+                writer: 'settle-reconfirm',
             },
         ]);
         expect(executeEffects(repeatedLateSettled)).toEqual([]);
+    });
+
+    it('clears the web bottom settle confirmation after trusted-scroll preemption', () => {
+        const owner = createEntryRestoreOwner();
+
+        owner.beginWebBottom({
+            contentHeight: 11_556,
+            deadlineMs: 1500,
+            layoutHeight: 334,
+            nowMs: 1000,
+            sessionId: 'session-a',
+        });
+        owner.observeWebHostFacts({
+            contentHeight: 11_556,
+            distanceFromBottom: 0,
+            layoutHeight: 334,
+            nowMs: 1050,
+            resolveAnchorObservation: () => null,
+            sessionId: 'session-a',
+            tolerancePx: 72,
+            wantsPinned: true,
+        });
+
+        owner.preempt({ reason: 'trusted-scroll', sessionId: 'session-a' });
+        const afterEscapeStreamAppend = owner.observeWebHostFacts({
+            contentHeight: 11_700,
+            distanceFromBottom: 180,
+            layoutHeight: 334,
+            nowMs: 1100,
+            resolveAnchorObservation: () => null,
+            sessionId: 'session-a',
+            tolerancePx: 72,
+            wantsPinned: false,
+        });
+
+        expect(executeEffects(afterEscapeStreamAppend)).toEqual([]);
+        expect(effectTypes(afterEscapeStreamAppend)).toEqual([]);
+    });
+
+    it('requests scheduler authority instead of emitting a direct web bottom settle command', () => {
+        const owner = createEntryRestoreOwner();
+
+        owner.beginWebBottom({
+            contentHeight: 11_556,
+            deadlineMs: 1500,
+            layoutHeight: 334,
+            nowMs: 1000,
+            sessionId: 'session-a',
+        });
+        owner.observeWebHostFacts({
+            contentHeight: 11_556,
+            distanceFromBottom: 0,
+            layoutHeight: 334,
+            nowMs: 1050,
+            resolveAnchorObservation: () => null,
+            sessionId: 'session-a',
+            tolerancePx: 72,
+            wantsPinned: true,
+        });
+
+        const lateSettled = owner.observeWebHostFacts({
+            contentHeight: 11_548,
+            distanceFromBottom: 8,
+            layoutHeight: 334,
+            nowMs: 1100,
+            resolveAnchorObservation: () => null,
+            sessionId: 'session-a',
+            tolerancePx: 72,
+            wantsPinned: true,
+        });
+
+        expect(executeEffects(lateSettled)).toEqual([]);
+        expect(lateSettled).toEqual([
+            {
+                reason: 'mount-settle',
+                sessionId: 'session-a',
+                type: 'request-bottom-follow-write',
+                writer: 'settle-reconfirm',
+            },
+        ]);
     });
 });

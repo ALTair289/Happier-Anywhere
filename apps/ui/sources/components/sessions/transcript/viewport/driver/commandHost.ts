@@ -8,7 +8,7 @@ import type {
     WebTranscriptPrependRestoreResult,
     WebTranscriptViewportAnchor,
     WebTranscriptViewportAnchorRestoreResult,
-} from '@/components/sessions/transcript/webTranscriptPrependAnchor';
+} from '@/components/sessions/transcript/viewport/prepend/webTranscriptPrependAnchor';
 import {
     performWebDomPrependAnchorRestoreCommand,
     performWebDomVisibleAnchorRestoreCommand,

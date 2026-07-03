@@ -47,16 +47,6 @@ import {
     type ContentGrowthLiveTailCommandApplyEffect,
 } from './contentGrowthLiveTailCommand';
 import {
-    planContentGrowthLiveTailPinSchedule as planContentGrowthLiveTailPinSchedulePolicy,
-    planContentGrowthLiveTailScheduledPinFire as planContentGrowthLiveTailScheduledPinFirePolicy,
-    type ContentGrowthLiveTailPinScheduleDecision,
-    type ContentGrowthLiveTailPinScheduleInput,
-    type ContentGrowthLiveTailScheduledPin,
-    type ContentGrowthLiveTailScheduledPinFireDecision,
-    type ContentGrowthLiveTailScheduledPinFireEffect,
-    type ContentGrowthLiveTailScheduledPinFireInput,
-} from './contentGrowthLiveTailScheduler';
-import {
     resolveExplicitJumpTakeoverApplyEffects,
     type ExplicitJumpTakeoverApplyEffect,
 } from './explicitJumpTakeover';
@@ -455,24 +445,6 @@ export type TranscriptLifecycleHostContentGrowthLiveTailCommandPlan = LifecycleH
     contentGrowthLiveTailCommandEffect: ContentGrowthLiveTailCommandApplyEffect | null;
 }>;
 
-export type TranscriptLifecycleHostContentGrowthLiveTailScheduledPin<PreviousWebMetrics = unknown> =
-    ContentGrowthLiveTailScheduledPin<PreviousWebMetrics>;
-
-export type TranscriptLifecycleHostContentGrowthLiveTailPinScheduleInput<PreviousWebMetrics = unknown> =
-    ContentGrowthLiveTailPinScheduleInput<PreviousWebMetrics>;
-
-export type TranscriptLifecycleHostContentGrowthLiveTailPinScheduleDecision<PreviousWebMetrics = unknown> =
-    ContentGrowthLiveTailPinScheduleDecision<PreviousWebMetrics>;
-
-export type TranscriptLifecycleHostContentGrowthLiveTailScheduledPinFireInput<PreviousWebMetrics = unknown> =
-    ContentGrowthLiveTailScheduledPinFireInput<PreviousWebMetrics>;
-
-export type TranscriptLifecycleHostContentGrowthLiveTailScheduledPinFireEffect<PreviousWebMetrics = unknown> =
-    ContentGrowthLiveTailScheduledPinFireEffect<PreviousWebMetrics>;
-
-export type TranscriptLifecycleHostContentGrowthLiveTailScheduledPinFireDecision<PreviousWebMetrics = unknown> =
-    ContentGrowthLiveTailScheduledPinFireDecision<PreviousWebMetrics>;
-
 export type TranscriptLifecycleHostExplicitReturnPlan = LifecycleHostPlanBase & Readonly<{
     viewportEffects: readonly ExplicitReturnToLiveTailViewportEffect[];
 }>;
@@ -613,12 +585,6 @@ export type TranscriptLifecycleHost = Readonly<{
     planContentGrowthLiveTailCommand(
         input: TranscriptLifecycleHostContentGrowthLiveTailCommandInput,
     ): TranscriptLifecycleHostContentGrowthLiveTailCommandPlan;
-    planContentGrowthLiveTailPinSchedule<PreviousWebMetrics = unknown>(
-        input: TranscriptLifecycleHostContentGrowthLiveTailPinScheduleInput<PreviousWebMetrics>,
-    ): TranscriptLifecycleHostContentGrowthLiveTailPinScheduleDecision<PreviousWebMetrics>;
-    planContentGrowthLiveTailScheduledPinFire<PreviousWebMetrics = unknown>(
-        input: TranscriptLifecycleHostContentGrowthLiveTailScheduledPinFireInput<PreviousWebMetrics>,
-    ): TranscriptLifecycleHostContentGrowthLiveTailScheduledPinFireDecision<PreviousWebMetrics>;
     planExplicitJumpTakeover(input: Readonly<{
         reason: TranscriptViewportExplicitJumpTakeoverReason;
         sessionId: string;
@@ -908,12 +874,6 @@ export function createTranscriptLifecycleHost(options: Readonly<{
                     sessionId: input.sessionId,
                 }),
             };
-        },
-        planContentGrowthLiveTailPinSchedule(input) {
-            return planContentGrowthLiveTailPinSchedulePolicy(input);
-        },
-        planContentGrowthLiveTailScheduledPinFire(input) {
-            return planContentGrowthLiveTailScheduledPinFirePolicy(input);
         },
         planNativeOffsetEscapeRelease,
         planExplicitJumpTakeover(input) {

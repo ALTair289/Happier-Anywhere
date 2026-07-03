@@ -291,6 +291,8 @@ export function createTranscriptViewportController(): TranscriptViewportControll
             mode,
             previousDistanceFromLiveTailPx,
             ...(typeof input.animated === 'boolean' ? { animated: input.animated } : {}),
+            ...(input.schedulerAuthorityReason ? { schedulerAuthorityReason: input.schedulerAuthorityReason } : {}),
+            ...(input.schedulerAuthorityWriter ? { schedulerAuthorityWriter: input.schedulerAuthorityWriter } : {}),
         };
     }
 }

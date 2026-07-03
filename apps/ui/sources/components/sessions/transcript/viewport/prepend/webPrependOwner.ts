@@ -1,7 +1,7 @@
 import type {
     TranscriptViewportTelemetryObservationReason,
 } from '@/components/sessions/transcript/scroll/transcriptViewportTelemetry';
-import type { WebTranscriptPrependAnchor } from '@/components/sessions/transcript/webTranscriptPrependAnchor';
+import type { WebTranscriptPrependAnchor } from '@/components/sessions/transcript/viewport/prepend/webTranscriptPrependAnchor';
 import { resolvePendingWebPrependAnchorIndex } from '@/components/sessions/transcript/webTranscriptPrependAnchorIndex';
 import { resolveWebTranscriptPrependRangeReservePx } from '@/components/sessions/transcript/webTranscriptPrependRangeReserve';
 import type { WebTranscriptScrollMetrics } from '@/components/sessions/transcript/webTranscriptScrollMetrics';

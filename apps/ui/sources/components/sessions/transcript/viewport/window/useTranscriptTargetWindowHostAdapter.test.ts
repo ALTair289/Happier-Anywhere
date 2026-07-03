@@ -123,6 +123,43 @@ describe('transcript target-window host adapter', () => {
         expect(onJumpLanded).not.toHaveBeenCalled();
     });
 
+    it('revalidates DOM mount presence after a moving web scroll even when the rendered-window item space still claims the target', async () => {
+        const loadTargetWindow = vi.fn(async () => ({ windowId: 'window-331' }));
+        const onJumpLanded = vi.fn();
+        const isTargetInRenderedWindow = vi.fn(() => true);
+        const isTargetMounted = vi.fn(() => false);
+
+        const result = await executeTranscriptTargetWindowJump({
+            canRenderTargetWindow: true,
+            isTargetInRenderedWindow,
+            isTargetMounted,
+            loadTargetWindow,
+            onJumpLanded,
+            platformOS: 'web',
+            readScrollTop: vi.fn()
+                .mockReturnValueOnce(11_224)
+                .mockReturnValueOnce(10_952),
+            resolveTargetIndex: () => ({ status: 'found', index: 29, seq: 331, routeMessageId: 'server:m331' }),
+            scrollToTarget: vi.fn(() => true),
+            target: { kind: 'seq', seq: 331 },
+            targetSeq: 331,
+        });
+
+        expect(result).toEqual({
+            status: 'window-rendered',
+            target: { kind: 'seq', seq: 331 },
+            windowId: 'window-331',
+        });
+        expect(isTargetInRenderedWindow).toHaveBeenCalled();
+        expect(isTargetMounted).toHaveBeenCalled();
+        expect(loadTargetWindow).toHaveBeenCalledWith({
+            direction: null,
+            target: { kind: 'seq', seq: 331 },
+            targetSeq: 331,
+        });
+        expect(onJumpLanded).not.toHaveBeenCalled();
+    });
+
     it('does not issue an ad-hoc newer page after target-window activation', async () => {
         const loadTargetWindow = vi.fn(async (request: { direction: 'older' | 'newer' | null }) => (
             request.direction === 'newer'
@@ -138,7 +175,7 @@ describe('transcript target-window host adapter', () => {
             platformOS: 'web',
             readScrollTop: () => null,
             resolveTargetIndex: () => ({ status: 'not-found', reason: 'unavailable' }),
-            scrollToTarget: vi.fn(() => false),
+            scrollToTarget: vi.fn(() => true),
             target: { kind: 'seq', seq: 253 },
             targetSeq: 253,
         });
@@ -164,7 +201,7 @@ describe('transcript target-window host adapter', () => {
             platformOS: 'web',
             readScrollTop: () => null,
             resolveTargetIndex: () => ({ status: 'not-found', reason: 'unavailable' }),
-            scrollToTarget: vi.fn(() => false),
+            scrollToTarget: vi.fn(() => true),
             target: { kind: 'seq', seq: 500 },
             targetSeq: 500,
         });
@@ -176,6 +213,7 @@ describe('transcript target-window host adapter', () => {
         const onJumpLanded = vi.fn();
         const isTargetMounted = vi.fn()
             .mockReturnValueOnce(false)
+            .mockReturnValueOnce(true)
             .mockReturnValueOnce(true);
 
         const result = await executeTranscriptTargetWindowJump({
@@ -186,7 +224,7 @@ describe('transcript target-window host adapter', () => {
             platformOS: 'web',
             readScrollTop: () => null,
             resolveTargetIndex: () => ({ status: 'not-found', reason: 'unavailable' }),
-            scrollToTarget: vi.fn(() => false),
+            scrollToTarget: vi.fn(() => true),
             target: { kind: 'seq', seq: 500 },
             targetSeq: 500,
         });
@@ -198,6 +236,105 @@ describe('transcript target-window host adapter', () => {
         });
         expect(onJumpLanded).toHaveBeenCalledTimes(1);
         expect(onJumpLanded).toHaveBeenCalledWith(result);
+    });
+
+    it('lands the web viewport on the target after a scroll-mounted fallback materialization', async () => {
+        // RG1 in-app class: strategy resolves scroll-mounted (item-space found), the write-time
+        // mounted gate refutes it, the fallback materializes a target window — the landing must
+        // then scroll onto the mounted target instead of leaving the viewport parked wrong-space.
+        const onJumpLanded = vi.fn();
+        const isTargetMounted = vi.fn(() => true).mockReturnValueOnce(false);
+        const scrollToTarget = vi.fn(() => true);
+        const loadTargetWindow = vi.fn(async () => ({ windowId: 'window-331' }));
+
+        const result = await executeTranscriptTargetWindowJump({
+            canRenderTargetWindow: true,
+            isTargetInRenderedWindow: () => true,
+            isTargetMounted,
+            loadTargetWindow,
+            onJumpLanded,
+            platformOS: 'web',
+            readScrollTop: () => 100,
+            resolveTargetIndex: () => ({ status: 'found', index: 29, seq: 331, routeMessageId: 'server:m331' }),
+            scrollToTarget,
+            target: { kind: 'seq', seq: 331 },
+            targetSeq: 331,
+            waitForNextLandingFrame: () => Promise.resolve(),
+        });
+
+        expect(result).toEqual({
+            status: 'window-rendered',
+            target: { kind: 'seq', seq: 331 },
+            windowId: 'window-331',
+        });
+        expect(scrollToTarget.mock.calls.length).toBeGreaterThanOrEqual(2);
+        expect(onJumpLanded).toHaveBeenCalledTimes(1);
+        expect(onJumpLanded).toHaveBeenCalledWith(result);
+    });
+
+    it('re-runs the exact landing write until the mounted target stops moving under late measurements', async () => {
+        // RG1 cold class: the first landing write resolves against estimated row layouts; late
+        // measurements shift content and leave the target 10-30 rows below the viewport. The
+        // landing loop must settle-correct against the live layout until stable.
+        const onJumpLanded = vi.fn();
+        const scrollToTarget = vi.fn(() => true);
+        const readScrollTop = vi.fn()
+            .mockReturnValueOnce(0) // metrics availability probe
+            .mockReturnValueOnce(0) // frame 1 pre-write
+            .mockReturnValueOnce(500) // frame 1 post-write (moved)
+            .mockReturnValueOnce(500) // frame 2 pre-write
+            .mockReturnValueOnce(520) // frame 2 post-write (late measurement shifted layout)
+            .mockReturnValueOnce(520) // frame 3 pre-write
+            .mockReturnValueOnce(520) // frame 3 post-write (stable x1)
+            .mockReturnValueOnce(520) // frame 4 pre-write
+            .mockReturnValueOnce(520); // frame 4 post-write (stable x2 -> settled)
+
+        const result = await executeTranscriptTargetWindowJump({
+            canRenderTargetWindow: true,
+            isTargetInRenderedWindow: () => true,
+            isTargetMounted: () => true,
+            loadTargetWindow: async () => ({ windowId: 'window-301' }),
+            onJumpLanded,
+            platformOS: 'web',
+            readScrollTop,
+            resolveTargetIndex: () => ({ status: 'not-found', reason: 'unavailable' }),
+            scrollToTarget,
+            target: { kind: 'seq', seq: 301 },
+            targetSeq: 301,
+            waitForNextLandingFrame: () => Promise.resolve(),
+        });
+
+        expect(result.status).toBe('window-rendered');
+        expect(scrollToTarget.mock.calls.length).toBeGreaterThanOrEqual(3);
+        expect(onJumpLanded).toHaveBeenCalledTimes(1);
+    });
+
+    it('stops landing corrections when a foreign writer moves the viewport', async () => {
+        const onJumpLanded = vi.fn();
+        const scrollToTarget = vi.fn(() => true);
+        const readScrollTop = vi.fn()
+            .mockReturnValueOnce(0) // metrics availability probe
+            .mockReturnValueOnce(0) // frame 1 pre-write
+            .mockReturnValueOnce(500) // frame 1 post-write
+            .mockReturnValue(900); // frame 2 pre-write: viewport moved by someone else
+
+        await executeTranscriptTargetWindowJump({
+            canRenderTargetWindow: true,
+            isTargetInRenderedWindow: () => true,
+            isTargetMounted: () => true,
+            loadTargetWindow: async () => ({ windowId: 'window-301' }),
+            onJumpLanded,
+            platformOS: 'web',
+            readScrollTop,
+            resolveTargetIndex: () => ({ status: 'not-found', reason: 'unavailable' }),
+            scrollToTarget,
+            target: { kind: 'seq', seq: 301 },
+            targetSeq: 301,
+            waitForNextLandingFrame: () => Promise.resolve(),
+        });
+
+        expect(scrollToTarget).toHaveBeenCalledTimes(1);
+        expect(onJumpLanded).toHaveBeenCalledTimes(1);
     });
 
     it('pages nearby unresolved targets before replacing the list with a target window', async () => {

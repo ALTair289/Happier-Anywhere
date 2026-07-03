@@ -11,13 +11,14 @@ type TestWebMetrics = Readonly<{
 }>;
 
 function initialState(
-    overrides: Partial<BottomFollowWriteSchedulerState<TestWebMetrics>> = {},
+    overrides: Partial<BottomFollowWriteSchedulerState<TestWebMetrics> & { explicitJumpActive: boolean }> = {},
 ): BottomFollowWriteSchedulerState<TestWebMetrics> {
     return {
+        explicitJumpActive: false,
         gestureActive: false,
         pending: null,
         ...overrides,
-    };
+    } as BottomFollowWriteSchedulerState<TestWebMetrics>;
 }
 
 function scheduledWrite(
@@ -43,6 +44,7 @@ describe('bottom-follow write scheduler', () => {
         expect(suspended).toEqual({
             effects: [],
             state: {
+                explicitJumpActive: false,
                 gestureActive: true,
                 pending: null,
             },
@@ -71,6 +73,7 @@ describe('bottom-follow write scheduler', () => {
                 },
             ],
             state: {
+                explicitJumpActive: false,
                 gestureActive: true,
                 pending: scheduledWrite({
                     previousWebMetrics: { scrollTop: 120 },
@@ -91,6 +94,7 @@ describe('bottom-follow write scheduler', () => {
                 },
             ],
             state: {
+                explicitJumpActive: false,
                 gestureActive: false,
                 pending: scheduledWrite({
                     previousWebMetrics: { scrollTop: 120 },
@@ -156,6 +160,7 @@ describe('bottom-follow write scheduler', () => {
                 },
             ],
             state: {
+                explicitJumpActive: false,
                 gestureActive: false,
                 pending: scheduledWrite({
                     previousWebMetrics: { scrollTop: 240 },
@@ -190,6 +195,7 @@ describe('bottom-follow write scheduler', () => {
                 },
             ],
             state: {
+                explicitJumpActive: false,
                 gestureActive: false,
                 pending: null,
             },
@@ -205,6 +211,8 @@ describe('bottom-follow write scheduler', () => {
             effects: [
                 {
                     reason: 'passive-drift',
+                    schedulerAuthorityReason: 'passive-drift',
+                    schedulerAuthorityWriter: 'web-passive-correction',
                     type: 'authorize-write',
                     writer: 'web-passive-correction',
                 },
@@ -224,6 +232,50 @@ describe('bottom-follow write scheduler', () => {
             effects: [
                 {
                     reason: 'gesture-active',
+                    type: 'drop-write',
+                },
+            ],
+            state,
+        });
+    });
+
+    it('defers a pending write when a gesture becomes active before the timer fires', () => {
+        const write = scheduledWrite({
+            previousWebMetrics: { scrollTop: 120 },
+        });
+        const state = initialState({
+            gestureActive: true,
+            pending: write,
+        });
+
+        expect(planBottomFollowWriteSchedulerEvent(state, {
+            observedRawOffsetY: 12,
+            type: 'fire-pending',
+            usesNativeFlashListBottomMaintenance: false,
+            waitMs: 0,
+        })).toEqual({
+            effects: [
+                {
+                    reason: 'gesture-active',
+                    type: 'defer-write',
+                    write,
+                },
+            ],
+            state,
+        });
+    });
+
+    it('drops passive drift authorization while an explicit jump is in flight', () => {
+        const state = initialState({ explicitJumpActive: true });
+
+        expect(planBottomFollowWriteSchedulerEvent(state, {
+            reason: 'passive-drift',
+            type: 'authorize-immediate-write',
+            writer: 'web-passive-correction',
+        })).toEqual({
+            effects: [
+                {
+                    reason: 'explicit-jump-active',
                     type: 'drop-write',
                 },
             ],

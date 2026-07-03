@@ -6,6 +6,7 @@ import type {
     TranscriptViewportAnchorIdentity,
     TranscriptViewportControllerInput,
     TranscriptViewportMode,
+    TranscriptViewportScrollReason,
 } from '../transcriptViewportTypes';
 import type { TranscriptViewportTransactionOutcome } from '../transcriptViewportOwnership';
 import { nativeEntryRestoreObservationMatches } from '../nativeEntryRestoreObservationPolicy';
@@ -121,6 +122,12 @@ export type EntryRestoreOwnerEffect =
     }>
     | Readonly<{
         type: 'reveal-entry-slice-window';
+    }>
+    | Readonly<{
+        reason: TranscriptViewportScrollReason;
+        sessionId: string;
+        type: 'request-bottom-follow-write';
+        writer: 'settle-reconfirm';
     }>;
 
 export type EntryRestoreOwnerAttemptInput<TItem> = Readonly<{
@@ -174,6 +181,7 @@ export type EntryRestoreOwnerWebHostFactsInput = Readonly<{
     resolveAnchorObservation(anchor: EntryRestoreOwnerAnchor): EntryRestoreTransactionObservation | null;
     sessionId: string;
     tolerancePx: number;
+    wantsPinned?: boolean;
 }>;
 
 export type EntryRestoreOwnerNativeHostFactsInput = Readonly<{
@@ -438,6 +446,9 @@ export function createEntryRestoreOwner(): EntryRestoreOwner {
 
     function preempt(params: Readonly<{ reason: 'jump' | 'prepend' | 'trusted-scroll'; sessionId: string }>): readonly EntryRestoreOwnerEffect[] {
         void params.reason;
+        if (webBottomSettleConfirmation?.context.sessionId === params.sessionId) {
+            webBottomSettleConfirmation = null;
+        }
         if (transaction && !transaction.isClosed() && transaction.sessionId === params.sessionId) {
             transaction.onTrustedUserScroll();
             return closeEffects(params.sessionId, 'native');
@@ -707,17 +718,15 @@ export function createEntryRestoreOwner(): EntryRestoreOwner {
     ): readonly EntryRestoreOwnerEffect[] {
         const confirmation = webBottomSettleConfirmation;
         if (!confirmation || confirmation.spent || confirmation.context.sessionId !== params.sessionId) return [];
+        if (params.wantsPinned !== true) return [];
         const observation = resolveWebHostObservation(confirmation.context, params);
         if (observation == null || observation.status !== 'misaligned') return [];
         webBottomSettleConfirmation = { ...confirmation, spent: true };
         return [{
-            command: buildDistanceCommand(
-                params.sessionId,
-                0,
-                Math.max(0, Math.trunc(params.contentHeight)),
-                false,
-            ),
-            type: 'execute-command',
+            reason: 'mount-settle',
+            sessionId: params.sessionId,
+            type: 'request-bottom-follow-write',
+            writer: 'settle-reconfirm',
         }];
     }
 

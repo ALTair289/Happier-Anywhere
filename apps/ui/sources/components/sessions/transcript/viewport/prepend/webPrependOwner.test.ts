@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import type { WebTranscriptPrependAnchor } from '@/components/sessions/transcript/webTranscriptPrependAnchor';
+import type { WebTranscriptPrependAnchor } from '@/components/sessions/transcript/viewport/prepend/webTranscriptPrependAnchor';
 import type { WebTranscriptScrollMetrics } from '@/components/sessions/transcript/webTranscriptScrollMetrics';
 import type { TranscriptViewportAnchorIdentity } from '../transcriptViewportTypes';
 import {

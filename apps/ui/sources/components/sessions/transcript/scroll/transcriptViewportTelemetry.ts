@@ -19,6 +19,17 @@ export type TranscriptViewportTelemetryScrollWriter =
     | 'native-explicit-jump'
     | 'mvcp-skip';
 
+export type TranscriptViewportTelemetrySchedulerAuthorityWriter =
+    | TranscriptViewportTelemetryScrollWriter
+    | 'automatic-live-tail'
+    | 'content-growth'
+    | 'deferred-post-scroll'
+    | 'hot-tail-carve'
+    | 'passive-drift'
+    | 'proactive-auto-follow'
+    | 'settle-reconfirm'
+    | 'web-passive-correction';
+
 export type TranscriptViewportTelemetryScrollReason = TranscriptViewportScrollReason;
 
 export type TranscriptViewportTelemetryObservationReason =
@@ -93,6 +104,7 @@ export type TranscriptViewportTelemetryMvcpPolicy =
 export type TranscriptViewportTelemetryVisibleWindowSource =
     | 'ref-compute'
     | 'ref-first-index'
+    | 'native-hot-edge-slot'
     | 'viewability-callback'
     | 'none';
 
@@ -250,7 +262,7 @@ export type TranscriptViewportTelemetryEvent =
         nativeMomentumActive?: boolean;
         mvcpPolicy?: TranscriptViewportTelemetryMvcpPolicy;
         pauseOffsetCorrection?: boolean;
-        schedulerAuthorityWriter?: TranscriptViewportTelemetryScrollWriter;
+        schedulerAuthorityWriter?: TranscriptViewportTelemetrySchedulerAuthorityWriter;
         schedulerAuthorityReason?: TranscriptViewportTelemetryScrollReason;
         isAtRawBottom?: boolean;
         hasVisibleRows?: boolean;
@@ -306,7 +318,7 @@ export type TranscriptViewportTelemetryEvent =
         nativeMomentumActive?: boolean;
         mvcpPolicy?: TranscriptViewportTelemetryMvcpPolicy;
         pauseOffsetCorrection?: boolean;
-        schedulerAuthorityWriter?: TranscriptViewportTelemetryScrollWriter;
+        schedulerAuthorityWriter?: TranscriptViewportTelemetrySchedulerAuthorityWriter;
         schedulerAuthorityReason?: TranscriptViewportTelemetryScrollReason;
         isAtRawBottom?: boolean;
         hasVisibleRows?: boolean;
@@ -466,6 +478,18 @@ const SCROLL_WRITERS = new Set<TranscriptViewportTelemetryScrollWriter>([
     'mvcp-skip',
 ]);
 
+const SCHEDULER_AUTHORITY_WRITERS = new Set<TranscriptViewportTelemetrySchedulerAuthorityWriter>([
+    ...SCROLL_WRITERS,
+    'automatic-live-tail',
+    'content-growth',
+    'deferred-post-scroll',
+    'hot-tail-carve',
+    'passive-drift',
+    'proactive-auto-follow',
+    'settle-reconfirm',
+    'web-passive-correction',
+]);
+
 const SCROLL_REASONS = new Set<TranscriptViewportTelemetryScrollReason>([
     'initial-open',
     'content-size-change',
@@ -568,6 +592,7 @@ const MVCP_POLICIES = new Set<TranscriptViewportTelemetryMvcpPolicy>([
 const VISIBLE_WINDOW_SOURCES = new Set<TranscriptViewportTelemetryVisibleWindowSource>([
     'ref-compute',
     'ref-first-index',
+    'native-hot-edge-slot',
     'viewability-callback',
     'none',
 ]);
@@ -877,7 +902,7 @@ function sanitizeTelemetryEvent(
         const reason = readEnum(source.reason, SCROLL_REASONS);
         if (!writer || !reason) return null;
         const sessionId = redactSessionId(rawSessionId);
-        const schedulerAuthorityWriter = readEnum(source.schedulerAuthorityWriter, SCROLL_WRITERS) ?? writer;
+        const schedulerAuthorityWriter = readEnum(source.schedulerAuthorityWriter, SCHEDULER_AUTHORITY_WRITERS) ?? writer;
         const schedulerAuthorityReason = readEnum(source.schedulerAuthorityReason, SCROLL_REASONS) ?? reason;
         const sharedFields = {
             writer,

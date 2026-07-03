@@ -9244,6 +9244,198 @@ describe('ChatList (FlashList v2)', () => {
         });
     });
 
+    it('packages scheduler authority fields on web bottom-follow telemetry snapshots', async () => {
+        await withWebFlashListFakeTimers(0, async () => {
+            const telemetryMod = await import('./scroll/transcriptViewportTelemetry');
+            const telemetrySink = vi.fn();
+            telemetryMod.transcriptViewportTelemetry.configure({
+                enabled: true,
+                capacity: 64,
+                sink: telemetrySink,
+            });
+            syncTuningState = {
+                ...syncTuningState,
+                transcriptViewportTelemetryEnabled: true,
+                transcriptViewportTelemetryMaxEvents: 64,
+            };
+            flashListRefHandle = { scrollToOffset: vi.fn(), scrollToIndex: vi.fn() };
+            sessionMessagesState = {
+                isLoaded: true,
+                messages: [{ kind: 'user-text', id: 'u1', localId: null, createdAt: 1, text: 'hi' }],
+            };
+
+            const scrollEl = createFlashListChatListWebScroller({
+                clientHeight: 600,
+                scrollHeight: 1800,
+                scrollTop: 1200,
+            });
+
+            await withFlashListChatListWebScrollerDom(
+                scrollEl,
+                async () => {
+                    const { ChatList } = await import('./ChatList');
+                    await renderTrackedFlashListChatList(<ChatList session={{ ...sessionState }} />);
+                    await primeFlashListMetrics(600, 600, { turns: 1 });
+                    telemetrySink.mockClear();
+
+                    scrollEl.scrollHeight = 2200;
+                    await triggerFlashListChatListContentSizeChange(400, 700, { turns: 2, frames: 1 });
+
+                    const bottomWrite = telemetrySink.mock.calls
+                        .map(([event]) => event)
+                        .find((event) => event?.type === 'scroll-write' && event.reason === 'content-size-change');
+                    expect(bottomWrite).toMatchObject({
+                        writer: 'web-dom-bottom',
+                        schedulerAuthorityWriter: 'content-growth',
+                        schedulerAuthorityReason: 'content-size-change',
+                    });
+                },
+                {
+                    document: { getElementById: vi.fn(() => scrollEl) },
+                    window: { getComputedStyle: vi.fn(() => ({ overflowY: 'auto' })) },
+                },
+            );
+        });
+    });
+
+    it('reconfirms a web bottom entry restore after late content height settle through the scheduler', async () => {
+        await withWebFlashListFakeTimers(0, async () => {
+            flashListRefHandle = { scrollToOffset: vi.fn(), scrollToIndex: vi.fn() };
+            sessionMessagesState = {
+                isLoaded: true,
+                messages: [{ kind: 'user-text', id: 'u1', localId: null, createdAt: 1, text: 'hi' }],
+            };
+            sessionViewportByIdState.set('session-1', {
+                anchor: null,
+                isPinned: true,
+                lastUpdatedAt: 1,
+                offsetY: 0,
+                source: 'observed',
+            });
+
+            const initialContentHeight = 11_548;
+            const settledContentHeight = 11_556;
+            const clientHeight = 334;
+            const initialBottom = initialContentHeight - clientHeight;
+            const settledBottom = settledContentHeight - clientHeight;
+            const scrollEl = createFlashListChatListWebScroller({
+                clientHeight,
+                scrollHeight: initialContentHeight,
+                scrollTop: initialBottom,
+            });
+
+            await withFlashListChatListWebScrollerDom(
+                scrollEl,
+                async () => {
+                    const { ChatList } = await import('./ChatList');
+                    const screen = await renderTrackedFlashListChatList(<ChatList session={{ ...sessionState }} />);
+                    await primeFlashListMetrics(clientHeight, initialContentHeight, { turns: 2 });
+                    await screen.settle({ cycles: 1, turns: 2, advanceTimersMs: 50 });
+                    expect(scrollEl.scrollTop).toBe(initialBottom);
+
+                    scrollEl.scrollHeight = settledContentHeight;
+                    scrollEl.scrollTop = initialBottom;
+                    await scrollFlashListTo(initialBottom, { trusted: false, turns: 2 });
+                    await screen.settle({ cycles: 1, turns: 2, advanceTimersMs: 50 });
+
+                    expect(scrollEl.scrollTop).toBe(settledBottom);
+                },
+                {
+                    document: { getElementById: vi.fn(() => scrollEl) },
+                    window: { getComputedStyle: vi.fn(() => ({ overflowY: 'auto' })) },
+                },
+            );
+        });
+    });
+
+    it('routes web bottom entry restore settle-reconfirm effects through the bottom-follow scheduler', async () => {
+        await withWebFlashListFakeTimers(0, async () => {
+            const schedulerEvents: any[] = [];
+            let observeWebHostFactsCalls = 0;
+            vi.doMock('@/components/sessions/transcript/viewport/bottomFollow/writeScheduler', async () => {
+                const actual: any = await vi.importActual('@/components/sessions/transcript/viewport/bottomFollow/writeScheduler');
+                return {
+                    ...actual,
+                    planBottomFollowWriteSchedulerEvent: (state: unknown, event: any) => {
+                        schedulerEvents.push(event);
+                        return actual.planBottomFollowWriteSchedulerEvent(state, event);
+                    },
+                };
+            });
+            vi.doMock('@/components/sessions/transcript/viewport/entryRestore/entryRestoreOwner', async () => {
+                const actual: any = await vi.importActual('@/components/sessions/transcript/viewport/entryRestore/entryRestoreOwner');
+                return {
+                    ...actual,
+                    createEntryRestoreOwner: () => {
+                        const owner = actual.createEntryRestoreOwner();
+                        return {
+                            ...owner,
+                            observeWebHostFacts: (params: { sessionId: string }) => {
+                                observeWebHostFactsCalls += 1;
+                                if (observeWebHostFactsCalls < 2) return [];
+                                return [{
+                                    reason: 'mount-settle',
+                                    sessionId: params.sessionId,
+                                    type: 'request-bottom-follow-write',
+                                    writer: 'settle-reconfirm',
+                                }];
+                            },
+                        };
+                    },
+                };
+            });
+
+            try {
+                flashListRefHandle = { scrollToOffset: vi.fn(), scrollToIndex: vi.fn() };
+                sessionMessagesState = {
+                    isLoaded: true,
+                    messages: [{ kind: 'user-text', id: 'u1', localId: null, createdAt: 1, text: 'hi' }],
+                };
+                sessionViewportByIdState.set('session-1', {
+                    anchor: null,
+                    isPinned: true,
+                    lastUpdatedAt: 1,
+                    offsetY: 0,
+                    source: 'observed',
+                });
+
+                const scrollEl = createFlashListChatListWebScroller({
+                    clientHeight: 334,
+                    scrollHeight: 11_548,
+                    scrollTop: 11_214,
+                });
+
+                await withFlashListChatListWebScrollerDom(
+                    scrollEl,
+                    async () => {
+                        const { ChatList } = await import('./ChatList');
+                        const screen = await renderTrackedFlashListChatList(<ChatList session={{ ...sessionState }} />);
+                        await primeFlashListMetrics(334, 11_548, { turns: 2 });
+                        scrollEl.scrollHeight = 11_556;
+                        scrollEl.scrollTop = 11_214;
+                        await scrollFlashListTo(11_214, { trusted: false, turns: 2 });
+                        await screen.settle({ cycles: 1, turns: 2, advanceTimersMs: 50 });
+                    },
+                    {
+                        document: { getElementById: vi.fn(() => scrollEl) },
+                        window: { getComputedStyle: vi.fn(() => ({ overflowY: 'auto' })) },
+                    },
+                );
+
+                expect(schedulerEvents).toEqual(expect.arrayContaining([
+                    expect.objectContaining({
+                        reason: 'mount-settle',
+                        type: 'request-write',
+                        writer: 'settle-reconfirm',
+                    }),
+                ]));
+            } finally {
+                vi.doUnmock('@/components/sessions/transcript/viewport/bottomFollow/writeScheduler');
+                vi.doUnmock('@/components/sessions/transcript/viewport/entryRestore/entryRestoreOwner');
+            }
+        });
+    });
+
     it('shows the jump-to-bottom affordance on web when unpinned even without new activity', async () => {
         await withWebFlashListFakeTimers(0, async () => {
             flashListRefHandle = { scrollToOffset: vi.fn(), scrollToIndex: vi.fn() };
@@ -9281,6 +9473,68 @@ describe('ChatList (FlashList v2)', () => {
                 },
             );
         });
+    });
+
+    it('shows the jump-to-bottom affordance after a web jumpToSeq lands far from bottom before a DOM anchor is available', async () => {
+        const messages = Array.from({ length: 360 }, (_, index) => {
+            const seq = index + 1;
+            return {
+                kind: 'agent-text' as const,
+                id: `m${seq}`,
+                localId: null,
+                createdAt: seq,
+                seq,
+                text: `message ${seq}`,
+            };
+        });
+        const contentHeight = 30_000;
+        const clientHeight = 500;
+        const targetScrollTop = 3_800;
+        const scroller = createFlashListChatListWebScroller({
+            clientHeight,
+            scrollHeight: contentHeight,
+            scrollTop: contentHeight - clientHeight,
+            testNodes: [],
+        });
+        flashListRefHandle = {
+            scrollToIndex: vi.fn(),
+            scrollToOffset: vi.fn(),
+            getLayout: vi.fn((index: number) => (
+                index === 300
+                    ? { x: 0, y: targetScrollTop + 200, width: 320, height: 100 }
+                    : undefined
+            )),
+        };
+        sessionMessagesState = {
+            isLoaded: true,
+            messages,
+        };
+        sessionState = { ...sessionState, seq: 360 };
+        settingValues.transcriptScrollJumpToBottomEnabled = true;
+        settingValues.transcriptScrollJumpToBottomMinNewCount = 1;
+        syncTuningState = {
+            ...syncTuningState,
+            transcriptWebHotTailItemCount: 2,
+        };
+
+        await withFlashListChatListWebScrollerDom(
+            scroller,
+            async () => {
+                const { ChatList } = await import('./ChatList');
+                const screen = await renderTrackedFlashListChatList(
+                    <ChatList session={{ ...sessionState }} jumpToSeq={301} />,
+                );
+                await primeFlashListMetrics(clientHeight, contentHeight, { turns: 2 });
+                await screen.settle({ turns: 4 });
+
+                expect(scroller.scrollTop).toBe(targetScrollTop);
+                expect(screen.findAllByTestId('transcript-jump-to-bottom').length).toBeGreaterThan(0);
+            },
+            {
+                document: { getElementById: vi.fn(() => scroller) },
+                window: { getComputedStyle: vi.fn(() => ({ overflowY: 'auto' })) },
+            },
+        );
     });
 
     it('restores a materialized session-switch anchor after tail growth while away', async () => {
@@ -13533,14 +13787,14 @@ describe('ChatList (FlashList v2)', () => {
                 expect(renderedIds).not.toContain('m437');
                 const targetIndex = renderedIds.indexOf('m331');
                 expect(targetIndex).toBeGreaterThanOrEqual(0);
-                expect(viewportControllerMockState.resolveInputs).not.toEqual(expect.arrayContaining([
+                expect(viewportControllerMockState.resolveInputs).toEqual(expect.arrayContaining([
                     expect.objectContaining({
                         type: 'jump-to-seq',
                         sessionId: 'session-1',
                         seq: 331,
                     }),
                 ]));
-                expect(scroller.scrollTop).toBe(11600);
+                expect(scroller.scrollTop).toBe(450);
             },
             {
                 HTMLElement: FlashListChatListWebElement,
@@ -13743,8 +13997,11 @@ describe('ChatList (FlashList v2)', () => {
                     await Promise.resolve();
                 });
 
-                expect(landing).toEqual({ status: 'scrolled', target: { kind: 'seq', seq: 331 } });
-                expect(flashListRefHandle.getLayout).toHaveBeenCalledWith(targetIndex);
+                expect(landing).toEqual({
+                    status: 'window-rendered',
+                    target: { kind: 'seq', seq: 331 },
+                    windowId: 'target:session-1:331',
+                });
                 expect(scroller.scrollTop).toBe(450);
             },
             {
@@ -13936,7 +14193,7 @@ describe('ChatList (FlashList v2)', () => {
                 );
 
                 expect(result).toEqual({ status: 'not-found', reason: 'unavailable' });
-                expect(flashListRefHandle.getLayout).toHaveBeenCalledWith(17);
+                expect(flashListRefHandle.getLayout).not.toHaveBeenCalled();
                 expect(scroller.scrollTop).toBe(1600);
             },
             {
@@ -14202,7 +14459,11 @@ describe('ChatList (FlashList v2)', () => {
                     .map((item: any) => item.id);
                 const targetIndex = renderedIds.indexOf('m331');
                 expect(targetIndex).toBeGreaterThanOrEqual(0);
-                expect(flashListRefHandle.getLayout).toHaveBeenCalledWith(targetIndex);
+                expect(loadTargetWindowMessagesMock).toHaveBeenCalledWith(
+                    'session-1',
+                    { kind: 'seq', seq: 331 },
+                    { direction: 'initial' },
+                );
                 expect(loadOlderMessagesMock).not.toHaveBeenCalled();
                 expect(viewportControllerMockState.resolveInputs).toEqual(expect.arrayContaining([
                     expect.objectContaining({
@@ -14571,6 +14832,7 @@ describe('ChatList (FlashList v2)', () => {
                 await primeFlashListMetrics(clientHeight, contentHeight, { turns: 2, frames: 1 });
                 await screen.settle({ turns: 4 });
 
+                expect(scroller.scrollTop).toBe(targetScrollTop);
                 expect(viewportControllerMockState.resolveInputs).toEqual(expect.arrayContaining([
                     expect.objectContaining({
                         anchor: expect.objectContaining({

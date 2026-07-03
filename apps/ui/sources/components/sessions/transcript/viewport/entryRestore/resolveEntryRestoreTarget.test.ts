@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { resolveTranscriptViewportAnchorIndex } from '@/components/sessions/transcript/transcriptViewportAnchorResolution';
+import { resolveTranscriptViewportAnchorIndex } from '@/components/sessions/transcript/viewport/entryRestore/transcriptViewportAnchorResolution';
 import type { EntryRestoreTransactionTarget } from './entryRestoreTransaction';
 import {
     resolveEntryRestoreTarget,
