@@ -1,0 +1,16 @@
+diff --git a/node_modules/react-native/React/Fabric/Mounting/ComponentViews/ScrollView/RCTScrollViewComponentView.mm b/node_modules/react-native/React/Fabric/Mounting/ComponentViews/ScrollView/RCTScrollViewComponentView.mm
+index 1494fd2..5be9070 100644
+--- a/node_modules/react-native/React/Fabric/Mounting/ComponentViews/ScrollView/RCTScrollViewComponentView.mm
++++ b/node_modules/react-native/React/Fabric/Mounting/ComponentViews/ScrollView/RCTScrollViewComponentView.mm
+@@ -976,6 +976,11 @@ - (void)_prepareForMaintainVisibleScrollPosition
+ {
+   const auto &props = static_cast<const ScrollViewProps &>(*_props);
+   if (!props.maintainVisibleContentPosition) {
++    // HAPPIER PATCH(react-native-mvcp-null-prop-clear): RN Fabric prepares with old props and
++    // adjusts with new props in the same mounting transaction. Clear stale anchor state while
++    // MVCP is disabled so a later re-enable cannot adjust against a recycled ScrollAnchor view.
++    _prevFirstVisibleFrame = CGRectZero;
++    _firstVisibleView = nil;
+     return;
+   }
+ 
