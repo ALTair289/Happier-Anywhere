@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const CHAT_LIST_SOURCE = readFileSync(new URL('../../ChatList.tsx', import.meta.url), 'utf8');
+const ENTRY_HOST_SOURCE = readFileSync(new URL('../entryRestore/host/useTranscriptEntryHost.ts', import.meta.url), 'utf8');
 
 describe('session-open latch source boundary', () => {
     it('keeps session-open one-shot guards inside the latch instead of ChatList effects', () => {
@@ -29,7 +30,7 @@ describe('session-open latch source boundary', () => {
 
     it('keeps session-entry resets on latch arm/dispose plans instead of a second effect-time owner', () => {
         expect(CHAT_LIST_SOURCE).not.toContain('applyEffectTimeSessionReset');
-        expect(CHAT_LIST_SOURCE).toContain("case 'apply-arm-reset-plan'");
-        expect(CHAT_LIST_SOURCE).toContain("case 'apply-dispose-reset-plan'");
+        expect(ENTRY_HOST_SOURCE).toContain("case 'apply-arm-reset-plan'");
+        expect(ENTRY_HOST_SOURCE).toContain("case 'apply-dispose-reset-plan'");
     });
 });

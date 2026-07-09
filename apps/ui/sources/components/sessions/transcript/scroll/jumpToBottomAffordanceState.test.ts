@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { resolveJumpToBottomAffordanceState } from './jumpToBottomAffordanceState';
+import { reduceTranscriptScrollPinState, type TranscriptScrollPinState } from './transcriptBottomFollowMode';
 
 describe('resolveJumpToBottomAffordanceState', () => {
     it('stays hidden while pinned or disabled', () => {
@@ -91,6 +92,55 @@ describe('resolveJumpToBottomAffordanceState', () => {
         })).toEqual({
             count: 0,
             isVisible: true,
+            presentation: 'standard',
+        });
+    });
+
+    it('follows the renderer at-end watermark for detach, unseen-count, and reset transitions', () => {
+        const initial: TranscriptScrollPinState = {
+            isPinned: true,
+            lastActivityKey: null,
+            newActivityCount: 0,
+        };
+        const detached = reduceTranscriptScrollPinState(initial, {
+            type: 'rendererAtEnd',
+            enabled: true,
+            isAtEnd: false,
+        });
+        const withUnseen = reduceTranscriptScrollPinState(detached, {
+            type: 'newActivity',
+            enabled: true,
+            activityKey: 'm1',
+        });
+
+        expect(resolveJumpToBottomAffordanceState({
+            distanceFromBottom: 300,
+            enabled: true,
+            isPinned: withUnseen.isPinned,
+            minNewActivityCount: 1,
+            newActivityCount: withUnseen.newActivityCount,
+            revealThresholdPx: 600,
+        })).toEqual({
+            count: 1,
+            isVisible: true,
+            presentation: 'activity',
+        });
+
+        const reachedTail = reduceTranscriptScrollPinState(withUnseen, {
+            type: 'rendererAtEnd',
+            enabled: true,
+            isAtEnd: true,
+        });
+        expect(resolveJumpToBottomAffordanceState({
+            distanceFromBottom: 0,
+            enabled: true,
+            isPinned: reachedTail.isPinned,
+            minNewActivityCount: 1,
+            newActivityCount: reachedTail.newActivityCount,
+            revealThresholdPx: 600,
+        })).toEqual({
+            count: 0,
+            isVisible: false,
             presentation: 'standard',
         });
     });

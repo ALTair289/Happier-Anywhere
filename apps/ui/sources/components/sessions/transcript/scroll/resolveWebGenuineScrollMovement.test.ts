@@ -5,6 +5,8 @@ import { resolveWebGenuineScrollMovement } from './resolveWebGenuineScrollMoveme
 const BASE = {
     scrollHeight: 10000,
     previousObservedScrollHeight: 10000,
+    clientHeight: 800,
+    previousObservedClientHeight: 800,
     previousStreak: null,
     pinThresholdPx: 72,
     sustainFrames: 2,
@@ -63,17 +65,65 @@ describe('resolveWebGenuineScrollMovement — web release authority (C3b / Q1-WE
         expect(r.isGenuineUserMovement).toBe(false);
     });
 
-    it('a genuine scrollbar/keyboard scroll BEYOND the threshold is genuine upward intent (releases)', () => {
-        const r = resolveWebGenuineScrollMovement({
+    it('a single UNTRUSTED far jump beyond the threshold is NOT single-frame release authority (Legend/inset writers can produce it)', () => {
+        // Landing beyond the pin threshold is NOT user evidence by itself: a renderer-internal
+        // adjustment (Legend MVCP/alignItemsAtEnd) or a composer-inset compensation can move
+        // scrollTop arbitrarily far in ONE untrusted frame. Only movement evidence releases:
+        // trusted eager, or a sustained same-direction streak (a real scrollbar/keyboard scroll
+        // emits a continuous stream of frames, so genuine gestures still release immediately).
+        const single = resolveWebGenuineScrollMovement({
             ...BASE,
             scrollTop: 7000, // moved up from 9500 to 7000 (toward older)
             previousObservedScrollTop: 9500,
             distanceFromBottom: 600, // beyond the 72px threshold
         });
-        expect(r.movedSinceLastObservation).toBe(true);
-        expect(r.direction).toBe(-1);
-        expect(r.upwardIntent).toBe(true);
-        expect(r.isGenuineUserMovement).toBe(true);
+        expect(single.movedSinceLastObservation).toBe(true);
+        expect(single.direction).toBe(-1);
+        expect(single.upwardIntent).toBe(false);
+        expect(single.isGenuineUserMovement).toBe(false);
+        expect(single.nextStreak).toEqual({ direction: -1, count: 1 });
+        const sustained = resolveWebGenuineScrollMovement({
+            ...BASE,
+            scrollTop: 6800,
+            previousObservedScrollTop: 7000,
+            distanceFromBottom: 800,
+            previousStreak: { direction: -1, count: 1 },
+        });
+        expect(sustained.upwardIntent).toBe(true);
+        expect(sustained.isGenuineUserMovement).toBe(true);
+    });
+
+    it('a viewport-height (clientHeight) change frame is layout churn: no eager release and the streak resets (composer-resize compensation)', () => {
+        // R3 root cause (live-captured 2026-07-08): growing the composer shrinks the list
+        // clientHeight; the same commit shifts scrollTop down (e.g. -90px, isTrusted:false)
+        // and the landing dfb exceeds the pin threshold. That frame is layout-driven, not a
+        // user scroll — a user scroll never changes clientHeight. It must not release, must
+        // not seed a sustained streak, and must not eager-release even when trusted.
+        const untrusted = resolveWebGenuineScrollMovement({
+            ...BASE,
+            scrollTop: 10471,
+            previousObservedScrollTop: 10561,
+            clientHeight: 558,
+            previousObservedClientHeight: 648,
+            distanceFromBottom: 112, // beyond the 72px threshold
+            previousStreak: { direction: -1, count: 1 }, // even with a prior upward frame...
+        });
+        expect(untrusted.movedSinceLastObservation).toBe(true);
+        expect(untrusted.upwardIntent).toBe(false);
+        expect(untrusted.isGenuineUserMovement).toBe(false);
+        // ...the churn resets the streak basis: count restarts at 1.
+        expect(untrusted.nextStreak).toEqual({ direction: -1, count: 1 });
+        const trusted = resolveWebGenuineScrollMovement({
+            ...BASE,
+            scrollTop: 10471,
+            previousObservedScrollTop: 10561,
+            clientHeight: 558,
+            previousObservedClientHeight: 648,
+            distanceFromBottom: 112,
+            isTrusted: true, // RN-web marks non-user scroll echoes trusted too
+        });
+        expect(trusted.upwardIntent).toBe(false);
+        expect(trusted.isGenuineUserMovement).toBe(false);
     });
 
     it('a TRUSTED small upward scroll WITHIN the threshold (no churn) IS intent on the first frame — eager web release (:402)', () => {

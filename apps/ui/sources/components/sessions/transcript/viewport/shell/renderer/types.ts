@@ -3,7 +3,10 @@ import type { FlatListProps } from 'react-native';
 
 import type { TranscriptListShellFrame } from '@/components/sessions/transcript/viewport/shell/transcriptListShellCapabilities';
 
+export type TranscriptListRendererOrientation = 'standard' | 'frame-resolved';
+
 export type TranscriptListShellRef<TItem = unknown> = Readonly<{
+    transcriptViewportCommandSpace?: 'native-inverted' | 'standard';
     scrollToIndex: (params: { index: number; animated?: boolean; viewOffset?: number; viewPosition?: number }) => void | Promise<void>;
     scrollToOffset: (params: { offset: number; animated?: boolean }) => void | Promise<void>;
     scrollToEnd?: (params?: { animated?: boolean }) => void | Promise<void>;
@@ -14,18 +17,27 @@ export type TranscriptListShellRef<TItem = unknown> = Readonly<{
     getLayout?: (index: number) => { x: number; y: number; width: number; height: number } | undefined;
 }>;
 
+export type TranscriptRendererAtEndState = Readonly<{
+    isAtEnd: boolean;
+    isNearEnd: boolean;
+    isWithinMaintainScrollAtEndThreshold: boolean;
+}>;
+
+type TranscriptListShellInteractionHandler = (event: unknown) => void;
+
 export type TranscriptListShellPlatformInteractionProps = Readonly<{
-    onMouseDown?: unknown;
-    onPointerDown?: unknown;
-    onTouchCancel?: unknown;
-    onTouchEnd?: unknown;
-    onTouchMove?: unknown;
-    onTouchStart?: unknown;
-    onWheel?: unknown;
+    onMouseDown?: TranscriptListShellInteractionHandler;
+    onPointerDown?: TranscriptListShellInteractionHandler;
+    onTouchCancel?: TranscriptListShellInteractionHandler;
+    onTouchEnd?: TranscriptListShellInteractionHandler;
+    onTouchMove?: TranscriptListShellInteractionHandler;
+    onTouchStart?: TranscriptListShellInteractionHandler;
+    onWheel?: TranscriptListShellInteractionHandler;
 }>;
 
 export type TranscriptListRendererProps<TItem> = Readonly<{
     data: readonly TItem[];
+    dataKey?: string;
     extraData?: unknown;
     keyExtractor: NonNullable<FlatListProps<TItem>['keyExtractor']>;
     getItemType?: (item: TItem, index: number, extraData?: unknown) => string | number | undefined;
@@ -44,6 +56,7 @@ export type TranscriptListRendererProps<TItem> = Readonly<{
     onScrollEndDrag?: FlatListProps<TItem>['onScrollEndDrag'];
     onMomentumScrollBegin?: FlatListProps<TItem>['onMomentumScrollBegin'];
     onMomentumScrollEnd?: FlatListProps<TItem>['onMomentumScrollEnd'];
+    onRendererAtEndChange?: (state: TranscriptRendererAtEndState) => void;
     onScrollToIndexFailed?: FlatListProps<TItem>['onScrollToIndexFailed'];
     onStartReachedThreshold?: number;
     onStartReached?: () => void;
@@ -56,6 +69,14 @@ export type TranscriptListRendererProps<TItem> = Readonly<{
 export type TranscriptListShellProps<TItem> = TranscriptListRendererProps<TItem> & Readonly<{
     olderLoadOverlay?: React.ReactNode;
     catchUpOverlay?: React.ReactNode;
+    /**
+     * Renderer-selection override from the host's canonical tuning source
+     * (sync.getSyncTuning()). When omitted the shell resolver falls back to
+     * loadSyncTuning() — same values at runtime, but hosts that read tuning
+     * through the sync facade should thread it so tests and live overrides
+     * flow through one path.
+     */
+    transcriptLegendListSpikeSurface?: 'off' | 'readOnly' | 'sidechain' | 'main' | 'flashList';
 }>;
 
 export type TranscriptListRendererComponent = <TItem>(
@@ -63,6 +84,7 @@ export type TranscriptListRendererComponent = <TItem>(
 ) => React.ReactElement;
 
 export type TranscriptListRenderer = Readonly<{
-    kind: 'flashList';
+    kind: 'flashList' | 'legendList';
+    orientation: TranscriptListRendererOrientation;
     Component: TranscriptListRendererComponent;
 }>;

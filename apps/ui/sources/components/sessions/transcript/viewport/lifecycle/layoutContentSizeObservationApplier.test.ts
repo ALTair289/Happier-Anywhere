@@ -142,6 +142,29 @@ describe('layout/content-size observation applier', () => {
         ]);
     });
 
+    it('keeps renderer-owned layout size changes write-free while preserving observation side effects', () => {
+        const log: string[] = [];
+        const input = {
+            contentHeight: 1200,
+            continuousFollowOwner: 'renderer',
+            layoutHeight: 800,
+            layoutHeightChanged: true,
+            platformOS: 'web',
+            shouldRestoreNativeEntry: false,
+        } as Parameters<typeof applyTranscriptLayoutObservation<string>>[0] & {
+            continuousFollowOwner: 'renderer';
+        };
+
+        expect(applyTranscriptLayoutObservation(input, layoutEffects(log))).toBe(true);
+
+        expect(log).toEqual([
+            'commit-layout:800',
+            'layout-telemetry:800:1200',
+            'visible-window:layout-change:800:1200',
+            'mount-settle',
+        ]);
+    });
+
     it('applies web layout observations without native entry restore or native prepend ownership', () => {
         const log: string[] = [];
 
@@ -202,6 +225,29 @@ describe('layout/content-size observation applier', () => {
             'entry-restore',
             'verify-slice',
             'auto-pin:web-before:stream-append:true',
+        ]);
+    });
+
+    it('keeps renderer-owned content growth and append changes write-free while preserving measurement telemetry', () => {
+        const log: string[] = [];
+        const input = {
+            continuousFollowOwner: 'renderer',
+            layoutHeight: 800,
+            observation: measuredObservation({ reason: 'stream-append' }),
+            platformOS: 'web',
+            shouldRestoreNativeEntry: false,
+        } as Parameters<typeof applyTranscriptContentSizeObservation<string>>[0] & {
+            continuousFollowOwner: 'renderer';
+        };
+
+        expect(applyTranscriptContentSizeObservation(input, contentSizeEffects(log))).toBe(true);
+
+        expect(log).toEqual([
+            'materialization:1200:stream-append',
+            'commit-content:1200',
+            'content-telemetry:stream-append:800:1200',
+            'visible-window:stream-append:800:1200',
+            'mount-settle',
         ]);
     });
 

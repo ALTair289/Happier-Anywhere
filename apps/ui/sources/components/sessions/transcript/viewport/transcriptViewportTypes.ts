@@ -24,10 +24,18 @@ export type TranscriptViewportScrollReason =
     | 'jump-to-seq'
     | 'stream-append'
     | 'mount-settle'
-    | 'passive-drift';
+    | 'passive-drift'
+    /**
+     * Composer/keyboard/hot-tail bottom-inset delta changed the usable viewport height while the
+     * content itself did not change. A held follow intent must re-pin on this event on BOTH
+     * platforms (systemic review 2026-07-08 §1.5/§1.7/S3): on web standard space there is no
+     * native viewOffset to absorb the resize, so without this event the pin goes stale.
+     */
+    | 'viewport-resized';
 
 export type TranscriptViewportSchedulerAuthorityWriter =
     | 'automatic-live-tail'
+    | 'blank-recovery'
     | 'content-growth'
     | 'deferred-post-scroll'
     | 'hot-tail-carve'
@@ -61,7 +69,7 @@ export type TranscriptViewportJumpAlignment =
 
 export type TranscriptViewportCommand =
     | Readonly<{ kind: 'none'; sessionId: string; reason: string; mode: TranscriptViewportMode }>
-    | Readonly<{ kind: 'pin-bottom'; sessionId: string; reason: TranscriptViewportScrollReason; mode: TranscriptViewportMode; force?: boolean; animated?: boolean; contentHeight?: number; layoutHeight?: number }>
+    | Readonly<{ kind: 'pin-bottom'; sessionId: string; reason: TranscriptViewportScrollReason; mode: TranscriptViewportMode; force?: boolean; animated?: boolean; contentHeight?: number; layoutHeight?: number; bottomInsetPx?: number }>
     | Readonly<{ kind: 'restore-distance'; sessionId: string; reason: TranscriptViewportScrollReason; mode: 'restore-distance'; distanceFromLiveTailPx: number; animated?: boolean; contentHeight?: number }>
     | Readonly<{ kind: 'apply-history-correction'; sessionId: string; reason: 'prepend-restore'; mode: 'restore-anchor'; targetDistanceFromHistoryStartPx: number; animated?: boolean }>
     | Readonly<{ kind: 'restore-anchor'; sessionId: string; reason: TranscriptViewportScrollReason; mode: 'restore-anchor'; target: TranscriptViewportRestoreAnchorTarget; animated?: boolean }>

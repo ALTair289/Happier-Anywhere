@@ -100,6 +100,57 @@ describe('normalizeTranscriptScrollIngress', () => {
         });
     });
 
+    it('normalizes native standard raw offsets without inverted mirroring', () => {
+        const observation = normalizeTranscriptScrollIngress({
+            eventNativeEvent: {
+                contentOffset: { y: 1500 },
+                contentSize: { height: 2000 },
+                layoutMeasurement: { height: 500 },
+                isTrusted: false,
+            },
+            measuredContentHeight: 0,
+            measuredLayoutHeight: 0,
+            nativeCommandSpace: 'standard',
+            platform: 'native',
+        });
+
+        expect(observation).toMatchObject({
+            contentHeightPx: 2000,
+            distanceFromLiveTailPx: 0,
+            distanceFromLiveTailForReleasePx: 0,
+            hasLiveWebMetrics: false,
+            isTrusted: false,
+            layoutHeightPx: 500,
+            platform: 'native',
+            rawOffsetY: 1500,
+            scrollOffsetPx: 1500,
+            viewportOutsideContent: false,
+            visualBottomScrollOffsetPx: 1500,
+        });
+    });
+
+    it('marks native standard observations beyond the measured content range as outside content', () => {
+        const observation = normalizeTranscriptScrollIngress({
+            eventNativeEvent: {
+                contentOffset: { y: 1600 },
+                contentSize: { height: 2000 },
+                layoutMeasurement: { height: 500 },
+            },
+            measuredContentHeight: 0,
+            measuredLayoutHeight: 0,
+            nativeCommandSpace: 'standard',
+            platform: 'native',
+        });
+
+        expect(observation).toMatchObject({
+            distanceFromLiveTailPx: 0,
+            rawOffsetY: 1600,
+            scrollOffsetPx: 1600,
+            viewportOutsideContent: true,
+            visualBottomScrollOffsetPx: 1500,
+        });
+    });
+
     it('returns null for missing native geometry and clamps negative native live-tail distance', () => {
         expect(normalizeTranscriptScrollIngress({
             eventNativeEvent: {

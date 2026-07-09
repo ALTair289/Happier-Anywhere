@@ -14,8 +14,10 @@ import type {
 export const INVALID_NATIVE_OFFSET_RECOVERY_RAW_THRESHOLD_PX = -64;
 export const INVALID_NATIVE_OFFSET_RECOVERY_DURATION_MS = 120;
 export const EMPTY_VISIBLE_WINDOW_RECOVERY_DURATION_MS = 500;
+export const BLANK_RECOVERY_REARM_QUIET_PERIOD_MS = 250;
 
 export type TranscriptBlankRecoveryState = Readonly<{
+    emptyVisibleWindowClearedSinceMs: number | null;
     emptyVisibleWindowSinceMs: number | null;
     invalidNativeOffsetSinceMs: number | null;
     recoveredEmptyVisibleWindowSessionId: string | null;
@@ -34,6 +36,7 @@ export type TranscriptBlankRecoveryObservation = Readonly<{
     prependOpen: boolean;
     rawOffsetY?: number | null;
     sessionId: string;
+    viewportOutsideContent?: boolean;
 }>;
 
 export type TranscriptBlankRecoveryEffect =
@@ -55,6 +58,7 @@ export type TranscriptBlankRecoveryPlan = Readonly<{
 
 export function createTranscriptBlankRecoveryState(): TranscriptBlankRecoveryState {
     return {
+        emptyVisibleWindowClearedSinceMs: null,
         emptyVisibleWindowSinceMs: null,
         invalidNativeOffsetSinceMs: null,
         recoveredEmptyVisibleWindowSessionId: null,
@@ -127,13 +131,29 @@ function planEmptyVisibleWindowRecovery(
     state: TranscriptBlankRecoveryState,
     observation: TranscriptBlankRecoveryObservation,
 ): TranscriptBlankRecoveryPlan {
-    const emptyVisibleWindow = observation.contentPresent && !observation.hasVisibleRows;
+    const emptyVisibleWindow = observation.contentPresent && (
+        !observation.hasVisibleRows ||
+        observation.viewportOutsideContent === true
+    );
     if (!emptyVisibleWindow) {
+        const emptyVisibleWindowClearedSinceMs =
+            state.recoveredEmptyVisibleWindowSessionId === observation.sessionId
+                ? state.emptyVisibleWindowClearedSinceMs ?? observation.nowMs
+                : null;
+        const shouldRearmEmptyVisibleWindowRecovery =
+            emptyVisibleWindowClearedSinceMs !== null &&
+            observation.nowMs - emptyVisibleWindowClearedSinceMs >= BLANK_RECOVERY_REARM_QUIET_PERIOD_MS;
         return {
             effects: [],
             state: {
                 ...state,
+                emptyVisibleWindowClearedSinceMs: shouldRearmEmptyVisibleWindowRecovery
+                    ? null
+                    : emptyVisibleWindowClearedSinceMs,
                 emptyVisibleWindowSinceMs: null,
+                recoveredEmptyVisibleWindowSessionId: shouldRearmEmptyVisibleWindowRecovery
+                    ? null
+                    : state.recoveredEmptyVisibleWindowSessionId,
             },
         };
     }
@@ -143,6 +163,7 @@ function planEmptyVisibleWindowRecovery(
     const emptySinceMs = state.emptyVisibleWindowSinceMs ?? observation.nowMs;
     const nextState = {
         ...state,
+        emptyVisibleWindowClearedSinceMs: null,
         emptyVisibleWindowSinceMs: emptySinceMs,
     };
     if (observation.nowMs - emptySinceMs < EMPTY_VISIBLE_WINDOW_RECOVERY_DURATION_MS) {
@@ -171,13 +192,14 @@ function requestBottomFollowRecovery(
         recovery,
         reason: 'passive-drift',
         type: 'request-bottom-follow-write',
-        writer: 'passive-drift',
+        writer: 'blank-recovery',
     };
 }
 
 function clearArmedRecovery(state: TranscriptBlankRecoveryState): TranscriptBlankRecoveryState {
     return {
         ...state,
+        emptyVisibleWindowClearedSinceMs: null,
         emptyVisibleWindowSinceMs: null,
         invalidNativeOffsetSinceMs: null,
     };

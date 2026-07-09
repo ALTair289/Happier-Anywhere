@@ -6,6 +6,8 @@ import {
 import { toNativeInvertedCanonicalOffset } from './nativeInvertedRawScroll';
 
 export type TranscriptScrollIngressPlatform = 'native' | 'web';
+export type TranscriptScrollIngressNativeCommandSpace = 'inverted' | 'standard';
+const NATIVE_VIEWPORT_OUTSIDE_CONTENT_TOLERANCE_PX = 64;
 
 export type TranscriptScrollIngressNativeEvent = Readonly<{
     contentOffset?: Readonly<{ y?: unknown }> | null;
@@ -24,6 +26,7 @@ export type TranscriptScrollIngressObservation = Readonly<{
     platform: TranscriptScrollIngressPlatform;
     rawOffsetY: number;
     scrollOffsetPx: number;
+    viewportOutsideContent: boolean;
     visualBottomScrollOffsetPx: number | null;
     webMetrics: WebTranscriptScrollMetrics | null;
 }>;
@@ -32,6 +35,7 @@ export function normalizeTranscriptScrollIngress(input: Readonly<{
     eventNativeEvent: TranscriptScrollIngressNativeEvent | null | undefined;
     measuredContentHeight: number;
     measuredLayoutHeight: number;
+    nativeCommandSpace?: TranscriptScrollIngressNativeCommandSpace;
     platform: TranscriptScrollIngressPlatform;
     webMetrics?: WebTranscriptScrollMetrics | null;
 }>): TranscriptScrollIngressObservation | null {
@@ -50,6 +54,7 @@ export function normalizeTranscriptScrollIngress(input: Readonly<{
         isTrusted,
         measuredContentHeight: input.measuredContentHeight,
         measuredLayoutHeight: input.measuredLayoutHeight,
+        nativeCommandSpace: input.nativeCommandSpace ?? 'inverted',
     });
 }
 
@@ -107,6 +112,7 @@ function normalizeWebScrollIngress(input: Readonly<{
         platform: 'web',
         rawOffsetY,
         scrollOffsetPx: rawOffsetY,
+        viewportOutsideContent: false,
         visualBottomScrollOffsetPx,
         webMetrics: metrics,
     };
@@ -117,6 +123,7 @@ function normalizeNativeScrollIngress(input: Readonly<{
     isTrusted: boolean;
     measuredContentHeight: number;
     measuredLayoutHeight: number;
+    nativeCommandSpace: TranscriptScrollIngressNativeCommandSpace;
 }>): TranscriptScrollIngressObservation | null {
     const rawOffsetY = resolveFiniteMetric(input.eventNativeEvent?.contentOffset?.y);
     if (rawOffsetY === null) return null;
@@ -129,16 +136,28 @@ function normalizeNativeScrollIngress(input: Readonly<{
         return null;
     }
 
-    const canonicalOffsetY = toNativeInvertedCanonicalOffset({
-        contentHeight,
-        layoutHeight,
-        rawOffsetY,
-    });
-    const distanceFromLiveTailPx = Math.max(
-        0,
-        Math.trunc(contentHeight - layoutHeight - canonicalOffsetY),
-    );
+    const canonicalOffsetY = input.nativeCommandSpace === 'standard'
+        ? Math.max(0, Math.trunc(rawOffsetY))
+        : toNativeInvertedCanonicalOffset({
+            contentHeight,
+            layoutHeight,
+            rawOffsetY,
+        });
+    const distanceFromLiveTailPx = input.nativeCommandSpace === 'standard'
+        ? deriveStandardDistanceFromLiveTail({
+            contentHeight,
+            layoutHeight,
+            scrollOffset: rawOffsetY,
+        })
+        : Math.max(
+            0,
+            Math.trunc(contentHeight - layoutHeight - canonicalOffsetY),
+        );
     const visualBottomScrollOffsetPx = deriveVisualBottomScrollOffset({ contentHeight, layoutHeight });
+    const viewportOutsideContent = visualBottomScrollOffsetPx !== null && (
+        rawOffsetY < -NATIVE_VIEWPORT_OUTSIDE_CONTENT_TOLERANCE_PX ||
+        rawOffsetY > visualBottomScrollOffsetPx + NATIVE_VIEWPORT_OUTSIDE_CONTENT_TOLERANCE_PX
+    );
 
     return {
         contentHeightPx: Math.max(0, contentHeight),
@@ -150,6 +169,7 @@ function normalizeNativeScrollIngress(input: Readonly<{
         platform: 'native',
         rawOffsetY,
         scrollOffsetPx: canonicalOffsetY,
+        viewportOutsideContent,
         visualBottomScrollOffsetPx,
         webMetrics: null,
     };

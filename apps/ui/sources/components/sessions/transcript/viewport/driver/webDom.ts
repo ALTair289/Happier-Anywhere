@@ -1,5 +1,6 @@
 import { resolveWebColdListScrollTarget } from '@/components/sessions/transcript/segments/resolveWebHotColdScrollDecision';
 import { queryExactWebTranscriptDataTestId } from '@/components/sessions/transcript/webTranscriptDomTestId';
+import { TRANSCRIPT_WEB_HOT_TAIL_ITEM_TEST_ID_PREFIX } from '@/components/sessions/transcript/web/WebTranscriptSplitFooter';
 import {
     restoreWebTranscriptViewportAnchor,
     restoreWebTranscriptPrependAnchor,
@@ -173,7 +174,10 @@ export function performWebDomViewportCommand(
         }
         // Prefer measured-band extrapolation over the renderer's estimated layout for
         // unmounted targets; the estimate goes stale once measured rows shift content.
-        // (Footer targets are always mounted, so no layout fallback is needed for them.)
+        // Hot-tail footer targets are always mounted but use a different testID prefix
+        // (`transcript-web-hot-tail-item-*` vs `transcript-item-*`) so findWebTranscriptItemElement
+        // cannot locate them. Read their rect directly via the hot-tail prefix so
+        // scrollWebDomToTranscriptItem can use the measured layout path instead.
         const bandLayout = hotFooterItemId
             ? null
             : resolveWebBandExtrapolatedTranscriptItemLayout({
@@ -183,7 +187,7 @@ export function performWebDomViewportCommand(
                 targetIndex: index,
             });
         const itemLayout = hotFooterItemId
-            ? null
+            ? readWebHotTailItemLayout(metrics.element, hotFooterItemId, metrics.scrollTop)
             : bandLayout ?? readScrollableChatListItemLayout(deps.listRef.current, index);
         const result = scrollWebDomToTranscriptItem({
             align: command.kind === 'jump-to-seq'
@@ -281,38 +285,21 @@ export function performWebDomVisibleAnchorRestoreCommand(
     const itemIndex = command.target.itemIndex;
     if (typeof itemIndex !== 'number' || !Number.isFinite(itemIndex)) return directResult;
     const normalizedIndex = Math.max(0, Math.trunc(itemIndex));
-    const itemId = resolveTranscriptViewportListDataItemIdAtIndex(deps.listDataRef.current, normalizedIndex) ??
-        command.target.anchor.itemId;
-    if (!itemId.trim()) return directResult;
-
-    const result = scrollWebDomToTranscriptItem({
-        align: { kind: 'top-with-item-offset', itemOffsetPx: command.target.itemOffsetPx },
-        itemId,
-        itemLayout: readScrollableChatListItemLayout(deps.listRef.current, normalizedIndex),
-        metrics,
-        observation: deps.webDomObservation,
-    });
-    if (!result.ok) return directResult;
-    deps.recordViewportTelemetryEvent({
-        type: 'scroll-write',
-        writer: 'web-dom-restore',
-        reason: command.reason,
-        mode: command.mode,
-        targetOffsetY: result.targetScrollTop,
-        layoutHeight: metrics.clientHeight,
-        contentHeight: metrics.scrollHeight,
-        distanceFromBottom: getWebTranscriptDistanceFromBottom({
-            ...metrics,
-            scrollTop: result.landedScrollTop,
-        }),
-        ...deps.resolveWebViewportTelemetryDiagnostics({
-            metrics,
-            programmaticWebWrite: true,
-            scrollable: isWebTranscriptScrollable(metrics, 1),
-            trigger: 'restore',
-        }),
-    });
-    return { didAdjustScroll: true, status: 'restored' };
+    // Hot-tail guard: FlashList excludes hot-tail items from listData on web. When the anchor
+    // index falls in the hot tail the item won't be in the DOM and attempting any layout-based
+    // scroll writes the wrong coordinates. Return not_found so the caller can use the
+    // distance-from-bottom fallback instead.
+    if (normalizedIndex >= deps.listDataRef.current.length) return directResult;
+    // Anchor is within the cold list but was not found in the DOM on the first attempt.
+    // FlashList only renders a virtual window of rows; the anchor may not yet be in that
+    // window. Call scrollToIndex to bring it into view — FlashList will render the item and
+    // change listContentHeight, triggering a retry attempt that will succeed via direct lookup.
+    try {
+        deps.listRef.current?.scrollToIndex?.({ index: normalizedIndex, animated: false });
+    } catch {
+        // scrollToIndex can throw when the item layout is not yet known; non-fatal.
+    }
+    return { didAdjustScroll: false, status: 'scroll_requested' };
 }
 
 export type WebDomLocalHeightChangeMode = 'follow-bottom' | 'preserve-position';
@@ -682,6 +669,45 @@ function resolveTranscriptViewportListDataItemIdAtIndex(
     const item = listData[index];
     const itemId = item?.id;
     return typeof itemId === 'string' && itemId.trim().length > 0 ? itemId : null;
+}
+
+/**
+ * Resolves the measured layout for a web hot-tail footer item. Hot-tail items are always
+ * mounted in the DOM but use the `transcript-web-hot-tail-item-*` testID prefix rather
+ * than `transcript-item-*`, so `findWebTranscriptItemElement` cannot locate them. This
+ * helper uses the correct prefix and computes an absolute scroll-space `y` from the
+ * element's bounding rect relative to the scroll container.
+ */
+function readWebHotTailItemLayout(
+    container: HTMLElement,
+    itemId: string,
+    scrollTop: number,
+): Readonly<{ height: number; y: number }> | null {
+    if (typeof container.getBoundingClientRect !== 'function') return null;
+    if (typeof container.querySelectorAll !== 'function') return null;
+    const targetTestId = `${TRANSCRIPT_WEB_HOT_TAIL_ITEM_TEST_ID_PREFIX}${itemId}`;
+    const exactMatch = queryExactWebTranscriptDataTestId(container, targetTestId);
+    let element: TestIdElement | null = null;
+    if (exactMatch.attempted) {
+        element = exactMatch.element as TestIdElement | null;
+    } else {
+        for (const node of container.querySelectorAll('[data-testid]')) {
+            const el = node as TestIdElement;
+            if (el.getAttribute?.('data-testid') === targetTestId) {
+                element = el;
+                break;
+            }
+        }
+    }
+    if (!element || typeof element.getBoundingClientRect !== 'function') return null;
+    const containerRect = container.getBoundingClientRect();
+    const rect = element.getBoundingClientRect();
+    const top = rect.top - containerRect.top + scrollTop;
+    const height = Math.max(0, typeof rect.height === 'number' && Number.isFinite(rect.height)
+        ? rect.height
+        : rect.bottom - rect.top);
+    if (!Number.isFinite(top) || !Number.isFinite(height)) return null;
+    return { y: top, height };
 }
 
 function readScrollableChatListItemLayout(

@@ -22,6 +22,7 @@ export type TranscriptViewportTelemetryScrollWriter =
 export type TranscriptViewportTelemetrySchedulerAuthorityWriter =
     | TranscriptViewportTelemetryScrollWriter
     | 'automatic-live-tail'
+    | 'blank-recovery'
     | 'content-growth'
     | 'deferred-post-scroll'
     | 'hot-tail-carve'
@@ -55,19 +56,6 @@ export type TranscriptViewportTelemetryObservationReason =
     | 'anchor-captured'
     | 'anchor-capture-empty'
     | 'anchor-capture-dropped';
-
-/** N1.1 — FlashList offset-corrector lifecycle, mirrored from the patched vendor hook. */
-export type TranscriptViewportTelemetryOffsetCorrectionAction =
-    | 'pause-set'
-    | 'pause-cleared'
-    | 'correction-applied'
-    | 'correction-skipped-paused'
-    | 'correction-skipped-animation'
-    | 'correction-skipped-happier-paused';
-
-export type TranscriptViewportTelemetryOffsetCorrectionSource =
-    | 'scroll-to-index'
-    | 'initial-scroll-index';
 
 /** N1.2/N1.3 — closed row-kind set (mirrors resolveTranscriptRowItemType outputs; no free-form text). */
 export type TranscriptViewportTelemetryRowKind =
@@ -159,8 +147,8 @@ export type TranscriptViewportTelemetryLiveTailAnchorKind =
  * deterministic pin height (#2) and the single pin owner (#3): each carve pin records the
  * just-measured hot-tail height it compensated for, the anchor that opened the carve, whether the
  * live region owns the bottom, and whether the JS pin was issued or skipped. Correlate against the
- * `mvcpPolicy` field (`start-rendering-from-bottom` = threshold withheld) and `offset-correction`
- * events to PROVE FlashList MVCP is not fighting the JS pin while the live region is active.
+ * `mvcpPolicy` field (`start-rendering-from-bottom` = threshold withheld) to show when
+ * FlashList MVCP, not a JS pin, owns the live region during the burn-in fallback path.
  */
 export type TranscriptViewportTelemetryLiveTailCarveDiagnostics = Readonly<{
     liveRegionActive?: boolean;
@@ -357,7 +345,6 @@ export type TranscriptViewportTelemetryEvent =
             | 'content-measured'
             | 'layout-measured'
             | 'anchor-capture'
-            | 'offset-correction'
             | 'row-measured'
             | 'row-mutated'
             | 'visible-window-observed';
@@ -376,9 +363,6 @@ export type TranscriptViewportTelemetryEvent =
         anchorCorrectionAttempt?: number;
         anchorCorrectionTargetOffsetY?: number;
         anchorRestoreViewOffset?: number;
-        correctionAction?: TranscriptViewportTelemetryOffsetCorrectionAction;
-        correctionSource?: TranscriptViewportTelemetryOffsetCorrectionSource;
-        correctionDiffPx?: number;
         /** N2d.1 prepend close diagnostics: corrector coverage over the transaction window. */
         correctorAppliedDiffTotalPx?: number;
         correctorEventCount?: number;
@@ -481,6 +465,7 @@ const SCROLL_WRITERS = new Set<TranscriptViewportTelemetryScrollWriter>([
 const SCHEDULER_AUTHORITY_WRITERS = new Set<TranscriptViewportTelemetrySchedulerAuthorityWriter>([
     ...SCROLL_WRITERS,
     'automatic-live-tail',
+    'blank-recovery',
     'content-growth',
     'deferred-post-scroll',
     'hot-tail-carve',
@@ -501,6 +486,7 @@ const SCROLL_REASONS = new Set<TranscriptViewportTelemetryScrollReason>([
     'stream-append',
     'mount-settle',
     'passive-drift',
+    'viewport-resized',
 ]);
 
 const OBSERVATION_REASONS = new Set<TranscriptViewportTelemetryObservationReason>([
@@ -525,20 +511,6 @@ const OBSERVATION_REASONS = new Set<TranscriptViewportTelemetryObservationReason
     'anchor-captured',
     'anchor-capture-empty',
     'anchor-capture-dropped',
-]);
-
-const OFFSET_CORRECTION_ACTIONS = new Set<TranscriptViewportTelemetryOffsetCorrectionAction>([
-    'pause-set',
-    'pause-cleared',
-    'correction-applied',
-    'correction-skipped-paused',
-    'correction-skipped-animation',
-    'correction-skipped-happier-paused',
-]);
-
-const OFFSET_CORRECTION_SOURCES = new Set<TranscriptViewportTelemetryOffsetCorrectionSource>([
-    'scroll-to-index',
-    'initial-scroll-index',
 ]);
 
 const ROW_KINDS = new Set<TranscriptViewportTelemetryRowKind>([
@@ -947,13 +919,10 @@ function sanitizeTelemetryEvent(
         type === 'content-measured' ||
         type === 'layout-measured' ||
         type === 'anchor-capture' ||
-        type === 'offset-correction' ||
         type === 'row-measured' ||
         type === 'row-mutated' ||
         type === 'visible-window-observed'
     ) {
-        const correctionAction = readEnum(source.correctionAction, OFFSET_CORRECTION_ACTIONS) ?? undefined;
-        const correctionSource = readEnum(source.correctionSource, OFFSET_CORRECTION_SOURCES) ?? undefined;
         const rowId = readString(source.rowId) ?? undefined;
         const rowKind = readEnum(source.rowKind, ROW_KINDS) ?? undefined;
         const rowHeightPx = readNumber(source.rowHeightPx);
@@ -961,7 +930,6 @@ function sanitizeTelemetryEvent(
         const rowViewportRelation = readEnum(source.rowViewportRelation, ROW_VIEWPORT_RELATIONS) ?? undefined;
         // Per-type required fields (N1 evidence events): malformed events are dropped, never
         // partially recorded, so trace analysis can rely on field presence.
-        if (type === 'offset-correction' && !correctionAction) return null;
         if (type === 'row-measured' && (!rowId || !rowKind || rowHeightPx === undefined || !rowMeasurePhase)) {
             return null;
         }
@@ -987,9 +955,6 @@ function sanitizeTelemetryEvent(
                 anchorCorrectionAttempt: readNumber(source.anchorCorrectionAttempt),
                 anchorCorrectionTargetOffsetY: readNumber(source.anchorCorrectionTargetOffsetY),
                 anchorRestoreViewOffset: readNumber(source.anchorRestoreViewOffset),
-                ...(correctionAction ? { correctionAction } : {}),
-                ...(correctionSource ? { correctionSource } : {}),
-                ...(spreadNumber('correctionDiffPx', readNumber(source.correctionDiffPx))),
                 ...(spreadNumber('correctorAppliedDiffTotalPx', readNumber(source.correctorAppliedDiffTotalPx))),
                 ...(spreadNumber('correctorEventCount', readNumber(source.correctorEventCount))),
                 ...(rowId ? { rowId } : {}),

@@ -90,6 +90,22 @@ describe('transcript auto-follow gate', () => {
         })).toBe(false);
     });
 
+    it('allows viewport resize maintenance while follow intent is held even when content auto-follow is disabled', () => {
+        expect(canAutoFollowTranscriptBottom({
+            ...baseParams,
+            autoFollowWhenPinned: false,
+            bottomFollowMode: 'following',
+            reason: 'viewport-resized',
+        })).toBe(true);
+
+        expect(canAutoFollowTranscriptBottom({
+            ...baseParams,
+            autoFollowWhenPinned: false,
+            bottomFollowMode: 'released',
+            reason: 'viewport-resized',
+        })).toBe(false);
+    });
+
     it('blocks automatic live-tail follow while a target window is active', () => {
         expect(canAutoFollowTranscriptBottom({
             ...baseParams,

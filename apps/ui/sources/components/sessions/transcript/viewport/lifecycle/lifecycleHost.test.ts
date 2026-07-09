@@ -97,6 +97,18 @@ describe('transcript lifecycle host', () => {
             sessionId: 'session-a',
             type: 'apply-explicit-return-to-live-tail-viewport',
         }]);
+        expect(returnPlan.explicitReturnEffects).toEqual([
+            {
+                sessionId: 'session-a',
+                type: 'apply-explicit-return-clear-user-scroll-intent',
+            },
+            {
+                distanceFromLiveTailPx: 0,
+                isPinned: true,
+                sessionId: 'session-a',
+                type: 'apply-explicit-return-to-live-tail-viewport',
+            },
+        ]);
         expect(followIntentPlan.followBottomIntentTakeoverEffects.map((effect) => effect.type)).toEqual([
             'follow-bottom-intent-preempt-entry-restore',
             'follow-bottom-intent-clear-user-scroll-intent',
@@ -615,6 +627,58 @@ describe('transcript lifecycle host', () => {
             }],
             type: 'issue-mount-settle-pin',
         });
+    });
+
+    it('does not re-arm web bottom-follow from a self-write echo clamped to the live tail', () => {
+        const host = createTranscriptLifecycleHost();
+        host.enterSession({
+            platform: 'web',
+            sessionId: 'session-a',
+            shouldFollowLiveTail: false,
+        });
+
+        // The app's own prepend-restore write got clamped by the browser to the
+        // bottom (prepended rows not laid out yet), so its echo frame arrives with
+        // distanceFromLiveTail 0, RN-web `isTrusted: true`, and an apparent
+        // toward-live-tail delta vs the user's last upward offset — but the DOM
+        // observation attests the frame did NOT move since the recorded landed
+        // value (`webMovedSinceLastObservation: false`). It must not re-arm.
+        const echoPlan = host.observeScroll({
+            distanceFromLiveTailPx: 0,
+            isTrusted: true,
+            movedAwayFromLiveTail: false,
+            movedTowardLiveTail: true,
+            nowMs: 1000,
+            pinEnabled: true,
+            pinThresholdPx: 72,
+            platform: 'web',
+            previousScrollOffsetPx: 500,
+            scrollOffsetPx: 4283,
+            sessionId: 'session-a',
+            wantsPinned: false,
+            webMovedSinceLastObservation: false,
+            webObservedUserScrollMovement: false,
+        });
+        expect(echoPlan.state.bottomFollowState.mode).not.toBe('following');
+
+        // A genuinely-attested trusted return to the live tail still re-arms.
+        const genuineReturnPlan = host.observeScroll({
+            distanceFromLiveTailPx: 0,
+            isTrusted: true,
+            movedAwayFromLiveTail: false,
+            movedTowardLiveTail: true,
+            nowMs: 2000,
+            pinEnabled: true,
+            pinThresholdPx: 72,
+            platform: 'web',
+            previousScrollOffsetPx: 4000,
+            scrollOffsetPx: 4283,
+            sessionId: 'session-a',
+            wantsPinned: false,
+            webMovedSinceLastObservation: true,
+            webObservedUserScrollMovement: false,
+        });
+        expect(genuineReturnPlan.state.bottomFollowState.mode).toBe('following');
     });
 
     it('groups session-entry lifecycle reset and viewport plans', () => {

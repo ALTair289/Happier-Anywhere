@@ -35,6 +35,7 @@ import {
     TRANSCRIPT_WEB_PREPEND_ANCHOR_TEST_ID_PREFIX,
 } from '@/components/sessions/transcript/webTranscriptPrependAnchor';
 import type { TranscriptInteraction } from '@/utils/sessions/deriveTranscriptInteraction';
+import type { TranscriptEventEmphasisByMessageId } from '@/components/sessions/transcript/events/transcriptEventEmphasis';
 
 export const ChatListMessageRow = React.memo(function ChatListMessageRow(props: {
     sessionId: string;
@@ -42,11 +43,17 @@ export const ChatListMessageRow = React.memo(function ChatListMessageRow(props: 
     messageOverride?: Message | null;
     originSessionId?: string;
     isReadOnlyContext?: boolean;
+    // Resolved at row render time (not materialized by the list renderItem): streaming
+    // deltas mutate the message in place and only bump the revision, and the memoized
+    // MessageView below re-renders on revision change. `useMessage` re-renders this row
+    // per revision bump; reading through the getter here keeps the value fresh.
+    getMessageRevisionById?: (messageId: string) => number | null;
     metadata: Metadata | null;
     activeThinkingMessageId: string | null;
     resolveThinkingExpanded: (messageId: string) => boolean;
     setThinkingExpanded: (messageId: string, expanded: boolean) => void;
     interaction: TranscriptInteraction;
+    eventEmphasisByMessageId?: TranscriptEventEmphasisByMessageId;
     rollbackAction?: TranscriptRollbackAction | null;
     rollbackRanges: readonly SessionRollbackRangeV1[];
     approvalRequests?: readonly OpenApprovalArtifactForSession[];
@@ -56,6 +63,7 @@ export const ChatListMessageRow = React.memo(function ChatListMessageRow(props: 
     const originSessionId = props.originSessionId ?? props.sessionId;
     const committedMessage = useMessage(originSessionId, props.messageId);
     const message = props.messageOverride ?? committedMessage;
+    const messageRevision = props.getMessageRevisionById?.(props.messageId) ?? null;
     if (!message) return null;
 
     const isThinking = message.kind === 'agent-text' && message.isThinking === true;
@@ -65,6 +73,7 @@ export const ChatListMessageRow = React.memo(function ChatListMessageRow(props: 
     const messageView = canUseParentCommon ? (
         <MessageViewWithSessionCommon
             message={message}
+            messageRevision={messageRevision}
             metadata={props.metadata}
             sessionId={originSessionId}
             activeThinkingMessageId={props.activeThinkingMessageId}
@@ -73,6 +82,7 @@ export const ChatListMessageRow = React.memo(function ChatListMessageRow(props: 
             interaction={readOnlyInteraction}
             rollbackAction={props.rollbackAction ?? null}
             historical={historical}
+            eventEmphasis={props.eventEmphasisByMessageId?.[message.id]}
             approvalRequests={props.approvalRequests}
             messagePins={props.messagePins}
             onToggleMessagePin={props.onToggleMessagePin}
@@ -85,6 +95,7 @@ export const ChatListMessageRow = React.memo(function ChatListMessageRow(props: 
     ) : (
         <MessageView
             message={message}
+            messageRevision={messageRevision}
             metadata={props.metadata}
             sessionId={originSessionId}
             activeThinkingMessageId={props.activeThinkingMessageId}
@@ -93,6 +104,7 @@ export const ChatListMessageRow = React.memo(function ChatListMessageRow(props: 
             interaction={readOnlyInteraction}
             rollbackAction={props.rollbackAction ?? null}
             historical={historical}
+            eventEmphasis={props.eventEmphasisByMessageId?.[message.id]}
             approvalRequests={props.approvalRequests}
             messagePins={props.messagePins}
             onToggleMessagePin={props.onToggleMessagePin}

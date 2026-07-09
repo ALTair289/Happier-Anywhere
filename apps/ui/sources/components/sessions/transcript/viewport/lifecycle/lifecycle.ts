@@ -43,6 +43,10 @@ export type TranscriptViewportLifecycleEffect =
         type: 'viewport-change';
     }>
     | Readonly<{
+        sessionId: string;
+        type: 'explicit-return-clear-user-scroll-intent';
+    }>
+    | Readonly<{
         distanceFromLiveTailPx: number;
         isPinned: true;
         sessionId: string;
@@ -1007,6 +1011,10 @@ function returnToLiveTailEffects(
 
 function explicitReturnToLiveTailEffects(sessionId: string): readonly TranscriptViewportLifecycleEffect[] {
     return [
+        {
+            sessionId,
+            type: 'explicit-return-clear-user-scroll-intent',
+        },
         {
             distanceFromLiveTailPx: 0,
             isPinned: true,

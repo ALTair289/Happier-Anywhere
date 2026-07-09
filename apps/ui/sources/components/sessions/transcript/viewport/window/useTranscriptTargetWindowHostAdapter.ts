@@ -31,6 +31,7 @@ export type TranscriptTargetWindowHostFacts<TItem extends TranscriptTargetWindow
 
 export function resolveTranscriptTargetWindowHostFacts<TItem extends TranscriptTargetWindowDisplayItem>(params: Readonly<{
     items: readonly TItem[];
+    isSeqLoaded?: (seq: number) => boolean;
     resolveSeq?: (item: TItem) => number | null | undefined;
     windowState: TranscriptTargetWindowState;
 }>): TranscriptTargetWindowHostFacts<TItem> {
@@ -40,6 +41,7 @@ export function resolveTranscriptTargetWindowHostFacts<TItem extends TranscriptT
             items: params.items,
             windowState: activeWindowState,
             resolveSeq: params.resolveSeq,
+            isSeqLoaded: params.isSeqLoaded,
         })
         : null;
     return {
@@ -251,6 +253,13 @@ export async function executeTranscriptTargetWindowJump(params: Readonly<{
      * not abort the landing. Without it, the loop falls back to a raw scrollTop-delta check.
      */
     hasGenuineUserMovementSince?: (sinceMs: number) => boolean;
+    /**
+     * Web-only: called when the landing loop detects a FlashList blank-chunk gap — the target
+     * row is in item space but approach writes leave scrollTop stable and the target unmounted.
+     * A 1-pixel nudge changes scrollTop enough to fire FlashList's scroll listener, which
+     * forces chunk re-population at the target position.
+     */
+    nudgeScrollForGap?: () => void;
 }>): Promise<TranscriptJumpResult> {
     const scrollToTarget = (options: Readonly<{ allowVirtualizedRenderedTarget?: boolean }> = {}): boolean => {
         const applied = params.scrollToTarget();
@@ -272,7 +281,10 @@ export async function executeTranscriptTargetWindowJump(params: Readonly<{
      *     stable across two consecutive frames (late measurements shift content under the
      *     first exact write),
      *  3. aborts as soon as a foreign writer (user scroll, another owner) moves the viewport
-     *     away from this jump's own last write.
+     *     away from this jump's own last write,
+     *  4. after a successful settle, keeps re-verifying for a bounded window: FlashList's async
+     *     re-measurement (and live streaming growth) can collapse estimated heights and move the
+     *     target away from the settled scrollTop after the fact (P2SMOKE3-S3-JUMP-GAP).
      * Runs inside the explicit-jump write barrier held by the caller for the whole jump.
      */
     const performWebWindowLanding = async (
@@ -302,9 +314,16 @@ export async function executeTranscriptTargetWindowJump(params: Readonly<{
         const waitFrame = params.waitForNextLandingFrame
             ?? (() => new Promise<void>((resolve) => setTimeout(resolve, 80)));
         const landingStartedAtMs = Date.now();
-        const deadlineAt = landingStartedAtMs + Math.max(0, params.landingSettleDeadlineMs ?? 1800);
+        // mutable: extended after gap nudge fires to let FlashList finish its async re-render.
+        let deadlineAt = landingStartedAtMs + Math.max(0, params.landingSettleDeadlineMs ?? 1800);
         let lastObservedAfterWrite: number | null = null;
         let stableFrames = 0;
+        // Counts consecutive frames where approach writes leave scrollTop unchanged and the
+        // target remains unmounted — the FlashList blank-chunk gap signature.
+        let consecutiveStableNonMountedFrames = 0;
+        // True once the gap corrective nudge fires. After this point, approach writes stop so
+        // FlashList's async render cycle can complete without repeated scrollToIndex interruption.
+        let gapNudgeFired = false;
         for (let iteration = 0; iteration < 60; iteration += 1) {
             const observedBefore = params.readScrollTop();
             if (params.hasGenuineUserMovementSince) {
@@ -318,6 +337,7 @@ export async function executeTranscriptTargetWindowJump(params: Readonly<{
                 break;
             }
             if (params.isTargetMounted()) {
+                consecutiveStableNonMountedFrames = 0;
                 landOnce();
                 const observedAfter = params.readScrollTop();
                 if (typeof observedAfter !== 'number') break;
@@ -330,15 +350,86 @@ export async function executeTranscriptTargetWindowJump(params: Readonly<{
                 }
             } else {
                 stableFrames = 0;
-                scrollToTarget();
-                const observedAfter = params.readScrollTop();
-                if (typeof observedAfter !== 'number') break;
-                lastObservedAfterWrite = observedAfter;
+                if (!gapNudgeFired) {
+                    // Normal approach-write path: scroll toward target, track scrollTop stability.
+                    scrollToTarget();
+                    const observedAfter = params.readScrollTop();
+                    if (typeof observedAfter !== 'number') break;
+                    // Gap detection: two consecutive stable-scrollTop non-mounted frames indicate a
+                    // FlashList blank-chunk gap. Fire the corrective nudge once, then stop approach
+                    // writes and extend the deadline so FlashList's async layout can settle without
+                    // repeated scrollToIndex calls interrupting its render pipeline.
+                    if (
+                        params.nudgeScrollForGap != null &&
+                        typeof lastObservedAfterWrite === 'number' &&
+                        Math.abs(observedAfter - lastObservedAfterWrite) <= 1
+                    ) {
+                        consecutiveStableNonMountedFrames++;
+                        if (consecutiveStableNonMountedFrames >= 2) {
+                            params.nudgeScrollForGap();
+                            // One restorative approach write brings scrollTop back to the correct
+                            // target position immediately after the nudge (the nudge may have written
+                            // a ±1px offset). After this, approach writes stop so FlashList's async
+                            // layout pipeline can complete without repeated scrollToIndex interruptions.
+                            scrollToTarget();
+                            gapNudgeFired = true;
+                            consecutiveStableNonMountedFrames = 0;
+                            // Allow up to 5 s for FlashList to finish measuring items and shift
+                            // the target row into the rendered range (live evidence: render
+                            // completes within 3–7 s of navigation for a fresh cold window load).
+                            deadlineAt = Math.max(deadlineAt, Date.now() + 5000);
+                        }
+                    } else {
+                        consecutiveStableNonMountedFrames = 0;
+                    }
+                    lastObservedAfterWrite = observedAfter;
+                }
+                // else: gapNudgeFired — skip approach write; just wait for FlashList to render.
             }
             if (Date.now() > deadlineAt) {
                 break;
             }
             await waitFrame();
+        }
+        if (!landed) return;
+        // Post-settle re-verification (P2SMOKE3-S3-JUMP-GAP): FlashList v2 web re-measures rows
+        // asynchronously after a settled landing; streaming growth plus estimated-height collapse
+        // can move the target row thousands of px away from the settled scrollTop, leaving the
+        // viewport in an unrendered allocation gap. Live evidence: re-measurement keeps shifting
+        // the layout for many seconds while a session streams, so the exit criterion is layout
+        // QUIESCENCE (no correction needed for ~2s), bounded by a hard cap. Each frame re-issues
+        // the exact rect-based landing write (a same-position write is a no-op) and falls back to
+        // approach writes if reallocation unmounts the target. Genuine user movement ends
+        // re-verification immediately — the user owns the viewport.
+        const reverifyDeadlineAt = Date.now() + 15000;
+        let reverifyStableFrames = 0;
+        for (let iteration = 0; iteration < 190; iteration += 1) {
+            if (Date.now() > reverifyDeadlineAt) break;
+            await waitFrame();
+            if (params.hasGenuineUserMovementSince) {
+                if (params.hasGenuineUserMovementSince(landingStartedAtMs)) break;
+            }
+            const observedBefore = params.readScrollTop();
+            if (typeof observedBefore !== 'number') break;
+            if (
+                !params.hasGenuineUserMovementSince &&
+                typeof lastObservedAfterWrite === 'number' &&
+                Math.abs(observedBefore - lastObservedAfterWrite) > 1
+            ) {
+                break;
+            }
+            if (params.isTargetMounted()) {
+                scrollToTarget({ allowVirtualizedRenderedTarget: true });
+            } else {
+                scrollToTarget();
+            }
+            const observedAfter = params.readScrollTop();
+            if (typeof observedAfter !== 'number') break;
+            reverifyStableFrames = Math.abs(observedAfter - observedBefore) <= 1
+                ? reverifyStableFrames + 1
+                : 0;
+            lastObservedAfterWrite = observedAfter;
+            if (reverifyStableFrames >= 25) break;
         }
     };
     const renderTargetWindow = async (

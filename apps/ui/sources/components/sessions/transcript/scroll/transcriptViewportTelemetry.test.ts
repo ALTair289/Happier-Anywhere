@@ -366,6 +366,30 @@ describe('transcript viewport telemetry', () => {
         });
     });
 
+    it('accepts viewport-resized as a typed scroll-write reason (S3 composer/keyboard resize events)', async () => {
+        const module = await loadTelemetryModule();
+        const createTranscriptViewportTelemetry = requireFunction(module, 'createTranscriptViewportTelemetry');
+
+        const telemetry = createTranscriptViewportTelemetry({
+            enabled: true,
+            now: () => 100,
+        }) as {
+            record: (event: unknown) => void;
+            snapshot: () => { events: Array<Record<string, unknown>>; droppedCount: number };
+        };
+
+        telemetry.record(buildScrollWriteEvent({
+            writer: 'mvcp-skip',
+            reason: 'viewport-resized',
+        }));
+
+        expect(telemetry.snapshot().events[0]).toMatchObject({
+            type: 'scroll-write',
+            writer: 'mvcp-skip',
+            reason: 'viewport-resized',
+        });
+    });
+
     it('drops coarse experiment scroll-write reasons', async () => {
         const module = await loadTelemetryModule();
         const createTranscriptViewportTelemetry = requireFunction(module, 'createTranscriptViewportTelemetry');
@@ -1166,47 +1190,6 @@ describe('transcript viewport telemetry — N1 evidence events', () => {
         mode: 'user-unpinned',
         timestampMs: 1000,
     };
-
-    it('accepts offset-correction events with typed action, source, and diff (N1.1)', async () => {
-        const telemetry = await createEvidenceTelemetry();
-
-        const actions = [
-            { correctionAction: 'pause-set', correctionSource: 'scroll-to-index' },
-            { correctionAction: 'pause-cleared', correctionSource: 'initial-scroll-index' },
-            { correctionAction: 'correction-applied', correctionDiffPx: -412.5 },
-            { correctionAction: 'correction-skipped-paused', correctionDiffPx: 87 },
-            { correctionAction: 'correction-skipped-animation', correctionDiffPx: 12 },
-        ];
-        for (const fields of actions) {
-            telemetry.record({ type: 'offset-correction', ...commonFields, ...fields });
-        }
-
-        const snapshot = telemetry.snapshot();
-        expect(snapshot.events.map((event) => event.correctionAction)).toEqual(
-            actions.map((fields) => fields.correctionAction),
-        );
-        expect(snapshot.events[2]?.correctionDiffPx).toBe(-412.5);
-        expect(snapshot.events[0]?.correctionSource).toBe('scroll-to-index');
-        expect(snapshot.droppedCount).toBe(0);
-    });
-
-    it('drops offset-correction events with free-form action or source', async () => {
-        const telemetry = await createEvidenceTelemetry();
-
-        telemetry.record({ type: 'offset-correction', ...commonFields, correctionAction: 'user typed text' });
-        telemetry.record({ type: 'offset-correction', ...commonFields });
-        telemetry.record({
-            type: 'offset-correction',
-            ...commonFields,
-            correctionAction: 'pause-set',
-            correctionSource: 'something-else',
-        });
-
-        const snapshot = telemetry.snapshot();
-        expect(snapshot.events).toHaveLength(1);
-        expect(snapshot.events[0]).toMatchObject({ correctionAction: 'pause-set' });
-        expect(snapshot.events[0]).not.toHaveProperty('correctionSource');
-    });
 
     it('accepts row-measured events with kind, delta, and viewport relation (N1.2)', async () => {
         const telemetry = await createEvidenceTelemetry();

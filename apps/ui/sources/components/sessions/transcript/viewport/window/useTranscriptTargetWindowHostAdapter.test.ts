@@ -438,6 +438,90 @@ describe('transcript target-window host adapter', () => {
         expect(onJumpLanded).toHaveBeenCalledTimes(1);
     });
 
+    it('nudges scrollTop to force FlashList chunk re-render when approach writes are stable but target is unmounted (P2SMOKE3-S3-JUMP-GAP)', async () => {
+        // Live S3 evidence: route jumpSeq=41, st=22470 correct but FlashList chunk 1 has a
+        // 6793px blank allocation gap (17449–24240) from streaming-growth reallocation.
+        // Approach writes re-write st=22470 every frame; FlashList's scroll listener never
+        // fires because scrollTop does not change. nudgeScrollForGap fires after 2 stable
+        // non-mounted frames, changing scrollTop by 1px to trigger FlashList chunk population.
+        const onJumpLanded = vi.fn();
+        // State-based mock: target unmounted until nudge fires, then mounted.
+        // scrollToTarget() calls isTargetMounted() internally, so a call-count mock would
+        // couple to implementation details; a state-based mock encodes the real contract.
+        let nudged = false;
+        const nudgeScrollForGap = vi.fn().mockImplementation(() => { nudged = true; });
+        const isTargetMounted = vi.fn().mockImplementation(() => nudged);
+
+        const result = await executeTranscriptTargetWindowJump({
+            canRenderTargetWindow: true,
+            hasGenuineUserMovementSince: () => false,
+            isTargetInRenderedWindow: () => true,
+            isTargetMounted,
+            loadTargetWindow: vi.fn(async () => ({ windowId: 'window-41' })),
+            nudgeScrollForGap,
+            onJumpLanded,
+            platformOS: 'web',
+            // Stable scrollTop throughout — simulates the blank-chunk gap condition where
+            // approach writes apply but scrollTop does not move.
+            readScrollTop: vi.fn().mockReturnValue(22470),
+            resolveTargetIndex: () => ({ status: 'not-found', reason: 'unavailable' }),
+            scrollToTarget: vi.fn(() => true),
+            target: { kind: 'seq', seq: 41 },
+            targetSeq: 41,
+            waitForNextLandingFrame: () => Promise.resolve(),
+        });
+
+        expect(result.status).toBe('window-rendered');
+        // Nudge must fire exactly once (at 2 stable non-mounted frames) before the target mounts.
+        expect(nudgeScrollForGap).toHaveBeenCalledTimes(1);
+        // Landing must be confirmed exactly once after nudge allows FlashList to render.
+        expect(onJumpLanded).toHaveBeenCalledTimes(1);
+        expect(onJumpLanded).toHaveBeenCalledWith(result);
+    });
+
+    it('re-corrects the settled landing when FlashList reallocation moves the target post-settle (P2SMOKE3-S3-JUMP-GAP)', async () => {
+        // Live S3 evidence: landing settles at st=22470 (correct at write time), then FlashList
+        // async re-measurement + streaming growth collapse estimated heights and move the target
+        // row to absTop≈16578 — the settled viewport is left in an unrendered allocation gap.
+        // The bounded post-settle re-verification must follow the target to its new position.
+        const onJumpLanded = vi.fn();
+        let scrollTop = 0;
+        let targetScrollTop = 22470;
+        let frames = 0;
+
+        const result = await executeTranscriptTargetWindowJump({
+            canRenderTargetWindow: true,
+            hasGenuineUserMovementSince: () => false,
+            isTargetInRenderedWindow: () => true,
+            isTargetMounted: () => true,
+            loadTargetWindow: vi.fn(async () => ({ windowId: 'window-41' })),
+            onJumpLanded,
+            platformOS: 'web',
+            readScrollTop: () => scrollTop,
+            resolveTargetIndex: () => ({ status: 'not-found', reason: 'unavailable' }),
+            scrollToTarget: vi.fn(() => {
+                scrollTop = targetScrollTop;
+                return true;
+            }),
+            target: { kind: 'seq', seq: 41 },
+            targetSeq: 41,
+            waitForNextLandingFrame: () => {
+                frames += 1;
+                // Simulate the post-settle reallocation: the main landing loop settles within
+                // the first few frames; the drift lands afterwards, during re-verification.
+                if (frames === 6) targetScrollTop = 16578;
+                return Promise.resolve();
+            },
+        });
+
+        expect(result.status).toBe('window-rendered');
+        // The re-verification pass must have chased the drifted layout to its new position.
+        expect(scrollTop).toBe(16578);
+        // Landing is still reported exactly once — re-verification corrects, never re-lands.
+        expect(onJumpLanded).toHaveBeenCalledTimes(1);
+        expect(onJumpLanded).toHaveBeenCalledWith(result);
+    });
+
     it('pages nearby unresolved targets before replacing the list with a target window', async () => {
         const pageTowardTarget = vi.fn(async () => ({
             status: 'scrolled' as const,

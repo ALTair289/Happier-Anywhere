@@ -1276,6 +1276,14 @@ describe('native bottom-follow observation policy', () => {
             ...base,
             reason: 'layout-change',
         })).toBe(true);
+
+        // viewport-resized (composer/keyboard inset change) keeps layout-change parity: on
+        // inverted native lists the viewOffset absorbs the resize, so the default
+        // materialization pin stays skipped.
+        expect(shouldSkipNativeDefaultMaterializationPin({
+            ...base,
+            reason: 'viewport-resized',
+        })).toBe(true);
     });
 
     it('skips automatic content-size-change materialization pins without a matching one-shot permission', () => {

@@ -15,6 +15,8 @@ import {
     readTerminalComposerDraftBlockedStateAtMs,
 } from '@/components/sessions/terminalComposer/terminalComposerDraftBlockedEvent';
 import { useTerminalComposerClearAction } from '@/components/sessions/terminalComposer/useTerminalComposerClearAction';
+import { getCachedIntlDateTimeFormat } from '@/utils/datetime/cachedIntlFormatters';
+import type { TranscriptEventEmphasis } from './transcriptEventEmphasis';
 
 const EVENT_ICON_SIZE = 18;
 const EVENT_SPINNER_SIZE = 20;
@@ -23,7 +25,7 @@ const EVENT_ICON_CONTAINER_SIZE = 20;
 function formatLimitReachedTime(timestamp: number): string {
     try {
         const date = new Date(timestamp * 1000);
-        return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        return getCachedIntlDateTimeFormat([], { hour: '2-digit', minute: '2-digit' }).format(date);
     } catch {
         return t('message.unknownTime');
     }
@@ -32,7 +34,7 @@ function formatLimitReachedTime(timestamp: number): string {
 function formatQuotaResetTime(timestampMs: number): string {
     try {
         const date = new Date(timestampMs);
-        return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        return getCachedIntlDateTimeFormat([], { hour: '2-digit', minute: '2-digit' }).format(date);
     } catch {
         return t('message.unknownTime');
     }
@@ -273,9 +275,12 @@ const TerminalComposerClearActionButton = React.memo(function TerminalComposerCl
 export const TranscriptEventRow = React.memo(function TranscriptEventRow(props: {
     event: AgentEvent;
     sessionId?: string | null;
+    emphasis?: TranscriptEventEmphasis;
 }) {
     const { theme } = useUnistyles();
     const settings = useSettings();
+    const deemphasized = props.emphasis === 'deemphasized';
+    const eventColor = deemphasized ? theme.colors.text.tertiary : theme.colors.text.secondary;
     const isTerminalComposerDraftBlocked = isTerminalComposerDraftBlockedEvent(props.event);
     const terminalComposerDraftBlockedStateAtMs = readTerminalComposerDraftBlockedStateAtMs(props.event);
     let iconName: React.ComponentProps<typeof Ionicons>['name'] = 'information-circle-outline';
@@ -409,13 +414,13 @@ export const TranscriptEventRow = React.memo(function TranscriptEventRow(props: 
             <View style={styles.row}>
                 <View style={styles.iconContainer}>
                     {isLoading ? (
-                        <ActivitySpinner size={EVENT_SPINNER_SIZE} color={theme.colors.text.secondary} />
+                        <ActivitySpinner size={EVENT_SPINNER_SIZE} color={eventColor} />
                     ) : (
-                        <Ionicons name={iconName} size={EVENT_ICON_SIZE} color={theme.colors.text.secondary} />
+                        <Ionicons name={iconName} size={EVENT_ICON_SIZE} color={eventColor} />
                     )}
                 </View>
                 <View style={styles.textColumn} testID={testID ? `${testID}-body` : undefined}>
-                    <Text selectable style={styles.text}>
+                    <Text selectable style={[styles.text, deemphasized ? styles.deemphasizedText : null]}>
                         {text}
                     </Text>
                     {detailText ? (
@@ -435,7 +440,7 @@ export const TranscriptEventRow = React.memo(function TranscriptEventRow(props: 
     );
 
     return (
-        <View style={styles.container} testID={testID}>
+        <View style={[styles.container, deemphasized ? styles.deemphasizedContainer : null]} testID={testID}>
             {testID === 'transcript-event-connected-service-account-switch' ? (
                 <View testID="session-event-connected-service-account-switch">
                     {content}
@@ -474,6 +479,12 @@ const styles = StyleSheet.create((theme) => ({
         lineHeight: 20,
         fontWeight: '500',
         flexShrink: 1,
+    },
+    deemphasizedText: {
+        color: theme.colors.text.tertiary,
+    },
+    deemphasizedContainer: {
+        opacity: 0.58,
     },
     detailText: {
         color: theme.colors.text.tertiary,

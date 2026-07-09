@@ -7,6 +7,7 @@
  * headers for the fidelity model and the canonical-owner composition.
  */
 export * from './flashListRuntimeModel';
+export * from './legendListRuntimeModel';
 export * from './perfContractTracker';
 export * from './transcriptRuntimeContract';
 export * from './sidechainShellRuntimeModel';

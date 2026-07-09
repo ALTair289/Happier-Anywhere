@@ -3,7 +3,7 @@
  * scroll physics (native inverted FlashList / web standard DOM).
  *
  * Above this seam the host holds only semantic FACTS (read) and issues semantic COMMANDS; below it the
- * platform drivers own the raw scroll primitives. Native fact readers are native inverted only; web DOM
+ * platform drivers own the raw scroll primitives. Native fact readers are command-space specific; web DOM
  * raw scrollTop identity stays outside this native fact source.
  *
  * The G1 lint rule (added once the surface is complete) forbids raw scroll primitives above this seam:
@@ -20,7 +20,7 @@ export interface TranscriptViewportFactSource {
     /**
      * Canonical px distance from the visual live-tail edge (0 = pinned at the bottom). `null` = unknown
      * (no measured native offset, or zero/unmeasured layout). This is the ONLY upward expression of the
-     * raw native inverted offset mapping: callers never read `getAbsoluteLastScrollOffset` or
+     * raw native offset mapping: callers never read `getAbsoluteLastScrollOffset` or
      * raw-to-canonical conversion helpers directly. `override` lets a caller supply freshly-measured content/layout
      * heights (e.g. during a content-size change before the refs settle).
      */
@@ -47,13 +47,13 @@ export interface TranscriptViewportFactSource {
     resolveReachedEdge(edge: TranscriptViewportRenderedEdge): TranscriptViewportSemanticEdge;
 
     /**
-     * Map a raw native inverted scroll offset to the CANONICAL (0 = oldest edge) offset. Web DOM
+     * Map a raw native scroll offset to the CANONICAL (0 = oldest edge) offset. Web DOM
      * scrollTop identity is handled before this method is reached.
      */
     toCanonicalOffset(rawOffsetY: number, override?: Readonly<{ contentHeight?: number; layoutHeight?: number }>): number;
 
     /**
-     * Normalize one native raw scroll observation into the semantic facts the host needs. Native inverted raw
+     * Normalize one native raw scroll observation into the semantic facts the host needs. Native raw
      * offset math and live-tail detection stay below this seam; callers above it consume canonical offset,
      * distance-from-live-tail, and raw-live-tail state as a single consistent snapshot.
      */
@@ -86,12 +86,12 @@ export type TranscriptViewportRenderedEdge = 'start' | 'end';
 export type TranscriptViewportSemanticEdge = 'older' | 'newer';
 
 /**
- * The read accessors the native inverted driver needs from the host: closures over the FlashList ref and
+ * The read accessors native fact drivers need from the host: closures over the list ref and
  * the measured geometry refs. Passing closures (rather than the refs themselves) keeps the driver pure and
  * unit-testable without React, and keeps the raw `getAbsoluteLastScrollOffset` call on the host side of the
  * closure boundary so the driver body never names a FlashList primitive type.
  */
-export type NativeInvertedFlashListFactReaders = Readonly<{
+export type NativeListFactReaders = Readonly<{
     /** `listRef.current?.getAbsoluteLastScrollOffset?.()` — the raw native scroll offset (undefined if unavailable). */
     readRawScrollOffset: () => number | undefined;
     /** The last measured content height (px). */
@@ -110,3 +110,5 @@ export type NativeInvertedFlashListFactReaders = Readonly<{
      */
     readSourceIndexForRenderedIndex?: (renderedIndex: number) => number | null | undefined;
 }>;
+
+export type NativeInvertedFlashListFactReaders = NativeListFactReaders;

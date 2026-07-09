@@ -16,7 +16,7 @@ import { installFlashListChatListCommonModuleMocks } from '@/dev/testkit/harness
 
 const loadNewerMessages = vi.fn(async (_sessionId?: string) => {});
 const hasDeferredNewerMessages = vi.fn(() => true);
-const getSyncTuning = vi.fn(() => ({ transcriptForwardPrefetchThresholdPx: 800, transcriptBackwardPrefetchThresholdPx: 0 }));
+const getSyncTuning = vi.fn(() => ({ transcriptForwardPrefetchThresholdPx: 800, transcriptBackwardPrefetchThresholdPx: 0, transcriptLegendListSpikeSurface: 'flashList' }));
 const maybeDrainDeferredNewerMessages = vi.fn();
 
 installFlashListChatListCommonModuleMocks({
@@ -79,7 +79,7 @@ describe('ChatList (forward prefetch)', () => {
         hasDeferredNewerMessages.mockClear();
         hasDeferredNewerMessages.mockReturnValue(true);
         getSyncTuning.mockClear();
-        getSyncTuning.mockReturnValue({ transcriptForwardPrefetchThresholdPx: 800, transcriptBackwardPrefetchThresholdPx: 0 });
+        getSyncTuning.mockReturnValue({ transcriptForwardPrefetchThresholdPx: 800, transcriptBackwardPrefetchThresholdPx: 0, transcriptLegendListSpikeSurface: 'flashList' });
         maybeDrainDeferredNewerMessages.mockClear();
     });
 

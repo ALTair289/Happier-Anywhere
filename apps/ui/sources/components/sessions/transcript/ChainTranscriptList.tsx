@@ -55,6 +55,7 @@ import {
     TranscriptListShell,
     type TranscriptListShellRef,
 } from '@/components/sessions/transcript/viewport/shell/TranscriptListShell';
+import { resolveTranscriptListRendererKind } from '@/components/sessions/transcript/viewport/shell/renderer/resolveTranscriptListRenderer';
 import { resolveSidechainTranscriptListShellFrame } from '@/components/sessions/transcript/viewport/shell/transcriptListShellCapabilities';
 import {
     applySidechainInitialBottomPinRequest,
@@ -234,6 +235,13 @@ export const ChainTranscriptList = React.memo(function ChainTranscriptList(props
     const syncTuning = sync.getSyncTuning();
     const estimatedItemSize = syncTuning.transcriptFlashListEstimatedItemSize;
     const configuredBackwardPrefetchThresholdPx = syncTuning.transcriptBackwardPrefetchThresholdPx;
+    const sidechainRendererKind = resolveTranscriptListRendererKind({
+        frameSurface: 'sidechain',
+        transcriptLegendListSpikeSurface: syncTuning.transcriptLegendListSpikeSurface,
+    });
+    const appOwnsSidechainInitialBottomPin = sidechainRendererKind === 'flashList';
+    const appOwnsSidechainPrependRestore = sidechainRendererKind === 'flashList';
+    const appOwnsSidechainLocalHeightChangeRestore = sidechainRendererKind === 'flashList';
     const shellFrame = React.useMemo(() => resolveSidechainTranscriptListShellFrame({
         platformOS: Platform.OS,
     }), []);
@@ -384,11 +392,12 @@ export const ChainTranscriptList = React.memo(function ChainTranscriptList(props
     const waitForNextVisualUpdate = React.useCallback(waitForNextTranscriptVisualUpdate, []);
 
     const buildWebPrependAnchor = React.useCallback((pinThresholdPx: number): WebTranscriptScrollMetrics | null => {
+        if (!appOwnsSidechainPrependRestore) return null;
         return resolveSidechainWebPrependAnchor({
             element: webScrollElementRef.current,
             pinThresholdPx,
         });
-    }, []);
+    }, [appOwnsSidechainPrependRestore]);
 
     const resolveTopPrefetchThresholdPx = React.useCallback((viewportPx: number): number => {
         return resolveTranscriptEdgePrefetchThresholdPx({
@@ -471,15 +480,21 @@ export const ChainTranscriptList = React.memo(function ChainTranscriptList(props
     }, [props.sessionId, resetOlderPagination]);
 
     const captureWebLocalHeightChangeAnchor = React.useCallback((): SidechainWebLocalHeightChangeAnchor | null => {
+        if (!appOwnsSidechainLocalHeightChangeRestore) return null;
         return resolveSidechainWebLocalHeightChangeAnchor({
             element: webScrollElementRef.current,
             platformOS: Platform.OS,
             resolveViewportGuardThresholdPx,
             sessionId: props.sessionId,
         });
-    }, [props.sessionId, resolveViewportGuardThresholdPx]);
+    }, [
+        appOwnsSidechainLocalHeightChangeRestore,
+        props.sessionId,
+        resolveViewportGuardThresholdPx,
+    ]);
 
     const applyWebLocalHeightChangeAnchor = React.useCallback((anchor: SidechainWebLocalHeightChangeAnchor): void => {
+        if (!appOwnsSidechainLocalHeightChangeRestore) return;
         if (anchor.sessionId !== props.sessionId) return;
         applySidechainWebLocalHeightRestore({
             anchor,
@@ -492,14 +507,23 @@ export const ChainTranscriptList = React.memo(function ChainTranscriptList(props
             timestampMs: Date.now(),
             webDomObservation,
         });
-    }, [olderPagination, props.sessionId, syncTuning, webDomObservation]);
+    }, [
+        appOwnsSidechainLocalHeightChangeRestore,
+        olderPagination,
+        props.sessionId,
+        syncTuning,
+        webDomObservation,
+    ]);
 
     const setToolCallsGroupExpanded = React.useCallback((params: { toolCallsGroupId: string; toolMessageIds: readonly string[]; expanded: boolean }) => {
         const isExpanded = params.toolMessageIds.some((id) => expandedToolCallsAnchorMessageIds.has(id));
         if (isExpanded !== params.expanded) {
             const webAnchor = captureWebLocalHeightChangeAnchor();
             pendingWebLocalHeightChangeAnchorRef.current = webAnchor;
-            if (webAnchor?.mode !== 'follow-bottom') {
+            if (
+                appOwnsSidechainLocalHeightChangeRestore &&
+                webAnchor?.mode !== 'follow-bottom'
+            ) {
                 deferAutoPinAfterLocalTranscriptInteraction();
             }
         }
@@ -519,17 +543,27 @@ export const ChainTranscriptList = React.memo(function ChainTranscriptList(props
         });
     }, [
         captureWebLocalHeightChangeAnchor,
+        appOwnsSidechainLocalHeightChangeRestore,
         deferAutoPinAfterLocalTranscriptInteraction,
         expandedToolCallsAnchorMessageIds,
     ]);
 
     React.useLayoutEffect(() => {
+        if (!appOwnsSidechainLocalHeightChangeRestore) {
+            pendingWebLocalHeightChangeAnchorRef.current = null;
+            return;
+        }
         if (Platform.OS !== 'web') return;
         const anchor = pendingWebLocalHeightChangeAnchorRef.current;
         if (!anchor) return;
         pendingWebLocalHeightChangeAnchorRef.current = null;
         applyWebLocalHeightChangeAnchor(anchor);
-    }, [applyWebLocalHeightChangeAnchor, expandedToolCallsAnchorMessageIds, items.length]);
+    }, [
+        appOwnsSidechainLocalHeightChangeRestore,
+        applyWebLocalHeightChangeAnchor,
+        expandedToolCallsAnchorMessageIds,
+        items.length,
+    ]);
 
     const {
         getSnapshot: getOlderPaginationSnapshot,
@@ -614,6 +648,7 @@ export const ChainTranscriptList = React.memo(function ChainTranscriptList(props
     ]);
 
     const pinToBottom = React.useCallback(() => {
+        if (!appOwnsSidechainInitialBottomPin) return;
         applySidechainInitialBottomPinRequest({
             alreadyApplied: initialPinDoneRef.current,
             contentHeightPx: listContentHeightRef.current,
@@ -628,7 +663,13 @@ export const ChainTranscriptList = React.memo(function ChainTranscriptList(props
                 initialPinDoneRef.current = applied;
             },
         });
-    }, [estimatedItemSize, jumpToMessageId, renderedItems.length, shellFrame.dataOrder]);
+    }, [
+        appOwnsSidechainInitialBottomPin,
+        estimatedItemSize,
+        jumpToMessageId,
+        renderedItems.length,
+        shellFrame.dataOrder,
+    ]);
 
     React.useEffect(() => {
         pinToBottom();

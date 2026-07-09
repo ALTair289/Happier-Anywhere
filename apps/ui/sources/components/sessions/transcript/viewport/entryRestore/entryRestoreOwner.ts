@@ -135,11 +135,13 @@ export type EntryRestoreOwnerAttemptInput<TItem> = Readonly<{
     contentHeight: number;
     currentSessionId: string;
     deadlineMs: number;
+    exactAnchorCommandIndex?: number | null;
     exactAnchorIndex: number | null;
     fillSettled: boolean;
     items: readonly TItem[];
     jumpToSeqActive: boolean;
     layoutHeight: number;
+    nearestAnchorCommandIndex?: number | null;
     nearestAnchorIndex: number | null;
     nowMs: number;
     platform: EntryRestoreOwnerPlatform;
@@ -276,6 +278,21 @@ export function createEntryRestoreOwner(): EntryRestoreOwner {
         });
 
         if (target.kind === 'none' && isWaitNoneReason(target.reason)) return [];
+        // On web, the entry restore layout effect may fire before any items are
+        // available (direct URL cold load: the React mount precedes the initial fill
+        // loop). Treating `empty-transcript` as FINAL at this point sets
+        // lastClosedSessionId and permanently blocks all subsequent retries.
+        // Treat it as a wait verdict until the fill settles so the owner retries
+        // once content arrives. Native is excluded: the slice path owns initial
+        // materialization there and does not share this timing race.
+        if (
+            params.platform === 'web' &&
+            target.kind === 'none' &&
+            target.reason === 'empty-transcript' &&
+            !params.fillSettled
+        ) {
+            return [];
+        }
         if (target.kind === 'materialize-then-anchor') {
             return materializeEffects('missing-anchor', 'restore-anchor', distanceFromBottom, params);
         }
@@ -308,13 +325,16 @@ export function createEntryRestoreOwner(): EntryRestoreOwner {
             contentHeight: params.contentHeight,
             distanceFromBottom,
             itemIndex: target.kind === 'anchor' ? target.index : null,
-            kind: target.kind === 'anchor' ? 'anchor' : target.kind === 'bottom' ? 'bottom' : 'distance',
+            kind: target.kind === 'anchor'
+                ? 'anchor'
+                : target.kind === 'bottom'
+                    ? 'bottom'
+                    : 'distance',
             layoutHeight: params.layoutHeight,
             nowMs: params.nowMs,
             sessionId: params.currentSessionId,
             targetOffsetY: target.kind === 'distance-oneshot' ? target.targetOffsetY : null,
-            targetOffsetYWasClamped:
-                target.kind === 'distance-oneshot' &&
+            targetOffsetYWasClamped: target.kind === 'distance-oneshot' &&
                 Math.max(0, Math.trunc(params.contentHeight - params.layoutHeight)) < distanceFromBottom,
         });
         const opened = openTransaction({
@@ -329,7 +349,7 @@ export function createEntryRestoreOwner(): EntryRestoreOwner {
         if (target.kind === 'anchor') {
             const command = buildEntryAnchorCommand({
                 anchor: entryViewport.anchor,
-                itemIndex: target.index,
+                itemIndex: resolveAnchorCommandIndex(target.index, params),
                 itemOffsetPx: target.itemOffsetPx,
                 platform: params.platform,
                 sessionId: params.currentSessionId,
@@ -554,7 +574,7 @@ export function createEntryRestoreOwner(): EntryRestoreOwner {
         const renderedAnchor = params.slice.renderedAnchor ?? null;
         const sliceIndex = params.slice.renderedAnchorIndex ?? null;
         if (renderedAnchor == null || sliceIndex == null) {
-            if (params.canMaterializeOlder) {
+            if (params.canMaterializeOlder && params.restoredViewport?.anchorSeqLoaded !== true) {
                 return materializeEffects('missing-anchor', 'restore-anchor', params.distanceFromBottom, params);
             }
             return null;
@@ -867,6 +887,21 @@ function buildEntryAnchorCommand(params: Readonly<{
         };
     }
     return buildAnchorCommand(params.sessionId, params.anchor, params.itemOffsetPx, params.animated);
+}
+
+function resolveAnchorCommandIndex<TItem>(
+    targetIndex: number,
+    params: EntryRestoreOwnerAttemptInput<TItem>,
+): number {
+    const commandIndex =
+        targetIndex === params.exactAnchorIndex
+            ? params.exactAnchorCommandIndex
+            : targetIndex === params.nearestAnchorIndex
+                ? params.nearestAnchorCommandIndex
+                : null;
+    return typeof commandIndex === 'number' && Number.isFinite(commandIndex)
+        ? Math.max(0, Math.trunc(commandIndex))
+        : targetIndex;
 }
 
 function buildDistanceCommand(

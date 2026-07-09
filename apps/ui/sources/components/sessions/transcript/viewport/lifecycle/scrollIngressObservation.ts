@@ -2,6 +2,7 @@ import type { WebTranscriptScrollMetrics } from '@/components/sessions/transcrip
 import { resolveWebDomOlderLoadObservationTrigger } from '../driver/webDomOlderLoadObservation';
 import {
     normalizeTranscriptScrollIngress,
+    type TranscriptScrollIngressNativeCommandSpace,
     type TranscriptScrollIngressNativeEvent,
     type TranscriptScrollIngressObservation,
     type TranscriptScrollIngressPlatform,
@@ -19,6 +20,12 @@ import type { EntryRestoreOwnerEffect } from '../entryRestore/entryRestoreOwner'
 import type { NativePrependOwnerEffect } from '../prepend/nativePrependOwner';
 
 export type TranscriptScrollIngressWebMovement = Readonly<{
+    /**
+     * DOM observation attestation that `scrollTop` moved since the last observed
+     * (landed) value; `false` = the echo of the app's own programmatic write,
+     * `null` = no live metrics were available to attest the frame.
+     */
+    webMovedSinceLastObservation: boolean | null;
     webObservedUpwardIntent: boolean;
     webObservedUserScrollMovement: boolean;
 }>;
@@ -48,6 +55,7 @@ export type TranscriptScrollIngressInput = Readonly<{
     loadOlderInFlight: boolean;
     measuredContentHeight: number;
     measuredLayoutHeight: number;
+    nativeCommandSpace?: TranscriptScrollIngressNativeCommandSpace;
     nativeListDragActive: boolean;
     nativeMomentumScrollActive: boolean;
     nativeMountSettleDeadlineReached: boolean;
@@ -152,6 +160,18 @@ export type TranscriptScrollIngressCallbacks = Readonly<{
             rawOffsetY: number;
         }>,
     ): void;
+    observeNativeBlankRecovery(
+        reason: TranscriptViewportTelemetryObservationReason,
+        input: Readonly<{
+            canonicalOffsetY: number;
+            contentHeight: number;
+            distanceFromBottom: number;
+            emptyVisibleWindowObserved?: boolean;
+            layoutHeight: number;
+            rawOffsetY: number;
+            viewportOutsideContentObserved?: boolean;
+        }>,
+    ): void;
     refreshInFlightWebPrependAnchor(input: Readonly<{
         userScrolledDuringLoad: boolean;
     }>): void;
@@ -176,6 +196,7 @@ export function observeTranscriptScrollIngress(
         eventNativeEvent: input.eventNativeEvent,
         measuredContentHeight: input.measuredContentHeight,
         measuredLayoutHeight: input.measuredLayoutHeight,
+        nativeCommandSpace: input.nativeCommandSpace,
         platform: input.platform,
         webMetrics: input.platform === 'web' ? callbacks.resolveWebScrollMetrics() : null,
     });
@@ -198,8 +219,10 @@ export function observeTranscriptScrollIngress(
             layoutHeight: observation.layoutHeightPx,
             rawOffsetY: observation.rawOffsetY,
             reason,
+            viewportOutsideContentObserved: observation.viewportOutsideContent,
         } as const;
         callbacks.recordNativeScrollObservation(telemetryInput);
+        callbacks.observeNativeBlankRecovery(reason, telemetryInput);
         callbacks.recordNativeVisibleWindowTelemetry(reason, telemetryInput);
     };
 
@@ -290,7 +313,11 @@ export function observeTranscriptScrollIngress(
             pinThresholdPx: input.pinThresholdPx,
             visualBottomScrollOffset: observation.visualBottomScrollOffsetPx,
         })
-        : { webObservedUpwardIntent: false, webObservedUserScrollMovement: false };
+        : {
+            webMovedSinceLastObservation: null,
+            webObservedUpwardIntent: false,
+            webObservedUserScrollMovement: false,
+        };
     const recentUserIntentBeforeObservation =
         observation.isTrusted || input.nowMs - input.lastUserScrollIntentAtMs < input.userIntentRecentMs;
 
@@ -334,6 +361,7 @@ export function observeTranscriptScrollIngress(
             scrollOffsetPx: observation.scrollOffsetPx,
             sessionId: input.sessionId,
             wantsPinned: input.wantsPinned,
+            webMovedSinceLastObservation: webMovement.webMovedSinceLastObservation ?? undefined,
             webObservedUserScrollMovement: webMovement.webObservedUserScrollMovement,
         })
         : callbacks.lifecycleHost.observeScroll({

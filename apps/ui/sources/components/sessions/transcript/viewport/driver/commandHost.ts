@@ -2,6 +2,7 @@ import {
     type TranscriptViewportCommandController,
     type TranscriptViewportRejectedWrite,
 } from '@/components/sessions/transcript/viewport/createTranscriptViewportCommandController';
+import type { TranscriptViewportTransactionOutcome } from '@/components/sessions/transcript/viewport/transcriptViewportOwnership';
 import { performTranscriptViewportCommand } from '@/components/sessions/transcript/viewport/performTranscriptViewportCommand';
 import type {
     WebTranscriptPrependAnchor,
@@ -40,6 +41,7 @@ export type TranscriptViewportCommandHost = Readonly<{
 }>;
 
 export type TranscriptViewportCommandHostDeps = Readonly<{
+    clearWebPrependRestoreWindow: (outcome: TranscriptViewportTransactionOutcome) => void;
     controller: TranscriptViewportCommandController;
     driverDeps: TranscriptViewportDriverDeps;
     hasWebPrependRestoreWindow: () => boolean;
@@ -53,6 +55,7 @@ export function createTranscriptViewportCommandHost(
         command: TranscriptViewportCommand,
         perform: (commandToPerform: TranscriptViewportCommand) => boolean,
     ): boolean => deps.controller.execute(command, {
+        clearWebPrependRestoreWindow: deps.clearWebPrependRestoreWindow,
         hasWebPrependRestoreWindow: deps.hasWebPrependRestoreWindow,
         isWeb: deps.isWeb(),
         perform,

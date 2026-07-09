@@ -4,6 +4,7 @@ import {
     performNativeInvertedFlashListViewportCommand,
     resolveIndexScrollWriter,
 } from '@/components/sessions/transcript/viewport/driver/nativeInvertedFlashList';
+import { performNativeStandardListViewportCommand } from '@/components/sessions/transcript/viewport/driver/nativeStandardList';
 import { performWebDomViewportCommand } from '@/components/sessions/transcript/viewport/driver/webDom';
 import type { TranscriptViewportDriverDeps } from '@/components/sessions/transcript/viewport/driver/types';
 import type { TranscriptViewportCommand } from '@/components/sessions/transcript/viewport/transcriptViewportTypes';
@@ -38,6 +39,10 @@ export function performTranscriptViewportCommand(
 
     if (Platform.OS === 'web') {
         return performWebDomViewportCommand(command, deps);
+    }
+
+    if (deps.listRef.current?.transcriptViewportCommandSpace === 'standard') {
+        return performNativeStandardListViewportCommand(command, deps);
     }
 
     return performNativeInvertedFlashListViewportCommand(command, deps);

@@ -1,10 +1,5 @@
 import type { TranscriptViewportLifecycleEffect } from './lifecycle';
 
-type ExplicitReturnViewportChangeEffect = Extract<
-    TranscriptViewportLifecycleEffect,
-    { type: 'viewport-change' }
->;
-
 export type ExplicitReturnToLiveTailViewportEffect = Readonly<{
     distanceFromLiveTailPx: number;
     isPinned: true;
@@ -12,26 +7,48 @@ export type ExplicitReturnToLiveTailViewportEffect = Readonly<{
     type: 'apply-explicit-return-to-live-tail-viewport';
 }>;
 
+export type ExplicitReturnToLiveTailClearUserScrollIntentEffect = Readonly<{
+    sessionId: string;
+    type: 'apply-explicit-return-clear-user-scroll-intent';
+}>;
+
+export type ExplicitReturnToLiveTailApplyEffect =
+    | ExplicitReturnToLiveTailClearUserScrollIntentEffect
+    | ExplicitReturnToLiveTailViewportEffect;
+
+export function resolveExplicitReturnToLiveTailApplyEffects(params: Readonly<{
+    effects: readonly TranscriptViewportLifecycleEffect[];
+    sessionId: string;
+}>): readonly ExplicitReturnToLiveTailApplyEffect[] {
+    const applyEffects: ExplicitReturnToLiveTailApplyEffect[] = [];
+    for (const effect of params.effects) {
+        if (effect.sessionId !== params.sessionId) continue;
+        if (effect.type === 'explicit-return-clear-user-scroll-intent') {
+            applyEffects.push({
+                sessionId: effect.sessionId,
+                type: 'apply-explicit-return-clear-user-scroll-intent',
+            });
+            continue;
+        }
+        if (effect.type === 'viewport-change' && effect.source === 'explicit-return') {
+            applyEffects.push({
+                distanceFromLiveTailPx: effect.distanceFromLiveTailPx,
+                isPinned: true,
+                sessionId: effect.sessionId,
+                type: 'apply-explicit-return-to-live-tail-viewport',
+            });
+        }
+    }
+    return applyEffects;
+}
+
 export function resolveExplicitReturnToLiveTailViewportEffects(params: Readonly<{
     effects: readonly TranscriptViewportLifecycleEffect[];
     sessionId: string;
 }>): readonly ExplicitReturnToLiveTailViewportEffect[] {
-    const viewportEffects: ExplicitReturnToLiveTailViewportEffect[] = [];
-    for (const effect of params.effects) {
-        if (
-            effect.sessionId !== params.sessionId ||
-            effect.type !== 'viewport-change' ||
-            effect.source !== 'explicit-return'
-        ) {
-            continue;
-        }
-        const viewportChangeEffect: ExplicitReturnViewportChangeEffect = effect;
-        viewportEffects.push({
-            distanceFromLiveTailPx: viewportChangeEffect.distanceFromLiveTailPx,
-            isPinned: true,
-            sessionId: viewportChangeEffect.sessionId,
-            type: 'apply-explicit-return-to-live-tail-viewport',
-        });
-    }
-    return viewportEffects;
+    return resolveExplicitReturnToLiveTailApplyEffects(params).filter((
+        effect,
+    ): effect is ExplicitReturnToLiveTailViewportEffect => (
+        effect.type === 'apply-explicit-return-to-live-tail-viewport'
+    ));
 }

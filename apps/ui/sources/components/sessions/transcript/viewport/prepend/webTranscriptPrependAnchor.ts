@@ -33,7 +33,10 @@ export type WebTranscriptViewportAnchor = Readonly<{
 
 export type WebTranscriptViewportAnchorRestoreResult = Readonly<{
     didAdjustScroll: boolean;
-    status: 'restored' | 'already_aligned' | 'not_found' | 'not_applied';
+    // 'scroll_requested': anchor was not in the DOM and its rendered index is within the cold
+    // list; scrollToIndex was called to bring it into the FlashList render window. The caller
+    // should schedule a retry attempt (e.g. requestAnimationFrame) after FlashList re-renders.
+    status: 'restored' | 'already_aligned' | 'not_found' | 'not_applied' | 'scroll_requested';
 }>;
 
 export type WebTranscriptScrollTopWriter = (targetScrollTop: number) => boolean;
@@ -41,6 +44,15 @@ export type WebTranscriptScrollTopWriter = (targetScrollTop: number) => boolean;
 export type WebTranscriptScrollTopWriteOptions = Readonly<{
     writeScrollTop: WebTranscriptScrollTopWriter;
 }>;
+
+export function readWebPrependAnchorTestIdSuffix(
+    testId: string | null | undefined,
+    prefix: string,
+): string | null {
+    if (!testId?.startsWith(prefix)) return null;
+    const suffix = testId.slice(prefix.length);
+    return suffix.length > 0 ? suffix : null;
+}
 
 function resolveElementByTestId(params: Readonly<{
     container: HTMLElement;
@@ -98,22 +110,34 @@ function resolveViewportAnchorKindAndMessageId(testId: string): Readonly<{
     kind: WebTranscriptViewportAnchorKind;
     messageId: string | null;
 }> | null {
-    if (testId.startsWith(TRANSCRIPT_WEB_MESSAGE_PREPEND_ANCHOR_TEST_ID_PREFIX)) {
+    const messageId = readWebPrependAnchorTestIdSuffix(
+        testId,
+        TRANSCRIPT_WEB_MESSAGE_PREPEND_ANCHOR_TEST_ID_PREFIX,
+    );
+    if (messageId) {
         return {
             kind: 'message',
-            messageId: testId.slice(TRANSCRIPT_WEB_MESSAGE_PREPEND_ANCHOR_TEST_ID_PREFIX.length),
+            messageId,
         };
     }
-    if (testId.startsWith(TRANSCRIPT_WEB_TOOL_GROUP_PREPEND_ANCHOR_TEST_ID_PREFIX)) {
+    const toolGroupMessageId = readWebPrependAnchorTestIdSuffix(
+        testId,
+        TRANSCRIPT_WEB_TOOL_GROUP_PREPEND_ANCHOR_TEST_ID_PREFIX,
+    );
+    if (toolGroupMessageId) {
         return {
             kind: 'toolGroup',
-            messageId: testId.slice(TRANSCRIPT_WEB_TOOL_GROUP_PREPEND_ANCHOR_TEST_ID_PREFIX.length),
+            messageId: toolGroupMessageId,
         };
     }
-    if (testId.startsWith(TRANSCRIPT_WEB_TOOL_CALL_PREPEND_ANCHOR_TEST_ID_PREFIX)) {
+    const toolCallMessageId = readWebPrependAnchorTestIdSuffix(
+        testId,
+        TRANSCRIPT_WEB_TOOL_CALL_PREPEND_ANCHOR_TEST_ID_PREFIX,
+    );
+    if (toolCallMessageId) {
         return {
             kind: 'toolGroup',
-            messageId: testId.slice(TRANSCRIPT_WEB_TOOL_CALL_PREPEND_ANCHOR_TEST_ID_PREFIX.length),
+            messageId: toolCallMessageId,
         };
     }
     if (testId.startsWith(TRANSCRIPT_WEB_PREPEND_ANCHOR_TEST_ID_PREFIX)) {
@@ -126,9 +150,7 @@ function resolveViewportAnchorKindAndMessageId(testId: string): Readonly<{
 }
 
 function resolveTranscriptItemIdFromTestId(testId: string | null): string | null {
-    if (!testId?.startsWith(TRANSCRIPT_WEB_PREPEND_ANCHOR_TEST_ID_PREFIX)) return null;
-    const itemId = testId.slice(TRANSCRIPT_WEB_PREPEND_ANCHOR_TEST_ID_PREFIX.length);
-    return itemId.length > 0 ? itemId : null;
+    return readWebPrependAnchorTestIdSuffix(testId, TRANSCRIPT_WEB_PREPEND_ANCHOR_TEST_ID_PREFIX);
 }
 
 type VisibleAnchorCandidate = Readonly<{
@@ -404,9 +426,12 @@ export function restoreWebTranscriptPrependAnchor(
 
     const restoreFromScrollHeightGrowth = (): WebTranscriptPrependRestoreResult | null => {
         const nextScrollHeight = element.scrollHeight;
-        const growth = Math.max(0, nextScrollHeight - anchor.metrics.scrollHeight);
-        if (growth <= 0) return null;
-        const targetScrollTop = anchor.metrics.scrollTop + growth;
+        // targetScrollTop = baseline scrollTop + any net scrollHeight growth.
+        // When sh drops then recovers to the same level (growth = 0 or negative)
+        // and the browser clamped scrollTop downward during the drop, the target
+        // still equals the original baseline scrollTop.  The remainingGrowthPx
+        // check below catches that case and writes the corrected value.
+        const targetScrollTop = anchor.metrics.scrollTop + Math.max(0, nextScrollHeight - anchor.metrics.scrollHeight);
         if (!Number.isFinite(targetScrollTop)) return null;
         const remainingGrowthPx = Math.trunc(targetScrollTop - element.scrollTop);
         if (remainingGrowthPx <= 1) return null;

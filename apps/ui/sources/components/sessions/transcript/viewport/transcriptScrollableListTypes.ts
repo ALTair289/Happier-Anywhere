@@ -6,6 +6,7 @@ import type { TranscriptViewportTelemetryScrollReason } from '@/components/sessi
  * implementations expose (guarded with `typeof node.x === 'function'` at the call sites).
  */
 export type ScrollableChatListRef = Readonly<{
+    transcriptViewportCommandSpace?: 'native-inverted' | 'standard';
     scrollToIndex: (params: { index: number; animated?: boolean; viewOffset?: number; viewPosition?: number }) => void;
     scrollToOffset: (params: { offset: number; animated?: boolean }) => void;
     scrollToEnd?: (params?: { animated?: boolean }) => void;

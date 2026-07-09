@@ -99,9 +99,11 @@ function scrollIngressCallbacks(
         observeMountSettleMetrics: () => {},
         observeNativeConfirmation: () => false,
         observeNativeEntryRestoreHostFacts: () => [],
+        observeNativeBlankRecovery: () => {},
         observeNativePrependOwner: () => {},
         observeOlderPaginationScroll: () => {},
         observeWebGenuineScrollMovement: () => ({
+            webMovedSinceLastObservation: true,
             webObservedUpwardIntent: true,
             webObservedUserScrollMovement: true,
         }),
@@ -123,6 +125,36 @@ function scrollIngressCallbacks(
 }
 
 describe('observeTranscriptScrollIngress', () => {
+    it('routes invalid native offsets to blank recovery outside telemetry recording', () => {
+        const log: string[] = [];
+
+        observeTranscriptScrollIngress(webScrollIngressInput({
+            eventNativeEvent: {
+                contentOffset: { y: -995_030 },
+                contentSize: { height: 2_000 },
+                layoutMeasurement: { height: 500 },
+            },
+            platform: 'native',
+        }), scrollIngressCallbacks({
+            observeNativeBlankRecovery(reason, input) {
+                log.push(`blank:${reason}:${input.rawOffsetY}`);
+            },
+            recordNativeScrollObservation(input) {
+                log.push(`scroll:${input.reason}:${input.rawOffsetY}`);
+            },
+            recordNativeVisibleWindowTelemetry(reason) {
+                log.push(`telemetry:${reason}`);
+            },
+            shouldIgnoreNativeInvalidScrollObservation: () => true,
+        }));
+
+        expect(log).toEqual([
+            'scroll:invalid-native-offset:-995030',
+            'blank:invalid-native-offset:-995030',
+            'telemetry:invalid-native-offset',
+        ]);
+    });
+
     it('refreshes the web prepend anchor when older pagination starts during a discrete scroll observation', () => {
         const log: string[] = [];
         let loadOlderInFlight = false;

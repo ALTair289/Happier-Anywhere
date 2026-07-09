@@ -227,6 +227,48 @@ describe('entry restore owner', () => {
         expect(owner.telemetryState('session-a')).toBe('closed');
     });
 
+    it('falls through from a missing slice anchor to the durable loaded anchor instead of materializing older pages', () => {
+        const owner = createEntryRestoreOwner();
+
+        const effects = owner.attempt({
+            ...baseAttempt,
+            canMaterializeOlder: true,
+            exactAnchorIndex: 2,
+            nearestAnchorIndex: null,
+            restoredViewport: {
+                ...baseAttempt.restoredViewport,
+                anchorSeqLoaded: true,
+            },
+            slice: {
+                anchorRowId: null,
+                capable: true,
+                renderedAnchor: null,
+                renderedAnchorIndex: null,
+                target: {
+                    anchorItemOffsetPx: 84,
+                    anchorMessageId: 'stale-server-m-20',
+                    anchorSeq: 20,
+                    kind: 'slice',
+                },
+                writeFree: true,
+            },
+        });
+
+        expect(effectTypes(effects)).not.toContain('request-bounded-materialization');
+        expect(executeEffects(effects)).toEqual([
+            {
+                command: {
+                    anchor: targetAnchor,
+                    itemOffsetPx: 84,
+                    reason: 'entry-restore',
+                    sessionId: 'session-a',
+                    type: 'restore-anchor',
+                },
+                type: 'execute-command',
+            },
+        ]);
+    });
+
     it('disposeForExit telemeters the transaction session and does not schedule current-session paint effects', () => {
         const owner = createEntryRestoreOwner();
         owner.attempt(baseAttempt);
@@ -471,5 +513,39 @@ describe('entry restore owner', () => {
                 writer: 'settle-reconfirm',
             },
         ]);
+    });
+
+    it('on web, does not permanently close the transaction when items are empty before fill settles', () => {
+        // Regression: direct URL cold loads on web mount the entry restore layout
+        // effect before any items are present. The old code treated empty-transcript
+        // as a FINAL verdict which set lastClosedSessionId, permanently blocking all
+        // subsequent restore attempts once content arrived.
+        const owner = createEntryRestoreOwner();
+        const webAnchoredBase: EntryRestoreOwnerAttemptInput<Readonly<{ id: string }>> = {
+            ...baseAttempt,
+            platform: 'web',
+            contentHeight: 0,
+            layoutHeight: 317,
+            items: [],
+            fillSettled: false,
+            exactAnchorIndex: null,
+            nearestAnchorIndex: null,
+        };
+
+        // First attempt with empty items and fill not settled — must be a WAIT, not final.
+        const firstEffects = owner.attempt(webAnchoredBase);
+        expect(firstEffects).toEqual([]);
+        expect(owner.telemetryState('session-a')).toBe('none');
+
+        // Once items arrive, the restore should succeed.
+        const secondEffects = owner.attempt({
+            ...webAnchoredBase,
+            items: [{ id: 'msg:m-10' }, { id: 'msg:m-15' }, { id: 'msg:m-20' }],
+            contentHeight: 4000,
+            fillSettled: true,
+            exactAnchorIndex: 2,
+        });
+        expect(executeEffects(secondEffects).length).toBeGreaterThan(0);
+        expect(owner.telemetryState('session-a')).toBe('open');
     });
 });

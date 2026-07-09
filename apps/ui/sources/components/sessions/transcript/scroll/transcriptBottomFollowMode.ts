@@ -26,6 +26,11 @@ export type TranscriptScrollPinEvent =
         pinnedOffsetThresholdPx: number;
     }
     | {
+        type: 'rendererAtEnd';
+        enabled: boolean;
+        isAtEnd: boolean;
+    }
+    | {
         type: 'newActivity';
         enabled: boolean;
         activityKey: string | null;
@@ -250,6 +255,15 @@ export function reduceTranscriptScrollPinState(
             return { ...state, isPinned: true, newActivityCount: 0 };
         }
 
+        if (!state.isPinned) return state;
+        return { ...state, isPinned: false };
+    }
+
+    if (event.type === 'rendererAtEnd') {
+        if (!event.enabled || event.isAtEnd) {
+            if (state.isPinned && state.newActivityCount === 0) return state;
+            return { ...state, isPinned: true, newActivityCount: 0 };
+        }
         if (!state.isPinned) return state;
         return { ...state, isPinned: false };
     }

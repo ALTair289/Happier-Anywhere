@@ -12,6 +12,7 @@ export type SessionOpenLatchPhase =
     | 'disarmed';
 
 export type SessionOpenInitialFillStatus = 'idle' | 'in_progress' | 'done';
+export type SessionOpenInitialBottomPositionOwner = 'app' | 'renderer';
 
 export type SessionOpenDisarmReason =
     | 'disposed'
@@ -71,6 +72,7 @@ export type SessionOpenLatchDecision = Readonly<{
 
 export type SessionOpenLatchArmInput = Readonly<{
     entryKind: SessionOpenEntryKind;
+    initialBottomPositionOwner?: SessionOpenInitialBottomPositionOwner;
     isNativeFlashListBottomMaintenanceEnabled: boolean;
     nativeFirstPaintFallbackDelayMs: number;
     nowMs: number;

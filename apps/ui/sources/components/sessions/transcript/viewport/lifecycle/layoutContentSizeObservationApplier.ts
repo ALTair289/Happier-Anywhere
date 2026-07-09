@@ -2,6 +2,7 @@ import type { TranscriptMeasurementHostContentSizeObservation } from '@/componen
 import type { TranscriptViewportTelemetryScrollReason } from '@/components/sessions/transcript/scroll/transcriptViewportTelemetry';
 
 export type TranscriptLayoutContentSizeObservationPlatform = 'web' | 'ios' | 'android' | 'native-other' | string;
+export type TranscriptContinuousFollowOwner = 'app' | 'renderer';
 
 type ObservationMetrics = Readonly<{
     contentHeight: number;
@@ -63,6 +64,7 @@ export type TranscriptContentSizeObservationApplierEffects<TWebMetrics> = Readon
 export function applyTranscriptLayoutObservation<TWebMetrics>(
     input: Readonly<{
         contentHeight: number;
+        continuousFollowOwner?: TranscriptContinuousFollowOwner;
         layoutHeight: number;
         layoutHeightChanged: boolean;
         platformOS: TranscriptLayoutContentSizeObservationPlatform;
@@ -72,8 +74,13 @@ export function applyTranscriptLayoutObservation<TWebMetrics>(
 ): boolean {
     if (!Number.isFinite(input.layoutHeight)) return false;
 
-    const previousWebMetrics = effects.captureWebBottomFollowPreviousMetrics();
-    const nativePrevFollowAtBottom = effects.captureNativeBottomFollowPreviousFollow();
+    const appOwnsContinuousFollow = input.continuousFollowOwner !== 'renderer';
+    const previousWebMetrics = appOwnsContinuousFollow
+        ? effects.captureWebBottomFollowPreviousMetrics()
+        : null;
+    const nativePrevFollowAtBottom = appOwnsContinuousFollow
+        ? effects.captureNativeBottomFollowPreviousFollow()
+        : false;
     effects.commitLayoutHeight(input.layoutHeight);
     if (input.layoutHeightChanged) {
         effects.recordLayoutMeasuredTelemetry({
@@ -86,19 +93,23 @@ export function applyTranscriptLayoutObservation<TWebMetrics>(
         layoutHeight: input.layoutHeight,
     });
     effects.observeMountSettleMetrics();
-    effects.pinNativeInitialFollowBottomViewportIfReady('layout-change');
-
-    if (input.platformOS === 'web') {
-        effects.observeWebPrependOwner();
-    } else {
-        effects.observeNativePrependOwner();
-        if (input.shouldRestoreNativeEntry) {
-            effects.runEntryRestoreAttempt();
-            effects.verifyNativeSliceEntryRestoreTransaction();
-        }
+    if (appOwnsContinuousFollow) {
+        effects.pinNativeInitialFollowBottomViewportIfReady('layout-change');
     }
 
-    if (input.layoutHeightChanged && input.contentHeight > 0) {
+    if (appOwnsContinuousFollow) {
+        if (input.platformOS === 'web') {
+            effects.observeWebPrependOwner();
+        } else {
+            effects.observeNativePrependOwner();
+        }
+    }
+    if (input.platformOS !== 'web' && input.shouldRestoreNativeEntry) {
+        effects.runEntryRestoreAttempt();
+        effects.verifyNativeSliceEntryRestoreTransaction();
+    }
+
+    if (appOwnsContinuousFollow && input.layoutHeightChanged && input.contentHeight > 0) {
         effects.requestAutomaticLiveTailPin(previousWebMetrics, 'layout-change', nativePrevFollowAtBottom);
     }
     return true;
@@ -106,6 +117,7 @@ export function applyTranscriptLayoutObservation<TWebMetrics>(
 
 export function applyTranscriptContentSizeObservation<TWebMetrics>(
     input: Readonly<{
+        continuousFollowOwner?: TranscriptContinuousFollowOwner;
         layoutHeight: number;
         observation: TranscriptMeasurementHostContentSizeObservation;
         platformOS: TranscriptLayoutContentSizeObservationPlatform;
@@ -117,9 +129,14 @@ export function applyTranscriptContentSizeObservation<TWebMetrics>(
 
     const observation = input.observation;
     const reason = observation.reason;
+    const appOwnsContinuousFollow = input.continuousFollowOwner !== 'renderer';
     effects.prepareNativeContentMaterializationAutoPin(observation);
-    const previousWebMetrics = effects.captureWebBottomFollowPreviousMetrics();
-    const nativePrevFollowAtBottom = effects.captureNativeBottomFollowPreviousFollow();
+    const previousWebMetrics = appOwnsContinuousFollow
+        ? effects.captureWebBottomFollowPreviousMetrics()
+        : null;
+    const nativePrevFollowAtBottom = appOwnsContinuousFollow
+        ? effects.captureNativeBottomFollowPreviousFollow()
+        : false;
     effects.commitContentHeight(observation.measuredContentHeight);
 
     const metrics = {
@@ -127,6 +144,7 @@ export function applyTranscriptContentSizeObservation<TWebMetrics>(
         layoutHeight: input.layoutHeight,
     };
     if (
+        appOwnsContinuousFollow &&
         input.platformOS !== 'web' &&
         observation.contentHeightChanged &&
         reason === 'stream-append'
@@ -138,19 +156,23 @@ export function applyTranscriptContentSizeObservation<TWebMetrics>(
     }
     effects.recordNativeVisibleWindowTelemetry(reason, metrics);
     effects.observeMountSettleMetrics();
-    effects.pinNativeInitialFollowBottomViewportIfReady(reason);
-
-    if (input.platformOS === 'web') {
-        effects.observeWebPrependOwner();
-    } else {
-        effects.observeNativePrependOwner();
-        if (input.shouldRestoreNativeEntry) {
-            effects.runEntryRestoreAttempt();
-            effects.verifyNativeSliceEntryRestoreTransaction();
-        }
+    if (appOwnsContinuousFollow) {
+        effects.pinNativeInitialFollowBottomViewportIfReady(reason);
     }
 
-    if (observation.contentHeightChanged && input.layoutHeight > 0) {
+    if (appOwnsContinuousFollow) {
+        if (input.platformOS === 'web') {
+            effects.observeWebPrependOwner();
+        } else {
+            effects.observeNativePrependOwner();
+        }
+    }
+    if (input.platformOS !== 'web' && input.shouldRestoreNativeEntry) {
+        effects.runEntryRestoreAttempt();
+        effects.verifyNativeSliceEntryRestoreTransaction();
+    }
+
+    if (appOwnsContinuousFollow && observation.contentHeightChanged && input.layoutHeight > 0) {
         effects.requestAutomaticLiveTailPin(previousWebMetrics, reason, nativePrevFollowAtBottom);
     }
     return true;

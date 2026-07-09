@@ -6,6 +6,7 @@ import type {
     SessionOpenHostFacts,
     SessionOpenInitialFillSettledInput,
     SessionOpenInitialFillStatus,
+    SessionOpenInitialBottomPositionOwner,
     SessionOpenLatchArmInput,
     SessionOpenLatchDecision,
     SessionOpenLatchEffect,
@@ -18,6 +19,7 @@ import type {
 type ArmedState = Readonly<{
     entryKind: SessionOpenEntryKind;
     firstPaintFallbackDeadlineAtMs: number | null;
+    initialBottomPositionOwner: SessionOpenInitialBottomPositionOwner;
     platform: SessionOpenPlatform;
     sessionId: string;
     shouldFollowBottom: boolean;
@@ -88,6 +90,7 @@ export function createSessionOpenLatch(): SessionOpenLatch {
 
     const takeNextWebRetryEffect = (nowMs: number): SessionOpenLatchEffect | null => {
         if (!armed || armed.platform !== 'web') return null;
+        if (armed.initialBottomPositionOwner === 'renderer') return null;
         const retryDelayMs = normalizeRetryDelay(armed.webInitialPinRetryDelaysMs[armed.webInitialPinRetryIndex]);
         if (retryDelayMs === null) return null;
         armed = {
@@ -103,6 +106,7 @@ export function createSessionOpenLatch(): SessionOpenLatch {
     const isSameArmRequest = (input: SessionOpenLatchArmInput): boolean => (
         armed?.sessionId === input.sessionId &&
         armed.entryKind === input.entryKind &&
+        armed.initialBottomPositionOwner === (input.initialBottomPositionOwner ?? 'app') &&
         armed.platform === input.platform &&
         armed.shouldFollowBottom === input.shouldFollowBottom
     );
@@ -119,9 +123,10 @@ export function createSessionOpenLatch(): SessionOpenLatch {
             clearSessionState();
             armed = {
                 entryKind: input.entryKind,
-                firstPaintFallbackDeadlineAtMs: input.platform === 'native' && input.isNativeFlashListBottomMaintenanceEnabled
+                firstPaintFallbackDeadlineAtMs: input.platform === 'native'
                     ? input.nowMs + Math.max(0, Math.trunc(input.nativeFirstPaintFallbackDelayMs))
                     : null,
+                initialBottomPositionOwner: input.initialBottomPositionOwner ?? 'app',
                 platform: input.platform,
                 sessionId: input.sessionId,
                 shouldFollowBottom: input.shouldFollowBottom,
@@ -187,7 +192,11 @@ export function createSessionOpenLatch(): SessionOpenLatch {
             }
             if (facts.layoutHeight <= 0 || facts.contentHeight <= 0) {
                 phase = 'awaiting-layout';
-                if (armed.entryKind !== 'bottom' || requestedInitialPin) return decision();
+                if (
+                    armed.entryKind !== 'bottom' ||
+                    requestedInitialPin ||
+                    armed.initialBottomPositionOwner === 'renderer'
+                ) return decision();
                 return decision([
                     { reason: 'initial-open', type: 'request-initial-pin' },
                     takeNextWebRetryEffect(facts.nowMs),
@@ -200,11 +209,11 @@ export function createSessionOpenLatch(): SessionOpenLatch {
             const effects: SessionOpenLatchEffect[] = [];
             if (armed.entryKind === 'bottom' && !requestedInitialPositioning) {
                 requestedInitialPositioning = true;
-                if (!requestedInitialPin) {
+                if (!requestedInitialPin && armed.initialBottomPositionOwner === 'app') {
                     requestedInitialPin = true;
                     effects.push({ reason: 'initial-open', type: 'request-initial-pin' });
                 }
-                if (armed.platform === 'web') {
+                if (armed.platform === 'web' && armed.initialBottomPositionOwner === 'app') {
                     effects.push({ deadlineMs: armed.webInitialPinStabilizeMs, type: 'begin-web-bottom-entry' });
                     const retryEffect = takeNextWebRetryEffect(facts.nowMs);
                     if (retryEffect) effects.push(retryEffect);
@@ -220,6 +229,19 @@ export function createSessionOpenLatch(): SessionOpenLatch {
             ) {
                 requestedInitialFill = true;
                 effects.push({ type: 'request-initial-fill' });
+            } else if (
+                armed.entryKind === 'bottom' &&
+                initialFillStatus === 'idle' &&
+                !requestedInitialFill &&
+                facts.isScrollable &&
+                !facts.hasEntrySliceWindow
+            ) {
+                // Already scrollable at the first measured facts: there is nothing for the
+                // initial fill to do. Settle the status immediately so fill-gated consumers
+                // (older pagination's 'fill-not-done' suspension) unblock. Renderers that
+                // measure content synchronously (Legend web) hit this branch; renderers that
+                // measure late (FlashList) go through request-initial-fill above instead.
+                initialFillStatus = 'done';
             }
 
             if (
@@ -255,7 +277,6 @@ export function createSessionOpenLatch(): SessionOpenLatch {
             nativeInitialViewportAppliedSession = { sessionId, applied: false };
         },
         shouldShowNativeFirstPaintPlaceholder(input) {
-            if (!input.usesNativeFlashListBottomMaintenance) return false;
             if (!input.isLoaded || input.itemCount <= 0) return false;
             if (input.jumpToSeqActive) return false;
             const followsBottom = armed?.sessionId === input.sessionId

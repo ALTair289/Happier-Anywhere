@@ -197,11 +197,13 @@ function buildDriverDeps(
 }
 
 function createHost(params: Readonly<{
+    clearWebPrependRestoreWindow?: (outcome: string) => void;
     controller: ReturnType<typeof createTranscriptViewportCommandController>;
     deps: TranscriptViewportDriverDeps;
     hasWebPrependRestoreWindow?: () => boolean;
 }>) {
     return createTranscriptViewportCommandHost({
+        clearWebPrependRestoreWindow: params.clearWebPrependRestoreWindow ?? (() => {}),
         controller: params.controller,
         driverDeps: params.deps,
         hasWebPrependRestoreWindow: params.hasWebPrependRestoreWindow ?? (() => false),
@@ -350,7 +352,7 @@ describe('transcript viewport command host', () => {
         });
     });
 
-    it('restoreWebVisibleAnchor falls back to the resolved item index when the web anchor ids are stale', () => {
+    it('restoreWebVisibleAnchor requests a renderer scroll to the resolved item index when the web anchor ids are stale', () => {
         setPlatform('web');
         const controller = createTranscriptViewportCommandController();
         controller.resetForSession({ openEntryTransaction: true, sessionId: BASE_SESSION });
@@ -387,18 +389,12 @@ describe('transcript viewport command host', () => {
             itemIndex: 1,
         });
 
-        expect(result).toEqual({ didAdjustScroll: true, status: 'restored' });
-        expect(getLayout).toHaveBeenCalledWith(1);
-        expect(node.indexCalls).toHaveLength(0);
+        expect(result).toEqual({ didAdjustScroll: false, status: 'scroll_requested' });
+        expect(getLayout).not.toHaveBeenCalled();
+        expect(node.indexCalls).toEqual([{ index: 1, animated: false }]);
         expect(node.offsetCalls).toHaveLength(0);
-        expect(metrics.element.scrollTop).toBe(120);
-        expect(lastWrite(bundle.recorded, 'scroll-write')).toMatchObject({
-            type: 'scroll-write',
-            writer: 'web-dom-restore',
-            reason: 'entry-restore',
-            mode: 'restore-anchor',
-            targetOffsetY: 120,
-        });
+        expect(metrics.element.scrollTop).toBe(0);
+        expect(lastWrite(bundle.recorded, 'scroll-write')).toBeUndefined();
     });
 
     it('drops stale-session commands before driver side effects', () => {

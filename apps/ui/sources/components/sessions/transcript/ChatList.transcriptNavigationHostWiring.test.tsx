@@ -13,6 +13,7 @@ import type { ServerAccountScope } from '@/sync/domains/scope/serverAccountScope
 import type { PersistedSessionMessagePinV1 } from '@/sync/domains/messages/pins/sessionMessagePins';
 import type { Message } from '@/sync/domains/messages/messageTypes';
 import { resetUserMessageHistoryRemoteEntriesForTests } from '@/hooks/session/useUserMessageHistory';
+import { createInactiveSessionMessagesWindowState } from '@/sync/runtime/sessionMessagesWindowState';
 import type { TranscriptNavigationEntry } from './navigation/transcriptNavigationTypes';
 import type { TranscriptNavigationRailJumpRequest } from './navigation/TranscriptNavigationRail';
 import { getTranscriptNavigationVisibilityStore } from '@/components/sessions/transcript/viewport/visibility/transcriptNavigationVisibilityStore';
@@ -25,6 +26,8 @@ const loadOlderMessagesMock = vi.hoisted(() => vi.fn());
 const loadNewerMessagesMock = vi.hoisted(() => vi.fn());
 const loadTargetWindowMessagesMock = vi.hoisted(() => vi.fn());
 const fetchUserMessageHistoryPageMock = vi.hoisted(() => vi.fn());
+const markSessionLiveTailIntentMock = vi.hoisted(() => vi.fn());
+const getSessionTargetWindowStateMock = vi.hoisted(() => vi.fn());
 const prefetchForkedTranscriptContextMock = vi.hoisted(() => vi.fn(() => Promise.resolve()));
 const jumpToTranscriptSeqMock = vi.hoisted(() => vi.fn(async (params: {
     targetSeq: number;
@@ -262,6 +265,8 @@ vi.mock('@/sync/sync', async () => (
         loadTargetWindowMessages: loadTargetWindowMessagesMock,
         prefetchForkedTranscriptContext: prefetchForkedTranscriptContextMock,
         getSessionViewport: () => null,
+        markSessionLiveTailIntent: markSessionLiveTailIntentMock,
+        getSessionTargetWindowState: getSessionTargetWindowStateMock,
     })
 ));
 
@@ -333,6 +338,10 @@ describe('ChatList transcript navigation host wiring', () => {
         prefetchForkedTranscriptContextMock.mockClear();
         jumpToTranscriptSeqMock.mockClear();
         performTranscriptViewportCommandMock.mockClear();
+        markSessionLiveTailIntentMock.mockReset();
+        getSessionTargetWindowStateMock.mockReset();
+        const inactiveWindowState = createInactiveSessionMessagesWindowState();
+        getSessionTargetWindowStateMock.mockImplementation(() => inactiveWindowState);
         capturedNavigationRailProps = [];
         buildChatListItemsMock.mockClear();
         resetFlashListChatListHarness();
@@ -628,6 +637,43 @@ describe('ChatList transcript navigation host wiring', () => {
             kind: 'jump-to-seq',
             seq: 335,
         }));
+
+        await screen.unmount();
+    });
+
+    it('jump-to-bottom exits an active target window to the live tail', async () => {
+        // RG4 in-app class: after a target-window jump the rendered bottom is NOT the
+        // session's live tail. The pill must be offered in window mode and its press must
+        // exit the window (markSessionLiveTailIntent), not just scroll the rendered content.
+        seedTranscriptMessages();
+        const activeWindowState = {
+            ...createInactiveSessionMessagesWindowState(),
+            isWindowMode: true,
+            windowId: 'session-1:main:seq:7',
+            targetSeq: 7,
+            windowMinSeq: 5,
+            windowMaxSeq: 9,
+            olderCursor: 5,
+            newerCursor: 9,
+            hasMoreOlder: true,
+            hasMoreNewer: true,
+            activatedAtMs: 1,
+        };
+        getSessionTargetWindowStateMock.mockImplementation(() => activeWindowState);
+        flashListChatListHarnessState.settingValues.transcriptScrollJumpToBottomEnabled = true;
+
+        const screen = await renderFlashListChatListSession();
+        const pills = screen.findAllByTestId('transcript-jump-to-bottom');
+        expect(pills.length).toBeGreaterThan(0);
+
+        markSessionLiveTailIntentMock.mockClear();
+        await act(async () => {
+            (pills[0].props as { onPress?: () => void }).onPress?.();
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+
+        expect(markSessionLiveTailIntentMock).toHaveBeenCalledWith('session-1');
 
         await screen.unmount();
     });

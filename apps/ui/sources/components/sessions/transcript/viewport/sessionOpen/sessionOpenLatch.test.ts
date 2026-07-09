@@ -19,6 +19,10 @@ function armInput(overrides: Partial<SessionOpenLatchArmInput> = {}): SessionOpe
     };
 }
 
+type RendererOwnedInitialPositionArmInput = SessionOpenLatchArmInput & Readonly<{
+    initialBottomPositionOwner: 'renderer';
+}>;
+
 describe('session open latch', () => {
     it('arms once for a session and emits a single arm reset plan', () => {
         const latch = createSessionOpenLatch();
@@ -121,6 +125,55 @@ describe('session open latch', () => {
         ]);
     });
 
+    it('keeps renderer-owned web bottom entries free of app initial pin and retry writes', () => {
+        const latch = createSessionOpenLatch();
+        const rendererOwnedArm = {
+            ...armInput(),
+            initialBottomPositionOwner: 'renderer',
+        } satisfies RendererOwnedInitialPositionArmInput;
+
+        latch.arm(rendererOwnedArm);
+        const decision = latch.onHostFacts({
+            contentHeight: 240,
+            hasEntrySliceWindow: false,
+            isLoaded: true,
+            isScrollable: false,
+            itemCount: 3,
+            layoutHeight: 600,
+            nowMs: 1_025,
+            sessionId: 'session-a',
+            userWantsPinned: true,
+        });
+
+        expect(decision.phase).toBe('positioning');
+        expect(decision.effects).toEqual([{ type: 'request-initial-fill' }]);
+    });
+
+    it('treats already-scrollable bottom entries as fill-settled without requesting a generic initial fill', () => {
+        // Regression (Legend 2026-07-08): a renderer whose scroll container is already
+        // scrollable at the first measured host facts never emits `request-initial-fill`,
+        // and the fill status previously stayed 'idle' forever — permanently suspending
+        // older pagination behind the 'fill-not-done' reason. A scrollable bottom entry
+        // has nothing to fill: it must settle the fill status immediately.
+        const latch = createSessionOpenLatch();
+
+        latch.arm(armInput());
+        const decision = latch.onHostFacts({
+            contentHeight: 10_052,
+            hasEntrySliceWindow: false,
+            isLoaded: true,
+            isScrollable: true,
+            itemCount: 121,
+            layoutHeight: 317,
+            nowMs: 1_025,
+            sessionId: 'session-a',
+            userWantsPinned: true,
+        });
+
+        expect(decision.effects.some((effect) => effect.type === 'request-initial-fill')).toBe(false);
+        expect(latch.initialFillStatus()).toBe('done');
+    });
+
     it('requests initial web pin and retry once per arm across repeated host facts', () => {
         const latch = createSessionOpenLatch();
         const facts = {
@@ -167,6 +220,30 @@ describe('session open latch', () => {
             { reason: 'initial-open', type: 'request-initial-pin' },
             { deadlineAtMs: 1_075, type: 'schedule-web-initial-pin-retry' },
         ]);
+    });
+
+    it('does not issue an early data-arrival pin when renderer owns initial bottom positioning', () => {
+        const latch = createSessionOpenLatch();
+        const rendererOwnedArm = {
+            ...armInput(),
+            initialBottomPositionOwner: 'renderer',
+        } satisfies RendererOwnedInitialPositionArmInput;
+
+        latch.arm(rendererOwnedArm);
+        const decision = latch.onHostFacts({
+            contentHeight: 0,
+            hasEntrySliceWindow: false,
+            isLoaded: true,
+            isScrollable: false,
+            itemCount: 3,
+            layoutHeight: 0,
+            nowMs: 1_025,
+            sessionId: 'session-a',
+            userWantsPinned: true,
+        });
+
+        expect(decision.phase).toBe('awaiting-layout');
+        expect(decision.effects).toEqual([]);
     });
 
     it('keeps anchored entries write-free and coordinates with entry restore after fill settles', () => {
@@ -244,6 +321,50 @@ describe('session open latch', () => {
         });
 
         expect(early.effects).toEqual([]);
+        expect(due.effects).toEqual([{ type: 'release-native-first-paint-placeholder' }]);
+    });
+
+    it('keeps the native first-paint placeholder contract for standard-space native renderers', () => {
+        const latch = createSessionOpenLatch();
+
+        latch.arm(armInput({
+            isNativeFlashListBottomMaintenanceEnabled: false,
+            platform: 'native',
+        }));
+
+        expect(latch.shouldShowNativeFirstPaintPlaceholder({
+            firstListPaintObserved: false,
+            hasOpenEntryRestoreTransaction: false,
+            isLoaded: true,
+            isWarmKeepAliveInstance: false,
+            itemCount: 12,
+            jumpToSeqActive: false,
+            lastPinOffsetForIntent: null,
+            nativeEntryRestorePaintReleased: false,
+            nativeInitialViewportPendingObservation: false,
+            nativeMountSettleDeadlineReached: false,
+            nativeMountSettleStable: false,
+            nativeViewportPaintObserved: false,
+            pinThresholdPx: 72,
+            sessionId: 'session-a',
+            usesNativeFlashListBottomMaintenance: false,
+        })).toBe(true);
+    });
+
+    it('releases the standard-space native first-paint placeholder on the fallback deadline', () => {
+        const latch = createSessionOpenLatch();
+
+        latch.arm(armInput({
+            isNativeFlashListBottomMaintenanceEnabled: false,
+            platform: 'native',
+        }));
+
+        const due = latch.onNativeFirstPaintFallbackDeadline({
+            nativeViewportPaintObserved: false,
+            nowMs: 1_450,
+            sessionId: 'session-a',
+        });
+
         expect(due.effects).toEqual([{ type: 'release-native-first-paint-placeholder' }]);
     });
 });

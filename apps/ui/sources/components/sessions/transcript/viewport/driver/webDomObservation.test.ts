@@ -105,12 +105,31 @@ describe('createWebDomScrollObservation', () => {
             sustainFrames: 2,
         });
 
-        expect(movement.isGenuineUserMovement).toBe(true);
-        expect(movement.upwardIntent).toBe(true);
+        // The growth frame itself is layout churn: a single frame landing beyond the threshold
+        // during a content-height change is NOT user evidence (Legend growth bursts produce the
+        // identical shape and previously false-released the pin — R3/open-drift root cause).
+        // The fallback still seeds the movement ledger/streak from the visual bottom.
+        expect(movement.isGenuineUserMovement).toBe(false);
+        expect(movement.upwardIntent).toBe(false);
+        expect(movement.movedSinceLastObservation).toBe(true);
+        expect(movement.nextStreak).toEqual({ direction: -1, count: 1 });
         expect(observation.getState()).toMatchObject({
             observedScrollHeight: 1200,
             observedScrollTop: 100,
         });
+
+        // The user's continued upward movement on the next (height-stable) frame releases.
+        element.scrollTop = 40;
+        const sustained = observation.observeGenuineScrollMovement({
+            distanceFromBottom: 560,
+            fallbackObservedScrollTop: null,
+            isTrusted: false,
+            metrics: metrics(element),
+            pinThresholdPx: 72,
+            sustainFrames: 2,
+        });
+        expect(sustained.isGenuineUserMovement).toBe(true);
+        expect(sustained.upwardIntent).toBe(true);
     });
 
     it('resets observed writes and movement streak on session entry', () => {
@@ -130,6 +149,7 @@ describe('createWebDomScrollObservation', () => {
         observation.reset();
 
         expect(observation.getState()).toEqual({
+            observedClientHeight: null,
             observedScrollHeight: null,
             observedScrollTop: null,
             streak: null,

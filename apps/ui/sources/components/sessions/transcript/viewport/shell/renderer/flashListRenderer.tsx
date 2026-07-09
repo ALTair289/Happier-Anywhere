@@ -1,4 +1,5 @@
 import * as React from 'react';
+import type { ViewStyle } from 'react-native';
 
 import {
     FlashList,
@@ -14,6 +15,28 @@ import type {
 } from './types';
 
 const FLASH_LIST_STYLE = { flex: 1, minHeight: 0 } as const;
+// Browser-native scroll anchoring (overflow-anchor: auto) is a second, invisible
+// scrollTop writer on the transcript scroll container: under FlashList window
+// reallocation with large rows it re-anchors the viewport to a mid-transcript
+// node outside the app's viewport ownership system. The transcript owners must
+// be the only anchor authority, so web frames opt the scroller out entirely.
+// FlashList applies its `style` prop to an outer wrapper; the real scroll
+// container is the internal ScrollView, which only receives `overrideProps`,
+// so the opt-out style must ride through overrideProps to reach the scroller.
+// (overflowAnchor is a web-only CSS property react-native-web passes through;
+// it is not representable in ViewStyle, hence the narrow boundary cast.)
+const WEB_SCROLL_ANCHOR_OPT_OUT_STYLE = { overflowAnchor: 'none' } as unknown as ViewStyle;
+
+function resolveScrollerOverrideProps(
+    overrideProps: Record<string, unknown> | undefined,
+    disableBrowserScrollAnchoring: boolean,
+): Record<string, unknown> | undefined {
+    if (!disableBrowserScrollAnchoring) return overrideProps;
+    return {
+        ...overrideProps,
+        style: [overrideProps?.style, WEB_SCROLL_ANCHOR_OPT_OUT_STYLE],
+    };
+}
 
 function FlashListTranscriptRendererInner<TItem>(
     props: TranscriptListRendererProps<TItem>,
@@ -36,7 +59,10 @@ function FlashListTranscriptRendererInner<TItem>(
                 keyExtractor={props.keyExtractor}
                 getItemType={props.getItemType}
                 renderItem={props.renderItem}
-                overrideProps={props.overrideProps}
+                overrideProps={resolveScrollerOverrideProps(
+                    props.overrideProps,
+                    flashListOptions.disableBrowserScrollAnchoring === true,
+                )}
                 scrollEventThrottle={flashListOptions.scrollEventThrottle}
                 keyboardShouldPersistTaps={flashListOptions.keyboardShouldPersistTaps}
                 keyboardDismissMode={flashListOptions.keyboardDismissMode}
@@ -70,5 +96,6 @@ const FlashListTranscriptRenderer = React.forwardRef(FlashListTranscriptRenderer
 
 export const flashListRenderer: TranscriptListRenderer = {
     kind: 'flashList',
+    orientation: 'frame-resolved',
     Component: FlashListTranscriptRenderer,
 };

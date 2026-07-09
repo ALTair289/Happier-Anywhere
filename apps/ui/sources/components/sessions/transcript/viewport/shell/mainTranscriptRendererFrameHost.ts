@@ -16,6 +16,23 @@ export type MainTranscriptRendererFrameHost = Readonly<{
     telemetryMvcpPolicy: TranscriptViewportTelemetryMvcpPolicy;
 }>;
 
+const TRANSCRIPT_LEGEND_MAINTAIN_SCROLL_AT_END_THRESHOLD_DEFAULT = 0.1;
+
+function resolveLegendMaintainScrollAtEndThreshold(params: Readonly<{
+    layoutHeight: number;
+    pinThresholdPx: number;
+}>): number {
+    if (
+        Number.isFinite(params.layoutHeight) &&
+        params.layoutHeight > 0 &&
+        Number.isFinite(params.pinThresholdPx) &&
+        params.pinThresholdPx >= 0
+    ) {
+        return params.pinThresholdPx / params.layoutHeight;
+    }
+    return TRANSCRIPT_LEGEND_MAINTAIN_SCROLL_AT_END_THRESHOLD_DEFAULT;
+}
+
 export function resolveMainTranscriptRendererFrameHost(params: Readonly<{
     autoFollowWhenPinned: boolean;
     bottomFollowMode: TranscriptBottomFollowMode;
@@ -48,6 +65,10 @@ export function resolveMainTranscriptRendererFrameHost(params: Readonly<{
         frame: resolveMainTranscriptListShellFrame({
             configuredDrawDistance: params.configuredDrawDistance,
             listLayoutHeight: params.layoutHeight,
+            maintainScrollAtEndThreshold: resolveLegendMaintainScrollAtEndThreshold({
+                layoutHeight: params.layoutHeight,
+                pinThresholdPx: params.pinThresholdPx,
+            }),
             maintainVisibleContentPosition,
             nativeID: params.nativeID,
             pauseOffsetCorrection: bottomMaintenance.pauseOffsetCorrection,

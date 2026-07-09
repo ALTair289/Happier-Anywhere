@@ -124,6 +124,7 @@ export const TranscriptList = React.memo((props: {
     return (
         <TranscriptListShell<Message>
             data={listData}
+            dataKey={props.sessionId}
             extraData={transcriptMessageSelection.selectionVersion}
             keyExtractor={keyExtractor}
             getItemType={getItemType}

@@ -32,6 +32,9 @@ describe('main transcript renderer frame host', () => {
                     maintainVisibleContentPosition: undefined,
                     nativeID: 'main-transcript-native-id',
                 },
+                legend: {
+                    maintainScrollAtEndThreshold: 72 / 600,
+                },
             },
         });
         expect(host.maintainVisibleContentPosition).toBeUndefined();
@@ -54,6 +57,9 @@ describe('main transcript renderer frame host', () => {
                     inverted: true,
                     maintainVisibleContentPosition: host.maintainVisibleContentPosition,
                     nativeID: 'main-transcript-native-id',
+                },
+                legend: {
+                    maintainScrollAtEndThreshold: 72 / 600,
                 },
             },
         });

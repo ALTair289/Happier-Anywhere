@@ -13,7 +13,11 @@ import {
     resolveSidechainTranscriptListShellFrame,
 } from './transcriptListShellCapabilities';
 
-const CHAT_LIST = readFileSync(new URL('../../ChatList.tsx', import.meta.url), 'utf8');
+const CHAT_LIST = [
+    readFileSync(new URL('../../ChatList.tsx', import.meta.url), 'utf8'),
+    readFileSync(new URL('../../ChatListInternal.tsx', import.meta.url), 'utf8'),
+].join('\n');
+const CHAT_LIST_INTERNAL_FRAME_URL = new URL('../../ChatListInternalFrame.tsx', import.meta.url);
 const TRANSCRIPT_LIST = readFileSync(new URL('../../TranscriptList.tsx', import.meta.url), 'utf8');
 const CHAIN_TRANSCRIPT_LIST = readFileSync(new URL('../../ChainTranscriptList.tsx', import.meta.url), 'utf8');
 const LIST_ORIENTATION = readFileSync(new URL('../../listOrientation.ts', import.meta.url), 'utf8');
@@ -24,13 +28,22 @@ const TRANSCRIPT_VIEWPORT_FACTS = readFileSync(new URL('../driver/transcriptView
 const NATIVE_INVERTED_FLASH_LIST = readFileSync(new URL('../driver/nativeInvertedFlashList.ts', import.meta.url), 'utf8');
 const NATIVE_INVERTED_FLASH_LIST_FACTS = readFileSync(new URL('../driver/nativeInvertedFlashListFacts.ts', import.meta.url), 'utf8');
 const NATIVE_INVERTED_FLASH_LIST_FACTS_TEST = readFileSync(new URL('../driver/nativeInvertedFlashListFacts.test.ts', import.meta.url), 'utf8');
+const NATIVE_STANDARD_LIST_FACTS = readFileSync(new URL('../driver/nativeStandardListFacts.ts', import.meta.url), 'utf8');
+const NATIVE_STANDARD_LIST_FACTS_TEST = readFileSync(new URL('../driver/nativeStandardListFacts.test.ts', import.meta.url), 'utf8');
+const NATIVE_TELEMETRY_DIAGNOSTICS = readFileSync(new URL('../telemetryHost/nativeDiagnostics.ts', import.meta.url), 'utf8');
 const NATIVE_VIEWPORT_ANCHOR = readFileSync(new URL('../driver/transcriptNativeViewportAnchor.ts', import.meta.url), 'utf8');
+const PREPEND_HOST = readFileSync(new URL('../prepend/host/useTranscriptPrependHost.ts', import.meta.url), 'utf8');
+const BOTTOM_FOLLOW_HOST = readFileSync(
+    new URL('../bottomFollow/host/useTranscriptBottomFollowHost.ts', import.meta.url),
+    'utf8',
+);
 const RENDER_WINDOW_PROJECTION = readFileSync(new URL('../window/resolveTranscriptRenderWindowProjection.ts', import.meta.url), 'utf8');
 const SIDECHAIN_OLDER_LOAD_OBSERVATION = readFileSync(new URL('./sidechainOlderLoadObservation.ts', import.meta.url), 'utf8');
 const FLASH_LIST_RUNTIME_MODEL = readFileSync(new URL('../../../../../dev/testkit/transcript/runtimeContract/flashListRuntimeModel.ts', import.meta.url), 'utf8');
 const VIEWPORT_COMMAND_PERFORMER = readFileSync(new URL('../performTranscriptViewportCommand.ts', import.meta.url), 'utf8');
 const COMMAND_HOST_URL = new URL('../driver/commandHost.ts', import.meta.url);
 const COMMAND_HOST = existsSync(COMMAND_HOST_URL) ? readFileSync(COMMAND_HOST_URL, 'utf8') : '';
+const COMMAND_HOST_WIRING = readFileSync(new URL('../driver/useTranscriptViewportCommandHostWiring.ts', import.meta.url), 'utf8');
 const NATIVE_PASSIVE_SCROLL_POLICY = readFileSync(new URL('../nativePassiveScrollPolicy.ts', import.meta.url), 'utf8');
 const BOTTOM_MAINTENANCE = readFileSync(new URL('../../scroll/transcriptFlashListBottomMaintenance.ts', import.meta.url), 'utf8');
 const NATIVE_SCROLL_FOLLOW_INTENT = readFileSync(new URL('../lifecycle/nativeScrollFollowIntent.ts', import.meta.url), 'utf8');
@@ -46,6 +59,21 @@ const SCROLL_INGRESS_OBSERVATION = readFileSync(
     new URL('../lifecycle/scrollIngressObservation.ts', import.meta.url),
     'utf8',
 );
+const SCROLL_OBSERVATION_HOST = readFileSync(
+    new URL('../lifecycle/host/useTranscriptScrollObservationHost.ts', import.meta.url),
+    'utf8',
+);
+const NATIVE_VIEWPORT_LIFECYCLE_HOST = readFileSync(
+    new URL('../lifecycle/host/useTranscriptNativeViewportLifecycle.ts', import.meta.url),
+    'utf8',
+);
+const SESSION_ENTRY_LIFECYCLE_HOST = readFileSync(
+    new URL('../entryRestore/host/useTranscriptSessionEntryLifecycle.ts', import.meta.url),
+    'utf8',
+);
+const NATIVE_INVERTED_FACT_SOURCE_HOOK = readFileSync(new URL('../driver/useNativeInvertedFactSource.ts', import.meta.url), 'utf8');
+const VIEWPORT_TELEMETRY_EVENTS_HOST = readFileSync(new URL('../telemetryHost/useTranscriptViewportTelemetryEvents.ts', import.meta.url), 'utf8');
+const JUMP_HOST = readFileSync(new URL('../jump/host/useTranscriptJumpHost.ts', import.meta.url), 'utf8');
 const SCROLL_INGRESS_DRIVER = readFileSync(new URL('../driver/scrollIngress.ts', import.meta.url), 'utf8');
 const LAYOUT_CONTENT_SIZE_OBSERVATION_APPLIER_URL = new URL(
     '../lifecycle/layoutContentSizeObservationApplier.ts',
@@ -58,11 +86,13 @@ const TRANSCRIPT_MEASUREMENT_HOST_URL = new URL('../../measurement/transcriptMea
 const TRANSCRIPT_MEASUREMENT_HOST = existsSync(TRANSCRIPT_MEASUREMENT_HOST_URL)
     ? readFileSync(TRANSCRIPT_MEASUREMENT_HOST_URL, 'utf8')
     : '';
+const TRANSCRIPT_MEASUREMENT_HOST_WIRING = readFileSync(new URL('../../measurement/useTranscriptMeasurementHostWiring.ts', import.meta.url), 'utf8');
 const MAIN_TRANSCRIPT_RENDERER_FRAME_HOST_URL = new URL('./mainTranscriptRendererFrameHost.ts', import.meta.url);
 const MAIN_TRANSCRIPT_RENDERER_FRAME_HOST = existsSync(MAIN_TRANSCRIPT_RENDERER_FRAME_HOST_URL)
     ? readFileSync(MAIN_TRANSCRIPT_RENDERER_FRAME_HOST_URL, 'utf8')
     : '';
 const TRANSCRIPT_DIR_URL = new URL('../../', import.meta.url);
+const APP_DIR_URL = new URL('../../../../../app/', import.meta.url);
 const SHELL_DIR_URL = new URL('./', import.meta.url);
 const SHELL_DIR_PATH = fileURLToPath(SHELL_DIR_URL);
 const TRANSCRIPT_LIST_SHELL_URL = new URL('./TranscriptListShell.tsx', import.meta.url);
@@ -83,10 +113,14 @@ const SIDECHAIN_INITIAL_BOTTOM_PIN = readFileSync(new URL('./sidechainInitialBot
 const SIDECHAIN_JUMP_TO_MESSAGE = readFileSync(new URL('./sidechainJumpToMessage.ts', import.meta.url), 'utf8');
 const DELETED_LEGACY_FALLBACK_CAPABILITY = ['uses', 'LegacyFallback'].join('');
 const LEGEND_LIST_PACKAGE_NAME = ['@legendapp', 'list'].join('/');
+const LEGEND_LIST_ROOT_IMPORT_PATTERN = /from ['"]@legendapp\/list['"]|require\(['"]@legendapp\/list['"]\)|import\(['"]@legendapp\/list['"]\)/;
+const LEGEND_LIST_REACT_NATIVE_IMPORT_PATH = '@legendapp/list/react-native';
 const FLASH_LIST_COMPAT_IMPORT_PATH = '@/components/ui/lists/flashListCompat/FlashListCompat';
 
 let capturedFlashListProps: any = null;
 let assignedRef: any = null;
+let capturedLegendListProps: any = null;
+let assignedLegendRef: any = null;
 
 function readExportedTypeBody(source: string, typeName: string): string {
     const match = source.match(new RegExp(`export type ${typeName} = ([\\s\\S]*?);`));
@@ -161,6 +195,44 @@ vi.mock('@shopify/flash-list', () => ({
                 ),
             ),
             footer,
+        );
+    }),
+}));
+
+vi.mock('@legendapp/list/react-native', () => ({
+    LegendList: React.forwardRef((props: any, ref: any) => {
+        capturedLegendListProps = props;
+        const instance = {
+            transcriptViewportCommandSpace: 'standard',
+            clearCaches: vi.fn(),
+            getState: vi.fn(() => ({
+                end: Math.max(0, (Array.isArray(props.data) ? props.data.length : 1) - 1),
+                positionAtIndex: undefined,
+                sizeAtIndex: undefined,
+                scroll: 0,
+                scrollLength: 0,
+                start: 0,
+            })),
+            scrollToEnd: vi.fn(() => Promise.resolve()),
+            scrollToIndex: vi.fn(() => Promise.resolve()),
+            scrollToOffset: vi.fn(() => Promise.resolve()),
+        };
+        if (typeof ref === 'function') ref(instance);
+        else if (ref && typeof ref === 'object') ref.current = instance;
+        assignedLegendRef = instance;
+        const data = Array.isArray(props.data) ? props.data : [];
+        return React.createElement(
+            'LegendList',
+            props,
+            props.ListHeaderComponent ?? null,
+            data.map((item: any, index: number) =>
+                React.createElement(
+                    'LegendListItem',
+                    { key: props.keyExtractor?.(item, index) ?? item.id ?? index },
+                    props.renderItem?.({ item, index }),
+                ),
+            ),
+            props.ListFooterComponent ?? null,
         );
     }),
 }));
@@ -330,41 +402,152 @@ describe('transcript list shell frame', () => {
         expect(sidechain.rendererOptions.flashList.nativeID).toBeUndefined();
     });
 
-    it('keeps all lane-0 renderer surfaces resolving to FlashList for every spike flag value', async () => {
+    it('keeps exact-surface Legend flags while defaulting every transcript surface to Legend', async () => {
         const { resolveTranscriptListRenderer } = await import('./renderer/resolveTranscriptListRenderer');
         const { resolveTranscriptRendererSurface } = await import('./renderer/transcriptRendererSurface');
-        const frames = [
-            {
-                frame: resolveMainTranscriptListShellFrame({ platformOS: 'ios' }),
-                surface: 'main',
-            },
-            {
-                frame: resolveReadOnlyTranscriptListShellFrame({
-                    accessKind: 'public',
-                    bottomNoticeVisible: false,
-                    platformOS: 'web',
-                }),
-                surface: 'readOnly',
-            },
-            {
-                frame: resolveSidechainTranscriptListShellFrame({ platformOS: 'web' }),
-                surface: 'sidechain',
-            },
-        ] as const;
 
-        for (const { frame, surface } of frames) {
-            expect(resolveTranscriptRendererSurface(frame)).toBe(surface);
-            for (const transcriptLegendListSpikeSurface of ['off', 'readOnly', 'sidechain', 'main'] as const) {
-                expect(resolveTranscriptListRenderer({
-                    frame,
-                    transcriptLegendListSpikeSurface,
-                }).kind).toBe('flashList');
-            }
-        }
+        const main = resolveMainTranscriptListShellFrame({ platformOS: 'ios' });
+        const readOnly = resolveReadOnlyTranscriptListShellFrame({
+            accessKind: 'public',
+            bottomNoticeVisible: false,
+            platformOS: 'web',
+        });
+        const sidechain = resolveSidechainTranscriptListShellFrame({ platformOS: 'web' });
+
+        expect(resolveTranscriptRendererSurface(main)).toBe('main');
+        expect(resolveTranscriptRendererSurface(readOnly)).toBe('readOnly');
+        expect(resolveTranscriptRendererSurface(sidechain)).toBe('sidechain');
+
+        expect(resolveTranscriptListRenderer({
+            frame: readOnly,
+            platformOS: 'web',
+            transcriptLegendListSpikeSurface: 'readOnly',
+        }).kind).toBe('legendList');
+
+        expect(resolveTranscriptListRenderer({
+            frame: readOnly,
+            platformOS: 'web',
+            transcriptLegendListSpikeSurface: 'off',
+        }).kind).toBe('legendList');
+        expect(resolveTranscriptListRenderer({
+            frame: sidechain,
+            platformOS: 'web',
+            transcriptLegendListSpikeSurface: 'readOnly',
+        }).kind).toBe('legendList');
+        expect(resolveTranscriptListRenderer({
+            frame: sidechain,
+            platformOS: 'web',
+            transcriptLegendListSpikeSurface: 'sidechain',
+        }).kind).toBe('legendList');
+        expect(resolveTranscriptListRenderer({
+            frame: main,
+            platformOS: 'ios',
+            transcriptLegendListSpikeSurface: 'readOnly',
+        }).kind).toBe('legendList');
+        expect(resolveTranscriptListRenderer({
+            frame: main,
+            platformOS: 'ios',
+            transcriptLegendListSpikeSurface: 'main',
+        }).kind).toBe('legendList');
     });
 
-    it('does not add Legend imports anywhere under transcript production sources', () => {
+    it('defaults main and sidechain transcripts to the Legend renderer with a FlashList escape hatch', async () => {
+        // Deliberate default change (user decision 2026-07-07): Legend List owns the
+        // main transcript and sidechain in standard scroll space. The tuning key remains
+        // the escape hatch: 'flashList' forces the FlashList renderer back on every surface.
+        const { resolveTranscriptListRenderer } = await import('./renderer/resolveTranscriptListRenderer');
+
+        const webMain = resolveMainTranscriptListShellFrame({ platformOS: 'web' });
+        const nativeMain = resolveMainTranscriptListShellFrame({ platformOS: 'ios' });
+        const webSidechain = resolveSidechainTranscriptListShellFrame({ platformOS: 'web' });
+        const nativeSidechain = resolveSidechainTranscriptListShellFrame({ platformOS: 'ios' });
+        const webReadOnly = resolveReadOnlyTranscriptListShellFrame({
+            accessKind: 'public',
+            bottomNoticeVisible: false,
+            platformOS: 'web',
+        });
+
+        // New default: web main = Legend.
+        expect(resolveTranscriptListRenderer({
+            frame: webMain,
+            platformOS: 'web',
+            transcriptLegendListSpikeSurface: 'off',
+        }).kind).toBe('legendList');
+        // New default: native main = Legend.
+        expect(resolveTranscriptListRenderer({
+            frame: nativeMain,
+            platformOS: 'ios',
+            transcriptLegendListSpikeSurface: 'off',
+        }).kind).toBe('legendList');
+        expect(resolveTranscriptListRenderer({
+            frame: nativeMain,
+            platformOS: 'android',
+            transcriptLegendListSpikeSurface: 'off',
+        }).kind).toBe('legendList');
+        // New default: sidechain = Legend on all platforms.
+        expect(resolveTranscriptListRenderer({
+            frame: webSidechain,
+            platformOS: 'web',
+            transcriptLegendListSpikeSurface: 'off',
+        }).kind).toBe('legendList');
+        expect(resolveTranscriptListRenderer({
+            frame: nativeSidechain,
+            platformOS: 'ios',
+            transcriptLegendListSpikeSurface: 'off',
+        }).kind).toBe('legendList');
+        // New default: read-only/public = Legend.
+        expect(resolveTranscriptListRenderer({
+            frame: webReadOnly,
+            platformOS: 'web',
+            transcriptLegendListSpikeSurface: 'off',
+        }).kind).toBe('legendList');
+        // Escape hatch: 'flashList' forces FlashList everywhere, including main and sidechain.
+        expect(resolveTranscriptListRenderer({
+            frame: webMain,
+            platformOS: 'web',
+            transcriptLegendListSpikeSurface: 'flashList',
+        }).kind).toBe('flashList');
+        expect(resolveTranscriptListRenderer({
+            frame: nativeMain,
+            platformOS: 'ios',
+            transcriptLegendListSpikeSurface: 'flashList',
+        }).kind).toBe('flashList');
+        expect(resolveTranscriptListRenderer({
+            frame: webSidechain,
+            platformOS: 'web',
+            transcriptLegendListSpikeSurface: 'flashList',
+        }).kind).toBe('flashList');
+        // A spike flag for another surface does not silently disable the web-main default.
+        expect(resolveTranscriptListRenderer({
+            frame: webMain,
+            platformOS: 'web',
+            transcriptLegendListSpikeSurface: 'sidechain',
+        }).kind).toBe('legendList');
+    });
+
+    it('confines Legend imports to the shell renderer adapter and the dev route', () => {
+        for (const { relativePath, source } of [
+            ...readProductionSources(TRANSCRIPT_DIR_URL),
+            ...readProductionSources(APP_DIR_URL).map((entry) => ({
+                ...entry,
+                relativePath: `app/${entry.relativePath}`,
+            })),
+        ]) {
+            expect(source, relativePath).not.toMatch(LEGEND_LIST_ROOT_IMPORT_PATTERN);
+            expect(source, relativePath).not.toMatch(/@legendapp\/list\/react(?!-native)\b/);
+            expect(source, relativePath).not.toMatch(/@legendapp\/list\/keyboard\b|KeyboardAwareLegendList/);
+        }
+
+        const transcriptLegendImporters = readProductionSources(TRANSCRIPT_DIR_URL)
+            .filter(({ source }) => source.includes(LEGEND_LIST_REACT_NATIVE_IMPORT_PATH) || /\bLegendList\b/.test(source))
+            .map(({ relativePath }) => relativePath);
+
+        expect(transcriptLegendImporters).toEqual(['viewport/shell/renderer/legendListRenderer.tsx']);
+    });
+
+    it('does not add Legend imports to transcript surfaces', () => {
         for (const { relativePath, source } of readProductionSources(TRANSCRIPT_DIR_URL)) {
+            if (relativePath === 'viewport/shell/renderer/legendListRenderer.tsx') continue;
             expect(source, relativePath).not.toContain(LEGEND_LIST_PACKAGE_NAME);
             expect(source, relativePath).not.toMatch(/\bLegendList\b/);
         }
@@ -375,6 +558,8 @@ describe('TranscriptListShell', () => {
     beforeEach(() => {
         capturedFlashListProps = null;
         assignedRef = null;
+        capturedLegendListProps = null;
+        assignedLegendRef = null;
     });
 
     it('renders the caller-owned FlashList frame without taking viewport decisions', async () => {
@@ -399,7 +584,12 @@ describe('TranscriptListShell', () => {
                 keyExtractor={keyExtractor}
                 getItemType={getItemType}
                 renderItem={renderItem}
-                frame={resolveSidechainTranscriptListShellFrame({ platformOS: 'web' })}
+                frame={resolveReadOnlyTranscriptListShellFrame({
+                    accessKind: 'public',
+                    bottomNoticeVisible: false,
+                    platformOS: 'web',
+                })}
+                transcriptLegendListSpikeSurface="flashList"
                 onLayout={onLayout}
                 onContentSizeChange={onContentSizeChange}
                 onScroll={onScroll}
@@ -436,17 +626,19 @@ describe('TranscriptListShell', () => {
         expect(capturedFlashListProps.getItemType).toBe(getItemType);
         expect(capturedFlashListProps.renderItem).toBe(renderItem);
         expect(capturedFlashListProps.estimatedItemSize).toBeUndefined();
-        expect(capturedFlashListProps.overrideProps).toBeUndefined();
+        // Web frames carry exactly one shell-owned override: the scroller's
+        // browser scroll-anchoring opt-out. No other overrideProps ownership.
+        expect(Object.keys(capturedFlashListProps.overrideProps)).toEqual(['style']);
         expect(screen.findByType('HeaderSlot' as any)).toBeTruthy();
         expect(screen.findByType('FooterSlot' as any)).toBeTruthy();
         expect(screen.findByType('OlderOverlay' as any)).toBeTruthy();
         expect(screen.findByType('CatchUpOverlay' as any)).toBeTruthy();
     });
 
-    it('forwards main frame identity and inversion to FlashList', async () => {
+    it('forwards main frame identity through the default Legend renderer', async () => {
         const { TranscriptListShell } = await import('./TranscriptListShell');
 
-        await renderScreen(
+        const screen = await renderScreen(
             <TranscriptListShell
                 data={[{ id: 'newest' }, { id: 'oldest' }]}
                 keyExtractor={(item: { id: string }) => item.id}
@@ -458,17 +650,79 @@ describe('TranscriptListShell', () => {
             />,
         );
 
-        expect(capturedFlashListProps).toMatchObject({
-            data: [{ id: 'newest' }, { id: 'oldest' }],
-            drawDistance: 600,
-            inverted: true,
-            nativeID: 'transcript-native-id',
-            scrollEventThrottle: 16,
-            testID: 'transcript-chat-list',
+        expect(assignedLegendRef).toMatchObject({
+            transcriptViewportCommandSpace: 'standard',
         });
+        expect(capturedLegendListProps).toMatchObject({
+            data: [{ id: 'oldest' }, { id: 'newest' }],
+            scrollEventThrottle: 16,
+        });
+        // Identity lives on the adapter-owned wrapper (Legend never forwards
+        // nativeID/testID to the DOM), which must be an ancestor of the Legend list so
+        // web getElementById(nativeID) → scrollable-descendant resolution works.
+        const identityHost = screen.tree.root.findByProps({ nativeID: 'transcript-native-id' });
+        expect(identityHost.props.testID).toBe('transcript-chat-list');
+        expect(identityHost.findByType('LegendList' as any)).toBeTruthy();
+        expect(capturedLegendListProps.nativeID).toBeUndefined();
+        expect(capturedLegendListProps.testID).toBeUndefined();
+        expect(capturedFlashListProps).toBeNull();
     });
 
-    it('passes optional main FlashList callbacks and platform interactions through without taking ownership', async () => {
+    it('opts the web transcript scroll container out of browser scroll anchoring so the app stays the only anchor owner', async () => {
+        // Chrome's native scroll anchoring (overflow-anchor: auto) is a second,
+        // invisible scrollTop writer on the transcript container. Under FlashList
+        // window reallocation with large markdown rows it silently re-anchors the
+        // viewport to a mid-transcript node (live-captured: scrollTop 719 -> 14904
+        // with only +4306 content growth and no app write). The app's viewport
+        // ownership system must be the only anchor owner on web.
+        const { TranscriptListShell } = await import('./TranscriptListShell');
+
+        await renderScreen(
+            <TranscriptListShell
+                data={[{ id: 'row-1' }]}
+                keyExtractor={(item: { id: string }) => item.id}
+                renderItem={({ item }: { item: { id: string } }) => React.createElement('Row', { id: item.id })}
+                frame={resolveReadOnlyTranscriptListShellFrame({
+                    accessKind: 'public',
+                    bottomNoticeVisible: false,
+                    platformOS: 'web',
+                })}
+                transcriptLegendListSpikeSurface="flashList"
+            />,
+        );
+
+        // FlashList applies `style` to an outer wrapper; the real scroll container
+        // (the element browsers anchor) only receives `overrideProps`, so the
+        // opt-out must arrive there (verified live: wrapper-level style has no effect).
+        const overrideStyle = capturedFlashListProps.overrideProps?.style;
+        const flattened = Object.assign(
+            {},
+            ...(Array.isArray(overrideStyle) ? overrideStyle : [overrideStyle]).filter(Boolean),
+        );
+        expect(flattened).toMatchObject({ overflowAnchor: 'none' });
+    });
+
+    it('keeps native transcript frames free of the web scroll-anchoring override', async () => {
+        const { TranscriptListShell } = await import('./TranscriptListShell');
+
+        await renderScreen(
+            <TranscriptListShell
+                data={[{ id: 'row-1' }]}
+                keyExtractor={(item: { id: string }) => item.id}
+                renderItem={({ item }: { item: { id: string } }) => React.createElement('Row', { id: item.id })}
+                frame={resolveReadOnlyTranscriptListShellFrame({
+                    accessKind: 'public',
+                    bottomNoticeVisible: false,
+                    platformOS: 'ios',
+                })}
+                transcriptLegendListSpikeSurface="flashList"
+            />,
+        );
+
+        expect(capturedFlashListProps.overrideProps).toBeUndefined();
+    });
+
+    it('passes optional FlashList callbacks and platform interactions through without taking ownership', async () => {
         const { TranscriptListShell } = await import('./TranscriptListShell');
         const overrideProps = { scrollViewProps: { testOnly: true } };
         const platformInteractionProps = {
@@ -492,7 +746,12 @@ describe('TranscriptListShell', () => {
                 data={[{ id: 'row-1' }]}
                 keyExtractor={(item: { id: string }) => item.id}
                 renderItem={({ item }: { item: { id: string } }) => React.createElement('Row', { id: item.id })}
-                frame={resolveMainTranscriptListShellFrame({ platformOS: 'ios' })}
+                frame={resolveReadOnlyTranscriptListShellFrame({
+                    accessKind: 'public',
+                    bottomNoticeVisible: false,
+                    platformOS: 'ios',
+                })}
+                transcriptLegendListSpikeSurface="flashList"
                 overrideProps={overrideProps}
                 platformInteractionProps={platformInteractionProps}
                 onLoad={onLoad}
@@ -521,7 +780,7 @@ describe('TranscriptListShell', () => {
         expect(capturedFlashListProps.onWheel).toBe(platformInteractionProps.onWheel);
     });
 
-    it('keeps the layout commit callback host-owned while the shell owns the renderer wrapper', async () => {
+    it('keeps the layout commit callback host-owned while the FlashList renderer wrapper owns the observer', async () => {
         const { TranscriptListShell } = await import('./TranscriptListShell');
         const onCommitLayoutEffect = vi.fn();
 
@@ -530,7 +789,12 @@ describe('TranscriptListShell', () => {
                 data={[{ id: 'row-1' }]}
                 keyExtractor={(item: { id: string }) => item.id}
                 renderItem={({ item }: { item: { id: string } }) => React.createElement('Row', { id: item.id })}
-                frame={resolveMainTranscriptListShellFrame({ platformOS: 'ios' })}
+                frame={resolveReadOnlyTranscriptListShellFrame({
+                    accessKind: 'public',
+                    bottomNoticeVisible: false,
+                    platformOS: 'ios',
+                })}
+                transcriptLegendListSpikeSurface="flashList"
                 onCommitLayoutEffect={onCommitLayoutEffect}
             />,
         );
@@ -555,7 +819,7 @@ describe('TranscriptListShell', () => {
         expect(TRANSCRIPT_RENDERER_SURFACE).toContain('main');
     });
 
-    it('keeps FlashList and LayoutCommitObserver imports confined to the FlashList renderer adapter', () => {
+    it('keeps FlashList compat and LayoutCommitObserver imports confined to renderer adapters', () => {
         const shellSources = readProductionSources(SHELL_DIR_URL);
         const flashListCompatImporters = shellSources
             .filter(({ source }) => source.includes(FLASH_LIST_COMPAT_IMPORT_PATH))
@@ -564,21 +828,32 @@ describe('TranscriptListShell', () => {
             .filter(({ source }) => /\bLayoutCommitObserver\b/.test(source))
             .map(({ relativePath }) => relativePath);
 
-        expect(flashListCompatImporters).toEqual(['renderer/flashListRenderer.tsx']);
-        expect(layoutCommitObserverUsers).toEqual(['renderer/flashListRenderer.tsx']);
+        expect(flashListCompatImporters).toEqual([
+            'renderer/flashListRenderer.tsx',
+            'renderer/legendListRenderer.tsx',
+        ]);
+        expect(layoutCommitObserverUsers).toEqual([
+            'renderer/flashListRenderer.tsx',
+            'renderer/legendListRenderer.tsx',
+        ]);
     });
 
-    it('routes main ChatList rendering through TranscriptListShell after the shell surface is widened', () => {
+    it('routes main ChatList rendering through TranscriptListShell without a pass-through frame shell', () => {
+        expect(existsSync(CHAT_LIST_INTERNAL_FRAME_URL)).toBe(false);
+        expect(CHAT_LIST).not.toContain('ChatListInternalFrame');
         expect(CHAT_LIST).toMatch(/<TranscriptListShell<ChatTranscriptListItem>/);
         expect(CHAT_LIST).not.toMatch(/<FlashList\b/);
         expect(CHAT_LIST).not.toMatch(/<LayoutCommitObserver\b/);
         expect(CHAT_LIST).toContain('frame={mainTranscriptListShellFrame}');
         expect(CHAT_LIST).toContain('onCommitLayoutEffect={recordLayoutCommitObserved}');
-        expect(CHAT_LIST).toContain('platformInteractionProps={mainTranscriptListShellPlatformInteractionProps}');
-        expect(CHAT_LIST).toContain('header={mainTranscriptListShellEdgeSlots.listHeaderNode}');
-        expect(CHAT_LIST).toContain('footer={mainTranscriptListShellEdgeSlots.listFooterNode}');
-        expect(CHAT_LIST).toContain('olderLoadOverlay={mainTranscriptListOlderLoadOverlay}');
-        expect(CHAT_LIST).toContain('catchUpOverlay={mainTranscriptListCatchUpOverlay}');
+        expect(CHAT_LIST).toContain('platformInteractionProps={scrollObservationHost.platformInteractionProps}');
+        expect(CHAT_LIST).toContain('onLayout={scrollObservationHost.onLayout}');
+        expect(CHAT_LIST).toContain('onContentSizeChange={scrollObservationHost.onContentSizeChange}');
+        expect(CHAT_LIST).toContain('onScroll={scrollObservationHost.onScroll}');
+        expect(CHAT_LIST).toContain('header={transcriptItemsEdgeSlots.edgeSlots.listHeaderNode}');
+        expect(CHAT_LIST).toContain('footer={transcriptItemsEdgeSlots.edgeSlots.listFooterNode}');
+        expect(CHAT_LIST).toContain('olderLoadOverlay={transcriptItemsEdgeSlots.olderLoadOverlay}');
+        expect(CHAT_LIST).toContain('catchUpOverlay={transcriptItemsEdgeSlots.catchUpOverlay}');
         expect(CHAT_LIST).not.toContain('testID="transcript-chat-list"');
         expect(CHAT_LIST).not.toContain('nativeID={chatListNativeId}');
     });
@@ -624,9 +899,9 @@ describe('TranscriptListShell', () => {
         expect(COMMAND_HOST).toBeTruthy();
         expect(COMMAND_HOST).toContain('performTranscriptViewportCommand');
         expect(COMMAND_HOST).toContain('performWebDomPrependAnchorRestoreCommand');
-        expect(CHAT_LIST).toContain('createTranscriptViewportCommandHost');
-        expect(CHAT_LIST).toContain('commandHost.execute');
-        expect(CHAT_LIST).toContain('commandHost.executeWithAnimation');
+        expect(COMMAND_HOST_WIRING).toContain('createTranscriptViewportCommandHost');
+        expect(COMMAND_HOST_WIRING).toContain('commandHost.execute');
+        expect(COMMAND_HOST_WIRING).toContain('commandHost.executeWithAnimation');
         expect(CHAT_LIST).not.toContain("viewport/performTranscriptViewportCommand");
         expect(CHAT_LIST).not.toMatch(/from ['"]@\/components\/sessions\/transcript\/viewport\/driver\/webDom['"]/);
         expect(CHAT_LIST).not.toContain('performTranscriptViewportCommand(commandToPerform, {');
@@ -649,11 +924,17 @@ describe('TranscriptListShell', () => {
     });
 
     it('delegates prepend transaction ownership to prepend owners', () => {
-        expect(CHAT_LIST).toContain('createNativePrependOwner');
-        expect(CHAT_LIST).toContain('createWebPrependOwner');
+        expect(CHAT_LIST).toContain('useTranscriptPrependHost');
+        expect(CHAT_LIST).toContain('prependHost.applyNativeEffects');
+        expect(CHAT_LIST).toContain('runTranscriptPrependOlderLoad');
+        expect(PREPEND_HOST).toContain('createNativePrependOwner');
+        expect(PREPEND_HOST).toContain('createWebPrependOwner');
+        expect(PREPEND_HOST).toContain('applyWebEffects');
         expect(CHAT_LIST).not.toContain('viewport/prepend/observePrependOutcome');
         expect(CHAT_LIST).not.toContain('viewport/prepend/prependTransaction');
         expect(CHAT_LIST).not.toContain('viewport/prepend/prependFallbackQuietGate');
+        expect(CHAT_LIST).not.toContain('createNativePrependOwner');
+        expect(CHAT_LIST).not.toContain('createWebPrependOwner');
         expect(CHAT_LIST).not.toContain('resolveNativePrependCloseEffects(');
         expect(CHAT_LIST).not.toContain('createPrependTransaction(');
         expect(CHAT_LIST).not.toContain('createPrependFallbackQuietGate(');
@@ -704,14 +985,15 @@ describe('TranscriptListShell', () => {
 
     it('routes measured native pin and content-growth planning through the lifecycle host', () => {
         const flushPendingNativeMountSettleBottomPinBody = readHookBody(
-            CHAT_LIST,
+            BOTTOM_FOLLOW_HOST,
             'flushPendingNativeMountSettleBottomPin',
             'useCallback',
         );
 
-        expect(CHAT_LIST).toContain('lifecycleHost.planMeasuredNativeLiveTailPin');
-        expect(CHAT_LIST).toContain('lifecycleHost.planNativeMountSettlePendingPinFlush');
-        expect(CHAT_LIST).toContain('lifecycleHost.planContentGrowthLiveTailCommand');
+        expect(CHAT_LIST).toContain('useTranscriptBottomFollowHost');
+        expect(BOTTOM_FOLLOW_HOST).toContain('lifecycleHost.planMeasuredNativeLiveTailPin');
+        expect(BOTTOM_FOLLOW_HOST).toContain('lifecycleHost.planNativeMountSettlePendingPinFlush');
+        expect(BOTTOM_FOLLOW_HOST).toContain('lifecycleHost.planContentGrowthLiveTailCommand');
         expect(flushPendingNativeMountSettleBottomPinBody).toContain(
             'lifecycleHost.planNativeMountSettlePendingPinFlush',
         );
@@ -730,10 +1012,12 @@ describe('TranscriptListShell', () => {
     });
 
     it('routes native stream-append offset escape release through the lifecycle host', () => {
-        expect(CHAT_LIST).toContain('lifecycleHost.planNativeOffsetEscapeRelease');
+        expect(CHAT_LIST).toContain('useTranscriptScrollObservationHost');
+        expect(SCROLL_OBSERVATION_HOST).toContain('deps.lifecycleHost.planNativeOffsetEscapeRelease');
         expect(LIFECYCLE_HOST).toContain('planNativeOffsetEscapeRelease');
         expect(LIFECYCLE_HOST).toContain('resolveNativeOffsetEscapeReleaseDecision');
         expect(CHAT_LIST).not.toContain("viewport/lifecycle/nativeOffsetEscapeRelease");
+        expect(CHAT_LIST).not.toContain('lifecycleHost.planNativeOffsetEscapeRelease');
         expect(CHAT_LIST).not.toContain('resolveNativeOffsetEscapeReleaseDecision');
         expect(CHAT_LIST).not.toContain('resolveNativeOffsetReleaseLiveTailStateEffects');
     });
@@ -754,11 +1038,11 @@ describe('TranscriptListShell', () => {
             'pendingNativeEntrySettleConfirmRef',
         ];
 
-        expect(CHAT_LIST).toContain('lifecycleHost.armNativeExplicitJumpConfirmation');
-        expect(CHAT_LIST).toContain('lifecycleHost.clearNativeExplicitJumpConfirmation');
-        expect(CHAT_LIST).toContain('lifecycleHost.armNativeEntrySettleConfirmation');
-        expect(CHAT_LIST).toContain('lifecycleHost.resetNativeEntrySettleConfirmation');
-        expect(CHAT_LIST).toContain('lifecycleHost.observeNativeScrollConfirmation');
+        expect(JUMP_HOST).toContain('lifecycleHost.armNativeExplicitJumpConfirmation');
+        expect(JUMP_HOST).toContain('lifecycleHost.clearNativeExplicitJumpConfirmation');
+        expect(NATIVE_VIEWPORT_LIFECYCLE_HOST).toContain('lifecycleHost.armNativeEntrySettleConfirmation');
+        expect(SESSION_ENTRY_LIFECYCLE_HOST).toContain('lifecycleHost.resetNativeEntrySettleConfirmation');
+        expect(BOTTOM_FOLLOW_HOST).toContain('lifecycleHost.observeNativeScrollConfirmation');
         expect(LIFECYCLE_HOST).toContain('createNativeConfirmationOwner');
         expect(LIFECYCLE_HOST).toContain('observeNativeScrollConfirmation');
         for (const forbiddenImport of forbiddenImports) {
@@ -769,9 +1053,12 @@ describe('TranscriptListShell', () => {
         }
     });
 
-    it('routes content-growth live-tail scheduling policy through the bottom-follow write scheduler', () => {
+    it('keeps FlashList-era content-growth scheduling behind the app-owned continuous-follow branch', () => {
         expect(CHAT_LIST).toContain('requestBottomFollowScheduledWrite');
         expect(CHAT_LIST).toContain('planBottomFollowWriteSchedulerEvent');
+        expect(CHAT_LIST).toContain('appOwnsContinuousFollow');
+        expect(CHAT_LIST).toContain('continuousFollowOwner: appOwnsContinuousFollow ?');
+        expect(SCROLL_OBSERVATION_HOST).toContain('continuousFollowOwner: deps.continuousFollowOwner');
         expect(CHAT_LIST).not.toContain('lifecycleHost.planContentGrowthLiveTailPinSchedule');
         expect(CHAT_LIST).not.toContain('lifecycleHost.planContentGrowthLiveTailScheduledPinFire');
         expect(LIFECYCLE_HOST).not.toContain('planContentGrowthLiveTailPinSchedule');
@@ -779,10 +1066,24 @@ describe('TranscriptListShell', () => {
         expect(LIFECYCLE_HOST).not.toContain('contentGrowthLiveTailScheduler');
     });
 
+    it('gates web initial pin retries, local height restores, and prepend restores to the app-owned renderer branch', () => {
+        expect(CHAT_LIST).toContain('appOwnsInitialBottomPosition');
+        expect(CHAT_LIST).toContain('appOwnsPrependRestore');
+        expect(CHAT_LIST).toContain('appOwnsLocalHeightChangeRestore');
+        expect(CHAT_LIST).toContain('initialBottomPositionOwner: appOwnsInitialBottomPosition ?');
+        expect(CHAT_LIST).toContain('preservePrependViewport: appOwnsPrependRestore');
+        expect(CHAT_LIST).toContain('localHeightChangeRestoreOwner: appOwnsLocalHeightChangeRestore ?');
+        expect(COMMAND_HOST_WIRING).toContain('localHeightChangeRestoreOwner');
+        expect(COMMAND_HOST_WIRING).toContain("localHeightChangeRestoreOwner === 'renderer'");
+        expect(PREPEND_HOST).toContain('webPrependRestoreOwner');
+        expect(PREPEND_HOST).toContain("webPrependRestoreOwner === 'renderer'");
+    });
+
     it('routes measurement and layout-cache host policy through the measurement host', () => {
         expect(CHAT_LIST).toContain('createTranscriptMeasurementHost');
-        expect(CHAT_LIST).toContain('measurementHost.observeRowLayoutMutation');
-        expect(CHAT_LIST).toContain('measurementHost.observeContentSizeChange');
+        expect(TRANSCRIPT_MEASUREMENT_HOST_WIRING).toContain('measurementHost.observeRowLayoutMutation');
+        expect(CHAT_LIST).toContain('measurementHost,');
+        expect(SCROLL_OBSERVATION_HOST).toContain('deps.measurementHost.observeContentSizeChange');
         expect(TRANSCRIPT_MEASUREMENT_HOST).toContain('requestGlobalLayoutInvalidation');
         expect(TRANSCRIPT_MEASUREMENT_HOST).toContain('clear-layout-cache');
         expect(TRANSCRIPT_MEASUREMENT_HOST).toContain('hasNativeContentMeasurementForSession');
@@ -797,9 +1098,10 @@ describe('TranscriptListShell', () => {
     });
 
     it('routes scroll-observation arbitration through the lifecycle host', () => {
-        expect(CHAT_LIST).toContain('observeTranscriptScrollIngress');
+        expect(CHAT_LIST).toContain('useTranscriptScrollObservationHost');
+        expect(SCROLL_OBSERVATION_HOST).toContain('observeTranscriptScrollIngress');
         expect(SCROLL_INGRESS_OBSERVATION).toContain('lifecycleHost.observeScroll');
-        expect(CHAT_LIST).toContain('applyTranscriptLifecycleScrollObservationPlan');
+        expect(SCROLL_OBSERVATION_HOST).toContain('applyTranscriptLifecycleScrollObservationPlan');
         expect(LIFECYCLE_SCROLL_OBSERVATION_APPLIER).toContain('nativePassiveScrollObservationEffect');
         expect(LIFECYCLE_SCROLL_OBSERVATION_APPLIER).toContain('nativeBottomFollowCompletionEffects');
         expect(LIFECYCLE_SCROLL_OBSERVATION_APPLIER).toContain('nativeUserScrollTakeoverEffects');
@@ -815,6 +1117,8 @@ describe('TranscriptListShell', () => {
         expect(CHAT_LIST).not.toContain("viewport/lifecycle/nativeObservedViewportStateGenericEffect");
         expect(CHAT_LIST).not.toContain("viewport/lifecycle/nativeScrollReleaseLiveTailGenericEffect");
         expect(CHAT_LIST).not.toContain("viewport/lifecycle/genericScrollObservationViewportState");
+        expect(CHAT_LIST).not.toContain('observeTranscriptScrollIngress');
+        expect(CHAT_LIST).not.toContain('applyTranscriptLifecycleScrollObservationPlan');
         expect(CHAT_LIST).not.toContain('shouldIgnoreNativePassiveViewportScroll');
         expect(CHAT_LIST).not.toContain('shouldRecordNativePassiveUnpinnedMovement');
         expect(CHAT_LIST).not.toContain('resolveNativeScrollObservationAnchorCaptureSuppression');
@@ -848,7 +1152,7 @@ describe('TranscriptListShell', () => {
     });
 
     it('does not pass list orientation into native invalid-scroll filtering', () => {
-        const invalidScrollPolicyCallSource = CHAT_LIST.match(
+        const invalidScrollPolicyCallSource = NATIVE_VIEWPORT_LIFECYCLE_HOST.match(
             /resolveShouldIgnoreNativeInvalidScrollObservation\(\{([\s\S]*?)\n\s+\}\);/,
         )?.[1];
         expect(invalidScrollPolicyCallSource).toBeTruthy();
@@ -866,13 +1170,12 @@ describe('TranscriptListShell', () => {
 
         expect(MAIN_TRANSCRIPT_RENDERER_FRAME_HOST).toContain('resolveNativeTelemetryMvcpPolicy');
         expect(MAIN_TRANSCRIPT_RENDERER_FRAME_HOST).toContain('resolveMainTranscriptListShellFrame');
-        expect(CHAT_LIST).toContain('resolveMainTranscriptRendererFrameHost');
+        expect(MAIN_TRANSCRIPT_RENDERER_FRAME_HOST).toContain('resolveMainTranscriptRendererFrameHost');
         expect(CHAT_LIST).not.toMatch(
             /import\s+\{[\s\S]*resolveTranscriptFlashListBottomMaintenance[\s\S]*\}\s+from\s+['"]@\/components\/sessions\/transcript\/scroll\/transcriptFlashListBottomMaintenance['"]/,
         );
         expect(CHAT_LIST).not.toMatch(/\bresolveTranscriptFlashListBottomMaintenance\s*\(/);
         expect(CHAT_LIST).not.toMatch(/\bfunction\s+resolveNativeTelemetryMvcpPolicy\b/);
-        expect(CHAT_LIST).not.toContain('sync.getSyncTuning().transcriptFlashListDrawDistance');
         expect(CHAT_LIST).not.toMatch(
             /import\s+\{[\s\S]*resolveMainTranscriptListShellFrame[\s\S]*\}\s+from\s+['"]@\/components\/sessions\/transcript\/viewport\/shell\/transcriptListShellCapabilities['"]/,
         );
@@ -885,20 +1188,22 @@ describe('TranscriptListShell', () => {
     });
 
     it('keeps main shell layout/content-size observation ordering in the lifecycle applier', () => {
-        const layoutStart = CHAT_LIST.indexOf('onLayout={(e: LayoutChangeEvent) => {');
-        const contentSizeStart = CHAT_LIST.indexOf('onContentSizeChange={(_: number, h: number) => {');
-        const scrollStart = CHAT_LIST.indexOf('onScroll={(e: NativeSyntheticEvent<NativeScrollEvent>) => {');
+        const layoutStart = SCROLL_OBSERVATION_HOST.indexOf('const onLayout = React.useCallback');
+        const contentSizeStart = SCROLL_OBSERVATION_HOST.indexOf('const onContentSizeChange = React.useCallback');
+        const scrollStart = SCROLL_OBSERVATION_HOST.indexOf('const onScroll = React.useCallback');
         expect(layoutStart).toBeGreaterThan(0);
         expect(contentSizeStart).toBeGreaterThan(layoutStart);
         expect(scrollStart).toBeGreaterThan(contentSizeStart);
 
-        const layoutBody = CHAT_LIST.slice(layoutStart, contentSizeStart);
-        const contentSizeBody = CHAT_LIST.slice(contentSizeStart, scrollStart);
+        const layoutBody = SCROLL_OBSERVATION_HOST.slice(layoutStart, contentSizeStart);
+        const contentSizeBody = SCROLL_OBSERVATION_HOST.slice(contentSizeStart, scrollStart);
 
         expect(LAYOUT_CONTENT_SIZE_OBSERVATION_APPLIER).toContain('applyTranscriptLayoutObservation');
         expect(LAYOUT_CONTENT_SIZE_OBSERVATION_APPLIER).toContain('applyTranscriptContentSizeObservation');
-        expect(CHAT_LIST).toContain('applyTranscriptLayoutObservation');
-        expect(CHAT_LIST).toContain('applyTranscriptContentSizeObservation');
+        expect(SCROLL_OBSERVATION_HOST).toContain('applyTranscriptLayoutObservation');
+        expect(SCROLL_OBSERVATION_HOST).toContain('applyTranscriptContentSizeObservation');
+        expect(CHAT_LIST).not.toContain('applyTranscriptLayoutObservation({');
+        expect(CHAT_LIST).not.toContain('applyTranscriptContentSizeObservation({');
 
         for (const staleLayoutOwner of [
             'observeMountSettleMetrics',
@@ -933,26 +1238,29 @@ describe('TranscriptListShell', () => {
         expect(CHAT_LIST).not.toContain('resolveTranscriptBottomFollowMode');
         expect(CHAT_LIST).toContain('TranscriptBottomFollowModeState');
         expect(CHAT_LIST).toContain('React.useRef<TranscriptBottomFollowModeState>');
-        expect(CHAT_LIST).toContain("TranscriptBottomFollowModeState['mode']");
+        expect(BOTTOM_FOLLOW_HOST).toContain("TranscriptBottomFollowModeState['mode']");
     });
 
-    it('keeps native inverted fact-source dependencies native-only and orientation-free', () => {
-        const nativeFactSourceConstruction = CHAT_LIST.match(
-            /createNativeInvertedFlashListFactSource\(\{([\s\S]*?)\n\s+\}\);/,
+    it('keeps native fact-source dependencies native-only and list-command-space-owned', () => {
+        const nativeFactSourceReaders = NATIVE_INVERTED_FACT_SOURCE_HOOK.match(
+            /const factReaders = React\.useMemo\(\(\) => \(\{([\s\S]*?)\n\s+\}\),/,
         )?.[1];
         const nativeFactSources = [
             TRANSCRIPT_VIEWPORT_FACTS,
             NATIVE_INVERTED_FLASH_LIST_FACTS,
             NATIVE_INVERTED_FLASH_LIST_FACTS_TEST,
+            NATIVE_STANDARD_LIST_FACTS,
+            NATIVE_STANDARD_LIST_FACTS_TEST,
         ].join('\n');
 
-        expect(nativeFactSourceConstruction).toBeTruthy();
+        expect(nativeFactSourceReaders).toBeTruthy();
         expect(nativeFactSources).not.toContain('readOrientation');
         expect(nativeFactSources).not.toContain('TranscriptListOrientation');
-        expect(nativeFactSources).not.toMatch(/orientation:\s*['"]standard['"]/);
-        expect(nativeFactSources).not.toMatch(/\bstandard:\s+.*(?:fact|offset|range|edge)/i);
-        expect(nativeFactSourceConstruction).not.toContain('readOrientation');
-        expect(nativeFactSourceConstruction).not.toContain('listOrientationRef');
+        expect(nativeFactSourceReaders).not.toContain('readOrientation');
+        expect(nativeFactSourceReaders).not.toContain('listOrientationRef');
+        expect(NATIVE_INVERTED_FACT_SOURCE_HOOK).toContain('transcriptViewportCommandSpace');
+        expect(NATIVE_INVERTED_FACT_SOURCE_HOOK).toContain('createNativeInvertedFlashListFactSource(factReaders)');
+        expect(NATIVE_INVERTED_FACT_SOURCE_HOOK).toContain('createNativeStandardListFactSource(factReaders)');
     });
 
     it('keeps native inverted raw scroll math owned by the native driver', () => {
@@ -976,57 +1284,59 @@ describe('TranscriptListShell', () => {
     });
 
     it('does not read list orientation to report native telemetry orientation', () => {
-        const nativeTelemetryStart = CHAT_LIST.indexOf(
+        const nativeTelemetryStart = VIEWPORT_TELEMETRY_EVENTS_HOST.indexOf(
             'const resolveNativeTelemetryDiagnostics = React.useCallback',
         );
-        const nativeTelemetryEnd = CHAT_LIST.indexOf(
-            'const resolveViewportTelemetryMode',
+        const nativeTelemetryEnd = VIEWPORT_TELEMETRY_EVENTS_HOST.indexOf(
+            'const recordViewportTelemetryEvent',
             nativeTelemetryStart,
         );
         expect(nativeTelemetryStart).toBeGreaterThanOrEqual(0);
         expect(nativeTelemetryEnd).toBeGreaterThan(nativeTelemetryStart);
-        const nativeTelemetrySource = CHAT_LIST.slice(nativeTelemetryStart, nativeTelemetryEnd);
+        const nativeTelemetrySource = VIEWPORT_TELEMETRY_EVENTS_HOST.slice(nativeTelemetryStart, nativeTelemetryEnd);
 
         expect(nativeTelemetrySource).not.toContain('listOrientationRef');
         expect(nativeTelemetrySource).not.toMatch(/orientation:\s*TranscriptViewportTelemetryListOrientation/);
         expect(nativeTelemetrySource).not.toMatch(/\?\s*'inverted'\s*:\s*'standard'/);
         expect(nativeTelemetrySource).not.toContain('resolveBottomRawScrollOffset');
-        expect(nativeTelemetrySource).toContain("orientation: 'inverted'");
+        expect(NATIVE_TELEMETRY_DIAGNOSTICS).not.toContain('listOrientationRef');
+        expect(NATIVE_TELEMETRY_DIAGNOSTICS).not.toMatch(/\?\s*'inverted'\s*:\s*'standard'/);
+        expect(NATIVE_TELEMETRY_DIAGNOSTICS).toContain("orientation: 'inverted'");
     });
 
     it('does not keep a duplicate mutable host orientation ref in main ChatList', () => {
         expect(CHAT_LIST).toContain(
-            'const listOrientation: TranscriptListOrientation = transcriptListPresentation.orientation;',
+            'const listOrientation: TranscriptListOrientation = resolveTranscriptListPresentation({',
         );
         expect(CHAT_LIST).not.toContain('listOrientationRef');
     });
 
     it('keeps native observed-offset normalization behind the native fact seam while web DOM stays identity-owned', () => {
-        const reachedEdgeResolverStart = CHAT_LIST.indexOf(
+        const reachedEdgeResolverStart = NATIVE_INVERTED_FACT_SOURCE_HOOK.indexOf(
             'const resolveViewportReachedEdge = React.useCallback',
         );
-        const reachedEdgeResolverEnd = CHAT_LIST.indexOf(
-            'const observeNativeStreamAppendOffsetEscape',
+        const reachedEdgeResolverEnd = NATIVE_INVERTED_FACT_SOURCE_HOOK.indexOf(
+            'return {',
             reachedEdgeResolverStart,
         );
         expect(reachedEdgeResolverStart).toBeGreaterThanOrEqual(0);
         expect(reachedEdgeResolverEnd).toBeGreaterThan(reachedEdgeResolverStart);
-        const reachedEdgeResolverSource = CHAT_LIST.slice(
+        const reachedEdgeResolverSource = NATIVE_INVERTED_FACT_SOURCE_HOOK.slice(
             reachedEdgeResolverStart,
             reachedEdgeResolverEnd,
         );
 
         expect(CHAT_LIST).not.toContain('const resolveCanonicalScrollOffset = React.useCallback');
         expect(CHAT_LIST).not.toContain('resolveNativeInvertedBottomRawOffset');
-        expect(CHAT_LIST).toContain('const resolveNativeObservedScrollOffset = React.useCallback');
-        expect(CHAT_LIST).toContain('observeTranscriptScrollIngress');
+        expect(NATIVE_INVERTED_FACT_SOURCE_HOOK).toContain('const resolveNativeObservedScrollOffset = React.useCallback');
+        expect(SCROLL_OBSERVATION_HOST).toContain('observeTranscriptScrollIngress');
         expect(TRANSCRIPT_VIEWPORT_FACTS).toContain('resolveObservedOffset');
         expect(NATIVE_INVERTED_FLASH_LIST_FACTS).toContain('resolveObservedOffset(rawOffsetY');
         expect(NATIVE_INVERTED_FLASH_LIST_FACTS_TEST).toContain('resolveObservedOffset(300');
         expect(SCROLL_INGRESS_DRIVER).toContain('toNativeInvertedCanonicalOffset');
         expect(SCROLL_INGRESS_DRIVER).toContain('getWebTranscriptDistanceFromBottom(metrics)');
         expect(reachedEdgeResolverSource).toMatch(
-            /if\s*\(\s*Platform\.OS\s*===\s*'web'\s*\)\s*return\s+edge\s*===\s*'start'\s*\?\s*'older'\s*:\s*'newer';/,
+            /if\s*\(\s*platformOS\s*===\s*'web'\s*\)\s*return\s+edge\s*===\s*'start'\s*\?\s*'older'\s*:\s*'newer';/,
         );
         expect(CHAT_LIST).not.toContain('const rawObservedOffsetY = liveWebMetrics ? liveWebMetrics.scrollTop');
         expect(SIDECHAIN_OLDER_LOAD_OBSERVATION).not.toContain('readNativeAbsoluteScrollOffset');
@@ -1075,13 +1385,13 @@ describe('TranscriptListShell', () => {
 
     it('does not keep stale native-standard guards after native inversion became canonical', () => {
         const nativeGestureIntentSource = readHookBody(
-            CHAT_LIST,
+            SCROLL_OBSERVATION_HOST,
             'recordNativeGestureTakeover',
             'useCallback',
         );
         const hotColdSegmentsSource = RENDER_WINDOW_PROJECTION;
         const nativeHotTailPinSource = readHookBody(
-            CHAT_LIST,
+            BOTTOM_FOLLOW_HOST,
             'pinNativeLiveTailForHotTailHeight',
             'useCallback',
         );
@@ -1104,7 +1414,7 @@ describe('TranscriptListShell', () => {
     });
 
     it('does not keep an explicit native jump-to-bottom orientation gate', () => {
-        const jumpToBottomSource = readHookBody(CHAT_LIST, 'jumpToBottom', 'useCallback');
+        const jumpToBottomSource = readHookBody(JUMP_HOST, 'jumpToBottom', 'useCallback');
 
         expect(jumpToBottomSource).not.toContain('listOrientationRef');
         expect(jumpToBottomSource).not.toMatch(
@@ -1116,20 +1426,20 @@ describe('TranscriptListShell', () => {
     });
 
     it('routes explicit jump-to-bottom through one command-host write path', () => {
-        const jumpToBottomSource = readHookBody(CHAT_LIST, 'jumpToBottom', 'useCallback');
+        const jumpToBottomSource = readHookBody(JUMP_HOST, 'jumpToBottom', 'useCallback');
 
         expect(jumpToBottomSource).not.toContain("tryPinToBottomDom('jump-to-bottom')");
     });
 
     it('does not keep a native touch-escape orientation gate', () => {
         const nativeTouchIntentSource = readHookBody(
-            CHAT_LIST,
+            SCROLL_OBSERVATION_HOST,
             'recordNativeTranscriptTouchIntent',
             'useCallback',
         );
         const gestureIntentIndex = nativeTouchIntentSource.indexOf('recordNativeGestureTakeover();');
         const lifecyclePlanIndex = nativeTouchIntentSource.indexOf(
-            'const plan = lifecycleHost.planNativeTouchRelease({',
+            'const plan = deps.lifecycleHost.planNativeTouchRelease({',
             gestureIntentIndex,
         );
         const lifecycleCommitIndex = nativeTouchIntentSource.indexOf(

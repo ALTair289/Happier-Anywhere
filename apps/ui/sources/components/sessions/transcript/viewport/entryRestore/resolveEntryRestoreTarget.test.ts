@@ -88,6 +88,24 @@ describe('resolve entry restore target', () => {
         }))).toEqual({ kind: 'anchor', index: 1, itemOffsetPx: 84 });
     });
 
+    it('degrades unreachable persisted anchor offsets to bottom instead of restoring off-viewport', () => {
+        expect(resolveEntryRestoreTarget(buildParams({
+            snapshot: {
+                shouldFollowBottom: false,
+                offsetY: 1_900,
+                anchor: { itemId: 'msg:m-20', messageId: 'm-20', itemOffsetPx: 2_900 },
+            },
+        }))).toEqual({ kind: 'bottom' });
+
+        expect(resolveEntryRestoreTarget(buildParams({
+            snapshot: {
+                shouldFollowBottom: false,
+                offsetY: 1_900,
+                anchor: { itemId: 'msg:m-20', messageId: 'm-20', itemOffsetPx: -900 },
+            },
+        }))).toEqual({ kind: 'bottom' });
+    });
+
     it('falls back to the nearest surviving item when the anchor message was pruned', () => {
         expect(resolveEntryRestoreTarget(buildParams({
             snapshot: {

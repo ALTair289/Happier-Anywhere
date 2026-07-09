@@ -11,6 +11,7 @@ import {
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
 let capturedFlashListProps: any = null;
+let capturedLegendListProps: any = null;
 let renderedFlatListCount = 0;
 let transcriptListImplementationSetting: 'flash_v2' | 'flatlist_legacy' = 'flash_v2';
 let platformOs: 'web' | 'ios' = 'web';
@@ -45,6 +46,39 @@ vi.mock('@shopify/flash-list', () => ({
                         : (item?.id ?? String(index));
                 const child = typeof props.renderItem === 'function' ? props.renderItem({ item, index }) : null;
                 return React.createElement('FlashListItem', { key }, child);
+            }),
+            footer,
+        );
+    },
+}));
+
+vi.mock('@legendapp/list/react-native', () => ({
+    LegendList: (props: any) => {
+        capturedLegendListProps = props;
+        const data = Array.isArray(props.data) ? props.data : [];
+        const header =
+            props.ListHeaderComponent
+                ? (typeof props.ListHeaderComponent === 'function'
+                    ? props.ListHeaderComponent()
+                    : props.ListHeaderComponent)
+                : null;
+        const footer =
+            props.ListFooterComponent
+                ? (typeof props.ListFooterComponent === 'function'
+                    ? props.ListFooterComponent()
+                    : props.ListFooterComponent)
+                : null;
+        return React.createElement(
+            'LegendList',
+            props,
+            header,
+            data.map((item: any, index: number) => {
+                const key =
+                    typeof props.keyExtractor === 'function'
+                        ? props.keyExtractor(item, index)
+                        : (item?.id ?? String(index));
+                const child = typeof props.renderItem === 'function' ? props.renderItem({ item, index }) : null;
+                return React.createElement('LegendListItem', { key }, child);
             }),
             footer,
         );
@@ -102,12 +136,22 @@ describe('TranscriptList (FlashList v2)', () => {
     beforeEach(() => {
         resetTranscriptCommonModuleMockState();
         capturedFlashListProps = null;
+        capturedLegendListProps = null;
         renderedFlatListCount = 0;
         transcriptListImplementationSetting = 'flash_v2';
         platformOs = 'web';
         headerHeightState = 0;
         safeAreaTopState = 0;
         renderedMessageViewProps = [];
+        vi.unstubAllGlobals();
+        vi.stubGlobal('window', {
+            localStorage: {
+                getItem: (key: string) =>
+                    key === 'HAPPIER_SYNC_TUNING_JSON'
+                        ? JSON.stringify({ transcriptLegendListSpikeSurface: 'flashList' })
+                        : null,
+            },
+        });
     });
 
     it('renders FlashList with startRenderingFromBottom enabled when selected', async () => {
@@ -127,6 +171,38 @@ describe('TranscriptList (FlashList v2)', () => {
             disableToolNavigation: true,
             permissionDisabledReason: 'public',
         });
+        expect(capturedLegendListProps).toBeNull();
+    });
+
+    it('routes public read-only transcripts to Legend only when the internal read-only flag is enabled', async () => {
+        vi.stubGlobal('window', {
+            localStorage: {
+                getItem: (key: string) =>
+                    key === 'HAPPIER_SYNC_TUNING_JSON'
+                        ? JSON.stringify({ transcriptLegendListSpikeSurface: 'readOnly' })
+                        : null,
+            },
+        });
+
+        const { TranscriptList } = await import('./TranscriptList');
+        await renderScreen(<TranscriptList
+                    sessionId="public-session"
+                    metadata={null}
+                    messages={[
+                        { kind: 'user-text', id: 'oldest', localId: null, createdAt: 1, text: 'first' } as any,
+                        { kind: 'agent-text', id: 'newest', localId: null, createdAt: 2, text: 'second', isThinking: false } as any,
+                    ]}
+                />);
+
+        expect(capturedFlashListProps).toBeNull();
+        expect(capturedLegendListProps).toMatchObject({
+            alignItemsAtEnd: true,
+            dataKey: 'public-session',
+            initialScrollAtEnd: true,
+            maintainScrollAtEnd: { animated: false },
+            maintainVisibleContentPosition: { data: true, size: true },
+        });
+        expect(capturedLegendListProps.data.map((item: any) => item.id)).toEqual(['oldest', 'newest']);
     });
 
     it('throttles web FlashList scroll events above one frame to reduce scroll-render churn', async () => {

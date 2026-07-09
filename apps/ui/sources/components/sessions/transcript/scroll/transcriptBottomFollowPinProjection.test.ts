@@ -108,4 +108,44 @@ describe('reduceTranscriptScrollPinState', () => {
         expect(pinned.isPinned).toBe(true);
         expect(pinned.newActivityCount).toBe(0);
     });
+
+    it('uses renderer at-end truth to detach, count unseen activity, and reset only on genuine tail reach', () => {
+        const initial: TranscriptScrollPinState = {
+            isPinned: true,
+            newActivityCount: 0,
+            lastActivityKey: null,
+        };
+
+        const detached = reduceTranscriptScrollPinState(initial, {
+            type: 'rendererAtEnd',
+            enabled: true,
+            isAtEnd: false,
+        });
+        expect(detached.isPinned).toBe(false);
+        expect(detached.newActivityCount).toBe(0);
+
+        const withUnseen = reduceTranscriptScrollPinState(detached, {
+            type: 'newActivity',
+            activityKey: 'm1',
+            enabled: true,
+        });
+        expect(withUnseen.newActivityCount).toBe(1);
+
+        const stillDetached = reduceTranscriptScrollPinState(withUnseen, {
+            type: 'rendererAtEnd',
+            enabled: true,
+            isAtEnd: false,
+        });
+        expect(stillDetached.newActivityCount).toBe(1);
+
+        const reachedTail = reduceTranscriptScrollPinState(stillDetached, {
+            type: 'rendererAtEnd',
+            enabled: true,
+            isAtEnd: true,
+        });
+        expect(reachedTail).toMatchObject({
+            isPinned: true,
+            newActivityCount: 0,
+        });
+    });
 });

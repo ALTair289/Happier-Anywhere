@@ -4,6 +4,7 @@ export type BottomFollowWriteSchedulerPlatform = 'native' | 'web';
 
 export type BottomFollowAutomaticWriter =
     | 'automatic-live-tail'
+    | 'blank-recovery'
     | 'content-growth'
     | 'deferred-post-scroll'
     | 'hot-tail-carve'

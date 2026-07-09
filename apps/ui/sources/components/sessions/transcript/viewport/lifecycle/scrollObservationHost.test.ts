@@ -169,6 +169,45 @@ describe('transcript lifecycle host scroll observation planning', () => {
         expect(plan.steps.map((step) => step.type)).toEqual(['web-passive-live-tail-correction']);
     });
 
+    it('corrects web passive drift BEYOND the pin threshold while follow intent is held (non-user writers can land far)', () => {
+        // R3 root-cause family (live-captured 2026-07-08): a composer resize (~23px per line)
+        // accumulates >72px of non-user drift in a few frames, and Legend-internal scroll
+        // adjustments can land arbitrarily far in one frame. Release authority now lives in
+        // the genuine-movement classifier (wantsPinned is authoritative): while follow intent
+        // is held, a non-genuine observation beyond the threshold is by definition a non-user
+        // writer's drift and MUST be corrected — the old `> pinThresholdPx` bail abandoned
+        // exactly the drifts that most need healing.
+        const host = createTranscriptLifecycleHost();
+        host.enterSession({
+            platform: 'web',
+            sessionId: 'session-a',
+            shouldFollowLiveTail: true,
+        });
+
+        const plan = host.observeScroll({
+            distanceFromLiveTailPx: 135,
+            hasLiveWebMetrics: true,
+            isTrusted: false,
+            movedAwayFromLiveTail: false,
+            movedTowardLiveTail: false,
+            nowMs: 1200,
+            pinEnabled: true,
+            pinThresholdPx: 72,
+            platform: 'web',
+            previousScrollOffsetPx: 5031,
+            scrollOffsetPx: 4896,
+            sessionId: 'session-a',
+            wantsPinned: true,
+            webObservedUserScrollMovement: false,
+        });
+
+        expect(plan.webPassiveLiveTailCorrectionEffect).toMatchObject({
+            reason: 'passive-drift',
+            sessionId: 'session-a',
+            type: 'apply-web-passive-live-tail-correction',
+        });
+    });
+
     it('keeps tiny passive web live-tail offsets observable without correcting them', () => {
         const host = createTranscriptLifecycleHost();
         host.enterSession({

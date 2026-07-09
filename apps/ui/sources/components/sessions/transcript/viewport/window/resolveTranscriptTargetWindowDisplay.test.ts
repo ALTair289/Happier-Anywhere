@@ -129,6 +129,55 @@ describe('resolveTranscriptTargetWindowDisplay', () => {
         expect(result.items.map((item) => item.id)).toEqual(['msg-105', 'msg-106']);
     });
 
+    it('keeps contiguity across item-seq gaps whose intermediate seqs are loaded (absorbed rows)', () => {
+        // Live RG1/RG4 evidence: tool-result and meta messages render INSIDE their tool row,
+        // so consecutive items can jump seq 331 -> 333 while seq 332 is fully loaded. Breaking
+        // the group there truncates the window display right after the target and strands the
+        // viewport at a false content bottom.
+        const items = [
+            { id: 'msg-330', seq: 330 },
+            { id: 'tool-331', seq: 331 },
+            { id: 'tool-333', seq: 333 },
+            { id: 'msg-335', seq: 335 },
+        ] as const;
+
+        const result = resolveTranscriptTargetWindowDisplay({
+            items,
+            isSeqLoaded: (seq) => seq >= 300 && seq <= 400,
+            windowState: {
+                ...activeWindow,
+                targetSeq: 331,
+                windowMinSeq: 300,
+                windowMaxSeq: 400,
+            },
+        });
+
+        expect(result.targetPresent).toBe(true);
+        expect(result.items.map((item) => item.id)).toEqual(['msg-330', 'tool-331', 'tool-333', 'msg-335']);
+    });
+
+    it('still breaks contiguity across gaps whose intermediate seqs are NOT loaded', () => {
+        const items = [
+            { id: 'msg-100', seq: 100 },
+            { id: 'msg-101', seq: 101 },
+            { id: 'msg-120', seq: 120 },
+        ] as const;
+
+        const result = resolveTranscriptTargetWindowDisplay({
+            items,
+            isSeqLoaded: (seq) => seq <= 101 || seq === 120,
+            windowState: {
+                ...activeWindow,
+                targetSeq: 100,
+                windowMinSeq: 100,
+                windowMaxSeq: 120,
+            },
+        });
+
+        expect(result.targetPresent).toBe(true);
+        expect(result.items.map((item) => item.id)).toEqual(['msg-100', 'msg-101']);
+    });
+
     it('returns an explicit absent-target window result instead of rendering the nearest group', () => {
         const items = [
             { id: 'msg-100', seq: 100 },

@@ -51,7 +51,9 @@ import {
     type ExplicitJumpTakeoverApplyEffect,
 } from './explicitJumpTakeover';
 import {
+    resolveExplicitReturnToLiveTailApplyEffects,
     resolveExplicitReturnToLiveTailViewportEffects,
+    type ExplicitReturnToLiveTailApplyEffect,
     type ExplicitReturnToLiveTailViewportEffect,
 } from './explicitReturnToLiveTail';
 import {
@@ -301,6 +303,15 @@ export type TranscriptLifecycleHostWebScrollObservationInput =
         hasLiveWebMetrics?: boolean;
         platform: 'web';
         recentUserIntent?: boolean;
+        /**
+         * Web DOM observation attestation that `scrollTop` moved since the last
+         * observed (landed) value. `false` marks the echo of the app's own
+         * programmatic write — RN-web still reports such echoes `isTrusted: true`
+         * (the Q1-WEB-1 trap), so the trusted-return fast path must not treat
+         * them as a user returning to the live tail. Omitted when no live DOM
+         * metrics were available to attest the frame.
+         */
+        webMovedSinceLastObservation?: boolean;
         webObservedUserScrollMovement: boolean;
     }>;
 
@@ -446,6 +457,7 @@ export type TranscriptLifecycleHostContentGrowthLiveTailCommandPlan = LifecycleH
 }>;
 
 export type TranscriptLifecycleHostExplicitReturnPlan = LifecycleHostPlanBase & Readonly<{
+    explicitReturnEffects: readonly ExplicitReturnToLiveTailApplyEffect[];
     viewportEffects: readonly ExplicitReturnToLiveTailViewportEffect[];
 }>;
 
@@ -898,6 +910,10 @@ export function createTranscriptLifecycleHost(options: Readonly<{
             });
             return {
                 ...transitionPlan(transition),
+                explicitReturnEffects: resolveExplicitReturnToLiveTailApplyEffects({
+                    effects: transition.effects,
+                    sessionId: input.sessionId,
+                }),
                 viewportEffects: resolveExplicitReturnToLiveTailViewportEffects({
                     effects: transition.effects,
                     sessionId: input.sessionId,
@@ -1082,7 +1098,13 @@ function resolveWebPassiveLiveTailCorrectionEffect(
     const minCorrectionDistancePx = Math.min(pinThresholdPx, WEB_PASSIVE_LIVE_TAIL_CORRECTION_MIN_DISTANCE_PX);
     if (input.hasLiveWebMetrics !== true) return null;
     if (!input.pinEnabled || !input.wantsPinned) return null;
-    if (distanceFromLiveTailPx <= minCorrectionDistancePx || distanceFromLiveTailPx > pinThresholdPx) return null;
+    // No upper bound: release authority lives in the genuine-movement classifier, so while
+    // follow intent is still held, a non-genuine observation beyond the pin threshold is by
+    // definition a non-user writer's drift (Legend-internal adjustments, composer-resize
+    // compensation frames can land arbitrarily far in one frame) and must be corrected.
+    // The old `> pinThresholdPx` bail abandoned exactly the drifts that most needed healing
+    // (live-captured R3 root-cause family, 2026-07-08).
+    if (distanceFromLiveTailPx <= minCorrectionDistancePx) return null;
     return {
         reason: 'passive-drift',
         sessionId: input.sessionId,
@@ -1097,9 +1119,18 @@ function planWebScrollObservation(
     if (!input.webObservedUserScrollMovement) {
         const distanceFromLiveTailPx = Math.max(0, input.distanceFromLiveTailPx);
         const pinThresholdPx = Math.max(0, input.pinThresholdPx);
+        // `isTrusted` alone cannot attest a user return: RN-web marks the echo of
+        // the app's OWN programmatic writes trusted (Q1-WEB-1). A prepend-restore
+        // write clamped by the browser to the live tail (prepended rows not laid
+        // out yet) therefore arrives here as trusted + toward-live-tail + dfb 0
+        // and would silently re-arm bottom-follow, yanking the user to the bottom
+        // once content growth fires. The DOM observation records every write's
+        // landed value; its `webMovedSinceLastObservation: false` positively
+        // identifies such echo frames, so they never count as a trusted return.
         const shouldObserveTrustedReturnToLiveTailFacts =
             input.isTrusted === true &&
             input.movedTowardLiveTail &&
+            input.webMovedSinceLastObservation !== false &&
             distanceFromLiveTailPx <= pinThresholdPx;
         if (shouldObserveTrustedReturnToLiveTailFacts) {
             const factsEffects = resolveWebScrollFactsObservationEffects({

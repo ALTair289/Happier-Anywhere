@@ -19,6 +19,13 @@ export type TranscriptListShellFlashListMaintainVisibleContentPosition =
     }>;
 
 export type TranscriptListShellFlashListRendererOptions = Readonly<{
+    /**
+     * Web only: opt the scroll container out of browser-native scroll anchoring
+     * (overflow-anchor) so the transcript viewport owners stay the sole anchor
+     * authority. Without this, Chrome silently re-anchors scrollTop to a
+     * mid-transcript node during FlashList window reallocation with large rows.
+     */
+    disableBrowserScrollAnchoring?: true;
     drawDistance?: number;
     inverted: boolean;
     keyboardDismissMode: TranscriptListShellKeyboardDismissMode;
@@ -28,6 +35,10 @@ export type TranscriptListShellFlashListRendererOptions = Readonly<{
     pauseOffsetCorrection?: boolean;
     scrollEventThrottle: number;
     testID?: string;
+}>;
+
+export type TranscriptListShellLegendRendererOptions = Readonly<{
+    maintainScrollAtEndThreshold: number;
 }>;
 
 type TranscriptListShellStreamingFollowCapability = Readonly<{
@@ -90,11 +101,13 @@ export type TranscriptListShellFrame = Readonly<{
     renderer: 'flashList';
     rendererOptions: Readonly<{
         flashList: TranscriptListShellFlashListRendererOptions;
+        legend: TranscriptListShellLegendRendererOptions;
     }>;
 }>;
 
 const TRANSCRIPT_NATIVE_DRAW_DISTANCE_DEFAULT_MIN_PX = 600;
 const TRANSCRIPT_NATIVE_DRAW_DISTANCE_DEFAULT_MAX_PX = 1200;
+const TRANSCRIPT_LEGEND_MAINTAIN_SCROLL_AT_END_THRESHOLD_DEFAULT = 0.1;
 const TRANSCRIPT_LIST_SHELL_KEYBOARD_DISMISS_MODE = 'none' as const;
 const TRANSCRIPT_LIST_SHELL_KEYBOARD_SHOULD_PERSIST_TAPS = 'handled' as const;
 const TRANSCRIPT_MAIN_LIST_TEST_ID = 'transcript-chat-list' as const;
@@ -117,9 +130,16 @@ function resolveNativeTranscriptListShellDrawDistance(params: Readonly<{
     );
 }
 
+function resolveLegendMaintainScrollAtEndThreshold(value: unknown): number {
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0
+        ? value
+        : TRANSCRIPT_LEGEND_MAINTAIN_SCROLL_AT_END_THRESHOLD_DEFAULT;
+}
+
 export function resolveMainTranscriptListShellFrame(params: Readonly<{
     configuredDrawDistance?: unknown;
     listLayoutHeight?: number;
+    maintainScrollAtEndThreshold?: number;
     maintainVisibleContentPosition?: TranscriptListShellFlashListMaintainVisibleContentPosition;
     nativeID?: string;
     pauseOffsetCorrection?: boolean;
@@ -140,6 +160,7 @@ export function resolveMainTranscriptListShellFrame(params: Readonly<{
         renderer: 'flashList',
         rendererOptions: {
             flashList: {
+                disableBrowserScrollAnchoring: nativeFlashList ? undefined : true,
                 drawDistance: nativeFlashList
                     ? resolveNativeTranscriptListShellDrawDistance({
                         configuredDrawDistance: params.configuredDrawDistance,
@@ -157,6 +178,11 @@ export function resolveMainTranscriptListShellFrame(params: Readonly<{
                         ? TRANSCRIPT_WEB_FLASH_LIST_SCROLL_EVENT_THROTTLE_MS
                         : TRANSCRIPT_NATIVE_SCROLL_EVENT_THROTTLE_MS,
                 testID: TRANSCRIPT_MAIN_LIST_TEST_ID,
+            },
+            legend: {
+                maintainScrollAtEndThreshold: resolveLegendMaintainScrollAtEndThreshold(
+                    params.maintainScrollAtEndThreshold,
+                ),
             },
         },
     };
@@ -187,6 +213,7 @@ export function resolveReadOnlyTranscriptListShellFrame(params: Readonly<{
         renderer: 'flashList',
         rendererOptions: {
             flashList: {
+                disableBrowserScrollAnchoring: nativeFlashList ? undefined : true,
                 inverted: nativeFlashList,
                 keyboardDismissMode: TRANSCRIPT_LIST_SHELL_KEYBOARD_DISMISS_MODE,
                 keyboardShouldPersistTaps: TRANSCRIPT_LIST_SHELL_KEYBOARD_SHOULD_PERSIST_TAPS,
@@ -195,6 +222,9 @@ export function resolveReadOnlyTranscriptListShellFrame(params: Readonly<{
                     params.platformOS === 'web'
                         ? TRANSCRIPT_WEB_FLASH_LIST_SCROLL_EVENT_THROTTLE_MS
                         : TRANSCRIPT_NATIVE_SCROLL_EVENT_THROTTLE_MS,
+            },
+            legend: {
+                maintainScrollAtEndThreshold: TRANSCRIPT_LEGEND_MAINTAIN_SCROLL_AT_END_THRESHOLD_DEFAULT,
             },
         },
     };
@@ -224,6 +254,7 @@ export function resolveSidechainTranscriptListShellFrame(params: Readonly<{
         renderer: 'flashList',
         rendererOptions: {
             flashList: {
+                disableBrowserScrollAnchoring: nativeFlashList ? undefined : true,
                 inverted: nativeFlashList,
                 keyboardDismissMode: TRANSCRIPT_LIST_SHELL_KEYBOARD_DISMISS_MODE,
                 keyboardShouldPersistTaps: TRANSCRIPT_LIST_SHELL_KEYBOARD_SHOULD_PERSIST_TAPS,
@@ -231,6 +262,9 @@ export function resolveSidechainTranscriptListShellFrame(params: Readonly<{
                     params.platformOS === 'web'
                         ? TRANSCRIPT_WEB_FLASH_LIST_SCROLL_EVENT_THROTTLE_MS
                         : TRANSCRIPT_NATIVE_SCROLL_EVENT_THROTTLE_MS,
+            },
+            legend: {
+                maintainScrollAtEndThreshold: TRANSCRIPT_LEGEND_MAINTAIN_SCROLL_AT_END_THRESHOLD_DEFAULT,
             },
         },
     };

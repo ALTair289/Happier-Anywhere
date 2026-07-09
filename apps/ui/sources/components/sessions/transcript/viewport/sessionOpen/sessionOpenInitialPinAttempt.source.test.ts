@@ -7,7 +7,7 @@ describe('session open initial pin attempt ownership', () => {
     it('keeps web retry scheduling owned by the session-open latch effect path', async () => {
         const source = await readFile(resolve(
             __dirname,
-            '../../ChatList.tsx',
+            '../../ChatListInternal.tsx',
         ), 'utf8');
         const body = source.slice(
             source.indexOf('const executeSessionOpenInitialPinAttempt = React.useCallback'),

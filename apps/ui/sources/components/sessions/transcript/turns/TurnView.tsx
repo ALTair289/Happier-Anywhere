@@ -22,6 +22,7 @@ import {
     type TranscriptSessionCommonProps,
     useTranscriptSessionCommon,
 } from '@/components/sessions/transcript/transcriptSessionCommon';
+import type { TranscriptEventEmphasisByMessageId } from '@/components/sessions/transcript/events/transcriptEventEmphasis';
 
 type TranscriptItemOriginLookup = (messageId: string) => {
     sessionId: string;
@@ -35,6 +36,7 @@ const TurnMessageRow = React.memo(function TurnMessageRow(props: {
     forcePermissionPromptsInTranscript?: boolean;
     activeThinkingMessageId: string | null;
     getMessageById?: (messageId: string) => Message | null;
+    getMessageRevisionById?: (messageId: string) => number | null;
     getMessageOrigin?: TranscriptItemOriginLookup;
     approvalRequests?: readonly OpenApprovalArtifactForSession[];
     resolveThinkingExpanded?: (messageId: string) => boolean;
@@ -42,6 +44,7 @@ const TurnMessageRow = React.memo(function TurnMessageRow(props: {
     interaction: TranscriptInteraction;
     rollbackRanges?: readonly SessionRollbackRangeV1[];
     resolveRollbackAction?: (messageId: string) => TranscriptRollbackAction | null;
+    eventEmphasisByMessageId?: TranscriptEventEmphasisByMessageId;
     messagePins?: readonly PersistedSessionMessagePinV1[];
     onToggleMessagePin?: (pin: PersistedSessionMessagePinV1) => void;
 } & Partial<TranscriptSessionCommonProps>) {
@@ -68,6 +71,7 @@ const TurnMessageRow = React.memo(function TurnMessageRow(props: {
     const messageView = canUseParentCommon ? (
         <MessageViewWithSessionCommon
             message={message}
+            messageRevision={props.getMessageRevisionById?.(message.id) ?? null}
             metadata={props.metadata}
             sessionId={effectiveSessionId}
             forcePermissionPromptsInTranscript={props.forcePermissionPromptsInTranscript}
@@ -77,6 +81,7 @@ const TurnMessageRow = React.memo(function TurnMessageRow(props: {
             onThinkingExpandedChange={controlledThinking ? (next) => setThinkingExpanded(message.id, next) : undefined}
             interaction={effectiveInteraction}
             historical={historical}
+            eventEmphasis={props.eventEmphasisByMessageId?.[message.id]}
             rollbackAction={props.resolveRollbackAction?.(message.id) ?? null}
             messagePins={props.messagePins}
             onToggleMessagePin={props.onToggleMessagePin}
@@ -89,6 +94,7 @@ const TurnMessageRow = React.memo(function TurnMessageRow(props: {
     ) : (
         <MessageView
             message={message}
+            messageRevision={props.getMessageRevisionById?.(message.id) ?? null}
             metadata={props.metadata}
             sessionId={effectiveSessionId}
             forcePermissionPromptsInTranscript={props.forcePermissionPromptsInTranscript}
@@ -98,6 +104,7 @@ const TurnMessageRow = React.memo(function TurnMessageRow(props: {
             onThinkingExpandedChange={controlledThinking ? (next) => setThinkingExpanded(message.id, next) : undefined}
             interaction={effectiveInteraction}
             historical={historical}
+            eventEmphasis={props.eventEmphasisByMessageId?.[message.id]}
             rollbackAction={props.resolveRollbackAction?.(message.id) ?? null}
             messagePins={props.messagePins}
             onToggleMessagePin={props.onToggleMessagePin}
@@ -147,6 +154,7 @@ type TurnViewProps = Readonly<{
     forcePermissionPromptsInTranscript?: boolean;
     activeThinkingMessageId: string | null;
     getMessageById?: (messageId: string) => Message | null;
+    getMessageRevisionById?: (messageId: string) => number | null;
     getMessageOrigin?: TranscriptItemOriginLookup;
     approvalRequests?: readonly OpenApprovalArtifactForSession[];
     expandedToolCallsAnchorMessageIds: ReadonlySet<string>;
@@ -156,6 +164,7 @@ type TurnViewProps = Readonly<{
     interaction: TranscriptInteraction;
     rollbackRanges?: readonly SessionRollbackRangeV1[];
     resolveRollbackAction?: (messageId: string) => TranscriptRollbackAction | null;
+    eventEmphasisByMessageId?: TranscriptEventEmphasisByMessageId;
     messagePins?: readonly PersistedSessionMessagePinV1[];
     onToggleMessagePin?: (pin: PersistedSessionMessagePinV1) => void;
 }>;
@@ -187,6 +196,7 @@ export const TurnViewWithSessionCommon = React.memo((props: TurnViewProps & Tran
                     forcePermissionPromptsInTranscript={props.forcePermissionPromptsInTranscript}
                     activeThinkingMessageId={resolveActiveThinkingMessageIdForTurnMessage(props.turn.userMessageId, props.activeThinkingMessageId)}
                     getMessageById={props.getMessageById}
+                    getMessageRevisionById={props.getMessageRevisionById}
                     getMessageOrigin={props.getMessageOrigin}
                     approvalRequests={props.approvalRequests}
                     resolveThinkingExpanded={props.resolveThinkingExpanded}
@@ -194,6 +204,7 @@ export const TurnViewWithSessionCommon = React.memo((props: TurnViewProps & Tran
                     interaction={props.interaction}
                     rollbackRanges={props.rollbackRanges}
                     resolveRollbackAction={props.resolveRollbackAction}
+                    eventEmphasisByMessageId={props.eventEmphasisByMessageId}
                     messagePins={props.messagePins}
                     onToggleMessagePin={props.onToggleMessagePin}
                     forkCommon={props.forkCommon}
@@ -213,6 +224,7 @@ export const TurnViewWithSessionCommon = React.memo((props: TurnViewProps & Tran
                             forcePermissionPromptsInTranscript={props.forcePermissionPromptsInTranscript}
                             activeThinkingMessageId={resolveActiveThinkingMessageIdForTurnMessage(c.messageId, props.activeThinkingMessageId)}
                             getMessageById={props.getMessageById}
+                            getMessageRevisionById={props.getMessageRevisionById}
                             getMessageOrigin={props.getMessageOrigin}
                             approvalRequests={props.approvalRequests}
                             resolveThinkingExpanded={props.resolveThinkingExpanded}
@@ -220,6 +232,7 @@ export const TurnViewWithSessionCommon = React.memo((props: TurnViewProps & Tran
                             interaction={props.interaction}
                             rollbackRanges={props.rollbackRanges}
                             resolveRollbackAction={props.resolveRollbackAction}
+                            eventEmphasisByMessageId={props.eventEmphasisByMessageId}
                             messagePins={props.messagePins}
                             onToggleMessagePin={props.onToggleMessagePin}
                             forkCommon={props.forkCommon}

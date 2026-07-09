@@ -74,6 +74,8 @@ import type {
 } from '@/components/sessions/transcript/transcriptSessionCommon';
 import { useTranscriptSessionCommon } from '@/components/sessions/transcript/transcriptSessionCommon';
 import { TranscriptJumpHighlightOverlay } from '@/components/sessions/transcript/navigation/TranscriptJumpHighlightOverlay';
+import { getCachedIntlDateTimeFormat } from '@/utils/datetime/cachedIntlFormatters';
+import type { TranscriptEventEmphasis } from '@/components/sessions/transcript/events/transcriptEventEmphasis';
 
 type StreamSegmentStateForRendering = 'streaming' | 'complete' | 'interrupted';
 const TRANSCRIPT_SELECTION_CHECKBOX_ANCHOR_TOP = 0;
@@ -145,7 +147,7 @@ function formatTranscriptMessageTimestamp(createdAt: number): string | null {
   if (typeof createdAt !== 'number' || !Number.isFinite(createdAt) || createdAt < 0) return null;
   const date = new Date(createdAt);
   if (!Number.isFinite(date.getTime())) return null;
-  return new Intl.DateTimeFormat(undefined, {
+  return getCachedIntlDateTimeFormat(undefined, {
     dateStyle: 'medium',
     timeStyle: 'short',
   }).format(date);
@@ -184,6 +186,11 @@ function resolveMessageTimestampPresentation(input: {
   }
 }
 
+function buildStreamingMarkdownParseCacheKey(messageId: string, revision: number | null | undefined): string | null {
+  if (typeof revision !== 'number' || !Number.isFinite(revision)) return null;
+  return `message:${messageId}:revision:${Math.trunc(revision)}`;
+}
+
 type MessageViewProps = {
   message: Message;
   metadata: Metadata | null;
@@ -200,6 +207,8 @@ type MessageViewProps = {
   onToggleMessagePin?: SessionMessagePinToggleHandler;
   onToggleToolPin?: SessionMessagePinToggleHandler;
   historical?: boolean;
+  messageRevision?: number | null;
+  eventEmphasis?: TranscriptEventEmphasis;
   interaction?: {
     canSendMessages: boolean;
     canApprovePermissions: boolean;
@@ -256,6 +265,8 @@ export const MessageViewWithSessionCommon = React.memo(function MessageViewWithS
           onToggleMessagePin={props.onToggleMessagePin}
           onToggleToolPin={props.onToggleToolPin}
           historical={props.historical}
+          messageRevision={props.messageRevision}
+          eventEmphasis={props.eventEmphasis}
           interaction={props.interaction}
           forkCommon={props.forkCommon}
           messageDisplayCommon={props.messageDisplayCommon}
@@ -290,6 +301,8 @@ function RenderBlock(props: {
   onToggleMessagePin?: SessionMessagePinToggleHandler;
   onToggleToolPin?: SessionMessagePinToggleHandler;
   historical?: boolean;
+  messageRevision?: number | null;
+  eventEmphasis?: TranscriptEventEmphasis;
   forkCommon: TranscriptForkCommon;
   messageDisplayCommon: TranscriptMessageDisplayCommon;
   toolChromeCommon: TranscriptToolChromeCommon;
@@ -327,6 +340,7 @@ function RenderBlock(props: {
           messagePins={props.messagePins}
           onToggleMessagePin={props.onToggleMessagePin}
           historical={props.historical}
+          messageRevision={props.messageRevision}
           pinReadOnlyContext={props.interaction?.permissionDisabledReason === 'readOnly'}
           forkCommon={props.forkCommon}
           messageDisplayCommon={props.messageDisplayCommon}
@@ -354,7 +368,7 @@ function RenderBlock(props: {
       />;
 
     case 'agent-event':
-      return <TranscriptEventRow event={props.message.event} sessionId={props.sessionId} />;
+      return <TranscriptEventRow event={props.message.event} sessionId={props.sessionId} emphasis={props.eventEmphasis} />;
 
 
     default:
@@ -764,6 +778,7 @@ function AgentTextBlock(props: {
   messagePins?: readonly PersistedSessionMessagePinV1[];
   onToggleMessagePin?: SessionMessagePinToggleHandler;
   historical?: boolean;
+  messageRevision?: number | null;
   pinReadOnlyContext?: boolean;
   forkCommon: TranscriptForkCommon;
   messageDisplayCommon: TranscriptMessageDisplayCommon;
@@ -1075,6 +1090,7 @@ function AgentTextBlock(props: {
                   profile="transcript"
                   textStyle={styles.transcriptMarkdownText}
                   streamingMode="streaming"
+                  streamingParseCacheKey={buildStreamingMarkdownParseCacheKey(props.message.id, props.messageRevision)}
                   streamingAnimated={streamingRevealAnimationEnabled}
                   streamingRevealPreset={streamingRevealPreset}
                 />

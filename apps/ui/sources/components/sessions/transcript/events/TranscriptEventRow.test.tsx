@@ -1,4 +1,4 @@
-import { ActivityIndicator } from 'react-native';
+import { ActivityIndicator, StyleSheet } from 'react-native';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { renderScreen } from '@/dev/testkit';
@@ -278,6 +278,28 @@ describe('TranscriptEventRow', () => {
         expect(serialized).toContain(t('message.runtimeConfigOutcomeFailed'));
         expect(serialized).toContain(`${t('message.runtimeConfigOutcomeKeyReasoningEffort')} → Medium`);
         expect(serialized).toContain('warning-outline');
+    });
+
+    it('mutes de-emphasized prior-era event rows without changing current-era failure rows', async () => {
+        const event = parseProtocolValidAgentEvent({
+            type: 'runtime-config-outcome',
+            provider: 'claude',
+            runtime: 'claude-unified-terminal',
+            status: 'failed',
+            message: 'Failed to apply Claude Unified runtime controls: reasoningEffort.',
+            changes: [
+                { key: 'reasoningEffort', requested: 'medium', reason: 'not_delivered' },
+            ],
+        } as AgentEvent);
+
+        const mutedScreen = await renderScreen(<TranscriptEventRow event={event} emphasis="deemphasized" />);
+        const normalScreen = await renderScreen(<TranscriptEventRow event={event} />);
+
+        const mutedRow = mutedScreen.findByProps({ testID: 'transcript-event-runtime-config-outcome-failed' });
+        const normalRow = normalScreen.findByProps({ testID: 'transcript-event-runtime-config-outcome-failed' });
+
+        expect(StyleSheet.flatten(mutedRow.props.style)?.opacity).toBeLessThan(1);
+        expect(StyleSheet.flatten(normalRow.props.style)?.opacity).toBeUndefined();
     });
 
     it('renders boolean and provider-echo change values readably', async () => {

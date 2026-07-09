@@ -34,20 +34,27 @@ export type WebGenuineScrollMovementResult = Readonly<{
  * genuine; a real scrollbar drag / keyboard scroll moves to a different value and IS.
  *
  * Eagerness: a TRUSTED user gesture (`isTrusted`, a real pointer/keyboard scroll event) releases EAGERLY even
- * within the pin threshold — but ONLY when content height is stable. A trusted event DURING a content-height
- * change (notably the app's own pin write echo that UNDER-SHOT while the stream was growing — `isTrusted` yet
- * not an exact self-write match) must still be filtered, so eager release requires `isTrusted && !churn`.
+ * within the pin threshold — but ONLY when layout is stable. A trusted event DURING a content-height or
+ * viewport-height change (notably the app's own pin write echo that UNDER-SHOT while the stream was growing,
+ * or a composer-resize compensation frame — `isTrusted` yet not an exact self-write match) must still be
+ * filtered, so eager release requires `isTrusted && !churn`.
  * Untrusted frames (virtualization noise, or scrollbar/keyboard scrolls RN-web does not reliably mark trusted)
- * never release within the threshold on a single frame: they require BEYOND the threshold or SUSTAINED
- * (>= `sustainFrames`) movement, and a content-height change breaks the sustained streak so streaming/layout
- * churn can never masquerade as intent. This is the pure, orientation-agnostic single owner of web release
- * authority — no duplication between the FlashList-onScroll and DOM-observer paths.
+ * NEVER release on a single frame — not even when the landing is beyond the pin threshold: a renderer-internal
+ * scroll adjustment (Legend MVCP/alignItemsAtEnd) or a composer-inset compensation can move scrollTop
+ * arbitrarily far in one untrusted frame (live-captured R3 root cause, 2026-07-08). Untrusted release requires
+ * SUSTAINED (>= `sustainFrames`) same-direction movement; a content-height OR viewport-height (clientHeight)
+ * change breaks the sustained streak so streaming/layout/resize churn can never masquerade as intent — a user
+ * scroll never changes clientHeight. Real gestures emit a continuous stream of frames, so they still release
+ * immediately in practice. This is the pure, orientation-agnostic single owner of web release authority —
+ * no duplication between the FlashList-onScroll and DOM-observer paths.
  */
 export function resolveWebGenuineScrollMovement(params: Readonly<{
     scrollTop: number;
     scrollHeight: number;
+    clientHeight: number;
     previousObservedScrollTop: number | null;
     previousObservedScrollHeight: number | null;
+    previousObservedClientHeight: number | null;
     previousStreak: WebScrollMovementStreak | null;
     distanceFromBottom: number;
     pinThresholdPx: number;
@@ -57,8 +64,10 @@ export function resolveWebGenuineScrollMovement(params: Readonly<{
     const {
         scrollTop,
         scrollHeight,
+        clientHeight,
         previousObservedScrollTop,
         previousObservedScrollHeight,
+        previousObservedClientHeight,
         previousStreak,
         distanceFromBottom,
         pinThresholdPx,
@@ -88,22 +97,30 @@ export function resolveWebGenuineScrollMovement(params: Readonly<{
         previousObservedScrollHeight != null &&
         Number.isFinite(scrollHeight) &&
         scrollHeight !== previousObservedScrollHeight;
-    // Content-height churn breaks the sustained streak so a stream/layout reflow can't accumulate into
-    // "sustained user intent".
-    const basisStreak = contentHeightChanged ? null : previousStreak;
+    const viewportHeightChanged =
+        previousObservedClientHeight != null &&
+        Number.isFinite(clientHeight) &&
+        clientHeight !== previousObservedClientHeight;
+    // Layout churn (content reflow OR viewport resize — e.g. the composer growing shrinks the list
+    // clientHeight and shifts scrollTop in the same commit) breaks the sustained streak so it can't
+    // accumulate into "sustained user intent". A user scroll never changes either height.
+    const layoutChurn = contentHeightChanged || viewportHeightChanged;
+    const basisStreak = layoutChurn ? null : previousStreak;
     const streakCount = basisStreak?.direction === direction ? basisStreak.count + 1 : 1;
     const nextStreak: WebScrollMovementStreak = { direction, count: streakCount };
 
     const beyondPinThreshold = distanceFromBottom > Math.max(0, pinThresholdPx);
     const sustainedMovement = streakCount >= Math.max(1, sustainFrames);
-    // A TRUSTED user gesture releases eagerly even within the threshold — but only when content height is
-    // stable. A trusted event during reflow (e.g. the app's own pin write that UNDER-SHOT while streaming —
-    // `isTrusted` yet not an exact self-write) must still be filtered, so eager requires `isTrusted && !churn`.
-    // Untrusted / churning frames release only when BEYOND the threshold or SUSTAINED.
+    // A TRUSTED user gesture releases eagerly even within the threshold — but only when layout is
+    // stable. A trusted event during reflow (e.g. the app's own pin write that UNDER-SHOT while
+    // streaming, or a resize compensation frame — `isTrusted` yet not an exact self-write) must still
+    // be filtered, so eager requires `isTrusted && !churn`. Untrusted frames release ONLY when
+    // SUSTAINED: a beyond-threshold landing alone is not user evidence, because renderer-internal
+    // adjustments (Legend MVCP) and inset compensations can land arbitrarily far in one frame.
     const movementMagnitudePx = Math.abs(scrollTop - previousObservedScrollTop);
     const eagerTrustedRelease =
-        isTrusted === true && !contentHeightChanged && movementMagnitudePx > EAGER_MOVEMENT_EPSILON_PX;
-    const upwardIntent = direction === -1 && (eagerTrustedRelease || beyondPinThreshold || sustainedMovement);
+        isTrusted === true && !layoutChurn && movementMagnitudePx > EAGER_MOVEMENT_EPSILON_PX;
+    const upwardIntent = direction === -1 && (eagerTrustedRelease || sustainedMovement);
     const downwardIntent = direction === 1 && beyondPinThreshold && sustainedMovement;
 
     return {

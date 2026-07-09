@@ -13,9 +13,13 @@ export function canAutoFollowTranscriptBottom(params: Readonly<{
 }>): boolean {
     if (params.isExplicitUserCommand) return true;
     if (params.targetWindowActive === true) return false;
-    if (!params.pinEnabled || !params.autoFollowWhenPinned) return false;
+    if (!params.pinEnabled) return false;
     if (params.jumpToSeqActive) return false;
     if (!params.wantsPinned) return false;
+    if (params.reason === 'viewport-resized') {
+        return params.bottomFollowMode === 'following';
+    }
+    if (!params.autoFollowWhenPinned) return false;
     return params.bottomFollowMode === 'following';
 }
 

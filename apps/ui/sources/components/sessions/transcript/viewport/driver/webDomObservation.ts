@@ -11,6 +11,7 @@ import {
 } from './webScrollTopWriter';
 
 export type WebDomScrollObservationState = Readonly<{
+    observedClientHeight: number | null;
     observedScrollHeight: number | null;
     observedScrollTop: number | null;
     streak: WebScrollMovementStreak | null;
@@ -44,11 +45,13 @@ export type WebDomScrollObservation = Readonly<{
 export function createWebDomScrollObservation(): WebDomScrollObservation {
     const observedScrollTopRef = { current: null as number | null };
     const observedScrollHeightRef = { current: null as number | null };
+    const observedClientHeightRef = { current: null as number | null };
     let streak: WebScrollMovementStreak | null = null;
 
     return {
         getState() {
             return {
+                observedClientHeight: observedClientHeightRef.current,
                 observedScrollHeight: observedScrollHeightRef.current,
                 observedScrollTop: observedScrollTopRef.current,
                 streak,
@@ -65,6 +68,7 @@ export function createWebDomScrollObservation(): WebDomScrollObservation {
             const movement = resolveWebGenuineScrollMovement({
                 scrollTop: params.metrics.scrollTop,
                 scrollHeight: params.metrics.scrollHeight,
+                clientHeight: params.metrics.clientHeight,
                 previousObservedScrollTop:
                     usePinnedHeightChangeFallback
                         ? params.fallbackObservedScrollTop
@@ -72,6 +76,9 @@ export function createWebDomScrollObservation(): WebDomScrollObservation {
                 previousObservedScrollHeight:
                     observedScrollHeight
                     ?? params.metrics.scrollHeight,
+                previousObservedClientHeight:
+                    observedClientHeightRef.current
+                    ?? params.metrics.clientHeight,
                 previousStreak: streak,
                 distanceFromBottom: params.distanceFromBottom,
                 pinThresholdPx: params.pinThresholdPx,
@@ -83,6 +90,7 @@ export function createWebDomScrollObservation(): WebDomScrollObservation {
             }
             observedScrollTopRef.current = params.metrics.scrollTop;
             observedScrollHeightRef.current = params.metrics.scrollHeight;
+            observedClientHeightRef.current = params.metrics.clientHeight;
             return movement;
         },
         recordProgrammaticScrollTopWrite(params) {
@@ -100,6 +108,7 @@ export function createWebDomScrollObservation(): WebDomScrollObservation {
         reset() {
             observedScrollTopRef.current = null;
             observedScrollHeightRef.current = null;
+            observedClientHeightRef.current = null;
             streak = null;
         },
     };

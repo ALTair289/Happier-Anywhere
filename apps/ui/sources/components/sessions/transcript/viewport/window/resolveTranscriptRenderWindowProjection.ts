@@ -63,6 +63,7 @@ export function resolveTranscriptRenderWindowProjection<TItem extends RenderWind
     activeThinkingMessageId: string | null;
     entrySliceWindow: Readonly<{ anchorRowId: string; sessionId: string }> | null;
     expandedToolCallsAnchorMessageIds: ReadonlySet<string>;
+    isSeqLoaded?: (seq: number) => boolean;
     items: readonly TItem[];
     listOrientation: TranscriptListOrientation;
     liveTailAnchorMessageId?: string | null;
@@ -90,6 +91,7 @@ export function resolveTranscriptRenderWindowProjection<TItem extends RenderWind
 
     const targetWindow = resolveTranscriptTargetWindowHostFacts({
         items: entrySliceItems,
+        isSeqLoaded: params.isSeqLoaded,
         resolveSeq: params.resolveSeq,
         windowState: params.targetWindowState,
     });

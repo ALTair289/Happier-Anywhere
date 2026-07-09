@@ -158,6 +158,64 @@ vi.mock('@/sync/sync', async () =>
 );
 
 describe('ChatList (FlashList v2, native jump-to-bottom)', () => {
+    it('recovers a sustained invalid native offset once when viewport telemetry is disabled', async () => {
+        vi.useFakeTimers({ now: new Date(0) });
+
+        flashListChatListHarnessState.sessionMessagesState = {
+            messages: [
+                { kind: 'user-text', id: 'm1', localId: 'u1', createdAt: 1, seq: 1, text: 'hi' },
+                { kind: 'assistant-text', id: 'm2', localId: null, createdAt: 2, seq: 2, text: 'there' },
+            ],
+            isLoaded: true,
+        };
+
+        const { ChatList } = await import('./ChatList');
+        const telemetryMod = await import('./scroll/transcriptViewportTelemetry');
+        telemetryMod.transcriptViewportTelemetry.configure({ enabled: false, sink: null });
+
+        const screen = await renderFlashListChatList(
+            <ChatList session={flashListChatListHarnessState.sessionState} />,
+        );
+
+        await screen.triggerInitialFill({
+            layoutHeight: 500,
+            contentHeight: 2000,
+            contentWidth: 0,
+            flushOptions: { cycles: 1, turns: 1 },
+        });
+        fileFlashListRefHandle.scrollToIndex.mockClear();
+        fileFlashListRefHandle.scrollToOffset.mockClear();
+
+        await triggerNativeScroll(screen, -995_030, {
+            contentSize: { height: 2000, width: 0 },
+            layoutMeasurement: { height: 500, width: 0 },
+        }, { cycles: 1, turns: 1 });
+        expect(fileFlashListRefHandle.scrollToIndex).not.toHaveBeenCalled();
+        expect(fileFlashListRefHandle.scrollToOffset).not.toHaveBeenCalled();
+
+        await act(async () => {
+            vi.setSystemTime(new Date(120));
+        });
+        await triggerNativeScroll(screen, -995_030, {
+            contentSize: { height: 2000, width: 0 },
+            layoutMeasurement: { height: 500, width: 0 },
+        }, { cycles: 1, turns: 1 });
+
+        expect(fileFlashListRefHandle.scrollToIndex).toHaveBeenCalledTimes(1);
+        expect(fileFlashListRefHandle.scrollToIndex).toHaveBeenCalledWith(
+            expect.objectContaining({ index: 0 }),
+        );
+
+        await act(async () => {
+            vi.setSystemTime(new Date(240));
+        });
+        await triggerNativeScroll(screen, -995_030, {
+            contentSize: { height: 2000, width: 0 },
+            layoutMeasurement: { height: 500, width: 0 },
+        }, { cycles: 1, turns: 1 });
+        expect(fileFlashListRefHandle.scrollToIndex).toHaveBeenCalledTimes(1);
+    });
+
     it('hides the jump-to-bottom affordance when native scrolling settles back at the bottom', async () => {
         vi.useFakeTimers({ now: new Date(0) });
 

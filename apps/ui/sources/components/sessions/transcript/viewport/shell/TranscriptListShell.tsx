@@ -19,7 +19,10 @@ function TranscriptListShellInner<TItem>(
     props: TranscriptListShellProps<TItem>,
     ref: React.ForwardedRef<TranscriptListShellRef<TItem>>,
 ): React.ReactElement {
-    const renderer = resolveTranscriptListRenderer({ frame: props.frame });
+    const renderer = resolveTranscriptListRenderer({
+        frame: props.frame,
+        transcriptLegendListSpikeSurface: props.transcriptLegendListSpikeSurface,
+    });
     const Renderer = renderer.Component;
 
     return (

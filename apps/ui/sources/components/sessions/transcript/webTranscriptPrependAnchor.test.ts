@@ -1181,4 +1181,55 @@ describe('webTranscriptPrependAnchor', () => {
 
         (globalThis as any).HTMLElement = originalHTMLElement;
     });
+
+    it('recovers browser-clamped scrollTop when scrollHeight recovers to baseline after a transient drop', () => {
+        // Scenario: anchor captured at scrollTop=45000, scrollHeight=50000 with no DOM anchor
+        // (anchor element virtualized out of the render window).
+        // FlashList window reallocation drops sh to 24100 → browser clamps scrollTop to ~23500.
+        // sh then recovers back to 50000 (items remeasure). The growth fallback must still
+        // re-apply scrollTop=45000 because remainingGrowthPx (21500) > 1.
+        //
+        // BUG (before fix): restoreFromScrollHeightGrowth computes growth = 50000-50000 = 0,
+        // then returns null due to `if (growth <= 0) return null`, leaving scrollTop clamped.
+        // FIX: replace the early-exit with Math.max(0, growth) for the additive contribution
+        // only; remainingGrowthPx > 1 becomes the sole no-op guard.
+        const container = createContainer({
+            scrollTop: 45000,
+            scrollHeight: 50000,
+            clientHeight: 600,
+            anchors: [], // anchor element virtualized out — no DOM anchors
+        });
+
+        // Capture baseline: scrollTop=45000, scrollHeight=50000, no visible DOM anchors
+        const anchor = captureWebTranscriptPrependAnchor({
+            metrics: {
+                element: container as unknown as HTMLElement,
+                scrollTop: 45000,
+                scrollHeight: 50000,
+                clientHeight: 600,
+            },
+            stabilizeForMs: 3000,
+            userIntentAtMs: 1,
+        });
+
+        // Simulate: sh dropped and recovered; browser clamped scrollTop during the drop
+        container.scrollTop = 23500;  // browser-clamped value during sh collapse
+        // container.scrollHeight remains 50000 (sh recovered to baseline)
+
+        // Growth = 50000 - 50000 = 0.  Without the fix, returns { didAdjustScroll: false }.
+        // With the fix, targetScrollTop = 45000, remainingGrowthPx = 21500 > 1 → must write.
+        const writes: number[] = [];
+        expect(restoreWebTranscriptPrependAnchor(anchor, {
+            writeScrollTop: (targetScrollTop) => {
+                writes.push(targetScrollTop);
+                container.scrollTop = targetScrollTop;
+                return true;
+            },
+        })).toEqual({
+            didAdjustScroll: true,
+            strategy: 'growth',
+        });
+        expect(writes).toEqual([45000]);
+        expect(container.scrollTop).toBe(45000);
+    });
 });

@@ -61,11 +61,13 @@ type FakeScrollNode = ScrollableChatListRef & {
     indexCalls: ScrollToIndexCall[];
     offsetCalls: ScrollToOffsetCall[];
     endCalls: ScrollToEndCall[];
+    transcriptViewportCommandSpace?: 'standard' | 'native-inverted';
 };
 
 function createFakeScrollNode(
     options: Readonly<{
         getLayout?: NonNullable<ScrollableChatListRef['getLayout']>;
+        transcriptViewportCommandSpace?: 'standard' | 'native-inverted';
         withScrollToEnd?: boolean;
         withScrollToIndex?: boolean;
         withScrollToOffset?: boolean;
@@ -78,6 +80,7 @@ function createFakeScrollNode(
         indexCalls,
         offsetCalls,
         endCalls,
+        transcriptViewportCommandSpace: options.transcriptViewportCommandSpace,
     } as FakeScrollNode;
     if (options.withScrollToIndex !== false) {
         (node as { scrollToIndex: ScrollableChatListRef['scrollToIndex'] }).scrollToIndex = (params) => {
@@ -378,6 +381,112 @@ describe('performTranscriptViewportCommand', () => {
             expect(node.offsetCalls).toHaveLength(0);
             expect(node.endCalls).toHaveLength(0);
             expect(lastWrite(bundle.recorded).writer).toBe('native-scroll-to-offset');
+        });
+
+        it('uses standard native scroll space for the Legend renderer command adapter', () => {
+            const node = createFakeScrollNode({
+                transcriptViewportCommandSpace: 'standard',
+                withScrollToEnd: true,
+            });
+            const bundle = buildDeps({
+                node,
+                listContentHeight: 1000,
+                listLayoutHeight: 400,
+                composerInsetHeight: 40,
+                nativeHotTailHeight: 12,
+            });
+
+            const result = performTranscriptViewportCommand(
+                { kind: 'pin-bottom', sessionId: BASE_SESSION, reason: 'content-size-change', mode: 'follow-bottom' },
+                bundle.deps,
+            );
+
+            expect(result).toBe(true);
+            expect(node.endCalls).toEqual([]);
+            expect(node.indexCalls).toHaveLength(0);
+            expect(node.offsetCalls).toEqual([{ offset: 600, animated: false }]);
+            expect(lastWrite(bundle.recorded)).toMatchObject({
+                writer: 'native-scroll-to-offset',
+                reason: 'content-size-change',
+                mode: 'follow-bottom',
+                targetOffsetY: 600,
+                distanceFromBottom: 0,
+            });
+        });
+
+        it('maps semantic native distance and history commands directly in standard Legend scroll space', () => {
+            const node = createFakeScrollNode({ transcriptViewportCommandSpace: 'standard' });
+            const bundle = buildDeps({
+                node,
+                listContentHeight: 1200,
+                listLayoutHeight: 500,
+            });
+
+            expect(performTranscriptViewportCommand({
+                kind: 'restore-distance',
+                sessionId: BASE_SESSION,
+                reason: 'entry-restore',
+                mode: 'restore-distance',
+                distanceFromLiveTailPx: 125,
+                animated: false,
+            }, bundle.deps)).toBe(true);
+            expect(performTranscriptViewportCommand({
+                kind: 'apply-history-correction',
+                sessionId: BASE_SESSION,
+                reason: 'prepend-restore',
+                mode: 'restore-anchor',
+                targetDistanceFromHistoryStartPx: 240,
+                animated: true,
+            }, bundle.deps)).toBe(true);
+            expect(performTranscriptViewportCommand({
+                kind: 'recover-jump-to-seq',
+                sessionId: BASE_SESSION,
+                reason: 'jump-to-seq',
+                mode: 'jump-to-seq',
+                failedRenderedIndex: 3,
+                averageItemLengthPx: 100,
+                animated: true,
+            } as TranscriptViewportCommand, bundle.deps)).toBe(true);
+
+            expect(node.offsetCalls).toEqual([
+                { offset: 575, animated: false },
+                { offset: 240, animated: true },
+                { offset: 300, animated: true },
+            ]);
+            expect(bundle.recorded.filter((event) => event.type === 'scroll-write').map((event) => event.targetOffsetY))
+                .toEqual([575, 240, 300]);
+        });
+
+        it('keeps standard Legend index commands in source-index space and skips FlashList hot-cold remapping', () => {
+            const node = createFakeScrollNode({ transcriptViewportCommandSpace: 'standard' });
+            const resolveJumpToSeqIndex = vi.fn(() => 8);
+            const bundle = buildDeps({
+                node,
+                itemsLength: 10,
+                listDataLength: 4,
+                resolveJumpToSeqIndex,
+                shouldUseNativeHotColdSplit: true,
+            });
+
+            const result = performTranscriptViewportCommand({
+                kind: 'jump-to-seq',
+                sessionId: BASE_SESSION,
+                reason: 'jump-to-seq',
+                mode: 'jump-to-seq',
+                seq: 42,
+                align: { kind: 'top-with-item-offset', itemOffsetPx: 32 },
+                animated: true,
+            }, bundle.deps);
+
+            expect(result).toBe(true);
+            expect(resolveJumpToSeqIndex).toHaveBeenCalledWith(42);
+            expect(node.indexCalls).toEqual([{ index: 8, animated: true, viewOffset: 32 }]);
+            expect(bundle.lastNativeRestoreIndexCommandRef.current).toMatchObject({
+                index: 8,
+                reason: 'jump-to-seq',
+                sessionId: BASE_SESSION,
+                viewOffset: 32,
+            });
         });
 
         it('uses the canonical inverted bottom command for native explicit jumps', () => {
@@ -1057,8 +1166,8 @@ describe('performTranscriptViewportCommand', () => {
 
             expect(result).toBe(true);
             expect(getLayout).toHaveBeenCalledWith(2);
-            // The unmounted-target render-window re-anchor nudge is allowed; the DOM write below stays the offset owner.
-            expect(node.indexCalls).toEqual([{ index: 2, animated: false }]);
+            // Restore-anchor commands stay DOM-only (the re-anchor nudge is jump-to-seq-scoped).
+            expect(node.indexCalls).toHaveLength(0);
             expect(webMetrics.element.scrollTop).toBe(820);
             expect(bundle.webDomObservation.getState()).toMatchObject({
                 observedScrollHeight: 1800,
@@ -1111,8 +1220,8 @@ describe('performTranscriptViewportCommand', () => {
             expect(result).toBe(true);
             expect(resolveRestoreAnchorIndex).toHaveBeenCalledWith(RESTORE_ANCHOR);
             expect(getLayout).toHaveBeenCalledWith(4);
-            // The unmounted-target render-window re-anchor nudge is allowed; the DOM write below stays the offset owner.
-            expect(node.indexCalls).toEqual([{ index: 4, animated: false }]);
+            // Restore-anchor commands stay DOM-only (the re-anchor nudge is jump-to-seq-scoped).
+            expect(node.indexCalls).toHaveLength(0);
             expect(bundle.webDomObservation.getState().observedScrollTop).toBe(1320);
             expect(lastWrite(bundle.recorded)).toMatchObject({
                 writer: 'web-dom-restore',

@@ -461,7 +461,9 @@ export function shouldSkipNativeDefaultMaterializationPin(params: Readonly<{
             params.materializationAutoPin.contentHeight === params.contentHeight
         );
     }
-    return params.reason === 'initial-open' || params.reason === 'layout-change';
+    // viewport-resized keeps layout-change parity: on inverted native lists the pin viewOffset
+    // absorbs composer/keyboard inset deltas, so the default materialization pin stays skipped.
+    return params.reason === 'initial-open' || params.reason === 'layout-change' || params.reason === 'viewport-resized';
 }
 
 export type NativeContentMaterializationAutoPinPostSuccessDecision = Readonly<{

@@ -240,4 +240,42 @@ describe('ChatList (FlashList v2 scroll-path render guard, plan G4)', () => {
       + `${midListOffsets.length} steady scroll frames (expected 0 — per-frame setState on the scroll path)`,
     ).toBe(0);
   });
+
+  it('keeps FlashList data identity stable when session activity changes without changing the live-tail anchor', async () => {
+    const { ChatList } = await import('./ChatList');
+    flashListChatListHarnessState.sessionMessagesState = {
+      messages: [
+        { kind: 'user-text', id: 'm1', localId: 'u1', createdAt: 1, seq: 1, text: 'hi' },
+        { kind: 'agent-text', id: 'm2', localId: null, createdAt: 2, seq: 2, text: 'there' },
+      ],
+      isLoaded: true,
+    };
+
+    const inactiveSession = {
+      ...flashListChatListHarnessState.sessionState,
+      active: false,
+      thinking: false,
+    };
+    const screen = await renderFlashListChatList(
+      <ChatList session={inactiveSession} />
+    );
+    await screen.triggerInitialFill({ layoutHeight: 600, contentHeight: 3000, contentWidth: 0 });
+    await screen.settle({ cycles: 1, turns: 1 });
+
+    const initialData = screen.requireCapturedFlashListProps().data;
+    const baselineCommits = readChatListCommitCount();
+
+    await screen.update(
+      <ChatList
+        session={{
+          ...inactiveSession,
+          active: true,
+        }}
+      />
+    );
+    await screen.settle({ cycles: 1, turns: 1 });
+
+    expect(readChatListCommitCount()).toBeGreaterThan(baselineCommits);
+    expect(screen.requireCapturedFlashListProps().data).toBe(initialData);
+  });
 });
