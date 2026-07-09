@@ -141,3 +141,7 @@ _.env.pipeline.production.local
 /.playwright-mcp
 /.clawpatch
 /apply_fix.py
+/apps/cli/.restore.*
+/apps/cli/.runner-snapshots/
+/evidence/
+/liveqa_*.mjs
