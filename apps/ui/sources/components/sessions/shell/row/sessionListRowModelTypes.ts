@@ -111,5 +111,7 @@ export type SessionListRowModel = Readonly<{
     identityDisplay: 'avatar' | 'agentLogo' | 'none';
     activeColorMode: 'activityAndAttention' | 'attentionOnly' | 'allActive';
     workingIndicatorMode: 'spinner' | 'pulse';
+    /** Retained working placement: show the working indicator without animation. */
+    workingIndicatorPaused: boolean;
     hideInactiveSessions: boolean;
 }>;

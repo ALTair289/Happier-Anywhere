@@ -10,6 +10,12 @@ export type UseSessionSurfaceActivationInput = Readonly<{
     sessionId: string;
     serverId?: string | null;
     surfaceFocused: boolean;
+    /**
+     * Whether this mounted surface is still part of the user-reachable surface set.
+     * Defaults to true so hidden native back-stack screens remain protected while
+     * web pane hosts can release mounted routes once they leave the displayed pane set.
+     */
+    surfaceRetained?: boolean;
     surfaceVisible: boolean;
 }>;
 
@@ -35,13 +41,14 @@ export function useSessionSurfaceActivation(
         };
     }, [input.serverId, input.surfaceVisible, sessionId]);
 
-    // Mount-lifetime transcript retention hold (NOT gated on surfaceVisible): a
+    // Transcript retention hold (NOT gated on surfaceVisible by default): a
     // hidden-but-mounted back-stack SessionView still renders its transcript, so the
-    // eviction sweep must treat it as a mounted consumer until real unmount.
+    // eviction sweep must treat it as a retained consumer until real unmount. Web
+    // pane hosts pass surfaceRetained=false when a mounted route is no longer displayed.
     React.useEffect(() => {
-        if (!sessionId) return;
+        if (!sessionId || input.surfaceRetained === false) return;
         return registerSessionTranscriptRetentionConsumer(sessionId, input.serverId);
-    }, [input.serverId, sessionId]);
+    }, [input.serverId, input.surfaceRetained, sessionId]);
 
     const hasVisibleSession = sessionId.length > 0 && input.surfaceVisible;
     return React.useMemo(() => ({

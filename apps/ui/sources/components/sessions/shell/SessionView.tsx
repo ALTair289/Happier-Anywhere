@@ -85,6 +85,7 @@ import {
 } from '@happier-dev/agents';
 import {
     SPAWN_SESSION_ERROR_CODES,
+    isConnectedServiceCredentialHealthStatusUsable,
     isConnectedServiceResumeUnreachableSpawnErrorDetail,
     isConnectedServiceUxDiagnosticSpawnErrorDetail,
 } from '@happier-dev/protocol';
@@ -189,6 +190,7 @@ import {
     connectedServiceProfileKey,
     resolveConnectedServiceProfileLabel,
 } from '@/sync/domains/connectedServices/connectedServiceProfilePreferences';
+import { resolveConnectedServiceCredentialHealthStatus } from '@/sync/domains/connectedServices/resolveConnectedServiceCredentialHealthStatus';
 import { resolveConnectedServiceQuotaProfileRefForSession } from './resolveConnectedServiceQuotaProfileRefForSession';
 import { Ionicons } from '@expo/vector-icons';
 import { usePathname, useRouter } from 'expo-router';
@@ -280,6 +282,7 @@ import { resolveConnectedServiceUxDiagnosticPresentation } from '@/components/se
 import { useWorkspaceScopeForSession } from '@/sync/domains/session/resolveWorkspaceScopeForSession';
 import { tryBuildWorkspaceCacheKey } from '@/sync/domains/workspaces/workspaceScope';
 import { useAuth } from '@/auth/context/AuthContext';
+import { resolveAuthCredentialsScopeKey } from '@/auth/storage/resolveAuthCredentialsScopeKey';
 import { useEnabledAgentIds } from '@/agents/hooks/useEnabledAgentIds';
 import { readDirectSessionLink } from '@/sync/domains/session/directSessions/readDirectSessionLink';
 import type { SessionParticipantTarget } from '@/sync/domains/session/participants/participantTargets';
@@ -292,7 +295,6 @@ import {
     readSessionContinuationRecoveryFromMetadata,
     readProviderAccountUsageRecordIdsFromMetadata,
     type ConnectedServiceQuotaRecoveryCreditsV1,
-    type ConnectedServiceQuotaSnapshotV1,
     type SessionRunnerRuntimeStateV1,
     type SessionRuntimeIssueV1,
     type SessionUsageLimitRecoveryV1,
@@ -336,7 +338,11 @@ import {
     sessionUsageLimitWaitResumeEnable,
     type SessionUsageLimitRecoveryOperationResult,
 } from '@/sync/ops/sessionUsageLimitRecovery';
-import { connectedServiceQuotaRecoveryCreditConsume } from '@/sync/ops/connectedServiceQuotaRecoveryCredits';
+import { useCredentialScopedAccountModeResolver } from '@/hooks/server/connectedServices/useCredentialScopedAccountModeResolver';
+import {
+    buildQuotaSnapshotScopeKey,
+    consumeQuotaRecoveryCredit,
+} from '@/hooks/server/connectedServices/connectedServiceQuotaSnapshotStore';
 
 const sessionSubmitPort = createSyncBackedSubmitPort(sync);
 const SESSION_COMPOSER_AUTOCOMPLETE_PREFIXES: string[] = ['@', '/', '$'];
@@ -373,6 +379,22 @@ function resolveConnectedServicesAuthSwitchDisabledReason(params: Readonly<{
     return inputReadiness.isInputBusy
         ? 'active_turn'
         : null;
+}
+
+function useConnectedServicesAuthSwitchDisabledReason(params: Readonly<{
+    isReadOnly: boolean;
+    session: Session;
+}>): 'read_only' | 'active_turn' | null {
+    const { isReadOnly, session } = params;
+    const sessionId = session.id;
+    return storage((state) => {
+        const liveSession = state.sessions[sessionId] ?? session;
+        return resolveConnectedServicesAuthSwitchDisabledReason({
+            isReadOnly,
+            session: liveSession,
+            nowMs: Date.now(),
+        });
+    });
 }
 
 function normalizePositiveTimestamp(value: unknown): number | null {
@@ -412,6 +434,7 @@ const connectedServiceQuotaGaugeFormatter: ConnectedServiceQuotaGaugeLabelFormat
     remainingWithReset: ({ percent, reset }) => t('agentInput.providerUsage.remainingWithReset', { percent, reset }),
     used: ({ used, limit }) => t('agentInput.providerUsage.usedCount', { used, limit }),
     durationNow: () => t('agentInput.providerUsage.duration.now'),
+    durationOutdated: () => t('agentInput.providerUsage.duration.outdated'),
     durationDaysHours: ({ days, hours }) => t('agentInput.providerUsage.duration.daysHours', { days, hours }),
     durationHoursMinutes: ({ hours, minutes }) => t('agentInput.providerUsage.duration.hoursMinutes', { hours, minutes }),
     durationHours: ({ hours }) => t('agentInput.providerUsage.duration.hours', { hours }),
@@ -481,29 +504,6 @@ function resolveUsageLimitRecoveryQuotaProfileRef(params: Readonly<{
         };
     }
     return null;
-}
-
-type ConnectedServiceQuotaSnapshotOverride = Readonly<{
-    key: string;
-    snapshot: ConnectedServiceQuotaSnapshotV1;
-}>;
-
-function selectConnectedServiceQuotaSnapshotWithOverride(params: Readonly<{
-    profileKey: string | null;
-    polledSnapshot: ConnectedServiceQuotaSnapshotV1 | null;
-    override: ConnectedServiceQuotaSnapshotOverride | null;
-}>): ConnectedServiceQuotaSnapshotV1 | null {
-    if (
-        params.profileKey
-        && params.override?.key === params.profileKey
-        && (
-            !params.polledSnapshot
-            || params.override.snapshot.fetchedAt >= params.polledSnapshot.fetchedAt
-        )
-    ) {
-        return params.override.snapshot;
-    }
-    return params.polledSnapshot;
 }
 
 function hasContinuationRecoveryWorkToResume(metadata: unknown): boolean {
@@ -874,9 +874,46 @@ const SessionHeaderRightElement = React.memo(function SessionHeaderRightElement(
 
     const badgeLabel =
         props.sessionAutomationsEnabledCount > 99 ? '99+' : String(props.sessionAutomationsEnabledCount);
+    const sessionStatus = useSessionStatus(props.session, {
+        subscribeToSession: false,
+        subscribeToTranscript: false,
+    });
+    const showResumingStatus = sessionStatus.state === 'resuming';
 
     return (
         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            {showResumingStatus ? (
+                <View
+                    testID="session-header-resuming-status"
+                    style={{
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        gap: 6,
+                        maxWidth: 132,
+                        marginRight: 4,
+                        paddingHorizontal: 8,
+                        paddingVertical: 4,
+                        borderRadius: 999,
+                        borderWidth: 1,
+                        borderColor: theme.colors.border.default,
+                        backgroundColor: theme.colors.surface.inset,
+                    }}
+                >
+                    <ActivitySpinner size={12} color={sessionStatus.statusColor} />
+                    <Text
+                        numberOfLines={1}
+                        style={{
+                            color: theme.colors.text.secondary,
+                            fontSize: 12,
+                            lineHeight: 16,
+                            fontWeight: '600',
+                            minWidth: 0,
+                        }}
+                    >
+                        {t('session.resuming')}
+                    </Text>
+                </View>
+            ) : null}
             <SessionHeaderActionMenu
                 sessionId={props.sessionId}
                 session={props.session}
@@ -1311,7 +1348,7 @@ export const SessionView = React.memo((props: SessionViewProps) => {
     const pathname = usePathname();
     const debugRouterEnabled = process.env.EXPO_PUBLIC_DEBUG === '1';
     const auth = useAuth();
-    const sessionSeq = useSessionViewShellSessionSeq(sessionId);
+    const credentials = auth.credentials;
     const routeHydrationState = props.routeHydrationState ?? null;
     const expectedRouteServerId = routeHydrationState?.serverId ?? props.routeServerId ?? null;
     const session = useSessionViewShellSession(sessionId, expectedRouteServerId);
@@ -1357,7 +1394,7 @@ export const SessionView = React.memo((props: SessionViewProps) => {
     const realtimeStatus = useRealtimeStatus();
     const isTablet = useIsTablet();
     const voiceSnap = useVoiceSessionSnapshot();
-    const hasAuthCredentials = Boolean(auth.credentials);
+    const hasAuthCredentials = Boolean(credentials);
     const routeFocused = useSessionScreenIsFocused();
     const surfaceFocused = typeof props.surfaceFocusedOverride === 'boolean'
         ? props.surfaceFocusedOverride
@@ -1366,10 +1403,12 @@ export const SessionView = React.memo((props: SessionViewProps) => {
         ? props.routeAnchorOverride
         : isOwnedSessionRoutePathname(pathname, sessionId);
     const shouldRenderSessionSurface = surfaceFocused || isRouteAnchor;
+    const shouldRetainSessionSurface = Platform.OS === 'web' ? shouldRenderSessionSurface : true;
     useSessionSurfaceActivation({
         sessionId,
         serverId: currentSessionRouteServerId,
         surfaceFocused,
+        surfaceRetained: shouldRetainSessionSurface,
         surfaceVisible: shouldRenderSessionSurface,
     });
     const endpointConnectivity =
@@ -1616,7 +1655,6 @@ export const SessionView = React.memo((props: SessionViewProps) => {
                 <SessionContentOverrideViewedLifecycle
                     sessionId={sessionId}
                     serverId={session.serverId ?? currentSessionRouteServerId}
-                    sessionSeq={sessionSeq}
                     surfaceFocused={shouldRenderSessionSurface}
                 />
             ) : null}
@@ -1694,14 +1732,13 @@ export const SessionView = React.memo((props: SessionViewProps) => {
 function SessionContentOverrideViewedLifecycle({
     sessionId,
     serverId,
-    sessionSeq,
     surfaceFocused,
 }: Readonly<{
     sessionId: string;
     serverId: string | null;
-    sessionSeq: number;
     surfaceFocused: boolean;
 }>) {
+    const sessionSeq = useSessionViewShellSessionSeq(sessionId);
     useSessionViewedLifecycle({
         sessionId,
         serverId,
@@ -2077,7 +2114,11 @@ function SessionViewLoaded({
     routeHydrationPending,
 }: SessionViewLoadedProps) {
     const { theme } = useUnistyles();
-    const sessionRuntimeStatusSource = useSessionRuntimeStatusSource(session);
+    const auth = useAuth();
+    const credentials = auth.credentials;
+    const credentialScope = credentials ? resolveAuthCredentialsScopeKey(credentials) : '';
+    const resolveAccountMode = useCredentialScopedAccountModeResolver({ credentials, credentialScope });
+    const sessionRuntimeStatusSource = session;
     const applyLocalSettings = useApplyLocalSettings();
     const router = useRouter();
     const pathname = usePathname();
@@ -2122,33 +2163,15 @@ function SessionViewLoaded({
         recovery: usageLimitRecovery,
         issue: session.lastRuntimeIssue ?? null,
     }), [session.lastRuntimeIssue, usageLimitRecovery]);
-    const [connectedServiceQuotaSnapshotOverride, setConnectedServiceQuotaSnapshotOverride] =
-        React.useState<ConnectedServiceQuotaSnapshotOverride | null>(null);
     const usageLimitRecoveryQuotaSnapshots = useConnectedServiceQuotaSnapshots(
         usageLimitRecoveryQuotaProfileRef ? [usageLimitRecoveryQuotaProfileRef] : [],
     );
     const usageLimitRecoveryQuotaProfileKey = usageLimitRecoveryQuotaProfileRef
         ? connectedServiceProfileKey(usageLimitRecoveryQuotaProfileRef)
         : null;
-    const usageLimitRecoveryQuotaPolledSnapshot = usageLimitRecoveryQuotaProfileKey
+    const usageLimitRecoveryQuotaSnapshot = usageLimitRecoveryQuotaProfileKey
         ? usageLimitRecoveryQuotaSnapshots.snapshotsByKey[usageLimitRecoveryQuotaProfileKey] ?? null
         : null;
-    const usageLimitRecoveryQuotaSnapshot = selectConnectedServiceQuotaSnapshotWithOverride({
-        profileKey: usageLimitRecoveryQuotaProfileKey,
-        polledSnapshot: usageLimitRecoveryQuotaPolledSnapshot,
-        override: connectedServiceQuotaSnapshotOverride,
-    });
-    React.useEffect(() => {
-        if (!connectedServiceQuotaSnapshotOverride || connectedServiceQuotaSnapshotOverride.key !== usageLimitRecoveryQuotaProfileKey) return;
-        if (!usageLimitRecoveryQuotaPolledSnapshot) return;
-        if (usageLimitRecoveryQuotaPolledSnapshot.fetchedAt >= connectedServiceQuotaSnapshotOverride.snapshot.fetchedAt) {
-            setConnectedServiceQuotaSnapshotOverride(null);
-        }
-    }, [
-        connectedServiceQuotaSnapshotOverride,
-        usageLimitRecoveryQuotaPolledSnapshot,
-        usageLimitRecoveryQuotaProfileKey,
-    ]);
     const usageLimitRecoveryCredits = React.useMemo<ConnectedServiceQuotaRecoveryCreditsV1 | null>(() => (
         usageLimitRecoveryQuotaSnapshot
             ? usageLimitRecoveryQuotaSnapshot.recoveryCredits ?? null
@@ -2647,12 +2670,14 @@ function SessionViewLoaded({
     }), [sessionRouteServerId]);
     const consumeConnectedServiceRecoveryCreditForProfile = React.useCallback(async (params: Readonly<{
         profileRef: Readonly<{ serviceId: string; profileId: string }>;
-        profileKey: string;
         providerCreditId?: string | null;
-        sourceSnapshotFetchedAtMs: number | null;
     }>): Promise<boolean> => {
         const targetMachineId = controlMachineTarget?.machineId ?? (typeof machineId === 'string' ? machineId : null);
         if (!targetMachineId) {
+            Modal.alert(t('common.error'), t('connectedServices.quota.recoveryCreditMachineUnavailable'));
+            return false;
+        }
+        if (!credentials) {
             Modal.alert(t('common.error'), t('connectedServices.quota.recoveryCreditMachineUnavailable'));
             return false;
         }
@@ -2661,7 +2686,11 @@ function SessionViewLoaded({
             Modal.alert(t('common.error'), t('connectedServices.quota.recoveryCreditMachineUnavailable'));
             return false;
         }
-        const result = await connectedServiceQuotaRecoveryCreditConsume({
+        const key = buildQuotaSnapshotScopeKey(credentialScope, serviceIdResult.data, params.profileRef.profileId);
+        const result = await consumeQuotaRecoveryCredit(key, {
+            credentials,
+            credentialScope,
+            resolveAccountMode,
             machineId: targetMachineId,
             serverId: sessionRouteServerId,
             serviceId: serviceIdResult.data,
@@ -2669,26 +2698,18 @@ function SessionViewLoaded({
             ...(params.providerCreditId
                 ? { providerCreditId: params.providerCreditId }
                 : {}),
-            sourceSnapshotFetchedAtMs: params.sourceSnapshotFetchedAtMs,
         });
         if (result.ok) {
-            if (result.snapshot) {
-                setConnectedServiceQuotaSnapshotOverride({
-                    key: params.profileKey,
-                    snapshot: result.snapshot,
-                });
-            } else {
-                setConnectedServiceQuotaSnapshotOverride((current) => (
-                    current?.key === params.profileKey ? null : current
-                ));
-            }
             return true;
         }
         Modal.alert(t('common.error'), result.error);
         return false;
     }, [
         controlMachineTarget?.machineId,
+        credentialScope,
+        credentials,
         machineId,
+        resolveAccountMode,
         sessionRouteServerId,
         t,
     ]);
@@ -3039,8 +3060,6 @@ function SessionViewLoaded({
             if (kind === 'consume_reset_credit' && usageLimitRecoveryQuotaProfileRef && usageLimitRecoveryQuotaProfileKey) {
                 const consumed = await consumeConnectedServiceRecoveryCreditForProfile({
                     profileRef: usageLimitRecoveryQuotaProfileRef,
-                    profileKey: usageLimitRecoveryQuotaProfileKey,
-                    sourceSnapshotFetchedAtMs: usageLimitRecoveryQuotaSnapshot?.fetchedAt ?? null,
                 });
                 if (consumed) {
                     setUsageLimitRecoveryOperationStatus(null);
@@ -3224,36 +3243,26 @@ function SessionViewLoaded({
             accountProfileConnectedServicesV2: accountProfile?.connectedServicesV2 ?? [],
         })
     ), [accountProfile?.connectedServicesV2, liveComposerState.agentId, session.metadata]);
+    const connectedServiceQuotaProfileCredentialUsable = React.useMemo(() => {
+        if (connectedServiceQuotaProfileRef?.credentialHealthStatus === undefined) return true;
+        return isConnectedServiceCredentialHealthStatusUsable(
+            resolveConnectedServiceCredentialHealthStatus(connectedServiceQuotaProfileRef.credentialHealthStatus),
+        );
+    }, [connectedServiceQuotaProfileRef?.credentialHealthStatus]);
     const connectedServiceQuotaSnapshots = useConnectedServiceQuotaSnapshots(
         connectedServiceQuotaProfileRef ? [connectedServiceQuotaProfileRef] : [],
     );
     const connectedServiceQuotaProfileKey = connectedServiceQuotaProfileRef
         ? connectedServiceProfileKey(connectedServiceQuotaProfileRef)
         : null;
-    const connectedServiceQuotaPolledSnapshot = connectedServiceQuotaProfileKey
+    const connectedServiceQuotaSnapshot = connectedServiceQuotaProfileKey
         ? connectedServiceQuotaSnapshots.snapshotsByKey[connectedServiceQuotaProfileKey] ?? null
         : null;
-    const connectedServiceQuotaSnapshot = selectConnectedServiceQuotaSnapshotWithOverride({
-        profileKey: connectedServiceQuotaProfileKey,
-        polledSnapshot: connectedServiceQuotaPolledSnapshot,
-        override: connectedServiceQuotaSnapshotOverride,
-    });
     const providerAccountUsageRecordIds = React.useMemo(
         () => readProviderAccountUsageRecordIdsFromMetadata(session.metadata),
         [session.metadata],
     );
     const providerAccountUsageSnapshotsByRecordId = useProviderAccountUsageSnapshots(providerAccountUsageRecordIds);
-    React.useEffect(() => {
-        if (!connectedServiceQuotaSnapshotOverride || connectedServiceQuotaSnapshotOverride.key !== connectedServiceQuotaProfileKey) return;
-        if (!connectedServiceQuotaPolledSnapshot) return;
-        if (connectedServiceQuotaPolledSnapshot.fetchedAt >= connectedServiceQuotaSnapshotOverride.snapshot.fetchedAt) {
-            setConnectedServiceQuotaSnapshotOverride(null);
-        }
-    }, [
-        connectedServiceQuotaPolledSnapshot,
-        connectedServiceQuotaProfileKey,
-        connectedServiceQuotaSnapshotOverride,
-    ]);
     const connectedServiceQuotaActiveAccountLabel = React.useMemo(() => {
         if (!connectedServiceQuotaProfileRef) return connectedServiceQuotaSnapshot?.accountLabel ?? null;
         return resolveConnectedServiceProfileLabel({
@@ -3283,6 +3292,7 @@ function SessionViewLoaded({
     ]);
     const providerUsageGaugeSource = React.useMemo(() => {
         if (!connectedServiceQuotasEnabled || sessionProviderUsageGaugeMode === 'hidden') return null;
+        if (!connectedServiceQuotaProfileCredentialUsable) return null;
         return selectConnectedServiceSessionProviderUsageGaugeSource({
             providerId: liveComposerState.agentId,
             connectedServiceSnapshot: providerUsageDisplaySnapshotSource?.snapshot ?? null,
@@ -3293,6 +3303,7 @@ function SessionViewLoaded({
         });
     }, [
         connectedServiceQuotasEnabled,
+        connectedServiceQuotaProfileCredentialUsable,
         liveComposerState.agentId,
         providerUsageDisplaySnapshotSource,
         session.lastRuntimeIssue,
@@ -3335,9 +3346,7 @@ function SessionViewLoaded({
             try {
                 await consumeConnectedServiceRecoveryCreditForProfile({
                     profileRef: providerUsageGaugeConnectedServiceProfileRef,
-                    profileKey: connectedServiceQuotaProfileKey,
                     providerCreditId: providerUsageGauge.recoveryCreditSummary.providerCreditId,
-                    sourceSnapshotFetchedAtMs: providerUsageGaugeSource?.snapshot.fetchedAt ?? null,
                 });
             } finally {
                 setProviderUsageRecoveryCreditPending(false);
@@ -3403,17 +3412,20 @@ function SessionViewLoaded({
     const attachmentDraftsSnapshotRef = React.useRef<readonly AttachmentDraft[]>(initialSessionAttachmentDrafts);
     const agentInputAttachments = attachmentDraftManager.agentInputAttachments;
     const patchAttachmentDraft = attachmentDraftManager.applyDraftPatch;
+    const replaceAttachmentManagerDrafts = attachmentDraftManager.replaceDrafts;
 
     React.useEffect(() => {
         attachmentDraftsSnapshotRef.current = attachmentDrafts;
         writeSessionAttachmentDrafts(sessionId, attachmentDrafts);
     }, [attachmentDrafts, sessionId]);
 
+    // Depend on the stable callback, not the manager object: this callback feeds the
+    // transcript onEditPendingMessage chain, whose identity gates row re-renders.
     const replaceSessionAttachmentDrafts = React.useCallback((drafts: readonly AttachmentDraft[]) => {
         attachmentDraftsSnapshotRef.current = drafts;
         writeSessionAttachmentDrafts(sessionId, drafts);
-        attachmentDraftManager.replaceDrafts(drafts);
-    }, [attachmentDraftManager, sessionId]);
+        replaceAttachmentManagerDrafts(drafts);
+    }, [replaceAttachmentManagerDrafts, sessionId]);
 
     const applySessionAttachmentDraftPatch = React.useCallback((
         id: string,
@@ -4100,8 +4112,9 @@ function SessionViewLoaded({
 
     const [followBottomIntentSeq, setFollowBottomIntentSeq] = React.useState(0);
     const markTranscriptLiveTailIntent = React.useCallback(() => {
-        sync.markSessionLiveTailIntent(sessionId);
-        setFollowBottomIntentSeq((current) => current + 1);
+        if (sync.markSessionLiveTailIntentIfNotDetached(sessionId)) {
+            setFollowBottomIntentSeq((current) => current + 1);
+        }
     }, [sessionId]);
 
     const handleTranscriptViewportChange = React.useCallback((state: TranscriptViewportChangeState) => {
@@ -4247,10 +4260,9 @@ function SessionViewLoaded({
             participantTargets,
             recipientState,
         });
-        const connectedServicesAuthSwitchDisabledReason = resolveConnectedServicesAuthSwitchDisabledReason({
+        const connectedServicesAuthSwitchDisabledReason = useConnectedServicesAuthSwitchDisabledReason({
             isReadOnly,
             session: sessionRuntimeStatusSource,
-            nowMs: Date.now(),
         });
         const intentionalRestartSourceEvents = useSessionConnectedServiceAccountSwitchEvents(sessionId);
         const intentionalRestartRecoveryEvidenceAtMs = React.useMemo(() => {

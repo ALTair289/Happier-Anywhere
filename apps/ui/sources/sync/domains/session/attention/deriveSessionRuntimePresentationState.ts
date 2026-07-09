@@ -8,6 +8,8 @@ import {
 
 export const SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS = 120_000;
 
+export type SessionRuntimeActivityPresentationState = 'idle' | 'working' | 'backgroundActive';
+
 export type SessionRuntimePresentationState = Readonly<{
     isOnline: boolean;
     isActive: boolean;
@@ -17,6 +19,9 @@ export type SessionRuntimePresentationState = Readonly<{
     freshInProgress: boolean;
     freshProviderRuntimeActivity: boolean;
     working: boolean;
+    backgroundActive: boolean;
+    resuming: boolean;
+    activityState: SessionRuntimeActivityPresentationState;
     runtimeProjectionInProgress: boolean;
     runtimeActivelyWorking: boolean;
     freshPermissionRequired: boolean;
@@ -31,6 +36,7 @@ export type DeriveSessionRuntimePresentationStateInput = Readonly<{
     thinkingAt?: number | null;
     latestTurnStatus?: PrimaryTurnStatusV1 | null;
     latestTurnStatusObservedAt?: number | null;
+    latestReadyEventAt?: number | null;
     runtimeActivityActiveCount?: number | null;
     runtimeActivityObservedAt?: number | null;
     runtimeActivityExpiresAt?: number | null;
@@ -76,12 +82,25 @@ export function deriveSessionRuntimePresentationState(
         && !blocksLegacyThinking;
     const freshInProgress = freshInProgressSignals.length > 0;
     const freshProviderRuntimeActivity = hasFreshProviderRuntimeActivity(input, nowMs);
-    const working = freshInProgress || freshThinking || freshProviderRuntimeActivity;
-    const runtimeActivelyWorking = isLiveRuntime && working;
+    const freshForegroundProviderRuntimeActivity =
+        freshProviderRuntimeActivity && isForegroundProviderRuntimeActivity(input, latestTurnStatus);
+    const working = freshInProgress || freshThinking || freshForegroundProviderRuntimeActivity;
+    const backgroundActive = !working && freshProviderRuntimeActivity;
     const pendingRequestObservedAt = normalizeRuntimeStatusTimestamp(input.pendingRequestObservedAt);
     const hasFreshPendingRequest =
         pendingRequestObservedAt !== null
         && isFreshTimestamp(pendingRequestObservedAt, nowMs, SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS);
+    const resuming = isResumeCatchUpPresentationActive(input, nowMs, {
+        backgroundActive,
+        hasFreshPendingRequest,
+        working,
+    });
+    const activityState: SessionRuntimeActivityPresentationState = working
+        ? 'working'
+        : backgroundActive
+            ? 'backgroundActive'
+            : 'idle';
+    const runtimeActivelyWorking = isLiveRuntime && working;
 
     return {
         isOnline,
@@ -92,6 +111,9 @@ export function deriveSessionRuntimePresentationState(
         freshInProgress,
         freshProviderRuntimeActivity,
         working,
+        backgroundActive,
+        resuming,
+        activityState,
         runtimeProjectionInProgress: freshInProgress,
         runtimeActivelyWorking,
         freshPermissionRequired:
@@ -145,9 +167,13 @@ export function readSessionRuntimePresentationFreshnessTimestamps(
         const pendingRequestObservedAt = normalizeRuntimeStatusTimestamp(input.pendingRequestObservedAt);
         if (pendingRequestObservedAt !== null) timestamps.push(pendingRequestObservedAt);
     }
+    if (runtimeStatus.resuming) {
+        const activeAt = normalizeRuntimeStatusTimestamp(input.activeAt);
+        if (activeAt !== null) timestamps.push(activeAt);
+    }
     if (runtimeStatus.freshProviderRuntimeActivity) {
         const runtimeActivityExpiresAt = normalizeRuntimeStatusTimestamp(input.runtimeActivityExpiresAt);
-        if (runtimeActivityExpiresAt !== null) {
+        if (runtimeActivityExpiresAt !== null && !isLiveRuntimeOwner(input)) {
             timestamps.push(Math.max(1, runtimeActivityExpiresAt - SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS));
         }
     }
@@ -205,10 +231,64 @@ function normalizeRuntimeActivityActiveCount(value: number | null | undefined): 
         : 0;
 }
 
+function isResumeCatchUpPresentationActive(
+    input: DeriveSessionRuntimePresentationStateInput,
+    nowMs: number,
+    state: Readonly<{
+        backgroundActive: boolean;
+        hasFreshPendingRequest: boolean;
+        working: boolean;
+    }>,
+): boolean {
+    if (!isLiveRuntimeOwner(input)) return false;
+    if (state.working || state.backgroundActive || state.hasFreshPendingRequest) return false;
+    const activeAt = normalizeRuntimeStatusTimestamp(input.activeAt);
+    if (activeAt === null) return false;
+    if (!isFreshTimestamp(activeAt, nowMs, SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS)) return false;
+    if (!hasPreAttachTranscriptActivity(input, activeAt)) return false;
+    return !hasPostAttachTranscriptActivity(input, activeAt);
+}
+
+function hasPreAttachTranscriptActivity(
+    input: DeriveSessionRuntimePresentationStateInput,
+    activeAt: number,
+): boolean {
+    const meaningfulActivityAt = normalizeRuntimeStatusTimestamp(input.meaningfulActivityAt);
+    if (meaningfulActivityAt !== null && meaningfulActivityAt < activeAt) return true;
+    const latestReadyEventAt = normalizeRuntimeStatusTimestamp(input.latestReadyEventAt);
+    return latestReadyEventAt !== null && latestReadyEventAt < activeAt;
+}
+
+function hasPostAttachTranscriptActivity(
+    input: DeriveSessionRuntimePresentationStateInput,
+    activeAt: number,
+): boolean {
+    const latestTurnStatusObservedAt = normalizeRuntimeStatusTimestamp(input.latestTurnStatusObservedAt);
+    if (latestTurnStatusObservedAt !== null && latestTurnStatusObservedAt >= activeAt) return true;
+    const meaningfulActivityAt = normalizeRuntimeStatusTimestamp(input.meaningfulActivityAt);
+    return meaningfulActivityAt !== null && meaningfulActivityAt >= activeAt;
+}
+
 function hasFreshProviderRuntimeActivity(
     input: DeriveSessionRuntimePresentationStateInput,
     nowMs: number,
 ): boolean {
     if (normalizeRuntimeActivityActiveCount(input.runtimeActivityActiveCount) <= 0) return false;
-    return !isSessionRuntimeActivityProjectionIdleForPendingDrain(input, nowMs);
+    return !isSessionRuntimeActivityProjectionIdleForPendingDrain(input, nowMs, {
+        ownerLive: isLiveRuntimeOwner(input),
+    });
+}
+
+function isLiveRuntimeOwner(input: DeriveSessionRuntimePresentationStateInput): boolean {
+    return input.active === true && input.presence === 'online';
+}
+
+function isForegroundProviderRuntimeActivity(
+    input: DeriveSessionRuntimePresentationStateInput,
+    latestTurnStatus: PrimaryTurnStatusV1 | null,
+): boolean {
+    return !(
+        input.runtimeActivitySourceClass === 'provider_detached_task'
+        && isTerminalPrimaryTurnStatus(latestTurnStatus)
+    );
 }

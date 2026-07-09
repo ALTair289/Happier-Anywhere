@@ -1342,8 +1342,15 @@ describe('SessionsList (native virtualization)', () => {
             mockVisibleSessionListViewData,
             'expected visible session list view data',
         );
-        expect(list.props.getItemType?.(visibleSessionListViewData[0])).toBe('header:date');
-        expect(list.props.getItemType?.(visibleSessionListViewData[1])).toBe('session');
+        expect(list.props.getItemType?.(visibleSessionListViewData[0], 0)).toBe('header:date');
+        // Session cell heights depend on group position (last/single rows
+        // carry the inter-group gap) and density, so recycling pools are
+        // keyed on the HEIGHT CLASS (body vs tail) — a recycled cell can then
+        // never bring a stale height from a different position into view,
+        // while position flips within the same height class (first↔middle)
+        // do not force a remount.
+        expect(list.props.getItemType?.(visibleSessionListViewData[1], 1)).toBe('session:default:body');
+        expect(list.props.getItemType?.(visibleSessionListViewData[2], 2)).toBe('session:default:tail');
     });
 
     it('disables web FlatList virtualization for first-page-sized lists', async () => {
@@ -1418,8 +1425,9 @@ describe('SessionsList (native virtualization)', () => {
         );
 
         expect(screen.root.findAll((node) => String(node.type) === 'FlatList')).toHaveLength(0);
-        expect(flashList.props.getItemType?.(mockVisibleSessionListViewData[0])).toBe('header:date');
-        expect(flashList.props.getItemType?.(mockVisibleSessionListViewData[1])).toBe('session');
+        expect(flashList.props.getItemType?.(mockVisibleSessionListViewData[0], 0)).toBe('header:date');
+        expect(flashList.props.getItemType?.(mockVisibleSessionListViewData[1], 1)).toBe('session:default:body');
+        expect(flashList.props.getItemType?.(mockVisibleSessionListViewData[2], 2)).toBe('session:default:body');
     });
 
     it('renders the full priority prefix before inactive history on large web lists', async () => {

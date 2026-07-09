@@ -129,6 +129,14 @@ describe('session list visible row store scopes', () => {
             {
                 type: 'session',
                 serverId: 'server-a',
+                // Retained rows stay priority-subscribed: their renderable
+                // refreshes are exactly what ends the retained state.
+                workingPlacementReason: 'working-retained',
+                session: { id: 'retained-row' },
+            },
+            {
+                type: 'session',
+                serverId: 'server-a',
                 attentionPromotionReason: 'unread',
                 session: { id: 'attention-row' },
             },
@@ -137,6 +145,7 @@ describe('session list visible row store scopes', () => {
         expect(embeddedPriorityKeys).toEqual(new Set([
             'server-a:selected-row',
             'server-a:working-row',
+            'server-a:retained-row',
         ]));
         expect(resolveSessionListRowStoreSubscriptionScopes(
             [

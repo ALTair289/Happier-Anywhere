@@ -1,3 +1,4 @@
+import { isSessionListWorkingPlacementReason } from '@/sync/domains/session/listing/placement/sessionListPlacementProjection';
 import { sessionTagKey } from '../sessionTagUtils';
 
 export type SessionListRowStoreSubscriptionScope = Readonly<{
@@ -71,7 +72,7 @@ export function resolveSessionListRowStoreScopeKey(scope: SessionListRowStoreSub
 function isEmbeddedPriorityRowStoreItem(item: SessionListEmbeddedPriorityRowItem): boolean {
     return item.type === 'session'
         && (
-            item.workingPlacementReason === 'working'
+            isSessionListWorkingPlacementReason(item.workingPlacementReason)
             || item.selected === true
         );
 }

@@ -15,6 +15,7 @@ import {
     getSessionSubtitle,
 } from '@/utils/sessions/sessionUtils';
 import {
+    deriveSessionRuntimePresentationState,
     resolveNextSessionRuntimePresentationFreshnessAtMs,
 } from '@/sync/domains/session/attention/deriveSessionRuntimePresentationState';
 import { formatShortRelativeTimeAt } from '@/utils/time/formatShortRelativeTime';
@@ -280,6 +281,7 @@ export function buildSessionListRowModel(input: BuildSessionListRowModelInput): 
         workingTextMode: settings.workingTextMode,
         statusColors: settings.statusColors,
     });
+    const runtimePresentationState = deriveSessionRuntimePresentationState(resolvedSession, settings.runtimeNowMs);
     const pendingCount = readPendingCount(input.state ?? {}, resolvedSession);
     const pendingBlockedCount = readPendingBlockedCount(input.state ?? {}, resolvedSession);
     const hasUnreadMessages = resolveHasUnreadMessages(input.state ?? {}, resolvedSession);
@@ -305,7 +307,29 @@ export function buildSessionListRowModel(input: BuildSessionListRowModelInput): 
             ?? null,
         lastViewedSessionSeq: resolveLastViewedSessionSeq(resolvedSession) ?? null,
     });
-    const rowAttentionState = resolveSessionRowAttentionState(attentionState);
+    const derivedRowAttentionState = resolveSessionRowAttentionState(attentionState);
+    // Retained working placement holds the session in the working group while
+    // its live signals are stale. Present it as a PAUSED working row (working
+    // indicator without animation) unless a more alerting state applies —
+    // otherwise the user sees a session in the working group with no
+    // indicator at all.
+    const presentsRetainedWorking = item.workingPlacementReason === 'working-retained'
+        && (
+            derivedRowAttentionState === 'quiet'
+            || derivedRowAttentionState === 'unread'
+            || derivedRowAttentionState === 'pending'
+        );
+    const presentsBackgroundActive = runtimePresentationState.activityState === 'backgroundActive'
+        && (
+            derivedRowAttentionState === 'quiet'
+            || derivedRowAttentionState === 'unread'
+            || derivedRowAttentionState === 'pending'
+        );
+    const rowAttentionState = presentsRetainedWorking
+        ? 'working'
+        : presentsBackgroundActive
+            ? 'backgroundActive'
+            : derivedRowAttentionState;
     const secondaryLineGroupKind = item.groupKind === 'folder' ? 'project' : item.groupKind;
     const secondaryLineMode = resolveSessionListSecondaryLineMode({ groupKind: secondaryLineGroupKind });
     const { subtitle, subtitleEllipsizeMode } = resolveRowSubtitle({
@@ -318,6 +342,7 @@ export function buildSessionListRowModel(input: BuildSessionListRowModelInput): 
         density: settings.density,
         requestedSecondaryLineMode: secondaryLineMode,
         hasPathSubtitle: subtitle.trim().length > 0,
+        workingRetained: presentsRetainedWorking,
     });
     const nextRuntimeFreshnessAtMs = resolveNextRuntimeFreshnessAtMs(resolvedSession, settings.runtimeNowMs);
     const isArchived = resolvedSession.archivedAt != null;
@@ -342,6 +367,7 @@ export function buildSessionListRowModel(input: BuildSessionListRowModelInput): 
             rowState: rowAttentionState,
         },
         presentation,
+        workingIndicatorPaused: presentsRetainedWorking,
         activity: {
             mode: activityMode,
             timestamp: activityTimestamp,

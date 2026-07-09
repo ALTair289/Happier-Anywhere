@@ -68,7 +68,11 @@ installSessionShellCommonModuleMocks({
 
 vi.mock('./useSessionListRelativeTimeClock', () => ({
     useSessionListRelativeTimeClock: () => 2_000,
-    useSessionListRuntimeFreshnessClock: () => 2_000,
+}));
+
+vi.mock('@/hooks/session/sessionListRuntimeClock', () => ({
+    useSessionListRuntimeNowMs: () => 2_000,
+    useSessionListRuntimeWake: () => undefined,
 }));
 
 vi.mock('./SessionListRow', () => ({

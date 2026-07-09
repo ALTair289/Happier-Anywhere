@@ -8,6 +8,7 @@ import type {
     SessionRowAttentionIndicator as SessionRowAttentionIndicatorKind,
     SessionRowAttentionState,
 } from './resolveSessionRowPresentation';
+import { resolveSessionRowAttentionIndicatorColor } from './sessionRowAttentionColors';
 
 const DEFAULT_WORKING_SPINNER_SIZE = 12;
 
@@ -41,26 +42,12 @@ export const SessionRowAttentionIndicator = React.memo(function SessionRowAttent
         return null;
     }
 
-    const color = (() => {
-        switch (props.indicator) {
-            case 'working':
-                if (props.workingMode !== 'pulse' && props.workingSpinnerTone === 'neutral') {
-                    return theme.colors.text.tertiary;
-                }
-                return theme.colors.state.info.foreground;
-            case 'ready':
-                return theme.colors.state.success.foreground;
-            case 'failed':
-                return theme.colors.state.danger.foreground;
-            case 'unread':
-                return theme.colors.text.link;
-            case 'pending':
-                return theme.colors.state.neutral.foreground;
-            case 'permission':
-            case 'action':
-                return theme.colors.state.warning.foreground;
-        }
-    })();
+    const color = resolveSessionRowAttentionIndicatorColor({
+        indicator: props.indicator,
+        theme,
+        workingMode: props.workingMode,
+        workingSpinnerTone: props.workingSpinnerTone,
+    });
 
     const shouldRenderWorkingSpinner = props.indicator === 'working'
         && props.workingMode !== 'pulse';

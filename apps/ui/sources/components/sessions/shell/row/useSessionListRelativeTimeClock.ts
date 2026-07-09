@@ -16,23 +16,3 @@ export function useSessionListRelativeTimeClock(enabled = true): number {
 
     return nowMs;
 }
-
-export function useSessionListRuntimeFreshnessClock(
-    nextRuntimeFreshnessAtMs: number | null,
-    enabled = true,
-): number {
-    const [nowMs, setNowMs] = React.useState(() => Date.now());
-
-    React.useEffect(() => {
-        if (!enabled) return undefined;
-        setNowMs(Date.now());
-        if (nextRuntimeFreshnessAtMs === null) return undefined;
-        const delayMs = Math.max(0, nextRuntimeFreshnessAtMs - Date.now());
-        const timeoutId = setTimeout(() => {
-            setNowMs(Date.now());
-        }, delayMs);
-        return () => clearTimeout(timeoutId);
-    }, [enabled, nextRuntimeFreshnessAtMs]);
-
-    return nowMs;
-}

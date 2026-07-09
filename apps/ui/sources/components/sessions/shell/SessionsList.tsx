@@ -32,6 +32,7 @@ import {
     resolveEffectiveSessionListOrderingModeForGroup,
     type SessionListOrderingSectionMode,
 } from '@/sync/domains/session/listing/sessionListOrderingRules';
+import { isSessionListWorkingPlacementReason } from '@/sync/domains/session/listing/placement/sessionListPlacementProjection';
 import { getServerProfileById } from '@/sync/domains/server/serverProfiles';
 import {
     setSessionFolderAssignment,
@@ -58,6 +59,7 @@ import { SessionFolderScopeBreadcrumb } from './sessionFolderScopeBreadcrumb';
 import { DraggableSessionFolderHeaderFrame } from './DraggableSessionFolderHeaderFrame';
 import { ProjectGroupHeader } from './ProjectGroupHeader';
 import { SessionListHeaderFrame } from './SessionListHeaderFrame';
+import { resolveSessionListRowModelAdjacency } from './row/buildSessionListRowModels';
 import { SessionListRowModelBoundary } from './row/SessionListRowModelBoundary';
 import type {
     SessionListRowPresentationSettings,
@@ -368,7 +370,7 @@ function buildPrioritySessionRowReasonCounts(
     for (const item of items) {
         if (item.type !== 'session') continue;
         const sessionItem = item as SessionListSessionItem;
-        if (sessionItem.workingPlacementReason === 'working') incrementPriorityReasonCount(counts, 'workingPlacement');
+        if (isSessionListWorkingPlacementReason(sessionItem.workingPlacementReason)) incrementPriorityReasonCount(counts, 'workingPlacement');
         if (sessionItem.attentionPromotionReason != null) incrementPriorityReasonCount(counts, 'attention');
         if (sessionItem.selected === true) incrementPriorityReasonCount(counts, 'selected');
     }
@@ -486,14 +488,34 @@ function normalizeWorkingIndicatorMode(value: unknown): SessionListRowPresentati
     return value === 'pulse' ? 'pulse' : 'spinner';
 }
 
-function getSessionListItemType(item: SessionListViewItem): string {
-    if (item.type === 'session') {
-        return 'session';
+/**
+ * FlashList recycling pools are keyed on this type. Session cell heights are
+ * NOT uniform: last/single-in-group rows carry the inter-group bottom margin
+ * (see SessionItem container styles) and density changes the base height, so
+ * pooling all sessions under one type lets a recycled cell reuse a stale
+ * height from a different group position — visible as a bottom gap/overlap
+ * when sessions change groups. Keying the pool on the HEIGHT CLASS keeps
+ * every pool height-homogeneous while avoiding remounts (a type change
+ * remounts the cell, tearing down drag/context-menu state) for position
+ * flips that do not change the cell height: 'tail' rows (last/single) carry
+ * the inter-group gap, 'body' rows (first/middle) do not. Adjacency comes
+ * from the same canonical resolver the row models use.
+ */
+function resolveSessionListVirtualizedItemType(params: Readonly<{
+    item: SessionListViewItem;
+    index: number;
+    items: ReadonlyArray<SessionListViewItem>;
+    density: SessionListRowPresentationSettings['density'];
+}>): string {
+    if (params.item.type !== 'session') {
+        const headerKind = typeof params.item.headerKind === 'string' && params.item.headerKind.length > 0
+            ? params.item.headerKind
+            : 'generic';
+        return `header:${headerKind}`;
     }
-    const headerKind = typeof item.headerKind === 'string' && item.headerKind.length > 0
-        ? item.headerKind
-        : 'generic';
-    return `header:${headerKind}`;
+    const adjacency = resolveSessionListRowModelAdjacency(params.items, params.index);
+    const heightClass = adjacency.isLast || adjacency.isSingle ? 'tail' : 'body';
+    return `session:${params.density}:${heightClass}`;
 }
 
 function resolveSessionFolderMoveMenuRowPaddingLeft(depth: number): number | undefined {
@@ -1079,6 +1101,9 @@ export const SessionsListContent = React.memo(function SessionsListContent(props
             hasMultipleMachines,
             reachableSessionDisplayByKey: reachableSessionDisplayByKeyRecord,
             folderViewEnabled,
+            // Placeholders: SessionListRowModelBoundary overlays the live
+            // shared-clock values per row. Keeping them out of this memo's
+            // identity avoids re-creating the settings object on every tick.
             relativeNowMs: 0,
             runtimeNowMs: 0,
         };
@@ -2253,6 +2278,24 @@ export const SessionsListContent = React.memo(function SessionsListContent(props
         return renderSessionItemRef.current(item, index);
     }, []);
 
+    const virtualizedItemTypeContextRef = React.useRef<Readonly<{
+        items: ReadonlyArray<SessionListViewItem>;
+        density: SessionListRowPresentationSettings['density'];
+    }>>({ items: EMPTY_SESSION_LIST_VIEW_ITEMS, density: 'default' });
+    virtualizedItemTypeContextRef.current = {
+        items: renderedListItems,
+        density: rowPresentationSettings.density,
+    };
+    const getVirtualizedItemType = React.useCallback((item: SessionListViewItem, index: number) => {
+        const context = virtualizedItemTypeContextRef.current;
+        return resolveSessionListVirtualizedItemType({
+            item,
+            index,
+            items: context.items,
+            density: context.density,
+        });
+    }, []);
+
     const renderVirtualizedHeader = React.useCallback(() => (
         <SessionsListHeader>
             <SessionFolderScopeBreadcrumb
@@ -2342,7 +2385,7 @@ export const SessionsListContent = React.memo(function SessionsListContent(props
             renderItem={renderVirtualizedItem as any}
             extraData={virtualizedRowExtraData}
             keyExtractor={listItemKeyExtractor as any}
-            getItemType={getSessionListItemType}
+            getItemType={getVirtualizedItemType}
             contentContainerStyle={contentContainerStyle}
             onLayout={handleVirtualizedListLayout}
             onScroll={handleVirtualizedListScroll}

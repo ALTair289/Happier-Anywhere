@@ -324,7 +324,84 @@ describe('buildSessionListRowModel', () => {
         expect(model.status.state).toBe('thinking');
     });
 
-    it('uses provider runtime activity for the same working row status and attention placement', () => {
+    it('presents retained working placement as a paused working row', () => {
+        const model = buildSessionListRowModel({
+            item: createSessionItem(createRenderable('s1', {
+                active: true,
+                activeAt: NOW_MS - SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS - 1_000,
+                latestTurnStatus: 'in_progress',
+                latestTurnStatusObservedAt: NOW_MS - SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS - 1_000,
+            }), { groupKind: 'working', workingPlacementReason: 'working-retained' }),
+            state: {},
+            dataIndex: 0,
+            isFirst: true,
+            isLast: true,
+            isSingle: true,
+            settings: createSettings({ runtimeNowMs: NOW_MS }),
+        });
+
+        // Live signals are stale, so the raw status is not working — but the
+        // placement retains the session in the working group, and the row
+        // presents that as a PAUSED working indicator instead of nothing.
+        expect(model.status.state).not.toBe('thinking');
+        expect(model.attention.rowState).toBe('working');
+        expect(model.workingIndicatorPaused).toBe(true);
+        expect(model.presentation.attentionIndicator).toBe('working');
+        // The status line must not imply live activity under the paused
+        // indicator — the dedicated retained status text is used instead.
+        expect(model.presentation.statusTextKey).toBe('status.workingRetained');
+    });
+
+    it('does not pause the indicator for live working sessions in the working group', () => {
+        const model = buildSessionListRowModel({
+            item: createSessionItem(createRenderable('s1', {
+                active: true,
+                activeAt: NOW_MS - 10,
+                latestTurnStatus: 'in_progress',
+                latestTurnStatusObservedAt: NOW_MS - 10,
+            }), { groupKind: 'working', workingPlacementReason: 'working' }),
+            state: {},
+            dataIndex: 0,
+            isFirst: true,
+            isLast: true,
+            isSingle: true,
+            settings: createSettings({ runtimeNowMs: NOW_MS }),
+        });
+
+        expect(model.attention.rowState).toBe('working');
+        expect(model.workingIndicatorPaused).toBe(false);
+    });
+
+    it('does not override alerting attention states for retained working placement', () => {
+        const model = buildSessionListRowModel({
+            item: createSessionItem(createRenderable('s1', {
+                active: true,
+                presence: 'online',
+                activeAt: NOW_MS - SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS - 1_000,
+                latestTurnStatus: 'failed',
+                latestTurnStatusObservedAt: NOW_MS - 10,
+                lastRuntimeIssue: {
+                    v: 1,
+                    scope: 'primary_session',
+                    status: 'failed',
+                    code: 'auth_error',
+                    source: 'auth_error',
+                    occurredAt: NOW_MS - 10,
+                } as any,
+            }), { groupKind: 'working', workingPlacementReason: 'working-retained' }),
+            state: {},
+            dataIndex: 0,
+            isFirst: true,
+            isLast: true,
+            isSingle: true,
+            settings: createSettings({ runtimeNowMs: NOW_MS }),
+        });
+
+        expect(model.attention.rowState).toBe('failed');
+        expect(model.workingIndicatorPaused).toBe(false);
+    });
+
+    it('presents detached-only provider runtime activity with a background indicator, not foreground working', () => {
         const model = buildSessionListRowModel({
             item: createSessionItem(createRenderable('s1', {
                 active: true,
@@ -333,6 +410,39 @@ describe('buildSessionListRowModel', () => {
                 thinkingAt: 0,
                 latestTurnStatus: 'completed',
                 latestTurnStatusObservedAt: NOW_MS - 5_000,
+                lastViewedSessionSeq: 10,
+                runtimeActivityActiveCount: 1,
+                runtimeActivityObservedAt: NOW_MS - 1_000,
+                runtimeActivityExpiresAt: NOW_MS + 60_000,
+                runtimeActivitySourceClass: 'provider_detached_task',
+            }), { groupKind: 'date' }),
+            state: {},
+            dataIndex: 0,
+            isFirst: true,
+            isLast: true,
+            isSingle: true,
+            settings: createSettings({ runtimeNowMs: NOW_MS }),
+        });
+
+        expect(model.status.state).toBe('background_active');
+        expect(model.status.statusColor).toBe('connecting-token');
+        expect(model.status.statusDotColor).toBe('connecting-token');
+        expect(model.attention.rowState).toBe('backgroundActive');
+        expect(model.presentation.attentionIndicator).toBe('background');
+        expect(model.presentation.secondaryLine).toBe('status');
+        expect(model.presentation.statusTextKey).toBe('status.backgroundActive');
+        expect(model.workingIndicatorPaused).toBe(false);
+    });
+
+    it('keeps foreground working presentation when detached runtime activity overlaps an active turn', () => {
+        const model = buildSessionListRowModel({
+            item: createSessionItem(createRenderable('s1', {
+                active: true,
+                activeAt: NOW_MS - 1_000,
+                thinking: false,
+                thinkingAt: 0,
+                latestTurnStatus: 'in_progress',
+                latestTurnStatusObservedAt: NOW_MS - 2_000,
                 runtimeActivityActiveCount: 1,
                 runtimeActivityObservedAt: NOW_MS - 1_000,
                 runtimeActivityExpiresAt: NOW_MS + 60_000,
@@ -348,7 +458,35 @@ describe('buildSessionListRowModel', () => {
 
         expect(model.status.state).toBe('thinking');
         expect(model.attention.rowState).toBe('working');
-        expect(model.presentation.secondaryLine).toBe('status');
+        expect(model.presentation.attentionIndicator).toBe('working');
+    });
+
+    it('leaves rows idle when runtime activity count is zero', () => {
+        const model = buildSessionListRowModel({
+            item: createSessionItem(createRenderable('s1', {
+                active: true,
+                activeAt: NOW_MS - 10_000,
+                thinking: false,
+                thinkingAt: 0,
+                latestTurnStatus: 'completed',
+                latestTurnStatusObservedAt: NOW_MS - 5_000,
+                lastViewedSessionSeq: 10,
+                runtimeActivityActiveCount: 0,
+                runtimeActivityObservedAt: NOW_MS - 1_000,
+                runtimeActivityExpiresAt: NOW_MS + 60_000,
+                runtimeActivitySourceClass: 'provider_detached_task',
+            }), { groupKind: 'date' }),
+            state: {},
+            dataIndex: 0,
+            isFirst: true,
+            isLast: true,
+            isSingle: true,
+            settings: createSettings({ runtimeNowMs: NOW_MS }),
+        });
+
+        expect(model.status.state).toBe('waiting');
+        expect(model.attention.rowState).toBe('quiet');
+        expect(model.presentation.attentionIndicator).toBe('none');
     });
 
     it('schedules runtime freshness from fresh active heartbeat when an in-progress observation is stale', () => {

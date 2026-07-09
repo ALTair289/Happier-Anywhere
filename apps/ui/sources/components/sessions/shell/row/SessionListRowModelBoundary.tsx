@@ -19,10 +19,8 @@ import type {
     UseSessionInlineDragResolveDropResultEvent,
     UseSessionInlineDragResolvedDrop,
 } from '../useSessionInlineDrag';
-import {
-    useSessionListRelativeTimeClock,
-    useSessionListRuntimeFreshnessClock,
-} from './useSessionListRelativeTimeClock';
+import { useSessionListRuntimeNowMs, useSessionListRuntimeWake } from '@/hooks/session/sessionListRuntimeClock';
+import { useSessionListRelativeTimeClock } from './useSessionListRelativeTimeClock';
 import {
     buildCachedSessionListRowModel,
     createSessionListRowModelsCache,
@@ -132,11 +130,13 @@ const SessionListRowModelBoundaryContent = React.memo(function SessionListRowMod
     props: SessionListRowModelBoundaryContentProps,
 ) {
     const relativeNowMs = useSessionListRelativeTimeClock(props.dataActive);
-    const [scheduledNextRuntimeFreshnessAtMs, setScheduledNextRuntimeFreshnessAtMs] = React.useState<number | null>(null);
-    const runtimeNowMs = useSessionListRuntimeFreshnessClock(
-        scheduledNextRuntimeFreshnessAtMs,
-        props.dataActive,
-    );
+    // The row reads the SAME shared runtime clock as group placement
+    // (useVisibleSessionListRuntimeNowMs), so the working indicator and the
+    // session's group can never cross a freshness boundary in different
+    // render cycles. The row only contributes its own wake horizon (below,
+    // straight from the freshly built row model), which can be earlier than
+    // the list's when its renderable is fresher than the committed view data.
+    const runtimeNowMs = useSessionListRuntimeNowMs(props.dataActive);
     const settings = React.useMemo<SessionListRowPresentationSettings>(() => ({
         ...props.settings,
         relativeNowMs,
@@ -160,13 +160,7 @@ const SessionListRowModelBoundaryContent = React.memo(function SessionListRowMod
         cache: rowModelsCacheRef.current,
     }), [adjacency, props.dataIndex, props.item, settings, snapshot]);
 
-    React.useEffect(() => {
-        setScheduledNextRuntimeFreshnessAtMs((current) =>
-            current === rowModel.nextRuntimeFreshnessAtMs
-                ? current
-                : rowModel.nextRuntimeFreshnessAtMs
-        );
-    }, [rowModel.nextRuntimeFreshnessAtMs]);
+    useSessionListRuntimeWake(rowModel.nextRuntimeFreshnessAtMs, props.dataActive);
 
     const sessionKey = rowModel.rowKey || null;
     const rowAttentionAnimationEnabled = props.rowStoreSubscriptionMode === 'all-rendered'

@@ -5,6 +5,7 @@ import { buildSessionListShellViewItemSignature } from '@/sync/store/hooks';
 import { resolveNextSessionRuntimePresentationFreshnessAtMs } from '@/sync/domains/session/attention/deriveSessionRuntimePresentationState';
 import { resolveSessionListSourceData } from '@/sync/domains/session/listing/sessionListPresentation';
 import { computeVisibleSessionListIndex } from '@/sync/domains/session/listing/computeVisibleSessionListIndex';
+import { isSessionListWorkingPlacementReason } from '@/sync/domains/session/listing/placement/sessionListPlacementProjection';
 import { buildSessionListIndexFromViewData } from '@/sync/domains/session/listing/sessionListIndex';
 import { buildSessionListViewDataFromIndex } from '@/sync/domains/session/listing/sessionListViewDataFromIndex';
 import { applySessionFoldersToSessionListViewData } from '@/sync/domains/session/listing/sessionListViewData';
@@ -42,6 +43,7 @@ import { getServerProfileById } from '@/sync/domains/server/serverProfiles';
 import { fetchAndApplySessionFolderAssignments } from '@/sync/ops/sessionOrganization';
 import { useFeatureEnabled } from '@/hooks/server/useFeatureEnabled';
 import { useResolvedActiveServerSelection } from '@/hooks/server/useEffectiveServerSelection';
+import { useSessionListRuntimeNowMs, useSessionListRuntimeWake } from './sessionListRuntimeClock';
 
 const EMPTY_SESSION_LIST_GROUP_ORDER: Readonly<Record<string, ReadonlyArray<string> | undefined>> = Object.freeze({});
 const EMPTY_SESSION_WORKSPACE_ORDER: SessionWorkspaceOrderV1 = Object.freeze({});
@@ -67,6 +69,7 @@ type SessionListDataState = Readonly<{
     pinnedSessionKeysV1: ReadonlyArray<string>;
     sessionListAttentionPromotionMode: SessionListAttentionPromotionMode;
     sessionListWorkingPlacementMode: SessionListWorkingPlacementMode;
+    sessionListSeparateBackgroundWork: boolean;
     sessionListFolderSortModeV1: SessionListFolderSortModeV1;
     sessionListOrderingModeV1: SessionListOrderingModeV1;
     sessionListSectionModeV1: SessionListOrderingSectionMode;
@@ -209,6 +212,7 @@ function buildVisibleSessionListIndexForState(
         workingPlacement: state.sessionListWorkingPlacementMode !== 'off'
             ? {
                 mode: state.sessionListWorkingPlacementMode,
+                separateBackgroundWork: state.sessionListSeparateBackgroundWork,
             }
             : DISABLED_WORKING_PLACEMENT_OPTIONS,
         retainWorkingSessionKeys: options.retainWorkingSessionKeys,
@@ -276,7 +280,7 @@ function collectRetainedWorkingSessionKeys(params: Readonly<{
     const seen = new Set<string>();
     for (const item of params.previousVisible) {
         if (item.type !== 'session') continue;
-        if (item.groupKind !== 'working' && item.workingPlacementReason !== 'working') continue;
+        if (item.groupKind !== 'working' && !isSessionListWorkingPlacementReason(item.workingPlacementReason)) continue;
         const key = buildSessionListSessionKey(item);
         if (!key || seen.has(key)) continue;
         seen.add(key);
@@ -299,25 +303,81 @@ function resolveNextVisibleSessionListRuntimeFreshnessAtMs(
     return nextAt;
 }
 
-function useVisibleSessionListRuntimeNowMs(source: ReadonlyArray<SessionListViewItem> | null): number {
-    const [runtimeNowMs, setRuntimeNowMs] = React.useState(() => Date.now());
+function useVisibleSessionListRuntimeNowMs(
+    source: ReadonlyArray<SessionListViewItem> | null,
+    enabled: boolean,
+): number {
+    // Shared session-list runtime clock: group placement and per-row working
+    // indicators must derive freshness from the same timestamp in the same
+    // render cycle, so this hook subscribes to the canonical clock and only
+    // contributes its own wake horizon (earliest freshness expiry in view).
+    // Inactive surfaces neither subscribe nor schedule wakes; their data is
+    // frozen downstream, so ticking them would only churn renders.
+    const runtimeNowMs = useSessionListRuntimeNowMs(enabled);
     const nextFreshnessAtMs = React.useMemo(
-        () => resolveNextVisibleSessionListRuntimeFreshnessAtMs(source, runtimeNowMs),
-        [source, runtimeNowMs],
+        () => (enabled ? resolveNextVisibleSessionListRuntimeFreshnessAtMs(source, runtimeNowMs) : null),
+        [enabled, source, runtimeNowMs],
     );
+    useSessionListRuntimeWake(nextFreshnessAtMs, enabled);
+    return runtimeNowMs;
+}
+
+type VisibleSessionListComputation = Readonly<{
+    visible: SessionListViewItem[] | null;
+    buildWithHiddenFilter: (hideInactiveSessions: boolean) => SessionListViewItem[] | null;
+}>;
+
+/**
+ * Single owner of the visible session-list computation shared by
+ * `useVisibleSessionListViewData`, `useVisibleSessionListPaneState`, and
+ * `useHasHiddenInactiveSessions`: previous-render retention seeding,
+ * retained attention/working key collection, clock-timed placement build,
+ * and stable-row reuse. Keeping one implementation guarantees every list
+ * surface derives placement from the same shared runtime clock.
+ */
+function useVisibleSessionListComputation(
+    state: SessionListDataState,
+    storageFilter: SessionListStorageFilter,
+    options: VisibleSessionListViewDataOptions,
+): VisibleSessionListComputation {
+    const surfaceDataActive = options.sessionListSurfaceDataActive !== false;
+    const runtimeNowMs = useVisibleSessionListRuntimeNowMs(state.folderSource, surfaceDataActive);
+    const previousVisibleRef = React.useRef<SessionListViewItem[] | null>(null);
+
+    const computation = React.useMemo<VisibleSessionListComputation>(() => {
+        const previousVisible = resolvePreviousVisibleSessionListForRetention(
+            previousVisibleRef.current,
+            options.retainedSessionListViewData,
+        );
+        const retainAttentionSessionKeys = collectRetainedAttentionSessionKeys({
+            previousVisible,
+            activeSessionId: options.activeSessionId,
+            mode: state.sessionListAttentionPromotionMode,
+        });
+        const retainWorkingSessionKeys = collectRetainedWorkingSessionKeys({
+            previousVisible,
+            mode: state.sessionListWorkingPlacementMode,
+        });
+        const buildWithHiddenFilter = (hideInactiveSessions: boolean) =>
+            buildVisibleSessionListViewData(state, storageFilter, hideInactiveSessions, {
+                retainAttentionSessionKeys,
+                retainWorkingSessionKeys,
+                nowMs: runtimeNowMs,
+            });
+        return {
+            visible: reuseStableVisibleSessionListRows(
+                previousVisible,
+                buildWithHiddenFilter(state.hideInactiveSessions),
+            ),
+            buildWithHiddenFilter,
+        };
+    }, [options.activeSessionId, options.retainedSessionListViewData, runtimeNowMs, state, storageFilter]);
 
     React.useEffect(() => {
-        if (nextFreshnessAtMs === null) return undefined;
-        const delayMs = Math.max(0, nextFreshnessAtMs - Date.now() + 1);
-        const timeoutId = setTimeout(() => {
-            setRuntimeNowMs(Date.now());
-        }, delayMs);
-        return () => {
-            clearTimeout(timeoutId);
-        };
-    }, [nextFreshnessAtMs]);
+        previousVisibleRef.current = computation.visible;
+    }, [computation.visible]);
 
-    return runtimeNowMs;
+    return computation;
 }
 
 function countRenderedSessions(data: SessionListViewItem[] | null): number {
@@ -414,6 +474,7 @@ function useSessionListDataState(
     const hideInactiveSessions = useSetting('hideInactiveSessions') === true;
     const sessionListAttentionPromotionMode = normalizeSessionListAttentionPromotionMode(useSetting('sessionListAttentionPromotionModeV1'));
     const sessionListWorkingPlacementMode = normalizeSessionListWorkingPlacementMode(useSetting('sessionListWorkingPlacementModeV1'));
+    const sessionListSeparateBackgroundWork = useSetting('sessionListSeparateBackgroundWork') === true;
     const sessionListFolderSortModeV1 = normalizeSessionListFolderSortModeV1(useLocalSetting('sessionListFolderSortModeV1'));
     const sessionListOrderingModeV1 = normalizeSessionListOrderingModeV1(useSetting('sessionListOrderingModeV1'));
     const sessionListSectionModeV1 = normalizeSessionListOrderingSectionMode(useSetting('sessionListSectionModeV1'));
@@ -554,6 +615,7 @@ function useSessionListDataState(
         pinnedSessionKeysV1,
         sessionListAttentionPromotionMode,
         sessionListWorkingPlacementMode,
+        sessionListSeparateBackgroundWork,
         sessionListFolderSortModeV1,
         sessionListOrderingModeV1,
         sessionListSectionModeV1,
@@ -576,6 +638,7 @@ function useSessionListDataState(
         normalizedWorkspaceOrder,
         pinnedSessionKeysV1,
         sessionListAttentionPromotionMode,
+        sessionListSeparateBackgroundWork,
         sessionListWorkingPlacementMode,
         sessionListFolderSortModeV1,
         sessionListOrderingModeV1,
@@ -634,34 +697,7 @@ export function useVisibleSessionListViewData(
     options: VisibleSessionListViewDataOptions = {},
 ): SessionListViewItem[] | null {
     const state = useSessionListDataState(storageFilter, options);
-    const runtimeNowMs = useVisibleSessionListRuntimeNowMs(state.folderSource);
-    const previousVisibleRef = React.useRef<SessionListViewItem[] | null>(null);
-
-    const visible = React.useMemo(() => {
-        const previousVisible = resolvePreviousVisibleSessionListForRetention(
-            previousVisibleRef.current,
-            options.retainedSessionListViewData,
-        );
-        const nextVisible = buildVisibleSessionListViewData(state, storageFilter, state.hideInactiveSessions, {
-            retainAttentionSessionKeys: collectRetainedAttentionSessionKeys({
-                previousVisible,
-                activeSessionId: options.activeSessionId,
-                mode: state.sessionListAttentionPromotionMode,
-            }),
-            retainWorkingSessionKeys: collectRetainedWorkingSessionKeys({
-                previousVisible,
-                mode: state.sessionListWorkingPlacementMode,
-            }),
-            nowMs: runtimeNowMs,
-        });
-        return reuseStableVisibleSessionListRows(previousVisible, nextVisible);
-    }, [options.activeSessionId, options.retainedSessionListViewData, runtimeNowMs, state, storageFilter]);
-
-    React.useEffect(() => {
-        previousVisibleRef.current = visible;
-    }, [visible]);
-
-    return visible;
+    return useVisibleSessionListComputation(state, storageFilter, options).visible;
 }
 
 export function useHasHiddenInactiveSessions(
@@ -669,38 +705,15 @@ export function useHasHiddenInactiveSessions(
     options: VisibleSessionListViewDataOptions = {},
 ): boolean {
     const state = useSessionListDataState(storageFilter, options);
-    const previousVisibleRef = React.useRef<SessionListViewItem[] | null>(null);
+    const computation = useVisibleSessionListComputation(state, storageFilter, options);
 
-    const result = React.useMemo(() => {
+    return React.useMemo(() => {
         if (!state.source || state.hideInactiveSessions !== true) return false;
-        const previousVisible = resolvePreviousVisibleSessionListForRetention(
-            previousVisibleRef.current,
-            options.retainedSessionListViewData,
-        );
-
-        const retainAttentionSessionKeys = collectRetainedAttentionSessionKeys({
-            previousVisible,
-            activeSessionId: options.activeSessionId,
-            mode: state.sessionListAttentionPromotionMode,
-        });
-        const retainWorkingSessionKeys = collectRetainedWorkingSessionKeys({
-            previousVisible,
-            mode: state.sessionListWorkingPlacementMode,
-        });
-        const visible = buildVisibleSessionListViewData(state, storageFilter, true, {
-            retainAttentionSessionKeys,
-            retainWorkingSessionKeys,
-        });
-        const visibleSessionCount = countRenderedSessions(visible);
+        const visibleSessionCount = countRenderedSessions(computation.visible);
         if (visibleSessionCount > 0) return false;
-        const unhidden = buildVisibleSessionListViewData(state, storageFilter, false, {
-            retainAttentionSessionKeys,
-            retainWorkingSessionKeys,
-        });
+        const unhidden = computation.buildWithHiddenFilter(false);
         return countRenderedSessions(unhidden) > visibleSessionCount;
-    }, [options.activeSessionId, options.retainedSessionListViewData, state, storageFilter]);
-
-    return result;
+    }, [computation, state.hideInactiveSessions, state.source]);
 }
 
 export function useVisibleSessionListPaneState(
@@ -712,7 +725,7 @@ export function useVisibleSessionListPaneState(
     hasHiddenInactiveSessions: boolean;
 }> {
     const state = useSessionListDataState(storageFilter, options);
-    const previousVisibleRef = React.useRef<SessionListViewItem[] | null>(null);
+    const computation = useVisibleSessionListComputation(state, storageFilter, options);
     const previousPaneStateRef = React.useRef<Readonly<{
         sessionListViewData: SessionListViewItem[] | null;
         visibleSessionCount: number;
@@ -720,26 +733,7 @@ export function useVisibleSessionListPaneState(
     }> | null>(null);
 
     const paneState = React.useMemo(() => {
-        const previousVisible = resolvePreviousVisibleSessionListForRetention(
-            previousVisibleRef.current,
-            options.retainedSessionListViewData,
-        );
-        const retainAttentionSessionKeys = collectRetainedAttentionSessionKeys({
-            previousVisible,
-            activeSessionId: options.activeSessionId,
-            mode: state.sessionListAttentionPromotionMode,
-        });
-        const retainWorkingSessionKeys = collectRetainedWorkingSessionKeys({
-            previousVisible,
-            mode: state.sessionListWorkingPlacementMode,
-        });
-        const sessionListViewData = reuseStableVisibleSessionListRows(
-            previousVisible,
-            buildVisibleSessionListViewData(state, storageFilter, state.hideInactiveSessions, {
-                retainAttentionSessionKeys,
-                retainWorkingSessionKeys,
-            }),
-        );
+        const sessionListViewData = computation.visible;
         const visibleSessionCount = countRenderedSessions(sessionListViewData);
         const reusePreviousPaneState = (hasHiddenInactiveSessions: boolean) => {
             const previous = previousPaneStateRef.current;
@@ -766,15 +760,11 @@ export function useVisibleSessionListPaneState(
             return reusePreviousPaneState(false);
         }
 
-        const unhidden = buildVisibleSessionListViewData(state, storageFilter, false, {
-            retainAttentionSessionKeys,
-            retainWorkingSessionKeys,
-        });
+        const unhidden = computation.buildWithHiddenFilter(false);
         return reusePreviousPaneState(countRenderedSessions(unhidden) > visibleSessionCount);
-    }, [options.activeSessionId, options.retainedSessionListViewData, state, storageFilter]);
+    }, [computation, state.hideInactiveSessions, state.source]);
 
     React.useEffect(() => {
-        previousVisibleRef.current = paneState.sessionListViewData;
         previousPaneStateRef.current = paneState;
     }, [paneState]);
 

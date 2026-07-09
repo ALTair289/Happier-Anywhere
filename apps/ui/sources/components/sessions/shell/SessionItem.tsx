@@ -35,6 +35,7 @@ import {
     normalizeSessionListActiveColorMode,
     resolveSessionRowTitleColorRole,
 } from './row/sessionRowTitleColorRole';
+import { resolveSessionRowAttentionStateColor } from './row/sessionRowAttentionColors';
 import {
     SESSION_LIST_ROW_HEIGHT_COMPACT,
     SESSION_LIST_ROW_HEIGHT_DEFAULT,
@@ -144,6 +145,7 @@ type SessionItemRenderProps = Omit<SessionItemBaseProps, 'activityTimeMode' | 's
     rowAttentionState: SessionRowAttentionState;
     rowPresentation: SessionRowPresentation;
     workingIndicatorMode: SessionItemWorkingIndicatorMode;
+    workingIndicatorPaused?: boolean;
     rowAttentionAnimationEnabled: boolean;
     sessionListIdentityDisplay: SessionItemIdentityDisplay;
     sessionListActiveColorMode: SessionItemActiveColorMode;
@@ -639,6 +641,7 @@ const SessionItemContent = React.memo(
         rowAttentionState,
         rowPresentation,
         workingIndicatorMode,
+        workingIndicatorPaused,
         rowAttentionAnimationEnabled,
         sessionListIdentityDisplay,
         sessionListActiveColorMode,
@@ -647,6 +650,10 @@ const SessionItemContent = React.memo(
         const styles = stylesheet;
         const { theme } = useUnistyles();
         const resolvedSession = session;
+        // Retained-working rows show the working indicator frozen: the
+        // session is held in the working group while its live signals are
+        // stale, so animating would misrepresent live activity.
+        const attentionIndicatorAnimationEnabled = rowAttentionAnimationEnabled && workingIndicatorPaused !== true;
         const localDevModeEnabled = useLocalSetting('devModeEnabled');
         const devModeEnabled = isSessionDebugInformationEnabled(localDevModeEnabled);
         const resolvedSelectionKey = selectionKey ?? '';
@@ -989,25 +996,7 @@ const SessionItemContent = React.memo(
         const rowDensity = isMinimal ? 'minimal' : compact ? 'compact' : 'default';
         const effectiveSecondaryLineMode = rowPresentation.secondaryLine === 'path' ? 'path' : 'status';
         const statusLineText = rowPresentation.statusTextKey ? t(rowPresentation.statusTextKey) : sessionStatus.statusText;
-        const rowStatusColor = (() => {
-            switch (rowAttentionState) {
-                case 'working':
-                    return theme.colors.state.info.foreground;
-                case 'ready':
-                    return theme.colors.state.success.foreground;
-                case 'failed':
-                    return theme.colors.state.danger.foreground;
-                case 'permission_required':
-                case 'action_required':
-                    return theme.colors.state.warning.foreground;
-                case 'unread':
-                    return theme.colors.text.link;
-                case 'pending':
-                    return theme.colors.state.neutral.foreground;
-                case 'quiet':
-                    return theme.colors.text.secondary;
-            }
-        })();
+        const rowStatusColor = resolveSessionRowAttentionStateColor(rowAttentionState, theme);
         const rowAttentionAccessibilityLabel =
             rowAttentionState === 'failed'
                 ? t('status.error')
@@ -1301,7 +1290,7 @@ const SessionItemContent = React.memo(
                                             attentionState={rowAttentionState}
                                             accessibilityLabel={rowAttentionAccessibilityLabel}
                                             workingMode={workingIndicatorMode}
-                                            animationEnabled={rowAttentionAnimationEnabled}
+                                            animationEnabled={attentionIndicatorAnimationEnabled}
                                         />
                                     ) : null}
                                 </View>
@@ -1491,7 +1480,7 @@ const SessionItemContent = React.memo(
                                     accessibilityLabel={rowAttentionAccessibilityLabel}
                                     workingMode={workingIndicatorMode}
                                     workingSpinnerTone="neutral"
-                                    animationEnabled={rowAttentionAnimationEnabled}
+                                    animationEnabled={attentionIndicatorAnimationEnabled}
                                 />
                             ) : null}
                             {showTrailingActivityTime ? (
@@ -1661,6 +1650,7 @@ function SessionItemFromRowModel(props: SessionItemProps & { rowModel: SessionLi
             rowAttentionState={rowModel.attention.rowState}
             rowPresentation={rowModel.presentation}
             workingIndicatorMode={rowModel.workingIndicatorMode}
+            workingIndicatorPaused={rowModel.workingIndicatorPaused}
             rowAttentionAnimationEnabled={itemProps.rowAttentionAnimationEnabled !== false}
             sessionListIdentityDisplay={normalizeSessionItemIdentityDisplay(rowModel.identityDisplay)}
             sessionListActiveColorMode={normalizeSessionItemActiveColorMode(rowModel.activeColorMode)}

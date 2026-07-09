@@ -89,4 +89,33 @@ describe('SessionRowAttentionIndicator', () => {
         }
         expect(flattenStyle(dot.props.style).animationName).toBeUndefined();
     });
+
+    it('uses the foreground working color for background-active indicators', async () => {
+        const { SessionRowAttentionIndicator } = await import('./SessionRowAttentionIndicator');
+
+        const workingScreen = await renderScreen(
+            <SessionRowAttentionIndicator
+                indicator="working"
+                sessionId="session-working"
+                attentionState="working"
+                workingMode="pulse"
+            />,
+        );
+        const backgroundScreen = await renderScreen(
+            <SessionRowAttentionIndicator
+                indicator="background"
+                sessionId="session-background"
+                attentionState="backgroundActive"
+                workingMode="pulse"
+            />,
+        );
+
+        const workingDot = workingScreen.findByTestId('session-row-attention-indicator-dot-session-working');
+        const backgroundDot = backgroundScreen.findByTestId('session-row-attention-indicator-dot-session-background');
+        if (!workingDot || !backgroundDot) {
+            throw new Error('Expected both working and background status dots to render');
+        }
+        expect(flattenStyle(backgroundDot.props.style).backgroundColor)
+            .toBe(flattenStyle(workingDot.props.style).backgroundColor);
+    });
 });

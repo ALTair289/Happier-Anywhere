@@ -107,6 +107,31 @@ describe('resolveSessionRowPresentation', () => {
         });
     });
 
+    it('gives retained working rows a dedicated status text instead of live status', () => {
+        expect(resolveSessionRowPresentation({
+            attentionState: 'working',
+            workingRetained: true,
+            density: 'default',
+            requestedSecondaryLineMode: 'path',
+            hasPathSubtitle: true,
+        })).toEqual({
+            attentionIndicator: 'working',
+            titleTone: 'emphasized',
+            secondaryLine: 'status',
+            statusTextKey: 'status.workingRetained',
+        });
+    });
+
+    it('does not apply the retained status text to live working rows', () => {
+        expect(resolveSessionRowPresentation({
+            attentionState: 'working',
+            workingRetained: false,
+            density: 'default',
+            requestedSecondaryLineMode: 'path',
+            hasPathSubtitle: true,
+        }).statusTextKey).toBeUndefined();
+    });
+
     it('keeps blocked active work visible when the row prefers a path subtitle', () => {
         expect(resolveSessionRowPresentation({
             attentionState: 'permission_required',

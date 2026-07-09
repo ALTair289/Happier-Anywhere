@@ -1728,7 +1728,7 @@ describe('useVisibleSessionListViewData', () => {
         await hook.unmount();
     });
 
-    it('recomputes global working placement when runtime activity expires without a store update', async () => {
+    it('recomputes non-live global working placement when runtime activity expires without a store update', async () => {
         vi.useFakeTimers();
         vi.setSystemTime(1_000_000);
         sourceData.sessionListWorkingPlacementMode = 'global';
@@ -1743,8 +1743,9 @@ describe('useVisibleSessionListViewData', () => {
             {
                 type: 'session',
                 session: makeRenderableSession('runtime-active-session', {
-                    active: true,
+                    active: false,
                     activeAt: 1_000_000,
+                    presence: 'offline',
                     latestTurnStatus: 'completed',
                     latestTurnStatusObservedAt: 999_000,
                     runtimeActivityActiveCount: 1,
@@ -1782,7 +1783,6 @@ describe('useVisibleSessionListViewData', () => {
             'session:normal-session:date:none',
         ]);
 
-        vi.setSystemTime(1_060_001);
         await flushHookEffects({ cycles: 1, advanceTimersMs: 60_001 });
 
         expect(hook.getCurrent()?.map((item) => item.type === 'header'
@@ -1794,6 +1794,86 @@ describe('useVisibleSessionListViewData', () => {
             'session:normal-session:date:none',
         ]);
         await hook.unmount();
+    });
+
+    it('recomputes pane-state placement from the shared runtime clock when working freshness expires', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(1_000_000);
+        sourceData.sessionListWorkingPlacementMode = 'global';
+        sourceData.activeData = [
+            {
+                type: 'header',
+                title: 'Today',
+                headerKind: 'date',
+                groupKey: 'server:server-a:day:2026-05-04',
+                serverId: 'server-a',
+            },
+            {
+                type: 'session',
+                session: makeRenderableSession('working-session', {
+                    active: true,
+                    activeAt: 999_000,
+                    latestTurnStatus: 'in_progress',
+                    latestTurnStatusObservedAt: 1_000_000,
+                }),
+                section: 'active',
+                groupKey: 'server:server-a:day:2026-05-04',
+                groupKind: 'date',
+                serverId: 'server-a',
+            },
+        ];
+
+        const { useVisibleSessionListPaneState } = await import('./useVisibleSessionListViewData');
+        const hook = await renderHook(() => useVisibleSessionListPaneState('all'));
+
+        const readShape = () => hook.getCurrent().sessionListViewData?.map((item) => item.type === 'header'
+            ? `header:${item.headerKind ?? 'unknown'}`
+            : `session:${item.session.id}:${item.groupKind ?? 'unknown'}:${item.workingPlacementReason ?? 'none'}`);
+
+        expect(readShape()).toEqual([
+            'header:working',
+            'session:working-session:working:working',
+        ]);
+
+        // The working freshness window expires at observedAt + 120s. The
+        // pane-state surface (tablet sidebar) must recompute placement from
+        // the shared clock wake — previously it never re-evaluated and kept
+        // presenting live 'working' placement indefinitely.
+        await flushHookEffects({ advanceTimersMs: 121_000, cycles: 1, turns: 2 });
+
+        expect(readShape()).toEqual([
+            'header:working',
+            'session:working-session:working:working-retained',
+        ]);
+
+        await hook.unmount();
+    });
+
+    it('renders the visible list without a Node stdout stream', async () => {
+        const stdoutDescriptor = Object.getOwnPropertyDescriptor(process, 'stdout');
+        Object.defineProperty(process, 'stdout', {
+            configurable: true,
+            value: undefined,
+        });
+
+        let hook: Awaited<ReturnType<typeof renderHook<SessionListViewItem[] | null>>> | null = null;
+        try {
+            const { useVisibleSessionListViewData } = await import('./useVisibleSessionListViewData');
+            hook = await renderHook(() => useVisibleSessionListViewData());
+
+            expect(hook.getCurrent()?.map((item) => item.type === 'header'
+                ? `header:${item.headerKind ?? 'unknown'}`
+                : `session:${item.session.id}`
+            )).toEqual([
+                'header:date',
+                'session:session-a',
+            ]);
+        } finally {
+            if (hook) await hook.unmount();
+            if (stdoutDescriptor) {
+                Object.defineProperty(process, 'stdout', stdoutDescriptor);
+            }
+        }
     });
 
     it('uses a retained visible-list seed after the pane-state hook remounts', async () => {
@@ -1860,7 +1940,9 @@ describe('useVisibleSessionListViewData', () => {
             : `session:${item.session.id}:${item.groupKind ?? 'unknown'}:${item.workingPlacementReason ?? 'none'}`
         )).toEqual([
             'header:working',
-            'session:working-session:working:working',
+            // Signals are stale at the remount time, so the seed retains the
+            // session in the working group with the distinct retained reason.
+            'session:working-session:working:working-retained',
             'header:date',
             'session:normal-session:date:none',
         ]);

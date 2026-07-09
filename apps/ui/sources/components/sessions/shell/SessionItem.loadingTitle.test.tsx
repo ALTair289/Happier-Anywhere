@@ -226,6 +226,7 @@ function createMetadataPendingRowModel(id: string): SessionListRowModel {
         identityDisplay: 'avatar',
         activeColorMode: 'activityAndAttention',
         workingIndicatorMode: 'spinner',
+        workingIndicatorPaused: false,
         hideInactiveSessions: false,
     };
 }

@@ -289,6 +289,7 @@ function createSessionRowModel(overrides: Partial<SessionListRowModel> = {}): Se
         identityDisplay: 'avatar',
         activeColorMode: 'activityAndAttention',
         workingIndicatorMode: 'spinner',
+        workingIndicatorPaused: false,
         hideInactiveSessions: false,
     };
     return { ...model, ...overrides };
@@ -361,6 +362,7 @@ function createSessionRowModelForProps(props: SessionItemForTestProps): SessionL
         identityDisplay: mockSessionListIdentityDisplay,
         activeColorMode: mockSessionListActiveColorMode,
         workingIndicatorMode: mockNarrowWorkingIndicatorStyle,
+        workingIndicatorPaused: false,
         hideInactiveSessions: false,
     });
 }

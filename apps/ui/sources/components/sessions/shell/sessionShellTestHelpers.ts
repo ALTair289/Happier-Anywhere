@@ -62,9 +62,10 @@ function resolveSessionItemTestListAttentionState(status: SessionStatus): Sessio
     switch (status.state) {
         case 'thinking':
         case 'waiting':
+        case 'background_active':
         case 'permission_required':
         case 'action_required':
-            return status.state === 'waiting' ? 'quiet' : status.state;
+            return status.state === 'waiting' || status.state === 'background_active' ? 'quiet' : status.state;
         case 'disconnected':
         case 'resuming':
             return 'quiet';
@@ -151,6 +152,7 @@ export function createSessionItemTestRowModel(
         identityDisplay: 'avatar',
         activeColorMode: 'activityAndAttention',
         workingIndicatorMode: 'spinner',
+        workingIndicatorPaused: false,
         hideInactiveSessions: input.hideInactiveSessions ?? false,
     };
 

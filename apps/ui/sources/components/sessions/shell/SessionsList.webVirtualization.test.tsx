@@ -638,8 +638,12 @@ describe('SessionsList web virtualization', () => {
         expect(capturedWebFlatListProps).toBeNull();
         expect(capturedWebFlashListProps).toBeTruthy();
         const props = capturedWebFlashListProps!;
-        expect(props.getItemType?.(mockVisibleSessionListViewData[0])).toBe('header:date');
-        expect(props.getItemType?.(mockVisibleSessionListViewData[1])).toBe('session');
+        expect(props.getItemType?.(mockVisibleSessionListViewData[0], 0)).toBe('header:date');
+        // Recycling pools are keyed on height class (body vs tail) + density
+        // so recycled cells never reuse a stale height from a different
+        // position, without remounting on first↔middle position flips.
+        expect(props.getItemType?.(mockVisibleSessionListViewData[1], 1)).toBe('session:default:body');
+        expect(props.getItemType?.(mockVisibleSessionListViewData[2], 2)).toBe('session:default:body');
         expect(props.scrollEventThrottle).toBe(32);
         expect(typeof props.overrideProps?.onWheel).toBe('function');
         expect(typeof props.overrideProps?.onTouchMove).toBe('function');
