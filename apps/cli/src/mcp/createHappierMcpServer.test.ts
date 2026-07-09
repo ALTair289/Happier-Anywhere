@@ -566,4 +566,139 @@ describe('createHappierMcpServer', () => {
       { surface: 'session_agent', defaultSessionId: 'sess_execution_run_start_1' },
     );
   });
+
+  it('passes the live session permission mode into action executor deps', async () => {
+    const captured: { params?: any } = {};
+
+    vi.doMock('@/session/actions/createCliActionExecutorHarness', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('@/session/actions/createCliActionExecutorHarness')>();
+      return {
+        ...actual,
+        createCliActionExecutorHarness: (params: any) => {
+          captured.params = params;
+          return { executor: { execute: vi.fn(async () => ({ ok: true, result: { ok: true } })) } };
+        },
+      };
+    });
+
+    const { createHappierMcpServer } = await import('@/mcp/createHappierMcpServer');
+    createHappierMcpServer(
+      {
+        sessionId: 'sess_live_permission_bridge_1',
+        rpcHandlerManager: { invokeLocal: async () => ({}) },
+        sendClaudeSessionMessage: () => {},
+        updateMetadata: () => {},
+        getMetadataSnapshot: () => ({ permissionMode: 'default', permissionModeUpdatedAt: 1 } as any),
+        getPermissionMode: () => 'yolo',
+      } as any,
+      { credentials: null },
+    );
+
+    expect(captured.params).toBeDefined();
+    expect(captured.params.getCallerPermissionMode()).toBe('yolo');
+  });
+
+  it('falls back to metadata snapshot permission mode when the live getter is unavailable', async () => {
+    const captured: { params?: any } = {};
+
+    vi.doMock('@/session/actions/createCliActionExecutorHarness', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('@/session/actions/createCliActionExecutorHarness')>();
+      return {
+        ...actual,
+        createCliActionExecutorHarness: (params: any) => {
+          captured.params = params;
+          return { executor: { execute: vi.fn(async () => ({ ok: true, result: { ok: true } })) } };
+        },
+      };
+    });
+
+    const { createHappierMcpServer } = await import('@/mcp/createHappierMcpServer');
+    createHappierMcpServer(
+      {
+        sessionId: 'sess_metadata_permission_bridge_1',
+        rpcHandlerManager: { invokeLocal: async () => ({}) },
+        sendClaudeSessionMessage: () => {},
+        updateMetadata: () => {},
+        getMetadataSnapshot: () => ({ permissionMode: 'safe-yolo', permissionModeUpdatedAt: 1 } as any),
+      } as any,
+      { credentials: null },
+    );
+
+    expect(captured.params).toBeDefined();
+    expect(captured.params.getCallerPermissionMode()).toBe('safe-yolo');
+  });
+
+  it('passes the live session backend target into action executor deps', async () => {
+    const captured: { params?: any } = {};
+
+    vi.doMock('@/session/actions/createCliActionExecutorHarness', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('@/session/actions/createCliActionExecutorHarness')>();
+      return {
+        ...actual,
+        createCliActionExecutorHarness: (params: any) => {
+          captured.params = params;
+          return { executor: { execute: vi.fn(async () => ({ ok: true, result: { ok: true } })) } };
+        },
+      };
+    });
+
+    const { createHappierMcpServer } = await import('@/mcp/createHappierMcpServer');
+    createHappierMcpServer(
+      {
+        sessionId: 'sess_live_backend_target_bridge_1',
+        rpcHandlerManager: { invokeLocal: async () => ({}) },
+        sendClaudeSessionMessage: () => {},
+        updateMetadata: () => {},
+        getMetadataSnapshot: () => ({ path: '/repo/current' } as any),
+        getBackendTarget: () => ({ kind: 'configuredAcpBackend', backendId: 'review-bot' }),
+      } as any,
+      { credentials: null },
+    );
+
+    expect(captured.params).toBeDefined();
+    expect(captured.params.getCurrentSessionBackendTarget()).toEqual({
+      kind: 'configuredAcpBackend',
+      backendId: 'review-bot',
+    });
+  });
+
+  it('passes live session location into action executor deps', async () => {
+    const captured: { params?: any } = {};
+
+    vi.doMock('@/session/actions/createCliActionExecutorHarness', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('@/session/actions/createCliActionExecutorHarness')>();
+      return {
+        ...actual,
+        createCliActionExecutorHarness: (params: any) => {
+          captured.params = params;
+          return { executor: { execute: vi.fn(async () => ({ ok: true, result: { ok: true } })) } };
+        },
+      };
+    });
+
+    const { createHappierMcpServer } = await import('@/mcp/createHappierMcpServer');
+    createHappierMcpServer(
+      {
+        sessionId: 'sess_live_location_bridge_1',
+        rpcHandlerManager: { invokeLocal: async () => ({}) },
+        sendClaudeSessionMessage: () => {},
+        updateMetadata: () => {},
+        getMetadataSnapshot: () => ({ permissionMode: 'default' } as any),
+        getCurrentSessionLocation: () => ({
+          path: '/repo/current',
+          host: 'leeroy-mbp',
+          machineId: 'machine-1',
+        }),
+      } as any,
+      { credentials: null },
+    );
+
+    expect(captured.params).toBeDefined();
+    expect(captured.params.rawSession).toMatchObject({
+      metadata: { permissionMode: 'default' },
+      path: '/repo/current',
+      host: 'leeroy-mbp',
+      machineId: 'machine-1',
+    });
+  });
 });

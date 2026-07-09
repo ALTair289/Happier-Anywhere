@@ -73,6 +73,55 @@ describe('createActionExecutor (inventory/discovery)', () => {
     );
   });
 
+  it('rejects delegate default workspace_write above a default session-agent caller', async () => {
+    const deps = createDeps();
+    const executor = createActionExecutor(deps);
+
+    const res = await executor.execute('subagents.delegate.start', {
+      sessionId: 'session_1',
+      backendTargetKeys: ['agent:claude'],
+      instructions: 'Delegate this task.',
+    }, { surface: 'session_agent', callerPermissionMode: 'default' } as any);
+
+    expect(res).toMatchObject({
+      ok: false,
+      errorCode: 'permission_escalation_denied',
+      details: {
+        surface: 'session_agent',
+        requestedMode: 'workspace_write',
+        callerMode: 'default',
+      },
+    });
+    expect(deps.executionRunStart).not.toHaveBeenCalled();
+  });
+
+  it('rejects execution.run.start permission above a default session-agent caller before deps.executionRunStart runs', async () => {
+    const deps = createDeps();
+    const executor = createActionExecutor(deps);
+
+    const res = await executor.execute('execution.run.start', {
+      sessionId: 'session_1',
+      intent: 'delegate',
+      backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+      instructions: 'Delegate this task.',
+      permissionMode: 'yolo',
+      retentionPolicy: 'ephemeral',
+      runClass: 'bounded',
+      ioMode: 'request_response',
+    }, { surface: 'session_agent', callerPermissionMode: 'default' } as any);
+
+    expect(res).toMatchObject({
+      ok: false,
+      errorCode: 'permission_escalation_denied',
+      details: {
+        surface: 'session_agent',
+        requestedMode: 'yolo',
+        callerMode: 'default',
+      },
+    });
+    expect(deps.executionRunStart).not.toHaveBeenCalled();
+  });
+
   it('treats successful execution-run service envelopes as successful fanout results', async () => {
     const deps = createDeps();
     deps.executionRunStart = vi.fn(async () => ({
@@ -1078,6 +1127,40 @@ describe('createActionExecutor (inventory/discovery)', () => {
         actionId: 'session.message.send',
         surface: 'session_agent',
         reason: 'disabled_by_policy',
+      }),
+    });
+    expect(deps.sessionSendMessage).not.toHaveBeenCalled();
+  });
+
+  it('rejects executing actions disabled by settings with structured settings details', async () => {
+    const deps = createDeps();
+    const executor = createActionExecutor(deps);
+
+    const res = await executor.execute(
+      'session.message.send',
+      { sessionId: 's1', message: 'Hello' },
+      {
+        surface: 'session_agent',
+        actionsSettings: {
+          v: 1,
+          actions: {
+            'session.message.send': {
+              disabledSurfaces: ['session_agent'],
+            },
+          },
+        },
+      } as any,
+    );
+
+    expect(res).toEqual({
+      ok: false,
+      errorCode: 'action_disabled',
+      error: 'action_disabled',
+      details: expect.objectContaining({
+        actionId: 'session.message.send',
+        surface: 'session_agent',
+        reason: 'disabled_by_settings',
+        settingsState: 'disabled',
       }),
     });
     expect(deps.sessionSendMessage).not.toHaveBeenCalled();

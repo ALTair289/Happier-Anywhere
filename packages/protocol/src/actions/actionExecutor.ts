@@ -27,10 +27,48 @@ import {
   SessionControlErrorCodeSchema,
   normalizeSessionUsageLimitRecoveryOperationResultV1,
 } from '../sessionControl/contract.js';
+import {
+  assertNonEscalatingPermissionMode,
+  resolveNearestPermissionModeAtOrBelow,
+  type PermissionEscalationDecision,
+} from './permissionPrivilege.js';
+import type { ActionsSettingsV1 } from './actionSettings.js';
 import type { ReviewStartInput } from '../reviews/reviewStart.js';
 import type { AcpConfigOptionOverridesV1 } from '../sessionMetadata/metadataOverridesV1.js';
 import type { ConnectedServiceBindingsV1 } from '../connect/connectedServiceBindings.js';
+import { normalizeConnectedServiceSelectionInput } from '../connect/normalizeConnectedServiceSelectionInput.js';
 import type { SessionMcpSelectionV1 } from '../mcpServers/sessionSelectionV1.js';
+import {
+  mergeSpawnConfigOptionAliases,
+  type SpawnConfigOptionValue,
+} from './sessionSpawnConfigOptions.js';
+
+/**
+ * Resolve the canonical run-start model + config-option selection from an agent-facing action
+ * input, reusing the SAME merge owner as session spawn (`mergeSpawnConfigOptionAliases`). Returns
+ * the canonical `sessionConfigOptionOverrides` (merging any `configOptions` shorthand) plus the
+ * `modelId`. A conflicting value supplied in both the shorthand and canonical forms is a typed
+ * `invalid_parameters` rejection — never a silent drop.
+ */
+function resolveRunStartModelAndConfig(input: Readonly<Record<string, unknown>>):
+  | { ok: true; modelId?: string; sessionConfigOptionOverrides?: AcpConfigOptionOverridesV1 }
+  | { ok: false; error: string } {
+  const modelIdRaw = input.modelId;
+  const modelId = typeof modelIdRaw === 'string' && modelIdRaw.trim().length > 0 ? modelIdRaw.trim() : undefined;
+  const merged = mergeSpawnConfigOptionAliases({
+    sessionConfigOptionOverrides: (input.sessionConfigOptionOverrides as AcpConfigOptionOverridesV1 | undefined) ?? null,
+    configOptions: (input.configOptions as Readonly<Record<string, SpawnConfigOptionValue>> | undefined) ?? null,
+  });
+  if (!merged.ok) {
+    const optionIds = merged.conflicts.map((conflict) => conflict.optionId).join(', ');
+    return { ok: false, error: `configOptions must agree with sessionConfigOptionOverrides (${optionIds})` };
+  }
+  return {
+    ok: true,
+    ...(modelId ? { modelId } : {}),
+    ...(merged.value ? { sessionConfigOptionOverrides: merged.value } : {}),
+  };
+}
 
 export type ActionExecuteResult =
   | Readonly<{ ok: true; result: unknown }>
@@ -75,6 +113,18 @@ export type ActionExecutorContext = Readonly<{
    * Stored on the approval so UI surfaces can link the approval back to the exact tool row.
    */
   approvalOrigin?: ApprovalRequestOriginV1 | null;
+
+  /**
+   * Effective permission mode of the running caller. Session-agent actions use this
+   * to enforce the non-escalation invariant before host adapters execute work.
+   */
+  callerPermissionMode?: string | null;
+
+  /**
+   * Live action settings for this invocation. Passing the concrete settings lets
+   * execute-time availability report the same disabled reason as spec discovery.
+   */
+  actionsSettings?: ActionsSettingsV1 | null;
 }>;
 
 export type ActionExecutorDeps = Readonly<{
@@ -137,7 +187,11 @@ export type ActionExecutorDeps = Readonly<{
     windowsRemoteSessionLaunchMode?: 'hidden' | 'windows_terminal' | 'console';
     windowsRemoteSessionConsole?: 'hidden' | 'visible';
     windowsTerminalWindowName?: string;
+    codexBackendMode?: SessionSpawnNewInput['codexBackendMode'];
+    agentRuntimeDescriptorV1?: SessionSpawnNewInput['agentRuntimeDescriptorV1'];
     surface?: keyof ActionSurfaces | null;
+    callerSurface?: keyof ActionSurfaces | null;
+    callerPermissionMode?: string | null;
   }>) => Promise<unknown>;
   sessionSpawnPicker: (args: Readonly<{ tag?: string; agentId?: string; modelId?: string; initialMessage?: string }>) => Promise<unknown>;
 
@@ -184,10 +238,18 @@ export type ActionExecutorDeps = Readonly<{
     wait?: boolean;
     timeoutSeconds?: number;
     serverId?: string | null;
+    callerSurface?: keyof ActionSurfaces | null;
+    callerPermissionMode?: string | null;
   }>) => Promise<unknown>;
   sessionTitleSet?: (args: Readonly<{ sessionId: string; title: string; serverId?: string | null }>) => Promise<unknown>;
   sessionStop?: (args: Readonly<{ sessionId: string; serverId?: string | null }>) => Promise<unknown>;
-  sessionPermissionModeSet?: (args: Readonly<{ sessionId: string; permissionMode: string; serverId?: string | null }>) => Promise<unknown>;
+  sessionPermissionModeSet?: (args: Readonly<{
+    sessionId: string;
+    permissionMode: string;
+    serverId?: string | null;
+    callerSurface?: keyof ActionSurfaces | null;
+    callerPermissionMode?: string | null;
+  }>) => Promise<unknown>;
   sessionModelSet?: (args: Readonly<{ sessionId: string; modelId: string; serverId?: string | null }>) => Promise<unknown>;
   sessionArchiveSet?: (args: Readonly<{ sessionId: string; archived: boolean; serverId?: string | null }>) => Promise<unknown>;
   sessionStatusGet?: (args: Readonly<{ sessionId: string; live?: boolean; serverId?: string | null }>) => Promise<unknown>;
@@ -488,6 +550,56 @@ const ActionSurfaceKeySchema = ActionSurfaceSchema.keyof();
 function parseActionSurfaceKey(value: unknown): keyof ActionSurfaces | null {
   const parsed = ActionSurfaceKeySchema.safeParse(value);
   return parsed.success ? parsed.data : null;
+}
+
+function isSessionAgentCaller(ctx: ActionExecutorContext): boolean {
+  return ctx.surface === 'session_agent';
+}
+
+function createPermissionPolicyResult(
+  ctx: ActionExecutorContext,
+  decision: Exclude<PermissionEscalationDecision, { ok: true }>,
+): ActionExecuteResult {
+  const errorCode = decision.reason;
+  return {
+    ok: false,
+    errorCode,
+    error: errorCode,
+    details: {
+      reason: errorCode,
+      surface: ctx.surface ?? null,
+      requestedMode: decision.requestedMode,
+      requestedOrdinal: decision.requestedOrdinal,
+      callerMode: decision.callerMode,
+      callerOrdinal: decision.callerOrdinal,
+    },
+  };
+}
+
+function assertSessionAgentPermission(
+  ctx: ActionExecutorContext,
+  requestedMode: unknown,
+  supportedModes?: readonly string[],
+): PermissionEscalationDecision | null {
+  if (!isSessionAgentCaller(ctx)) return null;
+  return assertNonEscalatingPermissionMode({
+    requestedMode,
+    callerMode: ctx.callerPermissionMode ?? 'default',
+    supportedModes,
+  });
+}
+
+function resolveSessionAgentPermission(
+  ctx: ActionExecutorContext,
+  requestedMode: unknown,
+  supportedModes?: readonly string[],
+): PermissionEscalationDecision | null {
+  if (!isSessionAgentCaller(ctx)) return null;
+  return resolveNearestPermissionModeAtOrBelow({
+    requestedMode,
+    callerMode: ctx.callerPermissionMode ?? 'default',
+    supportedModes,
+  });
 }
 
 function resolveSessionIdFromInput(input: any, ctx: ActionExecutorContext): string | null {
@@ -1031,6 +1143,7 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
     resolveActionSurfaceAvailability({
       actionId: spec.id as ActionId,
       surface: ctx.surface ?? null,
+      settings: ctx.actionsSettings ?? null,
       isActionEnabled: (id) => policyAllowsAction(id, ctx),
     });
   const isActionEnabled = (spec: ActionSpec, ctx: ActionExecutorContext) => resolveAvailability(spec, ctx).available;
@@ -1242,8 +1355,19 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
         const reviewInput = parsed.data as ReviewStartInput;
         const engineIds = reviewInput.engineIds;
         const instructions = reviewInput.instructions.trim();
-        const permissionMode = reviewInput.permissionMode;
-        const intentInputBase = { ...reviewInput };
+        const permissionDecision = resolveSessionAgentPermission(ctx, reviewInput.permissionMode, [
+          'read_only',
+          'default',
+          'workspace_write',
+          'yolo',
+        ]);
+        if (permissionDecision?.ok === false) {
+          return createPermissionPolicyResult(ctx, permissionDecision);
+        }
+        const permissionMode = permissionDecision?.ok === true
+          ? permissionDecision.requestedMode
+          : reviewInput.permissionMode;
+        const intentInputBase = { ...reviewInput, permissionMode };
         const runLocation = reviewInput.runLocation;
 
         if (runLocation === 'current_session') {
@@ -1312,28 +1436,76 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
         const intent: 'plan' | 'delegate' | 'voice_agent' =
           actionId === 'subagents.plan.start' ? 'plan' : actionId === 'subagents.delegate.start' ? 'delegate' : 'voice_agent';
         const permissionModeDefault = intent === 'delegate' ? 'workspace_write' : 'read_only';
-
-          const results = await fanoutStarts({
-            keys: backendTargetKeys,
-            startOne: async (backendTargetKey) =>
-              deps.executionRunStart(
-                sessionId,
-                {
-                  intent,
-                  backendTarget: parseBackendTargetKey(backendTargetKey),
-                  instructions,
-                  permissionMode: (parsed.data as any).permissionMode ?? permissionModeDefault,
-                  retentionPolicy: (parsed.data as any).retentionPolicy ?? 'ephemeral',
-                  runClass: (parsed.data as any).runClass ?? 'bounded',
-                  ioMode: (parsed.data as any).ioMode ?? 'request_response',
-                  intentInput: { ...(parsed.data as any), backendTargetKey },
-                },
-                opts,
-              ),
-          });
-
-          return { ok: true, result: { intent, sessionId, results } };
+        const requestedPermissionMode = (parsed.data as any).permissionMode ?? permissionModeDefault;
+        const permissionDecision = resolveSessionAgentPermission(ctx, requestedPermissionMode, [
+          'read_only',
+          'default',
+          'workspace_write',
+          'yolo',
+        ]);
+        if (permissionDecision?.ok === false) {
+          return createPermissionPolicyResult(ctx, permissionDecision);
         }
+        const permissionMode = permissionDecision?.ok === true
+          ? permissionDecision.requestedMode
+          : requestedPermissionMode;
+
+        // Connected-services selection: a per-target override wins over the blanket selection.
+        // Normalize the simple/object forms to canonical bindings at this ONE boundary; a malformed
+        // selection is a typed rejection, never a silent drop.
+        const blanketConnectedServices = (parsed.data as any).connectedServices;
+        const connectedServicesByBackendTargetKey =
+          (parsed.data as any).connectedServicesByBackendTargetKey &&
+          typeof (parsed.data as any).connectedServicesByBackendTargetKey === 'object'
+            ? (parsed.data as any).connectedServicesByBackendTargetKey as Record<string, unknown>
+            : {};
+        const connectedServicesByTarget = new Map<string, ConnectedServiceBindingsV1 | undefined>();
+        for (const backendTargetKey of backendTargetKeys) {
+          const rawSelection = Object.prototype.hasOwnProperty.call(connectedServicesByBackendTargetKey, backendTargetKey)
+            ? connectedServicesByBackendTargetKey[backendTargetKey]
+            : blanketConnectedServices;
+          const normalized = normalizeConnectedServiceSelectionInput(rawSelection);
+          if (!normalized.ok) {
+            return { ok: false, errorCode: 'invalid_parameters', error: normalized.error };
+          }
+          connectedServicesByTarget.set(backendTargetKey, normalized.bindings);
+        }
+
+        // Model + config-option (reasoning effort) selection: reuse the SAME canonical merge owner
+        // as session spawn. A conflicting shorthand/canonical value is a typed rejection here.
+        const runOptions = resolveRunStartModelAndConfig(parsed.data as Record<string, unknown>);
+        if (!runOptions.ok) {
+          return { ok: false, errorCode: 'invalid_parameters', error: runOptions.error };
+        }
+
+        const results = await fanoutStarts({
+          keys: backendTargetKeys,
+          startOne: async (backendTargetKey) => {
+            const connectedServices = connectedServicesByTarget.get(backendTargetKey);
+            return deps.executionRunStart(
+              sessionId,
+              {
+                intent,
+                backendTarget: parseBackendTargetKey(backendTargetKey),
+                instructions,
+                permissionMode,
+                retentionPolicy: (parsed.data as any).retentionPolicy ?? 'ephemeral',
+                runClass: (parsed.data as any).runClass ?? 'bounded',
+                ioMode: (parsed.data as any).ioMode ?? 'request_response',
+                ...(connectedServices ? { connectedServices } : {}),
+                ...(runOptions.modelId ? { modelId: runOptions.modelId } : {}),
+                ...(runOptions.sessionConfigOptionOverrides
+                  ? { sessionConfigOptionOverrides: runOptions.sessionConfigOptionOverrides }
+                  : {}),
+                intentInput: { ...(parsed.data as any), backendTargetKey },
+              },
+              opts,
+            );
+          },
+        });
+
+        return { ok: true, result: { intent, sessionId, results } };
+      }
 
         if (actionId === 'action.spec.search') {
           return {
@@ -1430,6 +1602,49 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
           const opts = serverId ? { serverId } : undefined;
 
           const { sessionId: _ignored, ...request } = parsed.data as any;
+          // Model + config-option (reasoning effort) selection: merge the `configOptions` shorthand
+          // into the canonical `sessionConfigOptionOverrides` using the SAME owner as session spawn.
+          // A conflicting shorthand/canonical value is a typed rejection.
+          const runOptions = resolveRunStartModelAndConfig(request as Record<string, unknown>);
+          if (!runOptions.ok) {
+            return { ok: false, errorCode: 'invalid_parameters', error: runOptions.error };
+          }
+          delete request.configOptions;
+          if (runOptions.sessionConfigOptionOverrides) {
+            request.sessionConfigOptionOverrides = runOptions.sessionConfigOptionOverrides;
+          } else {
+            delete request.sessionConfigOptionOverrides;
+          }
+          if (runOptions.modelId) {
+            request.modelId = runOptions.modelId;
+          } else {
+            delete request.modelId;
+          }
+          // Normalize the agent-friendly connected-services selection (simple string / object) to
+          // canonical bindings at this ONE boundary; malformed input is a typed rejection.
+          if (request.connectedServices !== undefined) {
+            const normalized = normalizeConnectedServiceSelectionInput(request.connectedServices);
+            if (!normalized.ok) {
+              return { ok: false, errorCode: 'invalid_parameters', error: normalized.error };
+            }
+            if (normalized.bindings) {
+              request.connectedServices = normalized.bindings;
+            } else {
+              delete request.connectedServices;
+            }
+          }
+          const permissionDecision = resolveSessionAgentPermission(ctx, request.permissionMode, [
+            'read_only',
+            'default',
+            'workspace_write',
+            'yolo',
+          ]);
+          if (permissionDecision?.ok === false) {
+            return createPermissionPolicyResult(ctx, permissionDecision);
+          }
+          if (permissionDecision?.ok === true) {
+            request.permissionMode = permissionDecision.requestedMode;
+          }
           const res = await deps.executionRunStart(sessionId, request, opts);
           return { ok: true, result: res };
         }
@@ -1557,9 +1772,21 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
 
         if (actionId === 'session.spawn_new') {
           const spawnInput = parsed.data as SessionSpawnNewInput;
+          const permissionDecision = typeof spawnInput.permissionMode === 'string' && spawnInput.permissionMode.trim().length > 0
+            ? assertSessionAgentPermission(ctx, spawnInput.permissionMode)
+            : null;
+          if (permissionDecision?.ok === false) {
+            return createPermissionPolicyResult(ctx, permissionDecision);
+          }
+          const effectiveSpawnInput = permissionDecision?.ok === true
+            ? { ...spawnInput, permissionMode: permissionDecision.normalizedMode }
+            : spawnInput;
           const res = await deps.sessionSpawnNew({
-            ...spawnInput,
+            ...effectiveSpawnInput,
             surface: ctx.surface ?? null,
+            ...(isSessionAgentCaller(ctx)
+              ? { callerSurface: 'session_agent' as const, callerPermissionMode: ctx.callerPermissionMode ?? null }
+              : {}),
           });
           return { ok: true, result: res };
         }
@@ -1668,10 +1895,19 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
           const modelOverrideRaw = Object.prototype.hasOwnProperty.call(parsed.data, 'modelOverride')
             ? (parsed.data as any).modelOverride
             : undefined;
+          const permissionOverrideRaw = (parsed.data as any).permissionModeOverride;
+          const permissionDecision = typeof permissionOverrideRaw === 'string' && permissionOverrideRaw.trim().length > 0
+            ? assertSessionAgentPermission(ctx, permissionOverrideRaw)
+            : null;
+          if (permissionDecision?.ok === false) {
+            return createPermissionPolicyResult(ctx, permissionDecision);
+          }
           const res = await deps.sessionSendMessage({
             sessionId,
             message: (parsed.data as any).message,
-            ...(((parsed.data as any).permissionModeOverride) ? { permissionModeOverride: (parsed.data as any).permissionModeOverride } : {}),
+            ...(permissionDecision?.ok === true
+              ? { permissionModeOverride: permissionDecision.normalizedMode }
+              : permissionOverrideRaw ? { permissionModeOverride: permissionOverrideRaw } : {}),
             ...(modelOverrideRaw === null
               ? { modelOverride: null }
               : typeof modelOverrideRaw === 'string' && modelOverrideRaw.trim().length > 0
@@ -1680,7 +1916,12 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
             ...(typeof (parsed.data as any).wait === 'boolean' ? { wait: (parsed.data as any).wait } : {}),
             ...(typeof (parsed.data as any).timeoutSeconds === 'number' ? { timeoutSeconds: (parsed.data as any).timeoutSeconds } : {}),
             ...(serverId ? { serverId } : {}),
+            ...(isSessionAgentCaller(ctx)
+              ? { callerSurface: 'session_agent' as const, callerPermissionMode: ctx.callerPermissionMode ?? null }
+              : {}),
           });
+          const failure = readActionExecuteFailure(res);
+          if (failure) return { ok: false, ...failure };
           return { ok: true, result: res };
         }
 
@@ -1716,8 +1957,19 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
           }
           const permissionMode = normalizeId((parsed.data as any).permissionMode);
           if (!permissionMode) return { ok: false, errorCode: 'invalid_parameters', error: 'invalid_parameters' };
+          const permissionDecision = assertSessionAgentPermission(ctx, permissionMode);
+          if (permissionDecision?.ok === false) {
+            return createPermissionPolicyResult(ctx, permissionDecision);
+          }
           const serverId = resolveServerIdForSession(deps, ctx, sessionId);
-          const res = await deps.sessionPermissionModeSet({ sessionId, permissionMode, ...(serverId ? { serverId } : {}) });
+          const res = await deps.sessionPermissionModeSet({
+            sessionId,
+            permissionMode: permissionDecision?.ok === true ? permissionDecision.normalizedMode : permissionMode,
+            ...(serverId ? { serverId } : {}),
+            ...(isSessionAgentCaller(ctx)
+              ? { callerSurface: 'session_agent' as const, callerPermissionMode: ctx.callerPermissionMode ?? null }
+              : {}),
+          });
           return { ok: true, result: res };
         }
 

@@ -94,6 +94,13 @@ function isTransientSpawnFailure(spawnResponse: unknown): boolean {
   return SPAWN_TRANSIENT_ERROR_MARKERS.some((marker) => message.includes(marker));
 }
 
+function isAcceptedPendingSpawn(spawnResponse: unknown): boolean {
+  if (!spawnResponse || typeof spawnResponse !== 'object') return false;
+  if ((spawnResponse as { success?: unknown }).success !== true) return false;
+  return (spawnResponse as { status?: unknown }).status === 'pending'
+    || (spawnResponse as { sessionIdStatus?: unknown }).sessionIdStatus === 'pending';
+}
+
 async function recoverSpawnedSessionFromNonce(params: Readonly<{
   token: string;
   spawnNonce: string;
@@ -175,7 +182,7 @@ export async function createSpawnedSession(
   let sessionId = '';
   if (spawnResponse?.success === true && typeof spawnResponse.sessionId === 'string') {
     sessionId = spawnResponse.sessionId.trim();
-  } else if (isTransientSpawnFailure(spawnResponse)) {
+  } else if (isAcceptedPendingSpawn(spawnResponse) || isTransientSpawnFailure(spawnResponse)) {
     const recoveredFromNonce = await recoverSpawnedSessionFromNonce({
       token: params.credentials.token,
       spawnNonce,

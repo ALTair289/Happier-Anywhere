@@ -17,6 +17,7 @@ import {
   PromptRegistryInstallResponseV1Schema,
   type ActionId,
   type AccountSettings,
+  type BackendTargetRefV1,
   getActionSpec,
   isActionSpecSurfacedOn,
 } from '@happier-dev/protocol';
@@ -27,6 +28,28 @@ import {
   createMcpActionEnablement,
   createMcpActionSettingsProvider,
 } from '@/mcp/server/createMcpActionEnablement';
+
+function resolveLiveClientPermissionMode(
+  client: HappyMcpSessionClient,
+  metadataSnapshot?: Metadata | null,
+): string | null {
+  const mode = client.getPermissionMode?.()
+    ?? metadataSnapshot?.permissionMode
+    ?? null;
+  return typeof mode === 'string' && mode.trim().length > 0 ? mode.trim() : null;
+}
+
+function resolveLiveClientBackendTarget(client: HappyMcpSessionClient): BackendTargetRefV1 | null {
+  return client.getBackendTarget?.() ?? null;
+}
+
+function resolveLiveClientLocation(client: HappyMcpSessionClient): Readonly<{
+  path?: string | null;
+  host?: string | null;
+  machineId?: string | null;
+}> | null {
+  return client.getCurrentSessionLocation?.() ?? null;
+}
 
 export function createHappierMcpServer(
   client: HappyMcpSessionClient,
@@ -66,7 +89,15 @@ export function createHappierMcpServer(
   const sessionScopedRpc = async (method: string, params: unknown) =>
     await client.rpcHandlerManager.invokeLocal(method, params);
   const sessionMetadataSnapshot = client.getMetadataSnapshot?.() ?? null;
-  const rawSession = sessionMetadataSnapshot ? { metadata: sessionMetadataSnapshot } : null;
+  const sessionLocation = resolveLiveClientLocation(client);
+  const rawSession = sessionMetadataSnapshot || sessionLocation
+    ? {
+        ...(sessionMetadataSnapshot ? { metadata: sessionMetadataSnapshot } : {}),
+        ...(typeof sessionLocation?.path === 'string' ? { path: sessionLocation.path } : {}),
+        ...(typeof sessionLocation?.host === 'string' ? { host: sessionLocation.host } : {}),
+        ...(typeof sessionLocation?.machineId === 'string' ? { machineId: sessionLocation.machineId } : {}),
+      }
+    : null;
   const executionRuns = {
     start: async (request: unknown) =>
       normalizeExecutionRunRpcPayload(
@@ -105,6 +136,8 @@ export function createHappierMcpServer(
       sessionId: client.sessionId,
       ctx,
       rawSession,
+      getCallerPermissionMode: () => resolveLiveClientPermissionMode(client, sessionMetadataSnapshot),
+      getCurrentSessionBackendTarget: () => resolveLiveClientBackendTarget(client),
     },
     {
       sessionTitleSet: async ({ sessionId, title }) => {
@@ -194,6 +227,7 @@ export function createHappierMcpServer(
     surface: toolSurface,
     actionsSettings: readActionsSettings(),
     getActionsSettings: readActionsSettings,
+    resolveCallerPermissionMode: () => resolveLiveClientPermissionMode(client, sessionMetadataSnapshot),
   });
 
   const { toolNames } = registerHappierMcpBuiltInTools(mcp as any, {

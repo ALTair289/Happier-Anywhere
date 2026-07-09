@@ -654,6 +654,82 @@ describe('createActionExecutor (session control)', () => {
     expect(JSON.stringify(res)).not.toContain('do-not-leak');
   });
 
+  it('rejects session-agent spawn permission escalation before deps.sessionSpawnNew runs', async () => {
+    const sessionSpawnNew = vi.fn(async () => ({ ok: true }));
+    const executor = createExecutor({ sessionSpawnNew });
+
+    const res = await executor.execute(
+      'session.spawn_new' as any,
+      {
+        path: '/repo',
+        permissionMode: 'bypassPermissions',
+      },
+      { surface: 'session_agent', defaultSessionId: null, callerPermissionMode: 'default' } as any,
+    );
+
+    expect(res).toMatchObject({
+      ok: false,
+      errorCode: 'permission_escalation_denied',
+      details: {
+        surface: 'session_agent',
+        requestedMode: 'bypassPermissions',
+        callerMode: 'default',
+      },
+    });
+    expect(sessionSpawnNew).not.toHaveBeenCalled();
+  });
+
+  it('rejects session-agent message permission overrides above the caller before deps.sessionSendMessage runs', async () => {
+    const sessionSendMessage = vi.fn(async () => ({ ok: true }));
+    const executor = createExecutor({ sessionSendMessage });
+
+    const res = await executor.execute(
+      'session.message.send' as any,
+      {
+        sessionId: 's2',
+        message: 'Continue',
+        permissionModeOverride: 'bypassPermissions',
+      },
+      { surface: 'session_agent', defaultSessionId: 's1', callerPermissionMode: 'default' } as any,
+    );
+
+    expect(res).toMatchObject({
+      ok: false,
+      errorCode: 'permission_escalation_denied',
+      details: {
+        surface: 'session_agent',
+        requestedMode: 'bypassPermissions',
+        callerMode: 'default',
+      },
+    });
+    expect(sessionSendMessage).not.toHaveBeenCalled();
+  });
+
+  it('rejects session-agent permission mode changes above the caller before deps.sessionPermissionModeSet runs', async () => {
+    const sessionPermissionModeSet = vi.fn(async () => ({ ok: true }));
+    const executor = createExecutor({ sessionPermissionModeSet });
+
+    const res = await executor.execute(
+      'session.permission_mode.set' as any,
+      {
+        sessionId: 's2',
+        permissionMode: 'bypassPermissions',
+      },
+      { surface: 'session_agent', defaultSessionId: 's1', callerPermissionMode: 'default' } as any,
+    );
+
+    expect(res).toMatchObject({
+      ok: false,
+      errorCode: 'permission_escalation_denied',
+      details: {
+        surface: 'session_agent',
+        requestedMode: 'bypassPermissions',
+        callerMode: 'default',
+      },
+    });
+    expect(sessionPermissionModeSet).not.toHaveBeenCalled();
+  });
+
   it('executes session.list via deps.sessionList (including cli filter flags)', async () => {
     const sessionList = vi.fn(async () => ({ sessions: [] }));
     const executor = createExecutor({ sessionList });

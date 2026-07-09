@@ -20,6 +20,7 @@ describe('action option sources', () => {
       'sessions.spawn.servers.available',
       'sessions.spawn.profiles.available',
       'sessions.spawn.connected_services.available',
+      'execution.runs.connected_services.available',
       'sessions.spawn.mcp_servers.preview',
     ]);
 
@@ -31,6 +32,12 @@ describe('action option sources', () => {
     });
     expect(resolveActionOptionSourceRoute('sessions.spawn.connected_services.available')).toEqual({
       id: 'sessions.spawn.connected_services.available',
+      kind: 'spawnDiscovery',
+      depsKey: 'sessionsSpawnConnectedServicesList',
+      unsupportedActionId: 'sessions.spawn.connected_services.list',
+    });
+    expect(resolveActionOptionSourceRoute('execution.runs.connected_services.available')).toEqual({
+      id: 'execution.runs.connected_services.available',
       kind: 'spawnDiscovery',
       depsKey: 'sessionsSpawnConnectedServicesList',
       unsupportedActionId: 'sessions.spawn.connected_services.list',

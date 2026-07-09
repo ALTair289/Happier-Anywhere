@@ -24,8 +24,13 @@ import { SessionTerminalComposerClearRequestV1Schema } from '../sessionControl/s
 import { SessionWorkStateStatusV1Schema } from '../sessionWorkState/sessionWorkStateV1.js';
 import { AcpConfigOptionOverridesV1Schema } from '../sessionMetadata/metadataOverridesV1.js';
 import { SessionPermissionModeSchema } from '../sessionMetadata/sessionPermissionModes.js';
+import { AgentRuntimeDescriptorV1Schema } from '../sessionMetadata/agentRuntimeDescriptorV1.js';
 import { SessionMcpSelectionV1Schema } from '../mcpServers/sessionSelectionV1.js';
 import { ConnectedServiceBindingsV1Schema } from '../connect/connectedServiceBindings.js';
+import {
+  SpawnConfigOptionValueSchema,
+  findSpawnConfigOptionAliasConflicts,
+} from './sessionSpawnConfigOptions.js';
 
 export {
   ActionApprovalFlowSchema,
@@ -383,6 +388,23 @@ const IntentStartCommonSchema = z.object({
   retentionPolicy: z.enum(['ephemeral', 'resumable']).optional(),
   runClass: z.enum(['bounded', 'long_lived']).optional(),
   ioMode: z.enum(['request_response', 'streaming']).optional(),
+  // Optional model selection for every fanned-out run, using the SAME canonical shape as
+  // session spawn (`session.spawn_new`'s `modelId`). Omit to use each backend's default model.
+  modelId: z.string().min(1).optional(),
+  // Optional config-option overrides applied to every fanned-out run, using the SAME canonical
+  // vocabulary as session spawn. Reasoning effort is the `reasoning_effort` option. Provide either
+  // the canonical `sessionConfigOptionOverrides` object or the agent-friendly `configOptions`
+  // shorthand (e.g. { reasoning_effort: "high" }); they are merged at the action boundary and a
+  // conflicting value in both forms is a typed rejection.
+  sessionConfigOptionOverrides: AcpConfigOptionOverridesV1Schema.optional(),
+  configOptions: z.record(z.string().min(1), SpawnConfigOptionValueSchema).optional(),
+  // Optional connected-services selection applied to every fanned-out target. Accepts the simple
+  // string form (e.g. "openai-codex:group:happier" or "openai-codex:team") or a full bindings
+  // object; normalized at the action boundary. Omit to use each account's default.
+  connectedServices: z.unknown().optional(),
+  // Optional per-target override keyed by backend target key (e.g. { "agent:codex": "openai-codex:team" }).
+  // A per-target entry wins over the blanket `connectedServices` for that target.
+  connectedServicesByBackendTargetKey: z.record(z.string().min(1), z.unknown()).optional(),
 }).passthrough();
 
 const PlanStartInputSchema = IntentStartCommonSchema.extend({
@@ -422,8 +444,23 @@ const ExecutionRunStartInputSchema = z.object({
   runClass: z.enum(['bounded', 'long_lived']),
   ioMode: z.enum(['request_response', 'streaming']),
   initialContextMode: z.enum(['bootstrap', 'first_turn']).optional(),
+  // Optional model selection for the run's backend — SAME canonical shape as session spawn's
+  // `modelId`. Omit to use the backend's default model.
+  modelId: z.string().min(1).optional(),
+  // Optional config-option overrides for the run, using the SAME canonical vocabulary as session
+  // spawn. Reasoning effort is the `reasoning_effort` option. Provide either the canonical
+  // `sessionConfigOptionOverrides` object or the `configOptions` shorthand; they are merged at the
+  // action boundary and a conflicting value in both forms is a typed rejection.
+  sessionConfigOptionOverrides: AcpConfigOptionOverridesV1Schema.optional(),
+  configOptions: z.record(z.string().min(1), SpawnConfigOptionValueSchema).optional(),
   resumeHandle: z.unknown().nullable().optional(),
   replay: z.unknown().optional(),
+  // Optional connected-services selection binding the run's backend to a specific account/pool
+  // instead of the runner's inherited account. Accepts the simple string form
+  // (e.g. "openai-codex:group:happier" or "openai-codex:team") or a full bindings object; normalized
+  // at the action boundary. Omit to use the account's configured default exactly as stored (literal:
+  // a profile default binds to that profile, a pool default binds to that pool — no silent upgrade).
+  connectedServices: z.unknown().optional(),
 }).passthrough();
 
 const ExecutionRunGetInputSchema = ExecutionRunIdInputSchema.extend({
@@ -474,8 +511,6 @@ const SessionHandoffInputSchema = z.object({
   workspaceTransfer: SessionHandoffWorkspaceTransferSchema.optional(),
 }).passthrough();
 
-const SpawnConfigOptionValueSchema = z.union([z.string(), z.number(), z.boolean(), z.null()]);
-
 const SessionSpawnTerminalInputSchema = z.object({
   mode: z.enum(['plain', 'tmux', 'windows_terminal', 'windows_console']).optional(),
   tmux: z.object({
@@ -522,6 +557,8 @@ const SessionSpawnNewInputSchema = z.object({
   windowsRemoteSessionLaunchMode: z.enum(['hidden', 'windows_terminal', 'console']).optional(),
   windowsRemoteSessionConsole: z.enum(['hidden', 'visible']).optional(),
   windowsTerminalWindowName: z.string().min(1).optional(),
+  codexBackendMode: z.enum(['mcp', 'acp', 'appServer']).optional(),
+  agentRuntimeDescriptorV1: AgentRuntimeDescriptorV1Schema.optional(),
 }).strict().superRefine((value, ctx) => {
   const record = value as Record<string, unknown>;
   const rejectConflictingAliases = (fields: readonly string[]) => {
@@ -568,20 +605,19 @@ const SessionSpawnNewInputSchema = z.object({
     }
   };
   const rejectConflictingConfigAliases = () => {
-    if (!value.sessionConfigOptionOverrides || !value.configOptions) return;
-
-    for (const [optionId, shorthandValue] of Object.entries(value.configOptions)) {
-      const structuredOverride = value.sessionConfigOptionOverrides.overrides[optionId];
-      if (!structuredOverride || Object.is(structuredOverride.value, shorthandValue)) continue;
+    for (const conflict of findSpawnConfigOptionAliasConflicts({
+      sessionConfigOptionOverrides: value.sessionConfigOptionOverrides,
+      configOptions: value.configOptions,
+    })) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: 'configOptions must agree with sessionConfigOptionOverrides',
-        path: ['configOptions', optionId],
+        path: ['configOptions', conflict.optionId],
       });
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: 'sessionConfigOptionOverrides must agree with configOptions',
-        path: ['sessionConfigOptionOverrides', 'overrides', optionId, 'value'],
+        path: ['sessionConfigOptionOverrides', 'overrides', conflict.optionId, 'value'],
       });
     }
   };
@@ -1143,6 +1179,33 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
           widget: 'textarea',
           required: true,
         },
+        {
+          path: 'modelId',
+          title: 'Model',
+          description: 'Optional. Model id for the run(s), using the SAME shape as session spawn. Applies to every target; omit to use each backend\'s default model. Enumerate valid ids with the agents.models.available options source.',
+          widget: 'text',
+          optionsSourceId: 'agents.models.available',
+        },
+        {
+          path: 'configOptions',
+          title: 'Config options (e.g. reasoning effort)',
+          description: 'Optional. Per-run config options using the SAME vocabulary as session spawn, e.g. { "reasoning_effort": "high" }. Reasoning effort is the reasoning_effort option (values are backend-specific, e.g. Codex low|medium|high|xhigh). Merged with sessionConfigOptionOverrides; a conflicting value in both forms is rejected.',
+          widget: 'text',
+        },
+        {
+          path: 'connectedServices',
+          title: 'Connected services (account/pool)',
+          description: 'Optional. Bind these runs to a connected account or pool instead of the runner\'s inherited account. Simple form: "openai-codex:group:<poolId>" (a pool — auto-rotates when autoSwitch is enabled), "openai-codex:<profileId>" (a single account), "openai-codex:native" (opt out), or a full { v:1, bindingsByServiceId } object. Applies to every target; omit to use each account\'s configured default exactly as stored (literal: a profile default binds to that profile, a pool default to that pool — no silent upgrade; to rotate, store a pool default or pass a pool selection).',
+          widget: 'text',
+          optionsSourceId: 'execution.runs.connected_services.available',
+        },
+        {
+          path: 'connectedServicesByBackendTargetKey',
+          title: 'Connected services per target',
+          description: 'Optional per-target override, e.g. { "agent:codex": "openai-codex:group:<poolId>" }. A per-target entry wins over connectedServices for that target.',
+          widget: 'text',
+          optionsSourceId: 'execution.runs.connected_services.available',
+        },
       ],
     },
     examples: {
@@ -1187,6 +1250,33 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
           widget: 'textarea',
           required: true,
         },
+        {
+          path: 'modelId',
+          title: 'Model',
+          description: 'Optional. Model id for the run(s), using the SAME shape as session spawn. Applies to every target; omit to use each backend\'s default model. Enumerate valid ids with the agents.models.available options source.',
+          widget: 'text',
+          optionsSourceId: 'agents.models.available',
+        },
+        {
+          path: 'configOptions',
+          title: 'Config options (e.g. reasoning effort)',
+          description: 'Optional. Per-run config options using the SAME vocabulary as session spawn, e.g. { "reasoning_effort": "high" }. Reasoning effort is the reasoning_effort option (values are backend-specific, e.g. Codex low|medium|high|xhigh). Merged with sessionConfigOptionOverrides; a conflicting value in both forms is rejected.',
+          widget: 'text',
+        },
+        {
+          path: 'connectedServices',
+          title: 'Connected services (account/pool)',
+          description: 'Optional. Bind these runs to a connected account or pool instead of the runner\'s inherited account. Simple form: "openai-codex:group:<poolId>" (a pool — auto-rotates when autoSwitch is enabled), "openai-codex:<profileId>" (a single account), "openai-codex:native" (opt out), or a full { v:1, bindingsByServiceId } object. Applies to every target; omit to use each account\'s configured default exactly as stored (literal: a profile default binds to that profile, a pool default to that pool — no silent upgrade; to rotate, store a pool default or pass a pool selection).',
+          widget: 'text',
+          optionsSourceId: 'execution.runs.connected_services.available',
+        },
+        {
+          path: 'connectedServicesByBackendTargetKey',
+          title: 'Connected services per target',
+          description: 'Optional per-target override, e.g. { "agent:codex": "openai-codex:group:<poolId>" }. A per-target entry wins over connectedServices for that target.',
+          widget: 'text',
+          optionsSourceId: 'execution.runs.connected_services.available',
+        },
       ],
     },
     examples: {
@@ -1229,6 +1319,20 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
           description: 'Initial instructions for the voice agent run.',
           widget: 'textarea',
           required: true,
+        },
+        {
+          path: 'connectedServices',
+          title: 'Connected services (account/pool)',
+          description: 'Optional. Bind the run to a connected account or pool instead of the runner\'s inherited account. Simple form: "openai-codex:group:<poolId>" (a pool — auto-rotates when autoSwitch is enabled), "openai-codex:<profileId>" (a single account), "openai-codex:native" (opt out), or a full { v:1, bindingsByServiceId } object. Omit to use the account\'s configured default exactly as stored (literal: a profile default binds to that profile, a pool default to that pool — no silent upgrade; to rotate, store a pool default or pass a pool selection).',
+          widget: 'text',
+          optionsSourceId: 'execution.runs.connected_services.available',
+        },
+        {
+          path: 'connectedServicesByBackendTargetKey',
+          title: 'Connected services per target',
+          description: 'Optional per-target override, e.g. { "agent:codex": "openai-codex:group:<poolId>" }. A per-target entry wins over connectedServices for that target.',
+          widget: 'text',
+          optionsSourceId: 'execution.runs.connected_services.available',
         },
       ],
     },
@@ -1280,6 +1384,32 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
         { path: 'runClass', title: 'Run class', widget: 'text', required: true },
         { path: 'ioMode', title: 'IO mode', widget: 'text', required: true },
         { path: 'initialContextMode', title: 'Initial context mode', widget: 'text' },
+        {
+          path: 'modelId',
+          title: 'Model',
+          description: 'Optional. Model id for the run\'s backend, using the SAME shape as session spawn. Omit to use the backend\'s default model. Enumerate valid ids with the agents.models.available options source.',
+          widget: 'text',
+          optionsSourceId: 'agents.models.available',
+        },
+        {
+          path: 'configOptions',
+          title: 'Config options (e.g. reasoning effort)',
+          description: 'Optional. Per-run config options using the SAME vocabulary as session spawn, e.g. { "reasoning_effort": "high" }. Reasoning effort is the reasoning_effort option (values are backend-specific, e.g. Codex low|medium|high|xhigh). Merged with sessionConfigOptionOverrides; a conflicting value in both forms is rejected.',
+          widget: 'text',
+        },
+        {
+          path: 'sessionConfigOptionOverrides',
+          title: 'Config option overrides (canonical json)',
+          description: 'Optional. Canonical AcpConfigOptionOverridesV1 object (same shape session spawn uses). Prefer the configOptions shorthand for simple cases like reasoning effort.',
+          widget: 'textarea',
+        },
+        {
+          path: 'connectedServices',
+          title: 'Connected services (account/pool)',
+          description: 'Optional. Bind the run to a connected account or pool instead of the runner\'s inherited account. Simple form: "openai-codex:group:<poolId>" (a pool — auto-rotates when autoSwitch is enabled), "openai-codex:<profileId>" (a single account), "openai-codex:native" (opt out), or a full { v:1, bindingsByServiceId } object. Omit to use the account\'s configured default exactly as stored (literal: a profile default binds to that profile, a pool default to that pool — no silent upgrade; to rotate, store a pool default or pass a pool selection).',
+          widget: 'text',
+          optionsSourceId: 'execution.runs.connected_services.available',
+        },
       ],
     },
     inputSchema: ExecutionRunStartInputSchema,

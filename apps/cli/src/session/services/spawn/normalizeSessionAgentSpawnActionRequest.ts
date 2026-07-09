@@ -1,12 +1,15 @@
 import {
   DEFAULT_SESSION_AGENT_SPAWN_POLICY_V1,
   BackendTargetRefSchema,
-  buildAcpConfigOptionOverridesV1,
+  mergeSpawnConfigOptionAliases,
   parseBackendTargetKey,
+  readAcpConfiguredBackendV1FromMetadata,
+  readAgentRuntimeDescriptorV1,
   type AcpConfigOptionOverridesV1,
   type ActionSurfaces,
   type BackendTargetRefV1,
   type ConnectedServiceBindingsV1,
+  type SpawnConfigOptionValue,
   type SessionAgentSpawnPolicyV1,
   type SessionMcpSelectionV1,
 } from '@happier-dev/protocol';
@@ -14,6 +17,7 @@ import {
   AGENT_IDS,
   DEFAULT_AGENT_ID,
   assertNonEscalatingPermissionMode,
+  resolveAgentIdFromSessionMetadata,
   type AgentId,
 } from '@happier-dev/agents';
 
@@ -50,7 +54,7 @@ export type SessionAgentSpawnActionInput = Readonly<{
   permissionMode?: unknown;
   agentModeId?: unknown;
   sessionConfigOptionOverrides?: AcpConfigOptionOverridesV1;
-  configOptions?: Record<string, string | number | boolean | null>;
+  configOptions?: Record<string, SpawnConfigOptionValue>;
   profileId?: unknown;
   environmentVariables?: Record<string, string>;
   connectedServices?: ConnectedServiceBindingsV1;
@@ -61,12 +65,16 @@ export type SessionAgentSpawnActionInput = Readonly<{
   windowsRemoteSessionLaunchMode?: CreateSpawnedSessionParams['windowsRemoteSessionLaunchMode'];
   windowsRemoteSessionConsole?: CreateSpawnedSessionParams['windowsRemoteSessionConsole'];
   windowsTerminalWindowName?: unknown;
+  codexBackendMode?: CreateSpawnedSessionParams['codexBackendMode'];
+  agentRuntimeDescriptorV1?: CreateSpawnedSessionParams['agentRuntimeDescriptorV1'];
 }>;
 
 export type SessionAgentSpawnActionCurrentSession = Readonly<{
   path?: string | null;
   host?: string | null;
   machineId?: string | null;
+  backendTarget?: BackendTargetRefV1 | null;
+  permissionMode?: string | null;
 }>;
 
 type SessionAgentSpawnActionErrorResult = Readonly<
@@ -227,7 +235,11 @@ function resolveDeniedExplicitPolicyField(params: Readonly<{
   return null;
 }
 
-function resolveBackendTarget(input: SessionAgentSpawnActionInput): Readonly<{
+function resolveBackendTarget(
+  input: SessionAgentSpawnActionInput,
+  parentMetadata: Record<string, unknown> | null,
+  currentSession: SessionAgentSpawnActionCurrentSession,
+): Readonly<{
   backendTarget: BackendTargetRefV1 | null;
   source: SessionAgentSpawnActionSource;
   invalidAgentId: boolean;
@@ -299,27 +311,53 @@ function resolveBackendTarget(input: SessionAgentSpawnActionInput): Readonly<{
     };
   }
 
+  if (currentSession.backendTarget) {
+    return {
+      backendTarget: currentSession.backendTarget,
+      source: { kind: 'currentSession', key: 'backendTarget' },
+      invalidAgentId: false,
+    };
+  }
+
+  const configuredBackend = parentMetadata
+    ? readAcpConfiguredBackendV1FromMetadata(parentMetadata)
+    : null;
+  if (configuredBackend) {
+    return {
+      backendTarget: {
+        kind: 'configuredAcpBackend',
+        backendId: configuredBackend.backendId,
+      },
+      source: { kind: 'metadata', key: 'acpConfiguredBackendV1' },
+      invalidAgentId: false,
+    };
+  }
+
+  const descriptor = parentMetadata
+    ? readAgentRuntimeDescriptorV1(parentMetadata.agentRuntimeDescriptorV1)
+    : null;
+  if (descriptor && AGENT_IDS.includes(descriptor.providerId as AgentId)) {
+    return {
+      backendTarget: { kind: 'builtInAgent', agentId: descriptor.providerId as AgentId },
+      source: { kind: 'runtimeDescriptorMetadata', key: 'agentRuntimeDescriptorV1' },
+      invalidAgentId: false,
+    };
+  }
+
+  const inheritedAgentId = resolveAgentIdFromSessionMetadata(parentMetadata);
+  if (inheritedAgentId) {
+    return {
+      backendTarget: { kind: 'builtInAgent', agentId: inheritedAgentId },
+      source: { kind: 'metadata', key: 'sessionMetadataAgentId' },
+      invalidAgentId: false,
+    };
+  }
+
   return {
     backendTarget: { kind: 'builtInAgent', agentId: DEFAULT_AGENT_ID },
     source: { kind: 'default', key: 'defaultAgentId' },
     invalidAgentId: false,
   };
-}
-
-function buildSessionConfigOptionOverridesFromShorthand(
-  configOptions: Record<string, string | number | boolean | null> | undefined,
-): AcpConfigOptionOverridesV1 | null {
-  if (!configOptions || Object.keys(configOptions).length === 0) return null;
-  const updatedAt = Date.now();
-  return buildAcpConfigOptionOverridesV1({
-    updatedAt,
-    overrides: Object.fromEntries(
-      Object.entries(configOptions).map(([id, value]) => [
-        id,
-        { updatedAt, value },
-      ]),
-    ),
-  });
 }
 
 function finiteNumber(value: unknown): number | null {
@@ -362,6 +400,9 @@ export const resolveSessionAgentSpawnConnectedServicesDefaults: SessionAgentSpaw
         mode: 'blocking',
         deps: { applySideEffects: () => undefined },
       });
+      // R4-2 (user-ruled): LITERAL resolution. The configured default is honored exactly as stored —
+      // a profile default binds to that profile, a pool default binds to the pool. No silent
+      // profile→pool upgrade here; rotation intent must be migrated by updating the STORED default.
       const connectedServices = resolveSpawnConnectedServicesDefaults({
         accountSettings: accountSettingsContext.settings,
         agentId: agentId as AgentId,
@@ -426,7 +467,7 @@ export async function normalizeSessionAgentSpawnActionRequest(params: Readonly<{
     };
   }
 
-  const backend = resolveBackendTarget(input);
+  const backend = resolveBackendTarget(input, params.parentMetadata, params.currentSession);
   if (!backend.backendTarget) {
     return {
       ok: false,
@@ -456,9 +497,11 @@ export async function normalizeSessionAgentSpawnActionRequest(params: Readonly<{
   };
 
   const explicitPermissionMode = normalizeString(input.permissionMode);
+  const currentPermissionMode = normalizeString(params.currentSession.permissionMode);
+  const callerPermissionMode = currentPermissionMode ?? inherited.spawn.permissionMode;
   const permissionDecision = assertNonEscalatingPermissionMode({
-    requestedMode: explicitPermissionMode ?? inherited.spawn.permissionMode,
-    callerMode: inherited.spawn.permissionMode,
+    requestedMode: explicitPermissionMode ?? callerPermissionMode,
+    callerMode: callerPermissionMode,
   });
   if (!permissionDecision.ok) {
     return {
@@ -468,11 +511,22 @@ export async function normalizeSessionAgentSpawnActionRequest(params: Readonly<{
   }
 
   const resolvedPermissionMode = explicitPermissionMode ?? permissionDecision.requestedMode;
+  const currentPermissionMatchesInherited = Boolean(
+    currentPermissionMode
+    && inherited.spawn.permissionMode
+    && currentPermissionMode === inherited.spawn.permissionMode,
+  );
   const resolvedPermissionModeUpdatedAt = explicitPermissionMode
     ? Date.now()
-    : inherited.spawn.permissionModeUpdatedAt;
+    : currentPermissionMode
+      ? (currentPermissionMatchesInherited
+          ? inherited.spawn.permissionModeUpdatedAt
+          : Date.now())
+      : inherited.spawn.permissionModeUpdatedAt;
   sources.permissionMode = explicitPermissionMode
     ? { kind: 'explicit', key: 'permissionMode' }
+    : currentPermissionMode
+      ? { kind: 'currentSession', key: 'permissionMode' }
     : inherited.sources.permissionMode ?? { kind: 'default', key: 'callerPermissionDefault' };
 
   if (effectivePolicy?.permissionCeiling) {
@@ -518,17 +572,29 @@ export async function normalizeSessionAgentSpawnActionRequest(params: Readonly<{
     );
   }
 
-  const shorthandSessionConfigOptionOverrides = buildSessionConfigOptionOverridesFromShorthand(input.configOptions);
+  const explicitConfigOptions = mergeSpawnConfigOptionAliases({
+    sessionConfigOptionOverrides: input.sessionConfigOptionOverrides,
+    configOptions: input.configOptions,
+  });
+  if (!explicitConfigOptions.ok) {
+    return {
+      ok: false,
+      result: {
+        type: 'error',
+        errorCode: 'invalid_parameters',
+        errorMessage: 'invalid_parameters',
+      },
+    };
+  }
   const resolvedSessionConfigOptionOverrides =
-    input.sessionConfigOptionOverrides
-    ?? shorthandSessionConfigOptionOverrides
+    explicitConfigOptions.value
     ?? inherited.metadata.sessionConfigOptionOverridesV1
     ?? inherited.metadata.acpConfigOptionOverridesV1;
   if (resolvedSessionConfigOptionOverrides) {
     sources.sessionConfigOptionOverrides = sourceForExplicitOrInherited(
-      input.sessionConfigOptionOverrides ?? shorthandSessionConfigOptionOverrides,
+      explicitConfigOptions.value,
       inherited.sources.sessionConfigOptionOverrides,
-      input.sessionConfigOptionOverrides ? 'sessionConfigOptionOverrides' : 'configOptions',
+      explicitConfigOptions.source ?? 'sessionConfigOptionOverrides',
     );
   }
 
@@ -618,6 +684,8 @@ export async function normalizeSessionAgentSpawnActionRequest(params: Readonly<{
       ...(input.windowsRemoteSessionLaunchMode ? { windowsRemoteSessionLaunchMode: input.windowsRemoteSessionLaunchMode } : {}),
       ...(input.windowsRemoteSessionConsole ? { windowsRemoteSessionConsole: input.windowsRemoteSessionConsole } : {}),
       ...(hasString(input.windowsTerminalWindowName) ? { windowsTerminalWindowName: String(input.windowsTerminalWindowName).trim() } : {}),
+      ...(input.codexBackendMode ? { codexBackendMode: input.codexBackendMode } : {}),
+      ...(input.agentRuntimeDescriptorV1 ? { agentRuntimeDescriptorV1: input.agentRuntimeDescriptorV1 } : {}),
     },
     sources,
   };

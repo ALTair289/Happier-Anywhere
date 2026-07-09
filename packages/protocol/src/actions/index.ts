@@ -78,6 +78,15 @@ export {
   type ActionSurfaceSettingsState,
   type ResolveActionSurfaceAvailabilityArgs,
 } from './actionSurfaceAvailability.js';
+export {
+  SpawnConfigOptionValueSchema,
+  buildAcpConfigOptionOverridesV1FromConfigOptions,
+  findSpawnConfigOptionAliasConflicts,
+  mergeSpawnConfigOptionAliases,
+  readSpawnConfigOptionOverrideValue,
+  type SpawnConfigOptionValue,
+  type SpawnConfigOptionsAliasConflict,
+} from './sessionSpawnConfigOptions.js';
 
 export {
   createActionExecutor,

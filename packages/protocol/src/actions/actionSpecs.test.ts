@@ -652,12 +652,30 @@ describe('Action Spec Registry', () => {
       windowsRemoteSessionLaunchMode: 'hidden',
       windowsRemoteSessionConsole: 'hidden',
       windowsTerminalWindowName: 'Happier',
+      codexBackendMode: 'appServer',
+      agentRuntimeDescriptorV1: {
+        v: 1,
+        providerId: 'codex',
+        provider: {
+          backendMode: 'appServer',
+          providerExtra: {
+            owner: 'codex',
+            schemaId: 'codex.agentRuntimeDescriptorExtra',
+            v: 1,
+          },
+        },
+      },
     })).toMatchObject({
       directory: '/repo',
       initialPrompt: 'Inspect the repository.',
       backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
       configOptions: { reasoning_effort: 'xhigh', ultracode: true },
       terminal: { mode: 'tmux' },
+      codexBackendMode: 'appServer',
+      agentRuntimeDescriptorV1: {
+        v: 1,
+        providerId: 'codex',
+      },
     });
   });
 
@@ -676,7 +694,6 @@ describe('Action Spec Registry', () => {
       'connectedServiceMaterializationIdentityV1',
       'materializationDiagnostics',
       'approvedNewDirectoryCreation',
-      'agentRuntimeDescriptorV1',
     ] as const;
 
     for (const field of internalFields) {

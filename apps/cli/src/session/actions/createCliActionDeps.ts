@@ -7,6 +7,7 @@ import {
   SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY,
   SessionUsageLimitRecoveryV1Schema,
   type ActionExecutorDeps,
+  type BackendTargetRefV1,
   type FeatureId,
   type SessionUsageLimitRecoveryV1,
 } from '@happier-dev/protocol';
@@ -216,6 +217,30 @@ function readSessionMetadata(params: Readonly<{
   }
 }
 
+function readRawSessionMetadata(params: Readonly<{
+  rawSession?: Readonly<{ metadata?: unknown }> | null;
+  mode?: SessionStoredContentEncryptionMode;
+  ctx: SessionEncryptionContext;
+}>): Record<string, unknown> | null {
+  return readSessionMetadata({
+    rawSession: params.rawSession,
+    mode: params.mode,
+    ctx: params.ctx,
+  });
+}
+
+async function readLiveActionAccountSettings(credentials?: Credentials): Promise<Readonly<Record<string, unknown>>> {
+  if (!credentials) return {};
+  return await bootstrapAccountSettingsContext({
+    credentials,
+    mode: 'blocking',
+    refresh: 'auto',
+    honorAccountSettingsModeEnv: false,
+  })
+    .then((ctx) => ctx.settings as Readonly<Record<string, unknown>>)
+    .catch(() => ({}));
+}
+
 type PendingAgentRequestKind = 'permission' | 'user_action';
 
 function readSessionAgentState(params: Readonly<{
@@ -393,10 +418,10 @@ export function createCliActionInventoryDeps(params: Readonly<{
   metadataCache.set(params.sessionId, seededMetadata);
   const rawPath = typeof params.rawSession?.path === 'string' ? params.rawSession.path.trim() : '';
   const metadataPath = typeof seededMetadata?.path === 'string' ? seededMetadata.path.trim() : '';
-  const optionRegistry = createCliActionOptionProviderRegistry({
+  const createOptionRegistry = async () => createCliActionOptionProviderRegistry({
     cwd: rawPath || metadataPath || process.cwd(),
     credentials: params.credentials ?? null,
-    accountSettings: null,
+    accountSettings: await readLiveActionAccountSettings(params.credentials),
   });
 
   const readSessionMetadataForId = async (sessionId: string): Promise<Record<string, unknown> | null> => {
@@ -447,6 +472,7 @@ export function createCliActionInventoryDeps(params: Readonly<{
       const backendTargetKey = typeof (args as { backendTargetKey?: unknown }).backendTargetKey === 'string'
         ? (args as { backendTargetKey: string }).backendTargetKey
         : undefined;
+      const optionRegistry = await createOptionRegistry();
       return await optionRegistry.agentsModelsList({
         agentId: normalizedAgentId,
         ...(backendTargetKey ? { backendTargetKey } : {}),
@@ -462,6 +488,7 @@ export function createCliActionInventoryDeps(params: Readonly<{
       const modelId = typeof (args as { modelId?: unknown }).modelId === 'string'
         ? (args as { modelId: string }).modelId.trim()
         : '';
+      const optionRegistry = await createOptionRegistry();
       return await optionRegistry.agentsConfigOptionsList({
         agentId: normalizedAgentId,
         ...(backendTargetKey ? { backendTargetKey } : {}),
@@ -475,6 +502,7 @@ export function createCliActionInventoryDeps(params: Readonly<{
       const backendTargetKey = typeof (args as { backendTargetKey?: unknown }).backendTargetKey === 'string'
         ? (args as { backendTargetKey: string }).backendTargetKey
         : undefined;
+      const optionRegistry = await createOptionRegistry();
       return await optionRegistry.agentsSessionModesList({
         agentId: normalizedAgentId,
         ...(backendTargetKey ? { backendTargetKey } : {}),
@@ -519,6 +547,8 @@ export function createCliActionDeps(params: Readonly<{
     host?: unknown;
     machineId?: unknown;
   }> | null;
+  getCallerPermissionMode?: (() => string | null | undefined) | null;
+  getCurrentSessionBackendTarget?: (() => BackendTargetRefV1 | null | undefined) | null;
   resumeInactiveSessionWhenUsageLimitReady?: ResumeInactiveSessionWhenUsageLimitReady;
   scheduleInactiveSessionUsageLimitRecoveryCheck?: ScheduleInactiveSessionUsageLimitRecoveryCheck;
   cancelInactiveSessionUsageLimitRecoveryCheck?: CancelInactiveSessionUsageLimitRecoveryCheck;
@@ -542,7 +572,6 @@ export function createCliActionDeps(params: Readonly<{
 
   const sessionTransportCache = new Map<string, ResolvedSessionTransport>();
   let usageLimitRecoveryFeatureEnabledPromise: Promise<boolean> | null = null;
-  let accountSettingsPromise: Promise<Readonly<Record<string, unknown>>> | null = null;
   let accountProfilePromise: Promise<Awaited<ReturnType<typeof fetchAccountProfile>> | null> | null = null;
   const actionFeatureDecisionPromises = new Map<FeatureId, Promise<boolean>>();
 
@@ -562,16 +591,7 @@ export function createCliActionDeps(params: Readonly<{
   };
 
   const readActionAccountSettings = async (): Promise<Readonly<Record<string, unknown>>> => {
-    if (!params.credentials) return {};
-    accountSettingsPromise ??= bootstrapAccountSettingsContext({
-      credentials: params.credentials,
-      mode: 'blocking',
-      refresh: 'auto',
-      honorAccountSettingsModeEnv: false,
-    })
-      .then((ctx) => ctx.settings as Readonly<Record<string, unknown>>)
-      .catch(() => ({}));
-    return await accountSettingsPromise;
+    return await readLiveActionAccountSettings(params.credentials);
   };
 
   const readActionAccountProfile = async (): Promise<Awaited<ReturnType<typeof fetchAccountProfile>> | null> => {
@@ -580,9 +600,7 @@ export function createCliActionDeps(params: Readonly<{
     return await accountProfilePromise;
   };
 
-  const readCurrentSessionMetadata = async (): Promise<Record<string, unknown> | null> => {
-    if (currentSessionMetadata) return currentSessionMetadata;
-
+  const fetchCurrentSessionMetadata = async (): Promise<Record<string, unknown> | null> => {
     try {
       const rawSession = await fetchSessionById({ token: params.token, sessionId: params.sessionId });
       currentSessionMetadata = readSessionMetadata({
@@ -597,6 +615,36 @@ export function createCliActionDeps(params: Readonly<{
     }
   };
 
+  const readCurrentSessionMetadata = async (): Promise<Record<string, unknown> | null> => {
+    currentSessionMetadata ??= readRawSessionMetadata({
+      rawSession: params.rawSession,
+      mode: params.mode,
+      ctx: params.ctx,
+    });
+    if (currentSessionMetadata) return currentSessionMetadata;
+    return await fetchCurrentSessionMetadata();
+  };
+
+  const readFreshCurrentSessionMetadata = async (): Promise<Record<string, unknown> | null> => {
+    const rawSessionMetadata = readRawSessionMetadata({
+      rawSession: params.rawSession,
+      mode: params.mode,
+      ctx: params.ctx,
+    });
+    if (rawSessionMetadata) {
+      currentSessionMetadata = rawSessionMetadata;
+      return rawSessionMetadata;
+    }
+    return await fetchCurrentSessionMetadata();
+  };
+
+  const readValidPermissionMode = (value: unknown): string | null => {
+    const liveMode = normalizeString(value);
+    return liveMode && parsePermissionIntentAlias(liveMode) ? liveMode : null;
+  };
+
+  const readLiveCallerPermissionMode = (): string | null => readValidPermissionMode(params.getCallerPermissionMode?.());
+
   const denyPermissionEscalationForRequestedMode = async (
     requestedMode: unknown,
   ): Promise<ReturnType<typeof buildPermissionEscalationDeniedResult> | ReturnType<typeof buildInvalidParametersResult> | null> => {
@@ -606,10 +654,11 @@ export function createCliActionDeps(params: Readonly<{
       return buildInvalidParametersResult();
     }
 
-    const callerPermission = resolvePermissionPrivilegeFromSessionMetadata(await readCurrentSessionMetadata());
+    const callerMode = readLiveCallerPermissionMode()
+      ?? resolvePermissionPrivilegeFromSessionMetadata(await readFreshCurrentSessionMetadata()).mode;
     const permissionDecision = assertNonEscalatingPermissionMode({
       requestedMode: normalizedRequestedMode,
-      callerMode: callerPermission.mode,
+      callerMode,
     });
     return permissionDecision.ok ? null : buildPermissionEscalationDeniedResult(permissionDecision);
   };
@@ -1180,13 +1229,20 @@ export function createCliActionDeps(params: Readonly<{
       windowsRemoteSessionLaunchMode,
       windowsRemoteSessionConsole,
       windowsTerminalWindowName,
+      codexBackendMode,
+      agentRuntimeDescriptorV1,
       surface,
+      callerSurface,
+      callerPermissionMode,
     }) => {
       if (!params.credentials) {
         notSupported();
       }
 
-      const toolSurface = normalizeActionToolExposureSurface(surface);
+      const toolSurface = normalizeActionToolExposureSurface(surface ?? callerSurface);
+      const currentCallerPermissionMode = toolSurface === 'session_agent'
+        ? readValidPermissionMode(callerPermissionMode) ?? readLiveCallerPermissionMode()
+        : null;
       const spawnPolicy = toolSurface === 'session_agent'
         ? await resolveSessionAgentSpawnPolicy({ credentials: params.credentials })
         : null;
@@ -1223,12 +1279,16 @@ export function createCliActionDeps(params: Readonly<{
           windowsRemoteSessionLaunchMode,
           windowsRemoteSessionConsole,
           windowsTerminalWindowName,
+          codexBackendMode,
+          agentRuntimeDescriptorV1,
         },
-        parentMetadata: await readCurrentSessionMetadata(),
+        parentMetadata: await readFreshCurrentSessionMetadata(),
         currentSession: {
           path: await resolveCurrentSessionValue('path'),
           host: await resolveCurrentSessionValue('host'),
           machineId: await resolveCurrentSessionValue('machineId'),
+          backendTarget: params.getCurrentSessionBackendTarget?.() ?? null,
+          permissionMode: currentCallerPermissionMode,
         },
         spawnPolicy,
       });

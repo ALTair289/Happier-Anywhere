@@ -84,6 +84,15 @@ const ACTION_OPTION_SOURCE_ROUTES = [
     unsupportedActionId: 'sessions.spawn.connected_services.list',
   },
   {
+    // Run-facing alias for execution runs (plan/delegate/voice/run.start) — reuses the ONE session
+    // connected-services data owner so agents can enumerate services, profiles, and account pools
+    // (with autoSwitch status) when choosing a run's `connectedServices` selection.
+    id: 'execution.runs.connected_services.available',
+    kind: 'spawnDiscovery',
+    depsKey: 'sessionsSpawnConnectedServicesList',
+    unsupportedActionId: 'sessions.spawn.connected_services.list',
+  },
+  {
     id: 'sessions.spawn.mcp_servers.preview',
     kind: 'spawnDiscovery',
     depsKey: 'sessionsSpawnMcpServersPreview',
