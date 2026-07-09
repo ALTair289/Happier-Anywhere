@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import {
   SESSION_WORKFLOW_RUN_SNAPSHOT_TITLE_MAX,
+  SessionWorkflowRunStatusReasonV1Schema,
   SessionWorkflowRunStatusV1Schema,
 } from './sessionWorkflowRunSnapshotV1.js';
 import { SESSION_WORKFLOW_RUN_RECORD_REVISION_PATTERN } from './sessionWorkflowRunRecordRevision.js';
@@ -20,6 +21,7 @@ export const SessionWorkflowRunHeadlineV1Schema = z
     runId: z.string().trim().min(1),
     title: z.string().trim().min(1).max(SESSION_WORKFLOW_RUN_SNAPSHOT_TITLE_MAX),
     status: SessionWorkflowRunStatusV1Schema,
+    statusReason: SessionWorkflowRunStatusReasonV1Schema.optional(),
     workflowToolUseId: z.string().trim().min(1).optional(),
     updatedAt: z.number().int().nonnegative(),
     recordRevision: z.string().trim().regex(SESSION_WORKFLOW_RUN_RECORD_REVISION_PATTERN),

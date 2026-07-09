@@ -39,6 +39,50 @@ describe('createClaudeGoalRuntimeControls', () => {
     expect(result).toMatchObject({ ok: false, errorCode: 'session_goal_control_inject_failed' });
   });
 
+  // G-1: Claude `/goal` cannot enforce a token budget or a status transition. Rather than SILENTLY
+  // dropping those options while returning success (the original bug — non-UI callers lose data with
+  // no signal), the runtime control fails LOUDLY with a typed, NON-fallback error. UI callers never
+  // send these for Claude (capability gate), so this is contract hardening for other callers.
+  it('rejects a setGoal that requests a token budget (unsupported on Claude) without injecting', async () => {
+    const injectGoalCommand = vi.fn(async () => SENT);
+    const controls = createClaudeGoalRuntimeControls({ injectGoalCommand });
+
+    const result = await controls.setGoal('ship it', { tokenBudget: 120_000 });
+
+    expect(injectGoalCommand).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: false, errorCode: 'session_goal_control_unsupported' });
+  });
+
+  it('rejects a setGoal that clears the token budget (tokenBudget:null is still a budget mutation)', async () => {
+    const injectGoalCommand = vi.fn(async () => SENT);
+    const controls = createClaudeGoalRuntimeControls({ injectGoalCommand });
+
+    const result = await controls.setGoal('ship it', { tokenBudget: null });
+
+    expect(injectGoalCommand).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: false, errorCode: 'session_goal_control_unsupported' });
+  });
+
+  it('rejects a setGoal that requests a status transition (unsupported on Claude) without injecting', async () => {
+    const injectGoalCommand = vi.fn(async () => SENT);
+    const controls = createClaudeGoalRuntimeControls({ injectGoalCommand });
+
+    const result = await controls.setGoal('ship it', { status: 'paused' });
+
+    expect(injectGoalCommand).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: false, errorCode: 'session_goal_control_unsupported' });
+  });
+
+  it('still injects a plain objective-only set when options carry no budget/status', async () => {
+    const injectGoalCommand = vi.fn(async () => SENT);
+    const controls = createClaudeGoalRuntimeControls({ injectGoalCommand });
+
+    const result = await controls.setGoal('ship it', {});
+
+    expect(injectGoalCommand).toHaveBeenCalledWith('/goal ship it');
+    expect(result).toBeUndefined();
+  });
+
   it('injects `/goal clear` when an active session clears its goal', async () => {
     const injectGoalCommand = vi.fn(async () => SENT);
     const controls = createClaudeGoalRuntimeControls({ injectGoalCommand });

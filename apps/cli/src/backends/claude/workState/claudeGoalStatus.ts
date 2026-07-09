@@ -260,6 +260,43 @@ export type ClaudeGoalStatusWorkStateTracker = Readonly<{
     opts: Readonly<{ updatedAt: number; currentClaudeSessionId?: string | null }>,
   ): SessionWorkStateV1 | null;
   /**
+   * G-6: build a shutdown-finalization snapshot for an ACTIVE, unmet goal. When the latest observed
+   * goal is `active`, returns a republish snapshot of the SAME goal item carrying
+   * `statusReason:'interrupted'` (status STAYS `active` — the goal may legitimately resume), so a
+   * graceful CLI teardown records that the goal was interrupted rather than leaving it looking live.
+   * Returns null when there is no active goal to finalize (never observed, or already terminal). The
+   * snapshot flows through the SAME owned-family publish/merge path as normal goal updates (one
+   * writer). Does not mutate tracker state.
+   */
+  buildInterruptedShutdownSnapshot(
+    opts: Readonly<{ updatedAt: number; currentClaudeSessionId?: string | null }>,
+  ): SessionWorkStateV1 | null;
+  /**
+   * G-3/E: fold live per-turn usage into the ACTIVE goal item. Called on TURN BOUNDARIES only (never
+   * per streaming delta) so metadata write cadence tracks the record cadence, not token deltas.
+   * `addTokens` is added to a running accumulated total; `timeUsedSeconds` is the ABSOLUTE elapsed
+   * wall-time since the goal was set (latest-wins, monotonic-ish). Returns a republish snapshot of the
+   * active goal carrying the accumulated `tokensUsed` + `timeUsedSeconds`, or null when: there is no
+   * active goal (never observed, or terminal), the event targets a foreign session, or neither value
+   * changed since the last fold (no-churn). Provider totals from a `met:true` `goal_status` WIN — a
+   * terminal `applyAttachment` overwrites these accumulated estimates and resets the accumulator.
+   */
+  foldActiveGoalUsage(
+    opts: Readonly<{
+      updatedAt: number;
+      currentClaudeSessionId?: string | null;
+      addTokens: number;
+      timeUsedSeconds: number;
+    }>,
+  ): SessionWorkStateV1 | null;
+  /**
+   * G-3/E: reseed the usage accumulator from an already-published active goal item (restart
+   * continuity). On a fresh tracker after a CLI restart, the last published active goal already
+   * carries `tokensUsed`/`timeUsedSeconds`; seeding the accumulator with them means the next
+   * `foldActiveGoalUsage` continues the running total instead of restarting from zero.
+   */
+  reseedActiveGoalUsage(seed: Readonly<{ tokensUsed?: number; timeUsedSeconds?: number }>): void;
+  /**
    * Record a user-driven goal control intent (G2). A `clear` bumps the goal-control epoch and arms
    * stale-replay suppression against the cleared baseline (so the provider's continued ACTIVE
    * re-evaluation of the un-meetable cleared goal does not resurrect the badge); a `set` bumps the
@@ -288,11 +325,54 @@ export function createClaudeGoalStatusWorkStateTracker(params: Readonly<{
   let goalCommandSupported = params.goalCommandSupported ?? false;
   let latestEvent: ClaudeGoalStatusTranscriptEvent | null = null;
   let latestCurrentClaudeSessionId: string | null | undefined;
+  // G-3/E live-usage accumulator for the ACTIVE goal. `accumulatedTokens` is a running total folded
+  // across turn boundaries; `accumulatedTimeUsedSeconds` is the latest absolute elapsed wall-time.
+  // Reset whenever a new active goal is set or the goal terminates (provider totals then win), so a
+  // resumed goal never inherits a previous run's estimate.
+  let accumulatedTokens = 0;
+  let accumulatedTimeUsedSeconds = 0;
+  let hasAccumulatedUsage = false;
+  // Restart-continuity FLOORS (G-3/E): seeded from the last-published active goal item after a CLI
+  // restart. Unlike the per-run accumulator, the floors SURVIVE the `resetUsageAccumulator()` that
+  // fires when the same active goal_status is re-observed during transcript replay — otherwise the
+  // replay would wipe the prior run's usage. Cleared only when the goal lifecycle genuinely ends (a
+  // terminal goal_status, whose provider totals WIN, or a clear/set control intent).
+  let reseedTokensFloor = 0;
+  let reseedTimeFloorSeconds = 0;
   // Explicit goal-control epoch state (G2), replacing the old `clearedCondition` tombstone. The
   // epoch — not the objective text — is the operation identity, so re-setting the SAME objective
   // after a clear is allowed while the provider's stale ACTIVE re-evaluation of the cleared goal is
   // still suppressed.
   const controlEpoch = createClaudeGoalControlEpochTracker();
+
+  // Reset the per-run accumulator. Does NOT clear the restart floors (those persist across a replay's
+  // re-observation of the same active goal). `clearUsageFloors` ends the goal's usage lifecycle.
+  const resetUsageAccumulator = (): void => {
+    accumulatedTokens = 0;
+    accumulatedTimeUsedSeconds = 0;
+    hasAccumulatedUsage = false;
+  };
+  const clearUsageFloors = (): void => {
+    reseedTokensFloor = 0;
+    reseedTimeFloorSeconds = 0;
+  };
+
+  const effectiveTokens = (): number => reseedTokensFloor + accumulatedTokens;
+  const effectiveTimeUsedSeconds = (): number => Math.max(reseedTimeFloorSeconds, accumulatedTimeUsedSeconds);
+  const hasEffectiveUsage = (): boolean => hasAccumulatedUsage || reseedTokensFloor > 0 || reseedTimeFloorSeconds > 0;
+
+  // Decorate an ACTIVE goal item with the running usage (floor + accumulator). Terminal items are
+  // returned unchanged: the provider's authoritative `met:true` totals (already mapped) WIN.
+  const withAccumulatedUsage = (item: SessionWorkStateItemV1): SessionWorkStateItemV1 => {
+    if (item.status !== 'active' || !hasEffectiveUsage()) return item;
+    const tokens = effectiveTokens();
+    const timeUsedSeconds = effectiveTimeUsedSeconds();
+    return {
+      ...item,
+      ...(tokens > 0 ? { tokensUsed: tokens } : {}),
+      ...(timeUsedSeconds > 0 ? { timeUsedSeconds } : {}),
+    };
+  };
 
   return {
     applyAttachment(event, opts) {
@@ -325,15 +405,24 @@ export function createClaudeGoalStatusWorkStateTracker(params: Readonly<{
 
       // Identity excludes updatedAt so a redundant re-derivation of the same
       // goal state does not churn metadata writes.
+      // (A new goal state supersedes any live-usage accumulation: a terminal goal_status carries the
+      // provider's authoritative totals — which WIN, already mapped onto the item — and a genuinely
+      // new/changed active goal starts its own run. resetUsageAccumulator() below runs after the
+      // no-change early return so unchanged re-derivations do not drop an in-progress accumulator.)
       const signature = `${item.status} ${item.title} ${item.vendorRef ?? ''}`;
       if (signature === latestItemSignature) return null;
       latestItemSignature = signature;
+      // The per-run accumulator restarts on any goal-state change. A terminal goal_status ends the
+      // usage lifecycle entirely (provider totals WIN), so its floors clear too; an active (re-)publish
+      // keeps the restart floors so the item carries the prior run's usage immediately.
+      resetUsageAccumulator();
+      if (item.status !== 'active') clearUsageFloors();
 
       return buildSnapshot({
         backendId: params.backendId,
         ...(params.agentId ? { agentId: params.agentId } : {}),
         updatedAt: opts.updatedAt,
-        item,
+        item: withAccumulatedUsage(item),
       });
     },
     setGoalCommandSupported(supported, opts) {
@@ -360,8 +449,69 @@ export function createClaudeGoalStatusWorkStateTracker(params: Readonly<{
         backendId: params.backendId,
         ...(params.agentId ? { agentId: params.agentId } : {}),
         updatedAt: opts.updatedAt,
-        item,
+        item: withAccumulatedUsage(item),
       });
+    },
+    buildInterruptedShutdownSnapshot(opts) {
+      if (!latestEvent) return null;
+      const item = mapClaudeGoalStatusEventToWorkStateItem(latestEvent, {
+        backendId: params.backendId,
+        ...(params.agentId ? { agentId: params.agentId } : {}),
+        updatedAt: opts.updatedAt,
+        currentClaudeSessionId: opts.currentClaudeSessionId ?? latestCurrentClaudeSessionId ?? null,
+        goalCommandSupported,
+      });
+      // Only an ACTIVE (unmet) goal can be interrupted; a terminal goal (complete/cancelled) or a
+      // foreign-session drop (item null) has nothing to finalize.
+      if (!item || item.status !== 'active') return null;
+      // Preserve any accrued live usage so the interrupted goal records how far it got.
+      const withUsage = withAccumulatedUsage(item);
+      return buildSnapshot({
+        backendId: params.backendId,
+        ...(params.agentId ? { agentId: params.agentId } : {}),
+        updatedAt: opts.updatedAt,
+        item: { ...withUsage, statusReason: 'interrupted' },
+      });
+    },
+    foldActiveGoalUsage(opts) {
+      if (!latestEvent) return null;
+      const item = mapClaudeGoalStatusEventToWorkStateItem(latestEvent, {
+        backendId: params.backendId,
+        ...(params.agentId ? { agentId: params.agentId } : {}),
+        updatedAt: opts.updatedAt,
+        currentClaudeSessionId: opts.currentClaudeSessionId ?? latestCurrentClaudeSessionId ?? null,
+        goalCommandSupported,
+      });
+      // Only an active goal accumulates: a terminal goal's provider totals already WIN, and a
+      // foreign-session drop has no goal to fold into.
+      if (!item || item.status !== 'active') return null;
+
+      const prevTokens = effectiveTokens();
+      const prevTimeUsedSeconds = effectiveTimeUsedSeconds();
+      accumulatedTokens += Math.max(0, Math.trunc(opts.addTokens));
+      // Elapsed is absolute + monotonic non-decreasing (a later boundary never shows less wall-time).
+      accumulatedTimeUsedSeconds = Math.max(accumulatedTimeUsedSeconds, Math.max(0, opts.timeUsedSeconds));
+      const nextTokens = effectiveTokens();
+      const nextTimeUsedSeconds = effectiveTimeUsedSeconds();
+      // No-churn: a boundary that added no tokens and did not advance elapsed re-publishes nothing.
+      if (hasEffectiveUsage() && nextTokens === prevTokens && nextTimeUsedSeconds === prevTimeUsedSeconds) {
+        return null;
+      }
+      hasAccumulatedUsage = true;
+
+      return buildSnapshot({
+        backendId: params.backendId,
+        ...(params.agentId ? { agentId: params.agentId } : {}),
+        updatedAt: opts.updatedAt,
+        item: withAccumulatedUsage(item),
+      });
+    },
+    reseedActiveGoalUsage(seed) {
+      // Seed the FLOORS (not the per-run accumulator): they must survive the replay's re-observation
+      // of the same active goal_status (which resets the accumulator) so the prior run's usage is not
+      // lost on restart. Live folds then add on top of the floor.
+      reseedTokensFloor = typeof seed.tokensUsed === 'number' && seed.tokensUsed >= 0 ? Math.trunc(seed.tokensUsed) : 0;
+      reseedTimeFloorSeconds = typeof seed.timeUsedSeconds === 'number' && seed.timeUsedSeconds >= 0 ? seed.timeUsedSeconds : 0;
     },
     recordGoalControlIntent(intent) {
       if (intent.kind === 'clear') {
@@ -384,6 +534,10 @@ export function createClaudeGoalStatusWorkStateTracker(params: Readonly<{
       latestItemSignature = null;
       latestEvent = null;
       latestCurrentClaudeSessionId = undefined;
+      // A clear/set intent starts a fresh goal lifecycle: prior live-usage accumulation (per-run
+      // accumulator AND restart floors) must not carry into the next goal.
+      resetUsageAccumulator();
+      clearUsageFloors();
     },
   };
 }

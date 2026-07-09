@@ -102,6 +102,7 @@ export function projectWorkflowRunHeadline(run: SessionWorkflowRunHeadlineV1): S
     totalAgents: run.totalAgents,
     completedAgents: run.completedAgents,
   };
+  if (run.statusReason !== undefined) projected.statusReason = run.statusReason;
   if (run.workflowToolUseId !== undefined) projected.workflowToolUseId = run.workflowToolUseId;
   if (run.failedAgents !== undefined) projected.failedAgents = run.failedAgents;
   if (run.blockedAgents !== undefined) projected.blockedAgents = run.blockedAgents;

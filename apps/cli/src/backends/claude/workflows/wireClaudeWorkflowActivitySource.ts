@@ -1,9 +1,10 @@
-import type {
-  SessionWorkflowActivityHeadlineV1,
-  SessionWorkflowRunSnapshotV1,
-  SessionSystemRecord,
-  SessionSystemRecordNamespace,
-  SessionSystemRecordUpsertRequest,
+import {
+  SessionWorkflowActivityHeadlineV1Schema,
+  type SessionWorkflowActivityHeadlineV1,
+  type SessionWorkflowRunSnapshotV1,
+  type SessionSystemRecord,
+  type SessionSystemRecordNamespace,
+  type SessionSystemRecordUpsertRequest,
 } from '@happier-dev/protocol';
 
 import type { Metadata } from '@/api/types';
@@ -28,6 +29,10 @@ import {
   hasLegacyClaudeAsyncAgentWorkflowGhosts,
   pruneLegacyClaudeAsyncAgentWorkflowGhostsFromMetadata,
 } from './legacyClaudeWorkflowActivityRepair';
+import {
+  WORKFLOW_ACTIVITY_STARTUP_RECONCILE_GRACE_MS,
+  collectStartupReconcileCandidates,
+} from './workflowActivityStartupReconcile';
 
 /**
  * The single composition seam that binds the provider-clean `createClaudeWorkflowActivitySource`
@@ -73,6 +78,8 @@ export function wireClaudeWorkflowActivitySource(params: Readonly<{
   binding: ClaudeWorkflowActivitySessionBinding;
   debounceMs?: number;
   logPrefix?: string;
+  /** Grace period before startup reconciliation terminates a still-unobserved stale run (W-1). */
+  startupReconcileGraceMs?: number;
 }>): ClaudeWorkflowActivitySource {
   const { binding } = params;
 
@@ -136,7 +143,7 @@ export function wireClaudeWorkflowActivitySource(params: Readonly<{
     );
   }
 
-  return createClaudeWorkflowActivitySource({
+  const source = createClaudeWorkflowActivitySource({
     backendId: params.backendId,
     ...(params.agentId ? { agentId: params.agentId } : {}),
     getCurrentClaudeSessionId: binding.getCurrentClaudeSessionId,
@@ -147,4 +154,30 @@ export function wireClaudeWorkflowActivitySource(params: Readonly<{
     ...(params.debounceMs !== undefined ? { debounceMs: params.debounceMs } : {}),
     ...(params.logPrefix ? { logPrefix: params.logPrefix } : {}),
   });
+
+  // W-1 startup reconciliation: a fresh tracker has no memory of runs left `active` by a prior
+  // crashed process. Read the persisted headline; after a grace period, synthetically terminate any
+  // of those stale runs that were NOT re-observed live (a genuinely-resumed run re-enters the
+  // tracker within the grace window and is skipped). Flows through the source's one-writer path.
+  const parsedHeadline = SessionWorkflowActivityHeadlineV1Schema.safeParse(
+    currentMetadata?.sessionWorkflowActivityHeadlineV1,
+  );
+  const reconcileCandidates = parsedHeadline.success
+    ? collectStartupReconcileCandidates(parsedHeadline.data)
+    : [];
+  if (reconcileCandidates.length === 0) return source;
+
+  const graceMs = params.startupReconcileGraceMs ?? WORKFLOW_ACTIVITY_STARTUP_RECONCILE_GRACE_MS;
+  const reconcileTimer = setTimeout(() => {
+    void source.reconcileStartupInterruptedRuns(reconcileCandidates);
+  }, graceMs);
+  reconcileTimer.unref?.();
+
+  return {
+    ...source,
+    dispose() {
+      clearTimeout(reconcileTimer);
+      source.dispose();
+    },
+  };
 }

@@ -127,6 +127,140 @@ describe('createClaudeGoalStatusWorkStateTracker', () => {
   });
 });
 
+describe('createClaudeGoalStatusWorkStateTracker — interrupted-on-shutdown snapshot (G-6)', () => {
+  it('republishes the ACTIVE goal with statusReason:interrupted (status stays active)', () => {
+    const tracker = createClaudeGoalStatusWorkStateTracker({ backendId: 'claude', agentId: 'claude', goalCommandSupported: true });
+    tracker.applyAttachment(parse('edit-active.jsonl'), { updatedAt: 1, currentClaudeSessionId: FIXTURE_SESSION_ID });
+
+    const snapshot = tracker.buildInterruptedShutdownSnapshot({ updatedAt: 5, currentClaudeSessionId: FIXTURE_SESSION_ID });
+    expect(snapshot).not.toBeNull();
+    expect(snapshot?.ownedSourceFamilies).toEqual([...CLAUDE_GOAL_WORK_STATE_OWNED_SOURCE_FAMILIES]);
+    const item = snapshot?.items[0];
+    expect(item).toMatchObject({
+      id: CLAUDE_GOAL_WORK_STATE_ITEM_ID,
+      status: 'active',
+      statusReason: 'interrupted',
+    });
+    // Preserves the goal's edit capability so the interrupted goal is still resumable.
+    expect(item?.goalCapabilities).toMatchObject({ canEdit: true });
+  });
+
+  it('returns null when the latest goal is terminal (completed/cancelled — nothing to interrupt)', () => {
+    const tracker = createClaudeGoalStatusWorkStateTracker({ backendId: 'claude', goalCommandSupported: true });
+    tracker.applyAttachment(parse('completed.jsonl'), { updatedAt: 1, currentClaudeSessionId: FIXTURE_SESSION_ID });
+
+    const snapshot = tracker.buildInterruptedShutdownSnapshot({ updatedAt: 5, currentClaudeSessionId: FIXTURE_SESSION_ID });
+    expect(snapshot).toBeNull();
+  });
+
+  it('returns null when no goal was ever observed', () => {
+    const tracker = createClaudeGoalStatusWorkStateTracker({ backendId: 'claude' });
+    expect(tracker.buildInterruptedShutdownSnapshot({ updatedAt: 5 })).toBeNull();
+  });
+});
+
+describe('createClaudeGoalStatusWorkStateTracker — live usage accumulation for active goals (G-3/E)', () => {
+  function activeTracker() {
+    const tracker = createClaudeGoalStatusWorkStateTracker({ backendId: 'claude', agentId: 'claude', goalCommandSupported: true });
+    tracker.applyAttachment(parse('edit-active.jsonl'), { updatedAt: 1, currentClaudeSessionId: FIXTURE_SESSION_ID });
+    return tracker;
+  }
+
+  it('folds per-turn tokens + elapsed wall-time into the ACTIVE goal item on a turn boundary', () => {
+    const tracker = activeTracker();
+
+    const snapshot = tracker.foldActiveGoalUsage({
+      updatedAt: 10,
+      currentClaudeSessionId: FIXTURE_SESSION_ID,
+      addTokens: 1200,
+      timeUsedSeconds: 30,
+    });
+
+    expect(snapshot).not.toBeNull();
+    const item = snapshot?.items[0];
+    expect(item).toMatchObject({
+      id: CLAUDE_GOAL_WORK_STATE_ITEM_ID,
+      status: 'active',
+      tokensUsed: 1200,
+      timeUsedSeconds: 30,
+    });
+    // Never marks an accumulating goal terminal or interrupted.
+    expect(item?.statusReason).toBeUndefined();
+  });
+
+  it('accumulates tokens across successive turns (running total, not per-turn replace)', () => {
+    const tracker = activeTracker();
+
+    tracker.foldActiveGoalUsage({ updatedAt: 10, currentClaudeSessionId: FIXTURE_SESSION_ID, addTokens: 1000, timeUsedSeconds: 20 });
+    const snapshot = tracker.foldActiveGoalUsage({ updatedAt: 20, currentClaudeSessionId: FIXTURE_SESSION_ID, addTokens: 500, timeUsedSeconds: 45 });
+
+    expect(snapshot?.items[0]).toMatchObject({ tokensUsed: 1500, timeUsedSeconds: 45 });
+  });
+
+  it('returns null (no churn) when neither tokens nor elapsed changed since the last fold', () => {
+    const tracker = activeTracker();
+
+    tracker.foldActiveGoalUsage({ updatedAt: 10, currentClaudeSessionId: FIXTURE_SESSION_ID, addTokens: 1000, timeUsedSeconds: 20 });
+    // A boundary with zero new tokens and unchanged elapsed produces no republish.
+    const snapshot = tracker.foldActiveGoalUsage({ updatedAt: 20, currentClaudeSessionId: FIXTURE_SESSION_ID, addTokens: 0, timeUsedSeconds: 20 });
+
+    expect(snapshot).toBeNull();
+  });
+
+  it('is a no-op (null) when the latest goal is terminal — completed/cancelled goals do not accumulate', () => {
+    const tracker = createClaudeGoalStatusWorkStateTracker({ backendId: 'claude', goalCommandSupported: true });
+    tracker.applyAttachment(parse('completed.jsonl'), { updatedAt: 1, currentClaudeSessionId: FIXTURE_SESSION_ID });
+
+    const snapshot = tracker.foldActiveGoalUsage({ updatedAt: 10, currentClaudeSessionId: FIXTURE_SESSION_ID, addTokens: 1000, timeUsedSeconds: 20 });
+    expect(snapshot).toBeNull();
+  });
+
+  it('provider totals WIN on met:true — a completing goal_status replaces the accumulated estimate', () => {
+    const tracker = createClaudeGoalStatusWorkStateTracker({ backendId: 'claude', goalCommandSupported: true });
+    tracker.applyAttachment(parse('edit-active.jsonl'), { updatedAt: 1, currentClaudeSessionId: FIXTURE_SESSION_ID });
+    tracker.foldActiveGoalUsage({ updatedAt: 10, currentClaudeSessionId: FIXTURE_SESSION_ID, addTokens: 9999, timeUsedSeconds: 999 });
+
+    // A completing attachment carrying authoritative provider totals must overwrite the accumulator.
+    const base = parse('completed.jsonl');
+    const completing = {
+      ...base,
+      uuid: 'complete-1',
+      sourceSessionId: FIXTURE_SESSION_ID,
+      attachment: { ...base.attachment, met: true, tokens: 42000, durationMs: 60000 },
+    } as ReturnType<typeof parse>;
+    const snapshot = tracker.applyAttachment(completing, { updatedAt: 20, currentClaudeSessionId: FIXTURE_SESSION_ID });
+
+    expect(snapshot?.items[0]).toMatchObject({ status: 'complete', tokensUsed: 42000, timeUsedSeconds: 60 });
+  });
+
+  it('provider totals WIN even after a reseed floor — a completing goal is not inflated by the floor', () => {
+    const tracker = createClaudeGoalStatusWorkStateTracker({ backendId: 'claude', goalCommandSupported: true });
+    tracker.applyAttachment(parse('edit-active.jsonl'), { updatedAt: 1, currentClaudeSessionId: FIXTURE_SESSION_ID });
+    tracker.reseedActiveGoalUsage({ tokensUsed: 5000, timeUsedSeconds: 120 });
+    tracker.foldActiveGoalUsage({ updatedAt: 5, currentClaudeSessionId: FIXTURE_SESSION_ID, addTokens: 100, timeUsedSeconds: 125 });
+
+    const base = parse('completed.jsonl');
+    const completing = {
+      ...base,
+      uuid: 'complete-floor',
+      sourceSessionId: FIXTURE_SESSION_ID,
+      attachment: { ...base.attachment, met: true, tokens: 7000, durationMs: 130000 },
+    } as ReturnType<typeof parse>;
+    const snapshot = tracker.applyAttachment(completing, { updatedAt: 20, currentClaudeSessionId: FIXTURE_SESSION_ID });
+
+    expect(snapshot?.items[0]).toMatchObject({ status: 'complete', tokensUsed: 7000, timeUsedSeconds: 130 });
+  });
+
+  it('reseeds the accumulator from an already-published active goal item (restart continuity)', () => {
+    const tracker = activeTracker();
+    // Simulate a restart where the last published active goal already carried usage.
+    tracker.reseedActiveGoalUsage({ tokensUsed: 5000, timeUsedSeconds: 120 });
+
+    const snapshot = tracker.foldActiveGoalUsage({ updatedAt: 10, currentClaudeSessionId: FIXTURE_SESSION_ID, addTokens: 300, timeUsedSeconds: 130 });
+    expect(snapshot?.items[0]).toMatchObject({ tokensUsed: 5300, timeUsedSeconds: 130 });
+  });
+});
+
 describe('claudeGoalStatus goal-control epoch (G2 — replaces clearedCondition)', () => {
   function event(params: Readonly<{ uuid: string; condition: string; met?: boolean; sentinel?: boolean }>) {
     const parsed = parseClaudeGoalStatusAttachment({

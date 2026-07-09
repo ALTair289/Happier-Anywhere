@@ -115,6 +115,13 @@ export const claudeGoalControlAdapter: SessionGoalControlAdapter = {
     return successWithMetadata(metadata);
   },
   setGoal: async (params) => {
+    // G-2: Claude cannot enforce a token budget or apply a status transition on the inactive path
+    // either — the seeded goal item is replaced cleanly by the provider's own `goal_status` on
+    // resume, and `/goal` (the resume mechanism) carries neither field. Reject loudly (matching the
+    // runtime control, G-1) instead of silently seeding a goal that drops the requested field.
+    if (params.request.tokenBudget !== undefined || params.request.status !== undefined) {
+      return stableError('session_goal_control_unsupported');
+    }
     const metadata = asRecord(params.metadata) ? { ...params.metadata } : {};
     const requestObjective = readString(params.request.objective);
     const latestGoal = readLatestGoalItem(metadata);

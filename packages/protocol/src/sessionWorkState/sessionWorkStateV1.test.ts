@@ -91,6 +91,23 @@ describe('SessionWorkStateV1', () => {
         ).toThrow();
     });
 
+    // G-6: a Claude goal left `active` when the CLI session tears down gracefully is republished with
+    // `statusReason:'interrupted'` (status STAYS active — the goal may legitimately resume) so the UI
+    // can render an "(interrupted)" affordance. Provider-neutral, additive to the shared enum.
+    it('accepts the provider-neutral `interrupted` status reason on an active goal', () => {
+        const item = SessionWorkStateItemV1Schema.parse({
+            id: 'goal:claude',
+            kind: 'goal',
+            origin: 'vendor',
+            status: 'active',
+            statusReason: 'interrupted',
+            title: 'Interrupted-on-shutdown goal',
+            updatedAt: 1,
+        });
+
+        expect(item.statusReason).toBe('interrupted');
+    });
+
     it('treats provider-derived goal capabilities as optional and additive', () => {
         const withoutCapabilities = SessionWorkStateItemV1Schema.parse({
             id: 'goal:thread-1',

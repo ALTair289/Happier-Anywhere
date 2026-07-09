@@ -521,9 +521,11 @@ await parallel([
       'a2b7b902e76418dba',
     ]);
     expect(snapshot?.phases.find((p) => p.title === 'Assess')?.agentIds).toEqual([]);
+    // W-7: an opaque started journal entry now prefers the script's declared agent label over the
+    // `Workflow agent N` ordinal (ordinals are the last resort, not the norm).
     expect(snapshot?.agents.map((agent) => [agent.id, agent.title, agent.phaseTitle])).toEqual([
-      ['ada15d97cdea9c7fd', 'Workflow agent 1', 'Investigate'],
-      ['a2b7b902e76418dba', 'Workflow agent 2', 'Investigate'],
+      ['ada15d97cdea9c7fd', 'shadcn-docs', 'Investigate'],
+      ['a2b7b902e76418dba', 'pin-ux', 'Investigate'],
     ]);
 
     tracker.observe(workflowJournal({
@@ -601,11 +603,12 @@ await parallel([
     expect(snapshot?.phases.find((phase) => phase.title === 'Assess')?.agentIds).toEqual([
       'opaque-critic',
     ]);
+    // W-7: opaque started entries adopt the script's declared labels (sequential spec assignment).
     expect(snapshot?.agents.map((agent) => agent.title)).toEqual([
-      'Workflow agent 1',
-      'Workflow agent 2',
-      'Workflow agent 3',
-      'Workflow agent 4',
+      'first',
+      'second',
+      'third',
+      'critic',
     ]);
 
     tracker.observe(workflowJournal({
@@ -623,6 +626,118 @@ await parallel([
       phaseTitle: 'Investigate',
       resultPreview: 'Finished third lane.',
     });
+  });
+
+  it('never displays a raw agent id for a terminal-arriving opaque journal fact (W-7)', () => {
+    const tracker = createClaudeWorkflowActivityTracker({ backendId: 'claude' });
+    // No script labels => no journal spec => the ordinal is the only fallback.
+    tracker.observe(workflowToolUse({ id: 'toolu_wf', name: 'plain' }), { updatedAt: 1000 });
+    // A `result` entry whose result carries no lane/label/message => the parser falls back to the
+    // raw agentId as the title. This arrives already-terminal (status complete).
+    tracker.observe(workflowJournal({
+      workflowToolUseId: 'toolu_wf',
+      type: 'result',
+      key: 'v2:only',
+      agentId: 'a36519ccc5c401aeb',
+      result: {},
+    }), { updatedAt: 1100 });
+
+    const agent = tracker.getRunSnapshot('toolu_wf')?.agents[0];
+    expect(agent?.status).toBe('complete');
+    expect(agent?.title).toBe('Workflow agent 1');
+    expect(agent?.title).not.toBe('a36519ccc5c401aeb');
+  });
+
+  it('prefers the declared script label for a terminal opaque journal fact (W-7)', () => {
+    const tracker = createClaudeWorkflowActivityTracker({ backendId: 'claude' });
+    tracker.observe(workflowToolUseWithScript({
+      id: 'toolu_wf',
+      script: `
+phase('Investigate')
+await parallel([
+  agent('Read the docs', { label: 'doc-reader', phase: 'Investigate' }),
+])
+`,
+    }), { updatedAt: 1000 });
+    tracker.observe(workflowJournal({
+      workflowToolUseId: 'toolu_wf',
+      type: 'result',
+      key: 'v2:only',
+      agentId: 'b7c2raw',
+      result: {},
+    }), { updatedAt: 1100 });
+
+    const agent = tracker.getRunSnapshot('toolu_wf')?.agents[0];
+    expect(agent?.title).toBe('doc-reader');
+    expect(agent?.title).not.toBe('b7c2raw');
+  });
+
+  it('keeps a genuine journal result title (lane) rather than substituting a placeholder (W-7)', () => {
+    const tracker = createClaudeWorkflowActivityTracker({ backendId: 'claude' });
+    tracker.observe(workflowToolUse({ id: 'toolu_wf', name: 'plain' }), { updatedAt: 1000 });
+    tracker.observe(workflowJournal({
+      workflowToolUseId: 'toolu_wf',
+      type: 'result',
+      key: 'v2:only',
+      agentId: 'rawid',
+      result: { lane: 'auth-module', summary: 'done' },
+    }), { updatedAt: 1100 });
+
+    expect(tracker.getRunSnapshot('toolu_wf')?.agents[0]?.title).toBe('auth-module');
+  });
+
+  it('keeps the ordinal fallback stable across re-observations (W-7)', () => {
+    const tracker = createClaudeWorkflowActivityTracker({ backendId: 'claude' });
+    tracker.observe(workflowToolUse({ id: 'toolu_wf', name: 'plain' }), { updatedAt: 1000 });
+    tracker.observe(workflowJournal({ workflowToolUseId: 'toolu_wf', type: 'started', key: 'k1', agentId: 'raw-1' }), { updatedAt: 1100 });
+    tracker.observe(workflowJournal({ workflowToolUseId: 'toolu_wf', type: 'started', key: 'k2', agentId: 'raw-2' }), { updatedAt: 1101 });
+    expect(tracker.getRunSnapshot('toolu_wf')?.agents.map((a) => a.title)).toEqual(['Workflow agent 1', 'Workflow agent 2']);
+
+    // Re-observe the same started facts: ordinals must not drift.
+    tracker.observe(workflowJournal({ workflowToolUseId: 'toolu_wf', type: 'started', key: 'k1', agentId: 'raw-1' }), { updatedAt: 1200 });
+    tracker.observe(workflowJournal({ workflowToolUseId: 'toolu_wf', type: 'started', key: 'k2', agentId: 'raw-2' }), { updatedAt: 1201 });
+    expect(tracker.getRunSnapshot('toolu_wf')?.agents.map((a) => a.title)).toEqual(['Workflow agent 1', 'Workflow agent 2']);
+  });
+
+  it('reconciles a crash-residue run to stopped/interrupted, preserving headline counts (W-1)', () => {
+    const tracker = createClaudeWorkflowActivityTracker({ backendId: 'claude' });
+    const observation = tracker.reconcileInterruptedRunFromHeadline({
+      runId: 'wf_stale',
+      title: 'Big workflow',
+      workflowToolUseId: 'toolu_stale',
+      totalAgents: 17,
+      completedAgents: 3,
+      blockedAgents: 1,
+    }, { updatedAt: 5000 });
+
+    expect(observation.terminalRunIds).toEqual(['wf_stale']);
+    expect(observation.startedRunIds).toEqual([]);
+    const snapshot = tracker.getRunSnapshot('wf_stale');
+    expect(snapshot).toMatchObject({
+      runId: 'wf_stale',
+      status: 'stopped',
+      statusReason: 'interrupted',
+      totalAgents: 17,
+      completedAgents: 3,
+      blockedAgents: 1,
+      workflowToolUseId: 'toolu_stale',
+    });
+  });
+
+  it('does NOT reconcile a run the fresh tracker already observed (resumed) (W-1)', () => {
+    const tracker = createClaudeWorkflowActivityTracker({ backendId: 'claude' });
+    tracker.observe(workflowToolUse({ id: 'toolu_live', name: 'live' }), { updatedAt: 1000 });
+
+    const observation = tracker.reconcileInterruptedRunFromHeadline({
+      runId: 'toolu_live',
+      title: 'live',
+      totalAgents: 2,
+      completedAgents: 0,
+    }, { updatedAt: 5000 });
+
+    expect(observation.changedRunIds).toEqual([]);
+    expect(tracker.getRunSnapshot('toolu_live')?.status).toBe('active');
+    expect(tracker.getRunSnapshot('toolu_live')?.statusReason).toBeUndefined();
   });
 
   it('rejects events from a foreign Claude source session', () => {

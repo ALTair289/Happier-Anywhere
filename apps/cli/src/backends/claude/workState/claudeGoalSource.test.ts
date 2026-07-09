@@ -99,6 +99,41 @@ describe('createClaudeGoalWorkStateSource', () => {
     expect(goalItem(published[published.length - 1]).goalCapabilities).toMatchObject({ canEdit: true, canClear: true });
   });
 
+  // G-6: on graceful CLI teardown, an active goal is republished with statusReason:'interrupted'.
+  it('finalizeInterruptedGoalOnShutdown republishes an active goal with statusReason:interrupted', () => {
+    const { source, published } = createSource();
+
+    source.observeTranscriptMessage(activeGoalAttachment({ uuid: 'g-1', condition: 'ship it' }));
+    const beforeCount = published.length;
+
+    source.finalizeInterruptedGoalOnShutdown();
+
+    expect(published.length).toBe(beforeCount + 1);
+    expect(goalItem(published[published.length - 1])).toMatchObject({
+      id: 'goal:claude',
+      status: 'active',
+      statusReason: 'interrupted',
+    });
+  });
+
+  it('finalizeInterruptedGoalOnShutdown is a no-op when the goal already completed', () => {
+    const { source, published } = createSource();
+
+    source.observeTranscriptMessage(activeGoalAttachment({ uuid: 'g-1', condition: 'ship it' }));
+    source.observeTranscriptMessage(completedGoalAttachment({ uuid: 'g-2', condition: 'ship it' }));
+    const beforeCount = published.length;
+
+    source.finalizeInterruptedGoalOnShutdown();
+
+    expect(published.length).toBe(beforeCount);
+  });
+
+  it('finalizeInterruptedGoalOnShutdown is a no-op when no goal was ever observed', () => {
+    const { source, published } = createSource();
+    source.finalizeInterruptedGoalOnShutdown();
+    expect(published).toHaveLength(0);
+  });
+
   it('transitions an active goal to complete on a met:true attachment', () => {
     const { source, published } = createSource();
 
@@ -243,6 +278,168 @@ describe('createClaudeGoalWorkStateSource', () => {
     expect(goalItem(last)).toMatchObject({ status: 'active', title: 'rewrite the kernel' });
   });
 
+  it('is robust to a publish callback that throws (best-effort)', () => {
+    const publishWorkStateSnapshot = vi.fn(() => {
+      throw new Error('publish failed');
+    });
+    const throwingSource = createClaudeGoalWorkStateSource({
+      backendId: 'claude',
+      agentId: 'claude',
+      publishWorkStateSnapshot,
+      getCurrentClaudeSessionId: () => SOURCE_SESSION_ID,
+    });
+
+    expect(() => throwingSource.observeTranscriptMessage(activeGoalAttachment({ uuid: 'g-1', condition: 'ship it' }))).not.toThrow();
+    expect(publishWorkStateSnapshot).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('createClaudeGoalWorkStateSource — live usage accumulation (G-3/E)', () => {
+  const NOW_BASE = 1_000_000;
+
+  function assistantWithUsage(params: Readonly<{ inputTokens: number; outputTokens: number; endTurn?: boolean; timestamp?: string }>): unknown {
+    return {
+      type: 'assistant',
+      sessionId: SOURCE_SESSION_ID,
+      isSidechain: false,
+      ...(params.timestamp ? { timestamp: params.timestamp } : {}),
+      message: {
+        role: 'assistant',
+        ...(params.endTurn ? { stop_reason: 'end_turn' } : {}),
+        content: [{ type: 'text', text: 'working' }],
+        usage: { input_tokens: params.inputTokens, output_tokens: params.outputTokens },
+      },
+    };
+  }
+
+  function createUsageSource() {
+    const published: SessionWorkStateV1[] = [];
+    let now = NOW_BASE;
+    const source = createClaudeGoalWorkStateSource({
+      backendId: 'claude',
+      agentId: 'claude',
+      publishWorkStateSnapshot: (snapshot) => published.push(snapshot),
+      getCurrentClaudeSessionId: () => SOURCE_SESSION_ID,
+      now: () => now,
+    });
+    return {
+      source,
+      published,
+      advance: (ms: number) => { now += ms; },
+    };
+  }
+
+  it('accumulates per-turn tokens + elapsed into the active goal on a turn boundary', () => {
+    const { source, published, advance } = createUsageSource();
+
+    source.observeTranscriptMessage(activeGoalAttachment({ uuid: 'g-1', condition: 'ship it' }));
+    const afterGoal = published.length;
+
+    advance(30_000); // 30s of wall-time
+    source.observeTranscriptMessage(assistantWithUsage({ inputTokens: 800, outputTokens: 400, endTurn: true }));
+
+    expect(published.length).toBe(afterGoal + 1);
+    const item = goalItem(published[published.length - 1]);
+    expect(item).toMatchObject({ status: 'active', tokensUsed: 1200, timeUsedSeconds: 30 });
+  });
+
+  it('does NOT republish per streaming delta — only on the turn boundary', () => {
+    const { source, published } = createUsageSource();
+
+    source.observeTranscriptMessage(activeGoalAttachment({ uuid: 'g-1', condition: 'ship it' }));
+    const afterGoal = published.length;
+
+    // Intermediate assistant deltas (no end_turn) accrue usage but must not publish.
+    source.observeTranscriptMessage(assistantWithUsage({ inputTokens: 100, outputTokens: 50 }));
+    source.observeTranscriptMessage(assistantWithUsage({ inputTokens: 100, outputTokens: 50 }));
+    expect(published.length).toBe(afterGoal);
+
+    // The end_turn boundary publishes ONCE with the whole turn's accrued total (150 × 3 = 450).
+    source.observeTranscriptMessage(assistantWithUsage({ inputTokens: 100, outputTokens: 50, endTurn: true }));
+    expect(published.length).toBe(afterGoal + 1);
+    expect(goalItem(published[published.length - 1])).toMatchObject({ tokensUsed: 450 });
+  });
+
+  it('accumulates across multiple turns', () => {
+    const { source, published, advance } = createUsageSource();
+    source.observeTranscriptMessage(activeGoalAttachment({ uuid: 'g-1', condition: 'ship it' }));
+
+    advance(10_000);
+    source.observeTranscriptMessage(assistantWithUsage({ inputTokens: 500, outputTokens: 100, endTurn: true }));
+    advance(15_000);
+    source.observeTranscriptMessage(assistantWithUsage({ inputTokens: 200, outputTokens: 100, endTurn: true }));
+
+    expect(goalItem(published[published.length - 1])).toMatchObject({ tokensUsed: 900, timeUsedSeconds: 25 });
+  });
+
+  it('provider totals WIN on completion — met:true replaces the accumulated estimate', () => {
+    const { source, published, advance } = createUsageSource();
+    source.observeTranscriptMessage(activeGoalAttachment({ uuid: 'g-1', condition: 'ship it' }));
+    advance(20_000);
+    source.observeTranscriptMessage(assistantWithUsage({ inputTokens: 9000, outputTokens: 1000, endTurn: true }));
+
+    // The provider's authoritative completion totals overwrite the accumulator.
+    source.observeTranscriptMessage({
+      type: 'attachment',
+      uuid: 'g-2',
+      sessionId: SOURCE_SESSION_ID,
+      timestamp: '2026-06-24T00:05:00.000Z',
+      attachment: { type: 'goal_status', met: true, condition: 'ship it', tokens: 2393, durationMs: 41613 },
+    });
+
+    const item = goalItem(published[published.length - 1]);
+    expect(item).toMatchObject({ status: 'complete', tokensUsed: 2393 });
+    expect(item.timeUsedSeconds).toBeCloseTo(41.613, 2);
+  });
+
+  it('does not accumulate usage when there is no active goal', () => {
+    const { source, published } = createUsageSource();
+    source.observeTranscriptMessage(assistantWithUsage({ inputTokens: 500, outputTokens: 100, endTurn: true }));
+    expect(published).toHaveLength(0);
+  });
+
+  it('reseeds the accumulator from a prior published active goal item (restart continuity)', () => {
+    const { source, published, advance } = createUsageSource();
+
+    // A restart replays the transcript: the source re-observes the active goal_status (fresh tracker,
+    // resets to zero), THEN the launcher reseeds the accumulator from the last-published metadata item
+    // so subsequent folds continue the running total instead of restarting from zero.
+    source.observeTranscriptMessage(activeGoalAttachment({ uuid: 'g-1', condition: 'ship it' }));
+    source.reseedActiveGoalUsageFromPublishedItem({ status: 'active', tokensUsed: 5000, timeUsedSeconds: 100 });
+    advance(110_000);
+    source.observeTranscriptMessage(assistantWithUsage({ inputTokens: 200, outputTokens: 100, endTurn: true }));
+
+    expect(goalItem(published[published.length - 1])).toMatchObject({ tokensUsed: 5300, timeUsedSeconds: 110 });
+  });
+
+  it('does not DOUBLE-COUNT historical turns re-fed by the transcript initial-replay after a restart', () => {
+    // Production restart: the scanner re-feeds the WHOLE transcript on the raw channel (initial-replay
+    // is NOT suppressed for the goal source when replaySuppressRowsBeforeMs is unset — the default).
+    // The launcher reseeds the floor from the last-published item, which ALREADY accounts for the
+    // historical turns. If the fold path re-folds those replayed historical assistant turns on top of
+    // the reseeded floor, the mid-run token/elapsed figure balloons (double-count).
+    const { source, published, advance } = createUsageSource();
+
+    // Floor from the prior run's last-published active goal item (accounts for 600 tokens / 100s),
+    // published at wall-time `updatedAt` (the historical-replay cutoff).
+    const floorUpdatedAtMs = Date.parse('2026-06-24T00:10:00.000Z');
+    source.reseedActiveGoalUsageFromPublishedItem({ status: 'active', tokensUsed: 600, timeUsedSeconds: 100, updatedAt: floorUpdatedAtMs });
+
+    // Transcript initial-replay re-feeds the historical goal_status + the historical assistant turn
+    // that produced those 600 tokens (both are on disk, unsuppressed, timestamped BEFORE the floor).
+    source.observeTranscriptMessage(activeGoalAttachment({ uuid: 'g-1', condition: 'ship it' }));
+    source.observeTranscriptMessage(assistantWithUsage({ inputTokens: 500, outputTokens: 100, endTurn: true, timestamp: '2026-06-24T00:05:00.000Z' }));
+
+    // A genuinely NEW turn (timestamped AFTER the floor basis) after the live tail resumes.
+    advance(110_000);
+    source.observeTranscriptMessage(assistantWithUsage({ inputTokens: 200, outputTokens: 100, endTurn: true, timestamp: '2026-06-24T00:20:00.000Z' }));
+
+    // Correct: floor 600 + new turn 300 = 900. NOT 600 + replayed 600 + new 300 = 1500.
+    expect(goalItem(published[published.length - 1])).toMatchObject({ tokensUsed: 900 });
+  });
+});
+
+describe('createClaudeGoalWorkStateSource — publish robustness', () => {
   it('is robust to a publish callback that throws (best-effort)', () => {
     const publishWorkStateSnapshot = vi.fn(() => {
       throw new Error('publish failed');

@@ -85,6 +85,31 @@ function injectFailedError(): GoalControlError {
   return stableError('session_goal_control_inject_failed');
 }
 
+/**
+ * G-1: Claude's `/goal` command carries an objective ONLY — it cannot enforce a token budget or
+ * apply a status transition (pause/complete/…). Requesting either is UNSUPPORTED on the Claude
+ * runtime path. Returning a typed, NON-fallback error (`session_goal_control_unsupported`, absent
+ * from the goal router's fallback set) fails loudly instead of silently dropping the option while
+ * reporting success — the original bug that let non-UI callers lose data with no signal.
+ */
+function unsupportedOptionError(): GoalControlError {
+  return stableError('session_goal_control_unsupported');
+}
+
+/**
+ * True when the caller requested a Claude-unsupported goal mutation: a token-budget field (even
+ * `null`, which is a request to CLEAR the budget) or a status transition. `objective`-only sets are
+ * the sole supported mutation and pass through.
+ */
+function requestsUnsupportedGoalOption(
+  options: Readonly<{ status?: string; tokenBudget?: number | null }> | undefined,
+): boolean {
+  if (!options) return false;
+  if (options.tokenBudget !== undefined) return true;
+  if (options.status !== undefined) return true;
+  return false;
+}
+
 export function createClaudeGoalRuntimeControls(opts: Readonly<{
   injectGoalCommand: ClaudeGoalCommandInjector;
   /**
@@ -104,7 +129,13 @@ export function createClaudeGoalRuntimeControls(opts: Readonly<{
   recordGoalSetIntent?: () => void;
 }>): ClaudeGoalRuntimeControls {
   return {
-    setGoal: async (objective) => {
+    setGoal: async (objective, options) => {
+      if (requestsUnsupportedGoalOption(options)) {
+        // Fail loudly before injecting: a budget/status mutation cannot be delivered via `/goal`,
+        // so pretending it succeeded (or injecting an objective-only command that silently drops it)
+        // would leave metadata/runtime disagreeing.
+        return unsupportedOptionError();
+      }
       const trimmed = typeof objective === 'string' ? objective.trim() : '';
       if (!trimmed) {
         // Claude `/goal` cannot pursue an empty objective. Returning a non-fallback

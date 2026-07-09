@@ -36,6 +36,18 @@ export const SessionWorkflowRunStatusV1Schema = z.enum([
 ]);
 export type SessionWorkflowRunStatusV1 = z.infer<typeof SessionWorkflowRunStatusV1Schema>;
 
+/**
+ * Optional reason qualifier for a workflow run's status. Additive and forward-compatible:
+ * today only `interrupted` is emitted (a run that was `active`/`blocked`/`unknown` when the CLI
+ * process died or shut down and was synthetically terminated to `stopped` by startup
+ * reconciliation / graceful teardown). Clients may render a distinct tone; absence means the
+ * status was reached by a real provider transition.
+ */
+export const SessionWorkflowRunStatusReasonV1Schema = z.enum([
+  'interrupted',
+]);
+export type SessionWorkflowRunStatusReasonV1 = z.infer<typeof SessionWorkflowRunStatusReasonV1Schema>;
+
 export const SessionWorkflowAgentStatusV1Schema = z.enum([
   'pending',
   'active',
@@ -88,6 +100,7 @@ export const SessionWorkflowRunSnapshotV1Schema = z
     agentId: z.string().trim().min(1).optional(),
     title: z.string().trim().min(1).max(SESSION_WORKFLOW_RUN_SNAPSHOT_TITLE_MAX),
     status: SessionWorkflowRunStatusV1Schema,
+    statusReason: SessionWorkflowRunStatusReasonV1Schema.optional(),
     vendorRef: z.string().trim().min(1).optional(),
     workflowToolUseId: z.string().trim().min(1).optional(),
     sourceSessionId: z.string().trim().min(1).optional(),

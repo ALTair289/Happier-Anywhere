@@ -6,6 +6,7 @@ import {
   type SessionWorkflowAgentStatusV1,
   type SessionWorkflowPhaseSnapshotV1,
   type SessionWorkflowRunSnapshotV1,
+  type SessionWorkflowRunStatusReasonV1,
   type SessionWorkflowRunStatusV1,
 } from '@happier-dev/protocol';
 
@@ -77,8 +78,20 @@ type MutableRun = {
   providerTaskId?: string;
   explicit: boolean;
   status: SessionWorkflowRunStatusV1;
+  statusReason?: SessionWorkflowRunStatusReasonV1;
   title: string;
   sourceSessionId?: string;
+  /**
+   * Count overrides used ONLY by startup reconciliation (W-1): a run seeded from a persisted
+   * headline has no live agent rows, so its counts are carried here to keep the interrupted card
+   * faithful (e.g. "3/17"). Ignored once real agent rows exist.
+   */
+  reconciledCounts?: Readonly<{
+    totalAgents: number;
+    completedAgents: number;
+    failedAgents?: number;
+    blockedAgents?: number;
+  }>;
   startedAt?: number;
   completedAt?: number;
   tokensUsed?: number;
@@ -108,6 +121,26 @@ export type ClaudeWorkflowActivityTracker = Readonly<{
   getWorkflowOwnedAgentToolUseIds(): ReadonlySet<string>;
   /** Preferred provider-source key for runtime activity; falls back to the run id until learned. */
   getRuntimeActivitySourceKeyForRunId(runId: string): string | null;
+  /**
+   * Startup reconciliation (W-1): synthesize a terminal `stopped`/`interrupted` transition for a
+   * run that was left active by a prior crashed process and has NOT been re-observed live. If the
+   * run id is already known (genuinely resumed), this is a no-op and returns an empty observation.
+   */
+  reconcileInterruptedRunFromHeadline(
+    run: WorkflowInterruptedRunSeed,
+    params: Readonly<{ updatedAt: number }>,
+  ): WorkflowActivityObservation;
+}>;
+
+/** Minimal detail needed to rebuild a faithful terminal snapshot for an interrupted run (W-1). */
+export type WorkflowInterruptedRunSeed = Readonly<{
+  runId: string;
+  title: string;
+  workflowToolUseId?: string;
+  totalAgents: number;
+  completedAgents: number;
+  failedAgents?: number;
+  blockedAgents?: number;
 }>;
 
 const TERMINAL_RUN_STATUSES: ReadonlySet<SessionWorkflowRunStatusV1> = new Set([
@@ -427,6 +460,9 @@ export function createClaudeWorkflowActivityTracker(params: Readonly<{
     const runSignal = runStatusFromSignal(fact.status);
     if (isTerminalRunStatus(runSignal)) {
       run.status = runSignal;
+      // A real terminal transition supersedes any synthetic "interrupted" reconciliation qualifier
+      // (e.g. a late-arriving completion for a run that was reconciled after the grace window).
+      delete run.statusReason;
     } else if (!isTerminalRunStatus(run.status)) {
       run.status = runSignal === 'unknown' ? run.status : runSignal;
     }
@@ -507,16 +543,28 @@ export function createClaudeWorkflowActivityTracker(params: Readonly<{
     const journalSpec = resolveJournalSpec(run, fact);
     const existingAgentIndex = run.agentOrder.indexOf(fact.agentId);
     const fallbackOrdinal = existingAgentIndex >= 0 ? existingAgentIndex + 1 : run.agentOrder.length + 1;
-    const isOpaquePendingJournalTitle = fact.status === 'active' && fact.title === fact.agentId;
+    // W-7: a journal fact whose title is just the raw agent id is opaque — regardless of status. A
+    // terminal `result` entry with no lane/label/message fields falls back to the agentId in the
+    // parser, so gating this on `status === 'active'` (the old code) leaked the RAW HEX AGENT ID as
+    // the row title for completed agents. Never display a raw agent id.
+    const isOpaqueJournalTitle = fact.title === fact.agentId;
+    // Prefer, in order: explicit label from the workflow script spec -> `Workflow agent N` ordinal.
+    // (A prompt first-line excerpt would slot between these, but journal facts do not currently
+    // carry the prompt — see claudeWorkflowCorrelation.parseWorkflowJournalFact; recorded as the
+    // upstream loss point in the lane report.) The ordinal is a stable last resort.
+    const journalLabel = journalSpec && journalSpec.label !== fact.agentId ? journalSpec.label : undefined;
+    const resolvedTitle = isOpaqueJournalTitle
+      ? (journalLabel ?? `Workflow agent ${fallbackOrdinal}`)
+      : fact.title;
     const effectiveFact = journalSpec
       ? {
         ...fact,
-        title: isOpaquePendingJournalTitle ? `Workflow agent ${fallbackOrdinal}` : fact.title,
+        title: resolvedTitle,
         phaseTitle: fact.phaseTitle ?? journalSpec.phaseTitle,
       }
       : {
         ...fact,
-        title: isOpaquePendingJournalTitle ? `Workflow agent ${fallbackOrdinal}` : fact.title,
+        title: resolvedTitle,
       };
     const phaseIndex = resolveJournalPhaseIndex(run, effectiveFact);
     upsertAgent(run, {
@@ -648,9 +696,13 @@ export function createClaudeWorkflowActivityTracker(params: Readonly<{
     const agents = projectAgents(run);
     const previous = lastSnapshotByRun.get(run.runId);
 
-    const completedAgents = countAgents(agents, 'complete');
-    const failedAgents = countAgents(agents, 'failed');
-    const blockedAgents = countAgents(agents, 'blocked');
+    // Reconciled-from-headline runs (W-1 startup reconcile) have no live agent rows; fall back to
+    // the counts carried from the persisted headline so the interrupted card stays faithful.
+    const reconciled = agents.length === 0 ? run.reconciledCounts : undefined;
+    const totalAgents = reconciled ? reconciled.totalAgents : agents.length;
+    const completedAgents = reconciled ? reconciled.completedAgents : countAgents(agents, 'complete');
+    const failedAgents = reconciled ? (reconciled.failedAgents ?? 0) : countAgents(agents, 'failed');
+    const blockedAgents = reconciled ? (reconciled.blockedAgents ?? 0) : countAgents(agents, 'blocked');
     const cancelledAgents = countAgents(agents, 'cancelled');
 
     const base: SessionWorkflowRunSnapshotV1 = {
@@ -663,10 +715,11 @@ export function createClaudeWorkflowActivityTracker(params: Readonly<{
       // Carry the previous revision; the material check below recomputes it.
       recordRevision: previous?.recordRevision ?? '0',
       updatedAt: run.updatedAt,
-      totalAgents: agents.length,
+      totalAgents,
       completedAgents,
       phases,
       agents,
+      ...(run.statusReason ? { statusReason: run.statusReason } : {}),
       ...(params.agentId ? { agentId: params.agentId } : {}),
       ...(run.workflowToolUseId ? { workflowToolUseId: run.workflowToolUseId } : {}),
       ...(run.sourceSessionId ? { sourceSessionId: run.sourceSessionId } : {}),
@@ -774,11 +827,51 @@ export function createClaudeWorkflowActivityTracker(params: Readonly<{
     return run.providerTaskId ?? run.workflowToolUseId ?? run.runId;
   }
 
+  function reconcileInterruptedRunFromHeadline(
+    seed: WorkflowInterruptedRunSeed,
+    reconcileParams: Readonly<{ updatedAt: number }>,
+  ): WorkflowActivityObservation {
+    const empty: WorkflowActivityObservation = {
+      changedRunIds: [], startedRunIds: [], terminalRunIds: [], statusChangedRunIds: [],
+    };
+    // Already known => the run was genuinely re-observed live since startup; never override it.
+    if (runs.has(seed.runId)) return empty;
+
+    const run = ensureRun(seed.runId, {
+      title: seed.title,
+      explicit: true,
+      status: 'stopped',
+      updatedAt: reconcileParams.updatedAt,
+      startedAt: reconcileParams.updatedAt,
+      ...(seed.workflowToolUseId ? { workflowToolUseId: seed.workflowToolUseId } : {}),
+    });
+    run.status = 'stopped';
+    run.statusReason = 'interrupted';
+    run.completedAt = reconcileParams.updatedAt;
+    run.updatedAt = reconcileParams.updatedAt;
+    run.reconciledCounts = {
+      totalAgents: seed.totalAgents,
+      completedAgents: seed.completedAgents,
+      ...(seed.failedAgents !== undefined ? { failedAgents: seed.failedAgents } : {}),
+      ...(seed.blockedAgents !== undefined ? { blockedAgents: seed.blockedAgents } : {}),
+    };
+    projectRun(run);
+    // Emit as a terminal transition only (no `startedRunIds`): we never want a runtime-activity
+    // "working" blip for a run we are immediately terminating.
+    return {
+      changedRunIds: [run.runId],
+      startedRunIds: [],
+      terminalRunIds: [run.runId],
+      statusChangedRunIds: [run.runId],
+    };
+  }
+
   return {
     observe,
     getRunSnapshot,
     getRunSnapshotMap,
     getWorkflowOwnedAgentToolUseIds,
     getRuntimeActivitySourceKeyForRunId,
+    reconcileInterruptedRunFromHeadline,
   };
 }

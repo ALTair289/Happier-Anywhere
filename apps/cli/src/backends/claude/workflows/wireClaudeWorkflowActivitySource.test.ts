@@ -193,11 +193,28 @@ describe('wireClaudeWorkflowActivitySource', () => {
     };
 
     const source = wireClaudeWorkflowActivitySource({ backendId: 'claude', binding });
+
+    // The legacy async-Agent ghost prune runs synchronously at wire time (before any grace window):
+    // the two opaque ghosts are dropped, the real run is preserved.
+    const prunedHeadline = (metadata as Record<string, unknown>).sessionWorkflowActivityHeadlineV1 as { activeRuns: { runId: string }[]; primaryRunId: string | null };
+    expect(prunedHeadline.activeRuns.map((run) => run.runId)).toEqual(['toolu_real']);
+    expect(prunedHeadline.primaryRunId).toBe('toolu_real');
+
+    // After the startup-reconcile grace window, the real run — left `active` by the prior process
+    // and never re-observed live this lifetime — is synthetically terminated to stopped/interrupted
+    // (W-1), so it leaves `activeRuns`. Ghost prune (Claude-specific legacy repair) and startup
+    // reconciliation (provider-clean) compose without fighting.
     await vi.runAllTimersAsync();
 
-    const headline = (metadata as Record<string, unknown>).sessionWorkflowActivityHeadlineV1 as { activeRuns: { runId: string }[]; primaryRunId: string | null };
-    expect(headline.activeRuns.map((run) => run.runId)).toEqual(['toolu_real']);
-    expect(headline.primaryRunId).toBe('toolu_real');
+    const reconciledHeadline = (metadata as Record<string, unknown>).sessionWorkflowActivityHeadlineV1 as {
+      activeRuns: { runId: string }[];
+      recentRuns?: { runId: string; status: string; statusReason?: string }[];
+      primaryRunId: string | null;
+    };
+    expect(reconciledHeadline.activeRuns.map((run) => run.runId)).toEqual([]);
+    const reconciledReal = reconciledHeadline.recentRuns?.find((run) => run.runId === 'toolu_real');
+    expect(reconciledReal?.status).toBe('stopped');
+    expect(reconciledReal?.statusReason).toBe('interrupted');
 
     source.dispose();
   });

@@ -109,6 +109,7 @@ function serializeMaterialProjection(snapshot: SessionWorkflowRunSnapshotV1): st
     agentId: snapshot.agentId,
     title: snapshot.title,
     status: snapshot.status,
+    statusReason: snapshot.statusReason,
     vendorRef: snapshot.vendorRef,
     workflowToolUseId: snapshot.workflowToolUseId,
     sourceSessionId: snapshot.sourceSessionId,

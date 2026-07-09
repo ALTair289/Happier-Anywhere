@@ -207,6 +207,73 @@ describe('createClaudeWorkflowActivitySource', () => {
     source.dispose();
   });
 
+  it('renews the runtime-activity lease on every durable commit, not only changed observations (W-4)', async () => {
+    const runtimeActivity = createRuntimeActivityPublisherHarness();
+    const source = createClaudeWorkflowActivitySource({
+      backendId: 'claude',
+      agentId: 'claude',
+      getCurrentClaudeSessionId: () => 'claude-session-1',
+      commitRecord: async () => {},
+      writeHeadline: () => {},
+      runtimeActivityPublisher: runtimeActivity.publisher,
+      debounceMs: 300,
+    });
+
+    source.observeTranscriptMessage(workflowToolUse('toolu_wf', 'wf'));
+    await vi.advanceTimersByTimeAsync(0);
+    // A progress-only (non-status-changing) update: this commits durably on the debounce, and the
+    // lease must be renewed off that commit even though it is not a started/terminal transition.
+    source.observeTranscriptMessage({
+      type: 'system',
+      subtype: 'task_progress',
+      task_id: 'w1',
+      tool_use_id: 'toolu_wf',
+      task_type: 'local_workflow',
+      session_id: 'claude-session-1',
+      usage: { total_tokens: 50 },
+      uuid: 'uuid-progress-heartbeat',
+    });
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(runtimeActivity.publisher.observeSource).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: 'claude_workflow_durable_commit' }),
+    );
+
+    source.dispose();
+  });
+
+  it('reconciles unobserved startup runs to stopped/interrupted through the one-writer path (W-1)', async () => {
+    const committed: SessionWorkflowRunSnapshotV1[] = [];
+    const headlines: SessionWorkflowActivityHeadlineV1[] = [];
+    const source = createClaudeWorkflowActivitySource({
+      backendId: 'claude',
+      agentId: 'claude',
+      getCurrentClaudeSessionId: () => 'claude-session-1',
+      commitRecord: async (snapshot) => { committed.push(snapshot); },
+      writeHeadline: (headline) => { headlines.push(headline); },
+      debounceMs: 300,
+    });
+
+    // A run genuinely resumed live since startup must be excluded from reconciliation.
+    source.observeTranscriptMessage(workflowToolUse('toolu_resumed', 'resumed'));
+    await vi.advanceTimersByTimeAsync(0);
+    committed.length = 0;
+    headlines.length = 0;
+
+    await source.reconcileStartupInterruptedRuns([
+      { runId: 'toolu_resumed', title: 'resumed', totalAgents: 1, completedAgents: 0 },
+      { runId: 'wf_crashed', title: 'Crashed workflow', workflowToolUseId: 'toolu_crashed', totalAgents: 4, completedAgents: 2 },
+    ]);
+
+    expect(committed.map((s) => s.runId)).toEqual(['wf_crashed']);
+    expect(committed[0]).toMatchObject({ status: 'stopped', statusReason: 'interrupted', totalAgents: 4, completedAgents: 2 });
+    const lastHeadline = headlines.at(-1);
+    expect(lastHeadline?.activeRuns.map((r) => r.runId)).not.toContain('wf_crashed');
+    expect(lastHeadline?.recentRuns?.find((r) => r.runId === 'wf_crashed')?.statusReason).toBe('interrupted');
+
+    source.dispose();
+  });
+
   it('does not publish workflow records or headlines for async Agent launches', async () => {
     const { committed, headlines, source } = setup();
     source.observeTranscriptMessage(agentAsyncLaunchResult('toolu_agent'));

@@ -2,8 +2,43 @@ import { isClaudeSlashCommandSupported, type SessionWorkStateV1 } from '@happier
 
 import { logger } from '@/ui/logger';
 
+import type { RawJSONLines } from '../types';
+import { readClaudeTranscriptTurnSignal } from '../localControl/readClaudeTranscriptTurnSignal';
 import { routeClaudeAttachment } from '../attachments/claudeAttachmentRouter';
 import { buildEmptyClaudeGoalWorkStateSnapshot, createClaudeGoalStatusWorkStateTracker } from './claudeGoalStatus';
+
+/**
+ * Read the additive per-message token cost from a raw `assistant` transcript row's `message.usage`.
+ * G-3/E accumulates NEW tokens billed per turn — `input_tokens + output_tokens + cache_creation` —
+ * deliberately excluding `cache_read_input_tokens` (re-reading the growing context each turn would
+ * multiply-count it). The provider's authoritative `goal_status.tokens` WINS on completion, so this
+ * mid-run figure is an honest estimate, not a precise accounting.
+ */
+function readAssistantTurnTokens(message: unknown): number {
+  if (!message || typeof message !== 'object') return 0;
+  const record = message as Record<string, unknown>;
+  if (record.type !== 'assistant') return 0;
+  const inner = record.message;
+  const usage = inner && typeof inner === 'object' ? (inner as Record<string, unknown>).usage : undefined;
+  if (!usage || typeof usage !== 'object') return 0;
+  const u = usage as Record<string, unknown>;
+  const read = (value: unknown): number =>
+    typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.trunc(value) : 0;
+  return read(u.input_tokens) + read(u.output_tokens) + read(u.cache_creation_input_tokens);
+}
+
+/**
+ * G-3/E restart double-count guard: is a raw transcript row STRICTLY newer than `basisMs`?
+ * Rows carry an ISO `timestamp`. Fail-closed — a row without a parseable timestamp returns `false`
+ * (cannot be proven newer than the floor basis, so it is treated as already-counted and not re-folded).
+ */
+function isTranscriptRowNewerThanMs(message: unknown, basisMs: number): boolean {
+  const raw = message && typeof message === 'object'
+    ? (message as Record<string, unknown>).timestamp
+    : undefined;
+  const timestampMs = typeof raw === 'string' ? Date.parse(raw) : Number.NaN;
+  return Number.isFinite(timestampMs) && timestampMs > basisMs;
+}
 
 /**
  * Centralized Claude native `/goal` SOURCE wiring (plan H6).
@@ -56,6 +91,21 @@ export type ClaudeGoalWorkStateSource = Readonly<{
    * Does not publish; the goal item still comes from the subsequent observed `goal_status`.
    */
   recordGoalSetIntent(): void;
+  /**
+   * G-6: on graceful CLI session teardown, if the tracked Claude goal is still ACTIVE and unmet,
+   * publish it once with `statusReason:'interrupted'` (status stays `active`) so metadata records the
+   * interruption instead of leaving the goal looking live. No-op when there is no active goal.
+   */
+  finalizeInterruptedGoalOnShutdown(): void;
+  /**
+   * G-3/E restart continuity: seed the live-usage accumulator from the last-published goal work-state
+   * item (read from session metadata at wiring time). Only an ACTIVE item with usage seeds; terminal
+   * or usage-less items are ignored. Lets a fresh tracker continue a running total after a CLI restart
+   * instead of restarting the mid-run usage from zero.
+   */
+  reseedActiveGoalUsageFromPublishedItem(
+    item: Readonly<{ status?: unknown; tokensUsed?: unknown; timeUsedSeconds?: unknown; updatedAt?: unknown }> | null | undefined,
+  ): void;
 }>;
 
 function readSlashCommandsFromSystemMessage(message: unknown): unknown {
@@ -101,8 +151,11 @@ export function createClaudeGoalWorkStateSource(params: Readonly<{
    */
   getCurrentClaudeSessionId: () => string | null;
   logPrefix?: string;
+  /** Injectable clock for the live-usage wall-time (G-3/E). Defaults to `Date.now`. */
+  now?: () => number;
 }>): ClaudeGoalWorkStateSource {
   const logPrefix = params.logPrefix ?? '[claude-goal-source]';
+  const now = params.now ?? Date.now;
   const tracker = createClaudeGoalStatusWorkStateTracker({
     backendId: params.backendId,
     ...(params.agentId ? { agentId: params.agentId } : {}),
@@ -117,12 +170,80 @@ export function createClaudeGoalWorkStateSource(params: Readonly<{
   const resolveCurrentClaudeSessionId = (): string | null =>
     observedClaudeSessionId ?? params.getCurrentClaudeSessionId();
 
+  // G-3/E live-usage state. `goalSetAtMs` is the wall-clock time the current active goal was first
+  // observed (basis for elapsed); `pendingTurnTokens` accrues the current in-flight turn's new tokens
+  // and is folded into the goal item on the turn boundary, then reset.
+  let goalSetAtMs: number | null = null;
+  let pendingTurnTokens = 0;
+  // G-3/E restart double-count guard. After a restart the scanner re-feeds the WHOLE transcript on the
+  // raw channel (initial-replay is NOT suppressed for this source by default), so historical assistant
+  // turns re-arrive here. The reseed floor ALREADY counts those turns; re-folding them would inflate the
+  // token total on every restart. `reseedBasisMs` is the wall-time the floor was last published at — an
+  // assistant turn whose transcript `timestamp` is at/before it was already counted and must NOT re-fold.
+  let reseedBasisMs: number | null = null;
+
+  const readPublishedActiveGoalStatus = (snapshot: SessionWorkStateV1): 'active' | 'other' | 'none' => {
+    const item = snapshot.items.find((candidate) => candidate.id === 'goal:claude');
+    if (!item) return 'none';
+    return item.status === 'active' ? 'active' : 'other';
+  };
+
   const publish = (snapshot: SessionWorkStateV1 | null): void => {
     if (!snapshot) return;
+    // Track the active-goal lifecycle so live usage folds only during an active goal and elapsed is
+    // measured from when THIS goal was set. A published active goal (re)starts the wall-time basis on
+    // its first observation; a non-active or removed goal ends it.
+    const status = readPublishedActiveGoalStatus(snapshot);
+    if (status === 'active') {
+      if (goalSetAtMs === null) goalSetAtMs = now();
+    } else {
+      goalSetAtMs = null;
+      pendingTurnTokens = 0;
+      // The goal lifecycle ended: a subsequent NEW goal in this process must count from scratch, so the
+      // historical-replay guard basis no longer applies.
+      reseedBasisMs = null;
+    }
     try {
       params.publishWorkStateSnapshot(snapshot);
     } catch (error) {
       logger.debug(`${logPrefix}: failed to publish Claude goal work-state snapshot (non-fatal)`, error);
+    }
+  };
+
+  // G-3/E: on a turn boundary, fold the accrued turn tokens + elapsed wall-time into the active goal.
+  const foldTurnUsageOnBoundary = (message: RawJSONLines): void => {
+    // Skip turns already accounted for by the reseed floor (historical rows re-fed by the transcript
+    // initial-replay after a restart). Fail-closed: a row without a parseable timestamp cannot be
+    // proven newer than the floor basis, so it is treated as already-counted and does not re-fold.
+    if (reseedBasisMs !== null && !isTranscriptRowNewerThanMs(message, reseedBasisMs)) return;
+
+    const turnTokens = readAssistantTurnTokens(message);
+    if (turnTokens > 0) pendingTurnTokens += turnTokens;
+
+    const signal = readClaudeTranscriptTurnSignal(message);
+    // Only a completed turn (not continuation/terminal-failure) records a usage checkpoint.
+    if (signal?.type !== 'completion_candidate') return;
+    if (goalSetAtMs === null) {
+      pendingTurnTokens = 0;
+      return;
+    }
+    const elapsedSeconds = Math.max(0, (now() - goalSetAtMs) / 1000);
+    const snapshot = tracker.foldActiveGoalUsage({
+      updatedAt: now(),
+      currentClaudeSessionId: resolveCurrentClaudeSessionId(),
+      addTokens: pendingTurnTokens,
+      timeUsedSeconds: elapsedSeconds,
+    });
+    pendingTurnTokens = 0;
+    // NB: bypass the lifecycle-tracking `publish` — a usage fold never changes the goal's active
+    // status, and routing it through `publish` would be harmless but the direct call keeps the
+    // wall-time basis untouched.
+    if (snapshot) {
+      try {
+        params.publishWorkStateSnapshot(snapshot);
+      } catch (error) {
+        logger.debug(`${logPrefix}: failed to publish Claude goal usage snapshot (non-fatal)`, error);
+      }
     }
   };
 
@@ -157,6 +278,9 @@ export function createClaudeGoalWorkStateSource(params: Readonly<{
       // transcript stream; gate `/goal` capability (fail-closed) from it.
       const slashCommands = readSlashCommandsFromSystemMessage(message);
       if (slashCommands !== undefined) applySlashCommands(slashCommands);
+      // G-3/E: accrue this turn's token usage and, on a turn boundary, fold live usage into the
+      // active goal. Rides the SAME raw transcript channel (assistant rows carry `message.usage`).
+      foldTurnUsageOnBoundary(message as RawJSONLines);
     },
     applySlashCommands,
     clearGoalWorkState() {
@@ -169,6 +293,26 @@ export function createClaudeGoalWorkStateSource(params: Readonly<{
     },
     recordGoalSetIntent() {
       tracker.recordGoalControlIntent({ kind: 'set' });
+    },
+    finalizeInterruptedGoalOnShutdown() {
+      // `publish` no-ops on null, so a session with no active goal to interrupt is a clean no-op.
+      publish(tracker.buildInterruptedShutdownSnapshot({
+        updatedAt: Date.now(),
+        currentClaudeSessionId: resolveCurrentClaudeSessionId(),
+      }));
+    },
+    reseedActiveGoalUsageFromPublishedItem(item) {
+      if (!item || item.status !== 'active') return;
+      const tokensUsed = typeof item.tokensUsed === 'number' && item.tokensUsed >= 0 ? item.tokensUsed : undefined;
+      const timeUsedSeconds = typeof item.timeUsedSeconds === 'number' && item.timeUsedSeconds >= 0 ? item.timeUsedSeconds : undefined;
+      if (tokensUsed === undefined && timeUsedSeconds === undefined) return;
+      tracker.reseedActiveGoalUsage({
+        ...(tokensUsed !== undefined ? { tokensUsed } : {}),
+        ...(timeUsedSeconds !== undefined ? { timeUsedSeconds } : {}),
+      });
+      // Record the floor's publish time as the historical-replay cutoff: assistant turns at/before it
+      // were already counted into `tokensUsed`, so the initial-replay must not re-fold them.
+      reseedBasisMs = typeof item.updatedAt === 'number' && Number.isFinite(item.updatedAt) ? item.updatedAt : null;
     },
   };
 }

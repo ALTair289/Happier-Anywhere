@@ -7,11 +7,13 @@ export {
   SessionWorkflowAgentStatusV1Schema,
   SessionWorkflowPhaseSnapshotV1Schema,
   SessionWorkflowRunSnapshotV1Schema,
+  SessionWorkflowRunStatusReasonV1Schema,
   SessionWorkflowRunStatusV1Schema,
   type SessionWorkflowAgentSnapshotV1,
   type SessionWorkflowAgentStatusV1,
   type SessionWorkflowPhaseSnapshotV1,
   type SessionWorkflowRunSnapshotV1,
+  type SessionWorkflowRunStatusReasonV1,
   type SessionWorkflowRunStatusV1,
 } from './sessionWorkflowRunSnapshotV1.js';
 export {

@@ -11,7 +11,12 @@ export const SessionWorkStateStatusV1Schema = z.enum([
 ]);
 export type SessionWorkStateStatusV1 = z.infer<typeof SessionWorkStateStatusV1Schema>;
 
-export const SessionWorkStateStatusReasonV1Schema = z.enum(['budgetLimited']);
+// Provider-neutral status reasons (additive, shared across providers):
+//  - `budgetLimited`: goal paused/blocked because a token budget was reached (Codex).
+//  - `interrupted`: goal was left `active` when its CLI session tore down gracefully without the
+//    goal being met (G-6). Status stays `active` (the goal may resume); the reason lets the UI mark
+//    it "(interrupted)" and resume-injection distinguish it from a freshly-set goal.
+export const SessionWorkStateStatusReasonV1Schema = z.enum(['budgetLimited', 'interrupted']);
 export type SessionWorkStateStatusReasonV1 = z.infer<typeof SessionWorkStateStatusReasonV1Schema>;
 
 export const SessionWorkStateItemKindV1Schema = z.enum(['goal', 'task', 'todo']);

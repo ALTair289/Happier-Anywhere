@@ -1,7 +1,13 @@
-import type {
-  SessionWorkflowActivityHeadlineV1,
-  SessionWorkflowRunSnapshotV1,
+import {
+  isTerminalWorkflowRunStatus,
+  type SessionWorkflowActivityHeadlineV1,
+  type SessionWorkflowRunSnapshotV1,
 } from '@happier-dev/protocol';
+
+import {
+  resolveStartupReconcileTargets,
+  type WorkflowStartupReconcileCandidate,
+} from './workflowActivityStartupReconcile';
 
 import {
   createCoalescedWorkflowActivityPublisher,
@@ -47,6 +53,12 @@ export type ClaudeWorkflowActivitySource = Readonly<{
   getWorkflowOwnedAgentToolUseIds(): ReadonlySet<string>;
   /** Drain pending writes immediately (terminal flush / stream close / session finalization). */
   flush(): Promise<void>;
+  /**
+   * Startup reconciliation (W-1): given the stale non-terminal runs read from the persisted
+   * headline, synthetically terminate to `stopped`/`interrupted` any that this fresh source has NOT
+   * re-observed live. Flows through the normal tracker -> coalesced-publisher path (one writer).
+   */
+  reconcileStartupInterruptedRuns(candidates: readonly WorkflowStartupReconcileCandidate[]): Promise<void>;
   /** Stop scheduling. */
   dispose(): void;
 }>;
@@ -73,10 +85,19 @@ export function createClaudeWorkflowActivitySource(params: Readonly<{
     getCurrentClaudeSessionId: params.getCurrentClaudeSessionId,
   });
 
+  // W-4 lease heartbeat: tie runtime-activity liveness to the durable write cadence. Assigned after
+  // the runtime-activity helpers below exist; called on EVERY successful durable commit (not only on
+  // `changedRunIds` observations) so a long-running workflow with sparse progress never lets the
+  // ephemeral "working" lease lapse while its durable record still says active.
+  let renewRuntimeLeaseAfterCommit: (snapshot: SessionWorkflowRunSnapshotV1) => void = () => {};
+
   const publisher = createWorkflowActivityPublisher({
     backendId: params.backendId,
     ...(params.agentId ? { agentId: params.agentId } : {}),
-    commitRecord: params.commitRecord,
+    commitRecord: async (snapshot) => {
+      await params.commitRecord(snapshot);
+      renewRuntimeLeaseAfterCommit(snapshot);
+    },
     writeHeadline: params.writeHeadline,
     onError: (error, ctx) => {
       logger.debug(`${logPrefix}: durable workflow record write failed for run ${ctx.runId} (will retry)`, error);
@@ -195,6 +216,41 @@ export function createClaudeWorkflowActivitySource(params: Readonly<{
     }
   };
 
+  renewRuntimeLeaseAfterCommit = (snapshot: SessionWorkflowRunSnapshotV1): void => {
+    const runtimeActivityPublisher = params.runtimeActivityPublisher;
+    if (!runtimeActivityPublisher) return;
+    // Terminal runs clear their source via the observation path; do not renew a lease we are about
+    // to (or already did) clear.
+    if (isTerminalWorkflowRunStatus(snapshot.status)) return;
+    const sourceId = publishedRuntimeSourceIdByRunId.get(snapshot.runId) ?? workflowRuntimeSourceId(snapshot.runId);
+    if (!sourceId) return;
+    // `observeSource` is a no-op when the source is not active, so an out-of-order commit before the
+    // source is announced simply does nothing — safe.
+    runRuntimeActivityEffect('commit-heartbeat', () => runtimeActivityPublisher.observeSource({
+      id: sourceId,
+      reason: 'claude_workflow_durable_commit',
+    }));
+  };
+
+  const reconcileStartupInterruptedRuns = async (
+    candidates: readonly WorkflowStartupReconcileCandidate[],
+  ): Promise<void> => {
+    if (candidates.length === 0) return;
+    // Runs the fresh tracker has already learned were genuinely resumed; exclude them.
+    const observedRunIds = new Set(tracker.getRunSnapshotMap().keys());
+    const targets = resolveStartupReconcileTargets(candidates, observedRunIds);
+    if (targets.length === 0) return;
+    const updatedAt = Date.now();
+    for (const target of targets) {
+      const observation = tracker.reconcileInterruptedRunFromHeadline(target, { updatedAt });
+      if (observation.changedRunIds.length === 0) continue;
+      logger.debug(`${logPrefix}: reconciling interrupted workflow run ${target.runId} (stopped/interrupted)`);
+      publishRuntimeActivityObservation(observation);
+      coalesced.notify(observation);
+    }
+    await coalesced.flush();
+  };
+
   const observeTrackerValue = (message: unknown): void => {
     const observation = tracker.observe(message, { updatedAt: Date.now() });
     if (observation.changedRunIds.length === 0) return;
@@ -222,6 +278,7 @@ export function createClaudeWorkflowActivitySource(params: Readonly<{
       await journalFollower?.syncAll();
       await coalesced.flush();
     },
+    reconcileStartupInterruptedRuns,
     dispose() {
       clearPublishedRuntimeSources('claude_workflow_source_disposed');
       journalFollower?.dispose();
