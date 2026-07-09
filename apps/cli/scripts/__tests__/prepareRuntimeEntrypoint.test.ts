@@ -13,7 +13,7 @@ describe('maybeRefreshLocalBundledWorkspacePackages', () => {
       const projectRoot = resolve(repoRoot, 'apps', 'cli');
       const syncModuleDir = resolve(repoRoot, 'scripts', 'workspaces');
       const syncCalledPath = resolve(repoRoot, '.project', 'tmp', 'sync-called');
-      const lockPath = resolve(repoRoot, '.project', 'tmp', 'cli-shared-deps-build.lock');
+      const lockPath = resolve(repoRoot, '.project', 'tmp', 'cli-dist-build.lock');
 
       mkdirSync(projectRoot, { recursive: true });
       mkdirSync(syncModuleDir, { recursive: true });

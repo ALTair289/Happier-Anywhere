@@ -24,6 +24,7 @@ export function syncPackageDist(options = {}) {
     lockTimeoutMs: options.lockTimeoutMs,
     lockPollIntervalMs: options.lockPollIntervalMs,
     lockStaleAfterMs: options.lockStaleAfterMs,
+    skipLock: options.skipLock,
   });
 }
 
@@ -48,29 +49,63 @@ function syncPackageDistUnlocked(options = {}) {
   makeDir(dirname(packageDistDir), { recursive: true });
   copy(distDir, stagingDir, { recursive: true });
 
-  let movedExistingDir = false;
-  try {
-    if (exists(packageDistDir)) {
-      rename(packageDistDir, backupDir);
-      movedExistingDir = true;
-    }
-    rename(stagingDir, packageDistDir);
-    if (movedExistingDir) {
-      remove(backupDir, { recursive: true, force: true });
-    }
-  } catch (error) {
-    remove(stagingDir, { recursive: true, force: true });
-    if (movedExistingDir && exists(backupDir) && !exists(packageDistDir)) {
-      rename(backupDir, packageDistDir);
-    }
-    throw error;
-  }
+  atomicPromoteDirectorySync({
+    sourceDir: stagingDir,
+    targetDir: packageDistDir,
+    backupDir,
+    existsSync: exists,
+    mkdirSync: makeDir,
+    renameSync: rename,
+    rmSync: remove,
+    removeSourceOnFailure: true,
+  });
 
   return {
     packageRoot,
     distDir,
     packageDistDir,
   };
+}
+
+export function atomicPromoteDirectorySync(options = {}) {
+  const sourceDir = resolve(String(options.sourceDir ?? ''));
+  const targetDir = resolve(String(options.targetDir ?? ''));
+  const backupDir = resolve(String(options.backupDir ?? `${targetDir}.__backup__.${process.pid}.${Date.now()}`));
+  const exists = options.existsSync ?? existsSync;
+  const makeDir = options.mkdirSync ?? mkdirSync;
+  const rename = options.renameSync ?? renameSync;
+  const remove = options.rmSync ?? rmSync;
+  const removeSourceOnFailure = options.removeSourceOnFailure !== false;
+
+  if (!sourceDir || !targetDir || sourceDir === targetDir) {
+    throw new Error('[atomic-promote] source and target directories must be distinct');
+  }
+  if (!exists(sourceDir)) {
+    throw new Error(`[atomic-promote] missing source directory: ${sourceDir}`);
+  }
+
+  remove(backupDir, { recursive: true, force: true });
+  makeDir(dirname(targetDir), { recursive: true });
+
+  let movedExistingDir = false;
+  try {
+    if (exists(targetDir)) {
+      rename(targetDir, backupDir);
+      movedExistingDir = true;
+    }
+    rename(sourceDir, targetDir);
+    if (movedExistingDir) {
+      remove(backupDir, { recursive: true, force: true });
+    }
+  } catch (error) {
+    if (removeSourceOnFailure) {
+      remove(sourceDir, { recursive: true, force: true });
+    }
+    if (movedExistingDir && exists(backupDir) && !exists(targetDir)) {
+      rename(backupDir, targetDir);
+    }
+    throw error;
+  }
 }
 
 function hasOwnOption(options, name) {

@@ -54,7 +54,7 @@ export async function bundleWorkspaceDeps(opts = {}) {
   // must still be loaded from the *script* repo (this monorepo checkout), not from the sandbox.
   const targetRepoRoot = opts.repoRoot ?? SCRIPT_REPO_ROOT;
   const happyCliDir = opts.happyCliDir ?? resolve(targetRepoRoot, 'apps', 'cli');
-  const lockPath = opts.lockPath ?? resolve(targetRepoRoot, '.project', 'tmp', 'cli-shared-deps-build.lock');
+  const lockPath = opts.lockPath ?? resolve(targetRepoRoot, '.project', 'tmp', 'cli-dist-build.lock');
 
   return withWorkspaceBundleLock(async () => {
     const {

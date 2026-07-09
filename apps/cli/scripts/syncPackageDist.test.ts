@@ -46,7 +46,7 @@ describe('syncPackageDist', () => {
       writeFileSync(join(distDir, 'index.mjs'), 'export const next = true;\n', 'utf8');
       writeFileSync(join(packageDistDir, 'index.mjs'), 'export const previous = true;\n', 'utf8');
 
-      const lockPath = resolve(packageRoot, '.project', 'tmp', 'cli-shared-deps-build.lock');
+      const lockPath = resolve(packageRoot, '.project', 'tmp', 'cli-dist-build.lock');
       await withWorkspaceBundleLock(
         async () => {
           expect(() =>

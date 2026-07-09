@@ -34,7 +34,7 @@ function findRepoRoot(startDir) {
 }
 
 const repoRoot = findRepoRoot(__dirname);
-const DEFAULT_BUILD_LOCK_PATH = resolve(repoRoot, '.project', 'tmp', 'cli-shared-deps-build.lock');
+const DEFAULT_BUILD_LOCK_PATH = resolve(repoRoot, '.project', 'tmp', 'cli-dist-build.lock');
 
 export function execYarn(args, options = {}) {
   return execYarnCommand(args, options);

@@ -29,6 +29,7 @@ export async function main(argv = process.argv, options = {}) {
     lockTimeoutMs: options.lockTimeoutMs,
     lockPollIntervalMs: options.lockPollIntervalMs,
     lockStaleAfterMs: options.lockStaleAfterMs,
+    skipLock: options.skipLock,
   });
 }
 

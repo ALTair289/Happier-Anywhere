@@ -92,7 +92,7 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "node scripts/rmDist.mjs && tsc --noEmit && node scripts/runPkgrollBuild.mjs && node scripts/syncPackageDist.mjs",
+    "build": "node scripts/build.mjs",
     "test": "$npm_execpath run test:unit",
     "vitest": "$npm_execpath run -s build:shared && vitest",
     "test:unit": "vitest run --config vitest.config.ts && yarn -s test:import-cycles",

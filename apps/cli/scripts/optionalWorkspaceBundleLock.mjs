@@ -323,10 +323,13 @@ export function findRepoRoot(startDir) {
 }
 
 export function resolveCliSharedDepsBuildLockPath(repoRoot) {
-  return resolve(repoRoot, '.project', 'tmp', 'cli-shared-deps-build.lock');
+  return resolve(repoRoot, '.project', 'tmp', 'cli-dist-build.lock');
 }
 
 export function resolveCliSharedDepsBuildLockOptions(options = {}) {
+  if (options.skipLock === true) {
+    return null;
+  }
   const explicitLockPath = String(options.lockPath ?? '').trim();
   const explicitRepoRoot = String(options.repoRoot ?? '').trim();
   const repoRoot = explicitRepoRoot ? resolve(explicitRepoRoot) : findRepoRoot(options.startDir);

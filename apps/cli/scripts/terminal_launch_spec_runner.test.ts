@@ -1,10 +1,10 @@
 import { createRequire } from 'node:module';
-import { mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 const require = createRequire(import.meta.url);
 
@@ -57,5 +57,55 @@ describe('terminal_launch_spec_runner.cjs', () => {
       }
       await rm(workDir, { recursive: true, force: true });
     }
+  });
+
+  it('tees child stderr to a per-session diagnostic log and non-zero exit report', async () => {
+    const mod = require('./terminal_launch_spec_runner.cjs') as {
+      runLaunchSpecFile: (specPath: string) => Promise<number>;
+    };
+    const specDir = await mkdtemp(join(tmpdir(), 'happier-terminal-launch-spec-test-'));
+    const workDir = await mkdtemp(join(tmpdir(), 'happier-terminal-launch-spec-work-'));
+    const logsDir = join(workDir, 'logs', 'terminal-runner');
+    const sessionExitDir = join(workDir, 'logs', 'session-exit');
+    const specPath = join(specDir, 'launch.json');
+    await writeFile(specPath, JSON.stringify({
+      command: process.execPath,
+      args: ['-e', 'process.stderr.write("raw claude stderr\\n"); process.exit(1);'],
+      cwd: workDir,
+      env: {
+        PATH: process.env.PATH ?? '',
+      },
+      diagnostics: {
+        sessionId: 'sess_stderr',
+        logsDir,
+        sessionExitDir,
+      },
+    }), { mode: 0o600 });
+
+    const stderrWrite = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      await expect(mod.runLaunchSpecFile(specPath)).resolves.toBe(1);
+      expect(stderrWrite).toHaveBeenCalled();
+    } finally {
+      stderrWrite.mockRestore();
+    }
+
+    const logNames = await readdir(logsDir);
+    expect(logNames).toHaveLength(1);
+    expect(logNames[0]).toMatch(/^session-sess_stderr-pid-\d+\.stderr\.log$/);
+    await expect(readFile(join(logsDir, logNames[0]!), 'utf8')).resolves.toBe('raw claude stderr\n');
+
+    const reportNames = await readdir(sessionExitDir);
+    expect(reportNames).toHaveLength(1);
+    expect(reportNames[0]).toMatch(/^session-sess_stderr-pid-\d+\.json$/);
+    const report = JSON.parse(await readFile(join(sessionExitDir, reportNames[0]!), 'utf8'));
+    expect(report).toMatchObject({
+      sessionId: 'sess_stderr',
+      observedBy: 'session',
+      reason: 'terminal-launch-child-exited',
+      code: 1,
+      stderrLogPath: join(logsDir, logNames[0]!),
+      stderrTail: 'raw claude stderr\n',
+    });
   });
 });

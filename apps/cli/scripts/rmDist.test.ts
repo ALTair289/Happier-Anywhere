@@ -70,7 +70,7 @@ describe('rmDist', () => {
       writeFileSync(join(rootDir, 'package-dist', 'index.mjs'), 'export const previous = true;\n', 'utf8');
       process.chdir(rootDir);
 
-      const lockPath = resolve(rootDir, '.project', 'tmp', 'cli-shared-deps-build.lock');
+      const lockPath = resolve(rootDir, '.project', 'tmp', 'cli-dist-build.lock');
       await withWorkspaceBundleLock(
         async () => {
           await expect(

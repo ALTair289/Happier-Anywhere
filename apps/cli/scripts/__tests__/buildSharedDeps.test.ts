@@ -385,7 +385,7 @@ describe('buildSharedDeps', () => {
   it('serializes concurrent shared-deps builds through a single lock', async () => {
     const rootDir = createTempDirSync('happy-build-shared-lock-');
     try {
-      const lockPath = resolve(rootDir, 'cli-shared-deps-build.lock');
+      const lockPath = resolve(rootDir, 'cli-dist-build.lock');
       const events: string[] = [];
       let releaseFirst: (() => void) | null = null;
 

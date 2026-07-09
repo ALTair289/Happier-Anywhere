@@ -2899,10 +2899,10 @@
     "@jridgewell/resolve-uri" "^3.1.0"
     "@jridgewell/sourcemap-codec" "^1.4.14"
 
-"@legendapp/list@2.0.0-beta.3":
-  version "2.0.0-beta.3"
-  resolved "https://registry.npmjs.org/@legendapp/list/-/list-2.0.0-beta.3.tgz"
-  integrity sha512-ZUiba+vENzXkac6urXauImww9llVn7Rir/XRDTl+IYZPhxCkLt765yfJU5WFTsxRdR73CeyqTxMor8JG5cUc0A==
+"@legendapp/list@3.3.2":
+  version "3.3.2"
+  resolved "https://registry.npmjs.org/@legendapp/list/-/list-3.3.2.tgz#ee3329255a143e6cb64de712a6a52960f85cac9e"
+  integrity sha512-wAw961e9PjWECXne68IVIWCUgPGrJGJySojEUFuVNICSqXKqzYSN7tA4r7SI3KVquto30Xb7PE+ZgdRZjwsOOQ==
   dependencies:
     use-sync-external-store "^1.5.0"
 
@@ -5650,7 +5650,7 @@
 
 "@tauri-apps/api@2.8.0", "@tauri-apps/api@^2.8.0", "@tauri-apps/api@~2.8.0":
   version "2.8.0"
-  resolved "https://registry.yarnpkg.com/@tauri-apps/api/-/api-2.8.0.tgz#0348a2b3ba5982ec67a7d569f329b4a55d7d5f1e"
+  resolved "https://registry.npmjs.org/@tauri-apps/api/-/api-2.8.0.tgz#0348a2b3ba5982ec67a7d569f329b4a55d7d5f1e"
   integrity sha512-ga7zdhbS2GXOMTIZRT0mYjKJtR9fivsXzsyq5U3vjDL0s6DTMwYRm0UHNjzTY5dh4+LSC68Sm/7WEiimbQNYlw==
 
 "@tauri-apps/cli-darwin-arm64@2.8.4":
@@ -7446,7 +7446,7 @@ baseline-browser-mapping@^2.9.19:
 
 basic-ftp@5.2.0, basic-ftp@^5.0.2:
   version "5.2.0"
-  resolved "https://registry.yarnpkg.com/basic-ftp/-/basic-ftp-5.2.0.tgz#7c2dff63c918bde60e6bad1f2ff93dcf5137a40a"
+  resolved "https://registry.npmjs.org/basic-ftp/-/basic-ftp-5.2.0.tgz#7c2dff63c918bde60e6bad1f2ff93dcf5137a40a"
   integrity sha512-VoMINM2rqJwJgfdHq6RiUudKt2BV+FY5ZFezP/ypmwayk68+NzzAQy4XXLlqsGD4MCzq3DrmNFD/uUmBJuGoXw==
 
 before-after-hook@^4.0.0:
@@ -17452,7 +17452,7 @@ tar-stream@^3.0.0:
 
 tar@7.5.13, tar@^7.0.1, tar@^7.5.2, tar@^7.5.4, tar@^7.5.8:
   version "7.5.13"
-  resolved "https://registry.yarnpkg.com/tar/-/tar-7.5.13.tgz#0d214ed56781a26edc313581c0e2d929ceeb866d"
+  resolved "https://registry.npmjs.org/tar/-/tar-7.5.13.tgz#0d214ed56781a26edc313581c0e2d929ceeb866d"
   integrity sha512-tOG/7GyXpFevhXVh8jOPJrmtRpOTsYqUIkVdVooZYJS/z8WhfQUX8RJILmeuJNinGAMSu1veBr4asSHFt5/hng==
   dependencies:
     "@isaacs/fs-minipass" "^4.0.0"
@@ -18197,7 +18197,7 @@ vite@7.3.2, "vite@^5.0.0 || ^6.0.0 || ^7.0.0-0":
 
 "vite@^5.0.0 || ^6.0.0 || ^7.0.0-0@7.3.2":
   version "6.4.3"
-  resolved "https://registry.yarnpkg.com/vite/-/vite-6.4.3.tgz#85a164db7ce706f2a776812efa2b340f1721858e"
+  resolved "https://registry.npmjs.org/vite/-/vite-6.4.3.tgz#85a164db7ce706f2a776812efa2b340f1721858e"
   integrity sha512-NTKlcQjlAK7MlQoyb6LgaqHc8sso/pVyUJYWMws3jg21uTJw/LddqIFPcPqP6PzpgbIcZyKI85sFE4HBrQDA8A==
   dependencies:
     esbuild "^0.25.0"

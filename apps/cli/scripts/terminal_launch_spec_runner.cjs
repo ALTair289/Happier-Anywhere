@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 
 const fs = require('node:fs/promises');
+const fsSync = require('node:fs');
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 
 const terminalSignalNames = ['SIGINT', 'SIGQUIT'];
+const stderrTailMaxChars = 64 * 1024;
 
 function isPlainObject(value) {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -34,6 +36,30 @@ function readEnv(value) {
         env[key] = envValue;
     }
     return env;
+}
+
+function readOptionalDiagnostics(value) {
+    if (value === undefined) return null;
+    if (!isPlainObject(value)) {
+        throw new Error('Invalid terminal launch spec: diagnostics must be an object');
+    }
+    const sessionId = value.sessionId;
+    const logsDir = value.logsDir;
+    const sessionExitDir = value.sessionExitDir;
+    if (sessionId !== undefined && typeof sessionId !== 'string') {
+        throw new Error('Invalid terminal launch spec: diagnostics.sessionId must be a string');
+    }
+    if (typeof logsDir !== 'string' || logsDir.length === 0) {
+        throw new Error('Invalid terminal launch spec: diagnostics.logsDir must be a non-empty string');
+    }
+    if (typeof sessionExitDir !== 'string' || sessionExitDir.length === 0) {
+        throw new Error('Invalid terminal launch spec: diagnostics.sessionExitDir must be a non-empty string');
+    }
+    return {
+        sessionId: typeof sessionId === 'string' && sessionId.trim().length > 0 ? sessionId.trim() : null,
+        logsDir,
+        sessionExitDir,
+    };
 }
 
 function buildChildEnv(specEnv, envPassthroughKeys) {
@@ -72,7 +98,89 @@ async function readLaunchSpecFile(specPath) {
         args: readStringArray(parsed.args, 'args'),
         cwd: parsed.cwd,
         env: buildChildEnv(readEnv(parsed.env), readOptionalStringArray(parsed.envPassthroughKeys, 'envPassthroughKeys')),
+        diagnostics: readOptionalDiagnostics(parsed.diagnostics),
     };
+}
+
+function sanitizeFilePart(value) {
+    const sanitized = String(value ?? '').replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
+    return sanitized.length > 0 ? sanitized : 'unknown';
+}
+
+function sessionFilePart(sessionId) {
+    return sessionId ? `session-${sanitizeFilePart(sessionId)}` : 'session-unknown';
+}
+
+function appendTail(tail, chunk) {
+    const next = tail + chunk.toString('utf8');
+    return next.length > stderrTailMaxChars ? next.slice(next.length - stderrTailMaxChars) : next;
+}
+
+function createChildStderrDiagnostics(diagnostics, pid) {
+    if (!diagnostics || typeof pid !== 'number') {
+        return null;
+    }
+    const sessionPart = sessionFilePart(diagnostics.sessionId);
+    try {
+        fsSync.mkdirSync(diagnostics.logsDir, { recursive: true });
+    } catch {
+        return null;
+    }
+    const stderrLogPath = path.join(diagnostics.logsDir, `${sessionPart}-pid-${pid}.stderr.log`);
+    const stderrLog = fsSync.createWriteStream(stderrLogPath, { flags: 'a', encoding: 'utf8' });
+    stderrLog.on('error', () => {});
+    let stderrTail = '';
+    return {
+        stderrLogPath,
+        observeStderr(chunk) {
+            stderrTail = appendTail(stderrTail, chunk);
+            stderrLog.write(chunk);
+        },
+        stderrTail() {
+            return stderrTail;
+        },
+        async close() {
+            await new Promise((resolve) => {
+                stderrLog.end(resolve);
+            });
+        },
+    };
+}
+
+async function readExistingJsonObject(filePath) {
+    try {
+        const parsed = JSON.parse(await fs.readFile(filePath, 'utf8'));
+        return isPlainObject(parsed) ? parsed : {};
+    } catch {
+        return {};
+    }
+}
+
+async function writeNonZeroSessionExitDiagnostics(params) {
+    const diagnostics = params.spec.diagnostics;
+    if (!diagnostics || !params.stderrDiagnostics) return;
+    try {
+        await fs.mkdir(diagnostics.sessionExitDir, { recursive: true });
+        const reportPath = path.join(
+            diagnostics.sessionExitDir,
+            `${sessionFilePart(diagnostics.sessionId)}-pid-${params.pid}.json`,
+        );
+        const payload = {
+            ...(await readExistingJsonObject(reportPath)),
+            sessionId: diagnostics.sessionId ?? null,
+            pid: params.pid,
+            observedAt: Date.now(),
+            observedBy: 'session',
+            reason: 'terminal-launch-child-exited',
+            code: params.code,
+            signal: params.signal ?? null,
+            stderrLogPath: params.stderrDiagnostics.stderrLogPath,
+            stderrTail: params.stderrDiagnostics.stderrTail(),
+        };
+        await fs.writeFile(reportPath, JSON.stringify(payload, null, 2), 'utf8');
+    } catch {
+        // Diagnostic retention must not change provider exit behavior.
+    }
 }
 
 function installTerminalSignalGuards() {
@@ -110,30 +218,65 @@ function runLaunchSpec(spec) {
             cwd: spec.cwd,
             env: spec.env,
             shell: false,
-            stdio: 'inherit',
+            stdio: ['inherit', 'inherit', 'pipe'],
             windowsHide: true,
+        });
+        const stderrDiagnostics = createChildStderrDiagnostics(spec.diagnostics, child.pid);
+        child.stderr?.on('data', (chunk) => {
+            stderrDiagnostics?.observeStderr(chunk);
+            process.stderr.write(chunk);
         });
         const removeSignalGuards = installTerminalSignalGuards();
         let settled = false;
-        const settle = (fn) => {
+        const settle = async (fn) => {
             if (settled) return;
             settled = true;
             removeSignalGuards();
-            fn();
+            await stderrDiagnostics?.close();
+            await fn();
         };
         child.on('error', (error) => {
             settle(() => reject(error));
         });
         child.on('close', (code, signal) => {
             if (typeof code === 'number') {
-                settle(() => resolve(code));
+                settle(async () => {
+                    if (code !== 0) {
+                        await writeNonZeroSessionExitDiagnostics({
+                            spec,
+                            pid: child.pid,
+                            code,
+                            signal,
+                            stderrDiagnostics,
+                        });
+                    }
+                    resolve(code);
+                });
                 return;
             }
             if (signal) {
-                settle(() => resolve(1));
+                settle(async () => {
+                    await writeNonZeroSessionExitDiagnostics({
+                        spec,
+                        pid: child.pid,
+                        code: null,
+                        signal,
+                        stderrDiagnostics,
+                    });
+                    resolve(1);
+                });
                 return;
             }
-            settle(() => resolve(1));
+            settle(async () => {
+                await writeNonZeroSessionExitDiagnostics({
+                    spec,
+                    pid: child.pid,
+                    code: null,
+                    signal: null,
+                    stderrDiagnostics,
+                });
+                resolve(1);
+            });
         });
     });
 }
