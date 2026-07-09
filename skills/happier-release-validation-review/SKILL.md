@@ -33,6 +33,15 @@ Act as a skeptical release-candidate reviewer. Verify that the validation branch
 8. Review `TRACKING.md#Process Feedback` and classify each item as `back-port now`, `back-port later`, or `ignore`.
 9. Produce a concise sign-off packet.
 
+## Re-measure, don't re-read
+
+This review is an adversarial pass over another agent's claims. Treat every number and every "green" in the validation report as unverified until reproduced:
+
+- Rerun the release dry-run yourself and compare against the recorded output.
+- Rerun at least one claimed-green lane at the exact recorded commit/basis; attribute any difference to concurrent churn explicitly before accepting it.
+- Re-measure reported metrics (LOC deltas, counts, timings) with the same command the lane claims to have used.
+- A report referencing files that do not exist, or a lane green only against a dirty tree, downgrades the verdict to `NEEDS_MORE_EVIDENCE` at minimum.
+
 ## Verdicts
 
 - `APPROVE_FOR_PREVIEW_PROMOTION`: evidence and diffs support promotion.

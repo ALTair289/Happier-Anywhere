@@ -2,6 +2,21 @@
 
 This file is the canonical cross-tool constitution for this repository. Re-read it at the start of each task and after context compaction. Also read the nearest package `AGENTS.md`/`CLAUDE.md` for package-specific rules.
 
+## Tier 0 — the ten invariants
+
+If you retain nothing else under pressure, retain these. The rest of this file elaborates them.
+
+1. Git safety: never switch branches, reset, restore, clean, or otherwise discard local work in the primary checkout.
+2. Never remove or "clean up" unrelated uncommitted changes — they may belong to another in-flight agent.
+3. Production behavior changes require test-first (verify RED before GREEN); content-only and mechanical changes do not.
+4. Mock system boundaries only; never internal logic.
+5. Split-brain (two active owners deciding the same domain concept) is a correctness bug — fix the owning choke point, not the symptom.
+6. Evidence first: base fixes on observed facts; distinguish observed vs derived vs assumed; never claim a check ran when it did not.
+7. Root cause over workaround; an unavoidable mitigation stays narrow, tested, and labeled with its follow-up fix.
+8. Feature gates fail closed; encryption envelopes are parsed explicitly, never assumed.
+9. Product runtime paths must be binary-safe: no direct `node`/`npm`/`npx`/`pnpm`/`yarn`/`bunx` spawns.
+10. Report outcomes faithfully: lead with the result, end with residual risk, never bury a failed or skipped check.
+
 ## Read order
 
 1. Root `AGENTS.md` (this file).
@@ -14,9 +29,14 @@ This file is the canonical cross-tool constitution for this repository. Re-read 
    - `skills/happier-testing` for repo-specific testing and lane selection.
    - `skills/happier-diagnose` for Happier daemon/session/provider/auth issues.
    - `test-driven-development` before behavior-changing implementation.
-   - `context7-mcp` before using post-training library/package knowledge.
+   - `find-docs` (Context7) before using post-training library/package knowledge.
    - `agent-browser` / `agent-device` / Argent skills for browser or device QA.
    - `autoreview` for closeout review after non-trivial edits.
+   - `skills/decompose-gates` when planning hard or multi-part work or writing lane briefs.
+   - `skills/verify-claims` before trusting subagent/lane reports or building decisions on unverified claims.
+   - `skills/attack-conclusion` before closing out non-trivial changes or root-cause verdicts.
+   - `skills/handoff-report` when reporting substantive findings or completed work.
+4. `docs/agent-craft.md` — the working method behind these rules (reading requests, decomposition, risk-weighted verification, re-derivation, self-attack, handoff). Re-read it when a task is hard, ambiguous, or high-stakes.
 
 ## Core operating policy
 
@@ -27,6 +47,15 @@ This file is the canonical cross-tool constitution for this repository. Re-read 
 - Persist to an implemented, verified, clearly reported outcome whenever feasible.
 - Prefer parallel tool calls for independent retrieval/lookup steps; do not parallelize dependent or speculative work.
 - Protect context: load the minimum relevant snippets, avoid dumping logs/build artifacts, and summarize large artifacts by path.
+
+## Reading the request
+
+Establish what is actually being asked before choosing how to respond.
+
+- Classify the mode first: a question wants an assessment, not a patch; a change order wants a verified change; an exploration wants a map of options, not a commitment. When the user describes a problem, the deliverable is your findings — report and stop; fix when asked.
+- Find the goal one level up: if the literal ask is a means, name the end it serves before choosing the fix. The right fix for the end may not touch the thing literally named.
+- Check the embedded diagnosis: "fix the retry logic" assumes retry logic is at fault. That assumption arrived with the request and was not verified by it — verify it before honoring it.
+- Restate scope in one sentence. Keep adjacent-but-unasked work out unless it is required for a coherent fix, and say so when it is.
 
 ## Product priorities
 
@@ -50,6 +79,15 @@ Base fixes and refactors on observed facts, not assumptions.
 - If evidence is missing, say what is missing and what would verify it.
 - Do not claim a test, typecheck, build, or manual QA passed unless it actually ran.
 - If blocked, name the blocker and the next concrete action.
+
+## Risk-weighted verification
+
+Verification effort follows risk, not difficulty or interest.
+
+- Risk = probability of being wrong × cost of being wrong × silence of the failure. Silent failure modes (persistence formats, dedupe keys, migrations, encryption envelopes, watermarks) outrank loud ones (typecheck errors, crashes).
+- Irreversible or outward-facing steps — schema migrations, data writes, published API shapes, external sends — get extra confirmation before execution.
+- Boring mechanical stretches hide more defects than interesting cores: attention decays where interest does. Audit the mechanical 80%; spot-check the clever 20%.
+- Before starting, name the two or three "if I'm wrong anywhere, it's here" spots and design verification for those spots specifically. Generic suite runs are uniform effort against non-uniform risk.
 
 ## Root-cause discipline
 
@@ -148,6 +186,15 @@ This repo is often edited by multiple agents at once.
 - Before handoff, run the touched package typecheck/build lane and the relevant broader test lane.
 - Canonical repo lanes are documented in `docs/testing.md` and `apps/docs/content/docs/development/testing.mdx`.
 - TypeScript changes require the relevant package typecheck/build-enforcing lane before handoff.
+
+### Live validation doctrine
+
+- Owner-test-green ≠ done for user-visible behavior. Live gates (browser QA against the running stack, on-device QA) are ship gates; host tests encode what the live loop taught, afterwards.
+- When a defect family repeatedly escapes host tests, switch to live-in-the-loop: one session with both source rights and the running app, iterating fix → hot reload → replay the exact failing recipe → verify live. Closure requires a live PASS in the same session.
+- Full-suite gates must be deterministic: run them twice back-to-back. Order-dependent flakes from leaked module singletons masquerade as green; a single passing run proves nothing.
+- Large suites may need `NODE_OPTIONS=--max-old-space-size=8192` (the ChatList host suite OOMs at 4GB).
+- The dev stack hot-reloads the working tree; mid-task edits are live in the user's app, so a "regression" reported during active work is often a half-landed edit being served. Stabilize first (finish or back out, remove instrumentation, live-verify) before starting new defect work.
+- Device QA must pin bundles: full Metro reload, Fast Refresh off, attest the loaded module via a probe.
 
 ## Type safety and code hygiene
 
@@ -331,12 +378,32 @@ This project has a graphify knowledge graph at `graphify-out/`.
 - Before architecture/codebase relationship answers, read `graphify-out/GRAPH_REPORT.md` for corpus/community context.
 - If `graphify-out/wiki/index.md` exists, navigate it before raw files.
 - Prefer graphify queries/paths/explanations for cross-module relationship questions when graphify tooling is available.
-- After modifying code files in a session, run `graphify update .` when a shell is available; if not available, report that it remains to do.
+- After substantial code changes, running `graphify update .` is recommended when a shell is available. Do not let it block handoff; if skipped, note it as remaining.
+
+## Adversarial review by default
+
+Non-trivial work gets an adversarial pass before it is treated as done — automatically, not on request.
+
+- The author always runs the self-attack (`skills/attack-conclusion`) before handoff: alternative cause, neighboring cases, blast radius, environment gap, hypothesis lock.
+- Independence scales with stakes: routine changes → author self-attack; delegated lane/corridor deliverables → an independent session runs `skills/verify-claims` against the deliverable's claims; ship gates (releases, user-visible behavior, schema/data changes) → independent review by a different mind than the author, with re-measured evidence.
+- The reviewer's brief is to refute, not confirm: re-derive claims via a different path, re-run numbers at the recorded basis, and attempt the failure the author says cannot happen.
+- Findings from the adversarial pass lead the handoff. A pass that found nothing states what was attacked and how — "reviewed, no findings" without the attack list is not a review.
+
+## Commit messages
+
+Use Conventional Commits for commits and squash messages:
+
+```text
+<type>[optional scope][!]: <description>
+```
+
+Types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `build`, `ci`, `perf`, `revert`.
 
 ## Final handoff
 
 Before finalizing:
 
+- Lead with the outcome, then evidence-pointed reasoning, then residual risk. Never bury a failed check, skipped step, or scope change mid-report.
 - Verify every requested item is covered or marked `[blocked]`.
 - Report tests/typechecks/docs checks actually run; do not fabricate evidence.
 - Mention any validation you could not run and why.

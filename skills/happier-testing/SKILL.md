@@ -91,6 +91,15 @@ CLI lane rule:
 - If a runner hangs or is killed, inspect whether the failure is repo-owned, harness-owned, or environmental before retrying blindly.
 - When shared process helpers change, rerun a broader lane that can reveal leaked handles or child-process cleanup regressions.
 
+## Live Validation Gates
+
+Host-test green is not shippable for user-visible behavior (root `AGENTS.md` → "Live validation doctrine" is the owning statement; these are the lane-level rules).
+
+- Treat live gates (managed-stack browser QA, argent device QA) as ship gates for UI-visible changes; write or extend host tests from what the live loop taught, afterwards.
+- If a defect family escapes host tests twice, stop adding host tests and switch to live-in-the-loop: fix → hot reload → replay the exact failing recipe → verify live, closing each defect with a live PASS in the same session.
+- Run full-suite gates twice back-to-back before calling them deterministic; order-dependent flakes from leaked module singletons masquerade as green.
+- If a large suite OOMs, rerun with `NODE_OPTIONS=--max-old-space-size=8192` instead of narrowing the lane.
+
 ## Output Expectations
 
 When reporting testing work, summarize:

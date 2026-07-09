@@ -12,6 +12,7 @@ Investigate a Happier issue from real evidence (logs, doctor output, source), de
 
 - **High confidence only.** Never guess. Every claim in the final root cause must be traceable to a specific log line, a `happier doctor` field, or a specific source file (with line numbers). If you cannot reach high confidence, say "Inconclusive — here's what I observed and what's missing" rather than inventing a story.
 - **Symptom ≠ root cause.** A failed RPC call is a symptom; the daemon being stale, the access key being missing, or a provider returning 429 is a root cause.
+- **Absence of evidence is an observation about your search, not about the world.** Distinguish "the log shows no X" from "X did not happen": when citing an absence, state which file you searched, with what pattern, over what time window.
 - **No fabricated paths or flags.** If a path, file, or command is not in this skill, in the user's logs, or in code you have actually read, do not include it.
 - **Concrete code references are welcomed.** The Happier maintainers prefer issues that name specific files (`apps/ui/sources/.../AgentInput.tsx:1759`), include code snippets, and propose a hypothesis. This is repo-relative — different from the user's filesystem paths, which must be sanitized in public issues. See `CONTRIBUTING.md`: "A well-written issue ... is often more useful than a PR."
 
@@ -122,7 +123,7 @@ Anchor reading on these directories: `apps/cli/src/`, `apps/server/sources/`, `p
 
 ### 6. Form the root cause
 
-Synthesize evidence into a single root cause. Reject a candidate cause unless you have at least one of:
+Synthesize evidence into a single root cause. Before settling on one, name at least two candidate causes consistent with the evidence and state which observation discriminates between them — if you cannot name a second candidate, you have not searched; evidence almost always underdetermines the cause. Then reject a candidate cause unless you have at least one of:
 
 - A log line that names it (with timestamp).
 - A `doctor` field whose value contradicts a healthy state.
