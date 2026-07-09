@@ -340,9 +340,16 @@ export function resolveCliSharedDepsBuildLockOptions(options = {}) {
     return null;
   }
 
+  const lockPath = explicitLockPath || resolveCliSharedDepsBuildLockPath(repoRoot);
+  const env = options.env ?? process.env;
+  const parentHeldLockPath = String(env?.HAPPIER_WORKSPACE_DIST_BUILD_LOCK_HELD ?? '').trim();
+  if (parentHeldLockPath && resolve(parentHeldLockPath) === resolve(lockPath) && existsSync(lockPath)) {
+    return null;
+  }
+
   const timeoutMs = options.lockTimeoutMs ?? options.timeoutMs ?? 240_000;
   return {
-    lockPath: explicitLockPath || resolveCliSharedDepsBuildLockPath(repoRoot),
+    lockPath,
     timeoutMs,
     pollIntervalMs: options.lockPollIntervalMs ?? options.pollIntervalMs ?? 250,
     staleAfterMs: options.lockStaleAfterMs ?? options.staleAfterMs ?? timeoutMs,
