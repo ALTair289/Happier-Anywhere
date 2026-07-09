@@ -36,11 +36,14 @@ export type ClaudeUnifiedComposerDraftGuardOutcome = Readonly<{
     | 'cleared'
     | 'foreign_draft'
     | 'capture_style_unavailable'
+    | 'provider_unavailable'
+    | 'blocked_non_input_state'
     | 'generating'
     | 'capture_failed'
     | 'clear_failed';
   attempts?: number | undefined;
   draftLength?: number | undefined;
+  blockedReason?: string | undefined;
 }>;
 
 type ClaudeUnifiedDraftGuardBlockerStatus = Extract<
@@ -52,8 +55,52 @@ export type ClaudeUnifiedDraftGuardStarvationInfo = Readonly<{
   consecutiveDeferrals: number;
   draftLength?: number | undefined;
   guardStatus: ClaudeUnifiedDraftGuardBlockerStatus;
+  isCanonicalTurnActive?: boolean | undefined;
   originKind: 'ui_pending' | 'ui_immediate' | 'rpc';
+  userMessageLocalIds?: readonly string[] | undefined;
 }>;
+
+function resolveDraftGuardBlocker(
+  guard: ClaudeUnifiedComposerDraftGuardOutcome,
+): NonNullable<Extract<TerminalInputInjectionResult, { status: 'deferred' }>['blocker']> | null {
+  switch (guard.status) {
+    case 'provider_unavailable':
+      return {
+        kind: 'provider_unavailable',
+        source: 'draft_guard',
+        detail: 'claude_usage_limit_dialog',
+      };
+    case 'blocked_non_input_state':
+      return {
+        kind: 'terminal_busy',
+        source: 'readiness',
+        detail: guard.blockedReason ?? 'non_input_state',
+      };
+    case 'foreign_draft':
+      return {
+        kind: 'terminal_user_draft',
+        source: 'draft_guard',
+        guardStatus: guard.status,
+        ...(guard.draftLength !== undefined ? { draftLength: guard.draftLength } : {}),
+      };
+    case 'clear_failed':
+      return {
+        kind: 'own_leftover_clear_failed',
+        source: 'draft_guard',
+        guardStatus: guard.status,
+        ...(guard.draftLength !== undefined ? { draftLength: guard.draftLength } : {}),
+      };
+    case 'capture_style_unavailable':
+      return {
+        kind: 'capture_ambiguous',
+        source: 'draft_guard',
+        guardStatus: guard.status,
+        ...(guard.draftLength !== undefined ? { draftLength: guard.draftLength } : {}),
+      };
+    default:
+      return null;
+  }
+}
 
 export function createClaudeUnifiedPromptInjector<Mode = unknown>(opts: Readonly<{
   inputInjection: TerminalInputInjectionV1;
@@ -75,6 +122,8 @@ export function createClaudeUnifiedPromptInjector<Mode = unknown>(opts: Readonly
    * preserving the fail-closed guard for genuine drafts.
    */
   onDraftGuardStarvation?: ((info: ClaudeUnifiedDraftGuardStarvationInfo) => void) | undefined;
+  onDraftGuardClear?: (() => void) | undefined;
+  isCanonicalTurnActive?: (() => boolean) | undefined;
 }>): ClaudeUnifiedPromptInjector<Mode> {
   const createNonce = opts.createNonce ?? randomUUID;
   const nowMs = opts.nowMs ?? Date.now;
@@ -86,6 +135,14 @@ export function createClaudeUnifiedPromptInjector<Mode = unknown>(opts: Readonly
     draftGuardDeferralCount = 0;
     draftGuardDeferralStartedAtMs = null;
     draftGuardStarvationEscalated = false;
+  }
+
+  function readCanonicalTurnActive(): boolean {
+    try {
+      return opts.isCanonicalTurnActive?.() ?? true;
+    } catch {
+      return true;
+    }
   }
 
   function recordDraftGuardDeferral(): Readonly<{
@@ -163,7 +220,9 @@ export function createClaudeUnifiedPromptInjector<Mode = unknown>(opts: Readonly
               consecutiveDeferrals: deferral.consecutiveDeferrals,
               ...(guard.draftLength !== undefined ? { draftLength: guard.draftLength } : {}),
               guardStatus: guard.status,
+              isCanonicalTurnActive: readCanonicalTurnActive(),
               originKind: batch.origin.kind,
+              userMessageLocalIds: batch.userMessageLocalIds ?? [],
             };
             if (opts.telemetry) {
               emitClaudeUnifiedInjectionDraftGuard(opts.telemetry, {
@@ -176,7 +235,25 @@ export function createClaudeUnifiedPromptInjector<Mode = unknown>(opts: Readonly
             }
             opts.onDraftGuardStarvation?.(starvationInfo);
           }
-          return { status: 'deferred', reason: 'user_typing', retryAfterMs: deferral.retryAfterMs };
+          return {
+            status: 'deferred',
+            reason: 'user_typing',
+            retryAfterMs: deferral.retryAfterMs,
+            blocker: resolveDraftGuardBlocker(guard) ?? undefined,
+          };
+        }
+        if (guard.status === 'provider_unavailable' || guard.status === 'blocked_non_input_state') {
+          return {
+            status: 'deferred',
+            reason: 'terminal_busy',
+            retryAfterMs: guard.status === 'provider_unavailable'
+              ? DRAFT_GUARD_BACKOFF_RETRY_MS
+              : DRAFT_GUARD_RETRY_MS,
+            blocker: resolveDraftGuardBlocker(guard) ?? undefined,
+          };
+        }
+        if (guard.status === 'no_draft' || guard.status === 'cleared') {
+          opts.onDraftGuardClear?.();
         }
         resetDraftGuardDeferralEpisode();
       }

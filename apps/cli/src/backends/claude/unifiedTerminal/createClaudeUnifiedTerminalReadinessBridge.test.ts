@@ -7,6 +7,10 @@ import {
   createClaudeUnifiedTerminalReadinessBridge,
   isClaudeUnifiedTerminalReadinessTimeoutError,
 } from './createClaudeUnifiedTerminalReadinessBridge';
+import { createPermissionHandlerSessionStub } from '../utils/permissionHandler.testkit';
+import { createFakeControlPort } from './tuiControls/fakeControlPort';
+import { createClaudeUnifiedResumeChoiceStartupResolver } from './resumeChoice/claudeUnifiedResumeChoiceStartupResolver';
+import { ClaudeUnifiedResumeChoiceBroker } from './resumeChoice/claudeUnifiedResumeChoiceBroker';
 
 const handle: TerminalHostHandle = {
   kind: 'zellij',
@@ -54,6 +58,15 @@ const resumeChoiceDialogScreen = [
   '',
   '❯ 1. Resume from summary',
   '  2. Resume full session',
+].join('\n');
+
+const effortChangeDialogHighScreen = [
+  'Change effort level?',
+  'This conversation is cached for the current effort level.',
+  'Switching to high means the full history gets re-read before Claude can continue.',
+  '',
+  '❯ 1. Yes, switch to high',
+  '  2. No, go back',
 ].join('\n');
 
 async function flushMicrotasks(times = 6): Promise<void> {
@@ -262,9 +275,7 @@ describe('createClaudeUnifiedTerminalReadinessBridge', () => {
     });
 
     bridge.start({ abortSignal: new AbortController().signal });
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(0);
     expect(arbiter.drainWhenSafe).toHaveBeenCalledTimes(1);
 
     bridge.dispose();
@@ -477,7 +488,66 @@ describe('createClaudeUnifiedTerminalReadinessBridge', () => {
     bridge.dispose();
   });
 
-  it('pauses startup timeout while the resume-choice resolver is waiting for a user action', async () => {
+  it('re-observes after resolving an orphan effort dialog so queued delivery can drain', async () => {
+    vi.useFakeTimers();
+    let nowMs = 0;
+    const arbiter = createArbiter();
+    const onStartupReady = vi.fn();
+    const { session } = createPermissionHandlerSessionStub('readiness-effort-dialog-session');
+    const port = createFakeControlPort({ captures: [effortChangeDialogHighScreen, boxedInteractiveClaudeScreen] });
+    const resolveStartupDialog = createClaudeUnifiedResumeChoiceStartupResolver({
+      choice: 'ask_every_time',
+      broker: new ClaudeUnifiedResumeChoiceBroker(session),
+      port,
+      wait: async () => undefined,
+      settleMs: 1,
+      startupMode: { permissionMode: 'default', reasoningEffort: 'high' },
+      isRuntimeControlInFlight: () => false,
+    });
+    const captureInputState = vi
+      .fn()
+      .mockResolvedValueOnce({
+        stable: true,
+        currentInput: effortChangeDialogHighScreen,
+        observedAt: 0,
+      })
+      .mockResolvedValueOnce({
+        stable: true,
+        currentInput: boxedInteractiveClaudeScreen,
+        observedAt: 10,
+      });
+    const bridge = createClaudeUnifiedTerminalReadinessBridge({
+      hostAdapter: {
+        evaluateLiveness: vi.fn().mockResolvedValue({ paneAlive: true, observedAt: 0 }),
+        captureInputState,
+      },
+      handle,
+      arbiter,
+      pollIntervalMs: 10,
+      quietPeriodMs: 25,
+      timeoutMs: 100,
+      nowMs: () => nowMs,
+      onStartupReady,
+      resolveStartupDialog,
+    });
+
+    bridge.start({ abortSignal: new AbortController().signal });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(onStartupReady).not.toHaveBeenCalled();
+    expect(port.sentLiteral).toEqual(['1']);
+    expect(port.sentKeys).toEqual(['Enter']);
+
+    nowMs += 10;
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(onStartupReady).toHaveBeenCalledTimes(1);
+    expect(arbiter.observeLifecycle).toHaveBeenCalledWith({ type: 'output', observedAtMs: 10 });
+    expect(arbiter.drainWhenSafe).toHaveBeenCalled();
+    bridge.dispose();
+  });
+
+  it('fails with diagnostics when the resume-choice resolver keeps waiting for a user action past the deadline', async () => {
     vi.useFakeTimers();
     let nowMs = 0;
     const arbiter = createArbiter();
@@ -502,25 +572,93 @@ describe('createClaudeUnifiedTerminalReadinessBridge', () => {
       resolveStartupDialog,
     });
 
-    let settled = false;
+    let rejection: unknown;
     const started = Promise.resolve(bridge.start({ abortSignal: abortController.signal }))
-      .then(() => { settled = true; });
+      .catch((error: unknown) => { rejection = error; });
 
-    await Promise.resolve();
-    for (let i = 0; i < 5; i += 1) {
-      nowMs += 10;
-      await vi.advanceTimersByTimeAsync(10);
+    try {
+      await Promise.resolve();
+      for (let i = 0; i < 5; i += 1) {
+        nowMs += 10;
+        await vi.advanceTimersByTimeAsync(10);
+      }
+
+      expect(isClaudeUnifiedTerminalReadinessTimeoutError(rejection)).toBe(true);
+      expect((rejection as ClaudeUnifiedTerminalReadinessTimeoutError).diagnostics).toMatchObject({
+        hostAlive: true,
+        lastLivenessPaneAlive: true,
+      });
+      expect(resolveStartupDialog).toHaveBeenCalled();
+      expect(arbiter.observeLifecycle).not.toHaveBeenCalled();
+    } finally {
+      abortController.abort();
+      await vi.advanceTimersByTimeAsync(0);
+      await started;
+      bridge.dispose();
     }
+  });
 
-    expect(settled).toBe(false);
-    expect(resolveStartupDialog).toHaveBeenCalled();
-    expect(arbiter.observeLifecycle).not.toHaveBeenCalled();
+  it('fails with diagnostics when input-state capture never settles before the readiness deadline', async () => {
+    vi.useFakeTimers();
+    let nowMs = 0;
+    const arbiter = createArbiter();
+    const abortController = new AbortController();
+    let releaseCapture: ((value: {
+      stable: boolean;
+      currentInput: string;
+      observedAt: number;
+    }) => void) | undefined;
+    const captureInputState = vi.fn(() => new Promise<{
+      stable: boolean;
+      currentInput: string;
+      observedAt: number;
+    }>((resolve) => {
+      releaseCapture = resolve;
+    }));
+    const bridge = createClaudeUnifiedTerminalReadinessBridge({
+      hostAdapter: {
+        evaluateLiveness: vi.fn().mockResolvedValue({ paneAlive: true, observedAt: 0 }),
+        captureInputState,
+      },
+      handle,
+      arbiter,
+      pollIntervalMs: 10,
+      timeoutMs: 20,
+      extendedTimeoutMs: 30,
+      progressGraceMs: 1,
+      nowMs: () => nowMs,
+    });
 
-    abortController.abort();
-    await vi.advanceTimersByTimeAsync(0);
-    await started;
-    expect(settled).toBe(true);
-    bridge.dispose();
+    let rejection: unknown;
+    const started = Promise.resolve(bridge.start({ abortSignal: abortController.signal }))
+      .catch((error: unknown) => { rejection = error; });
+
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(captureInputState).toHaveBeenCalledTimes(1);
+
+      for (let i = 0; i < 4; i += 1) {
+        nowMs += 10;
+        await vi.advanceTimersByTimeAsync(10);
+      }
+
+      expect(isClaudeUnifiedTerminalReadinessTimeoutError(rejection)).toBe(true);
+      expect((rejection as ClaudeUnifiedTerminalReadinessTimeoutError).diagnostics).toMatchObject({
+        hostAlive: true,
+        lastLivenessPaneAlive: true,
+      });
+      expect(arbiter.observeLifecycle).not.toHaveBeenCalled();
+    } finally {
+      releaseCapture?.({
+        stable: false,
+        currentInput: '',
+        observedAt: nowMs,
+      });
+      abortController.abort();
+      await vi.advanceTimersByTimeAsync(0);
+      await started;
+      bridge.dispose();
+    }
   });
 
   it('reports startup readiness for a boxed interactive Claude composer via the shared parser (D15)', async () => {

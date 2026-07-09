@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -499,6 +501,11 @@ const CLAUDE_HEAVY_SESSION_RESUME_DIALOG = [
   '  2. Resume full session',
 ].join('\n');
 
+const CLAUDE_2_1_205_SAFEGUARD_PAUSE = readFileSync(
+  new URL('./__fixtures__/claude-2.1.205-safeguard-pause.ansi', import.meta.url),
+  'utf8',
+);
+
 describe('parseClaudeScreenState — heavy-session resume choice dialog', () => {
   it('recognizes the resume-choice interstitial and maps its selectable options', () => {
     const state = parseClaudeScreenState(CLAUDE_HEAVY_SESSION_RESUME_DIALOG);
@@ -525,6 +532,35 @@ describe('parseClaudeScreenState — heavy-session resume choice dialog', () => 
     ].join('\n'));
     expect(state.resumeChoiceDialogVisible).toBe(false);
     expect(state.unrecognizedConfirmationDialogVisible).toBe(true);
+  });
+});
+
+describe('parseClaudeScreenState — safeguard pause chooser (Claude Code 2.1.205)', () => {
+  it('recognizes the live safeguard chooser as a first-class blocking dialog', () => {
+    const state = parseClaudeScreenState(CLAUDE_2_1_205_SAFEGUARD_PAUSE);
+
+    expect(state.safeguardPauseDialogVisible).toBe(true);
+    expect(state.safeguardPauseDialogOptions).toEqual([
+      { choice: 'switch_model', label: 'Switch to Opus 4.8', modelLabel: 'Opus 4.8' },
+      { choice: 'edit_prompt_and_retry', label: 'Edit prompt and retry with Fable 5', modelLabel: 'Fable 5' },
+    ]);
+    expect(state.unrecognizedConfirmationDialogVisible).toBe(false);
+    expect(isClaudeScreenReadyForInput(state)).toBe(false);
+    expect(isSafeWindowForSlashControl(state)).toBe(false);
+    expect(resolveClaudeScreenInFlightSteerVeto(state)).toBe('safeguard_pause_dialog');
+  });
+
+  it('keeps unrelated numbered dialogs on the generic fail-closed path', () => {
+    const state = parseClaudeScreenState([
+      'Claude needs a decision.',
+      '',
+      '❯ 1. Continue anyway',
+      '  2. Stop here',
+    ].join('\n'));
+
+    expect(state.safeguardPauseDialogVisible).toBe(false);
+    expect(state.unrecognizedConfirmationDialogVisible).toBe(true);
+    expect(resolveClaudeScreenInFlightSteerVeto(state)).toBe('unrecognized_confirmation_dialog');
   });
 });
 

@@ -76,6 +76,24 @@ describe('createClaudeInFlightSteerCapabilityPublisher (lane P, O-design Seam A)
     publisher.dispose();
   });
 
+  it('emits a final cleared snapshot on dispose after a terminal composer draft', () => {
+    const captured = capture();
+    const publisher = createClaudeInFlightSteerCapabilityPublisher({
+      session: captured.session,
+      isCanonicalTurnActive: () => true,
+      nowMs: () => 1234,
+      minPublishIntervalMs: 0,
+    });
+
+    publisher.publish({ available: false, reason: 'user_terminal_draft' });
+    publisher.dispose();
+
+    expect(captured.writes).toBe(2);
+    expect(captured.state.capabilities?.inFlightSteerAvailable).toBe(true);
+    expect(captured.state.capabilities?.inFlightSteerUnavailableReason ?? null).toBeNull();
+    expect(captured.state.capabilities?.terminalComposerDraftPresent).toBe(false);
+  });
+
   it('publishes draft presence from the raw terminal-draft snapshot even when unavailable maps to turn_settling', () => {
     const captured = capture();
     const publisher = createClaudeInFlightSteerCapabilityPublisher({

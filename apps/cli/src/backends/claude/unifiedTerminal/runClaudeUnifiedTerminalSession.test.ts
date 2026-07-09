@@ -21,6 +21,7 @@ import {
 } from './runClaudeUnifiedTerminalSession';
 import { surfaceClaudeUnifiedTerminalRuntimeIssue } from './surfaceClaudeUnifiedTerminalRuntimeIssue';
 import type {
+  BlockedApplyStarvationInfo,
   ClaudeUnifiedRuntimeConfigOutcomeEvent,
   ClaudeUnifiedRuntimeControlApplyResult,
 } from './runtimeControlIntegration';
@@ -132,6 +133,7 @@ describe('runClaudeUnifiedTerminalSession', () => {
   const tempDirs: string[] = [];
 
   afterEach(async () => {
+    vi.useRealTimers();
     if (originalProcessPlatformDescriptor) {
       Object.defineProperty(process, 'platform', originalProcessPlatformDescriptor);
     }
@@ -1510,6 +1512,389 @@ describe('runClaudeUnifiedTerminalSession', () => {
     });
   });
 
+  it('adopts a live existing terminal host for endpoint-rebound recovery without relaunching Claude', async () => {
+    const abortController = createAbortableSignal();
+    const existingHandle: TerminalHostHandle = {
+      kind: 'tmux',
+      sessionName: 'happier-claude-existing-session',
+      paneId: 'unified-window',
+      attachMetadata: {
+        attachStrategy: 'terminal_host',
+        topology: 'shared',
+        locality: 'same_machine',
+        liveProbe: 'required',
+      },
+    };
+    const adapter: TerminalHostAdapter = {
+      kind: 'tmux',
+      createOrAttachHost: vi.fn(async () => {
+        throw new Error('fresh host must not be created when adopt-first recovery is available');
+      }),
+      adoptExistingHost: vi.fn(async () => existingHandle),
+      injectUserPrompt: vi.fn(async (_handle, input) => {
+        abortController.abort();
+        return { status: 'injected', at: 1, bytesWritten: input.text.length } as const;
+      }),
+      evaluateLiveness: vi.fn(async () => ({ paneAlive: true, observedAt: 1 })),
+      captureInputState: vi.fn(async () => ({ stable: true, currentInput: interactiveClaudeScreen, observedAt: Date.now() })),
+      interruptTurn: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    };
+    const persistTerminalHostAttachmentInfo = vi.fn(async () => {});
+    const buildSpawn = vi.fn(async () => ({
+      spawnArgv: ['/managed/node', '/happier/scripts/terminal_launch_spec_runner.cjs', '/tmp/fresh-hooks-launch.json'],
+      spawnEnv: { CLAUDE_CONFIG_DIR: '/tmp/connected-service-claude-home' },
+    }));
+    const sessionPromise = runClaudeUnifiedTerminalSession({
+      path: '/workspace/project',
+      happySessionId: 'happy-session-id',
+      adoptExistingTerminalHost: true,
+      signal: abortController.signal,
+      nextMessage: async () => ({
+        message: 'hello existing terminal',
+        mode: {
+          permissionMode: 'default',
+          claudeUnifiedTerminalHost: 'tmux',
+        },
+      }),
+      resolveHostAdapter: async () => ({ status: 'resolved', adapter, reason: 'test' }),
+      buildSpawn,
+      createSessionName: () => 'happier-claude-existing-session',
+      readTerminalHostAttachmentInfo: async () => ({
+        version: 1,
+        sessionId: 'happy-session-id',
+        terminal: {
+          mode: 'tmux',
+          tmux: {
+            target: 'happier-claude-existing-session:unified-window',
+          },
+        },
+        updatedAt: 1,
+      }),
+      persistTerminalHostAttachmentInfo,
+    });
+
+    try {
+      await waitUntil(() => abortController.signal.aborted, 5_000);
+    } finally {
+      abortController.abort();
+      await sessionPromise.catch(() => undefined);
+    }
+
+    expect(adapter.evaluateLiveness).toHaveBeenCalledWith(expect.objectContaining({
+      kind: existingHandle.kind,
+      sessionName: existingHandle.sessionName,
+      paneId: existingHandle.paneId,
+      attachMetadata: {
+        attachStrategy: 'terminal_host',
+        topology: 'shared',
+        locality: 'same_machine',
+        liveProbe: 'required',
+      },
+    }));
+    expect(buildSpawn).not.toHaveBeenCalled();
+    expect(adapter.adoptExistingHost).toHaveBeenCalledWith(expect.objectContaining({
+      kind: existingHandle.kind,
+      sessionName: existingHandle.sessionName,
+      paneId: existingHandle.paneId,
+    }));
+    expect(adapter.createOrAttachHost).not.toHaveBeenCalled();
+    expect(persistTerminalHostAttachmentInfo).toHaveBeenCalledWith({
+      sessionId: 'happy-session-id',
+      terminal: {
+        mode: 'tmux',
+        tmux: {
+          target: 'happier-claude-existing-session:unified-window',
+        },
+      },
+    });
+  });
+
+  it('removes stale terminal attachment info and falls back to a fresh host when the saved pane is dead', async () => {
+    const abortController = createAbortableSignal();
+    const handle: TerminalHostHandle = {
+      kind: 'tmux',
+      sessionName: 'happier-claude-fresh-session',
+      paneId: 'fresh-window',
+      attachMetadata: {
+        attachStrategy: 'terminal_host',
+        topology: 'shared',
+        locality: 'same_machine',
+        liveProbe: 'required',
+      },
+    };
+    const adapter: TerminalHostAdapter = {
+      kind: 'tmux',
+      createOrAttachHost: vi.fn(async () => handle),
+      adoptExistingHost: vi.fn(async () => {
+        throw new Error('stale pane must not be adopted');
+      }),
+      injectUserPrompt: vi.fn(async (_handle, input) => {
+        abortController.abort();
+        return { status: 'injected', at: 1, bytesWritten: input.text.length } as const;
+      }),
+      evaluateLiveness: vi
+        .fn()
+        .mockResolvedValueOnce({ paneAlive: false, paneDead: true, observedAt: 1 })
+        .mockResolvedValue({ paneAlive: true, observedAt: 2 }),
+      captureInputState: vi.fn(async () => ({ stable: true, currentInput: interactiveClaudeScreen, observedAt: Date.now() })),
+      interruptTurn: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    };
+    const removeTerminalHostAttachmentInfo = vi.fn(async () => {});
+
+    await runClaudeUnifiedTerminalSession({
+      path: '/workspace/project',
+      happySessionId: 'happy-session-id',
+      signal: abortController.signal,
+      nextMessage: async () => ({
+        message: 'hello fresh terminal',
+        mode: {
+          permissionMode: 'default',
+          claudeUnifiedTerminalHost: 'tmux',
+        },
+      }),
+      resolveHostAdapter: async () => ({ status: 'resolved', adapter, reason: 'test' }),
+      buildSpawn: async () => ({
+        spawnArgv: ['/managed/node', '/happier/scripts/terminal_launch_spec_runner.cjs', '/tmp/fresh.json'],
+        spawnEnv: { CLAUDE_CONFIG_DIR: '/tmp/connected-service-claude-home' },
+      }),
+      createSessionName: () => 'happier-claude-fresh-session',
+      readTerminalHostAttachmentInfo: async () => ({
+        version: 1,
+        sessionId: 'happy-session-id',
+        terminal: {
+          mode: 'tmux',
+          tmux: { target: 'happier-claude-stale-session:dead-window' },
+        },
+        updatedAt: 1,
+      }),
+      removeTerminalHostAttachmentInfo,
+    });
+
+    expect(adapter.adoptExistingHost).not.toHaveBeenCalled();
+    expect(adapter.dispose).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      kind: 'tmux',
+      sessionName: 'happier-claude-stale-session',
+      paneId: 'dead-window',
+    }));
+    expect(vi.mocked(adapter.dispose).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(adapter.createOrAttachHost).mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
+    expect(removeTerminalHostAttachmentInfo).toHaveBeenCalledWith({
+      sessionId: 'happy-session-id',
+      terminal: {
+        mode: 'tmux',
+        tmux: { target: 'happier-claude-stale-session:dead-window' },
+      },
+    });
+    expect(adapter.createOrAttachHost).toHaveBeenCalledWith(expect.objectContaining({
+      sessionName: 'happier-claude-fresh-session',
+      spawnEnv: { CLAUDE_CONFIG_DIR: '/tmp/connected-service-claude-home' },
+    }));
+  });
+
+  it('keeps terminal attachment info when an inconclusive startup probe is followed by a live pane', async () => {
+    const abortController = createAbortableSignal();
+    const existingHandle: TerminalHostHandle = {
+      kind: 'tmux',
+      sessionName: 'happier-claude-existing-session',
+      paneId: 'transient-window',
+      attachMetadata: {
+        attachStrategy: 'terminal_host',
+        topology: 'shared',
+        locality: 'same_machine',
+        liveProbe: 'required',
+      },
+    };
+    const adapter: TerminalHostAdapter = {
+      kind: 'tmux',
+      createOrAttachHost: vi.fn(async () => {
+        throw new Error('fresh host must not be created after a single inconclusive probe');
+      }),
+      adoptExistingHost: vi.fn(async () => existingHandle),
+      injectUserPrompt: vi.fn(async (_handle, input) => {
+        abortController.abort();
+        return { status: 'injected', at: 1, bytesWritten: input.text.length } as const;
+      }),
+      evaluateLiveness: vi
+        .fn()
+        .mockResolvedValueOnce({ paneAlive: false, probeInconclusive: true, observedAt: 1 })
+        .mockResolvedValue({ paneAlive: true, observedAt: 2 }),
+      captureInputState: vi.fn(async () => ({ stable: true, currentInput: interactiveClaudeScreen, observedAt: Date.now() })),
+      interruptTurn: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    };
+    const removeTerminalHostAttachmentInfo = vi.fn(async () => {});
+
+    await runClaudeUnifiedTerminalSession({
+      path: '/workspace/project',
+      happySessionId: 'happy-session-id',
+      adoptExistingTerminalHost: true,
+      signal: abortController.signal,
+      nextMessage: async () => ({
+        message: 'hello adopted terminal',
+        mode: {
+          permissionMode: 'default',
+          claudeUnifiedTerminalHost: 'tmux',
+        },
+      }),
+      resolveHostAdapter: async () => ({ status: 'resolved', adapter, reason: 'test' }),
+      buildSpawn: async () => ({
+        spawnArgv: ['/managed/node', '/happier/scripts/terminal_launch_spec_runner.cjs', '/tmp/fresh.json'],
+        spawnEnv: { CLAUDE_CONFIG_DIR: '/tmp/connected-service-claude-home' },
+      }),
+      createSessionName: () => 'happier-claude-existing-session',
+      readTerminalHostAttachmentInfo: async () => ({
+        version: 1,
+        sessionId: 'happy-session-id',
+        terminal: {
+          mode: 'tmux',
+          tmux: { target: 'happier-claude-existing-session:transient-window' },
+        },
+        updatedAt: 1,
+      }),
+      removeTerminalHostAttachmentInfo,
+    });
+
+    expect(adapter.evaluateLiveness).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      sessionName: 'happier-claude-existing-session',
+      paneId: 'transient-window',
+    }));
+    expect(adapter.evaluateLiveness).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      sessionName: 'happier-claude-existing-session',
+      paneId: 'transient-window',
+    }));
+    expect(adapter.adoptExistingHost).toHaveBeenCalledWith(expect.objectContaining({
+      sessionName: 'happier-claude-existing-session',
+      paneId: 'transient-window',
+    }));
+    expect(adapter.createOrAttachHost).not.toHaveBeenCalled();
+  });
+
+  it('aborts adopt fallback instead of spawning a second Claude when the retained pane is still alive', async () => {
+    const existingHandle: TerminalHostHandle = {
+      kind: 'tmux',
+      sessionName: 'happier-claude-existing-session',
+      paneId: 'live-window',
+      attachMetadata: {
+        attachStrategy: 'terminal_host',
+        topology: 'shared',
+        locality: 'same_machine',
+        liveProbe: 'required',
+      },
+    };
+    const adapter: TerminalHostAdapter = {
+      kind: 'tmux',
+      createOrAttachHost: vi.fn(async () => {
+        throw new Error('fresh host must not be created while retained Claude is alive');
+      }),
+      adoptExistingHost: vi.fn(async () => {
+        throw new Error('adopt failed transiently');
+      }),
+      injectUserPrompt: vi.fn(),
+      evaluateLiveness: vi.fn(async () => ({ paneAlive: true, observedAt: 1 })),
+      interruptTurn: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    };
+
+    await expect(runClaudeUnifiedTerminalSession({
+      path: '/workspace/project',
+      happySessionId: 'happy-session-id',
+      adoptExistingTerminalHost: true,
+      nextMessage: async () => ({
+        message: 'hello existing terminal',
+        mode: {
+          permissionMode: 'default',
+          claudeUnifiedTerminalHost: 'tmux',
+        },
+      }),
+      resolveHostAdapter: async () => ({ status: 'resolved', adapter, reason: 'test' }),
+      buildSpawn: async () => ({
+        spawnArgv: ['/managed/node', '/happier/scripts/terminal_launch_spec_runner.cjs', '/tmp/fresh.json'],
+        spawnEnv: { CLAUDE_CONFIG_DIR: '/tmp/connected-service-claude-home' },
+      }),
+      createSessionName: () => 'happier-claude-existing-session',
+      readTerminalHostAttachmentInfo: async () => ({
+        version: 1,
+        sessionId: 'happy-session-id',
+        terminal: {
+          mode: 'tmux',
+          tmux: { target: 'happier-claude-existing-session:live-window' },
+        },
+        updatedAt: 1,
+      }),
+    })).rejects.toThrow('adopt failed transiently');
+
+    expect(adapter.createOrAttachHost).not.toHaveBeenCalled();
+  });
+
+  it('aborts relaunch fallback instead of spawning a second Claude when relaunch cannot confirm the old pane died', async () => {
+    const existingHandle: TerminalHostHandle = {
+      kind: 'tmux',
+      sessionName: 'happier-claude-existing-session',
+      paneId: 'live-window',
+      attachMetadata: {
+        attachStrategy: 'terminal_host',
+        topology: 'shared',
+        locality: 'same_machine',
+        liveProbe: 'required',
+      },
+    };
+    const adapter: TerminalHostAdapter = {
+      kind: 'tmux',
+      createOrAttachHost: vi.fn(async () => {
+        throw new Error('fresh host must not be created after failed relaunch');
+      }),
+      relaunchExistingHost: vi.fn(async () => {
+        throw new Error('killWindow false');
+      }),
+      injectUserPrompt: vi.fn(),
+      evaluateLiveness: vi.fn(async () => ({ paneAlive: true, observedAt: 1 })),
+      interruptTurn: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    };
+
+    await expect(runClaudeUnifiedTerminalSession({
+      path: '/workspace/project',
+      happySessionId: 'happy-session-id',
+      nextMessage: async () => ({
+        message: 'hello existing terminal',
+        mode: {
+          permissionMode: 'default',
+          claudeUnifiedTerminalHost: 'tmux',
+        },
+      }),
+      resolveHostAdapter: async () => ({ status: 'resolved', adapter, reason: 'test' }),
+      buildSpawn: async () => ({
+        spawnArgv: ['/managed/node', '/happier/scripts/terminal_launch_spec_runner.cjs', '/tmp/fresh.json'],
+        spawnEnv: { CLAUDE_CONFIG_DIR: '/tmp/connected-service-claude-home' },
+      }),
+      createSessionName: () => 'happier-claude-existing-session',
+      readTerminalHostAttachmentInfo: async () => ({
+        version: 1,
+        sessionId: 'happy-session-id',
+        terminal: {
+          mode: 'tmux',
+          tmux: { target: 'happier-claude-existing-session:live-window' },
+        },
+        updatedAt: 1,
+      }),
+    })).rejects.toThrow('killWindow false');
+
+    expect(adapter.relaunchExistingHost).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: existingHandle.kind,
+        sessionName: existingHandle.sessionName,
+        paneId: existingHandle.paneId,
+      }),
+      expect.objectContaining({
+        sessionName: 'happier-claude-existing-session',
+      }),
+    );
+    expect(adapter.createOrAttachHost).not.toHaveBeenCalled();
+  });
+
   it('removes matching terminal-host attachment info after terminal host disposal', async () => {
     const abortController = createAbortableSignal();
     const persistTerminalHostAttachmentInfo = vi.fn(async () => {});
@@ -1581,6 +1966,7 @@ describe('runClaudeUnifiedTerminalSession', () => {
   it('notifies when the terminal host is ready with attachable metadata', async () => {
     const abortController = createAbortableSignal();
     const onTerminalHostReady = vi.fn();
+    const clearSessionMarkerTerminalHostHealth = vi.fn(async () => true);
     const handle: TerminalHostHandle = {
       kind: 'tmux',
       sessionName: 'happier-claude-session-test',
@@ -1623,6 +2009,7 @@ describe('runClaudeUnifiedTerminalSession', () => {
       }),
       createSessionName: () => 'happier-claude-session-test',
       persistTerminalHostAttachmentInfo: vi.fn(async () => {}),
+      clearSessionMarkerTerminalHostHealth,
       onTerminalHostReady,
     } as Parameters<typeof runClaudeUnifiedTerminalSession<EnhancedMode>>[0] & {
       onTerminalHostReady: typeof onTerminalHostReady;
@@ -1630,6 +2017,13 @@ describe('runClaudeUnifiedTerminalSession', () => {
 
     await runClaudeUnifiedTerminalSession(options);
 
+    expect(clearSessionMarkerTerminalHostHealth).toHaveBeenCalledWith({
+      pid: process.pid,
+      sessionId: 'happy-session-id',
+    });
+    expect(clearSessionMarkerTerminalHostHealth.mock.invocationCallOrder[0]).toBeLessThan(
+      onTerminalHostReady.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
     expect(onTerminalHostReady).toHaveBeenCalledWith({
       handle,
       terminal: {
@@ -2354,6 +2748,314 @@ describe('runClaudeUnifiedTerminalSession', () => {
     }
   });
 
+  it('preserves runtime-control blockedReason and pending local ids on before-prompt starvation', async () => {
+    const abortController = createAbortableSignal();
+    const handle: TerminalHostHandle = {
+      kind: 'tmux',
+      sessionName: 'happier-claude-session-test',
+      paneId: '%1',
+      attachMetadata: {
+        attachStrategy: 'terminal_host',
+        topology: 'shared',
+        locality: 'same_machine',
+        liveProbe: 'required',
+      },
+    };
+    const adapter: TerminalHostAdapter = {
+      kind: 'tmux',
+      createOrAttachHost: vi.fn(async () => handle),
+      injectUserPrompt: vi.fn(async () => ({ status: 'injected', at: Date.now(), bytesWritten: 1 }) as const),
+      evaluateLiveness: vi.fn(async () => ({ paneAlive: true, observedAt: Date.now() })),
+      captureInputState: vi.fn(async () => ({ stable: true, currentInput: interactiveClaudeScreen, observedAt: Date.now() })),
+      interruptTurn: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    };
+    const starvations: BlockedApplyStarvationInfo[] = [];
+    let consumed = false;
+    const sessionPromise = runClaudeUnifiedTerminalSession({
+      path: '/workspace/project',
+      signal: abortController.signal,
+      nextMessage: async () => {
+        if (consumed) return null;
+        consumed = true;
+        return {
+          message: 'blocked runtime config prompt',
+          mode: {
+            permissionMode: 'default',
+            claudeUnifiedTerminalHost: 'tmux',
+          },
+          userMessageLocalIds: ['pending-local-runtime-config'],
+        };
+      },
+      resolveHostAdapter: async () => ({ status: 'resolved', adapter, reason: 'test' }),
+      buildSpawn: async () => ({
+        spawnArgv: ['/bin/claude'],
+        spawnEnv: {},
+      }),
+      createSessionName: () => 'happier-claude-session-test',
+      isCanonicalTurnActive: () => false,
+      tuiRuntimeControl: {
+        featureEnabled: true,
+        emitRuntimeConfigOutcome: vi.fn(),
+        blockedApplyStarvationThreshold: 1,
+        onBlockedApplyStarvation: (info) => {
+          starvations.push(info);
+          abortController.abort();
+        },
+        createBridge: () => ({
+          applyBeforePrompt: vi.fn(async () => ({
+            promptMayProceed: false,
+            attempted: true,
+            blockedReason: 'user_draft',
+          })),
+          reconcileFromPromptSubmitMetadata: vi.fn(),
+          dispose: vi.fn(async () => {}),
+        }) as unknown as ReturnType<NonNullable<NonNullable<Parameters<typeof runClaudeUnifiedTerminalSession>[0]['tuiRuntimeControl']>['createBridge']>>,
+      },
+    });
+
+    try {
+      await waitUntil(() => starvations.length === 1, 5_000);
+      expect(starvations).toEqual([{
+        consecutiveBlockedApplies: 1,
+        blockedReason: 'user_draft',
+        isCanonicalTurnActive: false,
+        userMessageLocalIds: ['pending-local-runtime-config'],
+      }]);
+      expect(adapter.injectUserPrompt).not.toHaveBeenCalled();
+    } finally {
+      abortController.abort();
+      await sessionPromise.catch(() => undefined);
+    }
+  });
+
+  it('delivers the queued prompt when runtime-control apply attempted only non-gating work', async () => {
+    const abortController = createAbortableSignal();
+    const injected: string[] = [];
+    const handle: TerminalHostHandle = {
+      kind: 'tmux',
+      sessionName: 'happier-claude-session-test',
+      paneId: '%1',
+      attachMetadata: {
+        attachStrategy: 'terminal_host',
+        topology: 'shared',
+        locality: 'same_machine',
+        liveProbe: 'required',
+      },
+    };
+    const adapter: TerminalHostAdapter = {
+      kind: 'tmux',
+      createOrAttachHost: vi.fn(async () => handle),
+      injectUserPrompt: vi.fn(async (_handle, input) => {
+        injected.push(input.text);
+        abortController.abort();
+        return { status: 'injected', at: Date.now(), bytesWritten: input.text.length } as const;
+      }),
+      evaluateLiveness: vi.fn(async () => ({ paneAlive: true, observedAt: Date.now() })),
+      captureInputState: vi.fn(async () => ({ stable: true, currentInput: interactiveClaudeScreen, observedAt: Date.now() })),
+      interruptTurn: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    };
+    const applyBeforePrompt = vi.fn(async () => ({
+      promptMayProceed: true,
+      attempted: true,
+    } as const));
+    let consumed = false;
+    const sessionPromise = runClaudeUnifiedTerminalSession({
+      path: '/workspace/project',
+      signal: abortController.signal,
+      nextMessage: async () => {
+        if (consumed) return null;
+        consumed = true;
+        return {
+          message: 'ambient settings must not block me',
+          mode: {
+            permissionMode: 'default',
+            reasoningEffort: 'medium',
+            claudeUnifiedTerminalHost: 'tmux',
+          },
+        };
+      },
+      resolveHostAdapter: async () => ({ status: 'resolved', adapter, reason: 'test' }),
+      buildSpawn: async () => ({
+        spawnArgv: ['/bin/claude'],
+        spawnEnv: {},
+      }),
+      createSessionName: () => 'happier-claude-session-test',
+      tuiRuntimeControl: {
+        featureEnabled: true,
+        emitRuntimeConfigOutcome: vi.fn(),
+        createBridge: () => ({
+          applyBeforePrompt,
+          reconcileFromPromptSubmitMetadata: vi.fn(),
+          dispose: vi.fn(async () => {}),
+        }) as unknown as ReturnType<NonNullable<NonNullable<Parameters<typeof runClaudeUnifiedTerminalSession>[0]['tuiRuntimeControl']>['createBridge']>>,
+      },
+    });
+
+    try {
+      await waitUntil(() => injected.length === 1, 5_000);
+      expect(applyBeforePrompt).toHaveBeenCalledTimes(1);
+      expect(injected).toEqual(['ambient settings must not block me']);
+    } finally {
+      abortController.abort();
+      await sessionPromise.catch(() => undefined);
+    }
+  });
+
+  it('keeps metadata apply starvation separate from before-prompt delivery starvation', async () => {
+    const abortController = createAbortableSignal();
+    const handle: TerminalHostHandle = {
+      kind: 'tmux',
+      sessionName: 'happier-claude-session-test',
+      paneId: '%1',
+      attachMetadata: {
+        attachStrategy: 'terminal_host',
+        topology: 'shared',
+        locality: 'same_machine',
+        liveProbe: 'required',
+      },
+    };
+    const adapter: TerminalHostAdapter = {
+      kind: 'tmux',
+      createOrAttachHost: vi.fn(async () => handle),
+      injectUserPrompt: vi.fn(async (_handle, input) => ({
+        status: 'injected',
+        at: Date.now(),
+        bytesWritten: input.text.length,
+      }) as const),
+      evaluateLiveness: vi.fn(async () => ({ paneAlive: true, observedAt: Date.now() })),
+      captureInputState: vi.fn(async () => ({ stable: true, currentInput: interactiveClaudeScreen, observedAt: Date.now() })),
+      interruptTurn: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    };
+    const applyBeforePrompt = vi
+      .fn()
+      .mockResolvedValueOnce({ promptMayProceed: true, attempted: false } as const)
+      .mockResolvedValueOnce({
+        promptMayProceed: false,
+        attempted: true,
+        blockedReason: 'user_draft',
+      } as const);
+    const applyOutOfBand = vi.fn(async () => ({
+      promptMayProceed: false,
+      attempted: true,
+      blockedReason: 'user_draft',
+    } as const));
+    const mode: EnhancedMode = {
+      permissionMode: 'yolo',
+      claudeUnifiedTerminalHost: 'tmux',
+    };
+    const registeredApply: { current?: (mode: EnhancedMode) => Promise<ClaudeUnifiedRuntimeControlApplyResult> } = {};
+    const starvations: BlockedApplyStarvationInfo[] = [];
+    const events: ClaudeUnifiedRuntimeConfigOutcomeEvent[] = [];
+    const batches: Array<{
+      message: string;
+      mode: EnhancedMode;
+      userMessageLocalIds: readonly string[];
+    }> = [
+      {
+        message: 'previous delivered prompt',
+        mode: {
+          permissionMode: 'default',
+          claudeUnifiedTerminalHost: 'tmux',
+        },
+        userMessageLocalIds: ['previous-local-id'],
+      },
+      {
+        message: 'genuine blocked delivery',
+        mode: {
+          permissionMode: 'default',
+          claudeUnifiedTerminalHost: 'tmux',
+        },
+        userMessageLocalIds: ['current-delivery-local-id'],
+      },
+    ];
+
+    const sessionPromise = runClaudeUnifiedTerminalSession<EnhancedMode>({
+      path: '/workspace/project',
+      signal: abortController.signal,
+      nextMessage: async () => batches.shift() ?? null,
+      resolveHostAdapter: async () => ({ status: 'resolved', adapter, reason: 'test' }),
+      buildSpawn: async () => ({
+        spawnArgv: ['/bin/claude'],
+        spawnEnv: {},
+      }),
+      createSessionName: () => 'happier-claude-session-test',
+      isCanonicalTurnActive: () => false,
+      createController: ({ inputConsumer, inputInjection }) => ({
+        run: async () => {
+          const firstBatch = await inputConsumer.waitForNextInput({ abortSignal: abortController.signal });
+          if (!firstBatch) throw new Error('missing first batch');
+          await inputInjection.injectUserPrompt({
+            text: firstBatch.message,
+            multiline: false,
+            origin: { kind: 'ui_pending', nonce: 'first' },
+            scheduling: {},
+          });
+
+          const apply = registeredApply.current;
+          if (!apply) throw new Error('metadata runtime mode applier was not registered');
+          await apply(mode);
+          await apply(mode);
+
+          const secondBatch = await inputConsumer.waitForNextInput({ abortSignal: abortController.signal });
+          if (!secondBatch) throw new Error('missing second batch');
+          await inputInjection.injectUserPrompt({
+            text: secondBatch.message,
+            multiline: false,
+            origin: { kind: 'ui_pending', nonce: 'second' },
+            scheduling: {},
+          });
+          abortController.abort();
+        },
+        dispose: async () => {},
+      }),
+      tuiRuntimeControl: {
+        featureEnabled: true,
+        emitRuntimeConfigOutcome: (event) => events.push(event),
+        blockedApplyStarvationThreshold: 1,
+        blockedInjectionRetryMs: 5,
+        onBlockedApplyStarvation: (info) => {
+          starvations.push(info);
+        },
+        registerMetadataRuntimeModeApplier: (apply) => {
+          registeredApply.current = apply;
+        },
+        createBridge: () => ({
+          applyBeforePrompt,
+          applyPermissionModeForInFlightSteer: vi.fn(async () => ({ status: 'applied' as const })),
+          applyOutOfBand,
+          reconcileFromPromptSubmitMetadata: vi.fn(),
+          reconcileFromStatusline: vi.fn(),
+          isControlInFlight: vi.fn(() => false),
+          ownsDialog: vi.fn(() => false),
+          whenControlIdle: vi.fn(async () => {}),
+          dispose: vi.fn(async () => {}),
+        }),
+      },
+    });
+
+    try {
+      await sessionPromise;
+    } finally {
+      abortController.abort();
+      await sessionPromise.catch(() => undefined);
+    }
+
+    expect(applyOutOfBand).toHaveBeenCalledTimes(2);
+    expect(events).toContainEqual(expect.objectContaining({
+      status: 'failed',
+      timing: 'queued_until_safe_window',
+    }));
+    expect(starvations).toEqual([{
+      consecutiveBlockedApplies: 1,
+      blockedReason: 'user_draft',
+      isCanonicalTurnActive: false,
+      userMessageLocalIds: ['current-delivery-local-id'],
+    }]);
+  });
+
   it('registers a metadata runtime-control applier after the existing bridge is created', async () => {
     const abortController = createAbortableSignal();
     const handle: TerminalHostHandle = {
@@ -2418,6 +3120,7 @@ describe('runClaudeUnifiedTerminalSession', () => {
           reconcileFromPromptSubmitMetadata: vi.fn(),
           reconcileFromStatusline: vi.fn(),
           isControlInFlight: vi.fn(() => false),
+          ownsDialog: vi.fn(() => false),
           whenControlIdle: vi.fn(async () => {}),
           dispose: vi.fn(async () => {}),
         }),
@@ -2527,6 +3230,7 @@ describe('runClaudeUnifiedTerminalSession', () => {
           reconcileFromPromptSubmitMetadata: vi.fn(),
           reconcileFromStatusline: vi.fn(),
           isControlInFlight: vi.fn(() => false),
+          ownsDialog: vi.fn(() => false),
           whenControlIdle: vi.fn(async () => {}),
           dispose: vi.fn(async () => {}),
         }),
@@ -2563,6 +3267,121 @@ describe('runClaudeUnifiedTerminalSession', () => {
 
       await waitUntil(() => applyOutOfBand.mock.calls.length === 2, 5_000);
       expect(applyOutOfBand).toHaveBeenNthCalledWith(2, mode);
+    } finally {
+      abortController.abort();
+      await sessionPromise;
+    }
+  });
+
+  it('retries a deferred metadata runtime-control apply on a bounded timer and emits a failed outcome when no safe boundary arrives', async () => {
+    const abortController = createAbortableSignal();
+    const handle: TerminalHostHandle = {
+      kind: 'tmux',
+      sessionName: 'happier-claude-session-test',
+      paneId: '%1',
+      attachMetadata: {
+        attachStrategy: 'terminal_host',
+        topology: 'shared',
+        locality: 'same_machine',
+        liveProbe: 'required',
+      },
+    };
+    const adapter: TerminalHostAdapter = {
+      kind: 'tmux',
+      createOrAttachHost: vi.fn(async () => handle),
+      injectUserPrompt: vi.fn(async () => ({ status: 'injected', at: Date.now(), bytesWritten: 1 }) as const),
+      evaluateLiveness: vi.fn(async () => ({ paneAlive: true, observedAt: Date.now() })),
+      captureInputState: vi.fn(async () => ({ stable: true, currentInput: interactiveClaudeScreen, observedAt: Date.now() })),
+      interruptTurn: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    };
+    const mode: EnhancedMode = {
+      permissionMode: 'yolo',
+      claudeUnifiedTerminalHost: 'tmux',
+    };
+    const applyOutOfBand = vi.fn(async () => ({
+      promptMayProceed: false,
+      attempted: true,
+      blockedReason: 'user_draft',
+    } as const));
+    const events: ClaudeUnifiedRuntimeConfigOutcomeEvent[] = [];
+    const registeredApply: { current?: (mode: EnhancedMode) => Promise<ClaudeUnifiedRuntimeControlApplyResult> } = {};
+    let consumed = false;
+    const waitForAbort = async (): Promise<null> => {
+      if (abortController.signal.aborted) return null;
+      return new Promise<null>((resolve) => {
+        abortController.signal.addEventListener('abort', () => resolve(null), { once: true });
+      });
+    };
+
+    const sessionPromise = runClaudeUnifiedTerminalSession<EnhancedMode>({
+      path: '/workspace/project',
+      signal: abortController.signal,
+      nextMessage: async () => {
+        if (consumed) return waitForAbort();
+        consumed = true;
+        return {
+          message: 'start turn before metadata apply',
+          mode: {
+            permissionMode: 'default',
+            claudeUnifiedTerminalHost: 'tmux',
+          },
+        };
+      },
+      resolveHostAdapter: async () => ({ status: 'resolved', adapter, reason: 'test' }),
+      buildSpawn: async () => ({
+        spawnArgv: ['/bin/claude'],
+        spawnEnv: {},
+      }),
+      createSessionName: () => 'happier-claude-session-test',
+      tuiRuntimeControl: {
+        featureEnabled: true,
+        emitRuntimeConfigOutcome: (event) => events.push(event),
+        blockedInjectionRetryMs: 5,
+        blockedApplyStarvationThreshold: 2,
+        registerMetadataRuntimeModeApplier: (apply) => {
+          registeredApply.current = apply;
+        },
+        createBridge: () => ({
+          applyBeforePrompt: vi.fn(async () => ({ promptMayProceed: true, attempted: false })),
+          applyPermissionModeForInFlightSteer: vi.fn(async () => ({ status: 'applied' as const })),
+          applyOutOfBand,
+          reconcileFromPromptSubmitMetadata: vi.fn(),
+          reconcileFromStatusline: vi.fn(),
+          isControlInFlight: vi.fn(() => false),
+          ownsDialog: vi.fn(() => false),
+          whenControlIdle: vi.fn(async () => {}),
+          dispose: vi.fn(async () => {}),
+        }),
+      },
+    });
+
+    try {
+      await waitUntil(() => registeredApply.current !== undefined, 5_000);
+      vi.useFakeTimers();
+      const apply = registeredApply.current;
+      if (!apply) throw new Error('metadata runtime mode applier was not registered');
+
+      await expect(apply(mode)).resolves.toEqual({
+        promptMayProceed: false,
+        attempted: true,
+        blockedReason: 'user_draft',
+      });
+      expect(applyOutOfBand).toHaveBeenCalledTimes(1);
+      expect(events).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(5);
+
+      expect(applyOutOfBand).toHaveBeenCalledTimes(2);
+      expect(events).toContainEqual(expect.objectContaining({
+        status: 'failed',
+        timing: 'queued_until_safe_window',
+        changes: [expect.objectContaining({
+          key: 'permissionMode',
+          requested: 'yolo',
+          reason: 'user_draft',
+        })],
+      }));
     } finally {
       abortController.abort();
       await sessionPromise;
@@ -5312,11 +6131,12 @@ describe('runClaudeUnifiedTerminalSession', () => {
     }
   });
 
-  it('rejects with a recoverable classified failure when terminal-custody acceptance evidence is lost after turn end', async () => {
+  it('credits provider acceptance when terminal custody owns a steered prompt before turn end', async () => {
     const abortController = createAbortableSignal();
     const injected: string[] = [];
     const telemetry = { emit: vi.fn() };
     const onTerminalInjectionFailure = vi.fn();
+    const onPromptAcceptedByProvider = vi.fn();
     let subscribedHook: ((data: SessionHookData) => void) | undefined;
     let currentScreen = interactiveClaudeScreen;
     const handle: TerminalHostHandle = {
@@ -5377,6 +6197,7 @@ describe('runClaudeUnifiedTerminalSession', () => {
       providerAcceptanceTimeoutMs: 20,
       telemetry,
       onTerminalInjectionFailure,
+      onPromptAcceptedByProvider,
       subscribeClaudeSessionHooks: (callback) => {
         subscribedHook = callback;
         return () => {
@@ -5419,26 +6240,21 @@ describe('runClaudeUnifiedTerminalSession', () => {
         && call[0]?.properties?.decision === 'queued_banner_check'
         && call[0]?.properties?.queuedBannerVisible === true
       )), 5_000);
+      await waitUntil(() => onPromptAcceptedByProvider.mock.calls.some((call) => (
+        call[0]?.message === 'terminal custody loses acceptance proof'
+      )), 5_000);
 
       subscribedHook?.({
         hook_event_name: 'Stop',
         session_id: 'claude-session-id',
         transcript_path: '/tmp/claude-session.jsonl',
       });
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
-      await waitUntil(
-        () => onTerminalInjectionFailure.mock.calls.some((call) => call[0]?.failureState === 'failed_terminal') || settlement !== null,
-        1_000,
-      );
       expect(settlement).toBeNull();
       expect(adapter.dispose).not.toHaveBeenCalled();
-      expect(onTerminalInjectionFailure).toHaveBeenCalledWith(expect.objectContaining({
-          code: 'claude_unified_terminal_injection_failed',
-          failureState: 'failed_terminal',
-          reason: 'timeout',
-          phase: 'after_enter_unknown',
-          duplicateRisk: 'likely',
-          recoverable: true,
+      expect(onTerminalInjectionFailure).not.toHaveBeenCalledWith(expect.objectContaining({
+        failureState: 'failed_terminal',
       }));
     } finally {
       abortController.abort();
@@ -6087,4 +6903,5 @@ describe('runClaudeUnifiedTerminalSession', () => {
       await sessionPromise;
     }
   });
+
 });

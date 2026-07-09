@@ -445,6 +445,112 @@ describe('createClaudeUnifiedTranscriptBridge', () => {
     }
   });
 
+  it('does not replay prior-era failed resume terminal rows as fresh visible messages', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'happier-claude-unified-transcript-prior-failed-'));
+    tempDirs.push(dir);
+    const transcriptPath = join(dir, 'sess_prior_failed_resume.jsonl');
+    await mkdir(dir, { recursive: true });
+    await writeFile(transcriptPath, '');
+
+    const sessionId = 'sess_prior_failed_resume';
+    await appendJsonl(transcriptPath, {
+      type: 'user',
+      uuid: 'prior_era_user_prompt',
+      timestamp: new Date(Date.now() - 60_000).toISOString(),
+      sessionId,
+      message: {
+        role: 'user',
+        content: [{ type: 'text', text: 'old prompt' }],
+      },
+    } as RawJSONLines);
+    await appendJsonl(transcriptPath, {
+      type: 'assistant',
+      uuid: 'prior_era_api_error',
+      timestamp: new Date(Date.now() - 59_000).toISOString(),
+      sessionId,
+      isApiErrorMessage: true,
+      error: 'server_error',
+      message: {
+        role: 'assistant',
+        content: 'API Error: terminal failure from a prior runner era.',
+      },
+    } as RawJSONLines);
+
+    let subscribedHook: ((data: SessionHookData) => void) | undefined;
+    const onMessage = vi.fn();
+    const onTranscriptMessage = vi.fn();
+    const bridge = createClaudeUnifiedTranscriptBridge({
+      sessionId,
+      transcriptPath,
+      workingDirectory: dir,
+      onMessage,
+      onTranscriptMessage,
+      loadCommittedClaudeJsonlMessageBaseline: async () => ({
+        keys: new Set<string>(),
+        complete: true,
+        oldestCoveredAtMs: null,
+      }),
+      subscribeClaudeSessionHooks: (callback) => {
+        subscribedHook = callback;
+        return () => {
+          subscribedHook = undefined;
+        };
+      },
+      transcriptMissingWarningMs: 0,
+    });
+
+    try {
+      await bridge.start({ abortSignal: new AbortController().signal });
+      expect(onMessage).not.toHaveBeenCalled();
+
+      const hook = subscribedHook;
+      expect(hook).toBeTypeOf('function');
+      if (typeof hook !== 'function') throw new Error('Claude session hook subscription was not registered');
+
+      hook({
+        hook_event_name: 'SessionStart',
+        source: 'resume',
+        session_id: sessionId,
+        transcript_path: transcriptPath,
+      });
+
+      await waitUntil(() => onMessage.mock.calls.some(([message]) => message?.uuid === 'prior_era_user_prompt'));
+      await waitMs(150);
+
+      const visibleUuidsAfterResume = onMessage.mock.calls.map(([message]) => message?.uuid);
+      expect(visibleUuidsAfterResume).not.toContain('prior_era_api_error');
+      expect(onTranscriptMessage.mock.calls.map(([message]) => message?.uuid)).not.toContain(
+        'prior_era_api_error',
+      );
+
+      await appendJsonl(transcriptPath, {
+        type: 'assistant',
+        uuid: 'live_api_error',
+        timestamp: new Date(Date.now() + 10_000).toISOString(),
+        sessionId,
+        isApiErrorMessage: true,
+        error: 'server_error',
+        message: {
+          role: 'assistant',
+          content: 'API Error: terminal failure observed by this runner.',
+        },
+      } as RawJSONLines);
+
+      await waitUntil(() => onMessage.mock.calls.some(([message]) => message?.uuid === 'live_api_error'));
+      await waitUntil(() =>
+        onTranscriptMessage.mock.calls.some(([message]) => message?.uuid === 'live_api_error'),
+      );
+      await waitMs(150);
+
+      const visibleUuidsAfterLiveFailure = onMessage.mock.calls.map(([message]) => message?.uuid);
+      const lifecycleUuidsAfterLiveFailure = onTranscriptMessage.mock.calls.map(([message]) => message?.uuid);
+      expect(visibleUuidsAfterLiveFailure.filter(uuid => uuid === 'live_api_error')).toHaveLength(1);
+      expect(lifecycleUuidsAfterLiveFailure.filter(uuid => uuid === 'live_api_error')).toHaveLength(1);
+    } finally {
+      await bridge.dispose();
+    }
+  });
+
   it('discovers a fresh transcript when Claude writes before emitting SessionStart', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'happier-claude-unified-transcript-no-hook-'));
     tempDirs.push(dir);

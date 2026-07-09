@@ -22,6 +22,11 @@ type TerminalLaunchSpecFixture = Readonly<{
   cwd?: string;
   env?: Record<string, string>;
   envPassthroughKeys?: string[];
+  diagnostics?: {
+    sessionId?: string;
+    logsDir?: string;
+    sessionExitDir?: string;
+  };
 }>;
 
 async function withPatchedEnv<T>(
@@ -100,6 +105,34 @@ describe('buildClaudeUnifiedTerminalSpawn', () => {
     expect(launchArgs.filter((arg) => arg === '--allow-dangerously-skip-permissions')).toHaveLength(1);
     expect(launchArgs).not.toContain('--dangerously-skip-permissions');
     expect(launchArgs).not.toContain('bypassPermissions');
+  });
+
+  it('writes per-session runner diagnostics paths into the launch spec when a happy session id is available', async () => {
+    const spawn = await buildClaudeUnifiedTerminalSpawn({
+      path: '/workspace/project',
+      happySessionId: 'happy-session-id',
+      first: {
+        message: 'hello',
+        mode: {
+          permissionMode: 'default',
+        },
+      },
+      deps: {
+        resolveClaudeCliPath: () => '/usr/local/bin/claude',
+        isClaudeCliJavaScriptFile: () => false,
+        ensureClaudeJsRuntimeExecutable: async () => '/managed/node',
+        claudeLocalLauncherPath: '/happier/scripts/claude_local_launcher.cjs',
+        terminalLaunchSpecRunnerPath: '/happier/scripts/terminal_launch_spec_runner.cjs',
+        resolveCommandInvocation: ({ command, args }) => ({ command, args: [...args] }),
+      },
+    });
+
+    const launchSpec = await readLaunchSpecFromSpawn(spawn);
+    expect(launchSpec.diagnostics).toMatchObject({
+      sessionId: 'happy-session-id',
+    });
+    expect(launchSpec.diagnostics?.logsDir).toContain('/logs/terminal-runner');
+    expect(launchSpec.diagnostics?.sessionExitDir).toContain('/logs/session-exit');
   });
 
   it('starts yolo sessions in bypass mode while still deduping the managed allow flag', async () => {

@@ -13,6 +13,10 @@ export type OwnComposerDraftGuardResult =
   | Readonly<{ status: 'foreign_draft'; screen: ClaudeScreenState }>
   /** Composer text may be a dim Claude suggestion, but the capture lacks style evidence. */
   | Readonly<{ status: 'capture_style_unavailable'; screen: ClaudeScreenState }>
+  /** Provider is known unavailable from the visible Claude TUI state; this is not a user draft. */
+  | Readonly<{ status: 'provider_unavailable'; screen: ClaudeScreenState }>
+  /** A dialog/editor/selection state owns input; this is not a user draft. */
+  | Readonly<{ status: 'blocked_non_input_state'; screen: ClaudeScreenState; blockedReason: string }>
   /** Screen is generating: the clear key (Escape) would interrupt the running turn. */
   | Readonly<{ status: 'generating'; screen: ClaudeScreenState }>
   | Readonly<{ status: 'capture_failed' }>
@@ -65,6 +69,20 @@ export async function clearOwnLeftoverComposerDraft(opts: Readonly<{
     });
   }
 
+  function resolveBlockedNonInputReason(screen: ClaudeScreenState): string {
+    if (screen.permissionPromptVisible) return 'permission_prompt';
+    if (screen.trustFolderPromptVisible) return 'trust_folder_prompt';
+    if (screen.switchModelDialogVisible) return 'switch_model_dialog';
+    if (screen.resumeChoiceDialogVisible) return 'resume_choice_dialog';
+    if (screen.effortChangeDialogVisible) return 'effort_change_dialog';
+    if (screen.unrecognizedConfirmationDialogVisible) return 'unrecognized_confirmation_dialog';
+    if (screen.permissionEditorOpen) return 'permission_editor';
+    if (screen.selectionListVisible) return 'selection_list';
+    if (screen.queuedMessageBannerVisible) return 'queued_message_banner';
+    if (screen.generating) return 'generating';
+    return 'non_input_state';
+  }
+
   let captured = await capture();
   if (!captured) return { status: 'capture_failed' };
   let screen = captured.screen;
@@ -73,6 +91,10 @@ export async function clearOwnLeftoverComposerDraft(opts: Readonly<{
       return { status: 'no_draft', screen };
     case 'generating':
       return { status: 'generating', screen };
+    case 'provider_unavailable':
+      return { status: 'provider_unavailable', screen };
+    case 'non_input_state':
+      return { status: 'blocked_non_input_state', screen, blockedReason: resolveBlockedNonInputReason(screen) };
     case 'capture_style_unavailable':
       return { status: 'capture_style_unavailable', screen };
     case 'foreign':
@@ -98,6 +120,10 @@ export async function clearOwnLeftoverComposerDraft(opts: Readonly<{
         return { status: 'cleared', screen, attempts: attempt };
       case 'generating':
         return { status: 'generating', screen };
+      case 'provider_unavailable':
+        return { status: 'provider_unavailable', screen };
+      case 'non_input_state':
+        return { status: 'blocked_non_input_state', screen, blockedReason: resolveBlockedNonInputReason(screen) };
       case 'capture_style_unavailable':
         return { status: 'capture_style_unavailable', screen };
       case 'foreign':

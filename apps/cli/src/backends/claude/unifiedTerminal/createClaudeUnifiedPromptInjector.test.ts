@@ -276,6 +276,20 @@ describe('createClaudeUnifiedPromptInjector', () => {
       });
     });
 
+    it('writes the queued prompt after the guard clears controller slash-command residue', async () => {
+      const injectUserPrompt = vi.fn().mockResolvedValue({ status: 'injected', at: 1, bytesWritten: 11 });
+      const injector = createClaudeUnifiedPromptInjector({
+        inputInjection: { hostKind: 'zellij', injectUserPrompt },
+        composerDraftGuard: async () => ({ status: 'cleared', attempts: 1, draftLength: '/effort medium'.length }),
+        createNonce: () => 'nonce-1',
+      });
+
+      await expect(
+        injector.injectPrompt({ message: 'next prompt', origin: { kind: 'ui_pending', clientId: 'c1' } }),
+      ).resolves.toMatchObject({ status: 'injected' });
+      expect(injectUserPrompt).toHaveBeenCalledWith(expect.objectContaining({ text: 'next prompt' }));
+    });
+
     it('defers the injection without writing when the composer holds a genuine user draft', async () => {
       const injectUserPrompt = vi.fn();
       const telemetry = { emit: vi.fn() };
@@ -288,12 +302,73 @@ describe('createClaudeUnifiedPromptInjector', () => {
 
       await expect(
         injector.injectPrompt({ message: 'next prompt', origin: { kind: 'ui_pending', clientId: 'c1' } }),
-      ).resolves.toMatchObject({ status: 'deferred', reason: 'user_typing' });
+      ).resolves.toMatchObject({
+        status: 'deferred',
+        reason: 'user_typing',
+        blocker: {
+          kind: 'terminal_user_draft',
+          source: 'draft_guard',
+          guardStatus: 'foreign_draft',
+          draftLength: 12,
+        },
+      });
       expect(injectUserPrompt).not.toHaveBeenCalled();
       expect(telemetry.emit).toHaveBeenCalledWith({
         name: 'unified.injection.draft_guard',
         properties: { status: 'foreign_draft', draftLength: 12, originKind: 'ui_pending' },
       });
+    });
+
+    it('defers provider-unavailable guard states with the provider blocker instead of a composer-draft blocker', async () => {
+      const injectUserPrompt = vi.fn();
+      const telemetry = { emit: vi.fn() };
+      const injector = createClaudeUnifiedPromptInjector({
+        inputInjection: { hostKind: 'zellij', injectUserPrompt },
+        composerDraftGuard: async () => ({ status: 'provider_unavailable' }),
+        createNonce: () => 'nonce-1',
+        telemetry,
+      });
+
+      await expect(
+        injector.injectPrompt({ message: 'next prompt', origin: { kind: 'ui_pending', clientId: 'c1' } }),
+      ).resolves.toMatchObject({
+        status: 'deferred',
+        reason: 'terminal_busy',
+        retryAfterMs: 30_000,
+        blocker: {
+          kind: 'provider_unavailable',
+          source: 'draft_guard',
+          detail: 'claude_usage_limit_dialog',
+        },
+      });
+      expect(injectUserPrompt).not.toHaveBeenCalled();
+      expect(telemetry.emit).toHaveBeenCalledWith({
+        name: 'unified.injection.draft_guard',
+        properties: { status: 'provider_unavailable', originKind: 'ui_pending' },
+      });
+    });
+
+    it('defers non-input guard states as terminal busy instead of user typing', async () => {
+      const injectUserPrompt = vi.fn();
+      const injector = createClaudeUnifiedPromptInjector({
+        inputInjection: { hostKind: 'zellij', injectUserPrompt },
+        composerDraftGuard: async () => ({ status: 'blocked_non_input_state', blockedReason: 'switch_model_dialog' }),
+        createNonce: () => 'nonce-1',
+      });
+
+      await expect(
+        injector.injectPrompt({ message: 'next prompt', origin: { kind: 'ui_pending', clientId: 'c1' } }),
+      ).resolves.toMatchObject({
+        status: 'deferred',
+        reason: 'terminal_busy',
+        retryAfterMs: 2_000,
+        blocker: {
+          kind: 'terminal_busy',
+          source: 'readiness',
+          detail: 'switch_model_dialog',
+        },
+      });
+      expect(injectUserPrompt).not.toHaveBeenCalled();
     });
 
     // Live-proven starvation (runner pid 20327, 11:28): an idle session has no turn-end or
@@ -333,7 +408,17 @@ describe('createClaudeUnifiedPromptInjector', () => {
 
       await expect(
         injector.injectPrompt({ message: 'next prompt', origin: { kind: 'ui_pending', clientId: 'c1' } }),
-      ).resolves.toMatchObject({ status: 'deferred', reason: 'user_typing', retryAfterMs: 2_000 });
+      ).resolves.toMatchObject({
+        status: 'deferred',
+        reason: 'user_typing',
+        retryAfterMs: 2_000,
+        blocker: {
+          kind: 'capture_ambiguous',
+          source: 'draft_guard',
+          guardStatus: 'capture_style_unavailable',
+          draftLength: 32,
+        },
+      });
       expect(injectUserPrompt).not.toHaveBeenCalled();
       expect(telemetry.emit).toHaveBeenCalledWith({
         name: 'unified.injection.draft_guard',
@@ -388,6 +473,7 @@ describe('createClaudeUnifiedPromptInjector', () => {
         nowMs: () => nowMs,
         telemetry,
         onDraftGuardStarvation,
+        isCanonicalTurnActive: () => false,
       };
       const injector = createClaudeUnifiedPromptInjector(injectorOptions);
       const batch = { message: 'next prompt', origin: { kind: 'ui_pending' as const, clientId: 'c1' } };
@@ -406,7 +492,9 @@ describe('createClaudeUnifiedPromptInjector', () => {
         consecutiveDeferrals: 4,
         draftLength: 32,
         guardStatus: 'foreign_draft',
+        isCanonicalTurnActive: false,
         originKind: 'ui_pending',
+        userMessageLocalIds: [],
       });
       expect(telemetry.emit).toHaveBeenCalledWith({
         name: 'unified.injection.draft_guard',
@@ -443,7 +531,9 @@ describe('createClaudeUnifiedPromptInjector', () => {
         consecutiveDeferrals: 4,
         draftLength: 32,
         guardStatus: 'capture_style_unavailable',
+        isCanonicalTurnActive: true,
         originKind: 'ui_pending',
+        userMessageLocalIds: [],
       });
     });
 

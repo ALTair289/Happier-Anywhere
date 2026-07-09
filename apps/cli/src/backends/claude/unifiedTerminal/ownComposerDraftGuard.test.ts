@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 import { createClaudeOwnComposerTextLog } from './ownComposerTextLog';
 import { clearOwnLeftoverComposerDraft } from './ownComposerDraftGuard';
@@ -37,6 +39,10 @@ function ownLog(...texts: string[]) {
   const log = createClaudeOwnComposerTextLog();
   for (const text of texts) log.record(text);
   return log;
+}
+
+function readFixture(name: string): string {
+  return readFileSync(resolve(__dirname, 'tuiControls/__fixtures__', name), 'utf8');
 }
 
 describe('clearOwnLeftoverComposerDraft (C11: idle pre-injection own-leftover guard)', () => {
@@ -218,6 +224,38 @@ describe('clearOwnLeftoverComposerDraft (C11: idle pre-injection own-leftover gu
       wait: async () => undefined,
     });
     expect(result.status).toBe('generating');
+  });
+
+  it('reports provider_unavailable for the captured Claude usage-limit dialog instead of foreign_draft', async () => {
+    const result = await clearOwnLeftoverComposerDraft({
+      captureInputState: async () => ({ currentInput: readFixture('incident-89861-ratelimit-resume.ansi') }),
+      sendClearKey: async () => {
+        throw new Error('must not clear a usage-limit dialog');
+      },
+      ownComposerTexts: ownLog(OWN_TEXT),
+      wait: async () => undefined,
+    });
+    expect(result.status).toBe('provider_unavailable');
+  });
+
+  it('reports blocked_non_input_state for composer-shaped dialog text instead of foreign_draft', async () => {
+    const result = await clearOwnLeftoverComposerDraft({
+      captureInputState: async () => ({
+        currentInput: [
+          'Switch model?',
+          '❯ 1. Yes, switch',
+          '  2. No, go back',
+          '',
+          plainSuggestionScreen('Continue where you left off'),
+        ].join('\n'),
+      }),
+      sendClearKey: async () => {
+        throw new Error('must not clear a non-input dialog');
+      },
+      ownComposerTexts: ownLog(OWN_TEXT),
+      wait: async () => undefined,
+    });
+    expect(result.status).toBe('blocked_non_input_state');
   });
 
   it('stops clearing when the draft mutates into foreign text mid-episode (user started typing)', async () => {

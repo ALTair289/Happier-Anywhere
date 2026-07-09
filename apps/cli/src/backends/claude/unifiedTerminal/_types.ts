@@ -6,6 +6,7 @@ import type {
   TerminalPromptInput,
   TerminalTurnState,
 } from '@/agent/runtime/terminal/_types';
+import type { ClaudeScreenState } from './tuiControls/screenState';
 
 export type ClaudeUnifiedPromptOrigin = Readonly<{
   kind: 'ui_pending' | 'ui_immediate' | 'rpc';
@@ -70,6 +71,15 @@ export type ClaudeUnifiedPromptInjectionOptions = Readonly<{
   inFlightSteer?: boolean | undefined;
 }>;
 
+export type ClaudeUnifiedDeliveryBlocker = NonNullable<
+  Extract<TerminalInputInjectionResult, { status: 'deferred' }>['blocker']
+>;
+
+export type ClaudeUnifiedTerminalScreenObservation = Readonly<{
+  screenState: ClaudeScreenState;
+  userMessageLocalIds?: readonly string[] | undefined;
+}>;
+
 export type ClaudeUnifiedPromptInjector<Mode = unknown> = Readonly<{
   injectPrompt(
     batch: ClaudeUnifiedPromptBatch<Mode>,
@@ -119,6 +129,7 @@ export type ClaudeUnifiedInputArbiterSnapshot = Readonly<{
   userTyping: boolean;
   lastDeferredReason: string | null;
   lastFailureReason: string | null;
+  currentHeadBlocker: ClaudeUnifiedDeliveryBlocker | null;
   headInputState:
     | 'queued'
     | 'waiting_for_readiness'

@@ -21,6 +21,11 @@ import {
 } from './slashControls';
 import { createClaudeTuiControlTelemetrySink } from './telemetry';
 import {
+  CLAUDE_UNIFIED_RECOGNIZED_DIALOG_REGISTRY,
+  type ClaudeUnifiedDialogId,
+  type ClaudeUnifiedRecognizedDialogId,
+} from './dialogRegistry';
+import {
   DEFAULT_CLAUDE_TUI_CONTROL_TIMINGS,
   type ApplyRuntimeConfigInput,
   type ApplyRuntimeConfigReason,
@@ -124,6 +129,7 @@ export function createClaudeUnifiedTuiControlController(
   // permission answers cannot interleave with control sequences. Lane E honors `isControlInFlight()`.
   let queue: Promise<unknown> = Promise.resolve();
   let activeCount = 0;
+  let activeOwnedDialogId: ClaudeUnifiedRecognizedDialogId | null = null;
   const idleResolvers: Array<() => void> = [];
 
   function runExclusive<T>(fn: () => Promise<T>): Promise<T> {
@@ -139,6 +145,15 @@ export function createClaudeUnifiedTuiControlController(
   function whenIdle(): Promise<void> {
     if (activeCount === 0) return Promise.resolve();
     return new Promise<void>((resolve) => idleResolvers.push(resolve));
+  }
+
+  function ownedDialogForControlKey(
+    key: RuntimeConfigOutcomeChangeKeyV1,
+  ): ClaudeUnifiedRecognizedDialogId | null {
+    return CLAUDE_UNIFIED_RECOGNIZED_DIALOG_REGISTRY.find((entry) => (
+      entry.owner?.kind === 'slash_controls'
+      && entry.owner.controlKeys.some((controlKey) => controlKey === key)
+    ))?.dialogId ?? null;
   }
 
   function recordVerified(key: RuntimeConfigOutcomeChangeKeyV1, change: RuntimeConfigChangeOutcome): void {
@@ -369,8 +384,14 @@ export function createClaudeUnifiedTuiControlController(
         consecutiveUnsafeWindowDeferrals.delete(plan.key);
         consecutiveDialogDeclines.delete(plan.key);
       } else {
+        const ownedDialogId = ownedDialogForControlKey(plan.key);
         try {
-          result = await plan.run(changes);
+          activeOwnedDialogId = ownedDialogId;
+          try {
+            result = await plan.run(changes);
+          } finally {
+            if (activeOwnedDialogId === ownedDialogId) activeOwnedDialogId = null;
+          }
         } catch (error) {
           // Never reject the apply promise: a thrown control (e.g. settings lock timeout) becomes a
           // failed change so the prompt stays blocked under the existing structured-outcome contract.
@@ -409,8 +430,9 @@ export function createClaudeUnifiedTuiControlController(
   return {
     async applyDesiredRuntimeConfig(input: ApplyRuntimeConfigInput): Promise<RuntimeConfigApplyOutcome> {
       const reason = input.reason ?? 'before_prompt';
-      const effectiveDesired = mergeDesired(pending, input.desired);
-      pending = {};
+      const includePending = input.includePending !== false;
+      const effectiveDesired = includePending ? mergeDesired(pending, input.desired) : input.desired;
+      if (includePending) pending = {};
       telemetry.emit({
         name: 'unified.control.start',
         properties: { changeKeys: describeChangeKeys(effectiveDesired), reason, featureEnabled: deps.featureEnabled },
@@ -512,6 +534,10 @@ export function createClaudeUnifiedTuiControlController(
 
     isControlInFlight(): boolean {
       return activeCount > 0;
+    },
+
+    ownsDialog(dialogId: ClaudeUnifiedDialogId): boolean {
+      return activeOwnedDialogId === dialogId;
     },
 
     whenControlIdle(): Promise<void> {

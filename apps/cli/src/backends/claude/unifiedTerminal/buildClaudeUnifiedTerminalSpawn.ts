@@ -27,6 +27,7 @@ import { isAllowedExactEnvKey } from '@/utils/env/isAllowedExactEnvKey';
 import {
   readConnectedServiceMaterializedEnvKeysFromEnv,
 } from '@/daemon/connectedServices/connectedServiceChildEnvironment';
+import { configuration } from '@/configuration';
 import type { EnhancedMode } from '../loop';
 import {
   resolveClaudeTerminalCliOptions,
@@ -102,6 +103,7 @@ type ClaudeUnifiedTerminalSpawnDeps = Readonly<{
 
 type ClaudeUnifiedTerminalSpawnInput<Mode extends EnhancedMode = EnhancedMode> = Readonly<{
   path: string;
+  happySessionId?: string | null | undefined;
   first: Readonly<{ message: string; mode: Mode }>;
   claudeArgs?: readonly string[] | undefined;
   hookSettingsPath?: string | undefined;
@@ -403,6 +405,11 @@ type TerminalLaunchSpec = Readonly<{
   cwd: string;
   env: Readonly<Record<string, string>>;
   envPassthroughKeys?: readonly string[] | undefined;
+  diagnostics?: Readonly<{
+    sessionId: string;
+    logsDir: string;
+    sessionExitDir: string;
+  }> | undefined;
 }>;
 
 type SplitTerminalLaunchEnv = Readonly<{
@@ -488,7 +495,7 @@ export async function buildClaudeUnifiedTerminalSpawn<Mode extends EnhancedMode 
     && !isEmbeddedBunBundlePath(deps.terminalLaunchSpecRunnerPath)
     && !input.deps?.terminalLaunchSpecRunnerPath
   ) {
-    throw new Error('Claude unified terminal launch-spec runner not found. Please ensure HAPPIER_PROJECT_ROOT is set correctly for development.');
+    throw new Error('Claude unified terminal launch-spec runner not found. Please ensure CLI runtime assets are present next to the running bundle.');
   }
 
   let childCommand: string;
@@ -499,7 +506,7 @@ export async function buildClaudeUnifiedTerminalSpawn<Mode extends EnhancedMode 
       && !isEmbeddedBunBundlePath(deps.claudeLocalLauncherPath)
       && !input.deps?.claudeLocalLauncherPath
     ) {
-      throw new Error('Claude local launcher not found. Please ensure HAPPIER_PROJECT_ROOT is set correctly for development.');
+      throw new Error('Claude local launcher not found. Please ensure CLI runtime assets are present next to the running bundle.');
     }
     if (!env.HAPPIER_CLAUDE_PATH && !env.HAPPY_CLAUDE_PATH) {
       env.HAPPIER_CLAUDE_PATH = resolvedClaudeCliPath;
@@ -517,12 +524,22 @@ export async function buildClaudeUnifiedTerminalSpawn<Mode extends EnhancedMode 
   }
 
   const splitEnv = splitTerminalLaunchSpecEnv(env);
+  const happySessionId = typeof input.happySessionId === 'string' ? input.happySessionId.trim() : '';
   const specPath = await writeTerminalLaunchSpec({
     command: childCommand,
     args: childArgs,
     cwd: input.path,
     env: splitEnv.persistedEnv,
     ...(splitEnv.passthroughKeys.length > 0 ? { envPassthroughKeys: splitEnv.passthroughKeys } : {}),
+    ...(happySessionId.length > 0
+      ? {
+          diagnostics: {
+            sessionId: happySessionId,
+            logsDir: join(configuration.logsDir, 'terminal-runner'),
+            sessionExitDir: join(configuration.logsDir, 'session-exit'),
+          },
+        }
+      : {}),
   });
 
   return {

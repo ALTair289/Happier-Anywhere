@@ -1,4 +1,6 @@
 import type { DrainPendingOptions, DrainPendingResult, MessageBatch } from '@/agent/runtime/sessionInput/types';
+import { PendingQueueMaterializationAuthError } from '@/agent/runtime/sessionInput/SessionProviderInputConsumer';
+import { logger } from '@/ui/logger';
 
 import type {
   ClaudeUnifiedInputArbiter,
@@ -13,6 +15,26 @@ function shouldPausePumpForArbiterBackpressure(snapshot: ClaudeUnifiedInputArbit
 }
 
 const DEFAULT_PAUSED_ARBITER_RECHECK_MS = 500;
+const DEFAULT_FAILURE_RETRY_BACKOFF_MS = 250;
+const DEFAULT_MAX_CONSECUTIVE_HANDLED_FAILURES = 3;
+
+type PumpOnceResult =
+  | Readonly<{ kind: 'delivered' }>
+  | Readonly<{ kind: 'stopped' }>
+  | Readonly<{ kind: 'handled_failure'; error: unknown }>;
+
+function createPumpFailureBudgetExhaustedError(error: unknown, failureCount: number): Error & {
+  code: 'claude_unified_pending_queue_pump_failure_budget_exhausted';
+  failureCount: number;
+  cause: unknown;
+} {
+  return Object.assign(new Error('Claude unified pending queue pump failure budget exhausted'), {
+    name: 'ClaudeUnifiedPendingQueuePumpFailureBudgetExhaustedError',
+    code: 'claude_unified_pending_queue_pump_failure_budget_exhausted' as const,
+    failureCount,
+    cause: error,
+  });
+}
 
 async function waitForPausedArbiterRecheck(abortSignal: AbortSignal, delayMs: number): Promise<boolean> {
   if (abortSignal.aborted) return false;
@@ -36,6 +58,8 @@ export function createClaudeUnifiedPendingQueuePump<Mode = unknown>(opts: Readon
   inputConsumer: ClaudeUnifiedInputConsumer<Mode>;
   arbiter: Pick<ClaudeUnifiedInputArbiter<Mode>, 'enqueueUiMessage' | 'drainWhenSafe' | 'snapshot'>;
   pausedArbiterRecheckMs?: number | undefined;
+  failureRetryBackoffMs?: number | undefined;
+  maxConsecutiveHandledFailures?: number | undefined;
   /**
    * Called when a batch was already pulled from the input consumer but the pump
    * can no longer deliver it (aborted/disposed mid-wait, e.g. host-death
@@ -53,30 +77,52 @@ export function createClaudeUnifiedPendingQueuePump<Mode = unknown>(opts: Readon
   let disposed = false;
   let runPromise: Promise<void> | null = null;
 
-  const pumpOnce = async (pumpOpts: { abortSignal: AbortSignal }): Promise<boolean> => {
+  const pumpOnceDetailed = async (pumpOpts: { abortSignal: AbortSignal }): Promise<PumpOnceResult> => {
     if (disposed || pumpOpts.abortSignal.aborted) {
-      return false;
+      return { kind: 'stopped' };
     }
-    const batch = await opts.inputConsumer.waitForNextInput({ abortSignal: pumpOpts.abortSignal });
+    let batch: MessageBatch<Mode, string> | null = null;
+    try {
+      batch = await opts.inputConsumer.waitForNextInput({ abortSignal: pumpOpts.abortSignal });
+    } catch (error) {
+      if (error instanceof PendingQueueMaterializationAuthError) {
+        throw error;
+      }
+      logger.debug('[unified]: pending queue pump input wait failed (non-fatal)', error);
+      return { kind: 'handled_failure', error };
+    }
     if (!batch) {
-      return false;
+      return { kind: 'stopped' };
     }
     if (pumpOpts.abortSignal.aborted || disposed) {
       opts.onUndeliverableBatch?.(batch);
-      return false;
+      return { kind: 'stopped' };
     }
     if (batch.providerAcceptancePending === true) {
       opts.onProviderAcceptancePendingPrompt?.(batch);
     }
-    await opts.arbiter.enqueueUiMessage({
-      message: batch.message,
-      mode: batch.mode,
-      origin: { kind: 'ui_pending' },
-      maxUserMessageSeq: batch.maxUserMessageSeq ?? null,
-      userMessageLocalIds: batch.userMessageLocalIds ?? [],
-    });
-    await opts.arbiter.drainWhenSafe();
-    return true;
+    try {
+      await opts.arbiter.enqueueUiMessage({
+        message: batch.message,
+        mode: batch.mode,
+        origin: { kind: 'ui_pending' },
+        maxUserMessageSeq: batch.maxUserMessageSeq ?? null,
+        userMessageLocalIds: batch.userMessageLocalIds ?? [],
+      });
+      await opts.arbiter.drainWhenSafe();
+    } catch (error) {
+      if (error instanceof PendingQueueMaterializationAuthError) {
+        throw error;
+      }
+      logger.debug('[unified]: pending queue pump delivery failed (non-fatal)', error);
+      opts.onUndeliverableBatch?.(batch);
+      return { kind: 'handled_failure', error };
+    }
+    return { kind: 'delivered' };
+  };
+
+  const pumpOnce = async (pumpOpts: { abortSignal: AbortSignal }): Promise<boolean> => {
+    return (await pumpOnceDetailed(pumpOpts)).kind === 'delivered';
   };
 
   const run = async (runOpts: { abortSignal: AbortSignal }): Promise<void> => {
@@ -84,6 +130,15 @@ export function createClaudeUnifiedPendingQueuePump<Mode = unknown>(opts: Readon
       1,
       Math.trunc(opts.pausedArbiterRecheckMs ?? DEFAULT_PAUSED_ARBITER_RECHECK_MS),
     );
+    const failureRetryBackoffMs = Math.max(
+      1,
+      Math.trunc(opts.failureRetryBackoffMs ?? DEFAULT_FAILURE_RETRY_BACKOFF_MS),
+    );
+    const maxConsecutiveHandledFailures = Math.max(
+      1,
+      Math.trunc(opts.maxConsecutiveHandledFailures ?? DEFAULT_MAX_CONSECUTIVE_HANDLED_FAILURES),
+    );
+    let consecutiveHandledFailures = 0;
     while (!disposed && !runOpts.abortSignal.aborted) {
       // Backpressure is local to the terminal arbiter: while a prompt is still waiting to be
       // injected or the head is waiting for provider acceptance, do not claim another durable
@@ -94,8 +149,19 @@ export function createClaudeUnifiedPendingQueuePump<Mode = unknown>(opts: Readon
         if (!keepGoing) return;
         continue;
       }
-      const pumped = await pumpOnce(runOpts);
-      if (!pumped) return;
+      const pumped = await pumpOnceDetailed(runOpts);
+      if (pumped.kind === 'stopped') return;
+      if (pumped.kind === 'delivered') {
+        consecutiveHandledFailures = 0;
+        continue;
+      }
+
+      consecutiveHandledFailures += 1;
+      if (consecutiveHandledFailures >= maxConsecutiveHandledFailures) {
+        throw createPumpFailureBudgetExhaustedError(pumped.error, consecutiveHandledFailures);
+      }
+      const keepGoing = await waitForPausedArbiterRecheck(runOpts.abortSignal, failureRetryBackoffMs);
+      if (!keepGoing) return;
     }
   };
 

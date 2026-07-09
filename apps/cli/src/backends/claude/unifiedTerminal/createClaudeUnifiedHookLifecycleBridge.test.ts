@@ -1146,4 +1146,145 @@ describe('createClaudeUnifiedHookLifecycleBridge', () => {
       bridge.dispose();
     }
   });
+
+  describe('turn-stall screen probe', () => {
+    it('fires once after a foreground turn stays quiet for the configured interval', async () => {
+      vi.useFakeTimers();
+      let subscribedHook: ((data: SessionHookData) => void) | undefined;
+      const onStalled = vi.fn();
+      const bridge = createClaudeUnifiedHookLifecycleBridge({
+        subscribeClaudeSessionHooks: (callback) => {
+          subscribedHook = callback;
+          return () => {
+            subscribedHook = undefined;
+          };
+        },
+        arbiter: {
+          observeLifecycle: vi.fn(),
+          confirmPromptAcceptedByProvider: vi.fn().mockResolvedValue(false),
+          drainWhenSafe: vi.fn().mockResolvedValue(undefined),
+        },
+        completionQuiescenceMs: 0,
+        turnStallScreenProbe: {
+          quietMs: 1_000,
+          maxAttempts: 1,
+          onStalled,
+        },
+      });
+
+      try {
+        bridge.start({ abortSignal: new AbortController().signal });
+        const hook = subscribedHook;
+        expect(hook).toBeTypeOf('function');
+        if (typeof hook !== 'function') throw new Error('Claude session hook subscription was not registered');
+
+        hook({ hook_event_name: 'UserPromptSubmit', session_id: 'claude-session-id' });
+        await vi.advanceTimersByTimeAsync(999);
+        expect(onStalled).not.toHaveBeenCalled();
+
+        await vi.advanceTimersByTimeAsync(1);
+        expect(onStalled).toHaveBeenCalledTimes(1);
+
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(onStalled).toHaveBeenCalledTimes(1);
+      } finally {
+        bridge.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    it('resets the bounded quiet interval when transcript output arrives', async () => {
+      vi.useFakeTimers();
+      let subscribedHook: ((data: SessionHookData) => void) | undefined;
+      const onStalled = vi.fn();
+      const bridge = createClaudeUnifiedHookLifecycleBridge({
+        subscribeClaudeSessionHooks: (callback) => {
+          subscribedHook = callback;
+          return () => {
+            subscribedHook = undefined;
+          };
+        },
+        arbiter: {
+          observeLifecycle: vi.fn(),
+          confirmPromptAcceptedByProvider: vi.fn().mockResolvedValue(false),
+          drainWhenSafe: vi.fn().mockResolvedValue(undefined),
+        },
+        completionQuiescenceMs: 0,
+        turnStallScreenProbe: {
+          quietMs: 1_000,
+          maxAttempts: 1,
+          onStalled,
+        },
+      });
+
+      try {
+        bridge.start({ abortSignal: new AbortController().signal });
+        const hook = subscribedHook;
+        expect(hook).toBeTypeOf('function');
+        if (typeof hook !== 'function') throw new Error('Claude session hook subscription was not registered');
+
+        hook({ hook_event_name: 'UserPromptSubmit', session_id: 'claude-session-id' });
+        await vi.advanceTimersByTimeAsync(800);
+        bridge.observeTranscript({
+          type: 'assistant',
+          uuid: 'assistant-progress',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'still working' }],
+          },
+        } as any);
+
+        await vi.advanceTimersByTimeAsync(999);
+        expect(onStalled).not.toHaveBeenCalled();
+
+        await vi.advanceTimersByTimeAsync(1);
+        expect(onStalled).toHaveBeenCalledTimes(1);
+      } finally {
+        bridge.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    it('cancels the quiet probe when the foreground turn completes before the interval', async () => {
+      vi.useFakeTimers();
+      let subscribedHook: ((data: SessionHookData) => void) | undefined;
+      const onStalled = vi.fn();
+      const bridge = createClaudeUnifiedHookLifecycleBridge({
+        subscribeClaudeSessionHooks: (callback) => {
+          subscribedHook = callback;
+          return () => {
+            subscribedHook = undefined;
+          };
+        },
+        arbiter: {
+          observeLifecycle: vi.fn(),
+          confirmPromptAcceptedByProvider: vi.fn().mockResolvedValue(true),
+          drainWhenSafe: vi.fn().mockResolvedValue(undefined),
+        },
+        completionQuiescenceMs: 0,
+        turnStallScreenProbe: {
+          quietMs: 1_000,
+          maxAttempts: 1,
+          onStalled,
+        },
+      });
+
+      try {
+        bridge.start({ abortSignal: new AbortController().signal });
+        const hook = subscribedHook;
+        expect(hook).toBeTypeOf('function');
+        if (typeof hook !== 'function') throw new Error('Claude session hook subscription was not registered');
+
+        hook({ hook_event_name: 'UserPromptSubmit', session_id: 'claude-session-id' });
+        await vi.advanceTimersByTimeAsync(500);
+        hook({ hook_event_name: 'Stop', session_id: 'claude-session-id', background_tasks: [] });
+        await vi.advanceTimersByTimeAsync(2_000);
+
+        expect(onStalled).not.toHaveBeenCalled();
+      } finally {
+        bridge.dispose();
+        vi.useRealTimers();
+      }
+    });
+  });
 });

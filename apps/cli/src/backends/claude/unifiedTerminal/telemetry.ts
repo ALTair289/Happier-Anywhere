@@ -71,6 +71,8 @@ export type ClaudeUnifiedTelemetryEvent =
             | 'cleared'
             | 'foreign_draft'
             | 'capture_style_unavailable'
+            | 'provider_unavailable'
+            | 'blocked_non_input_state'
             | 'generating'
             | 'capture_failed'
             | 'clear_failed'

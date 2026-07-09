@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createClaudeUnifiedTuiControlController } from './controller';
 import { createFakeControlPort, type FakeControlPort } from './fakeControlPort';
@@ -261,6 +261,30 @@ describe('createClaudeUnifiedTuiControlController — feature gate (B15)', () =>
 });
 
 describe('createClaudeUnifiedTuiControlController — lock, reconcile, dispose', () => {
+  it('owns only the recognized dialog for the active Happier slash control', async () => {
+    let releaseWait!: () => void;
+    let held = false;
+    const wait = vi.fn(() => {
+      if (held) return Promise.resolve();
+      held = true;
+      return new Promise<void>((resolve) => {
+        releaseWait = resolve;
+      });
+    });
+    const port = createFakeControlPort({ captures: [IDLE, IDLE, EFFORT_OK] });
+    const controller = await controllerFor(port, { wait });
+
+    const apply = controller.applyDesiredRuntimeConfig({ desired: { reasoningEffort: 'high' } });
+    await vi.waitFor(() => expect(wait).toHaveBeenCalled());
+
+    expect(controller.ownsDialog('effort_change')).toBe(true);
+    expect(controller.ownsDialog('switch_model')).toBe(false);
+
+    releaseWait();
+    await apply;
+    expect(controller.ownsDialog('effort_change')).toBe(false);
+  });
+
   it('serializes concurrent control ops behind the terminal lock', async () => {
     const port = createFakeControlPort({ captures: [IDLE, IDLE, MODEL_OK, IDLE, IDLE, EFFORT_OK] });
     const controller = await controllerFor(port);

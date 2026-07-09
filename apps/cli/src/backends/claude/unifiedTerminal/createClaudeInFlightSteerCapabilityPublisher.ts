@@ -98,12 +98,15 @@ export function createClaudeInFlightSteerCapabilityPublisher(opts: Readonly<{
       }
     },
     dispose() {
-      disposed = true;
       if (trailingTimer !== null) {
         clearTimeout(trailingTimer);
         trailingTimer = null;
       }
       pendingSnapshot = null;
+      if (lastPublishedKey !== null) {
+        write({ available: true, reason: null });
+      }
+      disposed = true;
     },
   };
 }

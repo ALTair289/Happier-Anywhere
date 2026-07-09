@@ -7,6 +7,7 @@ import type { TerminalControlPort } from '@/integrations/terminalHost/controlTyp
 
 import type { SettingsGuard } from './settingsGuard';
 import type { ClaudeTuiControlTelemetrySink } from './telemetry';
+import type { ClaudeUnifiedDialogId } from './dialogRegistry';
 
 /**
  * Canonical feature id that gates the Claude Unified TUI runtime-control controller (B15).
@@ -114,6 +115,12 @@ export type ApplyRuntimeConfigInput = Readonly<{
    * probe-proven (Q-A) steer-safe generating window so a config-carrying message can still steer.
    */
   reason?: ApplyRuntimeConfigReason | undefined;
+  /**
+   * Internal integration control for split before-prompt applies: dependent permission/plan deltas
+   * must not merge the controller's pending next-idle model/effort stash back into the prompt gate.
+   * Defaults to true for all existing callers.
+   */
+  includePending?: boolean | undefined;
 }>;
 
 /** Mode-only desired config accepted by the in-flight steer apply path (lane Q). */
@@ -157,6 +164,8 @@ export interface ClaudeUnifiedTuiControlController {
   getLastVerifiedRuntimeConfig(): ClaudeUnifiedVerifiedRuntimeConfig;
   /** True while a control op holds the terminal lock; Lane E must not inject prompts while held. */
   isControlInFlight(): boolean;
+  /** True only while a Happier-initiated slash control owns this registered follow-up dialog. */
+  ownsDialog(dialogId: ClaudeUnifiedDialogId): boolean;
   /** Resolves once no control op holds the lock. Lane E awaits this before prompt injection. */
   whenControlIdle(): Promise<void>;
   dispose(): Promise<void>;

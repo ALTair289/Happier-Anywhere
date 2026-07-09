@@ -1,10 +1,19 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { TerminalHostStartupError } from '@/integrations/terminalHost/errors';
 import { ClaudeUnifiedTerminalManagedSettingsOptionError } from './buildClaudeUnifiedTerminalSpawn';
 import { ClaudeUnifiedTerminalHostDeadError } from './createClaudeUnifiedController';
 import { ClaudeUnifiedTerminalReadinessTimeoutError } from './createClaudeUnifiedTerminalReadinessBridge';
 import { ClaudeUnifiedTerminalInjectionFailureError } from './terminalInjectionFailureError';
+
+const loggerMock = vi.hoisted(() => ({
+  debug: vi.fn(),
+}));
+
+vi.mock('@/ui/logger', () => ({
+  logger: loggerMock,
+}));
+
 import {
   isClaudeUnifiedTerminalRuntimeIssueError,
   surfaceClaudeUnifiedTerminalRuntimeIssue,
@@ -76,6 +85,10 @@ function buildTerminalHostStartupError(): TerminalHostStartupError {
 }
 
 describe('surfaceClaudeUnifiedTerminalRuntimeIssue', () => {
+  afterEach(() => {
+    loggerMock.debug.mockClear();
+  });
+
   it('classifies host-dead, terminal injection-failure, readiness-timeout, and host-startup failures as runtime issues', () => {
     expect(isClaudeUnifiedTerminalRuntimeIssueError(new ClaudeUnifiedTerminalHostDeadError())).toBe(true);
     expect(isClaudeUnifiedTerminalRuntimeIssueError(buildInjectionFailureError())).toBe(true);
@@ -178,6 +191,62 @@ describe('surfaceClaudeUnifiedTerminalRuntimeIssue', () => {
         allocateWhenIdle: true,
       });
     }
+  });
+
+  it('logs terminal host startup diagnostics before surfacing the runtime issue', async () => {
+    const startupError = new TerminalHostStartupError({
+      hostKind: 'zellij',
+      reason: 'startup_action_failed',
+      message: 'zellij run failed: run stderr',
+      diagnostics: {
+        action: 'run',
+        cmd: [
+          '/tools/zellij',
+          '-s',
+          'session-a',
+          'run',
+          '--',
+          '/managed/node',
+          'claude_local_launcher.cjs',
+        ],
+        exitCode: 2,
+        stderr: 'run stderr',
+        stdout: 'run stdout',
+        sessionName: 'session-a',
+        timeoutMs: 123,
+      },
+    });
+    const session = {
+      sessionTurnLifecycle: {
+        beginTurn: vi.fn(async () => ({ turnId: 't1' })),
+        completeTurn: vi.fn(async () => {}),
+        cancelTurn: vi.fn(async () => {}),
+        failTurn: vi.fn(async () => {}),
+      },
+    } as unknown as Parameters<typeof surfaceClaudeUnifiedTerminalRuntimeIssue>[0]['session'];
+
+    await expect(surfaceClaudeUnifiedTerminalRuntimeIssue({ error: startupError, session })).resolves.toBe(true);
+
+    expect(loggerMock.debug).toHaveBeenCalledWith(
+      '[unified]: Claude unified terminal host startup failed before injection',
+      expect.objectContaining({
+        hostKind: 'zellij',
+        reason: 'startup_action_failed',
+        action: 'run',
+        cmd: [
+          '/tools/zellij',
+          '-s',
+          'session-a',
+          'run',
+          '--',
+          '/managed/node',
+          'claude_local_launcher.cjs',
+        ],
+        exitCode: 2,
+        stderr: 'run stderr',
+        timeoutMs: 123,
+      }),
+    );
   });
 
   it('does not surface or touch the session for an unrelated error', async () => {

@@ -12,6 +12,12 @@ import type { ClaudeScreenState } from './screenState';
 import type { SettingsGuard } from './settingsGuard';
 import type { ClaudeTuiControlTelemetrySink } from './telemetry';
 import type { ApplyRuntimeConfigReason } from './types';
+import {
+  getClaudeUnifiedRecognizedDialogRegistryEntry,
+  isClaudeUnifiedRegisteredDialogVisible,
+  resolveClaudeUnifiedRegisteredDialogOption,
+  type ClaudeUnifiedRecognizedDialogRegistryEntry,
+} from './dialogRegistry';
 
 /**
  * `/model` and `/effort` controls (B9, B10). These are next-idle/before-next-prompt controls: a live
@@ -57,6 +63,24 @@ const MAX_DIALOG_ANSWER_ATTEMPTS = 2;
  * not always enough to reach an empty composer.
  */
 const MAX_LEFTOVER_SLASH_DRAFT_CLEAR_ATTEMPTS = 2;
+
+const SWITCH_MODEL_DIALOG = getClaudeUnifiedRecognizedDialogRegistryEntry('switch_model');
+const EFFORT_CHANGE_DIALOG = getClaudeUnifiedRecognizedDialogRegistryEntry('effort_change');
+
+async function injectRegisteredDialogAnswer(params: Readonly<{
+  ctx: SlashControlContext;
+  state: ClaudeScreenState;
+  entry: ClaudeUnifiedRecognizedDialogRegistryEntry;
+  choice: string;
+}>): Promise<ClaudeScreenState> {
+  const option = resolveClaudeUnifiedRegisteredDialogOption(params.state, params.entry, params.choice);
+  if (!option) throw new Error(`missing_claude_dialog_option:${params.entry.dialogId}:${params.choice}`);
+  await params.ctx.runtime.port.sendLiteralText(option.answer.text);
+  await params.ctx.runtime.port.sendSpecialKey('Enter');
+  await params.ctx.runtime.wait(params.ctx.runtime.timings.commandSettleMs);
+  const after = await captureScreenState(params.ctx.runtime.port);
+  return after.kind === 'state' ? after.state : params.state;
+}
 
 /**
  * Precise failure reason when the pre-Enter recapture shows the composer holding something OTHER
@@ -406,25 +430,18 @@ async function runSlashControl(ctx: SlashControlContext, spec: SlashControlSpec)
 }
 
 export async function applyModelControl(ctx: SlashControlContext, model: string): Promise<ControlAttemptResult> {
-  const { port, wait, timings } = ctx.runtime;
   return runSlashControl(ctx, {
     key: 'model',
     commandText: `/model ${model}`,
     resolveFinalState: async (state) => {
-      if (!state.switchModelDialogVisible) return state;
-      // Answer the `Switch model?` dialog deliberately: option 1 = "Yes, switch".
-      await port.sendLiteralText('1');
-      await port.sendSpecialKey('Enter');
-      await wait(timings.commandSettleMs);
-      const after = await captureScreenState(port);
-      return after.kind === 'state' ? after.state : state;
+      if (!isClaudeUnifiedRegisteredDialogVisible(state, SWITCH_MODEL_DIALOG)) return state;
+      return injectRegisteredDialogAnswer({ ctx, state, entry: SWITCH_MODEL_DIALOG, choice: 'confirm' });
     },
     verify: (state) => state.visibleModel,
   });
 }
 
 export async function applyEffortControl(ctx: SlashControlContext, effort: string): Promise<ControlAttemptResult> {
-  const { port, wait, timings } = ctx.runtime;
   const requested = effort.trim().toLowerCase();
   // `/effort ultracode` runs at xhigh, so the dialog announces "Switching to xhigh" (binary source
   // 2.1.173: `ultracode` maps to `xhigh` before the confirmation component renders).
@@ -443,17 +460,18 @@ export async function applyEffortControl(ctx: SlashControlContext, effort: strin
       answeredConfirm = true;
       keptCountAtConfirm = state.keptEffortNoticeCount;
     }
-    await port.sendLiteralText(option);
-    await port.sendSpecialKey('Enter');
-    await wait(timings.commandSettleMs);
-    const after = await captureScreenState(port);
-    return after.kind === 'state' ? after.state : state;
+    return injectRegisteredDialogAnswer({
+      ctx,
+      state,
+      entry: EFFORT_CHANGE_DIALOG,
+      choice: option === '1' ? 'confirm' : 'cancel',
+    });
   };
 
   return runSlashControl(ctx, {
     key: 'reasoningEffort',
     commandText: `/effort ${effort}`,
-    ownsDialog: (state) => state.effortChangeDialogVisible,
+    ownsDialog: (state) => isClaudeUnifiedRegisteredDialogVisible(state, EFFORT_CHANGE_DIALOG),
     resolveLeftoverDialog: async (state) => {
       if (targetMatches(state)) {
         // The leftover dialog (queued command executed at turn end) asks exactly for the requested
@@ -465,7 +483,7 @@ export async function applyEffortControl(ctx: SlashControlContext, effort: strin
       return { action: 'dismissed', state: await answerDialog(state, '2') };
     },
     resolveFinalState: async (state) => {
-      if (!state.effortChangeDialogVisible) return state;
+      if (!isClaudeUnifiedRegisteredDialogVisible(state, EFFORT_CHANGE_DIALOG)) return state;
       if (confirmAnswers >= MAX_DIALOG_ANSWER_ATTEMPTS) return state;
       // Answer the `Change effort level?` confirmation deliberately: option 1 = "Yes, switch to
       // <level>" (incident cmq8y3nlx L6 — a blind Enter resolved the dialog to its default and
@@ -473,7 +491,7 @@ export async function applyEffortControl(ctx: SlashControlContext, effort: strin
       // is stale and dismissed so the queued command behind it can run.
       return answerDialog(state, targetMatches(state) ? '1' : '2');
     },
-    verify: (state) => (state.effortChangeDialogVisible ? null : state.visibleEffort),
+    verify: (state) => (isClaudeUnifiedRegisteredDialogVisible(state, EFFORT_CHANGE_DIALOG) ? null : state.visibleEffort),
     detectAlreadyEffective: (state) => {
       // Ultracode is a session-only setting, not a level: plain xhigh/ultracode scrollback evidence
       // never proves it, so an ultracode request is always typed.
@@ -485,7 +503,7 @@ export async function applyEffortControl(ctx: SlashControlContext, effort: strin
       return latest !== null && latest.level === requested ? latest.level : null;
     },
     detectDeclined: (state) => {
-      if (!answeredConfirm || state.effortChangeDialogVisible) return null;
+      if (!answeredConfirm || isClaudeUnifiedRegisteredDialogVisible(state, EFFORT_CHANGE_DIALOG)) return null;
       const latest = state.latestEffortConfirmation;
       // Only a kept-notice that is NEWER than the ones visible when we confirmed counts: stale
       // kept rows from an earlier dismissal must not fail a confirm that simply rendered late.

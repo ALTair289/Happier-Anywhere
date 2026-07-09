@@ -37,6 +37,14 @@ export async function surfaceClaudeUnifiedTerminalRuntimeIssue(params: Readonly<
       ...params.error.diagnostics,
     });
   }
+  if (isTerminalHostStartupError(params.error) && params.error.diagnostics) {
+    logger.debug('[unified]: Claude unified terminal host startup failed before injection', {
+      hostKind: params.error.hostKind,
+      reason: params.error.reason,
+      message: params.error.message,
+      ...params.error.diagnostics,
+    });
+  }
   try {
     await surfacePrimarySessionRuntimeIssue({
       provider: 'claude',

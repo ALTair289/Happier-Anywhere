@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { TerminalHostHandle, TerminalInputState } from '@/integrations/terminalHost/_types';
 
@@ -17,6 +17,10 @@ const handle: TerminalHostHandle = {
     liveProbe: 'required',
   },
 };
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 const generatingScreen = [
   '● Working through the task…',
@@ -272,6 +276,37 @@ describe('createClaudeUnifiedInFlightSteerEvaluator', () => {
       });
     });
     expect(hiddenCustody).not.toHaveBeenCalled();
+  });
+
+  it('retries queued-message banner custody probes before leaving steer custody unresolved', async () => {
+    vi.useFakeTimers();
+    let screen = generatingScreen;
+    const custody = vi.fn();
+    const captureInputState = vi.fn(async (): Promise<TerminalInputState> => ({
+      stable: true,
+      currentInput: screen,
+      observedAt: Date.now(),
+    }));
+    const harness = createHarness({
+      captureInputState,
+      queuedBannerCheckDelayMs: 400,
+      onPromptCustodyByTerminal: custody,
+    });
+    const batch = pendingBatch('steer me');
+
+    harness.wiring.observeInjectedPrompt(
+      batch,
+      { acceptedAs: 'in_flight_steer', turnStateAtInjection: 'running' },
+    );
+
+    await vi.advanceTimersByTimeAsync(400);
+    expect(custody).not.toHaveBeenCalled();
+
+    screen = queuedBannerScreen;
+    await vi.advanceTimersByTimeAsync(1_200);
+    expect(captureInputState).toHaveBeenCalledTimes(2);
+    expect(custody).toHaveBeenCalledTimes(1);
+    expect(custody).toHaveBeenCalledWith(batch);
   });
 
   it('does not report terminal custody when the queued banner is visible but the composer still has a draft', async () => {

@@ -1,6 +1,7 @@
 import { createSessionScanner, type SessionScanner } from '../utils/sessionScanner';
 import type { CommittedClaudeJsonlMessageBaseline } from '../utils/claudeJsonlMessageKey';
 import type { RawJSONLines } from '../types';
+import { readClaudeTranscriptTurnSignal } from '../localControl/readClaudeTranscriptTurnSignal';
 import { isSidechainSessionHook } from '../utils/sessionHookAttribution';
 import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -95,6 +96,18 @@ function shouldForwardFreshResumeTranscriptToMessage(
   const timestampMs = readTranscriptTimestampMs(message);
   if (timestampMs === null) return false;
   return timestampMs >= liveAfterMs;
+}
+
+function isFailedTurnTerminalTranscript(message: RawJSONLines): boolean {
+  const signal = readClaudeTranscriptTurnSignal(message);
+  return signal?.type === 'turn_terminal' && signal.reason === 'failed';
+}
+
+function shouldSuppressPriorEraFailedTurnVisibleReplay(
+  message: RawJSONLines,
+  lifecycleOwnedByCurrentRunner: boolean,
+): boolean {
+  return !lifecycleOwnedByCurrentRunner && isFailedTurnTerminalTranscript(message);
 }
 
 function isFreshHookDrivenSession(opts: Readonly<{
@@ -338,10 +351,17 @@ export function createClaudeUnifiedTranscriptBridge(opts: Readonly<{
         claudeConfigDir: opts.claudeConfigDir,
         workingDirectory: opts.workingDirectory,
         onMessage: (message) => {
-          if (shouldForwardFreshResumeTranscriptToMessage(message, freshResumeLiveMessageAfterMsBySessionId)) {
+          const lifecycleOwnedByCurrentRunner = shouldForwardResumeTranscriptToLifecycle(
+            message,
+            resumeLiveTranscriptAfterMsBySessionId,
+          );
+          if (
+            shouldForwardFreshResumeTranscriptToMessage(message, freshResumeLiveMessageAfterMsBySessionId)
+            && !shouldSuppressPriorEraFailedTurnVisibleReplay(message, lifecycleOwnedByCurrentRunner)
+          ) {
             opts.onMessage?.(message);
           }
-          if (shouldForwardResumeTranscriptToLifecycle(message, resumeLiveTranscriptAfterMsBySessionId)) {
+          if (lifecycleOwnedByCurrentRunner) {
             opts.onTranscriptMessage?.(message);
           }
         },

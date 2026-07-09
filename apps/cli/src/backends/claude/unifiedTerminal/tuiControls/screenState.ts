@@ -3,6 +3,14 @@ import { normalizeCapturedScreen, stripTerminalControlSequences } from '@/integr
 import { hasComposerLineStyleEvidence, SGR_SEQUENCE_PREFIX } from './composerStyleEvidence';
 import type { ClaudeTuiModeMarker } from './types';
 
+export type ClaudeUnifiedSafeguardPauseChoice = 'switch_model' | 'edit_prompt_and_retry';
+
+export type ClaudeUnifiedSafeguardPauseDialogOption = Readonly<{
+  choice: ClaudeUnifiedSafeguardPauseChoice;
+  label: string;
+  modelLabel?: string | undefined;
+}>;
+
 /**
  * Parsed Claude Unified TUI screen state used to gate runtime controls.
  *
@@ -20,10 +28,16 @@ export type ClaudeScreenState = Readonly<{
   permissionPromptVisible: boolean;
   trustFolderPromptVisible: boolean;
   switchModelDialogVisible: boolean;
+  /** Claude usage/session-limit prompt opened by `/rate-limit-options`; provider is unavailable. */
+  usageLimitDialogVisible: boolean;
   /** Heavy-session startup interstitial: "Resume from summary" / "Resume full session". */
   resumeChoiceDialogVisible: boolean;
   /** Proven option order for the heavy-session resume interstitial. */
   resumeChoiceDialogOptions: readonly ('resume_from_summary' | 'resume_full_session')[];
+  /** Fable-safeguard pause chooser: "Session paused" with switch/retry options. */
+  safeguardPauseDialogVisible: boolean;
+  /** Proven option order and labels for the safeguard pause chooser. */
+  safeguardPauseDialogOptions: readonly ClaudeUnifiedSafeguardPauseDialogOption[];
   /** `Change effort level?` confirmation dialog (live probe 2.1.173, incident cmq8y3nlx L6). */
   effortChangeDialogVisible: boolean;
   /**
@@ -83,9 +97,15 @@ const ESC_TO_INTERRUPT = /esc to interrupt/i;
 const GENERATING_SPINNER_LINE = /(?:^|\n)[^\S\n]*[✶✻✽✳·∗*][^\S\n]+\S+…[^\S\n]*\(/u;
 const QUEUED_MESSAGE_BANNER = /press up to edit queued messages/i;
 const SWITCH_MODEL_DIALOG = /switch model\?/i;
+export const CLAUDE_RESUME_PREFILL_COMPOSER_TEXT = 'Continue where you left off';
 const RESUME_CHOICE_DIALOG_HEAD = /\bthis session is\b[\s\S]{0,500}\b(?:tokens?|old)\b/i;
 const RESUME_CHOICE_FROM_SUMMARY_OPTION = /(?:^|\n)[^\S\n]*(?:❯[^\S\n]*)?1\.[^\n]*\bresume from summary\b/i;
 const RESUME_CHOICE_FULL_SESSION_OPTION = /(?:^|\n)[^\S\n]*(?:❯[^\S\n]*)?2\.[^\n]*\bresume full session\b/i;
+const SAFEGUARD_PAUSE_DIALOG_HEAD = /\bsession paused\b/i;
+const SAFEGUARD_PAUSE_DIALOG_BODY = /\bsafeguards flagged this message\b/i;
+const SAFEGUARD_PAUSE_SWITCH_OPTION = /\bswitch to\s+(.+?)\s*$/i;
+const SAFEGUARD_PAUSE_RETRY_OPTION = /\bedit prompt and retry(?:\s+with\s+(.+?))?\s*$/i;
+const USAGE_LIMIT_DIALOG = /(?:\byou['’]ve hit your session limit\b|\/rate-limit-options)[\s\S]{0,900}\bwhat do you want to do\?[\s\S]{0,500}\bstop and wait for limit to reset\b[\s\S]{0,300}\bupgrade your plan\b/i;
 // Live probe 2026-06-11 (Claude Code 2.1.173, tmux): `/effort <level>` on a conversation cached at a
 // different effort opens "Change effort level? … ❯ 1. Yes, switch to <level>  2. No, go back".
 // Escape / "No, go back" prints `Kept effort level as <current>` (incident cmq8y3nlx, L6).
@@ -300,6 +320,10 @@ function cursorProvesPlainPlaceholder(params: Readonly<{
   );
 }
 
+export function isClaudeResumePrefillComposerContent(content: string): boolean {
+  return content.trim() === CLAUDE_RESUME_PREFILL_COMPOSER_TEXT;
+}
+
 function readComposerState(
   text: string,
   rawText: string,
@@ -313,6 +337,9 @@ function readComposerState(
   if (content.length === 0) return { content, cursorRelation: null };
   const continuation = readComposerContinuationLines(text, match.index + match[0].length);
   const cursorRelation = readCursorComposerRelation({ text, match, content, context });
+  if (continuation.length === 0 && isClaudeResumePrefillComposerContent(content)) {
+    return { content: '', cursorRelation };
+  }
   if (continuation.length === 0 && composerContentIsDimPlaceholder(rawText, content)) {
     return { content: '', cursorRelation };
   }
@@ -351,6 +378,35 @@ function resolveResumeChoiceDialogOptions(text: string): readonly ('resume_from_
   return ['resume_from_summary', 'resume_full_session'];
 }
 
+function readNumberedSelectionLabel(text: string, number: 1 | 2): string | null {
+  const linePattern = new RegExp(`(?:^|\\n)[^\\S\\n]*(?:❯[^\\S\\n]*)?${number}\\.[^\\n]*`, 'u');
+  const line = linePattern.exec(text)?.[0] ?? null;
+  if (!line) return null;
+  const label = line
+    .replace(/^\n/, '')
+    .replace(/^[^\S\n]*(?:❯[^\S\n]*)?\d+\.[^\S\n]*/u, '')
+    .trim();
+  return label.length > 0 ? label : null;
+}
+
+function resolveSafeguardPauseDialogOptions(text: string): readonly ClaudeUnifiedSafeguardPauseDialogOption[] {
+  // The chooser can appear below arbitrary assistant scrollback; constrain detection to the visible
+  // tail and require both the heading/body and the two known numbered choices.
+  const tail = tailLines(text, 30);
+  if (!SAFEGUARD_PAUSE_DIALOG_HEAD.test(tail) || !SAFEGUARD_PAUSE_DIALOG_BODY.test(tail)) return [];
+  const switchLabel = readNumberedSelectionLabel(tail, 1);
+  const retryLabel = readNumberedSelectionLabel(tail, 2);
+  const switchModel = switchLabel ? SAFEGUARD_PAUSE_SWITCH_OPTION.exec(switchLabel)?.[1]?.trim() : null;
+  const retryModel = retryLabel ? SAFEGUARD_PAUSE_RETRY_OPTION.exec(retryLabel)?.[1]?.trim() : null;
+  if (!switchLabel || !retryLabel || !switchModel || !SAFEGUARD_PAUSE_RETRY_OPTION.test(retryLabel)) return [];
+  return [
+    { choice: 'switch_model', label: switchLabel, modelLabel: switchModel },
+    ...(retryModel
+      ? [{ choice: 'edit_prompt_and_retry' as const, label: retryLabel, modelLabel: retryModel }]
+      : [{ choice: 'edit_prompt_and_retry' as const, label: retryLabel }]),
+  ];
+}
+
 type EffortConfirmationSignal = Readonly<{ kind: 'set' | 'kept'; level: string; index: number }>;
 
 function lastMatch(pattern: RegExp, text: string): RegExpExecArray | null {
@@ -387,8 +443,11 @@ export function parseClaudeScreenState(rawText: string, context?: ClaudeScreenPa
   const text = normalizeCapturedScreen(rawText);
 
   const switchModelDialogVisible = SWITCH_MODEL_DIALOG.test(text);
+  const usageLimitDialogVisible = USAGE_LIMIT_DIALOG.test(tailLines(text, 30));
   const resumeChoiceDialogOptions = resolveResumeChoiceDialogOptions(text);
   const resumeChoiceDialogVisible = resumeChoiceDialogOptions.length > 0;
+  const safeguardPauseDialogOptions = resolveSafeguardPauseDialogOptions(text);
+  const safeguardPauseDialogVisible = safeguardPauseDialogOptions.length > 0;
   const effortChangeDialogVisible = EFFORT_CHANGE_DIALOG.test(text);
   const effortChangeDialogTarget = effortChangeDialogVisible
     ? (EFFORT_CHANGE_DIALOG_TARGET.exec(text)?.[1]?.toLowerCase() ?? null)
@@ -409,7 +468,9 @@ export function parseClaudeScreenState(rawText: string, context?: ClaudeScreenPa
   const unrecognizedConfirmationDialogVisible =
     NUMBERED_SELECTION_OPTION.test(text)
     && !switchModelDialogVisible
+    && !usageLimitDialogVisible
     && !resumeChoiceDialogVisible
+    && !safeguardPauseDialogVisible
     && !effortChangeDialogVisible
     && !trustFolderPromptVisible
     && !permissionPromptVisible
@@ -417,7 +478,9 @@ export function parseClaudeScreenState(rawText: string, context?: ClaudeScreenPa
 
   const anyDialog =
     switchModelDialogVisible
+    || usageLimitDialogVisible
     || resumeChoiceDialogVisible
+    || safeguardPauseDialogVisible
     || effortChangeDialogVisible
     || unrecognizedConfirmationDialogVisible
     || trustFolderPromptVisible
@@ -441,8 +504,11 @@ export function parseClaudeScreenState(rawText: string, context?: ClaudeScreenPa
     permissionPromptVisible,
     trustFolderPromptVisible,
     switchModelDialogVisible,
+    usageLimitDialogVisible,
     resumeChoiceDialogVisible,
     resumeChoiceDialogOptions,
+    safeguardPauseDialogVisible,
+    safeguardPauseDialogOptions,
     effortChangeDialogVisible,
     unrecognizedConfirmationDialogVisible,
     effortChangeDialogTarget,
@@ -468,7 +534,9 @@ function hasBlockingOverlay(state: ClaudeScreenState): boolean {
     || state.permissionPromptVisible
     || state.trustFolderPromptVisible
     || state.switchModelDialogVisible
+    || state.usageLimitDialogVisible
     || state.resumeChoiceDialogVisible
+    || state.safeguardPauseDialogVisible
     || state.effortChangeDialogVisible
     || state.unrecognizedConfirmationDialogVisible
     || state.queuedMessageBannerVisible
@@ -513,7 +581,9 @@ export function resolveClaudeScreenInFlightSteerVeto(state: ClaudeScreenState): 
   if (state.permissionPromptVisible) return 'permission_prompt';
   if (state.trustFolderPromptVisible) return 'trust_prompt';
   if (state.switchModelDialogVisible) return 'switch_model_dialog';
+  if (state.usageLimitDialogVisible) return 'usage_limit_dialog';
   if (state.resumeChoiceDialogVisible) return 'resume_choice_dialog';
+  if (state.safeguardPauseDialogVisible) return 'safeguard_pause_dialog';
   if (state.effortChangeDialogVisible) return 'effort_change_dialog';
   if (state.unrecognizedConfirmationDialogVisible) return 'unrecognized_confirmation_dialog';
   if (state.permissionEditorOpen) return 'permission_editor';

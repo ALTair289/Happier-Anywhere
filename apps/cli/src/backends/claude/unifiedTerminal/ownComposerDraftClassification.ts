@@ -7,7 +7,23 @@ export type ClaudeOwnComposerDraftClassification =
   | 'own'
   | 'foreign'
   | 'capture_style_unavailable'
+  | 'non_input_state'
+  | 'provider_unavailable'
   | 'generating';
+
+function hasNonInputComposerState(screen: ClaudeScreenState): boolean {
+  return (
+    screen.permissionEditorOpen
+    || screen.permissionPromptVisible
+    || screen.trustFolderPromptVisible
+    || screen.switchModelDialogVisible
+    || screen.resumeChoiceDialogVisible
+    || screen.effortChangeDialogVisible
+    || screen.unrecognizedConfirmationDialogVisible
+    || screen.queuedMessageBannerVisible
+    || screen.selectionListVisible
+  );
+}
 
 export function classifyClaudeOwnComposerDraft(params: Readonly<{
   screen: ClaudeScreenState;
@@ -17,8 +33,10 @@ export function classifyClaudeOwnComposerDraft(params: Readonly<{
   stopOnGenerating?: boolean | undefined;
 }>): ClaudeOwnComposerDraftClassification {
   const content = params.screen.composerContent ?? '';
-  if (content.length === 0) return 'empty';
+  if (params.screen.usageLimitDialogVisible) return 'provider_unavailable';
   if (params.stopOnGenerating !== false && params.screen.generating) return 'generating';
+  if (hasNonInputComposerState(params.screen)) return 'non_input_state';
+  if (content.length === 0) return 'empty';
   if (params.ownComposerTexts.matches(content)) return 'own';
   // Controller-typed slash commands are echo-suppressed out of the persisted transcript, so a
   // respawned registry can never exact-match their residue. The finite controller vocabulary

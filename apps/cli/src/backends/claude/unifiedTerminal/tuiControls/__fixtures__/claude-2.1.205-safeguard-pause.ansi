@@ -1,0 +1,43 @@
+[m     [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[2m[23m   [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23monRequests` must gate ALL context
+[m     [38;2;153;153;153m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23m… +240 lines
+
+[38;2;78;186;101m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23m⏺[m [39m[49m[29m[28m[27m[25m[25m[1m[24m[22m[1m[23mWrite[m([m.project/plans/2026-07-09-voice-deep-audit-and-provider-extensibility/specs/wave2-wave5-extensibility.md[m)
+[38;2;153;153;153m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23m  ⎿  [mWrote [39m[49m[29m[28m[27m[25m[25m[1m[24m[22m[1m[23m189[m lines to [39m[49m[29m[28m[27m[25m[25m[1m[24m[22m[1m[23m.project/plans/2026-07-09-voice-deep-audit-and-provider-extensibility/specs/wave2-wave5-extensibility.md
+[m     [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[2m[23m  1 [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23m# Spec: Waves 2 & 5 — Provider-e
+[m     [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[2m[23m    [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23mion packaging
+[m     [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[2m[23m  3 [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23m> Read with `../synthesis/ARCHIT
+[m     [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[2m[23m    [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23mxact contracts, file layout, and
+[m     [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[2m[23m    [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23mule (RU2): generic voice code ma
+[m     [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[2m[23m  5 [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23m> providers contribute through r
+[m     [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[2m[23m    [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23m replace id-literals.
+[m     [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[2m[23m  7 [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23m## Target file/folder shape (end
+[m     [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[2m[23m    [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23m ➜)
+[m     [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[2m[23m  9 [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23m```
+[m     [38;2;153;153;153m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23m… +179 lines
+
+[38;2;78;186;101m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23m⏺[m [39m[49m[29m[28m[27m[25m[25m[1m[24m[22m[1m[23mWrite[m([m.project/plans/2026-07-09-voice-deep-audit-and-provider-extensibility/specs/wave3-grok.md[m)
+[38;2;153;153;153m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23m  ⎿  [mWrote [39m[49m[29m[28m[27m[25m[25m[1m[24m[22m[1m[23m118[m lines to [39m[49m[29m[28m[27m[25m[25m[1m[24m[22m[1m[23m.project/plans/2026-07-09-voice-deep-audit-and-provider-extensibility/specs/wave3-grok.md
+[m     [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[2m[23m   [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23mration (first proof of extensibil
+[m     [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[2m[23m 2
+[m     [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[2m[23m   [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23m dialect core, mappers, tool loop
+[m     [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[2m[23m   [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23m`
+[m     [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[2m[23m   [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23mNICAL SOURCE for wire shapes = of
+[m     [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[2m[23m   [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23m/ ephemeral-tokens), NOT the demo
+[m     [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[2m[23m 6 [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23m> `input_audio_format` fields are
+[m     [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[2m[23m   [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23moritative only for Expo
+[m     [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[2m[23m 8
+[m     [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[2m[23m   [38;2;248;248;242m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23mfied against docs at implementati
+[m     [38;2;153;153;153m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23m… +108 lines
+
+[38;2;153;153;153m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23m⏺[m [39m[49m[29m[28m[27m[25m[25m[1m[24m[22m[1m[23mWrite[m([m.project/plans/2026-07-09-voice-deep-audit-and-provider-extensibility/specs/wave4-closure-and-ux.md[m)
+
+[38;2;255;193;7m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[m [38;2;177;185;249m[49m[29m[28m[27m[25m[25m[1m[24m[22m[1m[23mSession paused
+
+[m  Fable 5's safeguards flagged this message. The safeguards are intentionally broad right now and may flag safe and routine coding, cybersecurity, or biology
+[m  work. These measures let us bring you Mythos-level capabilities sooner, and we're working to refine them. Send feedback with /feedback or [39m[49m[29m[28m[27m[25m[25m[22m[4m[22m[23mlearn more
+
+[m  [38;2;177;185;249m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23m❯[m [38;2;153;153;153m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23m1. [38;2;177;185;249m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23mSwitch to Opus 4.8
+[m    [38;2;153;153;153m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23m2. [mEdit prompt and retry with Fable 5
+
+[38;2;255;107;128m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23m✻[m [38;2;255;107;128m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23mWaiting for API response[38;2;153;153;153m[49m[29m[28m[27m[25m[25m[22m[24m[22m[23m · will retry in 0s · check your network[m

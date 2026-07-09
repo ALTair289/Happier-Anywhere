@@ -14,6 +14,7 @@ const createIdleSnapshot = () => ({
   userTyping: false,
   lastDeferredReason: null,
   lastFailureReason: null,
+  currentHeadBlocker: null,
   headInputState: null,
 });
 
@@ -258,7 +259,8 @@ describe('createClaudeUnifiedController', () => {
     await runPromise;
   });
 
-  it('routes pending queue input waiting failures through the fatal path after startup', async () => {
+  it('routes repeated pending queue input waiting failures through the fatal path after the pump budget', async () => {
+    vi.useFakeTimers();
     const pumpError = new Error('pending queue materialization failed');
     const onFatalError = vi.fn();
     const pendingQueuePump = createClaudeUnifiedPendingQueuePump({
@@ -270,27 +272,41 @@ describe('createClaudeUnifiedController', () => {
         drainWhenSafe: vi.fn(),
         snapshot: vi.fn(createIdleSnapshot),
       },
+      maxConsecutiveHandledFailures: 2,
+      failureRetryBackoffMs: 1,
     });
-    const controller = createClaudeUnifiedController({
-      host: {
-        evaluateLiveness: vi.fn().mockResolvedValue({ paneAlive: true, observedAt: 1 }),
-        dispose: vi.fn(),
-      },
-      pendingQueuePump,
-      arbiter: {
-        dispose: vi.fn(),
-      },
-      onFatalError,
-    });
+    try {
+      const controller = createClaudeUnifiedController({
+        host: {
+          evaluateLiveness: vi.fn().mockResolvedValue({ paneAlive: true, observedAt: 1 }),
+          dispose: vi.fn(),
+        },
+        pendingQueuePump,
+        arbiter: {
+          dispose: vi.fn(),
+        },
+        onFatalError,
+      });
 
-    await expect(controller.run()).resolves.toBeUndefined();
-    await Promise.resolve();
+      await expect(controller.run()).resolves.toBeUndefined();
+      await Promise.resolve();
+      expect(onFatalError).not.toHaveBeenCalled();
 
-    expect(onFatalError).toHaveBeenCalledTimes(1);
-    expect(onFatalError).toHaveBeenCalledWith(pumpError);
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(onFatalError).toHaveBeenCalledTimes(1);
+      expect(onFatalError).toHaveBeenCalledWith(expect.objectContaining({
+        code: 'claude_unified_pending_queue_pump_failure_budget_exhausted',
+        failureCount: 2,
+        cause: pumpError,
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it('routes pending queue drain failures through the fatal path after startup', async () => {
+  it('routes repeated pending queue drain failures through the fatal path after the pump budget', async () => {
+    vi.useFakeTimers();
     const drainError = new Error('pending queue drain failed');
     const onFatalError = vi.fn();
     const pendingQueuePump = createClaudeUnifiedPendingQueuePump({
@@ -307,24 +323,37 @@ describe('createClaudeUnifiedController', () => {
         drainWhenSafe: vi.fn().mockRejectedValue(drainError),
         snapshot: vi.fn(createIdleSnapshot),
       },
+      maxConsecutiveHandledFailures: 2,
+      failureRetryBackoffMs: 1,
     });
-    const controller = createClaudeUnifiedController({
-      host: {
-        evaluateLiveness: vi.fn().mockResolvedValue({ paneAlive: true, observedAt: 1 }),
-        dispose: vi.fn(),
-      },
-      pendingQueuePump,
-      arbiter: {
-        dispose: vi.fn(),
-      },
-      onFatalError,
-    });
+    try {
+      const controller = createClaudeUnifiedController({
+        host: {
+          evaluateLiveness: vi.fn().mockResolvedValue({ paneAlive: true, observedAt: 1 }),
+          dispose: vi.fn(),
+        },
+        pendingQueuePump,
+        arbiter: {
+          dispose: vi.fn(),
+        },
+        onFatalError,
+      });
 
-    await expect(controller.run()).resolves.toBeUndefined();
-    await waitOneTurn();
+      await expect(controller.run()).resolves.toBeUndefined();
+      await Promise.resolve();
+      expect(onFatalError).not.toHaveBeenCalled();
 
-    expect(onFatalError).toHaveBeenCalledTimes(1);
-    expect(onFatalError).toHaveBeenCalledWith(drainError);
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(onFatalError).toHaveBeenCalledTimes(1);
+      expect(onFatalError).toHaveBeenCalledWith(expect.objectContaining({
+        code: 'claude_unified_pending_queue_pump_failure_budget_exhausted',
+        failureCount: 2,
+        cause: drainError,
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('ignores pending queue pump failures after disposal', async () => {

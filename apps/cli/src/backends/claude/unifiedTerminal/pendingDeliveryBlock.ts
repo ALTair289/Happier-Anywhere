@@ -1,7 +1,11 @@
 import type { PendingQueueDeliveryBlockedReason } from '@/api/session/pendingQueueV2Transport';
 
 import type { NormalizedProviderUsageLimitDetailsV1 } from '../connectedServices/mapClaudeRateLimitEventToUsageDetails';
-import { isClaudeUnifiedTerminalInjectionFailureError } from './terminalInjectionFailureError';
+import type { ClaudeUnifiedDeliveryBlocker } from './_types';
+import {
+  isClaudeUnifiedTerminalInjectionFailureError,
+  isClaudeUnifiedTerminalProviderAcceptanceTimeoutError,
+} from './terminalInjectionFailureError';
 
 export type ClaudeUnifiedPendingDeliveryBlock = Readonly<{
   localIds: readonly string[];
@@ -11,6 +15,8 @@ export type ClaudeUnifiedPendingDeliveryBlock = Readonly<{
 export type ClaudeUnifiedProviderUnavailablePromptDeliveryWindow = Readonly<{
   unavailableUntilMs: number;
 }>;
+
+const CLAUDE_UNIFIED_USAGE_LIMIT_DIALOG_PROVIDER_UNAVAILABLE_WINDOW_MS = 5 * 60_000;
 
 function readFutureTimestampMs(value: unknown, nowMs: number): number | null {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
@@ -39,6 +45,29 @@ export function resolveClaudeUnifiedProviderUnavailableUntilMs(
 
   const futureCandidates = candidates.filter((candidate): candidate is number => candidate !== null);
   return futureCandidates.length > 0 ? Math.max(...futureCandidates) : null;
+}
+
+export function resolveClaudeUnifiedProviderUnavailableWindowForUsageLimitDialog(
+  observedAtMs: number,
+): ClaudeUnifiedProviderUnavailablePromptDeliveryWindow {
+  const unavailableUntilMs = resolveClaudeUnifiedProviderUnavailableUntilMs({
+    v: 1,
+    resetAtMs: null,
+    retryAfterMs: CLAUDE_UNIFIED_USAGE_LIMIT_DIALOG_PROVIDER_UNAVAILABLE_WINDOW_MS,
+    limitCategory: 'usage_limit',
+    quotaScope: 'account',
+    recoverability: 'wait',
+    providerLimitId: 'usage_limit_dialog',
+    planType: null,
+    utilization: null,
+    overage: null,
+    action: null,
+    connectedService: null,
+  }, observedAtMs);
+
+  return {
+    unavailableUntilMs: unavailableUntilMs ?? observedAtMs + CLAUDE_UNIFIED_USAGE_LIMIT_DIALOG_PROVIDER_UNAVAILABLE_WINDOW_MS,
+  };
 }
 
 export function isClaudeUnifiedProviderUnavailablePromptDeliveryWindowActive(
@@ -80,6 +109,53 @@ function readUserMessageLocalIds(error: unknown): string[] {
   return localIds;
 }
 
+function normalizeLocalIds(localIds: readonly string[] | null | undefined): string[] {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const value of localIds ?? []) {
+    const localId = typeof value === 'string' ? value.trim() : '';
+    if (!localId || seen.has(localId)) continue;
+    seen.add(localId);
+    normalized.push(localId);
+  }
+  return normalized;
+}
+
+export function resolveClaudeUnifiedPendingDeliveryBlockForDeliveryBlocker(params: Readonly<{
+  localIds: readonly string[] | null | undefined;
+  blocker: ClaudeUnifiedDeliveryBlocker | null | undefined;
+}>): ClaudeUnifiedPendingDeliveryBlock | null {
+  const localIds = normalizeLocalIds(params.localIds);
+  if (localIds.length === 0 || !params.blocker) return null;
+
+  if (
+    params.blocker.kind === 'terminal_user_draft'
+    || params.blocker.kind === 'own_leftover_clear_failed'
+    || params.blocker.kind === 'capture_ambiguous'
+  ) {
+    return {
+      localIds,
+      reason: 'terminal_composer_draft',
+    };
+  }
+
+  if (params.blocker.kind === 'provider_unavailable') {
+    return {
+      localIds,
+      reason: 'provider_unavailable_before_acceptance',
+    };
+  }
+
+  if (params.blocker.kind === 'runtime_config_blocked') {
+    return {
+      localIds,
+      reason: 'runtime_config_blocked',
+    };
+  }
+
+  return null;
+}
+
 export function resolveClaudeUnifiedPendingDeliveryBlock(
   error: unknown,
 ): ClaudeUnifiedPendingDeliveryBlock | null {
@@ -106,13 +182,7 @@ export function resolveClaudeUnifiedPendingDeliveryBlock(
   const duplicateRisk = (error as { duplicateRisk?: unknown }).duplicateRisk;
   const recoverable = (error as { recoverable?: unknown }).recoverable;
 
-  if (
-    failureState === 'failed_ambiguous'
-    && reason === 'timeout'
-    && phase === 'after_enter_unknown'
-    && duplicateRisk !== 'none'
-    && recoverable === true
-  ) {
+  if (isClaudeUnifiedTerminalProviderAcceptanceTimeoutError(error)) {
     return {
       localIds,
       reason: 'provider_acceptance_timeout',

@@ -58,6 +58,8 @@ import {
   buildClaudeUnifiedRuntimeControlDisabledOutcomeEvents,
   createBlockedApplyStarvationTracker,
   createClaudeUnifiedRuntimeControlBridge,
+  DEFAULT_BLOCKED_APPLY_STARVATION_THRESHOLD,
+  mapEnhancedModeToDesiredRuntimeConfig,
   resolveBlockedApplyRetryMs,
   type BlockedApplyStarvationInfo,
   type ClaudeUnifiedRuntimeConfigOutcomeEvent,
@@ -68,14 +70,20 @@ import {
   clearUserAuthorizedClaudeComposerDraft,
   createClaudeSettingsGuard,
   createClaudeUnifiedTuiControlController,
+  DEFAULT_CLAUDE_TUI_CONTROL_TIMINGS,
   resolveClaudeConfigRootFromEnv,
   type ClaudeComposerClearRefusalReason,
   type ClaudeStatuslineRuntimeMetadata,
   type ClaudeUserAuthorizedComposerClearResult,
 } from './tuiControls';
 import {
-  createClaudeUnifiedControlCommandEchoSuppressor,
-  type ClaudeUnifiedControlCommandEchoSuppressor,
+  createClaudeUnifiedDialogChoiceScreenProbe,
+  type ClaudeUnifiedDialogChoiceScreenProbe,
+} from './dialogChoice/claudeUnifiedDialogChoiceScreenProbe';
+import type { ClaudeUnifiedDialogChoiceBroker } from './dialogChoice/claudeUnifiedDialogChoiceBroker';
+import {
+  createClaudeUnifiedControlCommandEchoBookkeeper,
+  type ClaudeUnifiedControlCommandEchoBookkeeper,
 } from './controlCommandEcho';
 import type {
   ClaudeUnifiedInputConsumer,
@@ -83,6 +91,7 @@ import type {
   ClaudeUnifiedPromptAcceptance,
   ClaudeUnifiedPromptBatch,
   ClaudeUnifiedStartableDisposable,
+  ClaudeUnifiedTerminalScreenObservation,
 } from './_types';
 import type { EnhancedMode } from '../loop';
 import type { RawJSONLines } from '../types';
@@ -90,11 +99,27 @@ import type { SessionHookData } from '../utils/startHookServer';
 import { resolveClaudeConfigDirOverride } from '../utils/resolveClaudeConfigDirOverride';
 import type { MessageBatch } from '@/agent/runtime/sessionInput/types';
 import type { Metadata } from '@/api/types';
-import { buildTerminalAttachmentMetadataFromHostHandle } from '@/agent/runtime/terminal/attachmentMetadata';
-import type { TerminalHostAdapter, TerminalHostHandle, TerminalHostResolution } from '@/integrations/terminalHost/_types';
+import {
+  buildTerminalAttachmentMetadataFromHostHandle,
+  buildTerminalHostHandleFromAttachmentMetadata,
+} from '@/agent/runtime/terminal/attachmentMetadata';
+import type {
+  TerminalHostAdapter,
+  TerminalHostHandle,
+  TerminalHostKind,
+  TerminalHostResolution,
+} from '@/integrations/terminalHost/_types';
 import type { TerminalControlPort } from '@/integrations/terminalHost/controlTypes';
 import { persistTerminalAttachmentInfoIfNeeded } from '@/agent/runtime/startupSideEffects';
-import { removeTerminalAttachmentInfo } from '@/terminal/attachment/terminalAttachmentInfo';
+import {
+  readTerminalAttachmentInfo,
+  removeTerminalAttachmentInfo,
+} from '@/terminal/attachment/terminalAttachmentInfo';
+import {
+  evaluateTerminalHostLivenessForRecovery,
+  isTerminalHostConfirmedDeadForRelaunch,
+  shouldDiscardTerminalAttachmentAfterRecoveryProbe,
+} from '@/integrations/terminalHost/livenessPolicy';
 import { createTerminalHostRegistry } from '@/integrations/terminalHost/registry';
 import { resolveTerminalHost } from '@/integrations/terminalHost/resolveTerminalHost';
 import { createTmuxTerminalHostAdapter, isTmuxAvailable } from '@/integrations/tmux';
@@ -117,6 +142,10 @@ import {
 } from './telemetry';
 import type { NormalizedProviderUsageLimitDetailsV1 } from '../connectedServices/mapClaudeRateLimitEventToUsageDetails';
 import { logger } from '@/ui/logger';
+import {
+  clearSessionMarkerTerminalHostHealth,
+  publishSessionMarkerTerminalHostHealth,
+} from '@/daemon/sessionRegistry';
 
 type ClaudeUnifiedTerminalQueuedInput<Mode> = Readonly<{
   message: string;
@@ -162,6 +191,8 @@ export type ClaudeUnifiedTerminalSessionOptions<Mode extends EnhancedMode = Enha
   systemPromptText?: string | null | undefined;
   /** Hook-server coordinates for the statusline forwarder wrapper (see buildClaudeUnifiedTerminalSpawn). */
   statuslineForwarder?: Readonly<{ port: number; secret: string }> | undefined;
+  /** Adopt a surviving terminal host instead of relaunching Claude after endpoint-rebound recovery. */
+  adoptExistingTerminalHost?: boolean | undefined;
   signal?: AbortSignal | undefined;
   initialMode?: Mode | undefined;
   nextMessage: () => Promise<ClaudeUnifiedTerminalQueuedInput<Mode> | null>;
@@ -196,6 +227,7 @@ export type ClaudeUnifiedTerminalSessionOptions<Mode extends EnhancedMode = Enha
   buildSpawn?: ((params: Readonly<{
     first: ClaudeUnifiedTerminalQueuedInput<Mode>;
     path: string;
+    happySessionId?: string | null | undefined;
     claudeArgs?: readonly string[] | undefined;
     hookSettingsPath?: string | undefined;
     hookPluginDir?: string | null | undefined;
@@ -203,13 +235,19 @@ export type ClaudeUnifiedTerminalSessionOptions<Mode extends EnhancedMode = Enha
     systemPromptText?: string | null | undefined;
     statuslineForwarder?: Readonly<{ port: number; secret: string }> | undefined;
   }>) => Promise<ClaudeUnifiedTerminalSpawn>) | undefined;
+  readTerminalHostAttachmentInfo?: typeof readTerminalAttachmentInfo | undefined;
   createSessionName?: (() => string) | undefined;
   telemetry?: ClaudeUnifiedTelemetrySink | undefined;
   subscribeClaudeSessionHooks?: ClaudeUnifiedSessionHookSubscription | undefined;
   lifecycleCompletionQuiescenceMs?: number | undefined;
+  dialogChoiceBroker?: ClaudeUnifiedDialogChoiceBroker | undefined;
+  dialogOwnershipGraceMs?: number | undefined;
+  dialogTurnStallScreenProbeQuietMs?: number | undefined;
+  dialogTurnStallScreenProbeMaxAttempts?: number | undefined;
   onThinkingChange?: ((thinking: boolean) => void) | undefined;
   onReady?: (() => void | Promise<void>) | undefined;
   onUsageLimitDetails?: ((details: NormalizedProviderUsageLimitDetailsV1) => void | Promise<void>) | undefined;
+  onTerminalScreenObserved?: ((observation: ClaudeUnifiedTerminalScreenObservation) => void) | undefined;
   onRuntimeAuthFailureEvent?: ((error: unknown) => void | Promise<void>) | undefined;
   onProviderPromptStarted?: (() => void | Promise<void>) | undefined;
   onPromptTurnTerminal?: ((event: ClaudeUnifiedPromptTurnTerminalEvent) => void | Promise<void>) | undefined;
@@ -261,6 +299,11 @@ export type ClaudeUnifiedTerminalSessionOptions<Mode extends EnhancedMode = Enha
    * retry threshold. Launchers surface a single user-visible session notice.
    */
   onDraftGuardStarvation?: ((info: ClaudeUnifiedDraftGuardStarvationInfo) => void) | undefined;
+  /**
+   * Fired when the pre-injection draft guard observes an injectable composer again after a
+   * starvation episode. Launchers use this as the self-heal seam for rows this runtime blocked.
+   */
+  onDraftGuardClear?: (() => void) | undefined;
   /**
    * C11 (incident cmq8y3nlx): caller-owned own-injected-text registry. Launchers pass the binding's
    * registry, which is seeded from the persisted prompt store BEFORE the run, so a respawned runner
@@ -337,6 +380,7 @@ export type ClaudeUnifiedTerminalSessionOptions<Mode extends EnhancedMode = Enha
     sessionId: string;
     terminal: NonNullable<Metadata['terminal']>;
   }>) => void | Promise<void>) | undefined;
+  clearSessionMarkerTerminalHostHealth?: typeof clearSessionMarkerTerminalHostHealth | undefined;
   processSignals?: ClaudeUnifiedProcessSignals | null | undefined;
   createController?: ((params: Readonly<{
     hostAdapter: TerminalHostAdapter;
@@ -346,6 +390,7 @@ export type ClaudeUnifiedTerminalSessionOptions<Mode extends EnhancedMode = Enha
   createStartupDialogResolver?: ((params: Readonly<{
     controlPort: TerminalControlPort;
     startupMode: Mode;
+    isRuntimeControlInFlight: () => boolean;
   }>) => ClaudeUnifiedStartupDialogResolver | null | undefined) | undefined;
   tuiRuntimeControl?: ClaudeUnifiedTuiRuntimeControlOptions<Mode> | undefined;
 }>;
@@ -369,6 +414,8 @@ export type ClaudeUnifiedTuiRuntimeControlOptions<Mode extends EnhancedMode = En
    * an unsafe TUI window (draft/dialog/overlay) instead of silently re-deferring forever.
    */
   onBlockedApplyStarvation?: ((info: BlockedApplyStarvationInfo) => void) | undefined;
+  /** Fired after a previously blocked runtime-control apply can proceed again. */
+  onBlockedApplyClear?: (() => void) | undefined;
   /** Test seam: blocked-apply starvation threshold override. */
   blockedApplyStarvationThreshold?: number | undefined;
   /** Test seam: inject a prebuilt bridge instead of constructing one from the host control port. */
@@ -394,8 +441,17 @@ export type ClaudeUnifiedTuiRuntimeControlOptions<Mode extends EnhancedMode = En
 }>;
 
 const DEFAULT_RUNTIME_CONTROL_BLOCKED_INJECTION_RETRY_MS = 250;
+const DEFAULT_DIALOG_OWNERSHIP_GRACE_MS = 300;
+const DEFAULT_DIALOG_TURN_STALL_SCREEN_PROBE_QUIET_MS = 45_000;
+const DEFAULT_DIALOG_TURN_STALL_SCREEN_PROBE_MAX_ATTEMPTS = 3;
 const MAX_RECENT_ACCEPTED_TRANSCRIPT_CANDIDATES = 64;
 const PROVIDER_ACCEPTANCE_PENDING_PREFIX_RESIDUE_MIN_CHARS = 16;
+
+function waitMs(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
 
 function sanitizeSessionName(value: string): string {
   const sanitized = value.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
@@ -413,6 +469,18 @@ function normalizeHostPreferenceForCurrentPlatform(
     return 'auto';
   }
   return preference;
+}
+
+function isClaudeUnifiedReusableTerminalHostKind(
+  kind: TerminalHostKind,
+): kind is Exclude<ClaudeUnifiedTerminalHostPreference, 'auto'> {
+  return kind === 'tmux' || kind === 'zellij';
+}
+
+function disposeReplayableHookSubscription(
+  subscription: ReturnType<typeof createReplayableHookSubscription> | null,
+): void {
+  subscription?.dispose();
 }
 
 export function shouldProbeTmuxForClaudeUnifiedDefaultHost(
@@ -494,6 +562,7 @@ async function resolveDefaultHostAdapter(
 async function buildDefaultSpawn(params: Readonly<{
   first: ClaudeUnifiedTerminalQueuedInput<EnhancedMode>;
   path: string;
+  happySessionId?: string | null | undefined;
   claudeArgs?: readonly string[] | undefined;
   hookSettingsPath?: string | undefined;
   hookPluginDir?: string | null | undefined;
@@ -502,6 +571,27 @@ async function buildDefaultSpawn(params: Readonly<{
   statuslineForwarder?: Readonly<{ port: number; secret: string }> | undefined;
 }>): Promise<ClaudeUnifiedTerminalSpawn> {
   return buildClaudeUnifiedTerminalSpawn(params);
+}
+
+type ExistingTerminalHostAttachment = Readonly<{
+  handle: TerminalHostHandle;
+  terminal: NonNullable<Metadata['terminal']>;
+}>;
+
+async function readExistingTerminalHostAttachment(params: Readonly<{
+  sessionId?: string | null | undefined;
+  readAttachmentInfo: typeof readTerminalAttachmentInfo;
+}>): Promise<ExistingTerminalHostAttachment | null> {
+  const sessionId = typeof params.sessionId === 'string' ? params.sessionId.trim() : '';
+  if (!sessionId) return null;
+  const info = await params.readAttachmentInfo({
+    happyHomeDir: configuration.happyHomeDir,
+    sessionId,
+  });
+  if (!info) return null;
+  const handle = buildTerminalHostHandleFromAttachmentMetadata(info.terminal);
+  if (!handle) return null;
+  return { handle, terminal: info.terminal };
 }
 
 async function removeUnreadLaunchSpec(spawn: ClaudeUnifiedTerminalSpawn): Promise<void> {
@@ -699,6 +789,18 @@ async function removeTerminalHostAttachmentInfoIfAvailable(params: Readonly<{
   await params.remove({ sessionId, terminal: params.terminal });
 }
 
+async function tryRemoveTerminalHostAttachmentInfo(params: Readonly<{
+  sessionId: string | null | undefined;
+  terminal: NonNullable<Metadata['terminal']> | null;
+  remove: NonNullable<ClaudeUnifiedTerminalSessionOptions['removeTerminalHostAttachmentInfo']>;
+}>): Promise<void> {
+  try {
+    await removeTerminalHostAttachmentInfoIfAvailable(params);
+  } catch {
+    // Attachment removal is best-effort. A stale attachment must not block fresh recovery.
+  }
+}
+
 async function removeDefaultTerminalHostAttachmentInfo(params: Readonly<{
   sessionId: string;
   terminal: NonNullable<Metadata['terminal']>;
@@ -791,6 +893,31 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
   });
 
   const telemetry = opts.telemetry ?? createClaudeUnifiedTelemetrySink();
+  const publishHostDeadHealth = async (
+    handle: TerminalHostHandle,
+    liveness: unknown,
+  ): Promise<void> => {
+    const sessionId = typeof opts.happySessionId === 'string' ? opts.happySessionId.trim() : '';
+    if (!sessionId) return;
+    const observedAt =
+      liveness && typeof liveness === 'object' && typeof (liveness as { observedAt?: unknown }).observedAt === 'number'
+        ? Math.max(0, Math.trunc((liveness as { observedAt: number }).observedAt))
+        : Date.now();
+    await publishSessionMarkerTerminalHostHealth({
+      pid: process.pid,
+      health: {
+        status: 'host_dead',
+        sessionId,
+        runnerPid: process.pid,
+        hostKind: handle.kind,
+        ...(handle.kind === 'zellij' ? { zellijSessionName: handle.sessionName } : {}),
+        observedAt,
+        reason: 'host_dead',
+      },
+    }).catch((error) => {
+      logger.debug('[unified]: failed to publish terminal host death to daemon marker state', error);
+    });
+  };
   const startupMode = first?.mode ?? opts.initialMode;
   if (!startupMode) return;
   const startupInput: ClaudeUnifiedTerminalQueuedInput<Mode> = first ?? {
@@ -798,11 +925,12 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
     mode: startupMode,
   };
   const hostPreference = normalizeHostPreferenceForCurrentPlatform(startupMode.claudeUnifiedTerminalHost ?? 'auto');
-  const hostResolution = await (
+  const resolveHostAdapterForPreference = async (preference: ClaudeUnifiedTerminalHostPreference): Promise<TerminalHostResolution> => (
     opts.resolveHostAdapter
-      ? opts.resolveHostAdapter(hostPreference)
-      : resolveDefaultHostAdapter(hostPreference, telemetry)
+      ? opts.resolveHostAdapter(preference)
+      : resolveDefaultHostAdapter(preference, telemetry)
   );
+  let hostResolution = await resolveHostAdapterForPreference(hostPreference);
   telemetry.emit({
     name: 'unified.session.host_resolved',
     properties: {
@@ -816,21 +944,78 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
     maybeEmitClaudeUnifiedWindowsGuardTriggered(telemetry, hostResolution.reason);
     throw new ClaudeUnifiedTerminalHostUnavailableError(hostResolution.message);
   }
-  const spawn = await (opts.buildSpawn ?? buildDefaultSpawn)({
-    first: startupInput,
-    path: opts.path,
-    claudeArgs: opts.claudeArgs,
-    hookSettingsPath: opts.hookSettingsPath,
-    hookPluginDir: opts.hookPluginDir,
-    happierMcpConfigJson: opts.happierMcpConfigJson,
-    systemPromptText: opts.systemPromptText,
-    statuslineForwarder: opts.statuslineForwarder,
+  const savedTerminalHost = await readExistingTerminalHostAttachment({
+    sessionId: opts.happySessionId,
+    readAttachmentInfo: opts.readTerminalHostAttachmentInfo ?? readTerminalAttachmentInfo,
   });
-  const hookSubscription = createReplayableHookSubscription(opts.subscribeClaudeSessionHooks);
-  const sessionName = opts.createSessionName?.() ?? createDefaultSessionName();
+  let existingTerminalHost = savedTerminalHost;
+  if (existingTerminalHost && existingTerminalHost.handle.kind !== hostResolution.adapter.kind) {
+    const attachedKind = existingTerminalHost.handle.kind;
+    const attachedHostResolution = isClaudeUnifiedReusableTerminalHostKind(attachedKind)
+      ? await resolveHostAdapterForPreference(attachedKind)
+      : null;
+    if (attachedHostResolution?.status === 'resolved') {
+      hostResolution = attachedHostResolution;
+    } else {
+      await tryRemoveTerminalHostAttachmentInfo({
+        sessionId: opts.happySessionId,
+        terminal: existingTerminalHost.terminal,
+        remove: opts.removeTerminalHostAttachmentInfo ?? removeDefaultTerminalHostAttachmentInfo,
+      });
+      existingTerminalHost = null;
+    }
+  }
+  const discardExistingTerminalHost = async (
+    existing: ExistingTerminalHostAttachment,
+    reason: string,
+  ): Promise<void> => {
+    await hostResolution.adapter.dispose(existing.handle).catch((error) => {
+      logger.warn('[unified]: failed to dispose stale terminal host before fresh acquisition; continuing', {
+        reason,
+        hostKind: existing.handle.kind,
+        sessionName: existing.handle.sessionName,
+        error,
+      });
+    });
+    await tryRemoveTerminalHostAttachmentInfo({
+      sessionId: opts.happySessionId,
+      terminal: existing.terminal,
+      remove: opts.removeTerminalHostAttachmentInfo ?? removeDefaultTerminalHostAttachmentInfo,
+    });
+  };
+  if (existingTerminalHost) {
+    const liveness = await evaluateTerminalHostLivenessForRecovery(hostResolution.adapter, existingTerminalHost.handle);
+    if (liveness.liveness?.paneAlive !== true && shouldDiscardTerminalAttachmentAfterRecoveryProbe(liveness)) {
+      await discardExistingTerminalHost(existingTerminalHost, 'saved_host_confirmed_dead');
+      existingTerminalHost = null;
+    } else if (liveness.liveness?.paneAlive !== true) {
+      existingTerminalHost = null;
+    }
+  }
+  let spawn: ClaudeUnifiedTerminalSpawn | null = null;
+  let spawnEnvForRuntimeControl: Readonly<Record<string, string>> | null = null;
+  const ensureSpawn = async (): Promise<ClaudeUnifiedTerminalSpawn> => {
+    if (spawn) return spawn;
+    spawn = await (opts.buildSpawn ?? buildDefaultSpawn)({
+      first: startupInput,
+      path: opts.path,
+      happySessionId: opts.happySessionId,
+      claudeArgs: opts.claudeArgs,
+      hookSettingsPath: opts.hookSettingsPath,
+      hookPluginDir: opts.hookPluginDir,
+      happierMcpConfigJson: opts.happierMcpConfigJson,
+      systemPromptText: opts.systemPromptText,
+      statuslineForwarder: opts.statuslineForwarder,
+    });
+    spawnEnvForRuntimeControl = spawn.spawnEnv;
+    return spawn;
+  };
+  const fallbackSessionName = opts.createSessionName?.() ?? createDefaultSessionName();
+  const sessionName = existingTerminalHost?.handle.sessionName ?? fallbackSessionName;
   let handle: TerminalHostHandle | null = null;
   let controller: ClaudeUnifiedController | null = null;
   let runtimeControlBridge: ClaudeUnifiedRuntimeControlBridge | null = null;
+  let dialogChoiceScreenProbe: ClaudeUnifiedDialogChoiceScreenProbe | null = null;
   let unregisterStatuslineRuntimeReconciler: (() => void) | null = null;
   let unregisterMetadataRuntimeModeApplier: (() => void) | null = null;
   let unregisterTerminalComposerClearRuntimeControl: (() => void) | null = null;
@@ -841,6 +1026,11 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
   let terminalAttachment: NonNullable<Metadata['terminal']> | null = null;
   let removeProcessSignalCleanup: (() => void) | null = null;
   let turnInterruptRegistered = false;
+  let hookSubscription: ReturnType<typeof createReplayableHookSubscription> | null = null;
+  const ensureHookSubscription = (): ReturnType<typeof createReplayableHookSubscription> => {
+    hookSubscription ??= createReplayableHookSubscription(opts.subscribeClaudeSessionHooks);
+    return hookSubscription;
+  };
   const runtimeAbortController = new AbortController();
   const processSignalAbortController = new AbortController();
   let fatalRuntimeError: unknown = null;
@@ -848,6 +1038,12 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
   let providerSessionStartedObserved = false;
   let trustedProviderProgressObserved = false;
   let expectedPromptInputExit = false;
+  const observeTerminalScreen = (observation: ClaudeUnifiedTerminalScreenObservation): void => {
+    opts.onTerminalScreenObserved?.(observation);
+    void dialogChoiceScreenProbe?.evaluateScreenState(observation.screenState).catch((error) => {
+      logger.debug('[unified]: Claude unified dialog observation failed', error);
+    });
+  };
   let observeSafeRuntimeBoundaryForMetadataApply: (() => Promise<void>) | null = null;
   let preHandleProcessSignalCleanupRan = false;
   let concreteHostDisposedByProcessSignal = false;
@@ -865,6 +1061,9 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
   const observeTrustedProviderProgress = (): void => {
     trustedProviderProgressObserved = true;
     observeStartupReadyForInjection();
+    if (opts.dialogChoiceBroker?.hasPendingChoice() === true) {
+      opts.dialogChoiceBroker.noteDialogResolvedInTerminal('provider_progress_after_dialog_choice');
+    }
   };
   const wakeAfterTerminalComposerClear = (): void => {
     if (notifyTerminalComposerCleared) {
@@ -899,18 +1098,64 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
     },
   });
   try {
-    handle = await hostResolution.adapter.createOrAttachHost({
-      sessionName,
-      workingDirectory: opts.path,
-      spawnArgv: spawn.spawnArgv,
-      spawnEnv: spawn.spawnEnv,
-      isolatedEnv: true,
-    });
+    if (existingTerminalHost && opts.adoptExistingTerminalHost === true && hostResolution.adapter.adoptExistingHost) {
+      try {
+        handle = await hostResolution.adapter.adoptExistingHost(existingTerminalHost.handle);
+        ensureHookSubscription();
+      } catch (error) {
+        const liveness = await evaluateTerminalHostLivenessForRecovery(hostResolution.adapter, existingTerminalHost.handle);
+        if (!isTerminalHostConfirmedDeadForRelaunch(liveness)) {
+          throw error;
+        }
+        await discardExistingTerminalHost(existingTerminalHost, 'adopt_failed_host_confirmed_dead');
+        const fallbackSpawn = await ensureSpawn();
+        ensureHookSubscription();
+        handle = await hostResolution.adapter.createOrAttachHost({
+          sessionName: fallbackSessionName,
+          workingDirectory: opts.path,
+          spawnArgv: fallbackSpawn.spawnArgv,
+          spawnEnv: fallbackSpawn.spawnEnv,
+          isolatedEnv: true,
+        });
+      }
+    } else {
+      const launchSpawn = await ensureSpawn();
+      ensureHookSubscription();
+      const createOptions = {
+        sessionName,
+        workingDirectory: opts.path,
+        spawnArgv: launchSpawn.spawnArgv,
+        spawnEnv: launchSpawn.spawnEnv,
+        isolatedEnv: true,
+      } as const;
+      if (existingTerminalHost) {
+        try {
+          handle = hostResolution.adapter.relaunchExistingHost
+            ? await hostResolution.adapter.relaunchExistingHost(existingTerminalHost.handle, createOptions)
+            : await (async () => {
+              await hostResolution.adapter.dispose(existingTerminalHost.handle);
+              return hostResolution.adapter.createOrAttachHost(createOptions);
+            })();
+        } catch (error) {
+          const liveness = await evaluateTerminalHostLivenessForRecovery(hostResolution.adapter, existingTerminalHost.handle);
+          if (!isTerminalHostConfirmedDeadForRelaunch(liveness)) {
+            throw error;
+          }
+          await discardExistingTerminalHost(existingTerminalHost, 'relaunch_failed_host_confirmed_dead');
+          handle = await hostResolution.adapter.createOrAttachHost({
+            ...createOptions,
+            sessionName: fallbackSessionName,
+          });
+        }
+      } else {
+        handle = await hostResolution.adapter.createOrAttachHost(createOptions);
+      }
+    }
   } catch (error) {
     removeProcessSignalCleanup?.();
     removeProcessSignalCleanup = null;
-    hookSubscription.dispose();
-    await removeUnreadLaunchSpec(spawn);
+    disposeReplayableHookSubscription(hookSubscription);
+    if (spawn) await removeUnreadLaunchSpec(spawn);
     throw error;
   }
   if (processSignalAbortController.signal.aborted) {
@@ -921,11 +1166,12 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
       });
     }
     removeProcessSignalCleanup?.();
-    hookSubscription.dispose();
-    await removeUnreadLaunchSpec(spawn);
+    disposeReplayableHookSubscription(hookSubscription);
+    if (spawn) await removeUnreadLaunchSpec(spawn);
     return;
   }
   const activeHandle = handle;
+  const activeHookSubscription = hookSubscription ?? ensureHookSubscription();
   try {
     if (opts.registerTerminalComposerClearRuntimeControl) {
       const terminalComposerClearPort = hostResolution.adapter.createControlPort?.(activeHandle) ?? null;
@@ -954,12 +1200,27 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
       return;
     }
 
+    if (opts.dialogChoiceBroker) {
+      const dialogChoiceControlPort = hostResolution.adapter.createControlPort?.(activeHandle) ?? null;
+      if (dialogChoiceControlPort) {
+        dialogChoiceScreenProbe = createClaudeUnifiedDialogChoiceScreenProbe({
+          broker: opts.dialogChoiceBroker,
+          port: dialogChoiceControlPort,
+          wait: waitMs,
+          graceMs: opts.dialogOwnershipGraceMs ?? DEFAULT_DIALOG_OWNERSHIP_GRACE_MS,
+          settleMs: DEFAULT_CLAUDE_TUI_CONTROL_TIMINGS.commandSettleMs,
+          isDialogOwned: (dialogId) => runtimeControlBridge?.ownsDialog(dialogId) === true,
+        });
+      }
+    }
+
     // Runtime-control integration (Lane E): when the feature gate is on and the host exposes a control
     // port, run verified TUI controls (model/effort/permission/plan mode) before each dependent prompt
     // injection. Gated-off / no-control-port → bridge stays null and injection is never gated (the
     // existing restart-notice path remains the behavior).
     const runtimeControlOptions = opts.tuiRuntimeControl;
     let currentInjectionMode: Mode = startupInput.mode;
+    let currentInjectionDeliveryUserMessageLocalIds: readonly string[] = startupInput.userMessageLocalIds ?? [];
     // Lane X (incident cmq8y3nlx): bounded log of texts this runtime wrote into the TUI; the steer
     // evaluator uses it to classify a `user_draft` veto as our own leftover vs a genuine user draft.
     // C11: launchers pass a registry pre-seeded from the persisted prompt store so a RESPAWNED
@@ -968,25 +1229,30 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
     // typed-but-never-submitted `/effort medium` leftover otherwise classifies as a foreign draft
     // and deadlocks idle injection forever.
     const ownComposerTextLog = opts.ownComposerTexts ?? createClaudeOwnComposerTextLog();
-    // Controller-typed slash commands produce JSONL `<command-name>…`/`<local-command-stdout>…`
-    // user rows; registration-based suppression (L3) keeps them out of the UI transcript while
-    // genuine user-typed TUI commands still surface.
-    let controlCommandEchoSuppressor: ClaudeUnifiedControlCommandEchoSuppressor | null = null;
+    // Claude local-command XML/stdout rows are filtered globally by the scanner. This bookkeeper
+    // only persists consumed markers from the raw transcript channel to prevent relaunch replay.
+    let controlCommandEchoBookkeeper: ClaudeUnifiedControlCommandEchoBookkeeper | null = null;
     if (runtimeControlOptions?.featureEnabled === true) {
       runtimeControlBridge = runtimeControlOptions.createBridge?.() ?? null;
       if (!runtimeControlBridge) {
         const controlPort = hostResolution.adapter.createControlPort?.(activeHandle) ?? null;
         if (controlPort) {
-          const configDir = resolveClaudeConfigRootFromEnv({ ...spawn.spawnEnv }, process.platform);
-          const commandEchoSuppressor = createClaudeUnifiedControlCommandEchoSuppressor({
-            onSuppressed: opts.onTranscriptMessageSuppressed,
+          const controlEnv = spawnEnvForRuntimeControl
+            ? Object.assign({}, spawnEnvForRuntimeControl) as NodeJS.ProcessEnv
+            : process.env;
+          const configDir = resolveClaudeConfigRootFromEnv(
+            controlEnv,
+            process.platform,
+          );
+          const commandEchoBookkeeper = createClaudeUnifiedControlCommandEchoBookkeeper({
+            onConsumed: opts.onTranscriptMessageSuppressed,
           });
-          controlCommandEchoSuppressor = commandEchoSuppressor;
+          controlCommandEchoBookkeeper = commandEchoBookkeeper;
           const tuiController = createClaudeUnifiedTuiControlController({
             port: controlPort,
             featureEnabled: true,
             settingsGuard: createClaudeSettingsGuard({ configDir }),
-            onControlCommandTyped: (commandText) => commandEchoSuppressor.recordTypedControlCommand(commandText),
+            onControlCommandTyped: (commandText) => commandEchoBookkeeper.recordTypedControlCommand(commandText),
             onControlCommandTextEntered: (commandText) => ownComposerTextLog.record(commandText),
           });
           runtimeControlBridge = createClaudeUnifiedRuntimeControlBridge({
@@ -1008,14 +1274,92 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
         );
       }
     }
+    const blockedInjectionRetryMs = runtimeControlOptions?.blockedInjectionRetryMs
+      ?? DEFAULT_RUNTIME_CONTROL_BLOCKED_INJECTION_RETRY_MS;
+    const blockedApplyStarvationThreshold = Math.max(
+      1,
+      Math.trunc(runtimeControlOptions?.blockedApplyStarvationThreshold ?? DEFAULT_BLOCKED_APPLY_STARVATION_THRESHOLD),
+    );
+
+    const readCanonicalTurnActiveForRuntimeControl = (): boolean => {
+      try {
+        return opts.isCanonicalTurnActive?.() ?? true;
+      } catch {
+        return true;
+      }
+    };
+
+    // F2 starvation honesty: one bounded escalation per blocked delivery-apply episode (never a loop).
+    const deliveryBlockedApplyStarvationTracker = createBlockedApplyStarvationTracker({
+      threshold: blockedApplyStarvationThreshold,
+      onStarvation: (info: BlockedApplyStarvationInfo) => runtimeControlOptions?.onBlockedApplyStarvation?.({
+        isCanonicalTurnActive: readCanonicalTurnActiveForRuntimeControl(),
+        ...info,
+      }),
+    });
+    const metadataBlockedApplyStarvationTracker = createBlockedApplyStarvationTracker({
+      threshold: blockedApplyStarvationThreshold,
+      onStarvation: () => undefined,
+    });
+
     if (runtimeControlOptions?.registerMetadataRuntimeModeApplier) {
       let metadataFallbackBaselineMode: Mode = startupInput.mode;
       let pendingMetadataRuntimeModeApply: Mode | null = null;
       let metadataRuntimeModeApplyInFlight: Promise<ClaudeUnifiedRuntimeControlApplyResult> | null = null;
+      let metadataRuntimeModeApplyRetryTimer: ReturnType<typeof setTimeout> | null = null;
+      let metadataRuntimeModeApplyStarvationOutcomeEmitted = false;
       const deferredMetadataRuntimeApplyResult = (): ClaudeUnifiedRuntimeControlApplyResult => ({
         promptMayProceed: false,
         attempted: false,
       });
+      const clearMetadataRuntimeModeApplyRetryTimer = (): void => {
+        if (!metadataRuntimeModeApplyRetryTimer) return;
+        clearTimeout(metadataRuntimeModeApplyRetryTimer);
+        metadataRuntimeModeApplyRetryTimer = null;
+      };
+      const emitMetadataRuntimeModeApplyStarvationOutcome = (
+        mode: Mode,
+        blockedReason: string | undefined,
+      ): void => {
+        if (metadataRuntimeModeApplyStarvationOutcomeEmitted) return;
+        metadataRuntimeModeApplyStarvationOutcomeEmitted = true;
+        const desired = mapEnhancedModeToDesiredRuntimeConfig(mode);
+        const changes: Array<ClaudeUnifiedRuntimeConfigOutcomeEvent['changes'][number]> = [];
+        if (desired.model !== undefined) {
+          changes.push({ key: 'model', requested: desired.model, ...(blockedReason ? { reason: blockedReason } : {}) });
+        }
+        if (desired.reasoningEffort !== undefined) {
+          changes.push({ key: 'reasoningEffort', requested: desired.reasoningEffort, ...(blockedReason ? { reason: blockedReason } : {}) });
+        }
+        if (desired.ultracode !== undefined) {
+          changes.push({ key: 'launchOption', requested: 'ultracode', ...(blockedReason ? { reason: blockedReason } : {}) });
+        }
+        if (desired.maxThinkingTokens !== undefined) {
+          changes.push({ key: 'maxThinkingTokens', requested: desired.maxThinkingTokens, ...(blockedReason ? { reason: blockedReason } : {}) });
+        }
+        if (runtimeControlOptions.sessionModeEmissionEnabled === true && desired.agentModeId !== undefined) {
+          changes.push({ key: 'sessionMode', requested: desired.agentModeId ?? null, ...(blockedReason ? { reason: blockedReason } : {}) });
+        } else if (desired.permissionMode !== undefined) {
+          changes.push({ key: 'permissionMode', requested: desired.permissionMode, ...(blockedReason ? { reason: blockedReason } : {}) });
+        }
+        if (changes.length === 0) return;
+        runtimeControlOptions.emitRuntimeConfigOutcome({
+          status: 'failed',
+          timing: 'queued_until_safe_window',
+          message: 'Claude Unified runtime changes are still blocked waiting for a safe terminal window.',
+          changes,
+        });
+      };
+      const schedulePendingMetadataRuntimeModeApplyRetry = (
+        consecutiveBlockedApplies: number,
+      ): void => {
+        clearMetadataRuntimeModeApplyRetryTimer();
+        metadataRuntimeModeApplyRetryTimer = setTimeout(() => {
+          metadataRuntimeModeApplyRetryTimer = null;
+          void retryPendingMetadataRuntimeModeApply().catch(() => undefined);
+        }, resolveBlockedApplyRetryMs(consecutiveBlockedApplies, blockedInjectionRetryMs));
+        metadataRuntimeModeApplyRetryTimer.unref?.();
+      };
       const flushPendingMetadataRuntimeModeApply = async (): Promise<ClaudeUnifiedRuntimeControlApplyResult> => {
         if (metadataRuntimeModeApplyInFlight) return metadataRuntimeModeApplyInFlight;
         if (!pendingMetadataRuntimeModeApply || !runtimeControlBridge) {
@@ -1028,8 +1372,16 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
             const result = await runtimeControlBridge.applyOutOfBand(modeForMetadataApply);
             lastResult = result;
             if (!result.promptMayProceed) {
+              const consecutiveBlockedApplies = metadataBlockedApplyStarvationTracker.recordBlocked(result.blockedReason);
+              if (consecutiveBlockedApplies >= blockedApplyStarvationThreshold) {
+                emitMetadataRuntimeModeApplyStarvationOutcome(modeForMetadataApply, result.blockedReason);
+              }
+              schedulePendingMetadataRuntimeModeApplyRetry(consecutiveBlockedApplies);
               return result;
             }
+            clearMetadataRuntimeModeApplyRetryTimer();
+            metadataBlockedApplyStarvationTracker.reset();
+            metadataRuntimeModeApplyStarvationOutcomeEmitted = false;
             metadataFallbackBaselineMode = modeForMetadataApply;
             if (pendingMetadataRuntimeModeApply === modeForMetadataApply) {
               pendingMetadataRuntimeModeApply = null;
@@ -1052,6 +1404,8 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
       observeSafeRuntimeBoundaryForMetadataApply = retryPendingMetadataRuntimeModeApply;
       const unregister = runtimeControlOptions.registerMetadataRuntimeModeApplier(async (modeForMetadataApply) => {
         if (runtimeControlBridge) {
+          clearMetadataRuntimeModeApplyRetryTimer();
+          metadataRuntimeModeApplyStarvationOutcomeEmitted = false;
           pendingMetadataRuntimeModeApply = modeForMetadataApply;
           return flushPendingMetadataRuntimeModeApply();
         }
@@ -1068,16 +1422,15 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
           attempted: false,
         };
       });
-      unregisterMetadataRuntimeModeApplier = typeof unregister === 'function' ? unregister : null;
+      unregisterMetadataRuntimeModeApplier = typeof unregister === 'function'
+        ? () => {
+          clearMetadataRuntimeModeApplyRetryTimer();
+          unregister();
+        }
+        : () => {
+          clearMetadataRuntimeModeApplyRetryTimer();
+        };
     }
-    const blockedInjectionRetryMs = runtimeControlOptions?.blockedInjectionRetryMs
-      ?? DEFAULT_RUNTIME_CONTROL_BLOCKED_INJECTION_RETRY_MS;
-
-    // F2 starvation honesty: one bounded escalation per blocked-apply episode (never a loop).
-    const blockedApplyStarvationTracker = createBlockedApplyStarvationTracker({
-      threshold: runtimeControlOptions?.blockedApplyStarvationThreshold,
-      onStarvation: (info: BlockedApplyStarvationInfo) => runtimeControlOptions?.onBlockedApplyStarvation?.(info),
-    });
     // The gate is armed only for the default controller wiring (which constructs the readiness
     // bridge below); a custom `createController` seam owns its own readiness.
     const startupReadinessGateArmed = !opts.createController;
@@ -1099,14 +1452,25 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
           // when the safe window stayed blocked (incident cmq8y3nlx).
           const apply = await runtimeControlBridge.applyBeforePrompt(currentInjectionMode);
           if (!apply.promptMayProceed) {
-            const consecutiveBlockedApplies = blockedApplyStarvationTracker.recordBlocked(apply.blockedReason);
+            const consecutiveBlockedApplies = deliveryBlockedApplyStarvationTracker.recordBlocked(
+              apply.blockedReason,
+              {
+                userMessageLocalIds: currentInjectionDeliveryUserMessageLocalIds,
+              },
+            );
             return {
               status: 'deferred',
               reason: 'terminal_busy',
               retryAfterMs: resolveBlockedApplyRetryMs(consecutiveBlockedApplies, blockedInjectionRetryMs),
+              blocker: {
+                kind: 'runtime_config_blocked',
+                source: 'runtime_control',
+                ...(apply.blockedReason !== undefined ? { blockedReason: apply.blockedReason } : {}),
+              },
             };
           }
-          blockedApplyStarvationTracker.reset();
+          deliveryBlockedApplyStarvationTracker.reset();
+          runtimeControlOptions?.onBlockedApplyClear?.();
         }
         // Lane X: every text we attempt to write is recorded so a later leftover composer draft
         // can be exact-match classified as OUR OWN residue (vs an untouchable genuine user draft).
@@ -1135,7 +1499,10 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
       ? {
           async waitForNextInput(consumerOpts) {
             const batch = await baseInputConsumer.waitForNextInput(consumerOpts);
-            if (batch) currentInjectionMode = batch.mode;
+            if (batch) {
+              currentInjectionMode = batch.mode;
+              currentInjectionDeliveryUserMessageLocalIds = batch.userMessageLocalIds ?? [];
+            }
             return batch;
           },
         }
@@ -1156,6 +1523,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
         ? (opts.createStartupDialogResolver?.({
           controlPort: startupDialogControlPort,
           startupMode: startupInput.mode,
+          isRuntimeControlInFlight: () => runtimeControlBridge?.isControlInFlight() === true,
         }) ?? undefined)
         : undefined;
       const captureInputStateForGuard = hostResolution.adapter.captureInputState;
@@ -1163,6 +1531,8 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
         inputInjection,
         telemetry,
         onDraftGuardStarvation: opts.onDraftGuardStarvation,
+        onDraftGuardClear: opts.onDraftGuardClear,
+        isCanonicalTurnActive: opts.isCanonicalTurnActive,
         // C11 (live-proven, runner pid 83791): never type an idle injection next to a leftover
         // composer draft. Own leftovers (respawn-seeded registry) are cleared; anything else
         // defers the injection untouched.
@@ -1181,6 +1551,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
                 return {
                   status: result.status,
                   ...(result.status === 'cleared' ? { attempts: result.attempts } : {}),
+                  ...(result.status === 'blocked_non_input_state' ? { blockedReason: result.blockedReason } : {}),
                   ...(draftLength !== undefined ? { draftLength } : {}),
                 };
               },
@@ -1204,6 +1575,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
           await arbiterForPromptCustody?.observePromptCustodyByTerminal(batch);
         },
         onAvailabilitySnapshot: opts.onInFlightSteerAvailabilitySnapshot,
+        onScreenObserved: observeTerminalScreen,
         ownComposerTexts: ownComposerTextLog,
         ...(steerDraftClearPort
           ? {
@@ -1448,9 +1820,9 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
       const observeMetadataApplySafeBoundary = async (): Promise<void> => {
         await observeSafeRuntimeBoundaryForMetadataApply?.();
       };
-      const lifecycleBridge = hookSubscription.subscribe
+      const lifecycleBridge = activeHookSubscription.subscribe
         ? createClaudeUnifiedHookLifecycleBridge({
-            subscribeClaudeSessionHooks: hookSubscription.subscribe,
+            subscribeClaudeSessionHooks: activeHookSubscription.subscribe,
             arbiter,
             completionQuiescenceMs:
               opts.lifecycleCompletionQuiescenceMs ?? configuration.claudeLocalTurnCompletionQuiescenceMs,
@@ -1471,6 +1843,19 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
               await observeMetadataApplySafeBoundary();
               await opts.onPromptTurnTerminal?.(event);
             },
+            ...(dialogChoiceScreenProbe
+              ? {
+                  turnStallScreenProbe: {
+                    quietMs: opts.dialogTurnStallScreenProbeQuietMs
+                      ?? DEFAULT_DIALOG_TURN_STALL_SCREEN_PROBE_QUIET_MS,
+                    maxAttempts: opts.dialogTurnStallScreenProbeMaxAttempts
+                      ?? DEFAULT_DIALOG_TURN_STALL_SCREEN_PROBE_MAX_ATTEMPTS,
+                    onStalled: async () => {
+                      await dialogChoiceScreenProbe?.probe();
+                    },
+                  },
+                }
+              : {}),
             runtimeActivityPublisher: opts.runtimeActivityPublisher ?? null,
             onSessionEnd: (event) => {
               if (isClaudePromptInputExit(event)) {
@@ -1487,7 +1872,6 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
             claudeConfigDir: resolveClaudeConfigDirOverride(process.env),
             onMessage: opts.onMessage
               ? (message) => {
-                  if (controlCommandEchoSuppressor?.shouldSuppressTranscriptMessage(message)) return;
                   opts.onMessage?.(message);
                 }
               : undefined,
@@ -1499,6 +1883,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
             },
             onRawTranscriptValue: (value) => {
               confirmPromptAcceptedFromTranscript([value]);
+              controlCommandEchoBookkeeper?.markConsumedTranscriptMessage(value);
               // Native Claude `/goal` source (plan H7): the goal_status attachment +
               // system/init slash_commands survive only on this raw channel (the
               // scanner drops them before `onMessage`). Forward to the launcher so it
@@ -1508,7 +1893,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
             onSessionFound: opts.onSessionFound,
             loadCommittedClaudeJsonlMessageBaseline: opts.loadCommittedClaudeJsonlMessageBaseline,
             transcriptMissingWarningMs: configuration.claudeTranscriptMissingWarningMs,
-            subscribeClaudeSessionHooks: hookSubscription.subscribe,
+            subscribeClaudeSessionHooks: activeHookSubscription.subscribe,
             classifyDiscoveredSession: ({ messages }) => (
               confirmPromptAcceptedFromTranscript(messages) ? 'main' : null
             ),
@@ -1557,6 +1942,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
               || providerSessionStartedObserved
             ),
             resolveStartupDialog,
+            onScreenObserved: observeTerminalScreen,
             emitOutputReadiness: true,
           }),
           createClaudeUnifiedHostLivenessBridge({
@@ -1574,6 +1960,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
               }
             },
             onHostDead: (error) => {
+              void publishHostDeadHealth(activeHandle, error.liveness);
               fatalRuntimeError ??= error;
               runtimeAbortController.abort(error);
             },
@@ -1588,6 +1975,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
       await controller.run();
     } catch (error) {
       if (error instanceof ClaudeUnifiedTerminalHostDeadError) {
+        await publishHostDeadHealth(activeHandle, error.liveness);
         emitClaudeUnifiedHostDead(telemetry, {
           hostKind: activeHandle.kind,
           sessionName: activeHandle.sessionName,
@@ -1598,6 +1986,15 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
       throw error;
     }
     if (terminalAttachment) {
+      const happySessionId = typeof opts.happySessionId === 'string' ? opts.happySessionId.trim() : '';
+      if (happySessionId) {
+        await (opts.clearSessionMarkerTerminalHostHealth ?? clearSessionMarkerTerminalHostHealth)({
+          pid: process.pid,
+          sessionId: happySessionId,
+        }).catch((error) => {
+          logger.debug('[unified]: failed to clear recovered terminal host health marker', error);
+        });
+      }
       await opts.onTerminalHostReady?.({ handle: activeHandle, terminal: terminalAttachment });
     }
     const waitSignals = [runtimeAbortController.signal, processSignalAbortController.signal];
@@ -1624,6 +2021,8 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
         logger.debug('[unified]: failed to dispose Claude unified runtime-control bridge (non-fatal)', error);
       });
     }
+    dialogChoiceScreenProbe?.dispose();
+    dialogChoiceScreenProbe = null;
     inFlightSteerWiring?.dispose();
     if (controller) {
       await controller.dispose();
@@ -1637,6 +2036,6 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
     }).catch((error) => {
       logger.debug('[unified]: failed to remove Claude unified terminal attachment info', error);
     });
-    hookSubscription.dispose();
+    activeHookSubscription.dispose();
   }
 }

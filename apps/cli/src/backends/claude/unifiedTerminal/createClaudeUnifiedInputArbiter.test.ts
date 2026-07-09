@@ -122,6 +122,62 @@ describe('createClaudeUnifiedInputArbiter', () => {
     expect(arbiter.snapshot()).toMatchObject({ queuedCount: 0, lastDeferredReason: null });
   });
 
+  it('publishes the current head blocker from a deferred injection and clears it after success', async () => {
+    let nowMs = 10_000;
+    const injectPrompt = vi
+      .fn()
+      .mockResolvedValueOnce({
+        status: 'deferred' as const,
+        reason: 'user_typing' as const,
+        retryAfterMs: 75,
+        blocker: {
+          kind: 'terminal_user_draft' as const,
+          source: 'draft_guard' as const,
+          guardStatus: 'foreign_draft' as const,
+          draftLength: 12,
+        },
+      })
+      .mockResolvedValueOnce({ status: 'injected' as const, at: nowMs, bytesWritten: 5 });
+    const arbiter = createClaudeUnifiedInputArbiter({
+      nowMs: () => nowMs,
+      injectPrompt,
+    });
+
+    arbiter.observeLifecycle({ type: 'turn_state', state: 'idle', observedAtMs: nowMs });
+    arbiter.observeLifecycle({ type: 'output', observedAtMs: nowMs });
+    nowMs += 1_000;
+    await arbiter.enqueueUiMessage({
+      message: 'hello',
+      origin: { kind: 'ui_pending' },
+      userMessageLocalIds: ['pending-local-draft'],
+    });
+
+    await arbiter.drainWhenSafe();
+
+    expect(arbiter.snapshot()).toMatchObject({
+      queuedCount: 1,
+      lastDeferredReason: 'user_typing',
+      headInputState: 'waiting_for_readiness',
+      currentHeadBlocker: {
+        kind: 'terminal_user_draft',
+        source: 'draft_guard',
+        guardStatus: 'foreign_draft',
+        draftLength: 12,
+      },
+    });
+
+    nowMs += 1_000;
+    arbiter.notifyTerminalComposerCleared({ observedAtMs: nowMs });
+    await arbiter.drainWhenSafe();
+
+    expect(arbiter.snapshot()).toMatchObject({
+      queuedCount: 1,
+      lastDeferredReason: null,
+      currentHeadBlocker: null,
+      headInputState: 'awaiting_provider_acceptance',
+    });
+  });
+
   it('scales provider acceptance timeout for large injected prompts before retrying', async () => {
     vi.useFakeTimers();
     let nowMs = 10_000;
@@ -239,6 +295,7 @@ describe('createClaudeUnifiedInputArbiter', () => {
 
     const custodyObserved = await arbiter.observePromptCustodyByTerminal(batch);
     expect(custodyObserved).toBe(true);
+    expect(accepted).toEqual(['queued in Claude TUI']);
 
     nowMs += 1_000;
     arbiter.observeLifecycle({ type: 'turn_state', state: 'idle', observedAtMs: nowMs });
@@ -247,12 +304,12 @@ describe('createClaudeUnifiedInputArbiter', () => {
     expect(injectPrompt).toHaveBeenCalledTimes(1);
     expect(failures).toEqual([]);
     expect(arbiter.snapshot()).toMatchObject({
-      queuedCount: 1,
+      queuedCount: 0,
       lastFailureReason: null,
-      headInputState: 'awaiting_provider_acceptance',
+      headInputState: 'submitted',
     });
 
-    await expect(arbiter.confirmPromptAcceptedByProvider()).resolves.toBe(true);
+    await expect(arbiter.confirmPromptAcceptedByProvider()).resolves.toBe(false);
     expect(accepted).toEqual(['queued in Claude TUI']);
     expect(arbiter.snapshot()).toMatchObject({ queuedCount: 0, headInputState: 'submitted' });
 
@@ -260,7 +317,7 @@ describe('createClaudeUnifiedInputArbiter', () => {
     expect(handedBack).toEqual([]);
   });
 
-  it('terminalizes a terminal-custody prompt when provider acceptance is lost after turn end', async () => {
+  it('does not terminalize a terminal-custody prompt after custody has accepted delivery', async () => {
     vi.useFakeTimers();
     let nowMs = 10_000;
     const batch = { message: 'queued in Claude TUI without acceptance proof', origin: { kind: 'ui_pending' as const } };
@@ -286,35 +343,27 @@ describe('createClaudeUnifiedInputArbiter', () => {
     nowMs += 1_000;
     await arbiter.drainWhenSafe();
     await expect(arbiter.observePromptCustodyByTerminal(batch)).resolves.toBe(true);
+    expect(accepted).toEqual(['queued in Claude TUI without acceptance proof']);
 
     nowMs += 1_000;
     arbiter.observeLifecycle({ type: 'turn_state', state: 'idle', observedAtMs: nowMs });
     await vi.advanceTimersByTimeAsync(10);
 
-    expect(onInjectionFailure).toHaveBeenCalledWith(expect.objectContaining({
-      failureState: 'failed_terminal',
-      batch,
-      result: expect.objectContaining({
-        reason: 'timeout',
-        phase: 'after_enter_unknown',
-        duplicateRisk: 'likely',
-        recoverable: true,
-      }),
-    }));
-    expect(accepted).toEqual([]);
+    expect(onInjectionFailure).not.toHaveBeenCalled();
+    expect(accepted).toEqual(['queued in Claude TUI without acceptance proof']);
     expect(arbiter.snapshot()).toMatchObject({
       queuedCount: 0,
       terminalCustodyCount: 0,
       providerAcceptancePendingCount: 0,
-      lastFailureReason: 'timeout',
-      headInputState: 'failed_terminal',
+      lastFailureReason: null,
+      headInputState: 'submitted',
     });
 
     arbiter.dispose();
     expect(handedBack).toEqual([]);
   });
 
-  it('terminalizes a terminal-custody prompt immediately when the terminal reports a failed turn', async () => {
+  it('ignores terminal failure reports for a prompt already accepted by terminal custody', async () => {
     vi.useFakeTimers();
     let nowMs = 10_000;
     const batch = { message: 'queued in Claude TUI and then failed', origin: { kind: 'ui_pending' as const } };
@@ -339,22 +388,13 @@ describe('createClaudeUnifiedInputArbiter', () => {
     arbiter.observeLifecycle({ type: 'turn_state', state: 'finalizing', observedAtMs: nowMs });
     await expect(arbiter.observePendingProviderAcceptanceTerminalFailure()).resolves.toBe(false);
 
-    expect(onInjectionFailure).toHaveBeenCalledWith(expect.objectContaining({
-      failureState: 'failed_terminal',
-      batch,
-      result: expect.objectContaining({
-        reason: 'timeout',
-        phase: 'after_enter_unknown',
-        duplicateRisk: 'likely',
-        recoverable: true,
-      }),
-    }));
+    expect(onInjectionFailure).not.toHaveBeenCalled();
     expect(arbiter.snapshot()).toMatchObject({
       queuedCount: 0,
       terminalCustodyCount: 0,
       providerAcceptancePendingCount: 0,
-      lastFailureReason: 'timeout',
-      headInputState: 'failed_terminal',
+      lastFailureReason: null,
+      headInputState: 'submitted',
     });
   });
 
@@ -387,48 +427,50 @@ describe('createClaudeUnifiedInputArbiter', () => {
 
     expect(injected).toEqual(['first queued in Claude TUI']);
     await expect(arbiter.observePromptCustodyByTerminal(first)).resolves.toBe(true);
+    expect(accepted).toEqual(['first queued in Claude TUI']);
     expect(arbiter.snapshot()).toMatchObject({
-      queuedCount: 1,
+      queuedCount: 0,
       pendingInjectionCount: 0,
-      terminalCustodyCount: 1,
-      providerAcceptancePendingCount: 1,
-      headInputState: 'awaiting_provider_acceptance',
+      terminalCustodyCount: 0,
+      providerAcceptancePendingCount: 0,
+      headInputState: 'submitted',
     });
 
     await arbiter.enqueueUiMessage(second);
     expect(arbiter.snapshot()).toMatchObject({
-      queuedCount: 2,
+      queuedCount: 1,
       pendingInjectionCount: 1,
-      terminalCustodyCount: 1,
-      providerAcceptancePendingCount: 1,
-      headInputState: 'awaiting_provider_acceptance',
+      terminalCustodyCount: 0,
+      providerAcceptancePendingCount: 0,
+      headInputState: 'submitted',
     });
     nowMs += 1_000;
     await arbiter.drainWhenSafe();
 
     expect(injected).toEqual(['first queued in Claude TUI', 'second queued in Claude TUI']);
     expect(arbiter.snapshot()).toMatchObject({
-      queuedCount: 2,
+      queuedCount: 1,
       pendingInjectionCount: 0,
-      terminalCustodyCount: 1,
-      providerAcceptancePendingCount: 2,
+      terminalCustodyCount: 0,
+      providerAcceptancePendingCount: 1,
       headInputState: 'awaiting_provider_acceptance',
     });
     await expect(arbiter.observePromptCustodyByTerminal(second)).resolves.toBe(true);
+    expect(accepted).toEqual(['first queued in Claude TUI', 'second queued in Claude TUI']);
     expect(arbiter.snapshot()).toMatchObject({
-      queuedCount: 2,
+      queuedCount: 0,
       pendingInjectionCount: 0,
-      terminalCustodyCount: 2,
-      providerAcceptancePendingCount: 2,
-      headInputState: 'awaiting_provider_acceptance',
+      terminalCustodyCount: 0,
+      providerAcceptancePendingCount: 0,
+      headInputState: 'submitted',
     });
 
     nowMs += 1_000;
     arbiter.observeLifecycle({ type: 'turn_state', state: 'idle', observedAtMs: nowMs });
     await vi.advanceTimersByTimeAsync(5);
 
-    await expect(arbiter.confirmPromptAcceptedByProvider()).resolves.toBe(true);
-    await expect(arbiter.confirmPromptAcceptedByProvider()).resolves.toBe(true);
+    await expect(arbiter.confirmPromptAcceptedByProvider()).resolves.toBe(false);
+    await expect(arbiter.confirmPromptAcceptedByProvider()).resolves.toBe(false);
 
     expect(accepted).toEqual(['first queued in Claude TUI', 'second queued in Claude TUI']);
     expect(arbiter.snapshot()).toMatchObject({
@@ -443,7 +485,7 @@ describe('createClaudeUnifiedInputArbiter', () => {
     expect(handedBack).toEqual([]);
   });
 
-  it('does not arm a later terminal-custody timeout when an earlier custody prompt is accepted during a running turn', async () => {
+  it('does not arm terminal-custody timeouts after custody accepts delivery during a running turn', async () => {
     vi.useFakeTimers();
     let nowMs = 10_000;
     const first = { message: 'first queued in Claude TUI', origin: { kind: 'ui_pending' as const } };
@@ -479,33 +521,32 @@ describe('createClaudeUnifiedInputArbiter', () => {
     await expect(arbiter.observePromptCustodyByTerminal(second)).resolves.toBe(true);
 
     expect(injected).toEqual(['first queued in Claude TUI', 'second queued in Claude TUI']);
+    expect(accepted).toEqual(['first queued in Claude TUI', 'second queued in Claude TUI']);
     expect(arbiter.snapshot()).toMatchObject({
-      terminalCustodyCount: 2,
-      providerAcceptancePendingCount: 2,
+      terminalCustodyCount: 0,
+      providerAcceptancePendingCount: 0,
+      headInputState: 'submitted',
     });
 
-    await expect(arbiter.confirmPromptAcceptedByProvider()).resolves.toBe(true);
-    expect(accepted).toEqual(['first queued in Claude TUI']);
-    expect(arbiter.snapshot()).toMatchObject({
-      terminalCustodyCount: 1,
-      providerAcceptancePendingCount: 1,
-    });
+    await expect(arbiter.confirmPromptAcceptedByProvider()).resolves.toBe(false);
+    expect(accepted).toEqual(['first queued in Claude TUI', 'second queued in Claude TUI']);
 
     await vi.advanceTimersByTimeAsync(20);
     expect(failures).toEqual([]);
     expect(arbiter.snapshot()).toMatchObject({
-      terminalCustodyCount: 1,
-      providerAcceptancePendingCount: 1,
+      terminalCustodyCount: 0,
+      providerAcceptancePendingCount: 0,
+      headInputState: 'submitted',
     });
 
     nowMs += 1_000;
     arbiter.observeLifecycle({ type: 'turn_state', state: 'idle', observedAtMs: nowMs });
     await vi.advanceTimersByTimeAsync(20);
-    expect(failures).toEqual(['second queued in Claude TUI']);
+    expect(failures).toEqual([]);
     expect(arbiter.snapshot()).toMatchObject({
       terminalCustodyCount: 0,
       providerAcceptancePendingCount: 0,
-      headInputState: 'failed_terminal',
+      headInputState: 'submitted',
     });
   });
 
@@ -532,37 +573,27 @@ describe('createClaudeUnifiedInputArbiter', () => {
     await arbiter.enqueueUiMessage(first);
     await arbiter.drainWhenSafe();
     await expect(arbiter.observePromptCustodyByTerminal(first)).resolves.toBe(true);
+    expect(accepted).toEqual(['first queued in Claude TUI']);
     expect(arbiter.snapshot()).toMatchObject({
-      queuedCount: 1,
+      queuedCount: 0,
       pendingInjectionCount: 0,
-      terminalCustodyCount: 1,
-      providerAcceptancePendingCount: 1,
-      headInputState: 'awaiting_provider_acceptance',
+      terminalCustodyCount: 0,
+      providerAcceptancePendingCount: 0,
+      headInputState: 'submitted',
     });
 
     await arbiter.enqueueUiMessage(second);
     expect(arbiter.snapshot()).toMatchObject({
-      queuedCount: 2,
+      queuedCount: 1,
       pendingInjectionCount: 1,
-      terminalCustodyCount: 1,
-      providerAcceptancePendingCount: 1,
-      headInputState: 'awaiting_provider_acceptance',
+      terminalCustodyCount: 0,
+      providerAcceptancePendingCount: 0,
+      headInputState: 'submitted',
     });
     nowMs += 1_000;
     await arbiter.drainWhenSafe();
 
     expect(injected).toEqual(['first queued in Claude TUI', 'second pending provider acceptance']);
-    expect(arbiter.snapshot()).toMatchObject({
-      queuedCount: 2,
-      pendingInjectionCount: 0,
-      terminalCustodyCount: 1,
-      providerAcceptancePendingCount: 2,
-      headInputState: 'awaiting_provider_acceptance',
-    });
-
-    await expect(arbiter.confirmPromptAcceptedByProvider()).resolves.toBe(true);
-
-    expect(accepted).toEqual(['first queued in Claude TUI']);
     expect(arbiter.snapshot()).toMatchObject({
       queuedCount: 1,
       pendingInjectionCount: 0,
@@ -572,6 +603,17 @@ describe('createClaudeUnifiedInputArbiter', () => {
     });
 
     await expect(arbiter.confirmPromptAcceptedByProvider()).resolves.toBe(true);
+
+    expect(accepted).toEqual(['first queued in Claude TUI', 'second pending provider acceptance']);
+    expect(arbiter.snapshot()).toMatchObject({
+      queuedCount: 0,
+      pendingInjectionCount: 0,
+      terminalCustodyCount: 0,
+      providerAcceptancePendingCount: 0,
+      headInputState: 'submitted',
+    });
+
+    await expect(arbiter.confirmPromptAcceptedByProvider()).resolves.toBe(false);
     expect(accepted).toEqual(['first queued in Claude TUI', 'second pending provider acceptance']);
     expect(arbiter.snapshot()).toMatchObject({
       queuedCount: 0,
@@ -940,6 +982,40 @@ describe('createClaudeUnifiedInputArbiter', () => {
       lastDeferredReason: null,
       headInputState: 'awaiting_provider_acceptance',
     });
+  });
+
+  it('does not let dense running-turn output starve a steer behind the quiet-window gate', async () => {
+    vi.useFakeTimers();
+    let nowMs = 10_000;
+    const injectPrompt = vi.fn().mockImplementation(async (batch, options) => ({
+      status: 'injected' as const,
+      at: nowMs,
+      bytesWritten: batch.message.length,
+      options,
+    }));
+    const evaluateInFlightSteer = vi.fn(async () => ({ steer: true as const }));
+    const arbiter = createClaudeUnifiedInputArbiter({
+      nowMs: () => nowMs,
+      quietPeriodMs: 800,
+      injectPrompt,
+      evaluateInFlightSteer,
+    });
+
+    await arbiter.enqueueUiMessage({ message: 'steer during dense hooks', origin: { kind: 'ui_pending' } });
+    arbiter.observeLifecycle({ type: 'turn_state', state: 'running', observedAtMs: nowMs });
+    for (let i = 0; i < 3; i += 1) {
+      nowMs += 250;
+      arbiter.observeLifecycle({ type: 'output', observedAtMs: nowMs });
+    }
+
+    await arbiter.drainWhenSafe();
+
+    expect(evaluateInFlightSteer).toHaveBeenCalledTimes(1);
+    expect(injectPrompt).toHaveBeenCalledTimes(1);
+    expect(injectPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'steer during dense hooks' }),
+      { inFlightSteer: true },
+    );
   });
 
   it('redrains queued prompts after an adapter deferral retry delay', async () => {
@@ -1799,6 +1875,58 @@ describe('createClaudeUnifiedInputArbiter', () => {
     expect(arbiter.snapshot()).toMatchObject({
       queuedCount: 1,
       headInputState: 'awaiting_provider_acceptance',
+    });
+  });
+
+  it('durably fails provider acceptance when compaction never completes after the grace re-arm', async () => {
+    vi.useFakeTimers();
+    let nowMs = 10_000;
+    const onInjectionFailure = vi.fn();
+    const injectPrompt = vi.fn(async (batch) => ({
+      status: 'injected' as const,
+      at: nowMs,
+      bytesWritten: batch.message.length,
+    }));
+    const arbiter = createClaudeUnifiedInputArbiter({
+      nowMs: () => nowMs,
+      quietPeriodMs: 0,
+      providerAcceptanceTimeoutMs: 40,
+      injectPrompt,
+      onInjectionFailure,
+    });
+
+    await arbiter.enqueueUiMessage({ message: 'prompt parked by lost compaction completion', origin: { kind: 'ui_pending' } });
+    arbiter.observeLifecycle({ type: 'output', observedAtMs: nowMs });
+    nowMs += 1_000;
+    await arbiter.drainWhenSafe();
+
+    observeCompaction(arbiter, { type: 'compaction', phase: 'started', observedAtMs: nowMs });
+    nowMs += 40;
+    await vi.advanceTimersByTimeAsync(40);
+
+    expect(onInjectionFailure).not.toHaveBeenCalled();
+    expect(arbiter.snapshot()).toMatchObject({
+      queuedCount: 1,
+      lastFailureReason: null,
+      headInputState: 'awaiting_provider_acceptance',
+    });
+
+    nowMs += 40;
+    await vi.advanceTimersByTimeAsync(40);
+
+    expect(onInjectionFailure).toHaveBeenCalledWith(expect.objectContaining({
+      failureState: 'failed_ambiguous',
+      batch: expect.objectContaining({ message: 'prompt parked by lost compaction completion' }),
+      result: expect.objectContaining({
+        reason: 'timeout',
+        phase: 'after_enter_unknown',
+      }),
+    }));
+    expect(injectPrompt).toHaveBeenCalledTimes(1);
+    expect(arbiter.snapshot()).toMatchObject({
+      queuedCount: 1,
+      lastFailureReason: 'timeout',
+      headInputState: 'failed_ambiguous',
     });
   });
 

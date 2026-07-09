@@ -46,6 +46,12 @@ export type ClaudeUnifiedSessionEndEvent = Readonly<{
   source: string;
 }>;
 
+export type ClaudeUnifiedTurnStallScreenProbe = Readonly<{
+  quietMs: number;
+  maxAttempts?: number | undefined;
+  onStalled: () => void | Promise<void>;
+}>;
+
 function disposeSubscription(dispose: (() => void) | null): void {
   if (!dispose) return;
   dispose();
@@ -101,6 +107,7 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
   onTrustedProviderProgress?: (() => void) | undefined;
   onPromptTurnTerminal?: ((event: ClaudeUnifiedPromptTurnTerminalEvent) => void | Promise<void>) | undefined;
   onSessionEnd?: ((event: ClaudeUnifiedSessionEndEvent) => void | Promise<void>) | undefined;
+  turnStallScreenProbe?: ClaudeUnifiedTurnStallScreenProbe | undefined;
   runtimeActivityPublisher?: ClaudeProviderRuntimeActivityPublisher | null | undefined;
 }>): ClaudeUnifiedHookLifecycleBridge {
   let disposed = false;
@@ -108,6 +115,10 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
   let lifecycle: LocalTurnLifecycleController | null = null;
   let tracker: ReturnType<typeof createClaudeLocalLifecycleTracker> | null = null;
   let quietDrainTimer: NodeJS.Timeout | null = null;
+  let turnStallTimer: NodeJS.Timeout | null = null;
+  let turnStallActive = false;
+  let turnStallAttempts = 0;
+  let turnStallProbeInFlight = false;
   let terminalSideEffects: Promise<void> = Promise.resolve();
   let anonymousPermissionBlockCount = 0;
   const pendingPermissionRequestIds = new Set<string>();
@@ -116,6 +127,62 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
     if (!quietDrainTimer) return;
     clearTimeout(quietDrainTimer);
     quietDrainTimer = null;
+  };
+
+  const clearTurnStallTimer = (): void => {
+    if (!turnStallTimer) return;
+    clearTimeout(turnStallTimer);
+    turnStallTimer = null;
+  };
+
+  const turnStallProbeQuietMs = (): number => {
+    const raw = opts.turnStallScreenProbe?.quietMs ?? 0;
+    return Math.max(0, Math.trunc(raw));
+  };
+
+  const turnStallProbeMaxAttempts = (): number => {
+    const raw = opts.turnStallScreenProbe?.maxAttempts ?? 1;
+    return Math.max(1, Math.trunc(raw));
+  };
+
+  const scheduleTurnStallProbe = (): void => {
+    const probe = opts.turnStallScreenProbe;
+    if (!probe || !turnStallActive || turnStallProbeInFlight) return;
+    if (turnStallAttempts >= turnStallProbeMaxAttempts()) return;
+    clearTurnStallTimer();
+    turnStallTimer = setTimeout(() => {
+      turnStallTimer = null;
+      if (disposed || !turnStallActive || turnStallProbeInFlight) return;
+      turnStallAttempts += 1;
+      turnStallProbeInFlight = true;
+      Promise.resolve(probe.onStalled())
+        .catch((error) => {
+          logger.debug('[unified]: Claude unified terminal turn-stall screen probe failed', error);
+        })
+        .finally(() => {
+          turnStallProbeInFlight = false;
+          if (!disposed && turnStallActive) scheduleTurnStallProbe();
+        });
+    }, turnStallProbeQuietMs());
+    turnStallTimer.unref?.();
+  };
+
+  const noteTurnStallProgress = (): void => {
+    if (!opts.turnStallScreenProbe || !turnStallActive) return;
+    turnStallAttempts = 0;
+    scheduleTurnStallProbe();
+  };
+
+  const startTurnStallProbeWindow = (): void => {
+    if (!opts.turnStallScreenProbe) return;
+    turnStallActive = true;
+    noteTurnStallProgress();
+  };
+
+  const stopTurnStallProbeWindow = (): void => {
+    turnStallActive = false;
+    turnStallAttempts = 0;
+    clearTurnStallTimer();
   };
 
   const drainWhenSafe = (): void => {
@@ -159,6 +226,7 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
 
   const observeCompactionStarted = (): void => {
     clearQuietDrainTimer();
+    stopTurnStallProbeWindow();
     opts.arbiter.observeLifecycle({ type: 'compaction', phase: 'started' });
   };
 
@@ -167,6 +235,7 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
     opts.arbiter.observeLifecycle({ type: 'turn_state', state: 'idle' });
     opts.arbiter.observeLifecycle({ type: 'output' });
     drainWhenSafe();
+    stopTurnStallProbeWindow();
     clearQuietDrainTimer();
     quietDrainTimer = setTimeout(drainWhenSafe, TERMINAL_INPUT_QUIET_PERIOD_MS);
     quietDrainTimer.unref?.();
@@ -248,6 +317,7 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
     event: LocalTurnLifecycleEvent,
   ): Promise<void> => {
     if (disposed || !snapshot.terminal) return;
+    stopTurnStallProbeWindow();
     opts.arbiter.observeLifecycle({ type: 'turn_state', state: 'finalizing' });
     if (snapshot.lastTerminalReason === 'completed') {
       opts.onThinkingChange?.(false);
@@ -292,6 +362,7 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
         completionQuiescenceMs: opts.completionQuiescenceMs,
         onStateChange: (snapshot, event) => {
           if (snapshot.active && !snapshot.terminal) {
+            startTurnStallProbeWindow();
             opts.arbiter.observeLifecycle({ type: 'turn_state', state: 'running' });
             opts.onThinkingChange?.(true);
             return;
@@ -359,10 +430,14 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
         if (hookEventName === 'StopFailure') {
           observeStopFailureRuntimeIssue(data);
         }
+        if (!sidechain && hookEventName !== 'SessionStart') {
+          noteTurnStallProgress();
+        }
         tracker?.observeHook(data);
       }) ?? null;
     },
     observeTranscript(message) {
+      noteTurnStallProgress();
       if (readSystemSubtype(message) === 'compact_boundary') {
         observeCompactionCompleted();
       }
@@ -379,6 +454,7 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
       if (disposed) return;
       disposed = true;
       clearQuietDrainTimer();
+      stopTurnStallProbeWindow();
       disposeSubscription(unsubscribe);
       unsubscribe = null;
       tracker = null;

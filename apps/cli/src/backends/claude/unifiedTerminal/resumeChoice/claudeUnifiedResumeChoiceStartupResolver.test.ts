@@ -20,6 +20,32 @@ const IDLE = [
   '──────────────────────────────',
 ].join('\n');
 
+const EFFORT_DIALOG_HIGH = [
+  'Change effort level?',
+  'This conversation is cached for the current effort level.',
+  'Switching to high means the full history gets re-read before Claude can continue.',
+  '',
+  '❯ 1. Yes, switch to high',
+  '  2. No, go back',
+].join('\n');
+
+const EFFORT_DIALOG_MEDIUM = [
+  'Change effort level?',
+  'This conversation is cached for the current effort level.',
+  'Switching to medium means the full history gets re-read before Claude can continue.',
+  '',
+  '❯ 1. Yes, switch to medium',
+  '  2. No, go back',
+].join('\n');
+
+const SWITCH_MODEL_DIALOG = [
+  'Switch model?',
+  'Reading from cache may produce different results.',
+  '',
+  '❯ 1. Yes, switch',
+  '  2. No, go back',
+].join('\n');
+
 describe('createClaudeUnifiedResumeChoiceStartupResolver', () => {
   it('auto-answers resume-from-summary through terminal control', async () => {
     const { session } = createPermissionHandlerSessionStub('resume-choice-session');
@@ -261,5 +287,101 @@ describe('createClaudeUnifiedResumeChoiceStartupResolver', () => {
       status: 'canceled',
       reason: 'resume_dialog_resolved_in_terminal',
     });
+  });
+
+  it('answers an orphan effort-change dialog with switch when its target matches the configured startup effort', async () => {
+    const { session } = createPermissionHandlerSessionStub('resume-choice-session');
+    const broker = new ClaudeUnifiedResumeChoiceBroker(session);
+    const port = createFakeControlPort({ captures: [EFFORT_DIALOG_HIGH, IDLE] });
+    const resolver = createClaudeUnifiedResumeChoiceStartupResolver({
+      choice: 'ask_every_time',
+      broker,
+      port,
+      wait: async () => undefined,
+      settleMs: 1,
+      startupMode: { permissionMode: 'default', reasoningEffort: 'high' },
+      isRuntimeControlInFlight: () => false,
+    });
+
+    await expect(resolver({
+      screenState: parseClaudeScreenState(EFFORT_DIALOG_HIGH),
+      observedAtMs: 1,
+      abortSignal: new AbortController().signal,
+    })).resolves.toEqual({ status: 'handled' });
+
+    expect(port.sentLiteral).toEqual(['1']);
+    expect(port.sentKeys).toEqual(['Enter']);
+  });
+
+  it('answers an orphan effort-change dialog with go-back when its target differs from the configured startup effort', async () => {
+    const { session } = createPermissionHandlerSessionStub('resume-choice-session');
+    const broker = new ClaudeUnifiedResumeChoiceBroker(session);
+    const port = createFakeControlPort({ captures: [EFFORT_DIALOG_MEDIUM, IDLE] });
+    const resolver = createClaudeUnifiedResumeChoiceStartupResolver({
+      choice: 'ask_every_time',
+      broker,
+      port,
+      wait: async () => undefined,
+      settleMs: 1,
+      startupMode: { permissionMode: 'default', reasoningEffort: 'high' },
+      isRuntimeControlInFlight: () => false,
+    });
+
+    await resolver({
+      screenState: parseClaudeScreenState(EFFORT_DIALOG_MEDIUM),
+      observedAtMs: 1,
+      abortSignal: new AbortController().signal,
+    });
+
+    expect(port.sentLiteral).toEqual(['2']);
+    expect(port.sentKeys).toEqual(['Enter']);
+  });
+
+  it('leaves an effort-change dialog to the runtime-control apply episode while that driver owns it', async () => {
+    const { session } = createPermissionHandlerSessionStub('resume-choice-session');
+    const broker = new ClaudeUnifiedResumeChoiceBroker(session);
+    const port = createFakeControlPort({ captures: [EFFORT_DIALOG_HIGH, IDLE] });
+    const resolver = createClaudeUnifiedResumeChoiceStartupResolver({
+      choice: 'ask_every_time',
+      broker,
+      port,
+      wait: async () => undefined,
+      settleMs: 1,
+      startupMode: { permissionMode: 'default', reasoningEffort: 'high' },
+      isRuntimeControlInFlight: () => true,
+    });
+
+    await expect(resolver({
+      screenState: parseClaudeScreenState(EFFORT_DIALOG_HIGH),
+      observedAtMs: 1,
+      abortSignal: new AbortController().signal,
+    })).resolves.toEqual({ status: 'unhandled' });
+
+    expect(port.sentLiteral).toEqual([]);
+    expect(port.sentKeys).toEqual([]);
+  });
+
+  it('answers an orphan switch-model dialog when the startup mode configured a model', async () => {
+    const { session } = createPermissionHandlerSessionStub('resume-choice-session');
+    const broker = new ClaudeUnifiedResumeChoiceBroker(session);
+    const port = createFakeControlPort({ captures: [SWITCH_MODEL_DIALOG, IDLE] });
+    const resolver = createClaudeUnifiedResumeChoiceStartupResolver({
+      choice: 'ask_every_time',
+      broker,
+      port,
+      wait: async () => undefined,
+      settleMs: 1,
+      startupMode: { permissionMode: 'default', model: 'claude-sonnet-4-6' },
+      isRuntimeControlInFlight: () => false,
+    });
+
+    await expect(resolver({
+      screenState: parseClaudeScreenState(SWITCH_MODEL_DIALOG),
+      observedAtMs: 1,
+      abortSignal: new AbortController().signal,
+    })).resolves.toEqual({ status: 'handled' });
+
+    expect(port.sentLiteral).toEqual(['1']);
+    expect(port.sentKeys).toEqual(['Enter']);
   });
 });
