@@ -22,8 +22,13 @@ import {
     saveMachineDisplayWarmCacheEntries,
 } from '../../domains/state/warmCachePersistence';
 import { buildMachineDisplayCacheEntriesFromRenderables } from '../../domains/state/warmCacheAdapters';
+import { syncPerformanceTelemetry } from '../../runtime/syncPerformanceTelemetry';
 
 import type { StoreGet, StoreSet } from './_shared';
+import {
+    createWarmCacheSaveScheduler,
+    WARM_CACHE_PROGRESS_SAVE_DEBOUNCE_MS,
+} from './warmCacheSaveScheduler';
 
 export type MachinesDomain = {
     machines: Record<string, Machine>;
@@ -118,6 +123,89 @@ function areStringSetsEqual(left: ReadonlySet<string>, right: ReadonlySet<string
     return true;
 }
 
+function countOwnEntries(record: Record<string, unknown> | null | undefined): number {
+    return record ? Object.keys(record).length : 0;
+}
+
+function areMachineDisplayMetadataEqual(
+    left: MachineDisplayRenderable['metadata'],
+    right: MachineDisplayRenderable['metadata'],
+): boolean {
+    if (left === right) return true;
+    if (!left || !right) return left == null && right == null;
+    return (left.displayName ?? null) === (right.displayName ?? null)
+        && (left.host ?? null) === (right.host ?? null)
+        && (left.homeDir ?? null) === (right.homeDir ?? null);
+}
+
+function areMachineDisplaysEqual(
+    left: MachineDisplayRenderable | undefined,
+    right: MachineDisplayRenderable | undefined,
+): boolean {
+    if (left === right) return true;
+    if (!left || !right) return false;
+    return left.id === right.id
+        && left.updatedAt === right.updatedAt
+        && left.active === right.active
+        && left.activeAt === right.activeAt
+        && (left.revokedAt ?? null) === (right.revokedAt ?? null)
+        && (left.replacedByMachineId ?? null) === (right.replacedByMachineId ?? null)
+        && (left.replacedAt ?? null) === (right.replacedAt ?? null)
+        && (left.replacementReason ?? null) === (right.replacementReason ?? null)
+        && (left.replacementSource ?? null) === (right.replacementSource ?? null)
+        && (left.replacementActorUserId ?? null) === (right.replacementActorUserId ?? null)
+        && left.metadataVersion === right.metadataVersion
+        && areMachineDisplayMetadataEqual(left.metadata, right.metadata);
+}
+
+function areMachinesEqual(left: Machine | undefined, right: Machine | undefined): boolean {
+    if (left === right) return true;
+    if (!left || !right) return false;
+    return left.id === right.id
+        && left.seq === right.seq
+        && left.createdAt === right.createdAt
+        && left.updatedAt === right.updatedAt
+        && left.active === right.active
+        && left.activeAt === right.activeAt
+        && (left.revokedAt ?? null) === (right.revokedAt ?? null)
+        && (left.replacedByMachineId ?? null) === (right.replacedByMachineId ?? null)
+        && (left.replacedAt ?? null) === (right.replacedAt ?? null)
+        && (left.replacementReason ?? null) === (right.replacementReason ?? null)
+        && (left.replacementSource ?? null) === (right.replacementSource ?? null)
+        && (left.replacementActorUserId ?? null) === (right.replacementActorUserId ?? null)
+        && left.metadataVersion === right.metadataVersion
+        && left.metadata === right.metadata
+        && left.daemonStateVersion === right.daemonStateVersion
+        && left.daemonState === right.daemonState;
+}
+
+function areMachineArraysEqual(left: readonly Machine[], right: readonly Machine[]): boolean {
+    if (left === right) return true;
+    if (left.length !== right.length) return false;
+    for (let index = 0; index < left.length; index += 1) {
+        if (!areMachinesEqual(left[index], right[index])) return false;
+    }
+    return true;
+}
+
+function areMachineDisplayRecordsEqual(
+    left: Record<string, MachineDisplayRenderable>,
+    right: Record<string, MachineDisplayRenderable>,
+): boolean {
+    const leftCount = countOwnEntries(left);
+    const rightCount = countOwnEntries(right);
+    if (leftCount !== rightCount) return false;
+    for (const machineId in left) {
+        if (
+            Object.prototype.hasOwnProperty.call(left, machineId)
+            && !areMachineDisplaysEqual(left[machineId], right[machineId])
+        ) {
+            return false;
+        }
+    }
+    return true;
+}
+
 function resolveProjectMachineGroupSubtitle(
     groupId: string,
     machinesById: Record<string, MachineDisplayRenderable>,
@@ -136,11 +224,9 @@ function saveWarmMachineCacheForState(
     const activeServerId = String(getActiveServerSnapshot().serverId ?? '').trim();
     const accountId = resolveWarmCacheAccountScope(state.profile?.id);
     if (!activeServerId || !accountId) return;
-    saveMachineDisplayWarmCacheEntries(
-        activeServerId,
-        accountId,
-        buildMachineDisplayCacheEntriesFromRenderables(state.machineDisplayById ?? {}, previousEntries),
-    );
+    const nextEntries = buildMachineDisplayCacheEntriesFromRenderables(state.machineDisplayById ?? {}, previousEntries);
+    if (previousEntries && nextEntries === previousEntries) return;
+    saveMachineDisplayWarmCacheEntries(activeServerId, accountId, nextEntries);
 }
 
 function mergeMachineListById(
@@ -149,7 +235,8 @@ function mergeMachineListById(
     options: Readonly<{ replace: boolean }>,
 ): Machine[] {
     if (options.replace) {
-        return incoming.slice();
+        const next = incoming.slice();
+        return current && areMachineArraysEqual(current, next) ? current : next;
     }
     const mergedById = new Map<string, Machine>();
     if (Array.isArray(current)) {
@@ -160,7 +247,8 @@ function mergeMachineListById(
     for (const machine of incoming) {
         mergedById.set(machine.id, machine);
     }
-    return Array.from(mergedById.values());
+    const next = Array.from(mergedById.values());
+    return current && areMachineArraysEqual(current, next) ? current : next;
 }
 
 function normalizeMachineServerId(serverId: string | null | undefined): string {
@@ -169,10 +257,46 @@ function normalizeMachineServerId(serverId: string | null | undefined): string {
 
 export function createMachinesDomain<S extends MachinesDomain & MachinesDomainDependencies>({
     set,
+    get,
 }: {
     set: StoreSet<S>;
     get: StoreGet<S>;
 }): MachinesDomain {
+    let warmCacheSaveScheduler: ReturnType<typeof createWarmCacheSaveScheduler<
+        MachinesDomain & MachinesDomainDependencies,
+        Record<string, MachineDisplayCacheEntryV1>
+    >> | null = null;
+    const getWarmCacheSaveScheduler = () => {
+        if (!warmCacheSaveScheduler) {
+            warmCacheSaveScheduler = createWarmCacheSaveScheduler<
+                MachinesDomain & MachinesDomainDependencies,
+                Record<string, MachineDisplayCacheEntryV1>
+            >({
+                get,
+                save: saveWarmMachineCacheForState,
+                delayMs: WARM_CACHE_PROGRESS_SAVE_DEBOUNCE_MS,
+                onSchedule: ({ state, coalesced }) => {
+                    syncPerformanceTelemetry.countLazy('sync.store.machines.warmCache.schedule', () => ({
+                        coalesced: coalesced ? 1 : 0,
+                        renderables: Object.keys(state.machineDisplayById ?? {}).length,
+                        scheduled: coalesced ? 0 : 1,
+                    }));
+                },
+                onFlush: (currentState, flush) => {
+                    syncPerformanceTelemetry.measure(
+                        'sync.store.machines.warmCache.flush',
+                        { renderables: Object.keys(currentState.machineDisplayById ?? {}).length },
+                        flush,
+                    );
+                },
+            });
+        }
+        return warmCacheSaveScheduler;
+    };
+    const scheduleWarmMachineCacheSave = (state: MachinesDomain & MachinesDomainDependencies): void => {
+        getWarmCacheSaveScheduler().schedule(state);
+    };
+
     return {
         machines: {},
         machineDisplayById: {},
@@ -183,45 +307,80 @@ export function createMachinesDomain<S extends MachinesDomain & MachinesDomainDe
                 const activeServerId = normalizeMachineServerId(getActiveServerSnapshot().serverId);
                 const sourceServerId = normalizeMachineServerId(options?.sourceServerId) || activeServerId;
                 const shouldUpdateActiveProjection = !sourceServerId || areServerProfileIdentifiersEquivalent(sourceServerId, activeServerId);
-                const machineListByServerId = sourceServerId
+                const currentServerMachineList = sourceServerId
+                    ? state.machineListByServerId[sourceServerId]
+                    : undefined;
+                const nextServerMachineList = sourceServerId
+                    ? mergeMachineListById(currentServerMachineList, machines, { replace })
+                    : currentServerMachineList;
+                const machineListByServerId = sourceServerId && nextServerMachineList !== currentServerMachineList
                     ? {
                         ...state.machineListByServerId,
-                        [sourceServerId]: mergeMachineListById(
-                            state.machineListByServerId[sourceServerId],
-                            machines,
-                            { replace },
-                        ),
+                        [sourceServerId]: nextServerMachineList,
                     }
                     : state.machineListByServerId;
-                const machineListStatusByServerId = sourceServerId
+                const currentServerMachineListStatus = sourceServerId
+                    ? state.machineListStatusByServerId[sourceServerId]
+                    : undefined;
+                const machineListStatusByServerId = sourceServerId && currentServerMachineListStatus !== 'idle'
                     ? { ...state.machineListStatusByServerId, [sourceServerId]: 'idle' as const }
                     : state.machineListStatusByServerId;
+                const didScopedMachineListChange = machineListByServerId !== state.machineListByServerId
+                    || machineListStatusByServerId !== state.machineListStatusByServerId;
 
                 if (!shouldUpdateActiveProjection) {
-                    return {
+                    return didScopedMachineListChange ? {
                         ...state,
                         machineListByServerId,
                         machineListStatusByServerId,
-                    };
+                    } : state;
                 }
 
                 let mergedMachines: Record<string, Machine>;
                 let mergedMachineDisplays: Record<string, MachineDisplayRenderable>;
 
                 if (replace) {
-                    mergedMachines = {};
-                    mergedMachineDisplays = {};
+                    const nextMachines: Record<string, Machine> = {};
+                    const nextMachineDisplays: Record<string, MachineDisplayRenderable> = {};
                     machines.forEach((machine) => {
-                        mergedMachines[machine.id] = machine;
-                        mergedMachineDisplays[machine.id] = buildMachineDisplayRenderableFromMachine(machine);
+                        nextMachines[machine.id] = machine;
+                        nextMachineDisplays[machine.id] = buildMachineDisplayRenderableFromMachine(machine);
                     });
+                    const machinesAreUnchanged = countOwnEntries(state.machines) === machines.length
+                        && machines.every((machine) => areMachinesEqual(state.machines[machine.id], machine));
+                    mergedMachines = machinesAreUnchanged ? state.machines : nextMachines;
+                    mergedMachineDisplays = areMachineDisplayRecordsEqual(state.machineDisplayById ?? {}, nextMachineDisplays)
+                        ? state.machineDisplayById
+                        : nextMachineDisplays;
                 } else {
-                    mergedMachines = { ...state.machines };
-                    mergedMachineDisplays = { ...state.machineDisplayById };
+                    mergedMachines = state.machines;
+                    mergedMachineDisplays = state.machineDisplayById;
                     machines.forEach((machine) => {
-                        mergedMachines[machine.id] = machine;
-                        mergedMachineDisplays[machine.id] = buildMachineDisplayRenderableFromMachine(machine);
+                        if (!areMachinesEqual(state.machines[machine.id], machine)) {
+                            if (mergedMachines === state.machines) {
+                                mergedMachines = { ...state.machines };
+                            }
+                            mergedMachines[machine.id] = machine;
+                        }
+
+                        const nextDisplay = buildMachineDisplayRenderableFromMachine(machine);
+                        if (!areMachineDisplaysEqual(state.machineDisplayById[machine.id], nextDisplay)) {
+                            if (mergedMachineDisplays === state.machineDisplayById) {
+                                mergedMachineDisplays = { ...state.machineDisplayById };
+                            }
+                            mergedMachineDisplays[machine.id] = nextDisplay;
+                        }
                     });
+                }
+
+                const didActiveProjectionChange = mergedMachines !== state.machines
+                    || mergedMachineDisplays !== state.machineDisplayById;
+                if (!didActiveProjectionChange) {
+                    return didScopedMachineListChange ? {
+                        ...state,
+                        machineListByServerId,
+                        machineListStatusByServerId,
+                    } : state;
                 }
 
                 let needsSessionListViewDataRebuild = state.sessionListViewData === null;
@@ -299,7 +458,9 @@ export function createMachinesDomain<S extends MachinesDomain & MachinesDomainDe
                     machineListByServerId,
                     machineListStatusByServerId,
                 };
-                saveWarmMachineCacheForState(nextState as MachinesDomain & MachinesDomainDependencies);
+                if (mergedMachineDisplays !== state.machineDisplayById) {
+                    scheduleWarmMachineCacheSave(nextState as MachinesDomain & MachinesDomainDependencies);
+                }
                 return nextState;
             }),
         replaceMachineDisplays: (machines, options) =>
@@ -311,7 +472,10 @@ export function createMachinesDomain<S extends MachinesDomain & MachinesDomainDe
                 }
 
                 const nextMachineDisplays = Object.fromEntries(machines.map((machine) => [machine.id, machine]));
-                const previousEntries = buildMachineDisplayCacheEntriesFromRenderables(state.machineDisplayById ?? {});
+                if (areMachineDisplayRecordsEqual(state.machineDisplayById ?? {}, nextMachineDisplays)) {
+                    return state;
+                }
+
                 const sessionListViewData = buildSessionListViewDataWithServerScope({
                     sessions: state.sessionListRenderables ?? {},
                     sessionRecords: state.sessions,
@@ -333,7 +497,7 @@ export function createMachinesDomain<S extends MachinesDomain & MachinesDomainDe
                         sessionListViewData,
                     ),
                 };
-                saveWarmMachineCacheForState(nextState as MachinesDomain & MachinesDomainDependencies, previousEntries);
+                scheduleWarmMachineCacheSave(nextState as MachinesDomain & MachinesDomainDependencies);
                 return nextState;
             }),
     };

@@ -12,6 +12,7 @@ import {
     deriveSessionRuntimePresentationState,
     SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS,
 } from '@/sync/domains/session/attention/deriveSessionRuntimePresentationState';
+import { nowServerMs } from '@/sync/runtime/time';
 import { syncPerformanceTelemetry } from '@/sync/runtime/syncPerformanceTelemetry';
 import { formatShortRelativeTimeAt } from '@/utils/time/formatShortRelativeTime';
 
@@ -166,6 +167,19 @@ function hasSameRelativeProgressLabels(
     return true;
 }
 
+function canReuseRuntimeActivityLeaseRenewal(
+    previous: SessionListRenderableSession,
+    nowMs: number,
+): boolean {
+    // Reusing a stale renderable past its own lease horizon would drop the
+    // row's working derivation at the OLD expiry even though the lease was
+    // extended — mirror the heartbeat rule and only suppress renewals whose
+    // previous lease still has comfortable margin.
+    const previousExpiresAt = finiteTimestamp(previous.runtimeActivityExpiresAt);
+    if (previousExpiresAt === null) return false;
+    return previousExpiresAt - nowMs > ROW_PROGRESS_RENDERABLE_MIN_UPDATE_INTERVAL_MS;
+}
+
 function shouldReusePreviousProgressRenderable(input: Readonly<{
     previous: SessionListRenderableSession | undefined;
     next: SessionListRenderableSession | undefined;
@@ -173,7 +187,9 @@ function shouldReusePreviousProgressRenderable(input: Readonly<{
 }>): input is Readonly<{ previous: SessionListRenderableSession; next: SessionListRenderableSession; nowMs: number }> {
     const { previous, next, nowMs } = input;
     if (!previous || !next || previous === next) return false;
-    if (isSessionListRenderableRuntimeActivityLeaseOnlyChange({ previous, next, nowMs })) return true;
+    if (isSessionListRenderableRuntimeActivityLeaseOnlyChange({ previous, next, nowMs })) {
+        return canReuseRuntimeActivityLeaseRenewal(previous, nowMs);
+    }
     if (!isSessionListRenderableWarmCacheProgressOnlyChange(previous, next)) return false;
     if (!canReuseActiveHeartbeatAdvance({ previous, next, nowMs })) return false;
 
@@ -186,10 +202,14 @@ function shouldReusePreviousProgressRenderable(input: Readonly<{
     return hasSameRelativeProgressLabels(previous, next, nowMs);
 }
 
-function isRuntimePriorityRenderable(renderable: SessionListRenderableSession | undefined): boolean {
+function isRuntimePriorityRenderable(
+    renderable: SessionListRenderableSession | undefined,
+    nowMs: number,
+): boolean {
     if (!renderable) return false;
-    const runtimeStatus = deriveSessionRuntimePresentationState(renderable, Date.now());
+    const runtimeStatus = deriveSessionRuntimePresentationState(renderable, nowMs);
     return runtimeStatus.working
+        || runtimeStatus.backgroundActive
         || runtimeStatus.freshPermissionRequired
         || runtimeStatus.freshActionRequired
         || renderable.hasPendingPermissionRequests === true
@@ -220,11 +240,12 @@ export function createSessionListRuntimePriorityRowScopeSelector(
     let previousOutput: readonly SessionListRowStateSnapshotScope[] | null = null;
 
     return (state) => {
+        const nowMs = nowServerMs();
         let nextOutput: SessionListRowStateSnapshotScope[] | null = null;
         for (const scope of normalizedScopes) {
             if (!shouldReadActiveServerOverlay(overlayState, scope.serverId)) continue;
             const renderable = state.sessionListRenderables?.[scope.sessionId];
-            if (!isRuntimePriorityRenderable(renderable)) continue;
+            if (!isRuntimePriorityRenderable(renderable, nowMs)) continue;
             if (nextOutput === null) nextOutput = [];
             nextOutput.push(scope);
         }
@@ -261,7 +282,10 @@ export function createSessionListRowStoreStateSelector(
         const sessionPending: MutableSessionListRowStoreState['sessionPending'] = {};
 
         let suppressedProgressRenderableUpdates = 0;
-        const nowMs = Date.now();
+        // Server-adjusted clock: the reuse/suppression rules below compare
+        // against server-clock renderable timestamps (lease expiries,
+        // heartbeat anchors), matching the plan-path lease classifiers.
+        const nowMs = nowServerMs();
         for (let index = 0; index < normalizedScopes.length; index += 1) {
             const scope = normalizedScopes[index];
             const sessionId = scope.sessionId;

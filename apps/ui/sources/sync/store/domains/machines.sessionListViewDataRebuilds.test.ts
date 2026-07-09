@@ -26,6 +26,7 @@ vi.mock('react-native-mmkv', () => {
 });
 
 afterEach(() => {
+    vi.useRealTimers();
     vi.resetModules();
     vi.clearAllMocks();
     mmkvStore.clear();
@@ -104,6 +105,74 @@ function mockMachineDomainBoundariesForActiveServer(
 }
 
 describe('machines domain: sessionListViewData rebuild gating', () => {
+    it('preserves machine records and coalesces warm-cache writes when incoming machines do not change', async () => {
+        vi.useFakeTimers();
+        mockMachineDomainBoundaries();
+
+        const { createMachinesDomain } = await import('./machines');
+        const { saveMachineDisplayWarmCacheEntries } = await import('../../domains/state/warmCachePersistence');
+        const saveWarmCache = vi.mocked(saveMachineDisplayWarmCacheEntries);
+
+        const machine = {
+            id: 'm1',
+            seq: 1,
+            createdAt: 1,
+            updatedAt: 1,
+            active: true,
+            activeAt: 1,
+            revokedAt: null,
+            metadata: { displayName: 'Mac' },
+            metadataVersion: 1,
+            daemonState: null,
+            daemonStateVersion: 0,
+        };
+        const display = {
+            id: 'm1',
+            updatedAt: 1,
+            active: true,
+            activeAt: 1,
+            revokedAt: null,
+            metadataVersion: 1,
+            metadata: { displayName: 'Mac' },
+        };
+        const machinesRecord = { m1: machine };
+        const displaysRecord = { m1: display };
+        const initialState = {
+            sessions: {},
+            settings: {
+                groupInactiveSessionsByProject: false,
+            },
+            sessionListRenderables: {},
+            sessionListViewData: [],
+            sessionListViewDataByServerId: {},
+            machines: machinesRecord,
+            machineDisplayById: displaysRecord,
+            machineListByServerId: { server_a: [machine] },
+            machineListStatusByServerId: { server_a: 'idle' },
+            profile: { id: 'account_a' },
+        };
+
+        const { get, domain } = createHarness(createMachinesDomain, initialState);
+
+        domain.applyMachines([{ ...machine } as any]);
+
+        expect(get().machines).toBe(machinesRecord);
+        expect(get().machineDisplayById).toBe(displaysRecord);
+        expect(saveWarmCache).not.toHaveBeenCalled();
+
+        domain.applyMachines([{ ...machine, activeAt: 2 } as any]);
+        domain.applyMachines([{ ...machine, activeAt: 3 } as any]);
+
+        expect(saveWarmCache).not.toHaveBeenCalled();
+
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        expect(saveWarmCache).toHaveBeenCalledTimes(1);
+        expect(saveWarmCache.mock.calls[0]?.[2]).toEqual(expect.objectContaining({
+            m1: expect.objectContaining({ activeAt: 3 }),
+        }));
+    });
+
     it('keeps sessionListViewData reference stable for machine activity-only updates', async () => {
         mockMachineDomainBoundaries();
 

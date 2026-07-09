@@ -48,6 +48,25 @@ function isRetainableWorkingSession(session: SessionListRenderableSession): bool
     return session.latestTurnStatus === 'in_progress';
 }
 
+/**
+ * Whether the inputs that decide working RETENTION changed between two
+ * renderables. This comparator lives with `shouldRetainSessionListWorkingPlacement`
+ * and `resolveWorkingRetentionAnchor` on purpose: it must cover exactly the
+ * fields those functions read (retention gate: `thinking` + fresh `activeAt`;
+ * anchor: the four timestamps below), so a new retention signal cannot be
+ * added without updating this comparison in the same file.
+ */
+export function didSessionListWorkingRetentionInputsChange(
+    previous: SessionListRenderableSession,
+    next: SessionListRenderableSession,
+): boolean {
+    return (previous.thinking === true) !== (next.thinking === true)
+        || (previous.activeAt ?? null) !== (next.activeAt ?? null)
+        || (previous.thinkingAt ?? null) !== (next.thinkingAt ?? null)
+        || (previous.optimisticThinkingAt ?? null) !== (next.optimisticThinkingAt ?? null)
+        || (previous.latestTurnStatusObservedAt ?? null) !== (next.latestTurnStatusObservedAt ?? null);
+}
+
 function isFreshTimestamp(value: number | null | undefined, nowMs: number, budgetMs: number): boolean {
     return typeof value === 'number'
         && Number.isFinite(value)

@@ -1662,6 +1662,48 @@ describe('computeVisibleSessionListIndex', () => {
         ]);
     });
 
+    it('emits the retained working reason for within-groups placement of stale retained sessions', () => {
+        const now = 1_000_000;
+        const groupKey = 'server:s1:active:project:repo';
+        const source: SessionListIndexItem[] = [
+            { type: 'header', headerKind: 'active', title: 'Active', serverId: 's1' },
+            { type: 'header', headerKind: 'project', title: '~/repo', serverId: 's1', groupKey },
+            { type: 'session', sessionId: 'working', serverId: 's1', section: 'active', groupKey, groupKind: 'project' },
+        ];
+
+        const result = computeVisibleSessionListIndex({
+            source,
+            resolveSessionRow: makeResolver({
+                's1:working': makeSessionRow('working', {
+                    active: true,
+                    activeAt: now - SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS - 1_000,
+                    presence: 'online',
+                    thinking: true,
+                    latestTurnStatus: 'in_progress',
+                    latestTurnStatusObservedAt: now - SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS - 1_000,
+                    updatedAt: 30,
+                }),
+            }),
+            hideInactiveSessions: false,
+            pinnedSessionKeysV1: [],
+            sessionListGroupOrderV1: {},
+            sessionListOrderingModeV1: 'custom',
+            presentation: { enabled: false, presentation: 'grouped', selectedServerIds: [] },
+            workingPlacement: { mode: 'withinGroups' },
+            retainWorkingSessionKeys: ['s1:working'],
+            nowMs: now,
+        })!;
+
+        expect(result.map((item) => (item.type === 'header'
+            ? `h:${item.headerKind}`
+            : `s:${item.sessionId}:${item.groupKind ?? 'unknown'}:${item.workingPlacementReason ?? 'none'}`
+        ))).toEqual([
+            'h:active',
+            'h:project',
+            's:working:project:working-retained',
+        ]);
+    });
+
     it('retains stale working placement across recompute', () => {
         const now = 1_000_000;
         const groupKey = 'server:s1:active:project:repo';
@@ -1694,12 +1736,206 @@ describe('computeVisibleSessionListIndex', () => {
             nowMs: now,
         })!;
 
+        // Retained placement keeps the session in the working group but is
+        // surfaced as the distinct 'working-retained' reason so rows can
+        // render a paused indicator instead of pretending live activity.
+        expect(result.map((item) => (item.type === 'header'
+            ? `h:${item.headerKind}`
+            : `s:${item.sessionId}:${item.groupKind ?? 'unknown'}:${item.workingPlacementReason ?? 'none'}`
+        ))).toEqual([
+            'h:working',
+            's:working:working:working-retained',
+        ]);
+    });
+
+    it('emits the plain working reason for sessions with live working signals', () => {
+        const now = 1_000_000;
+        const groupKey = 'server:s1:active:project:repo';
+        const source: SessionListIndexItem[] = [
+            { type: 'header', headerKind: 'active', title: 'Active', serverId: 's1' },
+            { type: 'header', headerKind: 'project', title: '~/repo', serverId: 's1', groupKey },
+            { type: 'session', sessionId: 'working', serverId: 's1', section: 'active', groupKey, groupKind: 'project' },
+        ];
+
+        const result = computeVisibleSessionListIndex({
+            source,
+            resolveSessionRow: makeResolver({
+                's1:working': makeSessionRow('working', {
+                    active: true,
+                    activeAt: now - 1_000,
+                    presence: 'online',
+                    thinking: false,
+                    latestTurnStatus: 'in_progress',
+                    latestTurnStatusObservedAt: now - 1_000,
+                    updatedAt: 30,
+                }),
+            }),
+            hideInactiveSessions: false,
+            pinnedSessionKeysV1: [],
+            sessionListGroupOrderV1: {},
+            sessionListOrderingModeV1: 'custom',
+            presentation: { enabled: false, presentation: 'grouped', selectedServerIds: [] },
+            workingPlacement: { mode: 'global' },
+            nowMs: now,
+        })!;
+
         expect(result.map((item) => (item.type === 'header'
             ? `h:${item.headerKind}`
             : `s:${item.sessionId}:${item.groupKind ?? 'unknown'}:${item.workingPlacementReason ?? 'none'}`
         ))).toEqual([
             'h:working',
             's:working:working:working',
+        ]);
+    });
+
+    it('merges live background work into the working group by default while rows keep the background presentation', () => {
+        const now = 1_000_000;
+        const groupKey = 'server:s1:active:project:repo';
+        const source: SessionListIndexItem[] = [
+            { type: 'header', headerKind: 'active', title: 'Active', serverId: 's1' },
+            { type: 'header', headerKind: 'project', title: '~/repo', serverId: 's1', groupKey },
+            { type: 'session', sessionId: 'foreground', serverId: 's1', section: 'active', groupKey, groupKind: 'project' },
+            { type: 'session', sessionId: 'background', serverId: 's1', section: 'active', groupKey, groupKind: 'project' },
+        ];
+
+        const result = computeVisibleSessionListIndex({
+            source,
+            resolveSessionRow: makeResolver({
+                's1:foreground': makeSessionRow('foreground', {
+                    active: true,
+                    activeAt: now - 1_000,
+                    presence: 'online',
+                    latestTurnStatus: 'in_progress',
+                    latestTurnStatusObservedAt: now - 1_000,
+                    updatedAt: 30,
+                }),
+                's1:background': makeSessionRow('background', {
+                    active: false,
+                    activeAt: now - 10_000,
+                    presence: 0,
+                    latestTurnStatus: 'completed',
+                    latestTurnStatusObservedAt: now - 5_000,
+                    runtimeActivityActiveCount: 1,
+                    runtimeActivityObservedAt: now - 1_000,
+                    runtimeActivityExpiresAt: now + 60_000,
+                    runtimeActivitySourceClass: 'provider_detached_task',
+                    updatedAt: 20,
+                }),
+            }),
+            hideInactiveSessions: false,
+            pinnedSessionKeysV1: [],
+            sessionListGroupOrderV1: {},
+            sessionListOrderingModeV1: 'custom',
+            presentation: { enabled: false, presentation: 'grouped', selectedServerIds: [] },
+            workingPlacement: { mode: 'global' },
+            nowMs: now,
+        })!;
+
+        expect(result.map((item) => (item.type === 'header'
+            ? `h:${item.headerKind}:${item.title}`
+            : `s:${item.sessionId}:${item.groupKind ?? 'unknown'}:${item.workingPlacementReason ?? 'none'}`
+        ))).toEqual([
+            'h:working:Working',
+            's:foreground:working:working',
+            's:background:working:working',
+        ]);
+    });
+
+    it('separates live background work into its own group when requested', () => {
+        const now = 1_000_000;
+        const groupKey = 'server:s1:active:project:repo';
+        const source: SessionListIndexItem[] = [
+            { type: 'header', headerKind: 'active', title: 'Active', serverId: 's1' },
+            { type: 'header', headerKind: 'project', title: '~/repo', serverId: 's1', groupKey },
+            { type: 'session', sessionId: 'foreground', serverId: 's1', section: 'active', groupKey, groupKind: 'project' },
+            { type: 'session', sessionId: 'background', serverId: 's1', section: 'active', groupKey, groupKind: 'project' },
+        ];
+
+        const result = computeVisibleSessionListIndex({
+            source,
+            resolveSessionRow: makeResolver({
+                's1:foreground': makeSessionRow('foreground', {
+                    active: true,
+                    activeAt: now - 1_000,
+                    presence: 'online',
+                    latestTurnStatus: 'in_progress',
+                    latestTurnStatusObservedAt: now - 1_000,
+                    updatedAt: 30,
+                }),
+                's1:background': makeSessionRow('background', {
+                    active: false,
+                    activeAt: now - 10_000,
+                    presence: 0,
+                    latestTurnStatus: 'completed',
+                    latestTurnStatusObservedAt: now - 5_000,
+                    runtimeActivityActiveCount: 1,
+                    runtimeActivityObservedAt: now - 1_000,
+                    runtimeActivityExpiresAt: now + 60_000,
+                    runtimeActivitySourceClass: 'provider_detached_task',
+                    updatedAt: 20,
+                }),
+            }),
+            hideInactiveSessions: false,
+            pinnedSessionKeysV1: [],
+            sessionListGroupOrderV1: {},
+            sessionListOrderingModeV1: 'custom',
+            presentation: { enabled: false, presentation: 'grouped', selectedServerIds: [] },
+            workingPlacement: { mode: 'global', separateBackgroundWork: true } as any,
+            nowMs: now,
+        })!;
+
+        expect(result.map((item) => (item.type === 'header'
+            ? `h:${item.headerKind}:${item.title}:${item.groupKey ?? 'none'}`
+            : `s:${item.sessionId}:${item.groupKind ?? 'unknown'}:${item.workingPlacementReason ?? 'none'}`
+        ))).toEqual([
+            'h:working:Working:working-placement-v1',
+            's:foreground:working:working',
+            'h:working:Working in background:background-working-placement-v1',
+            's:background:working:background-working',
+        ]);
+    });
+
+    it('does not place expired detached runtime activity in the working groups', () => {
+        const now = 1_000_000;
+        const groupKey = 'server:s1:active:project:repo';
+        const source: SessionListIndexItem[] = [
+            { type: 'header', headerKind: 'active', title: 'Active', serverId: 's1' },
+            { type: 'header', headerKind: 'project', title: '~/repo', serverId: 's1', groupKey },
+            { type: 'session', sessionId: 'background', serverId: 's1', section: 'active', groupKey, groupKind: 'project' },
+        ];
+
+        const result = computeVisibleSessionListIndex({
+            source,
+            resolveSessionRow: makeResolver({
+                's1:background': makeSessionRow('background', {
+                    active: false,
+                    activeAt: now - 10_000,
+                    presence: 0,
+                    latestTurnStatus: 'completed',
+                    latestTurnStatusObservedAt: now - 5_000,
+                    runtimeActivityActiveCount: 1,
+                    runtimeActivityObservedAt: now - 10_000,
+                    runtimeActivityExpiresAt: now - 1,
+                    runtimeActivitySourceClass: 'provider_detached_task',
+                    updatedAt: 20,
+                }),
+            }),
+            hideInactiveSessions: false,
+            pinnedSessionKeysV1: [],
+            sessionListGroupOrderV1: {},
+            sessionListOrderingModeV1: 'custom',
+            presentation: { enabled: false, presentation: 'grouped', selectedServerIds: [] },
+            workingPlacement: { mode: 'global', separateBackgroundWork: true } as any,
+            nowMs: now,
+        })!;
+
+        expect(result.map((item) => (item.type === 'header'
+            ? `h:${item.headerKind}:${item.title}`
+            : `s:${item.sessionId}:${item.groupKind ?? 'unknown'}:${item.workingPlacementReason ?? 'none'}`
+        ))).toEqual([
+            'h:active:Active',
+            'h:project:~/repo',
+            's:background:project:none',
         ]);
     });
 

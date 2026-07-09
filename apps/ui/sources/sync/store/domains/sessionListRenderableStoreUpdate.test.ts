@@ -128,6 +128,79 @@ describe('sessionListRenderableStoreUpdate', () => {
         expect(plan.attentionPromotionFieldChangeCount).toBe(0);
     });
 
+    it('routes working-signal refreshes to the row-refresh channel instead of a structural rebuild', () => {
+        const now = Date.now();
+        const previous = makeRenderable('s1', {
+            active: true,
+            presence: 'online',
+            latestTurnStatus: 'in_progress',
+            latestTurnStatusObservedAt: now - 60_000,
+            activeAt: now - 60_000,
+        });
+        const plan = planSessionListRenderablePatches({
+            previousRenderables: { s1: previous },
+            patches: [{
+                sessionId: 's1',
+                patch: {
+                    latestTurnStatusObservedAt: now,
+                    activeAt: now,
+                },
+            }],
+            isSessionListViewDataUninitialized: false,
+            rebuildOnAttentionPromotionFieldsChange: true,
+        });
+
+        // Placement is 'working' before and after, so no rebuild — but the
+        // extended working window must reach the committed view data or the
+        // UI later demotes the session at the STALE freshness expiry.
+        expect(plan.needsSessionListViewDataRebuild).toBe(false);
+        expect(plan.listViewRowRefreshSessionIds).toContain('s1');
+    });
+
+    it('routes working-signal refreshes through the merge plan path to the row-refresh channel', () => {
+        const now = Date.now();
+        const previous = makeRenderable('s1', {
+            active: true,
+            presence: 'online',
+            latestTurnStatus: 'in_progress',
+            latestTurnStatusObservedAt: now - 60_000,
+            activeAt: now - 60_000,
+        });
+        const plan = planSessionListRenderableMerge({
+            previousRenderables: { s1: previous },
+            incomingRenderables: [{
+                ...previous,
+                latestTurnStatusObservedAt: now,
+                activeAt: now,
+            }],
+            isSessionListViewDataUninitialized: false,
+            rebuildOnAttentionPromotionFieldsChange: true,
+        });
+
+        expect(plan.needsSessionListViewDataRebuild).toBe(false);
+        expect(plan.listViewRowRefreshSessionIds).toContain('s1');
+    });
+
+    it('routes retention-input refreshes on retainable working candidates to the row-refresh channel', () => {
+        const now = Date.now();
+        const previous = makeRenderable('s1', {
+            active: true,
+            presence: 'online',
+            latestTurnStatus: 'in_progress',
+            latestTurnStatusObservedAt: now - 60_000,
+            activeAt: now - 600_000,
+        });
+        const plan = planSessionListRenderablePatches({
+            previousRenderables: { s1: previous },
+            patches: [{ sessionId: 's1', patch: { activeAt: now - 90_000 } }],
+            isSessionListViewDataUninitialized: false,
+            rebuildOnAttentionPromotionFieldsChange: true,
+        });
+
+        expect(plan.needsSessionListViewDataRebuild).toBe(false);
+        expect(plan.listViewRowRefreshSessionIds).toContain('s1');
+    });
+
     it('rebuilds list data when a stale retained working candidate becomes terminal', () => {
         const now = Date.now();
         const previous = makeRenderable('s1', {

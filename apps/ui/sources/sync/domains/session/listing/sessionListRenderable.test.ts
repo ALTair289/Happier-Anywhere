@@ -5,6 +5,7 @@ import {
     buildSessionListRenderableFromSession,
     derivePendingRequestFlagsFromAgentState,
     didSessionListRenderableAttentionPromotionFieldsChange,
+    didSessionListRenderablePlacementRelevantTimingChange,
     didSessionListRenderableReachabilityPeerFieldsChange,
     preserveSessionListRenderableStaleFields,
 } from './sessionListRenderable';
@@ -940,6 +941,92 @@ describe('didSessionListRenderableAttentionPromotionFieldsChange', () => {
             latestTurnStatus: 'completed',
             latestTurnStatusObservedAt: now,
         }, now)).toBe(true);
+    });
+
+    it('still ignores progress-only churn that never changes placement at any time', () => {
+        const now = 1_000_000;
+        const previous = buildRenderable({
+            id: 's_progress_churn',
+            seq: 5,
+            updatedAt: now - 10_000,
+            active: true,
+            presence: 'online',
+            latestTurnStatus: 'in_progress',
+            latestTurnStatusObservedAt: now - 60_000,
+            activeAt: now - 600_000,
+            thinking: false,
+            thinkingAt: 0,
+        });
+
+        expect(didSessionListRenderableAttentionPromotionFieldsChange(previous, {
+            ...previous,
+            seq: 6,
+            updatedAt: now - 1_000,
+        }, now)).toBe(false);
+    });
+});
+
+describe('didSessionListRenderablePlacementRelevantTimingChange', () => {
+    it('flags working-signal refreshes whose placements only diverge after a future freshness boundary', () => {
+        const now = 1_000_000;
+        const previous = buildRenderable({
+            id: 's_working_refresh',
+            active: true,
+            presence: 'online',
+            latestTurnStatus: 'in_progress',
+            latestTurnStatusObservedAt: now - 60_000,
+            activeAt: now - 60_000,
+            thinking: false,
+            thinkingAt: 0,
+        });
+
+        // Both rows are 'working' at nowMs, but the refreshed observation
+        // extends the working window: without a row refresh the committed
+        // view data would demote the session at the STALE expiry while its
+        // row (subscribed to the fresh renderable) still shows the spinner.
+        expect(didSessionListRenderablePlacementRelevantTimingChange(previous, {
+            ...previous,
+            latestTurnStatusObservedAt: now,
+            activeAt: now,
+        }, now)).toBe(true);
+    });
+
+    it('flags retention-input changes on retainable working sessions even when projections match at every horizon', () => {
+        const now = 1_000_000;
+        const previous = buildRenderable({
+            id: 's_retention_inputs',
+            active: true,
+            presence: 'online',
+            latestTurnStatus: 'in_progress',
+            latestTurnStatusObservedAt: now - 60_000,
+            activeAt: now - 600_000,
+            thinking: false,
+            thinkingAt: 0,
+        });
+
+        // activeAt stays below latestTurnStatusObservedAt so it never counts
+        // as a working signal, but it gates working RETENTION (fresh activeAt
+        // with thinking=false blocks retention). The committed view data must
+        // pick this change up for retained-working evaluation.
+        expect(didSessionListRenderablePlacementRelevantTimingChange(previous, {
+            ...previous,
+            activeAt: now - 90_000,
+        }, now)).toBe(true);
+    });
+
+    it('does not flag progress-only churn with no placement-relevant timing effect', () => {
+        const now = 1_000_000;
+        const previous = buildRenderable({
+            id: 's_timing_churn',
+            seq: 5,
+            updatedAt: now - 10_000,
+        });
+
+        expect(didSessionListRenderablePlacementRelevantTimingChange(previous, {
+            ...previous,
+            seq: 6,
+            updatedAt: now - 1_000,
+        }, now)).toBe(false);
     });
 });
 

@@ -12,15 +12,14 @@ import { isTranscriptRenderableAggregate } from '../../domains/messages/transcri
 import {
     areSessionListRenderablesEqual,
     buildSessionListRenderableFromSession,
-    didSessionListRenderableAttentionPromotionFieldsChange,
     didSessionListRenderableEmbeddedListRowFieldsChange,
     didSessionListRenderableProjectGroupingFieldsChange,
     didSessionListRenderableReachabilityPeerFieldsChange,
-    isSessionListRenderableWarmCacheProgressOnlyChange,
-    isSessionListRenderableRuntimeActivityLeaseOnlyChange,
     preserveSessionListRenderableTransientState,
     type SessionListRenderableSession,
 } from '../../domains/session/listing/sessionListRenderable';
+import { assessSessionListRenderableChange } from './sessionListRenderableStoreUpdate';
+import { createKeyedTimeoutScheduler } from '@/utils/time/keyedTimeoutScheduler';
 import {
     type SessionListAttentionPromotionMode,
     type SessionListWorkingPlacementMode,
@@ -97,6 +96,10 @@ import {
 } from './sessionListRenderableCommit';
 import { clearAgentInputLocalUiStateForSession } from '@/sync/domains/input/draftValues/agentInputLocalUiStateStore';
 import { clearSessionDraftValues } from '@/sync/domains/input/draftValues/sessionDraftValueStore';
+import {
+    createWarmCacheSaveScheduler,
+    WARM_CACHE_PROGRESS_SAVE_DEBOUNCE_MS,
+} from './warmCacheSaveScheduler';
 
 type SessionModelMode = NonNullable<Session['modelMode']>;
 type ScmOperationLogEntry = import('../../runtime/orchestration/projectManager').ScmProjectOperationLogEntry;
@@ -192,6 +195,13 @@ export type SessionsDomain = {
     getSessionProjectScmSnapshotError: (sessionId: string) => ProjectScmSnapshotError | null;
     updateSessionProjectScmSnapshot: (sessionId: string, snapshot: ScmWorkingSnapshot | null) => void;
     updateSessionProjectScmSnapshotError: (sessionId: string, error: ProjectScmSnapshotError | null) => void;
+    publishSessionProjectScmSnapshots: (
+        publishes: ReadonlyArray<Readonly<{
+            sessionId: string;
+            snapshot: ScmWorkingSnapshot;
+            status: ScmStatus | null;
+        }>>,
+    ) => void;
     getSessionProjectScmTouchedPaths: (sessionId: string) => string[];
     markSessionProjectScmTouchedPaths: (sessionId: string, paths: string[]) => void;
     pruneSessionProjectScmTouchedPaths: (sessionId: string, activePaths: Set<string>) => void;
@@ -240,14 +250,13 @@ type SessionsDomainDependencies = {
 // UI-only "optimistic processing" marker.
 // Cleared via timers so components don't need to poll time.
 const OPTIMISTIC_SESSION_THINKING_TIMEOUT_MS = 15_000;
-const optimisticThinkingTimeoutBySessionId = new Map<string, ReturnType<typeof setTimeout>>();
+const optimisticThinkingTimeouts = createKeyedTimeoutScheduler();
 
 // UI-only "thinking debounce" marker.
 // Kept for a short grace period after the session stops streaming, so the UI doesn't flicker
 // between "working" and "online" between output chunks.
 const SESSION_THINKING_GRACE_TIMEOUT_MS = 3_000;
-const thinkingGraceTimeoutBySessionId = new Map<string, ReturnType<typeof setTimeout>>();
-const SESSION_LIST_WARM_CACHE_PROGRESS_SAVE_DEBOUNCE_MS = 1_000;
+const thinkingGraceTimeouts = createKeyedTimeoutScheduler();
 
 let actionDraftIdCounter = 0;
 function createActionDraftId(nowMs: number): string {
@@ -455,47 +464,52 @@ export function createSessionsDomain<S extends SessionsDomain & SessionsDomainDe
     let sessionRepositoryTreeExpandedPathsBySessionId: Record<string, string[]> = {};
     const emptySessionRepositoryTreeExpandedPaths: string[] = [];
     let actionDraftsBySessionId: Record<string, SessionActionDraft[]> = loadSessionActionDrafts();
-    let deferredWarmCacheSaveTimeout: ReturnType<typeof setTimeout> | null = null;
+    let warmCacheSaveScheduler: ReturnType<typeof createWarmCacheSaveScheduler<
+        SessionsDomain & SessionsDomainDependencies,
+        Record<string, SessionListCacheEntryV1>
+    >> | null = null;
+    const getWarmCacheSaveScheduler = () => {
+        if (!warmCacheSaveScheduler) {
+            warmCacheSaveScheduler = createWarmCacheSaveScheduler<
+                SessionsDomain & SessionsDomainDependencies,
+                Record<string, SessionListCacheEntryV1>
+            >({
+                get,
+                save: saveWarmSessionCacheForState,
+                delayMs: WARM_CACHE_PROGRESS_SAVE_DEBOUNCE_MS,
+                onSchedule: ({ state, coalesced }) => {
+                    syncPerformanceTelemetry.countLazy('sync.store.sessions.warmCache.schedule', () => ({
+                        coalesced: coalesced ? 1 : 0,
+                        renderables: Object.keys(state.sessionListRenderables ?? {}).length,
+                        scheduled: coalesced ? 0 : 1,
+                    }));
+                },
+                onFlush: (currentState, flush) => {
+                    measureSessionApplyPhase(
+                        'sync.store.sessions.warmCache.flush',
+                        () => ({ renderables: Object.keys(currentState.sessionListRenderables ?? {}).length }),
+                        flush,
+                    );
+                },
+            });
+        }
+        return warmCacheSaveScheduler;
+    };
 
     const clearDeferredWarmCacheSave = (): void => {
-        if (!deferredWarmCacheSaveTimeout) return;
-        clearTimeout(deferredWarmCacheSaveTimeout);
-        deferredWarmCacheSaveTimeout = null;
+        warmCacheSaveScheduler?.clear();
     };
 
     const saveWarmSessionCacheImmediately = (
         state: SessionsDomain & SessionsDomainDependencies,
         previousEntries?: Record<string, SessionListCacheEntryV1>,
     ): void => {
-        clearDeferredWarmCacheSave();
-        saveWarmSessionCacheForState(state, previousEntries);
+        getWarmCacheSaveScheduler().saveImmediately(state, previousEntries);
     };
-
     const scheduleWarmSessionCacheSave = (
-        stateForTelemetry?: SessionsDomain & SessionsDomainDependencies,
+        state?: SessionsDomain & SessionsDomainDependencies,
     ): void => {
-        if (deferredWarmCacheSaveTimeout) {
-            syncPerformanceTelemetry.countLazy('sync.store.sessions.warmCache.schedule', () => ({
-                coalesced: 1,
-                renderables: Object.keys((stateForTelemetry ?? get()).sessionListRenderables ?? {}).length,
-                scheduled: 0,
-            }));
-            return;
-        }
-        syncPerformanceTelemetry.countLazy('sync.store.sessions.warmCache.schedule', () => ({
-            coalesced: 0,
-            renderables: Object.keys((stateForTelemetry ?? get()).sessionListRenderables ?? {}).length,
-            scheduled: 1,
-        }));
-        deferredWarmCacheSaveTimeout = setTimeout(() => {
-            deferredWarmCacheSaveTimeout = null;
-            const currentState = get();
-            measureSessionApplyPhase(
-                'sync.store.sessions.warmCache.flush',
-                () => ({ renderables: Object.keys(currentState.sessionListRenderables ?? {}).length }),
-                () => saveWarmSessionCacheForState(currentState),
-            );
-        }, SESSION_LIST_WARM_CACHE_PROGRESS_SAVE_DEBOUNCE_MS);
+        getWarmCacheSaveScheduler().schedule(state);
     };
 
     const stripLocalSessionFields = (session: Session): Session => ({
@@ -782,37 +796,19 @@ export function createSessionsDomain<S extends SessionsDomain & SessionsDomainDe
                 let mergedThinkingGraceUntil = existingThinkingGraceUntil;
                 if (presence !== 'online') {
                     mergedThinkingGraceUntil = null;
-                    const graceTimeout = thinkingGraceTimeoutBySessionId.get(session.id);
-                    if (graceTimeout) {
-                        clearTimeout(graceTimeout);
-                        thinkingGraceTimeoutBySessionId.delete(session.id);
-                    }
+                    thinkingGraceTimeouts.cancel(session.id);
                 } else if (runtimePresence.thinking === true) {
                     mergedThinkingGraceUntil = null;
-                    const graceTimeout = thinkingGraceTimeoutBySessionId.get(session.id);
-                    if (graceTimeout) {
-                        clearTimeout(graceTimeout);
-                        thinkingGraceTimeoutBySessionId.delete(session.id);
-                    }
+                    thinkingGraceTimeouts.cancel(session.id);
                 } else if (hasTerminalTurnProjection) {
                     mergedThinkingGraceUntil = null;
-                    const graceTimeout = thinkingGraceTimeoutBySessionId.get(session.id);
-                    if (graceTimeout) {
-                        clearTimeout(graceTimeout);
-                        thinkingGraceTimeoutBySessionId.delete(session.id);
-                    }
+                    thinkingGraceTimeouts.cancel(session.id);
                 } else if (wasThinking) {
                     mergedThinkingGraceUntil = localNowMs + SESSION_THINKING_GRACE_TIMEOUT_MS;
 
-                    const existingTimeout = thinkingGraceTimeoutBySessionId.get(session.id);
-                    if (existingTimeout) {
-                        clearTimeout(existingTimeout);
-                    }
-
                     const sessionId = session.id;
                     const expectedThinkingGraceUntil = mergedThinkingGraceUntil;
-                    const timeout = setTimeout(() => {
-                        thinkingGraceTimeoutBySessionId.delete(sessionId);
+                    thinkingGraceTimeouts.schedule(sessionId, SESSION_THINKING_GRACE_TIMEOUT_MS, () => {
                         set((s) => {
                             const current = s.sessions[sessionId];
                             if (!current) return s;
@@ -850,15 +846,10 @@ export function createSessionsDomain<S extends SessionsDomain & SessionsDomainDe
                                     : s.sessionListViewData,
                             };
                         });
-                    }, SESSION_THINKING_GRACE_TIMEOUT_MS);
-                    thinkingGraceTimeoutBySessionId.set(session.id, timeout);
+                    });
                 } else if (typeof mergedThinkingGraceUntil === 'number' && mergedThinkingGraceUntil <= localNowMs) {
                     mergedThinkingGraceUntil = null;
-                    const graceTimeout = thinkingGraceTimeoutBySessionId.get(session.id);
-                    if (graceTimeout) {
-                        clearTimeout(graceTimeout);
-                        thinkingGraceTimeoutBySessionId.delete(session.id);
-                    }
+                    thinkingGraceTimeouts.cancel(session.id);
                 }
 
                 const nextSession: Session = {
@@ -893,7 +884,7 @@ export function createSessionsDomain<S extends SessionsDomain & SessionsDomainDe
                 }
 
                 const existingSessionMessages = updatedSessionMessages[session.id];
-                let renderableMessages = existingSessionMessages
+                let renderableMessages = existingSessionMessages?.isLoaded === true
                     ? readStoredSessionMessagesFromStateLike(existingSessionMessages)
                     : undefined;
 
@@ -915,7 +906,9 @@ export function createSessionsDomain<S extends SessionsDomain & SessionsDomainDe
                             ...updated.sessionMessages,
                             isLoaded: existingSessionMessages.isLoaded,
                         };
-                        renderableMessages = readStoredSessionMessagesFromStateLike(updatedSessionMessages[session.id]);
+                        renderableMessages = updatedSessionMessages[session.id]?.isLoaded === true
+                            ? readStoredSessionMessagesFromStateLike(updatedSessionMessages[session.id])
+                            : undefined;
                     }
                     // Guard with value equality: the reconcile surfaces usage
                     // and todos on every snapshot, and unconditional writes
@@ -953,7 +946,8 @@ export function createSessionsDomain<S extends SessionsDomain & SessionsDomainDe
                 const nextRenderableBase = buildSessionListRenderableFromSession(
                     mergedSessions[session.id]!,
                     renderableMessages,
-                    isTranscriptRenderableAggregate(sessionMessagesForRenderable?.renderableAggregate)
+                    sessionMessagesForRenderable?.isLoaded === true
+                    && isTranscriptRenderableAggregate(sessionMessagesForRenderable.renderableAggregate)
                         ? sessionMessagesForRenderable.renderableAggregate
                         : undefined,
                 );
@@ -964,35 +958,26 @@ export function createSessionsDomain<S extends SessionsDomain & SessionsDomainDe
                 const mergedRenderable = areSessionListRenderablesEqual(previousRenderable, nextRenderable)
                     ? previousRenderable
                     : nextRenderable;
-                const didListViewFieldsChange = didSessionListRenderableListViewFieldsChangeForSettings(
-                    previousRenderable,
-                    mergedRenderable,
-                    state.settings,
-                );
-                const didAttentionPromotionFieldsChange = didSessionListRenderableAttentionPromotionFieldsChange(
-                    previousRenderable,
-                    mergedRenderable,
-                );
-                const didRuntimeActivityLeaseOnlyChange = isSessionListRenderableRuntimeActivityLeaseOnlyChange({
+                // One decision owner for renderable changes across ingestion
+                // paths: applySessions must reach the same rebuild/row-refresh/
+                // warm-cache verdicts as the canonical plan functions.
+                const assessment = assessSessionListRenderableChange({
                     previous: previousRenderable,
                     next: mergedRenderable,
-                    nowMs: nowServerMs(),
+                    rebuildOnAttentionPromotionFieldsChange,
+                    didListViewFieldsChange: (previous, next) =>
+                        didSessionListRenderableListViewFieldsChangeForSettings(previous, next, state.settings),
+                    didListViewRowFieldsChange: didSessionListRenderableEmbeddedListRowFieldsChange,
                 });
                 if (mergedRenderable !== previousRenderable) {
                     changedRenderableCount += 1;
-                    if (didListViewFieldsChange) {
+                    if (assessment.didListViewFieldsChange) {
                         listViewFieldChangeCount += 1;
                     }
-                    if (
-                        !didListViewFieldsChange
-                        && (
-                            didSessionListRenderableEmbeddedListRowFieldsChange(previousRenderable, mergedRenderable)
-                            || didRuntimeActivityLeaseOnlyChange
-                        )
-                    ) {
+                    if (assessment.shouldRefreshListViewRow) {
                         listViewRowRefreshSessionIds.push(session.id);
                     }
-                    if (didAttentionPromotionFieldsChange) {
+                    if (assessment.didAttentionPromotionFieldsChange) {
                         attentionPromotionFieldChangeCount += 1;
                     }
                     if (!didImmediateWarmCacheRelevantRenderableChange) {
@@ -1004,14 +989,7 @@ export function createSessionsDomain<S extends SessionsDomain & SessionsDomainDe
                             previousWarmCacheEntry,
                         );
                         if (nextWarmCacheEntry !== previousWarmCacheEntry) {
-                            if (
-                                !didListViewFieldsChange
-                                && !didAttentionPromotionFieldsChange
-                                && (
-                                    isSessionListRenderableWarmCacheProgressOnlyChange(previousRenderable, mergedRenderable)
-                                    || didRuntimeActivityLeaseOnlyChange
-                                )
-                            ) {
+                            if (assessment.warmCacheChange === 'deferred') {
                                 didDeferredWarmCacheRelevantRenderableChange = true;
                             } else {
                                 didImmediateWarmCacheRelevantRenderableChange = true;
@@ -1024,10 +1002,8 @@ export function createSessionsDomain<S extends SessionsDomain & SessionsDomainDe
                     mergedRenderables[session.id] = mergedRenderable;
                 }
 
-                if (!needsSessionListViewDataRebuild) {
-                    if (didListViewFieldsChange || (rebuildOnAttentionPromotionFieldsChange && didAttentionPromotionFieldsChange)) {
-                        needsSessionListViewDataRebuild = true;
-                    }
+                if (!needsSessionListViewDataRebuild && assessment.needsSessionListViewDataRebuild) {
+                    needsSessionListViewDataRebuild = true;
                 }
 
                 if (!needsProjectManagerUpdate) {
@@ -1630,12 +1606,7 @@ export function createSessionsDomain<S extends SessionsDomain & SessionsDomainDe
                 },
             };
 
-            const existingTimeout = optimisticThinkingTimeoutBySessionId.get(sessionId);
-            if (existingTimeout) {
-                clearTimeout(existingTimeout);
-            }
-            const timeout = setTimeout(() => {
-                optimisticThinkingTimeoutBySessionId.delete(sessionId);
+            optimisticThinkingTimeouts.schedule(sessionId, OPTIMISTIC_SESSION_THINKING_TIMEOUT_MS, () => {
                 set((s) => {
                     const current = s.sessions[sessionId];
                     if (!current) return s;
@@ -1653,8 +1624,7 @@ export function createSessionsDomain<S extends SessionsDomain & SessionsDomainDe
                         sessions: next,
                     };
                 });
-            }, OPTIMISTIC_SESSION_THINKING_TIMEOUT_MS);
-            optimisticThinkingTimeoutBySessionId.set(sessionId, timeout);
+            });
 
             return {
                 ...state,
@@ -1666,11 +1636,7 @@ export function createSessionsDomain<S extends SessionsDomain & SessionsDomainDe
             if (!session) return state;
             if (!session.optimisticThinkingAt) return state;
 
-            const existingTimeout = optimisticThinkingTimeoutBySessionId.get(sessionId);
-            if (existingTimeout) {
-                clearTimeout(existingTimeout);
-                optimisticThinkingTimeoutBySessionId.delete(sessionId);
-            }
+            optimisticThinkingTimeouts.cancel(sessionId);
 
             const nextSessions = {
                 ...state.sessions,
@@ -1690,11 +1656,7 @@ export function createSessionsDomain<S extends SessionsDomain & SessionsDomainDe
             if (!session) return state;
             if ((session.thinkingGraceUntil ?? null) === null) return state;
 
-            const existingTimeout = thinkingGraceTimeoutBySessionId.get(sessionId);
-            if (existingTimeout) {
-                clearTimeout(existingTimeout);
-                thinkingGraceTimeoutBySessionId.delete(sessionId);
-            }
+            thinkingGraceTimeouts.cancel(sessionId);
 
             const nextSessions = {
                 ...state.sessions,
@@ -1857,6 +1819,38 @@ export function createSessionsDomain<S extends SessionsDomain & SessionsDomainDe
             projectManager.updateSessionProjectScmSnapshotError(sessionId, error);
             set((state) => ({ ...state }));
         },
+        publishSessionProjectScmSnapshots: (publishes) => {
+            // A project SCM refresh publishes to every session sharing the repo. Doing that
+            // through the individual snapshot/status/prune actions costs up to six store
+            // notifications per session; every notification re-runs all store subscribers,
+            // which starves the JS thread on large accounts. All project-manager mutations
+            // happen here first, then a single notification covers the whole batch.
+            if (publishes.length === 0) return;
+            const statusUpdates: Record<string, ScmStatus | null> = {};
+            for (const { sessionId, snapshot, status } of publishes) {
+                ensureProjectManagerSession(sessionId);
+                const previousSnapshot = projectManager.getSessionProjectScmSnapshot(sessionId);
+                if (!areScmWorkingSnapshotsEquivalentIgnoringFetchedAt(previousSnapshot, snapshot)) {
+                    projectManager.updateSessionProjectScmSnapshot(sessionId, snapshot);
+                }
+                if (projectManager.getSessionProjectScmSnapshotError(sessionId)) {
+                    projectManager.updateSessionProjectScmSnapshotError(sessionId, null);
+                }
+                projectManager.updateSessionProjectScmStatus(sessionId, status);
+                const activePaths = new Set(snapshot.entries.map((entry) => entry.path));
+                projectManager.pruneSessionProjectScmTouchedPaths(sessionId, activePaths);
+                projectManager.pruneSessionProjectScmCommitSelectionPaths(sessionId, activePaths);
+                projectManager.pruneSessionProjectScmCommitSelectionPatches(sessionId, activePaths);
+                statusUpdates[sessionId] = status;
+            }
+            set((state) => ({
+                ...state,
+                sessionScmStatus: {
+                    ...state.sessionScmStatus,
+                    ...statusUpdates,
+                },
+            }));
+        },
         getSessionProjectScmTouchedPaths: (sessionId: string) => {
             ensureProjectManagerSession(sessionId);
             return projectManager.getSessionProjectScmTouchedPaths(sessionId);
@@ -1955,17 +1949,8 @@ export function createSessionsDomain<S extends SessionsDomain & SessionsDomainDe
             return finished;
         },
         deleteSession: (sessionId: string) => set((state) => {
-			            const optimisticTimeout = optimisticThinkingTimeoutBySessionId.get(sessionId);
-			            if (optimisticTimeout) {
-			                clearTimeout(optimisticTimeout);
-	                optimisticThinkingTimeoutBySessionId.delete(sessionId);
-	            }
-
-                const graceTimeout = thinkingGraceTimeoutBySessionId.get(sessionId);
-                if (graceTimeout) {
-                    clearTimeout(graceTimeout);
-                    thinkingGraceTimeoutBySessionId.delete(sessionId);
-                }
+            optimisticThinkingTimeouts.cancel(sessionId);
+            thinkingGraceTimeouts.cancel(sessionId);
 
 	            // Remove session from sessions
 	            const { [sessionId]: deletedSession, ...remainingSessions } = state.sessions;

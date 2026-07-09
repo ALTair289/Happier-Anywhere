@@ -126,6 +126,51 @@ function readSessionListSessionById(data: readonly any[] | null, sessionId: stri
 }
 
 describe('sessions domain: sessionListViewData rebuild gating', () => {
+    it('keeps manual unread renderables unread when only a partial transcript slice is cached', async () => {
+        mockSessionPersistenceBoundaries();
+        const { createSessionsDomain } = await import('./sessions');
+        const { domain, get } = createHarness(createSessionsDomain, {
+            sessionMessages: {
+                s1: {
+                    isLoaded: false,
+                    messageIdsOldestFirst: ['m110'],
+                    messagesById: {
+                        m110: {
+                            id: 'm110',
+                            seq: 110,
+                            kind: 'agent-text',
+                            text: 'older visible message',
+                            createdAt: 100,
+                        },
+                    },
+                    messagesMap: {},
+                },
+            },
+        });
+
+        domain.applySessions([{
+            id: 's1',
+            seq: 742,
+            createdAt: 1,
+            updatedAt: 2,
+            active: false,
+            activeAt: 1,
+            archivedAt: null,
+            lastViewedSessionSeq: 741,
+            latestReadyEventSeq: 110,
+            latestTurnStatus: 'completed',
+            metadata: null,
+            metadataVersion: 1,
+            agentState: null,
+            agentStateVersion: 0,
+            thinking: false,
+            thinkingAt: 0,
+            presence: 'offline',
+        } as any]);
+
+        expect(get().sessionListRenderables.s1.hasUnreadMessages).toBe(true);
+    });
+
     it('lazily registers loaded sessions before writing per-session project SCM snapshots', async () => {
         mockSessionPersistenceBoundaries();
         const { projectManager } = await import('../../runtime/orchestration/projectManager');
@@ -585,6 +630,83 @@ describe('sessions domain: sessionListViewData rebuild gating', () => {
             expect(next).not.toBe(initial);
             expect(readSessionListRowIds(next)).toEqual(readSessionListRowIds(initial));
             expect(readSessionListSessionById(next, 's1')?.runtimeActivityExpiresAt).toBe(now + 180_000);
+
+            const changedEvent = syncPerformanceTelemetry
+                .snapshot()
+                .events.find((candidate) => candidate.name === 'sync.store.sessions.apply.changed');
+            expect(changedEvent?.fields.listRebuild).toBe(0);
+            expect(changedEvent?.fields.listRowRefreshes).toBe(1);
+        } finally {
+            syncPerformanceTelemetry.configure({ enabled: false });
+            vi.useRealTimers();
+        }
+    });
+
+    it('refreshes list rows for working-signal refreshes that extend the working window without rebuilding placement', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-07-02T13:35:00.000Z'));
+        vi.doMock('../../runtime/orchestration/projectManager', () => ({
+            projectManager: { updateSessions: vi.fn() },
+        }));
+        mockSessionPersistenceBoundaries();
+
+        const { syncPerformanceTelemetry } = await import('@/sync/runtime/syncPerformanceTelemetry');
+        const { createSessionsDomain } = await import('./sessions');
+        const { get, domain } = createHarness(createSessionsDomain, {
+            settings: { sessionListWorkingPlacementModeV1: 'global' },
+        });
+        const now = Date.now();
+
+        syncPerformanceTelemetry.configure({
+            enabled: true,
+            slowThresholdMs: 1_000_000,
+            flushIntervalMs: 60_000,
+        });
+        syncPerformanceTelemetry.reset();
+
+        try {
+            domain.applySessions([
+                {
+                    id: 's1',
+                    seq: 1,
+                    createdAt: 1,
+                    updatedAt: 1,
+                    active: true,
+                    activeAt: now - 60_000,
+                    metadata: { machineId: 'm1', path: '/home/u/repo', homeDir: '/home/u' },
+                    metadataVersion: 1,
+                    agentState: null,
+                    agentStateVersion: 0,
+                    thinking: false,
+                    thinkingAt: 0,
+                    presence: 'online',
+                    latestTurnStatus: 'in_progress',
+                    latestTurnStatusObservedAt: now - 60_000,
+                } as any,
+            ]);
+
+            const initial = get().sessionListViewData;
+            expect(readSessionListSessionById(initial, 's1')?.latestTurnStatusObservedAt).toBe(now - 60_000);
+            syncPerformanceTelemetry.reset();
+
+            // Placement stays 'working' before and after, but the refreshed
+            // observation extends the working window: the committed view data
+            // must pick up the fresh timestamps through the row-refresh
+            // channel or the UI later demotes the session at the STALE expiry
+            // while its row (subscribed to the fresh renderable) still shows
+            // the working indicator.
+            domain.applySessions([
+                {
+                    ...get().sessions.s1,
+                    seq: 2,
+                    latestTurnStatusObservedAt: now,
+                    activeAt: now,
+                } as any,
+            ]);
+
+            const next = get().sessionListViewData;
+            expect(readSessionListRowIds(next)).toEqual(readSessionListRowIds(initial));
+            expect(readSessionListSessionById(next, 's1')?.latestTurnStatusObservedAt).toBe(now);
 
             const changedEvent = syncPerformanceTelemetry
                 .snapshot()

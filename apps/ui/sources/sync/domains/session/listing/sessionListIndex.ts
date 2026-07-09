@@ -3,6 +3,7 @@ import type { SessionFolderWorkspaceRefV1 } from '@/sync/domains/session/folders
 import { getSessionStorageKind, type SessionStorageKind } from '@/sync/domains/session/sessionStorageKind';
 
 import type { SessionListAttentionPromotionReason } from './attentionPromotion/sessionListAttentionPromotion';
+import type { SessionListWorkingPlacementReason } from './placement/sessionListPlacementProjection';
 import type { SessionListViewItem } from './sessionListViewData';
 
 export type SessionListIndexItem =
@@ -34,7 +35,7 @@ export type SessionListIndexItem =
         archivedAt?: number | null;
         keepVisibleWhenInactive?: boolean;
         attentionPromotionReason?: SessionListAttentionPromotionReason;
-        workingPlacementReason?: 'working';
+        workingPlacementReason?: SessionListWorkingPlacementReason;
         serverId?: string;
         serverName?: string;
         folderId?: string | null;

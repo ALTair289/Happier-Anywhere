@@ -2,6 +2,7 @@ import {
     areSessionListRenderablesEqual,
     applySessionListRenderablePatch,
     didSessionListRenderableAttentionPromotionFieldsChange,
+    didSessionListRenderablePlacementRelevantTimingChange,
     didSessionListRenderableStructuralFieldsChange,
     didSessionListRenderableWarmCacheFieldsChange,
     isSessionListRenderableRuntimeActivityLeaseOnlyChange,
@@ -73,31 +74,97 @@ function didPreservePendingFlags(
         );
 }
 
-function isDeferredWarmCacheOnlyRenderableChange(
-    previous: SessionListRenderableSession | undefined,
-    next: SessionListRenderableSession,
-): boolean {
-    return isSessionListRenderableWarmCacheProgressOnlyChange(previous, next)
-        || isSessionListRenderableRuntimeActivityLeaseOnlyChange({
-            previous,
-            next,
-            nowMs: nowServerMs(),
-        });
-}
+export type SessionListRenderableChangeAssessment = Readonly<{
+    didListViewFieldsChange: boolean;
+    didAttentionPromotionFieldsChange: boolean;
+    didRuntimeActivityLeaseOnlyChange: boolean;
+    shouldRefreshListViewRow: boolean;
+    needsSessionListViewDataRebuild: boolean;
+    warmCacheChange: 'none' | 'immediate' | 'deferred';
+}>;
 
-function shouldRefreshListViewRowForRenderableChange(input: Readonly<{
+/**
+ * Single owner of the per-renderable change decisions (structural rebuild,
+ * attention/placement rebuild, row refresh, warm-cache classification).
+ * Consumed by the plan functions below AND by the applySessions inline loop
+ * in `domains/sessions.ts` — the two ingestion orchestrations differ, but the
+ * decisions for one renderable change must never diverge between them.
+ */
+export function assessSessionListRenderableChange(input: Readonly<{
     previous: SessionListRenderableSession | undefined;
     next: SessionListRenderableSession;
-    didListViewFieldsChange: boolean;
-    didListViewRowFieldsChange: boolean;
-}>): boolean {
-    if (input.didListViewFieldsChange) return false;
-    if (input.didListViewRowFieldsChange) return true;
-    return isSessionListRenderableRuntimeActivityLeaseOnlyChange({
+    rebuildOnAttentionPromotionFieldsChange: boolean;
+    didListViewFieldsChange?: DidListViewFieldsChange;
+    didListViewRowFieldsChange?: DidListViewRowFieldsChange;
+}>): SessionListRenderableChangeAssessment {
+    const didListViewFieldsChange = input.didListViewFieldsChange
+        ? input.didListViewFieldsChange(input.previous, input.next)
+        : didSessionListRenderableStructuralFieldsChange(input.previous, input.next);
+    const didListViewRowFieldsChange = input.didListViewRowFieldsChange
+        ? input.didListViewRowFieldsChange(input.previous, input.next)
+        : false;
+    const didAttentionPromotionFieldsChange = didSessionListRenderableAttentionPromotionFieldsChange(
+        input.previous,
+        input.next,
+    );
+    const didRuntimeActivityLeaseOnlyChange = isSessionListRenderableRuntimeActivityLeaseOnlyChange({
         previous: input.previous,
         next: input.next,
         nowMs: nowServerMs(),
     });
+
+    const shouldRefreshListViewRow = resolveShouldRefreshListViewRow({
+        previous: input.previous,
+        next: input.next,
+        didListViewFieldsChange,
+        didListViewRowFieldsChange,
+        didAttentionPromotionFieldsChange,
+        didRuntimeActivityLeaseOnlyChange,
+        placementGroupingEnabled: input.rebuildOnAttentionPromotionFieldsChange,
+    });
+
+    const warmCacheChange = !didSessionListRenderableWarmCacheFieldsChange(input.previous, input.next)
+        ? 'none'
+        : !didListViewFieldsChange
+            && !didAttentionPromotionFieldsChange
+            && (
+                isSessionListRenderableWarmCacheProgressOnlyChange(input.previous, input.next)
+                || didRuntimeActivityLeaseOnlyChange
+            )
+            ? 'deferred'
+            : 'immediate';
+
+    return {
+        didListViewFieldsChange,
+        didAttentionPromotionFieldsChange,
+        didRuntimeActivityLeaseOnlyChange,
+        shouldRefreshListViewRow,
+        needsSessionListViewDataRebuild: didListViewFieldsChange
+            || (input.rebuildOnAttentionPromotionFieldsChange && didAttentionPromotionFieldsChange),
+        warmCacheChange,
+    };
+}
+
+function resolveShouldRefreshListViewRow(input: Readonly<{
+    previous: SessionListRenderableSession | undefined;
+    next: SessionListRenderableSession;
+    didListViewFieldsChange: boolean;
+    didListViewRowFieldsChange: boolean;
+    didAttentionPromotionFieldsChange: boolean;
+    didRuntimeActivityLeaseOnlyChange: boolean;
+    placementGroupingEnabled: boolean;
+}>): boolean {
+    if (input.didListViewFieldsChange) return false;
+    if (input.didListViewRowFieldsChange) return true;
+    if (input.didRuntimeActivityLeaseOnlyChange) return true;
+    // Timing-only placement changes (extended working windows, refreshed
+    // retention inputs) skip the structural rebuild but must still reach the
+    // committed view data so the UI re-evaluates placement against fresh
+    // timestamps instead of demoting at a stale freshness expiry. Instant
+    // placement changes are the rebuild gate's business, and with placement
+    // grouping disabled the committed list does not consume placement at all.
+    if (!input.placementGroupingEnabled || input.didAttentionPromotionFieldsChange) return false;
+    return didSessionListRenderablePlacementRelevantTimingChange(input.previous, input.next);
 }
 
 function planSessionListRenderableIncomingRows(input: Readonly<{
@@ -146,41 +213,30 @@ function planSessionListRenderableIncomingRows(input: Readonly<{
             stalePendingFlagsPreservedCount += 1;
         }
 
-        const didListViewFieldsChange = input.didListViewFieldsChange
-            ? input.didListViewFieldsChange(previousRenderable, nextRenderable)
-            : didSessionListRenderableStructuralFieldsChange(previousRenderable, nextRenderable);
-        const didListViewRowFieldsChange = input.didListViewRowFieldsChange
-            ? input.didListViewRowFieldsChange(previousRenderable, nextRenderable)
-            : false;
-        const didAttentionPromotionFieldsChange = didSessionListRenderableAttentionPromotionFieldsChange(previousRenderable, nextRenderable);
+        const assessment = assessSessionListRenderableChange({
+            previous: previousRenderable,
+            next: nextRenderable,
+            rebuildOnAttentionPromotionFieldsChange: input.rebuildOnAttentionPromotionFieldsChange === true,
+            didListViewFieldsChange: input.didListViewFieldsChange,
+            didListViewRowFieldsChange: input.didListViewRowFieldsChange,
+        });
 
         if (!previousRenderable || nextRenderable !== previousRenderable) {
             didAnyRenderableChange = true;
             changedCount += 1;
-            if (didListViewFieldsChange) {
+            if (assessment.didListViewFieldsChange) {
                 listViewFieldChangeCount += 1;
             }
-            if (shouldRefreshListViewRowForRenderableChange({
-                previous: previousRenderable,
-                next: nextRenderable,
-                didListViewFieldsChange,
-                didListViewRowFieldsChange,
-            })) {
+            if (assessment.shouldRefreshListViewRow) {
                 listViewRowRefreshSessionIds.push(incomingRenderable.id);
             }
-            if (didAttentionPromotionFieldsChange) {
+            if (assessment.didAttentionPromotionFieldsChange) {
                 attentionPromotionFieldChangeCount += 1;
             }
-            if (didSessionListRenderableWarmCacheFieldsChange(previousRenderable, nextRenderable)) {
-                if (
-                    !didListViewFieldsChange
-                    && !didAttentionPromotionFieldsChange
-                    && isDeferredWarmCacheOnlyRenderableChange(previousRenderable, nextRenderable)
-                ) {
-                    didDeferredWarmCacheRelevantRenderableChange = true;
-                } else {
-                    didImmediateWarmCacheRelevantRenderableChange = true;
-                }
+            if (assessment.warmCacheChange === 'deferred') {
+                didDeferredWarmCacheRelevantRenderableChange = true;
+            } else if (assessment.warmCacheChange === 'immediate') {
+                didImmediateWarmCacheRelevantRenderableChange = true;
             }
             if (nextRenderables === previousRenderables) {
                 nextRenderables = { ...previousRenderables };
@@ -188,10 +244,8 @@ function planSessionListRenderableIncomingRows(input: Readonly<{
             nextRenderables[incomingRenderable.id] = nextRenderable;
         }
 
-        if (!needsSessionListViewDataRebuild) {
-            if (didListViewFieldsChange || (input.rebuildOnAttentionPromotionFieldsChange === true && didAttentionPromotionFieldsChange)) {
-                needsSessionListViewDataRebuild = true;
-            }
+        if (!needsSessionListViewDataRebuild && assessment.needsSessionListViewDataRebuild) {
+            needsSessionListViewDataRebuild = true;
         }
     }
 
@@ -291,43 +345,30 @@ export function planSessionListRenderablePatches(input: Readonly<{
         }
 
         changedCount += 1;
-        const didListViewFieldsChange = input.didListViewFieldsChange
-            ? input.didListViewFieldsChange(previousRenderable, nextRenderable)
-            : didSessionListRenderableStructuralFieldsChange(previousRenderable, nextRenderable);
-        const didListViewRowFieldsChange = input.didListViewRowFieldsChange
-            ? input.didListViewRowFieldsChange(previousRenderable, nextRenderable)
-            : false;
-        const didAttentionPromotionFieldsChange = didSessionListRenderableAttentionPromotionFieldsChange(previousRenderable, nextRenderable);
-        if (didListViewFieldsChange) {
-            listViewFieldChangeCount += 1;
-        }
-        if (shouldRefreshListViewRowForRenderableChange({
+        const assessment = assessSessionListRenderableChange({
             previous: previousRenderable,
             next: nextRenderable,
-            didListViewFieldsChange,
-            didListViewRowFieldsChange,
-        })) {
+            rebuildOnAttentionPromotionFieldsChange: input.rebuildOnAttentionPromotionFieldsChange === true,
+            didListViewFieldsChange: input.didListViewFieldsChange,
+            didListViewRowFieldsChange: input.didListViewRowFieldsChange,
+        });
+        if (assessment.didListViewFieldsChange) {
+            listViewFieldChangeCount += 1;
+        }
+        if (assessment.shouldRefreshListViewRow) {
             listViewRowRefreshSessionIds.push(sessionId);
         }
-        if (didAttentionPromotionFieldsChange) {
+        if (assessment.didAttentionPromotionFieldsChange) {
             attentionPromotionFieldChangeCount += 1;
         }
-        if (didSessionListRenderableWarmCacheFieldsChange(previousRenderable, nextRenderable)) {
-            if (
-                !didListViewFieldsChange
-                && !didAttentionPromotionFieldsChange
-                && isDeferredWarmCacheOnlyRenderableChange(previousRenderable, nextRenderable)
-            ) {
-                didDeferredWarmCacheRelevantRenderableChange = true;
-            } else {
-                didImmediateWarmCacheRelevantRenderableChange = true;
-            }
+        if (assessment.warmCacheChange === 'deferred') {
+            didDeferredWarmCacheRelevantRenderableChange = true;
+        } else if (assessment.warmCacheChange === 'immediate') {
+            didImmediateWarmCacheRelevantRenderableChange = true;
         }
 
-        if (!needsSessionListViewDataRebuild) {
-            if (didListViewFieldsChange || (input.rebuildOnAttentionPromotionFieldsChange === true && didAttentionPromotionFieldsChange)) {
-                needsSessionListViewDataRebuild = true;
-            }
+        if (!needsSessionListViewDataRebuild && assessment.needsSessionListViewDataRebuild) {
+            needsSessionListViewDataRebuild = true;
         }
 
         if (nextRenderables === previousRenderables) {

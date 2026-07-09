@@ -1,6 +1,7 @@
 import type { MachineDisplayRenderable } from '@/sync/domains/machines/machineDisplayRenderable';
 import type { SessionListRenderableSession } from './sessionListRenderable';
 import type { SessionListAttentionPromotionReason } from './attentionPromotion/sessionListAttentionPromotionTypes';
+import type { SessionListWorkingPlacementReason } from './placement/sessionListPlacementProjection';
 import { t } from '@/text';
 import {
     resolveDisplayMachineIdForSessionFromState,
@@ -49,7 +50,7 @@ export type SessionListViewItem =
         folderDepth?: number;
         pinned?: boolean;
         attentionPromotionReason?: SessionListAttentionPromotionReason;
-        workingPlacementReason?: 'working';
+        workingPlacementReason?: SessionListWorkingPlacementReason;
         variant?: 'default' | 'no-path';
         serverId?: string;
         serverName?: string;

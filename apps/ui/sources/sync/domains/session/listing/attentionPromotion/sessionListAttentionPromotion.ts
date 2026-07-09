@@ -16,6 +16,7 @@ export type SessionListAttentionPromotionOptions = Readonly<{
 
 export type SessionListWorkingPlacementOptions = Readonly<{
     mode: SessionListWorkingPlacementMode;
+    separateBackgroundWork?: boolean;
 }>;
 
 export {

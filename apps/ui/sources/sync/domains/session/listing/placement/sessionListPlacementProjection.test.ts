@@ -63,15 +63,42 @@ describe('projectSessionListPlacement', () => {
         });
     });
 
-    it('uses provider runtime activity for working placement through the shared presentation selector', () => {
+    it('uses fresh legacy thinking evidence for working placement without detached runtime activity', () => {
+        const nowMs = 10_000;
+
+        expect(projectSessionListPlacement({
+            nowMs,
+            separateBackgroundWork: true,
+            session: makeSession({
+                active: true,
+                activeAt: nowMs - 1_000,
+                presence: 'online',
+                thinking: true,
+                thinkingAt: nowMs - 1_000,
+                latestTurnStatus: undefined,
+                latestTurnStatusObservedAt: undefined,
+                lastRuntimeIssue: null,
+                runtimeActivityActiveCount: 0,
+                runtimeActivityObservedAt: null,
+                runtimeActivityExpiresAt: null,
+                runtimeActivitySourceClass: null,
+            }),
+        })).toEqual({
+            kind: 'working',
+            timestamp: null,
+            retainedWorking: false,
+        });
+    });
+
+    it('uses live detached provider runtime activity for working placement after the foreground turn completed by default', () => {
         const nowMs = 10_000;
 
         expect(projectSessionListPlacement({
             nowMs,
             session: makeSession({
                 active: true,
-                activeAt: nowMs - 1_000,
-                presence: 'online',
+                activeAt: nowMs - 180_000,
+                presence: 0,
                 thinking: false,
                 thinkingAt: 0,
                 latestTurnStatus: 'completed',
@@ -89,15 +116,42 @@ describe('projectSessionListPlacement', () => {
         });
     });
 
-    it('does not use stale provider runtime activity for working placement even when the session is active online', () => {
+    it('projects live detached provider runtime activity into a separate background working placement when requested', () => {
+        const nowMs = 10_000;
+
+        expect(projectSessionListPlacement({
+            nowMs,
+            separateBackgroundWork: true,
+            session: makeSession({
+                active: true,
+                activeAt: nowMs - 1_000,
+                presence: 'online',
+                thinking: false,
+                thinkingAt: 0,
+                latestTurnStatus: 'completed',
+                latestTurnStatusObservedAt: nowMs - 2_000,
+                lastRuntimeIssue: null,
+                runtimeActivityActiveCount: 1,
+                runtimeActivityObservedAt: nowMs - 1_000,
+                runtimeActivityExpiresAt: nowMs + 60_000,
+                runtimeActivitySourceClass: 'provider_detached_task',
+            }),
+        })).toEqual({
+            kind: 'background_working',
+            timestamp: null,
+            retainedWorking: false,
+        });
+    });
+
+    it('does not use expired detached provider runtime activity for working placement', () => {
         const nowMs = 10_000;
 
         const placement = projectSessionListPlacement({
             nowMs,
             session: makeSession({
-                active: true,
-                activeAt: nowMs - 1_000,
-                presence: 'online',
+                active: false,
+                activeAt: nowMs - 180_000,
+                presence: 0,
                 thinking: false,
                 thinkingAt: 0,
                 latestTurnStatus: 'completed',
@@ -112,6 +166,28 @@ describe('projectSessionListPlacement', () => {
 
         expect(placement.kind).not.toBe('working');
         expect(placement.retainedWorking).toBe(false);
+    });
+
+    it('projects retained working placement for stale retained candidates', () => {
+        const now = 1_000_000;
+        const placement = projectSessionListPlacement({
+            session: makeSession({
+                active: true,
+                presence: 'online',
+                activeAt: now - 600_000,
+                latestTurnStatus: 'in_progress',
+                latestTurnStatusObservedAt: now - 600_000,
+            }),
+            sessionKey: 'server-a:s1',
+            retainedWorkingSessionKeys: ['server-a:s1'],
+            nowMs: now,
+        });
+
+        expect(placement).toEqual({
+            kind: 'working',
+            timestamp: null,
+            retainedWorking: true,
+        });
     });
 
     it('keeps terminal turn projection authoritative over fresh legacy thinking evidence', () => {

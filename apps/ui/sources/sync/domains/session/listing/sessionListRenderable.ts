@@ -22,7 +22,11 @@ import { resolveSessionReadableSeq } from '@/sync/domains/session/readCursor/res
 import { resolveSessionProjectGroupingKeyParts } from './sessionListProjectGroupingKeys';
 import { deriveSessionListMeaningfulActivityAt } from './deriveSessionListActivity';
 import type { SessionListAttentionPromotionReason } from './attentionPromotion/sessionListAttentionPromotionTypes';
-import { projectSessionListPlacement } from './placement/sessionListPlacementProjection';
+import {
+    didSessionListPlacementProjectionDiverge,
+    projectSessionListPlacement,
+} from './placement/sessionListPlacementProjection';
+import { didSessionListWorkingRetentionInputsChange } from './placement/sessionListWorkingRetention';
 import {
     deriveSessionRuntimePresentationState,
     resolveSessionRuntimePresenceFields,
@@ -526,7 +530,10 @@ export function resolveSessionListRenderableAttentionPromotionPlacement(
     nowMs: number = Date.now(),
 ): SessionListRenderableAttentionPromotionPlacement {
     const projection = projectSessionListPlacement({ session, nowMs });
-    return { kind: projection.kind, timestamp: projection.timestamp };
+    return {
+        kind: projection.kind === 'background_working' ? 'working' : projection.kind,
+        timestamp: projection.timestamp,
+    };
 }
 
 export function didSessionListRenderableStructuralFieldsChange(
@@ -577,6 +584,25 @@ export function didSessionListRenderableAttentionPromotionFieldsChange(
         || previousPlacement.timestamp !== nextPlacement.timestamp;
 }
 
+/**
+ * Changes that do not move the placement at this instant but WILL change how
+ * placement evaluates at a future freshness boundary (extended working
+ * windows, refreshed retention inputs). These must not trigger the expensive
+ * structural rebuild, but the committed view data has to pick up the fresh
+ * session object through the row-refresh channel — otherwise the UI later
+ * re-evaluates placement against stale timestamps and, e.g., demotes a
+ * still-working session at the stale expiry while its row shows the spinner.
+ */
+export function didSessionListRenderablePlacementRelevantTimingChange(
+    previous: SessionListRenderableSession | undefined,
+    next: SessionListRenderableSession,
+    nowMs: number = Date.now(),
+): boolean {
+    if (!previous) return false;
+    if (didSessionListRenderableWorkingRetentionInputFieldsChange(previous, next)) return true;
+    return didSessionListPlacementProjectionDiverge({ previous, next, nowMs });
+}
+
 function didSessionListRenderableRetainedWorkingInvalidationFieldsChange(
     previous: SessionListRenderableSession,
     next: SessionListRenderableSession,
@@ -585,6 +611,25 @@ function didSessionListRenderableRetainedWorkingInvalidationFieldsChange(
         return false;
     }
     return !isRetainableWorkingProjectionCandidate(next);
+}
+
+/**
+ * Working RETENTION (the 'keep in working group while signals are stale'
+ * projection) depends on the UI layer's retained-key set, which is not
+ * available at store-commit time, so the placement divergence walk evaluates
+ * with retention disabled. Compensate with the canonical retention-input
+ * comparison (owned by sessionListWorkingRetention.ts, next to the functions
+ * that read those fields), scoped to retainable candidates so ordinary
+ * sessions do not pay row refreshes for these high-churn timestamps.
+ */
+function didSessionListRenderableWorkingRetentionInputFieldsChange(
+    previous: SessionListRenderableSession,
+    next: SessionListRenderableSession,
+): boolean {
+    if (!isRetainableWorkingProjectionCandidate(previous) && !isRetainableWorkingProjectionCandidate(next)) {
+        return false;
+    }
+    return didSessionListWorkingRetentionInputsChange(previous, next);
 }
 
 function isRetainableWorkingProjectionCandidate(session: SessionListRenderableSession): boolean {
@@ -777,7 +822,9 @@ function areRuntimeActivityPresentationStatesEquivalent(
 ): boolean {
     const previousStatus = deriveSessionRuntimePresentationState(previous, nowMs);
     const nextStatus = deriveSessionRuntimePresentationState(next, nowMs);
-    return previousStatus.working === nextStatus.working
+    return previousStatus.activityState === nextStatus.activityState
+        && previousStatus.working === nextStatus.working
+        && previousStatus.backgroundActive === nextStatus.backgroundActive
         && previousStatus.runtimeProjectionInProgress === nextStatus.runtimeProjectionInProgress
         && previousStatus.runtimeActivelyWorking === nextStatus.runtimeActivelyWorking
         && previousStatus.freshInProgress === nextStatus.freshInProgress

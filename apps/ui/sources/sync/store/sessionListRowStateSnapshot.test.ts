@@ -17,6 +17,10 @@ const serverProfileMockState = vi.hoisted(() => ({
     profiles: [] as ServerProfile[],
 }));
 
+const runtimeClockMockState = vi.hoisted(() => ({
+    nowServerMs: null as number | null,
+}));
+
 vi.mock('@/sync/domains/server/serverProfiles', async (importOriginal) => {
     const { createServerProfilesModuleMock } = await import('@/dev/testkit/mocks/serverProfiles');
     return createServerProfilesModuleMock({
@@ -26,6 +30,10 @@ vi.mock('@/sync/domains/server/serverProfiles', async (importOriginal) => {
         },
     });
 });
+
+vi.mock('@/sync/runtime/time', () => ({
+    nowServerMs: () => runtimeClockMockState.nowServerMs ?? Date.now(),
+}));
 
 function createSession(id: string): Session {
     return {
@@ -84,6 +92,7 @@ const pending = {
 describe('selectSessionListRowStateSnapshot', () => {
     afterEach(() => {
         serverProfileMockState.profiles = [];
+        runtimeClockMockState.nowServerMs = null;
         vi.useRealTimers();
         syncPerformanceTelemetry.configure({ enabled: false });
         syncPerformanceTelemetry.reset();
@@ -286,6 +295,52 @@ describe('selectSessionListRowStateSnapshot', () => {
 
         expect(third).not.toBe(first);
         expect(third.sessionListRenderables?.s1).toBe(clearedRenderable);
+    });
+
+    it('publishes lease-only renewals when the previous lease is close to expiry', () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-05-30T12:00:00.000Z'));
+        const nowMs = Date.now();
+        const firstRenderable = {
+            ...createRenderable('s1'),
+            active: true,
+            activeAt: nowMs - 5_000,
+            presence: 'online' as const,
+            latestTurnStatus: 'completed' as const,
+            latestTurnStatusObservedAt: nowMs - 10_000,
+            runtimeActivityActiveCount: 1,
+            runtimeActivityObservedAt: nowMs - 1_000,
+            // Old lease expires in 10s — reusing the stale renderable past
+            // this horizon would drop the row's working indicator while the
+            // committed view data already carries the extended lease.
+            runtimeActivityExpiresAt: nowMs + 10_000,
+            runtimeActivitySourceClass: 'provider_detached_task' as const,
+        } satisfies SessionListRenderableSession;
+        const selector = createSessionListRowStoreStateSelector([{
+            sessionId: 's1',
+            serverId: 'server-a',
+        }], 'server-a');
+
+        const first = selector({
+            sessions: {},
+            sessionListRenderables: { s1: firstRenderable },
+            sessionMessages: {},
+            sessionPending: { s1: pending },
+        });
+        const renewedRenderable = {
+            ...firstRenderable,
+            runtimeActivityObservedAt: nowMs + 5_000,
+            runtimeActivityExpiresAt: nowMs + 70_000,
+        } satisfies SessionListRenderableSession;
+        const second = selector({
+            sessions: {},
+            sessionListRenderables: { s1: renewedRenderable },
+            sessionMessages: {},
+            sessionPending: { s1: pending },
+        });
+
+        expect(second).not.toBe(first);
+        expect(second.sessionListRenderables?.s1).toBe(renewedRenderable);
     });
 
     it('keeps focused row store state stable when fresh progress also advances active heartbeat', () => {
@@ -570,9 +625,9 @@ describe('selectSessionListRowStateSnapshot', () => {
             sessionListRenderables: {
                 s1: {
                     ...s1,
-                    active: true,
+                    active: false,
                     activeAt: nowMs - 10_000,
-                    presence: 'online',
+                    presence: 0,
                     latestTurnStatus: 'completed',
                     latestTurnStatusObservedAt: nowMs - 5_000,
                     runtimeActivityActiveCount: 1,
@@ -603,6 +658,35 @@ describe('selectSessionListRowStateSnapshot', () => {
         expect(runtimeWorking).toEqual([{ sessionId: 's1', serverId: 'server-a' }]);
         expect(liveExpiredRuntimeActivity).toBe(idle);
         expect(staleUntrustedRuntimeActivity).toBe(idle);
+    });
+
+    it('uses the selector server clock when tracking runtime-priority scopes', () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(2_000_000);
+        runtimeClockMockState.nowServerMs = 1_000_000;
+        const s1 = createRenderable('s1');
+        const selector = createSessionListRuntimePriorityRowScopeSelector([
+            { sessionId: 's1', serverId: 'server-a' },
+        ], 'server-a');
+
+        const runtimeWorking = selector({
+            sessionListRenderables: {
+                s1: {
+                    ...s1,
+                    active: true,
+                    activeAt: 990_000,
+                    presence: 'online',
+                    latestTurnStatus: 'completed',
+                    latestTurnStatusObservedAt: 995_000,
+                    runtimeActivityActiveCount: 1,
+                    runtimeActivityObservedAt: 999_000,
+                    runtimeActivityExpiresAt: 1_060_000,
+                    runtimeActivitySourceClass: 'provider_detached_task',
+                },
+            },
+        });
+
+        expect(runtimeWorking).toEqual([{ sessionId: 's1', serverId: 'server-a' }]);
     });
 
     it('records why the row-store selector output changed when telemetry is enabled', () => {
