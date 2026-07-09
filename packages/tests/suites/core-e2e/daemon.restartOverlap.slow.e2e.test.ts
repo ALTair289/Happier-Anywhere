@@ -67,6 +67,57 @@ async function listDaemonSessions(params: {
   return parseListedDaemonSessions(listed.data);
 }
 
+async function resolveSpawnedSessionId(params: {
+  port: number;
+  controlToken?: string | null;
+  spawnNonce?: string;
+  immediateSessionId?: string;
+  timeoutMs?: number;
+}): Promise<string> {
+  const immediateSessionId = typeof params.immediateSessionId === 'string' ? params.immediateSessionId.trim() : '';
+  if (immediateSessionId) return immediateSessionId;
+
+  const spawnNonce = typeof params.spawnNonce === 'string' ? params.spawnNonce.trim() : '';
+  if (!spawnNonce) {
+    throw new Error('Missing sessionId and spawnNonce from daemon spawn-session');
+  }
+
+  let resolvedSessionId = '';
+  await waitFor(async () => {
+    const resolved = await daemonControlPostJson<{
+      success: true;
+      status: 'success' | 'pending' | 'not_found';
+      sessionId?: string;
+    }>({
+      port: params.port,
+      path: '/spawn-session/resolve',
+      controlToken: params.controlToken,
+      body: { spawnNonce },
+      timeoutMs: 5_000,
+    });
+    expect(resolved.status).toBe(200);
+    expect(resolved.data.success).toBe(true);
+    if (resolved.data.status !== 'success') {
+      throw new Error(`spawn-session/resolve returned ${resolved.data.status}`);
+    }
+    const sessionId = typeof resolved.data.sessionId === 'string' ? resolved.data.sessionId.trim() : '';
+    if (!sessionId) {
+      throw new Error('spawn-session/resolve did not return a sessionId');
+    }
+    resolvedSessionId = sessionId;
+    return true;
+  }, {
+    timeoutMs: params.timeoutMs ?? 45_000,
+    intervalMs: 50,
+    context: 'spawn-session nonce resolution',
+  });
+
+  if (!resolvedSessionId) {
+    throw new Error('Failed to resolve spawned session id from nonce');
+  }
+  return resolvedSessionId;
+}
+
 async function waitForReplacementDaemonConfirmed(params: {
   happyHomeDir: string;
   originalPid: number;
@@ -160,6 +211,8 @@ describe('core e2e: daemon overlap self-restart', () => {
       HAPPIER_E2E_PROVIDER_USE_CLI_SOURCE_ENTRYPOINT: '1',
       HAPPIER_E2E_PROVIDER_SKIP_CLI_SHARED_DEPS_BUILD: '1',
       HAPPIER_DAEMON_RESTART_VERIFY_POLL_MS: '25',
+      // Source-mode replacement startup can take several seconds under E2E lane load.
+      HAPPIER_DAEMON_RESTART_OVERLAP_EXIT_GRACE_MS: '5000',
     };
 
     daemon = await startTestDaemon({
@@ -183,10 +236,12 @@ describe('core e2e: daemon overlap self-restart', () => {
     });
     expect(spawnRes.status).toBe(200);
     expect(spawnRes.data.success).toBe(true);
-    const sessionId = spawnRes.data.sessionId;
-    if (typeof sessionId !== 'string' || sessionId.length === 0) {
-      throw new Error('Missing sessionId from daemon spawn-session');
-    }
+    const sessionId = await resolveSpawnedSessionId({
+      port: daemon.state.httpPort,
+      controlToken: daemon.state.controlToken,
+      immediateSessionId: typeof spawnRes.data.sessionId === 'string' ? spawnRes.data.sessionId : '',
+      spawnNonce: typeof spawnRes.data.spawnNonce === 'string' ? spawnRes.data.spawnNonce : '',
+    });
 
     const firstPrompt = `DAEMON_RESTART_OVERLAP_FIRST_${randomUUID()}`;
     await enqueueSessionPromptForScenario({
@@ -239,7 +294,7 @@ describe('core e2e: daemon overlap self-restart', () => {
       port: daemon.state.httpPort,
       path: '/restart',
       controlToken: daemon.state.controlToken,
-      body: { stopSessions: false },
+      body: {},
       timeoutMs: 5_000,
     });
     expect(restart.status).toBe(202);

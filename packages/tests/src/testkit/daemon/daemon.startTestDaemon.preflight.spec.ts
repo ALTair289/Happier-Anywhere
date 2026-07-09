@@ -23,6 +23,7 @@ vi.mock('../process/cliLaunchSpec', async () => {
 import {
   replaceTestDaemonWithoutStoppingSessions,
   resolveTestDaemonOwnershipLeasesDir,
+  sanitizeDaemonEnvForSpawn,
   startTestDaemon,
 } from './daemon';
 import { repoRootDir } from '../paths';
@@ -87,6 +88,16 @@ async function writeReplacementDaemonScript(scriptPath: string, opts: { serverId
 }
 
 describe('startTestDaemon', () => {
+  it('forces source subprocesses for source-entrypoint daemon tests', () => {
+    expect(sanitizeDaemonEnvForSpawn({
+      HAPPIER_E2E_PROVIDER_USE_CLI_SOURCE_ENTRYPOINT: '1',
+      HAPPIER_CLI_SUBPROCESS_PREFER_TSX: undefined,
+      HAPPIER_CLI_SUBPROCESS_DIST_ENTRYPOINT: '/stack/cli/dist/index.mjs',
+    })).toMatchObject({
+      HAPPIER_CLI_SUBPROCESS_PREFER_TSX: '1',
+    });
+  });
+
   it('defaults source-entrypoint daemon snapshots to copy-mode node_modules when unset', async () => {
     const testDir = await mkdtemp(join(tmpdir(), 'happier-daemon-source-snapshot-copy-default-'));
     const homeDir = resolve(testDir, 'home');

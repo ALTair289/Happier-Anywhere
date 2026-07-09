@@ -581,6 +581,10 @@ export function resolveTestDaemonOwnershipLeasesDir(rootDir: string = repoRootDi
 
 export function sanitizeDaemonEnvForSpawn(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const sanitized = { ...env };
+  // Source-entrypoint E2E runs must not inherit a stack's pinned-dist fast path.
+  if (shouldUseCliSourceEntrypoint(sanitized)) {
+    sanitized.HAPPIER_CLI_SUBPROCESS_PREFER_TSX = '1';
+  }
   delete sanitized.TMUX;
   delete sanitized.TMUX_PANE;
   delete sanitized.TMUX_TMPDIR;
