@@ -5,14 +5,18 @@ import type {
   ReconciledRuntimeAccountIdentityEntry,
   RuntimeAccountIdentityEntry,
   RuntimeAccountIdentityProbeResult,
+  RuntimeAccountIdentitySource,
 } from './runtimeAccountIdentityTypes';
 
 export type RuntimeIdentityFanoutSuppressionReason =
   | 'runtime_identity_probe_missing_exact_identity'
-  | 'runtime_identity_probe_account_mismatch';
+  | 'runtime_identity_probe_account_mismatch'
+  | (string & {});
 
 export type RuntimeIdentityFanoutSuppressionDiagnostic = Readonly<{
   sessionId: string;
+  probeStatus?: RuntimeAccountIdentityProbeResult['status'];
+  probeReason?: string | null;
   expectedProviderAccountId?: string | null;
   actualProviderAccountId?: string | null;
   expectedProfileId: string;
@@ -42,12 +46,14 @@ function buildSuppressionDiagnostic(input: Readonly<{
     groupGeneration: number | null;
   }>;
   groupId: string;
-  providerAccountId: string;
+  providerAccountId?: string | null;
   result: RuntimeAccountIdentityProbeResult;
 }>): RuntimeIdentityFanoutSuppressionDiagnostic {
   return {
     sessionId: input.candidate.sessionId,
-    expectedProviderAccountId: input.providerAccountId,
+    probeStatus: input.result.status,
+    probeReason: input.result.status === 'verified' ? null : input.result.reason ?? null,
+    expectedProviderAccountId: readNonEmptyString(input.providerAccountId),
     actualProviderAccountId: readNonEmptyString(
       input.result.status === 'verified' ? input.result.providerAccountId : null,
     ),
@@ -66,11 +72,20 @@ function buildSuppressionDiagnostic(input: Readonly<{
   };
 }
 
+function resolveUnavailableSuppressionReason(
+  result: RuntimeAccountIdentityProbeResult,
+): RuntimeIdentityFanoutSuppressionReason {
+  if (result.status === 'unavailable' && readNonEmptyString(result.reason)) {
+    return readNonEmptyString(result.reason) ?? 'runtime_identity_probe_missing_exact_identity';
+  }
+  return 'runtime_identity_probe_missing_exact_identity';
+}
+
 export function resolveRuntimeAccountIdentityFanoutMatch(input: Readonly<{
   strategy: ConnectedServiceSameAccountFanoutStrategy;
   serviceId: ConnectedServiceId;
   groupId: string;
-  providerAccountId: string;
+  providerAccountId?: string | null;
   candidate: Pick<
     RuntimeAccountIdentityEntry,
     'sessionId' | 'serviceId' | 'groupId' | 'profileId' | 'accountLabel' | 'groupGeneration'
@@ -91,23 +106,24 @@ export function resolveRuntimeAccountIdentityFanoutMatch(input: Readonly<{
   if (input.result.status !== 'verified' || input.result.proofStrength !== 'exact') {
     return {
       status: 'suppressed',
-      reason: 'runtime_identity_probe_missing_exact_identity',
+      reason: resolveUnavailableSuppressionReason(input.result),
       diagnostic: buildSuppressionDiagnostic(input),
     };
   }
 
   const strategy = input.result.strategy ?? 'provider_account_id';
+  const expectedProviderAccountId = readNonEmptyString(input.providerAccountId);
   const providerAccountId = readNonEmptyString(input.result.providerAccountId);
   const sharedAuthSurfaceId = readNonEmptyString(input.result.sharedAuthSurfaceId) ?? readNonEmptyString(input.result.groupId);
   if (input.strategy === 'provider_account_id') {
-    if (strategy !== 'provider_account_id' || !providerAccountId) {
+    if (strategy !== 'provider_account_id' || !providerAccountId || !expectedProviderAccountId) {
       return {
         status: 'suppressed',
         reason: 'runtime_identity_probe_missing_exact_identity',
         diagnostic: buildSuppressionDiagnostic(input),
       };
     }
-    if (providerAccountId !== input.providerAccountId) {
+    if (providerAccountId !== expectedProviderAccountId) {
       return {
         status: 'suppressed',
         reason: 'runtime_identity_probe_account_mismatch',
@@ -149,6 +165,37 @@ export function resolveRuntimeAccountIdentityFanoutMatch(input: Readonly<{
     || nextGroupId !== (input.candidate.groupId ?? input.groupId)
     || nextGroupGeneration !== input.candidate.groupGeneration
   );
+  const accountLabel = readNonEmptyString(input.result.accountLabel) ?? input.candidate.accountLabel;
+  const source = input.result.source ?? 'runtime_identity_probe';
+  const runtime = input.result.runtime ? { runtime: input.result.runtime } : {};
+
+  if (input.strategy === 'shared_group_auth_surface') {
+    return {
+      status: 'matched',
+      staleExpectedStateReconciled,
+      entry: {
+        proofStrategy: 'shared_group_auth_surface',
+        sessionId: input.candidate.sessionId,
+        serviceId: input.serviceId,
+        groupId: nextGroupId,
+        profileId: nextProfileId,
+        accountLabel,
+        observedAtMs: input.observedAtMs,
+        source: source === 'group_switch_selection' ? source : 'runtime_identity_probe',
+        proofStrength: 'exact',
+        groupGeneration: nextGroupGeneration,
+        ...runtime,
+      },
+    };
+  }
+
+  if (!providerAccountId) {
+    return {
+      status: 'suppressed',
+      reason: 'runtime_identity_probe_missing_exact_identity',
+      diagnostic: buildSuppressionDiagnostic(input),
+    };
+  }
 
   return {
     status: 'matched',
@@ -158,13 +205,13 @@ export function resolveRuntimeAccountIdentityFanoutMatch(input: Readonly<{
       serviceId: input.serviceId,
       groupId: nextGroupId,
       profileId: nextProfileId,
-      providerAccountId: providerAccountId ?? '',
-      accountLabel: readNonEmptyString(input.result.accountLabel) ?? input.candidate.accountLabel,
+      providerAccountId,
+      accountLabel,
       observedAtMs: input.observedAtMs,
-      source: input.result.source ?? 'runtime_identity_probe',
+      source: source as RuntimeAccountIdentitySource,
       proofStrength: 'exact',
       groupGeneration: nextGroupGeneration,
-      ...(input.result.runtime ? { runtime: input.result.runtime } : {}),
+      ...runtime,
     },
   };
 }

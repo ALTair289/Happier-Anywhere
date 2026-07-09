@@ -1,4 +1,8 @@
 import type { ManagedConnectionSupervisor } from '@happier-dev/connection-supervisor';
+import {
+    SessionCatchUpAuthorizationV1Schema,
+    type SessionCatchUpAuthorizationV1,
+} from '@happier-dev/protocol';
 
 import { fetchChanges } from '../changes';
 import { serializeAxiosErrorForLog } from '../client/serializeAxiosErrorForLog';
@@ -12,6 +16,18 @@ export type SessionChangesSyncReason =
     | 'socket-stale-safety-tick'
     | 'version-gap-safety-tick'
     | 'bulk-reattach-catchup';
+
+export type SessionCatchUpAuthorization = SessionCatchUpAuthorizationV1;
+
+export function readSessionCatchUpAuthorization(value: unknown): SessionCatchUpAuthorization | null {
+    const parsed = SessionCatchUpAuthorizationV1Schema.safeParse(value);
+    return parsed.success ? parsed.data : null;
+}
+
+export type SessionCatchUpRequest = Readonly<{
+    afterSeq: number;
+    authorization: SessionCatchUpAuthorization;
+}>;
 
 export function isV2ChangesSyncEnabled(flagValue: string | undefined): boolean {
     if (!flagValue) return true;
@@ -45,7 +61,7 @@ export async function runSessionChangesSyncOnConnect(params: {
     getAccountId: () => Promise<string | null>;
     readChangesCursor: (accountId: string) => Promise<number>;
     writeChangesCursor: (accountId: string, cursor: number) => Promise<void>;
-    catchUpSessionMessages: (afterSeq: number) => Promise<void>;
+    catchUpSessionMessages: (request: SessionCatchUpRequest) => Promise<void>;
     syncSessionSnapshotFromServer: (opts: { reason: SessionSnapshotRefreshReasonInput }) => Promise<void>;
     applyPendingQueueState?: (state: KnownPendingQueueState) => void;
     connectionSupervisor?: ManagedConnectionSupervisor | null;
@@ -63,7 +79,10 @@ export async function runSessionChangesSyncOnConnect(params: {
         // force a snapshot rebuild so we don't miss deletion signals.
         if (params.reason === 'reconnect') {
             try {
-                await params.catchUpSessionMessages(params.lastObservedMessageSeq);
+                await params.catchUpSessionMessages({
+                    afterSeq: params.lastObservedMessageSeq,
+                    authorization: 'reconnect_watermark',
+                });
             } catch (error) {
                 reportReconnectCatchUpFailure(params, error);
             }
@@ -84,7 +103,10 @@ export async function runSessionChangesSyncOnConnect(params: {
         // On reconnect, fall back to the snapshot-based convergence path.
         if (params.reason === 'reconnect') {
             try {
-                await params.catchUpSessionMessages(params.lastObservedMessageSeq);
+                await params.catchUpSessionMessages({
+                    afterSeq: params.lastObservedMessageSeq,
+                    authorization: 'reconnect_watermark',
+                });
             } catch (error) {
                 reportReconnectCatchUpFailure(params, error);
             }
@@ -97,9 +119,9 @@ export async function runSessionChangesSyncOnConnect(params: {
     const nextCursor = result.response.nextCursor;
 
     let transcriptCatchUpFailed = false;
-    const catchUpSessionMessages = async (afterSeq: number): Promise<void> => {
+    const catchUpSessionMessages = async (request: SessionCatchUpRequest): Promise<void> => {
         try {
-            await params.catchUpSessionMessages(afterSeq);
+            await params.catchUpSessionMessages(request);
         } catch (error) {
             transcriptCatchUpFailed = true;
             reportReconnectCatchUpFailure(params, error);
@@ -137,7 +159,10 @@ export async function runSessionChangesSyncOnConnect(params: {
         // Slow-path: too many coalesced changes. Snapshot sync gets us back to a known-good state;
         // session transcript catch-up is only needed after reconnect.
         if (params.reason === 'reconnect') {
-            await catchUpSessionMessages(params.lastObservedMessageSeq);
+            await catchUpSessionMessages({
+                afterSeq: params.lastObservedMessageSeq,
+                authorization: 'reconnect_watermark',
+            });
         }
         void params.syncSessionSnapshotFromServer({ reason: snapshotReasonForChangesFallback(params.reason) });
         if (!transcriptCatchUpFailed) {
@@ -147,11 +172,17 @@ export async function runSessionChangesSyncOnConnect(params: {
     }
 
     if (hasRelevantSessionChange && params.reason === 'reconnect') {
-        await catchUpSessionMessages(params.lastObservedMessageSeq);
+        await catchUpSessionMessages({
+            afterSeq: params.lastObservedMessageSeq,
+            authorization: 'reconnect_watermark',
+        });
         void params.syncSessionSnapshotFromServer({ reason: snapshotReasonForChangesFallback(params.reason) });
     }
     if (shouldCatchUpSessionMessages && params.reason !== 'reconnect') {
-        await catchUpSessionMessages(params.lastObservedMessageSeq);
+        await catchUpSessionMessages({
+            afterSeq: params.lastObservedMessageSeq,
+            authorization: 'reconnect_watermark',
+        });
     }
     if (shouldSyncSnapshotFallback) {
         void params.syncSessionSnapshotFromServer({ reason: snapshotReasonForChangesFallback(params.reason) });

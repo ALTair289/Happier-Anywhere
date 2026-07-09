@@ -473,6 +473,37 @@ describe('useConnectedServiceQuotaSnapshots', () => {
     await hook.unmount();
   });
 
+  it('fetches usage for an unknown/empty credential status (fails OPEN, single predicate)', async () => {
+    // Folded onto shouldHideQuotaForCredentialStatus: an absent/unknown status is
+    // presumed healthy for DISPLAY, so the snapshot still fetches. Only an EXPLICIT
+    // needs_reauth suppresses usage — the opposite (fail-closed) derivation is gone.
+    getConnectedServiceQuotaSnapshotPlainSpy.mockResolvedValue(makeQuotaSnapshot({ serviceId: 'anthropic', meterId: 'weekly' }));
+
+    const { useConnectedServiceQuotaSnapshots } = await import('./useConnectedServiceQuotaSnapshots');
+    const hook = await renderHook(() => useConnectedServiceQuotaSnapshots([
+      { serviceId: 'anthropic', profileId: 'work', credentialHealthStatus: 'mystery-status' },
+    ]));
+    await flushHookEffects({ cycles: 5, turns: 5 });
+
+    expect(getConnectedServiceQuotaSnapshotPlainSpy).toHaveBeenCalledTimes(1);
+    expect(hook.getCurrent().snapshotsByKey['anthropic/work']?.meters[0]?.meterId).toBe('weekly');
+    await hook.unmount();
+  });
+
+  it('does not fetch usage for an explicit needs_reauth credential status', async () => {
+    getConnectedServiceQuotaSnapshotPlainSpy.mockResolvedValue(makeQuotaSnapshot({ serviceId: 'anthropic', meterId: 'weekly' }));
+
+    const { useConnectedServiceQuotaSnapshots } = await import('./useConnectedServiceQuotaSnapshots');
+    const hook = await renderHook(() => useConnectedServiceQuotaSnapshots([
+      { serviceId: 'anthropic', profileId: 'work', credentialHealthStatus: 'needs_reauth' },
+    ]));
+    await flushHookEffects({ cycles: 5, turns: 5 });
+
+    expect(getConnectedServiceQuotaSnapshotPlainSpy).not.toHaveBeenCalled();
+    expect(hook.getCurrent().snapshotsByKey['anthropic/work']).toBeNull();
+    await hook.unmount();
+  });
+
   it('fetches a reliable session-bound quota snapshot even when no meters are pinned', async () => {
     getConnectedServiceQuotaSnapshotPlainSpy.mockResolvedValue(makeQuotaSnapshot({ serviceId: 'anthropic', meterId: 'weekly' }));
 

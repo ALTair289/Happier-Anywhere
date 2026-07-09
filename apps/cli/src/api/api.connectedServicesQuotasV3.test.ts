@@ -321,6 +321,36 @@ describe('ApiClient connected services quotas v3', () => {
     expect(String(vi.mocked(axios.post).mock.calls[0]?.[0])).not.toContain('/profiles/');
   });
 
+  it('logs skipped plaintext provider account usage source-link outcomes from the v3 canonical endpoint', async () => {
+    mockPost.mockResolvedValue({
+      status: 200,
+      data: {
+        success: true,
+        source: {
+          status: 'skipped',
+          reason: 'binding_unavailable',
+        },
+      },
+    });
+    const snapshot = createProviderAccountUsageSnapshot();
+
+    const api = await ApiClient.create(createTestCredentials());
+
+    await api.registerProviderAccountUsageSnapshotPlain({
+      recordId: snapshot.recordId,
+      source: {
+        serviceId: 'openai-codex',
+        profileId: 'work',
+        bindingKind: 'profile',
+      },
+      content: { t: 'plain', v: snapshot },
+      metadata: { fetchedAt: 1_000, staleAfterMs: 300_000, status: 'ok', materialFingerprint: 'fingerprint' },
+    });
+
+    expect(logger.debug).toHaveBeenCalledWith(expect.stringContaining('Provider account usage source link skipped'));
+    expect(logger.debug).toHaveBeenCalledWith(expect.stringContaining('binding_unavailable'));
+  });
+
   it('gets plaintext provider account usage snapshots from the v3 canonical endpoint by record id', async () => {
     const snapshot = createProviderAccountUsageSnapshot();
     const source = createConnectedServiceUsageSource();

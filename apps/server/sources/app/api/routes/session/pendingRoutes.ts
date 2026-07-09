@@ -40,6 +40,7 @@ function toPendingJson(row: PendingMessageRow) {
         status: row.status,
         ...(row.deliveryState ? { deliveryState: row.deliveryState } : {}),
         ...(row.deliveryBlockedReason ? { deliveryBlockedReason: row.deliveryBlockedReason } : {}),
+        deliveryStatus: row.deliveryStatus,
         position: row.position,
         createdAt: row.createdAt.getTime(),
         updatedAt: row.updatedAt.getTime(),

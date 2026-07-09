@@ -50,7 +50,7 @@ describe('materializeConnectedServicesForSpawn atomicity', () => {
     await expect(readFile(join(activeRoot, 'auth.json'), 'utf8')).resolves.toContain('live');
   });
 
-  it('does not let a superseded late materialization promote over the newer successful root', async () => {
+  it('serializes full materialization work for the same final target root', async () => {
     const baseDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-late-materialization-'));
     const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-late-materialization-server-'));
     const activeRoot = join(baseDir, normalizeMaterializationKeyForPath('session-live'), 'codex');
@@ -107,18 +107,31 @@ describe('materializeConnectedServicesForSpawn atomicity', () => {
     });
     await firstEntered;
 
-    await materializeConnectedServicesForSpawn({
+    const second = materializeConnectedServicesForSpawn({
       ...common,
       processEnv: { HAPPIER_TEST_MATERIALIZATION_LABEL: 'B' },
     });
-    await expect(readFile(join(activeRoot, 'auth.json'), 'utf8')).resolves.toContain('B');
+    const observedBeforeRelease = await Promise.race([
+      second.then(() => 'resolved' as const),
+      new Promise<'pending'>((resolve) => setTimeout(() => resolve('pending'), 10)),
+    ]);
+    expect(observedBeforeRelease).toBe('pending');
 
     releaseFirst();
-    await expect(first).rejects.toThrow(/superseded/i);
+    await expect(first).resolves.toMatchObject({
+      env: expect.objectContaining({
+        HAPPIER_TEST_AUTH_FILE: join(activeRoot, 'auth.json'),
+      }),
+    });
+    await expect(second).resolves.toMatchObject({
+      env: expect.objectContaining({
+        HAPPIER_TEST_AUTH_FILE: join(activeRoot, 'auth.json'),
+      }),
+    });
     await expect(readFile(join(activeRoot, 'auth.json'), 'utf8')).resolves.toContain('B');
   });
 
-  it('rejects an env-only attempt superseded after it reaches promotion', async () => {
+  it('serializes env-only promotion attempts for the same final target root', async () => {
     const baseDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-promotion-race-'));
     const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-promotion-race-server-'));
     const attemptRootByLabel = new Map<string, string>();
@@ -183,9 +196,18 @@ describe('materializeConnectedServicesForSpawn atomicity', () => {
       ...common,
       processEnv: { HAPPIER_TEST_MATERIALIZATION_LABEL: 'B' },
     });
+    const observedBeforeRelease = await Promise.race([
+      second.then(() => 'resolved' as const),
+      new Promise<'pending'>((resolve) => setTimeout(() => resolve('pending'), 10)),
+    ]);
+    expect(observedBeforeRelease).toBe('pending');
     releaseFirstPromotion();
 
-    await expect(first).rejects.toThrow(/superseded/i);
+    await expect(first).resolves.toMatchObject({
+      env: expect.objectContaining({
+        HAPPIER_TEST_ENV_ONLY_LABEL: 'A',
+      }),
+    });
     await expect(second).resolves.toMatchObject({
       env: expect.objectContaining({
         HAPPIER_TEST_ENV_ONLY_LABEL: 'B',

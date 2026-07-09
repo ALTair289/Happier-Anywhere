@@ -5,6 +5,7 @@ import {
 import { createSessionMutationDeadLetterEntry } from './sessionMutationPersistence';
 import type { QueuedSessionMutation } from './sessionMutationTypes';
 import type { SessionMutationDeadLetterEntry } from './sessionMutationPersistence';
+import { isAuthoritativeSessionMutation } from './sessionMutationDurabilityPolicy';
 
 export type SessionMutationDeliveredPath =
     | 'socket'
@@ -40,6 +41,7 @@ export function shouldDeadLetterFailedMutation(
     now: number,
     outcome?: Exclude<SessionMutationDeliveryOutcome, { status: 'delivered' }>,
 ): boolean {
+    if (isAuthoritativeSessionMutation(mutation)) return false;
     if (outcome?.status === 'unsupported_capability' && mutation.kind === 'session_turn') return false;
     const maxAgeMs = resolveSessionMutationMaxAgeMs();
     return (

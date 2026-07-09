@@ -228,13 +228,12 @@ describe("connectRoutes (connected services quotas v2) sealed quota endpoints", 
             reason: "connected_service_usage_source_incompatible",
         });
 
-        expect(await db.connectedServiceUsageSource.findUnique({
+        expect(await db.connectedServiceUsageSource.findFirst({
             where: {
-                accountId_serviceId_profileId: {
                     accountId: user.id,
                     serviceId: "openai-codex",
                     profileId: "work",
-                },
+                
             },
             select: { id: true },
         })).toBeNull();
@@ -440,13 +439,12 @@ describe("connectRoutes (connected services quotas v2) sealed quota endpoints", 
         });
         expect(deleted.statusCode).toBe(200);
 
-        expect(await db.connectedServiceUsageSource.findUnique({
+        expect(await db.connectedServiceUsageSource.findFirst({
             where: {
-                accountId_serviceId_profileId: {
                     accountId: user.id,
                     serviceId: "openai-codex",
                     profileId: "work",
-                },
+                
             },
             select: { id: true },
         })).toBeNull();

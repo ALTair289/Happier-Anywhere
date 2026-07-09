@@ -18,6 +18,7 @@ type IoniconName = React.ComponentProps<typeof Ionicons>['name'];
 
 const RESET_COUNTDOWN_FORMATTER: ResetCountdownFormatter = {
   durationNow: () => t('connectedServices.quota.duration.now'),
+  durationOutdated: () => t('connectedServices.quota.duration.outdated'),
   durationDaysHours: ({ days, hours }) => t('connectedServices.quota.duration.daysHours', { days, hours }),
   durationHoursMinutes: ({ hours, minutes }) => t('connectedServices.quota.duration.hoursMinutes', { hours, minutes }),
   durationHours: ({ hours }) => t('connectedServices.quota.duration.hours', { hours }),
@@ -81,7 +82,7 @@ export const ConnectedServiceQuotaMeterRow = React.memo(function ConnectedServic
           testID="connected-service-quota-meter-row:remaining-bar"
           style={styles.bar}
           tone={tone}
-          value={(remaining ?? 0) / 100}
+          fillFraction={(remaining ?? 0) / 100}
         />
         <Text style={styles.rightText}>{right}</Text>
       </View>

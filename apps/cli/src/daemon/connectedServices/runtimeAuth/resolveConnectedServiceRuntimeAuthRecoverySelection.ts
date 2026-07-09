@@ -51,6 +51,18 @@ function matchesReportedGroupId(
   return selection?.kind === 'group' && selection.groupId === reportedGroupId;
 }
 
+function shouldUseDurableSelection<TSelection extends RuntimeRecoverySelection>(
+  selection: TSelection | null,
+  reportedGroupId: string,
+  preferDurableGroup: boolean,
+): selection is TSelection {
+  if (!selection) return false;
+  if (selection.kind === 'profile') return true;
+  return !preferDurableGroup
+    || !reportedGroupId
+    || matchesReportedGroupId(selection, reportedGroupId);
+}
+
 export function isGroupRuntimeRecoverySelection(
   selection: RuntimeRecoverySelection,
 ): selection is Extract<RuntimeRecoverySelection, Readonly<{ kind: 'group' }>> {
@@ -73,16 +85,7 @@ export function resolveConnectedServiceRuntimeAuthRecoverySelection(input: Reado
   const childEnvSelection = readConnectedServiceChildSelectionsFromEnv(
     input.environmentVariables ?? {},
   ).find((candidate) => candidate.serviceId === serviceId) ?? null;
-  if (
-    childEnvSelection
-    && (
-      !preferDurableGroup
-      || (
-        childEnvSelection.kind === 'group'
-        && (!reportedGroupId || matchesReportedGroupId(childEnvSelection, reportedGroupId))
-      )
-    )
-  ) {
+  if (shouldUseDurableSelection(childEnvSelection, reportedGroupId, preferDurableGroup)) {
     if (childEnvSelection.kind === 'profile') {
       return {
         selection: {
@@ -108,16 +111,7 @@ export function resolveConnectedServiceRuntimeAuthRecoverySelection(input: Reado
   const trackedSelection = parseConnectedServiceBindingSelections(
     input.trackedConnectedServices,
   ).find((candidate) => candidate.serviceId === serviceId) ?? null;
-  if (
-    trackedSelection
-    && (
-      !preferDurableGroup
-      || (
-        trackedSelection.kind === 'group'
-        && (!reportedGroupId || matchesReportedGroupId(trackedSelection, reportedGroupId))
-      )
-    )
-  ) {
+  if (shouldUseDurableSelection(trackedSelection, reportedGroupId, preferDurableGroup)) {
     return {
       selection: mapParsedBindingSelectionToRuntimeRecoverySelection(trackedSelection, reportedProfileId),
       source: 'tracked_spawn_options',
@@ -127,16 +121,7 @@ export function resolveConnectedServiceRuntimeAuthRecoverySelection(input: Reado
   const metadataSelection = parseConnectedServiceBindingSelections(
     input.sessionMetadataConnectedServices,
   ).find((candidate) => candidate.serviceId === serviceId) ?? null;
-  if (
-    metadataSelection
-    && (
-      !preferDurableGroup
-      || (
-        metadataSelection.kind === 'group'
-        && (!reportedGroupId || matchesReportedGroupId(metadataSelection, reportedGroupId))
-      )
-    )
-  ) {
+  if (shouldUseDurableSelection(metadataSelection, reportedGroupId, preferDurableGroup)) {
     return {
       selection: mapParsedBindingSelectionToRuntimeRecoverySelection(metadataSelection, reportedProfileId),
       source: 'session_metadata',

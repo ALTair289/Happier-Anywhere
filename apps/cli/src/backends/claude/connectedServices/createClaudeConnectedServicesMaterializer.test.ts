@@ -1,8 +1,10 @@
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { PassThrough, Writable } from 'node:stream';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { buildConnectedServiceCredentialRecord } from '@happier-dev/protocol';
 
@@ -10,17 +12,60 @@ import {
   HAPPIER_CONNECTED_SERVICE_MATERIALIZED_ENV_KEYS_ENV_KEY,
   HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY,
 } from '@/daemon/connectedServices/connectedServiceChildEnvironment';
+import { logger } from '@/ui/logger';
 
 import { createClaudeConnectedServicesMaterializer } from './createClaudeConnectedServicesMaterializer';
-import { buildClaudeConnectedServiceHomeProvenance } from './claudeConnectedServiceHomeProvenance';
+import {
+  buildClaudeConnectedServiceHomeProvenance,
+  resolveClaudeConnectedServiceHomeProvenancePath,
+} from './claudeConnectedServiceHomeProvenance';
 import { CLAUDE_CODE_RECOMMENDED_OAUTH_SCOPE } from './nativeAuth/claudeCodeCredentialScopes';
+import { resolveClaudeCodeMacOsKeychainServiceName } from './nativeAuth/claudeCodeMacOsKeychain';
 import { syncClaudeConnectedServiceHome } from './syncClaudeConnectedServiceHome';
+
+const { spawnSpy } = vi.hoisted(() => ({
+  spawnSpy: vi.fn(),
+}));
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    spawn: spawnSpy,
+  };
+});
 
 const REALISTIC_ISSUED_AT_MS = Date.parse('2026-06-05T12:00:00.000Z');
 const REALISTIC_EXPIRES_AT_MS = REALISTIC_ISSUED_AT_MS + 60 * 60 * 1000;
 const ORIGINAL_PLATFORM_DESCRIPTOR = Object.getOwnPropertyDescriptor(process, 'platform');
 
+function buildClaudeSubscriptionRecord(params: Readonly<{
+  accessToken?: string;
+  refreshToken?: string;
+  now?: number;
+  expiresAt?: number;
+}> = {}) {
+  return buildConnectedServiceCredentialRecord({
+    now: params.now ?? REALISTIC_ISSUED_AT_MS,
+    serviceId: 'claude-subscription',
+    profileId: 'oauth-profile',
+    kind: 'oauth',
+    expiresAt: params.expiresAt ?? REALISTIC_EXPIRES_AT_MS,
+    oauth: {
+      accessToken: params.accessToken ?? 'selected-access-placeholder',
+      refreshToken: params.refreshToken ?? 'selected-refresh-placeholder',
+      idToken: null,
+      scope: CLAUDE_CODE_RECOMMENDED_OAUTH_SCOPE,
+      tokenType: 'Bearer',
+      providerAccountId: null,
+      providerEmail: null,
+    },
+  });
+}
+
 describe('createClaudeConnectedServicesMaterializer', () => {
+  const securityInputs: string[] = [];
+
   beforeEach(() => {
     if (ORIGINAL_PLATFORM_DESCRIPTOR) {
       Object.defineProperty(process, 'platform', { ...ORIGINAL_PLATFORM_DESCRIPTOR, value: 'linux' });
@@ -31,7 +76,41 @@ describe('createClaudeConnectedServicesMaterializer', () => {
     if (ORIGINAL_PLATFORM_DESCRIPTOR) {
       Object.defineProperty(process, 'platform', ORIGINAL_PLATFORM_DESCRIPTOR);
     }
+    spawnSpy.mockReset();
+    securityInputs.length = 0;
   });
+
+  function mockSecurityProcess(result: Readonly<{ status: number | null; stdout?: string; stderr?: string }>) {
+    const child = new EventEmitter() as EventEmitter & {
+      stdin: Writable;
+      stdout: PassThrough;
+      stderr: PassThrough;
+      kill: ReturnType<typeof vi.fn>;
+    };
+    child.stdin = new Writable({
+      write(chunk, _encoding, callback) {
+        securityInputs.push(String(chunk));
+        callback();
+      },
+    });
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.kill = vi.fn();
+    queueMicrotask(() => {
+      if (result.stdout) child.stdout.write(result.stdout);
+      if (result.stderr) child.stderr.write(result.stderr);
+      child.stdout.end();
+      child.stderr.end();
+      child.emit('close', result.status);
+    });
+    return child;
+  }
+
+  function mockSecuritySpawn(
+    resolve: (args: readonly string[]) => Readonly<{ status: number | null; stdout?: string; stderr?: string }>,
+  ): void {
+    spawnSpy.mockImplementation((_command: string, args: readonly string[]) => mockSecurityProcess(resolve(args)));
+  }
 
   it('strips ambient Claude credentials and writes selected OAuth as native Claude Code credentials', async () => {
     const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-claude-materializer-server-'));
@@ -100,7 +179,7 @@ describe('createClaudeConnectedServicesMaterializer', () => {
 
     const credential = JSON.parse(await readFile(join(result!.env.CLAUDE_CONFIG_DIR!, '.credentials.json'), 'utf8'));
     expect(credential.claudeAiOauth.accessToken).toBe('selected-access-placeholder');
-    expect(credential.claudeAiOauth.refreshToken).toBe('selected-refresh-placeholder');
+    expect(credential.claudeAiOauth).not.toHaveProperty('refreshToken');
     expect(credential.claudeAiOauth.accessToken).not.toBe('ambient-access-placeholder');
     expect(credential.claudeAiOauth.scopes).toContain('user:sessions:claude_code');
     expect(credential.claudeAiOauth.expiresAt).toBe(REALISTIC_EXPIRES_AT_MS);
@@ -246,6 +325,251 @@ describe('createClaudeConnectedServicesMaterializer', () => {
     expect(credential.claudeAiOauth.accessToken).toBe('selected-access-placeholder');
   });
 
+  it('commits the macOS keychain credential before returning spawn materialization', async () => {
+    if (ORIGINAL_PLATFORM_DESCRIPTOR) {
+      Object.defineProperty(process, 'platform', { ...ORIGINAL_PLATFORM_DESCRIPTOR, value: 'darwin' });
+    }
+    mockSecuritySpawn((args) => {
+      if (args[0] === 'find-generic-password') return { status: 44, stderr: 'missing keychain entry' };
+      return { status: 0 };
+    });
+    const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-claude-materializer-server-'));
+    const rootDir = await mkdtemp(join(tmpdir(), 'happier-claude-materializer-root-'));
+    const homeDir = await mkdtemp(join(tmpdir(), 'happier-claude-materializer-home-'));
+    const sourceClaudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-source-config-'));
+    await writeFile(join(sourceClaudeConfigDir, 'settings.json'), '{"theme":"source"}\n');
+    const record = buildConnectedServiceCredentialRecord({
+      now: REALISTIC_ISSUED_AT_MS,
+      serviceId: 'claude-subscription',
+      profileId: 'oauth-profile',
+      kind: 'oauth',
+      expiresAt: REALISTIC_EXPIRES_AT_MS,
+      oauth: {
+        accessToken: 'selected-access-placeholder',
+        refreshToken: 'selected-refresh-placeholder',
+        idToken: null,
+        scope: CLAUDE_CODE_RECOMMENDED_OAUTH_SCOPE,
+        tokenType: 'Bearer',
+        providerAccountId: null,
+        providerEmail: null,
+      },
+    });
+
+    const result = await createClaudeConnectedServicesMaterializer()({
+      agentId: 'claude',
+      activeServerDir,
+      rootDir,
+      recordsByServiceId: new Map([['claude-subscription', record]]),
+      processEnv: {
+        CLAUDE_CONFIG_DIR: sourceClaudeConfigDir,
+        HOME: homeDir,
+        USER: 'tester',
+      },
+      cleanupRoot: () => {},
+    });
+
+    expect(result).not.toBeNull();
+    const expectedClaudeConfigDir = join(
+      activeServerDir,
+      'daemon',
+      'connected-services',
+      'homes',
+      'claude-subscription',
+      'oauth-profile',
+      'claude',
+      'claude-config',
+    );
+    expect(spawnSpy).toHaveBeenCalledWith(
+      'security',
+      [
+        'add-generic-password',
+        '-U',
+        '-a',
+        'tester',
+        '-s',
+        resolveClaudeCodeMacOsKeychainServiceName({
+          claudeConfigDir: expectedClaudeConfigDir,
+          homeDir,
+        }),
+        '-w',
+      ],
+      expect.objectContaining({ stdio: ['pipe', 'pipe', 'pipe'] }),
+    );
+    expect(securityInputs.join('')).toContain('selected-access-placeholder');
+    expect(securityInputs.join('')).not.toContain('selected-refresh-placeholder');
+    expect(spawnSpy.mock.calls.some(([, args]) => Array.isArray(args) && args[0] === 'dump-keychain')).toBe(false);
+    expect(spawnSpy.mock.calls.some(([, args]) => Array.isArray(args) && args[0] === 'delete-generic-password')).toBe(false);
+    const provenance = JSON.parse(
+      await readFile(resolveClaudeConnectedServiceHomeProvenancePath(expectedClaudeConfigDir), 'utf8'),
+    );
+    expect(provenance.macOsKeychainCredential).toEqual({
+      credentialFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+      writtenAtMs: expect.any(Number),
+    });
+  });
+
+  it('skips stable credential and keychain writes when the keychain is unreadable but last-written provenance matches', async () => {
+    if (ORIGINAL_PLATFORM_DESCRIPTOR) {
+      Object.defineProperty(process, 'platform', { ...ORIGINAL_PLATFORM_DESCRIPTOR, value: 'darwin' });
+    }
+    mockSecuritySpawn((args) => {
+      if (args[0] === 'find-generic-password') return { status: 44, stderr: 'missing keychain entry' };
+      if (args[0] === 'dump-keychain') return { status: 0, stdout: '' };
+      return { status: 0 };
+    });
+    const loggerInfoSpy = vi.spyOn(logger, 'info').mockImplementation(() => undefined);
+    try {
+      const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-claude-materializer-server-'));
+      const rootDir = await mkdtemp(join(tmpdir(), 'happier-claude-materializer-root-'));
+      const homeDir = await mkdtemp(join(tmpdir(), 'happier-claude-materializer-home-'));
+      const sourceClaudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-source-config-'));
+      await writeFile(join(sourceClaudeConfigDir, 'settings.json'), '{"theme":"source"}\n');
+      const record = buildClaudeSubscriptionRecord();
+      const materializer = createClaudeConnectedServicesMaterializer();
+      const materialize = async () => await materializer({
+        agentId: 'claude',
+        activeServerDir,
+        rootDir,
+        recordsByServiceId: new Map([['claude-subscription', record]]),
+        selectionsByServiceId: new Map([['claude-subscription', {
+          kind: 'group',
+          serviceId: 'claude-subscription',
+          groupId: 'claude-team',
+          activeProfileId: 'oauth-profile',
+          fallbackProfileId: 'fallback-profile',
+          generation: 7,
+          record,
+          policy: null,
+        }]]),
+        processEnv: {
+          CLAUDE_CONFIG_DIR: sourceClaudeConfigDir,
+          HOME: homeDir,
+          USER: 'tester',
+        },
+        cleanupRoot: () => {},
+      });
+
+      await expect(materialize()).resolves.not.toBeNull();
+      loggerInfoSpy.mockClear();
+      spawnSpy.mockClear();
+      securityInputs.length = 0;
+
+      const second = await materialize();
+
+      expect(second).not.toBeNull();
+      const credentialWriteEvents = loggerInfoSpy.mock.calls.filter(([, metadata]) => {
+        const event = metadata as { event?: unknown; decision?: unknown } | undefined;
+        return event?.event === 'claude_code_credential_file_decision'
+          && event.decision === 'write';
+      });
+      expect(credentialWriteEvents).toHaveLength(0);
+      expect(spawnSpy.mock.calls.some(([, args]) => Array.isArray(args) && args[0] === 'add-generic-password')).toBe(false);
+      expect(spawnSpy.mock.calls.some(([, args]) => Array.isArray(args) && args[0] === 'dump-keychain')).toBe(false);
+      expect(loggerInfoSpy).toHaveBeenCalledWith(
+        '[DAEMON RUN] Claude Code keychain credential decision',
+        expect.objectContaining({
+          homeKind: 'group',
+          decision: 'skip_provenance_match',
+          comparatorBasis: expect.objectContaining({ existing: null }),
+          provenanceBasis: expect.objectContaining({
+            incomingMatchesLastWritten: true,
+            newerExternalChangeDetected: false,
+          }),
+        }),
+      );
+    } finally {
+      loggerInfoSpy.mockRestore();
+    }
+  });
+
+  it('rewrites the credential file when the materialized credential fingerprint changes', async () => {
+    if (ORIGINAL_PLATFORM_DESCRIPTOR) {
+      Object.defineProperty(process, 'platform', { ...ORIGINAL_PLATFORM_DESCRIPTOR, value: 'darwin' });
+    }
+    mockSecuritySpawn((args) => {
+      if (args[0] === 'find-generic-password') return { status: 44, stderr: 'keychain item is not readable by this process' };
+      return { status: 0 };
+    });
+    const loggerInfoSpy = vi.spyOn(logger, 'info').mockImplementation(() => undefined);
+    try {
+      const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-claude-materializer-server-'));
+      const rootDir = await mkdtemp(join(tmpdir(), 'happier-claude-materializer-root-'));
+      const homeDir = await mkdtemp(join(tmpdir(), 'happier-claude-materializer-home-'));
+      const sourceClaudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-source-config-'));
+      await writeFile(join(sourceClaudeConfigDir, 'settings.json'), '{"theme":"source"}\n');
+      const firstRecord = buildClaudeSubscriptionRecord({
+        accessToken: 'selected-access-v1-placeholder',
+        refreshToken: 'selected-refresh-v1-placeholder',
+      });
+      const secondRecord = buildClaudeSubscriptionRecord({
+        accessToken: 'selected-access-v2-placeholder',
+        refreshToken: 'selected-refresh-v2-placeholder',
+        now: REALISTIC_ISSUED_AT_MS + 1,
+      });
+      const materializer = createClaudeConnectedServicesMaterializer();
+
+      const first = await materializer({
+        agentId: 'claude',
+        activeServerDir,
+        rootDir,
+        recordsByServiceId: new Map([['claude-subscription', firstRecord]]),
+        processEnv: {
+          CLAUDE_CONFIG_DIR: sourceClaudeConfigDir,
+          HOME: homeDir,
+          USER: 'tester',
+        },
+        cleanupRoot: () => {},
+      });
+      expect(first).not.toBeNull();
+      const firstProvenance = JSON.parse(
+        await readFile(resolveClaudeConnectedServiceHomeProvenancePath(first!.env.CLAUDE_CONFIG_DIR!), 'utf8'),
+      );
+      loggerInfoSpy.mockClear();
+      spawnSpy.mockClear();
+
+      const second = await materializer({
+        agentId: 'claude',
+        activeServerDir,
+        rootDir,
+        recordsByServiceId: new Map([['claude-subscription', secondRecord]]),
+        processEnv: {
+          CLAUDE_CONFIG_DIR: sourceClaudeConfigDir,
+          HOME: homeDir,
+          USER: 'tester',
+        },
+        cleanupRoot: () => {},
+      });
+
+      expect(second).not.toBeNull();
+      const credentialWriteEvents = loggerInfoSpy.mock.calls.filter(([, metadata]) => {
+        const event = metadata as { event?: unknown; decision?: unknown } | undefined;
+        return event?.event === 'claude_code_credential_file_decision'
+          && event.decision === 'write';
+      });
+      expect(credentialWriteEvents.length).toBeGreaterThan(0);
+      const credential = JSON.parse(await readFile(join(second!.env.CLAUDE_CONFIG_DIR!, '.credentials.json'), 'utf8'));
+      expect(credential.claudeAiOauth.accessToken).toBe('selected-access-v2-placeholder');
+      expect(spawnSpy.mock.calls.filter(([, args]) => Array.isArray(args) && args[0] === 'add-generic-password')).toHaveLength(1);
+      const secondProvenance = JSON.parse(
+        await readFile(resolveClaudeConnectedServiceHomeProvenancePath(second!.env.CLAUDE_CONFIG_DIR!), 'utf8'),
+      );
+      expect(secondProvenance.macOsKeychainCredential.credentialFingerprint).not.toBe(
+        firstProvenance.macOsKeychainCredential.credentialFingerprint,
+      );
+      expect(loggerInfoSpy).toHaveBeenCalledWith(
+        '[DAEMON RUN] Claude Code keychain credential decision',
+        expect.objectContaining({
+          decision: 'write',
+          provenanceBasis: expect.objectContaining({
+            incomingMatchesLastWritten: false,
+          }),
+        }),
+      );
+    } finally {
+      loggerInfoSpy.mockRestore();
+    }
+  });
+
   it('preserves the previous stable native credential file when rematerialization fails closed', async () => {
     const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-claude-materializer-server-'));
     const rootDir = await mkdtemp(join(tmpdir(), 'happier-claude-materializer-root-'));
@@ -318,7 +642,7 @@ describe('createClaudeConnectedServicesMaterializer', () => {
     }));
     const preservedCredential = JSON.parse(await readFile(credentialPath, 'utf8'));
     expect(preservedCredential.claudeAiOauth.accessToken).toBe('stable-access-placeholder');
-    expect(preservedCredential.claudeAiOauth.refreshToken).toBe('stable-refresh-placeholder');
+    expect(preservedCredential.claudeAiOauth).not.toHaveProperty('refreshToken');
   });
 
   it('re-materializes an existing stable profile home from the real Claude source env instead of self-sourcing stale target state', async () => {

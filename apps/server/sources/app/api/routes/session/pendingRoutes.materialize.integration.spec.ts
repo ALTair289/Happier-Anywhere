@@ -12,6 +12,7 @@ const markAccountChanged = vi.fn(async () => 10);
 const refreshSessionParticipantBadgePushes = vi.fn(async () => {});
 
 const materializeNextPendingMessage = vi.fn();
+const listPendingMessages = vi.fn();
 const resolveAcceptedPendingDelivery = vi.fn();
 const reconcileAcceptedPendingDeliveriesThroughSeq = vi.fn();
 const blockPendingDeliveriesOnProviderAttach = vi.fn();
@@ -40,6 +41,7 @@ vi.mock("@/app/session/pending/pendingMessageService", async (importOriginal) =>
     const actual = await importOriginal<typeof import("@/app/session/pending/pendingMessageService")>();
     return {
         ...actual,
+        listPendingMessages,
         materializeNextPendingMessage,
         resolveAcceptedPendingDelivery,
         reconcileAcceptedPendingDeliveriesThroughSeq,
@@ -66,6 +68,7 @@ describe("sessionPendingRoutes (materialize-next)", () => {
         refreshSessionParticipantBadgePushes.mockReset();
         refreshSessionParticipantBadgePushes.mockResolvedValue(undefined);
         materializeNextPendingMessage.mockReset();
+        listPendingMessages.mockReset();
         resolveAcceptedPendingDelivery.mockReset();
         reconcileAcceptedPendingDeliveriesThroughSeq.mockReset();
         blockPendingDeliveriesOnProviderAttach.mockReset();
@@ -73,6 +76,61 @@ describe("sessionPendingRoutes (materialize-next)", () => {
         retryPendingDelivery.mockReset();
         markPendingDeliveryHandled.mockReset();
         updatePendingMessage.mockReset();
+    });
+
+    it("projects typed deliveryStatus in pending GET responses while retaining raw delivery fields", async () => {
+        const createdAt = new Date(1_000);
+        const updatedAt = new Date(2_000);
+        listPendingMessages.mockResolvedValueOnce({
+            ok: true,
+            pending: [
+                {
+                    localId: "l-blocked",
+                    messageRole: "user",
+                    content: { t: "plain", v: { role: "user", content: { type: "text", text: "hello" } } },
+                    status: "queued",
+                    deliveryState: "blocked",
+                    deliveryBlockedReason: "terminal_composer_draft",
+                    deliveryStatus: { status: "blocked", reason: "terminal_composer_draft" },
+                    position: 1,
+                    createdAt,
+                    updatedAt,
+                    discardedAt: null,
+                    discardedReason: null,
+                    authorAccountId: "actor",
+                },
+            ],
+        });
+
+        const { sessionPendingRoutes } = await import("./pendingRoutes");
+        const route = createRouteTestBuilder({
+            method: "GET",
+            path: "/v2/sessions/:sessionId/pending",
+            registerRoutes(app) {
+                sessionPendingRoutes(app as any);
+            },
+        });
+        const { response: res } = await route.invoke({
+            userId: "actor",
+            params: { sessionId: "s1" },
+        });
+
+        expect(listPendingMessages).toHaveBeenCalledWith({
+            actorUserId: "actor",
+            sessionId: "s1",
+            includeDiscarded: false,
+        });
+        expect(res).toEqual({
+            pending: [
+                expect.objectContaining({
+                    localId: "l-blocked",
+                    status: "queued",
+                    deliveryState: "blocked",
+                    deliveryBlockedReason: "terminal_composer_draft",
+                    deliveryStatus: { status: "blocked", reason: "terminal_composer_draft" },
+                }),
+            ],
+        });
     });
 
     it("emits new-message and pending-changed updates on successful materialization", async () => {

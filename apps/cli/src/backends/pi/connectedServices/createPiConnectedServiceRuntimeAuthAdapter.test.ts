@@ -1,8 +1,16 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
+import {
+  getBrokerBridgeEffectiveSelectionForTest,
+  resetBrokerBridgeEffectiveSelectionsForTests,
+} from '@/daemon/connectedServices/broker/brokerBridgeEffectiveSelectionRegistry';
 import { createPiConnectedServiceRuntimeAuthAdapter } from './createPiConnectedServiceRuntimeAuthAdapter';
 
 describe('createPiConnectedServiceRuntimeAuthAdapter', () => {
+  afterEach(() => {
+    resetBrokerBridgeEffectiveSelectionsForTests();
+  });
+
   it('classifies Pi assistant usage-limit messages for the matching connected-service group', () => {
     const adapter = createPiConnectedServiceRuntimeAuthAdapter();
 
@@ -145,6 +153,41 @@ describe('createPiConnectedServiceRuntimeAuthAdapter', () => {
     expect(classification?.limitCategory).toBeUndefined();
   });
 
+  it('does not attribute untagged provider errors to the first selection when multiple selections are active', () => {
+    const adapter = createPiConnectedServiceRuntimeAuthAdapter();
+
+    const classification = adapter.classifyRuntimeAuthFailure({
+      target: { agentId: 'pi', targetId: 'pi-session-1' },
+      error: {
+        message: {
+          role: 'assistant',
+          stopReason: 'error',
+          errorMessage: 'Usage limit reached. Please try again later.',
+        },
+      },
+      selection: new Map([
+        ['openai-codex', {
+          kind: 'group',
+          serviceId: 'openai-codex',
+          groupId: 'openai-main',
+          activeProfileId: 'openai-primary',
+          fallbackProfileId: 'openai-backup',
+          generation: 3,
+        }],
+        ['claude-subscription', {
+          kind: 'group',
+          serviceId: 'claude-subscription',
+          groupId: 'claude-main',
+          activeProfileId: 'claude-primary',
+          fallbackProfileId: 'claude-backup',
+          generation: 4,
+        }],
+      ]),
+    });
+
+    expect(classification).toBeNull();
+  });
+
   it('reports restart-rematerialize adoption as weakly_verified — no live provider probe runs (RD-OPI-8)', async () => {
     const adapter = createPiConnectedServiceRuntimeAuthAdapter();
 
@@ -166,6 +209,49 @@ describe('createPiConnectedServiceRuntimeAuthAdapter', () => {
     })).resolves.toEqual({
       recovered: true,
       recovery: 'restart_rematerialize',
+    });
+  });
+
+  it('hot-applies brokered account swaps by bumping the daemon broker selection epoch', async () => {
+    const adapter = createPiConnectedServiceRuntimeAuthAdapter();
+
+    await expect(adapter.hotApply({
+      target: { agentId: 'pi' },
+      selection: {
+        serviceId: 'claude-subscription',
+        brokerSelectionIdentity: 'pi|connected|broker:1|claude-subscription:acct-old:',
+        kind: 'group',
+        groupId: 'main',
+        activeProfileId: 'profile-new',
+        fallbackProfileId: 'profile-old',
+        generation: 12,
+        record: { serviceId: 'claude-subscription', profileId: 'profile-new' },
+      },
+    })).resolves.toEqual({
+      applied: true,
+      recovery: 'provider_owned_broker_selection',
+      verification: {
+        status: 'weakly_verified',
+        proofStrength: 'weak',
+        sharedAuthSurfaceId: 'pi|connected|broker:1|claude-subscription:acct-old:',
+        source: 'broker_selection_indirection',
+        reason: 'daemon_broker_selection_epoch_bumped',
+      },
+    });
+
+    expect(getBrokerBridgeEffectiveSelectionForTest({
+      selectionIdentity: 'pi|connected|broker:1|claude-subscription:acct-old:',
+      serviceId: 'claude-subscription',
+    })).toMatchObject({
+      selectionEpoch: 1,
+      selection: {
+        kind: 'group',
+        serviceId: 'claude-subscription',
+        groupId: 'main',
+        activeProfileId: 'profile-new',
+        fallbackProfileId: 'profile-old',
+        generation: 12,
+      },
     });
   });
 });

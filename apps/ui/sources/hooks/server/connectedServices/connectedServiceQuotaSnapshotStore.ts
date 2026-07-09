@@ -45,6 +45,7 @@ export type QuotaSnapshotLoadContext = Readonly<{
 
 export type QuotaRecoveryConsumeContext = QuotaSnapshotLoadContext & Readonly<{
     machineId: string;
+    serverId?: string | null;
     providerCreditId?: string | null;
 }>;
 
@@ -353,6 +354,7 @@ export async function consumeQuotaRecoveryCredit(
     try {
         const result = await connectedServiceQuotaRecoveryCreditConsume({
             machineId: ctx.machineId,
+            ...(ctx.serverId ? { serverId: ctx.serverId } : {}),
             serviceId: ctx.serviceId,
             profileId: ctx.profileId,
             ...(ctx.providerCreditId ? { providerCreditId: ctx.providerCreditId } : {}),

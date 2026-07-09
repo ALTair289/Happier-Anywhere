@@ -9,6 +9,7 @@ import {
     accountSettingsParse,
     isSessionRuntimeActivityProjectionIdleForPendingDrain,
     isStoredContentKindAllowedForSessionByStoragePolicy,
+    pendingDeliveryStatusV1ToPersistedFields,
     type SessionMessageRole,
     type SessionPendingQueueDeliveryTiming,
     type SessionStoredContentKind,
@@ -337,9 +338,10 @@ async function materializeNextPendingMessageWithRaceRetry(params: {
                     }
                 }
 
+                const delivering = pendingDeliveryStatusV1ToPersistedFields({ status: "delivering" });
                 const claimed = await tx.sessionPendingMessage.updateMany({
                     where: { sessionId, localId, ...pendingMessageMaterializationWhere },
-                    data: { deliveryState: "delivering", deliveryBlockedReason: null },
+                    data: { deliveryState: delivering.deliveryState, deliveryBlockedReason: delivering.deliveryBlockedReason },
                 });
                 if (claimed.count === 0) {
                     const latestSession = await tx.session.findUniqueOrThrow({

@@ -198,13 +198,14 @@ describe('materializePiConnectedServiceAuth', () => {
 
   it('brokers Claude subscription OAuth: NO refresh token reaches Pi (auth.json/env/extension)', async () => {
     const now = Date.now();
+    const providerExpiresAt = now + 60_000;
     const rootDir = await mkdtemp(join(tmpdir(), 'happier-pi-auth-'));
     const claudeSubscription = buildConnectedServiceCredentialRecord({
       now,
       serviceId: 'claude-subscription',
       profileId: 'claude-pro-oauth',
       kind: 'oauth',
-      expiresAt: now + 60_000,
+      expiresAt: providerExpiresAt,
       oauth: {
         accessToken: 'claude-access-token-SECRET',
         refreshToken: 'claude-refresh-token-MUST-NOT-LEAK',
@@ -234,7 +235,12 @@ describe('materializePiConnectedServiceAuth', () => {
     expect(isPiBrokerMarker(auth.anthropic.refresh)).toBe(true);
     expect(auth.anthropic.refresh).not.toBe('claude-refresh-token-MUST-NOT-LEAK');
     expect(auth.anthropic.access).toBe('claude-access-token-SECRET');
-    expect(auth.anthropic.expires).toBe(claudeSubscription.expiresAt);
+    const anthropicExpires = auth.anthropic.expires;
+    expect(typeof anthropicExpires).toBe('number');
+    if (typeof anthropicExpires !== 'number') throw new Error('expected_brokered_anthropic_expiry');
+    expect(anthropicExpires).toBeGreaterThanOrEqual(now);
+    expect(anthropicExpires).toBeLessThanOrEqual(now + 11_000);
+    expect(anthropicExpires).toBeLessThan(providerExpiresAt);
     expect(auth.anthropic.accountId).toBe('claude-account-id');
 
     // Broker env: selections + daemon-state path + selection identity present; refresh-token env is the
@@ -249,6 +255,165 @@ describe('materializePiConnectedServiceAuth', () => {
       env: res.env,
       sentinels: ['claude-refresh-token-MUST-NOT-LEAK'],
     });
+  });
+
+  it('R4-4: mints DISTINCT selection identities for two pools that share one active profile', async () => {
+    const now = Date.now();
+    const claudeSubscription = buildConnectedServiceCredentialRecord({
+      now,
+      serviceId: 'claude-subscription',
+      profileId: 'claude-pro-oauth',
+      kind: 'oauth',
+      expiresAt: now + 60_000,
+      oauth: {
+        accessToken: 'claude-access-token',
+        refreshToken: 'claude-refresh-token',
+        idToken: null,
+        scope: null,
+        tokenType: 'Bearer',
+        providerAccountId: 'claude-account-id',
+        providerEmail: 'claude@example.com',
+      },
+    });
+    const groupSelections = (groupId: string) => new Map([[
+      'claude-subscription',
+      {
+        kind: 'group' as const,
+        serviceId: 'claude-subscription' as const,
+        groupId,
+        activeProfileId: 'claude-pro-oauth',
+        fallbackProfileId: 'claude-pro-oauth',
+        generation: 1,
+        record: claudeSubscription,
+        policy: null,
+      },
+    ]]);
+
+    const resA = await materializePiConnectedServiceAuth({
+      rootDir: await mkdtemp(join(tmpdir(), 'happier-pi-auth-')),
+      openaiCodex: null,
+      openai: null,
+      claudeSubscription,
+      anthropic: null,
+      selectionsByServiceId: groupSelections('pool-A') as any,
+    });
+    const resB = await materializePiConnectedServiceAuth({
+      rootDir: await mkdtemp(join(tmpdir(), 'happier-pi-auth-')),
+      openaiCodex: null,
+      openai: null,
+      claudeSubscription,
+      anthropic: null,
+      selectionsByServiceId: groupSelections('pool-B') as any,
+    });
+
+    // Two distinct pools sharing profile `claude-pro-oauth` must NOT collapse to one identity key.
+    expect(resA.env[PI_BROKER_SELECTION_IDENTITY_ENV]).not.toBe(resB.env[PI_BROKER_SELECTION_IDENTITY_ENV]);
+    expect(resA.env[PI_BROKER_SELECTION_IDENTITY_ENV]).toContain('pool-A');
+    expect(resB.env[PI_BROKER_SELECTION_IDENTITY_ENV]).toContain('pool-B');
+  });
+
+  it('F3: keeps ONE pool identity stable across a generation-only bump (no re-registration churn)', async () => {
+    const now = Date.now();
+    const claudeSubscription = buildConnectedServiceCredentialRecord({
+      now,
+      serviceId: 'claude-subscription',
+      profileId: 'claude-pro-oauth',
+      kind: 'oauth',
+      expiresAt: now + 60_000,
+      oauth: {
+        accessToken: 'claude-access-token',
+        refreshToken: 'claude-refresh-token',
+        idToken: null,
+        scope: null,
+        tokenType: 'Bearer',
+        providerAccountId: 'claude-account-id',
+        providerEmail: 'claude@example.com',
+      },
+    });
+    const poolSelection = (generation: number) => new Map([[
+      'claude-subscription',
+      {
+        kind: 'group' as const,
+        serviceId: 'claude-subscription' as const,
+        groupId: 'pool-A',
+        activeProfileId: 'claude-pro-oauth',
+        fallbackProfileId: 'claude-pro-oauth',
+        generation,
+        record: claudeSubscription,
+        policy: null,
+      },
+    ]]);
+
+    const gen1 = await materializePiConnectedServiceAuth({
+      rootDir: await mkdtemp(join(tmpdir(), 'happier-pi-auth-')),
+      openaiCodex: null,
+      openai: null,
+      claudeSubscription,
+      anthropic: null,
+      selectionsByServiceId: poolSelection(1) as any,
+    });
+    const gen2 = await materializePiConnectedServiceAuth({
+      rootDir: await mkdtemp(join(tmpdir(), 'happier-pi-auth-')),
+      openaiCodex: null,
+      openai: null,
+      claudeSubscription,
+      anthropic: null,
+      selectionsByServiceId: poolSelection(2) as any,
+    });
+
+    // Same pool + same active profile at a bumped generation must mint the SAME identity (opaque
+    // equality key); baking generation in only churns the runtime registry into re-registering a
+    // live target whose broker binding never changed.
+    expect(gen1.env[PI_BROKER_SELECTION_IDENTITY_ENV]).toBe(gen2.env[PI_BROKER_SELECTION_IDENTITY_ENV]);
+  });
+
+  it('R4-4: leaves the profile-only selection identity unchanged (no group suffix)', async () => {
+    const now = Date.now();
+    const claudeSubscription = buildConnectedServiceCredentialRecord({
+      now,
+      serviceId: 'claude-subscription',
+      profileId: 'claude-pro-oauth',
+      kind: 'oauth',
+      expiresAt: now + 60_000,
+      oauth: {
+        accessToken: 'claude-access-token',
+        refreshToken: 'claude-refresh-token',
+        idToken: null,
+        scope: null,
+        tokenType: 'Bearer',
+        providerAccountId: 'claude-account-id',
+        providerEmail: 'claude@example.com',
+      },
+    });
+
+    const withoutSelections = await materializePiConnectedServiceAuth({
+      rootDir: await mkdtemp(join(tmpdir(), 'happier-pi-auth-')),
+      openaiCodex: null,
+      openai: null,
+      claudeSubscription,
+      anthropic: null,
+    });
+    const withProfileSelection = await materializePiConnectedServiceAuth({
+      rootDir: await mkdtemp(join(tmpdir(), 'happier-pi-auth-')),
+      openaiCodex: null,
+      openai: null,
+      claudeSubscription,
+      anthropic: null,
+      selectionsByServiceId: new Map([[
+        'claude-subscription',
+        {
+          kind: 'profile' as const,
+          serviceId: 'claude-subscription' as const,
+          profileId: 'claude-pro-oauth',
+          record: claudeSubscription,
+        },
+      ]]) as any,
+    });
+
+    expect(withoutSelections.env[PI_BROKER_SELECTION_IDENTITY_ENV]).not.toContain(':group:');
+    expect(withProfileSelection.env[PI_BROKER_SELECTION_IDENTITY_ENV]).toBe(
+      withoutSelections.env[PI_BROKER_SELECTION_IDENTITY_ENV],
+    );
   });
 
   it('continues to reject Anthropic OAuth credentials for Pi', async () => {
@@ -348,13 +513,14 @@ describe('materializePiConnectedServiceAuth', () => {
 
   it('brokers Codex OAuth + keeps a direct Anthropic key: NO Codex refresh token reaches Pi', async () => {
     const now = Date.now();
+    const providerExpiresAt = now + 60_000;
     const rootDir = await mkdtemp(join(tmpdir(), 'happier-pi-auth-'));
     const openaiCodex = buildConnectedServiceCredentialRecord({
       now,
       serviceId: 'openai-codex',
       profileId: 'codex-p2',
       kind: 'oauth',
-      expiresAt: now + 60_000,
+      expiresAt: providerExpiresAt,
       oauth: {
         accessToken: 'codex-access-p2-SECRET',
         refreshToken: 'codex-refresh-p2-MUST-NOT-LEAK',
@@ -391,7 +557,12 @@ describe('materializePiConnectedServiceAuth', () => {
     expect(isPiBrokerMarker(auth['openai-codex'].refresh)).toBe(true);
     expect(auth['openai-codex'].refresh).not.toBe('codex-refresh-p2-MUST-NOT-LEAK');
     expect(auth['openai-codex'].access).toBe('codex-access-p2-SECRET');
-    expect(auth['openai-codex'].expires).toBe(openaiCodex.expiresAt);
+    const codexExpires = auth['openai-codex'].expires;
+    expect(typeof codexExpires).toBe('number');
+    if (typeof codexExpires !== 'number') throw new Error('expected_brokered_codex_expiry');
+    expect(codexExpires).toBeGreaterThanOrEqual(now);
+    expect(codexExpires).toBeLessThanOrEqual(now + 11_000);
+    expect(codexExpires).toBeLessThan(providerExpiresAt);
     expect(auth['openai-codex'].accountId).toBe('acct-codex-p2');
     expect(auth.anthropic).toEqual({ type: 'api_key', key: 'sk-ant-p1' });
 

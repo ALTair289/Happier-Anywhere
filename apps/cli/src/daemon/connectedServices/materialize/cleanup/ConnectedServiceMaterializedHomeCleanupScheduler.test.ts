@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { createTempDir, removeTempDir } from '@/testkit/fs/tempDir';
+import { buildDefaultConnectedServiceCredentialLifecycleDescriptor } from '../../credentials/lifecycleTypes';
 import { ConnectedServiceMaterializedHomeCleanupScheduler } from './ConnectedServiceMaterializedHomeCleanupScheduler';
 
 async function touchOld(path: string, nowMs: number, ageMs: number): Promise<void> {
@@ -81,6 +82,59 @@ describe('ConnectedServiceMaterializedHomeCleanupScheduler', () => {
     }
   });
 
+  it('deletes stale Claude keychain credentials for removed materialized homes and attempts', async () => {
+    const baseDir = await createTempDir('happier-connected-service-materialized-claude-keychain-cleanup-');
+    const nowMs = 100_000;
+    try {
+      const orphanHome = join(baseDir, 'csm_orphan', 'claude');
+      const staleAttempt = join(baseDir, '.attempts', 'csm_orphan-claude-00000000-0000-4000-8000-000000000001');
+      const codexHome = join(baseDir, 'csm_codex', 'codex');
+      await mkdir(join(orphanHome, 'claude-config'), { recursive: true });
+      await mkdir(join(staleAttempt, 'claude-config'), { recursive: true });
+      await mkdir(codexHome, { recursive: true });
+      await touchOld(orphanHome, nowMs, 60_000);
+      await touchOld(staleAttempt, nowMs, 60_000);
+      await touchOld(codexHome, nowMs, 60_000);
+      const deletedClaudeConfigDirs: string[] = [];
+
+      const scheduler = new ConnectedServiceMaterializedHomeCleanupScheduler({
+        baseDir,
+        nowMs: () => nowMs,
+        rootTtlMs: 10_000,
+        attemptsTtlMs: 10_000,
+        hasLiveTarget: () => false,
+        listRetainedIdentityIds: async () => new Set(),
+        resolveCredentialLifecycleDescriptor: async (agentId) => ({
+          ...buildDefaultConnectedServiceCredentialLifecycleDescriptor(agentId),
+          ...(agentId === 'claude'
+            ? {
+                credentialStorageCleanup: {
+                  async deleteCredentialStorageForHomeRoot({ rootDir }) {
+                    deletedClaudeConfigDirs.push(join(rootDir, 'claude-config'));
+                  },
+                },
+              }
+            : {}),
+        }),
+      });
+
+      await expect(scheduler.reconcileMaterializedHomes()).resolves.toEqual(expect.arrayContaining([
+        expect.objectContaining({ cleaned: true, path: orphanHome }),
+        expect.objectContaining({ cleaned: true, path: staleAttempt }),
+        expect.objectContaining({ cleaned: true, path: codexHome }),
+      ]));
+      expect(deletedClaudeConfigDirs).toEqual([
+        join(orphanHome, 'claude-config'),
+        join(staleAttempt, 'claude-config'),
+      ]);
+      await expect(stat(orphanHome)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(stat(staleAttempt)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(stat(codexHome)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await removeTempDir(baseDir);
+    }
+  });
+
   it('keeps a queued pending home when its identity becomes retained before child-exit cleanup', async () => {
     const baseDir = await createTempDir('happier-connected-service-materialized-retained-pending-');
     const nowMs = 100_000;
@@ -131,14 +185,21 @@ describe('ConnectedServiceMaterializedHomeCleanupScheduler', () => {
         attemptsTtlMs: 10_000,
         maxCleanupRetries: 2,
         removePath,
+        onCleanupRetryExhausted: ({ path, attempts, error }) => {
+          terminalDiagnostics.push({ path, attempts, error });
+        },
         hasLiveTarget: () => false,
         listRetainedIdentityIds: async () => new Set(),
       });
+      const terminalDiagnostics: Array<Readonly<{ path: string; attempts: number; error: unknown }>> = [];
 
       await expect(scheduler.reconcileMaterializedHomes()).rejects.toMatchObject({ code: 'EBUSY' });
       await expect(scheduler.cleanupPendingMaterializedHomes()).rejects.toMatchObject({ code: 'EBUSY' });
       await expect(scheduler.cleanupPendingMaterializedHomes()).resolves.toEqual([]);
       expect(removeAttempts).toBe(2);
+      expect(terminalDiagnostics).toEqual([
+        expect.objectContaining({ path: orphanHome, attempts: 2, error: expect.objectContaining({ code: 'EBUSY' }) }),
+      ]);
     } finally {
       await removeTempDir(baseDir);
     }

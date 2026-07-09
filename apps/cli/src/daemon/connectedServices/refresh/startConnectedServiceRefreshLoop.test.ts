@@ -3,6 +3,30 @@ import { describe, expect, it, vi } from 'vitest';
 import { startConnectedServiceRefreshLoop } from './startConnectedServiceRefreshLoop';
 
 describe('startConnectedServiceRefreshLoop', () => {
+    it('runs an initial reconcile without waiting for the first interval', async () => {
+        vi.useFakeTimers();
+        try {
+            const coordinator = {
+                tickOnce: vi.fn(async () => {}),
+            };
+
+            const handle = startConnectedServiceRefreshLoop({
+                enabled: true,
+                tickMs: 60_000,
+                coordinator,
+                onTickError: vi.fn(),
+            });
+
+            expect(handle).not.toBeNull();
+            await Promise.resolve();
+            expect(coordinator.tickOnce).toHaveBeenCalledTimes(1);
+
+            handle?.stop();
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
     it('runs refresh ticks on the configured interval', async () => {
         vi.useFakeTimers();
         try {
@@ -19,7 +43,7 @@ describe('startConnectedServiceRefreshLoop', () => {
 
             expect(handle).not.toBeNull();
             await vi.advanceTimersByTimeAsync(50);
-            expect(coordinator.tickOnce).toHaveBeenCalledTimes(1);
+            expect(coordinator.tickOnce).toHaveBeenCalledTimes(2);
 
             handle?.stop();
         } finally {
@@ -41,13 +65,16 @@ describe('startConnectedServiceRefreshLoop', () => {
                 onTickError: vi.fn(),
             });
 
+            await Promise.resolve();
+            expect(coordinator.tickOnce).toHaveBeenCalledTimes(1);
+
             handle?.pause();
             await vi.advanceTimersByTimeAsync(150);
-            expect(coordinator.tickOnce).not.toHaveBeenCalled();
+            expect(coordinator.tickOnce).toHaveBeenCalledTimes(1);
 
             handle?.resume();
             await vi.advanceTimersByTimeAsync(50);
-            expect(coordinator.tickOnce).toHaveBeenCalledTimes(1);
+            expect(coordinator.tickOnce).toHaveBeenCalledTimes(2);
 
             handle?.stop();
         } finally {

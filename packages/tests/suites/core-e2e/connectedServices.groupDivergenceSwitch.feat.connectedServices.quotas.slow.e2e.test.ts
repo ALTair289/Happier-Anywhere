@@ -128,7 +128,6 @@ async function createConnectedServiceAuthGroup(params: Readonly<{
         policy: {
           autoSwitch: true,
           recoveryMode: 'switch_or_wait',
-          memberRuntimeStatePersistence: 'server_state_json',
         },
       }),
       timeoutMs: 20_000,

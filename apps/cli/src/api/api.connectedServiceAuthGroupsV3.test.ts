@@ -121,6 +121,50 @@ describe('ApiClient connected service auth groups v3', () => {
     );
   });
 
+  it('returns null only for the server-confirmed deleted auth-group response', async () => {
+    mockGet.mockRejectedValue({
+      isAxiosError: true,
+      response: {
+        status: 404,
+        data: { error: 'connect_group_not_found' },
+      },
+    });
+    const api = await ApiClient.create({
+      token: 'happy-token',
+      encryption: { type: 'legacy' as const, secret: new Uint8Array(32) },
+    } as any);
+
+    await expect(api.getConnectedServiceAuthGroup({
+      serviceId: 'openai-codex',
+      groupId: 'main',
+    })).resolves.toBeNull();
+  });
+
+  it('throws an indeterminate auth-group error for feature-gated 404 responses', async () => {
+    mockGet.mockRejectedValue({
+      isAxiosError: true,
+      response: {
+        status: 404,
+        data: { error: 'not_found' },
+      },
+    });
+    const api = await ApiClient.create({
+      token: 'happy-token',
+      encryption: { type: 'legacy' as const, secret: new Uint8Array(32) },
+    } as any);
+
+    let caught: unknown;
+    try {
+      await api.getConnectedServiceAuthGroup({ serviceId: 'openai-codex', groupId: 'main' });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    expect(readHttpStatus(caught)).toBe(404);
+    expect((caught as { code?: string }).code).toBe('connected_service_auth_group_unavailable');
+  });
+
   it('commits an auth group active profile through the CAS active-profile contract', async () => {
     mockPost.mockResolvedValue({ status: 200, data: authGroupResponse('backup', 2) });
     const api = await ApiClient.create({

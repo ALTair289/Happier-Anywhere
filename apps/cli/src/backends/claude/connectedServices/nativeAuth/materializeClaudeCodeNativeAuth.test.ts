@@ -2,13 +2,18 @@ import { lstat, mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/pro
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { buildConnectedServiceCredentialRecord } from '@happier-dev/protocol';
 
 import { readConnectedServiceStateSharingManifest } from '@/daemon/connectedServices/stateSharing/connectedServiceStateSharingManifest';
+import { logger } from '@/ui/logger';
 
 import { verifyResumeReachableClaude } from '../verifyResumeReachableClaude';
+import {
+  buildClaudeConnectedServiceHomeProvenance,
+  writeClaudeConnectedServiceHomeProvenance,
+} from '../claudeConnectedServiceHomeProvenance';
 import { CLAUDE_CODE_RECOMMENDED_OAUTH_SCOPE } from './claudeCodeCredentialScopes';
 import {
   materializeClaudeCodeNativeAuth,
@@ -43,12 +48,14 @@ describe('materializeClaudeCodeNativeAuth', () => {
     if (ORIGINAL_PLATFORM_DESCRIPTOR) {
       Object.defineProperty(process, 'platform', { ...ORIGINAL_PLATFORM_DESCRIPTOR, value: 'linux' });
     }
+    vi.spyOn(logger, 'info').mockImplementation(() => {});
   });
 
   afterEach(() => {
     if (ORIGINAL_PLATFORM_DESCRIPTOR) {
       Object.defineProperty(process, 'platform', ORIGINAL_PLATFORM_DESCRIPTOR);
     }
+    vi.restoreAllMocks();
   });
 
   it('materializes direct and group Claude subscription homes through one helper with equivalent required auth artifacts', async () => {
@@ -120,11 +127,11 @@ describe('materializeClaudeCodeNativeAuth', () => {
     expect(groupCredential).toEqual(profileCredential);
     expect(groupCredential.claudeAiOauth).toMatchObject({
       accessToken: 'selected-access-placeholder',
-      refreshToken: 'selected-refresh-placeholder',
       expiresAt: REALISTIC_EXPIRES_AT_MS,
       subscriptionType: 'max',
       rateLimitTier: 'max_20x',
     });
+    expect(groupCredential.claudeAiOauth).not.toHaveProperty('refreshToken');
     await expect(readFile(join(profileClaudeConfigDir, 'settings.json'), 'utf8')).resolves.toBe('{"theme":"source"}\n');
     await expect(readFile(join(groupClaudeConfigDir, 'settings.json'), 'utf8')).resolves.toBe('{"theme":"source"}\n');
 
@@ -181,10 +188,176 @@ describe('materializeClaudeCodeNativeAuth', () => {
       credentialPath: join(claudeConfigDir, '.credentials.json'),
     });
     const credentialFile = JSON.parse(await readFile(join(claudeConfigDir, '.credentials.json'), 'utf8'));
+    expect(credentialFile.claudeAiOauth.accessToken).toBe('access-placeholder');
+    expect(credentialFile.claudeAiOauth).not.toHaveProperty('refreshToken');
     expect(credentialFile.claudeAiOauth.scopes).toContain('user:sessions:claude_code');
     expect(credentialFile.claudeAiOauth.expiresAt).toBe(REALISTIC_EXPIRES_AT_MS);
     expect(credentialFile.claudeAiOauth.expiresAt).toBeGreaterThan(1_000_000_000_000);
     expect(result.env).not.toHaveProperty('CLAUDE_CODE_SETUP_TOKEN');
+  });
+
+  it('updates an already-provenanced managed Claude home in place instead of replacing the live root', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'happier-claude-native-auth-home-in-place-'));
+    const sourceClaudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-native-auth-source-in-place-'));
+    const targetClaudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-native-auth-target-in-place-'));
+    await writeFile(join(sourceClaudeConfigDir, 'settings.json'), '{"theme":"source"}\n');
+    await writeFile(join(targetClaudeConfigDir, 'live-runner-marker.txt'), 'must survive\n');
+    const previousRecord = buildHealthyClaudeSubscriptionRecord('oauth-profile', 'previous-access', 'previous-refresh');
+    const nextRecord = buildHealthyClaudeSubscriptionRecord('oauth-profile', 'next-access', 'next-refresh');
+    await writeClaudeConnectedServiceHomeProvenance({
+      claudeConfigDir: targetClaudeConfigDir,
+      provenance: buildClaudeConnectedServiceHomeProvenance({
+        record: nextRecord,
+        selectionDescriptor: {
+          kind: 'profile',
+          serviceId: 'claude-subscription',
+          profileId: 'oauth-profile',
+        },
+      }),
+    });
+    await materializeClaudeCodeNativeAuth({
+      record: previousRecord,
+      claudeConfigDir: targetClaudeConfigDir,
+      preserveNewerExistingCredential: false,
+    });
+
+    const result = await materializeClaudeSubscriptionNativeAuthHome({
+      record: nextRecord,
+      targetClaudeConfigDir,
+      sourceEnv: { HOME: homeDir, CLAUDE_CONFIG_DIR: sourceClaudeConfigDir },
+      accountSettings: null,
+      sessionDirectory: null,
+      selectionDescriptor: {
+        kind: 'profile',
+        serviceId: 'claude-subscription',
+        profileId: 'oauth-profile',
+      },
+    });
+
+    expect(result.status).toBe('materialized');
+    const credential = JSON.parse(await readFile(join(targetClaudeConfigDir, '.credentials.json'), 'utf8'));
+    expect(credential.claudeAiOauth.accessToken).toBe('next-access');
+    await expect(readFile(join(targetClaudeConfigDir, 'live-runner-marker.txt'), 'utf8')).resolves.toBe('must survive\n');
+  });
+
+  it('strips legacy refresh-token fields from an already-provenanced materialized home before returning diagnostics', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'happier-claude-native-auth-home-rt-strip-'));
+    const sourceClaudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-native-auth-source-rt-strip-'));
+    const targetClaudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-native-auth-target-rt-strip-'));
+    const record = buildHealthyClaudeSubscriptionRecord('oauth-profile', 'managed-access', 'managed-refresh');
+    await writeClaudeConnectedServiceHomeProvenance({
+      claudeConfigDir: targetClaudeConfigDir,
+      provenance: buildClaudeConnectedServiceHomeProvenance({
+        record,
+        selectionDescriptor: {
+          kind: 'profile',
+          serviceId: 'claude-subscription',
+          profileId: 'oauth-profile',
+        },
+      }),
+    });
+    await writeFile(join(targetClaudeConfigDir, '.credentials.json'), JSON.stringify({
+      claudeAiOauth: {
+        accessToken: 'legacy-access',
+        refreshToken: 'legacy-refresh-camel',
+        refresh_token: 'legacy-refresh-snake',
+        RT: 'legacy-refresh-rt',
+        expiresAt: REALISTIC_EXPIRES_AT_MS,
+        scopes: ['user:profile', 'user:sessions:claude_code'],
+        subscriptionType: 'max',
+      },
+    }) + '\n');
+    const insufficientScopeRecord = buildConnectedServiceCredentialRecord({
+      now: REALISTIC_ISSUED_AT_MS,
+      serviceId: 'claude-subscription',
+      profileId: 'oauth-profile',
+      kind: 'oauth',
+      expiresAt: REALISTIC_EXPIRES_AT_MS,
+      oauth: {
+        accessToken: 'diagnostic-access',
+        refreshToken: 'diagnostic-refresh',
+        idToken: null,
+        scope: 'user:profile',
+        tokenType: 'Bearer',
+        providerAccountId: null,
+        providerEmail: null,
+      },
+    });
+
+    for (let iteration = 0; iteration < 2; iteration += 1) {
+      const result = await materializeClaudeSubscriptionNativeAuthHome({
+        record: insufficientScopeRecord,
+        targetClaudeConfigDir,
+        sourceEnv: { HOME: homeDir, CLAUDE_CONFIG_DIR: sourceClaudeConfigDir },
+        accountSettings: null,
+        sessionDirectory: null,
+        selectionDescriptor: {
+          kind: 'profile',
+          serviceId: 'claude-subscription',
+          profileId: 'oauth-profile',
+        },
+      });
+      expect(result.status).toBe('diagnostic');
+    }
+
+    const rewritten = JSON.parse(await readFile(join(targetClaudeConfigDir, '.credentials.json'), 'utf8'));
+    expect(rewritten.claudeAiOauth).toMatchObject({
+      accessToken: 'legacy-access',
+      expiresAt: REALISTIC_EXPIRES_AT_MS,
+      scopes: ['user:profile', 'user:sessions:claude_code'],
+      subscriptionType: 'max',
+    });
+    expect(rewritten.claudeAiOauth).not.toHaveProperty('refreshToken');
+    expect(rewritten.claudeAiOauth).not.toHaveProperty('refresh_token');
+    expect(rewritten.claudeAiOauth).not.toHaveProperty('RT');
+    expect(JSON.stringify(rewritten)).not.toContain('legacy-refresh');
+  });
+
+  it('does not strip refresh-token fields from an unprovenanced Claude config dir', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'happier-claude-native-auth-home-rt-global-'));
+    const sourceClaudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-native-auth-source-rt-global-'));
+    const targetClaudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-native-auth-target-rt-global-'));
+    await writeFile(join(targetClaudeConfigDir, '.credentials.json'), JSON.stringify({
+      claudeAiOauth: {
+        accessToken: 'user-access',
+        refreshToken: 'user-refresh',
+        expiresAt: REALISTIC_EXPIRES_AT_MS,
+        scopes: ['user:profile', 'user:sessions:claude_code'],
+      },
+    }) + '\n');
+    const insufficientScopeRecord = buildConnectedServiceCredentialRecord({
+      now: REALISTIC_ISSUED_AT_MS,
+      serviceId: 'claude-subscription',
+      profileId: 'oauth-profile',
+      kind: 'oauth',
+      expiresAt: REALISTIC_EXPIRES_AT_MS,
+      oauth: {
+        accessToken: 'diagnostic-access',
+        refreshToken: 'diagnostic-refresh',
+        idToken: null,
+        scope: 'user:profile',
+        tokenType: 'Bearer',
+        providerAccountId: null,
+        providerEmail: null,
+      },
+    });
+
+    const result = await materializeClaudeSubscriptionNativeAuthHome({
+      record: insufficientScopeRecord,
+      targetClaudeConfigDir,
+      sourceEnv: { HOME: homeDir, CLAUDE_CONFIG_DIR: sourceClaudeConfigDir },
+      accountSettings: null,
+      sessionDirectory: null,
+      selectionDescriptor: {
+        kind: 'profile',
+        serviceId: 'claude-subscription',
+        profileId: 'oauth-profile',
+      },
+    });
+
+    expect(result.status).toBe('diagnostic');
+    const unchanged = JSON.parse(await readFile(join(targetClaudeConfigDir, '.credentials.json'), 'utf8'));
+    expect(unchanged.claudeAiOauth.refreshToken).toBe('user-refresh');
   });
 
   it('keeps isolated Claude subscription homes fail-closed instead of importing source session files', async () => {
@@ -413,7 +586,7 @@ describe('materializeClaudeCodeNativeAuth', () => {
       });
       const targetCredential = JSON.parse(await readFile(join(targetClaudeConfigDir, '.credentials.json'), 'utf8'));
       expect(targetCredential.claudeAiOauth.accessToken).toBe('target-access-placeholder');
-      expect(targetCredential.claudeAiOauth.refreshToken).toBe('target-refresh-placeholder');
+      expect(targetCredential.claudeAiOauth).not.toHaveProperty('refreshToken');
       expect(JSON.stringify(targetCredential)).not.toContain('previous-token');
     }
 
@@ -646,6 +819,18 @@ describe('materializeClaudeCodeNativeAuth', () => {
     ]);
     expect(JSON.stringify(result.diagnostics)).not.toContain('secret-placeholder');
     await expect(lstat(join(claudeConfigDir, '.credentials.json'))).rejects.toThrow();
+    expect(logger.info).toHaveBeenCalledWith(
+      '[DAEMON RUN] Claude Code credential materialization decision',
+      expect.objectContaining({
+        event: 'claude_code_credential_materialization_decision',
+        profileId: 'oauth',
+        homeKind: 'unknown',
+        decision: 'refuse',
+        comparatorBasis: expect.objectContaining({
+          reason: 'missing_required_scope',
+        }),
+      }),
+    );
   });
 
   it('returns a safe blocking diagnostic when credential file materialization fails', async () => {

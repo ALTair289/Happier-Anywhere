@@ -265,4 +265,65 @@ describe('useConnectedServiceQuotaBadges', () => {
     await hook.unmount();
     await flushHookEffects({ cycles: 1, turns: 1 });
   });
+
+  it('shows usage badges for an unknown/empty credential status (fails OPEN, single predicate)', async () => {
+    // Folded onto shouldHideQuotaForCredentialStatus: an unrecognized status is not
+    // an explicit needs_reauth, so it must NOT blank the badges (fail-open for
+    // display). The old fail-closed derivation suppressed these — regression guard.
+    useFeatureEnabledSpy.mockReturnValue(true);
+    fetchAccountEncryptionModeSpy.mockResolvedValue({ mode: 'plain', updatedAt: 0 });
+
+    const snapshot = ConnectedServiceQuotaSnapshotV1Schema.parse({
+      v: 1,
+      serviceId: 'anthropic',
+      profileId: 'work',
+      fetchedAt: 1,
+      staleAfterMs: 60_000,
+      planLabel: 'Pro',
+      accountLabel: null,
+      meters: [
+        { meterId: 'weekly', label: 'Weekly', used: 82, limit: 100, unit: 'count', utilizationPct: null, resetsAt: null, status: 'ok', details: {} },
+      ],
+    });
+
+    useSettingsSpy.mockReturnValue({
+      connectedServicesQuotaPinnedMeterIdsByKey: { 'anthropic/work': ['weekly'] },
+      connectedServicesQuotaSummaryStrategyByKey: {},
+      connectedServicesProfileLabelByKey: {},
+      connectedServicesDefaultProfileByServiceId: {},
+    });
+    getConnectedServiceQuotaSnapshotPlainSpy.mockResolvedValue(snapshot);
+
+    const { useConnectedServiceQuotaBadges } = await import('./useConnectedServiceQuotaBadges');
+    const seen = await renderHookAndCollectValues(() => useConnectedServiceQuotaBadges([
+      { serviceId: 'anthropic', profileId: 'work', credentialHealthStatus: 'mystery-status' },
+    ]));
+
+    expect(getConnectedServiceQuotaSnapshotPlainSpy).toHaveBeenCalledTimes(1);
+    const last = seen.at(-1) ?? {};
+    expect(last['anthropic/work']?.map((b) => b.text)).toContain('18%');
+  });
+
+  it('suppresses badges and does not poll when credential health is not usable', async () => {
+    useFeatureEnabledSpy.mockReturnValue(true);
+    fetchAccountEncryptionModeSpy.mockResolvedValue({ mode: 'plain', updatedAt: 0 });
+
+    useSettingsSpy.mockReturnValue({
+      connectedServicesQuotaPinnedMeterIdsByKey: { 'anthropic/work': ['weekly'] },
+      connectedServicesQuotaSummaryStrategyByKey: {},
+      connectedServicesProfileLabelByKey: {},
+      connectedServicesDefaultProfileByServiceId: {},
+    });
+
+    const { useConnectedServiceQuotaBadges } = await import('./useConnectedServiceQuotaBadges');
+    const hook = await renderHook(() => useConnectedServiceQuotaBadges([
+      { serviceId: 'anthropic', profileId: 'work', credentialHealthStatus: 'needs_reauth' },
+    ]));
+
+    await flushHookEffects({ cycles: 2, turns: 1 });
+
+    expect(getConnectedServiceQuotaSnapshotPlainSpy).not.toHaveBeenCalled();
+    expect(hook.getCurrent()['anthropic/work']).toEqual([]);
+    await hook.unmount();
+  });
 });

@@ -1,8 +1,7 @@
 import axios from 'axios';
 
 import { isAuthenticationError } from '@/api/client/httpStatusError';
-import { resolveLoopbackHttpUrl } from '@/api/client/loopbackUrl';
-import { configuration } from '@/configuration';
+import { resolveServerHttpBaseUrl } from '@/session/transport/http/serverHttpBaseUrl';
 import { MessageAckResponseSchema } from '@/api/types';
 import { emitSocketWithAck } from '@/session/transport/shared/socketAck';
 
@@ -114,7 +113,7 @@ export async function deliverTranscriptMessageMutation(params: Readonly<{
     });
     if (socketDelivered) return { status: 'delivered', path: 'socket' };
 
-    const serverUrl = resolveLoopbackHttpUrl(configuration.apiServerUrl).replace(/\/+$/, '');
+    const serverUrl = resolveServerHttpBaseUrl();
     return await tryHttpTranscriptMutation({
         token: params.token,
         mutation: params.mutation,

@@ -68,7 +68,7 @@ describe('ConnectedServiceAuthGroupSwitchCoordinator', () => {
     await expect(coordinator.switchAfterClassifiedFailure({
       serviceId: 'openai-codex',
       groupId: 'main',
-      reason: 'usage_limit',
+      reason: 'refresh_failed',
     })).resolves.toEqual({ status: 'auto_switch_disabled', generation: 1 });
     expect(didCommit).toBe(false);
   });
@@ -95,7 +95,7 @@ describe('ConnectedServiceAuthGroupSwitchCoordinator', () => {
     await expect(coordinator.switchAfterClassifiedFailure({
       serviceId: 'openai-codex',
       groupId: 'main',
-      reason: 'usage_limit',
+      reason: 'refresh_failed',
     })).resolves.toEqual({ status: 'auto_switch_disabled', generation: 1 });
     expect(commitSwitch).not.toHaveBeenCalled();
     expect(applyGeneration).not.toHaveBeenCalled();
@@ -185,7 +185,7 @@ describe('ConnectedServiceAuthGroupSwitchCoordinator', () => {
     ]);
   });
 
-  it('treats permanent refresh failure as auth recovery when auth-expired fallback is enabled', async () => {
+  it('does not treat permanent refresh failure as group-switchable auth recovery without positive target evidence', async () => {
     let didCommit = false;
     const coordinator = new ConnectedServiceAuthGroupSwitchCoordinator({
       leases: new InMemoryConnectedServiceAuthGroupSwitchLeaseRegistry(),
@@ -205,11 +205,10 @@ describe('ConnectedServiceAuthGroupSwitchCoordinator', () => {
       reason: 'refresh_failed',
       observedProfileId: 'primary',
     })).resolves.toMatchObject({
-      status: 'switched',
-      activeProfileId: 'backup',
-      generation: 2,
+      status: 'switch_reason_disabled',
+      generation: 1,
     });
-    expect(didCommit).toBe(true);
+    expect(didCommit).toBe(false);
   });
 
   it('treats capacity failures as usage-limit recovery by default', async () => {
@@ -295,7 +294,7 @@ describe('ConnectedServiceAuthGroupSwitchCoordinator', () => {
     await expect(coordinator.switchAfterClassifiedFailure({
       serviceId: 'openai-codex',
       groupId: 'main',
-      reason: 'refresh_failed',
+      reason: 'usage_limit',
       observedProfileId: 'primary',
     })).resolves.toMatchObject({
       status: 'switched',
@@ -329,7 +328,7 @@ describe('ConnectedServiceAuthGroupSwitchCoordinator', () => {
     await expect(coordinator.switchAfterClassifiedFailure({
       serviceId: 'openai-codex',
       groupId: 'main',
-      reason: 'refresh_failed',
+      reason: 'usage_limit',
       observedProfileId: 'primary',
     })).resolves.toMatchObject({
       status: 'switched',

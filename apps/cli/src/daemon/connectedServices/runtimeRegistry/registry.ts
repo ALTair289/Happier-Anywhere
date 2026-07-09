@@ -1,4 +1,10 @@
 import { readConnectedServiceMaterializationIdentityV1 } from '../materialize/createConnectedServiceMaterializationIdentity';
+import { RuntimeAccountIdentityIndex } from '../quotas/identity/RuntimeAccountIdentityIndex';
+import type {
+  RuntimeAccountIdentityEntry,
+  RuntimeAccountIdentityRecordInput,
+  RuntimeAccountIdentityRecordResult,
+} from '../quotas/identity/runtimeAccountIdentityTypes';
 import {
   buildConnectedServiceRuntimeIdentityKey,
   buildRuntimeActiveBindings,
@@ -59,10 +65,59 @@ function omitRevision(target: ConnectedServiceRuntimeTarget): Omit<ConnectedServ
 export class ConnectedServiceRuntimeRegistry {
   private readonly targetsByPid = new Map<number, IndexedTarget>();
   private readonly pidBySessionId = new Map<string, number>();
+  private readonly pidsByBrokerSelectionIdentity = new Map<string, Set<number>>();
+  // Execution-run targets live in a SEPARATE keyspace: a run shares its RUNNER's pid with the
+  // session target, so keying runs by pid would clobber the session registration (and releasing a
+  // run would deregister the session — the divergent-identity clobber class from live incident #1).
+  // Run targets are keyed by their stable run key, carry the runner pid for liveness semantics, and
+  // are folded into the distribution views (listTargets/listRefreshTargets/listQuotaTargets) so
+  // refresh redistribution + quota fanout cover materialized run roots exactly like session roots.
+  private readonly runTargetsByRunKey = new Map<string, IndexedTarget>();
+  // Broker selection identity → run keys (NF-1/R3-6 for the runs surface). Run targets are keyed by
+  // run key (not pid, and several runs can share a runner pid), so their broker index is separate from
+  // the pid-keyed session index but folds into the same getByBrokerSelectionIdentity resolution.
+  private readonly runKeysByBrokerSelectionIdentity = new Map<string, Set<string>>();
+  private readonly runtimeAccountIdentities: RuntimeAccountIdentityIndex;
+
+  constructor(params: Readonly<{
+    nowMs?: () => number;
+    runtimeAccountIdentityTtlMs?: number;
+  }> = {}) {
+    this.runtimeAccountIdentities = new RuntimeAccountIdentityIndex({
+      nowMs: params.nowMs ?? (() => Date.now()),
+      ttlMs: params.runtimeAccountIdentityTtlMs,
+    });
+  }
 
   public registerTarget(input: ConnectedServiceRuntimeTargetInput): ConnectedServiceRuntimeTarget {
     const existing = this.getIndexedByPid(input.pid);
     return this.writeTarget(input.pid, input, existing?.target ?? null);
+  }
+
+  public registerRunTarget(
+    input: ConnectedServiceRuntimeTargetInput & Readonly<{ runKey: string }>,
+  ): ConnectedServiceRuntimeTarget {
+    const runKey = normalizeString(input.runKey);
+    if (!runKey) {
+      throw new Error('Execution-run runtime target registration requires a non-empty runKey');
+    }
+    const { runKey: _runKey, ...targetInput } = input;
+    const previous = this.runTargetsByRunKey.get(runKey)?.target ?? null;
+    if (previous) this.deleteRunBrokerSelectionIdentityIndex(runKey, previous);
+    const entry = this.buildStandaloneTarget(targetInput, previous);
+    this.runTargetsByRunKey.set(runKey, entry);
+    this.indexRunBrokerSelectionIdentity(runKey, entry.target);
+    return entry.target;
+  }
+
+  public unregisterRunKey(runKeyRaw: string): ConnectedServiceRuntimeTarget | null {
+    const runKey = normalizeString(runKeyRaw);
+    if (!runKey) return null;
+    const existing = this.runTargetsByRunKey.get(runKey);
+    if (!existing) return null;
+    this.runTargetsByRunKey.delete(runKey);
+    this.deleteRunBrokerSelectionIdentityIndex(runKey, existing.target);
+    return existing.target;
   }
 
   public updateTarget(input: ConnectedServiceRuntimeTargetUpdate): ConnectedServiceRuntimeTarget | null {
@@ -81,6 +136,8 @@ export class ConnectedServiceRuntimeRegistry {
   public unregisterPid(pidRaw: number): ConnectedServiceRuntimeTarget | null {
     const pid = normalizePid(pidRaw);
     if (pid === null) return null;
+    // A dead runner's execution runs are dead too: drop run targets bound to this pid.
+    this.dropRunTargetsForPid(pid);
     const existing = this.targetsByPid.get(pid);
     if (!existing) return null;
     this.targetsByPid.delete(pid);
@@ -95,6 +152,9 @@ export class ConnectedServiceRuntimeRegistry {
     const existing = this.targetsByPid.get(fromPid);
     if (!existing) return null;
     if (fromPid === toPid) return existing.target;
+    // A respawned runner does not carry its old process's runs; resumed runs re-materialize and
+    // re-register under the new runner pid.
+    this.dropRunTargetsForPid(fromPid);
 
     const replaced = this.targetsByPid.get(toPid);
     if (replaced) {
@@ -126,10 +186,40 @@ export class ConnectedServiceRuntimeRegistry {
     return typeof pid === 'number' ? this.getByPid(pid) : null;
   }
 
+  /**
+   * Resolve a LIVE runtime target by its broker selection identity (R3-6). Providers with a shared
+   * managed server (OpenCode/Pi) present this stable identity — not a per-session id — at the daemon
+   * bridge; the daemon uses the matched live target's CURRENT binding as the canonical selection.
+   * Any live target carrying the identity is equivalent (they share the same connected-service
+   * binding, which is what the identity keys on); the lowest live pid wins for determinism.
+   */
+  public getByBrokerSelectionIdentity(identityRaw: string): ConnectedServiceRuntimeTarget | null {
+    const identity = normalizeString(identityRaw);
+    if (!identity) return null;
+    let resolved: ConnectedServiceRuntimeTarget | null = null;
+    const consider = (target: ConnectedServiceRuntimeTarget | null): void => {
+      if (target && (resolved === null || target.pid < resolved.pid)) {
+        resolved = target;
+      }
+    };
+    const pids = this.pidsByBrokerSelectionIdentity.get(identity);
+    if (pids) {
+      for (const pid of pids) consider(this.targetsByPid.get(pid)?.target ?? null);
+    }
+    // Fold in the run keyspace (NF-1): a run bound to a broker pool that no live session shares must
+    // still authorize its broker token refresh. Lowest live pid wins across both keyspaces.
+    const runKeys = this.runKeysByBrokerSelectionIdentity.get(identity);
+    if (runKeys) {
+      for (const runKey of runKeys) consider(this.runTargetsByRunKey.get(runKey)?.target ?? null);
+    }
+    return resolved;
+  }
+
   public listTargets(): ReadonlyArray<ConnectedServiceRuntimeTarget> {
-    return Array.from(this.targetsByPid.values())
-      .map((entry) => entry.target)
-      .sort((left, right) => left.pid - right.pid);
+    return [
+      ...Array.from(this.targetsByPid.values()).map((entry) => entry.target),
+      ...Array.from(this.runTargetsByRunKey.values()).map((entry) => entry.target),
+    ].sort((left, right) => left.pid - right.pid);
   }
 
   public listRefreshTargets(): ReadonlyArray<ConnectedServiceRuntimeRefreshTarget> {
@@ -163,26 +253,70 @@ export class ConnectedServiceRuntimeRegistry {
     });
   }
 
+  public recordRuntimeAccountIdentity(
+    input: RuntimeAccountIdentityRecordInput,
+  ): RuntimeAccountIdentityRecordResult {
+    return this.runtimeAccountIdentities.record(input);
+  }
+
+  public readRuntimeAccountIdentity(sessionId: string): RuntimeAccountIdentityEntry | null {
+    return this.runtimeAccountIdentities.readSessionIdentity(sessionId);
+  }
+
+  public listRuntimeIdentitiesByProviderAccount(input: Readonly<{
+    serviceId: RuntimeAccountIdentityEntry['serviceId'];
+    providerAccountId: string;
+    groupId?: string | null;
+    excludeSessionId?: string | null;
+    currentGroupGenerationBySessionId?: ReadonlyMap<string, number | null>;
+  }>): RuntimeAccountIdentityEntry[] {
+    return this.runtimeAccountIdentities.listByProviderAccount(input);
+  }
+
+  public invalidateRuntimeAccountIdentity(sessionId: string): void {
+    this.runtimeAccountIdentities.invalidateSession(sessionId);
+  }
+
+  public clearRuntimeAccountIdentities(): void {
+    this.runtimeAccountIdentities.clear();
+  }
+
   private getIndexedByPid(pidRaw: number): IndexedTarget | null {
     const pid = normalizePid(pidRaw);
     if (pid === null) return null;
     return this.targetsByPid.get(pid) ?? null;
   }
 
-  private writeTarget(
-    pidRaw: number,
+  private dropRunTargetsForPid(pid: number): void {
+    for (const [runKey, entry] of this.runTargetsByRunKey) {
+      if (entry.target.pid === pid) {
+        this.runTargetsByRunKey.delete(runKey);
+        this.deleteRunBrokerSelectionIdentityIndex(runKey, entry.target);
+      }
+    }
+  }
+
+  private indexRunBrokerSelectionIdentity(runKey: string, target: ConnectedServiceRuntimeTarget): void {
+    if (!target.brokerSelectionIdentity) return;
+    const runKeys = this.runKeysByBrokerSelectionIdentity.get(target.brokerSelectionIdentity) ?? new Set<string>();
+    runKeys.add(runKey);
+    this.runKeysByBrokerSelectionIdentity.set(target.brokerSelectionIdentity, runKeys);
+  }
+
+  private deleteRunBrokerSelectionIdentityIndex(runKey: string, target: ConnectedServiceRuntimeTarget): void {
+    if (!target.brokerSelectionIdentity) return;
+    const runKeys = this.runKeysByBrokerSelectionIdentity.get(target.brokerSelectionIdentity);
+    if (!runKeys) return;
+    runKeys.delete(runKey);
+    if (runKeys.size === 0) this.runKeysByBrokerSelectionIdentity.delete(target.brokerSelectionIdentity);
+  }
+
+  // Pure target composition shared by pid-keyed session targets and run-key-keyed run targets.
+  private composeTargetBase(
+    pid: number,
     patch: ConnectedServiceRuntimeTargetInput | ConnectedServiceRuntimeTargetUpdate,
-    previousAtPid: ConnectedServiceRuntimeTarget | null,
-  ): ConnectedServiceRuntimeTarget {
-    const pid = normalizePid(pidRaw) ?? 0;
-    const provisionalSessionId = patch.sessionId !== undefined
-      ? normalizeString(patch.sessionId)
-      : previousAtPid?.sessionId ?? null;
-    const previousSessionPid = provisionalSessionId ? this.pidBySessionId.get(provisionalSessionId) : undefined;
-    const previousForSameSession = typeof previousSessionPid === 'number' && previousSessionPid !== pid
-      ? this.targetsByPid.get(previousSessionPid)?.target ?? null
-      : null;
-    const previous = previousAtPid ?? previousForSameSession;
+    previous: ConnectedServiceRuntimeTarget | null,
+  ): Readonly<{ base: Omit<ConnectedServiceRuntimeTarget, 'revision'>; fingerprint: string }> {
     const connectedServiceSelectionsEnv = patch.connectedServiceSelectionsEnv !== undefined
       ? normalizeRuntimeRegistryEnv(patch.connectedServiceSelectionsEnv)
       : previous?.connectedServiceSelectionsEnv ?? {};
@@ -192,6 +326,9 @@ export class ConnectedServiceRuntimeRegistry {
       : previous?.connectedServicesBindingsRaw ?? {};
     const agentId = patch.agentId !== undefined ? patch.agentId ?? null : previous?.agentId ?? null;
     const sessionId = patch.sessionId !== undefined ? normalizeString(patch.sessionId) : previous?.sessionId ?? null;
+    const brokerSelectionIdentity = patch.brokerSelectionIdentity !== undefined
+      ? normalizeString(patch.brokerSelectionIdentity)
+      : previous?.brokerSelectionIdentity ?? null;
     const materializationKey = patch.materializationKey !== undefined
       ? normalizeString(patch.materializationKey)
       : previous?.materializationKey ?? null;
@@ -204,6 +341,9 @@ export class ConnectedServiceRuntimeRegistry {
     const runtimeAccountIdentitySelections = patch.runtimeAccountIdentitySelections !== undefined
       ? Array.from(patch.runtimeAccountIdentitySelections ?? [])
       : previous?.runtimeAccountIdentitySelections ?? [];
+    const accessTokenRefresh = patch.accessTokenRefresh !== undefined
+      ? patch.accessTokenRefresh ?? null
+      : previous?.accessTokenRefresh ?? null;
     const boundProfiles = buildRuntimeBoundProfiles({
       connectedServicesBindingsRaw,
       connectedServiceSelections,
@@ -223,6 +363,7 @@ export class ConnectedServiceRuntimeRegistry {
       pid,
       agentId,
       sessionId,
+      brokerSelectionIdentity,
       connectedServicesBindingsRaw,
       connectedServiceSelectionsEnv,
       connectedServiceSelections,
@@ -230,11 +371,43 @@ export class ConnectedServiceRuntimeRegistry {
       connectedServiceMaterializationIdentityV1,
       sessionDirectory,
       runtimeAccountIdentitySelections,
+      accessTokenRefresh,
       boundProfiles,
       activeBindings,
       runtimeIdentityKey: buildConnectedServiceRuntimeIdentityKey(identity),
     };
-    const fingerprint = buildTargetFingerprint(base);
+    return { base, fingerprint: buildTargetFingerprint(base) };
+  }
+
+  // Builds an unindexed (no pid map, no session index) target entry for the run keyspace.
+  private buildStandaloneTarget(
+    patch: ConnectedServiceRuntimeTargetInput,
+    previous: ConnectedServiceRuntimeTarget | null,
+  ): IndexedTarget {
+    const pid = normalizePid(patch.pid) ?? 0;
+    const { base, fingerprint } = this.composeTargetBase(pid, patch, previous);
+    const target: ConnectedServiceRuntimeTarget = {
+      ...base,
+      revision: (previous?.revision ?? 0) + 1,
+    };
+    return { target, fingerprint };
+  }
+
+  private writeTarget(
+    pidRaw: number,
+    patch: ConnectedServiceRuntimeTargetInput | ConnectedServiceRuntimeTargetUpdate,
+    previousAtPid: ConnectedServiceRuntimeTarget | null,
+  ): ConnectedServiceRuntimeTarget {
+    const pid = normalizePid(pidRaw) ?? 0;
+    const provisionalSessionId = patch.sessionId !== undefined
+      ? normalizeString(patch.sessionId)
+      : previousAtPid?.sessionId ?? null;
+    const previousSessionPid = provisionalSessionId ? this.pidBySessionId.get(provisionalSessionId) : undefined;
+    const previousForSameSession = typeof previousSessionPid === 'number' && previousSessionPid !== pid
+      ? this.targetsByPid.get(previousSessionPid)?.target ?? null
+      : null;
+    const previous = previousAtPid ?? previousForSameSession;
+    const { base, fingerprint } = this.composeTargetBase(pid, patch, previous);
     if (previous) {
       const previousIndexed = this.targetsByPid.get(previous.pid);
       if (previousIndexed?.fingerprint === fingerprint) {
@@ -259,14 +432,33 @@ export class ConnectedServiceRuntimeRegistry {
   }
 
   private deleteSessionIndex(target: ConnectedServiceRuntimeTarget): void {
+    this.deleteBrokerSelectionIdentityIndex(target);
     if (!target.sessionId) return;
     if (this.pidBySessionId.get(target.sessionId) === target.pid) {
       this.pidBySessionId.delete(target.sessionId);
     }
+    this.invalidateRuntimeAccountIdentity(target.sessionId);
   }
 
   private indexSession(target: ConnectedServiceRuntimeTarget): void {
+    this.indexBrokerSelectionIdentity(target);
     if (!target.sessionId) return;
     this.pidBySessionId.set(target.sessionId, target.pid);
+  }
+
+  private indexBrokerSelectionIdentity(target: ConnectedServiceRuntimeTarget): void {
+    if (!target.brokerSelectionIdentity) return;
+    const pids = this.pidsByBrokerSelectionIdentity.get(target.brokerSelectionIdentity)
+      ?? new Set<number>();
+    pids.add(target.pid);
+    this.pidsByBrokerSelectionIdentity.set(target.brokerSelectionIdentity, pids);
+  }
+
+  private deleteBrokerSelectionIdentityIndex(target: ConnectedServiceRuntimeTarget): void {
+    if (!target.brokerSelectionIdentity) return;
+    const pids = this.pidsByBrokerSelectionIdentity.get(target.brokerSelectionIdentity);
+    if (!pids) return;
+    pids.delete(target.pid);
+    if (pids.size === 0) this.pidsByBrokerSelectionIdentity.delete(target.brokerSelectionIdentity);
   }
 }

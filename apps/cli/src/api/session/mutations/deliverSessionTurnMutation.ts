@@ -1,8 +1,10 @@
 import axios from 'axios';
 
 import { isAuthenticationError } from '@/api/client/httpStatusError';
-import { resolveLoopbackHttpUrl } from '@/api/client/loopbackUrl';
-import { configuration } from '@/configuration';
+import {
+    isServerHttpEndpointConnectionFailure,
+    resolveServerHttpBaseUrl,
+} from '@/session/transport/http/serverHttpBaseUrl';
 import { emitSocketWithAck } from '@/session/transport/shared/socketAck';
 
 import type { SessionTurnMutationV1 } from './sessionMutationTypes';
@@ -53,7 +55,7 @@ type SessionTurnMutationHttpResult =
     | Readonly<{ status: 'delivered' }>
     | Readonly<{ status: 'unsupported'; evidence: UnsupportedSessionTurnHttpEvidence }>
     | Readonly<{ status: 'incompatible'; statusCode: 400 | 422 }>
-    | Readonly<{ status: 'failed' }>;
+    | Readonly<{ status: 'failed'; error?: unknown }>;
 
 export type UnsupportedSessionTurnMutationDiagnostic = Readonly<{
     reason: 'session_turn_mutation_unsupported';
@@ -178,7 +180,7 @@ async function tryHttpSessionTurnMutation(params: Readonly<{
             return { status: 'unsupported', evidence: { transport: 'http', evidence: 'unsupported_status', status } };
         }
         if (status === 400 || status === 422) return { status: 'incompatible', statusCode: status };
-        return { status: 'failed' };
+        return { status: 'failed', error };
     }
 }
 
@@ -187,13 +189,25 @@ export async function deliverSessionTurnMutation(params: Readonly<{
     socket: SessionTurnMutationSocket;
     mutation: SessionTurnMutationV1;
 }>): Promise<SessionTurnMutationDeliveryResult> {
-    const serverUrl = resolveLoopbackHttpUrl(configuration.apiServerUrl).replace(/\/+$/, '');
+    const serverUrl = resolveServerHttpBaseUrl();
     const socketResult = params.socket.connected === true
         ? await trySocketSessionTurnMutation({ socket: params.socket, mutation: params.mutation })
         : { status: 'failed' as const };
     if (socketResult.status === 'delivered') return { status: 'delivered', path: 'socket' };
 
-    const httpResult = await tryHttpSessionTurnMutation({ token: params.token, mutation: params.mutation, serverUrl });
+    let httpServerUrl = serverUrl;
+    let httpResult = await tryHttpSessionTurnMutation({ token: params.token, mutation: params.mutation, serverUrl });
+    if (httpResult.status === 'failed' && isServerHttpEndpointConnectionFailure(httpResult.error)) {
+        const refreshedServerUrl = resolveServerHttpBaseUrl();
+        if (refreshedServerUrl !== serverUrl) {
+            httpServerUrl = refreshedServerUrl;
+            httpResult = await tryHttpSessionTurnMutation({
+                token: params.token,
+                mutation: params.mutation,
+                serverUrl: refreshedServerUrl,
+            });
+        }
+    }
     if (httpResult.status === 'delivered') return { status: 'delivered', path: 'http' };
 
     if (
@@ -204,7 +218,7 @@ export async function deliverSessionTurnMutation(params: Readonly<{
             status: 'unsupported_capability',
             reason: 'session_turn_mutation_unsupported',
             diagnostic: buildUnsupportedDiagnostic({
-                serverOrigin: resolveServerOrigin(serverUrl),
+                serverOrigin: resolveServerOrigin(httpServerUrl),
                 mutation: params.mutation,
                 socket: socketResult.evidence,
                 http: httpResult.evidence,

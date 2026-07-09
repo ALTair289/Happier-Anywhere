@@ -11,6 +11,8 @@ import {
     createSessionMutationDeadLetterEntry,
     loadSessionMutationOutbox,
     parseQueuedSessionMutation,
+    recoverAuthoritativeSessionMutationDeadLetters,
+    resolveSessionMutationOutboxPath,
     saveSessionMutationOutbox,
 } from './sessionMutationPersistence';
 import { deliverSessionTurnMutation, type UnsupportedSessionTurnMutationDiagnostic } from './deliverSessionTurnMutation';
@@ -31,6 +33,7 @@ import type {
 } from './sessionMutationTypes';
 import { resolveTranscriptMessageAppendMutationId } from './sessionMutationTypes';
 import type { SessionMutationDeadLetterEntry } from './sessionMutationPersistence';
+import { isAuthoritativeSessionMutationKind } from './sessionMutationDurabilityPolicy';
 
 export type SessionMutationSocket = {
     connected?: boolean;
@@ -57,6 +60,13 @@ type CreateSessionMutationOutboxParams = Readonly<{
     requestReconnect: (reason: string) => void;
 }>;
 
+type SessionMutationOutboxSharedEntry = Readonly<{
+    outbox: SessionMutationOutbox;
+    handles: Map<symbol, CreateSessionMutationOutboxParams>;
+}>;
+
+const sharedSessionMutationOutboxes = new Map<string, SessionMutationOutboxSharedEntry>();
+
 const loggedUnsupportedSessionTurnMutationDiagnostics = new Set<string>();
 
 function createQueuedSessionTurn(mutation: SessionTurnMutationV1): QueuedSessionMutation {
@@ -68,6 +78,102 @@ function createQueuedSessionTurn(mutation: SessionTurnMutationV1): QueuedSession
         createdAt: now,
         attempts: 0,
         nextAttemptAt: 0,
+    };
+}
+
+function selectActiveOutboxHandle(
+    handles: Map<symbol, CreateSessionMutationOutboxParams>,
+): CreateSessionMutationOutboxParams {
+    const allHandles = [...handles.values()];
+    const connectedHandle = allHandles.find((handle) => {
+        try {
+            return handle.getSocket().connected === true;
+        } catch {
+            return false;
+        }
+    });
+    return connectedHandle ?? allHandles[allHandles.length - 1];
+}
+
+export function createSessionMutationOutbox(params: CreateSessionMutationOutboxParams): SessionMutationOutbox {
+    const outboxPath = resolveSessionMutationOutboxPath(params.sessionId);
+    let shared = sharedSessionMutationOutboxes.get(outboxPath);
+    if (!shared) {
+        const handles = new Map<symbol, CreateSessionMutationOutboxParams>();
+        const adapterParams: CreateSessionMutationOutboxParams = {
+            token: params.token,
+            sessionId: params.sessionId,
+            getSocket: () => selectActiveOutboxHandle(handles).getSocket(),
+            requestReconnect: (reason) => {
+                for (const handle of handles.values()) {
+                    try {
+                        handle.requestReconnect(reason);
+                    } catch (error) {
+                        logger.debug('[API] Durable session mutation reconnect request failed', {
+                            sessionId: params.sessionId,
+                            error: serializeAxiosErrorForLog(error),
+                        });
+                    }
+                }
+            },
+        };
+        shared = {
+            handles,
+            outbox: createSessionMutationOutboxInstance(adapterParams),
+        };
+        sharedSessionMutationOutboxes.set(outboxPath, shared);
+    }
+
+    const handleId = Symbol(params.sessionId);
+    let handleClosed = false;
+    const sharedEntry = shared;
+    sharedEntry.handles.set(handleId, params);
+    const closeHandle = async () => {
+        if (handleClosed) return;
+        handleClosed = true;
+        const current = sharedSessionMutationOutboxes.get(outboxPath);
+        if (!current) return;
+        if (current.handles.size === 1 && current.handles.has(handleId)) {
+            sharedSessionMutationOutboxes.delete(outboxPath);
+            try {
+                await current.outbox.close();
+            } finally {
+                current.handles.delete(handleId);
+            }
+            return;
+        }
+        current.handles.delete(handleId);
+        if (current.handles.size > 0) return;
+        sharedSessionMutationOutboxes.delete(outboxPath);
+        await current.outbox.close();
+    };
+    const enqueueIfOpen = async <T>(enqueue: () => Promise<T>, fallback: T): Promise<T> => {
+        if (handleClosed) return fallback;
+        return await enqueue();
+    };
+
+    return {
+        enqueueSessionTurn: async (mutation) => {
+            await enqueueIfOpen(
+                () => sharedEntry.outbox.enqueueSessionTurn(mutation),
+                undefined,
+            );
+        },
+        enqueueSessionEnd: async (mutation) => {
+            await enqueueIfOpen(
+                () => sharedEntry.outbox.enqueueSessionEnd(mutation),
+                undefined,
+            );
+        },
+        enqueueTranscriptMessage: async (mutation) => await enqueueIfOpen(
+            () => sharedEntry.outbox.enqueueTranscriptMessage(mutation),
+            { persisted: false, delivered: false },
+        ),
+        flush: async (reason) => {
+            if (handleClosed) return;
+            await sharedEntry.outbox.flush(reason);
+        },
+        close: closeHandle,
     };
 }
 
@@ -218,7 +324,7 @@ function pruneSessionEndsSupersededByLaterTurnBegins(
     ));
 }
 
-export function createSessionMutationOutbox(params: CreateSessionMutationOutboxParams): SessionMutationOutbox {
+function createSessionMutationOutboxInstance(params: CreateSessionMutationOutboxParams): SessionMutationOutbox {
     let closed = false;
     let mutations: QueuedSessionMutation[] = [];
     let inFlightMutations: QueuedSessionMutation[] = [];
@@ -226,11 +332,29 @@ export function createSessionMutationOutbox(params: CreateSessionMutationOutboxP
     let persistTail: Promise<void> = Promise.resolve();
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     let loadedMutationsNeedPersist = false;
+    let deadLetterRecoveryTail: Promise<void> = Promise.resolve();
+
+    async function recoverDeadLetteredAuthoritativeMutations(): Promise<void> {
+        const recover = async () => {
+            const recovered = await recoverAuthoritativeSessionMutationDeadLetters(params.sessionId);
+            if (recovered.length === 0) return;
+            mutations = mergeQueuedSessionMutations(mutations, recovered);
+            loadedMutationsNeedPersist = true;
+            logger.debug('[API] Re-queued authoritative session mutations from dead letters', {
+                sessionId: params.sessionId,
+                recoveredCount: recovered.length,
+            });
+        };
+        const recoveryPromise = deadLetterRecoveryTail.then(recover, recover);
+        deadLetterRecoveryTail = recoveryPromise.catch(() => {});
+        await recoveryPromise;
+    }
 
     const ready = loadSessionMutationOutbox(params.sessionId)
-        .then((loaded) => {
+        .then(async (loaded) => {
             mutations = mergeQueuedSessionMutations([], pruneSessionEndsSupersededByLaterTurnBegins(loaded));
             loadedMutationsNeedPersist = mutations.length !== loaded.length;
+            await recoverDeadLetteredAuthoritativeMutations();
         })
         .catch((error) => {
             logger.debug('[API] Failed to load durable session mutation outbox', {
@@ -299,6 +423,12 @@ export function createSessionMutationOutbox(params: CreateSessionMutationOutboxP
 
     async function flush(reason: 'connect' | 'timer' | 'flush' | 'startup' | 'enqueue'): Promise<void> {
         await ready;
+        await recoverDeadLetteredAuthoritativeMutations().catch((error) => {
+            logger.debug('[API] Failed to recover dead-lettered authoritative session mutations', {
+                sessionId: params.sessionId,
+                error: serializeAxiosErrorForLog(error),
+            });
+        });
         if (closed && reason !== 'flush') return;
         if (flushInFlight) {
             await flushInFlight;
@@ -332,7 +462,11 @@ export function createSessionMutationOutbox(params: CreateSessionMutationOutboxP
             };
             for (let index = 0; index < batch.length; index += 1) {
                 const mutation = batch[index];
-                if (reason !== 'flush' && mutation.nextAttemptAt > now) {
+                const shouldRedriveAuthoritative = (
+                    (reason === 'connect' || reason === 'startup')
+                    && isAuthoritativeSessionMutationKind(mutation.kind)
+                );
+                if (!shouldRedriveAuthoritative && reason !== 'flush' && mutation.nextAttemptAt > now) {
                     if (mutation.kind === 'transcript_message_append') {
                         remaining.push(mutation);
                         refreshInFlightMutations(index + 1);

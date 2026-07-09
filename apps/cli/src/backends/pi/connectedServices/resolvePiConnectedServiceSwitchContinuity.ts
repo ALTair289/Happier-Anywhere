@@ -25,6 +25,14 @@ function supportsService(serviceId: string): boolean {
   return (AGENTS_CORE.pi.connectedServices.supportedServiceIds as readonly string[]).includes(serviceId);
 }
 
+function hasBrokerSelectionIdentity(value: unknown): boolean {
+  return Boolean(value)
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && typeof (value as Record<string, unknown>).brokerSelectionIdentity === 'string'
+    && ((value as Record<string, unknown>).brokerSelectionIdentity as string).trim().length > 0;
+}
+
 function asNonEmptyString(value: unknown): string | null {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
@@ -79,6 +87,9 @@ export async function resolvePiConnectedServiceSwitchContinuity(
 ): Promise<ConnectedServiceSwitchContinuityResult> {
   if (!supportsService(params.serviceId)) {
     return { mode: 'unsupported', reason: 'unsupported_service' };
+  }
+  if (hasBrokerSelectionIdentity(params.runtimeAuthSelection)) {
+    return { mode: 'hot_apply' };
   }
   if (isSameConnectedServiceAuthGroup(params) || isExactSameConnectedServiceSelection(params)) {
     const targetMaterializedRoot = asNonEmptyString(params.targetMaterializedRoot);

@@ -15,8 +15,10 @@ import {
 import { NotFoundSchema } from "../../schemas/notFoundSchema";
 import {
     ProviderAccountUsageInvalidParamsResponseSchema,
+    ProviderAccountUsageWriteSuccessResponseSchema,
     type ProviderAccountUsageInvalidParamsReason,
 } from "./providerAccountUsage/schemas";
+import type { ProviderAccountUsageSourceLinkOutcome } from "./providerAccountUsage/types";
 import {
     ConnectedServiceUsageSourceBindingError,
     ConnectedServiceUsageSourceOwnershipError,
@@ -71,7 +73,7 @@ export function registerProviderAccountUsageRoutesV2(app: Fastify): void {
                 source: ConnectedServiceUsageSourceV1Schema.optional(),
             }).strict(),
             response: {
-                200: z.object({ success: z.literal(true) }),
+                200: ProviderAccountUsageWriteSuccessResponseSchema,
                 400: ProviderAccountUsageInvalidParamsResponseSchema,
                 409: z.object({ error: z.literal("provider_account_usage_record_key_required") }),
             },
@@ -109,14 +111,20 @@ export function registerProviderAccountUsageRoutesV2(app: Fastify): void {
                 materialFingerprint: request.body.metadata.materialFingerprint,
                 sealedPayload: request.body.sealed,
             };
+            let sourceOutcome: ProviderAccountUsageSourceLinkOutcome | undefined;
             if (request.body.source) {
-                await writeProviderAccountUsageRecordAndLinkConnectedServiceUsageSource({
+                const result = await writeProviderAccountUsageRecordAndLinkConnectedServiceUsageSource({
                     ...writeParams,
                     source: request.body.source,
                 });
+                sourceOutcome = result.sourceOutcome;
             } else {
                 await writeProviderAccountUsageRecordWithPolicy(writeParams);
             }
+            return reply.send({
+                success: true,
+                ...(sourceOutcome ? { source: sourceOutcome } : {}),
+            });
         } catch (error) {
             if (error instanceof ConnectedServiceUsageSourceOwnershipError) {
                 return sendProviderAccountUsageInvalidParams(reply, "connected_service_usage_source_incompatible");
@@ -129,8 +137,6 @@ export function registerProviderAccountUsageRoutesV2(app: Fastify): void {
             }
             throw error;
         }
-
-        return reply.send({ success: true });
     });
 
     app.get("/v2/connect/provider-account-usage/:recordId", {

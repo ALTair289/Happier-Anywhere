@@ -11,6 +11,7 @@ import {
   type ConnectedServiceRuntimeLimitCategory,
   type ConnectedServiceRuntimeQuotaScope,
 } from './types';
+import { normalizeConnectedServiceAccessTokenFingerprint } from '../refresh/credentialFreshness/tokenFingerprint';
 
 const SAFE_STRING_MAX_LENGTH = 512;
 const SAFE_ACTION_URL_MAX_LENGTH = 2_048;
@@ -151,6 +152,7 @@ export function sanitizeConnectedServiceRuntimeFailureClassification(
   const quotaScope = readQuotaScope(value.quotaScope);
   const providerLimitId = readNullableSafeProviderString(value.providerLimitId);
   const sourceProviderAccountId = readNullableSafeProviderString(value.sourceProviderAccountId);
+  const failingAccessTokenFingerprint = normalizeConnectedServiceAccessTokenFingerprint(value.failingAccessTokenFingerprint);
   const sourceAccountLabel = sourceProviderAccountId
     ? readNullableSafeProviderString(value.sourceAccountLabel)
     : null;
@@ -181,6 +183,7 @@ export function sanitizeConnectedServiceRuntimeFailureClassification(
     ...(value.providerLimitId === undefined ? {} : { providerLimitId }),
     ...(sourceProviderAccountId ? { sourceProviderAccountId } : {}),
     ...(sourceProviderAccountId && value.sourceAccountLabel !== undefined ? { sourceAccountLabel } : {}),
+    ...(failingAccessTokenFingerprint ? { failingAccessTokenFingerprint } : {}),
     ...(value.action === undefined ? {} : { action }),
     planType: readNullableSafeProviderString(value.planType),
     rateLimits: null,

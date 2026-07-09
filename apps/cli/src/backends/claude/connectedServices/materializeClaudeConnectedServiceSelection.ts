@@ -1,4 +1,5 @@
 import { isAbsolute, join, relative, resolve } from 'node:path';
+import { readdir } from 'node:fs/promises';
 
 import type {
   AccountSettings,
@@ -143,6 +144,50 @@ function dedupeDiagnostics<T extends Readonly<{
   return deduped;
 }
 
+async function discoverProvenancedClaudeConfigDirs(rootDir: string): Promise<readonly string[]> {
+  const discovered: string[] = [];
+
+  async function visit(dir: string): Promise<void> {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true, encoding: 'utf8' });
+    } catch {
+      return;
+    }
+    if (
+      dir.endsWith('/claude-config')
+      && await readClaudeConnectedServiceHomeProvenance(dir)
+    ) {
+      discovered.push(dir);
+      return;
+    }
+    await Promise.all(entries
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => visit(join(dir, entry.name))));
+  }
+
+  await visit(rootDir);
+  return discovered;
+}
+
+async function resolveClaudeKeychainSweepLiveConfigDirs(params: Readonly<{
+  activeServerDir: string;
+  currentClaudeConfigDir: string;
+}>): Promise<readonly string[] | undefined> {
+  if (process.platform !== 'darwin') return undefined;
+  const homesRoot = join(
+    params.activeServerDir,
+    'daemon',
+    'connected-services',
+    'homes',
+    'claude-subscription',
+  );
+  return [...new Set([
+    params.currentClaudeConfigDir,
+    ...await discoverProvenancedClaudeConfigDirs(homesRoot),
+  ])];
+}
+
 export async function materializeClaudeConnectedServiceSelection(params: Readonly<{
   activeServerDir: string;
   serviceId: ClaudeConnectedServiceMaterializationServiceId;
@@ -154,6 +199,7 @@ export async function materializeClaudeConnectedServiceSelection(params: Readonl
   sessionDirectory?: string | null;
   vendorResumeId?: string | null;
   candidatePersistedSessionFile?: string | null;
+  writeMacOsKeychainCredential?: boolean;
 }>): Promise<ClaudeConnectedServiceSelectionMaterialization | null> {
   const claudeConfigDir = resolveClaudeConnectedServiceStableConfigDir({
     activeServerDir: params.activeServerDir,
@@ -164,6 +210,10 @@ export async function materializeClaudeConnectedServiceSelection(params: Readonl
   if (!claudeConfigDir) return null;
 
   if (params.serviceId === 'claude-subscription') {
+    const keychainSweepLiveClaudeConfigDirs = await resolveClaudeKeychainSweepLiveConfigDirs({
+      activeServerDir: params.activeServerDir,
+      currentClaudeConfigDir: claudeConfigDir,
+    });
     const selectionDescriptor = buildClaudeSubscriptionNativeAuthSelectionDescriptor({
       fallbackProfileId: params.fallbackProfileId,
       selection: params.selection ?? null,
@@ -203,6 +253,10 @@ export async function materializeClaudeConnectedServiceSelection(params: Readonl
           vendorResumeId: params.vendorResumeId ?? null,
           candidatePersistedSessionFile: params.candidatePersistedSessionFile ?? null,
           selectionDescriptor: canonicalProfileSelectionDescriptor,
+          writeMacOsKeychainCredential: params.writeMacOsKeychainCredential,
+          keychainSweepLiveClaudeConfigDirs: profileClaudeConfigDir
+            ? [...new Set([...(keychainSweepLiveClaudeConfigDirs ?? []), profileClaudeConfigDir])]
+            : keychainSweepLiveClaudeConfigDirs,
         });
         groupSourceDiagnostics = canonicalProfileMaterialized.diagnostics;
         if (
@@ -238,6 +292,8 @@ export async function materializeClaudeConnectedServiceSelection(params: Readonl
       vendorResumeId: params.vendorResumeId ?? null,
       candidatePersistedSessionFile: params.candidatePersistedSessionFile ?? null,
       selectionDescriptor,
+      writeMacOsKeychainCredential: params.writeMacOsKeychainCredential,
+      keychainSweepLiveClaudeConfigDirs,
     });
     return {
       env: materialized.env,

@@ -9,6 +9,7 @@ import {
 
 const formatter: ResetCountdownFormatter = {
     durationNow: () => 'now',
+    durationOutdated: () => 'outdated',
     durationDaysHours: ({ days, hours }) => `${days}d ${hours}h`,
     durationHoursMinutes: ({ hours, minutes }) => `${hours}h ${minutes}m`,
     durationHours: ({ hours }) => `${hours}h`,
@@ -36,9 +37,12 @@ describe('formatResetCountdown', () => {
         expect(formatResetCountdown(0, 45 * MINUTE, formatter)).toBe('45m');
     });
 
-    it('formats a past or current reset as "now"', () => {
+    it('formats a current reset as "now"', () => {
         expect(formatResetCountdown(1000, 1000, formatter)).toBe('now');
-        expect(formatResetCountdown(2000, 1000, formatter)).toBe('now');
+    });
+
+    it('formats a past reset as outdated rather than live-now', () => {
+        expect(formatResetCountdown(2000, 1000, formatter)).toBe('outdated');
     });
 });
 

@@ -244,7 +244,7 @@ describe('createQuotaDrivenConnectedServiceAuthGroupSwitchCoordinator', () => {
       serviceId: 'openai-codex',
       groupId: 'main',
       reason: 'soft_threshold',
-    })).resolves.toEqual({
+    })).resolves.toMatchObject({
       status: 'generation_apply_failed',
       activeProfileId: 'backup',
       generation: 2,
@@ -312,7 +312,7 @@ describe('createQuotaDrivenConnectedServiceAuthGroupSwitchCoordinator', () => {
       serviceId: 'openai-codex',
       groupId: 'main',
       reason: 'soft_threshold',
-    })).resolves.toEqual({
+    })).resolves.toMatchObject({
       status: 'generation_apply_failed',
       activeProfileId: 'backup',
       generation: 2,

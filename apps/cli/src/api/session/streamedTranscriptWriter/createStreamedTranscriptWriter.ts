@@ -136,6 +136,8 @@ export function createStreamedTranscriptWriter(params: {
       textVersion: 0,
       didWriteDurable: false,
       didWriteLive: false,
+      appendOnlySinceLastDurableSnapshot: true,
+      appendOnlySinceLastLiveSnapshot: true,
       lastDurableText: '',
       lastCheckpointAtMs: 0,
       lastCheckpointTextLen: 0,
@@ -164,9 +166,17 @@ export function createStreamedTranscriptWriter(params: {
     return segments.get(key) ?? null;
   };
 
-  const hasDirtyDurableText = (segment: SegmentRuntime) => segment.accumulatedText !== segment.lastDurableText;
+  const hasDirtyDurableText = (segment: SegmentRuntime) => {
+    if (segment.appendOnlySinceLastDurableSnapshot) {
+      return segment.accumulatedText.length !== segment.lastCheckpointTextLen;
+    }
+    return segment.accumulatedText !== segment.lastDurableText;
+  };
 
   const getDirtyAppendChars = (segment: SegmentRuntime) => {
+    if (segment.appendOnlySinceLastDurableSnapshot) {
+      return segment.accumulatedText.length - segment.lastCheckpointTextLen;
+    }
     if (!segment.accumulatedText.startsWith(segment.lastDurableText)) return checkpointMinChars;
     return segment.accumulatedText.length - segment.lastDurableText.length;
   };
@@ -214,7 +224,7 @@ export function createStreamedTranscriptWriter(params: {
     // The first live emission for a segment establishes receiver assembly state.
     if (!segment.didWriteLive) return false;
     // Deltas only describe pure appends; rewrites need a full snapshot.
-    if (!segment.accumulatedText.startsWith(segment.lastLiveSnapshotText)) return false;
+    if (!segment.appendOnlySinceLastLiveSnapshot) return false;
     // Periodic full-snapshot checkpoint so receivers can recover from dropped deltas.
     if (opts.nowMs - segment.lastLiveCheckpointAtMs >= liveCheckpointIntervalMs) return false;
     // After a transport reconnect, resync with a full snapshot first.
@@ -243,12 +253,12 @@ export function createStreamedTranscriptWriter(params: {
 
     try {
       if (emitAsDelta) {
-        const deltaText = segment.accumulatedText.slice(segment.lastLiveSnapshotText.length);
+        const deltaText = segment.accumulatedText.slice(segment.lastLiveSnapshotTextLen);
         void Promise.resolve(
           sendDelta(provider, buildStreamedTranscriptSegmentDeltaBody(segment, deltaText), {
             localId: segment.segmentLocalId,
             tick,
-            baseLength: segment.lastLiveSnapshotText.length,
+            baseLength: segment.lastLiveSnapshotTextLen,
             meta,
             createdAt: segment.startedAtMs,
             updatedAt: nowMs,
@@ -296,19 +306,27 @@ export function createStreamedTranscriptWriter(params: {
     segment.lastLiveSnapshotAtMs = nowMs;
     segment.lastLiveSnapshotTextLen = segment.accumulatedText.length;
     segment.lastLiveSnapshotText = segment.accumulatedText;
+    segment.appendOnlySinceLastLiveSnapshot = true;
+  };
+
+  const hasDirtyLiveSnapshotText = (segment: SegmentRuntime) => {
+    if (segment.appendOnlySinceLastLiveSnapshot) {
+      return segment.accumulatedText.length !== segment.lastLiveSnapshotTextLen;
+    }
+    return segment.accumulatedText !== segment.lastLiveSnapshotText;
   };
 
   const scheduleLiveSnapshot = (segment: SegmentRuntime) => {
     if (typeof session.sendAgentMessageEphemeral !== 'function') return;
     if (segment.liveSnapshotTimer) return;
-    if (segment.accumulatedText === segment.lastLiveSnapshotText) return;
+    if (!hasDirtyLiveSnapshotText(segment)) return;
 
     const elapsedMs = Date.now() - segment.lastLiveSnapshotAtMs;
     const delayMs = liveSnapshotIntervalMs <= 0 ? 0 : Math.max(0, liveSnapshotIntervalMs - elapsedMs);
     const timer = setTimeout(() => {
       segment.liveSnapshotTimer = null;
       if (!segments.has(segment.key)) return;
-      if (segment.accumulatedText === segment.lastLiveSnapshotText) return;
+      if (!hasDirtyLiveSnapshotText(segment)) return;
       emitLiveSnapshot(segment, { state: 'streaming' });
     }, delayMs);
     timer.unref?.();
@@ -323,11 +341,11 @@ export function createStreamedTranscriptWriter(params: {
       return;
     }
 
-    if (segment.accumulatedText === segment.lastLiveSnapshotText) return;
+    if (!hasDirtyLiveSnapshotText(segment)) return;
 
-    const isPureAppend = segment.accumulatedText.startsWith(segment.lastLiveSnapshotText);
+    const isPureAppend = segment.appendOnlySinceLastLiveSnapshot;
     const addedChars = isPureAppend
-      ? segment.accumulatedText.length - segment.lastLiveSnapshotText.length
+      ? segment.accumulatedText.length - segment.lastLiveSnapshotTextLen
       : liveSnapshotMinChars;
     const elapsedMs = Date.now() - segment.lastLiveSnapshotAtMs;
     const shouldEmitImmediately = !isPureAppend
@@ -400,6 +418,8 @@ export function createStreamedTranscriptWriter(params: {
     if (!segment) return false;
     if (segment.accumulatedText === text) return true;
     segment.accumulatedText = text;
+    segment.appendOnlySinceLastDurableSnapshot = false;
+    segment.appendOnlySinceLastLiveSnapshot = false;
     segment.textVersion += 1;
     maybeEmitLiveStreamingSnapshot(segment);
     maybeCommitDurableStreamingSnapshot(segment);

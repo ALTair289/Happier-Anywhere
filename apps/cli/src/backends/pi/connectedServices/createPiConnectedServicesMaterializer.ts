@@ -143,6 +143,7 @@ export function createPiConnectedServicesMaterializer(): ConnectedServicesProvid
       openai,
       claudeSubscription,
       anthropic,
+      ...(params.selectionsByServiceId ? { selectionsByServiceId: params.selectionsByServiceId } : {}),
     });
 
     const requestedStateMode = resolvePiStateSharingMode(params.accountSettings);

@@ -37,6 +37,7 @@ export const ClaudeSubscriptionAuthTokensRefreshResponseSchema = z.object({
   accessToken: z.string().min(1),
   anthropicAccountId: z.string().nullable(),
   expiresAt: z.number().nullable(),
+  selectionEpoch: z.number().int().nonnegative().optional(),
 });
 
 export type ClaudeSubscriptionAuthTokensRefreshResponse =

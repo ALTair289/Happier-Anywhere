@@ -2,6 +2,7 @@ import * as React from 'react';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import { CapacityRing } from '@/components/ui/progress/CapacityRing';
+import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
 import { Text } from '@/components/ui/text/Text';
 import { Typography } from '@/constants/Typography';
 import { resolveQuotaToneColor } from '@/sync/domains/connectedServices/resolveQuotaToneColor';
@@ -24,6 +25,13 @@ export type ConnectedServiceCapacityAvatarProps = Readonly<{
     rings: ReadonlyArray<CapacityRingDatum>;
     /** Center number (overall/most-constrained capacity %), or null to hide it. */
     centerLabel?: string | null;
+    /**
+     * True while the underlying snapshot is still loading. Renders a centered
+     * spinner over faint tracks and suppresses `centerLabel`, so a slow load reads
+     * as "loading" rather than an empty "no usage" gauge. Distinct from a resolved
+     * empty gauge (loading false) and from an error (surfaced by the caller).
+     */
+    loading?: boolean;
     size?: number;
     testID?: string;
     accessibilityLabel?: string;
@@ -47,6 +55,7 @@ export function ConnectedServiceCapacityAvatar(props: ConnectedServiceCapacityAv
     // count/tone (the rings already carry the health color; a tone-matched number
     // disappears against same-colored rings, e.g. a Claude account with 3 green rings).
     const centerColor = theme.colors.text.primary;
+    const loading = props.loading ?? false;
 
     return (
         <CapacityRing
@@ -56,7 +65,12 @@ export function ConnectedServiceCapacityAvatar(props: ConnectedServiceCapacityAv
             strokeWidth={3}
             accessibilityLabel={props.accessibilityLabel}
         >
-            {props.centerLabel != null ? (
+            {loading ? (
+                <ActivitySpinner
+                    testID={props.testID ? `${props.testID}:loading` : undefined}
+                    size={Math.round(size * 0.42)}
+                />
+            ) : props.centerLabel != null ? (
                 <Text
                     testID={props.testID ? `${props.testID}:capacity` : undefined}
                     style={[styles.pct, { color: centerColor }]}

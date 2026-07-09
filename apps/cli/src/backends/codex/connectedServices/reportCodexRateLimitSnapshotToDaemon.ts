@@ -13,7 +13,7 @@ import {
   type ConnectedServiceQuotaSnapshotDeliveryOutbox,
 } from '@/daemon/connectedServices/quotas/connectedServiceQuotaSnapshotDeliveryOutbox';
 import { buildNativeProviderAccountUsageSourceProfileId } from '@/daemon/connectedServices/accountUsage/nativeSourceIdentity';
-import { notifyDaemonConnectedServiceQuotaSnapshot } from '@/daemon/controlClient';
+import { deliverConnectedServiceQuotaSnapshotToDaemon } from '@/daemon/connectedServices/quotas/deliverConnectedServiceQuotaSnapshotToDaemon';
 import { resolveConfiguredCodexHome } from '../utils/resolveConfiguredCodexHome';
 import { mapCodexRateLimitSnapshotToQuotaSnapshot } from './mapCodexRateLimitSnapshot';
 import {
@@ -26,6 +26,7 @@ type NotifyQuotaSnapshot = (body: Readonly<{
   serviceId: 'openai-codex';
   groupId?: string | null;
   groupGeneration?: number | null;
+  sourceProviderAccountId?: string | null;
   snapshot: ConnectedServiceQuotaSnapshotV1;
 }>) => Promise<unknown>;
 
@@ -34,18 +35,27 @@ export type CodexQuotaSnapshotReportResult = ConnectedServiceQuotaSnapshotDelive
 export const CODEX_QUOTA_SNAPSHOT_DELIVERY_RETRY_DELAY_MS = 1_000;
 
 export function createCodexQuotaSnapshotDeliveryOutboxForNotify(input: Readonly<{
-  notify: NotifyQuotaSnapshot;
+  /**
+   * Optional explicit notify seam (used by `reportCodexRateLimitSnapshotToDaemon` callers + tests).
+   * When omitted, delivery routes through the ONE shared full-payload daemon deliver helper
+   * (CS-FIX-3) so `sourceProviderAccountId` can never be dropped by a hand-rolled per-site closure.
+   */
+  notify?: NotifyQuotaSnapshot;
   onDiagnostic?: (diagnostic: ConnectedServiceQuotaSnapshotDeliveryDiagnostic) => void;
   retryDelayMs?: number | null;
 }>): ConnectedServiceQuotaSnapshotDeliveryOutbox {
+  const notify = input.notify;
   return createConnectedServiceQuotaSnapshotDeliveryOutbox({
-    deliver: async ({ sessionId, groupId, groupGeneration, snapshot }) => await input.notify({
-      sessionId,
-      serviceId: 'openai-codex',
-      ...(groupId !== undefined ? { groupId } : {}),
-      ...(groupGeneration !== undefined ? { groupGeneration } : {}),
-      snapshot,
-    }),
+    deliver: notify
+      ? async ({ sessionId, groupId, groupGeneration, sourceProviderAccountId, snapshot }) => await notify({
+          sessionId,
+          serviceId: 'openai-codex',
+          ...(groupId !== undefined ? { groupId } : {}),
+          ...(groupGeneration !== undefined ? { groupGeneration } : {}),
+          ...(sourceProviderAccountId !== undefined ? { sourceProviderAccountId } : {}),
+          snapshot,
+        })
+      : deliverConnectedServiceQuotaSnapshotToDaemon,
     retryDelayMs: input.retryDelayMs === undefined
       ? CODEX_QUOTA_SNAPSHOT_DELIVERY_RETRY_DELAY_MS
       : input.retryDelayMs,
@@ -53,15 +63,7 @@ export function createCodexQuotaSnapshotDeliveryOutboxForNotify(input: Readonly<
   });
 }
 
-const defaultCodexQuotaSnapshotDeliveryOutbox = createCodexQuotaSnapshotDeliveryOutboxForNotify({
-  notify: async ({ sessionId, serviceId, groupId, groupGeneration, snapshot }) => await notifyDaemonConnectedServiceQuotaSnapshot({
-    sessionId,
-    serviceId,
-    ...(groupId !== undefined ? { groupId } : {}),
-    ...(groupGeneration !== undefined ? { groupGeneration } : {}),
-    snapshot,
-  }),
-});
+const defaultCodexQuotaSnapshotDeliveryOutbox = createCodexQuotaSnapshotDeliveryOutboxForNotify({});
 
 export async function flushPendingCodexQuotaSnapshotsToDaemon(input: Readonly<{
   deliveryOutbox?: ConnectedServiceQuotaSnapshotDeliveryOutbox;
@@ -164,6 +166,7 @@ export async function reportCodexRateLimitSnapshotToDaemon(input: Readonly<{
   // Do not substitute auth-store identity for connected-service sessions.
   activeAccountId?: string | null;
   accountLabel?: string | null;
+  sourceProviderAccountId?: string | null;
   rawResetCredits?: unknown;
   nowMs?: number;
   notify?: NotifyQuotaSnapshot;
@@ -209,6 +212,7 @@ export async function reportCodexRateLimitSnapshotToDaemon(input: Readonly<{
     serviceId: 'openai-codex',
     groupId: identity.groupId,
     groupGeneration: identity.groupGeneration,
+    ...(input.sourceProviderAccountId !== undefined ? { sourceProviderAccountId: input.sourceProviderAccountId } : {}),
     snapshot,
   });
 }

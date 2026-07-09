@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import type {
     ProviderAccountUsageRecordId,
     ProviderAccountUsageRecordKeyV1,
@@ -6,9 +7,11 @@ import type {
 } from "@happier-dev/protocol";
 import type { TransactionClient } from "@/storage/prisma";
 
+import { inTx } from "@/storage/inTx";
 import {
+    createProviderAccountUsageRecord,
     readProviderAccountUsageRecord,
-    writeProviderAccountUsageRecord,
+    updateProviderAccountUsageRecordIfCurrent,
 } from "./recordStorage";
 import type { ProviderAccountUsagePayloadMode, ProviderAccountUsageStatus } from "./types";
 
@@ -29,6 +32,10 @@ export type ProviderAccountUsageWritePolicyParams = Readonly<{
     client?: ProviderAccountUsagePolicyClient;
 }>;
 
+type ProviderAccountUsageWritePolicyOverrides = Partial<Omit<ProviderAccountUsageWritePolicyParams, "client">> & Readonly<{
+    refreshRequestedAt?: number;
+}>;
+
 function normalizeFingerprint(value: string | undefined): string | undefined {
     return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
@@ -41,90 +48,114 @@ function shouldPreserveRefreshRequest(refreshRequestedAt: number | undefined, fe
     return refreshRequestedAt !== undefined && fetchedAt < refreshRequestedAt;
 }
 
+function isUniqueConstraintError(error: unknown): boolean {
+    return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
+}
+
+function buildWriteParams(
+    params: ProviderAccountUsageWritePolicyParams,
+    overrides: ProviderAccountUsageWritePolicyOverrides = {},
+) {
+    const merged = { ...params, ...overrides };
+    return {
+        accountId: merged.accountId,
+        recordId: merged.recordId,
+        recordKey: merged.recordKey,
+        payloadMode: merged.payloadMode,
+        status: merged.status,
+        fetchedAt: merged.fetchedAt,
+        staleAfterMs: merged.staleAfterMs,
+        ...(merged.snapshot ? { snapshot: merged.snapshot } : {}),
+        ...(merged.sealedPayload ? { sealedPayload: merged.sealedPayload } : {}),
+        ...(merged.materialFingerprint ? { metadata: { materialFingerprint: merged.materialFingerprint } } : {}),
+        ...(merged.refreshRequestedAt !== undefined ? { refreshRequestedAt: merged.refreshRequestedAt } : {}),
+    };
+}
+
+async function writeProviderAccountUsageRecordWithPolicyInClient(
+    params: ProviderAccountUsageWritePolicyParams & Readonly<{ client: ProviderAccountUsagePolicyClient }>,
+): Promise<"written" | "noop" | "stale"> {
+    const incomingFingerprint = normalizeFingerprint(params.materialFingerprint);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+        const existing = await readProviderAccountUsageRecord({
+            accountId: params.accountId,
+            recordId: params.recordId,
+        }, params.client);
+
+        if (!existing) {
+            try {
+                await createProviderAccountUsageRecord(buildWriteParams(
+                    params,
+                    incomingFingerprint ? { materialFingerprint: incomingFingerprint } : {},
+                ), params.client);
+                return "written";
+            } catch (error) {
+                if (isUniqueConstraintError(error)) continue;
+                throw error;
+            }
+        }
+
+        const existingFingerprint = normalizeFingerprint(existing.metadata?.materialFingerprint);
+        const existingFetchedAt = existing.fetchedAt ?? null;
+        const isNewer = existingFetchedAt === null || params.fetchedAt > existingFetchedAt;
+        const clearsRefreshRequest = shouldClearRefreshRequest(existing.refreshRequestedAt, params.fetchedAt);
+        const preservesRefreshRequest = shouldPreserveRefreshRequest(existing.refreshRequestedAt, params.fetchedAt);
+
+        let nextWrite;
+        let result: "written" | "noop" | "stale";
+        if (!incomingFingerprint) {
+            if (!isNewer) return "stale";
+            nextWrite = buildWriteParams(params, {
+                ...(preservesRefreshRequest ? { refreshRequestedAt: existing.refreshRequestedAt } : {}),
+            });
+            result = "written";
+        } else if (existingFingerprint === incomingFingerprint) {
+            if (!isNewer && !clearsRefreshRequest) return "noop";
+            const preservedStatus = existing.status === "refresh_requested" ? params.status : existing.status;
+            nextWrite = buildWriteParams(params, {
+                status: isNewer ? params.status : preservedStatus,
+                fetchedAt: isNewer ? params.fetchedAt : (existing.fetchedAt ?? params.fetchedAt),
+                staleAfterMs: isNewer ? params.staleAfterMs : (existing.staleAfterMs ?? params.staleAfterMs),
+                snapshot: params.payloadMode === "plain_json_v1"
+                    ? (isNewer ? params.snapshot : existing.snapshot)
+                    : undefined,
+                sealedPayload: params.payloadMode === "sealed_account_scoped_v1"
+                    ? (isNewer ? params.sealedPayload : existing.sealedPayload)
+                    : undefined,
+                materialFingerprint: incomingFingerprint,
+                ...(preservesRefreshRequest ? { refreshRequestedAt: existing.refreshRequestedAt } : {}),
+            });
+            result = "written";
+        } else {
+            if (!isNewer) return "stale";
+            nextWrite = buildWriteParams(params, {
+                materialFingerprint: incomingFingerprint,
+                ...(preservesRefreshRequest ? { refreshRequestedAt: existing.refreshRequestedAt } : {}),
+            });
+            result = "written";
+        }
+
+        const updated = await updateProviderAccountUsageRecordIfCurrent(nextWrite, {
+            fetchedAt: existing.fetchedAt,
+            ...(existing.refreshRequestedAt !== undefined ? { refreshRequestedAt: existing.refreshRequestedAt } : {}),
+        }, params.client);
+        if (updated) return result;
+    }
+
+    throw new Error("Provider account usage write policy could not commit after concurrent changes");
+}
+
 export async function writeProviderAccountUsageRecordWithPolicy(
     params: ProviderAccountUsageWritePolicyParams,
 ): Promise<"written" | "noop" | "stale"> {
-    const incomingFingerprint = normalizeFingerprint(params.materialFingerprint);
-    const existing = await readProviderAccountUsageRecord({
-        accountId: params.accountId,
-        recordId: params.recordId,
-    }, params.client);
-
-    if (!existing) {
-        await writeProviderAccountUsageRecord({
-            accountId: params.accountId,
-            recordId: params.recordId,
-            recordKey: params.recordKey,
-            payloadMode: params.payloadMode,
-            status: params.status,
-            fetchedAt: params.fetchedAt,
-            staleAfterMs: params.staleAfterMs,
-            ...(params.snapshot ? { snapshot: params.snapshot } : {}),
-            ...(params.sealedPayload ? { sealedPayload: params.sealedPayload } : {}),
-            ...(incomingFingerprint ? { metadata: { materialFingerprint: incomingFingerprint } } : {}),
-        }, params.client);
-        return "written";
+    if (params.client) {
+        return await writeProviderAccountUsageRecordWithPolicyInClient({
+            ...params,
+            client: params.client,
+        });
     }
-
-    const existingFingerprint = normalizeFingerprint(existing.metadata?.materialFingerprint);
-    const existingFetchedAt = existing.fetchedAt ?? null;
-    const isNewer = existingFetchedAt === null || params.fetchedAt > existingFetchedAt;
-    const clearsRefreshRequest = shouldClearRefreshRequest(existing.refreshRequestedAt, params.fetchedAt);
-    const preservesRefreshRequest = shouldPreserveRefreshRequest(existing.refreshRequestedAt, params.fetchedAt);
-    if (!incomingFingerprint) {
-        if (!isNewer) return "stale";
-        await writeProviderAccountUsageRecord({
-            accountId: params.accountId,
-            recordId: params.recordId,
-            recordKey: params.recordKey,
-            payloadMode: params.payloadMode,
-            status: params.status,
-            fetchedAt: params.fetchedAt,
-            staleAfterMs: params.staleAfterMs,
-            ...(params.snapshot ? { snapshot: params.snapshot } : {}),
-            ...(params.sealedPayload ? { sealedPayload: params.sealedPayload } : {}),
-            ...(preservesRefreshRequest ? { refreshRequestedAt: existing.refreshRequestedAt } : {}),
-        }, params.client);
-        return "written";
-    }
-
-    if (existingFingerprint === incomingFingerprint) {
-        if (!isNewer && !clearsRefreshRequest) return "noop";
-
-        await writeProviderAccountUsageRecord({
-            accountId: params.accountId,
-            recordId: params.recordId,
-            recordKey: params.recordKey,
-            payloadMode: params.payloadMode,
-            status: isNewer ? params.status : existing.status,
-            fetchedAt: isNewer ? params.fetchedAt : (existing.fetchedAt ?? params.fetchedAt),
-            staleAfterMs: isNewer ? params.staleAfterMs : (existing.staleAfterMs ?? params.staleAfterMs),
-            snapshot: params.payloadMode === "plain_json_v1"
-                ? (isNewer ? params.snapshot : existing.snapshot)
-                : undefined,
-            sealedPayload: params.payloadMode === "sealed_account_scoped_v1"
-                ? (isNewer ? params.sealedPayload : existing.sealedPayload)
-                : undefined,
-            metadata: { materialFingerprint: incomingFingerprint },
-            ...(preservesRefreshRequest ? { refreshRequestedAt: existing.refreshRequestedAt } : {}),
-        }, params.client);
-        return "written";
-    }
-
-    if (!isNewer) return "stale";
-
-    await writeProviderAccountUsageRecord({
-        accountId: params.accountId,
-        recordId: params.recordId,
-        recordKey: params.recordKey,
-        payloadMode: params.payloadMode,
-        status: params.status,
-        fetchedAt: params.fetchedAt,
-        staleAfterMs: params.staleAfterMs,
-        ...(params.snapshot ? { snapshot: params.snapshot } : {}),
-        ...(params.sealedPayload ? { sealedPayload: params.sealedPayload } : {}),
-        metadata: { materialFingerprint: incomingFingerprint },
-        ...(preservesRefreshRequest ? { refreshRequestedAt: existing.refreshRequestedAt } : {}),
-    }, params.client);
-    return "written";
+    return await inTx(async (tx) => await writeProviderAccountUsageRecordWithPolicyInClient({
+        ...params,
+        client: tx,
+    }));
 }

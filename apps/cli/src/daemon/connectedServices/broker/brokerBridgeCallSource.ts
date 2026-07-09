@@ -15,7 +15,8 @@
  * uses `fetch`/`process` globals. It defines:
  *   - `fetchAccessTokenFromBridge(forceRefresh)` → `{ accessToken, accountId, expiresAt }`
  *   - `readDaemonHttpPort()`, `readScopedToken()` (also used by a broker's load handshake)
- * Callers must place `import { readFileSync } from "node:fs";` at the top of the assembled module.
+ * Callers must place `import { createHash } from "node:crypto";` and
+ * `import { readFileSync } from "node:fs";` at the top of the assembled module.
  */
 
 /**
@@ -53,6 +54,8 @@ export function buildBrokerBridgeCallSource(params: Readonly<{
   pluginVersion: string;
   /** Stable tag for the synthetic bridge `sessionId` (e.g. `opencode-broker` / `pi-broker`). */
   sessionTag: string;
+  /** Env var holding the stable broker selection identity used for daemon-side effective selection. */
+  selectionIdentityEnv?: string | null;
   /** Optional request body field used by providers whose bridge accepts a plan hint. */
   planTypeBodyField?: string | null;
   /** Response fields to check, in order, for a provider account id. */
@@ -61,6 +64,7 @@ export function buildBrokerBridgeCallSource(params: Readonly<{
   const accountIdResultFields = params.accountIdResultFields ?? ['accountId'];
   return `const PROVIDER = ${jsString(params.providerTag)};
 const BRIDGE_PATH = ${jsString(params.bridgePath)};
+const BRIDGE_FETCH_TIMEOUT_MS = 30000;
 const SERVICE_ID = ${jsString(params.serviceId)};
 const SELECTIONS_ENV = ${jsString(params.selectionsEnv)};
 const DAEMON_STATE_PATH_ENV = ${jsString(params.daemonStatePathEnv)};
@@ -68,6 +72,7 @@ const REFRESH_TOKEN_ENV = ${jsString(params.refreshTokenEnv)};
 const PLUGIN_VERSION_ENV = ${jsString(params.pluginVersionEnv)};
 const PLUGIN_VERSION = ${jsString(params.pluginVersion)};
 const SESSION_TAG = ${jsString(params.sessionTag)};
+const BRIDGE_SELECTION_IDENTITY_ENV = ${params.selectionIdentityEnv ? jsString(params.selectionIdentityEnv) : 'null'};
 const PLAN_TYPE_BODY_FIELD = ${params.planTypeBodyField ? jsString(params.planTypeBodyField) : 'null'};
 const ACCOUNT_ID_RESULT_FIELDS = ${JSON.stringify(accountIdResultFields)};
 
@@ -106,29 +111,94 @@ function readScopedToken() {
 function resolveSelection() {
   const selections = readJsonEnv(SELECTIONS_ENV) || {};
   const selection = selections[PROVIDER];
-  if (!selection || typeof selection.profileId !== "string" || selection.profileId.length === 0) {
+  if (!selection || typeof selection !== "object" || Array.isArray(selection)) {
+    throw new Error("happier_broker_selection_missing");
+  }
+  if (selection.kind === "group") {
+    if (
+      selection.serviceId !== SERVICE_ID
+      || typeof selection.groupId !== "string"
+      || selection.groupId.length === 0
+      || typeof selection.activeProfileId !== "string"
+      || selection.activeProfileId.length === 0
+      || typeof selection.fallbackProfileId !== "string"
+      || selection.fallbackProfileId.length === 0
+      || typeof selection.generation !== "number"
+    ) {
+      throw new Error("happier_broker_selection_missing");
+    }
+    return {
+      kind: "group",
+      serviceId: SERVICE_ID,
+      groupId: selection.groupId,
+      activeProfileId: selection.activeProfileId,
+      fallbackProfileId: selection.fallbackProfileId,
+      generation: selection.generation,
+      accountId: selection.accountId || null,
+      planType: selection.planType || null,
+    };
+  }
+  if (typeof selection.profileId !== "string" || selection.profileId.length === 0) {
+    throw new Error("happier_broker_selection_missing");
+  }
+  if (selection.serviceId && selection.serviceId !== SERVICE_ID) {
     throw new Error("happier_broker_selection_missing");
   }
   return selection;
 }
 
+function readSelectionIdentity() {
+  if (!BRIDGE_SELECTION_IDENTITY_ENV) return null;
+  const identity = process.env[BRIDGE_SELECTION_IDENTITY_ENV];
+  return typeof identity === "string" && identity.trim().length > 0 ? identity.trim() : null;
+}
+
+function computeAccessTokenFingerprint(accessToken) {
+  return "sha256:" + createHash("sha256").update(String(accessToken)).digest("hex").slice(0, 8);
+}
+
+function buildBridgeSelection(selection) {
+  if (selection && selection.kind === "group") {
+    return {
+      kind: "group",
+      serviceId: SERVICE_ID,
+      groupId: selection.groupId,
+      activeProfileId: selection.activeProfileId,
+      fallbackProfileId: selection.fallbackProfileId,
+      generation: selection.generation,
+    };
+  }
+  return { kind: "profile", serviceId: SERVICE_ID, profileId: selection.profileId };
+}
+
 // Calls the Happier daemon bridge for an ACCESS token. The daemon returns the CURRENT access token
 // when it is still valid and rotates ONLY when near-expiry or when forceRefresh is set (the 401-retry
 // path). Returns { accessToken, accountId, expiresAt }.
-async function fetchAccessTokenFromBridge(forceRefresh) {
+async function fetchAccessTokenFromBridge(forceRefresh, failingAccessToken) {
   const httpPort = readDaemonHttpPort();
   const scopedToken = readScopedToken();
   const selection = resolveSelection();
   const body = {
     sessionId: SESSION_TAG + ":" + PROVIDER + ":" + (process.env[PLUGIN_VERSION_ENV] || PLUGIN_VERSION),
-    selection: { kind: "profile", serviceId: SERVICE_ID, profileId: selection.profileId },
+    selection: buildBridgeSelection(selection),
     forceRefresh: forceRefresh === true,
   };
+  const selectionIdentity = readSelectionIdentity();
+  if (selectionIdentity) body.selectionIdentity = selectionIdentity;
   if (PLAN_TYPE_BODY_FIELD) body[PLAN_TYPE_BODY_FIELD] = selection.planType || null;
+  if (forceRefresh === true && typeof failingAccessToken === "string" && failingAccessToken.length > 0) {
+    body.failingAccessTokenFingerprint = computeAccessTokenFingerprint(failingAccessToken);
+  }
+  // RR-7: a hung daemon must not hang the provider's auth path forever — bound the bridge call.
+  // Guarded like the daemon's own OAuth fetch (AbortSignal.timeout needs node >= 17.3 / Bun).
+  const bridgeAbort = typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
+    ? { signal: AbortSignal.timeout(BRIDGE_FETCH_TIMEOUT_MS) }
+    : {};
   const response = await fetch("http://127.0.0.1:" + httpPort + BRIDGE_PATH, {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-happier-daemon-token": scopedToken },
     body: JSON.stringify(body),
+    ...bridgeAbort,
   });
   if (!response.ok) {
     throw new Error("happier_broker_bridge_status_" + response.status);
@@ -147,6 +217,7 @@ async function fetchAccessTokenFromBridge(forceRefresh) {
     }
   }
   const expiresAt = result && typeof result.expiresAt === "number" ? result.expiresAt : null;
-  return { accessToken: accessToken, accountId: accountId, expiresAt: expiresAt };
+  const selectionEpoch = result && typeof result.selectionEpoch === "number" ? result.selectionEpoch : null;
+  return { accessToken: accessToken, accountId: accountId, expiresAt: expiresAt, selectionEpoch: selectionEpoch };
 }`;
 }

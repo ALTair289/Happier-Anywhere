@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -45,6 +45,13 @@ async function readDeadLetterEntries(sessionId: string): Promise<unknown[]> {
     }
 }
 
+async function writeDeadLetterEntries(sessionId: string, entries: readonly unknown[]): Promise<void> {
+    const { configuration } = await import('@/configuration');
+    const filePath = join(configuration.activeServerDir, 'session-mutations', `session-${sessionId}.dead-letter.json`);
+    await mkdir(join(configuration.activeServerDir, 'session-mutations'), { recursive: true });
+    await writeFile(filePath, JSON.stringify({ v: 1, entries }, null, 2), 'utf8');
+}
+
 function createDeferred<T = void>(): {
     promise: Promise<T>;
     resolve: (value: T | PromiseLike<T>) => void;
@@ -73,6 +80,7 @@ describe('createSessionMutationOutbox', () => {
     });
 
     afterEach(async () => {
+        vi.unstubAllEnvs();
         process.env.HAPPIER_HOME_DIR = originalHappyHomeDir;
         if (originalMaxAttempts === undefined) {
             delete process.env.HAPPIER_SESSION_MUTATION_OUTBOX_MAX_ATTEMPTS;
@@ -180,7 +188,7 @@ describe('createSessionMutationOutbox', () => {
         await outbox.close();
     });
 
-    it.each([400, 422] as const)('dead-letters exhausted HTTP %s turn rejections and advances independent turns', async (status) => {
+    it.each([400, 422] as const)('keeps exhausted HTTP %s turn rejections queued instead of losing authoritative state', async (status) => {
         const deliveredTurnIds: string[] = [];
         vi.mocked(axios.post).mockImplementation(async (_url, body) => {
             const turnId = (body as { turnId?: unknown }).turnId;
@@ -259,27 +267,137 @@ describe('createSessionMutationOutbox', () => {
 
         await outbox.flush('flush');
 
-        expect(deliveredTurnIds).toContain('turn-independent');
+        expect(deliveredTurnIds).not.toContain('turn-independent');
         expect(deliveredTurnIds).not.toContain('turn-blocked-complete');
-        await expect(readPersistedOutboxMutations('s1')).resolves.toEqual([]);
-        await expect(readDeadLetterEntries('s1')).resolves.toEqual([
+        await expect(readPersistedOutboxMutations('s1')).resolves.toEqual([
             expect.objectContaining({
                 kind: 'session_turn',
                 mutationId: 'mutation-blocked-begin',
-                reason: 'retry_exhausted',
                 attempts: 2,
-                diagnostic: expect.objectContaining({
-                    deliveryStatus: 'retryable',
-                    httpStatus: status,
-                }),
             }),
+            expect.objectContaining({ mutationId: 'mutation-blocked-complete' }),
+            expect.objectContaining({ mutationId: 'mutation-independent-begin' }),
+        ]);
+        await expect(readDeadLetterEntries('s1')).resolves.toEqual([]);
+        await outbox.close();
+    });
+
+    it('retries authoritative turn mutations beyond max attempts and delivers after reconnect', async () => {
+        process.env.HAPPIER_SESSION_MUTATION_OUTBOX_MAX_ATTEMPTS = '1';
+        process.env.HAPPIER_SESSION_MUTATION_OUTBOX_BASE_RETRY_MS = '0';
+        let shouldFail = true;
+        vi.mocked(axios.post).mockImplementation(async () => {
+            if (shouldFail) {
+                throw Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:41001'), {
+                    isAxiosError: true,
+                    code: 'ECONNREFUSED',
+                });
+            }
+            return { status: 200, data: { ok: true } } as never;
+        });
+        const socket = createApiSessionSocketStub({ connected: false });
+        const { createSessionMutationOutbox } = await import('./createSessionMutationOutbox');
+        const { createSessionTurnMutation } = await import('./sessionMutationTypes');
+        const { saveSessionMutationOutbox } = await import('./sessionMutationPersistence');
+        const complete = createSessionTurnMutation({
+            sessionId: 's-authoritative-retry',
+            action: 'complete',
+            turnId: 'turn-1',
+            provider: 'claude',
+            mutationId: 'mutation-complete',
+            observedAt: 1_100,
+        });
+        await saveSessionMutationOutbox('s-authoritative-retry', [{
+            kind: 'session_turn',
+            mutationId: complete.mutationId,
+            payload: complete,
+            createdAt: 1_100,
+            attempts: 0,
+            nextAttemptAt: 0,
+        }]);
+        const outbox = createSessionMutationOutbox({
+            token: 'tok',
+            sessionId: 's-authoritative-retry',
+            getSocket: () => socket,
+            requestReconnect: () => {},
+        });
+
+        await outbox.flush('flush');
+        await outbox.flush('flush');
+
+        await expect(readDeadLetterEntries('s-authoritative-retry')).resolves.toEqual([]);
+        const persistedAfterFailures = await readPersistedOutboxMutations('s-authoritative-retry');
+        expect(persistedAfterFailures).toEqual([
             expect.objectContaining({
                 kind: 'session_turn',
-                mutationId: 'mutation-blocked-complete',
-                reason: 'blocked_by_dead_lettered_dependency',
-                dependencyMutationId: 'mutation-blocked-begin',
+                mutationId: 'mutation-complete',
             }),
         ]);
+        expect((persistedAfterFailures[0] as { attempts?: unknown }).attempts).toBeGreaterThan(1);
+
+        shouldFail = false;
+        await outbox.flush('connect');
+
+        expect(vi.mocked(axios.post).mock.calls.length).toBeGreaterThanOrEqual(3);
+        await expect(readPersistedOutboxMutations('s-authoritative-retry')).resolves.toEqual([]);
+        await expect(readDeadLetterEntries('s-authoritative-retry')).resolves.toEqual([]);
+        await outbox.close();
+    });
+
+    it('re-resolves the live server URL and retries a terminal turn mutation after a local endpoint refusal', async () => {
+        const attemptedUrls: string[] = [];
+        vi.stubEnv('HAPPIER_SERVER_URL', 'http://127.0.0.1:41001');
+        vi.stubEnv('HAPPIER_LOCAL_SERVER_URL', '');
+        vi.mocked(axios.post).mockImplementation(async (url) => {
+            attemptedUrls.push(String(url));
+            if (attemptedUrls.length === 1) {
+                vi.stubEnv('HAPPIER_SERVER_URL', 'http://127.0.0.1:52002');
+                throw Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:41001'), {
+                    isAxiosError: true,
+                    code: 'ECONNREFUSED',
+                });
+            }
+            return { status: 200, data: { ok: true } } as never;
+        });
+        const socket = createApiSessionSocketStub({
+            connected: false,
+            emitWithAck: async () => {
+                throw new Error('socket emit should not be reached while disconnected');
+            },
+        });
+        const { createSessionMutationOutbox } = await import('./createSessionMutationOutbox');
+        const { createSessionTurnMutation } = await import('./sessionMutationTypes');
+        const { saveSessionMutationOutbox } = await import('./sessionMutationPersistence');
+        const complete = createSessionTurnMutation({
+            sessionId: 's1',
+            action: 'complete',
+            turnId: 'turn-1',
+            provider: 'claude',
+            mutationId: 'mutation-complete',
+            observedAt: 1_100,
+        });
+        await saveSessionMutationOutbox('s1', [{
+            kind: 'session_turn',
+            mutationId: complete.mutationId,
+            payload: complete,
+            createdAt: 1_100,
+            attempts: 0,
+            nextAttemptAt: 0,
+        }]);
+
+        const outbox = createSessionMutationOutbox({
+            token: 'tok',
+            sessionId: 's1',
+            getSocket: () => socket,
+            requestReconnect: () => {},
+        });
+        await outbox.flush('flush');
+
+        expect(attemptedUrls).toEqual([
+            'http://127.0.0.1:41001/v1/sessions/s1/turns/mutations',
+            'http://127.0.0.1:52002/v1/sessions/s1/turns/mutations',
+        ]);
+        await expect(readPersistedOutboxMutations('s1')).resolves.toEqual([]);
         await outbox.close();
     });
 
@@ -503,7 +621,7 @@ describe('createSessionMutationOutbox', () => {
         },
     );
 
-    it('dead-letters exhausted unsupported session-end mutations after legacy proof fails', async () => {
+    it('keeps exhausted unsupported session-end mutations queued after legacy proof fails', async () => {
         process.env.HAPPIER_SESSION_MUTATION_OUTBOX_MAX_ATTEMPTS = '1';
         vi.mocked(axios.post).mockRejectedValue({ response: { status: 404 } });
         const socket = createApiSessionSocketStub({
@@ -534,17 +652,13 @@ describe('createSessionMutationOutbox', () => {
 
         await outbox.flush('flush');
 
-        await expect(readPersistedOutboxMutations('s1')).resolves.toEqual([]);
-        await expect(readDeadLetterEntries('s1')).resolves.toEqual([
+        await expect(readPersistedOutboxMutations('s1')).resolves.toEqual([
             expect.objectContaining({
                 kind: 'session_end',
-                reason: 'retry_exhausted',
                 attempts: 1,
-                diagnostic: expect.objectContaining({
-                    deliveryStatus: 'unsupported_capability',
-                }),
             }),
         ]);
+        await expect(readDeadLetterEntries('s1')).resolves.toEqual([]);
         await outbox.close();
     });
 
@@ -593,16 +707,9 @@ describe('createSessionMutationOutbox', () => {
 
         await outbox.flush('connect');
 
-        await expect(readPersistedOutboxMutations('s1')).resolves.toEqual([
-            expect.objectContaining({
-                kind: 'session_end',
-                mutationId: latestEnd.mutationId,
-                payload: expect.objectContaining({
-                    observedAt: 2_000,
-                }),
-            }),
-        ]);
-        expect(vi.mocked(axios.post)).not.toHaveBeenCalled();
+        await expect(readPersistedOutboxMutations('s1')).resolves.toEqual([]);
+        expect(vi.mocked(axios.post)).toHaveBeenCalledTimes(1);
+        expect(vi.mocked(axios.post).mock.calls[0]?.[1]).toEqual({ time: 2_000 });
         await outbox.close();
     });
 
@@ -1065,6 +1172,101 @@ describe('createSessionMutationOutbox', () => {
         await outbox.close();
     });
 
+    it('recovers authoritative dead letters on reconnect without requeueing lossy transcript dead letters', async () => {
+        const deliveredUrls: string[] = [];
+        vi.mocked(axios.post).mockImplementation(async (url) => {
+            deliveredUrls.push(String(url));
+            return { status: 200, data: { ok: true } } as never;
+        });
+        const socket = createApiSessionSocketStub({ connected: false });
+        const { createSessionMutationOutbox } = await import('./createSessionMutationOutbox');
+        const {
+            createSessionTurnMutation,
+            createTranscriptMessageAppendMutation,
+        } = await import('./sessionMutationTypes');
+        const turn = createSessionTurnMutation({
+            sessionId: 's-dead-letter-recovery',
+            action: 'complete',
+            turnId: 'turn-1',
+            provider: 'claude',
+            mutationId: 'mutation-recovered-complete',
+            observedAt: 1_100,
+        });
+        const transcript = createTranscriptMessageAppendMutation({
+            sessionId: 's-dead-letter-recovery',
+            localId: 'segment-lost',
+            messageRole: 'agent',
+            content: { t: 'plain', v: { role: 'agent', content: { type: 'text', text: 'lossy' } } },
+            createdAt: 1_000,
+            updatedAt: 1_100,
+        });
+        await writeDeadLetterEntries('s-dead-letter-recovery', [
+            {
+                v: 1,
+                kind: 'session_turn',
+                sessionId: 's-dead-letter-recovery',
+                mutationId: turn.mutationId,
+                reason: 'retry_exhausted',
+                attempts: 12,
+                createdAt: 1_100,
+                deadLetteredAt: 1_300,
+                payloadSummary: {
+                    keys: ['action', 'mutationId', 'observedAt', 'provider', 'sessionId', 'turnId', 'v'],
+                    action: 'complete',
+                    mutationId: turn.mutationId,
+                    sessionId: 's-dead-letter-recovery',
+                },
+            },
+            {
+                v: 1,
+                kind: 'transcript_message_append',
+                sessionId: 's-dead-letter-recovery',
+                mutationId: transcript.mutationId,
+                reason: 'retry_exhausted',
+                attempts: 12,
+                createdAt: 1_000,
+                deadLetteredAt: 1_300,
+                queuedMutation: {
+                    kind: 'transcript_message_append',
+                    mutationId: transcript.mutationId,
+                    payload: transcript,
+                    createdAt: 1_000,
+                    attempts: 12,
+                    nextAttemptAt: 0,
+                },
+            },
+        ]);
+
+        const outbox = createSessionMutationOutbox({
+            token: 'tok',
+            sessionId: 's-dead-letter-recovery',
+            getSocket: () => socket,
+            requestReconnect: () => {},
+        });
+
+        await outbox.flush('connect');
+        await outbox.flush('connect');
+
+        expect(deliveredUrls).toEqual([
+            expect.stringMatching(/\/v1\/sessions\/s-dead-letter-recovery\/turns\/mutations$/),
+        ]);
+        await expect(readPersistedOutboxMutations('s-dead-letter-recovery')).resolves.toEqual([]);
+        const deadLetters = await readDeadLetterEntries('s-dead-letter-recovery');
+        expect(deadLetters[0]).toEqual(
+            expect.objectContaining({
+                kind: 'session_turn',
+                mutationId: 'mutation-recovered-complete',
+                recoveryAttemptedAt: expect.any(Number),
+            }),
+        );
+        expect(deadLetters[1]).toEqual(expect.objectContaining({
+            kind: 'transcript_message_append',
+            mutationId: 'transcript:s-dead-letter-recovery:segment-lost',
+        }));
+        expect(deadLetters[1]).not.toHaveProperty('recoveryAttemptedAt');
+        await outbox.close();
+    });
+
     it('keeps socket ACK timeouts queued and requests reconnect for transcript snapshots', async () => {
         process.env.HAPPIER_SESSION_SOCKET_ACK_TIMEOUT_MS = '1';
         vi.mocked(axios.post).mockRejectedValue(new Error('server unavailable'));
@@ -1304,5 +1506,78 @@ describe('createSessionMutationOutbox', () => {
             await outbox1.close();
             await outbox2.close();
         }
+    });
+
+    it('serializes same-session outbox handles through one owner so concurrent enqueues cannot overwrite the file', async () => {
+        vi.mocked(axios.post).mockRejectedValue(new Error('server unavailable'));
+        const saves: Array<{
+            mutationIds: string[];
+            resolve: () => void;
+        }> = [];
+        vi.doMock('./sessionMutationPersistence', async (importOriginal) => {
+            const actual = await importOriginal<typeof import('./sessionMutationPersistence')>();
+            return {
+                ...actual,
+                loadSessionMutationOutbox: vi.fn(async () => []),
+                saveSessionMutationOutbox: vi.fn(async (_sessionId: string, mutations: readonly { mutationId?: unknown }[]) => {
+                    if (saves.length >= 2) return;
+                    const deferred = createDeferred<void>();
+                    saves.push({
+                        mutationIds: mutations.map((mutation) => String(mutation.mutationId ?? '')),
+                        resolve: () => deferred.resolve(),
+                    });
+                    await deferred.promise;
+                }),
+                appendSessionMutationDeadLetters: vi.fn(async () => undefined),
+            };
+        });
+        const { createSessionMutationOutbox } = await import('./createSessionMutationOutbox');
+        const {
+            createSessionEndMutation,
+            createSessionTurnMutation,
+        } = await import('./sessionMutationTypes');
+        const socket = createApiSessionSocketStub({ connected: false });
+        const firstHandle = createSessionMutationOutbox({
+            token: 'tok',
+            sessionId: 's-shared-owner',
+            getSocket: () => socket,
+            requestReconnect: () => {},
+        });
+        const secondHandle = createSessionMutationOutbox({
+            token: 'tok',
+            sessionId: 's-shared-owner',
+            getSocket: () => socket,
+            requestReconnect: () => {},
+        });
+
+        const first = firstHandle.enqueueSessionTurn(createSessionTurnMutation({
+            sessionId: 's-shared-owner',
+            action: 'begin',
+            turnId: 'turn-1',
+            mutationId: 'mutation-turn-begin',
+            observedAt: 1_000,
+        }));
+        await expect.poll(() => saves.length, { timeout: 100 }).toBe(1);
+        const second = secondHandle.enqueueSessionEnd(createSessionEndMutation({
+            sessionId: 's-shared-owner',
+            observedAt: 2_000,
+        }));
+        await Promise.resolve();
+        await Promise.resolve();
+        const saveCountBeforeFirstCompletes = saves.length;
+
+        saves[0].resolve();
+        await first;
+        await expect.poll(() => saves.length, { timeout: 100 }).toBe(2);
+        saves[1].resolve();
+        await second;
+
+        expect(saveCountBeforeFirstCompletes).toBe(1);
+        expect(saves[1].mutationIds).toEqual(expect.arrayContaining([
+            'mutation-turn-begin',
+            expect.stringMatching(/^[0-9a-f-]{36}$/i),
+        ]));
+        await firstHandle.close();
+        await secondHandle.close();
     });
 });

@@ -37,11 +37,7 @@ export const CONNECTED_SERVICE_BROKER_REFRESH_SCOPE_LABEL = 'happier:connected-s
  * authorizes anything because the verifier rejects empty providers).
  */
 export function deriveConnectedServiceBrokerRefreshToken(controlToken: string | null | undefined): string {
-  const normalized = typeof controlToken === 'string' ? controlToken.trim() : '';
-  if (!normalized) return '';
-  return createHmac('sha256', normalized)
-    .update(CONNECTED_SERVICE_BROKER_REFRESH_SCOPE_LABEL)
-    .digest('base64url');
+  return deriveScopedCapabilityToken(controlToken, CONNECTED_SERVICE_BROKER_REFRESH_SCOPE_LABEL);
 }
 
 /**
@@ -53,7 +49,41 @@ export function isValidConnectedServiceBrokerRefreshToken(
   provided: string | null | undefined,
   controlToken: string | null | undefined,
 ): boolean {
-  const expected = deriveConnectedServiceBrokerRefreshToken(controlToken);
+  return isValidScopedCapabilityToken(provided, controlToken, CONNECTED_SERVICE_BROKER_REFRESH_SCOPE_LABEL);
+}
+
+/**
+ * Scope label for the EXECUTION-RUN materialization bridge (POST-WAVE-REVIEW F2: least privilege —
+ * a leaked run-materialize token must not authorize the broker-refresh endpoints, and vice versa).
+ */
+export const CONNECTED_SERVICE_RUN_MATERIALIZE_SCOPE_LABEL = 'happier:connected-service-run-materialize:v1';
+
+export function deriveConnectedServiceRunMaterializeToken(controlToken: string | null | undefined): string {
+  return deriveScopedCapabilityToken(controlToken, CONNECTED_SERVICE_RUN_MATERIALIZE_SCOPE_LABEL);
+}
+
+export function isValidConnectedServiceRunMaterializeToken(
+  provided: string | null | undefined,
+  controlToken: string | null | undefined,
+): boolean {
+  return isValidScopedCapabilityToken(provided, controlToken, CONNECTED_SERVICE_RUN_MATERIALIZE_SCOPE_LABEL);
+}
+
+/** ONE derivation core for every scoped capability (label = the scope; empty inputs fail closed). */
+function deriveScopedCapabilityToken(controlToken: string | null | undefined, scopeLabel: string): string {
+  const normalized = typeof controlToken === 'string' ? controlToken.trim() : '';
+  if (!normalized) return '';
+  return createHmac('sha256', normalized)
+    .update(scopeLabel)
+    .digest('base64url');
+}
+
+function isValidScopedCapabilityToken(
+  provided: string | null | undefined,
+  controlToken: string | null | undefined,
+  scopeLabel: string,
+): boolean {
+  const expected = deriveScopedCapabilityToken(controlToken, scopeLabel);
   const candidate = typeof provided === 'string' ? provided.trim() : '';
   if (!expected || !candidate) return false;
   // Hash both sides to a fixed length so `timingSafeEqual` never throws on a length mismatch and the

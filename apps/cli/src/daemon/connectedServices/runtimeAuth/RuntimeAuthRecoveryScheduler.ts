@@ -534,13 +534,11 @@ function readTemporaryRetryHandoffStatus(result: Readonly<Record<string, unknown
   return null;
 }
 
-// F0: group-exhausted (and switch-limited) recoveries with ANY wait signal are durable
-// waits, never terminal. When every wait candidate is stale (already elapsed by the
-// time the coordinator answers), fall back to a policy floor instead of an immediate
-// retry: collapsing the wait to "now" burned the whole attempt budget in milliseconds
-// and dead-lettered `no_eligible_member` (live incident cmq7pyq). The group floor
-// mirrors the group-member cooldown default (protocol
-// `ConnectedServiceAuthGroupPolicy.cooldownMs` = 30s).
+// F0: group-exhausted (and switch-limited) recoveries are durable waits, never terminal.
+// For `no_eligible_member`, known reset evidence owns the next retry time. Without reset
+// evidence, the wait uses the anti-storm floor until capped exponential backoff grows beyond it.
+const DEFAULT_RUNTIME_AUTH_RECOVERY_BASE_BACKOFF_MS = 1_000;
+const DEFAULT_RUNTIME_AUTH_RECOVERY_MAX_BACKOFF_MS = 60_000;
 const DEFAULT_RUNTIME_AUTH_RECOVERY_GROUP_EXHAUSTED_WAIT_FLOOR_MS = 30_000;
 // The per-session switch budget frees on a rolling hour window the scheduler cannot
 // observe directly; poll it on a coarser floor so the durable wait itself provides the
@@ -548,7 +546,7 @@ const DEFAULT_RUNTIME_AUTH_RECOVERY_GROUP_EXHAUSTED_WAIT_FLOOR_MS = 30_000;
 const DEFAULT_RUNTIME_AUTH_RECOVERY_SWITCH_LIMIT_WAIT_FLOOR_MS = 5 * 60_000;
 
 export type RuntimeAuthRecoveryDurableWait = Readonly<{
-  nextRetryAtMs: number;
+  nextRetryAtMs: number | null;
   reason: 'no_eligible_member' | 'switch_limit_reached' | 'awaiting_limit_reset';
 }>;
 
@@ -619,6 +617,7 @@ export function resolveRuntimeAuthRecoveryDurableWaitPlan(input: Readonly<{
   result: unknown;
   classificationResetsAtMs: number | null;
   additionalWaitCandidatesMs?: ReadonlyArray<number | null>;
+  unknownNoEligibleMemberBackoffMs?: number | null;
   nowMs: number;
 }>): RuntimeAuthRecoveryDurableWait | null {
   const switchResult = readSwitchAttemptResult(input.result);
@@ -632,9 +631,13 @@ export function resolveRuntimeAuthRecoveryDurableWaitPlan(input: Readonly<{
       input.classificationResetsAtMs,
       ...additionalCandidates,
     ], input.nowMs);
+    const unknownResetBackoffMs = readNonNegativeNumber(input.unknownNoEligibleMemberBackoffMs);
     return {
       reason: 'no_eligible_member',
-      nextRetryAtMs: candidate ?? input.nowMs + DEFAULT_RUNTIME_AUTH_RECOVERY_GROUP_EXHAUSTED_WAIT_FLOOR_MS,
+      nextRetryAtMs: candidate ?? input.nowMs + Math.max(
+        DEFAULT_RUNTIME_AUTH_RECOVERY_GROUP_EXHAUSTED_WAIT_FLOOR_MS,
+        unknownResetBackoffMs ?? 0,
+      ),
     };
   }
   if (switchResult.status === 'switch_limit_reached') {
@@ -669,12 +672,14 @@ export function resolveRuntimeAuthRecoveryDurableWaitPlan(input: Readonly<{
 function resolveRuntimeAuthRecoveryDurableWait(input: Readonly<{
   result: unknown;
   intent: RuntimeAuthRecoveryIntent;
+  unknownNoEligibleMemberBackoffMs: number;
   nowMs: number;
 }>): RuntimeAuthRecoveryDurableWait | null {
   return resolveRuntimeAuthRecoveryDurableWaitPlan({
     result: input.result,
     classificationResetsAtMs: input.intent.classification.resetsAtMs ?? null,
     additionalWaitCandidatesMs: [input.intent.nextRetryAtMs],
+    unknownNoEligibleMemberBackoffMs: input.unknownNoEligibleMemberBackoffMs,
     nowMs: input.nowMs,
   });
 }
@@ -784,6 +789,23 @@ function normalizeMaxAttempts(value: unknown): number {
   return Math.max(1, Math.trunc(value));
 }
 
+function normalizePositiveInteger(value: unknown, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+  const normalized = Math.trunc(value);
+  return normalized > 0 ? normalized : fallback;
+}
+
+function computeRuntimeAuthRecoveryBackoffMs(input: Readonly<{
+  attemptCount: number;
+  baseBackoffMs: number;
+  maxBackoffMs: number;
+  jitterMs: () => number;
+}>): number {
+  const exponential = input.baseBackoffMs * (2 ** Math.max(0, input.attemptCount));
+  const jitter = Math.max(0, Math.trunc(input.jitterMs()));
+  return Math.min(input.maxBackoffMs, exponential) + jitter;
+}
+
 function buildRecoveryKeyForIntent(
   intent: Pick<RuntimeAuthRecoveryIntent, 'sessionId' | 'serviceId' | 'profileId' | 'groupId'>,
 ): string {
@@ -824,10 +846,15 @@ function mergeRuntimeAuthRecoveryIntent(
   next: RuntimeAuthRecoveryIntent,
 ): RuntimeAuthRecoveryIntent {
   if (!previous) return next;
+  if (isTerminalRuntimeAuthRecoveryStatus(previous.status)) return previous;
+  const sameEvidence = hasSameRuntimeAuthRecoveryEvidence(previous, next);
+  if (!sameEvidence && previous.status !== 'checking' && previous.status !== 'resumed_awaiting_proof') return next;
   return {
     ...next,
     status: previous.status,
-    nextRetryAtMs: mergeRuntimeAuthNextRetryAtMs(previous, next),
+    nextRetryAtMs: sameEvidence
+      ? previous.nextRetryAtMs ?? next.nextRetryAtMs
+      : mergeRuntimeAuthNextRetryAtMs(previous, next),
     attemptCount: previous.attemptCount,
     maxAttempts: Math.min(previous.maxAttempts, next.maxAttempts),
     terminalAtMs: isTerminalRuntimeAuthRecoveryStatus(previous.status)
@@ -861,9 +888,28 @@ function isSameRuntimeFailureClassification(
     && left.serviceId === right.serviceId
     && left.profileId === right.profileId
     && left.groupId === right.groupId
+    && left.groupGeneration === right.groupGeneration
+    && left.activeProfileId === right.activeProfileId
     && left.resetsAtMs === right.resetsAtMs
+    && left.retryAfterMs === right.retryAfterMs
+    && left.limitCategory === right.limitCategory
+    && left.quotaScope === right.quotaScope
+    && left.providerLimitId === right.providerLimitId
+    && left.credentialHealthStatus === right.credentialHealthStatus
+    && left.identityProofVersion === right.identityProofVersion
+    && left.sourceKey === right.sourceKey
+    && left.providerAccountUsageRecordId === right.providerAccountUsageRecordId
+    && left.sourceProviderAccountId === right.sourceProviderAccountId
+    && left.failingAccessTokenFingerprint === right.failingAccessTokenFingerprint
     && left.planType === right.planType
     && left.source === right.source;
+}
+
+function hasSameRuntimeAuthRecoveryEvidence(
+  left: RuntimeAuthRecoveryIntent,
+  right: RuntimeAuthRecoveryIntent,
+): boolean {
+  return isSameRuntimeFailureClassification(left.classification, right.classification);
 }
 
 function hasSameRuntimeAuthFailureFields(
@@ -913,6 +959,12 @@ function mergeRuntimeAuthRecoveryWakeWrite(input: Readonly<{
     pendingTargetProfileId: input.next.pendingTargetProfileId ?? input.current.pendingTargetProfileId ?? null,
     pendingTargetGeneration: input.next.pendingTargetGeneration ?? input.current.pendingTargetGeneration ?? null,
   };
+}
+
+function isRuntimeAuthDurableWaitIntent(intent: RuntimeAuthRecoveryIntent): boolean {
+  return intent.lastError === 'no_eligible_member'
+    || intent.lastError === 'switch_limit_reached'
+    || intent.lastError === 'awaiting_limit_reset';
 }
 
 type RuntimeAuthPendingProofTarget = Readonly<{
@@ -968,6 +1020,8 @@ function readRuntimeAuthRecoverySupersededReason(result: unknown): string | null
 }
 
 export class RuntimeAuthRecoveryScheduler {
+  private readonly baseBackoffMs: number;
+  private readonly maxBackoffMs: number;
   private readonly maxAttempts: number;
   private readonly maxDegradedAttempts: number;
   private readonly degradedBackoffMs: number;
@@ -976,6 +1030,11 @@ export class RuntimeAuthRecoveryScheduler {
   private readonly scheduler: DurableBackoffRecoveryScheduler<RuntimeAuthRecoveryIntent>;
 
   constructor(private readonly deps: RuntimeAuthRecoverySchedulerDeps) {
+    this.baseBackoffMs = normalizePositiveInteger(deps.baseBackoffMs, DEFAULT_RUNTIME_AUTH_RECOVERY_BASE_BACKOFF_MS);
+    this.maxBackoffMs = Math.max(
+      this.baseBackoffMs,
+      normalizePositiveInteger(deps.maxBackoffMs, DEFAULT_RUNTIME_AUTH_RECOVERY_MAX_BACKOFF_MS),
+    );
     this.maxAttempts = normalizeMaxAttempts(deps.maxAttempts);
     this.maxDegradedAttempts = typeof deps.maxDegradedAttempts === 'number'
       && Number.isFinite(deps.maxDegradedAttempts)
@@ -1006,7 +1065,9 @@ export class RuntimeAuthRecoveryScheduler {
       getStatus: (intent) => intent.status === 'resumed_awaiting_proof' ? 'waiting' : intent.status,
       getNextRetryAtMs: (intent) => intent.nextRetryAtMs,
       getAttemptCount: (intent) => intent.attemptCount,
-      getMaxAttempts: (intent) => intent.maxAttempts,
+      getMaxAttempts: (intent) => isRuntimeAuthDurableWaitIntent(intent)
+        ? Number.MAX_SAFE_INTEGER
+        : intent.maxAttempts,
       terminalRecordRetentionMs: DEFAULT_RUNTIME_AUTH_RECOVERY_TERMINAL_RECORD_RETENTION_MS,
       getTerminalPruneReferenceMs: (intent) => intent.terminalAtMs ?? intent.armedAtMs,
       markChecking: (intent, attemptCount) => ({
@@ -1141,13 +1202,18 @@ export class RuntimeAuthRecoveryScheduler {
               degradedBackoffMs: this.degradedBackoffMs,
             });
           }
-          // F0: group-exhausted + known (or floored) wait = durable wait, never
-          // terminal. Mirror the degraded track's rollback: durable-wait cycles must
-          // not consume the dead-letter attempt budget (RD-REC-3), or a correct wait
-          // still terminalizes after maxAttempts wakes.
+          // Group-exhausted waits are durable provider-policy waits, never terminal.
+          // Count the attempt for telemetry/backoff, but do not let the generic
+          // max-attempt dead-letter rule override a known reset or backoff wait.
           const durableWait = resolveRuntimeAuthRecoveryDurableWait({
             result,
             intent,
+            unknownNoEligibleMemberBackoffMs: computeRuntimeAuthRecoveryBackoffMs({
+              attemptCount: intent.attemptCount,
+              baseBackoffMs: this.baseBackoffMs,
+              maxBackoffMs: this.maxBackoffMs,
+              jitterMs: this.deps.jitterMs ?? (() => 0),
+            }),
             nowMs: deps.nowMs(),
           });
           if (durableWait !== null) {
@@ -1155,10 +1221,10 @@ export class RuntimeAuthRecoveryScheduler {
               status: 'wait',
               nextRetryAtMs: durableWait.nextRetryAtMs,
               lastError: durableWait.reason,
+              exhaustOnMaxAttempt: false,
               intent: {
                 ...intent,
                 status: 'waiting',
-                attemptCount: Math.max(0, intent.attemptCount - 1),
                 nextRetryAtMs: durableWait.nextRetryAtMs,
                 lastError: durableWait.reason,
               },
@@ -1424,28 +1490,44 @@ export class RuntimeAuthRecoveryScheduler {
    * In-band (report-path) mirror of the scheduler-retry F0/INC-2 durable-wait
    * semantics: when the handler result is a group-exhausted `no_eligible_member`
    * or `switch_limit_reached`, re-arm the active intent as a durable wait at the
-   * computed/floored wake time — on THIS scheduler's clock — WITHOUT burning the
-   * attempt budget and WITHOUT terminalizing. Terminal records are never
-   * resurrected. Returns null when the result is not a durable-wait result.
+   * computed wake time — on THIS scheduler's clock — while counting the attempted
+   * recovery. Terminal records are never resurrected. Returns null when the result
+   * is not a durable-wait result.
    */
   async markDurableWaitForResultByKey(input: Readonly<{
     recoveryKey: string;
     result: unknown;
     classificationResetsAtMs: number | null;
   }>): Promise<RuntimeAuthRecoveryIntent | null> {
-    const plan = resolveRuntimeAuthRecoveryDurableWaitPlan({
-      result: input.result,
-      classificationResetsAtMs: input.classificationResetsAtMs,
-      nowMs: this.deps.nowMs(),
-    });
-    if (!plan) return null;
     const intent = this.readByKey(input.recoveryKey);
     if (!intent) return null;
     if (isTerminalRuntimeAuthRecoveryStatus(intent.status)) return intent;
+    const attemptCount = intent.attemptCount + 1;
+    const plan = resolveRuntimeAuthRecoveryDurableWaitPlan({
+      result: input.result,
+      classificationResetsAtMs: input.classificationResetsAtMs,
+      unknownNoEligibleMemberBackoffMs: computeRuntimeAuthRecoveryBackoffMs({
+        attemptCount,
+        baseBackoffMs: this.baseBackoffMs,
+        maxBackoffMs: this.maxBackoffMs,
+        jitterMs: this.deps.jitterMs ?? (() => 0),
+      }),
+      nowMs: this.deps.nowMs(),
+    });
+    if (!plan) return null;
+    const nextRetryAtMs = plan.nextRetryAtMs ?? (
+      this.deps.nowMs() + computeRuntimeAuthRecoveryBackoffMs({
+        attemptCount,
+        baseBackoffMs: this.baseBackoffMs,
+        maxBackoffMs: this.maxBackoffMs,
+        jitterMs: this.deps.jitterMs ?? (() => 0),
+      })
+    );
     const waiting: RuntimeAuthRecoveryIntent = {
       ...intent,
       status: 'waiting',
-      nextRetryAtMs: plan.nextRetryAtMs,
+      attemptCount,
+      nextRetryAtMs,
       lastError: plan.reason,
     };
     await this.scheduler.upsertByKey({
@@ -1461,7 +1543,7 @@ export class RuntimeAuthRecoveryScheduler {
       profileId: waiting.profileId,
       failurePhase: waiting.failurePhase,
       reason: plan.reason,
-      nextRetryAtMs: plan.nextRetryAtMs,
+      nextRetryAtMs,
       classification: waiting.lastErrorClassification,
     });
     return waiting;

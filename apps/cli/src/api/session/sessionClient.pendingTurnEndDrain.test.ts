@@ -91,6 +91,7 @@ const materializeNextMock = vi.fn();
 const resolveAcceptedPendingDeliveryMock = vi.fn();
 const reconcileAcceptedPendingDeliveriesThroughSeqMock = vi.fn();
 const blockPendingDeliveryMock = vi.fn();
+const retryPendingDeliveryMock = vi.fn();
 const blockProviderDeliveriesOnAttachMock = vi.fn();
 const listProviderDeliveryLocalIdsMock = vi.fn();
 const resolveCliFeatureDecisionForServerMock = vi.fn();
@@ -122,6 +123,7 @@ vi.mock('./pendingQueueV2Transport', async (importOriginal) => {
     resolveAcceptedPendingQueueV2Delivery: (...args: unknown[]) => resolveAcceptedPendingDeliveryMock(...args),
     reconcileAcceptedPendingQueueV2DeliveriesThroughSeq: (...args: unknown[]) => reconcileAcceptedPendingDeliveriesThroughSeqMock(...args),
     blockPendingQueueV2Delivery: (...args: unknown[]) => blockPendingDeliveryMock(...args),
+    retryPendingQueueV2Delivery: (...args: unknown[]) => retryPendingDeliveryMock(...args),
     blockPendingQueueV2ProviderDeliveriesOnAttach: (...args: unknown[]) => blockProviderDeliveriesOnAttachMock(...args),
     listPendingQueueV2ProviderDeliveryLocalIdsFromServer: (...args: unknown[]) => listProviderDeliveryLocalIdsMock(...args),
   };
@@ -251,6 +253,10 @@ describe('ApiSessionClient pending-queue turn-end drain', () => {
     reconcileAcceptedPendingDeliveriesThroughSeqMock.mockResolvedValue({ pendingQueueState: { known: true, pendingCount: 0, pendingBlockedCount: 0, pendingVersion: 2 } });
     blockPendingDeliveryMock.mockReset();
     blockPendingDeliveryMock.mockResolvedValue({});
+    retryPendingDeliveryMock.mockReset();
+    retryPendingDeliveryMock.mockResolvedValue({
+      pendingQueueState: { known: true, pendingCount: 1, pendingBlockedCount: 0, pendingVersion: 3 },
+    });
     blockProviderDeliveriesOnAttachMock.mockReset();
     blockProviderDeliveriesOnAttachMock.mockResolvedValue({});
     listProviderDeliveryLocalIdsMock.mockReset();
@@ -267,6 +273,8 @@ describe('ApiSessionClient pending-queue turn-end drain', () => {
 
   afterEach(() => {
     terminalTurnWriteGate = null;
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
   });
 
@@ -355,6 +363,38 @@ describe('ApiSessionClient pending-queue turn-end drain', () => {
 
     expect(blockProviderDeliveriesOnAttachMock).toHaveBeenCalledTimes(2);
     expect(materializeNextMock).not.toHaveBeenCalled();
+    await waitUntil(() => client.shouldAttemptPendingMaterialization() === false);
+  });
+
+  it('sweeps stale provider-delivery claims during the socket stale-safety tick', async () => {
+    vi.stubEnv('HAPPY_ENABLE_V2_CHANGES', 'false');
+    const client = await createClient({
+      latestTurnStatus: 'completed',
+      pendingCount: 1,
+      pendingBlockedCount: 0,
+      pendingVersion: 1,
+    });
+    blockProviderDeliveriesOnAttachMock
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({
+        pendingQueueState: {
+          known: true,
+          pendingCount: 1,
+          pendingBlockedCount: 1,
+          pendingVersion: 2,
+        },
+      });
+
+    client.deferDeliveredUserMessageWatermarkToProviderAcceptance();
+    await waitUntil(() => blockProviderDeliveriesOnAttachMock.mock.calls.length === 1);
+
+    await (client as unknown as { runSocketStaleSafetyTick(): Promise<void> }).runSocketStaleSafetyTick();
+
+    expect(blockProviderDeliveriesOnAttachMock).toHaveBeenCalledTimes(2);
+    expect(blockProviderDeliveriesOnAttachMock).toHaveBeenLastCalledWith({
+      token: 'tok',
+      sessionId: 's1',
+    });
     await waitUntil(() => client.shouldAttemptPendingMaterialization() === false);
   });
 
@@ -449,6 +489,191 @@ describe('ApiSessionClient pending-queue turn-end drain', () => {
       reason: 'runtime_activity_active',
     });
     expect(materializeNextMock).not.toHaveBeenCalled();
+  });
+
+  it('defers runtime-idle materialization immediately after a local runtime-activity write before socket ack', async () => {
+    const now = Date.now();
+    const runtimeActivityAck = createDeferred<unknown>();
+    const client = await createClient({
+      latestTurnStatus: 'completed',
+      pendingCount: 1,
+      pendingVersion: 1,
+      runtimeActivityActiveCount: 0,
+      runtimeActivityObservedAt: null,
+      runtimeActivityExpiresAt: null,
+      runtimeActivitySourceClass: null,
+    }, {
+      sessionSocketEmitWithAck: async (event: string) => {
+        if (event === 'update-runtime-activity') {
+          return runtimeActivityAck.promise;
+        }
+        return { ok: true, id: 'm1', seq: 1, localId: 'l1' };
+      },
+    });
+
+    const updatePromise = client.updateRuntimeActivityProjection({
+      runtimeActivityActiveCount: 1,
+      runtimeActivityObservedAt: now,
+      runtimeActivityExpiresAt: now + 60_000,
+      runtimeActivitySourceClass: 'provider_detached_task',
+    });
+    await waitUntil(() => sessionSocketStub?.emitWithAck.mock.calls.some((call) => call[0] === 'update-runtime-activity') === true);
+
+    expect(client.shouldAttemptPendingMaterialization(runtimeIdleMaterializeOptions())).toBe(false);
+    await expect(client.materializeNextPendingMessageSafely(runtimeIdleMaterializeOptions())).resolves.toEqual({
+      type: 'deferred',
+      reason: 'runtime_activity_active',
+    });
+    expect(materializeNextMock).not.toHaveBeenCalled();
+
+    runtimeActivityAck.resolve({ result: 'success' });
+    await updatePromise;
+  });
+
+  it('wakes metadata waiters when a runtime-idle materialization deferral reaches its expiry', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000);
+    const client = await createClient({
+      latestTurnStatus: 'completed',
+      pendingCount: 1,
+      pendingVersion: 1,
+      runtimeActivityActiveCount: 1,
+      runtimeActivityObservedAt: Date.now(),
+      runtimeActivityExpiresAt: Date.now() + 50,
+      runtimeActivitySourceClass: 'provider_detached_task',
+    });
+
+    await expect(client.materializeNextPendingMessageSafely(runtimeIdleMaterializeOptions())).resolves.toEqual({
+      type: 'deferred',
+      reason: 'runtime_activity_active',
+    });
+    expect(materializeNextMock).not.toHaveBeenCalled();
+
+    let wakeResult: boolean | null = null;
+    void client.waitForMetadataUpdate().then((result) => {
+      wakeResult = result;
+    });
+
+    await vi.advanceTimersByTimeAsync(49);
+    expect(wakeResult).toBeNull();
+
+    await vi.advanceTimersByTimeAsync(1);
+    await Promise.resolve();
+    expect(wakeResult).toBe(true);
+  });
+
+  it('retries a failed pending-changed materialize wake before turn end', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000);
+    const client = await createClient({
+      latestTurnStatus: 'in_progress',
+      pendingCount: 1,
+      pendingVersion: 1,
+    });
+    await client.sessionTurnLifecycle.beginTurn({ provider: 'claude', observedAt: Date.now() });
+    const transportFailure = new Error('materialize transport down');
+    materializeNextMock
+      .mockRejectedValueOnce(transportFailure)
+      .mockResolvedValueOnce({
+        didMaterialize: true,
+        didWrite: true,
+        localId: 'local-retry',
+        message: {
+          seq: 10,
+          localId: 'local-retry',
+          messageRole: 'user',
+          content: { role: 'user', content: { type: 'text', text: 'retry wake' } },
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        },
+        pendingQueueState: {
+          known: true,
+          pendingCount: 0,
+          pendingBlockedCount: 0,
+          pendingVersion: 2,
+        },
+      });
+
+    if (!userSocketStub) throw new Error('missing user socket');
+    userSocketStub.trigger('update', {
+      id: 'pending-changed-retry',
+      createdAt: Date.now(),
+      body: {
+        t: 'pending-changed',
+        sid: 's1',
+        pendingCount: 1,
+        pendingVersion: 1,
+      },
+    });
+
+    await expect(client.materializeNextPendingMessageSafely({
+      activeTurnDeliveryPolicy: 'allow_live_delivery',
+    })).resolves.toEqual({ type: 'no_pending' });
+
+    let wakeResult: boolean | null = null;
+    void client.waitForMetadataUpdate().then((result) => {
+      wakeResult = result;
+    });
+
+    await vi.advanceTimersByTimeAsync(249);
+    expect(wakeResult).toBeNull();
+
+    await vi.advanceTimersByTimeAsync(1);
+    await Promise.resolve();
+    expect(wakeResult).toBe(true);
+
+    await expect(client.materializeNextPendingMessageSafely({
+      activeTurnDeliveryPolicy: 'allow_live_delivery',
+    })).resolves.toMatchObject({
+      type: 'materialized',
+      localId: 'local-retry',
+      seq: 10,
+    });
+    expect(client.sessionTurnLifecycle.hasActiveTurn()).toBe(true);
+    expect(materializeNextMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('cancels a pending runtime-idle expiry wake when the server clears the runtime activity expiry', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000);
+    const client = await createClient({
+      latestTurnStatus: 'completed',
+      pendingCount: 1,
+      pendingVersion: 1,
+      runtimeActivityActiveCount: 1,
+      runtimeActivityObservedAt: Date.now(),
+      runtimeActivityExpiresAt: Date.now() + 50,
+      runtimeActivitySourceClass: 'provider_detached_task',
+    });
+
+    await expect(client.materializeNextPendingMessageSafely(runtimeIdleMaterializeOptions())).resolves.toEqual({
+      type: 'deferred',
+      reason: 'runtime_activity_active',
+    });
+    expect(materializeNextMock).not.toHaveBeenCalled();
+
+    let wakeResult: boolean | null = null;
+    void client.waitForMetadataUpdate().then((result) => {
+      wakeResult = result;
+    });
+
+    if (!userSocketStub) throw new Error('missing user socket');
+    userSocketStub.trigger('update', {
+      id: 'update-runtime-activity-clear',
+      createdAt: Date.now(),
+      body: {
+        t: 'update-session',
+        sid: 's1',
+        runtimeActivityActiveCount: 0,
+        runtimeActivityObservedAt: Date.now(),
+        runtimeActivityExpiresAt: null,
+        runtimeActivitySourceClass: null,
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(50);
+    await Promise.resolve();
+    expect(wakeResult).toBeNull();
   });
 
   it.each([
@@ -2305,6 +2530,27 @@ describe('ApiSessionClient pending-queue turn-end drain', () => {
     expect(materializeNextMock).toHaveBeenCalledTimes(2);
   });
 
+  it('retries a blocked provider delivery by local id and wakes pending drain', async () => {
+    const client = await createClient({
+      latestTurnStatus: 'completed',
+      pendingCount: 1,
+      pendingBlockedCount: 1,
+      pendingVersion: 2,
+      metadata: { deliveredUserMessageSeqV1: 0 },
+    });
+
+    await expect(client.retryPendingMessageDelivery({
+      localId: 'blocked-provider-local',
+    })).resolves.toBe(true);
+
+    expect(retryPendingDeliveryMock).toHaveBeenCalledWith({
+      token: 'tok',
+      sessionId: 's1',
+      localId: 'blocked-provider-local',
+    });
+    expect(client.shouldAttemptPendingMaterialization()).toBe(true);
+  });
+
   it('retires a stale blocked-delivery claim when the server reports that the pending row is gone', async () => {
     const deliveryState = { mode: 'provider' as const, unresolved: true };
     const client = await createClient({
@@ -2688,5 +2934,29 @@ describe('ApiSessionClient pending-queue turn-end drain', () => {
     await client.materializeNextPendingMessageSafely();
     expect(fetchSnapshotMock).toHaveBeenCalled();
     expect(materializeNextMock).toHaveBeenCalled();
+  });
+
+  it('self-heals a stale local active turn by reconciling the snapshot without force-ending the lifecycle', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const client = await createClient({
+      latestTurnStatus: 'in_progress',
+      pendingCount: 1,
+      pendingVersion: 1,
+    });
+    await client.sessionTurnLifecycle.beginTurn({ provider: 'claude', observedAt: Date.now() });
+    fetchSnapshotMock.mockResolvedValue({ latestTurnStatus: 'completed' });
+    materializeNextMock.mockResolvedValue({ didMaterialize: false });
+
+    await expect(client.materializeNextPendingMessageSafely()).resolves.toEqual({ type: 'no_pending' });
+    expect(fetchSnapshotMock).not.toHaveBeenCalled();
+    expect(materializeNextMock).not.toHaveBeenCalled();
+
+    vi.setSystemTime(300_000);
+    await expect(client.materializeNextPendingMessageSafely()).resolves.toEqual({ type: 'no_pending' });
+
+    expect(fetchSnapshotMock).toHaveBeenCalled();
+    expect(materializeNextMock).toHaveBeenCalled();
+    expect(client.sessionTurnLifecycle.hasActiveTurn()).toBe(true);
   });
 });

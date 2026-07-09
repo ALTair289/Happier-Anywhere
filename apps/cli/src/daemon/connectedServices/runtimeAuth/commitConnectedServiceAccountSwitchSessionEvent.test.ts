@@ -460,7 +460,7 @@ describe('commitConnectedServiceAccountSwitchSessionEvent', () => {
     );
   });
 
-  it('suppresses background soft-threshold switch attempt transcript events', async () => {
+  it('surfaces preemptive soft-threshold switch attempt transcript events', async () => {
     process.env.HAPPIER_SERVER_URL = 'http://server.example.test';
     vi.resetModules();
     const { commitConnectedServiceAccountSwitchSessionEvent } = await import('./commitConnectedServiceAccountSwitchSessionEvent');
@@ -511,7 +511,19 @@ describe('commitConnectedServiceAccountSwitchSessionEvent', () => {
       },
     });
 
-    expect(postSpy).not.toHaveBeenCalled();
+    expect(postSpy).toHaveBeenCalledWith(
+      expect.stringMatching(/\/v2\/sessions\/sess-attempt-background\/messages$/),
+      expect.objectContaining({
+        content: expect.objectContaining({
+          v: expect.objectContaining({
+            content: expect.objectContaining({
+              data: expect.objectContaining({ type: 'connected-service-account-switch-attempt' }),
+            }),
+          }),
+        }),
+      }),
+      expect.any(Object),
+    );
   });
 
   it('suppresses same-provider fanout switch attempt transcript events as background maintenance', async () => {
@@ -810,7 +822,7 @@ describe('commitConnectedServiceAccountSwitchSessionEvent', () => {
     expect(JSON.stringify(postedBody)).not.toContain('entryName');
   });
 
-  it('suppresses preventive soft-threshold switches as background maintenance transcript events', async () => {
+  it('surfaces preventive soft-threshold switches as transcript events', async () => {
     process.env.HAPPIER_SERVER_URL = 'http://server.example.test';
     vi.resetModules();
     const { commitConnectedServiceAccountSwitchSessionEvent } = await import('./commitConnectedServiceAccountSwitchSessionEvent');
@@ -859,8 +871,14 @@ describe('commitConnectedServiceAccountSwitchSessionEvent', () => {
       },
     });
 
-    expect(getSpy).not.toHaveBeenCalled();
-    expect(postSpy).not.toHaveBeenCalled();
+    expect(getSpy).toHaveBeenCalled();
+    expect(postSpy).toHaveBeenCalledWith(
+      expect.stringMatching(/\/v2\/sessions\/sess-2\/messages$/),
+      expect.objectContaining({
+        localId: expect.stringMatching(/^connected-service-account-switch:openai-codex:codex-main:/),
+      }),
+      expect.any(Object),
+    );
   });
 
   it('commits the actual switch mode from runtime auth events', async () => {
@@ -930,7 +948,7 @@ describe('commitConnectedServiceAccountSwitchSessionEvent', () => {
     );
   });
 
-  it('suppresses pre-turn auth-group soft-threshold switch coordinator events', async () => {
+  it('surfaces pre-turn auth-group soft-threshold switch coordinator events', async () => {
     process.env.HAPPIER_SERVER_URL = 'http://server.example.test';
     vi.resetModules();
     const { commitConnectedServiceAccountSwitchSessionEvent } = await import('./commitConnectedServiceAccountSwitchSessionEvent');
@@ -983,8 +1001,14 @@ describe('commitConnectedServiceAccountSwitchSessionEvent', () => {
       },
     });
 
-    expect(getSpy).not.toHaveBeenCalled();
-    expect(postSpy).not.toHaveBeenCalled();
+    expect(getSpy).toHaveBeenCalled();
+    expect(postSpy).toHaveBeenCalledWith(
+      expect.stringMatching(/\/v2\/sessions\/sess-3\/messages$/),
+      expect.objectContaining({
+        localId: expect.stringMatching(/^connected-service-account-switch:openai-codex:codex-main:/),
+      }),
+      expect.any(Object),
+    );
   });
 
   it('suppresses same-provider fanout switch coordinator events as background maintenance', async () => {

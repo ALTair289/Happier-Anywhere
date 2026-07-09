@@ -1,11 +1,10 @@
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
 
 import { classifyClaudeConnectedServiceRuntimeAuthFailure } from './classifyClaudeConnectedServiceRuntimeAuthFailure';
 import { mapClaudeRateLimitEventToUsageDetails } from './mapClaudeRateLimitEventToUsageDetails';
 import { resolveClaudeConnectedServiceRuntimeAuthSwitchPlan } from './claudeConnectedServiceRuntimeAuthSwitchPlan';
 import { resolveClaudeSharedGroupHotApplyTarget } from './claudeSharedGroupHotApplyTarget';
-import { readClaudeOauthAccountIdentity, readClaudeRootConfigFile } from './claudeRootConfig';
+import { readClaudeMaterializedOAuthAccountIdentity } from './resolveClaudeRuntimeProviderAccountIdentity';
 import { classifyClaudeCodeCredentialHealth } from './nativeAuth/claudeCodeCredentialHealth';
 import {
   buildClaudeCodeCredentialPayload,
@@ -74,18 +73,6 @@ async function materializedCredentialMatchesRecord(params: Readonly<{
   } catch {
     return false;
   }
-}
-
-async function readMaterializedOAuthAccountIdentity(claudeConfigDir: string): Promise<Readonly<{
-  providerAccountId: string | null;
-  providerEmail: string | null;
-}>> {
-  const rootConfig = await readClaudeRootConfigFile(join(claudeConfigDir, '.claude.json'));
-  const identity = readClaudeOauthAccountIdentity(rootConfig?.oauthAccount);
-  return {
-    providerAccountId: identity.accountId,
-    providerEmail: identity.email,
-  };
 }
 
 function buildSharedGroupVerification(params: Readonly<{
@@ -191,7 +178,7 @@ export function createClaudeConnectedServiceRuntimeAuthAdapter(): ConnectedServi
         verification: buildSharedGroupVerification({
           record: target.record,
           selectionDescriptor: target.selectionDescriptor,
-          materializedIdentity: await readMaterializedOAuthAccountIdentity(target.metadata.runtimeClaudeConfigDir),
+          materializedIdentity: await readClaudeMaterializedOAuthAccountIdentity(target.metadata.runtimeClaudeConfigDir),
         }),
       };
     },
@@ -259,7 +246,7 @@ export function createClaudeConnectedServiceRuntimeAuthAdapter(): ConnectedServi
         return buildSharedGroupVerification({
           record: target.record,
           selectionDescriptor: target.selectionDescriptor,
-          materializedIdentity: await readMaterializedOAuthAccountIdentity(claudeConfigDir),
+          materializedIdentity: await readClaudeMaterializedOAuthAccountIdentity(claudeConfigDir),
         }) ?? {
           status: 'unavailable',
           retryable: true,

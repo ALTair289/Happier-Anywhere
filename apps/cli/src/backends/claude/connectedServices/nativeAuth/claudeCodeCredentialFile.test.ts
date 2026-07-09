@@ -2,15 +2,17 @@ import { chmod, mkdtemp, readFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { buildConnectedServiceCredentialRecord } from '@happier-dev/protocol';
+import { logger } from '@/ui/logger';
 
 import {
   buildClaudeCodeCredentialPayload,
   computeClaudeCodeCredentialAccountProofFingerprint,
   computeClaudeCodeCredentialFingerprint,
   parseClaudeCodeCredentialFile,
+  readClaudeCodeNativeCredential,
   resolveClaudeCodeCredentialsFilePath,
   writeClaudeCodeCredentialsFile,
 } from './claudeCodeCredentialFile';
@@ -20,6 +22,14 @@ const REALISTIC_ISSUED_AT_MS = Date.parse('2026-06-05T12:00:00.000Z');
 const REALISTIC_EXPIRES_AT_MS = REALISTIC_ISSUED_AT_MS + 60 * 60 * 1000;
 
 describe('claudeCodeCredentialFile', () => {
+  beforeEach(() => {
+    vi.spyOn(logger, 'info').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('builds the native Claude Code credential payload from an OAuth record', () => {
     const record = buildConnectedServiceCredentialRecord({
       now: REALISTIC_ISSUED_AT_MS,
@@ -43,7 +53,6 @@ describe('claudeCodeCredentialFile', () => {
       payload: {
         claudeAiOauth: {
           accessToken: 'access-placeholder',
-          refreshToken: 'refresh-placeholder',
           expiresAt: REALISTIC_EXPIRES_AT_MS,
           scopes: [
             'user:inference',
@@ -111,7 +120,6 @@ describe('claudeCodeCredentialFile', () => {
       payload: {
         claudeAiOauth: {
           accessToken: 'access-placeholder',
-          refreshToken: 'refresh-placeholder',
           expiresAt: REALISTIC_EXPIRES_AT_MS,
           scopes: [
             'user:inference',
@@ -170,7 +178,7 @@ describe('claudeCodeCredentialFile', () => {
     expect(credentialPath).toBe(join(claudeConfigDir, '.credentials.json'));
     const parsed = JSON.parse(await readFile(credentialPath, 'utf8'));
     expect(parsed.claudeAiOauth.accessToken).toBe('access-placeholder');
-    expect(parsed.claudeAiOauth.refreshToken).toBe('refresh-placeholder');
+    expect(parsed.claudeAiOauth).not.toHaveProperty('refreshToken');
     expect(parsed.claudeAiOauth.expiresAt).toBe(REALISTIC_EXPIRES_AT_MS);
     expect(parsed.claudeAiOauth.expiresAt).toBeGreaterThan(1_000_000_000_000);
 
@@ -178,6 +186,206 @@ describe('claudeCodeCredentialFile', () => {
       const mode = (await stat(credentialPath)).mode & 0o777;
       expect(mode).toBe(0o600);
     }
+  });
+
+  it('does not overwrite a newer native credential with an older different refresh token', async () => {
+    const claudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-native-auth-freshness-test-'));
+    const credentialPath = resolveClaudeCodeCredentialsFilePath(claudeConfigDir);
+
+    await writeClaudeCodeCredentialsFile({
+      claudeConfigDir,
+      payload: {
+        claudeAiOauth: {
+          accessToken: 'newer-access',
+          refreshToken: 'newer-refresh',
+          expiresAt: REALISTIC_EXPIRES_AT_MS + 60_000,
+          scopes: ['user:inference', 'user:profile', 'user:sessions:claude_code'],
+        },
+      },
+      incomingUpdatedAtMs: REALISTIC_ISSUED_AT_MS + 20_000,
+    });
+
+    await writeClaudeCodeCredentialsFile({
+      claudeConfigDir,
+      payload: {
+        claudeAiOauth: {
+          accessToken: 'older-access',
+          refreshToken: 'older-refresh',
+          expiresAt: REALISTIC_EXPIRES_AT_MS,
+          scopes: ['user:inference', 'user:profile', 'user:sessions:claude_code'],
+        },
+      },
+      incomingUpdatedAtMs: REALISTIC_ISSUED_AT_MS,
+    });
+
+    const parsed = JSON.parse(await readFile(credentialPath, 'utf8'));
+    expect(parsed.claudeAiOauth.accessToken).toBe('newer-access');
+    expect(parsed.claudeAiOauth).not.toHaveProperty('refreshToken');
+  });
+
+  it('preserves a newer target credential when writing through a staged home', async () => {
+    const targetClaudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-native-auth-target-test-'));
+    const stagedClaudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-native-auth-staged-test-'));
+    const targetCredentialPath = resolveClaudeCodeCredentialsFilePath(targetClaudeConfigDir);
+    const stagedCredentialPath = resolveClaudeCodeCredentialsFilePath(stagedClaudeConfigDir);
+
+    await writeClaudeCodeCredentialsFile({
+      claudeConfigDir: targetClaudeConfigDir,
+      payload: {
+        claudeAiOauth: {
+          accessToken: 'target-newer-access',
+          refreshToken: 'target-newer-refresh',
+          expiresAt: REALISTIC_EXPIRES_AT_MS + 60_000,
+          scopes: ['user:inference', 'user:profile', 'user:sessions:claude_code'],
+        },
+      },
+      incomingUpdatedAtMs: REALISTIC_ISSUED_AT_MS + 20_000,
+    });
+
+    await writeClaudeCodeCredentialsFile({
+      claudeConfigDir: stagedClaudeConfigDir,
+      payload: {
+        claudeAiOauth: {
+          accessToken: 'staged-older-access',
+          refreshToken: 'staged-older-refresh',
+          expiresAt: REALISTIC_EXPIRES_AT_MS,
+          scopes: ['user:inference', 'user:profile', 'user:sessions:claude_code'],
+        },
+      },
+      incomingUpdatedAtMs: REALISTIC_ISSUED_AT_MS,
+      compareCredentialPath: targetCredentialPath,
+    });
+
+    const parsed = JSON.parse(await readFile(stagedCredentialPath, 'utf8'));
+    expect(parsed.claudeAiOauth.accessToken).toBe('target-newer-access');
+    expect(parsed.claudeAiOauth).not.toHaveProperty('refreshToken');
+  });
+
+  it('emits safe machine-greppable diagnostics for write and freshness-skip decisions', async () => {
+    const info = vi.mocked(logger.info);
+    const claudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-native-auth-diagnostic-test-'));
+    const writeWithDiagnostics = writeClaudeCodeCredentialsFile as (
+      params: Parameters<typeof writeClaudeCodeCredentialsFile>[0] & Readonly<{
+        diagnosticContext: Readonly<{
+          profileId: string;
+          homeKind: 'group';
+        }>;
+      }>,
+    ) => ReturnType<typeof writeClaudeCodeCredentialsFile>;
+    await writeWithDiagnostics({
+      claudeConfigDir,
+      payload: {
+        claudeAiOauth: {
+          accessToken: 'first-access-secret',
+          refreshToken: 'first-refresh-secret',
+          expiresAt: REALISTIC_EXPIRES_AT_MS + 60_000,
+          scopes: ['user:inference', 'user:profile', 'user:sessions:claude_code'],
+        },
+      },
+      incomingUpdatedAtMs: REALISTIC_ISSUED_AT_MS + 20_000,
+      diagnosticContext: {
+        profileId: 'work',
+        homeKind: 'group',
+      },
+    });
+    await writeWithDiagnostics({
+      claudeConfigDir,
+      payload: {
+        claudeAiOauth: {
+          accessToken: 'older-access-secret',
+          refreshToken: 'older-refresh-secret',
+          expiresAt: REALISTIC_EXPIRES_AT_MS,
+          scopes: ['user:inference', 'user:profile', 'user:sessions:claude_code'],
+        },
+      },
+      incomingUpdatedAtMs: REALISTIC_ISSUED_AT_MS,
+      diagnosticContext: {
+        profileId: 'work',
+        homeKind: 'group',
+      },
+    });
+
+    expect(info).toHaveBeenCalledWith(
+      '[DAEMON RUN] Claude Code credential file decision',
+      expect.objectContaining({
+        event: 'claude_code_credential_file_decision',
+        profileId: 'work',
+        homeKind: 'group',
+        decision: 'write',
+        comparatorBasis: expect.objectContaining({
+          existing: null,
+          incoming: expect.objectContaining({
+            expiresAtMs: REALISTIC_EXPIRES_AT_MS + 60_000,
+            updatedAtMs: REALISTIC_ISSUED_AT_MS + 20_000,
+          }),
+        }),
+      }),
+    );
+    expect(info).toHaveBeenCalledWith(
+      '[DAEMON RUN] Claude Code credential file decision',
+      expect.objectContaining({
+        event: 'claude_code_credential_file_decision',
+        profileId: 'work',
+        homeKind: 'group',
+        decision: 'skip_existing_newer',
+        comparatorBasis: expect.objectContaining({
+          existing: expect.objectContaining({
+            expiresAtMs: REALISTIC_EXPIRES_AT_MS + 60_000,
+          }),
+          incoming: expect.objectContaining({
+            expiresAtMs: REALISTIC_EXPIRES_AT_MS,
+          }),
+        }),
+      }),
+    );
+    expect(JSON.stringify(info.mock.calls)).not.toContain('secret');
+  });
+
+  it('emits safe source and fingerprint diagnostics when reading credentials', async () => {
+    const info = vi.mocked(logger.info);
+    const claudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-native-auth-read-diagnostic-test-'));
+    await writeClaudeCodeCredentialsFile({
+      claudeConfigDir,
+      payload: {
+        claudeAiOauth: {
+          accessToken: 'read-access-secret',
+          refreshToken: 'read-refresh-secret',
+          expiresAt: REALISTIC_EXPIRES_AT_MS,
+          scopes: ['user:inference', 'user:profile', 'user:sessions:claude_code'],
+        },
+      },
+      incomingUpdatedAtMs: REALISTIC_ISSUED_AT_MS,
+      diagnosticContext: {
+        profileId: 'work',
+        homeKind: 'profile',
+      },
+    });
+    info.mockClear();
+
+    await expect(readClaudeCodeNativeCredential({
+      claudeConfigDir,
+      diagnosticContext: {
+        profileId: 'work',
+        homeKind: 'profile',
+      },
+    })).resolves.toEqual(expect.objectContaining({ source: 'file' }));
+
+    expect(info).toHaveBeenCalledWith(
+      '[DAEMON RUN] Claude Code credential read',
+      expect.objectContaining({
+        event: 'claude_code_credential_read',
+        profileId: 'work',
+        homeKind: 'profile',
+        source: 'file',
+        credential: expect.objectContaining({
+          accessTokenFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{8}$/),
+          hasRefreshToken: false,
+          refreshTokenFingerprint: null,
+          expiresAtMs: REALISTIC_EXPIRES_AT_MS,
+        }),
+      }),
+    );
+    expect(JSON.stringify(info.mock.calls)).not.toContain('secret');
   });
 
   it('parses credential health without exposing credential values', async () => {
@@ -201,7 +409,7 @@ describe('claudeCodeCredentialFile', () => {
     expect(safe).toEqual({
       status: 'ok',
       hasAccessToken: true,
-      hasRefreshToken: true,
+      hasRefreshToken: false,
       expiresAt: REALISTIC_EXPIRES_AT_MS,
       scopes: ['user:inference', 'user:profile', 'user:sessions:claude_code'],
     });

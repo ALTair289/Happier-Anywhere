@@ -41,6 +41,26 @@ describe('serviceRefreshers', () => {
     expect(refreshed.expiresAt).toBe(now + 3600 * 1000);
   });
 
+  it('passes an abort signal to the provider token refresh fetch', async () => {
+    const fetchMock = vi.fn(async (_input: unknown, _init?: unknown) => ({
+      ok: true,
+      json: async () => ({
+        access_token: 'new-access',
+        refresh_token: 'new-refresh',
+        expires_in: 3600,
+      }),
+    }));
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+
+    await refreshOpenAiCodexOauthTokens({
+      refreshToken: 'old-refresh',
+      now: 1000,
+    });
+
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
+  });
+
   it('extracts OpenAI Codex account email from refreshed id_token claims', async () => {
     const fetchMock = vi.fn(async () => ({
       ok: true,

@@ -1,10 +1,19 @@
 import type { ConnectedServiceId } from '@happier-dev/protocol';
 
 import type { RuntimeAccountIdentityEntry } from './runtimeAccountIdentityTypes';
-import type { RuntimeAccountIdentityIndex } from './RuntimeAccountIdentityIndex';
+
+type RuntimeAccountIdentityProviderAccountReader = Readonly<{
+  listRuntimeIdentitiesByProviderAccount(input: Readonly<{
+    serviceId: ConnectedServiceId;
+    providerAccountId: string;
+    groupId?: string | null;
+    excludeSessionId?: string | null;
+    currentGroupGenerationBySessionId?: ReadonlyMap<string, number | null>;
+  }>): RuntimeAccountIdentityEntry[];
+}>;
 
 export function resolveSessionsSharingProviderAccount(
-  index: RuntimeAccountIdentityIndex,
+  registry: RuntimeAccountIdentityProviderAccountReader,
   input: Readonly<{
     serviceId: ConnectedServiceId;
     providerAccountId: string;
@@ -13,5 +22,5 @@ export function resolveSessionsSharingProviderAccount(
     currentGroupGenerationBySessionId?: ReadonlyMap<string, number | null>;
   }>,
 ): RuntimeAccountIdentityEntry[] {
-  return index.listByProviderAccount(input);
+  return registry.listRuntimeIdentitiesByProviderAccount(input);
 }

@@ -1,10 +1,12 @@
 import {
   ProviderAccountUsageRecordIdSchema,
+  isConnectedServiceCredentialHealthStatusUsable,
   type ConnectedServiceQuotaSnapshotV1,
   type ProviderAccountUsageSnapshotV1,
 } from '@happier-dev/protocol';
 
 import type { ConnectedServiceQuotaProfileRefProvenance } from '@/sync/domains/connectedServices/connectedServiceQuotaGauge';
+import { resolveConnectedServiceCredentialHealthStatus } from '@/sync/domains/connectedServices/resolveConnectedServiceCredentialHealthStatus';
 
 import {
   projectProviderAccountUsageToNativeDisplaySnapshot,
@@ -13,6 +15,7 @@ import {
 export type ProviderUsageDisplayConnectedServiceProfileRef = Readonly<{
   serviceId: string;
   profileId: string;
+  credentialHealthStatus?: unknown;
   provenance: ConnectedServiceQuotaProfileRefProvenance;
 }>;
 
@@ -86,6 +89,14 @@ export function selectProviderUsageDisplaySnapshot(params: Readonly<{
   const candidates = selectCandidateAccountUsageSnapshots(params);
   const connectedRef = params.connectedServiceProfileRef;
   if (connectedRef) {
+    if (
+      connectedRef.credentialHealthStatus !== undefined
+      && !isConnectedServiceCredentialHealthStatusUsable(
+        resolveConnectedServiceCredentialHealthStatus(connectedRef.credentialHealthStatus),
+      )
+    ) {
+      return null;
+    }
     if (params.connectedServiceQuotaView) {
       return {
         kind: 'connected_service_quota_view',

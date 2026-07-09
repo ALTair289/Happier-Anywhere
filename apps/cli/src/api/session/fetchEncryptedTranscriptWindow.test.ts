@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { HttpStatusError } from '@/api/client/httpStatusError';
 
 const mockGet = vi.fn();
@@ -22,6 +22,13 @@ import { fetchEncryptedTranscriptPageAfterSeq, fetchEncryptedTranscriptPageLates
 describe('fetchEncryptedTranscriptWindow', () => {
   beforeEach(() => {
     mockGet.mockReset();
+    vi.stubEnv('HAPPIER_LOCAL_SERVER_URL', '');
+    vi.stubEnv('HAPPIER_PUBLIC_SERVER_URL', '');
+    vi.stubEnv('HAPPIER_SERVER_URL', 'http://localhost:1234');
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
   it('builds afterSeq/limit params for page fetch', async () => {

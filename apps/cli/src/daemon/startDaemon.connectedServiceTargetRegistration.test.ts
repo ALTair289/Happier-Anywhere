@@ -57,6 +57,100 @@ function createProviderAccountUsageSnapshot(accountSubjectId = 'acct_live_codex'
 }
 
 describe('registerConnectedServiceTrackedSessionTargetsForDaemon', () => {
+  function createClaudeTrackedSession(metadata: Record<string, unknown> = {}): TrackedSession {
+    const connectedServiceSelectionsEnv = {
+      [HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY]: JSON.stringify([{
+        kind: 'profile',
+        serviceId: 'claude-subscription',
+        profileId: 'claude-primary',
+      }]),
+    };
+    return {
+      pid: 6610,
+      startedBy: 'daemon',
+      happySessionId: 'sess-claude-connected-service',
+      reattachedFromDiskMarker: true,
+      happySessionMetadataFromLocalWebhook: {
+        path: '/tmp/claude-workspace',
+        host: 'test-host',
+        startedBy: 'daemon',
+        ...metadata,
+      } as TrackedSession['happySessionMetadataFromLocalWebhook'],
+      spawnOptions: {
+        directory: '/tmp/claude-workspace',
+        backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+        connectedServiceMaterializationIdentityV1: {
+          v: 1,
+          id: 'csm_claude_connected_service',
+          createdAtMs: 1_000,
+        },
+        connectedServices: {
+          v: 1,
+          bindingsByServiceId: {
+            'claude-subscription': {
+              source: 'connected',
+              selection: 'profile',
+              profileId: 'claude-primary',
+            },
+          },
+        },
+        environmentVariables: connectedServiceSelectionsEnv,
+      },
+    };
+  }
+
+  it('keeps Claude connected-service sessions restart-capable until the Agent SDK callback is reported active', () => {
+    const runtimeRegistry = new ConnectedServiceRuntimeRegistry();
+
+    registerConnectedServiceTrackedSessionTargetsForDaemon({
+      tracked: createClaudeTrackedSession(),
+      runtimeRegistry,
+    });
+
+    expect(runtimeRegistry.getByPid(6610)?.accessTokenRefresh).toBeNull();
+  });
+
+  it('marks Claude connected-service sessions callback-capable after the Agent SDK runtime reports the OAuth callback', () => {
+    const runtimeRegistry = new ConnectedServiceRuntimeRegistry();
+
+    registerConnectedServiceTrackedSessionTargetsForDaemon({
+      tracked: createClaudeTrackedSession({
+        claudeSubscriptionAccessTokenRefreshV1: {
+          v: 1,
+          mode: 'daemon_callback',
+        },
+      }),
+      runtimeRegistry,
+    });
+
+    expect(runtimeRegistry.getByPid(6610)?.accessTokenRefresh).toEqual({ mode: 'daemon_callback' });
+  });
+
+  it('clears Claude callback capability when the runtime reports the legacy fallback', () => {
+    const runtimeRegistry = new ConnectedServiceRuntimeRegistry();
+
+    registerConnectedServiceTrackedSessionTargetsForDaemon({
+      tracked: createClaudeTrackedSession({
+        claudeSubscriptionAccessTokenRefreshV1: {
+          v: 1,
+          mode: 'daemon_callback',
+        },
+      }),
+      runtimeRegistry,
+    });
+    registerConnectedServiceTrackedSessionTargetsForDaemon({
+      tracked: createClaudeTrackedSession({
+        claudeSubscriptionAccessTokenRefreshV1: {
+          v: 1,
+          mode: 'unavailable',
+        },
+      }),
+      runtimeRegistry,
+    });
+
+    expect(runtimeRegistry.getByPid(6610)?.accessTokenRefresh).toBeNull();
+  });
+
   it('registers a reattached connected-service session directly with the runtime registry', () => {
     const connectedServiceSelectionsEnv = {
       [HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY]: JSON.stringify([{

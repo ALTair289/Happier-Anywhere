@@ -1,8 +1,10 @@
 import { lstat, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { PassThrough, Writable } from 'node:stream';
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { buildConnectedServiceCredentialRecord } from '@happier-dev/protocol';
 import { resolveOpenCodeConnectedConfigHomeDir } from '@/backends/opencode/brokerPlugin';
@@ -14,7 +16,55 @@ import { HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY } from '../connectedServic
 import { HAPPIER_CONNECTED_SERVICE_TARGET_MATERIALIZED_ROOT_ENV_KEY } from '../connectedServiceChildEnvironment';
 import { CLAUDE_SUBSCRIPTION_OAUTH_SCOPE } from '../descriptors/connectedAccountDescriptors';
 
+const { spawnSpy } = vi.hoisted(() => ({
+  spawnSpy: vi.fn(),
+}));
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    spawn: spawnSpy,
+  };
+});
+
 describe('materializeConnectedServicesForSpawn', () => {
+  beforeEach(() => {
+    spawnSpy.mockImplementation((_command: string, args: readonly string[]) => {
+      const child = new EventEmitter() as EventEmitter & {
+        stdin: Writable;
+        stdout: PassThrough;
+        stderr: PassThrough;
+        kill: ReturnType<typeof vi.fn>;
+      };
+      child.stdin = new Writable({
+        write(_chunk, _encoding, callback) {
+          callback();
+        },
+      });
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.kill = vi.fn();
+      queueMicrotask(() => {
+        if (args[0] === 'find-generic-password') {
+          child.stderr.write('missing keychain entry');
+          child.stdout.end();
+          child.stderr.end();
+          child.emit('close', 44);
+          return;
+        }
+        child.stdout.end();
+        child.stderr.end();
+        child.emit('close', 0);
+      });
+      return child;
+    });
+  });
+
+  afterEach(() => {
+    spawnSpy.mockReset();
+  });
+
   it('materializes Codex auth.json and CODEX_HOME env', async () => {
     const baseDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-test-'));
     const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-server-test-'));
@@ -980,13 +1030,75 @@ describe('materializeConnectedServicesForSpawn', () => {
     expect(credential).toMatchObject({
       claudeAiOauth: {
         accessToken: 'claude-access',
-        refreshToken: 'claude-refresh',
         scopes: expect.arrayContaining(['user:inference', 'user:profile', 'user:sessions:claude_code']),
       },
     });
+    expect(credential.claudeAiOauth).not.toHaveProperty('refreshToken');
     expect('CLAUDE_CODE_SETUP_TOKEN' in result!.env).toBe(false);
     expect('CLAUDE_CODE_OAUTH_TOKEN' in result!.env).toBe(false);
     expect('ANTHROPIC_API_KEY' in result!.env).toBe(false);
+  });
+
+  it('refreshes caller-supplied Claude OAuth records before materializing a native home', async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-test-'));
+    const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-server-test-'));
+    const sourceClaudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-source-claude-config-test-'));
+    const expired = buildConnectedServiceCredentialRecord({
+      now: 10,
+      serviceId: 'claude-subscription',
+      profileId: 'work',
+      kind: 'oauth',
+      expiresAt: 20,
+      oauth: {
+        accessToken: 'expired-access',
+        refreshToken: 'expired-refresh',
+        idToken: null,
+        scope: CLAUDE_SUBSCRIPTION_OAUTH_SCOPE,
+        tokenType: 'Bearer',
+        providerAccountId: 'acct',
+        providerEmail: 'user@example.com',
+      },
+    });
+    const fresh = buildConnectedServiceCredentialRecord({
+      now: 30,
+      serviceId: 'claude-subscription',
+      profileId: 'work',
+      kind: 'oauth',
+      expiresAt: 3_600_000,
+      oauth: {
+        accessToken: 'fresh-access',
+        refreshToken: 'fresh-refresh',
+        idToken: null,
+        scope: CLAUDE_SUBSCRIPTION_OAUTH_SCOPE,
+        tokenType: 'Bearer',
+        providerAccountId: 'acct',
+        providerEmail: 'user@example.com',
+      },
+    });
+    const refreshCredentialForMaterialization = vi.fn(async () => fresh);
+
+    const result = await materializeConnectedServicesForSpawn({
+      agentId: 'claude',
+      materializationKey: 'session-refresh-before-materialize',
+      activeServerDir,
+      baseDir,
+      recordsByServiceId: new Map([['claude-subscription', expired]]),
+      refreshCredentialForMaterialization,
+      processEnv: {
+        HOME: tmpdir(),
+        CLAUDE_CONFIG_DIR: sourceClaudeConfigDir,
+      },
+    });
+
+    expect(result).not.toBeNull();
+    expect(refreshCredentialForMaterialization).toHaveBeenCalledWith({
+      serviceId: 'claude-subscription',
+      profileId: 'work',
+      record: expired,
+    });
+    const credential = JSON.parse(await readFile(join(result!.env.CLAUDE_CONFIG_DIR!, '.credentials.json'), 'utf8'));
+    expect(credential.claudeAiOauth.accessToken).toBe('fresh-access');
+    expect(credential.claudeAiOauth).not.toHaveProperty('refreshToken');
   });
 
   it('materializes Claude Anthropic API key with an auth-isolated Claude config root', async () => {

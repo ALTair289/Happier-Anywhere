@@ -390,7 +390,6 @@ export async function createConnectedServiceAuthGroup(params: Readonly<{
         autoSwitch: true,
         ...(params.preTurnProbeMode ? { preTurnProbeMode: params.preTurnProbeMode } : {}),
         recoveryMode: 'switch_or_wait',
-        memberRuntimeStatePersistence: 'server_state_json',
       },
     }),
     timeoutMs: 20_000,

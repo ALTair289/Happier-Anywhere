@@ -33,7 +33,7 @@ describe('ApiSessionClient startup transcript catch-up retries', () => {
             startupMessageCatchUpInitialAfterSeq: number;
             startupMessageCatchUpRetryTimer: ReturnType<typeof setTimeout> | null;
             startupMessageCatchUpRetryIndex: number;
-            catchUpSessionMessages: (afterSeq: number) => Promise<void>;
+            catchUpSessionMessages: (request: { afterSeq: number; authorization: 'startup_recovery' | 'explicit_cursor' | 'reconnect_watermark' }) => Promise<void>;
             shouldRunStartupTranscriptCatchUp: () => boolean;
             scheduleNextStartupMessageCatchUpRetry: () => void;
         };
@@ -52,8 +52,9 @@ describe('ApiSessionClient startup transcript catch-up retries', () => {
         await Promise.resolve();
 
         expect(client.catchUpSessionMessages).toHaveBeenCalledTimes(1);
-        expect(client.catchUpSessionMessages).toHaveBeenCalledWith(1, {
-            afterSeqIsExplicit: undefined,
+        expect(client.catchUpSessionMessages).toHaveBeenCalledWith({
+            afterSeq: 1,
+            authorization: 'startup_recovery',
         });
     });
 
@@ -64,7 +65,7 @@ describe('ApiSessionClient startup transcript catch-up retries', () => {
             startupMessageCatchUpInitialAfterSeq: number;
             startupMessageCatchUpRetryTimer: ReturnType<typeof setTimeout> | null;
             startupMessageCatchUpRetryIndex: number;
-            catchUpSessionMessages: (afterSeq: number) => Promise<void>;
+            catchUpSessionMessages: (request: { afterSeq: number; authorization: 'startup_recovery' | 'explicit_cursor' | 'reconnect_watermark' }) => Promise<void>;
             shouldRunStartupTranscriptCatchUp: () => boolean;
             scheduleNextStartupMessageCatchUpRetry: () => void;
         };
@@ -83,8 +84,9 @@ describe('ApiSessionClient startup transcript catch-up retries', () => {
         await Promise.resolve();
 
         expect(client.catchUpSessionMessages).toHaveBeenCalledTimes(1);
-        expect(client.catchUpSessionMessages).toHaveBeenCalledWith(0, {
-            afterSeqIsExplicit: undefined,
+        expect(client.catchUpSessionMessages).toHaveBeenCalledWith({
+            afterSeq: 0,
+            authorization: 'startup_recovery',
         });
     });
 
@@ -101,7 +103,7 @@ describe('ApiSessionClient startup transcript catch-up retries', () => {
                 reportProbeResult: ReturnType<typeof vi.fn>;
             };
             handleUpdate: ReturnType<typeof vi.fn>;
-            catchUpSessionMessages: (afterSeq: number) => Promise<void>;
+            catchUpSessionMessages: (request: { afterSeq: number; authorization: 'startup_recovery' | 'explicit_cursor' | 'reconnect_watermark' }) => Promise<void>;
         };
 
         client.token = 'expired';
@@ -112,7 +114,10 @@ describe('ApiSessionClient startup transcript catch-up retries', () => {
         };
         client.handleUpdate = vi.fn();
 
-        await expect(client.catchUpSessionMessages(10)).rejects.toMatchObject({
+        await expect(client.catchUpSessionMessages({
+            afterSeq: 10,
+            authorization: 'explicit_cursor',
+        })).rejects.toMatchObject({
             name: 'HttpStatusError',
             code: 'not_authenticated',
             response: { status: 401 },
@@ -131,7 +136,7 @@ describe('ApiSessionClient startup transcript catch-up retries', () => {
             startupMessageCatchUpInitialAfterSeq: number;
             startupMessageCatchUpRetryTimer: ReturnType<typeof setTimeout> | null;
             startupMessageCatchUpRetryIndex: number;
-            catchUpSessionMessages: (afterSeq: number) => Promise<void>;
+            catchUpSessionMessages: (request: { afterSeq: number; authorization: 'startup_recovery' | 'explicit_cursor' | 'reconnect_watermark' }) => Promise<void>;
             shouldRunStartupTranscriptCatchUp: () => boolean;
             scheduleNextStartupMessageCatchUpRetry: () => void;
         };
@@ -163,7 +168,7 @@ describe('ApiSessionClient startup transcript catch-up retries', () => {
             startupMessageCatchUpInitialAfterSeq: number;
             startupMessageCatchUpRetryTimer: ReturnType<typeof setTimeout> | null;
             startupMessageCatchUpRetryIndex: number;
-            catchUpSessionMessages: (afterSeq: number) => Promise<void>;
+            catchUpSessionMessages: (request: { afterSeq: number; authorization: 'startup_recovery' | 'explicit_cursor' | 'reconnect_watermark' }) => Promise<void>;
             shouldRunStartupTranscriptCatchUp: () => boolean;
             scheduleNextStartupMessageCatchUpRetry: () => void;
         };
@@ -187,11 +192,13 @@ describe('ApiSessionClient startup transcript catch-up retries', () => {
         await Promise.resolve();
 
         expect(client.catchUpSessionMessages).toHaveBeenCalledTimes(2);
-        expect(client.catchUpSessionMessages).toHaveBeenNthCalledWith(1, 0, {
-            afterSeqIsExplicit: undefined,
+        expect(client.catchUpSessionMessages).toHaveBeenNthCalledWith(1, {
+            afterSeq: 0,
+            authorization: 'startup_recovery',
         });
-        expect(client.catchUpSessionMessages).toHaveBeenNthCalledWith(2, 0, {
-            afterSeqIsExplicit: undefined,
+        expect(client.catchUpSessionMessages).toHaveBeenNthCalledWith(2, {
+            afterSeq: 0,
+            authorization: 'startup_recovery',
         });
     });
 });

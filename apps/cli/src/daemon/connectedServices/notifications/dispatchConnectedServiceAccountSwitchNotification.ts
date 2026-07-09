@@ -16,7 +16,7 @@ import {
   type ConnectedServiceNotificationProfileSummary,
 } from './connectedServiceNotificationLabels';
 
-type ConnectedServiceAccountSwitchNotificationSource = Readonly<{
+export type ConnectedServiceAccountSwitchNotificationSource = Readonly<{
   sessionId: string;
   sessionTitle?: string | null;
   serviceId: string;

@@ -35,7 +35,7 @@ type TemporaryThrottleRecoveryLike = Readonly<{
 type RuntimeRecoveryActionRequired = Readonly<{
   status: 'recovery_action_required';
   action: Readonly<{
-    kind: 'reconnect_profile' | 'profile_action_required' | 'provider_state_sharing_required' | 'connected_service_required';
+    kind: 'reconnect_profile' | 're_resolve_binding' | 'profile_action_required' | 'provider_state_sharing_required' | 'connected_service_required';
     serviceId: string;
     profileId: string | null;
     groupId: string | null;
@@ -73,6 +73,7 @@ function mapRecoveryDecisionToActionRequired(input: Readonly<{
     && decision.action !== 'profile_action_required'
     && decision.action !== 'connected_service_required'
     && decision.action !== 'shared_state_required'
+    && decision.action !== 're_resolve_binding'
   ) return null;
 
   return {
@@ -82,6 +83,8 @@ function mapRecoveryDecisionToActionRequired(input: Readonly<{
         ? 'reconnect_profile'
         : decision.action === 'shared_state_required'
         ? 'provider_state_sharing_required'
+        : decision.action === 're_resolve_binding'
+        ? 're_resolve_binding'
         : decision.action,
       serviceId: decision.serviceId,
       profileId: decision.profileId,
@@ -203,7 +206,7 @@ export async function handleConnectedServiceRuntimeAuthFailure(input: Readonly<{
     serviceId: input.selection.serviceId,
     groupId: input.selection.groupId,
     reason: input.classification.kind,
-    observedProfileId: input.selection.activeProfileId ?? input.classification.profileId,
+    observedProfileId: input.classification.profileId ?? input.selection.activeProfileId,
     retryAfterMs: input.classification.retryAfterMs,
     resetsAtMs: input.classification.resetsAtMs,
     limitCategory: input.classification.limitCategory,

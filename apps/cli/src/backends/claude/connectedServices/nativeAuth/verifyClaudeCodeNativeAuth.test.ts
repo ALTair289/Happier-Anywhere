@@ -141,7 +141,7 @@ describe('verifyClaudeCodeNativeAuth', () => {
     expect(await readFile(join(claudeConfigDir, '.credentials.json'), 'utf8')).toContain('secret-placeholder');
   });
 
-  it('fails closed on darwin when the matching keychain entry is missing the refresh token even if the file is healthy', async () => {
+  it('accepts access-token-only credentials on darwin when a matching keychain entry has no refresh token', async () => {
     const claudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-native-auth-verify-'));
     await writeClaudeCodeCredentialsFile({
       claudeConfigDir,
@@ -173,7 +173,7 @@ describe('verifyClaudeCodeNativeAuth', () => {
     const result = await verifyUnderDarwin({ claudeConfigDir, now: NOW_MS });
 
     expect(result).toEqual({
-      status: 'missing_refresh_token',
+      status: 'ok',
       missingScopes: [],
       credentialPath: join(claudeConfigDir, '.credentials.json'),
     });
@@ -229,6 +229,7 @@ describe('verifyClaudeCodeNativeAuth', () => {
       },
     };
     await writeClaudeCodeCredentialsFile({ claudeConfigDir, payload: filePayload });
+    const materializedPayload = JSON.parse(await readFile(resolveClaudeCodeCredentialsFilePath(claudeConfigDir), 'utf8'));
     await writeFile(
       resolveClaudeConnectedServiceHomeProvenancePath(claudeConfigDir),
       `${JSON.stringify({
@@ -236,7 +237,7 @@ describe('verifyClaudeCodeNativeAuth', () => {
         serviceId: 'claude-subscription',
         credentialProfileId: 'profile-a',
         credentialCreatedAt: 1000,
-        credentialFingerprint: computeClaudeCodeCredentialFingerprint(filePayload),
+        credentialFingerprint: computeClaudeCodeCredentialFingerprint(materializedPayload),
         selection: { kind: 'profile', profileId: 'profile-a' },
       })}\n`,
     );

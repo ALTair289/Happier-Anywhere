@@ -136,4 +136,33 @@ describe('buildConnectedServiceAuthGroupSwitchStateFromAccountUsage', () => {
       },
     }));
   });
+
+  it('returns a provisional persisted-member state when the account-usage store has no source-backed records', () => {
+    const group = createGroup();
+    const accountUsageStore = {
+      resolveBySource: () => null,
+    };
+
+    const result = buildConnectedServiceAuthGroupSwitchStateFromAccountUsage({
+      group,
+      accountUsageStore,
+    });
+
+    expect(result).toMatchObject({
+      kind: 'provisional',
+      state: expect.objectContaining({
+        serviceId: 'openai-codex',
+        groupId: 'team',
+        activeProfileId: 'exhausted',
+        generation: 4,
+      }),
+    });
+    expect(result?.state.memberStatesByProfileId.get('exhausted')).toEqual(expect.objectContaining({
+      credentialHealthStatus: 'connected',
+    }));
+    expect(result?.state.memberStatesByProfileId.get('fresh')).toEqual(expect.objectContaining({
+      credentialHealthStatus: 'connected',
+    }));
+    expect(result?.sourceRefsByProfileId.size).toBe(0);
+  });
 });

@@ -1,14 +1,15 @@
-import { mkdir, rm, stat } from 'node:fs/promises';
+import { mkdir, readdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
 import { createTempDir, removeTempDir } from '@/testkit/fs/tempDir';
+import { buildDefaultConnectedServiceCredentialLifecycleDescriptor } from '../credentials/lifecycleTypes';
 import { ConnectedServiceGroupHomeCleanupScheduler } from './ConnectedServiceGroupHomeCleanupScheduler';
 import { resolveConnectedServiceGroupHomeDir } from './resolveConnectedServiceHomeDir';
 
 describe('ConnectedServiceGroupHomeCleanupScheduler', () => {
-  it('removes a deleted group home only after no live target references it', async () => {
+  it('quarantines a deleted group home only after no live target references it', async () => {
     const root = await createTempDir('happier-connected-service-group-home-cleanup-');
     try {
       const home = resolveConnectedServiceGroupHomeDir({
@@ -40,7 +41,58 @@ describe('ConnectedServiceGroupHomeCleanupScheduler', () => {
         agentId: 'codex',
       });
       await expect(stat(home)).rejects.toMatchObject({ code: 'ENOENT' });
+      const quarantined = await readdir(join(root, 'daemon', 'connected-services', 'homes', 'openai-codex', '__groups', 'main', '.quarantine'));
+      expect(quarantined).toHaveLength(1);
+      await expect(stat(join(root, 'daemon', 'connected-services', 'homes', 'openai-codex', '__groups', 'main', '.quarantine', quarantined[0]))).resolves.toBeTruthy();
       expect(home).toBe(join(root, 'daemon', 'connected-services', 'homes', 'openai-codex', '__groups', 'main', 'codex'));
+    } finally {
+      await removeTempDir(root);
+    }
+  });
+
+  it('deletes quarantined Claude keychain credentials only when purging expired quarantine homes', async () => {
+    const root = await createTempDir('happier-connected-service-group-home-claude-keychain-cleanup-');
+    try {
+      const home = resolveConnectedServiceGroupHomeDir({
+        activeServerDir: root,
+        serviceId: 'anthropic',
+        groupId: 'main',
+        agentId: 'claude',
+      });
+      await mkdir(join(home, 'claude-config'), { recursive: true });
+      const deletedClaudeConfigDirs: string[] = [];
+      const scheduler = new ConnectedServiceGroupHomeCleanupScheduler({
+        activeServerDir: root,
+        hasLiveTarget: () => false,
+        nowMs: () => 100_000,
+        quarantineTtlMs: 0,
+        resolveCredentialLifecycleDescriptor: async (agentId) => ({
+          ...buildDefaultConnectedServiceCredentialLifecycleDescriptor(agentId),
+          ...(agentId === 'claude'
+            ? {
+                credentialStorageCleanup: {
+                  async deleteCredentialStorageForHomeRoot({ rootDir }) {
+                    deletedClaudeConfigDirs.push(join(rootDir, 'claude-config'));
+                  },
+                },
+              }
+            : {}),
+        }),
+      });
+
+      await expect(scheduler.scheduleDeletedGroupCleanup({
+        serviceId: 'anthropic',
+        groupId: 'main',
+        agentId: 'claude',
+      })).resolves.toMatchObject({ cleaned: true });
+      expect(deletedClaudeConfigDirs).toEqual([]);
+
+      await expect(scheduler.reconcileDeletedGroupHomes({})).resolves.toEqual([]);
+      const quarantineRoot = join(root, 'daemon', 'connected-services', 'homes', 'anthropic', '__groups', 'main', '.quarantine');
+      expect(deletedClaudeConfigDirs).toEqual([
+        join(quarantineRoot, '100000-claude', 'claude-config'),
+      ]);
+      await expect(readdir(quarantineRoot)).resolves.toEqual([]);
     } finally {
       await removeTempDir(root);
     }
@@ -96,6 +148,37 @@ describe('ConnectedServiceGroupHomeCleanupScheduler', () => {
         activeServerDir: root,
         hasLiveTarget: () => live,
         groupExists: async ({ groupId }) => groupId === 'main',
+      });
+
+      await expect(scheduler.scheduleDeletedGroupCleanup({
+        serviceId: 'openai-codex',
+        groupId: 'main',
+        agentId: 'codex',
+      })).resolves.toMatchObject({ cleaned: false, pending: true });
+
+      live = false;
+      await expect(scheduler.cleanupPendingDeletedGroupHomes()).resolves.toEqual([]);
+      await expect(stat(home)).resolves.toBeTruthy();
+    } finally {
+      await removeTempDir(root);
+    }
+  });
+
+  it('does not delete a pending group home when deletion authority is indeterminate', async () => {
+    const root = await createTempDir('happier-connected-service-group-home-cleanup-indeterminate-');
+    try {
+      const home = resolveConnectedServiceGroupHomeDir({
+        activeServerDir: root,
+        serviceId: 'openai-codex',
+        groupId: 'main',
+        agentId: 'codex',
+      });
+      await mkdir(home, { recursive: true });
+      let live = true;
+      const scheduler = new ConnectedServiceGroupHomeCleanupScheduler({
+        activeServerDir: root,
+        hasLiveTarget: () => live,
+        resolveGroupDeletionAuthority: async () => ({ status: 'unknown' }),
       });
 
       await expect(scheduler.scheduleDeletedGroupCleanup({
@@ -190,8 +273,34 @@ describe('ConnectedServiceGroupHomeCleanupScheduler', () => {
         expect.objectContaining({ cleaned: false, pending: true, path: liveDeletedHome }),
       ]));
       await expect(stat(deletedHome)).rejects.toMatchObject({ code: 'ENOENT' });
+      const quarantineRoot = join(root, 'daemon', 'connected-services', 'homes', 'openai-codex', '__groups', 'deleted', '.quarantine');
+      await expect(readdir(quarantineRoot)).resolves.toHaveLength(1);
       await expect(stat(liveDeletedHome)).resolves.toBeTruthy();
       await expect(stat(existingHome)).resolves.toBeTruthy();
+    } finally {
+      await removeTempDir(root);
+    }
+  });
+
+  it('keeps existing group homes when deletion is not positively confirmed', async () => {
+    const root = await createTempDir('happier-connected-service-group-home-cleanup-unknown-');
+    try {
+      const home = resolveConnectedServiceGroupHomeDir({
+        activeServerDir: root,
+        serviceId: 'openai-codex',
+        groupId: 'gate-off',
+        agentId: 'codex',
+      });
+      await mkdir(home, { recursive: true });
+      const scheduler = new ConnectedServiceGroupHomeCleanupScheduler({
+        activeServerDir: root,
+        hasLiveTarget: () => false,
+      });
+
+      await expect(scheduler.reconcileDeletedGroupHomes({
+        resolveGroupDeletionAuthority: async () => ({ status: 'unknown' }),
+      })).resolves.toEqual([]);
+      await expect(stat(home)).resolves.toBeTruthy();
     } finally {
       await removeTempDir(root);
     }

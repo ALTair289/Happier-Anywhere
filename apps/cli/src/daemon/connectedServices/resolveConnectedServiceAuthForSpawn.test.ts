@@ -1,9 +1,11 @@
 import { mkdir, mkdtemp, readFile } from 'node:fs/promises';
+import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { PassThrough, Writable } from 'node:stream';
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   buildProviderAccountUsageRecordId,
@@ -21,10 +23,24 @@ import { CLAUDE_SUBSCRIPTION_OAUTH_SCOPE } from './descriptors/connectedAccountD
 import {
   ConnectedServiceSpawnCredentialRefreshError,
   ConnectedServiceSpawnMaterializationError,
+  persistMaterializationFailureCredentialHealthForSpawn,
   resolveConnectedServiceAuthForSpawn,
 } from './resolveConnectedServiceAuthForSpawn';
+import type { ConnectedServicesMaterializationDiagnostic } from './materialize/providerMaterializerTypes';
 import { resolveClaudeCodeCredentialsFilePath } from '@/backends/claude/connectedServices/nativeAuth/claudeCodeCredentialFile';
 import { normalizeMaterializationKeyForPath } from './materialize/normalizeMaterializationKeyForPath';
+
+const { spawnSpy } = vi.hoisted(() => ({
+  spawnSpy: vi.fn(),
+}));
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    spawn: spawnSpy,
+  };
+});
 
 function resolveCodexHomeForMaterialization(baseDir: string, materializationKey: string): string {
   return join(baseDir, normalizeMaterializationKeyForPath(materializationKey), 'codex', 'codex-home');
@@ -85,6 +101,42 @@ function createProviderAccountUsageSnapshot(profileId: string, remainingPct: num
 }
 
 describe('resolveConnectedServiceAuthForSpawn', () => {
+  beforeEach(() => {
+    spawnSpy.mockImplementation((_command: string, args: readonly string[]) => {
+      const child = new EventEmitter() as EventEmitter & {
+        stdin: Writable;
+        stdout: PassThrough;
+        stderr: PassThrough;
+        kill: ReturnType<typeof vi.fn>;
+      };
+      child.stdin = new Writable({
+        write(_chunk, _encoding, callback) {
+          callback();
+        },
+      });
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.kill = vi.fn();
+      queueMicrotask(() => {
+        if (args[0] === 'find-generic-password') {
+          child.stderr.write('missing keychain entry');
+          child.stdout.end();
+          child.stderr.end();
+          child.emit('close', 44);
+          return;
+        }
+        child.stdout.end();
+        child.stderr.end();
+        child.emit('close', 0);
+      });
+      return child;
+    });
+  });
+
+  afterEach(() => {
+    spawnSpy.mockReset();
+  });
+
   it('uses a preflight-refreshed expired Claude OAuth credential for materialization', async () => {
     const baseDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-test-'));
     const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-server-test-'));
@@ -184,7 +236,6 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
     expect(refreshConnectedServiceCredentialForSpawnPreflight).toHaveBeenCalledWith({
       serviceId: 'claude-subscription',
       profileId: 'work',
-      force: true,
     });
     expect(connectedServiceAuth?.env.CLAUDE_CODE_SETUP_TOKEN).toBeUndefined();
     expect(connectedServiceAuth?.env.CLAUDE_CONFIG_DIR).toBeTypeOf('string');
@@ -192,10 +243,10 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
     expect(credential).toMatchObject({
       claudeAiOauth: {
         accessToken: 'fresh-access',
-        refreshToken: 'rotated-refresh',
         scopes: expect.arrayContaining(['user:inference', 'user:profile', 'user:sessions:claude_code']),
       },
     });
+    expect(credential?.claudeAiOauth).not.toHaveProperty('refreshToken');
   });
 
   it('fails before spawning when materialized Claude native OAuth is expired and cannot be refreshed', async () => {
@@ -369,7 +420,6 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
     expect(refreshConnectedServiceCredentialForSpawnPreflight).toHaveBeenCalledWith({
       serviceId: 'claude-subscription',
       profileId: 'work',
-      force: true,
     });
     expect(connectedServiceAuth?.env.CLAUDE_CODE_SETUP_TOKEN).toBeUndefined();
     expect(connectedServiceAuth?.env.CLAUDE_CONFIG_DIR).toBeTypeOf('string');
@@ -377,10 +427,10 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
     expect(credential).toMatchObject({
       claudeAiOauth: {
         accessToken: 'near-expiry-fresh-access',
-        refreshToken: 'rotated-refresh',
         scopes: expect.arrayContaining(['user:inference', 'user:profile', 'user:sessions:claude_code']),
       },
     });
+    expect(credential?.claudeAiOauth).not.toHaveProperty('refreshToken');
   });
 
   it('forces spawn preflight refresh for future-dated Claude OAuth credentials', async () => {
@@ -478,18 +528,186 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
       },
     });
 
+    // Claude spawn preflight is expiry_window (NOT force): a near-expiry credential still
+    // refreshes (the service applies its window), but a fresh one must never be force-rotated —
+    // per-spawn forced rotation burned single-use refresh tokens and made lease contention right
+    // after a daemon restart fail resumes entirely (live incident 2026-07-08 19:39).
     expect(refreshConnectedServiceCredentialForSpawnPreflight).toHaveBeenCalledWith({
       serviceId: 'claude-subscription',
       profileId: 'work',
-      force: true,
     });
     const credential = await readClaudeCodeNativeCredential(connectedServiceAuth!.env.CLAUDE_CONFIG_DIR!);
     expect(credential).toMatchObject({
       claudeAiOauth: {
         accessToken: 'forced-fresh-access',
-        refreshToken: 'forced-fresh-refresh',
       },
     });
+    expect(credential?.claudeAiOauth).not.toHaveProperty('refreshToken');
+  });
+
+  it('proceeds with a still-valid credential when spawn preflight refresh loses the lease', async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-test-'));
+    const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-server-test-'));
+    const processEnv = await createIsolatedClaudeSourceEnv();
+    const now = 1_000_000;
+
+    // 8 hours from expiry — no refresh is required for this spawn to be safe.
+    const freshRecord = buildConnectedServiceCredentialRecord({
+      now,
+      serviceId: 'claude-subscription',
+      profileId: 'work',
+      kind: 'oauth',
+      expiresAt: now + 8 * 3_600_000,
+      oauth: {
+        accessToken: 'still-valid-access',
+        refreshToken: 'still-valid-refresh',
+        idToken: null,
+        scope: CLAUDE_SUBSCRIPTION_OAUTH_SCOPE,
+        tokenType: 'Bearer',
+        providerAccountId: 'acct',
+        providerEmail: null,
+      },
+    });
+
+    const credentials: Credentials = {
+      token: 'happy-token',
+      encryption: { type: 'legacy', secret: new Uint8Array(32).fill(7) },
+    };
+    if (credentials.encryption.type !== 'legacy') {
+      throw new Error('test fixture expected legacy encryption');
+    }
+    const ciphertext = sealAccountScopedBlobCiphertext({
+      kind: 'connected_service_credential',
+      material: { type: 'legacy', secret: credentials.encryption.secret },
+      payload: freshRecord,
+      randomBytes: (length) => randomBytes(length),
+    });
+    // Another refresher (previous daemon / scheduled loop) holds the lease — a TRANSIENT state
+    // that must not fail the spawn while the current credential is still hours from expiry
+    // (live incident 2026-07-08 19:39: "Failed to resume session" on lease contention).
+    const refreshConnectedServiceCredentialForSpawnPreflight = vi.fn(async () => ({
+      status: 'lease_not_acquired' as const,
+      credential: null,
+      diagnostic: {
+        serviceId: 'claude-subscription' as const,
+        profileId: 'work',
+        reason: 'spawn_preflight' as const,
+        status: 'lease_not_acquired' as const,
+        expiresAt: freshRecord.expiresAt,
+        expiryAgeMs: now - (freshRecord.expiresAt ?? now),
+        refreshWindowMs: 600_000,
+      },
+    }));
+    const api = {
+      getConnectedServiceCredentialSealed: async () => ({
+        sealed: { format: 'account_scoped_v1', ciphertext },
+        metadata: { kind: 'oauth', providerEmail: null, providerAccountId: 'acct', expiresAt: freshRecord.expiresAt },
+      }),
+    } as unknown as ApiClient;
+
+    const connectedServiceAuth = await resolveConnectedServiceAuthForSpawn({
+      agentId: 'claude',
+      connectedServicesBindingsRaw: {
+        v: 1,
+        bindingsByServiceId: {
+          'claude-subscription': { source: 'connected', profileId: 'work' },
+        },
+      },
+      materializationKey: 'session-1',
+      activeServerDir,
+      baseDir,
+      credentials,
+      api,
+      nowMs: () => now,
+      processEnv,
+      credentialRefreshService: {
+        refreshConnectedServiceCredentialForSpawnPreflight,
+      },
+    });
+
+    const credential = await readClaudeCodeNativeCredential(connectedServiceAuth!.env.CLAUDE_CONFIG_DIR!);
+    expect(credential).toMatchObject({
+      claudeAiOauth: {
+        accessToken: 'still-valid-access',
+      },
+    });
+  });
+
+  it('still fails spawn when preflight refresh loses the lease on an expired credential', async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-test-'));
+    const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-server-test-'));
+    const processEnv = await createIsolatedClaudeSourceEnv();
+    const now = 1_000_000;
+
+    const expiredRecord = buildConnectedServiceCredentialRecord({
+      now,
+      serviceId: 'claude-subscription',
+      profileId: 'work',
+      kind: 'oauth',
+      expiresAt: now - 60_000,
+      oauth: {
+        accessToken: 'expired-access',
+        refreshToken: 'expired-refresh',
+        idToken: null,
+        scope: CLAUDE_SUBSCRIPTION_OAUTH_SCOPE,
+        tokenType: 'Bearer',
+        providerAccountId: 'acct',
+        providerEmail: null,
+      },
+    });
+
+    const credentials: Credentials = {
+      token: 'happy-token',
+      encryption: { type: 'legacy', secret: new Uint8Array(32).fill(7) },
+    };
+    if (credentials.encryption.type !== 'legacy') {
+      throw new Error('test fixture expected legacy encryption');
+    }
+    const ciphertext = sealAccountScopedBlobCiphertext({
+      kind: 'connected_service_credential',
+      material: { type: 'legacy', secret: credentials.encryption.secret },
+      payload: expiredRecord,
+      randomBytes: (length) => randomBytes(length),
+    });
+    const refreshConnectedServiceCredentialForSpawnPreflight = vi.fn(async () => ({
+      status: 'lease_not_acquired' as const,
+      credential: null,
+      diagnostic: {
+        serviceId: 'claude-subscription' as const,
+        profileId: 'work',
+        reason: 'spawn_preflight' as const,
+        status: 'lease_not_acquired' as const,
+        expiresAt: expiredRecord.expiresAt,
+        expiryAgeMs: now - (expiredRecord.expiresAt ?? now),
+        refreshWindowMs: 600_000,
+      },
+    }));
+    const api = {
+      getConnectedServiceCredentialSealed: async () => ({
+        sealed: { format: 'account_scoped_v1', ciphertext },
+        metadata: { kind: 'oauth', providerEmail: null, providerAccountId: 'acct', expiresAt: expiredRecord.expiresAt },
+      }),
+    } as unknown as ApiClient;
+
+    await expect(resolveConnectedServiceAuthForSpawn({
+      agentId: 'claude',
+      connectedServicesBindingsRaw: {
+        v: 1,
+        bindingsByServiceId: {
+          'claude-subscription': { source: 'connected', profileId: 'work' },
+        },
+      },
+      materializationKey: 'session-1',
+      activeServerDir,
+      baseDir,
+      credentials,
+      api,
+      nowMs: () => now,
+      processEnv,
+      credentialRefreshService: {
+        refreshConnectedServiceCredentialForSpawnPreflight,
+      },
+    })).rejects.toMatchObject({ kind: 'transient_refresh_failed' });
   });
 
   it('blocks known reconnect-required credentials before spawn preflight expiry shortcuts', async () => {
@@ -653,7 +871,7 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
     });
   });
 
-  it('switches a group binding when credential health marks the active profile reconnect-required', async () => {
+  it('fails closed when credential health marks the active group profile reconnect-required', async () => {
     const baseDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-test-'));
     const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-server-test-'));
     const now = 1_000_000;
@@ -723,11 +941,6 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
         },
       };
     });
-    const switchAfterClassifiedFailure = vi.fn(async () => ({
-      status: 'switched' as const,
-      activeProfileId: 'backup',
-      generation: 8,
-    }));
     const refreshConnectedServiceCredentialForSpawnPreflight = vi.fn(async () => ({
       status: 'not_needed' as const,
       credential: null,
@@ -798,7 +1011,7 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
       getConnectedServiceCredentialSealed,
     } as unknown as ApiClient;
 
-    const connectedServiceAuth = await resolveConnectedServiceAuthForSpawn({
+    await expect(resolveConnectedServiceAuthForSpawn({
       agentId: 'codex',
       connectedServicesBindingsRaw: {
         v: 1,
@@ -820,44 +1033,22 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
       sessionId: 'session-1',
       authGroupSwitchCoordinator: {
         switchBeforeTurn: vi.fn(async () => ({ status: 'not_needed' })),
-        switchAfterClassifiedFailure,
       },
       credentialRefreshService: {
         refreshConnectedServiceCredentialForSpawnPreflight,
       },
-    });
+    })).rejects.toMatchObject({
+      name: 'ConnectedServiceSpawnCredentialRefreshError',
+      kind: 'reconnect_required',
+      serviceId: 'openai-codex',
+      profileId: 'primary',
+    } satisfies Partial<ConnectedServiceSpawnCredentialRefreshError>);
 
-    expect(switchAfterClassifiedFailure).toHaveBeenCalledWith(expect.objectContaining({
-      sessionId: 'session-1',
-      serviceId: 'openai-codex',
-      groupId: 'main',
-      reason: 'refresh_failed',
-      observedProfileId: 'primary',
-    }));
-    expect(getConnectedServiceCredentialSealed).toHaveBeenCalledWith({
+    expect(getConnectedServiceCredentialSealed).not.toHaveBeenCalledWith({
       serviceId: 'openai-codex',
       profileId: 'backup',
     });
-    expect(refreshConnectedServiceCredentialForSpawnPreflight).toHaveBeenCalledWith({
-      serviceId: 'openai-codex',
-      profileId: 'backup',
-    });
-    expect(connectedServiceAuth).not.toBeNull();
-    const authWithIdentitySelections = connectedServiceAuth as typeof connectedServiceAuth & Readonly<{
-      runtimeAccountIdentitySelections?: ReadonlyArray<unknown>;
-    }>;
-    expect(authWithIdentitySelections.runtimeAccountIdentitySelections).toEqual([
-      expect.objectContaining({
-        serviceId: 'openai-codex',
-        profileId: 'backup',
-        groupId: 'main',
-        groupGeneration: 8,
-        source: 'spawn_selection',
-        record: backupRecord,
-      }),
-    ]);
-    const auth = JSON.parse(await readFile(join(connectedServiceAuth!.env.CODEX_HOME, 'auth.json'), 'utf8'));
-    expect(auth.access_token).toBe('backup-access');
+    expect(refreshConnectedServiceCredentialForSpawnPreflight).not.toHaveBeenCalled();
   });
 
   it('returns a typed reconnect-required preflight error when central refresh cannot recover an expired credential', async () => {
@@ -944,7 +1135,7 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
     });
   });
 
-  it('switches a group binding after the active profile permanently fails spawn preflight refresh', async () => {
+  it('does not switch a group binding after the active profile permanently fails spawn preflight refresh', async () => {
     const baseDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-test-'));
     const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-server-test-'));
     const now = 1_000_000;
@@ -1021,11 +1212,6 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
       activeProfileId: 'primary',
       generation: 7,
     }));
-    const switchAfterClassifiedFailure = vi.fn(async () => ({
-      status: 'switched' as const,
-      activeProfileId: 'backup',
-      generation: 8,
-    }));
     const getConnectedServiceCredentialSealed = vi.fn(async (params: { serviceId: string; profileId: string }) => {
       const ciphertext = ciphertextByProfileId.get(params.profileId);
       if (params.serviceId !== 'openai-codex' || !ciphertext) return null;
@@ -1090,7 +1276,7 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
       getConnectedServiceCredentialSealed,
     } as unknown as ApiClient;
 
-    const connectedServiceAuth = await resolveConnectedServiceAuthForSpawn({
+    await expect(resolveConnectedServiceAuthForSpawn({
       agentId: 'codex',
       connectedServicesBindingsRaw: {
         v: 1,
@@ -1110,34 +1296,28 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
       api,
       nowMs: () => now,
       sessionId: 'session-1',
-      authGroupSwitchCoordinator: { switchBeforeTurn, switchAfterClassifiedFailure },
+      authGroupSwitchCoordinator: { switchBeforeTurn },
       credentialRefreshService: {
         refreshConnectedServiceCredentialForSpawnPreflight,
       },
+    })).rejects.toMatchObject({
+      name: 'ConnectedServiceSpawnCredentialRefreshError',
+      kind: 'reconnect_required',
+      serviceId: 'openai-codex',
+      profileId: 'primary',
     });
 
     expect(refreshConnectedServiceCredentialForSpawnPreflight).toHaveBeenCalledWith({
       serviceId: 'openai-codex',
       profileId: 'primary',
     });
-    expect(switchAfterClassifiedFailure).toHaveBeenCalledWith(expect.objectContaining({
-      sessionId: 'session-1',
-      serviceId: 'openai-codex',
-      groupId: 'main',
-      reason: 'refresh_failed',
-      observedProfileId: 'primary',
-    }));
-    expect(getConnectedServiceCredentialSealed).toHaveBeenCalledWith({
-      serviceId: 'openai-codex',
+    expect(getConnectedServiceCredentialSealed).not.toHaveBeenCalledWith(expect.objectContaining({
       profileId: 'backup',
-    });
+    }));
     expect(switchBeforeTurn).not.toHaveBeenCalled();
-    expect(connectedServiceAuth).not.toBeNull();
-    const auth = JSON.parse(await readFile(join(connectedServiceAuth!.env.CODEX_HOME, 'auth.json'), 'utf8'));
-    expect(auth.access_token).toBe('backup-access');
   });
 
-  it('surfaces the group fallback status when active credential refresh fails but the group cannot switch', async () => {
+  it('surfaces reconnect-required when active credential refresh fails instead of consulting group fallback', async () => {
     const baseDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-test-'));
     const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-server-test-'));
     const now = 1_000_000;
@@ -1184,10 +1364,6 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
         expiryAgeMs: 1_000,
         refreshWindowMs: 60_000,
       },
-    }));
-    const switchAfterClassifiedFailure = vi.fn(async () => ({
-      status: 'switch_reason_disabled' as const,
-      generation: 3,
     }));
     const api = {
       getConnectedServiceAuthGroup: async () => ({
@@ -1251,21 +1427,19 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
       sessionId: 'session-1',
       authGroupSwitchCoordinator: {
         switchBeforeTurn: vi.fn(),
-        switchAfterClassifiedFailure,
       },
       credentialRefreshService: {
         refreshConnectedServiceCredentialForSpawnPreflight,
       },
     })).rejects.toMatchObject({
-      name: 'ConnectedServiceSpawnGroupSwitchUnavailableError',
+      name: 'ConnectedServiceSpawnCredentialRefreshError',
+      kind: 'reconnect_required',
       serviceId: 'claude-subscription',
-      groupId: 'claude',
-      activeProfileId: 'leeroy',
-      status: 'switch_reason_disabled',
+      profileId: 'leeroy',
     });
   });
 
-  it('observes a newer group active profile after refresh-failure fallback without snapshot-driven pre-spawn switching', async () => {
+  it('does not observe newer group active profile after spawn refresh failure without runtime-auth recovery', async () => {
     const baseDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-test-'));
     const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-server-test-'));
     const now = 1_000_000;
@@ -1420,18 +1594,6 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
       };
     });
     const switchBeforeTurn = vi.fn(async () => ({ status: 'session_not_found' as const }));
-    const switchAfterClassifiedFailure = vi.fn(async () => {
-      activeProfileId = 'eligible';
-      generation = 8;
-      return {
-        status: 'no_eligible_member' as const,
-        generation,
-        retryAtMs: null,
-        excluded: [
-          { profileId: 'already-exhausted', reason: 'quota_exhausted', retryAtMs: now + 60_000 },
-        ],
-      };
-    });
     const refreshConnectedServiceCredentialForSpawnPreflight = vi.fn(async (
       params: { serviceId: 'openai-codex'; profileId: string },
     ) => {
@@ -1471,7 +1633,7 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
       getConnectedServiceCredentialSealed,
     } as unknown as ApiClient;
 
-    const connectedServiceAuth = await resolveConnectedServiceAuthForSpawn({
+    await expect(resolveConnectedServiceAuthForSpawn({
       agentId: 'codex',
       connectedServicesBindingsRaw: {
         v: 1,
@@ -1495,41 +1657,30 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
       sessionId: 'session-1',
       authGroupSwitchCoordinator: {
         switchBeforeTurn,
-        switchAfterClassifiedFailure,
       },
       credentialRefreshService: {
         refreshConnectedServiceCredentialForSpawnPreflight,
       },
-    });
+    })).rejects.toMatchObject({
+      name: 'ConnectedServiceSpawnCredentialRefreshError',
+      kind: 'reconnect_required',
+      serviceId: 'openai-codex',
+      profileId: 'limited',
+    } satisfies Partial<ConnectedServiceSpawnCredentialRefreshError>);
 
     expect(switchBeforeTurn).not.toHaveBeenCalled();
-    expect(switchAfterClassifiedFailure).toHaveBeenCalledWith(expect.objectContaining({
-      sessionId: 'session-1',
-      serviceId: 'openai-codex',
-      groupId: 'codex-divergence',
-      reason: 'refresh_failed',
-      observedProfileId: 'limited',
-    }));
-    expect(getConnectedServiceAuthGroup).toHaveBeenCalledTimes(2);
-    expect(getConnectedServiceCredentialSealed).toHaveBeenCalledWith({
+    expect(getConnectedServiceAuthGroup).toHaveBeenCalledTimes(1);
+    expect(getConnectedServiceCredentialSealed).not.toHaveBeenCalledWith({
       serviceId: 'openai-codex',
       profileId: 'eligible',
     });
-    expect(refreshConnectedServiceCredentialForSpawnPreflight).toHaveBeenCalledWith({
+    expect(refreshConnectedServiceCredentialForSpawnPreflight).not.toHaveBeenCalledWith({
       serviceId: 'openai-codex',
       profileId: 'eligible',
     });
-    expect(connectedServiceAuth?.connectedServicesBindings.bindingsByServiceId['openai-codex']).toMatchObject({
-      source: 'connected',
-      selection: 'group',
-      groupId: 'codex-divergence',
-      profileId: 'eligible',
-    });
-    const auth = JSON.parse(await readFile(join(connectedServiceAuth!.env.CODEX_HOME, 'auth.json'), 'utf8'));
-    expect(auth.access_token).toBe('eligible-access');
   });
 
-  it('keeps the real group switch coordinator bound when default auto fallback handles spawn preflight refresh failure', async () => {
+  it('keeps spawn preflight refresh failure out of the real group switch coordinator', async () => {
     const baseDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-test-'));
     const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-server-test-'));
     const processEnv = await createIsolatedClaudeSourceEnv();
@@ -1678,7 +1829,7 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
       },
     }));
 
-    const connectedServiceAuth = await resolveConnectedServiceAuthForSpawn({
+    await expect(resolveConnectedServiceAuthForSpawn({
       agentId: 'claude',
       connectedServicesBindingsRaw: {
         v: 1,
@@ -1703,30 +1854,18 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
       credentialRefreshService: {
         refreshConnectedServiceCredentialForSpawnPreflight,
       },
-    });
+    })).rejects.toMatchObject({
+      name: 'ConnectedServiceSpawnCredentialRefreshError',
+      kind: 'reconnect_required',
+      serviceId: 'claude-subscription',
+      profileId: 'primary',
+    } satisfies Partial<ConnectedServiceSpawnCredentialRefreshError>);
 
-    expect(updateConnectedServiceAuthGroupRuntimeState).toHaveBeenCalledWith(expect.objectContaining({
-      serviceId: 'claude-subscription',
-      groupId: 'main',
-    }));
-    expect(updateConnectedServiceAuthGroupActiveProfile).toHaveBeenCalledWith(expect.objectContaining({
-      serviceId: 'claude-subscription',
-      groupId: 'main',
-      activeProfileId: 'backup',
-    }));
-    expect(connectedServiceAuth?.env.CLAUDE_CODE_SETUP_TOKEN).toBeUndefined();
-    expect(connectedServiceAuth?.env.CLAUDE_CONFIG_DIR).toBeTypeOf('string');
-    const credential = await readClaudeCodeNativeCredential(connectedServiceAuth!.env.CLAUDE_CONFIG_DIR!);
-    expect(credential).toMatchObject({
-      claudeAiOauth: {
-        accessToken: 'backup-access',
-        refreshToken: 'backup-refresh',
-        scopes: expect.arrayContaining(['user:inference', 'user:profile', 'user:sessions:claude_code']),
-      },
-    });
+    expect(updateConnectedServiceAuthGroupRuntimeState).not.toHaveBeenCalled();
+    expect(updateConnectedServiceAuthGroupActiveProfile).not.toHaveBeenCalled();
   });
 
-  it('continues group fallback when the first switched Claude profile cannot materialize native auth', async () => {
+  it('does not continue group fallback from spawn preflight refresh failure into materialization', async () => {
     const baseDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-test-'));
     const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-server-test-'));
     const processEnv = await createIsolatedClaudeSourceEnv();
@@ -1947,7 +2086,7 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
       };
     });
 
-    const connectedServiceAuth = await resolveConnectedServiceAuthForSpawn({
+    await expect(resolveConnectedServiceAuthForSpawn({
       agentId: 'claude',
       connectedServicesBindingsRaw: {
         v: 1,
@@ -1972,45 +2111,22 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
       credentialRefreshService: {
         refreshConnectedServiceCredentialForSpawnPreflight,
       },
-    });
+    })).rejects.toMatchObject({
+      name: 'ConnectedServiceSpawnCredentialRefreshError',
+      kind: 'reconnect_required',
+      serviceId: 'claude-subscription',
+      profileId: 'primary',
+    } satisfies Partial<ConnectedServiceSpawnCredentialRefreshError>);
 
-    expect(updateConnectedServiceAuthGroupActiveProfile).toHaveBeenNthCalledWith(1, expect.objectContaining({
-      serviceId: 'claude-subscription',
-      groupId: 'main',
-      activeProfileId: 'narrow',
-    }));
-    expect(updateConnectedServiceAuthGroupActiveProfile).toHaveBeenNthCalledWith(2, expect.objectContaining({
-      serviceId: 'claude-subscription',
-      groupId: 'main',
-      activeProfileId: 'healthy',
-    }));
-    expect(updateConnectedServiceAuthGroupRuntimeState).toHaveBeenCalledWith(expect.objectContaining({
-      serviceId: 'claude-subscription',
-      groupId: 'main',
-      memberStates: [expect.objectContaining({ profileId: 'narrow' })],
-    }));
-    expect(updateConnectedServiceCredentialHealth).toHaveBeenCalledWith(expect.objectContaining({
+    expect(updateConnectedServiceAuthGroupActiveProfile).not.toHaveBeenCalled();
+    expect(updateConnectedServiceAuthGroupRuntimeState).not.toHaveBeenCalled();
+    expect(updateConnectedServiceCredentialHealth).not.toHaveBeenCalledWith(expect.objectContaining({
       serviceId: 'claude-subscription',
       profileId: 'narrow',
-      health: expect.objectContaining({
-        status: 'needs_reauth',
-        reconnectRequired: true,
-        providerErrorCode: 'claude_subscription_missing_claude_code_scope',
-      }),
     }));
-    expect(connectedServiceAuth?.env.CLAUDE_CODE_SETUP_TOKEN).toBeUndefined();
-    expect(connectedServiceAuth?.env.CLAUDE_CONFIG_DIR).toBeTypeOf('string');
-    const credential = await readClaudeCodeNativeCredential(connectedServiceAuth!.env.CLAUDE_CONFIG_DIR!);
-    expect(credential).toMatchObject({
-      claudeAiOauth: {
-        accessToken: 'healthy-access',
-        refreshToken: 'healthy-refresh',
-        scopes: expect.arrayContaining(['user:inference', 'user:profile', 'user:sessions:claude_code']),
-      },
-    });
   });
 
-  it('continues materialization-failure group fallback through multiple unusable Claude profiles', async () => {
+  it('does not continue materialization-failure group fallback through unusable Claude profiles', async () => {
     const baseDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-test-'));
     const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-server-test-'));
     const processEnv = await createIsolatedClaudeSourceEnv();
@@ -2085,15 +2201,6 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
       ['healthy', seal(healthyRecord)],
     ]);
 
-    const activeProfiles = ['narrow', 'healthy'];
-    const switchAfterClassifiedFailure = vi.fn(async () => {
-      const next = activeProfiles.shift();
-      return {
-        status: next ? 'switched' as const : 'no_candidate' as const,
-        activeProfileId: next ?? null,
-        generation: next === 'narrow' ? 8 : 9,
-      };
-    });
     const updateConnectedServiceCredentialHealth = vi.fn(async () => {});
     const api = {
       getConnectedServiceAuthGroup: vi.fn(async () => ({
@@ -2169,7 +2276,7 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
       }),
     } as unknown as ApiClient;
 
-    const connectedServiceAuth = await resolveConnectedServiceAuthForSpawn({
+    await expect(resolveConnectedServiceAuthForSpawn({
       agentId: 'claude',
       connectedServicesBindingsRaw: {
         v: 1,
@@ -2191,23 +2298,13 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
       processEnv,
       sessionId: 'session-1',
       authGroupSwitchCoordinator: {
-        switchAfterClassifiedFailure,
         switchBeforeTurn: vi.fn(async () => ({ status: 'no_candidate', activeProfileId: null })),
       },
-    });
+    })).rejects.toMatchObject({
+      name: 'ConnectedServiceSpawnMaterializationError',
+      agentId: 'claude',
+    } satisfies Partial<ConnectedServiceSpawnMaterializationError>);
 
-    expect(switchAfterClassifiedFailure).toHaveBeenNthCalledWith(1, expect.objectContaining({
-      serviceId: 'claude-subscription',
-      groupId: 'main',
-      reason: 'refresh_failed',
-      observedProfileId: 'primary',
-    }));
-    expect(switchAfterClassifiedFailure).toHaveBeenNthCalledWith(2, expect.objectContaining({
-      serviceId: 'claude-subscription',
-      groupId: 'main',
-      reason: 'refresh_failed',
-      observedProfileId: 'narrow',
-    }));
     expect(updateConnectedServiceCredentialHealth).toHaveBeenCalledWith(expect.objectContaining({
       serviceId: 'claude-subscription',
       profileId: 'primary',
@@ -2216,25 +2313,13 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
         providerErrorCode: 'claude_subscription_missing_claude_code_scope',
       }),
     }));
-    expect(updateConnectedServiceCredentialHealth).toHaveBeenCalledWith(expect.objectContaining({
+    expect(updateConnectedServiceCredentialHealth).not.toHaveBeenCalledWith(expect.objectContaining({
       serviceId: 'claude-subscription',
       profileId: 'narrow',
-      health: expect.objectContaining({
-        status: 'needs_reauth',
-        providerErrorCode: 'claude_subscription_missing_claude_code_scope',
-      }),
     }));
-    const credential = await readClaudeCodeNativeCredential(connectedServiceAuth!.env.CLAUDE_CONFIG_DIR!);
-    expect(credential).toMatchObject({
-      claudeAiOauth: {
-        accessToken: 'healthy-access',
-        refreshToken: 'healthy-refresh',
-        scopes: expect.arrayContaining(['user:inference', 'user:profile', 'user:sessions:claude_code']),
-      },
-    });
   });
 
-  it('switches a Claude group when the active middle-priority member has a permanent preflight refresh failure', async () => {
+  it('fails closed when the active middle-priority Claude member has a permanent preflight refresh failure', async () => {
     const baseDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-test-'));
     const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-server-test-'));
     const processEnv = await createIsolatedClaudeSourceEnv();
@@ -2402,7 +2487,7 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
       },
     }));
 
-    const connectedServiceAuth = await resolveConnectedServiceAuthForSpawn({
+    await expect(resolveConnectedServiceAuthForSpawn({
       agentId: 'claude',
       connectedServicesBindingsRaw: {
         v: 1,
@@ -2427,27 +2512,15 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
       credentialRefreshService: {
         refreshConnectedServiceCredentialForSpawnPreflight,
       },
-    });
+    })).rejects.toMatchObject({
+      name: 'ConnectedServiceSpawnCredentialRefreshError',
+      kind: 'reconnect_required',
+      serviceId: 'claude-subscription',
+      profileId: 'leeroy',
+    } satisfies Partial<ConnectedServiceSpawnCredentialRefreshError>);
 
-    expect(updateConnectedServiceAuthGroupRuntimeState).toHaveBeenCalledWith(expect.objectContaining({
-      serviceId: 'claude-subscription',
-      groupId: 'claude',
-    }));
-    expect(updateConnectedServiceAuthGroupActiveProfile).toHaveBeenCalledWith(expect.objectContaining({
-      serviceId: 'claude-subscription',
-      groupId: 'claude',
-      activeProfileId: 'batiplus',
-    }));
-    expect(connectedServiceAuth?.env.CLAUDE_CODE_SETUP_TOKEN).toBeUndefined();
-    expect(connectedServiceAuth?.env.CLAUDE_CONFIG_DIR).toBeTypeOf('string');
-    const credential = await readClaudeCodeNativeCredential(connectedServiceAuth!.env.CLAUDE_CONFIG_DIR!);
-    expect(credential).toMatchObject({
-      claudeAiOauth: {
-        accessToken: 'batiplus-access',
-        refreshToken: 'batiplus-refresh',
-        scopes: expect.arrayContaining(['user:inference', 'user:profile', 'user:sessions:claude_code']),
-      },
-    });
+    expect(updateConnectedServiceAuthGroupRuntimeState).not.toHaveBeenCalled();
+    expect(updateConnectedServiceAuthGroupActiveProfile).not.toHaveBeenCalled();
   });
 
   it('fetches, decrypts, and materializes auth for a spawn', async () => {
@@ -3595,9 +3668,9 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
     expect(credential).toMatchObject({
       claudeAiOauth: {
         accessToken: 'primary-access',
-        refreshToken: 'primary-refresh',
       },
     });
+    expect(credential?.claudeAiOauth).not.toHaveProperty('refreshToken');
   });
 
   it('allows spawn-time soft-threshold group switching from source-backed provider account usage without runtime quota snapshots', async () => {
@@ -3800,9 +3873,9 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
     expect(credential).toMatchObject({
       claudeAiOauth: {
         accessToken: 'backup-access',
-        refreshToken: 'backup-refresh',
       },
     });
+    expect(credential?.claudeAiOauth).not.toHaveProperty('refreshToken');
   });
 
   it('performs no pre-spawn group switch when no switch coordinator is injected (RD-SW-4: switches only go through the coordinator FSM)', async () => {
@@ -3950,5 +4023,71 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
     });
     const auth = JSON.parse(await readFile(join(connectedServiceAuth!.env.CODEX_HOME, 'auth.json'), 'utf8'));
     expect(auth.access_token).toBe('primary-access');
+  });
+});
+
+describe('persistMaterializationFailureCredentialHealthForSpawn', () => {
+  it('does not latch needs_reauth for a non-auth blocking materialization diagnostic', async () => {
+    const updateConnectedServiceCredentialHealth = vi.fn(async () => {});
+    const api = { updateConnectedServiceCredentialHealth } as unknown as ApiClient;
+    const diagnostic: ConnectedServicesMaterializationDiagnostic = {
+      // A blocking, NON-auth failure (e.g. shared-state link unavailable): no credentialRefreshFailure.
+      code: 'claude_shared_state_link_unavailable',
+      providerId: 'claude',
+      severity: 'blocking',
+      serviceId: 'claude-subscription',
+      reason: 'shared_state_link_failed',
+    };
+
+    await persistMaterializationFailureCredentialHealthForSpawn({
+      api,
+      serviceId: 'claude-subscription',
+      profileId: 'primary',
+      diagnostic,
+      now: 1_000,
+    });
+
+    expect(updateConnectedServiceCredentialHealth).toHaveBeenCalledTimes(1);
+    const written = (updateConnectedServiceCredentialHealth.mock.calls[0] as unknown as [
+      { serviceId: string; profileId: string; health: { status: string; reconnectRequired: boolean; lastRefreshFailureKind?: string; providerHttpStatus?: number } },
+    ])[0];
+    expect(written.serviceId).toBe('claude-subscription');
+    expect(written.profileId).toBe('primary');
+    expect(written.health.status).not.toBe('needs_reauth');
+    expect(written.health.reconnectRequired).toBe(false);
+    expect(written.health.providerHttpStatus).toBeUndefined();
+  });
+
+  it('latches needs_reauth only for a genuine auth (provider_403) materialization diagnostic', async () => {
+    const updateConnectedServiceCredentialHealth = vi.fn(async () => {});
+    const api = { updateConnectedServiceCredentialHealth } as unknown as ApiClient;
+    const diagnostic: ConnectedServicesMaterializationDiagnostic = {
+      code: 'claude_subscription_missing_claude_code_scope',
+      providerId: 'claude',
+      severity: 'blocking',
+      serviceId: 'claude-subscription',
+      reason: 'missing_required_scope',
+      credentialRefreshFailure: {
+        category: 'provider_403',
+        providerStatus: 403,
+        providerErrorCode: 'claude_subscription_missing_claude_code_scope',
+      },
+    };
+
+    await persistMaterializationFailureCredentialHealthForSpawn({
+      api,
+      serviceId: 'claude-subscription',
+      profileId: 'primary',
+      diagnostic,
+      now: 1_000,
+    });
+
+    const written = (updateConnectedServiceCredentialHealth.mock.calls[0] as unknown as [
+      { health: { status: string; reconnectRequired: boolean; lastRefreshFailureKind?: string; providerHttpStatus?: number } },
+    ])[0];
+    expect(written.health.status).toBe('needs_reauth');
+    expect(written.health.reconnectRequired).toBe(true);
+    expect(written.health.lastRefreshFailureKind).toBe('provider_403');
+    expect(written.health.providerHttpStatus).toBe(403);
   });
 });

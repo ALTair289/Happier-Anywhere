@@ -219,6 +219,31 @@ describe('AccountBlock', () => {
         expect(screen.findByTestId('acct:reauth-badge')).toBeTruthy();
     });
 
+    it('lets credential health dominate quota display and polling when re-auth is required', async () => {
+        const screen = await renderAccountBlock({ status: 'needs_reauth' });
+
+        expect(quotaHookState.callSpy).not.toHaveBeenCalled();
+        expect(screen.findByTestId('acct:reauth-badge')).toBeTruthy();
+        expect(screen.findAllByTestId('acct:meter:weekly')).toHaveLength(0);
+        expect(screen.getTextContent()).not.toContain('connectedServices.account.usageCaption');
+        expect(screen.findByTestId('acct:avatar:capacity')).toBeNull();
+    });
+
+    it('renders usage for a healthy account whose status is empty/unknown (fails OPEN)', async () => {
+        // Regression: an absent status coerced to '' must NOT blank the capacity
+        // avatar. Only an EXPLICIT needs_reauth hides usage; '' is presumed
+        // healthy for display, so the snapshot hook mounts and quota renders.
+        const screen = await renderAccountBlock({
+            // Boundary cast: the runtime feed can carry an absent/coerced '' that
+            // the enum-typed prop does not model; the display gate must fail open.
+            status: '' as React.ComponentProps<typeof import('./AccountBlock')['AccountBlock']>['status'],
+        });
+
+        expect(quotaHookState.callSpy).toHaveBeenCalledTimes(1);
+        expect(screen.findByTestId('acct:avatar:capacity')).toBeTruthy();
+        expect(screen.findAllByTestId('acct:reauth-badge').length).toBe(0);
+    });
+
     it('shows a default-account star glyph (not a pill) for the default account', async () => {
         const screen = await renderAccountBlock({ isDefault: true });
         expect(screen.findByTestId('acct:default-star')).toBeTruthy();
@@ -363,6 +388,17 @@ describe('AccountBlock', () => {
 
         expect(screen.findByTestId('acct:usage-skeleton')).toBeTruthy();
         expect(screen.findAllByTestId('acct:meter:weekly').length).toBe(0);
+    });
+
+    it('shows a loading avatar (not an empty capacity ring) while the first snapshot loads', async () => {
+        // Regression: a slow load previously rendered EMPTY rings + no center label,
+        // which reads as "no usage". The avatar must surface a loading indicator and
+        // suppress the numeric capacity until a snapshot resolves.
+        quotaHookState.value = buildQuotaResult({ snapshot: null, loading: true });
+        const screen = await renderAccountBlock();
+
+        expect(screen.findByTestId('acct:avatar:loading')).toBeTruthy();
+        expect(screen.findAllByTestId('acct:avatar:capacity').length).toBe(0);
     });
 
     it('shows quota errors inline without hiding the account row', async () => {

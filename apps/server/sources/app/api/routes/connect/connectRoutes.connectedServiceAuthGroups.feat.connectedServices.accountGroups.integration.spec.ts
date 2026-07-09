@@ -228,7 +228,7 @@ describe("connectRoutes connected service auth groups (integration)", () => {
                 displayName: "Codex Main",
                 activeProfileId: "work",
                 generation: 0,
-                policy: expect.objectContaining({ v: 1, strategy: "priority", autoSwitch: false }),
+                policy: expect.objectContaining({ v: 1, strategy: "least_limited", autoSwitch: true }),
                 members: [
                     expect.objectContaining({ v: 1, serviceId: "openai-codex", profileId: "work", priority: 10, enabled: true }),
                     expect.objectContaining({ v: 1, serviceId: "openai-codex", profileId: "backup", priority: 20, enabled: true }),
@@ -586,7 +586,7 @@ describe("connectRoutes connected service auth groups (integration)", () => {
         });
     });
 
-    it("rejects active profile switches to persisted runtime-cooldown members", async () => {
+    it("rejects manual switches for quota reset waits but not auth action-required state", async () => {
         const user = await createAccount("pk-groups-active-profile-runtime-cooldown");
         await createConnectedProfile(user.id, "openai-codex", "work");
         await createConnectedProfile(user.id, "openai-codex", "backup");
@@ -644,28 +644,34 @@ describe("connectRoutes connected service auth groups (integration)", () => {
             },
         })).statusCode).toBe(200);
 
-        const authBlocked = await app.inject({
+        const authAllowed = await app.inject({
             method: "POST",
             url: "/v3/connect/openai-codex/groups/codex-main/active-profile",
             headers: authHeaders(user.id),
             payload: { profileId: "work", expectedGeneration: 0 },
         });
 
-        expect(authBlocked.statusCode).toBe(409);
-        expect(authBlocked.json()).toEqual({ error: "connect_group_profile_runtime_cooldown", resetAtMs: authInvalidUntilMs });
+        expect(authAllowed.statusCode).toBe(200);
+        expect(authAllowed.json().group).toEqual(expect.objectContaining({
+            activeProfileId: "work",
+            generation: 1,
+        }));
 
-        const patchBlocked = await app.inject({
+        const patchAllowed = await app.inject({
             method: "PATCH",
             url: "/v3/connect/openai-codex/groups/codex-main",
             headers: authHeaders(user.id),
-            payload: { activeProfileId: "work", expectedGeneration: 0 },
+            payload: { activeProfileId: "backup", expectedGeneration: 1 },
         });
 
-        expect(patchBlocked.statusCode).toBe(409);
-        expect(patchBlocked.json()).toEqual({ error: "connect_group_profile_runtime_cooldown", resetAtMs: authInvalidUntilMs });
+        expect(patchAllowed.statusCode).toBe(200);
+        expect(patchAllowed.json().group).toEqual(expect.objectContaining({
+            activeProfileId: "backup",
+            generation: 2,
+        }));
     });
 
-    it("rejects manual active profile switches to plan, validation, or reauth-blocked members", async () => {
+    it("allows manual active profile switches to action-required runtime states", async () => {
         const user = await createAccount("pk-groups-active-profile-new-runtime-blockers");
         await createConnectedProfile(user.id, "openai-codex", "work");
         await createConnectedProfile(user.id, "openai-codex", "plan-blocked");
@@ -716,34 +722,37 @@ describe("connectRoutes connected service auth groups (integration)", () => {
         const cases = [
             {
                 profileId: "plan-blocked",
-                response: { error: "connect_group_profile_runtime_cooldown", resetAtMs: planUnavailableUntilMs },
+                entrypoint: "active-profile",
             },
             {
                 profileId: "validation-blocked",
-                response: { error: "connect_group_profile_runtime_cooldown", resetAtMs: validationBlockedUntilMs },
+                entrypoint: "group-patch",
             },
             {
                 profileId: "reauth-blocked",
-                response: { error: "connect_group_profile_runtime_cooldown" },
+                entrypoint: "active-profile",
             },
         ] as const;
 
-        for (const entrypoint of ["active-profile", "group-patch"] as const) {
-            for (const testCase of cases) {
-                const blocked = await app.inject({
-                    method: entrypoint === "active-profile" ? "POST" : "PATCH",
-                    url: entrypoint === "active-profile"
-                        ? "/v3/connect/openai-codex/groups/codex-main/active-profile"
-                        : "/v3/connect/openai-codex/groups/codex-main",
-                    headers: authHeaders(user.id),
-                    payload: entrypoint === "active-profile"
-                        ? { profileId: testCase.profileId, expectedGeneration: 0 }
-                        : { activeProfileId: testCase.profileId, expectedGeneration: 0 },
-                });
+        let expectedGeneration = 0;
+        for (const testCase of cases) {
+            const switched = await app.inject({
+                method: testCase.entrypoint === "active-profile" ? "POST" : "PATCH",
+                url: testCase.entrypoint === "active-profile"
+                    ? "/v3/connect/openai-codex/groups/codex-main/active-profile"
+                    : "/v3/connect/openai-codex/groups/codex-main",
+                headers: authHeaders(user.id),
+                payload: testCase.entrypoint === "active-profile"
+                    ? { profileId: testCase.profileId, expectedGeneration }
+                    : { activeProfileId: testCase.profileId, expectedGeneration },
+            });
 
-                expect(blocked.statusCode).toBe(409);
-                expect(blocked.json()).toEqual(testCase.response);
-            }
+            expectedGeneration += 1;
+            expect(switched.statusCode).toBe(200);
+            expect(switched.json().group).toEqual(expect.objectContaining({
+                activeProfileId: testCase.profileId,
+                generation: expectedGeneration,
+            }));
         }
 
         const fetched = await app.inject({
@@ -754,8 +763,8 @@ describe("connectRoutes connected service auth groups (integration)", () => {
 
         expect(fetched.statusCode).toBe(200);
         expect(fetched.json().group).toEqual(expect.objectContaining({
-            activeProfileId: "work",
-            generation: 0,
+            activeProfileId: "reauth-blocked",
+            generation: 3,
         }));
     });
 
@@ -2127,6 +2136,55 @@ describe("connectRoutes connected service auth groups (integration)", () => {
         });
     });
 
+    it("defaults autoSwitch to true at create when the account-fallback feature is enabled", async () => {
+        const user = await createAccount("pk-groups-autoswitch-default-on");
+        await createConnectedProfile(user.id, "openai-codex", "work");
+        const app = await createReadyApp();
+
+        const res = await app.inject({
+            method: "POST",
+            url: "/v3/connect/openai-codex/groups",
+            headers: authHeaders(user.id),
+            payload: {
+                groupId: "codex-main",
+                members: [{ profileId: "work" }],
+                activeProfileId: "work",
+            },
+        });
+
+        expect(res.statusCode).toBe(200);
+        expect(res.json()).toEqual({
+            group: expect.objectContaining({
+                policy: expect.objectContaining({ autoSwitch: true }),
+            }),
+        });
+    });
+
+    it("keeps autoSwitch false at create when the account-fallback feature is disabled (fail-closed, no 400)", async () => {
+        harness.resetEnv({ HAPPIER_FEATURE_CONNECTED_SERVICES_ACCOUNT_FALLBACK__ENABLED: "0" });
+        const user = await createAccount("pk-groups-autoswitch-default-off");
+        await createConnectedProfile(user.id, "openai-codex", "work");
+        const app = await createReadyApp();
+
+        const res = await app.inject({
+            method: "POST",
+            url: "/v3/connect/openai-codex/groups",
+            headers: authHeaders(user.id),
+            payload: {
+                groupId: "codex-main",
+                members: [{ profileId: "work" }],
+                activeProfileId: "work",
+            },
+        });
+
+        expect(res.statusCode).toBe(200);
+        expect(res.json()).toEqual({
+            group: expect.objectContaining({
+                policy: expect.objectContaining({ autoSwitch: false }),
+            }),
+        });
+    });
+
     it("fails closed when no runtime supports connected-service fallback for the service", async () => {
         const user = await createAccount("pk-groups-runtime-fallback-unsupported-create");
         await createConnectedProfile(user.id, "github", "work");
@@ -2211,8 +2269,10 @@ describe("connectRoutes connected service auth groups (integration)", () => {
                     preTurnProbeMode: "always_for_group",
                     preTurnProbeOrder: "candidates_first_then_current",
                     recoveryMode: "wait_until_reset",
-                    recoveryPromptMode: "standard",
                     resumePromptMode: "standard",
+                    // Removed legacy no-op fields sent by an older client must be tolerated (stripped),
+                    // not rejected, so the rest of the patch still applies.
+                    recoveryPromptMode: "standard",
                     effectiveMeterStrategy: "weekly",
                     memberRuntimeStatePersistence: "server_state_json",
                 },
@@ -2229,13 +2289,13 @@ describe("connectRoutes connected service auth groups (integration)", () => {
                     preTurnProbeMode: "always_for_group",
                     preTurnProbeOrder: "candidates_first_then_current",
                     recoveryMode: "wait_until_reset",
-                    recoveryPromptMode: "standard",
                     resumePromptMode: "standard",
-                    effectiveMeterStrategy: "weekly",
-                    memberRuntimeStatePersistence: "server_state_json",
                 }),
             }),
         });
+        expect(patched.json().group.policy).not.toHaveProperty("recoveryPromptMode");
+        expect(patched.json().group.policy).not.toHaveProperty("effectiveMeterStrategy");
+        expect(patched.json().group.policy).not.toHaveProperty("memberRuntimeStatePersistence");
 
         const fetched = await app.inject({
             method: "GET",
@@ -2244,7 +2304,8 @@ describe("connectRoutes connected service auth groups (integration)", () => {
         });
 
         expect(fetched.statusCode).toBe(200);
-        expect(fetched.json().group.policy.effectiveMeterStrategy).toBe("weekly");
+        expect(fetched.json().group.policy.preTurnProbeMode).toBe("always_for_group");
+        expect(fetched.json().group.policy).not.toHaveProperty("effectiveMeterStrategy");
     });
 
     it("rejects malformed request policy", async () => {
@@ -2295,10 +2356,9 @@ describe("connectRoutes connected service auth groups (integration)", () => {
             group: expect.objectContaining({
                 policy: expect.objectContaining({
                     v: 1,
-                    strategy: "priority",
+                    strategy: "least_limited",
                     autoSwitch: false,
                     recoveryMode: "switch_or_wait",
-                    effectiveMeterStrategy: "most_constrained",
                 }),
             }),
         });

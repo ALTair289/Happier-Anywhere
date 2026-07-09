@@ -17,6 +17,12 @@ type StableRuntimeAuthFailureClassificationIdentity = Readonly<{
   sourceProviderAccountId: string | null;
   recoveryActionKind: string | null;
   resetsAtMsBucket: number | null;
+  /**
+   * CLOSE-19: a newly rotated token failing with an otherwise identical classification must form a
+   * DISTINCT report identity — the ingress dedupe window must never suppress the first failure of
+   * a new token before the fingerprint-aware recovery scheduler sees it.
+   */
+  failingAccessTokenFingerprint: string | null;
 }>;
 
 function readRecoveryActionKind(value: unknown): string | null {
@@ -52,6 +58,7 @@ export function readStableRuntimeAuthFailureClassificationIdentity(
     sourceProviderAccountId: parsed.sourceProviderAccountId ?? null,
     recoveryActionKind: readRecoveryActionKind(parsed.recoveryAction),
     resetsAtMsBucket,
+    failingAccessTokenFingerprint: parsed.failingAccessTokenFingerprint ?? null,
   };
 }
 

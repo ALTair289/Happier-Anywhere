@@ -34,9 +34,13 @@ const allowedDaemonProviderLiteralFiles: Readonly<Record<string, string>> = {
   'notifications/dispatchConnectedServiceAccountSwitchNotification.ts':
     'notification copy maps canonical service ids to product display names',
   'refresh/ConnectedServiceRefreshCoordinator.ts':
-    'Codex app-server ChatGPT bridge refresh is the central daemon lifecycle entrypoint for openai-codex',
+    'ONE generic bridge-refresh skeleton (refreshServiceTokensForBridge) dispatches to provider-owned '
+    + 'bridge hooks; the thin typed public adapters for openai-codex + claude-subscription name their '
+    + 'service ids and import their provider hook modules (CS-FIX-1)',
   'refresh/serviceRefreshers.ts':
-    'central OAuth refreshers own service-id to provider OAuth metadata mapping',
+    'central OAuth refreshers own the service-id → provider OAuth metadata mapping (convenience '
+    + 'wrappers); provider identity extraction lives behind the descriptor extractRefreshResponseIdentity '
+    + 'hook, not a service-id branch (CS-FIX-4)',
   'shared/oauthConfig.ts':
     'legacy OAuth config accessors intentionally wrap canonical service descriptors',
 };

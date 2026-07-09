@@ -42,7 +42,9 @@ async function createProfileBinding(params: Readonly<{
             token: Buffer.from(`token:${params.serviceId ?? "openai-codex"}:${params.profileId ?? "work"}`, "utf8"),
             metadata: {
                 kind: "oauth",
-                providerAccountId: params.providerAccountId ?? "acct_provider_subject",
+                ...(params.providerAccountId === null
+                    ? {}
+                    : { providerAccountId: params.providerAccountId ?? "acct_provider_subject" }),
             },
         },
     });
@@ -440,7 +442,82 @@ describe("providerAccountUsage storage", () => {
         })).rejects.toBeInstanceOf(ConnectedServiceUsageSourceOwnershipError);
     });
 
-    it("links provisional provider usage records to a valid connected-service group member without exact provider-account identity", async () => {
+    it("requires stable non-account source links to have an active credential owner proof", async () => {
+        const user = await db.account.create({ data: { publicKey: null, encryptionMode: "plain" }, select: { id: true } });
+        await createProfileBinding({
+            accountId: user.id,
+            serviceId: "openai-codex",
+            providerAccountId: null,
+        });
+        const recordKey = createProviderAccountUsageRecordKey({
+            providerId: "codex",
+            accountSubjectId: "sub_codex_team",
+            subjectKind: "subscription",
+        });
+        const snapshot = createUsageSnapshot({ fetchedAt: Date.now(), recordKey });
+
+        await upsertProviderAccountUsageRecord({
+            accountId: user.id,
+            recordId: snapshot.recordId,
+            recordKey: snapshot.recordKey,
+            payloadMode: "plain_json_v1",
+            snapshot,
+            status: "ok",
+            fetchedAt: snapshot.fetchedAtMs,
+            staleAfterMs: snapshot.staleAfterMs,
+        });
+
+        await expect(upsertConnectedServiceUsageSource({
+            accountId: user.id,
+            serviceId: "openai-codex",
+            profileId: "work",
+            providerAccountUsageRecordId: snapshot.recordId,
+            bindingKind: "profile",
+        })).rejects.toBeInstanceOf(ConnectedServiceUsageSourceOwnershipError);
+    });
+
+    it("rejects stable non-account source links because exact source ownership is unproven", async () => {
+        const user = await db.account.create({ data: { publicKey: null, encryptionMode: "plain" }, select: { id: true } });
+        await createProfileBinding({
+            accountId: user.id,
+            serviceId: "openai-codex",
+            providerAccountId: "acct_connected_profile",
+        });
+        const recordKey = createProviderAccountUsageRecordKey({
+            providerId: "codex",
+            accountSubjectId: "sub_codex_team",
+            subjectKind: "subscription",
+        });
+        const snapshot = createUsageSnapshot({ fetchedAt: Date.now(), recordKey, planLabel: "subscription-source" });
+
+        await upsertProviderAccountUsageRecord({
+            accountId: user.id,
+            recordId: snapshot.recordId,
+            recordKey: snapshot.recordKey,
+            payloadMode: "plain_json_v1",
+            snapshot,
+            status: "ok",
+            fetchedAt: snapshot.fetchedAtMs,
+            staleAfterMs: snapshot.staleAfterMs,
+        });
+
+        await expect(upsertConnectedServiceUsageSource({
+            accountId: user.id,
+            serviceId: "openai-codex",
+            profileId: "work",
+            providerAccountUsageRecordId: snapshot.recordId,
+            bindingKind: "profile",
+        })).rejects.toBeInstanceOf(ConnectedServiceUsageSourceOwnershipError);
+
+        expect(await db.connectedServiceUsageSource.count({ where: { accountId: user.id } })).toBe(0);
+        await expect(readConnectedServiceQuotaView({
+            accountId: user.id,
+            serviceId: "openai-codex",
+            profileId: "work",
+        })).resolves.toBeNull();
+    });
+
+    it("rejects provisional provider usage source links without exact provider-account identity", async () => {
         const user = await db.account.create({ data: { publicKey: null, encryptionMode: "plain" }, select: { id: true } });
         await createGroupMemberBinding({
             accountId: user.id,
@@ -475,24 +552,14 @@ describe("providerAccountUsage storage", () => {
             bindingKind: "group_member",
             groupId: "team",
             groupGeneration: 7,
-        })).resolves.toEqual(expect.objectContaining({
-            accountId: user.id,
-            serviceId: "openai-codex",
-            profileId: "work",
-            providerAccountUsageRecordId: snapshot.recordId,
-            bindingKind: "group_member",
-            groupId: "team",
-            groupGeneration: 7,
-        }));
+        })).rejects.toBeInstanceOf(ConnectedServiceUsageSourceOwnershipError);
 
+        expect(await db.connectedServiceUsageSource.count({ where: { accountId: user.id } })).toBe(0);
         await expect(readConnectedServiceQuotaView({
             accountId: user.id,
             serviceId: "openai-codex",
             profileId: "work",
-        })).resolves.toEqual(expect.objectContaining({
-            recordId: snapshot.recordId,
-            snapshot: expect.objectContaining({ planLabel: "provisional-source" }),
-        }));
+        })).resolves.toBeNull();
     });
 
     it("does not project a connected-service quota view after a linked credential is replaced with a different provider account", async () => {
@@ -705,6 +772,94 @@ describe("providerAccountUsage storage", () => {
         ]);
     });
 
+    it("keeps per-group source links independent when one profile belongs to multiple groups", async () => {
+        const user = await db.account.create({ data: { publicKey: null, encryptionMode: "plain" }, select: { id: true } });
+        // One shared credential for profile "work"...
+        await createProfileBinding({ accountId: user.id, serviceId: "openai-codex", profileId: "work" });
+        // ...that belongs to TWO auth groups.
+        for (const groupId of ["alpha", "beta"]) {
+            const group = await db.connectedServiceAuthGroup.create({
+                data: {
+                    accountId: user.id,
+                    vendor: "openai-codex",
+                    groupId,
+                    displayName: groupId,
+                    policyJson: "{}",
+                    activeProfileId: "work",
+                    generation: 3,
+                },
+                select: { id: true },
+            });
+            await db.connectedServiceAuthGroupMember.create({
+                data: {
+                    groupDbId: group.id,
+                    accountId: user.id,
+                    vendor: "openai-codex",
+                    groupId,
+                    profileId: "work",
+                    priority: 1,
+                    enabled: true,
+                },
+            });
+        }
+
+        const snapshot = createUsageSnapshot({ fetchedAt: Date.now(), planLabel: "multi-group" });
+        await writeProviderAccountUsageRecord({
+            accountId: user.id,
+            recordId: snapshot.recordId,
+            recordKey: snapshot.recordKey,
+            payloadMode: "plain_json_v1",
+            snapshot,
+            status: "ok",
+            fetchedAt: snapshot.fetchedAtMs,
+            staleAfterMs: snapshot.staleAfterMs,
+        });
+
+        await linkConnectedServiceUsageSource({
+            accountId: user.id,
+            providerAccountUsageRecordId: snapshot.recordId,
+            source: {
+                serviceId: "openai-codex",
+                profileId: "work",
+                bindingKind: "group_member",
+                groupId: "alpha",
+                groupGeneration: 3,
+            },
+        });
+        // The second group's link must NOT clobber the first: pre-fix this overwrote
+        // the alpha row because the upsert keyed by (accountId, serviceId, profileId).
+        await linkConnectedServiceUsageSource({
+            accountId: user.id,
+            providerAccountUsageRecordId: snapshot.recordId,
+            source: {
+                serviceId: "openai-codex",
+                profileId: "work",
+                bindingKind: "group_member",
+                groupId: "beta",
+                groupGeneration: 3,
+            },
+        });
+
+        const rows = await db.connectedServiceUsageSource.findMany({
+            where: { accountId: user.id, serviceId: "openai-codex", profileId: "work" },
+            orderBy: { groupId: "asc" },
+            select: { groupId: true, sourceKey: true, bindingKind: true, providerAccountUsageRecordId: true },
+        });
+
+        // Both group links persist independently, each keyed by its own sourceKey.
+        expect(rows.map((row) => row.groupId)).toEqual(["alpha", "beta"]);
+        expect(new Set(rows.map((row) => row.sourceKey)).size).toBe(2);
+        expect(rows.every((row) => row.bindingKind === "group_member")).toBe(true);
+        expect(rows.every((row) => row.providerAccountUsageRecordId === snapshot.recordId)).toBe(true);
+
+        // The reader still resolves the profile to its (shared) record.
+        await expect(readConnectedServiceQuotaView({
+            accountId: user.id,
+            serviceId: "openai-codex",
+            profileId: "work",
+        })).resolves.toEqual(expect.objectContaining({ recordId: snapshot.recordId }));
+    });
+
     it("keeps settings quota views readable when a group-member source has a stale generation but still matches the credential account", async () => {
         const user = await db.account.create({ data: { publicKey: null, encryptionMode: "plain" }, select: { id: true } });
         await createGroupMemberBinding({ accountId: user.id, profileId: "work", groupId: "team", generation: 7 });
@@ -781,6 +936,10 @@ describe("providerAccountUsage storage", () => {
                 recordKey: snapshot.recordKey,
             }),
             source: null,
+            sourceOutcome: {
+                status: "skipped",
+                reason: "binding_unavailable",
+            },
         });
 
         await expect(readProviderAccountUsageRecord({
@@ -794,6 +953,60 @@ describe("providerAccountUsage storage", () => {
             accountId: user.id,
             serviceId: "openai-codex",
             profileId: "missing-profile-binding",
+        })).resolves.toBeNull();
+
+        await createProfileBinding({
+            accountId: user.id,
+            profileId: "unproven-profile",
+            providerAccountId: "acct_connected_profile_subject",
+        });
+        const unprovenRecordKey = createProviderAccountUsageRecordKey({
+            accountSubjectId: "provisional:unproven-source-subject",
+            subjectKind: "unknown",
+        });
+        const unprovenSnapshot = createUsageSnapshot({
+            fetchedAt: Date.now(),
+            recordKey: unprovenRecordKey,
+            planLabel: "persist-on-unproven-source",
+        });
+
+        await expect(writeProviderAccountUsageRecordAndLinkConnectedServiceUsageSource({
+            accountId: user.id,
+            recordId: unprovenSnapshot.recordId,
+            recordKey: unprovenSnapshot.recordKey,
+            payloadMode: "plain_json_v1",
+            snapshot: unprovenSnapshot,
+            status: "ok",
+            fetchedAt: unprovenSnapshot.fetchedAtMs,
+            staleAfterMs: unprovenSnapshot.staleAfterMs,
+            source: {
+                serviceId: "openai-codex",
+                profileId: "unproven-profile",
+                bindingKind: "profile",
+            },
+        })).resolves.toEqual({
+            record: expect.objectContaining({
+                recordId: unprovenSnapshot.recordId,
+                recordKey: unprovenSnapshot.recordKey,
+            }),
+            source: null,
+            sourceOutcome: {
+                status: "skipped",
+                reason: "ownership_unproven",
+            },
+        });
+
+        await expect(readProviderAccountUsageRecord({
+            accountId: user.id,
+            recordId: unprovenSnapshot.recordId,
+        })).resolves.toEqual(expect.objectContaining({
+            recordId: unprovenSnapshot.recordId,
+            recordKey: unprovenSnapshot.recordKey,
+        }));
+        await expect(readConnectedServiceUsageSource({
+            accountId: user.id,
+            serviceId: "openai-codex",
+            profileId: "unproven-profile",
         })).resolves.toBeNull();
 
         await createProfileBinding({
@@ -888,6 +1101,96 @@ describe("providerAccountUsage storage", () => {
             accountId: user.id,
             recordId: snapshot.recordId,
         }))?.refreshRequestedAt).toEqual(refreshedAt);
+    });
+
+    it("does not stale-overwrite a newer record when a policy writer read an older version", async () => {
+        const user = await db.account.create({ data: { publicKey: null, encryptionMode: "plain" }, select: { id: true } });
+        const recordKey = createProviderAccountUsageRecordKey();
+        const oldSnapshot = createUsageSnapshot({ fetchedAt: 1_000, recordKey, planLabel: "old" });
+        const staleSnapshot = createUsageSnapshot({ fetchedAt: 2_000, recordKey, planLabel: "stale-racer" });
+        const newerSnapshot = createUsageSnapshot({ fetchedAt: 3_000, recordKey, planLabel: "newer-winner" });
+
+        await writeProviderAccountUsageRecord({
+            accountId: user.id,
+            recordId: oldSnapshot.recordId,
+            recordKey,
+            payloadMode: "plain_json_v1",
+            snapshot: oldSnapshot,
+            status: "ok",
+            fetchedAt: oldSnapshot.fetchedAtMs,
+            staleAfterMs: oldSnapshot.staleAfterMs,
+        });
+
+        const laggingRead = await db.providerAccountUsageRecord.findUnique({
+            where: {
+                accountId_recordId: {
+                    accountId: user.id,
+                    recordId: oldSnapshot.recordId,
+                },
+            },
+            select: {
+                accountId: true,
+                recordId: true,
+                recordKeyJson: true,
+                payloadMode: true,
+                status: true,
+                snapshot: true,
+                sealedPayload: true,
+                fetchedAt: true,
+                staleAfterMs: true,
+                refreshRequestedAt: true,
+                metadata: true,
+            },
+        });
+        expect(laggingRead).not.toBeNull();
+
+        await writeProviderAccountUsageRecord({
+            accountId: user.id,
+            recordId: newerSnapshot.recordId,
+            recordKey,
+            payloadMode: "plain_json_v1",
+            snapshot: newerSnapshot,
+            status: "ok",
+            fetchedAt: newerSnapshot.fetchedAtMs,
+            staleAfterMs: newerSnapshot.staleAfterMs,
+        });
+
+        let returnedLaggingRead = false;
+        const interleavedClient = {
+            providerAccountUsageRecord: {
+                findUnique: async (args: Parameters<typeof db.providerAccountUsageRecord.findUnique>[0]) => {
+                    if (!returnedLaggingRead) {
+                        returnedLaggingRead = true;
+                        return laggingRead;
+                    }
+                    return await db.providerAccountUsageRecord.findUnique(args);
+                },
+                create: db.providerAccountUsageRecord.create.bind(db.providerAccountUsageRecord),
+                updateMany: db.providerAccountUsageRecord.updateMany.bind(db.providerAccountUsageRecord),
+                upsert: db.providerAccountUsageRecord.upsert.bind(db.providerAccountUsageRecord),
+            },
+            // Boundary fixture: emulate one lagging Prisma read while all writes still hit the real test database.
+        } as unknown as Pick<typeof db, "providerAccountUsageRecord">;
+
+        await expect(writeProviderAccountUsageRecordWithPolicy({
+            accountId: user.id,
+            recordId: staleSnapshot.recordId,
+            recordKey,
+            payloadMode: "plain_json_v1",
+            snapshot: staleSnapshot,
+            status: "ok",
+            fetchedAt: staleSnapshot.fetchedAtMs,
+            staleAfterMs: staleSnapshot.staleAfterMs,
+            client: interleavedClient,
+        })).resolves.toBe("stale");
+
+        await expect(readProviderAccountUsageRecord({
+            accountId: user.id,
+            recordId: newerSnapshot.recordId,
+        })).resolves.toEqual(expect.objectContaining({
+            snapshot: expect.objectContaining({ planLabel: "newer-winner" }),
+            fetchedAt: newerSnapshot.fetchedAtMs,
+        }));
     });
 
     it("refreshes provider usage through the connected-service source relation and returns not_found when no source is linked", async () => {

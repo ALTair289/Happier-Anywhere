@@ -17,6 +17,7 @@ import type {
     TranscriptMessageAppendMutationV1,
 } from './sessionMutationTypes';
 import { resolveTranscriptMessageAppendMutationId } from './sessionMutationTypes';
+import { isAuthoritativeSessionMutation, isAuthoritativeSessionMutationKind } from './sessionMutationDurabilityPolicy';
 
 type SessionMutationOutboxFileV1 = Readonly<{
     v: 1;
@@ -35,6 +36,8 @@ export type SessionMutationDeadLetterEntry = Readonly<{
     dependencyMutationId?: string;
     diagnostic?: Record<string, unknown>;
     payloadSummary?: Record<string, unknown>;
+    queuedMutation?: QueuedSessionMutation;
+    recoveryAttemptedAt?: number;
 }>;
 
 type SessionMutationDeadLetterFileV1 = Readonly<{
@@ -76,7 +79,7 @@ function summarizePayload(value: unknown): Record<string, unknown> | undefined {
     const summary: Record<string, unknown> = {
         keys: Object.keys(value).sort(),
     };
-    for (const key of ['sessionId', 'mutationId', 'action', 'source', 'localId'] as const) {
+    for (const key of ['sessionId', 'mutationId', 'action', 'source', 'localId', 'turnId', 'provider', 'providerTurnId'] as const) {
         if (typeof value[key] === 'string') summary[key] = value[key];
     }
     return summary;
@@ -101,6 +104,8 @@ function createDeadLetterEntry(params: Readonly<{
     dependencyMutationId?: string;
     diagnostic?: Record<string, unknown>;
     payload?: unknown;
+    queuedMutation?: QueuedSessionMutation;
+    recoveryAttemptedAt?: number;
 }>): SessionMutationDeadLetterEntry {
     return {
         v: 1,
@@ -114,6 +119,8 @@ function createDeadLetterEntry(params: Readonly<{
         ...(params.dependencyMutationId ? { dependencyMutationId: params.dependencyMutationId } : {}),
         ...(params.diagnostic ? { diagnostic: params.diagnostic } : {}),
         ...(params.payload !== undefined ? { payloadSummary: summarizePayload(params.payload) } : {}),
+        ...(params.queuedMutation ? { queuedMutation: params.queuedMutation } : {}),
+        ...(typeof params.recoveryAttemptedAt === 'number' ? { recoveryAttemptedAt: params.recoveryAttemptedAt } : {}),
     };
 }
 
@@ -413,6 +420,138 @@ export async function appendSessionMutationDeadLetters(
     } satisfies SessionMutationDeadLetterFileV1);
 }
 
+function readRecoverableQueuedMutation(
+    entry: SessionMutationDeadLetterEntry,
+    sessionId: string,
+): QueuedSessionMutation | null {
+    if (!isAuthoritativeSessionMutationKind(entry.kind as QueuedSessionMutation['kind'])) return null;
+    if (typeof entry.recoveryAttemptedAt === 'number') return null;
+    const record = entry as unknown as Record<string, unknown>;
+    const rawQueuedMutation = record.queuedMutation ?? record.mutation ?? (
+        record.payload
+            ? {
+                kind: entry.kind,
+                mutationId: entry.mutationId,
+                payload: record.payload,
+                createdAt: entry.createdAt,
+                attempts: entry.attempts,
+                nextAttemptAt: 0,
+            }
+            : readQueuedMutationFromPayloadSummary(entry, sessionId)
+    );
+    if (!rawQueuedMutation) return null;
+    const parsed = parseQueuedSessionMutation(rawQueuedMutation, sessionId);
+    if (!parsed.ok || !isAuthoritativeSessionMutation(parsed.mutation)) return null;
+    return {
+        ...parsed.mutation,
+        nextAttemptAt: 0,
+    } as QueuedSessionMutation;
+}
+
+function readQueuedMutationFromPayloadSummary(
+    entry: SessionMutationDeadLetterEntry,
+    sessionId: string,
+): QueuedSessionMutation | null {
+    const summary = isRecord(entry.payloadSummary) ? entry.payloadSummary : null;
+    if (!summary) return null;
+    const recoveredSessionId = typeof summary.sessionId === 'string' && summary.sessionId.trim().length > 0
+        ? summary.sessionId
+        : sessionId;
+    const mutationId = typeof entry.mutationId === 'string' && entry.mutationId.trim().length > 0
+        ? entry.mutationId
+        : typeof summary.mutationId === 'string' && summary.mutationId.trim().length > 0
+            ? summary.mutationId
+            : null;
+    if (!mutationId) return null;
+    const createdAt = typeof entry.createdAt === 'number' && Number.isFinite(entry.createdAt)
+        ? entry.createdAt
+        : entry.deadLetteredAt;
+    const attempts = typeof entry.attempts === 'number' && Number.isFinite(entry.attempts)
+        ? Math.max(0, Math.trunc(entry.attempts))
+        : 0;
+
+    if (entry.kind === 'session_turn') {
+        if (typeof summary.action !== 'string' || summary.action.trim().length === 0) return null;
+        const turnId = typeof summary.turnId === 'string' && summary.turnId.trim().length > 0
+            ? summary.turnId
+            : null;
+        const action = turnId || summary.action === 'end_session'
+            ? summary.action
+            : summary.action === 'complete' || summary.action === 'fail' || summary.action === 'cancel'
+                ? 'end_session'
+                : null;
+        if (!action) return null;
+        return {
+            kind: 'session_turn',
+            mutationId,
+            payload: {
+                v: 1,
+                sessionId: recoveredSessionId,
+                mutationId,
+                action,
+                ...(turnId ? { turnId } : {}),
+                ...(typeof summary.provider === 'string' && summary.provider.trim().length > 0 ? { provider: summary.provider } : {}),
+                ...(typeof summary.providerTurnId === 'string' && summary.providerTurnId.trim().length > 0 ? { providerTurnId: summary.providerTurnId } : {}),
+                observedAt: createdAt,
+            },
+            createdAt,
+            attempts,
+            nextAttemptAt: 0,
+        } as QueuedSessionMutation;
+    }
+
+    if (entry.kind === 'session_end') {
+        return {
+            kind: 'session_end',
+            mutationId,
+            payload: {
+                v: 1,
+                sessionId: recoveredSessionId,
+                mutationId,
+                source: 'session_end',
+                observedAt: createdAt,
+            },
+            createdAt,
+            attempts,
+            nextAttemptAt: 0,
+        } as QueuedSessionMutation;
+    }
+
+    return null;
+}
+
+export async function recoverAuthoritativeSessionMutationDeadLetters(
+    sessionId: string,
+    limit = 100,
+): Promise<QueuedSessionMutation[]> {
+    const filePath = resolveSessionMutationDeadLetterPath(sessionId);
+    const existing = await loadDeadLetterFile(filePath);
+    if (existing.length === 0) return [];
+
+    const recovered: QueuedSessionMutation[] = [];
+    let didMark = false;
+    const now = Date.now();
+    const updated = existing.map((entry) => {
+        if (recovered.length >= limit) return entry;
+        const queuedMutation = readRecoverableQueuedMutation(entry, sessionId);
+        if (!queuedMutation) return entry;
+        recovered.push(queuedMutation);
+        didMark = true;
+        return {
+            ...entry,
+            recoveryAttemptedAt: now,
+        } satisfies SessionMutationDeadLetterEntry;
+    });
+
+    if (didMark) {
+        await writeJsonAtomic(filePath, {
+            v: 1,
+            entries: updated,
+        } satisfies SessionMutationDeadLetterFileV1);
+    }
+    return recovered;
+}
+
 export function createSessionMutationDeadLetterEntry(params: Readonly<{
     sessionId: string;
     mutation: QueuedSessionMutation;
@@ -430,6 +569,7 @@ export function createSessionMutationDeadLetterEntry(params: Readonly<{
         dependencyMutationId: params.dependencyMutationId,
         diagnostic: params.diagnostic,
         payload: params.mutation.payload,
+        ...(isAuthoritativeSessionMutation(params.mutation) ? { queuedMutation: params.mutation } : {}),
     });
 }
 

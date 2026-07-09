@@ -9,6 +9,7 @@ import type { PendingQueueReadOptions, PendingQueueReconcileWhenEmpty } from './
 import type { PendingMaterializationActiveTurnPolicy } from './pendingMaterializationActiveTurnPolicy';
 import type { ProviderOwnedUserMessageEchoClassifier } from './providerOwnedUserMessageEcho';
 import type { SessionRuntimeControls } from '@/rpc/handlers/sessionControls';
+import type { SessionRuntimeActivityPublisher } from '@/session/runtimeActivity/sessionRuntimeActivityPublisher';
 import type {
   SessionEncryptionContext,
   SessionStoredContentEncryptionMode,
@@ -86,6 +87,7 @@ export interface SessionClientPort {
     runtimeActivityExpiresAt: number | null;
     runtimeActivitySourceClass: SessionRuntimeActivitySourceClassV1 | null;
   }>): Promise<void> | void;
+  runtimeActivityPublisher?: SessionRuntimeActivityPublisher;
   upsertSessionSystemRecord?(request: SessionSystemRecordUpsertRequest): Promise<void>;
   fetchSessionSystemRecord?(params: Readonly<{
     namespace: SessionSystemRecordNamespace;
@@ -115,6 +117,9 @@ export interface SessionClientPort {
   blockPendingMessageDelivery?(params: Readonly<{
     localIds: readonly string[] | null | undefined;
     reason: PendingQueueDeliveryBlockedReason;
+  }>): Promise<boolean>;
+  retryPendingMessageDelivery?(params: Readonly<{
+    localId: string | null | undefined;
   }>): Promise<boolean>;
   getLastObservedMessageSeq?(): number;
   getCommittedUserMessageSeq?(localId: string): number | null;

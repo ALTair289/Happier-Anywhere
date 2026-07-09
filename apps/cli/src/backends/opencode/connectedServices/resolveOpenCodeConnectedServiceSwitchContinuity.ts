@@ -13,6 +13,14 @@ function supportsService(serviceId: string): boolean {
   return (AGENTS_CORE.opencode.connectedServices.supportedServiceIds as readonly string[]).includes(serviceId);
 }
 
+function hasBrokerSelectionIdentity(value: unknown): boolean {
+  return Boolean(value)
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && typeof (value as Record<string, unknown>).brokerSelectionIdentity === 'string'
+    && ((value as Record<string, unknown>).brokerSelectionIdentity as string).trim().length > 0;
+}
+
 /**
  * OpenCode session state lives in the GLOBAL shared managed-server storage, NOT in the
  * selection-scoped materialized home, so every switch shape (changed selection, identical
@@ -27,6 +35,9 @@ export async function resolveOpenCodeConnectedServiceSwitchContinuity(
 ): Promise<ConnectedServiceSwitchContinuityResult> {
   if (!supportsService(params.serviceId)) {
     return { mode: 'unsupported', reason: 'unsupported_service' };
+  }
+  if (hasBrokerSelectionIdentity(params.runtimeAuthSelection)) {
+    return { mode: 'hot_apply' };
   }
   return resolveConnectedServiceRestartContinuityAction({
     stateSharingDescriptor: openCodeConnectedServiceStateSharingDescriptor,

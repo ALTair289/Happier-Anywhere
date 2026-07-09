@@ -38,6 +38,7 @@ export function commitStreamedTranscriptSegmentSnapshot(params: {
     segment.lastDurableText = commitText;
     segment.lastCheckpointAtMs = Date.now();
     segment.lastCheckpointTextLen = commitTextLen;
+    segment.appendOnlySinceLastDurableSnapshot = true;
     segment.lastCommittedTextVersion = commitVersion;
     segment.lastCommittedState = state;
   };

@@ -159,6 +159,18 @@ export const ConnectedServiceDetailView = React.memo(function ConnectedServiceDe
 
   const poolsAvailable = accountGroupsEnabled && groupConfigurationSupported;
 
+  // Honor an initial `segment` deep-link param (e.g. the profile "Add to pool" action
+  // routes here with `segment: 'pools'`) exactly once, once pools are actually available.
+  const requestedSegment = asStringParam((params as Record<string, unknown>).segment).trim();
+  const didApplyRequestedSegmentRef = React.useRef(false);
+  React.useEffect(() => {
+    if (didApplyRequestedSegmentRef.current) return;
+    if (requestedSegment === 'pools' && poolsAvailable) {
+      didApplyRequestedSegmentRef.current = true;
+      setActiveSegment('pools');
+    }
+  }, [poolsAvailable, requestedSegment]);
+
   const ensureCredentials = () => {
     if (!auth.credentials) {
       throw new Error('Not authenticated');
@@ -618,6 +630,7 @@ export const ConnectedServiceDetailView = React.memo(function ConnectedServiceDe
             groupConfigurationSupported={groupConfigurationSupported}
             onOpenPool={handleOpenPool}
             onCreatePool={() => void authGroups.createPool()}
+            onRetryLoad={() => void authGroups.refresh()}
           />
         )}
       />

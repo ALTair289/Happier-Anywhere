@@ -87,6 +87,13 @@ export {
 const CONNECTED_SERVICE_PROFILE_LIST_CACHE_TTL_MS = 10_000;
 const ACCOUNT_ENCRYPTION_MODE_CACHE_TTL_MS = 10_000;
 const ProviderAccountUsageResponseSourcesSchema = z.array(ConnectedServiceUsageSourceV1Schema).optional();
+const ProviderAccountUsageWriteSourceOutcomeSchema = z.union([
+  z.object({ status: z.literal('linked') }).strict(),
+  z.object({
+    status: z.literal('skipped'),
+    reason: z.literal('binding_unavailable'),
+  }).strict(),
+]).optional();
 
 function parseProviderAccountUsageResponseSources(raw: Readonly<Record<string, unknown>>): ConnectedServiceUsageSourceV1[] | undefined {
   const parsed = ProviderAccountUsageResponseSourcesSchema.safeParse(raw.sources);
@@ -94,6 +101,64 @@ function parseProviderAccountUsageResponseSources(raw: Readonly<Record<string, u
     throw createConnectedServiceQuotaProtocolError('Invalid provider account usage snapshot response', parsed.error);
   }
   return parsed.data;
+}
+
+function logProviderAccountUsageWriteSourceOutcome(params: Readonly<{
+  raw: unknown;
+  source: ConnectedServiceUsageSourceV1 | undefined;
+  version: 'v2' | 'v3';
+}>): void {
+  if (!params.source) return;
+  if (!params.raw || typeof params.raw !== 'object' || Array.isArray(params.raw)) return;
+  const parsed = ProviderAccountUsageWriteSourceOutcomeSchema.safeParse((params.raw as Record<string, unknown>).source);
+  if (!parsed.success) {
+    logger.debug(`[API] Provider account usage source link outcome invalid (${params.version}) service=${params.source.serviceId} profile=${params.source.profileId}`);
+    return;
+  }
+  if (!parsed.data) return;
+  const suffix = parsed.data.status === 'skipped' ? ` reason=${parsed.data.reason}` : '';
+  logger.debug(`[API] Provider account usage source link ${parsed.data.status} (${params.version}) service=${params.source.serviceId} profile=${params.source.profileId}${suffix}`);
+}
+
+function readRegisteredConnectedServiceProfileId(data: unknown): string | null {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  const record = data as Record<string, unknown>;
+  for (const value of [record.profileId, record.registeredProfileId]) {
+    if (typeof value === 'string' && value.trim().length > 0) return value.trim();
+  }
+  const profile = record.profile;
+  if (profile && typeof profile === 'object' && !Array.isArray(profile)) {
+    const value = (profile as Record<string, unknown>).profileId;
+    if (typeof value === 'string' && value.trim().length > 0) return value.trim();
+  }
+  return null;
+}
+
+function logConnectedServiceCredentialRegistration(params: Readonly<{
+  serviceId: ConnectedServiceId;
+  routeProfileId: string;
+  registeredProfileId: string | null;
+  version: 'v2' | 'v3';
+}>): void {
+  const registeredProfileId = params.registeredProfileId ?? params.routeProfileId;
+  logger.debug(
+    params.version === 'v3'
+      ? `[API] Connected service credential registered (v3)`
+      : `[API] Connected service credential registered`,
+    {
+      serviceId: params.serviceId,
+      profileId: params.routeProfileId,
+      routeProfileId: params.routeProfileId,
+      registeredProfileId,
+    },
+  );
+  if (registeredProfileId !== params.routeProfileId) {
+    logger.warn('[API] Connected service credential registration profile mismatch', {
+      serviceId: params.serviceId,
+      routeProfileId: params.routeProfileId,
+      registeredProfileId,
+    });
+  }
 }
 
 type ConnectedServiceProfileListResult = Readonly<{
@@ -749,9 +814,11 @@ export class ApiClient {
       }
 
       this.invalidateConnectedServiceProfileListCache(params.serviceId);
-      logger.debug(`[API] Connected service credential registered`, {
+      logConnectedServiceCredentialRegistration({
         serviceId: params.serviceId,
-        profileId: params.profileId,
+        routeProfileId: params.profileId,
+        registeredProfileId: readRegisteredConnectedServiceProfileId(response.data),
+        version: 'v2',
       });
     } catch (error) {
       // Never log raw Axios errors: they can contain bearer tokens or provider secrets.
@@ -1205,9 +1272,11 @@ export class ApiClient {
       }
 
       this.invalidateConnectedServiceProfileListCache(params.serviceId);
-      logger.debug(`[API] Connected service credential registered (v3)`, {
+      logConnectedServiceCredentialRegistration({
         serviceId: params.serviceId,
-        profileId: params.profileId,
+        routeProfileId: params.profileId,
+        registeredProfileId: readRegisteredConnectedServiceProfileId(response.data),
+        version: 'v3',
       });
     } catch (error: unknown) {
       if (axios.isAxiosError(error) && error.response?.status === 409) {
@@ -1316,6 +1385,11 @@ export class ApiClient {
           message: `Provider account usage snapshot write failed with status ${response.status}`,
         });
       }
+      logProviderAccountUsageWriteSourceOutcome({
+        raw: response.data,
+        source,
+        version: 'v2',
+      });
     } catch (error) {
       logServerEndpointFailure({
         logger,
@@ -1535,6 +1609,11 @@ export class ApiClient {
           message: `Provider account usage snapshot write failed with status ${response.status}`,
         });
       }
+      logProviderAccountUsageWriteSourceOutcome({
+        raw: response.data,
+        source,
+        version: 'v3',
+      });
     } catch (error) {
       logServerEndpointFailure({
         logger,

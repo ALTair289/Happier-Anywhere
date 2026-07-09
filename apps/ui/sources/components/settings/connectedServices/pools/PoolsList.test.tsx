@@ -123,8 +123,8 @@ function buildGroup(overrides: RawGroup = {}): Record<string, unknown> {
 }
 
 const profiles = [
-  { profileId: 'work', label: 'Work', providerEmail: 'work@example.com' },
-  { profileId: 'home', label: 'Home', providerEmail: 'home@example.com' },
+  { profileId: 'work', label: 'Work', providerEmail: 'work@example.com', status: 'connected' },
+  { profileId: 'home', label: 'Home', providerEmail: 'home@example.com', status: 'connected' },
 ];
 
 function lowCapacitySnapshot(profileId: string) {
@@ -154,8 +154,10 @@ function lowCapacitySnapshot(profileId: string) {
 
 let onOpenPool: ReturnType<typeof vi.fn>;
 let onCreatePool: ReturnType<typeof vi.fn>;
+let onRetryLoad: ReturnType<typeof vi.fn>;
 
 type RenderOverrides = Readonly<{
+  profiles?: ReadonlyArray<(typeof profiles)[number]>;
   groups?: ReadonlyArray<Record<string, unknown>>;
   loadStatus?: ConnectedServiceAuthGroupsLoadStatus;
   quotasEnabled?: boolean;
@@ -167,7 +169,7 @@ function renderPools(overrides: RenderOverrides = {}) {
   return renderScreen(
     <PoolsList
       serviceId="anthropic"
-      profiles={profiles}
+      profiles={overrides.profiles ?? profiles}
       profileLabelsByKey={overrides.profileLabelsByKey ?? {}}
       groups={overrides.groups ?? [buildGroup()]}
       loadStatus={overrides.loadStatus}
@@ -175,6 +177,7 @@ function renderPools(overrides: RenderOverrides = {}) {
       groupConfigurationSupported={overrides.groupConfigurationSupported ?? true}
       onOpenPool={onOpenPool}
       onCreatePool={onCreatePool}
+      onRetryLoad={onRetryLoad}
     />,
   );
 }
@@ -185,6 +188,7 @@ describe('PoolsList', () => {
     currentCredentials = stableCredentials;
     onOpenPool = vi.fn();
     onCreatePool = vi.fn();
+    onRetryLoad = vi.fn();
     vi.clearAllMocks();
     fetchAccountEncryptionModeSpy.mockResolvedValue({ mode: 'e2ee', updatedAt: 0 });
     getConnectedServiceQuotaSnapshotPlainSpy.mockResolvedValue(null);
@@ -237,6 +241,27 @@ describe('PoolsList', () => {
     expect(tree.findAllByTestId('connected-services-pool-action:create').length).toBeGreaterThan(0);
   });
 
+  it('shows an explicit error + retry state (not the empty state) when the pool load fails with no data', async () => {
+    const tree = (await renderPools({ groups: [], loadStatus: 'error' })).tree;
+
+    // The failure must NOT masquerade as "No pools yet".
+    expect(tree.findAllByTestId('connected-services-pools:empty:title')).toHaveLength(0);
+    expect(tree.findByTestId('connected-services-pools:load-error')).toBeTruthy();
+
+    tree.pressByTestId('connected-services-pools:load-error:retry');
+    expect(onRetryLoad).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps stale pool rows and offers an inline retry when a refresh fails', async () => {
+    const tree = (await renderPools({ groups: [buildGroup()], loadStatus: 'error' })).tree;
+
+    // Stale data is retained.
+    expect(tree.findAllByTestId('connected-services-pool:pool-1').length).toBeGreaterThan(0);
+    // ...alongside an actionable retry affordance.
+    tree.pressByTestId('connected-services-pools:stale-error:retry');
+    expect(onRetryLoad).toHaveBeenCalledTimes(1);
+  });
+
   it('invokes onCreatePool when the create card is pressed', async () => {
     const tree = (await renderPools()).tree;
 
@@ -277,6 +302,50 @@ describe('PoolsList', () => {
     // rendered text of the count node rather than asserting its raw children.
     const warningCount = tree.findByTestId('connected-services-pool:pool-1:warnings:count');
     expect(flattenRenderedText(warningCount?.props.children)).toBe('1');
+  });
+
+  it('does not poll quota snapshots for auth-invalid pool members', async () => {
+    fetchAccountEncryptionModeSpy.mockResolvedValue({ mode: 'plain', updatedAt: 0 });
+    getConnectedServiceQuotaSnapshotPlainSpy.mockResolvedValue(lowCapacitySnapshot('work'));
+
+    await renderPools({
+      quotasEnabled: true,
+      groups: [buildGroup({
+        activeProfileId: 'work',
+        members: [{
+          profileId: 'work',
+          enabled: true,
+          priority: 100,
+          state: { authInvalidUntilMs: 1_800_000_040_000 },
+        }],
+      })],
+    });
+
+    await flushHookEffects({ turns: 4 });
+
+    expect(getConnectedServiceQuotaSnapshotPlainSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not poll or render quota rings for pool members whose credential needs reauth', async () => {
+    fetchAccountEncryptionModeSpy.mockResolvedValue({ mode: 'plain', updatedAt: 0 });
+    getConnectedServiceQuotaSnapshotPlainSpy.mockResolvedValue(lowCapacitySnapshot('work'));
+
+    const tree = (await renderPools({
+      quotasEnabled: true,
+      profiles: [
+        { profileId: 'work', label: 'Work', providerEmail: 'work@example.com', status: 'needs_reauth' },
+      ],
+      groups: [buildGroup({
+        activeProfileId: 'work',
+        members: [{ profileId: 'work', enabled: true, priority: 100, state: {} }],
+      })],
+    })).tree;
+
+    await flushHookEffects({ turns: 4 });
+
+    expect(getConnectedServiceQuotaSnapshotPlainSpy).not.toHaveBeenCalled();
+    expect(tree.findAllByTestId('connected-services-pool:pool-1:avatar:capacity')).toHaveLength(0);
+    expect(tree.findAllByTestId('connected-services-pool:pool-1:warnings:count').length).toBeGreaterThan(0);
   });
 
   it('does not surface a warning indicator while quotas are disabled', async () => {

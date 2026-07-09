@@ -122,10 +122,7 @@ describe('recordConnectedServiceRuntimeQuotaSnapshotForSession', () => {
       confidence: 'confirmed',
     });
     expect(accountUsage.persistence?.recordInBandSnapshot).toHaveBeenCalledOnce();
-    expect(accountUsage.publishRecordId).toHaveBeenCalledWith({
-      sessionId: 'sess_native',
-      recordId: recorded?.recordId,
-    });
+    expect(accountUsage.publishRecordId).not.toHaveBeenCalled();
     expect(runtimeQuotaSnapshots.getSnapshot({
       serviceId: 'openai-codex',
       groupId: 'main',
@@ -168,6 +165,7 @@ describe('recordConnectedServiceRuntimeQuotaSnapshotForSession', () => {
       runtimeQuotaSnapshots,
       sessionId: 'sess_connected',
       serviceId: 'openai-codex',
+      sourceProviderAccountId: 'acct_live_codex',
       snapshot,
     })).resolves.toEqual({ status: 'recorded', groupRuntimeStateRecorded: true, quotaStateRecorded: true });
 
@@ -196,6 +194,64 @@ describe('recordConnectedServiceRuntimeQuotaSnapshotForSession', () => {
       recordId: bySource?.recordId,
       snapshot: bySource,
     });
+  });
+
+  it('records connected runtime usage facts but strips source links when the source owner differs from the live account', async () => {
+    const accountUsage = createAccountUsageHarness();
+    const runtimeQuotaSnapshots = new ConnectedServiceAuthGroupRuntimeQuotaSnapshotStore();
+    const notifyAccountUsageChanged = vi.fn(async () => {});
+    const snapshot = createExhaustedSnapshot({
+      activeAccountId: 'acct_live_after_switch',
+    });
+
+    await expect(recordConnectedServiceRuntimeQuotaSnapshotForSession({
+      getChildren: () => [{
+        startedBy: 'daemon',
+        happySessionId: 'sess_connected',
+        pid: 123,
+        spawnOptions: {
+          directory: '/tmp/project',
+          connectedServices: {
+            v: 1,
+            bindingsByServiceId: {
+              'openai-codex': {
+                source: 'connected',
+                selection: 'group',
+                profileId: 'primary',
+                groupId: 'main',
+              },
+            },
+          },
+          environmentVariables: currentGroupEnv('primary'),
+        },
+      }],
+      accountUsageRecorder: accountUsage.accountUsageRecorder,
+      groupId: 'main',
+      groupGeneration: 7,
+      notifyAccountUsageChanged,
+      runtimeQuotaSnapshots,
+      sessionId: 'sess_connected',
+      serviceId: 'openai-codex',
+      sourceProviderAccountId: 'acct_connected_profile',
+      snapshot,
+    })).resolves.toEqual({ status: 'recorded', groupRuntimeStateRecorded: true, quotaStateRecorded: true });
+
+    expect(accountUsage.store.listSnapshots()).toEqual([
+      expect.objectContaining({
+        accountSubject: { kind: 'providerSubject', id: 'acct_live_after_switch' },
+      }),
+    ]);
+    expect(accountUsage.store.resolveBySource({
+      serviceId: 'openai-codex',
+      profileId: 'primary',
+      bindingKind: 'group_member',
+      groupId: 'main',
+      groupGeneration: 7,
+    })).toBeNull();
+    expect(accountUsage.persistence?.recordInBandSnapshot).toHaveBeenCalledWith(expect.objectContaining({
+      accountSubject: { kind: 'providerSubject', id: 'acct_live_after_switch' },
+    }), undefined);
+    expect(notifyAccountUsageChanged).not.toHaveBeenCalled();
   });
 
   it('records stale generation observations for display but does not let them drive connected-service policy', async () => {
@@ -233,6 +289,7 @@ describe('recordConnectedServiceRuntimeQuotaSnapshotForSession', () => {
       runtimeQuotaSnapshots,
       sessionId: 'sess_stale',
       serviceId: 'openai-codex',
+      sourceProviderAccountId: 'acct_stale_generation',
       snapshot,
     })).resolves.toEqual({ status: 'recorded', groupRuntimeStateRecorded: false, quotaStateRecorded: true });
 
@@ -287,6 +344,7 @@ describe('recordConnectedServiceRuntimeQuotaSnapshotForSession', () => {
       runtimeQuotaSnapshots,
       sessionId: 'sess_delayed',
       serviceId: 'openai-codex',
+      sourceProviderAccountId: 'acct_old_generation',
       snapshot,
     })).resolves.toEqual({ status: 'recorded', groupRuntimeStateRecorded: false, quotaStateRecorded: true });
 
@@ -393,6 +451,7 @@ describe('recordConnectedServiceRuntimeQuotaSnapshotForSession', () => {
       runtimeQuotaSnapshots,
       sessionId: 'sess_connected',
       serviceId: 'openai-codex',
+      sourceProviderAccountId: 'acct_shared_stable',
       snapshot: createSnapshot({ activeAccountId: 'acct_shared_stable' }),
     });
 

@@ -23,6 +23,8 @@ type SameAccountFanoutDiagnostic = Readonly<{
   reason: string;
   retryAfterMs?: number;
   sessionId?: string;
+  probeStatus?: RuntimeAccountIdentityProbeResult['status'];
+  probeReason?: string | null;
   expectedProviderAccountId?: string | null;
   actualProviderAccountId?: string | null;
   expectedProfileId?: string;
@@ -38,6 +40,8 @@ function recordSuppression(
   input: Readonly<{
     reason: string;
     sessionId?: string;
+    probeStatus?: RuntimeAccountIdentityProbeResult['status'];
+    probeReason?: string | null;
     expectedProviderAccountId?: string | null;
     actualProviderAccountId?: string | null;
     expectedProfileId?: string;
@@ -119,7 +123,9 @@ export async function reconcileIndexedSameAccountFanoutCandidates(input: Readonl
         reason: 'runtime_identity_probe_stale_expected_state_reconciled',
       });
     }
-    input.recordRuntimeAccountIdentity(match.entry);
+    if ('providerAccountId' in match.entry) {
+      input.recordRuntimeAccountIdentity(match.entry);
+    }
     reconciled.push(match.entry);
   }
   return reconciled;

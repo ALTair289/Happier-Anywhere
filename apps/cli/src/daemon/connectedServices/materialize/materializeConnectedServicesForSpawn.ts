@@ -41,7 +41,16 @@ export type ConnectedServiceResolvedSelection =
       policy: unknown;
     }>;
 
+type ConnectedServiceMaterializationCredentialRefresh = (
+  params: Readonly<{
+    serviceId: ConnectedServiceId;
+    profileId: string;
+    record: ConnectedServiceCredentialRecordV1;
+  }>,
+) => Promise<ConnectedServiceCredentialRecordV1 | null>;
+
 const activeMaterializationAttemptByRootDir = new Map<string, string>();
+const materializationWorkTailByRootDir = new Map<string, Promise<void>>();
 const materializationPromotionTailByRootDir = new Map<string, Promise<void>>();
 
 export class ConnectedServiceMaterializationSupersededError extends Error {
@@ -80,27 +89,79 @@ function assertActiveAttempt(params: Readonly<{
   throw new ConnectedServiceMaterializationSupersededError(params.rootDir);
 }
 
-async function runSerializedPromotion<T>(
+/**
+ * RR-3 backstop: every leaf inside a serialized segment is bounded (fetch/keychain budgets +
+ * the external-waits invariant guard), so a predecessor that never settles is pathological. A
+ * joiner therefore waits at most this long, then fails LOUDLY (typed error) instead of hanging
+ * every future materialization of that root forever — and the finally-cleanup drops the stuck
+ * tail from the map so the NEXT attempt starts a fresh queue (self-healing).
+ */
+const MATERIALIZATION_TAIL_WAIT_TIMEOUT_MS = 6 * 60_000;
+
+export class ConnectedServiceMaterializationTailStuckError extends Error {
+  constructor(rootDir: string) {
+    super(`connected_service_materialization_tail_stuck:${rootDir}`);
+    this.name = 'ConnectedServiceMaterializationTailStuckError';
+  }
+}
+
+async function awaitTailWithBackstop(previousTail: Promise<void>, rootDir: string): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  const backstop = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new ConnectedServiceMaterializationTailStuckError(rootDir)),
+      MATERIALIZATION_TAIL_WAIT_TIMEOUT_MS,
+    );
+    timer.unref?.();
+  });
+  try {
+    await Promise.race([previousTail.catch(() => {}), backstop]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Single owner of per-root tail serialization (used for both materialization work and staged
+ * promotion — previously two identical copies). Segments run strictly after the root's previous
+ * segment; a stuck predecessor is bounded by the RR-3 backstop above.
+ */
+async function runSerializedOnRootTail<T>(
+  tailByRootDir: Map<string, Promise<void>>,
   rootDir: string,
-  promote: () => Promise<T>,
+  work: () => Promise<T>,
 ): Promise<T> {
-  const previousTail = materializationPromotionTailByRootDir.get(rootDir) ?? Promise.resolve();
+  const previousTail = tailByRootDir.get(rootDir) ?? Promise.resolve();
   let releaseCurrent!: () => void;
   const currentTailSegment = new Promise<void>((resolve) => {
     releaseCurrent = resolve;
   });
   const currentTail = previousTail.catch(() => {}).then(() => currentTailSegment);
-  materializationPromotionTailByRootDir.set(rootDir, currentTail);
+  tailByRootDir.set(rootDir, currentTail);
 
-  await previousTail.catch(() => {});
   try {
-    return await promote();
+    await awaitTailWithBackstop(previousTail, rootDir);
+    return await work();
   } finally {
     releaseCurrent();
-    if (materializationPromotionTailByRootDir.get(rootDir) === currentTail) {
-      materializationPromotionTailByRootDir.delete(rootDir);
+    if (tailByRootDir.get(rootDir) === currentTail) {
+      tailByRootDir.delete(rootDir);
     }
   }
+}
+
+async function runSerializedPromotion<T>(
+  rootDir: string,
+  promote: () => Promise<T>,
+): Promise<T> {
+  return await runSerializedOnRootTail(materializationPromotionTailByRootDir, rootDir, promote);
+}
+
+export async function runSerializedMaterializationForRoot<T>(
+  rootDir: string,
+  materialize: () => Promise<T>,
+): Promise<T> {
+  return await runSerializedOnRootTail(materializationWorkTailByRootDir, rootDir, materialize);
 }
 
 function rewriteEnvRoot(
@@ -133,6 +194,58 @@ function rewritePathRoot(
       : value;
 }
 
+async function resolveFreshMaterializationRecords(params: Readonly<{
+  recordsByServiceId: ReadonlyMap<ConnectedServiceId, ConnectedServiceCredentialRecordV1>;
+  selectionsByServiceId?: ReadonlyMap<ConnectedServiceId, ConnectedServiceResolvedSelection>;
+  refreshCredentialForMaterialization?: ConnectedServiceMaterializationCredentialRefresh | null;
+}>): Promise<Readonly<{
+  recordsByServiceId: ReadonlyMap<ConnectedServiceId, ConnectedServiceCredentialRecordV1>;
+  selectionsByServiceId?: ReadonlyMap<ConnectedServiceId, ConnectedServiceResolvedSelection>;
+}>> {
+  if (!params.refreshCredentialForMaterialization) {
+    return {
+      recordsByServiceId: params.recordsByServiceId,
+      ...(params.selectionsByServiceId ? { selectionsByServiceId: params.selectionsByServiceId } : {}),
+    };
+  }
+
+  let recordsByServiceId: Map<ConnectedServiceId, ConnectedServiceCredentialRecordV1> | null = null;
+  let selectionsByServiceId: Map<ConnectedServiceId, ConnectedServiceResolvedSelection> | null = null;
+  for (const [serviceId, record] of params.recordsByServiceId) {
+    if (
+      record.kind !== 'oauth'
+      || typeof record.expiresAt !== 'number'
+      || !Number.isFinite(record.expiresAt)
+    ) {
+      continue;
+    }
+    const refreshed = await params.refreshCredentialForMaterialization({
+      serviceId,
+      profileId: record.profileId,
+      record,
+    });
+    if (!refreshed || refreshed === record) continue;
+    if (refreshed.serviceId !== serviceId || refreshed.profileId !== record.profileId) {
+      throw new Error(`Connected-service materialization refresh returned mismatched credential for ${serviceId}/${record.profileId}`);
+    }
+    recordsByServiceId ??= new Map(params.recordsByServiceId);
+    recordsByServiceId.set(serviceId, refreshed);
+
+    const selection = params.selectionsByServiceId?.get(serviceId);
+    if (selection) {
+      selectionsByServiceId ??= new Map(params.selectionsByServiceId);
+      selectionsByServiceId.set(serviceId, { ...selection, record: refreshed });
+    }
+  }
+
+  return {
+    recordsByServiceId: recordsByServiceId ?? params.recordsByServiceId,
+    ...(params.selectionsByServiceId
+      ? { selectionsByServiceId: selectionsByServiceId ?? params.selectionsByServiceId }
+      : {}),
+  };
+}
+
 export async function materializeConnectedServicesForSpawn(params: Readonly<{
   agentId: CatalogAgentId;
   materializationKey: string;
@@ -142,6 +255,7 @@ export async function materializeConnectedServicesForSpawn(params: Readonly<{
   sessionDirectory?: string | null;
   recordsByServiceId: ReadonlyMap<ConnectedServiceId, ConnectedServiceCredentialRecordV1>;
   selectionsByServiceId?: ReadonlyMap<ConnectedServiceId, ConnectedServiceResolvedSelection>;
+  refreshCredentialForMaterialization?: ConnectedServiceMaterializationCredentialRefresh | null;
   accountSettings?: AccountSettings | Readonly<Record<string, unknown>> | null;
   processEnv?: NodeJS.ProcessEnv;
   vendorResumeId?: string | null;
@@ -152,6 +266,12 @@ export async function materializeConnectedServicesForSpawn(params: Readonly<{
     agentId: params.agentId,
     materializationKey: params.materializationKey,
     materializationIdentity: params.connectedServiceMaterializationIdentityV1 ?? null,
+  });
+  return await runSerializedMaterializationForRoot(rootDir, async () => {
+  const freshMaterial = await resolveFreshMaterializationRecords({
+    recordsByServiceId: params.recordsByServiceId,
+    ...(params.selectionsByServiceId ? { selectionsByServiceId: params.selectionsByServiceId } : {}),
+    refreshCredentialForMaterialization: params.refreshCredentialForMaterialization ?? null,
   });
   // `rootDir` is `<baseDir>/<segment>/<agentId>`; recover the segment for the sibling attempt dir.
   const materializationSegment = basename(dirname(rootDir));
@@ -173,8 +293,8 @@ export async function materializeConnectedServicesForSpawn(params: Readonly<{
       activeServerDir: params.activeServerDir,
       rootDir: attemptRoot,
       sessionDirectory: params.sessionDirectory ?? null,
-      recordsByServiceId: params.recordsByServiceId,
-      selectionsByServiceId: params.selectionsByServiceId,
+      recordsByServiceId: freshMaterial.recordsByServiceId,
+      selectionsByServiceId: freshMaterial.selectionsByServiceId,
       accountSettings: params.accountSettings ?? null,
       processEnv: params.processEnv ?? process.env,
       vendorResumeId: params.vendorResumeId ?? null,
@@ -196,7 +316,7 @@ export async function materializeConnectedServicesForSpawn(params: Readonly<{
     && materialized.targetMaterializedRoot.trim().length > 0
     ? rewritePathRoot(materialized.targetMaterializedRoot, attemptRoot, rootDir)
     : null;
-  const serializedSelections = serializeConnectedServiceChildSelections(params.selectionsByServiceId);
+  const serializedSelections = serializeConnectedServiceChildSelections(freshMaterial.selectionsByServiceId);
   const serializedMaterializedEnvKeys = serializeConnectedServiceMaterializedEnvKeys(materializedEnv);
   const targetMaterializedRoot = explicitTargetMaterializedRoot ?? resolveConnectedServiceTargetMaterializedRoot({
     agentId: params.agentId,
@@ -243,4 +363,5 @@ export async function materializeConnectedServicesForSpawn(params: Readonly<{
   } finally {
     forgetActiveAttemptIfCurrent(rootDir, attemptId);
   }
+  });
 }

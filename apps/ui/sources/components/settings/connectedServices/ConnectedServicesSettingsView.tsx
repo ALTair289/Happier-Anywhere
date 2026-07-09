@@ -89,6 +89,14 @@ export const ConnectedServicesSettingsView = React.memo(function ConnectedServic
     useSettingMutable('connectedServicesProviderStateSharingSettingsV1');
   const [defaultAuthSettings, setDefaultAuthSettings] =
     useSettingMutable('connectedServicesDefaultAuthByAgentIdV1');
+  const [poolAdoptionDismissedByKey, setPoolAdoptionDismissedByKey] =
+    useSettingMutable('connectedServicesDefaultAuthPoolAdoptionDismissedByKey');
+  const dismissPoolAdoptionSuggestion = React.useCallback((key: string) => {
+    setPoolAdoptionDismissedByKey({
+      ...(poolAdoptionDismissedByKey ?? {}),
+      [key]: true,
+    });
+  }, [poolAdoptionDismissedByKey, setPoolAdoptionDismissedByKey]);
   const router = useRouter();
   const navigation = useNavigation();
   const connectedServicesEnabled = useFeatureEnabled('connectedServices');
@@ -304,6 +312,8 @@ export const ConnectedServicesSettingsView = React.memo(function ConnectedServic
                 pathname: '/settings/connected-services/profile',
                 params: { serviceId, profileId },
               })}
+              dismissedPoolAdoptionSuggestionKeys={poolAdoptionDismissedByKey}
+              onDismissPoolAdoptionSuggestion={dismissPoolAdoptionSuggestion}
             />
           );
         })}

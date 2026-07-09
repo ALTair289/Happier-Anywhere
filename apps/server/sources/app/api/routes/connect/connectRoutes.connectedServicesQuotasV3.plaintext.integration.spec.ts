@@ -88,13 +88,12 @@ describe("connectRoutes (connected services quotas v3) plaintext quota endpoints
         });
         expect(write.statusCode).toBe(200);
 
-        const source = await db.connectedServiceUsageSource.findUnique({
+        const source = await db.connectedServiceUsageSource.findFirst({
             where: {
-                accountId_serviceId_profileId: {
                     accountId: user.id,
                     serviceId: "openai-codex",
                     profileId: "work",
-                },
+                
             },
             select: { providerAccountUsageRecordId: true },
         });
@@ -259,13 +258,12 @@ describe("connectRoutes (connected services quotas v3) plaintext quota endpoints
         });
         expect(deleted.statusCode).toBe(200);
 
-        expect(await db.connectedServiceUsageSource.findUnique({
+        expect(await db.connectedServiceUsageSource.findFirst({
             where: {
-                accountId_serviceId_profileId: {
                     accountId: user.id,
                     serviceId: "openai-codex",
                     profileId: "work",
-                },
+                
             },
             select: { id: true },
         })).toBeNull();

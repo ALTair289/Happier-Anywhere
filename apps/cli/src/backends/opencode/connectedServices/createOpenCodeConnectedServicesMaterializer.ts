@@ -22,6 +22,7 @@ export function createOpenCodeConnectedServicesMaterializer(): ConnectedServices
       openai,
       claudeSubscription,
       anthropic,
+      ...(params.selectionsByServiceId ? { selectionsByServiceId: params.selectionsByServiceId } : {}),
     });
     return { env: materialized.env, cleanupOnFailure: params.cleanupRoot, cleanupOnExit: null };
   };

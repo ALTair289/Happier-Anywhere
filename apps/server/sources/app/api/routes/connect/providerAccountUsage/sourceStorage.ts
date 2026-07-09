@@ -253,11 +253,17 @@ function assertConnectedServiceBindingIdentityMatchesProviderUsageRecord(params:
     providerAccountSubjectKind: string;
     bindingIdentity: ConnectedServiceBindingIdentity;
 }>): void {
-    if (params.providerAccountSubjectKind !== "account") {
-        return;
-    }
     if (!params.bindingIdentity.providerAccountId) {
-        throw new ConnectedServiceUsageSourceOwnershipError("Connected-service credential does not expose provider account identity");
+        throw new ConnectedServiceUsageSourceOwnershipError(
+            "Connected-service credential does not expose provider account identity",
+            "unproven",
+        );
+    }
+    if (params.providerAccountSubjectKind !== "account") {
+        throw new ConnectedServiceUsageSourceOwnershipError(
+            "Provider account usage record does not expose a verifiable account subject",
+            "unproven",
+        );
     }
     if (params.bindingIdentity.providerAccountId !== params.providerAccountSubjectId) {
         throw new ConnectedServiceUsageSourceOwnershipError("Connected-service credential identity does not match provider account usage record");
@@ -309,12 +315,15 @@ export async function upsertConnectedServiceUsageSource(
         groupGeneration,
     });
 
+    // Source identity is the full sourceKey (serviceId + profileId + group identity),
+    // NOT the profile tuple: one profile can belong to multiple auth groups, and each
+    // group's link owns a distinct sourceKey. Keying the upsert by sourceKey lets those
+    // per-group links coexist instead of the second silently overwriting the first.
     const row = await client.connectedServiceUsageSource.upsert({
         where: {
-            accountId_serviceId_profileId: {
+            accountId_sourceKey: {
                 accountId: parsed.accountId,
-                serviceId: parsed.serviceId,
-                profileId: parsed.profileId,
+                sourceKey,
             },
         },
         create: {
@@ -328,7 +337,6 @@ export async function upsertConnectedServiceUsageSource(
             ...(groupGeneration !== undefined ? { groupGeneration } : {}),
         },
         update: {
-            sourceKey,
             providerAccountUsageRecordId: parsed.providerAccountUsageRecordId,
             bindingKind: parsed.bindingKind,
             groupId: parsed.groupId ?? null,
@@ -353,14 +361,20 @@ export async function readConnectedServiceUsageSource(params: Readonly<{
     serviceId: string;
     profileId: string;
 }>, client: ConnectedServiceUsageSourceClient = db): Promise<StoredConnectedServiceUsageSource | null> {
-    const row = await client.connectedServiceUsageSource.findUnique({
+    // A profile can now hold several coexisting links (one per group it belongs to,
+    // plus an optional profile-level link). They are identity-bound to the same
+    // credential, so any active one resolves to the same provider usage record; return
+    // the first active match under a deterministic order.
+    const rows = await client.connectedServiceUsageSource.findMany({
         where: {
-            accountId_serviceId_profileId: {
-                accountId: params.accountId,
-                serviceId: params.serviceId,
-                profileId: params.profileId,
-            },
+            accountId: params.accountId,
+            serviceId: params.serviceId,
+            profileId: params.profileId,
         },
+        orderBy: [
+            { bindingKind: "asc" },
+            { sourceKey: "asc" },
+        ],
         select: {
             accountId: true,
             serviceId: true,
@@ -372,9 +386,13 @@ export async function readConnectedServiceUsageSource(params: Readonly<{
             groupGeneration: true,
         },
     });
-    if (!row) return null;
-    const source = mapStoredConnectedServiceUsageSource(row);
-    return await isStoredConnectedServiceUsageSourceActive(source, client) ? source : null;
+    for (const row of rows) {
+        const source = mapStoredConnectedServiceUsageSource(row);
+        if (await isStoredConnectedServiceUsageSourceActive(source, client)) {
+            return source;
+        }
+    }
+    return null;
 }
 
 export async function listConnectedServiceUsageSourcesForProviderAccountUsageRecord(params: Readonly<{

@@ -1,10 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { join, win32 } from 'node:path';
 
-import type { ConnectedServiceCredentialRecordV1 } from '@happier-dev/protocol';
+import type { ConnectedServiceCredentialRecordV1, ConnectedServiceId } from '@happier-dev/protocol';
 
 import { configuration } from '@/configuration';
 import { writeJsonAtomic } from '@/utils/fs/writeJsonAtomic';
+import { brokerSelectionIdentityGroupSuffix } from '@/daemon/connectedServices/broker/brokerSelectionIdentityGroup';
+import type { ConnectedServiceResolvedSelection } from '@/daemon/connectedServices/materialize/materializeConnectedServicesForSpawn';
 import {
   requireConnectedServiceTokenCredentialRecord,
   requireConnectedServiceOauthCredentialRecordWithExpiry,
@@ -27,6 +29,8 @@ import {
   type PiBrokerProviderSelection,
   type PiRegisterProviderId,
 } from '@/backends/pi/brokerExtension';
+
+const PI_BROKER_CREDENTIAL_MAX_TTL_MS = 10_000;
 
 export function formatPiCodingAgentDirForChildEnv(
   agentDir: string,
@@ -87,6 +91,7 @@ function buildPiBrokeredOauthAuthEntry(
   registerProviderId: PiRegisterProviderId,
   record: ConnectedServiceOauthCredentialRecordWithExpiry,
 ): Record<string, unknown> {
+  const brokeredExpiresAt = Math.min(record.expiresAt, Date.now() + PI_BROKER_CREDENTIAL_MAX_TTL_MS);
   return {
     type: 'oauth',
     // NON-secret marker, NOT the provider refresh token. The broker recognises it and re-brokers.
@@ -94,7 +99,7 @@ function buildPiBrokeredOauthAuthEntry(
     // Short-lived access only. This lets Pi's synchronous getApiKey path satisfy the first request while
     // keeping provider refresh authority exclusively in the daemon.
     access: record.oauth.accessToken,
-    expires: record.expiresAt,
+    expires: brokeredExpiresAt,
     ...(record.oauth.providerAccountId ? { accountId: record.oauth.providerAccountId } : {}),
   };
 }
@@ -105,6 +110,8 @@ export async function materializePiConnectedServiceAuth(params: Readonly<{
   openai: ConnectedServiceCredentialRecordV1 | null;
   claudeSubscription: ConnectedServiceCredentialRecordV1 | null;
   anthropic: ConnectedServiceCredentialRecordV1 | null;
+  // Resolved selections carry the pool (group) identity that keys the mint per pool (R4-4).
+  selectionsByServiceId?: ReadonlyMap<ConnectedServiceId, ConnectedServiceResolvedSelection>;
 }>): Promise<Readonly<{ env: Record<string, string> }>> {
   const agentDir = join(params.rootDir, 'pi-agent-dir');
   const auth: Record<string, unknown> = {};
@@ -133,7 +140,8 @@ export async function materializePiConnectedServiceAuth(params: Readonly<{
       planType: null,
     };
     brokeredProviders.push(provider);
-    identityFragments.push(`${provider}:${record.profileId}:${record.oauth.providerAccountId ?? ''}`);
+    const groupSuffix = brokerSelectionIdentityGroupSuffix(params.selectionsByServiceId?.get(record.serviceId));
+    identityFragments.push(`${provider}:${record.profileId}:${record.oauth.providerAccountId ?? ''}${groupSuffix}`);
   };
 
   // OpenAI: Codex subscription is OAuth-only ⇒ always brokered. A platform API key is direct.

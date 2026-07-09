@@ -12,6 +12,8 @@ export type StreamedTranscriptSegmentRuntime = {
   textVersion: number;
   didWriteDurable: boolean;
   didWriteLive: boolean;
+  appendOnlySinceLastDurableSnapshot: boolean;
+  appendOnlySinceLastLiveSnapshot: boolean;
   lastDurableText: string;
   lastCheckpointAtMs: number;
   lastCheckpointTextLen: number;

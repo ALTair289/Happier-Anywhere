@@ -14,7 +14,8 @@ import {
 } from '@/sync/domains/connectedServices/connectedServiceQuotaGauge';
 import { deriveAccountCapacityPct } from '@/sync/domains/connectedServices/deriveAccountCapacityPct';
 import { type ResetCountdownDaysFormatter } from '@/sync/domains/connectedServices/formatResetCountdown';
-import type { ConnectedServiceId } from '@happier-dev/protocol';
+import { shouldHideQuotaForCredentialStatus } from '@/sync/domains/connectedServices/shouldHideQuotaForCredentialStatus';
+import { type ConnectedServiceId } from '@happier-dev/protocol';
 import { t } from '@/text';
 
 import { resolveAccountUsageRows } from './accountBlockModel';
@@ -77,6 +78,7 @@ const GAUGE_LABEL_FORMATTER: ConnectedServiceQuotaGaugeLabelFormatter = {
         t('connectedServices.quota.remainingWithReset', { percent, reset }),
     used: ({ used, limit }) => t('connectedServices.account.usedDetail', { used, limit }),
     durationNow: () => t('connectedServices.quota.duration.now'),
+    durationOutdated: () => t('connectedServices.quota.duration.outdated'),
     durationDaysHours: ({ days, hours }) => t('connectedServices.quota.duration.daysHours', { days, hours }),
     durationHoursMinutes: ({ hours, minutes }) =>
         t('connectedServices.quota.duration.hoursMinutes', { hours, minutes }),
@@ -148,7 +150,11 @@ function buildQuotaView(hook: UseConnectedServiceQuotaSnapshotResult): AccountBl
 const QuotaConnectedAccountBlock = React.memo(function QuotaConnectedAccountBlock(
     props: Readonly<SharedViewProps & { serviceId: ConnectedServiceId; profileId: string }>,
 ) {
-    const hook = useConnectedServiceQuotaSnapshot({ serviceId: props.serviceId, profileId: props.profileId });
+    const hook = useConnectedServiceQuotaSnapshot({
+        serviceId: props.serviceId,
+        profileId: props.profileId,
+        credentialHealthStatus: props.status,
+    });
     const quota = buildQuotaView(hook);
     return <AccountBlockView {...props} quota={quota} />;
 });
@@ -184,7 +190,10 @@ export const AccountBlock = React.memo(function AccountBlock(props: AccountBlock
         testID,
     };
 
-    if (!quotasEnabled) {
+    // Usage display fails OPEN: hide quota only for an EXPLICIT needs_reauth
+    // credential (shared with the snapshot hook). Absent/unknown status still
+    // shows usage so healthy accounts never blank their capacity avatar.
+    if (!quotasEnabled || shouldHideQuotaForCredentialStatus(props.status)) {
         return <AccountBlockView {...shared} quota={null} />;
     }
 

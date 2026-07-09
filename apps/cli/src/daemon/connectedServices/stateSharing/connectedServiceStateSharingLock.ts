@@ -7,14 +7,29 @@ export class ConnectedServiceStateSharingLockError extends Error {
   readonly code = 'state_sharing_lock_unavailable';
   readonly providerId: string | null;
   readonly destinationHome: string;
+  readonly owner: ConnectedServiceStateSharingLockOwnerDiagnostic | null;
 
-  constructor(params: Readonly<{ providerId?: string | null; destinationHome: string }>) {
+  constructor(params: Readonly<{
+    providerId?: string | null;
+    destinationHome: string;
+    owner?: ConnectedServiceStateSharingLockOwnerDiagnostic | null;
+  }>) {
     super(`Connected-service state sharing lock is unavailable for ${params.destinationHome}`);
     this.name = 'ConnectedServiceStateSharingLockError';
     this.providerId = params.providerId ?? null;
     this.destinationHome = params.destinationHome;
+    this.owner = params.owner ?? null;
   }
 }
+
+export type ConnectedServiceStateSharingLockOwnerDiagnostic = Readonly<{
+  pid: number | null;
+  providerId: string | null;
+  acquiredAt: string | null;
+  acquiredAtMs: number | null;
+  ageMs: number | null;
+  alive: boolean | null;
+}>;
 
 type LockOptions = Readonly<{
   providerId?: string | null;
@@ -38,12 +53,32 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
-async function readLockOwner(lockDir: string): Promise<Readonly<{ pid?: number; acquiredAt?: string }> | null> {
+async function readLockOwner(lockDir: string): Promise<Readonly<{ pid?: number; providerId?: string | null; acquiredAt?: string }> | null> {
   try {
-    return JSON.parse(await readFile(join(lockDir, 'owner.json'), 'utf8')) as Readonly<{ pid?: number; acquiredAt?: string }>;
+    return JSON.parse(await readFile(join(lockDir, 'owner.json'), 'utf8')) as Readonly<{ pid?: number; providerId?: string | null; acquiredAt?: string }>;
   } catch {
     return null;
   }
+}
+
+async function readLockOwnerDiagnostic(lockDir: string): Promise<ConnectedServiceStateSharingLockOwnerDiagnostic | null> {
+  const owner = await readLockOwner(lockDir);
+  if (!owner) return null;
+  const pid = typeof owner.pid === 'number' && Number.isSafeInteger(owner.pid) && owner.pid > 0
+    ? owner.pid
+    : null;
+  const acquiredAt = typeof owner.acquiredAt === 'string' ? owner.acquiredAt : null;
+  const acquiredAtMs = acquiredAt ? Date.parse(acquiredAt) : NaN;
+  return {
+    pid,
+    providerId: typeof owner.providerId === 'string' && owner.providerId.trim().length > 0
+      ? owner.providerId
+      : null,
+    acquiredAt,
+    acquiredAtMs: Number.isFinite(acquiredAtMs) ? acquiredAtMs : null,
+    ageMs: Number.isFinite(acquiredAtMs) ? Math.max(0, Date.now() - acquiredAtMs) : null,
+    alive: pid === null ? null : isProcessAlive(pid),
+  };
 }
 
 async function removeStaleFileLock(lockDir: string, staleLockTimeoutMs: number): Promise<boolean> {
@@ -84,6 +119,7 @@ async function acquireFileLock(destinationHome: string, options: LockOptions): P
         throw new ConnectedServiceStateSharingLockError({
           providerId: options.providerId ?? null,
           destinationHome,
+          owner: await readLockOwnerDiagnostic(lockDir),
         });
       }
       await sleep(retryDelayMs);

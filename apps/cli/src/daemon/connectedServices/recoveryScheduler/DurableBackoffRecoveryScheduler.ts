@@ -12,7 +12,7 @@ export type DurableRecoveryStore<TIntent> = Readonly<{
 
 export type DurableRecoveryOutcome<TIntent> =
   | Readonly<{ status: 'success'; intent?: TIntent }>
-  | Readonly<{ status: 'wait'; nextRetryAtMs?: number | null; lastError?: string | null; intent?: TIntent }>
+  | Readonly<{ status: 'wait'; nextRetryAtMs?: number | null; lastError?: string | null; intent?: TIntent; exhaustOnMaxAttempt?: boolean }>
   | Readonly<{ status: 'terminal'; lastError?: string | null; intent?: TIntent }>
   | Readonly<{ status: 'exhausted'; lastError?: string | null; intent?: TIntent }>
   // The recovery no longer applies (the condition it was armed for was superseded by other
@@ -438,7 +438,9 @@ export class DurableBackoffRecoveryScheduler<TIntent> {
       return { status: 'terminal' };
     }
 
-    const exhaustAfterOutcome = this.deps.exhaustOnMaxAttemptOutcome !== false;
+    const exhaustAfterOutcome = outcome.status === 'wait' && outcome.exhaustOnMaxAttempt === false
+      ? false
+      : this.deps.exhaustOnMaxAttemptOutcome !== false;
     // Honor an outcome-provided intent's attempt count: recover loops may roll the
     // markChecking increment back for outcomes that must not consume the attempt
     // budget (degraded local outages, durable group-exhausted waits). Exhaustion

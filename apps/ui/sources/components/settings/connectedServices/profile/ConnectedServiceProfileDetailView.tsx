@@ -347,7 +347,13 @@ export const ConnectedServiceProfileDetailView = React.memo(function ConnectedSe
   };
 
   const handleAddToPool = () => {
-    router.push({ pathname: '/settings/connected-services/[serviceId]', params: { serviceId } });
+    // Route straight to the provider's Pools segment (not the default Accounts tab)
+    // and carry the profile through so the pools surface lands where the account can
+    // actually be added, instead of dropping the user on a generic provider page.
+    router.push({
+      pathname: '/settings/connected-services/[serviceId]',
+      params: { serviceId, segment: 'pools', profileId },
+    });
   };
 
   // Header kebab actions reuse the canonical mutation flows (replace token,

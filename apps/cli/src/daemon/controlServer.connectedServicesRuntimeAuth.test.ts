@@ -7,6 +7,10 @@ import {
   deriveOpenCodeBrokerRefreshToken,
   resetOpenCodeBrokerLoadHandshakesForTests,
 } from '@/backends/opencode/brokerPlugin';
+import {
+  resetBrokerBridgeEffectiveSelectionsForTests,
+  updateBrokerBridgeEffectiveSelection,
+} from './connectedServices/broker/brokerBridgeEffectiveSelectionRegistry';
 import { createDaemonControlApp, startDaemonControlServer } from './controlServer';
 
 /** Scoped broker-refresh token for the master control token the bridge endpoints now require (F2). */
@@ -24,6 +28,66 @@ import { readRuntimeAuthFailureReportOutboxItems } from './connectedServices/run
 import type { ConnectedServiceRuntimeFailureClassification } from './connectedServices/runtimeAuth/types';
 
 describe('createDaemonControlApp connected-service runtime auth handling', () => {
+  it('dispatches manual auth group generation apply requests to the daemon FSM handler', async () => {
+    const handleConnectedServiceAuthGroupGenerationApply = vi.fn(async () => ({
+      ok: true,
+      appliedSessionCount: 1,
+      deferredSessionCount: 0,
+      skippedIdleSessionCount: 0,
+    }));
+    const app = createDaemonControlApp({
+      getChildren: () => [],
+      machineId: 'machine',
+      stopSession: async () => false,
+      spawnSession: async () => ({
+        type: 'error',
+        errorCode: SPAWN_SESSION_ERROR_CODES.UNEXPECTED,
+        errorMessage: 'unused',
+      }),
+      requestShutdown: () => {},
+      onHappySessionWebhook: () => {},
+      controlToken: 'token',
+      handleConnectedServiceAuthGroupGenerationApply,
+    } as Parameters<typeof createDaemonControlApp>[0] & {
+      handleConnectedServiceAuthGroupGenerationApply: typeof handleConnectedServiceAuthGroupGenerationApply;
+    });
+
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/connected-service-auth/group-generation/apply',
+        headers: { 'x-happier-daemon-token': 'token' },
+        payload: {
+          serviceId: 'claude-subscription',
+          groupId: 'claude',
+          activeProfileId: 'leeroy_bat',
+          generation: 222,
+          switchReason: 'manual',
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({
+        ok: true,
+        result: {
+          ok: true,
+          appliedSessionCount: 1,
+          deferredSessionCount: 0,
+          skippedIdleSessionCount: 0,
+        },
+      });
+      expect(handleConnectedServiceAuthGroupGenerationApply).toHaveBeenCalledWith({
+        serviceId: 'claude-subscription',
+        groupId: 'claude',
+        activeProfileId: 'leeroy_bat',
+        generation: 222,
+        switchReason: 'manual',
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
   it('dispatches manual session auth switches to the daemon handler', async () => {
     const handleSessionConnectedServiceAuthSwitch = vi.fn(async () => ({
       ok: true,
@@ -2298,6 +2362,7 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
       expect(response.json().result).not.toHaveProperty('refreshToken');
       expect(handleCodexChatGptAuthTokensRefresh).toHaveBeenCalledWith({
         sessionId: 'sess_1',
+        brokerSelectionIdentity: null,
         selection: {
           kind: 'group',
           serviceId: 'openai-codex',
@@ -2308,9 +2373,133 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
         },
         chatgptPlanType: 'plus',
         forceRefresh: false,
+        failingAccessTokenFingerprint: null,
       });
     } finally {
       await app.close();
+    }
+  });
+
+  it('returns 403 when the bridge handler rejects the session selection authorization', async () => {
+    const handleCodexChatGptAuthTokensRefresh = vi.fn(async () => {
+      throw new Error('connected_service_bridge_selection_not_authorized');
+    });
+    const app = createDaemonControlApp({
+      getChildren: () => [],
+      machineId: 'machine',
+      stopSession: async () => false,
+      spawnSession: async () => ({
+        type: 'error',
+        errorCode: SPAWN_SESSION_ERROR_CODES.UNEXPECTED,
+        errorMessage: 'unused',
+      }),
+      requestShutdown: () => {},
+      onHappySessionWebhook: () => {},
+      controlToken: 'token',
+      handleCodexChatGptAuthTokensRefresh,
+    });
+
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/connected-service-auth/openai-codex/chatgpt-auth-tokens/refresh',
+        headers: { 'x-happier-daemon-token': BROKER_SCOPED_TOKEN },
+        payload: {
+          sessionId: 'sess_1',
+          selection: { kind: 'profile', serviceId: 'openai-codex', profileId: 'other-profile' },
+          chatgptPlanType: 'plus',
+        },
+      });
+
+      expect(response.statusCode).toBe(403);
+      expect(response.json()).toEqual({
+        ok: false,
+        errorCode: 'connected_service_bridge_selection_not_authorized',
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('resolves the effective broker selection by selection identity before dispatching refresh handlers', async () => {
+    resetBrokerBridgeEffectiveSelectionsForTests();
+    const updated = updateBrokerBridgeEffectiveSelection({
+      selectionIdentity: 'opencode|connected|broker:1|openai-codex:acct-old:',
+      serviceId: 'openai-codex',
+      selection: {
+        kind: 'group',
+        serviceId: 'openai-codex',
+        groupId: 'main',
+        activeProfileId: 'profile-new',
+        fallbackProfileId: 'profile-old',
+        generation: 15,
+      },
+    });
+    const handleCodexChatGptAuthTokensRefresh = vi.fn(async () => ({
+      accessToken: 'fresh-access',
+      chatgptAccountId: 'acct_new',
+      chatgptPlanType: 'plus',
+    }));
+    const app = createDaemonControlApp({
+      getChildren: () => [],
+      machineId: 'machine',
+      stopSession: async () => false,
+      spawnSession: async () => ({
+        type: 'error',
+        errorCode: SPAWN_SESSION_ERROR_CODES.UNEXPECTED,
+        errorMessage: 'unused',
+      }),
+      requestShutdown: () => {},
+      onHappySessionWebhook: () => {},
+      controlToken: 'token',
+      handleCodexChatGptAuthTokensRefresh,
+    });
+
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/connected-service-auth/openai-codex/chatgpt-auth-tokens/refresh',
+        headers: { 'x-happier-daemon-token': BROKER_SCOPED_TOKEN },
+        payload: {
+          sessionId: 'opencode-broker:openai:1',
+          selectionIdentity: 'opencode|connected|broker:1|openai-codex:acct-old:',
+          selection: {
+            kind: 'profile',
+            serviceId: 'openai-codex',
+            profileId: 'profile-old',
+          },
+          chatgptPlanType: 'plus',
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({
+        ok: true,
+        result: {
+          accessToken: 'fresh-access',
+          chatgptAccountId: 'acct_new',
+          chatgptPlanType: 'plus',
+          selectionEpoch: updated.selectionEpoch,
+        },
+      });
+      expect(handleCodexChatGptAuthTokensRefresh).toHaveBeenCalledWith({
+        sessionId: 'opencode-broker:openai:1',
+        brokerSelectionIdentity: 'opencode|connected|broker:1|openai-codex:acct-old:',
+        selection: {
+          kind: 'group',
+          serviceId: 'openai-codex',
+          groupId: 'main',
+          activeProfileId: 'profile-new',
+          fallbackProfileId: 'profile-old',
+          generation: 15,
+        },
+        chatgptPlanType: 'plus',
+        forceRefresh: false,
+        failingAccessTokenFingerprint: null,
+      });
+    } finally {
+      await app.close();
+      resetBrokerBridgeEffectiveSelectionsForTests();
     }
   });
 
@@ -2414,6 +2603,7 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
       expect(response.json().result).not.toHaveProperty('refreshToken');
       expect(handleClaudeSubscriptionAuthTokensRefresh).toHaveBeenCalledWith({
         sessionId: 'sess_1',
+        brokerSelectionIdentity: null,
         selection: {
           kind: 'group',
           serviceId: 'claude-subscription',
@@ -2423,6 +2613,7 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
           generation: 7,
         },
         forceRefresh: true,
+        failingAccessTokenFingerprint: null,
       });
     } finally {
       await app.close();
@@ -2803,6 +2994,7 @@ describe('startDaemonControlServer connected-service runtime wiring', () => {
       });
       expect(handleCodexChatGptAuthTokensRefresh).toHaveBeenCalledWith({
         sessionId: 'sess_1',
+        brokerSelectionIdentity: null,
         selection: {
           kind: 'profile',
           serviceId: 'openai-codex',
@@ -2810,6 +3002,7 @@ describe('startDaemonControlServer connected-service runtime wiring', () => {
         },
         chatgptPlanType: null,
         forceRefresh: false,
+        failingAccessTokenFingerprint: null,
       });
     } finally {
       await server.stop();

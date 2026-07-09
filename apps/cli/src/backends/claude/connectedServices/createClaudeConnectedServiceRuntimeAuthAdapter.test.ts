@@ -302,7 +302,52 @@ describe('createClaudeConnectedServiceRuntimeAuthAdapter', () => {
     };
     expect(credentials.claudeAiOauth).toMatchObject({
       accessToken: 'new-access-placeholder',
-      refreshToken: 'new-refresh-placeholder',
+    });
+    expect(credentials.claudeAiOauth).not.toHaveProperty('refreshToken');
+  });
+
+  it('fails closed when Claude shared-group hot apply is missing a group generation', async () => {
+    const runtimeClaudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-hot-group-config-'));
+    const record = buildConnectedServiceCredentialRecord({
+      now: 1000,
+      serviceId: 'claude-subscription',
+      profileId: 'oauth',
+      kind: 'oauth',
+      expiresAt: FUTURE_EXPIRES_AT_MS,
+      oauth: {
+        accessToken: 'new-access-placeholder',
+        refreshToken: 'new-refresh-placeholder',
+        idToken: null,
+        scope: CLAUDE_CODE_RECOMMENDED_OAUTH_SCOPE,
+        tokenType: 'Bearer',
+        providerAccountId: 'provider-account',
+        providerEmail: 'member@example.com',
+      },
+    });
+    const selection = {
+      record,
+      groupId: 'team',
+      activeProfileId: 'oauth',
+      fallbackProfileId: 'oauth',
+      targetMaterializedEnv: { CLAUDE_CONFIG_DIR: runtimeClaudeConfigDir },
+      targetMaterializedRoot: runtimeClaudeConfigDir,
+      [CLAUDE_RUNTIME_AUTH_SHARED_GROUP_SURFACE_METADATA_KEY]: {
+        mode: 'shared_group_auth_surface',
+        runtimeClaudeConfigDir,
+        runtimeMaterializedRoot: runtimeClaudeConfigDir,
+        sourceClaudeConfigDir: runtimeClaudeConfigDir,
+      },
+    };
+
+    const adapter = createClaudeConnectedServiceRuntimeAuthAdapter();
+    expect(adapter.canHotApply({ target: { agentId: 'claude' }, selection })).toEqual({
+      supported: false,
+      recovery: 'restart_rematerialize',
+    });
+    await expect(adapter.hotApply({ target: { agentId: 'claude' }, selection })).resolves.toEqual({
+      applied: false,
+      reason: 'hot_apply_unsupported',
+      recovery: 'restart_rematerialize',
     });
   });
 

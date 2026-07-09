@@ -2,7 +2,7 @@ import axios from 'axios';
 
 import { createAuthenticationHttpStatusError, isAuthenticationStatus } from '@/api/client/httpStatusError';
 import { configuration } from '@/configuration';
-import { resolveLoopbackHttpUrl } from '@/api/client/loopbackUrl';
+import { resolveServerHttpBaseUrl } from '@/session/transport/http/serverHttpBaseUrl';
 import { SessionMessageContentSchema, type SessionMessageContent } from '../types';
 
 export type TranscriptRow = Readonly<{
@@ -63,7 +63,7 @@ export async function fetchEncryptedTranscriptPageAfterSeq(params: Readonly<{
   limit: number;
   timeoutMs?: number;
 }>): Promise<TranscriptRow[]> {
-  const serverUrl = resolveLoopbackHttpUrl(configuration.apiServerUrl).replace(/\/+$/, '');
+  const serverUrl = resolveServerHttpBaseUrl();
   const response = await axios.get(`${serverUrl}/v1/sessions/${params.sessionId}/messages`, {
     headers: {
       Authorization: `Bearer ${params.token}`,
@@ -91,7 +91,7 @@ export async function fetchEncryptedTranscriptPageLatest(params: Readonly<{
   limit: number;
   timeoutMs?: number;
 }>): Promise<TranscriptRow[]> {
-  const serverUrl = resolveLoopbackHttpUrl(configuration.apiServerUrl).replace(/\/+$/, '');
+  const serverUrl = resolveServerHttpBaseUrl();
   const response = await axios.get(`${serverUrl}/v1/sessions/${params.sessionId}/messages`, {
     headers: {
       Authorization: `Bearer ${params.token}`,

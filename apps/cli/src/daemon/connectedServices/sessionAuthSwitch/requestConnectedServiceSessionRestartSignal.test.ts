@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  createConnectedServiceSessionRestartAmplificationGuard,
   isConnectedServiceRestartSignalStaleProcessError,
   requestConnectedServiceSessionRestartSignal,
 } from './requestConnectedServiceSessionRestartSignal';
@@ -146,6 +147,146 @@ describe('requestConnectedServiceSessionRestartSignal', () => {
       delayMs: 0,
       atMs: 10_000,
     }]);
+  });
+
+  it('builds a visible restart-request transcript event from connected-service restart diagnostics', async () => {
+    const module = await import('./requestConnectedServiceSessionRestartSignal');
+    const buildEvent = (module as Record<string, unknown>).buildConnectedServiceRestartRequestedSessionEvent;
+
+    expect(typeof buildEvent).toBe('function');
+    expect((buildEvent as (input: unknown) => unknown)({
+      trigger: 'refresh_triggered_restart',
+      sessionId: 'session-1',
+      agentId: 'claude',
+      serviceId: 'claude-subscription',
+      profileId: 'work',
+      groupId: 'team',
+      generation: 7,
+      reason: 'refresh_triggered_restart',
+    })).toEqual({
+      type: 'connected_service_account_switch_attempt',
+      ok: true,
+      action: 'restart_requested',
+      reason: 'refresh_triggered_restart',
+      attemptedContinuityMode: 'restart',
+      outcome: 'succeeded',
+      outcomeAction: 'restarted',
+      errorCode: null,
+      groupGeneration: 7,
+      partialState: null,
+      diagnostic: expect.objectContaining({
+        code: 'connected_service_restart_requested',
+        failurePhase: 'restart',
+        source: 'transcript_switch_attempt',
+        serviceId: 'claude-subscription',
+        agentId: 'claude',
+        profileId: 'work',
+        groupId: 'team',
+        retryable: true,
+        diagnostics: expect.objectContaining({
+          trigger: 'refresh_triggered_restart',
+          reason: 'refresh_triggered_restart',
+        }),
+      }),
+    });
+  });
+
+  it('suppresses duplicate auth-recovery restart requests for the same session service generation until respawn completes', async () => {
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+    const records: unknown[] = [];
+    const restartAmplificationGuard = createConnectedServiceSessionRestartAmplificationGuard();
+    const restartDiagnostic = {
+      trigger: 'runtime_auth_recovery_restart' as const,
+      sessionId: 'session-1',
+      agentId: 'claude',
+      serviceId: 'claude-subscription',
+      profileId: 'work',
+      groupId: 'team',
+      generation: 7,
+      reason: 'auth_failed',
+    };
+
+    await expect(requestConnectedServiceSessionRestartSignal({
+      pid: 123,
+      delayMs: 0,
+      onSignalFailure: () => {},
+      nowMs: () => 10_000,
+      recordRestartDiagnostic: (record: unknown) => records.push(record),
+      restartDiagnostic,
+      restartAmplificationGuard,
+    })).resolves.toEqual({ status: 'requested' });
+
+    await expect(requestConnectedServiceSessionRestartSignal({
+      pid: 456,
+      delayMs: 0,
+      onSignalFailure: () => {},
+      nowMs: () => 10_001,
+      recordRestartDiagnostic: (record: unknown) => records.push(record),
+      restartDiagnostic,
+      restartAmplificationGuard,
+    })).resolves.toEqual({ status: 'skipped_duplicate_restart' });
+
+    restartAmplificationGuard.completePid(123, { status: 'success' });
+
+    await expect(requestConnectedServiceSessionRestartSignal({
+      pid: 456,
+      delayMs: 0,
+      onSignalFailure: () => {},
+      nowMs: () => 10_002,
+      recordRestartDiagnostic: (record: unknown) => records.push(record),
+      restartDiagnostic,
+      restartAmplificationGuard,
+    })).resolves.toEqual({ status: 'requested' });
+
+    expect(kill).toHaveBeenCalledTimes(2);
+    expect(records).toEqual([
+      expect.objectContaining({ status: 'requested', pid: 123 }),
+      expect.objectContaining({ status: 'duplicate_restart_suppressed', pid: 456 }),
+      expect.objectContaining({ status: 'requested', pid: 456 }),
+    ]);
+  });
+
+  it('treats not_authenticated as terminal for the same auth-recovery generation', async () => {
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+    const records: unknown[] = [];
+    const restartAmplificationGuard = createConnectedServiceSessionRestartAmplificationGuard();
+    const restartDiagnostic = {
+      trigger: 'runtime_auth_recovery_restart' as const,
+      sessionId: 'session-1',
+      agentId: 'claude',
+      serviceId: 'claude-subscription',
+      profileId: 'work',
+      groupId: 'team',
+      generation: 7,
+      reason: 'auth_failed',
+    };
+
+    await requestConnectedServiceSessionRestartSignal({
+      pid: 123,
+      delayMs: 0,
+      onSignalFailure: () => {},
+      nowMs: () => 10_000,
+      recordRestartDiagnostic: (record: unknown) => records.push(record),
+      restartDiagnostic,
+      restartAmplificationGuard,
+    });
+    restartAmplificationGuard.completePid(123, { status: 'terminal', reason: 'not_authenticated' });
+
+    await expect(requestConnectedServiceSessionRestartSignal({
+      pid: 456,
+      delayMs: 0,
+      onSignalFailure: () => {},
+      nowMs: () => 10_001,
+      recordRestartDiagnostic: (record: unknown) => records.push(record),
+      restartDiagnostic,
+      restartAmplificationGuard,
+    })).resolves.toEqual({ status: 'skipped_terminal_restart' });
+
+    expect(kill).toHaveBeenCalledTimes(1);
+    expect(records).toEqual([
+      expect.objectContaining({ status: 'requested', pid: 123 }),
+      expect.objectContaining({ status: 'terminal_restart_suppressed', pid: 456 }),
+    ]);
   });
 
   it('records a signal-failed daemon restart diagnostic when non-stale signaling fails', async () => {

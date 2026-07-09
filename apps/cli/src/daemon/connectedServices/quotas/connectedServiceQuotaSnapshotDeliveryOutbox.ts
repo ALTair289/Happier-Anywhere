@@ -12,6 +12,7 @@ export type ConnectedServiceQuotaSnapshotDeliveryBody = Readonly<{
 export type ConnectedServiceQuotaSnapshotDeliveryInput = ConnectedServiceQuotaSnapshotDeliveryBody & Readonly<{
   groupId?: string | null;
   groupGeneration?: number | null;
+  sourceProviderAccountId?: string | null;
 }>;
 
 export type ConnectedServiceQuotaSnapshotDeliveryFlushReason =

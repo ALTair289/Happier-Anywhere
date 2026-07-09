@@ -9,6 +9,12 @@ import {
 } from './pendingQueueState';
 import type { PendingQueueRuntimeActivityProjection } from '@/agent/runtime/sessionInput/pendingQueueDrainPolicy';
 
+type PendingChangedDrainTriggerSnapshot = Readonly<{
+    pendingCount: number | null;
+    pendingBlockedCount: number | null;
+    pendingVersion: number | null;
+}>;
+
 function tryDecodeSessionStateValue<T>(params: {
     rawValue: unknown;
     sessionEncryptionMode: 'e2ee' | 'plain';
@@ -58,6 +64,7 @@ export function handleSessionStateUpdate(params: {
     encryptionKey: Uint8Array;
     encryptionVariant: 'legacy' | 'dataKey';
     onMetadataUpdated: () => void;
+    onPendingChangedDrainTrigger?: ((snapshot: PendingChangedDrainTriggerSnapshot) => void) | undefined;
     onWarning: (message: string) => void;
 }): {
     handled: boolean;
@@ -90,6 +97,11 @@ export function handleSessionStateUpdate(params: {
 
         const nextPendingQueueState = readKnownPendingQueueState(body);
         if (!nextPendingQueueState) {
+            params.onPendingChangedDrainTrigger?.({
+                pendingCount: null,
+                pendingBlockedCount: null,
+                pendingVersion: null,
+            });
             params.onMetadataUpdated();
             return {
                 handled: true,
@@ -105,6 +117,11 @@ export function handleSessionStateUpdate(params: {
 
         const applied = applyKnownPendingQueueState(currentPendingQueueState, nextPendingQueueState);
         if (applied.changed) {
+            params.onPendingChangedDrainTrigger?.({
+                pendingCount: nextPendingQueueState.pendingCount,
+                pendingBlockedCount: nextPendingQueueState.pendingBlockedCount,
+                pendingVersion: nextPendingQueueState.pendingVersion,
+            });
             params.onMetadataUpdated();
         }
         return {

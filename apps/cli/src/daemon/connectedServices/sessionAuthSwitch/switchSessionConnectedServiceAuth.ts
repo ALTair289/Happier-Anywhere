@@ -908,6 +908,66 @@ async function normalizeRequestedBindings(input: Readonly<{
       continue;
     }
 
+    const profileBindingGroupId = readNonEmptyString(readRecord(binding)?.groupId);
+    if (profileBindingGroupId) {
+      const group = await input.api.getConnectedServiceAuthGroup({
+        serviceId,
+        groupId: profileBindingGroupId,
+      });
+      if (group && groupHasEnabledMember({ group, profileId: binding.profileId })) {
+        const expectedGeneration = readExpectedGeneration(input.request.expectedGroupGenerationByServiceId, serviceId);
+        const currentGeneration = readGroupGeneration(group.generation);
+        if (expectedGeneration !== null && expectedGeneration !== currentGeneration) {
+          return { ok: false, errorCode: 'group_generation_conflict', serviceId };
+        }
+        const activeProfileId = typeof group.activeProfileId === 'string' ? group.activeProfileId.trim() : '';
+        if (!activeProfileId) {
+          return { ok: false, errorCode: 'profile_missing', serviceId };
+        }
+        const fallbackProfileId = resolveGroupFallbackProfileId({
+          group,
+          requestedFallbackProfileId: binding.profileId,
+          activeProfileId,
+        });
+	      const activeProfileError = await validateConnectedProfile({
+	        api: input.api,
+	        serviceId,
+	        profileId: activeProfileId,
+	        diagnosticSource: input.diagnosticSource,
+	      });
+        if (activeProfileError) return activeProfileError;
+        if (fallbackProfileId !== activeProfileId) {
+	        const fallbackProfileError = await validateConnectedProfile({
+	          api: input.api,
+	          serviceId,
+	          profileId: fallbackProfileId,
+	          diagnosticSource: input.diagnosticSource,
+	        });
+          if (fallbackProfileError) return fallbackProfileError;
+        }
+        normalizedBindingsByServiceId[serviceId] = {
+          source: 'connected',
+          selection: 'group',
+          groupId: profileBindingGroupId,
+          profileId: activeProfileId,
+        };
+        groupMetadataByServiceId.set(serviceId, {
+          groupId: profileBindingGroupId,
+          activeProfileId,
+          fallbackProfileId,
+          generation: currentGeneration,
+        });
+        effectiveByServiceId.set(serviceId, {
+          source: 'connected',
+          selection: 'group',
+          serviceId,
+          profileId: activeProfileId,
+          groupId: profileBindingGroupId,
+        });
+        continue;
+      }
+    }
+
 	    const profileError = await validateConnectedProfile({
 	      api: input.api,
 	      serviceId,
@@ -1130,6 +1190,20 @@ function readRuntimeAuthSelectionBlockingMaterializationDiagnostics(
   return collectBlockingConnectedServicesMaterializationDiagnostics(
     readMaterializationDiagnostics(selection?.materializationDiagnostics),
   );
+}
+
+function readRuntimeAuthCredentialWriteCommitted(runtimeAuthSelection: unknown): Promise<unknown> | null {
+  const selection = readRecord(runtimeAuthSelection);
+  const candidate = readRecord(selection)?.credentialWriteCommitted;
+  if (!candidate || typeof candidate !== 'object') return null;
+  const then = (candidate as Readonly<{ then?: unknown }>).then;
+  return typeof then === 'function' ? candidate as Promise<unknown> : null;
+}
+
+async function awaitRuntimeAuthCredentialWriteCommitted(runtimeAuthSelection: unknown): Promise<void> {
+  const committed = readRuntimeAuthCredentialWriteCommitted(runtimeAuthSelection);
+  if (!committed) return;
+  await committed;
 }
 
 function buildRuntimeAuthMaterializationFailureResult(input: Readonly<{
@@ -1645,6 +1719,7 @@ async function rematerializeUnchangedConnectedServiceBinding(input: Readonly<{
     groupSwitchTriggerReason: input.groupSwitchTriggerReason,
     runtimeAuthApply,
   });
+  await awaitRuntimeAuthCredentialWriteCommitted(runtimeAuthSelection);
   const blockingMaterializationDiagnostics = readRuntimeAuthSelectionBlockingMaterializationDiagnostics(
     runtimeAuthSelection,
   );
@@ -2196,6 +2271,7 @@ export async function switchSessionConnectedServiceAuth(
             groupSwitchTriggerReason: input.groupSwitchTriggerReason,
             runtimeAuthApply,
           });
+        await awaitRuntimeAuthCredentialWriteCommitted(runtimeAuthSelection);
         const blockingMaterializationDiagnostics = readRuntimeAuthSelectionBlockingMaterializationDiagnostics(
           runtimeAuthSelection,
         );

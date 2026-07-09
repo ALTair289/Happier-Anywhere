@@ -65,6 +65,7 @@ describe('handleSessionStateUpdate', () => {
 
   it('tracks pending count/version from pending-changed updates', () => {
     const onMetadataUpdated = vi.fn();
+    const onPendingChangedDrainTrigger = vi.fn();
 
     const result = handleSessionStateUpdate({
       update: {
@@ -85,6 +86,7 @@ describe('handleSessionStateUpdate', () => {
       encryptionKey: new Uint8Array(),
       encryptionVariant: 'dataKey',
       onMetadataUpdated,
+      onPendingChangedDrainTrigger,
       onWarning: () => {},
     } as any);
 
@@ -96,6 +98,11 @@ describe('handleSessionStateUpdate', () => {
       pendingVersion: 7,
     });
     expect(onMetadataUpdated).toHaveBeenCalledTimes(1);
+    expect(onPendingChangedDrainTrigger).toHaveBeenCalledWith({
+      pendingCount: 2,
+      pendingBlockedCount: 0,
+      pendingVersion: 7,
+    });
   });
 
   it('preserves the complete runtime activity projection from update-session events', () => {

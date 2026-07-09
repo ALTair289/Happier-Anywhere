@@ -254,6 +254,56 @@ describe('dispatchConnectedServiceAccountSwitchNotificationAsync', () => {
     expect(sendToAllDevicesAsync).not.toHaveBeenCalled();
   });
 
+  it('surfaces the preventive copy for preemptive soft-threshold switches', async () => {
+    const sendToAllDevicesAsync = vi.fn<SendToAllDevicesAsync>(async () => {});
+    const runtimeQuotaSnapshots = new ConnectedServiceAuthGroupRuntimeQuotaSnapshotStore();
+
+    await dispatchConnectedServiceAccountSwitchNotificationAsync({
+      settings: accountSettingsParse({
+        notificationChannelsV1: [{
+          v: 1,
+          id: 'expo',
+          kind: 'expo_push',
+          enabled: true,
+          topics: {
+            ready: false,
+            permissionRequest: false,
+            userActionRequest: false,
+            connectedServiceAccountSwitch: true,
+            connectedServiceQuotaBlocked: false,
+            connectedServiceQuotaRecovered: false,
+          },
+          readyIncludeMessageText: false,
+        }],
+      }),
+      expoPushSender: { sendToAllDevicesAsync },
+      settingsSecretsReadKeys: [],
+      runtimeQuotaSnapshots,
+      listConnectedServiceProfiles: vi.fn(async () => ({
+        serviceId: 'openai-codex' as const,
+        profiles: [
+          { profileId: 'primary', status: 'connected' as const, providerEmail: 'main@example.test' },
+          { profileId: 'backup', status: 'connected' as const, providerEmail: 'backup@example.test' },
+        ],
+      })),
+      source: {
+        sessionId: 'session-soft',
+        sessionTitle: 'Preemptive swap',
+        serviceId: 'openai-codex',
+        groupId: 'main',
+        fromProfileId: 'primary',
+        toProfileId: 'backup',
+        reason: 'soft_threshold',
+      },
+      nowMs: () => 2_000,
+      dedupeWindowMs: 0,
+    });
+
+    const [, body, data] = readOnlyPushNotificationCall(sendToAllDevicesAsync);
+    expect(body).toContain('preventively');
+    expect(data).toMatchObject({ reason: 'soft_threshold' });
+  });
+
   it('does not expose provider account ids in outbound account-switch notifications', async () => {
     const sendToAllDevicesAsync = vi.fn<SendToAllDevicesAsync>(async (
       _title: string,

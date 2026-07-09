@@ -17,6 +17,13 @@ import { ProviderAccountUsagePayloadInvariantError } from "./types";
 type ProviderAccountUsageRecordClient = Pick<typeof db, "providerAccountUsageRecord">
     | Pick<TransactionClient, "providerAccountUsageRecord">;
 
+type ParsedProviderAccountUsageRecordWrite = ReturnType<typeof validateProviderAccountUsageRecordWrite>;
+
+export type ProviderAccountUsageRecordCurrentGuard = Readonly<{
+    fetchedAt: number | null;
+    refreshRequestedAt?: number;
+}>;
+
 function toNullableDate(value: number | undefined): Date | undefined {
     return value === undefined ? undefined : new Date(value);
 }
@@ -104,18 +111,75 @@ function zodProviderAccountUsageMetadata(raw: unknown) {
     return materialFingerprint ? { materialFingerprint } : {};
 }
 
-export async function upsertProviderAccountUsageRecord(
-    raw: UpsertProviderAccountUsageRecordParams,
-    client: ProviderAccountUsageRecordClient = db,
-): Promise<StoredProviderAccountUsageRecord> {
-    let parsed;
+function parseProviderAccountUsageRecordWrite(raw: UpsertProviderAccountUsageRecordParams): ParsedProviderAccountUsageRecordWrite {
     try {
-        parsed = validateProviderAccountUsageRecordWrite(raw);
+        return validateProviderAccountUsageRecordWrite(raw);
     } catch (error) {
         throw new ProviderAccountUsagePayloadInvariantError(
             error instanceof Error ? error.message : "Invalid provider account usage payload",
         );
     }
+}
+
+function buildProviderAccountUsageRecordCreateData(parsed: ParsedProviderAccountUsageRecordWrite) {
+    return {
+        accountId: parsed.accountId,
+        providerId: parsed.recordKey.providerId,
+        recordId: parsed.recordId,
+        accountSubjectId: parsed.recordKey.accountSubjectId,
+        subjectKind: parsed.recordKey.subjectKind,
+        quotaScope: parsed.recordKey.quotaScope,
+        quotaScopeId: parsed.recordKey.quotaScopeId,
+        quotaScopeIdKey: normalizeQuotaScopeIdKey(parsed.recordKey.quotaScopeId),
+        recordKeyJson: parsed.recordKey,
+        payloadMode: parsed.payloadMode,
+        status: parsed.status,
+        ...(parsed.snapshot ? { snapshot: parsed.snapshot as Prisma.InputJsonValue } : {}),
+        ...(parsed.sealedPayload ? { sealedPayload: parsed.sealedPayload as Prisma.InputJsonValue } : {}),
+        ...(parsed.fetchedAt !== undefined ? { fetchedAt: new Date(parsed.fetchedAt) } : {}),
+        ...(parsed.staleAfterMs !== undefined ? { staleAfterMs: parsed.staleAfterMs } : {}),
+        ...(parsed.refreshRequestedAt !== undefined ? { refreshRequestedAt: new Date(parsed.refreshRequestedAt) } : {}),
+        ...(parsed.metadata ? { metadata: parsed.metadata as Prisma.InputJsonValue } : {}),
+    };
+}
+
+function buildProviderAccountUsageRecordUpdateData(parsed: ParsedProviderAccountUsageRecordWrite) {
+    return {
+        providerId: parsed.recordKey.providerId,
+        accountSubjectId: parsed.recordKey.accountSubjectId,
+        subjectKind: parsed.recordKey.subjectKind,
+        quotaScope: parsed.recordKey.quotaScope,
+        quotaScopeId: parsed.recordKey.quotaScopeId,
+        quotaScopeIdKey: normalizeQuotaScopeIdKey(parsed.recordKey.quotaScopeId),
+        recordKeyJson: parsed.recordKey,
+        payloadMode: parsed.payloadMode,
+        status: parsed.status,
+        snapshot: parsed.snapshot ? parsed.snapshot as Prisma.InputJsonValue : Prisma.DbNull,
+        sealedPayload: parsed.sealedPayload ? parsed.sealedPayload as Prisma.InputJsonValue : Prisma.DbNull,
+        fetchedAt: parsed.fetchedAt !== undefined ? new Date(parsed.fetchedAt) : null,
+        staleAfterMs: parsed.staleAfterMs ?? null,
+        refreshRequestedAt: parsed.refreshRequestedAt !== undefined ? new Date(parsed.refreshRequestedAt) : null,
+        metadata: parsed.metadata ? parsed.metadata as Prisma.InputJsonValue : Prisma.DbNull,
+    };
+}
+
+function buildProviderAccountUsageRecordCurrentWhere(
+    parsed: ParsedProviderAccountUsageRecordWrite,
+    guard: ProviderAccountUsageRecordCurrentGuard,
+) {
+    return {
+        accountId: parsed.accountId,
+        recordId: parsed.recordId,
+        fetchedAt: guard.fetchedAt === null ? null : new Date(guard.fetchedAt),
+        refreshRequestedAt: guard.refreshRequestedAt === undefined ? null : new Date(guard.refreshRequestedAt),
+    };
+}
+
+export async function upsertProviderAccountUsageRecord(
+    raw: UpsertProviderAccountUsageRecordParams,
+    client: ProviderAccountUsageRecordClient = db,
+): Promise<StoredProviderAccountUsageRecord> {
+    const parsed = parseProviderAccountUsageRecordWrite(raw);
 
     await client.providerAccountUsageRecord.upsert({
         where: {
@@ -124,42 +188,8 @@ export async function upsertProviderAccountUsageRecord(
                 recordId: parsed.recordId,
             },
         },
-        create: {
-            accountId: parsed.accountId,
-            providerId: parsed.recordKey.providerId,
-            recordId: parsed.recordId,
-            accountSubjectId: parsed.recordKey.accountSubjectId,
-            subjectKind: parsed.recordKey.subjectKind,
-            quotaScope: parsed.recordKey.quotaScope,
-            quotaScopeId: parsed.recordKey.quotaScopeId,
-            quotaScopeIdKey: normalizeQuotaScopeIdKey(parsed.recordKey.quotaScopeId),
-            recordKeyJson: parsed.recordKey,
-            payloadMode: parsed.payloadMode,
-            status: parsed.status,
-            ...(parsed.snapshot ? { snapshot: parsed.snapshot as Prisma.InputJsonValue } : {}),
-            ...(parsed.sealedPayload ? { sealedPayload: parsed.sealedPayload as Prisma.InputJsonValue } : {}),
-            ...(parsed.fetchedAt !== undefined ? { fetchedAt: new Date(parsed.fetchedAt) } : {}),
-            ...(parsed.staleAfterMs !== undefined ? { staleAfterMs: parsed.staleAfterMs } : {}),
-            ...(parsed.refreshRequestedAt !== undefined ? { refreshRequestedAt: new Date(parsed.refreshRequestedAt) } : {}),
-            ...(parsed.metadata ? { metadata: parsed.metadata as Prisma.InputJsonValue } : {}),
-        },
-        update: {
-            providerId: parsed.recordKey.providerId,
-            accountSubjectId: parsed.recordKey.accountSubjectId,
-            subjectKind: parsed.recordKey.subjectKind,
-            quotaScope: parsed.recordKey.quotaScope,
-            quotaScopeId: parsed.recordKey.quotaScopeId,
-            quotaScopeIdKey: normalizeQuotaScopeIdKey(parsed.recordKey.quotaScopeId),
-            recordKeyJson: parsed.recordKey,
-            payloadMode: parsed.payloadMode,
-            status: parsed.status,
-            snapshot: parsed.snapshot ? parsed.snapshot as Prisma.InputJsonValue : Prisma.DbNull,
-            sealedPayload: parsed.sealedPayload ? parsed.sealedPayload as Prisma.InputJsonValue : Prisma.DbNull,
-            fetchedAt: parsed.fetchedAt !== undefined ? new Date(parsed.fetchedAt) : null,
-            staleAfterMs: parsed.staleAfterMs ?? null,
-            refreshRequestedAt: parsed.refreshRequestedAt !== undefined ? new Date(parsed.refreshRequestedAt) : null,
-            metadata: parsed.metadata ? parsed.metadata as Prisma.InputJsonValue : Prisma.DbNull,
-        },
+        create: buildProviderAccountUsageRecordCreateData(parsed),
+        update: buildProviderAccountUsageRecordUpdateData(parsed),
     });
 
     const stored = await readProviderAccountUsageRecord({
@@ -168,6 +198,45 @@ export async function upsertProviderAccountUsageRecord(
     }, client);
     if (!stored) {
         throw new Error("Provider account usage record disappeared after upsert");
+    }
+    return stored;
+}
+
+export async function createProviderAccountUsageRecord(
+    raw: UpsertProviderAccountUsageRecordParams,
+    client: ProviderAccountUsageRecordClient = db,
+): Promise<StoredProviderAccountUsageRecord> {
+    const parsed = parseProviderAccountUsageRecordWrite(raw);
+    await client.providerAccountUsageRecord.create({
+        data: buildProviderAccountUsageRecordCreateData(parsed),
+    });
+    const stored = await readProviderAccountUsageRecord({
+        accountId: parsed.accountId,
+        recordId: parsed.recordId,
+    }, client);
+    if (!stored) {
+        throw new Error("Provider account usage record disappeared after create");
+    }
+    return stored;
+}
+
+export async function updateProviderAccountUsageRecordIfCurrent(
+    raw: UpsertProviderAccountUsageRecordParams,
+    guard: ProviderAccountUsageRecordCurrentGuard,
+    client: ProviderAccountUsageRecordClient = db,
+): Promise<StoredProviderAccountUsageRecord | null> {
+    const parsed = parseProviderAccountUsageRecordWrite(raw);
+    const updated = await client.providerAccountUsageRecord.updateMany({
+        where: buildProviderAccountUsageRecordCurrentWhere(parsed, guard),
+        data: buildProviderAccountUsageRecordUpdateData(parsed),
+    });
+    if (updated.count === 0) return null;
+    const stored = await readProviderAccountUsageRecord({
+        accountId: parsed.accountId,
+        recordId: parsed.recordId,
+    }, client);
+    if (!stored) {
+        throw new Error("Provider account usage record disappeared after guarded update");
     }
     return stored;
 }

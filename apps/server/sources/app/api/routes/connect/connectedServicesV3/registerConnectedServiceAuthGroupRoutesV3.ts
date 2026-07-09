@@ -3,7 +3,11 @@ import {
     isConnectedServiceAccountGroupConfigurationSupported,
     isConnectedServiceRuntimeFallbackSupported,
 } from "@happier-dev/agents";
-import { ConnectedServiceIdSchema } from "@happier-dev/protocol";
+import {
+    ConnectedServiceIdSchema,
+    readConnectedServiceManualActiveProfileRuntimeBlocker,
+    type ConnectedServiceManualActiveProfileRuntimeBlocker,
+} from "@happier-dev/protocol";
 
 import type { Fastify } from "../../../types";
 import { db } from "@/storage/db";
@@ -52,7 +56,7 @@ const NotFoundResponseSchema = z.object({ error: z.literal("not_found") });
 type AuthGroupEnvelopeResponse = z.infer<typeof AuthGroupEnvelopeResponseSchema>;
 type ConnectedServiceAuthGroupState = z.infer<typeof ConnectedServiceAuthGroupStateSchema>;
 type ConnectedServiceAuthGroupMemberState = z.infer<typeof ConnectedServiceAuthGroupMemberStateSchema>;
-type ManualActiveProfileRuntimeBlocker = Readonly<{ resetAtMs?: number }>;
+type ManualActiveProfileRuntimeBlocker = ConnectedServiceManualActiveProfileRuntimeBlocker;
 
 function isUniqueConflict(error: unknown): boolean {
     return isPrismaErrorCode(error, "P2002");
@@ -134,20 +138,7 @@ function readManualActiveProfileRuntimeBlockerFromState(
     state: ConnectedServiceAuthGroupMemberState,
     nowMs: number,
 ): ManualActiveProfileRuntimeBlocker | null {
-    if (state.credentialHealthStatus === "needs_reauth") return {};
-    const resetAtValues = [
-        state.cooldownUntilMs,
-        state.exhaustedUntilMs,
-        state.quotaExhaustedUntilMs,
-        state.rateLimitedUntilMs,
-        state.capacityLimitedUntilMs,
-        state.authInvalidUntilMs,
-        state.planUnavailableUntilMs,
-        state.validationBlockedUntilMs,
-        // providerResetsAtMs is reset evidence for another limiter. By itself it is not
-        // a manual active-profile blocker.
-    ].filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value > nowMs);
-    return resetAtValues.length > 0 ? { resetAtMs: Math.max(...resetAtValues) } : null;
+    return readConnectedServiceManualActiveProfileRuntimeBlocker(state, nowMs);
 }
 
 function readManualActiveProfileRuntimeBlocker(stateJson: string | null, nowMs: number): ManualActiveProfileRuntimeBlocker | null {
@@ -265,7 +256,16 @@ export function registerConnectedServiceAuthGroupRoutesV3(app: Fastify): void {
             return reply.code(400).send({ error: "connect_group_member_profile_not_found" });
         }
 
-        const policy = mergeConnectedServiceAuthGroupPolicyPatch(DEFAULT_CONNECTED_SERVICE_AUTH_GROUP_POLICY_V1, policyPatch);
+        // Default a newly created pool to automatic fallback ONLY when the account has the
+        // runtime-fallback feature enabled and the service supports it. Fail closed otherwise so a
+        // pool is never created with autoSwitch=true for an account that lacks the feature (which
+        // the guards above would 400 on). An explicit autoSwitch in the request always wins.
+        const autoSwitchCreateDefault = fallbackEnabled() && runtimeFallbackSupportedForService(serviceId);
+        const effectivePolicyPatch: ConnectedServiceAuthGroupPolicyPatch = {
+            ...policyPatch,
+            autoSwitch: policyPatch?.autoSwitch ?? autoSwitchCreateDefault,
+        };
+        const policy = mergeConnectedServiceAuthGroupPolicyPatch(DEFAULT_CONNECTED_SERVICE_AUTH_GROUP_POLICY_V1, effectivePolicyPatch);
         try {
             await inTx(async (tx) => {
                 await tx.connectedServiceAuthGroup.create({

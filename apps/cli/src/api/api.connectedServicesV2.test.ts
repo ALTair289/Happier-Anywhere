@@ -28,6 +28,7 @@ vi.mock('axios', () => ({
 vi.mock('@/ui/logger', () => ({
   logger: {
     debug: vi.fn(),
+    warn: vi.fn(),
   },
 }));
 
@@ -205,6 +206,38 @@ describe('ApiClient connected services v2', () => {
       }),
     );
     expect(String(vi.mocked(axios.post).mock.calls[0]?.[0])).not.toContain('/profiles/');
+  });
+
+  it('logs skipped sealed provider account usage source-link outcomes from the v2 canonical endpoint', async () => {
+    mockPost.mockResolvedValue({
+      status: 200,
+      data: {
+        success: true,
+        source: {
+          status: 'skipped',
+          reason: 'binding_unavailable',
+        },
+      },
+    });
+    const recordKey = createProviderAccountUsageRecordKey();
+    const recordId = buildProviderAccountUsageRecordId(recordKey);
+
+    const api = await ApiClient.create(createTestCredentials());
+
+    await api.registerProviderAccountUsageSnapshotSealed({
+      recordId,
+      recordKey,
+      source: {
+        serviceId: 'openai-codex',
+        profileId: 'work',
+        bindingKind: 'profile',
+      },
+      sealed: { format: 'account_scoped_v1', ciphertext: 'cHJvdmlkZXItdXNhZ2U=' },
+      metadata: { fetchedAt: 1_000, staleAfterMs: 300_000, status: 'ok', materialFingerprint: 'fingerprint' },
+    });
+
+    expect(logger.debug).toHaveBeenCalledWith(expect.stringContaining('Provider account usage source link skipped'));
+    expect(logger.debug).toHaveBeenCalledWith(expect.stringContaining('binding_unavailable'));
   });
 
   it('gets sealed provider account usage snapshots from the v2 canonical endpoint by record id', async () => {

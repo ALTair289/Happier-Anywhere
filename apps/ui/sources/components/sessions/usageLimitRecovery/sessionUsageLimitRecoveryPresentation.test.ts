@@ -525,7 +525,41 @@ describe('sessionUsageLimitRecoveryPresentation', () => {
 
         expect(presentation?.banner.body).toBe(`session.usageLimitRecovery.resetBody:time:${resetAtMs}`);
         expect(presentation?.banner.primaryAction.kind).toBe('cancel');
-        expect(badge?.label).toBe(`session.usageLimitRecovery.statusWaitingUntil:time:${resetAtMs}`);
+        expect(badge?.label).toBe(`session.usageLimitRecovery.statusWaitingResetUntil:time:${resetAtMs}`);
+    });
+
+    it('surfaces account rotation pending for waiting group recovery without a reset time', () => {
+        const recovery: SessionUsageLimitRecoveryV1 = {
+            v: 1,
+            status: 'waiting',
+            issueFingerprint: 'usage:rotation-pending',
+            armedAtMs: 1,
+            resetAtMs: null,
+            nextCheckAtMs: null,
+            attemptCount: 1,
+            maxAttempts: 3,
+            lastProbeError: 'no_eligible_member',
+            resumePromptMode: 'standard',
+            selectedAuth: { kind: 'group', serviceId: 'openai-codex', groupId: 'codex-main', profileId: 'primary' },
+        };
+
+        const badge = buildSessionUsageLimitStatusBadgePresentation({
+            featureEnabled: true,
+            latestTurnStatus: 'failed',
+            issue: usageIssue('codex', null, {
+                recoverability: 'switch_account',
+                connectedService: {
+                    serviceId: 'openai-codex',
+                    profileId: 'primary',
+                    groupId: 'codex-main',
+                },
+            }),
+            recovery,
+            translate: (key, params) => params ? `${key}:time:${params.time}` : key,
+            formatTime: (value) => String(value),
+        });
+
+        expect(badge?.label).toBe('session.usageLimitRecovery.statusAccountRotationPending');
     });
 
     it('does not present a resume action after reset elapses when no interrupted work remains to resume', () => {

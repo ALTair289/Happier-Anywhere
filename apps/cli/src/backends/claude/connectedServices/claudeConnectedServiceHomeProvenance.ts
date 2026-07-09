@@ -30,12 +30,28 @@ export type ClaudeConnectedServiceHomeSelectionDescriptor =
     serviceId: 'claude-subscription';
   }>;
 
+/**
+ * Last credential we successfully wrote into the derived macOS keychain item for this home.
+ *
+ * P0 keychain-clobber fix (2026-07-08): the shared `__groups/claude` keychain item is often
+ * ACL-unreadable by the daemon (`security` non-zero exit is indistinguishable from "absent"), so the
+ * keychain read can never be the comparator basis. The daemon owns materialization, so it records the
+ * fingerprint of the last-written payload here (next to the home) and compares INCOMING vs
+ * LAST-WRITTEN. Identical → skip the write entirely (no `add-generic-password -U`, no ACL re-write,
+ * no clobber of running sibling claude processes). Fingerprint only — never a secret value.
+ */
+export type ClaudeConnectedServiceHomeMacOsKeychainCredentialProvenance = Readonly<{
+  credentialFingerprint: string;
+  writtenAtMs: number;
+}>;
+
 export type ClaudeConnectedServiceHomeProvenanceV1 = Readonly<{
   v: 1;
   serviceId: 'claude-subscription';
   credentialProfileId: string;
   credentialCreatedAt: number;
   credentialFingerprint?: string | undefined;
+  macOsKeychainCredential?: ClaudeConnectedServiceHomeMacOsKeychainCredentialProvenance | undefined;
   selection: ClaudeConnectedServiceHomeSelectionProvenance;
 }>;
 
@@ -56,6 +72,17 @@ function readFiniteNumber(value: unknown): number | null {
 function readCredentialFingerprint(value: unknown): string | undefined {
   const text = readNonBlankString(value);
   return text?.match(/^sha256:[a-f0-9]{64}$/) ? text : undefined;
+}
+
+function readMacOsKeychainCredentialProvenance(
+  value: unknown,
+): ClaudeConnectedServiceHomeMacOsKeychainCredentialProvenance | undefined {
+  const root = readObject(value);
+  const credentialFingerprint = readCredentialFingerprint(root?.credentialFingerprint);
+  const writtenAtMs = readFiniteNumber(root?.writtenAtMs);
+  return credentialFingerprint && writtenAtMs !== null
+    ? { credentialFingerprint, writtenAtMs }
+    : undefined;
 }
 
 function buildCredentialFingerprint(record: ConnectedServiceCredentialRecordV1): string | undefined {
@@ -110,6 +137,7 @@ export function parseClaudeConnectedServiceHomeProvenance(
   const credentialProfileId = readNonBlankString(root.credentialProfileId);
   const credentialCreatedAt = readFiniteNumber(root.credentialCreatedAt);
   const credentialFingerprint = readCredentialFingerprint(root.credentialFingerprint);
+  const macOsKeychainCredential = readMacOsKeychainCredentialProvenance(root.macOsKeychainCredential);
   const selection = readObject(root.selection);
   if (!credentialProfileId || credentialCreatedAt === null || !selection) return null;
   if (selection.kind === 'profile') {
@@ -121,6 +149,7 @@ export function parseClaudeConnectedServiceHomeProvenance(
       credentialProfileId,
       credentialCreatedAt,
       ...(credentialFingerprint ? { credentialFingerprint } : {}),
+      ...(macOsKeychainCredential ? { macOsKeychainCredential } : {}),
       selection: {
         kind: 'profile',
         profileId,
@@ -138,6 +167,7 @@ export function parseClaudeConnectedServiceHomeProvenance(
       credentialProfileId,
       credentialCreatedAt,
       ...(credentialFingerprint ? { credentialFingerprint } : {}),
+      ...(macOsKeychainCredential ? { macOsKeychainCredential } : {}),
       selection: {
         kind: 'group',
         groupId,
@@ -197,4 +227,24 @@ export async function writeClaudeConnectedServiceHomeProvenance(params: Readonly
     resolveClaudeConnectedServiceHomeProvenancePath(params.claudeConfigDir),
     params.provenance,
   );
+}
+
+/**
+ * Records the last-written macOS keychain fingerprint onto the existing home provenance without
+ * disturbing the rest of it. Called only AFTER a real keychain write succeeds so the next spawn/resume
+ * can skip an identical (clobbering) write. No-op if the home has no provenance yet.
+ */
+export async function writeClaudeConnectedServiceHomeMacOsKeychainCredentialProvenance(params: Readonly<{
+  claudeConfigDir: string;
+  macOsKeychainCredential: ClaudeConnectedServiceHomeMacOsKeychainCredentialProvenance;
+}>): Promise<void> {
+  const current = await readClaudeConnectedServiceHomeProvenance(params.claudeConfigDir);
+  if (!current) return;
+  await writeClaudeConnectedServiceHomeProvenance({
+    claudeConfigDir: params.claudeConfigDir,
+    provenance: {
+      ...current,
+      macOsKeychainCredential: params.macOsKeychainCredential,
+    },
+  });
 }

@@ -1,6 +1,37 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { DEFAULT_CONNECTED_SERVICE_AUTH_GROUP_POLICY_V1 } from '../accountGroups/selection/selectConnectedServiceAuthGroupCandidate';
+import {
+  ConnectedServiceAuthGroupSwitchCoordinator,
+  InMemoryConnectedServiceAuthGroupSwitchLeaseRegistry,
+  type ConnectedServiceAuthGroupSwitchState,
+} from '../accountGroups/switching/ConnectedServiceAuthGroupSwitchCoordinator';
 import { handleConnectedServiceRuntimeAuthFailure } from './handleConnectedServiceRuntimeAuthFailure';
+
+function groupSwitchState(input: Readonly<{
+  activeProfileId: string;
+  exhaustedProfileId?: string;
+}>): ConnectedServiceAuthGroupSwitchState {
+  return {
+    serviceId: 'openai-codex',
+    groupId: 'main',
+    activeProfileId: input.activeProfileId,
+    generation: 1,
+    policy: { ...DEFAULT_CONNECTED_SERVICE_AUTH_GROUP_POLICY_V1, strategy: 'priority', autoSwitch: true },
+    members: [
+      { profileId: 'primary', priority: 1, createdAtMs: 1, enabled: true },
+      { profileId: 'backup', priority: 2, createdAtMs: 2, enabled: true },
+    ],
+    memberStatesByProfileId: input.exhaustedProfileId
+      ? new Map([
+          [input.exhaustedProfileId, {
+            quotaExhaustedUntilMs: 10_000,
+            providerResetsAtMs: 10_000,
+          }],
+        ])
+      : new Map(),
+  };
+}
 
 describe('handleConnectedServiceRuntimeAuthFailure', () => {
   it('returns a profile action-required state for a single connected profile usage-limit failure', async () => {
@@ -252,6 +283,139 @@ describe('handleConnectedServiceRuntimeAuthFailure', () => {
       action: { kind: 'open_url', url: 'https://chatgpt.com/codex/settings/usage' },
       planType: null,
       switchesThisTurn: 0,
+    });
+  });
+
+  it('uses the classified failing profile, not the group-active profile, as the observed current profile', async () => {
+    const switchAfterClassifiedFailure = vi.fn(async () => ({
+      status: 'observed_generation' as const,
+      activeProfileId: 'primary',
+      generation: 1,
+    }));
+
+    await handleConnectedServiceRuntimeAuthFailure({
+      selection: {
+        kind: 'group',
+        serviceId: 'openai-codex',
+        groupId: 'main',
+        activeProfileId: 'primary',
+      },
+      classification: {
+        kind: 'usage_limit',
+        limitCategory: 'usage_limit',
+        serviceId: 'openai-codex',
+        profileId: 'backup',
+        groupId: 'main',
+        resetsAtMs: null,
+        planType: null,
+        rateLimits: null,
+        source: 'structured_provider_error',
+      },
+      switchesThisTurn: 0,
+      switchCoordinator: { switchAfterClassifiedFailure },
+    });
+
+    expect(switchAfterClassifiedFailure).toHaveBeenCalledWith(expect.objectContaining({
+      observedProfileId: 'backup',
+    }));
+  });
+
+  it('treats the healthy group-active profile as an observed-generation target when the failing session is stale', async () => {
+    const commitSwitch = vi.fn(async () => groupSwitchState({ activeProfileId: 'backup' }));
+    const applyGeneration = vi.fn(async () => {});
+    const switchCoordinator = new ConnectedServiceAuthGroupSwitchCoordinator({
+      leases: new InMemoryConnectedServiceAuthGroupSwitchLeaseRegistry(),
+      nowMs: () => 1_000,
+      quotaFreshnessMs: 60_000,
+      loadState: async () => groupSwitchState({
+        activeProfileId: 'primary',
+        exhaustedProfileId: 'backup',
+      }),
+      commitSwitch,
+      applyGeneration,
+    });
+
+    await expect(handleConnectedServiceRuntimeAuthFailure({
+      sessionId: 'session-1',
+      selection: {
+        kind: 'group',
+        serviceId: 'openai-codex',
+        groupId: 'main',
+        activeProfileId: 'primary',
+      },
+      classification: {
+        kind: 'usage_limit',
+        limitCategory: 'usage_limit',
+        serviceId: 'openai-codex',
+        profileId: 'backup',
+        groupId: 'main',
+        resetsAtMs: null,
+        planType: null,
+        rateLimits: null,
+        source: 'structured_provider_error',
+      },
+      switchesThisTurn: 0,
+      switchCoordinator,
+    })).resolves.toMatchObject({
+      status: 'switch_attempted',
+      result: {
+        status: 'observed_generation',
+        activeProfileId: 'primary',
+        generation: 1,
+      },
+    });
+
+    expect(commitSwitch).not.toHaveBeenCalled();
+    expect(applyGeneration).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 'session-1',
+      activeProfileId: 'primary',
+      fromProfileId: 'backup',
+    }));
+  });
+
+  it('keeps excluding the group-active profile as current_active when the failing session is actually on it', async () => {
+    const switchCoordinator = new ConnectedServiceAuthGroupSwitchCoordinator({
+      leases: new InMemoryConnectedServiceAuthGroupSwitchLeaseRegistry(),
+      nowMs: () => 1_000,
+      quotaFreshnessMs: 60_000,
+      loadState: async () => groupSwitchState({
+        activeProfileId: 'primary',
+        exhaustedProfileId: 'backup',
+      }),
+      commitSwitch: vi.fn(async () => groupSwitchState({ activeProfileId: 'backup' })),
+      applyGeneration: vi.fn(async () => {}),
+    });
+
+    await expect(handleConnectedServiceRuntimeAuthFailure({
+      sessionId: 'session-1',
+      selection: {
+        kind: 'group',
+        serviceId: 'openai-codex',
+        groupId: 'main',
+        activeProfileId: 'primary',
+      },
+      classification: {
+        kind: 'usage_limit',
+        limitCategory: 'usage_limit',
+        serviceId: 'openai-codex',
+        profileId: 'primary',
+        groupId: 'main',
+        resetsAtMs: null,
+        planType: null,
+        rateLimits: null,
+        source: 'structured_provider_error',
+      },
+      switchesThisTurn: 0,
+      switchCoordinator,
+    })).resolves.toMatchObject({
+      status: 'switch_attempted',
+      result: {
+        status: 'no_eligible_member',
+        excluded: expect.arrayContaining([
+          { profileId: 'primary', reason: 'current_active' },
+          { profileId: 'backup', reason: 'quota_exhausted', retryAtMs: 10_000 },
+        ]),
+      },
     });
   });
 });

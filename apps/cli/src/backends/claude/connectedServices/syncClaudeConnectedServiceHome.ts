@@ -418,8 +418,9 @@ export async function syncClaudeConnectedServiceHome(params: Readonly<{
    * config-dir overrides when not provided.
    */
   ambientStateSourceDir?: string | null | undefined;
+  destinationLockAlreadyHeld?: boolean | undefined;
 }>): Promise<SyncClaudeConnectedServiceHomeResult> {
-  return await withConnectedServiceStateSharingDestinationLock(params.targetDir, async () => {
+  const sync = async (): Promise<SyncClaudeConnectedServiceHomeResult> => {
     const settings = params.sharingPolicyOverride ?? resolveClaudeHomeSharingSettings(params.accountSettings ?? null);
     const sourceDir = resolveConfiguredClaudeConfigDir({ env: params.sourceEnv });
     await mkdir(params.targetDir, { recursive: true });
@@ -534,7 +535,11 @@ export async function syncClaudeConnectedServiceHome(params: Readonly<{
       effectiveStateMode: applyResult.manifest.effectiveStateMode,
       diagnostics: applyResult.diagnostics,
     };
-  }, { providerId: 'claude' });
+  };
+  if (params.destinationLockAlreadyHeld === true) {
+    return await sync();
+  }
+  return await withConnectedServiceStateSharingDestinationLock(params.targetDir, sync, { providerId: 'claude' });
 }
 
 /**

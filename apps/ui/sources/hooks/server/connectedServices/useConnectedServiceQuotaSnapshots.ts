@@ -4,9 +4,13 @@ import { useAuth } from '@/auth/context/AuthContext';
 import { resolveAuthCredentialsScopeKey } from '@/auth/storage/resolveAuthCredentialsScopeKey';
 import { useFeatureEnabled } from '@/hooks/server/useFeatureEnabled';
 import { connectedServiceProfileKey } from '@/sync/domains/connectedServices/connectedServiceProfilePreferences';
+import { shouldHideQuotaForCredentialStatus } from '@/sync/domains/connectedServices/shouldHideQuotaForCredentialStatus';
 
 import type { ConnectedServiceQuotaSnapshotV1 } from '@happier-dev/protocol';
-import { ConnectedServiceIdSchema, type ConnectedServiceId } from '@happier-dev/protocol';
+import {
+  ConnectedServiceIdSchema,
+  type ConnectedServiceId,
+} from '@happier-dev/protocol';
 import { useCredentialScopedAccountModeResolver } from './useCredentialScopedAccountModeResolver';
 import {
   buildQuotaSnapshotScopeKey,
@@ -16,11 +20,16 @@ import {
   type QuotaSnapshotLoadContext,
 } from './connectedServiceQuotaSnapshotStore';
 
-export type ConnectedServiceQuotaProfileRef = Readonly<{ serviceId: string; profileId: string }>;
+export type ConnectedServiceQuotaProfileRef = Readonly<{
+  serviceId: string;
+  profileId: string;
+  credentialHealthStatus?: unknown;
+}>;
 type NormalizedProfileRef = Readonly<{
   key: string;
   serviceId: ConnectedServiceId;
   profileId: string;
+  credentialHealthUsable: boolean;
 }>;
 
 export type ConnectedServiceQuotaSnapshotsResult = Readonly<{
@@ -36,10 +45,15 @@ function normalizeProfile(profile: ConnectedServiceQuotaProfileRef): NormalizedP
   const profileId = String(profile.profileId ?? '').trim();
   if (!serviceIdParsed.success || !profileId) return null;
   const serviceId = serviceIdParsed.data;
+  // Usage DISPLAY gate: fail OPEN via the single shared predicate — only an
+  // EXPLICIT needs_reauth blocks usage; absent/unknown/'' presumed healthy. This
+  // is the SAME owner as the single hook + AccountBlock, so the three can never
+  // disagree (the old resolve→usable derivation failed CLOSED on unknown).
   return {
     key: connectedServiceProfileKey({ serviceId, profileId }),
     serviceId,
     profileId,
+    credentialHealthUsable: !shouldHideQuotaForCredentialStatus(profile.credentialHealthStatus),
   };
 }
 
@@ -57,7 +71,7 @@ function normalizeProfiles(profiles: ReadonlyArray<ConnectedServiceQuotaProfileR
 
 function buildProfilesSignature(profiles: ReadonlyArray<ConnectedServiceQuotaProfileRef>): string {
   return normalizeProfiles(profiles)
-    .map((profile) => `${profile.key}\u0000${profile.serviceId}\u0000${profile.profileId}`)
+    .map((profile) => `${profile.key}\u0000${profile.serviceId}\u0000${profile.profileId}\u0000${profile.credentialHealthUsable ? 'usable' : 'blocked'}`)
     .join('\u0001');
 }
 
@@ -80,7 +94,9 @@ export function useConnectedServiceQuotaSnapshots(
       profileKey: string;
       loadContext: QuotaSnapshotLoadContext;
     }>>;
-    return normalizedProfiles.map((profile) => ({
+    return normalizedProfiles
+      .filter((profile) => profile.credentialHealthUsable)
+      .map((profile) => ({
       key: buildQuotaSnapshotScopeKey(credentialScope, profile.serviceId, profile.profileId),
       profileKey: profile.key,
       loadContext: {
@@ -118,6 +134,12 @@ export function useConnectedServiceQuotaSnapshots(
     }
 
     void version;
+    for (const profile of normalizedProfiles) {
+      if (!profile.credentialHealthUsable) {
+        snapshotsByKey[profile.key] = null;
+        loadingByKey[profile.key] = false;
+      }
+    }
     for (const { key, profileKey } of loadContexts) {
       const entry = getQuotaSnapshotEntry(key);
       snapshotsByKey[profileKey] = entry.snapshot;

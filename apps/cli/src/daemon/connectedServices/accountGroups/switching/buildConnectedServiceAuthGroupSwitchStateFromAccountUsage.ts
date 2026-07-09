@@ -9,6 +9,7 @@ import { projectProviderAccountUsageSnapshotToAuthGroupRuntimeState } from '../q
 import type { ConnectedServiceAuthGroupMemberRuntimeState } from '../selection/selectConnectedServiceAuthGroupCandidate';
 import type { ConnectedServiceAuthGroupSwitchState } from './ConnectedServiceAuthGroupSwitchCoordinator';
 import {
+  buildConnectedServiceAuthGroupSwitchStateFromPersistedMemberState,
   mergePersistedMemberRuntimeState,
   normalizeConnectedServiceAuthGroupPolicy,
 } from './buildConnectedServiceAuthGroupSwitchState';
@@ -80,11 +81,18 @@ export function buildConnectedServiceAuthGroupSwitchStateFromAccountUsage(input:
   changedSnapshot?: ProviderAccountUsageSnapshotV1 | null;
   changedGroupGeneration?: number | null;
 }>): Readonly<{
+  kind: 'source_backed' | 'provisional';
   state: ConnectedServiceAuthGroupSwitchState;
   sourceRefsByProfileId: ReadonlyMap<string, ConnectedServiceUsageSourceRecordRef>;
-}> | null {
+}> {
   const snapshotsByProfileId = resolveAccountUsageSnapshotsByGroupProfile(input);
-  if (snapshotsByProfileId.size === 0) return null;
+  if (snapshotsByProfileId.size === 0) {
+    return {
+      kind: 'provisional',
+      state: buildConnectedServiceAuthGroupSwitchStateFromPersistedMemberState({ group: input.group }),
+      sourceRefsByProfileId: new Map(),
+    };
+  }
 
   const memberStatesByProfileId = new Map<string, ConnectedServiceAuthGroupMemberRuntimeState>();
   const sourceRefsByProfileId = new Map<string, ConnectedServiceUsageSourceRecordRef>();
@@ -110,6 +118,7 @@ export function buildConnectedServiceAuthGroupSwitchStateFromAccountUsage(input:
   }
 
   return {
+    kind: 'source_backed',
     state: {
       serviceId: input.group.serviceId,
       groupId: input.group.groupId,

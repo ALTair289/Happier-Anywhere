@@ -304,6 +304,10 @@ export const AccountBlockView = React.memo<AccountBlockViewProps>((props) => {
     // number is the overall capacity. No brand glyph/dot — every row here is the
     // same provider, so the logo would be noise.
     const capacityRings = resolveAccountCapacityRings(quota?.usageRows ?? []);
+    // A first snapshot that is still loading (no cached value yet) must read as
+    // "loading" on the gauge, not as an empty "no usage" ring. This mirrors the
+    // body skeleton's `loading && !hasSnapshot` signal so the avatar and body agree.
+    const quotaFirstLoad = quota != null && quota.loading && !quota.hasSnapshot;
     // While a force-refresh is in flight, the capacity gauge is replaced by a
     // spinner in place (the live USAGE/RESETS below dim) — so the user sees the
     // refresh working and then the new values land directly when it resolves.
@@ -315,6 +319,7 @@ export const AccountBlockView = React.memo<AccountBlockViewProps>((props) => {
         <ConnectedServiceCapacityAvatar
             testID={`${testID}:avatar`}
             rings={capacityRings}
+            loading={quotaFirstLoad}
             centerLabel={quota?.capacityPct != null ? String(Math.round(quota.capacityPct)) : null}
             accessibilityLabel={props.title}
         />
@@ -584,7 +589,7 @@ export const AccountBlockView = React.memo<AccountBlockViewProps>((props) => {
                                 <MeterBar
                                     testID={`${testID}:meter:${row.meterId}`}
                                     tone={row.tone}
-                                    value={row.remaining}
+                                    fillFraction={row.remaining}
                                     caption={row.detailLabel}
                                 />
                             </View>

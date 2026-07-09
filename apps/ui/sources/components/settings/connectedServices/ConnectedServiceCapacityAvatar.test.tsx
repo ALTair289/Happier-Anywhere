@@ -50,4 +50,16 @@ describe('ConnectedServiceCapacityAvatar', () => {
         // Empty rings -> a single faint track arc (1 track + 1 progress).
         expect(tree.root.findAllByType('Circle' as never).length).toBe(2);
     });
+
+    it('renders a loading indicator (not an empty/"no usage" ring) while a snapshot loads', () => {
+        // A slow load must read as "loading", not "no usage": the center shows a
+        // spinner and the numeric capacity label is suppressed even if one is
+        // passed, so a pending snapshot never looks like a genuinely-empty avatar.
+        const tree = renderAvatar(
+            <ConnectedServiceCapacityAvatar rings={[]} centerLabel="0" loading testID="av" />,
+        );
+
+        expect(tree.root.findByProps({ testID: 'av:loading' })).toBeTruthy();
+        expect(tree.root.findAllByProps({ testID: 'av:capacity' }).length).toBe(0);
+    });
 });

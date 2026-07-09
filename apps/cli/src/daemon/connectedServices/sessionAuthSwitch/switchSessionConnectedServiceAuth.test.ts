@@ -85,6 +85,24 @@ function bindings(profileId: string): ConnectedServiceBindingsV1 {
   };
 }
 
+function profileBindingWithGroupContext(input: Readonly<{
+  serviceId: 'anthropic' | 'claude-subscription' | 'openai-codex';
+  profileId: string;
+  groupId: string;
+}>): ConnectedServiceBindingsV1 {
+  return {
+    v: 1,
+    bindingsByServiceId: {
+      [input.serviceId]: {
+        source: 'connected',
+        selection: 'profile',
+        profileId: input.profileId,
+        groupId: input.groupId,
+      },
+    },
+  } as unknown as ConnectedServiceBindingsV1;
+}
+
 const materializationIdentity = {
   v: 1,
   id: 'csm_switch_1',
@@ -248,6 +266,178 @@ describe('switchSessionConnectedServiceAuth', () => {
       ok: true,
       action: 'unchanged',
     });
+  });
+
+  it('treats a profile binding with group context as a group binding that follows the active member', async () => {
+    const tracked = trackedSession({
+      spawnOptions: {
+        directory: '/tmp/project',
+        backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+        connectedServices: profileBindingWithGroupContext({
+          serviceId: 'anthropic',
+          profileId: 'remembered-member',
+          groupId: 'work',
+        }),
+      },
+    });
+    const workGroup = group({
+      activeProfileId: 'manual-active',
+      members: [
+        {
+          v: 1,
+          serviceId: 'anthropic',
+          groupId: 'work',
+          profileId: 'remembered-member',
+          priority: 1,
+          enabled: true,
+          state: {},
+          createdAt: 1,
+          updatedAt: 1,
+        },
+        {
+          v: 1,
+          serviceId: 'anthropic',
+          groupId: 'work',
+          profileId: 'manual-active',
+          priority: 2,
+          enabled: true,
+          state: {},
+          createdAt: 2,
+          updatedAt: 2,
+        },
+      ],
+    });
+    const resolveContinuity = vi.fn(async (input: Parameters<SwitchSessionConnectedServiceAuthInput['resolveContinuity']>[0]) => {
+      expect(input.next).toMatchObject({
+        selection: 'group',
+        groupId: 'work',
+        profileId: 'manual-active',
+      });
+      return { mode: 'restart_rematerialize' as const };
+    });
+    const persistSessionBindings = vi.fn();
+
+    await expect(switchSessionConnectedServiceAuth({
+      core: createCore(),
+      postSwitchVerificationMode: {
+        kind: 'disabled_for_test_only',
+        reason: 'binding policy test does not exercise provider adoption verification',
+      },
+      getChildren: () => [tracked],
+      api: {
+        listConnectedServiceProfiles: async () => ({
+          serviceId: 'anthropic' as const,
+          profiles: [
+            { profileId: 'remembered-member', status: 'connected' as const },
+            { profileId: 'manual-active', status: 'connected' as const },
+          ],
+        }),
+        getConnectedServiceAuthGroup: async () => workGroup,
+      },
+      resolveContinuity,
+      restartSession: vi.fn(async () => {}),
+      hotApply: async () => ({ ok: true }),
+      persistSessionBindings,
+      registerHotApplyTargets: vi.fn(),
+      emitSessionEvent: vi.fn(),
+      request: {
+        sessionId: 'sess_1',
+        agentId: 'claude',
+        bindings: profileBindingWithGroupContext({
+          serviceId: 'anthropic',
+          profileId: 'remembered-member',
+          groupId: 'work',
+        }),
+      },
+    })).resolves.toMatchObject({
+      ok: true,
+      action: 'restart_requested',
+      normalizedBindings: {
+        bindingsByServiceId: {
+          anthropic: {
+            source: 'connected',
+            selection: 'group',
+            groupId: 'work',
+            profileId: 'manual-active',
+          },
+        },
+      },
+    });
+
+    expect(persistSessionBindings).toHaveBeenCalledWith(expect.objectContaining({
+      normalizedBindings: expect.objectContaining({
+        bindingsByServiceId: expect.objectContaining({
+          anthropic: expect.objectContaining({
+            selection: 'group',
+            profileId: 'manual-active',
+          }),
+        }),
+      }),
+    }));
+  });
+
+  it('awaits runtime-auth credential write commitment before restart rematerialization spawns', async () => {
+    const tracked = trackedSession({
+      spawnOptions: {
+        directory: '/tmp/project',
+        backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+        connectedServices: bindings('old-profile'),
+      },
+    });
+    let releaseCredentialWrite!: () => void;
+    let credentialWriteCommitted = false;
+    const credentialWriteCommittedPromise = new Promise<void>((resolve) => {
+      releaseCredentialWrite = () => {
+        credentialWriteCommitted = true;
+        resolve();
+      };
+    });
+    const restartSession = vi.fn(async () => {
+      if (!credentialWriteCommitted) throw new Error('credential_write_not_committed');
+    });
+    const materializeRuntimeAuthSelection = vi.fn(async () => ({
+      credentialWriteCommitted: credentialWriteCommittedPromise,
+    }));
+    const switchPromise = switchSessionConnectedServiceAuth({
+      core: createCore(),
+      postSwitchVerificationMode: {
+        kind: 'disabled_for_test_only',
+        reason: 'restart ordering test does not exercise provider adoption verification',
+      },
+      getChildren: () => [tracked],
+      api: {
+        listConnectedServiceProfiles: async () => ({
+          serviceId: 'anthropic' as const,
+          profiles: [{ profileId: 'new-profile', status: 'connected' as const }],
+        }),
+        getConnectedServiceAuthGroup: async () => null,
+      },
+      materializeRuntimeAuthSelection,
+      resolveContinuity: async () => ({ mode: 'restart_rematerialize' as const }),
+      restartSession,
+      hotApply: async () => ({ ok: true }),
+      persistSessionBindings: vi.fn(),
+      registerHotApplyTargets: vi.fn(),
+      emitSessionEvent: vi.fn(),
+      request: {
+        sessionId: 'sess_1',
+        agentId: 'claude',
+        bindings: bindings('new-profile'),
+      },
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(restartSession).not.toHaveBeenCalled();
+
+    releaseCredentialWrite();
+    await expect(switchPromise).resolves.toMatchObject({
+      ok: true,
+      action: 'restart_requested',
+    });
+    expect(restartSession).toHaveBeenCalledOnce();
   });
 
   it('updates inactive session bindings without requesting a restart', async () => {

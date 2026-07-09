@@ -22,6 +22,11 @@ export const CLAUDE_SUBSCRIPTION_OAUTH_SCOPES = CLAUDE_CODE_RECOMMENDED_OAUTH_SC
 export const CLAUDE_SUBSCRIPTION_OAUTH_SCOPE = CLAUDE_CODE_RECOMMENDED_OAUTH_SCOPE;
 export const CLAUDE_SUBSCRIPTION_REQUIRED_CLAUDE_CODE_SCOPES = CLAUDE_CODE_REQUIRED_OAUTH_SCOPES;
 
+export type ConnectedAccountOauthRefreshResponseIdentity = Readonly<{
+  providerAccountId?: string | null;
+  providerEmail?: string | null;
+}>;
+
 export type ConnectedAccountOAuthDescriptor = Readonly<{
   clientIdEnv: string;
   defaultClientId: string;
@@ -35,6 +40,16 @@ export type ConnectedAccountOAuthDescriptor = Readonly<{
     now: number;
     payload: unknown;
   }>) => ConnectedAccountOauthCredentialPayload;
+  /**
+   * CS-FIX-4: provider-owned identity extraction from a REFRESH response. Providers whose account
+   * identity is carried in the refresh id_token (e.g. openai-codex) implement this so the central
+   * refresher (`refreshConnectedAccountOauthTokens`) stays config-driven with no provider-name
+   * branch. Absent ⇒ the refresh response carries no provider identity.
+   */
+  extractRefreshResponseIdentity?: (input: Readonly<{
+    idToken: string | null;
+    payload: unknown;
+  }>) => ConnectedAccountOauthRefreshResponseIdentity;
 }>;
 
 export type ConnectedAccountOauthCredentialPayload = Readonly<{
@@ -71,6 +86,10 @@ export type ResolvedConnectedAccountOauthConfig = Readonly<{
   tokenUrl: string;
   refreshTokenBody: 'form' | 'json';
   scopes: readonly string[];
+  extractRefreshResponseIdentity?: (input: Readonly<{
+    idToken: string | null;
+    payload: unknown;
+  }>) => ConnectedAccountOauthRefreshResponseIdentity;
 }>;
 
 function resolveNonEmptyEnv(raw: string | undefined, fallback: string): string {
@@ -178,6 +197,10 @@ export const CONNECTED_ACCOUNT_DESCRIPTORS = [
           raw: null,
         };
       },
+      extractRefreshResponseIdentity: ({ idToken }) => ({
+        providerAccountId: extractOpenAiCodexAccountId(idToken),
+        providerEmail: extractOpenAiCodexEmail(idToken),
+      }),
     },
     ui: { iconName: 'openai', oauthAddActionModes: ['device', 'browser'] },
   },
@@ -339,5 +362,8 @@ export function resolveConnectedAccountOauthConfig(
     tokenUrl,
     refreshTokenBody: oauth.refreshTokenBody,
     scopes: oauth.scopes,
+    ...(oauth.extractRefreshResponseIdentity
+      ? { extractRefreshResponseIdentity: oauth.extractRefreshResponseIdentity }
+      : {}),
   };
 }

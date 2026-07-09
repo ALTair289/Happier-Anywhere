@@ -1,5 +1,6 @@
 import type { ItemAction } from '@/components/ui/lists/itemActions';
 import { resolveConnectedServiceProfileLabel } from '@/sync/domains/connectedServices/connectedServiceProfilePreferences';
+import { resolveConnectedServiceCredentialHealthStatus } from '@/sync/domains/connectedServices/resolveConnectedServiceCredentialHealthStatus';
 import { t } from '@/text';
 import {
     formatConnectedServiceIdentityVisibleLabel,
@@ -7,6 +8,7 @@ import {
 } from './resolveConnectedServiceIdentityDisplay';
 import {
     ConnectedServiceAuthGroupPolicyV1Schema,
+    type ConnectedServiceCredentialHealthStatusV1,
     type ConnectedServiceAuthGroupPolicyV1,
     type ConnectedServiceAuthGroupV1,
     type ConnectedServiceId,
@@ -65,6 +67,7 @@ export type ConnectedServiceGroupProfileLike = Readonly<{
     profileId?: string;
     label?: string | null;
     providerEmail?: string | null;
+    status?: unknown;
 }>;
 
 export const CONNECTED_SERVICE_GROUP_DEFAULT_POLICY: ConnectedServiceAuthGroupPolicyV1 = ConnectedServiceAuthGroupPolicyV1Schema.parse({});
@@ -84,10 +87,7 @@ const connectedServiceAuthGroupPolicyKeys = [
     'preTurnProbeMode',
     'preTurnProbeOrder',
     'recoveryMode',
-    'recoveryPromptMode',
     'resumePromptMode',
-    'effectiveMeterStrategy',
-    'memberRuntimeStatePersistence',
 ] as const satisfies ReadonlyArray<keyof ConnectedServiceAuthGroupPolicyV1>;
 
 function readRecord(value: unknown): Record<string, unknown> | null {
@@ -246,6 +246,20 @@ export function parseConnectedServiceGroupViewModels(groups: unknown): Connected
         const normalized = createConnectedServiceGroupViewModel(group);
         return normalized ? [normalized] : [];
     });
+}
+
+export function resolveConnectedServiceGroupMemberCredentialHealthStatus(params: Readonly<{
+    member: Pick<ConnectedServiceGroupMemberViewModel, 'profileId' | 'blocker'>;
+    profiles?: ReadonlyArray<ConnectedServiceGroupProfileLike>;
+}>): ConnectedServiceCredentialHealthStatusV1 {
+    const profile = params.profiles?.find((candidate) =>
+        readConnectedServiceGroupString(candidate.profileId) === params.member.profileId
+    ) ?? null;
+    if (params.member.blocker?.kind === 'auth_invalid') return 'needs_reauth';
+    if (profile && Object.prototype.hasOwnProperty.call(profile, 'status')) {
+        return resolveConnectedServiceCredentialHealthStatus(profile.status);
+    }
+    return 'connected';
 }
 
 export type ConnectedServiceGroupIdentityResolver = Readonly<{

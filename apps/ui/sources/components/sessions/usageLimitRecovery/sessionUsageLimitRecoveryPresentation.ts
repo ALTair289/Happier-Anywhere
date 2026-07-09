@@ -75,6 +75,8 @@ export type SessionUsageLimitRecoveryTranslationKey =
     | 'session.usageLimitRecovery.statusReady'
     | 'session.usageLimitRecovery.statusWaiting'
     | 'session.usageLimitRecovery.statusWaitingUntil'
+    | 'session.usageLimitRecovery.statusWaitingResetUntil'
+    | 'session.usageLimitRecovery.statusAccountRotationPending'
     | 'session.usageLimitRecovery.statusChecking'
     | 'session.usageLimitRecovery.statusPaused'
     | 'session.usageLimitRecovery.statusExhausted'
@@ -84,6 +86,7 @@ export type SessionUsageLimitRecoveryTranslationKey =
 type SessionUsageLimitRecoveryTimeTranslationKey =
     | 'session.usageLimitRecovery.resetBody'
     | 'session.usageLimitRecovery.statusWaitingUntil'
+    | 'session.usageLimitRecovery.statusWaitingResetUntil'
     | 'session.usageLimitRecovery.resetCreditBody'
     | 'session.usageLimitRecovery.resetCreditExpiresBody';
 
@@ -301,6 +304,16 @@ function isExhaustedGroupRecoveryForIssue(
         && recovery.selectedAuth.groupId === connectedService.groupId;
 }
 
+function isAccountRotationPendingRecovery(
+    recovery: SessionUsageLimitRecoveryV1 | null | undefined,
+): boolean {
+    if (recovery?.status !== 'waiting' || recovery.selectedAuth.kind !== 'group') return false;
+    return recovery.lastProbeError === null
+        || recovery.lastProbeError === 'no_eligible_member'
+        || recovery.lastProbeError === 'connected_service_group_no_eligible_member'
+        || recovery.lastProbeError === 'switch_limit_reached';
+}
+
 function resolvePrimaryRecoveryAction(params: Readonly<{
     issue: SessionRuntimeIssueV1;
     recovery: SessionUsageLimitRecoveryV1 | null | undefined;
@@ -463,7 +476,14 @@ export function buildSessionUsageLimitStatusBadgePresentation(
         : recoveryStatus === 'checking'
         ? params.translate('session.usageLimitRecovery.statusChecking')
         : recoveryStatus === 'waiting' && waitUntilMs !== null
-            ? params.translate('session.usageLimitRecovery.statusWaitingUntil', { time: params.formatTime(waitUntilMs) })
+            ? params.translate(
+                resetAtMs !== null
+                    ? 'session.usageLimitRecovery.statusWaitingResetUntil'
+                    : 'session.usageLimitRecovery.statusWaitingUntil',
+                { time: params.formatTime(waitUntilMs) },
+            )
+            : recoveryStatus === 'waiting' && isAccountRotationPendingRecovery(params.recovery)
+                ? params.translate('session.usageLimitRecovery.statusAccountRotationPending')
             : recoveryStatus === 'waiting'
                 ? params.translate('session.usageLimitRecovery.statusWaiting')
                 : recoveryStatus === 'paused'

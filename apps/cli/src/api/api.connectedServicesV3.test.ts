@@ -23,6 +23,7 @@ vi.mock('axios', () => ({
 vi.mock('@/ui/logger', () => ({
   logger: {
     debug: vi.fn(),
+    warn: vi.fn(),
   },
 }));
 
@@ -120,6 +121,45 @@ describe('ApiClient connected services v3 credentials', () => {
     );
 
     const serializedLogs = JSON.stringify(vi.mocked(logger.debug).mock.calls);
+    expect(serializedLogs).not.toContain('plain-access-token');
+    expect(serializedLogs).not.toContain('plain-refresh-token');
+  });
+
+  it('emits a visible diagnostic when the registered profile id diverges from the v3 route profile id', async () => {
+    mockPost.mockResolvedValue({ status: 200, data: { profileId: 'other-profile' } });
+
+    const api = await ApiClient.create(createTestCredentials());
+    const record = buildConnectedServiceCredentialRecord({
+      now: 1_000,
+      serviceId: 'openai-codex',
+      profileId: 'work',
+      kind: 'oauth',
+      oauth: {
+        accessToken: 'plain-access-token',
+        refreshToken: 'plain-refresh-token',
+        idToken: null,
+        scope: null,
+        tokenType: null,
+        providerAccountId: null,
+        providerEmail: null,
+      },
+    });
+
+    await api.registerConnectedServiceCredentialPlain({
+      serviceId: 'openai-codex',
+      profileId: 'work',
+      content: { t: 'plain', v: record },
+    });
+
+    expect(vi.mocked(logger.warn)).toHaveBeenCalledWith(
+      '[API] Connected service credential registration profile mismatch',
+      {
+        serviceId: 'openai-codex',
+        routeProfileId: 'work',
+        registeredProfileId: 'other-profile',
+      },
+    );
+    const serializedLogs = JSON.stringify(vi.mocked(logger.warn).mock.calls);
     expect(serializedLogs).not.toContain('plain-access-token');
     expect(serializedLogs).not.toContain('plain-refresh-token');
   });

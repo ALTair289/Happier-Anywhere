@@ -28,6 +28,11 @@ describe('resolveConnectedServiceOauthErrorMessage', () => {
     expect(message).toBe('Failed to exchange authorization code');
   });
 
+  it('maps reconnect target mismatch to a visible profile-target error', () => {
+    const message = resolveConnectedServiceOauthErrorMessage(new Error('connected_service_reconnect_target_mismatch'), 'fallback');
+    expect(message).toBe('This reconnect returned credentials for a different connected profile. Start reconnect again from the target profile.');
+  });
+
   it('keeps human-readable error messages', () => {
     const message = resolveConnectedServiceOauthErrorMessage(new Error('Token exchange failed: 400'), 'fallback');
     expect(message).toBe('Token exchange failed: 400');

@@ -26,7 +26,7 @@ import {
 import { resolveTrackedConnectedServiceBindingsRaw } from '../trackedSessionConnectedServiceBindings';
 
 type AccountUsageRecorderLike = Readonly<{
-  store: Pick<ProviderAccountUsageStore, 'recordSnapshot' | 'resolveRecordId'>;
+  store: Pick<ProviderAccountUsageStore, 'recordSnapshot' | 'resolveRecordId' | 'resolveBySource'>;
   persistence: Pick<ProviderAccountUsagePersistenceScheduler, 'recordInBandSnapshot'> | null;
   publishRecordId?: ProviderAccountUsageRecordIdPublisher;
 }>;
@@ -66,9 +66,11 @@ function findTrackedSession(
 function buildAccountUsageSnapshotForRuntimeQuota(input: Readonly<{
   snapshot: ConnectedServiceQuotaSnapshotV1;
   groupGeneration?: number | null;
+  sourceProviderAccountId?: string | null;
 }>): ProviderAccountUsageSnapshotV1 {
   return buildProviderAccountUsageSnapshotFromConnectedServiceQuotaObservation({
     snapshot: input.snapshot,
+    sourceProviderAccountId: input.sourceProviderAccountId,
   });
 }
 
@@ -110,6 +112,7 @@ export async function recordConnectedServiceRuntimeQuotaSnapshotForSession(input
   serviceId: ConnectedServiceId;
   groupId?: string | null;
   groupGeneration?: number | null;
+  sourceProviderAccountId?: string | null;
   snapshot: ConnectedServiceQuotaSnapshotV1;
 }>): Promise<
   | Readonly<{ status: 'recorded'; groupRuntimeStateRecorded: boolean; quotaStateRecorded: boolean }>
@@ -155,9 +158,11 @@ export async function recordConnectedServiceRuntimeQuotaSnapshotForSession(input
   let quotaStateRecorded = false;
   let recordedAccountUsageSnapshot: ProviderAccountUsageSnapshotV1 | null = null;
   let recordedAccountUsageRecordId: string | null = null;
+  let recordedAccountUsageSourceLinked = false;
   const accountUsageSnapshot = buildAccountUsageSnapshotForRuntimeQuota({
     snapshot: input.snapshot,
     groupGeneration: activeGroupGeneration,
+    sourceProviderAccountId: input.sourceProviderAccountId,
   });
   const accountUsageObservation = buildRuntimeQuotaObservation({
     serviceId: input.serviceId,
@@ -172,15 +177,19 @@ export async function recordConnectedServiceRuntimeQuotaSnapshotForSession(input
         store: input.accountUsageRecorder.store,
         persistence: input.accountUsageRecorder.persistence,
         publishRecordId: input.accountUsageRecorder.publishRecordId,
+        sourceProviderAccountId: input.sourceProviderAccountId,
         observation: accountUsageObservation,
         sessionId: input.sessionId,
         snapshot: accountUsageSnapshot,
       });
       if (recorded.status === 'recorded') {
-        quotaStateRecorded = recorded.persisted;
+        quotaStateRecorded = true;
         recordedAccountUsageRecordId = recorded.recordId;
         recordedAccountUsageSnapshot =
           input.accountUsageRecorder.store.resolveRecordId(recorded.recordId) ?? accountUsageSnapshot;
+        recordedAccountUsageSourceLinked = accountUsageObservation.sources?.some((source) =>
+          input.accountUsageRecorder?.store.resolveBySource?.(source)?.recordId === recorded.recordId,
+        ) === true;
       }
     } catch {
       quotaStateRecorded = false;
@@ -190,6 +199,7 @@ export async function recordConnectedServiceRuntimeQuotaSnapshotForSession(input
   if (
     recordedAccountUsageSnapshot
     && recordedAccountUsageRecordId
+    && recordedAccountUsageSourceLinked
     && selection?.kind === 'group'
     && activeGroupGeneration !== null
   ) {

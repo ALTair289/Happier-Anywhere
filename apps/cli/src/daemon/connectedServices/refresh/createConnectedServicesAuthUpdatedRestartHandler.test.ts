@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import type { ConnectedServiceId } from '@happier-dev/protocol';
 import type { CatalogAgentId } from '@/backends/types';
 import { agent as openCodeAgent } from '@/backends/opencode';
 import { agent as piAgent } from '@/backends/pi';
@@ -36,12 +37,23 @@ describe('createConnectedServicesAuthUpdatedRestartHandler', () => {
   function createLifecycleDescriptor(
     agentId: CatalogAgentId,
     mode: 'restart_required' | 'no_restart_required',
+    options: Readonly<{
+      noRestartRequiredWhenAccessTokenCallbackServiceIds?: ReadonlyArray<ConnectedServiceId>;
+    }> = {},
   ): ConnectedServiceCredentialLifecycleDescriptor {
     return {
       providerId: agentId,
       serviceIds: ['claude-subscription'],
       spawnPreflightOauthRefresh: { mode: 'expiry_window' },
-      refreshedCredentialApplication: { mode },
+      refreshedCredentialApplication: {
+        mode,
+        ...(options.noRestartRequiredWhenAccessTokenCallbackServiceIds
+          ? {
+              noRestartRequiredWhenAccessTokenCallbackServiceIds:
+                options.noRestartRequiredWhenAccessTokenCallbackServiceIds,
+            }
+          : {}),
+      },
       predictiveSoftSwitch: { mode: agentId === 'codex' ? 'supported' : 'unsupported' },
       sameAccountFanoutStrategy: agentId === 'codex' ? 'provider_account_id' : 'none',
       runtimeAuthApply: {
@@ -98,6 +110,105 @@ describe('createConnectedServicesAuthUpdatedRestartHandler', () => {
     }));
   });
 
+  it('does not request a restart for a target that can refresh Claude subscription access tokens through the SDK callback', async () => {
+    const restartRequestedPids = new Set<number>();
+    const requestRestartSignal = vi.fn(async (_params: RestartSignalParams) => ({ signaled: true }));
+    const pidToTrackedSession = new Map<number, TrackedSession>([
+      [1, createTrackedSession({ pid: 1, sessionId: 's1' })],
+    ]);
+
+    const handler = createConnectedServicesAuthUpdatedRestartHandler({
+      restartRequestedPids,
+      pidToTrackedSession,
+      resolveLifecycleDescriptor: async (agentId) =>
+        createLifecycleDescriptor(agentId, 'restart_required', {
+          noRestartRequiredWhenAccessTokenCallbackServiceIds: ['claude-subscription'],
+        }),
+      resolveProcessGroupPid: (tracked) => tracked.pid,
+      requestRestartSignal,
+      restartSignalDelayMs: 0,
+    } satisfies RestartHandlerParams);
+
+    await handler({
+      binding: { serviceId: 'claude-subscription', profileId: 'work' },
+      affectedTargets: [
+        {
+          pid: 1,
+          agentId: 'claude',
+          accessTokenRefresh: { mode: 'daemon_callback' },
+        },
+      ],
+    });
+
+    expect(requestRestartSignal).not.toHaveBeenCalled();
+    expect(restartRequestedPids.has(1)).toBe(false);
+  });
+
+  it('never restarts Claude sessions for refreshed claude-subscription credentials with the REAL catalog descriptor (stable home is read live by every runner shape)', async () => {
+    // Live incident 2026-07-08: a unified-terminal Claude session (no SDK daemon_callback
+    // capability) was restarted on every refresh distribution. The terminal `claude` binary
+    // re-reads the stable home's .credentials.json live (user-proven), so NO Claude runner shape
+    // needs a restart for a refreshed claude-subscription credential — only account SWITCHES
+    // (generation applies, via the switch coordinator) restart sessions.
+    const { resolveConnectedServiceCredentialLifecycleDescriptor } = await import('@/backends/catalog');
+    const restartRequestedPids = new Set<number>();
+    const requestRestartSignal = vi.fn(async (_params: RestartSignalParams) => ({ signaled: true }));
+    const pidToTrackedSession = new Map<number, TrackedSession>([
+      [1, createTrackedSession({ pid: 1, sessionId: 's1' })],
+    ]);
+
+    const handler = createConnectedServicesAuthUpdatedRestartHandler({
+      restartRequestedPids,
+      pidToTrackedSession,
+      resolveLifecycleDescriptor: resolveConnectedServiceCredentialLifecycleDescriptor,
+      resolveProcessGroupPid: (tracked) => tracked.pid,
+      requestRestartSignal,
+      restartSignalDelayMs: 0,
+    } satisfies RestartHandlerParams);
+
+    // Unified-terminal shape: NO accessTokenRefresh capability on the target.
+    await handler({
+      binding: { serviceId: 'claude-subscription', profileId: 'work', groupId: 'team', generation: 7 },
+      affectedTargets: [{ pid: 1, agentId: 'claude' }],
+    });
+
+    expect(requestRestartSignal).not.toHaveBeenCalled();
+    expect(restartRequestedPids.has(1)).toBe(false);
+  });
+
+  it('keeps restart fallback for targets without an active access-token callback', async () => {
+    const restartRequestedPids = new Set<number>();
+    const requestRestartSignal = vi.fn(async (_params: RestartSignalParams) => ({ signaled: true }));
+    const pidToTrackedSession = new Map<number, TrackedSession>([
+      [1, createTrackedSession({ pid: 1, sessionId: 's1' })],
+    ]);
+
+    const handler = createConnectedServicesAuthUpdatedRestartHandler({
+      restartRequestedPids,
+      pidToTrackedSession,
+      resolveLifecycleDescriptor: async (agentId) =>
+        createLifecycleDescriptor(agentId, 'restart_required', {
+          noRestartRequiredWhenAccessTokenCallbackServiceIds: ['claude-subscription'],
+        }),
+      resolveProcessGroupPid: (tracked) => tracked.pid,
+      requestRestartSignal,
+      restartSignalDelayMs: 0,
+    } satisfies RestartHandlerParams);
+
+    await handler({
+      binding: { serviceId: 'claude-subscription', profileId: 'work' },
+      affectedTargets: [
+        {
+          pid: 1,
+          agentId: 'claude',
+        },
+      ],
+    });
+
+    expect(requestRestartSignal).toHaveBeenCalledWith(expect.objectContaining({ pid: 1 }));
+    expect(restartRequestedPids.has(1)).toBe(true);
+  });
+
   it('does not restart OpenCode or Pi for brokered same-account OAuth refreshes', async () => {
     const restartRequestedPids = new Set<number>();
     const requestRestartSignal = vi.fn(async (_params: RestartSignalParams) => ({ signaled: true }));
@@ -130,6 +241,78 @@ describe('createConnectedServicesAuthUpdatedRestartHandler', () => {
 
     expect(requestRestartSignal).not.toHaveBeenCalled();
     expect(restartRequestedPids.size).toBe(0);
+  });
+
+  it('restarts a Pi claude-subscription SETUP-TOKEN session on reconnect (raw api_key, no broker to hot-apply)', async () => {
+    // R3-7: Pi's descriptor no-restart claim for claude-subscription is only truthful for the brokered
+    // OAuth shape. A setup-token materializes as a raw api_key baked into auth.json at spawn (no broker
+    // env), so a reconnected credential can only reach the running Pi process via a restart. The
+    // absence of PI_BROKER_SELECTIONS_ENV on the tracked session marks it as the setup-token shape.
+    const restartRequestedPids = new Set<number>();
+    const requestRestartSignal = vi.fn(async (_params: RestartSignalParams) => ({ signaled: true }));
+    const pidToTrackedSession = new Map<number, TrackedSession>([
+      [1, createTrackedSession({ pid: 1, sessionId: 'pi-setup-token-session' })],
+    ]);
+
+    const handler = createConnectedServicesAuthUpdatedRestartHandler({
+      restartRequestedPids,
+      pidToTrackedSession,
+      resolveLifecycleDescriptor: async (agentId) => {
+        if (agentId === 'pi') return await piAgent.getConnectedServiceCredentialLifecycleDescriptor();
+        return createLifecycleDescriptor(agentId, 'restart_required');
+      },
+      resolveProcessGroupPid: (tracked) => tracked.pid,
+      requestRestartSignal,
+      restartSignalDelayMs: 0,
+    } satisfies RestartHandlerParams);
+
+    await handler({
+      binding: { serviceId: 'claude-subscription', profileId: 'work' },
+      affectedTargets: [{ pid: 1, agentId: 'pi' }],
+      trigger: 'reconnect_propagation',
+    });
+
+    expect(requestRestartSignal).toHaveBeenCalledWith(expect.objectContaining({ pid: 1 }));
+    expect(restartRequestedPids.has(1)).toBe(true);
+  });
+
+  it('does not restart a Pi claude-subscription OAuth (brokered) session on reconnect', async () => {
+    const { PI_BROKER_SELECTIONS_ENV, serializePiBrokerSelections } = await import('@/backends/pi/brokerExtension');
+    const restartRequestedPids = new Set<number>();
+    const requestRestartSignal = vi.fn(async (_params: RestartSignalParams) => ({ signaled: true }));
+    const tracked: TrackedSession = {
+      ...createTrackedSession({ pid: 1, sessionId: 'pi-brokered-session' }),
+      spawnOptions: {
+        directory: '/tmp/pi-brokered-session',
+        environmentVariables: {
+          [PI_BROKER_SELECTIONS_ENV]: serializePiBrokerSelections({
+            anthropic: { serviceId: 'claude-subscription', profileId: 'work', accountId: null, planType: null },
+          }),
+        },
+      },
+    };
+    const pidToTrackedSession = new Map<number, TrackedSession>([[1, tracked]]);
+
+    const handler = createConnectedServicesAuthUpdatedRestartHandler({
+      restartRequestedPids,
+      pidToTrackedSession,
+      resolveLifecycleDescriptor: async (agentId) => {
+        if (agentId === 'pi') return await piAgent.getConnectedServiceCredentialLifecycleDescriptor();
+        return createLifecycleDescriptor(agentId, 'restart_required');
+      },
+      resolveProcessGroupPid: (t) => t.pid,
+      requestRestartSignal,
+      restartSignalDelayMs: 0,
+    } satisfies RestartHandlerParams);
+
+    await handler({
+      binding: { serviceId: 'claude-subscription', profileId: 'work' },
+      affectedTargets: [{ pid: 1, agentId: 'pi' }],
+      trigger: 'reconnect_propagation',
+    });
+
+    expect(requestRestartSignal).not.toHaveBeenCalled();
+    expect(restartRequestedPids.has(1)).toBe(false);
   });
 
   it('still restarts OpenCode when a direct API-key connected service is reconnected', async () => {

@@ -857,6 +857,7 @@ describe('pendingQueueV2Transport', () => {
         mockGet.mockResolvedValueOnce({
             data: {
                 pending: [
+                    { localId: 'typed-provider', status: 'queued', deliveryState: null, deliveryStatus: { status: 'delivering' } },
                     { localId: 'provider-1', status: 'queued', deliveryState: 'delivering' },
                     { localId: 'regular-queued', status: 'queued', deliveryState: null },
                     { localId: 'provider-blocked', status: 'queued', deliveryState: 'blocked' },
@@ -870,7 +871,7 @@ describe('pendingQueueV2Transport', () => {
         await expect(listPendingQueueV2ProviderDeliveryLocalIdsFromServer({
             token: 'token',
             sessionId: 'session/with spaces',
-        })).resolves.toEqual(['provider-1', 'provider-2']);
+        })).resolves.toEqual(['typed-provider', 'provider-1', 'provider-2']);
 
         expect(mockGet).toHaveBeenCalledWith(
             expect.stringContaining('/v2/sessions/session%2Fwith%20spaces/pending'),
@@ -886,7 +887,13 @@ describe('pendingQueueV2Transport', () => {
             data: {
                 pending: [
                     { localId: 'other-local', status: 'queued', deliveryState: 'blocked', deliveryBlockedReason: 'payload_too_large' },
-                    { localId: 'blocked-local', status: 'queued', deliveryState: 'blocked', deliveryBlockedReason: 'runtime_disposed_before_delivery' },
+                    {
+                        localId: 'blocked-local',
+                        status: 'queued',
+                        deliveryState: null,
+                        deliveryBlockedReason: null,
+                        deliveryStatus: { status: 'blocked', reason: 'runtime_disposed_before_delivery' },
+                    },
                     { localId: 'delivering-local', status: 'queued', deliveryState: 'delivering' },
                     { localId: 'future-local', status: 'queued', deliveryState: 'blocked', deliveryBlockedReason: 'future_reason' },
                 ],

@@ -23,7 +23,9 @@ function readString(value: unknown): string | null {
 }
 
 function readNumber(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.trunc(value)
+    : null;
 }
 
 function readClaudeSubscriptionOauthRecord(
@@ -47,7 +49,8 @@ export function resolveClaudeSharedGroupHotApplyTarget(
   const metadata = readClaudeRuntimeAuthSharedGroupSurfaceMetadata(selection);
   const groupId = readString(selectionRecord.groupId);
   const activeProfileId = readString(selectionRecord.activeProfileId);
-  if (!record || !metadata || !groupId || !activeProfileId) return null;
+  const generation = readNumber(selectionRecord.generation);
+  if (!record || !metadata || !groupId || !activeProfileId || generation === null) return null;
   return {
     record,
     metadata,
@@ -57,7 +60,7 @@ export function resolveClaudeSharedGroupHotApplyTarget(
       groupId,
       activeProfileId,
       fallbackProfileId: readString(selectionRecord.fallbackProfileId) ?? activeProfileId,
-      generation: readNumber(selectionRecord.generation) ?? 0,
+      generation,
     },
   };
 }

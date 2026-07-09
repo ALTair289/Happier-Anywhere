@@ -1,25 +1,39 @@
-import { createHash, randomUUID } from 'node:crypto';
-import { chmod, mkdir, rename, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 
 import type { ConnectedServiceCredentialRecordV1 } from '@happier-dev/protocol';
+
+import { logger } from '@/ui/logger';
 
 import {
   classifyClaudeCodeCredentialHealth,
   type ClaudeCodeCredentialHealth,
 } from './claudeCodeCredentialHealth';
+import { readClaudeCodeMacOsKeychainCredentialWithMetadata } from './claudeCodeMacOsKeychain';
 import { parseClaudeCodeCredentialScopes } from './claudeCodeCredentialScopes';
+import {
+  buildSafeClaudeCodeCredentialComparatorEntry,
+  computeClaudeCodeCredentialAccountProofFingerprint,
+  computeClaudeCodeCredentialFingerprint,
+  computeClaudeCodeCredentialSafeTokenFingerprint,
+  isExistingClaudeCodeCredentialNewer,
+  readClaudeCodeCredentialFreshness,
+  readClaudeCodeNativeCredentialPayload,
+  readNumber,
+  readObject,
+  readOptionalString,
+  readString,
+  type ClaudeCodeNativeCredentialPayload,
+} from './claudeCodeNativeCredentialPayload';
 
-export type ClaudeCodeNativeCredentialPayload = Readonly<{
-  claudeAiOauth: Readonly<{
-    accessToken: string;
-    refreshToken: string;
-    expiresAt?: number;
-    scopes: readonly string[];
-    subscriptionType?: string;
-    rateLimitTier?: string;
-  }>;
-}>;
+export {
+  computeClaudeCodeCredentialAccountProofFingerprint,
+  computeClaudeCodeCredentialFingerprint,
+  computeClaudeCodeCredentialSafeTokenFingerprint,
+  readClaudeCodeNativeCredentialPayload,
+  type ClaudeCodeNativeCredentialPayload,
+} from './claudeCodeNativeCredentialPayload';
 
 export type ClaudeCodeCredentialFileParseResult =
   | Readonly<{
@@ -41,72 +55,26 @@ export type ClaudeCodeCredentialPayloadBuildResult =
   | Readonly<{ status: 'ok'; payload: ClaudeCodeNativeCredentialPayload }>
   | Readonly<{ status: 'diagnostic'; health: ClaudeCodeCredentialHealth }>;
 
-function readObject(value: unknown): Record<string, unknown> | null {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
-}
+export type ClaudeCodeNativeCredentialFileReadResult = Readonly<{
+  payload: ClaudeCodeNativeCredentialPayload;
+  updatedAtMs: number;
+}>;
 
-function readString(value: unknown): string | null {
-  return typeof value === 'string' && value.trim().length > 0 ? value : null;
-}
+export type ClaudeCodeNativeCredentialReadSource = 'file' | 'macos_keychain';
 
-function readOptionalString(value: unknown): string | undefined {
-  const text = readString(value);
-  return text ?? undefined;
-}
+export type ClaudeCodeNativeCredentialReadResult = Readonly<{
+  payload: ClaudeCodeNativeCredentialPayload;
+  updatedAtMs: number;
+  source: ClaudeCodeNativeCredentialReadSource;
+}>;
 
-function readNumber(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
-}
+type ClaudeCodeCredentialDiagnosticContext = Readonly<{
+  profileId?: string | undefined;
+  homeKind?: 'profile' | 'group' | string | undefined;
+}>;
 
 export function resolveClaudeCodeCredentialsFilePath(claudeConfigDir: string): string {
   return join(claudeConfigDir, '.credentials.json');
-}
-
-function canonicalizeJsonValue(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(canonicalizeJsonValue);
-  }
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([key, nested]) => [key, canonicalizeJsonValue(nested)]),
-    );
-  }
-  return value;
-}
-
-export function computeClaudeCodeCredentialFingerprint(payload: unknown): string {
-  const canonical = JSON.stringify(canonicalizeJsonValue(payload));
-  return `sha256:${createHash('sha256').update(canonical).digest('hex')}`;
-}
-
-export function computeClaudeCodeCredentialAccountProofFingerprint(payload: unknown): string | null {
-  const root = readObject(payload);
-  const credential = readObject(root?.claudeAiOauth);
-  const accessToken = readString(credential?.accessToken);
-  const refreshToken = readString(credential?.refreshToken);
-  if (!accessToken || !refreshToken) return null;
-  const subscriptionType = readOptionalString(credential?.subscriptionType);
-  const rateLimitTier = readOptionalString(credential?.rateLimitTier);
-
-  return computeClaudeCodeCredentialFingerprint({
-    claudeAiOauth: {
-      accessToken,
-      refreshToken,
-      scopes: parseClaudeCodeCredentialScopes(
-        Array.isArray(credential?.scopes)
-          ? credential.scopes.filter((scope): scope is string => typeof scope === 'string')
-          : typeof credential?.scopes === 'string'
-            ? credential.scopes
-            : null,
-      ),
-      ...(subscriptionType ? { subscriptionType } : {}),
-      ...(rateLimitTier ? { rateLimitTier } : {}),
-    },
-  });
 }
 
 export function parseClaudeCodeCredentialFile(value: unknown): ClaudeCodeCredentialFileParseResult {
@@ -137,6 +105,121 @@ export function parseClaudeCodeCredentialFile(value: unknown): ClaudeCodeCredent
   };
 }
 
+export async function readClaudeCodeNativeCredentialFile(
+  claudeConfigDir: string,
+): Promise<ClaudeCodeNativeCredentialFileReadResult | null> {
+  return await readClaudeCodeNativeCredentialFilePath(resolveClaudeCodeCredentialsFilePath(claudeConfigDir));
+}
+
+export async function readClaudeCodeNativeCredential(params: Readonly<{
+  claudeConfigDir: string;
+  homeDir?: string | null | undefined;
+  username?: string | null | undefined;
+  diagnosticContext?: ClaudeCodeCredentialDiagnosticContext | undefined;
+}>): Promise<ClaudeCodeNativeCredentialReadResult | null> {
+  if (process.platform === 'darwin') {
+    const keychain = await readClaudeCodeMacOsKeychainCredentialWithMetadata({
+      claudeConfigDir: params.claudeConfigDir,
+      homeDir: params.homeDir,
+      username: params.username,
+    });
+    if (keychain) {
+      const result: ClaudeCodeNativeCredentialReadResult = {
+        payload: keychain.payload,
+        updatedAtMs: keychain.updatedAtMs ?? Date.now(),
+        source: 'macos_keychain',
+      };
+      logCredentialRead({
+        diagnosticContext: params.diagnosticContext,
+        result,
+      });
+      return result;
+    }
+  }
+  const file = await readClaudeCodeNativeCredentialFile(params.claudeConfigDir);
+  const result = file ? { ...file, source: 'file' as const } : null;
+  logCredentialRead({
+    diagnosticContext: params.diagnosticContext,
+    result,
+  });
+  return result;
+}
+
+async function readClaudeCodeNativeCredentialFilePath(
+  credentialPath: string,
+): Promise<ClaudeCodeNativeCredentialFileReadResult | null> {
+  try {
+    const [contents, stats] = await Promise.all([
+      readFile(credentialPath, 'utf8'),
+      stat(credentialPath),
+    ]);
+    const payload = readClaudeCodeNativeCredentialPayload(JSON.parse(contents));
+    if (!payload) return null;
+    return {
+      payload,
+      updatedAtMs: stats.mtimeMs,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function logCredentialFileDecision(params: Readonly<{
+  decision: 'write' | 'skip_existing_newer';
+  diagnosticContext?: ClaudeCodeCredentialDiagnosticContext | undefined;
+  existing: ClaudeCodeNativeCredentialReadResult | ClaudeCodeNativeCredentialFileReadResult | null;
+  incomingPayload: ClaudeCodeNativeCredentialPayload;
+  incomingFreshness: ReturnType<typeof readClaudeCodeCredentialFreshness>;
+}>): void {
+  const existingFreshness = params.existing
+    ? readClaudeCodeCredentialFreshness(params.existing.payload, params.existing.updatedAtMs)
+    : null;
+  logger.info('[DAEMON RUN] Claude Code credential file decision', {
+    event: 'claude_code_credential_file_decision',
+    ...(params.diagnosticContext ?? {}),
+    decision: params.decision,
+    comparatorBasis: {
+      existing: params.existing && existingFreshness
+        ? buildSafeClaudeCodeCredentialComparatorEntry(
+            params.existing.payload,
+            existingFreshness,
+            'source' in params.existing ? params.existing.source : 'file',
+          )
+        : null,
+      incoming: buildSafeClaudeCodeCredentialComparatorEntry(
+        params.incomingPayload,
+        params.incomingFreshness,
+        'incoming',
+      ),
+      sameRefreshToken: existingFreshness
+        ? existingFreshness.refreshToken === params.incomingFreshness.refreshToken
+        : null,
+    },
+    decidedAtMs: Date.now(),
+  });
+}
+
+function logCredentialRead(params: Readonly<{
+  diagnosticContext?: ClaudeCodeCredentialDiagnosticContext | undefined;
+  result: ClaudeCodeNativeCredentialReadResult | null;
+}>): void {
+  const freshness = params.result
+    ? readClaudeCodeCredentialFreshness(params.result.payload, params.result.updatedAtMs)
+    : null;
+  logger.info('[DAEMON RUN] Claude Code credential read', {
+    event: 'claude_code_credential_read',
+    ...(params.diagnosticContext ?? {}),
+    source: params.result?.source ?? 'missing',
+    credential: params.result && freshness
+      ? buildSafeClaudeCodeCredentialComparatorEntry(
+          params.result.payload,
+          freshness,
+          params.result.source,
+        )
+      : null,
+  });
+}
+
 export function buildClaudeCodeCredentialPayload(
   record: ConnectedServiceCredentialRecordV1,
 ): ClaudeCodeCredentialPayloadBuildResult {
@@ -158,7 +241,6 @@ export function buildClaudeCodeCredentialPayload(
     payload: {
       claudeAiOauth: {
         accessToken: record.oauth.accessToken,
-        refreshToken: record.oauth.refreshToken,
         // A null/unknown expiry must NOT be coerced to 0: writing `expiresAt: 0`
         // produces an immediately-expired credential (a latent fail-open/fail-closed
         // trap depending on the consumer). Omit it so the value reads as "unknown".
@@ -174,22 +256,97 @@ export function buildClaudeCodeCredentialPayload(
 export async function writeClaudeCodeCredentialsFile(params: Readonly<{
   claudeConfigDir: string;
   payload: ClaudeCodeNativeCredentialPayload;
+  incomingUpdatedAtMs?: number;
+  compareCredentialPath?: string;
+  preserveNewerExistingCredential?: boolean;
+  homeDir?: string | null | undefined;
+  username?: string | null | undefined;
+  diagnosticContext?: ClaudeCodeCredentialDiagnosticContext | undefined;
 }>): Promise<string> {
   await mkdir(params.claudeConfigDir, { recursive: true });
   const credentialPath = resolveClaudeCodeCredentialsFilePath(params.claudeConfigDir);
+  const compareCredentialPath = params.compareCredentialPath ?? credentialPath;
+  const incomingFreshness = readClaudeCodeCredentialFreshness(
+    params.payload,
+    typeof params.incomingUpdatedAtMs === 'number' && Number.isFinite(params.incomingUpdatedAtMs)
+      ? params.incomingUpdatedAtMs
+      : Date.now(),
+  );
+  const existing = compareCredentialPath === credentialPath || process.platform === 'darwin'
+    ? await readClaudeCodeNativeCredential({
+        claudeConfigDir: compareCredentialPath === credentialPath
+          ? params.claudeConfigDir
+          : dirname(compareCredentialPath),
+        homeDir: params.homeDir,
+        username: params.username,
+      })
+    : await readClaudeCodeNativeCredentialFilePath(compareCredentialPath);
+  if (existing && params.preserveNewerExistingCredential !== false) {
+    const existingFreshness = readClaudeCodeCredentialFreshness(existing.payload, existing.updatedAtMs);
+    if (isExistingClaudeCodeCredentialNewer({ existing: existingFreshness, incoming: incomingFreshness })) {
+      logCredentialFileDecision({
+        decision: 'skip_existing_newer',
+        diagnosticContext: params.diagnosticContext,
+        existing,
+        incomingPayload: params.payload,
+        incomingFreshness,
+      });
+      if (
+        compareCredentialPath !== credentialPath
+        || ('source' in existing && existing.source === 'macos_keychain')
+      ) {
+        await writeClaudeCodeCredentialsFileUnchecked({
+          credentialPath,
+          claudeConfigDir: params.claudeConfigDir,
+          payload: existing.payload,
+        });
+      }
+      return credentialPath;
+    }
+  }
+
+  logCredentialFileDecision({
+    decision: 'write',
+    diagnosticContext: params.diagnosticContext,
+    existing,
+    incomingPayload: params.payload,
+    incomingFreshness,
+  });
+  await writeClaudeCodeCredentialsFileUnchecked({
+    credentialPath,
+    claudeConfigDir: params.claudeConfigDir,
+    payload: params.payload,
+  });
+  return credentialPath;
+}
+
+async function writeClaudeCodeCredentialsFileUnchecked(params: Readonly<{
+  credentialPath: string;
+  claudeConfigDir: string;
+  payload: ClaudeCodeNativeCredentialPayload;
+}>): Promise<void> {
   const tempPath = join(params.claudeConfigDir, `.credentials.${randomUUID()}.tmp`);
+  const payload = stripClaudeCodeCredentialFileRefreshToken(params.payload);
   try {
-    await writeFile(tempPath, `${JSON.stringify(params.payload)}\n`, { mode: 0o600 });
+    await writeFile(tempPath, `${JSON.stringify(payload)}\n`, { mode: 0o600 });
     if (process.platform !== 'win32') {
       await chmod(tempPath, 0o600);
     }
-    await rename(tempPath, credentialPath);
+    await rename(tempPath, params.credentialPath);
     if (process.platform !== 'win32') {
-      await chmod(credentialPath, 0o600);
+      await chmod(params.credentialPath, 0o600);
     }
-    return credentialPath;
   } catch (error) {
     await rm(tempPath, { force: true }).catch(() => {});
     throw error;
   }
+}
+
+function stripClaudeCodeCredentialFileRefreshToken(
+  payload: ClaudeCodeNativeCredentialPayload,
+): ClaudeCodeNativeCredentialPayload {
+  const { refreshToken: _refreshToken, ...credential } = payload.claudeAiOauth;
+  return {
+    claudeAiOauth: credential,
+  };
 }

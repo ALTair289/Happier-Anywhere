@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { reconcileIndexedSameAccountFanoutCandidates } from './reconcileIndexedSameAccountFanoutCandidates';
+import { resolveRuntimeAccountIdentityFanoutMatch } from './resolveRuntimeAccountIdentityFanoutMatch';
 import type {
   RuntimeAccountIdentityEntry,
   RuntimeAccountIdentityProbeResult,
@@ -95,6 +96,23 @@ describe('reconcileIndexedSameAccountFanoutCandidates', () => {
     expect(reconciliation.invalidateRuntimeAccountIdentity).toHaveBeenCalledWith('sess_same');
   });
 
+  it('preserves unsupported runtime method as its own probe diagnostic', async () => {
+    const reconciliation = runReconcileWithProbe({
+      status: 'unavailable',
+      reason: 'unsupported_session_runtime_method',
+    });
+
+    await expect(reconciliation.result).resolves.toEqual([]);
+    expect(reconciliation.diagnostics).toContainEqual(expect.objectContaining({
+      event: 'quota_work_suppressed',
+      phase: 'same_account_fanout',
+      reason: 'unsupported_session_runtime_method',
+      probeStatus: 'unavailable',
+      probeReason: 'unsupported_session_runtime_method',
+    }));
+    expect(reconciliation.invalidateRuntimeAccountIdentity).toHaveBeenCalledWith('sess_same');
+  });
+
   it('records a stable account-mismatch diagnostic when exact runtime identity points at another account', async () => {
     const reconciliation = runReconcileWithProbe({
       status: 'verified',
@@ -123,5 +141,46 @@ describe('reconcileIndexedSameAccountFanoutCandidates', () => {
       actualGroupGeneration: 4,
     }));
     expect(reconciliation.invalidateRuntimeAccountIdentity).toHaveBeenCalledWith('sess_same');
+  });
+});
+
+describe('resolveRuntimeAccountIdentityFanoutMatch', () => {
+  it('returns shared auth-surface proof without a provider account sentinel', () => {
+    const result = resolveRuntimeAccountIdentityFanoutMatch({
+      strategy: 'shared_group_auth_surface',
+      serviceId: 'claude-subscription',
+      groupId: 'team',
+      candidate: {
+        sessionId: 'sess_shared',
+        serviceId: 'claude-subscription',
+        groupId: 'team',
+        profileId: 'active-profile',
+        accountLabel: null,
+        groupGeneration: 4,
+      },
+      result: {
+        status: 'verified',
+        strategy: 'shared_group_auth_surface',
+        sharedAuthSurfaceId: 'team',
+        proofStrength: 'exact',
+        source: 'runtime_identity_probe',
+        profileId: 'active-profile',
+        groupId: 'team',
+        groupGeneration: 4,
+      },
+      observedAtMs: 1_000,
+    });
+
+    expect(result.status).toBe('matched');
+    if (result.status !== 'matched') return;
+    expect('providerAccountId' in result.entry).toBe(false);
+    expect(result.entry).toMatchObject({
+      proofStrategy: 'shared_group_auth_surface',
+      sessionId: 'sess_shared',
+      serviceId: 'claude-subscription',
+      groupId: 'team',
+      profileId: 'active-profile',
+      groupGeneration: 4,
+    });
   });
 });

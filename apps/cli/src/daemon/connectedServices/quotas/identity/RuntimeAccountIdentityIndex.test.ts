@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
 import { RuntimeAccountIdentityIndex } from './RuntimeAccountIdentityIndex';
-import { resolveSessionsSharingProviderAccount } from './resolveSessionsSharingProviderAccount';
 
 describe('RuntimeAccountIdentityIndex', () => {
   it('resolves only fresh sessions proven on the same live provider account', () => {
@@ -48,7 +47,7 @@ describe('RuntimeAccountIdentityIndex', () => {
       groupGeneration: 4,
     });
 
-    expect(resolveSessionsSharingProviderAccount(index, {
+    expect(index.listByProviderAccount({
       serviceId: 'openai-codex',
       providerAccountId: 'acct-a',
       excludeSessionId: 'source',
@@ -59,7 +58,7 @@ describe('RuntimeAccountIdentityIndex', () => {
     }).map((entry) => entry.sessionId)).toEqual(['same-account']);
 
     now = 20_001;
-    expect(resolveSessionsSharingProviderAccount(index, {
+    expect(index.listByProviderAccount({
       serviceId: 'openai-codex',
       providerAccountId: 'acct-a',
     })).toEqual([]);
@@ -145,12 +144,12 @@ describe('RuntimeAccountIdentityIndex', () => {
       groupGeneration: 8,
     })).toEqual({ status: 'recorded' });
 
-    expect(resolveSessionsSharingProviderAccount(index, {
+    expect(index.listByProviderAccount({
       serviceId: 'openai-codex',
       providerAccountId: 'acct-codex',
       currentGroupGenerationBySessionId: new Map(),
     })).toEqual([]);
-    expect(resolveSessionsSharingProviderAccount(index, {
+    expect(index.listByProviderAccount({
       serviceId: 'openai-codex',
       providerAccountId: 'acct-codex',
       currentGroupGenerationBySessionId: new Map([['codex-session', 8]]),

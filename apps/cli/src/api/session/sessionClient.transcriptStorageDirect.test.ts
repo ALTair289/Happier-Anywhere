@@ -17,6 +17,10 @@ let supervisorOnConnected: (() => Promise<void> | void) | null = null;
 let supervisorOnDisconnected: ((params: { event: { reason?: string } }) => Promise<void> | void) | null = null;
 let supervisorReportProbeResult: ReturnType<typeof vi.fn> | null = null;
 
+function getSessionAliveEmitCalls(socket: ApiSessionSocketStub): unknown[][] {
+  return socket.emit.mock.calls.filter((call) => call[0] === 'session-alive');
+}
+
 async function getCurrentConnectionState() {
   const mod = await import('@/api/offline/serverConnectionErrors');
   return mod.connectionState;
@@ -415,6 +419,33 @@ describe('ApiSessionClient (HAPPIER_TRANSCRIPT_STORAGE=direct)', () => {
     }));
   });
 
+  it('replays the latest terminal turn status with presence after reconnect', async () => {
+    vi.resetModules();
+    sessionSocketStub = createApiSessionSocketStub({ connected: true });
+    userSocketStub = createApiSessionSocketStub({ connected: true });
+
+    vi.stubEnv('HAPPIER_TRANSCRIPT_STORAGE', 'direct');
+
+    const { ApiSessionClient } = await import('./sessionClient');
+
+    const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+    createdClients.push(client);
+
+    await client.sessionTurnLifecycle.beginTurn({ provider: 'claude', observedAt: 1_000 });
+    await client.sessionTurnLifecycle.completeTurn({ provider: 'claude', observedAt: 1_100 });
+
+    sessionSocketStub.emit.mockClear();
+    await expect(supervisorOnConnected?.()).resolves.toBeUndefined();
+
+    expect(sessionSocketStub.emit).toHaveBeenCalledWith('session-alive', expect.objectContaining({
+      sid: 's1',
+      thinking: false,
+      mode: 'remote',
+      latestTurnStatus: 'completed',
+      latestTurnStatusObservedAt: expect.any(Number),
+    }));
+  });
+
   it('replays presence updated while the supervised session transport is reconnecting after a proxy disconnect', async () => {
     vi.resetModules();
     sessionSocketStub = createApiSessionSocketStub({ connected: true });
@@ -446,5 +477,69 @@ describe('ApiSessionClient (HAPPIER_TRANSCRIPT_STORAGE=direct)', () => {
       thinking: true,
       mode: 'local',
     }));
+  });
+
+  it('reasserts session presence on reconnect even when no keepalive snapshot was recorded', async () => {
+    vi.resetModules();
+    sessionSocketStub = createApiSessionSocketStub({ connected: true });
+    userSocketStub = createApiSessionSocketStub({ connected: true });
+
+    vi.stubEnv('HAPPIER_TRANSCRIPT_STORAGE', 'direct');
+
+    const { ApiSessionClient } = await import('./sessionClient');
+
+    const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+    createdClients.push(client);
+
+    sessionSocketStub.emit.mockClear();
+    await expect(supervisorOnConnected?.()).resolves.toBeUndefined();
+
+    expect(sessionSocketStub.emit).toHaveBeenCalledWith('session-alive', expect.objectContaining({
+      sid: 's1',
+      thinking: false,
+      mode: 'remote',
+    }));
+    expect(sessionSocketStub.volatile.emit).not.toHaveBeenCalledWith('session-alive', expect.anything());
+  });
+
+  it('follows reconnect presence reassertion with a prompt non-volatile retry', async () => {
+    vi.resetModules();
+    sessionSocketStub = createApiSessionSocketStub({ connected: true });
+    userSocketStub = createApiSessionSocketStub({ connected: true });
+
+    vi.stubEnv('HAPPIER_TRANSCRIPT_STORAGE', 'direct');
+
+    const { ApiSessionClient } = await import('./sessionClient');
+
+    const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+    createdClients.push(client);
+
+    client.keepAlive(true, 'local');
+    sessionSocketStub.emit.mockClear();
+    sessionSocketStub.volatile.emit.mockClear();
+
+    await expect(supervisorOnConnected?.()).resolves.toBeUndefined();
+
+    let sessionAliveEmitCalls = getSessionAliveEmitCalls(sessionSocketStub);
+    expect(sessionAliveEmitCalls).toHaveLength(1);
+    expect(sessionAliveEmitCalls.at(-1)).toEqual(['session-alive', expect.objectContaining({
+      sid: 's1',
+      thinking: true,
+      mode: 'local',
+    })]);
+
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(getSessionAliveEmitCalls(sessionSocketStub)).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(1);
+
+    sessionAliveEmitCalls = getSessionAliveEmitCalls(sessionSocketStub);
+    expect(sessionAliveEmitCalls).toHaveLength(2);
+    expect(sessionAliveEmitCalls.at(-1)).toEqual(['session-alive', expect.objectContaining({
+      sid: 's1',
+      thinking: true,
+      mode: 'local',
+    })]);
+    expect(sessionSocketStub.volatile.emit).not.toHaveBeenCalledWith('session-alive', expect.anything());
   });
 });

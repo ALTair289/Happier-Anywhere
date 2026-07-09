@@ -74,6 +74,21 @@ export const ProviderAccountUsageInvalidParamsResponseSchema = z.union([
     }).passthrough(),
 ]);
 
+export const ProviderAccountUsageSourceLinkOutcomeResponseSchema = z.union([
+    z.object({
+        status: z.literal("linked"),
+    }).strict(),
+    z.object({
+        status: z.literal("skipped"),
+        reason: z.enum(["binding_unavailable", "ownership_unproven"]),
+    }).strict(),
+]);
+
+export const ProviderAccountUsageWriteSuccessResponseSchema = z.object({
+    success: z.literal(true),
+    source: ProviderAccountUsageSourceLinkOutcomeResponseSchema.optional(),
+}).strict();
+
 export const UpsertConnectedServiceUsageSourceSchema = z.object({
     accountId: z.string().trim().min(1),
     serviceId: z.string().trim().min(1).max(128),

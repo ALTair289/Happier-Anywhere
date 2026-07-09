@@ -16,6 +16,7 @@ const SELECTIONS_ENV = 'TEST_BROKER_SELECTIONS';
 const DAEMON_STATE_PATH_ENV = 'TEST_BROKER_DAEMON_STATE_PATH';
 const REFRESH_TOKEN_ENV = 'TEST_BROKER_REFRESH_TOKEN';
 const PLUGIN_VERSION_ENV = 'TEST_BROKER_VERSION';
+const SELECTION_IDENTITY_ENV = 'TEST_BROKER_SELECTION_IDENTITY';
 
 type BridgeFixture = Readonly<{
   providerTag: string;
@@ -26,7 +27,12 @@ type BridgeFixture = Readonly<{
 }>;
 
 async function loadBridgeCaller(fixture: BridgeFixture): Promise<
-  (forceRefresh: boolean) => Promise<{ accessToken: string; accountId: string | null; expiresAt: number | null }>
+  (forceRefresh: boolean) => Promise<{
+    accessToken: string;
+    accountId: string | null;
+    expiresAt: number | null;
+    selectionEpoch: number | null;
+  }>
 > {
   const source = buildBrokerBridgeCallSource({
     ...fixture,
@@ -36,6 +42,7 @@ async function loadBridgeCaller(fixture: BridgeFixture): Promise<
     pluginVersionEnv: PLUGIN_VERSION_ENV,
     pluginVersion: '7',
     sessionTag: 'test-broker',
+    selectionIdentityEnv: SELECTION_IDENTITY_ENV,
   });
   const dir = await mkdtemp(join(tmpdir(), 'happier-broker-bridge-'));
   const file = join(dir, `bridge-${fixture.providerTag}-${Math.random().toString(36).slice(2)}.mjs`);
@@ -66,6 +73,7 @@ describe('brokerBridgeCallSource (shared bridge-call, exercised live)', () => {
     delete process.env[DAEMON_STATE_PATH_ENV];
     delete process.env[REFRESH_TOKEN_ENV];
     delete process.env[PLUGIN_VERSION_ENV];
+    delete process.env[SELECTION_IDENTITY_ENV];
   });
   afterEach(() => {
     globalThis.fetch = originalFetch;
@@ -73,6 +81,7 @@ describe('brokerBridgeCallSource (shared bridge-call, exercised live)', () => {
     delete process.env[DAEMON_STATE_PATH_ENV];
     delete process.env[REFRESH_TOKEN_ENV];
     delete process.env[PLUGIN_VERSION_ENV];
+    delete process.env[SELECTION_IDENTITY_ENV];
   });
 
   it('reads httpPort from daemon-state, sends the SCOPED token, POSTs caller-owned bridge metadata', async () => {
@@ -144,6 +153,88 @@ describe('brokerBridgeCallSource (shared bridge-call, exercised live)', () => {
       forceRefresh: true,
     });
     expect(bodies[0]).not.toHaveProperty('planTypeHint');
+  });
+
+  it('preserves group selections and sends the broker selection identity so the daemon can resolve the effective account', async () => {
+    process.env[DAEMON_STATE_PATH_ENV] = await writeDaemonStateFile('tok');
+    process.env[REFRESH_TOKEN_ENV] = 'scoped';
+    process.env[SELECTION_IDENTITY_ENV] = 'opencode|connected|broker:1|openai-codex:stable-acct:';
+    const fixture = {
+      providerTag: 'provider-a',
+      bridgePath: '/connected-service-auth/service-a/access-token/refresh',
+      serviceId: 'service-a',
+    };
+    process.env[SELECTIONS_ENV] = JSON.stringify({
+      [fixture.providerTag]: {
+        kind: 'group',
+        serviceId: fixture.serviceId,
+        groupId: 'main',
+        activeProfileId: 'profile-new',
+        fallbackProfileId: 'profile-old',
+        generation: 11,
+        accountId: 'acct-new',
+      },
+    });
+    const bodies: Array<Record<string, unknown>> = [];
+    globalThis.fetch = vi.fn(async (_input: unknown, init: unknown) => {
+      bodies.push(JSON.parse(String((init as RequestInit | undefined)?.body ?? '{}')));
+      return new Response(JSON.stringify({
+        ok: true,
+        result: { accessToken: 'fresh-access', accountId: 'acct-new', selectionEpoch: 4 },
+      }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const fetchAccessTokenFromBridge = await loadBridgeCaller(fixture);
+    const result = await fetchAccessTokenFromBridge(false);
+
+    expect(result).toMatchObject({
+      accessToken: 'fresh-access',
+      accountId: 'acct-new',
+      selectionEpoch: 4,
+    });
+    expect(bodies[0]).toMatchObject({
+      selectionIdentity: 'opencode|connected|broker:1|openai-codex:stable-acct:',
+      selection: {
+        kind: 'group',
+        serviceId: fixture.serviceId,
+        groupId: 'main',
+        activeProfileId: 'profile-new',
+        fallbackProfileId: 'profile-old',
+        generation: 11,
+      },
+      forceRefresh: false,
+    });
+    expect(JSON.stringify(bodies[0])).not.toContain('profile-old-refresh-token');
+  });
+
+  it('bounds the bridge fetch with an abort signal (RR-7: no unbounded wait in the provider auth path)', async () => {
+    process.env[DAEMON_STATE_PATH_ENV] = await writeDaemonStateFile('tok');
+    process.env[REFRESH_TOKEN_ENV] = 'scoped-broker-token';
+    const fixture = {
+      providerTag: 'provider-a',
+      bridgePath: '/connected-service-auth/service-a/access-token/refresh',
+      serviceId: 'service-a',
+      accountIdResultFields: ['providerAccountId'] as const,
+    };
+    process.env[SELECTIONS_ENV] = JSON.stringify({
+      [fixture.providerTag]: { serviceId: fixture.serviceId, profileId: 'profile-a', accountId: null, planType: null },
+    });
+    const signals: Array<unknown> = [];
+    globalThis.fetch = vi.fn(async (_input: unknown, init: unknown) => {
+      signals.push((init as RequestInit | undefined)?.signal ?? null);
+      return new Response(
+        JSON.stringify({ ok: true, result: { accessToken: 'fresh-access', providerAccountId: 'acct_7' } }),
+        { status: 200 },
+      );
+    }) as unknown as typeof fetch;
+
+    const fetchAccessTokenFromBridge = await loadBridgeCaller(fixture);
+    await fetchAccessTokenFromBridge(false);
+
+    // A hung daemon must not hang the provider's auth path forever: the bridge call carries a
+    // timeout-bound AbortSignal by construction.
+    expect(signals).toHaveLength(1);
+    expect(signals[0]).toBeInstanceOf(AbortSignal);
   });
 
   it('throws a clear error when the scoped token is missing (fail-closed)', async () => {

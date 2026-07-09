@@ -18,6 +18,7 @@ import {
     resolveAcceptedPendingDelivery,
     retryPendingDelivery,
     restorePendingMessage,
+    sweepStaleProviderDeliveryClaims,
     updatePendingMessage,
 } from "./pendingMessageService";
 import { createLightSqliteHarness, type LightSqliteHarness } from "@/testkit/lightSqliteHarness";
@@ -274,6 +275,7 @@ describe("pendingMessageService (shared sessions)", () => {
     });
 
     it("persists and returns a ready projection when a queued owner-authored ready event is materialized", async () => {
+        harness.resetEnv({ HAPPIER_FEATURE_ENCRYPTION__STORAGE_POLICY: "optional" });
         const owner = await createAccount("owner");
         const session = await createSession(owner.id);
 
@@ -793,6 +795,17 @@ describe("pendingMessageService (shared sessions)", () => {
             where: { sessionId_localId: { sessionId: session.id, localId } },
             select: { deliveryState: true, deliveryBlockedReason: true },
         })).resolves.toEqual({ deliveryState: "blocked", deliveryBlockedReason: "terminal_composer_draft" });
+        const listedBlocked = await listPendingMessages({ actorUserId: owner.id, sessionId: session.id });
+        expect(listedBlocked.ok).toBe(true);
+        if (!listedBlocked.ok) throw new Error("expected pending list");
+        expect(listedBlocked.pending).toEqual([
+            expect.objectContaining({
+                localId,
+                deliveryState: "blocked",
+                deliveryBlockedReason: "terminal_composer_draft",
+                deliveryStatus: { status: "blocked", reason: "terminal_composer_draft" },
+            }),
+        ]);
 
         const blockedMaterialize = await materializeNextPendingMessage({
             actorUserId: owner.id,
@@ -971,6 +984,151 @@ describe("pendingMessageService (shared sessions)", () => {
         })).resolves.toEqual({ deliveryState: "blocked", deliveryBlockedReason: "provider_acceptance_timeout" });
     });
 
+    it("sweeps stale provider-delivery claims through the typed delivery status contract", async () => {
+        const owner = await createAccount("owner");
+        const session = await createSession(owner.id);
+        const localId = `provider-delivery-stale-sweep-${randomUUID()}`;
+
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-provider-delivery-stale-sweep",
+        })).resolves.toMatchObject({ ok: true });
+
+        const firstMaterialize = await materializeNextPendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            deliveryState: "provider",
+        });
+        expect(firstMaterialize.ok).toBe(true);
+        if (!firstMaterialize.ok || !firstMaterialize.didMaterialize) throw new Error("expected provider claim");
+        expect(firstMaterialize.didWriteMessage).toBe(false);
+
+        await db.sessionPendingMessage.update({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            data: { updatedAt: new Date(Date.now() - 10 * 60_000) },
+        });
+
+        const swept = await sweepStaleProviderDeliveryClaims({
+            actorUserId: owner.id,
+            sessionId: session.id,
+        });
+        expect(swept.ok).toBe(true);
+        if (!swept.ok) throw new Error("expected stale sweep");
+        expect(swept.didUpdate).toBe(true);
+        expect(swept.blockedCount).toBe(1);
+        expect(swept.pendingCount).toBe(1);
+        expect(swept.pendingBlockedCount).toBe(1);
+
+        const listed = await listPendingMessages({ actorUserId: owner.id, sessionId: session.id });
+        expect(listed.ok).toBe(true);
+        if (!listed.ok) throw new Error("expected pending list");
+        expect(listed.pending).toEqual([
+            expect.objectContaining({
+                localId,
+                deliveryState: "blocked",
+                deliveryBlockedReason: "provider_acceptance_timeout",
+                deliveryStatus: { status: "blocked", reason: "provider_acceptance_timeout" },
+            }),
+        ]);
+        await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
+    });
+
+    it("reconciles an inherited provider-delivery claim that has already been accepted into the transcript", async () => {
+        const owner = await createAccount("owner");
+        const session = await createSession(owner.id);
+        const localId = `provider-delivery-stale-accepted-${randomUUID()}`;
+
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-provider-delivery-stale-accepted",
+        })).resolves.toMatchObject({ ok: true });
+
+        const firstMaterialize = await materializeNextPendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            deliveryState: "provider",
+        });
+        expect(firstMaterialize.ok).toBe(true);
+        if (!firstMaterialize.ok || !firstMaterialize.didMaterialize) throw new Error("expected provider claim");
+        expect(firstMaterialize.didWriteMessage).toBe(false);
+
+        await createCommittedTranscriptMessage({
+            sessionId: session.id,
+            localId,
+            seq: 1,
+            messageRole: "user",
+            ciphertext: "cipher-provider-delivery-stale-accepted",
+        });
+        await db.sessionPendingMessage.update({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            data: { updatedAt: new Date(Date.now() - 10 * 60_000) },
+        });
+
+        const swept = await blockPendingDeliveriesOnProviderAttach({
+            actorUserId: owner.id,
+            sessionId: session.id,
+        });
+        expect(swept.ok).toBe(true);
+        if (!swept.ok) throw new Error("expected attach recovery");
+        expect(swept.didUpdate).toBe(true);
+        expect(swept.blockedCount).toBe(0);
+        expect(swept.pendingCount).toBe(0);
+        expect(swept.pendingBlockedCount).toBe(0);
+        await expect(db.sessionPendingMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
+    });
+
+    it("reconciles a blocked inherited provider-delivery claim that has already been accepted into the transcript", async () => {
+        const owner = await createAccount("owner");
+        const session = await createSession(owner.id);
+        const localId = `provider-delivery-blocked-accepted-${randomUUID()}`;
+
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-provider-delivery-blocked-accepted",
+        })).resolves.toMatchObject({ ok: true });
+
+        const firstMaterialize = await materializeNextPendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            deliveryState: "provider",
+        });
+        expect(firstMaterialize.ok).toBe(true);
+        if (!firstMaterialize.ok || !firstMaterialize.didMaterialize) throw new Error("expected provider claim");
+        expect(firstMaterialize.didWriteMessage).toBe(false);
+
+        await expect(blockPendingDelivery({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            reason: "provider_acceptance_timeout",
+        })).resolves.toMatchObject({ ok: true, pendingBlockedCount: 1 });
+        await createCommittedTranscriptMessage({
+            sessionId: session.id,
+            localId,
+            seq: 2,
+            messageRole: "user",
+            ciphertext: "cipher-provider-delivery-blocked-accepted",
+        });
+
+        const recovered = await blockPendingDeliveriesOnProviderAttach({
+            actorUserId: owner.id,
+            sessionId: session.id,
+        });
+        expect(recovered.ok).toBe(true);
+        if (!recovered.ok) throw new Error("expected attach recovery");
+        expect(recovered.didUpdate).toBe(true);
+        expect(recovered.blockedCount).toBe(0);
+        expect(recovered.pendingCount).toBe(0);
+        expect(recovered.pendingBlockedCount).toBe(0);
+        await expect(db.sessionPendingMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
+    });
+
     it("does not block a fresh inherited provider-delivery claim on provider attach", async () => {
         const owner = await createAccount("owner");
         const session = await createSession(owner.id);
@@ -1099,6 +1257,52 @@ describe("pendingMessageService (shared sessions)", () => {
             .resolves.toMatchObject({ ok: true, didResolve: false, pendingCount: 0 });
     });
 
+    it("marks an already-transcripted blocked provider delivery handled idempotently", async () => {
+        const owner = await createAccount("owner");
+        const session = await createSession(owner.id);
+        const localId = `provider-delivery-handled-already-transcripted-${randomUUID()}`;
+
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-provider-delivery-handled-already-transcripted",
+        })).resolves.toMatchObject({ ok: true });
+
+        const materialize = await materializeNextPendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            deliveryState: "provider",
+        });
+        expect(materialize.ok).toBe(true);
+        if (!materialize.ok || !materialize.didMaterialize) throw new Error("expected provider claim");
+        expect(materialize.didWriteMessage).toBe(false);
+
+        await expect(blockPendingDelivery({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            reason: "provider_acceptance_timeout",
+        })).resolves.toMatchObject({ ok: true, pendingBlockedCount: 1 });
+        await createCommittedTranscriptMessage({
+            sessionId: session.id,
+            localId,
+            seq: 3,
+            messageRole: "user",
+            ciphertext: "cipher-provider-delivery-handled-already-transcripted",
+        });
+
+        const handled = await markPendingDeliveryHandled({ actorUserId: owner.id, sessionId: session.id, localId });
+        expect(handled.ok).toBe(true);
+        if (!handled.ok) throw new Error("expected handled success");
+        expect(handled.didResolve).toBe(true);
+        expect(handled.didWrite).toBe(false);
+        expect(handled.pendingCount).toBe(0);
+        expect(handled.pendingBlockedCount).toBe(0);
+        await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(1);
+        await expect(db.sessionPendingMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
+    });
+
     it("marks a delivering provider delivery as handled by committing the pending row", async () => {
         const owner = await createAccount("owner");
         const session = await createSession(owner.id);
@@ -1137,6 +1341,7 @@ describe("pendingMessageService (shared sessions)", () => {
     });
 
     it("does not advance ready projection when a shared editor marks provider delivery handled", async () => {
+        harness.resetEnv({ HAPPIER_FEATURE_ENCRYPTION__STORAGE_POLICY: "optional" });
         const owner = await createAccount("owner");
         const collaborator = await createAccount("collab");
         const session = await createSession(owner.id);
@@ -1315,6 +1520,130 @@ describe("pendingMessageService (shared sessions)", () => {
         ]);
     });
 
+    it("reconciles blocked claimed rows but not unclaimed queued rows covered by a durable accepted seq", async () => {
+        const owner = await createAccount("owner");
+        const session = await createSession(owner.id);
+        const blockedLocalId = `provider-delivery-reconcile-blocked-${randomUUID()}`;
+        const queuedLocalId = `provider-delivery-reconcile-queued-${randomUUID()}`;
+
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: blockedLocalId,
+            ciphertext: "cipher-provider-delivery-reconcile-blocked",
+        })).resolves.toMatchObject({ ok: true });
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: queuedLocalId,
+            ciphertext: "cipher-provider-delivery-reconcile-queued",
+        })).resolves.toMatchObject({ ok: true });
+
+        const materialized = await materializeNextPendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            deliveryState: "provider",
+        });
+        expect(materialized.ok).toBe(true);
+        if (!materialized.ok || !materialized.didMaterialize) throw new Error("expected provider claim");
+
+        const blocked = await blockPendingDelivery({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: blockedLocalId,
+            reason: "terminal_composer_draft",
+        });
+        expect(blocked.ok).toBe(true);
+        if (!blocked.ok) throw new Error("expected block to succeed");
+        expect(blocked.pendingBlockedCount).toBe(1);
+
+        await createCommittedTranscriptMessage({
+            sessionId: session.id,
+            localId: blockedLocalId,
+            seq: 60,
+            messageRole: "user",
+            ciphertext: "cipher-provider-delivery-reconcile-blocked",
+        });
+        await createCommittedTranscriptMessage({
+            sessionId: session.id,
+            localId: queuedLocalId,
+            seq: 61,
+            messageRole: "user",
+            ciphertext: "cipher-provider-delivery-reconcile-queued",
+        });
+
+        const reconciled = await reconcileAcceptedPendingDeliveriesThroughSeq({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            maxAcceptedSeq: 61,
+        });
+        expect(reconciled.ok).toBe(true);
+        if (!reconciled.ok) throw new Error("expected reconciliation");
+        expect(reconciled.didResolve).toBe(true);
+        expect(reconciled.resolvedCount).toBe(1);
+        expect(reconciled.resolvedLocalIds).toEqual([blockedLocalId]);
+        expect(reconciled.pendingCount).toBe(1);
+        expect(reconciled.pendingBlockedCount).toBe(0);
+
+        await expect(db.sessionPendingMessage.findMany({
+            where: { sessionId: session.id },
+            orderBy: [{ position: "asc" }, { localId: "asc" }],
+            select: { localId: true, deliveryState: true, deliveryBlockedReason: true },
+        })).resolves.toEqual([
+            { localId: queuedLocalId, deliveryState: null, deliveryBlockedReason: null },
+        ]);
+    });
+
+    it("does not resolve direct accepted provider delivery from a blocked row without a trusted accepted seq", async () => {
+        const owner = await createAccount("owner");
+        const session = await createSession(owner.id);
+        const localId = `provider-delivery-direct-blocked-${randomUUID()}`;
+
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-provider-delivery-direct-blocked",
+        })).resolves.toMatchObject({ ok: true });
+
+        const materialized = await materializeNextPendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            deliveryState: "provider",
+        });
+        expect(materialized.ok).toBe(true);
+        if (!materialized.ok || !materialized.didMaterialize) throw new Error("expected provider claim");
+
+        const blocked = await blockPendingDelivery({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            reason: "terminal_composer_draft",
+        });
+        expect(blocked.ok).toBe(true);
+        if (!blocked.ok) throw new Error("expected block to succeed");
+
+        await createCommittedTranscriptMessage({
+            sessionId: session.id,
+            localId,
+            seq: 62,
+            messageRole: "user",
+            ciphertext: "cipher-provider-delivery-direct-blocked",
+        });
+
+        const accepted = await resolveAcceptedPendingDelivery({ actorUserId: owner.id, sessionId: session.id, localId });
+        expect(accepted.ok).toBe(true);
+        if (!accepted.ok) throw new Error("expected direct acceptance no-op");
+        expect(accepted.didResolve).toBe(false);
+        expect(accepted.pendingCount).toBe(1);
+        expect(accepted.pendingBlockedCount).toBe(1);
+
+        await expect(db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: { deliveryState: true, deliveryBlockedReason: true },
+        })).resolves.toEqual({ deliveryState: "blocked", deliveryBlockedReason: "terminal_composer_draft" });
+    });
+
     it("blocks accepted-through-seq provider delivery that collides with divergent transcript content", async () => {
         const owner = await createAccount("owner");
         const session = await createSession(owner.id);
@@ -1394,7 +1723,7 @@ describe("pendingMessageService (shared sessions)", () => {
         })).resolves.toEqual({ deliveryState: "blocked", deliveryBlockedReason: "unknown" });
     });
 
-    it("resolves accepted provider delivery from a queued row by committing it to the transcript", async () => {
+    it("does not resolve accepted provider delivery from a queued row before it is claimed", async () => {
         const owner = await createAccount("owner");
         const session = await createSession(owner.id);
         const localId = `provider-delivery-prewrite-${randomUUID()}`;
@@ -1409,14 +1738,17 @@ describe("pendingMessageService (shared sessions)", () => {
 
         const accepted = await resolveAcceptedPendingDelivery({ actorUserId: owner.id, sessionId: session.id, localId });
         expect(accepted.ok).toBe(true);
-        if (!accepted.ok || !accepted.didResolve || !accepted.message) throw new Error("expected accepted resolution");
-        expect(accepted.message).toEqual(expect.objectContaining({ seq: 1, localId }));
-        await expect(db.sessionPendingMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
-        await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(1);
+        if (!accepted.ok) throw new Error("expected accepted no-op");
+        expect(accepted.didResolve).toBe(false);
+        await expect(db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: { status: true, deliveryState: true, deliveryBlockedReason: true },
+        })).resolves.toEqual({ status: "queued", deliveryState: null, deliveryBlockedReason: null });
+        await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
         await expect(db.session.findUniqueOrThrow({
             where: { id: session.id },
             select: { pendingCount: true },
-        })).resolves.toEqual({ pendingCount: 0 });
+        })).resolves.toEqual({ pendingCount: 1 });
     });
 
     it("handles duplicate accepted delivery resolution races idempotently", async () => {
@@ -1430,6 +1762,15 @@ describe("pendingMessageService (shared sessions)", () => {
             localId,
             ciphertext: "cipher-provider-delivery-accepted-race",
         })).resolves.toMatchObject({ ok: true });
+
+        const materialize = await materializeNextPendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            deliveryState: "provider",
+        });
+        expect(materialize.ok).toBe(true);
+        if (!materialize.ok || !materialize.didMaterialize) throw new Error("expected provider delivery claim");
+        expect(materialize.didWriteMessage).toBe(false);
 
         const results = await Promise.all([
             resolveAcceptedPendingDelivery({ actorUserId: owner.id, sessionId: session.id, localId }),
@@ -1707,6 +2048,73 @@ describe("pendingMessageService (shared sessions)", () => {
             discardedReason: "test",
         });
         await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
+    });
+
+    it("deletes queued, blocked, and discarded pending rows", async () => {
+        const owner = await createAccount("owner");
+        const session = await createSession(owner.id);
+        const queuedLocalId = `delete-queued-${randomUUID()}`;
+        const blockedLocalId = `delete-blocked-${randomUUID()}`;
+        const discardedLocalId = `delete-discarded-${randomUUID()}`;
+
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: queuedLocalId,
+            ciphertext: "cipher-delete-queued",
+        })).resolves.toMatchObject({ ok: true });
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: blockedLocalId,
+            ciphertext: "cipher-delete-blocked",
+        })).resolves.toMatchObject({ ok: true });
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: discardedLocalId,
+            ciphertext: "cipher-delete-discarded",
+        })).resolves.toMatchObject({ ok: true });
+
+        const blocked = await blockPendingDelivery({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: blockedLocalId,
+            reason: "terminal_composer_draft",
+        });
+        expect(blocked.ok).toBe(true);
+        const discarded = await discardPendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: discardedLocalId,
+            reason: "runtime_switch",
+        });
+        expect(discarded.ok).toBe(true);
+
+        const beforeDelete = await db.session.findUniqueOrThrow({
+            where: { id: session.id },
+            select: { pendingCount: true, pendingBlockedCount: true, pendingVersion: true },
+        });
+
+        await expect(deletePendingMessage({ actorUserId: owner.id, sessionId: session.id, localId: queuedLocalId })).resolves.toMatchObject({
+            ok: true,
+            pendingCount: beforeDelete.pendingCount - 1,
+            pendingBlockedCount: beforeDelete.pendingBlockedCount,
+        });
+        await expect(deletePendingMessage({ actorUserId: owner.id, sessionId: session.id, localId: blockedLocalId })).resolves.toMatchObject({
+            ok: true,
+            pendingCount: beforeDelete.pendingCount - 2,
+            pendingBlockedCount: beforeDelete.pendingBlockedCount - 1,
+        });
+        await expect(deletePendingMessage({ actorUserId: owner.id, sessionId: session.id, localId: discardedLocalId })).resolves.toMatchObject({
+            ok: true,
+            pendingCount: beforeDelete.pendingCount - 2,
+            pendingBlockedCount: beforeDelete.pendingBlockedCount - 1,
+        });
+
+        await expect(db.sessionPendingMessage.findMany({
+            where: { sessionId: session.id, localId: { in: [queuedLocalId, blockedLocalId, discardedLocalId] } },
+        })).resolves.toEqual([]);
     });
 
     it("deletes a delivering provider-owned pending row", async () => {

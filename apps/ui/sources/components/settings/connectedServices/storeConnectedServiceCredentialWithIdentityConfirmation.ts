@@ -7,6 +7,7 @@ import { fireAndForget } from '@/utils/system/fireAndForget';
 import type { ConnectedServiceCredentialRecordV1, ConnectedServiceId } from '@happier-dev/protocol';
 
 const PROVIDER_IDENTITY_MISMATCH_ERROR = 'connect_reconnect_provider_identity_mismatch';
+const RECONNECT_TARGET_MISMATCH_ERROR = 'connected_service_reconnect_target_mismatch';
 
 type StoredConnectedServiceCredentialParams = Readonly<{
   serviceId: ConnectedServiceId;
@@ -39,11 +40,18 @@ function runStoredEffects(
   }
 }
 
+function assertReconnectTargetMatchesRecord(params: StoredConnectedServiceCredentialParams): void {
+  if (params.record.serviceId !== params.serviceId || params.record.profileId !== params.profileId) {
+    throw new Error(RECONNECT_TARGET_MISMATCH_ERROR);
+  }
+}
+
 export async function storeConnectedServiceCredentialWithIdentityConfirmation(
   credentials: AuthCredentials,
   params: StoredConnectedServiceCredentialParams,
   options: StoreConnectedServiceCredentialWithIdentityConfirmationOptions = {},
 ): Promise<boolean> {
+  assertReconnectTargetMatchesRecord(params);
   try {
     await storeConnectedServiceCredentialForAccount(credentials, params);
     runStoredEffects(options.onStored, params);

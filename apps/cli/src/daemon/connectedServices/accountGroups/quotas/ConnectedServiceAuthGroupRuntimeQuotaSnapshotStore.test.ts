@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { ConnectedServiceAuthGroupRuntimeQuotaSnapshotStore } from './ConnectedServiceAuthGroupRuntimeQuotaSnapshotStore';
 import {
   DEFAULT_CONNECTED_SERVICE_AUTH_GROUP_POLICY_V1,
+  resolveConnectedServiceAuthGroupSoftSwitchSourceEvidence,
   selectConnectedServiceAuthGroupCandidate,
 } from '../selection/selectConnectedServiceAuthGroupCandidate';
 
@@ -377,5 +378,132 @@ describe('ConnectedServiceAuthGroupRuntimeQuotaSnapshotStore', () => {
       groupId: 'main',
       capturedAtMs: 2_500,
     }).get('primary')?.quotaSnapshot?.effectiveRemainingPercent).toBe(85);
+  });
+
+  it('makes high-utilization Claude passive quota evidence fresh for predictive soft switching', () => {
+    const store = new ConnectedServiceAuthGroupRuntimeQuotaSnapshotStore();
+
+    store.recordSnapshot({
+      serviceId: 'claude-subscription',
+      groupId: 'team-pool',
+      profileId: 'active',
+      snapshot: {
+        v: 1,
+        serviceId: 'claude-subscription',
+        profileId: 'active',
+        providerId: 'claude',
+        fetchedAt: 10_000,
+        staleAfterMs: 300_000,
+        planLabel: null,
+        accountLabel: null,
+        source: 'in_band_provider_snapshot',
+        confidence: 'exact',
+        evidence: {
+          kind: 'claude_runtime_quota_utilization',
+          providerLimitId: 'seven_day',
+          observedAtMs: 10_000,
+        },
+        meters: [
+          {
+            meterId: 'seven_day',
+            label: 'Weekly',
+            used: null,
+            limit: null,
+            unit: 'unknown',
+            utilizationPct: 92,
+            remainingPct: 8,
+            resetsAt: 1_779_097_200_000,
+            resetAtMs: 1_779_097_200_000,
+            status: 'ok',
+            source: 'in_band_provider_snapshot',
+            scope: 'weekly',
+            limitScope: 'account',
+            confidence: 'exact',
+            details: {
+              providerLimitId: 'seven_day',
+              limitCategory: 'usage_limit',
+            },
+          },
+        ],
+      },
+    });
+    store.recordSnapshot({
+      serviceId: 'claude-subscription',
+      groupId: 'team-pool',
+      profileId: 'backup',
+      snapshot: {
+        v: 1,
+        serviceId: 'claude-subscription',
+        profileId: 'backup',
+        providerId: 'claude',
+        fetchedAt: 10_000,
+        staleAfterMs: 300_000,
+        planLabel: null,
+        accountLabel: null,
+        source: 'provider_api',
+        confidence: 'exact',
+        meters: [
+          {
+            meterId: 'seven_day',
+            label: 'Weekly',
+            used: null,
+            limit: null,
+            unit: 'unknown',
+            utilizationPct: 20,
+            remainingPct: 80,
+            resetsAt: null,
+            status: 'ok',
+            details: {},
+          },
+        ],
+      },
+    });
+
+    const memberStatesByProfileId = store.buildMemberStates({
+      serviceId: 'claude-subscription',
+      groupId: 'team-pool',
+      capturedAtMs: 10_100,
+    });
+
+    expect(resolveConnectedServiceAuthGroupSoftSwitchSourceEvidence({
+      activeProfileId: 'active',
+      policy: {
+        ...DEFAULT_CONNECTED_SERVICE_AUTH_GROUP_POLICY_V1,
+        softSwitchRemainingPercent: 15,
+      },
+      memberStatesByProfileId,
+      nowMs: 10_100,
+      quotaFreshnessMs: 300_000,
+    })).toEqual({
+      status: 'at_or_below_threshold',
+      remainingPercent: 8,
+      thresholdPercent: 15,
+    });
+
+    const selected = selectConnectedServiceAuthGroupCandidate({
+      nowMs: 10_100,
+      quotaFreshnessMs: 300_000,
+      activeProfileId: 'active',
+      allowCurrentProfileRetry: true,
+      policy: {
+        ...DEFAULT_CONNECTED_SERVICE_AUTH_GROUP_POLICY_V1,
+        strategy: 'priority',
+        softSwitchRemainingPercent: 15,
+      },
+      members: [
+        { profileId: 'active', priority: 1, createdAtMs: 1, enabled: true },
+        { profileId: 'backup', priority: 2, createdAtMs: 2, enabled: true },
+      ],
+      memberStatesByProfileId,
+    });
+
+    expect(selected.selected?.profileId).toBe('backup');
+    expect(selected.decisionTrace.candidates.find((candidate) => candidate.profileId === 'active')?.quotaEvidence)
+      .toMatchObject({
+        status: 'fresh',
+        remainingPercent: 8,
+        capturedAtMs: 10_000,
+        exhausted: false,
+      });
   });
 });

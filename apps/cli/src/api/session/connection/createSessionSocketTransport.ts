@@ -9,7 +9,7 @@ import type { ClientToServerEvents, ServerToClientEvents } from '@/api/types';
 import { createSocketTransportAdapter } from '@/api/connection/createSocketTransportAdapter';
 import { configuration } from '@/configuration';
 import { getSocketIoProxyOptions } from '@/utils/proxy/socketIoProxy';
-import { resolveLoopbackHttpUrl } from '@/api/client/loopbackUrl';
+import { normalizeServerHttpBaseUrl, resolveServerHttpBaseUrl } from '@/session/transport/http/serverHttpBaseUrl';
 import { resolveSessionControlSocketConnectTimeoutMs } from '@/session/transport/shared/sessionTimeouts';
 
 const ACCESS_KEY_BINDING_CACHE_TTL_MS = 30_000;
@@ -139,7 +139,9 @@ export function createSessionSocketTransport(params: Readonly<{
     socket: Socket<ServerToClientEvents, ClientToServerEvents>;
     transport: ManagedConnectionTransport;
 }> {
-    const serverUrl = resolveLoopbackHttpUrl(params.serverUrl ?? configuration.apiServerUrl).replace(/\/+$/, '');
+    const serverUrl = params.serverUrl
+        ? normalizeServerHttpBaseUrl(params.serverUrl)
+        : resolveServerHttpBaseUrl();
     const transports = params.transports ?? configuration.socketIoTransports;
     const env = params.env ?? process.env;
 

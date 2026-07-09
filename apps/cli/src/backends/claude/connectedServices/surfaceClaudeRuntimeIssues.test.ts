@@ -1,11 +1,18 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY } from '@happier-dev/protocol';
 import type { SessionRuntimeIssueV1 } from '@happier-dev/protocol';
 
 import { HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY } from '@/daemon/connectedServices/connectedServiceChildEnvironment';
 import { resetConnectedServiceRuntimeAuthFailureReportDedupeForTests } from '@/daemon/connectedServices/runtimeAuth/reportConnectedServiceRuntimeAuthFailureToDaemon';
+import { buildProviderAccountUsageSnapshotFromConnectedServiceQuotaObservation } from '@/daemon/connectedServices/accountUsage/fromConnectedServiceQuotaObservation';
+import { canRecordProviderAccountUsageSourceLinks } from '@/daemon/connectedServices/accountUsage/record';
 
 import {
+  recordClaudeRateLimitQuotaEvidence,
   surfaceClaudeRuntimeAuthFailure,
   surfaceClaudeRateLimitRuntimeIssue,
 } from './surfaceClaudeRuntimeIssues';
@@ -134,6 +141,97 @@ describe('surfaceClaudeRuntimeIssues runtime-auth projection', () => {
             meterId: 'five_hour',
             resetAtMs: 1_781_221_200_000,
           })],
+        }),
+      }));
+    } finally {
+      restoreClaudeSelectionEnv(previousSelectionEnv);
+    }
+  });
+
+  it('records passive allowed-warning Claude utilization as quota evidence without failing the turn', async () => {
+    const previousSelectionEnv = installClaudeSelectionEnv();
+    const failTurn = createClaudeFailTurnSpy();
+    try {
+      await recordClaudeRateLimitQuotaEvidence({
+        client: {
+          sessionId: 'sess_claude_passive_quota',
+          sessionTurnLifecycle: { failTurn },
+        },
+      } as any, {
+        v: 1,
+        resetAtMs: 1_779_097_200_000,
+        retryAfterMs: null,
+        quotaScope: 'account',
+        recoverability: 'wait',
+        providerLimitId: 'seven_day',
+        planType: null,
+        utilization: 92,
+        overage: null,
+        action: null,
+        connectedService: null,
+      }, '[claude-test]');
+
+      expect(failTurn).not.toHaveBeenCalled();
+      expect(mockNotifyDaemonConnectedServiceRuntimeAuthFailure).not.toHaveBeenCalled();
+      expect(mockNotifyDaemonConnectedServiceQuotaSnapshot).toHaveBeenCalledWith(expect.objectContaining({
+        sessionId: 'sess_claude_passive_quota',
+        serviceId: 'claude-subscription',
+        groupId: 'team-pool',
+        groupGeneration: 4,
+        snapshot: expect.objectContaining({
+          serviceId: 'claude-subscription',
+          profileId: 'claude-main',
+          source: 'in_band_provider_snapshot',
+          confidence: 'exact',
+          evidence: expect.objectContaining({
+            kind: 'claude_runtime_quota_utilization',
+            providerLimitId: 'seven_day',
+          }),
+          meters: [expect.objectContaining({
+            meterId: 'seven_day',
+            utilizationPct: 92,
+            remainingPct: 8,
+            resetAtMs: 1_779_097_200_000,
+            source: 'in_band_provider_snapshot',
+          })],
+        }),
+      }));
+    } finally {
+      restoreClaudeSelectionEnv(previousSelectionEnv);
+    }
+  });
+
+  it('threads source provider account identity into passive Claude quota evidence delivery', async () => {
+    const previousSelectionEnv = installClaudeSelectionEnv();
+    const failTurn = createClaudeFailTurnSpy();
+    try {
+      await recordClaudeRateLimitQuotaEvidence({
+        client: {
+          sessionId: 'sess_claude_passive_identity',
+          sessionTurnLifecycle: { failTurn },
+        },
+      } as any, {
+        v: 1,
+        resetAtMs: 1_779_097_200_000,
+        retryAfterMs: null,
+        quotaScope: 'account',
+        recoverability: 'wait',
+        providerLimitId: 'seven_day',
+        planType: null,
+        utilization: 92,
+        overage: null,
+        action: null,
+        connectedService: null,
+        sourceProviderAccountId: 'acct_claude_live',
+      }, '[claude-test]');
+
+      expect(failTurn).not.toHaveBeenCalled();
+      expect(mockNotifyDaemonConnectedServiceQuotaSnapshot).toHaveBeenCalledWith(expect.objectContaining({
+        sessionId: 'sess_claude_passive_identity',
+        serviceId: 'claude-subscription',
+        sourceProviderAccountId: 'acct_claude_live',
+        snapshot: expect.objectContaining({
+          profileId: 'claude-main',
         }),
       }));
     } finally {
@@ -850,5 +948,141 @@ describe('surfaceClaudeRuntimeIssues runtime-auth projection', () => {
     } finally {
       restoreClaudeSelectionEnv(previousSelectionEnv);
     }
+  });
+});
+
+describe('R3-4: Claude in-band evidence becomes source-backed → predictive soft-switch eligible', () => {
+  // The rate_limit tap runs in the agent child process whose materialized CLAUDE_CONFIG_DIR
+  // names the live account. The tap must resolve that real provider-account UUID and stamp it as
+  // `sourceProviderAccountId` so the emitted quota evidence forms a PROVEN source link — the
+  // precondition the predictive soft-switch policy requires (it fails closed on unproven evidence).
+  let tmpDir: string;
+  let previousSelectionEnv: string | undefined;
+  let previousConfigDir: string | undefined;
+
+  async function writeMaterializedClaudeConfig(oauthAccount: Record<string, unknown> | null): Promise<void> {
+    const rootConfig = oauthAccount ? { oauthAccount } : {};
+    await writeFile(join(tmpDir, '.claude.json'), JSON.stringify(rootConfig), 'utf8');
+  }
+
+  function installConfigDir(): void {
+    previousConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = tmpDir;
+  }
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), 'claude-r34-'));
+    previousSelectionEnv = installClaudeSelectionEnv();
+    installConfigDir();
+  });
+
+  afterEach(async () => {
+    restoreClaudeSelectionEnv(previousSelectionEnv);
+    if (previousConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previousConfigDir;
+    mockNotifyDaemonConnectedServiceQuotaSnapshot.mockReset();
+    mockNotifyDaemonConnectedServiceQuotaSnapshot.mockResolvedValue({ ok: true });
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  function passiveUtilizationDetails() {
+    return {
+      v: 1 as const,
+      resetAtMs: 1_779_097_200_000,
+      retryAfterMs: null,
+      quotaScope: 'account' as const,
+      recoverability: 'wait' as const,
+      providerLimitId: 'seven_day',
+      planType: null,
+      utilization: 92,
+      overage: null,
+      action: null,
+      connectedService: null,
+    };
+  }
+
+  function deliveredQuotaCall() {
+    const calls = mockNotifyDaemonConnectedServiceQuotaSnapshot.mock.calls as readonly (readonly unknown[])[];
+    const call = calls.at(-1)?.[0] as
+      | { sourceProviderAccountId?: string; snapshot: import('@happier-dev/protocol').ConnectedServiceQuotaSnapshotV1 }
+      | undefined;
+    if (!call) throw new Error('expected a quota snapshot delivery');
+    return call;
+  }
+
+  it('enriches passive quota evidence with the live account identity → source-linked PAU (soft-switch eligible)', async () => {
+    await writeMaterializedClaudeConfig({ accountUuid: 'acct_live_uuid', emailAddress: 'pool@happier.dev' });
+
+    await recordClaudeRateLimitQuotaEvidence({
+      client: { sessionId: 'sess_r34_passive' },
+    } as any, passiveUtilizationDetails(), '[r34-test]');
+
+    const call = deliveredQuotaCall();
+    // 1. Real provider-account identity resolved from the materialized config and stamped.
+    expect(call.sourceProviderAccountId).toBe('acct_live_uuid');
+
+    // 2. Regression runs all the way to soft-switch eligibility: the delivered snapshot derives a
+    // PROVEN (providerSubject) PAU whose source links survive the fail-closed proof guard.
+    const pau = buildProviderAccountUsageSnapshotFromConnectedServiceQuotaObservation({
+      snapshot: call.snapshot,
+      sourceProviderAccountId: call.sourceProviderAccountId,
+    });
+    expect(pau.accountSubject.kind).toBe('providerSubject');
+    expect(pau.recordKey.subjectKind).toBe('account');
+    expect(canRecordProviderAccountUsageSourceLinks({
+      snapshot: pau,
+      sourceProviderAccountId: call.sourceProviderAccountId,
+    })).toBe(true);
+  });
+
+  it('stamps the live identity onto the rejected usage-limit snapshot too', async () => {
+    await writeMaterializedClaudeConfig({ accountUuid: 'acct_live_uuid' });
+    const failTurn = createClaudeFailTurnSpy();
+
+    await surfaceClaudeRateLimitRuntimeIssue({
+      client: {
+        sessionId: 'sess_r34_rejected',
+        sessionTurnLifecycle: { failTurn },
+      },
+    } as any, {
+      ...passiveUtilizationDetails(),
+      limitCategory: 'usage_limit' as const,
+      utilization: 100,
+    }, '[r34-test]');
+
+    expect(deliveredQuotaCall().sourceProviderAccountId).toBe('acct_live_uuid');
+  });
+
+  it('fails closed when the materialized config has no oauth account (identity genuinely unknown)', async () => {
+    await writeMaterializedClaudeConfig(null);
+
+    await recordClaudeRateLimitQuotaEvidence({
+      client: { sessionId: 'sess_r34_unproven' },
+    } as any, passiveUtilizationDetails(), '[r34-test]');
+
+    const call = deliveredQuotaCall();
+    expect(call.sourceProviderAccountId).toBeUndefined();
+    // No proven identity ⇒ source links cannot form ⇒ predictive soft-switch stays fail-closed.
+    const pau = buildProviderAccountUsageSnapshotFromConnectedServiceQuotaObservation({
+      snapshot: call.snapshot,
+      sourceProviderAccountId: call.sourceProviderAccountId,
+    });
+    expect(canRecordProviderAccountUsageSourceLinks({
+      snapshot: pau,
+      sourceProviderAccountId: call.sourceProviderAccountId,
+    })).toBe(false);
+  });
+
+  it('does not overwrite an already-proven source identity supplied on the details', async () => {
+    await writeMaterializedClaudeConfig({ accountUuid: 'acct_live_uuid' });
+
+    await recordClaudeRateLimitQuotaEvidence({
+      client: { sessionId: 'sess_r34_preset' },
+    } as any, {
+      ...passiveUtilizationDetails(),
+      sourceProviderAccountId: 'acct_supplied',
+    }, '[r34-test]');
+
+    expect(deliveredQuotaCall().sourceProviderAccountId).toBe('acct_supplied');
   });
 });

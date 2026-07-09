@@ -83,7 +83,24 @@ export type RuntimeAccountIdentityEntry = Readonly<{
   groupGeneration: number | null;
 }>;
 
-export type ReconciledRuntimeAccountIdentityEntry = RuntimeAccountIdentityEntry & Readonly<{
+export type RuntimeSharedGroupAuthSurfaceProof = Readonly<{
+  proofStrategy: 'shared_group_auth_surface';
+  sessionId: string;
+  serviceId: ConnectedServiceId;
+  groupId: string;
+  profileId: string;
+  accountLabel: string | null;
+  observedAtMs: number;
+  source: Extract<RuntimeAccountIdentitySource, 'group_switch_selection' | 'runtime_identity_probe'>;
+  proofStrength: 'exact';
+  groupGeneration: number | null;
+}>;
+
+export type RuntimeAccountFanoutProof =
+  | RuntimeAccountIdentityEntry
+  | RuntimeSharedGroupAuthSurfaceProof;
+
+export type ReconciledRuntimeAccountIdentityEntry = RuntimeAccountFanoutProof & Readonly<{
   runtime?: Readonly<{
     safeToApply?: boolean;
     inProviderTurn?: boolean;

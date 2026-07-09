@@ -1,7 +1,9 @@
-import type { ConnectedServiceCredentialRecordV1 } from '@happier-dev/protocol';
+import type { ConnectedServiceCredentialRecordV1, ConnectedServiceId } from '@happier-dev/protocol';
 
 import { configuration } from '@/configuration';
 import { requireConnectedServiceTokenCredentialRecord } from '@/daemon/connectedServices/shared/connectedServiceCredentialRecord';
+import { brokerSelectionIdentityGroupSuffix } from '@/daemon/connectedServices/broker/brokerSelectionIdentityGroup';
+import type { ConnectedServiceResolvedSelection } from '@/daemon/connectedServices/materialize/materializeConnectedServicesForSpawn';
 
 import {
   OPEN_CODE_BROKER_DAEMON_STATE_PATH_ENV,
@@ -22,6 +24,8 @@ type MaterializeInput = Readonly<{
   openai: ConnectedServiceCredentialRecordV1 | null;
   claudeSubscription: ConnectedServiceCredentialRecordV1 | null;
   anthropic: ConnectedServiceCredentialRecordV1 | null;
+  // Resolved selections carry the pool (group) identity that keys the mint per pool (R4-4).
+  selectionsByServiceId?: ReadonlyMap<ConnectedServiceId, ConnectedServiceResolvedSelection>;
 }>;
 
 function readProviderAccountId(record: ConnectedServiceCredentialRecordV1): string | null {
@@ -39,8 +43,12 @@ function readProviderAccountId(record: ConnectedServiceCredentialRecordV1): stri
  * same-account token refresh keeps the fingerprint unchanged (no managed-server churn) while two
  * different accounts never collapse to one identity.
  */
-function identityFragment(record: ConnectedServiceCredentialRecordV1): string {
-  return `${record.serviceId}:${record.profileId}:${readProviderAccountId(record) ?? ''}`;
+function identityFragment(
+  record: ConnectedServiceCredentialRecordV1,
+  selectionsByServiceId: ReadonlyMap<ConnectedServiceId, ConnectedServiceResolvedSelection> | undefined,
+): string {
+  const groupSuffix = brokerSelectionIdentityGroupSuffix(selectionsByServiceId?.get(record.serviceId));
+  return `${record.serviceId}:${record.profileId}:${readProviderAccountId(record) ?? ''}${groupSuffix}`;
 }
 
 /**
@@ -78,7 +86,7 @@ export async function materializeOpenCodeConnectedServiceAuth(params: Materializ
       planType: null,
     };
     brokeredProviders.push(provider);
-    identityFragments.push(identityFragment(record));
+    identityFragments.push(identityFragment(record, params.selectionsByServiceId));
   };
 
   // OpenAI: subscription OAuth (Codex) is brokered; a platform API key is used directly.
@@ -87,7 +95,7 @@ export async function materializeOpenCodeConnectedServiceAuth(params: Materializ
   } else if (params.openai) {
     const record = requireConnectedServiceTokenCredentialRecord(params.openai);
     auth.openai = { type: 'api', key: record.token.token };
-    identityFragments.push(identityFragment(record));
+    identityFragments.push(identityFragment(record, params.selectionsByServiceId));
   }
 
   // Anthropic: Claude subscription (setup-token OR browser-login OAuth) is brokered (Bearer + beta,
@@ -97,7 +105,7 @@ export async function materializeOpenCodeConnectedServiceAuth(params: Materializ
   } else if (params.anthropic) {
     const record = requireConnectedServiceTokenCredentialRecord(params.anthropic);
     auth.anthropic = { type: 'api', key: record.token.token };
-    identityFragments.push(identityFragment(record));
+    identityFragments.push(identityFragment(record, params.selectionsByServiceId));
   }
 
   const env: Record<string, string> = {

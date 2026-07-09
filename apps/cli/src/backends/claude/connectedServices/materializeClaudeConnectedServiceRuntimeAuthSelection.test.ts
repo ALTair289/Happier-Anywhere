@@ -241,7 +241,7 @@ describe('materializeClaudeConnectedServiceRuntimeAuthSelection', () => {
 
     const credential = JSON.parse(await readFile(join(groupClaudeConfigDir, '.credentials.json'), 'utf8'));
     expect(credential.claudeAiOauth.accessToken).toBe('selected-access-placeholder');
-    expect(credential.claudeAiOauth.refreshToken).toBe('selected-refresh-placeholder');
+    expect(credential.claudeAiOauth).not.toHaveProperty('refreshToken');
     expect(credential.claudeAiOauth.scopes).toContain('user:sessions:claude_code');
     const targetRootConfig = JSON.parse(await readFile(join(groupClaudeConfigDir, '.claude.json'), 'utf8'));
     expect(targetRootConfig.oauthAccount).toBeUndefined();
@@ -1125,7 +1125,7 @@ describe('materializeClaudeConnectedServiceRuntimeAuthSelection', () => {
       }));
       const replacedCredential = JSON.parse(await readFile(join(targetClaudeConfigDir, '.credentials.json'), 'utf8'));
       expect(replacedCredential.claudeAiOauth.accessToken).toBe('replacement-access-placeholder');
-      expect(replacedCredential.claudeAiOauth.refreshToken).toBe('replacement-refresh-placeholder');
+      expect(replacedCredential.claudeAiOauth).not.toHaveProperty('refreshToken');
     } finally {
       vi.doUnmock('node:crypto');
       vi.resetModules();

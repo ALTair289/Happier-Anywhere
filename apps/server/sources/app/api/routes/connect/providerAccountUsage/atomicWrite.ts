@@ -12,8 +12,10 @@ import {
 } from "./sourceStorage";
 import {
     ConnectedServiceUsageSourceBindingError,
+    ConnectedServiceUsageSourceOwnershipError,
 } from "./types";
 import type {
+    ProviderAccountUsageSourceLinkOutcome,
     StoredConnectedServiceUsageSource,
     StoredProviderAccountUsageRecord,
 } from "./types";
@@ -25,6 +27,7 @@ export async function writeProviderAccountUsageRecordAndLinkConnectedServiceUsag
 ): Promise<Readonly<{
     record: StoredProviderAccountUsageRecord;
     source: StoredConnectedServiceUsageSource | null;
+    sourceOutcome: ProviderAccountUsageSourceLinkOutcome;
 }>> {
     assertProviderUsageRecordCompatibleWithConnectedServiceSource({
         providerId: params.recordKey.providerId,
@@ -47,15 +50,21 @@ export async function writeProviderAccountUsageRecordAndLinkConnectedServiceUsag
         });
 
         let source: StoredConnectedServiceUsageSource | null;
+        let sourceOutcome: ProviderAccountUsageSourceLinkOutcome;
         try {
             source = await linkConnectedServiceUsageSource({
                 accountId: params.accountId,
                 providerAccountUsageRecordId: params.recordId,
                 source: params.source,
             }, tx);
+            sourceOutcome = { status: "linked" };
         } catch (error) {
             if (error instanceof ConnectedServiceUsageSourceBindingError && error.kind === "unavailable") {
                 source = null;
+                sourceOutcome = { status: "skipped", reason: "binding_unavailable" };
+            } else if (error instanceof ConnectedServiceUsageSourceOwnershipError && error.kind === "unproven") {
+                source = null;
+                sourceOutcome = { status: "skipped", reason: "ownership_unproven" };
             } else {
                 throw error;
             }
@@ -72,6 +81,7 @@ export async function writeProviderAccountUsageRecordAndLinkConnectedServiceUsag
         return {
             record: stored,
             source,
+            sourceOutcome,
         };
     });
 }

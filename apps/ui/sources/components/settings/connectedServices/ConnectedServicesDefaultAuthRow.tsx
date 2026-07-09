@@ -1,6 +1,7 @@
 import * as React from 'react';
+import { Pressable, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { useUnistyles } from 'react-native-unistyles';
+import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import {
     ConnectedServiceBindingsV1Schema,
@@ -10,23 +11,21 @@ import {
     type ConnectedServicesDefaultAuthByAgentIdV1,
 } from '@happier-dev/protocol';
 
-import type {
-    ConnectedServicesSelectionOptionAvailability,
-} from '@/components/sessions/new/components/buildNewSessionConnectedServicesSelectionListModel';
-
-import { DropdownMenu, type DropdownMenuItem } from '@/components/ui/forms/dropdown/DropdownMenu';
+import { Item } from '@/components/ui/lists/Item';
+import { Text } from '@/components/ui/text/Text';
+import { Modal } from '@/modal';
+import { NewSessionConnectedServicesSelectionContent } from '@/components/sessions/new/components/NewSessionConnectedServicesSelectionContent';
 import { useActionSettingsNarrowLayout } from '@/components/settings/actions/useActionSettingsNarrowLayout';
 import { t } from '@/text';
-import {
-    buildNewSessionConnectedServicesSelectionListModel,
-} from '@/components/sessions/new/components/buildNewSessionConnectedServicesSelectionListModel';
 import {
     buildConnectedServiceAccountGroupOptionsByServiceId,
     buildConnectedServiceProfileOptionsByServiceId,
     resolveAgentSupportedConnectedServiceIds,
+    type ConnectedServicesAccountGroupOption,
     type NewSessionConnectedServiceProjection,
     type NewSessionConnectedServicesAgentCore,
 } from '@/components/sessions/new/modules/connectedServicesNewSessionBindings';
+import type { ConnectedServicesSelectionOptionAvailability } from '@/components/sessions/new/components/buildNewSessionConnectedServicesSelectionListModel';
 import type { ConnectedServicesServiceBinding } from '@/sync/domains/connectedServices/connectedServicesAgentOptionStateBindings';
 import { resolveConnectedServiceDisplayName } from './model/resolveConnectedServiceDisplayName';
 import {
@@ -50,6 +49,13 @@ export type ConnectedServicesDefaultAuthRowProps = Readonly<{
     setDefaultAuthSettings: (next: ConnectedServicesDefaultAuthByAgentIdV1) => void;
     onOpenConnectedServiceSettings: (serviceId: string) => void;
     onReconnectConnectedServiceProfile?: (serviceId: string, profileId: string) => void;
+    /**
+     * Persisted dismissals of the one-time "adopt this autoSwitch pool" suggestion,
+     * keyed by `${agentId}:${serviceId}:${groupId}`. Suppresses the nudge so it does
+     * not nag once the user has chosen to keep the literal profile default.
+     */
+    dismissedPoolAdoptionSuggestionKeys?: Readonly<Record<string, boolean>>;
+    onDismissPoolAdoptionSuggestion?: (key: string) => void;
 }>;
 
 const EMPTY_DEFAULT_AUTH_SETTINGS: ConnectedServicesDefaultAuthByAgentIdV1 = {
@@ -57,6 +63,7 @@ const EMPTY_DEFAULT_AUTH_SETTINGS: ConnectedServicesDefaultAuthByAgentIdV1 = {
     bindingsByAgentId: {},
 };
 const EMPTY_SERVICE_BINDINGS: Readonly<Record<string, ConnectedServicesServiceBinding | undefined>> = {};
+const DEFAULT_AUTH_PICKER_MAX_HEIGHT = 520;
 
 function buildNextDefaultAuthSettings(params: Readonly<{
     agentId: string;
@@ -113,10 +120,41 @@ function resolveDefaultAuthWarningLabel(warningCode: ConnectedServicesAuthWarnin
     return key ? t(key) : undefined;
 }
 
+type PoolAdoptionSuggestion = Readonly<{
+    key: string;
+    serviceId: string;
+    groupId: string;
+    groupLabel: string;
+}>;
+
+/**
+ * A profile-default is a candidate for pool adoption when the exact stored profile is a
+ * member of a READY autoSwitch pool for the same service. This is the ONLY pool-awareness
+ * used here: it drives a visible suggestion, never a silent resolution-time rewrite.
+ */
+function resolveReadyAutoSwitchPoolForProfile(params: Readonly<{
+    binding: ConnectedServicesServiceBinding | undefined;
+    groupOptions: ReadonlyArray<ConnectedServicesAccountGroupOption>;
+}>): ConnectedServicesAccountGroupOption | null {
+    const binding = params.binding;
+    if (!binding || binding.source !== 'connected' || binding.selection !== 'profile') return null;
+    const profileId = typeof binding.profileId === 'string' ? binding.profileId.trim() : '';
+    if (!profileId) return null;
+    for (const group of params.groupOptions) {
+        if (!group.autoSwitch) continue;
+        if (group.status !== 'ready') continue;
+        if (!(group.memberProfileIds ?? []).includes(profileId)) continue;
+        return group;
+    }
+    return null;
+}
+
 export function ConnectedServicesDefaultAuthRow(props: ConnectedServicesDefaultAuthRowProps) {
     const { theme } = useUnistyles();
-    const [menuOpen, setMenuOpen] = React.useState(false);
+    const styles = stylesheet;
     const narrowLayout = useActionSettingsNarrowLayout();
+    const [locallyDismissedKeys, setLocallyDismissedKeys] = React.useState<Readonly<Record<string, boolean>>>({});
+
     const supportedServiceIds = React.useMemo(() => resolveAgentSupportedConnectedServiceIds({
         connectedServicesFeatureEnabled: props.connectedServicesEnabled,
         agentCore: props.agentCore,
@@ -186,113 +224,207 @@ export function ConnectedServicesDefaultAuthRow(props: ConnectedServicesDefaultA
         props.setDefaultAuthSettings,
     ]);
 
-    const selectionModel = React.useMemo(() => buildNewSessionConnectedServicesSelectionListModel({
-        supportedServiceIds,
+    const resolveOptionAvailability = React.useCallback((availabilityParams: Readonly<{
+        serviceId: string;
+        optionId: string;
+    }>): ConnectedServicesSelectionOptionAvailability => {
+        const state = authLabelModel.serviceStatesById[availabilityParams.serviceId];
+        if (
+            state?.warningCode
+            && availabilityParams.optionId === `connected-service:${encodeURIComponent(availabilityParams.serviceId)}:native`
+        ) {
+            return {
+                subtitle: resolveDefaultAuthWarningLabel(state.warningCode),
+            };
+        }
+        return {};
+    }, [authLabelModel.serviceStatesById]);
+
+    const openPicker = React.useCallback(() => {
+        Modal.show({
+            component: ConnectedServicesDefaultAuthPickerModalContent,
+            props: {
+                supportedServiceIds,
+                profileOptionsByServiceId,
+                accountGroupOptionsByServiceId,
+                bindingsByServiceId,
+                setBindingForService,
+                defaultProfileIdByServiceId: props.settings.connectedServicesDefaultProfileByServiceId,
+                resolveOptionAvailability,
+                onReconnectProfile: props.onReconnectConnectedServiceProfile,
+                onOpenSettings: props.onOpenConnectedServiceSettings,
+            },
+            chrome: {
+                kind: 'card',
+                title: props.agentTitle,
+                testID: `settings-connected-services-default-auth-modal-${props.agentId}`,
+                layout: 'fill',
+                bodyScroll: 'none',
+            },
+            closeOnBackdrop: true,
+        });
+    }, [
+        accountGroupOptionsByServiceId,
+        bindingsByServiceId,
         profileOptionsByServiceId,
-        accountGroupOptionsByServiceId,
-        bindingsByServiceId,
-        defaultProfileIdByServiceId: props.settings.connectedServicesDefaultProfileByServiceId,
-        quotaBadgesByKey: {},
-        setBindingForService,
-        onOpenSettings: props.onOpenConnectedServiceSettings,
-        translate: t,
-        resolveServiceTitle: (serviceId) => resolveConnectedServiceDisplayName(serviceId as ConnectedServiceId, t),
-        renderSelectionIcon: ({ selected, variant }) => (
-            <Ionicons
-                name={selected ? 'checkmark-circle' : variant === 'warning' ? 'alert-circle-outline' : 'ellipse-outline'}
-                size={22}
-                color={selected ? theme.colors.accent.blue : theme.colors.text.secondary}
-            />
-        ),
-        renderSettingsIcon: () => (
-            <Ionicons name="settings-outline" size={22} color={theme.colors.text.secondary} />
-        ),
-        renderQuotaBadges: () => null,
-        renderNeedsReauthPill: () => null,
-        onReconnectProfile: props.onReconnectConnectedServiceProfile,
-        resolveOptionAvailability: ({ serviceId, optionId }) => {
-            const state = authLabelModel.serviceStatesById[serviceId];
-            if (
-                state?.warningCode
-                && optionId === `connected-service:${encodeURIComponent(serviceId)}:native`
-            ) {
-                return {
-                    subtitle: resolveDefaultAuthWarningLabel(state.warningCode),
-                };
-            }
-            return {};
-        },
-    }), [
-        accountGroupOptionsByServiceId,
-        authLabelModel.serviceStatesById,
-        bindingsByServiceId,
+        props.agentId,
+        props.agentTitle,
         props.onOpenConnectedServiceSettings,
         props.onReconnectConnectedServiceProfile,
-        profileOptionsByServiceId,
         props.settings.connectedServicesDefaultProfileByServiceId,
+        resolveOptionAvailability,
         setBindingForService,
         supportedServiceIds,
-        theme.colors.accent.blue,
-        theme.colors.text.secondary,
     ]);
 
-    const dropdownItems = React.useMemo((): DropdownMenuItem[] => {
-        const items: DropdownMenuItem[] = [];
-        for (const section of selectionModel.rootStep.sections) {
-            if (section.kind !== 'static') continue;
-            for (const option of section.options) {
-                items.push({
-                    id: option.id,
-                    title: option.label,
-                    subtitle: option.subtitle,
-                    category: section.title,
-                    icon: option.icon,
-                    disabled: option.disabled,
-                });
-            }
+    const poolAdoptionSuggestions = React.useMemo((): ReadonlyArray<PoolAdoptionSuggestion> => {
+        const suggestions: PoolAdoptionSuggestion[] = [];
+        for (const serviceId of supportedServiceIds) {
+            const group = resolveReadyAutoSwitchPoolForProfile({
+                binding: bindingsByServiceId[serviceId],
+                groupOptions: accountGroupOptionsByServiceId[serviceId] ?? [],
+            });
+            if (!group) continue;
+            const key = `${props.agentId}:${serviceId}:${group.groupId}`;
+            if (props.dismissedPoolAdoptionSuggestionKeys?.[key] || locallyDismissedKeys[key]) continue;
+            suggestions.push({ key, serviceId, groupId: group.groupId, groupLabel: group.label });
         }
-        return items;
-    }, [selectionModel.rootStep.sections]);
+        return suggestions;
+    }, [
+        accountGroupOptionsByServiceId,
+        bindingsByServiceId,
+        locallyDismissedKeys,
+        props.agentId,
+        props.dismissedPoolAdoptionSuggestionKeys,
+        supportedServiceIds,
+    ]);
 
-    const handleSelect = React.useCallback((itemId: string) => {
-        const option = selectionModel.rootStep.sections
-            .flatMap((section) => section.kind === 'static' ? section.options : [])
-            .find((candidate) => candidate.id === itemId);
-        option?.onSelect?.();
-        setMenuOpen(false);
-    }, [selectionModel.rootStep.sections]);
+    const acceptPoolSuggestion = React.useCallback((suggestion: PoolAdoptionSuggestion) => {
+        setBindingForService(suggestion.serviceId, {
+            source: 'connected',
+            selection: 'group',
+            groupId: suggestion.groupId,
+        });
+    }, [setBindingForService]);
+
+    const dismissPoolSuggestion = React.useCallback((suggestion: PoolAdoptionSuggestion) => {
+        setLocallyDismissedKeys((prev) => ({ ...prev, [suggestion.key]: true }));
+        props.onDismissPoolAdoptionSuggestion?.(suggestion.key);
+    }, [props.onDismissPoolAdoptionSuggestion]);
 
     if (supportedServiceIds.length === 0) return null;
 
     return (
-        <DropdownMenu
-            open={menuOpen}
-            onOpenChange={setMenuOpen}
-            variant="selectable"
-            search={false}
-            selectedId={selectionModel.selectedOptionId}
-            showCategoryTitles={supportedServiceIds.length > 1}
-            matchTriggerWidth={true}
-            connectToTrigger={true}
-            rowKind="item"
-            itemTrigger={{
-                title: props.agentTitle,
-                // On a compact (mobile) layout the selected auth value is too long to
-                // sit in the row's right detail next to the title, so surface it in the
-                // subtitle and drop the detail. The wide layout keeps it on the right.
-                subtitle: narrowLayout
+        <>
+            <Item
+                testID={`settings-connected-services-default-auth-${props.agentId}`}
+                title={props.agentTitle}
+                icon={<Ionicons name="key-outline" size={22} color={theme.colors.accent.blue} />}
+                // On a compact (mobile) layout the selected auth value is too long to sit in
+                // the row's right detail next to the title, so surface it in the subtitle and
+                // drop the detail. The wide layout keeps it on the right.
+                subtitle={narrowLayout
                     ? (warningLabel ?? authLabelModel.label)
-                    : (warningLabel ?? t('connectedServices.defaultAuth.rowDetail')),
-                icon: <Ionicons name="key-outline" size={22} color={theme.colors.accent.blue} />,
-                showSelectedSubtitle: false,
-                showSelectedDetail: !narrowLayout,
-                detailFormatter: () => authLabelModel.label,
-                itemProps: {
-                    testID: `settings-connected-services-default-auth-${props.agentId}`,
-                },
-            }}
-            items={dropdownItems}
-            onSelect={handleSelect}
+                    : (warningLabel ?? t('connectedServices.defaultAuth.rowDetail'))}
+                detail={narrowLayout ? undefined : authLabelModel.label}
+                showChevron={true}
+                onPress={openPicker}
+            />
+            {poolAdoptionSuggestions.map((suggestion) => (
+                <View
+                    key={suggestion.key}
+                    testID={`settings-connected-services-pool-adoption-suggestion-${props.agentId}-${suggestion.serviceId}`}
+                    style={styles.suggestion}
+                >
+                    <Text style={styles.suggestionText}>
+                        {t('connectedServices.defaultAuth.poolSuggestion.body', { pool: suggestion.groupLabel })}
+                    </Text>
+                    <View style={styles.suggestionActions}>
+                        <Pressable
+                            testID={`settings-connected-services-pool-adoption-suggestion-${props.agentId}-${suggestion.serviceId}-dismiss`}
+                            accessibilityRole="button"
+                            accessibilityLabel={t('connectedServices.defaultAuth.poolSuggestion.dismiss')}
+                            onPress={() => dismissPoolSuggestion(suggestion)}
+                            style={styles.suggestionSecondaryButton}
+                        >
+                            <Text style={styles.suggestionSecondaryLabel}>
+                                {t('connectedServices.defaultAuth.poolSuggestion.dismiss')}
+                            </Text>
+                        </Pressable>
+                        <Pressable
+                            testID={`settings-connected-services-pool-adoption-suggestion-${props.agentId}-${suggestion.serviceId}-accept`}
+                            accessibilityRole="button"
+                            accessibilityLabel={t('connectedServices.defaultAuth.poolSuggestion.accept')}
+                            onPress={() => acceptPoolSuggestion(suggestion)}
+                            style={styles.suggestionPrimaryButton}
+                        >
+                            <Text style={styles.suggestionPrimaryLabel}>
+                                {t('connectedServices.defaultAuth.poolSuggestion.accept')}
+                            </Text>
+                        </Pressable>
+                    </View>
+                </View>
+            ))}
+        </>
+    );
+}
+
+type ConnectedServicesDefaultAuthPickerModalContentProps = Readonly<{
+    onClose: () => void;
+}> & Omit<
+    React.ComponentProps<typeof NewSessionConnectedServicesSelectionContent>,
+    'requestClose' | 'maxHeight'
+>;
+
+function ConnectedServicesDefaultAuthPickerModalContent(
+    props: ConnectedServicesDefaultAuthPickerModalContentProps,
+) {
+    const { onClose, ...contentProps } = props;
+    return (
+        <NewSessionConnectedServicesSelectionContent
+            {...contentProps}
+            requestClose={onClose}
+            maxHeight={DEFAULT_AUTH_PICKER_MAX_HEIGHT}
         />
     );
 }
+
+const stylesheet = StyleSheet.create((theme) => ({
+    suggestion: {
+        marginTop: 8,
+        marginHorizontal: 12,
+        padding: 12,
+        borderRadius: 12,
+        backgroundColor: theme.colors.surface.elevated,
+        gap: 10,
+    },
+    suggestionText: {
+        fontSize: 13,
+        lineHeight: 18,
+        color: theme.colors.text.secondary,
+    },
+    suggestionActions: {
+        flexDirection: 'row',
+        justifyContent: 'flex-end',
+        gap: 8,
+    },
+    suggestionSecondaryButton: {
+        paddingVertical: 8,
+        paddingHorizontal: 12,
+        borderRadius: 8,
+    },
+    suggestionSecondaryLabel: {
+        fontSize: 13,
+        color: theme.colors.text.secondary,
+    },
+    suggestionPrimaryButton: {
+        paddingVertical: 8,
+        paddingHorizontal: 12,
+        borderRadius: 8,
+        backgroundColor: theme.colors.accent.blue,
+    },
+    suggestionPrimaryLabel: {
+        fontSize: 13,
+        color: theme.colors.button.primary.tint,
+    },
+}));

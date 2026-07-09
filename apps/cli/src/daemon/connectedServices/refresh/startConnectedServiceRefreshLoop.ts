@@ -27,6 +27,8 @@ export function startConnectedServiceRefreshLoop(params: Readonly<{
         unref: true,
     });
 
+    loop.trigger();
+
     return {
         stop: () => {
             loop.stop();

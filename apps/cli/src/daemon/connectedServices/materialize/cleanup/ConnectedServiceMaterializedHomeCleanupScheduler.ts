@@ -1,11 +1,17 @@
 import { rm } from 'node:fs/promises';
 
+import { resolveConnectedServiceCredentialLifecycleDescriptor } from '@/backends/catalog';
 import type { CatalogAgentId } from '@/backends/types';
+import type { ConnectedServiceCredentialLifecycleDescriptor } from '../../credentials/lifecycleTypes';
 import {
   listMaterializedAttemptTargets,
   listMaterializedHomeTargets,
   type ConnectedServiceMaterializedCleanupTarget,
 } from './connectedServiceMaterializedHomeTargets';
+import {
+  createPendingPathCleanupQueue,
+  type PendingPathCleanupRetryExhaustedEvent,
+} from '../../cleanup/PendingPathCleanupQueue';
 
 export type ConnectedServiceMaterializedHomeCleanupResult = Readonly<{
   cleaned: boolean;
@@ -18,7 +24,12 @@ type RetainedIdentityIds = ReadonlySet<string> | ReadonlyArray<string>;
 
 type PendingMaterializedCleanupTarget = ConnectedServiceMaterializedCleanupTarget & Readonly<{
   cleanupAttempts?: number;
+  lastCleanupError?: unknown;
 }>;
+
+type ResolveCredentialLifecycleDescriptor = (
+  agentId: CatalogAgentId,
+) => Promise<ConnectedServiceCredentialLifecycleDescriptor>;
 
 const defaultRootTtlMs = 30 * 24 * 60 * 60_000;
 const defaultAttemptsTtlMs = 60 * 60_000;
@@ -47,11 +58,10 @@ function isStale(input: Readonly<{
 }
 
 export class ConnectedServiceMaterializedHomeCleanupScheduler {
-  private readonly pendingTargetsByKey = new Map<string, PendingMaterializedCleanupTarget>();
   private readonly rootTtlMs: number;
   private readonly attemptsTtlMs: number;
-  private readonly maxCleanupRetries: number;
-  private readonly removePath: typeof rm;
+  private readonly resolveCredentialLifecycleDescriptor: ResolveCredentialLifecycleDescriptor;
+  private readonly cleanupQueue: ReturnType<typeof createPendingPathCleanupQueue<PendingMaterializedCleanupTarget>>;
 
   constructor(private readonly deps: Readonly<{
     baseDir: string;
@@ -60,6 +70,8 @@ export class ConnectedServiceMaterializedHomeCleanupScheduler {
     attemptsTtlMs?: number;
     maxCleanupRetries?: number;
     removePath?: typeof rm;
+    resolveCredentialLifecycleDescriptor?: ResolveCredentialLifecycleDescriptor;
+    onCleanupRetryExhausted?: (event: PendingPathCleanupRetryExhaustedEvent<PendingMaterializedCleanupTarget>) => void;
     hasLiveTarget(input: Readonly<{
       kind: 'home' | 'attempt';
       materializationIdentityId: string;
@@ -70,8 +82,24 @@ export class ConnectedServiceMaterializedHomeCleanupScheduler {
   }>) {
     this.rootTtlMs = Math.max(0, Math.trunc(deps.rootTtlMs ?? defaultRootTtlMs));
     this.attemptsTtlMs = Math.max(0, Math.trunc(deps.attemptsTtlMs ?? defaultAttemptsTtlMs));
-    this.maxCleanupRetries = Math.max(0, Math.trunc(deps.maxCleanupRetries ?? 3));
-    this.removePath = deps.removePath ?? rm;
+    this.resolveCredentialLifecycleDescriptor = deps.resolveCredentialLifecycleDescriptor
+      ?? resolveConnectedServiceCredentialLifecycleDescriptor;
+    this.cleanupQueue = createPendingPathCleanupQueue<PendingMaterializedCleanupTarget>({
+      maxCleanupRetries: deps.maxCleanupRetries,
+      removePath: deps.removePath,
+      beforeRemove: async (target) => {
+        await this.deleteTargetCredentialStorage(target);
+      },
+      onRetryExhausted: deps.onCleanupRetryExhausted,
+    });
+  }
+
+  private async deleteTargetCredentialStorage(target: ConnectedServiceMaterializedCleanupTarget): Promise<void> {
+    const descriptor = await this.resolveCredentialLifecycleDescriptor(target.agentId);
+    await descriptor.credentialStorageCleanup?.deleteCredentialStorageForHomeRoot({
+      rootDir: target.path,
+      kind: target.kind === 'home' ? 'materialized_home' : 'materialized_attempt',
+    });
   }
 
   private hasLiveTarget(target: ConnectedServiceMaterializedCleanupTarget): boolean {
@@ -83,27 +111,11 @@ export class ConnectedServiceMaterializedHomeCleanupScheduler {
     });
   }
 
-  private async removeTarget(target: PendingMaterializedCleanupTarget): Promise<void> {
-    const key = targetKey(target);
-    try {
-      await this.removePath(target.path, { recursive: true, force: true });
-      this.pendingTargetsByKey.delete(key);
-    } catch (error) {
-      const cleanupAttempts = (target.cleanupAttempts ?? 0) + 1;
-      if (cleanupAttempts <= this.maxCleanupRetries) {
-        this.pendingTargetsByKey.set(key, { ...target, cleanupAttempts });
-      } else {
-        this.pendingTargetsByKey.delete(key);
-      }
-      throw error;
-    }
-  }
-
   private async scheduleCleanup(
     target: ConnectedServiceMaterializedCleanupTarget,
   ): Promise<ConnectedServiceMaterializedHomeCleanupResult> {
     if (this.hasLiveTarget(target)) {
-      this.pendingTargetsByKey.set(targetKey(target), target);
+      this.cleanupQueue.setPending(targetKey(target), target);
       return {
         cleaned: false,
         pending: true,
@@ -111,7 +123,7 @@ export class ConnectedServiceMaterializedHomeCleanupScheduler {
         path: target.path,
       };
     }
-    await this.removeTarget(target);
+    await this.cleanupQueue.removeNow(targetKey(target), target);
     return {
       cleaned: true,
       kind: target.kind,
@@ -145,25 +157,15 @@ export class ConnectedServiceMaterializedHomeCleanupScheduler {
     kind: 'home' | 'attempt';
     path: string;
   }>>> {
-    const cleaned: Array<Readonly<{ cleaned: true; kind: 'home' | 'attempt'; path: string }>> = [];
     const retainedIdentityIds = normalizeRetainedIdentityIds(await this.deps.listRetainedIdentityIds?.());
-    for (const [key, target] of this.pendingTargetsByKey.entries()) {
-      if (target.kind === 'home' && retainedIdentityIds.has(target.materializationIdentityId)) {
-        this.pendingTargetsByKey.delete(key);
-        continue;
-      }
-      if (this.hasLiveTarget(target)) continue;
-      if (target.cleanupAttempts !== undefined && target.cleanupAttempts >= this.maxCleanupRetries) {
-        this.pendingTargetsByKey.delete(key);
-        continue;
-      }
-      await this.removeTarget(target);
-      cleaned.push({
+    return await this.cleanupQueue.drainPending({
+      shouldDropPending: (target) => target.kind === 'home' && retainedIdentityIds.has(target.materializationIdentityId),
+      shouldKeepPending: (target) => this.hasLiveTarget(target),
+      toCleanedResult: (target) => ({
         cleaned: true,
         kind: target.kind,
         path: target.path,
-      });
-    }
-    return cleaned;
+      }),
+    });
   }
 }

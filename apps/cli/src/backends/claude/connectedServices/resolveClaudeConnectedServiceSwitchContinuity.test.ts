@@ -221,6 +221,7 @@ describe('resolveClaudeConnectedServiceSwitchContinuity', () => {
           groupId: 'claude',
           activeProfileId: 'backup',
           fallbackProfileId: 'primary',
+          generation: 7,
           targetMaterializedEnv: { CLAUDE_CONFIG_DIR: runtimeClaudeConfigDir },
           targetMaterializedRoot: runtimeClaudeConfigDir,
           claudeRuntimeAuthSharedGroupSurface: {
@@ -324,6 +325,7 @@ describe('resolveClaudeConnectedServiceSwitchContinuity', () => {
           groupId: 'claude',
           activeProfileId: 'backup',
           fallbackProfileId: 'primary',
+          generation: 7,
           targetMaterializedEnv: { CLAUDE_CONFIG_DIR: runtimeClaudeConfigDir },
           targetMaterializedRoot: runtimeClaudeConfigDir,
           claudeRuntimeAuthSharedGroupSurface: {

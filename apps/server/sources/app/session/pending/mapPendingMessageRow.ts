@@ -1,4 +1,8 @@
 import { parseSessionMessageRole } from "@/app/session/messageRole/resolveSessionMessageRole";
+import {
+    normalizePendingDeliveryStatusV1,
+    type PendingDeliveryStatusV1,
+} from "@happier-dev/protocol";
 
 export type PendingMessageRow = {
     localId: string;
@@ -7,6 +11,7 @@ export type PendingMessageRow = {
     status: "queued" | "discarded";
     deliveryState: string | null;
     deliveryBlockedReason: string | null;
+    deliveryStatus: PendingDeliveryStatusV1;
     position: number;
     createdAt: Date;
     updatedAt: Date;
@@ -38,6 +43,12 @@ export function mapPendingMessageRow(row: PendingMessageRowRaw): PendingMessageR
         status: row.status,
         deliveryState: typeof row.deliveryState === "string" && row.deliveryState.length > 0 ? row.deliveryState : null,
         deliveryBlockedReason: typeof row.deliveryBlockedReason === "string" && row.deliveryBlockedReason.length > 0 ? row.deliveryBlockedReason : null,
+        deliveryStatus: normalizePendingDeliveryStatusV1({
+            status: row.status,
+            deliveryState: row.deliveryState,
+            deliveryBlockedReason: row.deliveryBlockedReason,
+            discardedReason: row.discardedReason,
+        }),
         position: row.position,
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,

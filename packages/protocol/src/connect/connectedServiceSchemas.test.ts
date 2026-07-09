@@ -532,7 +532,7 @@ describe('connectedServiceSchemas', () => {
         const ConnectedServiceAuthGroupPolicyV1Schema = expectSchema('ConnectedServiceAuthGroupPolicyV1Schema');
         expect(ConnectedServiceAuthGroupPolicyV1Schema.parse({ v: 1 })).toEqual({
             v: 1,
-            strategy: 'priority',
+            strategy: 'least_limited',
             autoSwitch: false,
             switchOn: {
                 usageLimit: true,
@@ -550,10 +550,7 @@ describe('connectedServiceSchemas', () => {
             preTurnProbeMode: 'when_stale',
             preTurnProbeOrder: 'current_first_then_candidates',
             recoveryMode: 'switch_or_wait',
-            recoveryPromptMode: 'standard',
             resumePromptMode: 'standard',
-            effectiveMeterStrategy: 'most_constrained',
-            memberRuntimeStatePersistence: 'server_state_json',
         });
         expect(ConnectedServiceAuthGroupPolicyV1Schema.parse({
             v: 1,
@@ -563,6 +560,39 @@ describe('connectedServiceSchemas', () => {
             resumePromptMode: 'off',
         }).resumePromptMode).toBe('off');
         expect(ConnectedServiceAuthGroupPolicyV1Schema.safeParse({ v: 1, strategy: 'round_robin' }).success).toBe(false);
+        // Existing pools that persisted an explicit `priority` strategy must NOT be silently migrated.
+        expect(ConnectedServiceAuthGroupPolicyV1Schema.parse({ v: 1, strategy: 'priority' }).strategy).toBe('priority');
+        // Removed no-op fields are dropped, not carried, on the parsed policy.
+        const parsedPolicy = ConnectedServiceAuthGroupPolicyV1Schema.parse({ v: 1 });
+        expect(parsedPolicy).not.toHaveProperty('recoveryPromptMode');
+        expect(parsedPolicy).not.toHaveProperty('effectiveMeterStrategy');
+        expect(parsedPolicy).not.toHaveProperty('memberRuntimeStatePersistence');
+        // Migration-safe: stored policy JSON that still carries the removed legacy keys parses
+        // (strips them) instead of failing strict validation and resetting the whole policy.
+        const migrated = ConnectedServiceAuthGroupPolicyV1Schema.parse({
+            v: 1,
+            strategy: 'manual',
+            softSwitchRemainingPercent: 42,
+            recoveryPromptMode: 'standard',
+            effectiveMeterStrategy: 'weekly',
+            memberRuntimeStatePersistence: 'server_state_json',
+        });
+        expect(migrated.strategy).toBe('manual');
+        expect(migrated.softSwitchRemainingPercent).toBe(42);
+        expect(migrated).not.toHaveProperty('recoveryPromptMode');
+        expect(migrated).not.toHaveProperty('effectiveMeterStrategy');
+        expect(migrated).not.toHaveProperty('memberRuntimeStatePersistence');
+        // Genuine typos are still rejected (strict is preserved for non-legacy unknown keys).
+        expect(ConnectedServiceAuthGroupPolicyV1Schema.safeParse({ v: 1, bogusKey: true }).success).toBe(false);
+        // The patch schema also tolerates the removed legacy keys from older clients.
+        const migratedPatch = expectSchema('ConnectedServiceAuthGroupPolicyPatchV1Schema').parse({
+            strategy: 'least_limited',
+            recoveryPromptMode: 'standard',
+            effectiveMeterStrategy: 'weekly',
+            memberRuntimeStatePersistence: 'server_state_json',
+        });
+        expect(migratedPatch.strategy).toBe('least_limited');
+        expect(migratedPatch).not.toHaveProperty('effectiveMeterStrategy');
     });
 
     it('parses persisted member runtime state by limit category', () => {

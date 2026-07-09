@@ -28,6 +28,17 @@ export class ConnectedServiceAuthGroupGenerationConflictError extends Error {
   }
 }
 
+export const connectedServiceAuthGroupUnavailableCode = 'connected_service_auth_group_unavailable';
+
+export function isConnectedServiceAuthGroupUnavailableError(error: unknown): boolean {
+  return Boolean(
+    error
+    && typeof error === 'object'
+    && 'code' in error
+    && error.code === connectedServiceAuthGroupUnavailableCode,
+  );
+}
+
 export class ConnectedServiceCredentialUnsupportedFormatError extends Error {
   readonly serviceId: ConnectedServiceId;
   readonly profileId: string;
@@ -298,7 +309,15 @@ export async function getConnectedServiceAuthGroup(params: Readonly<{
   } catch (error: unknown) {
     throwConnectedServiceGroupGenerationConflictIfPresent(error);
     const status = readAxiosStatus(error);
-    if (status === 404) return null;
+    const code = readAxiosErrorCode(error);
+    if (status === 404 && code === 'connect_group_not_found') return null;
+    if (status === 404) {
+      throw createHttpStatusError(
+        404,
+        'Connected service auth group unavailable',
+        connectedServiceAuthGroupUnavailableCode,
+      );
+    }
     logServerEndpointFailure({
       logger,
       operation: 'Failed to get connected service auth group',

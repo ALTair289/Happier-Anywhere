@@ -102,6 +102,90 @@ describe('materializeOpenCodeConnectedServiceAuth', () => {
     expect(otherAccount.env[OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV]).not.toBe(first.env[OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV]);
   });
 
+  it('R4-4: mints DISTINCT selection identities for two pools that share one active profile', async () => {
+    const now = Date.now();
+    const openaiCodex = buildConnectedServiceCredentialRecord({
+      now,
+      serviceId: 'openai-codex',
+      profileId: 'default',
+      kind: 'oauth',
+      expiresAt: now + 1000,
+      oauth: { accessToken: 'a', refreshToken: 'r', idToken: null, scope: null, tokenType: null, providerAccountId: 'acct_123', providerEmail: null },
+    });
+    const groupSelections = (groupId: string) => new Map([[
+      'openai-codex',
+      {
+        kind: 'group' as const,
+        serviceId: 'openai-codex' as const,
+        groupId,
+        activeProfileId: 'default',
+        fallbackProfileId: 'default',
+        generation: 1,
+        record: openaiCodex,
+        policy: null,
+      },
+    ]]);
+
+    const resA = await materializeOpenCodeConnectedServiceAuth({ rootDir: '', openaiCodex, openai: null, claudeSubscription: null, anthropic: null, selectionsByServiceId: groupSelections('pool-A') as any });
+    const resB = await materializeOpenCodeConnectedServiceAuth({ rootDir: '', openaiCodex, openai: null, claudeSubscription: null, anthropic: null, selectionsByServiceId: groupSelections('pool-B') as any });
+
+    expect(resA.env[OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV]).not.toBe(resB.env[OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV]);
+    expect(resA.env[OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV]).toContain('pool-A');
+  });
+
+  it('F3: keeps ONE pool identity stable across a generation-only bump (no re-registration churn)', async () => {
+    const now = Date.now();
+    const openaiCodex = buildConnectedServiceCredentialRecord({
+      now,
+      serviceId: 'openai-codex',
+      profileId: 'default',
+      kind: 'oauth',
+      expiresAt: now + 1000,
+      oauth: { accessToken: 'a', refreshToken: 'r', idToken: null, scope: null, tokenType: null, providerAccountId: 'acct_123', providerEmail: null },
+    });
+    const poolSelection = (generation: number) => new Map([[
+      'openai-codex',
+      {
+        kind: 'group' as const,
+        serviceId: 'openai-codex' as const,
+        groupId: 'pool-A',
+        activeProfileId: 'default',
+        fallbackProfileId: 'default',
+        generation,
+        record: openaiCodex,
+        policy: null,
+      },
+    ]]);
+
+    const gen1 = await materializeOpenCodeConnectedServiceAuth({ rootDir: '', openaiCodex, openai: null, claudeSubscription: null, anthropic: null, selectionsByServiceId: poolSelection(1) as any });
+    const gen2 = await materializeOpenCodeConnectedServiceAuth({ rootDir: '', openaiCodex, openai: null, claudeSubscription: null, anthropic: null, selectionsByServiceId: poolSelection(2) as any });
+
+    // Same pool + same active profile at a bumped generation must mint the SAME identity: the string
+    // is an opaque equality key, generation flows as a separate payload field, so baking it in only
+    // churns the runtime registry into re-registering a live target that never changed its binding.
+    expect(gen1.env[OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV]).toBe(gen2.env[OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV]);
+  });
+
+  it('R4-4: leaves the profile-only selection identity unchanged (no group suffix)', async () => {
+    const now = Date.now();
+    const openaiCodex = buildConnectedServiceCredentialRecord({
+      now,
+      serviceId: 'openai-codex',
+      profileId: 'default',
+      kind: 'oauth',
+      expiresAt: now + 1000,
+      oauth: { accessToken: 'a', refreshToken: 'r', idToken: null, scope: null, tokenType: null, providerAccountId: 'acct_123', providerEmail: null },
+    });
+    const withoutSelections = await materializeOpenCodeConnectedServiceAuth({ rootDir: '', openaiCodex, openai: null, claudeSubscription: null, anthropic: null });
+    const withProfileSelection = await materializeOpenCodeConnectedServiceAuth({ rootDir: '', openaiCodex, openai: null, claudeSubscription: null, anthropic: null, selectionsByServiceId: new Map([[
+      'openai-codex',
+      { kind: 'profile' as const, serviceId: 'openai-codex' as const, profileId: 'default', record: openaiCodex },
+    ]]) as any });
+
+    expect(withoutSelections.env[OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV]).not.toContain(':group:');
+    expect(withProfileSelection.env[OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV]).toBe(withoutSelections.env[OPENCODE_CONNECTED_SERVICE_SELECTION_IDENTITY_ENV]);
+  });
+
   it('keeps OpenAI platform + Anthropic Console API keys as direct x-api-key credentials', async () => {
     const now = Date.now();
     const openai = buildConnectedServiceCredentialRecord({ now, serviceId: 'openai', profileId: 'openai-key', kind: 'token', token: { token: 'sk-openai-test', providerAccountId: null, providerEmail: null } });

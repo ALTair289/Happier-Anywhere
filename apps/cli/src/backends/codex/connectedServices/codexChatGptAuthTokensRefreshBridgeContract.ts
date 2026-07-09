@@ -31,6 +31,7 @@ export const CodexChatGptAuthTokensRefreshResponseSchema = z.object({
   accessToken: z.string().min(1),
   chatgptAccountId: z.string().nullable(),
   chatgptPlanType: z.string().nullable(),
+  selectionEpoch: z.number().int().nonnegative().optional(),
 });
 
 export type CodexChatGptAuthTokensRefreshResponse =

@@ -6,6 +6,7 @@ import {
 } from './openCodeConnectedServicePrecedence';
 import { extractOpenCodeErrorText } from '@/backends/opencode/server/openCodeErrorText';
 import { releaseForAuthSwitch } from '@/backends/opencode/server/sharedManagedServer';
+import { applyBrokerBridgeRuntimeAuthSelection } from '@/daemon/connectedServices/broker/applyBrokerBridgeRuntimeAuthSelection';
 import {
   classifyProviderLimitEvidence,
   parseProviderResetAt,
@@ -138,11 +139,14 @@ export function createOpenCodeConnectedServiceRuntimeAuthAdapter(): ConnectedSer
     async materializeActiveProfile() {
       return { supported: true };
     },
-    canHotApply() {
-      return { supported: false, recovery: 'restart_rematerialize' };
+    canHotApply(input) {
+      const selection = readRecord(input.selection);
+      return readString(selection?.brokerSelectionIdentity)
+        ? { supported: true, recovery: 'provider_owned_broker_selection' }
+        : { supported: false, recovery: 'restart_rematerialize' };
     },
-    async hotApply() {
-      return { applied: false, reason: 'hot_apply_unsupported' };
+    async hotApply(input) {
+      return applyBrokerBridgeRuntimeAuthSelection(input.selection);
     },
     async recoverAfterRuntimeAuthSwitch(input) {
       const selection = readRecord(input.selection);

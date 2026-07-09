@@ -17,13 +17,14 @@ import {
 import { findConnectedServiceChildSelection } from '@/daemon/connectedServices/connectedServiceChildEnvironment';
 import { buildNativeProviderAccountUsageSourceProfileId } from '@/daemon/connectedServices/accountUsage/nativeSourceIdentity';
 import { createConnectedServiceQuotaSnapshotDeliveryOutbox } from '@/daemon/connectedServices/quotas/connectedServiceQuotaSnapshotDeliveryOutbox';
-import { notifyDaemonConnectedServiceQuotaSnapshot } from '@/daemon/controlClient';
+import { deliverConnectedServiceQuotaSnapshotToDaemon } from '@/daemon/connectedServices/quotas/deliverConnectedServiceQuotaSnapshotToDaemon';
 import { logger } from '@/ui/logger';
 import { resolveConfiguredClaudeConfigDir } from '../utils/resolveConfiguredClaudeConfigDir';
 
 import { resolveClaudeRuntimeAuthRetryDecision } from './claudeRuntimeAuthRetryDecision';
 import { classifyClaudeConnectedServiceRuntimeAuthFailure } from './classifyClaudeConnectedServiceRuntimeAuthFailure';
 import type { NormalizedProviderUsageLimitDetailsV1 } from './mapClaudeRateLimitEventToUsageDetails';
+import { resolveClaudeRuntimeProviderAccountIdentity } from './resolveClaudeRuntimeProviderAccountIdentity';
 
 type RuntimeIssueSession = Readonly<{
     client: {
@@ -42,21 +43,31 @@ type RuntimeIssueRecoveryProjectionDeduperState = Readonly<{
     key: string;
     surfacedAtMs: number;
 }>;
+type ClaudeQuotaSnapshotSource = NonNullable<ConnectedServiceQuotaSnapshotV1['source']>;
+type ClaudeQuotaSnapshotEvidenceKind = 'claude_runtime_usage_limit' | 'claude_runtime_quota_utilization';
 
 const CLAUDE_RUNTIME_ISSUE_RECOVERY_PROJECTION_DEDUPE_WINDOW_MS = 15_000;
 const recentRecoveryProjectionByClient = new WeakMap<
     RuntimeIssueSession['client'],
     RuntimeIssueRecoveryProjectionDeduperState
 >();
+const daemonOwnedRuntimeAuthFailures = new WeakSet<object>();
+
+export function isClaudeRuntimeAuthFailureOwnedByDaemonRecovery(error: unknown): boolean {
+    if (!error || typeof error !== 'object') return false;
+    return daemonOwnedRuntimeAuthFailures.has(error);
+}
+
+function markClaudeRuntimeAuthFailureOwnedByDaemonRecovery(error: unknown): void {
+    if (error && typeof error === 'object') {
+        daemonOwnedRuntimeAuthFailures.add(error);
+    }
+}
 
 const claudeQuotaSnapshotDeliveryOutbox = createConnectedServiceQuotaSnapshotDeliveryOutbox({
-    deliver: async ({ sessionId, serviceId, groupId, groupGeneration, snapshot }) => await notifyDaemonConnectedServiceQuotaSnapshot({
-        sessionId,
-        serviceId,
-        ...(groupId !== undefined ? { groupId } : {}),
-        ...(groupGeneration !== undefined ? { groupGeneration } : {}),
-        snapshot,
-    }),
+    // CS-FIX-3: route through the ONE shared full-payload daemon deliver helper (forwards
+    // `sourceProviderAccountId`) instead of a hand-rolled per-site closure.
+    deliver: deliverConnectedServiceQuotaSnapshotToDaemon,
     retryDelayMs: 1_000,
     onDiagnostic: (diagnostic) => {
         logger.debug('[claude] Connected-service quota snapshot delivery diagnostic', diagnostic);
@@ -173,6 +184,35 @@ function projectClaudeRuntimeAuthRecoveryReport(input: Readonly<{
     }
 }
 
+/**
+ * R3-4: the rate_limit tap runs in the agent child process whose materialized `CLAUDE_CONFIG_DIR`
+ * names the live account. Stamp that real provider-account UUID onto the evidence as
+ * `sourceProviderAccountId` so the emitted quota snapshot forms a PROVEN source link — the
+ * precondition the predictive soft-switch policy requires. Without this the field is never set and
+ * Claude runtime evidence stays unproven, so predictive pool switching correctly fails closed and
+ * never fires (the flagship Claude soft-swap). An already-supplied identity is respected; a
+ * genuinely-unknown identity (no `oauthAccount`, e.g. api-key sessions) stays unset = fail closed.
+ */
+async function enrichClaudeUsageDetailsWithRuntimeAccountIdentity(
+    details: NormalizedProviderUsageLimitDetailsV1,
+): Promise<NormalizedProviderUsageLimitDetailsV1> {
+    if (typeof details.sourceProviderAccountId === 'string' && details.sourceProviderAccountId.trim().length > 0) {
+        return details;
+    }
+    // Only connected-service (pool) sessions carry a source identity: the soft-switch is a pool
+    // feature, and source links are attributed to a connected-service account. Native sessions
+    // have no pool to switch within, so they stay unstamped (and must not read the ambient home).
+    const hasConnectedServiceSelection = Boolean(
+        findConnectedServiceChildSelection(process.env, 'claude-subscription')
+        ?? findConnectedServiceChildSelection(process.env, 'anthropic'),
+    );
+    if (!hasConnectedServiceSelection) return details;
+    const identity = await resolveClaudeRuntimeProviderAccountIdentity({ env: process.env }).catch(() => null);
+    const providerAccountId = identity?.providerAccountId ?? null;
+    if (!providerAccountId) return details;
+    return { ...details, sourceProviderAccountId: providerAccountId };
+}
+
 function buildNativeClaudeQuotaProfileId(): string {
     return buildNativeProviderAccountUsageSourceProfileId({
         kind: 'localCredential',
@@ -186,10 +226,14 @@ function buildClaudeRuntimeQuotaSnapshot(params: Readonly<{
     fetchedAt: number;
     serviceId: RuntimeIssueConnectedService['serviceId'];
     profileId: string;
+    source?: ClaudeQuotaSnapshotSource;
+    evidenceKind?: ClaudeQuotaSnapshotEvidenceKind;
 }>): ConnectedServiceQuotaSnapshotV1 {
     const providerLimitId = params.details.providerLimitId ?? params.details.limitCategory ?? 'account';
     const resetAtMs = params.details.resetAtMs ?? params.details.overage?.resetAtMs ?? null;
     const utilizationPct = params.details.utilization;
+    const source = params.source ?? 'runtime_event';
+    const evidenceKind = params.evidenceKind ?? 'claude_runtime_usage_limit';
     return {
         v: 1,
         serviceId: params.serviceId,
@@ -201,10 +245,10 @@ function buildClaudeRuntimeQuotaSnapshot(params: Readonly<{
         staleAtMs: params.fetchedAt + 300_000,
         planLabel: params.details.planType,
         accountLabel: null,
-        source: 'runtime_event',
+        source,
         confidence: utilizationPct === null ? 'derived' : 'exact',
         evidence: {
-            kind: 'claude_runtime_usage_limit',
+            kind: evidenceKind,
             providerLimitId,
             observedAtMs: params.fetchedAt,
         },
@@ -219,9 +263,13 @@ function buildClaudeRuntimeQuotaSnapshot(params: Readonly<{
             remainingPct: utilizationPct === null ? null : Math.max(0, 100 - utilizationPct),
             resetsAt: resetAtMs,
             resetAtMs: resetAtMs,
-            resetSource: resetAtMs === null ? 'unknown' : 'provider_event',
+            resetSource: resetAtMs === null
+                ? 'unknown'
+                : source === 'in_band_provider_snapshot'
+                    ? 'in_band_snapshot'
+                    : 'provider_event',
             status: 'ok',
-            source: 'runtime_event',
+            source,
             scope: 'unknown',
             limitScope: params.details.quotaScope,
             confidence: utilizationPct === null ? 'derived' : 'exact',
@@ -232,6 +280,62 @@ function buildClaudeRuntimeQuotaSnapshot(params: Readonly<{
             },
         }],
     };
+}
+
+function resolveClaudeQuotaSnapshotTarget(input: Readonly<{
+    serviceId?: RuntimeIssueConnectedService['serviceId'] | null;
+    profileId?: string | null;
+    groupId?: string | null;
+}>): Readonly<{
+    serviceId: RuntimeIssueConnectedService['serviceId'];
+    profileId: string | null;
+    groupId: string | null;
+    groupGeneration: number | null;
+}> {
+    const selection =
+        findConnectedServiceChildSelection(process.env, 'claude-subscription')
+        ?? findConnectedServiceChildSelection(process.env, 'anthropic')
+        ?? undefined;
+    const selectedGroup = selection?.kind === 'group' ? selection : null;
+    const serviceId = input.serviceId
+        ?? (selection?.serviceId === 'anthropic' ? 'anthropic' : 'claude-subscription');
+    const groupId = input.groupId ?? selectedGroup?.groupId ?? null;
+    const profileId = input.profileId
+        ?? (selection?.kind === 'group' ? selection.activeProfileId : selection?.kind === 'profile' ? selection.profileId : null)
+        ?? (selection ? null : buildNativeClaudeQuotaProfileId());
+    return {
+        serviceId,
+        profileId,
+        groupId,
+        groupGeneration: selectedGroup && groupId === selectedGroup.groupId ? selectedGroup.generation : null,
+    };
+}
+
+export async function recordClaudeRateLimitQuotaEvidence(
+    session: RuntimeIssueSession,
+    details: NormalizedProviderUsageLimitDetailsV1,
+    logPrefix: string,
+): Promise<void> {
+    void logPrefix;
+    const target = resolveClaudeQuotaSnapshotTarget({});
+    if (!target.profileId) return;
+    const enrichedDetails = await enrichClaudeUsageDetailsWithRuntimeAccountIdentity(details);
+    const observedAt = Date.now();
+    await claudeQuotaSnapshotDeliveryOutbox.enqueueAndFlush({
+        sessionId: session.client.sessionId,
+        serviceId: target.serviceId,
+        ...(target.groupId ? { groupId: target.groupId } : {}),
+        ...(target.groupGeneration !== null ? { groupGeneration: target.groupGeneration } : {}),
+        ...(enrichedDetails.sourceProviderAccountId !== undefined ? { sourceProviderAccountId: enrichedDetails.sourceProviderAccountId } : {}),
+        snapshot: buildClaudeRuntimeQuotaSnapshot({
+            details: enrichedDetails,
+            fetchedAt: observedAt,
+            serviceId: target.serviceId,
+            profileId: target.profileId,
+            source: 'in_band_provider_snapshot',
+            evidenceKind: 'claude_runtime_quota_utilization',
+        }),
+    }).catch(() => undefined);
 }
 
 function buildClaudeRuntimeIssueUsageLimit(params: Readonly<{
@@ -355,13 +459,15 @@ export async function surfaceClaudeRateLimitRuntimeIssue(
     // subject. Record it for BOTH the native identity and the selected member (mirroring Codex)
     // so the canonical quota row does not lag behind the background fetcher for group sessions.
     if (profileId) {
+        const enrichedDetails = await enrichClaudeUsageDetailsWithRuntimeAccountIdentity(details);
         await claudeQuotaSnapshotDeliveryOutbox.enqueueAndFlush({
             sessionId: session.client.sessionId,
             serviceId: connectedServiceId,
             ...(effectiveGroupId ? { groupId: effectiveGroupId } : {}),
             ...(effectiveGroupGeneration !== null ? { groupGeneration: effectiveGroupGeneration } : {}),
+            ...(enrichedDetails.sourceProviderAccountId !== undefined ? { sourceProviderAccountId: enrichedDetails.sourceProviderAccountId } : {}),
             snapshot: buildClaudeRuntimeQuotaSnapshot({
-                details,
+                details: enrichedDetails,
                 fetchedAt: occurredAt,
                 serviceId: connectedServiceId,
                 profileId,
@@ -450,6 +556,7 @@ export async function surfaceClaudeRuntimeAuthFailure(
         logPrefix,
     });
     if (connectedServiceRuntimeAuthRecoveryCanOwnTurnFailure(recoveryReport)) {
+        markClaudeRuntimeAuthFailureOwnedByDaemonRecovery(error);
         return true;
     }
     await session.client.sessionTurnLifecycle?.failTurn?.({

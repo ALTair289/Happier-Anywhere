@@ -15,6 +15,10 @@ type TrackedSessionLike = Readonly<{
   happySessionId?: unknown;
 }>;
 
+type ProviderAccountUsagePersistenceResult =
+  | Readonly<{ status: 'persisted' }>
+  | Awaited<ReturnType<ProviderAccountUsagePersistenceScheduler['recordInBandSnapshot']>>;
+
 export type ProviderAccountUsageRecordIdPublisher = (input: Readonly<{
   sessionId: string;
   recordId: string;
@@ -32,6 +36,36 @@ function findTrackedSession(
   if (!normalized) return null;
   return (children as ReadonlyArray<TrackedSessionLike>)
     .find((child) => normalizeSessionId(child.happySessionId) === normalized) ?? null;
+}
+
+function normalizeProviderAccountId(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+export function canRecordProviderAccountUsageSourceLinks(input: Readonly<{
+  snapshot: ProviderAccountUsageSnapshotV1;
+  sourceProviderAccountId?: string | null;
+}>): boolean {
+  const sourceProviderAccountId = normalizeProviderAccountId(input.sourceProviderAccountId);
+  if (!sourceProviderAccountId) return false;
+  const parsed = ProviderAccountUsageSnapshotV1Schema.parse(input.snapshot);
+  if (parsed.recordKey.subjectKind !== 'account' || !parsed.recordKey.accountSubjectId) return false;
+  return parsed.recordKey.accountSubjectId === sourceProviderAccountId;
+}
+
+export function authorizeProviderAccountUsageObservation(input: Readonly<{
+  snapshot: ProviderAccountUsageSnapshotV1;
+  observation?: ProviderAccountUsageObservation;
+  sourceProviderAccountId?: string | null;
+}>): ProviderAccountUsageObservation | undefined {
+  if (!input.observation?.sources?.length) return undefined;
+  if (!canRecordProviderAccountUsageSourceLinks({
+    snapshot: input.snapshot,
+    sourceProviderAccountId: input.sourceProviderAccountId,
+  })) {
+    return undefined;
+  }
+  return { sources: input.observation.sources };
 }
 
 export function createProviderAccountUsageRecordIdMetadataPublisher(params: Readonly<{
@@ -54,6 +88,7 @@ export async function recordProviderAccountUsageSnapshotForSession(input: Readon
   store: Pick<ProviderAccountUsageStore, 'recordSnapshot' | 'resolveRecordId'>;
   persistence: Pick<ProviderAccountUsagePersistenceScheduler, 'recordInBandSnapshot'> | null;
   publishRecordId?: ProviderAccountUsageRecordIdPublisher;
+  sourceProviderAccountId?: string | null;
   observation?: Readonly<{
     sources?: readonly ConnectedServiceUsageSourceV1[];
   }>;
@@ -70,16 +105,21 @@ export async function recordProviderAccountUsageSnapshotForSession(input: Readon
   const observation: ProviderAccountUsageObservation = {
     ...(input.observation?.sources ? { sources: input.observation.sources } : {}),
   };
-  const recorded = input.store.recordSnapshot(snapshot, observation);
+  const authorizedObservation = authorizeProviderAccountUsageObservation({
+    snapshot,
+    observation,
+    sourceProviderAccountId: input.sourceProviderAccountId,
+  });
+  const recorded = input.store.recordSnapshot(snapshot, authorizedObservation);
 
   let persisted = false;
   if (input.persistence) {
     try {
-      await input.persistence.recordInBandSnapshot(
+      const result = await input.persistence.recordInBandSnapshot(
         input.store.resolveRecordId(recorded.recordId) ?? snapshot,
-        input.observation?.sources?.length ? { sources: input.observation.sources } : undefined,
-      );
-      persisted = true;
+        authorizedObservation?.sources?.length ? { sources: authorizedObservation.sources } : undefined,
+      ) as ProviderAccountUsagePersistenceResult;
+      persisted = result.status === 'persisted';
     } catch {
       persisted = false;
     }

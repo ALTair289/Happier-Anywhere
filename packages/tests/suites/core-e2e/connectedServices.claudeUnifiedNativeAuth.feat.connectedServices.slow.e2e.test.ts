@@ -133,7 +133,6 @@ async function createClaudeSubscriptionAuthGroup(params: Readonly<{
           autoSwitch: true,
           preTurnProbeMode: 'never',
           recoveryMode: 'switch_or_wait',
-          memberRuntimeStatePersistence: 'server_state_json',
         },
       }),
       timeoutMs: 20_000,

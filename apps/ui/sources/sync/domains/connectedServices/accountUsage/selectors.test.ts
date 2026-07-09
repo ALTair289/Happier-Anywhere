@@ -145,6 +145,26 @@ describe('selectProviderUsageDisplaySnapshot', () => {
     expect(source).toBeNull();
   });
 
+  it('suppresses connected-service quota display when credential health is not usable', () => {
+    const usage = accountUsageSnapshot();
+    const legacy = legacyQuotaSnapshot();
+
+    const source = selectProviderUsageDisplaySnapshot({
+      providerId: 'codex',
+      metadataRecordIds: [usage.recordId],
+      accountUsageSnapshotsByRecordId: { [usage.recordId]: usage },
+      connectedServiceProfileRef: {
+        serviceId: 'openai-codex',
+        profileId: 'work',
+        credentialHealthStatus: 'needs_reauth',
+        provenance: 'connected_binding_profile',
+      },
+      connectedServiceQuotaView: legacy,
+    });
+
+    expect(source).toBeNull();
+  });
+
   it('ignores connected-service account usage records from other providers before falling back to the connected-service quota view', () => {
     const wrongProviderUsage = accountUsageSnapshot({
       providerId: 'claude',

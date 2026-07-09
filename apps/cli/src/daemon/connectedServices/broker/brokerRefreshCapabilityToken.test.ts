@@ -5,6 +5,9 @@ import {
   CONNECTED_SERVICE_BROKER_REFRESH_TOKEN_ENV,
   deriveConnectedServiceBrokerRefreshToken,
   isValidConnectedServiceBrokerRefreshToken,
+  CONNECTED_SERVICE_RUN_MATERIALIZE_SCOPE_LABEL,
+  deriveConnectedServiceRunMaterializeToken,
+  isValidConnectedServiceRunMaterializeToken,
 } from './brokerRefreshCapabilityToken';
 
 describe('brokerRefreshCapabilityToken (shared, provider-agnostic)', () => {
@@ -56,5 +59,20 @@ describe('brokerRefreshCapabilityToken (shared, provider-agnostic)', () => {
     // scope/format change is unambiguous.
     expect(CONNECTED_SERVICE_BROKER_REFRESH_SCOPE_LABEL).toBe('happier:connected-service-broker-refresh:v1');
     expect(CONNECTED_SERVICE_BROKER_REFRESH_TOKEN_ENV).toBe('HAPPIER_CONNECTED_SERVICE_BROKER_REFRESH_TOKEN');
+  });
+
+  it('keeps run-materialize and broker-refresh scopes mutually exclusive (POST-WAVE-REVIEW F2 least privilege)', () => {
+    const master = 'master-control-token';
+    const brokerToken = deriveConnectedServiceBrokerRefreshToken(master);
+    const runToken = deriveConnectedServiceRunMaterializeToken(master);
+    expect(runToken).not.toBe(brokerToken);
+    // Each validator accepts ONLY its own scope: a leaked run token cannot reach the broker
+    // endpoints and a leaked broker token cannot materialize execution-run credentials.
+    expect(isValidConnectedServiceRunMaterializeToken(runToken, master)).toBe(true);
+    expect(isValidConnectedServiceRunMaterializeToken(brokerToken, master)).toBe(false);
+    expect(isValidConnectedServiceBrokerRefreshToken(runToken, master)).toBe(false);
+    // Neither validator accepts the master token.
+    expect(isValidConnectedServiceRunMaterializeToken(master, master)).toBe(false);
+    expect(CONNECTED_SERVICE_RUN_MATERIALIZE_SCOPE_LABEL).toBe('happier:connected-service-run-materialize:v1');
   });
 });

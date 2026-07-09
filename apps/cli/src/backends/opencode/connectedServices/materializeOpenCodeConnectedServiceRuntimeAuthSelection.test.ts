@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { buildConnectedServiceCredentialRecord } from '@happier-dev/protocol';
 
+import { OPEN_CODE_BROKER_SELECTION_IDENTITY_ENV } from '@/backends/opencode/brokerPlugin';
 import { materializeOpenCodeConnectedServiceRuntimeAuthSelection } from './materializeOpenCodeConnectedServiceRuntimeAuthSelection';
 
 const {
@@ -111,5 +112,65 @@ describe('materializeOpenCodeConnectedServiceRuntimeAuthSelection', () => {
       previousOwnerToken: 'owner-token-1',
     });
     expect(typeof (result as Record<string, unknown>).restartAndResume).toBe('function');
+  });
+
+  it('carries the frozen broker selection identity so hot apply can update daemon-side selection indirection', async () => {
+    resolveConnectedServiceCredentialsMock.mockResolvedValue(new Map());
+
+    const result = await materializeOpenCodeConnectedServiceRuntimeAuthSelection({
+      credentials: {
+        token: 'token',
+        encryption: { type: 'legacy', secret: new Uint8Array(32).fill(1) },
+      },
+      api: {} as any,
+      input: {
+        mode: 'apply',
+        tracked: {
+          startedBy: 'daemon',
+          happySessionId: 'sess_1',
+          pid: 999,
+          spawnOptions: {
+            directory: '/tmp/workspace',
+            backendTarget: { kind: 'builtInAgent', agentId: 'opencode' },
+            environmentVariables: {
+              [OPEN_CODE_BROKER_SELECTION_IDENTITY_ENV]: 'opencode|connected|broker:1|openai-codex:acct-old:',
+            },
+          },
+        },
+        sessionId: 'sess_1',
+        agentId: 'opencode',
+        serviceId: 'openai-codex',
+        previous: null,
+        next: {
+          source: 'connected',
+          selection: 'group',
+          serviceId: 'openai-codex',
+          profileId: 'profile-new',
+          groupId: 'main',
+        },
+        previousBindings: { v: 1, bindingsByServiceId: {} },
+        normalizedBindings: { v: 1, bindingsByServiceId: {} },
+      },
+      baseSelection: {
+        serviceId: 'openai-codex',
+        binding: { source: 'connected', selection: 'group', groupId: 'main', profileId: 'profile-new' },
+        profileId: 'profile-new',
+        groupId: 'main',
+        activeProfileId: 'profile-new',
+        fallbackProfileId: 'profile-old',
+        generation: 12,
+        record: { profileId: 'profile-new' },
+      },
+      processEnv: {
+        HOME: '/tmp/happier',
+      },
+    });
+
+    expect(result).toMatchObject({
+      brokerSelectionIdentity: 'opencode|connected|broker:1|openai-codex:acct-old:',
+      serviceId: 'openai-codex',
+      activeProfileId: 'profile-new',
+      generation: 12,
+    });
   });
 });

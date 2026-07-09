@@ -44,6 +44,7 @@ export function resolveConnectedServiceUxDiagnosticActions(
       ];
     case CONNECTED_SERVICE_UX_DIAGNOSTIC_CODES.quotaFetchDisabled:
     case CONNECTED_SERVICE_UX_DIAGNOSTIC_CODES.authSurfaceWeaklyVerified:
+    case CONNECTED_SERVICE_UX_DIAGNOSTIC_CODES.connectedServiceRestartRequested:
       return [
         CONNECTED_SERVICE_UX_DIAGNOSTIC_ACTIONS.openConnectedAccounts,
       ];

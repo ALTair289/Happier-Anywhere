@@ -3,20 +3,26 @@ import * as React from 'react';
 import { useFeatureEnabled } from '@/hooks/server/useFeatureEnabled';
 import { computeConnectedServiceQuotaSummaryBadges } from '@/sync/domains/connectedServices/connectedServiceQuotaBadges';
 import { connectedServiceProfileKey } from '@/sync/domains/connectedServices/connectedServiceProfilePreferences';
+import { shouldHideQuotaForCredentialStatus } from '@/sync/domains/connectedServices/shouldHideQuotaForCredentialStatus';
 import { useSettings } from '@/sync/store/hooks';
 
-import { ConnectedServiceIdSchema, type ConnectedServiceId } from '@happier-dev/protocol';
+import {
+    ConnectedServiceIdSchema,
+    type ConnectedServiceId,
+} from '@happier-dev/protocol';
 
 import {
     useConnectedServiceQuotaSnapshots,
     type ConnectedServiceQuotaSnapshotsFetchPolicy,
 } from './useConnectedServiceQuotaSnapshots';
 
-type ProfileRef = Readonly<{ serviceId: string; profileId: string }>;
+type ProfileRef = Readonly<{ serviceId: string; profileId: string; credentialHealthStatus?: unknown }>;
 type NormalizedProfileRef = Readonly<{
     key: string;
     serviceId: ConnectedServiceId;
     profileId: string;
+    credentialHealthStatus?: unknown;
+    credentialHealthUsable: boolean;
 }>;
 
 type UseConnectedServiceQuotaBadgesOptions = Readonly<{
@@ -36,7 +42,16 @@ function normalizeProfileRefs(profiles: ReadonlyArray<ProfileRef>): NormalizedPr
         const key = connectedServiceProfileKey({ serviceId, profileId });
         if (seenKeys.has(key)) continue;
         seenKeys.add(key);
-        next.push({ key, serviceId, profileId });
+        // Usage DISPLAY gate: fail OPEN via the single shared predicate (same owner
+        // as the single/plural hooks + AccountBlock). Only an EXPLICIT needs_reauth
+        // blanks badges; absent/unknown/'' show usage — no independent derivation.
+        next.push({
+            key,
+            serviceId,
+            profileId,
+            ...(profile.credentialHealthStatus !== undefined ? { credentialHealthStatus: profile.credentialHealthStatus } : {}),
+            credentialHealthUsable: !shouldHideQuotaForCredentialStatus(profile.credentialHealthStatus),
+        });
     }
     return next;
 }
@@ -62,6 +77,10 @@ export function useConnectedServiceQuotaBadges(
 
         for (const profile of normalizedProfiles) {
             const key = profile.key;
+            if (!profile.credentialHealthUsable) {
+                badgesByKey[key] = [];
+                continue;
+            }
             const pinnedMeterIds = pinnedByKey[key] ?? [];
             const snapshot = snapshotsByKey[key] ?? null;
             if (fetchPolicy === 'cache_only' && !snapshot) {

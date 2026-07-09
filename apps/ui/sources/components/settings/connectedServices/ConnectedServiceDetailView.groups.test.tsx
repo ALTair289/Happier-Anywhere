@@ -344,6 +344,22 @@ describe('ConnectedServiceDetailView pools segment', () => {
         expect(titles.length).toBeGreaterThan(0);
     });
 
+    it('opens directly on the Pools segment when deep-linked with segment=pools', async () => {
+        authoritativeGroupState.groups = [
+            createAuthoritativeGroup({ displayName: 'Authoritative pool' }),
+        ];
+        connectedServicesModuleState.searchParams = { serviceId: 'openai-codex', segment: 'pools' };
+
+        const screen = await renderGroupsScreen();
+        // The one-shot segment initializer runs post-mount; flush its state + the PoolsList load.
+        await act(async () => {
+            await flushAsyncHandlers();
+        });
+
+        // No manual segment switch — the pools content is reachable immediately.
+        expect(screen.findByTestId('connected-services-pool:primary')).toBeTruthy();
+    });
+
     it('offers reconnect for a healthy OAuth account from the accounts list', async () => {
         const screen = await renderGroupsScreen();
 

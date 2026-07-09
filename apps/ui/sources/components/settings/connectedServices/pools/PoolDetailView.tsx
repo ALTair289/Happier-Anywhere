@@ -25,7 +25,15 @@ import {
 } from '@/components/ui/lists/useListInlineReorder';
 import { useAuth } from '@/auth/context/AuthContext';
 import { useFeatureEnabled } from '@/hooks/server/useFeatureEnabled';
+import {
+    useConnectedServiceGroupBindingMachineTargetStatus,
+    type ConnectedServiceBindingMachineTargetReason,
+} from '@/hooks/server/connectedServices/useConnectedServiceRecoveryCreditMachineTarget';
 import { Modal } from '@/modal';
+import {
+    applyConnectedServiceAuthGroupGenerationOnDaemon,
+    type ConnectedServiceAuthGroupGenerationApplyResult,
+} from '@/sync/ops/connectedServices/authGroupGenerationApply';
 import {
     addConnectedServiceAuthGroupMemberV3,
     deleteConnectedServiceAuthGroupV3,
@@ -57,6 +65,7 @@ import {
 import {
     CONNECTED_SERVICE_GROUP_DEFAULT_POLICY,
     normalizeConnectedServiceGroupMember,
+    resolveConnectedServiceGroupMemberCredentialHealthStatus,
     resolveConnectedServiceGroupProbeIfSnapshotOlderThanMs,
     resolveConnectedServiceGroupMemberIdentity,
     resolveConnectedServiceGroupProfileTitle,
@@ -68,7 +77,9 @@ import {
 import { resolveConnectedServiceRuntimeGroupCapability } from '../model/connectedServiceRuntimeFallbackCapability';
 import { resolveConnectedServiceDisplayName } from '../model/resolveConnectedServiceDisplayName';
 import { commitPoolMemberReorder, computePoolMemberPriorities, type ReorderableGroup } from './commitPoolMemberReorder';
+import { commitPoolMembershipBatch } from './commitPoolMembershipBatch';
 import { PoolMembersDropOverlay } from './PoolMembersDropOverlay';
+import { PoolMembershipEditorModal, type PoolMembershipCandidate } from './PoolMembershipEditorModal';
 
 type GroupStrategy = ConnectedServiceAuthGroupPolicyV1['strategy'];
 type GroupRecoveryMode = ConnectedServiceAuthGroupPolicyV1['recoveryMode'];
@@ -79,6 +90,22 @@ type PoolDetailGroupsState = Readonly<{
     groups: ReadonlyArray<ConnectedServiceAuthGroupV1>;
     loadStatus: PoolDetailGroupsLoadStatus;
     hasLoaded: boolean;
+}>;
+
+/**
+ * R3-8: a manual active-account switch commits the server CAS BEFORE the daemon applies the new
+ * generation to live sessions. When that daemon apply fails, server + UI are on the NEW account but
+ * running sessions stay on the OLD one — a silent 3-way divergence. This captures the reconciled,
+ * authoritative post-failure state so the UI can surface it explicitly and offer retry/revert instead
+ * of a generic alert that hides the split.
+ */
+type ManualApplyDivergence = Readonly<{
+    /** Server-committed target profile (what the server/UI now show as active). */
+    targetProfileId: string;
+    /** Previous active profile, for a revert that reconverges server + daemon on the old account. */
+    previousProfileId: string | null;
+    /** Sanitized per-session failure detail (session:errorCode …). */
+    detail: string;
 }>;
 
 const SWITCH_ON_KEYS: ReadonlyArray<SwitchOnKey> = ['usageLimit', 'authExpired', 'accountChanged', 'refreshFailure'];
@@ -207,6 +234,56 @@ function resolveNextMemberPriority(group: ConnectedServiceAuthGroupV1): number {
     return Math.max(100, maxPriority + 100);
 }
 
+function formatDaemonApplyFailureDetails(result: ConnectedServiceAuthGroupGenerationApplyResult): string {
+    const failures = Array.isArray(result.failures) ? result.failures : [];
+    const failureDetails = failures
+        .map((failure) => `${failure.sessionId}:${failure.errorCode}`)
+        .filter((value) => value.length > 1);
+    const failedCount = typeof result.failedSessionCount === 'number'
+        ? result.failedSessionCount
+        : failures.length;
+    return [
+        failedCount > 0 ? `failedSessionCount=${failedCount}` : null,
+        ...failureDetails,
+    ].filter(Boolean).join(', ');
+}
+
+function isDaemonApplySucceeded(result: ConnectedServiceAuthGroupGenerationApplyResult): boolean {
+    const failedSessionCount = typeof result.failedSessionCount === 'number'
+        ? result.failedSessionCount
+        : 0;
+    const failureCount = Array.isArray(result.failures) ? result.failures.length : 0;
+    return result.ok !== false && failedSessionCount <= 0 && failureCount <= 0;
+}
+
+function assertDaemonApplySucceeded(result: ConnectedServiceAuthGroupGenerationApplyResult) {
+    if (isDaemonApplySucceeded(result)) return;
+
+    const details = formatDaemonApplyFailureDetails(result);
+    throw new Error(details
+        ? `${t('connectedServices.detail.errors.requestFailed')} (${details})`
+        : t('connectedServices.detail.errors.requestFailed'));
+}
+
+/**
+ * Concrete, typed copy for why no live hot-apply target is reachable, instead of the
+ * generic "request failed" — so a manual pool switch explains WHAT is wrong and the
+ * next step (start/reach a session on this pool) rather than a dead error.
+ */
+function resolveMachineTargetUnavailableMessage(
+    reason: ConnectedServiceBindingMachineTargetReason,
+): string {
+    return reason === 'machine_offline'
+        ? t('connectedServices.pools.detail.machineTarget.offline')
+        : t('connectedServices.pools.detail.machineTarget.noBoundSession');
+}
+
+/** Sanitized failure detail for the divergence surface — never a raw secret, just session:errorCode. */
+function resolveManualApplyFailureDetail(error: unknown): string {
+    if (error instanceof Error && error.message.trim().length > 0) return error.message;
+    return t('connectedServices.detail.errors.requestFailed');
+}
+
 /**
  * Pool ("auth group") detail view. The new canonical replacement for
  * `ConnectedServiceGroupDetailView`: members render as the shared
@@ -226,6 +303,7 @@ export const PoolDetailView = React.memo(function PoolDetailView() {
     const accountGroupsEnabled = useFeatureEnabled('connectedServices.accountGroups');
     const accountFallbackEnabled = useFeatureEnabled('connectedServices.accountFallback');
     const [groupsState, setGroupsState] = React.useState<PoolDetailGroupsState>(EMPTY_GROUPS_STATE);
+    const [manualApplyDivergence, setManualApplyDivergence] = React.useState<ManualApplyDivergence | null>(null);
     const [strategyOpen, setStrategyOpen] = React.useState(false);
     const [recoveryModeOpen, setRecoveryModeOpen] = React.useState(false);
     const [advancedExpanded, setAdvancedExpanded] = React.useState(false);
@@ -243,6 +321,11 @@ export const PoolDetailView = React.memo(function PoolDetailView() {
     const groups = groupsState.groups;
     const groupsLoadStatus = groupsState.loadStatus;
     const group = groups.find((candidate) => candidate.serviceId === serviceId && candidate.groupId === groupId) ?? null;
+    const daemonApplyMachineTargetStatus = useConnectedServiceGroupBindingMachineTargetStatus({
+        serviceId,
+        groupId,
+    });
+    const daemonApplyMachineId = daemonApplyMachineTargetStatus.machineId;
 
     const runtimeGroupCapability = React.useMemo(
         () => serviceId
@@ -556,36 +639,244 @@ export const PoolDetailView = React.memo(function PoolDetailView() {
         }));
     }, [group, runGroupMutation, serviceId]);
 
+    /**
+     * All profiles eligible for pool membership: current members (kept so they can
+     * be unchecked) plus any connectable profile not yet a member. Feeds the
+     * searchable batch membership editor.
+     */
+    const membershipCandidates = React.useMemo<ReadonlyArray<PoolMembershipCandidate>>(() => {
+        if (!group || !serviceId) return [];
+        const memberProfileIds = new Set(group.members.map((member) => member.profileId));
+        return profiles
+            .filter((candidate) => {
+                const profileId = readProfileId(candidate);
+                return profileId.length > 0
+                    && (memberProfileIds.has(profileId) || isConnectedProfile(candidate));
+            })
+            .map((candidate) => {
+                const profileId = readProfileId(candidate);
+                const identity = resolveConnectedServiceGroupMemberIdentity({
+                    serviceId,
+                    profileId,
+                    labelsByKey: settings.connectedServicesProfileLabelByKey,
+                    profiles,
+                });
+                return {
+                    profileId,
+                    title: resolveConnectedServiceGroupProfileTitle({
+                        serviceId,
+                        profileId,
+                        labelsByKey: settings.connectedServicesProfileLabelByKey,
+                        profiles,
+                    }),
+                    subtitle: identity.secondaryLabel ?? undefined,
+                };
+            });
+    }, [group, profiles, serviceId, settings.connectedServicesProfileLabelByKey]);
+
+    /**
+     * Batch-apply a membership diff from the editor: reuse the canonical
+     * add/remove member mutations, threaded through `commitPoolMembershipBatch`
+     * so the bumped `expectedGeneration` chains across the sequential calls (no
+     * batch endpoint exists) and a generation conflict refetches + retries. The
+     * authoritative reconcile happens once at the end via profile + group reload.
+     */
+    const handleCommitMembership = React.useCallback(async (
+        nextSelectedProfileIds: ReadonlyArray<string>,
+    ) => {
+        if (!serviceId || !group) return;
+        const startGroup = group;
+        const toLean = (candidate: ConnectedServiceAuthGroupV1) => ({
+            generation: candidate.generation,
+            members: candidate.members.map((member) => ({ profileId: member.profileId, priority: member.priority })),
+        });
+        try {
+            await commitPoolMembershipBatch({
+                group: toLean(startGroup),
+                nextSelectedProfileIds,
+                addMember: async ({ profileId, priority, expectedGeneration }) => toLean(
+                    await addConnectedServiceAuthGroupMemberV3(ensureCredentials(), {
+                        serviceId,
+                        groupId: startGroup.groupId,
+                        profileId,
+                        priority,
+                        enabled: true,
+                        expectedGeneration,
+                    }),
+                ),
+                removeMember: async ({ profileId, expectedGeneration }) => toLean(
+                    await removeConnectedServiceAuthGroupMemberV3(ensureCredentials(), {
+                        serviceId,
+                        groupId: startGroup.groupId,
+                        profileId,
+                        expectedGeneration,
+                    }),
+                ),
+                refetchGroup: async () => {
+                    const refreshed = await listConnectedServiceAuthGroupsV3(ensureCredentials(), { serviceId });
+                    const next = refreshed.find((candidate) => candidate.groupId === startGroup.groupId);
+                    if (next) {
+                        upsertGroup(next);
+                        return toLean(next);
+                    }
+                    return toLean(startGroup);
+                },
+            });
+            await sync.refreshProfile().catch(() => undefined);
+            await loadGroups().catch(() => undefined);
+        } catch (e: unknown) {
+            await loadGroups().catch(() => undefined);
+            await Modal.alert(t('common.error'), resolveConnectedServiceSettingsErrorMessage(e));
+        }
+    }, [group, loadGroups, serviceId, upsertGroup]);
+
+    const handleEditMembers = React.useCallback(() => {
+        if (!serviceId || !group) return;
+        Modal.show({
+            component: PoolMembershipEditorModal,
+            props: {
+                candidates: membershipCandidates,
+                initialSelectedProfileIds: group.members.map((member) => member.profileId),
+                onSubmit: (next) => { void handleCommitMembership(next); },
+            },
+            chrome: {
+                kind: 'card',
+                title: t('connectedServices.detail.groupActions.membersTitle'),
+                subtitle: t('connectedServices.detail.groupActions.membersSubtitle'),
+                dimensions: { size: 'lg' },
+            },
+            closeOnBackdrop: true,
+        });
+    }, [group, handleCommitMembership, membershipCandidates, serviceId]);
+
+    /**
+     * Apply an already server-committed group generation to live daemon sessions, with the R3-8
+     * mandatory reconcile: on apply failure, refetch AUTHORITATIVE server state and record the
+     * server↔daemon divergence explicitly (retry/revert affordances render off it) instead of leaving
+     * a silent 3-way split behind a generic alert. `previousProfileId` is the pre-switch active
+     * profile so a later revert can reconverge server + daemon on the old account.
+     */
+    const applyGenerationWithReconcile = React.useCallback(async (
+        serverGroup: ConnectedServiceAuthGroupV1,
+        previousProfileId: string | null,
+    ): Promise<'applied' | 'diverged'> => {
+        if (!serviceId || !daemonApplyMachineId) return 'diverged';
+        const activeProfileId = serverGroup.activeProfileId;
+        try {
+            if (!activeProfileId) {
+                setManualApplyDivergence(null);
+                return 'applied';
+            }
+            const result = await applyConnectedServiceAuthGroupGenerationOnDaemon({
+                machineId: daemonApplyMachineId,
+                serverId: null,
+                serviceId,
+                groupId: serverGroup.groupId,
+                activeProfileId,
+                generation: serverGroup.generation,
+            });
+            assertDaemonApplySucceeded(result);
+            setManualApplyDivergence(null);
+            await sync.refreshProfile().catch(() => undefined);
+            await loadGroups().catch(() => undefined);
+            return 'applied';
+        } catch (error) {
+            // MANDATORY reconcile from authoritative sources before surfacing.
+            const refreshed = await loadGroups().catch(() => undefined);
+            await sync.refreshProfile().catch(() => undefined);
+            const authoritative = (refreshed ?? []).find(
+                (candidate) => candidate.serviceId === serviceId && candidate.groupId === serverGroup.groupId,
+            ) ?? serverGroup;
+            setManualApplyDivergence({
+                targetProfileId: authoritative.activeProfileId ?? activeProfileId ?? '',
+                previousProfileId,
+                detail: resolveManualApplyFailureDetail(error),
+            });
+            return 'diverged';
+        }
+    }, [daemonApplyMachineId, loadGroups, serviceId]);
+
     const handleSetActiveMember = React.useCallback(async (profileId: string) => {
         if (!serviceId || !group || !fallbackControlsEnabled) return;
-        const runSetActiveMember = async (overrideRuntimeCooldown: boolean) => {
-            await runGroupMutation(() => setConnectedServiceAuthGroupActiveProfileV3(ensureCredentials(), {
+        if (daemonApplyMachineTargetStatus.machineId == null) {
+            await Modal.alert(
+                t('connectedServices.pools.detail.machineTarget.title'),
+                resolveMachineTargetUnavailableMessage(daemonApplyMachineTargetStatus.reason),
+            );
+            return;
+        }
+        const previousProfileId = group.activeProfileId ?? null;
+        const commitServerActive = (overrideRuntimeCooldown: boolean) =>
+            setConnectedServiceAuthGroupActiveProfileV3(ensureCredentials(), {
                 serviceId,
                 groupId: group.groupId,
                 profileId,
                 expectedGeneration: group.generation,
                 ...(overrideRuntimeCooldown ? { overrideRuntimeCooldown: true } : {}),
-            }));
-        };
-        await runGroupMutation(() => setConnectedServiceAuthGroupActiveProfileV3(ensureCredentials(), {
-            serviceId,
-            groupId: group.groupId,
-            profileId,
-            expectedGeneration: group.generation,
-        }), {
-            onError: async (error) => {
-                if (!isConnectedServiceRuntimeCooldownError(error)) return false;
+            });
+
+        // Phase 1 — server CAS commit. A failure here means NOTHING committed (no divergence): reconcile
+        // to server truth and surface generically. Runtime-cooldown offers an explicit override retry.
+        let serverGroup: ConnectedServiceAuthGroupV1;
+        try {
+            serverGroup = await commitServerActive(false);
+        } catch (error) {
+            if (isConnectedServiceRuntimeCooldownError(error)) {
                 const prompt = resolveConnectedServiceRuntimeCooldownOverridePrompt(error);
                 const ok = await Modal.confirm(prompt.title, prompt.body, {
                     confirmText: prompt.confirmText,
                     cancelText: prompt.cancelText,
                 });
-                if (!ok) return true;
-                await runSetActiveMember(true);
-                return true;
-            },
-        });
-    }, [fallbackControlsEnabled, group, runGroupMutation, serviceId]);
+                if (!ok) return;
+                try {
+                    serverGroup = await commitServerActive(true);
+                } catch (retryError) {
+                    await loadGroups().catch(() => undefined);
+                    await Modal.alert(t('common.error'), resolveConnectedServiceSettingsErrorMessage(retryError));
+                    return;
+                }
+            } else {
+                await loadGroups().catch(() => undefined);
+                await Modal.alert(t('common.error'), resolveConnectedServiceSettingsErrorMessage(error));
+                return;
+            }
+        }
+
+        // Server committed: reflect its truth locally immediately, then apply to live sessions with the
+        // reconcile coordinator (Phase 2). No generic alert on apply failure — the divergence surface is.
+        upsertGroup(serverGroup);
+        await applyGenerationWithReconcile(serverGroup, previousProfileId);
+    }, [applyGenerationWithReconcile, daemonApplyMachineTargetStatus, fallbackControlsEnabled, group, loadGroups, serviceId, upsertGroup]);
+
+    /** Retry the daemon apply using the CURRENT authoritative server generation. */
+    const handleRetryManualApply = React.useCallback(async () => {
+        if (!serviceId || !group || !manualApplyDivergence) return;
+        await applyGenerationWithReconcile(group, manualApplyDivergence.previousProfileId);
+    }, [applyGenerationWithReconcile, group, manualApplyDivergence, serviceId]);
+
+    /**
+     * Revert: forward-CAS the server active profile back to the previous account (there is no
+     * transactional undo — the first commit already bumped the generation), then re-apply on the
+     * daemon so server + live sessions reconverge on the old account.
+     */
+    const handleRevertManualApply = React.useCallback(async () => {
+        if (!serviceId || !group || !manualApplyDivergence?.previousProfileId) return;
+        const revertToProfileId = manualApplyDivergence.previousProfileId;
+        const divergedFromProfileId = group.activeProfileId ?? null;
+        try {
+            const reverted = await setConnectedServiceAuthGroupActiveProfileV3(ensureCredentials(), {
+                serviceId,
+                groupId: group.groupId,
+                profileId: revertToProfileId,
+                expectedGeneration: group.generation,
+            });
+            upsertGroup(reverted);
+            await applyGenerationWithReconcile(reverted, divergedFromProfileId);
+        } catch (error) {
+            await loadGroups().catch(() => undefined);
+            await Modal.alert(t('common.error'), resolveConnectedServiceSettingsErrorMessage(error));
+        }
+    }, [applyGenerationWithReconcile, group, loadGroups, manualApplyDivergence, serviceId, upsertGroup]);
 
     /**
      * Commit a new member fallback order. Threads the bumped `expectedGeneration`
@@ -814,6 +1105,11 @@ export const PoolDetailView = React.memo(function PoolDetailView() {
                             profiles,
                         });
                         const isActive = memberModel.profileId === group.activeProfileId;
+                        const memberHealthStatus = resolveConnectedServiceGroupMemberCredentialHealthStatus({
+                            member: memberModel,
+                            profiles,
+                        });
+                        const canSetActiveMember = !isActive && fallbackControlsEnabled && daemonApplyMachineId != null;
                         // Bind the inline-reorder pan gesture for this row. The gesture
                         // is created once per row here and handed to `AccountBlock`,
                         // which renders the GestureDetector INLINE (mirroring
@@ -842,14 +1138,18 @@ export const PoolDetailView = React.memo(function PoolDetailView() {
                                 title: isActive
                                     ? t('connectedServices.detail.groupActions.activeMember')
                                     : t('connectedServices.detail.groupActions.makeActive'),
-                                subtitle: !isActive && !fallbackControlsEnabled
-                                    ? fallbackDisabledSubtitle ?? t('connectedServices.detail.groupActions.accountFallbackDisabled')
+                                subtitle: !isActive
+                                    ? !fallbackControlsEnabled
+                                        ? fallbackDisabledSubtitle ?? t('connectedServices.detail.groupActions.accountFallbackDisabled')
+                                        : daemonApplyMachineTargetStatus.machineId == null
+                                            ? resolveMachineTargetUnavailableMessage(daemonApplyMachineTargetStatus.reason)
+                                            : undefined
                                     : undefined,
                                 icon: isActive ? 'radio-button-on-outline' : 'radio-button-off-outline',
-                                disabled: isActive || !fallbackControlsEnabled,
-                                onPress: isActive || !fallbackControlsEnabled
-                                    ? undefined
-                                    : () => void handleSetActiveMember(memberModel.profileId),
+                                disabled: !canSetActiveMember,
+                                onPress: canSetActiveMember
+                                    ? () => void handleSetActiveMember(memberModel.profileId)
+                                    : undefined,
                             },
                             {
                                 id: `connected-services-pool:${group.groupId}:member:${memberModel.profileId}:action:remove`,
@@ -872,13 +1172,13 @@ export const PoolDetailView = React.memo(function PoolDetailView() {
                                     profileId={memberModel.profileId}
                                     title={memberTitle}
                                     identityLabel={memberIdentity.secondaryLabel ?? null}
-                                    status={memberModel.blocker?.kind === 'auth_invalid' ? 'needs_reauth' : 'connected'}
+                                    status={memberHealthStatus}
                                     variant="poolMember"
                                     groupId={group.groupId}
                                     enabled={memberModel.enabled}
                                     onToggleEnabled={(next) => void handleSetMemberEnabled(memberModel.profileId, next)}
                                     isActive={isActive}
-                                    onSetActive={!isActive && fallbackControlsEnabled
+                                    onSetActive={canSetActiveMember
                                         ? () => void handleSetActiveMember(memberModel.profileId)
                                         : undefined}
                                     actions={memberActions}
@@ -912,7 +1212,43 @@ export const PoolDetailView = React.memo(function PoolDetailView() {
                     disabled={!canAddMember}
                     onPress={canAddMember ? handleAddMember : undefined}
                 />
+                <Item
+                    testID="connected-services-pool-detail:edit-members"
+                    title={t('connectedServices.detail.groupActions.membersTitle')}
+                    subtitle={t('connectedServices.detail.groupActions.membersSubtitle')}
+                    icon={<Ionicons name="people-outline" size={22} color={theme.colors.accent.blue} />}
+                    disabled={membershipCandidates.length === 0}
+                    onPress={membershipCandidates.length === 0 ? undefined : handleEditMembers}
+                />
             </ItemGroup>
+
+            {manualApplyDivergence ? (
+                <ItemGroup>
+                    <Item
+                        testID="connected-services-pool-detail:manual-apply-failure"
+                        title={t('connectedServices.pools.detail.manualApplyDivergenceTitle')}
+                        subtitle={t('connectedServices.pools.detail.manualApplyDivergenceSubtitle', {
+                            detail: manualApplyDivergence.detail,
+                        })}
+                        icon={<Ionicons name="warning-outline" size={22} color={theme.colors.state.danger.foreground} />}
+                        showChevron={false}
+                    />
+                    <Item
+                        testID="connected-services-pool-detail:manual-apply-failure:retry"
+                        title={t('connectedServices.pools.detail.manualApplyRetry')}
+                        icon={<Ionicons name="refresh-outline" size={22} color={theme.colors.accent.blue} />}
+                        onPress={() => void handleRetryManualApply()}
+                    />
+                    {manualApplyDivergence.previousProfileId ? (
+                        <Item
+                            testID="connected-services-pool-detail:manual-apply-failure:revert"
+                            title={t('connectedServices.pools.detail.manualApplyRevert')}
+                            icon={<Ionicons name="arrow-undo-outline" size={22} color={theme.colors.accent.blue} />}
+                            onPress={() => void handleRevertManualApply()}
+                        />
+                    ) : null}
+                </ItemGroup>
+            ) : null}
 
             <ItemGroup title={t('connectedServices.pools.detail.behaviorTitle')}>
                 <Item

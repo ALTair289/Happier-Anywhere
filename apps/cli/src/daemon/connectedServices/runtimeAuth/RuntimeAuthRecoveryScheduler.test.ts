@@ -195,7 +195,7 @@ describe('RuntimeAuthRecoveryScheduler', () => {
     }));
   });
 
-  it('keeps group-exhausted no_eligible_member waiting until the earliest FUTURE reset without burning attempts', async () => {
+  it('keeps group-exhausted no_eligible_member waiting until the earliest FUTURE reset and counts the attempt', async () => {
     const diagnostics: RuntimeAuthRecoveryDiagnostic[] = [];
     let nowMs = 1_000;
     const scheduler = new RuntimeAuthRecoveryScheduler({
@@ -244,30 +244,27 @@ describe('RuntimeAuthRecoveryScheduler', () => {
       groupId: 'team',
       nextRetryAtMs: 9_000,
       lastError: 'no_eligible_member',
-      // RD-REC-3 / F0: a group-exhausted durable wait must not consume the attempt budget.
-      attemptCount: 0,
+      attemptCount: 1,
     });
     expect(diagnostics).not.toContainEqual(expect.objectContaining({
       event: 'runtime_auth_recovery_terminal',
     }));
   });
 
-  it('falls back to a never-zero policy floor when every group-exhausted wait candidate is stale', async () => {
+  it('uses the group-exhausted floor when no_eligible_member has no future reset evidence', async () => {
     const diagnostics: RuntimeAuthRecoveryDiagnostic[] = [];
     let nowMs = 1_000;
     const scheduler = new RuntimeAuthRecoveryScheduler({
       nowMs: () => nowMs,
       baseBackoffMs: 100,
-      maxBackoffMs: 1_000,
+      maxBackoffMs: 250,
       jitterMs: () => 0,
       recover: async () => ({
         status: 'no_eligible_member' as const,
         generation: 12,
         groupExhausted: true,
-        retryAtMs: 2_000,
-        excluded: [
-          { profileId: 'primary', reason: 'quota_exhausted', retryAtMs: 3_000 },
-        ],
+        retryAtMs: null,
+        excluded: [],
       }),
       recordDiagnostic: (event) => {
         diagnostics.push(event);
@@ -296,11 +293,9 @@ describe('RuntimeAuthRecoveryScheduler', () => {
     expect(intent).toMatchObject({
       status: 'waiting',
       lastError: 'no_eligible_member',
-      attemptCount: 0,
+      attemptCount: 1,
+      nextRetryAtMs: 35_000,
     });
-    // The durable wait must be strictly in the future (member-cooldown/policy floor),
-    // never "now": collapsing to now produced the live immediate-retry dead-letter loop.
-    expect(intent?.nextRetryAtMs ?? 0).toBeGreaterThan(nowMs);
     expect(diagnostics).not.toContainEqual(expect.objectContaining({
       event: 'runtime_auth_recovery_terminal',
     }));
@@ -309,7 +304,66 @@ describe('RuntimeAuthRecoveryScheduler', () => {
     }));
   });
 
-  it('never dead-letters group-exhausted durable waits at the attempt ceiling', async () => {
+  it('lets unknown-reset group-exhausted no_eligible_member backoff grow above the floor', async () => {
+    let nowMs = 1_000;
+    const scheduler = new RuntimeAuthRecoveryScheduler({
+      nowMs: () => nowMs,
+      baseBackoffMs: 10_000,
+      maxBackoffMs: 45_000,
+      jitterMs: () => 0,
+      recover: async () => ({
+        status: 'no_eligible_member' as const,
+        generation: 12,
+        groupExhausted: true,
+        retryAtMs: null,
+        excluded: [],
+      }),
+    });
+    const recoveryKey = buildRuntimeAuthRecoveryKey({
+      sessionId: 'session-1',
+      serviceId: 'openai-codex',
+      profileId: 'primary',
+      groupId: 'team',
+    });
+
+    await scheduler.beginClassifiedFailure({
+      sessionId: 'session-1',
+      switchesThisTurn: 0,
+      classification: classificationFor({ resetsAtMs: 3_000 }),
+    });
+
+    nowMs = 5_000;
+    await expect(scheduler.wakeByKey({
+      recoveryKey,
+      reason: 'manual',
+    })).resolves.toEqual({ status: 'waiting' });
+    expect(scheduler.readByKey(recoveryKey)).toMatchObject({
+      attemptCount: 1,
+      nextRetryAtMs: 35_000,
+    });
+
+    nowMs = 35_000;
+    await expect(scheduler.wakeByKey({
+      recoveryKey,
+      reason: 'manual',
+    })).resolves.toEqual({ status: 'waiting' });
+    expect(scheduler.readByKey(recoveryKey)).toMatchObject({
+      attemptCount: 2,
+      nextRetryAtMs: 75_000,
+    });
+
+    nowMs = 75_000;
+    await expect(scheduler.wakeByKey({
+      recoveryKey,
+      reason: 'manual',
+    })).resolves.toEqual({ status: 'waiting' });
+    expect(scheduler.readByKey(recoveryKey)).toMatchObject({
+      attemptCount: 3,
+      nextRetryAtMs: 120_000,
+    });
+  });
+
+  it('increments group-exhausted no_eligible_member attempts without dead-lettering durable waits at the attempt ceiling', async () => {
     const diagnostics: RuntimeAuthRecoveryDiagnostic[] = [];
     let nowMs = 1_000;
     const scheduler = new RuntimeAuthRecoveryScheduler({
@@ -347,11 +401,62 @@ describe('RuntimeAuthRecoveryScheduler', () => {
     expect(scheduler.read('session-1')).toMatchObject({
       status: 'waiting',
       lastError: 'no_eligible_member',
-      attemptCount: 0,
+      attemptCount: 5,
     });
     const events = diagnostics.map((event) => event.event);
     expect(events).not.toContain('runtime_auth_recovery_dead_letter');
     expect(events).not.toContain('runtime_auth_recovery_terminal');
+  });
+
+  it('resets no_eligible_member backoff when the failure evidence changes', async () => {
+    let nowMs = 1_000;
+    const scheduler = new RuntimeAuthRecoveryScheduler({
+      nowMs: () => nowMs,
+      baseBackoffMs: 100,
+      maxBackoffMs: 1_000,
+      jitterMs: () => 0,
+      recover: async () => ({
+        status: 'no_eligible_member' as const,
+        generation: 12,
+        groupExhausted: true,
+        retryAtMs: null,
+        excluded: [],
+      }),
+    });
+    const recoveryKey = buildRuntimeAuthRecoveryKey({
+      sessionId: 'session-1',
+      serviceId: 'openai-codex',
+      profileId: 'primary',
+      groupId: 'team',
+    });
+
+    await scheduler.beginClassifiedFailure({
+      sessionId: 'session-1',
+      switchesThisTurn: 0,
+      classification: classification(),
+    });
+    nowMs = 5_000;
+    await expect(scheduler.wakeByKey({
+      recoveryKey,
+      reason: 'manual',
+    })).resolves.toEqual({ status: 'waiting' });
+    expect(scheduler.readByKey(recoveryKey)).toMatchObject({
+      attemptCount: 1,
+      nextRetryAtMs: 35_000,
+    });
+
+    nowMs = 5_100;
+    await scheduler.beginClassifiedFailure({
+      sessionId: 'session-1',
+      switchesThisTurn: 0,
+      classification: classificationFor({ resetsAtMs: 20_000 }),
+    });
+
+    expect(scheduler.readByKey(recoveryKey)).toMatchObject({
+      attemptCount: 0,
+      nextRetryAtMs: 20_000,
+      classification: expect.objectContaining({ resetsAtMs: 20_000 }),
+    });
   });
 
   it('keeps switch_limit_reached as a durable wait instead of terminalizing the recovery', async () => {
@@ -384,8 +489,7 @@ describe('RuntimeAuthRecoveryScheduler', () => {
     expect(intent).toMatchObject({
       status: 'waiting',
       lastError: 'switch_limit_reached',
-      // INC-2: storm protection comes from the wait, not from burning the budget.
-      attemptCount: 0,
+      attemptCount: 1,
     });
     expect(intent?.nextRetryAtMs ?? 0).toBeGreaterThan(nowMs);
     const events = diagnostics.map((event) => event.event);
@@ -631,8 +735,7 @@ describe('RuntimeAuthRecoveryScheduler', () => {
       status: 'waiting',
       lastError: 'awaiting_limit_reset',
       nextRetryAtMs: 60_000,
-      // Durable waits must not consume the dead-letter attempt budget (RD-REC-3 / F0).
-      attemptCount: 0,
+      attemptCount: 1,
     });
     const events = diagnostics.map((event) => event.event);
     expect(events).not.toContain('runtime_auth_recovery_terminal');
@@ -860,6 +963,57 @@ describe('RuntimeAuthRecoveryScheduler', () => {
       'anthropic',
       'openai-codex',
     ]);
+  });
+
+  it('classifies state-sharing lock contention as retryable handler dependency contention', async () => {
+    const diagnostics: RuntimeAuthRecoveryDiagnostic[] = [];
+    const scheduler = new RuntimeAuthRecoveryScheduler({
+      nowMs: () => 1_000,
+      baseBackoffMs: 100,
+      maxBackoffMs: 1_000,
+      jitterMs: () => 0,
+      recover: async () => ({ status: 'credential_refreshed' }),
+      recordDiagnostic: (event) => {
+        diagnostics.push(event);
+      },
+    });
+
+    const result = await scheduler.enqueueHandlerFailure({
+      sessionId: 'session-1',
+      switchesThisTurn: 0,
+      classification: classification(),
+      error: Object.assign(new Error('state sharing lock unavailable'), {
+        code: 'state_sharing_lock_unavailable',
+        owner: {
+          pid: 1234,
+          providerId: 'claude',
+          acquiredAtMs: 900,
+          ageMs: 100,
+          alive: true,
+        },
+      }),
+    });
+
+    expect(result).toMatchObject({
+      status: 'scheduled',
+      retryable: true,
+      nextRetryAtMs: 1_100,
+    });
+    expect(scheduler.readByKey(buildRuntimeAuthRecoveryKey({
+      sessionId: 'session-1',
+      serviceId: 'openai-codex',
+      profileId: 'primary',
+      groupId: 'team',
+    }))).toMatchObject({
+      status: 'waiting',
+      lastErrorClassification: {
+        kind: 'dependency_unavailable',
+        retryable: true,
+      },
+    });
+    expect(diagnostics).not.toContainEqual(expect.objectContaining({
+      event: 'runtime_auth_recovery_terminal',
+    }));
   });
 
   it('marks one composite recovery key succeeded with provider proof without clobbering sibling intents', async () => {
@@ -1223,7 +1377,7 @@ describe('RuntimeAuthRecoveryScheduler', () => {
     expect(scheduler.read('session-1')).toMatchObject({
       status: 'waiting',
       attemptCount: 1,
-      nextRetryAtMs: 2_150,
+      nextRetryAtMs: 2_200,
       switchesThisTurn: 2,
       lastErrorClassification: { kind: 'network', retryable: true },
     } satisfies Partial<RuntimeAuthRecoveryIntent>);
@@ -1260,6 +1414,53 @@ describe('RuntimeAuthRecoveryScheduler', () => {
 
     // Exactly one durable intent for the session despite two enqueues.
     expect(scheduler.readForSession('session-1')).toHaveLength(1);
+  });
+
+  it('coalesces duplicate runtime-auth reports for the same failing access-token fingerprint', async () => {
+    const scheduler = new RuntimeAuthRecoveryScheduler({
+      nowMs: () => 1_000,
+      baseBackoffMs: 100,
+      maxBackoffMs: 1_000,
+      jitterMs: () => 0,
+      maxAttempts: 3,
+      recover: async () => ({ status: 'session_endpoint_unavailable', reason: 'down' }),
+    });
+
+    await scheduler.enqueueHandlerFailure({
+      sessionId: 'session-1',
+      switchesThisTurn: 1,
+      classification: classificationFor({
+        kind: 'auth_expired',
+        serviceId: 'claude-subscription',
+        groupId: 'claude',
+        profileId: 'member-a',
+        failingAccessTokenFingerprint: 'sha256:aaaaaaaa',
+      }),
+      error: Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }),
+    });
+    await scheduler.enqueueHandlerFailure({
+      sessionId: 'session-1',
+      switchesThisTurn: 2,
+      classification: classificationFor({
+        kind: 'auth_expired',
+        serviceId: 'claude-subscription',
+        groupId: 'claude',
+        profileId: 'member-b',
+        failingAccessTokenFingerprint: 'sha256:aaaaaaaa',
+      }),
+      error: Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }),
+    });
+
+    expect(scheduler.readForSession('session-1')).toHaveLength(1);
+    expect(scheduler.read('session-1')).toMatchObject({
+      serviceId: 'claude-subscription',
+      groupId: 'claude',
+      profileId: 'member-b',
+      switchesThisTurn: 2,
+      classification: expect.objectContaining({
+        failingAccessTokenFingerprint: 'sha256:aaaaaaaa',
+      }),
+    } satisfies Partial<RuntimeAuthRecoveryIntent>);
   });
 
   it('coalesces group-backed recoveries even when the reported profile changes within the same group', async () => {

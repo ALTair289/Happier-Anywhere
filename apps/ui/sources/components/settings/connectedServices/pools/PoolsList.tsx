@@ -27,6 +27,7 @@ import {
 } from '../account/accountBlockModel';
 import {
     parseConnectedServiceGroupViewModels,
+    resolveConnectedServiceGroupMemberCredentialHealthStatus,
     resolveConnectedServiceGroupProfileTitle,
     type ConnectedServiceGroupMemberViewModel,
     type ConnectedServiceGroupProfileLike,
@@ -50,6 +51,7 @@ const NOOP_GAUGE_LABEL_FORMATTER: ConnectedServiceQuotaGaugeLabelFormatter = {
     remainingWithReset: () => '',
     used: () => '',
     durationNow: () => '',
+    durationOutdated: () => '',
     durationDaysHours: () => '',
     durationHoursMinutes: () => '',
     durationHours: () => '',
@@ -101,12 +103,6 @@ function deriveSnapshotGauge(
     };
 }
 
-function resolveMemberHealthStatus(
-    member: ConnectedServiceGroupMemberViewModel,
-): 'needs_reauth' | null {
-    return member.blocker?.kind === 'auth_invalid' ? 'needs_reauth' : null;
-}
-
 export type PoolMemberResolution = Readonly<{
     health: AccountHealth;
     capacityPct: number | null;
@@ -127,15 +123,24 @@ function ringsKeyOf(rings: ReadonlyArray<CapacityRingDatum>): string {
 const PoolMemberProbe = React.memo(function PoolMemberProbe(props: Readonly<{
     serviceId: ConnectedServiceId;
     member: ConnectedServiceGroupMemberViewModel;
+    profiles: ReadonlyArray<ConnectedServiceGroupProfileLike>;
     onResolve: (profileId: string, resolution: PoolMemberResolution) => void;
 }>) {
     const { serviceId, member, onResolve } = props;
-    const { snapshot, isStale } = useConnectedServiceQuotaSnapshot({ serviceId, profileId: member.profileId });
+    const memberHealthStatus = resolveConnectedServiceGroupMemberCredentialHealthStatus({
+        member,
+        profiles: props.profiles,
+    });
+    const { snapshot, isStale } = useConnectedServiceQuotaSnapshot({
+        serviceId,
+        profileId: member.profileId,
+        credentialHealthStatus: memberHealthStatus,
+    });
 
     const gauge = React.useMemo(() => deriveSnapshotGauge(snapshot), [snapshot]);
     const { capacityPct, rings } = gauge;
     const health = deriveAccountHealth({
-        status: resolveMemberHealthStatus(member),
+        status: memberHealthStatus,
         capacityPct,
         isStale,
     });
@@ -283,6 +288,7 @@ const PoolRow = React.memo(function PoolRow(props: Readonly<{
                         key={member.profileId}
                         serviceId={serviceId}
                         member={member}
+                        profiles={props.profiles}
                         onResolve={onResolve}
                     />
                 ))
@@ -315,6 +321,8 @@ export type PoolsListProps = Readonly<{
     groupConfigurationSupported: boolean;
     onOpenPool: (groupId: string) => void;
     onCreatePool: () => void;
+    /** Refetch the authoritative pools after a load failure (the error/stale retry action). */
+    onRetryLoad?: () => void;
 }>;
 
 /**
@@ -345,10 +353,38 @@ export const PoolsList = React.memo(function PoolsList(props: PoolsListProps) {
         </ItemGroup>
     );
 
+    const retryCard = props.onRetryLoad ? (
+        <Item
+            testID="connected-services-pools:load-error:retry"
+            title={t('connectedServices.pools.loadError.retry')}
+            icon={<Ionicons name="refresh-outline" size={22} color={theme.colors.accent.blue} />}
+            onPress={props.onRetryLoad}
+        />
+    ) : null;
+
+    // A failed load with NO data to fall back on gets an explicit, actionable error
+    // state — never the "No pools yet" empty state, which would silently mask the failure.
+    if (pools.length === 0 && loadStatus === 'error') {
+        return (
+            <>
+                <ItemGroup>
+                    <Item
+                        testID="connected-services-pools:load-error"
+                        title={t('connectedServices.pools.loadError.title')}
+                        subtitle={t('connectedServices.pools.loadError.subtitle')}
+                        icon={<Ionicons name="warning-outline" size={22} color={theme.colors.state.danger.foreground} />}
+                        showChevron={false}
+                    />
+                    {retryCard}
+                </ItemGroup>
+                {createCard}
+            </>
+        );
+    }
+
     const canShowAuthoritativeEmpty = loadStatus == null
         || loadStatus === 'idle'
-        || loadStatus === 'loaded'
-        || loadStatus === 'error';
+        || loadStatus === 'loaded';
 
     if (pools.length === 0 && canShowAuthoritativeEmpty) {
         return (
@@ -365,8 +401,29 @@ export const PoolsList = React.memo(function PoolsList(props: PoolsListProps) {
         );
     }
 
+    // Stale data retained after a failed refresh: keep the last-known pool rows and
+    // surface an inline retry so the failure stays visible and recoverable.
+    const staleErrorBanner = loadStatus === 'error' && props.onRetryLoad ? (
+        <ItemGroup>
+            <Item
+                testID="connected-services-pools:stale-error"
+                title={t('connectedServices.pools.loadError.staleTitle')}
+                subtitle={t('connectedServices.pools.loadError.staleSubtitle')}
+                icon={<Ionicons name="warning-outline" size={22} color={theme.colors.state.warning.foreground} />}
+                showChevron={false}
+            />
+            <Item
+                testID="connected-services-pools:stale-error:retry"
+                title={t('connectedServices.pools.loadError.retry')}
+                icon={<Ionicons name="refresh-outline" size={22} color={theme.colors.accent.blue} />}
+                onPress={props.onRetryLoad}
+            />
+        </ItemGroup>
+    ) : null;
+
     return (
         <>
+            {staleErrorBanner}
             <ItemGroup title={t('connectedServices.pools.title')}>
                 {pools.map((group) => (
                     <PoolRow

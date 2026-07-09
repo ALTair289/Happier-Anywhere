@@ -68,6 +68,31 @@ describe('createSessionSocketStaleSafetyScheduler', () => {
     scheduler.stop();
   });
 
+  it('keeps re-ticking so a safety action gated off on one tick can run after the gate opens', async () => {
+    vi.useFakeTimers();
+    let enabled = false;
+    const gatedSafetyAction = vi.fn();
+    const scheduler = createSessionSocketStaleSafetyScheduler({
+      intervalMs: 100,
+      random: () => 0,
+      isOnline: () => true,
+      runSafetyTick: async () => {
+        if (enabled) gatedSafetyAction();
+      },
+    });
+
+    scheduler.start();
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(gatedSafetyAction).not.toHaveBeenCalled();
+
+    enabled = true;
+    await vi.advanceTimersByTimeAsync(100);
+    expect(gatedSafetyAction).toHaveBeenCalledTimes(1);
+
+    scheduler.stop();
+  });
+
   it('keeps the active safety timeout refed so stale sockets are checked during provider waits', () => {
     const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
     const unref = vi.fn();

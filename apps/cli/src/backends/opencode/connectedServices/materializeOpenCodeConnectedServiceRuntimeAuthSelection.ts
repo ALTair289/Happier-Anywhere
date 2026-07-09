@@ -9,6 +9,7 @@ import { logger } from '@/ui/logger';
 import type { OpenCodeConnectedServiceId } from './openCodeConnectedServicePrecedence';
 import { readOpenCodeConnectedServiceId } from './openCodeConnectedServicePrecedence';
 import { materializeOpenCodeConnectedServiceAuth } from './materializeOpenCodeConnectedServiceAuth';
+import { OPEN_CODE_BROKER_SELECTION_IDENTITY_ENV } from '@/backends/opencode/brokerPlugin';
 import {
   readSharedManagedOpenCodeServerStateByLaunchFingerprintBestEffort,
   resolveSharedManagedOpenCodeServerStatePathForEnv,
@@ -92,6 +93,11 @@ export const materializeOpenCodeConnectedServiceRuntimeAuthSelection: ConnectedS
 
   return {
     ...params.baseSelection,
+    ...(typeof params.input.tracked.spawnOptions?.environmentVariables?.[OPEN_CODE_BROKER_SELECTION_IDENTITY_ENV] === 'string'
+      ? {
+          brokerSelectionIdentity: params.input.tracked.spawnOptions.environmentVariables[OPEN_CODE_BROKER_SELECTION_IDENTITY_ENV],
+        }
+      : {}),
     ...(context?.previousLaunchFingerprint ? { previousLaunchFingerprint: context.previousLaunchFingerprint } : {}),
     ...(context?.previousOwnerToken ? { previousOwnerToken: context.previousOwnerToken } : {}),
     restartAndResume: async () => undefined,

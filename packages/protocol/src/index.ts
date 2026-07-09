@@ -124,6 +124,7 @@ export {
   SessionWorkflowPhaseSnapshotV1Schema,
   SessionWorkflowRunHeadlineV1Schema,
   SessionWorkflowRunSnapshotV1Schema,
+  SessionWorkflowRunStatusReasonV1Schema,
   SessionWorkflowRunStatusV1Schema,
   boundRecentWorkflowRunHeadlines,
   buildSessionWorkflowActivityHeadline,
@@ -141,10 +142,12 @@ export {
   type SessionWorkflowPhaseSnapshotV1,
   type SessionWorkflowRunHeadlineV1,
   type SessionWorkflowRunSnapshotV1,
+  type SessionWorkflowRunStatusReasonV1,
   type SessionWorkflowRunStatusV1,
 } from './sessionWorkflowActivity/index.js';
 
 export {
+  SESSION_RUNTIME_ACTIVITY_PROJECTION_LEASE_MS,
   SESSION_RUNTIME_ACTIVITY_SOURCE_LIMIT,
   SessionRuntimeActivitySourceClassV1Schema,
   SessionRuntimeActivitySourceKindV1Schema,
@@ -526,6 +529,17 @@ export {
 } from './connect/connectedServiceSchemas.js';
 
 export {
+  normalizeConnectedServiceSelectionInput,
+  type NormalizeConnectedServiceSelectionResult,
+} from './connect/normalizeConnectedServiceSelectionInput.js';
+
+export {
+  clearConnectedServiceAuthGroupMemberRuntimeBlockers,
+  readConnectedServiceManualActiveProfileRuntimeBlocker,
+  type ConnectedServiceManualActiveProfileRuntimeBlocker,
+} from './connect/connectedServiceAuthGroupMemberRuntimeStatePolicy.js';
+
+export {
   openConnectedServiceCredentialCiphertext,
   openConnectedServiceQuotaSnapshotCiphertext,
   sealConnectedServiceCredentialCiphertext,
@@ -691,6 +705,17 @@ export {
   normalizePendingDeliveryBlockedReason,
   type PendingDeliveryBlockedReason,
 } from './sessionMessages/pendingDeliveryBlockedReason.js';
+export {
+  isPendingDeliveryStatusTransitionAllowedV1,
+  normalizePendingDeliveryStatusV1,
+  parsePendingDeliveryStatusV1,
+  pendingDeliveryStatusV1ToPersistedFields,
+  type PendingDeliveryResolvedReasonV1,
+  type PendingDeliveryStatusPersistedFieldsV1,
+  type PendingDeliveryStatusPersistedProjectionV1,
+  type PendingDeliveryStatusTransitionTargetV1,
+  type PendingDeliveryStatusV1,
+} from './sessionMessages/pendingDeliveryStatusV1.js';
 export {
   ACTIVITY_SESSION_SYSTEM_RECORD_KINDS,
   MEMORY_SESSION_SYSTEM_RECORD_KINDS,
@@ -1354,6 +1379,8 @@ export {
   type V2SessionListCursorV2,
   type V2SessionMessageResponse,
   type V2SessionRecord,
+  SessionCatchUpAuthorizationV1Schema,
+  type SessionCatchUpAuthorizationV1,
   type SessionSummary,
   SessionMetadataSchema,
   type SessionMetadata,
@@ -2871,14 +2898,12 @@ export {
   DEFAULT_SESSION_AGENT_SPAWN_POLICY_V1,
   DEFAULT_SESSION_PENDING_QUEUE_DELIVERY_TIMING,
   DEFAULT_SESSION_PENDING_QUEUE_DRAIN_MODE,
-  DEFAULT_SESSION_PROVIDER_USAGE_SETTINGS_V1,
   DEFAULT_USAGE_LIMIT_RECOVERY_SETTINGS_V1,
   SESSION_PENDING_QUEUE_DELIVERY_TIMINGS,
   SESSION_PENDING_QUEUE_DRAIN_MODES,
   SessionAgentSpawnPolicyV1Schema,
   SessionPendingQueueDeliveryTimingSchema,
   SessionPendingQueueDrainModeSchema,
-  SessionProviderUsageSettingsV1Schema,
   UsageLimitRecoverySettingsV1Schema,
   accountSettingsParse,
   getNotificationsSettingsV1FromAccountSettings,
@@ -2899,7 +2924,6 @@ export {
   type SessionAgentSpawnPolicyV1,
   type SessionPendingQueueDeliveryTiming,
   type SessionPendingQueueDrainMode,
-  type SessionProviderUsageSettingsV1,
   type UsageLimitRecoverySettingsV1,
   type NotificationsSettingsV1,
 } from './account/settings/index.js';

@@ -13,7 +13,10 @@ import { isPrismaErrorCode } from "@/storage/prisma";
 import { readEncryptionFeatureEnv } from "@/app/features/catalog/readFeatureEnv";
 import {
     isStoredContentKindAllowedForSessionByStoragePolicy,
+    isPendingDeliveryStatusTransitionAllowedV1,
     normalizePendingDeliveryBlockedReason,
+    normalizePendingDeliveryStatusV1,
+    pendingDeliveryStatusV1ToPersistedFields,
     type PendingDeliveryBlockedReason,
     type SessionStoredContentKind,
 } from "@happier-dev/protocol";
@@ -487,6 +490,8 @@ export type ResolveAcceptedPendingDeliveryResult =
 type PendingDeliveryResolutionInput = Readonly<{
     status: string;
     deliveryState: string | null;
+    deliveryBlockedReason?: string | null;
+    discardedReason?: string | null;
     messageRole: string | null;
     content: unknown;
     position: number;
@@ -496,6 +501,8 @@ type PendingDeliveryBlockRowInput = Readonly<{
     localId: string;
     status: string;
     deliveryState: string | null;
+    deliveryBlockedReason?: string | null;
+    discardedReason?: string | null;
 }>;
 
 async function markPendingDeliveryRowsBlocked(
@@ -506,19 +513,23 @@ async function markPendingDeliveryRowsBlocked(
         reason: PendingDeliveryBlockedReason;
     }>,
 ): Promise<Readonly<{ updatedCount: number; pendingBlockedCountDelta: number }>> {
-    const localIds = [...new Set(params.rows.map((row) => row.localId).filter((localId) => localId.length > 0))];
+    const target = { status: "blocked", reason: params.reason } as const;
+    const rows = params.rows.filter((row) =>
+        row.localId.length > 0 &&
+        isPendingDeliveryStatusTransitionAllowedV1(normalizePendingDeliveryStatusV1(row), target)
+    );
+    const localIds = [...new Set(rows.map((row) => row.localId))];
     if (localIds.length === 0) return { updatedCount: 0, pendingBlockedCountDelta: 0 };
 
-    const pendingBlockedCountDelta = params.rows.filter((row) =>
-        row.status === "queued" && row.deliveryState !== "blocked",
-    ).length;
+    const pendingBlockedCountDelta = rows.filter((row) => normalizePendingDeliveryStatusV1(row).status !== "blocked").length;
+    const persisted = pendingDeliveryStatusV1ToPersistedFields(target);
     const updated = await tx.sessionPendingMessage.updateMany({
         where: {
             sessionId: params.sessionId,
             localId: { in: localIds },
             status: "queued",
         },
-        data: { deliveryState: "blocked", deliveryBlockedReason: params.reason },
+        data: { deliveryState: persisted.deliveryState, deliveryBlockedReason: persisted.deliveryBlockedReason },
     });
 
     return {
@@ -598,6 +609,8 @@ async function commitResolvedPendingDelivery(
                 localId: params.localId,
                 status: params.existing.status,
                 deliveryState: params.existing.deliveryState,
+                deliveryBlockedReason: params.existing.deliveryBlockedReason,
+                discardedReason: params.existing.discardedReason,
             }],
             reason: "unknown",
         });
@@ -680,7 +693,7 @@ export async function resolveAcceptedPendingDelivery(params: {
         return await retryPendingDeliveryResolutionRace(() => inTx(async (tx) => {
             const existing = await tx.sessionPendingMessage.findUnique({
                 where: { sessionId_localId: { sessionId, localId } },
-                select: { status: true, deliveryState: true, messageRole: true, content: true, position: true },
+                select: { status: true, deliveryState: true, deliveryBlockedReason: true, discardedReason: true, messageRole: true, content: true, position: true },
             });
 
             if (!existing) {
@@ -714,7 +727,8 @@ export async function resolveAcceptedPendingDelivery(params: {
                 } as const;
             }
 
-            if (existing.status !== "queued") {
+            const existingDeliveryStatus = normalizePendingDeliveryStatusV1(existing);
+            if (!isPendingDeliveryStatusTransitionAllowedV1(existingDeliveryStatus, { status: "resolved", reason: "provider_accepted" })) {
                 const session = await tx.session.findUnique({
                     where: { id: sessionId },
                     select: { pendingCount: true, pendingBlockedCount: true, pendingVersion: true },
@@ -764,6 +778,133 @@ export type ReconcileAcceptedPendingDeliveriesThroughSeqResult =
     | { ok: true; pendingVersion: number; pendingCount: number; pendingBlockedCount: number; participantCursors: ParticipantCursor[]; badgeAttentionChanged: boolean; didResolve: boolean; resolvedCount: number; resolvedLocalIds: string[] }
     | { ok: false; error: "session-not-found" | "forbidden" | "invalid-params" | "internal" };
 
+type ReconcileAcceptedPendingDeliveriesThroughSeqTxResult =
+    | (Extract<ReconcileAcceptedPendingDeliveriesThroughSeqResult, { ok: true }> & { didMutate: boolean })
+    | { ok: false; error: "session-not-found" };
+
+async function reconcileAcceptedPendingDeliveriesThroughSeqInTx(
+    tx: PendingServiceTx,
+    params: Readonly<{
+        sessionId: string;
+        maxAcceptedSeq: number;
+    }>,
+): Promise<ReconcileAcceptedPendingDeliveriesThroughSeqTxResult> {
+    const session = await tx.session.findUnique({
+        where: { id: params.sessionId },
+        select: { encryptionMode: true },
+    });
+    if (!session) return { ok: false, error: "session-not-found" } as const;
+    const sessionEncryptionMode: "e2ee" | "plain" = session.encryptionMode === "plain" ? "plain" : "e2ee";
+    const unresolvedRows = await tx.sessionPendingMessage.findMany({
+        where: {
+            sessionId: params.sessionId,
+            status: "queued",
+            deliveryState: { in: ["delivering", "blocked"] },
+        },
+        select: { localId: true, deliveryState: true, deliveryBlockedReason: true, messageRole: true, content: true },
+    });
+    if (unresolvedRows.length === 0) {
+        return { ok: true, ...(await readCurrentPendingMutationState(tx, params.sessionId)), didResolve: false, didMutate: false, resolvedCount: 0, resolvedLocalIds: [] };
+    }
+
+    const localIds = unresolvedRows.map((row) => row.localId);
+    const acceptedMessages = await tx.sessionMessage.findMany({
+        where: {
+            sessionId: params.sessionId,
+            localId: { in: localIds },
+            seq: { lte: params.maxAcceptedSeq },
+        },
+        select: { localId: true, messageRole: true, content: true },
+    });
+    const acceptedMessageByLocalId = new Map<string, typeof acceptedMessages[number]>();
+    for (const message of acceptedMessages) {
+        if (typeof message.localId === "string" && message.localId.length > 0) {
+            acceptedMessageByLocalId.set(message.localId, message);
+        }
+    }
+    const acceptedLocalIds: string[] = [];
+    const conflictingRows: PendingDeliveryBlockRowInput[] = [];
+    for (const row of unresolvedRows) {
+        const message = acceptedMessageByLocalId.get(row.localId);
+        if (!message) continue;
+        const compatibility = resolvePendingTranscriptCompatibility({
+            existing: message,
+            pending: {
+                content: row.content as PrismaJson.SessionMessageContent,
+                messageRole: resolveSessionMessageRole({
+                    content: row.content as PrismaJson.SessionPendingMessageContent,
+                    suppliedRole: row.messageRole,
+                    telemetry: {
+                        sessionId: params.sessionId,
+                        storageMode: sessionEncryptionMode,
+                        source: "pending-materialization",
+                    },
+                }).messageRole,
+            },
+        });
+        if (compatibility.ok) {
+            const isAllowedAcceptedThroughSeqTransition = isPendingDeliveryStatusTransitionAllowedV1(
+                normalizePendingDeliveryStatusV1({
+                    status: "queued",
+                    deliveryState: row.deliveryState,
+                    deliveryBlockedReason: row.deliveryBlockedReason,
+                }),
+                { status: "resolved", reason: "provider_accepted", acceptedThroughSeq: true },
+            );
+            if (isAllowedAcceptedThroughSeqTransition) {
+                acceptedLocalIds.push(row.localId);
+            }
+        } else {
+            conflictingRows.push({
+                localId: row.localId,
+                status: "queued",
+                deliveryState: row.deliveryState,
+                deliveryBlockedReason: row.deliveryBlockedReason,
+            });
+        }
+    }
+
+    if (acceptedLocalIds.length === 0 && conflictingRows.length === 0) {
+        return { ok: true, ...(await readCurrentPendingMutationState(tx, params.sessionId)), didResolve: false, didMutate: false, resolvedCount: 0, resolvedLocalIds: [] };
+    }
+
+    const blockedConflicts = await markPendingDeliveryRowsBlocked(tx, {
+        sessionId: params.sessionId,
+        rows: conflictingRows,
+        reason: "unknown",
+    });
+    const acceptedLocalIdSet = new Set(acceptedLocalIds);
+    const resolvedBlockedCount = unresolvedRows.filter((row) => acceptedLocalIdSet.has(row.localId) && row.deliveryState === "blocked").length;
+    const deleted = await tx.sessionPendingMessage.deleteMany({
+        where: {
+            sessionId: params.sessionId,
+            localId: { in: acceptedLocalIds },
+            status: "queued",
+            deliveryState: { in: ["delivering", "blocked"] },
+        },
+    });
+
+    const { pendingVersion, pendingCount, pendingBlockedCount, participantCursors, badgeAttentionChanged } = await applyPendingSessionStateChange({
+        tx,
+        sessionId: params.sessionId,
+        pendingCountDelta: deleted.count > 0 ? -deleted.count : 0,
+        pendingBlockedCountDelta: blockedConflicts.pendingBlockedCountDelta
+            + (deleted.count > 0 ? -Math.min(resolvedBlockedCount, deleted.count) : 0),
+    });
+    return {
+        ok: true,
+        pendingVersion,
+        pendingCount,
+        pendingBlockedCount,
+        participantCursors,
+        badgeAttentionChanged,
+        didResolve: deleted.count > 0,
+        didMutate: deleted.count > 0 || blockedConflicts.updatedCount > 0,
+        resolvedCount: deleted.count,
+        resolvedLocalIds: acceptedLocalIds,
+    };
+}
+
 export async function reconcileAcceptedPendingDeliveriesThroughSeq(params: {
     actorUserId: string;
     sessionId: string;
@@ -782,108 +923,13 @@ export async function reconcileAcceptedPendingDeliveriesThroughSeq(params: {
 
     try {
         return await inTx(async (tx) => {
-            const session = await tx.session.findUnique({
-                where: { id: sessionId },
-                select: { encryptionMode: true },
-            });
-            if (!session) return { ok: false, error: "session-not-found" } as const;
-            const sessionEncryptionMode: "e2ee" | "plain" = session.encryptionMode === "plain" ? "plain" : "e2ee";
-            const unresolvedRows = await tx.sessionPendingMessage.findMany({
-                where: {
-                    sessionId,
-                    status: "queued",
-                    deliveryState: { in: ["delivering", "blocked"] },
-                },
-                select: { localId: true, deliveryState: true, messageRole: true, content: true },
-            });
-            if (unresolvedRows.length === 0) {
-                return { ok: true, ...(await readCurrentPendingMutationState(tx, sessionId)), didResolve: false, resolvedCount: 0, resolvedLocalIds: [] };
-            }
-
-            const localIds = unresolvedRows.map((row) => row.localId);
-            const acceptedMessages = await tx.sessionMessage.findMany({
-                where: {
-                    sessionId,
-                    localId: { in: localIds },
-                    seq: { lte: maxAcceptedSeq },
-                },
-                select: { localId: true, messageRole: true, content: true },
-            });
-            const acceptedMessageByLocalId = new Map<string, typeof acceptedMessages[number]>();
-            for (const message of acceptedMessages) {
-                if (typeof message.localId === "string" && message.localId.length > 0) {
-                    acceptedMessageByLocalId.set(message.localId, message);
-                }
-            }
-            const acceptedLocalIds: string[] = [];
-            const conflictingRows: PendingDeliveryBlockRowInput[] = [];
-            for (const row of unresolvedRows) {
-                const message = acceptedMessageByLocalId.get(row.localId);
-                if (!message) continue;
-                const compatibility = resolvePendingTranscriptCompatibility({
-                    existing: message,
-                    pending: {
-                        content: row.content as PrismaJson.SessionMessageContent,
-                        messageRole: resolveSessionMessageRole({
-                            content: row.content as PrismaJson.SessionPendingMessageContent,
-                            suppliedRole: row.messageRole,
-                            telemetry: {
-                                sessionId,
-                                storageMode: sessionEncryptionMode,
-                                source: "pending-materialization",
-                            },
-                        }).messageRole,
-                    },
-                });
-                if (compatibility.ok) {
-                    acceptedLocalIds.push(row.localId);
-                } else {
-                    conflictingRows.push({
-                        localId: row.localId,
-                        status: "queued",
-                        deliveryState: row.deliveryState,
-                    });
-                }
-            }
-
-            if (acceptedLocalIds.length === 0 && conflictingRows.length === 0) {
-                return { ok: true, ...(await readCurrentPendingMutationState(tx, sessionId)), didResolve: false, resolvedCount: 0, resolvedLocalIds: [] };
-            }
-
-            const blockedConflicts = await markPendingDeliveryRowsBlocked(tx, {
+            const reconciled = await reconcileAcceptedPendingDeliveriesThroughSeqInTx(tx, {
                 sessionId,
-                rows: conflictingRows,
-                reason: "unknown",
+                maxAcceptedSeq,
             });
-            const acceptedLocalIdSet = new Set(acceptedLocalIds);
-            const resolvedBlockedCount = unresolvedRows.filter((row) => acceptedLocalIdSet.has(row.localId) && row.deliveryState === "blocked").length;
-            const deleted = await tx.sessionPendingMessage.deleteMany({
-                where: {
-                    sessionId,
-                    localId: { in: acceptedLocalIds },
-                    status: "queued",
-                    deliveryState: { in: ["delivering", "blocked"] },
-                },
-            });
-
-            const { pendingVersion, pendingCount, pendingBlockedCount, participantCursors, badgeAttentionChanged } = await applyPendingSessionStateChange({
-                tx,
-                sessionId,
-                pendingCountDelta: deleted.count > 0 ? -deleted.count : 0,
-                pendingBlockedCountDelta: blockedConflicts.pendingBlockedCountDelta
-                    + (deleted.count > 0 ? -Math.min(resolvedBlockedCount, deleted.count) : 0),
-            });
-            return {
-                ok: true,
-                pendingVersion,
-                pendingCount,
-                pendingBlockedCount,
-                participantCursors,
-                badgeAttentionChanged,
-                didResolve: deleted.count > 0,
-                resolvedCount: deleted.count,
-                resolvedLocalIds: acceptedLocalIds,
-            };
+            if (!reconciled.ok) return reconciled;
+            const { didMutate: _didMutate, ...result } = reconciled;
+            return result;
         });
     } catch {
         return { ok: false, error: "internal" };
@@ -912,10 +958,12 @@ export type BlockPendingDeliveriesOnProviderAttachResult =
     | { ok: true; pendingVersion: number; pendingCount: number; pendingBlockedCount: number; participantCursors: ParticipantCursor[]; badgeAttentionChanged: boolean; didUpdate: boolean; blockedCount: number }
     | { ok: false; error: "session-not-found" | "forbidden" | "invalid-params" | "internal" };
 
-export async function blockPendingDeliveriesOnProviderAttach(params: {
+export type SweepStaleProviderDeliveryClaimsResult = BlockPendingDeliveriesOnProviderAttachResult;
+
+export async function sweepStaleProviderDeliveryClaims(params: {
     actorUserId: string;
     sessionId: string;
-}): Promise<BlockPendingDeliveriesOnProviderAttachResult> {
+}): Promise<SweepStaleProviderDeliveryClaimsResult> {
     const actorUserId = typeof params.actorUserId === "string" ? params.actorUserId : "";
     const sessionId = typeof params.sessionId === "string" ? params.sessionId : "";
 
@@ -926,10 +974,31 @@ export async function blockPendingDeliveriesOnProviderAttach(params: {
 
     try {
         return await inTx(async (tx) => {
+            const session = await tx.session.findUnique({
+                where: { id: sessionId },
+                select: { seq: true },
+            });
+            if (!session) return { ok: false, error: "session-not-found" } as const;
+
+            const reconciled = await reconcileAcceptedPendingDeliveriesThroughSeqInTx(tx, {
+                sessionId,
+                maxAcceptedSeq: session.seq,
+            });
+            if (!reconciled.ok) return reconciled;
+
             const blocked = await blockStaleProviderDeliveryClaims({ tx, sessionId });
 
             if (!blocked) {
-                return { ok: true, ...(await readCurrentPendingMutationState(tx, sessionId)), didUpdate: false, blockedCount: 0 };
+                return {
+                    ok: true,
+                    pendingVersion: reconciled.pendingVersion,
+                    pendingCount: reconciled.pendingCount,
+                    pendingBlockedCount: reconciled.pendingBlockedCount,
+                    participantCursors: reconciled.participantCursors,
+                    badgeAttentionChanged: reconciled.badgeAttentionChanged,
+                    didUpdate: reconciled.didMutate,
+                    blockedCount: 0,
+                };
             }
 
             return {
@@ -946,6 +1015,13 @@ export async function blockPendingDeliveriesOnProviderAttach(params: {
     } catch {
         return { ok: false, error: "internal" };
     }
+}
+
+export async function blockPendingDeliveriesOnProviderAttach(params: {
+    actorUserId: string;
+    sessionId: string;
+}): Promise<BlockPendingDeliveriesOnProviderAttachResult> {
+    return await sweepStaleProviderDeliveryClaims(params);
 }
 
 export async function blockPendingDelivery(params: {
@@ -968,7 +1044,7 @@ export async function blockPendingDelivery(params: {
         return await inTx(async (tx) => {
             const existing = await tx.sessionPendingMessage.findUnique({
                 where: { sessionId_localId: { sessionId, localId } },
-                select: { status: true, deliveryState: true, deliveryBlockedReason: true },
+                select: { status: true, deliveryState: true, deliveryBlockedReason: true, discardedReason: true },
             });
             if (!existing) return { ok: false, error: "not-found" } as const;
             if (existing.status !== "queued") {
@@ -980,7 +1056,13 @@ export async function blockPendingDelivery(params: {
 
             const blocked = await markPendingDeliveryRowsBlocked(tx, {
                 sessionId,
-                rows: [{ localId, status: existing.status, deliveryState: existing.deliveryState }],
+                rows: [{
+                    localId,
+                    status: existing.status,
+                    deliveryState: existing.deliveryState,
+                    deliveryBlockedReason: existing.deliveryBlockedReason,
+                    discardedReason: existing.discardedReason,
+                }],
                 reason,
             });
 
@@ -1018,16 +1100,17 @@ export async function retryPendingDelivery(params: {
         return await inTx(async (tx) => {
             const existing = await tx.sessionPendingMessage.findUnique({
                 where: { sessionId_localId: { sessionId, localId } },
-                select: { status: true, deliveryState: true, deliveryBlockedReason: true },
+                select: { status: true, deliveryState: true, deliveryBlockedReason: true, discardedReason: true },
             });
             if (!existing) return { ok: false, error: "not-found" } as const;
             if (existing.status !== "queued" || existing.deliveryState !== "blocked") {
                 return { ok: true, ...(await readCurrentPendingMutationState(tx, sessionId)), didUpdate: false };
             }
 
+            const persistedQueued = pendingDeliveryStatusV1ToPersistedFields({ status: "queued" });
             await tx.sessionPendingMessage.update({
                 where: { sessionId_localId: { sessionId, localId } },
-                data: { deliveryState: null, deliveryBlockedReason: null },
+                data: { deliveryState: persistedQueued.deliveryState, deliveryBlockedReason: persistedQueued.deliveryBlockedReason },
             });
 
             const { pendingVersion, pendingCount, pendingBlockedCount, participantCursors, badgeAttentionChanged } = await applyPendingSessionStateChange({
@@ -1087,7 +1170,7 @@ export async function markPendingDeliveryHandled(params: {
         return await retryPendingDeliveryResolutionRace(() => inTx(async (tx) => {
             const existing = await tx.sessionPendingMessage.findUnique({
                 where: { sessionId_localId: { sessionId, localId } },
-                select: { status: true, deliveryState: true, messageRole: true, content: true, position: true },
+                select: { status: true, deliveryState: true, deliveryBlockedReason: true, discardedReason: true, messageRole: true, content: true, position: true },
             });
             const isResolvableDeliveryState = existing?.deliveryState === "blocked" || existing?.deliveryState === "delivering";
             if (!existing || existing.status !== "queued" || !isResolvableDeliveryState) {
@@ -1138,7 +1221,7 @@ export async function discardPendingMessage(params: {
         return await inTx(async (tx) => {
             const existing = await tx.sessionPendingMessage.findUnique({
                 where: { sessionId_localId: { sessionId, localId } },
-                select: { status: true, deliveryState: true },
+                select: { status: true, deliveryState: true, deliveryBlockedReason: true, discardedReason: true },
             });
             if (!existing) return { ok: false, error: "not-found" } as const;
 
@@ -1157,9 +1240,20 @@ export async function discardPendingMessage(params: {
                 } as const;
             }
 
+            const discarded = { status: "discarded", reason } as const;
+            if (!isPendingDeliveryStatusTransitionAllowedV1(normalizePendingDeliveryStatusV1(existing), discarded)) {
+                return { ok: true, ...(await readCurrentPendingMutationState(tx, sessionId)) } as const;
+            }
+            const persistedDiscarded = pendingDeliveryStatusV1ToPersistedFields(discarded);
             await tx.sessionPendingMessage.update({
                 where: { sessionId_localId: { sessionId, localId } },
-                data: { status: "discarded", deliveryState: null, deliveryBlockedReason: null, discardedAt: now, discardedReason: reason },
+                data: {
+                    status: persistedDiscarded.status,
+                    deliveryState: persistedDiscarded.deliveryState,
+                    deliveryBlockedReason: persistedDiscarded.deliveryBlockedReason,
+                    discardedAt: now,
+                    discardedReason: persistedDiscarded.discardedReason,
+                },
             });
 
             const { pendingVersion, pendingCount, pendingBlockedCount, participantCursors, badgeAttentionChanged } = await applyPendingSessionStateChange({
@@ -1197,21 +1291,23 @@ export async function restorePendingMessage(params: {
         return await inTx(async (tx) => {
             const existing = await tx.sessionPendingMessage.findUnique({
                 where: { sessionId_localId: { sessionId, localId } },
-                select: { status: true },
+                select: { status: true, deliveryState: true, deliveryBlockedReason: true, discardedReason: true },
             });
             if (!existing) return { ok: false, error: "not-found" } as const;
 
-            if (existing.status === "discarded") {
+            const queued = { status: "queued" } as const;
+            if (isPendingDeliveryStatusTransitionAllowedV1(normalizePendingDeliveryStatusV1(existing), queued)) {
                 const position = await reserveNextPendingQueuePosition(tx, sessionId);
+                const persistedQueued = pendingDeliveryStatusV1ToPersistedFields(queued);
 
                 await tx.sessionPendingMessage.update({
                     where: { sessionId_localId: { sessionId, localId } },
                     data: {
-                        status: "queued",
-                        deliveryState: null,
-                        deliveryBlockedReason: null,
+                        status: persistedQueued.status,
+                        deliveryState: persistedQueued.deliveryState,
+                        deliveryBlockedReason: persistedQueued.deliveryBlockedReason,
                         discardedAt: null,
-                        discardedReason: null,
+                        discardedReason: persistedQueued.discardedReason,
                         position,
                     },
                 });

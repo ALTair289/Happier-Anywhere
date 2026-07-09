@@ -53,6 +53,7 @@ export type ConnectedServiceRuntimeFailureClassification = Readonly<{
   providerLimitId?: string | null;
   sourceProviderAccountId?: string | null;
   sourceAccountLabel?: string | null;
+  failingAccessTokenFingerprint?: string | null;
   action?: Readonly<{ kind: 'open_url'; url: string }> | null;
   planType: string | null;
   rateLimits: unknown | null;

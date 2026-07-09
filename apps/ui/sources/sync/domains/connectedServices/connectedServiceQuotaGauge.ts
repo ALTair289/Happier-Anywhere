@@ -46,6 +46,7 @@ export type ConnectedServiceQuotaGaugeLabelFormatter = Readonly<{
     remainingWithReset: (params: Readonly<{ percent: string; reset: string }>) => string;
     used: (params: Readonly<{ used: string; limit: string }>) => string;
     durationNow: () => string;
+    durationOutdated: () => string;
     durationDaysHours: (params: Readonly<{ days: number; hours: number }>) => string;
     durationHoursMinutes: (params: Readonly<{ hours: number; minutes: number }>) => string;
     durationHours: (params: Readonly<{ hours: number }>) => string;

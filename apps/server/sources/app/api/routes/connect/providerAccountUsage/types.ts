@@ -63,6 +63,11 @@ export type StoredConnectedServiceUsageSource = Readonly<{
     groupGeneration?: number;
 }>;
 
+export type ProviderAccountUsageSourceLinkOutcome = Readonly<
+    | { status: "linked" }
+    | { status: "skipped"; reason: "binding_unavailable" | "ownership_unproven" }
+>;
+
 export type ProviderAccountUsageResponseMetadata = Readonly<{
     fetchedAt: number;
     staleAfterMs: number;
@@ -87,10 +92,12 @@ export class ProviderAccountUsagePayloadInvariantError extends Error {
 
 export class ConnectedServiceUsageSourceOwnershipError extends Error {
     readonly code = "connected_service_usage_source_ownership";
+    readonly kind: "mismatch" | "unproven";
 
-    constructor(message: string) {
+    constructor(message: string, kind: "mismatch" | "unproven" = "mismatch") {
         super(message);
         this.name = "ConnectedServiceUsageSourceOwnershipError";
+        this.kind = kind;
     }
 }
 

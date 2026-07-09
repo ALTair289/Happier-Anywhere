@@ -1111,6 +1111,31 @@ describe('createStreamedTranscriptWriter delta live streaming', () => {
     }
   });
 
+  it('does not scan accumulated text prefixes on append-only live delta appends', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(0));
+    const startsWithSpy = vi.spyOn(String.prototype, 'startsWith');
+    try {
+      const { session, deltaCalls } = createDeltaSessionStub();
+      const writer = createDeltaWriter(session);
+
+      writer.appendAssistantDelta('Hello');
+      await settleCommittedSnapshot();
+
+      startsWithSpy.mockClear();
+      vi.advanceTimersByTime(40);
+      writer.appendAssistantDelta(' world');
+      const prefixScanCalls = startsWithSpy.mock.calls.length;
+
+      await settleCommittedSnapshot();
+      expect(deltaCalls).toHaveLength(1);
+      expect(prefixScanCalls).toBe(0);
+    } finally {
+      startsWithSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it('emits a full-snapshot checkpoint once the live checkpoint interval elapses, then resumes deltas', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(0));

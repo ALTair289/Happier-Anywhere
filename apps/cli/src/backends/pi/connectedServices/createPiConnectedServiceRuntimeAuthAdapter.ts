@@ -1,4 +1,5 @@
 import { classifyProviderLimitEvidence, parseProviderResetAt } from '@/daemon/connectedServices/quotas/normalization';
+import { applyBrokerBridgeRuntimeAuthSelection } from '@/daemon/connectedServices/broker/applyBrokerBridgeRuntimeAuthSelection';
 import { mapProviderLimitCategoryToRuntimeAuthFailureKind } from '@/daemon/connectedServices/runtimeAuth/mapProviderLimitCategoryToRuntimeAuthFailureKind';
 import type {
   ConnectedServiceProviderRuntimeAuthAdapter,
@@ -127,7 +128,7 @@ function chooseSelection(params: Readonly<{
     const match = selections.find((selection) => selection.serviceId === serviceId);
     if (match) return match;
   }
-  return selections[0] ?? null;
+  return params.serviceIds.length === 0 && selections.length > 1 ? null : selections[0] ?? null;
 }
 
 function quotaScopeForCategory(category: ConnectedServiceRuntimeLimitCategory): ConnectedServiceRuntimeQuotaScope | undefined {
@@ -199,11 +200,14 @@ export function createPiConnectedServiceRuntimeAuthAdapter(): ConnectedServicePr
     async materializeActiveProfile(input) {
       return { supported: true, activeProfiles: activeProfiles(input) };
     },
-    canHotApply() {
-      return { supported: false, recovery: 'restart_rematerialize' };
+    canHotApply(input) {
+      const selection = readRecord(input.selection);
+      return readString(selection?.brokerSelectionIdentity)
+        ? { supported: true, recovery: 'provider_owned_broker_selection' }
+        : { supported: false, recovery: 'restart_rematerialize' };
     },
-    async hotApply() {
-      return { applied: false, reason: 'hot_apply_unsupported' };
+    async hotApply(input) {
+      return applyBrokerBridgeRuntimeAuthSelection(input.selection);
     },
     async recoverAfterRuntimeAuthSwitch() {
       // Nothing to hot-recover: restart/rematerialize IS the recovery for Pi (no-op success).

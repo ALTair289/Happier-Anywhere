@@ -18,6 +18,7 @@ type ConnectedServiceBindingRef = Readonly<{
 type ConnectedServiceSpawnTargetRef = Readonly<{
   pid: number;
   agentId: CatalogAgentId;
+  accessTokenRefresh?: Readonly<{ mode: 'daemon_callback' }> | null;
 }>;
 
 export type ConnectedServicesAuthUpdatedRestartBlockedDiagnostic = Readonly<{
@@ -150,6 +151,26 @@ export function createConnectedServicesAuthUpdatedRestartHandler(params: Readonl
       const refreshedCredentialApplication = descriptor.refreshedCredentialApplication;
       if (refreshedCredentialApplication.mode !== 'restart_required') continue;
       if ((refreshedCredentialApplication.noRestartRequiredServiceIds ?? []).some((serviceId) => serviceId === event.binding.serviceId)) continue;
+      if (
+        target.accessTokenRefresh?.mode === 'daemon_callback'
+        && (refreshedCredentialApplication.noRestartRequiredWhenAccessTokenCallbackServiceIds ?? [])
+          .some((serviceId) => serviceId === event.binding.serviceId)
+      ) {
+        continue;
+      }
+      // Broker-conditional no-restart: skip the restart ONLY when this running target actually holds a
+      // broker binding for the service. A non-brokered shape (e.g. a Pi claude-subscription setup-token
+      // baked as a raw api_key at spawn) has no broker to hot-apply the reconnected credential, so it
+      // falls through to a restart instead of being silently skipped by service id alone.
+      const brokerConditionalServiceId = (refreshedCredentialApplication.noRestartRequiredWhenBrokeredServiceIds ?? [])
+        .find((serviceId) => serviceId === event.binding.serviceId);
+      if (brokerConditionalServiceId) {
+        const brokered = refreshedCredentialApplication.isTargetBrokeredForBinding?.({
+          serviceId: brokerConditionalServiceId,
+          environmentVariables: params.pidToTrackedSession.get(target.pid)?.spawnOptions?.environmentVariables ?? {},
+        }) ?? false;
+        if (brokered) continue;
+      }
       if (params.restartRequestedPids.has(target.pid)) continue;
 
       const tracked = params.pidToTrackedSession.get(target.pid);

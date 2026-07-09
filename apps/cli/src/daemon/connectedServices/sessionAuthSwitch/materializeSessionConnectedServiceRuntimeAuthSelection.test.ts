@@ -1,8 +1,10 @@
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { PassThrough, Writable } from 'node:stream';
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildConnectedServiceCredentialRecord, type ConnectedServiceBindingsV1 } from '@happier-dev/protocol';
 
 import type { ApiClient } from '@/api/api';
@@ -12,7 +14,55 @@ import { HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY } from '@/daemon/connected
 import { CLAUDE_CODE_RECOMMENDED_OAUTH_SCOPE } from '@/backends/claude/connectedServices/nativeAuth/claudeCodeCredentialScopes';
 import { materializeSessionConnectedServiceRuntimeAuthSelection } from './materializeSessionConnectedServiceRuntimeAuthSelection';
 
+const { spawnSpy } = vi.hoisted(() => ({
+  spawnSpy: vi.fn(),
+}));
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    spawn: spawnSpy,
+  };
+});
+
 describe('materializeSessionConnectedServiceRuntimeAuthSelection', () => {
+  beforeEach(() => {
+    spawnSpy.mockImplementation((_command: string, args: readonly string[]) => {
+      const child = new EventEmitter() as EventEmitter & {
+        stdin: Writable;
+        stdout: PassThrough;
+        stderr: PassThrough;
+        kill: ReturnType<typeof vi.fn>;
+      };
+      child.stdin = new Writable({
+        write(_chunk, _encoding, callback) {
+          callback();
+        },
+      });
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.kill = vi.fn();
+      queueMicrotask(() => {
+        if (args[0] === 'find-generic-password') {
+          child.stderr.write('missing keychain entry');
+          child.stdout.end();
+          child.stderr.end();
+          child.emit('close', 44);
+          return;
+        }
+        child.stdout.end();
+        child.stderr.end();
+        child.emit('close', 0);
+      });
+      return child;
+    });
+  });
+
+  afterEach(() => {
+    spawnSpy.mockReset();
+  });
+
   it('preserves group fallback profile and generation from the current session selection env', async () => {
     const record = buildConnectedServiceCredentialRecord({
       now: 1_000,
@@ -543,7 +593,7 @@ describe('materializeSessionConnectedServiceRuntimeAuthSelection', () => {
     const credential = JSON.parse(await readFile(join(activeMemberConfigDir, '.credentials.json'), 'utf8'));
     expect(credential.claudeAiOauth.accessToken).toBe('refreshed-access-placeholder');
     expect(credential.claudeAiOauth.accessToken).not.toBe('stale-access-placeholder');
-    expect(credential.claudeAiOauth.refreshToken).toBe('refreshed-refresh-placeholder');
+    expect(credential.claudeAiOauth).not.toHaveProperty('refreshToken');
     const groupCredential = JSON.parse(await readFile(join(groupConfigDir, '.credentials.json'), 'utf8'));
     expect(groupCredential.claudeAiOauth.accessToken).toBe('refreshed-access-placeholder');
     expect(groupCredential.claudeAiOauth.accessToken).not.toBe('stale-group-access-placeholder');

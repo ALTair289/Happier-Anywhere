@@ -1,5 +1,6 @@
 import {
   ConnectedServiceIdSchema,
+  isConnectedServiceCredentialHealthStatusReconnectRequired,
   type ConnectedServiceAuthGroupV1,
   type ConnectedServiceAuthGroupMemberStateV1,
   type ConnectedServiceCredentialHealthStatusV1,
@@ -15,12 +16,14 @@ import {
 } from '../accountGroups/switching/ConnectedServiceAuthGroupSwitchCoordinator';
 import { evaluatePredictiveSoftSwitchSessionApplyPolicy } from '../accountGroups/switching/predictiveSoftSwitchPolicy';
 import {
+  buildConnectedServiceAuthGroupSwitchState,
   buildConnectedServiceAuthGroupSwitchStateFromPersistedMemberState,
 } from '../accountGroups/switching/buildConnectedServiceAuthGroupSwitchState';
 import {
   buildConnectedServiceAuthGroupSwitchStateFromAccountUsage,
   type AccountUsageStoreForAuthGroupSwitchState,
 } from '../accountGroups/switching/buildConnectedServiceAuthGroupSwitchStateFromAccountUsage';
+import { buildObservedFailureMemberRuntimeState } from '../accountGroups/memberRuntimeState';
 import { createConnectedServiceAuthGenerationApplyFailureError } from './connectedServiceAuthGenerationApplyFailure';
 import type { ConnectedServiceSessionAuthSwitchReason } from './connectedServiceSessionAuthSwitchCore';
 
@@ -59,26 +62,6 @@ function readNonNegativeNumber(value: unknown): number | null {
   return Math.trunc(value);
 }
 
-function resolveLimiterRetryAtMs(input: Readonly<{
-  loaded: ConnectedServiceAuthGroupSwitchState;
-  retryAtMs: number | null;
-  observedAtMs: number;
-}>): number | null {
-  if (input.retryAtMs !== null) return input.retryAtMs;
-  const cooldownMs = readNonNegativeNumber(input.loaded.policy.cooldownMs);
-  return cooldownMs === null ? null : input.observedAtMs + cooldownMs;
-}
-
-function resolveAuthFailureRetryAtMs(input: Readonly<{
-  loaded: ConnectedServiceAuthGroupSwitchState;
-  retryAtMs: number | null;
-  observedAtMs: number;
-}>): number | null {
-  if (input.retryAtMs !== null) return input.retryAtMs;
-  const cooldownMs = readNonNegativeNumber(input.loaded.policy.cooldownMs);
-  return cooldownMs === null ? null : input.observedAtMs + cooldownMs;
-}
-
 function assertPredictiveSoftSwitchSessionApplyAllowed(input: Readonly<{
   reason: string;
   sessionId?: string;
@@ -114,49 +97,15 @@ function mapConnectedServiceAuthGenerationActionToApplyMode(
   }
 }
 
-function buildObservedFailureMemberState(input: Readonly<{
-  loaded: ConnectedServiceAuthGroupSwitchState;
-  profileId: string;
-  reason: string;
-  retryAtMs: number | null;
-  planType: string | null | undefined;
-  observedAtMs: number;
-}>): ConnectedServiceAuthGroupMemberStateV1 {
-  const existing = input.loaded.memberStatesByProfileId.get(input.profileId) ?? {};
-  const state: ConnectedServiceAuthGroupMemberStateV1 = {
-    ...(existing.cooldownUntilMs === undefined ? {} : { cooldownUntilMs: existing.cooldownUntilMs }),
-    ...(existing.exhaustedUntilMs === undefined ? {} : { exhaustedUntilMs: existing.exhaustedUntilMs }),
-    ...(existing.quotaExhaustedUntilMs === undefined ? {} : { quotaExhaustedUntilMs: existing.quotaExhaustedUntilMs }),
-    ...(existing.rateLimitedUntilMs === undefined ? {} : { rateLimitedUntilMs: existing.rateLimitedUntilMs }),
-    ...(existing.capacityLimitedUntilMs === undefined ? {} : { capacityLimitedUntilMs: existing.capacityLimitedUntilMs }),
-    ...(existing.authInvalidUntilMs === undefined ? {} : { authInvalidUntilMs: existing.authInvalidUntilMs }),
-    ...(existing.planUnavailableUntilMs === undefined ? {} : { planUnavailableUntilMs: existing.planUnavailableUntilMs }),
-    ...(existing.validationBlockedUntilMs === undefined ? {} : { validationBlockedUntilMs: existing.validationBlockedUntilMs }),
-    lastFailureKind: input.reason,
-    lastObservedAtMs: input.observedAtMs,
-    ...(input.planType ? { lastObservedPlanType: input.planType } : {}),
-  };
-  switch (input.reason) {
-    case 'usage_limit':
-      return { ...state, quotaExhaustedUntilMs: resolveLimiterRetryAtMs(input) };
-    case 'rate_limit':
-      return { ...state, rateLimitedUntilMs: resolveLimiterRetryAtMs(input) };
-    case 'capacity':
-      return { ...state, capacityLimitedUntilMs: resolveLimiterRetryAtMs(input) };
-    case 'auth_expired':
-    case 'refresh_failed':
-    case 'account_disabled':
-      return {
-        ...state,
-        authInvalidUntilMs: resolveAuthFailureRetryAtMs(input),
-      };
-    case 'plan':
-      return { ...state, planUnavailableUntilMs: input.retryAtMs };
-    case 'validation':
-      return { ...state, validationBlockedUntilMs: input.retryAtMs };
-    default:
-      return state;
+function mergeCredentialHealthStatus(input: Readonly<{
+  existing?: ConnectedServiceCredentialHealthStatusV1 | null;
+  profileListStatus: ConnectedServiceCredentialHealthStatusV1;
+}>): ConnectedServiceCredentialHealthStatusV1 {
+  void input.existing;
+  if (isConnectedServiceCredentialHealthStatusReconnectRequired(input.profileListStatus)) {
+    return input.profileListStatus;
   }
+  return input.profileListStatus;
 }
 
 function resolveRetryAtMs(input: Readonly<{
@@ -328,15 +277,28 @@ export function createDaemonConnectedServiceAuthGroupSwitchCoordinator(params: R
         sleepMs: params.sleepMs ?? defaultSwitchCoordinatorSleepMs,
       });
       if (!group) throw new Error(`Connected service auth group not found (${input.serviceId}/${input.groupId})`);
-      const sourceBackedState = params.accountUsageStore
+      // CLOSE-11 contract: when the account-usage store exists, only an explicitly SOURCE-BACKED
+      // result carries canonical authority; a provisional result (store present but cold) is the
+      // persisted-member-state projection and must never masquerade as source-backed evidence.
+      // The raw runtimeQuotaSnapshots pre_turn fallback survives ONLY for the legacy store-absent
+      // deployment shape.
+      const accountUsageSwitchState = params.accountUsageStore
         ? buildConnectedServiceAuthGroupSwitchStateFromAccountUsage({
           group,
           accountUsageStore: params.accountUsageStore,
-        })?.state ?? null
+        })
         : null;
-      const state = sourceBackedState ?? (
-        buildConnectedServiceAuthGroupSwitchStateFromPersistedMemberState({ group })
-      );
+      const state = params.accountUsageStore
+        ? (accountUsageSwitchState?.kind === 'source_backed'
+          ? accountUsageSwitchState.state
+          : buildConnectedServiceAuthGroupSwitchStateFromPersistedMemberState({ group }))
+        : input.trigger === 'pre_turn'
+          ? buildConnectedServiceAuthGroupSwitchState({
+            group,
+            runtimeQuotaSnapshots: params.runtimeQuotaSnapshots,
+            nowMs: params.nowMs(),
+          })
+          : buildConnectedServiceAuthGroupSwitchStateFromPersistedMemberState({ group });
       if (typeof params.api.listConnectedServiceProfiles !== 'function') return state;
       const profiles = await params.api.listConnectedServiceProfiles({ serviceId }).catch(() => null);
       if (!profiles) return state;
@@ -345,9 +307,13 @@ export function createDaemonConnectedServiceAuthGroupSwitchCoordinator(params: R
       for (const member of state.members) {
         const healthStatus = healthByProfileId.get(member.profileId);
         if (!healthStatus) continue;
+        const existing = memberStatesByProfileId.get(member.profileId) ?? {};
         memberStatesByProfileId.set(member.profileId, {
-          ...(memberStatesByProfileId.get(member.profileId) ?? {}),
-          credentialHealthStatus: healthStatus,
+          ...existing,
+          credentialHealthStatus: mergeCredentialHealthStatus({
+            existing: existing.credentialHealthStatus,
+            profileListStatus: healthStatus,
+          }),
         });
       }
       return {
@@ -371,11 +337,16 @@ export function createDaemonConnectedServiceAuthGroupSwitchCoordinator(params: R
         generation: group.generation,
         ...(input.expectedGeneration === undefined ? {} : { expectedGeneration: input.expectedGeneration }),
       });
-      return params.accountUsageStore
+      // CLOSE-11 contract: same rule as the loader above — provisional (cold PAU) results must not
+      // masquerade as source-backed; they intentionally degrade to persisted member state.
+      const refreshedAccountUsageSwitchState = params.accountUsageStore
         ? buildConnectedServiceAuthGroupSwitchStateFromAccountUsage({
           group,
           accountUsageStore: params.accountUsageStore,
-        })?.state ?? buildConnectedServiceAuthGroupSwitchStateFromPersistedMemberState({ group })
+        })
+        : null;
+      return refreshedAccountUsageSwitchState?.kind === 'source_backed'
+        ? refreshedAccountUsageSwitchState.state
         : buildConnectedServiceAuthGroupSwitchStateFromPersistedMemberState({ group });
     },
     ...(params.probeQuotaSnapshotsForGroup ? {
@@ -488,9 +459,9 @@ export function createDaemonConnectedServiceAuthGroupSwitchCoordinator(params: R
         expectedGeneration: input.loaded.generation,
         memberStates: [{
           profileId: observedProfileId,
-          state: buildObservedFailureMemberState({
-            loaded: input.loaded,
-            profileId: observedProfileId,
+          state: buildObservedFailureMemberRuntimeState({
+            existing: input.loaded.memberStatesByProfileId.get(observedProfileId) ?? null,
+            policy: input.loaded.policy,
             reason: input.reason,
             retryAtMs: resolveRetryAtMs({
               retryAtMs: input.retryAtMs,

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { releaseForAuthSwitchMock } = vi.hoisted(() => ({
   releaseForAuthSwitchMock: vi.fn(async () => ({ released: true as const, reason: 'released' as const })),
@@ -9,6 +9,10 @@ vi.mock('@/backends/opencode/server/sharedManagedServer', () => ({
 }));
 
 import {
+  getBrokerBridgeEffectiveSelectionForTest,
+  resetBrokerBridgeEffectiveSelectionsForTests,
+} from '@/daemon/connectedServices/broker/brokerBridgeEffectiveSelectionRegistry';
+import {
   createOpenCodeConnectedServiceRuntimeAuthAdapter,
   resolveOpenCodeRuntimeAuthSelection,
 } from './createOpenCodeConnectedServiceRuntimeAuthAdapter';
@@ -17,6 +21,11 @@ describe('createOpenCodeConnectedServiceRuntimeAuthAdapter', () => {
   beforeEach(() => {
     releaseForAuthSwitchMock.mockReset();
     releaseForAuthSwitchMock.mockResolvedValue({ released: true as const, reason: 'released' as const });
+    resetBrokerBridgeEffectiveSelectionsForTests();
+  });
+
+  afterEach(() => {
+    resetBrokerBridgeEffectiveSelectionsForTests();
   });
 
   it('releases the prior managed server after an auth switch when prior fingerprint context is present', async () => {
@@ -179,6 +188,49 @@ describe('createOpenCodeConnectedServiceRuntimeAuthAdapter', () => {
       serviceId: 'claude-subscription',
       groupId: 'team-claude',
       activeProfileId: 'claude-profile',
+    });
+  });
+
+  it('hot-applies brokered account swaps by bumping the daemon broker selection epoch', async () => {
+    const adapter = createOpenCodeConnectedServiceRuntimeAuthAdapter();
+
+    await expect(adapter.hotApply({
+      target: { agentId: 'opencode' },
+      selection: {
+        serviceId: 'openai-codex',
+        brokerSelectionIdentity: 'opencode|connected|broker:1|openai-codex:acct-old:',
+        kind: 'group',
+        groupId: 'main',
+        activeProfileId: 'profile-new',
+        fallbackProfileId: 'profile-old',
+        generation: 12,
+        record: { serviceId: 'openai-codex', profileId: 'profile-new' },
+      },
+    })).resolves.toEqual({
+      applied: true,
+      recovery: 'provider_owned_broker_selection',
+      verification: {
+        status: 'weakly_verified',
+        proofStrength: 'weak',
+        sharedAuthSurfaceId: 'opencode|connected|broker:1|openai-codex:acct-old:',
+        source: 'broker_selection_indirection',
+        reason: 'daemon_broker_selection_epoch_bumped',
+      },
+    });
+
+    expect(getBrokerBridgeEffectiveSelectionForTest({
+      selectionIdentity: 'opencode|connected|broker:1|openai-codex:acct-old:',
+      serviceId: 'openai-codex',
+    })).toMatchObject({
+      selectionEpoch: 1,
+      selection: {
+        kind: 'group',
+        serviceId: 'openai-codex',
+        groupId: 'main',
+        activeProfileId: 'profile-new',
+        fallbackProfileId: 'profile-old',
+        generation: 12,
+      },
     });
   });
 });

@@ -8,6 +8,11 @@ import { SessionMessageContentSchema, UserMessageSchema } from '../types';
 import { coerceSessionUserPromptV1 } from '@happier-dev/protocol';
 import { summarizeValueShapeForLog } from '@/diagnostics/eventShapeForLog';
 
+type ReceivedMessageIdStore = {
+    has(value: string): boolean;
+    add(value: string): unknown;
+};
+
 function readNonEmptyString(value: unknown): string | null {
     return typeof value === 'string' && value.length > 0 ? value : null;
 }
@@ -26,7 +31,7 @@ export function handleSessionNewMessageUpdate(params: {
     sessionId: string;
     encryptionKey: Uint8Array;
     encryptionVariant: 'legacy' | 'dataKey';
-    receivedMessageIds: Set<string>;
+    receivedMessageIds: ReceivedMessageIdStore;
     /**
      * Owed-delivery replay authorization: an explicit catch-up may re-process a message id that
      * was already observed (its live broadcast was received but the row was never handed to the

@@ -123,14 +123,17 @@ describe("connectRoutes provider-account usage source-of-truth phase 4 contract"
             },
         });
         expect(write.statusCode).toBe(200);
+        expect(write.json()).toEqual({
+            success: true,
+            source: { status: "linked" },
+        });
 
-        const source = await db.connectedServiceUsageSource.findUnique({
+        const source = await db.connectedServiceUsageSource.findFirst({
             where: {
-                accountId_serviceId_profileId: {
                     accountId: user.id,
                     serviceId: "openai-codex",
                     profileId: "work",
-                },
+                
             },
             select: { providerAccountUsageRecordId: true, bindingKind: true },
         });
@@ -178,6 +181,65 @@ describe("connectRoutes provider-account usage source-of-truth phase 4 contract"
         });
     });
 
+    it("reports a skipped v3 source link when the trusted profile binding is unavailable", async () => {
+        harness.resetEnv({
+            HAPPIER_FEATURE_CONNECTED_SERVICES_QUOTAS__ENABLED: "true",
+            HAPPIER_FEATURE_ENCRYPTION__STORAGE_POLICY: "optional",
+            HAPPIER_FEATURE_ENCRYPTION__DEFAULT_ACCOUNT_MODE: "plain",
+            HAPPIER_FEATURE_ENCRYPTION__PLAIN_ACCOUNT_CREDENTIALS_AT_REST: "none",
+        });
+        const user = await db.account.create({ data: { publicKey: null, encryptionMode: "plain" }, select: { id: true } });
+        const snapshot = createUsageSnapshot({
+            fetchedAt: Date.now(),
+            planLabel: "source-skip",
+        });
+
+        const app = createProviderAccountUsageTestApp();
+        connectRoutes(app as any);
+        await app.ready();
+
+        const write = await app.inject({
+            method: "POST",
+            url: `/v3/connect/provider-account-usage/${snapshot.recordId}`,
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: {
+                ...createV3ProviderAccountUsagePayload({ snapshot, fingerprint: "usage:v3:source-skip" }),
+                source: {
+                    serviceId: "openai-codex",
+                    profileId: "missing-profile",
+                    bindingKind: "profile",
+                },
+            },
+        });
+
+        expect(write.statusCode).toBe(200);
+        expect(write.json()).toEqual({
+            success: true,
+            source: {
+                status: "skipped",
+                reason: "binding_unavailable",
+            },
+        });
+        expect(await db.providerAccountUsageRecord.findUnique({
+            where: {
+                accountId_recordId: {
+                    accountId: user.id,
+                    recordId: snapshot.recordId,
+                },
+            },
+            select: { id: true },
+        })).not.toBeNull();
+        expect(await db.connectedServiceUsageSource.findFirst({
+            where: {
+                    accountId: user.id,
+                    serviceId: "openai-codex",
+                    profileId: "missing-profile",
+                
+            },
+            select: { id: true },
+        })).toBeNull();
+    });
+
     it("rejects same-account v3 source links when the provider usage record is incompatible with the connected service", async () => {
         harness.resetEnv({
             HAPPIER_FEATURE_CONNECTED_SERVICES_QUOTAS__ENABLED: "true",
@@ -219,13 +281,12 @@ describe("connectRoutes provider-account usage source-of-truth phase 4 contract"
             error: "invalid-params",
             reason: "connected_service_usage_source_incompatible",
         });
-        expect(await db.connectedServiceUsageSource.findUnique({
+        expect(await db.connectedServiceUsageSource.findFirst({
             where: {
-                accountId_serviceId_profileId: {
                     accountId: user.id,
                     serviceId: "openai-codex",
                     profileId: "work",
-                },
+                
             },
             select: { id: true },
         })).toBeNull();
@@ -281,13 +342,12 @@ describe("connectRoutes provider-account usage source-of-truth phase 4 contract"
             error: "invalid-params",
             reason: "connected_service_usage_source_incompatible",
         });
-        expect(await db.connectedServiceUsageSource.findUnique({
+        expect(await db.connectedServiceUsageSource.findFirst({
             where: {
-                accountId_serviceId_profileId: {
                     accountId: user.id,
                     serviceId: "openai-codex",
                     profileId: "work",
-                },
+                
             },
             select: { id: true },
         })).toBeNull();
@@ -443,13 +503,12 @@ describe("connectRoutes provider-account usage source-of-truth phase 4 contract"
         });
         expect(write.statusCode).toBe(400);
         expect(write.json()).toEqual({ error: "invalid-params" });
-        expect(await db.connectedServiceUsageSource.findUnique({
+        expect(await db.connectedServiceUsageSource.findFirst({
             where: {
-                accountId_serviceId_profileId: {
                     accountId: user.id,
                     serviceId: "openai-codex",
                     profileId: "work",
-                },
+                
             },
             select: { id: true },
         })).toBeNull();
@@ -547,6 +606,10 @@ describe("connectRoutes provider-account usage source-of-truth phase 4 contract"
             },
         });
         expect(write.statusCode).toBe(200);
+        expect(write.json()).toEqual({
+            success: true,
+            source: { status: "linked" },
+        });
 
         const canonicalRead = await app.inject({
             method: "GET",
@@ -588,6 +651,72 @@ describe("connectRoutes provider-account usage source-of-truth phase 4 contract"
                 status: "ok",
             },
         });
+    });
+
+    it("reports a skipped v2 source link when the trusted profile binding is unavailable", async () => {
+        harness.resetEnv({
+            HAPPIER_FEATURE_CONNECTED_SERVICES_QUOTAS__ENABLED: "true",
+            HAPPIER_FEATURE_ENCRYPTION__STORAGE_POLICY: "required_e2ee",
+            HAPPIER_FEATURE_ENCRYPTION__DEFAULT_ACCOUNT_MODE: "e2ee",
+        });
+        const user = await db.account.create({ data: { publicKey: "pk-v2-source-skip", encryptionMode: "e2ee" }, select: { id: true } });
+        const recordKey = createProviderAccountUsageRecordKey({ accountSubjectId: "acct_v2_source_skip" });
+        const recordId = buildProviderAccountUsageRecordId(recordKey);
+
+        const app = createProviderAccountUsageTestApp();
+        connectRoutes(app as any);
+        await app.ready();
+
+        const write = await app.inject({
+            method: "POST",
+            url: `/v2/connect/provider-account-usage/${recordId}`,
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: {
+                recordKey,
+                sealed: {
+                    format: "account_scoped_v1",
+                    ciphertext: "sealed-source-skip",
+                },
+                metadata: {
+                    fetchedAt: 32_345,
+                    staleAfterMs: 300_000,
+                    status: "ok",
+                    materialFingerprint: "usage:v2:source-skip",
+                },
+                source: {
+                    serviceId: "openai-codex",
+                    profileId: "missing-profile",
+                    bindingKind: "profile",
+                },
+            },
+        });
+
+        expect(write.statusCode).toBe(200);
+        expect(write.json()).toEqual({
+            success: true,
+            source: {
+                status: "skipped",
+                reason: "binding_unavailable",
+            },
+        });
+        expect(await db.providerAccountUsageRecord.findUnique({
+            where: {
+                accountId_recordId: {
+                    accountId: user.id,
+                    recordId,
+                },
+            },
+            select: { id: true },
+        })).not.toBeNull();
+        expect(await db.connectedServiceUsageSource.findFirst({
+            where: {
+                    accountId: user.id,
+                    serviceId: "openai-codex",
+                    profileId: "missing-profile",
+                
+            },
+            select: { id: true },
+        })).toBeNull();
     });
 
     it("rejects same-account v2 source links when the provider usage record is incompatible with the connected service", async () => {
@@ -637,13 +766,12 @@ describe("connectRoutes provider-account usage source-of-truth phase 4 contract"
             error: "invalid-params",
             reason: "connected_service_usage_source_incompatible",
         });
-        expect(await db.connectedServiceUsageSource.findUnique({
+        expect(await db.connectedServiceUsageSource.findFirst({
             where: {
-                accountId_serviceId_profileId: {
                     accountId: user.id,
                     serviceId: "openai-codex",
                     profileId: "work",
-                },
+                
             },
             select: { id: true },
         })).toBeNull();
@@ -705,13 +833,12 @@ describe("connectRoutes provider-account usage source-of-truth phase 4 contract"
             error: "invalid-params",
             reason: "connected_service_usage_source_incompatible",
         });
-        expect(await db.connectedServiceUsageSource.findUnique({
+        expect(await db.connectedServiceUsageSource.findFirst({
             where: {
-                accountId_serviceId_profileId: {
                     accountId: user.id,
                     serviceId: "openai-codex",
                     profileId: "work",
-                },
+                
             },
             select: { id: true },
         })).toBeNull();
@@ -781,13 +908,12 @@ describe("connectRoutes provider-account usage source-of-truth phase 4 contract"
         });
         expect(afterDelete.statusCode).toBe(404);
         expect(afterDelete.json()).toEqual({ error: "connect_quotas_not_found" });
-        expect(await db.connectedServiceUsageSource.findUnique({
+        expect(await db.connectedServiceUsageSource.findFirst({
             where: {
-                accountId_serviceId_profileId: {
                     accountId: user.id,
                     serviceId: "openai-codex",
                     profileId: "work",
-                },
+                
             },
             select: { id: true },
         })).toBeNull();

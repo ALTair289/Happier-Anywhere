@@ -46,6 +46,7 @@ const formatter: ConnectedServiceQuotaGaugeLabelFormatter = {
     remainingWithReset: ({ percent, reset }) => `${percent} left · resets in ${reset}`,
     used: ({ used, limit }) => `${used}/${limit} used`,
     durationNow: () => 'now',
+    durationOutdated: () => 'outdated',
     durationDaysHours: ({ days, hours }) => `${days}d ${hours}h`,
     durationHoursMinutes: ({ hours, minutes }) => `${hours}h ${minutes}m`,
     durationHours: ({ hours }) => `${hours}h`,

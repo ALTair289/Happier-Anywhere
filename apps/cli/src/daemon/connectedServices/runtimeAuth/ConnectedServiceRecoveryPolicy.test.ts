@@ -188,13 +188,42 @@ describe('ConnectedServiceRecoveryPolicy', () => {
         applyMode: 'restart_rematerialize',
       },
     })).toEqual({
-      action: 'switch_account',
-      mode: 'restart_rematerialize',
+      action: 'reconnect_required',
       serviceId: 'openai-codex',
+      profileId: 'primary',
       groupId: 'main',
-      fromProfileId: 'primary',
-      toProfileId: 'backup',
       reason: 'auth_expired',
+      actor: 'automatic',
+    });
+  });
+
+  it('routes account-changed evidence to binding re-resolution instead of refresh or group switching', () => {
+    expect(decideConnectedServiceRecovery({
+      actor: 'automatic',
+      issue: {
+        kind: 'account_changed',
+        ...baseIssue,
+      },
+      selection: {
+        kind: 'group',
+        serviceId: 'openai-codex',
+        groupId: 'main',
+        activeProfileId: 'primary',
+      },
+      credentialRefresh: {
+        status: 'refreshable',
+      },
+      groupCandidate: {
+        status: 'selected',
+        profileId: 'backup',
+        applyMode: 'restart_rematerialize',
+      },
+    })).toEqual({
+      action: 're_resolve_binding',
+      serviceId: 'openai-codex',
+      profileId: 'primary',
+      groupId: 'main',
+      reason: 'account_changed',
       actor: 'automatic',
     });
   });

@@ -21,6 +21,7 @@ export type NormalizedProviderUsageLimitDetailsV1 = Readonly<{
   }> | null;
   action: null;
   connectedService: null;
+  sourceProviderAccountId?: string | null;
   /**
    * Set when the evidence row was imported from a subagent transcript (`isSidechain: true`).
    * Sidechain limits are real account-level evidence (quota snapshots may consume them) but
@@ -58,6 +59,12 @@ function readTimestampMs(value: unknown): number | null {
 function readUtilization(value: unknown): number | null {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
   return Math.max(0, Math.min(100, value));
+}
+
+function readUtilizationPercent(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  const percent = value >= 0 && value <= 1 ? value * 100 : value;
+  return Math.max(0, Math.min(100, percent));
 }
 
 function readHttpStatus(value: unknown): number | null {
@@ -511,4 +518,29 @@ export function mapClaudeRateLimitEventToUsageDetails(event: unknown): Normalize
     action: null,
     connectedService: null,
   });
+}
+
+export function mapClaudeRateLimitEventToQuotaEvidence(event: unknown): NormalizedProviderUsageLimitDetailsV1 | null {
+  const record = isRecord(event) ? event : null;
+  if (record?.type !== 'rate_limit_event') return null;
+  const info = isRecord(record.rate_limit_info) ? record.rate_limit_info : null;
+  if (!info) return null;
+  const status = readString(info.status);
+  if (status !== 'allowed' && status !== 'allowed_warning') return null;
+  const utilization = readUtilizationPercent(info.utilization);
+  if (utilization === null) return null;
+  const rateLimitType = readString(info.rateLimitType ?? info.rate_limit_type);
+  return {
+    v: 1,
+    resetAtMs: readTimestampMs(info.resetsAt ?? info.resets_at),
+    retryAfterMs: null,
+    quotaScope: 'account',
+    recoverability: 'wait',
+    ...(rateLimitType ? { providerLimitId: rateLimitType } : {}),
+    planType: null,
+    utilization,
+    overage: null,
+    action: null,
+    connectedService: null,
+  };
 }

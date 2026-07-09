@@ -2,14 +2,15 @@ import axios from 'axios';
 import type { Socket } from 'socket.io-client';
 
 import { isAuthenticationError } from '@/api/client/httpStatusError';
-import { configuration } from '@/configuration';
 import type { ClientToServerEvents, ServerToClientEvents } from '../types';
-import { resolveLoopbackHttpUrl } from '../client/loopbackUrl';
+import { resolveServerHttpBaseUrl } from '@/session/transport/http/serverHttpBaseUrl';
 import { emitSocketWithAck } from '@/session/transport/shared/socketAck';
 import {
-    normalizePendingDeliveryBlockedReason,
+    normalizePendingDeliveryStatusV1,
+    parsePendingDeliveryStatusV1,
     SessionMessageRoleSchema,
     type PendingDeliveryBlockedReason,
+    type PendingDeliveryStatusV1,
     type SessionPendingQueueDeliveryTiming,
     type SessionMessageRole,
 } from '@happier-dev/protocol';
@@ -112,6 +113,15 @@ function readPendingMaterializeDeferredReason(value: unknown): PendingQueueMater
     if (!value || typeof value !== 'object') return undefined;
     const reason = (value as { deferredReason?: unknown }).deferredReason;
     return reason === 'runtime_activity_active' ? reason : undefined;
+}
+
+function readPendingRowDeliveryStatus(record: Record<string, unknown>): PendingDeliveryStatusV1 {
+    return parsePendingDeliveryStatusV1(record.deliveryStatus) ?? normalizePendingDeliveryStatusV1({
+        status: record.status,
+        deliveryState: record.deliveryState,
+        deliveryBlockedReason: record.deliveryBlockedReason,
+        discardedReason: record.discardedReason,
+    });
 }
 
 function buildPendingMaterializeBody(params: {
@@ -297,7 +307,7 @@ export async function listPendingQueueV2LocalIdsFromServer(params: {
     sessionId: string;
 }): Promise<string[]> {
     try {
-        const serverUrl = resolveLoopbackHttpUrl(configuration.apiServerUrl).replace(/\/+$/, '');
+        const serverUrl = resolveServerHttpBaseUrl();
         const response = await axios.get(`${serverUrl}/v2/sessions/${params.sessionId}/pending`, {
             headers: { Authorization: `Bearer ${params.token}` },
             timeout: 10_000,
@@ -324,7 +334,7 @@ export async function listPendingQueueV2ProviderDeliveryLocalIdsFromServer(param
     sessionId: string;
 }): Promise<string[]> {
     try {
-        const serverUrl = resolveLoopbackHttpUrl(configuration.apiServerUrl).replace(/\/+$/, '');
+        const serverUrl = resolveServerHttpBaseUrl();
         const response = await axios.get(`${serverUrl}/v2/sessions/${encodeURIComponent(params.sessionId)}/pending`, {
             headers: { Authorization: `Bearer ${params.token}` },
             timeout: 10_000,
@@ -337,12 +347,12 @@ export async function listPendingQueueV2ProviderDeliveryLocalIdsFromServer(param
             if (!row || typeof row !== 'object') continue;
             const record = row as Record<string, unknown>;
             const localId = record.localId;
+            const deliveryStatus = readPendingRowDeliveryStatus(record);
             if (
                 typeof localId !== 'string'
                 || localId.length === 0
                 || seen.has(localId)
-                || record.status !== 'queued'
-                || record.deliveryState !== 'delivering'
+                || deliveryStatus.status !== 'delivering'
             ) {
                 continue;
             }
@@ -364,7 +374,7 @@ export async function readBlockedPendingQueueV2DeliveryByLocalIdFromServer(param
     localId: string;
 }): Promise<PendingQueueBlockedDelivery | null> {
     try {
-        const serverUrl = resolveLoopbackHttpUrl(configuration.apiServerUrl).replace(/\/+$/, '');
+        const serverUrl = resolveServerHttpBaseUrl();
         const response = await axios.get(`${serverUrl}/v2/sessions/${encodeURIComponent(params.sessionId)}/pending`, {
             headers: { Authorization: `Bearer ${params.token}` },
             timeout: 10_000,
@@ -375,15 +385,14 @@ export async function readBlockedPendingQueueV2DeliveryByLocalIdFromServer(param
             if (!row || typeof row !== 'object') continue;
             const record = row as Record<string, unknown>;
             const localId = record.localId;
+            const deliveryStatus = readPendingRowDeliveryStatus(record);
             if (
                 localId !== params.localId
-                || record.status !== 'queued'
-                || record.deliveryState !== 'blocked'
+                || deliveryStatus.status !== 'blocked'
             ) {
                 continue;
             }
-            const reason = normalizePendingDeliveryBlockedReason(record.deliveryBlockedReason);
-            return reason ? { localId: params.localId, reason } : null;
+            return { localId: params.localId, reason: deliveryStatus.reason };
         }
         return null;
     } catch (error) {
@@ -401,7 +410,7 @@ export async function discardPendingQueueV2Messages(params: {
     reason: 'switch_to_local' | 'manual';
 }): Promise<number> {
     let discarded = 0;
-    const serverUrl = resolveLoopbackHttpUrl(configuration.apiServerUrl).replace(/\/+$/, '');
+    const serverUrl = resolveServerHttpBaseUrl();
     for (const localId of params.localIds) {
         try {
             await axios.post(
@@ -425,7 +434,7 @@ export async function enqueuePendingQueueV2MessageViaHttp(params: {
     sessionId: string;
     body: PendingQueueWriteBody;
 }): Promise<void> {
-    const serverUrl = resolveLoopbackHttpUrl(configuration.apiServerUrl).replace(/\/+$/, '');
+    const serverUrl = resolveServerHttpBaseUrl();
     await axios.post(
         `${serverUrl}/v2/sessions/${encodeURIComponent(params.sessionId)}/pending`,
         params.body,
@@ -456,7 +465,7 @@ export async function reconcileAcceptedPendingQueueV2DeliveriesThroughSeq(params
     sessionId: string;
     maxAcceptedSeq: number;
 }): Promise<{ pendingQueueState?: KnownPendingQueueState; resolvedLocalIds: string[] }> {
-    const serverUrl = resolveLoopbackHttpUrl(configuration.apiServerUrl).replace(/\/+$/, '');
+    const serverUrl = resolveServerHttpBaseUrl();
     const response = await axios.post(
         `${serverUrl}/v2/sessions/${encodeURIComponent(params.sessionId)}/pending/delivery/accepted-through-seq`,
         { maxAcceptedSeq: params.maxAcceptedSeq },
@@ -487,7 +496,7 @@ export async function blockPendingQueueV2ProviderDeliveriesOnAttach(params: {
     token: string;
     sessionId: string;
 }): Promise<{ pendingQueueState?: KnownPendingQueueState }> {
-    const serverUrl = resolveLoopbackHttpUrl(configuration.apiServerUrl).replace(/\/+$/, '');
+    const serverUrl = resolveServerHttpBaseUrl();
     const response = await axios.post(
         `${serverUrl}/v2/sessions/${encodeURIComponent(params.sessionId)}/pending/delivery/provider-attach`,
         {},
@@ -555,7 +564,7 @@ async function postPendingQueueV2DeliveryAction(params: {
     action: 'accepted' | 'block' | 'retry' | 'handled';
     body: Record<string, unknown>;
 }): Promise<{ pendingQueueState?: KnownPendingQueueState; message?: PendingQueueMaterializedMessage | null }> {
-    const serverUrl = resolveLoopbackHttpUrl(configuration.apiServerUrl).replace(/\/+$/, '');
+    const serverUrl = resolveServerHttpBaseUrl();
     const response = await axios.post(
         `${serverUrl}/v2/sessions/${encodeURIComponent(params.sessionId)}/pending/${encodeURIComponent(params.localId)}/delivery/${params.action}`,
         params.body,
@@ -645,7 +654,7 @@ async function tryMaterializeNextViaHttp(params: {
     deliveryStateOptIn?: boolean;
     deliveryTiming?: SessionPendingQueueDeliveryTiming;
 }): Promise<PendingQueueHttpMaterializeResult> {
-    const serverUrl = resolveLoopbackHttpUrl(configuration.apiServerUrl).replace(/\/+$/, '');
+    const serverUrl = resolveServerHttpBaseUrl();
     const response = await axios.post(
         `${serverUrl}/v2/sessions/${encodeURIComponent(params.sessionId)}/pending/materialize-next`,
         buildPendingMaterializeBody(params),

@@ -77,6 +77,28 @@ describe('storeConnectedServiceCredentialWithIdentityConfirmation', () => {
     expect(onStored).not.toHaveBeenCalled();
   });
 
+  it('rejects a credential record whose target differs from the initiated reconnect target', async () => {
+    const { storeConnectedServiceCredentialWithIdentityConfirmation } = await import(
+      './storeConnectedServiceCredentialWithIdentityConfirmation'
+    );
+    const mismatchedRecord = {
+      ...sampleRecord(),
+      profileId: 'other-profile',
+    };
+
+    await expect(storeConnectedServiceCredentialWithIdentityConfirmation(
+      credentials,
+      {
+        serviceId: 'openai-codex',
+        profileId: 'work',
+        record: mismatchedRecord,
+      },
+    )).rejects.toThrow('connected_service_reconnect_target_mismatch');
+
+    expect(storeMock).not.toHaveBeenCalled();
+    expect(confirmMock).not.toHaveBeenCalled();
+  });
+
   it('returns true after retrying with identity replacement when the follow-up effects fail', async () => {
     storeMock.mockRejectedValueOnce(new Error('connect_reconnect_provider_identity_mismatch'));
     storeMock.mockResolvedValueOnce(undefined);

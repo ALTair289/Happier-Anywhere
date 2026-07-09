@@ -47,6 +47,42 @@ function registerFullTarget(registry: ConnectedServiceRuntimeRegistry) {
 }
 
 describe('ConnectedServiceRuntimeRegistry', () => {
+  it('indexes and evicts targets by broker selection identity (R3-6)', () => {
+    const registry = new ConnectedServiceRuntimeRegistry();
+    const identity = 'opencode|connected|broker:1|openai-codex:codex-a:acct';
+
+    registry.registerTarget({
+      pid: 70,
+      agentId: 'opencode',
+      sessionId: 'sess-broker-a',
+      brokerSelectionIdentity: identity,
+      connectedServicesBindingsRaw,
+      connectedServiceSelectionsEnv,
+      materializationKey: 'csm_broker_a',
+    });
+    registry.registerTarget({
+      pid: 71,
+      agentId: 'opencode',
+      sessionId: 'sess-broker-b',
+      brokerSelectionIdentity: identity,
+      connectedServicesBindingsRaw,
+      connectedServiceSelectionsEnv,
+      materializationKey: 'csm_broker_b',
+    });
+
+    // Two live sessions share the shared-server selection identity; the lowest live pid wins.
+    expect(registry.getByBrokerSelectionIdentity(identity)?.pid).toBe(70);
+    expect(registry.getByBrokerSelectionIdentity('no-such-identity')).toBeNull();
+
+    // Dropping the lower pid keeps resolution live via the surviving sibling.
+    registry.unregisterPid(70);
+    expect(registry.getByBrokerSelectionIdentity(identity)?.pid).toBe(71);
+
+    // Once every live target is gone the identity resolves to null (fail-closed).
+    registry.unregisterPid(71);
+    expect(registry.getByBrokerSelectionIdentity(identity)).toBeNull();
+  });
+
   it('registers, updates, and unregisters targets across pid and session indexes', () => {
     const registry = new ConnectedServiceRuntimeRegistry();
 
@@ -165,5 +201,162 @@ describe('ConnectedServiceRuntimeRegistry', () => {
     expect(readConnectedServiceRuntimeTargetIdentity(refreshTarget!)).toEqual(
       readConnectedServiceRuntimeTargetIdentity(quotaTarget!),
     );
+  });
+
+  it('covers a run target and a session target on the SAME pid in the refresh distribution view (R3-1)', () => {
+    const registry = new ConnectedServiceRuntimeRegistry();
+
+    // A session (claude) runs in a runner process with pid 4242.
+    registry.registerTarget({
+      pid: 4242,
+      agentId: 'claude',
+      sessionId: 'sess-host',
+      materializationKey: 'session-key',
+      connectedServicesBindingsRaw: {
+        v: 1,
+        bindingsByServiceId: {
+          'claude-subscription': { source: 'connected', selection: 'group', groupId: 'pool', profileId: 'claude-a' },
+        },
+      },
+    });
+
+    // A codex execution run is hosted INSIDE that same runner pid — it must coexist, keyed by its
+    // run key, and share coverage on the same pid instead of clobbering the session registration.
+    const runTarget = registry.registerRunTarget({
+      runKey: 'execution_run:run_codex_1',
+      pid: 4242,
+      agentId: 'codex',
+      materializationKey: 'execution_run:run_codex_1',
+      connectedServicesBindingsRaw,
+      connectedServiceSelectionsEnv,
+    });
+    expect(runTarget.materializationKey).toBe('execution_run:run_codex_1');
+
+    // The pid map still resolves to the SESSION target (untouched).
+    expect(registry.getByPid(4242)?.materializationKey).toBe('session-key');
+    expect(registry.getByPid(4242)?.agentId).toBe('claude');
+
+    // Both targets are visible to refresh redistribution + quota fanout.
+    const refreshKeys = registry.listRefreshTargets().map((target) => target.materializationKey).sort();
+    expect(refreshKeys).toEqual(['execution_run:run_codex_1', 'session-key']);
+    const quotaKeys = registry.listQuotaTargets().map((target) => target.materializationKey).sort();
+    expect(quotaKeys).toEqual(['execution_run:run_codex_1', 'session-key']);
+
+    // Releasing the run removes ONLY the run target; the session coverage remains.
+    expect(registry.unregisterRunKey('execution_run:run_codex_1')?.materializationKey).toBe('execution_run:run_codex_1');
+    expect(registry.listRefreshTargets().map((target) => target.materializationKey)).toEqual(['session-key']);
+    expect(registry.getByPid(4242)?.materializationKey).toBe('session-key');
+  });
+
+  it('drops a run target when its host runner pid is unregistered or transferred (R3-1)', () => {
+    const registry = new ConnectedServiceRuntimeRegistry();
+    registry.registerTarget({
+      pid: 4242,
+      agentId: 'claude',
+      sessionId: 'sess-host',
+      materializationKey: 'session-key',
+      connectedServicesBindingsRaw,
+      connectedServiceSelectionsEnv,
+    });
+    registry.registerRunTarget({
+      runKey: 'execution_run:run_codex_1',
+      pid: 4242,
+      agentId: 'codex',
+      materializationKey: 'execution_run:run_codex_1',
+      connectedServicesBindingsRaw,
+      connectedServiceSelectionsEnv,
+    });
+
+    // A dead runner takes its execution runs with it.
+    registry.unregisterPid(4242);
+    expect(registry.listTargets()).toEqual([]);
+    expect(registry.unregisterRunKey('execution_run:run_codex_1')).toBeNull();
+  });
+
+  it('resolves a broker selection identity from a RUN target with no live session sharing it (NF-1)', () => {
+    const registry = new ConnectedServiceRuntimeRegistry();
+
+    // An OpenCode run bound to a pool that no live session uses. Its broker token refresh authorizes
+    // via getByBrokerSelectionIdentity — which must fold in the run keyspace, not just session targets.
+    registry.registerRunTarget({
+      runKey: 'execution_run:run_oc_1',
+      pid: 5150,
+      agentId: 'opencode',
+      materializationKey: 'execution_run:run_oc_1',
+      brokerSelectionIdentity: 'oc-pool-x',
+      connectedServicesBindingsRaw: {
+        v: 1,
+        bindingsByServiceId: {
+          'opencode-zen': { source: 'connected', selection: 'group', groupId: 'pool-x', profileId: 'oc-a' },
+        },
+      },
+    });
+
+    const resolved = registry.getByBrokerSelectionIdentity('oc-pool-x');
+    expect(resolved?.materializationKey).toBe('execution_run:run_oc_1');
+    expect(resolved?.pid).toBe(5150);
+
+    // Evicted on run release — no leak, no cross-run authorize of a dead run.
+    registry.unregisterRunKey('execution_run:run_oc_1');
+    expect(registry.getByBrokerSelectionIdentity('oc-pool-x')).toBeNull();
+  });
+
+  it('evicts a run target from the broker index when its runner pid dies (NF-1)', () => {
+    const registry = new ConnectedServiceRuntimeRegistry();
+    registry.registerRunTarget({
+      runKey: 'execution_run:run_pi_1',
+      pid: 6200,
+      agentId: 'pi',
+      materializationKey: 'execution_run:run_pi_1',
+      brokerSelectionIdentity: 'pi-pool-y',
+      connectedServicesBindingsRaw: {
+        v: 1,
+        bindingsByServiceId: {
+          'pi-managed': { source: 'connected', selection: 'group', groupId: 'pool-y', profileId: 'pi-a' },
+        },
+      },
+    });
+    expect(registry.getByBrokerSelectionIdentity('pi-pool-y')?.pid).toBe(6200);
+
+    registry.unregisterPid(6200);
+    expect(registry.getByBrokerSelectionIdentity('pi-pool-y')).toBeNull();
+  });
+
+  it('owns session runtime account identity and clears it with the session target', () => {
+    let now = 1_000;
+    const registry = new ConnectedServiceRuntimeRegistry({
+      nowMs: () => now,
+      runtimeAccountIdentityTtlMs: 50,
+    });
+    registerFullTarget(registry);
+
+    expect(registry.recordRuntimeAccountIdentity({
+      sessionId: 'sess-a',
+      serviceId: 'openai-codex',
+      groupId: 'team',
+      profileId: 'codex-a',
+      providerAccountId: 'acct-a',
+      accountLabel: 'a@example.test',
+      observedAtMs: now,
+      source: 'spawn_selection',
+      proofStrength: 'exact',
+      groupGeneration: 7,
+    })).toEqual({ status: 'recorded' });
+
+    expect(registry.readRuntimeAccountIdentity('sess-a')).toMatchObject({
+      providerAccountId: 'acct-a',
+      groupGeneration: 7,
+    });
+
+    now = 1_025;
+    expect(registry.listRuntimeIdentitiesByProviderAccount({
+      serviceId: 'openai-codex',
+      providerAccountId: 'acct-a',
+      groupId: 'team',
+      currentGroupGenerationBySessionId: new Map([['sess-a', 7]]),
+    }).map((entry) => entry.sessionId)).toEqual(['sess-a']);
+
+    registry.unregisterPid(42);
+    expect(registry.readRuntimeAccountIdentity('sess-a')).toBeNull();
   });
 });

@@ -2,7 +2,7 @@ import React from 'react';
 import renderer, { act } from 'react-test-renderer';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { renderScreen } from '@/dev/testkit';
-import { installConnectedServicesCommonModuleMocks } from '../connectedServicesTestHelpers';
+import { connectedServicesModuleState, installConnectedServicesCommonModuleMocks } from '../connectedServicesTestHelpers';
 import type { UseConnectedServiceQuotaSnapshotResult } from '@/hooks/server/connectedServices/useConnectedServiceQuotaSnapshot';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -198,6 +198,7 @@ beforeEach(() => {
   routeParams.serviceId = 'openai-codex';
   routeParams.profileId = 'work';
   applySettingsSpy.mockClear();
+  connectedServicesModuleState.routerPushSpy.mockClear();
   modalSpies.confirm.mockReset();
   modalSpies.prompt.mockReset();
   modalSpies.alert.mockReset();
@@ -466,6 +467,21 @@ describe('ConnectedServiceProfileDetailView', () => {
 
     expect(findByTestId(screen.tree, 'connected-service-profile-pools:empty')).toBeTruthy();
     expect(findByTestId(screen.tree, 'connected-service-profile-action:add-to-pool')).toBeTruthy();
+  });
+
+  it('routes "Add to pool" to the provider Pools segment with the profile carried through', async () => {
+    const { ConnectedServiceProfileDetailView } = await import('./ConnectedServiceProfileDetailView');
+    const screen = await renderScreen(<ConnectedServiceProfileDetailView />);
+
+    await act(async () => {
+      findByTestId(screen.tree, 'connected-service-profile-action:add-to-pool')?.props.onPress?.();
+      await flushAsyncHandlers();
+    });
+
+    expect(connectedServicesModuleState.routerPushSpy).toHaveBeenCalledWith({
+      pathname: '/settings/connected-services/[serviceId]',
+      params: { serviceId: 'openai-codex', segment: 'pools', profileId: 'work' },
+    });
   });
 
   it('lists pool memberships derived from the projected groups', async () => {

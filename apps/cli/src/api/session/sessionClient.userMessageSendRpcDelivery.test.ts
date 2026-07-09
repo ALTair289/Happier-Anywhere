@@ -5,6 +5,7 @@ import { createMockSession, createPlainSessionFixture } from '@/testkit/backends
 import { createApiSessionSocketStub, flushApiSessionClientMessageCommitQueue, type ApiSessionSocketStub } from '@/testkit/backends/apiSessionSocketHarness';
 import { waitForCondition } from '@/testkit/async/waitFor';
 import { decodeBase64, decrypt } from '../encryption';
+import { SESSION_RPC_METHODS } from '@happier-dev/protocol/rpc';
 
 let sessionSocketStub: ApiSessionSocketStub | null = null;
 let userSocketStub: ApiSessionSocketStub | null = null;
@@ -147,7 +148,7 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
       id: 'catchup-explicit-pending',
     }, {
       catchUpAfterSeq: 10,
-      catchUpAfterSeqIsExplicit: true,
+      catchUpAuthorization: 'explicit_cursor',
     })).toBe(true);
   });
 
@@ -501,6 +502,119 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
     expect(committedPayloads).toHaveLength(0);
   });
 
+  it('reports provider-acceptance pending custody in the session user-message RPC ACK', async () => {
+    sessionSocketStub = createApiSessionSocketStub({
+      connected: true,
+      emitWithAckResult: { ok: true },
+    });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+
+    const client = new ApiSessionClient('tok', createPlainSessionFixture({
+      id: 's1',
+      pendingCount: 0,
+      pendingBlockedCount: 0,
+      pendingVersion: 1,
+    }));
+    await enableProviderAcceptanceMode(client);
+
+    const result = await client.rpcHandlerManager.invokeLocal(SESSION_RPC_METHODS.SESSION_USER_MESSAGE_SEND, {
+      text: 'send now with durable custody',
+      localId: 'rpc-provider-acceptance-local',
+      meta: { source: 'ui', sentFrom: 'web' },
+    });
+
+    expect(result).toEqual({ ok: true, providerAcceptancePending: true });
+    expect(enqueuePendingQueueV2MessageViaHttpMock).toHaveBeenCalledTimes(1);
+    expect(enqueuePendingQueueV2MessageViaHttpMock.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+      token: 'tok',
+      sessionId: 's1',
+      body: expect.objectContaining({
+        localId: 'rpc-provider-acceptance-local',
+        messageRole: 'user',
+      }),
+    }));
+  });
+
+  it('does not materialize a provider-acceptance RPC prompt while an earlier canonical delivery is unresolved', async () => {
+    sessionSocketStub = createApiSessionSocketStub({
+      connected: true,
+      emitWithAckResult: { ok: true },
+    });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+
+    const client = new ApiSessionClient('tok', createPlainSessionFixture({
+      id: 's1',
+      pendingCount: 0,
+      pendingBlockedCount: 0,
+      pendingVersion: 1,
+    }));
+    await enableProviderAcceptanceMode(client);
+
+    (client as any).canonicalPendingDeliveryByLocalId.set('earlier-local', {
+      mode: 'provider',
+      unresolved: true,
+    });
+
+    await (client as any).enqueueSessionUserMessage({
+      text: 'later send now',
+      localId: 'later-local',
+      meta: { source: 'ui', sentFrom: 'web' },
+    });
+
+    expect(enqueuePendingQueueV2MessageViaHttpMock).toHaveBeenCalledTimes(1);
+    expect(materializeNextPendingQueueV2MessageMock).not.toHaveBeenCalled();
+  });
+
+  it('materializes a provider-acceptance RPC prompt immediately when no canonical delivery is unresolved', async () => {
+    sessionSocketStub = createApiSessionSocketStub({
+      connected: true,
+      emitWithAckResult: { ok: true },
+    });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    materializeNextPendingQueueV2MessageMock.mockResolvedValueOnce({
+      didMaterialize: true,
+      localId: 'send-now-local',
+      didWrite: false,
+      pendingQueueState: { known: true, pendingCount: 1, pendingBlockedCount: 0, pendingVersion: 2 },
+      message: {
+        id: null,
+        seq: null,
+        localId: 'send-now-local',
+        messageRole: 'user',
+        content: { t: 'plain', v: { role: 'user', content: { type: 'text', text: 'send now' } } },
+        createdAt: 1_000,
+        updatedAt: 1_000,
+        deliveryState: { mode: 'provider', unresolved: true },
+      },
+    });
+
+    const client = new ApiSessionClient('tok', createPlainSessionFixture({
+      id: 's1',
+      pendingCount: 0,
+      pendingBlockedCount: 0,
+      pendingVersion: 1,
+    }));
+    await enableProviderAcceptanceMode(client);
+
+    const received: any[] = [];
+    client.onUserMessage((msg) => received.push(msg));
+
+    await (client as any).enqueueSessionUserMessage({
+      text: 'send now',
+      localId: 'send-now-local',
+      meta: { source: 'ui', sentFrom: 'web' },
+    });
+
+    expect(enqueuePendingQueueV2MessageViaHttpMock).toHaveBeenCalledTimes(1);
+    expect(materializeNextPendingQueueV2MessageMock).toHaveBeenCalledWith(expect.objectContaining({
+      token: 'tok',
+      sessionId: 's1',
+      deliveryStateOptIn: true,
+    }));
+    expect(received).toHaveLength(1);
+    expect(received[0]?.localId).toBe('send-now-local');
+  });
+
   it('can defer the provider-accepted watermark without claiming pending delivery state', async () => {
     const encryptionKey = new Uint8Array(32);
     encryptionKey.fill(8);
@@ -581,6 +695,65 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
       () => client.getMetadataSnapshot()?.deliveredUserMessageSeqV1 === 1,
       { timeoutMs: 1_000, intervalMs: 5, label: 'provider accepted commit watermark persistence' },
     );
+  });
+
+  it('keeps provider-acceptance RPC prompts durable when delivery-state claims are unsupported', async () => {
+    sessionSocketStub = createApiSessionSocketStub({
+      connected: true,
+      emitWithAckResult: { ok: true },
+    });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    resolveCliFeatureDecisionForServerMock.mockResolvedValueOnce({
+      decision: createPendingDeliveryStateFeatureDecision('unsupported'),
+    });
+    materializeNextPendingQueueV2MessageMock.mockResolvedValueOnce({
+      didMaterialize: true,
+      localId: 'unsupported-claim-local',
+      didWrite: true,
+      pendingQueueState: { known: true, pendingCount: 0, pendingBlockedCount: 0, pendingVersion: 2 },
+      message: {
+        id: 'm-unsupported-claim',
+        seq: 7,
+        localId: 'unsupported-claim-local',
+        messageRole: 'user',
+        content: {
+          t: 'plain',
+          v: {
+            role: 'user',
+            content: { type: 'text', text: 'durable unsupported claim fallback' },
+            meta: { source: 'ui', sentFrom: 'web' },
+          },
+        },
+        createdAt: 1_000,
+        updatedAt: 1_000,
+      },
+    });
+
+    const client = new ApiSessionClient('tok', createPlainSessionFixture({
+      id: 's1',
+      pendingCount: 0,
+      pendingBlockedCount: 0,
+      pendingVersion: 1,
+    }));
+    client.deferDeliveredUserMessageWatermarkToProviderAcceptance();
+
+    const received: any[] = [];
+    client.onUserMessage((msg) => received.push(msg));
+
+    await (client as any).enqueueSessionUserMessage({
+      text: 'durable unsupported claim fallback',
+      localId: 'unsupported-claim-local',
+      meta: { source: 'ui', sentFrom: 'web' },
+    });
+
+    expect(enqueuePendingQueueV2MessageViaHttpMock).toHaveBeenCalledTimes(1);
+    expect(materializeNextPendingQueueV2MessageMock).toHaveBeenCalledWith(expect.objectContaining({
+      token: 'tok',
+      sessionId: 's1',
+      deliveryStateOptIn: false,
+    }));
+    expect(received).toHaveLength(1);
+    expect(received[0]?.localId).toBe('unsupported-claim-local');
   });
 
   it('delivers row-first unresolved daemon initial prompts through provider delivery instead of echo suppression', async () => {

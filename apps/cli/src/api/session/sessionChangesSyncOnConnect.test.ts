@@ -193,7 +193,10 @@ describe('runSessionChangesSyncOnConnect', () => {
       onDebug: () => {},
     } satisfies Parameters<typeof runSessionChangesSyncOnConnect>[0]);
 
-    expect(catchUpSessionMessages).toHaveBeenCalledWith(9);
+    expect(catchUpSessionMessages).toHaveBeenCalledWith({
+      afterSeq: 9,
+      authorization: 'reconnect_watermark',
+    });
     expect(syncSessionSnapshotFromServer).not.toHaveBeenCalled();
     expect(changesCursor.writeChangesCursor).not.toHaveBeenCalled();
   });

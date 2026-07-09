@@ -407,10 +407,24 @@ export const SealedConnectedServiceQuotaSnapshotV1Schema = z.object({
 
 export type SealedConnectedServiceQuotaSnapshotV1 = z.infer<typeof SealedConnectedServiceQuotaSnapshotV1Schema>;
 
-export const ConnectedServiceAuthGroupPolicyV1Schema = z
+// Fields that were previously frozen single-value no-op knobs (no behavioral reader). They are
+// removed from the policy, but stored blobs and older clients may still carry them; strip them at
+// the parse boundary so removal is migration-safe (strict validation still rejects other unknowns).
+const REMOVED_AUTH_GROUP_POLICY_LEGACY_KEYS = ['recoveryPromptMode', 'effectiveMeterStrategy', 'memberRuntimeStatePersistence'] as const;
+
+function stripRemovedAuthGroupPolicyLegacyKeys(value: unknown): unknown {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+    const record = value as Record<string, unknown>;
+    if (!REMOVED_AUTH_GROUP_POLICY_LEGACY_KEYS.some((key) => key in record)) return value;
+    const next = { ...record };
+    for (const key of REMOVED_AUTH_GROUP_POLICY_LEGACY_KEYS) delete next[key];
+    return next;
+}
+
+export const ConnectedServiceAuthGroupPolicyV1Schema = z.preprocess(stripRemovedAuthGroupPolicyLegacyKeys, z
     .object({
         v: z.literal(1).default(1),
-        strategy: z.enum(['priority', 'least_limited', 'manual']).default('priority'),
+        strategy: z.enum(['priority', 'least_limited', 'manual']).default('least_limited'),
         autoSwitch: z.boolean().default(false),
         switchOn: z
             .object({
@@ -440,18 +454,13 @@ export const ConnectedServiceAuthGroupPolicyV1Schema = z
         recoveryMode: z
             .enum(['off', 'wait_until_reset', 'switch_then_resume', 'switch_or_wait'])
             .default('switch_or_wait'),
-        recoveryPromptMode: z.literal('standard').default('standard'),
         resumePromptMode: z.enum(['standard', 'off', 'custom']).default('standard'),
-        effectiveMeterStrategy: z
-            .enum(['most_constrained', 'primary', 'secondary', 'daily', 'weekly', 'session'])
-            .default('most_constrained'),
-        memberRuntimeStatePersistence: z.literal('server_state_json').default('server_state_json'),
     })
-    .strict();
+    .strict());
 
 export type ConnectedServiceAuthGroupPolicyV1 = z.infer<typeof ConnectedServiceAuthGroupPolicyV1Schema>;
 
-export const ConnectedServiceAuthGroupPolicyPatchV1Schema = z
+export const ConnectedServiceAuthGroupPolicyPatchV1Schema = z.preprocess(stripRemovedAuthGroupPolicyLegacyKeys, z
     .object({
         v: z.literal(1).optional(),
         strategy: z.enum(['priority', 'least_limited', 'manual']).optional(),
@@ -475,14 +484,9 @@ export const ConnectedServiceAuthGroupPolicyPatchV1Schema = z
         preTurnProbeMode: z.enum(['never', 'when_stale', 'always_for_group']).optional(),
         preTurnProbeOrder: z.enum(['current_first_then_candidates', 'candidates_first_then_current']).optional(),
         recoveryMode: z.enum(['off', 'wait_until_reset', 'switch_then_resume', 'switch_or_wait']).optional(),
-        recoveryPromptMode: z.literal('standard').optional(),
         resumePromptMode: z.enum(['standard', 'off', 'custom']).optional(),
-        effectiveMeterStrategy: z
-            .enum(['most_constrained', 'primary', 'secondary', 'daily', 'weekly', 'session'])
-            .optional(),
-        memberRuntimeStatePersistence: z.literal('server_state_json').optional(),
     })
-    .strict();
+    .strict());
 
 export type ConnectedServiceAuthGroupPolicyPatchV1 = z.infer<typeof ConnectedServiceAuthGroupPolicyPatchV1Schema>;
 
