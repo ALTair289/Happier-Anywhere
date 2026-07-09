@@ -5,6 +5,7 @@ import type { ACPMessageData, ACPProvider } from '@/api/session/sessionMessageTy
 import type { StreamedTranscriptWriterSession } from '@/api/session/streamedTranscriptWriter';
 import type { ExecutionBudgetRegistry } from '@/daemon/executionBudget/ExecutionBudgetRegistry';
 import {
+  type AcpConfigOptionOverridesV1,
   type BackendTargetRefV1,
   ExecutionRunPublicStateSchema,
   type ExecutionRunPublicState,
@@ -23,6 +24,7 @@ import type {
   ExecutionRunState,
 } from '@/agent/executionRuns/runtime/executionRunTypes';
 import type { ExecutionRunController } from '@/agent/executionRuns/controllers/types';
+import type { SessionRuntimeActivityPublisher } from '@/session/runtimeActivity/sessionRuntimeActivityPublisher';
 import {
   cancelVoiceAgentTurnStream,
   readVoiceAgentTurnStream,
@@ -41,6 +43,8 @@ import {
   writeExecutionRunActivityMarker,
 } from '@/agent/executionRuns/runtime/executionRunManager/activityMarkers';
 
+const EXECUTION_RUN_RUNTIME_ACTIVITY_SOURCE_CLASS = 'provider_detached_task' as const;
+
 function readBoundedExternalSendAckTimeoutMs(): number {
   const raw = process.env.HAPPIER_EXECUTION_RUN_BOUNDED_SEND_ACK_TIMEOUT_MS;
   if (typeof raw !== 'string' || raw.trim().length === 0) return 20_000;
@@ -53,12 +57,15 @@ export class ExecutionRunManager {
   private readonly parentProvider: ACPProvider;
   private readonly cwd: string;
   private readonly createBackend: (opts: {
+    runId?: string;
     backendId: string;
     backendTarget?: BackendTargetRefV1;
     permissionMode: string;
     modelId?: string;
     accountSettings?: Readonly<Record<string, unknown>> | null;
     start?: ExecutionRunBackendStartContext;
+    connectedServicesEnv?: Readonly<Record<string, string>> | null;
+    connectedServicesCleanup?: (() => Promise<void>) | null;
   }) => AgentBackend;
   private readonly sendAcp: (provider: ACPProvider, body: ACPMessageData, opts?: { meta?: Record<string, unknown> }) => void;
   private readonly streamedTranscriptSession: StreamedTranscriptWriterSession | null;
@@ -74,6 +81,7 @@ export class ExecutionRunManager {
   private readonly boundedTimeoutMs: number | null;
   private readonly maxTurns: number | null;
   private readonly budgetRegistry: ExecutionBudgetRegistry | null;
+  private readonly runtimeActivityPublisher: SessionRuntimeActivityPublisher | null;
   private readonly runs = new Map<string, ExecutionRunState>();
   private readonly controllers = new Map<string, ExecutionRunController>();
   private readonly markerWriteChains = new Map<string, Promise<void>>();
@@ -104,14 +112,40 @@ export class ExecutionRunManager {
   }
 
   private async writeActivityMarker(runId: string, nowMs: number, opts?: Readonly<{ force?: boolean }>): Promise<void> {
-    await writeExecutionRunActivityMarker({
-      runId,
-      nowMs,
-      opts,
-      runs: this.runs,
-      controllers: this.controllers,
-      enqueueMarkerWrite: this.enqueueMarkerWrite.bind(this),
-    });
+    try {
+      await writeExecutionRunActivityMarker({
+        runId,
+        nowMs,
+        opts,
+        runs: this.runs,
+        controllers: this.controllers,
+        enqueueMarkerWrite: this.enqueueMarkerWrite.bind(this),
+      });
+    } finally {
+      this.publishRunRuntimeActivityActive(runId);
+    }
+  }
+
+  private buildRuntimeActivitySourceId(runId: string): string | null {
+    const normalized = runId.trim();
+    return normalized.length > 0 ? `execution_run:${normalized}` : null;
+  }
+
+  private publishRunRuntimeActivityActive(runId: string): void {
+    const sourceId = this.buildRuntimeActivitySourceId(runId);
+    if (!sourceId || !this.runtimeActivityPublisher) return;
+    const run = this.runs.get(runId);
+    if (run?.status !== 'running' || !this.controllers.has(runId)) return;
+    void this.runtimeActivityPublisher.setSourceActive({
+      id: sourceId,
+      sourceClass: EXECUTION_RUN_RUNTIME_ACTIVITY_SOURCE_CLASS,
+    }).catch(() => {});
+  }
+
+  private clearRunRuntimeActivity(runId: string, reason: string): void {
+    const sourceId = this.buildRuntimeActivitySourceId(runId);
+    if (!sourceId || !this.runtimeActivityPublisher) return;
+    void this.runtimeActivityPublisher.clearSource(sourceId, reason).catch(() => {});
   }
 
   constructor(opts: Readonly<{
@@ -123,8 +157,11 @@ export class ExecutionRunManager {
       backendTarget?: BackendTargetRefV1;
       permissionMode: string;
       modelId?: string;
+      sessionConfigOptionOverrides?: AcpConfigOptionOverridesV1;
       accountSettings?: Readonly<Record<string, unknown>> | null;
       start?: ExecutionRunBackendStartContext;
+      connectedServicesEnv?: Readonly<Record<string, string>> | null;
+      connectedServicesCleanup?: (() => Promise<void>) | null;
     }) => AgentBackend;
     sendAcp: (provider: ACPProvider, body: ACPMessageData, opts?: { meta?: Record<string, unknown> }) => void;
     streamedTranscriptSession?: StreamedTranscriptWriterSession;
@@ -139,6 +176,7 @@ export class ExecutionRunManager {
     boundedTimeoutMs?: number;
     maxTurns?: number;
     budgetRegistry?: ExecutionBudgetRegistry;
+    runtimeActivityPublisher?: SessionRuntimeActivityPublisher | null;
     resolveAccountSettings?: () => Promise<Record<string, unknown> | null> | Record<string, unknown> | null;
     resolveVoicePromptStackBlocks?: (args: Readonly<{
       settings?: unknown;
@@ -163,6 +201,7 @@ export class ExecutionRunManager {
         ? Math.floor(opts.maxTurns)
         : null;
     this.budgetRegistry = opts.budgetRegistry ?? null;
+    this.runtimeActivityPublisher = opts.runtimeActivityPublisher ?? null;
     this.onPublicStateUpdated = typeof opts.onPublicStateUpdated === 'function' ? opts.onPublicStateUpdated : null;
     const resolveAccountSettings = opts.resolveAccountSettings ?? (async () => null);
     const resolveVoicePromptStackBlocks = opts.resolveVoicePromptStackBlocks
@@ -177,9 +216,9 @@ export class ExecutionRunManager {
       }>) => await resolveCliVoicePromptStackBlocks({ settings, profileId }));
 
     this.voiceAgentManager = new VoiceAgentManager({
-      createBackend: ({ agentId, modelId, permissionPolicy, start }) => {
+      createBackend: ({ agentId, modelId, permissionPolicy, start, connectedServicesEnv }) => {
         try {
-          return this.createBackend({ backendId: agentId, backendTarget: { kind: 'builtInAgent', agentId }, modelId, permissionMode: permissionPolicy, ...(start ? { start } : {}) });
+          return this.createBackend({ backendId: agentId, backendTarget: { kind: 'builtInAgent', agentId }, modelId, permissionMode: permissionPolicy, ...(start ? { start } : {}), ...(connectedServicesEnv ? { connectedServicesEnv } : {}) });
         } catch (e) {
           // Backend init failures should surface as "unsupported" so callers can fall back to
           // alternate voice engines. If the backend already classified the error, preserve it.
@@ -332,6 +371,7 @@ export class ExecutionRunManager {
     toolResult: { output: any; isError?: boolean; meta?: Record<string, unknown> },
     structuredMeta?: ExecutionRunStructuredMeta,
   ): void {
+    const wasRunning = this.runs.get(runId)?.status === 'running';
     finishExecutionRun({
       runId,
       next,
@@ -345,6 +385,10 @@ export class ExecutionRunManager {
       enqueueMarkerWrite: this.enqueueMarkerWrite.bind(this),
       terminalMarkerWritePromises: this.terminalMarkerWritePromises,
     });
+    const current = this.runs.get(runId);
+    if (wasRunning && current?.status !== 'running') {
+      this.clearRunRuntimeActivity(runId, `execution_run_${current?.status ?? 'terminal'}`);
+    }
     this.emitPublicStateUpdated(runId);
   }
 
@@ -368,6 +412,7 @@ export class ExecutionRunManager {
       getDepthByCallId: this.getDepthByCallId.bind(this),
       onPublicStateUpdated: (runId) => this.emitPublicStateUpdated(runId),
     });
+    this.publishRunRuntimeActivityActive(started.runId);
     this.emitPublicStateUpdated(started.runId);
     return started;
   }

@@ -16,6 +16,12 @@ describe('pending delivery blocked reason contract', () => {
     }
   });
 
+  it('accepts runtime config blockers as retryable pending delivery blocks', () => {
+    expect(PendingDeliveryBlockedReasonSchema.parse('runtime_config_blocked')).toBe('runtime_config_blocked');
+    expect(isPendingDeliveryBlockedReason('runtime_config_blocked')).toBe(true);
+    expect(normalizePendingDeliveryBlockedReason('runtime_config_blocked')).toBe('runtime_config_blocked');
+  });
+
   it('rejects missing and future blocked reasons', () => {
     expect(isPendingDeliveryBlockedReason('future_reason')).toBe(false);
     expect(normalizePendingDeliveryBlockedReason('future_reason')).toBeNull();

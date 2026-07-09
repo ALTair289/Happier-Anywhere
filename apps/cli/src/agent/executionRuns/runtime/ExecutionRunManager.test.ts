@@ -1,9 +1,51 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { AgentBackend, AgentMessage, AgentMessageHandler, SessionId } from '@/agent/core/AgentBackend';
 import type { ACPMessageData } from '@/api/session/sessionMessageTypes';
+import {
+  hasActiveSessionRuntimeActivity,
+} from '@happier-dev/protocol';
+import {
+  createSessionRuntimeActivityPublisher,
+  type RuntimeActivityProjection,
+} from '@/session/runtimeActivity/sessionRuntimeActivityPublisher';
 
 import { ExecutionRunManager } from './ExecutionRunManager';
+
+function createRuntimeActivityHarness(opts: Readonly<{
+  nowMs?: number;
+  leaseDurationMs?: number;
+}> = {}): {
+  publisher: ReturnType<typeof createSessionRuntimeActivityPublisher>;
+  projections: RuntimeActivityProjection[];
+  getNowMs: () => number;
+  setNowMs: (next: number) => void;
+} {
+  let nowMs = opts.nowMs ?? 10_000;
+  const projections: RuntimeActivityProjection[] = [];
+  const publisher = createSessionRuntimeActivityPublisher({
+    nowMs: () => nowMs,
+    leaseDurationMs: opts.leaseDurationMs ?? 5_000,
+    updateRuntimeActivityProjection: (projection) => {
+      projections.push(projection);
+    },
+  });
+
+  return {
+    publisher,
+    projections,
+    getNowMs: () => nowMs,
+    setNowMs: (next) => {
+      nowMs = next;
+    },
+  };
+}
+
+async function flushAsyncEffects(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+}
 
 function createStaticJsonBackend(responseText: string): AgentBackend {
   let handler: AgentMessageHandler | null = null;
@@ -330,6 +372,148 @@ describe('ExecutionRunManager (review intent)', () => {
     }
     await manager.waitForTerminal(started.runId);
     expect(manager.get(started.runId)?.status).toBe('succeeded');
+  });
+
+  it('publishes an expiring provider-detached runtime activity lease for live bounded runs and clears it at terminal', async () => {
+    const runtimeActivity = createRuntimeActivityHarness({ nowMs: 20_000, leaseDurationMs: 5_000 });
+    let handler: AgentMessageHandler | null = null;
+    let resolvePrompt!: () => void;
+    const promptDone = new Promise<void>((resolve) => {
+      resolvePrompt = () => {
+        handler?.({
+          type: 'model-output',
+          fullText: JSON.stringify({ summary: 'Ok', findings: [] }),
+        } as any);
+        resolve();
+      };
+    });
+
+    const backend: AgentBackend = {
+      async startSession(): Promise<{ sessionId: SessionId }> {
+        return { sessionId: 'child_session_1' as SessionId };
+      },
+      async sendPrompt(_sessionId: SessionId, _prompt: string): Promise<void> {
+        await promptDone;
+      },
+      async cancel(_sessionId: SessionId): Promise<void> {},
+      onMessage(next: AgentMessageHandler): void {
+        handler = next;
+      },
+      async dispose(): Promise<void> {},
+      async waitForResponseComplete(): Promise<void> {},
+    };
+
+    const manager = new ExecutionRunManager({
+      parentProvider: 'claude',
+      cwd: process.cwd(),
+      createBackend: () => backend,
+      sendAcp: () => {},
+      getNowMs: runtimeActivity.getNowMs,
+      runtimeActivityPublisher: runtimeActivity.publisher,
+    });
+
+    const started = await manager.start({
+      sessionId: 'parent_session_1',
+      intent: 'review',
+      backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+      instructions: 'Review this repo.',
+      permissionMode: 'read_only',
+      retentionPolicy: 'ephemeral',
+      runClass: 'bounded',
+      ioMode: 'request_response',
+    });
+
+    await flushAsyncEffects();
+
+    const activeProjection = runtimeActivity.projections.find(
+      (projection) => projection.runtimeActivityActiveCount === 1,
+    );
+    expect(activeProjection).toEqual({
+      runtimeActivityActiveCount: 1,
+      runtimeActivityObservedAt: 20_000,
+      runtimeActivityExpiresAt: 25_000,
+      runtimeActivitySourceClass: 'provider_detached_task',
+    });
+    expect(runtimeActivity.publisher.getSnapshot().sources).toEqual([
+      expect.objectContaining({
+        id: expect.stringContaining(started.runId),
+        kind: 'provider_detached_task',
+        status: 'active',
+        expiresAtMs: 25_000,
+      }),
+    ]);
+    expect(hasActiveSessionRuntimeActivity(runtimeActivity.publisher.getSnapshot(), runtimeActivity.getNowMs())).toBe(true);
+
+    runtimeActivity.setNowMs(25_001);
+    expect(hasActiveSessionRuntimeActivity(runtimeActivity.publisher.getSnapshot(), runtimeActivity.getNowMs())).toBe(false);
+
+    resolvePrompt();
+    await manager.waitForTerminal(started.runId);
+    await flushAsyncEffects();
+
+    expect(runtimeActivity.projections.at(-1)).toEqual({
+      runtimeActivityActiveCount: 0,
+      runtimeActivityObservedAt: null,
+      runtimeActivityExpiresAt: null,
+      runtimeActivitySourceClass: null,
+    });
+  });
+
+  it('clears execution-run runtime activity when a live run is stopped', async () => {
+    const runtimeActivity = createRuntimeActivityHarness({ nowMs: 30_000, leaseDurationMs: 5_000 });
+    let releaseSend!: () => void;
+    const sendDone = new Promise<void>((resolve) => {
+      releaseSend = resolve;
+    });
+    const cancel = vi.fn(async () => {
+      releaseSend();
+    });
+    const backend: AgentBackend = {
+      async startSession(): Promise<{ sessionId: SessionId }> {
+        return { sessionId: 'child_session_1' as SessionId };
+      },
+      async sendPrompt(): Promise<void> {
+        await sendDone;
+      },
+      cancel,
+      onMessage(): void {},
+      async dispose(): Promise<void> {},
+      async waitForResponseComplete(): Promise<void> {},
+    };
+
+    const manager = new ExecutionRunManager({
+      parentProvider: 'claude',
+      cwd: process.cwd(),
+      createBackend: () => backend,
+      sendAcp: () => {},
+      getNowMs: runtimeActivity.getNowMs,
+      runtimeActivityPublisher: runtimeActivity.publisher,
+    });
+
+    const started = await manager.start({
+      sessionId: 'parent_session_1',
+      intent: 'review',
+      backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+      instructions: 'Review this repo.',
+      permissionMode: 'read_only',
+      retentionPolicy: 'ephemeral',
+      runClass: 'bounded',
+      ioMode: 'request_response',
+    });
+
+    await flushAsyncEffects();
+    expect(runtimeActivity.publisher.getSnapshot().activeCount).toBe(1);
+
+    await expect(manager.stop(started.runId)).resolves.toEqual({ ok: true });
+    await flushAsyncEffects();
+
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(runtimeActivity.projections.at(-1)).toEqual({
+      runtimeActivityActiveCount: 0,
+      runtimeActivityObservedAt: null,
+      runtimeActivityExpiresAt: null,
+      runtimeActivitySourceClass: null,
+    });
   });
 
   it('forwards terminal output + file edits into the run sidechain transcript', async () => {
@@ -1367,7 +1551,12 @@ describe('ExecutionRunManager (long-lived runs)', () => {
       ioMode: 'request_response',
     });
 
-    expect((manager.getPublic(started.runId) as any)?.turnInFlight).toBe(true);
+    // Bounded kickoff is async (provisioning is bounded, QA2-F04); poll until the turn is in flight
+    // instead of pinning microtask timing.
+    await expect.poll(
+      () => (manager.getPublic(started.runId) as any)?.turnInFlight,
+      { timeout: 2_000 },
+    ).toBe(true);
 
     const stopped = await manager.stop(started.runId);
     expect(stopped.ok).toBe(true);

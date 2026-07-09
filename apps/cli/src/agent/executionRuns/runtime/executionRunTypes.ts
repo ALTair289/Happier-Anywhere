@@ -1,4 +1,4 @@
-import type { BackendTargetRefV1, ExecutionRunDisplay, ExecutionRunIntent, ExecutionRunResumeHandle } from '@happier-dev/protocol';
+import type { AcpConfigOptionOverridesV1, BackendTargetRefV1, ExecutionRunDisplay, ExecutionRunIntent, ExecutionRunResumeHandle } from '@happier-dev/protocol';
 
 import type { ExecutionRunStructuredMeta } from '@/agent/executionRuns/profiles/ExecutionRunIntentProfile';
 
@@ -8,6 +8,17 @@ export type ExecutionRunManagerStartParams = Readonly<{
   backendTarget: BackendTargetRefV1;
   accountSettings?: Readonly<Record<string, unknown>> | null;
   instructions?: string;
+  /**
+   * Optional model selection for the run's backend — SAME canonical shape as session spawn's
+   * `modelId`. Threaded to the spawned backend; absent keeps the backend's default model.
+   */
+  modelId?: string;
+  /**
+   * Optional canonical config-option overrides for the run (e.g. `reasoning_effort`), SAME shape as
+   * session spawn's `sessionConfigOptionOverrides`. Threaded to the spawned backend; absent keeps
+   * the backend's configured defaults.
+   */
+  sessionConfigOptionOverrides?: AcpConfigOptionOverridesV1;
   /**
    * Intent-scoped configuration. The execution-run substrate treats this as opaque,
    * but backends/engines may interpret it (e.g. native review CLIs like CodeRabbit).
@@ -19,6 +30,14 @@ export type ExecutionRunManagerStartParams = Readonly<{
   runClass: 'bounded' | 'long_lived';
   ioMode: 'request_response' | 'streaming';
   profileId?: string | null;
+  /**
+   * Daemon-materialized connected-services env for this run (e.g. `CODEX_HOME`), resolved at the
+   * RPC start layer via the ER-CS daemon bridge. Merged generically into the run backend's isolation
+   * bundle; absent means the run keeps default (runner-inherited) behavior.
+   */
+  connectedServicesEnv?: Readonly<Record<string, string>> | null;
+  /** Idempotent run-end release for the daemon-side CS registration + materialized root. */
+  connectedServicesCleanup?: (() => Promise<void>) | null;
   // Internal runtime override for bounded-run timeouts. Not part of the public RPC contract.
   boundedTimeoutMs?: number;
   resumeHandle?: ExecutionRunResumeHandle | null;

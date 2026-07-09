@@ -1,0 +1,99 @@
+import { afterEach, describe, expect, it } from 'vitest';
+
+import type { AgentBackend, SessionId } from '@/agent/core/AgentBackend';
+
+import { ExecutionRunManager } from './ExecutionRunManager';
+
+const PROVISION_TIMEOUT_ENV_KEY = 'HAPPIER_EXECUTION_RUN_BACKEND_PROVISION_TIMEOUT_MS';
+
+function createNeverProvisioningBackend(): AgentBackend {
+  return {
+    // Hangs forever: the live QA2-F04 shape — no backend process ever appears, no error is thrown,
+    // and without a bound the run sits "running" indefinitely.
+    startSession(): Promise<{ sessionId: SessionId }> {
+      return new Promise(() => {});
+    },
+    async sendPrompt(): Promise<void> {},
+    async cancel(): Promise<void> {},
+    onMessage(): void {},
+    async dispose(): Promise<void> {},
+    async waitForResponseComplete(): Promise<void> {},
+  };
+}
+
+async function waitForStatus(
+  read: () => string | undefined,
+  wanted: string,
+  timeoutMs: number,
+): Promise<string | undefined> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const status = read();
+    if (status === wanted) return status;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return read();
+}
+
+describe('ExecutionRunManager backend provisioning bound (QA2-F04)', () => {
+  afterEach(() => {
+    delete process.env[PROVISION_TIMEOUT_ENV_KEY];
+  });
+
+  it('fails a bounded run whose backend session provisioning never settles', async () => {
+    process.env[PROVISION_TIMEOUT_ENV_KEY] = '200';
+    const manager = new ExecutionRunManager({
+      parentProvider: 'claude',
+      cwd: process.cwd(),
+      createBackend: () => createNeverProvisioningBackend(),
+      sendAcp: () => {},
+    });
+
+    const started = await manager.start({
+      sessionId: 'session-1',
+      intent: 'delegate',
+      backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+      instructions: 'Do the thing.',
+      permissionMode: 'read_only',
+      retentionPolicy: 'ephemeral',
+      runClass: 'bounded',
+      ioMode: 'request_response',
+    });
+
+    const status = await waitForStatus(
+      () => manager.getPublic(started.runId)?.status,
+      'failed',
+      5_000,
+    );
+    expect(status).toBe('failed');
+    const run = manager.getPublic(started.runId);
+    expect(run?.error?.code).toBe('execution_run_backend_provision_timeout');
+  });
+
+  it('fails a long-lived run start whose backend session provisioning never settles', async () => {
+    process.env[PROVISION_TIMEOUT_ENV_KEY] = '200';
+    const manager = new ExecutionRunManager({
+      parentProvider: 'claude',
+      cwd: process.cwd(),
+      createBackend: () => createNeverProvisioningBackend(),
+      sendAcp: () => {},
+    });
+
+    await expect(manager.start({
+      sessionId: 'session-1',
+      intent: 'delegate',
+      backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+      instructions: 'Do the thing.',
+      permissionMode: 'read_only',
+      retentionPolicy: 'resumable',
+      runClass: 'long_lived',
+      ioMode: 'request_response',
+    })).rejects.toThrow(/provision/iu);
+
+    // The run entry must be terminal (failed), not leaked as running.
+    const runs = manager.listPublic();
+    expect(runs.length).toBe(1);
+    expect(runs[0]?.status).toBe('failed');
+    expect(runs[0]?.error?.code).toBe('execution_run_backend_provision_timeout');
+  });
+});

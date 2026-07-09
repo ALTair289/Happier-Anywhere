@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 export const PENDING_DELIVERY_BLOCKED_REASONS = [
   'terminal_composer_draft',
+  'runtime_config_blocked',
   'provider_acceptance_timeout',
   'provider_unavailable_before_acceptance',
   'ambiguous_terminal_delivery',
