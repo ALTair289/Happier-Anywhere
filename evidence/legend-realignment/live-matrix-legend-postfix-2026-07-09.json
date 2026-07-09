@@ -1,0 +1,1282 @@
+{
+  "pass": false,
+  "cells": [
+    {
+      "name": "toolExpansionJiggle",
+      "pass": false,
+      "toggles": [
+        {
+          "ratio": 0.22,
+          "pair": 0,
+          "anchorId": "transcript-item-toolCalls:turn:swwscxyj79:poi6azv3s1#footer",
+          "worst": 0
+        },
+        {
+          "ratio": 0.22,
+          "pair": 1,
+          "anchorId": "transcript-item-toolCalls:turn:swwscxyj79:poi6azv3s1#footer",
+          "worst": 0
+        },
+        {
+          "ratio": 0.34,
+          "pair": 0,
+          "anchorId": "transcript-item-toolCalls:turn:swwscxyj79:poi6azv3s1#tool:mwz9m0rwoj",
+          "worst": 0
+        },
+        {
+          "ratio": 0.34,
+          "pair": 1,
+          "anchorId": "transcript-item-toolCalls:turn:swwscxyj79:poi6azv3s1#tool:mwz9m0rwoj",
+          "worst": 0
+        },
+        {
+          "ratio": 0.46,
+          "pair": 0,
+          "error": "missing preview"
+        },
+        {
+          "ratio": 0.58,
+          "pair": 0,
+          "error": "missing preview"
+        },
+        {
+          "ratio": 0.7,
+          "pair": 0,
+          "error": "missing preview"
+        }
+      ]
+    },
+    {
+      "name": "sendPinned",
+      "pass": true,
+      "after": {
+        "st": 9592,
+        "sh": 10262,
+        "ch": 670,
+        "dfb": 0,
+        "rect": {
+          "x": 384,
+          "y": 56,
+          "width": 1056,
+          "height": 670
+        },
+        "center": {
+          "id": "transcript-item-msg:rbhslepzfpp",
+          "top": 333.5,
+          "bottom": 499.5,
+          "text": "Received intact:\n\ntext\n\nLegend probe after sync timestamp preempt 1783579134156"
+        },
+        "path": "/session/cmracew6101cztm5nya6yqxx4"
+      }
+    },
+    {
+      "name": "sendDetached",
+      "pass": true,
+      "before": {
+        "st": 6320,
+        "sh": 10341,
+        "ch": 670,
+        "dfb": 3351,
+        "rect": {
+          "x": 384,
+          "y": 56,
+          "width": 1056,
+          "height": 670
+        },
+        "center": {
+          "id": "transcript-item-msg:2357pdjn0fb",
+          "top": 265,
+          "bottom": 411,
+          "text": "Received:\n\ntext\n\nLegend live detached send 1783575798635\nJul 9, 2026, 7:43 AM\n"
+        },
+        "path": "/session/cmracew6101cztm5nya6yqxx4"
+      },
+      "after": {
+        "st": 6320,
+        "sh": 10603,
+        "ch": 670,
+        "dfb": 3613,
+        "rect": {
+          "x": 384,
+          "y": 56,
+          "width": 1056,
+          "height": 670
+        },
+        "center": {
+          "id": "transcript-item-msg:2357pdjn0fb",
+          "top": 265,
+          "bottom": 411,
+          "text": "Received:\n\ntext\n\nLegend live detached send 1783575798635\nJul 9, 2026, 7:43 AM\n"
+        },
+        "path": "/session/cmracew6101cztm5nya6yqxx4"
+      },
+      "maxDelta": 0,
+      "writeCount": 0
+    },
+    {
+      "name": "switchRestore",
+      "pass": false,
+      "bottomBefore": {
+        "st": 9933,
+        "sh": 10603,
+        "ch": 670,
+        "dfb": 0,
+        "rect": {
+          "x": 384,
+          "y": 56,
+          "width": 1056,
+          "height": 670
+        },
+        "center": {
+          "id": "transcript-item-msg:u61n56j7k1l",
+          "top": 245.625,
+          "bottom": 411.625,
+          "text": "Received intact:\n\ntext\n\nLegend matrix pinned send 1783579795760\nline two\nJul 9,"
+        },
+        "path": "/session/cmracew6101cztm5nya6yqxx4"
+      },
+      "bottomAfter": {
+        "st": 19040,
+        "sh": 19710,
+        "ch": 670,
+        "dfb": 0,
+        "rect": {
+          "x": 384,
+          "y": 56,
+          "width": 1056,
+          "height": 670
+        },
+        "center": {
+          "id": "transcript-item-msg:pnxni7qbjq",
+          "top": 246,
+          "bottom": 412,
+          "text": "text\n\nLegend matrix pinned send 1783579795760\nline two\nJul 9, 2026, 8:50 AM\n\n"
+        },
+        "path": "/session/cmracew6101cztm5nya6yqxx4"
+      },
+      "anchoredBefore": {
+        "st": 9507,
+        "sh": 18495,
+        "ch": 670,
+        "dfb": 8318,
+        "rect": {
+          "x": 384,
+          "y": 56,
+          "width": 1056,
+          "height": 670
+        },
+        "center": {
+          "id": "transcript-item-msg:042p51a3uszo",
+          "top": 313,
+          "bottom": 383,
+          "text": "Jul 8, 2026, 9:19 PM\n\n"
+        },
+        "path": "/session/cmracew6101cztm5nya6yqxx4"
+      },
+      "anchoredAfter": {
+        "st": 19040,
+        "sh": 19710,
+        "ch": 670,
+        "dfb": 0,
+        "rect": {
+          "x": 384,
+          "y": 56,
+          "width": 1056,
+          "height": 670
+        },
+        "center": {
+          "id": "transcript-item-msg:0grz1a2t6e0k",
+          "top": 246,
+          "bottom": 412,
+          "text": "Received intact:\n\ntext\n\nLegend matrix pinned send 1783579795760\nline two\nJul 9,"
+        },
+        "path": "/session/cmracew6101cztm5nya6yqxx4"
+      },
+      "anchoredMaxDeltaPx": 999
+    },
+    {
+      "name": "fullJourney",
+      "pass": false,
+      "sampleCount": 122,
+      "final": {
+        "st": 18888,
+        "sh": 19558,
+        "ch": 670,
+        "dfb": 0,
+        "rect": {
+          "x": 384,
+          "y": 56,
+          "width": 1056,
+          "height": 670
+        },
+        "center": {
+          "id": "transcript-item-msg:4ehpsqwl5eg",
+          "top": 202,
+          "bottom": 368,
+          "text": "Received intact:\n\ntext\n\nLegend matrix detached send 1783579805786\nline two\nJul "
+        },
+        "path": "/session/cmracew6101cztm5nya6yqxx4"
+      },
+      "timeline": [
+        {
+          "t": 1783579896013,
+          "st": 19040,
+          "sh": 19710,
+          "dfb": 0,
+          "center": "transcript-item-msg:3qz7upuou8o",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579896561,
+          "st": 19040,
+          "sh": 19710,
+          "dfb": 0,
+          "center": "transcript-item-msg:3qz7upuou8o",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579896621,
+          "st": 18540,
+          "sh": 19710,
+          "dfb": 500,
+          "center": "transcript-item-msg:8mgjnn43ojx",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579896683,
+          "st": 18540,
+          "sh": 19710,
+          "dfb": 500,
+          "center": "transcript-item-msg:8mgjnn43ojx",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579896761,
+          "st": 18040,
+          "sh": 19710,
+          "dfb": 1000,
+          "center": "transcript-item-msg:lfj2vjjqymc",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579896833,
+          "st": 18040,
+          "sh": 19710,
+          "dfb": 1000,
+          "center": "transcript-item-msg:lfj2vjjqymc",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579896899,
+          "st": 18040,
+          "sh": 19710,
+          "dfb": 1000,
+          "center": "transcript-item-msg:lfj2vjjqymc",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579897184,
+          "st": 17540,
+          "sh": 19710,
+          "dfb": 1500,
+          "center": "transcript-item-msg:xf8cy0om50b",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579897247,
+          "st": 17040,
+          "sh": 19710,
+          "dfb": 2000,
+          "center": "transcript-item-msg:zwmg4itzjp9",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579897319,
+          "st": 17040,
+          "sh": 19710,
+          "dfb": 2000,
+          "center": "transcript-item-msg:zwmg4itzjp9",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579897437,
+          "st": 16540,
+          "sh": 19408,
+          "dfb": 2198,
+          "center": "transcript-item-msg:xcxexo7bsx",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579897502,
+          "st": 16540,
+          "sh": 19408,
+          "dfb": 2198,
+          "center": "transcript-item-msg:xcxexo7bsx",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579897593,
+          "st": 18738,
+          "sh": 19408,
+          "dfb": 0,
+          "center": "transcript-item-msg:3qz7upuou8o",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579897670,
+          "st": 18738,
+          "sh": 19408,
+          "dfb": 0,
+          "center": "transcript-item-msg:3qz7upuou8o",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579897737,
+          "st": 18738,
+          "sh": 19408,
+          "dfb": 0,
+          "center": "transcript-item-msg:3qz7upuou8o",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579897799,
+          "st": 18738,
+          "sh": 19408,
+          "dfb": 0,
+          "center": "transcript-item-msg:3qz7upuou8o",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579897872,
+          "st": 18738,
+          "sh": 19408,
+          "dfb": 0,
+          "center": "transcript-item-msg:3qz7upuou8o",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579897946,
+          "st": 18738,
+          "sh": 19408,
+          "dfb": 0,
+          "center": "transcript-item-msg:3qz7upuou8o",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579898013,
+          "st": 18738,
+          "sh": 19408,
+          "dfb": 0,
+          "center": "transcript-item-msg:3qz7upuou8o",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579898081,
+          "st": 18738,
+          "sh": 19408,
+          "dfb": 0,
+          "center": "transcript-item-msg:3qz7upuou8o",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579898151,
+          "st": 18738,
+          "sh": 19408,
+          "dfb": 0,
+          "center": "transcript-item-msg:3qz7upuou8o",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579898216,
+          "st": 18738,
+          "sh": 19408,
+          "dfb": 0,
+          "center": "transcript-item-msg:3qz7upuou8o",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579898282,
+          "st": 18738,
+          "sh": 19408,
+          "dfb": 0,
+          "center": "transcript-item-msg:3qz7upuou8o",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579898347,
+          "st": 18738,
+          "sh": 19408,
+          "dfb": 0,
+          "center": "transcript-item-msg:3qz7upuou8o",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579898410,
+          "st": 18738,
+          "sh": 19408,
+          "dfb": 0,
+          "center": "transcript-item-msg:3qz7upuou8o",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579898474,
+          "st": 18738,
+          "sh": 19408,
+          "dfb": 0,
+          "center": "transcript-item-msg:3qz7upuou8o",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579898538,
+          "st": 18738,
+          "sh": 19408,
+          "dfb": 0,
+          "center": "transcript-item-msg:3qz7upuou8o",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579898729,
+          "st": 16636,
+          "sh": 17306,
+          "dfb": 45,
+          "center": "transcript-item-msg:3qz7upuou8o",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579898798,
+          "st": 16636,
+          "sh": 17306,
+          "dfb": 45,
+          "center": "transcript-item-msg:3qz7upuou8o",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579898865,
+          "st": 16636,
+          "sh": 17306,
+          "dfb": 45,
+          "center": "transcript-item-msg:3qz7upuou8o",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579898927,
+          "st": 16636,
+          "sh": 17306,
+          "dfb": 45,
+          "center": "transcript-item-msg:3qz7upuou8o",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579898994,
+          "st": 16636,
+          "sh": 17306,
+          "dfb": 45,
+          "center": "transcript-item-msg:3qz7upuou8o",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579899061,
+          "st": 16636,
+          "sh": 17306,
+          "dfb": 45,
+          "center": "transcript-item-msg:3qz7upuou8o",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579899132,
+          "st": 16636,
+          "sh": 17306,
+          "dfb": 45,
+          "center": "transcript-item-msg:3qz7upuou8o",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579899201,
+          "st": 16636,
+          "sh": 17306,
+          "dfb": 45,
+          "center": "transcript-item-msg:3qz7upuou8o",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579899288,
+          "st": 16636,
+          "sh": 17306,
+          "dfb": 45,
+          "center": "transcript-item-msg:3qz7upuou8o",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579900213,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579900327,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579900390,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579900452,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579900519,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579900584,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579900650,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579900714,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579900792,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579900858,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579900920,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579900984,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579901050,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579901133,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579901197,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579901262,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579901324,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579901389,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579901458,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579901531,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579901600,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579901679,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579901747,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579901818,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579901886,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579901959,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579902024,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579902089,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579902154,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579902218,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579902307,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579902371,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579902432,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579902507,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579902572,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579902641,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579902723,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579902785,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579902847,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579902921,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579902985,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579903047,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579903112,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579903180,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579903246,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579903307,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579903374,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579903444,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579903509,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579903573,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579903654,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579903718,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579903781,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579903847,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579903911,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579903974,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579904039,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579904106,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579904170,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579904233,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579904294,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579904357,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579904421,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579904485,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579904553,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579904616,
+          "st": 16770,
+          "sh": 17440,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579905099,
+          "st": 16836,
+          "sh": 17506,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579905161,
+          "st": 16836,
+          "sh": 17506,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579905223,
+          "st": 16836,
+          "sh": 17506,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579905284,
+          "st": 16836,
+          "sh": 17506,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579905348,
+          "st": 16836,
+          "sh": 17506,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579905442,
+          "st": 16836,
+          "sh": 17506,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579905504,
+          "st": 16836,
+          "sh": 17506,
+          "dfb": 0,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579905586,
+          "st": 16836,
+          "sh": 17646,
+          "dfb": 140,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579905652,
+          "st": 16836,
+          "sh": 17646,
+          "dfb": 140,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579905719,
+          "st": 16836,
+          "sh": 17646,
+          "dfb": 140,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579905782,
+          "st": 16836,
+          "sh": 17646,
+          "dfb": 140,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579905849,
+          "st": 16836,
+          "sh": 17646,
+          "dfb": 140,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579905913,
+          "st": 16836,
+          "sh": 17646,
+          "dfb": 140,
+          "center": "transcript-item-msg:hfs1oea3h0v",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579906339,
+          "st": 16976,
+          "sh": 17646,
+          "dfb": 0,
+          "center": "transcript-item-msg:xmwowopiswe",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579906402,
+          "st": 16976,
+          "sh": 17646,
+          "dfb": 0,
+          "center": "transcript-item-msg:xmwowopiswe",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579906468,
+          "st": 16976,
+          "sh": 17646,
+          "dfb": 0,
+          "center": "transcript-item-msg:xmwowopiswe",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579906531,
+          "st": 16976,
+          "sh": 17646,
+          "dfb": 0,
+          "center": "transcript-item-msg:xmwowopiswe",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 1783579936585,
+          "path": "/session/cmracew6101cztm5nya6yqxx4",
+          "error": "locator.boundingBox: Timeout 30000ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('[data-scroll-probe=\"1\"]')\u001b[22m\n\u001b[2m    - locator resolved to visible <div data-scroll-probe=\"1\" keyboarddismissmode=\"none\" keyboardshouldpersisttaps=\"handled\">…</div>\u001b[22m\n"
+        }
+      ]
+    }
+  ],
+  "consoleErrors": [
+    "Accessing element.ref was removed in React 19. ref is now a regular prop. It will be removed from the JSX Element type in a future release.",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from a parent component, remove it from the DOM element. keyboardDismissMode keyboarddismissmode",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from a parent component, remove it from the DOM element. keyboardShouldPersistTaps keyboardshouldpersisttaps",
+    "Unknown event handler property `%s`. It will be ignored. onMomentumScrollBegin",
+    "Unknown event handler property `%s`. It will be ignored. onScrollBeginDrag",
+    "Unknown event handler property `%s`. It will be ignored. onScrollEndDrag",
+    "Accessing element.ref was removed in React 19. ref is now a regular prop. It will be removed from the JSX Element type in a future release.",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from a parent component, remove it from the DOM element. keyboardDismissMode keyboarddismissmode",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from a parent component, remove it from the DOM element. keyboardShouldPersistTaps keyboardshouldpersisttaps",
+    "Unknown event handler property `%s`. It will be ignored. onMomentumScrollBegin",
+    "Unknown event handler property `%s`. It will be ignored. onScrollBeginDrag",
+    "Unknown event handler property `%s`. It will be ignored. onScrollEndDrag",
+    "[fireAndForget] ChatList.webMarkdownRuntimeFirstPaint TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&tran",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "Accessing element.ref was removed in React 19. ref is now a regular prop. It will be removed from the JSX Element type in a future release.",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from a parent component, remove it from the DOM element. keyboardDismissMode keyboarddismissmode",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from a parent component, remove it from the DOM element. keyboardShouldPersistTaps keyboardshouldpersisttaps",
+    "Unknown event handler property `%s`. It will be ignored. onMomentumScrollBegin",
+    "Unknown event handler property `%s`. It will be ignored. onScrollBeginDrag",
+    "Unknown event handler property `%s`. It will be ignored. onScrollEndDrag",
+    "[fireAndForget] ChatList.webMarkdownRuntimeFirstPaint TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&tran",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "Accessing element.ref was removed in React 19. ref is now a regular prop. It will be removed from the JSX Element type in a future release.",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from a parent component, remove it from the DOM element. keyboardDismissMode keyboarddismissmode",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from a parent component, remove it from the DOM element. keyboardShouldPersistTaps keyboardshouldpersisttaps",
+    "Unknown event handler property `%s`. It will be ignored. onMomentumScrollBegin",
+    "Unknown event handler property `%s`. It will be ignored. onScrollBeginDrag",
+    "Unknown event handler property `%s`. It will be ignored. onScrollEndDrag",
+    "[fireAndForget] ChatList.webMarkdownRuntimeFirstPaint TypeError: Failed to fetch",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "[EnrichedMarkdownText] Parse failed: TypeError: Failed to fetch\n    at fetchAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:231818:28)\n    at Object.fetchThenEvalAsync (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=herm",
+    "Accessing element.ref was removed in React 19. ref is now a regular prop. It will be removed from the JSX Element type in a future release.",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from a parent component, remove it from the DOM element. keyboardDismissMode keyboarddismissmode",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from a parent component, remove it from the DOM element. keyboardShouldPersistTaps keyboardshouldpersisttaps",
+    "Unknown event handler property `%s`. It will be ignored. onMomentumScrollBegin",
+    "Unknown event handler property `%s`. It will be ignored. onScrollBeginDrag",
+    "Unknown event handler property `%s`. It will be ignored. onScrollEndDrag",
+    "[fireAndForget] ChatList.webMarkdownRuntimeFirstPaint TypeError: Failed to fetch",
+    "Accessing element.ref was removed in React 19. ref is now a regular prop. It will be removed from the JSX Element type in a future release.",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from a parent component, remove it from the DOM element. keyboardDismissMode keyboarddismissmode",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from a parent component, remove it from the DOM element. keyboardShouldPersistTaps keyboardshouldpersisttaps",
+    "Unknown event handler property `%s`. It will be ignored. onMomentumScrollBegin",
+    "Unknown event handler property `%s`. It will be ignored. onScrollBeginDrag",
+    "Unknown event handler property `%s`. It will be ignored. onScrollEndDrag",
+    "[fireAndForget] SessionView.markSessionViewed Error: socket has been disconnected\n    at http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:461443:28\n    at Array.forEach (<anonymous>)\n    at Socket._clearAcks (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false",
+    "Accessing element.ref was removed in React 19. ref is now a regular prop. It will be removed from the JSX Element type in a future release.",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from a parent component, remove it from the DOM element. keyboardDismissMode keyboarddismissmode",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from a parent component, remove it from the DOM element. keyboardShouldPersistTaps keyboardshouldpersisttaps",
+    "Unknown event handler property `%s`. It will be ignored. onMomentumScrollBegin",
+    "Unknown event handler property `%s`. It will be ignored. onScrollBeginDrag",
+    "Unknown event handler property `%s`. It will be ignored. onScrollEndDrag",
+    "Accessing element.ref was removed in React 19. ref is now a regular prop. It will be removed from the JSX Element type in a future release.",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from a parent component, remove it from the DOM element. keyboardDismissMode keyboarddismissmode",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from a parent component, remove it from the DOM element. keyboardShouldPersistTaps keyboardshouldpersisttaps",
+    "Unknown event handler property `%s`. It will be ignored. onMomentumScrollBegin",
+    "Unknown event handler property `%s`. It will be ignored. onScrollBeginDrag",
+    "Unknown event handler property `%s`. It will be ignored. onScrollEndDrag"
+  ]
+}

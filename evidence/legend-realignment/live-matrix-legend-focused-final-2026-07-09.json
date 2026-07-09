@@ -1,0 +1,896 @@
+{
+  "startedAt": "2026-07-09T06:07:38.012Z",
+  "cells": [
+    {
+      "name": "toolExpansionJiggle",
+      "ok": true,
+      "pass": false,
+      "cases": [
+        {
+          "headerId": "transcript-item-toolCalls:turn:15xa6qwwt3k:16g166ihj4#header",
+          "ratio": 0.48285950518348913,
+          "text": "+1 more…",
+          "worstDeltaPx": 999,
+          "pass": false,
+          "toggles": [
+            {
+              "i": 1,
+              "error": "missing header"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "sendDetached",
+      "ok": true,
+      "before": {
+        "st": 17530,
+        "sh": 21188,
+        "ch": 670,
+        "dfb": 2988,
+        "rect": {
+          "x": 384,
+          "y": 56,
+          "width": 1056,
+          "height": 670
+        },
+        "center": {
+          "id": "transcript-item-msg:au2y0tnndwc",
+          "top": 6,
+          "bottom": 1490,
+          "height": 1484,
+          "center": 748,
+          "text": "OutcomeI re-read the full plugin SDK v1 plan, the ledger, the prior review repor"
+        },
+        "path": "/session/cmracew6101cztm5nya6yqxx4"
+      },
+      "anchorId": "transcript-item-msg:au2y0tnndwc",
+      "beforeTop": 6,
+      "after": {
+        "st": 17461,
+        "sh": 21328,
+        "ch": 670,
+        "dfb": 3197,
+        "rect": {
+          "x": 384,
+          "y": 56,
+          "width": 1056,
+          "height": 670
+        },
+        "center": {
+          "id": "transcript-item-msg:nyrayfp6ks",
+          "top": 5,
+          "bottom": 75,
+          "height": 70,
+          "center": 40,
+          "text": "The focused inventory is now captured. Most implementation files are either modi"
+        },
+        "path": "/session/cmracew6101cztm5nya6yqxx4"
+      },
+      "maxDelta": 69,
+      "pass": false
+    },
+    {
+      "name": "switchRestore",
+      "ok": true,
+      "bottomBefore": {
+        "st": 21362,
+        "sh": 22032,
+        "ch": 670,
+        "dfb": 0,
+        "rect": {
+          "x": 384,
+          "y": 56,
+          "width": 1056,
+          "height": 670
+        },
+        "center": {
+          "id": "transcript-item-msg:geu39zp35bo",
+          "top": 346,
+          "bottom": 512,
+          "height": 166,
+          "center": 429,
+          "text": "Received intact:textLegend final pinned send 1783577041054\nline twoJul 9, 2026,"
+        },
+        "path": "/session/cmracew6101cztm5nya6yqxx4"
+      },
+      "bottomAfter": {
+        "st": 21362,
+        "sh": 22032,
+        "ch": 670,
+        "dfb": 0,
+        "rect": {
+          "x": 384,
+          "y": 56,
+          "width": 1056,
+          "height": 670
+        },
+        "center": {
+          "id": "transcript-item-msg:16f27g7w5mn",
+          "top": 346,
+          "bottom": 512,
+          "height": 166,
+          "center": 429,
+          "text": "Received intact:textLegend final pinned send 1783577041054\nline twoJul 9, 2026,"
+        },
+        "path": "/session/cmracew6101cztm5nya6yqxx4"
+      },
+      "bottomPass": true,
+      "anchoredBefore": {
+        "st": 12877,
+        "sh": 17426,
+        "ch": 670,
+        "dfb": 3879,
+        "rect": {
+          "x": 384,
+          "y": 56,
+          "width": 1056,
+          "height": 670
+        },
+        "center": {
+          "id": "transcript-item-toolCalls:turn:kqp1xztm6:sfjrdq1hxxq#tool:sfjrdq1hxxq",
+          "top": 364,
+          "bottom": 392,
+          "height": 28,
+          "center": 378,
+          "text": "Terminal(cmd: /bin/zsh)/bin/zsh -lc 'git diff --check -- .github/workflows/tes"
+        },
+        "path": "/session/cmracew6101cztm5nya6yqxx4"
+      },
+      "anchorId": "transcript-item-toolCalls:turn:kqp1xztm6:sfjrdq1hxxq#tool:sfjrdq1hxxq",
+      "beforeTop": 364,
+      "anchoredAfter": {
+        "st": 14082,
+        "sh": 18428,
+        "ch": 670,
+        "dfb": 3676,
+        "rect": {
+          "x": 384,
+          "y": 56,
+          "width": 1056,
+          "height": 670
+        },
+        "center": {
+          "id": "transcript-item-toolCalls:turn:hrfpck92rl:hwvk902fb8e#footer",
+          "top": 382,
+          "bottom": 416,
+          "height": 34,
+          "center": 399,
+          "text": ""
+        },
+        "path": "/session/cmracew6101cztm5nya6yqxx4"
+      },
+      "anchoredMaxDeltaPx": 999,
+      "anchoredPass": false,
+      "pass": false
+    },
+    {
+      "name": "fullJourney",
+      "ok": true,
+      "tools": {
+        "pass": false,
+        "worst": 0
+      },
+      "detached": {
+        "pass": true,
+        "maxDelta": 0
+      },
+      "final": {
+        "st": 18984,
+        "sh": 19654,
+        "ch": 670,
+        "dfb": 0,
+        "rect": {
+          "x": 384,
+          "y": 56,
+          "width": 1056,
+          "height": 670
+        },
+        "center": {
+          "id": "transcript-item-msg:1qye8ofbjzp",
+          "top": 322,
+          "bottom": 468,
+          "height": 146,
+          "center": 395,
+          "text": "Received:textLegend focused detached send 1783577388071Jul 9, 2026, 8:09 AM"
+        },
+        "path": "/session/cmracew6101cztm5nya6yqxx4"
+      },
+      "sampleCount": 813,
+      "pass": false,
+      "timeline": [
+        {
+          "t": 44533,
+          "error": "no transcript host"
+        },
+        {
+          "t": 44584,
+          "error": "no transcript host"
+        },
+        {
+          "t": 44717,
+          "error": "no transcript host"
+        },
+        {
+          "t": 44855,
+          "error": "no transcript host"
+        },
+        {
+          "t": 44942,
+          "error": "no transcript host"
+        },
+        {
+          "t": 45414,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 45481,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 45541,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 46036,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 46133,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 46197,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 46375,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 46521,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 46573,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 46626,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 46679,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 46732,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 46786,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 46839,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 46891,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 46944,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 46998,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 47051,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 47104,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 47156,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 47209,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 47262,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 47316,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 47369,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 47422,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 47490,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 47542,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 47595,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 47647,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 47698,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 47749,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 47801,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 47854,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 47906,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 47957,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 48009,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 48061,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 48113,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 48165,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 48219,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 48271,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 48324,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 48377,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 48430,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 48483,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 48535,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 48587,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 48639,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 48691,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 48742,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 48795,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 48849,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 48901,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 48953,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 49006,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 49059,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 49112,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 49164,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 49327,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 49380,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 49431,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 49483,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 49534,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 49586,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 49638,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 49691,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 49744,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 49798,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 49850,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 49904,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 49955,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 50007,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 50058,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 50109,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        },
+        {
+          "t": 50160,
+          "st": 18984,
+          "sh": 19654,
+          "dfb": 0,
+          "center": "transcript-item-msg:1qye8ofbjzp",
+          "path": "/session/cmracew6101cztm5nya6yqxx4"
+        }
+      ]
+    }
+  ],
+  "consoleErrors": [
+    "Accessing element.ref was removed in React 19. ref is now a regular prop. It will be removed from the JSX Element type in a future release.",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from",
+    "Unknown event handler property `%s`. It will be ignored. onMomentumScrollBegin",
+    "Unknown event handler property `%s`. It will be ignored. onScrollBeginDrag",
+    "Unknown event handler property `%s`. It will be ignored. onScrollEndDrag",
+    "Accessing element.ref was removed in React 19. ref is now a regular prop. It will be removed from the JSX Element type in a future release.",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from",
+    "Unknown event handler property `%s`. It will be ignored. onMomentumScrollBegin",
+    "Unknown event handler property `%s`. It will be ignored. onScrollBeginDrag",
+    "Unknown event handler property `%s`. It will be ignored. onScrollEndDrag",
+    "Accessing element.ref was removed in React 19. ref is now a regular prop. It will be removed from the JSX Element type in a future release.",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from",
+    "Unknown event handler property `%s`. It will be ignored. onMomentumScrollBegin",
+    "Unknown event handler property `%s`. It will be ignored. onScrollBeginDrag",
+    "Unknown event handler property `%s`. It will be ignored. onScrollEndDrag",
+    "Accessing element.ref was removed in React 19. ref is now a regular prop. It will be removed from the JSX Element type in a future release.",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from",
+    "Unknown event handler property `%s`. It will be ignored. onMomentumScrollBegin",
+    "Unknown event handler property `%s`. It will be ignored. onScrollBeginDrag",
+    "Unknown event handler property `%s`. It will be ignored. onScrollEndDrag",
+    "Accessing element.ref was removed in React 19. ref is now a regular prop. It will be removed from the JSX Element type in a future release.",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from",
+    "Unknown event handler property `%s`. It will be ignored. onMomentumScrollBegin",
+    "Unknown event handler property `%s`. It will be ignored. onScrollBeginDrag",
+    "Unknown event handler property `%s`. It will be ignored. onScrollEndDrag",
+    "Accessing element.ref was removed in React 19. ref is now a regular prop. It will be removed from the JSX Element type in a future release.",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from",
+    "Unknown event handler property `%s`. It will be ignored. onMomentumScrollBegin",
+    "Unknown event handler property `%s`. It will be ignored. onScrollBeginDrag",
+    "Unknown event handler property `%s`. It will be ignored. onScrollEndDrag",
+    "Accessing element.ref was removed in React 19. ref is now a regular prop. It will be removed from the JSX Element type in a future release.",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from",
+    "Unknown event handler property `%s`. It will be ignored. onMomentumScrollBegin",
+    "Unknown event handler property `%s`. It will be ignored. onScrollBeginDrag",
+    "Unknown event handler property `%s`. It will be ignored. onScrollEndDrag",
+    "Accessing element.ref was removed in React 19. ref is now a regular prop. It will be removed from the JSX Element type in a future release.",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from",
+    "Unknown event handler property `%s`. It will be ignored. onMomentumScrollBegin",
+    "Unknown event handler property `%s`. It will be ignored. onScrollBeginDrag",
+    "Unknown event handler property `%s`. It will be ignored. onScrollEndDrag",
+    "Accessing element.ref was removed in React 19. ref is now a regular prop. It will be removed from the JSX Element type in a future release.",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from",
+    "Unknown event handler property `%s`. It will be ignored. onMomentumScrollBegin",
+    "Unknown event handler property `%s`. It will be ignored. onScrollBeginDrag",
+    "Unknown event handler property `%s`. It will be ignored. onScrollEndDrag",
+    "Accessing element.ref was removed in React 19. ref is now a regular prop. It will be removed from the JSX Element type in a future release.",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from",
+    "Unknown event handler property `%s`. It will be ignored. onMomentumScrollBegin",
+    "Unknown event handler property `%s`. It will be ignored. onScrollBeginDrag",
+    "Unknown event handler property `%s`. It will be ignored. onScrollEndDrag",
+    "Accessing element.ref was removed in React 19. ref is now a regular prop. It will be removed from the JSX Element type in a future release.",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from",
+    "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from",
+    "Unknown event handler property `%s`. It will be ignored. onMomentumScrollBegin",
+    "Unknown event handler property `%s`. It will be ignored. onScrollBeginDrag",
+    "Unknown event handler property `%s`. It will be ignored. onScrollEndDrag"
+  ],
+  "finishedAt": "2026-07-09T06:10:12.137Z",
+  "pass": false
+}

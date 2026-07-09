@@ -1,0 +1,295 @@
+{
+  "before": {
+    "st": 15996,
+    "sh": 19830,
+    "ch": 670,
+    "dfb": 3164,
+    "rect": {
+      "x": 384,
+      "y": 56,
+      "width": 1056,
+      "height": 670
+    },
+    "center": {
+      "id": "transcript-item-msg:w6hqbc5ft0b",
+      "top": -794,
+      "bottom": 690,
+      "text": "Outcome\n\nI re-read the full plugin SDK v1 plan, the ledger, the prior review reports, and the current implementation, th"
+    }
+  },
+  "after": {
+    "st": 19170,
+    "sh": 20544,
+    "ch": 670,
+    "dfb": 704,
+    "rect": {
+      "x": 384,
+      "y": 56,
+      "width": 1056,
+      "height": 670
+    },
+    "center": {
+      "id": "transcript-item-msg:rr3ckqxhgm",
+      "top": 258,
+      "bottom": 404,
+      "text": "Received:\n\ntext\n\nLegend focused detached send 1783577296550\nJul 9, 2026, 8:08 AM\n\n"
+    }
+  },
+  "maxDelta": 999,
+  "probe": [
+    {
+      "t": 12031.100000023842,
+      "old": 15996,
+      "value": 19940,
+      "stack": "Error\n    at HTMLDivElement.set (eval at evaluate (:290:30), <anonymous>:1:596)\n    at tryWriteScrollTop (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:1007382:25)\n    at writeWebScrollTopAndObserve (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:1007365:10)\n    at Object.recordProgrammaticScrollTopWrite (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:1007225:106)\n    at writeWebDomScrollTop (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:1018396:49)\n    at performWebDomViewportCommand (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:1017944:14)\n    at performTranscriptViewportCommand (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:1017665:93)\n    at Object.perform (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:1017504:171)\n    at Object.execute (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:1001045:22)\n    at performThroughController (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:1017496:76)\n    at Object.execute (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:1017504:14)\n    at Object.executeViewportCommand (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:1017448:26)\n    at http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:1027266:31\n    at http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:1027648:7\n    at Object.current (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:1027788:13)\n    at http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:1009732:44\n    at react-stack-bottom-frame (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:16250:20)\n    at runWithFiberInDEV (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:4169:70)\n    at commitHookEffectListMount (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:9159:620)\n    at commitHookLayoutEffects (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:9146:58)\n    at commitLayoutEffectOnFiber (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:9507:24)\n    at recursivelyTraverseLayoutEffects (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:9974:105)\n    at commitLayoutEffectOnFiber (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:9506:11)\n    at recursivelyTraverseLayoutEffects (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:9974:105)\n    at commitLayoutEffectOnFiber (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:9506:11)\n    at recursivelyTraverseLayoutEffects (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:9974:105)\n    at commitLayoutEffectOnFiber (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:9506:11)\n    at recursivelyTraverseLayoutEffects (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:9974:105)\n    at commitLayoutEffectOnFiber (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:9582:11)\n    at recursivelyTraverseLayoutEffects (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:9974:105)\n    at commitLayoutEffectOnFiber (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:9506:11)\n    at recursivelyTraverseLayoutEffects (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:9974:105)\n    at commitLayoutEffectOnFiber (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:9506:11)\n    at recursivelyTraverseLayoutEffects (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:9974:105)\n    at commitLayoutEffectOnFiber (http://happier-repo-remote-dev-d72117acdb.localhost:18829/apps/ui/index.ts.bundle?platform=web&dev=true&hot=false&lazy=true&transform.engine=hermes&transform.routerRoot=.%2Fsources%2Fapp&unstable_transformProfile=hermes-stable:9545:11)"
+    },
+    {
+      "t": 12084,
+      "event": "scroll",
+      "st": 19270
+    },
+    {
+      "t": 15377.100000023842,
+      "event": "scroll",
+      "st": 19170
+    }
+  ],
+  "consoleLines": [
+    {
+      "type": "info",
+      "text": "%cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold"
+    },
+    {
+      "type": "log",
+      "text": "Running application \"main\" with appParams:\n {rootTag: #root, hydrate: undefined} \nDevelopment-level warnings: ON.\nPerformance optimizations: OFF."
+    },
+    {
+      "type": "log",
+      "text": "[loadAppConfig] Loaded from Constants.expoConfig: [variant, identityVariant]"
+    },
+    {
+      "type": "log",
+      "text": "[loadAppConfig] Override serverUrl from EXPO_PUBLIC_HAPPIER_SERVER_URL/EXPO_PUBLIC_HAPPY_SERVER_URL/EXPO_PUBLIC_SERVER_URL"
+    },
+    {
+      "type": "warning",
+      "text": "props.pointerEvents is deprecated. Use style.pointerEvents"
+    },
+    {
+      "type": "debug",
+      "text": "[RealtimeVoiceSession] Registering voice session"
+    },
+    {
+      "type": "debug",
+      "text": "[RealtimeVoiceSession] Voice session registered successfully"
+    },
+    {
+      "type": "log",
+      "text": "[serverFetch] active server snapshot: serverId=localhost-52753, serverUrl=http://localhost:52753, generation=0"
+    },
+    {
+      "type": "warning",
+      "text": "Animated: `useNativeDriver` is not supported because the native animated module is missing. Falling back to JS-based animation. To resolve this, add `RCTAnimation` module to this app, or remove `useNativeDriver`. Make sure to run `bundle exec pod install` first. Read more about autolinking: https://"
+    },
+    {
+      "type": "warning",
+      "text": "[expo-notifications] Listening to push token changes is not yet fully supported on web. Adding a listener will have no effect."
+    },
+    {
+      "type": "log",
+      "text": "[serverFetch] runtimeFetch failed: GET http://localhost:52753/v1/features (activeServer=http://localhost:52753, serverId=srv_xTGdUNfHw32U8ONqT4H2xggPR42D73EJ) server-switch"
+    },
+    {
+      "type": "log",
+      "text": "[serverFetch] hint: active server URL is loopback (localhost:52753); a physical device cannot reach your computer via localhost. Use a LAN/Tailscale URL."
+    },
+    {
+      "type": "log",
+      "text": "[AUTH DEBUG] Sending auth request to: http://localhost:52753/v1/auth/account/request"
+    },
+    {
+      "type": "log",
+      "text": "[AUTH DEBUG] Public key: JKmvuL2zT/ZnyQiUfkFD..."
+    },
+    {
+      "type": "log",
+      "text": "[AUTH DEBUG] Auth request sent successfully"
+    },
+    {
+      "type": "log",
+      "text": "🖥️ fetchMachines completed - rendered 89 machine display rows before selective hydration"
+    },
+    {
+      "type": "log",
+      "text": "📦 fetchArtifactsList: Starting artifact sync"
+    },
+    {
+      "type": "log",
+      "text": "📦 fetchArtifactsList: Fetching artifacts from server"
+    },
+    {
+      "type": "log",
+      "text": "📦 fetchArtifactsList: Received 34 artifacts from server"
+    },
+    {
+      "type": "log",
+      "text": "📦 fetchArtifactsList: Successfully decrypted 34 artifacts"
+    },
+    {
+      "type": "log",
+      "text": "📦 fetchArtifactsList: Artifacts applied to storage"
+    },
+    {
+      "type": "log",
+      "text": "📝 Fetching todos..."
+    },
+    {
+      "type": "log",
+      "text": "👥 fetchFriendRequests called - now handled by fetchFriends"
+    },
+    {
+      "type": "log",
+      "text": "📰 Fetching feed..."
+    },
+    {
+      "type": "log",
+      "text": "📰 Fetching feed: /v1/feed?limit=100"
+    },
+    {
+      "type": "log",
+      "text": "📝 Todos loaded"
+    },
+    {
+      "type": "log",
+      "text": "📰 Fetching feed: /v1/feed?limit=100"
+    },
+    {
+      "type": "log",
+      "text": "📰 fetchFeed completed - loaded 0 compatible items (0 filtered)"
+    },
+    {
+      "type": "log",
+      "text": "📱 App state changed to: background"
+    },
+    {
+      "type": "info",
+      "text": "%cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold"
+    },
+    {
+      "type": "log",
+      "text": "Running application \"main\" with appParams:\n {rootTag: #root, hydrate: undefined} \nDevelopment-level warnings: ON.\nPerformance optimizations: OFF."
+    },
+    {
+      "type": "log",
+      "text": "[loadAppConfig] Loaded from Constants.expoConfig: [variant, identityVariant]"
+    },
+    {
+      "type": "log",
+      "text": "[loadAppConfig] Override serverUrl from EXPO_PUBLIC_HAPPIER_SERVER_URL/EXPO_PUBLIC_HAPPY_SERVER_URL/EXPO_PUBLIC_SERVER_URL"
+    },
+    {
+      "type": "log",
+      "text": "[serverFetch] active server snapshot: serverId=srv_xTGdUNfHw32U8ONqT4H2xggPR42D73EJ, serverUrl=http://localhost:52753, generation=0"
+    },
+    {
+      "type": "warning",
+      "text": "props.pointerEvents is deprecated. Use style.pointerEvents"
+    },
+    {
+      "type": "debug",
+      "text": "[RealtimeVoiceSession] Registering voice session"
+    },
+    {
+      "type": "debug",
+      "text": "[RealtimeVoiceSession] Voice session registered successfully"
+    },
+    {
+      "type": "error",
+      "text": "Accessing element.ref was removed in React 19. ref is now a regular prop. It will be removed from the JSX Element type in a future release."
+    },
+    {
+      "type": "warning",
+      "text": "[expo-notifications] Listening to push token changes is not yet fully supported on web. Adding a listener will have no effect."
+    },
+    {
+      "type": "error",
+      "text": "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from a parent component, remove it from the DOM element. keyboardDismissMode keyboarddismissmode"
+    },
+    {
+      "type": "error",
+      "text": "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from a parent component, remove it from the DOM element. keyboardShouldPersistTaps keyboardshouldpersist"
+    },
+    {
+      "type": "error",
+      "text": "Unknown event handler property `%s`. It will be ignored. onMomentumScrollBegin"
+    },
+    {
+      "type": "error",
+      "text": "Unknown event handler property `%s`. It will be ignored. onScrollBeginDrag"
+    },
+    {
+      "type": "error",
+      "text": "Unknown event handler property `%s`. It will be ignored. onScrollEndDrag"
+    },
+    {
+      "type": "warning",
+      "text": "Animated: `useNativeDriver` is not supported because the native animated module is missing. Falling back to JS-based animation. To resolve this, add `RCTAnimation` module to this app, or remove `useNativeDriver`. Make sure to run `bundle exec pod install` first. Read more about autolinking: https://"
+    },
+    {
+      "type": "warning",
+      "text": "LegendList bootstrap initial scroll aborted after exceeding convergence bounds."
+    },
+    {
+      "type": "log",
+      "text": "🖥️ fetchMachines completed - rendered 89 machine display rows before selective hydration"
+    },
+    {
+      "type": "log",
+      "text": "📦 fetchArtifactsList: Starting artifact sync"
+    },
+    {
+      "type": "log",
+      "text": "📦 fetchArtifactsList: Fetching artifacts from server"
+    },
+    {
+      "type": "log",
+      "text": "📦 fetchArtifactsList: Received 34 artifacts from server"
+    },
+    {
+      "type": "log",
+      "text": "📦 fetchArtifactsList: Successfully decrypted 34 artifacts"
+    },
+    {
+      "type": "log",
+      "text": "📦 fetchArtifactsList: Artifacts applied to storage"
+    },
+    {
+      "type": "log",
+      "text": "📝 Fetching todos..."
+    },
+    {
+      "type": "log",
+      "text": "👥 fetchFriendRequests called - now handled by fetchFriends"
+    },
+    {
+      "type": "log",
+      "text": "📰 Fetching feed..."
+    },
+    {
+      "type": "log",
+      "text": "📰 Fetching feed: /v1/feed?limit=100"
+    },
+    {
+      "type": "log",
+      "text": "📝 Todos loaded"
+    },
+    {
+      "type": "log",
+      "text": "📰 Fetching feed: /v1/feed?limit=100"
+    },
+    {
+      "type": "log",
+      "text": "📰 fetchFeed completed - loaded 0 compatible items (0 filtered)"
+    }
+  ]
+}

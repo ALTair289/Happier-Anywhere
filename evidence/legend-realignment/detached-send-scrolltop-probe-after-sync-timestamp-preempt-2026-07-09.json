@@ -1,0 +1,278 @@
+{
+  "before": {
+    "st": 16222,
+    "sh": 20024,
+    "ch": 670,
+    "dfb": 3132,
+    "rect": {
+      "x": 384,
+      "y": 56,
+      "width": 1056,
+      "height": 670
+    },
+    "center": {
+      "id": "transcript-item-msg:pmoarx5teg7",
+      "top": 290,
+      "bottom": 488,
+      "text": "Received the two-line payload:\n\ntext\n\nLegend live pinned send 1783575784943\nline two\n\nIf this was a live/pinned-message"
+    }
+  },
+  "after": {
+    "st": 16222,
+    "sh": 20645,
+    "ch": 670,
+    "dfb": 3753,
+    "rect": {
+      "x": 384,
+      "y": 56,
+      "width": 1056,
+      "height": 670
+    },
+    "center": {
+      "id": "transcript-item-msg:pmoarx5teg7",
+      "top": 290,
+      "bottom": 488,
+      "text": "Received the two-line payload:\n\ntext\n\nLegend live pinned send 1783575784943\nline two\n\nIf this was a live/pinned-message"
+    }
+  },
+  "maxDelta": 0,
+  "probe": [],
+  "consoleLines": [
+    {
+      "type": "info",
+      "text": "%cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold"
+    },
+    {
+      "type": "log",
+      "text": "Running application \"main\" with appParams:\n {rootTag: #root, hydrate: undefined} \nDevelopment-level warnings: ON.\nPerformance optimizations: OFF."
+    },
+    {
+      "type": "log",
+      "text": "[loadAppConfig] Loaded from Constants.expoConfig: [variant, identityVariant]"
+    },
+    {
+      "type": "log",
+      "text": "[loadAppConfig] Override serverUrl from EXPO_PUBLIC_HAPPIER_SERVER_URL/EXPO_PUBLIC_HAPPY_SERVER_URL/EXPO_PUBLIC_SERVER_URL"
+    },
+    {
+      "type": "warning",
+      "text": "props.pointerEvents is deprecated. Use style.pointerEvents"
+    },
+    {
+      "type": "debug",
+      "text": "[RealtimeVoiceSession] Registering voice session"
+    },
+    {
+      "type": "debug",
+      "text": "[RealtimeVoiceSession] Voice session registered successfully"
+    },
+    {
+      "type": "log",
+      "text": "[serverFetch] active server snapshot: serverId=localhost-52753, serverUrl=http://localhost:52753, generation=0"
+    },
+    {
+      "type": "warning",
+      "text": "Animated: `useNativeDriver` is not supported because the native animated module is missing. Falling back to JS-based animation. To resolve this, add `RCTAnimation` module to this app, or remove `useNativeDriver`. Make sure to run `bundle exec pod install` first. Read more about autolinking: https://"
+    },
+    {
+      "type": "warning",
+      "text": "[expo-notifications] Listening to push token changes is not yet fully supported on web. Adding a listener will have no effect."
+    },
+    {
+      "type": "log",
+      "text": "[serverFetch] runtimeFetch failed: GET http://localhost:52753/v1/features (activeServer=http://localhost:52753, serverId=srv_xTGdUNfHw32U8ONqT4H2xggPR42D73EJ) server-switch"
+    },
+    {
+      "type": "log",
+      "text": "[serverFetch] hint: active server URL is loopback (localhost:52753); a physical device cannot reach your computer via localhost. Use a LAN/Tailscale URL."
+    },
+    {
+      "type": "log",
+      "text": "[AUTH DEBUG] Sending auth request to: http://localhost:52753/v1/auth/account/request"
+    },
+    {
+      "type": "log",
+      "text": "[AUTH DEBUG] Public key: QnR8X972c4A2gIpTC4r7..."
+    },
+    {
+      "type": "log",
+      "text": "[AUTH DEBUG] Auth request sent successfully"
+    },
+    {
+      "type": "log",
+      "text": "🖥️ fetchMachines completed - rendered 89 machine display rows before selective hydration"
+    },
+    {
+      "type": "log",
+      "text": "📦 fetchArtifactsList: Starting artifact sync"
+    },
+    {
+      "type": "log",
+      "text": "📦 fetchArtifactsList: Fetching artifacts from server"
+    },
+    {
+      "type": "log",
+      "text": "📦 fetchArtifactsList: Received 34 artifacts from server"
+    },
+    {
+      "type": "log",
+      "text": "📦 fetchArtifactsList: Successfully decrypted 34 artifacts"
+    },
+    {
+      "type": "log",
+      "text": "📦 fetchArtifactsList: Artifacts applied to storage"
+    },
+    {
+      "type": "log",
+      "text": "📝 Fetching todos..."
+    },
+    {
+      "type": "log",
+      "text": "👥 fetchFriendRequests called - now handled by fetchFriends"
+    },
+    {
+      "type": "log",
+      "text": "📰 Fetching feed..."
+    },
+    {
+      "type": "log",
+      "text": "📰 Fetching feed: /v1/feed?limit=100"
+    },
+    {
+      "type": "log",
+      "text": "📝 Todos loaded"
+    },
+    {
+      "type": "log",
+      "text": "📰 Fetching feed: /v1/feed?limit=100"
+    },
+    {
+      "type": "log",
+      "text": "📰 fetchFeed completed - loaded 0 compatible items (0 filtered)"
+    },
+    {
+      "type": "log",
+      "text": "📱 App state changed to: background"
+    },
+    {
+      "type": "info",
+      "text": "%cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold"
+    },
+    {
+      "type": "log",
+      "text": "Running application \"main\" with appParams:\n {rootTag: #root, hydrate: undefined} \nDevelopment-level warnings: ON.\nPerformance optimizations: OFF."
+    },
+    {
+      "type": "log",
+      "text": "[loadAppConfig] Loaded from Constants.expoConfig: [variant, identityVariant]"
+    },
+    {
+      "type": "log",
+      "text": "[loadAppConfig] Override serverUrl from EXPO_PUBLIC_HAPPIER_SERVER_URL/EXPO_PUBLIC_HAPPY_SERVER_URL/EXPO_PUBLIC_SERVER_URL"
+    },
+    {
+      "type": "log",
+      "text": "[serverFetch] active server snapshot: serverId=srv_xTGdUNfHw32U8ONqT4H2xggPR42D73EJ, serverUrl=http://localhost:52753, generation=0"
+    },
+    {
+      "type": "warning",
+      "text": "props.pointerEvents is deprecated. Use style.pointerEvents"
+    },
+    {
+      "type": "debug",
+      "text": "[RealtimeVoiceSession] Registering voice session"
+    },
+    {
+      "type": "debug",
+      "text": "[RealtimeVoiceSession] Voice session registered successfully"
+    },
+    {
+      "type": "error",
+      "text": "Accessing element.ref was removed in React 19. ref is now a regular prop. It will be removed from the JSX Element type in a future release."
+    },
+    {
+      "type": "warning",
+      "text": "[expo-notifications] Listening to push token changes is not yet fully supported on web. Adding a listener will have no effect."
+    },
+    {
+      "type": "log",
+      "text": "🖥️ fetchMachines completed - rendered 89 machine display rows before selective hydration"
+    },
+    {
+      "type": "error",
+      "text": "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from a parent component, remove it from the DOM element. keyboardDismissMode keyboarddismissmode"
+    },
+    {
+      "type": "error",
+      "text": "React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from a parent component, remove it from the DOM element. keyboardShouldPersistTaps keyboardshouldpersist"
+    },
+    {
+      "type": "error",
+      "text": "Unknown event handler property `%s`. It will be ignored. onMomentumScrollBegin"
+    },
+    {
+      "type": "error",
+      "text": "Unknown event handler property `%s`. It will be ignored. onScrollBeginDrag"
+    },
+    {
+      "type": "error",
+      "text": "Unknown event handler property `%s`. It will be ignored. onScrollEndDrag"
+    },
+    {
+      "type": "warning",
+      "text": "Animated: `useNativeDriver` is not supported because the native animated module is missing. Falling back to JS-based animation. To resolve this, add `RCTAnimation` module to this app, or remove `useNativeDriver`. Make sure to run `bundle exec pod install` first. Read more about autolinking: https://"
+    },
+    {
+      "type": "log",
+      "text": "📦 fetchArtifactsList: Starting artifact sync"
+    },
+    {
+      "type": "log",
+      "text": "📦 fetchArtifactsList: Fetching artifacts from server"
+    },
+    {
+      "type": "log",
+      "text": "📦 fetchArtifactsList: Received 34 artifacts from server"
+    },
+    {
+      "type": "log",
+      "text": "📦 fetchArtifactsList: Successfully decrypted 34 artifacts"
+    },
+    {
+      "type": "log",
+      "text": "📦 fetchArtifactsList: Artifacts applied to storage"
+    },
+    {
+      "type": "log",
+      "text": "📝 Fetching todos..."
+    },
+    {
+      "type": "log",
+      "text": "👥 fetchFriendRequests called - now handled by fetchFriends"
+    },
+    {
+      "type": "log",
+      "text": "📰 Fetching feed..."
+    },
+    {
+      "type": "log",
+      "text": "📰 Fetching feed: /v1/feed?limit=100"
+    },
+    {
+      "type": "warning",
+      "text": "LegendList bootstrap initial scroll aborted after exceeding convergence bounds."
+    },
+    {
+      "type": "log",
+      "text": "📝 Todos loaded"
+    },
+    {
+      "type": "log",
+      "text": "📰 Fetching feed: /v1/feed?limit=100"
+    },
+    {
+      "type": "log",
+      "text": "📰 fetchFeed completed - loaded 0 compatible items (0 filtered)"
+    }
+  ]
+}

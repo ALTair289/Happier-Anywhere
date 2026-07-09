@@ -1,0 +1,10 @@
+import { chromium } from 'playwright';
+const browser = await chromium.launch({ headless: true });
+const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, storageState: '/private/tmp/claude-501/-Users-leeroy-Documents-Development-happier-remote-dev/4c046907-8ab9-46a3-8f72-1ff4a1af1030/scratchpad/auth_state.json' });
+const page = await context.newPage();
+await page.goto('http://happier-repo-remote-dev-d72117acdb.localhost:18829/session/cmracew6101cztm5nya6yqxx4?serverId=srv_xTGdUNfHw32U8ONqT4H2xggPR42D73EJ&happier_hmr=0');
+await page.waitForTimeout(6000);
+const ok = await page.evaluate(() => !!document.querySelector('[data-testid="transcript-chat-list"]'));
+console.log('URL:', page.url());
+console.log('transcript mounted:', ok);
+await browser.close();
