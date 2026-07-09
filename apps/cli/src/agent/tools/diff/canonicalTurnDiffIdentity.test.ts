@@ -1,9 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import type { TurnChangeSet } from '@happier-dev/protocol';
 
 import { resolveCanonicalTurnDiffCallId } from './canonicalTurnDiffIdentity';
 
-function makeTurnChangeSet(overrides?: Partial<{ newText: string; filePath: string }>): TurnChangeSet {
+function makeBoundedDiffInput(overrides?: Partial<{ newText: string; filePath: string }>): Record<string, unknown> {
     return {
         sessionId: 'session_1',
         turnId: 'turn_1',
@@ -21,51 +20,49 @@ function makeTurnChangeSet(overrides?: Partial<{ newText: string; filePath: stri
             },
         ],
         provider: 'claude',
-        derivedAt: 1730000000000,
     };
 }
 
 describe('resolveCanonicalTurnDiffCallId', () => {
-    it('is deterministic for identical change sets', () => {
-        expect(resolveCanonicalTurnDiffCallId(makeTurnChangeSet()))
-            .toBe(resolveCanonicalTurnDiffCallId(makeTurnChangeSet()));
+    it('is deterministic for identical bounded inputs', () => {
+        expect(resolveCanonicalTurnDiffCallId(makeBoundedDiffInput()))
+            .toBe(resolveCanonicalTurnDiffCallId(makeBoundedDiffInput()));
     });
 
     it('keeps the turn-diff-<hex32> id shape', () => {
-        expect(resolveCanonicalTurnDiffCallId(makeTurnChangeSet())).toMatch(/^turn-diff-[0-9a-f]{32}$/);
+        expect(resolveCanonicalTurnDiffCallId(makeBoundedDiffInput())).toMatch(/^turn-diff-[0-9a-f]{32}$/);
     });
 
-    it('changes when file content changes, even at identical lengths', () => {
-        const a = resolveCanonicalTurnDiffCallId(makeTurnChangeSet({ newText: 'bbbb\n' }));
-        const b = resolveCanonicalTurnDiffCallId(makeTurnChangeSet({ newText: 'bbbc\n' }));
+    it('changes when emitted file content changes, even at identical lengths', () => {
+        const a = resolveCanonicalTurnDiffCallId(makeBoundedDiffInput({ newText: 'bbbb\n' }));
+        const b = resolveCanonicalTurnDiffCallId(makeBoundedDiffInput({ newText: 'bbbc\n' }));
         expect(a).not.toBe(b);
     });
 
     it('changes when the file path changes', () => {
-        const a = resolveCanonicalTurnDiffCallId(makeTurnChangeSet({ filePath: 'src/a.ts' }));
-        const b = resolveCanonicalTurnDiffCallId(makeTurnChangeSet({ filePath: 'src/b.ts' }));
+        const a = resolveCanonicalTurnDiffCallId(makeBoundedDiffInput({ filePath: 'src/a.ts' }));
+        const b = resolveCanonicalTurnDiffCallId(makeBoundedDiffInput({ filePath: 'src/b.ts' }));
         expect(a).not.toBe(b);
     });
 
-    it('hashes multi-megabyte texts without building a full stable-JSON copy', () => {
-        const big = 'x'.repeat(8 * 1024 * 1024);
-        const changeSet: TurnChangeSet = {
-            ...makeTurnChangeSet(),
+    it('hashes the bounded representation instead of omitted source content', () => {
+        const inputA = {
+            ...makeBoundedDiffInput(),
             files: [
                 {
                     filePath: 'src/huge.ts',
                     changeKind: 'modified',
-                    oldText: big,
-                    newText: `${big}y`,
+                    unified_diff: 'diff --git a/src/huge.ts b/src/huge.ts\n--- a/src/huge.ts\n+++ b/src/huge.ts\n@@ -0,0 +0,0 @@\n# Diff too large',
+                    truncated: true,
+                    stats: { oldTextBytes: 10_000, newTextBytes: 10_000 },
                     source: 'provider_tool',
                     confidence: 'exact',
                     provider: 'claude',
                 },
             ],
         };
-        // Behavioral contract: identity stays deterministic and content-sensitive for huge payloads.
-        const first = resolveCanonicalTurnDiffCallId(changeSet);
-        expect(first).toBe(resolveCanonicalTurnDiffCallId(changeSet));
-        expect(first).toMatch(/^turn-diff-[0-9a-f]{32}$/);
+        const inputB = JSON.parse(JSON.stringify(inputA)) as Record<string, unknown>;
+
+        expect(resolveCanonicalTurnDiffCallId(inputB)).toBe(resolveCanonicalTurnDiffCallId(inputA));
     });
 });

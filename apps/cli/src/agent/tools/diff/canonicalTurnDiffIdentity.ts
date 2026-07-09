@@ -1,8 +1,21 @@
 import { createHash } from 'node:crypto';
 
-import type { TurnChangeSet } from '@happier-dev/protocol';
-
 type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+
+function toJsonValue(value: unknown): JsonValue {
+  if (value === null) return null;
+  if (typeof value === 'string' || typeof value === 'boolean') return value;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (Array.isArray(value)) return value.map((item) => toJsonValue(item));
+  if (typeof value === 'object') {
+    const out: { [key: string]: JsonValue } = {};
+    for (const [key, child] of Object.entries(value)) {
+      out[key] = toJsonValue(child);
+    }
+    return out;
+  }
+  return null;
+}
 
 function stableJsonStringify(value: JsonValue): string {
   if (value === null || typeof value !== 'object') {
@@ -18,50 +31,12 @@ function stableJsonStringify(value: JsonValue): string {
 }
 
 /**
- * Replaces potentially multi-megabyte file texts with `{length, sha256}` digests so the identity
- * hash never has to stable-stringify the full payload. Content sensitivity is preserved via the
- * per-text digest.
+ * Hashes the already bounded Diff tool input. Large source texts must be diff-ified/truncated
+ * before this helper is called so identity work scales with the emitted payload, not raw files.
  */
-function digestOptionalText(text: string | null | undefined): JsonValue {
-  if (typeof text !== 'string') return null;
-  return {
-    length: text.length,
-    sha256: createHash('sha256').update(text).digest('hex'),
-  };
-}
-
-function normalizeFileEvidence(file: TurnChangeSet['files'][number]): JsonValue {
-  return {
-    binary: file.binary === true,
-    changeKind: file.changeKind,
-    confidence: file.confidence,
-    description: file.description ?? null,
-    filePath: file.filePath,
-    newText: digestOptionalText(file.newText),
-    oldText: digestOptionalText(file.oldText),
-    previousFilePath: file.previousFilePath ?? null,
-    provider: file.provider,
-    providerMessageId: file.providerMessageId ?? null,
-    providerTurnId: file.providerTurnId ?? null,
-    source: file.source,
-    unifiedDiff: digestOptionalText(file.unifiedDiff),
-  };
-}
-
-export function resolveCanonicalTurnDiffCallId(turnChangeSet: TurnChangeSet): string {
-  const payload: JsonValue = {
-    files: turnChangeSet.files.map(normalizeFileEvidence),
-    provider: turnChangeSet.provider,
-    seqRange: {
-      endSeqInclusive: turnChangeSet.seqRange.endSeqInclusive,
-      startSeqInclusive: turnChangeSet.seqRange.startSeqInclusive,
-    },
-    sessionId: turnChangeSet.sessionId,
-    status: turnChangeSet.status,
-    turnId: turnChangeSet.turnId,
-  };
+export function resolveCanonicalTurnDiffCallId(boundedInput: unknown): string {
   const digest = createHash('sha256')
-    .update(stableJsonStringify(payload))
+    .update(stableJsonStringify(toJsonValue(boundedInput)))
     .digest('hex')
     .slice(0, 32);
   return `turn-diff-${digest}`;

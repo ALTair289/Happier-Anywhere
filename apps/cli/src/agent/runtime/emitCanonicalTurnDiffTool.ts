@@ -10,14 +10,15 @@ export function emitCanonicalTurnDiffTool(params: Readonly<{
     sendToolCall: (params: { toolName: string; input: unknown; callId?: string }) => string;
     sendToolResult: (params: { callId: string; output: unknown }) => void;
 }>): string {
+    const input = buildTurnChangeSetDiffInput({
+        turnChangeSet: params.turnChangeSet,
+        protocol: params.protocol,
+        rawToolName: params.rawToolName,
+    });
     const callId = params.sendToolCall({
         toolName: 'Diff',
-        input: buildTurnChangeSetDiffInput({
-            turnChangeSet: params.turnChangeSet,
-            protocol: params.protocol,
-            rawToolName: params.rawToolName,
-        }),
-        callId: resolveCanonicalTurnDiffCallId(params.turnChangeSet),
+        input,
+        callId: resolveCanonicalTurnDiffCallId(input),
     });
     params.sendToolResult({
         callId,
