@@ -25,6 +25,7 @@ type SessionReadStateInput = LastViewedSessionSeqInput & Readonly<{
     latestMessageSeq?: unknown;
     latestTurnStatus?: ResolveSessionReadableSeqInput['latestTurnStatus'];
     accessLevel?: 'view' | 'edit' | 'admin' | null;
+    hasUnreadMessages?: unknown;
 }>;
 
 function resolveLegacyPendingActivityAt(metadata: unknown): number | undefined {
@@ -46,11 +47,35 @@ function readSessionMessagesForReadState(session: SessionReadStateInput): Resolv
     if (!sessionId) return null;
     const storageState = readRegisteredStorageState();
     if (!storageState) return null;
+    const sessionMessages = (storageState as {
+        sessionMessages?: Record<string, { isLoaded?: unknown } | undefined>;
+    }).sessionMessages?.[sessionId];
+    if (sessionMessages?.isLoaded !== true) return null;
     return readStoredSessionMessages(storageState, sessionId);
+}
+
+function readRenderableHasUnreadMessages(session: SessionReadStateInput): boolean | null {
+    if (session.hasUnreadMessages === true) return true;
+    if (session.hasUnreadMessages === false) return false;
+
+    const sessionId = typeof session.id === 'string' ? session.id.trim() : '';
+    if (!sessionId) return null;
+
+    const storageState = readRegisteredStorageState();
+    const renderable = (storageState as {
+        sessionListRenderables?: Record<string, { hasUnreadMessages?: unknown } | undefined>;
+    } | null)?.sessionListRenderables?.[sessionId];
+    if (renderable?.hasUnreadMessages === true) return true;
+    if (renderable?.hasUnreadMessages === false) return false;
+    return null;
 }
 
 export function deriveSessionReadState(session: SessionReadStateInput): SessionReadState {
     const storedMessages = readSessionMessagesForReadState(session);
+    const renderableHasUnreadMessages = readRenderableHasUnreadMessages(session);
+    if (renderableHasUnreadMessages === true) {
+        return 'unread';
+    }
     const readableSeq = resolveSessionReadableSeq({
         messages: storedMessages,
         latestMessageSeq: storedMessages === null

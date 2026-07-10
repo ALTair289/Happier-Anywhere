@@ -9,6 +9,7 @@ const storageState = {
 
 beforeEach(async () => {
     (storageState as { sessionMessages: Record<string, unknown> }).sessionMessages = {};
+    (storageState as { sessionListRenderables: Record<string, unknown> }).sessionListRenderables = {};
     const { registerStorageStateReader } = await import('@/sync/domains/state/storageStateReaderBridge');
     registerStorageStateReader(() => storageState);
 });
@@ -41,6 +42,7 @@ describe('sessionReadState', () => {
     it('derives unread state from a committed stored message and offers mark-read', () => {
         (storageState as { sessionMessages: Record<string, unknown> }).sessionMessages = {
             s_message: {
+                isLoaded: true,
                 messageIdsOldestFirst: ['m3'],
                 messagesById: {
                     m3: {
@@ -73,6 +75,7 @@ describe('sessionReadState', () => {
     it('ignores trailing maintenance events when deriving manual read-state actions', () => {
         (storageState as { sessionMessages: Record<string, unknown> }).sessionMessages = {
             s_maintenance: {
+                isLoaded: true,
                 messageIdsOldestFirst: ['m-visible', 'm-switch'],
                 messagesById: {
                     'm-visible': {
@@ -118,6 +121,40 @@ describe('sessionReadState', () => {
         });
     });
 
+    it('does not let a partial stored transcript suppress terminal session activity', () => {
+        (storageState as { sessionMessages: Record<string, unknown> }).sessionMessages = {
+            s_partial: {
+                isLoaded: false,
+                messageIdsOldestFirst: ['m110'],
+                messagesById: {
+                    m110: {
+                        id: 'm110',
+                        seq: 110,
+                        localId: null,
+                        kind: 'agent-text',
+                        text: 'older visible message',
+                        createdAt: 100,
+                    },
+                },
+            },
+        };
+        const session = {
+            id: 's_partial',
+            seq: 742,
+            lastViewedSessionSeq: 741,
+            latestReadyEventSeq: 110,
+            latestTurnStatus: 'completed' as const,
+            metadata: null,
+        };
+
+        expect(deriveSessionReadState(session)).toBe('unread');
+        expect(resolveSessionReadStateAction(session)).toEqual({
+            kind: 'mark-read',
+            visible: true,
+            targetState: 'read',
+        });
+    });
+
     it('derives unread state from a ready event and offers mark-read', () => {
         const session = {
             seq: 3,
@@ -148,6 +185,75 @@ describe('sessionReadState', () => {
             kind: 'mark-unread',
             visible: true,
             targetState: 'unread',
+        });
+    });
+
+    it('uses renderable unread state when committed transcript details are not available', () => {
+        const session = {
+            id: 's_renderable',
+            seq: 7,
+            lastViewedSessionSeq: 7,
+            latestTurnStatus: 'in_progress' as const,
+            metadata: null,
+            hasUnreadMessages: true,
+        };
+
+        expect(deriveSessionReadState(session)).toBe('unread');
+        expect(resolveSessionReadStateAction(session)).toEqual({
+            kind: 'mark-read',
+            visible: true,
+            targetState: 'read',
+        });
+    });
+
+    it('uses registered row renderable unread state for full sessions without committed transcript details', () => {
+        (storageState as { sessionListRenderables: Record<string, unknown> }).sessionListRenderables = {
+            s_renderable_cache: {
+                id: 's_renderable_cache',
+                seq: 7,
+                lastViewedSessionSeq: 7,
+                hasUnreadMessages: true,
+            },
+        };
+        const session = {
+            id: 's_renderable_cache',
+            seq: 7,
+            lastViewedSessionSeq: 7,
+            latestTurnStatus: 'in_progress' as const,
+            metadata: null,
+        };
+
+        expect(deriveSessionReadState(session)).toBe('unread');
+        expect(resolveSessionReadStateAction(session)).toEqual({
+            kind: 'mark-read',
+            visible: true,
+            targetState: 'read',
+        });
+    });
+
+    it('uses registered row renderable unread state over a stale full-session read cursor', () => {
+        (storageState as { sessionListRenderables: Record<string, unknown> }).sessionListRenderables = {
+            s_stale_full_session: {
+                id: 's_stale_full_session',
+                seq: 7,
+                lastViewedSessionSeq: 6,
+                hasUnreadMessages: true,
+            },
+        };
+        const session = {
+            id: 's_stale_full_session',
+            seq: 7,
+            lastViewedSessionSeq: 7,
+            latestReadyEventSeq: 7,
+            latestTurnStatus: 'in_progress' as const,
+            metadata: null,
+        };
+
+        expect(deriveSessionReadState(session)).toBe('unread');
+        expect(resolveSessionReadStateAction(session)).toEqual({
+            kind: 'mark-read',
+            visible: true,
+            targetState: 'read',
         });
     });
 
