@@ -3,6 +3,7 @@ import {
   BackendTargetRefSchema,
   ExecutionRunIntentSchema,
   ExecutionRunStartRequestSchema,
+  normalizeConnectedServiceSelectionForRunStart,
 } from '@happier-dev/protocol';
 import {
   defaultIoModeForExecutionRunIntent,
@@ -34,6 +35,7 @@ export const executionRunStartToolInputSchema = z.object({
   retentionPolicy: z.enum(['ephemeral', 'resumable']).optional(),
   runClass: z.enum(['bounded', 'long_lived']).optional(),
   ioMode: z.enum(['request_response', 'streaming']).optional(),
+  connectedServices: z.unknown().optional(),
 }).passthrough().superRefine((value, ctx) => {
   const hasBackendTarget = typeof value.backendTarget !== 'undefined';
   const backendId = typeof value.backendId === 'string' ? value.backendId.trim() : '';
@@ -51,7 +53,7 @@ export function normalizeExecutionRunStartToolInput(params: Readonly<{
   args: unknown;
 }>):
   | Readonly<{ ok: true; request: z.infer<typeof ExecutionRunStartRequestSchema> }>
-  | Readonly<{ ok: false; errorCode: 'invalid_action_input' | 'execution_run_not_allowed'; error: string }> {
+  | Readonly<{ ok: false; errorCode: 'invalid_action_input' | 'invalid_parameters' | 'execution_run_not_allowed'; error: string }> {
   const parsed = executionRunStartToolInputSchema.safeParse(params.args ?? {});
   if (!parsed.success) {
     return {
@@ -74,6 +76,20 @@ export function normalizeExecutionRunStartToolInput(params: Readonly<{
     agentId: String(parsed.data.backendId ?? '').trim(),
   };
 
+  // Normalize the agent-friendly connected-services selection (simple string / object) to canonical
+  // bindings at this ONE boundary; malformed input is a typed rejection, never a silent drop.
+  const normalizedConnectedServices = normalizeConnectedServiceSelectionForRunStart(parsed.data.connectedServices);
+  if (!normalizedConnectedServices.ok) {
+    // Align with the canonical action path (actionExecutor `execution.run.start`), which returns
+    // `invalid_parameters` for a malformed connected-services selection. A malformed selection is a
+    // bad parameter, not an unparseable action payload — keep the two contracts identical.
+    return {
+      ok: false,
+      errorCode: 'invalid_parameters',
+      error: normalizedConnectedServices.error,
+    };
+  }
+
   const request = ExecutionRunStartRequestSchema.safeParse({
     intent: parsed.data.intent,
     backendTarget,
@@ -87,6 +103,7 @@ export function normalizeExecutionRunStartToolInput(params: Readonly<{
     ...(typeof parsed.data.initialContextMode !== 'undefined' ? { initialContextMode: parsed.data.initialContextMode } : {}),
     ...(typeof parsed.data.resumeHandle !== 'undefined' ? { resumeHandle: parsed.data.resumeHandle } : {}),
     ...(typeof parsed.data.replay !== 'undefined' ? { replay: parsed.data.replay } : {}),
+    ...(normalizedConnectedServices.bindings ? { connectedServices: normalizedConnectedServices.bindings } : {}),
   });
   if (!request.success) {
     return {

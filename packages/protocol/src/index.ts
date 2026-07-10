@@ -529,7 +529,9 @@ export {
 } from './connect/connectedServiceSchemas.js';
 
 export {
+  normalizeConnectedServiceSelectionForRunStart,
   normalizeConnectedServiceSelectionInput,
+  type NormalizeConnectedServiceSelectionForRunStartResult,
   type NormalizeConnectedServiceSelectionResult,
 } from './connect/normalizeConnectedServiceSelectionInput.js';
 
