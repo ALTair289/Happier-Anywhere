@@ -94,6 +94,8 @@ const storageState = vi.hoisted(() => ({
   current: {
     settings: { voice: null as any } as any,
     sessions: {} as Record<string, any>,
+    sessionListRenderables: {} as Record<string, any>,
+    sessionMessages: {} as Record<string, any>,
     createSessionActionDraft: createSessionActionDraftMock,
   },
 }));
@@ -120,11 +122,19 @@ installSessionActionsCommonModuleMocks({
   },
   storage: async () => {
     const { createStorageModuleStub } = await import('@/dev/testkit/mocks/storage');
-    return createStorageModuleStub({
-      storage: {
+    const storageStore = Object.assign(
+      ((selector?: (state: any) => unknown) =>
+        typeof selector === 'function' ? selector(storageState.current) : storageState.current) as any,
+      {
         getState: () => storageState.current,
+        getInitialState: () => storageState.current,
+        setState: () => undefined,
         subscribe: () => () => {},
+        destroy: () => undefined,
       },
+    );
+    return createStorageModuleStub({
+      storage: storageStore,
       useSettings: () => storageState.current.settings,
       useSetting: (key: string) => {
         if (key === 'actionsSettingsV1') return actionsSettingsState.current;
@@ -311,7 +321,7 @@ vi.mock('@/voice/agent/teleportVoiceAgentToSessionRoot', () => ({
 }));
 
 describe('SessionHeaderActionMenu handoff', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     resetSessionActionsCommonModuleMockState();
     runSessionHandoffPickerFlowMock.mockReset();
     createDefaultActionExecutorMock.mockReset();
@@ -363,6 +373,8 @@ describe('SessionHeaderActionMenu handoff', () => {
         featureToggles: { 'execution.runs': true },
       },
       sessions: {},
+      sessionListRenderables: {},
+      sessionMessages: {},
       createSessionActionDraft: createSessionActionDraftMock,
     };
     voiceSessionSnapshotState.current = {
@@ -374,11 +386,12 @@ describe('SessionHeaderActionMenu handoff', () => {
     };
 
     vi.resetModules();
-    return import('@/voice/sessionBinding/voiceSessionBindingStore').then(({ voiceSessionBindingStore }) => {
-      for (const binding of voiceSessionBindingStore.getState().list()) {
-        voiceSessionBindingStore.getState().unbind(binding.conversationSessionId);
-      }
-    });
+    const { registerStorageStateReader } = await import('@/sync/domains/state/storageStateReaderBridge');
+    registerStorageStateReader(() => storageState.current as any);
+    const { voiceSessionBindingStore } = await import('@/voice/sessionBinding/voiceSessionBindingStore');
+    for (const binding of voiceSessionBindingStore.getState().list()) {
+      voiceSessionBindingStore.getState().unbind(binding.conversationSessionId);
+    }
   });
 
   it('routes forked child session opens through the shared fork completion helper', async () => {
@@ -641,6 +654,52 @@ describe('SessionHeaderActionMenu handoff', () => {
     });
 
     expect(setManualReadStateMock).toHaveBeenCalledWith('sess_unread', 'read', { serverId: 'server_a' });
+  });
+
+  it('refreshes header read-state actions from row renderable state when the session shell is stable', async () => {
+    const session = {
+      id: 'sess_stable_read_state',
+      seq: 7,
+      lastViewedSessionSeq: 7,
+      latestReadyEventSeq: 7,
+      latestTurnStatus: 'completed',
+      archivedAt: null,
+      metadata: null,
+    };
+    storageState.current.sessions = {
+      sess_stable_read_state: session,
+    };
+
+    const { SessionHeaderActionMenu } = await import('./SessionHeaderActionMenu');
+
+    const screen = await renderScreen(<SessionHeaderActionMenu
+          sessionId="sess_stable_read_state"
+          session={session as any}
+        />);
+
+    let dropdown = screen.findByType('DropdownMenu' as any);
+    expect(dropdown.props.items.some((item: any) => item?.id === SESSION_ACTION_MARK_UNREAD_ID)).toBe(true);
+
+    storageState.current = {
+      ...storageState.current,
+      sessionListRenderables: {
+        sess_stable_read_state: {
+          id: 'sess_stable_read_state',
+          seq: 7,
+          lastViewedSessionSeq: 6,
+          hasUnreadMessages: true,
+        },
+      },
+    };
+
+    await act(async () => {
+      dropdown.props.onOpenChange(true);
+    });
+    await flushHookEffects({ cycles: 1 });
+
+    dropdown = screen.findByType('DropdownMenu' as any);
+    expect(dropdown.props.items.some((item: any) => item?.id === SESSION_ACTION_MARK_READ_ID)).toBe(true);
+    expect(dropdown.props.items.some((item: any) => item?.id === SESSION_ACTION_MARK_UNREAD_ID)).toBe(false);
   });
 
   it('surfaces central lifecycle actions in the header menu', async () => {

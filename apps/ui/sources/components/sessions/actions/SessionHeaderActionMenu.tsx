@@ -8,6 +8,7 @@ import { useRouter } from 'expo-router';
 import { storage, useSetting, useSettings } from '@/sync/domains/state/storage';
 import { useEnabledAgentIds } from '@/agents/hooks/useEnabledAgentIds';
 import type { Session } from '@/sync/domains/state/storageTypes';
+import type { StorageState } from '@/sync/store/types';
 import { DropdownMenu, type DropdownMenuItem } from '@/components/ui/forms/dropdown/DropdownMenu';
 import { isActionEnabledInState } from '@/sync/domains/settings/actionsSettings';
 import { buildExecutionRunActionDraftInputForUi } from '@/sync/domains/actions/buildExecutionRunActionDraftInputForUi';
@@ -73,6 +74,64 @@ function readCurrentSessionForOpenMenu(sessionId: string, fallback: Session): Se
   return storage.getState().sessions[sessionId] ?? fallback;
 }
 
+function signatureValue(value: unknown): string {
+  if (typeof value === 'number' && Number.isFinite(value)) return String(Math.trunc(value));
+  if (typeof value === 'string' || typeof value === 'boolean') return String(value);
+  return '';
+}
+
+function readLegacyReadStateMetadata(metadata: unknown): Readonly<{
+  sessionSeq: unknown;
+  pendingActivityAt: unknown;
+}> {
+  if (!metadata || typeof metadata !== 'object') {
+    return { sessionSeq: null, pendingActivityAt: null };
+  }
+  const readStateV1 = (metadata as { readStateV1?: unknown }).readStateV1;
+  if (!readStateV1 || typeof readStateV1 !== 'object') {
+    return { sessionSeq: null, pendingActivityAt: null };
+  }
+  return {
+    sessionSeq: (readStateV1 as { sessionSeq?: unknown }).sessionSeq,
+    pendingActivityAt: (readStateV1 as { pendingActivityAt?: unknown }).pendingActivityAt,
+  };
+}
+
+function buildSessionHeaderReadStateSignature(
+  state: Pick<StorageState, 'sessions' | 'sessionListRenderables' | 'sessionMessages'>,
+  sessionId: string,
+): string {
+  const session = state.sessions[sessionId];
+  const renderable = state.sessionListRenderables[sessionId];
+  const messages = state.sessionMessages[sessionId] as Readonly<{
+    messageIdsOldestFirst?: ReadonlyArray<unknown>;
+    messagesVersion?: unknown;
+    reducerVersion?: unknown;
+    latestReadyEventSeq?: unknown;
+    latestReadyEventAt?: unknown;
+  }> | undefined;
+  const readStateV1 = readLegacyReadStateMetadata(session?.metadata);
+
+  return [
+    signatureValue(session?.seq),
+    signatureValue(session?.lastViewedSessionSeq),
+    signatureValue(session?.latestReadyEventSeq),
+    signatureValue((session as { latestMessageSeq?: unknown } | undefined)?.latestMessageSeq),
+    signatureValue(session?.latestTurnStatus),
+    signatureValue(session?.accessLevel),
+    signatureValue(readStateV1.sessionSeq),
+    signatureValue(readStateV1.pendingActivityAt),
+    signatureValue(renderable?.hasUnreadMessages),
+    signatureValue(renderable?.seq),
+    signatureValue(renderable?.lastViewedSessionSeq),
+    signatureValue(messages?.messagesVersion),
+    signatureValue(messages?.reducerVersion),
+    signatureValue(messages?.latestReadyEventSeq),
+    signatureValue(messages?.latestReadyEventAt),
+    signatureValue(messages?.messageIdsOldestFirst?.length),
+  ].join('|');
+}
+
 function areSessionActionMenuMetadataSemanticallyEqual(
   prev: Session['metadata'],
   next: Session['metadata'],
@@ -106,6 +165,9 @@ function SessionHeaderActionMenuInner(props: SessionHeaderActionMenuProps) {
   const hasGlobalVoiceAgentConversation = useHasGlobalVoiceAgentConversation();
   const sessionHandoffEnabled = useFeatureEnabled('sessions.handoff');
   const sessionServerId = usePreferredServerIdForSession(props.sessionId);
+  const readStateSignature = storage((state) =>
+    buildSessionHeaderReadStateSignature(state, props.sessionId),
+  );
   const [open, setOpen] = React.useState(false);
   const session = React.useMemo(
     () => open ? readCurrentSessionForOpenMenu(props.sessionId, props.session) : props.session,
@@ -119,7 +181,7 @@ function SessionHeaderActionMenuInner(props: SessionHeaderActionMenuProps) {
       isConnected: session.active === true,
       isPinned: false,
     }),
-    [session, sessionServerId],
+    [readStateSignature, session, sessionServerId],
   );
   const reachableMachineId = React.useMemo(
     () => readMachineTargetForSession(props.sessionId)?.machineId ?? null,
