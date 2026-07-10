@@ -17,6 +17,17 @@ Canonical lanes:
 
 Use the smallest relevant subset during RED/GREEN loops. Before handoff, run the touched package typecheck/build-enforcing lane and at least one broader relevant lane when shared contracts are touched.
 
+## TypeScript toolchain
+
+The repository deliberately separates the compiler from the programmatic TypeScript API:
+
+- `@typescript/native` provides the TypeScript 7 compiler used by first-party typecheck and package-build lanes.
+- `typescript` remains the TypeScript 5.9 API consumed by AST tooling and ecosystem integrations such as `prisma-json-types-generator`. Do not replace it with TypeScript 7 until the native release provides a stable compatible API and every consumer supports it.
+- `scripts/workspaces/typescriptCommand.mjs` is the only compiler-selection owner. First-party scripts must use `runTypeScriptCli.mjs`, `buildTypeScriptPackageDist.mjs`, or that resolver directly; do not invoke a bare `tsc` shim or resolve `typescript/bin/tsc`.
+- `yarn tsc ...` is an intentional convenience command at the repository root and in every TypeScript-owning workspace; it delegates to `runTypeScriptCli.mjs` and therefore uses TypeScript 7 rather than the package-manager bin shim.
+
+The root `devDependencies` own both versions. Package manifests that run TypeScript lanes mirror those values, with parity enforced by the release tooling contract tests.
+
 ## Lane naming and placement
 
 - App integration tests: `*.integration.test.*`, `*.integration.spec.*`, `*.real.integration.test.*`.

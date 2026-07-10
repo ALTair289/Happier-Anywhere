@@ -207,6 +207,13 @@ This repo is often edited by multiple agents at once.
 - No stray `console.log` or debug statements.
 - Remove dead code and commented-out code blocks.
 
+### TypeScript compiler ownership
+
+- First-party typechecks and builds use the native TypeScript 7 compiler provided by `@typescript/native`. Run the repository or package scripts (`yarn typecheck`, workspace `typecheck`/`build`, or the documented package lane). `yarn tsc ...` is also safe from the repository root and every TypeScript-owning workspace because those scripts delegate to the same native runner; for a direct ad hoc invocation, use `node scripts/workspaces/runTypeScriptCli.mjs ...`.
+- Never invoke or introduce a bare `tsc`, `npx tsc`, `node_modules/.bin/tsc`, or `typescript/bin/tsc` path. Those can select the retained TypeScript 5 API package instead of the repository compiler.
+- `scripts/workspaces/typescriptCommand.mjs` is the only compiler-selection owner. Build orchestrators must import that resolver or use `runTypeScriptCli.mjs` / `buildTypeScriptPackageDist.mjs`; do not create fallback candidates or retry TypeScript 7 diagnostics with another compiler.
+- The `typescript` dependency intentionally remains on 5.9 for programmatic compiler-API consumers and ecosystem integrations. Do not remove it, use it for compilation, or upgrade it independently of `@typescript/native` without inventorying and validating every direct TypeScript API consumer and generator integration.
+
 ## Engineering taste
 
 - Optimize for readability over cleverness.

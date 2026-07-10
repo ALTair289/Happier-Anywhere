@@ -218,6 +218,14 @@ TypeScript typechecking for the main runtime packages (UI/CLI/server).
 yarn typecheck
 ```
 
+### TypeScript compiler ownership
+
+Happier uses the native TypeScript 7 compiler for first-party typecheck and package-build lanes. The `typescript` package remains on the API-compatible 5.9 line for AST-based tools and integrations that do not yet support TypeScript 7's native API.
+
+Compiler selection is centralized in `scripts/workspaces/typescriptCommand.mjs`. Package scripts use the shared workspace runners rather than a bare `tsc` executable, so dependency hoisting or package-manager bin-link order cannot silently select the API package's older compiler.
+
+For convenience, `yarn tsc ...` is defined at the repository root and in every TypeScript-owning workspace. It delegates to the same native runner and therefore uses TypeScript 7; direct `tsc`, `npx tsc`, and `typescript/bin/tsc` invocations remain unsupported.
+
 ### 9) Release contracts
 
 Security/release-pipeline contract checks for workflow/install/signing invariants.
