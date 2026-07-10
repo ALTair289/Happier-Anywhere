@@ -13,6 +13,11 @@ export type ClaudeControlCommandRowShape =
   | Readonly<{ kind: 'command'; name: string; args: string }>
   | Readonly<{ kind: 'stdout' }>;
 
+export const CLAUDE_CONTROL_COMMAND_TRANSCRIPT_PREFIXES = [
+  '<command-name>',
+  '<local-command-stdout>',
+] as const;
+
 const COMMAND_NAME_TAG = /<command-name>([^<]*)<\/command-name>/;
 const COMMAND_ARGS_TAG = /<command-args>([^<]*)<\/command-args>/;
 
@@ -35,8 +40,8 @@ export function readClaudeControlCommandRowShape(message: RawJSONLines): ClaudeC
   const text = firstMessageText(message);
   if (text === null) return null;
   const trimmed = text.trim();
-  if (trimmed.startsWith('<local-command-stdout>')) return { kind: 'stdout' };
-  if (!trimmed.startsWith('<command-name>')) return null;
+  if (trimmed.startsWith(CLAUDE_CONTROL_COMMAND_TRANSCRIPT_PREFIXES[1])) return { kind: 'stdout' };
+  if (!trimmed.startsWith(CLAUDE_CONTROL_COMMAND_TRANSCRIPT_PREFIXES[0])) return null;
   const nameMatch = COMMAND_NAME_TAG.exec(trimmed);
   if (!nameMatch) return null;
   return {

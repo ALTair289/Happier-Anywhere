@@ -35,6 +35,11 @@ describe('isClaudeLocalCommandTranscriptMessage', () => {
     expect(isClaudeLocalCommandTranscriptMessage(userRow(
       '<local-command-stdout>Set effort level to low (saved as your default for new sessions)</local-command-stdout>',
     ))).toBe(true);
+
+    expect(isClaudeLocalCommandTranscriptMessage(userRow([
+      '<local-command-stdout>Set model to Opus 4.8 and saved as your default for new sessions',
+      'Additional genuine multi-line Claude local-command stdout</local-command-stdout>',
+    ].join('\n')))).toBe(true);
   });
 
   it('does not treat ordinary user text as a local command artifact', () => {

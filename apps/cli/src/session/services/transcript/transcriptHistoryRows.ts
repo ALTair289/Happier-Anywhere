@@ -69,9 +69,10 @@ function readTranscriptArtifactText(value: unknown): string | null {
 
 function isClaudeLocalCommandArtifactText(value: string): boolean {
   const trimmed = value.trim();
-  if (trimmed.startsWith('<local-command-caveat>')) return true;
-  if (trimmed.startsWith('<local-command-stdout>')) return true;
-  return trimmed.startsWith('<command-name>');
+  // Boundary compatibility only: raw Claude JSONL classification is owned by
+  // `apps/cli/src/backends/claude/utils/{controlCommandRows,isClaudeInternalTranscriptMessage}`.
+  const prefixes = ['<local-command-caveat>', '<command-name>', '<local-command-stdout>'] as const;
+  return prefixes.some((prefix) => trimmed.startsWith(prefix));
 }
 
 export function isHistoryArtifactDecryptedRow(value: unknown): boolean {
