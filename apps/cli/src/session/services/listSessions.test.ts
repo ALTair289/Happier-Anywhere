@@ -99,6 +99,53 @@ describe('listSessions', () => {
     expect(result.rows?.[0]).not.toHaveProperty('pendingCount');
   });
 
+  it('caps sessions and rows to the requested limit after server initial-page expansion', async () => {
+    fetchSessionsPage.mockResolvedValue(createSessionListResponseFixture([
+      createSessionRecordFixture({
+        id: 'sess-1',
+        metadata: encryptedMetadata({ summary: { text: 'Session one' }, path: '/repo/one' }),
+      }),
+      createSessionRecordFixture({
+        id: 'sess-2',
+        metadata: encryptedMetadata({ summary: { text: 'Session two' }, path: '/repo/two' }),
+      }),
+      createSessionRecordFixture({
+        id: 'sess-3',
+        metadata: encryptedMetadata({ summary: { text: 'Session three' }, path: '/repo/three' }),
+      }),
+      createSessionRecordFixture({
+        id: 'sess-4',
+        metadata: encryptedMetadata({ summary: { text: 'Session four' }, path: '/repo/four' }),
+      }),
+    ], { nextCursor: 'cursor-2', hasNext: true }));
+    getSessionTranscript.mockResolvedValue({
+      ok: true,
+      sessionId: 'sess',
+      items: [],
+      nextCursor: null,
+      hasMore: false,
+      diagnostics: { rawRowsScanned: 0, pagesFetched: 1, scanLimitReached: false, payloadTruncations: 0 },
+    });
+
+    const { listSessions } = await import('./listSessions');
+    const result = await listSessions({
+      credentials,
+      activeOnly: false,
+      archivedOnly: false,
+      includeSystem: false,
+      resumableOnly: false,
+      includeRows: true,
+      includeLastMessagePreview: true,
+      limit: 2,
+    });
+
+    expect(fetchSessionsPage).toHaveBeenCalledWith(expect.objectContaining({ limit: 2 }));
+    expect(result.sessions.map((session) => session.id)).toEqual(['sess-1', 'sess-2']);
+    expect(result.rows?.map((row) => row.id)).toEqual(['sess-1', 'sess-2']);
+    expect(result.nextCursor).toBe('cursor-2');
+    expect(getSessionTranscript).toHaveBeenCalledTimes(2);
+  });
+
   it('adds a bounded semantic last message preview only when requested', async () => {
     fetchSessionsPage.mockResolvedValue(createSessionListResponseFixture([
       createSessionRecordFixture({
