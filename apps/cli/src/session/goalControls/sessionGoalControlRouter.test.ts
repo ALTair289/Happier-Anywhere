@@ -217,6 +217,108 @@ describe('routeSessionGoalControl', () => {
     }));
   });
 
+  // G-4: a transient live-RPC TRANSPORT failure on an ACTIVE session must NOT fall back to the
+  // metadata adapter (which would seed a decorative `status:'active'` goal the running session never
+  // started pursuing — split-brain). The typed transport error must surface to the caller instead.
+  it('surfaces a transport-failure error on an active session WITHOUT seeding a metadata goal', async () => {
+    const callLiveSessionRpc = vi.fn(async () => ({
+      ok: false,
+      errorCode: 'session_rpc_failed',
+      error: 'session_rpc_failed',
+    }));
+    const resolveAdapter = vi.fn(async () => ({ setGoal: vi.fn() }));
+
+    await expect(routeSessionGoalControl({
+      token: 'token',
+      credentials: createCredentials(),
+      sessionId: 'sess_1',
+      rawSession: createRawSession({ active: true }),
+      metadata: createMetadata(),
+      currentMachineId: 'machine-local',
+      ctx,
+      mode: 'plain',
+      operation: 'set',
+      request: { objective: 'pursue the goal' },
+      callLiveSessionRpc,
+      resolveAdapter,
+    })).resolves.toEqual({
+      ok: false,
+      errorCode: 'session_rpc_failed',
+      error: 'session_rpc_failed',
+    });
+
+    expect(callLiveSessionRpc).toHaveBeenCalledTimes(1);
+    expect(resolveAdapter).not.toHaveBeenCalled();
+    expect(mocks.updateSessionMetadataWithRetry).not.toHaveBeenCalled();
+  });
+
+  // A typed inject failure (`session_goal_control_inject_failed`) is likewise NON-fallback: the
+  // running session must own delivery; the router surfaces the failure rather than seeding metadata.
+  it('surfaces a typed inject failure on an active session WITHOUT falling back to the adapter', async () => {
+    const callLiveSessionRpc = vi.fn(async () => ({
+      ok: false,
+      errorCode: 'session_goal_control_inject_failed',
+      error: 'session_goal_control_inject_failed',
+    }));
+    const resolveAdapter = vi.fn(async () => ({ setGoal: vi.fn() }));
+
+    await expect(routeSessionGoalControl({
+      token: 'token',
+      credentials: createCredentials(),
+      sessionId: 'sess_1',
+      rawSession: createRawSession({ active: true }),
+      metadata: createMetadata(),
+      currentMachineId: 'machine-local',
+      ctx,
+      mode: 'plain',
+      operation: 'set',
+      request: { objective: 'pursue the goal' },
+      callLiveSessionRpc,
+      resolveAdapter,
+    })).resolves.toEqual({
+      ok: false,
+      errorCode: 'session_goal_control_inject_failed',
+      error: 'session_goal_control_inject_failed',
+    });
+
+    expect(resolveAdapter).not.toHaveBeenCalled();
+    expect(mocks.updateSessionMetadataWithRetry).not.toHaveBeenCalled();
+  });
+
+  // Definitive CAPABILITY signals still fall back to the inactive adapter (the live runtime genuinely
+  // cannot serve the method), so a stale/no-runtime session can still seed metadata.
+  it('still falls back on the unsupported_session_runtime_method capability signal', async () => {
+    const nextWorkState = { v: 1, items: [], primaryItemId: null, updatedAt: 13 };
+    const callLiveSessionRpc = vi.fn(async () => ({
+      ok: false,
+      errorCode: 'unsupported_session_runtime_method',
+      error: 'unsupported_session_runtime_method',
+    }));
+    const setGoal = vi.fn(async () => ({
+      metadata: createMetadata({ sessionWorkStateV1: nextWorkState }),
+      workState: nextWorkState,
+    }));
+    const resolveAdapter = vi.fn(async () => ({ setGoal }));
+
+    await routeSessionGoalControl({
+      token: 'token',
+      credentials: createCredentials(),
+      sessionId: 'sess_1',
+      rawSession: createRawSession({ active: true }),
+      metadata: createMetadata(),
+      currentMachineId: 'machine-local',
+      ctx,
+      mode: 'plain',
+      operation: 'set',
+      request: { objective: 'pursue the goal' },
+      callLiveSessionRpc,
+      resolveAdapter,
+    });
+
+    expect(resolveAdapter).toHaveBeenCalledWith('codex');
+    expect(setGoal).toHaveBeenCalledTimes(1);
+  });
+
   it('returns stable errors without persisting when inactive control lacks local metadata', async () => {
     await expect(routeSessionGoalControl({
       token: 'token',

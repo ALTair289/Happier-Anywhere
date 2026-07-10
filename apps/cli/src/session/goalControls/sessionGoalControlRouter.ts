@@ -100,14 +100,18 @@ function shouldFallbackFromLiveSessionGoalRpc(result: unknown): boolean {
   const raw = result as Record<string, unknown>;
   const errorCode = typeof raw.errorCode === 'string' ? raw.errorCode : '';
   const error = typeof raw.error === 'string' ? raw.error : '';
+  // Fall back to the inactive metadata adapter ONLY on DEFINITIVE capability signals — the live
+  // runtime genuinely cannot serve the method. A transient TRANSPORT failure (`session_rpc_failed`,
+  // produced when the live-session RPC throws) must NOT fall back: doing so seeds a decorative
+  // `status:'active'` metadata goal the running session never started pursuing (`/goal` never
+  // reached the provider) — a split-brain between metadata and runtime (G-4). Transport failures
+  // surface as typed errors to the caller/UI instead, mirroring the `injectFailedError()` treatment.
   return errorCode === RPC_ERROR_CODES.METHOD_NOT_AVAILABLE
     || errorCode === RPC_ERROR_CODES.METHOD_NOT_FOUND
     || errorCode === 'unsupported_session_runtime_method'
-    || errorCode === 'session_rpc_failed'
     || error === RPC_ERROR_CODES.METHOD_NOT_AVAILABLE
     || error === RPC_ERROR_CODES.METHOD_NOT_FOUND
-    || error === 'unsupported_session_runtime_method'
-    || error === 'session_rpc_failed';
+    || error === 'unsupported_session_runtime_method';
 }
 
 function buildGoalMetadataPatch(metadata: Record<string, unknown>): Record<string, unknown> | null {
