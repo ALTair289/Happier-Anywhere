@@ -6,6 +6,7 @@ const bottomFollowHostPath = path.resolve(
     __dirname,
     'viewport/bottomFollow/host/useTranscriptBottomFollowHost.ts',
 );
+const chatListInternalPath = path.resolve(__dirname, 'ChatListInternal.tsx');
 
 describe('ChatList bottom-follow write scheduler boundary', () => {
     it('routes automatic bottom-follow write authorities through the scheduler owner', () => {
@@ -38,6 +39,15 @@ describe('ChatList bottom-follow write scheduler boundary', () => {
         expect(writeIndex).toBeGreaterThanOrEqual(0);
         expect(rendererGateIndex).toBeGreaterThanOrEqual(0);
         expect(rendererGateIndex).toBeLessThan(writeIndex);
+    });
+
+    it('delegates renderer-owned viewport resize maintenance through the renderer ref', () => {
+        const source = fs.readFileSync(chatListInternalPath, 'utf8');
+        const body = extractCallbackBody(source, 'handleComposerInsetHeightChange');
+
+        expect(body).toContain('if (appOwnsContinuousFollow)');
+        expect(body).toContain("requestAutomaticLiveTailPin(null, 'viewport-resized')");
+        expect(body).toContain('listRef.current?.notifyViewportGeometryChanged?.()');
     });
 });
 

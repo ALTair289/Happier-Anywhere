@@ -11,6 +11,7 @@ export type {
     TranscriptListShellPlatformInteractionProps,
     TranscriptListShellProps,
     TranscriptListShellRef,
+    TranscriptRendererAtEndState,
 } from './renderer/types';
 
 const TRANSCRIPT_LIST_SHELL_STYLE = { flex: 1, minHeight: 0 } as const;

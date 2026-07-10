@@ -10,6 +10,7 @@ export type ScrollableChatListRef = Readonly<{
     scrollToIndex: (params: { index: number; animated?: boolean; viewOffset?: number; viewPosition?: number }) => void;
     scrollToOffset: (params: { offset: number; animated?: boolean }) => void;
     scrollToEnd?: (params?: { animated?: boolean }) => void;
+    notifyViewportGeometryChanged?: () => void;
     clearLayoutCacheOnUpdate?: () => void;
     computeVisibleIndices?: () => { startIndex: number; endIndex: number };
     getAbsoluteLastScrollOffset?: () => number;

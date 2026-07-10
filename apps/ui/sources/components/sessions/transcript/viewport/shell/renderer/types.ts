@@ -10,6 +10,7 @@ export type TranscriptListShellRef<TItem = unknown> = Readonly<{
     scrollToIndex: (params: { index: number; animated?: boolean; viewOffset?: number; viewPosition?: number }) => void | Promise<void>;
     scrollToOffset: (params: { offset: number; animated?: boolean }) => void | Promise<void>;
     scrollToEnd?: (params?: { animated?: boolean }) => void | Promise<void>;
+    notifyViewportGeometryChanged?: () => void;
     clearLayoutCacheOnUpdate?: () => void;
     computeVisibleIndices?: () => { startIndex: number; endIndex: number };
     getAbsoluteLastScrollOffset?: () => number;

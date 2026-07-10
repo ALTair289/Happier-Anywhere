@@ -1,5 +1,6 @@
 import * as React from 'react';
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { Platform, View } from 'react-native';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react-test-renderer';
 
 import { renderScreen } from '@/dev/testkit';
@@ -14,6 +15,11 @@ let assignedLegendRef: any = null;
 let legendStateOverride: any = null;
 let legendStateListeners: Map<string, Set<(value: any) => void>> = new Map();
 let rejectNextScroll = false;
+const originalPlatformOS = Platform.OS;
+
+function setPlatformOS(value: typeof Platform.OS): void {
+    Object.defineProperty(Platform, 'OS', { configurable: true, value });
+}
 
 function getShellRef<TItem>(
     ref: React.RefObject<TranscriptListShellRef<TItem> | null>,
@@ -82,6 +88,7 @@ vi.mock('@legendapp/list/react-native', () => ({
 
 describe('Legend transcript renderer adapter', () => {
     beforeEach(() => {
+        setPlatformOS('web');
         capturedLegendListProps = null;
         assignedLegendRef = null;
         legendStateOverride = null;
@@ -89,7 +96,55 @@ describe('Legend transcript renderer adapter', () => {
         rejectNextScroll = false;
     });
 
+    afterEach(() => {
+        setPlatformOS(originalPlatformOS);
+        vi.restoreAllMocks();
+        vi.unstubAllGlobals();
+    });
+
+    it('derives web at-end and maintain-threshold facts from the actual scroller geometry', async () => {
+        const {
+            resolveLegendRendererAtEndStateFromWebMetrics,
+            scrollLegendWebElementToEnd,
+        } = await import('./legendListRenderer');
+
+        expect(resolveLegendRendererAtEndStateFromWebMetrics({
+            metrics: { scrollTop: 16_739, scrollHeight: 17_054, clientHeight: 315 },
+            maintainScrollAtEndThreshold: 0.1,
+        })).toEqual({
+            isAtEnd: true,
+            isNearEnd: true,
+            isWithinMaintainScrollAtEndThreshold: true,
+        });
+        expect(resolveLegendRendererAtEndStateFromWebMetrics({
+            metrics: { scrollTop: 16_716, scrollHeight: 17_054, clientHeight: 315 },
+            maintainScrollAtEndThreshold: 0.1,
+        })).toEqual({
+            isAtEnd: false,
+            isNearEnd: true,
+            isWithinMaintainScrollAtEndThreshold: true,
+        });
+        expect(resolveLegendRendererAtEndStateFromWebMetrics({
+            metrics: { scrollTop: 16_604, scrollHeight: 17_054, clientHeight: 315 },
+            maintainScrollAtEndThreshold: 0.1,
+        })).toEqual({
+            isAtEnd: false,
+            isNearEnd: false,
+            isWithinMaintainScrollAtEndThreshold: false,
+        });
+
+        const scrollTo = vi.fn();
+        scrollLegendWebElementToEnd({
+            clientHeight: 535,
+            scrollHeight: 17_054,
+            scrollLeft: 0,
+            scrollTo,
+        });
+        expect(scrollTo).toHaveBeenCalledWith({ behavior: 'auto', left: 0, top: 16_519 });
+    });
+
     it('maps the read-only shell seam to the Legend non-inverted chat props', async () => {
+        setPlatformOS('ios');
         const { legendListRenderer } = await import('./legendListRenderer');
         const Renderer = legendListRenderer.Component;
         const listRef = React.createRef<TranscriptListShellRef<{ id: string; kind: string }>>();
@@ -106,7 +161,7 @@ describe('Legend transcript renderer adapter', () => {
         const onViewableItemsChanged = vi.fn();
         const viewabilityConfig = { itemVisiblePercentThreshold: 55, minimumViewTime: 120 };
 
-        await renderScreen(
+        const screen = await renderScreen(
             <Renderer
                 ref={listRef}
                 data={[
@@ -153,8 +208,6 @@ describe('Legend transcript renderer adapter', () => {
             maintainScrollAtEnd: { animated: false },
             maintainScrollAtEndThreshold: 0.1,
             maintainVisibleContentPosition: { data: true, size: true },
-            onLayout,
-            onScroll,
             onScrollBeginDrag,
             onScrollEndDrag,
             onMomentumScrollBegin,
@@ -169,6 +222,17 @@ describe('Legend transcript renderer adapter', () => {
             onWheel,
             scrollEventThrottle: 16,
         });
+        const layoutEvent = { nativeEvent: { layout: { height: 600, width: 800, x: 0, y: 0 } } };
+        const scrollEvent = { nativeEvent: { contentOffset: { x: 0, y: 0 } } };
+        const identityHost = screen.tree.root.findAllByType(View).find((node) => (
+            typeof node.props.onLayout === 'function' && node.findAllByType('LegendList' as any).length > 0
+        ));
+        expect(identityHost).toBeTruthy();
+        identityHost!.props.onLayout(layoutEvent);
+        capturedLegendListProps.onScroll(scrollEvent);
+        expect(onLayout).toHaveBeenCalledWith(layoutEvent);
+        expect(onScroll).toHaveBeenCalledWith(scrollEvent);
+        expect(capturedLegendListProps).not.toHaveProperty('onLayout');
         expect(capturedLegendListProps.data.map((item: any) => item.id)).toEqual(['oldest', 'newest']);
         // Shell header/footer are FRAME LIST-SPACE slots (FlashList semantics): on a
         // newest-first (native inverted) frame, `header` is the data-start slot, which
@@ -178,7 +242,8 @@ describe('Legend transcript renderer adapter', () => {
         // Getting this wrong renders the composer keyboard-inset spacer at the TOP of the
         // transcript and the last row flush under the floating composer (native occlusion,
         // live-measured ~130pt on 2026-07-08).
-        expect(capturedLegendListProps.ListFooterComponent.type).toBe('HeaderSlot');
+        expect(capturedLegendListProps.ListFooterComponent.type).toBe(View);
+        expect(capturedLegendListProps.ListFooterComponent.props.children.type).toBe('HeaderSlot');
         expect(capturedLegendListProps.ListHeaderComponent.type).toBe('FooterSlot');
         expect(capturedLegendListProps).not.toHaveProperty('inverted');
         expect(capturedLegendListProps).not.toHaveProperty('drawDistance');
@@ -204,13 +269,14 @@ describe('Legend transcript renderer adapter', () => {
                 keyExtractor={(item: { id: string }) => item.id}
                 renderItem={({ item }: { item: { id: string } }) => React.createElement('Row', { id: item.id })}
                 frame={resolveMainTranscriptListShellFrame({
+                    legendInitialScrollAtEnd: false,
                     nativeID: 'legend-main-native-id',
                     platformOS: 'web',
                 })}
             />,
         );
 
-        expect(capturedLegendListProps.initialScrollAtEnd).toBe(true);
+        expect(capturedLegendListProps.initialScrollAtEnd).toBe(false);
         // alignItemsAtEnd is layout-only (bottom-hugging padding) and stays on for all platforms.
         expect(capturedLegendListProps.alignItemsAtEnd).toBe(true);
     });
@@ -236,7 +302,8 @@ describe('Legend transcript renderer adapter', () => {
         );
 
         expect(capturedLegendListProps.ListHeaderComponent.type).toBe('HeaderSlot');
-        expect(capturedLegendListProps.ListFooterComponent.type).toBe('FooterSlot');
+        expect(capturedLegendListProps.ListFooterComponent.type).toBe(View);
+        expect(capturedLegendListProps.ListFooterComponent.props.children.type).toBe('FooterSlot');
     });
 
     it('synthesizes the shell onContentSizeChange contract that Legend silently drops', async () => {
@@ -369,6 +436,325 @@ describe('Legend transcript renderer adapter', () => {
             isNearEnd: true,
             isWithinMaintainScrollAtEndThreshold: true,
         });
+    });
+
+    it('re-targets a held web tail when viewport or visual-bottom slot geometry changes', async () => {
+        const { legendListRenderer } = await import('./legendListRenderer');
+        const Renderer = legendListRenderer.Component;
+
+        legendStateOverride = {
+            contentLength: 1200,
+            end: 0,
+            isAtEnd: true,
+            isNearEnd: true,
+            isWithinMaintainScrollAtEndThreshold: true,
+            scroll: 600,
+            scrollLength: 600,
+            start: 0,
+        };
+
+        const screen = await renderScreen(
+            <Renderer
+                data={[{ id: 'row-1' }]}
+                keyExtractor={(item: { id: string }) => item.id}
+                renderItem={({ item }: { item: { id: string } }) => React.createElement('Row', { id: item.id })}
+                frame={resolveMainTranscriptListShellFrame({
+                    nativeID: 'legend-main-native-id',
+                    platformOS: 'web',
+                })}
+                footer={React.createElement('BottomSlot')}
+            />,
+        );
+        const identityHost = screen.tree.root.findByProps({ nativeID: 'legend-main-native-id' });
+
+        assignedLegendRef.scrollToEnd.mockClear();
+        identityHost.props.onLayout({ nativeEvent: { layout: { height: 670, width: 800, x: 0, y: 0 } } });
+        capturedLegendListProps.ListFooterComponent.props.onLayout({
+            nativeEvent: { layout: { height: 40, width: 800, x: 0, y: 0 } },
+        });
+        expect(assignedLegendRef.scrollToEnd).not.toHaveBeenCalled();
+
+        // The browser recomputes `isAtEnd` from the new geometry before any user scroll.
+        // The renderer must preserve the prior held-tail intent across that resize.
+        legendStateOverride = {
+            ...legendStateOverride,
+            isAtEnd: false,
+            isNearEnd: false,
+            isWithinMaintainScrollAtEndThreshold: false,
+        };
+        identityHost.props.onLayout({ nativeEvent: { layout: { height: 535, width: 800, x: 0, y: 0 } } });
+        capturedLegendListProps.ListFooterComponent.props.onLayout({
+            nativeEvent: { layout: { height: 352, width: 800, x: 0, y: 0 } },
+        });
+
+        expect(assignedLegendRef.scrollToEnd).toHaveBeenCalledTimes(2);
+        expect(assignedLegendRef.scrollToEnd).toHaveBeenNthCalledWith(1, { animated: false });
+        expect(assignedLegendRef.scrollToEnd).toHaveBeenNthCalledWith(2, { animated: false });
+    });
+
+    it('does not re-target geometry changes after a genuine detached web scroll', async () => {
+        const { legendListRenderer } = await import('./legendListRenderer');
+        const Renderer = legendListRenderer.Component;
+
+        legendStateOverride = {
+            contentLength: 1200,
+            end: 0,
+            isAtEnd: true,
+            isNearEnd: true,
+            isWithinMaintainScrollAtEndThreshold: true,
+            scroll: 600,
+            scrollLength: 600,
+            start: 0,
+        };
+
+        const screen = await renderScreen(
+            <Renderer
+                data={[{ id: 'row-1' }]}
+                keyExtractor={(item: { id: string }) => item.id}
+                renderItem={({ item }: { item: { id: string } }) => React.createElement('Row', { id: item.id })}
+                frame={resolveMainTranscriptListShellFrame({
+                    nativeID: 'legend-main-native-id',
+                    platformOS: 'web',
+                })}
+                footer={React.createElement('BottomSlot')}
+            />,
+        );
+        const identityHost = screen.tree.root.findByProps({ nativeID: 'legend-main-native-id' });
+
+        identityHost.props.onLayout({ nativeEvent: { layout: { height: 670, width: 800, x: 0, y: 0 } } });
+        capturedLegendListProps.ListFooterComponent.props.onLayout({
+            nativeEvent: { layout: { height: 40, width: 800, x: 0, y: 0 } },
+        });
+        assignedLegendRef.scrollToEnd.mockClear();
+
+        legendStateOverride = {
+            ...legendStateOverride,
+            isAtEnd: false,
+            isNearEnd: false,
+            isWithinMaintainScrollAtEndThreshold: false,
+            scroll: 200,
+        };
+        capturedLegendListProps.onScroll({ nativeEvent: { contentOffset: { x: 0, y: 200 } } });
+        identityHost.props.onLayout({ nativeEvent: { layout: { height: 535, width: 800, x: 0, y: 0 } } });
+        capturedLegendListProps.ListFooterComponent.props.onLayout({
+            nativeEvent: { layout: { height: 352, width: 800, x: 0, y: 0 } },
+        });
+
+        expect(assignedLegendRef.scrollToEnd).not.toHaveBeenCalled();
+    });
+
+    it('leaves native viewport and footer geometry maintenance to Legend', async () => {
+        setPlatformOS('ios');
+        const { legendListRenderer } = await import('./legendListRenderer');
+        const Renderer = legendListRenderer.Component;
+        const listRef = React.createRef<TranscriptListShellRef<{ id: string }>>();
+        const render = (phase: number) => (
+            <Renderer
+                ref={listRef}
+                data={[{ id: 'row-1' }]}
+                keyExtractor={(item: { id: string }) => item.id}
+                renderItem={({ item }: { item: { id: string } }) => React.createElement('Row', { id: item.id })}
+                frame={resolveMainTranscriptListShellFrame({
+                    nativeID: 'legend-main-native-id',
+                    platformOS: 'ios',
+                })}
+                header={React.createElement('BottomSlot', { phase })}
+            />
+        );
+
+        legendStateOverride = {
+            contentLength: 1200,
+            end: 0,
+            isAtEnd: true,
+            isNearEnd: true,
+            isWithinMaintainScrollAtEndThreshold: true,
+            scroll: 600,
+            scrollLength: 600,
+            start: 0,
+        };
+        const screen = await renderScreen(render(1));
+        const identityHost = screen.tree.root.findByProps({ nativeID: 'legend-main-native-id' });
+        identityHost.props.onLayout({ nativeEvent: { layout: { height: 670, width: 800, x: 0, y: 0 } } });
+        capturedLegendListProps.ListFooterComponent.props.onLayout({
+            nativeEvent: { layout: { height: 40, width: 800, x: 0, y: 0 } },
+        });
+        assignedLegendRef.scrollToEnd.mockClear();
+
+        identityHost.props.onLayout({ nativeEvent: { layout: { height: 535, width: 800, x: 0, y: 0 } } });
+        capturedLegendListProps.ListFooterComponent.props.onLayout({
+            nativeEvent: { layout: { height: 352, width: 800, x: 0, y: 0 } },
+        });
+        listRef.current?.notifyViewportGeometryChanged?.();
+        await screen.update(render(2));
+
+        expect(assignedLegendRef.scrollToEnd).not.toHaveBeenCalled();
+    });
+
+    it('re-targets a held tail when the visual-bottom slot render changes before web layout signals', async () => {
+        const { legendListRenderer } = await import('./legendListRenderer');
+        const Renderer = legendListRenderer.Component;
+        const render = (phase: number) => (
+            <Renderer
+                data={[{ id: 'row-1' }]}
+                keyExtractor={(item: { id: string }) => item.id}
+                renderItem={({ item }: { item: { id: string } }) => React.createElement('Row', { id: item.id })}
+                frame={resolveMainTranscriptListShellFrame({
+                    nativeID: 'legend-main-native-id',
+                    platformOS: 'web',
+                })}
+                footer={React.createElement('BottomSlot', { phase })}
+            />
+        );
+
+        legendStateOverride = {
+            contentLength: 1200,
+            end: 0,
+            isAtEnd: true,
+            isNearEnd: true,
+            isWithinMaintainScrollAtEndThreshold: true,
+            scroll: 600,
+            scrollLength: 600,
+            start: 0,
+        };
+        const screen = await renderScreen(render(1));
+        assignedLegendRef.scrollToEnd.mockClear();
+
+        await screen.update(render(2));
+
+        expect(assignedLegendRef.scrollToEnd).toHaveBeenCalledTimes(1);
+        expect(assignedLegendRef.scrollToEnd).toHaveBeenCalledWith({ animated: false });
+
+        legendStateOverride = {
+            ...legendStateOverride,
+            isAtEnd: false,
+            isNearEnd: false,
+            isWithinMaintainScrollAtEndThreshold: false,
+            scroll: 200,
+        };
+        capturedLegendListProps.onScroll({ nativeEvent: { contentOffset: { x: 0, y: 200 } } });
+        assignedLegendRef.scrollToEnd.mockClear();
+        await screen.update(render(3));
+        expect(assignedLegendRef.scrollToEnd).not.toHaveBeenCalled();
+    });
+
+    it('owns host viewport-geometry notifications behind held-tail intent', async () => {
+        const { legendListRenderer } = await import('./legendListRenderer');
+        const Renderer = legendListRenderer.Component;
+        const listRef = React.createRef<TranscriptListShellRef<{ id: string }>>();
+
+        legendStateOverride = {
+            contentLength: 1200,
+            end: 0,
+            isAtEnd: true,
+            isNearEnd: true,
+            isWithinMaintainScrollAtEndThreshold: true,
+            scroll: 600,
+            scrollLength: 600,
+            start: 0,
+        };
+        await renderScreen(
+            <Renderer
+                ref={listRef}
+                data={[{ id: 'row-1' }]}
+                keyExtractor={(item: { id: string }) => item.id}
+                renderItem={({ item }: { item: { id: string } }) => React.createElement('Row', { id: item.id })}
+                frame={resolveMainTranscriptListShellFrame({
+                    nativeID: 'legend-main-native-id',
+                    platformOS: 'web',
+                })}
+            />,
+        );
+
+        assignedLegendRef.scrollToEnd.mockClear();
+        listRef.current?.notifyViewportGeometryChanged?.();
+        expect(assignedLegendRef.scrollToEnd).toHaveBeenCalledWith({ animated: false });
+
+        legendStateOverride = {
+            ...legendStateOverride,
+            isAtEnd: false,
+            isNearEnd: false,
+            isWithinMaintainScrollAtEndThreshold: false,
+            scroll: 200,
+        };
+        capturedLegendListProps.onScroll({ nativeEvent: { contentOffset: { x: 0, y: 200 } } });
+        assignedLegendRef.scrollToEnd.mockClear();
+        listRef.current?.notifyViewportGeometryChanged?.();
+        expect(assignedLegendRef.scrollToEnd).not.toHaveBeenCalled();
+    });
+
+    it('reasserts a held web tail after the browser layout settle and cancels that retry on wheel detach', async () => {
+        let nowMs = 1_000;
+        vi.spyOn(Date, 'now').mockImplementation(() => nowMs);
+        const animationFrames: FrameRequestCallback[] = [];
+        const requestAnimationFrame = vi.fn((callback: FrameRequestCallback) => {
+            animationFrames.push(callback);
+            return animationFrames.length;
+        });
+        const cancelAnimationFrame = vi.fn();
+        vi.stubGlobal('requestAnimationFrame', requestAnimationFrame);
+        vi.stubGlobal('cancelAnimationFrame', cancelAnimationFrame);
+        const { legendListRenderer } = await import('./legendListRenderer');
+        const Renderer = legendListRenderer.Component;
+        const listRef = React.createRef<TranscriptListShellRef<{ id: string }>>();
+        const onWheel = vi.fn();
+        const onScrollBeginDrag = vi.fn();
+
+        legendStateOverride = {
+            contentLength: 1200,
+            end: 0,
+            isAtEnd: true,
+            isNearEnd: true,
+            isWithinMaintainScrollAtEndThreshold: true,
+            scroll: 600,
+            scrollLength: 600,
+            start: 0,
+        };
+        await renderScreen(
+            <Renderer
+                ref={listRef}
+                data={[{ id: 'row-1' }]}
+                keyExtractor={(item: { id: string }) => item.id}
+                renderItem={({ item }: { item: { id: string } }) => React.createElement('Row', { id: item.id })}
+                frame={resolveMainTranscriptListShellFrame({
+                    nativeID: 'legend-main-native-id',
+                    platformOS: 'web',
+                })}
+                platformInteractionProps={{ onWheel }}
+                onScrollBeginDrag={onScrollBeginDrag}
+            />,
+        );
+
+        assignedLegendRef.scrollToEnd.mockClear();
+        listRef.current?.notifyViewportGeometryChanged?.();
+        expect(assignedLegendRef.scrollToEnd).toHaveBeenCalledTimes(1);
+        expect(requestAnimationFrame).toHaveBeenCalledTimes(1);
+
+        act(() => animationFrames.shift()?.(16));
+        expect(requestAnimationFrame).toHaveBeenCalledTimes(2);
+        legendStateOverride = {
+            ...legendStateOverride,
+            isAtEnd: false,
+            isNearEnd: true,
+            isWithinMaintainScrollAtEndThreshold: true,
+            scroll: 200,
+        };
+        nowMs = 1_400;
+        act(() => animationFrames.shift()?.(32));
+        expect(assignedLegendRef.scrollToEnd).toHaveBeenCalledTimes(2);
+        expect(requestAnimationFrame).toHaveBeenCalledTimes(3);
+
+        capturedLegendListProps.onScrollBeginDrag({ type: 'renderer-scroll-begin' });
+        expect(onScrollBeginDrag).toHaveBeenCalledWith({ type: 'renderer-scroll-begin' });
+        capturedLegendListProps.onScroll({ nativeEvent: { contentOffset: { x: 0, y: 200 } } });
+        expect(assignedLegendRef.scrollToEnd).toHaveBeenCalledTimes(2);
+        act(() => animationFrames.shift()?.(48));
+        expect(assignedLegendRef.scrollToEnd).toHaveBeenCalledTimes(3);
+
+        capturedLegendListProps.onWheel({ type: 'wheel' });
+        expect(onWheel).toHaveBeenCalledWith({ type: 'wheel' });
+        assignedLegendRef.scrollToEnd.mockClear();
+        listRef.current?.notifyViewportGeometryChanged?.();
+        expect(assignedLegendRef.scrollToEnd).not.toHaveBeenCalled();
     });
 
     it('contains async Legend ref methods behind the synchronous shell ref contract', async () => {

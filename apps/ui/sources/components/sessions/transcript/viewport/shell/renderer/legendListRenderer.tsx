@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { View } from 'react-native';
+import { Platform, View, type LayoutChangeEvent, type NativeSyntheticEvent, type NativeScrollEvent } from 'react-native';
 import {
     LegendList,
     type LegendListProps,
@@ -8,6 +8,10 @@ import {
 } from '@legendapp/list/react-native';
 
 import { LayoutCommitObserver } from '@/components/ui/lists/flashListCompat/FlashListCompat';
+import {
+    resolveWebTranscriptScrollMetrics,
+    type WebTranscriptScrollMetrics,
+} from '@/components/sessions/transcript/webTranscriptScrollMetrics';
 
 import type {
     TranscriptRendererAtEndState,
@@ -21,6 +25,10 @@ const LEGEND_LIST_STYLE = { flex: 1, minHeight: 0 } as const;
 // handles giant markdown rows with per-row measured floors, so this is only a
 // first-render hint. It intentionally stays below the giant-row outliers.
 const LEGEND_TRANSCRIPT_ESTIMATED_ITEM_SIZE_PX = 240;
+// Legend/browser reconciliation can replay the pre-resize DOM offset about 400ms after
+// a composer resize. Keep that specific layout-settle transaction distinguishable from
+// a later keyboard/user scroll; wheel/drag interactions cancel it immediately.
+const LEGEND_WEB_TAIL_RETARGET_SETTLE_MS = 750;
 // Identity host wrapper: @legendapp/list does not forward nativeID/testID to any
 // rendered node (verified against the 3.3.0 dist). The web viewport ownership stack
 // resolves its scroll container via document.getElementById(nativeID) and then
@@ -103,7 +111,7 @@ function readDataVersion(extraData: unknown): React.Key | undefined {
     return typeof extraData === 'string' || typeof extraData === 'number' ? extraData : undefined;
 }
 
-function toLegendSlot<TItem>(node: React.ReactNode): LegendListProps<TItem>['ListHeaderComponent'] {
+function toLegendSlot(node: React.ReactNode): React.ReactElement | null {
     return React.isValidElement(node) ? node : null;
 }
 
@@ -116,11 +124,52 @@ function readLegendAtEndState(state: LegendListState | undefined): TranscriptRen
     };
 }
 
+export function resolveLegendRendererAtEndStateFromWebMetrics(params: Readonly<{
+    metrics: Pick<WebTranscriptScrollMetrics, 'clientHeight' | 'scrollHeight' | 'scrollTop'>;
+    maintainScrollAtEndThreshold: number;
+}>): TranscriptRendererAtEndState {
+    const distanceFromBottom = Math.max(
+        0,
+        params.metrics.scrollHeight - params.metrics.clientHeight - params.metrics.scrollTop,
+    );
+    const thresholdRatio = Number.isFinite(params.maintainScrollAtEndThreshold)
+        ? Math.max(0, params.maintainScrollAtEndThreshold)
+        : 0;
+    const thresholdPx = thresholdRatio * Math.max(0, params.metrics.clientHeight);
+    return {
+        isAtEnd: distanceFromBottom <= 1,
+        isNearEnd: distanceFromBottom <= thresholdPx,
+        isWithinMaintainScrollAtEndThreshold: distanceFromBottom <= thresholdPx,
+    };
+}
+
+export function scrollLegendWebElementToEnd(element: Pick<
+    HTMLElement,
+    'clientHeight' | 'scrollHeight' | 'scrollLeft' | 'scrollTo'
+>, animated = false): void {
+    element.scrollTo({
+        behavior: animated ? 'smooth' : 'auto',
+        left: element.scrollLeft,
+        top: Math.max(0, element.scrollHeight - element.clientHeight),
+    });
+}
+
 function LegendListTranscriptRendererInner<TItem>(
     props: TranscriptListRendererProps<TItem>,
     ref: React.ForwardedRef<TranscriptListShellRef<TItem>>,
 ): React.ReactElement {
     const legendListRef = React.useRef<LegendListRef | null>(null);
+    const identityHostRef = React.useRef<React.ElementRef<typeof View> | null>(null);
+    const visualBottomSlotHostRef = React.useRef<React.ElementRef<typeof View> | null>(null);
+    const maintainEndIntentRef = React.useRef(false);
+    const lastViewportHeightRef = React.useRef<number | null>(null);
+    const lastVisualBottomSlotHeightRef = React.useRef<number | null>(null);
+    const hasCommittedVisualBottomSlotRef = React.useRef(false);
+    const previousVisualBottomSlotRef = React.useRef<React.ReactNode>(null);
+    const lastObservedScrollOffsetRef = React.useRef<number | null>(null);
+    const webScrollableElementRef = React.useRef<HTMLElement | null>(null);
+    const webTailRetargetFrameRef = React.useRef<number | null>(null);
+    const webTailRetargetSettleUntilRef = React.useRef(0);
     const data = React.useMemo(() => toLegendData(props.data, props.frame.dataOrder), [props.data, props.frame.dataOrder]);
     const dataLength = data.length;
     const projectChronologicalIndex = shouldProjectChronologicalIndex(props);
@@ -147,19 +196,208 @@ function LegendListTranscriptRendererInner<TItem>(
         emit(0, height);
     }, []);
 
+    const readRendererAtEndState = React.useCallback((): TranscriptRendererAtEndState | null => {
+        if (Platform.OS === 'web' && typeof document !== 'undefined' && typeof window !== 'undefined') {
+            const nativeID = props.frame.rendererOptions.flashList.nativeID;
+            const root = nativeID ? document.getElementById(nativeID) : null;
+            const metrics = resolveWebTranscriptScrollMetrics({
+                root,
+                cachedElement: webScrollableElementRef.current,
+                win: window,
+                minOverflowPx: 0,
+                allowRootFallback: true,
+            });
+            if (metrics) {
+                webScrollableElementRef.current = metrics.element;
+                return resolveLegendRendererAtEndStateFromWebMetrics({
+                    metrics,
+                    maintainScrollAtEndThreshold: props.frame.rendererOptions.legend.maintainScrollAtEndThreshold,
+                });
+            }
+        }
+        return readLegendAtEndState(legendListRef.current?.getState());
+    }, [
+        props.frame.rendererOptions.flashList.nativeID,
+        props.frame.rendererOptions.legend.maintainScrollAtEndThreshold,
+    ]);
+
     const emitRendererAtEndState = React.useCallback(() => {
+        const state = readRendererAtEndState();
+        if (!state) return;
+        if (state.isAtEnd) {
+            maintainEndIntentRef.current = true;
+        }
+        if (lastObservedScrollOffsetRef.current === null) {
+            const webScroll = webScrollableElementRef.current?.scrollTop;
+            const scroll = Platform.OS === 'web' && typeof webScroll === 'number' && Number.isFinite(webScroll)
+                ? webScroll
+                : legendListRef.current?.getState().scroll;
+            if (typeof scroll === 'number' && Number.isFinite(scroll)) {
+                lastObservedScrollOffsetRef.current = scroll;
+            }
+        }
         const emit = props.onRendererAtEndChange;
         if (!emit) return;
-        const state = readLegendAtEndState(legendListRef.current?.getState());
-        if (!state) return;
         emit(state);
-    }, [props.onRendererAtEndChange]);
+    }, [props.onRendererAtEndChange, readRendererAtEndState]);
+
+    const scrollRendererToEnd = React.useCallback((params?: { animated?: boolean }) => {
+        if (Platform.OS === 'web' && typeof document !== 'undefined' && typeof window !== 'undefined') {
+            const nativeID = props.frame.rendererOptions.flashList.nativeID;
+            const root = nativeID ? document.getElementById(nativeID) : null;
+            const metrics = resolveWebTranscriptScrollMetrics({
+                root,
+                cachedElement: webScrollableElementRef.current,
+                win: window,
+                minOverflowPx: 0,
+                allowRootFallback: true,
+            });
+            if (metrics) {
+                webScrollableElementRef.current = metrics.element;
+                scrollLegendWebElementToEnd(metrics.element, params?.animated === true);
+                return;
+            }
+        }
+        settleLegendScroll(legendListRef.current?.scrollToEnd(params));
+    }, [props.frame.rendererOptions.flashList.nativeID]);
+
+    const cancelScheduledWebTailRetarget = React.useCallback(() => {
+        const cancelAnimationFrame = globalThis.cancelAnimationFrame;
+        if (typeof cancelAnimationFrame === 'function') {
+            if (webTailRetargetFrameRef.current !== null) {
+                cancelAnimationFrame(webTailRetargetFrameRef.current);
+            }
+        }
+        webTailRetargetFrameRef.current = null;
+    }, []);
+
+    const releaseHeldWebTailIntent = React.useCallback(() => {
+        maintainEndIntentRef.current = false;
+        webTailRetargetSettleUntilRef.current = 0;
+        cancelScheduledWebTailRetarget();
+    }, [cancelScheduledWebTailRetarget]);
+
+    const requestHeldTailRetarget = React.useCallback(() => {
+        // Legend owns native viewport/footer maintenance through maintainScrollAtEnd.
+        // The explicit retarget is a web-only repair for the browser DOM/Legend geometry split.
+        if (Platform.OS !== 'web') return;
+        if (!maintainEndIntentRef.current) return;
+        scrollRendererToEnd({ animated: false });
+        cancelScheduledWebTailRetarget();
+        const requestAnimationFrame = globalThis.requestAnimationFrame;
+        if (typeof requestAnimationFrame !== 'function') return;
+        // Browser/Legend reconciliation can replay the pre-resize offset for several frames
+        // after a synchronous ResizeObserver/layout-effect write. Monitor the short settle
+        // transaction and reassert only when the canonical DOM metrics move off the held tail.
+        // A real wheel interaction releases the held intent and cancels this loop immediately.
+        webTailRetargetSettleUntilRef.current = Date.now() + LEGEND_WEB_TAIL_RETARGET_SETTLE_MS;
+        const monitorHeldTailThroughLayoutSettle = () => {
+            webTailRetargetFrameRef.current = null;
+            if (!maintainEndIntentRef.current) return;
+            if (Date.now() > webTailRetargetSettleUntilRef.current) return;
+            const state = readRendererAtEndState();
+            if (state && !state.isAtEnd) {
+                scrollRendererToEnd({ animated: false });
+            }
+            webTailRetargetFrameRef.current = requestAnimationFrame(monitorHeldTailThroughLayoutSettle);
+        };
+        webTailRetargetFrameRef.current = requestAnimationFrame(monitorHeldTailThroughLayoutSettle);
+    }, [cancelScheduledWebTailRetarget, readRendererAtEndState, scrollRendererToEnd]);
+
+    React.useEffect(() => cancelScheduledWebTailRetarget, [cancelScheduledWebTailRetarget]);
+
+    const recordViewportHeight = React.useCallback((nextHeight: number) => {
+        const previousHeight = lastViewportHeightRef.current;
+        lastViewportHeightRef.current = nextHeight;
+        if (previousHeight === null || Math.abs(previousHeight - nextHeight) < 1) return;
+        requestHeldTailRetarget();
+    }, [requestHeldTailRetarget]);
+
+    const recordVisualBottomSlotHeight = React.useCallback((nextHeight: number) => {
+        const previousHeight = lastVisualBottomSlotHeightRef.current;
+        lastVisualBottomSlotHeightRef.current = nextHeight;
+        if (previousHeight === null || Math.abs(previousHeight - nextHeight) < 1) return;
+        requestHeldTailRetarget();
+    }, [requestHeldTailRetarget]);
+
+    const handleLegendLayout = React.useCallback((event: LayoutChangeEvent) => {
+        props.onLayout?.(event);
+        recordViewportHeight(event.nativeEvent.layout.height);
+    }, [props.onLayout, recordViewportHeight]);
+
+    const handleVisualBottomSlotLayout = React.useCallback((event: LayoutChangeEvent) => {
+        recordVisualBottomSlotHeight(event.nativeEvent.layout.height);
+    }, [recordVisualBottomSlotHeight]);
+
+    React.useEffect(() => {
+        if (Platform.OS !== 'web') return undefined;
+        const ResizeObserverCtor = globalThis.ResizeObserver;
+        if (typeof ResizeObserverCtor !== 'function') return undefined;
+        const nativeID = props.frame.rendererOptions.flashList.nativeID;
+        const identityHost = (
+            typeof document !== 'undefined' && nativeID
+                ? document.getElementById(nativeID)
+                : null
+        ) ?? identityHostRef.current as unknown as Element | null;
+        const visualBottomSlotHost = visualBottomSlotHostRef.current as unknown as Element | null;
+        if (!identityHost && !visualBottomSlotHost) return undefined;
+        const observer = new ResizeObserverCtor((entries) => {
+            for (const entry of entries) {
+                if (entry.target === identityHost) {
+                    recordViewportHeight(entry.contentRect.height);
+                }
+                if (entry.target === visualBottomSlotHost) {
+                    recordVisualBottomSlotHeight(entry.contentRect.height);
+                }
+            }
+            emitRendererAtEndState();
+        });
+        if (identityHost) observer.observe(identityHost);
+        if (visualBottomSlotHost) observer.observe(visualBottomSlotHost);
+        return () => observer.disconnect();
+    }, [emitRendererAtEndState, props.frame.rendererOptions.flashList.nativeID, recordViewportHeight, recordVisualBottomSlotHeight]);
+
+    const handleLegendScroll = React.useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+        const state = readRendererAtEndState();
+        const webScroll = webScrollableElementRef.current?.scrollTop;
+        const nextScrollOffset = Platform.OS === 'web' && typeof webScroll === 'number' && Number.isFinite(webScroll)
+            ? webScroll
+            : event.nativeEvent.contentOffset.y;
+        const previousScrollOffset = lastObservedScrollOffsetRef.current;
+        lastObservedScrollOffsetRef.current = nextScrollOffset;
+        const offsetMoved = previousScrollOffset !== null && Math.abs(previousScrollOffset - nextScrollOffset) >= 1;
+        const browserLayoutSettleInFlight = Platform.OS === 'web'
+            && Date.now() <= webTailRetargetSettleUntilRef.current;
+        const movedAwayFromTail = offsetMoved
+            && state
+            && !state.isAtEnd
+            && !state.isNearEnd
+            && !state.isWithinMaintainScrollAtEndThreshold;
+        if (movedAwayFromTail && browserLayoutSettleInFlight) {
+            // Chromium can emit one final scroll-anchor correction after both the layout
+            // notification and the scheduled frame retry. That correction is not a user
+            // detach: the interaction wrappers below cancel the held intent first for a
+            // real wheel/drag. Reassert from the same renderer-owned tail target.
+            requestHeldTailRetarget();
+        } else if (
+            movedAwayFromTail
+            && !browserLayoutSettleInFlight
+        ) {
+            maintainEndIntentRef.current = false;
+        }
+        props.onScroll?.(event);
+        emitRendererAtEndState();
+    }, [emitRendererAtEndState, props.onScroll, readRendererAtEndState, requestHeldTailRetarget]);
+
+    const handleLegendWheel = React.useCallback((event: unknown) => {
+        if (Platform.OS === 'web') releaseHeldWebTailIntent();
+        props.platformInteractionProps?.onWheel?.(event);
+    }, [props.platformInteractionProps, releaseHeldWebTailIntent]);
 
     React.useLayoutEffect(() => {
-        if (!props.onRendererAtEndChange) return undefined;
         emitRendererAtEndState();
         const state = legendListRef.current?.getState();
-        if (!state) return undefined;
+        if (!state || typeof state.listen !== 'function') return undefined;
         const unlisten = [
             state.listen('isAtEnd', emitRendererAtEndState),
             state.listen('isNearEnd', emitRendererAtEndState),
@@ -178,6 +416,7 @@ function LegendListTranscriptRendererInner<TItem>(
         clearLayoutCacheOnUpdate: () => {
             legendListRef.current?.clearCaches({ mode: 'sizes' });
         },
+        notifyViewportGeometryChanged: requestHeldTailRetarget,
         computeVisibleIndices: () => {
             const state = legendListRef.current?.getState();
             if (!state) return { startIndex: 0, endIndex: 0 };
@@ -204,9 +443,7 @@ function LegendListTranscriptRendererInner<TItem>(
             if (!Number.isFinite(y) || !Number.isFinite(height)) return undefined;
             return { x: 0, y, width: 0, height };
         },
-        scrollToEnd: (params) => {
-            settleLegendScroll(legendListRef.current?.scrollToEnd(params));
-        },
+        scrollToEnd: scrollRendererToEnd,
         scrollToIndex: (params) => {
             const legendIndex = toLegendIndex(params.index, dataLength, projectChronologicalIndex);
             settleLegendScroll(legendListRef.current?.scrollToIndex({
@@ -224,7 +461,7 @@ function LegendListTranscriptRendererInner<TItem>(
         scrollToOffset: (params) => {
             settleLegendScroll(legendListRef.current?.scrollToOffset(params));
         },
-    }), [dataLength, projectChronologicalIndex, props.onScrollToIndexFailed]);
+    }), [dataLength, projectChronologicalIndex, props.onScrollToIndexFailed, requestHeldTailRetarget, scrollRendererToEnd]);
 
     const renderItem: LegendListProps<TItem>['renderItem'] = (info) => props.renderItem({
         item: info.item,
@@ -235,9 +472,31 @@ function LegendListTranscriptRendererInner<TItem>(
             updateProps: () => undefined,
         },
     });
+    const visualBottomSlot = toLegendSlot(projectChronologicalIndex ? props.header : props.footer);
+    React.useLayoutEffect(() => {
+        if (!hasCommittedVisualBottomSlotRef.current) {
+            hasCommittedVisualBottomSlotRef.current = true;
+            previousVisualBottomSlotRef.current = visualBottomSlot;
+            return;
+        }
+        const changed = previousVisualBottomSlotRef.current !== visualBottomSlot;
+        previousVisualBottomSlotRef.current = visualBottomSlot;
+        if (changed) requestHeldTailRetarget();
+    }, [requestHeldTailRetarget, visualBottomSlot]);
+    const legendVisualBottomSlot = React.useMemo<LegendListProps<TItem>['ListFooterComponent']>(() => (
+        visualBottomSlot ? (
+            <View ref={visualBottomSlotHostRef} onLayout={handleVisualBottomSlotLayout}>
+                {visualBottomSlot}
+            </View>
+        ) : null
+    ), [handleVisualBottomSlotLayout, visualBottomSlot]);
 
-    const legendProps: LegendListProps<TItem> = {
+    const legendPlatformInteractionProps = {
         ...props.platformInteractionProps,
+        onWheel: Platform.OS === 'web' ? handleLegendWheel : props.platformInteractionProps?.onWheel,
+    };
+    const legendProps: LegendListProps<TItem> = {
+        ...legendPlatformInteractionProps,
         style: LEGEND_LIST_STYLE,
         alignItemsAtEnd: true,
         data,
@@ -255,7 +514,10 @@ function LegendListTranscriptRendererInner<TItem>(
                 return typeof type === 'number' ? String(type) : type;
             }
             : undefined,
-        initialScrollAtEnd: true,
+        // Continuous tail maintenance belongs to Legend, but initial placement must respect the
+        // app-owned discrete entry intent. A released/anchored entry starts away from the tail so
+        // entry restore can consume its saved anchor before any at-end observation clears it.
+        initialScrollAtEnd: props.frame.rendererOptions.legend.initialScrollAtEnd,
         keyExtractor: (item, index) => props.keyExtractor(
             item,
             toSourceIndex(index, dataLength, projectChronologicalIndex),
@@ -270,7 +532,7 @@ function LegendListTranscriptRendererInner<TItem>(
         // visual top (ListHeaderComponent). Without this, the inset spacer renders at the top and
         // the last row lays out under the floating composer (native occlusion, live-measured
         // ~130pt on 2026-07-08). Oldest-first frames already are standard space: no swap.
-        ListFooterComponent: toLegendSlot(projectChronologicalIndex ? props.header : props.footer),
+        ListFooterComponent: legendVisualBottomSlot,
         ListHeaderComponent: toLegendSlot(projectChronologicalIndex ? props.footer : props.header),
         maintainScrollAtEnd: { animated: false },
         maintainScrollAtEndThreshold: props.frame.rendererOptions.legend.maintainScrollAtEndThreshold,
@@ -278,14 +540,13 @@ function LegendListTranscriptRendererInner<TItem>(
         onEndReached: props.onEndReached,
         onEndReachedThreshold: props.onEndReachedThreshold,
         onItemSizeChanged: emitSynthesizedContentSize,
-        onLayout: props.onLayout,
         onLoad: (info) => {
             emitSynthesizedContentSize();
             props.onLoad?.(info);
         },
         onMomentumScrollBegin: props.onMomentumScrollBegin,
         onMomentumScrollEnd: props.onMomentumScrollEnd,
-        onScroll: props.onScroll,
+        onScroll: handleLegendScroll,
         onScrollBeginDrag: props.onScrollBeginDrag,
         onScrollEndDrag: props.onScrollEndDrag,
         onStartReached: props.onStartReached,
@@ -302,7 +563,9 @@ function LegendListTranscriptRendererInner<TItem>(
 
     return (
         <View
+            ref={identityHostRef}
             nativeID={props.frame.rendererOptions.flashList.nativeID}
+            onLayout={handleLegendLayout}
             testID={props.frame.rendererOptions.flashList.testID}
             style={LEGEND_IDENTITY_HOST_STYLE}
         >

@@ -2124,6 +2124,11 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         // must re-pin because the usable viewport height changed with no content change.
         if (appOwnsContinuousFollow) {
             requestAutomaticLiveTailPin(null, 'viewport-resized');
+        } else {
+            // Legend remains the sole continuous-follow writer. The host only reports that its
+            // usable viewport geometry changed; the adapter re-targets iff its held-tail intent
+            // is still active, and stays inert for a genuinely detached viewport.
+            listRef.current?.notifyViewportGeometryChanged?.();
         }
     }, [appOwnsContinuousFollow, observeMountSettleMetrics, requestAutomaticLiveTailPin]);
     const transcriptItemsEdgeSlots = useTranscriptItemsEdgeSlots({
