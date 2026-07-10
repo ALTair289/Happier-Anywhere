@@ -142,6 +142,7 @@ describe('CapabilitiesSchema (server capabilities)', () => {
             inactivityDays: 30,
             requires: ['updatedAt', 'lastActiveAt'],
           },
+          sessionMessages: { mode: 'delete_older_than', days: 30 },
           accountChanges: { mode: 'delete_older_than', days: 30 },
           voiceSessionLeases: { mode: 'keep_forever' },
           userFeedItems: { mode: 'delete_older_than', days: 90 },
@@ -166,6 +167,7 @@ describe('CapabilitiesSchema (server capabilities)', () => {
         inactivityDays: 30,
         requires: ['updatedAt', 'lastActiveAt'],
       },
+      sessionMessages: { mode: 'delete_older_than', days: 30 },
       accountChanges: { mode: 'delete_older_than', days: 30 },
       voiceSessionLeases: { mode: 'keep_forever' },
     });
