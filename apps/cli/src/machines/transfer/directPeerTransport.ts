@@ -543,7 +543,7 @@ function serializeDirectPeerOpenRequestBodyToBytes(params: Readonly<{
   openBody: unknown;
   estimatedBytes: number;
   maxBodyBytes: number;
-}>): Uint8Array {
+}>): Uint8Array<ArrayBuffer> {
   // Avoid a double-buffer peak (`Uint8Array[]` + concatenated buffer) without iterating the JSON
   // generator twice (which could re-run `toJSON()` hooks and/or introduce side-effects).
   const maxBodyBytes = Math.max(0, Math.floor(params.maxBodyBytes));
@@ -618,7 +618,7 @@ function createDirectPeerOpenRequestBodyStream(params: Readonly<{ openBody: unkn
 }
 
 type DirectPeerOpenRequestBodyTransmission =
-  | Readonly<{ kind: 'bytes'; body: Uint8Array }>
+  | Readonly<{ kind: 'bytes'; body: Uint8Array<ArrayBuffer> }>
   | Readonly<{ kind: 'stream'; body: () => ReadableStream<Uint8Array> }>;
 
 function createDirectPeerOpenRequestBodyTransmission(params: Readonly<{
