@@ -23,6 +23,7 @@ import { ConnectedServiceAuthGroupRuntimeQuotaSnapshotStore } from '../accountGr
 import { createProviderAccountUsageStore } from '../accountUsage/store';
 import { CLAUDE_SUBSCRIPTION_OAUTH_SCOPE } from '../descriptors/connectedAccountDescriptors';
 import { ConnectedServiceQuotasCoordinator } from './ConnectedServiceQuotasCoordinator';
+import type { RuntimeAccountIdentityProbeResult } from './identity/runtimeAccountIdentityTypes';
 import { ConnectedServiceQuotaFetchError, type ConnectedServiceQuotaFetcher } from './types';
 import { DEFAULT_CONNECTED_SERVICE_AUTH_GROUP_POLICY_V1 } from '../accountGroups/selection/selectConnectedServiceAuthGroupCandidate';
 import { ConnectedServiceRuntimeRegistry } from '../runtimeRegistry/registry';
@@ -5045,6 +5046,183 @@ describe('ConnectedServiceQuotasCoordinator', () => {
         ],
       }),
     }));
+  });
+
+  describe('cold-index same-account fanout persisted-identity fallback', () => {
+    const buildColdFanoutHarness = (options: Readonly<{
+      probe: () => Promise<RuntimeAccountIdentityProbeResult>;
+      readPersistedSessionAccountIdentity?: (input: {
+        sessionId: string;
+        serviceId: string;
+        groupId: string;
+        profileId: string;
+        expectedGroupGeneration: number | null;
+      }) => Promise<{
+        providerAccountId: string;
+        serviceId: 'openai-codex';
+        groupId: string | null;
+        profileId: string;
+        groupGeneration: number | null;
+      } | null>;
+    }>) => {
+      const now = 1_000_000;
+      const credentials: Credentials = {
+        token: 'happy-token',
+        encryption: { type: 'legacy', secret: new Uint8Array(32).fill(9) },
+      };
+      const api = {
+        getAccountEncryptionMode: vi.fn(async () => 'plain' as const),
+        getConnectedServiceQuotaSnapshotPlain: vi.fn(async () => null),
+        getConnectedServiceCredentialPlain: vi.fn(async () => null),
+        registerProviderAccountUsageSnapshotPlain: vi.fn(async () => {}),
+        getConnectedServiceQuotaSnapshotSealed: vi.fn(async () => null),
+        getConnectedServiceCredentialSealed: vi.fn(async () => null),
+        registerProviderAccountUsageSnapshotSealed: vi.fn(async () => {}),
+      } as unknown as QuotaApi;
+      const switchBeforeTurn = vi.fn(async () => ({ status: 'switched' as const, activeProfileId: 'backup', generation: 2 }));
+      const readRuntimeAccountIdentity = vi.fn(options.probe);
+      const readPersistedSessionAccountIdentity = options.readPersistedSessionAccountIdentity
+        ? vi.fn(options.readPersistedSessionAccountIdentity)
+        : undefined;
+      const diagnostics: unknown[] = [];
+      const coordinator = new ConnectedServiceQuotasCoordinator({
+        api,
+        credentials,
+        quotaFetchers: [],
+        now: () => now,
+        randomBytes: (length: number) => randomBytes(length),
+        authGroupSwitchCoordinator: { switchBeforeTurn },
+        groupSwitchCheckMinIntervalMs: 0,
+        sameAccountFanoutStrategyResolver: () => 'provider_account_id',
+        readRuntimeAccountIdentity,
+        ...(readPersistedSessionAccountIdentity ? { readPersistedSessionAccountIdentity } : {}),
+        recordDiagnostic: (event) => diagnostics.push(event),
+      });
+      // Register source + a COLD sibling (no recordRuntimeAccountIdentityFromSnapshot ⇒ index is cold
+      // for the sibling, so it flows through the cold reconcile path — the post-restart scenario).
+      for (const [sessionId, pid] of [['source', 701], ['same-account', 702]] as const) {
+        coordinator.registerSpawnTarget({
+          pid,
+          sessionId,
+          connectedServicesBindingsRaw: {
+            v: 1,
+            bindingsByServiceId: {
+              'openai-codex': { source: 'connected', selection: 'group', groupId: 'team' },
+            },
+          },
+          connectedServiceSelectionsEnv: {
+            [HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY]: JSON.stringify([{
+              kind: 'group',
+              serviceId: 'openai-codex',
+              groupId: 'team',
+              activeProfileId: 'primary',
+              fallbackProfileId: 'backup',
+              generation: 4,
+            }]),
+          },
+        });
+      }
+      return { coordinator, switchBeforeTurn, diagnostics, readPersistedSessionAccountIdentity, now };
+    };
+
+    it('retains a cold sibling via its persisted materialization identity when the live probe is inexact', async () => {
+      const harness = buildColdFanoutHarness({
+        probe: async () => ({ status: 'inexact', reason: 'runtime_identity_probe_missing_exact_identity' }),
+        readPersistedSessionAccountIdentity: async () => ({
+          providerAccountId: 'acct-a',
+          serviceId: 'openai-codex',
+          groupId: 'team',
+          profileId: 'primary',
+          groupGeneration: 4,
+        }),
+      });
+
+      await expect(harness.coordinator.recordAccountExhaustionAndFanout({
+        sourceSessionId: 'source',
+        serviceId: 'openai-codex',
+        groupId: 'team',
+        exhaustedProfileId: 'primary',
+        providerAccountId: 'acct-a',
+        resetAtMs: null,
+        reason: 'usage_limit',
+      })).resolves.toEqual({ status: 'recorded', fanoutCandidates: 1, fanoutRequests: 1 });
+
+      expect(harness.switchBeforeTurn).toHaveBeenCalledWith(expect.objectContaining({
+        sessionId: 'same-account',
+        reason: 'same_provider_account_exhausted',
+      }));
+      expect(harness.diagnostics).toContainEqual(expect.objectContaining({
+        event: 'quota_work_deferred',
+        phase: 'same_account_fanout',
+        reason: 'same_account_fanout_retained_via_persisted_materialization_identity',
+        decisionTrace: expect.objectContaining({ proofSource: 'persisted_materialization_identity' }),
+      }));
+    });
+
+    it('still suppresses a cold sibling when the live probe VERIFIES a different account, even if persisted identity matches', async () => {
+      const harness = buildColdFanoutHarness({
+        probe: async () => ({
+          status: 'verified',
+          strategy: 'provider_account_id',
+          providerAccountId: 'acct-b',
+          proofStrength: 'exact',
+          source: 'runtime_identity_probe',
+          profileId: 'primary',
+          groupId: 'team',
+          groupGeneration: 4,
+        }),
+        readPersistedSessionAccountIdentity: async () => ({
+          providerAccountId: 'acct-a',
+          serviceId: 'openai-codex',
+          groupId: 'team',
+          profileId: 'primary',
+          groupGeneration: 4,
+        }),
+      });
+
+      await expect(harness.coordinator.recordAccountExhaustionAndFanout({
+        sourceSessionId: 'source',
+        serviceId: 'openai-codex',
+        groupId: 'team',
+        exhaustedProfileId: 'primary',
+        providerAccountId: 'acct-a',
+        resetAtMs: null,
+        reason: 'usage_limit',
+      })).resolves.toEqual({ status: 'recorded', fanoutCandidates: 0, fanoutRequests: 0 });
+
+      expect(harness.switchBeforeTurn).not.toHaveBeenCalled();
+      expect(harness.readPersistedSessionAccountIdentity).not.toHaveBeenCalled();
+      expect(harness.diagnostics).toContainEqual(expect.objectContaining({
+        reason: 'runtime_identity_probe_account_mismatch',
+      }));
+    });
+
+    it('suppresses a cold sibling with proofSourcesTried when neither probe nor persisted identity proves the account', async () => {
+      const harness = buildColdFanoutHarness({
+        probe: async () => ({ status: 'inexact', reason: 'runtime_identity_probe_missing_exact_identity' }),
+        readPersistedSessionAccountIdentity: async () => null,
+      });
+
+      await expect(harness.coordinator.recordAccountExhaustionAndFanout({
+        sourceSessionId: 'source',
+        serviceId: 'openai-codex',
+        groupId: 'team',
+        exhaustedProfileId: 'primary',
+        providerAccountId: 'acct-a',
+        resetAtMs: null,
+        reason: 'usage_limit',
+      })).resolves.toEqual({ status: 'recorded', fanoutCandidates: 0, fanoutRequests: 0 });
+
+      expect(harness.switchBeforeTurn).not.toHaveBeenCalled();
+      expect(harness.readPersistedSessionAccountIdentity).toHaveBeenCalledOnce();
+      expect(harness.diagnostics).toContainEqual(expect.objectContaining({
+        event: 'quota_work_suppressed',
+        reason: 'runtime_identity_probe_missing_exact_identity',
+        decisionTrace: expect.objectContaining({
+          proofSourcesTried: ['runtime_identity_probe', 'persisted_materialization_identity'],
+        }),
+      }));
+    });
   });
 
   it('applies warmed direct-live-capable same-account siblings immediately when runtime reconciliation reports an active provider turn', async () => {

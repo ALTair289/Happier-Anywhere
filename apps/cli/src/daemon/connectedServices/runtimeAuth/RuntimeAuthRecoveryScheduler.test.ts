@@ -91,6 +91,14 @@ describe('RuntimeAuthRecoveryScheduler', () => {
       },
     });
     expect(diagnostics.map((event) => event.event)).toContain('runtime_auth_recovery_enqueue');
+    // The recovery diagnostic must carry the ORIGINAL failure kind alongside the mapped retry class.
+    // The mapped `classification.kind` renames usage_limit → rate_limited and misled a live
+    // investigation (2026-07-10); `failureKind` preserves the real cause for log readers.
+    const enqueueEvent = diagnostics.find((event) => event.event === 'runtime_auth_recovery_enqueue');
+    expect(enqueueEvent).toMatchObject({
+      failureKind: 'usage_limit',
+      classification: { kind: 'rate_limited' },
+    });
   });
 
   it('allowlist-sanitizes runtime classifications before retaining recovery state', async () => {

@@ -394,11 +394,12 @@ export type SameAccountFanoutProofSource =
   | 'runtime_auth_failure_report'
   | 'runtime_identity_index'
   | 'runtime_identity_probe'
-  | 'registry_binding';
+  | 'registry_binding'
+  | 'persisted_materialization_identity';
 export type SameAccountFanoutDecisionTrace = Readonly<{
   proofSource: SameAccountFanoutProofSource;
   sameAccountFanoutStrategy?: ConnectedServiceSameAccountFanoutStrategy;
-  proofKind?: 'registry_binding' | 'runtime_exact' | 'runtime_identity_index' | 'runtime_auth_failure_report';
+  proofKind?: 'registry_binding' | 'runtime_exact' | 'runtime_identity_index' | 'runtime_auth_failure_report' | 'persisted_materialization_identity';
   sourceSessionId: string;
   sourceProfileId: string;
   expectedGroupGeneration: number | null;

@@ -1,7 +1,9 @@
 import type { ConnectedServiceId } from '@happier-dev/protocol';
 
+import { persistedSessionAccountIdentityMatchesFailingAccount } from './resolvePersistedMaterializationIdentityFanoutMatch';
 import { resolveRuntimeAccountIdentityFanoutMatch } from './resolveRuntimeAccountIdentityFanoutMatch';
 import type {
+  PersistedSessionAccountIdentityReader,
   ReconciledRuntimeAccountIdentityEntry,
   RuntimeAccountIdentityEntry,
   RuntimeAccountIdentityProbeResult,
@@ -33,6 +35,9 @@ type SameAccountFanoutDiagnostic = Readonly<{
   actualGroupId?: string | null;
   expectedGroupGeneration?: number | null;
   actualGroupGeneration?: number | null;
+  // Carries the proof source(s) tried (e.g. `runtime_identity_probe`, `persisted_materialization_identity`).
+  // Typed `unknown` so it stays assignable to the coordinator's richer diagnostic type.
+  decisionTrace?: unknown;
 }>;
 
 function recordSuppression(
@@ -50,6 +55,7 @@ function recordSuppression(
     actualGroupId?: string | null;
     expectedGroupGeneration?: number | null;
     actualGroupGeneration?: number | null;
+    decisionTrace?: unknown;
   }>,
 ): void {
   recordDiagnostic?.({
@@ -61,12 +67,43 @@ function recordSuppression(
 
 const STABLE_UNSUPPORTED_PROBE_REASON = 'unsupported_session_runtime_method';
 
+/**
+ * Build the durable retained entry when the persisted materialization identity supplies the fanout
+ * proof. Recorded into the runtime identity index so the (cold) index re-warms and subsequent ticks
+ * hit the fast indexed path.
+ */
+function buildPersistedFallbackEntry(input: Readonly<{
+  candidate: RuntimeAccountIdentityEntry;
+  serviceId: ConnectedServiceId;
+  groupId: string;
+  providerAccountId: string;
+  observedAtMs: number;
+}>): RuntimeAccountIdentityEntry {
+  return {
+    sessionId: input.candidate.sessionId,
+    serviceId: input.serviceId,
+    groupId: input.candidate.groupId ?? input.groupId,
+    profileId: input.candidate.profileId,
+    providerAccountId: input.providerAccountId,
+    accountLabel: input.candidate.accountLabel,
+    observedAtMs: input.observedAtMs,
+    source: 'persisted_materialization_identity',
+    proofStrength: 'exact',
+    groupGeneration: input.candidate.groupGeneration,
+  };
+}
+
 export async function reconcileIndexedSameAccountFanoutCandidates(input: Readonly<{
   serviceId: ConnectedServiceId;
   groupId: string;
   providerAccountId: string;
   indexedCandidates: ReadonlyArray<RuntimeAccountIdentityEntry>;
   readRuntimeAccountIdentity?: RuntimeAccountIdentityReader | null;
+  /**
+   * Durable fallback proof source. When the live probe is UNAVAILABLE or INEXACT (never on a VERIFIED
+   * mismatch), the candidate's persisted materialization identity can supply the fanout proof.
+   */
+  readPersistedSessionAccountIdentity?: PersistedSessionAccountIdentityReader | null;
   /**
    * Does this candidate's provider require a LIVE session-runtime identity probe (codex) or is its
    * account binding DAEMON-authoritative via broker/shared-group indirection (opencode/pi/claude)?
@@ -88,6 +125,53 @@ export async function reconcileIndexedSameAccountFanoutCandidates(input: Readonl
   if (input.indexedCandidates.length === 0) {
     return [];
   }
+
+  // Durable fallback: attempt the persisted materialization identity proof for a candidate whose live
+  // probe could not verify identity (unavailable/inexact — NOT a verified mismatch). Returns the
+  // retained entry (also recorded to re-warm the index) or null when no durable proof is available.
+  const attemptPersistedFallback = async (
+    candidate: RuntimeAccountIdentityEntry,
+  ): Promise<RuntimeAccountIdentityEntry | null> => {
+    if (!input.readPersistedSessionAccountIdentity) return null;
+    let identity: Awaited<ReturnType<PersistedSessionAccountIdentityReader>>;
+    try {
+      identity = await input.readPersistedSessionAccountIdentity({
+        sessionId: candidate.sessionId,
+        serviceId: input.serviceId,
+        groupId: candidate.groupId ?? input.groupId,
+        profileId: candidate.profileId,
+        expectedGroupGeneration: candidate.groupGeneration,
+      });
+    } catch {
+      return null;
+    }
+    if (!identity) return null;
+    const matched = persistedSessionAccountIdentityMatchesFailingAccount({
+      identity,
+      serviceId: input.serviceId,
+      groupId: input.groupId,
+      providerAccountId: input.providerAccountId,
+      candidate,
+    });
+    if (!matched) return null;
+    const retained = buildPersistedFallbackEntry({
+      candidate,
+      serviceId: input.serviceId,
+      groupId: input.groupId,
+      providerAccountId: input.providerAccountId,
+      observedAtMs: input.now(),
+    });
+    input.recordRuntimeAccountIdentity(retained);
+    input.recordDiagnostic?.({
+      event: 'quota_work_deferred',
+      phase: 'same_account_fanout',
+      reason: 'same_account_fanout_retained_via_persisted_materialization_identity',
+      sessionId: candidate.sessionId,
+      expectedProviderAccountId: input.providerAccountId,
+      decisionTrace: { proofSource: 'persisted_materialization_identity' },
+    });
+    return retained;
+  };
 
   const reconciled: Array<RuntimeAccountIdentityEntry | ReconciledRuntimeAccountIdentityEntry> = [];
   for (const candidate of input.indexedCandidates) {
@@ -127,6 +211,11 @@ export async function reconcileIndexedSameAccountFanoutCandidates(input: Readonl
         expectedGroupGeneration: candidate.groupGeneration,
       });
     } catch {
+      const fallback = await attemptPersistedFallback(candidate);
+      if (fallback) {
+        reconciled.push(fallback);
+        continue;
+      }
       recordSuppression(input.recordDiagnostic, {
         reason: 'runtime_identity_probe_missing_exact_identity',
         sessionId: candidate.sessionId,
@@ -137,6 +226,9 @@ export async function reconcileIndexedSameAccountFanoutCandidates(input: Readonl
         actualGroupId: candidate.groupId ?? input.groupId,
         expectedGroupGeneration: candidate.groupGeneration,
         actualGroupGeneration: candidate.groupGeneration,
+        ...(input.readPersistedSessionAccountIdentity
+          ? { decisionTrace: { proofSource: 'runtime_identity_probe', proofSourcesTried: ['runtime_identity_probe', 'persisted_materialization_identity'] } }
+          : {}),
       });
       input.invalidateRuntimeAccountIdentity(candidate.sessionId);
       continue;
@@ -158,9 +250,22 @@ export async function reconcileIndexedSameAccountFanoutCandidates(input: Readonl
       observedAtMs: input.now(),
     });
     if (match.status === 'suppressed') {
+      // A VERIFIED live probe pointing at a genuinely different account is an authoritative veto —
+      // never fall back. Only an unverifiable probe (unavailable/inexact) is eligible for the durable
+      // persisted-identity fallback.
+      if (result.status !== 'verified') {
+        const fallback = await attemptPersistedFallback(candidate);
+        if (fallback) {
+          reconciled.push(fallback);
+          continue;
+        }
+      }
       recordSuppression(input.recordDiagnostic, {
         reason: match.reason,
         ...match.diagnostic,
+        ...(input.readPersistedSessionAccountIdentity && result.status !== 'verified'
+          ? { decisionTrace: { proofSource: 'runtime_identity_probe', proofSourcesTried: ['runtime_identity_probe', 'persisted_materialization_identity'] } }
+          : {}),
       });
       input.invalidateRuntimeAccountIdentity(candidate.sessionId);
       continue;

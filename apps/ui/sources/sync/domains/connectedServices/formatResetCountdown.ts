@@ -21,6 +21,17 @@ export type ResetCountdownFormatter = Readonly<{
     durationMinutes: (params: Readonly<{ minutes: number }>) => string;
 }>;
 
+/**
+ * True when a reset timestamp exists but already elapsed (or is malformed): the usage snapshot
+ * predates its own reset boundary, so "resets in …" phrasing must not be composed around it
+ * (observed live as the nonsense label "resets in outdated").
+ */
+export function isResetCountdownOutdated(nowMs: number, resetsAtMs: number | null): boolean {
+    if (!resetsAtMs) return false;
+    const delta = resetsAtMs - nowMs;
+    return !Number.isFinite(delta) || delta < 0;
+}
+
 export function formatResetCountdown(
     nowMs: number,
     resetsAtMs: number | null,

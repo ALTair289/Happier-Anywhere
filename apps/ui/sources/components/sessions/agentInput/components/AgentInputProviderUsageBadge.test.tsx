@@ -98,7 +98,9 @@ describe('AgentInputProviderUsageBadge', () => {
         });
 
         const meterFill = screen.findByTestId('agent-input-provider-usage-meter-bar:weekly:fill');
-        expect(flattenStyle(meterFill?.props.style).width).toBe('82%');
+        // Remaining-first fill: the row label says "18% left", so the bar fills 18% (battery model;
+        // user decision 2026-07-10 reverting the consumption-fill flip in 5ad4d06be).
+        expect(flattenStyle(meterFill?.props.style).width).toBe('18%');
 
         expect(screen.getTextContent()).toContain('1 reset available');
         const action = screen.tree.root.findAll((node) => node.props?.testID === 'agent-input-provider-usage-recovery-credit-action')[0] ?? null;

@@ -206,6 +206,129 @@ describe('reconcileIndexedSameAccountFanoutCandidates', () => {
     }));
     expect(reconciliation.invalidateRuntimeAccountIdentity).toHaveBeenCalledWith('sess_same');
   });
+
+  it('retains a candidate via its persisted materialization identity when the live probe is unavailable', async () => {
+    const diagnostics: unknown[] = [];
+    const recordRuntimeAccountIdentity = vi.fn((): RuntimeAccountIdentityRecordResult => ({ status: 'recorded' }));
+    const invalidateRuntimeAccountIdentity = vi.fn();
+    const readPersistedSessionAccountIdentity = vi.fn(async () => ({
+      providerAccountId: 'acct-a',
+      serviceId: 'openai-codex' as const,
+      groupId: 'team',
+      profileId: 'stale-profile',
+      groupGeneration: 4,
+    }));
+
+    const result = await reconcileIndexedSameAccountFanoutCandidates({
+      serviceId: 'openai-codex',
+      groupId: 'team',
+      providerAccountId: 'acct-a',
+      indexedCandidates: [indexedCandidate],
+      readRuntimeAccountIdentity: vi.fn(async (): Promise<RuntimeAccountIdentityProbeResult> => ({
+        status: 'unavailable',
+        reason: 'runtime_probe_timeout',
+      })),
+      readPersistedSessionAccountIdentity,
+      now: () => 1_000,
+      recordRuntimeAccountIdentity,
+      invalidateRuntimeAccountIdentity,
+      recordDiagnostic: (event) => diagnostics.push(event),
+    });
+
+    expect(result).toEqual([
+      expect.objectContaining({
+        sessionId: 'sess_same',
+        providerAccountId: 'acct-a',
+        source: 'persisted_materialization_identity',
+      }),
+    ]);
+    expect(recordRuntimeAccountIdentity).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 'sess_same',
+      source: 'persisted_materialization_identity',
+      providerAccountId: 'acct-a',
+    }));
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'quota_work_deferred',
+      phase: 'same_account_fanout',
+      reason: 'same_account_fanout_retained_via_persisted_materialization_identity',
+      decisionTrace: expect.objectContaining({ proofSource: 'persisted_materialization_identity' }),
+    }));
+    expect(invalidateRuntimeAccountIdentity).not.toHaveBeenCalled();
+  });
+
+  it('never falls back to persisted identity when the live probe VERIFIES a different account', async () => {
+    const readPersistedSessionAccountIdentity = vi.fn(async () => ({
+      providerAccountId: 'acct-a',
+      serviceId: 'openai-codex' as const,
+      groupId: 'team',
+      profileId: 'stale-profile',
+      groupGeneration: 4,
+    }));
+    const diagnostics: unknown[] = [];
+    const invalidateRuntimeAccountIdentity = vi.fn();
+
+    const result = await reconcileIndexedSameAccountFanoutCandidates({
+      serviceId: 'openai-codex',
+      groupId: 'team',
+      providerAccountId: 'acct-a',
+      indexedCandidates: [indexedCandidate],
+      readRuntimeAccountIdentity: vi.fn(async (): Promise<RuntimeAccountIdentityProbeResult> => ({
+        status: 'verified',
+        strategy: 'provider_account_id',
+        providerAccountId: 'acct-b',
+        proofStrength: 'exact',
+        source: 'runtime_identity_probe',
+        profileId: 'stale-profile',
+        groupId: 'team',
+        groupGeneration: 4,
+      })),
+      readPersistedSessionAccountIdentity,
+      now: () => 1_000,
+      recordRuntimeAccountIdentity: vi.fn((): RuntimeAccountIdentityRecordResult => ({ status: 'recorded' })),
+      invalidateRuntimeAccountIdentity,
+      recordDiagnostic: (event) => diagnostics.push(event),
+    });
+
+    expect(result).toEqual([]);
+    expect(readPersistedSessionAccountIdentity).not.toHaveBeenCalled();
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      reason: 'runtime_identity_probe_account_mismatch',
+    }));
+    expect(invalidateRuntimeAccountIdentity).toHaveBeenCalledWith('sess_same');
+  });
+
+  it('suppresses with proofSourcesTried when the probe is unavailable and no persisted identity matches', async () => {
+    const readPersistedSessionAccountIdentity = vi.fn(async () => null);
+    const diagnostics: unknown[] = [];
+    const invalidateRuntimeAccountIdentity = vi.fn();
+
+    const result = await reconcileIndexedSameAccountFanoutCandidates({
+      serviceId: 'openai-codex',
+      groupId: 'team',
+      providerAccountId: 'acct-a',
+      indexedCandidates: [indexedCandidate],
+      readRuntimeAccountIdentity: vi.fn(async (): Promise<RuntimeAccountIdentityProbeResult> => ({
+        status: 'inexact',
+        reason: 'runtime_identity_probe_missing_exact_identity',
+      })),
+      readPersistedSessionAccountIdentity,
+      now: () => 1_000,
+      recordRuntimeAccountIdentity: vi.fn((): RuntimeAccountIdentityRecordResult => ({ status: 'recorded' })),
+      invalidateRuntimeAccountIdentity,
+      recordDiagnostic: (event) => diagnostics.push(event),
+    });
+
+    expect(result).toEqual([]);
+    expect(readPersistedSessionAccountIdentity).toHaveBeenCalledOnce();
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'quota_work_suppressed',
+      reason: 'runtime_identity_probe_missing_exact_identity',
+      decisionTrace: expect.objectContaining({
+        proofSourcesTried: ['runtime_identity_probe', 'persisted_materialization_identity'],
+      }),
+    }));
+    expect(invalidateRuntimeAccountIdentity).toHaveBeenCalledWith('sess_same');
+  });
 });
 
 describe('resolveRuntimeAccountIdentityFanoutMatch', () => {

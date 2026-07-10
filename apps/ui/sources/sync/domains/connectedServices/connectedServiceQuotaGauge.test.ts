@@ -196,6 +196,27 @@ describe('computeConnectedServiceQuotaGaugeViewModel', () => {
         expect(viewModel?.allMeterRows[0]?.usedLimitLabel).toBe('82/100 used');
     });
 
+    it('drops the reset clause when the reset boundary already elapsed instead of composing "resets in outdated"', () => {
+        const viewModel = computeConnectedServiceQuotaGaugeViewModel({
+            snapshot: snapshot([
+                meter({
+                    meterId: 'weekly',
+                    label: 'Weekly',
+                    used: 35,
+                    limit: 100,
+                    // Snapshot predates its own reset boundary: the reset timestamp is in the past.
+                    resetsAt: 1_000,
+                }),
+            ]),
+            windowMode: 'weekly',
+            nowMs: 2_000,
+            formatter,
+        });
+
+        expect(viewModel?.detailRightLabel).toBe('65% left');
+        expect(viewModel?.allMeterRows[0]?.detailRightLabel).toBe('65% left');
+    });
+
     it('uses first-class remaining and used percentages from provider quota meters', () => {
         const viewModel = computeConnectedServiceQuotaGaugeViewModel({
             snapshot: snapshot([

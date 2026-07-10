@@ -10,7 +10,7 @@ import { Typography } from '@/constants/Typography';
 import type { ConnectedServiceQuotaMeterV1 } from '@happier-dev/protocol';
 
 import { clampQuotaPct, deriveQuotaUtilizationPct } from '@/sync/domains/connectedServices/deriveQuotaUtilizationPct';
-import { formatResetCountdown, type ResetCountdownFormatter } from '@/sync/domains/connectedServices/formatResetCountdown';
+import { formatResetCountdown, isResetCountdownOutdated, type ResetCountdownFormatter } from '@/sync/domains/connectedServices/formatResetCountdown';
 import { resolveQuotaTone } from '@/sync/domains/connectedServices/resolveQuotaTone';
 import { t } from '@/text';
 
@@ -62,7 +62,11 @@ export const ConnectedServiceQuotaMeterRow = React.memo(function ConnectedServic
     ? clampQuotaPct(props.meter.remainingPct)
     : utilization === null ? null : clampQuotaPct(100 - utilization);
   const remainingText = remaining === null ? '—' : `${Math.round(remaining)}%`;
-  const resetText = formatResetCountdown(props.nowMs, props.meter.resetAtMs ?? props.meter.resetsAt, RESET_COUNTDOWN_FORMATTER);
+  // An elapsed reset boundary means the snapshot predates its own reset — fall back to the plain
+  // remaining label instead of composing the nonsense phrase "resets in outdated".
+  const resetText = isResetCountdownOutdated(props.nowMs, props.meter.resetAtMs ?? props.meter.resetsAt)
+    ? null
+    : formatResetCountdown(props.nowMs, props.meter.resetAtMs ?? props.meter.resetsAt, RESET_COUNTDOWN_FORMATTER);
   const right = remaining === null
     ? remainingText
     : resetText
@@ -82,7 +86,11 @@ export const ConnectedServiceQuotaMeterRow = React.memo(function ConnectedServic
           testID="connected-service-quota-meter-row:remaining-bar"
           style={styles.bar}
           tone={tone}
-          fillFraction={(utilization ?? 0) / 100}
+          // CS quota gauges are remaining-first end to end: the labels say "% left", the tone is
+          // derived from remaining, and the capacity rings display remaining. The fill must match
+          // that language (battery model: full green bar = plenty left) — a consumption fill next
+          // to a "left" label reads inverted (user decision 2026-07-10, reverting 5ad4d06be).
+          fillFraction={(remaining ?? 0) / 100}
         />
         <Text style={styles.rightText}>{right}</Text>
       </View>

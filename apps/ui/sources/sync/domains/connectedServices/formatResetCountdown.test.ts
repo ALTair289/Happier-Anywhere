@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
     formatResetCountdown,
     formatResetCountdownDays,
+    isResetCountdownOutdated,
     type ResetCountdownDaysFormatter,
     type ResetCountdownFormatter,
 } from './formatResetCountdown';
@@ -39,6 +40,15 @@ describe('formatResetCountdown', () => {
 
     it('formats a current reset as "now"', () => {
         expect(formatResetCountdown(1000, 1000, formatter)).toBe('now');
+    });
+
+    it('reports outdated only for elapsed or malformed reset boundaries', () => {
+        // Label composers use this to DROP the "resets in …" clause for stale snapshots instead of
+        // composing the nonsense phrase "resets in outdated" (observed live 2026-07-10).
+        expect(isResetCountdownOutdated(2000, 1000)).toBe(true);
+        expect(isResetCountdownOutdated(2000, Number.NaN)).toBe(false);
+        expect(isResetCountdownOutdated(2000, null)).toBe(false);
+        expect(isResetCountdownOutdated(2000, 3000)).toBe(false);
     });
 
     it('formats a past reset as outdated rather than live-now', () => {

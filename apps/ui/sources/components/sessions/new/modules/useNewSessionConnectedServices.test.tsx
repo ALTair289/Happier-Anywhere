@@ -212,8 +212,13 @@ describe('useNewSessionConnectedServices', () => {
             }),
         );
 
-        const popover = requireCollapsedContentPopover(hook.getCurrent().connectedServicesAuthChip);
-        const content = popover.renderContent({
+        const popoverRenderer = requireCollapsedContentPopover(
+            hook.getCurrent().connectedServicesAuthChip,
+        ).renderContent;
+        if (typeof popoverRenderer !== 'function') {
+            throw new Error('Expected connected services popover content renderer');
+        }
+        const content = popoverRenderer({
             requestClose: vi.fn(),
             maxHeight: 420,
         }) as React.ReactElement<{ onOpenSettings: (serviceId: string) => void }>;

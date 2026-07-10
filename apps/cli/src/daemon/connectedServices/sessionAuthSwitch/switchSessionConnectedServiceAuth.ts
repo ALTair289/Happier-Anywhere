@@ -1147,6 +1147,17 @@ function emitConnectedServiceSwitchAttemptEvent(input: Readonly<{
   }
 
   if (!SWITCH_ATTEMPT_FAILURE_ERROR_CODES.has(input.result.errorCode)) return;
+  // Mirror of the soft-threshold guard on the SUCCESS path above. A predictive soft-threshold
+  // switch is a background optimization with a fail-safe design (RD-SW-9): it only ever hot-applies
+  // (never restarts a working session) and declines BEFORE side effects when no safe apply window
+  // exists (e.g. the session is mid-turn). The session keeps working on its current account, the
+  // next poll/in-band tick retries, and hard-limit recovery remains the backstop — so a declined
+  // hot-apply must not surface as a user-facing "Authentication could not be switched" error
+  // (observed live 2026-07-10 19:10: 4 idle siblings applied instantly, the one mid-turn session
+  // alarmed the user). Side-effectful failure codes stay loud even for soft-threshold switches.
+  if (input.groupSwitchTriggerReason === 'soft_threshold' && input.result.errorCode === 'hot_apply_failed') {
+    return;
+  }
 	  const projection = resolveSwitchAttemptEventOutcomeForFailure({
 	    errorCode: input.result.errorCode,
 	    attemptedAction: input.result.diagnostics?.attemptedAction,

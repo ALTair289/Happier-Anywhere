@@ -80,12 +80,16 @@ import {
 import {
   resolveRuntimeAccountIdentityFanoutMatch,
 } from './identity/resolveRuntimeAccountIdentityFanoutMatch';
+import {
+  persistedSessionAccountIdentityMatchesFailingAccount,
+} from './identity/resolvePersistedMaterializationIdentityFanoutMatch';
 import { resolveSessionsSharingProviderAccount } from './identity/resolveSessionsSharingProviderAccount';
 import {
   requiresExactProviderAccountFanout,
   type ConnectedServiceSameAccountFanoutStrategy,
 } from './identity/providerFanoutStrategy';
 import type {
+  PersistedSessionAccountIdentityReader,
   ReconciledRuntimeAccountIdentityEntry,
   RuntimeAccountIdentityEntry,
   RuntimeAccountIdentityProbeResult,
@@ -226,6 +230,7 @@ export class ConnectedServiceQuotasCoordinator {
   private readonly refreshConnectedServiceCredentialForQuota: RefreshConnectedServiceCredentialForQuota | null;
   private readonly runtimeAuthApplyCapabilityResolver: ConnectedServiceRuntimeAuthApplyCapabilityResolver | null;
   private readonly readRuntimeAccountIdentity: RuntimeAccountIdentityReader | null;
+  private readonly readPersistedSessionAccountIdentity: PersistedSessionAccountIdentityReader | null;
   private readonly groupSwitchCheckMinIntervalMs: number;
   private readonly groupSwitchCheckJitterMs: number;
   private readonly quotaWorkGate: DaemonServerWorkGate | null;
@@ -291,6 +296,7 @@ export class ConnectedServiceQuotasCoordinator {
     sameAccountFanoutStrategyResolver?: ConnectedServiceSameAccountFanoutStrategyResolver | null;
     runtimeAuthApplyCapabilityResolver?: ConnectedServiceRuntimeAuthApplyCapabilityResolver | null;
     readRuntimeAccountIdentity?: RuntimeAccountIdentityReader | null;
+    readPersistedSessionAccountIdentity?: PersistedSessionAccountIdentityReader | null;
     groupSwitchCheckMinIntervalMs?: number;
     groupSwitchCheckJitterMs?: number;
     quotaWorkGate?: DaemonServerWorkGate | null;
@@ -348,6 +354,7 @@ export class ConnectedServiceQuotasCoordinator {
     this.refreshConnectedServiceCredentialForQuota = params.refreshConnectedServiceCredentialForQuota ?? null;
     this.runtimeAuthApplyCapabilityResolver = params.runtimeAuthApplyCapabilityResolver ?? null;
     this.readRuntimeAccountIdentity = params.readRuntimeAccountIdentity ?? null;
+    this.readPersistedSessionAccountIdentity = params.readPersistedSessionAccountIdentity ?? null;
     this.groupSwitchCheckMinIntervalMs =
       typeof params.groupSwitchCheckMinIntervalMs === 'number' && Number.isFinite(params.groupSwitchCheckMinIntervalMs)
         ? Math.max(0, Math.trunc(params.groupSwitchCheckMinIntervalMs))
@@ -1126,7 +1133,9 @@ export class ConnectedServiceQuotasCoordinator {
         ? 'registry_binding'
         : input.proofSource === 'runtime_identity_probe'
           ? 'runtime_exact'
-          : input.proofSource,
+          : input.proofSource === 'persisted_materialization_identity'
+            ? 'persisted_materialization_identity'
+            : input.proofSource,
       sourceSessionId: input.sourceSessionId,
       sourceProfileId: input.sourceProfileId,
       expectedGroupGeneration: normalizeConnectedServiceQuotaGeneration(input.expectedGroupGeneration),
@@ -1610,6 +1619,7 @@ export class ConnectedServiceQuotasCoordinator {
       providerAccountId: input.providerAccountId,
       indexedCandidates: input.indexedCandidates,
       readRuntimeAccountIdentity: this.readRuntimeAccountIdentity,
+      readPersistedSessionAccountIdentity: this.readPersistedSessionAccountIdentity,
       // Capability choke point: broker/shared-group-indirection providers (opencode/pi/claude —
       // `requiresExactRuntimeIdentity: false`) are DAEMON-authoritative; retain them via the indexed
       // identity instead of demanding a live probe their runtime cannot answer. codex still probes.
@@ -1659,6 +1669,77 @@ export class ConnectedServiceQuotasCoordinator {
       });
     }
     return candidates.sort((left, right) => left.sessionId.localeCompare(right.sessionId));
+  }
+
+  /**
+   * Durable cold-path fallback for the `provider_account_id` strategy: when the live runtime-identity
+   * probe cannot VERIFY a candidate's account (unavailable/inexact — never a verified mismatch), retain
+   * the candidate via its PERSISTED materialization identity if it proves the same failing account and
+   * a matching group binding. Re-warms the (cold) runtime identity index so later ticks hit the fast
+   * indexed path. Best-effort: a read failure or non-match yields null (candidate stays suppressed).
+   */
+  private async attemptColdPersistedFanoutFallback(input: Readonly<{
+    serviceId: ConnectedServiceId;
+    groupId: string;
+    providerAccountId: string;
+    candidate: ActiveSameAccountFanoutCandidate;
+  }>): Promise<RuntimeAccountIdentityEntry | null> {
+    if (!this.readPersistedSessionAccountIdentity) return null;
+    let identity: Awaited<ReturnType<PersistedSessionAccountIdentityReader>>;
+    try {
+      identity = await this.readPersistedSessionAccountIdentity({
+        sessionId: input.candidate.sessionId,
+        serviceId: input.serviceId,
+        groupId: input.candidate.groupId,
+        profileId: input.candidate.profileId,
+        expectedGroupGeneration: input.candidate.groupGeneration,
+      });
+    } catch {
+      return null;
+    }
+    if (!identity) return null;
+    const matched = persistedSessionAccountIdentityMatchesFailingAccount({
+      identity,
+      serviceId: input.serviceId,
+      groupId: input.groupId,
+      providerAccountId: input.providerAccountId,
+      candidate: {
+        serviceId: input.candidate.serviceId,
+        groupId: input.candidate.groupId,
+        groupGeneration: input.candidate.groupGeneration,
+      },
+    });
+    if (!matched) return null;
+    const retained: RuntimeAccountIdentityEntry = {
+      sessionId: input.candidate.sessionId,
+      serviceId: input.serviceId,
+      groupId: input.candidate.groupId,
+      profileId: input.candidate.profileId,
+      providerAccountId: input.providerAccountId,
+      accountLabel: null,
+      observedAtMs: this.now(),
+      source: 'persisted_materialization_identity',
+      proofStrength: 'exact',
+      groupGeneration: input.candidate.groupGeneration,
+    };
+    this.runtimeRegistry.recordRuntimeAccountIdentity(retained);
+    this.recordDiagnostic?.({
+      event: 'quota_work_deferred',
+      phase: 'same_account_fanout',
+      reason: 'same_account_fanout_retained_via_persisted_materialization_identity',
+      sessionId: input.candidate.sessionId,
+      serviceId: input.serviceId,
+      groupId: input.groupId,
+      expectedProviderAccountId: input.providerAccountId,
+      decisionTrace: this.buildSameAccountFanoutDecisionTrace({
+        proofSource: 'persisted_materialization_identity',
+        sameAccountFanoutStrategy: 'provider_account_id',
+        sourceSessionId: input.candidate.sessionId,
+        sourceProfileId: input.candidate.profileId,
+        expectedGroupGeneration: input.candidate.groupGeneration,
+      }),
+    });
+    return retained;
   }
 
   private async reconcileColdSameAccountFanoutCandidates(input: Readonly<{
@@ -1786,6 +1867,16 @@ export class ConnectedServiceQuotasCoordinator {
           expectedGroupGeneration: candidate.groupGeneration,
         });
       } catch {
+        const fallback = await this.attemptColdPersistedFanoutFallback({
+          serviceId: input.serviceId,
+          groupId: input.groupId,
+          providerAccountId: input.providerAccountId,
+          candidate,
+        });
+        if (fallback) {
+          reconciled.push(fallback);
+          continue;
+        }
         this.recordSameAccountFanoutSuppression({
           reason: 'runtime_identity_probe_missing_exact_identity',
           serviceId: input.serviceId,
@@ -1793,6 +1884,9 @@ export class ConnectedServiceQuotasCoordinator {
           sourceSessionId: input.sourceSessionId,
           sourceProfileId: input.sourceProfileId,
           proofSource: 'runtime_identity_probe',
+          ...(this.readPersistedSessionAccountIdentity
+            ? { proofSourcesTried: ['runtime_identity_probe', 'persisted_materialization_identity'] as const }
+            : {}),
           sameAccountFanoutStrategy: input.strategy,
           sessionId: candidate.sessionId,
           expectedProviderAccountId: input.providerAccountId,
@@ -1823,6 +1917,20 @@ export class ConnectedServiceQuotasCoordinator {
         observedAtMs: this.now(),
       });
       if (match.status === 'suppressed') {
+        // A VERIFIED probe pointing at a genuinely different account is an authoritative veto. Only an
+        // unverifiable probe (unavailable/inexact) is eligible for the durable persisted-identity fallback.
+        if (result.status !== 'verified') {
+          const fallback = await this.attemptColdPersistedFanoutFallback({
+            serviceId: input.serviceId,
+            groupId: input.groupId,
+            providerAccountId: input.providerAccountId,
+            candidate,
+          });
+          if (fallback) {
+            reconciled.push(fallback);
+            continue;
+          }
+        }
         this.recordSameAccountFanoutSuppression({
           reason: match.reason,
           serviceId: input.serviceId,
@@ -1830,6 +1938,9 @@ export class ConnectedServiceQuotasCoordinator {
           sourceSessionId: input.sourceSessionId,
           sourceProfileId: input.sourceProfileId,
           proofSource: 'runtime_identity_probe',
+          ...(this.readPersistedSessionAccountIdentity && result.status !== 'verified'
+            ? { proofSourcesTried: ['runtime_identity_probe', 'persisted_materialization_identity'] as const }
+            : {}),
           sameAccountFanoutStrategy: input.strategy,
           ...match.diagnostic,
         });

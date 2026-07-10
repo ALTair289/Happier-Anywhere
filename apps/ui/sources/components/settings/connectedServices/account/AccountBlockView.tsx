@@ -589,7 +589,9 @@ export const AccountBlockView = React.memo<AccountBlockViewProps>((props) => {
                                 <MeterBar
                                     testID={`${testID}:meter:${row.meterId}`}
                                     tone={row.tone}
-                                    fillFraction={row.fillFraction}
+                                    // Remaining-first fill: matches the row's "% left" label and the
+                                    // capacity rings (battery model — see accountBlockModel).
+                                    fillFraction={row.remaining}
                                     caption={row.detailLabel}
                                 />
                             </View>

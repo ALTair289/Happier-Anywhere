@@ -15,7 +15,7 @@ import {
     summarizeConnectedServiceQuotaRecoveryCredits,
     type ConnectedServiceQuotaRecoveryCreditSummary,
 } from './connectedServiceQuotaRecoveryCreditSummary';
-import { formatResetCountdown } from './formatResetCountdown';
+import { formatResetCountdown, isResetCountdownOutdated } from './formatResetCountdown';
 import { resolveQuotaTone } from './resolveQuotaTone';
 
 export type ConnectedServiceQuotaGaugeWindowMode =
@@ -257,7 +257,11 @@ function buildMeterRow(
         : clampQuotaPct(100 - usedPct);
     const roundedRemaining = Math.round(remainingPct);
     const remainingLabel = `${roundedRemaining}%`;
-    const resetLabel = formatResetCountdown(nowMs, meter.resetAtMs ?? meter.resetsAt, formatter);
+    // An elapsed reset boundary means the snapshot predates its own reset — fall back to the plain
+    // remaining label instead of composing the nonsense phrase "resets in outdated".
+    const resetLabel = isResetCountdownOutdated(nowMs, meter.resetAtMs ?? meter.resetsAt)
+        ? null
+        : formatResetCountdown(nowMs, meter.resetAtMs ?? meter.resetsAt, formatter);
     return {
         meterId: meter.meterId,
         label: meter.label,

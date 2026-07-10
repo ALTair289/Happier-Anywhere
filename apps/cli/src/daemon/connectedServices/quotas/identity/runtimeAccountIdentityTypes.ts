@@ -16,7 +16,33 @@ export type RuntimeAccountIdentitySource =
   | 'group_switch_selection'
   | 'codex_live_auth_apply'
   | 'runtime_auth_failure_report'
-  | 'runtime_identity_probe';
+  | 'runtime_identity_probe'
+  // Durable fallback proof: the candidate's PERSISTED materialization identity (provider account id +
+  // group binding) matched the failing account when a live runtime-identity probe was unavailable or
+  // inexact. Survives daemon restarts (the in-memory runtime identity index does not).
+  | 'persisted_materialization_identity';
+
+/**
+ * Durable per-session account identity resolved from the session's PERSISTED metadata (its
+ * materialization identity / connected-service binding), independent of the in-memory runtime
+ * identity index that every daemon restart wipes. Used as the same-account fanout fallback proof
+ * for the `provider_account_id` strategy (codex) when a live runtime probe cannot verify identity.
+ */
+export type PersistedSessionAccountIdentity = Readonly<{
+  providerAccountId: string;
+  serviceId: ConnectedServiceId;
+  groupId: string | null;
+  profileId: string;
+  groupGeneration: number | null;
+}>;
+
+export type PersistedSessionAccountIdentityReader = (input: Readonly<{
+  sessionId: string;
+  serviceId: ConnectedServiceId;
+  groupId: string;
+  profileId: string;
+  expectedGroupGeneration: number | null;
+}>) => Promise<PersistedSessionAccountIdentity | null>;
 
 export type RuntimeAccountIdentityRecordInput = Readonly<{
   sessionId: string;

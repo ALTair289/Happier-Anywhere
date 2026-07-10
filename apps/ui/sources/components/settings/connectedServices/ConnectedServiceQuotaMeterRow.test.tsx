@@ -28,7 +28,7 @@ vi.mock('@/text', async () => {
 });
 
 describe('ConnectedServiceQuotaMeterRow', () => {
-    it('renders remaining quota text and a consumed-quota bar state', async () => {
+    it('renders remaining quota text and a remaining-filled bar state', async () => {
         const { ConnectedServiceQuotaMeterRow } = await import('./ConnectedServiceQuotaMeterRow');
 
         const nowMs = 1_000_000;
@@ -56,7 +56,9 @@ describe('ConnectedServiceQuotaMeterRow', () => {
 
         const bar = screen.findByTestId('connected-service-quota-meter-row:remaining-bar:fill');
         const style = flattenStyle(bar?.props?.style);
-        expect(style.width).toBe('82%');
+        // Remaining-first fill: the label says "18% left", so the bar fills 18% (battery model;
+        // user decision 2026-07-10 reverting the consumption-fill flip in 5ad4d06be).
+        expect(style.width).toBe('18%');
         expect(style.backgroundColor).toBe(lightTheme.colors.state.warning.foreground);
     });
 

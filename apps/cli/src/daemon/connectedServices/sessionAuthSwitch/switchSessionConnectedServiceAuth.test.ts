@@ -3911,6 +3911,59 @@ describe('switchSessionConnectedServiceAuth', () => {
 		    }));
 		  });
 
+  it('keeps a declined predictive soft-threshold hot-apply out of the transcript (benign fail-safe)', async () => {
+    // Live incident 2026-07-10 19:10: the burn-rate soft-switch targeted 5 sessions; 4 idle
+    // siblings hot-applied instantly, the one MID-TURN session had no safe apply window, timed out
+    // after 15s and surfaced "Authentication could not be switched (hot_apply_failed)" to the user.
+    // A predictive switch is a background optimization that fails BEFORE side effects by design
+    // (RD-SW-9): the session keeps working on its current account, the next poll/in-band tick
+    // retries, and hard-limit recovery remains the backstop. The SUCCESS path already keeps
+    // soft-threshold switches silent here (they surface via the centralized swap notification);
+    // the benign-decline failure must be symmetric. Side-effectful failures stay loud.
+    const tracked = trackedSession();
+    const emitSessionEvent = vi.fn();
+
+    const result = await switchSessionConnectedServiceAuth({
+      core: createCore(),
+      groupSwitchTriggerReason: 'soft_threshold',
+      postSwitchVerificationMode: {
+        kind: 'disabled_for_test_only',
+        reason: 'existing switch fixture does not exercise provider adoption verification',
+      },
+      getChildren: () => [tracked],
+      api: {
+        listConnectedServiceProfiles: async () => ({
+          serviceId: 'anthropic',
+          profiles: [{ profileId: 'new-profile', status: 'connected' }],
+        }),
+        getConnectedServiceAuthGroup: async () => null,
+      },
+      resolveContinuity: async () => ({ mode: 'hot_apply' }),
+      restartSession: vi.fn(),
+      hotApply: async () => ({
+        ok: false,
+        errorCode: 'hot_apply_failed',
+        underlyingError: 'no safe apply window within bound',
+      }),
+      persistSessionBindings: vi.fn(),
+      registerHotApplyTargets: vi.fn(),
+      emitSessionEvent,
+      request: {
+        sessionId: 'sess_1',
+        agentId: 'claude',
+        bindings: bindings('new-profile'),
+      },
+    });
+
+    // The coordinator still sees the failure (retry bookkeeping)…
+    expect(result).toMatchObject({ ok: false, errorCode: 'hot_apply_failed' });
+    // …but the user-facing failed switch-attempt event is NOT committed.
+    expect(emitSessionEvent).not.toHaveBeenCalledWith('sess_1', expect.objectContaining({
+      type: 'connected_service_account_switch_attempt',
+      ok: false,
+    }));
+  });
+
   it('emits hot-apply attempted route when post-switch verification fails after hot apply', async () => {
     const tracked = trackedSession({
       spawnOptions: {

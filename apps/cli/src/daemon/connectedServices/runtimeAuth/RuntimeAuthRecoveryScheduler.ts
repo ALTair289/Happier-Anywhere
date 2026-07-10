@@ -84,6 +84,14 @@ export type RuntimeAuthRecoveryDiagnostic = Readonly<{
   attemptCount?: number;
   nextRetryAtMs?: number | null;
   classification?: DaemonServerWorkErrorClassification | null;
+  /**
+   * The ORIGINAL runtime failure kind (e.g. `usage_limit`) before it is mapped to a
+   * `DaemonServerWorkErrorClassification` retry class (`usage_limit` → `rate_limited`). Carried
+   * alongside the mapped `classification` so log readers see the real cause: the mapped-only view
+   * renamed `usage_limit` to `rate_limited` and misled a live investigation (2026-07-10). The retry
+   * class mapping itself is unchanged — this is diagnostics only.
+   */
+  failureKind?: ConnectedServiceRuntimeFailureClassification['kind'];
   uxDiagnostic?: ConnectedServiceUxDiagnosticV1;
   transcriptEvent?: ConnectedServiceRuntimeAuthRecoveryTranscriptEventV1;
 }>;
@@ -1302,6 +1310,7 @@ export class RuntimeAuthRecoveryScheduler {
           failurePhase: intent.failurePhase,
           attemptCount: intent.attemptCount,
           classification: intent.lastErrorClassification,
+          failureKind: intent.classification.kind,
         });
       },
       onSuccess: ({ intent }) => {
@@ -1367,6 +1376,7 @@ export class RuntimeAuthRecoveryScheduler {
           failurePhase: intent.failurePhase,
           reason: lastError ?? 'max_attempts_exhausted',
           attemptCount: intent.attemptCount,
+          failureKind: intent.classification.kind,
           uxDiagnostic,
           ...(transcriptEvent ? { transcriptEvent } : {}),
         });
@@ -1382,6 +1392,7 @@ export class RuntimeAuthRecoveryScheduler {
           reason,
           nextRetryAtMs: retryAtMs,
           classification: intent.lastErrorClassification,
+          failureKind: intent.classification.kind,
         });
       },
     });
@@ -1482,6 +1493,7 @@ export class RuntimeAuthRecoveryScheduler {
       failurePhase: terminal.failurePhase,
       reason: input.terminalReason,
       classification: terminal.lastErrorClassification,
+      failureKind: terminal.classification.kind,
     });
     return terminal;
   }
@@ -1545,6 +1557,7 @@ export class RuntimeAuthRecoveryScheduler {
       reason: plan.reason,
       nextRetryAtMs,
       classification: waiting.lastErrorClassification,
+      failureKind: waiting.classification.kind,
     });
     return waiting;
   }
@@ -1584,6 +1597,7 @@ export class RuntimeAuthRecoveryScheduler {
       reason: RUNTIME_AUTH_RECOVERY_UNPROVEN_PROVIDER_OUTCOME_ERROR,
       nextRetryAtMs: waiting.nextRetryAtMs,
       classification: waiting.lastErrorClassification,
+      failureKind: waiting.classification.kind,
     });
     return waiting;
   }
@@ -1731,6 +1745,7 @@ export class RuntimeAuthRecoveryScheduler {
         failurePhase: input.decision.failurePhase,
         reason: input.decision.reason,
         classification: input.decision.classification,
+        failureKind: classification.kind,
       });
       return { status: 'terminal_non_retry', retryable: false };
     }
@@ -1806,6 +1821,7 @@ export class RuntimeAuthRecoveryScheduler {
       reason: persistedIntent.failureReason,
       nextRetryAtMs: persistedIntent.nextRetryAtMs,
       classification: persistedIntent.lastErrorClassification,
+      failureKind: persistedIntent.classification.kind,
       uxDiagnostic,
       ...(transcriptEvent ? { transcriptEvent } : {}),
     });
