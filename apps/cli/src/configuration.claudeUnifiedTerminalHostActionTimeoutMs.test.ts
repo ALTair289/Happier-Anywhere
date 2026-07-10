@@ -17,7 +17,7 @@ describe('configuration claudeUnifiedTerminalHostActionTimeoutMs', () => {
 
     const { configuration } = await import('./configuration');
 
-    expect(configuration.claudeUnifiedTerminalHostActionTimeoutMs).toBe(5_000);
+    expect(configuration.claudeUnifiedTerminalHostActionTimeoutMs).toBe(15_000);
   });
 
   it('reads the zellij terminal host action timeout from env and applies configured bounds', async () => {
@@ -29,7 +29,7 @@ describe('configuration claudeUnifiedTerminalHostActionTimeoutMs', () => {
     process.env.HAPPIER_CLAUDE_UNIFIED_TERMINAL_HOST_ACTION_TIMEOUT_MS = '1';
     vi.resetModules();
     const { configuration: configuration2 } = await import('./configuration');
-    expect(configuration2.claudeUnifiedTerminalHostActionTimeoutMs).toBe(5_000);
+    expect(configuration2.claudeUnifiedTerminalHostActionTimeoutMs).toBe(15_000);
 
     process.env.HAPPIER_CLAUDE_UNIFIED_TERMINAL_HOST_ACTION_TIMEOUT_MS = '60001';
     vi.resetModules();

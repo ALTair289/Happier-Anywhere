@@ -758,7 +758,7 @@ class Configuration {
     );
     this.claudeUnifiedTerminalHostActionTimeoutMs = resolveIntEnvWithBounds(
       'HAPPIER_CLAUDE_UNIFIED_TERMINAL_HOST_ACTION_TIMEOUT_MS',
-      { min: 100, max: 60_000, default: 5_000 },
+      { min: 100, max: 60_000, default: 15_000 },
     );
     this.claudeUnifiedTerminalAcceptedPromptEchoWindowMs = resolveIntEnvWithBounds(
       'HAPPIER_CLAUDE_UNIFIED_TERMINAL_ACCEPTED_PROMPT_ECHO_WINDOW_MS',
