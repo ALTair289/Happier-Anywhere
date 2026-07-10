@@ -564,6 +564,12 @@ function dedupeIdentityProfiles(params: Readonly<{
     return { servers: next, idRewrite, changed };
 }
 
+// Parse cache keyed by the raw persisted string: readPersistedState sits on hot selector
+// paths and re-parsing the whole blob per call costs CPU and breaks referential stability.
+// Keying by the raw value (re-read every call) stays correct for cross-tab and self-heal
+// writes without invalidation wiring; local writes clear it explicitly.
+let persistedStateParseCache: { raw: string; state: Required<PersistedServerState> } | null = null;
+
 function readPersistedState(): Required<PersistedServerState> {
     const raw = getPersistedStateStorage().getString(STATE_KEY);
     if (!raw) {
@@ -573,6 +579,9 @@ function readPersistedState(): Required<PersistedServerState> {
             activeServerId: resolvePrimaryActiveServerId(seeded, null),
             servers: seeded,
         };
+    }
+    if (persistedStateParseCache && persistedStateParseCache.raw === raw) {
+        return persistedStateParseCache.state;
     }
 
     try {
@@ -618,6 +627,7 @@ function readPersistedState(): Required<PersistedServerState> {
             writePersistedState(state);
         }
 
+        persistedStateParseCache = { raw, state };
         return state;
     } catch {
         const seeded = applyRuntimeSeedPolicy({});
@@ -631,6 +641,9 @@ function readPersistedState(): Required<PersistedServerState> {
 
 function writePersistedState(state: Required<PersistedServerState>): void {
     getPersistedStateStorage().set(STATE_KEY, JSON.stringify(state));
+    // Invalidate rather than prime: the next read re-parses so the parse path stays the
+    // single canonicalization owner for cached state shapes.
+    persistedStateParseCache = null;
 }
 
 function readTabActiveServerId(): string | null {
