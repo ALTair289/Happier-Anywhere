@@ -49,6 +49,59 @@ describe('createActionToolExecutorBridge', () => {
     ]);
   });
 
+  it('passes live caller permission mode through to action executor context', async () => {
+    const calls: unknown[] = [];
+    const actionsSettings = ActionsSettingsV1Schema.parse({
+      v: 1,
+      actions: {
+        'session.list': {
+          toolExposureModes: {
+            session_agent: 'direct',
+          },
+        },
+      },
+    });
+    const bridge = createActionToolExecutorBridge({
+      surface: 'session_agent',
+      actionsSettings,
+      resolveCallerPermissionMode: () => 'yolo',
+      executor: {
+        execute: async (actionId, input, ctx) => {
+          calls.push({ actionId, input, ctx });
+          return {
+            ok: true,
+            result: { ok: true },
+          };
+        },
+      },
+    });
+
+    await bridge.executeActionByToolName('action_execute', {
+      actionId: 'session.spawn_new',
+      input: { path: '/repo', permissionMode: 'bypassPermissions' },
+    }, 'sess-1');
+    await bridge.executeActionByToolName('session_list', { limit: 5 }, 'sess-1');
+
+    expect(calls).toEqual([
+      expect.objectContaining({
+        actionId: 'session.spawn_new',
+        ctx: expect.objectContaining({
+          defaultSessionId: 'sess-1',
+          surface: 'session_agent',
+          callerPermissionMode: 'yolo',
+        }),
+      }),
+      expect.objectContaining({
+        actionId: 'session.list',
+        ctx: expect.objectContaining({
+          defaultSessionId: 'sess-1',
+          surface: 'session_agent',
+          callerPermissionMode: 'yolo',
+        }),
+      }),
+    ]);
+  });
+
   it('parses JSON-string action_execute input before invoking the action executor', async () => {
     const calls: unknown[] = [];
     const bridge = createActionToolExecutorBridge({
@@ -74,18 +127,19 @@ describe('createActionToolExecutorBridge', () => {
       result: { ok: true },
     });
     expect(calls).toEqual([
-      {
+      expect.objectContaining({
         actionId: 'session.transcript.get',
         input: {
           sessionId: 'sess-2',
           limit: 20,
           roles: ['user', 'assistant'],
         },
-        ctx: {
+        ctx: expect.objectContaining({
           defaultSessionId: 'sess-1',
           surface: 'session_agent',
-        },
-      },
+          actionsSettings: null,
+        }),
+      }),
     ]);
   });
 

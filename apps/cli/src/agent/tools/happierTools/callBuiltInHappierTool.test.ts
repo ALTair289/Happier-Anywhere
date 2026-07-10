@@ -68,7 +68,11 @@ describe('callBuiltInHappierTool', () => {
     expect(execute).toHaveBeenCalledWith(
       'subagents.plan.start',
       { backendTargetKeys: ['agent:codex'], instructions: 'Plan this change.' },
-      { defaultSessionId: 'sess-1', surface: 'cli' },
+      {
+        defaultSessionId: 'sess-1',
+        surface: 'cli',
+        actionsSettings: { v: 1, actions: {} },
+      },
     );
   });
 
@@ -87,6 +91,12 @@ describe('callBuiltInHappierTool', () => {
       ok: false,
       errorCode: 'action_disabled',
       error: 'Action is disabled',
+      details: expect.objectContaining({
+        actionId: 'action.options.resolve',
+        surface: 'cli',
+        reason: 'unsupported_surface',
+        settingsState: 'enabled',
+      }),
     });
     expect(execute).not.toHaveBeenCalled();
     expect(createCliActionExecutor).toHaveBeenCalledWith(expect.objectContaining({
@@ -171,6 +181,12 @@ describe('callBuiltInHappierTool', () => {
       ok: false,
       errorCode: 'action_disabled',
       error: 'Action is disabled',
+      details: expect.objectContaining({
+        actionId: 'subagents.plan.start',
+        surface: 'cli',
+        reason: 'disabled_by_settings',
+        settingsState: 'disabled',
+      }),
     });
     expect(execute).not.toHaveBeenCalled();
   });
@@ -191,6 +207,12 @@ describe('callBuiltInHappierTool', () => {
       ok: false,
       errorCode: 'action_disabled',
       error: 'Action is disabled',
+      details: expect.objectContaining({
+        actionId: 'memory.search',
+        surface: 'cli',
+        reason: 'unsupported_surface',
+        settingsState: 'enabled',
+      }),
     });
     expect(execute).not.toHaveBeenCalled();
   });

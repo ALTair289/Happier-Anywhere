@@ -20,6 +20,8 @@ type ActionExecutorLike = Readonly<{
       defaultSessionId: string;
       surface: 'mcp' | 'cli' | 'session_agent';
       approvalOrigin?: ApprovalRequestOriginV1 | null;
+      callerPermissionMode?: string | null;
+      actionsSettings?: ActionsSettingsV1 | null;
     }>,
   ) => Promise<ActionExecutorResult>;
 }>;
@@ -88,6 +90,7 @@ export function createActionToolExecutorBridge(params: Readonly<{
   surface?: 'mcp' | 'cli' | 'session_agent';
   actionsSettings?: ActionsSettingsV1 | null;
   getActionsSettings?: (() => ActionsSettingsV1 | null) | null;
+  resolveCallerPermissionMode?: (() => string | null | undefined) | null;
 }>): Readonly<{
   executeActionByToolName: (toolName: string, toolArgs: unknown, defaultSessionId: string, options?: ActionToolExecutionOptions) => Promise<ActionToolBridgeResult>;
   resolveActionOptions: (args: Readonly<{
@@ -103,13 +106,17 @@ export function createActionToolExecutorBridge(params: Readonly<{
   const isActionEnabled = params.isActionEnabled ?? (() => true);
   const surface = params.surface ?? 'session_agent';
   const readActionsSettings = () => params.getActionsSettings?.() ?? params.actionsSettings ?? null;
+  const readCallerPermissionMode = () => params.resolveCallerPermissionMode?.() ?? null;
 
   return {
     executeActionByToolName: async (toolName, toolArgs, defaultSessionId, options) => {
+      const callerPermissionMode = readCallerPermissionMode();
       const context = {
         defaultSessionId,
         surface,
         ...(options?.approvalOrigin ? { approvalOrigin: options.approvalOrigin } : {}),
+        ...(callerPermissionMode ? { callerPermissionMode } : {}),
+        actionsSettings: readActionsSettings(),
       } as const;
       if (toolName === 'action_execute') {
         const actionId = typeof (toolArgs as any)?.actionId === 'string' ? String((toolArgs as any).actionId).trim() : '';
@@ -142,6 +149,7 @@ export function createActionToolExecutorBridge(params: Readonly<{
       ));
     },
     resolveActionOptions: async (args, defaultSessionId) => {
+      const callerPermissionMode = readCallerPermissionMode();
       const input: Record<string, unknown> = {};
       if (args.actionId) input.actionId = args.actionId;
       if (args.fieldPath) input.fieldPath = args.fieldPath;
@@ -153,7 +161,12 @@ export function createActionToolExecutorBridge(params: Readonly<{
       const result = await params.executor.execute(
         'action.options.resolve',
         input,
-        { defaultSessionId, surface },
+        {
+          defaultSessionId,
+          surface,
+          ...(callerPermissionMode ? { callerPermissionMode } : {}),
+          actionsSettings: readActionsSettings(),
+        },
       );
       if (!result.ok) {
         return {
