@@ -71,6 +71,93 @@ describe('updateSessionMetadataWithRetry', () => {
     waitForSocketConnectMock.mockResolvedValue(undefined);
   });
 
+  it('skips socket and HTTP writes when the updater returns unchanged metadata', async () => {
+    const result = await updateSessionMetadataWithRetry({
+      token: 'token-1',
+      credentials: {
+        token: 'token-1',
+        encryption: { type: 'legacy', secret: new Uint8Array(32).fill(1) },
+      },
+      sessionId: 'sess_noop',
+      rawSession: {
+        metadata: '{"path":"/tmp/project"}',
+        metadataVersion: 7,
+        encryptionMode: 'plain',
+        dataEncryptionKey: null,
+      },
+      updater: (metadata) => ({ ...metadata }),
+      maxAttempts: 1,
+    });
+
+    expect(result).toEqual({ version: 7, metadata: { path: '/tmp/project' } });
+    expect(waitForSocketConnectMock).not.toHaveBeenCalled();
+    expect(patchSessionMetadataMock).not.toHaveBeenCalled();
+  });
+
+  it('sends one metadata write when the updater returns a real change', async () => {
+    const socket = new FakeMetadataSocket({
+      result: 'success',
+      version: 8,
+      metadata: '{"path":"/tmp/project","title":"Project"}',
+    });
+    socketRef.current = socket;
+
+    const result = await updateSessionMetadataWithRetry({
+      token: 'token-1',
+      credentials: {
+        token: 'token-1',
+        encryption: { type: 'legacy', secret: new Uint8Array(32).fill(1) },
+      },
+      sessionId: 'sess_real_change',
+      rawSession: {
+        metadata: '{"path":"/tmp/project"}',
+        metadataVersion: 7,
+        encryptionMode: 'plain',
+        dataEncryptionKey: null,
+      },
+      updater: (metadata) => ({ ...metadata, title: 'Project' }),
+      maxAttempts: 1,
+    });
+
+    expect(result).toEqual({ version: 8, metadata: { path: '/tmp/project', title: 'Project' } });
+    expect(socket.emitted).toHaveLength(1);
+    expect(patchSessionMetadataMock).not.toHaveBeenCalled();
+  });
+
+  it('sends one metadata write when an updater mutates its input in place', async () => {
+    const socket = new FakeMetadataSocket({
+      result: 'success',
+      version: 8,
+      metadata: '{"project":{"path":"/tmp/project","title":"Project"}}',
+    });
+    socketRef.current = socket;
+
+    const result = await updateSessionMetadataWithRetry({
+      token: 'token-1',
+      credentials: {
+        token: 'token-1',
+        encryption: { type: 'legacy', secret: new Uint8Array(32).fill(1) },
+      },
+      sessionId: 'sess_in_place_change',
+      rawSession: {
+        metadata: '{"project":{"path":"/tmp/project"}}',
+        metadataVersion: 7,
+        encryptionMode: 'plain',
+        dataEncryptionKey: null,
+      },
+      updater: (metadata) => {
+        const project = metadata.project as Record<string, unknown>;
+        project.title = 'Project';
+        return metadata;
+      },
+      maxAttempts: 1,
+    });
+
+    expect(result).toEqual({ version: 8, metadata: { project: { path: '/tmp/project', title: 'Project' } } });
+    expect(socket.emitted).toHaveLength(1);
+    expect(patchSessionMetadataMock).not.toHaveBeenCalled();
+  });
+
   it('classifies forbidden metadata acks as canonical authentication errors', async () => {
     const socket = new FakeMetadataSocket({ result: 'forbidden' });
     socketRef.current = socket;

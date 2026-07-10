@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import type { Socket } from 'socket.io-client';
 
 import { createAuthenticationHttpStatusError, isAuthenticationError } from '@/api/client/httpStatusError';
@@ -29,6 +30,10 @@ function createMetadataUpdateError(message: string, code: MetadataUpdateErrorCod
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   return value as Record<string, unknown>;
+}
+
+function cloneMetadataRecord(value: Record<string, unknown>): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
 }
 
 function isRetryableSocketMetadataTransportError(error: unknown): boolean {
@@ -75,9 +80,29 @@ export async function updateSessionMetadataWithRetry(params: Readonly<{
   let currentDecrypted: Record<string, unknown> = initialDecrypted;
   const maxAttempts = typeof params.maxAttempts === 'number' && Number.isFinite(params.maxAttempts) && params.maxAttempts > 0 ? Math.min(10, params.maxAttempts) : 6;
 
+  const computeChangedMetadata = (): Record<string, unknown> | null => {
+    const updated = params.updater(cloneMetadataRecord(currentDecrypted));
+    return isDeepStrictEqual(updated, currentDecrypted) ? null : updated;
+  };
+  let pendingChangedMetadata: Record<string, unknown> | null | undefined = computeChangedMetadata();
+  if (pendingChangedMetadata === null) {
+    return { version: expectedVersion, metadata: currentDecrypted };
+  }
+  const takeChangedMetadata = (): Record<string, unknown> | null => {
+    if (pendingChangedMetadata !== undefined) {
+      const result = pendingChangedMetadata;
+      pendingChangedMetadata = undefined;
+      return result;
+    }
+    return computeChangedMetadata();
+  };
+
   const updateViaHttpPatch = async (): Promise<{ version: number; metadata: Record<string, unknown> }> => {
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-      const updated = params.updater(currentDecrypted);
+      const updated = takeChangedMetadata();
+      if (updated === null) {
+        return { version: expectedVersion, metadata: currentDecrypted };
+      }
       const updatedWireValue = encryptStoredSessionPayload({ mode, ctx, payload: updated });
 
       const result = await patchSessionMetadata({
@@ -98,6 +123,7 @@ export async function updateSessionMetadataWithRetry(params: Readonly<{
         throw createMetadataUpdateError('Unsupported session metadata payload', 'unsupported');
       }
       currentDecrypted = next;
+      pendingChangedMetadata = undefined;
       await backoffMetadataRetry(attempt, maxAttempts);
     }
 
@@ -119,7 +145,10 @@ export async function updateSessionMetadataWithRetry(params: Readonly<{
     }
 
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-      const updated = params.updater(currentDecrypted);
+      const updated = takeChangedMetadata();
+      if (updated === null) {
+        return { version: expectedVersion, metadata: currentDecrypted };
+      }
       const updatedWireValue = encryptStoredSessionPayload({ mode, ctx, payload: updated });
 
       let ack: UpdateMetadataAck;
@@ -146,6 +175,7 @@ export async function updateSessionMetadataWithRetry(params: Readonly<{
         currentWireValue = String(ack.metadata ?? '').trim();
         const next = asRecord(decryptStoredSessionPayload({ mode, ctx, value: currentWireValue }));
         if (next) currentDecrypted = next;
+        pendingChangedMetadata = undefined;
         await backoffMetadataRetry(attempt, maxAttempts);
         continue;
       }
