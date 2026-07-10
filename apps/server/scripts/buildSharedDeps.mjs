@@ -2,7 +2,8 @@ import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createRequire } from 'node:module';
+
+import { resolveTypeScriptCommandInvocation } from '../../../scripts/workspaces/typescriptCommand.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 function findRepoRoot(startDir) {
@@ -19,29 +20,12 @@ function findRepoRoot(startDir) {
 }
 
 const repoRoot = findRepoRoot(__dirname);
-const tscInvocation = (() => {
-  // Prefer resolving the TypeScript CLI via Node module resolution rather than relying on
-  // node_modules/.bin symlinks (which can be missing/unstable in some workspace setups).
-  try {
-    const require = createRequire(import.meta.url);
-    const tscJs = require.resolve('typescript/bin/tsc');
-    return { command: process.execPath, argsPrefix: [tscJs] };
-  } catch {
-    // Fall back to .bin lookup for compatibility with unusual installs.
-    const binName = process.platform === 'win32' ? 'tsc.cmd' : 'tsc';
-    const candidates = [
-      resolve(repoRoot, 'node_modules', '.bin', binName),
-      resolve(repoRoot, 'apps', 'server', 'node_modules', '.bin', binName),
-    ];
-    for (const candidate of candidates) {
-      if (existsSync(candidate)) return { command: candidate, argsPrefix: [] };
-    }
-    return { command: candidates[0], argsPrefix: [] };
-  }
-})();
-
 function runTsc(tsconfigPath) {
-  execFileSync(tscInvocation.command, [...tscInvocation.argsPrefix, '-p', tsconfigPath], { stdio: 'inherit' });
+  const invocation = resolveTypeScriptCommandInvocation({
+    cwd: resolve(repoRoot, 'apps', 'server'),
+    args: ['-p', tsconfigPath],
+  });
+  execFileSync(invocation.command, invocation.args, { stdio: 'inherit' });
 }
 
 // Build shared packages (dist/ is the runtime contract).

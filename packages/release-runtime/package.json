@@ -47,7 +47,8 @@
     "README.md"
   ],
   "scripts": {
-    "build:esm": "tsc -p tsconfig.json",
+    "tsc": "node ../../scripts/workspaces/runTypeScriptCli.mjs",
+    "build:esm": "node ../../scripts/workspaces/runTypeScriptCli.mjs -p tsconfig.json",
     "build": "yarn -s build:esm",
     "test": "yarn -s build && HAPPIER_FEATURE_POLICY_ENV= node --test \"tests/*.test.mjs\"",
     "postinstall:real": "yarn -s build",
@@ -55,6 +56,7 @@
   },
   "devDependencies": {
     "@types/node": ">=20",
-    "typescript": "^5.9.2"
+    "@typescript/native": "npm:typescript@7.0.2",
+    "typescript": "5.9.3"
   }
 }

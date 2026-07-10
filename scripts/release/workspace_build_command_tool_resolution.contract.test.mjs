@@ -19,8 +19,81 @@ const workspaceTypeScriptScriptPackages = [
   'packages/cli-common',
   'packages/connection-supervisor',
   'apps/bootstrap',
+  'apps/cli',
+  'apps/docs',
+  'apps/server',
+  'apps/ui',
+  'packages/release-runtime',
   'packages/tests',
 ];
+
+test('workspace TypeScript tool dependencies stay aligned with the root toolchain owner', async () => {
+  const rootPackage = await readJson('package.json');
+  const nativeCompiler = rootPackage?.devDependencies?.['@typescript/native'];
+  const apiPackage = rootPackage?.devDependencies?.typescript;
+
+  assert.equal(typeof nativeCompiler, 'string');
+  assert.equal(typeof apiPackage, 'string');
+
+  for (const packagePath of workspaceTypeScriptScriptPackages) {
+    const pkg = await readJson(`${packagePath}/package.json`);
+    assert.equal(
+      pkg?.devDependencies?.['@typescript/native'],
+      nativeCompiler,
+      `${packagePath} must use the root-owned native compiler version`,
+    );
+    assert.equal(
+      pkg?.devDependencies?.typescript,
+      apiPackage,
+      `${packagePath} must use the root-owned TypeScript API version`,
+    );
+  }
+});
+
+test('root and workspace yarn tsc commands delegate to the native compiler runner', async () => {
+  const packagePaths = ['.', ...workspaceTypeScriptScriptPackages];
+
+  for (const packagePath of packagePaths) {
+    const manifestPath = packagePath === '.' ? 'package.json' : `${packagePath}/package.json`;
+    const pkg = await readJson(manifestPath);
+    const tscScript = String(pkg?.scripts?.tsc ?? '');
+
+    assert.match(
+      tscScript,
+      /^node (?:\.\.\/\.\.\/)?scripts\/workspaces\/runTypeScriptCli\.mjs$/,
+      `${packagePath} yarn tsc must delegate to the native compiler runner`,
+    );
+  }
+});
+
+test('the shared TypeScript command resolver owns native compiler selection', async () => {
+  const resolver = await readFile(resolve(repoRoot, 'scripts/workspaces/typescriptCommand.mjs'), 'utf8');
+
+  assert.match(resolver, /@typescript\/native\/package\.json/);
+  assert.doesNotMatch(resolver, /typescript\/bin\/tsc/);
+});
+
+test('first-party build orchestrators delegate compiler selection to the shared resolver', async () => {
+  const orchestrators = [
+    'apps/cli/scripts/build.mjs',
+    'apps/cli/scripts/buildSharedDeps.mjs',
+    'apps/server/scripts/buildSharedDeps.mjs',
+  ];
+
+  for (const relativePath of orchestrators) {
+    const source = await readFile(resolve(repoRoot, relativePath), 'utf8');
+    assert.match(
+      source,
+      /scripts\/workspaces\/typescriptCommand\.mjs/,
+      `${relativePath} must delegate native compiler selection to the shared resolver`,
+    );
+    assert.doesNotMatch(
+      source,
+      /typescript\/bin\/tsc|node_modules[^\n]*typescript[^\n]*bin[^\n]*tsc/,
+      `${relativePath} must not retain a competing compiler resolution path`,
+    );
+  }
+});
 
 test('cli-common build scripts resolve TypeScript through workspace tool resolution instead of a hardcoded repo-root binary', async () => {
   const pkg = await readJson('packages/cli-common/package.json');
@@ -44,7 +117,7 @@ test('cli-common build scripts resolve TypeScript through workspace tool resolut
 test('first-party TypeScript package scripts use workspace tool resolution instead of bare tsc shims', async () => {
   for (const packagePath of workspaceTypeScriptScriptPackages) {
     const pkg = await readJson(`${packagePath}/package.json`);
-    for (const scriptName of ['build', 'typecheck']) {
+    for (const scriptName of ['build', 'build:esm', 'typecheck', 'types:check']) {
       const script = String(pkg?.scripts?.[scriptName] ?? '');
       if (!script) continue;
       assert.doesNotMatch(script, /(^|&&\s*)tsc\b/, `${packagePath} ${scriptName} must not rely on a bare tsc shim`);
@@ -62,6 +135,22 @@ test('first-party TypeScript package scripts use workspace tool resolution inste
       }
     }
   }
+});
+
+test('docs production builds gate on the native compiler instead of Next embedded TypeScript', async () => {
+  const pkg = await readJson('apps/docs/package.json');
+  const buildScript = String(pkg?.scripts?.build ?? '');
+  const buildRunner = await readFile(resolve(repoRoot, 'apps/docs/scripts/build.mjs'), 'utf8');
+  const nextConfig = await readFile(resolve(repoRoot, 'apps/docs/next.config.mjs'), 'utf8');
+
+  assert.equal(buildScript, 'node scripts/build.mjs');
+  assert.match(buildRunner, /execYarn(?:Impl)?\(\['-s', 'types:check'\]/);
+  assert.match(buildRunner, /next\/dist\/bin\/next/);
+  assert.match(
+    nextConfig,
+    /typescript\s*:\s*\{[\s\S]*?ignoreBuildErrors\s*:\s*true/,
+    'Next must not run a competing embedded TypeScript compiler after the native gate',
+  );
 });
 
 test('tests package typecheck resolves TypeScript through workspace tool resolution instead of a bare bin shim', async () => {

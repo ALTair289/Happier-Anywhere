@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "tsc": "node ../../scripts/workspaces/runTypeScriptCli.mjs",
     "test": "node scripts/run-vitest-with-heartbeat.mjs --config vitest.core.config.ts",
     "test:core:fast": "node scripts/run-vitest-with-heartbeat.mjs --config vitest.core.fast.config.ts",
     "test:core:slow": "node scripts/run-vitest-with-heartbeat.mjs --config vitest.core.slow.config.ts $(find suites/core-e2e -name '*.slow.e2e.test.ts' -print | sort)",
@@ -72,6 +73,7 @@
     "@types/node": ">=20",
     "tsx": "^4.20.6",
     "textarea-caret": "^3.1.0",
+    "@typescript/native": "npm:typescript@7.0.2",
     "typescript": "5.9.3",
     "vitest": "^3.2.4"
   }

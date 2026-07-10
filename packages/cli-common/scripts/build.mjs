@@ -14,7 +14,6 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 
-import { resolveYarnCommandInvocation } from '../../../scripts/workspaces/execYarnCommand.mjs';
 import { resolveTypeScriptCommandInvocation } from '../../../scripts/workspaces/typescriptCommand.mjs';
 import { verifyPackageExportTargets } from './verifyExports.mjs';
 
@@ -223,60 +222,22 @@ function resolveTscBinaryArgs(tscArgs) {
 }
 
 export function resolveCliCommonBuildTscInvocations({
-  env = process.env,
-  platform = process.platform,
   packageDir,
   tscArgs,
   resolveTypeScriptCommandInvocationImpl = resolveTypeScriptCommandInvocation,
 } = {}) {
   const args = Array.isArray(tscArgs) ? tscArgs : [];
-  const npmExecPath = typeof env?.npm_execpath === 'string' ? env.npm_execpath.trim() : '';
-  const yarnInvocation = resolveYarnCommandInvocation(args, {
-      npmExecPath,
-      platform,
+  if (typeof packageDir !== 'string' || !packageDir.trim()) {
+    throw new Error('cli-common TypeScript compilation requires a package directory');
+  }
+
+  return [
+    resolveTypeScriptCommandInvocationImpl({
+      cwd: packageDir,
+      args: resolveTscBinaryArgs(args),
       processExecPath: process.execPath,
-      comspec: env?.COMSPEC ?? env?.ComSpec ?? env?.comspec,
-  });
-  const invocations = [];
-
-  if (typeof packageDir === 'string' && packageDir.trim()) {
-    try {
-      invocations.push(
-        resolveTypeScriptCommandInvocationImpl({
-          cwd: packageDir,
-          args: resolveTscBinaryArgs(args),
-          processExecPath: process.execPath,
-        }),
-      );
-    } catch {
-      // Fall through to the package-manager shim when TypeScript is not resolvable
-      // from the package under build.
-    }
-  }
-
-  invocations.push(yarnInvocation);
-  return invocations;
-}
-
-function runFirstAvailableChecked(candidates, options, runCommandImpl) {
-  let lastError = null;
-  for (const candidate of candidates) {
-    try {
-      runChecked(candidate.command, candidate.args, {
-        ...options,
-        ...(candidate.windowsVerbatimArguments
-          ? { windowsVerbatimArguments: candidate.windowsVerbatimArguments }
-          : {}),
-      }, runCommandImpl);
-      return;
-    } catch (error) {
-      lastError = error;
-      if (candidate === candidates.at(-1)) {
-        throw error;
-      }
-    }
-  }
-  throw lastError ?? new Error('No package-manager command candidates were available');
+    }),
+  ];
 }
 
 async function replaceDistWithStagedBuild({ distDir, tempDistDir, backupDir }) {
@@ -358,14 +319,14 @@ export async function buildCliCommonDist(options = {}) {
     await writeFile(tempTsconfigPath, `${JSON.stringify(tempTsconfig, null, 2)}\n`, 'utf8');
 
     try {
-      runFirstAvailableChecked(
-        resolveCliCommonBuildTscInvocations({
-          env: commandEnv,
-          packageDir,
-          platform: options.platform ?? process.platform,
-          tscArgs: ['-s', 'tsc', '-p', tempTsconfigPath],
-          resolveTypeScriptCommandInvocationImpl: options.resolveTypeScriptCommandInvocationImpl,
-        }),
+      const [typeScriptInvocation] = resolveCliCommonBuildTscInvocations({
+        packageDir,
+        tscArgs: ['-s', 'tsc', '-p', tempTsconfigPath],
+        resolveTypeScriptCommandInvocationImpl: options.resolveTypeScriptCommandInvocationImpl,
+      });
+      runChecked(
+        typeScriptInvocation.command,
+        typeScriptInvocation.args,
         {
           cwd: packageDir,
           stdio: options.stdio ?? 'inherit',
