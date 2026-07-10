@@ -56,6 +56,7 @@ type PublicShareResponse = {
     accessLevel: 'view';
     encryptedDataKey: string | null;
     isConsentRequired: boolean;
+    messagesAccessToken?: string | null;
 };
 
 type PublicShareConsentResponse = {
@@ -68,6 +69,8 @@ type PublicShareConsentResponse = {
 type PublicShareMessagesResponse = {
     messages: ApiMessage[];
 };
+
+const PUBLIC_SHARE_MESSAGES_ACCESS_TOKEN_HEADER = 'x-public-share-messages-access-token';
 
 function getOwnerDisplayName(owner: ShareOwner | null): string {
     if (!owner) return t('status.unknown');
@@ -95,7 +98,10 @@ async function normalizePlainPublicShareMessages(messages: ReadonlyArray<ApiMess
             message.localId ?? null,
             message.createdAt,
             content,
-            { seq: normalizeMessageSeq(message) },
+            {
+                seq: normalizeMessageSeq(message),
+                messageRole: message.messageRole ?? undefined,
+            },
         );
         if (!normalizedMessage) continue;
 
@@ -170,7 +176,15 @@ export default memo(function PublicShareViewerScreen() {
             const messagesPath = withConsent
                 ? `/v1/public-share/${tokenParam}/messages?consent=true`
                 : `/v1/public-share/${tokenParam}/messages`;
-            const messagesResponse = await serverFetch(messagesPath, { method: 'GET', headers }, { includeAuth: false });
+            const messagesHeaders = { ...headers };
+            if (typeof data.messagesAccessToken === 'string' && data.messagesAccessToken.trim().length > 0) {
+                messagesHeaders[PUBLIC_SHARE_MESSAGES_ACCESS_TOKEN_HEADER] = data.messagesAccessToken;
+            }
+            const messagesResponse = await serverFetch(
+                messagesPath,
+                { method: 'GET', headers: messagesHeaders },
+                { includeAuth: false },
+            );
             if (!messagesResponse.ok) {
                 setError(t('errors.operationFailed'));
                 setIsLoading(false);
@@ -250,7 +264,10 @@ export default memo(function PublicShareViewerScreen() {
                         m.localId ?? null,
                         m.createdAt,
                         m.content,
-                        { seq: normalizeMessageSeq(m) },
+                        {
+                            seq: normalizeMessageSeq(m),
+                            messageRole: m.messageRole ?? undefined,
+                        },
                     );
                     if (normalizedMessage) normalized.push(normalizedMessage);
                 }

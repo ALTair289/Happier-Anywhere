@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { CRYPTO_GOLDEN_VECTORS } from "@happier-dev/protocol";
 
 import { createDbMocks, createDbTransactionMock, installDbModuleMock } from "../../testkit/dbMocks";
 import { createRouteTestBuilder } from "../../testkit/routeTestBuilder";
@@ -41,9 +42,11 @@ const dbMocks = createDbMocks({
 } as const);
 const txDbMocks = createDbMocks({
     publicSessionShare: ["findUnique", "update"],
+    session: ["findUnique"],
 } as const);
 const dbTransaction = createDbTransactionMock(() => ({
     publicSessionShare: txDbMocks.db.publicSessionShare,
+    session: txDbMocks.db.session,
 }));
 
 installDbModuleMock(() => ({
@@ -51,6 +54,12 @@ installDbModuleMock(() => ({
 }));
 
 describe("publicShareRoutes optional auth (no reply-already-sent)", () => {
+    const validEncryptedDataKey = Uint8Array.from(
+        CRYPTO_GOLDEN_VECTORS.encryptedDataKeyEnvelopeV1.directSecretKey.envelope.hex
+            .match(/../g)
+            ?.map((pair) => Number.parseInt(pair, 16)) ?? [],
+    );
+
     beforeEach(() => {
         vi.clearAllMocks();
         dbMocks.reset();
@@ -66,10 +75,11 @@ describe("publicShareRoutes optional auth (no reply-already-sent)", () => {
             maxUses: null,
             useCount: 0,
             isConsentRequired: false,
-            encryptedDataKey: new Uint8Array([1, 2, 3]),
+            encryptedDataKey: validEncryptedDataKey,
             blockedUsers: undefined,
         });
         txDbMocks.db.publicSessionShare.update.mockResolvedValue({});
+        txDbMocks.db.session.findUnique.mockResolvedValue({ encryptionMode: "e2ee" });
 
         dbMocks.db.session.findUnique.mockResolvedValue({
             id: "s1",
@@ -126,23 +136,22 @@ describe("publicShareRoutes optional auth (no reply-already-sent)", () => {
     });
 
     it("does not call app.authenticate() for /v1/public-share/:token/messages and succeeds even with invalid bearer", async () => {
-        dbMocks.db.publicSessionShare.findUnique.mockResolvedValue({
+        txDbMocks.db.publicSessionShare.findUnique.mockResolvedValue({
             id: "ps1",
             sessionId: "s1",
             expiresAt: null,
             maxUses: null,
-            useCount: 0,
             isConsentRequired: false,
             blockedUsers: undefined,
-            encryptedDataKey: new Uint8Array([1, 2, 3]),
+            encryptedDataKey: validEncryptedDataKey,
         });
 
-        dbMocks.db.session.findUnique.mockResolvedValue({
+        txDbMocks.db.session.findUnique.mockResolvedValue({
             encryptionMode: "e2ee",
         });
 
         dbMocks.db.sessionMessage.findMany.mockResolvedValue([
-            { id: "m1", seq: 1, localId: "l1", content: "c", createdAt: new Date(1), updatedAt: new Date(2) },
+            { id: "m1", seq: 1, localId: "l1", messageRole: null, content: "c", createdAt: new Date(1), updatedAt: new Date(2) },
         ]);
 
         const { publicShareRoutes } = await import("./publicShareRoutes");

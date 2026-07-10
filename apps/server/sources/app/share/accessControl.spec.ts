@@ -5,20 +5,18 @@ import { createDbMocks, installDbModuleMock } from "../api/testkit/dbMocks";
 const dbMocks = createDbMocks({
     session: ["findUnique"],
     sessionShare: ["findUnique"],
-    publicSessionShare: ["findUnique"],
     userRelationship: ["findFirst"],
 } as const);
 
 installDbModuleMock({ db: dbMocks.db });
 
 let checkSessionAccess: typeof import("./accessControl").checkSessionAccess;
-let checkPublicShareAccess: typeof import("./accessControl").checkPublicShareAccess;
 let isSessionOwner: typeof import("./accessControl").isSessionOwner;
 let canManageSharing: typeof import("./accessControl").canManageSharing;
 let areFriends: typeof import("./accessControl").areFriends;
 
 beforeAll(async () => {
-    ({ checkSessionAccess, checkPublicShareAccess, isSessionOwner, canManageSharing, areFriends } = await import("./accessControl"));
+    ({ checkSessionAccess, isSessionOwner, canManageSharing, areFriends } = await import("./accessControl"));
 });
 
 describe("accessControl", () => {
@@ -89,71 +87,6 @@ describe("accessControl", () => {
             dbMocks.db.sessionShare.findUnique.mockResolvedValue(null);
 
             const result = await checkSessionAccess("user-1", "session-1");
-
-            expect(result).toBeNull();
-        });
-    });
-
-    describe("checkPublicShareAccess", () => {
-        it("should return access info for valid token", async () => {
-            const mockShare = {
-                id: "public-1",
-                sessionId: "session-1",
-                expiresAt: null,
-                maxUses: null,
-                useCount: 5,
-                blockedUsers: [],
-            };
-
-            dbMocks.db.publicSessionShare.findUnique.mockResolvedValue(mockShare as any);
-
-            const result = await checkPublicShareAccess("valid-token", null);
-
-            expect(result).toEqual({
-                sessionId: "session-1",
-                publicShareId: "public-1",
-            });
-        });
-
-        it("should return null for invalid token", async () => {
-            dbMocks.db.publicSessionShare.findUnique.mockResolvedValue(null);
-
-            const result = await checkPublicShareAccess("invalid-token", null);
-
-            expect(result).toBeNull();
-        });
-
-        it("should return null for expired shares", async () => {
-            const pastDate = new Date(Date.now() - 1000 * 60 * 60);
-            const mockShare = {
-                id: "public-1",
-                sessionId: "session-1",
-                expiresAt: pastDate,
-                maxUses: null,
-                useCount: 0,
-                blockedUsers: [],
-            };
-
-            dbMocks.db.publicSessionShare.findUnique.mockResolvedValue(mockShare as any);
-
-            const result = await checkPublicShareAccess("valid-token", null);
-
-            expect(result).toBeNull();
-        });
-
-        it("should return null when max uses reached", async () => {
-            const mockShare = {
-                id: "public-1",
-                sessionId: "session-1",
-                expiresAt: null,
-                maxUses: 10,
-                useCount: 10,
-                blockedUsers: [],
-            };
-
-            dbMocks.db.publicSessionShare.findUnique.mockResolvedValue(mockShare as any);
-
-            const result = await checkPublicShareAccess("valid-token", null);
 
             expect(result).toBeNull();
         });

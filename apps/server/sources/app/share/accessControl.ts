@@ -1,6 +1,5 @@
 import { db } from "@/storage/db";
 import { ShareAccessLevel } from "@/storage/prisma";
-import { createHash } from "crypto";
 
 /**
  * Access level for session sharing (including owner)
@@ -245,61 +244,4 @@ export async function areFriends(
         }
     });
     return relationship !== null;
-}
-
-/**
- * Check public share access with blocking and limits
- *
- * Public shares are always view-only for security
- *
- * @param token - Public share token
- * @param userId - User ID accessing (null for anonymous)
- * @returns Public share info if valid, null otherwise
- */
-export async function checkPublicShareAccess(
-    token: string,
-    userId: string | null
-): Promise<{
-    sessionId: string;
-    publicShareId: string;
-} | null> {
-    const tokenHash = createHash('sha256').update(token, 'utf8').digest();
-    const publicShare = await db.publicSessionShare.findUnique({
-        where: { tokenHash },
-        select: {
-            id: true,
-            sessionId: true,
-            expiresAt: true,
-            maxUses: true,
-            useCount: true,
-            blockedUsers: userId ? {
-                where: { userId },
-                select: { id: true }
-            } : undefined
-        }
-    });
-
-    if (!publicShare) {
-        return null;
-    }
-
-    // Check if expired
-    if (publicShare.expiresAt && publicShare.expiresAt < new Date()) {
-        return null;
-    }
-
-    // Check if max uses exceeded
-    if (publicShare.maxUses && publicShare.useCount >= publicShare.maxUses) {
-        return null;
-    }
-
-    // Check if user is blocked
-    if (userId && publicShare.blockedUsers && publicShare.blockedUsers.length > 0) {
-        return null;
-    }
-
-    return {
-        sessionId: publicShare.sessionId,
-        publicShareId: publicShare.id
-    };
 }

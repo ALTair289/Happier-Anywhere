@@ -13,6 +13,10 @@ import { createHash } from "crypto";
 import { afterTx, inTx } from "@/storage/inTx";
 import { markAccountChanged } from "@/app/changes/markAccountChanged";
 import { resolveApiHotEndpointRateLimit } from "@/app/api/utils/apiRateLimitCatalog";
+import {
+    tryParseEncryptedDataKeyEnvelopeV1,
+    tryParsePersistedEncryptedDataKeyEnvelopeV1,
+} from "./encryptedDataKeyValidation";
 
 export function registerPublicShareOwnerRoutes(app: Fastify): void {
     /**
@@ -67,17 +71,28 @@ export function registerPublicShareOwnerRoutes(app: Fastify): void {
                 if (shouldRotateToken && sessionEncryptionMode === "e2ee" && !encryptedDataKey) {
                     return { type: 'error' as const, error: 'encryptedDataKey required when rotating token' as const };
                 }
+                let encryptedDataKeyUpdate: { encryptedDataKey?: Uint8Array<ArrayBuffer> | null } = {};
+                if (sessionEncryptionMode === "plain") {
+                    encryptedDataKeyUpdate = { encryptedDataKey: null };
+                } else if (encryptedDataKey !== undefined) {
+                    const parsedEncryptedDataKey = tryParseEncryptedDataKeyEnvelopeV1(encryptedDataKey);
+                    if (parsedEncryptedDataKey.type === "error") {
+                        return parsedEncryptedDataKey;
+                    }
+                    encryptedDataKeyUpdate = { encryptedDataKey: parsedEncryptedDataKey.encryptedDataKey };
+                } else {
+                    const parsedEncryptedDataKey = tryParsePersistedEncryptedDataKeyEnvelopeV1(existing.encryptedDataKey);
+                    if (parsedEncryptedDataKey.type === "error") {
+                        return parsedEncryptedDataKey;
+                    }
+                }
                 const nextTokenHash = shouldRotateToken ? createHash('sha256').update(token!, 'utf8').digest() : null;
 
                 publicShare = await tx.publicSessionShare.update({
                     where: { sessionId },
                     data: {
                         ...(nextTokenHash ? { tokenHash: nextTokenHash } : {}),
-                        ...(sessionEncryptionMode === "plain"
-                            ? { encryptedDataKey: null }
-                            : encryptedDataKey
-                                ? { encryptedDataKey: new Uint8Array(Buffer.from(encryptedDataKey, 'base64')) }
-                                : {}),
+                        ...encryptedDataKeyUpdate,
                         expiresAt: expiresAt ? new Date(expiresAt) : null,
                         maxUses: maxUses ?? null,
                         isConsentRequired: isConsentRequired ?? false,
@@ -92,16 +107,21 @@ export function registerPublicShareOwnerRoutes(app: Fastify): void {
                     return { type: 'error' as const, error: 'encryptedDataKey required' as const };
                 }
                 const tokenHash = createHash('sha256').update(token, 'utf8').digest();
+                let encryptedDataKeyBytes: Uint8Array<ArrayBuffer> | null = null;
+                if (sessionEncryptionMode === "e2ee") {
+                    const parsedEncryptedDataKey = tryParseEncryptedDataKeyEnvelopeV1(encryptedDataKey!);
+                    if (parsedEncryptedDataKey.type === "error") {
+                        return parsedEncryptedDataKey;
+                    }
+                    encryptedDataKeyBytes = parsedEncryptedDataKey.encryptedDataKey;
+                }
 
                 publicShare = await tx.publicSessionShare.create({
                     data: {
                         sessionId,
                         createdByUserId: userId,
                         tokenHash,
-                        encryptedDataKey:
-                            sessionEncryptionMode === "plain"
-                                ? null
-                                : new Uint8Array(Buffer.from(encryptedDataKey!, 'base64')),
+                        encryptedDataKey: encryptedDataKeyBytes,
                         expiresAt: expiresAt ? new Date(expiresAt) : null,
                         maxUses: maxUses ?? null,
                         isConsentRequired: isConsentRequired ?? false

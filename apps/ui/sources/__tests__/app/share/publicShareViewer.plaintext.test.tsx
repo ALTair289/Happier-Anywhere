@@ -83,6 +83,7 @@ describe('PublicShareViewerScreen (plaintext)', () => {
                     accessLevel: 'view',
                     encryptedDataKey: null,
                     isConsentRequired: false,
+                    messagesAccessToken: 'messages-token-1',
                 }),
             })
             .mockResolvedValueOnce({
@@ -120,7 +121,11 @@ describe('PublicShareViewerScreen (plaintext)', () => {
         );
         expect(serverFetchSpy).toHaveBeenCalledWith(
             '/v1/public-share/tok-1/messages',
-            expect.anything(),
+            expect.objectContaining({
+                headers: expect.objectContaining({
+                    'x-public-share-messages-access-token': 'messages-token-1',
+                }),
+            }),
             expect.objectContaining({ includeAuth: false }),
         );
         expect(transcriptListSpy).toHaveBeenCalled();
@@ -257,6 +262,75 @@ describe('PublicShareViewerScreen (plaintext)', () => {
         const last = transcriptListSpy.mock.calls[transcriptListSpy.mock.calls.length - 1]?.[0];
         const seqs = Array.isArray(last?.messages) ? last.messages.map((m: any) => (m as any)?.seq ?? null) : [];
         expect(seqs).toEqual([1, 2]);
+    });
+
+    it('suppresses non-structured event-role output rows from public transcripts', async () => {
+        transcriptListSpy.mockClear();
+        serverFetchSpy.mockReset();
+
+        serverFetchSpy
+            .mockResolvedValueOnce({
+                ok: true,
+                status: 200,
+                json: async () => ({
+                    session: {
+                        id: 's1',
+                        seq: 1,
+                        encryptionMode: 'plain',
+                        createdAt: 1,
+                        updatedAt: 2,
+                        active: true,
+                        activeAt: 2,
+                        metadata: JSON.stringify({ path: '/repo', host: 'devbox', name: 'Plain Session' }),
+                        metadataVersion: 1,
+                        agentState: JSON.stringify({}),
+                        agentStateVersion: 1,
+                    },
+                    owner: { id: 'u1', username: 'alice', firstName: null, lastName: null, avatar: null },
+                    accessLevel: 'view',
+                    encryptedDataKey: null,
+                    isConsentRequired: false,
+                }),
+            })
+            .mockResolvedValueOnce({
+                ok: true,
+                status: 200,
+                json: async () => ({
+                    messages: [{
+                        id: 'm-event',
+                        seq: 1,
+                        localId: null,
+                        messageRole: 'event',
+                        content: {
+                            t: 'plain',
+                            v: {
+                                role: 'agent',
+                                content: {
+                                    type: 'output',
+                                    data: {
+                                        type: 'assistant',
+                                        uuid: 'event-uuid',
+                                        message: {
+                                            role: 'assistant',
+                                            content: [{ type: 'text', text: 'Transport status' }],
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                        createdAt: 10,
+                        updatedAt: 10,
+                    }],
+                }),
+            });
+
+        const { default: PublicShareViewerScreen } = await import('@/app/(app)/share/[token]');
+
+        await renderScreen(<PublicShareViewerScreen />);
+        await flushHookEffects({ cycles: 1, turns: 1 });
+
+        const last = transcriptListSpy.mock.calls[transcriptListSpy.mock.calls.length - 1]?.[0];
+        expect(last?.messages).toEqual([]);
     });
 
     it('skips malformed plaintext share messages and still renders the remaining messages', async () => {

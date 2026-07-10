@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
+import { encodeBase64, stringifySerializedJsonValue } from "@happier-dev/protocol";
 
 import { db } from "@/storage/db";
 import { createLightSqliteHarness, type LightSqliteHarness } from "@/testkit/lightSqliteHarness";
@@ -45,6 +46,16 @@ vi.mock("@/app/events/eventRouter", () => ({
 
 vi.mock("@/utils/keys/randomKeyNaked", () => ({ randomKeyNaked }));
 vi.mock("@/app/changes/markAccountChanged", () => ({ markAccountChanged }));
+
+const validEncryptedDataKey = encodeBase64(
+    new Uint8Array(
+        24 + 16 + new TextEncoder().encode(
+            stringifySerializedJsonValue({ v: 0, keyB64: "A".repeat(44) }),
+        ).byteLength,
+    ).fill(1),
+    "base64",
+);
+const validEncryptedDataKeyBytes = Buffer.from(validEncryptedDataKey, "base64");
 
 describe("publicShareRoutes (AccountChange integration)", () => {
     let harness: LightSqliteHarness;
@@ -115,7 +126,7 @@ describe("publicShareRoutes (AccountChange integration)", () => {
                     headers: { "x-test-user-id": owner.id, "content-type": "application/json" },
                     payload: {
                         token: "tok-create",
-                        encryptedDataKey: Buffer.from("key").toString("base64"),
+                        encryptedDataKey: validEncryptedDataKey,
                     },
                 });
 
@@ -157,6 +168,34 @@ describe("publicShareRoutes (AccountChange integration)", () => {
         );
     });
 
+    it("POST create rejects malformed E2EE encryptedDataKey envelopes before writing a share", async () => {
+        const { owner, session } = await seedOwnerSession();
+
+        await withAuthenticatedTestApp(
+            (app) => publicShareRoutes(app as any),
+            async (app) => {
+                const res = await app.inject({
+                    method: "POST",
+                    url: `/v1/sessions/${session.id}/public-share`,
+                    headers: { "x-test-user-id": owner.id, "content-type": "application/json" },
+                    payload: {
+                        token: "tok-malformed-create",
+                        encryptedDataKey: Buffer.from([1, 2, 3]).toString("base64"),
+                    },
+                });
+
+                expect(res.statusCode).toBe(400);
+                expect(res.json()).toEqual({ error: "Invalid encryptedDataKey" });
+            },
+        );
+
+        await expect(db.publicSessionShare.findUnique({
+            where: { sessionId: session.id },
+            select: { id: true },
+        })).resolves.toBeNull();
+        expect(emitUpdate).not.toHaveBeenCalled();
+    });
+
     it("POST update marks share+session and emits updated update using latest cursor", async () => {
         const { owner, session } = await seedOwnerSession();
         await db.publicSessionShare.create({
@@ -164,7 +203,7 @@ describe("publicShareRoutes (AccountChange integration)", () => {
                 sessionId: session.id,
                 createdByUserId: owner.id,
                 tokenHash: createHash("sha256").update("tok-existing", "utf8").digest(),
-                encryptedDataKey: Buffer.from([1, 2, 3]),
+                encryptedDataKey: validEncryptedDataKeyBytes,
                 maxUses: 2,
                 isConsentRequired: false,
             },
@@ -211,6 +250,44 @@ describe("publicShareRoutes (AccountChange integration)", () => {
         );
     });
 
+    it("POST update rejects a malformed stored E2EE envelope before changes or events", async () => {
+        const { owner, session } = await seedOwnerSession();
+        await db.publicSessionShare.create({
+            data: {
+                sessionId: session.id,
+                createdByUserId: owner.id,
+                tokenHash: createHash("sha256").update("tok-malformed-existing", "utf8").digest(),
+                encryptedDataKey: Buffer.from([1, 2, 3]),
+                maxUses: 2,
+                isConsentRequired: false,
+            },
+        });
+
+        await withAuthenticatedTestApp(
+            (app) => publicShareRoutes(app as any),
+            async (app) => {
+                const res = await app.inject({
+                    method: "POST",
+                    url: `/v1/sessions/${session.id}/public-share`,
+                    headers: { "x-test-user-id": owner.id, "content-type": "application/json" },
+                    payload: { maxUses: 3 },
+                });
+
+                expect(res.statusCode).toBe(400);
+                expect(res.json()).toEqual({ error: "Invalid encryptedDataKey" });
+            },
+        );
+
+        const stored = await db.publicSessionShare.findUnique({
+            where: { sessionId: session.id },
+            select: { maxUses: true, encryptedDataKey: true },
+        });
+        expect(stored?.maxUses).toBe(2);
+        expect(stored?.encryptedDataKey).toEqual(new Uint8Array([1, 2, 3]));
+        expect(markAccountChanged).not.toHaveBeenCalled();
+        expect(emitUpdate).not.toHaveBeenCalled();
+    });
+
     it("DELETE marks share+session and emits deleted update using latest cursor", async () => {
         const { owner, session } = await seedOwnerSession();
         await db.publicSessionShare.create({
@@ -218,7 +295,7 @@ describe("publicShareRoutes (AccountChange integration)", () => {
                 sessionId: session.id,
                 createdByUserId: owner.id,
                 tokenHash: createHash("sha256").update("tok-delete", "utf8").digest(),
-                encryptedDataKey: Buffer.from([1, 2, 3]),
+                encryptedDataKey: validEncryptedDataKeyBytes,
                 isConsentRequired: false,
             },
         });
