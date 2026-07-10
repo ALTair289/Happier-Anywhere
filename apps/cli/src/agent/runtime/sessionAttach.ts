@@ -1,4 +1,5 @@
 import { decodeBase64 } from '@/api/encryption';
+import { readSessionCatchUpAuthorization, type SessionCatchUpAuthorization } from '@/api/session/sessionChangesSyncOnConnect';
 import { assertSessionAttachFilePathWithinBaseDir, resolveSessionAttachBaseDir } from '@/agent/runtime/sessionAttachPaths';
 import { SessionAttachPayloadSchema } from '@/agent/runtime/sessionAttachPayload';
 import { configuration } from '@/configuration';
@@ -8,8 +9,8 @@ import { lstat, readFile, unlink } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
 export type SessionAttachSecret =
-  | Readonly<{ encryptionMode: 'plain'; lastObservedMessageSeq?: number; initialTranscriptAfterSeq?: number }>
-  | Readonly<{ encryptionMode: 'e2ee'; encryptionKey: Uint8Array; encryptionVariant: 'legacy' | 'dataKey'; lastObservedMessageSeq?: number; initialTranscriptAfterSeq?: number }>;
+  | Readonly<{ encryptionMode: 'plain'; lastObservedMessageSeq?: number; initialTranscriptAfterSeq?: number; initialTranscriptCatchUpAuthorization?: SessionCatchUpAuthorization }>
+  | Readonly<{ encryptionMode: 'e2ee'; encryptionKey: Uint8Array; encryptionVariant: 'legacy' | 'dataKey'; lastObservedMessageSeq?: number; initialTranscriptAfterSeq?: number; initialTranscriptCatchUpAuthorization?: SessionCatchUpAuthorization }>;
 
 function readNonNegativeIntegerProperty(payload: unknown, key: string): number | undefined {
   if (!payload || typeof payload !== 'object' || !(key in payload)) return undefined;
@@ -51,11 +52,15 @@ export async function readSessionAttachFromEnv(): Promise<SessionAttachSecret | 
     const payload = parsed.data;
     const lastObservedMessageSeq = readNonNegativeIntegerProperty(payload, 'lastObservedMessageSeq');
     const initialTranscriptAfterSeq = readNonNegativeIntegerProperty(payload, 'initialTranscriptAfterSeq');
+    const initialTranscriptCatchUpAuthorization = readSessionCatchUpAuthorization(
+      (payload as { initialTranscriptCatchUpAuthorization?: unknown }).initialTranscriptCatchUpAuthorization,
+    );
     if ('encryptionMode' in payload && payload.encryptionMode === 'plain') {
       return {
         encryptionMode: 'plain',
         ...(lastObservedMessageSeq !== undefined ? { lastObservedMessageSeq } : {}),
         ...(initialTranscriptAfterSeq !== undefined ? { initialTranscriptAfterSeq } : {}),
+        ...(initialTranscriptCatchUpAuthorization ? { initialTranscriptCatchUpAuthorization } : {}),
       };
     }
 
@@ -71,6 +76,7 @@ export async function readSessionAttachFromEnv(): Promise<SessionAttachSecret | 
       encryptionVariant: payload.encryptionVariant,
       ...(lastObservedMessageSeq !== undefined ? { lastObservedMessageSeq } : {}),
       ...(initialTranscriptAfterSeq !== undefined ? { initialTranscriptAfterSeq } : {}),
+      ...(initialTranscriptCatchUpAuthorization ? { initialTranscriptCatchUpAuthorization } : {}),
     };
   } finally {
     // Best-effort cleanup to keep the key short-lived on disk.

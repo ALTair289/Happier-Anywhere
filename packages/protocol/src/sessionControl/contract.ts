@@ -261,9 +261,16 @@ export const SessionMetadataSchema = createSessionMetadataSchema(z);
 export type SessionMetadata = z.infer<typeof SessionMetadataSchema>;
 
 export function readSystemSessionMetadataFromMetadata(params: Readonly<{ metadata: unknown }>): SessionSystemSessionV1 | null {
-  const parsed = SessionMetadataSchema.safeParse(params.metadata);
-  if (!parsed.success) return null;
-  return parsed.data.systemSessionV1 ?? null;
+  // Hot path: this runs inside per-session loops on store notifications (session list
+  // filtering, voice lookups, CLI row building). Parse only the marker field itself —
+  // validating the whole metadata blob here is both wasteful and wrong (a malformed
+  // sibling field must not hide a system session).
+  const metadata = params.metadata;
+  if (typeof metadata !== 'object' || metadata === null) return null;
+  const marker = (metadata as Record<string, unknown>).systemSessionV1;
+  if (typeof marker !== 'object' || marker === null) return null;
+  const parsed = SessionSystemSessionV1Schema.safeParse(marker);
+  return parsed.success ? parsed.data : null;
 }
 
 export function isHiddenSystemSession(params: Readonly<{ metadata: unknown }>): boolean {
@@ -297,6 +304,13 @@ export const SessionShareSchema = z
   .passthrough();
 export type SessionShare = z.infer<typeof SessionShareSchema>;
 
+export const SessionCatchUpAuthorizationV1Schema = z.enum([
+  'explicit_cursor',
+  'reconnect_watermark',
+  'startup_recovery',
+]);
+export type SessionCatchUpAuthorizationV1 = z.infer<typeof SessionCatchUpAuthorizationV1Schema>;
+
 export const V2SessionRecordSchema = z
   .object({
     id: z.string().min(1),
@@ -329,6 +343,7 @@ export const V2SessionRecordSchema = z
     latestTurnStatus: PrimaryTurnStatusV1Schema.nullable().optional(),
     latestTurnStatusObservedAt: z.number().int().nonnegative().nullable().optional(),
     lastRuntimeIssue: SessionRuntimeIssueV1Schema.nullable().optional(),
+    initialTranscriptCatchUpAuthorization: SessionCatchUpAuthorizationV1Schema.optional(),
     runtimeActivityActiveCount: z.number().int().nonnegative().optional(),
     runtimeActivityObservedAt: z.number().int().nonnegative().nullable().optional(),
     runtimeActivityExpiresAt: z.number().int().nonnegative().nullable().optional(),

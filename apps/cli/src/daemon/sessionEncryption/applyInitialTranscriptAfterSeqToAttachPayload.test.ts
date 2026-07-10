@@ -14,6 +14,7 @@ describe('applyInitialTranscriptAfterSeqToAttachPayload', () => {
       encryptionMode: 'plain',
       lastObservedMessageSeq: 36,
       initialTranscriptAfterSeq: 36,
+      initialTranscriptCatchUpAuthorization: 'explicit_cursor',
     });
   });
 
@@ -28,6 +29,7 @@ describe('applyInitialTranscriptAfterSeqToAttachPayload', () => {
       encryptionMode: 'plain',
       lastObservedMessageSeq: 36,
       initialTranscriptAfterSeq: 36,
+      initialTranscriptCatchUpAuthorization: 'explicit_cursor',
     });
   });
 
@@ -42,6 +44,7 @@ describe('applyInitialTranscriptAfterSeqToAttachPayload', () => {
       encryptionMode: 'plain',
       lastObservedMessageSeq: 0,
       initialTranscriptAfterSeq: 0,
+      initialTranscriptCatchUpAuthorization: 'explicit_cursor',
     });
   });
 
@@ -63,6 +66,7 @@ describe('applyInitialTranscriptAfterSeqToAttachPayload', () => {
       encryptionMode: 'plain',
       lastObservedMessageSeq: 4,
       initialTranscriptAfterSeq: 4,
+      initialTranscriptCatchUpAuthorization: 'explicit_cursor',
     });
   });
 
@@ -78,6 +82,7 @@ describe('applyInitialTranscriptAfterSeqToAttachPayload', () => {
       encryptionMode: 'plain',
       lastObservedMessageSeq: 5,
       initialTranscriptAfterSeq: 5,
+      initialTranscriptCatchUpAuthorization: 'explicit_cursor',
     });
   });
 

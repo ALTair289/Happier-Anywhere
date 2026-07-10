@@ -478,6 +478,7 @@ describe('sessionControl contract exports', () => {
       latestTurnStatus: 'failed',
       latestTurnStatusObservedAt: 456,
       lastRuntimeIssue: runtimeIssue,
+      initialTranscriptCatchUpAuthorization: 'explicit_cursor',
       runtimeActivityActiveCount: 2,
       runtimeActivityObservedAt: 1_000,
       runtimeActivityExpiresAt: 2_000,
@@ -502,6 +503,22 @@ describe('sessionControl contract exports', () => {
       latestTurnStatusObservedAt: -1,
     });
     expect(invalidTurnStatusObservedAtParsed.success).toBe(false);
+
+    const invalidCatchUpAuthorizationParsed = (protocol as any).V2SessionRecordSchema.safeParse({
+      id: 'sess_123',
+      seq: 7,
+      createdAt: 1,
+      updatedAt: 2,
+      active: false,
+      activeAt: 0,
+      metadata: '{}',
+      metadataVersion: 1,
+      agentState: null,
+      agentStateVersion: 1,
+      dataEncryptionKey: null,
+      initialTranscriptCatchUpAuthorization: 'no_explicit_authorization',
+    });
+    expect(invalidCatchUpAuthorizationParsed.success).toBe(false);
 
     const invalidAttentionProjectionParsed = (protocol as any).V2SessionRecordSchema.safeParse({
       id: 'sess_123',
@@ -745,6 +762,37 @@ describe('sessionControl contract exports', () => {
     expect((protocol as any).isHiddenSystemSession({ metadata: null })).toBe(false);
     expect((protocol as any).isHiddenSystemSession({ metadata: { systemSessionV1: { v: 1, key: 'carrier' } } })).toBe(false);
     expect((protocol as any).isHiddenSystemSession({ metadata: { systemSessionV1: { v: 1, key: 'carrier', hidden: true } } })).toBe(true);
+  });
+
+  it('reads systemSessionV1 independently of malformed sibling metadata keys', () => {
+    // The system-session marker read must not depend on unrelated metadata fields
+    // being well-formed: a corrupt recovery blob must not hide a system session.
+    const parsed = (protocol as any).readSystemSessionMetadataFromMetadata({
+      metadata: {
+        systemSessionV1: { v: 1, key: 'voice_conversation', hidden: true },
+        sessionUsageLimitRecoveryV1: { v: 'corrupt', nonsense: true },
+        sessionContinuationRecoveryV1: 42,
+      },
+    });
+    expect(parsed).toEqual({ v: 1, key: 'voice_conversation', hidden: true });
+    expect((protocol as any).isHiddenSystemSession({
+      metadata: {
+        systemSessionV1: { v: 1, key: 'voice_conversation', hidden: true },
+        sessionUsageLimitRecoveryV1: 42,
+      },
+    })).toBe(true);
+  });
+
+  it('returns null system-session metadata for non-object, absent, and malformed markers', () => {
+    const read = (metadata: unknown) => (protocol as any).readSystemSessionMetadataFromMetadata({ metadata });
+    expect(read(null)).toBeNull();
+    expect(read(undefined)).toBeNull();
+    expect(read('metadata-string')).toBeNull();
+    expect(read(7)).toBeNull();
+    expect(read({})).toBeNull();
+    expect(read({ systemSessionV1: null })).toBeNull();
+    expect(read({ systemSessionV1: { v: 2, key: 'x' } })).toBeNull();
+    expect(read({ systemSessionV1: { v: 1 } })).toBeNull();
   });
 
   it('drops legacy connected-service quota refs from parsed session metadata while preserving provider-account usage refs', () => {

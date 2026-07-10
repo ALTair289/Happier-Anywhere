@@ -2,6 +2,7 @@ import type { SessionAttachFilePayload } from '@/agent/runtime/sessionAttachPayl
 import type { Credentials } from '@/persistence';
 import { isAuthenticationError } from '@/api/client/httpStatusError';
 import { encodeBase64 } from '@/api/encryption';
+import { readSessionCatchUpAuthorization } from '@/api/session/sessionChangesSyncOnConnect';
 import { configuration } from '@/configuration';
 import { resolveVendorResumeIdForExistingSession } from '@/daemon/spawn/resolveVendorResumeIdForExistingSession';
 import { createSpawnConcurrencyGate, type SpawnConcurrencyGate } from '@/daemon/spawn/createSpawnConcurrencyGate';
@@ -100,6 +101,9 @@ function buildExistingSessionAttachContext(params: Readonly<{
   });
   const lastObservedMessageSeq = attachCursor.cursor;
   const effectiveDeliveredUserMessageSeq = attachCursor.effectiveWatermarkSeq;
+  const initialTranscriptCatchUpAuthorization = readSessionCatchUpAuthorization(
+    (params.rawSession as { initialTranscriptCatchUpAuthorization?: unknown }).initialTranscriptCatchUpAuthorization,
+  );
   if (mode === 'plain') {
     return {
       ok: true,
@@ -107,6 +111,7 @@ function buildExistingSessionAttachContext(params: Readonly<{
         v: 2,
         encryptionMode: 'plain',
         ...(lastObservedMessageSeq !== undefined ? { lastObservedMessageSeq } : {}),
+        ...(initialTranscriptCatchUpAuthorization ? { initialTranscriptCatchUpAuthorization } : {}),
       },
       vendorResumeId: resolveVendorResumeIdForExistingSession({
         agent: params.agent,
@@ -132,6 +137,7 @@ function buildExistingSessionAttachContext(params: Readonly<{
       encryptionKeyBase64: encodeBase64(ctx.encryptionKey, 'base64'),
       encryptionVariant: ctx.encryptionVariant,
       ...(lastObservedMessageSeq !== undefined ? { lastObservedMessageSeq } : {}),
+      ...(initialTranscriptCatchUpAuthorization ? { initialTranscriptCatchUpAuthorization } : {}),
     },
     vendorResumeId: resolveVendorResumeIdForExistingSession({
       agent: params.agent,

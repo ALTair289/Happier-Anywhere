@@ -1,5 +1,7 @@
 import * as z from 'zod';
 
+import { SessionCatchUpAuthorizationV1Schema } from '@happier-dev/protocol';
+
 const LegacyAttachPayloadSchema = z.object({
   encryptionKeyBase64: z.string().min(1),
   encryptionVariant: z.union([z.literal('legacy'), z.literal('dataKey')]),
@@ -12,6 +14,7 @@ const AttachPayloadV2PlainSchema = z.object({
   encryptionMode: z.literal('plain'),
   lastObservedMessageSeq: z.number().int().nonnegative().optional(),
   initialTranscriptAfterSeq: z.number().int().nonnegative().optional(),
+  initialTranscriptCatchUpAuthorization: SessionCatchUpAuthorizationV1Schema.optional(),
 });
 
 const AttachPayloadV2E2eeSchema = z.object({
@@ -21,6 +24,7 @@ const AttachPayloadV2E2eeSchema = z.object({
   encryptionVariant: z.union([z.literal('legacy'), z.literal('dataKey')]),
   lastObservedMessageSeq: z.number().int().nonnegative().optional(),
   initialTranscriptAfterSeq: z.number().int().nonnegative().optional(),
+  initialTranscriptCatchUpAuthorization: SessionCatchUpAuthorizationV1Schema.optional(),
 });
 
 export const SessionAttachPayloadV2Schema = z.union([AttachPayloadV2PlainSchema, AttachPayloadV2E2eeSchema]);

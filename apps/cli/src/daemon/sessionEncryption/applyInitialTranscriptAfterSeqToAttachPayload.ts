@@ -33,5 +33,6 @@ export function applyInitialTranscriptAfterSeqToAttachPayload(
     ...payload,
     lastObservedMessageSeq: effectiveCursor,
     initialTranscriptAfterSeq: effectiveCursor,
+    initialTranscriptCatchUpAuthorization: 'explicit_cursor',
   };
 }

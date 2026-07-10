@@ -52,6 +52,7 @@ describe('resolveExistingSessionAttachContext', () => {
         id: 'sess_plain',
         seq: 42,
         encryptionMode: 'plain',
+        initialTranscriptCatchUpAuthorization: 'explicit_cursor',
         metadata: JSON.stringify({ flavor: 'codex', path: '/tmp', codexSessionId: 'vendor-plain-1' }),
         dataEncryptionKey: null,
       }),
@@ -60,7 +61,12 @@ describe('resolveExistingSessionAttachContext', () => {
     const out = await resolveExistingSessionAttachContext({ token: 't', sessionId: 'sess_plain', agent: 'codex', credentials: null });
     expect(out).toMatchObject({
       ok: true,
-      attachPayload: { v: 2, encryptionMode: 'plain', lastObservedMessageSeq: 42 },
+      attachPayload: {
+        v: 2,
+        encryptionMode: 'plain',
+        lastObservedMessageSeq: 42,
+        initialTranscriptCatchUpAuthorization: 'explicit_cursor',
+      },
       vendorResumeId: 'vendor-plain-1',
       sessionPath: '/tmp',
       metadata: { flavor: 'codex', path: '/tmp', codexSessionId: 'vendor-plain-1' },

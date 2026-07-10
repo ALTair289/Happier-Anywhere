@@ -46,6 +46,7 @@ describe('createBaseSessionForAttach', () => {
 
       expect(session.seq).toBe(123);
       expect(session.initialTranscriptAfterSeq).toBe(0);
+      expect(session.initialTranscriptCatchUpAuthorization).toBe('explicit_cursor');
     } finally {
       envScope.restore();
       await removeTempDir(dir);
@@ -125,6 +126,48 @@ describe('createBaseSessionForAttach', () => {
 
       expect(session.seq).toBe(55);
       expect(session.initialTranscriptAfterSeq).toBe(12);
+    } finally {
+      envScope.restore();
+      await removeTempDir(dir);
+    }
+  });
+
+  it('carries the server-provided catch-up authorization from the attach payload', async () => {
+    const dir = await createTempDir('happy-base-attach-');
+    try {
+      envScope.patch({
+        HAPPIER_HOME_DIR: dir,
+        HAPPIER_SESSION_ATTACH_FILE: undefined,
+      });
+      vi.resetModules();
+
+      const { createBaseSessionForAttach } = await import('./createBaseSessionForAttach');
+
+      const attachDir = join(dir, 'tmp', 'session-attach');
+      await mkdir(attachDir, { recursive: true });
+      const filePath = join(attachDir, 'attach.json');
+      await writeFile(
+        filePath,
+        JSON.stringify({
+          v: 2,
+          encryptionMode: 'plain',
+          lastObservedMessageSeq: 9,
+          initialTranscriptAfterSeq: 4,
+          initialTranscriptCatchUpAuthorization: 'startup_recovery',
+        }),
+        { mode: 0o600 },
+      );
+      process.env.HAPPIER_SESSION_ATTACH_FILE = filePath;
+
+      const session = await createBaseSessionForAttach({
+        existingSessionId: 'session-attach',
+        metadata: createTestMetadata(),
+        state: { controlledByUser: false },
+      });
+
+      expect(session.seq).toBe(9);
+      expect(session.initialTranscriptAfterSeq).toBe(4);
+      expect(session.initialTranscriptCatchUpAuthorization).toBe('startup_recovery');
     } finally {
       envScope.restore();
       await removeTempDir(dir);
