@@ -181,6 +181,10 @@ const LEGACY_DEFAULT_SESSION_AGENT_DISABLED_ACTION_IDS_V1 = Object.freeze([
   'session.messages.recent.get',
 ] as const satisfies readonly string[]);
 
+const LEGACY_DEFAULT_SESSION_AGENT_DISABLED_ACTION_ID_SET_V1 = new Set<string>(
+  LEGACY_DEFAULT_SESSION_AGENT_DISABLED_ACTION_IDS_V1,
+);
+
 function isLegacyDefaultSessionAgentActionLockdownV1(settings: ActionsSettingsV1): boolean {
   const known = new Set<string>(LEGACY_DEFAULT_SESSION_AGENT_DISABLED_ACTION_IDS_V1);
   const actions = settings.actions ?? ({} as any);
@@ -202,14 +206,36 @@ function isLegacyDefaultSessionAgentActionLockdownV1(settings: ActionsSettingsV1
   return true;
 }
 
+function hasOnlyEmptyActionSettingsFieldsV1(override: Readonly<Record<string, unknown>>): boolean {
+  const enabledPlacements = Array.isArray(override.enabledPlacements) ? override.enabledPlacements : [];
+  const disabledSurfaces = Array.isArray(override.disabledSurfaces) ? override.disabledSurfaces : [];
+  const disabledPlacements = Array.isArray(override.disabledPlacements) ? override.disabledPlacements : [];
+  const approvalRequiredSurfaces = Array.isArray(override.approvalRequiredSurfaces) ? override.approvalRequiredSurfaces : [];
+  const toolExposureModes = override.toolExposureModes && typeof override.toolExposureModes === 'object' && !Array.isArray(override.toolExposureModes)
+    ? override.toolExposureModes
+    : {};
+  return (
+    override.enabled !== false &&
+    disabledSurfaces.length === 0 &&
+    enabledPlacements.length === 0 &&
+    disabledPlacements.length === 0 &&
+    approvalRequiredSurfaces.length === 0 &&
+    Object.keys(toolExposureModes).length === 0
+  );
+}
+
 function migrateLegacyDefaultActionsSettingsV1(settings: ActionsSettingsV1): ActionsSettingsV1 {
-  if (!isLegacyDefaultSessionAgentActionLockdownV1(settings)) return settings;
   const actions = { ...(settings.actions as any) } as ActionsSettingsV1['actions'];
-  for (const id of LEGACY_DEFAULT_SESSION_AGENT_DISABLED_ACTION_IDS_V1) {
+  let changed = false;
+
+  const shouldMigrateAllLegacyDefaults = isLegacyDefaultSessionAgentActionLockdownV1(settings);
+  for (const id of Object.keys(actions)) {
+    if (!shouldMigrateAllLegacyDefaults && !LEGACY_DEFAULT_SESSION_AGENT_DISABLED_ACTION_ID_SET_V1.has(id)) continue;
     if (CURRENT_DEFAULT_SESSION_AGENT_DISABLED_ACTION_ID_SET_V1.has(id)) continue;
     const existing = (actions as any)[id];
     if (!existing || typeof existing !== 'object' || Array.isArray(existing)) {
       delete (actions as any)[id];
+      changed = true;
       continue;
     }
 
@@ -220,26 +246,15 @@ function migrateLegacyDefaultActionsSettingsV1(settings: ActionsSettingsV1): Act
       ...existing,
       disabledSurfaces,
     };
-    const enabledPlacements = Array.isArray(next.enabledPlacements) ? next.enabledPlacements : [];
-    const disabledPlacements = Array.isArray(next.disabledPlacements) ? next.disabledPlacements : [];
-    const approvalRequiredSurfaces = Array.isArray(next.approvalRequiredSurfaces) ? next.approvalRequiredSurfaces : [];
-    const toolExposureModes = next.toolExposureModes && typeof next.toolExposureModes === 'object' && !Array.isArray(next.toolExposureModes)
-      ? next.toolExposureModes
-      : {};
-    if (
-      next.enabled !== false &&
-      disabledSurfaces.length === 0 &&
-      enabledPlacements.length === 0 &&
-      disabledPlacements.length === 0 &&
-      approvalRequiredSurfaces.length === 0 &&
-      Object.keys(toolExposureModes).length === 0
-    ) {
+    if (disabledSurfaces.length === existing.disabledSurfaces?.length) continue;
+    changed = true;
+    if (hasOnlyEmptyActionSettingsFieldsV1(next as Record<string, unknown>)) {
       delete (actions as any)[id];
     } else {
       (actions as any)[id] = next;
     }
   }
-  return { ...settings, actions };
+  return changed ? { ...settings, actions } : settings;
 }
 
 const BackendEnabledByTargetKeySchema = z.record(z.string(), z.boolean()).catch({});
@@ -278,26 +293,6 @@ export type UsageLimitRecoverySettingsV1 = z.infer<typeof UsageLimitRecoverySett
 
 export const DEFAULT_USAGE_LIMIT_RECOVERY_SETTINGS_V1: UsageLimitRecoverySettingsV1 =
   UsageLimitRecoverySettingsV1Schema.parse({});
-
-export const SessionProviderUsageSettingsV1Schema = z
-  .object({
-    v: z.literal(1).default(1),
-    gaugeMode: z.enum(['auto', 'hidden']).default('auto'),
-    gaugeWindowMode: z
-      .enum(['most_constrained', 'daily', 'weekly', 'primary', 'secondary', 'session'])
-      .default('most_constrained'),
-  })
-  .strict()
-  .catch({
-    v: 1,
-    gaugeMode: 'auto',
-    gaugeWindowMode: 'most_constrained',
-  });
-
-export type SessionProviderUsageSettingsV1 = z.infer<typeof SessionProviderUsageSettingsV1Schema>;
-
-export const DEFAULT_SESSION_PROVIDER_USAGE_SETTINGS_V1: SessionProviderUsageSettingsV1 =
-  SessionProviderUsageSettingsV1Schema.parse({});
 
 export const SESSION_PENDING_QUEUE_DRAIN_MODES = ['one_at_a_time', 'drain_all'] as const;
 export const DEFAULT_SESSION_PENDING_QUEUE_DRAIN_MODE = 'one_at_a_time' as const;
@@ -372,7 +367,6 @@ export const AccountSettingsSchema = z.preprocess(
       actionsSettingsV1: ActionsSettingsV1Schema.catch(DEFAULT_ACTIONS_SETTINGS_V1).default(DEFAULT_ACTIONS_SETTINGS_V1),
       notificationsSettingsV1: NotificationsSettingsV1Schema.default(DEFAULT_NOTIFICATIONS_SETTINGS_V1),
       usageLimitRecoverySettingsV1: UsageLimitRecoverySettingsV1Schema.default(DEFAULT_USAGE_LIMIT_RECOVERY_SETTINGS_V1),
-      sessionProviderUsageSettingsV1: SessionProviderUsageSettingsV1Schema.default(DEFAULT_SESSION_PROVIDER_USAGE_SETTINGS_V1),
       sessionPendingQueueDrainMode: SessionPendingQueueDrainModeSchema.default(DEFAULT_SESSION_PENDING_QUEUE_DRAIN_MODE),
       sessionPendingQueueDeliveryTiming: SessionPendingQueueDeliveryTimingSchema.default(
         DEFAULT_SESSION_PENDING_QUEUE_DELIVERY_TIMING,

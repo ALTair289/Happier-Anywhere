@@ -8,7 +8,6 @@ export {
   DEFAULT_SESSION_AGENT_SPAWN_POLICY_V1,
   DEFAULT_SESSION_PENDING_QUEUE_DELIVERY_TIMING,
   DEFAULT_SESSION_PENDING_QUEUE_DRAIN_MODE,
-  DEFAULT_SESSION_PROVIDER_USAGE_SETTINGS_V1,
   DEFAULT_USAGE_LIMIT_RECOVERY_SETTINGS_V1,
   SESSION_PENDING_QUEUE_DELIVERY_TIMINGS,
   SESSION_PENDING_QUEUE_DRAIN_MODES,
@@ -17,7 +16,6 @@ export {
   SessionPendingQueueDeliveryTimingSchema,
   SessionPendingQueueDrainModeSchema,
   SessionAgentSpawnPolicyV1Schema,
-  SessionProviderUsageSettingsV1Schema,
   UsageLimitRecoverySettingsV1Schema,
   type AccountSettings,
   type ForegroundBehavior,
@@ -25,7 +23,6 @@ export {
   type SessionAgentSpawnPolicyV1,
   type SessionPendingQueueDeliveryTiming,
   type SessionPendingQueueDrainMode,
-  type SessionProviderUsageSettingsV1,
   type UsageLimitRecoverySettingsV1,
 } from './accountSettings.js';
 

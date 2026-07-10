@@ -84,14 +84,10 @@ describe('accountSettings', () => {
     });
   });
 
-  it('defaults the session provider usage gauge to automatic most-constrained display', () => {
+  it('no longer materializes a sessionProviderUsageSettingsV1 default (dead duplicate of the flat gauge keys)', () => {
     const parsed = accountSettingsParse({});
 
-    expect(parsed.sessionProviderUsageSettingsV1).toEqual({
-      v: 1,
-      gaugeMode: 'auto',
-      gaugeWindowMode: 'most_constrained',
-    });
+    expect((parsed as Record<string, unknown>).sessionProviderUsageSettingsV1).toBeUndefined();
   });
 
   it('defaults pending queue draining to one message per wake', () => {
@@ -388,20 +384,19 @@ describe('accountSettings', () => {
     });
   });
 
-  it('accepts hiding the session provider usage gauge', () => {
-    const parsed = accountSettingsParse({
-      sessionProviderUsageSettingsV1: {
-        v: 1,
-        gaugeMode: 'hidden',
-        gaugeWindowMode: 'weekly',
-      },
-    });
-
-    expect(parsed.sessionProviderUsageSettingsV1).toEqual({
-      v: 1,
-      gaugeMode: 'hidden',
-      gaugeWindowMode: 'weekly',
-    });
+  it('tolerates a stored legacy sessionProviderUsageSettingsV1 blob without breaking parse', () => {
+    // The nested object was removed (superseded by the flat sessionProviderUsageGauge* keys). Old
+    // stored blobs must still parse; the canonical settings schema is passthrough, so the inert key
+    // is preserved rather than rejected.
+    expect(() =>
+      accountSettingsParse({
+        sessionProviderUsageSettingsV1: {
+          v: 1,
+          gaugeMode: 'hidden',
+          gaugeWindowMode: 'weekly',
+        },
+      }),
+    ).not.toThrow();
   });
 
   it('defaults connected-service notification topics to enabled', () => {
@@ -759,5 +754,23 @@ describe('accountSettings', () => {
     expect(isActionEnabledByActionsSettings('session.title.set' as any, parsed.actionsSettingsV1, { surface: 'session_agent' } as any)).toBe(true);
     expect(isActionEnabledByActionsSettings('session.message.send' as any, parsed.actionsSettingsV1, { surface: 'session_agent' } as any)).toBe(true);
     expect(parsed.actionsSettingsV1.actions['session.message.send' as any]?.approvalRequiredSurfaces).toEqual(['cli']);
+  });
+
+  it('migrates partial legacy session-agent locks for actions that are now default-open', () => {
+    const parsed = accountSettingsParse({
+      actionsSettingsV1: {
+        v: 1,
+        actions: {
+          'session.permission_mode.set': { disabledSurfaces: ['session_agent'] },
+          'session.message.send': { disabledSurfaces: ['session_agent'], approvalRequiredSurfaces: ['cli'] },
+          'session.stop': { disabledSurfaces: ['session_agent'] },
+        },
+      },
+    });
+
+    expect(isActionEnabledByActionsSettings('session.permission_mode.set' as any, parsed.actionsSettingsV1, { surface: 'session_agent' } as any)).toBe(true);
+    expect(isActionEnabledByActionsSettings('session.message.send' as any, parsed.actionsSettingsV1, { surface: 'session_agent' } as any)).toBe(true);
+    expect(parsed.actionsSettingsV1.actions['session.message.send' as any]?.approvalRequiredSurfaces).toEqual(['cli']);
+    expect(isActionEnabledByActionsSettings('session.stop' as any, parsed.actionsSettingsV1, { surface: 'session_agent' } as any)).toBe(false);
   });
 });
