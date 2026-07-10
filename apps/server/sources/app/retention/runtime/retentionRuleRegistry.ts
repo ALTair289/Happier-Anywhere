@@ -8,6 +8,7 @@ import { createAuthPairingSessionRetentionRule } from '@/app/retention/rules/aut
 import { createGlobalLockRetentionRule } from '@/app/retention/rules/globalLockRetentionRule';
 import { createPublicShareAccessLogRetentionRule } from '@/app/retention/rules/publicShareAccessLogRetentionRule';
 import { createRepeatKeyRetentionRule } from '@/app/retention/rules/repeatKeyRetentionRule';
+import { runSessionMessageRetentionRule } from '@/app/retention/rules/sessionMessageRetentionRule';
 import { createSessionShareAccessLogRetentionRule } from '@/app/retention/rules/sessionShareAccessLogRetentionRule';
 import { runSessionRetentionRule } from '@/app/retention/rules/sessionRetentionRule';
 import { createTerminalAuthRequestRetentionRule } from '@/app/retention/rules/terminalAuthRequestRetentionRule';
@@ -38,6 +39,20 @@ export function createRetentionRuleRegistry(): readonly RetentionRule[] {
                 return {
                     id: 'sessions',
                     ...(await runSessionRetentionRule({ cutoff, batchSize, dryRun, maxDeletesPerRulePerRun })),
+                };
+            },
+        },
+        {
+            id: 'sessionMessages',
+            run: async ({ policy, batchSize, dryRun, maxDeletesPerRulePerRun, now }) => {
+                const domains = resolveEffectiveRetentionDomains(policy);
+                if (domains.sessionMessages.mode === 'keep_forever') {
+                    return { id: 'sessionMessages', deleted: 0 };
+                }
+                const cutoff = new Date(now.getTime() - domains.sessionMessages.days * 24 * 60 * 60 * 1000);
+                return {
+                    id: 'sessionMessages',
+                    ...(await runSessionMessageRetentionRule({ cutoff, batchSize, dryRun, maxDeletesPerRulePerRun })),
                 };
             },
         },

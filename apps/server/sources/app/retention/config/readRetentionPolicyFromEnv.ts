@@ -69,6 +69,11 @@ function readSessionPolicy(env: NodeJS.ProcessEnv): SessionRetentionPolicy {
 function readDomainPolicies(env: NodeJS.ProcessEnv): RetentionDomainPolicies {
     return Object.freeze({
         sessions: readSessionPolicy(env),
+        sessionMessages: readAgePolicy({
+            env,
+            modeKey: 'HAPPIER_SERVER_RETENTION__SESSION_MESSAGES__MODE',
+            daysKey: 'HAPPIER_SERVER_RETENTION__SESSION_MESSAGES__DAYS',
+        }),
         accountChanges: readAgePolicy({
             env,
             modeKey: 'HAPPIER_SERVER_RETENTION__ACCOUNT_CHANGES__MODE',

@@ -3,7 +3,7 @@ import type { RetentionRule } from '@/app/retention/runtime/retentionRuleRegistr
 import { resolveEffectiveRetentionDomains } from '@/app/retention/config/retentionPolicyState';
 import type { RetentionPolicy } from '@/app/retention/config/retentionPolicyTypes';
 
-type RuleDomainId = Exclude<keyof RetentionPolicy['domains'], 'sessions' | 'accountChanges'>;
+type RuleDomainId = Exclude<keyof RetentionPolicy['domains'], 'sessions' | 'sessionMessages' | 'accountChanges'>;
 
 type CreateDeleteManyRetentionRuleParams = Readonly<{
     id: RuleDomainId;

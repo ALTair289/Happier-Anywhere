@@ -12,6 +12,7 @@ function createPolicy(overrides?: Partial<RetentionPolicy>): RetentionPolicy {
         maxDeletesPerRulePerRun: 500,
         domains: {
             sessions: { mode: 'keep_forever' },
+            sessionMessages: { mode: 'keep_forever' },
             accountChanges: { mode: 'keep_forever' },
             voiceSessionLeases: { mode: 'keep_forever' },
             userFeedItems: { mode: 'keep_forever' },
@@ -35,6 +36,7 @@ describe('retention/retentionPolicyToCapabilities', () => {
             enabled: false,
             domains: {
                 sessions: { mode: 'delete_inactive', inactivityDays: 30 },
+                sessionMessages: { mode: 'delete_older_than', days: 30 },
                 accountChanges: { mode: 'delete_older_than', days: 14 },
                 voiceSessionLeases: { mode: 'keep_forever' },
                 userFeedItems: { mode: 'keep_forever' },
@@ -54,6 +56,7 @@ describe('retention/retentionPolicyToCapabilities', () => {
             policyVersion: 1,
             enabled: false,
             sessions: { mode: 'keep_forever' },
+            sessionMessages: { mode: 'keep_forever' },
             accountChanges: { mode: 'keep_forever' },
         });
     });
@@ -62,6 +65,7 @@ describe('retention/retentionPolicyToCapabilities', () => {
         const capabilities = retentionPolicyToCapabilities(createPolicy({
             domains: {
                 sessions: { mode: 'delete_inactive', inactivityDays: 30 },
+                sessionMessages: { mode: 'delete_older_than', days: 30 },
                 accountChanges: { mode: 'delete_older_than', days: 14 },
                 voiceSessionLeases: { mode: 'delete_older_than', days: 7 },
                 userFeedItems: { mode: 'keep_forever' },
@@ -85,6 +89,7 @@ describe('retention/retentionPolicyToCapabilities', () => {
                 inactivityDays: 30,
                 requires: ['updatedAt', 'lastActiveAt'],
             },
+            sessionMessages: { mode: 'delete_older_than', days: 30 },
             accountChanges: { mode: 'delete_older_than', days: 14 },
             voiceSessionLeases: { mode: 'delete_older_than', days: 7 },
             automationRuns: { mode: 'delete_older_than', days: 45 },

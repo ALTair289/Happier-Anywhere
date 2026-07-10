@@ -14,6 +14,7 @@ describe('retention/readRetentionPolicyFromEnv', () => {
             maxDeletesPerRulePerRun: 1000,
             domains: {
                 sessions: { mode: 'keep_forever' },
+                sessionMessages: { mode: 'keep_forever' },
                 accountChanges: { mode: 'keep_forever' },
                 voiceSessionLeases: { mode: 'keep_forever' },
                 userFeedItems: { mode: 'keep_forever' },
@@ -32,6 +33,7 @@ describe('retention/readRetentionPolicyFromEnv', () => {
             maxDeletesPerRulePerRun: 1000,
             domains: {
                 sessions: { mode: 'keep_forever' },
+                sessionMessages: { mode: 'keep_forever' },
                 accountChanges: { mode: 'keep_forever' },
                 voiceSessionLeases: { mode: 'keep_forever' },
                 userFeedItems: { mode: 'keep_forever' },
@@ -48,6 +50,8 @@ describe('retention/readRetentionPolicyFromEnv', () => {
             HAPPIER_SERVER_RETENTION__MAX_DELETES_PER_RULE_PER_RUN: '250',
             HAPPIER_SERVER_RETENTION__SESSIONS__MODE: 'delete_inactive',
             HAPPIER_SERVER_RETENTION__SESSIONS__INACTIVITY_DAYS: '30',
+            HAPPIER_SERVER_RETENTION__SESSION_MESSAGES__MODE: 'delete_older_than',
+            HAPPIER_SERVER_RETENTION__SESSION_MESSAGES__DAYS: '30',
             HAPPIER_SERVER_RETENTION__ACCOUNT_CHANGES__MODE: 'delete_older_than',
             HAPPIER_SERVER_RETENTION__ACCOUNT_CHANGES__DAYS: '14',
             HAPPIER_SERVER_RETENTION__VOICE_SESSION_LEASES__MODE: 'delete_older_than',
@@ -62,6 +66,7 @@ describe('retention/readRetentionPolicyFromEnv', () => {
             maxDeletesPerRulePerRun: 250,
             domains: {
                 sessions: { mode: 'delete_inactive', inactivityDays: 30 },
+                sessionMessages: { mode: 'delete_older_than', days: 30 },
                 accountChanges: { mode: 'delete_older_than', days: 14 },
                 voiceSessionLeases: { mode: 'delete_older_than', days: 7 },
             },

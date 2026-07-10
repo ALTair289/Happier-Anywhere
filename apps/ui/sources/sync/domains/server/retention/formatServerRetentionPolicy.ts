@@ -41,7 +41,7 @@ function formatDomainPolicyDetail(params: {
     }
 
     const domainPolicy = params.policy[params.domainKey];
-    if (domainPolicy.mode === 'keep_forever') {
+    if (!domainPolicy || domainPolicy.mode === 'keep_forever') {
         return t('server.retention.keepForever');
     }
     if (params.domainKey === 'sessions' && domainPolicy.mode === 'delete_inactive') {

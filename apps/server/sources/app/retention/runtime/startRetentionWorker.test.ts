@@ -44,6 +44,7 @@ function createPolicy(intervalMs: number) {
         maxDeletesPerRulePerRun: 1000,
         domains: {
             sessions: { mode: 'keep_forever' },
+            sessionMessages: { mode: 'keep_forever' },
             accountChanges: { mode: 'keep_forever' },
             voiceSessionLeases: { mode: 'delete_older_than', days: 7 },
             userFeedItems: { mode: 'keep_forever' },
