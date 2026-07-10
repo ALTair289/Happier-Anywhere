@@ -1,16 +1,15 @@
 import axios from 'axios';
 import { AccountProfileResponseSchema, type AccountProfileResponse } from '@happier-dev/protocol';
 
-import { configuration } from '@/configuration';
 import {
   createAuthenticationHttpStatusError,
   createHttpStatusError,
   isAuthenticationStatus,
 } from '@/api/client/httpStatusError';
-import { resolveLoopbackHttpUrl } from '@/api/client/loopbackUrl';
+import { resolveServerHttpBaseUrl } from '@/session/transport/http/serverHttpBaseUrl';
 
 export async function fetchAccountProfile(opts: Readonly<{ token: string }>): Promise<AccountProfileResponse> {
-  const serverUrl = resolveLoopbackHttpUrl(configuration.apiServerUrl).replace(/\/+$/, '');
+  const serverUrl = resolveServerHttpBaseUrl();
   const response = await axios.get(`${serverUrl}/v1/account/profile`, {
     headers: {
       Authorization: `Bearer ${opts.token}`,

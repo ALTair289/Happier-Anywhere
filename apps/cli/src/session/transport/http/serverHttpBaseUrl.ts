@@ -1,1 +1,5 @@
-export { resolveServerHttpBaseUrl } from '@/api/client/serverHttpBaseUrl';
+export {
+  isServerHttpEndpointConnectionFailure,
+  normalizeServerHttpBaseUrl,
+  resolveServerHttpBaseUrl,
+} from '@/api/client/serverHttpBaseUrl';

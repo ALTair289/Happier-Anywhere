@@ -1,8 +1,7 @@
 import axios from 'axios';
 import * as z from 'zod';
-import { configuration } from '@/configuration';
 import { createAuthenticationHttpStatusError, createHttpStatusError, isAuthenticationStatus } from './client/httpStatusError';
-import { resolveLoopbackHttpUrl } from './client/loopbackUrl';
+import { resolveServerHttpBaseUrl } from '@/session/transport/http/serverHttpBaseUrl';
 
 export const ChangeEntrySchema = z.object({
   cursor: z.number().int().min(0),
@@ -29,7 +28,7 @@ export const CursorGoneErrorSchema = z.object({
 export type CursorGoneError = z.infer<typeof CursorGoneErrorSchema>;
 
 export async function fetchChangesAccountId(opts: { token: string }): Promise<string> {
-  const serverUrl = resolveLoopbackHttpUrl(configuration.apiServerUrl).replace(/\/+$/, '');
+  const serverUrl = resolveServerHttpBaseUrl();
   const response = await axios.get(`${serverUrl}/v1/account/profile`, {
     headers: {
       Authorization: `Bearer ${opts.token}`,
@@ -70,7 +69,7 @@ export async function fetchChanges(opts: { token: string; after: number; limit?:
 }> {
   const after = Number.isFinite(opts.after) && opts.after >= 0 ? Math.floor(opts.after) : 0;
   const limit = typeof opts.limit === 'number' && opts.limit > 0 ? Math.min(Math.floor(opts.limit), 500) : 200;
-  const serverUrl = resolveLoopbackHttpUrl(configuration.apiServerUrl).replace(/\/+$/, '');
+  const serverUrl = resolveServerHttpBaseUrl();
 
   try {
     const response = await axios.get(`${serverUrl}/v2/changes`, {
