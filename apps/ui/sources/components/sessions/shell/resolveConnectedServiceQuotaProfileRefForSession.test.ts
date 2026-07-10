@@ -57,6 +57,42 @@ describe('resolveConnectedServiceQuotaProfileRefForSession', () => {
         });
     });
 
+    it('carries explicit profile credential health so quota consumers can suppress stale invalid snapshots', () => {
+        const accountProfileConnectedServicesV2 = AccountProfileSchema.parse({
+            id: 'acct',
+            connectedServicesV2: [{
+                serviceId: 'openai-codex',
+                profiles: [
+                    { profileId: 'connected-profile', status: 'needs_reauth', kind: 'oauth', providerEmail: 'a@b.com', expiresAt: 1 },
+                ],
+                groups: [],
+            }],
+        }).connectedServicesV2;
+
+        expect(resolveConnectedServiceQuotaProfileRefForSession({
+            agentId: 'codex',
+            accountProfileConnectedServicesV2,
+            metadata: {
+                path: '/tmp/project',
+                host: 'local',
+                connectedServices: {
+                    v: 1,
+                    bindingsByServiceId: {
+                        'openai-codex': {
+                            source: 'connected',
+                            profileId: 'connected-profile',
+                        },
+                    },
+                },
+            },
+        })).toEqual({
+            serviceId: 'openai-codex',
+            profileId: 'connected-profile',
+            credentialHealthStatus: 'needs_reauth',
+            provenance: 'connected_binding_profile',
+        });
+    });
+
     it('reports group provenance for group bindings resolved to the active member', () => {
         const accountProfileConnectedServicesV2 = AccountProfileSchema.parse({
             id: 'acct',
@@ -94,6 +130,7 @@ describe('resolveConnectedServiceQuotaProfileRefForSession', () => {
         })).toEqual({
             serviceId: 'openai-codex',
             profileId: 'member-a',
+            credentialHealthStatus: 'connected',
             provenance: 'connected_binding_group',
         });
     });
@@ -136,6 +173,7 @@ describe('resolveConnectedServiceQuotaProfileRefForSession', () => {
         })).toEqual({
             serviceId: 'openai-codex',
             profileId: 'member-a',
+            credentialHealthStatus: 'refresh_failed_retryable',
             provenance: 'connected_binding_group',
         });
     });
