@@ -5,11 +5,11 @@ import { logger } from "@/ui/logger";
 import { createHappierMcpServer } from "@/mcp/createHappierMcpServer";
 import { listBuiltInHappierTools } from "@/agent/tools/happierTools/listBuiltInHappierTools";
 import type { RpcHandlerManagerLike } from "@/api/rpc/types";
-import type { Metadata } from "@/api/types";
+import type { Metadata, PermissionMode } from "@/api/types";
 import { configuration } from "@/configuration";
 import type { Credentials } from '@/persistence';
 import type { ExecutionRunServiceResult, WaitForExecutionRunResult } from "@/session/services/executionRuns";
-import type { AccountSettings } from '@happier-dev/protocol';
+import type { AccountSettings, BackendTargetRefV1 } from '@happier-dev/protocol';
 import { createMcpActionEnablement, createMcpActionSettingsProvider } from '@/mcp/server/createMcpActionEnablement';
 
 export type HappyMcpExecutionRunService = Readonly<{
@@ -28,6 +28,13 @@ export type HappyMcpSessionClient = {
     sendClaudeSessionMessage(message: any, meta?: Record<string, unknown>): void;
     updateMetadata(updater: (metadata: Metadata) => Metadata): void | Promise<void>;
     getMetadataSnapshot?(): Metadata | null;
+    getPermissionMode?(): PermissionMode | null | undefined;
+    getBackendTarget?(): BackendTargetRefV1 | null | undefined;
+    getCurrentSessionLocation?(): Readonly<{
+        path?: string | null;
+        host?: string | null;
+        machineId?: string | null;
+    }> | null | undefined;
     executionRuns?: HappyMcpExecutionRunService;
 };
 
@@ -37,6 +44,7 @@ export async function startHappyServer(
         credentials?: Credentials | null;
         accountSettings?: AccountSettings | null;
         getAccountSettings?: (() => AccountSettings | null) | null;
+        requestedPort?: number;
     }>,
 ) {
     // Do not eagerly construct an MCP server on startup; only snapshot the names.
@@ -127,8 +135,13 @@ export async function startHappyServer(
         }
     });
 
-    const baseUrl = await new Promise<URL>((resolve) => {
-        server.listen(0, "127.0.0.1", () => {
+    const requestedPort = typeof opts?.requestedPort === 'number' && Number.isInteger(opts.requestedPort) && opts.requestedPort > 0
+        ? opts.requestedPort
+        : 0;
+    const baseUrl = await new Promise<URL>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(requestedPort, "127.0.0.1", () => {
+            server.off('error', reject);
             const addr = server.address() as AddressInfo;
             resolve(new URL(`http://127.0.0.1:${addr.port}`));
         });

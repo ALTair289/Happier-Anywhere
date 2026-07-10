@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { request as httpRequest } from 'node:http';
+import { createServer } from 'node:net';
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -67,6 +68,20 @@ async function withTimeout<T>(promise: Promise<T>, label: string, timeoutMs = 3_
   }
 }
 
+async function reservePort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => resolve());
+  });
+  const address = server.address();
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  if (!address || typeof address === 'string') {
+    throw new Error('failed to reserve port');
+  }
+  return address.port;
+}
+
 describe('startHappyServer (MCP integration)', () => {
   beforeEach(() => {
     vi.resetModules();
@@ -74,6 +89,60 @@ describe('startHappyServer (MCP integration)', () => {
     delete process.env.HAPPIER_ACTIONS_SETTINGS_V1;
     delete process.env.HAPPIER_MCP_SSE_KEEPALIVE_INTERVAL_MS;
     reloadConfiguration();
+  });
+
+  it('binds an explicitly requested port', async () => {
+    const requestedPort = await reservePort();
+    const rpcHandlerManager = new RpcHandlerManager({
+      scopePrefix: 'sess_mcp_requested_port',
+      encryptionKey: new Uint8Array([1, 2, 3, 4]),
+      encryptionVariant: 'legacy',
+    });
+    const fakeClient: HappyMcpSessionClient = {
+      sessionId: 'sess_mcp_requested_port',
+      rpcHandlerManager,
+      sendClaudeSessionMessage: () => {},
+      updateMetadata: () => {},
+    };
+
+    const server = await startHappyServer(fakeClient, { requestedPort });
+    try {
+      expect(new URL(server.url).port).toBe(String(requestedPort));
+    } finally {
+      server.stop();
+    }
+  });
+
+  it('fails cleanly when the requested port is already occupied', async () => {
+    const blocker = createServer();
+    await new Promise<void>((resolve, reject) => {
+      blocker.once('error', reject);
+      blocker.listen(0, '127.0.0.1', () => resolve());
+    });
+    const address = blocker.address();
+    if (!address || typeof address === 'string') {
+      await new Promise<void>((resolve) => blocker.close(() => resolve()));
+      throw new Error('failed to allocate occupied port');
+    }
+    const rpcHandlerManager = new RpcHandlerManager({
+      scopePrefix: 'sess_mcp_requested_port_taken',
+      encryptionKey: new Uint8Array([1, 2, 3, 4]),
+      encryptionVariant: 'legacy',
+    });
+    const fakeClient: HappyMcpSessionClient = {
+      sessionId: 'sess_mcp_requested_port_taken',
+      rpcHandlerManager,
+      sendClaudeSessionMessage: () => {},
+      updateMetadata: () => {},
+    };
+
+    try {
+      await expect(startHappyServer(fakeClient, {
+        requestedPort: address.port,
+      })).rejects.toMatchObject({ code: 'EADDRINUSE' });
+    } finally {
+      await new Promise<void>((resolve) => blocker.close(() => resolve()));
+    }
   });
 
   it('emits SSE keepalive comments on the standalone GET stream (prevents idle timeouts)', async () => {

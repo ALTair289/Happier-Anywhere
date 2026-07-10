@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
 import type { HappyMcpSessionClient } from '@/mcp/startHappyServer';
+import type { Metadata } from '@/api/types';
 import { logger } from '@/ui/logger';
 
 import { registerHappierMcpResources } from '@/mcp/resources/registerHappierMcpResources';
