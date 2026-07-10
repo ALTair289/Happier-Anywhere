@@ -80,6 +80,24 @@ function sessionEnv(baseEnv: Readonly<Record<string, string>>, sessionName: stri
   };
 }
 
+/**
+ * A saved zellij handle can outlive the Happier home that created it. Its socket root is therefore
+ * host identity, not a current-process setting: only a persisted, non-empty root authorizes socket
+ * absence as death evidence. Legacy markers have no such proof and must remain inconclusive.
+ */
+function socketRootFromHandle(handle: TerminalHostHandle): string | null {
+  const socketDir = typeof handle.socketDir === 'string' ? handle.socketDir.trim() : '';
+  return socketDir || null;
+}
+
+function livenessEnvForHandle(
+  baseEnv: Readonly<Record<string, string>>,
+  handle: TerminalHostHandle,
+): Readonly<Record<string, string>> {
+  const socketDir = socketRootFromHandle(handle);
+  return socketDir === null ? baseEnv : { ...baseEnv, ZELLIJ_SOCKET_DIR: socketDir };
+}
+
 function resolvePaneId(pane: ZellijPane): string | null {
   const value = pane.pane_id ?? pane.id;
   if (value === undefined || value === null) return null;
@@ -932,7 +950,7 @@ export function createZellijTerminalHostAdapter(params: Readonly<{
   const livenessInspectionCache = new Map<string, Readonly<{ atMs: number; value: LivenessInspection }>>();
 
   async function inspectLiveness(handle: TerminalHostHandle): Promise<LivenessInspection> {
-    const cacheKey = `${handle.sessionName}\u0000${handle.paneId ?? ''}`;
+    const cacheKey = `${handle.sessionName}\u0000${handle.paneId ?? ''}\u0000${socketRootFromHandle(handle) ?? ''}`;
     const cached = livenessInspectionCache.get(cacheKey);
     const nowMs = Date.now();
     if (cached && nowMs - cached.atMs <= LIVENESS_INSPECTION_FRESHNESS_MS) {
@@ -947,15 +965,19 @@ export function createZellijTerminalHostAdapter(params: Readonly<{
     const observedAt = Date.now();
     const trackedPaneId = handle.paneId;
     if (!trackedPaneId) return { liveness: { paneAlive: false, paneDead: true, observedAt }, paneDeadRecoverable: true };
+    const attachedSocketDir = socketRootFromHandle(handle);
+    const livenessEnv = livenessEnvForHandle(env, handle);
     // Positive death evidence, consulted BEFORE any client action. A gone zellij server leaves no
     // socket for the session; a `list-panes` client against it blocks forever (incident cmrdazlqm).
     // Socket absence is conclusive death — it both avoids the hang and lets recovery dispose the
     // husk and relaunch. Presence / an unknown result falls through to the normal client probe, so
     // a wedged-but-alive host still times out into an *inconclusive* observation (never false-dead).
-    const socketPresence = await inspectSocketPresence({
-      socketDir: env.ZELLIJ_SOCKET_DIR,
-      sessionName: handle.sessionName,
-    }).catch(() => 'unknown' as const);
+    const socketPresence = attachedSocketDir === null
+      ? 'unknown'
+      : await inspectSocketPresence({
+          socketDir: attachedSocketDir,
+          sessionName: handle.sessionName,
+        }).catch(() => 'unknown' as const);
     if (socketPresence === 'absent') {
       return {
         liveness: {
@@ -971,7 +993,7 @@ export function createZellijTerminalHostAdapter(params: Readonly<{
     try {
       panes = await actions.listPanes({
         zellijBinary: params.zellijBinary,
-        env: sessionEnv(env, handle.sessionName),
+        env: sessionEnv(livenessEnv, handle.sessionName),
         timeoutMs: actionTimeoutMs,
       });
     } catch (error) {
@@ -1029,7 +1051,7 @@ export function createZellijTerminalHostAdapter(params: Readonly<{
         try {
           const rawDump = await actions.dumpScreen({
             zellijBinary: params.zellijBinary,
-            env: sessionEnv(env, handle.sessionName),
+            env: sessionEnv(livenessEnv, handle.sessionName),
             paneId: diagnosticPaneId,
             timeoutMs: actionTimeoutMs,
           });

@@ -302,12 +302,122 @@ describe('createZellijTerminalHostAdapter', () => {
       kind: 'zellij',
       sessionName: 'session-gone',
       paneId: 'terminal_1',
+      socketDir: '/attached-root',
       attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' },
     });
 
     expect(liveness).toMatchObject({ paneAlive: false, paneDead: true });
     expect(liveness.probeInconclusive).toBeUndefined();
     expect(listPanesCalls).toBe(0);
+  });
+
+  it('binds liveness evidence and probes to the persisted zellij socket root after the current root moved', async () => {
+    const inspectedSocketDirs: string[] = [];
+    const probeSocketDirs: string[] = [];
+    const actions: ZellijActions = {
+      attachCreateBackground: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+      runCommand: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+      writeBytesChunked: async () => undefined,
+      sendEnter: async () => undefined,
+      sendEscape: async () => undefined,
+      closePane: async () => undefined,
+      listPanes: async (params) => {
+        probeSocketDirs.push(params.env.ZELLIJ_SOCKET_DIR ?? '');
+        return [{ pane_id: 'terminal_1', terminal_command: '/managed/node', exited: false }];
+      },
+      dumpScreen: async () => '',
+      killSession: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+      deleteSession: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+    };
+    const adapter = createZellijTerminalHostAdapter({
+      zellijBinary: '/tools/zellij',
+      happyHomeDir: '/current-home',
+      actions,
+      inspectSocketPresence: async ({ socketDir }) => {
+        inspectedSocketDirs.push(socketDir);
+        return socketDir === '/attached-root' ? 'present' : 'absent';
+      },
+    });
+
+    await expect(adapter.evaluateLiveness({
+      kind: 'zellij',
+      sessionName: 'session-moved-root',
+      paneId: 'terminal_1',
+      socketDir: '/attached-root',
+      attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' },
+    })).resolves.toMatchObject({ paneAlive: true, paneDead: false });
+
+    expect(inspectedSocketDirs).toEqual(['/attached-root']);
+    expect(probeSocketDirs).toEqual(['/attached-root']);
+  });
+
+  it('treats socket absence for a legacy marker with no persisted root as inconclusive', async () => {
+    let listPanesCalls = 0;
+    const actions: ZellijActions = {
+      attachCreateBackground: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+      runCommand: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+      writeBytesChunked: async () => undefined,
+      sendEnter: async () => undefined,
+      sendEscape: async () => undefined,
+      closePane: async () => undefined,
+      listPanes: async () => {
+        listPanesCalls += 1;
+        throw new Error('zellij client cannot establish a session');
+      },
+      dumpScreen: async () => '',
+      killSession: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+      deleteSession: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+    };
+    const adapter = createZellijTerminalHostAdapter({
+      zellijBinary: '/tools/zellij',
+      happyHomeDir: '/current-home',
+      actions,
+      inspectSocketPresence: async () => 'absent',
+    });
+
+    const liveness = await adapter.evaluateLiveness({
+      kind: 'zellij',
+      sessionName: 'legacy-session',
+      paneId: 'terminal_1',
+      attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' },
+    });
+
+    expect(liveness).toMatchObject({ paneAlive: false, probeInconclusive: true });
+    expect(liveness.paneDead).toBeUndefined();
+    expect(listPanesCalls).toBe(1);
+  });
+
+  it('treats an ENOENT zellij probe spawn failure as inconclusive', async () => {
+    const spawnError = Object.assign(new Error('spawn /deleted-snapshot/zellij ENOENT'), { code: 'ENOENT' });
+    const actions: ZellijActions = {
+      attachCreateBackground: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+      runCommand: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+      writeBytesChunked: async () => undefined,
+      sendEnter: async () => undefined,
+      sendEscape: async () => undefined,
+      closePane: async () => undefined,
+      listPanes: async () => { throw spawnError; },
+      dumpScreen: async () => '',
+      killSession: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+      deleteSession: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+    };
+    const adapter = createZellijTerminalHostAdapter({
+      zellijBinary: '/deleted-snapshot/zellij',
+      happyHomeDir: '/current-home',
+      actions,
+      inspectSocketPresence: async () => 'present',
+    });
+
+    const liveness = await adapter.evaluateLiveness({
+      kind: 'zellij',
+      sessionName: 'spawn-missing',
+      paneId: 'terminal_1',
+      socketDir: '/attached-root',
+      attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' },
+    });
+
+    expect(liveness).toMatchObject({ paneAlive: false, probeInconclusive: true });
+    expect(liveness.paneDead).toBeUndefined();
   });
 
   it('keeps a socket-present probe timeout inconclusive (no false death on a wedged-but-alive host)', async () => {
