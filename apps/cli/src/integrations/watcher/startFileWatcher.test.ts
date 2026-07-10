@@ -60,7 +60,7 @@ describe('startFileWatcher', () => {
     await appendFile(file, 'world\n', 'utf8');
     await waitFor(() => calls >= 2);
 
-    stop();
+    await stop();
 
     const callsBefore = calls;
     await appendFile(file, 'after-stop\n', 'utf8');
@@ -90,7 +90,7 @@ describe('startFileWatcher', () => {
     expect(watcherDebugMessages(debugSpy)).toHaveLength(debugCountAfterExpiry);
     expect(watcherDebugMessages(debugSpy).length).toBeLessThanOrEqual(3);
 
-    stop();
+    await stop();
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -107,7 +107,7 @@ describe('startFileWatcher', () => {
       expect(vi.getTimerCount()).toBeGreaterThan(0);
     });
 
-    stop();
+    await stop();
 
     expect(vi.getTimerCount()).toBe(0);
     const debugCountAfterStop = watcherDebugMessages(debugSpy).length;

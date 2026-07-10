@@ -156,7 +156,7 @@ export function startFileWatcher(file: string, onFileChange: (file: string) => v
     const targetName = basename(file);
     const watcherPolicy = DEFAULT_WATCHER_POLICY;
 
-    void (async () => {
+    const watcherTask = (async () => {
         while (true) {
             try {
                 const fileExists = await waitForFileToExist({
@@ -193,7 +193,8 @@ export function startFileWatcher(file: string, onFileChange: (file: string) => v
         }
     })();
 
-    return () => {
+    return async () => {
         abortController.abort();
+        await watcherTask;
     };
 }
