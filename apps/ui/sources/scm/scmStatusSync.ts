@@ -136,22 +136,21 @@ export class ScmStatusSync {
         sessionId: string,
         snapshot: ScmWorkingSnapshot,
     ): void {
-        const activePaths = new Set(snapshot.entries.map((entry) => entry.path));
+        this.publishSnapshotToSessions(state, [sessionId], snapshot);
+    }
 
-        state.updateSessionProjectScmSnapshot(sessionId, snapshot);
-        if (state.getSessionProjectScmSnapshotError(sessionId)) {
-            state.updateSessionProjectScmSnapshotError(sessionId, null);
-        }
-
-        if (!snapshot.repo.isRepo) {
-            state.applyScmStatus(sessionId, null);
-        } else {
-            state.applyScmStatus(sessionId, snapshotToScmStatus(snapshot));
-        }
-
-        state.pruneSessionProjectScmTouchedPaths(sessionId, activePaths);
-        state.pruneSessionProjectScmCommitSelectionPaths(sessionId, activePaths);
-        state.pruneSessionProjectScmCommitSelectionPatches(sessionId, activePaths);
+    private publishSnapshotToSessions(
+        state: ReturnType<typeof storage.getState>,
+        sessionIds: readonly string[],
+        snapshot: ScmWorkingSnapshot,
+    ): void {
+        if (sessionIds.length === 0) return;
+        const status = snapshot.repo.isRepo ? snapshotToScmStatus(snapshot) : null;
+        state.publishSessionProjectScmSnapshots(sessionIds.map((sessionId) => ({
+            sessionId,
+            snapshot,
+            status,
+        })));
     }
 
     private hydrateSessionFromCachedProjectSnapshot(
@@ -436,9 +435,7 @@ export class ScmStatusSync {
             }
 
             if (publishSessionIds.length > 0) {
-                for (const scopedSessionId of publishSessionIds) {
-                    this.publishSnapshotToSession(state, scopedSessionId, snapshot);
-                }
+                this.publishSnapshotToSessions(state, publishSessionIds, snapshot);
             } else {
                 // No observable SCM changes; avoid churn. Still clear a previous error if present.
                 for (const scopedSessionId of scopeSessionIds) {
