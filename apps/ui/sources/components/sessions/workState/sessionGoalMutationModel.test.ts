@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
-import { goalSignature, isNoOpGoalMutation } from './sessionGoalMutationModel';
+import {
+    IDLE_GOAL_CONFIRMATION,
+    beginGoalConfirmation,
+    goalSignature,
+    isNoOpGoalMutation,
+    markGoalConfirmationSlow,
+    resolveGoalConfirmation,
+} from './sessionGoalMutationModel';
 import type { SessionWorkStateItem } from './sessionWorkStateTypes';
 
 function goal(partial: Partial<SessionWorkStateItem> & Pick<SessionWorkStateItem, 'status'>): SessionWorkStateItem {
@@ -44,5 +51,34 @@ describe('isNoOpGoalMutation', () => {
 
     it('is never a no-op when there is no existing goal', () => {
         expect(isNoOpGoalMutation(null, { objective: 'Ship goals' })).toBe(false);
+    });
+});
+
+describe('goal confirmation state machine', () => {
+    it('begins pending (not slow) from a captured baseline signature', () => {
+        const state = beginGoalConfirmation('goal:1|Ship|active||10');
+        expect(state).toEqual({ phase: 'pending', baseline: 'goal:1|Ship|active||10', slow: false });
+    });
+
+    it('marks a pending confirmation slow, and is idempotent / a no-op off the pending phase', () => {
+        const pending = beginGoalConfirmation('sig');
+        const slow = markGoalConfirmationSlow(pending);
+        expect(slow).toEqual({ phase: 'pending', baseline: 'sig', slow: true });
+        // Idempotent: re-marking an already-slow state returns the same reference.
+        expect(markGoalConfirmationSlow(slow)).toBe(slow);
+        // Off the pending phase there is nothing to slow.
+        expect(markGoalConfirmationSlow(IDLE_GOAL_CONFIRMATION)).toBe(IDLE_GOAL_CONFIRMATION);
+    });
+
+    it('resolves to idle only once the work-state signature moves off the pending baseline', () => {
+        const pending = beginGoalConfirmation('sig');
+        // Signature unchanged → still pending (same reference).
+        expect(resolveGoalConfirmation(pending, 'sig')).toBe(pending);
+        // Signature changed → confirmed → idle.
+        expect(resolveGoalConfirmation(pending, 'sig-2')).toBe(IDLE_GOAL_CONFIRMATION);
+        // A slow-pending confirmation still resolves when the signature finally moves.
+        expect(resolveGoalConfirmation(markGoalConfirmationSlow(pending), 'sig-2')).toBe(IDLE_GOAL_CONFIRMATION);
+        // Idle stays idle regardless of signature.
+        expect(resolveGoalConfirmation(IDLE_GOAL_CONFIRMATION, 'anything')).toBe(IDLE_GOAL_CONFIRMATION);
     });
 });

@@ -36,7 +36,7 @@ export function GoalBudgetDisclosure(props: Readonly<{
                 style={styles.disclosureRow}
             >
                 <Text style={[styles.disclosureText, { color: theme.colors.button.primary.background }]}>
-                    {`+ ${t('session.workState.goal.addBudget')}`}
+                    {t('session.workState.goal.addBudget')}
                 </Text>
             </Pressable>
         );

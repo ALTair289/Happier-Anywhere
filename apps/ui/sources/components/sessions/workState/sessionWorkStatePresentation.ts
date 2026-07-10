@@ -58,7 +58,7 @@ function readNonNegativeNumber(value: unknown): number | null {
 }
 
 function readStatusReason(value: unknown): SessionWorkStateStatusReason | null {
-    return value === 'budgetLimited' ? value : null;
+    return value === 'budgetLimited' || value === 'interrupted' ? value : null;
 }
 
 function readGoalCapabilities(value: unknown): SessionWorkStateGoalCapabilities | null {

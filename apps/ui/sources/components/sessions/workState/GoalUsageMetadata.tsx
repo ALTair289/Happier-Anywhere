@@ -14,6 +14,11 @@ import { t } from '@/text';
 import { formatGoalTimeUsed } from './goalUsageFormatting';
 import type { SessionWorkStateItem } from './sessionWorkStateTypes';
 
+/**
+ * Tone for the consumed-budget meter. The meter fills as tokens are consumed (fillFraction = ratio),
+ * so the tone escalates toward `danger` as the fill approaches/exceeds 1 — contract-true with the
+ * MeterBar's canonical "fill = consumed/progress" semantic.
+ */
 function resolveBudgetTone(ratio: number): MeterTone {
     if (ratio >= 1) return 'danger';
     if (ratio >= 0.85) return 'warning';
@@ -35,8 +40,19 @@ export function GoalUsageMetadata(props: Readonly<{ goal: SessionWorkStateItem }
     const timeText = timeSeconds > 0 ? formatGoalTimeUsed(timeSeconds) : null;
 
     if (!hasBudget && !hasUsage) {
+        // An ACTIVE goal with no usage yet (e.g. Claude, which reports usage only on completion)
+        // renders nothing — "No usage yet" under a running goal reads as "nothing is happening".
+        // Honest emptiness beats fake status. Non-active goals (paused/complete with genuinely no
+        // usage) keep the muted fallback line.
+        if (props.goal.status === 'active') {
+            return null;
+        }
         return (
-            <Text testID="session-goal-usage-meta" style={[styles.meta, { color: theme.colors.text.secondary }]}>
+            <Text
+                testID="session-goal-usage-meta"
+                accessibilityLiveRegion="none"
+                style={[styles.meta, { color: theme.colors.text.secondary }]}
+            >
                 {t('session.workState.goal.noUsageYet')}
             </Text>
         );
@@ -48,7 +64,11 @@ export function GoalUsageMetadata(props: Readonly<{ goal: SessionWorkStateItem }
             t('session.workState.goal.tokensSuffix', { count: formatTokenUsageCount(usedTokens) }),
         ].filter((segment): segment is string => Boolean(segment));
         return (
-            <Text testID="session-goal-usage-meta" style={[styles.meta, { color: theme.colors.text.secondary }]}>
+            <Text
+                testID="session-goal-usage-meta"
+                accessibilityLiveRegion="none"
+                style={[styles.meta, { color: theme.colors.text.secondary }]}
+            >
                 {segments.join(' · ')}
             </Text>
         );
@@ -61,16 +81,32 @@ export function GoalUsageMetadata(props: Readonly<{ goal: SessionWorkStateItem }
         budget: formatTokenUsageCount(tokenBudget as number),
     });
     const segments = [budgetText, percent, timeText].filter((segment): segment is string => Boolean(segment));
+    const budgetCaption = t('session.workState.goal.budgetCaption', {
+        budget: formatTokenUsageCount(tokenBudget as number),
+    });
     return (
         <View style={styles.budgetBlock}>
-            <Text testID="session-goal-usage-meta" style={[styles.meta, { color: theme.colors.text.secondary }]}>
+            <Text
+                testID="session-goal-usage-meta"
+                accessibilityLiveRegion="none"
+                style={[styles.meta, { color: theme.colors.text.secondary }]}
+            >
                 {segments.join(' · ')}
             </Text>
             <MeterBar
                 testID="session-goal-budget-meter"
                 tone={resolveBudgetTone(ratio)}
-                value={1 - ratio}
+                fillFraction={ratio}
                 height={4}
+                caption={
+                    <Text
+                        testID="session-goal-budget-caption"
+                        accessibilityLiveRegion="none"
+                        style={[styles.caption, { color: theme.colors.text.secondary }]}
+                    >
+                        {budgetCaption}
+                    </Text>
+                }
             />
         </View>
     );
@@ -84,5 +120,10 @@ const styles = StyleSheet.create(() => ({
     },
     budgetBlock: {
         gap: 6,
+    },
+    caption: {
+        fontSize: 12,
+        lineHeight: 16,
+        fontVariant: ['tabular-nums'],
     },
 }));

@@ -1,5 +1,5 @@
 export type SessionWorkStateStatus = 'pending' | 'active' | 'paused' | 'blocked' | 'complete' | 'cancelled' | 'unknown';
-export type SessionWorkStateStatusReason = 'budgetLimited';
+export type SessionWorkStateStatusReason = 'budgetLimited' | 'interrupted';
 export type SessionWorkStateKind = 'goal' | 'task' | 'todo';
 export type SessionWorkStateOrigin = 'vendor' | 'happier' | 'derived';
 

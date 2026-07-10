@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { resolveGoalActionCapabilities } from './goalActionVisibility';
+import { resolveGoalActionCapabilities, resolveGoalStatusLabelKey } from './goalActionVisibility';
 import type { SessionWorkStateItem } from './sessionWorkStateTypes';
 
 function goal(overrides: Partial<SessionWorkStateItem> = {}): SessionWorkStateItem {
@@ -81,5 +81,22 @@ describe('resolveGoalActionCapabilities', () => {
             canClear: false,
             canConfigureBudget: false,
         });
+    });
+});
+
+describe('resolveGoalStatusLabelKey', () => {
+    it('surfaces a muted "Interrupted" label for an active goal flagged interrupted (plan #9)', () => {
+        expect(resolveGoalStatusLabelKey(goal({ status: 'active', statusReason: 'interrupted' })))
+            .toBe('session.workState.goal.statusInterrupted');
+    });
+
+    it('does not override budget-limited with interrupted', () => {
+        expect(resolveGoalStatusLabelKey(goal({ status: 'active', statusReason: 'budgetLimited' })))
+            .toBe('session.workState.goal.statusBudgetLimited');
+    });
+
+    it('falls back to the active label with no status reason', () => {
+        expect(resolveGoalStatusLabelKey(goal({ status: 'active' })))
+            .toBe('session.workState.goal.statusActive');
     });
 });

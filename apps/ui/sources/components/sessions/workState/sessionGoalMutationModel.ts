@@ -19,10 +19,46 @@ export type SessionWorkStateGoalSetRequest = Readonly<{
 /**
  * After the goal RPC is acknowledged we keep the popover in a "setting goal…" pending state until
  * the native work-state actually reflects the change (H4). For Claude the confirmation only arrives
- * once a fresh `goal_status` work-state item lands; if it never does within this window we surface a
- * diagnostic instead of silently leaving a decorative/unconfirmed goal.
+ * once a fresh `goal_status` work-state item lands. If it has not arrived within this window we do
+ * NOT tear the pending state down or surface an error (the `/goal` inject is commonly just queued
+ * behind an in-flight turn — G-5): instead we soften the copy to a non-error "still waiting" note and
+ * keep waiting, auto-resolving the moment confirmation lands.
  */
 export const GOAL_CONFIRMATION_TIMEOUT_MS = 12_000;
+
+/**
+ * Pending-confirmation state for a dispatched goal mutation. `idle` = nothing awaiting confirmation;
+ * `pending` = the popover holds "setting goal…" keyed to the goal signature captured at request time;
+ * `slow` flips true once the confirmation window elapses so the controller can show the softened
+ * "still waiting for confirmation…" note without dropping the pending row. Kept as a pure model so the
+ * transitions are testable without rendering the popover.
+ */
+export type GoalConfirmation =
+    | { readonly phase: 'idle' }
+    | { readonly phase: 'pending'; readonly baseline: string; readonly slow: boolean };
+
+export const IDLE_GOAL_CONFIRMATION: GoalConfirmation = { phase: 'idle' };
+
+/** Begin awaiting confirmation for a dispatched mutation, keyed to the pre-mutation goal signature. */
+export function beginGoalConfirmation(baseline: string): GoalConfirmation {
+    return { phase: 'pending', baseline, slow: false };
+}
+
+/** Flip a pending confirmation into its softened "still waiting" presentation (no-op otherwise). */
+export function markGoalConfirmationSlow(state: GoalConfirmation): GoalConfirmation {
+    if (state.phase !== 'pending' || state.slow) return state;
+    return { phase: 'pending', baseline: state.baseline, slow: true };
+}
+
+/**
+ * Resolve a pending confirmation once the live work-state signature has moved off the captured
+ * baseline (the mutation is now observed natively). Returns `idle` on confirmation; otherwise returns
+ * the input state unchanged (referentially stable so effects do not churn).
+ */
+export function resolveGoalConfirmation(state: GoalConfirmation, currentSignature: string): GoalConfirmation {
+    if (state.phase !== 'pending') return state;
+    return currentSignature !== state.baseline ? IDLE_GOAL_CONFIRMATION : state;
+}
 
 /**
  * A value-stable signature of the goal item used to detect that the work-state confirmed a mutation.

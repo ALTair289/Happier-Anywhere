@@ -47,6 +47,9 @@ export function SessionWorkStatePopover(props: Readonly<{
             maxWidthCap={420}
             maxHeightCap={520}
             testID="session-work-state-popover-surface"
+            // U-4: the goal edit mode reveals the objective textarea inside this popover, so reserve
+            // the bottom keyboard inset to keep it clear of the software keyboard.
+            reserveKeyboardInset
             content={() => content}
         />
     );

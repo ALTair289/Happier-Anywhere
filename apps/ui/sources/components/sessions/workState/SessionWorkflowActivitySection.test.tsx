@@ -166,7 +166,11 @@ describe('SessionWorkflowActivitySection', () => {
         }));
         const text = collectHostText(tree);
         expect(text).toContain('Pending detail');
-        expect(text).toContain('loading');
+        // U-14: the cold-open skeleton reserves fixed-height rows (no visible "loading" text that
+        // reflows when the record arrives); the loading label is carried on the accessibilityLabel.
+        const skeleton = tree?.root.findByProps({ testID: 'workflow-run-panel-skeleton-a' });
+        expect(skeleton).toBeTruthy();
+        expect(skeleton?.props.accessibilityLabel).toContain('loading');
     });
 
     it('keeps a 300-agent run bounded through progressive row windows', async () => {

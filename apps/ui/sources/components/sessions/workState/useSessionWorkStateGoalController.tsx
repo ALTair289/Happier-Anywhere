@@ -10,8 +10,12 @@ import type { GoalActionCapabilities } from './goalActionVisibility';
 import { SessionGoalControlContent } from './SessionGoalControlContent';
 import {
     GOAL_CONFIRMATION_TIMEOUT_MS,
+    IDLE_GOAL_CONFIRMATION,
+    beginGoalConfirmation,
     goalSignature,
     isNoOpGoalMutation,
+    markGoalConfirmationSlow,
+    resolveGoalConfirmation,
     type SessionWorkStateGoalOperationResult,
     type SessionWorkStateGoalSetRequest,
 } from './sessionGoalMutationModel';
@@ -22,6 +26,7 @@ import {
     resolveGoalManagementControlsVisible,
 } from './sessionGoalSelectors';
 import { SessionTaskListContent } from './SessionTaskListContent';
+import { groupSessionWorkStateItems } from './sessionWorkStatePresentation';
 import type { SessionWorkStateSnapshot } from './sessionWorkStateTypes';
 
 // Re-exported for the chip/popover/content surfaces that consume these contracts through the
@@ -69,10 +74,11 @@ export function useSessionWorkStateGoalController(params: Readonly<{
     const taskListSnapshot = renderGoalControls ? omitGoalItemFromSnapshot(params.snapshot, goal?.id ?? null) : params.snapshot;
     const [draftObjective, setDraftObjective] = React.useState(goal?.title ?? '');
     const [busy, setBusy] = React.useState(false);
-    // After an acknowledged set, hold a "setting goal…" pending state keyed by the goal signature at
-    // request time, so we can detect when the work-state actually reflects the change (H4).
-    const [pendingBaseline, setPendingBaseline] = React.useState<string | null>(null);
-    const [errorText, setErrorText] = React.useState<string | null>(null);
+    // After an acknowledged set, hold a "setting goal…" pending confirmation keyed by the goal
+    // signature at request time, so we can detect when the work-state actually reflects the change
+    // (H4). If the confirmation is slow (G-5: the /goal inject is often queued behind an in-flight
+    // turn) the pending state stays and only its copy softens — it never becomes an error.
+    const [confirmation, setConfirmation] = React.useState(IDLE_GOAL_CONFIRMATION);
     const currentSignature = goalSignature(goal);
 
     React.useEffect(() => {
@@ -88,25 +94,26 @@ export function useSessionWorkStateGoalController(params: Readonly<{
     // Confirmation: once the work-state signature moves off the captured baseline, the mutation has
     // been observed natively — close the popover and drop the pending state.
     React.useEffect(() => {
-        if (!open || pendingBaseline === null) return;
-        if (currentSignature !== pendingBaseline) {
-            setPendingBaseline(null);
+        if (!open || confirmation.phase !== 'pending') return;
+        if (resolveGoalConfirmation(confirmation, currentSignature).phase === 'idle') {
+            setConfirmation(IDLE_GOAL_CONFIRMATION);
             onRequestClose();
         }
-    }, [currentSignature, onRequestClose, open, pendingBaseline]);
+    }, [confirmation, currentSignature, onRequestClose, open]);
 
-    // Timeout: if confirmation never arrives, stop pretending and surface a subtle diagnostic so the
-    // user is not left with a goal that may not have applied.
+    // Timeout: if confirmation is slow (commonly the /goal inject is queued behind an in-flight turn),
+    // do NOT tear the pending state down or raise an error — soften the copy and keep waiting. It
+    // auto-resolves the moment the native work-state confirms.
     React.useEffect(() => {
-        if (pendingBaseline === null) return;
+        if (confirmation.phase !== 'pending' || confirmation.slow) return;
         const timer = setTimeout(() => {
-            setPendingBaseline(null);
-            setErrorText(t('session.workState.goal.pendingTimeout'));
+            setConfirmation((prev) => markGoalConfirmationSlow(prev));
         }, GOAL_CONFIRMATION_TIMEOUT_MS);
         return () => clearTimeout(timer);
-    }, [pendingBaseline]);
+    }, [confirmation]);
 
-    const pending = pendingBaseline !== null;
+    const pending = confirmation.phase === 'pending';
+    const confirmationSlow = pending && confirmation.slow;
     const mutating = busy || pending;
     // While a mutation is in flight or pending confirmation the draft is committed; do not treat it
     // as unsaved work for the dirty-close guard.
@@ -127,7 +134,6 @@ export function useSessionWorkStateGoalController(params: Readonly<{
     const runGoalMutation = React.useCallback(async (request: SessionWorkStateGoalSetRequest) => {
         if (!onSetGoal) return;
         const baseline = goalSignature(goal);
-        setErrorText(null);
         setBusy(true);
         const noOp = isNoOpGoalMutation(goal, request);
         try {
@@ -139,7 +145,7 @@ export function useSessionWorkStateGoalController(params: Readonly<{
                     onRequestClose();
                 } else {
                     // Keep the popover open in a pending state until the native work-state confirms.
-                    setPendingBaseline(baseline);
+                    setConfirmation(beginGoalConfirmation(baseline));
                 }
             } else {
                 onRequestClose();
@@ -152,13 +158,15 @@ export function useSessionWorkStateGoalController(params: Readonly<{
 
     const clearGoal = React.useCallback(async () => {
         if (!onClearGoal) return;
-        onRequestClose();
+        // U-2: confirm BEFORE closing the popover so declining the destructive prompt keeps the
+        // surface open instead of dismissing it out from under the user.
         const confirmed = await Modal.confirm(
             t('session.workState.goal.clearTitle'),
             t('session.workState.goal.clearBody'),
             { confirmText: t('session.workState.goal.clear'), destructive: true },
         );
         if (!confirmed) return;
+        onRequestClose();
         setBusy(true);
         try {
             const result = await onClearGoal();
@@ -168,30 +176,19 @@ export function useSessionWorkStateGoalController(params: Readonly<{
         }
     }, [onClearGoal, onRequestClose]);
 
-    const content = (
-        <View
-            testID="session-work-state-popover"
-            style={styles.content}
-        >
-            {pending ? (
-                <View testID="session-goal-pending" style={styles.statusRow}>
-                    <ActivityIndicator size="small" color={theme.colors.text.secondary} />
-                    <Text style={[styles.pendingText, { color: theme.colors.text.secondary }]}>
-                        {t('session.workState.goal.pending')}
-                    </Text>
-                </View>
-            ) : null}
-            {errorText ? (
-                <View
-                    testID="session-goal-pending-error"
-                    style={[styles.statusRow, styles.errorRow, { backgroundColor: theme.colors.surface.inset }]}
-                >
-                    <Text style={[styles.errorText, { color: theme.colors.state.danger.foreground }]}>
-                        {errorText}
-                    </Text>
-                </View>
-            ) : null}
-            {renderGoalControls ? (
+    // U-7: goal / workflow / tasks stack with a hairline divider between present sections instead of
+    // one uniform gap, so a busy popover reads as distinct landmarks rather than "soup".
+    const taskGroups = groupSessionWorkStateItems(taskListSnapshot);
+    const hasTasks =
+        taskGroups.active.length > 0
+        || taskGroups.pending.length > 0
+        || taskGroups.blockedPaused.length > 0
+        || taskGroups.done.length > 0;
+    const mainSections: { key: string; node: React.ReactNode }[] = [];
+    if (renderGoalControls) {
+        mainSections.push({
+            key: 'goal',
+            node: (
                 <SessionGoalControlContent
                     goal={goal}
                     capabilityFallback={params.goalActionCapabilityFallback ?? null}
@@ -218,15 +215,69 @@ export function useSessionWorkStateGoalController(params: Readonly<{
                     onResume={() => { void runGoalMutation({ status: 'active' }); }}
                     onComplete={() => { void runGoalMutation({ status: 'complete' }); }}
                     onClear={clearGoal}
-                    onCancel={onRequestClose}
+                    onCancel={() => { void guardedRequestClose(); }}
                     busy={mutating}
                 />
+            ),
+        });
+    }
+    if (params.workflowSection) {
+        mainSections.push({ key: 'workflow', node: params.workflowSection });
+    }
+    if (hasTasks) {
+        mainSections.push({
+            key: 'tasks',
+            node: (
+                <SessionTaskListContent
+                    snapshot={taskListSnapshot}
+                    primaryItemId={taskListSnapshot?.primaryItemId ?? null}
+                />
+            ),
+        });
+    }
+    // U-15: nothing to show (no goal, no workflows, no tasks) renders a muted placeholder instead of
+    // an empty padded box. Transient status rows (pending/slow) do not count as content.
+    const showEmptyPlaceholder = mainSections.length === 0 && !pending && !confirmationSlow;
+
+    const content = (
+        <View
+            testID="session-work-state-popover"
+            style={styles.content}
+        >
+            {pending ? (
+                <View testID="session-goal-pending" style={styles.statusRow}>
+                    <ActivityIndicator size="small" color={theme.colors.text.secondary} />
+                    <Text style={[styles.pendingText, { color: theme.colors.text.secondary }]}>
+                        {t('session.workState.goal.pending')}
+                    </Text>
+                </View>
             ) : null}
-            {params.workflowSection ?? null}
-            <SessionTaskListContent
-                snapshot={taskListSnapshot}
-                primaryItemId={taskListSnapshot?.primaryItemId ?? null}
-            />
+            {confirmationSlow ? (
+                <View testID="session-goal-pending-slow" style={styles.statusRow}>
+                    <Text style={[styles.slowText, { color: theme.colors.text.secondary }]}>
+                        {t('session.workState.goal.stillWaiting')}
+                    </Text>
+                </View>
+            ) : null}
+            {mainSections.map((section, index) => (
+                <React.Fragment key={section.key}>
+                    {index > 0 ? (
+                        <View
+                            testID={`session-work-state-divider-${section.key}`}
+                            style={[styles.sectionDivider, { backgroundColor: theme.colors.border.default }]}
+                        />
+                    ) : null}
+                    {section.node}
+                </React.Fragment>
+            ))}
+            {showEmptyPlaceholder ? (
+                <Text
+                    testID="session-work-state-empty"
+                    style={[styles.emptyText, { color: theme.colors.text.tertiary }]}
+                >
+                    {t('session.workState.emptyPlaceholder')}
+                </Text>
+            ) : null}
         </View>
     );
 
@@ -247,17 +298,21 @@ const styles = StyleSheet.create(() => ({
         alignItems: 'center',
         gap: 8,
     },
-    errorRow: {
-        borderRadius: 10,
-        paddingHorizontal: 12,
-        paddingVertical: 10,
-    },
     pendingText: {
         fontSize: 13,
         fontWeight: '600',
     },
-    errorText: {
+    slowText: {
         fontSize: 12,
-        fontWeight: '600',
+        fontWeight: '500',
+    },
+    sectionDivider: {
+        height: StyleSheet.hairlineWidth,
+        marginVertical: 2,
+    },
+    emptyText: {
+        fontSize: 13,
+        fontWeight: '500',
+        paddingVertical: 8,
     },
 }));

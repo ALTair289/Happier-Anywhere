@@ -84,6 +84,17 @@ function collectText(value: unknown): string {
     return collectText(record.children);
 }
 
+/**
+ * Pause/Resume, Complete, and Clear live in the goal header's `⋯` overflow menu (U-5). The menu
+ * items (which keep the `session-goal-*-button` testIDs) mount only once the menu is opened, so
+ * behavior assertions targeting those ids must open the menu first.
+ */
+function openGoalActionsMenu(tree: renderer.ReactTestRenderer | undefined): void {
+    act(() => {
+        tree?.root.findByProps({ testID: 'session-goal-actions-overflow' }).props.onPress();
+    });
+}
+
 describe('SessionWorkStatePopover', () => {
     beforeEach(() => {
         alert.mockReset();
@@ -224,6 +235,7 @@ describe('SessionWorkStatePopover', () => {
         });
 
         expect(() => tree?.root.findByProps({ testID: 'session-goal-objective-input' })).toThrow();
+        openGoalActionsMenu(tree);
         expect(tree?.root.findByProps({ testID: 'session-goal-pause-resume-button' })).toBeTruthy();
         expect(tree?.root.findByProps({ testID: 'session-goal-complete-button' })).toBeTruthy();
         expect(tree?.root.findByProps({ testID: 'session-goal-clear-button' })).toBeTruthy();
@@ -340,6 +352,123 @@ describe('SessionWorkStatePopover', () => {
         act(() => tree?.unmount());
     });
 
+    it('routes the set-first-goal Cancel through the dirty-close guard when a draft was typed (U-1)', async () => {
+        confirm.mockResolvedValueOnce(false);
+        const requestClose = vi.fn();
+        let tree: renderer.ReactTestRenderer | undefined;
+        await act(async () => {
+            tree = renderer.create(<SessionWorkStateContent
+                snapshot={null}
+                editableGoal
+                requestClose={requestClose}
+                onSetGoal={vi.fn()}
+                onClearGoal={vi.fn()}
+            />);
+        });
+
+        act(() => {
+            tree?.root.findByProps({ testID: 'session-goal-objective-input' }).props.onChangeText('Draft objective');
+        });
+        await act(async () => {
+            await tree?.root.findByProps({ testID: 'session-goal-cancel-button' }).props.onPress();
+        });
+
+        // A typed-but-unsaved draft must prompt the discard confirm; declining keeps the surface open.
+        expect(confirm).toHaveBeenCalled();
+        expect(requestClose).not.toHaveBeenCalled();
+
+        act(() => tree?.unmount());
+    });
+
+    it('closes the set-first-goal form directly on Cancel when no draft was typed (U-1)', async () => {
+        const requestClose = vi.fn();
+        let tree: renderer.ReactTestRenderer | undefined;
+        await act(async () => {
+            tree = renderer.create(<SessionWorkStateContent
+                snapshot={null}
+                editableGoal
+                requestClose={requestClose}
+                onSetGoal={vi.fn()}
+                onClearGoal={vi.fn()}
+            />);
+        });
+
+        await act(async () => {
+            await tree?.root.findByProps({ testID: 'session-goal-cancel-button' }).props.onPress();
+        });
+
+        // Nothing typed → not dirty → close directly with no discard prompt.
+        expect(confirm).not.toHaveBeenCalled();
+        expect(requestClose).toHaveBeenCalledTimes(1);
+
+        act(() => tree?.unmount());
+    });
+
+    it('never renders the empty set-goal form in the work-state popover, even with only non-goal items (U-17)', async () => {
+        const anchorRef = { current: null } as React.RefObject<any>;
+        let tree: renderer.ReactTestRenderer | undefined;
+        await act(async () => {
+            tree = renderer.create(<SessionWorkStatePopover
+                open
+                anchorRef={anchorRef}
+                snapshot={{
+                    v: 1,
+                    backendId: 'claude',
+                    updatedAt: 10,
+                    primaryItemId: 'task:active',
+                    items: [
+                        { id: 'task:active', kind: 'task', origin: 'vendor', status: 'active', title: 'Run focused tests', updatedAt: 10 },
+                        { id: 'todo:pending', kind: 'todo', origin: 'vendor', status: 'pending', title: 'Draft implementation', updatedAt: 9 },
+                    ],
+                }}
+                editableGoal
+                onRequestClose={vi.fn()}
+                onSetGoal={vi.fn()}
+                onClearGoal={vi.fn()}
+            />);
+        });
+
+        // The set-goal form belongs only to the goal chip. With no goal item the work-state popover
+        // must render its task list but NEVER the empty creation form (no input, no set/cancel button).
+        expect(() => tree?.root.findByProps({ testID: 'session-goal-objective-input' })).toThrow();
+        expect(() => tree?.root.findByProps({ testID: 'session-goal-save-button' })).toThrow();
+        expect(() => tree?.root.findByProps({ testID: 'session-goal-cancel-button' })).toThrow();
+        expect(tree?.root.findByProps({ testID: 'session-work-state-item-task-active' })).toBeTruthy();
+
+        act(() => tree?.unmount());
+    });
+
+    it('renders the muted empty placeholder when there is no goal, no workflow, and no tasks (F3/U-15)', async () => {
+        const anchorRef = { current: null } as React.RefObject<any>;
+        let tree: renderer.ReactTestRenderer | undefined;
+        await act(async () => {
+            tree = renderer.create(<SessionWorkStatePopover
+                open
+                anchorRef={anchorRef}
+                // A snapshot with no goal item, no tasks, and (no workflowActivity prop →) no workflow
+                // section: every content section is absent, so the popover shows a muted "nothing here"
+                // placeholder instead of an empty padded box — never the set-goal creation form (U-17).
+                snapshot={{
+                    v: 1,
+                    backendId: 'claude',
+                    updatedAt: 10,
+                    primaryItemId: null,
+                    items: [],
+                }}
+                editableGoal
+                onRequestClose={vi.fn()}
+                onSetGoal={vi.fn()}
+                onClearGoal={vi.fn()}
+            />);
+        });
+
+        expect(tree?.root.findByProps({ testID: 'session-work-state-empty' })).toBeTruthy();
+        expect(() => tree?.root.findByProps({ testID: 'session-goal-objective-input' })).toThrow();
+        expect(() => tree?.root.findByProps({ testID: 'session-goal-actions-overflow' })).toThrow();
+
+        act(() => tree?.unmount());
+    });
+
     it('keeps the AgentInput goal-chip set-first-goal affordance even when a task is primary', async () => {
         let tree: renderer.ReactTestRenderer | undefined;
         await act(async () => {
@@ -392,6 +521,7 @@ describe('SessionWorkStatePopover', () => {
         });
 
         expect(collectText(tree?.toJSON())).toContain('session.workState.goal.statusComplete:');
+        openGoalActionsMenu(tree);
         expect(() => tree?.root.findByProps({ testID: 'session-goal-pause-resume-button' })).toThrow();
         expect(() => tree?.root.findByProps({ testID: 'session-goal-complete-button' })).toThrow();
         expect(tree?.root.findByProps({ testID: 'session-goal-clear-button' })).toBeTruthy();
@@ -433,6 +563,7 @@ describe('SessionWorkStatePopover', () => {
         });
 
         expect(collectText(tree?.toJSON())).toContain('session.workState.goal.statusBudgetLimited:');
+        openGoalActionsMenu(tree);
         expect(() => tree?.root.findByProps({ testID: 'session-goal-pause-resume-button' })).toThrow();
         expect(() => tree?.root.findByProps({ testID: 'session-goal-complete-button' })).toThrow();
         expect(tree?.root.findByProps({ testID: 'session-goal-clear-button' })).toBeTruthy();
@@ -568,6 +699,7 @@ describe('SessionWorkStatePopover', () => {
             />);
         });
 
+        openGoalActionsMenu(tree);
         await act(async () => {
             await tree?.root.findByProps({ testID: 'session-goal-complete-button' }).props.onPress();
         });
@@ -725,13 +857,15 @@ describe('SessionWorkStatePopover', () => {
             />);
         });
 
+        openGoalActionsMenu(tree);
         await act(async () => {
             await tree?.root.findByProps({ testID: 'session-goal-clear-button' }).props.onPress();
         });
 
+        // U-2: confirm is asked BEFORE the popover closes; declining keeps the popover open so the
+        // user is not stranded with a dismissed surface after backing out of the destructive prompt.
         expect(confirm).toHaveBeenCalled();
-        expect(onRequestClose).toHaveBeenCalledTimes(1);
-        expect(onRequestClose.mock.invocationCallOrder[0]).toBeLessThan(confirm.mock.invocationCallOrder[0]);
+        expect(onRequestClose).not.toHaveBeenCalled();
         expect(onClearGoal).not.toHaveBeenCalled();
 
         act(() => tree?.unmount());
@@ -764,12 +898,16 @@ describe('SessionWorkStatePopover', () => {
             />);
         });
 
+        openGoalActionsMenu(tree);
         await act(async () => {
             await tree?.root.findByProps({ testID: 'session-goal-clear-button' }).props.onPress();
         });
 
+        // Accepting the confirm runs the clear mutation and closes the popover; the confirm is still
+        // asked before the close (U-2 order).
         expect(onClearGoal).toHaveBeenCalledTimes(1);
         expect(onRequestClose).toHaveBeenCalledTimes(1);
+        expect(confirm.mock.invocationCallOrder[0]).toBeLessThan(onRequestClose.mock.invocationCallOrder[0]);
 
         act(() => tree?.unmount());
     });
@@ -803,6 +941,7 @@ describe('SessionWorkStatePopover', () => {
             />);
         });
 
+        openGoalActionsMenu(tree);
         await act(async () => {
             await tree?.root.findByProps({ testID: 'session-goal-pause-resume-button' }).props.onPress();
         });
@@ -880,6 +1019,7 @@ describe('SessionWorkStatePopover', () => {
         });
 
         // Claude does not publish canStop → no pause/resume/complete and no token-budget editor.
+        openGoalActionsMenu(tree);
         expect(() => tree?.root.findByProps({ testID: 'session-goal-pause-resume-button' })).toThrow();
         expect(() => tree?.root.findByProps({ testID: 'session-goal-complete-button' })).toThrow();
         expect(tree?.root.findByProps({ testID: 'session-goal-clear-button' })).toBeTruthy();
@@ -918,6 +1058,7 @@ describe('SessionWorkStatePopover', () => {
             />);
         });
 
+        openGoalActionsMenu(tree);
         expect(tree?.root.findByProps({ testID: 'session-goal-pause-resume-button' })).toBeTruthy();
         expect(tree?.root.findByProps({ testID: 'session-goal-complete-button' })).toBeTruthy();
         expect(tree?.root.findByProps({ testID: 'session-goal-clear-button' })).toBeTruthy();
@@ -925,6 +1066,47 @@ describe('SessionWorkStatePopover', () => {
             await tree?.root.findByProps({ testID: 'session-goal-edit-button' }).props.onPress();
         });
         expect(tree?.root.findByProps({ testID: 'session-goal-budget-disclosure' })).toBeTruthy();
+
+        act(() => tree?.unmount());
+    });
+
+    it('keeps the destructive goal actions behind the ⋯ overflow menu, not inline (F1/U-5)', async () => {
+        const anchorRef = { current: null } as React.RefObject<any>;
+
+        let tree: renderer.ReactTestRenderer | undefined;
+        await act(async () => {
+            tree = renderer.create(<SessionWorkStatePopover
+                open
+                anchorRef={anchorRef}
+                snapshot={{
+                    v: 1,
+                    backendId: 'codex',
+                    updatedAt: 10,
+                    primaryItemId: 'goal:codex',
+                    items: [
+                        { id: 'goal:codex', kind: 'goal', origin: 'vendor', status: 'active', title: 'Ship goals', updatedAt: 10 },
+                    ],
+                }}
+                editableGoal
+                onRequestClose={vi.fn()}
+                onSetGoal={vi.fn()}
+                onClearGoal={vi.fn()}
+            />);
+        });
+
+        // U-5: Pause/Resume, Complete, and Clear live behind the overflow affordance — they must NOT be
+        // rendered inline on the header. Only the ⋯ menu button and the inline Edit affordance are present
+        // before the menu opens; the destructive actions mount only after it is opened.
+        expect(tree?.root.findByProps({ testID: 'session-goal-actions-overflow' })).toBeTruthy();
+        expect(tree?.root.findByProps({ testID: 'session-goal-edit-button' })).toBeTruthy();
+        expect(() => tree?.root.findByProps({ testID: 'session-goal-pause-resume-button' })).toThrow();
+        expect(() => tree?.root.findByProps({ testID: 'session-goal-complete-button' })).toThrow();
+        expect(() => tree?.root.findByProps({ testID: 'session-goal-clear-button' })).toThrow();
+
+        openGoalActionsMenu(tree);
+        expect(tree?.root.findByProps({ testID: 'session-goal-pause-resume-button' })).toBeTruthy();
+        expect(tree?.root.findByProps({ testID: 'session-goal-complete-button' })).toBeTruthy();
+        expect(tree?.root.findByProps({ testID: 'session-goal-clear-button' })).toBeTruthy();
 
         act(() => tree?.unmount());
     });
@@ -957,6 +1139,7 @@ describe('SessionWorkStatePopover', () => {
             />);
         });
 
+        openGoalActionsMenu(tree);
         await act(async () => {
             await tree?.root.findByProps({ testID: 'session-goal-complete-button' }).props.onPress();
         });
@@ -989,25 +1172,66 @@ describe('SessionWorkStatePopover', () => {
         act(() => tree?.unmount());
     });
 
-    it('surfaces a diagnostic when the goal update is never confirmed (timeout)', async () => {
+    it('softens a slow confirmation to a non-error "still waiting" note and keeps the pending row, then auto-resolves', async () => {
+        // G-5: the /goal inject is frequently queued behind an in-flight turn, so the confirmation is
+        // legitimately delayed. After the window we must NOT tear down the pending state or shout an
+        // error — keep waiting under a softened note and resolve the instant confirmation lands.
         vi.useFakeTimers();
         try {
             const anchorRef = { current: null } as React.RefObject<any>;
             const onSetGoal = vi.fn().mockResolvedValue({ ok: true });
             const onRequestClose = vi.fn();
 
+            const activeSnapshot = {
+                v: 1 as const,
+                backendId: 'codex',
+                updatedAt: 10,
+                primaryItemId: 'goal:codex',
+                items: [
+                    { id: 'goal:codex', kind: 'goal' as const, origin: 'vendor' as const, status: 'active' as const, title: 'Ship goals', updatedAt: 10 },
+                ],
+            };
+
             let tree: renderer.ReactTestRenderer | undefined;
             await act(async () => {
                 tree = renderer.create(<SessionWorkStatePopover
                     open
                     anchorRef={anchorRef}
+                    snapshot={activeSnapshot}
+                    editableGoal
+                    onRequestClose={onRequestClose}
+                    onSetGoal={onSetGoal}
+                    onClearGoal={vi.fn()}
+                />);
+            });
+
+            openGoalActionsMenu(tree);
+            await act(async () => {
+                await tree?.root.findByProps({ testID: 'session-goal-complete-button' }).props.onPress();
+            });
+            expect(tree?.root.findByProps({ testID: 'session-goal-pending' })).toBeTruthy();
+            expect(() => tree?.root.findByProps({ testID: 'session-goal-pending-slow' })).toThrow();
+
+            await act(async () => {
+                vi.advanceTimersByTime(12_000);
+            });
+
+            // Pending row stays; a softened non-error note appears; no error row; popover stays open.
+            expect(tree?.root.findByProps({ testID: 'session-goal-pending' })).toBeTruthy();
+            expect(tree?.root.findByProps({ testID: 'session-goal-pending-slow' })).toBeTruthy();
+            expect(() => tree?.root.findByProps({ testID: 'session-goal-pending-error' })).toThrow();
+            expect(onRequestClose).not.toHaveBeenCalled();
+
+            // Confirmation finally lands → both the pending and the softened note clear, popover closes.
+            await act(async () => {
+                tree?.update(<SessionWorkStatePopover
+                    open
+                    anchorRef={anchorRef}
                     snapshot={{
-                        v: 1,
-                        backendId: 'codex',
-                        updatedAt: 10,
-                        primaryItemId: 'goal:codex',
+                        ...activeSnapshot,
+                        updatedAt: 11,
                         items: [
-                            { id: 'goal:codex', kind: 'goal', origin: 'vendor', status: 'active', title: 'Ship goals', updatedAt: 10 },
+                            { id: 'goal:codex', kind: 'goal', origin: 'vendor', status: 'complete', title: 'Ship goals', updatedAt: 11 },
                         ],
                     }}
                     editableGoal
@@ -1017,18 +1241,9 @@ describe('SessionWorkStatePopover', () => {
                 />);
             });
 
-            await act(async () => {
-                await tree?.root.findByProps({ testID: 'session-goal-complete-button' }).props.onPress();
-            });
-            expect(tree?.root.findByProps({ testID: 'session-goal-pending' })).toBeTruthy();
-
-            await act(async () => {
-                vi.advanceTimersByTime(12_000);
-            });
-
+            expect(onRequestClose).toHaveBeenCalledTimes(1);
             expect(() => tree?.root.findByProps({ testID: 'session-goal-pending' })).toThrow();
-            expect(tree?.root.findByProps({ testID: 'session-goal-pending-error' })).toBeTruthy();
-            expect(onRequestClose).not.toHaveBeenCalled();
+            expect(() => tree?.root.findByProps({ testID: 'session-goal-pending-slow' })).toThrow();
 
             act(() => tree?.unmount());
         } finally {

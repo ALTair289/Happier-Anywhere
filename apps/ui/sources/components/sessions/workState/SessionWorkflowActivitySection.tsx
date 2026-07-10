@@ -123,7 +123,7 @@ const SessionWorkflowRunPanel = React.memo<SessionWorkflowRunPanelProps>((props)
                 <WorkflowRunHeader
                     title={props.snapshot?.title ?? props.runHeadline.title}
                     status={props.runHeadline.status}
-                    statusLabel={formatWorkflowRunStatusLabel(props.runHeadline.status)}
+                    statusLabel={formatWorkflowRunStatusLabel(props.runHeadline.status, props.runHeadline.statusReason)}
                     completedAgents={props.runHeadline.completedAgents}
                     totalAgents={props.runHeadline.totalAgents}
                     rollup={headerRollup}
@@ -175,12 +175,20 @@ const SessionWorkflowRunPanel = React.memo<SessionWorkflowRunPanelProps>((props)
                             ) : null}
                         </View>
                     )
+                ) : props.detailState === 'missing' ? (
+                    <Text style={styles.skeleton}>{t('tools.workflowActivityView.unavailable')}</Text>
                 ) : (
-                    <Text style={styles.skeleton}>
-                        {props.detailState === 'missing'
-                            ? t('tools.workflowActivityView.unavailable')
-                            : t('tools.workflowActivityView.loading')}
-                    </Text>
+                    // U-14: reserve space with fixed-height skeleton rows so the panel does not jump
+                    // when the durable record arrives.
+                    <View
+                        style={styles.skeletonRows}
+                        accessibilityLabel={t('tools.workflowActivityView.loading')}
+                        testID={`workflow-run-panel-skeleton-${props.runHeadline.runId}`}
+                    >
+                        <View style={styles.skeletonRow} />
+                        <View style={[styles.skeletonRow, styles.skeletonRowShort]} />
+                        <View style={styles.skeletonRow} />
+                    </View>
                 )
             ) : null}
         </View>
@@ -194,6 +202,7 @@ export function SessionWorkflowActivitySection(props: Readonly<{
     const { headline, activeRuns, runDetailById, loadedRunsById } = props.activity;
     if (activeRuns.length === 0) return null;
     const primaryRunId = headline?.primaryRunId ?? activeRuns[0]?.runId ?? null;
+    const omittedCount = headline?.truncated?.omittedCount ?? 0;
 
     return (
         <View style={styles.section} testID="session-workflow-activity-section">
@@ -215,6 +224,11 @@ export function SessionWorkflowActivitySection(props: Readonly<{
                     />
                 );
             })}
+            {omittedCount > 0 ? (
+                <Text style={styles.olderRuns} testID="session-workflow-older-runs">
+                    {t('session.workState.workflow.olderRunsHidden', { count: omittedCount })}
+                </Text>
+            ) : null}
         </View>
     );
 }
@@ -240,6 +254,23 @@ const styles = StyleSheet.create((theme) => ({
     skeleton: {
         fontSize: 12,
         color: theme.colors.text.secondary,
+    },
+    skeletonRows: {
+        gap: 8,
+        paddingVertical: 4,
+    },
+    skeletonRow: {
+        minHeight: 14,
+        borderRadius: 6,
+        backgroundColor: theme.colors.surface.base,
+    },
+    skeletonRowShort: {
+        width: '60%',
+    },
+    olderRuns: {
+        fontSize: 12,
+        color: theme.colors.text.tertiary,
+        paddingTop: 2,
     },
     showMore: {
         minHeight: 40,
