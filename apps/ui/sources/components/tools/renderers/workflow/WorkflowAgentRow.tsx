@@ -14,6 +14,11 @@ import { WorkflowStatusIcon } from './workflowStatusIcon';
  * One workflow agent row (UIW3/UIW4). Props are PRIMITIVE so this memoized row re-renders only when
  * its own status/metrics change — concurrent workflows' progress ticks must not re-render unrelated
  * rows. Status icon/colors come from the shared themed helper.
+ *
+ * Density (U-18): compact single-line rows (≤44pt) with a right-aligned muted metadata slot that
+ * only renders when metrics are actually present. Distinct status glyphs (U-19) come from the shared
+ * `WorkflowStatusIcon`. Accessibility (U-10): the Pressable announces the agent title, not the full
+ * live-updating metric string.
  */
 
 export type WorkflowAgentRowProps = Readonly<{
@@ -46,7 +51,6 @@ export const WorkflowAgentRow = React.memo<WorkflowAgentRowProps>((props) => {
     const { theme } = useUnistyles();
     const [expanded, setExpanded] = React.useState(false);
     const metricParts: string[] = [];
-    if (props.model) metricParts.push(props.model);
     if (typeof props.tokensUsed === 'number' && props.tokensUsed > 0) {
         metricParts.push(t('tools.workflowActivityView.tokens', { tokens: formatTokens(props.tokensUsed) }));
     }
@@ -58,7 +62,7 @@ export const WorkflowAgentRow = React.memo<WorkflowAgentRowProps>((props) => {
     }
     const metrics = metricParts.join(' · ');
     const hasDetail = Boolean(props.summary || props.resultPreview);
-    const collapsedPreview = props.resultPreview ?? props.summary;
+    // Prefer the fuller narrative for the expanded body; the row itself stays compact.
     const expandedDetail = props.summary ?? props.resultPreview;
     const detailTestID = props.testID ? `${props.testID}-detail` : undefined;
     const content = (
@@ -66,21 +70,14 @@ export const WorkflowAgentRow = React.memo<WorkflowAgentRowProps>((props) => {
             <View style={styles.iconColumn}>
                 <WorkflowStatusIcon status={props.status} size={14} />
             </View>
-            <View style={styles.body}>
-                <Text style={styles.title} numberOfLines={1}>
-                    {props.title}
+            <Text style={styles.title} numberOfLines={1}>
+                {props.title}
+            </Text>
+            {metrics ? (
+                <Text style={styles.metrics} numberOfLines={1} testID={props.testID ? `${props.testID}-metrics` : undefined}>
+                    {metrics}
                 </Text>
-                {metrics ? (
-                    <Text style={styles.metrics} numberOfLines={1}>
-                        {metrics}
-                    </Text>
-                ) : null}
-                {collapsedPreview && !expanded ? (
-                    <Text style={styles.preview} numberOfLines={1}>
-                        {collapsedPreview}
-                    </Text>
-                ) : null}
-            </View>
+            ) : null}
             {hasDetail ? (
                 <Ionicons
                     name={expanded ? 'chevron-up' : 'chevron-down'}
@@ -95,6 +92,7 @@ export const WorkflowAgentRow = React.memo<WorkflowAgentRowProps>((props) => {
         return (
             <Pressable
                 accessibilityRole="button"
+                accessibilityLabel={props.title}
                 accessibilityState={{ expanded }}
                 onPress={() => setExpanded((current) => !current)}
                 style={[styles.row, expanded ? styles.rowExpanded : null]}
@@ -110,7 +108,7 @@ export const WorkflowAgentRow = React.memo<WorkflowAgentRowProps>((props) => {
     }
 
     return (
-        <View style={styles.row} testID={props.testID}>
+        <View style={styles.row} testID={props.testID} accessibilityLabel={props.title}>
             {content}
         </View>
     );
@@ -120,38 +118,34 @@ WorkflowAgentRow.displayName = 'WorkflowAgentRow';
 const styles = StyleSheet.create((theme) => ({
     row: {
         gap: 6,
-        minHeight: 40,
-        paddingVertical: 6,
+        minHeight: 32,
+        paddingVertical: 5,
         paddingHorizontal: 2,
         borderRadius: 8,
+        borderBottomWidth: StyleSheet.hairlineWidth,
+        borderBottomColor: theme.colors.border.default,
     },
     rowExpanded: {
         backgroundColor: theme.colors.surface.base,
+        borderBottomColor: 'transparent',
     },
     mainRow: {
         flexDirection: 'row',
-        alignItems: 'flex-start',
+        alignItems: 'center',
         gap: 8,
     },
     iconColumn: {
-        width: 18,
+        width: 16,
         alignItems: 'center',
-        paddingTop: 1,
-    },
-    body: {
-        flex: 1,
-        gap: 2,
     },
     title: {
+        flex: 1,
         fontSize: 13,
         color: theme.colors.text.primary,
     },
     metrics: {
         fontSize: 11,
-        color: theme.colors.text.secondary,
-    },
-    preview: {
-        fontSize: 12,
-        color: theme.colors.text.secondary,
+        color: theme.colors.text.tertiary,
+        fontVariant: ['tabular-nums'],
     },
 }));

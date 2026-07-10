@@ -215,7 +215,8 @@ describe('WorkflowActivityView', () => {
         });
 
         const tree = await renderCard();
-        expect(collectHostText(tree)).toContain('Short result');
+        // Compact rows (U-18): the collapsed row shows the title + metadata only — no inline result
+        // preview or summary dump. The detail body appears only on expand.
         expect(collectHostText(tree).join(' ')).not.toContain('Full normalized result summary');
         expect(tree.root.findAllByProps({ testID: 'workflow-card-agent-wf_1-agent-1-detail' })).toHaveLength(0);
 

@@ -159,7 +159,7 @@ export const WorkflowActivityView = React.memo<ToolViewProps>(({ tool, sessionId
             <WorkflowRunHeader
                 title={snapshot.title}
                 status={snapshot.status}
-                statusLabel={formatWorkflowRunStatusLabel(snapshot.status)}
+                statusLabel={formatWorkflowRunStatusLabel(snapshot.status, snapshot.statusReason)}
                 completedAgents={snapshot.completedAgents}
                 totalAgents={snapshot.totalAgents}
                 rollup={rollup}

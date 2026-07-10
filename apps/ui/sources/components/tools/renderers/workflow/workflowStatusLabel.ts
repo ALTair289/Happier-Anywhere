@@ -1,8 +1,16 @@
 import { t } from '@/text';
-import type { SessionWorkflowRunStatusV1 } from '@happier-dev/protocol';
+import type { SessionWorkflowRunStatusReasonV1, SessionWorkflowRunStatusV1 } from '@happier-dev/protocol';
 
 /** i18n run-status label for the workflow card/popover header. */
-export function formatWorkflowRunStatusLabel(status: SessionWorkflowRunStatusV1): string {
+export function formatWorkflowRunStatusLabel(
+    status: SessionWorkflowRunStatusV1,
+    statusReason?: SessionWorkflowRunStatusReasonV1,
+): string {
+    // A run reconciled after a crash lands as `stopped` with `statusReason: 'interrupted'` — surface
+    // that distinction (muted "Interrupted") instead of a bare "Stopped" (plan #4).
+    if (statusReason === 'interrupted' && (status === 'stopped' || status === 'active')) {
+        return t('tools.workflowActivityView.statusInterrupted');
+    }
     switch (status) {
         case 'active':
             return t('tools.workflowActivityView.statusActive');

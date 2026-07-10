@@ -67,12 +67,15 @@ const styles = StyleSheet.create((theme) => ({
         paddingBottom: 2,
     },
     title: {
-        flexShrink: 1,
+        // U-11: the title takes remaining space and truncates; the rollup keeps its natural width so
+        // a long rollup can never crush the title to zero.
+        flex: 1,
         fontSize: 12,
         fontWeight: '600',
         color: theme.colors.text.secondary,
     },
     rollup: {
+        flexShrink: 0,
         fontSize: 11,
         color: theme.colors.text.secondary,
     },

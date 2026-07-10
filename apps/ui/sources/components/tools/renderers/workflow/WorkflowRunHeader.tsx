@@ -64,10 +64,10 @@ export const WorkflowRunHeader = React.memo<WorkflowRunHeaderProps>((props) => {
             {props.totalAgents > 0 ? (
                 <MeterBar
                     tone={meterTone}
-                    value={fraction}
+                    fillFraction={fraction}
                     height={4}
                     caption={
-                        <Text style={styles.summary} numberOfLines={1}>
+                        <Text style={styles.summary} numberOfLines={1} accessibilityLiveRegion="none">
                             {props.summaryLine
                                 ?? t('tools.workflowActivityView.agentFraction', {
                                     complete: props.completedAgents,
@@ -77,7 +77,7 @@ export const WorkflowRunHeader = React.memo<WorkflowRunHeaderProps>((props) => {
                     }
                 />
             ) : props.summaryLine ? (
-                <Text style={styles.summary} numberOfLines={1}>
+                <Text style={styles.summary} numberOfLines={1} accessibilityLiveRegion="none">
                     {props.summaryLine}
                 </Text>
             ) : null}
