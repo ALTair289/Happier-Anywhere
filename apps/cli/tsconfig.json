@@ -1,6 +1,5 @@
 {
   "compilerOptions": {
-    "baseUrl": ".",
     "target": "ESNext",
     "module": "ESNext",
     "moduleResolution": "bundler",
@@ -27,8 +26,8 @@
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "noEmit": true,
-    "typeRoots": [
-      "./node_modules/@types"
+    "types": [
+      "node"
     ],
     "paths": {
       "@/*": [
