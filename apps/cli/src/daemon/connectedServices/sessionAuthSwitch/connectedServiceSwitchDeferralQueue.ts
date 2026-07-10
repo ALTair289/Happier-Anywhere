@@ -63,6 +63,10 @@ type SessionTurnState = {
   inFlight: boolean;
   lastEvent: ConnectedServiceTurnLifecycleEvent | null;
   hasProviderActivityThisTurn: boolean;
+  // True when a deferred switch's forced-boundary timeout closed a LIVE turn (the switch genuinely
+  // interrupted in-flight work). Consumed by the continuation replay plan, which resolves AFTER the
+  // forced close (inFlight already false there). Cleared when the next turn starts.
+  forcedSwitchInterruptedLiveTurn: boolean;
 };
 
 export class ConnectedServiceSwitchDeferralConflictError extends Error {
@@ -145,6 +149,7 @@ export type ConnectedServiceSwitchDeferralQueue = Readonly<{
     inFlight: boolean;
     lastEvent: ConnectedServiceTurnLifecycleEvent | null;
     hasProviderActivityThisTurn: boolean;
+    forcedSwitchInterruptedLiveTurn: boolean;
   }>;
   cancelSession: (sessionId: string, reason: 'session_terminated' | 'session_restarting') => void;
   cancelAll: (reason: 'daemon_shutdown') => void;
@@ -169,6 +174,7 @@ export function createConnectedServiceSwitchDeferralQueue(
       inFlight: false,
       lastEvent: null,
       hasProviderActivityThisTurn: false,
+      forcedSwitchInterruptedLiveTurn: false,
     };
     turnStateBySessionId.set(sessionId, created);
     return created;
@@ -284,6 +290,10 @@ export function createConnectedServiceSwitchDeferralQueue(
       if (state?.inFlight === true) {
         state.inFlight = false;
         state.lastEvent = 'turn_cancelled';
+        // The forced boundary interrupted a LIVE turn: record the fact for the continuation replay
+        // plan, which runs after this close and can no longer observe inFlight (idle-session manual
+        // switches must NOT send continuation prompts; genuinely interrupted ones must).
+        state.forcedSwitchInterruptedLiveTurn = true;
       }
       void executePendingSwitch(pending, 'aborted_after_timeout');
     }, timeoutMs);
@@ -384,6 +394,8 @@ export function createConnectedServiceSwitchDeferralQueue(
     state.lastEvent = input.event;
     if (input.event === 'prompt_or_steer' || input.event === 'task_started') {
       state.inFlight = true;
+      // A new turn supersedes any recorded forced-boundary interruption of a previous turn.
+      state.forcedSwitchInterruptedLiveTurn = false;
       if (input.event === 'prompt_or_steer') {
         state.hasProviderActivityThisTurn = false;
       }
@@ -415,6 +427,7 @@ export function createConnectedServiceSwitchDeferralQueue(
     inFlight: boolean;
     lastEvent: ConnectedServiceTurnLifecycleEvent | null;
     hasProviderActivityThisTurn: boolean;
+    forcedSwitchInterruptedLiveTurn: boolean;
   }> => {
     const normalizedSessionId = String(sessionId ?? '').trim();
     if (!normalizedSessionId) {
@@ -422,6 +435,7 @@ export function createConnectedServiceSwitchDeferralQueue(
         inFlight: false,
         lastEvent: null,
         hasProviderActivityThisTurn: false,
+        forcedSwitchInterruptedLiveTurn: false,
       };
     }
     const state = readTurnState(normalizedSessionId);
@@ -429,6 +443,7 @@ export function createConnectedServiceSwitchDeferralQueue(
       inFlight: state.inFlight,
       lastEvent: state.lastEvent,
       hasProviderActivityThisTurn: state.hasProviderActivityThisTurn,
+      forcedSwitchInterruptedLiveTurn: state.forcedSwitchInterruptedLiveTurn,
     };
   };
 

@@ -853,7 +853,20 @@ async function normalizeRequestedBindings(input: Readonly<{
         && expectedGeneration === currentGeneration + 1
         && prospectiveProfileId.length > 0
         && groupHasEnabledMember({ group, profileId: prospectiveProfileId });
-      if (expectedGeneration !== null && expectedGeneration !== currentGeneration && !isProspectiveDryRunGeneration) {
+      // Generation semantics are CONVERGENCE, not CAS, for real applies: the caller's expected
+      // generation is a snapshot taken before a fan-out that legitimately overlaps other group
+      // writers (concurrent daemons, recovery switches, member edits — observed live 2026-07-10 as
+      // per-session "group_generation_conflict" transcript errors on every settings pool switch).
+      // The switch below applies the group's CURRENT active profile + generation, which is always
+      // the correct target regardless of how the generation advanced. Only DRY-RUN preflights keep
+      // the strict check: they validate a PROSPECTIVE (not-yet-committed) generation and must abort
+      // on any other mismatch so the coordinator re-resolves before committing.
+      if (
+        input.dryRun === true
+        && expectedGeneration !== null
+        && expectedGeneration !== currentGeneration
+        && !isProspectiveDryRunGeneration
+      ) {
         return { ok: false, errorCode: 'group_generation_conflict', serviceId };
       }
       const activeProfileId = isProspectiveDryRunGeneration
@@ -917,7 +930,9 @@ async function normalizeRequestedBindings(input: Readonly<{
       if (group && groupHasEnabledMember({ group, profileId: binding.profileId })) {
         const expectedGeneration = readExpectedGeneration(input.request.expectedGroupGenerationByServiceId, serviceId);
         const currentGeneration = readGroupGeneration(group.generation);
-        if (expectedGeneration !== null && expectedGeneration !== currentGeneration) {
+        // Same convergence rule as the group-selection branch above: real applies converge onto the
+        // group's CURRENT truth; only dry-run preflights abort on a generation mismatch.
+        if (input.dryRun === true && expectedGeneration !== null && expectedGeneration !== currentGeneration) {
           return { ok: false, errorCode: 'group_generation_conflict', serviceId };
         }
         const activeProfileId = typeof group.activeProfileId === 'string' ? group.activeProfileId.trim() : '';

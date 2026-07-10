@@ -108,6 +108,7 @@ describe('connectedServiceSwitchDeferralQueue', () => {
       inFlight: false,
       lastEvent: null,
       hasProviderActivityThisTurn: false,
+      forcedSwitchInterruptedLiveTurn: false,
     });
 
     queue.recordTurnLifecycleEvent({ sessionId: 'sess_1', event: 'prompt_or_steer' });
@@ -115,6 +116,7 @@ describe('connectedServiceSwitchDeferralQueue', () => {
       inFlight: true,
       lastEvent: 'prompt_or_steer',
       hasProviderActivityThisTurn: false,
+      forcedSwitchInterruptedLiveTurn: false,
     });
 
     queue.recordTurnLifecycleEvent({ sessionId: 'sess_1', event: 'task_started' });
@@ -122,6 +124,7 @@ describe('connectedServiceSwitchDeferralQueue', () => {
       inFlight: true,
       lastEvent: 'task_started',
       hasProviderActivityThisTurn: true,
+      forcedSwitchInterruptedLiveTurn: false,
     });
 
     queue.recordTurnLifecycleEvent({ sessionId: 'sess_1', event: 'assistant_message_end' });
@@ -129,6 +132,7 @@ describe('connectedServiceSwitchDeferralQueue', () => {
       inFlight: false,
       lastEvent: 'assistant_message_end',
       hasProviderActivityThisTurn: true,
+      forcedSwitchInterruptedLiveTurn: false,
     });
   });
 
@@ -278,6 +282,38 @@ describe('connectedServiceSwitchDeferralQueue', () => {
     // The forced switch closed the turn at a (forced) boundary instead of leaving it mid-stream.
     expect(queue.isTurnInFlight('sess_1')).toBe(false);
     expect(queue.getTurnLifecycleState('sess_1').lastEvent).toBe('turn_cancelled');
+    // The forced boundary genuinely interrupted a live turn — the continuation replay plan needs
+    // this fact, because at plan-resolution time the turn is already closed (inFlight false).
+    expect(queue.getTurnLifecycleState('sess_1').forcedSwitchInterruptedLiveTurn).toBe(true);
+
+    // The interruption fact is scoped to the interrupted turn: the next prompt starts a new turn
+    // and clears it, so a later idle-session switch cannot read it as stale interruption evidence.
+    queue.recordTurnLifecycleEvent({ sessionId: 'sess_1', event: 'prompt_or_steer' });
+    expect(queue.getTurnLifecycleState('sess_1').forcedSwitchInterruptedLiveTurn).toBe(false);
+  });
+
+  it('does not record a forced-boundary interruption when the deferral timeout fires while the session is idle', async () => {
+    const runSwitch = vi.fn(async () => {});
+    const queue = createConnectedServiceSwitchDeferralQueue({
+      timeoutMs: 60_000,
+      disableDeferral: false,
+    });
+
+    // Mid-turn request defers; the turn then completes normally BEFORE the timeout would fire, so
+    // the switch runs at a clean boundary — no live turn was interrupted.
+    queue.recordTurnLifecycleEvent({ sessionId: 'sess_1', event: 'prompt_or_steer' });
+    const pending = queue.requestSwitch({
+      sessionId: 'sess_1',
+      policy: 'defer_until_turn_boundary',
+      source: 'manual',
+      target: target(),
+      runSwitch,
+    });
+    queue.recordTurnLifecycleEvent({ sessionId: 'sess_1', event: 'assistant_message_end' });
+    await pending;
+
+    expect(runSwitch).toHaveBeenCalledTimes(1);
+    expect(queue.getTurnLifecycleState('sess_1').forcedSwitchInterruptedLiveTurn).toBe(false);
   });
 
   it('bypasses deferral when HAPPIER_CONNECTED_SERVICES_DISABLE_TURN_DEFERRAL is enabled', async () => {

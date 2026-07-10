@@ -78,6 +78,54 @@ describe('resolveConnectedServiceContinuationReplayPlan', () => {
     });
   });
 
+  it('suppresses continuation for a manual switch that did not interrupt a live turn (idle session)', () => {
+    // Live regression 2026-07-10: a settings pool switch sent "continue" prompts to sessions that
+    // were merely ACTIVE, not working. The daemon-local `hasProviderActivityThisTurn` flag is set on
+    // task_started and survives the turn's end, so an idle session that ever completed a turn still
+    // reads stale-true. A MANUAL switch is boundary-deferred by construction — it only interrupts
+    // work when the deferral was FORCED mid-turn — so interruption must come from the live-turn
+    // evidence, never from the stale activity flag or the durable transcript probe.
+    expect(resolveConnectedServiceContinuationReplayPlan({
+      switchReason: 'manual',
+      turnInterrupted: false,
+      hasProviderActivityThisTurn: true,
+    })).toEqual({
+      continuationRequired: false,
+      replayMode: 'suppress',
+    });
+    expect(resolveConnectedServiceContinuationReplayPlan({
+      switchReason: 'manual',
+      turnInterrupted: false,
+      hasProviderActivityThisTurn: false,
+      providerActivityEvidence: 'no_activity_found',
+    })).toEqual({
+      continuationRequired: false,
+      replayMode: 'suppress',
+    });
+  });
+
+  it('keeps the continuation for a manual switch that interrupted a live turn (forced boundary)', () => {
+    expect(resolveConnectedServiceContinuationReplayPlan({
+      switchReason: 'manual',
+      turnInterrupted: true,
+      hasProviderActivityThisTurn: true,
+    })).toEqual({
+      continuationRequired: true,
+      replayMode: 'continuation_prompt',
+    });
+  });
+
+  it('keeps evidence-driven continuation for failure switches even when no turn is in flight (failTurn closes the turn first)', () => {
+    expect(resolveConnectedServiceContinuationReplayPlan({
+      switchReason: 'automatic_runtime_failure',
+      turnInterrupted: false,
+      hasProviderActivityThisTurn: true,
+    })).toEqual({
+      continuationRequired: true,
+      replayMode: 'continuation_prompt',
+    });
+  });
+
   it('releases the old turn boundary for continuation and guarded original retry plans', () => {
     expect(shouldReleaseConnectedServiceRestartBoundaryForReplayPlan({
       continuationRequired: true,

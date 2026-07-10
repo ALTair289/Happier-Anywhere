@@ -399,6 +399,26 @@ export async function requestDaemonSessionConnectedServiceAuthSwitch(
   return (result as { result?: unknown } | null)?.result;
 }
 
+/**
+ * The group-generation apply fans out to EVERY live session bound to the group, and each
+ * per-session switch may legitimately wait a full turn-boundary deferral window (60s) before it can
+ * restart the session. The generic 10s daemonPost default aborted the ack while the daemon-side
+ * apply kept running (observed live 2026-07-10 16:29) — the UI then reported a divergence for a
+ * switch that succeeded. Bound the ack with deferral + restart margin instead.
+ */
+const DAEMON_CONNECTED_SERVICE_GROUP_APPLY_TIMEOUT_ENV_KEY = 'HAPPIER_DAEMON_CONNECTED_SERVICE_GROUP_APPLY_HTTP_TIMEOUT_MS';
+const DEFAULT_DAEMON_CONNECTED_SERVICE_GROUP_APPLY_TIMEOUT_MS = 150_000;
+
+export function resolveDaemonConnectedServiceGroupGenerationApplyTimeoutMs(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  return resolvePositiveIntValue(
+    env[DAEMON_CONNECTED_SERVICE_GROUP_APPLY_TIMEOUT_ENV_KEY],
+    DEFAULT_DAEMON_CONNECTED_SERVICE_GROUP_APPLY_TIMEOUT_MS,
+    { min: 1_000, max: 300_000 },
+  );
+}
+
 export async function requestDaemonConnectedServiceAuthGroupGenerationApply(
   body: Readonly<{
     serviceId: ConnectedServiceId;
@@ -415,7 +435,10 @@ export async function requestDaemonConnectedServiceAuthGroupGenerationApply(
     activeProfileId: body.activeProfileId,
     generation: body.generation,
     switchReason: body.switchReason,
-  }, options);
+  }, {
+    timeoutMs: resolveDaemonConnectedServiceGroupGenerationApplyTimeoutMs(),
+    ...options,
+  });
   if (result?.error) {
     throw new Error(String(result.error));
   }

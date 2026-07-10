@@ -2612,11 +2612,89 @@ describe('switchSessionConnectedServiceAuth', () => {
     }));
   });
 
-  it('resolves group active profile under the lock and rejects stale expected generations before mutation', async () => {
+  it('converges a real switch onto the CURRENT group truth when the expected generation is stale', async () => {
+    // Live regression 2026-07-10: the settings pool-switch fan-out is a long-running per-session
+    // loop while the group generation legitimately keeps moving (concurrent daemons, recovery
+    // switches, member edits). A strict expected==current CAS here turned every such advance into a
+    // per-session "Authentication could not be switched (group_generation_conflict)" transcript
+    // error, even though applying the group's CURRENT active profile is always the correct
+    // convergence. A stale expectation must converge, not fail; only dry-run preflights keep the
+    // strict semantics (they gate a NOT-yet-committed prospective generation).
+    const tracked = trackedSession({
+      spawnOptions: {
+        directory: '/tmp/project',
+        backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+        connectedServices: bindings('old-profile'),
+      },
+    });
+    const restartSession = vi.fn(async () => {
+      // The child env adopts the CURRENT generation (5), not the caller's stale expectation (4).
+      expect(tracked.spawnOptions?.environmentVariables).toEqual({
+        [HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY]: JSON.stringify([
+          {
+            kind: 'group',
+            serviceId: 'anthropic',
+            groupId: 'work',
+            activeProfileId: 'group-active',
+            fallbackProfileId: 'group-active',
+            generation: 5,
+          },
+        ]),
+      });
+    });
+
+    await expect(switchSessionConnectedServiceAuth({
+      core: createCore(),
+      postSwitchVerificationMode: {
+        kind: 'disabled_for_test_only',
+        reason: 'existing switch fixture does not exercise provider adoption verification',
+      },
+      getChildren: () => [tracked],
+      api: {
+        listConnectedServiceProfiles: async () => ({
+          serviceId: 'anthropic',
+          profiles: [{ profileId: 'group-active', status: 'connected' }],
+        }),
+        getConnectedServiceAuthGroup: async () => group({ generation: 5 }),
+      },
+      resolveContinuity: async () => ({ mode: 'restart_rematerialize' }),
+      restartSession,
+      hotApply: async () => ({ ok: true }),
+      registerHotApplyTargets: () => {},
+      emitSessionEvent: () => {},
+      request: {
+        sessionId: 'sess_1',
+        agentId: 'claude',
+        expectedGroupGenerationByServiceId: { anthropic: 4 },
+        bindings: {
+          v: 1,
+          bindingsByServiceId: {
+            anthropic: {
+              source: 'connected',
+              selection: 'group',
+              groupId: 'work',
+              profileId: 'stale-ui-profile',
+            },
+          },
+        },
+      },
+    })).resolves.toMatchObject({
+      ok: true,
+      action: 'restart_requested',
+    });
+
+    expect(restartSession).toHaveBeenCalledWith(tracked);
+  });
+
+  it('keeps the strict generation check for dry-run preflights (prospective generations only)', async () => {
+    // A dry-run preflight validates a PROSPECTIVE switch (expected == current + 1 is the committed
+    // shape). A stale/other expectation must still abort so the coordinator re-resolves before
+    // committing — convergence applies only to REAL applies.
     const tracked = trackedSession();
 
     await expect(switchSessionConnectedServiceAuth({
       core: createCore(),
+      dryRun: true,
       postSwitchVerificationMode: {
         kind: 'disabled_for_test_only',
         reason: 'existing switch fixture does not exercise provider adoption verification',
@@ -2634,7 +2712,7 @@ describe('switchSessionConnectedServiceAuth', () => {
       request: {
         sessionId: 'sess_1',
         agentId: 'claude',
-        expectedGroupGenerationByServiceId: { anthropic: 4 },
+        expectedGroupGenerationByServiceId: { anthropic: 3 },
         bindings: {
           v: 1,
           bindingsByServiceId: {
