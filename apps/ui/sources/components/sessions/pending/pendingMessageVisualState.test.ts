@@ -68,6 +68,7 @@ describe('getPendingMessageVisualState', () => {
             kind: 'blocked',
             showSpinner: false,
             iconName: 'alert-circle-outline',
+            deliveryBlockedReason: 'payload_too_large',
             deliveryBlockedPresentation: {
                 labelKey: 'session.pendingMessages.deliveryBlockedReasons.payloadTooLarge',
                 isUnknown: false,
@@ -81,8 +82,23 @@ describe('getPendingMessageVisualState', () => {
             kind: 'blocked',
             showSpinner: false,
             iconName: 'alert-circle-outline',
+            deliveryBlockedReason: 'provider_unavailable_before_acceptance',
             deliveryBlockedPresentation: {
                 labelKey: 'session.pendingMessages.deliveryBlockedReasons.providerUnavailableBeforeAcceptance',
+                isUnknown: false,
+            },
+        });
+
+        expect(getPendingMessageVisualState(pendingMessage({
+            pendingDeliveryStatus: 'blocked',
+            pendingDeliveryBlockedReason: 'runtime_config_blocked',
+        }))).toEqual({
+            kind: 'blocked',
+            showSpinner: false,
+            iconName: 'alert-circle-outline',
+            deliveryBlockedReason: 'runtime_config_blocked',
+            deliveryBlockedPresentation: {
+                labelKey: 'session.pendingMessages.deliveryBlockedReasons.runtimeConfigBlocked',
                 isUnknown: false,
             },
         });
@@ -95,6 +111,7 @@ describe('getPendingMessageVisualState', () => {
             kind: 'blocked',
             showSpinner: false,
             iconName: 'alert-circle-outline',
+            deliveryBlockedReason: 'unknown',
             deliveryBlockedPresentation: {
                 labelKey: 'session.pendingMessages.deliveryBlockedReasons.unknown',
                 isUnknown: true,

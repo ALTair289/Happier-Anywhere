@@ -17,11 +17,13 @@ export type PendingMessageVisualState = Readonly<{
     kind: PendingMessageVisualStateKind;
     showSpinner: boolean;
     iconName: 'cloud-upload-outline' | 'time-outline' | 'navigate-outline' | 'alert-circle-outline';
+    deliveryBlockedReason?: PendingMessage['pendingDeliveryBlockedReason'];
     deliveryBlockedPresentation?: PendingDeliveryBlockedReasonPresentation;
 }>;
 
 const blockedReasonLabelKeys = {
     terminal_composer_draft: 'session.pendingMessages.deliveryBlockedReasons.terminalComposerDraft',
+    runtime_config_blocked: 'session.pendingMessages.deliveryBlockedReasons.runtimeConfigBlocked',
     provider_acceptance_timeout: 'session.pendingMessages.deliveryBlockedReasons.providerAcceptanceTimeout',
     provider_unavailable_before_acceptance: 'session.pendingMessages.deliveryBlockedReasons.providerUnavailableBeforeAcceptance',
     ambiguous_terminal_delivery: 'session.pendingMessages.deliveryBlockedReasons.ambiguousTerminalDelivery',
@@ -74,6 +76,7 @@ export function getPendingMessageVisualState(
             kind: 'blocked',
             showSpinner: false,
             iconName: 'alert-circle-outline',
+            deliveryBlockedReason: message.pendingDeliveryBlockedReason ?? 'unknown',
             deliveryBlockedPresentation: getPendingDeliveryBlockedReasonPresentation(message),
         };
     }

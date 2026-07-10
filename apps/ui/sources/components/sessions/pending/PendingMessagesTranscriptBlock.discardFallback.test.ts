@@ -150,7 +150,7 @@ vi.mock('@/components/ui/layout/layout', () => ({
     layout: { maxWidth: 800, headerMaxWidth: 800 },
 }));
 
-describe('PendingMessagesTranscriptBlock discard fallback', () => {
+describe('PendingMessagesTranscriptBlock send cleanup failure', () => {
     beforeEach(() => {
         vi.resetModules();
         sendPendingMessageNow.mockReset();
@@ -169,13 +169,12 @@ describe('PendingMessagesTranscriptBlock discard fallback', () => {
         });
     }
 
-    it('falls back to discarding when delete fails after send', async () => {
+    it('does not create a discarded tombstone when delete fails after send', async () => {
         const PendingMessagesTranscriptBlock = await loadPendingMessagesTranscriptBlock();
         modalConfirm.mockResolvedValueOnce(true);
         sessionAbort.mockResolvedValueOnce(undefined);
-        sendPendingMessageNow.mockResolvedValueOnce({ type: 'committed' });
+        sendPendingMessageNow.mockResolvedValueOnce({ type: 'committed', persistence: 'provider_direct' });
         deletePendingMessage.mockRejectedValueOnce(new Error('delete failed'));
-        discardPendingMessage.mockResolvedValueOnce(undefined);
 
         const screen = await renderScreen(React.createElement(PendingMessagesTranscriptBlock, {
                     sessionId: 's1',
@@ -193,7 +192,7 @@ describe('PendingMessagesTranscriptBlock discard fallback', () => {
         });
 
         expect(deletePendingMessage).toHaveBeenCalledTimes(1);
-        expect(discardPendingMessage).toHaveBeenCalledTimes(1);
-        expect(modalAlert).toHaveBeenCalledTimes(0);
+        expect(discardPendingMessage).not.toHaveBeenCalled();
+        expect(modalAlert).toHaveBeenCalledTimes(1);
     });
 });
