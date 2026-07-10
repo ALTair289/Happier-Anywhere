@@ -845,6 +845,12 @@ describe('settings', () => {
             expect((parsed as any).sessionListWorkingPlacementModeV1).toBe('off');
         });
 
+        it('defaults separate background work grouping to disabled', () => {
+            const parsed = settingsParse({});
+
+            expect((parsed as any).sessionListSeparateBackgroundWork).toBe(false);
+        });
+
         it('parses session list attention placement when set to the global section', () => {
             const parsed = settingsParse({
                 sessionListAttentionPromotionModeV1: 'global',
@@ -859,6 +865,14 @@ describe('settings', () => {
             } as any);
 
             expect((parsed as any).sessionListWorkingPlacementModeV1).toBe('global');
+        });
+
+        it('parses separate background work grouping when enabled', () => {
+            const parsed = settingsParse({
+                sessionListSeparateBackgroundWork: true,
+            } as any);
+
+            expect((parsed as any).sessionListSeparateBackgroundWork).toBe(true);
         });
 
         it('parses session list attention placement when set to current groups', () => {

@@ -298,6 +298,13 @@ export const ACCOUNT_CORE_SETTING_DEFINITIONS = defineSettingDefinitions({
         storageScope: 'account',
         analytics: { trackCurrentState: true, trackChanges: true, valueKind: 'enum', privacy: 'safe', identityScope: 'person' },
     },
+    sessionListSeparateBackgroundWork: {
+        schema: z.boolean(),
+        default: false,
+        description: 'Show live detached background work in a separate session list group',
+        storageScope: 'account',
+        analytics: { trackCurrentState: true, trackChanges: true, valueKind: 'boolean', privacy: 'safe', identityScope: 'person' },
+    },
     sessionMessageSendMode: {
         schema: SessionMessageSendModeSchema,
         default: 'server_pending',

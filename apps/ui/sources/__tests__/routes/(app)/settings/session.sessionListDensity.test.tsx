@@ -14,6 +14,7 @@ const setSessionListIdentityDisplay = vi.fn();
 const setSessionListActiveColorMode = vi.fn();
 const setSessionListAttentionPromotionMode = vi.fn();
 const setSessionListWorkingPlacementMode = vi.fn();
+const setSessionListSeparateBackgroundWork = vi.fn();
 const setSessionListFolderSortMode = vi.fn();
 const setSessionListSectionMode = vi.fn();
 const setSessionListOrderingMode = vi.fn();
@@ -31,6 +32,7 @@ installSessionSettingsEntryModuleMocks({
                     if (key === 'sessionListActiveColorModeV1') return ['activityAndAttention', setSessionListActiveColorMode];
                     if (key === 'sessionListAttentionPromotionModeV1') return ['off', setSessionListAttentionPromotionMode];
                     if (key === 'sessionListWorkingPlacementModeV1') return ['off', setSessionListWorkingPlacementMode];
+                    if (key === 'sessionListSeparateBackgroundWork') return [false, setSessionListSeparateBackgroundWork];
                     if (key === 'sessionListOrderingModeV1') return ['custom', setSessionListOrderingMode];
                     if (key === 'workspacePathDisplayModeV1') return ['name', setWorkspacePathDisplayMode];
                     if (key === 'workspaceFaviconsEnabled') return [true, setWorkspaceFaviconsEnabled];
@@ -80,6 +82,7 @@ afterEach(() => {
     setSessionListActiveColorMode.mockClear();
     setSessionListAttentionPromotionMode.mockClear();
     setSessionListWorkingPlacementMode.mockClear();
+    setSessionListSeparateBackgroundWork.mockClear();
     setSessionListFolderSortMode.mockClear();
     setSessionListSectionMode.mockClear();
     setSessionListOrderingMode.mockClear();
@@ -221,6 +224,34 @@ describe('Session settings session list density', () => {
         });
 
         expect(setSessionListWorkingPlacementMode).toHaveBeenCalledWith('global');
+    });
+
+    it('exposes the separate background work toggle alongside working placement', async () => {
+        const mod = await import('../../../../app/(app)/settings/session');
+        const SessionSettingsScreen = mod.default;
+
+        const screen = await renderSettingsView(React.createElement(SessionSettingsScreen));
+        const item = screen.findAllByType('Item' as any).find((node: any) =>
+            node.props?.title === 'settingsSession.sessionList.separateBackgroundWorkTitle');
+        expect(item).toBeTruthy();
+
+        let current = item?.parent;
+        let groupTitle: unknown;
+        while (current) {
+            if ((current.type as unknown) === 'ItemGroup') {
+                groupTitle = current.props?.title;
+                break;
+            }
+            current = current.parent;
+        }
+
+        expect(groupTitle).toBe('settingsSession.rootGroups.activitySignals.title');
+
+        await act(async () => {
+            item!.props.onPress();
+        });
+
+        expect(setSessionListSeparateBackgroundWork).toHaveBeenCalledWith(true);
     });
 
     it('exposes the session list section mode selector', async () => {
