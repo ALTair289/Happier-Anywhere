@@ -18,6 +18,7 @@ import {
     MachineRegistrationReplacementError,
     type MachineRegistrationReplacementResult,
 } from "@/app/machines/applyVerifiedMachineRegistrationReplacement";
+import { invalidateSessionRelayAuthorizationForMachine } from "@/app/api/socket/sessionRelayAuthCache";
 import {
     computeContentPublicKeyFingerprint,
     normalizeContentPublicKeyFingerprint,
@@ -719,6 +720,7 @@ export function machinesRoutes(app: Fastify) {
                     recipientFilter: { type: 'user-scoped-only' },
                 });
                 activityCache.invalidateMachine(updated.id);
+                invalidateSessionRelayAuthorizationForMachine(updated.id);
             });
 
             return { kind: 'ok' as const, machine: updated };

@@ -26,6 +26,10 @@ const invalidateMachine = vi.fn();
 vi.mock("@/app/presence/sessionCache", () => ({
     activityCache: { invalidateMachine },
 }));
+const invalidateSessionRelayAuthorizationForMachine = vi.fn();
+vi.mock("@/app/api/socket/sessionRelayAuthCache", () => ({
+    invalidateSessionRelayAuthorizationForMachine,
+}));
 
 const existingMachine = {
     id: "m1",
@@ -117,6 +121,7 @@ describe("machinesRoutes (revoke machine)", () => {
         );
         expect(emitUpdate).toHaveBeenCalledTimes(1);
         expect(invalidateMachine).toHaveBeenCalledWith("m1");
+        expect(invalidateSessionRelayAuthorizationForMachine).toHaveBeenCalledWith("m1");
 
         expect(reply.send).toHaveBeenCalled();
         expect(response).toEqual(
