@@ -220,4 +220,56 @@ describe('requestDaemonSelfRestart', () => {
     expect(exitProcess).not.toHaveBeenCalled();
     expect(result.status).toBe('replacement_not_confirmed');
   });
+
+  it('coalesces concurrent self-restart requests with one correlation id and one spawn', async () => {
+    let resolveSpawn!: () => void;
+    const spawnDetachedDaemonStartSync = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        resolveSpawn = resolve;
+      });
+      return { unref: vi.fn() };
+    });
+    const readDaemonState = vi.fn(async () => makeState({ runtimeId: 'runtime-single-flight' }));
+    const confirmReplacementState = vi.fn(async () => true);
+    const exitProcess = vi.fn();
+
+    const { requestDaemonSelfRestart } = await import('./requestDaemonSelfRestart');
+
+    const first = requestDaemonSelfRestart({
+      runtimeId: 'runtime-single-flight',
+      expectedCliVersion: '2.0.0',
+      ownPid: process.pid,
+      timeoutMs: 25,
+      pollMs: 1,
+      spawnDetachedDaemonStartSyncImpl: spawnDetachedDaemonStartSync,
+      readDaemonStateImpl: readDaemonState,
+      confirmReplacementStateImpl: confirmReplacementState,
+      exitProcess,
+      env: {},
+    });
+    const second = requestDaemonSelfRestart({
+      runtimeId: 'runtime-single-flight',
+      expectedCliVersion: '2.0.0',
+      ownPid: process.pid,
+      timeoutMs: 25,
+      pollMs: 1,
+      spawnDetachedDaemonStartSyncImpl: spawnDetachedDaemonStartSync,
+      readDaemonStateImpl: readDaemonState,
+      confirmReplacementStateImpl: confirmReplacementState,
+      exitProcess,
+      env: {},
+    });
+
+    await Promise.resolve();
+    expect(spawnDetachedDaemonStartSync).toHaveBeenCalledTimes(1);
+    resolveSpawn!();
+
+    await expect(Promise.all([first, second])).resolves.toEqual([{ status: 'exited' }, { status: 'exited' }]);
+    const [firstSpawnOptions] = spawnDetachedDaemonStartSync.mock.calls[0] as unknown as [
+      { env?: Record<string, string | undefined> },
+    ];
+    const env = firstSpawnOptions.env ?? {};
+    expect(env.HAPPIER_DAEMON_SELF_RESTART_CORRELATION_ID).toMatch(/^self-restart-/);
+    expect(exitProcess).toHaveBeenCalledTimes(1);
+  });
 });

@@ -13,6 +13,8 @@ type SpawnDetachedDaemonStartSync = (
 ) => Promise<{ unref?: () => void }>;
 type ReadDaemonState = () => Promise<DaemonLocallyPersistedState | null>;
 type ConfirmReplacementDaemonState = (state: DaemonLocallyPersistedState) => Promise<boolean>;
+let nextSelfRestartCorrelationSequence = 0;
+const inFlightSelfRestarts = new Map<string, Promise<RequestDaemonSelfRestartResult>>();
 
 async function delay(ms: number): Promise<void> {
   if (ms <= 0) return;
@@ -129,7 +131,20 @@ export async function waitForReplacementDaemon(params: Readonly<{
   return false;
 }
 
-export async function requestDaemonSelfRestart(params: Readonly<{
+function buildSelfRestartSingleFlightKey(params: Readonly<{
+  runtimeId?: string | null;
+  expectedCliVersion: string;
+}>): string {
+  const runtimeId = typeof params.runtimeId === 'string' ? params.runtimeId.trim() : '';
+  return `${runtimeId}\0${String(params.expectedCliVersion ?? '').trim()}`;
+}
+
+function createSelfRestartCorrelationId(): string {
+  nextSelfRestartCorrelationSequence += 1;
+  return `self-restart-${process.pid}-${Date.now()}-${nextSelfRestartCorrelationSequence}`;
+}
+
+async function performDaemonSelfRestart(params: Readonly<{
   runtimeId?: string | null;
   expectedCliVersion: string;
   ownPid?: number;
@@ -142,6 +157,7 @@ export async function requestDaemonSelfRestart(params: Readonly<{
   readDaemonStateImpl?: ReadDaemonState;
   confirmReplacementStateImpl?: ConfirmReplacementDaemonState;
   exitProcess?: (code: number) => never | void;
+  correlationId: string;
 }>): Promise<RequestDaemonSelfRestartResult> {
   const {
     expectedCliVersion,
@@ -160,6 +176,7 @@ export async function requestDaemonSelfRestart(params: Readonly<{
   const restartEnv: Record<string, string | undefined> = {
     ...env,
     HAPPIER_DAEMON_STARTUP_SOURCE: 'self-restart',
+    HAPPIER_DAEMON_SELF_RESTART_CORRELATION_ID: params.correlationId,
     ...(runtimeId ? { HAPPIER_DAEMON_RUNTIME_ID: runtimeId } : {}),
     ...(takeover ? { HAPPIER_DAEMON_TAKEOVER: '1' } : {}),
   };
@@ -194,4 +211,36 @@ export async function requestDaemonSelfRestart(params: Readonly<{
   await delay(postConfirmationOverlapMs);
   exitProcess(0);
   return { status: 'exited' };
+}
+
+export async function requestDaemonSelfRestart(params: Readonly<{
+  runtimeId?: string | null;
+  expectedCliVersion: string;
+  ownPid?: number;
+  timeoutMs: number;
+  pollMs: number;
+  postConfirmationOverlapMs?: number;
+  takeover?: boolean;
+  env?: NodeJS.ProcessEnv | Record<string, string | undefined>;
+  spawnDetachedDaemonStartSyncImpl?: SpawnDetachedDaemonStartSync;
+  readDaemonStateImpl?: ReadDaemonState;
+  confirmReplacementStateImpl?: ConfirmReplacementDaemonState;
+  exitProcess?: (code: number) => never | void;
+}>): Promise<RequestDaemonSelfRestartResult> {
+  const key = buildSelfRestartSingleFlightKey(params);
+  const existing = inFlightSelfRestarts.get(key);
+  if (existing) return await existing;
+
+  const promise = performDaemonSelfRestart({
+    ...params,
+    correlationId: createSelfRestartCorrelationId(),
+  });
+  inFlightSelfRestarts.set(key, promise);
+  try {
+    return await promise;
+  } finally {
+    if (inFlightSelfRestarts.get(key) === promise) {
+      inFlightSelfRestarts.delete(key);
+    }
+  }
 }

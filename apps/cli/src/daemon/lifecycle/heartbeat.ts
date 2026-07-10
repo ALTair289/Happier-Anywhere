@@ -23,6 +23,7 @@ import { recoverSessionHandoffPrepareTargetJobsAfterRestart } from '@/session/ha
 import type { TrackedSession } from '../types';
 import { cleanupPidSessionResources } from '../sessions/cleanupPidSessionResources';
 import { createOnChildExited } from '../sessions/onChildExited';
+import { readSessionMarkerForPid } from '../sessionRegistry';
 import {
   isValidProcessCommandHash,
   readSessionRunnerProcessIdentity as readSessionRunnerProcessIdentityDefault,
@@ -226,6 +227,12 @@ export function startDaemonHeartbeatLoop(params: Readonly<{
           );
           onChildExitedForPrune(pid, { reason: pruneReason, code: null, signal: null });
           continue;
+        }
+        if (tracked.happySessionId) {
+          const marker = await readSessionMarkerForPid(pid).catch(() => null);
+          if (marker?.happySessionId === tracked.happySessionId) {
+            tracked.terminalHostHealth = marker.terminalHostHealth;
+          }
         }
       }
 

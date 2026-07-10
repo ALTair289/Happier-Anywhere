@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+type SessionMarkerReadResult = Awaited<ReturnType<typeof import('../sessionRegistry').readSessionMarkerForPid>>;
+const readSessionMarkerForPid = vi.hoisted(() => vi.fn<
+  (_pid: number) => Promise<SessionMarkerReadResult>
+>(async () => null));
+
 vi.mock('fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('fs')>();
   return {
@@ -15,6 +20,7 @@ vi.mock('@/persistence', () => ({
 
 vi.mock('../sessionRegistry', () => ({
   promoteSessionMarkerConnectedServiceRestartIntent: vi.fn(async () => {}),
+  readSessionMarkerForPid,
   removeSessionMarker: vi.fn(async () => {}),
 }));
 
@@ -26,6 +32,8 @@ describe('startDaemonHeartbeatLoop process-missing delegation', () => {
     process.env.HAPPIER_DAEMON_HEARTBEAT_INTERVAL = '1';
     vi.useFakeTimers();
     vi.resetModules();
+    readSessionMarkerForPid.mockReset();
+    readSessionMarkerForPid.mockResolvedValue(null);
   });
 
   afterEach(() => {
@@ -347,5 +355,64 @@ describe('startDaemonHeartbeatLoop process-missing delegation', () => {
 
     expect(onChildExitedMock).not.toHaveBeenCalled();
     expect(pidToTrackedSession.has(pid)).toBe(true);
+  });
+
+  it('clears tracked host-dead status after the runner marker reports a recovered host', async () => {
+    vi.mocked(readDaemonState).mockResolvedValue({
+      pid: process.pid,
+      httpPort: 4001,
+      startedAt: Date.now(),
+      startedWithCliVersion: '1.0.0',
+      lastHeartbeatAt: Date.now(),
+    });
+    readSessionMarkerForPid.mockResolvedValue({
+      pid: process.pid,
+      happySessionId: 'sess-recovered',
+      startedBy: 'daemon',
+      cwd: '/workspace',
+      happyHomeDir: '/tmp/happier',
+      createdAt: 1,
+      updatedAt: 2,
+    });
+    vi.spyOn(global, 'setInterval').mockImplementation(((handler: (...args: any[]) => any) => {
+      (globalThis as any).__tick = handler;
+      return 1 as any;
+    }) as any);
+    const tracked = {
+      pid: process.pid,
+      happySessionId: 'sess-recovered',
+      terminalHostHealth: {
+        status: 'host_dead',
+        sessionId: 'sess-recovered',
+        runnerPid: process.pid,
+        hostKind: 'zellij',
+        observedAt: 1,
+        reason: 'pane_dead',
+      },
+    };
+    const pidToTrackedSession = new Map<number, any>([[process.pid, tracked]]);
+
+    const { startDaemonHeartbeatLoop } = await import('./heartbeat');
+    startDaemonHeartbeatLoop({
+      pidToTrackedSession,
+      spawnResourceCleanupByPid: new Map(),
+      sessionAttachCleanupByPid: new Map(),
+      getApiMachineForSessions: () => null,
+      controlPort: 8765,
+      fileState: {
+        pid: process.pid,
+        httpPort: 8765,
+        startedAt: Date.now(),
+        startedWithCliVersion: '1.0.0',
+        daemonLogPath: '/tmp/daemon.log',
+      },
+      currentCliVersion: '1.0.0',
+      requestShutdown: vi.fn(),
+    });
+
+    const tick: (() => Promise<void>) | undefined = (globalThis as any).__tick;
+    await tick?.();
+
+    expect(tracked.terminalHostHealth).toBeUndefined();
   });
 });
