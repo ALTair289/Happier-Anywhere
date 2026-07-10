@@ -27,15 +27,29 @@ function meterRow(overrides: Partial<ConnectedServiceQuotaGaugeMeterRow>): Conne
 
 describe('accountBlockModel', () => {
     describe('resolveAccountUsageRows', () => {
-        it('maps gauge meter rows to MeterTone-driven usage rows (remaining as a 0..1 fraction)', () => {
+        it('maps gauge meter rows to MeterTone-driven usage rows with distinct remaining and fill fractions', () => {
             const rows = resolveAccountUsageRows([
                 meterRow({ meterId: 'weekly', label: 'Weekly', remainingPct: 60, detailRightLabel: '60% left' }),
-                meterRow({ meterId: 'daily', label: 'Daily', remainingPct: 8, detailRightLabel: '8% left' }),
+                meterRow({ meterId: 'daily', label: 'Daily', remainingPct: 8, usedPct: 92, detailRightLabel: '8% left' }),
             ]);
 
             expect(rows).toEqual([
-                { meterId: 'weekly', label: 'Weekly', tone: 'success', remaining: 0.6, detailLabel: '60% left' },
-                { meterId: 'daily', label: 'Daily', tone: 'danger', remaining: 0.08, detailLabel: '8% left' },
+                {
+                    meterId: 'weekly',
+                    label: 'Weekly',
+                    tone: 'success',
+                    remaining: 0.6,
+                    fillFraction: 0.4,
+                    detailLabel: '60% left',
+                },
+                {
+                    meterId: 'daily',
+                    label: 'Daily',
+                    tone: 'danger',
+                    remaining: 0.08,
+                    fillFraction: 0.92,
+                    detailLabel: '8% left',
+                },
             ]);
         });
 

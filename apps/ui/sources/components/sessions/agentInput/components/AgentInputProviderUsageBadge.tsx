@@ -23,6 +23,78 @@ type AgentInputProviderUsageBadgeProps = Readonly<{
     recoveryCreditActionPending?: boolean;
 }>;
 
+function areProviderUsageMeterRowsEqual(
+    left: ConnectedServiceQuotaGaugeViewModel['allMeterRows'],
+    right: ConnectedServiceQuotaGaugeViewModel['allMeterRows'],
+): boolean {
+    if (left === right) return true;
+    if (left.length !== right.length) return false;
+    for (let index = 0; index < left.length; index += 1) {
+        const leftRow = left[index];
+        const rightRow = right[index];
+        if (!leftRow || !rightRow) return false;
+        if (
+            leftRow.meterId !== rightRow.meterId
+            || leftRow.label !== rightRow.label
+            || leftRow.remainingPct !== rightRow.remainingPct
+            || leftRow.usedPct !== rightRow.usedPct
+            || leftRow.detailRightSemantics !== rightRow.detailRightSemantics
+            || leftRow.detailRightLabel !== rightRow.detailRightLabel
+            || leftRow.usedLimitSemantics !== rightRow.usedLimitSemantics
+            || leftRow.usedLimitLabel !== rightRow.usedLimitLabel
+            || leftRow.resetLabel !== rightRow.resetLabel
+            || leftRow.tone !== rightRow.tone
+        ) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function areProviderUsageRecoveryCreditsEqual(
+    left: ConnectedServiceQuotaGaugeViewModel['recoveryCreditSummary'],
+    right: ConnectedServiceQuotaGaugeViewModel['recoveryCreditSummary'],
+): boolean {
+    if (left === right) return true;
+    if (!left || !right) return false;
+    return left.availableCount === right.availableCount
+        && left.nextExpiresAtMs === right.nextExpiresAtMs
+        && left.providerCreditId === right.providerCreditId;
+}
+
+function areProviderUsageViewModelsEqual(
+    left: ConnectedServiceQuotaGaugeViewModel,
+    right: ConnectedServiceQuotaGaugeViewModel,
+): boolean {
+    return left.serviceId === right.serviceId
+        && left.providerDisplayName === right.providerDisplayName
+        && left.activeAccountDisplayLabel === right.activeAccountDisplayLabel
+        && left.remainingPct === right.remainingPct
+        && left.usedPct === right.usedPct
+        && left.valueLabel === right.valueLabel
+        && left.ringValueLabel === right.ringValueLabel
+        && left.badgeLabel === right.badgeLabel
+        && left.scopePrefix === right.scopePrefix
+        && left.primaryValueSemantics === right.primaryValueSemantics
+        && left.detailRightLabel === right.detailRightLabel
+        && left.usedLimitLabel === right.usedLimitLabel
+        && left.resetLabel === right.resetLabel
+        && left.tone === right.tone
+        && left.isStale === right.isStale
+        && areProviderUsageRecoveryCreditsEqual(left.recoveryCreditSummary, right.recoveryCreditSummary)
+        && areProviderUsageMeterRowsEqual(left.allMeterRows, right.allMeterRows);
+}
+
+function areProviderUsageBadgePropsEqual(
+    left: AgentInputProviderUsageBadgeProps,
+    right: AgentInputProviderUsageBadgeProps,
+): boolean {
+    return left.marginLeft === right.marginLeft
+        && left.onRecoveryCreditPress === right.onRecoveryCreditPress
+        && left.recoveryCreditActionPending === right.recoveryCreditActionPending
+        && areProviderUsageViewModelsEqual(left.viewModel, right.viewModel);
+}
+
 function mapQuotaToneToTokenTone(tone: ConnectedServiceQuotaGaugeViewModel['tone']): TokenUsageTone {
     if (tone === 'critical') return 'critical';
     if (tone === 'warning') return 'warning';
@@ -35,7 +107,9 @@ function mapGaugeToneToMeterTone(tone: ConnectedServiceQuotaGaugeViewModel['tone
     return 'success';
 }
 
-export function AgentInputProviderUsageBadge(props: AgentInputProviderUsageBadgeProps) {
+export const AgentInputProviderUsageBadge = React.memo(function AgentInputProviderUsageBadge(
+    props: AgentInputProviderUsageBadgeProps,
+) {
     const styles = stylesheet;
     const anchorRef = React.useRef<any>(null);
     const [isPinnedOpen, setIsPinnedOpen] = React.useState(false);
@@ -123,7 +197,7 @@ export function AgentInputProviderUsageBadge(props: AgentInputProviderUsageBadge
                                 <MeterBar
                                     testID={`agent-input-provider-usage-meter-bar:${row.meterId}`}
                                     tone={mapGaugeToneToMeterTone(row.tone)}
-                                    value={row.remainingPct / 100}
+                                    fillFraction={row.usedPct / 100}
                                     height={5}
                                 />
                                 {row.usedLimitLabel ? (
@@ -172,7 +246,7 @@ export function AgentInputProviderUsageBadge(props: AgentInputProviderUsageBadge
             />
         </>
     );
-}
+}, areProviderUsageBadgePropsEqual);
 
 const stylesheet = StyleSheet.create((theme) => ({
     badge: {

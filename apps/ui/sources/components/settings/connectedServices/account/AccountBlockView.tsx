@@ -589,7 +589,7 @@ export const AccountBlockView = React.memo<AccountBlockViewProps>((props) => {
                                 <MeterBar
                                     testID={`${testID}:meter:${row.meterId}`}
                                     tone={row.tone}
-                                    fillFraction={row.remaining}
+                                    fillFraction={row.fillFraction}
                                     caption={row.detailLabel}
                                 />
                             </View>

@@ -28,7 +28,7 @@ vi.mock('@/text', async () => {
 });
 
 describe('ConnectedServiceQuotaMeterRow', () => {
-    it('renders remaining quota text, usage detail, and remaining bar state', async () => {
+    it('renders remaining quota text and a consumed-quota bar state', async () => {
         const { ConnectedServiceQuotaMeterRow } = await import('./ConnectedServiceQuotaMeterRow');
 
         const nowMs = 1_000_000;
@@ -56,7 +56,7 @@ describe('ConnectedServiceQuotaMeterRow', () => {
 
         const bar = screen.findByTestId('connected-service-quota-meter-row:remaining-bar:fill');
         const style = flattenStyle(bar?.props?.style);
-        expect(style.width).toBe('18%');
+        expect(style.width).toBe('82%');
         expect(style.backgroundColor).toBe(lightTheme.colors.state.warning.foreground);
     });
 

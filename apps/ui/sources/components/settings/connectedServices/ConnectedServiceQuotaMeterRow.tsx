@@ -82,7 +82,7 @@ export const ConnectedServiceQuotaMeterRow = React.memo(function ConnectedServic
           testID="connected-service-quota-meter-row:remaining-bar"
           style={styles.bar}
           tone={tone}
-          fillFraction={(remaining ?? 0) / 100}
+          fillFraction={(utilization ?? 0) / 100}
         />
         <Text style={styles.rightText}>{right}</Text>
       </View>

@@ -20,8 +20,10 @@ export type AccountUsageRow = Readonly<{
     meterId: string;
     label: string;
     tone: MeterTone;
-    /** Remaining fraction in 0..1 (the MeterBar shrinks as quota depletes). */
+    /** Remaining capacity fraction in 0..1 for capacity indicators. */
     remaining: number;
+    /** Consumed quota fraction in 0..1 for the forward-filling MeterBar. */
+    fillFraction: number;
     detailLabel: string;
 }>;
 
@@ -35,7 +37,8 @@ function clamp01(value: number): number {
 /**
  * Map the gauge's comparable meter rows onto the AccountBlock USAGE rows. Tone is
  * derived from the SAME `resolveQuotaTone` owner the meter bars and health dot
- * use, and `remaining` is normalized to the 0..1 fraction `MeterBar` expects.
+ * use. Remaining capacity stays available for capacity indicators while the
+ * forward-filling MeterBar receives the consumed quota fraction.
  */
 export function resolveAccountUsageRows(
     meterRows: ReadonlyArray<ConnectedServiceQuotaGaugeMeterRow> | null | undefined,
@@ -46,6 +49,7 @@ export function resolveAccountUsageRows(
         label: row.label,
         tone: resolveQuotaTone(row.remainingPct),
         remaining: clamp01(row.remainingPct / 100),
+        fillFraction: clamp01(row.usedPct / 100),
         detailLabel: row.detailRightLabel,
     }));
 }

@@ -8,8 +8,12 @@ export type MeterTone = 'success' | 'warning' | 'danger' | 'neutral';
 
 export interface MeterBarProps {
     tone: MeterTone;
-    /** Remaining fraction in 0..1 (clamped). The bar shrinks as quota depletes. */
-    value: number;
+    /**
+     * Fill fraction in 0..1 (clamped). Canonical semantic: fill = consumed / progress — the bar
+     * GROWS as work happens (tokens consumed, agents completed). Pass the progress ratio directly;
+     * do not invert it.
+     */
+    fillFraction: number;
     caption?: React.ReactNode;
     /** Track height in px (default 6). */
     height?: number;
@@ -50,7 +54,7 @@ export const MeterBar = React.memo<MeterBarProps>((props) => {
     const styles = stylesheet;
 
     const height = props.height ?? DEFAULT_TRACK_HEIGHT_PX;
-    const remaining = clamp01(props.value);
+    const fill = clamp01(props.fillFraction);
     // Read the token directly — never apply a runtime opacity/rgba transform to a
     // theme token (web var-ification turns such transforms into silent no-ops).
     const fillColor = theme.colors.state[props.tone].foreground;
@@ -64,7 +68,7 @@ export const MeterBar = React.memo<MeterBarProps>((props) => {
             >
                 <View
                     testID={props.testID ? `${props.testID}:fill` : undefined}
-                    style={[styles.fill, { width: `${remaining * 100}%`, backgroundColor: fillColor }]}
+                    style={[styles.fill, { width: `${fill * 100}%`, backgroundColor: fillColor }]}
                 />
             </View>
             {props.caption != null ? (
