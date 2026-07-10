@@ -11,11 +11,16 @@ import { createStartServerHarness } from "@/testkit/startServerHarness";
 
 const sqliteWalCheckpointMocks = vi.hoisted(() => {
     const stop = vi.fn(async () => {});
+    const stopVacuum = vi.fn(async () => {});
     return {
         resolveBusyTimeout: vi.fn(() => 5000),
         resolveInterval: vi.fn(() => 1000),
+        resolveVacuumInterval: vi.fn(() => 6 * 60 * 60 * 1000),
+        resolveVacuumPages: vi.fn(() => 1000),
         startWorker: vi.fn(() => ({ stop })),
+        startVacuumWorker: vi.fn(() => ({ stop: stopVacuum })),
         stop,
+        stopVacuum,
     };
 });
 
@@ -35,8 +40,11 @@ installStartServerDbModuleMock(startServerDbMocks);
 installStartServerCommonWiringMocks();
 
 vi.mock("@/storage/sqliteWalCheckpoint", () => ({
+    resolveSqliteIncrementalVacuumIntervalMsFromEnv: sqliteWalCheckpointMocks.resolveVacuumInterval,
+    resolveSqliteIncrementalVacuumPagesFromEnv: sqliteWalCheckpointMocks.resolveVacuumPages,
     resolveSqliteWalCheckpointBusyTimeoutMsFromEnv: sqliteWalCheckpointMocks.resolveBusyTimeout,
     resolveSqliteWalCheckpointIntervalMsFromEnv: sqliteWalCheckpointMocks.resolveInterval,
+    startSqliteIncrementalVacuumWorker: sqliteWalCheckpointMocks.startVacuumWorker,
     startSqliteWalCheckpointWorker: sqliteWalCheckpointMocks.startWorker,
 }));
 
@@ -59,11 +67,19 @@ describe("startServer sqlite WAL checkpoint shutdown ordering", () => {
         });
         sqliteWalCheckpointMocks.resolveBusyTimeout.mockReset().mockReturnValue(5000);
         sqliteWalCheckpointMocks.resolveInterval.mockReset().mockReturnValue(1000);
+        sqliteWalCheckpointMocks.resolveVacuumInterval.mockReset().mockReturnValue(6 * 60 * 60 * 1000);
+        sqliteWalCheckpointMocks.resolveVacuumPages.mockReset().mockReturnValue(1000);
         sqliteWalCheckpointMocks.startWorker
             .mockReset()
             .mockImplementation(() => ({ stop: sqliteWalCheckpointMocks.stop }));
+        sqliteWalCheckpointMocks.startVacuumWorker
+            .mockReset()
+            .mockImplementation(() => ({ stop: sqliteWalCheckpointMocks.stopVacuum }));
         sqliteWalCheckpointMocks.stop.mockReset().mockImplementation(async () => {
             callOrder.push("sqliteWalCheckpoint.stop");
+        });
+        sqliteWalCheckpointMocks.stopVacuum.mockReset().mockImplementation(async () => {
+            callOrder.push("sqliteIncrementalVacuum.stop");
         });
         startServerHarness.reset();
     });
@@ -98,6 +114,12 @@ describe("startServer sqlite WAL checkpoint shutdown ordering", () => {
         expect(sqliteWalCheckpointMocks.startWorker).toHaveBeenCalledWith(expect.objectContaining({
             client: startServerDbMocks.sqliteMaintenanceClient,
         }));
+        expect(sqliteWalCheckpointMocks.startVacuumWorker).toHaveBeenCalledTimes(1);
+        expect(sqliteWalCheckpointMocks.startVacuumWorker).toHaveBeenCalledWith(expect.objectContaining({
+            client: startServerDbMocks.sqliteMaintenanceClient,
+            intervalMs: 6 * 60 * 60 * 1000,
+            pages: 1000,
+        }));
         expect(startServerDbMocks.applySqliteRuntimePragmas).toHaveBeenCalledWith(
             startServerDbMocks.sqliteMaintenanceClient,
             expect.objectContaining({
@@ -107,13 +129,15 @@ describe("startServer sqlite WAL checkpoint shutdown ordering", () => {
         );
         expect(callOrder).toEqual([
             "sqliteWalCheckpoint.stop",
+            "sqliteIncrementalVacuum.stop",
             "sqliteMaintenanceClient.$disconnect",
             "db.$disconnect",
         ]);
     });
 
-    it("does not open a sqlite maintenance client when WAL checkpointing is disabled", async () => {
+    it("does not open a sqlite maintenance client when SQLite maintenance is disabled", async () => {
         sqliteWalCheckpointMocks.resolveInterval.mockReturnValue(0);
+        sqliteWalCheckpointMocks.resolveVacuumInterval.mockReturnValue(0);
         startServerHarness.prepareImport({
             SERVER_ROLE: "api",
             REDIS_URL: undefined,
@@ -132,7 +156,9 @@ describe("startServer sqlite WAL checkpoint shutdown ordering", () => {
 
         expect(startServerDbMocks.createDbSqliteMaintenanceClient).not.toHaveBeenCalled();
         expect(sqliteWalCheckpointMocks.resolveBusyTimeout).not.toHaveBeenCalled();
+        expect(sqliteWalCheckpointMocks.resolveVacuumPages).not.toHaveBeenCalled();
         expect(sqliteWalCheckpointMocks.startWorker).not.toHaveBeenCalled();
+        expect(sqliteWalCheckpointMocks.startVacuumWorker).not.toHaveBeenCalled();
         expect(callOrder).toEqual(["db.$disconnect"]);
     });
 

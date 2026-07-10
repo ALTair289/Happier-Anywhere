@@ -12,12 +12,15 @@ import { log } from "@/utils/logging/log";
 // reader gap.
 const DEFAULT_WAL_CHECKPOINT_INTERVAL_MS = 60_000;
 const DEFAULT_WAL_CHECKPOINT_BUSY_TIMEOUT_MS = 5_000;
+const DEFAULT_INCREMENTAL_VACUUM_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const DEFAULT_INCREMENTAL_VACUUM_PAGES = 1_000;
 
 // `setInterval` stores its delay in a 32-bit signed int. A larger value is silently
 // coerced to 1ms (with a TimeoutOverflowWarning), which would turn this into a hot loop.
 const MAX_TIMER_INTERVAL_MS = 2_147_483_647;
 // SQLite's busy timeout API also takes a signed 32-bit millisecond value.
 const MAX_SQLITE_BUSY_TIMEOUT_MS = 2_147_483_647;
+const MAX_SQLITE_INCREMENTAL_VACUUM_PAGES = 2_147_483_647;
 
 export type SqliteWalCheckpointResult = Readonly<{
     // SQLite returns 1 when the checkpoint could not run to completion because the
@@ -29,6 +32,33 @@ export type SqliteWalCheckpointResult = Readonly<{
     checkpointedFrames: number;
 }>;
 
+function parseUnsignedIntegerEnv(params: Readonly<{
+    env: NodeJS.ProcessEnv;
+    primaryKey: string;
+    legacyKey?: string;
+    defaultValue: number;
+    maxValue: number;
+    allowZero: boolean;
+}>): number {
+    const raw = String(
+        params.env[params.primaryKey] ?? (params.legacyKey ? params.env[params.legacyKey] : undefined) ?? "",
+    ).trim();
+    if (!raw) return params.defaultValue;
+    if (!/^\d+$/.test(raw)) {
+        throw new Error(`Invalid ${params.primaryKey}${params.legacyKey ? `/${params.legacyKey}` : ""}: ${raw}`);
+    }
+    const parsed = Number(raw);
+    if (!Number.isSafeInteger(parsed) || (!params.allowZero && parsed < 1)) {
+        throw new Error(`Invalid ${params.primaryKey}${params.legacyKey ? `/${params.legacyKey}` : ""}: ${raw}`);
+    }
+    if (parsed > params.maxValue) {
+        throw new Error(
+            `${params.primaryKey}${params.legacyKey ? `/${params.legacyKey}` : ""} must be <= ${params.maxValue}: ${raw}`,
+        );
+    }
+    return parsed;
+}
+
 /**
  * Resolve the interval (ms) between active WAL checkpoints.
  *
@@ -38,27 +68,14 @@ export type SqliteWalCheckpointResult = Readonly<{
  *  - positive integer -> that many ms
  */
 export function resolveSqliteWalCheckpointIntervalMsFromEnv(env: NodeJS.ProcessEnv): number {
-    const raw = String(
-        env.HAPPIER_SQLITE_WAL_CHECKPOINT_INTERVAL_MS ?? env.HAPPY_SQLITE_WAL_CHECKPOINT_INTERVAL_MS ?? "",
-    ).trim();
-    if (!raw) return DEFAULT_WAL_CHECKPOINT_INTERVAL_MS;
-    if (!/^\d+$/.test(raw)) {
-        throw new Error(
-            `Invalid HAPPIER_SQLITE_WAL_CHECKPOINT_INTERVAL_MS/HAPPY_SQLITE_WAL_CHECKPOINT_INTERVAL_MS: ${raw}`,
-        );
-    }
-    const parsed = Number(raw);
-    if (!Number.isSafeInteger(parsed)) {
-        throw new Error(
-            `Invalid HAPPIER_SQLITE_WAL_CHECKPOINT_INTERVAL_MS/HAPPY_SQLITE_WAL_CHECKPOINT_INTERVAL_MS: ${raw}`,
-        );
-    }
-    if (parsed > MAX_TIMER_INTERVAL_MS) {
-        throw new Error(
-            `HAPPIER_SQLITE_WAL_CHECKPOINT_INTERVAL_MS/HAPPY_SQLITE_WAL_CHECKPOINT_INTERVAL_MS must be <= ${MAX_TIMER_INTERVAL_MS}: ${raw}`,
-        );
-    }
-    return parsed;
+    return parseUnsignedIntegerEnv({
+        env,
+        primaryKey: "HAPPIER_SQLITE_WAL_CHECKPOINT_INTERVAL_MS",
+        legacyKey: "HAPPY_SQLITE_WAL_CHECKPOINT_INTERVAL_MS",
+        defaultValue: DEFAULT_WAL_CHECKPOINT_INTERVAL_MS,
+        maxValue: MAX_TIMER_INTERVAL_MS,
+        allowZero: true,
+    });
 }
 
 /**
@@ -70,27 +87,51 @@ export function resolveSqliteWalCheckpointIntervalMsFromEnv(env: NodeJS.ProcessE
  *  - positive integer -> that many ms
  */
 export function resolveSqliteWalCheckpointBusyTimeoutMsFromEnv(env: NodeJS.ProcessEnv): number {
-    const raw = String(
-        env.HAPPIER_SQLITE_WAL_CHECKPOINT_BUSY_TIMEOUT_MS ?? env.HAPPY_SQLITE_WAL_CHECKPOINT_BUSY_TIMEOUT_MS ?? "",
-    ).trim();
-    if (!raw) return DEFAULT_WAL_CHECKPOINT_BUSY_TIMEOUT_MS;
-    if (!/^\d+$/.test(raw)) {
-        throw new Error(
-            `Invalid HAPPIER_SQLITE_WAL_CHECKPOINT_BUSY_TIMEOUT_MS/HAPPY_SQLITE_WAL_CHECKPOINT_BUSY_TIMEOUT_MS: ${raw}`,
-        );
-    }
-    const parsed = Number(raw);
-    if (!Number.isSafeInteger(parsed)) {
-        throw new Error(
-            `Invalid HAPPIER_SQLITE_WAL_CHECKPOINT_BUSY_TIMEOUT_MS/HAPPY_SQLITE_WAL_CHECKPOINT_BUSY_TIMEOUT_MS: ${raw}`,
-        );
-    }
-    if (parsed > MAX_SQLITE_BUSY_TIMEOUT_MS) {
-        throw new Error(
-            `HAPPIER_SQLITE_WAL_CHECKPOINT_BUSY_TIMEOUT_MS/HAPPY_SQLITE_WAL_CHECKPOINT_BUSY_TIMEOUT_MS must be <= ${MAX_SQLITE_BUSY_TIMEOUT_MS}: ${raw}`,
-        );
-    }
-    return parsed;
+    return parseUnsignedIntegerEnv({
+        env,
+        primaryKey: "HAPPIER_SQLITE_WAL_CHECKPOINT_BUSY_TIMEOUT_MS",
+        legacyKey: "HAPPY_SQLITE_WAL_CHECKPOINT_BUSY_TIMEOUT_MS",
+        defaultValue: DEFAULT_WAL_CHECKPOINT_BUSY_TIMEOUT_MS,
+        maxValue: MAX_SQLITE_BUSY_TIMEOUT_MS,
+        allowZero: true,
+    });
+}
+
+/**
+ * Resolve the interval (ms) between incremental SQLite vacuum batches.
+ *
+ * Env: `HAPPIER_SQLITE_INCREMENTAL_VACUUM_INTERVAL_MS` / `HAPPY_SQLITE_INCREMENTAL_VACUUM_INTERVAL_MS`
+ *  - unset            -> default (6h)
+ *  - "0"              -> disabled
+ *  - positive integer -> that many ms
+ */
+export function resolveSqliteIncrementalVacuumIntervalMsFromEnv(env: NodeJS.ProcessEnv): number {
+    return parseUnsignedIntegerEnv({
+        env,
+        primaryKey: "HAPPIER_SQLITE_INCREMENTAL_VACUUM_INTERVAL_MS",
+        legacyKey: "HAPPY_SQLITE_INCREMENTAL_VACUUM_INTERVAL_MS",
+        defaultValue: DEFAULT_INCREMENTAL_VACUUM_INTERVAL_MS,
+        maxValue: MAX_TIMER_INTERVAL_MS,
+        allowZero: true,
+    });
+}
+
+/**
+ * Resolve how many free pages one incremental vacuum batch may reclaim.
+ *
+ * Env: `HAPPIER_SQLITE_INCREMENTAL_VACUUM_PAGES` / `HAPPY_SQLITE_INCREMENTAL_VACUUM_PAGES`
+ *  - unset            -> default (1000 pages)
+ *  - positive integer -> that many pages per batch
+ */
+export function resolveSqliteIncrementalVacuumPagesFromEnv(env: NodeJS.ProcessEnv): number {
+    return parseUnsignedIntegerEnv({
+        env,
+        primaryKey: "HAPPIER_SQLITE_INCREMENTAL_VACUUM_PAGES",
+        legacyKey: "HAPPY_SQLITE_INCREMENTAL_VACUUM_PAGES",
+        defaultValue: DEFAULT_INCREMENTAL_VACUUM_PAGES,
+        maxValue: MAX_SQLITE_INCREMENTAL_VACUUM_PAGES,
+        allowZero: false,
+    });
 }
 
 /**
@@ -115,6 +156,7 @@ export async function checkpointSqliteWal(client: PrismaClientType): Promise<Sql
 }
 
 export type SqliteWalCheckpointWorkerHandle = Readonly<{ stop: () => Promise<void> }>;
+export type SqliteIncrementalVacuumWorkerHandle = Readonly<{ stop: () => Promise<void> }>;
 
 export type StartSqliteWalCheckpointWorkerOptions = Readonly<{
     client: PrismaClientType;
@@ -156,6 +198,76 @@ export function startSqliteWalCheckpointWorker(
                 log(
                     { module: "storage", event: "sqlite-wal-checkpoint-failed", error },
                     "SQLite WAL checkpoint failed",
+                );
+            } finally {
+                inFlight = null;
+            }
+        })();
+    };
+
+    const timer = setInterval(() => {
+        void run();
+    }, options.intervalMs);
+    timer.unref?.();
+
+    return {
+        stop: async () => {
+            stopped = true;
+            clearInterval(timer);
+            if (inFlight) {
+                await inFlight;
+            }
+        },
+    };
+}
+
+/**
+ * Run one bounded SQLite incremental vacuum batch.
+ *
+ * This is intentionally not `VACUUM`: full VACUUM rewrites the database and can
+ * block writers for too long on light-server installs. `incremental_vacuum(N)`
+ * reclaims at most N free pages when the database was created with incremental
+ * auto-vacuum, and is otherwise a harmless no-op.
+ */
+export async function incrementalVacuumSqlite(client: PrismaClientType, pages: number): Promise<void> {
+    const normalizedPages = parseUnsignedIntegerEnv({
+        env: { HAPPIER_SQLITE_INCREMENTAL_VACUUM_PAGES: String(pages) },
+        primaryKey: "HAPPIER_SQLITE_INCREMENTAL_VACUUM_PAGES",
+        defaultValue: DEFAULT_INCREMENTAL_VACUUM_PAGES,
+        maxValue: MAX_SQLITE_INCREMENTAL_VACUUM_PAGES,
+        allowZero: false,
+    });
+    await client.$executeRawUnsafe(`PRAGMA incremental_vacuum(${normalizedPages});`);
+}
+
+export type StartSqliteIncrementalVacuumWorkerOptions = Readonly<{
+    client: PrismaClientType;
+    intervalMs: number;
+    pages: number;
+    // Injectable for tests; defaults to a real incremental vacuum batch.
+    runVacuum?: (client: PrismaClientType, pages: number) => Promise<void>;
+}>;
+
+export function startSqliteIncrementalVacuumWorker(
+    options: StartSqliteIncrementalVacuumWorkerOptions,
+): SqliteIncrementalVacuumWorkerHandle | null {
+    if (options.intervalMs <= 0) {
+        return null;
+    }
+    const runVacuum = options.runVacuum ?? incrementalVacuumSqlite;
+
+    let stopped = false;
+    let inFlight: Promise<void> | null = null;
+
+    const run = async (): Promise<void> => {
+        if (stopped || inFlight) return;
+        inFlight = (async () => {
+            try {
+                await runVacuum(options.client, options.pages);
+            } catch (error) {
+                log(
+                    { module: "storage", event: "sqlite-incremental-vacuum-failed", error },
+                    "SQLite incremental vacuum failed",
                 );
             } finally {
                 inFlight = null;

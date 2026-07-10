@@ -19,8 +19,11 @@ import {
     shutdownDbPglite,
 } from '@/storage/db';
 import {
+    resolveSqliteIncrementalVacuumIntervalMsFromEnv,
+    resolveSqliteIncrementalVacuumPagesFromEnv,
     resolveSqliteWalCheckpointBusyTimeoutMsFromEnv,
     resolveSqliteWalCheckpointIntervalMsFromEnv,
+    startSqliteIncrementalVacuumWorker,
     startSqliteWalCheckpointWorker,
 } from '@/storage/sqliteWalCheckpoint';
 import { log } from '@/utils/logging/log';
@@ -184,17 +187,27 @@ export async function startServer(flavor: ServerFlavor): Promise<void> {
     const sqliteWalCheckpointIntervalMs = dbProvider === 'sqlite'
         ? resolveSqliteWalCheckpointIntervalMsFromEnv(process.env)
         : null;
+    const sqliteIncrementalVacuumIntervalMs = dbProvider === 'sqlite'
+        ? resolveSqliteIncrementalVacuumIntervalMsFromEnv(process.env)
+        : null;
     const shouldStartSqliteWalCheckpointWorker =
         sqliteWalCheckpointIntervalMs !== null && sqliteWalCheckpointIntervalMs > 0;
-    const sqliteWalCheckpointBusyTimeoutMs = shouldStartSqliteWalCheckpointWorker
+    const shouldStartSqliteIncrementalVacuumWorker =
+        sqliteIncrementalVacuumIntervalMs !== null && sqliteIncrementalVacuumIntervalMs > 0;
+    const shouldStartSqliteMaintenanceClient =
+        shouldStartSqliteWalCheckpointWorker || shouldStartSqliteIncrementalVacuumWorker;
+    const sqliteWalCheckpointBusyTimeoutMs = shouldStartSqliteMaintenanceClient
         ? resolveSqliteWalCheckpointBusyTimeoutMsFromEnv(process.env)
+        : null;
+    const sqliteIncrementalVacuumPages = shouldStartSqliteIncrementalVacuumWorker
+        ? resolveSqliteIncrementalVacuumPagesFromEnv(process.env)
         : null;
 
     // Storage
     await db.$connect();
     let sqliteWalCheckpointClient: typeof db | null = null;
     try {
-        if (shouldStartSqliteWalCheckpointWorker) {
+        if (shouldStartSqliteMaintenanceClient) {
             sqliteWalCheckpointClient = await createDbSqliteMaintenanceClient();
             await sqliteWalCheckpointClient.$connect();
             await applySqliteRuntimePragmas(sqliteWalCheckpointClient, {
@@ -218,6 +231,18 @@ export async function startServer(flavor: ServerFlavor): Promise<void> {
             intervalMs: sqliteWalCheckpointIntervalMs,
         });
     }
+    let sqliteIncrementalVacuumWorker: ReturnType<typeof startSqliteIncrementalVacuumWorker> = null;
+    if (
+        sqliteWalCheckpointClient
+        && sqliteIncrementalVacuumIntervalMs !== null
+        && sqliteIncrementalVacuumPages !== null
+    ) {
+        sqliteIncrementalVacuumWorker = startSqliteIncrementalVacuumWorker({
+            client: sqliteWalCheckpointClient,
+            intervalMs: sqliteIncrementalVacuumIntervalMs,
+            pages: sqliteIncrementalVacuumPages,
+        });
+    }
     if (dbProvider === 'pglite') {
         // When using embedded pglite, ensure Prisma disconnect happens before stopping the socket server.
         onShutdown('db', async () => {
@@ -227,6 +252,7 @@ export async function startServer(flavor: ServerFlavor): Promise<void> {
     } else if (dbProvider === 'sqlite') {
         onShutdown('db', async () => {
             await sqliteWalCheckpointWorker?.stop();
+            await sqliteIncrementalVacuumWorker?.stop();
             try {
                 await sqliteWalCheckpointClient?.$disconnect();
             } finally {

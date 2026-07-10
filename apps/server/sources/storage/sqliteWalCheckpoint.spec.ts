@@ -3,8 +3,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PrismaClientType } from "@/storage/prisma";
 import {
     checkpointSqliteWal,
+    incrementalVacuumSqlite,
+    resolveSqliteIncrementalVacuumIntervalMsFromEnv,
+    resolveSqliteIncrementalVacuumPagesFromEnv,
     resolveSqliteWalCheckpointBusyTimeoutMsFromEnv,
     resolveSqliteWalCheckpointIntervalMsFromEnv,
+    startSqliteIncrementalVacuumWorker,
     startSqliteWalCheckpointWorker,
     type SqliteWalCheckpointResult,
 } from "@/storage/sqliteWalCheckpoint";
@@ -86,6 +90,39 @@ describe("resolveSqliteWalCheckpointBusyTimeoutMsFromEnv", () => {
     });
 });
 
+describe("resolveSqliteIncrementalVacuumIntervalMsFromEnv", () => {
+    it("defaults to a low-frequency maintenance cadence", () => {
+        expect(resolveSqliteIncrementalVacuumIntervalMsFromEnv({})).toBe(6 * 60 * 60 * 1000);
+    });
+
+    it("treats 0 as disabled and accepts the HAPPY_ alias", () => {
+        expect(resolveSqliteIncrementalVacuumIntervalMsFromEnv({
+            HAPPIER_SQLITE_INCREMENTAL_VACUUM_INTERVAL_MS: "0",
+        })).toBe(0);
+        expect(resolveSqliteIncrementalVacuumIntervalMsFromEnv({
+            HAPPY_SQLITE_INCREMENTAL_VACUUM_INTERVAL_MS: "1500",
+        })).toBe(1500);
+    });
+});
+
+describe("resolveSqliteIncrementalVacuumPagesFromEnv", () => {
+    it("defaults to bounded page batches", () => {
+        expect(resolveSqliteIncrementalVacuumPagesFromEnv({})).toBe(1_000);
+    });
+
+    it("rejects zero, invalid, and unsafe page counts", () => {
+        expect(() => resolveSqliteIncrementalVacuumPagesFromEnv({
+            HAPPIER_SQLITE_INCREMENTAL_VACUUM_PAGES: "0",
+        })).toThrow();
+        expect(() => resolveSqliteIncrementalVacuumPagesFromEnv({
+            HAPPIER_SQLITE_INCREMENTAL_VACUUM_PAGES: "soon",
+        })).toThrow();
+        expect(() => resolveSqliteIncrementalVacuumPagesFromEnv({
+            HAPPIER_SQLITE_INCREMENTAL_VACUUM_PAGES: "99999999999999999999",
+        })).toThrow();
+    });
+});
+
 describe("checkpointSqliteWal", () => {
     it("reads documented SQLite column names first", async () => {
         const fakeClient = {
@@ -109,6 +146,18 @@ describe("checkpointSqliteWal", () => {
             logFrames: 11,
             checkpointedFrames: 9,
         });
+    });
+});
+
+describe("incrementalVacuumSqlite", () => {
+    it("runs a bounded incremental vacuum batch", async () => {
+        const fakeClient = {
+            $executeRawUnsafe: vi.fn(async () => 0),
+        } as unknown as PrismaClientType;
+
+        await incrementalVacuumSqlite(fakeClient, 250);
+
+        expect(fakeClient.$executeRawUnsafe).toHaveBeenCalledWith("PRAGMA incremental_vacuum(250);");
     });
 });
 
@@ -203,5 +252,50 @@ describe("startSqliteWalCheckpointWorker", () => {
         release();
         await stopPromise;
         expect(finished).toBe(true);
+    });
+});
+
+describe("startSqliteIncrementalVacuumWorker", () => {
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
+    it("returns null when disabled", () => {
+        expect(startSqliteIncrementalVacuumWorker({
+            client,
+            intervalMs: 0,
+            pages: 100,
+            runVacuum: async () => undefined,
+        })).toBeNull();
+    });
+
+    it("does not overlap vacuum batches when one is slower than the interval", async () => {
+        vi.useFakeTimers();
+        let started = 0;
+        const releases: Array<() => void> = [];
+
+        const handle = startSqliteIncrementalVacuumWorker({
+            client,
+            intervalMs: 1000,
+            pages: 100,
+            runVacuum: async () => {
+                started += 1;
+                await new Promise<void>((resolve) => {
+                    releases.push(resolve);
+                });
+            },
+        });
+
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(started).toBe(1);
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(started).toBe(1);
+
+        releases[0]();
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(started).toBe(2);
+
+        releases.forEach((release) => release());
+        await handle!.stop();
     });
 });
