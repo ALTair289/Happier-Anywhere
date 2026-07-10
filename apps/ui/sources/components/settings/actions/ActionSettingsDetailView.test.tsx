@@ -1,6 +1,7 @@
 import * as React from 'react';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { act } from 'react-test-renderer';
 import { DEFAULT_SESSION_AGENT_SPAWN_POLICY_V1 } from '@happier-dev/protocol';
 import { renderScreen, standardCleanup } from '@/dev/testkit';
 import { installSettingsViewCommonModuleMocks, resetSettingsViewCommonModuleMockState } from '../settingsViewTestHelpers';
@@ -330,6 +331,29 @@ describe('ActionSettingsDetailView', () => {
             allowEnvironmentVariables: false,
             permissionCeiling: 'default',
         });
+    });
+
+    it('keeps create-session AI-session policy controls visible when target search filters the AI-session row', async () => {
+        const { ActionSettingsDetailContent } = await import('./ActionSettingsDetailView');
+
+        await renderScreen(<ActionSettingsDetailContent actionId="session.spawn_new" />);
+
+        expect(capture.switches.some((switchProps) =>
+            switchProps.testID === 'settings-actions:session-spawn-policy:allowEnvironmentVariables',
+        )).toBe(true);
+
+        capture.switches = [];
+        capture.items = [];
+        await act(async () => {
+            (capture.searchHeaders[0]?.onChangeText as (text: string) => void)('MCP');
+        });
+
+        expect(capture.items.some((item) =>
+            item.testID === 'settings-actions:action:session.spawn_new:target:session_agent',
+        )).toBe(false);
+        expect(capture.switches.some((switchProps) =>
+            switchProps.testID === 'settings-actions:session-spawn-policy:allowEnvironmentVariables',
+        )).toBe(true);
     });
 
     it('persists and reloads every create-session AI-session policy toggle', async () => {

@@ -186,8 +186,11 @@ export const ActionSettingsDetailContent = React.memo(function ActionSettingsDet
             })
             .filter((target): target is NonNullable<typeof target> => target !== null)
     ), [entry, filteredTargets, settings]);
+    const hasSessionAgentTarget = React.useMemo(() => (
+        entry?.targets.some((target) => target.id === 'session_agent') === true
+    ), [entry?.targets]);
     const showSessionAgentSpawnPolicy = props.actionId === 'session.spawn_new'
-        && filteredTargets.some((target) => target.id === 'session_agent');
+        && hasSessionAgentTarget;
 
     const commitSettings = React.useCallback((next: unknown) => {
         setRawSettings(normalizeActionsSettings(next));
