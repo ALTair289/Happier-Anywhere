@@ -1,5 +1,7 @@
 import React from 'react';
 import { View } from 'react-native';
+import { act } from 'react-test-renderer';
+import type { ReactTestInstance } from 'react-test-renderer';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { renderScreen } from '@/dev/testkit';
 import { lightTheme } from '@/theme';
@@ -23,6 +25,17 @@ vi.mock('@/hooks/ui/useReducedMotionPreference', () => ({
 
 const animationControls = vi.hoisted(() => ({
     timingCalls: [] as Array<{ to: unknown }>,
+    // When true (the default for the existing suite) `withTiming` settles
+    // synchronously by firing its completion callback immediately. Native runs
+    // the animation over ~220ms, so the reconciliation tests set this false to
+    // hold the animation MID-FLIGHT (the window where a stale target must be
+    // corrected to the freshest measured height).
+    autoFinish: true,
+    pending: [] as Array<(finished?: boolean) => void>,
+    finishPending() {
+        const callbacks = this.pending.splice(0, this.pending.length);
+        for (const callback of callbacks) callback(true);
+    },
 }));
 
 vi.mock('react-native-reanimated', async () => {
@@ -38,7 +51,10 @@ vi.mock('react-native-reanimated', async () => {
     const cancelAnimation = () => {};
     const withTiming = <T,>(value: T, _config?: unknown, callback?: (finished?: boolean) => void) => {
         animationControls.timingCalls.push({ to: value });
-        if (callback) callback(true);
+        if (callback) {
+            if (animationControls.autoFinish) callback(true);
+            else animationControls.pending.push(callback);
+        }
         return value;
     };
     const Animated = {
@@ -61,8 +77,35 @@ vi.mock('react-native-reanimated', async () => {
 
 beforeEach(() => {
     animationControls.timingCalls = [];
+    animationControls.autoFinish = true;
+    animationControls.pending = [];
     reducedMotionRef.value = false;
 });
+
+/**
+ * Fires the body's `onLayout` with a natural content height, modelling the
+ * async body content (a quota skeleton settling into real meters/reset rows)
+ * reporting a new height AFTER the reveal animation already armed.
+ */
+function fireBodyLayout(
+    body: ReactTestInstance | null,
+    height: number,
+): void {
+    const layoutNode = body?.findAll(
+        (node) => typeof node.props?.onLayout === 'function',
+    )[0];
+    if (!layoutNode) throw new Error('body onLayout node not found');
+    act(() => {
+        layoutNode.props.onLayout({ nativeEvent: { layout: { height } } });
+    });
+}
+
+/** Height targets from the height (not opacity) `withTiming` commands. */
+function heightTargets(): number[] {
+    return animationControls.timingCalls
+        .map((call) => call.to)
+        .filter((to): to is number => typeof to === 'number' && to !== 1);
+}
 
 /**
  * Lightweight header that records the `showDivider` ExpandableItem clones onto
@@ -325,5 +368,194 @@ describe('ExpandableItem', () => {
         );
 
         expect(animationControls.timingCalls.length).toBeGreaterThan(0);
+    });
+
+    it('reconciles a mid-flight expand to a body that GROWS after the first layout', async () => {
+        // Hold the reveal animation mid-flight (native runs it over ~220ms).
+        animationControls.autoFinish = false;
+        const { ExpandableItem } = await import('./ExpandableItem');
+        const screen = await renderScreen(
+            <ExpandableItem
+                testID="acct"
+                expanded={false}
+                onExpandedChange={() => {}}
+                header={(s) => <HeaderProbe testID="hdr" expanded={s.expanded} {...s.headerProps} />}
+            >
+                <View testID="body-content" />
+            </ExpandableItem>,
+        );
+        await screen.update(
+            <ExpandableItem
+                testID="acct"
+                expanded
+                onExpandedChange={() => {}}
+                header={(s) => <HeaderProbe testID="hdr" expanded={s.expanded} {...s.headerProps} />}
+            >
+                <View testID="body-content" />
+            </ExpandableItem>,
+        );
+
+        const body = screen.findByTestId('acct:body');
+        // First measured height arms the reveal; then async content lands at a
+        // taller natural height while the animation is still pinned mid-flight.
+        fireBodyLayout(body, 120);
+        fireBodyLayout(body, 200);
+
+        // The pinned reveal must chase the LATEST height, not undershoot to 120
+        // ("half-expand"). The final height command reconciles to 200.
+        expect(heightTargets().at(-1)).toBe(200);
+    });
+
+    it('reconciles a mid-flight expand to a body that SHRINKS after the first layout', async () => {
+        animationControls.autoFinish = false;
+        const { ExpandableItem } = await import('./ExpandableItem');
+        const screen = await renderScreen(
+            <ExpandableItem
+                testID="acct"
+                expanded={false}
+                onExpandedChange={() => {}}
+                header={(s) => <HeaderProbe testID="hdr" expanded={s.expanded} {...s.headerProps} />}
+            >
+                <View testID="body-content" />
+            </ExpandableItem>,
+        );
+        await screen.update(
+            <ExpandableItem
+                testID="acct"
+                expanded
+                onExpandedChange={() => {}}
+                header={(s) => <HeaderProbe testID="hdr" expanded={s.expanded} {...s.headerProps} />}
+            >
+                <View testID="body-content" />
+            </ExpandableItem>,
+        );
+
+        const body = screen.findByTestId('acct:body');
+        fireBodyLayout(body, 200);
+        fireBodyLayout(body, 120);
+
+        expect(heightTargets().at(-1)).toBe(120);
+    });
+
+    it('reconciles the STALE fast-path height on re-expand (the reported half-expand)', async () => {
+        const { ExpandableItem } = await import('./ExpandableItem');
+        const header = (s: import('./ExpandableItem').ExpandableItemHeaderState) => (
+            <HeaderProbe testID="hdr" expanded={s.expanded} {...s.headerProps} />
+        );
+        const screen = await renderScreen(
+            <ExpandableItem testID="acct" expanded={false} onExpandedChange={() => {}} header={header}>
+                <View testID="body-content" />
+            </ExpandableItem>,
+        );
+
+        // 1) First open settles at 120, seeding measuredHeightRef with a height
+        //    that becomes STALE once the account's quota changes.
+        await screen.update(
+            <ExpandableItem testID="acct" expanded onExpandedChange={() => {}} header={header}>
+                <View testID="body-content" />
+            </ExpandableItem>,
+        );
+        fireBodyLayout(screen.findByTestId('acct:body'), 120);
+
+        // 2) Collapse (animation settles synchronously via autoFinish).
+        await screen.update(
+            <ExpandableItem testID="acct" expanded={false} onExpandedChange={() => {}} header={header}>
+                <View testID="body-content" />
+            </ExpandableItem>,
+        );
+
+        // 3) Re-open, now holding the animation mid-flight. The expand effect
+        //    takes the fast path using the STALE 120 height. Async quota then
+        //    reports the real, larger 260.
+        animationControls.autoFinish = false;
+        animationControls.timingCalls = [];
+        await screen.update(
+            <ExpandableItem testID="acct" expanded onExpandedChange={() => {}} header={header}>
+                <View testID="body-content" />
+            </ExpandableItem>,
+        );
+        fireBodyLayout(screen.findByTestId('acct:body'), 260);
+
+        // The reveal must reconcile off the stale 120 to the fresh 260 instead
+        // of undershooting until the timing finishes.
+        expect(heightTargets().at(-1)).toBe(260);
+    });
+
+    it('does not re-arm the reveal when the height is unchanged (no animation thrash)', async () => {
+        animationControls.autoFinish = false;
+        const { ExpandableItem } = await import('./ExpandableItem');
+        const screen = await renderScreen(
+            <ExpandableItem
+                testID="acct"
+                expanded={false}
+                onExpandedChange={() => {}}
+                header={(s) => <HeaderProbe testID="hdr" expanded={s.expanded} {...s.headerProps} />}
+            >
+                <View testID="body-content" />
+            </ExpandableItem>,
+        );
+        await screen.update(
+            <ExpandableItem
+                testID="acct"
+                expanded
+                onExpandedChange={() => {}}
+                header={(s) => <HeaderProbe testID="hdr" expanded={s.expanded} {...s.headerProps} />}
+            >
+                <View testID="body-content" />
+            </ExpandableItem>,
+        );
+
+        const body = screen.findByTestId('acct:body');
+        fireBodyLayout(body, 150);
+        const afterArm = heightTargets().length;
+        // A repeat layout within the epsilon must NOT re-issue a timing command.
+        fireBodyLayout(body, 150.5);
+        expect(heightTargets().length).toBe(afterArm);
+    });
+
+    it('reduced motion never animates height even as the body re-layouts', async () => {
+        reducedMotionRef.value = true;
+        animationControls.autoFinish = false;
+        const { ExpandableItem } = await import('./ExpandableItem');
+        const screen = await renderScreen(
+            <ExpandableItem
+                testID="acct"
+                expanded
+                onExpandedChange={() => {}}
+                header={(s) => <HeaderProbe testID="hdr" expanded={s.expanded} {...s.headerProps} />}
+            >
+                <View testID="body-content" />
+            </ExpandableItem>,
+        );
+
+        const body = screen.findByTestId('acct:body');
+        fireBodyLayout(body, 120);
+        fireBodyLayout(body, 240);
+        // No height timing is ever issued under reduced motion.
+        expect(heightTargets().length).toBe(0);
+    });
+
+    it('collapse still unmounts the body and drives height to zero', async () => {
+        const { ExpandableItem } = await import('./ExpandableItem');
+        const header = (s: import('./ExpandableItem').ExpandableItemHeaderState) => (
+            <HeaderProbe testID="hdr" expanded={s.expanded} {...s.headerProps} />
+        );
+        const screen = await renderScreen(
+            <ExpandableItem testID="acct" expanded onExpandedChange={() => {}} header={header}>
+                <View testID="body-content" />
+            </ExpandableItem>,
+        );
+        fireBodyLayout(screen.findByTestId('acct:body'), 120);
+
+        animationControls.timingCalls = [];
+        await screen.update(
+            <ExpandableItem testID="acct" expanded={false} onExpandedChange={() => {}} header={header}>
+                <View testID="body-content" />
+            </ExpandableItem>,
+        );
+
+        // Collapse drives to 0 and settles the body unmounted.
+        expect(heightTargets()).toContain(0);
+        expect(screen.findAllByTestId('body-content').length).toBe(0);
     });
 });

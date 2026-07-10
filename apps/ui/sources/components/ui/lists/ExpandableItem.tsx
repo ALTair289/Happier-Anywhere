@@ -59,6 +59,11 @@ export interface ExpandableItemProps {
 const EXPAND_ANIMATION_DURATION_MS = 220;
 const TIMING_CONFIG: WithTimingConfig = { duration: EXPAND_ANIMATION_DURATION_MS };
 
+// Sub-pixel layout jitter must not re-arm the reveal animation. Only a real
+// change in the body's natural height (async quota skeleton -> real meters)
+// re-drives the pinned expand.
+const HEIGHT_EPSILON = 1;
+
 // Thinnest line that still paints on every platform. The previous
 // `Platform.select({ ios: 0.33, default: 0 })` collapsed to zero height on
 // web/Android, leaving account rows with no visible separation.
@@ -119,11 +124,26 @@ export const ExpandableItem = React.memo<ExpandableItemProps>((props) => {
     const animatedHeight = useSharedValue(0);
     const animatedOpacity = useSharedValue(expanded ? 1 : 0);
     const isMountedRef = React.useRef(true);
+    // `pendingExpandRef` is purely the "has the expand armed at all yet?" guard
+    // (true from the expand effect until the first height command is issued).
+    // It is NOT the sole gate for correctness — `handleBodyLayout` reconciles a
+    // pinned, in-flight expand to the freshest height even after arming.
     const pendingExpandRef = React.useRef(false);
     const prevExpandedRef = React.useRef(expanded);
+    // The height the pinned expand animation is currently heading to. Compared
+    // against fresh layout measurements to decide whether a reconcile is needed.
+    const animationTargetRef = React.useRef(0);
+    // Mirror of `heightPinned` readable synchronously inside `handleBodyLayout`
+    // (onLayout can fire against a closure captured before a re-render).
+    const heightPinnedRef = React.useRef(false);
 
     const [bodyMounted, setBodyMounted] = React.useState(expanded);
     const [heightPinned, setHeightPinned] = React.useState(false);
+
+    const applyHeightPinned = React.useCallback((next: boolean) => {
+        heightPinnedRef.current = next;
+        setHeightPinned(next);
+    }, []);
 
     React.useEffect(() => {
         isMountedRef.current = true;
@@ -137,14 +157,24 @@ export const ExpandableItem = React.memo<ExpandableItemProps>((props) => {
     const settleExpanded = React.useCallback(() => {
         if (!isMountedRef.current) return;
         // Release the pin so the body renders at natural height and can grow.
-        setHeightPinned(false);
-    }, []);
+        applyHeightPinned(false);
+    }, [applyHeightPinned]);
 
     const settleCollapsed = React.useCallback(() => {
         if (!isMountedRef.current) return;
         setBodyMounted(false);
-        setHeightPinned(false);
-    }, []);
+        applyHeightPinned(false);
+    }, [applyHeightPinned]);
+
+    // Drive (or re-drive) the pinned expand toward `target`, recording it so a
+    // later layout can tell whether the animation is already heading there.
+    const armExpandTiming = React.useCallback((target: number) => {
+        animationTargetRef.current = target;
+        animatedHeight.value = withTiming(target, TIMING_CONFIG, (finished) => {
+            'worklet';
+            if (finished) runOnJS(settleExpanded)();
+        });
+    }, [animatedHeight, settleExpanded]);
 
     React.useEffect(() => {
         if (prevExpandedRef.current === expanded) return;
@@ -154,20 +184,21 @@ export const ExpandableItem = React.memo<ExpandableItemProps>((props) => {
             setBodyMounted(true);
             if (reducedMotion) {
                 animatedOpacity.value = 1;
-                setHeightPinned(false);
+                applyHeightPinned(false);
                 return;
             }
             animatedHeight.value = 0;
-            setHeightPinned(true);
+            applyHeightPinned(true);
             pendingExpandRef.current = true;
+            animationTargetRef.current = 0;
             animatedOpacity.value = withTiming(1, TIMING_CONFIG);
             const target = measuredHeightRef.current;
             if (target > 0) {
+                // Fast path: arm immediately to the last known height. This may
+                // be STALE (the body's async content can now settle at a
+                // different height); `handleBodyLayout` reconciles it below.
                 pendingExpandRef.current = false;
-                animatedHeight.value = withTiming(target, TIMING_CONFIG, (finished) => {
-                    'worklet';
-                    if (finished) runOnJS(settleExpanded)();
-                });
+                armExpandTiming(target);
             }
             return;
         }
@@ -179,27 +210,44 @@ export const ExpandableItem = React.memo<ExpandableItemProps>((props) => {
             return;
         }
         pendingExpandRef.current = false;
+        animationTargetRef.current = 0;
         animatedHeight.value = measuredHeightRef.current > 0 ? measuredHeightRef.current : 0;
-        setHeightPinned(true);
+        applyHeightPinned(true);
         animatedOpacity.value = withTiming(0, TIMING_CONFIG);
         animatedHeight.value = withTiming(0, TIMING_CONFIG, (finished) => {
             'worklet';
             if (finished) runOnJS(settleCollapsed)();
         });
-    }, [expanded, reducedMotion, animatedHeight, animatedOpacity, settleExpanded, settleCollapsed]);
+    }, [expanded, reducedMotion, animatedHeight, animatedOpacity, applyHeightPinned, armExpandTiming, settleCollapsed]);
 
     const handleBodyLayout = React.useCallback((event: LayoutChangeEvent) => {
         const measured = event.nativeEvent.layout.height;
         if (measured <= 0) return;
         measuredHeightRef.current = measured;
-        if (pendingExpandRef.current && !reducedMotion) {
+        if (reducedMotion) return;
+
+        if (pendingExpandRef.current) {
+            // Initial arm: the expand effect deferred to the first real height.
             pendingExpandRef.current = false;
-            animatedHeight.value = withTiming(measured, TIMING_CONFIG, (finished) => {
-                'worklet';
-                if (finished) runOnJS(settleExpanded)();
-            });
+            armExpandTiming(measured);
+            return;
         }
-    }, [animatedHeight, reducedMotion, settleExpanded]);
+
+        // Reconcile an in-flight expand. The body's async content (a quota
+        // skeleton settling into real meters/reset rows) can change the natural
+        // height AFTER the animation armed — previously the reveal undershot to
+        // the stale height ("half-expand") until the timing finished. While the
+        // height is still pinned, chase the freshest measurement instead. Once
+        // settled (unpinned) the `height: undefined` release valve owns natural
+        // growth, so we must not re-pin here.
+        if (
+            expanded
+            && heightPinnedRef.current
+            && Math.abs(measured - animationTargetRef.current) > HEIGHT_EPSILON
+        ) {
+            armExpandTiming(measured);
+        }
+    }, [expanded, reducedMotion, armExpandTiming]);
 
     const bodyAnimatedStyle = useAnimatedStyle(() => {
         // ALWAYS return the same set of keys. Reanimated's native updater does not
