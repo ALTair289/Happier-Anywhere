@@ -46,6 +46,10 @@ export type MachineSpawnSessionResolveStatus =
 const DEFAULT_MACHINE_SPAWN_NONCE_RESOLUTION_TIMEOUT_MS = 3_000;
 const DEFAULT_MACHINE_SPAWN_NONCE_RESOLUTION_POLL_INTERVAL_MS = 200;
 
+function createMachineSpawnNonce(): string {
+    return `spawn-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
 function readMachineDaemonCliVersion(machineId: string): string | null {
     const rawVersion = storage.getState().machines[machineId]?.daemonState?.startedWithCliVersion;
     return typeof rawVersion === 'string' && rawVersion.trim().length > 0 ? rawVersion.trim() : null;
@@ -164,6 +168,55 @@ export async function machineSpawnNewSession(options: SpawnSessionOptions): Prom
             errorMessage: error instanceof Error ? error.message : 'Failed to spawn session'
         };
     }
+}
+
+function buildPendingSpawnResolutionError(status: Exclude<MachineSpawnSessionResolveStatus['status'], 'success'>): Extract<SpawnSessionResult, { type: 'error' }> {
+    return {
+        type: 'error',
+        errorCode: SPAWN_SESSION_ERROR_CODES.SESSION_WEBHOOK_TIMEOUT,
+        errorMessage: (() => {
+            switch (status) {
+                case 'pending':
+                    return 'Session startup is still pending. Please retry in a moment.';
+                case 'unsupported':
+                    return 'Session startup is still pending and this daemon cannot resolve the launch attempt.';
+                case 'transport_error':
+                    return 'Session startup is still pending and the daemon could not be reached to resolve the launch attempt.';
+                case 'not_found':
+                default:
+                    return 'Session startup is still pending before the created session could be confirmed.';
+            }
+        })(),
+    };
+}
+
+export async function machineSpawnNewSessionUntilResolved(options: SpawnSessionOptions): Promise<SpawnSessionResult> {
+    const spawnNonce = typeof options.spawnNonce === 'string' && options.spawnNonce.trim().length > 0
+        ? options.spawnNonce.trim()
+        : createMachineSpawnNonce();
+    const result = await machineSpawnNewSession({
+        ...options,
+        spawnNonce,
+    });
+    const shouldResolve =
+        (result.type === 'success' && !result.sessionId && result.sessionIdStatus === 'pending')
+        || (result.type === 'error' && result.errorCode === SPAWN_SESSION_ERROR_CODES.SESSION_WEBHOOK_TIMEOUT);
+    if (!shouldResolve) {
+        return result;
+    }
+
+    const resolved = await machineResolveSpawnSessionByNonceUntilSettled({
+        machineId: options.machineId,
+        serverId: options.serverId,
+        spawnNonce,
+    });
+    if (resolved.status === 'success') {
+        return {
+            type: 'success',
+            sessionId: resolved.sessionId,
+        };
+    }
+    return buildPendingSpawnResolutionError(resolved.status);
 }
 
 function normalizeMachineSpawnSessionResolveStatus(value: unknown): MachineSpawnSessionResolveStatus {

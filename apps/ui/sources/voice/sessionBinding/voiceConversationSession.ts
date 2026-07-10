@@ -10,7 +10,7 @@ import { getActiveServerSnapshot } from '@/sync/domains/server/serverRuntime';
 import { storage } from '@/sync/domains/state/storage';
 import { resolveMachineForActiveServerFromState, resolveVisibleMachinesForActiveServerFromState } from '@/sync/store/domains/machines/resolveMachinesForActiveServerFromState';
 import { readDirectSessionLink } from '@/sync/domains/session/directSessions/readDirectSessionLink';
-import { machineSpawnNewSession } from '@/sync/ops/machines';
+import { machineSpawnNewSessionUntilResolved } from '@/sync/ops/machines';
 import { readReplacementAwareMachineRpcTarget } from '@/sync/ops/machineRpcTarget';
 import { readMachineTargetForSession } from '@/sync/ops/sessionMachineTarget';
 import { sync } from '@/sync/sync';
@@ -497,7 +497,7 @@ export async function ensureVoiceConversationSessionForVoiceHome(): Promise<stri
   const agent = resolveVoiceConversationAgentId(state);
   const serverId = getActiveServerSnapshot().serverId;
   const knownSessionIds = new Set(Object.keys(state.sessions ?? {}));
-  const spawned = await machineSpawnNewSession({
+  const spawned = await machineSpawnNewSessionUntilResolved({
     machineId: target.machineId,
     directory: target.directory,
     transcriptStorage: 'persisted',
@@ -580,7 +580,7 @@ export async function ensureVoiceConversationSessionForSessionRoot(params: Reado
   const agent = resolveVoiceConversationAgentId(state);
   const serverId = getActiveServerSnapshot().serverId;
   const knownSessionIds = new Set(Object.keys(state.sessions ?? {}));
-  const spawned = await machineSpawnNewSession({
+  const spawned = await machineSpawnNewSessionUntilResolved({
     machineId,
     directory,
     transcriptStorage: 'persisted',

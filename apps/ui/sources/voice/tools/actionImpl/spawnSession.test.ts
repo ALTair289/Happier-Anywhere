@@ -21,6 +21,7 @@ vi.mock('@/sync/domains/server/serverRuntime', () => ({
 
 vi.mock('@/sync/ops/machines', () => ({
     machineSpawnNewSession: (params: unknown) => machineSpawnNewSessionMock(params),
+    machineSpawnNewSessionUntilResolved: (params: unknown) => machineSpawnNewSessionMock(params),
 }));
 
 vi.mock('./spawnSessionPostProcess', () => ({

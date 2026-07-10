@@ -119,6 +119,7 @@ vi.mock('@/sync/domains/server/serverRuntime', () => ({
 
 vi.mock('@/sync/ops/machines', () => ({
   machineSpawnNewSession: (opts: unknown) => spawnSession(opts),
+  machineSpawnNewSessionUntilResolved: (opts: unknown) => spawnSession(opts),
 }));
 
 // sessionExecutionRunGet is a protocol boundary; keep the mock flexible as the run schema evolves.

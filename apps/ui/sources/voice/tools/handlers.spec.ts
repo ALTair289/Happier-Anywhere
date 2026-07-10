@@ -242,6 +242,7 @@ vi.mock('@/sync/ops/sessionExecutionRuns', () => ({
 
 vi.mock('@/sync/ops/machines', () => ({
   machineSpawnNewSession: (options: any) => spawnSession(options),
+  machineSpawnNewSessionUntilResolved: (options: any) => spawnSession(options),
 }));
 
 vi.mock('@/sync/domains/server/activeServerSwitch', () => ({

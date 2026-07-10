@@ -1,4 +1,4 @@
-import { machineSpawnNewSession } from '@/sync/ops/machines';
+import { machineSpawnNewSessionUntilResolved } from '@/sync/ops/machines';
 import { storage } from '@/sync/domains/state/storage';
 import { getActiveServerSnapshot } from '@/sync/domains/server/serverRuntime';
 import { resolveEffectiveWindowsRemoteSessionLaunchMode } from '@/sync/domains/session/spawn/windowsRemoteSessionLaunchMode';
@@ -42,7 +42,7 @@ export async function spawnSessionWithPickerForVoiceTool(params: Readonly<{ tag?
     settings: state?.settings ?? {},
   }).mode;
 
-  const spawned = await machineSpawnNewSession({
+  const spawned = await machineSpawnNewSessionUntilResolved({
     machineId: picked.machineId,
     directory: picked.directory,
     backendTarget: { kind: 'builtInAgent', agentId: agent },

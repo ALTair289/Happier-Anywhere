@@ -38,6 +38,29 @@ function buildSpawnSessionErrorResult(params: Readonly<{
     };
 }
 
+function normalizeSpawnSessionSuccess(record: Record<string, unknown>): Extract<SpawnSessionResult, { type: 'success' }> {
+    const sessionId = typeof record.sessionId === 'string' && record.sessionId.trim().length > 0
+        ? record.sessionId.trim()
+        : typeof record.sid === 'string' && record.sid.trim().length > 0
+            ? record.sid.trim()
+            : undefined;
+    const spawnNonce = typeof record.spawnNonce === 'string' && record.spawnNonce.trim().length > 0
+        ? record.spawnNonce.trim()
+        : undefined;
+    const sessionIdStatus =
+        record.sessionIdStatus === 'pending' || record.sessionIdStatus === 'available'
+            ? record.sessionIdStatus
+            : record.status === 'pending'
+                ? 'pending'
+            : undefined;
+    return {
+        type: 'success',
+        ...(sessionId ? { sessionId } : {}),
+        ...(spawnNonce ? { spawnNonce } : {}),
+        ...(sessionIdStatus ? { sessionIdStatus } : {}),
+    };
+}
+
 export function normalizeSpawnSessionResult(value: unknown): SpawnSessionResult {
     if (!isPlainObject(value)) {
         return {
@@ -49,8 +72,7 @@ export function normalizeSpawnSessionResult(value: unknown): SpawnSessionResult 
 
     const type = value.type;
     if (type === 'success') {
-        const sessionId = typeof value.sessionId === 'string' ? value.sessionId : undefined;
-        return { type: 'success', ...(sessionId ? { sessionId } : {}) };
+        return normalizeSpawnSessionSuccess(value);
     }
 
     if (type === 'requestToApproveDirectoryCreation') {
@@ -99,13 +121,7 @@ export function normalizeSpawnSessionResult(value: unknown): SpawnSessionResult 
             }
         }
 
-        const sessionId =
-            typeof value.sessionId === 'string'
-                ? value.sessionId
-                : typeof value.sid === 'string'
-                    ? value.sid
-                    : undefined;
-        return { type: 'success', ...(sessionId ? { sessionId } : {}) };
+        return normalizeSpawnSessionSuccess(value);
     }
 
     return {

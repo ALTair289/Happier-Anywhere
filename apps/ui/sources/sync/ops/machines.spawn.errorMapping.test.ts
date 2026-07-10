@@ -160,6 +160,61 @@ describe('machineSpawnNewSession error mapping', () => {
     }));
   });
 
+  it('preserves pending session-id ACK fields from daemon spawn response', async () => {
+    machineRpcWithServerScopeMock.mockResolvedValueOnce({
+      type: 'success',
+      spawnNonce: 'spawn-nonce-ui-pending',
+      sessionIdStatus: 'pending',
+    });
+
+    const { machineSpawnNewSession } = await import('./machines');
+    const result = await machineSpawnNewSession({
+      machineId: 'machine-1',
+      directory: '/tmp',
+      backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+      serverId: 'server-b',
+      accountSettingsVersionHint: 12,
+      spawnNonce: 'spawn-nonce-ui-pending',
+    });
+
+    expect(result).toEqual({
+      type: 'success',
+      spawnNonce: 'spawn-nonce-ui-pending',
+      sessionIdStatus: 'pending',
+    });
+  });
+
+  it('resolves a pending spawn ACK through the shared settled-spawn helper', async () => {
+    machineRpcWithServerScopeMock
+      .mockResolvedValueOnce({
+        type: 'success',
+        spawnNonce: 'spawn-nonce-generated-by-helper',
+        sessionIdStatus: 'pending',
+      })
+      .mockResolvedValueOnce({
+        status: 'success',
+        sessionId: 'session-from-helper-resolve',
+      });
+
+    const { machineSpawnNewSessionUntilResolved } = await import('./machines');
+    const result = await machineSpawnNewSessionUntilResolved({
+      machineId: 'machine-1',
+      directory: '/tmp',
+      backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+      serverId: 'server-b',
+      accountSettingsVersionHint: 12,
+    });
+
+    expect(result).toEqual({
+      type: 'success',
+      sessionId: 'session-from-helper-resolve',
+    });
+    const spawnCall = machineRpcWithServerScopeMock.mock.calls[0]?.[0];
+    const resolveCall = machineRpcWithServerScopeMock.mock.calls[1]?.[0];
+    expect(spawnCall?.payload?.spawnNonce).toEqual(expect.stringMatching(/^spawn-/));
+    expect(resolveCall?.payload).toEqual({ spawnNonce: spawnCall?.payload?.spawnNonce });
+  });
+
   it('resolves a spawn nonce through machine RPC when supported', async () => {
     machineRpcWithServerScopeMock.mockResolvedValueOnce({
       status: 'success',

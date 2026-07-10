@@ -51,6 +51,7 @@ installVoiceToolActionImplCommonModuleMocks({
 
 vi.mock('@/sync/ops/machines', () => ({
   machineSpawnNewSession: (params: any) => machineSpawnNewSession(params),
+  machineSpawnNewSessionUntilResolved: (params: any) => machineSpawnNewSession(params),
 }));
 
 vi.mock('@/sync/domains/server/serverRuntime', () => ({

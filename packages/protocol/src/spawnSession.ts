@@ -304,6 +304,11 @@ export function normalizeSpawnSessionErrorDetail(value: unknown): SpawnSessionEr
 }
 
 export type SpawnSessionResult =
-  | { type: 'success'; sessionId?: string }
+  | {
+      type: 'success';
+      sessionId?: string;
+      spawnNonce?: string;
+      sessionIdStatus?: 'available' | 'pending';
+    }
   | { type: 'requestToApproveDirectoryCreation'; directory: string }
   | { type: 'error'; errorCode: SpawnSessionErrorCode; errorMessage: string; errorDetail?: SpawnSessionErrorDetail };

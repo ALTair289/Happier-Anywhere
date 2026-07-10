@@ -1,4 +1,4 @@
-import { machineSpawnNewSession } from '@/sync/ops/machines';
+import { machineSpawnNewSessionUntilResolved } from '@/sync/ops/machines';
 import { storage } from '@/sync/domains/state/storage';
 import { getActiveServerSnapshot } from '@/sync/domains/server/serverRuntime';
 import { useVoiceTargetStore } from '@/voice/runtime/voiceTargetStore';
@@ -167,7 +167,7 @@ export async function spawnSessionForVoiceTool(params: Readonly<{
     path: directory,
   });
 
-  const spawned = await machineSpawnNewSession({
+  const spawned = await machineSpawnNewSessionUntilResolved({
     machineId,
     directory,
     backendTarget: { kind: 'builtInAgent', agentId: agent },

@@ -39,6 +39,7 @@ installVoiceSessionBindingCommonModuleMocks({
 
 vi.mock('@/sync/ops/machines', () => ({
   machineSpawnNewSession: (...args: any[]) => machineSpawnNewSession(...args),
+  machineSpawnNewSessionUntilResolved: (...args: any[]) => machineSpawnNewSession(...args),
 }));
 
 vi.mock('@/sync/sync', () => ({
