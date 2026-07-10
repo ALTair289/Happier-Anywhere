@@ -51,6 +51,9 @@ export function createGoalActionChip(params: Readonly<{
             icon: (tint: string) => normalizeNodeForView(<GoalIcon color={tint} size={16} />),
             maxWidthCap: 420,
             maxHeightCap: 520,
+            // U-4: this popover hosts the goal objective textarea / budget input, so it opts in to the
+            // bottom keyboard inset to keep the focused field clear of the software keyboard.
+            reserveKeyboardInset: true,
             renderContent: ({ requestClose }) => (
                 <SessionWorkStateContent
                     snapshot={params.snapshot}

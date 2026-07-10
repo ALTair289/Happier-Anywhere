@@ -1,8 +1,10 @@
 import * as React from 'react';
+import { View } from 'react-native';
 
 import type { FloatingOverlayEdgeFades } from '@/components/ui/overlays/FloatingOverlay';
 import type { ScrollEdgeVisibility } from '@/components/ui/scroll/useScrollEdgeFades';
 import { AgentInputSelectionPopover } from '@/components/sessions/agentInput/selection/AgentInputSelectionPopover';
+import { useKeyboardHeight } from '@/hooks/ui/useKeyboardHeight';
 
 import { AgentInputPopoverSurface } from './AgentInputPopoverSurface';
 
@@ -25,6 +27,13 @@ export type AgentInputContentPopoverConfig = Readonly<{
     edgeFades?: FloatingOverlayEdgeFades;
     edgeIndicators?: boolean | Readonly<{ size?: number; opacity?: number }>;
     initialVisibility?: Partial<ScrollEdgeVisibility>;
+    /**
+     * U-4: opt-in bottom keyboard inset. Only popovers that host a focused field (goal objective
+     * textarea / budget input) request this; other consumers must not reserve the inset or they gain
+     * dead bottom-scroll space whenever the composer keyboard happens to be up. Web is unaffected
+     * (`useKeyboardHeight` returns 0 on web).
+     */
+    reserveKeyboardInset?: boolean;
 }>;
 
 export type AgentInputContentPopoverProps = Readonly<{
@@ -41,6 +50,7 @@ export type AgentInputContentPopoverProps = Readonly<{
     edgeFades?: FloatingOverlayEdgeFades;
     edgeIndicators?: boolean | Readonly<{ size?: number; opacity?: number }>;
     initialVisibility?: Partial<ScrollEdgeVisibility>;
+    reserveKeyboardInset?: boolean;
 }>;
 
 function renderPopoverContent(
@@ -51,6 +61,14 @@ function renderPopoverContent(
 }
 
 export function AgentInputContentPopover(props: AgentInputContentPopoverProps) {
+    // U-4: reserve a bottom inset equal to the settled keyboard height so a focused field inside the
+    // popover (e.g. the goal objective textarea) can scroll clear of the on-screen keyboard instead
+    // of being occluded. Opt-in per consumer (`reserveKeyboardInset`) so info/picker popovers that
+    // never host a focused field don't gain dead bottom-scroll space. Passive, non-frame-critical
+    // layout — the canonical use of `useKeyboardHeight` (web returns 0). The scroll surface owns the
+    // actual scroll.
+    const keyboardHeight = useKeyboardHeight();
+    const keyboardInset = props.reserveKeyboardInset ? keyboardHeight : 0;
     return (
         <AgentInputSelectionPopover
             open={props.open}
@@ -74,6 +92,9 @@ export function AgentInputContentPopover(props: AgentInputContentPopoverProps) {
                         requestClose: props.onRequestClose,
                         maxHeight,
                     })}
+                    {keyboardInset > 0 ? (
+                        <View testID="agent-input-popover-keyboard-inset" style={{ height: keyboardInset }} />
+                    ) : null}
                 </AgentInputPopoverSurface>
             )}
         </AgentInputSelectionPopover>

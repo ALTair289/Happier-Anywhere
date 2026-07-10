@@ -55,6 +55,7 @@ type AgentInputContentPopoverEntry = Readonly<{
     edgeFades?: AgentInputContentPopoverConfig['edgeFades'];
     edgeIndicators?: AgentInputContentPopoverConfig['edgeIndicators'];
     initialVisibility?: AgentInputContentPopoverConfig['initialVisibility'];
+    reserveKeyboardInset?: AgentInputContentPopoverConfig['reserveKeyboardInset'];
 }>;
 
 function resolvePopoverAnchorRef(
@@ -82,6 +83,7 @@ function renderContentPopover(entry: AgentInputContentPopoverEntry): React.React
             edgeFades={entry.edgeFades}
             edgeIndicators={entry.edgeIndicators}
             initialVisibility={entry.initialVisibility}
+            reserveKeyboardInset={entry.reserveKeyboardInset}
         />
     );
 }
@@ -298,6 +300,7 @@ export function AgentInputOverlayLayer(props: Readonly<{
             edgeFades: props.activeExtraCollapsedPopoverChip.collapsedContentPopover.edgeFades,
             edgeIndicators: props.activeExtraCollapsedPopoverChip.collapsedContentPopover.edgeIndicators,
             initialVisibility: props.activeExtraCollapsedPopoverChip.collapsedContentPopover.initialVisibility,
+            reserveKeyboardInset: props.activeExtraCollapsedPopoverChip.collapsedContentPopover.reserveKeyboardInset,
         });
     }
 

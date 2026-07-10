@@ -145,6 +145,7 @@ export type AgentInputExtraActionChip = Readonly<{
         edgeFades?: AgentInputContentPopoverConfig['edgeFades'];
         edgeIndicators?: AgentInputContentPopoverConfig['edgeIndicators'];
         initialVisibility?: AgentInputContentPopoverConfig['initialVisibility'];
+        reserveKeyboardInset?: AgentInputContentPopoverConfig['reserveKeyboardInset'];
     }>;
     composerAttachmentBadge?: AgentInputComposerAttachmentBadge;
     render: (ctx: AgentInputExtraActionChipRenderContext) => React.ReactNode;
