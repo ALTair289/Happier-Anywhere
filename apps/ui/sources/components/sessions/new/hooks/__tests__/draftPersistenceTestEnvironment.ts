@@ -546,6 +546,7 @@ vi.mock('@/components/automations/editor/AutomationSettingsForm', () => ({
 }));
 
 vi.mock('@react-navigation/native', () => ({
+    useIsFocused: () => true,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     useFocusEffect: (fn: any) => {
         focusEffectRef.current.push(fn);

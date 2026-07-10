@@ -68,6 +68,14 @@ export function useNewSessionDraftAutoPersist(params: Readonly<{
     persistDraftNow: () => void;
     persistenceEnabled?: boolean;
     draftTextLength?: number;
+    /**
+     * Whether the owning screen is currently focused. Only the focused screen instance may
+     * auto-persist: an unfocused instance's draft state is stale relative to whichever
+     * focused instance is editing the same scoped draft key, and persisting it would
+     * clobber live typing there. On losing focus any pending persist is flushed once so
+     * navigating away does not drop recent edits.
+     */
+    focused?: boolean;
 }>): void {
     // Persist the current wizard state so it survives remounts and screen navigation
     // Uses debouncing to avoid excessive writes
@@ -76,6 +84,7 @@ export function useNewSessionDraftAutoPersist(params: Readonly<{
     const persistDraftNowRef = React.useRef(params.persistDraftNow);
     const persistenceEnabledRef = React.useRef(params.persistenceEnabled ?? true);
     const draftTextLengthRef = React.useRef(params.draftTextLength);
+    const focused = params.focused ?? true;
     React.useEffect(() => {
         persistDraftNowRef.current = params.persistDraftNow;
     }, [params.persistDraftNow]);
@@ -121,7 +130,31 @@ export function useNewSessionDraftAutoPersist(params: Readonly<{
         }
     }, [cancelPendingIdlePersist]);
 
+    // Losing focus flushes any pending persist once: navigation away must not drop the
+    // last few seconds of typing, and an unfocused instance must never persist later.
+    // Declared before the scheduling effect so it observes the pending timer before the
+    // scheduling effect clears it for the unfocused state.
+    const wasFocusedRef = React.useRef(focused);
     React.useEffect(() => {
+        const wasFocused = wasFocusedRef.current;
+        wasFocusedRef.current = focused;
+        if (!wasFocused || focused) {
+            return;
+        }
+        if (draftSaveTimerRef.current === null) {
+            return;
+        }
+        clearTimeout(draftSaveTimerRef.current);
+        draftSaveTimerRef.current = null;
+        persistAfterCurrentPolicy();
+    }, [focused, persistAfterCurrentPolicy]);
+
+    React.useEffect(() => {
+        if (!focused) {
+            // The blur-flush effect above already flushed any pending debounce; leave an
+            // in-flight idle persist alone so the flush completes with the live value.
+            return;
+        }
         cancelPendingIdlePersist();
         if (draftSaveTimerRef.current !== null) {
             clearTimeout(draftSaveTimerRef.current);
@@ -142,7 +175,7 @@ export function useNewSessionDraftAutoPersist(params: Readonly<{
                 clearTimeout(draftSaveTimerRef.current);
             }
         };
-    }, [cancelPendingIdlePersist, params.draftTextLength, params.persistDraftNow, params.persistenceEnabled, persistAfterCurrentPolicy]);
+    }, [cancelPendingIdlePersist, focused, params.draftTextLength, params.persistenceEnabled, persistAfterCurrentPolicy]);
 
     // Flush pending work on unmount so fast navigation / modal close doesn't drop draft state.
     React.useEffect(() => {

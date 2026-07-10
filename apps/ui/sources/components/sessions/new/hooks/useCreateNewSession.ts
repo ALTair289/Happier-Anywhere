@@ -39,6 +39,7 @@ import { resolvePromptInvocationComposerSendAction } from '@/sync/domains/input/
 import { createDefaultActionExecutor } from '@/sync/ops/actions/defaultActionExecutor';
 import { resolveServerIdForSessionIdFromLocalCache } from '@/sync/runtime/orchestration/serverScopedRpc/resolveServerIdForSessionIdFromLocalCache';
 import { sessionGoalClear, sessionGoalSet } from '@/sync/ops/sessionGoals';
+import { isSocketIoAckTimeoutError } from '@/sync/runtime/socketIoAckTimeout';
 
 function getActiveNewSessionDraftScope() {
     return storage.getState().profileScope ?? null;
@@ -135,6 +136,10 @@ function buildNewSessionLaunchScopeKey(params: Readonly<{
         `profiles:${params.useProfiles ? 'on' : 'off'}`,
         `profile:${normalizeLaunchScopePart(params.selectedProfileId)}`,
     ].join('|');
+}
+
+function isFirstTurnFollowUpTimeout(error: unknown): boolean {
+    return isSocketIoAckTimeoutError(error);
 }
 
 function readNewSessionConnectedServicesOption(
@@ -616,7 +621,10 @@ export function useCreateNewSession(params: Readonly<{
                     spawnNonce: launchAttempt.spawnNonce,
                 });
 
-                if (result.type === 'error' && result.errorCode === SPAWN_SESSION_ERROR_CODES.SESSION_WEBHOOK_TIMEOUT) {
+                const shouldResolveSpawnByNonce =
+                    (result.type === 'error' && result.errorCode === SPAWN_SESSION_ERROR_CODES.SESSION_WEBHOOK_TIMEOUT)
+                    || (result.type === 'success' && !result.sessionId && result.sessionIdStatus === 'pending');
+                if (shouldResolveSpawnByNonce) {
                     const resolvedSpawn = await machineResolveSpawnSessionByNonceUntilSettled({
                         machineId: current.selectedMachineId,
                         serverId: resolvedTargetServerId,
@@ -691,6 +699,7 @@ export function useCreateNewSession(params: Readonly<{
                 let postSpawnFollowUpRetry: (() => Promise<void>) | null = null;
                 let suppressPostSpawnFollowUpAlert = false;
                 let postSpawnFailurePhase: 'sending_first_turn' | 'uploading_attachments' = 'sending_first_turn';
+                let preserveLaunchAttemptForFirstTurnRetry = false;
                 let initialMessageText = '';
                 let postSpawnSessionRouteSuffix = '';
                 let postSpawnReplacementHref: string | null = null;
@@ -879,6 +888,23 @@ export function useCreateNewSession(params: Readonly<{
                     return;
                 }
 
+                if (
+                    postSpawnFollowUpError
+                    && postSpawnFailurePhase === 'sending_first_turn'
+                    && isFirstTurnFollowUpTimeout(postSpawnFollowUpError)
+                ) {
+                    launchAttempt = markNewSessionLaunchAttemptFailed(launchAttempt, {
+                        phase: postSpawnFailurePhase,
+                        error: postSpawnFollowUpError,
+                        retryable: true,
+                    });
+                    launchAttemptRef.current = launchAttempt;
+                    postSpawnFollowUpError = null;
+                    postSpawnFollowUpRetry = null;
+                    suppressPostSpawnFollowUpAlert = true;
+                    preserveLaunchAttemptForFirstTurnRetry = true;
+                }
+
                 if (postSpawnFollowUpError) {
                     const retryFailureClassification = classifyCurrentPostSpawnFailure(postSpawnFollowUpError);
                     launchAttempt = markNewSessionLaunchAttemptFailed(launchAttempt, {
@@ -899,10 +925,12 @@ export function useCreateNewSession(params: Readonly<{
                     return;
                 }
 
-                launchAttempt = markNewSessionLaunchAttemptComplete(launchAttempt);
-                launchAttemptRef.current = null;
-                current.disableDraftPersistence?.();
-                clearNewSessionDraftForLaunchParams(current);
+                if (!preserveLaunchAttemptForFirstTurnRetry) {
+                    launchAttempt = markNewSessionLaunchAttemptComplete(launchAttempt);
+                    launchAttemptRef.current = null;
+                    current.disableDraftPersistence?.();
+                    clearNewSessionDraftForLaunchParams(current);
+                }
 
                 const sessionRoute = buildScopedSessionRouteHref({
                     sessionId: createdSessionId,

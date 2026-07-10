@@ -319,6 +319,7 @@ vi.mock('@expo/vector-icons', () => ({
 }));
 
 vi.mock('@react-navigation/native', () => ({
+    useIsFocused: () => true,
     useFocusEffect: (_fn: any) => {},
 }));
 
