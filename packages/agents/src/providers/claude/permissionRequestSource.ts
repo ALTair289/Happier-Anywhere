@@ -1,6 +1,7 @@
 export const CLAUDE_LOCAL_PERMISSION_BRIDGE_REQUEST_SOURCE = 'claude_local_permission_bridge' as const;
 export const CLAUDE_LOCAL_PERMISSION_BRIDGE_STOPPED_REASON = 'Local permission bridge stopped' as const;
 export const CLAUDE_UNIFIED_TERMINAL_RESUME_CHOICE_REQUEST_SOURCE = 'claude_unified_terminal_resume_choice' as const;
+export const CLAUDE_UNIFIED_TERMINAL_DIALOG_CHOICE_REQUEST_SOURCE = 'claude_unified_terminal_dialog_choice' as const;
 
 type ClaudeLocalPermissionBridgeAgentStateRequest = Readonly<{
     source: typeof CLAUDE_LOCAL_PERMISSION_BRIDGE_REQUEST_SOURCE;
@@ -8,6 +9,10 @@ type ClaudeLocalPermissionBridgeAgentStateRequest = Readonly<{
 
 type ClaudeUnifiedTerminalResumeChoiceAgentStateRequest = Readonly<{
     source: typeof CLAUDE_UNIFIED_TERMINAL_RESUME_CHOICE_REQUEST_SOURCE;
+}>;
+
+type ClaudeUnifiedTerminalDialogChoiceAgentStateRequest = Readonly<{
+    source: typeof CLAUDE_UNIFIED_TERMINAL_DIALOG_CHOICE_REQUEST_SOURCE;
 }>;
 
 export function isClaudeLocalPermissionBridgeAgentStateRequest(
@@ -28,4 +33,14 @@ export function isClaudeUnifiedTerminalResumeChoiceAgentStateRequest(
     }
 
     return (request as { source?: unknown }).source === CLAUDE_UNIFIED_TERMINAL_RESUME_CHOICE_REQUEST_SOURCE;
+}
+
+export function isClaudeUnifiedTerminalDialogChoiceAgentStateRequest(
+    request: unknown,
+): request is ClaudeUnifiedTerminalDialogChoiceAgentStateRequest {
+    if (!request || typeof request !== 'object' || Array.isArray(request)) {
+        return false;
+    }
+
+    return (request as { source?: unknown }).source === CLAUDE_UNIFIED_TERMINAL_DIALOG_CHOICE_REQUEST_SOURCE;
 }
