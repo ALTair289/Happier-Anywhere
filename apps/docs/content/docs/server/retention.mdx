@@ -9,9 +9,10 @@ If you do not set any retention env vars, the server keeps sessions and other re
 
 ## What retention currently covers
 
-Retention is implemented as one server-side sweep worker with per-domain rules. ITt can clean up:
+Retention is implemented as one server-side sweep worker with per-domain rules. It can clean up:
 
 - Sessions
+- Session messages inside stale inactive sessions
 - Account changes
 - Voice session leases
 - User feed items
@@ -39,7 +40,17 @@ When `HAPPIER_SERVER_RETENTION__SESSIONS__MODE=delete_inactive`, the server dele
 
 This means the server does not need to inspect or decrypt stored transcript content to apply the current session rule.
 
-Happier does **not** currently prune individual old messages inside an otherwise-kept session. Retention deletes whole inactive sessions.
+## How session message retention works
+
+The session message rule is separate from whole-session deletion. When `HAPPIER_SERVER_RETENTION__SESSION_MESSAGES__MODE=delete_older_than`, the server only prunes messages that are all of the following:
+
+- older than the configured message cutoff
+- owned by a session whose `active` flag is `false`
+- owned by a session whose `updatedAt` and `lastActiveAt` are older than the same cutoff
+- below the session read/ready watermarks and outside the preserved tail
+- owned by a session that the runtime does not currently observe as active in memory
+
+The final delete rechecks the same old-inactive session guard. The rule treats message content as opaque JSON, so encrypted and plaintext-at-rest sessions use the same retention path.
 
 ## Default behavior
 
@@ -112,6 +123,7 @@ Supported age-based modes:
 
 Supported domain names:
 
+- `SESSION_MESSAGES`
 - `ACCOUNT_CHANGES`
 - `VOICE_SESSION_LEASES`
 - `USER_FEED_ITEMS`
@@ -151,6 +163,8 @@ HAPPIER_SERVER_RETENTION__BATCH_SIZE=100
 HAPPIER_SERVER_RETENTION__MAX_DELETES_PER_RULE_PER_RUN=1000
 HAPPIER_SERVER_RETENTION__SESSIONS__MODE=delete_inactive
 HAPPIER_SERVER_RETENTION__SESSIONS__INACTIVITY_DAYS=30
+HAPPIER_SERVER_RETENTION__SESSION_MESSAGES__MODE=delete_older_than
+HAPPIER_SERVER_RETENTION__SESSION_MESSAGES__DAYS=30
 HAPPIER_SERVER_RETENTION__ACCOUNT_CHANGES__MODE=delete_older_than
 HAPPIER_SERVER_RETENTION__ACCOUNT_CHANGES__DAYS=30
 HAPPIER_SERVER_RETENTION__TERMINAL_AUTH_REQUESTS__MODE=delete_older_than
@@ -174,9 +188,19 @@ Clients learn the server policy from `GET /v1/features`, under `capabilities.ser
 ## Operational notes
 
 - Session retention is based on server-side metadata such as `updatedAt`, `lastActiveAt`, and `active`, not by decrypting stored messages.
+- Session message retention does not parse message envelopes; it applies the same session/watermark guard to encrypted and plaintext content.
 - Account change retention can advance the server `changesFloor`. After old account changes are pruned, very old `/v2/changes` cursors can become invalid and return `410 cursor-gone`.
 - Retention deletes are permanent. There is no built-in quarantine or archive stage before deletion.
 - Like any timestamp-based cleanup system, retention depends on accurate server time and correct stored timestamps. If you manually corrupt timestamps in the database or run with a badly wrong system clock, the policy can make wrong decisions.
+
+## SQLite maintenance after pruning
+
+Light-server SQLite deployments run two background maintenance loops when `HAPPIER_DB_PROVIDER=sqlite`:
+
+- WAL checkpointing every `HAPPIER_SQLITE_WAL_CHECKPOINT_INTERVAL_MS` milliseconds, default `60000`, using `PRAGMA wal_checkpoint(TRUNCATE)`.
+- Incremental vacuum every `HAPPIER_SQLITE_INCREMENTAL_VACUUM_INTERVAL_MS` milliseconds, default `21600000` (6 hours), using `PRAGMA incremental_vacuum(N)` with `HAPPIER_SQLITE_INCREMENTAL_VACUUM_PAGES` pages per batch, default `1000`.
+
+Both loops use a separate maintenance database client and the SQLite busy timeout controlled by `HAPPIER_SQLITE_WAL_CHECKPOINT_BUSY_TIMEOUT_MS`, default `5000`. Set an interval to `0` to disable that loop. The server intentionally does not run full `VACUUM` in the live process because it rewrites the database and can block writes for too long; use offline full `VACUUM` only during an explicit maintenance window.
 
 ## Keep-forever example
 
