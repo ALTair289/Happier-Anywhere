@@ -66,6 +66,7 @@ describe("sessionRoutes v2 session by id", () => {
                 runtimeActivityObservedAt: 2_000,
                 runtimeActivityExpiresAt: 5_000,
                 runtimeActivitySourceClass: "provider_detached_task",
+                initialTranscriptCatchUpAuthorization: "explicit_cursor",
                 share: null,
                 archivedAt: null,
             }),

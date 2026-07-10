@@ -238,6 +238,7 @@ export function registerSessionCreateOrLoadRoute(app: Fastify) {
                 pendingCount: resolvedSession.pendingCount,
                 pendingBlockedCount: resolvedSession.pendingBlockedCount,
                 pendingVersion: resolvedSession.pendingVersion,
+                initialTranscriptCatchUpAuthorization: "explicit_cursor",
                 ...mapStoredSessionRuntimeActivityProjection(resolvedSession),
                 active: resolvedSession.active,
                 activeAt: resolvedSession.lastActiveAt.getTime(),

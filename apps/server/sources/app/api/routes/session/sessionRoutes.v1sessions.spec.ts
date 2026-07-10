@@ -476,6 +476,7 @@ describe("sessionRoutes v1 sessions snapshot", () => {
                 id: "s2",
                 pendingCount: 0,
                 pendingVersion: 0,
+                initialTranscriptCatchUpAuthorization: "explicit_cursor",
             }),
         });
     });
