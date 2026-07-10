@@ -13,9 +13,19 @@ installToolShellCommonModuleMocks({
   text: async () => (await import('@/dev/testkit/mocks/text')).createTextModuleMock({
     translate: (key: string) => key,
   }),
+  storage: async (importOriginal) => {
+    const { createStorageModuleMock } = await import('@/dev/testkit/mocks/storage');
+    return createStorageModuleMock({
+      importOriginal,
+      overrides: {
+        useSetting: (key: string) => key === 'filesDiffTokenizationMaxBytes' ? 24 : null,
+      },
+    });
+  },
 });
 
 vi.mock('@/components/ui/text/Text', () => ({
+  Text: (props: any) => React.createElement('Text', props, props.children),
   TextSelectabilityScope: (props: any) => React.createElement('TextSelectabilityScope', props, props.children),
 }));
 
@@ -41,7 +51,7 @@ vi.mock('@/components/tools/shell/presentation/ToolSectionView', async (importOr
 });
 
 vi.mock('@/components/ui/media/CodeView', () => ({
-  CodeView: () => React.createElement('CodeView'),
+  CodeView: (props: any) => React.createElement('CodeView', props),
 }));
 
 vi.mock('@/utils/errors/toolErrorParser', () => ({
@@ -189,5 +199,46 @@ describe('ToolInlineBody (text selection scope)', () => {
 
     expect(screen.findAllByType('StructuredResultView' as any)).toHaveLength(1);
     expect(screen.findAllByType('ToolError' as any)).toHaveLength(0);
+  });
+
+  it('clamps oversized default input and output before rendering CodeView', async () => {
+    const { ToolInlineBody } = await import('./ToolInlineBody');
+
+    const tool: any = {
+      id: 't-large',
+      name: 'unknown',
+      state: 'completed',
+      input: { payload: 'i'.repeat(80) },
+      result: 'o'.repeat(80),
+      createdAt: 1,
+      startedAt: null,
+      completedAt: null,
+      permission: undefined,
+    };
+
+    const screen = await renderScreen(
+      <ToolInlineBody
+        mode="card"
+        tool={tool}
+        normalizedToolName="unknown"
+        metadata={null}
+        messages={[]}
+        detailLevel="full"
+        setHeaderActions={() => {}}
+      />
+    );
+
+    const codeViews = screen.findAllByType('CodeView' as any);
+    expect(codeViews).toHaveLength(2);
+    expect(codeViews[0]?.props.code).not.toContain('i'.repeat(80));
+    expect(codeViews[1]?.props.code).not.toContain('o'.repeat(80));
+    expect(screen.findAllByTestId('tool-inline-body-show-full-input')).toHaveLength(1);
+    expect(screen.findAllByTestId('tool-inline-body-show-full-output')).toHaveLength(1);
+    expect(JSON.stringify(screen.tree.toJSON())).toContain('toolView.showFullPayload');
+
+    await screen.pressByTestIdAsync('tool-inline-body-show-full-output');
+
+    const expandedCodeViews = screen.findAllByType('CodeView' as any);
+    expect(expandedCodeViews[1]?.props.code).toContain('o'.repeat(80));
   });
 });
