@@ -1,11 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+const shikiMockState = vi.hoisted(() => ({
+    codeToTokensCalls: [] as Array<{ code: string; options: any }>,
+}));
+
 const createHighlighterSpy = vi.fn(async (..._args: any[]) => ({
     loadLanguage: async () => {},
-    codeToTokens: (_code: string, options: any) => ({
-        fg: '#111111',
-        tokens: [[{ content: String(options.theme), color: '#222222' }]],
-    }),
+    codeToTokens: (code: string, options: any) => {
+        shikiMockState.codeToTokensCalls.push({ code, options });
+        return {
+            fg: '#111111',
+            tokens: [[{ content: String(options.theme), color: '#222222' }]],
+        };
+    },
 }));
 
 vi.mock('shiki', () => ({
@@ -31,10 +38,13 @@ function makeColors(keyword: string) {
 function makeHighlighter() {
     return {
         loadLanguage: async () => {},
-        codeToTokens: (_code: string, options: any) => ({
-            fg: '#111111',
-            tokens: [[{ content: String(options.theme), color: '#222222' }]],
-        }),
+        codeToTokens: (code: string, options: any) => {
+            shikiMockState.codeToTokensCalls.push({ code, options });
+            return {
+                fg: '#111111',
+                tokens: [[{ content: String(options.theme), color: '#222222' }]],
+            };
+        },
     };
 }
 
@@ -55,6 +65,7 @@ async function importFreshModule() {
 describe('shikiTokenizeLines dynamic theme cache', () => {
     beforeEach(() => {
         createHighlighterSpy.mockClear();
+        shikiMockState.codeToTokensCalls = [];
     });
 
     it('uses effective syntax colors in the registered Shiki theme key', async () => {
@@ -136,5 +147,22 @@ describe('shikiTokenizeLines dynamic theme cache', () => {
         });
 
         expect(createHighlighterSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('reuses tokenization results for identical code, language, and theme', async () => {
+        const { shikiTokenizeLines } = await importFreshModule();
+        const request = {
+            isDark: false,
+            language: 'typescript',
+            lines: ['const value = 1;', 'const next = value + 1;'],
+            colors: makeColors('#123456'),
+        };
+
+        const first = await shikiTokenizeLines(request);
+        const second = await shikiTokenizeLines(request);
+
+        expect(second).toEqual(first);
+        expect(createHighlighterSpy).toHaveBeenCalledTimes(1);
+        expect(shikiMockState.codeToTokensCalls).toHaveLength(1);
     });
 });

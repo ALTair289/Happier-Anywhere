@@ -7,6 +7,7 @@ import {
     getHappierTextMateThemeRegistration,
     resolveHappierTextMateThemeId,
 } from '@/components/ui/code/highlighting/shiki/happierTextMateTheme';
+import { LruMap } from '@/utils/cache/lruMap';
 
 export type ShikiInlineToken = Readonly<{ text: string; color: string }>;
 
@@ -23,6 +24,11 @@ const highlighterCache = new Map<string, { highlighter: ShikiHighlighter; loaded
 const highlighterInflight = new Map<string, Promise<CachedHighlighter>>();
 const highlighterCacheGeneration = new Map<string, number>();
 const SHIKI_HIGHLIGHTER_CACHE_CAP = 8;
+const SHIKI_TOKENIZATION_CACHE_CAP = 32;
+
+const tokenizationCache = new LruMap<string, Readonly<{ tokensByLine: readonly (readonly ShikiInlineToken[])[]; fg: string }>>({
+    maxEntries: SHIKI_TOKENIZATION_CACHE_CAP,
+});
 
 export function resolveHappierShikiThemeId(params: Readonly<{ isDark: boolean; colors?: Record<string, unknown> | null }>): string {
     return resolveHappierTextMateThemeId(params);
@@ -30,6 +36,10 @@ export function resolveHappierShikiThemeId(params: Readonly<{ isDark: boolean; c
 
 function buildShikiHighlighterCacheKey(params: Readonly<{ themeId: string; languageId: string }>): string {
     return `${params.themeId}::${params.languageId}`;
+}
+
+function buildShikiTokenizationCacheKey(params: Readonly<{ themeId: string; languageId: string; code: string }>): string {
+    return `${params.themeId}::${params.languageId}::${params.code}`;
 }
 
 function disposeHighlighter(highlighter: ShikiHighlighter): void {
@@ -82,6 +92,7 @@ export function clearShikiCacheForKey(oldKey: string): void {
     for (const key of affectedKeys) {
         bumpHighlighterCacheGeneration(key);
     }
+    tokenizationCache.clear();
     clearHappierTextMateThemeRegistrationCacheForKey(oldKey);
 }
 
@@ -137,6 +148,11 @@ export async function shikiTokenizeLines(params: Readonly<{
 }>): Promise<Readonly<{ tokensByLine: readonly (readonly ShikiInlineToken[])[]; fg: string }>> {
     const languageId = resolveShikiLanguageId(params.language) as unknown as string;
     const themeId = resolveHappierShikiThemeId({ isDark: params.isDark, colors: params.colors });
+    const code = params.lines.join('\n');
+    const tokenizationCacheKey = buildShikiTokenizationCacheKey({ themeId, languageId, code });
+    const cachedTokenization = tokenizationCache.get(tokenizationCacheKey);
+    if (cachedTokenization) return cachedTokenization;
+
     const { highlighter } = await getShikiHighlighterForTheme({ themeId, isDark: params.isDark, colors: params.colors, languageId });
 
     const cachedEntry = highlighterCache.get(buildShikiHighlighterCacheKey({ themeId, languageId }));
@@ -144,7 +160,7 @@ export async function shikiTokenizeLines(params: Readonly<{
         await ensureLanguageLoaded({ highlighter: cachedEntry.highlighter, loadedLanguageIds: cachedEntry.loadedLanguageIds, languageId });
     }
 
-    const res = highlighter.codeToTokens(params.lines.join('\n'), {
+    const res = highlighter.codeToTokens(code, {
         lang: languageId as unknown as BundledLanguage,
         theme: themeId as unknown as BundledTheme,
     }) as unknown as TokensResult;
@@ -161,5 +177,7 @@ export async function shikiTokenizeLines(params: Readonly<{
         })));
     }
 
-    return { tokensByLine: out, fg };
+    const result = { tokensByLine: out, fg };
+    tokenizationCache.set(tokenizationCacheKey, result);
+    return result;
 }
