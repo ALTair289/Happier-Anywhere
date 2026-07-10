@@ -139,7 +139,7 @@ export function CodeLinesViewCore(
                 showLineNumbers={showLineNumbers}
                 showPrefix={showPrefix}
                 syntaxHighlighting={effectiveSyntaxHighlighting}
-                advancedTokens={(effectiveSyntaxHighlighting.mode === 'advanced' ? (props.getAdvancedTokens?.(index) ?? undefined) : undefined) ?? undefined}
+                advancedTokens={effectiveSyntaxHighlighting.mode === 'advanced' ? (props.getAdvancedTokens?.(index) ?? undefined) : undefined}
             />
             {props.renderAfterLine ? props.renderAfterLine(item) : null}
         </View>
