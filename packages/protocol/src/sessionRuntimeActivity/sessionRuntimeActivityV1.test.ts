@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  SESSION_RUNTIME_ACTIVITY_PROJECTION_LEASE_MS,
   SESSION_RUNTIME_ACTIVITY_SOURCE_LIMIT,
   buildSessionRuntimeActivityV1,
   hasActiveSessionRuntimeActivity,
@@ -27,6 +28,10 @@ const activeSource = (overrides: Partial<{
 });
 
 describe('SessionRuntimeActivityV1', () => {
+  it('defines the canonical runtime-activity projection lease duration', () => {
+    expect(SESSION_RUNTIME_ACTIVITY_PROJECTION_LEASE_MS).toBe(900_000);
+  });
+
   it('builds a bounded provider-neutral snapshot and derives active sources from valid future leases', () => {
     const snapshot = buildSessionRuntimeActivityV1({
       observedAtMs: 3_000,
@@ -61,7 +66,7 @@ describe('SessionRuntimeActivityV1', () => {
     expect(hasActiveSessionRuntimeActivity(snapshot, 5_000)).toBe(false);
   });
 
-  it('derives pending-drain idleness from active count and valid future projection expiry only', () => {
+  it('derives pending-drain idleness from active count, owner liveness, and fail-open expiry rules', () => {
     expect(isSessionRuntimeActivityProjectionIdleForPendingDrain({
       runtimeActivityActiveCount: 1,
       runtimeActivityObservedAt: null,
@@ -77,6 +82,12 @@ describe('SessionRuntimeActivityV1', () => {
     expect(isSessionRuntimeActivityProjectionIdleForPendingDrain({
       runtimeActivityActiveCount: 1,
       runtimeActivityObservedAt: 4_000,
+      runtimeActivityExpiresAt: 5_000,
+      runtimeActivitySourceClass: 'provider_detached_task',
+    }, 5_000, { ownerLive: true })).toBe(true);
+    expect(isSessionRuntimeActivityProjectionIdleForPendingDrain({
+      runtimeActivityActiveCount: 1,
+      runtimeActivityObservedAt: 4_000,
       runtimeActivityExpiresAt: null,
       runtimeActivitySourceClass: 'provider_detached_task',
     }, 5_000)).toBe(true);
@@ -85,13 +96,13 @@ describe('SessionRuntimeActivityV1', () => {
       runtimeActivityObservedAt: 4_000,
       runtimeActivityExpiresAt: 5_000,
       runtimeActivitySourceClass: 'provider_detached_task',
-    }, 5_000)).toBe(true);
+    }, 5_000, { ownerLive: false })).toBe(true);
     expect(isSessionRuntimeActivityProjectionIdleForPendingDrain({
       runtimeActivityActiveCount: 0,
       runtimeActivityObservedAt: 4_000,
       runtimeActivityExpiresAt: 10_000,
       runtimeActivitySourceClass: null,
-    }, 5_000)).toBe(true);
+    }, 5_000, { ownerLive: true })).toBe(true);
   });
 
   it('parses valid snapshots, strips unknown detail fields, and rejects malformed snapshots', () => {

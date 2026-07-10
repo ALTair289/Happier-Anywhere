@@ -2,6 +2,16 @@ import { z } from 'zod';
 
 export const SESSION_RUNTIME_ACTIVITY_SOURCE_LIMIT = 32;
 
+/**
+ * Dead-owner display backstop for runtime-activity projections, not a liveness
+ * proof or provider work deadline. Deliberately decoupled from
+ * SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS: silent detached work such as
+ * codex/Bash lanes can emit no renewal evidence for many minutes and must stay
+ * displayed as working. Sizing matches the Helmor idle-backstop magnitude per
+ * plan refinement 30 amendment.
+ */
+export const SESSION_RUNTIME_ACTIVITY_PROJECTION_LEASE_MS = 900_000;
+
 export const SessionRuntimeActivitySourceKindV1Schema = z.enum([
   'provider_detached_task',
   'provider_autonomous_output',
@@ -119,6 +129,7 @@ export function hasActiveSessionRuntimeActivity(
 export function isSessionRuntimeActivityProjectionIdleForPendingDrain(
   activity: SessionRuntimeActivityProjectionForPendingDrain | null | undefined,
   nowMs: unknown,
+  _opts: Readonly<{ ownerLive?: boolean }> = {},
 ): boolean {
   const activeCount = readNonNegativeInteger(activity?.runtimeActivityActiveCount);
   if (activeCount === null || activeCount <= 0) {

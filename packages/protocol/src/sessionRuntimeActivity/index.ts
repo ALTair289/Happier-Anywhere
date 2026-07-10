@@ -1,4 +1,5 @@
 export {
+  SESSION_RUNTIME_ACTIVITY_PROJECTION_LEASE_MS,
   SESSION_RUNTIME_ACTIVITY_SOURCE_LIMIT,
   SessionRuntimeActivitySourceKindV1Schema,
   SessionRuntimeActivitySourceClassV1Schema,
