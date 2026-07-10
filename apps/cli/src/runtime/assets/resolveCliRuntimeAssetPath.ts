@@ -1,6 +1,6 @@
 import { basename, dirname, join } from 'node:path';
 
-import { projectPath } from '@/projectPath';
+import { projectPath, projectPathFromModuleUrl } from '@/projectPath';
 
 function normalizePathLike(pathLike: string): string {
   return String(pathLike ?? '').trim().replaceAll('\\', '/');
@@ -44,7 +44,18 @@ function resolveInstalledCliRuntimeRootPath(execPath: string): string | null {
   return join(dirname(binaryDir), installRootName, 'current');
 }
 
-export function resolveCliRuntimeRootPath(execPath: string = process.execPath): string {
+export function resolveCliRuntimeRootPathFromModuleUrl(moduleUrl: string): string | null {
+  try {
+    return projectPathFromModuleUrl(moduleUrl);
+  } catch {
+    return null;
+  }
+}
+
+export function resolveCliRuntimeRootPath(
+  execPath: string = process.execPath,
+  moduleUrl: string = import.meta.url,
+): string {
   const installedCliRuntimeRoot = resolveInstalledCliRuntimeRootPath(execPath);
   if (installedCliRuntimeRoot) {
     return installedCliRuntimeRoot;
@@ -54,9 +65,19 @@ export function resolveCliRuntimeRootPath(execPath: string = process.execPath): 
   if (isSelfContainedCliBinary(normalizedExecPath)) {
     return dirname(normalizedExecPath);
   }
+
+  const moduleRuntimeRoot = resolveCliRuntimeRootPathFromModuleUrl(moduleUrl);
+  if (moduleRuntimeRoot) {
+    return moduleRuntimeRoot;
+  }
+
   return projectPath();
 }
 
+export function resolveCliRuntimeAssetPathFromModuleUrl(moduleUrl: string, ...segments: string[]): string {
+  return join(resolveCliRuntimeRootPath(process.execPath, moduleUrl), ...segments);
+}
+
 export function resolveCliRuntimeAssetPath(...segments: string[]): string {
-  return join(resolveCliRuntimeRootPath(), ...segments);
+  return resolveCliRuntimeAssetPathFromModuleUrl(import.meta.url, ...segments);
 }

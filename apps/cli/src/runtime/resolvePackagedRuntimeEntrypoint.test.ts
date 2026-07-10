@@ -116,6 +116,67 @@ describe('resolvePackagedRuntimeEntrypoint', () => {
         );
     });
 
+    it('resolves flattened runner snapshot entrypoints inside the launched fingerprint directory', () => {
+        Object.defineProperty(process, 'execPath', {
+            value: '/usr/local/bin/node',
+            configurable: true,
+        });
+        process.argv = [
+            '/usr/local/bin/node',
+            '/repo/apps/cli/.runner-snapshots/5fa3abbb60ff1860/index.mjs',
+        ];
+        vi.mocked(existsSync).mockImplementation((pathLike) => {
+            const path = String(pathLike);
+            return path === '/repo/apps/cli/.runner-snapshots/5fa3abbb60ff1860/backends/codex/happyMcpStdioBridge.mjs';
+        });
+
+        expect(resolvePackagedRuntimeEntrypoint('backends/codex/happyMcpStdioBridge.mjs')).toBe(
+            '/repo/apps/cli/.runner-snapshots/5fa3abbb60ff1860/backends/codex/happyMcpStdioBridge.mjs',
+        );
+    });
+
+    it('prefers the launched flattened runner snapshot over managed-installed payloads', () => {
+        Object.defineProperty(process, 'execPath', {
+            value: '/usr/local/bin/node',
+            configurable: true,
+        });
+        process.argv = [
+            '/usr/local/bin/node',
+            '/repo/apps/cli/.runner-snapshots/5fa3abbb60ff1860/index.mjs',
+        ];
+        vi.mocked(existsSync).mockImplementation((pathLike) => {
+            const path = String(pathLike);
+            return (
+                path === '/repo/apps/cli/.runner-snapshots/5fa3abbb60ff1860/backends/codex/happyMcpStdioBridge.mjs'
+                || path === '/Users/test/.happier/cli-dev/current/package-dist/index.mjs'
+                || path === '/Users/test/.happier/cli-dev/current/package-dist/backends/codex/happyMcpStdioBridge.mjs'
+            );
+        });
+
+        expect(resolvePackagedRuntimeEntrypoint('backends/codex/happyMcpStdioBridge.mjs')).toBe(
+            '/repo/apps/cli/.runner-snapshots/5fa3abbb60ff1860/backends/codex/happyMcpStdioBridge.mjs',
+        );
+    });
+
+    it('resolves legacy dist runner snapshot entrypoints inside the launched fingerprint directory', () => {
+        Object.defineProperty(process, 'execPath', {
+            value: '/usr/local/bin/node',
+            configurable: true,
+        });
+        process.argv = [
+            '/usr/local/bin/node',
+            '/repo/apps/cli/dist/.runner-snapshots/abc123def4567890/index.mjs',
+        ];
+        vi.mocked(existsSync).mockImplementation((pathLike) => {
+            const path = String(pathLike);
+            return path === '/repo/apps/cli/dist/.runner-snapshots/abc123def4567890/backends/codex/happyMcpStdioBridge.mjs';
+        });
+
+        expect(resolvePackagedRuntimeEntrypoint('backends/codex/happyMcpStdioBridge.mjs')).toBe(
+            '/repo/apps/cli/dist/.runner-snapshots/abc123def4567890/backends/codex/happyMcpStdioBridge.mjs',
+        );
+    });
+
     it('prefers the runtime snapshot root derived from any packaged argv entrypoint', () => {
         Object.defineProperty(process, 'execPath', {
             value: 'C:\\Program Files\\Bun\\bun.exe',

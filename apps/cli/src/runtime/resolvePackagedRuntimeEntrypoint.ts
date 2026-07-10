@@ -8,7 +8,10 @@ import {
 } from '@happier-dev/cli-common/firstPartyRuntime';
 import { projectPath } from '@/projectPath';
 import { isEmbeddedBunBundlePath } from '@/runtime/js/isEmbeddedBunBundlePath';
-import { resolveRuntimeRootsFromLaunchedProcess } from '@/runtime/resolveRuntimeEntrypointArgv';
+import {
+  isRunnerSnapshotRuntimeRoot,
+  resolveRuntimeRootsFromLaunchedProcess,
+} from '@/runtime/resolveRuntimeEntrypointArgv';
 
 const MANAGED_CLI_SHIM_INSTALLS = new Map(
   (['stable', 'preview', 'publicdev'] as const).flatMap((channel) => {
@@ -149,19 +152,28 @@ export function resolvePackagedRuntimeEntrypoint(
   }
 
   const projectRoots = resolvePackagedRuntimeProjectRoots();
+  let firstCandidate: string | null = null;
 
   for (const root of projectRoots) {
+    const isSnapshotRoot = isRunnerSnapshotRuntimeRoot(root);
     if (options.packageDistOnly) {
-      const candidate = join(root, 'package-dist', normalizedRelativePath);
-      if (existsSync(candidate)) {
-        return candidate;
+      const candidates = isSnapshotRoot
+        ? [join(root, normalizedRelativePath), join(root, 'package-dist', normalizedRelativePath)]
+        : [join(root, 'package-dist', normalizedRelativePath)];
+      firstCandidate ??= candidates[0] ?? null;
+      for (const candidate of candidates) {
+        if (existsSync(candidate)) {
+          return candidate;
+        }
       }
       continue;
     }
     const candidates = [
+      ...(isSnapshotRoot ? [join(root, normalizedRelativePath)] : []),
       join(root, 'package-dist', normalizedRelativePath),
       join(root, 'dist', normalizedRelativePath),
     ];
+    firstCandidate ??= candidates[0] ?? null;
 
     for (const candidate of candidates) {
       if (existsSync(candidate)) {
@@ -170,5 +182,5 @@ export function resolvePackagedRuntimeEntrypoint(
     }
   }
 
-  return join(projectRoots[0] ?? projectPath(), 'package-dist', normalizedRelativePath);
+  return firstCandidate ?? join(projectPath(), 'package-dist', normalizedRelativePath);
 }

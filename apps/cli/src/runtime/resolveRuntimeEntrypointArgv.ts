@@ -8,6 +8,31 @@ function normalizePathLike(pathLike: string): string {
   return String(pathLike ?? '').trim().replaceAll('\\', '/');
 }
 
+export function resolveRunnerSnapshotRuntimeRootFromPath(pathLike: string | null | undefined): string | null {
+  const normalized = normalizePathLike(String(pathLike ?? '')).replace(/\/+$/, '');
+  if (!normalized || isEmbeddedBunBundlePath(normalized)) {
+    return null;
+  }
+  for (const snapshotMarker of ['/.runner-snapshots/', '/dist/.runner-snapshots/']) {
+    const snapshotIndex = normalized.lastIndexOf(snapshotMarker);
+    if (snapshotIndex < 0) {
+      continue;
+    }
+    const afterMarker = normalized.slice(snapshotIndex + snapshotMarker.length);
+    const snapshotName = afterMarker.split('/')[0]?.trim();
+    if (!snapshotName) {
+      continue;
+    }
+    return normalized.slice(0, snapshotIndex + snapshotMarker.length + snapshotName.length);
+  }
+  return null;
+}
+
+export function isRunnerSnapshotRuntimeRoot(pathLike: string | null | undefined): boolean {
+  const normalized = normalizePathLike(String(pathLike ?? '')).replace(/\/+$/, '');
+  return resolveRunnerSnapshotRuntimeRootFromPath(normalized) === normalized;
+}
+
 export function resolveRuntimeRootFromEntrypointPath(pathLike: string | null | undefined): string | null {
   const normalized = normalizePathLike(String(pathLike ?? ''));
   if (!normalized || isEmbeddedBunBundlePath(normalized)) {
@@ -15,6 +40,11 @@ export function resolveRuntimeRootFromEntrypointPath(pathLike: string | null | u
   }
   if (basename(normalized).toLowerCase() !== 'index.mjs') {
     return null;
+  }
+
+  const runnerSnapshotRoot = resolveRunnerSnapshotRuntimeRootFromPath(normalized);
+  if (runnerSnapshotRoot) {
+    return runnerSnapshotRoot;
   }
 
   const packageDistMarker = `${String.raw`/`}package-dist${String.raw`/`}`;
