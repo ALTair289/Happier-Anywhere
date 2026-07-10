@@ -2839,6 +2839,89 @@ describe("sessionWriteService", () => {
             });
         });
 
+        it("marks unread below the latest readable main transcript seq when raw session seq is ahead", async () => {
+            currentTx.session.findUnique
+                .mockResolvedValueOnce({ accountId: "u1" })
+                .mockResolvedValueOnce({
+                    seq: 742,
+                    lastViewedSessionSeq: 742,
+                    latestReadyEventSeq: 110,
+                    latestTurnStatus: "completed",
+                    pendingCount: 0,
+                    pendingBlockedCount: 0,
+                    pendingPermissionRequestCount: 0,
+                    pendingUserActionRequestCount: 0,
+                    active: true,
+                    archivedAt: null,
+                });
+            currentTx.sessionMessage.findMany.mockResolvedValue([
+                {
+                    seq: 742,
+                    localId: "connected-service-account-switch-attempt:ok:restart_requested:manual:restart:succeeded:restarted:none",
+                    messageRole: "event",
+                    content: { t: "encrypted", c: "cipher-742" },
+                },
+                {
+                    seq: 741,
+                    localId: "connected-service-account-switch-attempt:failed:hot_applied:manual:hot_apply:failed:none:post_switch_verification_failed",
+                    messageRole: "event",
+                    content: { t: "encrypted", c: "cipher-741" },
+                },
+                {
+                    seq: 740,
+                    localId: "connected-service-account-switch-attempt:failed:restart_requested:manual:restart:failed:none:profile_action_required",
+                    messageRole: "event",
+                    content: { t: "encrypted", c: "cipher-740" },
+                },
+                {
+                    seq: 739,
+                    localId: "claude-jsonl:main:assistant:0a9393af-3ed1-4933-ade2-c7e2b0389c00",
+                    messageRole: "agent",
+                    content: { t: "encrypted", c: "cipher-739" },
+                },
+            ]);
+            currentTx.sessionShare.findUnique.mockResolvedValue(null);
+            currentTx.session.updateMany.mockResolvedValue({ count: 1 });
+            getSessionParticipantUserIds.mockResolvedValue(["u1"]);
+            markAccountChanged.mockResolvedValueOnce(200);
+
+            const res = await applySessionReadCursorOperation({
+                actorUserId: "u1",
+                sessionId: "s1",
+                operation: { kind: "mark-unread" },
+            });
+
+            expect(currentTx.sessionMessage.findMany).toHaveBeenCalledWith({
+                where: {
+                    sessionId: "s1",
+                    sidechainId: null,
+                },
+                orderBy: { seq: "desc" },
+                take: 100,
+                select: {
+                    seq: true,
+                    localId: true,
+                    messageRole: true,
+                    content: true,
+                },
+            });
+            expect(currentTx.session.updateMany).toHaveBeenCalledWith({
+                where: {
+                    id: "s1",
+                    lastViewedSessionSeq: { gt: 738 },
+                },
+                data: { lastViewedSessionSeq: 738 },
+            });
+            expect(res).toEqual({
+                ok: true,
+                lastViewedSessionSeq: 738,
+                participantCursors: [{ accountId: "u1", cursor: 200 }],
+                badgeAttentionChanged: true,
+                didChange: true,
+                readState: "unread",
+            });
+        });
+
         it("preserves null when marking unread is already represented by a missing cursor", async () => {
             currentTx.session.findUnique
                 .mockResolvedValueOnce({ accountId: "u1" })

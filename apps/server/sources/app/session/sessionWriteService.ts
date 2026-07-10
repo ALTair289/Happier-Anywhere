@@ -140,6 +140,7 @@ export function resolveReadyProjectionEventType(params: Readonly<{
 function selectSessionActivityBadgeInputs() {
     return {
         seq: true,
+        latestReadyEventSeq: true,
         pendingCount: true,
         pendingBlockedCount: true,
         lastViewedSessionSeq: true,
@@ -179,6 +180,84 @@ function shouldAdvanceReadCursorForNonUnreadMessage(before: SessionActivityBadge
         : null;
     if (lastViewedSessionSeq !== null) return lastViewedSessionSeq >= seq;
     return seq === 0;
+}
+
+function normalizeReadSeq(value: unknown): number | null {
+    return typeof value === "number" && Number.isFinite(value)
+        ? Math.max(0, Math.trunc(value))
+        : null;
+}
+
+function maxReadSeq(left: number | null, right: number | null): number | null {
+    if (left === null) return right;
+    if (right === null) return left;
+    return Math.max(left, right);
+}
+
+function isTerminalTurnStatus(value: unknown): value is Exclude<PrimaryTurnStatusV1, "in_progress"> {
+    return value === "completed" || value === "cancelled" || value === "failed";
+}
+
+function resolveStoredSessionMessageAttentionImpact(row: Readonly<{
+    localId?: string | null;
+    messageRole?: unknown;
+    content: PrismaJson.SessionMessageContent;
+}>): SessionMessageAttentionImpact {
+    const trustedLocalIdAttentionImpact = parseSessionMessageRole(row.messageRole) === "event"
+        ? agentEventLocalIdAttentionImpact(row.localId)
+        : null;
+    return resolveMessageAttentionImpact({
+        content: row.content,
+        explicitAttentionImpact: trustedLocalIdAttentionImpact ?? undefined,
+    });
+}
+
+async function findLatestUnreadAffectingMainTranscriptMessageSeq(tx: Tx, sessionId: string): Promise<number | null> {
+    const pageSize = 100;
+    let beforeSeq: number | null = null;
+    for (;;) {
+        const messages = await tx.sessionMessage.findMany({
+            where: {
+                sessionId,
+                sidechainId: null,
+                ...(beforeSeq === null ? {} : { seq: { lt: beforeSeq } }),
+            },
+            orderBy: { seq: "desc" },
+            take: pageSize,
+            select: {
+                seq: true,
+                localId: true,
+                messageRole: true,
+                content: true,
+            },
+        });
+        if (!Array.isArray(messages) || messages.length === 0) return null;
+        for (const message of messages) {
+            if (resolveStoredSessionMessageAttentionImpact(message).affectsUnread) {
+                return normalizeReadSeq(message.seq);
+            }
+        }
+        if (messages.length < pageSize) return null;
+        beforeSeq = normalizeReadSeq(messages[messages.length - 1]?.seq);
+        if (beforeSeq === null) return null;
+    }
+}
+
+async function resolveManualUnreadReadableSessionSeq(
+    tx: Tx,
+    sessionId: string,
+    session: Readonly<{
+        seq?: number | null;
+        latestReadyEventSeq?: number | null;
+        latestTurnStatus?: PrimaryTurnStatusV1 | string | null;
+    }>,
+): Promise<number> {
+    const latestMainMessageSeq = await findLatestUnreadAffectingMainTranscriptMessageSeq(tx, sessionId);
+    let readableSeq = maxReadSeq(latestMainMessageSeq, normalizeReadSeq(session.latestReadyEventSeq));
+    if (readableSeq === null && isTerminalTurnStatus(parseStoredLatestTurnStatus(session.latestTurnStatus))) {
+        readableSeq = normalizeReadSeq(session.seq);
+    }
+    return readableSeq ?? normalizeReadSeq(session.seq) ?? 0;
 }
 
 function parseStoredObservedAt(value: unknown): number | null {
@@ -1338,8 +1417,12 @@ export async function applySessionReadCursorOperation(params: {
                 return { ok: false, error: "session-not-found" };
             }
 
+            const readableSessionSeq = operation.kind === "mark-unread" && session.lastViewedSessionSeq !== null
+                ? await resolveManualUnreadReadableSessionSeq(tx, sessionId, session)
+                : undefined;
             const resolved = resolveSessionReadCursorOperation({
                 sessionSeq: session.seq,
+                readableSessionSeq,
                 currentLastViewedSessionSeq: session.lastViewedSessionSeq,
                 operation,
             });
