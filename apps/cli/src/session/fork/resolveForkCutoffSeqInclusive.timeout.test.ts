@@ -56,6 +56,42 @@ describe('resolveForkCutoffSeqInclusive timeouts', () => {
     expect(getSpy.mock.calls[0]?.[1]?.timeout).toBe(54_321);
   });
 
+  it('uses the live runtime env endpoint instead of stale loaded configuration', async () => {
+    process.env.HAPPIER_SERVER_URL = 'http://127.0.0.1:41001';
+    process.env.HAPPIER_SESSION_CONTROL_HTTP_TIMEOUT_MS = '54321';
+
+    vi.resetModules();
+    const { resolveForkCutoffSeqInclusive } = await import('./resolveForkCutoffSeqInclusive');
+
+    process.env.HAPPIER_SERVER_URL = 'http://127.0.0.1:52002';
+    const getSpy = vi.spyOn(axios, 'get').mockResolvedValueOnce({
+      status: 200,
+      data: {
+        messages: [
+          {
+            seq: 1,
+            createdAt: 1,
+            content: { t: 'plain', v: { role: 'agent', content: { type: 'text', text: 'hi' } } },
+          },
+        ],
+      },
+    } as any);
+
+    const credentials: Credentials = {
+      token: 't',
+      encryption: { type: 'legacy', secret: new Uint8Array(32).fill(1) },
+    };
+
+    await resolveForkCutoffSeqInclusive({
+      credentials,
+      parentSessionId: 'sess_parent_1',
+      parentRawSession: { encryptionMode: 'plain', dataEncryptionKey: null },
+      targetSeqInclusive: 1,
+    });
+
+    expect(getSpy.mock.calls[0]?.[0]).toBe('http://127.0.0.1:52002/v1/sessions/sess_parent_1/messages');
+  });
+
   it('throws a stable auth status error for terminal auth failures', async () => {
     process.env.HAPPIER_SERVER_URL = 'http://server.example.test';
 

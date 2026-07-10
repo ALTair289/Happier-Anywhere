@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import axios from 'axios';
 import { HttpStatusError } from '@/api/client/httpStatusError';
@@ -14,6 +14,32 @@ vi.mock('@/api/client/loopbackUrl', () => ({
 }));
 
 describe('fetchEncryptedTranscriptMessages', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  it('uses the live runtime env endpoint instead of stale loaded configuration', async () => {
+    vi.stubEnv('HAPPIER_LOCAL_SERVER_URL', '');
+    vi.stubEnv('HAPPIER_PUBLIC_SERVER_URL', '');
+    vi.stubEnv('HAPPIER_SERVER_URL', 'http://127.0.0.1:52002');
+    const getSpy = vi.spyOn(axios, 'get').mockResolvedValueOnce({
+      status: 200,
+      data: { messages: [] },
+    } as any);
+
+    const { fetchEncryptedTranscriptMessages } = await import('./fetchEncryptedTranscriptMessages');
+
+    await fetchEncryptedTranscriptMessages({
+      token: 't',
+      sessionId: 'sess_1',
+      limit: 10,
+    });
+
+    expect(getSpy.mock.calls[0]?.[0]).toBe('http://127.0.0.1:52002/v1/sessions/sess_1/messages');
+  });
+
   it('passes beforeSeq through to the server query params when provided', async () => {
     const getSpy = vi.spyOn(axios, 'get').mockResolvedValueOnce({
       status: 200,
