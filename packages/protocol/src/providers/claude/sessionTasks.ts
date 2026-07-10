@@ -138,6 +138,7 @@ export function isTerminalClaudeAgentSdkProviderTaskStatus(status: unknown): boo
     case 'failed':
     case 'error':
     case 'errored':
+    case 'killed':
     case 'cancelled':
     case 'canceled':
       return true;

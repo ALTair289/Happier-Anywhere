@@ -89,6 +89,7 @@ describe('Claude Agent SDK provider task status normalization', () => {
             'failed',
             'error',
             'errored',
+            'killed',
             'cancelled',
             'canceled',
         ]) {
