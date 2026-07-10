@@ -7,7 +7,7 @@ import { createEnvKeyScope } from '@/testkit/env/envScope';
 import { createTempDirSync, removeTempDirSync } from '@/testkit/fs/tempDir';
 
 describe('logger', () => {
-    const envKeys = ['DEBUG', 'HAPPIER_HOME_DIR', 'HAPPIER_LOG_LEVEL', 'HAPPIER_SESSION_LOG_KEEP_COUNT'] as const;
+    const envKeys = ['DEBUG', 'HAPPIER_HOME_DIR', 'HAPPIER_LOG_LEVEL', 'HAPPIER_SESSION_LOG_KEEP_COUNT', 'HAPPIER_CRASHED_SESSION_LOG_KEEP_COUNT'] as const;
     let envScope = createEnvKeyScope(envKeys);
     let tempDir: string;
     let originalArgv: string[];
@@ -21,6 +21,7 @@ describe('logger', () => {
             DEBUG: undefined,
             HAPPIER_LOG_LEVEL: undefined,
             HAPPIER_SESSION_LOG_KEEP_COUNT: undefined,
+            HAPPIER_CRASHED_SESSION_LOG_KEEP_COUNT: undefined,
         });
         vi.resetModules();
     });
@@ -256,6 +257,48 @@ describe('logger', () => {
             const sessionLogs = entries.filter(file => file.endsWith('.log') && !file.endsWith('-daemon.log'));
             expect(sessionLogs).toHaveLength(3);
             expect(entries).toContain('2026-06-30-09-00-00-pid-99-daemon.log');
+        });
+    });
+
+    it('retains bounded non-zero crashed runner session logs outside the normal session log budget', async () => {
+        process.env.HAPPIER_SESSION_LOG_KEEP_COUNT = '3';
+        process.env.HAPPIER_CRASHED_SESSION_LOG_KEEP_COUNT = '1';
+        const logsDir = join(tempDir, 'logs');
+        const sessionExitDir = join(logsDir, 'session-exit');
+        mkdirSync(sessionExitDir, { recursive: true });
+        for (let index = 1; index <= 7; index += 1) {
+            writeFileSync(
+                join(logsDir, `2026-06-30-10-${String(index).padStart(2, '0')}-00-pid-${index}.log`),
+                `old session ${index}\n`,
+                'utf8',
+            );
+        }
+        writeFileSync(
+            join(sessionExitDir, 'z-session-crashed-old-pid-3.json'),
+            JSON.stringify({ sessionId: 'crashed-old', pid: 3, observedAt: 10, reason: 'process-exited', code: 1 }),
+            'utf8',
+        );
+        writeFileSync(
+            join(sessionExitDir, 'a-session-crashed-new-pid-2.json'),
+            JSON.stringify({ sessionId: 'crashed-new', pid: 2, observedAt: 20, reason: 'process-exited', code: 1 }),
+            'utf8',
+        );
+        writeFileSync(
+            join(sessionExitDir, 'session-clean-pid-1.json'),
+            JSON.stringify({ sessionId: 'clean', pid: 1, reason: 'process-exited', code: 0 }),
+            'utf8',
+        );
+
+        await import('@/ui/logger');
+
+        await vi.waitFor(() => {
+            const sessionLogs = readdirSync(logsDir)
+                .filter(file => file.endsWith('.log') && !file.endsWith('-daemon.log'))
+                .sort();
+            expect(sessionLogs).toHaveLength(4);
+            expect(sessionLogs).toContain('2026-06-30-10-02-00-pid-2.log');
+            expect(sessionLogs).not.toContain('2026-06-30-10-03-00-pid-3.log');
+            expect(sessionLogs).not.toContain('2026-06-30-10-01-00-pid-1.log');
         });
     });
 

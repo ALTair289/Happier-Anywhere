@@ -4,9 +4,12 @@
  * One log file is created per process boot, so retention is count-based:
  * - daemon logs (`*-daemon.log`) keep the newest {@link DEFAULT_DAEMON_LOG_KEEP_COUNT}
  * - session logs (all other `*.log`) keep the newest {@link DEFAULT_SESSION_LOG_KEEP_COUNT}
+ * - non-zero crashed session logs are preserved outside the normal budget, capped by
+ *   {@link DEFAULT_CRASHED_SESSION_LOG_KEEP_COUNT}
  *
  * Both budgets are env-overridable (`HAPPIER_DAEMON_LOG_KEEP_COUNT`,
- * `HAPPIER_SESSION_LOG_KEEP_COUNT`) for support/debugging scenarios.
+ * `HAPPIER_SESSION_LOG_KEEP_COUNT`, `HAPPIER_CRASHED_SESSION_LOG_KEEP_COUNT`) for
+ * support/debugging scenarios.
  */
 
 export const DAEMON_LOG_SUFFIX = '-daemon.log';
@@ -14,6 +17,7 @@ export const LOG_FILE_SUFFIX = '.log';
 
 export const DEFAULT_DAEMON_LOG_KEEP_COUNT = 50;
 export const DEFAULT_SESSION_LOG_KEEP_COUNT = 200;
+export const DEFAULT_CRASHED_SESSION_LOG_KEEP_COUNT = 20;
 
 type EnvLike = Readonly<Record<string, string | undefined>>;
 
@@ -28,4 +32,8 @@ export function resolveDaemonLogKeepCount(env: EnvLike = process.env): number {
 
 export function resolveSessionLogKeepCount(env: EnvLike = process.env): number {
   return resolveKeepCount(env.HAPPIER_SESSION_LOG_KEEP_COUNT, DEFAULT_SESSION_LOG_KEEP_COUNT);
+}
+
+export function resolveCrashedSessionLogKeepCount(env: EnvLike = process.env): number {
+  return resolveKeepCount(env.HAPPIER_CRASHED_SESSION_LOG_KEEP_COUNT, DEFAULT_CRASHED_SESSION_LOG_KEEP_COUNT);
 }

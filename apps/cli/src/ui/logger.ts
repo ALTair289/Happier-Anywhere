@@ -11,7 +11,7 @@
 
 import chalk from 'chalk'
 import { configuration } from '@/configuration'
-import { appendFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { inspect } from 'node:util'
 import { writeConsoleErrorBestEffort, writeConsoleLogBestEffort } from '@/utils/writeConsoleBestEffort'
@@ -19,6 +19,7 @@ import { pruneLogsByCount } from '@/utils/logs/pruneLogsByCount'
 import {
   DAEMON_LOG_SUFFIX,
   LOG_FILE_SUFFIX,
+  resolveCrashedSessionLogKeepCount,
   resolveDaemonLogKeepCount,
   resolveSessionLogKeepCount,
 } from '@/utils/logs/logRetention'
@@ -81,7 +82,61 @@ async function pruneSessionLogsForCurrentLogger(logFilePath: string): Promise<vo
     excludeSuffix: DAEMON_LOG_SUFFIX,
     keepCount: resolveSessionLogKeepCount(),
     keepPath: logFilePath,
+    keepPaths: resolveCrashedSessionLogKeepPaths(configuration.logsDir),
   }).catch(() => ({ pruned: 0 }))
+}
+
+type CrashedSessionExitReportReference = Readonly<{
+  pid: number
+  observedAt: number
+}>
+
+function readNonZeroExitReportReference(path: string): CrashedSessionExitReportReference | null {
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
+    if (!parsed || typeof parsed !== 'object') return null;
+    const record = parsed as { pid?: unknown; code?: unknown; signal?: unknown };
+    const pid = typeof record.pid === 'number' && Number.isInteger(record.pid) && record.pid > 0
+      ? record.pid
+      : null;
+    if (pid === null) return null;
+    const crashed = (typeof record.code === 'number' && record.code !== 0)
+      || (typeof record.signal === 'string' && record.signal.trim().length > 0)
+    if (!crashed) return null
+    const observedAt = typeof (record as { observedAt?: unknown }).observedAt === 'number'
+      && Number.isFinite((record as { observedAt?: number }).observedAt)
+      ? Math.trunc((record as { observedAt: number }).observedAt)
+      : Math.trunc(statSync(path).mtimeMs)
+    return { pid, observedAt }
+  } catch {
+    return null;
+  }
+}
+
+function resolveCrashedSessionLogKeepPaths(logsDir: string): string[] {
+  try {
+    const keepCount = resolveCrashedSessionLogKeepCount();
+    if (keepCount <= 0) return [];
+    const sessionExitDir = join(logsDir, 'session-exit');
+    const crashedPids = readdirSync(sessionExitDir)
+      .filter((file) => file.endsWith('.json'))
+      .map((file) => readNonZeroExitReportReference(join(sessionExitDir, file)))
+      .filter((entry): entry is CrashedSessionExitReportReference => entry !== null)
+      .sort((a, b) => b.observedAt - a.observedAt)
+      .slice(0, keepCount)
+      .map((entry) => entry.pid);
+    if (crashedPids.length === 0) return [];
+    const crashedPidSet = new Set(crashedPids);
+    return readdirSync(logsDir)
+      .filter((file) => file.endsWith(LOG_FILE_SUFFIX) && !file.endsWith(DAEMON_LOG_SUFFIX))
+      .filter((file) => {
+        const match = /-pid-(\d+)\.log$/.exec(file);
+        return match ? crashedPidSet.has(Number(match[1])) : false;
+      })
+      .map((file) => join(logsDir, file));
+  } catch {
+    return [];
+  }
 }
 
 function pruneLogsForCurrentLogger(logFilePath: string): void {

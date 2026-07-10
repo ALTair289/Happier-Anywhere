@@ -8,6 +8,7 @@ export type PruneLogsByCountParams = Readonly<{
   excludeSuffix?: string;
   keepCount: number;
   keepPath?: string;
+  keepPaths?: readonly string[];
 }>;
 
 export type PruneLogsByCountResult = Readonly<{
@@ -27,6 +28,7 @@ export async function pruneLogsByCount(params: PruneLogsByCountParams): Promise<
   try {
     const keepCount = resolveKeepCount(params.keepCount);
     const keepName = params.keepPath ? basename(params.keepPath) : null;
+    const keepNames = new Set((params.keepPaths ?? []).map((entry) => basename(entry)));
     const entries = (await readdir(params.dir))
       .filter((entry) => entry.endsWith(params.suffix))
       .filter((entry) => !params.excludeSuffix || !entry.endsWith(params.excludeSuffix))
@@ -34,6 +36,7 @@ export async function pruneLogsByCount(params: PruneLogsByCountParams): Promise<
 
     const keep = new Set(entries.slice(0, keepCount));
     if (keepName !== null) keep.add(keepName);
+    for (const name of keepNames) keep.add(name);
 
     let pruned = 0;
     for (const entry of entries) {
