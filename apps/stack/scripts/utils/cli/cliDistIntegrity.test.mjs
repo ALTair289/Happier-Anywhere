@@ -5,49 +5,53 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
-  findMissingCliDistModules,
   probeCliDistRuntimeImport,
-  readCliDistClosureFingerprint,
+  readCliDistBuildManifest,
+  readCliDistIntegrity,
 } from './cliDistIntegrity.mjs';
 
-test('findMissingCliDistModules ignores unreachable stale modules', async () => {
+test('readCliDistIntegrity requires a build manifest next to the entrypoint', async () => {
   const tmp = await mkdtemp(join(tmpdir(), 'happy-cli-dist-integrity-'));
   try {
     const distDir = join(tmp, 'dist');
     const entrypoint = join(distDir, 'index.mjs');
     await mkdir(distDir, { recursive: true });
-    await writeFile(entrypoint, "import './used.mjs';\n", 'utf-8');
-    await writeFile(join(distDir, 'used.mjs'), 'export const ready = true;\n', 'utf-8');
-    await writeFile(join(distDir, 'stale-unused.mjs'), "import './missing-old.mjs';\n", 'utf-8');
+    await writeFile(entrypoint, 'export const ready = true;\n', 'utf-8');
 
-    assert.deepEqual(findMissingCliDistModules(entrypoint), []);
+    assert.deepEqual(readCliDistIntegrity(entrypoint), {
+      ok: false,
+      reason: 'missing_build_manifest',
+      fingerprint: null,
+      fileCount: 0,
+      manifestPath: join(distDir, '.build-manifest.json'),
+    });
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }
 });
 
-test('readCliDistClosureFingerprint hashes only the reachable entrypoint closure', async () => {
+test('readCliDistBuildManifest reads the manifest fingerprint without rehashing dist files', async () => {
   const tmp = await mkdtemp(join(tmpdir(), 'happy-cli-dist-fingerprint-'));
   try {
     const distDir = join(tmp, 'dist');
     const entrypoint = join(distDir, 'index.mjs');
-    const staleUnusedPath = join(distDir, 'stale-unused.mjs');
     await mkdir(distDir, { recursive: true });
-    await writeFile(entrypoint, "import './used.mjs';\n", 'utf-8');
-    await writeFile(join(distDir, 'used.mjs'), 'export const value = 1;\n', 'utf-8');
-    await writeFile(staleUnusedPath, 'export const stale = 1;\n', 'utf-8');
+    await writeFile(entrypoint, "import './missing.mjs';\n", 'utf-8');
+    await writeFile(
+      join(distDir, '.build-manifest.json'),
+      JSON.stringify({
+        fingerprint: 'abcdef1234567890',
+        builtAt: '2026-07-09T00:00:00.000Z',
+        fileCount: 7,
+        toolVersion: '1',
+      }) + '\n',
+      'utf-8',
+    );
 
-    const first = readCliDistClosureFingerprint(entrypoint);
-    assert.equal(first.ok, true);
-    assert.equal(first.fileCount, 2);
-    assert.ok(first.fingerprint, 'expected a fingerprint for the reachable closure');
-
-    await writeFile(staleUnusedPath, 'export const stale = 2;\n', 'utf-8');
-
-    const second = readCliDistClosureFingerprint(entrypoint);
-    assert.equal(second.ok, true);
-    assert.equal(second.fileCount, 2);
-    assert.equal(second.fingerprint, first.fingerprint);
+    const manifest = readCliDistBuildManifest(entrypoint);
+    assert.equal(manifest.ok, true);
+    assert.equal(manifest.fingerprint, 'abcdef1234567890');
+    assert.equal(manifest.fileCount, 7);
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }

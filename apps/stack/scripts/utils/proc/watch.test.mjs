@@ -52,3 +52,23 @@ test('watchDebounced polls an explicit signature so missed fs.watch events still
   assert.ok(calls.includes('watch:closed'));
   assert.ok(calls.includes('poll:closed'));
 });
+
+test('watchDebounced logs why no filesystem watcher or poller could start', () => {
+  const messages = [];
+  const watcher = watchDebounced({
+    paths: ['/tmp/hstack-watch-unavailable'],
+    onChange() {},
+    watchImpl() {
+      throw new Error('watch unavailable');
+    },
+    logger: {
+      log(message) { messages.push(String(message)); },
+      warn(message) { messages.push(String(message)); },
+      error(message) { messages.push(String(message)); },
+    },
+  });
+
+  assert.equal(watcher, null);
+  assert.ok(messages.some((message) => message.includes('/tmp/hstack-watch-unavailable')));
+  assert.ok(messages.some((message) => message.includes('no active filesystem watcher or signature poller')));
+});

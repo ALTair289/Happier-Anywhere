@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
-import { resolveDevReloadPollIntervalMs, startDevReloadCoordinator } from './devReloadCoordinator.mjs';
+import {
+  readDevReloadWatchChangeSignature,
+  resolveDevReloadPollIntervalMs,
+  startDevReloadCoordinator,
+} from './devReloadCoordinator.mjs';
 
 function createDescriptor({ id, target, initial = '0', paths = [`/tmp/${id}`] }) {
   let signature = initial;
@@ -316,4 +323,66 @@ test('resolveDevReloadPollIntervalMs defaults on and supports explicit opt-out',
     resolveDevReloadPollIntervalMs({ HAPPIER_STACK_DEV_RELOAD_POLL_MS: '-1' }, { defaultMs: 2000 }),
     2000,
   );
+});
+
+test('reload coordinator logs every initialization bail reason', () => {
+  const messages = [];
+  const logger = {
+    log(message) { messages.push(String(message)); },
+    warn(message) { messages.push(String(message)); },
+    error(message) { messages.push(String(message)); },
+  };
+  const executor = createExecutor('daemon', []);
+  const descriptor = createDescriptor({ id: 'daemon:cli', target: 'daemon' });
+
+  assert.equal(startDevReloadCoordinator({ enabled: false, descriptors: [descriptor], executors: [executor], logger }), null);
+  assert.equal(startDevReloadCoordinator({ enabled: true, descriptors: [], executors: [executor], logger }), null);
+  assert.equal(startDevReloadCoordinator({ enabled: true, descriptors: [descriptor], executors: [], logger }), null);
+  assert.equal(startDevReloadCoordinator({
+    enabled: true,
+    descriptors: [{ ...descriptor, paths: [] }],
+    executors: [executor],
+    logger,
+  }), null);
+
+  assert.ok(messages.some((message) => message.includes('disabled')));
+  assert.ok(messages.some((message) => message.includes('no valid descriptors')));
+  assert.ok(messages.some((message) => message.includes('no executors')));
+  assert.ok(messages.some((message) => message.includes('no watch paths')));
+});
+
+test('reload coordinator logs a watcher event that has no signature delta', async () => {
+  const messages = [];
+  const daemon = createDescriptor({ id: 'daemon:cli', target: 'daemon' });
+  const { onChange } = startCoordinator({
+    descriptors: [daemon],
+    executors: [createExecutor('daemon', [])],
+    logger: {
+      log(message) { messages.push(String(message)); },
+      warn(message) { messages.push(String(message)); },
+      error(message) { messages.push(String(message)); },
+    },
+  });
+
+  await onChange({ eventType: 'change', filename: 'runtime.ts' });
+
+  assert.ok(messages.some((message) => message.includes('no signature delta')));
+});
+
+test('watch signature distinguishes same-size edits within one millisecond', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hs-dev-reload-signature-'));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+  const sourcePath = join(root, 'runtime.ts');
+
+  await writeFile(sourcePath, 'one\n', 'utf-8');
+  await utimes(sourcePath, 1_000.0001, 1_000.0001);
+  const first = readDevReloadWatchChangeSignature([sourcePath]);
+
+  await writeFile(sourcePath, 'two\n', 'utf-8');
+  await utimes(sourcePath, 1_000.0009, 1_000.0009);
+  const second = readDevReloadWatchChangeSignature([sourcePath]);
+
+  assert.notEqual(second, first);
 });

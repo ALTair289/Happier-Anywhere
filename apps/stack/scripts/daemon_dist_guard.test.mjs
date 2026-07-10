@@ -7,7 +7,9 @@ import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 import {
+  applyDaemonDistClosureRuntimeEnv,
   createDaemonStartAttemptLogPath,
+  resolveDaemonDistRestartReason,
   resolveGuardedLocalCliDistEntrypoint,
   startLocalDaemonWithAuth,
   stopLocalDaemon,
@@ -27,6 +29,78 @@ function buildDaemonDistGuardEnv(overrides = {}) {
     ...overrides,
   };
 }
+
+test('applyDaemonDistClosureRuntimeEnv exposes the current stack dist fingerprint to source daemon child spawns', () => {
+  const env = { KEEP_ME: '1' };
+
+  const nextEnv = applyDaemonDistClosureRuntimeEnv(env, {
+    runtimeStatePath: '/tmp/happier/stack.runtime.json',
+    distEntrypoint: '/repo/apps/cli/dist/index.mjs',
+    distClosureFingerprint: 'abc123def4567890',
+  });
+
+  assert.equal(nextEnv, env);
+  assert.equal(nextEnv.KEEP_ME, '1');
+  assert.equal(nextEnv.HAPPIER_CLI_SUBPROCESS_STACK_RUNTIME_STATE_PATH, '/tmp/happier/stack.runtime.json');
+  assert.equal(nextEnv.HAPPIER_CLI_SUBPROCESS_DIST_ENTRYPOINT, '/repo/apps/cli/dist/index.mjs');
+  assert.equal(nextEnv.HAPPIER_CLI_SUBPROCESS_DAEMON_DIST_CLOSURE_FINGERPRINT, 'abc123def4567890');
+});
+
+test('applyDaemonDistClosureRuntimeEnv clears the dist runner fast path when the fingerprint is missing', () => {
+  const env = {
+    HAPPIER_CLI_SUBPROCESS_STACK_RUNTIME_STATE_PATH: '/tmp/happier/stack.runtime.json',
+    HAPPIER_CLI_SUBPROCESS_DIST_ENTRYPOINT: '/repo/apps/cli/dist/index.mjs',
+    HAPPIER_CLI_SUBPROCESS_DAEMON_DIST_CLOSURE_FINGERPRINT: 'abc123def4567890',
+  };
+
+  applyDaemonDistClosureRuntimeEnv(env, {
+    runtimeStatePath: '/tmp/happier/stack.runtime.json',
+    distEntrypoint: '/repo/apps/cli/dist/index.mjs',
+    distClosureFingerprint: null,
+  });
+
+  assert.equal(env.HAPPIER_CLI_SUBPROCESS_STACK_RUNTIME_STATE_PATH, undefined);
+  assert.equal(env.HAPPIER_CLI_SUBPROCESS_DIST_ENTRYPOINT, undefined);
+  assert.equal(env.HAPPIER_CLI_SUBPROCESS_DAEMON_DIST_CLOSURE_FINGERPRINT, undefined);
+});
+
+test('daemon dist guard does not restart when only dist mtimes are newer than daemon startup', async (t) => {
+  const tmp = await mkdtemp(join(tmpdir(), 'happy-stacks-daemon-dist-mtime-'));
+  t.after(async () => {
+    await rm(tmp, { recursive: true, force: true });
+  });
+  const runtimeStatePath = join(tmp, 'stack.runtime.json');
+  const cliHomeDir = join(tmp, 'home');
+  const statePath = join(cliHomeDir, 'daemon.state.json');
+  const fingerprint = 'abc123def4567890';
+  await mkdir(dirname(statePath), { recursive: true });
+  await writeFile(
+    runtimeStatePath,
+    JSON.stringify({ daemon: { distClosureFingerprint: fingerprint } }),
+    'utf-8',
+  );
+  await writeFile(
+    statePath,
+    JSON.stringify({ startedAt: 1_000 }),
+    'utf-8',
+  );
+
+  const reason = resolveDaemonDistRestartReason({
+    distEntrypoint: join(tmp, 'cli', 'dist', 'index.mjs'),
+    distClosure: {
+      ok: true,
+      fingerprint,
+      maxMtimeMs: 2_000,
+    },
+    runtimeStatePath,
+    cliHomeDir,
+    env: {
+      HAPPIER_STACK_DAEMON_STATE_PATH: statePath,
+    },
+  });
+
+  assert.equal(reason, null);
+});
 
 async function reserveLoopbackServerUrls() {
   const server = net.createServer();
@@ -581,6 +655,19 @@ async function readDaemonPid(statePath) {
   return Number(JSON.parse(await readFile(statePath, 'utf-8')).pid);
 }
 
+async function writeDistBuildManifestForTest(distEntrypoint, fingerprint) {
+  await writeFile(
+    join(dirname(distEntrypoint), '.build-manifest.json'),
+    JSON.stringify({
+      fingerprint,
+      builtAt: '2026-07-09T00:00:00.000Z',
+      fileCount: 1,
+      toolVersion: '1',
+    }) + '\n',
+    'utf-8',
+  );
+}
+
 test('startLocalDaemonWithAuth requires daemon control ping before accepting running daemon state', async () => {
   const tmp = await mkdtemp(join(tmpdir(), 'happy-stacks-daemon-ping-ready-'));
   try {
@@ -873,9 +960,10 @@ process.exit(0);
       join(cliDir, 'scripts', 'build.mjs'),
       `import { mkdirSync, writeFileSync } from 'node:fs';\n` +
         `import { join } from 'node:path';\n` +
-        `const dist = process.env.HAPPIER_WORKSPACE_DIST_OUTPUT_DIR || process.env.HAPPIER_CLI_BUILD_OUTPUT_DIR || join(process.cwd(), 'dist');\n` +
-        `mkdirSync(dist, { recursive: true });\n` +
-        `writeFileSync(join(dist, 'index.mjs'), ${JSON.stringify(distScript.trimStart())}, 'utf-8');\n`,
+      `const dist = process.env.HAPPIER_WORKSPACE_DIST_OUTPUT_DIR || process.env.HAPPIER_CLI_BUILD_OUTPUT_DIR || join(process.cwd(), 'dist');\n` +
+      `mkdirSync(dist, { recursive: true });\n` +
+        `writeFileSync(join(dist, 'index.mjs'), ${JSON.stringify(distScript.trimStart())}, 'utf-8');\n` +
+        `writeFileSync(join(dist, '.build-manifest.json'), JSON.stringify({ fingerprint: '3333333333333333', builtAt: '2026-07-09T00:00:00.000Z', fileCount: 1, toolVersion: '1' }) + '\\n', 'utf-8');\n`,
       'utf-8',
     );
 
@@ -1051,6 +1139,103 @@ test('startLocalDaemonWithAuth keeps a running daemon when a concurrent CLI buil
   }
 });
 
+test('startLocalDaemonWithAuth coalesces stale dist restarts until dist is quiescent', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'happy-stacks-daemon-dist-restart-damper-'));
+  let daemonPid = null;
+  try {
+    const { internalServerUrl, publicServerUrl } = await reserveLoopbackServerUrls();
+    const cliDir = join(tmp, 'apps', 'cli');
+    const cliBin = await writeStubHappyCli({ cliDir });
+    const cliHomeDir = join(tmp, 'stack', 'cli');
+    const statePath = join(cliHomeDir, 'daemon.state.json');
+    const runtimeStatePath = join(tmp, 'stack.runtime.json');
+    const distEntrypoint = join(cliDir, 'dist', 'index.mjs');
+    await mkdir(cliHomeDir, { recursive: true });
+    await writeFile(join(cliHomeDir, 'access.key'), 'dummy\n', 'utf-8');
+    await writeFile(join(cliHomeDir, 'settings.json'), JSON.stringify({ machineId: 'test-machine' }) + '\n', 'utf-8');
+
+    const env = buildDaemonDistGuardEnv({
+      HAPPIER_STACK_DAEMON_DIST_RESTART_QUIET_MS: '80',
+      HAPPIER_STACK_DAEMON_DIST_RESTART_MIN_INTERVAL_MS: '250',
+    });
+
+    await startLocalDaemonWithAuth({
+      cliBin,
+      cliHomeDir,
+      internalServerUrl,
+      publicServerUrl,
+      runtimeStatePath,
+      isShuttingDown: () => false,
+      forceRestart: true,
+      env,
+      stackName: 'dev',
+      cliIdentity: 'default',
+    });
+    daemonPid = await readDaemonPid(statePath);
+    const distSource = await readFile(distEntrypoint, 'utf-8');
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    await writeFile(distEntrypoint, `${distSource}\n// rebuild-one\n`, 'utf-8');
+    await writeDistBuildManifestForTest(distEntrypoint, '1111111111111111');
+    await startLocalDaemonWithAuth({
+      cliBin,
+      cliHomeDir,
+      internalServerUrl,
+      publicServerUrl,
+      runtimeStatePath,
+      isShuttingDown: () => false,
+      forceRestart: false,
+      env,
+      stackName: 'dev',
+      cliIdentity: 'default',
+    });
+
+    assert.equal(await readDaemonPid(statePath), daemonPid);
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await startLocalDaemonWithAuth({
+      cliBin,
+      cliHomeDir,
+      internalServerUrl,
+      publicServerUrl,
+      runtimeStatePath,
+      isShuttingDown: () => false,
+      forceRestart: false,
+      env,
+      stackName: 'dev',
+      cliIdentity: 'default',
+    });
+
+    const restartedPid = await readDaemonPid(statePath);
+    assert.notEqual(restartedPid, daemonPid);
+    daemonPid = restartedPid;
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    await writeFile(distEntrypoint, `${distSource}\n// rebuild-two\n`, 'utf-8');
+    await writeDistBuildManifestForTest(distEntrypoint, '2222222222222222');
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await startLocalDaemonWithAuth({
+      cliBin,
+      cliHomeDir,
+      internalServerUrl,
+      publicServerUrl,
+      runtimeStatePath,
+      isShuttingDown: () => false,
+      forceRestart: false,
+      env,
+      stackName: 'dev',
+      cliIdentity: 'default',
+    });
+
+    assert.equal(await readDaemonPid(statePath), restartedPid);
+  } finally {
+    if (daemonPid) {
+      try { process.kill(daemonPid, 'SIGTERM'); } catch {}
+    }
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
 test('startLocalDaemonWithAuth rejects incomplete dist when index imports missing chunks', async () => {
   const tmp = await mkdtemp(join(tmpdir(), 'happy-stacks-daemon-dist-incomplete-'));
   try {
@@ -1064,6 +1249,7 @@ test('startLocalDaemonWithAuth rejects incomplete dist when index imports missin
       "import './doctor-missing-chunk.mjs';\nexport {};\n",
       'utf-8',
     );
+    await rm(join(cliDir, 'dist', '.build-manifest.json'), { force: true });
 
     await writeFile(join(tmp, 'package.json'), '{}\n', 'utf-8');
     runGit(['init'], tmp);

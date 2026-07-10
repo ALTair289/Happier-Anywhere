@@ -4,7 +4,25 @@ import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
-import { ensureDevCliReady, startDevDaemon, watchHappyCliAndRestartDaemon } from './daemon.mjs';
+import {
+  createHappyCliReloadExecutor,
+  ensureDevCliReady,
+  startDevDaemon,
+  watchHappyCliAndRestartDaemon,
+} from './daemon.mjs';
+
+async function writeDistBuildManifest(distIndexPath, fingerprint = 'abc123def4567890') {
+  await writeFile(
+    join(dirname(distIndexPath), '.build-manifest.json'),
+    JSON.stringify({
+      fingerprint,
+      builtAt: '2026-07-09T00:00:00.000Z',
+      fileCount: 1,
+      toolVersion: '1',
+    }) + '\n',
+    'utf-8',
+  );
+}
 
 test('watch onChange does not throw when daemon restart fails', async () => {
   let capturedOnChange = null;
@@ -438,6 +456,7 @@ test('watch ignores no-op manifest events without missing real source edits', as
   await writeFile(join(cliDir, 'package.json'), '{ "name": "@happier-dev/cli" }\n', 'utf-8');
   await writeFile(join(cliSrcDir, 'index.ts'), 'export const value = 1;\n', 'utf-8');
   await writeFile(cliDistIndex, 'export const daemon = true;\n', 'utf-8');
+  await writeFile(join(dirname(cliDistIndex), '.build-manifest.json'), '{"fingerprint":"watch-test"}\n', 'utf-8');
 
   let capturedOnChange = null;
   let buildCalls = 0;
@@ -467,6 +486,7 @@ test('watch ignores no-op manifest events without missing real source edits', as
       startLocalDaemonWithAuthImpl: async () => {
         restartCalls += 1;
       },
+      pingDaemonImpl: async () => ({ ok: false, reason: 'daemon_not_running' }),
       logger: { log() {}, warn() {}, error() {} },
     },
   );
@@ -497,6 +517,7 @@ test('watch ignores CLI test-only source edits without missing real runtime sour
   await writeFile(join(cliDir, 'package.json'), '{ "name": "@happier-dev/cli" }\n', 'utf-8');
   await writeFile(join(cliSrcDir, 'runtime.ts'), 'export const value = 1;\n', 'utf-8');
   await writeFile(cliDistIndex, 'export const daemon = true;\n', 'utf-8');
+  await writeFile(join(dirname(cliDistIndex), '.build-manifest.json'), '{"fingerprint":"watch-test"}\n', 'utf-8');
 
   let capturedOnChange = null;
   let buildCalls = 0;
@@ -544,6 +565,62 @@ test('watch ignores CLI test-only source edits without missing real runtime sour
   assert.equal(restartCalls, 1);
 });
 
+test('watch logs an ensureCliBuilt skip and does not restart the daemon with stale dist', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hs-daemon-watch-build-skip-'));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const cliDir = join(root, 'apps', 'cli');
+  const cliSrcDir = join(cliDir, 'src');
+  const cliDistIndex = join(cliDir, 'dist', 'index.mjs');
+  await mkdir(cliSrcDir, { recursive: true });
+  await mkdir(dirname(cliDistIndex), { recursive: true });
+  await writeFile(join(cliDir, 'package.json'), '{ "name": "@happier-dev/cli" }\n', 'utf-8');
+  await writeFile(join(cliSrcDir, 'runtime.ts'), 'export const value = 1;\n', 'utf-8');
+  await writeFile(cliDistIndex, 'export const daemon = true;\n', 'utf-8');
+  await writeDistBuildManifest(cliDistIndex, 'stale-fingerprint');
+
+  const messages = [];
+  let capturedOnChange = null;
+  let restartCalls = 0;
+  watchHappyCliAndRestartDaemon(
+    {
+      enabled: true,
+      startDaemon: true,
+      buildCli: true,
+      cliDir,
+      cliBin: join(cliDir, 'bin', 'happier.mjs'),
+      cliHomeDir: join(root, 'home'),
+      internalServerUrl: 'http://127.0.0.1:3009',
+      publicServerUrl: 'http://localhost:3009',
+      isShuttingDown: () => false,
+    },
+    {
+      watchDebouncedImpl: ({ onChange }) => {
+        capturedOnChange = onChange;
+        return { close() {} };
+      },
+      ensureCliBuiltImpl: async () => ({ built: false, reason: 'up_to_date' }),
+      pingDaemonImpl: async () => ({ ok: true }),
+      restartDaemonViaControlServerImpl: async () => {
+        restartCalls += 1;
+      },
+      logger: {
+        log(message) { messages.push(String(message)); },
+        warn(message) { messages.push(String(message)); },
+        error(message) { messages.push(String(message)); },
+      },
+    },
+  );
+
+  await writeFile(join(cliSrcDir, 'runtime.ts'), 'export const value = 2;\n', 'utf-8');
+  await capturedOnChange({ eventType: 'change', filename: 'runtime.ts' });
+
+  assert.equal(restartCalls, 0);
+  assert.ok(messages.some((message) => message.includes('up_to_date')));
+});
+
 test('watch does not include cliDir/yarn.lock in watched paths (prevents rebuild loops)', async () => {
   let capturedPaths = null;
 
@@ -575,7 +652,40 @@ test('watch does not include cliDir/yarn.lock in watched paths (prevents rebuild
   assert.ok(!capturedPaths.includes('/tmp/happy-cli/yarn.lock'));
 });
 
-test('watch includes shared CLI runtime packages so daemon restarts on shared source edits', async () => {
+test('watch derives the full shared CLI runtime package closure from package manifests', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hs-daemon-watch-package-closure-'));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const cliDir = join(root, 'apps', 'cli');
+  await mkdir(join(cliDir, 'src'), { recursive: true });
+  await writeFile(
+    join(cliDir, 'package.json'),
+    JSON.stringify({
+      name: '@happier-dev/cli',
+      dependencies: {
+        '@happier-dev/connection-supervisor': '0.0.0',
+        '@happier-dev/transfers': '0.0.0',
+      },
+    }),
+    'utf-8',
+  );
+  for (const [id, dependencies] of [
+    ['connection-supervisor', { '@happier-dev/protocol': '0.0.0' }],
+    ['transfers', {}],
+    ['protocol', {}],
+    ['unrelated', {}],
+  ]) {
+    const packageDir = join(root, 'packages', id);
+    await mkdir(join(packageDir, 'src'), { recursive: true });
+    await writeFile(
+      join(packageDir, 'package.json'),
+      JSON.stringify({ name: `@happier-dev/${id}`, dependencies }),
+      'utf-8',
+    );
+  }
+
   let capturedPaths = null;
 
   watchHappyCliAndRestartDaemon(
@@ -583,9 +693,9 @@ test('watch includes shared CLI runtime packages so daemon restarts on shared so
       enabled: true,
       startDaemon: true,
       buildCli: true,
-      cliDir: '/tmp/repo/apps/cli',
-      cliBin: '/tmp/repo/apps/cli/bin/happier.mjs',
-      cliHomeDir: '/tmp/happy-cli-home',
+      cliDir,
+      cliBin: join(cliDir, 'bin', 'happier.mjs'),
+      cliHomeDir: join(root, 'home'),
       internalServerUrl: 'http://127.0.0.1:3009',
       publicServerUrl: 'http://localhost:3009',
       isShuttingDown: () => false,
@@ -597,15 +707,15 @@ test('watch includes shared CLI runtime packages so daemon restarts on shared so
       },
       ensureCliBuiltImpl: async () => ({ built: true, reason: 'test' }),
       startLocalDaemonWithAuthImpl: async () => {},
-      existsSyncImpl: () => true,
       logger: { log() {}, warn() {}, error() {} },
     },
   );
 
   assert.ok(Array.isArray(capturedPaths));
-  assert.ok(capturedPaths.includes('/tmp/repo/packages/agents/src'));
-  assert.ok(capturedPaths.includes('/tmp/repo/packages/cli-common/src'));
-  assert.ok(capturedPaths.includes('/tmp/repo/packages/protocol/src'));
+  assert.ok(capturedPaths.includes(join(root, 'packages', 'connection-supervisor', 'src')));
+  assert.ok(capturedPaths.includes(join(root, 'packages', 'transfers', 'src')));
+  assert.ok(capturedPaths.includes(join(root, 'packages', 'protocol', 'src')));
+  assert.ok(!capturedPaths.includes(join(root, 'packages', 'unrelated', 'src')));
 });
 
 test('ensureDevCliReady keeps existing dist output when build fails', async (t) => {
@@ -626,6 +736,7 @@ test('ensureDevCliReady keeps existing dist output when build fails', async (t) 
   await writeFile(join(cliDir, 'yarn.lock'), '# yarn\n', 'utf-8');
   await writeFile(join(cliDir, 'node_modules', '.yarn-integrity'), 'ok\n', 'utf-8');
   await writeFile(distIndexPath, 'export const stable = true;\n', 'utf-8');
+  await writeDistBuildManifest(distIndexPath);
   await writeFile(
     yarnPath,
     [
@@ -636,7 +747,6 @@ test('ensureDevCliReady keeps existing dist output when build fails', async (t) 
       '  exit 0',
       'fi',
       'if [ "${1:-}" = "build" ]; then',
-      '  rm -rf dist',
       '  echo "simulated build failure" >&2',
       '  exit 2',
       'fi',
@@ -656,4 +766,55 @@ test('ensureDevCliReady keeps existing dist output when build fails', async (t) 
   });
   const restored = await readFile(distIndexPath, 'utf-8');
   assert.equal(restored, 'export const stable = true;\n');
+});
+
+test('ensureDevCliReady rejects bare dist entrypoint without build manifest', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hs-daemon-cli-ready-manifest-'));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const cliDir = join(root, 'apps', 'cli');
+  const distIndexPath = join(cliDir, 'dist', 'index.mjs');
+  await mkdir(dirname(distIndexPath), { recursive: true });
+  await mkdir(join(cliDir, 'node_modules'), { recursive: true });
+  await writeFile(join(cliDir, 'package.json'), '{ "name": "cli-test" }\n', 'utf-8');
+  await writeFile(join(cliDir, 'yarn.lock'), '# yarn\n', 'utf-8');
+  await writeFile(join(cliDir, 'node_modules', '.yarn-integrity'), 'ok\n', 'utf-8');
+  await writeFile(distIndexPath, 'export const stale = true;\n', 'utf-8');
+
+  await assert.rejects(
+    () => ensureDevCliReady({
+      cliDir,
+      buildCli: false,
+      env: {
+        ...process.env,
+        HAPPIER_STACK_CLI_BUILD_MODE: 'never',
+      },
+    }),
+    /build manifest/,
+  );
+});
+
+test('reload executor rejects bare dist entrypoint without build manifest', async () => {
+  const cliDir = '/tmp/repo/apps/cli';
+  const executor = createHappyCliReloadExecutor(
+    {
+      startDaemon: true,
+      buildCli: true,
+      cliDir,
+      cliBin: `${cliDir}/bin/happier.mjs`,
+      cliHomeDir: '/tmp/happy-cli-home',
+      internalServerUrl: 'http://127.0.0.1:3009',
+      publicServerUrl: 'http://localhost:3009',
+      isShuttingDown: () => false,
+    },
+    {
+      ensureCliBuiltImpl: async () => ({ built: true, reason: 'test' }),
+      existsSyncImpl: (path) => String(path).endsWith('/dist/index.mjs'),
+      logger: { log() {}, warn() {}, error() {} },
+    },
+  );
+
+  await assert.rejects(() => executor.build(), /build manifest/);
 });

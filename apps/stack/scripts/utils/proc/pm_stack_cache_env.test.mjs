@@ -119,8 +119,6 @@ async function writeYarnBuildFailAfterDeletingDistStub({ binDir, outputPath }) {
       '  exit 0',
       'fi',
       'if [ "${1:-}" = "build" ]; then',
-      '  out_dir="${HAPPIER_CLI_BUILD_OUTPUT_DIR:-dist}"',
-      '  rm -rf "$out_dir"',
       '  echo "simulated build failure" >&2',
       '  exit 2',
       'fi',
@@ -159,6 +157,48 @@ async function writeYarnBuildCreatesDistStub({ binDir, outputPath, cliDir }) {
   await writeFile(outputPath, '', 'utf-8');
 }
 
+async function writeYarnBuildRejectsStackOwnedOutputEnvStub({ binDir, outputPath, cliDir }) {
+  await mkdir(binDir, { recursive: true });
+  const yarnPath = join(binDir, 'yarn');
+  await writeFile(
+    yarnPath,
+    [
+      '#!/usr/bin/env bash',
+      'set -euo pipefail',
+      'echo "$*" >> "${OUTPUT_PATH:?}"',
+      'if [ "${1:-}" = "--version" ]; then',
+      '  echo "1.22.22"',
+      '  exit 0',
+      'fi',
+      'if [ "${1:-}" = "build" ]; then',
+      '  if [ -n "${HAPPIER_CLI_BUILD_OUTPUT_DIR:-}" ]; then',
+      '    echo "stack still owns HAPPIER_CLI_BUILD_OUTPUT_DIR" >&2',
+      '    exit 3',
+      '  fi',
+      '  if [ -n "${HAPPIER_CLI_SKIP_PACKAGE_DIST_SYNC:-}" ]; then',
+      '    echo "stack still skips package dist sync" >&2',
+      '    exit 4',
+      '  fi',
+      '  if [ -z "${HAPPIER_WORKSPACE_DIST_BUILD_LOCK_HELD:-}" ]; then',
+      '    echo "stack did not declare the CLI dist build lock it already holds" >&2',
+      '    exit 5',
+      '  fi',
+      '  if [ ! -f "${HAPPIER_WORKSPACE_DIST_BUILD_LOCK_HELD}" ]; then',
+      '    echo "declared CLI dist build lock is not active" >&2',
+      '    exit 6',
+      '  fi',
+      `  mkdir -p ${JSON.stringify(join(cliDir, 'dist'))}`,
+      `  echo "export const cliBuilt = true;" > ${JSON.stringify(join(cliDir, 'dist', 'index.mjs'))}`,
+      '  exit 0',
+      'fi',
+      'exit 0',
+    ].join('\n') + '\n',
+    'utf-8'
+  );
+  await chmod(yarnPath, 0o755);
+  await writeFile(outputPath, '', 'utf-8');
+}
+
 async function writeYarnBuildCreatesPartialDistWithMissingChunkStub({ binDir, outputPath, cliDir }) {
   await mkdir(binDir, { recursive: true });
   const yarnPath = join(binDir, 'yarn');
@@ -173,13 +213,10 @@ async function writeYarnBuildCreatesPartialDistWithMissingChunkStub({ binDir, ou
       '  exit 0',
       'fi',
       'if [ "${1:-}" = "build" ]; then',
-      '  out_dir="${HAPPIER_CLI_BUILD_OUTPUT_DIR:-dist}"',
-      '  mkdir -p "$out_dir"',
-      // Simulate a "successful" build that leaves a broken local import graph.
-      // This should be treated as a build failure by ensureCliBuilt.
-      '  echo "import \'./index-inner.mjs\';" > "$out_dir/index.mjs"',
-      '  echo "import \'./missing-chunk.mjs\';" > "$out_dir/index-inner.mjs"',
-      '  exit 0',
+      // Simulate the cli-owned finalize step rejecting an incomplete staged import graph
+      // before it promotes anything over the previous dist.
+      '  echo "simulated finalizeDist incomplete import closure" >&2',
+      '  exit 2',
       'fi',
       'exit 0',
     ].join('\n') + '\n',
@@ -237,12 +274,17 @@ async function writeYarnSlowBuildCreatesDistStub({ binDir, outputPath, cliDir })
       'fi',
       'if [ "${1:-}" = "build" ]; then',
       '  sleep 1',
-      '  out_dir="${HAPPIER_CLI_BUILD_OUTPUT_DIR:-dist}"',
+      '  out_dir="dist.staging.test"',
+      '  rm -rf "$out_dir"',
       '  mkdir -p "$out_dir"',
       '  echo "export const built = true;" > "$out_dir/index.mjs"',
       '  echo "$out_dir" > "${OUTPUT_PATH}.outdir"',
       '  if [ -n "${BUILD_SIGNAL_PATH:-}" ]; then echo started > "${BUILD_SIGNAL_PATH}"; fi',
       '  sleep 1',
+      '  rm -rf dist.__test_backup__',
+      '  if [ -d dist ]; then mv dist dist.__test_backup__; fi',
+      '  mv "$out_dir" dist',
+      '  rm -rf dist.__test_backup__',
       '  exit 0',
       'fi',
       'exit 0',
@@ -267,7 +309,7 @@ async function writeYarnBuildCreatesEsmLinkFailureStub({ binDir, outputPath }) {
       '  exit 0',
       'fi',
       'if [ "${1:-}" = "build" ]; then',
-      '  out_dir="${HAPPIER_CLI_BUILD_OUTPUT_DIR:-dist}"',
+      '  out_dir="dist"',
       '  mkdir -p "$out_dir"',
       '  echo "import { A } from \'./chunk.mjs\'; export const value = A;" > "$out_dir/index.mjs"',
       '  echo "export const B = true;" > "$out_dir/chunk.mjs"',
@@ -915,7 +957,37 @@ test('ensureCliBuilt restores previous dist output when build fails', async (t) 
   assert.equal(restored, 'export const stable = true;\n');
 });
 
-test('ensureCliBuilt restores previous dist output when build produces a broken dist import graph', async (t) => {
+test('ensureCliBuilt lets the cli build script own dist staging while declaring the parent-held build lock', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hs-pm-cli-build-owned-by-cli-'));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const cliDir = join(root, 'apps', 'cli');
+  await mkdir(cliDir, { recursive: true });
+  await writeFile(join(cliDir, 'package.json'), '{ "name": "cli-test" }\n', 'utf-8');
+  await writeFile(join(cliDir, 'yarn.lock'), '# yarn\n', 'utf-8');
+  await writeFile(join(cliDir, '.gitignore'), 'dist/\n', 'utf-8');
+  await mkdir(join(cliDir, 'node_modules'), { recursive: true });
+  await writeFile(join(cliDir, 'node_modules', '.yarn-integrity'), 'ok\n', 'utf-8');
+
+  const binDir = join(root, 'bin');
+  const outputPath = join(root, 'argv.txt');
+  await writeYarnBuildRejectsStackOwnedOutputEnvStub({ binDir, outputPath, cliDir });
+
+  applyEnvOverrides(t, {
+    PATH: `${binDir}:/usr/bin:/bin`,
+    OUTPUT_PATH: outputPath,
+    HAPPIER_STACK_CLI_BUILD_MODE: 'always',
+    HAPPIER_STACK_ENV_FILE: null,
+  });
+
+  await ensureCliBuilt(cliDir, { buildCli: true, quiet: true });
+
+  assert.equal(await readFile(join(cliDir, 'dist', 'index.mjs'), 'utf-8'), 'export const cliBuilt = true;\n');
+});
+
+test('ensureCliBuilt preserves previous dist when cli-owned finalize rejects a broken import graph', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'hs-pm-cli-build-partial-'));
   t.after(async () => {
     await rm(root, { recursive: true, force: true });
@@ -992,7 +1064,7 @@ test('ensureCliBuilt keeps the previous dist readable while a staged build is in
   await assert.rejects(() => stat(join(cliDir, '.dist.hstack-backup')));
 });
 
-test('ensureCliBuilt rejects staged ESM link failures before promoting over the previous dist', async (t) => {
+test('ensureCliBuilt rejects post-swap ESM link failures with the runtime import probe', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'hs-pm-cli-build-esm-link-'));
   t.after(async () => {
     await rm(root, { recursive: true, force: true });
@@ -1025,7 +1097,10 @@ test('ensureCliBuilt rejects staged ESM link failures before promoting over the 
     /does not provide an export named|import probe failed|SyntaxError/
   );
 
-  assert.equal(await readFile(distIndex, 'utf-8'), 'export const stable = true;\n');
+  assert.equal(
+    await readFile(distIndex, 'utf-8'),
+    "import { A } from './chunk.mjs'; export const value = A;\n",
+  );
   await assert.rejects(() => stat(join(cliDir, '.dist.hstack-backup')));
 });
 
@@ -1193,6 +1268,81 @@ test('ensureCliBuilt ignores stale legacy .dist.hstack-backup and rebuilds throu
   const argv = await readFile(outputPath, 'utf-8');
   assert.match(argv, /(^|\n)build(\n|$)/);
   await assert.rejects(() => stat(distBackupDir));
+});
+
+test('ensureCliBuilt rebuilds for repeated dirty tracked and untracked edits in a nested monorepo package', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hs-pm-cli-build-dirty-content-'));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const cliDir = join(root, 'apps', 'cli');
+  await mkdir(cliDir, { recursive: true });
+  await writeFile(join(cliDir, 'package.json'), '{ "name": "cli-test" }\n', 'utf-8');
+  await writeFile(join(cliDir, 'yarn.lock'), '# yarn\n', 'utf-8');
+  await writeFile(join(cliDir, '.gitignore'), 'dist/\n', 'utf-8');
+  await writeFile(join(cliDir, 'tracked.txt'), 'clean\n', 'utf-8');
+  await writeFile(join(root, '.gitignore'), '/.project/\n/bin/\n/home/\n/argv.txt\n', 'utf-8');
+  await mkdir(join(cliDir, 'node_modules'), { recursive: true });
+  await writeFile(join(cliDir, 'node_modules', '.yarn-integrity'), 'ok\n', 'utf-8');
+
+  await runCapture('git', ['init'], { cwd: root });
+  await runCapture('git', ['config', 'user.email', 'hstack-test@example.test'], { cwd: root });
+  await runCapture('git', ['config', 'user.name', 'hstack-test'], { cwd: root });
+  await runCapture('git', ['add', '.'], { cwd: root });
+  await runCapture('git', ['commit', '-m', 'init'], { cwd: root });
+
+  const binDir = join(root, 'bin');
+  const outputPath = join(root, 'argv.txt');
+  await mkdir(binDir, { recursive: true });
+  const yarnPath = join(binDir, 'yarn');
+  await writeFile(
+    yarnPath,
+    [
+      '#!/usr/bin/env bash',
+      'set -euo pipefail',
+      'echo "$*" >> "${OUTPUT_PATH:?}"',
+      'if [ "${1:-}" = "--version" ]; then',
+      '  echo "1.22.22"',
+      '  exit 0',
+      'fi',
+      'if [ "${1:-}" = "build" ]; then',
+      '  mkdir -p dist',
+      '  value="$(tr -d \'\\n\' < tracked.txt)"',
+      '  printf "export const tracked = \\"%s\\";\\n" "$value" > dist/index.mjs',
+      '  exit 0',
+      'fi',
+      'exit 0',
+    ].join('\n') + '\n',
+    'utf-8',
+  );
+  await chmod(yarnPath, 0o755);
+  await writeFile(outputPath, '', 'utf-8');
+
+  applyEnvOverrides(t, {
+    PATH: `${binDir}:/usr/bin:/bin`,
+    OUTPUT_PATH: outputPath,
+    HAPPIER_STACK_CLI_BUILD_MODE: 'auto',
+    HAPPIER_STACK_HOME_DIR: join(root, 'home'),
+    HAPPIER_STACK_ENV_FILE: null,
+  });
+
+  await writeFile(join(cliDir, 'tracked.txt'), 'dirty one\n', 'utf-8');
+  await ensureCliBuilt(cliDir, { buildCli: true, quiet: true, env: process.env });
+  await writeFile(join(cliDir, 'tracked.txt'), 'dirty two\n', 'utf-8');
+  await ensureCliBuilt(cliDir, { buildCli: true, quiet: true, env: process.env });
+  await writeFile(join(cliDir, 'untracked.txt'), 'untracked one\n', 'utf-8');
+  await ensureCliBuilt(cliDir, { buildCli: true, quiet: true, env: process.env });
+  await writeFile(join(cliDir, 'untracked.txt'), 'untracked two\n', 'utf-8');
+  await ensureCliBuilt(cliDir, { buildCli: true, quiet: true, env: process.env });
+
+  const argv = await readFile(outputPath, 'utf-8');
+  const buildInvocations = argv
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line === 'build');
+  assert.equal(buildInvocations.length, 4);
+  assert.equal(await readFile(join(cliDir, 'dist', 'index.mjs'), 'utf-8'), 'export const tracked = "dirty two";\n');
 });
 
 test('ensureCliBuilt refreshes shared workspace deps before trusting a cached cli dist', async (t) => {

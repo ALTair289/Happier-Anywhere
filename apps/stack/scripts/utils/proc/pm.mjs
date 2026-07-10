@@ -9,6 +9,7 @@ import { readJsonIfExists, writeJsonAtomic } from '../fs/json.mjs';
 import { run, runCapture, spawnProc } from './proc.mjs';
 import { commandExists } from './commands.mjs';
 import { collectWorkspacePackageJsonPaths } from './workspace_package_manifests.mjs';
+import { collectInternalWorkspaceDependencyNames } from './workspace_dependencies.mjs';
 import {
   coerceHappyMonorepoRootFromPath,
   getDefaultAutostartPaths,
@@ -154,18 +155,87 @@ async function computeGitWorktreeSignature(dir) {
     // Fast path: only if this is a git worktree.
     const inside = (await runCapture('git', ['-C', dir, 'rev-parse', '--is-inside-work-tree'])).trim();
     if (inside !== 'true') return null;
+    const gitRoot = (await runCapture('git', ['-C', dir, 'rev-parse', '--show-toplevel'])).trim();
+    if (!gitRoot) return null;
     const head = (await runCapture('git', ['-C', dir, 'rev-parse', 'HEAD'])).trim();
-    // Includes staged + unstaged + untracked changes; captures “dirty” vs “clean”.
-    const status = await runCapture('git', ['-C', dir, 'status', '--porcelain=v1']);
+    // Includes staged + unstaged + untracked changes; hashes dirty file content so repeated
+    // edits to an already-dirty file still invalidate the dev build cache.
+    const status = await runCapture('git', ['-C', dir, 'status', '--porcelain=v1', '-z', '--untracked-files=all']);
+    const dirtySignature = await computeGitDirtySignature({ cliDir: dir, gitRoot, porcelainStatus: status });
     return {
       kind: 'git',
       head,
-      statusHash: sha256Hex(status),
-      signature: sha256Hex(`${head}\n${status}`),
+      statusHash: sha256Hex(dirtySignature),
+      signature: sha256Hex(`${head}\n${dirtySignature}`),
     };
   } catch {
     return null;
   }
+}
+
+async function computeGitDirtySignature({ cliDir, gitRoot, porcelainStatus }) {
+  const hash = createHash('sha256');
+  const records = String(porcelainStatus ?? '').split('\0').filter(Boolean);
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index];
+    if (record.length < 4) continue;
+    const statusCode = record.slice(0, 2);
+    const relativePath = record.slice(3);
+    if (isCliBuildOutputStatusPath(relativePath, { cliDir, gitRoot })) {
+      continue;
+    }
+    hash.update(statusCode);
+    hash.update('\0');
+    hash.update(relativePath);
+    hash.update('\0');
+    if (statusCode.includes('R') || statusCode.includes('C')) {
+      index += 1;
+      hash.update(records[index] ?? '');
+      hash.update('\0');
+    }
+    if (statusCode.includes('D')) {
+      hash.update('<deleted>');
+      hash.update('\0');
+      continue;
+    }
+    try {
+      // Porcelain v1 -z paths are repository-root-relative even when `git -C`
+      // points at a nested package such as apps/cli.
+      const filePath = resolve(gitRoot, relativePath);
+      const fileStats = await stat(filePath);
+      if (!fileStats.isFile()) {
+        hash.update(`<non-file:${fileStats.size}>`);
+        hash.update('\0');
+        continue;
+      }
+      hash.update(await readFile(filePath));
+      hash.update('\0');
+    } catch {
+      hash.update('<missing>');
+      hash.update('\0');
+    }
+  }
+  return hash.digest('hex');
+}
+
+function isCliBuildOutputStatusPath(relativePath, { cliDir = null, gitRoot = null } = {}) {
+  const repoRelative = String(relativePath ?? '').replace(/\\/g, '/').replace(/^\.\/+/, '');
+  const cliRelative = cliDir && gitRoot
+    ? relative(resolve(cliDir), resolve(gitRoot, repoRelative)).replace(/\\/g, '/')
+    : repoRelative;
+  const normalized = cliRelative && cliRelative !== '..' && !cliRelative.startsWith('../')
+    ? cliRelative
+    : repoRelative;
+  return (
+    normalized === 'dist' ||
+    normalized.startsWith('dist/') ||
+    normalized === 'package-dist' ||
+    normalized.startsWith('package-dist/') ||
+    normalized.startsWith('dist.staging.') ||
+    normalized.startsWith('.runner-snapshots/') ||
+    normalized === '.dist.hstack-build.lock' ||
+    repoRelative === '.project/tmp/cli-dist-build.lock'
+  );
 }
 
 async function getComponentPm(dir, env = process.env) {
@@ -751,20 +821,6 @@ export async function ensureWorkspacePackagesBuiltForComponent(componentDir, { q
   const built = [];
 
   const visited = new Set([componentName].filter(Boolean));
-  const collectInternalDeps = (pkgJson, currentPkgName) => {
-    const depSources = [pkgJson?.dependencies, pkgJson?.optionalDependencies, pkgJson?.devDependencies];
-    const internalDeps = [];
-    for (const src of depSources) {
-      if (!src || typeof src !== 'object') continue;
-      for (const name of Object.keys(src)) {
-        if (!name.startsWith('@happier-dev/')) continue;
-        if (name === currentPkgName) continue;
-        internalDeps.push(name);
-      }
-    }
-    return internalDeps;
-  };
-
   const buildWorkspaceClosure = async (pkgDir) => {
     const pkgJsonPath = join(pkgDir, 'package.json');
     if (!(await pathExists(pkgJsonPath))) {
@@ -780,7 +836,7 @@ export async function ensureWorkspacePackagesBuiltForComponent(componentDir, { q
       visited.add(pkgName);
     }
 
-    for (const depName of collectInternalDeps(pkgJson, pkgName)) {
+    for (const depName of collectInternalWorkspaceDependencyNames(pkgJson, pkgName)) {
       const depId = String(depName).split('/')[1] ?? '';
       if (!depId) continue;
       const depDir = join(monorepoRoot, 'packages', depId);
@@ -794,7 +850,7 @@ export async function ensureWorkspacePackagesBuiltForComponent(componentDir, { q
     }
   };
 
-  for (const depName of collectInternalDeps(componentPkg, componentName)) {
+  for (const depName of collectInternalWorkspaceDependencyNames(componentPkg, componentName)) {
     const depId = String(depName).split('/')[1] ?? '';
     if (!depId) continue;
     const depDir = join(monorepoRoot, 'packages', depId);
@@ -814,8 +870,15 @@ export async function ensureCliBuilt(cliDir, { buildCli, quiet = false, env: env
     : join(cliDir, '.dist.hstack-build.lock');
 
   return await withCliDistBuildLock(async ({ waited }) => {
+    const skip = (reason) => {
+      if (!quiet) {
+        // eslint-disable-next-line no-console
+        console.log(`[local] happier-cli build skipped (${reason}).`);
+      }
+      return { built: false, reason };
+    };
     if (!buildCli) {
-      return { built: false, reason: 'disabled' };
+      return skip('disabled');
     }
     // Default: build only when needed (fast + reliable for worktrees that haven't been built yet).
     //
@@ -839,7 +902,7 @@ export async function ensureCliBuilt(cliDir, { buildCli, quiet = false, env: env
       const latestBuildState = await readJsonIfExists(buildStatePath);
       if (buildStateMatchesGitSignature(latestBuildState, gitSig)) {
         await assertNoMissingLocalImports({ distDir, entryPath: distEntrypoint });
-        return { built: false, reason: 'concurrent_build_already_completed' };
+        return skip('concurrent_build_already_completed');
       }
     }
 
@@ -847,7 +910,7 @@ export async function ensureCliBuilt(cliDir, { buildCli, quiet = false, env: env
     // If the dist entrypoint is missing, build once even in "never" mode.
     if (mode === 'never') {
       if (await pathExists(distEntrypoint)) {
-        return { built: false, reason: 'mode_never' };
+        return skip('mode_never');
       }
       // fallthrough to build
     }
@@ -857,10 +920,10 @@ export async function ensureCliBuilt(cliDir, { buildCli, quiet = false, env: env
       if (!(await pathExists(distEntrypoint))) {
         // fallthrough to build
       } else if (gitSig && prev?.signature && prev.signature === gitSig.signature) {
-        return { built: false, reason: 'up_to_date' };
+        return skip('up_to_date');
       } else if (!gitSig) {
         // No git info: best-effort skip if dist exists (keeps this fast outside git worktrees).
-        return { built: false, reason: 'no_git_info' };
+        return skip('no_git_info');
       }
     }
 
@@ -870,36 +933,25 @@ export async function ensureCliBuilt(cliDir, { buildCli, quiet = false, env: env
     }
     const env = await preparePmEnv(cliDir, envIn);
     const pm = await getComponentPm(cliDir, env);
-    await buildIntoTempThenReplace(distDir, async (tmpDistDir) => {
-      const outputDir = relative(cliDir, tmpDistDir).replace(/\\/g, '/');
-      if (!outputDir || outputDir.startsWith('..') || outputDir === '.' || outputDir.includes('/../')) {
-        throw new Error(`[local] invalid staged CLI dist output directory: ${tmpDistDir}`);
-      }
-      const buildEnv = {
-        ...env,
-        HAPPIER_CLI_BUILD_OUTPUT_DIR: outputDir,
-        HAPPIER_CLI_SKIP_PACKAGE_DIST_SYNC: '1',
-      };
-      await run(pm.cmd, ['build'], { cwd: cliDir, env: buildEnv, stdio: quiet ? 'ignore' : 'inherit' });
+    const buildEnv = {
+      ...env,
+      HAPPIER_WORKSPACE_DIST_BUILD_LOCK_HELD: lockPath,
+    };
+    await run(pm.cmd, ['build'], { cwd: cliDir, env: buildEnv, stdio: quiet ? 'ignore' : 'inherit' });
 
-      // Sanity check: happier-cli daemon entrypoint must exist after a successful build.
-      // Without this, watch-based rebuilds can restart the daemon into a MODULE_NOT_FOUND crash,
-      // which looks like the UI "dies out of nowhere" even though the root cause is missing build output.
-      const tmpDistEntrypoint = join(tmpDistDir, 'index.mjs');
-      if (!(await pathExists(tmpDistEntrypoint))) {
-        throw new Error(
-          `[local] happier-cli build finished but did not produce expected entrypoint.\n` +
-            `Expected: ${tmpDistEntrypoint}\n` +
-            `Fix: run the component build directly and inspect its output:\n` +
-            `  cd "${cliDir}" && ${pm.cmd} build`
-        );
-      }
+    // Sanity check: happier-cli daemon entrypoint must exist after a successful build.
+    // Without this, watch-based rebuilds can restart the daemon into a MODULE_NOT_FOUND crash,
+    // which looks like the UI "dies out of nowhere" even though the root cause is missing build output.
+    if (!(await pathExists(distEntrypoint))) {
+      throw new Error(
+        `[local] happier-cli build finished but did not produce expected entrypoint.\n` +
+          `Expected: ${distEntrypoint}\n` +
+          `Fix: run the component build directly and inspect its output:\n` +
+          `  cd "${cliDir}" && ${pm.cmd} build`
+      );
+    }
 
-      // Dist integrity: ensure that local import specifiers reachable from the daemon entrypoint exist.
-      // This prevents restarting the daemon into a runtime MODULE_NOT_FOUND crash if the build is partial.
-      await assertNoMissingLocalImports({ distDir: tmpDistDir, entryPath: tmpDistEntrypoint });
-      await probeCliDistRuntimeImport(tmpDistEntrypoint, { cwd: cliDir, env: buildEnv });
-    });
+    await probeCliDistRuntimeImport(distEntrypoint, { cwd: cliDir, env });
 
     // Persist new build state (best-effort).
     const nowSig = gitSig ?? (await computeGitWorktreeSignature(cliDir));

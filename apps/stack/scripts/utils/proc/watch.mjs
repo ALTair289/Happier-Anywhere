@@ -1,13 +1,18 @@
 import { watch } from 'node:fs';
 
-function safeWatch(path, handler, watchImpl = watch) {
+function formatError(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function safeWatch(path, handler, watchImpl = watch, logger = console) {
   try {
     // Node supports recursive watching on macOS and Windows. On Linux this may throw; we fail closed by returning null.
     return watchImpl(path, { recursive: true }, handler);
   } catch {
     try {
       return watchImpl(path, {}, handler);
-    } catch {
+    } catch (error) {
+      logger.warn?.(`[local] watch: unable to watch ${path}: ${formatError(error)}`);
       return null;
     }
   }
@@ -26,10 +31,17 @@ export function watchDebounced({
   watchImpl = watch,
   setIntervalImpl = setInterval,
   clearIntervalImpl = clearInterval,
+  logger = console,
 } = {}) {
   const list = Array.isArray(paths) ? paths.filter(Boolean) : [];
-  if (!list.length) return null;
-  if (typeof onChange !== 'function') return null;
+  if (!list.length) {
+    logger.warn?.('[local] watch: no paths were configured; watcher not started.');
+    return null;
+  }
+  if (typeof onChange !== 'function') {
+    logger.error?.('[local] watch: onChange handler is missing; watcher not started.');
+    return null;
+  }
 
   let closed = false;
   let t = null;
@@ -38,8 +50,9 @@ export function watchDebounced({
   if (typeof readSignature === 'function') {
     try {
       lastSignature = readSignature();
-    } catch {
+    } catch (error) {
       lastSignature = null;
+      logger.warn?.(`[local] watch: initial signature read failed; filesystem events remain active: ${formatError(error)}`);
     }
   }
 
@@ -48,16 +61,16 @@ export function watchDebounced({
     if (t) clearTimeout(t);
     t = setTimeout(() => {
       t = null;
-      try {
-        onChange({ eventType, filename });
-      } catch {
-        // ignore
-      }
+      Promise.resolve()
+        .then(() => onChange({ eventType, filename }))
+        .catch((error) => {
+          logger.error?.(`[local] watch: change handler failed; watcher remains active: ${formatError(error)}`);
+        });
     }, debounceMs);
   };
 
   for (const p of list) {
-    const w = safeWatch(p, trigger, watchImpl);
+    const w = safeWatch(p, trigger, watchImpl, logger);
     if (w) watchers.push(w);
   }
 
@@ -74,8 +87,8 @@ export function watchDebounced({
           lastSignature = nextSignature;
           trigger('poll', null);
         }
-      } catch {
-        // ignore; fs.watch remains the fast path and the next poll can recover
+      } catch (error) {
+        logger.warn?.(`[local] watch: signature poll failed; filesystem events remain active: ${formatError(error)}`);
       } finally {
         polling = false;
       }
@@ -84,7 +97,10 @@ export function watchDebounced({
     pollTimer?.unref?.();
   }
 
-  if (!watchers.length && !pollTimer) return null;
+  if (!watchers.length && !pollTimer) {
+    logger.error?.('[local] watch: no active filesystem watcher or signature poller; watcher not started.');
+    return null;
+  }
 
   return {
     close() {

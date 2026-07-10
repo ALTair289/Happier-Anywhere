@@ -424,7 +424,7 @@ function writeWorkspaceBundleManifest({ stackDir, sourceSignature }) {
 export async function bundleWorkspaceDeps(opts = {}) {
   const repoRoot = opts.repoRoot ?? findRepoRoot(__dirname);
   const stackDir = opts.stackDir ?? resolve(repoRoot, 'apps', 'stack');
-  const lockPath = opts.lockPath ?? resolve(repoRoot, '.project', 'tmp', 'cli-shared-deps-build.lock');
+  const lockPath = opts.lockPath ?? resolve(repoRoot, '.project', 'tmp', 'cli-dist-build.lock');
 
   return withWorkspaceBundleLock(async () => {
     const {

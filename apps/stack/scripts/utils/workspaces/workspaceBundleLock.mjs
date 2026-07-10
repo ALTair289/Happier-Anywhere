@@ -9,7 +9,7 @@ import {
   unlinkSync,
   writeSync,
 } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 function sleepSync(ms) {
@@ -192,6 +192,19 @@ function isLockOwnedByFd(lockPath, fd, owner) {
   return true;
 }
 
+function parentAlreadyHoldsWorkspaceBundleLock(lockPath, options = {}) {
+  const env = options.env ?? process.env;
+  const parentHeldLockPath = String(env?.HAPPIER_WORKSPACE_DIST_BUILD_LOCK_HELD ?? '').trim();
+  if (!parentHeldLockPath || resolve(parentHeldLockPath) !== resolve(lockPath)) return false;
+
+  try {
+    statSync(lockPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function releaseWorkspaceBundleLock(lockPath, fd, owner, operations = { closeSync, unlinkSync }) {
   if (fd == null) return;
 
@@ -215,6 +228,10 @@ export async function withWorkspaceBundleLock(fn, options = {}) {
   const lockPath = options.lockPath;
   if (!String(lockPath ?? '').trim()) {
     throw new Error('Missing workspace bundle lock path');
+  }
+
+  if (parentAlreadyHoldsWorkspaceBundleLock(lockPath, options)) {
+    return await fn();
   }
 
   mkdirSync(dirname(lockPath), { recursive: true });
@@ -273,6 +290,10 @@ export function withWorkspaceBundleLockSync(fn, options = {}) {
   const lockPath = options.lockPath;
   if (!String(lockPath ?? '').trim()) {
     throw new Error('Missing workspace bundle lock path');
+  }
+
+  if (parentAlreadyHoldsWorkspaceBundleLock(lockPath, options)) {
+    return fn();
   }
 
   mkdirSync(dirname(lockPath), { recursive: true });

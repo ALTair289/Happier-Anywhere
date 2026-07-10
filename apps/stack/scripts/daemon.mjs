@@ -28,7 +28,7 @@ import { ensureEnvFileUpdated } from './utils/env/env_file.mjs';
 import { getCliHomeDirFromEnvOrDefault } from './utils/stack/dirs.mjs';
 import {
   isCliDirectExecutableCommand,
-  readCliDistClosureFingerprint,
+  readCliDistBuildManifest,
   readCliDistIntegrity,
   resolveCliDistEntrypointFromBin,
 } from './utils/cli/cliDistIntegrity.mjs';
@@ -514,7 +514,7 @@ function readDaemonStateStartedAtMs({ cliHomeDir, serverUrl = '', env = process.
   }
 }
 
-function resolveDaemonDistRestartReason({
+export function resolveDaemonDistRestartReason({
   distEntrypoint = '',
   distClosure = null,
   runtimeStatePath = '',
@@ -535,15 +535,161 @@ function resolveDaemonDistRestartReason({
   } catch {
     // Older runtime state files do not record a dist fingerprint.
   }
-  const startedAtMs = readDaemonStateStartedAtMs({ cliHomeDir, serverUrl, env });
-  if (!startedAtMs) {
+  return null;
+}
+
+const DEFAULT_STACK_DAEMON_DIST_RESTART_QUIET_MS = 5_000;
+const DEFAULT_STACK_DAEMON_DIST_RESTART_MIN_INTERVAL_MS = 30_000;
+
+function resolveDaemonDistRestartDamperConfig(env = process.env) {
+  return {
+    quietMs: parseNonNegativeInt(
+      env?.HAPPIER_STACK_DAEMON_DIST_RESTART_QUIET_MS,
+      DEFAULT_STACK_DAEMON_DIST_RESTART_QUIET_MS,
+    ),
+    minIntervalMs: parseNonNegativeInt(
+      env?.HAPPIER_STACK_DAEMON_DIST_RESTART_MIN_INTERVAL_MS,
+      DEFAULT_STACK_DAEMON_DIST_RESTART_MIN_INTERVAL_MS,
+    ),
+  };
+}
+
+function resolveDaemonDistRestartMarkerPath({ cliHomeDir, serverUrl = '' }) {
+  const home = String(cliHomeDir ?? '').trim();
+  if (!home) return null;
+  const serverKey = Buffer.from(String(serverUrl || 'default')).toString('base64url') || 'default';
+  return join(home, '.stack-daemon-dist-restart', `${serverKey}.json`);
+}
+
+function readDaemonDistRestartMarker(markerPath) {
+  try {
+    const parsed = JSON.parse(readFileSync(markerPath, 'utf-8'));
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
     return null;
   }
-  const maxMtimeMs = Number(distClosure?.maxMtimeMs);
-  if (Number.isFinite(maxMtimeMs) && maxMtimeMs > startedAtMs) {
-    return `source dist closure rebuilt after daemon start (${entrypoint})`;
+}
+
+function finitePositiveMs(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+}
+
+function resolveDaemonDistRestartSignature({ distEntrypoint = '', distClosure = null }) {
+  return {
+    distEntrypoint: String(distEntrypoint ?? '').trim(),
+    distFingerprint: String(distClosure?.fingerprint ?? '').trim(),
+    signature: [
+      String(distEntrypoint ?? '').trim(),
+      String(distClosure?.fingerprint ?? '').trim(),
+    ].join('|'),
+  };
+}
+
+async function writeDaemonDistRestartMarker(markerPath, marker) {
+  await mkdir(dirname(markerPath), { recursive: true }).catch(() => {});
+  await writeFile(markerPath, JSON.stringify(marker, null, 2) + '\n', 'utf-8');
+}
+
+async function decideDaemonDistRestartAfterDamper({
+  cliHomeDir,
+  serverUrl = '',
+  distEntrypoint = '',
+  distClosure = null,
+  reason = '',
+  env = process.env,
+  nowMs = Date.now(),
+}) {
+  const markerPath = resolveDaemonDistRestartMarkerPath({ cliHomeDir, serverUrl });
+  if (!markerPath) return { action: 'restart', reason: 'missing_marker_path' };
+  const { quietMs, minIntervalMs } = resolveDaemonDistRestartDamperConfig(env);
+  const previous = readDaemonDistRestartMarker(markerPath);
+  const signature = resolveDaemonDistRestartSignature({ distEntrypoint, distClosure });
+  const sameDist = String(previous?.signature ?? '') === signature.signature;
+  const firstObservedAtMs = sameDist
+    ? finitePositiveMs(previous?.firstObservedAtMs) ?? nowMs
+    : nowMs;
+  const lastChangedAtMs = sameDist
+    ? finitePositiveMs(previous?.lastChangedAtMs) ?? nowMs
+    : nowMs;
+  const lastRestartAtMs = finitePositiveMs(previous?.lastRestartAtMs) ?? 0;
+  const quietForMs = Math.max(0, nowMs - lastChangedAtMs);
+  const sinceRestartMs = lastRestartAtMs > 0 ? Math.max(0, nowMs - lastRestartAtMs) : null;
+  const quietSatisfied = quietForMs >= quietMs;
+  const minIntervalSatisfied = sinceRestartMs === null || sinceRestartMs >= minIntervalMs;
+
+  const baseMarker = {
+    pendingRestart: !(quietSatisfied && minIntervalSatisfied),
+    reason,
+    signature: signature.signature,
+    distEntrypoint: signature.distEntrypoint,
+    distFingerprint: signature.distFingerprint,
+    firstObservedAtMs,
+    lastChangedAtMs,
+    lastObservedAtMs: nowMs,
+    lastRestartAtMs: lastRestartAtMs || null,
+    quietMs,
+    minIntervalMs,
+  };
+
+  if (!quietSatisfied) {
+    await writeDaemonDistRestartMarker(markerPath, baseMarker);
+    return {
+      action: 'defer',
+      reason: `dist changed ${quietForMs}ms ago; waiting ${quietMs}ms of quiescence`,
+      quietForMs,
+      quietMs,
+      minIntervalMs,
+    };
   }
-  return null;
+
+  if (!minIntervalSatisfied) {
+    await writeDaemonDistRestartMarker(markerPath, baseMarker);
+    return {
+      action: 'defer',
+      reason: `last restart was ${sinceRestartMs}ms ago; waiting ${minIntervalMs}ms minimum interval`,
+      quietForMs,
+      quietMs,
+      minIntervalMs,
+    };
+  }
+
+  await writeDaemonDistRestartMarker(markerPath, {
+    ...baseMarker,
+    pendingRestart: false,
+    lastRestartAtMs: nowMs,
+    restartStartedAtMs: nowMs,
+  });
+  return {
+    action: 'restart',
+    reason: 'dist is quiescent and restart interval elapsed',
+    quietForMs,
+    quietMs,
+    minIntervalMs,
+  };
+}
+
+export function applyDaemonDistClosureRuntimeEnv(
+  env,
+  {
+    runtimeStatePath = '',
+    distEntrypoint = '',
+    distClosureFingerprint = null,
+  } = {},
+) {
+  const fingerprint = String(distClosureFingerprint ?? '').trim();
+  const entrypoint = String(distEntrypoint ?? '').trim();
+  const statePath = String(runtimeStatePath ?? '').trim();
+  if (fingerprint && entrypoint && statePath) {
+    env.HAPPIER_CLI_SUBPROCESS_STACK_RUNTIME_STATE_PATH = statePath;
+    env.HAPPIER_CLI_SUBPROCESS_DIST_ENTRYPOINT = entrypoint;
+    env.HAPPIER_CLI_SUBPROCESS_DAEMON_DIST_CLOSURE_FINGERPRINT = fingerprint;
+  } else {
+    delete env.HAPPIER_CLI_SUBPROCESS_STACK_RUNTIME_STATE_PATH;
+    delete env.HAPPIER_CLI_SUBPROCESS_DIST_ENTRYPOINT;
+    delete env.HAPPIER_CLI_SUBPROCESS_DAEMON_DIST_CLOSURE_FINGERPRINT;
+  }
+  return env;
 }
 
 function getLatestDaemonLogPath(homeDir) {
@@ -1466,15 +1612,18 @@ export async function startLocalDaemonWithAuth({
   });
   const isTui = (baseEnv.HAPPIER_STACK_TUI ?? '').toString().trim() === '1';
   const syncRuntimeDaemonState = async ({ runtimeDaemonPid = null, daemonDistFingerprint = undefined } = {}) => {
+    const params = {
+      runtimeStatePath,
+      cliHomeDir,
+      internalServerUrl,
+      runtimeDaemonPid,
+      env: daemonEnv,
+    };
+    if (daemonDistFingerprint !== undefined) {
+      params.daemonDistFingerprint = daemonDistFingerprint;
+    }
     await syncStackRuntimeDaemonPidFromDaemonState(
-      {
-        runtimeStatePath,
-        cliHomeDir,
-        internalServerUrl,
-        runtimeDaemonPid,
-        daemonDistFingerprint,
-        env: daemonEnv,
-      },
+      params,
       { checkDaemonStateImpl: checkDaemonStatePingAware },
     ).catch(() => {});
   };
@@ -1643,17 +1792,23 @@ export async function startLocalDaemonWithAuth({
     }
   }
 
+  const currentDistClosure =
+    distEntrypoint && !explicitCommand && !explicitEntrypoint
+      ? readCliDistBuildManifest(distEntrypoint)
+      : null;
+  const currentDistFingerprint = currentDistClosure?.ok ? currentDistClosure.fingerprint : null;
+  applyDaemonDistClosureRuntimeEnv(daemonEnv, {
+    runtimeStatePath,
+    distEntrypoint,
+    distClosureFingerprint: currentDistFingerprint,
+  });
+
   const daemonCommand = resolveDaemonCommandSpec({ cliBin, cliEntrypoint, cliNodeEntrypoint, cliCommand, cliCommandArgs, env: daemonEnv });
   // Daemon startup can outlive the CLI's short foreground "still starting" window: source
   // daemons reattach sessions and hydrate local state, and packaged daemons may warm runtime state.
   const startVerifyTimeoutMs = resolveStackDaemonStartVerifyTimeoutMs(baseEnv);
   const startVerifyPollMs = parseNonNegativeInt(baseEnv.HAPPIER_STACK_DAEMON_START_VERIFY_POLL_MS, 125);
   const startVerifyStableMs = parseNonNegativeInt(baseEnv.HAPPIER_STACK_DAEMON_START_VERIFY_STABLE_MS, 750);
-  const currentDistClosure =
-    distEntrypoint && !explicitCommand && !explicitEntrypoint
-      ? readCliDistClosureFingerprint(distEntrypoint)
-      : null;
-  const currentDistFingerprint = currentDistClosure?.ok ? currentDistClosure.fingerprint : null;
 
   if (
     preserveExistingRunning &&
@@ -1698,6 +1853,23 @@ export async function startLocalDaemonWithAuth({
     });
     if (matches === true) {
       if (distRestartReason) {
+        const distRestartDecision = await decideDaemonDistRestartAfterDamper({
+          cliHomeDir,
+          serverUrl: internalServerUrl,
+          distEntrypoint,
+          distClosure: currentDistClosure,
+          reason: distRestartReason,
+          env: baseEnv,
+        });
+        if (distRestartDecision.action === 'defer') {
+          console.warn(
+            `[local] daemon is running with stale runtime; deferring restart (pid=${pid}).\n` +
+              `[local] ${distRestartReason}\n` +
+              `[local] ${distRestartDecision.reason}`
+          );
+          await syncRuntimeDaemonState({ runtimeDaemonPid: pid });
+          return;
+        }
         console.warn(`[local] daemon is running with stale runtime; restarting (pid=${pid}).\n[local] ${distRestartReason}`);
       } else {
         // eslint-disable-next-line no-console

@@ -37,7 +37,7 @@ export function appendWatchSignatureEntries(path, entries, { ignorePath = null }
 
   let stats;
   try {
-    stats = lstatSync(path);
+    stats = lstatSync(path, { bigint: true });
   } catch {
     entries.push(`${path}\0missing`);
     return false;
@@ -60,11 +60,11 @@ export function appendWatchSignatureEntries(path, entries, { ignorePath = null }
   }
 
   if (stats.isFile() || stats.isSymbolicLink()) {
-    entries.push(`${path}\0file\0${stats.size}\0${Math.trunc(stats.mtimeMs)}`);
+    entries.push(`${path}\0file\0${stats.size}\0${stats.mtimeNs}`);
     return true;
   }
 
-  entries.push(`${path}\0other\0${Math.trunc(stats.mtimeMs)}`);
+  entries.push(`${path}\0other\0${stats.mtimeNs}`);
   return true;
 }
 
@@ -179,16 +179,29 @@ export function startDevReloadCoordinator({
 } = {}, {
   watchDebouncedImpl = watchDebounced,
 } = {}) {
-  if (!enabled) return null;
+  if (!enabled) {
+    logger.log?.('[local] watch: reload coordinator disabled.');
+    return null;
+  }
 
   const normalizedDescriptors = normalizeDescriptors(descriptors);
   const executorsByTarget = createExecutorMap(executors);
-  if (!normalizedDescriptors.length || !executorsByTarget.size) return null;
+  if (!normalizedDescriptors.length) {
+    logger.warn?.('[local] watch: reload coordinator has no valid descriptors; watcher not started.');
+    return null;
+  }
+  if (!executorsByTarget.size) {
+    logger.warn?.('[local] watch: reload coordinator has no executors; watcher not started.');
+    return null;
+  }
 
   const watchPaths = Array.from(
     new Set(normalizedDescriptors.flatMap((descriptor) => descriptor.paths).filter(Boolean).map((p) => resolve(p)))
   );
-  if (!watchPaths.length) return null;
+  if (!watchPaths.length) {
+    logger.warn?.('[local] watch: reload coordinator has no watch paths; watcher not started.');
+    return null;
+  }
 
   let lastSignatures = readDescriptorSignatures(normalizedDescriptors);
   let inFlight = false;
@@ -206,6 +219,7 @@ export function startDevReloadCoordinator({
       executorsByTarget,
     });
     if (!targets.length) {
+      logger.log?.('[local] watch: event produced no signature delta; no reload scheduled.');
       lastSignatures = nextSignatures;
       return;
     }
@@ -219,10 +233,14 @@ export function startDevReloadCoordinator({
     };
 
     try {
+      const restartTargets = [];
       for (const target of targets) {
         if (isShuttingDown?.()) return;
-        await executorsByTarget.get(target)?.build?.(context);
+        const result = await executorsByTarget.get(target)?.build?.(context);
+        if (result?.skipped === true) continue;
+        restartTargets.push(target);
       }
+      context.restartTargets = restartTargets;
     } catch (error) {
       logger.error?.('[local] watch: reload build/preflight failed; keeping existing services running.');
       logger.error?.(formatError(error));
@@ -231,7 +249,7 @@ export function startDevReloadCoordinator({
 
     if (isShuttingDown?.()) return;
 
-    for (const target of targets) {
+    for (const target of context.restartTargets ?? targets) {
       try {
         if (isShuttingDown?.()) return;
         await executorsByTarget.get(target)?.restart?.(context);
@@ -271,6 +289,7 @@ export function startDevReloadCoordinator({
     debounceMs,
     onChange,
     pollIntervalMs,
+    logger,
     readSignature: () => serializeDescriptorSignatures(
       normalizedDescriptors,
       readDescriptorSignatures(normalizedDescriptors),
