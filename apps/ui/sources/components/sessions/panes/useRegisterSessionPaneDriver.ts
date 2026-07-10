@@ -27,7 +27,15 @@ export function useRegisterSessionPaneDriver(sessionId: string): string {
 
     React.useEffect(() => {
         if (!canRegister) return;
-        void prefetchSessionPaneModules();
+        // Defer prefetch so it does not compete with session content rendering.
+        // The SessionSubagentDetailsView bundle is 6MB compressed / 35MB uncompressed;
+        // fetching it immediately on mount causes a ~1.3s V8 parse freeze that blocks
+        // the first paint of transcript items. Delaying by 3s lets the transcript render
+        // and become interactive before the bundle download and parse begin.
+        const timer = setTimeout(() => {
+            void prefetchSessionPaneModules();
+        }, 3000);
+        return () => clearTimeout(timer);
     }, [canRegister]);
 
     React.useEffect(() => {
