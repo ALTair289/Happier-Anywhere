@@ -33,6 +33,7 @@ export const MarkdownView = React.memo((props: {
     variant?: 'default' | 'thinking';
     streamingMode?: MarkdownStreamingMode;
     streamingAnimated?: boolean;
+    streamingParseCacheKey?: string | null;
     streamingRevealPreset?: StreamingTextRevealPreset;
     staticRenderPlaceholderEnabled?: boolean;
     onPressSourceRange?: (action: MarkdownSourceRangeAction) => void;
@@ -57,6 +58,7 @@ export const MarkdownView = React.memo((props: {
             profile={profile}
             streamingMode={props.streamingMode === 'streaming' ? 'streaming' : 'static'}
             streamingAnimated={props.streamingAnimated === true}
+            streamingParseCacheKey={props.streamingParseCacheKey}
             streamingRevealPreset={props.streamingRevealPreset}
             staticRenderPlaceholderEnabled={props.staticRenderPlaceholderEnabled}
             onPressSourceRange={props.onPressSourceRange}

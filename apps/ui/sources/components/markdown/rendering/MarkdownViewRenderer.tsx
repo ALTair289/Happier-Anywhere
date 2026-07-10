@@ -8,10 +8,12 @@ import type { MarkdownStreamingMode } from '../streaming/useStreamingMarkdownBlo
 import { usePreparedStreamingMarkdown } from '../streaming/usePreparedStreamingMarkdown';
 import type { StreamingTextRevealPreset } from '../streaming/streamingTextRevealConfig';
 import type { MarkdownRenderingProfile } from './MarkdownRenderingProfile';
+import type { MarkdownRenderSegment } from './markdownRenderSegmentTypes';
 import { MarkdownSegmentView } from './MarkdownSegmentView';
 import { splitMarkdownRenderSegments } from './splitMarkdownRenderSegments';
 import { StaticMarkdownRenderPlaceholder } from './StaticMarkdownRenderPlaceholder';
 import { useDelayedStaticMarkdownRenderPlaceholder } from './useDelayedStaticMarkdownRenderPlaceholder';
+import { LruMap } from '@/utils/cache/lruMap';
 
 type MarkdownViewRendererProps = Readonly<{
     testID?: string;
@@ -24,12 +26,47 @@ type MarkdownViewRendererProps = Readonly<{
     profile: MarkdownRenderingProfile;
     streamingMode: MarkdownStreamingMode;
     streamingAnimated: boolean;
+    streamingParseCacheKey?: string | null;
     streamingRevealPreset?: StreamingTextRevealPreset;
     staticRenderPlaceholderEnabled?: boolean;
     onPressSourceRange?: (action: MarkdownSourceRangeAction) => void;
     renderAfterSourceRange?: (action: MarkdownSourceRangeAction) => React.ReactNode;
     highlightSourceRange?: MarkdownSourceRange | null;
 }>;
+
+const STREAMING_SEGMENT_CACHE_MAX_ENTRIES = 64;
+const streamingSegmentCache = new LruMap<string, readonly MarkdownRenderSegment[]>({
+    maxEntries: STREAMING_SEGMENT_CACHE_MAX_ENTRIES,
+});
+
+function readStreamingSegmentCache(params: Readonly<{
+    parseCacheKey: string | null | undefined;
+    streamingMode: MarkdownStreamingMode;
+    splitEnrichedSourceRanges: boolean;
+}>): readonly MarkdownRenderSegment[] | null {
+    if (params.streamingMode !== 'streaming') return null;
+    if (params.splitEnrichedSourceRanges) return null;
+    const key = typeof params.parseCacheKey === 'string' && params.parseCacheKey.length > 0
+        ? params.parseCacheKey
+        : null;
+    if (!key) return null;
+    return streamingSegmentCache.get(key) ?? null;
+}
+
+function writeStreamingSegmentCache(params: Readonly<{
+    parseCacheKey: string | null | undefined;
+    streamingMode: MarkdownStreamingMode;
+    splitEnrichedSourceRanges: boolean;
+    segments: readonly MarkdownRenderSegment[];
+}>): void {
+    if (params.streamingMode !== 'streaming') return;
+    if (params.splitEnrichedSourceRanges) return;
+    const key = typeof params.parseCacheKey === 'string' && params.parseCacheKey.length > 0
+        ? params.parseCacheKey
+        : null;
+    if (!key) return;
+    streamingSegmentCache.set(key, params.segments);
+}
 
 export const MarkdownViewRenderer = React.memo((props: MarkdownViewRendererProps) => {
     const preparedMarkdown = usePreparedStreamingMarkdown({
@@ -41,12 +78,28 @@ export const MarkdownViewRenderer = React.memo((props: MarkdownViewRendererProps
         props.renderAfterSourceRange ||
         props.highlightSourceRange,
     );
-    const segments = React.useMemo(() => splitMarkdownRenderSegments({
-        markdown: preparedMarkdown,
-        streamingMode: props.streamingMode,
-        streamingRepair: 'prepared',
-        splitEnrichedSourceRanges: sourceRangeInteractionsActive,
-    }), [preparedMarkdown, props.streamingMode, sourceRangeInteractionsActive]);
+    const segments = React.useMemo(() => {
+        const cached = readStreamingSegmentCache({
+            parseCacheKey: props.streamingParseCacheKey,
+            streamingMode: props.streamingMode,
+            splitEnrichedSourceRanges: sourceRangeInteractionsActive,
+        });
+        if (cached) return cached;
+
+        const nextSegments = splitMarkdownRenderSegments({
+            markdown: preparedMarkdown,
+            streamingMode: props.streamingMode,
+            streamingRepair: 'prepared',
+            splitEnrichedSourceRanges: sourceRangeInteractionsActive,
+        });
+        writeStreamingSegmentCache({
+            parseCacheKey: props.streamingParseCacheKey,
+            streamingMode: props.streamingMode,
+            splitEnrichedSourceRanges: sourceRangeInteractionsActive,
+            segments: nextSegments,
+        });
+        return nextSegments;
+    }, [preparedMarkdown, props.streamingMode, props.streamingParseCacheKey, sourceRangeInteractionsActive]);
     const streamingReveal = props.streamingMode === 'streaming' && props.streamingAnimated === true;
     const staticRenderPlaceholder = useDelayedStaticMarkdownRenderPlaceholder({
         enabled:
