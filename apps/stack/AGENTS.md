@@ -95,10 +95,4 @@ If `yarn` is not on PATH, use `corepack yarn ...`.
 
 ## Commit messages
 
-Use Conventional Commits for commits and squash messages:
-
-```text
-<type>[optional scope][!]: <description>
-```
-
-Types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `build`, `ci`, `perf`, `revert`.
+Use Conventional Commits as defined in the root `AGENTS.md` ("Commit messages").
