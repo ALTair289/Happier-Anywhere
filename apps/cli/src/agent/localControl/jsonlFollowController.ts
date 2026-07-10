@@ -6,7 +6,10 @@ import type { JsonlFollowerMetrics } from './jsonlFollowMetrics';
 
 export type JsonlFollowControllerState = 'idle' | 'active' | 'completed' | 'closed';
 
-export type JsonlFollowControllerWatchFile = (file: string, onFileChange: (file: string) => void) => () => void;
+export type JsonlFollowControllerWatchFile = (
+    file: string,
+    onFileChange: (file: string) => void,
+) => () => void | Promise<void>;
 
 export type JsonlFollowControllerOptions = Readonly<{
     filePath: string;
@@ -107,7 +110,7 @@ export class JsonlFollowController {
             clearTimeout(this.completionTimer);
             this.completionTimer = null;
         }
-        this.stopWatcher?.();
+        await this.stopWatcher?.();
         this.stopWatcher = null;
         await this.follower.stop();
         this.notifyClosed();

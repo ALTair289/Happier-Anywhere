@@ -69,6 +69,45 @@ describe('JsonlFollowController', () => {
         }
     });
 
+    it('awaits asynchronous watcher closure before reporting stopped', async () => {
+        const root = await mkdtemp(join(tmpdir(), 'jsonl-follow-controller-async-stop-'));
+        const filePath = join(root, 'rollout.jsonl');
+        await writeFile(filePath, '');
+
+        let finishWatcherClose!: () => void;
+        const watcherClosed = new Promise<void>((resolve) => {
+            finishWatcherClose = resolve;
+        });
+        const watchFile: JsonlFollowControllerWatchFile = () => async () => {
+            await watcherClosed;
+        };
+        const controller = createJsonlFollowController({
+            filePath,
+            pollIntervalMs: 60_000,
+            watchFile,
+            onJson: () => undefined,
+        });
+
+        try {
+            await controller.start();
+            let stopSettled = false;
+            const stopPromise = controller.stop().then(() => {
+                stopSettled = true;
+            });
+
+            await new Promise<void>((resolve) => setTimeout(resolve, 0));
+            expect(stopSettled).toBe(false);
+
+            finishWatcherClose();
+            await stopPromise;
+            expect(controller.getState()).toBe('closed');
+        } finally {
+            finishWatcherClose?.();
+            await controller.stop().catch(() => {});
+            await rm(root, { recursive: true, force: true });
+        }
+    });
+
     it('final-drains and closes resources after completion grace', async () => {
         const root = await mkdtemp(join(tmpdir(), 'jsonl-follow-controller-complete-'));
         const filePath = join(root, 'rollout.jsonl');
