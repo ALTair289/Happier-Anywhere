@@ -7,13 +7,13 @@ const LazyCustomAcpProviderSettingsSections = React.lazy(async () => {
     return { default: module.CustomAcpProviderSettingsSections };
 });
 
-const CustomAcpProviderSettingsSections = React.memo(function CustomAcpProviderSettingsSections(props: Readonly<{
+const CustomAcpProviderSettingsSections = React.memo(function CustomAcpProviderSettingsSections(_props: Readonly<{
     providerId: 'customAcp';
 }>) {
     return React.createElement(
         React.Suspense,
         { fallback: null },
-        React.createElement(LazyCustomAcpProviderSettingsSections, props),
+        React.createElement(LazyCustomAcpProviderSettingsSections),
     );
 });
 
