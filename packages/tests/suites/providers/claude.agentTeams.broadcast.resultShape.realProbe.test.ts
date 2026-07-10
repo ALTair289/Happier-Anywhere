@@ -91,12 +91,10 @@ describe('real Claude Agent Teams broadcast SendMessage result shape probe', () 
           .map((u) => u.toolUseId)
           .find((id): id is string => typeof id === 'string' && id.trim().length > 0) ?? null;
 
-      const broadcastResult =
-        (broadcastToolUseId
-          ? result.toolResults.find((r) => r.toolUseId === broadcastToolUseId) ?? null
-          : null) ??
-        result.toolResults.at(-1) ??
-        null;
+      const matchingBroadcastResult = broadcastToolUseId
+        ? result.toolResults.find((r) => r.toolUseId === broadcastToolUseId)
+        : undefined;
+      const broadcastResult = matchingBroadcastResult ?? result.toolResults.at(-1) ?? null;
 
       expect(broadcastResult).not.toBeNull();
       if (!broadcastResult) return;
@@ -116,4 +114,3 @@ describe('real Claude Agent Teams broadcast SendMessage result shape probe', () 
     },
   );
 });
-

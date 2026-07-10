@@ -112,8 +112,7 @@ describe('real Claude Agent Teams shutdown result shape probe', () => {
       const taskStopToolUseId =
         taskStopUses.map((u) => u.toolUseId).find((id): id is string => typeof id === 'string' && id.trim().length > 0) ?? null;
       const taskStopResult =
-        (taskStopToolUseId ? result.toolResults.find((r) => r.toolUseId === taskStopToolUseId) ?? null : null) ??
-        null;
+        taskStopToolUseId ? result.toolResults.find((r) => r.toolUseId === taskStopToolUseId) ?? null : null;
       expect(taskStopResult).not.toBeNull();
       if (!taskStopResult) return;
 

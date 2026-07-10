@@ -79,10 +79,10 @@ describe('real Claude Agent Teams TeamDelete result shape probe', () => {
 
       const deleteToolUseId =
         deleteUses.map((u) => u.toolUseId).find((id): id is string => typeof id === 'string' && id.trim().length > 0) ?? null;
-      const deleteResult =
-        (deleteToolUseId ? result.toolResults.find((r) => r.toolUseId === deleteToolUseId) ?? null : null) ??
-        result.toolResults.at(-1) ??
-        null;
+      const matchingDeleteResult = deleteToolUseId
+        ? result.toolResults.find((r) => r.toolUseId === deleteToolUseId)
+        : undefined;
+      const deleteResult = matchingDeleteResult ?? result.toolResults.at(-1) ?? null;
       expect(deleteResult).not.toBeNull();
       if (!deleteResult) return;
 

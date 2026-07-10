@@ -82,10 +82,9 @@ describe('real Claude Agent Teams SendMessage result shape probe', () => {
 
       const sendMessageToolUseId = sendMessageUses.map((u) => u.toolUseId).find((id): id is string => typeof id === 'string' && id.trim().length > 0) ?? null;
       const sendMessageToolResult =
-        (sendMessageToolUseId
+        sendMessageToolUseId
           ? result.toolResults.find((r) => r.toolUseId === sendMessageToolUseId) ?? null
-          : null) ??
-        null;
+          : null;
 
       const toolResultTexts = (sendMessageToolResult ? [sendMessageToolResult] : result.toolResults)
         .map((r) => coerceTextFromToolResultResult(r.result))
