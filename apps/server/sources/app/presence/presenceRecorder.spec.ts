@@ -15,6 +15,21 @@ const publishSessionAlive = vi.fn(async () => {});
 const publishMachineAlive = vi.fn(async () => {});
 vi.mock("./presenceRedisQueue", () => ({ publishSessionAlive, publishMachineAlive }));
 
+const reassertSessionLatestTurnStatus = vi.fn(async () => ({
+    ok: true,
+    didApply: true,
+    latestTurnId: "turn-1",
+    latestTurnStatus: "completed",
+    latestTurnStatusObservedAt: 20,
+    lastRuntimeIssue: null,
+    participantCursors: [],
+    badgeAttentionChanged: false,
+}));
+vi.mock("@/app/session/sessionWriteService", () => ({ reassertSessionLatestTurnStatus }));
+
+const publishSessionTurnUpdate = vi.fn(async () => {});
+vi.mock("@/app/session/turns/publishSessionTurnUpdate", () => ({ publishSessionTurnUpdate }));
+
 vi.mock("@/utils/logging/log", () => ({ log: vi.fn() }));
 
 describe("presenceRecorder", () => {
@@ -48,6 +63,38 @@ describe("presenceRecorder", () => {
 
         expect(publishSessionAlive).not.toHaveBeenCalled();
         expect(markSessionUpdateSent).not.toHaveBeenCalled();
+    });
+
+    it("replays latest turn status before the presence queue decision", async () => {
+        queueSessionUpdate.mockReturnValueOnce(false);
+
+        const { recordSessionAlive } = await import("./presenceRecorder");
+        await recordSessionAlive({
+            accountId: "u1",
+            sessionId: "s1",
+            timestamp: 20,
+            thinking: false,
+            latestTurnStatus: "completed",
+            latestTurnStatusObservedAt: 20,
+        });
+
+        expect(reassertSessionLatestTurnStatus).toHaveBeenCalledWith({
+            actorUserId: "u1",
+            sessionId: "s1",
+            latestTurnStatus: "completed",
+            latestTurnStatusObservedAt: 20,
+        });
+        expect(publishSessionTurnUpdate).toHaveBeenCalledWith({
+            sessionId: "s1",
+            actorUserId: "u1",
+            result: expect.objectContaining({
+                ok: true,
+                latestTurnStatus: "completed",
+                latestTurnStatusObservedAt: 20,
+            }),
+        });
+        expect(queueSessionUpdate).toHaveBeenCalledWith("s1", "u1", 20, false);
+        expect(publishSessionAlive).not.toHaveBeenCalled();
     });
 
     it("publishes machine alive only when queue returns true and redis mode enabled", async () => {

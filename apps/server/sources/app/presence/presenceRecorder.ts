@@ -2,8 +2,43 @@ import { activityCache } from "./sessionCache";
 import { shouldPublishPresenceToRedis } from "./presenceMode";
 import { publishMachineAlive, publishSessionAlive } from "./presenceRedisQueue";
 import { log } from "@/utils/logging/log";
+import {
+    reassertSessionLatestTurnStatus,
+    type ReassertSessionLatestTurnStatusResult,
+} from "@/app/session/sessionWriteService";
+import { publishSessionTurnUpdate } from "@/app/session/turns/publishSessionTurnUpdate";
 
-export async function recordSessionAlive(params: { accountId: string; sessionId: string; timestamp: number; thinking?: boolean }): Promise<void> {
+type SessionAliveRecord = {
+    accountId: string;
+    sessionId: string;
+    timestamp: number;
+    thinking?: boolean;
+    latestTurnStatus?: unknown;
+    latestTurnStatusObservedAt?: unknown;
+};
+
+async function replayLatestTurnStatusIfPresent(
+    params: SessionAliveRecord,
+): Promise<ReassertSessionLatestTurnStatusResult | null> {
+    if (params.latestTurnStatus === undefined || params.latestTurnStatusObservedAt === undefined) return null;
+    const result = await reassertSessionLatestTurnStatus({
+        actorUserId: params.accountId,
+        sessionId: params.sessionId,
+        latestTurnStatus: params.latestTurnStatus,
+        latestTurnStatusObservedAt: params.latestTurnStatusObservedAt,
+    });
+    if (result.ok) {
+        await publishSessionTurnUpdate({
+            sessionId: params.sessionId,
+            actorUserId: params.accountId,
+            result,
+        });
+    }
+    return result;
+}
+
+export async function recordSessionAlive(params: SessionAliveRecord): Promise<void> {
+    await replayLatestTurnStatusIfPresent(params);
     const shouldPersist = activityCache.queueSessionUpdate(params.sessionId, params.accountId, params.timestamp, params.thinking);
     if (!shouldPersist) return;
     if (!shouldPublishPresenceToRedis(process.env)) return;

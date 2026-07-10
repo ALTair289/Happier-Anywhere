@@ -388,6 +388,113 @@ type SessionTurnMutationTxResult = Readonly<{
     badgeAttentionChanged: boolean;
 }>;
 
+export type ReassertSessionLatestTurnStatusResult =
+    | {
+        ok: true;
+        didApply: boolean;
+        latestTurnId: string | null;
+        latestTurnStatus: PrimaryTurnStatusV1 | null;
+        latestTurnStatusObservedAt: number | null;
+        lastRuntimeIssue: SessionRuntimeIssueV1 | null;
+        participantCursors: ParticipantCursor[];
+        badgeAttentionChanged: boolean;
+    }
+    | { ok: false; error: "invalid-params" | "forbidden" | "session-not-found" | "internal" };
+
+export async function reassertSessionLatestTurnStatus(params: {
+    actorUserId: string;
+    sessionId: string;
+    latestTurnStatus: unknown;
+    latestTurnStatusObservedAt: unknown;
+}): Promise<ReassertSessionLatestTurnStatusResult> {
+    const actorUserId = typeof params.actorUserId === "string" ? params.actorUserId : "";
+    const sessionId = typeof params.sessionId === "string" ? params.sessionId : "";
+    const latestTurnStatus = PrimaryTurnStatusV1Schema.safeParse(params.latestTurnStatus);
+    const latestTurnStatusObservedAt = parseStoredObservedAt(params.latestTurnStatusObservedAt);
+    if (!actorUserId || !sessionId || !latestTurnStatus.success || latestTurnStatusObservedAt === null) {
+        return { ok: false, error: "invalid-params" };
+    }
+
+    try {
+        return await inTx(async (tx) => {
+            const access = await ensureSessionEditAccess(tx, { actorUserId, sessionId });
+            if (!access.ok) {
+                return { ok: false, error: access.error };
+            }
+
+            const session = await tx.session.findUnique({
+                where: { id: sessionId },
+                select: {
+                    latestTurnId: true,
+                    latestTurnStatusObservedAt: true,
+                    ...selectSessionActivityBadgeInputs(),
+                },
+            });
+            if (!session) {
+                return { ok: false, error: "session-not-found" };
+            }
+
+            const currentObservedAt = parseStoredObservedAt(session.latestTurnStatusObservedAt);
+            const currentStatus = parseStoredLatestTurnStatus(session.latestTurnStatus);
+            const currentIssue = parseStoredLastRuntimeIssue(session.lastRuntimeIssue);
+            if (
+                currentObservedAt !== null
+                && (
+                    currentObservedAt > latestTurnStatusObservedAt
+                    || (currentObservedAt === latestTurnStatusObservedAt && currentStatus === latestTurnStatus.data)
+                )
+            ) {
+                return {
+                    ok: true,
+                    didApply: false,
+                    latestTurnId: session.latestTurnId ?? null,
+                    latestTurnStatus: currentStatus,
+                    latestTurnStatusObservedAt: currentObservedAt,
+                    lastRuntimeIssue: currentIssue,
+                    participantCursors: [],
+                    badgeAttentionChanged: false,
+                };
+            }
+
+            await tx.session.update({
+                where: { id: sessionId },
+                data: {
+                    latestTurnStatus: latestTurnStatus.data,
+                    latestTurnStatusObservedAt: BigInt(latestTurnStatusObservedAt),
+                    ...buildLegacyThinkingProjectionWriteData({
+                        latestTurnId: session.latestTurnId ?? null,
+                        latestTurnStatus: latestTurnStatus.data,
+                        latestTurnStatusObservedAt,
+                        lastRuntimeIssue: currentIssue,
+                    }),
+                },
+            });
+
+            const participantCursors = await markSessionParticipantsChanged({ tx, sessionId });
+            const badgeAttentionChanged = didSessionActivityBadgeContributionChange(
+                toSessionActivityBadgeInputs(session),
+                {
+                    ...toSessionActivityBadgeInputs(session),
+                    latestTurnStatus: latestTurnStatus.data,
+                    lastRuntimeIssue: currentIssue,
+                },
+            );
+            return {
+                ok: true,
+                didApply: true,
+                latestTurnId: session.latestTurnId ?? null,
+                latestTurnStatus: latestTurnStatus.data,
+                latestTurnStatusObservedAt,
+                lastRuntimeIssue: currentIssue,
+                participantCursors,
+                badgeAttentionChanged,
+            };
+        });
+    } catch {
+        return { ok: false, error: "internal" };
+    }
+}
+
 export async function applySessionTurnMutationInTx(params: Readonly<{
     tx: Tx;
     sessionId: string;

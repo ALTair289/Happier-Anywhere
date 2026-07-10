@@ -80,6 +80,8 @@ describe("sessionWriteService", () => {
             },
             sessionMessage: {
                 findUnique: vi.fn(),
+                findFirst: vi.fn(),
+                findMany: vi.fn(),
                 create: vi.fn(),
                 update: vi.fn(),
             },
@@ -88,6 +90,96 @@ describe("sessionWriteService", () => {
 
     afterEach(() => {
         vi.useRealTimers();
+    });
+
+    describe("reassertSessionLatestTurnStatus", () => {
+        it("persists a newer replayed terminal turn status and participant update projection", async () => {
+            currentTx.session.findUnique
+                .mockResolvedValueOnce({ accountId: "u1", encryptionMode: "e2ee" })
+                .mockResolvedValueOnce({
+                    seq: 10,
+                    latestReadyEventSeq: null,
+                    pendingCount: 0,
+                    pendingBlockedCount: 0,
+                    lastViewedSessionSeq: null,
+                    pendingPermissionRequestCount: 0,
+                    pendingUserActionRequestCount: 0,
+                    latestTurnId: "turn-1",
+                    latestTurnStatus: "in_progress",
+                    latestTurnStatusObservedAt: BigInt(100),
+                    lastRuntimeIssue: null,
+                    active: true,
+                    archivedAt: null,
+                });
+            currentTx.session.update.mockResolvedValue({});
+            getSessionParticipantUserIds.mockResolvedValue(["u1", "u2"]);
+            markAccountChanged.mockResolvedValueOnce(201).mockResolvedValueOnce(202);
+
+            const res = await reassertSessionLatestTurnStatus({
+                actorUserId: "u1",
+                sessionId: "s1",
+                latestTurnStatus: "completed",
+                latestTurnStatusObservedAt: 200,
+            });
+
+            expect(currentTx.session.update).toHaveBeenCalledWith({
+                where: { id: "s1" },
+                data: {
+                    latestTurnStatus: "completed",
+                    latestTurnStatusObservedAt: BigInt(200),
+                    thinking: false,
+                    thinkingAt: new Date(200),
+                },
+            });
+            expect(res).toEqual({
+                ok: true,
+                didApply: true,
+                latestTurnId: "turn-1",
+                latestTurnStatus: "completed",
+                latestTurnStatusObservedAt: 200,
+                lastRuntimeIssue: null,
+                participantCursors: [
+                    { accountId: "u1", cursor: 201 },
+                    { accountId: "u2", cursor: 202 },
+                ],
+                badgeAttentionChanged: false,
+            });
+        });
+
+        it("does not overwrite a newer materialized turn projection", async () => {
+            currentTx.session.findUnique
+                .mockResolvedValueOnce({ accountId: "u1", encryptionMode: "e2ee" })
+                .mockResolvedValueOnce({
+                    seq: 10,
+                    latestReadyEventSeq: null,
+                    pendingCount: 0,
+                    pendingBlockedCount: 0,
+                    lastViewedSessionSeq: null,
+                    pendingPermissionRequestCount: 0,
+                    pendingUserActionRequestCount: 0,
+                    latestTurnId: "turn-1",
+                    latestTurnStatus: "in_progress",
+                    latestTurnStatusObservedAt: BigInt(300),
+                    lastRuntimeIssue: null,
+                    active: true,
+                    archivedAt: null,
+                });
+
+            const res = await reassertSessionLatestTurnStatus({
+                actorUserId: "u1",
+                sessionId: "s1",
+                latestTurnStatus: "completed",
+                latestTurnStatusObservedAt: 200,
+            });
+
+            expect(currentTx.session.update).not.toHaveBeenCalled();
+            expect(res).toEqual(expect.objectContaining({
+                ok: true,
+                didApply: false,
+                latestTurnStatus: "in_progress",
+                latestTurnStatusObservedAt: 300,
+            }));
+        });
     });
 
     describe("updateSessionRuntimeActivityProjection", () => {

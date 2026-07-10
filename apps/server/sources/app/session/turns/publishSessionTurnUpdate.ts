@@ -4,7 +4,10 @@ import {
     type ClientConnection,
     eventRouter,
 } from "@/app/events/eventRouter";
-import type { ApplySessionTurnMutationResult } from "@/app/session/sessionWriteService";
+import type {
+    ApplySessionTurnMutationResult,
+    ReassertSessionLatestTurnStatusResult,
+} from "@/app/session/sessionWriteService";
 import { randomKeyNaked } from "@/utils/keys/randomKeyNaked";
 
 function resolveSessionTurnUpdateSkipSenderConnection(connection?: ClientConnection): ClientConnection | undefined {
@@ -16,7 +19,9 @@ export async function publishSessionTurnUpdate(params: {
     sessionId: string;
     actorUserId: string;
     connection?: ClientConnection;
-    result: Extract<ApplySessionTurnMutationResult, { ok: true }>;
+    result:
+        | Extract<ApplySessionTurnMutationResult, { ok: true }>
+        | Extract<ReassertSessionLatestTurnStatusResult, { ok: true }>;
 }): Promise<void> {
     if (!params.result.didApply) return;
     const skipSenderConnection = resolveSessionTurnUpdateSkipSenderConnection(params.connection);
