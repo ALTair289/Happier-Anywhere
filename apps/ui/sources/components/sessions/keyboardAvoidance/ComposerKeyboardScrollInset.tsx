@@ -49,12 +49,13 @@ export function ComposerKeyboardScrollInset(props: Readonly<{
         }
         applyHeight(resolveCurrentInsetHeight(layout));
         if (layout.subscribeListBottomInset) {
+            // The notified payload is computed by the writer from its own fresh inputs and is
+            // the canonical inset on every platform. Re-deriving from shared-value reads at
+            // delivery time is stale on native: guest-runtime writes are async, so `.value`
+            // lags the payload by one step and the final composer-growth update is lost
+            // (live-diagnosed 2026-07-09: transcript rows rendered under the composer).
             return layout.subscribeListBottomInset((nextHeight) => {
-                if (Platform.OS === 'web') {
-                    applyHeight(nextHeight);
-                    return;
-                }
-                applyHeight(resolveNativeCurrentInsetHeight(layout));
+                applyHeight(nextHeight);
             });
         }
         return undefined;

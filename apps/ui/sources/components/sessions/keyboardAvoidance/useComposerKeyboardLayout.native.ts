@@ -145,7 +145,11 @@ export function useComposerKeyboardLayout(options: ComposerKeyboardLayoutOptions
         };
     }, []);
 
+    // JS mirror of the last notified inset: subscribe replay must not read the shared value
+    // (guest-runtime writes are async, so `.value` can lag the last computed inset).
+    const listBottomInsetSnapshotRef = React.useRef<number | null>(null);
     const notifyListBottomInset = React.useCallback((height: number) => {
+        listBottomInsetSnapshotRef.current = height;
         for (const listener of listBottomInsetSubscribersRef.current) {
             listener(height);
         }
@@ -153,7 +157,7 @@ export function useComposerKeyboardLayout(options: ComposerKeyboardLayoutOptions
 
     const subscribeListBottomInset = React.useCallback((listener: (height: number) => void) => {
         listBottomInsetSubscribersRef.current.add(listener);
-        listener(listBottomInset.value);
+        listener(listBottomInsetSnapshotRef.current ?? listBottomInset.value);
         return () => {
             listBottomInsetSubscribersRef.current.delete(listener);
         };
@@ -171,27 +175,37 @@ export function useComposerKeyboardLayout(options: ComposerKeyboardLayoutOptions
             : scaffoldMeasuredHeight.value;
         const effectiveViewportHeight = resolveMeasuredViewportHeight(effectiveScaffoldHeight, viewportHeight.value);
         const effectiveHeaderHeight = resolveMeasuredHeaderHeight(effectiveScaffoldHeight, headerHeightValue.value);
+        // Guest-runtime (JS-thread) shared-value writes are async in Reanimated 4: a read
+        // immediately after a write observes the PREVIOUS value. Every value that is written
+        // and then consumed within this pass must therefore flow through a local, and every
+        // subscriber notification must carry the freshly computed local — never a `.value`
+        // read-back. (Live-diagnosed 2026-07-09: read-back notifies left the transcript
+        // composer inset one growth step behind, rendering rows under the composer.)
         const liveKeyboardHeight = isKeyboardLiftSuppressed.value
             ? 0
             : resolveKeyboardHeightWithinScaffold(keyboardHeightAbsolute.value, layoutBottomInsetValue.value);
         keyboardHeightLive.value = liveKeyboardHeight;
-        if (isKeyboardLiftSuppressed.value || !isInteractiveDismissActive.value) {
+        const shouldRefreshInsetKeyboardHeight = isKeyboardLiftSuppressed.value || !isInteractiveDismissActive.value;
+        if (shouldRefreshInsetKeyboardHeight) {
             keyboardHeightForInset.value = liveKeyboardHeight;
         }
         notifyKeyboardHeight(liveKeyboardHeight);
-        const insetKeyboardHeight = isKeyboardLiftSuppressed.value ? 0 : keyboardHeightForInset.value;
+        const insetKeyboardHeight = isKeyboardLiftSuppressed.value
+            ? 0
+            : (shouldRefreshInsetKeyboardHeight ? liveKeyboardHeight : keyboardHeightForInset.value);
         bottomInset.value = resolveComposerBottomOffset({
             keyboardHeight: liveKeyboardHeight,
             safeAreaBottom: safeAreaBottomValue.value,
         });
-        listBottomInset.value = resolveListBottomInset({
+        const nextListBottomInset = resolveListBottomInset({
             composerHeight: effectiveComposerHeight,
             keyboardHeightForInset: insetKeyboardHeight,
             safeAreaBottom: safeAreaBottomValue.value,
         });
-        notifyListBottomInset(listBottomInset.value);
+        listBottomInset.value = nextListBottomInset;
+        notifyListBottomInset(nextListBottomInset);
         const absoluteKeyboardHeight = isKeyboardLiftSuppressed.value ? 0 : keyboardHeightAbsolute.value;
-        availablePanelHeight.value = resolveAvailablePanelHeight({
+        const nextAvailablePanelHeight = resolveAvailablePanelHeight({
             viewportHeight: effectiveViewportHeight,
             headerHeight: effectiveHeaderHeight,
             keyboardHeight: absoluteKeyboardHeight,
@@ -199,7 +213,8 @@ export function useComposerKeyboardLayout(options: ComposerKeyboardLayoutOptions
             reservedHeight: absoluteKeyboardHeight > 0 ? 0 : layoutBottomInsetValue.value,
             safeAreaBottom: safeAreaBottomValue.value,
         });
-        notifyAvailablePanelHeight(availablePanelHeight.value);
+        availablePanelHeight.value = nextAvailablePanelHeight;
+        notifyAvailablePanelHeight(nextAvailablePanelHeight);
     }, [
         availablePanelHeight,
         availablePanelMaxHeightValue,
@@ -222,13 +237,16 @@ export function useComposerKeyboardLayout(options: ComposerKeyboardLayoutOptions
     ]);
 
     const applyFinalKeyboardHeightFromJS = React.useCallback((height: number) => {
+        // See recomputeStaticLayout: consume locals, never `.value` read-backs, and notify
+        // subscribers with the freshly computed values (guest-runtime writes are async).
         const absoluteKeyboardHeight = Number.isFinite(height) ? Math.max(0, height) : 0;
         isInteractiveDismissActive.value = false;
         lastKeyboardEventHeightAbsolute.value = absoluteKeyboardHeight;
-        keyboardHeightAbsolute.value = isKeyboardLiftSuppressed.value ? 0 : absoluteKeyboardHeight;
+        const effectiveAbsoluteKeyboardHeight = isKeyboardLiftSuppressed.value ? 0 : absoluteKeyboardHeight;
+        keyboardHeightAbsolute.value = effectiveAbsoluteKeyboardHeight;
         const liveKeyboardHeight = isKeyboardLiftSuppressed.value
             ? 0
-            : resolveKeyboardHeightWithinScaffold(keyboardHeightAbsolute.value, layoutBottomInsetValue.value);
+            : resolveKeyboardHeightWithinScaffold(effectiveAbsoluteKeyboardHeight, layoutBottomInsetValue.value);
         keyboardHeightLive.value = liveKeyboardHeight;
         keyboardHeightForInset.value = liveKeyboardHeight;
         notifyKeyboardHeight(liveKeyboardHeight);
@@ -239,13 +257,14 @@ export function useComposerKeyboardLayout(options: ComposerKeyboardLayoutOptions
         });
         const effectiveViewportHeight = resolveMeasuredViewportHeight(scaffoldMeasuredHeight.value, viewportHeight.value);
         const effectiveHeaderHeight = resolveMeasuredHeaderHeight(scaffoldMeasuredHeight.value, headerHeightValue.value);
-        listBottomInset.value = resolveListBottomInset({
+        const nextListBottomInset = resolveListBottomInset({
             composerHeight: composerHeight.value,
             keyboardHeightForInset: isKeyboardLiftSuppressed.value ? 0 : liveKeyboardHeight,
             safeAreaBottom: safeAreaBottomValue.value,
         });
-        notifyListBottomInset(listBottomInset.value);
-        availablePanelHeight.value = resolveAvailablePanelHeight({
+        listBottomInset.value = nextListBottomInset;
+        notifyListBottomInset(nextListBottomInset);
+        const nextAvailablePanelHeight = resolveAvailablePanelHeight({
             viewportHeight: effectiveViewportHeight,
             headerHeight: effectiveHeaderHeight,
             keyboardHeight: isKeyboardLiftSuppressed.value ? 0 : absoluteKeyboardHeight,
@@ -253,7 +272,8 @@ export function useComposerKeyboardLayout(options: ComposerKeyboardLayoutOptions
             reservedHeight: absoluteKeyboardHeight > 0 ? 0 : layoutBottomInsetValue.value,
             safeAreaBottom: safeAreaBottomValue.value,
         });
-        notifyAvailablePanelHeight(availablePanelHeight.value);
+        availablePanelHeight.value = nextAvailablePanelHeight;
+        notifyAvailablePanelHeight(nextAvailablePanelHeight);
     }, [
         availablePanelHeight,
         availablePanelMaxHeightValue,
@@ -573,16 +593,22 @@ export function useComposerKeyboardLayout(options: ComposerKeyboardLayoutOptions
         }
     }, [ignoreKeyboardFramesUntilComposerFocus]);
 
+    // Dedupe guards use plain JS mirrors: guest-runtime shared-value writes are async, so a
+    // `.value` read-back cannot see a measurement committed earlier in the same frame.
+    const lastMeasuredComposerHeightRef = React.useRef<number | null>(null);
     const setComposerMeasuredHeight = React.useCallback((height: number) => {
         const nextHeight = typeof height === 'number' && Number.isFinite(height) ? Math.max(0, Math.round(height)) : 0;
-        if (composerHeight.value === nextHeight) return;
+        if (lastMeasuredComposerHeightRef.current === nextHeight) return;
+        lastMeasuredComposerHeightRef.current = nextHeight;
         composerHeight.value = nextHeight;
         recomputeStaticLayout({ composerHeight: nextHeight });
     }, [composerHeight, recomputeStaticLayout]);
 
+    const lastMeasuredScaffoldHeightRef = React.useRef<number | null>(null);
     const setScaffoldMeasuredHeight = React.useCallback((height: number) => {
         const nextHeight = typeof height === 'number' && Number.isFinite(height) ? Math.max(0, Math.round(height)) : 0;
-        if (scaffoldMeasuredHeight.value === nextHeight) return;
+        if (lastMeasuredScaffoldHeightRef.current === nextHeight) return;
+        lastMeasuredScaffoldHeightRef.current = nextHeight;
         scaffoldMeasuredHeight.value = nextHeight;
         recomputeStaticLayout({ scaffoldHeight: nextHeight });
     }, [recomputeStaticLayout, scaffoldMeasuredHeight]);

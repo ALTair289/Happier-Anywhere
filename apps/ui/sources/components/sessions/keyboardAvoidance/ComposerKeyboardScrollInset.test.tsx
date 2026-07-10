@@ -93,7 +93,59 @@ describe('ComposerKeyboardScrollInset', () => {
         expect(readHeight()).toBe(192);
     });
 
-    it('ignores stale native total inset payloads after the composer and keyboard have collapsed', async () => {
+    it('applies notified totals even when guest-runtime shared-value reads lag behind', async () => {
+        // Reanimated 4 guest-runtime: JS writes to shared values are async, so `.value`
+        // reads at notify-delivery time can be one step behind the writer's computation.
+        // The notified payload is computed from the writer's own fresh inputs and is the
+        // canonical value; the native listener must apply it rather than re-deriving from
+        // (potentially stale) shared-value reads. Live evidence 2026-07-09: composer growth
+        // left the transcript inset one step behind and rows rendered under the composer.
+        const listeners = new Set<(height: number) => void>();
+        const layout = {
+            ...createMockComposerKeyboardLayout({
+                bottomInset: 267,
+                composerHeight: 153, // stale read: the composer already grew to 172
+                keyboardHeightForInset: 267,
+                listBottomInset: 420, // stale read: the writer just computed 439
+            }),
+            subscribeListBottomInset: (listener: (height: number) => void) => {
+                listeners.add(listener);
+                listener(420);
+                return () => {
+                    listeners.delete(listener);
+                };
+            },
+        } satisfies ComposerKeyboardLayout;
+
+        const screen = await renderScreen(
+            <ComposerKeyboardProvider layout={layout}>
+                <ComposerKeyboardScrollInset testID="transcript-composer-keyboard-inset" />
+            </ComposerKeyboardProvider>,
+        );
+
+        const readHeight = () => {
+            const node = screen.findByTestId('transcript-composer-keyboard-inset');
+            if (!node) {
+                throw new Error('Expected transcript composer keyboard inset to render.');
+            }
+            const styles = Array.isArray(node.props.style) ? node.props.style : [node.props.style];
+            return styles.reduce<number | undefined>((height, style) => (
+                typeof style?.height === 'number' ? style.height : height
+            ), undefined);
+        };
+
+        expect(readHeight()).toBe(420);
+
+        await act(async () => {
+            for (const listener of listeners) {
+                listener(439);
+            }
+        });
+
+        expect(readHeight()).toBe(439);
+    });
+
+    it('settles on the last notified total after the composer and keyboard have collapsed', async () => {
         const onHeightChange = vi.fn();
         const listeners = new Set<(height: number) => void>();
         const layout = {
@@ -135,15 +187,21 @@ describe('ComposerKeyboardScrollInset', () => {
         expect(readHeight()).toBe(134);
         expect(onHeightChange).toHaveBeenCalledWith(134);
 
+        // Collapse settle notifications (keyboard onEnd + keyboardDidHide) are emitted after
+        // any in-flight animation-frame payloads, so delivery order on the JS thread ends on
+        // the settled total. The listener applies payloads in delivery order and must settle
+        // on the last one.
         await act(async () => {
-            layout.listBottomInset.value = 303;
             for (const listener of listeners) {
                 listener(303);
+            }
+            for (const listener of listeners) {
+                listener(134);
             }
         });
 
         expect(readHeight()).toBe(134);
-        expect(onHeightChange).not.toHaveBeenCalledWith(303);
+        expect(onHeightChange).toHaveBeenLastCalledWith(134);
     });
 
     it('falls back to measured composer height when the native list inset has not replayed yet', async () => {
