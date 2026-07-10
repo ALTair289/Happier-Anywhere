@@ -16,6 +16,7 @@ import { updateSkillPromptBundleWithEntry, readPromptBundleUtf8Entry } from '@/s
 import { t } from '@/text';
 import { safeRouterBack } from '@/utils/navigation/safeRouterBack';
 
+import { usePromptEditorDraftField } from '../shared/usePromptEditorDraftField';
 import { readSkillBundleArtifactState } from './readSkillBundleArtifactState';
 
 const styles = StyleSheet.create((theme) => ({
@@ -62,7 +63,9 @@ export const SkillBundleSupportingFileEditorScreen = React.memo(function SkillBu
     const navigation = useNavigation();
     const artifactState = React.useMemo(() => readSkillBundleArtifactState(props.artifactId), [props.artifactId]);
     const [path, setPath] = React.useState(props.path ?? '');
-    const [content, setContent] = React.useState('');
+    const contentField = usePromptEditorDraftField('');
+    const { applyExternalValue: applyExternalContent, setValue: setContent } = contentField;
+    const content = contentField.value;
     const [saving, setSaving] = React.useState(false);
     // Flushed before reading `content` on save so the latest rich/raw edit (which
     // may still be debounced inside the active editor surface) is captured.
@@ -71,11 +74,11 @@ export const SkillBundleSupportingFileEditorScreen = React.memo(function SkillBu
     React.useEffect(() => {
         setPath(props.path ?? '');
         if (!artifactState || !props.path) {
-            setContent('');
+            applyExternalContent('', { preserveDirty: true });
             return;
         }
-        setContent(readPromptBundleUtf8Entry(artifactState.body, props.path) ?? '');
-    }, [artifactState, props.path]);
+        applyExternalContent(readPromptBundleUtf8Entry(artifactState.body, props.path) ?? '', { preserveDirty: true });
+    }, [applyExternalContent, artifactState, props.path]);
 
     const canSave = Boolean(artifactState) && path.trim().length > 0 && !saving;
 
