@@ -92,7 +92,7 @@ describe('tiptapWebViewRuntime', () => {
         );
     });
 
-    it('cancels pending docChanged when the host applies setDoc before debounce elapses', async () => {
+    it('keeps unflushed local edits when the host applies setDoc before debounce elapses (flushes instead of replacing the doc)', async () => {
         vi.useFakeTimers();
         try {
             const postEnvelope = vi.fn();
@@ -115,8 +115,14 @@ describe('tiptapWebViewRuntime', () => {
 
             vi.advanceTimersByTime(100);
 
-            expect(editor.markdown).toBe('external update');
-            expect(postEnvelope.mock.calls.filter(([envelope]) => envelope.type === 'docChanged')).toEqual([]);
+            // The user's unflushed local edit is the source of truth: the stale/racing
+            // host doc must not replace the editor content (that resets the cursor and
+            // loses keystrokes). The pending change is flushed upward immediately so the
+            // host state converges to the editor instead.
+            expect(editor.markdown).toBe('local edit');
+            const docChangedEnvelopes = postEnvelope.mock.calls.filter(([envelope]) => envelope.type === 'docChanged');
+            expect(docChangedEnvelopes).toHaveLength(1);
+            expect(docChangedEnvelopes[0]?.[0]?.payload).toEqual({ doc: 'local edit' });
         } finally {
             vi.useRealTimers();
         }

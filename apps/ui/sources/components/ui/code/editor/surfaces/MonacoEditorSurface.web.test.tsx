@@ -471,7 +471,7 @@ describe('MonacoEditorSurface (web)', () => {
         expect(setScrollLeftSpy).toHaveBeenCalledWith(7);
     });
 
-    it('cancels a pending debounced edit when an external value is synced', async () => {
+    it('keeps unflushed local edits when an external value arrives mid-typing (flushes instead of replacing the doc)', async () => {
         vi.useFakeTimers();
         try {
             let currentValue = 'start';
@@ -533,8 +533,12 @@ describe('MonacoEditorSurface (web)', () => {
                 vi.advanceTimersByTime(100);
             });
 
-            expect(currentValue).toBe('external sync');
-            expect(onChange).not.toHaveBeenCalled();
+            // The user's unflushed local edit is the source of truth: the stale/racing
+            // external value must not replace the document (that resets the cursor and
+            // loses keystrokes). The pending change is flushed upward so the parent
+            // state converges to the editor instead.
+            expect(currentValue).toBe('local edit');
+            expect(onChange).toHaveBeenCalledWith('local edit');
         } finally {
             vi.useRealTimers();
         }

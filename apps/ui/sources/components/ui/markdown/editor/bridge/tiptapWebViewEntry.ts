@@ -277,8 +277,17 @@ function createRuntime(params: Readonly<{
 
     const setDoc = (nextDoc: string) => {
         const current = editor.getMarkdown();
-        cancelPendingDocChange();
         if (current === nextDoc) {
+            // Editor and host agree; any still-pending change is a settled echo.
+            cancelPendingDocChange();
+            return;
+        }
+        if (docChangeTimer) {
+            // Unflushed local edits: the incoming doc is stale relative to the editor.
+            // Replacing the document would reset the cursor and drop in-flight keystrokes.
+            // Local text wins; flush it upward so the host state converges instead.
+            cancelPendingDocChange();
+            emitDocChanged(editor);
             return;
         }
         applyingRemote = true;

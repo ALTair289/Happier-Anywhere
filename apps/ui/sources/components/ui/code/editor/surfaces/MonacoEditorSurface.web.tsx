@@ -457,16 +457,27 @@ export const MonacoEditorSurface = React.forwardRef<CodeEditorHandle, CodeEditor
     React.useEffect(() => {
         const model = modelRef.current;
         if (!model) return;
-        cancelPendingChange();
         const current = model.getValue();
-        if (current === props.value) return;
+        if (current === props.value) {
+            // Editor and parent agree; any still-pending change is a settled echo.
+            cancelPendingChange();
+            return;
+        }
+        if (pendingChangeRef.current != null || changeTimerRef.current != null) {
+            // The user has unflushed local edits: the incoming value is stale relative
+            // to the editor (a debounce-window echo or a racing async write-back).
+            // Replacing the document here would reset the cursor and lose keystrokes.
+            // Local text wins; flush it upward so the parent state converges instead.
+            flushPendingChange();
+            return;
+        }
         ignoreChangeRef.current = true;
         try {
             applyMonacoModelValuePreservingViewState(editorRef.current, model, props.value);
         } finally {
             ignoreChangeRef.current = false;
         }
-    }, [cancelPendingChange, props.value]);
+    }, [cancelPendingChange, flushPendingChange, props.value]);
 
     const borderStyle = {
         flex: 1,

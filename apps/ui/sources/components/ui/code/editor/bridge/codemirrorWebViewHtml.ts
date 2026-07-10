@@ -252,6 +252,15 @@ export function buildCodeMirrorWebViewHtml(params: Readonly<{
         }
       }
 
+      function flushPendingDocChange() {
+        if (!changeTimer) return;
+        cancelPendingDocChange();
+        if (!view) return;
+        try {
+          sendEnvelope({ v: 1, type: 'docChanged', payload: { doc: view.state.doc.toString() } });
+        } catch (e) {}
+      }
+
       async function boot() {
         const embedded = ${hasEmbeddedBundle ? 'true' : 'false'};
         let EditorState;
@@ -472,8 +481,17 @@ export function buildCodeMirrorWebViewHtml(params: Readonly<{
         function setDoc(nextDoc) {
           if (!view) return;
           const normalizedDoc = nextDoc || '';
-          cancelPendingDocChange();
-          if (view.state.doc.toString() === normalizedDoc) return;
+          if (view.state.doc.toString() === normalizedDoc) {
+            cancelPendingDocChange();
+            return;
+          }
+          if (changeTimer) {
+            // Unflushed local edits: the incoming doc is stale relative to the editor.
+            // Replacing the document would reset the cursor and drop in-flight keystrokes.
+            // Local text wins; flush it upward so the host state converges instead.
+            flushPendingDocChange();
+            return;
+          }
           const previousSelection = view.state.selection;
           const scrollDOM = view.scrollDOM || null;
           const previousScrollTop = scrollDOM ? scrollDOM.scrollTop : null;

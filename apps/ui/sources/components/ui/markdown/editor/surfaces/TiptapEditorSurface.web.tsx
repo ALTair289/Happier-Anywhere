@@ -400,10 +400,24 @@ export const TiptapEditorSurface = React.forwardRef<MarkdownEditorSurfaceRef, Ma
         // Sync external value changes into the editor without echoing them back as
         // user edits (mirrors Monaco's ignoreChangeRef guard).
         React.useEffect(() => {
-            cancelPendingChange();
-            if (!editor) return;
+            if (!editor) {
+                cancelPendingChange();
+                return;
+            }
             const current = editor.getMarkdown();
-            if (current === props.value) return;
+            if (current === props.value) {
+                // Editor and parent agree; any still-pending change is a settled echo.
+                cancelPendingChange();
+                return;
+            }
+            if (pendingChangeRef.current != null || changeTimerRef.current != null) {
+                // The user has unflushed local edits: the incoming value is stale relative
+                // to the editor (a debounce-window echo or a racing async write-back).
+                // Replacing the document would reset the cursor and lose keystrokes.
+                // Local text wins; flush it upward so the parent state converges instead.
+                flushPendingChange();
+                return;
+            }
             seedRef.current = props.value;
             ignoreChangeRef.current = true;
             try {
@@ -413,7 +427,7 @@ export const TiptapEditorSurface = React.forwardRef<MarkdownEditorSurfaceRef, Ma
             } catch {
                 // ignore
             }
-        }, [cancelPendingChange, editor, props.value]);
+        }, [cancelPendingChange, editor, flushPendingChange, props.value]);
 
         React.useImperativeHandle(
             ref,

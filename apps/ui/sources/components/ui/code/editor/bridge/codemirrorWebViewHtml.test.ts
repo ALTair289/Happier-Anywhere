@@ -239,10 +239,23 @@ describe('buildCodeMirrorWebViewHtml', () => {
 
         const setDocStart = html.indexOf('function setDoc(nextDoc)');
         const sameDocumentGuard = html.indexOf('if (view.state.doc.toString() === normalizedDoc)', setDocStart);
-        const setDocPrefix = html.slice(setDocStart, sameDocumentGuard);
         expect(setDocStart).toBeGreaterThanOrEqual(0);
         expect(sameDocumentGuard).toBeGreaterThan(setDocStart);
-        expect(setDocPrefix).toContain('cancelPendingDocChange();');
+        const setDocBody = html.slice(setDocStart, html.indexOf('function onEnvelope', setDocStart));
+        // A same-document echo settles the pending debounce without touching the doc.
+        expect(setDocBody).toContain('cancelPendingDocChange();');
+        // Unflushed local edits must win over an incoming (stale) doc: setDoc flushes the
+        // pending local change upward instead of replacing the document, which would reset
+        // the cursor and drop in-flight keystrokes.
+        const pendingEditGuard = setDocBody.indexOf('if (changeTimer)');
+        const docReplacement = setDocBody.indexOf('const changes = { from: 0, to: view.state.doc.length');
+        expect(pendingEditGuard).toBeGreaterThanOrEqual(0);
+        expect(docReplacement).toBeGreaterThan(pendingEditGuard);
+        expect(setDocBody).toContain('flushPendingDocChange();');
+        const flushFnStart = html.indexOf('function flushPendingDocChange()');
+        expect(flushFnStart).toBeGreaterThanOrEqual(0);
+        const flushFnBody = html.slice(flushFnStart, html.indexOf('async function boot', flushFnStart));
+        expect(flushFnBody).toContain("type: 'docChanged'");
 
         const recreateViewStart = html.indexOf('function recreateView(doc, language, readOnly)');
         const recreateViewBody = html.slice(recreateViewStart, html.indexOf('view = createView(doc, language, readOnly);', recreateViewStart));
