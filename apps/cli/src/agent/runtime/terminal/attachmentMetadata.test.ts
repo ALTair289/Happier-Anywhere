@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 
 import type { TerminalHostHandle } from '@/integrations/terminalHost/_types';
 
-import { buildTerminalAttachmentMetadataFromHostHandle } from './attachmentMetadata';
+import {
+  buildTerminalAttachmentMetadataFromHostHandle,
+  buildTerminalHostHandleFromAttachmentMetadata,
+} from './attachmentMetadata';
 
 describe('buildTerminalAttachmentMetadataFromHostHandle', () => {
   it('builds tmux terminal metadata from a host handle', () => {
@@ -43,8 +46,39 @@ describe('buildTerminalAttachmentMetadataFromHostHandle', () => {
       zellij: {
         sessionName: 'happy-zellij',
         paneId: 'terminal_7',
+        socketDirV1: '/tmp/happier-zellij-a',
       },
     });
+  });
+
+  it('reconstructs the versioned zellij socket root while accepting legacy markers', () => {
+    expect(buildTerminalHostHandleFromAttachmentMetadata({
+      mode: 'zellij',
+      zellij: {
+        sessionName: 'happy-zellij',
+        paneId: 'terminal_7',
+        socketDirV1: '/tmp/happier-zellij-a',
+      },
+    })).toMatchObject({
+      kind: 'zellij',
+      sessionName: 'happy-zellij',
+      paneId: 'terminal_7',
+      socketDir: '/tmp/happier-zellij-a',
+    });
+
+    const legacyHandle = buildTerminalHostHandleFromAttachmentMetadata({
+      mode: 'zellij',
+      zellij: {
+        sessionName: 'legacy-zellij',
+        paneId: 'terminal_8',
+      },
+    });
+    expect(legacyHandle).toMatchObject({
+      kind: 'zellij',
+      sessionName: 'legacy-zellij',
+      paneId: 'terminal_8',
+    });
+    expect(legacyHandle?.socketDir).toBeUndefined();
   });
 
   it('builds non-focusable Windows console metadata from a PTY host handle', () => {

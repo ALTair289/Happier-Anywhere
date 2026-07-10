@@ -22,20 +22,20 @@ describe('sessionMetadata terminal metadata', () => {
     expect((parsed as any).tmux?.tmpDir).toBe(null);
   });
 
-  it('parses zellij terminal metadata and ignores local socket directory hints', () => {
+  it('parses versioned zellij socket-root attestation metadata', () => {
     const parsed = (protocol as any).SessionTerminalMetadataSchema.parse({
       mode: 'zellij',
       requested: 'zellij',
       zellij: {
         sessionName: 'happier-claude-unified-1',
         paneId: 'terminal_2',
-        socketDir: '/tmp/happier-zellij-a',
+        socketDirV1: '/tmp/happier-zellij-a',
       },
     });
     expect(parsed.mode).toBe('zellij');
     expect((parsed as any).zellij?.sessionName).toBe('happier-claude-unified-1');
     expect((parsed as any).zellij?.paneId).toBe('terminal_2');
-    expect((parsed as any).zellij?.socketDir).toBeUndefined();
+    expect((parsed as any).zellij?.socketDirV1).toBe('/tmp/happier-zellij-a');
   });
 
   it('parses windows terminal metadata', () => {

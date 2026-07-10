@@ -26,6 +26,8 @@ export function createSessionTerminalMetadataSchema(zod: typeof z) {
         .object({
           sessionName: zod.string(),
           paneId: zod.string().optional(),
+          /** Socket-root attestation for hosts written by the v1 terminal-host metadata writer. */
+          socketDirV1: zod.string().optional(),
         })
         .optional(),
       windows: zod
