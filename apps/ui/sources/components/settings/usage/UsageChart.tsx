@@ -4,6 +4,7 @@ import { Text } from '@/components/ui/text/Text';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { UsageDataPoint } from '@/sync/api/account/apiUsage';
 import { t } from '@/text';
+import { getCachedIntlDateTimeFormat } from '@/utils/datetime/cachedIntlFormatters';
 
 interface UsageChartProps {
     data: UsageDataPoint[];
@@ -94,9 +95,9 @@ export const UsageChart: React.FC<UsageChartProps> = ({
         const isToday = date.toDateString() === now.toDateString();
         
         if (isToday) {
-            return date.toLocaleTimeString(locale, { hour: 'numeric' });
+            return getCachedIntlDateTimeFormat(locale, { hour: 'numeric' }).format(date);
         } else {
-            return date.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
+            return getCachedIntlDateTimeFormat(locale, { month: 'short', day: 'numeric' }).format(date);
         }
     };
     
