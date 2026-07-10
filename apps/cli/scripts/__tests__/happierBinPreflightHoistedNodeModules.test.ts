@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { withWorkspaceBundleLockSync } from '../optionalWorkspaceBundleLock.mjs';
 import {
   copyCliBinRuntimeFiles,
   createCliBinPreflightSandbox,
@@ -115,23 +116,28 @@ describe('apps/cli bin/happier.mjs preflight', () => {
     }
   });
 
-  it('refreshes stale local bundled workspace packages before launching from a monorepo checkout', () => {
+  it('launches a valid local snapshot without waiting for the writer lock or running workspace sync', () => {
     const { rootDir: tmp, cleanup } = createCliBinPreflightSandbox('happier-bin-preflight-');
     try {
       const projectRoot = join(tmp, 'apps', 'cli');
       const binDir = join(projectRoot, 'bin');
       const bundledProtocolDir = join(projectRoot, 'node_modules', '@happier-dev', 'protocol');
-      const workspaceProtocolDir = join(tmp, 'packages', 'protocol');
       const scriptsDir = join(tmp, 'scripts', 'workspaces');
+      const syncCalledPath = join(tmp, '.project', 'tmp', 'sync-called');
+      const lockPath = join(tmp, '.project', 'tmp', 'cli-dist-build.lock');
 
-      mkdirSync(join(workspaceProtocolDir, 'dist'), { recursive: true });
       mkdirSync(scriptsDir, { recursive: true });
 
       writeCliProjectFixture({
         projectRoot,
         entrypointDir: 'dist',
-        entrypointContent: "import '@happier-dev/protocol/changes'; console.log('ok');\n",
+        entrypointContent: "console.log('launched');\n",
       });
+      writeFileSync(
+        join(projectRoot, 'dist', '.build-manifest.json'),
+        `${JSON.stringify({ fingerprint: '0123456789abcdef', builtAt: '2026-07-09T00:00:00.000Z', fileCount: 1, toolVersion: '1' })}\n`,
+        'utf8',
+      );
       writeFileSync(
         join(projectRoot, 'package.json'),
         `${JSON.stringify({ name: '@happier-dev/cli', bundledDependencies: ['@happier-dev/protocol'] }, null, 2)}\n`,
@@ -140,33 +146,23 @@ describe('apps/cli bin/happier.mjs preflight', () => {
       copyCliBinRuntimeFiles({ binDir });
       writeFileSync(
         join(scriptsDir, 'syncBundledWorkspacePackages.mjs'),
-        readFileSync(join(process.cwd(), '..', '..', 'scripts', 'workspaces', 'syncBundledWorkspacePackages.mjs'), 'utf8'),
-        'utf8',
-      );
-      writeFileSync(
-        join(scriptsDir, 'vendorBundledWorkspaceRuntimeDependenciesFallback.mjs'),
-        readFileSync(join(process.cwd(), '..', '..', 'scripts', 'workspaces', 'vendorBundledWorkspaceRuntimeDependenciesFallback.mjs'), 'utf8'),
+        [
+          "import { mkdirSync, writeFileSync } from 'node:fs';",
+          "import { dirname } from 'node:path';",
+          `const syncCalledPath = ${JSON.stringify(syncCalledPath)};`,
+          'export function syncBundledWorkspacePackages() {',
+          '  mkdirSync(dirname(syncCalledPath), { recursive: true });',
+          "  writeFileSync(syncCalledPath, 'called', 'utf8');",
+          '}',
+          '',
+        ].join('\n'),
         'utf8',
       );
 
       writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'repo', private: true }), 'utf8');
       writeFileSync(join(tmp, 'yarn.lock'), '# lock\n', 'utf8');
       writeProtocolBundleStub({
-        packageDir: workspaceProtocolDir,
-        exportsMap: {
-          '.': './dist/index.js',
-          './changes': './dist/changes.js',
-        },
-        distFiles: {
-          'dist/changes.js': 'export const change = true;\n',
-        },
-      });
-      writeProtocolBundleStub({
         packageDir: bundledProtocolDir,
-        exportsMap: {
-          '.': './dist/index.js',
-          './changes': './dist/changes.js',
-        },
       });
 
       writeNodeModuleStub({
@@ -186,19 +182,28 @@ describe('apps/cli bin/happier.mjs preflight', () => {
         },
       });
 
-      const res = runHappierBin({
-        binDir,
-        cwd: projectRoot,
-        args: ['--help'],
-        env: {
-          ...process.env,
-          NODE_OPTIONS: '',
+      const res = withWorkspaceBundleLockSync(
+        () => runHappierBin({
+          binDir,
+          cwd: projectRoot,
+          args: ['--help'],
+          timeoutMs: 2_000,
+          env: {
+            ...process.env,
+            NODE_OPTIONS: '',
+          },
+        }),
+        {
+          lockPath,
+          timeoutMs: 2_000,
+          pollIntervalMs: 10,
+          staleAfterMs: 5_000,
         },
-      });
+      );
 
       expect(res.status).toBe(0);
-      expect(res.stdout).toContain('ok');
-      expect(existsSync(join(bundledProtocolDir, 'dist', 'changes.js'))).toBe(true);
+      expect(res.stdout).toContain('launched');
+      expect(existsSync(syncCalledPath)).toBe(false);
     } finally {
       cleanup();
     }

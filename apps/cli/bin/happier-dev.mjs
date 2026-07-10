@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url';
 import { join, dirname } from 'path';
 import { homedir } from 'os';
 
-import { prepareRuntimeEntrypoint } from './_prepareRuntimeEntrypoint.mjs';
+import { importPreparedRuntimeEntrypoint } from './_importRuntimeEntrypoint.mjs';
 
 // Check if we're already running with the flags
 const hasNoWarnings = process.execArgv.includes('--no-warnings');
@@ -18,13 +18,11 @@ process.env.HAPPIER_VARIANT = 'dev';
 if (!hasNoWarnings || !hasNoDeprecation) {
   // Re-execute with the flags
   const __filename = fileURLToPath(import.meta.url);
-  const projectRoot = dirname(dirname(__filename));
-  const scriptPath = await prepareRuntimeEntrypoint(projectRoot, 'index.mjs');
 
   try {
     execFileSync(
       process.execPath,
-      ['--no-warnings', '--no-deprecation', scriptPath, ...process.argv.slice(2)],
+      ['--no-warnings', '--no-deprecation', __filename, ...process.argv.slice(2)],
       {
         stdio: 'inherit',
         env: process.env
@@ -37,5 +35,5 @@ if (!hasNoWarnings || !hasNoDeprecation) {
 } else {
   // Already have the flags, import normally
   const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-  await import(await prepareRuntimeEntrypoint(projectRoot, 'index.mjs'));
+  await importPreparedRuntimeEntrypoint(projectRoot, 'index.mjs');
 }

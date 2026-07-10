@@ -3,10 +3,11 @@ import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+
+import { resolveTypeScriptCliPath } from '../../../scripts/workspaces/typescriptCommand.mjs';
 import { syncBundledWorkspacePackages } from '../../../scripts/workspaces/syncBundledWorkspacePackages.mjs';
 import { resolveBundledWorkspaceDependencyBuildOrder } from '../../../scripts/workspaces/resolveWorkspaceDependencyBuildOrder.mjs';
 import {
-  buildWindowsCmdShimInvocation,
   execYarn as execYarnCommand,
   resolveYarnInvocation as resolveYarnCommandInvocation,
 } from '../../../scripts/workspaces/execYarnCommand.mjs';
@@ -80,54 +81,21 @@ function resolveCliBundledWorkspacePackageNames({ exists = existsSync } = {}) {
   }).filter((workspaceName) => exists(resolve(repoRoot, 'packages', workspaceName, 'tsconfig.json')));
 }
 
-export function resolveTscBin({ exists } = {}) {
+export function resolveTscBin({ exists, resolveTypeScriptCliPathImpl = resolveTypeScriptCliPath } = {}) {
   const existsImpl = exists ?? existsSync;
-  const isWindows = process.platform === 'win32';
-  const binName = isWindows ? 'tsc.cmd' : 'tsc';
-  const candidates = isWindows
-    ? [
-        // Windows: prefer cmd shims when present.
-        resolve(repoRoot, 'node_modules', '.bin', binName),
-        resolve(repoRoot, 'cli', 'node_modules', '.bin', binName),
-        // Fallback: allow executing the JS entry via Node if shims are missing.
-        resolve(repoRoot, 'node_modules', 'typescript', 'bin', 'tsc'),
-        resolve(repoRoot, 'cli', 'node_modules', 'typescript', 'bin', 'tsc'),
-      ]
-    : [
-        // Prefer the real TypeScript entrypoint over node_modules/.bin symlinks.
-        // On macOS, workspace-hoisted `.bin/*` symlinks can intermittently fail with ENOENT.
-        resolve(repoRoot, 'node_modules', 'typescript', 'bin', 'tsc'),
-        resolve(repoRoot, 'cli', 'node_modules', 'typescript', 'bin', 'tsc'),
-        resolve(repoRoot, 'node_modules', '.bin', binName),
-        resolve(repoRoot, 'cli', 'node_modules', '.bin', binName),
-      ];
-
-  for (const candidate of candidates) {
-    if (existsImpl(candidate)) return candidate;
+  const candidate = resolveTypeScriptCliPathImpl({ cwd: resolve(repoRoot, 'apps', 'cli') });
+  if (!existsImpl(candidate)) {
+    throw new Error(`Native TypeScript compiler entrypoint not found: ${candidate}`);
   }
-
-  return candidates[0];
+  return candidate;
 }
-
-const tscBin = resolveTscBin();
 
 export function runTsc(tsconfigPath, opts) {
   const exec = opts?.execFileSync ?? execFileSync;
-  const tsc = opts?.tscBin ?? tscBin;
-  const platform = opts?.platform ?? process.platform;
+  const tsc = opts?.tscBin ?? resolveTscBin();
   try {
-    if (platform === 'win32' && (tsc.endsWith('.cmd') || tsc.endsWith('.bat'))) {
-      const wrapped = buildWindowsCmdShimInvocation(tsc, ['-p', tsconfigPath], {
-        comspec: opts?.comspec,
-      });
-      exec(wrapped.command, wrapped.args, {
-        stdio: 'inherit',
-        windowsVerbatimArguments: wrapped.windowsVerbatimArguments,
-      });
-    } else {
-      // Execute tsc via Node to avoid `.bin/*` symlink spawn issues and shebang portability quirks.
-      exec(process.execPath, [tsc, '-p', tsconfigPath], { stdio: 'inherit' });
-    }
+    // Execute the exported JavaScript entrypoint via the managed Node runtime on every platform.
+    exec(process.execPath, [tsc, '-p', tsconfigPath], { stdio: 'inherit' });
   } catch (error) {
     const suffix = tsconfigPath ? ` (${tsconfigPath})` : '';
     const message = error instanceof Error ? error.message : String(error);
@@ -186,8 +154,8 @@ export function syncBundledWorkspaceRuntimeDependencies(opts = {}) {
   }
 }
 
-export function main() {
-  return withBuildSharedDepsLock(async () => {
+export function main(options = {}) {
+  const build = async () => {
     const bundledWorkspaceNames = resolveCliBundledWorkspacePackageNames();
     for (const name of bundledWorkspaceNames) {
       runTsc(resolve(repoRoot, 'packages', name, 'tsconfig.json'));
@@ -203,7 +171,12 @@ export function main() {
     syncBundledWorkspaceDist({ repoRoot });
     syncBundledWorkspaceRuntimeDependencies({ repoRoot });
     syncCliRuntimeDependencies({ repoRoot });
-  });
+  };
+
+  if (options.skipLock === true) {
+    return build();
+  }
+  return withBuildSharedDepsLock(build, options);
 }
 
 const invokedAsMain = (() => {

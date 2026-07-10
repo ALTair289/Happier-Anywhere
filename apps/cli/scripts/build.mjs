@@ -1,15 +1,13 @@
 import { spawnSync } from 'node:child_process';
-import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { resolveTypeScriptCliPath } from '../../../scripts/workspaces/typescriptCommand.mjs';
 import { finalizeDist, readCliDistBuildManifestFingerprint } from './finalizeDist.mjs';
 import { withOptionalCliSharedDepsBuildLock } from './optionalWorkspaceBundleLock.mjs';
 import { main as rmDist } from './rmDist.mjs';
 import { runPkgrollBuild } from './runPkgrollBuild.mjs';
 import { syncPackageDist } from './syncPackageDist.mjs';
-
-const require = createRequire(import.meta.url);
 
 function resolveBuildOutputDir(env = process.env) {
   const raw = String(env?.HAPPIER_CLI_BUILD_OUTPUT_DIR ?? '').trim();
@@ -42,6 +40,7 @@ export async function buildCliDist(options = {}) {
       lockTimeoutMs: options.lockTimeoutMs,
       lockPollIntervalMs: options.lockPollIntervalMs,
       lockStaleAfterMs: options.lockStaleAfterMs,
+      skipLock: options.skipLock,
       env: options.env,
     },
   );
@@ -57,6 +56,7 @@ async function buildCliDistUnlocked(options = {}) {
   env.HAPPIER_CLI_BUILD_OUTPUT_DIR = outputDir;
   const expectedCurrentFingerprint = readCliDistBuildManifestFingerprint(join(packageRoot, 'dist'));
   const rmDistImpl = options.rmDistImpl ?? rmDist;
+  const resolveTypeScriptCliPathImpl = options.resolveTypeScriptCliPathImpl ?? resolveTypeScriptCliPath;
   const runTypecheckImpl = options.runTypecheckImpl ?? runNodeScript;
   const runPkgrollBuildImpl = options.runPkgrollBuildImpl ?? runPkgrollBuild;
   const finalizeDistImpl = options.finalizeDistImpl ?? finalizeDist;
@@ -73,7 +73,7 @@ async function buildCliDistUnlocked(options = {}) {
     skipLock: true,
   });
 
-  runTypecheckImpl(require.resolve('typescript/bin/tsc'), ['--noEmit'], {
+  runTypecheckImpl(resolveTypeScriptCliPathImpl({ cwd: packageRoot }), ['--noEmit'], {
     cwd: packageRoot,
     env,
   });

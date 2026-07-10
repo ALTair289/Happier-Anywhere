@@ -5,7 +5,12 @@ import { join, resolve } from 'node:path';
 import { createTempDirSync, removeTempDirSync } from '../../../src/testkit/fs/tempDir';
 import { ensureDirectorySync, writeTextFileSync } from '../../../src/testkit/fs/fileHelpers';
 
-const runtimeBinFiles = ['happier.mjs', '_resolveRuntimeEntrypoint.mjs', '_prepareRuntimeEntrypoint.mjs'];
+const runtimeBinFiles = [
+  'happier.mjs',
+  '_resolveRuntimeEntrypoint.mjs',
+  '_prepareRuntimeEntrypoint.mjs',
+  '_importRuntimeEntrypoint.mjs',
+];
 const runtimeScriptFiles = ['optionalWorkspaceBundleLock.mjs'];
 
 export function createCliBinPreflightSandbox(prefix: string): { rootDir: string; cleanup: () => void } {
@@ -46,11 +51,14 @@ export function runHappierBin(options: {
   cwd: string;
   args?: readonly string[];
   env?: NodeJS.ProcessEnv;
+  timeoutMs?: number;
 }): SpawnSyncReturns<string> {
   return spawnSync(process.execPath, [join(options.binDir, 'happier.mjs'), ...(options.args ?? [])], {
     cwd: options.cwd,
     encoding: 'utf8',
     env: options.env,
+    timeout: options.timeoutMs,
+    killSignal: 'SIGKILL',
   });
 }
 

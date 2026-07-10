@@ -4,20 +4,17 @@ import { execFileSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import { join, dirname } from 'path';
 
-import { prepareRuntimeEntrypoint } from './_prepareRuntimeEntrypoint.mjs';
+import { importPreparedRuntimeEntrypoint } from './_importRuntimeEntrypoint.mjs';
 
 const hasNoWarnings = process.execArgv.includes('--no-warnings');
 const hasNoDeprecation = process.execArgv.includes('--no-deprecation');
 
 if (!hasNoWarnings || !hasNoDeprecation) {
-  const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-  const entrypoint = await prepareRuntimeEntrypoint(projectRoot, join('mcp', 'launchers', 'stdioMcpServerLauncher.mjs'));
-
   try {
     execFileSync(process.execPath, [
       '--no-warnings',
       '--no-deprecation',
-      entrypoint,
+      fileURLToPath(import.meta.url),
       ...process.argv.slice(2),
     ], {
       stdio: 'inherit',
@@ -28,5 +25,5 @@ if (!hasNoWarnings || !hasNoDeprecation) {
   }
 } else {
   const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-  import(await prepareRuntimeEntrypoint(projectRoot, join('mcp', 'launchers', 'stdioMcpServerLauncher.mjs')));
+  await importPreparedRuntimeEntrypoint(projectRoot, join('mcp', 'launchers', 'stdioMcpServerLauncher.mjs'));
 }

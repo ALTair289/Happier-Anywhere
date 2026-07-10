@@ -27,6 +27,7 @@ describe('buildCliDist', () => {
               HAPPIER_WORKSPACE_DIST_BUILD_LOCK_HELD: lockPath,
             },
             rmDistImpl: async () => { events.push('rm'); },
+            resolveTypeScriptCliPathImpl: () => '/repo/node_modules/@typescript/native/bin/tsc',
             runTypecheckImpl: () => { events.push('typecheck'); },
             runPkgrollBuildImpl: () => { events.push('bundle'); },
             finalizeDistImpl: () => { events.push('finalize'); },
@@ -67,6 +68,7 @@ describe('buildCliDist', () => {
         rmDistImpl: async () => {
           writeFileSync(eventsPath, 'rm\n', { flag: 'a' });
         },
+        resolveTypeScriptCliPathImpl: () => '/repo/node_modules/@typescript/native/bin/tsc',
         runTypecheckImpl: () => {
           writeFileSync(eventsPath, 'typecheck\n', { flag: 'a' });
         },

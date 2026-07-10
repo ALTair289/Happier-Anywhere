@@ -7,6 +7,7 @@
     "hsetup": "./bin/hsetup.mjs"
   },
   "scripts": {
+    "tsc": "node ../../scripts/workspaces/runTypeScriptCli.mjs",
     "build:shared": "yarn -s workspace @happier-dev/protocol build && yarn -s workspace @happier-dev/cli-common build",
     "build": "node ../../scripts/workspaces/buildTypeScriptPackageDist.mjs -p tsconfig.json && node scripts/writeDistBinWrappers.mjs",
     "build:binary": "yarn -s build:shared && yarn -s build && node scripts/buildBinary.mjs",
@@ -19,7 +20,8 @@
     "zod": "4.3.6"
   },
   "devDependencies": {
-    "typescript": "^5.9.3",
+    "@typescript/native": "npm:typescript@7.0.2",
+    "typescript": "5.9.3",
     "vitest": "^3.2.4"
   },
   "packageManager": "yarn@1.22.22"

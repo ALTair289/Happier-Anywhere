@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url';
 import { join, dirname } from 'path';
 import { createRequire } from 'module';
 
-import { prepareRuntimeEntrypoint } from './_prepareRuntimeEntrypoint.mjs';
+import { importPreparedRuntimeEntrypoint } from './_importRuntimeEntrypoint.mjs';
 
 function preflightRequiredDependencies(projectRoot) {
   const cliRequire = createRequire(import.meta.url);
@@ -57,17 +57,13 @@ const hasNoWarnings = process.execArgv.includes('--no-warnings');
 const hasNoDeprecation = process.execArgv.includes('--no-deprecation');
 
 if (!hasNoWarnings || !hasNoDeprecation) {
-  // Get path to the actual CLI entrypoint
-  const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-  const entrypoint = await prepareRuntimeEntrypoint(projectRoot, 'index.mjs');
-  preflightRequiredDependencies(projectRoot);
-  
-  // Execute the actual CLI directly with the correct flags
+  // Re-run this stable wrapper with the desired flags. The flagged process selects and imports
+  // a complete snapshot so a writer rename between selection and launch can be retried safely.
   try {
     execFileSync(process.execPath, [
       '--no-warnings',
       '--no-deprecation',
-      entrypoint,
+      fileURLToPath(import.meta.url),
       ...process.argv.slice(2)
     ], {
       stdio: 'inherit',
@@ -81,7 +77,6 @@ if (!hasNoWarnings || !hasNoDeprecation) {
   // We're running Node with the flags we wanted, import the CLI entrypoint
   // module to avoid creating a new process.
   const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-  const entrypoint = await prepareRuntimeEntrypoint(projectRoot, 'index.mjs');
   preflightRequiredDependencies(projectRoot);
-  import(entrypoint);
+  await importPreparedRuntimeEntrypoint(projectRoot, 'index.mjs');
 }

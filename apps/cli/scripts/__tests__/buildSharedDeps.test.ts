@@ -25,43 +25,45 @@ describe('buildSharedDeps', () => {
       throw new Error('tsc failed');
     });
 
-    expect(() => runTsc('/repo/packages/protocol/tsconfig.json', { execFileSync })).toThrow(
+    expect(() => runTsc('/repo/packages/protocol/tsconfig.json', {
+      execFileSync,
+      tscBin: '/repo/node_modules/@typescript/native/bin/tsc',
+    })).toThrow(
       /tsconfig\.json/i,
     );
   });
 
-  it('invokes tsc.cmd via cmd.exe on Windows', () => {
+  it('invokes the native TypeScript JavaScript entrypoint via Node on Windows', () => {
     const execFileSync = vi.fn(() => undefined);
 
     runTsc('C:\\repo\\packages\\protocol\\tsconfig.json', {
       execFileSync,
-      tscBin: 'C:\\repo\\node_modules\\.bin\\tsc.cmd',
+      tscBin: 'C:\\repo\\node_modules\\@typescript\\native\\bin\\tsc',
       platform: 'win32',
     });
 
     expect(execFileSync).toHaveBeenCalled();
-    const cmdCall = execFileSync.mock.calls[0] as unknown as [string, string[], { stdio: string }] | undefined;
-    if (!cmdCall) throw new Error('expected execFileSync call');
-    const [cmd, args, opts] = cmdCall;
-    expect(cmd).toBe('cmd.exe');
-    expect(args.slice(0, 3)).toEqual(['/d', '/s', '/c']);
-    expect(args[3]).toBe(
-      '"C:\\repo\\node_modules\\.bin\\tsc.cmd ^"-p^" ^"C:\\repo\\packages\\protocol\\tsconfig.json^""',
-    );
-    expect(opts).toEqual({
-      stdio: 'inherit',
-      windowsVerbatimArguments: true,
-    });
+    const nodeCall = execFileSync.mock.calls[0] as unknown as [string, string[], { stdio: string }] | undefined;
+    if (!nodeCall) throw new Error('expected execFileSync call');
+    const [cmd, args, opts] = nodeCall;
+    expect(cmd).toBe(process.execPath);
+    expect(args).toEqual([
+      'C:\\repo\\node_modules\\@typescript\\native\\bin\\tsc',
+      '-p',
+      'C:\\repo\\packages\\protocol\\tsconfig.json',
+    ]);
+    expect(opts).toEqual({ stdio: 'inherit' });
   });
 
   it('prefers the workspace root tsc binary when present', () => {
     const bin = resolveTscBin({
+      resolveTypeScriptCliPathImpl: () => '/repo/node_modules/@typescript/native/bin/tsc',
       exists: (candidate: string) =>
-        candidate.includes(`${sep}node_modules${sep}typescript${sep}bin${sep}`) &&
+        candidate.includes(`${sep}node_modules${sep}@typescript${sep}native${sep}bin${sep}`) &&
         !candidate.includes(`${sep}cli${sep}node_modules${sep}`),
     });
 
-    expect(bin).toMatch(/node_modules/);
+    expect(bin).toMatch(/node_modules[\\/]@typescript[\\/]native[\\/]bin[\\/]tsc$/);
     expect(bin).not.toMatch(/cli[\\/]+node_modules/);
   });
 
@@ -179,7 +181,7 @@ describe('buildSharedDeps', () => {
 
     runTsc('/repo/packages/protocol/tsconfig.json', {
       execFileSync,
-      tscBin: '/repo/node_modules/typescript/bin/tsc',
+      tscBin: '/repo/node_modules/@typescript/native/bin/tsc',
       platform: 'darwin',
     });
 
@@ -187,7 +189,7 @@ describe('buildSharedDeps', () => {
     if (!nodeCall) throw new Error('expected execFileSync call');
     const [cmd, args] = nodeCall;
     expect(cmd).toBe(process.execPath);
-    expect(args).toEqual(['/repo/node_modules/typescript/bin/tsc', '-p', '/repo/packages/protocol/tsconfig.json']);
+    expect(args).toEqual(['/repo/node_modules/@typescript/native/bin/tsc', '-p', '/repo/packages/protocol/tsconfig.json']);
   });
 
   it('syncs workspace dist outputs into bundled deps for local bundled hosts when present', () => {
@@ -421,6 +423,37 @@ describe('buildSharedDeps', () => {
       await Promise.all([first, second]);
 
       expect(events).toEqual(['first:start', 'first:end', 'second:start']);
+    } finally {
+      removeTempDirSync(rootDir);
+    }
+  });
+
+  it('honors a parent-held dist build lock handoff without waiting on itself', async () => {
+    const rootDir = createTempDirSync('happy-build-shared-parent-lock-');
+    try {
+      const lockPath = resolve(rootDir, 'cli-dist-build.lock');
+      const events: string[] = [];
+
+      await withBuildSharedDepsLock(async () => {
+        events.push('parent:start');
+        await withBuildSharedDepsLock(async () => {
+          events.push('child:start');
+        }, {
+          lockPath,
+          timeoutMs: 50,
+          pollIntervalMs: 10,
+          staleAfterMs: 1_000,
+          env: { HAPPIER_WORKSPACE_DIST_BUILD_LOCK_HELD: lockPath },
+        });
+        events.push('parent:end');
+      }, {
+        lockPath,
+        timeoutMs: 2_000,
+        pollIntervalMs: 10,
+        staleAfterMs: 1_000,
+      });
+
+      expect(events).toEqual(['parent:start', 'child:start', 'parent:end']);
     } finally {
       removeTempDirSync(rootDir);
     }
