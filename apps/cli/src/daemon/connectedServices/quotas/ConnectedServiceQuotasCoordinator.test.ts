@@ -46,6 +46,18 @@ const directLiveExternalTokenInjectionCapability = {
   },
 } as const;
 
+const brokerSelectionIndirectionCapability = {
+  directLiveHotAuth: {
+    supportsInTurnApply: false,
+    requiresExactRuntimeIdentity: false,
+    refreshSelectionResync: 'not_applicable',
+    authMode: {
+      kind: 'provider_owned',
+      name: 'broker_selection_indirection',
+    },
+  },
+} as const;
+
 function buildQuotaSnapshotFixture(input: Readonly<{
   serviceId: ConnectedServiceQuotaSnapshotV1['serviceId'];
   profileId: string;
@@ -1790,6 +1802,8 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       sourceProfileId: 'active',
       sourceRemainingPercent: 5,
       sourceThresholdPercent: 15,
+      // PS-1: reactive at-threshold switch — the source was observed below threshold, not projected.
+      sourceProjected: false,
       selectedProfileId: 'backup',
       selectedRemainingPercent: 90,
       targetCount: 1,
@@ -2928,6 +2942,132 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       phase: 'soft_switch',
       reason: 'soft_switch_target_eligibility_unknown',
     }));
+  });
+
+  it('reactively soft-switches on an in-band usage change when the active member is projected to burn below the threshold before the next window', async () => {
+    const now = 1_000_000;
+    const softSwitchEligibility = createSoftSwitchEligibilityFixture({
+      serviceId: 'openai-codex',
+      now,
+    });
+    // Fast burn on the ACTIVE member: 60% -> 40% remaining across 30s in the in-band runtime store.
+    softSwitchEligibility.runtimeQuotaSnapshots.recordSnapshot({
+      serviceId: 'openai-codex',
+      groupId: 'team',
+      profileId: 'active',
+      snapshot: buildQuotaSnapshotFixture({ serviceId: 'openai-codex', profileId: 'active', now: now - 30_000, remainingPct: 60 }),
+    });
+    softSwitchEligibility.runtimeQuotaSnapshots.recordSnapshot({
+      serviceId: 'openai-codex',
+      groupId: 'team',
+      profileId: 'active',
+      snapshot: buildQuotaSnapshotFixture({ serviceId: 'openai-codex', profileId: 'active', now, remainingPct: 40 }),
+    });
+
+    // Canonical source-backed account usage: active is at 40% (ABOVE the 15% threshold — a poll-only
+    // soft-switch would not fire), backup is healthy at 90%.
+    const accountUsageStore = createProviderAccountUsageStore();
+    const activeUsageSnapshot = buildProviderAccountUsageSnapshotFixture({
+      serviceId: 'openai-codex', groupId: 'team', profileId: 'active', groupGeneration: 1, now, remainingPct: 40,
+    });
+    recordGroupMemberAccountUsageFixture(accountUsageStore, {
+      snapshot: activeUsageSnapshot, serviceId: 'openai-codex', groupId: 'team', profileId: 'active', groupGeneration: 1,
+    });
+    recordGroupMemberAccountUsageFixture(accountUsageStore, {
+      snapshot: buildProviderAccountUsageSnapshotFixture({
+        serviceId: 'openai-codex', groupId: 'team', profileId: 'backup', groupGeneration: 1, now, remainingPct: 90,
+      }),
+      serviceId: 'openai-codex', groupId: 'team', profileId: 'backup', groupGeneration: 1,
+    });
+
+    const switchBeforeTurn = vi.fn(async () => ({ status: 'switched' as const, activeProfileId: 'backup', generation: 2 }));
+    const diagnostics: unknown[] = [];
+    const coordinator = new ConnectedServiceQuotasCoordinator({
+      api: { getConnectedServiceAuthGroup: softSwitchEligibility.getConnectedServiceAuthGroup } as unknown as QuotaApi,
+      credentials: { token: 'happy-token', encryption: { type: 'legacy', secret: new Uint8Array(32).fill(9) } },
+      quotaFetchers: [],
+      now: () => now,
+      randomBytes: (length: number) => randomBytes(length),
+      discoveryEnabled: false,
+      runtimeQuotaSnapshots: softSwitchEligibility.runtimeQuotaSnapshots,
+      accountUsageStore,
+      authGroupSwitchCoordinator: { switchBeforeTurn },
+      groupSwitchCheckMinIntervalMs: 0,
+      recordDiagnostic: (event: unknown) => diagnostics.push(event),
+    });
+
+    await coordinator.handleAccountUsageChanged({
+      sessionId: 'session-1',
+      serviceId: 'openai-codex',
+      profileId: 'active',
+      groupId: 'team',
+      groupGeneration: 1,
+      recordId: activeUsageSnapshot.recordId,
+      snapshot: activeUsageSnapshot,
+    });
+
+    expect(switchBeforeTurn).toHaveBeenCalledTimes(1);
+    expect(switchBeforeTurn).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 'session-1',
+      serviceId: 'openai-codex',
+      groupId: 'team',
+      reason: 'soft_threshold',
+      observedProfileId: 'active',
+    }));
+    // PS-1: a burn-projection switch must be distinguishable from a reactive one in diagnostics —
+    // the source was ABOVE threshold (40% vs 15%) and only the projected next-window remaining tripped it.
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'quota_work_requested',
+      phase: 'soft_switch',
+      eligibilityStatus: 'eligible',
+      sourceProjected: true,
+    }));
+  });
+
+  it('does not reactively soft-switch on a poll-sourced usage change (the poll runs its own check)', async () => {
+    const now = 1_000_000;
+    const softSwitchEligibility = createSoftSwitchEligibilityFixture({ serviceId: 'openai-codex', now });
+    softSwitchEligibility.runtimeQuotaSnapshots.recordSnapshot({
+      serviceId: 'openai-codex', groupId: 'team', profileId: 'active',
+      snapshot: buildQuotaSnapshotFixture({ serviceId: 'openai-codex', profileId: 'active', now: now - 30_000, remainingPct: 60 }),
+    });
+    softSwitchEligibility.runtimeQuotaSnapshots.recordSnapshot({
+      serviceId: 'openai-codex', groupId: 'team', profileId: 'active',
+      snapshot: buildQuotaSnapshotFixture({ serviceId: 'openai-codex', profileId: 'active', now, remainingPct: 40 }),
+    });
+    const accountUsageStore = createProviderAccountUsageStore();
+    const activeUsageSnapshot = buildProviderAccountUsageSnapshotFixture({
+      serviceId: 'openai-codex', groupId: 'team', profileId: 'active', groupGeneration: 1, now, remainingPct: 40,
+    });
+    recordGroupMemberAccountUsageFixture(accountUsageStore, {
+      snapshot: activeUsageSnapshot, serviceId: 'openai-codex', groupId: 'team', profileId: 'active', groupGeneration: 1,
+    });
+    const switchBeforeTurn = vi.fn(async () => ({ status: 'switched' as const, activeProfileId: 'backup', generation: 2 }));
+    const coordinator = new ConnectedServiceQuotasCoordinator({
+      api: { getConnectedServiceAuthGroup: softSwitchEligibility.getConnectedServiceAuthGroup } as unknown as QuotaApi,
+      credentials: { token: 'happy-token', encryption: { type: 'legacy', secret: new Uint8Array(32).fill(9) } },
+      quotaFetchers: [],
+      now: () => now,
+      randomBytes: (length: number) => randomBytes(length),
+      discoveryEnabled: false,
+      runtimeQuotaSnapshots: softSwitchEligibility.runtimeQuotaSnapshots,
+      accountUsageStore,
+      authGroupSwitchCoordinator: { switchBeforeTurn },
+      groupSwitchCheckMinIntervalMs: 0,
+    });
+
+    await coordinator.handleAccountUsageChanged({
+      sessionId: 'session-1',
+      serviceId: 'openai-codex',
+      profileId: 'active',
+      groupId: 'team',
+      groupGeneration: 1,
+      recordId: activeUsageSnapshot.recordId,
+      snapshot: activeUsageSnapshot,
+      source: 'poll',
+    });
+
+    expect(switchBeforeTurn).not.toHaveBeenCalled();
   });
 
   it('does not fall back to runtime quota snapshots for same-account fanout eligibility when canonical account usage is cold', async () => {
@@ -5029,6 +5169,120 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       event: 'quota_work_deferred',
       phase: 'same_account_fanout',
       reason: 'same_account_fanout_candidate_deferred_until_turn_boundary',
+    }));
+  });
+
+  it('fans out a broker-indirection (daemon-authoritative) sibling WITHOUT a live probe instead of silently stranding it', async () => {
+    const now = 1_000_000;
+    const credentials: Credentials = {
+      token: 'happy-token',
+      encryption: { type: 'legacy', secret: new Uint8Array(32).fill(9) },
+    };
+    const api = {
+      getAccountEncryptionMode: vi.fn(async () => 'plain' as const),
+      getConnectedServiceQuotaSnapshotPlain: vi.fn(async () => null),
+      getConnectedServiceCredentialPlain: vi.fn(async () => null),
+      registerProviderAccountUsageSnapshotPlain: vi.fn(async () => {}),
+      getConnectedServiceQuotaSnapshotSealed: vi.fn(async () => null),
+      getConnectedServiceCredentialSealed: vi.fn(async () => null),
+      registerProviderAccountUsageSnapshotSealed: vi.fn(async () => {}),
+    } as unknown as QuotaApi;
+    const switchBeforeTurn = vi.fn(async () => ({ status: 'switched' as const, activeProfileId: 'backup', generation: 2 }));
+    // The opencode/pi runtime cannot answer the identity probe — a live probe would return the
+    // stranding `unsupported_session_runtime_method`. The daemon's indexed identity is authoritative.
+    const readRuntimeAccountIdentity = vi.fn(async () => ({
+      status: 'unavailable' as const,
+      reason: 'unsupported_session_runtime_method',
+    }));
+    const diagnostics: unknown[] = [];
+    const coordinatorParams = {
+      api,
+      credentials,
+      quotaFetchers: [],
+      now: () => now,
+      randomBytes: (length: number) => randomBytes(length),
+      authGroupSwitchCoordinator: { switchBeforeTurn },
+      groupSwitchCheckMinIntervalMs: 0,
+      sameAccountFanoutStrategyResolver: () => 'provider_account_id' as const,
+      runtimeAuthApplyCapabilityResolver: (input: Readonly<{
+        sourceSessionId: string;
+        targetSessionId?: string;
+      }>) => input.targetSessionId === 'same-account'
+        ? brokerSelectionIndirectionCapability
+        : { directLiveHotAuth: 'unsupported' as const },
+      readRuntimeAccountIdentity,
+      recordDiagnostic: (event: unknown) => diagnostics.push(event),
+    } satisfies ConstructorParameters<typeof ConnectedServiceQuotasCoordinator>[0] & {
+      readRuntimeAccountIdentity: typeof readRuntimeAccountIdentity;
+    };
+    const coordinator = new ConnectedServiceQuotasCoordinator(coordinatorParams);
+    for (const [sessionId, pid] of [['source', 591], ['same-account', 592]] as const) {
+      coordinator.registerSpawnTarget({
+        pid,
+        sessionId,
+        connectedServicesBindingsRaw: {
+          v: 1,
+          bindingsByServiceId: {
+            'openai-codex': {
+              source: 'connected',
+              selection: 'group',
+              groupId: 'team',
+            },
+          },
+        },
+        connectedServiceSelectionsEnv: {
+          [HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY]: JSON.stringify([{
+            kind: 'group',
+            serviceId: 'openai-codex',
+            groupId: 'team',
+            activeProfileId: 'primary',
+            fallbackProfileId: 'backup',
+            generation: 4,
+          }]),
+        },
+      });
+      coordinator.recordRuntimeAccountIdentityFromSnapshot({
+        sessionId,
+        serviceId: 'openai-codex',
+        groupId: 'team',
+        profileId: 'primary',
+        providerAccountId: 'acct-a',
+        accountLabel: null,
+        observedAtMs: now,
+        source: 'active_account_verification',
+        proofStrength: 'exact',
+        groupGeneration: 4,
+      });
+    }
+
+    await expect(coordinator.recordAccountExhaustionAndFanout({
+      sourceSessionId: 'source',
+      serviceId: 'openai-codex',
+      groupId: 'team',
+      exhaustedProfileId: 'primary',
+      providerAccountId: 'acct-a',
+      resetAtMs: null,
+      reason: 'usage_limit',
+    })).resolves.toEqual({
+      status: 'recorded',
+      fanoutCandidates: 1,
+      fanoutRequests: 1,
+    });
+
+    // The daemon-authoritative candidate is switched (cross-account applied via broker), NOT stranded,
+    // and its runtime is never probed for identity.
+    expect(readRuntimeAccountIdentity).not.toHaveBeenCalled();
+    expect(switchBeforeTurn).toHaveBeenCalledTimes(1);
+    expect(switchBeforeTurn).toHaveBeenCalledWith({
+      sessionId: 'same-account',
+      serviceId: 'openai-codex',
+      groupId: 'team',
+      reason: 'same_provider_account_exhausted',
+      observedProfileId: 'primary',
+    });
+    expect(diagnostics).not.toContainEqual(expect.objectContaining({
+      event: 'quota_work_suppressed',
+      reason: 'unsupported_session_runtime_method',
     }));
   });
 

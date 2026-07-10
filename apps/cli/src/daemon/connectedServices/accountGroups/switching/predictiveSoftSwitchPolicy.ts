@@ -131,6 +131,29 @@ function supportsDirectLiveHotAuth(
   return directLiveHotAuth.refreshSelectionResync === 'not_applicable';
 }
 
+/**
+ * Does this provider's runtime require a LIVE session-runtime identity probe to prove which account a
+ * live session is on, for same-account fanout reconciliation?
+ *
+ * - `true`  — the account binding lives INSIDE the runtime process and can drift without the daemon
+ *   knowing (codex: `requiresExactRuntimeIdentity: true`, external token injection). The fanout MUST
+ *   re-probe the live runtime before switching a candidate.
+ * - `false` — the account binding is DAEMON-authoritative via broker/shared-group indirection
+ *   (opencode/pi/claude: `requiresExactRuntimeIdentity: false`, `provider_owned` broker selection).
+ *   The daemon already owns the effective selection, so the daemon's own indexed identity is
+ *   authoritative and a live session-runtime probe is neither needed NOR answerable — demanding one
+ *   only strands the candidate on an unsupported RPC.
+ *
+ * Unknown / `unsupported` apply capability fails toward `true` (keep the conservative live-probe path).
+ */
+export function runtimeAuthApplyRequiresLiveIdentityProbe(
+  capability: ConnectedServiceRuntimeAuthApplyCapability | null | undefined,
+): boolean {
+  const directLiveHotAuth = capability?.directLiveHotAuth;
+  if (typeof directLiveHotAuth !== 'object') return true;
+  return directLiveHotAuth.requiresExactRuntimeIdentity === true;
+}
+
 export function evaluateConnectedServiceSwitchApplyPolicy(input: Readonly<{
   context: ConnectedServiceSwitchApplyContext;
   reason: PredictiveSoftSwitchReason | 'manual' | 'diagnostic' | string;

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
-import type { BackendTargetRefV1, ConnectedServiceBindingsV1 } from '@happier-dev/protocol';
+import type { AgentId } from '@happier-dev/agents';
+import type { BackendTargetRefV1, ConnectedServiceBindingsV1, ConnectedServiceBindingSelectionV1, ConnectedServiceId } from '@happier-dev/protocol';
 import { ConnectedServiceBindingsV1Schema } from '@happier-dev/protocol';
 
 import {
@@ -9,6 +10,8 @@ import {
 } from '@/daemon/controlClient';
 import type { Credentials } from '@/persistence';
 import { resolveSessionAgentSpawnConnectedServicesDefaults } from '@/session/services/spawn/normalizeSessionAgentSpawnActionRequest';
+import { resolveSpawnConnectedServicesDefaults } from '@/session/services/spawnConnectedServicesDefaults';
+import { bootstrapAccountSettingsContext } from '@/settings/accountSettings/bootstrapAccountSettingsContext';
 import { logger } from '@/ui/logger';
 
 /**
@@ -48,6 +51,13 @@ export type PreparedExecutionRunConnectedServices = Readonly<{
   env: Readonly<Record<string, string>>;
   materializationKey: string;
   cleanup: () => Promise<void>;
+  /**
+   * The canonical connected-service selection that was actually materialized for this run. Persisted
+   * verbatim in the run's immutable launch record so a later resume can re-materialize the SAME
+   * account/profile (as an explicit, authoritative selection) instead of re-resolving a drifting
+   * session default. Contains only binding metadata — never tokens or materialized env values.
+   */
+  selection: ConnectedServiceBindingsV1;
 }>;
 
 type MaterializeViaDaemon = typeof materializeDaemonConnectedServicesForExecutionRun;
@@ -58,6 +68,36 @@ type ResolveSessionSpawnDefaults = (params: Readonly<{
   backendTarget: BackendTargetRefV1 & { kind: 'builtInAgent' };
   credentials: Credentials;
 }>) => Promise<Readonly<{ connectedServices: ConnectedServiceBindingsV1 }> | null>;
+
+/**
+ * Resolves a bare per-service default token (`"<serviceId>"`) to that service's STORED default binding
+ * only (never broadening to the whole agent). Missing stored default → the service is omitted from the
+ * returned bindings, which the caller treats as fail-closed. Reuses the canonical
+ * `resolveSpawnConnectedServicesDefaults` owner with a `serviceIds` filter.
+ */
+export type ResolvePerServiceConnectedServicesDefaults = (params: Readonly<{
+  backendTarget: BackendTargetRefV1 & { kind: 'builtInAgent' };
+  credentials: Credentials;
+  serviceIds: readonly ConnectedServiceId[];
+}>) => Promise<ConnectedServiceBindingsV1 | null>;
+
+const defaultResolvePerServiceConnectedServicesDefaults: ResolvePerServiceConnectedServicesDefaults =
+  async ({ backendTarget, credentials, serviceIds }) => {
+    try {
+      const accountSettingsContext = await bootstrapAccountSettingsContext({
+        credentials,
+        mode: 'blocking',
+        deps: { applySideEffects: () => undefined },
+      });
+      return resolveSpawnConnectedServicesDefaults({
+        accountSettings: accountSettingsContext.settings,
+        agentId: backendTarget.agentId as AgentId,
+        serviceIds,
+      });
+    } catch {
+      return null;
+    }
+  };
 
 type ResolvedRunSelection = Readonly<{
   bindings: ConnectedServiceBindingsV1;
@@ -71,22 +111,62 @@ function hasConnectedBinding(bindings: ConnectedServiceBindingsV1): boolean {
 async function resolveRunSelection(params: Readonly<{
   backendTarget: BackendTargetRefV1 & { kind: 'builtInAgent' };
   explicitBindings: unknown;
+  defaultServiceIds: readonly ConnectedServiceId[];
   credentials: Credentials | null;
   resolveSessionSpawnDefaults: ResolveSessionSpawnDefaults;
+  resolvePerServiceDefaults: ResolvePerServiceConnectedServicesDefaults;
 }>): Promise<ResolvedRunSelection> {
+  const agentId = params.backendTarget.agentId;
+
+  // Parse explicit per-service pins first (authoritative; explicit always wins over a bare default).
+  let explicitBindingsByServiceId: Record<string, ConnectedServiceBindingSelectionV1> = {};
+  let hadValidExplicit = false;
   if (params.explicitBindings !== undefined && params.explicitBindings !== null) {
     const parsed = ConnectedServiceBindingsV1Schema.safeParse(params.explicitBindings);
     if (parsed.success) {
-      // A valid explicit selection is authoritative — including "all native" (the caller opted out).
-      return hasConnectedBinding(parsed.data)
-        ? { bindings: parsed.data, source: 'explicit' }
-        : null;
+      explicitBindingsByServiceId = { ...parsed.data.bindingsByServiceId };
+      hadValidExplicit = true;
+    } else {
+      // Malformed explicit selection: never guess an account from garbage — fall through to the
+      // account default (which itself fails closed to null when unset).
+      logger.warn('[EXECUTION RUN] connected services: malformed explicit selection ignored; falling back to account default', {
+        agentId,
+      });
     }
-    // Malformed explicit selection: never guess an account from garbage — fall through to the
-    // account default (which itself fails closed to null when unset).
-    logger.warn('[EXECUTION RUN] connected services: malformed explicit selection ignored; falling back to account default', {
-      agentId: params.backendTarget.agentId,
+  }
+
+  // RO-F5 seam: resolve each bare per-service DEFAULT token to that service's stored default and merge
+  // it UNDER the explicit pins (explicit wins; grammar rejects same-service duplicates pre-resolution).
+  // A named default with no stored connected default fails CLOSED — never silently native/ambient.
+  const defaultServiceIdsToResolve = params.defaultServiceIds.filter(
+    (serviceId) => !Object.prototype.hasOwnProperty.call(explicitBindingsByServiceId, serviceId),
+  );
+  if (defaultServiceIdsToResolve.length > 0) {
+    if (!params.credentials) {
+      throw new ExecutionRunConnectedServicesUnavailableError({ agentId });
+    }
+    const resolvedDefaults = await params.resolvePerServiceDefaults({
+      backendTarget: params.backendTarget,
+      credentials: params.credentials,
+      serviceIds: defaultServiceIdsToResolve,
     });
+    const merged: Record<string, ConnectedServiceBindingSelectionV1> = { ...explicitBindingsByServiceId };
+    for (const serviceId of defaultServiceIdsToResolve) {
+      const binding = resolvedDefaults?.bindingsByServiceId[serviceId];
+      if (!binding || binding.source !== 'connected') {
+        // Missing stored default for a service the caller explicitly asked to default → fail closed.
+        throw new ExecutionRunConnectedServicesUnavailableError({ agentId });
+      }
+      merged[serviceId] = binding;
+    }
+    const bindings = ConnectedServiceBindingsV1Schema.parse({ v: 1, bindingsByServiceId: merged });
+    return { bindings, source: hadValidExplicit ? 'explicit' : 'session_default' };
+  }
+
+  if (hadValidExplicit) {
+    const bindings = ConnectedServiceBindingsV1Schema.parse({ v: 1, bindingsByServiceId: explicitBindingsByServiceId });
+    // A valid explicit selection is authoritative — including "all native" (the caller opted out).
+    return hasConnectedBinding(bindings) ? { bindings, source: 'explicit' } : null;
   }
 
   if (!params.credentials) return null;
@@ -102,6 +182,13 @@ export async function prepareExecutionRunConnectedServices(params: Readonly<{
   backendTarget: BackendTargetRefV1;
   /** Optional explicit per-target selection from the run-start request. */
   connectedServices?: unknown;
+  /**
+   * Optional bare per-service default tokens from the run-start request (RO-F5): services asking for
+   * their STORED default. Resolved here to concrete bindings and merged UNDER any explicit pins;
+   * missing stored default fails closed. On resume this stays empty — the persisted selection already
+   * carries the resolved concrete bindings.
+   */
+  connectedServicesDefaultServiceIds?: readonly string[];
   /** Runner credentials — required for account-default resolution (the session owner bootstraps settings). */
   credentials: Credentials | null;
   cwd: string;
@@ -110,6 +197,7 @@ export async function prepareExecutionRunConnectedServices(params: Readonly<{
   materializeViaDaemon?: MaterializeViaDaemon;
   releaseViaDaemon?: ReleaseViaDaemon;
   resolveSessionSpawnDefaults?: ResolveSessionSpawnDefaults;
+  resolvePerServiceDefaults?: ResolvePerServiceConnectedServicesDefaults;
 }>): Promise<PreparedExecutionRunConnectedServices | null> {
   if (params.backendTarget.kind !== 'builtInAgent') return null;
   const backendTarget = params.backendTarget;
@@ -118,9 +206,12 @@ export async function prepareExecutionRunConnectedServices(params: Readonly<{
   const selection = await resolveRunSelection({
     backendTarget,
     explicitBindings: params.connectedServices,
+    defaultServiceIds: (params.connectedServicesDefaultServiceIds ?? []) as readonly ConnectedServiceId[],
     credentials: params.credentials,
     resolveSessionSpawnDefaults: params.resolveSessionSpawnDefaults
       ?? resolveSessionAgentSpawnConnectedServicesDefaults,
+    resolvePerServiceDefaults: params.resolvePerServiceDefaults
+      ?? defaultResolvePerServiceConnectedServicesDefaults,
   });
   if (!selection) {
     // QA2-F03: the one decision line for the native path — a run silently starting on the
@@ -205,5 +296,6 @@ export async function prepareExecutionRunConnectedServices(params: Readonly<{
     env: materialized.env,
     materializationKey,
     cleanup,
+    selection: selection.bindings,
   };
 }

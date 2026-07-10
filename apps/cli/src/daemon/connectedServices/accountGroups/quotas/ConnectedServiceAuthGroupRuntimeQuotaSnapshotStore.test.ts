@@ -506,4 +506,149 @@ describe('ConnectedServiceAuthGroupRuntimeQuotaSnapshotStore', () => {
         exhausted: false,
       });
   });
+
+  it('preemptively reports at_or_below_threshold when projected burn crosses the threshold before the next window', () => {
+    const store = new ConnectedServiceAuthGroupRuntimeQuotaSnapshotStore();
+    // A fast-burning active member: 60% -> 40% remaining across 30s (0.02%/ms burn).
+    store.recordSnapshot({
+      serviceId: 'claude-subscription',
+      groupId: 'team-pool',
+      profileId: 'active',
+      snapshot: quotaSnapshotWithRemaining({ profileId: 'active', fetchedAt: 0, remainingPct: 60 }),
+    });
+    store.recordSnapshot({
+      serviceId: 'claude-subscription',
+      groupId: 'team-pool',
+      profileId: 'active',
+      snapshot: quotaSnapshotWithRemaining({ profileId: 'active', fetchedAt: 30_000, remainingPct: 40 }),
+    });
+
+    const memberStatesByProfileId = store.buildMemberStates({
+      serviceId: 'claude-subscription',
+      groupId: 'team-pool',
+      capturedAtMs: 30_000,
+    });
+    const burn = store.getRecentBurn({ serviceId: 'claude-subscription', groupId: 'team-pool', profileId: 'active' });
+    expect(burn).not.toBeNull();
+    expect(burn?.remainingPercentPerMs).toBeCloseTo(20 / 30_000, 10);
+
+    // Current remaining (40%) is above the 15% threshold, but a 300s projection at this burn rate
+    // crosses it -> preemptive soft-switch should fire before the hard limit.
+    const projected = resolveConnectedServiceAuthGroupSoftSwitchSourceEvidence({
+      activeProfileId: 'active',
+      policy: {
+        ...DEFAULT_CONNECTED_SERVICE_AUTH_GROUP_POLICY_V1,
+        softSwitchRemainingPercent: 15,
+        probeIfSnapshotOlderThanMs: 300_000,
+      },
+      memberStatesByProfileId,
+      nowMs: 30_000,
+      quotaFreshnessMs: 300_000,
+      burnProjection: burn ? { remainingPercentPerMs: burn.remainingPercentPerMs, horizonMs: 300_000 } : null,
+    });
+    expect(projected).toMatchObject({
+      status: 'at_or_below_threshold',
+      remainingPercent: 40,
+      thresholdPercent: 15,
+      projected: true,
+    });
+
+    // Without the burn projection, the same healthy snapshot stays above threshold.
+    expect(resolveConnectedServiceAuthGroupSoftSwitchSourceEvidence({
+      activeProfileId: 'active',
+      policy: {
+        ...DEFAULT_CONNECTED_SERVICE_AUTH_GROUP_POLICY_V1,
+        softSwitchRemainingPercent: 15,
+      },
+      memberStatesByProfileId,
+      nowMs: 30_000,
+      quotaFreshnessMs: 300_000,
+    })).toMatchObject({ status: 'above_threshold', remainingPercent: 40 });
+  });
+
+  it('does not preemptively switch a slow-burning active member whose projection stays above threshold', () => {
+    const store = new ConnectedServiceAuthGroupRuntimeQuotaSnapshotStore();
+    // Slow burn: 60% -> 58% across 30s.
+    store.recordSnapshot({
+      serviceId: 'claude-subscription',
+      groupId: 'team-pool',
+      profileId: 'active',
+      snapshot: quotaSnapshotWithRemaining({ profileId: 'active', fetchedAt: 0, remainingPct: 60 }),
+    });
+    store.recordSnapshot({
+      serviceId: 'claude-subscription',
+      groupId: 'team-pool',
+      profileId: 'active',
+      snapshot: quotaSnapshotWithRemaining({ profileId: 'active', fetchedAt: 30_000, remainingPct: 58 }),
+    });
+    const memberStatesByProfileId = store.buildMemberStates({
+      serviceId: 'claude-subscription',
+      groupId: 'team-pool',
+      capturedAtMs: 30_000,
+    });
+    const burn = store.getRecentBurn({ serviceId: 'claude-subscription', groupId: 'team-pool', profileId: 'active' });
+    expect(resolveConnectedServiceAuthGroupSoftSwitchSourceEvidence({
+      activeProfileId: 'active',
+      policy: {
+        ...DEFAULT_CONNECTED_SERVICE_AUTH_GROUP_POLICY_V1,
+        softSwitchRemainingPercent: 15,
+        probeIfSnapshotOlderThanMs: 300_000,
+      },
+      memberStatesByProfileId,
+      nowMs: 30_000,
+      quotaFreshnessMs: 300_000,
+      burnProjection: burn ? { remainingPercentPerMs: burn.remainingPercentPerMs, horizonMs: 300_000 } : null,
+    })).toMatchObject({ status: 'above_threshold', remainingPercent: 58 });
+  });
+
+  it('returns no burn when remaining is flat or increasing (a reset)', () => {
+    const store = new ConnectedServiceAuthGroupRuntimeQuotaSnapshotStore();
+    store.recordSnapshot({
+      serviceId: 'claude-subscription',
+      groupId: 'team-pool',
+      profileId: 'active',
+      snapshot: quotaSnapshotWithRemaining({ profileId: 'active', fetchedAt: 0, remainingPct: 40 }),
+    });
+    store.recordSnapshot({
+      serviceId: 'claude-subscription',
+      groupId: 'team-pool',
+      profileId: 'active',
+      snapshot: quotaSnapshotWithRemaining({ profileId: 'active', fetchedAt: 30_000, remainingPct: 90 }),
+    });
+    expect(store.getRecentBurn({ serviceId: 'claude-subscription', groupId: 'team-pool', profileId: 'active' }))
+      .toBeNull();
+  });
 });
+
+function quotaSnapshotWithRemaining(input: Readonly<{
+  profileId: string;
+  fetchedAt: number;
+  remainingPct: number;
+}>) {
+  return {
+    v: 1 as const,
+    serviceId: 'claude-subscription' as const,
+    profileId: input.profileId,
+    providerId: 'claude' as const,
+    fetchedAt: input.fetchedAt,
+    staleAfterMs: 300_000,
+    planLabel: null,
+    accountLabel: null,
+    source: 'provider_api' as const,
+    confidence: 'exact' as const,
+    meters: [
+      {
+        meterId: 'seven_day',
+        label: 'Weekly',
+        used: null,
+        limit: null,
+        unit: 'unknown' as const,
+        utilizationPct: 100 - input.remainingPct,
+        remainingPct: input.remainingPct,
+        resetsAt: null,
+        status: 'ok' as const,
+        details: { providerLimitId: 'seven_day', limitCategory: 'usage_limit' as const },
+      },
+    ],
+  };
+}

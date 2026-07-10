@@ -236,8 +236,11 @@ export function useNewSessionConnectedServices(params: Readonly<{
         }
         return {};
       }}
-      onOpenSettings={() => {
-        router.push('/settings/connected-services');
+      onOpenSettings={(serviceId) => {
+        router.push({
+          pathname: '/settings/connected-services/[serviceId]',
+          params: { serviceId },
+        });
       }}
       onReconnectProfile={(serviceId, profileId) => {
         const profile = connectedServiceProfileOptionsByServiceId[serviceId]?.find((option) => option.profileId === profileId);

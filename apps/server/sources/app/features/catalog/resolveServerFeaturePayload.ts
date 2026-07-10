@@ -70,18 +70,30 @@ export function resolveServerFeaturePayload(
         evaluateFeatureBuildPolicy(buildPolicy, "voice.happierVoice") === "deny" ||
         evaluateFeatureBuildPolicy(buildPolicy, "voice") === "deny";
 
-    // 2) Enforce dependencies between represented server features.
-    for (const featureId of FEATURE_IDS) {
-        const enabled = readServerEnabledBit(payload, featureId);
-        if (enabled !== true) continue;
+    // 2) Enforce dependencies between represented server features. Iterate to a FIXPOINT so
+    // enforcement is order-independent (SD-3): a single pass is only correct when the catalog
+    // declares every parent before its dependents, and the catalog does not guarantee that
+    // (`connectedServices.accountFallback` depends on the later-declared
+    // `sessions.usageLimitRecovery`). Each pass only flips bits enabled -> disabled (monotone)
+    // over a finite id set, so a pass with no writes is a true fixpoint and the loop terminates
+    // in at most FEATURE_IDS.length passes.
+    let dependencyEnforcementChanged = true;
+    while (dependencyEnforcementChanged) {
+        dependencyEnforcementChanged = false;
+        for (const featureId of FEATURE_IDS) {
+            const enabled = readServerEnabledBit(payload, featureId);
+            if (enabled !== true) continue;
 
-        const dependencies = DEPENDENCIES_BY_ID.get(featureId) ?? [];
-        for (const depId of dependencies) {
-            const depEnabled = readServerEnabledBit(payload, depId);
-            if (depEnabled === true) continue;
+            const dependencies = DEPENDENCIES_BY_ID.get(featureId) ?? [];
+            for (const depId of dependencies) {
+                const depEnabled = readServerEnabledBit(payload, depId);
+                if (depEnabled === true) continue;
 
-            tryWriteServerEnabledBitInPlace(payload, featureId, false);
-            break;
+                if (tryWriteServerEnabledBitInPlace(payload, featureId, false)) {
+                    dependencyEnforcementChanged = true;
+                }
+                break;
+            }
         }
     }
 

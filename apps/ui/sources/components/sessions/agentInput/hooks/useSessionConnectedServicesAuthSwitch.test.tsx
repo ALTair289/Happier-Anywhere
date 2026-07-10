@@ -1238,14 +1238,19 @@ describe('useSessionConnectedServicesAuthSwitch', () => {
         const popover = renderContent({
             requestClose,
             maxHeight: 420,
-        }) as React.ReactElement<{ onOpenSettings: () => void }>;
+        }) as React.ReactElement<{ onOpenSettings: (serviceId: string) => void }>;
 
         await act(async () => {
-            popover.props.onOpenSettings();
+            popover.props.onOpenSettings('openai-codex');
         });
 
         expect(requestClose).toHaveBeenCalledTimes(1);
-        expect(routerPushMock).toHaveBeenCalledWith('/settings/connected-services');
+        // UI-2: the picker's settings action deep-links to the tapped service's settings screen,
+        // matching the settings-side onOpenConnectedServiceSettings consumers.
+        expect(routerPushMock).toHaveBeenCalledWith({
+            pathname: '/settings/connected-services/[serviceId]',
+            params: { serviceId: 'openai-codex' },
+        });
 
         await hook.unmount();
     });
@@ -2585,6 +2590,179 @@ describe('useSessionConnectedServicesAuthSwitch', () => {
         ]));
         expect(hook.getCurrent().statusBadges).not.toContainEqual(expect.objectContaining({
             key: 'connected-services-auth-switch-partial-application',
+        }));
+
+        await hook.unmount();
+    });
+
+    it('offers Retry and Revert on a partial hot-apply badge and re-applies the attempted binding on retry', async () => {
+        setSessionConnectedServiceAuthBindingMock.mockResolvedValueOnce({
+            ok: false,
+            errorCode: 'hot_apply_failed',
+            serviceId: 'openai-codex',
+            diagnostics: {
+                failurePhase: 'hot_apply',
+                partialState: 'runtime_auth_partially_applied',
+            },
+        });
+        const { useSessionConnectedServicesAuthSwitch } = await import('./useSessionConnectedServicesAuthSwitch');
+
+        const hook = await renderHook(() =>
+            useSessionConnectedServicesAuthSwitch({
+                sessionId: 'session-1',
+                agentId: 'claude',
+                machineId: 'machine-1',
+                serverId: 'server-1',
+                agentCore: {
+                    id: 'claude',
+                    connectedServices: {
+                        supportedServiceIds: ['openai-codex'],
+                        sessionAuthSwitch: { continuityMode: 'restart_same_home' },
+                    },
+                },
+                sessionMetadata: {
+                    connectedServices: {
+                        v: 1,
+                        bindingsByServiceId: {
+                            'openai-codex': { source: 'native' },
+                        },
+                    },
+                },
+                settings: {
+                    connectedServicesProfileLabelByKey: { 'openai-codex/happier': 'Happier' },
+                    connectedServicesDefaultProfileByServiceId: {},
+                },
+                switchingDisabledReason: null,
+                sessionActive: false,
+            }),
+        );
+
+        const popover = renderChipPopover(
+            hook.getCurrent().connectedServicesAuthChip?.collapsedContentPopover?.renderContent,
+        ) as React.ReactElement<{ setBindingForService: (serviceId: string, binding: unknown) => void }>;
+
+        await act(async () => {
+            popover.props.setBindingForService('openai-codex', {
+                source: 'connected',
+                selection: 'profile',
+                profileId: 'happier',
+            });
+            await Promise.resolve();
+        });
+
+        const partialBadge = hook.getCurrent().statusBadges.find(
+            (badge) => badge.testID === 'session-connected-services-auth-switch-partial-application',
+        );
+        expect(partialBadge?.onPress).toEqual(expect.any(Function));
+
+        modalAlertMock.mockClear();
+        await act(async () => {
+            partialBadge?.onPress?.();
+            await Promise.resolve();
+        });
+        const alertButtons = modalAlertMock.mock.calls[0]?.[2] as Array<{ text: string; onPress?: () => void }> | undefined;
+        expect(alertButtons).toEqual([
+            expect.objectContaining({ text: 'connectedServices.authSwitch.partialApply.retry', onPress: expect.any(Function) }),
+            expect.objectContaining({ text: 'connectedServices.authSwitch.partialApply.revert', onPress: expect.any(Function) }),
+            expect.objectContaining({ text: 'common.cancel' }),
+        ]);
+
+        setSessionConnectedServiceAuthBindingMock.mockClear();
+        await act(async () => {
+            alertButtons?.find((button) => button.text === 'connectedServices.authSwitch.partialApply.retry')?.onPress?.();
+            await Promise.resolve();
+        });
+        expect(setSessionConnectedServiceAuthBindingMock.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+            bindings: expect.objectContaining({
+                bindingsByServiceId: expect.objectContaining({
+                    'openai-codex': { source: 'connected', selection: 'profile', profileId: 'happier' },
+                }),
+            }),
+        }));
+
+        await hook.unmount();
+    });
+
+    it('reverts a partial hot-apply to the previous account via the canonical apply path', async () => {
+        setSessionConnectedServiceAuthBindingMock.mockResolvedValueOnce({
+            ok: false,
+            errorCode: 'hot_apply_failed',
+            serviceId: 'openai-codex',
+            diagnostics: {
+                failurePhase: 'hot_apply',
+                partialState: 'runtime_auth_partially_applied',
+            },
+        });
+        const { useSessionConnectedServicesAuthSwitch } = await import('./useSessionConnectedServicesAuthSwitch');
+
+        const hook = await renderHook(() =>
+            useSessionConnectedServicesAuthSwitch({
+                sessionId: 'session-1',
+                agentId: 'claude',
+                machineId: 'machine-1',
+                serverId: 'server-1',
+                agentCore: {
+                    id: 'claude',
+                    connectedServices: {
+                        supportedServiceIds: ['openai-codex'],
+                        sessionAuthSwitch: { continuityMode: 'restart_same_home' },
+                    },
+                },
+                sessionMetadata: {
+                    connectedServices: {
+                        v: 1,
+                        bindingsByServiceId: {
+                            'openai-codex': { source: 'native' },
+                        },
+                    },
+                },
+                settings: {
+                    connectedServicesProfileLabelByKey: { 'openai-codex/happier': 'Happier' },
+                    connectedServicesDefaultProfileByServiceId: {},
+                },
+                switchingDisabledReason: null,
+                sessionActive: false,
+            }),
+        );
+
+        const popover = renderChipPopover(
+            hook.getCurrent().connectedServicesAuthChip?.collapsedContentPopover?.renderContent,
+        ) as React.ReactElement<{ setBindingForService: (serviceId: string, binding: unknown) => void }>;
+
+        await act(async () => {
+            popover.props.setBindingForService('openai-codex', {
+                source: 'connected',
+                selection: 'profile',
+                profileId: 'happier',
+            });
+            await Promise.resolve();
+        });
+
+        const partialBadge = hook.getCurrent().statusBadges.find(
+            (badge) => badge.testID === 'session-connected-services-auth-switch-partial-application',
+        );
+        await act(async () => {
+            partialBadge?.onPress?.();
+            await Promise.resolve();
+        });
+        const alertButtons = modalAlertMock.mock.calls[0]?.[2] as Array<{ text: string; onPress?: () => void }> | undefined;
+
+        setSessionConnectedServiceAuthBindingMock.mockClear();
+        await act(async () => {
+            alertButtons?.find((button) => button.text === 'connectedServices.authSwitch.partialApply.revert')?.onPress?.();
+            await Promise.resolve();
+        });
+        expect(setSessionConnectedServiceAuthBindingMock.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+            bindings: expect.objectContaining({
+                bindingsByServiceId: expect.objectContaining({
+                    'openai-codex': { source: 'native' },
+                }),
+            }),
+        }));
+
+        // The partial-application badge clears once the reconcile apply succeeds.
+        expect(hook.getCurrent().statusBadges).not.toContainEqual(expect.objectContaining({
+            testID: 'session-connected-services-auth-switch-partial-application',
         }));
 
         await hook.unmount();

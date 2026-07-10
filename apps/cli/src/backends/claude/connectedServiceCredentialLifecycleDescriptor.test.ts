@@ -7,8 +7,11 @@ describe('Claude connected-service credential lifecycle descriptor', () => {
     await expect(agent.getConnectedServiceCredentialLifecycleDescriptor()).resolves.toMatchObject({
       providerId: 'claude',
       serviceIds: expect.arrayContaining(['claude-subscription', 'anthropic']),
-      spawnPreflightOauthRefresh: { mode: 'force' },
-      refreshedCredentialApplication: { mode: 'no_restart_required' },
+      spawnPreflightOauthRefresh: { mode: 'expiry_window' },
+      refreshedCredentialApplication: {
+        mode: 'restart_required',
+        noRestartRequiredServiceIds: ['claude-subscription'],
+      },
       sameAccountFanoutStrategy: 'shared_group_auth_surface',
       predictiveSoftSwitch: {
         mode: 'supported',

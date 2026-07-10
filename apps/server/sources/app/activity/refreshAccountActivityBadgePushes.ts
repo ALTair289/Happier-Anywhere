@@ -7,12 +7,16 @@ import { log } from "@/utils/logging/log";
 import { computeAccountActivityBadgeCounts } from "./accountActivityBadge";
 
 const expo = new Expo();
+const SESSION_PARTICIPANT_BADGE_REFRESH_DEBOUNCE_MS = 1_000;
 
 type BadgeRefreshDelivery = Readonly<{
     accountId: string;
     token: string;
     message: ExpoPushMessage;
 }>;
+
+const scheduledBadgeRefreshAccountIds = new Set<string>();
+let scheduledBadgeRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
 async function deleteInvalidAccountPushTokens(deliveries: ReadonlyArray<BadgeRefreshDelivery>): Promise<void> {
     if (deliveries.length === 0) return;
@@ -37,24 +41,10 @@ async function sendExpoBadgeRefreshMessages(deliveries: ReadonlyArray<BadgeRefre
         deliveryOffset += chunk.length;
         try {
             const ticketChunk = await expo.sendPushNotificationsAsync(chunk);
-            let receipts: Record<string, unknown> | undefined;
-            const receiptIds = ticketChunk
-                .map((ticket) => (typeof (ticket as { id?: unknown })?.id === "string" ? (ticket as { id: string }).id : null))
-                .filter((ticketId): ticketId is string => typeof ticketId === "string" && ticketId.length > 0);
-
-            if (receiptIds.length > 0) {
-                try {
-                    receipts = await expo.getPushNotificationReceiptsAsync(receiptIds);
-                } catch (error) {
-                    log({ module: "activity-badges", level: "warn" }, "failed to fetch Expo push receipts", error);
-                }
-            }
-
             const invalidTokens = new Set(
                 collectExpoPushTokensMarkedUnregistered({
                     messages: chunk,
                     tickets: ticketChunk,
-                    receipts,
                 }),
             );
             if (invalidTokens.size > 0) {
@@ -99,12 +89,32 @@ export async function refreshAccountActivityBadgePushes(params: Readonly<{ accou
     await sendExpoBadgeRefreshMessages(deliveries);
 }
 
+function scheduleAccountActivityBadgePushRefresh(accountIds: ReadonlyArray<string>): void {
+    for (const accountId of accountIds) {
+        const normalizedAccountId = accountId.trim();
+        if (normalizedAccountId.length > 0) {
+            scheduledBadgeRefreshAccountIds.add(normalizedAccountId);
+        }
+    }
+    if (scheduledBadgeRefreshAccountIds.size === 0 || scheduledBadgeRefreshTimer) return;
+
+    scheduledBadgeRefreshTimer = setTimeout(() => {
+        scheduledBadgeRefreshTimer = null;
+        const accountIdsToRefresh = [...scheduledBadgeRefreshAccountIds];
+        scheduledBadgeRefreshAccountIds.clear();
+        void refreshAccountActivityBadgePushes({ accountIds: accountIdsToRefresh }).catch((error) => {
+            log({ module: "activity-badges", level: "warn" }, "failed to refresh scheduled badge pushes", error);
+        });
+    }, SESSION_PARTICIPANT_BADGE_REFRESH_DEBOUNCE_MS);
+    if (typeof (scheduledBadgeRefreshTimer as { unref?: unknown }).unref === "function") {
+        (scheduledBadgeRefreshTimer as { unref: () => void }).unref();
+    }
+}
+
 export async function refreshSessionParticipantBadgePushes(params: Readonly<{
     badgeAttentionChanged: boolean;
     participantCursors: ReadonlyArray<{ accountId: string }>;
 }>): Promise<void> {
     if (!params.badgeAttentionChanged) return;
-    await refreshAccountActivityBadgePushes({
-        accountIds: params.participantCursors.map(({ accountId }) => accountId),
-    });
+    scheduleAccountActivityBadgePushRefresh(params.participantCursors.map(({ accountId }) => accountId));
 }

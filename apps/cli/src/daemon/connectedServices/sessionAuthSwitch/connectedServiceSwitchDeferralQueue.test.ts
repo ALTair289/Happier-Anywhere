@@ -201,6 +201,54 @@ describe('connectedServiceSwitchDeferralQueue', () => {
     expect(completedEvents).toHaveLength(1);
   });
 
+  it('rejects the deferred callers with a bounded typed error when runSwitch itself hangs (CL-1)', async () => {
+    // A hung runSwitch (stuck materialization / network hang) must not strand the deferred callers
+    // forever: the deferral-window timer is cleared at execute-start, so without an execution bound
+    // the pending leaks until session teardown.
+    const runSwitch = vi.fn(() => new Promise<void>(() => {}));
+    const emitSessionEvent = vi.fn();
+    const queue = createConnectedServiceSwitchDeferralQueue({
+      timeoutMs: 60_000,
+      disableDeferral: false,
+      emitSessionEvent,
+    });
+
+    queue.recordTurnLifecycleEvent({ sessionId: 'sess_1', event: 'prompt_or_steer' });
+    const pending = queue.requestSwitch({
+      sessionId: 'sess_1',
+      policy: 'defer_until_turn_boundary',
+      source: 'manual',
+      target: target(),
+      runSwitch,
+    });
+    const outcome = expect(pending).rejects.toMatchObject({
+      name: 'ConnectedServiceSwitchDeferralConflictError',
+      code: 'switch_execution_timeout',
+    });
+
+    queue.recordTurnLifecycleEvent({ sessionId: 'sess_1', event: 'assistant_message_end' });
+    expect(runSwitch).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(60_000);
+    await outcome;
+    expect(emitSessionEvent).toHaveBeenCalledWith('sess_1', expect.objectContaining({
+      type: 'connected_service_account_switch_deferral_completed',
+      reason: 'aborted_after_timeout',
+    }));
+
+    // The pending entry is settled and cleared: a fresh idle-session request runs immediately
+    // instead of piggybacking onto the leaked hung pending.
+    const followUp = vi.fn(async () => {});
+    await queue.requestSwitch({
+      sessionId: 'sess_1',
+      policy: 'defer_until_turn_boundary',
+      source: 'manual',
+      target: target(),
+      runSwitch: followUp,
+    });
+    expect(followUp).toHaveBeenCalledTimes(1);
+  });
+
   it('closes the in-flight turn at a forced boundary when the deferral timeout fires (no silent mid-stream kill)', async () => {
     // Lane F deferral-timeout escape hatch: when the boundary never arrives within the timeout the
     // switch is forced, but the turn must be closed cleanly first so downstream (and the managed-

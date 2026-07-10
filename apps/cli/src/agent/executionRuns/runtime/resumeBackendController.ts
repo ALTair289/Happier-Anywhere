@@ -1,7 +1,7 @@
 import type { AgentBackend } from '@/agent/core/AgentBackend';
 import type { ExecutionBudgetRegistry } from '@/daemon/executionBudget/ExecutionBudgetRegistry';
-import type { BackendTargetRefV1 } from '@happier-dev/protocol';
 
+import { ExecutionRunConnectedServicesUnavailableError } from '@/agent/executionRuns/runtime/prepareExecutionRunConnectedServices';
 import type { ExecutionRunState } from '@/agent/executionRuns/runtime/executionRunTypes';
 import type { ExecutionRunBackendController, ExecutionRunController } from '@/agent/executionRuns/controllers/types';
 import { areExecutionRunBackendTargetsEqual } from '@/agent/executionRuns/runtime/backendTargets';
@@ -16,7 +16,13 @@ export async function resumeBackendControllerForResumableRun(args: Readonly<{
   runs: Map<string, ExecutionRunState>;
   controllers: Map<string, ExecutionRunController>;
   budgetRegistry: ExecutionBudgetRegistry | null;
-  createBackend: (opts: { runId?: string; backendId: string; backendTarget?: BackendTargetRefV1; permissionMode: string }) => AgentBackend;
+  /**
+   * Async backend factory owned by the caller. It performs launch rehydration (re-resolve account
+   * settings, re-materialize connected services from the persisted selection) and constructs the
+   * backend with the run's runId isolation. It may throw — a fail-closed connected-services error is
+   * mapped to a typed resume failure below.
+   */
+  createBackend: () => Promise<AgentBackend>;
   sendAcp: (provider: ACPProvider, body: ACPMessageData, opts?: { meta?: Record<string, unknown> }) => void;
   parentProvider: ACPProvider;
   streamedTranscriptSession: StreamedTranscriptWriterSession | null;
@@ -46,12 +52,17 @@ export async function resumeBackendControllerForResumableRun(args: Readonly<{
     return { ok: false, errorCode: 'execution_run_not_allowed', error: 'Missing resume handle' };
   }
 
-  const backend = args.createBackend({
-    runId: args.runId,
-    backendId: args.run.backendId,
-    backendTarget: args.run.backendTarget,
-    permissionMode: args.run.permissionMode,
-  });
+  let backend: AgentBackend;
+  try {
+    backend = await args.createBackend();
+  } catch (e: unknown) {
+    args.budgetRegistry?.releaseExecutionRun(args.runId);
+    // Fail closed: a resumable run bound to a connected account must not recreate on ambient auth.
+    if (e instanceof ExecutionRunConnectedServicesUnavailableError) {
+      return { ok: false, errorCode: e.code, error: e.message };
+    }
+    return { ok: false, errorCode: 'execution_run_failed', error: e instanceof Error ? e.message : 'Resume failed' };
+  }
   const wantsReplayCapture = args.requireReplayCapture === true;
   const canResume = wantsReplayCapture
     ? Boolean(backend.loadSessionWithReplayCapture)

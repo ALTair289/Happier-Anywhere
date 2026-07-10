@@ -6,10 +6,6 @@ import { join, resolve } from 'node:path';
 import { logger } from '@/ui/logger';
 
 import {
-  buildSafeClaudeCodeCredentialComparatorEntry,
-  computeClaudeCodeCredentialFingerprint,
-  isExistingClaudeCodeCredentialNewer,
-  readClaudeCodeCredentialFreshness,
   readClaudeCodeNativeCredentialPayload,
   type ClaudeCodeNativeCredentialPayload,
 } from './claudeCodeNativeCredentialPayload';
@@ -24,38 +20,10 @@ export type ClaudeCodeMacOsKeychainCredentialReadResult = Readonly<{
   updatedAtMs: number | null;
 }>;
 
-export type ClaudeCodeMacOsKeychainCredentialWriteProvenance = Readonly<{
-  credentialFingerprint: string;
-  writtenAtMs: number;
-}>;
-
-export type ClaudeCodeMacOsKeychainCredentialWriteResult =
-  | Readonly<{
-      status: 'written';
-      adoptedCredential: null;
-      credentialFingerprint: string;
-      writtenAtMs: number;
-    }>
-  | Readonly<{
-      status: 'skipped_provenance_match';
-      adoptedCredential: null;
-      credentialFingerprint: string;
-      writtenAtMs: number;
-    }>
-  | Readonly<{
-      status: 'skipped_existing_newer';
-      adoptedCredential: Readonly<{
-        payload: ClaudeCodeNativeCredentialPayload;
-        updatedAtMs: number;
-      }>;
-    }>;
-
 export type ClaudeCodeMacOsKeychainSweepSkipReason =
   | 'global_service'
-  | 'live_service'
   | 'different_account'
-  | 'not_happier_managed_service'
-  | 'unverifiable_live_set';
+  | 'not_happier_managed_service';
 
 export type ClaudeCodeMacOsKeychainSweepEntry = Readonly<{
   account: string;
@@ -71,11 +39,6 @@ export type ClaudeCodeMacOsKeychainSweepResult = Readonly<{
   scanned: number;
   deleted: readonly ClaudeCodeMacOsKeychainSweepEntry[];
   skipped: readonly ClaudeCodeMacOsKeychainSweepSkippedEntry[];
-}>;
-
-type ClaudeCodeMacOsKeychainCredentialDiagnosticContext = Readonly<{
-  profileId?: string | undefined;
-  homeKind?: 'profile' | 'group' | string | undefined;
 }>;
 
 function resolveDefaultClaudeConfigDir(homeDir: string): string {
@@ -102,41 +65,39 @@ export function isClaudeCodeMacOsGlobalKeychainService(params: Readonly<{
   return resolveClaudeCodeMacOsKeychainServiceName(params) === DEFAULT_CLAUDE_CODE_KEYCHAIN_SERVICE;
 }
 
-function buildKeychainPayloadInput(payload: ClaudeCodeNativeCredentialPayload): string {
-  const serialized = JSON.stringify(payload);
-  // The macOS security CLI prompts for both the secret and a confirmation retype
-  // when using `-w` interactively; piping the value twice keeps the write stable
-  // in non-interactive agent execution as well.
-  return `${serialized}\n${serialized}\n`;
-}
-
-function stripClaudeCodeMacOsKeychainRefreshToken(
-  payload: ClaudeCodeNativeCredentialPayload,
-): ClaudeCodeNativeCredentialPayload {
-  const { refreshToken: _refreshToken, ...credential } = payload.claudeAiOauth;
-  return {
-    claudeAiOauth: credential,
-  };
-}
-
-function buildKeychainWriteError(stderr: string, status: number | null): Error {
+function buildKeychainCommandError(stderr: string, status: number | null): Error {
   const detail = stderr.trim();
   return new Error(
     detail.length > 0
-      ? `claude_code_keychain_write_failed:${detail}`
-      : `claude_code_keychain_write_failed:status_${status ?? 'unknown'}`,
+      ? `claude_code_keychain_command_failed:${detail}`
+      : `claude_code_keychain_command_failed:status_${status ?? 'unknown'}`,
   );
 }
 
 function buildKeychainTimeoutError(): Error {
-  return new Error('claude_code_keychain_write_failed:security_timeout');
+  return new Error('claude_code_keychain_command_failed:security_timeout');
+}
+
+function assertSecuritySpawnAllowed(): void {
+  // Structural boundary guard: under the vitest unit environment the REAL macOS `security` binary
+  // must NEVER be spawned. A prior boundary escape (an un-mocked `spawnSync` writer) wrote ~266 items
+  // into the developer's real login keychain. Every `security` call now funnels through this single
+  // choke point, and any test exercising it MUST mock `node:child_process` `spawn` (the mocked binding
+  // carries vitest's `.mock` marker). An un-mocked spawn under VITEST is a harness bug, so we fail loud
+  // instead of touching the real keychain. Production is unaffected (`process.env.VITEST` is unset).
+  if (
+    process.env.VITEST
+    && !Object.prototype.hasOwnProperty.call(spawn as unknown as Record<string, unknown>, 'mock')
+  ) {
+    throw new Error('claude_code_keychain_real_security_spawn_blocked_in_test');
+  }
 }
 
 async function runSecurityCommand(params: Readonly<{
   args: readonly string[];
-  input?: string | undefined;
   timeoutMs?: number | undefined;
 }>): Promise<Readonly<{ stdout: string; stderr: string; status: number | null }>> {
+  assertSecuritySpawnAllowed();
   const child = spawn('security', [...params.args], {
     stdio: ['pipe', 'pipe', 'pipe'],
   });
@@ -179,11 +140,7 @@ async function runSecurityCommand(params: Readonly<{
         status,
       }));
     });
-    if (params.input !== undefined) {
-      child.stdin?.end(params.input);
-    } else {
-      child.stdin?.end();
-    }
+    child.stdin?.end();
   });
 }
 
@@ -205,18 +162,18 @@ function parseDumpedKeychainCredentialEntries(output: string): ClaudeCodeMacOsKe
 function classifyKeychainSweepEntry(params: Readonly<{
   entry: ClaudeCodeMacOsKeychainSweepEntry;
   username: string;
-  liveServices: ReadonlySet<string>;
-  liveSetVerifiable: boolean;
 }>): ClaudeCodeMacOsKeychainSweepSkipReason | 'delete' {
+  // The ONLY protected items are (a) other accounts' items — e.g. the ~266 `happier-test-user`
+  // residue, never ours to delete — and (b) the user's GLOBAL `Claude Code-credentials` login, which
+  // is the only Claude keychain item any `claude` process reads (a managed home sets CLAUDE_CONFIG_DIR
+  // and reads ONLY its `.credentials.json` file — verified against the shipped binary). Every remaining
+  // Happier-managed SUFFIXED item for this account is obsolete: nothing writes it and nothing reads it,
+  // so it is deleted regardless of whether its home is currently live.
   if (params.entry.account !== params.username) return 'different_account';
   if (params.entry.service === DEFAULT_CLAUDE_CODE_KEYCHAIN_SERVICE) return 'global_service';
   if (!HAPPIER_MANAGED_CLAUDE_CODE_KEYCHAIN_SERVICE_PATTERN.test(params.entry.service)) {
     return 'not_happier_managed_service';
   }
-  if (params.liveServices.has(params.entry.service)) return 'live_service';
-  // Fail closed: with no verifiable live set we cannot positively identify a managed item as stale, so
-  // we must never delete it — an incomplete live-set discovery must not evict a live sibling's item.
-  if (!params.liveSetVerifiable) return 'unverifiable_live_set';
   return 'delete';
 }
 
@@ -234,161 +191,6 @@ function parseKeychainTimestamp(metadata: string): number | null {
   return Number.isFinite(timestamp) ? timestamp : null;
 }
 
-function logKeychainCredentialDecision(params: Readonly<{
-  decision: 'write' | 'skip_existing_newer' | 'skip_provenance_match';
-  diagnosticContext?: ClaudeCodeMacOsKeychainCredentialDiagnosticContext | undefined;
-  existing: ClaudeCodeMacOsKeychainCredentialReadResult | null;
-  incomingPayload: ClaudeCodeNativeCredentialPayload;
-  incomingUpdatedAtMs: number;
-  provenanceBasis: Readonly<{
-    incomingMatchesLastWritten: boolean;
-    newerExternalChangeDetected: boolean;
-  }>;
-}>): void {
-  const existingFreshness = params.existing
-    ? readClaudeCodeCredentialFreshness(
-        params.existing.payload,
-        params.existing.updatedAtMs ?? Date.now(),
-      )
-    : null;
-  const incomingFreshness = readClaudeCodeCredentialFreshness(
-    params.incomingPayload,
-    params.incomingUpdatedAtMs,
-  );
-  logger.info('[DAEMON RUN] Claude Code keychain credential decision', {
-    event: 'claude_code_keychain_credential_decision',
-    ...(params.diagnosticContext ?? {}),
-    decision: params.decision,
-    comparatorBasis: {
-      existing: params.existing && existingFreshness
-        ? buildSafeClaudeCodeCredentialComparatorEntry(
-            params.existing.payload,
-            existingFreshness,
-            'macos_keychain',
-          )
-        : null,
-      incoming: buildSafeClaudeCodeCredentialComparatorEntry(
-        params.incomingPayload,
-        incomingFreshness,
-        'incoming',
-      ),
-      sameRefreshToken: existingFreshness
-        ? existingFreshness.refreshToken === incomingFreshness.refreshToken
-        : null,
-    },
-    provenanceBasis: params.provenanceBasis,
-    decidedAtMs: Date.now(),
-  });
-}
-
-export async function writeClaudeCodeMacOsKeychainCredential(params: Readonly<{
-  claudeConfigDir: string;
-  payload: ClaudeCodeNativeCredentialPayload;
-  homeDir?: string | null | undefined;
-  username?: string | null | undefined;
-  incomingUpdatedAtMs?: number | undefined;
-  preserveNewerExistingCredential?: boolean | undefined;
-  /**
-   * The daemon's own record of what it last wrote into this keychain item (fingerprint + when).
-   * This is the AUTHORITATIVE comparator basis because the shared group keychain item is frequently
-   * ACL-unreadable (`security` non-zero exit == null == "absent"), so a read-based comparator can
-   * never skip and every spawn/resume blind-rewrites the item, evicting running sibling processes.
-   * When the incoming payload fingerprint matches this record we skip the write entirely.
-   */
-  lastWrittenProvenance?: ClaudeCodeMacOsKeychainCredentialWriteProvenance | undefined;
-  diagnosticContext?: ClaudeCodeMacOsKeychainCredentialDiagnosticContext | undefined;
-}>): Promise<ClaudeCodeMacOsKeychainCredentialWriteResult> {
-  const payload = stripClaudeCodeMacOsKeychainRefreshToken(params.payload);
-  const incomingUpdatedAtMs = typeof params.incomingUpdatedAtMs === 'number' && Number.isFinite(params.incomingUpdatedAtMs)
-    ? params.incomingUpdatedAtMs
-    : Date.now();
-  const incomingFingerprint = computeClaudeCodeCredentialFingerprint(payload);
-  const existing = await readClaudeCodeMacOsKeychainCredentialWithMetadata({
-    claudeConfigDir: params.claudeConfigDir,
-    homeDir: params.homeDir,
-    username: params.username,
-  });
-  const incomingMatchesLastWritten =
-    params.lastWrittenProvenance?.credentialFingerprint === incomingFingerprint;
-  // A readable keychain item that DIFFERS from what we last wrote AND is newer than our last write is
-  // an external mutation (e.g. the user ran `/login`, creating a keychain shadow). In that case we must
-  // NOT skip on a provenance match — fall through so the normal freshness comparator can preserve it.
-  const newerExternalChangeDetected = Boolean(
-    existing
-    && params.lastWrittenProvenance
-    && computeClaudeCodeCredentialFingerprint(stripClaudeCodeMacOsKeychainRefreshToken(existing.payload))
-      !== params.lastWrittenProvenance.credentialFingerprint
-    && (existing.updatedAtMs ?? 0) > params.lastWrittenProvenance.writtenAtMs,
-  );
-  const provenanceBasis = { incomingMatchesLastWritten, newerExternalChangeDetected } as const;
-  if (params.lastWrittenProvenance && incomingMatchesLastWritten && !newerExternalChangeDetected) {
-    logKeychainCredentialDecision({
-      decision: 'skip_provenance_match',
-      diagnosticContext: params.diagnosticContext,
-      existing,
-      incomingPayload: payload,
-      incomingUpdatedAtMs,
-      provenanceBasis,
-    });
-    return {
-      status: 'skipped_provenance_match',
-      adoptedCredential: null,
-      credentialFingerprint: incomingFingerprint,
-      writtenAtMs: params.lastWrittenProvenance.writtenAtMs,
-    };
-  }
-  if (existing && params.preserveNewerExistingCredential !== false) {
-    const existingUpdatedAtMs = existing.updatedAtMs ?? Date.now();
-    const existingFreshness = readClaudeCodeCredentialFreshness(existing.payload, existingUpdatedAtMs);
-    const incomingFreshness = readClaudeCodeCredentialFreshness(payload, incomingUpdatedAtMs);
-    if (isExistingClaudeCodeCredentialNewer({ existing: existingFreshness, incoming: incomingFreshness })) {
-      logKeychainCredentialDecision({
-        decision: 'skip_existing_newer',
-        diagnosticContext: params.diagnosticContext,
-        existing,
-        incomingPayload: payload,
-        incomingUpdatedAtMs,
-        provenanceBasis,
-      });
-      return {
-        status: 'skipped_existing_newer',
-        adoptedCredential: {
-          payload: existing.payload,
-          updatedAtMs: existingUpdatedAtMs,
-        },
-      };
-    }
-  }
-
-  logKeychainCredentialDecision({
-    decision: 'write',
-    diagnosticContext: params.diagnosticContext,
-    existing,
-    incomingPayload: payload,
-    incomingUpdatedAtMs,
-    provenanceBasis,
-  });
-  const serviceName = resolveClaudeCodeMacOsKeychainServiceName({
-    claudeConfigDir: params.claudeConfigDir,
-    homeDir: params.homeDir,
-  });
-  const username = resolveKeychainUsername(params.username);
-  const writtenAtMs = Date.now();
-  const result = await runSecurityCommand({
-    args: ['add-generic-password', '-U', '-a', username, '-s', serviceName, '-w'],
-    input: buildKeychainPayloadInput(payload),
-  });
-  if (result.status !== 0) {
-    throw buildKeychainWriteError(String(result.stderr ?? ''), result.status);
-  }
-  return {
-    status: 'written',
-    adoptedCredential: null,
-    credentialFingerprint: incomingFingerprint,
-    writtenAtMs,
-  };
-}
-
 export async function deleteClaudeCodeMacOsKeychainCredential(params: Readonly<{
   claudeConfigDir: string;
   homeDir?: string | null | undefined;
@@ -403,32 +205,24 @@ export async function deleteClaudeCodeMacOsKeychainCredential(params: Readonly<{
     args: ['delete-generic-password', '-a', username, '-s', serviceName],
   });
   if (result.status !== 0 && !String(result.stderr ?? '').includes('could not be found')) {
-    throw buildKeychainWriteError(String(result.stderr ?? ''), result.status);
+    throw buildKeychainCommandError(String(result.stderr ?? ''), result.status);
   }
 }
 
 export async function sweepStaleClaudeCodeMacOsKeychainCredentials(params: Readonly<{
-  liveClaudeConfigDirs: readonly string[];
   homeDir?: string | null | undefined;
   username?: string | null | undefined;
 }>): Promise<ClaudeCodeMacOsKeychainSweepResult> {
   const username = resolveKeychainUsername(params.username);
-  const liveServices = new Set(
-    params.liveClaudeConfigDirs.map((claudeConfigDir) => resolveClaudeCodeMacOsKeychainServiceName({
-      claudeConfigDir,
-      homeDir: params.homeDir,
-    })),
-  );
   const dump = await runSecurityCommand({ args: ['dump-keychain'] });
   if (dump.status !== 0) {
-    throw buildKeychainWriteError(String(dump.stderr ?? ''), dump.status);
+    throw buildKeychainCommandError(String(dump.stderr ?? ''), dump.status);
   }
-  const liveSetVerifiable = liveServices.size > 0;
   const entries = parseDumpedKeychainCredentialEntries(dump.stdout);
   const deleted: ClaudeCodeMacOsKeychainSweepEntry[] = [];
   const skipped: ClaudeCodeMacOsKeychainSweepSkippedEntry[] = [];
   for (const entry of entries) {
-    const decision = classifyKeychainSweepEntry({ entry, username, liveServices, liveSetVerifiable });
+    const decision = classifyKeychainSweepEntry({ entry, username });
     if (decision !== 'delete') {
       skipped.push({ ...entry, reason: decision });
       continue;
@@ -441,7 +235,7 @@ export async function sweepStaleClaudeCodeMacOsKeychainCredentials(params: Reado
       continue;
     }
     if (String(result.stderr ?? '').includes('could not be found')) continue;
-    throw buildKeychainWriteError(String(result.stderr ?? ''), result.status);
+    throw buildKeychainCommandError(String(result.stderr ?? ''), result.status);
   }
   logger.info('[DAEMON RUN] Claude Code keychain stale credential sweep', {
     event: 'claude_code_keychain_stale_credential_sweep',
@@ -474,6 +268,13 @@ export async function readClaudeCodeMacOsKeychainCredentialWithMetadata(params: 
     claudeConfigDir: params.claudeConfigDir,
     homeDir: params.homeDir,
   });
+  // The keychain read fallback is scoped to the GLOBAL `Claude Code-credentials` service only.
+  // Happier no longer writes derived per-config keychain items, and native Claude uses only the
+  // global service. A derived-service read could therefore only surface stale legacy Happier
+  // artifacts — a split-brain remnant — so we never consult it (no read-back comparison against an
+  // item nothing writes, no stale-payload clobber vector). The native/external read fallback for a
+  // real `~/.claude` home is preserved.
+  if (serviceName !== DEFAULT_CLAUDE_CODE_KEYCHAIN_SERVICE) return null;
   const username = resolveKeychainUsername(params.username);
   try {
     const args = ['find-generic-password', '-a', username, '-s', serviceName] as const;

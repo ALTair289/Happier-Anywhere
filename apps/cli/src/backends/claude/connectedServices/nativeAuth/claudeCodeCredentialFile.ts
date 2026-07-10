@@ -165,7 +165,7 @@ async function readClaudeCodeNativeCredentialFilePath(
 }
 
 function logCredentialFileDecision(params: Readonly<{
-  decision: 'write' | 'skip_existing_newer';
+  decision: 'write' | 'skip_existing_newer' | 'skip_fingerprint_match';
   diagnosticContext?: ClaudeCodeCredentialDiagnosticContext | undefined;
   existing: ClaudeCodeNativeCredentialReadResult | ClaudeCodeNativeCredentialFileReadResult | null;
   incomingPayload: ClaudeCodeNativeCredentialPayload;
@@ -305,17 +305,17 @@ export async function writeClaudeCodeCredentialsFile(params: Readonly<{
     }
   }
 
+  const writeStatus = await writeClaudeCodeCredentialsFileUnchecked({
+    credentialPath,
+    claudeConfigDir: params.claudeConfigDir,
+    payload: params.payload,
+  });
   logCredentialFileDecision({
-    decision: 'write',
+    decision: writeStatus === 'written' ? 'write' : 'skip_fingerprint_match',
     diagnosticContext: params.diagnosticContext,
     existing,
     incomingPayload: params.payload,
     incomingFreshness,
-  });
-  await writeClaudeCodeCredentialsFileUnchecked({
-    credentialPath,
-    claudeConfigDir: params.claudeConfigDir,
-    payload: params.payload,
   });
   return credentialPath;
 }
@@ -324,9 +324,21 @@ async function writeClaudeCodeCredentialsFileUnchecked(params: Readonly<{
   credentialPath: string;
   claudeConfigDir: string;
   payload: ClaudeCodeNativeCredentialPayload;
-}>): Promise<void> {
+}>): Promise<'written' | 'unchanged'> {
   const tempPath = join(params.claudeConfigDir, `.credentials.${randomUUID()}.tmp`);
   const payload = stripClaudeCodeCredentialFileRefreshToken(params.payload);
+  const current = await readClaudeCodeNativeCredentialFilePath(params.credentialPath);
+  if (
+    current
+    && computeClaudeCodeCredentialFingerprint(current.payload)
+      === computeClaudeCodeCredentialFingerprint(payload)
+  ) {
+    // Content is unchanged, but the file may have been left world/group-readable by external
+    // tooling or an older writer. The rewrite path is skipped, so repair the mode here (stat first,
+    // chmod only when needed) — a credentials file must never linger at 0644/0664.
+    await repairClaudeCodeCredentialsFileMode(params.credentialPath);
+    return 'unchanged';
+  }
   try {
     await writeFile(tempPath, `${JSON.stringify(payload)}\n`, { mode: 0o600 });
     if (process.platform !== 'win32') {
@@ -336,9 +348,21 @@ async function writeClaudeCodeCredentialsFileUnchecked(params: Readonly<{
     if (process.platform !== 'win32') {
       await chmod(params.credentialPath, 0o600);
     }
+    return 'written';
   } catch (error) {
     await rm(tempPath, { force: true }).catch(() => {});
     throw error;
+  }
+}
+
+async function repairClaudeCodeCredentialsFileMode(credentialPath: string): Promise<void> {
+  if (process.platform === 'win32') return;
+  try {
+    const stats = await stat(credentialPath);
+    if ((stats.mode & 0o777) === 0o600) return;
+    await chmod(credentialPath, 0o600);
+  } catch {
+    // The file may have vanished under a concurrent writer; the next materialization repairs it.
   }
 }
 

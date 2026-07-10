@@ -66,6 +66,8 @@ const DIAGNOSTIC_TITLE_KEYS = {
         'connectedServices.diagnostics.title.quota_fetch_backoff',
     [CONNECTED_SERVICE_UX_DIAGNOSTIC_CODES.authSurfaceWeaklyVerified]:
         'connectedServices.diagnostics.title.auth_surface_weakly_verified',
+    [CONNECTED_SERVICE_UX_DIAGNOSTIC_CODES.connectedServiceRestartRequested]:
+        'connectedServices.diagnostics.title.connected_service_restart_requested',
     [CONNECTED_SERVICE_UX_DIAGNOSTIC_CODES.connectedServiceCredentialReconnectRequired]:
         'connectedServices.diagnostics.title.connected_service_credential_reconnect_required',
     [CONNECTED_SERVICE_UX_DIAGNOSTIC_CODES.claudeSubscriptionMissingClaudeCodeScope]:
@@ -113,6 +115,8 @@ const DIAGNOSTIC_BODY_KEYS = {
         'connectedServices.diagnostics.body.quota_fetch_backoff',
     [CONNECTED_SERVICE_UX_DIAGNOSTIC_CODES.authSurfaceWeaklyVerified]:
         'connectedServices.diagnostics.body.auth_surface_weakly_verified',
+    [CONNECTED_SERVICE_UX_DIAGNOSTIC_CODES.connectedServiceRestartRequested]:
+        'connectedServices.diagnostics.body.connected_service_restart_requested',
     [CONNECTED_SERVICE_UX_DIAGNOSTIC_CODES.connectedServiceCredentialReconnectRequired]:
         'connectedServices.diagnostics.body.connected_service_credential_reconnect_required',
     [CONNECTED_SERVICE_UX_DIAGNOSTIC_CODES.claudeSubscriptionMissingClaudeCodeScope]:
@@ -160,6 +164,8 @@ const DIAGNOSTIC_STATUS_KEYS = {
         'connectedServices.diagnostics.status.quota_fetch_backoff',
     [CONNECTED_SERVICE_UX_DIAGNOSTIC_CODES.authSurfaceWeaklyVerified]:
         'connectedServices.diagnostics.status.auth_surface_weakly_verified',
+    [CONNECTED_SERVICE_UX_DIAGNOSTIC_CODES.connectedServiceRestartRequested]:
+        'connectedServices.diagnostics.status.connected_service_restart_requested',
     [CONNECTED_SERVICE_UX_DIAGNOSTIC_CODES.connectedServiceCredentialReconnectRequired]:
         'connectedServices.diagnostics.status.connected_service_credential_reconnect_required',
     [CONNECTED_SERVICE_UX_DIAGNOSTIC_CODES.claudeSubscriptionMissingClaudeCodeScope]:

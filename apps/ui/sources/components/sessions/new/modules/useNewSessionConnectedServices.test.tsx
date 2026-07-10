@@ -188,6 +188,45 @@ describe('useNewSessionConnectedServices', () => {
         await hook.unmount();
     });
 
+    it('deep-links the picker settings action to the tapped service settings screen (UI-2)', async () => {
+        const { useNewSessionConnectedServices } = await import('./useNewSessionConnectedServices');
+
+        const routerPush = vi.fn();
+        const hook = await renderHook(() =>
+            useNewSessionConnectedServices({
+                agentCore: {
+                    connectedServices: {
+                        supportedServiceIds: ['anthropic'],
+                        supportedKindsByServiceId: { anthropic: ['token'] },
+                    },
+                },
+                agentOptionState: null,
+                settings: {
+                    connectedServicesProfileLabelByKey: { 'anthropic:work': 'Work' },
+                    connectedServicesDefaultProfileByServiceId: {},
+                    connectedServicesDefaultAuthByAgentIdV1: { v: 1, bindingsByAgentId: {} },
+                },
+                targetServerId: null,
+                router: { push: routerPush },
+                setAgentOptionStateForCurrentAgent: vi.fn(),
+            }),
+        );
+
+        const popover = requireCollapsedContentPopover(hook.getCurrent().connectedServicesAuthChip);
+        const content = popover.renderContent({
+            requestClose: vi.fn(),
+            maxHeight: 420,
+        }) as React.ReactElement<{ onOpenSettings: (serviceId: string) => void }>;
+
+        content.props.onOpenSettings('anthropic');
+
+        expect(routerPush).toHaveBeenCalledWith({
+            pathname: '/settings/connected-services/[serviceId]',
+            params: { serviceId: 'anthropic' },
+        });
+        await hook.unmount();
+    });
+
     it('updates the chip label and reopened popover selection after choosing a connected profile', async () => {
         const { useNewSessionConnectedServices } = await import('./useNewSessionConnectedServices');
 

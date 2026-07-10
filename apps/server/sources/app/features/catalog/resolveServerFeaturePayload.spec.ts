@@ -82,6 +82,36 @@ describe("resolveServerFeaturePayload", () => {
         expect(payload.features.connectedServices.quotas.enabled).toBe(false);
     });
 
+    it("enforces transitive dependencies regardless of catalog declaration order (SD-3)", () => {
+        // Real out-of-order chain: `connectedServices.accountFallback` is declared BEFORE its
+        // dependency `sessions.usageLimitRecovery` in the catalog. A single-pass, order-dependent
+        // enforcement visits accountFallback while usageLimitRecovery still reads enabled (its own
+        // dependency `sessions` is disabled and only gets enforced later), leaving accountFallback
+        // incorrectly enabled. Enforcement must resolve to a fixpoint.
+        const payload = resolveServerFeaturePayload(
+            {} as NodeJS.ProcessEnv,
+            [
+                fromPartial({
+                    features: {
+                        sessions: { enabled: false, usageLimitRecovery: { enabled: true } },
+                        connectedServices: {
+                            enabled: true,
+                            accountGroups: { enabled: true },
+                            accountFallback: { enabled: true },
+                        },
+                    },
+                }),
+            ],
+        );
+
+        expect(payload.features.sessions.enabled).toBe(false);
+        expect(payload.features.sessions.usageLimitRecovery.enabled).toBe(false);
+        expect(payload.features.connectedServices.accountFallback.enabled).toBe(false);
+        // Independent siblings stay untouched.
+        expect(payload.features.connectedServices.enabled).toBe(true);
+        expect(payload.features.connectedServices.accountGroups.enabled).toBe(true);
+    });
+
     it("keeps pets sync independent from the companion client feature", () => {
         const payload = resolveServerFeaturePayload(
             {} as NodeJS.ProcessEnv,

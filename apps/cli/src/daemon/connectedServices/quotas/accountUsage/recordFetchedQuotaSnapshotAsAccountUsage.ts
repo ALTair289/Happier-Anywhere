@@ -36,6 +36,7 @@ type RecordFetchedQuotaSnapshotContext = Readonly<{
     groupGeneration: number;
     recordId: string;
     snapshot: ProviderAccountUsageSnapshotV1;
+    source?: 'poll' | 'in_band';
   }>): Promise<void>;
 }>;
 
@@ -208,6 +209,10 @@ export async function recordFetchedQuotaSnapshotAsAccountUsage(
           groupGeneration: target.groupGeneration,
           recordId: latest.recordId,
           snapshot: latest,
+          // The poll performs its OWN soft-switch check for these targets; suppress the reactive
+          // burn-projected re-check here so a fetch does not double-request the switch. Only genuine
+          // in-band snapshot deliveries (outside the poll) drive the reactive preemptive path.
+          source: 'poll',
         });
       }
     }

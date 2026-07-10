@@ -182,7 +182,10 @@ export const ConnectedServiceProfileDetailView = React.memo(function ConnectedSe
     );
   }
 
-  const status = resolveConnectedServiceCredentialHealthStatus(profileRecord.status);
+  // Fail-closed normalization drives actions/labels only; AccountBlock receives the
+  // RAW status so its fail-open usage gate stays live (UI-1).
+  const rawStatus: unknown = profileRecord.status;
+  const status = resolveConnectedServiceCredentialHealthStatus(rawStatus);
   const kind = profileRecord.kind === 'token' ? 'token' : profileRecord.kind === 'oauth' ? 'oauth' : null;
   const providerEmail = typeof profileRecord.providerEmail === 'string' ? profileRecord.providerEmail : '';
   const providerAccountId = typeof profileRecord.providerAccountId === 'string' ? profileRecord.providerAccountId : '';
@@ -376,7 +379,7 @@ export const ConnectedServiceProfileDetailView = React.memo(function ConnectedSe
             profileId={profileId}
             title={title}
             identityLabel={identityDisplay.secondaryLabel}
-            status={status}
+            status={rawStatus}
             isDefault={isDefault}
             onToggleDefault={handleSetDefault}
             poolLabels={poolLabels}

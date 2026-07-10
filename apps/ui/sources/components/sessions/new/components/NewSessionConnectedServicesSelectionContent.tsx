@@ -35,7 +35,7 @@ export type NewSessionConnectedServicesSelectionContentProps = Readonly<{
         binding: ConnectedServicesServiceBinding;
     }>) => ConnectedServicesSelectionOptionAvailability;
     onReconnectProfile?: (serviceId: string, profileId: string) => void;
-    onOpenSettings: () => void;
+    onOpenSettings: (serviceId: string) => void;
     requestClose?: () => void;
     maxHeight: number;
 }>;
@@ -71,14 +71,14 @@ export function NewSessionConnectedServicesSelectionContent(props: NewSessionCon
     }, [props.bindingsByServiceId]);
 
     const requestedProfiles = React.useMemo(() => {
-        const next: Array<{ serviceId: string; profileId: string }> = [];
+        const next: Array<{ serviceId: string; profileId: string; credentialHealthStatus?: unknown }> = [];
         for (const serviceId of props.supportedServiceIds) {
             const options = props.profileOptionsByServiceId[serviceId] ?? [];
             for (const option of options) {
                 if (!isConnectedServiceProfileOptionSelectable(option)) continue;
                 const profileId = option.profileId.trim();
                 if (!profileId) continue;
-                next.push({ serviceId, profileId });
+                next.push({ serviceId, profileId, credentialHealthStatus: option.status });
             }
         }
         return next;

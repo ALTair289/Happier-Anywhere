@@ -248,4 +248,69 @@ describe('prepareExecutionRunConnectedServices', () => {
     expect(prepared).toBeNull();
     expect(release).toHaveBeenCalledTimes(1);
   });
+
+  it('RO-F5: resolves a mixed bare-default + explicit selection, merging the resolved default UNDER explicit pins', async () => {
+    const materialize = vi.fn(async (_input: unknown) => ({ env: { CODEX_HOME: '/run/root/codex/codex-home' } }));
+    const resolvePerServiceDefaults = vi.fn(async (_input: { serviceIds: readonly string[] }) => ({
+      v: 1 as const,
+      bindingsByServiceId: {
+        'openai-codex': { source: 'connected' as const, selection: 'profile' as const, profileId: 'team' },
+      },
+    }));
+
+    const prepared = await prepareExecutionRunConnectedServices({
+      backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+      connectedServices: {
+        v: 1,
+        bindingsByServiceId: {
+          anthropic: { source: 'connected', selection: 'profile', profileId: 'work' },
+        },
+      },
+      connectedServicesDefaultServiceIds: ['openai-codex'],
+      credentials: CREDENTIALS,
+      cwd: '/tmp/workspace',
+      sessionId: 'session-1',
+      materializeViaDaemon: materialize,
+      releaseViaDaemon: vi.fn(async () => true),
+      resolvePerServiceDefaults,
+    });
+
+    expect(resolvePerServiceDefaults).toHaveBeenCalledTimes(1);
+    expect(resolvePerServiceDefaults.mock.calls.at(0)?.[0]).toMatchObject({ serviceIds: ['openai-codex'] });
+    expect(prepared).not.toBeNull();
+    const mergedSelection = {
+      v: 1,
+      bindingsByServiceId: {
+        anthropic: { source: 'connected', selection: 'profile', profileId: 'work' },
+        'openai-codex': { source: 'connected', selection: 'profile', profileId: 'team' },
+      },
+    };
+    expect(prepared?.selection).toEqual(mergedSelection);
+    const materializeInput = materialize.mock.calls.at(0)?.[0] as Record<string, unknown>;
+    expect(materializeInput.connectedServicesBindingsRaw).toEqual(mergedSelection);
+  });
+
+  it('RO-F5: fails closed (typed) when a bare default token has no stored connected default', async () => {
+    const materialize = vi.fn(async (_input: unknown) => ({ env: { CODEX_HOME: '/x' } }));
+    await expect(
+      prepareExecutionRunConnectedServices({
+        backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+        connectedServices: {
+          v: 1,
+          bindingsByServiceId: {
+            anthropic: { source: 'connected', selection: 'profile', profileId: 'work' },
+          },
+        },
+        connectedServicesDefaultServiceIds: ['openai-codex'],
+        credentials: CREDENTIALS,
+        cwd: '/tmp/workspace',
+        sessionId: 'session-1',
+        materializeViaDaemon: materialize,
+        releaseViaDaemon: vi.fn(async () => true),
+        // No stored default for openai-codex → resolver returns null.
+        resolvePerServiceDefaults: vi.fn(async () => null),
+      }),
+    ).rejects.toBeInstanceOf(ExecutionRunConnectedServicesUnavailableError);
+    expect(materialize).not.toHaveBeenCalled();
+  });
 });

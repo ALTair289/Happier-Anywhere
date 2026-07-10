@@ -772,6 +772,58 @@ describe("providerAccountUsage storage", () => {
         ]);
     });
 
+    it("prunes superseded generation rows for the same logical group source on upsert (SD-2)", async () => {
+        const user = await db.account.create({ data: { publicKey: null, encryptionMode: "plain" }, select: { id: true } });
+        await createGroupMemberBinding({ accountId: user.id, profileId: "work", groupId: "team", generation: 3 });
+        const snapshot = createUsageSnapshot({ fetchedAt: Date.now(), planLabel: "generation-prune" });
+        await writeProviderAccountUsageRecord({
+            accountId: user.id,
+            recordId: snapshot.recordId,
+            recordKey: snapshot.recordKey,
+            payloadMode: "plain_json_v1",
+            snapshot,
+            status: "ok",
+            fetchedAt: snapshot.fetchedAtMs,
+            staleAfterMs: snapshot.staleAfterMs,
+        });
+        await linkConnectedServiceUsageSource({
+            accountId: user.id,
+            providerAccountUsageRecordId: snapshot.recordId,
+            source: {
+                serviceId: "openai-codex",
+                profileId: "work",
+                bindingKind: "group_member",
+                groupId: "team",
+                groupGeneration: 3,
+            },
+        });
+
+        // The group's generation bumps (a swap happened); relinking the SAME logical
+        // source (service + profile + group) mints a new generation-embedding sourceKey.
+        // The superseded generation-3 row must be pruned instead of accumulating.
+        await db.connectedServiceAuthGroup.update({
+            where: { accountId_vendor_groupId: { accountId: user.id, vendor: "openai-codex", groupId: "team" } },
+            data: { generation: 7 },
+        });
+        await linkConnectedServiceUsageSource({
+            accountId: user.id,
+            providerAccountUsageRecordId: snapshot.recordId,
+            source: {
+                serviceId: "openai-codex",
+                profileId: "work",
+                bindingKind: "group_member",
+                groupId: "team",
+                groupGeneration: 7,
+            },
+        });
+
+        const rows = await db.connectedServiceUsageSource.findMany({
+            where: { accountId: user.id, serviceId: "openai-codex", profileId: "work", groupId: "team" },
+            select: { groupGeneration: true },
+        });
+        expect(rows).toEqual([{ groupGeneration: 7 }]);
+    });
+
     it("keeps per-group source links independent when one profile belongs to multiple groups", async () => {
         const user = await db.account.create({ data: { publicKey: null, encryptionMode: "plain" }, select: { id: true } });
         // One shared credential for profile "work"...

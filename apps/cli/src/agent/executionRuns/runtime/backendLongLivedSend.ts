@@ -1,6 +1,5 @@
 import type { AgentBackend } from '@/agent/core/AgentBackend';
 import type { ExecutionBudgetRegistry } from '@/daemon/executionBudget/ExecutionBudgetRegistry';
-import type { BackendTargetRefV1 } from '@happier-dev/protocol';
 
 import type { ACPMessageData, ACPProvider } from '@/api/session/sessionMessageTypes';
 import type { StreamedTranscriptWriterSession } from '@/api/session/streamedTranscriptWriter';
@@ -54,7 +53,7 @@ export async function sendBackendLongLivedRun(args: Readonly<{
   runs: Map<string, ExecutionRunState>;
   controllers: Map<string, ExecutionRunController>;
   budgetRegistry: ExecutionBudgetRegistry | null;
-  createBackend: (opts: { runId?: string; backendId: string; backendTarget?: BackendTargetRefV1; permissionMode: string }) => AgentBackend;
+  createBackend: () => Promise<AgentBackend>;
   maxTurns: number | null;
   getNowMs: () => number;
   finishRun: FinishExecutionRun;

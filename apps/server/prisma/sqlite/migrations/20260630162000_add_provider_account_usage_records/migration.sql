@@ -41,10 +41,10 @@ CREATE TABLE "ConnectedServiceUsageSource" (
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" DATETIME NOT NULL,
 
-    CONSTRAINT "ConnectedServiceUsageSource_accountId_providerAccountUsageRecordId_fkey" FOREIGN KEY ("accountId", "providerAccountUsageRecordId") REFERENCES "ProviderAccountUsageRecord" ("accountId", "recordId") ON DELETE CASCADE ON UPDATE CASCADE
+    CONSTRAINT "csus_paur_fkey" FOREIGN KEY ("accountId", "providerAccountUsageRecordId") REFERENCES "ProviderAccountUsageRecord" ("accountId", "recordId") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
-CREATE UNIQUE INDEX "ProviderAccountUsageRecord_accountId_providerId_accountSubjectId_quotaScope_quotaScopeIdKey_key"
+CREATE UNIQUE INDEX "paur_identity_key"
 ON "ProviderAccountUsageRecord"("accountId", "providerId", "accountSubjectId", "quotaScope", "quotaScopeIdKey");
 
 CREATE INDEX "ProviderAccountUsageRecord_accountId_providerId_idx"
@@ -59,5 +59,5 @@ ON "ConnectedServiceUsageSource"("accountId", "serviceId", "profileId");
 CREATE UNIQUE INDEX "ConnectedServiceUsageSource_accountId_sourceKey_key"
 ON "ConnectedServiceUsageSource"("accountId", "sourceKey");
 
-CREATE INDEX "ConnectedServiceUsageSource_accountId_providerAccountUsageRecordId_idx"
+CREATE INDEX "csus_paur_idx"
 ON "ConnectedServiceUsageSource"("accountId", "providerAccountUsageRecordId");

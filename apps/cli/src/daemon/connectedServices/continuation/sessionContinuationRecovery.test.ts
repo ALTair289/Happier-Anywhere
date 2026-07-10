@@ -79,6 +79,14 @@ type ContinuationModule = Readonly<{
       };
     }) => Promise<{ observed: number }>;
     expireProviderActivityWaits: (input: { sessionId: string }) => Promise<{ expired: number }>;
+    expireStuckRecoveryAttempts: (input: {
+      sessionId: string;
+      stuckAfterMs?: number;
+      requestRelaunch?: (input: { attemptId: string; failureAtMs: number }) =>
+        | Promise<'requested' | 'unavailable'>
+        | 'requested'
+        | 'unavailable';
+    }) => Promise<{ relaunchRequested: number; failed: number }>;
     suppressPendingAttempts: (input: { sessionId: string }) => Promise<{ suppressed: number }>;
   };
 }>;
@@ -99,6 +107,26 @@ function createStore() {
     read: (sessionId: string) => stored.get(sessionId) ?? null,
     write: (sessionId: string, state: unknown) => {
       stored.set(sessionId, state);
+    },
+    stored,
+  };
+}
+
+// A clone-on-read async store: `read` resolves a deep clone of the CURRENT durable value after a
+// microtask, and `write` persists a deep clone after a microtask. This is the reproduction surface
+// from LC-F3 — without a per-session mutation owner, two operations that each read before either
+// writes both capture the same base state and the last writer clobbers the other's mutation.
+function createAsyncCloneStore() {
+  const stored = new Map<string, unknown>();
+  const clone = (value: unknown) => (value == null ? value : JSON.parse(JSON.stringify(value)));
+  return {
+    read: async (sessionId: string) => {
+      await Promise.resolve();
+      return clone(stored.get(sessionId) ?? null);
+    },
+    write: async (sessionId: string, state: unknown) => {
+      await Promise.resolve();
+      stored.set(sessionId, clone(state));
     },
     stored,
   };
@@ -516,6 +544,90 @@ describe('session continuation recovery', () => {
     })).resolves.toEqual({ status: 'provider_activity_timeout' });
   });
 
+  it('backstops a disposed-runtime blocked continuation with one bounded relaunch then a typed terminal error', async () => {
+    const { createSessionContinuationRecoveryController } = await loadContinuationModule();
+    const store = createStore();
+    let now = 2_000;
+    const controller = createSessionContinuationRecoveryController({
+      nowMs: () => now,
+      providerActivityTimeoutMs: 5_000,
+      store,
+    });
+
+    // A blocked continuation attempt that never progressed past pending_provider_context
+    // (the runtime was disposed before the resume prompt could be delivered).
+    await controller.beginAttempt({
+      sessionId: 'session-1',
+      attemptId: 'generation-1:restart-1',
+      failureAtMs: 1_000,
+      resumePromptMode: 'standard',
+    });
+    expect(store.stored.get('session-1')).toMatchObject({
+      attemptsById: { 'generation-1:restart-1': { status: 'pending_provider_context' } },
+    });
+
+    const requestRelaunch = vi.fn(() => 'requested' as const);
+
+    // Not yet past the bound: no relaunch, no terminalization.
+    now = 6_999;
+    await expect(controller.expireStuckRecoveryAttempts({
+      sessionId: 'session-1',
+      requestRelaunch,
+    })).resolves.toEqual({ relaunchRequested: 0, failed: 0 });
+    expect(requestRelaunch).not.toHaveBeenCalled();
+    expect(store.stored.get('session-1')).toMatchObject({
+      attemptsById: { 'generation-1:restart-1': { status: 'pending_provider_context' } },
+    });
+
+    // Past the bound: request exactly one relaunch and terminalize with a typed error so the
+    // pending drain unblocks instead of stalling forever ("waiting for provider confirmation").
+    now = 7_000;
+    await expect(controller.expireStuckRecoveryAttempts({
+      sessionId: 'session-1',
+      requestRelaunch,
+    })).resolves.toEqual({ relaunchRequested: 1, failed: 1 });
+    expect(requestRelaunch).toHaveBeenCalledTimes(1);
+    expect(requestRelaunch).toHaveBeenCalledWith({ attemptId: 'generation-1:restart-1', failureAtMs: 1_000 });
+    expect(store.stored.get('session-1')).toMatchObject({
+      attemptsById: {
+        'generation-1:restart-1': {
+          status: 'continuity_failed',
+          errorCode: 'runtime_disposed_before_delivery',
+        },
+      },
+    });
+  });
+
+  it('surfaces a typed terminal error for a stuck blocked continuation even when no relaunch machinery is available', async () => {
+    const { createSessionContinuationRecoveryController } = await loadContinuationModule();
+    const store = createStore();
+    let now = 2_000;
+    const controller = createSessionContinuationRecoveryController({
+      nowMs: () => now,
+      providerActivityTimeoutMs: 5_000,
+      store,
+    });
+
+    await controller.beginAttempt({
+      sessionId: 'session-1',
+      attemptId: 'generation-1:restart-1',
+      failureAtMs: 1_000,
+      resumePromptMode: 'standard',
+    });
+
+    now = 9_000;
+    await expect(controller.expireStuckRecoveryAttempts({ sessionId: 'session-1' }))
+      .resolves.toEqual({ relaunchRequested: 0, failed: 1 });
+    expect(store.stored.get('session-1')).toMatchObject({
+      attemptsById: {
+        'generation-1:restart-1': {
+          status: 'continuity_failed',
+          errorCode: 'runtime_disposed_before_delivery',
+        },
+      },
+    });
+  });
+
   it('resolves persisted pending attempts once provider context is available', async () => {
     const { createSessionContinuationRecoveryController } = await loadContinuationModule();
     const store = createStore();
@@ -720,6 +832,107 @@ describe('session continuation recovery', () => {
         'generation-1:restart-1': {
           status: 'awaiting_provider_activity',
           sentAtMs: expect.any(Number),
+        },
+      },
+    });
+  });
+
+  it('preserves distinct concurrent begin attempts through a clone-on-read async store', async () => {
+    const { createSessionContinuationRecoveryController } = await loadContinuationModule();
+    const store = createAsyncCloneStore();
+    const controller = createSessionContinuationRecoveryController({ nowMs: () => 2_000, store });
+
+    await Promise.all([
+      controller.beginAttempt({ sessionId: 'session-1', attemptId: 'A', failureAtMs: 1_000, resumePromptMode: 'standard' }),
+      controller.beginAttempt({ sessionId: 'session-1', attemptId: 'B', failureAtMs: 1_000, resumePromptMode: 'standard' }),
+    ]);
+
+    const stored = store.stored.get('session-1') as { attemptsById: Record<string, unknown> };
+    expect(Object.keys(stored.attemptsById).sort()).toEqual(['A', 'B']);
+  });
+
+  it('claims sending exactly once when two resolvers race two pre-claim reads', async () => {
+    const { createSessionContinuationRecoveryController } = await loadContinuationModule();
+    const store = createAsyncCloneStore();
+    const controller = createSessionContinuationRecoveryController({ nowMs: () => 2_000, store });
+    const sends: string[] = [];
+    const resolveInput = () => ({
+      sessionId: 'session-1',
+      attemptId: 'generation-1:restart-1',
+      failureAtMs: 1_000,
+      resumePromptMode: 'standard' as const,
+      exactProviderContextAvailable: true,
+      hasUserMessageAfterFailure: () => false,
+      sendContinuationPrompt: ({ localId }: { prompt: string; localId: string }) => {
+        sends.push(localId);
+      },
+    });
+
+    const [first, second] = await Promise.all([
+      controller.resolveAttempt(resolveInput()),
+      controller.resolveAttempt(resolveInput()),
+    ]);
+
+    expect(sends).toHaveLength(1);
+    expect([first.status, second.status].sort()).toEqual([
+      'already_awaiting_provider_activity',
+      'awaiting_provider_activity',
+    ]);
+  });
+
+  it('does not let the stuck-expiry sweep erase a concurrently begun attempt', async () => {
+    const { createSessionContinuationRecoveryController } = await loadContinuationModule();
+    const store = createAsyncCloneStore();
+    let now = 2_000;
+    const controller = createSessionContinuationRecoveryController({
+      nowMs: () => now,
+      providerActivityTimeoutMs: 5_000,
+      store,
+    });
+
+    await controller.beginAttempt({ sessionId: 'session-1', attemptId: 'OLD', failureAtMs: 1_000, resumePromptMode: 'standard' });
+
+    now = 9_000;
+    await Promise.all([
+      controller.expireStuckRecoveryAttempts({ sessionId: 'session-1' }),
+      controller.beginAttempt({ sessionId: 'session-1', attemptId: 'NEW', failureAtMs: 8_500, resumePromptMode: 'standard' }),
+    ]);
+
+    const stored = store.stored.get('session-1') as {
+      attemptsById: Record<string, { status: string }>;
+    };
+    expect(Object.keys(stored.attemptsById).sort()).toEqual(['NEW', 'OLD']);
+    expect(stored.attemptsById.OLD.status).toBe('continuity_failed');
+    expect(stored.attemptsById.NEW.status).toBe('pending_provider_context');
+  });
+
+  it('does not let a mid-send finalize regress a concurrent suppression', async () => {
+    const { createSessionContinuationRecoveryController } = await loadContinuationModule();
+    const store = createStore();
+    const controller = createSessionContinuationRecoveryController({ nowMs: () => 2_000, store });
+    const sends: string[] = [];
+
+    const result = await controller.resolveAttempt({
+      sessionId: 'session-1',
+      attemptId: 'generation-1:restart-1',
+      failureAtMs: 1_000,
+      resumePromptMode: 'standard',
+      exactProviderContextAvailable: true,
+      hasUserMessageAfterFailure: () => false,
+      // Use the in-flight send as a deterministic barrier: terminalize the attempt via a concurrent
+      // suppression while the send is between claim and finalize. The finalize must not regress it.
+      sendContinuationPrompt: async ({ localId }) => {
+        sends.push(localId);
+        await controller.suppressPendingAttempts({ sessionId: 'session-1' });
+      },
+    });
+
+    expect(sends).toHaveLength(1);
+    expect(result.status).toBe('suppressed_newer_user_input');
+    expect(store.stored.get('session-1')).toMatchObject({
+      attemptsById: {
+        'generation-1:restart-1': {
+          status: 'suppressed_newer_user_input',
         },
       },
     });

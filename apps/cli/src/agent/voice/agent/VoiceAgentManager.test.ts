@@ -1263,6 +1263,142 @@ describe('VoiceAgentManager', () => {
     expect(backend.prompts[0]).toContain('Voice stack block');
   });
 
+  it('R3-2: forwards connectedServicesEnv to BOTH the chat and commit backend factories', async () => {
+    const { VoiceAgentManager } = await import('./VoiceAgentManager');
+
+    const seenEnvByModel: Record<string, Readonly<Record<string, string>> | null | undefined> = {};
+    const chatBackend = createDeterministicBackend('chat');
+    const commitBackend = createDeterministicBackend('commit');
+    const createBackend: BackendFactory = (opts) => {
+      seenEnvByModel[opts.modelId] = opts.connectedServicesEnv;
+      return opts.modelId === 'commit-model' ? commitBackend : chatBackend;
+    };
+
+    const manager = new VoiceAgentManager({ createBackend });
+    const started = await manager.start({
+      agentId: 'claude',
+      chatModelId: 'chat-model',
+      commitModelId: 'commit-model',
+      permissionPolicy: 'read_only',
+      idleTtlSeconds: 60,
+      initialContext: 'CTX',
+      connectedServicesEnv: { CODEX_HOME: '/materialized/run/codex-home' },
+    } as any);
+
+    // Chat backend received the materialized CS env at start…
+    expect(seenEnvByModel['chat-model']).toEqual({ CODEX_HOME: '/materialized/run/codex-home' });
+    // …and the lazily-created commit backend gets the SAME env (not the runner's inherited account).
+    await manager.commit({ voiceAgentId: started.voiceAgentId, maxChars: 10_000 });
+    expect(seenEnvByModel['commit-model']).toEqual({ CODEX_HOME: '/materialized/run/codex-home' });
+  });
+
+  it('R3-2: runs connectedServicesCleanup exactly once at voice-agent dispose (release), after backends dispose', async () => {
+    const { VoiceAgentManager } = await import('./VoiceAgentManager');
+
+    const disposeOrder: string[] = [];
+    const chatBackend: AgentBackend = {
+      onMessage: () => {},
+      startSession: async () => ({ sessionId: 's-chat' }),
+      sendPrompt: async () => {},
+      cancel: async () => {},
+      dispose: async () => { disposeOrder.push('chat'); },
+    };
+    const connectedServicesCleanup = vi.fn(async () => { disposeOrder.push('cleanup'); });
+    const createBackend: BackendFactory = () => chatBackend;
+
+    const manager = new VoiceAgentManager({ createBackend });
+    const started = await manager.start({
+      agentId: 'claude',
+      chatModelId: 'chat-model',
+      commitModelId: 'commit-model',
+      permissionPolicy: 'read_only',
+      idleTtlSeconds: 60,
+      initialContext: 'CTX',
+      connectedServicesCleanup,
+    } as any);
+
+    await manager.stop({ voiceAgentId: started.voiceAgentId });
+
+    // Cleanup ran exactly once, and only after the backend was disposed (root still needed until then).
+    expect(connectedServicesCleanup).toHaveBeenCalledTimes(1);
+    expect(disposeOrder).toEqual(['chat', 'cleanup']);
+
+    // Manager dispose (or a reap after stop) must NOT re-run the run-scoped release.
+    await manager.dispose();
+    expect(connectedServicesCleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it('R4-1: releases connectedServicesCleanup exactly once when start fails BEFORE the instance is created', async () => {
+    const { VoiceAgentManager } = await import('./VoiceAgentManager');
+
+    let disposed = 0;
+    const connectedServicesCleanup = vi.fn(async () => {});
+    const chatBackend: AgentBackend = {
+      onMessage: () => {},
+      // Fails before the voice-agent instance is registered → the happy-path exactly-once owner
+      // (instance.dispose) never runs, so the failure path must release the materialized run root.
+      startSession: async () => { throw new Error('backend session boot failed'); },
+      sendPrompt: async () => {},
+      cancel: async () => {},
+      dispose: async () => { disposed += 1; },
+    };
+
+    const manager = new VoiceAgentManager({ createBackend: () => chatBackend });
+    await expect(manager.start({
+      agentId: 'claude',
+      chatModelId: 'chat-model',
+      commitModelId: 'commit-model',
+      permissionPolicy: 'read_only',
+      idleTtlSeconds: 60,
+      initialContext: 'CTX',
+      connectedServicesCleanup,
+    } as any)).rejects.toThrow();
+
+    // The materialized run root MUST be released on the pre-instance failure path (no leak).
+    expect(connectedServicesCleanup).toHaveBeenCalledTimes(1);
+    expect(disposed).toBe(1);
+
+    // Manager dispose must not double-release.
+    await manager.dispose();
+    expect(connectedServicesCleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it('R4-1: releases connectedServicesCleanup exactly once when the bootstrap handshake throws', async () => {
+    const { VoiceAgentManager } = await import('./VoiceAgentManager');
+
+    let disposed = 0;
+    const connectedServicesCleanup = vi.fn(async () => {});
+    const chatBackend: AgentBackend = {
+      onMessage: () => {},
+      startSession: async () => ({ sessionId: 's-chat' as SessionId }),
+      sendPrompt: async () => {},
+      // Bootstrap reads chatBuffer (stays '', never 'READY') → start throws AFTER the instance is
+      // registered. Cleanup must still fire exactly once.
+      waitForResponseComplete: async () => {},
+      cancel: async () => {},
+      dispose: async () => { disposed += 1; },
+    };
+
+    const manager = new VoiceAgentManager({ createBackend: () => chatBackend });
+    await expect(manager.start({
+      agentId: 'claude',
+      chatModelId: 'chat-model',
+      commitModelId: 'commit-model',
+      permissionPolicy: 'read_only',
+      idleTtlSeconds: 60,
+      initialContext: 'CTX',
+      bootstrapMode: 'ready_handshake',
+      connectedServicesCleanup,
+    } as any)).rejects.toThrow();
+
+    expect(connectedServicesCleanup).toHaveBeenCalledTimes(1);
+    expect(disposed).toBe(1);
+
+    // The failed instance must not linger in the registry and re-release on manager dispose.
+    await manager.dispose();
+    expect(connectedServicesCleanup).toHaveBeenCalledTimes(1);
+  });
+
   it('passes an explicit bounded timeout to non-bootstrap voice waits', async () => {
     const { VoiceAgentManager } = await import('./VoiceAgentManager');
 

@@ -2,7 +2,7 @@ import type {
   AccountSettings,
   ConnectedServiceCredentialRecordV1,
 } from '@happier-dev/protocol';
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 
 import { resolveConfiguredClaudeConfigDir } from '@/backends/claude/utils/resolveConfiguredClaudeConfigDir';
@@ -19,10 +19,8 @@ import {
 import {
   buildClaudeConnectedServiceHomeProvenance,
   matchesClaudeConnectedServiceHomeProvenance,
-  resolveClaudeConnectedServiceHomeProvenancePath,
   readClaudeConnectedServiceHomeProvenance,
   writeClaudeConnectedServiceHomeProvenance,
-  writeClaudeConnectedServiceHomeMacOsKeychainCredentialProvenance,
 } from '../claudeConnectedServiceHomeProvenance';
 import { sanitizeClaudeRootConfigFile } from '../claudeRootConfig';
 import { materializeClaudeWorkspaceTrust } from '../materializeClaudeWorkspaceTrust';
@@ -35,12 +33,7 @@ import {
   type ClaudeCodeNativeCredentialPayload,
 } from './claudeCodeCredentialFile';
 import { stripClaudeCodeCredentialFileRefreshTokenFields } from './claudeCodeCredentialFileRefreshTokenStrip';
-import {
-  isClaudeCodeMacOsGlobalKeychainService,
-  sweepStaleClaudeCodeMacOsKeychainCredentials,
-  writeClaudeCodeMacOsKeychainCredential,
-  type ClaudeCodeMacOsKeychainCredentialWriteResult,
-} from './claudeCodeMacOsKeychain';
+import { sweepStaleClaudeCodeMacOsKeychainCredentials } from './claudeCodeMacOsKeychain';
 import {
   classifyClaudeCodeCredentialHealth,
   type ClaudeCodeCredentialHealth,
@@ -87,11 +80,6 @@ export type ClaudeSubscriptionNativeAuthIdentityDiagnostic = Readonly<{
   credentialHealthStatus: ClaudeCodeCredentialHealthStatus;
   hasProviderAccountId: boolean;
   hasProviderEmail: boolean;
-}>;
-
-export type ClaudeSubscriptionNativeAuthMacOsKeychainCredentialWriteResult = Readonly<{
-  diagnostics: readonly ConnectedServicesMaterializationDiagnostic[];
-  keychainWrite: ClaudeCodeMacOsKeychainCredentialWriteResult | null;
 }>;
 
 export type ClaudeSubscriptionNativeAuthHomeMaterializationResult =
@@ -164,16 +152,6 @@ function diagnosticForCredentialFileWriteFailure(): ConnectedServicesMaterializa
     severity: 'blocking',
     serviceId: 'claude-subscription',
     reason: 'credential_file_write_failed',
-  };
-}
-
-function diagnosticForKeychainWriteFailure(): ConnectedServicesMaterializationDiagnostic {
-  return {
-    code: 'claude_subscription_native_auth_keychain_write_failed',
-    providerId: 'claude',
-    severity: 'blocking',
-    serviceId: 'claude-subscription',
-    reason: 'keychain_write_failed',
   };
 }
 
@@ -338,38 +316,6 @@ function hasNonBlankString(value: unknown): boolean {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
-type FileRollbackSnapshot = Readonly<{
-  path: string;
-  existed: boolean;
-  contents?: Buffer | undefined;
-  mode?: number | undefined;
-}>;
-
-async function snapshotFileForRollback(path: string): Promise<FileRollbackSnapshot> {
-  try {
-    const [contents, stats] = await Promise.all([readFile(path), lstat(path)]);
-    return { path, existed: true, contents, mode: stats.mode & 0o777 };
-  } catch {
-    return { path, existed: false };
-  }
-}
-
-async function restoreFileSnapshot(snapshot: FileRollbackSnapshot): Promise<void> {
-  if (!snapshot.existed) {
-    await rm(snapshot.path, { force: true }).catch(() => {});
-    return;
-  }
-  await mkdir(dirname(snapshot.path), { recursive: true });
-  await writeFile(snapshot.path, snapshot.contents ?? Buffer.alloc(0), { mode: snapshot.mode ?? 0o600 });
-  if (process.platform !== 'win32') {
-    await chmod(snapshot.path, snapshot.mode ?? 0o600).catch(() => {});
-  }
-}
-
-async function restoreFileSnapshots(snapshots: readonly FileRollbackSnapshot[]): Promise<void> {
-  await Promise.all(snapshots.map((snapshot) => restoreFileSnapshot(snapshot)));
-}
-
 function buildClaudeSubscriptionNativeAuthIdentityDiagnostic(params: Readonly<{
   record: ConnectedServiceCredentialRecordV1;
   selectionDescriptor: ClaudeSubscriptionNativeAuthSelectionDescriptor;
@@ -399,101 +345,27 @@ function buildClaudeSubscriptionNativeAuthIdentityDiagnostic(params: Readonly<{
   };
 }
 
-export async function writeClaudeSubscriptionNativeAuthMacOsKeychainCredential(params: Readonly<{
-  record: ConnectedServiceCredentialRecordV1;
-  claudeConfigDir: string;
-  sourceEnv: NodeJS.ProcessEnv;
-  payload?: ClaudeCodeNativeCredentialPayload | null;
-  incomingUpdatedAtMs?: number | undefined;
-  preserveNewerExistingCredential?: boolean | undefined;
-  keychainSweepLiveClaudeConfigDirs?: readonly string[] | undefined;
-  diagnosticContext?: Readonly<{
-    profileId?: string;
-    homeKind?: 'profile' | 'group' | string;
-  }> | undefined;
-}>): Promise<ClaudeSubscriptionNativeAuthMacOsKeychainCredentialWriteResult> {
-  if (process.platform !== 'darwin') {
-    return {
-      diagnostics: [],
-      keychainWrite: null,
-    };
-  }
-  if (isClaudeCodeMacOsGlobalKeychainService({
-    claudeConfigDir: params.claudeConfigDir,
-    homeDir: params.sourceEnv.HOME,
-  })) {
-    return {
-      diagnostics: [],
-      keychainWrite: null,
-    };
-  }
-  const homeProvenance = await readClaudeConnectedServiceHomeProvenance(params.claudeConfigDir);
-  if (!homeProvenance) {
-    return {
-      diagnostics: [],
-      keychainWrite: null,
-    };
-  }
-  const builtPayload = params.payload ? null : buildClaudeCodeCredentialPayload(params.record);
-  const payload = params.payload ?? (builtPayload?.status === 'ok' ? builtPayload.payload : null);
-  if (!payload) {
-    return {
-      diagnostics: [diagnosticForKeychainWriteFailure()],
-      keychainWrite: null,
-    };
-  }
-  try {
-    const keychainWrite = await writeClaudeCodeMacOsKeychainCredential({
-      claudeConfigDir: params.claudeConfigDir,
-      payload,
-      homeDir: params.sourceEnv.HOME,
-      username: params.sourceEnv.USER,
-      incomingUpdatedAtMs: params.incomingUpdatedAtMs,
-      preserveNewerExistingCredential: params.preserveNewerExistingCredential,
-      lastWrittenProvenance: homeProvenance.macOsKeychainCredential,
-      diagnosticContext: params.diagnosticContext,
-    });
-    // Record the fingerprint we just committed so the next spawn/resume can skip an identical
-    // (clobbering) write. Only a genuine rotation (fingerprint change) will write again.
-    if (keychainWrite.status === 'written') {
-      await writeClaudeConnectedServiceHomeMacOsKeychainCredentialProvenance({
-        claudeConfigDir: params.claudeConfigDir,
-        macOsKeychainCredential: {
-          credentialFingerprint: keychainWrite.credentialFingerprint,
-          writtenAtMs: keychainWrite.writtenAtMs,
-        },
-      });
-    }
-    if (params.keychainSweepLiveClaudeConfigDirs && params.keychainSweepLiveClaudeConfigDirs.length > 0) {
-      scheduleStaleClaudeCodeMacOsKeychainCredentialSweep({
-        liveClaudeConfigDirs: params.keychainSweepLiveClaudeConfigDirs,
-        homeDir: params.sourceEnv.HOME,
-        username: params.sourceEnv.USER,
-      });
-    }
-    return {
-      diagnostics: [],
-      keychainWrite,
-    };
-  } catch {
-    return {
-      diagnostics: [diagnosticForKeychainWriteFailure()],
-      keychainWrite: null,
-    };
-  }
-}
-
 const scheduledStaleClaudeCodeMacOsKeychainSweepKeys = new Set<string>();
 
+/** AT-4: reset the module-level sweep dedupe between tests (darwin-only path; order-determinism). */
+export function resetScheduledStaleClaudeCodeMacOsKeychainSweepKeysForTests(): void {
+  scheduledStaleClaudeCodeMacOsKeychainSweepKeys.clear();
+}
+
+/**
+ * Reconcile the login keychain: delete every obsolete Happier-managed derived (suffixed) item for the
+ * current user account. Under the file-only design nothing writes or reads a derived item, so any that
+ * survive are legacy cruft (e.g. items written before the writer was removed) — they must be removed so
+ * a stale token can never shadow the authoritative `.credentials.json`. Deferred off the spawn hot path,
+ * deduped per (home, user) while in flight, and idempotent (missing item ⇒ no-op). The user's global
+ * `Claude Code-credentials` login and other-account items are never touched (see classifier).
+ */
 function scheduleStaleClaudeCodeMacOsKeychainCredentialSweep(params: Readonly<{
-  liveClaudeConfigDirs: readonly string[];
   homeDir?: string | null | undefined;
   username?: string | null | undefined;
 }>): void {
-  const liveClaudeConfigDirs = [...new Set(params.liveClaudeConfigDirs.map((dir) => resolve(dir)))].sort();
-  if (liveClaudeConfigDirs.length === 0) return;
+  if (process.platform !== 'darwin') return;
   const key = JSON.stringify({
-    liveClaudeConfigDirs,
     homeDir: params.homeDir ?? null,
     username: params.username ?? null,
   });
@@ -501,7 +373,6 @@ function scheduleStaleClaudeCodeMacOsKeychainCredentialSweep(params: Readonly<{
   scheduledStaleClaudeCodeMacOsKeychainSweepKeys.add(key);
   const timer = setTimeout(() => {
     void sweepStaleClaudeCodeMacOsKeychainCredentials({
-      liveClaudeConfigDirs,
       homeDir: params.homeDir,
       username: params.username,
     }).catch((error) => {
@@ -542,11 +413,15 @@ export async function materializeClaudeSubscriptionNativeAuthHome(params: Readon
   candidatePersistedSessionFile?: string | null;
   /** Ambient native store root for self-source sharing-policy reconciliation (RD-MAT-2). */
   ambientStateSourceDir?: string | null;
-  writeMacOsKeychainCredential?: boolean;
-  keychainSweepLiveClaudeConfigDirs?: readonly string[] | undefined;
   selectionDescriptor: ClaudeSubscriptionNativeAuthSelectionDescriptor;
 }>): Promise<ClaudeSubscriptionNativeAuthHomeMaterializationResult> {
   await stripLegacyRefreshTokensFromManagedClaudeHome(params.targetClaudeConfigDir);
+  // Reconcile obsolete Happier-managed derived keychain items once we materialize a managed home. The
+  // sweep is deferred, deduped and never touches the global login or other-account items.
+  scheduleStaleClaudeCodeMacOsKeychainCredentialSweep({
+    homeDir: params.sourceEnv.HOME,
+    username: params.sourceEnv.USER,
+  });
   const health = classifyClaudeCodeCredentialHealth(params.record);
   const builtCredentialPayload = buildClaudeCodeCredentialPayload(params.record);
   const preserveNewerExistingCredential = await shouldPreserveNewerExistingCredential({
@@ -585,12 +460,6 @@ export async function materializeClaudeSubscriptionNativeAuthHome(params: Readon
   const sharingPolicy = resolveClaudeHomeSharingSettings(params.accountSettings ?? null);
   const sourceClaudeConfigDir = resolveConfiguredClaudeConfigDir({ env: params.sourceEnv });
   if (resolve(sourceClaudeConfigDir) === resolve(params.targetClaudeConfigDir)) {
-    const credentialSnapshot = await snapshotFileForRollback(
-      resolveClaudeCodeCredentialsFilePath(params.targetClaudeConfigDir),
-    );
-    const provenanceSnapshot = await snapshotFileForRollback(
-      resolveClaudeConnectedServiceHomeProvenancePath(params.targetClaudeConfigDir),
-    );
     const syncResult = await syncClaudeConnectedServiceHome({
       sourceEnv: params.sourceEnv,
       targetDir: params.targetClaudeConfigDir,
@@ -644,30 +513,6 @@ export async function materializeClaudeSubscriptionNativeAuthHome(params: Readon
         }),
       });
     }
-    if (params.writeMacOsKeychainCredential !== false) {
-      const finalCredential = await readClaudeCodeNativeCredentialFile(params.targetClaudeConfigDir);
-      const keychainDiagnostics = await writeClaudeSubscriptionNativeAuthMacOsKeychainCredential({
-        record: params.record,
-        claudeConfigDir: params.targetClaudeConfigDir,
-        sourceEnv: params.sourceEnv,
-        payload: finalCredential?.payload ?? null,
-        incomingUpdatedAtMs: finalCredential?.updatedAtMs ?? params.record.updatedAt,
-        preserveNewerExistingCredential: false,
-        keychainSweepLiveClaudeConfigDirs: credentialFileAlreadyCurrent
-          ? undefined
-          : params.keychainSweepLiveClaudeConfigDirs,
-        diagnosticContext: credentialDiagnosticContextForSelection(params.selectionDescriptor),
-      });
-      if (keychainDiagnostics.diagnostics.some((diagnostic) => diagnostic.code === 'claude_subscription_native_auth_keychain_write_failed')) {
-        await restoreFileSnapshots([credentialSnapshot, provenanceSnapshot]);
-        return {
-          status: 'diagnostic',
-          env: { CLAUDE_CONFIG_DIR: params.targetClaudeConfigDir },
-          diagnostics: keychainDiagnostics.diagnostics,
-          identityDiagnostic,
-        };
-      }
-    }
     return {
       ...materialized,
       env: { CLAUDE_CONFIG_DIR: params.targetClaudeConfigDir },
@@ -679,12 +524,6 @@ export async function materializeClaudeSubscriptionNativeAuthHome(params: Readon
 
   if (preserveNewerExistingCredential) {
     return await withConnectedServiceStateSharingDestinationLock(params.targetClaudeConfigDir, async () => {
-      const credentialSnapshot = await snapshotFileForRollback(
-        resolveClaudeCodeCredentialsFilePath(params.targetClaudeConfigDir),
-      );
-      const provenanceSnapshot = await snapshotFileForRollback(
-        resolveClaudeConnectedServiceHomeProvenancePath(params.targetClaudeConfigDir),
-      );
       const syncResult = await syncClaudeConnectedServiceHome({
         sourceEnv: params.sourceEnv,
         targetDir: params.targetClaudeConfigDir,
@@ -737,30 +576,6 @@ export async function materializeClaudeSubscriptionNativeAuthHome(params: Readon
             selectionDescriptor: params.selectionDescriptor,
           }),
         });
-      }
-      if (params.writeMacOsKeychainCredential !== false) {
-        const finalCredential = await readClaudeCodeNativeCredentialFile(params.targetClaudeConfigDir);
-        const keychainDiagnostics = await writeClaudeSubscriptionNativeAuthMacOsKeychainCredential({
-          record: params.record,
-          claudeConfigDir: params.targetClaudeConfigDir,
-          sourceEnv: params.sourceEnv,
-          payload: finalCredential?.payload ?? null,
-          incomingUpdatedAtMs: finalCredential?.updatedAtMs ?? params.record.updatedAt,
-          preserveNewerExistingCredential: false,
-          keychainSweepLiveClaudeConfigDirs: credentialFileAlreadyCurrent
-            ? undefined
-            : params.keychainSweepLiveClaudeConfigDirs,
-          diagnosticContext: credentialDiagnosticContextForSelection(params.selectionDescriptor),
-        });
-        if (keychainDiagnostics.diagnostics.some((diagnostic) => diagnostic.code === 'claude_subscription_native_auth_keychain_write_failed')) {
-          await restoreFileSnapshots([credentialSnapshot, provenanceSnapshot]);
-          return {
-            status: 'diagnostic',
-            env: { CLAUDE_CONFIG_DIR: params.targetClaudeConfigDir },
-            diagnostics: keychainDiagnostics.diagnostics,
-            identityDiagnostic,
-          };
-        }
       }
       return {
         ...materialized,
@@ -826,45 +641,10 @@ export async function materializeClaudeSubscriptionNativeAuthHome(params: Readon
         effectiveStateMode: syncResult.effectiveStateMode,
         sharedSourceProjectsRoot: join(sourceClaudeConfigDir, 'projects'),
       });
-      if (params.writeMacOsKeychainCredential !== false && process.platform === 'darwin') {
-        let keychainWriteFailed = false;
-        try {
-          await replaceDirectoryAtomically({
-            stagedDir: stagedClaudeConfigDir,
-            targetDir: params.targetClaudeConfigDir,
-            afterPromote: async () => {
-              const finalCredential = await readClaudeCodeNativeCredentialFile(params.targetClaudeConfigDir);
-              const keychainDiagnostics = await writeClaudeSubscriptionNativeAuthMacOsKeychainCredential({
-                record: params.record,
-                claudeConfigDir: params.targetClaudeConfigDir,
-                sourceEnv: params.sourceEnv,
-                payload: finalCredential?.payload ?? null,
-                incomingUpdatedAtMs: finalCredential?.updatedAtMs ?? params.record.updatedAt,
-                preserveNewerExistingCredential: false,
-                keychainSweepLiveClaudeConfigDirs: params.keychainSweepLiveClaudeConfigDirs,
-                diagnosticContext: credentialDiagnosticContextForSelection(params.selectionDescriptor),
-              });
-              if (keychainDiagnostics.diagnostics.some((diagnostic) => diagnostic.code === 'claude_subscription_native_auth_keychain_write_failed')) {
-                keychainWriteFailed = true;
-                throw new Error('claude_subscription_native_auth_keychain_write_failed');
-              }
-            },
-          });
-        } catch (error) {
-          if (!keychainWriteFailed) throw error;
-          return {
-            status: 'diagnostic',
-            env: { CLAUDE_CONFIG_DIR: params.targetClaudeConfigDir },
-            diagnostics: [...syncResult.diagnostics, diagnosticForKeychainWriteFailure()],
-            identityDiagnostic,
-          };
-        }
-      } else {
-        await replaceDirectoryAtomically({
-          stagedDir: stagedClaudeConfigDir,
-          targetDir: params.targetClaudeConfigDir,
-        });
-      }
+      await replaceDirectoryAtomically({
+        stagedDir: stagedClaudeConfigDir,
+        targetDir: params.targetClaudeConfigDir,
+      });
       return {
         ...materialized,
         env: { CLAUDE_CONFIG_DIR: params.targetClaudeConfigDir },

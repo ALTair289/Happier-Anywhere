@@ -113,6 +113,70 @@ describe('reconcileIndexedSameAccountFanoutCandidates', () => {
     expect(reconciliation.invalidateRuntimeAccountIdentity).toHaveBeenCalledWith('sess_same');
   });
 
+  it('retains a daemon-authoritative candidate via its indexed identity WITHOUT a live probe', async () => {
+    const readRuntimeAccountIdentity = vi.fn(async (): Promise<RuntimeAccountIdentityProbeResult> => ({
+      status: 'verified',
+      strategy: 'provider_account_id',
+      providerAccountId: 'acct-a',
+      proofStrength: 'exact',
+      source: 'runtime_identity_probe',
+    }));
+    const invalidateRuntimeAccountIdentity = vi.fn();
+    const recordRuntimeAccountIdentity = vi.fn((): RuntimeAccountIdentityRecordResult => ({ status: 'recorded' }));
+    const diagnostics: unknown[] = [];
+
+    const result = await reconcileIndexedSameAccountFanoutCandidates({
+      serviceId: 'openai-codex',
+      groupId: 'team',
+      providerAccountId: 'acct-a',
+      indexedCandidates: [indexedCandidate],
+      readRuntimeAccountIdentity,
+      resolveCandidateRequiresLiveIdentityProbe: () => false,
+      now: () => 1_000,
+      recordRuntimeAccountIdentity,
+      invalidateRuntimeAccountIdentity,
+      recordDiagnostic: (event) => diagnostics.push(event),
+    });
+
+    expect(result).toEqual([
+      expect.objectContaining({ sessionId: 'sess_same', providerAccountId: 'acct-a' }),
+    ]);
+    expect(readRuntimeAccountIdentity).not.toHaveBeenCalled();
+    expect(invalidateRuntimeAccountIdentity).not.toHaveBeenCalled();
+    expect(diagnostics).toEqual([]);
+  });
+
+  it('backs off re-probing a live-probe-required candidate whose method is unsupported (one record, no storm)', async () => {
+    const unsupportedSessions = new Set<string>();
+    const readRuntimeAccountIdentity = vi.fn(async (): Promise<RuntimeAccountIdentityProbeResult> => ({
+      status: 'unavailable',
+      reason: 'unsupported_session_runtime_method',
+    }));
+    const diagnostics: unknown[] = [];
+    const shared = {
+      serviceId: 'openai-codex' as const,
+      groupId: 'team',
+      providerAccountId: 'acct-a',
+      indexedCandidates: [indexedCandidate],
+      readRuntimeAccountIdentity,
+      resolveCandidateRequiresLiveIdentityProbe: () => true,
+      isLiveIdentityProbeUnsupported: (sessionId: string) => unsupportedSessions.has(sessionId),
+      markLiveIdentityProbeUnsupported: (sessionId: string) => { unsupportedSessions.add(sessionId); },
+      now: () => 1_000,
+      recordRuntimeAccountIdentity: vi.fn((): RuntimeAccountIdentityRecordResult => ({ status: 'recorded' })),
+      invalidateRuntimeAccountIdentity: vi.fn(),
+      recordDiagnostic: (event: unknown) => diagnostics.push(event),
+    };
+
+    await reconcileIndexedSameAccountFanoutCandidates(shared);
+    await reconcileIndexedSameAccountFanoutCandidates(shared);
+
+    expect(readRuntimeAccountIdentity).toHaveBeenCalledTimes(1);
+    expect(
+      diagnostics.filter((event) => (event as { reason?: string }).reason === 'unsupported_session_runtime_method'),
+    ).toHaveLength(1);
+  });
+
   it('records a stable account-mismatch diagnostic when exact runtime identity points at another account', async () => {
     const reconciliation = runReconcileWithProbe({
       status: 'verified',

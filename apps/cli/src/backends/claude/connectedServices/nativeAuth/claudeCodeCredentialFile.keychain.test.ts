@@ -87,6 +87,16 @@ describe('claudeCodeCredentialFile macOS keychain source', () => {
     spawnSpy.mockImplementation((_command: string, args: readonly string[]) => mockSecurityProcess(resolve(args)));
   }
 
+  // The macOS keychain read fallback is scoped to the GLOBAL `Claude Code-credentials` service —
+  // i.e. the native `~/.claude` config dir. Derived per-config items are no longer written or read,
+  // so these source-preference tests exercise a global config dir where the keychain is authoritative.
+  async function globalClaudeConfigDir(
+    prefix: string,
+  ): Promise<Readonly<{ homeDir: string; claudeConfigDir: string }>> {
+    const homeDir = await mkdtemp(join(tmpdir(), prefix));
+    return { homeDir, claudeConfigDir: join(homeDir, '.claude') };
+  }
+
   it('reads the matching macOS keychain credential before the credential file', async () => {
     Object.defineProperty(process, 'platform', { ...ORIGINAL_PLATFORM_DESCRIPTOR, value: 'darwin' });
     mockSecuritySpawn((args) => {
@@ -99,9 +109,10 @@ describe('claudeCodeCredentialFile macOS keychain source', () => {
       writeClaudeCodeCredentialsFile,
     } = await import('./claudeCodeCredentialFile');
 
-    const claudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-keychain-read-'));
+    const { homeDir, claudeConfigDir } = await globalClaudeConfigDir('happier-claude-keychain-read-');
     await writeClaudeCodeCredentialsFile({
       claudeConfigDir,
+      homeDir,
       payload: {
         claudeAiOauth: {
           accessToken: 'file-access-placeholder',
@@ -113,7 +124,7 @@ describe('claudeCodeCredentialFile macOS keychain source', () => {
       preserveNewerExistingCredential: false,
     });
 
-    await expect(readClaudeCodeNativeCredential({ claudeConfigDir, homeDir: '/Users/tester' })).resolves.toEqual({
+    await expect(readClaudeCodeNativeCredential({ claudeConfigDir, homeDir })).resolves.toEqual({
       payload: keychainPayload(),
       updatedAtMs: Date.parse('2026-06-06T12:01:00.000Z'),
       source: 'macos_keychain',
@@ -141,7 +152,7 @@ describe('claudeCodeCredentialFile macOS keychain source', () => {
       writeClaudeCodeCredentialsFile,
     } = await import('./claudeCodeCredentialFile');
 
-    const claudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-keychain-invalid-read-'));
+    const { homeDir, claudeConfigDir } = await globalClaudeConfigDir('happier-claude-keychain-invalid-read-');
     const filePayload = {
       claudeAiOauth: {
         accessToken: 'file-access-placeholder',
@@ -159,11 +170,12 @@ describe('claudeCodeCredentialFile macOS keychain source', () => {
     };
     await writeClaudeCodeCredentialsFile({
       claudeConfigDir,
+      homeDir,
       payload: filePayload,
       preserveNewerExistingCredential: false,
     });
 
-    await expect(readClaudeCodeNativeCredential({ claudeConfigDir, homeDir: '/Users/tester' })).resolves.toEqual({
+    await expect(readClaudeCodeNativeCredential({ claudeConfigDir, homeDir })).resolves.toEqual({
       payload: expectedFilePayload,
       updatedAtMs: expect.any(Number),
       source: 'file',
@@ -182,7 +194,7 @@ describe('claudeCodeCredentialFile macOS keychain source', () => {
       writeClaudeCodeCredentialsFile,
     } = await import('./claudeCodeCredentialFile');
 
-    const claudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-keychain-freshness-'));
+    const { homeDir, claudeConfigDir } = await globalClaudeConfigDir('happier-claude-keychain-freshness-');
     await writeClaudeCodeCredentialsFile({
       claudeConfigDir,
       payload: {
@@ -194,7 +206,7 @@ describe('claudeCodeCredentialFile macOS keychain source', () => {
         },
       },
       incomingUpdatedAtMs: NOW_MS,
-      homeDir: '/Users/tester',
+      homeDir,
     });
 
     const parsed = JSON.parse(await readFile(resolveClaudeCodeCredentialsFilePath(claudeConfigDir), 'utf8'));
@@ -214,7 +226,7 @@ describe('claudeCodeCredentialFile macOS keychain source', () => {
       writeClaudeCodeCredentialsFile,
     } = await import('./claudeCodeCredentialFile');
 
-    const targetClaudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-keychain-target-'));
+    const { homeDir, claudeConfigDir: targetClaudeConfigDir } = await globalClaudeConfigDir('happier-claude-keychain-target-');
     const stagedClaudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-keychain-staged-'));
     await writeClaudeCodeCredentialsFile({
       claudeConfigDir: stagedClaudeConfigDir,
@@ -228,7 +240,7 @@ describe('claudeCodeCredentialFile macOS keychain source', () => {
       },
       incomingUpdatedAtMs: NOW_MS,
       compareCredentialPath: resolveClaudeCodeCredentialsFilePath(targetClaudeConfigDir),
-      homeDir: '/Users/tester',
+      homeDir,
     });
 
     const parsed = JSON.parse(await readFile(resolveClaudeCodeCredentialsFilePath(stagedClaudeConfigDir), 'utf8'));

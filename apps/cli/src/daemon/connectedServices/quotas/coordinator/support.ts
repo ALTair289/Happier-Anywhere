@@ -292,6 +292,8 @@ export type GroupSwitchTargetEligibility =
       sourceProfileId?: string | null;
       sourceRemainingPercent?: number;
       sourceThresholdPercent?: number;
+      /** PS-1: true when the source only tripped the threshold via burn projection (preemptive), false when observed at/below it (reactive). */
+      sourceProjected?: boolean;
       selectedProfileId?: string;
       selectedRemainingPercent?: number | null;
       decisionTrace?: unknown;
@@ -371,6 +373,7 @@ export type ConnectedServiceQuotaCoordinatorDiagnostic = Readonly<{
   sourceProfileId?: string | null;
   sourceRemainingPercent?: number;
   sourceThresholdPercent?: number;
+  sourceProjected?: boolean;
   selectedProfileId?: string;
   selectedRemainingPercent?: number | null;
   targetCount?: number;

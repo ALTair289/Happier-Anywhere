@@ -3,6 +3,7 @@ import type { AcpPermissionHandler } from '@/agent/acp/AcpBackend';
 import type { PermissionMode } from '@/api/types';
 import { permissionModeForExecutionRunPolicy } from '@/agent/executionRuns/policy/permissionModeForExecutionRunPolicy';
 import type { ExecutionRunBackendFactory } from '@/agent/executionRuns/registry/executionRunBackendTypes';
+import { withExecutionRunBackendModelOptions } from '@/agent/executionRuns/runtime/applyExecutionRunBackendModelOptions';
 
 /**
  * Common option shape passed to simple provider `create*Backend` functions
@@ -34,6 +35,14 @@ export function createSimpleExecutionRunBackendFactory<
       permissionHandler: opts.permissionHandler,
       permissionMode: permissionModeForExecutionRunPolicy(opts.permissionMode),
     };
-    return createBackend(backendOpts as T);
+    // Run modelId + canonical config overrides are part of the execution-run contract. Apply them
+    // capability-driven (no provider-name branching): backends that expose the setters get them, the
+    // rest are returned untouched. Fixes the shared factory silently dropping model/effort.
+    return withExecutionRunBackendModelOptions(createBackend(backendOpts as T), {
+      ...(opts.modelId ? { modelId: opts.modelId } : {}),
+      ...(opts.sessionConfigOptionOverrides
+        ? { sessionConfigOptionOverrides: opts.sessionConfigOptionOverrides }
+        : {}),
+    });
   };
 }

@@ -25,35 +25,10 @@ async function readPlainAccount(accountId: string) {
 }
 
 export function registerConnectedServiceQuotaRoutesV3(app: Fastify): void {
-    app.post("/v3/connect/:serviceId/profiles/:profileId/quotas", {
-        config: { rateLimit: resolveApiHotEndpointRateLimit(process.env, "connectedServices.quotas.write") },
-        preHandler: app.authenticate,
-        schema: {
-            params: z.object({
-                serviceId: ConnectedServiceIdSchema,
-                profileId: ConnectedServiceProfileIdSchema,
-            }),
-            body: z.object({
-                content: StoredJsonContentEnvelopeSchema,
-                metadata: z.object({
-                    fetchedAt: z.number().int().nonnegative(),
-                    staleAfterMs: z.number().int().min(1),
-                    status: z.enum(["ok", "unavailable", "estimated", "error"]),
-                    materialFingerprint: z.string().min(1).max(256).optional(),
-                }).strict(),
-            }).strict(),
-            response: {
-                200: z.object({ success: z.literal(true) }),
-                400: z.object({ error: z.literal("invalid-params") }),
-            },
-        },
-    }, async (request, reply) => {
-        const account = await readPlainAccount(request.userId);
-        if (!account || request.body.content.t !== "plain") {
-            return reply.code(400).send({ error: "invalid-params" });
-        }
-        return reply.code(400).send({ error: "invalid-params" });
-    });
+    // SD-1: the quota V3 POST route was retired when quota reads became a projection over
+    // provider-account usage — its handler returned 400 unconditionally and no first-party client
+    // POSTs here (CLI + UI quota V3 surfaces are GET-only). Removed rather than kept as a dead
+    // registered write surface.
 
     app.get("/v3/connect/:serviceId/profiles/:profileId/quotas", {
         config: { rateLimit: resolveApiHotEndpointRateLimit(process.env, "connectedServices.quotas.read") },

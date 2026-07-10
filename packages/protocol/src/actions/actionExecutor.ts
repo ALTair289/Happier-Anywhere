@@ -1459,16 +1459,24 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
           typeof (parsed.data as any).connectedServicesByBackendTargetKey === 'object'
             ? (parsed.data as any).connectedServicesByBackendTargetKey as Record<string, unknown>
             : {};
-        const connectedServicesByTarget = new Map<string, ConnectedServiceBindingsV1 | undefined>();
+        const connectedServicesByTarget = new Map<
+          string,
+          Readonly<{ bindings: ConnectedServiceBindingsV1 | undefined; defaultServiceIds: readonly string[] }>
+        >();
         for (const backendTargetKey of backendTargetKeys) {
           const rawSelection = Object.prototype.hasOwnProperty.call(connectedServicesByBackendTargetKey, backendTargetKey)
             ? connectedServicesByBackendTargetKey[backendTargetKey]
             : blanketConnectedServices;
+          // Preserve bare per-service defaults (RO-F5): the run-start owner resolves them and merges
+          // UNDER explicit pins, so a mixed bare+explicit selection resolves instead of failing closed.
           const normalized = normalizeConnectedServiceSelectionInput(rawSelection);
           if (!normalized.ok) {
             return { ok: false, errorCode: 'invalid_parameters', error: normalized.error };
           }
-          connectedServicesByTarget.set(backendTargetKey, normalized.bindings);
+          connectedServicesByTarget.set(backendTargetKey, {
+            bindings: normalized.bindings,
+            defaultServiceIds: normalized.defaultServiceIds,
+          });
         }
 
         // Model + config-option (reasoning effort) selection: reuse the SAME canonical merge owner
@@ -1481,7 +1489,9 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
         const results = await fanoutStarts({
           keys: backendTargetKeys,
           startOne: async (backendTargetKey) => {
-            const connectedServices = connectedServicesByTarget.get(backendTargetKey);
+            const targetSelection = connectedServicesByTarget.get(backendTargetKey);
+            const connectedServices = targetSelection?.bindings;
+            const connectedServicesDefaultServiceIds = targetSelection?.defaultServiceIds ?? [];
             return deps.executionRunStart(
               sessionId,
               {
@@ -1493,6 +1503,9 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
                 runClass: (parsed.data as any).runClass ?? 'bounded',
                 ioMode: (parsed.data as any).ioMode ?? 'request_response',
                 ...(connectedServices ? { connectedServices } : {}),
+                ...(connectedServicesDefaultServiceIds.length > 0
+                  ? { connectedServicesDefaultServiceIds }
+                  : {}),
                 ...(runOptions.modelId ? { modelId: runOptions.modelId } : {}),
                 ...(runOptions.sessionConfigOptionOverrides
                   ? { sessionConfigOptionOverrides: runOptions.sessionConfigOptionOverrides }
@@ -1623,6 +1636,8 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
           // Normalize the agent-friendly connected-services selection (simple string / object) to
           // canonical bindings at this ONE boundary; malformed input is a typed rejection.
           if (request.connectedServices !== undefined) {
+            // Preserve bare per-service defaults (RO-F5) alongside explicit pins; the run-start owner
+            // resolves + merges them (mixed bare+explicit resolves instead of failing closed).
             const normalized = normalizeConnectedServiceSelectionInput(request.connectedServices);
             if (!normalized.ok) {
               return { ok: false, errorCode: 'invalid_parameters', error: normalized.error };
@@ -1631,6 +1646,11 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
               request.connectedServices = normalized.bindings;
             } else {
               delete request.connectedServices;
+            }
+            if (normalized.defaultServiceIds.length > 0) {
+              request.connectedServicesDefaultServiceIds = normalized.defaultServiceIds;
+            } else {
+              delete request.connectedServicesDefaultServiceIds;
             }
           }
           const permissionDecision = resolveSessionAgentPermission(ctx, request.permissionMode, [

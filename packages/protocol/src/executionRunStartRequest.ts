@@ -1,8 +1,10 @@
 import { z } from 'zod';
 
 import { BackendTargetRefSchema } from './backendTargets/backendTargetRef.js';
+import { ConnectedServiceBindingsV1Schema } from './connect/connectedServiceBindings.js';
 import { HappierReplayStrategySchema } from './sessionContinueWithReplay.js';
 import { LlmTaskRunnerConfigV1Schema } from './llmTasks/llmTaskRunnerConfigV1.js';
+import { AcpConfigOptionOverridesV1Schema } from './sessionMetadata/metadataOverridesV1.js';
 
 export const ExecutionRunIntentSchema = z.enum([
   'review',
@@ -101,7 +103,9 @@ export const ExecutionRunReplaySeedRequestSchema = z.discriminatedUnion('kind', 
     recentMessagesCount: z.number().int().min(1).max(500).optional(),
     maxSeedChars: z.number().int().min(200).max(200_000).optional(),
     summaryRunner: LlmTaskRunnerConfigV1Schema.optional(),
-  }).strict(),
+    // CL-2: passthrough like every sibling wire schema in this file — a newer peer adding a replay
+    // field must not make an older daemon reject the ENTIRE run-start request.
+  }).passthrough(),
 ]);
 export type ExecutionRunReplaySeedRequest = z.infer<typeof ExecutionRunReplaySeedRequestSchema>;
 
@@ -115,8 +119,33 @@ export const ExecutionRunStartRequestSchema = z.object({
   runClass: ExecutionRunClassSchema,
   ioMode: ExecutionRunIoModeSchema,
   initialContextMode: z.enum(['bootstrap', 'first_turn']).optional(),
+  /**
+   * Optional model selection for the run's backend, using the SAME canonical shape as session
+   * spawn (`session.spawn_new`'s `modelId`). Threaded to the spawned backend exactly like a
+   * session spawn's model. Omit to use the backend's default model.
+   */
+  modelId: z.string().min(1).optional(),
+  /**
+   * Optional per-run config-option overrides using the SAME canonical vocabulary as session spawn
+   * (`sessionConfigOptionOverrides`). Reasoning effort is the `reasoning_effort` option here. The
+   * agent-friendly `configOptions` shorthand is normalized/merged into this canonical shape at the
+   * action boundary. Omit to keep the backend's configured defaults.
+   */
+  sessionConfigOptionOverrides: AcpConfigOptionOverridesV1Schema.optional(),
   resumeHandle: ExecutionRunResumeHandleSchema.nullable().optional(),
   replay: ExecutionRunReplaySeedRequestSchema.optional(),
+  /**
+   * Optional per-target connected-services selection for the run (profile|group per serviceId).
+   * Absent means the run defaults exactly like session spawn defaulting (account defaults).
+   */
+  connectedServices: ConnectedServiceBindingsV1Schema.optional(),
+  /**
+   * Bare per-service default tokens (RO-F5): serviceIds asking for their STORED account default. Set by
+   * the action boundary alongside `connectedServices` so the run-start owner resolves each named
+   * service's stored default and merges it UNDER explicit pins. Mixed bare+explicit thus resolves
+   * instead of failing closed. Missing stored default fails closed at the run-start owner.
+   */
+  connectedServicesDefaultServiceIds: z.array(z.string()).optional(),
 }).passthrough();
 export type ExecutionRunStartRequest = z.infer<typeof ExecutionRunStartRequestSchema>;
 

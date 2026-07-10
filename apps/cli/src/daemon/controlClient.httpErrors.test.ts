@@ -140,6 +140,61 @@ describe('daemon control client (HTTP error responses)', () => {
     }
   });
 
+  it('posts manual auth group generation apply requests to the daemon control route', async () => {
+    let observedUrl: string | undefined;
+    let observedBody: Record<string, unknown> | null = null;
+
+    const server = http.createServer((req, res) => {
+      observedUrl = req.url;
+      let rawBody = '';
+      req.setEncoding('utf8');
+      req.on('data', (chunk) => {
+        rawBody += chunk;
+      });
+      req.on('end', () => {
+        observedBody = JSON.parse(rawBody) as Record<string, unknown>;
+        res.statusCode = 200;
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({ ok: true, result: { ok: true, appliedSessionCount: 1 } }));
+      });
+    });
+
+    try {
+      const { port } = await listen(server);
+
+      tmpHomeDir = await createTempDir('happier-daemon-client-test-');
+      envScope.patch({ HAPPIER_HOME_DIR: tmpHomeDir });
+      reloadConfiguration();
+      writeDaemonState({
+        pid: process.pid,
+        httpPort: port,
+        startedAt: Date.now(),
+        startedWithCliVersion: 'test',
+        controlToken: 'test-token',
+      });
+
+      const { requestDaemonConnectedServiceAuthGroupGenerationApply } = await import('./controlClient');
+      await expect(requestDaemonConnectedServiceAuthGroupGenerationApply({
+        serviceId: 'claude-subscription',
+        groupId: 'claude',
+        activeProfileId: 'leeroy_bat',
+        generation: 222,
+        switchReason: 'manual',
+      })).resolves.toEqual({ ok: true, appliedSessionCount: 1 });
+
+      expect(observedUrl).toBe('/connected-service-auth/group-generation/apply');
+      expect(observedBody).toEqual({
+        serviceId: 'claude-subscription',
+        groupId: 'claude',
+        activeProfileId: 'leeroy_bat',
+        generation: 222,
+        switchReason: 'manual',
+      });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
   it('posts connected-service turn lifecycle events to the daemon control route', async () => {
     let observedUrl: string | undefined;
     let observedBody: Record<string, unknown> | null = null;
@@ -532,6 +587,87 @@ describe('daemon control client (HTTP error responses)', () => {
           profileId: 'work',
         },
         chatgptPlanType: 'plus',
+      });
+      expect(observedAuthToken).toBe(deriveConnectedServiceBrokerRefreshToken('test-token'));
+      expect(observedAuthToken).not.toBe('test-token');
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('posts forced Claude subscription refresh bridge requests to daemon control server', async () => {
+    let observedBody: Record<string, unknown> | null = null;
+    let observedAuthToken: string | undefined;
+    const server = http.createServer((req, res) => {
+      if (req.method === 'POST' && req.url === '/connected-service-auth/claude-subscription/anthropic-auth-tokens/refresh') {
+        const rawAuthToken = req.headers['x-happier-daemon-token'];
+        observedAuthToken = Array.isArray(rawAuthToken) ? rawAuthToken.join(',') : rawAuthToken;
+        let rawBody = '';
+        req.setEncoding('utf8');
+        req.on('data', (chunk) => {
+          rawBody += chunk;
+        });
+        req.on('end', () => {
+          observedBody = JSON.parse(rawBody) as Record<string, unknown>;
+          res.statusCode = 200;
+          res.setHeader('content-type', 'application/json');
+          res.end(JSON.stringify({
+            ok: true,
+            result: {
+              accessToken: 'fresh-claude-access',
+              anthropicAccountId: 'acct_123',
+              expiresAt: 123_456,
+            },
+          }));
+        });
+        return;
+      }
+      res.statusCode = 404;
+      res.end();
+    });
+
+    try {
+      const { port } = await listen(server);
+      tmpHomeDir = await createTempDir('happier-daemon-client-test-');
+      envScope.patch({ HAPPIER_HOME_DIR: tmpHomeDir });
+      reloadConfiguration();
+      writeDaemonState({
+        pid: process.pid,
+        httpPort: port,
+        startedAt: Date.now(),
+        startedWithCliVersion: 'test',
+        controlToken: 'test-token',
+      });
+
+      const refresh = (controlClient as {
+        refreshDaemonClaudeSubscriptionAnthropicAuthTokensForBridge?: (input: Readonly<{
+          sessionId: string;
+          selection: Readonly<{ kind: 'profile'; serviceId: 'claude-subscription'; profileId: string }>;
+          forceRefresh?: boolean;
+        }>) => Promise<unknown>;
+      }).refreshDaemonClaudeSubscriptionAnthropicAuthTokensForBridge;
+      expect(typeof refresh).toBe('function');
+      await expect(refresh!({
+        sessionId: 'sess_1',
+        selection: {
+          kind: 'profile',
+          serviceId: 'claude-subscription',
+          profileId: 'work',
+        },
+        forceRefresh: true,
+      })).resolves.toEqual({
+        accessToken: 'fresh-claude-access',
+        anthropicAccountId: 'acct_123',
+        expiresAt: 123_456,
+      });
+      expect(observedBody).toEqual({
+        sessionId: 'sess_1',
+        selection: {
+          kind: 'profile',
+          serviceId: 'claude-subscription',
+          profileId: 'work',
+        },
+        forceRefresh: true,
       });
       expect(observedAuthToken).toBe(deriveConnectedServiceBrokerRefreshToken('test-token'));
       expect(observedAuthToken).not.toBe('test-token');

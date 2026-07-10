@@ -1,4 +1,4 @@
-import type { AcpConfigOptionOverridesV1, BackendTargetRefV1, ExecutionRunDisplay, ExecutionRunIntent, ExecutionRunResumeHandle } from '@happier-dev/protocol';
+import type { AcpConfigOptionOverridesV1, BackendTargetRefV1, ConnectedServiceBindingsV1, ExecutionRunDisplay, ExecutionRunIntent, ExecutionRunResumeHandle } from '@happier-dev/protocol';
 
 import type { ExecutionRunStructuredMeta } from '@/agent/executionRuns/profiles/ExecutionRunIntentProfile';
 
@@ -38,6 +38,12 @@ export type ExecutionRunManagerStartParams = Readonly<{
   connectedServicesEnv?: Readonly<Record<string, string>> | null;
   /** Idempotent run-end release for the daemon-side CS registration + materialized root. */
   connectedServicesCleanup?: (() => Promise<void>) | null;
+  /**
+   * The canonical connected-service selection actually materialized for this run at start (resolved
+   * by the RPC-layer CS owner). Persisted verbatim in the run's immutable launch record so a resume
+   * can re-materialize the SAME account/profile. Binding metadata only — never tokens/env values.
+   */
+  connectedServicesSelection?: ConnectedServiceBindingsV1 | null;
   // Internal runtime override for bounded-run timeouts. Not part of the public RPC contract.
   boundedTimeoutMs?: number;
   resumeHandle?: ExecutionRunResumeHandle | null;
@@ -85,6 +91,17 @@ export type ExecutionRunState = Readonly<{
    */
   turnCount?: number;
   status: 'running' | 'succeeded' | 'failed' | 'cancelled' | 'timeout';
+  /**
+   * Immutable launch record: the re-resolvable launch intent captured at start so every resume
+   * recreates the backend with the SAME model, config overrides, and connected-service account
+   * instead of falling back to ambient/native auth and default model. Contains only safe,
+   * re-resolvable inputs — NEVER raw credentials, materialized env values, or closures.
+   */
+  launch?: Readonly<{
+    modelId?: string;
+    sessionConfigOptionOverrides?: AcpConfigOptionOverridesV1;
+    connectedServicesSelection?: ConnectedServiceBindingsV1 | null;
+  }>;
   startedAtMs: number;
   finishedAtMs?: number;
   error?: { code: string; message?: string };

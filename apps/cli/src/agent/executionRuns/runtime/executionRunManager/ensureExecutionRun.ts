@@ -3,7 +3,6 @@ import type { ExecutionRunController, ExecutionRunVoiceAgentController } from '@
 import { VoiceAgentManager } from '@/agent/voice/agent/VoiceAgentManager';
 import type { ExecutionRunState } from '@/agent/executionRuns/runtime/executionRunTypes';
 import type { ExecutionBudgetRegistry } from '@/daemon/executionBudget/ExecutionBudgetRegistry';
-import type { BackendTargetRefV1 } from '@happier-dev/protocol';
 import { resumeBackendControllerForResumableRun } from '@/agent/executionRuns/runtime/resumeBackendController';
 import type { ACPMessageData, ACPProvider } from '@/api/session/sessionMessageTypes';
 import type { StreamedTranscriptWriterSession } from '@/api/session/streamedTranscriptWriter';
@@ -18,14 +17,8 @@ export async function ensureExecutionRun(args: Readonly<{
   runs: Map<string, ExecutionRunState>;
   controllers: Map<string, ExecutionRunController>;
   budgetRegistry: ExecutionBudgetRegistry | null;
-  createBackend: (opts: {
-    runId?: string;
-    backendId: string;
-    backendTarget?: BackendTargetRefV1;
-    permissionMode: string;
-    modelId?: string;
-    start?: any;
-  }) => AgentBackend;
+  /** Async backend factory owning launch rehydration; see resumeBackendControllerForResumableRun. */
+  createBackend: () => Promise<AgentBackend>;
   sendAcp: (provider: ACPProvider, body: ACPMessageData, opts?: { meta?: Record<string, unknown> }) => void;
   parentProvider: ACPProvider;
   streamedTranscriptSession: StreamedTranscriptWriterSession | null;
@@ -133,7 +126,7 @@ export async function ensureExecutionRun(args: Readonly<{
     runs: args.runs,
     controllers: args.controllers,
     budgetRegistry: args.budgetRegistry,
-    createBackend: ({ backendId, backendTarget, permissionMode }) => args.createBackend({ runId: args.runId, backendId, backendTarget, permissionMode }),
+    createBackend: args.createBackend,
     sendAcp: args.sendAcp,
     parentProvider: args.parentProvider,
     streamedTranscriptSession: args.streamedTranscriptSession,

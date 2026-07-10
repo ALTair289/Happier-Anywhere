@@ -54,7 +54,7 @@ describe('resumeBackendControllerForResumableRun', () => {
       runs,
       controllers,
       budgetRegistry: null,
-      createBackend: (_opts) => backend,
+      createBackend: async () => backend,
       sendAcp: () => undefined,
       parentProvider: 'claude' as any,
       streamedTranscriptSession: null,

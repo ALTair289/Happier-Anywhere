@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 
@@ -67,6 +67,46 @@ describe('Claude Code credential file write policy', () => {
     await expect(readFile(resolveClaudeCodeCredentialsFilePath(claudeConfigDir), 'utf8')).resolves.toContain(
       'stable-access-placeholder',
     );
+  });
+
+  it('repairs credential file permissions to 0600 on the unchanged fingerprint-skip path', async () => {
+    if (process.platform === 'win32') return;
+    vi.spyOn(logger, 'info').mockImplementation(() => {});
+    const { resolveClaudeCodeCredentialsFilePath, writeClaudeCodeCredentialsFile } = await import(
+      './claudeCodeCredentialFile'
+    );
+    const claudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-credential-perms-'));
+    const credentialPath = resolveClaudeCodeCredentialsFilePath(claudeConfigDir);
+    const payload = {
+      claudeAiOauth: {
+        accessToken: 'stable-access-placeholder',
+        refreshToken: 'stable-refresh-placeholder',
+        expiresAt: 1_800_000_000_000,
+        scopes: ['user:inference', 'user:profile', 'user:sessions:claude_code'],
+      },
+    };
+
+    await writeClaudeCodeCredentialsFile({
+      claudeConfigDir,
+      payload,
+      preserveNewerExistingCredential: false,
+    });
+    // Simulate an external tool / old writer leaving the file world-and-group readable.
+    await chmod(credentialPath, 0o644);
+    renameSpy.mockClear();
+    writeFileSpy.mockClear();
+
+    await writeClaudeCodeCredentialsFile({
+      claudeConfigDir,
+      payload,
+      preserveNewerExistingCredential: false,
+    });
+
+    // Content is unchanged (no rewrite), but the mode must be repaired to 0600.
+    expect(renameSpy).not.toHaveBeenCalled();
+    expect(writeFileSpy).not.toHaveBeenCalled();
+    const mode = (await stat(credentialPath)).mode & 0o777;
+    expect(mode).toBe(0o600);
   });
 
   it('commits a genuine credential change with a temp-file rename and never truncates the live file', async () => {

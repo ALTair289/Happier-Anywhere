@@ -270,6 +270,37 @@ describe('ConnectedServiceDetailView quotas', () => {
     expect(screen.findByTestId('account-block:work:meter:weekly')).toBeTruthy();
   });
 
+  it('keeps usage visible for a missing/empty credential status (UI-1)', async () => {
+    // The usage-DISPLAY gate fails OPEN (shouldHideQuotaForCredentialStatus) and must receive the
+    // RAW status: pre-normalizing '' -> needs_reauth before the gate silently blanks a healthy
+    // account's usage in the detail block while the badge surfaces (which gate on raw) keep showing
+    // it. Display fails open end to end — no reauth pill for an unrecognized status either; the
+    // fail-closed normalization stays for the row actions/ordering only.
+    setFeatureFlags({ connectedServices: true, 'connectedServices.quotas': true });
+    fetchAccountEncryptionModeSpy.mockResolvedValue({ mode: 'plain', updatedAt: 0 });
+    getConnectedServiceQuotaSnapshotPlainSpy.mockResolvedValue(buildWeeklySnapshot());
+    profileState.current = {
+      connectedServicesV2: [
+        {
+          serviceId: 'openai-codex',
+          profiles: [{ profileId: 'work', status: '', kind: 'oauth', providerEmail: null }],
+        },
+      ],
+    };
+
+    const { ConnectedServiceDetailView } = await import('./ConnectedServiceDetailView');
+    const screen = await renderScreen(<ConnectedServiceDetailView />);
+    await act(async () => {
+      await flushHookEffects({ cycles: 1, turns: 1 });
+    });
+
+    expect(screen.findByTestId('account-block:work:usage')).toBeTruthy();
+    expect(screen.findByTestId('account-block:work:meter:weekly')).toBeTruthy();
+    // Display fails open: no reauth pill for an unrecognized status (matches the
+    // AccountBlock block-level contract).
+    expect(screen.findAllByTestId('account-block:work:reauth-badge')).toHaveLength(0);
+  });
+
   it('does not render AccountBlock USAGE meters when the quotas feature is disabled', async () => {
     setFeatureFlags({ connectedServices: true, 'connectedServices.quotas': false });
     fetchAccountEncryptionModeSpy.mockResolvedValue({ mode: 'e2ee', updatedAt: 0 });

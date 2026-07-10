@@ -1,8 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
-
-import { logger } from '@/ui/logger';
 
 const { spawnSpy } = vi.hoisted(() => ({
   spawnSpy: vi.fn(),
@@ -17,28 +15,16 @@ vi.mock('node:child_process', async (importOriginal) => {
 });
 
 import {
-  computeClaudeCodeCredentialFingerprint,
-  type ClaudeCodeNativeCredentialPayload,
-} from './claudeCodeNativeCredentialPayload';
-import {
   deleteClaudeCodeMacOsKeychainCredential,
   readClaudeCodeMacOsKeychainCredential,
   resolveClaudeCodeMacOsKeychainServiceName,
   sweepStaleClaudeCodeMacOsKeychainCredentials,
-  writeClaudeCodeMacOsKeychainCredential,
 } from './claudeCodeMacOsKeychain';
 
 describe('claudeCodeMacOsKeychain', () => {
-  const securityInputs: string[] = [];
-
-  beforeEach(() => {
-    vi.spyOn(logger, 'info').mockImplementation(() => {});
-  });
-
   afterEach(() => {
     vi.restoreAllMocks();
     spawnSpy.mockReset();
-    securityInputs.length = 0;
   });
 
   function keychainMetadata(updatedAt = '20260605120100Z') {
@@ -69,7 +55,6 @@ describe('claudeCodeMacOsKeychain', () => {
     };
     child.stdin = new Writable({
       write(_chunk, _encoding, callback) {
-        securityInputs.push(String(_chunk));
         callback();
       },
     });
@@ -90,13 +75,6 @@ describe('claudeCodeMacOsKeychain', () => {
     resolve: (args: readonly string[]) => Readonly<{ status: number | null; stdout?: string; stderr?: string }>,
   ): void {
     spawnSpy.mockImplementation((_command: string, args: readonly string[]) => mockSecurityProcess(resolve(args)));
-  }
-
-  function mockMissingKeychainWithSuccessfulWrites(): void {
-    mockSecuritySpawn((args) => {
-      if (args[0] === 'find-generic-password') return { status: 44, stderr: 'not found' };
-      return successfulSpawnResult();
-    });
   }
 
   function dumpKeychainItems(items: readonly Readonly<{ account: string; service: string }>[]): string {
@@ -126,303 +104,7 @@ describe('claudeCodeMacOsKeychain', () => {
     ).toBe('Claude Code-credentials-e161167c');
   });
 
-  it('writes the credential JSON to the derived macOS keychain service without putting secrets in argv', async () => {
-    mockMissingKeychainWithSuccessfulWrites();
-
-    await writeClaudeCodeMacOsKeychainCredential({
-      claudeConfigDir: '/tmp/custom-claude-home',
-      homeDir: '/Users/tester',
-      username: 'tester',
-      payload: {
-        claudeAiOauth: {
-          accessToken: 'access-placeholder',
-          refreshToken: 'refresh-placeholder',
-          expiresAt: 123,
-          scopes: ['user:profile', 'user:sessions:claude_code'],
-        },
-      },
-    });
-
-    expect(spawnSpy).toHaveBeenCalledWith(
-      'security',
-      [
-        'add-generic-password',
-        '-U',
-        '-a',
-        'tester',
-        '-s',
-        'Claude Code-credentials-e161167c',
-        '-w',
-      ],
-      expect.objectContaining({ stdio: ['pipe', 'pipe', 'pipe'] }),
-    );
-    expect(securityInputs.join('')).toContain('access-placeholder');
-    expect(securityInputs.join('')).not.toContain('refresh-placeholder');
-    expect(spawnSpy.mock.calls[0]?.[1]).not.toContain('access-placeholder');
-    expect(spawnSpy.mock.calls[0]?.[1]).not.toContain('refresh-placeholder');
-    expect(spawnSpy.mock.calls.some((call) => (call[1] as readonly string[])[0] === 'delete-generic-password')).toBe(false);
-  });
-
-  it('skips an unreadable existing credential when the incoming fingerprint matches our last successful write', async () => {
-    mockSecuritySpawn((args) => {
-      if (args[0] === 'find-generic-password') {
-        return { status: 44, stderr: 'User interaction is not allowed.' };
-      }
-      return successfulSpawnResult();
-    });
-    const payload: ClaudeCodeNativeCredentialPayload = {
-      claudeAiOauth: {
-        accessToken: 'access-placeholder',
-        expiresAt: 123,
-        scopes: ['user:profile', 'user:sessions:claude_code'],
-      },
-    };
-    const writeWithProvenance = writeClaudeCodeMacOsKeychainCredential as (
-      params: Parameters<typeof writeClaudeCodeMacOsKeychainCredential>[0] & Readonly<{
-        lastWrittenProvenance: Readonly<{
-          credentialFingerprint: string;
-          writtenAtMs: number;
-        }>;
-      }>,
-    ) => ReturnType<typeof writeClaudeCodeMacOsKeychainCredential>;
-
-    const result = await writeWithProvenance({
-      claudeConfigDir: '/tmp/custom-claude-home',
-      homeDir: '/Users/tester',
-      username: 'tester',
-      payload,
-      lastWrittenProvenance: {
-        credentialFingerprint: computeClaudeCodeCredentialFingerprint(payload),
-        writtenAtMs: Date.parse('2026-06-05T12:02:00.000Z'),
-      },
-      diagnosticContext: { profileId: 'work', homeKind: 'group' },
-    });
-
-    expect(result).toEqual(expect.objectContaining({ status: 'skipped_provenance_match' }));
-    expect(spawnSpy.mock.calls.some((call) => (call[1] as readonly string[])[0] === 'add-generic-password')).toBe(false);
-    expect(logger.info).toHaveBeenCalledWith(
-      '[DAEMON RUN] Claude Code keychain credential decision',
-      expect.objectContaining({
-        decision: 'skip_provenance_match',
-        comparatorBasis: expect.objectContaining({ existing: null }),
-        provenanceBasis: expect.objectContaining({
-          incomingMatchesLastWritten: true,
-          newerExternalChangeDetected: false,
-        }),
-      }),
-    );
-  });
-
-  it('bounds macOS security writes and deletes so a locked keychain cannot block the daemon forever', async () => {
-    mockMissingKeychainWithSuccessfulWrites();
-
-    await writeClaudeCodeMacOsKeychainCredential({
-      claudeConfigDir: '/tmp/custom-claude-home',
-      homeDir: '/Users/tester',
-      username: 'tester',
-      payload: {
-        claudeAiOauth: {
-          accessToken: 'access-placeholder',
-          expiresAt: 123,
-          scopes: ['user:profile', 'user:sessions:claude_code'],
-        },
-      },
-    });
-    await deleteClaudeCodeMacOsKeychainCredential({
-      claudeConfigDir: '/tmp/custom-claude-home',
-      homeDir: '/Users/tester',
-      username: 'tester',
-    });
-
-    expect(spawnSpy).toHaveBeenCalledWith('security', expect.any(Array), expect.objectContaining({ stdio: ['pipe', 'pipe', 'pipe'] }));
-    expect(spawnSpy).not.toHaveBeenCalledWith('security', expect.any(Array), expect.objectContaining({ timeout: expect.any(Number) }));
-  });
-
-  it('does not overwrite a fresher valid keychain credential with a staler daemon credential', async () => {
-    mockSecuritySpawn((args) => {
-      if (args[0] === 'find-generic-password' && args.includes('-w')) {
-        return { status: 0, stdout: JSON.stringify({
-          claudeAiOauth: {
-            accessToken: 'fresh-login-access-secret',
-            refreshToken: 'fresh-login-refresh-secret',
-            expiresAt: 456,
-            scopes: ['user:profile', 'user:sessions:claude_code'],
-          },
-        }) };
-      }
-      if (args[0] === 'find-generic-password') return { status: 0, stdout: keychainMetadata() };
-      return successfulSpawnResult();
-    });
-
-    const result = await writeClaudeCodeMacOsKeychainCredential({
-      claudeConfigDir: '/tmp/custom-claude-home',
-      homeDir: '/Users/tester',
-      username: 'tester',
-      incomingUpdatedAtMs: Date.parse('2026-06-05T12:00:00.000Z'),
-      payload: {
-        claudeAiOauth: {
-          accessToken: 'stale-daemon-access-secret',
-          refreshToken: 'stale-daemon-refresh-secret',
-          expiresAt: 123,
-          scopes: ['user:profile', 'user:sessions:claude_code'],
-        },
-      },
-    });
-
-    expect(result).toEqual(expect.objectContaining({
-      status: 'skipped_existing_newer',
-      adoptedCredential: expect.objectContaining({
-        payload: expect.objectContaining({
-          claudeAiOauth: expect.objectContaining({
-            accessToken: 'fresh-login-access-secret',
-            refreshToken: 'fresh-login-refresh-secret',
-          }),
-        }),
-      }),
-    }));
-    expect(spawnSpy.mock.calls.some((call) => (call[1] as readonly string[]).includes('add-generic-password'))).toBe(false);
-  });
-
-  it('overwrites a fresher keychain credential when the caller is switching to a different account', async () => {
-    mockSecuritySpawn((args) => {
-      if (args[0] === 'find-generic-password' && args.includes('-w')) {
-        return { status: 0, stdout: JSON.stringify({
-          claudeAiOauth: {
-            accessToken: 'previous-account-access-secret',
-            refreshToken: 'previous-account-refresh-secret',
-            expiresAt: 456,
-            scopes: ['user:profile', 'user:sessions:claude_code'],
-          },
-        }) };
-      }
-      if (args[0] === 'find-generic-password') return { status: 0, stdout: keychainMetadata() };
-      return successfulSpawnResult();
-    });
-
-    const writeWithFreshnessOptions = writeClaudeCodeMacOsKeychainCredential as (
-      params: Parameters<typeof writeClaudeCodeMacOsKeychainCredential>[0] & Readonly<{
-        preserveNewerExistingCredential: boolean;
-      }>,
-    ) => ReturnType<typeof writeClaudeCodeMacOsKeychainCredential>;
-
-    const result = await writeWithFreshnessOptions({
-      claudeConfigDir: '/tmp/custom-claude-home',
-      homeDir: '/Users/tester',
-      username: 'tester',
-      preserveNewerExistingCredential: false,
-      incomingUpdatedAtMs: Date.parse('2026-06-05T12:00:00.000Z'),
-      payload: {
-        claudeAiOauth: {
-          accessToken: 'new-account-access-secret',
-          refreshToken: 'new-account-refresh-secret',
-          expiresAt: 123,
-          scopes: ['user:profile', 'user:sessions:claude_code'],
-        },
-      },
-    });
-
-    expect(result).toEqual(expect.objectContaining({ status: 'written' }));
-    expect(spawnSpy.mock.calls.filter((call) => (call[1] as readonly string[]).includes('add-generic-password'))).toHaveLength(1);
-    expect(securityInputs.join('')).toContain('new-account-access-secret');
-    expect(securityInputs.join('')).not.toContain('new-account-refresh-secret');
-  });
-
-  it('overwrites a blank or invalid existing keychain credential', async () => {
-    mockSecuritySpawn((args) => {
-      if (args[0] === 'find-generic-password' && args.includes('-w')) {
-        return { status: 0, stdout: JSON.stringify({
-          claudeAiOauth: {
-            accessToken: '',
-            refreshToken: '',
-            expiresAt: 456,
-            scopes: [],
-          },
-        }) };
-      }
-      if (args[0] === 'find-generic-password') return { status: 0, stdout: keychainMetadata() };
-      return successfulSpawnResult();
-    });
-
-    const result = await writeClaudeCodeMacOsKeychainCredential({
-      claudeConfigDir: '/tmp/custom-claude-home',
-      homeDir: '/Users/tester',
-      username: 'tester',
-      incomingUpdatedAtMs: Date.parse('2026-06-05T12:00:00.000Z'),
-      payload: {
-        claudeAiOauth: {
-          accessToken: 'valid-access-secret',
-          refreshToken: 'valid-refresh-secret',
-          expiresAt: 123,
-          scopes: ['user:profile', 'user:sessions:claude_code'],
-        },
-      },
-    });
-
-    expect(result).toEqual(expect.objectContaining({ status: 'written' }));
-    expect(spawnSpy.mock.calls.filter((call) => (call[1] as readonly string[]).includes('add-generic-password'))).toHaveLength(1);
-  });
-
-  it('emits safe machine-greppable diagnostics for keychain write and freshness-skip decisions', async () => {
-    const info = vi.mocked(logger.info);
-    mockSecuritySpawn((args) => {
-      if (args[0] === 'find-generic-password' && args.includes('-w')) {
-        return { status: 0, stdout: JSON.stringify({
-          claudeAiOauth: {
-            accessToken: 'fresh-login-access-secret',
-            refreshToken: 'fresh-login-refresh-secret',
-            expiresAt: 456,
-            scopes: ['user:profile', 'user:sessions:claude_code'],
-          },
-        }) };
-      }
-      if (args[0] === 'find-generic-password') return { status: 0, stdout: keychainMetadata() };
-      return successfulSpawnResult();
-    });
-
-    await writeClaudeCodeMacOsKeychainCredential({
-      claudeConfigDir: '/tmp/custom-claude-home',
-      homeDir: '/Users/tester',
-      username: 'tester',
-      incomingUpdatedAtMs: Date.parse('2026-06-05T12:00:00.000Z'),
-      diagnosticContext: {
-        profileId: 'work',
-        homeKind: 'group',
-      },
-      payload: {
-        claudeAiOauth: {
-          accessToken: 'stale-daemon-access-secret',
-          refreshToken: 'stale-daemon-refresh-secret',
-          expiresAt: 123,
-          scopes: ['user:profile', 'user:sessions:claude_code'],
-        },
-      },
-    });
-
-    expect(info).toHaveBeenCalledWith(
-      '[DAEMON RUN] Claude Code keychain credential decision',
-      expect.objectContaining({
-        event: 'claude_code_keychain_credential_decision',
-        profileId: 'work',
-        homeKind: 'group',
-        decision: 'skip_existing_newer',
-        comparatorBasis: expect.objectContaining({
-          existing: expect.objectContaining({
-            source: 'macos_keychain',
-            accessTokenFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{8}$/),
-            refreshTokenFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{8}$/),
-          }),
-          incoming: expect.objectContaining({
-            source: 'incoming',
-            accessTokenFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{8}$/),
-            refreshTokenFingerprint: null,
-          }),
-        }),
-      }),
-    );
-    expect(JSON.stringify(info.mock.calls)).not.toContain('secret');
-  });
-
-  it('reads and parses the derived macOS keychain credential payload', async () => {
+  it('reads and parses the GLOBAL macOS keychain credential payload (native/external fallback)', async () => {
     mockSecuritySpawn((args) => {
       if (args[0] === 'find-generic-password' && args.includes('-w')) {
         return { status: 0, stdout: JSON.stringify({
@@ -440,7 +122,7 @@ describe('claudeCodeMacOsKeychain', () => {
 
     await expect(
       readClaudeCodeMacOsKeychainCredential({
-        claudeConfigDir: '/tmp/custom-claude-home',
+        claudeConfigDir: '/Users/tester/.claude',
         homeDir: '/Users/tester',
       }),
     ).resolves.toEqual({
@@ -454,14 +136,25 @@ describe('claudeCodeMacOsKeychain', () => {
 
     expect(spawnSpy).toHaveBeenCalledWith(
       'security',
-      ['find-generic-password', '-a', 'leeroy', '-s', 'Claude Code-credentials-e161167c', '-w'],
+      ['find-generic-password', '-a', 'leeroy', '-s', 'Claude Code-credentials', '-w'],
       expect.objectContaining({ stdio: ['pipe', 'pipe', 'pipe'] }),
     );
-    expect(spawnSpy).toHaveBeenCalledWith(
-      'security',
-      ['find-generic-password', '-a', 'leeroy', '-s', 'Claude Code-credentials-e161167c'],
-      expect.objectContaining({ stdio: ['pipe', 'pipe', 'pipe'] }),
-    );
+  });
+
+  it('never consults a derived (non-global) keychain service and returns null without spawning security', async () => {
+    mockSecuritySpawn(() => successfulSpawnResult());
+
+    await expect(
+      readClaudeCodeMacOsKeychainCredential({
+        claudeConfigDir: '/tmp/custom-claude-home',
+        homeDir: '/Users/tester',
+      }),
+    ).resolves.toBeNull();
+
+    // The derived-item read channel is removed: Happier no longer writes derived per-config
+    // keychain items and native Claude only uses the global service. A derived read could only
+    // surface stale legacy artifacts, so the reader must not spawn `security` at all.
+    expect(spawnSpy.mock.calls.some((call) => (call[1] as readonly string[])[0] === 'find-generic-password')).toBe(false);
   });
 
   it('deletes the derived macOS keychain credential by account and service', async () => {
@@ -493,17 +186,21 @@ describe('claudeCodeMacOsKeychain', () => {
     })).resolves.toBeUndefined();
   });
 
-  it('sweeps only stale derived Happier-owned macOS keychain services and is idempotent', async () => {
-    const liveService = resolveClaudeCodeMacOsKeychainServiceName({
+  it('sweeps ALL Happier-managed derived services for the account (live or otherwise) and is idempotent', async () => {
+    // Under the file-only design Happier neither writes nor reads a derived (suffixed) keychain item,
+    // so EVERY managed suffixed item — including one whose home is currently live — is obsolete cruft
+    // and must be removed. Liveness no longer protects an item (nothing reads it), which is why the
+    // sweep no longer needs a live set.
+    const liveHomeService = resolveClaudeCodeMacOsKeychainServiceName({
       claudeConfigDir: '/tmp/live-claude-home',
       homeDir: '/Users/tester',
     });
-    const staleService = 'Claude Code-credentials-1111aaaa';
+    const otherManagedService = 'Claude Code-credentials-1111aaaa';
     const otherAccountService = 'Claude Code-credentials-2222bbbb';
     const entries = new Map([
       ['global', { account: 'tester', service: 'Claude Code-credentials' }],
-      ['live', { account: 'tester', service: liveService }],
-      ['stale', { account: 'tester', service: staleService }],
+      ['live', { account: 'tester', service: liveHomeService }],
+      ['other-managed', { account: 'tester', service: otherManagedService }],
       ['other-account', { account: 'someone-else', service: otherAccountService }],
       ['other-service', { account: 'tester', service: 'Other App credentials-3333cccc' }],
     ]);
@@ -522,57 +219,61 @@ describe('claudeCodeMacOsKeychain', () => {
     });
 
     const first = await sweepStaleClaudeCodeMacOsKeychainCredentials({
-      liveClaudeConfigDirs: ['/tmp/live-claude-home'],
       homeDir: '/Users/tester',
       username: 'tester',
     });
     const second = await sweepStaleClaudeCodeMacOsKeychainCredentials({
-      liveClaudeConfigDirs: ['/tmp/live-claude-home'],
       homeDir: '/Users/tester',
       username: 'tester',
     });
 
-    expect(first).toEqual({
-      scanned: 5,
-      deleted: [{ account: 'tester', service: staleService }],
-      skipped: expect.arrayContaining([
-        { account: 'tester', service: 'Claude Code-credentials', reason: 'global_service' },
-        { account: 'tester', service: liveService, reason: 'live_service' },
-        { account: 'someone-else', service: otherAccountService, reason: 'different_account' },
-        { account: 'tester', service: 'Other App credentials-3333cccc', reason: 'not_happier_managed_service' },
-      ]),
-    });
+    expect(first.scanned).toBe(5);
+    expect(first.deleted).toEqual(expect.arrayContaining([
+      { account: 'tester', service: liveHomeService },
+      { account: 'tester', service: otherManagedService },
+    ]));
+    expect(first.deleted).toHaveLength(2);
+    expect(first.skipped).toEqual(expect.arrayContaining([
+      { account: 'tester', service: 'Claude Code-credentials', reason: 'global_service' },
+      { account: 'someone-else', service: otherAccountService, reason: 'different_account' },
+      { account: 'tester', service: 'Other App credentials-3333cccc', reason: 'not_happier_managed_service' },
+    ]));
     expect(second.deleted).toEqual([]);
-    const deleteCalls = spawnSpy.mock.calls
-      .map((call) => call[1] as readonly string[])
-      .filter((args) => args[0] === 'delete-generic-password');
-    expect(deleteCalls).toEqual([
-      ['delete-generic-password', '-a', 'tester', '-s', staleService],
-    ]);
+    // The user's global login and other-account residue (e.g. happier-test-user) are NEVER touched.
     expect(entries.get('global')).toEqual({ account: 'tester', service: 'Claude Code-credentials' });
-    expect(entries.get('live')).toEqual({ account: 'tester', service: liveService });
     expect(entries.get('other-account')).toEqual({ account: 'someone-else', service: otherAccountService });
+    expect(entries.get('other-service')).toEqual({ account: 'tester', service: 'Other App credentials-3333cccc' });
   });
 
-  it('never deletes a managed keychain service when the live set is unverifiable (fails closed)', async () => {
-    const managedService = 'Claude Code-credentials-1111aaaa';
+  it('never deletes the global service or a different-account item (protects the user login and test residue)', async () => {
+    const deleteAttempts: string[] = [];
     mockSecuritySpawn((args) => {
       if (args[0] === 'dump-keychain') {
-        return { status: 0, stdout: dumpKeychainItems([{ account: 'tester', service: managedService }]) };
+        return {
+          status: 0,
+          stdout: dumpKeychainItems([
+            { account: 'tester', service: 'Claude Code-credentials' },
+            { account: 'happier-test-user', service: 'Claude Code-credentials-deadbeef' },
+          ]),
+        };
+      }
+      if (args[0] === 'delete-generic-password') {
+        deleteAttempts.push(String(args[args.indexOf('-s') + 1] ?? ''));
+        return successfulSpawnResult();
       }
       return successfulSpawnResult();
     });
 
     const result = await sweepStaleClaudeCodeMacOsKeychainCredentials({
-      liveClaudeConfigDirs: [],
       homeDir: '/Users/tester',
       username: 'tester',
     });
 
     expect(result.deleted).toEqual([]);
-    expect(result.skipped).toEqual([
-      { account: 'tester', service: managedService, reason: 'unverifiable_live_set' },
-    ]);
-    expect(spawnSpy.mock.calls.some((call) => (call[1] as readonly string[])[0] === 'delete-generic-password')).toBe(false);
+    expect(result.skipped).toEqual(expect.arrayContaining([
+      { account: 'tester', service: 'Claude Code-credentials', reason: 'global_service' },
+      { account: 'happier-test-user', service: 'Claude Code-credentials-deadbeef', reason: 'different_account' },
+    ]));
+    expect(deleteAttempts).toEqual([]);
   });
 });

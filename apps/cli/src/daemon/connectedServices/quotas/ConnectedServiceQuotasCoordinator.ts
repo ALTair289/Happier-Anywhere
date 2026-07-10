@@ -99,7 +99,10 @@ import {
   type QuotaProbeFreshProofResult,
 } from './proof/quotaProbeFreshProof';
 import type { ConnectedServiceRuntimeAuthApplyCapability } from '../credentials/lifecycleTypes';
-import { evaluateConnectedServiceSwitchApplyPolicy } from '../accountGroups/switching/predictiveSoftSwitchPolicy';
+import {
+  evaluateConnectedServiceSwitchApplyPolicy,
+  runtimeAuthApplyRequiresLiveIdentityProbe,
+} from '../accountGroups/switching/predictiveSoftSwitchPolicy';
 import {
   ConnectedServiceRuntimeRegistry,
   type ConnectedServiceRuntimeQuotaTarget,
@@ -234,6 +237,12 @@ export class ConnectedServiceQuotasCoordinator {
   private readonly failureStateByBindingKey = new Map<string, FailureState>();
   private readonly groupSwitchCheckAtByKey = new Map<string, number>();
   private readonly sameAccountFanoutAtByKey = new Map<string, number>();
+  /**
+   * Sessions whose live runtime-identity probe reported `unsupported_session_runtime_method` — a
+   * STABLE per-session capability fact. The fanout reconcile backs off re-probing these (one INFO
+   * record, no per-tick storm). Cleared on dispose; entries are naturally bounded by live sessions.
+   */
+  private readonly liveIdentityProbeUnsupportedSessionIds = new Set<string>();
   private readonly persistedInBandQuotaStateByKey = new Map<string, PersistedInBandQuotaState>();
   private readonly quotaLifecycleStateByGroupKey = new Map<string, ConnectedServiceAuthGroupQuotaLifecycleState>();
   private readonly recoveryCreditConsumeResultsByKey = new Map<string, ConnectedServiceQuotaRecoveryCreditConsumeResult>();
@@ -629,11 +638,11 @@ export class ConnectedServiceQuotasCoordinator {
     groupGeneration: number;
     recordId: string;
     snapshot: ProviderAccountUsageSnapshotV1;
+    source?: 'poll' | 'in_band';
   }>): Promise<void> {
-    void input.sessionId;
     void input.recordId;
     const listener = this.onQuotaLifecycleTransition;
-    if (!listener || !this.accountUsageStore || typeof this.api.getConnectedServiceAuthGroup !== 'function') return;
+    if (!this.accountUsageStore || typeof this.api.getConnectedServiceAuthGroup !== 'function') return;
     const groupId = input.groupId.trim();
     if (!groupId) return;
     const group = await this.api.getConnectedServiceAuthGroup({
@@ -642,6 +651,27 @@ export class ConnectedServiceQuotasCoordinator {
     }).catch(() => null);
     if (!group) return;
 
+    // Reactive preemption: a genuine in-band usage change (delivered outside the poll) is the freshest
+    // per-session consumption signal. Re-evaluate the burn-projected soft-switch NOW (through the
+    // existing, fully flap-guarded soft-switch machinery) instead of waiting for the ~30-minute quota
+    // poll — the whole point of catching a fast burn before the hard limit. The poll performs its own
+    // soft-switch check (`source: 'poll'`), so suppress the reactive re-check there to avoid a
+    // double-request. Best-effort; the poll remains the backstop.
+    const changedProfileId = input.profileId.trim();
+    if (input.source !== 'poll' && changedProfileId) {
+      await this.maybeRequestActiveGroupSwitchForSnapshot({
+        now: this.now(),
+        targets: [{
+          sessionId: input.sessionId,
+          serviceId: input.serviceId,
+          groupId,
+          activeProfileId: changedProfileId,
+          groupGeneration: normalizeConnectedServiceQuotaGeneration(input.groupGeneration),
+        }],
+      }).catch(() => undefined);
+    }
+
+    if (!listener) return;
     const evaluation = this.evaluateGroupQuotaLifecycleFromAccountUsage({
       mode: 'live_account_usage_change',
       group,
@@ -671,6 +701,7 @@ export class ConnectedServiceQuotasCoordinator {
     this.quotaPersistenceScheduler.dispose();
     this.runtimeRegistry.clearRuntimeAccountIdentities();
     this.sameAccountFanoutAtByKey.clear();
+    this.liveIdentityProbeUnsupportedSessionIds.clear();
     this.quotaLifecycleStateByGroupKey.clear();
   }
 
@@ -750,6 +781,7 @@ export class ConnectedServiceQuotasCoordinator {
       : [];
     const reconciledIndexedCandidates = requiresExactProviderAccountFanout(fanoutStrategy)
       ? await this.reconcileIndexedSameAccountFanoutCandidates({
+          sourceSessionId: input.sourceSessionId,
           serviceId: input.serviceId,
           groupId: input.groupId,
           providerAccountId,
@@ -1265,12 +1297,28 @@ export class ConnectedServiceQuotasCoordinator {
       { status: 'at_or_below_threshold' }
     > | null = null;
     if (input.purpose === 'soft_switch') {
+      // Preemptive burn projection: the poll-driven soft-switch cannot see a session burning from
+      // healthy to exhausted inside one ~30-minute poll window. Feed the recent consumption velocity
+      // (from the in-band runtime snapshots) so a projected-below-threshold active member triggers the
+      // soft-switch BEFORE the hard limit. Horizon reuses the existing `probeIfSnapshotOlderThanMs`
+      // (the next check window) — no new policy knob.
+      const recentBurn = activeProfileId
+        ? this.runtimeQuotaSnapshots?.getRecentBurn({
+          serviceId: input.serviceId,
+          groupId: input.groupId,
+          profileId: activeProfileId,
+        }) ?? null
+        : null;
+      const burnHorizonMs = switchState.policy.probeIfSnapshotOlderThanMs;
       const sourceEvidence = resolveConnectedServiceAuthGroupSoftSwitchSourceEvidence({
         activeProfileId,
         policy: switchState.policy,
         memberStatesByProfileId: switchState.memberStatesByProfileId,
         nowMs: now,
         quotaFreshnessMs: this.quotaLifecycleFreshnessMs,
+        burnProjection: recentBurn && typeof burnHorizonMs === 'number' && Number.isFinite(burnHorizonMs) && burnHorizonMs > 0
+          ? { remainingPercentPerMs: recentBurn.remainingPercentPerMs, horizonMs: burnHorizonMs }
+          : null,
       });
       if (sourceEvidence.status === 'unknown') {
         return {
@@ -1340,6 +1388,10 @@ export class ConnectedServiceQuotasCoordinator {
               sourceProfileId: activeProfileId,
               sourceRemainingPercent: softSwitchSourceEvidence?.remainingPercent,
               sourceThresholdPercent: softSwitchSourceEvidence?.thresholdPercent,
+              // PS-1: preemptive (burn-projected) vs reactive (observed at/below threshold) switches
+              // must stay distinguishable downstream — the evidence carries `projected` only for the
+              // projection-tripped case.
+              sourceProjected: softSwitchSourceEvidence?.projected === true,
               selectedProfileId: selection.selected.profileId,
               selectedRemainingPercent: selection.selected.leastLimitedScore,
               decisionTrace: selection.decisionTrace,
@@ -1546,14 +1598,30 @@ export class ConnectedServiceQuotasCoordinator {
   }
 
   private async reconcileIndexedSameAccountFanoutCandidates(input: Readonly<{
+    sourceSessionId: string;
     serviceId: ConnectedServiceId;
     groupId: string;
     providerAccountId: string;
     indexedCandidates: ReadonlyArray<RuntimeAccountIdentityEntry>;
   }>): Promise<Array<RuntimeAccountIdentityEntry | ReconciledRuntimeAccountIdentityEntry>> {
     return await reconcileIndexedSameAccountFanoutCandidates({
-      ...input,
+      serviceId: input.serviceId,
+      groupId: input.groupId,
+      providerAccountId: input.providerAccountId,
+      indexedCandidates: input.indexedCandidates,
       readRuntimeAccountIdentity: this.readRuntimeAccountIdentity,
+      // Capability choke point: broker/shared-group-indirection providers (opencode/pi/claude —
+      // `requiresExactRuntimeIdentity: false`) are DAEMON-authoritative; retain them via the indexed
+      // identity instead of demanding a live probe their runtime cannot answer. codex still probes.
+      resolveCandidateRequiresLiveIdentityProbe: async (candidate) =>
+        runtimeAuthApplyRequiresLiveIdentityProbe(await this.resolveRuntimeAuthApplyCapability({
+          sourceSessionId: input.sourceSessionId,
+          targetSessionId: candidate.sessionId,
+          serviceId: input.serviceId,
+          groupId: input.groupId,
+        })),
+      isLiveIdentityProbeUnsupported: (sessionId) => this.liveIdentityProbeUnsupportedSessionIds.has(sessionId),
+      markLiveIdentityProbeUnsupported: (sessionId) => { this.liveIdentityProbeUnsupportedSessionIds.add(sessionId); },
       now: this.now,
       recordRuntimeAccountIdentity: (entry) => this.runtimeRegistry.recordRuntimeAccountIdentity(entry),
       invalidateRuntimeAccountIdentity: (sessionId) => this.runtimeRegistry.invalidateRuntimeAccountIdentity(sessionId),
@@ -2437,6 +2505,9 @@ export class ConnectedServiceQuotasCoordinator {
           ...(targetEligibility.sourceThresholdPercent === undefined
             ? {}
             : { sourceThresholdPercent: targetEligibility.sourceThresholdPercent }),
+          ...(targetEligibility.sourceProjected === undefined
+            ? {}
+            : { sourceProjected: targetEligibility.sourceProjected }),
           ...(targetEligibility.selectedProfileId === undefined
             ? {}
             : { selectedProfileId: targetEligibility.selectedProfileId }),

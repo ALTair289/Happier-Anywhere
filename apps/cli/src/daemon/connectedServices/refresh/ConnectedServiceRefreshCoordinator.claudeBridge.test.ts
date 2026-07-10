@@ -771,6 +771,114 @@ describe('ConnectedServiceRefreshCoordinator.refreshClaudeSubscriptionTokensForB
     expect(api.getConnectedServiceCredentialSealed).not.toHaveBeenCalled();
   });
 
+  it('SEC-F1: rejects a broker bridge call that names a live VICTIM sessionId, never returning the victim token', async () => {
+    // A holder of the daemon-wide scoped broker-refresh capability presents its OWN broker selection
+    // identity AND a different, live victim sessionId. Authz must key EXCLUSIVELY on the broker
+    // identity when it is present — the supplied sessionId must never resolve a target and hand back
+    // that session's access token (cross-account bypass inside a multi-account pool).
+    const now = 6_400_000;
+    const victimRecord = buildConnectedServiceCredentialRecord({
+      now,
+      serviceId: 'claude-subscription',
+      profileId: 'victim-profile',
+      kind: 'token',
+      token: { token: 'victim-access', providerAccountId: 'anthropic-victim', providerEmail: null },
+    });
+    const victimSealed = sealAccountScopedBlobCiphertext({
+      kind: 'connected_service_credential',
+      material: { type: 'legacy', secret: legacySecret() },
+      payload: victimRecord,
+      randomBytes: (length) => randomBytes(length),
+    });
+    // Returns the VICTIM credential if the buggy session-first path is exercised (so a regression
+    // leaks a real token and the reject assertion fails loudly).
+    const getSealed = vi.fn(async () => ({
+      sealed: { format: 'account_scoped_v1', ciphertext: victimSealed },
+      metadata: { kind: 'token', providerEmail: null, providerAccountId: 'anthropic-victim', expiresAt: null },
+    }));
+    const api = { getConnectedServiceCredentialSealed: getSealed } as unknown as ApiClient;
+    const coordinator = new ConnectedServiceRefreshCoordinator({
+      api,
+      credentials,
+      machineIdProvider: () => 'm1',
+      activeServerDir: '/tmp/x',
+      baseDir: '/tmp/y',
+      refreshWindowMs: 60_000,
+      refreshLeaseMs: 30_000,
+      now: () => now,
+    });
+    // Victim: a real per-session runtime target bound to its own account.
+    coordinator.registerSpawnTarget({
+      pid: 201,
+      agentId: 'claude',
+      sessionId: 'sess-victim',
+      connectedServicesBindingsRaw: {
+        v: 1,
+        bindingsByServiceId: { 'claude-subscription': { source: 'connected', profileId: 'victim-profile' } },
+      },
+      materializationKey: 'sess-victim',
+    });
+    // Attacker's own live broker target (holds a valid broker selection identity).
+    const attackerIdentity = 'opencode|connected|broker:1|claude-subscription:attacker-profile:anthropic-attacker';
+    coordinator.registerSpawnTarget({
+      pid: 202,
+      agentId: 'opencode',
+      sessionId: 'sess-attacker',
+      brokerSelectionIdentity: attackerIdentity,
+      connectedServicesBindingsRaw: {
+        v: 1,
+        bindingsByServiceId: { 'claude-subscription': { source: 'connected', profileId: 'attacker-profile' } },
+      },
+      materializationKey: 'sess-attacker',
+    });
+
+    await expect(coordinator.refreshClaudeSubscriptionTokensForBridge({
+      sessionId: 'sess-victim',
+      brokerSelectionIdentity: attackerIdentity,
+      selection: { kind: 'profile' as const, serviceId: 'claude-subscription' as const, profileId: 'victim-profile' },
+    })).rejects.toThrow('connected_service_bridge_selection_not_authorized');
+    // Fail-closed: no credential is ever read for the mismatched pair.
+    expect(getSealed).not.toHaveBeenCalled();
+  });
+
+  it('SEC-F1: a ghost broker identity does NOT fall back to a live victim sessionId', async () => {
+    // The broker identity resolves to no live target; the OLD session-first ordering would then
+    // resolve the supplied victim sessionId and leak its token. When a broker identity is asserted it
+    // is authoritative — an unmatched identity fails closed and never consults the sessionId.
+    const now = 6_450_000;
+    const getSealed = vi.fn(async () => {
+      throw new Error('must not read credentials when the broker identity does not match');
+    });
+    const api = { getConnectedServiceCredentialSealed: getSealed } as unknown as ApiClient;
+    const coordinator = new ConnectedServiceRefreshCoordinator({
+      api,
+      credentials,
+      machineIdProvider: () => 'm1',
+      activeServerDir: '/tmp/x',
+      baseDir: '/tmp/y',
+      refreshWindowMs: 60_000,
+      refreshLeaseMs: 30_000,
+      now: () => now,
+    });
+    coordinator.registerSpawnTarget({
+      pid: 211,
+      agentId: 'claude',
+      sessionId: 'sess-victim',
+      connectedServicesBindingsRaw: {
+        v: 1,
+        bindingsByServiceId: { 'claude-subscription': { source: 'connected', profileId: 'victim-profile' } },
+      },
+      materializationKey: 'sess-victim',
+    });
+
+    await expect(coordinator.refreshClaudeSubscriptionTokensForBridge({
+      sessionId: 'sess-victim',
+      brokerSelectionIdentity: 'opencode|connected|broker:1|claude-subscription:ghost:none',
+      selection: { kind: 'profile' as const, serviceId: 'claude-subscription' as const, profileId: 'victim-profile' },
+    })).rejects.toThrow('connected_service_bridge_selection_not_authorized');
+    expect(getSealed).not.toHaveBeenCalled();
+  });
+
   it('rejects Claude bridge requests with a stale group generation for the session', async () => {
     const now = 6_200_000;
     const api = {

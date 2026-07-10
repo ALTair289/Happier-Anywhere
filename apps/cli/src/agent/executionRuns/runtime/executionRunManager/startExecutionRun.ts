@@ -178,6 +178,18 @@ export async function startExecutionRun(args: Readonly<{
 
   const startedAtMs = args.getNowMs();
   const backendId = resolveExecutionRunRuntimeBackendId(args.params.backendTarget);
+  // Immutable launch record: capture the re-resolvable launch intent so every resume recreates the
+  // backend with the SAME model, config overrides, and connected-service account (fail-closed) rather
+  // than ambient auth + default model. Safe inputs only — no credentials/env values/closures.
+  const launch = {
+    ...(args.params.modelId ? { modelId: args.params.modelId } : {}),
+    ...(args.params.sessionConfigOptionOverrides
+      ? { sessionConfigOptionOverrides: args.params.sessionConfigOptionOverrides }
+      : {}),
+    ...(args.params.connectedServicesSelection
+      ? { connectedServicesSelection: args.params.connectedServicesSelection }
+      : {}),
+  } as const;
   args.runs.set(runId, {
     runId,
     callId,
@@ -194,6 +206,7 @@ export async function startExecutionRun(args: Readonly<{
     retentionPolicy: args.params.retentionPolicy,
     runClass: args.params.runClass,
     ioMode: args.params.ioMode,
+    ...(Object.keys(launch).length > 0 ? { launch } : {}),
     status: 'running',
     startedAtMs,
     resumeHandle: null,

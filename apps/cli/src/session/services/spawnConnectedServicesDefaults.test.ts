@@ -62,4 +62,31 @@ describe('resolveSpawnConnectedServicesDefaults (R4-2 literal resolver)', () => 
     });
     expect(result).toBeNull();
   });
+
+  it('scopes resolution to the named service only when serviceIds is provided (per-service default)', () => {
+    // A bare "openai-codex" token must resolve ONLY openai-codex's stored default — not broaden to every
+    // service the agent supports (codex also supports "openai").
+    const result = resolveSpawnConnectedServicesDefaults({
+      accountSettings: codexProfileDefaultSettings,
+      agentId: 'codex',
+      serviceIds: ['openai-codex'],
+    });
+    expect(result?.bindingsByServiceId['openai-codex']).toEqual({
+      source: 'connected',
+      selection: 'profile',
+      profileId: 'test-profile-1',
+    });
+    expect(result && Object.keys(result.bindingsByServiceId)).toEqual(['openai-codex']);
+  });
+
+  it('returns null when the named service has no stored default (fail-closed to native)', () => {
+    // Missing stored default for the requested service → no connected binding → null (the caller then
+    // proceeds native), never a guessed account.
+    const result = resolveSpawnConnectedServicesDefaults({
+      accountSettings: codexProfileDefaultSettings,
+      agentId: 'codex',
+      serviceIds: ['openai'],
+    });
+    expect(result).toBeNull();
+  });
 });

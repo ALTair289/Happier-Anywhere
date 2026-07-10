@@ -31,6 +31,20 @@ import {
   recordOpenCodeBrokerLoadHandshake,
   wasOpenCodeBrokerLoadHandshakeObserved,
 } from '@/backends/opencode/brokerPlugin';
+import { isValidConnectedServiceRunMaterializeToken } from '@/daemon/connectedServices/broker/brokerRefreshCapabilityToken';
+import {
+  EXECUTION_RUN_CONNECTED_SERVICE_MATERIALIZE_PATH,
+  EXECUTION_RUN_CONNECTED_SERVICE_RELEASE_PATH,
+  ExecutionRunConnectedServiceMaterializeRequestSchema,
+  ExecutionRunConnectedServiceMaterializeResponseSchema,
+  ExecutionRunConnectedServiceReleaseRequestSchema,
+  ExecutionRunConnectedServiceReleaseResponseSchema,
+} from './connectedServices/runsBridge/contract';
+import { resolveBrokerBridgeEffectiveSelection } from './connectedServices/broker/brokerBridgeEffectiveSelectionRegistry';
+import {
+  CONNECTED_SERVICE_BRIDGE_SELECTION_NOT_AUTHORIZED,
+  isConnectedServiceBridgeSelectionAuthorizationError,
+} from './connectedServices/refresh/ConnectedServiceRefreshCoordinator';
 import { TrackedSession } from './types';
 import { SPAWN_SESSION_ERROR_CODES, SpawnSessionOptions, SpawnSessionResult } from '@/rpc/handlers/registerSessionHandlers';
 import {
@@ -87,6 +101,11 @@ const DEFAULT_SPAWN_NONCE_SUCCESS_TTL_MS = 60 * 60_000;
 const SPAWN_NONCE_PENDING_TTL_ENV_KEY = 'HAPPIER_DAEMON_SPAWN_NONCE_PENDING_TTL_MS';
 const SPAWN_NONCE_SUCCESS_TTL_ENV_KEY = 'HAPPIER_DAEMON_SPAWN_NONCE_SUCCESS_TTL_MS';
 const DAEMON_CONTROL_ERROR_MESSAGE_MAX_LENGTH = 500;
+
+const brokerBridgeAuthzDeniedSchema = z.object({
+  ok: z.literal(false),
+  errorCode: z.literal(CONNECTED_SERVICE_BRIDGE_SELECTION_NOT_AUTHORIZED),
+});
 
 function readSafeDaemonControlErrorDiagnostic(error: unknown): Readonly<{
   name: string;
@@ -266,6 +285,16 @@ type SpawnNonceAdmissionResult =
   | { type: 'pending' }
   | { type: 'success'; sessionId: string };
 
+const ConnectedServiceAuthGroupGenerationApplyRequestSchema = z.object({
+  serviceId: ConnectedServiceIdSchema,
+  groupId: z.string().trim().min(1),
+  activeProfileId: z.string().trim().min(1),
+  generation: z.number().int().nonnegative(),
+  switchReason: z.literal('manual'),
+});
+
+type ConnectedServiceAuthGroupGenerationApplyRequest = z.infer<typeof ConnectedServiceAuthGroupGenerationApplyRequestSchema>;
+
 export function createDaemonControlApp({
   getChildren,
   machineId,
@@ -279,6 +308,7 @@ export function createDaemonControlApp({
   handleConnectedServiceRuntimeAuthFailure,
   handleConnectedServiceTurnLifecycle,
   handleConnectedServiceUsageLimitWaitResumeCancel,
+  handleConnectedServiceAuthGroupGenerationApply,
   handleSessionConnectedServiceAuthSwitch,
   handleSessionRunnerRestart,
   handleSessionRunnerRestartAll,
@@ -287,6 +317,8 @@ export function createDaemonControlApp({
   handleConnectedServiceQuotaRecoveryCreditConsume,
   handleCodexChatGptAuthTokensRefresh,
   handleClaudeSubscriptionAuthTokensRefresh,
+  handleExecutionRunConnectedServiceMaterialize,
+  handleExecutionRunConnectedServiceRelease,
   runtimeAuthRecoveryScheduler,
   isShuttingDown,
   requestSelfRestart,
@@ -300,6 +332,23 @@ export function createDaemonControlApp({
   beforeShutdown?: () => Promise<void>;
   onHappySessionWebhook: (sessionId: string, metadata: Metadata) => void;
   controlToken: string;
+  // Run-materialization bridge: given a run-scoped selection, the daemon (sole CS owner) resolves +
+  // materializes + registers the run PID and returns the env map (paths only, no secrets).
+  handleExecutionRunConnectedServiceMaterialize?: (input: Readonly<{
+    runId: string;
+    agentId: string;
+    pid: number;
+    materializationKey: string;
+    connectedServicesBindingsRaw: unknown;
+    sessionDirectory?: string | null;
+    sessionId?: string;
+  }>) => Promise<Readonly<{ env: Record<string, string> }>>;
+  // Run-end lifecycle: unregister the run's runtime target + clean its run-scoped materialized root.
+  handleExecutionRunConnectedServiceRelease?: (input: Readonly<{
+    runId: string;
+    pid: number;
+    materializationKey: string;
+  }>) => Promise<Readonly<{ released: boolean }>>;
   handleConnectedServiceRuntimeAuthFailure?: (input: Readonly<{
     sessionId: string;
     switchesThisTurn: number;
@@ -321,6 +370,9 @@ export function createDaemonControlApp({
   handleConnectedServiceUsageLimitWaitResumeCancel?: (input: Readonly<{
     sessionId: string;
   }>) => Promise<unknown>;
+  handleConnectedServiceAuthGroupGenerationApply?: (
+    input: Readonly<ConnectedServiceAuthGroupGenerationApplyRequest>,
+  ) => Promise<unknown>;
   handleSessionConnectedServiceAuthSwitch?: (input: Readonly<SessionConnectedServiceAuthSwitchRpcParams>) => Promise<unknown>;
   handleSessionRunnerRestart?: (input: RestartSessionRunnerRequestV1) => Promise<RestartSessionRunnerResultV1>;
   handleSessionRunnerRestartAll?: (
@@ -332,6 +384,7 @@ export function createDaemonControlApp({
     serviceId: ConnectedServiceId;
     groupId?: string | null;
     groupGeneration?: number | null;
+    sourceProviderAccountId?: string | null;
     snapshot: ConnectedServiceQuotaSnapshotV1;
   }>) => Promise<unknown>;
   handleConnectedServiceQuotaRecoveryCreditConsume?: (input: Readonly<{
@@ -342,14 +395,18 @@ export function createDaemonControlApp({
   }>) => Promise<unknown>;
   handleCodexChatGptAuthTokensRefresh?: (input: Readonly<{
     sessionId: string;
+    brokerSelectionIdentity?: string | null;
     selection: CodexChatGptAuthTokensRefreshSelection;
     chatgptPlanType: string | null;
     forceRefresh: boolean;
+    failingAccessTokenFingerprint?: string | null;
   }>) => Promise<CodexChatGptAuthTokensRefreshResponse>;
   handleClaudeSubscriptionAuthTokensRefresh?: (input: Readonly<{
     sessionId: string;
+    brokerSelectionIdentity?: string | null;
     selection: ClaudeSubscriptionAuthTokensRefreshSelection;
     forceRefresh: boolean;
+    failingAccessTokenFingerprint?: string | null;
   }>) => Promise<ClaudeSubscriptionAuthTokensRefreshResponse>;
   requestSelfRestart?: () => Promise<unknown>;
 }): FastifyInstance {
@@ -477,6 +534,48 @@ export function createDaemonControlApp({
       return reply.send({ success: false as const, error: 'Unauthorized' });
     }
   };
+  // SEC-F1: the two credential-bridge routes serve TWO principals that must never share an authz
+  // path — per-session SDK callbacks (runner processes, which hold the MASTER control token) and
+  // shared OpenCode/Pi brokers (which hold ONLY the scoped broker-refresh token). The credential
+  // presented picks the caller mode, and the mode constrains which target key the request may
+  // authorize through: master token ⇒ session mode (sessionId); scoped token ⇒ broker mode
+  // (selectionIdentity REQUIRED). A scoped-token holder must never resolve a target via a
+  // caller-supplied sessionId — otherwise a leaked broker token could name a live victim session
+  // and receive that session's refreshed access token. Accepting the master token here grants
+  // nothing new (it is a strict privilege superset of this control surface); the earlier blanket
+  // master-token rejection is what forced SDK callbacks onto the shared scoped capability and
+  // created the principal conflation in the first place.
+  const requireBridgeRefreshAuth = async (
+    request: { headers: Record<string, unknown>; bridgeCallerMode?: 'control' | 'broker_scope' },
+    reply: any,
+  ): Promise<void> => {
+    const rawHeader = (request.headers as any)['x-happier-daemon-token'];
+    const provided = typeof rawHeader === 'string' ? rawHeader : Array.isArray(rawHeader) ? rawHeader[0] : null;
+    if (provided && safeTokenEquals(provided, normalizedControlToken)) {
+      request.bridgeCallerMode = 'control';
+      return;
+    }
+    if (isValidOpenCodeBrokerRefreshToken(provided, normalizedControlToken)) {
+      request.bridgeCallerMode = 'broker_scope';
+      return;
+    }
+    reply.code(401);
+    return reply.send({ success: false as const, error: 'Unauthorized' });
+  };
+  const readBridgeCallerMode = (request: unknown): 'control' | 'broker_scope' =>
+    (request as { bridgeCallerMode?: 'control' | 'broker_scope' }).bridgeCallerMode === 'control'
+      ? 'control'
+      : 'broker_scope';
+  // Dedicated least-privilege scope for the execution-run materialization bridge (POST-WAVE-REVIEW
+  // F2): a leaked run-materialize token cannot call the broker-refresh endpoints, and vice versa.
+  const requireRunMaterializeAuth = async (request: { headers: Record<string, unknown> }, reply: any): Promise<void> => {
+    const rawHeader = (request.headers as any)['x-happier-daemon-token'];
+    const provided = typeof rawHeader === 'string' ? rawHeader : Array.isArray(rawHeader) ? rawHeader[0] : null;
+    if (!isValidConnectedServiceRunMaterializeToken(provided, normalizedControlToken)) {
+      reply.code(401);
+      return reply.send({ success: false as const, error: 'Unauthorized' });
+    }
+  };
   let restartState: 'idle' | 'restarting' = 'idle';
 
   typed.post('/ping', {
@@ -516,6 +615,34 @@ export function createDaemonControlApp({
       };
     }
     const result = await handleSessionConnectedServiceAuthSwitch(request.body);
+    return { ok: true as const, result };
+  });
+
+  typed.post('/connected-service-auth/group-generation/apply', {
+    schema: {
+      body: ConnectedServiceAuthGroupGenerationApplyRequestSchema,
+      response: {
+        200: z.object({
+          ok: z.literal(true),
+          result: z.unknown(),
+        }),
+        401: authSchema401,
+        501: z.object({
+          ok: z.literal(false),
+          errorCode: z.literal('connected_service_auth_group_generation_apply_handler_unavailable'),
+        }),
+      },
+    },
+    preHandler: requireAuth,
+  }, async (request, reply) => {
+    if (!handleConnectedServiceAuthGroupGenerationApply) {
+      reply.code(501);
+      return {
+        ok: false as const,
+        errorCode: 'connected_service_auth_group_generation_apply_handler_unavailable' as const,
+      };
+    }
+    const result = await handleConnectedServiceAuthGroupGenerationApply(request.body);
     return { ok: true as const, result };
   });
 
@@ -975,6 +1102,7 @@ export function createDaemonControlApp({
         serviceId: ConnectedServiceIdSchema,
         groupId: z.string().trim().min(1).nullable().optional(),
         groupGeneration: z.number().int().nonnegative().nullable().optional(),
+        sourceProviderAccountId: z.string().trim().min(1).nullable().optional(),
         snapshot: ConnectedServiceQuotaSnapshotV1Schema,
       }).superRefine((body, ctx) => {
         if (body.snapshot.serviceId !== body.serviceId) {
@@ -1022,6 +1150,7 @@ export function createDaemonControlApp({
       serviceId: request.body.serviceId,
       ...(request.body.groupId !== undefined ? { groupId: request.body.groupId } : {}),
       ...(request.body.groupGeneration !== undefined ? { groupGeneration: request.body.groupGeneration } : {}),
+      ...(request.body.sourceProviderAccountId !== undefined ? { sourceProviderAccountId: request.body.sourceProviderAccountId } : {}),
       snapshot: request.body.snapshot,
     });
     return { ok: true as const, result };
@@ -1076,10 +1205,12 @@ export function createDaemonControlApp({
       body: z.object({
         sessionId: z.string().min(1),
         selection: CodexChatGptAuthTokensRefreshSelectionSchema,
+        selectionIdentity: z.string().min(1).optional(),
         chatgptPlanType: z.string().nullable().optional(),
         // F6: the broker sets this ONLY on its 401-retry path; a cold cache-miss leaves it false so
         // the daemon returns the current (valid) token instead of rotating the single-use refresh token.
         forceRefresh: z.boolean().optional(),
+        failingAccessTokenFingerprint: z.string().regex(/^sha256:[a-f0-9]{8}$/u).optional(),
       }),
       response: {
         200: z.object({
@@ -1087,13 +1218,14 @@ export function createDaemonControlApp({
           result: CodexChatGptAuthTokensRefreshResponseSchema,
         }),
         401: authSchema401,
+        403: brokerBridgeAuthzDeniedSchema,
         501: z.object({
           ok: z.literal(false),
           errorCode: z.literal('connected_service_chatgpt_refresh_handler_unavailable'),
         }),
       },
     },
-    preHandler: requireBrokerRefreshAuth,
+    preHandler: requireBridgeRefreshAuth,
   }, async (request, reply) => {
     if (!handleCodexChatGptAuthTokensRefresh) {
       reply.code(501);
@@ -1102,13 +1234,45 @@ export function createDaemonControlApp({
         errorCode: 'connected_service_chatgpt_refresh_handler_unavailable' as const,
       };
     }
-    const result = await handleCodexChatGptAuthTokensRefresh({
-      sessionId: request.body.sessionId,
+    // SEC-F1: broker-scope callers authorize EXCLUSIVELY through their selection identity.
+    if (readBridgeCallerMode(request) === 'broker_scope' && !request.body.selectionIdentity) {
+      reply.code(403);
+      return {
+        ok: false as const,
+        errorCode: CONNECTED_SERVICE_BRIDGE_SELECTION_NOT_AUTHORIZED as typeof CONNECTED_SERVICE_BRIDGE_SELECTION_NOT_AUTHORIZED,
+      };
+    }
+    const effectiveSelection = resolveBrokerBridgeEffectiveSelection({
+      selectionIdentity: request.body.selectionIdentity ?? null,
+      serviceId: 'openai-codex',
       selection: request.body.selection,
-      chatgptPlanType: request.body.chatgptPlanType ?? null,
-      forceRefresh: request.body.forceRefresh === true,
     });
-    return { ok: true as const, result };
+    const parsedSelection = CodexChatGptAuthTokensRefreshSelectionSchema.parse(effectiveSelection.selection);
+    let result: CodexChatGptAuthTokensRefreshResponse;
+    try {
+      result = await handleCodexChatGptAuthTokensRefresh({
+        sessionId: request.body.sessionId,
+        brokerSelectionIdentity: request.body.selectionIdentity ?? null,
+        selection: parsedSelection,
+        chatgptPlanType: request.body.chatgptPlanType ?? null,
+        forceRefresh: request.body.forceRefresh === true,
+        failingAccessTokenFingerprint: request.body.failingAccessTokenFingerprint ?? null,
+      });
+    } catch (error) {
+      if (!isConnectedServiceBridgeSelectionAuthorizationError(error)) throw error;
+      reply.code(403);
+      return {
+        ok: false as const,
+        errorCode: CONNECTED_SERVICE_BRIDGE_SELECTION_NOT_AUTHORIZED as typeof CONNECTED_SERVICE_BRIDGE_SELECTION_NOT_AUTHORIZED,
+      };
+    }
+    return {
+      ok: true as const,
+      result: {
+        ...result,
+        ...(request.body.selectionIdentity ? { selectionEpoch: effectiveSelection.selectionEpoch } : {}),
+      },
+    };
   });
 
   typed.post(CLAUDE_SUBSCRIPTION_AUTH_TOKENS_REFRESH_PATH, {
@@ -1116,7 +1280,9 @@ export function createDaemonControlApp({
       body: z.object({
         sessionId: z.string().min(1),
         selection: ClaudeSubscriptionAuthTokensRefreshSelectionSchema,
+        selectionIdentity: z.string().min(1).optional(),
         forceRefresh: z.boolean().optional(),
+        failingAccessTokenFingerprint: z.string().regex(/^sha256:[a-f0-9]{8}$/u).optional(),
       }),
       response: {
         200: z.object({
@@ -1124,13 +1290,14 @@ export function createDaemonControlApp({
           result: ClaudeSubscriptionAuthTokensRefreshResponseSchema,
         }),
         401: authSchema401,
+        403: brokerBridgeAuthzDeniedSchema,
         501: z.object({
           ok: z.literal(false),
           errorCode: z.literal('connected_service_claude_subscription_refresh_handler_unavailable'),
         }),
       },
     },
-    preHandler: requireBrokerRefreshAuth,
+    preHandler: requireBridgeRefreshAuth,
   }, async (request, reply) => {
     if (!handleClaudeSubscriptionAuthTokensRefresh) {
       reply.code(501);
@@ -1139,12 +1306,119 @@ export function createDaemonControlApp({
         errorCode: 'connected_service_claude_subscription_refresh_handler_unavailable' as const,
       };
     }
-    const result = await handleClaudeSubscriptionAuthTokensRefresh({
-      sessionId: request.body.sessionId,
+    // SEC-F1: broker-scope callers authorize EXCLUSIVELY through their selection identity.
+    if (readBridgeCallerMode(request) === 'broker_scope' && !request.body.selectionIdentity) {
+      reply.code(403);
+      return {
+        ok: false as const,
+        errorCode: CONNECTED_SERVICE_BRIDGE_SELECTION_NOT_AUTHORIZED as typeof CONNECTED_SERVICE_BRIDGE_SELECTION_NOT_AUTHORIZED,
+      };
+    }
+    const effectiveSelection = resolveBrokerBridgeEffectiveSelection({
+      selectionIdentity: request.body.selectionIdentity ?? null,
+      serviceId: 'claude-subscription',
       selection: request.body.selection,
-      forceRefresh: request.body.forceRefresh === true,
     });
-    return { ok: true as const, result };
+    const parsedSelection = ClaudeSubscriptionAuthTokensRefreshSelectionSchema.parse(effectiveSelection.selection);
+    let result: ClaudeSubscriptionAuthTokensRefreshResponse;
+    try {
+      result = await handleClaudeSubscriptionAuthTokensRefresh({
+        sessionId: request.body.sessionId,
+        brokerSelectionIdentity: request.body.selectionIdentity ?? null,
+        selection: parsedSelection,
+        forceRefresh: request.body.forceRefresh === true,
+        failingAccessTokenFingerprint: request.body.failingAccessTokenFingerprint ?? null,
+      });
+    } catch (error) {
+      if (!isConnectedServiceBridgeSelectionAuthorizationError(error)) throw error;
+      reply.code(403);
+      return {
+        ok: false as const,
+        errorCode: CONNECTED_SERVICE_BRIDGE_SELECTION_NOT_AUTHORIZED as typeof CONNECTED_SERVICE_BRIDGE_SELECTION_NOT_AUTHORIZED,
+      };
+    }
+    return {
+      ok: true as const,
+      result: {
+        ...result,
+        ...(request.body.selectionIdentity ? { selectionEpoch: effectiveSelection.selectionEpoch } : {}),
+      },
+    };
+  });
+
+  // Run-materialization bridge (DEDICATED scoped run-materialize token, least privilege — mirrors the broker
+  // bridge). The runner asks the daemon (sole CS owner) to resolve+materialize+register CS for an
+  // execution run and returns the env map. Fails CLOSED: a materialization fault is a 500, never a
+  // silent empty env that would let the run fall back to the runner's inherited account.
+  typed.post(EXECUTION_RUN_CONNECTED_SERVICE_MATERIALIZE_PATH, {
+    schema: {
+      body: ExecutionRunConnectedServiceMaterializeRequestSchema,
+      response: {
+        200: z.object({
+          ok: z.literal(true),
+          result: ExecutionRunConnectedServiceMaterializeResponseSchema,
+        }),
+        401: authSchema401,
+        501: z.object({
+          ok: z.literal(false),
+          errorCode: z.literal('execution_run_connected_service_materialize_handler_unavailable'),
+        }),
+      },
+    },
+    preHandler: requireRunMaterializeAuth,
+  }, async (request, reply) => {
+    if (!handleExecutionRunConnectedServiceMaterialize) {
+      reply.code(501);
+      return {
+        ok: false as const,
+        errorCode: 'execution_run_connected_service_materialize_handler_unavailable' as const,
+      };
+    }
+    const result = await handleExecutionRunConnectedServiceMaterialize({
+      runId: request.body.runId,
+      agentId: request.body.agentId,
+      pid: request.body.pid,
+      materializationKey: request.body.materializationKey,
+      connectedServicesBindingsRaw: request.body.connectedServicesBindingsRaw,
+      sessionDirectory: request.body.sessionDirectory ?? null,
+      ...(request.body.sessionId ? { sessionId: request.body.sessionId } : {}),
+    });
+    return { ok: true as const, result: { env: result.env } };
+  });
+
+  // Run-end lifecycle for the run-materialization bridge: unregister the run's runtime target and
+  // clean its run-scoped materialized root. Best-effort semantics on the caller side; the handler
+  // itself never tears down a target owned by a different materialization.
+  typed.post(EXECUTION_RUN_CONNECTED_SERVICE_RELEASE_PATH, {
+    schema: {
+      body: ExecutionRunConnectedServiceReleaseRequestSchema,
+      response: {
+        200: z.object({
+          ok: z.literal(true),
+          result: ExecutionRunConnectedServiceReleaseResponseSchema,
+        }),
+        401: authSchema401,
+        501: z.object({
+          ok: z.literal(false),
+          errorCode: z.literal('execution_run_connected_service_release_handler_unavailable'),
+        }),
+      },
+    },
+    preHandler: requireRunMaterializeAuth,
+  }, async (request, reply) => {
+    if (!handleExecutionRunConnectedServiceRelease) {
+      reply.code(501);
+      return {
+        ok: false as const,
+        errorCode: 'execution_run_connected_service_release_handler_unavailable' as const,
+      };
+    }
+    const result = await handleExecutionRunConnectedServiceRelease({
+      runId: request.body.runId,
+      pid: request.body.pid,
+      materializationKey: request.body.materializationKey,
+    });
+    return { ok: true as const, result: { released: result.released } };
   });
 
   // F4: broker load handshake. The broker plugin pings this on activation (scoped token only) so the
@@ -1689,6 +1963,7 @@ export function startDaemonControlServer({
   handleConnectedServiceRuntimeAuthFailure,
   handleConnectedServiceTurnLifecycle,
   handleConnectedServiceUsageLimitWaitResumeCancel,
+  handleConnectedServiceAuthGroupGenerationApply,
   handleSessionConnectedServiceAuthSwitch,
   handleSessionRunnerRestart,
   handleSessionRunnerRestartAll,
@@ -1697,6 +1972,8 @@ export function startDaemonControlServer({
   handleConnectedServiceQuotaRecoveryCreditConsume,
   handleCodexChatGptAuthTokensRefresh,
   handleClaudeSubscriptionAuthTokensRefresh,
+  handleExecutionRunConnectedServiceMaterialize,
+  handleExecutionRunConnectedServiceRelease,
   runtimeAuthRecoveryScheduler,
   isShuttingDown,
   requestSelfRestart,
@@ -1710,6 +1987,20 @@ export function startDaemonControlServer({
   beforeShutdown?: () => Promise<void>;
   onHappySessionWebhook: (sessionId: string, metadata: Metadata) => void;
   controlToken: string;
+  handleExecutionRunConnectedServiceMaterialize?: (input: Readonly<{
+    runId: string;
+    agentId: string;
+    pid: number;
+    materializationKey: string;
+    connectedServicesBindingsRaw: unknown;
+    sessionDirectory?: string | null;
+    sessionId?: string;
+  }>) => Promise<Readonly<{ env: Record<string, string> }>>;
+  handleExecutionRunConnectedServiceRelease?: (input: Readonly<{
+    runId: string;
+    pid: number;
+    materializationKey: string;
+  }>) => Promise<Readonly<{ released: boolean }>>;
   handleConnectedServiceRuntimeAuthFailure?: (input: Readonly<{
     sessionId: string;
     switchesThisTurn: number;
@@ -1728,6 +2019,9 @@ export function startDaemonControlServer({
   handleConnectedServiceUsageLimitWaitResumeCancel?: (input: Readonly<{
     sessionId: string;
   }>) => Promise<unknown>;
+  handleConnectedServiceAuthGroupGenerationApply?: (
+    input: Readonly<ConnectedServiceAuthGroupGenerationApplyRequest>,
+  ) => Promise<unknown>;
   handleSessionConnectedServiceAuthSwitch?: (input: Readonly<SessionConnectedServiceAuthSwitchRpcParams>) => Promise<unknown>;
   handleSessionRunnerRestart?: (input: RestartSessionRunnerRequestV1) => Promise<RestartSessionRunnerResultV1>;
   handleSessionRunnerRestartAll?: (
@@ -1739,6 +2033,7 @@ export function startDaemonControlServer({
     serviceId: ConnectedServiceId;
     groupId?: string | null;
     groupGeneration?: number | null;
+    sourceProviderAccountId?: string | null;
     snapshot: ConnectedServiceQuotaSnapshotV1;
   }>) => Promise<unknown>;
   handleConnectedServiceQuotaRecoveryCreditConsume?: (input: Readonly<{
@@ -1749,14 +2044,18 @@ export function startDaemonControlServer({
   }>) => Promise<unknown>;
   handleCodexChatGptAuthTokensRefresh?: (input: Readonly<{
     sessionId: string;
+    brokerSelectionIdentity?: string | null;
     selection: CodexChatGptAuthTokensRefreshSelection;
     chatgptPlanType: string | null;
     forceRefresh: boolean;
+    failingAccessTokenFingerprint?: string | null;
   }>) => Promise<CodexChatGptAuthTokensRefreshResponse>;
   handleClaudeSubscriptionAuthTokensRefresh?: (input: Readonly<{
     sessionId: string;
+    brokerSelectionIdentity?: string | null;
     selection: ClaudeSubscriptionAuthTokensRefreshSelection;
     forceRefresh: boolean;
+    failingAccessTokenFingerprint?: string | null;
   }>) => Promise<ClaudeSubscriptionAuthTokensRefreshResponse>;
   requestSelfRestart?: () => Promise<unknown>;
 }): Promise<{ port: number; stop: () => Promise<void> }> {
@@ -1774,6 +2073,7 @@ export function startDaemonControlServer({
       handleConnectedServiceRuntimeAuthFailure,
       handleConnectedServiceTurnLifecycle,
       handleConnectedServiceUsageLimitWaitResumeCancel,
+      handleConnectedServiceAuthGroupGenerationApply,
       handleSessionConnectedServiceAuthSwitch,
       handleSessionRunnerRestart,
       handleSessionRunnerRestartAll,
@@ -1782,6 +2082,8 @@ export function startDaemonControlServer({
       handleConnectedServiceQuotaRecoveryCreditConsume,
       handleCodexChatGptAuthTokensRefresh,
       handleClaudeSubscriptionAuthTokensRefresh,
+      handleExecutionRunConnectedServiceMaterialize,
+      handleExecutionRunConnectedServiceRelease,
       runtimeAuthRecoveryScheduler,
       isShuttingDown,
       requestSelfRestart,

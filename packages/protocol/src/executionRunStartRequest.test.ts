@@ -42,3 +42,19 @@ describe('ExecutionRunStartRequestSchema model/effort parity', () => {
     expect(parsed.sessionConfigOptionOverrides).toBeUndefined();
   });
 });
+
+describe('ExecutionRunReplaySeedRequestSchema wire compatibility (CL-2)', () => {
+  it('accepts a replay seed carrying unknown fields from a newer peer (passthrough, like sibling wire schemas)', () => {
+    const parsed = ExecutionRunStartRequestSchema.parse({
+      ...base,
+      replay: {
+        kind: 'voice_session.v1',
+        previousSessionId: 'sess_prev',
+        transcriptEpoch: 3,
+        futureFieldFromNewerPeer: { anything: true },
+      },
+    });
+    expect(parsed.replay?.kind).toBe('voice_session.v1');
+    expect((parsed.replay as Record<string, unknown>).futureFieldFromNewerPeer).toEqual({ anything: true });
+  });
+});

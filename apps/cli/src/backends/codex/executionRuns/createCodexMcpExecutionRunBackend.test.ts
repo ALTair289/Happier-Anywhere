@@ -258,6 +258,80 @@ describe('createCodexMcpExecutionRunBackend', () => {
     expect(state.continueCalls).toHaveLength(0);
   });
 
+  it('surfaces a usage-limit start-turn error without leaking an unhandled rejection', async () => {
+    const usageLimitMessage =
+      "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 9:42 AM.";
+    const state: FakeClientState = {
+      vendorSessionId: 'vendor_session_usage_limit' as SessionId,
+      startCalls: [],
+      continueCalls: [],
+      emittedMessages: [],
+      instances: [],
+      startSessionImpl: async () => ({
+        content: [{ type: 'text' as const, text: usageLimitMessage }],
+        structuredContent: { threadId: 'thread-usage-limit', content: usageLimitMessage },
+        isError: true,
+      }),
+    };
+    const backend = await loadBackendWithFakeClient(state);
+    const started = await backend.startSession();
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      // The turn fails cleanly with the provider message surfaced to the caller...
+      await expect(backend.sendPrompt(started.sessionId, 'first prompt')).rejects.toThrow(/usage limit/i);
+      // ...and the response waiter must settle (session stays alive), not hang or reject unobserved.
+      await expect(backend.waitForResponseComplete?.()).resolves.toBeUndefined();
+      // Flush pending microtasks/immediates so any orphaned rejection would surface here.
+      await new Promise((resolve) => setImmediate(resolve));
+    } finally {
+      process.removeListener('unhandledRejection', onUnhandled);
+    }
+
+    expect(unhandled).toEqual([]);
+  });
+
+  it('surfaces a usage-limit continue-turn error without leaking an unhandled rejection', async () => {
+    const usageLimitMessage =
+      "You've hit your usage limit. Try again at 9:42 AM.";
+    const state: FakeClientState = {
+      vendorSessionId: 'vendor_session_usage_limit_continue' as SessionId,
+      startCalls: [],
+      continueCalls: [],
+      emittedMessages: [],
+      instances: [],
+      continueSessionImpl: async () => ({
+        content: [{ type: 'text' as const, text: usageLimitMessage }],
+        structuredContent: { content: usageLimitMessage },
+        isError: true,
+      }),
+    };
+    const backend = await loadBackendWithFakeClient(state);
+    const started = await backend.startSession();
+    // First prompt establishes the vendor session so the next prompt takes the continue path.
+    await backend.sendPrompt(started.sessionId, 'first prompt');
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      await expect(backend.sendPrompt(started.sessionId, 'second prompt')).rejects.toThrow(/usage limit/i);
+      await expect(backend.waitForResponseComplete?.()).resolves.toBeUndefined();
+      await new Promise((resolve) => setImmediate(resolve));
+    } finally {
+      process.removeListener('unhandledRejection', onUnhandled);
+    }
+
+    expect(state.continueCalls).toHaveLength(1);
+    expect(unhandled).toEqual([]);
+  });
+
   it('correlates missing exec_command call ids across begin and end events', async () => {
     const state: FakeClientState = {
       vendorSessionId: 'vendor_session_4' as SessionId,

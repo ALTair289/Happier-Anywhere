@@ -69,6 +69,7 @@ export class ConnectedServiceSwitchDeferralConflictError extends Error {
   public readonly code:
     | 'group_generation_conflict'
     | 'switch_cancelled'
+    | 'switch_execution_timeout'
     | 'session_terminated'
     | 'daemon_shutdown';
 
@@ -204,8 +205,27 @@ export function createConnectedServiceSwitchDeferralQueue(
     // timeout racing a terminal event) cannot both pass the guard and double-invoke runSwitch.
     pending.executing = true;
     clearPendingTimer(pending);
+    // CL-1: the deferral-window timer cleared above only bounds the WAIT for a boundary. Bound the
+    // runSwitch execution itself too, so a hung switch (stuck materialization, wedged restart signal)
+    // rejects the deferred callers instead of stranding them until session teardown. A late runSwitch
+    // outcome after the deadline is ignored via the settled guard; the switch machinery downstream is
+    // generation-guarded against a stale completion racing a newer request. The completion event
+    // reuses the existing wire reason 'aborted_after_timeout' — no new wire enum member.
+    const executionDeadline = setTimeout(() => {
+      if (pending.settled) return;
+      emit(pending.sessionId, {
+        type: 'connected_service_account_switch_deferral_completed',
+        policy: pending.policy,
+        reason: 'aborted_after_timeout',
+      });
+      settlePending(pending, 'reject', new ConnectedServiceSwitchDeferralConflictError({
+        code: 'switch_execution_timeout',
+        message: `Connected-service deferred switch execution exceeded ${timeoutMs}ms`,
+      }));
+    }, timeoutMs);
     try {
       await pending.runSwitch();
+      if (pending.settled) return;
       emit(pending.sessionId, {
         type: 'connected_service_account_switch_deferral_completed',
         policy: pending.policy,
@@ -213,7 +233,10 @@ export function createConnectedServiceSwitchDeferralQueue(
       });
       settlePending(pending, 'resolve');
     } catch (error) {
+      if (pending.settled) return;
       settlePending(pending, 'reject', error);
+    } finally {
+      clearTimeout(executionDeadline);
     }
   };
 

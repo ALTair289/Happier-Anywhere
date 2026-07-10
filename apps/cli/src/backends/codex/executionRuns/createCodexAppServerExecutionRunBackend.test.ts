@@ -42,6 +42,36 @@ describe('createCodexAppServerExecutionRunBackend', () => {
     expect(params?.processEnv?.PATH).toBe('/tmp/isolated-bin:/usr/bin');
   });
 
+  it('delegates setSessionModel + setSessionConfigOption to the app-server runtime', async () => {
+    const setSessionModel = vi.fn(async () => undefined);
+    const setSessionConfigOption = vi.fn(async () => undefined);
+    createCodexAppServerRuntimeMock.mockReturnValueOnce({
+      startOrLoad: async () => undefined,
+      getSessionId: () => 'thread_1',
+      sendPrompt: async () => undefined,
+      startReview: async () => undefined,
+      compactContext: async () => undefined,
+      cancel: async () => undefined,
+      reset: async () => undefined,
+      setSessionModel,
+      setSessionConfigOption,
+    });
+
+    const { createCodexAppServerExecutionRunBackend } = await import('./createCodexAppServerExecutionRunBackend');
+    const backend = createCodexAppServerExecutionRunBackend({
+      cwd: '/tmp/happier-worktree',
+      env: {},
+      permissionMode: 'read-only' as any,
+      permissionHandler: null,
+    });
+
+    await backend.setSessionModel('thread_1' as any, 'gpt-5.5');
+    await backend.setSessionConfigOption('thread_1' as any, 'reasoning_effort', 'high');
+
+    expect(setSessionModel).toHaveBeenCalledWith('gpt-5.5');
+    expect(setSessionConfigOption).toHaveBeenCalledWith('reasoning_effort', 'high');
+  });
+
   it('loads existing execution-run sessions without importing provider history', async () => {
     const startOrLoad = vi.fn(async () => undefined);
     createCodexAppServerRuntimeMock.mockReturnValueOnce({

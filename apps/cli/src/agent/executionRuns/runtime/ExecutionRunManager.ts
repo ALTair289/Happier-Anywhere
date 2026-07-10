@@ -39,6 +39,10 @@ import { ensureExecutionRun } from '@/agent/executionRuns/runtime/executionRunMa
 import { finishExecutionRun } from '@/agent/executionRuns/runtime/executionRunManager/finishExecutionRun';
 import { startExecutionRun } from '@/agent/executionRuns/runtime/executionRunManager/startExecutionRun';
 import {
+  resolveExecutionRunResumeBackendOptions,
+  type PrepareExecutionRunConnectedServicesForResume,
+} from '@/agent/executionRuns/runtime/rehydrateExecutionRunBackendLaunch';
+import {
   enqueueExecutionRunMarkerWrite,
   writeExecutionRunActivityMarker,
 } from '@/agent/executionRuns/runtime/executionRunManager/activityMarkers';
@@ -62,11 +66,14 @@ export class ExecutionRunManager {
     backendTarget?: BackendTargetRefV1;
     permissionMode: string;
     modelId?: string;
+    sessionConfigOptionOverrides?: AcpConfigOptionOverridesV1;
     accountSettings?: Readonly<Record<string, unknown>> | null;
     start?: ExecutionRunBackendStartContext;
     connectedServicesEnv?: Readonly<Record<string, string>> | null;
     connectedServicesCleanup?: (() => Promise<void>) | null;
   }) => AgentBackend;
+  private readonly resolveAccountSettings: () => Promise<Record<string, unknown> | null> | Record<string, unknown> | null;
+  private readonly prepareConnectedServices: PrepareExecutionRunConnectedServicesForResume | null;
   private readonly sendAcp: (provider: ACPProvider, body: ACPMessageData, opts?: { meta?: Record<string, unknown> }) => void;
   private readonly streamedTranscriptSession: StreamedTranscriptWriterSession | null;
   private readonly transcriptWriter:
@@ -178,6 +185,12 @@ export class ExecutionRunManager {
     budgetRegistry?: ExecutionBudgetRegistry;
     runtimeActivityPublisher?: SessionRuntimeActivityPublisher | null;
     resolveAccountSettings?: () => Promise<Record<string, unknown> | null> | Record<string, unknown> | null;
+    /**
+     * Canonical connected-services owner used to RE-materialize a run's account on resume, driven by
+     * the persisted launch selection. Same owner start uses. Absent means resume cannot re-materialize
+     * CS — a run with a persisted connected selection then fails closed on resume.
+     */
+    prepareConnectedServices?: PrepareExecutionRunConnectedServicesForResume;
     resolveVoicePromptStackBlocks?: (args: Readonly<{
       settings?: unknown;
       profileId?: string | null;
@@ -204,6 +217,8 @@ export class ExecutionRunManager {
     this.runtimeActivityPublisher = opts.runtimeActivityPublisher ?? null;
     this.onPublicStateUpdated = typeof opts.onPublicStateUpdated === 'function' ? opts.onPublicStateUpdated : null;
     const resolveAccountSettings = opts.resolveAccountSettings ?? (async () => null);
+    this.resolveAccountSettings = resolveAccountSettings;
+    this.prepareConnectedServices = opts.prepareConnectedServices ?? null;
     const resolveVoicePromptStackBlocks = opts.resolveVoicePromptStackBlocks
       ?? (async ({
         settings,
@@ -442,6 +457,38 @@ export class ExecutionRunManager {
     });
   }
 
+  /**
+   * ONE resume backend factory: on every recreation path, rehydrate the run's immutable launch record
+   * (re-resolve account settings, re-materialize connected services from the persisted selection —
+   * fail-closed) and construct the backend with the run's runId isolation, model, and config
+   * overrides. This is the single owner that keeps resume symmetric with start.
+   */
+  private buildResumeBackendFactory(run: ExecutionRunState): () => Promise<AgentBackend> {
+    return async () => {
+      const resumeOptions = await resolveExecutionRunResumeBackendOptions({
+        run,
+        resolveAccountSettings: this.resolveAccountSettings,
+        ...(this.prepareConnectedServices ? { prepareConnectedServices: this.prepareConnectedServices } : {}),
+      });
+      return this.createBackend({
+        runId: run.runId,
+        backendId: run.backendId,
+        backendTarget: run.backendTarget,
+        permissionMode: run.permissionMode,
+        start: { retentionPolicy: run.retentionPolicy, intent: run.intent },
+        ...(resumeOptions.modelId ? { modelId: resumeOptions.modelId } : {}),
+        ...(resumeOptions.sessionConfigOptionOverrides
+          ? { sessionConfigOptionOverrides: resumeOptions.sessionConfigOptionOverrides }
+          : {}),
+        ...(typeof resumeOptions.accountSettings !== 'undefined' ? { accountSettings: resumeOptions.accountSettings } : {}),
+        ...(resumeOptions.connectedServicesEnv ? { connectedServicesEnv: resumeOptions.connectedServicesEnv } : {}),
+        ...(resumeOptions.connectedServicesCleanup
+          ? { connectedServicesCleanup: resumeOptions.connectedServicesCleanup }
+          : {}),
+      });
+    };
+  }
+
   async send(
     runId: string,
     params: Readonly<{ message: string; resume?: boolean; delivery?: unknown }>,
@@ -457,7 +504,7 @@ export class ExecutionRunManager {
         runs: this.runs,
         controllers: this.controllers,
         budgetRegistry: this.budgetRegistry,
-        createBackend: ({ backendId, backendTarget, permissionMode }) => this.createBackend({ backendId, backendTarget, permissionMode }),
+        createBackend: this.buildResumeBackendFactory(run),
         maxTurns: this.maxTurns,
         getNowMs: this.getNowMs,
         finishRun: this.finishRun.bind(this),
@@ -529,7 +576,7 @@ export class ExecutionRunManager {
       runs: this.runs,
       controllers: this.controllers,
       budgetRegistry: this.budgetRegistry,
-      createBackend: ({ backendId, backendTarget, permissionMode }) => this.createBackend({ backendId, backendTarget, permissionMode }),
+      createBackend: this.buildResumeBackendFactory(run),
       maxTurns: this.maxTurns,
       getNowMs: this.getNowMs,
       finishRun: this.finishRun.bind(this),
@@ -542,13 +589,18 @@ export class ExecutionRunManager {
   }
 
   async ensure(runId: string, params: Readonly<{ resume?: boolean }>): Promise<{ ok: boolean; errorCode?: string; error?: string }> {
+    const run = this.runs.get(runId) ?? null;
     return ensureExecutionRun({
       runId,
       params,
       runs: this.runs,
       controllers: this.controllers,
       budgetRegistry: this.budgetRegistry,
-      createBackend: ({ backendId, backendTarget, permissionMode }) => this.createBackend({ backendId, backendTarget, permissionMode }),
+      createBackend: run
+        ? this.buildResumeBackendFactory(run)
+        : async () => {
+            throw new Error('Execution run not found');
+          },
       sendAcp: this.sendAcp,
       parentProvider: this.parentProvider,
       streamedTranscriptSession: this.streamedTranscriptSession,

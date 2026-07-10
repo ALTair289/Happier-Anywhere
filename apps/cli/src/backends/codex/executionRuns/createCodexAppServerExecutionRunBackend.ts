@@ -39,6 +39,15 @@ export type CodexAppServerExecutionRunTurnLiveness = Readonly<{
 
 export type CodexAppServerExecutionRunBackend = AgentBackend & Readonly<{
   probeTurnLiveness: () => Promise<CodexAppServerExecutionRunTurnLiveness>;
+  // Canonical apply-options seam: run modelId + config overrides (e.g. reasoning_effort) are applied
+  // through the app-server runtime setters after the session id is known (see
+  // withExecutionRunBackendModelOptions).
+  setSessionModel: (sessionId: SessionId, modelId: string) => Promise<void>;
+  setSessionConfigOption: (
+    sessionId: SessionId,
+    configId: string,
+    value: string | number | boolean | null,
+  ) => Promise<void>;
 }>;
 
 type PromptTurnState = {
@@ -344,6 +353,20 @@ export function createCodexAppServerExecutionRunBackend(args: Readonly<{
           promptTurn = null;
         }
       }
+    },
+    async setSessionModel(_sessionId: SessionId, modelId: string): Promise<void> {
+      const normalized = typeof modelId === 'string' ? modelId.trim() : '';
+      if (!normalized) return;
+      await runtime.setSessionModel(normalized);
+    },
+    async setSessionConfigOption(
+      _sessionId: SessionId,
+      configId: string,
+      value: string | number | boolean | null,
+    ): Promise<void> {
+      const normalizedConfigId = typeof configId === 'string' ? configId.trim() : '';
+      if (!normalizedConfigId) return;
+      await runtime.setSessionConfigOption(normalizedConfigId, value);
     },
     async cancel(_sessionId: SessionId): Promise<void> {
       await runtime.cancel();

@@ -23,7 +23,16 @@ import {
   type ClaudeSubscriptionAuthTokensRefreshResponse,
   type ClaudeSubscriptionAuthTokensRefreshSelection,
 } from '@/backends/claude/connectedServices/claudeSubscriptionAuthTokensRefreshBridgeContract';
-import { deriveConnectedServiceBrokerRefreshToken } from '@/daemon/connectedServices/broker/brokerRefreshCapabilityToken';
+import {
+  deriveConnectedServiceBrokerRefreshToken,
+  deriveConnectedServiceRunMaterializeToken,
+} from '@/daemon/connectedServices/broker/brokerRefreshCapabilityToken';
+import {
+  EXECUTION_RUN_CONNECTED_SERVICE_MATERIALIZE_PATH,
+  EXECUTION_RUN_CONNECTED_SERVICE_RELEASE_PATH,
+  ExecutionRunConnectedServiceMaterializeResponseSchema,
+  ExecutionRunConnectedServiceReleaseResponseSchema,
+} from '@/daemon/connectedServices/runsBridge/contract';
 import { resolveComparableCliVersion } from './resolveComparableCliVersion';
 import {
   RestartAllSessionRunnersRequestV1Schema,
@@ -47,7 +56,7 @@ export type DaemonControlRequestOptions = {
   timeoutMs?: number;
 };
 
-type DaemonPostAuthScope = 'daemon-control' | 'connected-service-broker-refresh';
+type DaemonPostAuthScope = 'daemon-control' | 'connected-service-broker-refresh' | 'connected-service-run-materialize';
 
 type DaemonPostOptions = DaemonControlRequestOptions & {
   authScope?: DaemonPostAuthScope;
@@ -58,7 +67,7 @@ const DEFAULT_DAEMON_SPAWN_HTTP_TIMEOUT_MS = DEFAULT_SESSION_WEBHOOK_TIMEOUT_MS;
 const DEFAULT_DAEMON_PING_TIMEOUT_MS = 3_000;
 const DEFAULT_DAEMON_STOP_WAIT_FOR_DEATH_TIMEOUT_MS = 12_000;
 const DEFAULT_DAEMON_SHUTDOWN_SPAWN_DRAIN_GRACE_MS = 10_000;
-const DAEMON_PING_UNREACHABLE_STARTUP_GRACE_MS = 60_000;
+const DAEMON_STATE_FRESHNESS_GRACE_MS = 60_000;
 const DAEMON_LOCK_UNCLASSIFIED_STARTUP_GRACE_MS = 60_000;
 const DAEMON_HTTP_TIMEOUT_ENV_KEY = 'HAPPIER_DAEMON_HTTP_TIMEOUT';
 const DAEMON_SPAWN_HTTP_TIMEOUT_ENV_KEY = 'HAPPIER_DAEMON_SPAWN_HTTP_TIMEOUT';
@@ -76,13 +85,18 @@ export type GetDaemonSessionRunnerStatusResult = SessionRunnerRuntimeStateV1;
 
 function resolveDaemonStateAgeMs(state: unknown): number | null {
   if (state && typeof state === 'object') {
+    const lastHeartbeatAt = (state as any).lastHeartbeatAt;
+    if (typeof lastHeartbeatAt === 'number' && Number.isFinite(lastHeartbeatAt)) {
+      return Math.max(0, Date.now() - lastHeartbeatAt);
+    }
+
     const startedAt = (state as any).startedAt;
     if (typeof startedAt === 'number' && Number.isFinite(startedAt)) {
       return Math.max(0, Date.now() - startedAt);
     }
   }
 
-  // Fall back to file mtime if startedAt is missing; helps avoid deleting freshly written state.
+  // Fall back to file mtime if timestamps are missing; freshly written state should back off.
   try {
     const stat = statSync(configuration.daemonStateFile);
     if (Number.isFinite(stat.mtimeMs)) {
@@ -237,22 +251,20 @@ export async function inspectDaemonRunningStateAndCleanupStaleState(): Promise<D
       }
 
       if (ping?.error) {
-        const ageMs = resolveDaemonStateAgeMs(state);
-        if (ageMs !== null && ageMs < DAEMON_PING_UNREACHABLE_STARTUP_GRACE_MS) {
-          logger.debug('[DAEMON RUN] Daemon /ping unreachable during startup grace window, keeping state');
-          return { status: 'starting', state };
-        }
-
-        logger.debug('[DAEMON RUN] Daemon control server did not respond to /ping, cleaning up state');
-        await cleanupDaemonState();
-        return { status: 'not-running' };
+        logger.debug('[DAEMON RUN] Daemon /ping unreachable while PID is alive, treating daemon as starting or busy and keeping state');
+        return { status: 'starting', state };
       }
     }
 
     return { status: 'running', state };
   } catch {
-    logger.debug('[DAEMON RUN] Daemon PID not running, cleaning up state');
-    await cleanupDaemonState();
+    const ageMs = resolveDaemonStateAgeMs(state);
+    if (ageMs !== null && ageMs < DAEMON_STATE_FRESHNESS_GRACE_MS) {
+      logger.debug('[DAEMON RUN] Daemon PID is missing but state heartbeat is fresh, keeping state as startup in progress');
+      return { status: 'starting', state };
+    }
+
+    logger.debug('[DAEMON RUN] Daemon PID not running and state is stale, leaving daemon-owned state for startup replacement');
     return { status: 'not-running' };
   }
 }
@@ -282,7 +294,9 @@ async function daemonPost(path: string, body?: any, options: DaemonPostOptions =
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     const authToken = options.authScope === 'connected-service-broker-refresh'
       ? deriveConnectedServiceBrokerRefreshToken(state.controlToken)
-      : state.controlToken;
+      : options.authScope === 'connected-service-run-materialize'
+        ? deriveConnectedServiceRunMaterializeToken(state.controlToken)
+        : state.controlToken;
     if (authToken) {
       headers['x-happier-daemon-token'] = authToken;
     }
@@ -385,6 +399,29 @@ export async function requestDaemonSessionConnectedServiceAuthSwitch(
   return (result as { result?: unknown } | null)?.result;
 }
 
+export async function requestDaemonConnectedServiceAuthGroupGenerationApply(
+  body: Readonly<{
+    serviceId: ConnectedServiceId;
+    groupId: string;
+    activeProfileId: string;
+    generation: number;
+    switchReason: 'manual';
+  }>,
+  options: DaemonControlRequestOptions = {},
+): Promise<unknown> {
+  const result = await daemonPost('/connected-service-auth/group-generation/apply', {
+    serviceId: body.serviceId,
+    groupId: body.groupId,
+    activeProfileId: body.activeProfileId,
+    generation: body.generation,
+    switchReason: body.switchReason,
+  }, options);
+  if (result?.error) {
+    throw new Error(String(result.error));
+  }
+  return (result as { result?: unknown } | null)?.result;
+}
+
 export async function notifyDaemonConnectedServiceRuntimeAuthFailure(
   body: Readonly<{
     sessionId: string;
@@ -438,6 +475,7 @@ export async function notifyDaemonConnectedServiceQuotaSnapshot(
     serviceId: string;
     groupId?: string | null;
     groupGeneration?: number | null;
+    sourceProviderAccountId?: string | null;
     snapshot: unknown;
   }>,
   options: DaemonControlRequestOptions = {},
@@ -447,6 +485,7 @@ export async function notifyDaemonConnectedServiceQuotaSnapshot(
     serviceId: body.serviceId,
     ...(body.groupId !== undefined ? { groupId: body.groupId } : {}),
     ...(body.groupGeneration !== undefined ? { groupGeneration: body.groupGeneration } : {}),
+    ...(body.sourceProviderAccountId !== undefined ? { sourceProviderAccountId: body.sourceProviderAccountId } : {}),
     snapshot: body.snapshot,
   }, options);
 }
@@ -473,6 +512,8 @@ export async function refreshDaemonOpenAiCodexChatGptAuthTokensForBridge(
     sessionId: string;
     selection: CodexChatGptAuthTokensRefreshSelection;
     chatgptPlanType: string | null;
+    forceRefresh?: boolean;
+    failingAccessTokenFingerprint?: string | null;
   }>,
   options: DaemonControlRequestOptions = {},
 ): Promise<CodexChatGptAuthTokensRefreshResponse> {
@@ -480,7 +521,12 @@ export async function refreshDaemonOpenAiCodexChatGptAuthTokensForBridge(
     sessionId: body.sessionId,
     selection: body.selection,
     chatgptPlanType: body.chatgptPlanType,
-  }, { ...options, authScope: 'connected-service-broker-refresh' });
+    ...(body.forceRefresh === true ? { forceRefresh: true } : {}),
+    ...(body.failingAccessTokenFingerprint ? { failingAccessTokenFingerprint: body.failingAccessTokenFingerprint } : {}),
+    // SEC-F1: per-session SDK callbacks authenticate with the MASTER control token (session mode).
+    // The scoped broker-refresh token is identity-mode only and would be rejected for this
+    // sessionId-keyed request shape.
+  }, options);
   if (result?.error) {
     throw new Error(String(result.error));
   }
@@ -497,13 +543,18 @@ export async function refreshDaemonClaudeSubscriptionAnthropicAuthTokensForBridg
   body: Readonly<{
     sessionId: string;
     selection: ClaudeSubscriptionAuthTokensRefreshSelection;
+    forceRefresh?: boolean;
+    failingAccessTokenFingerprint?: string | null;
   }>,
   options: DaemonControlRequestOptions = {},
 ): Promise<ClaudeSubscriptionAuthTokensRefreshResponse> {
   const result = await daemonPost(CLAUDE_SUBSCRIPTION_AUTH_TOKENS_REFRESH_PATH, {
     sessionId: body.sessionId,
     selection: body.selection,
-  }, { ...options, authScope: 'connected-service-broker-refresh' });
+    ...(body.forceRefresh === true ? { forceRefresh: true } : {}),
+    ...(body.failingAccessTokenFingerprint ? { failingAccessTokenFingerprint: body.failingAccessTokenFingerprint } : {}),
+    // SEC-F1: session mode uses the MASTER control token (see Codex twin above).
+  }, options);
   if (result?.error) {
     throw new Error(String(result.error));
   }
@@ -514,6 +565,95 @@ export async function refreshDaemonClaudeSubscriptionAnthropicAuthTokensForBridg
     throw new Error('Invalid daemon Claude subscription refresh response');
   }
   return parsed.data;
+}
+
+/**
+ * A1: materialization is real work (staged home copy + a possible OAuth refresh + group selection),
+ * so the materialize call gets its OWN bounded timeout instead of riding the generic 10s daemonPost
+ * default — a 10s client abandonment while the daemon succeeds seconds later was the leak window.
+ * Session precedent: the spawn webhook wait allows 5min; this defaults tighter at 2min.
+ */
+const EXECUTION_RUN_CS_MATERIALIZE_TIMEOUT_ENV_KEY = 'HAPPIER_EXECUTION_RUN_CS_MATERIALIZE_TIMEOUT_MS';
+const DEFAULT_EXECUTION_RUN_CS_MATERIALIZE_TIMEOUT_MS = 120_000;
+
+export function resolveExecutionRunConnectedServiceMaterializeTimeoutMs(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  return resolvePositiveIntValue(
+    env[EXECUTION_RUN_CS_MATERIALIZE_TIMEOUT_ENV_KEY],
+    DEFAULT_EXECUTION_RUN_CS_MATERIALIZE_TIMEOUT_MS,
+    { min: 1_000, max: 600_000 },
+  );
+}
+
+/**
+ * ER-CS run-materialization bridge (runner → daemon). Asks the daemon (sole CS owner) to
+ * resolve+materialize+register connected services for an execution run and returns the env map to
+ * merge into the run's isolation bundle. Uses the DEDICATED run-materialize capability token
+ * (`happier:connected-service-run-materialize:v1` — narrower than the broker-refresh scope) and the
+ * canonical bounded `daemonPost` transport with a materialization-sized timeout (see above).
+ * Fail-closed: any transport/handler error throws — a run with a CS selection must never silently
+ * fall back to the runner's inherited account; the caller then fires the idempotent reclaim release.
+ */
+export async function materializeDaemonConnectedServicesForExecutionRun(
+  body: Readonly<{
+    runId: string;
+    agentId: string;
+    pid: number;
+    materializationKey: string;
+    connectedServicesBindingsRaw: unknown;
+    sessionDirectory?: string | null;
+    sessionId?: string;
+  }>,
+  options: DaemonControlRequestOptions = {},
+): Promise<Readonly<{ env: Record<string, string> }>> {
+  const result = await daemonPost(EXECUTION_RUN_CONNECTED_SERVICE_MATERIALIZE_PATH, {
+    runId: body.runId,
+    agentId: body.agentId,
+    pid: body.pid,
+    materializationKey: body.materializationKey,
+    connectedServicesBindingsRaw: body.connectedServicesBindingsRaw,
+    ...(body.sessionDirectory !== undefined ? { sessionDirectory: body.sessionDirectory } : {}),
+    ...(body.sessionId ? { sessionId: body.sessionId } : {}),
+  }, {
+    timeoutMs: resolveExecutionRunConnectedServiceMaterializeTimeoutMs(),
+    ...options,
+    authScope: 'connected-service-run-materialize',
+  });
+  if (result?.error) {
+    throw new Error(String(result.error));
+  }
+  const parsed = ExecutionRunConnectedServiceMaterializeResponseSchema.safeParse(
+    (result as { result?: unknown } | null)?.result,
+  );
+  if (!parsed.success) {
+    throw new Error('Invalid daemon execution-run connected-service materialize response');
+  }
+  return parsed.data;
+}
+
+/**
+ * ER-CS run-end lifecycle (runner → daemon): unregister the run's runtime target and clean its
+ * run-scoped materialized root. Best-effort — a failed release must not fail run teardown.
+ */
+export async function releaseDaemonConnectedServicesForExecutionRun(
+  body: Readonly<{
+    runId: string;
+    pid: number;
+    materializationKey: string;
+  }>,
+  options: DaemonControlRequestOptions = {},
+): Promise<boolean> {
+  const result = await daemonPost(EXECUTION_RUN_CONNECTED_SERVICE_RELEASE_PATH, {
+    runId: body.runId,
+    pid: body.pid,
+    materializationKey: body.materializationKey,
+  }, { ...options, authScope: 'connected-service-run-materialize' });
+  if (result?.error) return false;
+  const parsed = ExecutionRunConnectedServiceReleaseResponseSchema.safeParse(
+    (result as { result?: unknown } | null)?.result,
+  );
+  return parsed.success ? parsed.data.released : false;
 }
 
 /**
@@ -592,12 +732,35 @@ export async function resolveDaemonSpawnSessionByNonce(spawnNonce: string): Prom
   return { status: 'not_found' };
 }
 
+/**
+ * The session-runner restart handler blocks on the respawn completion (kill the tracked runner, spawn
+ * the replacement on the current CLI, await its webhook) — default completion budget 60s. Riding the
+ * generic 10s daemonPost default guaranteed the internal control request aborted while the respawn was
+ * still in flight, so a succeeding restart was reported as a failure. Give it a completion-sized
+ * timeout that clears the respawn-completion budget with margin.
+ */
+const DAEMON_SESSION_RUNNER_RESTART_TIMEOUT_ENV_KEY = 'HAPPIER_DAEMON_SESSION_RUNNER_RESTART_HTTP_TIMEOUT_MS';
+const DEFAULT_DAEMON_SESSION_RUNNER_RESTART_TIMEOUT_MS = 75_000;
+
+export function resolveDaemonSessionRunnerRestartTimeoutMs(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  return resolvePositiveIntValue(
+    env[DAEMON_SESSION_RUNNER_RESTART_TIMEOUT_ENV_KEY],
+    DEFAULT_DAEMON_SESSION_RUNNER_RESTART_TIMEOUT_MS,
+    { min: 1_000, max: 300_000 },
+  );
+}
+
 export async function requestDaemonSessionRunnerRestart(
   request: RestartSessionRunnerRequestV1,
   options: DaemonControlRequestOptions = {},
 ): Promise<RestartSessionRunnerResultV1> {
   const body = RestartSessionRunnerRequestV1Schema.parse(request);
-  const result = await daemonPost('/session-runners/restart', body, options);
+  const result = await daemonPost('/session-runners/restart', body, {
+    timeoutMs: resolveDaemonSessionRunnerRestartTimeoutMs(),
+    ...options,
+  });
   if (result?.error) {
     throw new Error(String(result.error));
   }
@@ -613,7 +776,10 @@ export async function restartAllDaemonSessionRunners(
   options: DaemonControlRequestOptions = {},
 ): Promise<RestartAllDaemonSessionRunnersResult> {
   const body = RestartAllSessionRunnersRequestV1Schema.parse(request);
-  const result = await daemonPost('/session-runners/restart-all', body, options);
+  const result = await daemonPost('/session-runners/restart-all', body, {
+    timeoutMs: resolveDaemonSessionRunnerRestartTimeoutMs(),
+    ...options,
+  });
   if (result?.error) {
     throw new Error(String(result.error));
   }
@@ -665,7 +831,7 @@ export async function restartDaemonHttp(): Promise<{ status: 'restarting' | 'alr
 
 /**
  * Best-effort health check for a running daemon.
- * Returns false and clears stale state when the PID is dead or (when available) the control token cannot /ping.
+ * Returns false when the daemon is absent or busy; client-side ping timeouts do not delete daemon-owned state.
  */
 export async function checkIfDaemonRunningAndCleanupStaleState(): Promise<boolean> {
   const inspection = await inspectDaemonRunningStateAndCleanupStaleState();

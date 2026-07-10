@@ -1,4 +1,7 @@
+import { readSpawnConfigOptionOverrideValue } from '@happier-dev/protocol';
+
 import { createCodexAcpBackend } from '@/backends/codex/acp/backend';
+import { withExecutionRunBackendModelOptions } from '@/agent/executionRuns/runtime/applyExecutionRunBackendModelOptions';
 import { buildCodexAcpEnvOverrides } from '@/backends/codex/acp/env';
 import { resolveCodexAcpSpawn } from '@/backends/codex/acp/resolveCommand';
 import { validateCodexAcpSpawnAvailability } from '@/backends/codex/acp/spawnAvailability';
@@ -36,6 +39,15 @@ function buildCodexExecutionRunBaseEnv(isolationEnv: NodeJS.ProcessEnv | undefin
 }
 
 export const executionRunBackendFactory: ExecutionRunBackendFactory = (opts) => {
+  // Reasoning effort uses the SAME canonical config-option vocabulary as session spawn
+  // (`reasoning_effort`), read with the shared protocol reader — no second vocabulary.
+  const reasoningEffortValue = readSpawnConfigOptionOverrideValue(
+    opts.sessionConfigOptionOverrides,
+    'reasoning_effort',
+  );
+  const reasoningEffort = typeof reasoningEffortValue === 'string' && reasoningEffortValue.trim().length > 0
+    ? reasoningEffortValue.trim()
+    : undefined;
   const baseEnv = buildCodexExecutionRunBaseEnv(opts.isolation?.env);
   const env = buildCodexAcpEnvOverrides({ baseEnv, projectDir: opts.cwd });
   const permissionMode = permissionModeForExecutionRunPolicy(opts.permissionMode);
@@ -58,13 +70,21 @@ export const executionRunBackendFactory: ExecutionRunBackendFactory = (opts) => 
   });
 
   if (transport === 'appServer' && probeCodexAppServerExecutionRunAvailability({ env })) {
-    return createCodexAppServerExecutionRunBackend({
-      cwd: opts.cwd,
-      env,
-      permissionHandler: opts.permissionHandler,
-      permissionMode,
-      start: opts.start ?? null,
-    });
+    return withExecutionRunBackendModelOptions(
+      createCodexAppServerExecutionRunBackend({
+        cwd: opts.cwd,
+        env,
+        permissionHandler: opts.permissionHandler,
+        permissionMode,
+        start: opts.start ?? null,
+      }),
+      {
+        ...(opts.modelId ? { modelId: opts.modelId } : {}),
+        ...(opts.sessionConfigOptionOverrides
+          ? { sessionConfigOptionOverrides: opts.sessionConfigOptionOverrides }
+          : {}),
+      },
+    );
   }
 
   const shouldUseMcp = transport === 'mcp' || (() => {
@@ -81,14 +101,23 @@ export const executionRunBackendFactory: ExecutionRunBackendFactory = (opts) => 
       cwd: opts.cwd,
       env,
       modelId: opts.modelId,
+      ...(reasoningEffort ? { reasoningEffort } : {}),
       permissionMode,
     });
   }
 
-  return createCodexAcpBackend({
-    cwd: opts.cwd,
-    env,
-    permissionHandler: opts.permissionHandler,
-    permissionMode,
-  }).backend;
+  return withExecutionRunBackendModelOptions(
+    createCodexAcpBackend({
+      cwd: opts.cwd,
+      env,
+      permissionHandler: opts.permissionHandler,
+      permissionMode,
+    }).backend,
+    {
+      ...(opts.modelId ? { modelId: opts.modelId } : {}),
+      ...(opts.sessionConfigOptionOverrides
+        ? { sessionConfigOptionOverrides: opts.sessionConfigOptionOverrides }
+        : {}),
+    },
+  );
 };

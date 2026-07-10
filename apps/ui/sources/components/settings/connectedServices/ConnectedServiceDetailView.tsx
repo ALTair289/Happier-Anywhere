@@ -533,11 +533,14 @@ export const ConnectedServiceDetailView = React.memo(function ConnectedServiceDe
   const sortedProfiles = profiles
     .map((p) => {
       const profileId = typeof p?.profileId === 'string' ? p.profileId : '';
-      const status = resolveConnectedServiceCredentialHealthStatus(p?.status);
+      // Fail-closed normalization drives ordering + row ACTIONS only; AccountBlock
+      // receives the RAW status so its fail-open usage gate stays live (UI-1).
+      const rawStatus: unknown = p?.status;
+      const status = resolveConnectedServiceCredentialHealthStatus(rawStatus);
       // Attention-first ordering uses the status dimension of the canonical
       // health derivation (quota capacity is fetched inside AccountBlock).
       const health = deriveAccountHealth({ status, capacityPct: null });
-      return { record: p, profileId, status, health };
+      return { record: p, profileId, rawStatus, status, health };
     })
     .filter((entryRow) => entryRow.profileId.length > 0)
     .sort((a, b) => {
@@ -557,7 +560,7 @@ export const ConnectedServiceDetailView = React.memo(function ConnectedServiceDe
           />
         ) : null}
         {sortedProfiles.map((row, index) => {
-          const { profileId, status, record } = row;
+          const { profileId, rawStatus, status, record } = row;
           const isDefault = profileId === defaultProfileId;
           const kind = record.kind === 'token' ? 'token' : record.kind === 'oauth' ? 'oauth' : null;
           const label = resolveConnectedServiceProfileLabel({
@@ -588,7 +591,7 @@ export const ConnectedServiceDetailView = React.memo(function ConnectedServiceDe
               profileId={profileId}
               title={title}
               identityLabel={identityDisplay.secondaryLabel}
-              status={status}
+              status={rawStatus}
               isDefault={isDefault}
               onToggleDefault={() => void handleToggleDefaultProfile(profileId)}
               poolLabels={poolLabels}

@@ -486,19 +486,40 @@ export class ConnectedServiceRefreshCoordinator {
     return selection;
   }
 
+  /**
+   * SEC-F1: resolve the runtime target for a bridge caller by its DISCRIMINATED principal, never by
+   * first-success precedence across two identities. The presence of a `brokerSelectionIdentity` is the
+   * caller-mode discriminator: a shared broker (OpenCode/Pi) always presents one alongside a synthetic
+   * sessionId; a per-session callback presents only a real sessionId.
+   *
+   * Broker mode (identity present): authorize EXCLUSIVELY through the broker selection identity. The
+   * supplied sessionId is a synthetic broker tag and is NEVER used as a target key — otherwise a broker
+   * naming a live VICTIM session would be handed that session's current selection + access token
+   * (cross-account bypass inside a multi-account pool). Fail-closed defense-in-depth: if the supplied
+   * sessionId DOES resolve to a live session target that differs from the broker's own target, the
+   * caller conflated two principals — reject the mixed/mismatched pair with the typed authz error.
+   *
+   * Session mode (no identity): resolve by the real sessionId only (per-session callback, unchanged).
+   */
   private resolveBridgeRuntimeTargetForIdentity(input: Readonly<{
     sessionId?: string | null;
     brokerSelectionIdentity?: string | null;
   }>): ReturnType<ConnectedServiceRuntimeRegistry['getBySessionId']> {
     const sessionId = typeof input.sessionId === 'string' ? input.sessionId.trim() : '';
-    const bySession = sessionId ? this.runtimeRegistry.getBySessionId(sessionId) : null;
-    if (bySession) return bySession;
     const brokerSelectionIdentity = typeof input.brokerSelectionIdentity === 'string'
       ? input.brokerSelectionIdentity.trim()
       : '';
-    return brokerSelectionIdentity
-      ? this.runtimeRegistry.getByBrokerSelectionIdentity(brokerSelectionIdentity)
-      : null;
+    if (brokerSelectionIdentity) {
+      const brokerTarget = this.runtimeRegistry.getByBrokerSelectionIdentity(brokerSelectionIdentity);
+      if (sessionId) {
+        const sessionTarget = this.runtimeRegistry.getBySessionId(sessionId);
+        if (sessionTarget && sessionTarget !== brokerTarget) {
+          throw new ConnectedServiceBridgeSelectionAuthorizationError();
+        }
+      }
+      return brokerTarget;
+    }
+    return sessionId ? this.runtimeRegistry.getBySessionId(sessionId) : null;
   }
 
   async refreshConnectedServiceCredentialForQuota(input: Readonly<{

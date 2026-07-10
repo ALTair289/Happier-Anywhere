@@ -2333,8 +2333,9 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
       const response = await app.inject({
         method: 'POST',
         url: '/connected-service-auth/openai-codex/chatgpt-auth-tokens/refresh',
-        // The bridge now requires the SCOPED broker-refresh token (NOT the broad master token).
-        headers: { 'x-happier-daemon-token': BROKER_SCOPED_TOKEN },
+        // SEC-F1: session-mode (sessionId, no broker identity) requires the MASTER control token —
+        // the credential runner processes actually hold. The scoped broker token is identity-mode only.
+        headers: { 'x-happier-daemon-token': 'token' },
         payload: {
           sessionId: 'sess_1',
           selection: {
@@ -2575,7 +2576,8 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
       const response = await app.inject({
         method: 'POST',
         url: '/connected-service-auth/claude-subscription/anthropic-auth-tokens/refresh',
-        headers: { 'x-happier-daemon-token': BROKER_SCOPED_TOKEN },
+        // SEC-F1: session-mode requires the MASTER control token (see codex twin above).
+        headers: { 'x-happier-daemon-token': 'token' },
         payload: {
           sessionId: 'sess_1',
           selection: {
@@ -2620,7 +2622,7 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
     }
   });
 
-  it('fails closed on the auth-token refresh bridges without the SCOPED broker token, and rejects the MASTER token (least privilege, F2)', async () => {
+  it('SEC-F1: bridge auth is principal-discriminated — missing/wrong tokens 401; scoped token without a broker identity 403; scoped token with identity accepted', async () => {
     // Security boundary (no-leak, plan §5 item 6 / Lane C + F2 least privilege): the access-token
     // bridges MUST reject any call lacking the SCOPED broker-refresh token and never run the refresh
     // handler. A missing token, a wrong token, AND the broad MASTER control token all fail closed with
@@ -2653,13 +2655,13 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
 
     try {
       const cases: ReadonlyArray<{ url: string; headers: Record<string, string> }> = [
+        // SEC-F1: the master token is a valid SESSION-MODE credential on the bridge routes (it is a
+        // strict privilege superset of this control surface) — its acceptance is pinned by the
+        // dispatch tests above. Missing/wrong tokens stay 401.
         { url: '/connected-service-auth/claude-subscription/anthropic-auth-tokens/refresh', headers: {} },
         { url: '/connected-service-auth/claude-subscription/anthropic-auth-tokens/refresh', headers: { 'x-happier-daemon-token': 'wrong' } },
-        // The broad MASTER control token must NOT authorize the scoped broker endpoints.
-        { url: '/connected-service-auth/claude-subscription/anthropic-auth-tokens/refresh', headers: { 'x-happier-daemon-token': 'token' } },
         { url: '/connected-service-auth/openai-codex/chatgpt-auth-tokens/refresh', headers: {} },
         { url: '/connected-service-auth/openai-codex/chatgpt-auth-tokens/refresh', headers: { 'x-happier-daemon-token': 'wrong' } },
-        { url: '/connected-service-auth/openai-codex/chatgpt-auth-tokens/refresh', headers: { 'x-happier-daemon-token': 'token' } },
       ];
       for (const testCase of cases) {
         const response = await app.inject({
@@ -2677,12 +2679,38 @@ describe('createDaemonControlApp connected-service runtime auth handling', () =>
       expect(handleClaudeSubscriptionAuthTokensRefresh).not.toHaveBeenCalled();
       expect(handleCodexChatGptAuthTokensRefresh).not.toHaveBeenCalled();
 
-      // The SCOPED token is accepted (and reaches the handler).
+      // SEC-F1: the SCOPED broker token is IDENTITY-MODE ONLY. A scoped-token holder naming a
+      // sessionId without a broker selection identity is rejected BEFORE the handler runs —
+      // otherwise a leaked broker token could name a live victim session and receive that
+      // session's refreshed access token.
+      const scopedSessionOnly = await app.inject({
+        method: 'POST',
+        url: '/connected-service-auth/openai-codex/chatgpt-auth-tokens/refresh',
+        headers: { 'x-happier-daemon-token': BROKER_SCOPED_TOKEN },
+        payload: { sessionId: 'sess_victim', selection: { kind: 'profile', serviceId: 'openai-codex', profileId: 'work' } },
+      });
+      expect(scopedSessionOnly.statusCode).toBe(403);
+      expect(scopedSessionOnly.json()).toEqual({ ok: false, errorCode: 'connected_service_bridge_selection_not_authorized' });
+      const scopedSessionOnlyClaude = await app.inject({
+        method: 'POST',
+        url: '/connected-service-auth/claude-subscription/anthropic-auth-tokens/refresh',
+        headers: { 'x-happier-daemon-token': BROKER_SCOPED_TOKEN },
+        payload: { sessionId: 'sess_victim', selection: { kind: 'profile', serviceId: 'claude-subscription', profileId: 'work' } },
+      });
+      expect(scopedSessionOnlyClaude.statusCode).toBe(403);
+      expect(handleCodexChatGptAuthTokensRefresh).not.toHaveBeenCalled();
+      expect(handleClaudeSubscriptionAuthTokensRefresh).not.toHaveBeenCalled();
+
+      // The SCOPED token WITH a broker selection identity is accepted (identity-mode).
       const ok = await app.inject({
         method: 'POST',
         url: '/connected-service-auth/openai-codex/chatgpt-auth-tokens/refresh',
         headers: { 'x-happier-daemon-token': BROKER_SCOPED_TOKEN },
-        payload: { sessionId: 'sess_1', selection: { kind: 'profile', serviceId: 'openai-codex', profileId: 'work' } },
+        payload: {
+          sessionId: 'opencode-broker:openai:1',
+          selectionIdentity: 'opencode|connected|broker:1|openai-codex:work:',
+          selection: { kind: 'profile', serviceId: 'openai-codex', profileId: 'work' },
+        },
       });
       expect(ok.statusCode).toBe(200);
       expect(handleCodexChatGptAuthTokensRefresh).toHaveBeenCalledTimes(1);
@@ -2971,7 +2999,8 @@ describe('startDaemonControlServer connected-service runtime wiring', () => {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'x-happier-daemon-token': BROKER_SCOPED_TOKEN,
+          // SEC-F1: session-mode (sessionId, no broker identity) authenticates with the MASTER token.
+          'x-happier-daemon-token': 'token',
         },
         body: JSON.stringify({
           sessionId: 'sess_1',

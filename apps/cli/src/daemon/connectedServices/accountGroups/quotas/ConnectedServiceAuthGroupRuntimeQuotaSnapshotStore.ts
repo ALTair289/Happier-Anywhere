@@ -47,16 +47,65 @@ function shouldRecordSnapshot(
   return readFetchedAt(incoming) >= readFetchedAt(existing);
 }
 
+type BurnObservation = Readonly<{ remainingPct: number; atMs: number }>;
+type BurnHistory = Readonly<{ prev: BurnObservation | null; latest: BurnObservation }>;
+
+export type ConnectedServiceAuthGroupRuntimeQuotaBurn = Readonly<{
+  /** Positive consumption velocity of the effective meter's remaining%, in percent per ms. */
+  remainingPercentPerMs: number;
+  observedAtMs: number;
+}>;
+
+function readSnapshotEffectiveRemainingPct(snapshot: ConnectedServiceQuotaSnapshotV1): number | null {
+  const remaining = buildMemberState(snapshot).quotaSnapshot?.effectiveRemainingPercent;
+  return typeof remaining === 'number' && Number.isFinite(remaining) ? remaining : null;
+}
+
 export class ConnectedServiceAuthGroupRuntimeQuotaSnapshotStore {
   private readonly snapshotsByKey = new Map<string, ConnectedServiceQuotaSnapshotV1>();
   private readonly snapshotsByProfileKey = new Map<string, ConnectedServiceQuotaSnapshotV1>();
+  private readonly burnHistoryByKey = new Map<string, BurnHistory>();
 
   recordSnapshot(input: SnapshotKeyInput & Readonly<{ snapshot: ConnectedServiceQuotaSnapshotV1 }>): void {
     const key = snapshotKey(input);
     if (shouldRecordSnapshot(this.snapshotsByKey.get(key), input.snapshot)) {
       this.snapshotsByKey.set(key, input.snapshot);
+      this.recordBurnObservation(key, input.snapshot);
     }
     this.recordProfileSnapshot(input);
+  }
+
+  private recordBurnObservation(key: string, snapshot: ConnectedServiceQuotaSnapshotV1): void {
+    const remainingPct = readSnapshotEffectiveRemainingPct(snapshot);
+    if (remainingPct === null) return;
+    const atMs = readFetchedAt(snapshot);
+    const existing = this.burnHistoryByKey.get(key);
+    // Only advance the history when this observation is strictly newer than the latest one; a
+    // duplicate/stale fetchedAt would otherwise poison the delta with a zero time window.
+    if (existing && atMs <= existing.latest.atMs) return;
+    this.burnHistoryByKey.set(key, {
+      prev: existing?.latest ?? null,
+      latest: { remainingPct, atMs },
+    });
+  }
+
+  /**
+   * Recent consumption velocity of the effective meter's remaining% for a member, derived from the
+   * two most recent distinct-time in-band snapshots this store retained. Only a DECREASING remaining%
+   * (real burn) yields a value; a flat or increasing remaining% (a reset/replenish) returns null so
+   * the predictive projection fails closed. This is the fast-burn signal the poll-driven soft-switch
+   * cannot see between 30-minute quota polls.
+   */
+  getRecentBurn(input: SnapshotKeyInput): ConnectedServiceAuthGroupRuntimeQuotaBurn | null {
+    const history = this.burnHistoryByKey.get(snapshotKey(input));
+    if (!history || !history.prev) return null;
+    const deltaRemaining = history.prev.remainingPct - history.latest.remainingPct;
+    const deltaMs = history.latest.atMs - history.prev.atMs;
+    if (deltaRemaining <= 0 || deltaMs <= 0) return null;
+    return {
+      remainingPercentPerMs: deltaRemaining / deltaMs,
+      observedAtMs: history.latest.atMs,
+    };
   }
 
   recordProfileSnapshot(input: ProfileSnapshotKeyInput & Readonly<{ snapshot: ConnectedServiceQuotaSnapshotV1 }>): void {

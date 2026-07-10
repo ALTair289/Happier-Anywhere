@@ -30,6 +30,20 @@ export type VoiceAgentStartParams = Readonly<{
    * When omitted, the backend default response-completion timeout applies.
    */
   bootstrapTimeoutMs?: number;
+  /**
+   * Provider-agnostic connected-service environment for this voice run, already materialized by the
+   * daemon run-materialization bridge (e.g. `CODEX_HOME`/`CLAUDE_CONFIG_DIR`). Forwarded to BOTH the
+   * chat and commit backend factories so a voice run reads its selected CS account instead of the
+   * runner's inherited one (R3-2: silent-native execution was a fail-closed violation).
+   */
+  connectedServicesEnv?: Readonly<Record<string, string>> | null;
+  /**
+   * Run-scoped, idempotent release for the daemon-side CS registration + materialized root. Owned at
+   * the voice-agent INSTANCE level (not per-backend): invoked exactly once when the voice agent is
+   * disposed (stop / idle reap / manager dispose), AFTER its chat + commit backends have disposed —
+   * the run root must survive until both backends are gone.
+   */
+  connectedServicesCleanup?: (() => Promise<void>) | null;
 }>;
 
 export type VoiceAgentStartResult = Readonly<{
@@ -73,6 +87,11 @@ export type BackendFactory = (opts: {
   modelId: string;
   permissionPolicy: PermissionPolicy;
   start?: Readonly<{ intent: 'voice_agent' }>;
+  /**
+   * Materialized connected-service env for this voice run, merged into the backend's isolation bundle
+   * (env-only; the run-scoped cleanup is owned by the voice-agent instance, not the backend).
+   */
+  connectedServicesEnv?: Readonly<Record<string, string>> | null;
 }) => AgentBackend;
 
 export type ResolveVoiceSystemAppendBlocksArgs = Readonly<{
@@ -109,6 +128,7 @@ export type VoiceAgentInstance = {
   chatModelId: string;
   commitModelId: string;
   initialContext: string;
+  connectedServicesEnv: Readonly<Record<string, string>> | null;
   disabledActionIds: readonly string[];
   memoryRecallGuidanceEnabled: boolean;
   systemAppendBlocks: readonly string[];

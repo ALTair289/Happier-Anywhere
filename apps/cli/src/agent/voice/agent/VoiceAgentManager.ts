@@ -121,6 +121,7 @@ export class VoiceAgentManager {
         modelId: voiceAgent.commitModelId,
         permissionPolicy: voiceAgent.permissionPolicy,
         start: { intent: 'voice_agent' },
+        connectedServicesEnv: voiceAgent.connectedServicesEnv,
       });
       commitBackend.onMessage((msg) => {
         if (msg.type !== 'model-output') return;
@@ -167,7 +168,21 @@ export class VoiceAgentManager {
       sessionId: params.contextSessionId ?? null,
     });
 
+    // Run-scoped connected-services release is owned at the INSTANCE level and must fire EXACTLY once
+    // across every exit path — happy return (via instance.dispose), a pre-instance boot failure, or a
+    // post-registration bootstrap throw. Hoisted to the method scope so the catch path can release even
+    // when no instance was ever created (R4-1). Idempotent guard prevents any double-release.
+    const connectedServicesCleanup = params.connectedServicesCleanup ?? null;
+    let connectedServicesReleased = false;
+    const releaseConnectedServicesOnce = async (): Promise<void> => {
+      if (connectedServicesCleanup && !connectedServicesReleased) {
+        connectedServicesReleased = true;
+        await connectedServicesCleanup().catch(() => {});
+      }
+    };
+
     let chatBackendForCleanup: AgentBackend | undefined;
+    let instanceRef: VoiceAgentInstance | null = null;
     try {
       const resume = (() => {
         const handle = params.resumeHandle ?? null;
@@ -181,14 +196,16 @@ export class VoiceAgentManager {
         };
       })();
 
+      const connectedServicesEnv = params.connectedServicesEnv ?? null;
+
       const chatBackend = (chatBackendForCleanup = this.createBackend({
         agentId: params.agentId,
         modelId: params.chatModelId,
         permissionPolicy: params.permissionPolicy,
         start: { intent: 'voice_agent' },
+        connectedServicesEnv,
       }));
 
-      let instanceRef: VoiceAgentInstance | null = null;
       const clearChatBuffer = () => {
         if (instanceRef) instanceRef.chatBuffer = '';
       };
@@ -242,6 +259,7 @@ export class VoiceAgentManager {
         chatModelId: params.chatModelId,
         commitModelId: params.commitModelId,
         initialContext: params.initialContext,
+        connectedServicesEnv,
         disabledActionIds,
         memoryRecallGuidanceEnabled,
         systemAppendBlocks: [...systemAppendBlocks],
@@ -259,6 +277,9 @@ export class VoiceAgentManager {
           const disposals: Promise<unknown>[] = [chatBackend.dispose()];
           if (instance.commitBackend) disposals.push(instance.commitBackend.dispose());
           await Promise.allSettled(disposals);
+          // Run-scoped CS release: exactly once, AFTER the backends are gone (the materialized run
+          // root must outlive both chat + commit backends). Idempotent across stop/reap/dispose.
+          await releaseConnectedServicesOnce();
         },
       };
       instanceRef = instance;
@@ -302,9 +323,20 @@ export class VoiceAgentManager {
         },
       };
     } catch (e: any) {
-      const disposals: Promise<unknown>[] = [];
-      if (chatBackendForCleanup) disposals.push(chatBackendForCleanup.dispose());
-      await Promise.allSettled(disposals);
+      if (instanceRef) {
+        // Post-registration failure (e.g. bootstrap handshake throw): drop the half-started instance
+        // from the registry and route through its dispose, which tears down both backends and releases
+        // the run root exactly once (R4-1) — the reaper/dispose must never see a failed instance.
+        this.voiceAgents.delete(instanceRef.id);
+        await instanceRef.dispose().catch(() => {});
+      } else {
+        // Pre-instance failure: no instance owns the release, so dispose the bare chat backend and
+        // release the materialized run root here so it does not leak (R4-1).
+        const disposals: Promise<unknown>[] = [];
+        if (chatBackendForCleanup) disposals.push(chatBackendForCleanup.dispose());
+        await Promise.allSettled(disposals);
+        await releaseConnectedServicesOnce();
+      }
       if (e instanceof VoiceAgentError) {
         throw e;
       }

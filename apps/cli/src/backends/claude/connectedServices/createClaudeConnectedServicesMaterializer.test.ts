@@ -325,7 +325,7 @@ describe('createClaudeConnectedServicesMaterializer', () => {
     expect(credential.claudeAiOauth.accessToken).toBe('selected-access-placeholder');
   });
 
-  it('commits the macOS keychain credential before returning spawn materialization', async () => {
+  it('materializes macOS credentials without creating a derived keychain item', async () => {
     if (ORIGINAL_PLATFORM_DESCRIPTOR) {
       Object.defineProperty(process, 'platform', { ...ORIGINAL_PLATFORM_DESCRIPTOR, value: 'darwin' });
     }
@@ -379,36 +379,17 @@ describe('createClaudeConnectedServicesMaterializer', () => {
       'claude',
       'claude-config',
     );
-    expect(spawnSpy).toHaveBeenCalledWith(
-      'security',
-      [
-        'add-generic-password',
-        '-U',
-        '-a',
-        'tester',
-        '-s',
-        resolveClaudeCodeMacOsKeychainServiceName({
-          claudeConfigDir: expectedClaudeConfigDir,
-          homeDir,
-        }),
-        '-w',
-      ],
-      expect.objectContaining({ stdio: ['pipe', 'pipe', 'pipe'] }),
-    );
-    expect(securityInputs.join('')).toContain('selected-access-placeholder');
-    expect(securityInputs.join('')).not.toContain('selected-refresh-placeholder');
+    expect(spawnSpy.mock.calls.some(([, args]) => Array.isArray(args) && args[0] === 'add-generic-password')).toBe(false);
+    expect(securityInputs).toEqual([]);
     expect(spawnSpy.mock.calls.some(([, args]) => Array.isArray(args) && args[0] === 'dump-keychain')).toBe(false);
     expect(spawnSpy.mock.calls.some(([, args]) => Array.isArray(args) && args[0] === 'delete-generic-password')).toBe(false);
     const provenance = JSON.parse(
       await readFile(resolveClaudeConnectedServiceHomeProvenancePath(expectedClaudeConfigDir), 'utf8'),
     );
-    expect(provenance.macOsKeychainCredential).toEqual({
-      credentialFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
-      writtenAtMs: expect.any(Number),
-    });
+    expect(provenance).not.toHaveProperty('macOsKeychainCredential');
   });
 
-  it('skips stable credential and keychain writes when the keychain is unreadable but last-written provenance matches', async () => {
+  it('skips a stable credential-file rewrite when the derived keychain item is missing', async () => {
     if (ORIGINAL_PLATFORM_DESCRIPTOR) {
       Object.defineProperty(process, 'platform', { ...ORIGINAL_PLATFORM_DESCRIPTOR, value: 'darwin' });
     }
@@ -465,20 +446,129 @@ describe('createClaudeConnectedServicesMaterializer', () => {
       expect(credentialWriteEvents).toHaveLength(0);
       expect(spawnSpy.mock.calls.some(([, args]) => Array.isArray(args) && args[0] === 'add-generic-password')).toBe(false);
       expect(spawnSpy.mock.calls.some(([, args]) => Array.isArray(args) && args[0] === 'dump-keychain')).toBe(false);
-      expect(loggerInfoSpy).toHaveBeenCalledWith(
-        '[DAEMON RUN] Claude Code keychain credential decision',
-        expect.objectContaining({
-          homeKind: 'group',
-          decision: 'skip_provenance_match',
-          comparatorBasis: expect.objectContaining({ existing: null }),
-          provenanceBasis: expect.objectContaining({
-            incomingMatchesLastWritten: true,
-            newerExternalChangeDetected: false,
-          }),
-        }),
-      );
     } finally {
       loggerInfoSpy.mockRestore();
+    }
+  });
+
+  it('deletes every Happier-managed derived keychain item for the account (live or legacy) while protecting the global login and other accounts', async () => {
+    if (ORIGINAL_PLATFORM_DESCRIPTOR) {
+      Object.defineProperty(process, 'platform', { ...ORIGINAL_PLATFORM_DESCRIPTOR, value: 'darwin' });
+    }
+    vi.useFakeTimers();
+    try {
+      const homeDir = await mkdtemp(join(tmpdir(), 'happier-claude-materializer-machine-home-'));
+      const activeServerDir = join(
+        homeDir,
+        '.happier',
+        'stacks',
+        'stack-a',
+        'cli',
+        'servers',
+        'server-a',
+      );
+      const siblingServerDir = join(
+        homeDir,
+        '.happier',
+        'stacks',
+        'stack-b',
+        'cli',
+        'servers',
+        'server-b',
+      );
+      const siblingClaudeConfigDir = join(
+        siblingServerDir,
+        'daemon',
+        'connected-services',
+        'homes',
+        'claude-subscription',
+        'sibling-profile',
+        'claude',
+        'claude-config',
+      );
+      const customHomeClaudeConfigDir = join(
+        homeDir,
+        'custom-happier',
+        'servers',
+        'server-custom',
+        'daemon',
+        'connected-services',
+        'homes',
+        'claude-subscription',
+        'custom-profile',
+        'claude',
+        'claude-config',
+      );
+      await mkdir(activeServerDir, { recursive: true });
+      await mkdir(siblingClaudeConfigDir, { recursive: true });
+      await mkdir(customHomeClaudeConfigDir, { recursive: true });
+      const siblingService = resolveClaudeCodeMacOsKeychainServiceName({
+        claudeConfigDir: siblingClaudeConfigDir,
+        homeDir,
+      });
+      const customHomeService = resolveClaudeCodeMacOsKeychainServiceName({
+        claudeConfigDir: customHomeClaudeConfigDir,
+        homeDir,
+      });
+      const staleService = 'Claude Code-credentials-1111aaaa';
+      const dumpOutput = (account: string, service: string) => [
+        'keychain: "/Users/tester/Library/Keychains/login.keychain-db"',
+        'class: "genp"',
+        'attributes:',
+        `    "acct"<blob>="${account}"`,
+        `    "svce"<blob>="${service}"`,
+      ].join('\n');
+      const otherAccountService = 'Claude Code-credentials-99998888';
+      mockSecuritySpawn((args) => {
+        if (args[0] === 'find-generic-password') return { status: 44, stderr: 'missing keychain entry' };
+        if (args[0] === 'dump-keychain') {
+          return {
+            status: 0,
+            stdout: [
+              dumpOutput('tester', siblingService),
+              dumpOutput('tester', customHomeService),
+              dumpOutput('tester', staleService),
+              // The user's global login and other-account residue (e.g. happier-test-user) are protected.
+              dumpOutput('tester', 'Claude Code-credentials'),
+              dumpOutput('happier-test-user', otherAccountService),
+            ].join('\n'),
+          };
+        }
+        return { status: 0 };
+      });
+      const rootDir = await mkdtemp(join(tmpdir(), 'happier-claude-materializer-root-'));
+      const sourceClaudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-source-config-'));
+      await writeFile(join(sourceClaudeConfigDir, 'settings.json'), '{"theme":"source"}\n');
+
+      await expect(createClaudeConnectedServicesMaterializer()({
+        agentId: 'claude',
+        activeServerDir,
+        rootDir,
+        recordsByServiceId: new Map([['claude-subscription', buildClaudeSubscriptionRecord()]]),
+        processEnv: {
+          CLAUDE_CONFIG_DIR: sourceClaudeConfigDir,
+          HOME: homeDir,
+          HAPPIER_HOME_DIR: '~/custom-happier',
+          USER: 'tester',
+        },
+        cleanupRoot: () => {},
+      })).resolves.not.toBeNull();
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      const deletedServices = spawnSpy.mock.calls
+        .map((call) => call[1] as readonly string[])
+        .filter((args) => args[0] === 'delete-generic-password')
+        .map((args) => args[args.indexOf('-s') + 1]);
+      expect(deletedServices).toContain(staleService);
+      // Live sibling / custom-home managed items are obsolete cruft under the file-only design and are
+      // now removed too (nothing reads a derived item, so liveness no longer protects it).
+      expect(deletedServices).toContain(siblingService);
+      expect(deletedServices).toContain(customHomeService);
+      // The user's global login and other-account items are never touched.
+      expect(deletedServices).not.toContain('Claude Code-credentials');
+      expect(deletedServices).not.toContain(otherAccountService);
+    } finally {
+      vi.useRealTimers();
     }
   });
 
@@ -549,22 +639,11 @@ describe('createClaudeConnectedServicesMaterializer', () => {
       expect(credentialWriteEvents.length).toBeGreaterThan(0);
       const credential = JSON.parse(await readFile(join(second!.env.CLAUDE_CONFIG_DIR!, '.credentials.json'), 'utf8'));
       expect(credential.claudeAiOauth.accessToken).toBe('selected-access-v2-placeholder');
-      expect(spawnSpy.mock.calls.filter(([, args]) => Array.isArray(args) && args[0] === 'add-generic-password')).toHaveLength(1);
       const secondProvenance = JSON.parse(
         await readFile(resolveClaudeConnectedServiceHomeProvenancePath(second!.env.CLAUDE_CONFIG_DIR!), 'utf8'),
       );
-      expect(secondProvenance.macOsKeychainCredential.credentialFingerprint).not.toBe(
-        firstProvenance.macOsKeychainCredential.credentialFingerprint,
-      );
-      expect(loggerInfoSpy).toHaveBeenCalledWith(
-        '[DAEMON RUN] Claude Code keychain credential decision',
-        expect.objectContaining({
-          decision: 'write',
-          provenanceBasis: expect.objectContaining({
-            incomingMatchesLastWritten: false,
-          }),
-        }),
-      );
+      expect(secondProvenance.credentialFingerprint).not.toBe(firstProvenance.credentialFingerprint);
+      expect(spawnSpy.mock.calls.some(([, args]) => Array.isArray(args) && args[0] === 'add-generic-password')).toBe(false);
     } finally {
       loggerInfoSpy.mockRestore();
     }

@@ -353,6 +353,24 @@ export async function upsertConnectedServiceUsageSource(
             groupGeneration: true,
         },
     });
+    if (parsed.bindingKind === "group_member") {
+        // SD-2: the sourceKey embeds the group generation, so every generation bump mints a NEW
+        // row for the SAME logical link (service + profile + group) and the superseded row would
+        // accumulate forever. Prune superseded generations of this exact logical source here, at
+        // the single write owner. Scoped by groupId so a profile's links to OTHER groups coexist
+        // untouched, and only fired on a fresh upsert so a stale-generation row with no newer
+        // sibling stays readable (the reader intentionally tolerates it).
+        await client.connectedServiceUsageSource.deleteMany({
+            where: {
+                accountId: parsed.accountId,
+                serviceId: parsed.serviceId,
+                profileId: parsed.profileId,
+                bindingKind: "group_member",
+                groupId: parsed.groupId,
+                sourceKey: { not: sourceKey },
+            },
+        });
+    }
     return mapStoredConnectedServiceUsageSource(row);
 }
 

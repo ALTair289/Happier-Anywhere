@@ -139,6 +139,90 @@ describe('createActionExecutor connected-services selection', () => {
     );
   });
 
+  it('forwards a mixed bare-default + explicit selection: explicit pins + bare defaults threaded to the run-start owner (RO-F5)', async () => {
+    const executionRunStart = vi.fn(async () => ({ runId: 'run_1', callId: 'call_1', sidechainId: 'call_1' }));
+    const executor = createActionExecutor(createDeps({ executionRunStart }));
+
+    const res = await executor.execute(
+      'execution.run.start',
+      {
+        sessionId: 's1',
+        intent: 'delegate',
+        backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+        instructions: 'Do the thing.',
+        permissionMode: 'workspace_write',
+        retentionPolicy: 'ephemeral',
+        runClass: 'bounded',
+        ioMode: 'request_response',
+        connectedServices: ['openai-codex', 'anthropic:work'],
+      },
+      { defaultSessionId: 's1' },
+    );
+
+    // The bare service is no longer silently dropped, and mixed no longer fails closed at this boundary:
+    // the explicit pin is forwarded as bindings and the bare service is forwarded as a default token for
+    // the run-start owner to resolve + merge (missing default fails closed downstream).
+    expect(res.ok).toBe(true);
+    expect(executionRunStart).toHaveBeenCalledWith(
+      's1',
+      expect.objectContaining({
+        connectedServices: {
+          v: 1,
+          bindingsByServiceId: {
+            anthropic: { source: 'connected', selection: 'profile', profileId: 'work' },
+          },
+        },
+        connectedServicesDefaultServiceIds: ['openai-codex'],
+      }),
+      undefined,
+    );
+  });
+
+  it('rejects a bare + same-service explicit duplicate with invalid_parameters (RO-F5)', async () => {
+    const executionRunStart = vi.fn(async () => ({ runId: 'run_1', callId: 'call_1', sidechainId: 'call_1' }));
+    const executor = createActionExecutor(createDeps({ executionRunStart }));
+
+    const res = await executor.execute(
+      'subagents.delegate.start',
+      {
+        sessionId: 's1',
+        backendTargetKeys: ['agent:codex'],
+        instructions: 'Do the thing.',
+        connectedServices: ['openai-codex', 'openai-codex:group:happier'],
+      },
+      { defaultSessionId: 's1' },
+    );
+
+    expect(res.ok).toBe(false);
+    expect(res.ok === false && res.errorCode).toBe('invalid_parameters');
+    expect(executionRunStart).not.toHaveBeenCalled();
+  });
+
+  it('defers a pure bare-default selection to downstream account defaulting (no connectedServices forwarded)', async () => {
+    const executionRunStart = vi.fn(async () => ({ runId: 'run_1', callId: 'call_1', sidechainId: 'call_1' }));
+    const executor = createActionExecutor(createDeps({ executionRunStart }));
+
+    const res = await executor.execute(
+      'execution.run.start',
+      {
+        sessionId: 's1',
+        intent: 'delegate',
+        backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+        instructions: 'Do the thing.',
+        permissionMode: 'workspace_write',
+        retentionPolicy: 'ephemeral',
+        runClass: 'bounded',
+        ioMode: 'request_response',
+        connectedServices: 'openai-codex',
+      },
+      { defaultSessionId: 's1' },
+    );
+
+    expect(res.ok).toBe(true);
+    const call = executionRunStart.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(call).not.toHaveProperty('connectedServices');
+  });
+
   it('rejects a malformed selection with invalid_parameters and never starts the run', async () => {
     const executionRunStart = vi.fn(async () => ({ runId: 'run_1', callId: 'call_1', sidechainId: 'call_1' }));
     const executor = createActionExecutor(createDeps({ executionRunStart }));
