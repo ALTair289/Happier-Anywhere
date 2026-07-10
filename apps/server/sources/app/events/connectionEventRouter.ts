@@ -13,6 +13,7 @@ import {
 
 const MAX_SOCKET_METRIC_LABEL_LENGTH = 80;
 const SAFE_SOCKET_METRIC_LABEL_PATTERN = /^[a-zA-Z0-9_.:-]+$/;
+const SOCKET_PAYLOAD_BYTES_SAMPLE_RATE = 100;
 
 function normalizeSocketMetricLabel(value: unknown): string {
     if (typeof value !== "string" || value.length === 0 || value.length > MAX_SOCKET_METRIC_LABEL_LENGTH) {
@@ -34,6 +35,10 @@ function estimateSocketPayloadBytes(payload: any): number {
     } catch {
         return 0;
     }
+}
+
+function shouldObserveSocketPayloadBytes(): boolean {
+    return Math.random() < (1 / SOCKET_PAYLOAD_BYTES_SAMPLE_RATE);
 }
 
 class EventRouter {
@@ -166,7 +171,9 @@ class EventRouter {
             payload_type: resolveSocketPayloadType(params.payload),
         };
         socketEmissionsCounter.inc(emissionLabels);
-        socketEmissionPayloadBytesHistogram.observe(emissionLabels, estimateSocketPayloadBytes(params.payload));
+        if (shouldObserveSocketPayloadBytes()) {
+            socketEmissionPayloadBytesHistogram.observe(emissionLabels, estimateSocketPayloadBytes(params.payload));
+        }
 
         if (this.io) {
             const skipSocketId = params.skipSenderConnection?.socket?.id;

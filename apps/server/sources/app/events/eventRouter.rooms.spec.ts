@@ -16,6 +16,7 @@ vi.mock("@/app/monitoring/metrics2", () => ({
 describe("eventRouter (rooms)", () => {
     afterEach(() => {
         eventRouter.clearIo();
+        vi.restoreAllMocks();
         socketEmissionPayloadBytesObserve.mockReset();
         socketEmissionsInc.mockReset();
     });
@@ -181,6 +182,7 @@ describe("eventRouter (rooms)", () => {
     });
 
     it("records low-cardinality socket emission telemetry", () => {
+        vi.spyOn(Math, "random").mockReturnValue(0);
         const ioTo = vi.fn();
         const emit = vi.fn();
         ioTo.mockReturnValue({ emit });
@@ -199,5 +201,22 @@ describe("eventRouter (rooms)", () => {
         };
         expect(socketEmissionsInc).toHaveBeenCalledWith(labels);
         expect(socketEmissionPayloadBytesObserve).toHaveBeenCalledWith(labels, expect.any(Number));
+    });
+
+    it("samples socket payload byte telemetry instead of measuring every emission", () => {
+        vi.spyOn(Math, "random").mockReturnValue(0.99);
+        const ioTo = vi.fn();
+        const emit = vi.fn();
+        ioTo.mockReturnValue({ emit });
+        eventRouter.setIo({ to: ioTo } as any);
+
+        eventRouter.emitEphemeral({
+            userId: "u1",
+            payload: { type: "transcript-stream-segment", sessionId: "s1", message: { accumulatedText: "x".repeat(100_000) } } as any,
+            recipientFilter: { type: "all-interested-in-session", sessionId: "s1" },
+        });
+
+        expect(socketEmissionsInc).toHaveBeenCalledTimes(1);
+        expect(socketEmissionPayloadBytesObserve).not.toHaveBeenCalled();
     });
 });
