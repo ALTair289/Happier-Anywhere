@@ -1,41 +1,63 @@
 import type { TerminalHostAdapter, TerminalHostHandle, TerminalHostLiveness } from './_types';
+import { sanitizeTerminalHostDiagnosticText } from './sanitizeTerminalHostDiagnosticText';
 
-export type TerminalHostRecoveryProbeResult = Readonly<{
-  liveness: TerminalHostLiveness | null;
-  inconclusiveProbeCount: number;
-}>;
+export type TerminalHostRecoveryProbeResult =
+  | Readonly<{ status: 'alive'; liveness: TerminalHostLiveness; probeCount: number }>
+  | Readonly<{ status: 'dead'; liveness: TerminalHostLiveness; probeCount: number }>
+  | Readonly<{ status: 'inconclusive'; liveness: TerminalHostLiveness; probeCount: number }>;
+
+export type TerminalHostConfirmedDeadProbeResult = Extract<
+  TerminalHostRecoveryProbeResult,
+  { status: 'dead' }
+>;
+
+function inconclusiveLivenessFromProbeError(error: unknown): TerminalHostLiveness {
+  const message = error instanceof Error ? error.message : String(error);
+  return {
+    paneAlive: false,
+    probeInconclusive: true,
+    paneScreenDumpError: sanitizeTerminalHostDiagnosticText(message),
+    observedAt: Date.now(),
+  };
+}
+
+async function evaluateOnce(
+  adapter: TerminalHostAdapter,
+  handle: TerminalHostHandle,
+): Promise<TerminalHostLiveness> {
+  try {
+    return await adapter.evaluateLiveness(handle);
+  } catch (error) {
+    return inconclusiveLivenessFromProbeError(error);
+  }
+}
+
+function classifyRecoveryProbe(
+  liveness: TerminalHostLiveness,
+  probeCount: number,
+): TerminalHostRecoveryProbeResult {
+  if (liveness.probeInconclusive === true) {
+    return { status: 'inconclusive', liveness, probeCount };
+  }
+  return liveness.paneAlive
+    ? { status: 'alive', liveness, probeCount }
+    : { status: 'dead', liveness, probeCount };
+}
 
 export async function evaluateTerminalHostLivenessForRecovery(
   adapter: TerminalHostAdapter,
   handle: TerminalHostHandle,
 ): Promise<TerminalHostRecoveryProbeResult> {
-  const first = await adapter.evaluateLiveness(handle).catch(() => null);
-  if (first?.probeInconclusive !== true) {
-    return {
-      liveness: first,
-      inconclusiveProbeCount: 0,
-    };
-  }
+  const first = await evaluateOnce(adapter, handle);
+  const firstResult = classifyRecoveryProbe(first, 1);
+  if (firstResult.status !== 'inconclusive') return firstResult;
 
-  const second = await adapter.evaluateLiveness(handle).catch(() => null);
-  return {
-    liveness: second ?? first,
-    inconclusiveProbeCount: second?.probeInconclusive === true ? 2 : 1,
-  };
-}
-
-export function shouldDiscardTerminalAttachmentAfterRecoveryProbe(
-  result: TerminalHostRecoveryProbeResult,
-): boolean {
-  if (result.liveness?.paneAlive === true) return false;
-  if (result.liveness?.probeInconclusive === true) {
-    return result.inconclusiveProbeCount >= 2;
-  }
-  return true;
+  const second = await evaluateOnce(adapter, handle);
+  return classifyRecoveryProbe(second, 2);
 }
 
 export function isTerminalHostConfirmedDeadForRelaunch(
   result: TerminalHostRecoveryProbeResult,
-): boolean {
-  return result.liveness?.paneAlive === false && result.liveness.probeInconclusive !== true;
+): result is TerminalHostConfirmedDeadProbeResult {
+  return result.status === 'dead';
 }

@@ -2,6 +2,8 @@ import type { TerminalHostKind } from './_types';
 
 export type TerminalHostStartupFailureReason =
   | 'startup_action_timeout'
+  | 'startup_action_failed'
+  | 'recovery_probe_inconclusive'
   | 'bootstrap_cleanup_did_not_converge'
   | 'pane_disappeared_after_bootstrap_cleanup';
 
@@ -33,4 +35,8 @@ export function isTerminalHostStartupError(error: unknown): error is TerminalHos
   return candidate.code === 'terminal_host_startup_failed'
     && typeof candidate.hostKind === 'string'
     && typeof candidate.reason === 'string';
+}
+
+export function isRecoveryProbeInconclusiveError(error: unknown): error is TerminalHostStartupError {
+  return isTerminalHostStartupError(error) && error.reason === 'recovery_probe_inconclusive';
 }

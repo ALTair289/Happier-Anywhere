@@ -1,5 +1,8 @@
 import { EventEmitter } from 'node:events';
 import type { SpawnOptions } from 'node:child_process';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -218,6 +221,184 @@ describe('zellij actions', () => {
     await expect(listPanes({ zellijBinary: '/tools/zellij', env: {} })).resolves.toEqual([
       { id: 1, is_plugin: false, is_focused: true },
     ]);
+  });
+
+  it('globally caps concurrent zellij action client invocations', async () => {
+    process.env.HAPPIER_ZELLIJ_ACTION_MAX_CONCURRENCY = '1';
+    const children: Array<EventEmitter & { stdout: EventEmitter; stderr: EventEmitter }> = [];
+    spawnMock.mockImplementation(() => {
+      const child = new EventEmitter() as EventEmitter & { stdout: EventEmitter; stderr: EventEmitter };
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      children.push(child);
+      return child;
+    });
+
+    try {
+      const { listPanes } = await import('./actions');
+      const first = listPanes({ zellijBinary: '/tools/zellij', env: {} });
+      const second = listPanes({ zellijBinary: '/tools/zellij', env: {} });
+
+      await Promise.resolve();
+      expect(spawnMock).toHaveBeenCalledTimes(1);
+
+      children[0]!.stdout.emit('data', Buffer.from('[]'));
+      children[0]!.emit('close', 0);
+      await first;
+      await Promise.resolve();
+
+      expect(spawnMock).toHaveBeenCalledTimes(2);
+      children[1]!.stdout.emit('data', Buffer.from('[]'));
+      children[1]!.emit('close', 0);
+      await second;
+    } finally {
+      delete process.env.HAPPIER_ZELLIJ_ACTION_MAX_CONCURRENCY;
+    }
+  });
+
+  it('shares the zellij action cap across independent module instances and jitters contention retries', async () => {
+    const socketDir = await mkdtemp(join(tmpdir(), 'happier-zellij-limit-'));
+    process.env.HAPPIER_ZELLIJ_ACTION_MAX_CONCURRENCY = '1';
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const children: Array<EventEmitter & { stdout: EventEmitter; stderr: EventEmitter }> = [];
+    spawnMock.mockImplementation(() => {
+      const child = new EventEmitter() as EventEmitter & { stdout: EventEmitter; stderr: EventEmitter };
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      children.push(child);
+      return child;
+    });
+
+    try {
+      vi.resetModules();
+      const firstActions = await import('./actions');
+      const first = firstActions.listPanes({
+        zellijBinary: '/tools/zellij',
+        env: { ZELLIJ_SOCKET_DIR: socketDir },
+      });
+      await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(1));
+
+      vi.resetModules();
+      const secondActions = await import('./actions');
+      const second = secondActions.listPanes({
+        zellijBinary: '/tools/zellij',
+        env: { ZELLIJ_SOCKET_DIR: socketDir },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(spawnMock).toHaveBeenCalledTimes(1);
+      expect(random).toHaveBeenCalled();
+
+      children[0]!.stdout.emit('data', Buffer.from('[]'));
+      children[0]!.emit('close', 0);
+      await first;
+      await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
+      children[1]!.stdout.emit('data', Buffer.from('[]'));
+      children[1]!.emit('close', 0);
+      await second;
+    } finally {
+      for (const child of children) child.emit('close', 0);
+      delete process.env.HAPPIER_ZELLIJ_ACTION_MAX_CONCURRENCY;
+      random.mockRestore();
+      await rm(socketDir, { recursive: true, force: true });
+      vi.resetModules();
+    }
+  });
+
+  it('includes limiter queue wait in the zellij action timeout deadline', async () => {
+    process.env.HAPPIER_ZELLIJ_ACTION_MAX_CONCURRENCY = '1';
+    const firstChild = new EventEmitter() as EventEmitter & { stdout: EventEmitter; stderr: EventEmitter };
+    firstChild.stdout = new EventEmitter();
+    firstChild.stderr = new EventEmitter();
+    spawnMock
+      .mockImplementationOnce(() => firstChild)
+      .mockImplementation(() => mockChild(0, '[]'));
+
+    try {
+      vi.resetModules();
+      const { listPanes, ZellijActionTimeoutError } = await import('./actions');
+      const first = listPanes({ zellijBinary: '/tools/zellij', env: {} });
+      await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(1));
+
+      let queueError: unknown;
+      const second = listPanes({ zellijBinary: '/tools/zellij', env: {}, timeoutMs: 25 }).catch((error: unknown) => {
+        queueError = error;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const errorBeforeRelease = queueError;
+
+      firstChild.stdout.emit('data', Buffer.from('[]'));
+      firstChild.emit('close', 0);
+      await first;
+      await second;
+
+      expect(errorBeforeRelease).toBeInstanceOf(ZellijActionTimeoutError);
+      expect(spawnMock).toHaveBeenCalledTimes(1);
+    } finally {
+      firstChild.emit('close', 0);
+      delete process.env.HAPPIER_ZELLIJ_ACTION_MAX_CONCURRENCY;
+      vi.resetModules();
+    }
+  });
+
+  it('counts detached command launchers in the same zellij action limit until they close', async () => {
+    process.env.HAPPIER_ZELLIJ_ACTION_MAX_CONCURRENCY = '1';
+    const detachedChild = mockHangingChild();
+    spawnMock
+      .mockImplementationOnce(() => detachedChild)
+      .mockImplementation(() => mockChild(0, '[]'));
+
+    try {
+      vi.resetModules();
+      const { listPanes, startCommandDetached } = await import('./actions');
+      const detached = await startCommandDetached({
+        zellijBinary: '/tools/zellij',
+        env: {},
+        sessionName: 'happy-claude',
+        command: ['/managed/node', 'claude_local_launcher.cjs'],
+        timeoutMs: 1_000,
+      });
+      const list = listPanes({ zellijBinary: '/tools/zellij', env: {} });
+
+      await Promise.resolve();
+      expect(spawnMock).toHaveBeenCalledTimes(1);
+
+      detached.dispose();
+      detachedChild.emit('close', 0);
+      await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
+      await list;
+    } finally {
+      detachedChild.emit('close', 0);
+      delete process.env.HAPPIER_ZELLIJ_ACTION_MAX_CONCURRENCY;
+      vi.resetModules();
+    }
+  });
+
+  it('reclaims a shared zellij action slot whose owner process is gone', async () => {
+    const socketDir = await mkdtemp(join(tmpdir(), 'happier-zellij-dead-owner-'));
+    const slotDir = join(socketDir, '.happier-action-slots', 'slot-0');
+    process.env.HAPPIER_ZELLIJ_ACTION_MAX_CONCURRENCY = '1';
+    await mkdir(slotDir, { recursive: true });
+    await writeFile(join(slotDir, 'owner.json'), JSON.stringify({
+      pid: 99_999_999,
+      nonce: 'dead-owner',
+      acquiredAtMs: 1,
+    }));
+
+    try {
+      vi.resetModules();
+      const { listPanes } = await import('./actions');
+      await expect(listPanes({
+        zellijBinary: '/tools/zellij',
+        env: { ZELLIJ_SOCKET_DIR: socketDir },
+        timeoutMs: 250,
+      })).resolves.toEqual([]);
+      expect(spawnMock).toHaveBeenCalledTimes(1);
+    } finally {
+      delete process.env.HAPPIER_ZELLIJ_ACTION_MAX_CONCURRENCY;
+      await rm(socketDir, { recursive: true, force: true });
+      vi.resetModules();
+    }
   });
 
   it('kills a hung list-panes action when its timeout elapses', async () => {
@@ -621,6 +802,7 @@ describe('zellij actions', () => {
 
     handle?.dispose();
     expect(child.kill).toHaveBeenCalledTimes(1);
+    child.emit('close', 0);
   });
 
   it('preserves Windows Path casing for zellij host actions', async () => {

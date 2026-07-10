@@ -99,30 +99,50 @@ export function createTmuxTerminalHostAdapter(params?: Readonly<{
     };
   }
 
+  const createOrAttachHost: TerminalHostAdapter['createOrAttachHost'] = async (opts) => {
+    const result = await tmux.spawnInTmux([...opts.spawnArgv], {
+      sessionName: opts.sessionName,
+      windowName: opts.sessionName,
+      cwd: opts.workingDirectory,
+    }, { ...opts.spawnEnv });
+    if (!result.success) {
+      throw new Error(result.error ?? 'Failed to create tmux terminal host');
+    }
+    return {
+      kind: 'tmux',
+      sessionName: result.sessionName ?? opts.sessionName,
+      paneId: result.windowName,
+      attachMetadata: {
+        attachStrategy: 'terminal_host',
+        topology: 'shared',
+        locality: 'same_machine',
+        maxClients: null,
+        requiresLocalAttachmentInfo: true,
+        liveProbe: 'required',
+      },
+    };
+  };
+
   return {
     kind: 'tmux',
-    async createOrAttachHost(opts) {
-      const result = await tmux.spawnInTmux([...opts.spawnArgv], {
-        sessionName: opts.sessionName,
-        windowName: opts.sessionName,
-        cwd: opts.workingDirectory,
-      }, { ...opts.spawnEnv });
-      if (!result.success) {
-        throw new Error(result.error ?? 'Failed to create tmux terminal host');
+    createOrAttachHost,
+    async adoptExistingHost(handle: TerminalHostHandle): Promise<TerminalHostHandle> {
+      const liveness = await evaluateLiveness(handle);
+      if (!liveness.paneAlive) {
+        throw new Error('Cannot adopt tmux terminal host because the target pane is not alive');
       }
-      return {
-        kind: 'tmux',
-        sessionName: result.sessionName ?? opts.sessionName,
-        paneId: result.windowName,
-        attachMetadata: {
-          attachStrategy: 'terminal_host',
-          topology: 'shared',
-          locality: 'same_machine',
-          maxClients: null,
-          requiresLocalAttachmentInfo: true,
-          liveProbe: 'required',
-        },
-      };
+      return handle;
+    },
+    async relaunchExistingHost(handle, opts) {
+      const liveness = await evaluateLiveness(handle);
+      if (!liveness.paneAlive) {
+        throw new Error('Cannot relaunch tmux terminal host because the target pane is not alive');
+      }
+      const killed = await tmux.killWindow(targetFromHandle(handle));
+      if (!killed) {
+        throw new Error('Failed to kill existing tmux terminal host before relaunch');
+      }
+      return createOrAttachHost({ ...opts, sessionName: handle.sessionName });
     },
     async injectUserPrompt(handle: TerminalHostHandle, input: TerminalPromptInput): Promise<TerminalInputInjectionResult> {
       const deferral = scheduledDeferral(input);

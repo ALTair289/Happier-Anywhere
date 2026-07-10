@@ -31,6 +31,14 @@ export type TerminalHostHandle = Readonly<{
   attachMetadata: TerminalHostAttachMetadata;
 }>;
 
+export type TerminalHostCreateOrAttachOptions = Readonly<{
+  sessionName: string;
+  workingDirectory: string;
+  spawnArgv: readonly string[];
+  spawnEnv: Readonly<Record<string, string>>;
+  isolatedEnv: boolean;
+}>;
+
 export type TerminalHostLiveness = Readonly<{
   paneAlive: boolean;
   probeInconclusive?: boolean;
@@ -54,13 +62,9 @@ export type TerminalInputState = Readonly<{
 
 export type TerminalHostAdapter = Readonly<{
   kind: TerminalHostKind;
-  createOrAttachHost(opts: Readonly<{
-    sessionName: string;
-    workingDirectory: string;
-    spawnArgv: readonly string[];
-    spawnEnv: Readonly<Record<string, string>>;
-    isolatedEnv: boolean;
-  }>): Promise<TerminalHostHandle>;
+  createOrAttachHost(opts: TerminalHostCreateOrAttachOptions): Promise<TerminalHostHandle>;
+  adoptExistingHost?(handle: TerminalHostHandle): Promise<TerminalHostHandle>;
+  relaunchExistingHost?(handle: TerminalHostHandle, opts: TerminalHostCreateOrAttachOptions): Promise<TerminalHostHandle>;
   injectUserPrompt(handle: TerminalHostHandle, input: TerminalPromptInput): Promise<TerminalInputInjectionResult>;
   interruptTurn(handle: TerminalHostHandle): Promise<void>;
   evaluateLiveness(handle: TerminalHostHandle): Promise<TerminalHostLiveness>;

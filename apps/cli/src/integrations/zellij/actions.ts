@@ -7,6 +7,7 @@ import {
   createTerminalHostDeadline,
   remainingTerminalHostDeadlineMs,
 } from '../terminalHost/deadline';
+import { acquireZellijActionSlot } from './actionLimiter';
 
 export type ZellijCommandResult = Readonly<{ exitCode: number; stdout: string; stderr: string }>;
 
@@ -70,6 +71,7 @@ export type ZellijActions = Readonly<{
   listPanes(params: ZellijActionParams & ZellijTimeoutParams): Promise<ZellijPane[]>;
   dumpScreen(params: ZellijPaneActionParams & ZellijTimeoutParams): Promise<string>;
   killSession(params: ZellijActionParams & Readonly<{ sessionName: string }> & ZellijTimeoutParams): Promise<ZellijCommandResult>;
+  deleteSession(params: ZellijActionParams & Readonly<{ sessionName: string }> & ZellijTimeoutParams): Promise<ZellijCommandResult>;
 }>;
 
 export type ZellijAttachActions = Readonly<{
@@ -100,6 +102,7 @@ const ZELLIJ_HOST_ENV_KEYS = new Set([
   'ComSpec',
 ]);
 const ZELLIJ_TIMEOUT_KILL_GRACE_MS = 250;
+const DEFAULT_ZELLIJ_ACTION_MAX_CONCURRENCY = 4;
 
 function buildZellijProcessEnv(env: Readonly<Record<string, string>>): NodeJS.ProcessEnv {
   const base: NodeJS.ProcessEnv = {};
@@ -111,7 +114,43 @@ function buildZellijProcessEnv(env: Readonly<Record<string, string>>): NodeJS.Pr
   return { ...base, ...env };
 }
 
-function runZellij(
+function readZellijActionMaxConcurrency(): number {
+  const parsed = Number.parseInt(process.env.HAPPIER_ZELLIJ_ACTION_MAX_CONCURRENCY ?? '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_ZELLIJ_ACTION_MAX_CONCURRENCY;
+}
+
+async function runZellij(
+  params: ZellijActionParams,
+  args: readonly string[],
+  options?: Readonly<{ cwd?: string; timeoutMs?: number; action?: string; stdio?: StdioOptions; windowsHide?: boolean }>,
+): Promise<ZellijCommandResult> {
+  const action = options?.action ?? args[0] ?? 'command';
+  const timeoutError = () => new ZellijActionTimeoutError(action);
+  if (options?.timeoutMs === 0) throw timeoutError();
+  // End-to-end semantic: admission and process execution consume one caller deadline.
+  const deadline = createTerminalHostDeadline(options?.timeoutMs);
+  const releaseSlot = await acquireZellijActionSlot({
+    socketDir: params.env.ZELLIJ_SOCKET_DIR,
+    maxConcurrency: readZellijActionMaxConcurrency(),
+    deadlineMs: deadline,
+    timeoutError,
+  });
+  try {
+    const remainingTimeoutMs = remainingTerminalHostDeadlineMs(deadline);
+    if (remainingTimeoutMs === 0) throw timeoutError();
+    return await runZellijUnbounded(
+      params,
+      args,
+      remainingTimeoutMs === undefined
+        ? options
+        : { ...options, timeoutMs: remainingTimeoutMs },
+    );
+  } finally {
+    await releaseSlot();
+  }
+}
+
+function runZellijUnbounded(
   params: ZellijActionParams,
   args: readonly string[],
   options?: Readonly<{ cwd?: string; timeoutMs?: number; action?: string; stdio?: StdioOptions; windowsHide?: boolean }>,
@@ -273,21 +312,52 @@ export async function runCommand(params: ZellijRunCommandParams & ZellijTimeoutP
 
 export async function startCommandDetached(params: ZellijRunCommandParams & ZellijTimeoutParams): Promise<ZellijDetachedCommandHandle> {
   const args = buildRunCommandArgs(params);
+  const timeoutError = () => new ZellijActionTimeoutError('run');
+  if (params.timeoutMs === 0) throw timeoutError();
+  const deadline = createTerminalHostDeadline(params.timeoutMs);
+  const releaseSlot = await acquireZellijActionSlot({
+    socketDir: params.env.ZELLIJ_SOCKET_DIR,
+    maxConcurrency: readZellijActionMaxConcurrency(),
+    deadlineMs: deadline,
+    timeoutError,
+  });
+  const remainingTimeoutMs = remainingTerminalHostDeadlineMs(deadline);
+  if (remainingTimeoutMs === 0) {
+    await releaseSlot();
+    throw timeoutError();
+  }
   return await new Promise((resolve, reject) => {
     let closed = false;
     let settled = false;
-    const child = spawn(params.zellijBinary, args, {
-      cwd: params.cwd,
-      env: buildZellijProcessEnv(params.env),
-      shell: false,
-      stdio: ['ignore', 'ignore', 'ignore'],
-      windowsHide: true,
-    });
+    let released = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const release = () => {
+      if (released) return;
+      released = true;
+      if (timeout !== undefined) clearTimeout(timeout);
+      void releaseSlot();
+    };
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(params.zellijBinary, args, {
+        cwd: params.cwd,
+        env: buildZellijProcessEnv(params.env),
+        shell: false,
+        stdio: ['ignore', 'ignore', 'ignore'],
+        windowsHide: true,
+      });
+    } catch (error) {
+      release();
+      reject(error);
+      return;
+    }
     child.once('close', () => {
       closed = true;
+      release();
     });
     child.once('error', (error) => {
       closed = true;
+      release();
       if (!settled) {
         settled = true;
         reject(error);
@@ -307,6 +377,13 @@ export async function startCommandDetached(params: ZellijRunCommandParams & Zell
         resolve(handle);
       }
     });
+    timeout = remainingTimeoutMs === undefined
+      ? undefined
+      : setTimeout(() => {
+          if (!closed && !child.killed) child.kill();
+          release();
+        }, remainingTimeoutMs);
+    timeout?.unref?.();
   });
 }
 
@@ -443,6 +520,16 @@ export async function killSession(
   );
 }
 
+export async function deleteSession(
+  params: ZellijActionParams & Readonly<{ sessionName: string }> & ZellijTimeoutParams,
+): Promise<ZellijCommandResult> {
+  return runZellij(
+    params,
+    ['delete-session', params.sessionName],
+    params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs, action: 'delete-session' } : { action: 'delete-session' },
+  );
+}
+
 export const defaultZellijActions: ZellijActions = {
   attachCreateBackground,
   runCommand,
@@ -456,6 +543,7 @@ export const defaultZellijActions: ZellijActions = {
   listPanes,
   dumpScreen,
   killSession,
+  deleteSession,
 };
 
 export const defaultZellijAttachActions: ZellijAttachActions = {

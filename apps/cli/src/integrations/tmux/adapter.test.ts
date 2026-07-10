@@ -91,6 +91,90 @@ describe('createTmuxTerminalHostAdapter', () => {
     });
   });
 
+  it('adopts an existing live tmux host without spawning a new window', async () => {
+    const tmux = new TmuxUtilities();
+    const spawnInTmux = vi.spyOn(tmux, 'spawnInTmux');
+    vi.spyOn(tmux, 'executeTmuxCommand').mockResolvedValue({
+      returncode: 0,
+      stdout: '0\t12345\tclaude\n',
+      stderr: '',
+      command: [],
+    });
+    const adapter = createTmuxTerminalHostAdapter({ tmux });
+
+    await expect(adapter.adoptExistingHost?.(TMUX_HANDLE)).resolves.toEqual(TMUX_HANDLE);
+
+    expect(spawnInTmux).not.toHaveBeenCalled();
+  });
+
+  it('relaunches an existing tmux host by replacing the old window with a fresh command', async () => {
+    const tmux = new TmuxUtilities();
+    vi.spyOn(tmux, 'executeTmuxCommand').mockResolvedValue({
+      returncode: 0,
+      stdout: '0\t12345\tclaude\n',
+      stderr: '',
+      command: [],
+    });
+    const killWindow = vi.spyOn(tmux, 'killWindow').mockResolvedValue(true);
+    const spawnInTmux = vi.spyOn(tmux, 'spawnInTmux').mockResolvedValue({
+      success: true,
+      sessionName: 'happy',
+      windowName: 'fresh-window',
+    });
+    const adapter = createTmuxTerminalHostAdapter({ tmux });
+
+    await expect(adapter.relaunchExistingHost?.(TMUX_HANDLE, {
+      sessionName: 'ignored-fresh-name',
+      workingDirectory: '/workspace/project',
+      spawnArgv: ['/managed/node', 'terminal_launch_spec_runner.cjs', '/tmp/fresh.json'],
+      spawnEnv: { CLAUDE_CONFIG_DIR: '/tmp/claude-home' },
+      isolatedEnv: true,
+    })).resolves.toMatchObject({
+      kind: 'tmux',
+      sessionName: 'happy',
+      paneId: 'fresh-window',
+    });
+
+    expect(killWindow).toHaveBeenCalledWith('happy:claude.1');
+    expect(spawnInTmux).toHaveBeenCalledWith(
+      ['/managed/node', 'terminal_launch_spec_runner.cjs', '/tmp/fresh.json'],
+      {
+        sessionName: 'happy',
+        windowName: 'happy',
+        cwd: '/workspace/project',
+      },
+      { CLAUDE_CONFIG_DIR: '/tmp/claude-home' },
+    );
+  });
+
+  it('does not relaunch into an existing tmux host when the old window was not killed', async () => {
+    const tmux = new TmuxUtilities();
+    vi.spyOn(tmux, 'executeTmuxCommand').mockResolvedValue({
+      returncode: 0,
+      stdout: '0\t12345\tclaude\n',
+      stderr: '',
+      command: [],
+    });
+    const killWindow = vi.spyOn(tmux, 'killWindow').mockResolvedValue(false);
+    const spawnInTmux = vi.spyOn(tmux, 'spawnInTmux').mockResolvedValue({
+      success: true,
+      sessionName: 'happy',
+      windowName: 'fresh-window',
+    });
+    const adapter = createTmuxTerminalHostAdapter({ tmux });
+
+    await expect(adapter.relaunchExistingHost?.(TMUX_HANDLE, {
+      sessionName: 'ignored-fresh-name',
+      workingDirectory: '/workspace/project',
+      spawnArgv: ['/managed/node', 'terminal_launch_spec_runner.cjs', '/tmp/fresh.json'],
+      spawnEnv: { CLAUDE_CONFIG_DIR: '/tmp/claude-home' },
+      isolatedEnv: true,
+    })).rejects.toThrow('Failed to kill existing tmux terminal host before relaunch');
+
+    expect(killWindow).toHaveBeenCalledWith('happy:claude.1');
+    expect(spawnInTmux).not.toHaveBeenCalled();
+  });
+
   it('pastes prompt text through a tmux buffer and submits with carriage return', async () => {
     const tmux = new TmuxUtilities();
     const executeTmuxCommand = vi.spyOn(tmux, 'executeTmuxCommand').mockResolvedValue({
