@@ -25,13 +25,19 @@ import { readCredentials } from '@/persistence';
 import { bootstrapAccountSettingsContext } from '@/settings/accountSettings/bootstrapAccountSettingsContext';
 import type { AgentId } from '@happier-dev/agents';
 import { applyAgentRuntimeKindOverrideToAccountSettings } from '@happier-dev/agents';
-import { BackendTargetRefSchema, type BackendTargetRefV1 } from '@happier-dev/protocol';
+import {
+    BackendTargetRefSchema,
+    ConnectedServiceBindingsV1Schema,
+    type BackendTargetRefV1,
+    type ConnectedServiceBindingsV1,
+} from '@happier-dev/protocol';
 import { invokeProviderCliInstall as invokeSharedProviderCliInstall } from '@/runtime/managedTools/invokeProviderCliInstall';
 import { existsSync, statSync } from 'node:fs';
 import { dirname, resolve as resolvePath } from 'node:path';
 import os from 'node:os';
 
 const DEFAULT_PROBE_MODELS_TIMEOUT_MS = 30_000;
+type CliProbeMethod = 'probeModels' | 'probeModes' | 'probeConfigOptions';
 
 function titleCase(value: string): string {
     if (!value) return value;
@@ -73,6 +79,11 @@ function resolveProbeCwd(raw: unknown): string {
     if (isExistingDirectory(cwdCandidate)) return cwdCandidate;
 
     return process.cwd();
+}
+
+function parseProbeConnectedServices(params?: Record<string, unknown>): ConnectedServiceBindingsV1 | null {
+    const parsed = ConnectedServiceBindingsV1Schema.safeParse((params ?? {}).connectedServices);
+    return parsed.success ? parsed.data : null;
 }
 
 async function resolveProbeBackendContext(params?: Record<string, unknown>): Promise<{
@@ -179,6 +190,39 @@ async function invokeProviderCliInstall(
     return { ok: true, result: { plan: result.plan, alreadyInstalled: result.alreadyInstalled, logPath: result.logPath ?? null } };
 }
 
+async function invokeCliProbeMethod(
+    agentId: AgentCatalogEntry['id'],
+    method: CliProbeMethod,
+    params?: Record<string, unknown>,
+): Promise<CapabilitiesInvokeResponse> {
+    const probeContext = await resolveProbeBackendContext({ ...params, agentId });
+    const timeoutMsRaw = (params ?? {}).timeoutMs;
+    const timeoutMs = typeof timeoutMsRaw === 'number' ? timeoutMsRaw : DEFAULT_PROBE_MODELS_TIMEOUT_MS;
+    const cwd = resolveProbeCwd((params ?? {}).cwd);
+    const connectedServices = parseProbeConnectedServices(params);
+    const commonParams = {
+        agentId,
+        backendTarget: probeContext.backendTarget,
+        cwd,
+        timeoutMs,
+        accountSettings: probeContext.accountSettings,
+        credentials: probeContext.credentials,
+        connectedServices,
+    };
+
+    if (method === 'probeModels') {
+        const result = await probeAgentModelsBestEffort(commonParams);
+        return { ok: true, result };
+    }
+    if (method === 'probeModes') {
+        const result = await probeAgentModesBestEffort(commonParams);
+        return { ok: true, result };
+    }
+
+    const result = await probeAgentConfigOptionsBestEffort(commonParams);
+    return { ok: true, result };
+}
+
 function createGenericCliCapability(agentId: AgentCatalogEntry['id']): Capability {
     return {
         descriptor: {
@@ -201,49 +245,13 @@ function createGenericCliCapability(agentId: AgentCatalogEntry['id']): Capabilit
                 return invokeProviderCliInstall(agentId, params);
             }
             if (method === 'probeModels') {
-                const probeContext = await resolveProbeBackendContext({ ...params, agentId });
-                const timeoutMsRaw = (params ?? {}).timeoutMs;
-                const timeoutMs = typeof timeoutMsRaw === 'number' ? timeoutMsRaw : DEFAULT_PROBE_MODELS_TIMEOUT_MS;
-                const cwd = resolveProbeCwd((params ?? {}).cwd);
-                const result = await probeAgentModelsBestEffort({
-                    agentId,
-                    backendTarget: probeContext.backendTarget,
-                    cwd,
-                    timeoutMs,
-                    accountSettings: probeContext.accountSettings,
-                    credentials: probeContext.credentials,
-                });
-                return { ok: true, result };
+                return invokeCliProbeMethod(agentId, method, params);
             }
             if (method === 'probeModes') {
-                const probeContext = await resolveProbeBackendContext({ ...params, agentId });
-                const timeoutMsRaw = (params ?? {}).timeoutMs;
-                const timeoutMs = typeof timeoutMsRaw === 'number' ? timeoutMsRaw : DEFAULT_PROBE_MODELS_TIMEOUT_MS;
-                const cwd = resolveProbeCwd((params ?? {}).cwd);
-                const result = await probeAgentModesBestEffort({
-                    agentId,
-                    backendTarget: probeContext.backendTarget,
-                    cwd,
-                    timeoutMs,
-                    accountSettings: probeContext.accountSettings,
-                    credentials: probeContext.credentials,
-                });
-                return { ok: true, result };
+                return invokeCliProbeMethod(agentId, method, params);
             }
             if (method === 'probeConfigOptions') {
-                const probeContext = await resolveProbeBackendContext({ ...params, agentId });
-                const timeoutMsRaw = (params ?? {}).timeoutMs;
-                const timeoutMs = typeof timeoutMsRaw === 'number' ? timeoutMsRaw : DEFAULT_PROBE_MODELS_TIMEOUT_MS;
-                const cwd = resolveProbeCwd((params ?? {}).cwd);
-                const result = await probeAgentConfigOptionsBestEffort({
-                    agentId,
-                    backendTarget: probeContext.backendTarget,
-                    cwd,
-                    timeoutMs,
-                    accountSettings: probeContext.accountSettings,
-                    credentials: probeContext.credentials,
-                });
-                return { ok: true, result };
+                return invokeCliProbeMethod(agentId, method, params);
             }
             return { ok: false, error: { message: `Unsupported method: ${method}`, code: 'unsupported-method' } };
         },
@@ -269,49 +277,13 @@ function augmentCliCapabilityWithProbeModels(cap: Capability, agentId: AgentCata
             return invokeProviderCliInstall(agentId, params);
         }
         if (method === 'probeModels') {
-            const probeContext = await resolveProbeBackendContext({ ...params, agentId });
-            const timeoutMsRaw = (params ?? {}).timeoutMs;
-            const timeoutMs = typeof timeoutMsRaw === 'number' ? timeoutMsRaw : DEFAULT_PROBE_MODELS_TIMEOUT_MS;
-            const cwd = resolveProbeCwd((params ?? {}).cwd);
-            const result = await probeAgentModelsBestEffort({
-                agentId,
-                backendTarget: probeContext.backendTarget,
-                cwd,
-                timeoutMs,
-                accountSettings: probeContext.accountSettings,
-                credentials: probeContext.credentials,
-            });
-            return { ok: true, result };
+            return invokeCliProbeMethod(agentId, method, params);
         }
         if (method === 'probeModes') {
-            const probeContext = await resolveProbeBackendContext({ ...params, agentId });
-            const timeoutMsRaw = (params ?? {}).timeoutMs;
-            const timeoutMs = typeof timeoutMsRaw === 'number' ? timeoutMsRaw : DEFAULT_PROBE_MODELS_TIMEOUT_MS;
-            const cwd = resolveProbeCwd((params ?? {}).cwd);
-            const result = await probeAgentModesBestEffort({
-                agentId,
-                backendTarget: probeContext.backendTarget,
-                cwd,
-                timeoutMs,
-                accountSettings: probeContext.accountSettings,
-                credentials: probeContext.credentials,
-            });
-            return { ok: true, result };
+            return invokeCliProbeMethod(agentId, method, params);
         }
         if (method === 'probeConfigOptions') {
-            const probeContext = await resolveProbeBackendContext({ ...params, agentId });
-            const timeoutMsRaw = (params ?? {}).timeoutMs;
-            const timeoutMs = typeof timeoutMsRaw === 'number' ? timeoutMsRaw : DEFAULT_PROBE_MODELS_TIMEOUT_MS;
-            const cwd = resolveProbeCwd((params ?? {}).cwd);
-            const result = await probeAgentConfigOptionsBestEffort({
-                agentId,
-                backendTarget: probeContext.backendTarget,
-                cwd,
-                timeoutMs,
-                accountSettings: probeContext.accountSettings,
-                credentials: probeContext.credentials,
-            });
-            return { ok: true, result };
+            return invokeCliProbeMethod(agentId, method, params);
         }
         if (baseInvoke) return await baseInvoke({ method, params });
         return { ok: false, error: { message: `Unsupported method: ${method}`, code: 'unsupported-method' } };

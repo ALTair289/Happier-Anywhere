@@ -358,4 +358,58 @@ describe('capabilities.invoke(cli.* probeModels)', () => {
       credentials: { token: 'token' },
     }));
   });
+
+  it('forwards valid connectedServices bindings to probeAgentModelsBestEffort', async () => {
+    vi.resetModules();
+
+    const probeSpy = vi.fn(async (_params: unknown) => ({
+      provider: 'codex',
+      availableModels: [{ id: 'default', name: 'Default' }],
+      supportsFreeform: false,
+      source: 'static',
+    }));
+    const connectedServices = {
+      v: 1,
+      bindingsByServiceId: {
+        'openai-codex': {
+          source: 'connected',
+          selection: 'group',
+          groupId: 'happier',
+          profileId: 'leeroy',
+        },
+      },
+    };
+
+    vi.doMock('@/capabilities/probes/agentModelsProbe', () => ({
+      probeAgentModelsBestEffort: (params: unknown) => probeSpy(params),
+    }));
+
+    vi.doMock('@/backends/catalog', () => ({
+      AGENTS: {
+        codex: { id: 'codex' },
+      },
+    }));
+
+    const { registerCapabilitiesHandlers } = await import('./capabilities');
+    const { createEncryptedRpcTestClient } = await import('./encryptedRpc.testkit');
+
+    const { call } = createEncryptedRpcTestClient({
+      scopePrefix: 'machine-test',
+      encryptionKey: new Uint8Array(32).fill(7),
+      logger: () => undefined,
+      registerHandlers: (manager) => registerCapabilitiesHandlers(manager),
+    });
+
+    await call(RPC_METHODS.CAPABILITIES_INVOKE, {
+      id: 'cli.codex',
+      method: 'probeModels',
+      params: { cwd: '/tmp/happier-probe-cwd', connectedServices },
+    });
+
+    expect(probeSpy).toHaveBeenCalledTimes(1);
+    expect(probeSpy).toHaveBeenCalledWith(expect.objectContaining({
+      agentId: 'codex',
+      connectedServices,
+    }));
+  });
 });
