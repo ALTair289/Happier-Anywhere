@@ -35,6 +35,20 @@ export interface ProjectKey {
     path: string;
 }
 
+/**
+ * Synthetic machine scope used to key projects for sessions whose metadata never
+ * received a machineId. It is a grouping key only — it never corresponds to a real,
+ * routable machine and must not be used as an RPC/control target.
+ */
+export const UNKNOWN_PROJECT_MACHINE_SCOPE_ID = 'unknown';
+
+export function normalizeKnownProjectMachineId(value: string | null | undefined): string | null {
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    if (trimmed.length === 0 || trimmed === UNKNOWN_PROJECT_MACHINE_SCOPE_ID) return null;
+    return trimmed;
+}
+
 export function resolveProjectMachineScopeId(metadata: {
     machineId?: string | null;
     host?: string | null;
@@ -42,7 +56,7 @@ export function resolveProjectMachineScopeId(metadata: {
 }): string {
     const machineId = resolveSessionMachineId(metadata) ?? '';
     if (machineId) return machineId;
-    return 'unknown';
+    return UNKNOWN_PROJECT_MACHINE_SCOPE_ID;
 }
 
 export type ScmProjectOperationKind =

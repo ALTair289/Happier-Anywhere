@@ -6,6 +6,7 @@ import { storage } from '@/sync/domains/state/storage';
 import type { Machine } from '@/sync/domains/state/storageTypes';
 import type { MachineDisplayRenderable } from '@/sync/domains/machines/machineDisplayRenderable';
 import { resolveSessionMachineId } from '@/sync/domains/session/directSessions/resolveSessionMachineId';
+import { normalizeKnownProjectMachineId } from '@/sync/runtime/orchestration/projectManager';
 
 type SessionTargetMetadataLike = Readonly<{
   machineId?: string | null;
@@ -118,18 +119,21 @@ export function resolveMachineTargetForSessionFromState(
   const project = typeof state.getProjectForSession === 'function' ? state.getProjectForSession(sessionId) : null;
 
   const machines = Object.values(state.machines ?? {}) as Machine[];
+  // Project keys use a synthetic "unknown" machine scope for sessions without a
+  // machineId; it is a grouping key, not a machine, and must not steer targeting.
+  const projectMachineId = normalizeKnownProjectMachineId(project?.key?.machineId);
   const target = resolveSessionMachineRpcTarget({
     sessionId,
     sessionActive: session?.active === true,
     sessionMachineId: resolveSessionMachineId(metadata),
     sessionPath: normalizeNonEmptyString(metadata?.path),
-    projectMachineId: project?.key?.machineId ?? null,
+    projectMachineId,
     projectPath: normalizeNonEmptyString(project?.key?.path),
     machines,
   });
   return target ?? resolveLegacyHostMachineTarget({
     metadata,
-    projectMachineId: project?.key?.machineId ?? null,
+    projectMachineId,
     machines,
   });
 }
@@ -233,6 +237,14 @@ export function resolveMachineControlTargetForSessionFromState(
     && projectMachineId !== sessionMachineId
     && !projectMachineId.startsWith('host:')
   ) {
+    return null;
+  }
+
+  // The display target can carry the synthetic "unknown" project machine scope for
+  // sessions without a machineId. That placeholder is not a routable machine — handing
+  // it out as a control target produces RPCs that can never be delivered and whose
+  // failures surface nowhere.
+  if (normalizeKnownProjectMachineId(displayTarget.machineId) === null) {
     return null;
   }
 

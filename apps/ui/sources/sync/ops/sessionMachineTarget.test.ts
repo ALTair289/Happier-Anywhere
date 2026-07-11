@@ -179,6 +179,94 @@ describe('sessionMachineTarget', () => {
         });
     });
 
+    it('resolves the unique active same-host machine when the project key only carries the synthetic unknown machine scope', async () => {
+        const { readMachineTargetForSession, readMachineControlTargetForSession } = await import('./sessionMachineTarget');
+        // A session whose metadata never received a machineId (e.g. a fork shell that was
+        // created server-side but whose runner never attached) gets a project key with the
+        // synthetic "unknown" machine scope. That placeholder must not disable the
+        // unique-active-host fallback, and must never leak out as a control-target machine id.
+        getStateSpy.mockReturnValue({
+            sessions: {
+                s1: {
+                    active: false,
+                    metadata: {
+                        path: '/workspace/repo',
+                        host: 'mbp-host',
+                    },
+                },
+            },
+            machines: {
+                'm-host': {
+                    id: 'm-host',
+                    active: true,
+                    activeAt: 1,
+                    metadata: { host: 'mbp-host' },
+                },
+            },
+            getProjectForSession: (sessionId: string) =>
+                sessionId === 's1'
+                    ? {
+                        key: {
+                            machineId: 'unknown',
+                            path: '/workspace/repo',
+                        },
+                    }
+                    : null,
+        });
+
+        expect(readMachineTargetForSession('s1')).toEqual({
+            machineId: 'm-host',
+            basePath: '/workspace/repo',
+        });
+        expect(readMachineControlTargetForSession('s1')).toEqual({
+            machineId: 'm-host',
+            basePath: '/workspace/repo',
+            confidence: 'reachable',
+        });
+    });
+
+    it('never emits the synthetic unknown machine scope as a control target when no host match exists', async () => {
+        const { readMachineControlTargetForSession } = await import('./sessionMachineTarget');
+        getStateSpy.mockReturnValue({
+            sessions: {
+                s1: {
+                    active: false,
+                    metadata: {
+                        path: '/workspace/repo',
+                        host: 'mbp-host',
+                    },
+                },
+            },
+            machines: {
+                m1: {
+                    id: 'm1',
+                    active: true,
+                    activeAt: 1,
+                    metadata: { host: 'mbp-host' },
+                },
+                m2: {
+                    id: 'm2',
+                    active: true,
+                    activeAt: 2,
+                    metadata: { host: 'mbp-host' },
+                },
+            },
+            getProjectForSession: (sessionId: string) =>
+                sessionId === 's1'
+                    ? {
+                        key: {
+                            machineId: 'unknown',
+                            path: '/workspace/repo',
+                        },
+                    }
+                    : null,
+        });
+
+        // Ambiguous host: no reachable target may resolve, and the placeholder must not be
+        // handed back as a routable machine id (RPCs to machine "unknown" fail silently).
+        expect(readMachineControlTargetForSession('s1')).toBeNull();
+    });
+
     it('does not map host-scoped project keys to a latest-active machine id', async () => {
         const { readMachineTargetForSession } = await import('./sessionMachineTarget');
         getStateSpy.mockReturnValue({
