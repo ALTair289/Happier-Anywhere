@@ -61,6 +61,13 @@ describe('feature catalog', () => {
     expect(FEATURE_CATALOG['sessions.usageLimitRecovery']?.dependencies).toEqual(['sessions']);
   });
 
+  it('represents runtime activity v2 as a fail-closed server feature under sessions', () => {
+    expect(isFeatureId('sessions.runtimeActivityV2')).toBe(true);
+    expect(FEATURE_CATALOG['sessions.runtimeActivityV2']?.representation).toBe('server');
+    expect(FEATURE_CATALOG['sessions.runtimeActivityV2']?.dependencies).toEqual(['sessions']);
+    expect(FEATURE_CATALOG['sessions.runtimeActivityV2']?.defaultFailMode).toBe('fail_closed');
+  });
+
   it('includes channel bridge feature ids', () => {
     expect(isFeatureId('channelBridges')).toBe(true);
     expect(isFeatureId('channelBridges.telegram')).toBe(true);

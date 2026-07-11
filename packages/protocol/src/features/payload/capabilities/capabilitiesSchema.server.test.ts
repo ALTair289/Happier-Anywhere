@@ -5,6 +5,38 @@ import { BUILT_IN_PET_IDS_V1, PET_SYNC_SUPPORTED_MEDIA_TYPES_V1 } from '../../..
 import { CapabilitiesSchema } from './capabilitiesSchema.js';
 
 describe('CapabilitiesSchema (server capabilities)', () => {
+  it('parses session-sync compatibility as a sibling of strict server capabilities', () => {
+    const parsed = CapabilitiesSchema.parse({
+      compatibility: {
+        v: 1,
+        sessionSync: {
+          v: 1,
+          enforcement: 'required',
+          minimumSessionSyncProtocolVersion: 2,
+          declarationTransport: 'headers-v1',
+        },
+      },
+    });
+
+    expect(parsed.compatibility?.sessionSync).toMatchObject({
+      enforcement: 'required',
+      minimumSessionSyncProtocolVersion: 2,
+    });
+    expect(CapabilitiesSchema.safeParse({
+      server: {
+        compatibility: {
+          v: 1,
+          sessionSync: {
+            v: 1,
+            enforcement: 'required',
+            minimumSessionSyncProtocolVersion: 2,
+            declarationTransport: 'headers-v1',
+          },
+        },
+      },
+    }).success).toBe(false);
+  });
+
   it('parses server identity capabilities outside the strict server capability object', () => {
     const parsed = CapabilitiesSchema.parse({
       server: {

@@ -107,6 +107,7 @@ export const FeatureGatesSchema = z.object({
       enabled: z.boolean(),
       folders: FeatureGateSchema.optional().default(DEFAULT_GATE_DISABLED),
       usageLimitRecovery: FeatureGateSchema.optional().default(DEFAULT_GATE_DISABLED),
+      runtimeActivityV2: FeatureGateSchema.optional().default(DEFAULT_GATE_DISABLED),
       handoff: z
         .object({
           enabled: z.boolean(),
@@ -119,6 +120,7 @@ export const FeatureGatesSchema = z.object({
       enabled: false,
       folders: DEFAULT_GATE_DISABLED,
       usageLimitRecovery: DEFAULT_GATE_DISABLED,
+      runtimeActivityV2: DEFAULT_GATE_DISABLED,
       handoff: { enabled: false },
     }),
   machines: z

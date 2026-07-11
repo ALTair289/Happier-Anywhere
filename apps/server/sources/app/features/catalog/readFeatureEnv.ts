@@ -72,6 +72,10 @@ export type SessionUsageLimitRecoveryFeatureEnv = Readonly<{
   usageLimitRecoveryEnabled: boolean;
 }>;
 
+export type SessionRuntimeActivityV2FeatureEnv = Readonly<{
+  runtimeActivityV2Enabled: boolean;
+}>;
+
 export type SessionFoldersFeatureEnv = Readonly<{
   foldersEnabled: boolean;
 }>;
@@ -321,6 +325,12 @@ export function readSessionHandoffFeatureEnv(env: NodeJS.ProcessEnv): SessionHan
 export function readSessionUsageLimitRecoveryFeatureEnv(env: NodeJS.ProcessEnv): SessionUsageLimitRecoveryFeatureEnv {
   return {
     usageLimitRecoveryEnabled: parseBooleanEnv(env[FEATURE_ENV_KEYS.sessionsUsageLimitRecoveryEnabled], true),
+  };
+}
+
+export function readSessionRuntimeActivityV2FeatureEnv(env: NodeJS.ProcessEnv): SessionRuntimeActivityV2FeatureEnv {
+  return {
+    runtimeActivityV2Enabled: parseBooleanEnv(env[FEATURE_ENV_KEYS.sessionsRuntimeActivityV2Enabled], false),
   };
 }
 

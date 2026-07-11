@@ -168,6 +168,8 @@ export {
   type SessionRuntimeActivityV1,
 } from './sessionRuntimeActivity/index.js';
 
+export * from './clientCompatibility/index.js';
+
 export {
   WorkspaceAnchorResolutionStatusV1Schema,
   WorkspaceAnchorResolutionV1Schema,

@@ -21,12 +21,14 @@ import { resolveEncryptionFeature } from '../encryptionFeature';
 import { resolveE2eeFeature } from '../e2eeFeature';
 import { resolveServerUrlCapabilitiesFeature } from '../serverUrlCapabilitiesFeature';
 import { resolveServerRetentionCapabilitiesFeature } from '../serverRetentionCapabilitiesFeature';
+import { resolveClientCompatibilityFeature } from '../clientCompatibilityFeature';
 
 export type ServerFeatureResolver = (env: NodeJS.ProcessEnv) => FeaturesPayloadDelta;
 
 export const serverFeatureRegistry: readonly ServerFeatureResolver[] = Object.freeze([
     (env) => resolveServerUrlCapabilitiesFeature(env),
     (env) => resolveServerRetentionCapabilitiesFeature(env),
+    (env) => resolveClientCompatibilityFeature(env),
     (env) => resolveBugReportsFeature(env),
     (env) => resolveAutomationsFeature(env),
     (env) => resolveSharingFeature(env),

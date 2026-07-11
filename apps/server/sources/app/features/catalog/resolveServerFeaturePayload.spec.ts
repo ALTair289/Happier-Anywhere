@@ -186,6 +186,35 @@ describe("resolveServerFeaturePayload", () => {
         expect(payload.features.connectedServices.accountFallback.enabled).toBe(true);
     });
 
+    it("advertises session-sync compatibility while forcing runtime activity v2 off in observe mode", () => {
+        const payload = resolveServerFeaturePayload({
+            HAPPIER_FEATURE_SESSIONS_RUNTIME_ACTIVITY_V2__ENABLED: "1",
+        } as NodeJS.ProcessEnv, serverFeatureRegistry);
+
+        expect(payload.capabilities.compatibility?.sessionSync).toMatchObject({
+            enforcement: "observe",
+            minimumSessionSyncProtocolVersion: 2,
+            declarationTransport: "headers-v1",
+        });
+        expect(payload.features.sessions.runtimeActivityV2.enabled).toBe(false);
+    });
+
+    it("enables runtime activity v2 only when requested under required protocol-v2 enforcement", () => {
+        const enabled = resolveServerFeaturePayload({
+            HAPPIER_FEATURE_SESSIONS_RUNTIME_ACTIVITY_V2__ENABLED: "1",
+            HAPPIER_SESSION_SYNC_COMPATIBILITY__ENFORCEMENT: "required",
+            HAPPIER_SESSION_SYNC_COMPATIBILITY__MINIMUM_PROTOCOL_VERSION: "2",
+        } as NodeJS.ProcessEnv, serverFeatureRegistry);
+        const floorTooOld = resolveServerFeaturePayload({
+            HAPPIER_FEATURE_SESSIONS_RUNTIME_ACTIVITY_V2__ENABLED: "1",
+            HAPPIER_SESSION_SYNC_COMPATIBILITY__ENFORCEMENT: "required",
+            HAPPIER_SESSION_SYNC_COMPATIBILITY__MINIMUM_PROTOCOL_VERSION: "1",
+        } as NodeJS.ProcessEnv, serverFeatureRegistry);
+
+        expect(enabled.features.sessions.runtimeActivityV2.enabled).toBe(true);
+        expect(floorTooOld.features.sessions.runtimeActivityV2.enabled).toBe(false);
+    });
+
     it("advertises pending delivery-state support separately from the basic pending queue gate", () => {
         const payload = resolveServerFeaturePayload({} as NodeJS.ProcessEnv, serverFeatureRegistry);
 

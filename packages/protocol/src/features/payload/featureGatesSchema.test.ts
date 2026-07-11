@@ -149,4 +149,18 @@ describe('FeatureGatesSchema', () => {
     expect(readServerEnabledBit(parsed, 'sharing.pendingDeliveryAttempts')).toBe(false);
     expect(readServerEnabledBit(parsed, 'sharing.pendingDeliveryAttemptClaims')).toBe(false);
   });
+
+  it('preserves runtime activity v2 and defaults it fail closed when omitted', () => {
+    const enabled = FeaturesResponseSchema.parse({
+      features: { sessions: { enabled: true, runtimeActivityV2: { enabled: true } } },
+      capabilities: {},
+    });
+    const omitted = FeaturesResponseSchema.parse({
+      features: { sessions: { enabled: true } },
+      capabilities: {},
+    });
+
+    expect(readServerEnabledBit(enabled, 'sessions.runtimeActivityV2')).toBe(true);
+    expect(readServerEnabledBit(omitted, 'sessions.runtimeActivityV2')).toBe(false);
+  });
 });

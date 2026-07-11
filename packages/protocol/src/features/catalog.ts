@@ -165,6 +165,12 @@ const FEATURE_CATALOG_DEFINITION = {
     dependencies: ['sessions'],
     representation: 'server',
   },
+  'sessions.runtimeActivityV2': {
+    description: 'Generation-fenced, source-scoped session runtime activity with explicit active, idle, and unknown states.',
+    defaultFailMode: 'fail_closed',
+    dependencies: ['sessions'],
+    representation: 'server',
+  },
   'sessions.folders': {
     description: 'Per-account session folder organization and assignment APIs.',
     defaultFailMode: 'fail_closed',
