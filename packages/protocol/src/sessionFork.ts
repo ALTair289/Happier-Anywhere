@@ -24,6 +24,13 @@ export const SessionForkRpcParamsSchema = z
     strategy: SessionForkStrategySchema.optional(),
     replaySummaryRunner: LlmTaskRunnerConfigV1Schema.optional(),
     replayMaxSeedChars: z.number().int().min(200).max(200_000).optional(),
+    /**
+     * Stable idempotency key for the fork request. Retries of the SAME user
+     * action (e.g. transport-timeout retries inside the machine RPC layer)
+     * MUST reuse it so the daemon can coalesce them onto the in-flight fork
+     * instead of committing a second provider-side fork.
+     */
+    requestId: z.string().min(1).max(128).optional(),
   })
   .strict();
 export type SessionForkRpcParams = z.infer<typeof SessionForkRpcParamsSchema>;

@@ -47,6 +47,31 @@ describe('SessionForkRpcParamsSchema', () => {
     expect(parsed.success).toBe(true);
   });
 
+  it('accepts a stable request id while rejecting empty or oversized values', () => {
+    const valid = SessionForkRpcParamsSchema.safeParse({
+      v: 1,
+      parentSessionId: 'sess_parent',
+      forkPoint: { type: 'latest' },
+      requestId: 'fork-request-1',
+    });
+    const empty = SessionForkRpcParamsSchema.safeParse({
+      v: 1,
+      parentSessionId: 'sess_parent',
+      forkPoint: { type: 'latest' },
+      requestId: '',
+    });
+    const oversized = SessionForkRpcParamsSchema.safeParse({
+      v: 1,
+      parentSessionId: 'sess_parent',
+      forkPoint: { type: 'latest' },
+      requestId: 'x'.repeat(129),
+    });
+
+    expect(valid.success).toBe(true);
+    expect(empty.success).toBe(false);
+    expect(oversized.success).toBe(false);
+  });
+
   it('rejects unknown top-level fields', () => {
     const parsed = SessionForkRpcParamsSchema.safeParse({
       v: 1,
