@@ -428,7 +428,7 @@ describe('codexAppServerUsageLimitRecoveryControlAdapter', () => {
     );
     const fetchRuntime = vi.fn(async (url: string, init: RequestInit) => {
       if (init.method === 'POST') {
-        return { ok: true, status: 200, json: async () => ({ ok: true }) } as Response;
+        return { ok: true, status: 200, json: async () => ({ code: 'reset', windows_reset: 2 }) } as Response;
       }
       expect(url).toBe('https://chatgpt.com/backend-api/wham/rate-limit-reset-credits');
       return {
@@ -493,7 +493,82 @@ describe('codexAppServerUsageLimitRecoveryControlAdapter', () => {
           'Content-Type': 'application/json',
         }),
         body: JSON.stringify({
+          redeem_request_id: 'usage-limit:sess_1:reset:reset-credit',
           credit_id: 'credit-native-1',
+        }),
+      }),
+    );
+  });
+
+  it('uses aggregate redemption when the provider reports available credits without detail ids', async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), 'happier-codex-reset-native-aggregate-home-'));
+    tempDirs.push(codexHome);
+    await mkdir(codexHome, { recursive: true });
+    await writeFile(
+      join(codexHome, 'auth.json'),
+      JSON.stringify({
+        tokens: {
+          id_token: buildJwt({ email: 'native@example.test', exp: 4_102_444_800 }),
+          access_token: buildJwt({ email: 'native@example.test', exp: 4_102_444_800 }),
+          account_id: 'acct-native',
+        },
+      }),
+      'utf8',
+    );
+    const fetchRuntime = vi.fn(async (url: string, init: RequestInit) => {
+      if (init.method === 'POST') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ code: 'reset', windows_reset: 2 }),
+        } as Response;
+      }
+      expect(url).toBe('https://chatgpt.com/backend-api/wham/rate-limit-reset-credits');
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ available_count: 1, credits: [] }),
+      } as Response;
+    });
+    const runWithControlClient: RunWithControlClient = async (params) => ({
+      ok: true,
+      value: await params.run(createClient(async () => ({ primary: { used_percent: 12 } }))),
+    });
+    const adapter = createCodexAppServerUsageLimitRecoveryControlAdapter({
+      runWithControlClient,
+      fetchRuntime,
+    });
+    const metadata = {
+      machineId: 'machine-local',
+      agentRuntimeDescriptorV1: buildCodexAgentRuntimeDescriptor({
+        backendMode: 'appServer',
+        vendorSessionId: 'thread-1',
+        home: 'user',
+        homePath: codexHome,
+      }),
+      sessionUsageLimitRecoveryV1: {
+        v: 1,
+        status: 'waiting',
+        issueFingerprint: 'usage-limit:sess_1:reset',
+        armedAtMs: 1,
+        resetAtMs: 2,
+        nextCheckAtMs: 2,
+        attemptCount: 0,
+        maxAttempts: 3,
+        lastProbeError: null,
+        selectedAuth: { kind: 'native', serviceId: 'openai-codex' },
+      },
+    };
+
+    await expect(adapter.consumeResetCredit?.(createParams(metadata))).resolves.toMatchObject({
+      ok: true,
+      status: 'ready',
+    });
+    expect(fetchRuntime).toHaveBeenCalledWith(
+      'https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
           redeem_request_id: 'usage-limit:sess_1:reset:reset-credit',
         }),
       }),
@@ -517,7 +592,7 @@ describe('codexAppServerUsageLimitRecoveryControlAdapter', () => {
     );
     const fetchRuntime = vi.fn(async (url: string, init: RequestInit) => {
       if (init.method === 'POST') {
-        return { ok: true, status: 200, json: async () => ({ ok: true }) } as Response;
+        return { ok: true, status: 200, json: async () => ({ code: 'reset', windows_reset: 2 }) } as Response;
       }
       expect(url).toBe('https://chatgpt.com/backend-api/wham/rate-limit-reset-credits');
       return {
@@ -556,6 +631,19 @@ describe('codexAppServerUsageLimitRecoveryControlAdapter', () => {
         maxAttempts: 3,
         lastProbeError: null,
         selectedAuth: { kind: 'native', serviceId: 'openai-codex' },
+        recoveryCredits: {
+          kind: 'usage_limit_resets',
+          availableCount: 1,
+          totalCount: 1,
+          source: 'provider_api',
+          confidence: 'exact',
+          credits: [{
+            providerCreditId: 'credit-persisted-stale',
+            kind: 'rate_limit_reset',
+            status: 'available',
+            providerResetType: 'codex_rate_limits',
+          }],
+        },
       },
     };
 
@@ -588,7 +676,7 @@ describe('codexAppServerUsageLimitRecoveryControlAdapter', () => {
     );
     const fetchRuntime = vi.fn(async (url: string, init: RequestInit) => {
       if (init.method === 'POST') {
-        return { ok: true, status: 200, json: async () => ({ ok: true }) } as Response;
+        return { ok: true, status: 200, json: async () => ({ code: 'reset', windows_reset: 2 }) } as Response;
       }
       expect(url).toBe('https://chatgpt.com/backend-api/wham/rate-limit-reset-credits');
       return {
@@ -655,7 +743,7 @@ describe('codexAppServerUsageLimitRecoveryControlAdapter', () => {
   it('consumes a connected-service Codex reset credit for the selected profile', async () => {
     const fetchRuntime = vi.fn(async (url: string, init: RequestInit) => {
       if (init.method === 'POST') {
-        return { ok: true, status: 200, json: async () => ({ ok: true }) } as Response;
+        return { ok: true, status: 200, json: async () => ({ code: 'reset', windows_reset: 2 }) } as Response;
       }
       expect(url).toBe('https://chatgpt.com/backend-api/wham/rate-limit-reset-credits');
       return {
@@ -728,8 +816,8 @@ describe('codexAppServerUsageLimitRecoveryControlAdapter', () => {
           'Content-Type': 'application/json',
         }),
         body: JSON.stringify({
-          credit_id: 'credit-connected-1',
           redeem_request_id: 'usage-limit:sess_1:reset:reset-credit',
+          credit_id: 'credit-connected-1',
         }),
       }),
     );

@@ -136,17 +136,13 @@ export function createOpenAiCodexQuotaFetcher(params?: Readonly<{
           { quotaFetchErrorCode: 'missing_auth' },
         );
       }
-      const creditId = typeof providerCreditId === 'string' ? providerCreditId.trim() : '';
-      if (!creditId) {
-        throw new ConnectedServiceQuotaFetchError(
-          'OpenAI Codex reset-credit consume requires a provider credit id',
-          { quotaFetchErrorCode: 'missing_auth', providerCode: 'missing_credit_id' },
-        );
-      }
+      const creditId = typeof providerCreditId === 'string' && providerCreditId.trim()
+        ? providerCreditId.trim()
+        : undefined;
       const result = await consumeCodexRateLimitResetCredit({
         accessToken: record.oauth.accessToken,
         accountId: record.oauth.providerAccountId,
-        creditId,
+        ...(creditId ? { creditId } : {}),
         redeemRequestId: idempotencyKey,
         signal,
       });
@@ -162,7 +158,16 @@ export function createOpenAiCodexQuotaFetcher(params?: Readonly<{
           },
         );
       }
-      return result.response;
+      switch (result.outcome.code) {
+        case 'reset':
+          return 'consumed';
+        case 'already_redeemed':
+          return 'already_consumed';
+        case 'no_credit':
+          return 'not_available';
+        case 'nothing_to_reset':
+          return 'nothing_to_reset';
+      }
     },
     fetch: async ({ record, now, signal }) => {
       if (record.kind !== 'oauth') {

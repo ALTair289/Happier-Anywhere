@@ -36,11 +36,11 @@ describe('codexRateLimitResetCreditsClient', () => {
     );
   });
 
-  it('posts to the Codex reset-credit consume endpoint with a credit-id JSON body', async () => {
+  it('posts the official explicit-id reset-credit wire body', async () => {
     const fetchRuntime = vi.fn(async (_url: string, _init: RequestInit): Promise<Response> => ({
       ok: true,
       status: 200,
-      json: async () => ({ ok: true }),
+      json: async () => ({ code: 'reset', windows_reset: 2 }),
     } as Response));
 
     await expect(consumeCodexRateLimitResetCredit({
@@ -52,7 +52,8 @@ describe('codexRateLimitResetCreditsClient', () => {
       fetchRuntime,
     })).resolves.toEqual({
       ok: true,
-      response: { ok: true },
+      response: { code: 'reset', windows_reset: 2 },
+      outcome: { code: 'reset', windowsReset: 2 },
     });
 
     expect(fetchRuntime).toHaveBeenCalledWith(
@@ -65,13 +66,17 @@ describe('codexRateLimitResetCreditsClient', () => {
           'Content-Type': 'application/json',
           Accept: 'application/json',
         }),
-        body: JSON.stringify({ credit_id: 'credit-1', redeem_request_id: 'reset-req-1' }),
+        body: JSON.stringify({ redeem_request_id: 'reset-req-1', credit_id: 'credit-1' }),
       }),
     );
   });
 
-  it('rejects a consume request with no credit id', async () => {
-    const fetchRuntime = vi.fn();
+  it('posts the official aggregate reset-credit wire body without a credit id', async () => {
+    const fetchRuntime = vi.fn(async (_url: string, _init: RequestInit): Promise<Response> => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ code: 'reset', windows_reset: 1 }),
+    } as Response));
 
     await expect(consumeCodexRateLimitResetCredit({
       accessToken: 'access-token',
@@ -81,11 +86,77 @@ describe('codexRateLimitResetCreditsClient', () => {
       consumeUrl: 'https://chatgpt.example.test/backend-api/wham/rate-limit-reset-credits/consume',
       fetchRuntime,
     })).resolves.toEqual({
+      ok: true,
+      response: { code: 'reset', windows_reset: 1 },
+      outcome: { code: 'reset', windowsReset: 1 },
+    });
+    expect(fetchRuntime).toHaveBeenCalledWith(
+      'https://chatgpt.example.test/backend-api/wham/rate-limit-reset-credits/consume',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ redeem_request_id: 'reset-req-1' }),
+      }),
+    );
+  });
+
+  it('rejects a consume request with no redeem request id before provider I/O', async () => {
+    const fetchRuntime = vi.fn();
+
+    await expect(consumeCodexRateLimitResetCredit({
+      accessToken: 'access-token',
+      accountId: 'acct-1',
+      creditId: 'credit-1',
+      redeemRequestId: '   ',
+      consumeUrl: 'https://chatgpt.example.test/backend-api/wham/rate-limit-reset-credits/consume',
+      fetchRuntime,
+    })).resolves.toEqual({
       ok: false,
       errorCode: 'codex_reset_credit_consume_failed',
-      providerCode: 'missing_credit_id',
+      providerCode: 'missing_redeem_request_id',
     });
     expect(fetchRuntime).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['reset', 2, { code: 'reset', windowsReset: 2 }],
+    ['nothing_to_reset', 0, { code: 'nothing_to_reset', windowsReset: 0 }],
+    ['no_credit', 0, { code: 'no_credit', windowsReset: 0 }],
+    ['already_redeemed', 0, { code: 'already_redeemed', windowsReset: 0 }],
+  ] as const)('parses the provider %s outcome', async (code, windowsReset, outcome) => {
+    const fetchRuntime = vi.fn(async (_url: string, _init: RequestInit): Promise<Response> => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ code, windows_reset: windowsReset }),
+    } as Response));
+
+    await expect(consumeCodexRateLimitResetCredit({
+      accessToken: 'access-token',
+      accountId: 'acct-1',
+      creditId: 'credit-1',
+      redeemRequestId: 'reset-req-1',
+      fetchRuntime,
+    })).resolves.toMatchObject({ ok: true, outcome });
+  });
+
+  it('rejects a successful HTTP response with an unknown provider outcome', async () => {
+    const fetchRuntime = vi.fn(async (_url: string, _init: RequestInit): Promise<Response> => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ code: 'future_code', windows_reset: 0 }),
+    } as Response));
+
+    await expect(consumeCodexRateLimitResetCredit({
+      accessToken: 'access-token',
+      accountId: 'acct-1',
+      creditId: 'credit-1',
+      redeemRequestId: 'reset-req-1',
+      fetchRuntime,
+    })).resolves.toEqual({
+      ok: false,
+      errorCode: 'codex_reset_credit_consume_failed',
+      status: 200,
+      providerCode: 'invalid_consume_response',
+    });
   });
 
   it('returns provider status details for rejected reset-credit consume requests', async () => {

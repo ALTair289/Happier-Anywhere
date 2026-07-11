@@ -288,7 +288,7 @@ describe('createOpenAiCodexQuotaFetcher', () => {
     const now = 1_768_000_000_000;
     const fetchMock = vi.fn(async () => ({
       ok: true,
-      json: async () => ({ ok: true }),
+      json: async () => ({ code: 'reset', windows_reset: 2 }),
     }));
     vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
 
@@ -318,7 +318,7 @@ describe('createOpenAiCodexQuotaFetcher', () => {
       signal: new AbortController().signal,
     });
 
-    expect(result).toEqual(expect.objectContaining({ ok: true }));
+    expect(result).toBe('consumed');
     expect(fetchMock).toHaveBeenCalledWith(
       'https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume',
       expect.objectContaining({
@@ -328,14 +328,18 @@ describe('createOpenAiCodexQuotaFetcher', () => {
           'ChatGPT-Account-Id': 'acct',
           'Content-Type': 'application/json',
         }),
-        body: JSON.stringify({ credit_id: 'credit-1', redeem_request_id: 'reset-req-1' }),
+        body: JSON.stringify({ redeem_request_id: 'reset-req-1', credit_id: 'credit-1' }),
       }),
     );
   });
 
-  it('fails reset-credit consume when no provider credit id is supplied', async () => {
+  it('consumes an aggregate reset credit when no provider credit id is supplied', async () => {
     const now = 1_768_000_000_000;
-    const fetchMock = vi.fn();
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ code: 'nothing_to_reset', windows_reset: 0 }),
+    }));
     vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
 
     const record = buildConnectedServiceCredentialRecord({
@@ -361,8 +365,14 @@ describe('createOpenAiCodexQuotaFetcher', () => {
       now,
       idempotencyKey: 'reset-req-1',
       signal: new AbortController().signal,
-    })).rejects.toMatchObject({ providerCode: 'missing_credit_id' });
-    expect(fetchMock).not.toHaveBeenCalled();
+    })).resolves.toBe('nothing_to_reset');
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ redeem_request_id: 'reset-req-1' }),
+      }),
+    );
   });
 
   it('allows an explicitly configured ChatGPT wham usage endpoint', async () => {

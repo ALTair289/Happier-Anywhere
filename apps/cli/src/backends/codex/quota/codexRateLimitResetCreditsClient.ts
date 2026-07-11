@@ -16,13 +16,28 @@ export type FetchCodexRateLimitResetCreditsResult =
     }>;
 
 export type ConsumeCodexRateLimitResetCreditResult =
-  | Readonly<{ ok: true; response: unknown | null }>
+  | Readonly<{
+      ok: true;
+      response: unknown | null;
+      outcome: ConsumeCodexRateLimitResetCreditOutcome;
+    }>
   | Readonly<{
       ok: false;
       errorCode: 'codex_reset_credit_consume_failed' | 'codex_reset_credit_consume_network_error';
       status?: number;
       providerCode?: string | null;
     }>;
+
+export type ConsumeCodexRateLimitResetCreditOutcomeCode =
+  | 'reset'
+  | 'nothing_to_reset'
+  | 'no_credit'
+  | 'already_redeemed';
+
+export type ConsumeCodexRateLimitResetCreditOutcome = Readonly<{
+  code: ConsumeCodexRateLimitResetCreditOutcomeCode;
+  windowsReset: number;
+}>;
 
 function readProviderCode(value: unknown): string | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -41,6 +56,33 @@ async function readJsonBestEffort(response: Response): Promise<unknown | null> {
   } catch {
     return null;
   }
+}
+
+function parseConsumeOutcome(value: unknown): ConsumeCodexRateLimitResetCreditOutcome | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const code = record.code;
+  if (
+    code !== 'reset'
+    && code !== 'nothing_to_reset'
+    && code !== 'no_credit'
+    && code !== 'already_redeemed'
+  ) {
+    return null;
+  }
+  const rawWindowsReset = record.windows_reset;
+  if (
+    rawWindowsReset !== undefined
+    && (typeof rawWindowsReset !== 'number' || !Number.isFinite(rawWindowsReset))
+  ) {
+    return null;
+  }
+  return {
+    code,
+    windowsReset: typeof rawWindowsReset === 'number'
+      ? Math.max(0, Math.trunc(rawWindowsReset))
+      : 0,
+  };
 }
 
 export async function fetchCodexRateLimitResetCredits(params: Readonly<{
@@ -90,7 +132,7 @@ export async function consumeCodexRateLimitResetCredit(params: Readonly<{
   accessToken: string;
   accountId?: string | null;
   /** Id of the rate-limit-reset credit to redeem (from the credits inventory `id`). */
-  creditId: string;
+  creditId?: string | null;
   /** Per-redeem dedup id sent as `redeem_request_id`. Stable retries reuse the same value. */
   redeemRequestId: string;
   consumeUrl?: string;
@@ -98,7 +140,7 @@ export async function consumeCodexRateLimitResetCredit(params: Readonly<{
   signal?: AbortSignal;
 }>): Promise<ConsumeCodexRateLimitResetCreditResult> {
   const accessToken = params.accessToken.trim();
-  const creditId = params.creditId.trim();
+  const creditId = typeof params.creditId === 'string' ? params.creditId.trim() : '';
   const redeemRequestId = params.redeemRequestId.trim();
   if (!accessToken) {
     return {
@@ -107,11 +149,11 @@ export async function consumeCodexRateLimitResetCredit(params: Readonly<{
       providerCode: 'missing_access_token',
     };
   }
-  if (!creditId) {
+  if (!redeemRequestId) {
     return {
       ok: false,
       errorCode: 'codex_reset_credit_consume_failed',
-      providerCode: 'missing_credit_id',
+      providerCode: 'missing_redeem_request_id',
     };
   }
 
@@ -129,8 +171,8 @@ export async function consumeCodexRateLimitResetCredit(params: Readonly<{
           Accept: 'application/json',
         },
         body: JSON.stringify({
-          credit_id: creditId,
-          ...(redeemRequestId ? { redeem_request_id: redeemRequestId } : {}),
+          redeem_request_id: redeemRequestId,
+          ...(creditId ? { credit_id: creditId } : {}),
         }),
       },
     );
@@ -143,7 +185,16 @@ export async function consumeCodexRateLimitResetCredit(params: Readonly<{
         providerCode: readProviderCode(json),
       };
     }
-    return { ok: true, response: json };
+    const outcome = parseConsumeOutcome(json);
+    if (!outcome) {
+      return {
+        ok: false,
+        errorCode: 'codex_reset_credit_consume_failed',
+        status: response.status,
+        providerCode: 'invalid_consume_response',
+      };
+    }
+    return { ok: true, response: json, outcome };
   } catch {
     return { ok: false, errorCode: 'codex_reset_credit_consume_network_error' };
   }

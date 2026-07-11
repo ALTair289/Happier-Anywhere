@@ -154,6 +154,14 @@ function selectAvailableResetCreditId(
   return available?.providerCreditId?.trim() ?? null;
 }
 
+function hasAvailableResetCredit(
+  recoveryCredits: ConnectedServiceQuotaRecoveryCreditsV1 | null | undefined,
+): boolean {
+  if (!recoveryCredits || recoveryCredits.kind !== 'usage_limit_resets') return false;
+  if (recoveryCredits.availableCount > 0) return true;
+  return selectAvailableResetCreditId(recoveryCredits) !== null;
+}
+
 function buildNextIntent(params: Readonly<{
   intent: SessionUsageLimitRecoveryV1;
   exhausted: boolean;
@@ -333,24 +341,27 @@ export function createCodexAppServerUsageLimitRecoveryControlAdapter(deps: Reado
           : 'codex_reset_credit_connected_service_auth_unavailable');
       }
 
-      // Resolve the concrete credit to redeem. Prefer a freshly fetched available
-      // credit id; fall back to the persisted intent's credits when the live fetch
-      // is unavailable. The provider rejects a consume with no credit_id.
+      // Prefer a concrete available credit when details contain one, while preserving
+      // the provider's aggregate redemption contract for count-only/capped inventories.
       const liveRecoveryCredits = await readRecoveryCreditsForIntent(params, intent);
+      const effectiveRecoveryCredits = liveRecoveryCredits ?? intent.recoveryCredits;
       const creditId = selectAvailableResetCreditId(liveRecoveryCredits)
-        ?? selectAvailableResetCreditId(intent.recoveryCredits);
-      if (!creditId) {
+        ?? (liveRecoveryCredits === null
+          ? selectAvailableResetCreditId(intent.recoveryCredits)
+          : null);
+      if (!creditId && !hasAvailableResetCredit(effectiveRecoveryCredits)) {
         return stableError('codex_reset_credit_no_available_credit');
       }
 
       const consumed = await consumeCodexRateLimitResetCredit({
         accessToken: auth.accessToken,
         accountId: auth.accountId,
-        creditId,
+        ...(creditId ? { creditId } : {}),
         redeemRequestId: `${intent.issueFingerprint}:reset-credit`,
         ...(deps.fetchRuntime ? { fetchRuntime: deps.fetchRuntime } : {}),
       });
       if (!consumed.ok) return stableError(consumed.providerCode ?? consumed.errorCode);
+      if (consumed.outcome.code === 'no_credit') return stableError('no_credit');
 
       return await runCheckNow(params);
     },

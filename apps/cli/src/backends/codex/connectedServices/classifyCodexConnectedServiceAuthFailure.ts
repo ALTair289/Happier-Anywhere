@@ -1,9 +1,11 @@
 import type { ConnectedServiceId, ConnectedServiceLimitCategoryV1, ConnectedServiceProfileId } from '@happier-dev/protocol';
 
 import { classifyPrimarySessionRuntimeIssue } from '@/agent/runtime/session/errors/classifyPrimarySessionRuntimeIssue';
+import { classifyProviderLimitEvidence } from '@/daemon/connectedServices/quotas/normalization';
 
 export type CodexConnectedServiceRuntimeFailureKind =
   | 'usage_limit'
+  | 'capacity'
   | 'auth_expired'
   | 'account_changed'
   | 'refresh_failed'
@@ -19,6 +21,7 @@ export type CodexConnectedServiceRuntimeFailureClassification = Readonly<{
   groupGeneration?: number | null;
   resetsAtMs: number | null;
   retryAfterMs: number | null;
+  quotaScope?: 'provider';
   planType: string | null;
   rateLimits: unknown | null;
   sourceProviderAccountId?: string | null;
@@ -93,6 +96,13 @@ function readErrorText(value: unknown): string {
     .join(' ');
 }
 
+export function isCodexProviderCapacityFailure(value: unknown): boolean {
+  const evidence = value instanceof Error
+    ? { message: value.message }
+    : readErrorRecord(value) ?? value;
+  return classifyProviderLimitEvidence(evidence) === 'capacity';
+}
+
 function isStructuredUsageLimitCode(value: string | null): boolean {
   return value === 'UsageLimitExceeded'
     || value === 'UsageLimitReached'
@@ -145,6 +155,7 @@ function buildClassification(
     limitCategory?: CodexConnectedServiceRuntimeFailureClassification['limitCategory'];
     resetsAtMs?: number | null;
     retryAfterMs?: number | null;
+    quotaScope?: CodexConnectedServiceRuntimeFailureClassification['quotaScope'];
     planType?: string | null;
     rateLimits?: unknown | null;
     source: CodexConnectedServiceRuntimeFailureClassification['source'];
@@ -165,6 +176,7 @@ function buildClassification(
     ...(groupGeneration !== null ? { groupGeneration } : {}),
     resetsAtMs: params.resetsAtMs ?? null,
     retryAfterMs: params.retryAfterMs ?? null,
+    ...(params.quotaScope ? { quotaScope: params.quotaScope } : {}),
     planType: params.planType ?? null,
     rateLimits: params.rateLimits ?? null,
     ...(sourceProviderAccountId ? { sourceProviderAccountId } : {}),
@@ -227,6 +239,15 @@ export function classifyCodexConnectedServiceAuthFailure(
     return buildClassification(input, {
       kind: 'auth_expired',
       limitCategory: 'auth_invalid',
+      source: record ? 'structured_provider_error' : 'stable_provider_message',
+    });
+  }
+
+  if (isCodexProviderCapacityFailure(input.error)) {
+    return buildClassification(input, {
+      kind: 'capacity',
+      limitCategory: 'capacity',
+      quotaScope: 'provider',
       source: record ? 'structured_provider_error' : 'stable_provider_message',
     });
   }

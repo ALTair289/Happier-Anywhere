@@ -254,6 +254,32 @@ describe('classifyCodexConnectedServiceAuthFailure', () => {
     })).toBeNull();
   });
 
+  it('classifies the observed model-capacity failure for provider-scoped retry recovery', () => {
+    expect(classifyCodexConnectedServiceAuthFailure({
+      providerErrorPath: true,
+      error: {
+        turn: {
+          error: {
+            message: 'Selected model is at capacity. Please try a different model.',
+            codexErrorInfo: 'other',
+            additionalDetails: null,
+          },
+        },
+      },
+      serviceId: 'openai-codex',
+      profileId: 'work',
+      groupId: 'pool',
+    })).toMatchObject({
+      kind: 'capacity',
+      limitCategory: 'capacity',
+      quotaScope: 'provider',
+      serviceId: 'openai-codex',
+      profileId: 'work',
+      groupId: 'pool',
+      source: 'structured_provider_error',
+    });
+  });
+
   it('recognizes account-changed auth failures', () => {
     const result = classifyCodexConnectedServiceAuthFailure({
       providerErrorPath: true,
