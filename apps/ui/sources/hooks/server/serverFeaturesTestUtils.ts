@@ -105,6 +105,8 @@ export function buildServerFeaturesResponse(overrides: FixtureOverrides = {}): F
                 contentKeys: { enabled: true },
                 pendingQueueV2: { enabled: false },
                 pendingDeliveryState: { enabled: false },
+                pendingDeliveryAttempts: { enabled: false },
+                pendingDeliveryAttemptClaims: { enabled: false },
             },
             sessions: {
                 enabled: false,

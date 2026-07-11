@@ -97,6 +97,8 @@ const BASE_ROOT_LAYOUT_FEATURES: RootLayoutFeatures = {
             contentKeys: { enabled: true },
             pendingQueueV2: { enabled: false },
             pendingDeliveryState: { enabled: false },
+            pendingDeliveryAttempts: { enabled: false },
+            pendingDeliveryAttemptClaims: { enabled: false },
         },
         sessions: {
             enabled: false,
