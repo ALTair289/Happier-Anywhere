@@ -168,6 +168,10 @@ export {
   type SessionRuntimeActivityV1,
 } from './sessionRuntimeActivity/index.js';
 
+export * from './sessionRuntimeActivity/sessionRuntimeActivityIdentity.js';
+export * from './sessionRuntimeActivity/sessionRuntimeActivityV2.js';
+export * from './sessionRuntimeActivity/sessionRuntimeActivityReducer.js';
+
 export * from './clientCompatibility/index.js';
 
 export {

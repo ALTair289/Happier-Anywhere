@@ -19,3 +19,7 @@ export {
   type SessionRuntimeActivitySourceV1,
   type SessionRuntimeActivityV1,
 } from './sessionRuntimeActivityV1.js';
+
+export * from './sessionRuntimeActivityIdentity.js';
+export * from './sessionRuntimeActivityV2.js';
+export * from './sessionRuntimeActivityReducer.js';

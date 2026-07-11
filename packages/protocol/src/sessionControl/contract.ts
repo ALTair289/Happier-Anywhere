@@ -17,6 +17,12 @@ import {
 } from '../sessions/control/runtimeIssueV1.js';
 import { SessionRuntimeActivitySourceClassV1Schema } from '../sessionRuntimeActivity/sessionRuntimeActivityV1.js';
 import {
+  findPrivateSessionRuntimeActivityPublicFieldV2,
+  SessionRuntimeActivityAggregateStateV2Schema,
+  SessionRuntimeActivityPublicVersionSchema,
+  SessionRuntimeActivitySourceClassV2Schema,
+} from '../sessionRuntimeActivity/sessionRuntimeActivityV2.js';
+import {
   SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY,
   SessionUsageLimitRecoveryV1Schema,
 } from '../sessionMetadata/sessionUsageLimitRecoveryV1.js';
@@ -214,11 +220,20 @@ export const SessionSummarySchema = z.object({
   latestTurnId: z.string().min(1).nullable().optional(),
   latestTurnStatus: PrimaryTurnStatusV1Schema.nullable().optional(),
   lastRuntimeIssue: SessionRuntimeIssueV1Schema.nullable().optional(),
+  runtimeActivityVersion: SessionRuntimeActivityPublicVersionSchema.optional(),
+  runtimeActivityState: SessionRuntimeActivityAggregateStateV2Schema.nullable().optional(),
   runtimeActivityActiveCount: z.number().int().nonnegative().optional(),
   runtimeActivityObservedAt: z.number().int().nonnegative().nullable().optional(),
   runtimeActivityExpiresAt: z.number().int().nonnegative().nullable().optional(),
-  runtimeActivitySourceClass: SessionRuntimeActivitySourceClassV1Schema.nullable().optional(),
-}).passthrough();
+  runtimeActivitySourceClass: z.union([
+    SessionRuntimeActivitySourceClassV1Schema,
+    SessionRuntimeActivitySourceClassV2Schema,
+  ]).nullable().optional(),
+  runtimeActivityRevision: z.number().int().nonnegative().safe().optional(),
+}).passthrough().superRefine((value, context) => {
+  const privateField = findPrivateSessionRuntimeActivityPublicFieldV2(value);
+  if (privateField) context.addIssue({ code: 'custom', path: [privateField], message: 'Private runtime activity field is not public' });
+});
 export type SessionSummary = z.infer<typeof SessionSummarySchema>;
 
 /**
@@ -344,12 +359,22 @@ export const V2SessionRecordSchema = z
     latestTurnStatusObservedAt: z.number().int().nonnegative().nullable().optional(),
     lastRuntimeIssue: SessionRuntimeIssueV1Schema.nullable().optional(),
     initialTranscriptCatchUpAuthorization: SessionCatchUpAuthorizationV1Schema.optional(),
+    runtimeActivityVersion: SessionRuntimeActivityPublicVersionSchema.optional(),
+    runtimeActivityState: SessionRuntimeActivityAggregateStateV2Schema.nullable().optional(),
     runtimeActivityActiveCount: z.number().int().nonnegative().optional(),
     runtimeActivityObservedAt: z.number().int().nonnegative().nullable().optional(),
     runtimeActivityExpiresAt: z.number().int().nonnegative().nullable().optional(),
-    runtimeActivitySourceClass: SessionRuntimeActivitySourceClassV1Schema.nullable().optional(),
+    runtimeActivitySourceClass: z.union([
+      SessionRuntimeActivitySourceClassV1Schema,
+      SessionRuntimeActivitySourceClassV2Schema,
+    ]).nullable().optional(),
+    runtimeActivityRevision: z.number().int().nonnegative().safe().optional(),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((value, context) => {
+    const privateField = findPrivateSessionRuntimeActivityPublicFieldV2(value);
+    if (privateField) context.addIssue({ code: 'custom', path: [privateField], message: 'Private runtime activity field is not public' });
+  });
 export type V2SessionRecord = z.infer<typeof V2SessionRecordSchema>;
 
 export const V2SessionListResponseSchema = z

@@ -8,6 +8,12 @@ import { SessionMessageRoleSchema } from './sessionMessages/sessionMessageRole.j
 import { SessionStoredMessageContentSchema } from './sessionMessages/sessionStoredMessageContent.js';
 import { PrimaryTurnStatusV1Schema, SessionRuntimeIssueV1Schema } from './sessions/control/runtimeIssueV1.js';
 import { SessionRuntimeActivitySourceClassV1Schema } from './sessionRuntimeActivity/sessionRuntimeActivityV1.js';
+import {
+  findPrivateSessionRuntimeActivityPublicFieldV2,
+  SessionRuntimeActivityAggregateStateV2Schema,
+  SessionRuntimeActivityPublicVersionSchema,
+  SessionRuntimeActivitySourceClassV2Schema,
+} from './sessionRuntimeActivity/sessionRuntimeActivityV2.js';
 
 const TimestampMsSchema = z.number().int().min(0);
 const Base64Schema = z.string();
@@ -72,11 +78,20 @@ export const UpdateBodySchema = z.discriminatedUnion('t', [
     createdAt: TimestampMsSchema,
     updatedAt: TimestampMsSchema,
     meaningfulActivityAt: TimestampMsSchema.optional(),
+    runtimeActivityVersion: SessionRuntimeActivityPublicVersionSchema.optional(),
+    runtimeActivityState: SessionRuntimeActivityAggregateStateV2Schema.nullable().optional(),
     runtimeActivityActiveCount: z.number().int().nonnegative().optional(),
     runtimeActivityObservedAt: TimestampMsSchema.nullable().optional(),
     runtimeActivityExpiresAt: TimestampMsSchema.nullable().optional(),
-    runtimeActivitySourceClass: SessionRuntimeActivitySourceClassV1Schema.nullable().optional(),
-  }).passthrough(),
+    runtimeActivitySourceClass: z.union([
+      SessionRuntimeActivitySourceClassV1Schema,
+      SessionRuntimeActivitySourceClassV2Schema,
+    ]).nullable().optional(),
+    runtimeActivityRevision: z.number().int().nonnegative().safe().optional(),
+  }).passthrough().superRefine((value, context) => {
+    const privateField = findPrivateSessionRuntimeActivityPublicFieldV2(value);
+    if (privateField) context.addIssue({ code: 'custom', path: [privateField], message: 'Private runtime activity field is not public' });
+  }),
   z.object({
     t: z.literal('update-session'),
     id: z.string(),
@@ -94,13 +109,22 @@ export const UpdateBodySchema = z.discriminatedUnion('t', [
     latestTurnStatus: PrimaryTurnStatusV1Schema.nullable().optional(),
     latestTurnStatusObservedAt: TimestampMsSchema.nullable().optional(),
     lastRuntimeIssue: SessionRuntimeIssueV1Schema.nullable().optional(),
+    runtimeActivityVersion: SessionRuntimeActivityPublicVersionSchema.optional(),
+    runtimeActivityState: SessionRuntimeActivityAggregateStateV2Schema.nullable().optional(),
     runtimeActivityActiveCount: z.number().int().nonnegative().optional(),
     runtimeActivityObservedAt: TimestampMsSchema.nullable().optional(),
     runtimeActivityExpiresAt: TimestampMsSchema.nullable().optional(),
-    runtimeActivitySourceClass: SessionRuntimeActivitySourceClassV1Schema.nullable().optional(),
+    runtimeActivitySourceClass: z.union([
+      SessionRuntimeActivitySourceClassV1Schema,
+      SessionRuntimeActivitySourceClassV2Schema,
+    ]).nullable().optional(),
+    runtimeActivityRevision: z.number().int().nonnegative().safe().optional(),
     meaningfulActivityAt: TimestampMsSchema.optional(),
     archivedAt: TimestampMsSchema.nullable().optional(),
-  }).passthrough(),
+  }).passthrough().superRefine((value, context) => {
+    const privateField = findPrivateSessionRuntimeActivityPublicFieldV2(value);
+    if (privateField) context.addIssue({ code: 'custom', path: [privateField], message: 'Private runtime activity field is not public' });
+  }),
   z.object({
     t: z.literal('pending-changed'),
     sid: z.string(),
