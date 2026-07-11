@@ -321,35 +321,6 @@ describe('ApiMachineClient transports', () => {
     }));
   });
 
-  it('confirms session-end over HTTP even when the machine socket is absent', async () => {
-    const mod = await import('./apiMachine');
-
-    const machine: Machine = {
-      id: 'test-machine',
-      encryptionKey: new Uint8Array(32),
-      encryptionVariant: 'legacy',
-      metadata: null,
-      metadataVersion: 0,
-      daemonState: null,
-      daemonStateVersion: 0,
-    };
-
-    const client = new mod.ApiMachineClient('fake-token', machine);
-    client.emitSessionEnd({ sid: 'session-1', time: 1234 });
-
-    await vi.waitFor(() => {
-      expect(mockAxiosPost).toHaveBeenCalledWith(
-        'http://localhost:3005/v1/sessions/session-1/end',
-        { time: 1234 },
-        expect.objectContaining({
-          headers: expect.objectContaining({
-            Authorization: 'Bearer fake-token',
-          }),
-        }),
-      );
-    });
-  });
-
   it('keeps startup cleanup session-end queued when HTTP delivery fails', async () => {
     const tempServerDir = await mkdtemp(join(tmpdir(), 'happier-machine-session-end-'));
     configurationMock.activeServerDir = tempServerDir;
@@ -400,50 +371,10 @@ describe('ApiMachineClient transports', () => {
     }
   });
 
-  it('redacts authorization headers when session-end HTTP confirmation fails', async () => {
-    const mod = await import('./apiMachine');
-
-    const machine: Machine = {
-      id: 'test-machine',
-      encryptionKey: new Uint8Array(32),
-      encryptionVariant: 'legacy',
-      metadata: null,
-      metadataVersion: 0,
-      daemonState: null,
-      daemonStateVersion: 0,
-    };
-
-    mockAxiosPost.mockRejectedValueOnce({
-      isAxiosError: true,
-      name: 'AxiosError',
-      message: 'socket hang up',
-      code: 'ECONNRESET',
-      config: {
-        method: 'post',
-        url: 'http://localhost:3005/v1/sessions/session-1/end?token=secret',
-        headers: { Authorization: 'Bearer fake-token' },
-        data: { time: 1234 },
-      },
-    });
-
-    const client = new mod.ApiMachineClient('fake-token', machine);
-    client.emitSessionEnd({ sid: 'session-1', time: 1234 });
-
-    await vi.waitFor(() => {
-      expect(logger.warn).toHaveBeenCalled();
-    });
-
-    const logged = JSON.stringify(vi.mocked(logger.warn).mock.calls);
-    expect(logged).not.toContain('fake-token');
-    expect(logged).not.toContain('Authorization');
-    expect(logged).not.toContain('token=secret');
-  });
-
-  it('does not warn when connected legacy session-end delivery reaches a server without the durable route', async () => {
-    const machineSocket = createApiSessionSocketStub({ connected: true });
-    bindApiSessionSocketMock(mockIo, machineSocket);
-    mockAxiosPost.mockResolvedValueOnce({ status: 404, data: { error: 'not found' } });
-
+  it('routes daemon turn-settlement and session-end for one session through a single shared durable queue', async () => {
+    const tempServerDir = await mkdtemp(join(tmpdir(), 'happier-machine-single-owner-'));
+    configurationMock.activeServerDir = tempServerDir;
+    mockAxiosPost.mockRejectedValue(new Error('server offline'));
     const mod = await import('./apiMachine');
 
     const machine: Machine = {
@@ -457,22 +388,29 @@ describe('ApiMachineClient transports', () => {
     };
 
     const client = new mod.ApiMachineClient('fake-token', machine);
-    client.connect();
-    client.emitSessionEnd({ sid: 'session-1', time: 1234 });
 
-    await vi.waitFor(() => {
-      expect(mockAxiosPost).toHaveBeenCalledWith(
-        'http://localhost:3005/v1/sessions/session-1/end',
-        { time: 1234 },
-        expect.any(Object),
-      );
-    });
-    await new Promise<void>((resolve) => {
-      setTimeout(resolve, 0);
-    });
+    try {
+      // Two distinct daemon publish paths (Lane N1 turn-settlement + full session-end) for the same
+      // session must land in ONE durable outbox queue — no second instance, no rival file.
+      client.enqueueSessionTurnSettlementMutation({ sid: 'session-solo', time: 1000 });
+      client.enqueueSessionEndMutation({
+        sid: 'session-solo',
+        time: 2000,
+        exit: { observedBy: 'daemon', reason: 'process-missing' },
+      });
 
-    expect(machineSocket.emit).toHaveBeenCalledWith('session-end', { sid: 'session-1', time: 1234 });
-    expect(logger.warn).not.toHaveBeenCalled();
+      await vi.waitFor(async () => {
+        const parsed = JSON.parse(
+          await readFile(join(tempServerDir, 'session-mutations', 'session-session-solo.json'), 'utf8'),
+        ) as { mutations?: Array<{ kind?: string }> };
+        const kinds = (parsed.mutations ?? []).map((mutation) => mutation.kind);
+        // One queue, correct order: settlement turn precedes the session-end, session-end not superseded.
+        expect(kinds).toEqual(['session_turn', 'session_end']);
+      });
+    } finally {
+      await client.shutdown();
+      await rm(tempServerDir, { recursive: true, force: true });
+    }
   });
 
   it('threads direct-session transcript delta emission into machine RPC dependencies', async () => {

@@ -1,6 +1,5 @@
-import { resolveLoopbackHttpUrl } from '@/api/client/loopbackUrl';
-import { configuration } from '@/configuration';
+import { resolveServerHttpBaseUrl } from '@/session/transport/http/serverHttpBaseUrl';
 
 export function resolveAccountSettingsHttpBaseUrl(): string {
-  return resolveLoopbackHttpUrl(configuration.apiServerUrl).replace(/\/+$/, '');
+  return resolveServerHttpBaseUrl();
 }

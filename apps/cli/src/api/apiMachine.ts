@@ -29,7 +29,6 @@ import type {
 } from '@happier-dev/protocol';
 import { fetchChanges, fetchChangesAccountId } from './changes';
 import { readAccountChangesCursor, writeAccountChangesCursor } from '@/persistence';
-import { resolveLoopbackHttpUrl } from './client/loopbackUrl';
 import { createAuthenticationHttpStatusError, isAuthenticationError, isAuthenticationStatus } from './client/httpStatusError';
 import { serializeAxiosErrorForLog } from './client/serializeAxiosErrorForLog';
 import { runSupervisedRequest } from '@/api/connection/requestSupervision/runSupervisedRequest';
@@ -59,6 +58,7 @@ import { buildInstallationProofForMachine } from '@/daemon/identity/proof';
 import { readInstallationIdentityIfExistsSync } from '@/daemon/identity/store';
 import { readMachineOwnerConflictFromSocketError, type MachineOwnerConflictDetails } from '@/api/machine/machineOwnerConflict';
 import { readAccountSettingsVersionFromHint } from '@/settings/accountSettings/accountSettingsVersion';
+import { resolveServerHttpBaseUrl } from '@/session/transport/http/serverHttpBaseUrl';
 
 export type ApiMachineClientDeps = Readonly<{
     connectedAccounts?: ScmConnectedAccountCredentialResolver;
@@ -438,55 +438,6 @@ export class ApiMachineClient {
         });
     }
 
-    private async confirmSessionEndOverHttp(payload: MachineSessionEndPayload): Promise<'confirmed' | 'unsupported'> {
-        const serverUrl = resolveLoopbackHttpUrl(configuration.apiServerUrl).replace(/\/+$/, '');
-        const response = await axios.post(
-            `${serverUrl}/v1/sessions/${encodeURIComponent(payload.sid)}/end`,
-            { time: payload.time },
-            {
-                headers: {
-                    Authorization: `Bearer ${this.token}`,
-                    'Content-Type': 'application/json',
-                },
-                timeout: 15_000,
-                validateStatus: () => true,
-            },
-        );
-        if (isAuthenticationStatus(response.status)) {
-            throw createAuthenticationHttpStatusError(
-                response.status,
-                `Authentication failed while confirming session end (${response.status})`,
-            );
-        }
-        if (response.status === 404 || response.status === 405 || response.status === 501) {
-            return 'unsupported';
-        }
-        if (response.status < 200 || response.status >= 300) {
-            throw new Error(`Session-end HTTP confirmation failed with status ${response.status}`);
-        }
-        return 'confirmed';
-    }
-
-    emitSessionEnd(payload: MachineSessionEndPayload) {
-        // Socket fanout is kept for compatibility; HTTP is the durable confirmation path.
-        const emittedLegacySessionEnd = Boolean(this.socket);
-        if (this.socket) {
-            this.socket.emit('session-end', payload);
-        }
-        void this.confirmSessionEndOverHttp(payload).then((result) => {
-            if (result === 'unsupported' && emittedLegacySessionEnd) return;
-            if (result === 'unsupported') {
-                logger.warn('[API MACHINE] Failed to confirm session-end over HTTP', {
-                    error: { message: 'Session-end HTTP confirmation route unsupported' },
-                });
-            }
-        }).catch((error) => {
-            logger.warn('[API MACHINE] Failed to confirm session-end over HTTP', {
-                error: serializeAxiosErrorForLog(error),
-            });
-        });
-    }
-
     private createSessionEndMutationSocket(): SessionMutationSocket {
         return {
             connected: this.socket?.connected === true,
@@ -563,14 +514,14 @@ export class ApiMachineClient {
         onOwnershipConflict?: (conflict: { owner: MachineOwnerConflictDetails }) => void;
         onMachineReplaced?: () => void;
     }) {
-        const serverUrl = resolveLoopbackHttpUrl(configuration.apiServerUrl).replace(/\/+$/, '');
-        logger.debug(`[API MACHINE] Connecting to ${serverUrl}`);
+        logger.debug(`[API MACHINE] Connecting to ${resolveServerHttpBaseUrl()}`);
         let takeoverOnNextConnect = params?.takeover === true;
 
         if (!this.connectionSupervisor) {
             this.connectionSupervisor = createManagedConnectionSupervisor({
                 ...DEFAULT_MANAGED_CONNECTION_POLICY,
                 createTransport: () => {
+                    const serverUrl = resolveServerHttpBaseUrl();
                     const transportGeneration = this.activeTransportGeneration + 1;
                     this.activeTransportGeneration = transportGeneration;
                     const installationIdentity = readInstallationIdentityIfExistsSync();
@@ -604,10 +555,10 @@ export class ApiMachineClient {
                     });
                     return transport;
                 },
-                probeReadiness: createLoopbackReadinessProbe({
-                    serverUrl: configuration.apiServerUrl,
+                probeReadiness: async () => await createLoopbackReadinessProbe({
+                    serverUrl: resolveServerHttpBaseUrl(),
                     token: this.token,
-                }),
+                })(),
                 onStateChange: (state) => {
                     this.currentConnectionState = state;
                     for (const listener of this.connectionStateListeners) {
@@ -844,7 +795,7 @@ export class ApiMachineClient {
 
     private async refreshMachineFromServer(): Promise<void> {
         try {
-            const serverUrl = resolveLoopbackHttpUrl(configuration.apiServerUrl).replace(/\/+$/, '');
+            const serverUrl = resolveServerHttpBaseUrl();
             const request = async () => {
                 const response = await axios.get(`${serverUrl}/v1/machines/${this.machine.id}`, {
                     headers: {

@@ -22,6 +22,7 @@ const envKeys = [
   'HAPPIER_HOME_DIR',
   'HAPPIER_ACTIVE_SERVER_ID',
   'HAPPIER_SERVER_URL',
+  'HAPPIER_LOCAL_SERVER_URL',
   'HAPPIER_WEBAPP_URL',
   'HAPPIER_PUBLIC_SERVER_URL',
 ] as const;
@@ -65,5 +66,32 @@ describe('ApiMachineClient loopback url resolution', () => {
     expect(mockIo).toHaveBeenCalled();
     const calledUrl = mockIo.mock.calls[0]?.[0];
     expect(String(calledUrl)).toContain('http://127.0.0.1:3005');
+  });
+
+  it('uses the live runtime env endpoint instead of stale loaded configuration', async () => {
+    process.env.HAPPIER_SERVER_URL = 'http://localhost:41001';
+    delete process.env.HAPPIER_LOCAL_SERVER_URL;
+    reloadConfiguration();
+
+    const mod = await import('./apiMachine');
+
+    process.env.HAPPIER_SERVER_URL = 'http://localhost:52002';
+
+    const machine: Machine = {
+      id: 'test-machine',
+      encryptionKey: new Uint8Array(32),
+      encryptionVariant: 'legacy',
+      metadata: null,
+      metadataVersion: 0,
+      daemonState: null,
+      daemonStateVersion: 0,
+    };
+
+    const client = new mod.ApiMachineClient('fake-token', machine);
+    client.connect();
+
+    expect(mockIo).toHaveBeenCalled();
+    const calledUrl = mockIo.mock.calls[0]?.[0];
+    expect(String(calledUrl)).toContain('http://127.0.0.1:52002');
   });
 });
