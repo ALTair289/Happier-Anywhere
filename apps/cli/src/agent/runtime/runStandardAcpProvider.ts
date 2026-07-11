@@ -34,6 +34,7 @@ import { MessageBuffer } from '@/ui/ink/messageBuffer';
 import { logger } from '@/ui/logger';
 import { resolvePermissionModeSeedForAgentStart } from '@/settings/permissions/permissionModeSeed';
 import { resolveRunnerMcpServers } from '@/mcp/runtime/resolveRunnerMcpServers';
+import { applyRunnerMcpSessionContext } from '@/mcp/runtime/applyRunnerMcpSessionContext';
 import { resolveCliFeatureDecision } from '@/features/featureDecisionService';
 import { resolveCliMemoryRecallGuidanceEnabled } from '@/agent/promptLibrary/resolveCliMemoryRecallGuidanceEnabled';
 import { resolveAgentToolsDelivery } from '@/agent/tools/happierTools/runtime/resolveAgentToolsDelivery';
@@ -255,7 +256,9 @@ export async function runStandardAcpProvider(
   session = initializedSession.session;
   const reconnectionHandle = initializedSession.reconnectionHandle;
   if (config.deferUserMessageDeliveryWatermarkToProviderAcceptance === true) {
-    session.deferDeliveredUserMessageWatermarkToProviderAcceptance?.();
+    session.deferDeliveredUserMessageWatermarkToProviderAcceptance?.({
+      pendingMaterialization: 'commitAtMaterialize',
+    });
   }
 
   let abortRequestedCallback: (() => void | Promise<void>) | null = null;
@@ -369,9 +372,18 @@ export async function runStandardAcpProvider(
 
   const runtimeDirectory = runtimeContext.runtimeDirectory;
   const supportsMcpServers = (config.supportsMcpServers ?? true) && resolveAgentToolsDelivery(policyAgentId) === 'native_mcp';
+  const mcpSession = applyRunnerMcpSessionContext(session, {
+    getPermissionMode: () => permissionModeState.getCurrentPermissionMode() ?? 'default',
+    getBackendTarget: () => opts.backendTarget ?? null,
+    getCurrentSessionLocation: () => ({
+      path: runtimeDirectory,
+      host: config.machineMetadata.host,
+      machineId,
+    }),
+  });
   const { happierMcpServer, mcpServers } = supportsMcpServers
     ? await resolveRunnerMcpServersFn({
-      session,
+      session: mcpSession,
       credentials: opts.credentials,
       accountSettings: opts.accountSettingsContext?.settings ?? null,
       machineId,

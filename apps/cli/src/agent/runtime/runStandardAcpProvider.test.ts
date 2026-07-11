@@ -447,9 +447,11 @@ describe('runStandardAcpProvider', () => {
 
     let capturedMcpDirectory: string | null = null;
     let capturedSessionMetadata: any = null;
+    let capturedSessionLocation: any = null;
     harness.deps.resolveRunnerMcpServersFn = async (params: any) => {
       capturedMcpDirectory = params.directory;
       capturedSessionMetadata = params.sessionMetadata;
+      capturedSessionLocation = params.session.getCurrentSessionLocation?.();
       return {
         happierMcpServer: { stop: () => undefined },
         mcpServers: {},
@@ -465,6 +467,11 @@ describe('runStandardAcpProvider', () => {
     });
     expect(capturedMcpDirectory).toBe('/srv/attached-workspace');
     expect(capturedSessionMetadata).toMatchObject({ path: '/srv/attached-workspace', profileId: 'profile-attached' });
+    expect(capturedSessionLocation).toEqual({
+      path: '/srv/attached-workspace',
+      host: harness.config.machineMetadata.host,
+      machineId: 'machine-1',
+    });
   });
 
   it('skips native MCP resolution for shell-bridge providers', async () => {
@@ -635,7 +642,7 @@ describe('runStandardAcpProvider', () => {
     expect(harness.metrics.defaultReadyCalls).toBe(0);
   });
 
-  it('defers user-message delivery watermarks when the standard provider config opts in', async () => {
+  it('defers user-message delivery watermarks with request-response materialization when the standard provider config opts in', async () => {
     const harness = createHarness();
     harness.session.deferDeliveredUserMessageWatermarkToProviderAcceptance = vi.fn();
     (harness.config as any).deferUserMessageDeliveryWatermarkToProviderAcceptance = true;
@@ -643,6 +650,9 @@ describe('runStandardAcpProvider', () => {
     await runStandardAcpProvider(harness.opts, harness.config, harness.deps);
 
     expect(harness.session.deferDeliveredUserMessageWatermarkToProviderAcceptance).toHaveBeenCalledTimes(1);
+    expect(harness.session.deferDeliveredUserMessageWatermarkToProviderAcceptance).toHaveBeenCalledWith({
+      pendingMaterialization: 'commitAtMaterialize',
+    });
   });
 
   it('uses provider-controlled keep-alive mode when configured', async () => {
