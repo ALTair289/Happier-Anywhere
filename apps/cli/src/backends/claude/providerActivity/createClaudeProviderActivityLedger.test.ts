@@ -1,9 +1,41 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
+    CLAUDE_PROVIDER_TASK_ACTIVITY_TTL_MS,
     createClaudeProviderActivityLedger,
     readClaudeProviderTaskActivity,
 } from './createClaudeProviderActivityLedger';
+
+/** Manual clock + timer harness so TTL sweeps fire deterministically without real timers. */
+function createTtlHarness() {
+    let clockMs = 0;
+    const pending: Array<{ fn: () => void; fireAt: number }> = [];
+    const onActiveTasksExpired = vi.fn();
+    const ledger = createClaudeProviderActivityLedger({
+        now: () => clockMs,
+        ttlMs: CLAUDE_PROVIDER_TASK_ACTIVITY_TTL_MS,
+        onActiveTasksExpired,
+        setExpiryTimer: (fn, delayMs) => {
+            const entry = { fn, fireAt: clockMs + delayMs };
+            pending.push(entry);
+            return () => {
+                const index = pending.indexOf(entry);
+                if (index >= 0) pending.splice(index, 1);
+            };
+        },
+    });
+    const advance = (deltaMs: number) => {
+        clockMs += deltaMs;
+        // Fire any due timers (the ledger arms at most one at a time and re-arms on fire).
+        for (let guard = 0; guard < 100; guard += 1) {
+            const due = pending.find((entry) => entry.fireAt <= clockMs);
+            if (!due) break;
+            pending.splice(pending.indexOf(due), 1);
+            due.fn();
+        }
+    };
+    return { ledger, advance, onActiveTasksExpired };
+}
 
 describe('readClaudeProviderTaskActivity', () => {
     it('classifies async tool results as background task activity', () => {
@@ -102,5 +134,47 @@ describe('createClaudeProviderActivityLedger', () => {
             taskId: 'task-1',
             sources: ['assistant-auto-backgrounded-tool-result'],
         }]);
+    });
+
+    it('stops blocking hasActiveProviderTasks once a task has no events past the TTL (W-3)', () => {
+        const { ledger, advance } = createTtlHarness();
+        ledger.noteProviderTaskStarted('task-1');
+        expect(ledger.hasActiveProviderTasks()).toBe(true);
+
+        advance(CLAUDE_PROVIDER_TASK_ACTIVITY_TTL_MS - 1);
+        expect(ledger.hasActiveProviderTasks()).toBe(true);
+
+        advance(2);
+        expect(ledger.hasActiveProviderTasks()).toBe(false);
+        expect(ledger.getActiveProviderTaskCount()).toBe(0);
+    });
+
+    it('keeps a task alive when progress renews it inside the TTL window', () => {
+        const { ledger, advance } = createTtlHarness();
+        ledger.noteProviderTaskStarted('task-1');
+        advance(CLAUDE_PROVIDER_TASK_ACTIVITY_TTL_MS - 10);
+        ledger.noteProviderTaskProgress('task-1');
+        // Past the ORIGINAL deadline but within a fresh TTL from the progress event.
+        advance(20);
+        expect(ledger.hasActiveProviderTasks()).toBe(true);
+    });
+
+    it('re-checks idle emission when a TTL fires with no further events', () => {
+        const { ledger, advance, onActiveTasksExpired } = createTtlHarness();
+        ledger.noteProviderTaskStarted('task-1');
+        expect(onActiveTasksExpired).not.toHaveBeenCalled();
+
+        advance(CLAUDE_PROVIDER_TASK_ACTIVITY_TTL_MS + 1);
+        expect(onActiveTasksExpired).toHaveBeenCalledTimes(1);
+        expect(ledger.hasActiveProviderTasks()).toBe(false);
+    });
+
+    it('does not fire the expiry callback when a task terminates normally', () => {
+        const { ledger, advance, onActiveTasksExpired } = createTtlHarness();
+        ledger.noteProviderTaskStarted('task-1');
+        ledger.noteProviderTaskFinished('task-1');
+        advance(CLAUDE_PROVIDER_TASK_ACTIVITY_TTL_MS + 1);
+        expect(onActiveTasksExpired).not.toHaveBeenCalled();
+        expect(ledger.hasActiveProviderTasks()).toBe(false);
     });
 });
