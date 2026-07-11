@@ -27,6 +27,9 @@ import {
     type PermissionRequestCoordinatorCompletedRequest,
     type PermissionRequestCoordinatorContext,
 } from './permissionRequestCoordinator';
+import type { PermissionResult } from './permissionResult';
+
+export type { PermissionResult } from './permissionResult';
 
 export type PermissionRequestPushSender = PermissionRequestPushSenderFromSettings;
 
@@ -65,17 +68,6 @@ export interface PendingRequest {
     toolName: string;
     input: unknown;
     coordinatorManaged?: boolean;
-}
-
-/**
- * Result of a permission request.
- */
-export interface PermissionResult {
-    decision: 'approved' | 'approved_for_session' | 'approved_execpolicy_amendment' | 'denied' | 'abort';
-    execPolicyAmendment?: {
-        command: string[];
-    };
-    answers?: Record<string, string>;
 }
 
 /**

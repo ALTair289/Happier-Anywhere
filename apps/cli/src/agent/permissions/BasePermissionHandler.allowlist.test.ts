@@ -319,7 +319,7 @@ describe('BasePermissionHandler allowlist', () => {
 
     const result = await promise;
     expect(result.decision).toBe('approved');
-    expect((result as any).answers).toEqual({ q1: 'a' });
+    expect(result.answers).toEqual({ q1: 'a' });
   });
 
   it('invokes onAbortRequested when user responds with abort', async () => {
