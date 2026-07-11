@@ -10,6 +10,7 @@ export function isTransientConnectivityError(error: unknown): boolean {
     if (
         error.name === 'ServerFetchConnectivityTimeoutError'
         || error.name === 'ServerFetchAbortedForServerSwitchError'
+        || error.name === 'ServerFetchWriteTimeoutError'
     ) {
         return true;
     }

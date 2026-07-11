@@ -10,7 +10,10 @@ import {
     ServerReachabilityWaitTimeoutError,
     waitForServerReachable,
 } from '@/sync/runtime/connectivity/serverReachabilitySupervisorPool';
-import { readServerReachabilityWaitTimeoutMs } from '@/sync/runtime/connectivity/serverReachabilityTuning';
+import {
+    readServerFetchWriteTimeoutMs,
+    readServerReachabilityWaitTimeoutMs,
+} from '@/sync/runtime/connectivity/serverReachabilityTuning';
 
 export { resetRuntimeFetch, setRuntimeFetch } from '@/utils/system/runtimeFetch';
 
@@ -37,6 +40,20 @@ export class ServerFetchConnectivityTimeoutError extends Error {
     }
 }
 
+/**
+ * A mutating request exceeded its write timeout (the server accepted the connection but never
+ * responded). Retryable: the pending outbox re-POSTs with the same localId (server dedupes), so a
+ * timeout that fires after the server actually committed is idempotent.
+ */
+export class ServerFetchWriteTimeoutError extends Error {
+    public readonly retryable = true;
+
+    constructor() {
+        super('Timed out waiting for the server to respond to a write');
+        this.name = 'ServerFetchWriteTimeoutError';
+    }
+}
+
 type ServerFetchOptions = Readonly<{
     includeAuth?: boolean;
     /**
@@ -45,7 +62,23 @@ type ServerFetchOptions = Readonly<{
      * orchestration/backoff and must not get stuck behind nested connectivity supervisors.
      */
     retry?: 'default' | 'none';
+    /**
+     * Per-request upper bound (ms) after which the request is aborted with a retryable
+     * `ServerFetchWriteTimeoutError`. When omitted, mutating requests (POST/PUT/PATCH/DELETE) use
+     * the canonical write timeout (`readServerFetchWriteTimeoutMs`) and reads stay unbounded here.
+     * Pass `0` to explicitly disable the bound for a single request.
+     */
+    timeoutMs?: number;
 }>;
+
+const MUTATING_HTTP_METHODS: ReadonlySet<string> = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+function resolveRequestTimeoutMs(method: string, optionTimeoutMs: number | undefined): number {
+    if (typeof optionTimeoutMs === 'number' && Number.isFinite(optionTimeoutMs)) {
+        return Math.max(0, Math.trunc(optionTimeoutMs));
+    }
+    return MUTATING_HTTP_METHODS.has(method) ? readServerFetchWriteTimeoutMs() : 0;
+}
 
 const inFlightControllers = new Set<AbortController>();
 let abortSequence = 0;
@@ -226,6 +259,20 @@ export async function serverFetch(
     }
 
     const method = String(init?.method ?? 'GET').toUpperCase();
+
+    // Bound mutating requests so a stalled server (accepts, never responds) cannot hang the await
+    // forever — the silent message-loss class. On expiry we abort the in-flight request and surface
+    // a retryable ServerFetchWriteTimeoutError so the pending outbox re-POSTs with the same localId.
+    const effectiveTimeoutMs = resolveRequestTimeoutMs(method, options.timeoutMs);
+    let didWriteTimeout = false;
+    let writeTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
+    if (effectiveTimeoutMs > 0) {
+        writeTimeoutHandle = setTimeout(() => {
+            didWriteTimeout = true;
+            requestController.abort('write-timeout');
+        }, effectiveTimeoutMs);
+    }
+
     const retryMode: 'default' | 'none' = options.retry ?? 'default';
     const isActiveOrigin =
         !isCrossOrigin
@@ -243,7 +290,7 @@ export async function serverFetch(
                 if (isActiveOrigin && retryMode !== 'none') {
                     const tokenForReachability =
                         usedToken
-                        ?? (peekServerReachabilityToken(snapshot.serverUrl) ?? null)
+                        ?? peekServerReachabilityToken(snapshot.serverUrl)
                         ?? null;
                     try {
                         await waitForServerReachable({
@@ -261,6 +308,10 @@ export async function serverFetch(
                             const serverSwitchAbort = reason === 'server-switch' || abortSequence !== localAbortSequence;
                             if (serverSwitchAbort) {
                                 throw new ServerFetchAbortedForServerSwitchError();
+                            }
+                            if (didWriteTimeout) {
+                                reportServerUnreachable(snapshot.serverUrl, error);
+                                throw new ServerFetchWriteTimeoutError();
                             }
                             throw error;
                         }
@@ -305,6 +356,13 @@ export async function serverFetch(
                     const serverSwitchAbort = reason === 'server-switch' || abortSequence !== localAbortSequence;
                     if (serverSwitchAbort) {
                         throw new ServerFetchAbortedForServerSwitchError();
+                    }
+                    if (didWriteTimeout) {
+                        // The server accepted the connection but never responded within the write
+                        // bound. Report unreachable (so backoff/reachability track it) and surface a
+                        // retryable timeout so the pending outbox re-POSTs with the same localId.
+                        reportServerUnreachable(snapshot.serverUrl, error);
+                        throw new ServerFetchWriteTimeoutError();
                     }
                     // Caller aborts should not poison reachability state.
                     throw error;
@@ -359,6 +417,9 @@ export async function serverFetch(
             break;
         }
     } finally {
+        if (writeTimeoutHandle) {
+            clearTimeout(writeTimeoutHandle);
+        }
         removeUpstreamListener();
         inFlightControllers.delete(requestController);
     }
