@@ -8,6 +8,14 @@ import {
 
 export const SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS = 120_000;
 
+/**
+ * Bounded lifetime of the explicit client-owned "resuming" lifecycle marker.
+ * A resume is initiated locally (the app calls the resume op); the marker is set at
+ * initiation and cleared on the first post-attach activity. This bound guarantees a
+ * crashed/never-settling resume cannot latch the indicator forever.
+ */
+export const SESSION_RESUMING_PRESENTATION_TIMEOUT_MS = 30_000;
+
 export type SessionRuntimeActivityPresentationState = 'idle' | 'working' | 'backgroundActive';
 
 export type SessionRuntimePresentationState = Readonly<{
@@ -20,7 +28,6 @@ export type SessionRuntimePresentationState = Readonly<{
     freshProviderRuntimeActivity: boolean;
     working: boolean;
     backgroundActive: boolean;
-    resuming: boolean;
     activityState: SessionRuntimeActivityPresentationState;
     runtimeProjectionInProgress: boolean;
     runtimeActivelyWorking: boolean;
@@ -90,11 +97,6 @@ export function deriveSessionRuntimePresentationState(
     const hasFreshPendingRequest =
         pendingRequestObservedAt !== null
         && isFreshTimestamp(pendingRequestObservedAt, nowMs, SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS);
-    const resuming = isResumeCatchUpPresentationActive(input, nowMs, {
-        backgroundActive,
-        hasFreshPendingRequest,
-        working,
-    });
     const activityState: SessionRuntimeActivityPresentationState = working
         ? 'working'
         : backgroundActive
@@ -112,7 +114,6 @@ export function deriveSessionRuntimePresentationState(
         freshProviderRuntimeActivity,
         working,
         backgroundActive,
-        resuming,
         activityState,
         runtimeProjectionInProgress: freshInProgress,
         runtimeActivelyWorking,
@@ -166,10 +167,6 @@ export function readSessionRuntimePresentationFreshnessTimestamps(
     if (runtimeStatus.freshPermissionRequired || runtimeStatus.freshActionRequired) {
         const pendingRequestObservedAt = normalizeRuntimeStatusTimestamp(input.pendingRequestObservedAt);
         if (pendingRequestObservedAt !== null) timestamps.push(pendingRequestObservedAt);
-    }
-    if (runtimeStatus.resuming) {
-        const activeAt = normalizeRuntimeStatusTimestamp(input.activeAt);
-        if (activeAt !== null) timestamps.push(activeAt);
     }
     if (runtimeStatus.freshProviderRuntimeActivity) {
         const runtimeActivityExpiresAt = normalizeRuntimeStatusTimestamp(input.runtimeActivityExpiresAt);
@@ -229,44 +226,6 @@ function normalizeRuntimeActivityActiveCount(value: number | null | undefined): 
     return typeof value === 'number' && Number.isFinite(value)
         ? Math.max(0, Math.trunc(value))
         : 0;
-}
-
-function isResumeCatchUpPresentationActive(
-    input: DeriveSessionRuntimePresentationStateInput,
-    nowMs: number,
-    state: Readonly<{
-        backgroundActive: boolean;
-        hasFreshPendingRequest: boolean;
-        working: boolean;
-    }>,
-): boolean {
-    if (!isLiveRuntimeOwner(input)) return false;
-    if (state.working || state.backgroundActive || state.hasFreshPendingRequest) return false;
-    const activeAt = normalizeRuntimeStatusTimestamp(input.activeAt);
-    if (activeAt === null) return false;
-    if (!isFreshTimestamp(activeAt, nowMs, SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS)) return false;
-    if (!hasPreAttachTranscriptActivity(input, activeAt)) return false;
-    return !hasPostAttachTranscriptActivity(input, activeAt);
-}
-
-function hasPreAttachTranscriptActivity(
-    input: DeriveSessionRuntimePresentationStateInput,
-    activeAt: number,
-): boolean {
-    const meaningfulActivityAt = normalizeRuntimeStatusTimestamp(input.meaningfulActivityAt);
-    if (meaningfulActivityAt !== null && meaningfulActivityAt < activeAt) return true;
-    const latestReadyEventAt = normalizeRuntimeStatusTimestamp(input.latestReadyEventAt);
-    return latestReadyEventAt !== null && latestReadyEventAt < activeAt;
-}
-
-function hasPostAttachTranscriptActivity(
-    input: DeriveSessionRuntimePresentationStateInput,
-    activeAt: number,
-): boolean {
-    const latestTurnStatusObservedAt = normalizeRuntimeStatusTimestamp(input.latestTurnStatusObservedAt);
-    if (latestTurnStatusObservedAt !== null && latestTurnStatusObservedAt >= activeAt) return true;
-    const meaningfulActivityAt = normalizeRuntimeStatusTimestamp(input.meaningfulActivityAt);
-    return meaningfulActivityAt !== null && meaningfulActivityAt >= activeAt;
 }
 
 function hasFreshProviderRuntimeActivity(

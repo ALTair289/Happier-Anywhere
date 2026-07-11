@@ -23,6 +23,7 @@ type SessionRuntimeStatusFields = Pick<
     | 'pendingUserActionRequestCount'
     | 'pendingRequestObservedAt'
     | 'optimisticThinkingAt'
+    | 'resumingAt'
     | 'thinkingGraceUntil'
 >;
 
@@ -45,6 +46,7 @@ function selectSessionRuntimeStatusFields(session: Session): SessionRuntimeStatu
         pendingUserActionRequestCount: session.pendingUserActionRequestCount,
         pendingRequestObservedAt: session.pendingRequestObservedAt,
         optimisticThinkingAt: session.optimisticThinkingAt,
+        resumingAt: session.resumingAt,
         thinkingGraceUntil: session.thinkingGraceUntil,
     };
 }

@@ -71,7 +71,6 @@ describe('deriveSessionRuntimePresentationState', () => {
 
         expect(runtimeState.freshThinking).toBe(false);
         expect(runtimeState.working).toBe(false);
-        expect(runtimeState.resuming).toBe(false);
     });
 
     it('presents detached provider runtime activity as background-active without foreground working after the turn completed', () => {
@@ -141,44 +140,6 @@ describe('deriveSessionRuntimePresentationState', () => {
         expect(runtimeState.working).toBe(false);
         expect(runtimeState.backgroundActive).toBe(false);
         expect(runtimeState.activityState).toBe('idle');
-    });
-
-    it('marks active online resume catch-up while transcript activity still predates the attach', () => {
-        const nowMs = 1_000_000;
-        const runtimeState = deriveSessionRuntimePresentationState({
-            active: true,
-            activeAt: nowMs - 10_000,
-            presence: 'online',
-            thinking: false,
-            thinkingAt: 0,
-            latestTurnStatus: 'failed',
-            latestTurnStatusObservedAt: nowMs - 60_000,
-            meaningfulActivityAt: nowMs - 60_000,
-            latestReadyEventAt: nowMs - 55_000,
-        }, nowMs);
-
-        expect(runtimeState.working).toBe(false);
-        expect(runtimeState.backgroundActive).toBe(false);
-        expect(runtimeState.resuming).toBe(true);
-    });
-
-    it('clears resume catch-up presentation after the first post-attach transcript activity', () => {
-        const nowMs = 1_000_000;
-        const activeAt = nowMs - 10_000;
-        const runtimeState = deriveSessionRuntimePresentationState({
-            active: true,
-            activeAt,
-            presence: 'online',
-            thinking: false,
-            thinkingAt: 0,
-            latestTurnStatus: 'completed',
-            latestTurnStatusObservedAt: activeAt - 1_000,
-            meaningfulActivityAt: activeAt + 100,
-            latestReadyEventAt: activeAt - 500,
-        }, nowMs);
-
-        expect(runtimeState.resuming).toBe(false);
-        expect(runtimeState.working).toBe(false);
     });
 
     it('does not retain elapsed detached provider runtime activity while owner presence is live', () => {

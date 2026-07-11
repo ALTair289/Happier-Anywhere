@@ -519,6 +519,81 @@ describe('getSessionStatus', () => {
         expect(status.shouldShowStatus).toBe(false);
     });
 
+    it('does not falsely show resuming for a finished idle session whose heartbeat crept past its last event', async () => {
+        // Regression: previously "resuming" was derived by comparing the creeping presence
+        // heartbeat (activeAt) against frozen event timestamps, so an idle-online session that
+        // had already finished flipped into a false "resuming". With the explicit lifecycle
+        // marker, no resume was initiated -> resumingAt is absent -> never resuming.
+        const { getSessionStatus } = await import('./sessionUtils');
+        const now = 1_000_000;
+        const activeAt = now - 10_000;
+        const session = createBaseSession({
+            active: true,
+            activeAt,
+            presence: 'online',
+            latestTurnStatus: 'failed',
+            latestTurnStatusObservedAt: activeAt - 50_000,
+            meaningfulActivityAt: activeAt - 50_000,
+            latestReadyEventAt: activeAt - 45_000,
+        });
+
+        const status = getSessionStatus(session, now, 0);
+
+        expect(status.state).toBe('waiting');
+    });
+
+    it('shows resuming for the whole resume window from an explicit resume marker', async () => {
+        const { getSessionStatus } = await import('./sessionUtils');
+        const now = 1_000_000;
+        const session = createBaseSession({
+            active: true,
+            activeAt: now - 10_000,
+            presence: 'online',
+            latestTurnStatus: 'completed',
+            latestTurnStatusObservedAt: now - 60_000,
+            resumingAt: now - 5_000,
+        });
+
+        const status = getSessionStatus(session, now, 0);
+
+        expect(status.state).toBe('resuming');
+        expect(status.statusText).toBe('session.resuming');
+        expect(status.shouldShowStatus).toBe(true);
+        expect(status.isPulsing).toBe(true);
+    });
+
+    it('shows resuming from an explicit marker even while the session is still reconnecting (offline)', async () => {
+        const { getSessionStatus } = await import('./sessionUtils');
+        const now = 1_000_000;
+        const session = createBaseSession({
+            active: false,
+            presence: now - 2_000,
+            resumingAt: now - 1_000,
+        });
+
+        const status = getSessionStatus(session, now, 0);
+
+        expect(status.state).toBe('resuming');
+        expect(status.statusText).toBe('session.resuming');
+    });
+
+    it('stops showing resuming once the explicit marker has decayed past its bounded lifetime', async () => {
+        const { getSessionStatus, SESSION_RESUMING_PRESENTATION_TIMEOUT_MS } = await import('./sessionUtils');
+        const now = 1_000_000;
+        const session = createBaseSession({
+            active: true,
+            activeAt: now - 10_000,
+            presence: 'online',
+            latestTurnStatus: 'completed',
+            latestTurnStatusObservedAt: now - 60_000,
+            resumingAt: now - SESSION_RESUMING_PRESENTATION_TIMEOUT_MS - 1,
+        });
+
+        const status = getSessionStatus(session, now, 0);
+
+        expect(status.state).toBe('waiting');
+    });
+
     it('does not treat inactive post-terminal activity as active work', async () => {
         const { getSessionStatus } = await import('./sessionUtils');
         const session = {
@@ -648,6 +723,36 @@ describe('getSessionStatus', () => {
 
         expect(status.state).toBe('thinking');
         expect(status.statusText).toBe('status.working');
+    });
+
+    it('uses the working status color token for background-active runtime status', async () => {
+        const { getSessionStatus } = await import('./sessionUtils');
+        const now = 1_000_000;
+        const status = getSessionStatus(createBaseSession({
+            activeAt: now - 10_000,
+            latestTurnStatus: 'completed',
+            latestTurnStatusObservedAt: now - 5_000,
+            runtimeActivityActiveCount: 1,
+            runtimeActivityObservedAt: now - 1_000,
+            runtimeActivityExpiresAt: now + 60_000,
+            runtimeActivitySourceClass: 'provider_detached_task',
+        }), now, {
+            workingTextMode: 'static',
+            statusColors: {
+                connected: 'connected-token',
+                connecting: 'working-token',
+                actionRequired: 'action-token',
+                disconnected: 'disconnected-token',
+                error: 'error-token',
+                default: 'default-token',
+            },
+        });
+
+        expect(status.state).toBe('background_active');
+        expect(status.statusText).toBe('status.backgroundActive');
+        expect(status.statusColor).toBe('working-token');
+        expect(status.statusDotColor).toBe('working-token');
+        expect(status.isPulsing).toBe(false);
     });
 
     it('uses the account setting to disable animated working text in the status hook', async () => {

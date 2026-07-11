@@ -16,6 +16,7 @@ import {
     deriveSessionRuntimePresentationState,
     isFreshTimestamp,
     readSessionRuntimePresentationFreshnessTimestamps,
+    SESSION_RESUMING_PRESENTATION_TIMEOUT_MS,
     SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS,
 } from '@/sync/domains/session/attention/deriveSessionRuntimePresentationState';
 import {
@@ -29,11 +30,12 @@ import { formatPathRelativeToHome } from './formatPathRelativeToHome';
 import { useUnistyles } from 'react-native-unistyles';
 export { formatPathRelativeToHome } from './formatPathRelativeToHome';
 export {
+    SESSION_RESUMING_PRESENTATION_TIMEOUT_MS,
     SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS,
 } from '@/sync/domains/session/attention/deriveSessionRuntimePresentationState';
 export { isFreshTimestamp };
 
-export type SessionState = 'disconnected' | 'resuming' | 'thinking' | 'waiting' | 'permission_required' | 'action_required';
+export type SessionState = 'disconnected' | 'resuming' | 'thinking' | 'background_active' | 'waiting' | 'permission_required' | 'action_required';
 
 export interface SessionStatus {
     state: SessionState;
@@ -147,6 +149,7 @@ function resolveRuntimeStatusFreshnessRefreshDelayMs(
         thinkingAt: session.thinkingAt,
         latestTurnStatus: session.latestTurnStatus,
         latestTurnStatusObservedAt: session.latestTurnStatusObservedAt,
+        latestReadyEventAt: session.latestReadyEventAt,
         runtimeActivityActiveCount: session.runtimeActivityActiveCount,
         runtimeActivityObservedAt: session.runtimeActivityObservedAt,
         runtimeActivityExpiresAt: session.runtimeActivityExpiresAt,
@@ -177,6 +180,7 @@ function useRuntimeStatusFreshnessRefresh(input: RuntimeStatusFreshnessRefreshIn
         input.session.thinkingAt,
         input.session.latestTurnStatus,
         input.session.latestTurnStatusObservedAt,
+        input.session.latestReadyEventAt,
         input.session.runtimeActivityActiveCount,
         input.session.runtimeActivityObservedAt,
         input.session.runtimeActivityExpiresAt,
@@ -215,6 +219,7 @@ export function getSessionStatus(session: SessionStatusSource, nowMs: number = D
         thinkingAt: session.thinkingAt,
         latestTurnStatus: session.latestTurnStatus,
         latestTurnStatusObservedAt: session.latestTurnStatusObservedAt,
+        latestReadyEventAt: session.latestReadyEventAt,
         runtimeActivityActiveCount: session.runtimeActivityActiveCount,
         runtimeActivityObservedAt: session.runtimeActivityObservedAt,
         runtimeActivityExpiresAt: session.runtimeActivityExpiresAt,
@@ -230,6 +235,10 @@ export function getSessionStatus(session: SessionStatusSource, nowMs: number = D
         && typeof optimisticThinkingAt === 'number'
         && nowMs - optimisticThinkingAt < OPTIMISTIC_SESSION_THINKING_TIMEOUT_MS;
     const isThinking = runtimeStatus.working;
+    // Single source of truth for the "resuming" indicator: an explicit, client-owned lifecycle
+    // marker set at resume initiation and cleared on first post-attach activity (bounded decay).
+    // Header, composer, and list all read this same derived state, so they never disagree.
+    const isResuming = isFreshTimestamp(session.resumingAt ?? null, nowMs, SESSION_RESUMING_PRESENTATION_TIMEOUT_MS);
 
     const workingStatusText = (() => {
         if (workingTextMode === 'static') return t('status.working');
@@ -239,7 +248,7 @@ export function getSessionStatus(session: SessionStatusSource, nowMs: number = D
         return vibingMessages[idx % vibingMessages.length].toLowerCase() + '…';
     })();
 
-    if (!runtimeStatus.isActive && isOptimisticThinking) {
+    if ((!runtimeStatus.isActive && isOptimisticThinking) || isResuming) {
         return {
             state: 'resuming',
             isConnected: true,
@@ -300,6 +309,18 @@ export function getSessionStatus(session: SessionStatusSource, nowMs: number = D
         };
     }
 
+    if (runtimeStatus.backgroundActive) {
+        return {
+            state: 'background_active',
+            isConnected: true,
+            statusText: t('status.backgroundActive'),
+            shouldShowStatus: true,
+            statusColor: statusColors.connecting,
+            statusDotColor: statusColors.connecting,
+            isPulsing: false,
+        };
+    }
+
     return {
         state: 'waiting',
         isConnected: true,
@@ -344,6 +365,7 @@ export function useSessionStatus(session: SessionStatusSource, options: UseSessi
         thinkingAt: resolvedSession.thinkingAt,
         latestTurnStatus: resolvedSession.latestTurnStatus,
         latestTurnStatusObservedAt: resolvedSession.latestTurnStatusObservedAt,
+        latestReadyEventAt: resolvedSession.latestReadyEventAt,
         runtimeActivityActiveCount: resolvedSession.runtimeActivityActiveCount,
         runtimeActivityObservedAt: resolvedSession.runtimeActivityObservedAt,
         runtimeActivityExpiresAt: resolvedSession.runtimeActivityExpiresAt,
@@ -356,7 +378,7 @@ export function useSessionStatus(session: SessionStatusSource, options: UseSessi
 
     const vibingIndex = React.useMemo(() => {
         return Math.floor(Math.random() * vibingMessages.length);
-    }, [isOnline, hasPermissions, hasUserActions, runtimeStatus.working]);
+    }, [isOnline, hasPermissions, hasUserActions, runtimeStatus.activityState]);
 
     return getSessionStatus(resolvedSession, now, {
         vibingIndex,
@@ -473,6 +495,7 @@ export function formatLastSeen(activeAt: number, isActive: boolean = false): str
     if (isActive) {
         return t('status.activeNow');
     }
+
     // Sessions can reach this without a usable timestamp (0 is the repo-wide
     // "no timestamp" convention); formatting an invalid Date throws in the
     // Intl path, so degrade to the unknown label instead of crashing the row.
