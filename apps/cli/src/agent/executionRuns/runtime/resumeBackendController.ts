@@ -5,7 +5,8 @@ import { ExecutionRunConnectedServicesUnavailableError } from '@/agent/execution
 import type { ExecutionRunState } from '@/agent/executionRuns/runtime/executionRunTypes';
 import type { ExecutionRunBackendController, ExecutionRunController } from '@/agent/executionRuns/controllers/types';
 import { areExecutionRunBackendTargetsEqual } from '@/agent/executionRuns/runtime/backendTargets';
-import type { ACPMessageData, ACPProvider } from '@/api/session/sessionMessageTypes';
+import type { ACPProvider } from '@/api/session/sessionMessageTypes';
+import type { AcpSendFn } from '@/agent/acp/bridge/acpSessionForwarding';
 import { createBackendControllerMessageHandler } from '@/agent/executionRuns/runtime/createBackendControllerMessageHandler';
 import { resolveExecutionRunIntentProfile } from '@/agent/executionRuns/profiles/intentRegistry';
 import { createStreamedTranscriptWriter, type StreamedTranscriptWriterSession } from '@/api/session/streamedTranscriptWriter';
@@ -23,7 +24,7 @@ export async function resumeBackendControllerForResumableRun(args: Readonly<{
    * mapped to a typed resume failure below.
    */
   createBackend: () => Promise<AgentBackend>;
-  sendAcp: (provider: ACPProvider, body: ACPMessageData, opts?: { meta?: Record<string, unknown> }) => void;
+  sendAcp: AcpSendFn;
   parentProvider: ACPProvider;
   streamedTranscriptSession: StreamedTranscriptWriterSession | null;
   writeActivityMarker: (runId: string, nowMs: number, opts?: Readonly<{ force?: boolean }>) => Promise<void>;

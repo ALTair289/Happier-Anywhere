@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 
 import type { AgentBackend } from '@/agent/core/AgentBackend';
-import type { ACPMessageData, ACPProvider } from '@/api/session/sessionMessageTypes';
+import type { ACPProvider } from '@/api/session/sessionMessageTypes';
+import type { AcpSendFn } from '@/agent/acp/bridge/acpSessionForwarding';
 import type { StreamedTranscriptWriterSession } from '@/api/session/streamedTranscriptWriter';
 import type { ExecutionBudgetRegistry } from '@/daemon/executionBudget/ExecutionBudgetRegistry';
 import {
@@ -74,7 +75,7 @@ export class ExecutionRunManager {
   }) => AgentBackend;
   private readonly resolveAccountSettings: () => Promise<Record<string, unknown> | null> | Record<string, unknown> | null;
   private readonly prepareConnectedServices: PrepareExecutionRunConnectedServicesForResume | null;
-  private readonly sendAcp: (provider: ACPProvider, body: ACPMessageData, opts?: { meta?: Record<string, unknown> }) => void;
+  private readonly sendAcp: AcpSendFn;
   private readonly streamedTranscriptSession: StreamedTranscriptWriterSession | null;
   private readonly transcriptWriter:
     | Readonly<{
@@ -170,7 +171,7 @@ export class ExecutionRunManager {
       connectedServicesEnv?: Readonly<Record<string, string>> | null;
       connectedServicesCleanup?: (() => Promise<void>) | null;
     }) => AgentBackend;
-    sendAcp: (provider: ACPProvider, body: ACPMessageData, opts?: { meta?: Record<string, unknown> }) => void;
+    sendAcp: AcpSendFn;
     streamedTranscriptSession?: StreamedTranscriptWriterSession;
     transcriptWriter?: Readonly<{
       appendUserText: (text: string, meta: Record<string, unknown>) => void | Promise<void>;

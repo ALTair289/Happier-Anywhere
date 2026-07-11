@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 
-import type { ACPMessageData, ACPProvider } from '@/api/session/sessionMessageTypes';
+import type { ACPProvider } from '@/api/session/sessionMessageTypes';
 import { createAcpAgentMessageForwarder } from '@/agent/acp/bridge/createAcpAgentMessageForwarder';
+import type { AcpSendFn } from '@/agent/acp/bridge/acpSessionForwarding';
 import type { AgentMessage, AgentMessageHandler, SessionId } from '@/agent/core/AgentBackend';
 import type { ExecutionRunBackendController } from '@/agent/executionRuns/controllers/types';
 import type { ExecutionRunState } from '@/agent/executionRuns/runtime/executionRunTypes';
@@ -34,7 +35,7 @@ export function createBackendControllerMessageHandler(args: Readonly<{
   sidechainId: string;
   intent: ExecutionRunState['intent'];
   ioMode: ExecutionRunState['ioMode'];
-  sendAcp: (provider: ACPProvider, body: ACPMessageData, opts?: { meta?: Record<string, unknown> }) => void;
+  sendAcp: AcpSendFn;
   parentProvider: ACPProvider;
   runs: Map<string, ExecutionRunState>;
   backendSupportsResume: boolean;

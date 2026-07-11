@@ -1,7 +1,8 @@
 import type { AgentBackend } from '@/agent/core/AgentBackend';
 import type { ExecutionBudgetRegistry } from '@/daemon/executionBudget/ExecutionBudgetRegistry';
 
-import type { ACPMessageData, ACPProvider } from '@/api/session/sessionMessageTypes';
+import type { ACPProvider } from '@/api/session/sessionMessageTypes';
+import type { AcpSendFn } from '@/agent/acp/bridge/acpSessionForwarding';
 import type { StreamedTranscriptWriterSession } from '@/api/session/streamedTranscriptWriter';
 import type { ExecutionRunState } from '@/agent/executionRuns/runtime/executionRunTypes';
 import type { ExecutionRunController } from '@/agent/executionRuns/controllers/types';
@@ -57,7 +58,7 @@ export async function sendBackendLongLivedRun(args: Readonly<{
   maxTurns: number | null;
   getNowMs: () => number;
   finishRun: FinishExecutionRun;
-  sendAcp: (provider: ACPProvider, body: ACPMessageData, opts?: { meta?: Record<string, unknown> }) => void;
+  sendAcp: AcpSendFn;
   parentProvider: ACPProvider;
   streamedTranscriptSession: StreamedTranscriptWriterSession | null;
   writeActivityMarker: (runId: string, nowMs: number, opts?: Readonly<{ force?: boolean }>) => Promise<void>;

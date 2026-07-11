@@ -4,7 +4,8 @@ import { VoiceAgentManager } from '@/agent/voice/agent/VoiceAgentManager';
 import type { ExecutionRunState } from '@/agent/executionRuns/runtime/executionRunTypes';
 import type { ExecutionBudgetRegistry } from '@/daemon/executionBudget/ExecutionBudgetRegistry';
 import { resumeBackendControllerForResumableRun } from '@/agent/executionRuns/runtime/resumeBackendController';
-import type { ACPMessageData, ACPProvider } from '@/api/session/sessionMessageTypes';
+import type { ACPProvider } from '@/api/session/sessionMessageTypes';
+import type { AcpSendFn } from '@/agent/acp/bridge/acpSessionForwarding';
 import type { StreamedTranscriptWriterSession } from '@/api/session/streamedTranscriptWriter';
 import {
   areExecutionRunBackendTargetsEqual,
@@ -19,7 +20,7 @@ export async function ensureExecutionRun(args: Readonly<{
   budgetRegistry: ExecutionBudgetRegistry | null;
   /** Async backend factory owning launch rehydration; see resumeBackendControllerForResumableRun. */
   createBackend: () => Promise<AgentBackend>;
-  sendAcp: (provider: ACPProvider, body: ACPMessageData, opts?: { meta?: Record<string, unknown> }) => void;
+  sendAcp: AcpSendFn;
   parentProvider: ACPProvider;
   streamedTranscriptSession: StreamedTranscriptWriterSession | null;
   getNowMs: () => number;

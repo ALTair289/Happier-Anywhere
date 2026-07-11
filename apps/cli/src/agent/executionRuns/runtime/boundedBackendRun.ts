@@ -1,5 +1,6 @@
 import { resolveExecutionRunIntentProfile } from '@/agent/executionRuns/profiles/intentRegistry';
-import type { ACPMessageData, ACPProvider } from '@/api/session/sessionMessageTypes';
+import type { ACPProvider } from '@/api/session/sessionMessageTypes';
+import type { AcpSendFn } from '@/agent/acp/bridge/acpSessionForwarding';
 import type { ExecutionRunManagerStartParams } from '@/agent/executionRuns/runtime/executionRunTypes';
 import type { ExecutionRunController, ExecutionRunBackendController } from '@/agent/executionRuns/controllers/types';
 import type { FinishExecutionRun } from '@/agent/executionRuns/runtime/executionRunFinishRun';
@@ -42,7 +43,7 @@ export async function executeBoundedBackendRun(args: Readonly<{
   startedAtMs: number;
   params: ExecutionRunManagerStartParams;
   controllers: ReadonlyMap<string, ExecutionRunController>;
-  sendAcp: (provider: ACPProvider, body: ACPMessageData, opts?: { meta?: Record<string, unknown> }) => void;
+  sendAcp: AcpSendFn;
   parentProvider: ACPProvider;
   getNowMs: () => number;
   boundedTimeoutMs: number | null;

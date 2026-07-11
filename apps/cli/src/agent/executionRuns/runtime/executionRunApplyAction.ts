@@ -7,6 +7,7 @@ import {
 } from '@happier-dev/protocol';
 
 import type { ACPMessageData, ACPProvider } from '@/api/session/sessionMessageTypes';
+import type { AcpSendFn } from '@/agent/acp/bridge/acpSessionForwarding';
 import { resolveExecutionRunIntentProfile } from '@/agent/executionRuns/profiles/intentRegistry';
 import { buildReviewFindingsV2Payload } from '@/agent/reviews/normalize/buildReviewFindingsV2Payload';
 import { VoiceAgentError, type VoiceAgentManager } from '@/agent/voice/agent/VoiceAgentManager';
@@ -27,7 +28,7 @@ export async function applyExecutionRunAction(args: Readonly<{
   controllers: ReadonlyMap<string, ExecutionRunController>;
   voiceAgentManager: VoiceAgentManager;
   startRun: (params: ExecutionRunManagerStartParams) => Promise<ExecutionRunStartResult>;
-  sendAcp: (provider: ACPProvider, body: ACPMessageData, opts?: { meta?: Record<string, unknown> }) => void;
+  sendAcp: AcpSendFn;
   sendCommittedAcp?: (
     provider: ACPProvider,
     body: ACPMessageData,

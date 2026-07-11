@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
-import type { ACPMessageData, ACPProvider } from '@/api/session/sessionMessageTypes';
+import type { ACPProvider } from '@/api/session/sessionMessageTypes';
+import type { AcpSendFn } from '@/agent/acp/bridge/acpSessionForwarding';
 import type { ExecutionRunStructuredMeta } from '@/agent/executionRuns/profiles/ExecutionRunIntentProfile';
 import { resolveExecutionRunIntentProfile } from '@/agent/executionRuns/profiles/intentRegistry';
 import type { ExecutionRunController } from '@/agent/executionRuns/controllers/types';
@@ -12,7 +13,7 @@ import type { ExecutionRunResumeHandle } from '@happier-dev/protocol';
 
 type EnqueueMarkerWrite = (runId: string, write: () => Promise<void>) => Promise<void>;
 
-type SendAcp = (provider: ACPProvider, body: ACPMessageData, opts?: { meta?: Record<string, unknown> }) => void;
+type SendAcp = AcpSendFn;
 
 type FinishRunNext = Omit<
   ExecutionRunState,

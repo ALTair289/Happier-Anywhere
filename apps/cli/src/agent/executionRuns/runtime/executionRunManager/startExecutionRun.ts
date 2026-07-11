@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 
 import type { AgentBackend, AgentMessageHandler, SessionId } from '@/agent/core/AgentBackend';
-import type { ACPMessageData, ACPProvider } from '@/api/session/sessionMessageTypes';
+import type { ACPProvider } from '@/api/session/sessionMessageTypes';
+import type { AcpSendFn } from '@/agent/acp/bridge/acpSessionForwarding';
 import { resolveExecutionRunIntentProfile } from '@/agent/executionRuns/profiles/intentRegistry';
 import type { ExecutionRunStructuredMeta } from '@/agent/executionRuns/profiles/ExecutionRunIntentProfile';
 import type { AcpConfigOptionOverridesV1, BackendTargetRefV1 } from '@happier-dev/protocol';
@@ -27,7 +28,7 @@ import {
   resolveExecutionRunRuntimeBackendId,
 } from '@/agent/executionRuns/runtime/backendTargets';
 
-type SendAcp = (provider: ACPProvider, body: ACPMessageData, opts?: { meta?: Record<string, unknown> }) => void;
+type SendAcp = AcpSendFn;
 
 type FinishRunNext = Omit<
   ExecutionRunState,

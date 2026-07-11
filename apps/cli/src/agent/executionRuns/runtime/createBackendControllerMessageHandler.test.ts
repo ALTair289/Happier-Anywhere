@@ -43,6 +43,10 @@ function createController(): ExecutionRunBackendController {
 
 function createHandlerHarness() {
   const writes: Array<Readonly<{ runId: string; nowMs: number; force?: boolean }>> = [];
+  const sent: Array<Readonly<{
+    body: ACPMessageData;
+    options?: Readonly<{ localId?: string; meta?: Record<string, unknown> }>;
+  }>> = [];
   let nowMs = 1_700_000_000_000;
   const handler = createBackendControllerMessageHandler({
     ctrl: createController(),
@@ -50,7 +54,9 @@ function createHandlerHarness() {
     sidechainId: 'sidechain_1',
     intent: 'delegate',
     ioMode: 'request_response',
-    sendAcp: (_provider: ACPProvider, _body: ACPMessageData) => {},
+    sendAcp: (_provider: ACPProvider, body: ACPMessageData, options) => {
+      sent.push({ body, ...(options ? { options } : {}) });
+    },
     parentProvider: 'codex',
     runs: new Map(),
     backendSupportsResume: false,
@@ -62,6 +68,7 @@ function createHandlerHarness() {
 
   return {
     writes,
+    sent,
     send(message: AgentMessage, nextNowMs = nowMs + 1_000): void {
       nowMs = nextNowMs;
       handler(message);
@@ -100,5 +107,24 @@ describe('createBackendControllerMessageHandler', () => {
     harness.send({ type: 'event', name: 'vendor_session_id', payload: { sessionId: 'vendor_1' } });
 
     expect(harness.writes).toEqual([]);
+  });
+
+  it('preserves stable transcript identity options for sidechain tool revisions', () => {
+    const harness = createHandlerHarness();
+
+    harness.send({ type: 'tool-call', toolName: 'other', args: {}, callId: 'opaque\ncall' });
+    harness.send({ type: 'tool-call', toolName: 'read', args: { file: 'README.md' }, callId: 'opaque\ncall' });
+
+    expect(harness.sent).toHaveLength(2);
+    const first = harness.sent[0];
+    const second = harness.sent[1];
+    expect(first?.body.type).toBe('tool-call');
+    expect(second?.body.type).toBe('tool-call');
+    if (first?.body.type !== 'tool-call' || second?.body.type !== 'tool-call') {
+      throw new Error('Expected tool-call transcript messages');
+    }
+    expect(first.body.id).toBe(second.body.id);
+    expect(first.options?.localId).toBe(first.body.id);
+    expect(second.options?.localId).toBe(first.body.id);
   });
 });
