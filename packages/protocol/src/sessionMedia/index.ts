@@ -4,8 +4,10 @@ export {
   SessionMediaMessageMetaEnvelopeV1Schema,
   SessionMediaMessagePayloadV1Schema,
   SessionMediaOriginV1Schema,
+  SessionMediaReferenceV1Schema,
   type SessionMediaItemV1,
   type SessionMediaMessageMetaEnvelopeV1,
   type SessionMediaMessagePayloadV1,
   type SessionMediaOriginV1,
+  type SessionMediaReferenceV1,
 } from './sessionMediaSchemas.js';

@@ -465,8 +465,8 @@ export const AGENTS_CORE = {
         tools: { delivery: 'shell_bridge', support: 'experimental' },
         media: {
             acceptsImageInput: 'unsupported',
-            emitsSessionMedia: 'unsupported',
-            nativeImageGeneration: NO_NATIVE_IMAGE_GENERATION,
+            emitsSessionMedia: 'supported',
+            nativeImageGeneration: 'supported',
         },
     },
 } as const satisfies Record<AgentId, AgentCore>;

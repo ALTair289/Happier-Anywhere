@@ -34,6 +34,10 @@ import {
     resolveSessionMediaMimeType,
     type SupportedSessionMediaMimeType,
 } from './sessionMediaMime';
+import {
+    resolveSessionMediaReferences,
+    sanitizeSessionMediaDescription,
+} from './resolveSessionMediaReferences';
 
 export type PersistSessionMediaInput = Readonly<{
     sessionId: string;
@@ -42,6 +46,8 @@ export type PersistSessionMediaInput = Readonly<{
     category: 'attachment' | 'generated' | 'tool-artifact';
     source: SessionMediaIngestionSource;
     origin: SessionMediaOrigin;
+    description?: string;
+    referenceImagePaths?: readonly string[];
     suggestedName?: string;
     createdAtMs?: number;
 }>;
@@ -76,6 +82,11 @@ function failure(code: string, error: string): PersistSessionMediaFailure {
     return { success: false, code, error };
 }
 
+function boundedOriginValue(value: string | undefined): string | undefined {
+    const normalized = value?.trim().slice(0, 16_384).trim();
+    return normalized || undefined;
+}
+
 function sanitizeSessionMediaOrigin(origin: SessionMediaOrigin): SessionMediaOrigin {
     const sanitized: {
         source: SessionMediaOrigin['source'];
@@ -87,11 +98,16 @@ function sanitizeSessionMediaOrigin(origin: SessionMediaOrigin): SessionMediaOri
     } = {
         source: origin.source,
     };
-    if (typeof origin.agentId === 'string' && origin.agentId.trim()) sanitized.agentId = origin.agentId;
-    if (typeof origin.toolCallId === 'string' && origin.toolCallId.trim()) sanitized.toolCallId = origin.toolCallId;
-    if (typeof origin.generationId === 'string' && origin.generationId.trim()) sanitized.generationId = origin.generationId;
-    if (typeof origin.providerEventId === 'string' && origin.providerEventId.trim()) sanitized.providerEventId = origin.providerEventId;
-    if (typeof origin.providerFileId === 'string' && origin.providerFileId.trim()) sanitized.providerFileId = origin.providerFileId;
+    const agentId = boundedOriginValue(origin.agentId);
+    const toolCallId = boundedOriginValue(origin.toolCallId);
+    const generationId = boundedOriginValue(origin.generationId);
+    const providerEventId = boundedOriginValue(origin.providerEventId);
+    const providerFileId = boundedOriginValue(origin.providerFileId);
+    if (agentId) sanitized.agentId = agentId;
+    if (toolCallId) sanitized.toolCallId = toolCallId;
+    if (generationId) sanitized.generationId = generationId;
+    if (providerEventId) sanitized.providerEventId = providerEventId;
+    if (providerFileId) sanitized.providerFileId = providerFileId;
     return sanitized;
 }
 
@@ -365,6 +381,15 @@ export async function persistSessionMediaItem(params: Readonly<{
         ? createHash('sha256').update(prepared.bytes).digest('hex')
         : await hashFile(uploadTarget.target.destPath);
     const dimensions = await readPreparedImageDimensions(prepared);
+    const description = sanitizeSessionMediaDescription(params.input.description);
+    const references = params.input.referenceImagePaths?.length
+        ? await resolveSessionMediaReferences({
+            paths: params.input.referenceImagePaths,
+            workingDirectory: params.workingDirectory,
+            accessPolicy: params.accessPolicy ?? { kind: 'osUser' },
+            maxBytes,
+        })
+        : [];
 
     try {
         await ensureSessionMediaIgnoreRule({
@@ -392,6 +417,8 @@ export async function persistSessionMediaItem(params: Readonly<{
             ...(dimensions ? { width: dimensions.width, height: dimensions.height } : {}),
             sha256,
             ...(typeof params.input.createdAtMs === 'number' ? { createdAtMs: params.input.createdAtMs } : {}),
+            ...(description ? { description } : {}),
+            ...(references.length > 0 ? { references } : {}),
             origin: sanitizeSessionMediaOrigin(params.input.origin),
         },
     };

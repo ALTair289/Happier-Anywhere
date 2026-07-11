@@ -1,10 +1,12 @@
 import type { AgentMessage, SessionMediaSource, SessionMediaSourceOrigin } from '@/agent/core';
+import { createHash } from 'node:crypto';
 import type { FilesystemAccessPolicy } from '@/rpc/handlers/fileSystem/accessPolicy/filesystemAccessPolicy';
 import {
   createTransferPathAllowanceRegistry,
   type TransferPathAllowanceRegistry,
 } from '@/transfers/targets/createTransferPathAllowanceRegistry';
 import { SessionMediaItemV1Schema, type SessionMediaItemV1 } from '@happier-dev/protocol';
+import { logger } from '@/ui/logger';
 
 import {
   persistSessionMediaItem,
@@ -24,7 +26,20 @@ type AgentSessionMediaPersisterParams = Readonly<{
   pathAllowanceRegistry?: TransferPathAllowanceRegistry;
   maxBytes?: number;
   sessionRpcTransferMaxBytes?: number | null;
+  onUnavailable?: (diagnostic: SessionMediaUnavailableDiagnostic) => void;
 }>;
+
+export type SessionMediaUnavailableDiagnostic = Readonly<{
+  code: string;
+  source: string;
+  agentId?: string;
+  toolCallIdHash?: string;
+  generationIdHash?: string;
+}>;
+
+function boundedCorrelationHash(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
 
 function mapMediaCategory(origin: SessionMediaSourceOrigin): PersistSessionMediaInput['category'] {
   return origin.source === 'tool-output' ? 'tool-artifact' : 'generated';
@@ -74,8 +89,12 @@ function buildMessageLocalId(message: RuntimeSessionMediaMessage, index: number)
     source?.toolCallId ??
     source?.providerFileId ??
     message.source;
-  const safeStableId = stableId.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'media';
-  return `session-media-${safeStableId}-${index}`;
+  const boundedStableId = createHash('sha256')
+    .update(message.source)
+    .update('\0')
+    .update(stableId)
+    .digest('hex');
+  return `session-media-${boundedStableId}-${index}`;
 }
 
 export function createAgentSessionMediaPersister(
@@ -83,33 +102,75 @@ export function createAgentSessionMediaPersister(
 ): { persist: (message: RuntimeSessionMediaMessage) => Promise<SessionMediaItemV1[]> } {
   const pathAllowanceRegistry = params.pathAllowanceRegistry ?? createTransferPathAllowanceRegistry();
 
+  const reportUnavailable = (
+    message: RuntimeSessionMediaMessage,
+    media: SessionMediaSource,
+    code: string,
+  ): void => {
+    const diagnostic: SessionMediaUnavailableDiagnostic = {
+      code: code.slice(0, 128),
+      source: message.source.slice(0, 128),
+      ...(typeof media.origin.agentId === 'string'
+        ? { agentId: media.origin.agentId.slice(0, 512) }
+        : {}),
+      ...(typeof media.origin.toolCallId === 'string'
+        ? { toolCallIdHash: boundedCorrelationHash(media.origin.toolCallId) }
+        : {}),
+      ...(typeof media.origin.generationId === 'string'
+        ? { generationIdHash: boundedCorrelationHash(media.origin.generationId) }
+        : {}),
+    };
+    logger.debug('[session-media] Media unavailable after bounded persistence validation', diagnostic);
+    try {
+      params.onUnavailable?.(diagnostic);
+    } catch {
+      logger.debug('[session-media] Media unavailable observer failed (non-fatal)');
+    }
+  };
+
   return {
     async persist(message) {
       const items: SessionMediaItemV1[] = [];
       for (let index = 0; index < message.media.length; index += 1) {
         const media = message.media[index]!;
-        const result = await persistSessionMediaItem({
-          workingDirectory: params.workingDirectory,
-          pathAllowanceRegistry,
-          sessionRpcTransferMaxBytes: params.sessionRpcTransferMaxBytes ?? null,
-          ...(params.accessPolicy ? { accessPolicy: params.accessPolicy } : {}),
-          ...(typeof params.maxBytes === 'number' ? { maxBytes: params.maxBytes } : {}),
-          input: {
-            sessionId: params.sessionId,
-            messageLocalId: buildMessageLocalId(message, index),
-            role: 'output',
-            category: mapMediaCategory(media.origin),
-            source: mapSource(media),
-            origin: mapOrigin(media.origin),
-            ...(media.suggestedName ? { suggestedName: media.suggestedName } : {}),
-            createdAtMs: Date.now(),
-          },
-        });
+        let result: Awaited<ReturnType<typeof persistSessionMediaItem>>;
+        try {
+          result = await persistSessionMediaItem({
+            workingDirectory: params.workingDirectory,
+            pathAllowanceRegistry,
+            sessionRpcTransferMaxBytes: params.sessionRpcTransferMaxBytes ?? null,
+            ...(params.accessPolicy ? { accessPolicy: params.accessPolicy } : {}),
+            ...(typeof params.maxBytes === 'number' ? { maxBytes: params.maxBytes } : {}),
+            input: {
+              sessionId: params.sessionId,
+              messageLocalId: buildMessageLocalId(message, index),
+              role: 'output',
+              category: mapMediaCategory(media.origin),
+              source: mapSource(media),
+              origin: mapOrigin(media.origin),
+              ...(media.kind === 'local-file' && media.description
+                ? { description: media.description }
+                : {}),
+              ...(media.kind === 'local-file' && media.referenceImagePaths?.length
+                ? { referenceImagePaths: media.referenceImagePaths }
+                : {}),
+              ...(media.suggestedName ? { suggestedName: media.suggestedName } : {}),
+              createdAtMs: Date.now(),
+            },
+          });
+        } catch {
+          reportUnavailable(message, media, 'persistence_failed');
+          continue;
+        }
         if (result.success) {
           const parsed = SessionMediaItemV1Schema.safeParse(result.item);
           if (parsed.success) {
             items.push(parsed.data);
+          } else {
+            reportUnavailable(message, media, 'invalid_persisted_metadata');
           }
+        } else {
+          reportUnavailable(message, media, result.code);
         }
       }
       return items;

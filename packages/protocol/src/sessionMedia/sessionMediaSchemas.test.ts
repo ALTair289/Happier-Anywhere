@@ -54,6 +54,30 @@ describe('session media v1 schemas', () => {
     expect(parsed).toEqual(validMediaItem);
   });
 
+  it('accepts bounded generated descriptions and portable reference-image metadata', () => {
+    const schema = readSchema('SessionMediaItemV1Schema');
+    const item = {
+      ...validMediaItem,
+      description: 'Architecture diagram',
+      references: [{
+        mediaKind: 'image',
+        path: 'references/source.png',
+        mimeType: 'image/png',
+        sizeBytes: 42,
+      }],
+    };
+
+    expect(schema.parse(item)).toEqual(item);
+    expect(schema.safeParse({
+      ...item,
+      references: [{ ...item.references[0], path: '/private/source.png' }],
+    }).success).toBe(false);
+    expect(schema.safeParse({
+      ...item,
+      references: [{ ...item.references[0], path: `references/${'a'.repeat(16_384)}.png` }],
+    }).success).toBe(false);
+  });
+
   it('accepts the exact session_media.v1 meta envelope shape', () => {
     const schema = readSchema('SessionMediaMessageMetaEnvelopeV1Schema');
 
@@ -76,6 +100,15 @@ describe('session media v1 schemas', () => {
     const schema = readSchema('SessionMediaMessageMetaEnvelopeV1Schema');
 
     expect(schema.safeParse({ kind: 'session_media.v1', payload: { media: [] } }).success).toBe(false);
+  });
+
+  it('bounds the number of media items in one durable envelope', () => {
+    const schema = readSchema('SessionMediaMessageMetaEnvelopeV1Schema');
+
+    expect(schema.safeParse({
+      kind: 'session_media.v1',
+      payload: { media: Array.from({ length: 257 }, (_, index) => ({ ...validMediaItem, id: `media_${index}` })) },
+    }).success).toBe(false);
   });
 
   it('rejects transient bytes and unsafe persisted paths', () => {
@@ -125,5 +158,20 @@ describe('session media v1 schemas', () => {
         },
       }).success,
     ).toBe(false);
+  });
+
+  it('bounds durable media names and provider correlation identifiers', () => {
+    const schema = readSchema('SessionMediaItemV1Schema');
+    const oversizedName = 'x'.repeat(513);
+    const oversizedOriginId = 'x'.repeat(16_385);
+
+    expect(schema.safeParse({ ...validMediaItem, id: oversizedName }).success).toBe(false);
+    expect(schema.safeParse({ ...validMediaItem, name: oversizedName }).success).toBe(false);
+    for (const field of ['agentId', 'toolCallId', 'generationId', 'providerEventId', 'providerFileId'] as const) {
+      expect(schema.safeParse({
+        ...validMediaItem,
+        origin: { ...validMediaItem.origin, [field]: oversizedOriginId },
+      }).success).toBe(false);
+    }
   });
 });

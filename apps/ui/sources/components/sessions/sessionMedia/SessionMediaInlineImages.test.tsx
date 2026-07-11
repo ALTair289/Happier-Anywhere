@@ -127,6 +127,47 @@ describe('SessionMediaInlineImages', () => {
         expect(tile?.props.accessibilityLabel).toBe('files.sessionMedia.generatedImageA11y:cat.png');
     });
 
+    it('uses the generated description in the existing accessible image label', async () => {
+        const { SessionMediaInlineImages } = await import('./SessionMediaInlineImages');
+        const media = {
+            id: 'media-description',
+            name: 'diagram.png',
+            description: 'Architecture diagram',
+            path: '.happier/uploads/generated/message-1/diagram.png',
+            mimeType: 'image/png',
+            sizeBytes: 10,
+            category: 'generated' as const,
+            role: 'output' as const,
+        };
+
+        const screen = await renderScreen(
+            <SessionMediaInlineImages sessionId="s1" media={[media]} onOpenPath={() => {}} />,
+        );
+
+        expect(screen.findByTestId(`message-session-media-inline-image:${media.path}`)?.props.accessibilityLabel)
+            .toBe('files.sessionMedia.generatedImageA11y:Architecture diagram');
+    });
+
+    it('bounds generated descriptions used by assistive technology', async () => {
+        const { SessionMediaInlineImages } = await import('./SessionMediaInlineImages');
+        const media = {
+            id: 'media-long-description',
+            name: 'diagram.png',
+            description: 'a'.repeat(2_000),
+            path: '.happier/uploads/generated/message-1/long.png',
+            mimeType: 'image/png',
+            sizeBytes: 10,
+            category: 'generated' as const,
+            role: 'output' as const,
+        };
+        const screen = await renderScreen(
+            <SessionMediaInlineImages sessionId="s1" media={[media]} onOpenPath={() => {}} />,
+        );
+        const label = screen.findByTestId(`message-session-media-inline-image:${media.path}`)?.props.accessibilityLabel;
+
+        expect(label).toBe(`files.sessionMedia.generatedImageA11y:${'a'.repeat(512)}`);
+    });
+
     it('uses attachment-specific accessibility labels for attachment image tiles', async () => {
         const { SessionMediaInlineImages } = await import('./SessionMediaInlineImages');
 

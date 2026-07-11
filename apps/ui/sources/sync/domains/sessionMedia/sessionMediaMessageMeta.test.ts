@@ -26,6 +26,17 @@ function buildSessionMediaMeta(path: string): unknown {
 }
 
 describe('parseSessionMediaMessageMeta', () => {
+    it('preserves a bounded generated description for generic presentation', () => {
+        const meta = buildSessionMediaMeta('.happier/uploads/generated/message-1/generated.png') as {
+            happier: { payload: { media: Array<Record<string, unknown>> } };
+        };
+        meta.happier.payload.media[0]!.description = 'Architecture diagram';
+
+        expect(parseSessionMediaMessageMeta(meta).inlineImages[0]).toMatchObject({
+            description: 'Architecture diagram',
+        });
+    });
+
     it('preserves optional image dimensions for transcript layout', () => {
         const parsed = parseSessionMediaMessageMeta({
             happier: {
@@ -65,5 +76,39 @@ describe('parseSessionMediaMessageMeta', () => {
         ]) {
             expect(parseSessionMediaMessageMeta(buildSessionMediaMeta(path)).inlineImages).toEqual([]);
         }
+    });
+
+    it('uses the canonical session-media schema for paths, MIME, size, and identifier bounds', () => {
+        const validPath = '.happier/uploads/generated/message-1/generated.png';
+        const mutations: Array<(item: Record<string, unknown>) => void> = [
+            (item) => { item.path = '.happier\\uploads\\generated\\message-1\\generated.png'; },
+            (item) => { item.path = '.happier/uploads//generated.png'; },
+            (item) => { item.path = '.happier/uploads/./generated.png'; },
+            (item) => { item.mimeType = 'image/html'; },
+            (item) => { item.sizeBytes = 0; },
+            (item) => { item.id = 'x'.repeat(513); },
+            (item) => { item.origin = { source: 'provider-generated', toolCallId: 'x'.repeat(16_385) }; },
+        ];
+
+        for (const mutate of mutations) {
+            const meta = buildSessionMediaMeta(validPath) as {
+                happier: { payload: { media: Array<Record<string, unknown>> } };
+            };
+            mutate(meta.happier.payload.media[0]!);
+            expect(parseSessionMediaMessageMeta(meta).inlineImages).toEqual([]);
+        }
+    });
+
+    it('rejects an oversized durable media envelope before iterating render items', () => {
+        const meta = buildSessionMediaMeta('.happier/uploads/generated/message-1/generated.png') as {
+            happier: { payload: { media: Array<Record<string, unknown>> } };
+        };
+        const item = meta.happier.payload.media[0]!;
+        meta.happier.payload.media = Array.from({ length: 257 }, (_, index) => ({
+            ...item,
+            id: `media-${index}`,
+        }));
+
+        expect(parseSessionMediaMessageMeta(meta).inlineImages).toEqual([]);
     });
 });

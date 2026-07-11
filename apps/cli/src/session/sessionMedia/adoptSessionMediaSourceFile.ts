@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { copyFile, link } from 'node:fs/promises';
+import { copyFile } from 'node:fs/promises';
 
 export async function adoptSessionMediaSourceFile(input: Readonly<{
     sourcePath: string;
@@ -12,12 +12,7 @@ export async function adoptSessionMediaSourceFile(input: Readonly<{
         // Reflink is opportunistic; fall through to other byte-preserving strategies.
     }
 
-    try {
-        await link(input.sourcePath, input.destinationPath);
-        return;
-    } catch {
-        // Hard links are not always supported across filesystems.
-    }
-
+    // A hard link is not adoption: the provider can still mutate the durable file
+    // through its source path. Preserve an independent byte snapshot instead.
     await copyFile(input.sourcePath, input.destinationPath);
 }

@@ -26,6 +26,12 @@ describe('agent media capabilities', () => {
       emitsSessionMedia: 'supported',
       nativeImageGeneration: 'supported',
     });
+
+    expect(agents.getAgentMediaCapabilities('cursor')).toMatchObject({
+      acceptsImageInput: 'unsupported',
+      emitsSessionMedia: 'supported',
+      nativeImageGeneration: 'supported',
+    });
   });
 
   it('populates conservative provider media output support', () => {

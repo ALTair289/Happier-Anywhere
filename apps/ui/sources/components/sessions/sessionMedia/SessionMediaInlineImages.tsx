@@ -136,13 +136,14 @@ function SessionMediaInlineImageTile(props: Readonly<{
         sizeBytes: props.media.sizeBytes,
     });
     const accessibilityLabel = (() => {
+        const accessibleName = (props.media.description ?? props.media.name).slice(0, 512);
         if (props.media.category === 'attachment') {
-            return t('files.sessionMedia.attachmentImageA11y', { name: props.media.name });
+            return t('files.sessionMedia.attachmentImageA11y', { name: accessibleName });
         }
         if (props.media.category === 'tool-artifact') {
-            return t('files.sessionMedia.toolArtifactImageA11y', { name: props.media.name });
+            return t('files.sessionMedia.toolArtifactImageA11y', { name: accessibleName });
         }
-        return t('files.sessionMedia.generatedImageA11y', { name: props.media.name });
+        return t('files.sessionMedia.generatedImageA11y', { name: accessibleName });
     })();
 
     return (

@@ -2,12 +2,14 @@ import { z } from 'zod';
 
 export const SESSION_MEDIA_MESSAGE_META_KIND_V1 = 'session_media.v1' as const;
 
-const SafeStringSchema = z.string().trim().min(1);
+const SafeStringSchema = z.string().trim().min(1).max(512);
+const OriginIdentifierSchema = z.string().trim().min(1).max(16_384);
 
 const SessionMediaPathSchema = z
   .string()
   .trim()
   .min(1)
+  .max(16_384)
   .superRefine((path, ctx) => {
     const lowerPath = path.toLowerCase();
     if (
@@ -34,11 +36,20 @@ const SessionMediaPathSchema = z
 export const SessionMediaOriginV1Schema = z
   .object({
     source: z.enum(['user-upload', 'provider-generated', 'tool-output', 'acp-content', 'mcp-content', 'local-file']),
-    agentId: SafeStringSchema.optional(),
-    toolCallId: SafeStringSchema.optional(),
-    generationId: SafeStringSchema.optional(),
-    providerEventId: SafeStringSchema.optional(),
-    providerFileId: SafeStringSchema.optional(),
+    agentId: OriginIdentifierSchema.optional(),
+    toolCallId: OriginIdentifierSchema.optional(),
+    generationId: OriginIdentifierSchema.optional(),
+    providerEventId: OriginIdentifierSchema.optional(),
+    providerFileId: OriginIdentifierSchema.optional(),
+  })
+  .strict();
+
+export const SessionMediaReferenceV1Schema = z
+  .object({
+    mediaKind: z.literal('image'),
+    path: SessionMediaPathSchema,
+    mimeType: z.enum(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/svg+xml']),
+    sizeBytes: z.number().int().positive(),
   })
   .strict();
 
@@ -56,13 +67,15 @@ export const SessionMediaItemV1Schema = z
     width: z.number().int().positive().optional(),
     height: z.number().int().positive().optional(),
     createdAtMs: z.number().int().nonnegative().optional(),
+    description: z.string().trim().min(1).max(16_384).optional(),
+    references: z.array(SessionMediaReferenceV1Schema).max(64).optional(),
     origin: SessionMediaOriginV1Schema,
   })
   .strict();
 
 export const SessionMediaMessagePayloadV1Schema = z
   .object({
-    media: z.array(SessionMediaItemV1Schema).min(1),
+    media: z.array(SessionMediaItemV1Schema).min(1).max(256),
   })
   .strict();
 
@@ -74,6 +87,7 @@ export const SessionMediaMessageMetaEnvelopeV1Schema = z
   .strict();
 
 export type SessionMediaOriginV1 = z.infer<typeof SessionMediaOriginV1Schema>;
+export type SessionMediaReferenceV1 = z.infer<typeof SessionMediaReferenceV1Schema>;
 export type SessionMediaItemV1 = z.infer<typeof SessionMediaItemV1Schema>;
 export type SessionMediaMessagePayloadV1 = z.infer<typeof SessionMediaMessagePayloadV1Schema>;
 export type SessionMediaMessageMetaEnvelopeV1 = z.infer<typeof SessionMediaMessageMetaEnvelopeV1Schema>;
