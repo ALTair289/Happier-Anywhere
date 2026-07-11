@@ -79,7 +79,12 @@ describe('provider account usage source-link proof invariant guard', () => {
     const store = {
       recordSnapshot: vi.fn((recorded: ProviderAccountUsageSnapshotV1, observation?: typeof latestObservation) => {
         latestObservation = observation;
-        return { status: 'recorded' as const, recordId: recorded.recordId };
+        return {
+          status: 'snapshot_advanced' as const,
+          recordId: recorded.recordId,
+          snapshotAdvanced: true,
+          sourceLinked: false,
+        };
       }),
       resolveRecordId: vi.fn(() => snapshot),
     };
@@ -99,7 +104,7 @@ describe('provider account usage source-link proof invariant guard', () => {
       sessionId: 'sess_source_link_guard',
       snapshot,
     })).resolves.toEqual({
-      status: 'recorded',
+      status: 'snapshot_advanced',
       recordId: snapshot.recordId,
       persisted: true,
     });

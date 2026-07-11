@@ -12,7 +12,12 @@ type ProviderAccountUsageStore = Readonly<{
     observation?: Readonly<{
       sources?: readonly ConnectedServiceUsageSourceV1[];
     }>,
-  ): Readonly<{ status: 'recorded'; recordId: string }>;
+  ): Readonly<{
+    status: 'snapshot_advanced' | 'source_linked' | 'duplicate' | 'older';
+    recordId: string;
+    snapshotAdvanced: boolean;
+    sourceLinked: boolean;
+  }>;
   resolveRecordId(recordId: string): ProviderAccountUsageSnapshotV1 | null;
   resolveBySource(source: ConnectedServiceUsageSourceV1): ProviderAccountUsageSnapshotV1 | null;
   listSnapshots(): readonly ProviderAccountUsageSnapshotV1[];
@@ -77,8 +82,10 @@ describe('provider account usage store', () => {
         bindingKind: 'profile',
       }],
     })).toEqual({
-      status: 'recorded',
+      status: 'snapshot_advanced',
       recordId: stableSnapshot.recordId,
+      snapshotAdvanced: true,
+      sourceLinked: true,
     });
     store.recordSnapshot(createSnapshot({
       recordKey: firstProvisionalKey,
@@ -150,6 +157,72 @@ describe('provider account usage store', () => {
       profileId: 'alias-only',
       bindingKind: 'profile',
     })).toBeNull();
+  });
+
+  it('classifies effective snapshot revisions, new source edges, duplicates, and older delivery', async () => {
+    const module = await loadStoreModule();
+    expect(module).not.toBeNull();
+    const store = module!.createProviderAccountUsageStore();
+    const sourceA: ConnectedServiceUsageSourceV1 = {
+      serviceId: 'anthropic',
+      profileId: 'work',
+      bindingKind: 'profile',
+    };
+    const sourceB: ConnectedServiceUsageSourceV1 = {
+      serviceId: 'anthropic',
+      profileId: 'work',
+      bindingKind: 'group_member',
+      groupId: 'team',
+      groupGeneration: 7,
+    };
+    const initial = createSnapshot({ fetchedAtMs: 2_000, observedAtMs: 2_000 });
+
+    expect(store.recordSnapshot(initial, { sources: [sourceA] })).toEqual({
+      status: 'snapshot_advanced',
+      recordId: initial.recordId,
+      snapshotAdvanced: true,
+      sourceLinked: true,
+    });
+    expect(store.recordSnapshot(initial, { sources: [sourceA] })).toEqual({
+      status: 'duplicate',
+      recordId: initial.recordId,
+      snapshotAdvanced: false,
+      sourceLinked: false,
+    });
+    expect(store.recordSnapshot(createSnapshot({
+      fetchedAtMs: 1_000,
+      observedAtMs: 1_000,
+      planLabel: 'outdated',
+    }))).toEqual({
+      status: 'older',
+      recordId: initial.recordId,
+      snapshotAdvanced: false,
+      sourceLinked: false,
+    });
+    expect(store.recordSnapshot(createSnapshot({
+      fetchedAtMs: 1_000,
+      observedAtMs: 1_000,
+      planLabel: 'outdated',
+    }), { sources: [sourceB] })).toEqual({
+      status: 'source_linked',
+      recordId: initial.recordId,
+      snapshotAdvanced: false,
+      sourceLinked: true,
+    });
+    expect(store.resolveBySource(sourceB)).toEqual(initial);
+
+    const correctedAtSameTimestamp = createSnapshot({
+      fetchedAtMs: 2_000,
+      observedAtMs: 2_000,
+      planLabel: 'Enterprise',
+    });
+    expect(store.recordSnapshot(correctedAtSameTimestamp, { sources: [sourceA, sourceB] })).toEqual({
+      status: 'snapshot_advanced',
+      recordId: initial.recordId,
+      snapshotAdvanced: true,
+      sourceLinked: false,
+    });
+    expect(store.resolveRecordId(initial.recordId)?.planLabel).toBe('Enterprise');
   });
 
 });

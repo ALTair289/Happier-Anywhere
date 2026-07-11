@@ -7,15 +7,30 @@ import {
   type ProviderAccountUsageSnapshotV1,
 } from '@happier-dev/protocol';
 
+import { computeProviderAccountUsageSnapshotMaterialRevision } from './fingerprint';
+
 export type ProviderAccountUsageObservation = Readonly<{
   sources?: readonly ConnectedServiceUsageSourceV1[];
+}>;
+
+export type ProviderAccountUsageStoreMutationStatus =
+  | 'snapshot_advanced'
+  | 'source_linked'
+  | 'duplicate'
+  | 'older';
+
+export type ProviderAccountUsageStoreMutationResult = Readonly<{
+  status: ProviderAccountUsageStoreMutationStatus;
+  recordId: ProviderAccountUsageRecordId;
+  snapshotAdvanced: boolean;
+  sourceLinked: boolean;
 }>;
 
 export type ProviderAccountUsageStore = Readonly<{
   recordSnapshot(
     snapshot: ProviderAccountUsageSnapshotV1,
     observation?: ProviderAccountUsageObservation,
-  ): Readonly<{ status: 'recorded'; recordId: ProviderAccountUsageRecordId }>;
+  ): ProviderAccountUsageStoreMutationResult;
   resolveRecordId(recordId: string): ProviderAccountUsageSnapshotV1 | null;
   resolveBySource(source: ConnectedServiceUsageSourceV1): ProviderAccountUsageSnapshotV1 | null;
   listSnapshots(): readonly ProviderAccountUsageSnapshotV1[];
@@ -90,7 +105,7 @@ export function createProviderAccountUsageStore(): ProviderAccountUsageStore {
   function recordSnapshot(
     rawSnapshot: ProviderAccountUsageSnapshotV1,
     observation?: ProviderAccountUsageObservation,
-  ): Readonly<{ status: 'recorded'; recordId: ProviderAccountUsageRecordId }> {
+  ): ProviderAccountUsageStoreMutationResult {
     const normalized = normalizeObservation(rawSnapshot, observation);
     const parsed = normalized.snapshot;
     const targetRecordId = resolveRedirect(parsed.recordId);
@@ -104,15 +119,25 @@ export function createProviderAccountUsageStore(): ProviderAccountUsageStore {
       throw new Error(`Missing provider account usage adoption target key for ${targetRecordId}`);
     }
 
-    const sources = mergeSources(sourcesByRecordId.get(targetRecordId) ?? [], normalized.sources);
+    const existingSources = sourcesByRecordId.get(targetRecordId) ?? [];
+    const existingSourceKeys = new Set(existingSources.map(sourceKey));
+    const sourceLinked = normalized.sources.some((source) => !existingSourceKeys.has(sourceKey(source)));
+    const sources = sourceLinked
+      ? mergeSources(existingSources, normalized.sources)
+      : existingSources;
 
     if (existing && parsed.fetchedAtMs < existing.fetchedAtMs) {
-      setRecordSources(targetRecordId, sources);
+      if (sourceLinked) setRecordSources(targetRecordId, sources);
       if (targetRecordId !== parsed.recordId) {
         snapshotsByRecordId.delete(parsed.recordId);
         sourcesByRecordId.delete(parsed.recordId);
       }
-      return { status: 'recorded', recordId: targetRecordId as ProviderAccountUsageRecordId };
+      return {
+        status: sourceLinked ? 'source_linked' : 'older',
+        recordId: targetRecordId as ProviderAccountUsageRecordId,
+        snapshotAdvanced: false,
+        sourceLinked,
+      };
     }
 
     const next = ProviderAccountUsageSnapshotV1Schema.parse({
@@ -127,13 +152,22 @@ export function createProviderAccountUsageStore(): ProviderAccountUsageStore {
           id: targetRecordKey.accountSubjectId,
         },
     });
-    snapshotsByRecordId.set(targetRecordId, next);
-    setRecordSources(targetRecordId, sources);
+    const snapshotAdvanced = !existing
+      || parsed.fetchedAtMs > existing.fetchedAtMs
+      || computeProviderAccountUsageSnapshotMaterialRevision(next)
+        !== computeProviderAccountUsageSnapshotMaterialRevision(existing);
+    if (snapshotAdvanced) snapshotsByRecordId.set(targetRecordId, next);
+    if (sourceLinked || !existing) setRecordSources(targetRecordId, sources);
     if (targetRecordId !== parsed.recordId) {
       snapshotsByRecordId.delete(parsed.recordId);
       sourcesByRecordId.delete(parsed.recordId);
     }
-    return { status: 'recorded', recordId: targetRecordId as ProviderAccountUsageRecordId };
+    return {
+      status: snapshotAdvanced ? 'snapshot_advanced' : sourceLinked ? 'source_linked' : 'duplicate',
+      recordId: targetRecordId as ProviderAccountUsageRecordId,
+      snapshotAdvanced,
+      sourceLinked,
+    };
   }
 
   function resolveRecordId(recordId: string): ProviderAccountUsageSnapshotV1 | null {

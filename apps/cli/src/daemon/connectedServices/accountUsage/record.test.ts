@@ -23,7 +23,7 @@ type RecordModule = Readonly<{
         observation?: Readonly<{
           sources?: readonly ConnectedServiceUsageSourceV1[];
         }>,
-      ): Readonly<{ status: 'recorded'; recordId: string }>;
+      ): Readonly<{ status: 'snapshot_advanced'; recordId: string }>;
       resolveRecordId(recordId: string): ProviderAccountUsageSnapshotV1 | null;
     }>;
     persistence: Readonly<{
@@ -40,7 +40,7 @@ type RecordModule = Readonly<{
     sessionId: string;
     snapshot: ProviderAccountUsageSnapshotV1;
   }>): Promise<
-    | Readonly<{ status: 'recorded'; recordId: string; persisted: boolean }>
+    | Readonly<{ status: 'snapshot_advanced'; recordId: string; persisted: boolean }>
     | Readonly<{ status: 'session_not_found' }>
   >;
 }>;
@@ -116,7 +116,7 @@ describe('recordProviderAccountUsageSnapshotForSession', () => {
       recordSnapshot: vi.fn((snapshot: ProviderAccountUsageSnapshotV1, observation?: typeof latestObservation) => {
         latestSnapshot = snapshot;
         latestObservation = observation;
-        return { status: 'recorded' as const, recordId: snapshot.recordId };
+        return { status: 'snapshot_advanced' as const, recordId: snapshot.recordId };
       }),
       resolveRecordId: vi.fn(() => latestSnapshot),
     };
@@ -147,7 +147,7 @@ describe('recordProviderAccountUsageSnapshotForSession', () => {
       sessionId: 'sess_1',
       snapshot,
     })).resolves.toEqual({
-      status: 'recorded',
+      status: 'snapshot_advanced',
       recordId: snapshot.recordId,
       persisted: false,
     });
@@ -182,7 +182,7 @@ describe('recordProviderAccountUsageSnapshotForSession', () => {
     };
     const store = {
       recordSnapshot: vi.fn((recorded: ProviderAccountUsageSnapshotV1) => ({
-        status: 'recorded' as const,
+        status: 'snapshot_advanced' as const,
         recordId: recorded.recordId,
       })),
       resolveRecordId: vi.fn(() => snapshot),
@@ -200,7 +200,7 @@ describe('recordProviderAccountUsageSnapshotForSession', () => {
       snapshot,
       observation: { sources: [profileSource, groupSource] },
     })).resolves.toEqual({
-      status: 'recorded',
+      status: 'snapshot_advanced',
       recordId: snapshot.recordId,
       persisted: true,
     });
@@ -215,7 +215,7 @@ describe('recordProviderAccountUsageSnapshotForSession', () => {
     expect(module).not.toBeNull();
     const store = {
       recordSnapshot: vi.fn((snapshot: ProviderAccountUsageSnapshotV1) => ({
-        status: 'recorded' as const,
+        status: 'snapshot_advanced' as const,
         recordId: snapshot.recordId,
       })),
       resolveRecordId: vi.fn(() => null),
@@ -245,7 +245,7 @@ describe('recordProviderAccountUsageSnapshotForSession', () => {
     const snapshot = createSnapshot();
     const store = {
       recordSnapshot: vi.fn((recorded: ProviderAccountUsageSnapshotV1) => ({
-        status: 'recorded' as const,
+        status: 'snapshot_advanced' as const,
         recordId: recorded.recordId,
       })),
       resolveRecordId: vi.fn(() => snapshot),
@@ -265,7 +265,7 @@ describe('recordProviderAccountUsageSnapshotForSession', () => {
       sessionId: 'sess_1',
       snapshot,
     })).resolves.toEqual({
-      status: 'recorded',
+      status: 'snapshot_advanced',
       recordId: snapshot.recordId,
       persisted: false,
     });
@@ -280,7 +280,7 @@ describe('recordProviderAccountUsageSnapshotForSession', () => {
     const snapshot = createSnapshot();
     const store = {
       recordSnapshot: vi.fn((recorded: ProviderAccountUsageSnapshotV1) => ({
-        status: 'recorded' as const,
+        status: 'snapshot_advanced' as const,
         recordId: recorded.recordId,
       })),
       resolveRecordId: vi.fn(() => snapshot),
@@ -298,7 +298,7 @@ describe('recordProviderAccountUsageSnapshotForSession', () => {
       sessionId: 'sess_1',
       snapshot,
     })).resolves.toEqual({
-      status: 'recorded',
+      status: 'snapshot_advanced',
       recordId: snapshot.recordId,
       persisted: false,
     });
@@ -321,7 +321,7 @@ describe('recordProviderAccountUsageSnapshotForSession', () => {
     const store = {
       recordSnapshot: vi.fn((recorded: ProviderAccountUsageSnapshotV1, observation?: typeof latestObservation) => {
         latestObservation = observation;
-        return { status: 'recorded' as const, recordId: recorded.recordId };
+        return { status: 'snapshot_advanced' as const, recordId: recorded.recordId };
       }),
       resolveRecordId: vi.fn(() => snapshot),
     };
@@ -338,7 +338,7 @@ describe('recordProviderAccountUsageSnapshotForSession', () => {
       sessionId: 'sess_1',
       snapshot,
     })).resolves.toEqual({
-      status: 'recorded',
+      status: 'snapshot_advanced',
       recordId: snapshot.recordId,
       persisted: false,
     });
@@ -366,7 +366,7 @@ describe('recordProviderAccountUsageSnapshotForSession', () => {
     const store = {
       recordSnapshot: vi.fn((recorded: ProviderAccountUsageSnapshotV1, observation?: typeof latestObservation) => {
         latestObservation = observation;
-        return { status: 'recorded' as const, recordId: recorded.recordId };
+        return { status: 'snapshot_advanced' as const, recordId: recorded.recordId };
       }),
       resolveRecordId: vi.fn(() => snapshot),
     };
@@ -382,7 +382,7 @@ describe('recordProviderAccountUsageSnapshotForSession', () => {
       sessionId: 'sess_1',
       snapshot,
     })).resolves.toEqual({
-      status: 'recorded',
+      status: 'snapshot_advanced',
       recordId: snapshot.recordId,
       persisted: false,
     });
@@ -415,7 +415,7 @@ describe('recordProviderAccountUsageSnapshotForSession', () => {
     const store = {
       recordSnapshot: vi.fn((recorded: ProviderAccountUsageSnapshotV1, observation?: typeof latestObservation) => {
         latestObservation = observation;
-        return { status: 'recorded' as const, recordId: recorded.recordId };
+        return { status: 'snapshot_advanced' as const, recordId: recorded.recordId };
       }),
       resolveRecordId: vi.fn(() => snapshot),
     };
@@ -432,7 +432,7 @@ describe('recordProviderAccountUsageSnapshotForSession', () => {
       sessionId: 'sess_1',
       snapshot,
     })).resolves.toEqual({
-      status: 'recorded',
+      status: 'snapshot_advanced',
       recordId: snapshot.recordId,
       persisted: true,
     });
@@ -452,7 +452,7 @@ describe('recordProviderAccountUsageSnapshotForSession', () => {
     const snapshot = createSnapshot();
     const store = {
       recordSnapshot: vi.fn((recorded: ProviderAccountUsageSnapshotV1) => ({
-        status: 'recorded' as const,
+        status: 'snapshot_advanced' as const,
         recordId: recorded.recordId,
       })),
       resolveRecordId: vi.fn(() => snapshot),
@@ -472,7 +472,7 @@ describe('recordProviderAccountUsageSnapshotForSession', () => {
       sessionId: 'sess_1',
       snapshot,
     })).resolves.toEqual({
-      status: 'recorded',
+      status: 'snapshot_advanced',
       recordId: snapshot.recordId,
       persisted: true,
     });
@@ -489,7 +489,7 @@ describe('recordProviderAccountUsageSnapshotForSession', () => {
     };
     const store = {
       recordSnapshot: vi.fn((recorded: ProviderAccountUsageSnapshotV1) => ({
-        status: 'recorded' as const,
+        status: 'snapshot_advanced' as const,
         recordId: recorded.recordId,
       })),
       resolveRecordId: vi.fn(() => snapshot),
@@ -502,7 +502,7 @@ describe('recordProviderAccountUsageSnapshotForSession', () => {
       sessionId: 'sess_1',
       snapshot,
     })).resolves.toEqual({
-      status: 'recorded',
+      status: 'snapshot_advanced',
       recordId: snapshot.recordId,
       persisted: false,
     });
@@ -514,7 +514,7 @@ describe('recordProviderAccountUsageSnapshotForSession', () => {
     const snapshot = createConnectedServiceGroupSnapshot();
     const store = {
       recordSnapshot: vi.fn((recorded: ProviderAccountUsageSnapshotV1) => ({
-        status: 'recorded' as const,
+        status: 'snapshot_advanced' as const,
         recordId: recorded.recordId,
       })),
       resolveRecordId: vi.fn(() => snapshot),
@@ -527,7 +527,7 @@ describe('recordProviderAccountUsageSnapshotForSession', () => {
       sessionId: 'sess_1',
       snapshot,
     })).resolves.toEqual({
-      status: 'recorded',
+      status: 'snapshot_advanced',
       recordId: snapshot.recordId,
       persisted: false,
     });

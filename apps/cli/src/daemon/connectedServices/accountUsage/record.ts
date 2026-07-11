@@ -9,6 +9,7 @@ import type { ProviderAccountUsagePersistenceScheduler } from './persistence';
 import {
   type ProviderAccountUsageObservation,
   type ProviderAccountUsageStore,
+  type ProviderAccountUsageStoreMutationStatus,
 } from './store';
 
 type TrackedSessionLike = Readonly<{
@@ -95,7 +96,11 @@ export async function recordProviderAccountUsageSnapshotForSession(input: Readon
   sessionId: string;
   snapshot: ProviderAccountUsageSnapshotV1;
 }>): Promise<
-  | Readonly<{ status: 'recorded'; recordId: string; persisted: boolean }>
+  | Readonly<{
+      status: ProviderAccountUsageStoreMutationStatus;
+      recordId: string;
+      persisted: boolean;
+    }>
   | Readonly<{ status: 'session_not_found' }>
 > {
   const tracked = findTrackedSession(input.getChildren(), input.sessionId);
@@ -111,9 +116,10 @@ export async function recordProviderAccountUsageSnapshotForSession(input: Readon
     sourceProviderAccountId: input.sourceProviderAccountId,
   });
   const recorded = input.store.recordSnapshot(snapshot, authorizedObservation);
+  const changed = recorded.status === 'snapshot_advanced' || recorded.status === 'source_linked';
 
   let persisted = false;
-  if (input.persistence) {
+  if (input.persistence && changed) {
     try {
       const result = await input.persistence.recordInBandSnapshot(
         input.store.resolveRecordId(recorded.recordId) ?? snapshot,
@@ -136,5 +142,9 @@ export async function recordProviderAccountUsageSnapshotForSession(input: Readon
     }
   }
 
-  return { status: 'recorded', recordId: recorded.recordId, persisted };
+  return {
+    status: recorded.status,
+    recordId: recorded.recordId,
+    persisted,
+  };
 }
