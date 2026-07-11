@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
 import { writeAcpTestAgentScript, readFileEventually } from '../testkit/subprocessHarness';
-import { AcpBackend, buildInitializeRequest, type AcpExtensionHandlerContext } from '../AcpBackend';
+import { AcpBackend, buildInitializeRequest } from '../AcpBackend';
+import {
+  defineAcpExtensionNotification,
+  defineAcpExtensionRequest,
+  type AcpExtensionHandlerContext,
+} from '../connection/types';
 import { withTempDir } from '@/testkit/fs/tempDir';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -24,10 +29,17 @@ function readNestedRecord(record: Record<string, unknown>, key: string): Record<
   return value;
 }
 
+const extensionParams = {
+  parse(value: unknown): Record<string, unknown> {
+    if (!isRecord(value)) throw new Error('Expected extension object params');
+    return value;
+  },
+};
+
 function writeExtensionProbeAgentScript(params: {
   dir: string;
   resultFile: string;
-  scenario: 'request' | 'notification' | 'error' | 'abort';
+  scenario: 'request' | 'notification' | 'error' | 'abort' | 'outgoing';
 }): string {
   const src = `
     const fs = require('node:fs');
@@ -90,6 +102,12 @@ function writeExtensionProbeAgentScript(params: {
 
         if (method === 'session/new') {
           ok(id, { sessionId: 'test-session' });
+          continue;
+        }
+
+        if (method === 'example/client_request') {
+          writeResult(req.params || {});
+          ok(id, { ok: true, echoed: req.params || {} });
           continue;
         }
 
@@ -159,9 +177,11 @@ describe('AcpBackend ACP extension dispatch', () => {
         args: [scriptPath],
       };
       Object.assign(backendOptions, {
-        extensionHandlers: {
-          requests: {
-            'example/object_request': async (
+        extensionHandlers: [
+          defineAcpExtensionRequest({
+            method: 'example/object_request',
+            params: extensionParams,
+            handler: async (
               params: Record<string, unknown>,
               context: AcpExtensionHandlerContext,
             ): Promise<Record<string, unknown>> => ({
@@ -170,8 +190,8 @@ describe('AcpBackend ACP extension dispatch', () => {
               sessionId: context.sessionId,
               signalAborted: context.signal.aborted,
             }),
-          },
-        },
+          }),
+        ],
       });
 
       const backend = new AcpBackend(backendOptions);
@@ -194,6 +214,33 @@ describe('AcpBackend ACP extension dispatch', () => {
     });
   }, 10_000);
 
+  it('exposes provider-neutral outgoing extension requests through the active peer', async () => {
+    await withTempDir('happier-acp-extension-outgoing-', async (dir) => {
+      const resultFile = `${dir}/extension-outgoing.json`;
+      const scriptPath = writeExtensionProbeAgentScript({ dir, resultFile, scenario: 'outgoing' });
+      const backend = new AcpBackend({
+        agentName: 'test',
+        cwd: dir,
+        command: process.execPath,
+        args: [scriptPath],
+      });
+
+      try {
+        await backend.startSession();
+        const response = await backend.requestExtension<{
+          ok: boolean;
+          echoed: Record<string, unknown>;
+        }>('example/client_request', { value: 'request' }, { timeoutMs: 500 });
+
+        expect(response).toEqual({ ok: true, echoed: { value: 'request' } });
+        expect(parseJsonRecord(await readFileEventually(resultFile, { timeoutMs: 1_000 })))
+          .toEqual({ value: 'request' });
+      } finally {
+        await backend.dispose().catch(() => {});
+      }
+    });
+  }, 10_000);
+
   it('dispatches extension notifications without requiring a response', async () => {
     await withTempDir('happier-acp-extension-notification-', async (dir) => {
       const resultFile = `${dir}/initialize.json`;
@@ -206,16 +253,18 @@ describe('AcpBackend ACP extension dispatch', () => {
         args: [scriptPath],
       };
       Object.assign(backendOptions, {
-        extensionHandlers: {
-          notifications: {
-            'example/notification': async (
+        extensionHandlers: [
+          defineAcpExtensionNotification({
+            method: 'example/notification',
+            params: extensionParams,
+            handler: async (
               params: Record<string, unknown>,
               context: AcpExtensionHandlerContext,
             ): Promise<void> => {
               notifications.push({ ...params, sessionIdFromContext: context.sessionId });
             },
-          },
-        },
+          }),
+        ],
       });
 
       const backend = new AcpBackend(backendOptions);
@@ -248,13 +297,15 @@ describe('AcpBackend ACP extension dispatch', () => {
         args: [scriptPath],
       };
       Object.assign(backendOptions, {
-        extensionHandlers: {
-          requests: {
-            'example/object_request': async (): Promise<Record<string, unknown>> => {
+        extensionHandlers: [
+          defineAcpExtensionRequest({
+            method: 'example/object_request',
+            params: extensionParams,
+            handler: async (): Promise<Record<string, unknown>> => {
               throw new Error('extension exploded');
             },
-          },
-        },
+          }),
+        ],
       });
 
       const backend = new AcpBackend(backendOptions);
@@ -283,11 +334,13 @@ describe('AcpBackend ACP extension dispatch', () => {
         args: [scriptPath],
       };
       Object.assign(backendOptions, {
-        extensionHandlers: {
-          requests: {
-            'example/other_request': async (): Promise<Record<string, unknown>> => ({ unused: true }),
-          },
-        },
+        extensionHandlers: [
+          defineAcpExtensionRequest({
+            method: 'example/other_request',
+            params: extensionParams,
+            handler: async (): Promise<Record<string, unknown>> => ({ unused: true }),
+          }),
+        ],
       });
 
       const backend = new AcpBackend(backendOptions);
@@ -327,9 +380,11 @@ describe('AcpBackend ACP extension dispatch', () => {
         args: [scriptPath],
       };
       Object.assign(backendOptions, {
-        extensionHandlers: {
-          requests: {
-            'example/object_request': async (
+        extensionHandlers: [
+          defineAcpExtensionRequest({
+            method: 'example/object_request',
+            params: extensionParams,
+            handler: async (
               _params: Record<string, unknown>,
               context: AcpExtensionHandlerContext,
             ): Promise<Record<string, unknown>> => {
@@ -350,8 +405,8 @@ describe('AcpBackend ACP extension dispatch', () => {
               });
               return { shouldNotReach: true };
             },
-          },
-        },
+          }),
+        ],
       });
 
       const backend = new AcpBackend(backendOptions);
@@ -402,9 +457,11 @@ describe('AcpBackend ACP extension dispatch', () => {
         args: [scriptPath],
       };
       Object.assign(backendOptions, {
-        extensionHandlers: {
-          requests: {
-            'example/object_request': async (
+        extensionHandlers: [
+          defineAcpExtensionRequest({
+            method: 'example/object_request',
+            params: extensionParams,
+            handler: async (
               _params: Record<string, unknown>,
               context: AcpExtensionHandlerContext,
             ): Promise<Record<string, unknown>> => {
@@ -425,8 +482,8 @@ describe('AcpBackend ACP extension dispatch', () => {
               });
               return { shouldNotReach: true };
             },
-          },
-        },
+          }),
+        ],
       });
 
       const backend = new AcpBackend(backendOptions);

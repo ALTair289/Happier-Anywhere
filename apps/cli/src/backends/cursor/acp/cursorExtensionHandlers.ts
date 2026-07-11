@@ -5,7 +5,18 @@ import type {
   AcpExtensionHandlers,
   AcpPermissionHandler,
 } from '@/agent/acp/AcpBackend';
+import {
+  defineAcpExtensionNotification,
+  defineAcpExtensionRequest,
+} from '@/agent/acp/connection/types';
 import { logger } from '@/ui/logger';
+import {
+  cursorAskQuestionRequestSchema,
+  cursorCreatePlanRequestSchema,
+  cursorGenerateImageNotificationSchema,
+  cursorTaskNotificationSchema,
+  cursorUpdateTodosRequestSchema,
+} from './extensions/schemas';
 
 type CursorQuestionOption = Readonly<{
   id?: unknown;
@@ -303,18 +314,38 @@ export function buildCursorExtensionHandlers(params: Readonly<{
     });
   };
 
-  return {
-    requests: {
-      'cursor/ask_question': askQuestion,
-      'cursor/create_plan': createPlan,
-      'cursor/update_todos': updateTodos,
-    },
-    notifications: {
-      'cursor/update_todos': async (rawParams, context) => {
+  return [
+    defineAcpExtensionRequest({
+      method: 'cursor/ask_question',
+      params: cursorAskQuestionRequestSchema,
+      handler: askQuestion,
+    }),
+    defineAcpExtensionRequest({
+      method: 'cursor/create_plan',
+      params: cursorCreatePlanRequestSchema,
+      handler: createPlan,
+    }),
+    defineAcpExtensionRequest({
+      method: 'cursor/update_todos',
+      params: cursorUpdateTodosRequestSchema,
+      handler: updateTodos,
+    }),
+    defineAcpExtensionNotification({
+      method: 'cursor/update_todos',
+      params: cursorUpdateTodosRequestSchema,
+      handler: async (rawParams, context) => {
         await updateTodos(rawParams, context);
       },
-      'cursor/task': diagnosticOnly('cursor/task'),
-      'cursor/generate_image': diagnosticOnly('cursor/generate_image'),
-    },
-  };
+    }),
+    defineAcpExtensionNotification({
+      method: 'cursor/task',
+      params: cursorTaskNotificationSchema,
+      handler: diagnosticOnly('cursor/task'),
+    }),
+    defineAcpExtensionNotification({
+      method: 'cursor/generate_image',
+      params: cursorGenerateImageNotificationSchema,
+      handler: diagnosticOnly('cursor/generate_image'),
+    }),
+  ];
 }

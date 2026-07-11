@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import type { AcpPermissionHandler } from '@/agent/acp/AcpBackend';
+import type { ClientApp } from '@agentclientprotocol/sdk';
+import type {
+  AcpExtensionHandlerContext,
+  AcpExtensionHandlers,
+  AcpPermissionHandler,
+} from '@/agent/acp/AcpBackend';
 import {
   buildCursorAskQuestionInput,
   buildCursorExtensionHandlers,
@@ -13,6 +18,44 @@ type CapturedCall = Readonly<{
   toolName: string;
   input: unknown;
 }>;
+
+type ExtensionCallback = (context: Readonly<{
+  params: Record<string, unknown>;
+  signal: AbortSignal;
+}>) => unknown | Promise<unknown>;
+
+async function invokeCursorExtension(params: Readonly<{
+  handlers: AcpExtensionHandlers;
+  kind: 'request' | 'notification';
+  method: string;
+  payload: Record<string, unknown>;
+  context: AcpExtensionHandlerContext;
+}>): Promise<unknown> {
+  const registration = params.handlers.find((candidate) => (
+    candidate.kind === params.kind && candidate.method === params.method
+  ));
+  if (!registration) {
+    throw new Error(`Missing ${params.kind} handler for ${params.method}`);
+  }
+
+  const captured: { callback: ExtensionCallback | null } = { callback: null };
+  const app = {
+    onRequest: (_method: string, _parser: unknown, handler: unknown) => {
+      captured.callback = handler as ExtensionCallback;
+      return app;
+    },
+    onNotification: (_method: string, _parser: unknown, handler: unknown) => {
+      captured.callback = handler as ExtensionCallback;
+      return app;
+    },
+  };
+  // The SDK client is an external transport boundary. This fixture captures only the registered callback.
+  registration.register(app as unknown as ClientApp, () => params.context);
+  if (!captured.callback) {
+    throw new Error(`Handler registration did not register ${params.method}`);
+  }
+  return await captured.callback({ params: params.payload, signal: params.context.signal });
+}
 
 class CapturingPermissionHandler implements AcpPermissionHandler {
   readonly calls: CapturedCall[] = [];
@@ -68,16 +111,22 @@ describe('Cursor ACP extension handlers', () => {
       },
     });
 
-    const result = await buildCursorExtensionHandlers({ permissionHandler }).requests!['cursor/ask_question']!({
-      toolCallId: 'ask-1',
-      questions: [
-        {
-          id: 'language',
-          prompt: 'Which language should I use?',
-          options: [{ id: 'ts', label: 'TypeScript' }],
-        },
-      ],
-    }, { method: 'cursor/ask_question', sessionId: 's1', signal: new AbortController().signal, agentName: 'cursor' });
+    const result = await invokeCursorExtension({
+      handlers: buildCursorExtensionHandlers({ permissionHandler }),
+      kind: 'request',
+      method: 'cursor/ask_question',
+      payload: {
+        toolCallId: 'ask-1',
+        questions: [
+          {
+            id: 'language',
+            prompt: 'Which language should I use?',
+            options: [{ id: 'ts', label: 'TypeScript' }],
+          },
+        ],
+      },
+      context: { method: 'cursor/ask_question', sessionId: 's1', signal: new AbortController().signal, agentName: 'cursor' },
+    });
 
     expect(permissionHandler.calls).toEqual([
       {
@@ -102,12 +151,18 @@ describe('Cursor ACP extension handlers', () => {
   it('normalizes create_plan payloads to ExitPlanMode and returns Cursor accepted state', async () => {
     const permissionHandler = new CapturingPermissionHandler({ decision: 'approved' });
 
-    const result = await buildCursorExtensionHandlers({ permissionHandler }).requests!['cursor/create_plan']!({
-      toolCallId: 'plan-1',
-      name: 'Refactor parser',
-      plan: '# Plan\n\n1. Add schemas',
-      todos: [],
-    }, { method: 'cursor/create_plan', sessionId: 's1', signal: new AbortController().signal, agentName: 'cursor' });
+    const result = await invokeCursorExtension({
+      handlers: buildCursorExtensionHandlers({ permissionHandler }),
+      kind: 'request',
+      method: 'cursor/create_plan',
+      payload: {
+        toolCallId: 'plan-1',
+        name: 'Refactor parser',
+        plan: '# Plan\n\n1. Add schemas',
+        todos: [],
+      },
+      context: { method: 'cursor/create_plan', sessionId: 's1', signal: new AbortController().signal, agentName: 'cursor' },
+    });
 
     expect(permissionHandler.calls).toEqual([
       {
@@ -127,11 +182,17 @@ describe('Cursor ACP extension handlers', () => {
   it('reports create_plan rejection to Cursor without throwing', async () => {
     const permissionHandler = new CapturingPermissionHandler({ decision: 'denied' });
 
-    const result = await buildCursorExtensionHandlers({ permissionHandler }).requests!['cursor/create_plan']!({
-      toolCallId: 'plan-1',
-      plan: '# Plan',
-      todos: [],
-    }, { method: 'cursor/create_plan', sessionId: 's1', signal: new AbortController().signal, agentName: 'cursor' });
+    const result = await invokeCursorExtension({
+      handlers: buildCursorExtensionHandlers({ permissionHandler }),
+      kind: 'request',
+      method: 'cursor/create_plan',
+      payload: {
+        toolCallId: 'plan-1',
+        plan: '# Plan',
+        todos: [],
+      },
+      context: { method: 'cursor/create_plan', sessionId: 's1', signal: new AbortController().signal, agentName: 'cursor' },
+    });
 
     expect(result).toEqual({ accepted: false });
   });
@@ -150,18 +211,9 @@ describe('Cursor ACP extension handlers', () => {
       ],
     };
 
-    await handlers.notifications!['cursor/update_todos']!(payload, {
-      method: 'cursor/update_todos',
-      sessionId: 's1',
-      signal: new AbortController().signal,
-      agentName: 'cursor',
-    });
-    const result = await handlers.requests!['cursor/update_todos']!(payload, {
-      method: 'cursor/update_todos',
-      sessionId: 's1',
-      signal: new AbortController().signal,
-      agentName: 'cursor',
-    });
+    const context = { method: 'cursor/update_todos', sessionId: 's1', signal: new AbortController().signal, agentName: 'cursor' } as const;
+    await invokeCursorExtension({ handlers, kind: 'notification', method: 'cursor/update_todos', payload, context });
+    const result = await invokeCursorExtension({ handlers, kind: 'request', method: 'cursor/update_todos', payload, context });
 
     expect(buildCursorTodoWriteInput(payload)).toEqual({
       todos: [
@@ -181,15 +233,21 @@ describe('Cursor ACP extension handlers', () => {
   it('surfaces create_plan todos through TodoWrite in addition to ExitPlanMode prose', async () => {
     const permissionHandler = new CapturingPermissionHandler({ decision: 'approved' });
 
-    const result = await buildCursorExtensionHandlers({ permissionHandler }).requests!['cursor/create_plan']!({
-      toolCallId: 'plan-1',
-      name: 'python-hello-plan',
-      plan: '# Python Hello-World Plan',
-      todos: [
-        { id: 'write-script', content: 'Add the script', status: 'pending' },
-        { id: 'run-script', content: 'Run it', status: 'pending' },
-      ],
-    }, { method: 'cursor/create_plan', sessionId: 's1', signal: new AbortController().signal, agentName: 'cursor' });
+    const result = await invokeCursorExtension({
+      handlers: buildCursorExtensionHandlers({ permissionHandler }),
+      kind: 'request',
+      method: 'cursor/create_plan',
+      payload: {
+        toolCallId: 'plan-1',
+        name: 'python-hello-plan',
+        plan: '# Python Hello-World Plan',
+        todos: [
+          { id: 'write-script', content: 'Add the script', status: 'pending' },
+          { id: 'run-script', content: 'Run it', status: 'pending' },
+        ],
+      },
+      context: { method: 'cursor/create_plan', sessionId: 's1', signal: new AbortController().signal, agentName: 'cursor' },
+    });
 
     // TodoWrite (structured checklist) is surfaced first, then the blocking ExitPlanMode prose card.
     expect(permissionHandler.calls).toEqual([
@@ -215,14 +273,20 @@ describe('Cursor ACP extension handlers', () => {
   it('flattens create_plan phases (no flat todos) into the checklist with phase-name prefixes', async () => {
     const permissionHandler = new CapturingPermissionHandler({ decision: 'approved' });
 
-    await buildCursorExtensionHandlers({ permissionHandler }).requests!['cursor/create_plan']!({
-      toolCallId: 'plan-2',
-      plan: '# Plan',
-      phases: [
-        { name: 'Setup', todos: [{ id: 'a', content: 'Init repo', status: 'pending' }] },
-        { name: 'Build', todos: [{ id: 'b', content: 'Compile', status: 'in_progress' }] },
-      ],
-    }, { method: 'cursor/create_plan', sessionId: 's1', signal: new AbortController().signal, agentName: 'cursor' });
+    await invokeCursorExtension({
+      handlers: buildCursorExtensionHandlers({ permissionHandler }),
+      kind: 'request',
+      method: 'cursor/create_plan',
+      payload: {
+        toolCallId: 'plan-2',
+        plan: '# Plan',
+        phases: [
+          { name: 'Setup', todos: [{ id: 'a', content: 'Init repo', status: 'pending' }] },
+          { name: 'Build', todos: [{ id: 'b', content: 'Compile', status: 'in_progress' }] },
+        ],
+      },
+      context: { method: 'cursor/create_plan', sessionId: 's1', signal: new AbortController().signal, agentName: 'cursor' },
+    });
 
     expect(permissionHandler.calls[0]).toEqual({
       id: 'plan-2-todos',
@@ -257,22 +321,34 @@ describe('Cursor ACP extension handlers', () => {
     const handlers = buildCursorExtensionHandlers({ permissionHandler });
     const ctx = { method: 'cursor/update_todos', sessionId: 's1', signal: new AbortController().signal, agentName: 'cursor' };
 
-    await handlers.notifications!['cursor/update_todos']!({
-      toolCallId: 'todos-1',
-      todos: [
-        { id: '1', content: 'First', status: 'pending' },
-        { id: '2', content: 'Second', status: 'pending' },
-      ],
-    }, ctx);
+    await invokeCursorExtension({
+      handlers,
+      kind: 'notification',
+      method: 'cursor/update_todos',
+      payload: {
+        toolCallId: 'todos-1',
+        todos: [
+          { id: '1', content: 'First', status: 'pending' },
+          { id: '2', content: 'Second', status: 'pending' },
+        ],
+      },
+      context: ctx,
+    });
 
-    await handlers.notifications!['cursor/update_todos']!({
-      toolCallId: 'todos-2',
-      merge: true,
-      todos: [
-        { id: '2', content: 'Second', status: 'completed' },
-        { id: '3', content: 'Third', status: 'in_progress' },
-      ],
-    }, ctx);
+    await invokeCursorExtension({
+      handlers,
+      kind: 'notification',
+      method: 'cursor/update_todos',
+      payload: {
+        toolCallId: 'todos-2',
+        merge: true,
+        todos: [
+          { id: '2', content: 'Second', status: 'completed' },
+          { id: '3', content: 'Third', status: 'in_progress' },
+        ],
+      },
+      context: ctx,
+    });
 
     // The merged snapshot keeps #1 (untouched), updates #2, and appends #3 in first-seen order.
     expect(permissionHandler.calls[1].input).toEqual({

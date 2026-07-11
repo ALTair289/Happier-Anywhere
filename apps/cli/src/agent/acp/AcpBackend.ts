@@ -9,10 +9,7 @@
 import type { ChildProcess } from 'node:child_process';
 import spawn from 'cross-spawn';
 import {
-  ClientSideConnection,
   RequestError,
-  type Client,
-  type Agent,
   type SessionNotification,
   type RequestPermissionRequest,
   type RequestPermissionResponse,
@@ -20,11 +17,11 @@ import {
   type InitializeResponse,
   type NewSessionRequest,
   type ForkSessionRequest,
-  type ForkSessionResponse,
   type LoadSessionRequest,
   type PromptRequest,
   type PromptResponse,
   type SetSessionModeRequest,
+  type SetSessionConfigOptionRequest,
   type ContentBlock,
 } from '@agentclientprotocol/sdk';
 import { redactBugReportSensitiveText } from '@happier-dev/protocol';
@@ -96,6 +93,15 @@ import { createEventShapeLoggerForLog } from '@/diagnostics/eventShapeForLog';
 import type { AcpTurnOutcome } from './backend/turn/_types';
 import { mapStopReasonToAcpTurnOutcome, readPromptStopReason } from './backend/turn/acpTurnCompletion';
 import { abortPendingAcpPermissionRequests } from './backend/permissions/acpPermissionFinalization';
+import {
+  createAcpClientConnection,
+  type AcpClientConnection,
+} from './connection/createAcpClientConnection';
+import type {
+  AcpClientConnectionHandlers,
+  AcpExtensionHandlerContext,
+  AcpExtensionRegistration,
+} from './connection/types';
 
 function makeAbortError(message: string): Error {
   const err = new Error(message);
@@ -260,27 +266,8 @@ export type SessionMode = {
   description?: string;
 };
 
-export type AcpExtensionHandlerContext = Readonly<{
-  method: string;
-  sessionId: string | null;
-  signal: AbortSignal;
-  agentName: string;
-}>;
-
-export type AcpExtensionRequestHandler = (
-  params: Record<string, unknown>,
-  context: AcpExtensionHandlerContext,
-) => Promise<Record<string, unknown>> | Record<string, unknown>;
-
-export type AcpExtensionNotificationHandler = (
-  params: Record<string, unknown>,
-  context: AcpExtensionHandlerContext,
-) => Promise<void> | void;
-
-export type AcpExtensionHandlers = Readonly<{
-  requests?: Readonly<Record<string, AcpExtensionRequestHandler>>;
-  notifications?: Readonly<Record<string, AcpExtensionNotificationHandler>>;
-}>;
+export type AcpExtensionHandlers = ReadonlyArray<AcpExtensionRegistration>;
+export type { AcpExtensionHandlerContext } from './connection/types';
 
 export type SessionModeState = {
   currentModeId: string;
@@ -318,12 +305,11 @@ function getString(obj: Record<string, unknown>, key: string): string | null {
   return typeof value === 'string' ? value : null;
 }
 
-function normalizeConfigOptionValueId(value: unknown): SessionConfigOptionValueId | null {
+function normalizeConfigOptionValueId(value: unknown): string | boolean | null {
   if (typeof value === 'string') {
     const trimmed = value.trim();
     return trimmed.length > 0 ? trimmed : null;
   }
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'boolean') return value;
   return null;
 }
@@ -444,7 +430,7 @@ export function buildInitializeRequest(params: {
 export function createAcpClientFsMethods(params: {
   cwd: string;
   permissionHandler?: AcpPermissionHandler;
-}): Pick<Client, 'readTextFile' | 'writeTextFile'> {
+}): Pick<AcpClientConnectionHandlers, 'readTextFile' | 'writeTextFile'> {
   const rootResolved = resolve(params.cwd);
   const rootRealPromise = fs.realpath(rootResolved).catch(() => rootResolved);
 
@@ -514,7 +500,7 @@ export function createAcpClientFsMethods(params: {
     }
   };
 
-  const readTextFile: NonNullable<Client['readTextFile']> = async (req) => {
+  const readTextFile: NonNullable<AcpClientConnectionHandlers['readTextFile']> = async (req) => {
     const targetPath = isAbsolute(req.path) ? resolve(req.path) : resolve(rootResolved, req.path);
     await assertWithinCwd(targetPath, { kind: 'read' });
     const full = await fs.readFile(targetPath, 'utf8');
@@ -534,7 +520,7 @@ export function createAcpClientFsMethods(params: {
     return { content: slice.join('\n') };
   };
 
-  const writeTextFile: NonNullable<Client['writeTextFile']> = async (req) => {
+  const writeTextFile: NonNullable<AcpClientConnectionHandlers['writeTextFile']> = async (req) => {
     const targetPath = isAbsolute(req.path) ? resolve(req.path) : resolve(rootResolved, req.path);
     await assertWithinCwd(targetPath, { kind: 'write' });
     const reqRecord = asRecord(req) ?? {};
@@ -631,7 +617,7 @@ export class AcpBackend implements AgentBackend {
   private readonly recentStderrSummaries: string[] = [];
   private lastProcessExitDetail: string | null = null;
   private readonly sessionUpdateShapeLogger = createEventShapeLoggerForLog({ logger, scope: 'acp-backend' });
-  private connection: ClientSideConnection | null = null;
+  private connection: AcpClientConnection | null = null;
   private acpSessionId: string | null = null;
   private disposed = false;
   private replayCapture: AcpReplayCapture | null = null;
@@ -678,6 +664,20 @@ export class AcpBackend implements AgentBackend {
 
   getLastTurnOutcome(): AcpTurnOutcome | null {
     return this.lastTurnOutcome;
+  }
+
+  async requestExtension<Response = unknown, Params = unknown>(
+    method: string,
+    params?: Params,
+    options?: Readonly<{ signal?: AbortSignal; timeoutMs?: number }>,
+  ): Promise<Response> {
+    if (this.disposed) {
+      throw new Error('Backend has been disposed');
+    }
+    if (!this.connection) {
+      throw new Error('ACP connection is not initialized');
+    }
+    return await this.connection.peer.requestExtension<Response, Params>(method, params, options);
   }
 
   /** Track tool calls count since last prompt (to identify first tool call) */
@@ -768,9 +768,12 @@ export class AcpBackend implements AgentBackend {
 
   private async cleanupInitializedProcessConnection(params: { graceMs: number }): Promise<void> {
     const proc = this.process;
+    const connection = this.connection;
     this.process = null;
     this.connection = null;
     this.acpSessionId = null;
+
+    connection?.close();
 
     try {
       await this.stderrAppender?.close();
@@ -787,6 +790,8 @@ export class AcpBackend implements AgentBackend {
         // best-effort cleanup
       }
     }
+
+    await connection?.closed.catch(() => undefined);
   }
 
   private buildSpawnEnv(): NodeJS.ProcessEnv {
@@ -818,56 +823,16 @@ export class AcpBackend implements AgentBackend {
     }
   }
 
-  private createExtensionHandlerContext(method: string): AcpExtensionHandlerContext {
+  private createExtensionHandlerContext(
+    method: string,
+    sdkSignal: AbortSignal,
+  ): AcpExtensionHandlerContext {
     return {
       method,
       sessionId: this.acpSessionId,
-      signal: this.extensionAbortController.signal,
+      signal: AbortSignal.any([sdkSignal, this.extensionAbortController.signal]),
       agentName: this.options.agentName,
     };
-  }
-
-  private getExtensionRequestHandler(method: string): AcpExtensionRequestHandler | null {
-    const handlers = this.options.extensionHandlers?.requests;
-    if (!handlers || !Object.prototype.hasOwnProperty.call(handlers, method)) {
-      return null;
-    }
-    return handlers[method] ?? null;
-  }
-
-  private getExtensionNotificationHandler(method: string): AcpExtensionNotificationHandler | null {
-    const handlers = this.options.extensionHandlers?.notifications;
-    if (!handlers || !Object.prototype.hasOwnProperty.call(handlers, method)) {
-      return null;
-    }
-    return handlers[method] ?? null;
-  }
-
-  private attachExtensionHandlers(client: Client): void {
-    if (this.options.extensionHandlers?.requests) {
-      client.extMethod = async (method, params) => {
-        const handler = this.getExtensionRequestHandler(method);
-        if (!handler) {
-          throw RequestError.methodNotFound(method);
-        }
-        const result = await handler(asRecord(params) ?? {}, this.createExtensionHandlerContext(method));
-        const record = asRecord(result);
-        if (!record) {
-          throw new Error(`ACP extension request handler returned a non-object result for ${method}`);
-        }
-        return record;
-      };
-    }
-
-    if (this.options.extensionHandlers?.notifications) {
-      client.extNotification = async (method, params) => {
-        const handler = this.getExtensionNotificationHandler(method);
-        if (!handler) {
-          throw RequestError.methodNotFound(method);
-        }
-        await handler(asRecord(params) ?? {}, this.createExtensionHandlerContext(method));
-      };
-    }
   }
 
   private async createConnectionAndInitialize(params: { operationId: string }): Promise<{ initTimeout: number }> {
@@ -1121,8 +1086,8 @@ export class AcpBackend implements AgentBackend {
     // Create ndJSON stream for ACP
     const stream = createAcpNdJsonStream(writable, filteredReadable);
 
-    // Create Client implementation
-    const client: Client = {
+    // Create client handlers. The generic connection owner registers these on the public SDK app API.
+    const clientHandlers: AcpClientConnectionHandlers = {
       sessionUpdate: async (params: SessionNotification) => {
         this.handleSessionUpdate(params);
       },
@@ -1326,20 +1291,22 @@ export class AcpBackend implements AgentBackend {
 
     if (isAcpFsEnabled()) {
       Object.assign(
-        client,
+        clientHandlers,
         createAcpClientFsMethods({
           cwd: this.options.cwd,
           permissionHandler: this.options.permissionHandler,
         })
       );
     }
-    this.attachExtensionHandlers(client);
-
-    // Create ClientSideConnection
-    this.connection = new ClientSideConnection(
-      (_agent: Agent) => client,
-      stream
-    );
+    this.connection = createAcpClientConnection({
+      name: 'happier-cli',
+      transport: stream,
+      handlers: clientHandlers,
+      extensions: this.options.extensionHandlers,
+      createExtensionContext: (method, sdkSignal) => (
+        this.createExtensionHandlerContext(method, sdkSignal)
+      ),
+    });
 
     // Initialize the connection with timeout and retry
     const initRequest = buildInitializeRequest({
@@ -1368,7 +1335,7 @@ export class AcpBackend implements AgentBackend {
         let timeoutHandle: NodeJS.Timeout | null = null;
         try {
           const result = await Promise.race([
-            this.connection!.initialize(initRequest).then((res) => {
+            this.connection!.peer.initialize(initRequest).then((res) => {
               if (timeoutHandle) {
                 clearTimeout(timeoutHandle);
                 timeoutHandle = null;
@@ -1423,7 +1390,7 @@ export class AcpBackend implements AgentBackend {
           let timeoutHandle: NodeJS.Timeout | null = null;
           try {
             const result = await Promise.race([
-              this.connection!.authenticate(authenticateRequest).then((res) => {
+              this.connection!.peer.authenticate(authenticateRequest).then((res) => {
                 if (timeoutHandle) {
                   clearTimeout(timeoutHandle);
                   timeoutHandle = null;
@@ -1489,7 +1456,7 @@ export class AcpBackend implements AgentBackend {
           let timeoutHandle: NodeJS.Timeout | null = null;
           try {
             const result = await Promise.race([
-              this.connection!.newSession(newSessionRequest).then((res) => {
+              this.connection!.peer.newSession(newSessionRequest).then((res) => {
                 if (timeoutHandle) {
                   clearTimeout(timeoutHandle);
                   timeoutHandle = null;
@@ -1582,7 +1549,7 @@ export class AcpBackend implements AgentBackend {
           let timeoutHandle: NodeJS.Timeout | null = null;
           try {
             const result = await Promise.race([
-              this.connection!.loadSession(loadSessionRequest).then((res) => {
+              this.connection!.peer.loadSession(loadSessionRequest).then((res) => {
                 if (timeoutHandle) {
                   clearTimeout(timeoutHandle);
                   timeoutHandle = null;
@@ -1665,9 +1632,7 @@ export class AcpBackend implements AgentBackend {
         await this.createConnectionAndInitialize({ operationId: randomUUID() });
       }
       const connection = this.connection;
-      const unstableForkSession = (connection as unknown as { unstable_forkSession?: (req: ForkSessionRequest) => Promise<ForkSessionResponse> })
-        ?.unstable_forkSession;
-      if (!connection || typeof unstableForkSession !== 'function') {
+      if (!connection) {
         throw new Error(`${this.transport.agentName} does not support ACP session/fork`);
       }
 
@@ -1677,7 +1642,12 @@ export class AcpBackend implements AgentBackend {
         mcpServers: this.buildAcpMcpServersForSessionRequest() as unknown as ForkSessionRequest['mcpServers'],
       };
 
-      const response = await unstableForkSession.call(connection, request);
+      const response = await connection.peer.forkSession(request).catch((error) => {
+        if (error instanceof RequestError && error.code === -32601) {
+          throw new Error(`${this.transport.agentName} does not support ACP session/fork`);
+        }
+        throw error;
+      });
       const forkedSessionId = typeof response?.sessionId === 'string' ? response.sessionId.trim() : '';
       if (!forkedSessionId) {
         throw new Error('Fork response did not include a session id');
@@ -2279,19 +2249,20 @@ export class AcpBackend implements AgentBackend {
       throw new Error('Config value is required');
     }
 
-    const connectionAny = this.connection as any;
-    if (typeof connectionAny.setSessionConfigOption !== 'function') {
-      throw new Error('ACP SDK does not support session/set_config_option');
-    }
+    const request: SetSessionConfigOptionRequest = typeof normalizedValueId === 'boolean'
+      ? {
+          sessionId: normalizedSessionId,
+          configId: normalizedConfigId,
+          type: 'boolean',
+          value: normalizedValueId,
+        }
+      : {
+          sessionId: normalizedSessionId,
+          configId: normalizedConfigId,
+          value: normalizedValueId,
+        };
 
-    const request = {
-      sessionId: normalizedSessionId,
-      configId: normalizedConfigId,
-      value: normalizedValueId,
-      ...(typeof normalizedValueId === 'boolean' ? { type: 'boolean' } : {}),
-    };
-
-    const response = await connectionAny.setSessionConfigOption(request);
+    const response = await this.connection.peer.setSessionConfigOption(request);
 
     const configOptionsCandidate = response?.configOptions;
     const configOptionsRaw = Array.isArray(configOptionsCandidate) ? configOptionsCandidate : null;
@@ -2846,7 +2817,7 @@ export class AcpBackend implements AgentBackend {
         }));
       }
 
-      const promptPromise = this.connection.prompt(promptRequest);
+      const promptPromise = this.connection.peer.prompt(promptRequest);
       promptLivenessRaceItems.unshift(promptPromise);
       let promptLivenessTimedOut = false;
       void promptPromise.catch((error) => {
@@ -2983,7 +2954,7 @@ export class AcpBackend implements AgentBackend {
 
     // Intentionally do not toggle `waitingForResponse` or tool-call counters here.
     // This method is used for in-flight steering while a primary prompt is already running.
-    await this.connection.prompt(promptRequest);
+    await this.connection.peer.prompt(promptRequest);
   }
 
   async setSessionMode(sessionId: SessionId, modeId: string): Promise<void> {
@@ -3007,7 +2978,7 @@ export class AcpBackend implements AgentBackend {
     }
 
     const request: SetSessionModeRequest = { sessionId: normalizedSessionId, modeId: normalizedModeId };
-    await this.connection.setSessionMode(request);
+    await this.connection.peer.setSessionMode(request);
 
     if (this.sessionModeState) {
       this.sessionModeState = { ...this.sessionModeState, currentModeId: normalizedModeId };
@@ -3037,16 +3008,10 @@ export class AcpBackend implements AgentBackend {
       throw new Error('Model ID is required');
     }
 
-    const connectionAny = this.connection as any;
-    const setModel =
-      typeof connectionAny.unstable_setSessionModel === 'function'
-        ? connectionAny.unstable_setSessionModel.bind(connectionAny)
-        : (typeof connectionAny.setSessionModel === 'function' ? connectionAny.setSessionModel.bind(connectionAny) : null);
-    if (!setModel) {
-      throw new Error('ACP SDK does not support session/set_model');
-    }
-
-    await setModel({ sessionId: normalizedSessionId, modelId: normalizedModelId });
+    await this.connection.peer.setSessionModelLegacy({
+      sessionId: normalizedSessionId,
+      modelId: normalizedModelId,
+    });
 
     if (this.sessionModelState) {
       this.sessionModelState = { ...this.sessionModelState, currentModelId: normalizedModelId };
@@ -3276,7 +3241,7 @@ export class AcpBackend implements AgentBackend {
     if (!this.connection || !this.acpSessionId) return;
 
     // Fire-and-forget: local cancellation must unblock immediately.
-    void this.connection
+    void this.connection.peer
       .cancel({ sessionId: this.acpSessionId })
       .catch((error) => logger.debug('[AcpBackend] Error cancelling:', error));
 
@@ -3329,13 +3294,16 @@ export class AcpBackend implements AgentBackend {
       try {
         // Send cancel to stop any ongoing work
         await Promise.race([
-          this.connection.cancel({ sessionId: this.acpSessionId }),
+          this.connection.peer.cancel({ sessionId: this.acpSessionId }),
           new Promise((resolve) => setTimeout(resolve, 2000)), // 2s timeout for graceful shutdown
         ]);
       } catch (error) {
         logger.debug('[AcpBackend] Error during graceful shutdown:', error);
       }
     }
+
+    const connection = this.connection;
+    connection?.close();
 
     // Kill the whole process tree (some ACP CLIs spawn child processes).
     if (this.process) {
@@ -3347,6 +3315,7 @@ export class AcpBackend implements AgentBackend {
         this.process = null;
       }
     }
+    await connection?.closed.catch(() => undefined);
 
     // Clear timeouts
     if (this.postPromptCompletionIdleTimeout) {
