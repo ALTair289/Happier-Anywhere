@@ -11,6 +11,7 @@ export type SpawnPathDiscoveryItem = Readonly<{
   label: string;
   path: string;
   host?: string;
+  machineId?: string;
   sessionId: string;
   activeAt?: number;
 }>;
@@ -68,11 +69,18 @@ export async function listRecentSpawnPathItems(params: Readonly<{
   const seen = new Set<string>();
   const items: SpawnPathDiscoveryItem[] = [];
   for (const session of result.sessions) {
-    const path = normalizeActionOptionString((session as { path?: unknown }).path);
+    const sessionRecord = session as { path?: unknown; host?: unknown; machineId?: unknown };
+    const path = normalizeActionOptionString(sessionRecord.path);
     if (!path) continue;
-    const host = normalizeActionOptionString((session as { host?: unknown }).host);
-    if (machineId && host !== machineId) continue;
-    const key = `${host ?? ''}\0${path}`;
+    const host = normalizeActionOptionString(sessionRecord.host);
+    const sessionMachineId = normalizeActionOptionString(sessionRecord.machineId);
+    if (machineId) {
+      const matchesMachine = sessionMachineId
+        ? sessionMachineId === machineId
+        : host === machineId;
+      if (!matchesMachine) continue;
+    }
+    const key = `${sessionMachineId ?? host ?? ''}\0${path}`;
     if (seen.has(key)) continue;
     seen.add(key);
     items.push({
@@ -80,6 +88,7 @@ export async function listRecentSpawnPathItems(params: Readonly<{
       label: path,
       path,
       ...(host ? { host } : {}),
+      ...(sessionMachineId ? { machineId: sessionMachineId } : {}),
       sessionId: session.id,
       ...(typeof session.activeAt === 'number' && Number.isFinite(session.activeAt) ? { activeAt: session.activeAt } : {}),
     });
