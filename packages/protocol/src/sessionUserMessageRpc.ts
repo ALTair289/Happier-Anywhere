@@ -196,6 +196,7 @@ export type SessionUserMessageSendRequest = z.infer<typeof SessionUserMessageSen
 
 const SessionUserMessageSendSuccessResponseSchema = z.object({
   ok: z.literal(true),
+  providerAcceptancePending: z.boolean().optional(),
 }).passthrough();
 
 const SessionUserMessageSendErrorResponseSchema = z.object({

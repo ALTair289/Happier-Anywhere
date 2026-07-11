@@ -12,6 +12,16 @@ describe('SessionUserMessageSendResponseSchema', () => {
     expect(SessionUserMessageSendResponseSchema.parse({ ok: true })).toEqual({ ok: true });
   });
 
+  it('accepts provider-acceptance pending custody on successful ACK payloads', () => {
+    expect(SessionUserMessageSendResponseSchema.parse({
+      ok: true,
+      providerAcceptancePending: true,
+    })).toEqual({
+      ok: true,
+      providerAcceptancePending: true,
+    });
+  });
+
   it('accepts runtime error ACK payloads', () => {
     expect(
       SessionUserMessageSendResponseSchema.parse({
