@@ -34,10 +34,7 @@ export function summarizeConnectedServiceQuotaRecoveryCredits(
     if (!recoveryCredits || recoveryCredits.availableCount <= 0) return null;
     const detailedCredits = Array.isArray(recoveryCredits.credits) ? recoveryCredits.credits : [];
     const availableCredits = detailedCredits.filter((credit) => isAvailableRecoveryCredit(credit, nowMs));
-    if (detailedCredits.length > 0 && availableCredits.length === 0) return null;
-    const availableCount = availableCredits.length > 0
-        ? availableCredits.length
-        : recoveryCredits.availableCount;
+    const availableCount = recoveryCredits.availableCount;
     if (availableCount <= 0) return null;
 
     const expiries = availableCredits
