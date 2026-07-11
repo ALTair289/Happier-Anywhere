@@ -97,6 +97,48 @@ export const ConnectedServiceCredentialHealthV1Schema = z.object({
 }).strict();
 export type ConnectedServiceCredentialHealthV1 = z.infer<typeof ConnectedServiceCredentialHealthV1Schema>;
 
+/**
+ * Opaque server-owned revision for one connected-service credential value.
+ * It is intentionally independent from row timestamps and refresh-lease bookkeeping.
+ */
+export const ConnectedServiceCredentialRevisionV1Schema = z
+    .string()
+    .regex(/^csr_[A-Za-z0-9_-]{22,64}$/);
+export type ConnectedServiceCredentialRevisionV1 = z.infer<typeof ConnectedServiceCredentialRevisionV1Schema>;
+
+export const ConnectedServiceCredentialMutationGuardV1Schema = z.object({
+    expectedCredentialRevision: ConnectedServiceCredentialRevisionV1Schema.optional(),
+    refreshLeaseOwnerId: z.string().trim().min(1).max(256).optional(),
+}).strict().superRefine((value, context) => {
+    if (value.refreshLeaseOwnerId && !value.expectedCredentialRevision) {
+        context.addIssue({
+            code: 'custom',
+            message: 'refreshLeaseOwnerId requires expectedCredentialRevision',
+            path: ['expectedCredentialRevision'],
+        });
+    }
+});
+export type ConnectedServiceCredentialMutationGuardV1 = z.infer<typeof ConnectedServiceCredentialMutationGuardV1Schema>;
+
+export const ConnectedServiceCredentialMutationSuccessV1Schema = z.object({
+    success: z.literal(true),
+    credentialRevision: ConnectedServiceCredentialRevisionV1Schema,
+}).strict();
+export type ConnectedServiceCredentialMutationSuccessV1 = z.infer<typeof ConnectedServiceCredentialMutationSuccessV1Schema>;
+
+export const ConnectedServiceCredentialMutationSupersededV1Schema = z.object({
+    error: z.literal('connect_credential_mutation_superseded'),
+    reason: z.enum(['revision_mismatch', 'refresh_lease_lost']),
+    credentialRevision: ConnectedServiceCredentialRevisionV1Schema.nullable(),
+}).strict();
+export type ConnectedServiceCredentialMutationSupersededV1 = z.infer<typeof ConnectedServiceCredentialMutationSupersededV1Schema>;
+
+export const ConnectedServiceCredentialMutationResponseV1Schema = z.union([
+    ConnectedServiceCredentialMutationSuccessV1Schema,
+    ConnectedServiceCredentialMutationSupersededV1Schema,
+]);
+export type ConnectedServiceCredentialMutationResponseV1 = z.infer<typeof ConnectedServiceCredentialMutationResponseV1Schema>;
+
 const OauthCredentialPayloadSchema = z.object({
     accessToken: z.string().min(1),
     refreshToken: z.string().min(1),

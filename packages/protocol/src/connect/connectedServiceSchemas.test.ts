@@ -19,6 +19,47 @@ function expectSchema(name: string): any {
 }
 
 describe('connectedServiceSchemas', () => {
+    it('defines one strict credential revision and mutation fence contract', () => {
+        const revisionSchema = expectSchema('ConnectedServiceCredentialRevisionV1Schema');
+        const mutationGuardSchema = expectSchema('ConnectedServiceCredentialMutationGuardV1Schema');
+        const mutationSuccessSchema = expectSchema('ConnectedServiceCredentialMutationSuccessV1Schema');
+        const mutationSupersededSchema = expectSchema('ConnectedServiceCredentialMutationSupersededV1Schema');
+        const mutationResponseSchema = expectSchema('ConnectedServiceCredentialMutationResponseV1Schema');
+
+        expect(revisionSchema.parse('csr_0123456789ABCDEFGHJKMNPQRS')).toBe('csr_0123456789ABCDEFGHJKMNPQRS');
+        expect(revisionSchema.safeParse(' ').success).toBe(false);
+        expect(mutationGuardSchema.parse({
+            expectedCredentialRevision: 'csr_0123456789ABCDEFGHJKMNPQRS',
+            refreshLeaseOwnerId: 'machine:daemon:attempt',
+        })).toEqual({
+            expectedCredentialRevision: 'csr_0123456789ABCDEFGHJKMNPQRS',
+            refreshLeaseOwnerId: 'machine:daemon:attempt',
+        });
+        expect(mutationGuardSchema.safeParse({ refreshLeaseOwnerId: 'owner-without-revision' }).success).toBe(false);
+        expect(mutationResponseSchema.parse({
+            success: true,
+            credentialRevision: 'csr_1123456789ABCDEFGHJKMNPQRS',
+        })).toEqual({
+            success: true,
+            credentialRevision: 'csr_1123456789ABCDEFGHJKMNPQRS',
+        });
+        expect(mutationSuccessSchema.safeParse({ success: true, credentialRevision: 'bad' }).success).toBe(false);
+        expect(mutationSupersededSchema.safeParse({
+            error: 'connect_credential_mutation_superseded',
+            reason: 'unknown',
+            credentialRevision: null,
+        }).success).toBe(false);
+        expect(mutationResponseSchema.parse({
+            error: 'connect_credential_mutation_superseded',
+            reason: 'refresh_lease_lost',
+            credentialRevision: 'csr_2123456789ABCDEFGHJKMNPQRS',
+        })).toEqual({
+            error: 'connect_credential_mutation_superseded',
+            reason: 'refresh_lease_lost',
+            credentialRevision: 'csr_2123456789ABCDEFGHJKMNPQRS',
+        });
+    });
+
     it('parses connected service ids', () => {
         expect(ConnectedServiceIdSchema.parse('openai-codex')).toBe('openai-codex');
         expect(ConnectedServiceIdSchema.parse('openai')).toBe('openai');
