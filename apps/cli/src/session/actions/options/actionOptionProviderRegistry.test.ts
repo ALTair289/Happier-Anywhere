@@ -47,6 +47,63 @@ describe('createCliActionOptionProviderRegistry', () => {
     });
   });
 
+  it('redacts secret-like model options from model listings', async () => {
+    const probeModels = vi.fn(async () => ({
+      provider: 'claude' as const,
+      availableModels: [
+        {
+          id: 'claude-opus-4-8',
+          name: 'Claude Opus 4.8',
+          modelOptions: [
+            {
+              id: 'reasoning_effort',
+              name: 'Thinking',
+              type: 'select',
+              currentValue: 'high',
+            },
+            {
+              id: 'api_key',
+              name: 'API key',
+              type: 'password',
+              currentValue: 'sk-secret',
+            },
+          ],
+        },
+      ],
+      supportsFreeform: true,
+      source: 'dynamic' as const,
+    }));
+    const registry = createCliActionOptionProviderRegistry({
+      probeModels,
+      probeModes: vi.fn(),
+      probeConfigOptions: vi.fn(),
+      cwd: '/repo',
+      credentials: null,
+      accountSettings: null,
+    });
+
+    const result = await registry.agentsModelsList({
+      agentId: 'claude',
+      backendTargetKey: 'agent:claude',
+    });
+
+    expect(JSON.stringify(result)).not.toContain('sk-secret');
+    expect(result.items).toEqual([
+      {
+        id: 'claude-opus-4-8',
+        label: 'Claude Opus 4.8',
+        modelOptions: [
+          {
+            id: 'reasoning_effort',
+            name: 'Thinking',
+            type: 'select',
+            currentValue: 'high',
+          },
+        ],
+      },
+    ]);
+  });
+
   it('lists config options without exposing secret material', async () => {
     const probeConfigOptions = vi.fn(async () => ({
       provider: 'claude' as const,

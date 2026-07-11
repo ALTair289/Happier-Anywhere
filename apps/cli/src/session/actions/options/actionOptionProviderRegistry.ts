@@ -134,6 +134,16 @@ function isSecretConfigOption(option: Readonly<{ id: string; label: string; type
 
 type ProbedModelOption = NonNullable<ProbedAgentModelsResult['availableModels'][number]['modelOptions']>[number];
 
+function filterSafeModelOptions(modelOptions: readonly ProbedModelOption[] | undefined): readonly ProbedModelOption[] | undefined {
+  if (!Array.isArray(modelOptions)) return undefined;
+  const filtered = modelOptions.filter((option) => !isSecretConfigOption({
+    id: option.id,
+    label: option.name || option.id,
+    type: option.type,
+  }));
+  return filtered.length > 0 ? filtered : undefined;
+}
+
 function configOptionItemFromModelOption(option: ProbedModelOption): ConfigOptionItem {
   return {
     id: option.id,
@@ -206,13 +216,16 @@ export function createCliActionOptionProviderRegistry(
         credentials: context.credentials,
         accountSettings: context.accountSettings,
       });
-      const items = probed.availableModels.map((model): ModelItem => ({
-        id: model.id,
-        label: model.name || model.id,
-        ...(model.description ? { description: model.description } : {}),
-        ...(typeof model.contextWindowTokens === 'number' ? { contextWindowTokens: model.contextWindowTokens } : {}),
-        ...(Array.isArray(model.modelOptions) ? { modelOptions: model.modelOptions } : {}),
-      }));
+      const items = probed.availableModels.map((model): ModelItem => {
+        const modelOptions = filterSafeModelOptions(model.modelOptions);
+        return {
+          id: model.id,
+          label: model.name || model.id,
+          ...(model.description ? { description: model.description } : {}),
+          ...(typeof model.contextWindowTokens === 'number' ? { contextWindowTokens: model.contextWindowTokens } : {}),
+          ...(modelOptions ? { modelOptions } : {}),
+        };
+      });
       return {
         agentId: context.agentId,
         ...(context.backendTargetKey ? { backendTargetKey: context.backendTargetKey } : {}),
