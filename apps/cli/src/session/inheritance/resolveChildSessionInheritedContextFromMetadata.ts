@@ -171,16 +171,66 @@ function cloneSessionModelsState(
     currentModelId: state.currentModelId,
     availableModels: state.availableModels
       .filter((model) => model && isNonEmptyString(model.id) && isNonEmptyString(model.name))
-      .map((model) => ({
-        id: model.id,
-        name: model.name,
-        ...(isNonEmptyString(model.description) ? { description: model.description } : {}),
-      })),
+      .map((model) => {
+        const modelOptions = Array.isArray(model.modelOptions)
+          ? cloneProviderOptionEntries(model.modelOptions)
+          : undefined;
+        return {
+          id: model.id,
+          name: model.name,
+          ...(isNonEmptyString(model.description) ? { description: model.description } : {}),
+          ...(isFiniteNumber(model.contextWindowTokens) ? { contextWindowTokens: model.contextWindowTokens } : {}),
+          ...(modelOptions ? { modelOptions } : {}),
+        };
+      }),
   };
 }
 
 function isAllowedConfigValue(value: unknown): value is string | number | boolean | null {
   return value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean';
+}
+
+type ProviderOptionEntry = NonNullable<
+  NonNullable<Metadata['sessionConfigOptionsV1']>['configOptions']
+>[number];
+
+/**
+ * Session model entries and config options share the same provider-option entry
+ * shape. Clone it in one place so inherited copies never drift from the
+ * canonical `Metadata` shape (e.g. fork inheritance dropping reasoning-effort
+ * model options).
+ */
+function cloneProviderOptionEntries(
+  entries: ReadonlyArray<unknown>,
+): ProviderOptionEntry[] {
+  return (entries as ReadonlyArray<ProviderOptionEntry | null | undefined>)
+    .filter((option): option is ProviderOptionEntry =>
+      !!option &&
+      typeof option === 'object' &&
+      isNonEmptyString(option.id) &&
+      isNonEmptyString(option.name) &&
+      isNonEmptyString(option.type) &&
+      isAllowedConfigValue(option.currentValue),
+    )
+    .map((option) => ({
+      id: option.id,
+      name: option.name,
+      type: option.type,
+      currentValue: option.currentValue,
+      ...(isNonEmptyString(option.description) ? { description: option.description } : {}),
+      ...(isNonEmptyString(option.category) ? { category: option.category } : {}),
+      ...(Array.isArray(option.options)
+        ? {
+          options: option.options
+            .filter((choice) => choice && isNonEmptyString(choice.name) && isAllowedConfigValue(choice.value))
+            .map((choice) => ({
+              value: choice.value,
+              name: choice.name,
+              ...(isNonEmptyString(choice.description) ? { description: choice.description } : {}),
+            })),
+        }
+        : {}),
+    }));
 }
 
 function cloneSessionConfigOptionsState(
@@ -201,32 +251,7 @@ function cloneSessionConfigOptionsState(
     v: 1,
     provider: state.provider,
     updatedAt: state.updatedAt,
-    configOptions: state.configOptions
-      .filter((option) =>
-        option &&
-        isNonEmptyString(option.id) &&
-        isNonEmptyString(option.name) &&
-        isNonEmptyString(option.type) &&
-        isAllowedConfigValue(option.currentValue),
-      )
-      .map((option) => ({
-        id: option.id,
-        name: option.name,
-        type: option.type,
-        currentValue: option.currentValue,
-        ...(isNonEmptyString(option.description) ? { description: option.description } : {}),
-        ...(Array.isArray(option.options)
-          ? {
-            options: option.options
-              .filter((choice) => choice && isNonEmptyString(choice.name) && isAllowedConfigValue(choice.value))
-              .map((choice) => ({
-                value: choice.value,
-                name: choice.name,
-                ...(isNonEmptyString(choice.description) ? { description: choice.description } : {}),
-              })),
-          }
-          : {}),
-      })),
+    configOptions: cloneProviderOptionEntries(state.configOptions),
   };
 }
 

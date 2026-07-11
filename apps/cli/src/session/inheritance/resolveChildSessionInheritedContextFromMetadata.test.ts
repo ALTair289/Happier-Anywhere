@@ -133,6 +133,112 @@ describe('resolveChildSessionInheritedContextFromMetadata', () => {
     });
   });
 
+  it('preserves per-model options and context window on inherited session model state', () => {
+    const availableModels = [
+      {
+        id: 'gpt-5.6-sol',
+        name: 'GPT 5.6 Sol',
+        description: 'Latest frontier agentic coding model.',
+        contextWindowTokens: 272000,
+        modelOptions: [
+          {
+            id: 'reasoning_effort',
+            name: 'Thinking',
+            type: 'select',
+            currentValue: 'medium',
+            options: [
+              { value: 'low', name: 'Low', description: 'Fast responses with lighter reasoning' },
+              { value: 'high', name: 'High' },
+            ],
+          },
+        ],
+      },
+      {
+        id: 'gpt-5.4-mini',
+        name: 'GPT 5.4 Mini',
+      },
+    ];
+    const inherited = resolveChildSessionInheritedContextFromMetadata({
+      metadata: {
+        sessionModelsV1: {
+          v: 1,
+          provider: 'codex',
+          updatedAt: 200,
+          currentModelId: 'gpt-5.6-sol',
+          availableModels,
+        },
+        acpSessionModelsV1: {
+          v: 1,
+          provider: 'codex',
+          updatedAt: 201,
+          currentModelId: 'gpt-5.6-sol',
+          availableModels,
+        },
+      },
+      fields: CHILD_SESSION_INHERITANCE_FIELD_SETS.fork,
+      providerId: 'codex',
+    });
+
+    expect(inherited.metadata.sessionModelsV1).toEqual({
+      v: 1,
+      provider: 'codex',
+      updatedAt: 200,
+      currentModelId: 'gpt-5.6-sol',
+      availableModels,
+    });
+    expect(inherited.metadata.acpSessionModelsV1).toEqual({
+      v: 1,
+      provider: 'codex',
+      updatedAt: 201,
+      currentModelId: 'gpt-5.6-sol',
+      availableModels,
+    });
+  });
+
+  it('drops malformed model options while keeping the valid model entries on inheritance', () => {
+    const inherited = resolveChildSessionInheritedContextFromMetadata({
+      metadata: {
+        sessionModelsV1: {
+          v: 1,
+          provider: 'codex',
+          updatedAt: 200,
+          currentModelId: 'gpt-5.6-sol',
+          availableModels: [
+            {
+              id: 'gpt-5.6-sol',
+              name: 'GPT 5.6 Sol',
+              contextWindowTokens: 'not-a-number',
+              modelOptions: [
+                { id: 'reasoning_effort', name: 'Thinking', type: 'select', currentValue: 'medium' },
+                { id: '', name: 'Broken', type: 'select', currentValue: 'x' },
+                { id: 'bad-value', name: 'Bad', type: 'select', currentValue: { nested: true } },
+                'not-an-option',
+              ],
+            },
+          ],
+        },
+      },
+      fields: CHILD_SESSION_INHERITANCE_FIELD_SETS.fork,
+      providerId: 'codex',
+    });
+
+    expect(inherited.metadata.sessionModelsV1).toEqual({
+      v: 1,
+      provider: 'codex',
+      updatedAt: 200,
+      currentModelId: 'gpt-5.6-sol',
+      availableModels: [
+        {
+          id: 'gpt-5.6-sol',
+          name: 'GPT 5.6 Sol',
+          modelOptions: [
+            { id: 'reasoning_effort', name: 'Thinking', type: 'select', currentValue: 'medium' },
+          ],
+        },
+      ],
+    });
+  });
+
   it('ignores invalid spawn-only metadata fields for session-agent spawn', () => {
     const inherited = resolveChildSessionInheritedContextFromMetadata({
       metadata: {
