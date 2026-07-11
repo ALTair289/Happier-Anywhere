@@ -394,4 +394,64 @@ describe('sessionWorkStatePresentation', () => {
         }));
         expect(formatSessionWorkStateBadgeLabel(snapshot?.items[0] ?? null, translate)).toBe('session.workState.badge.goalBudgetLimited:');
     });
+
+    it.each([
+        ['blocked', 'session.workState.badge.goalBlocked:'],
+        ['usageLimited', 'session.workState.badge.goalBlocked:'],
+        ['budgetLimited', 'session.workState.badge.goalBudgetLimited:'],
+    ] as const)('preserves the %s blocked-family reason without losing the warning presentation', (statusReason, expectedLabel) => {
+        const snapshot = readSessionWorkStateFromMetadata({
+            sessionWorkStateV1: {
+                v: 1,
+                backendId: 'codex',
+                updatedAt: 20,
+                primaryItemId: 'goal:thread-1',
+                items: [{
+                    id: 'goal:thread-1',
+                    kind: 'goal',
+                    origin: 'vendor',
+                    status: 'blocked',
+                    statusReason,
+                    title: 'Ship blocked-family display',
+                    updatedAt: 20,
+                }],
+            },
+        });
+
+        const goal = snapshot?.items[0] ?? null;
+        expect(goal?.statusReason).toBe(statusReason);
+        expect(formatSessionWorkStateBadgeLabel(goal, translate)).toBe(expectedLabel);
+        expect(resolveSessionWorkStateStatusBadgePresentation({
+            primaryItem: goal,
+            activeStatusBadgeKey: null,
+            editableGoal: true,
+            translate,
+        })).toEqual(expect.objectContaining({
+            label: expectedLabel,
+            tone: 'warning',
+            emphasis: 'prominent',
+        }));
+    });
+
+    it('drops an unknown future status reason while preserving the otherwise valid blocked item', () => {
+        const snapshot = readSessionWorkStateFromMetadata({
+            sessionWorkStateV1: {
+                v: 1,
+                backendId: 'codex',
+                updatedAt: 20,
+                items: [{
+                    id: 'goal:thread-1',
+                    kind: 'goal',
+                    origin: 'vendor',
+                    status: 'blocked',
+                    statusReason: 'futureReason',
+                    title: 'Remain forward-compatible',
+                    updatedAt: 20,
+                }],
+            },
+        });
+
+        expect(snapshot?.items[0]).toEqual(expect.objectContaining({ status: 'blocked' }));
+        expect(snapshot?.items[0]?.statusReason).toBeUndefined();
+    });
 });

@@ -78,6 +78,24 @@ describe('SessionWorkStateV1', () => {
         });
 
         expect(item.statusReason).toBe('budgetLimited');
+        expect(SessionWorkStateItemV1Schema.parse({
+            id: 'goal:blocked',
+            kind: 'goal',
+            origin: 'vendor',
+            status: 'blocked',
+            statusReason: 'blocked',
+            title: 'Provider-blocked goal',
+            updatedAt: 2,
+        }).statusReason).toBe('blocked');
+        expect(SessionWorkStateItemV1Schema.parse({
+            id: 'goal:usage-limited',
+            kind: 'goal',
+            origin: 'vendor',
+            status: 'blocked',
+            statusReason: 'usageLimited',
+            title: 'Usage-limited goal',
+            updatedAt: 3,
+        }).statusReason).toBe('usageLimited');
         expect(() =>
             SessionWorkStateItemV1Schema.parse({
                 id: 'goal:thread-1',

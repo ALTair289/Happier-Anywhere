@@ -1,5 +1,7 @@
+import type { SessionWorkStateStatusReasonV1 } from '@happier-dev/protocol';
+
 export type SessionWorkStateStatus = 'pending' | 'active' | 'paused' | 'blocked' | 'complete' | 'cancelled' | 'unknown';
-export type SessionWorkStateStatusReason = 'budgetLimited' | 'interrupted';
+export type SessionWorkStateStatusReason = SessionWorkStateStatusReasonV1;
 export type SessionWorkStateKind = 'goal' | 'task' | 'todo';
 export type SessionWorkStateOrigin = 'vendor' | 'happier' | 'derived';
 

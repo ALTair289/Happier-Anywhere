@@ -1,3 +1,5 @@
+import { SessionWorkStateStatusReasonV1Schema } from '@happier-dev/protocol';
+
 import type {
     SessionWorkStateGoalCapabilities,
     SessionWorkStateItem,
@@ -58,7 +60,8 @@ function readNonNegativeNumber(value: unknown): number | null {
 }
 
 function readStatusReason(value: unknown): SessionWorkStateStatusReason | null {
-    return value === 'budgetLimited' || value === 'interrupted' ? value : null;
+    const parsed = SessionWorkStateStatusReasonV1Schema.safeParse(value);
+    return parsed.success ? parsed.data : null;
 }
 
 function readGoalCapabilities(value: unknown): SessionWorkStateGoalCapabilities | null {

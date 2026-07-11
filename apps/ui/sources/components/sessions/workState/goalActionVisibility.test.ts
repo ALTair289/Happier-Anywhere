@@ -95,6 +95,12 @@ describe('resolveGoalStatusLabelKey', () => {
             .toBe('session.workState.goal.statusBudgetLimited');
     });
 
+    it.each(['blocked', 'usageLimited'] as const)('surfaces the generic blocked label while preserving the %s reason on the item', (statusReason) => {
+        const item = goal({ status: 'blocked', statusReason });
+        expect(resolveGoalStatusLabelKey(item)).toBe('session.workState.badge.goalBlocked');
+        expect(item.statusReason).toBe(statusReason);
+    });
+
     it('falls back to the active label with no status reason', () => {
         expect(resolveGoalStatusLabelKey(goal({ status: 'active' })))
             .toBe('session.workState.goal.statusActive');
