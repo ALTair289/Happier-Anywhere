@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { captureConsoleText } from '@/testkit/logger/captureOutput';
+import { SESSION_CREATE_USAGE } from './create/parseSessionCreateSpawnOptions';
 
 describe('handleSessionCommand help output', () => {
   it('lists the direct session control subcommands and run subcommands', async () => {
@@ -12,7 +13,7 @@ describe('handleSessionCommand help output', () => {
 
       expect(output.text()).toContain('happier session list [--active] [--archived] [--limit N] [--cursor C] [--include-system] [--resumable] [--plain] [--json]');
       expect(output.text()).toContain('happier session status <session-id-or-prefix> [--live] [--json]');
-      expect(output.text()).toContain('happier session create [--path <path>] [--backend <backend-target>] [--tag <tag>] [--title <title>] [--prompt <text>|--message <text>] [--json]');
+      expect(output.text()).toContain(SESSION_CREATE_USAGE);
       expect(output.text()).toContain('happier session send <session-id-or-prefix> <message> [--permission-mode <mode>] [--model <model-id>] [--wait] [--timeout <seconds>] [--json]');
       expect(output.text()).toContain('happier session wait <session-id-or-prefix> [--timeout <seconds>] [--json]');
       expect(output.text()).toContain('happier session stop <session-id-or-prefix> [--json]');

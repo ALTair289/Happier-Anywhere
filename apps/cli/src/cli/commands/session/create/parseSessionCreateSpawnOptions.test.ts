@@ -27,8 +27,49 @@ describe('parseSessionCreateSpawnOptions', () => {
         '--config-option',
         'temperature=0.4',
         '--ultracode',
+        '--profile',
+        'profile-1',
+        '--env',
+        'FEATURE_FLAG=enabled',
+        '--env',
+        'EMPTY_VALUE=',
+        '--connected-services-json',
+        JSON.stringify({
+          v: 1,
+          bindingsByServiceId: {
+            'claude-subscription': { source: 'native' },
+          },
+        }),
+        '--mcp-selection-json',
+        JSON.stringify({
+          v: 1,
+          managedServersEnabled: false,
+          forceIncludeServerIds: ['repo-tools'],
+          forceExcludeServerIds: ['legacy-tool'],
+        }),
+        '--transcript-storage',
+        'direct',
+        '--terminal-json',
+        JSON.stringify({
+          mode: 'tmux',
+          tmux: { sessionName: 'spawn', isolated: true },
+        }),
+        '--codex-backend-mode',
+        'appServer',
+        '--agent-runtime-descriptor-json',
+        JSON.stringify({
+          v: 1,
+          providerId: 'codex',
+          provider: {
+            backendMode: 'appServer',
+            providerExtra: { owner: 'codex', schemaId: 'codex.agentRuntimeDescriptorExtra', v: 1 },
+          },
+        }),
+        '--host',
+        'leeroy-mbp',
+        '--machine-id',
+        'machine-1',
       ],
-      { nowMs: 1_710_000_000_000 },
     );
 
     expect(parsed).toEqual({
@@ -43,20 +84,49 @@ describe('parseSessionCreateSpawnOptions', () => {
         modelId: 'claude-opus-4-8',
         permissionMode: 'acceptEdits',
         agentModeId: 'plan',
-        sessionConfigOptionOverrides: {
+        profileId: 'profile-1',
+        environmentVariables: {
+          FEATURE_FLAG: 'enabled',
+          EMPTY_VALUE: '',
+        },
+        connectedServices: {
           v: 1,
-          updatedAt: 1_710_000_000_000,
-          overrides: {
-            reasoning_effort: { updatedAt: 1_710_000_000_000, value: 'xhigh' },
-            temperature: { updatedAt: 1_710_000_000_000, value: 0.4 },
-            ultracode: { updatedAt: 1_710_000_000_000, value: true },
+          bindingsByServiceId: {
+            'claude-subscription': { source: 'native' },
           },
+        },
+        mcpSelection: {
+          v: 1,
+          managedServersEnabled: false,
+          forceIncludeServerIds: ['repo-tools'],
+          forceExcludeServerIds: ['legacy-tool'],
+        },
+        transcriptStorage: 'direct',
+        terminal: {
+          mode: 'tmux',
+          tmux: { sessionName: 'spawn', isolated: true },
+        },
+        codexBackendMode: 'appServer',
+        agentRuntimeDescriptorV1: {
+          v: 1,
+          providerId: 'codex',
+          provider: {
+            backendMode: 'appServer',
+            providerExtra: { owner: 'codex', schemaId: 'codex.agentRuntimeDescriptorExtra', v: 1 },
+          },
+        },
+        host: 'leeroy-mbp',
+        machineId: 'machine-1',
+        configOptions: {
+          reasoning_effort: 'xhigh',
+          temperature: 0.4,
+          ultracode: true,
         },
       },
     });
   });
 
-  it('merges --config-overrides-json with convenience config flags', () => {
+  it('keeps canonical --config-overrides-json separate from convenience config flags', () => {
     const parsed = parseSessionCreateSpawnOptions(
       [
         '--config-overrides-json',
@@ -71,19 +141,20 @@ describe('parseSessionCreateSpawnOptions', () => {
         'foo=true',
         '--ultracode',
       ],
-      { nowMs: 20 },
     );
 
     expect(parsed.actionInput).toEqual(expect.objectContaining({
       agentId: 'claude',
       sessionConfigOptionOverrides: {
         v: 1,
-        updatedAt: 20,
+        updatedAt: 10,
         overrides: {
           reasoning_effort: { updatedAt: 10, value: 'high' },
-          foo: { updatedAt: 20, value: true },
-          ultracode: { updatedAt: 20, value: true },
         },
+      },
+      configOptions: {
+        foo: true,
+        ultracode: true,
       },
     }));
   });
@@ -91,7 +162,12 @@ describe('parseSessionCreateSpawnOptions', () => {
   it('rejects malformed config override JSON without echoing the value', () => {
     expect(() => parseSessionCreateSpawnOptions(
       ['--config-overrides-json', '{"secret":"do-not-print"'],
-      { nowMs: 20 },
     )).toThrow('Invalid --config-overrides-json');
+  });
+
+  it('rejects malformed rich JSON flags without echoing values', () => {
+    expect(() => parseSessionCreateSpawnOptions(
+      ['--connected-services-json', '{"token":"do-not-print"'],
+    )).toThrow('Invalid --connected-services-json');
   });
 });

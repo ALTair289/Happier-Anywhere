@@ -1,15 +1,15 @@
 import {
   AcpConfigOptionOverridesV1Schema,
-  buildAcpConfigOptionOverridesV1,
-  type AcpConfigOptionOverridesV1,
+  AgentRuntimeDescriptorV1Schema,
+  ConnectedServiceBindingsV1Schema,
+  SessionMcpSelectionV1Schema,
+  type SpawnConfigOptionValue,
 } from '@happier-dev/protocol';
 
 import { DEFAULT_CATALOG_AGENT_ID } from '@/backends/types';
 import { readFlagValue, hasFlag } from '@/cli/commands/shared/argvFlags';
 import { normalizeBackendTargetKeysFromCsv } from '@/cli/commands/session/shared/normalizeBackendTargetKeys';
 import { resolveRequestedSessionDirectory } from '@/agent/runtime/resolveRequestedSessionDirectory';
-
-type ConfigOptionValue = string | number | boolean | null;
 
 export type SessionCreateSpawnActionInput = Record<string, unknown>;
 
@@ -19,11 +19,7 @@ export type ParsedSessionCreateSpawnOptions = Readonly<{
   actionInput: SessionCreateSpawnActionInput;
 }>;
 
-type ParseOptions = Readonly<{
-  nowMs?: number;
-}>;
-
-export const SESSION_CREATE_USAGE = 'happier session create [--path <path>] [--backend <backend-target>] [--title <title>] [--tag <tag>] [--prompt <text>|--message <text>] [--model <model-id>] [--permission-mode <mode>] [--mode <agent-mode-id>] [--config-option <id=value>] [--reasoning-effort <value>] [--ultracode] [--config-overrides-json <json>] [--json]';
+export const SESSION_CREATE_USAGE = 'happier session create [--path <path>] [--backend <backend-target>] [--title <title>] [--tag <tag>] [--prompt <text>|--message <text>] [--model <model-id>] [--permission-mode <mode>] [--mode <agent-mode-id>] [--config-option <id=value>] [--reasoning-effort <value>] [--ultracode] [--config-overrides-json <json>] [--profile <profile-id>] [--env <KEY=VALUE>] [--connected-services-json <json>] [--mcp-selection-json <json>] [--transcript-storage <persisted|direct>] [--terminal-json <json>] [--codex-backend-mode <mcp|acp|appServer>] [--runtime-descriptor-json <json>|--agent-runtime-descriptor-json <json>] [--host <host>] [--machine-id <machineId>] [--json]';
 
 function readRepeatedFlagValues(argv: readonly string[], flag: string): string[] {
   const values: string[] = [];
@@ -37,7 +33,7 @@ function readRepeatedFlagValues(argv: readonly string[], flag: string): string[]
   return values;
 }
 
-function parseConfigOptionValue(raw: string): ConfigOptionValue {
+function parseConfigOptionValue(raw: string): SpawnConfigOptionValue {
   const trimmed = raw.trim();
   if (trimmed === 'true') return true;
   if (trimmed === 'false') return false;
@@ -49,7 +45,7 @@ function parseConfigOptionValue(raw: string): ConfigOptionValue {
   return trimmed;
 }
 
-function parseConfigOptionFlag(raw: string): Readonly<{ id: string; value: ConfigOptionValue }> {
+function parseConfigOptionFlag(raw: string): Readonly<{ id: string; value: SpawnConfigOptionValue }> {
   const separatorIndex = raw.indexOf('=');
   if (separatorIndex <= 0) {
     throw new Error('Invalid --config-option. Expected <id=value>.');
@@ -64,111 +60,85 @@ function parseConfigOptionFlag(raw: string): Readonly<{ id: string; value: Confi
   };
 }
 
-function parseConfigOverridesJson(raw: string, updatedAt: number): AcpConfigOptionOverridesV1 {
-  let parsedJson: unknown;
+function parseJsonFlagValue(raw: string, flag: string): unknown {
   try {
-    parsedJson = JSON.parse(raw);
+    return JSON.parse(raw);
   } catch {
-    throw new Error('Invalid --config-overrides-json.');
+    throw new Error(`Invalid ${flag}.`);
   }
-
-  const parsedCanonical = AcpConfigOptionOverridesV1Schema.safeParse(parsedJson);
-  if (parsedCanonical.success) return parsedCanonical.data;
-
-  if (!parsedJson || typeof parsedJson !== 'object' || Array.isArray(parsedJson)) {
-    throw new Error('Invalid --config-overrides-json.');
-  }
-
-  const overrides: Record<string, { updatedAt: number; value: ConfigOptionValue }> = {};
-  for (const [key, value] of Object.entries(parsedJson)) {
-    const id = key.trim();
-    if (!id) continue;
-    if (
-      typeof value !== 'string'
-      && typeof value !== 'number'
-      && typeof value !== 'boolean'
-      && value !== null
-    ) {
-      throw new Error('Invalid --config-overrides-json.');
-    }
-    overrides[id] = { updatedAt, value };
-  }
-
-  return buildAcpConfigOptionOverridesV1({ updatedAt, overrides });
 }
 
-function sameConfigOptionValue(left: ConfigOptionValue, right: ConfigOptionValue): boolean {
-  return left === right;
-}
-
-function addConfigOverride(params: Readonly<{
-  overrides: Record<string, { updatedAt: number; value: ConfigOptionValue }>;
-  id: string;
-  value: ConfigOptionValue;
-  updatedAt: number;
-}>): void {
-  const existing = params.overrides[params.id];
-  if (existing && !sameConfigOptionValue(existing.value, params.value)) {
-    throw new Error(`Conflicting config option override: ${params.id}`);
+function parseObjectJsonFlagValue(raw: string, flag: string): Record<string, unknown> {
+  const parsed = parseJsonFlagValue(raw, flag);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`Invalid ${flag}.`);
   }
-  params.overrides[params.id] = {
-    updatedAt: params.updatedAt,
-    value: params.value,
-  };
+  return parsed as Record<string, unknown>;
 }
 
-function buildSessionConfigOptionOverrides(
+function readParsedJsonFlag<T>(
   argv: readonly string[],
-  nowMs: number,
-): AcpConfigOptionOverridesV1 | null {
-  const configOverridesRaw = readFlagValue(argv, '--config-overrides-json');
-  const base = configOverridesRaw ? parseConfigOverridesJson(configOverridesRaw, nowMs) : null;
-  const overrides: Record<string, { updatedAt: number; value: ConfigOptionValue }> = {
-    ...(base?.overrides ?? {}),
-  };
+  flag: string,
+  parse: (value: unknown) => T,
+): T | null {
+  const raw = readFlagValue(argv, flag);
+  if (!raw) return null;
+  const parsed = parseJsonFlagValue(raw, flag);
+  try {
+    return parse(parsed);
+  } catch {
+    throw new Error(`Invalid ${flag}.`);
+  }
+}
 
-  const configOptionFlags = readRepeatedFlagValues(argv, '--config-option');
-  for (const raw of configOptionFlags) {
+function parseEnvironmentVariables(argv: readonly string[]): Record<string, string> | null {
+  const values = readRepeatedFlagValues(argv, '--env');
+  if (values.length === 0) return null;
+  const environmentVariables: Record<string, string> = {};
+  for (const raw of values) {
+    const separatorIndex = raw.indexOf('=');
+    if (separatorIndex <= 0) {
+      throw new Error('Invalid --env. Expected <KEY=VALUE>.');
+    }
+    const key = raw.slice(0, separatorIndex).trim();
+    if (!key) {
+      throw new Error('Invalid --env. Expected <KEY=VALUE>.');
+    }
+    environmentVariables[key] = raw.slice(separatorIndex + 1);
+  }
+  return environmentVariables;
+}
+
+function parseTranscriptStorage(raw: string): 'persisted' | 'direct' {
+  if (raw === 'persisted' || raw === 'direct') return raw;
+  throw new Error('Invalid --transcript-storage.');
+}
+
+function parseCodexBackendMode(raw: string): 'mcp' | 'acp' | 'appServer' {
+  if (raw === 'mcp' || raw === 'acp' || raw === 'appServer') return raw;
+  throw new Error('Invalid --codex-backend-mode.');
+}
+
+function parseConfigOptions(argv: readonly string[]): Record<string, SpawnConfigOptionValue> | null {
+  const configOptions: Record<string, SpawnConfigOptionValue> = {};
+  for (const raw of readRepeatedFlagValues(argv, '--config-option')) {
     const parsed = parseConfigOptionFlag(raw);
-    addConfigOverride({
-      overrides,
-      id: parsed.id,
-      value: parsed.value,
-      updatedAt: nowMs,
-    });
+    configOptions[parsed.id] = parsed.value;
   }
 
   const reasoningEffort = readFlagValue(argv, '--reasoning-effort');
   if (reasoningEffort) {
-    addConfigOverride({
-      overrides,
-      id: 'reasoning_effort',
-      value: reasoningEffort,
-      updatedAt: nowMs,
-    });
+    configOptions.reasoning_effort = reasoningEffort.trim();
   }
 
   if (hasFlag(argv, '--ultracode')) {
-    addConfigOverride({
-      overrides,
-      id: 'ultracode',
-      value: true,
-      updatedAt: nowMs,
-    });
+    configOptions.ultracode = true;
   }
 
-  if (Object.keys(overrides).length === 0) return null;
-  return buildAcpConfigOptionOverridesV1({
-    updatedAt: nowMs,
-    overrides,
-  });
+  return Object.keys(configOptions).length > 0 ? configOptions : null;
 }
 
-export function parseSessionCreateSpawnOptions(
-  argv: readonly string[],
-  options: ParseOptions = {},
-): ParsedSessionCreateSpawnOptions {
-  const nowMs = options.nowMs ?? Date.now();
+export function parseSessionCreateSpawnOptions(argv: readonly string[]): ParsedSessionCreateSpawnOptions {
   const path = resolveRequestedSessionDirectory({
     requestedDirectory: readFlagValue(argv, '--path') ?? null,
   });
@@ -181,7 +151,38 @@ export function parseSessionCreateSpawnOptions(
   const modelId = (readFlagValue(argv, '--model') ?? '').trim();
   const permissionMode = (readFlagValue(argv, '--permission-mode') ?? '').trim();
   const agentModeId = (readFlagValue(argv, '--mode') ?? '').trim();
-  const sessionConfigOptionOverrides = buildSessionConfigOptionOverrides(argv, nowMs);
+  const profileId = (readFlagValue(argv, '--profile') ?? '').trim();
+  const host = (readFlagValue(argv, '--host') ?? '').trim();
+  const machineId = (readFlagValue(argv, '--machine-id') ?? '').trim();
+  const transcriptStorageRaw = (readFlagValue(argv, '--transcript-storage') ?? '').trim();
+  const codexBackendModeRaw = (readFlagValue(argv, '--codex-backend-mode') ?? '').trim();
+  const sessionConfigOptionOverrides = readParsedJsonFlag(
+    argv,
+    '--config-overrides-json',
+    (value) => AcpConfigOptionOverridesV1Schema.parse(value),
+  );
+  const configOptions = parseConfigOptions(argv);
+  const environmentVariables = parseEnvironmentVariables(argv);
+  const connectedServices = readParsedJsonFlag(
+    argv,
+    '--connected-services-json',
+    (value) => ConnectedServiceBindingsV1Schema.parse(value),
+  );
+  const mcpSelection = readParsedJsonFlag(
+    argv,
+    '--mcp-selection-json',
+    (value) => SessionMcpSelectionV1Schema.parse(value),
+  );
+  const terminalRaw = readFlagValue(argv, '--terminal-json');
+  const terminal = terminalRaw ? parseObjectJsonFlagValue(terminalRaw, '--terminal-json') : null;
+  const agentRuntimeDescriptorRaw =
+    readFlagValue(argv, '--agent-runtime-descriptor-json')
+    ?? readFlagValue(argv, '--runtime-descriptor-json');
+  const agentRuntimeDescriptorV1 = agentRuntimeDescriptorRaw
+    ? AgentRuntimeDescriptorV1Schema.parse(parseJsonFlagValue(agentRuntimeDescriptorRaw, '--agent-runtime-descriptor-json'))
+    : null;
+  const transcriptStorage = transcriptStorageRaw ? parseTranscriptStorage(transcriptStorageRaw) : null;
+  const codexBackendMode = codexBackendModeRaw ? parseCodexBackendMode(codexBackendModeRaw) : null;
 
   return {
     backendRaw,
@@ -196,6 +197,17 @@ export function parseSessionCreateSpawnOptions(
       ...(permissionMode ? { permissionMode } : {}),
       ...(agentModeId ? { agentModeId } : {}),
       ...(sessionConfigOptionOverrides ? { sessionConfigOptionOverrides } : {}),
+      ...(configOptions ? { configOptions } : {}),
+      ...(profileId ? { profileId } : {}),
+      ...(environmentVariables ? { environmentVariables } : {}),
+      ...(connectedServices ? { connectedServices } : {}),
+      ...(mcpSelection ? { mcpSelection } : {}),
+      ...(transcriptStorage ? { transcriptStorage } : {}),
+      ...(terminal ? { terminal } : {}),
+      ...(codexBackendMode ? { codexBackendMode } : {}),
+      ...(agentRuntimeDescriptorV1 ? { agentRuntimeDescriptorV1 } : {}),
+      ...(host ? { host } : {}),
+      ...(machineId ? { machineId } : {}),
     },
   };
 }
