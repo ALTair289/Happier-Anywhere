@@ -42,6 +42,7 @@ import { ApprovalPromptCard } from '../approvals/ApprovalPromptCard';
 import { resolveInactiveSessionToolCallFailure } from '../permissions/resolveInactiveSessionToolCallFailure';
 import { navigateWithBlurOnWeb } from '@/utils/platform/navigateWithBlurOnWeb';
 import { buildApprovalToolCallLocation, doesApprovalMatchToolCall } from './toolApprovalPromptMatching';
+import type { TranscriptInteraction } from '@/utils/sessions/deriveTranscriptInteraction';
 
 export const ToolTimelineRow = React.memo((props: {
     tool: ToolCall;
@@ -52,12 +53,7 @@ export const ToolTimelineRow = React.memo((props: {
     headerAction?: React.ReactNode | null;
     approvalRequests?: readonly OpenApprovalArtifactForSession[];
     forcePermissionPromptsInTranscript?: boolean;
-    interaction?: {
-        canSendMessages: boolean;
-        canApprovePermissions: boolean;
-        permissionDisabledReason?: 'public' | 'readOnly' | 'notGranted' | 'inactive';
-        disableToolNavigation?: boolean;
-    };
+    interaction?: TranscriptInteraction;
 }) => {
     const { theme } = useUnistyles();
     const router = useRouter();

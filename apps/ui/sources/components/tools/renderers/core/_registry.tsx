@@ -31,6 +31,7 @@ import { AgentTeamView } from '../workflow/AgentTeamView';
 import { WorkflowActivityView } from '../workflow/WorkflowActivityView';
 import { KnownCanonicalToolNameV2Schema, type KnownCanonicalToolNameV2 } from '@happier-dev/protocol';
 import { normalizeToolNameForView } from '@/components/tools/normalization/policy/normalizeToolNameForView';
+import type { TranscriptInteraction } from '@/utils/sessions/deriveTranscriptInteraction';
 
 export type ToolViewDetailLevel = 'title' | 'summary' | 'full';
 
@@ -41,11 +42,7 @@ export type ToolViewProps = {
     sessionId?: string;
     messageId?: string;
     detailLevel?: ToolViewDetailLevel;
-    interaction?: {
-        canSendMessages: boolean;
-        canApprovePermissions: boolean;
-        permissionDisabledReason?: 'public' | 'readOnly' | 'notGranted' | 'inactive';
-    };
+    interaction?: TranscriptInteraction;
 }
 
 // Type for tool view components

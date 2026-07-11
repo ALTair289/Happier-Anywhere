@@ -1,6 +1,8 @@
 export type TranscriptInteraction = Readonly<{
     canSendMessages: boolean;
     canApprovePermissions: boolean;
+    /** Action grant for creating a fork from this transcript surface. Missing grants fail closed. */
+    canFork?: boolean;
     permissionDisabledReason?: 'public' | 'readOnly' | 'notGranted' | 'inactive';
     disableToolNavigation?: boolean;
 }>;
@@ -45,6 +47,7 @@ export function deriveTranscriptInteraction(
         return {
             canSendMessages: false,
             canApprovePermissions: false,
+            canFork: false,
             permissionDisabledReason: 'public',
             disableToolNavigation: input.disableToolNavigation,
         };
@@ -68,6 +71,7 @@ export function deriveTranscriptInteraction(
     return {
         canSendMessages,
         canApprovePermissions,
+        canFork: canSendMessages,
         permissionDisabledReason,
         disableToolNavigation: input.disableToolNavigation,
     };

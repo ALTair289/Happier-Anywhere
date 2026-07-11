@@ -12,9 +12,11 @@ import { Ionicons } from '@expo/vector-icons';
 import { Text, TextInput } from '@/components/ui/text/Text';
 import { resolveAgentRequestKind } from '@/utils/sessions/permissions/permissionPromptPolicy';
 import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
+import { resolveClaudeUnifiedDialogQuestionPresentation } from './resolveClaudeUnifiedDialogQuestionPresentation';
 
 
 interface QuestionOption {
+    choice?: string;
     label: string;
     description: string;
 }
@@ -32,6 +34,7 @@ interface Question {
 
 interface AskUserQuestionInput {
     questions: Question[];
+    happierDialog?: unknown;
 }
 
 function parseAskUserQuestionAnswersFromToolResult(result: unknown): Record<string, string> | null {
@@ -215,7 +218,9 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
 
     // Parse input
     const input = tool.input as AskUserQuestionInput | undefined;
-    const questions = input?.questions;
+    const questions = input
+        ? resolveClaudeUnifiedDialogQuestionPresentation(input, (key) => t(key)).questions as Question[]
+        : undefined;
 
     if (!questions || !Array.isArray(questions) || questions.length === 0) {
         return null;
@@ -316,7 +321,11 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
                     .filter(Boolean);
                 const selectedLabelsText = selectedLabelsArray.join(', ');
                 responseLines.push(`${q.header}: ${selectedLabelsText}`);
-                answers[questionKey] = selectedLabelsText;
+                const selectedAnswerValues = Array.from(selected)
+                    .map(optIndex => options[optIndex])
+                    .filter((option): option is QuestionOption => Boolean(option))
+                    .map((option) => option.choice ?? option.label);
+                answers[questionKey] = selectedAnswerValues.join(', ');
             }
         });
 

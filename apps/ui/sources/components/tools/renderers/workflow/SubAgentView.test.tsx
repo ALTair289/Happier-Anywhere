@@ -128,6 +128,28 @@ describe('SubAgentView', () => {
             expect(joined).toContain('+ 1 more');
         });
 
+        it('keeps nested +N tool navigation disabled for generic SubAgent/Task renderers', async () => {
+            const base = Date.now();
+            const taskTool = makeTaskTool({ createdAt: base, startedAt: base });
+            const messages = Array.from({ length: 5 }, (_, index) =>
+                makeToolMessage(makeSubTool(`Tool${index + 1}`, base + index + 1)),
+            );
+            const { SubAgentView } = await import('./SubAgentView');
+            const screen = await renderScreen(React.createElement(SubAgentView, {
+                ...makeToolViewProps(taskTool, { messages }),
+                sessionId: 'public-session',
+                messageId: 'parent-message',
+                interaction: {
+                    canSendMessages: false,
+                    canApprovePermissions: false,
+                    permissionDisabledReason: 'public',
+                    disableToolNavigation: true,
+                },
+            }));
+
+            expect(screen.findByTestId('task-like-summary-more-tools')?.props.onPress).toBeUndefined();
+        });
+
         it('does not render sidechain text messages in summary mode', async () => {
             const base = Date.now();
             const taskTool = makeTaskTool({ createdAt: base, startedAt: base });

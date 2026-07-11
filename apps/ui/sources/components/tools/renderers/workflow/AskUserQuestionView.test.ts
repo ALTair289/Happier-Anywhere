@@ -187,6 +187,38 @@ describe('AskUserQuestionView', () => {
         expect(sendMessage).toHaveBeenCalledTimes(0);
     });
 
+    it('submits the stable Claude dialog choice instead of its localized display label', async () => {
+        sessionAllowWithAnswers.mockResolvedValueOnce(undefined);
+        const screen = await renderView(makeTool({
+            input: {
+                happierDialog: {
+                    kind: 'unrecognized',
+                    dialogId: 'unrecognized_confirmation',
+                    notice: 'open_terminal',
+                },
+                questions: [{
+                    header: 'Claude dialog',
+                    question: 'Open the terminal?',
+                    multiSelect: false,
+                    options: [{
+                        choice: 'open_terminal',
+                        label: 'Open terminal',
+                        description: 'Open the terminal to continue.',
+                    }],
+                }],
+            },
+        }));
+
+        const option = screen.findByProps({ testID: 'ask-user-question.option:0:0' });
+        expect(option).toBeTruthy();
+        await pressTestInstanceAsync(option, 'Claude dialog option');
+        await pressPressableByLabel(screen, 'tools.askUserQuestion.submit');
+
+        expect(sessionAllowWithAnswers).toHaveBeenCalledWith('s1', 'toolu_1', {
+            'tools.askUserQuestion.claudeDialogNotice.question': 'open_terminal',
+        });
+    });
+
     it('exposes stable testIDs for native E2E (Maestro)', async () => {
         const screen = await renderView(makeTool());
 

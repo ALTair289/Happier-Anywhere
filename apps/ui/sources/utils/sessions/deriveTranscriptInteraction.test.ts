@@ -3,10 +3,18 @@ import { describe, expect, it } from 'vitest';
 import { deriveTranscriptInteraction, deriveTranscriptInteractionFromSession } from './deriveTranscriptInteraction';
 
 describe('deriveTranscriptInteraction', () => {
+    it('derives fork access from the transcript surface grant and fails closed for public/view surfaces', () => {
+        expect(deriveTranscriptInteraction({ kind: 'public', disableToolNavigation: true }).canFork).toBe(false);
+        expect(deriveTranscriptInteraction({ kind: 'session', accessLevel: 'view', canApprovePermissions: false }).canFork).toBe(false);
+        expect(deriveTranscriptInteraction({ kind: 'session', accessLevel: 'edit', canApprovePermissions: false }).canFork).toBe(true);
+        expect(deriveTranscriptInteraction({ kind: 'session', accessLevel: undefined, canApprovePermissions: false }).canFork).toBe(true);
+    });
+
     it('treats missing accessLevel as owner (full interaction)', () => {
         expect(deriveTranscriptInteraction({ kind: 'session', accessLevel: undefined, canApprovePermissions: undefined })).toEqual({
             canSendMessages: true,
             canApprovePermissions: true,
+            canFork: true,
             permissionDisabledReason: undefined,
             disableToolNavigation: undefined,
         });
@@ -23,6 +31,7 @@ describe('deriveTranscriptInteraction', () => {
         ).toEqual({
             canSendMessages: true,
             canApprovePermissions: false,
+            canFork: true,
             permissionDisabledReason: 'inactive',
             disableToolNavigation: undefined,
         });
@@ -32,6 +41,7 @@ describe('deriveTranscriptInteraction', () => {
         expect(deriveTranscriptInteraction({ kind: 'session', accessLevel: 'view', canApprovePermissions: false })).toEqual({
             canSendMessages: false,
             canApprovePermissions: false,
+            canFork: false,
             permissionDisabledReason: 'readOnly',
             disableToolNavigation: undefined,
         });
@@ -48,6 +58,7 @@ describe('deriveTranscriptInteraction', () => {
         ).toEqual({
             canSendMessages: false,
             canApprovePermissions: false,
+            canFork: false,
             permissionDisabledReason: 'inactive',
             disableToolNavigation: undefined,
         });
@@ -57,6 +68,7 @@ describe('deriveTranscriptInteraction', () => {
         expect(deriveTranscriptInteraction({ kind: 'session', accessLevel: 'edit', canApprovePermissions: false })).toEqual({
             canSendMessages: true,
             canApprovePermissions: false,
+            canFork: true,
             permissionDisabledReason: 'notGranted',
             disableToolNavigation: undefined,
         });
@@ -66,6 +78,7 @@ describe('deriveTranscriptInteraction', () => {
         expect(deriveTranscriptInteraction({ kind: 'session', accessLevel: 'edit', canApprovePermissions: true })).toEqual({
             canSendMessages: true,
             canApprovePermissions: true,
+            canFork: true,
             permissionDisabledReason: undefined,
             disableToolNavigation: undefined,
         });
@@ -82,6 +95,7 @@ describe('deriveTranscriptInteraction', () => {
         ).toEqual({
             canSendMessages: true,
             canApprovePermissions: false,
+            canFork: true,
             permissionDisabledReason: 'inactive',
             disableToolNavigation: undefined,
         });
@@ -91,6 +105,7 @@ describe('deriveTranscriptInteraction', () => {
         expect(deriveTranscriptInteraction({ kind: 'public', disableToolNavigation: true })).toEqual({
             canSendMessages: false,
             canApprovePermissions: false,
+            canFork: false,
             permissionDisabledReason: 'public',
             disableToolNavigation: true,
         });
@@ -109,6 +124,7 @@ describe('deriveTranscriptInteractionFromSession', () => {
         ).toEqual({
             canSendMessages: true,
             canApprovePermissions: false,
+            canFork: true,
             permissionDisabledReason: 'inactive',
             disableToolNavigation: undefined,
         });
@@ -125,6 +141,7 @@ describe('deriveTranscriptInteractionFromSession', () => {
         ).toEqual({
             canSendMessages: true,
             canApprovePermissions: false,
+            canFork: true,
             permissionDisabledReason: 'inactive',
             disableToolNavigation: undefined,
         });

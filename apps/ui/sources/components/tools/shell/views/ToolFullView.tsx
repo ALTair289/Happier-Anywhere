@@ -29,6 +29,7 @@ import { isSubAgentTranscriptToolName } from '@happier-dev/protocol/tools/v2';
 import { resolveInactiveSessionToolCallFailure } from '../permissions/resolveInactiveSessionToolCallFailure';
 import { ToolError } from '@/components/tools/shell/presentation/ToolError';
 import { resolveToolPermissionTerminalErrorMessage } from '../permissions/resolveToolPermissionTerminalErrorMessage';
+import type { TranscriptInteraction } from '@/utils/sessions/deriveTranscriptInteraction';
 
 
 interface ToolFullViewProps {
@@ -38,11 +39,7 @@ interface ToolFullViewProps {
     messages?: Message[];
     jumpChildId?: string | null;
     forcePermissionFooterInTranscript?: boolean;
-    interaction?: {
-        canSendMessages: boolean;
-        canApprovePermissions: boolean;
-        permissionDisabledReason?: 'public' | 'readOnly' | 'notGranted' | 'inactive';
-    };
+    interaction?: TranscriptInteraction;
 }
 
 export function ToolFullView({ tool, sessionId, metadata, messages = [], jumpChildId, forcePermissionFooterInTranscript = false, interaction }: ToolFullViewProps) {

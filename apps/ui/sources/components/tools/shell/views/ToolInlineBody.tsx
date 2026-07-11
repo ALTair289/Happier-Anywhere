@@ -20,6 +20,7 @@ import { t } from '@/text';
 import { resolveToolPermissionTerminalErrorMessage } from '@/components/tools/shell/permissions/resolveToolPermissionTerminalErrorMessage';
 import { useSetting } from '@/sync/domains/state/storage';
 import { settingsDefaults } from '@/sync/domains/settings/settings';
+import type { TranscriptInteraction } from '@/utils/sessions/deriveTranscriptInteraction';
 
 type ToolInlineBodyMode = 'card' | 'timeline';
 type ToolPayloadKind = 'input' | 'output';
@@ -176,11 +177,7 @@ export const ToolInlineBody = React.memo(function ToolInlineBody(props: {
     messages: Message[];
     sessionId?: string;
     messageId?: string;
-    interaction?: {
-        canSendMessages: boolean;
-        canApprovePermissions: boolean;
-        permissionDisabledReason?: 'public' | 'readOnly' | 'notGranted' | 'inactive';
-    };
+    interaction?: TranscriptInteraction;
     detailLevel: 'summary' | 'full';
     sectionSpacing?: 'default' | 'compact';
     setHeaderActions: (node: React.ReactNode | null) => void;

@@ -41,6 +41,7 @@ import { isGenericSubAgentToolName, isSubAgentTranscriptToolName } from '@happie
 import { resolveInactiveSessionToolCallFailure } from '../permissions/resolveInactiveSessionToolCallFailure';
 import { navigateWithBlurOnWeb } from '@/utils/platform/navigateWithBlurOnWeb';
 import { buildApprovalToolCallLocation, doesApprovalMatchToolCall } from './toolApprovalPromptMatching';
+import type { TranscriptInteraction } from '@/utils/sessions/deriveTranscriptInteraction';
 
 
 interface ToolViewProps {
@@ -61,12 +62,7 @@ interface ToolViewProps {
      * Standalone tool cards (default) keep the intrinsic margin.
      */
     embedded?: boolean;
-    interaction?: {
-        canSendMessages: boolean;
-        canApprovePermissions: boolean;
-        permissionDisabledReason?: 'public' | 'readOnly' | 'notGranted' | 'inactive';
-        disableToolNavigation?: boolean;
-    };
+    interaction?: TranscriptInteraction;
 }
 
 export const ToolView = React.memo<ToolViewProps>((props) => {
