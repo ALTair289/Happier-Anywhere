@@ -5,13 +5,18 @@
 
 import { query } from './query'
 import type { SDKSystemMessage } from './types'
+import {
+    isCacheableMetadata,
+    readCachedSDKMetadata,
+    resolveSDKMetadataCacheKey,
+    type SDKMetadata,
+    writeCachedSDKMetadata,
+} from './metadataCache'
+import { getDefaultClaudeCodePath } from './utils'
 import { ensureClaudeJsRuntimeExecutable } from '@/backends/claude/utils/ensureClaudeJsRuntimeExecutable'
 import { logger } from '@/ui/logger'
 
-export interface SDKMetadata {
-    tools?: string[]
-    slashCommands?: string[]
-}
+export type { SDKMetadata } from './metadataCache'
 
 /**
  * Extract SDK metadata by running a minimal query and capturing the init message
@@ -19,43 +24,54 @@ export interface SDKMetadata {
  */
 export async function extractSDKMetadata(): Promise<SDKMetadata> {
     const abortController = new AbortController()
-    
+
     try {
         logger.debug('[metadataExtractor] Starting SDK metadata extraction')
         const runtimeExecutable = await ensureClaudeJsRuntimeExecutable()
-        
+        const claudePath = getDefaultClaudeCodePath()
+        const cacheKey = resolveSDKMetadataCacheKey({ claudePath, runtimeExecutable })
+        const cached = cacheKey ? readCachedSDKMetadata(cacheKey) : null
+        if (cached) {
+            logger.debug('[metadataExtractor] Using cached SDK metadata:', cached)
+            return cached
+        }
+
         // Run SDK with minimal tools allowed
-	        const sdkQuery = query({
-	            prompt: 'hello',
-	            options: {
-	                maxTurns: 1,
-                    executable: runtimeExecutable,
-	                abort: abortController.signal
-	            }
-	        })
+        const sdkQuery = query({
+            prompt: 'hello',
+            options: {
+                maxTurns: 1,
+                executable: runtimeExecutable,
+                pathToClaudeCodeExecutable: claudePath,
+                abort: abortController.signal
+            }
+        })
 
         // Wait for the first system message which contains tools and slash commands
         for await (const message of sdkQuery) {
             if (message.type === 'system' && message.subtype === 'init') {
                 const systemMessage = message as SDKSystemMessage
-                
-                const metadata: SDKMetadata = {
-                    tools: systemMessage.tools,
-                    slashCommands: systemMessage.slash_commands
-                }
-                
+
+                const metadata: SDKMetadata = {}
+                if (Array.isArray(systemMessage.tools)) metadata.tools = systemMessage.tools
+                if (Array.isArray(systemMessage.slash_commands)) metadata.slashCommands = systemMessage.slash_commands
+
                 logger.debug('[metadataExtractor] Captured SDK metadata:', metadata)
-                
+
                 // Abort the query since we got what we need
                 abortController.abort()
-                
+
+                if (cacheKey && isCacheableMetadata(metadata)) {
+                    await writeCachedSDKMetadata(cacheKey, metadata)
+                }
+
                 return metadata
             }
         }
-        
+
         logger.debug('[metadataExtractor] No init message received from SDK')
         return {}
-        
+
     } catch (error) {
         // Check if it's an abort error (expected)
         if (error instanceof Error && error.name === 'AbortError') {
