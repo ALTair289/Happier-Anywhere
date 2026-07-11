@@ -3,7 +3,7 @@ import { Pressable } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
-import { buildBackendTargetKey, type BackendTargetRefV1 } from '@happier-dev/protocol';
+import { buildBackendTargetKey, type BackendTargetRefV1, type ConnectedServiceBindingsV1 } from '@happier-dev/protocol';
 
 import { resolveProviderAgentIdForBackendTarget } from '@/agents/backendCatalog/getResolvedBackendCatalogEntries';
 import { getAgentCore } from '@/agents/catalog/catalog';
@@ -32,6 +32,7 @@ export type NewSessionEngineOptionDetailProps = Readonly<{
     capabilityServerId: string;
     cwd?: string | null;
     capabilityProbeContext?: NewSessionCapabilityProbeContext | null;
+    connectedServices?: ConnectedServiceBindingsV1 | null;
     /**
      * Optional additional probe surface to merge into the model section's refresh affordance.
      * New-session wants one refresh button that can also refresh CLI detection.
@@ -151,6 +152,7 @@ export function NewSessionEngineOptionDetail(props: NewSessionEngineOptionDetail
         capabilityServerId: props.capabilityServerId,
         cwd: props.cwd ?? null,
         probeContext: props.capabilityProbeContext ?? null,
+        connectedServices: props.connectedServices ?? null,
     });
     const { configOptions, probe: configProbe } = useNewSessionPreflightConfigOptionsState({
         backendTarget: props.backendTarget,
@@ -158,6 +160,7 @@ export function NewSessionEngineOptionDetail(props: NewSessionEngineOptionDetail
         capabilityServerId: props.capabilityServerId,
         cwd: props.cwd ?? null,
         probeContext: props.capabilityProbeContext ?? null,
+        connectedServices: props.connectedServices ?? null,
     });
 
     const [selectedModelId, setSelectedModelId] = React.useState(() => normalizeSelectedOptionId(props.selectedModelId));

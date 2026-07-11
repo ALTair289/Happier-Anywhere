@@ -3,6 +3,7 @@ import { describe, expect, it, vi, afterEach } from 'vitest';
 
 import { renderHook } from '@/dev/testkit/hooks/renderHook';
 import { installNewSessionScreenModelCommonModuleMocks } from '../newSessionScreenModelTestHelpers';
+import type { AccountProfile, ConnectedServiceBindingsV1 } from '@happier-dev/protocol';
 
 import { useNewSessionAgentPickerControls } from './useNewSessionAgentPickerControls';
 
@@ -654,6 +655,83 @@ describe('useNewSessionAgentPickerControls', () => {
                     value: 'fast',
                 },
             },
+        }));
+    });
+
+    it('passes per-entry connected-services bindings to an engine detail even when another engine is selected', async () => {
+        const accountProfileConnectedServicesV2: AccountProfile['connectedServicesV2'] = [
+            {
+                serviceId: 'openai-codex',
+                profiles: [
+                    {
+                        profileId: 'leeroy',
+                        status: 'connected',
+                        kind: 'oauth',
+                        providerEmail: 'leeroy@example.com',
+                        providerAccountId: null,
+                        expiresAt: null,
+                        lastUsedAt: null,
+                        health: null,
+                    },
+                ],
+                groups: [{
+                    groupId: 'happier',
+                    displayName: 'Happier',
+                    activeProfileId: 'leeroy',
+                    generation: 1,
+                    memberProfileIds: ['leeroy'],
+                }],
+            },
+        ];
+        const expectedConnectedServices: ConnectedServiceBindingsV1 = {
+            v: 1,
+            bindingsByServiceId: {
+                'openai-codex': {
+                    source: 'connected',
+                    selection: 'group',
+                    groupId: 'happier',
+                },
+            },
+        };
+        const hook = await renderHook(() => useNewSessionAgentPickerControls({
+            ...buildAgentPickerHookParams(),
+            selectedBackendEntry: {
+                target: { kind: 'builtInAgent', agentId: 'claude' },
+                targetKey: 'agent:claude',
+                title: 'Claude',
+                subtitle: null,
+                providerAgentId: 'claude',
+                builtInAgentId: 'claude',
+                iconAgentId: 'claude',
+            } as any,
+            selectedBackendTargetKey: 'agent:claude',
+            accountProfileConnectedServicesV2,
+            connectedServicesFeatureEnabled: true,
+            connectedServicesAccountGroupsFeatureEnabled: true,
+            agentNewSessionOptionStateByAgentId: {
+                'agent:codex': {
+                    connectedServicesBindingsByServiceId: {
+                        'openai-codex': {
+                            source: 'connected',
+                            selection: 'group',
+                            groupId: 'happier',
+                        },
+                    },
+                },
+            },
+            settings: {
+                connectedServicesProfileLabelByKey: {},
+                connectedServicesDefaultProfileByServiceId: {},
+                connectedServicesDefaultAuthByAgentIdV1: { v: 1, bindingsByAgentId: {} },
+            } as any,
+        } as Parameters<typeof useNewSessionAgentPickerControls>[0]));
+
+        const codexDetail = hook.getCurrent().agentPickerOptions?.find((option) => option.id === 'agent:codex')
+            ?.renderDetailContent?.() as React.ReactElement<{ connectedServices?: ConnectedServiceBindingsV1 | null }> | undefined;
+
+        expect(codexDetail?.props.connectedServices).toEqual(expect.objectContaining({
+            v: expectedConnectedServices.v,
+            bindingsByServiceId: expect.objectContaining(expectedConnectedServices.bindingsByServiceId),
         }));
     });
 

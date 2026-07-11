@@ -1,5 +1,10 @@
 import * as React from 'react';
-import { buildBackendTargetKey, isBuiltInAgentTarget, type BackendTargetRefV1 } from '@happier-dev/protocol';
+import {
+    buildBackendTargetKey,
+    isBuiltInAgentTarget,
+    type BackendTargetRefV1,
+    type ConnectedServiceBindingsV1,
+} from '@happier-dev/protocol';
 
 import { getAgentCore, type AgentId } from '@/agents/catalog/catalog';
 import { resolveProviderAgentIdForBackendTarget } from '@/agents/backendCatalog/getResolvedBackendCatalogEntries';
@@ -25,6 +30,7 @@ import {
 } from '@/components/sessions/new/modules/newSessionCapabilityProbeContext';
 import { NEW_SESSION_CAPABILITY_PROBE_TIMEOUT_MS } from '@/components/sessions/new/modules/newSessionCapabilityProbeTimeoutMs';
 import { scheduleProbedResourceRetryAfterExpiry } from './probedResourceRetrySchedule';
+import { stableJsonStringify } from '@/utils/json/stableJsonStringify';
 
 export function useNewSessionPreflightSessionModesState(params: Readonly<{
     backendTarget: BackendTargetRefV1;
@@ -32,6 +38,7 @@ export function useNewSessionPreflightSessionModesState(params: Readonly<{
     capabilityServerId: string;
     cwd?: string | null;
     probeContext?: NewSessionCapabilityProbeContext | null;
+    connectedServices?: ConnectedServiceBindingsV1 | null;
 }>): Readonly<{
     preflightModes: PreflightSessionModeList | null;
     modeOptions: readonly SessionModeOption[];
@@ -79,6 +86,17 @@ export function useNewSessionPreflightSessionModesState(params: Readonly<{
         () => params.probeContext?.capabilityParams ?? null,
         [probeContextKey],
     );
+    const connectedServicesKey = React.useMemo(
+        () => stableJsonStringify(params.connectedServices ?? null),
+        [params.connectedServices],
+    );
+    const cacheKeySuffixParts = React.useMemo(
+        () => [
+            ...(probeContextCacheKeySuffixParts ?? []),
+            ...(params.connectedServices ? [`connectedServices:${connectedServicesKey}`] : []),
+        ],
+        [probeContextCacheKeySuffixParts, connectedServicesKey, params.connectedServices],
+    );
 
     const preflightModesKey = React.useMemo(() => {
         return buildDynamicSessionModeProbeCacheKey({
@@ -86,9 +104,9 @@ export function useNewSessionPreflightSessionModesState(params: Readonly<{
             targetKey: backendTargetKey,
             serverId: params.capabilityServerId,
             cwd: params.cwd ?? null,
-            extraKeySuffixParts: probeContextCacheKeySuffixParts,
+            extraKeySuffixParts: cacheKeySuffixParts,
         });
-    }, [backendTargetKey, params.capabilityServerId, params.cwd, params.selectedMachineId, probeContextCacheKeySuffixParts]);
+    }, [backendTargetKey, params.capabilityServerId, params.cwd, params.selectedMachineId, cacheKeySuffixParts]);
 
     const probeScopeKey = React.useMemo(() => {
         const machineId = String(params.selectedMachineId ?? '').trim();
@@ -99,9 +117,9 @@ export function useNewSessionPreflightSessionModesState(params: Readonly<{
             serverId,
             machineId,
             backendTargetKey,
-            ...(probeContextCacheKeySuffixParts ?? []),
+            ...cacheKeySuffixParts,
         ]);
-    }, [backendTargetKey, params.capabilityServerId, params.selectedMachineId, probeContextCacheKeySuffixParts]);
+    }, [backendTargetKey, params.capabilityServerId, params.selectedMachineId, cacheKeySuffixParts]);
 
     const supportsPreflightModeProbe = React.useMemo(() => {
         const core = getAgentCore(agentType);
@@ -213,6 +231,7 @@ export function useNewSessionPreflightSessionModesState(params: Readonly<{
                             timeoutMs: NEW_SESSION_CAPABILITY_PROBE_TIMEOUT_MS,
                             backendTarget,
                             ...(probeContextCapabilityParams ? probeContextCapabilityParams : {}),
+                            ...(params.connectedServices ? { connectedServices: params.connectedServices } : {}),
                             ...(cwd ? { cwd } : {}),
                         },
                     },
@@ -293,7 +312,7 @@ export function useNewSessionPreflightSessionModesState(params: Readonly<{
             cancelled = true;
             if (retryTimeout) clearTimeout(retryTimeout);
         };
-    }, [agentType, backendTarget, preflightModesKey, params.selectedMachineId, params.capabilityServerId, params.cwd, probeContextKey, probeContextCapabilityParams, probeScopeKey, refreshNonce, supportsPreflightModeProbe]);
+    }, [agentType, backendTarget, preflightModesKey, params.selectedMachineId, params.capabilityServerId, params.cwd, probeContextKey, probeContextCapabilityParams, probeScopeKey, refreshNonce, supportsPreflightModeProbe, params.connectedServices]);
 
     const modeOptions = React.useMemo(() => {
         if (staticModeOptions.length > 0) return staticModeOptions;

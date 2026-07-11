@@ -5,12 +5,17 @@ import { useUnistyles } from 'react-native-unistyles';
 import { NewSessionEngineOptionDetail } from '@/components/sessions/new/components/NewSessionEngineOptionDetail';
 import { NewSessionFavoriteModelsDetail } from '@/components/sessions/new/components/NewSessionFavoriteModelsDetail';
 import type { AgentInputChipPickerOption } from '@/components/sessions/agentInput/components/AgentInputChipPickerTypes';
-import { getAgentCore, isAgentId } from '@/agents/catalog/catalog';
+import { getAgentCore, isAgentId, type AgentId } from '@/agents/catalog/catalog';
 import { AgentIcon } from '@/agents/registry/AgentIcon';
 import { getAgentPickerIconScale } from '@/agents/registry/registryUi';
 import type { AIBackendProfile } from '@/sync/domains/profiles/profileCompatibility';
 import { getBuiltInProfile } from '@/sync/domains/profiles/profileUtils';
-import { buildAcpConfigOptionOverridesV1, type BackendTargetRefV1 } from '@happier-dev/protocol';
+import {
+    buildAcpConfigOptionOverridesV1,
+    type AccountProfile,
+    type BackendTargetRefV1,
+    type ConnectedServiceBindingsV1,
+} from '@happier-dev/protocol';
 import type { ModelMode } from '@/sync/domains/permissions/permissionTypes';
 import type { ResolvedBackendCatalogEntry } from '@/agents/backendCatalog/getResolvedBackendCatalogEntries';
 import { t } from '@/text';
@@ -32,6 +37,8 @@ import {
     type FavoriteModelBackendIdentity,
     type FavoriteModelSelectionV1,
 } from '@/sync/domains/models/favoriteModelSelections';
+import { resolveNewSessionConnectedServicesBindingsForAgent } from '@/components/sessions/new/modules/connectedServicesNewSessionBindings';
+import { stableJsonStringify } from '@/utils/json/stableJsonStringify';
 
 type EngineSelection = Readonly<{
     modelId: string;
@@ -205,6 +212,17 @@ function buildFavoriteModelSelectionsSignature(favorites: readonly FavoriteModel
     }
 }
 
+function buildConnectedServicesPayloadCacheKeyPart(payload: ConnectedServiceBindingsV1 | null): string {
+    return stableJsonStringify(payload);
+}
+
+function resolveProviderAgentIdForPickerEntry(entry: ResolvedBackendCatalogEntry): AgentId | null {
+    if (isAgentId(entry.providerAgentId)) return entry.providerAgentId;
+    if (isAgentId(entry.builtInAgentId)) return entry.builtInAgentId;
+    if (entry.target.kind === 'builtInAgent' && isAgentId(entry.target.agentId)) return entry.target.agentId;
+    return null;
+}
+
 export function useNewSessionAgentPickerControls(rawParams: Readonly<{
     useProfiles: boolean;
     selectedProfileId: string | null;
@@ -225,6 +243,10 @@ export function useNewSessionAgentPickerControls(rawParams: Readonly<{
     capabilityServerId: string;
     selectedPath: string | null;
     settings: Settings;
+    accountProfileConnectedServicesV2?: AccountProfile['connectedServicesV2'];
+    connectedServicesFeatureEnabled?: boolean;
+    connectedServicesAccountGroupsFeatureEnabled?: boolean;
+    agentNewSessionOptionStateByAgentId?: Readonly<Record<string, Record<string, unknown> | null | undefined>>;
     favoriteModelSelections?: readonly FavoriteModelSelectionV1[];
     setFavoriteModelSelections?: (favorites: FavoriteModelSelectionV1[]) => void;
     favoriteBackendTargetKeys?: ReadonlyArray<string>;
@@ -255,6 +277,29 @@ export function useNewSessionAgentPickerControls(rawParams: Readonly<{
     handleAgentClick: () => void;
 }> {
     const params = useShallowStableObject(rawParams);
+    const resolveConnectedServicesForEntry = React.useCallback((entry: ResolvedBackendCatalogEntry): ConnectedServiceBindingsV1 | null => {
+        const providerAgentId = resolveProviderAgentIdForPickerEntry(entry);
+        if (!providerAgentId) return null;
+        return resolveNewSessionConnectedServicesBindingsForAgent({
+            agentId: providerAgentId,
+            agentCore: getAgentCore(providerAgentId),
+            agentOptionState: params.agentNewSessionOptionStateByAgentId?.[entry.targetKey] ?? null,
+            accountProfileConnectedServicesV2: params.accountProfileConnectedServicesV2 ?? [],
+            settings: {
+                connectedServicesProfileLabelByKey: params.settings.connectedServicesProfileLabelByKey ?? {},
+                connectedServicesDefaultProfileByServiceId: params.settings.connectedServicesDefaultProfileByServiceId ?? {},
+                connectedServicesDefaultAuthByAgentIdV1: params.settings.connectedServicesDefaultAuthByAgentIdV1,
+            },
+            connectedServicesFeatureEnabled: params.connectedServicesFeatureEnabled === true,
+            accountGroupsFeatureEnabled: params.connectedServicesAccountGroupsFeatureEnabled === true,
+        }).connectedServicesBindingsPayload;
+    }, [
+        params.accountProfileConnectedServicesV2,
+        params.agentNewSessionOptionStateByAgentId,
+        params.connectedServicesAccountGroupsFeatureEnabled,
+        params.connectedServicesFeatureEnabled,
+        params.settings,
+    ]);
     const profileForAgentSelection = React.useMemo(() => {
         if (!params.useProfiles || params.selectedProfileId === null) return null;
         return params.profileMap.get(params.selectedProfileId) || getBuiltInProfile(params.selectedProfileId);
@@ -497,6 +542,8 @@ export function useNewSessionAgentPickerControls(rawParams: Readonly<{
             const selectable = params.isBackendEntrySelectable(entry);
             const isFavoriteBackend = favoriteBackendTargetKeySet.has(entry.targetKey);
             const disabled = !isCompatibleWithSelectedProfile;
+            const connectedServices = resolveConnectedServicesForEntry(entry);
+            const connectedServicesCacheKeyPart = buildConnectedServicesPayloadCacheKeyPart(connectedServices);
             const muted = !selectable && !disabled;
             const subtitle = !isCompatibleWithSelectedProfile
                 ? t('newSession.aiBackendNotCompatibleWithSelectedProfile')
@@ -532,6 +579,7 @@ export function useNewSessionAgentPickerControls(rawParams: Readonly<{
                     params.selectedMachineId ?? '',
                     entry.targetKey,
                     params.selectedPath ?? '',
+                    connectedServicesCacheKeyPart,
                 ].join(':'),
                 onSelectImmediate: () => {
                     if (disabled) return;
@@ -548,6 +596,7 @@ export function useNewSessionAgentPickerControls(rawParams: Readonly<{
                         backendTarget: entry.target,
                         settings: params.settings,
                     });
+                    const detailConnectedServices = resolveConnectedServicesForEntry(entry);
                     return (
                         <NewSessionEngineOptionDetail
                             backendTarget={entry.target}
@@ -555,6 +604,7 @@ export function useNewSessionAgentPickerControls(rawParams: Readonly<{
                             capabilityServerId={params.capabilityServerId}
                             cwd={params.selectedPath}
                             capabilityProbeContext={capabilityProbeContext}
+                            connectedServices={detailConnectedServices}
                             refreshProbe={params.refreshProbe}
                             selectedModelId={selection.modelId}
                             selectedSessionModeId={selection.sessionModeId}
@@ -599,6 +649,13 @@ export function useNewSessionAgentPickerControls(rawParams: Readonly<{
                 favoriteModelSelectionMatchesBackend(favorite, buildFavoriteBackendIdentity(entry))
             ))
         ));
+        const favoriteConnectedServicesByTargetKey = Object.fromEntries(
+            favoriteBackendEntries.map((entry) => [
+                entry.targetKey,
+                resolveConnectedServicesForEntry(entry),
+            ]),
+        );
+        const favoriteConnectedServicesCacheKeyPart = stableJsonStringify(favoriteConnectedServicesByTargetKey);
         const favoriteModelsOption: AgentInputChipPickerOption[] = favoriteModelSelectionsForVisibleBackends.length > 0
             ? [{
                 id: FAVORITE_MODELS_AGENT_PICKER_OPTION_ID,
@@ -611,6 +668,7 @@ export function useNewSessionAgentPickerControls(rawParams: Readonly<{
                     params.capabilityServerId,
                     params.selectedMachineId ?? '',
                     params.selectedPath ?? '',
+                    favoriteConnectedServicesCacheKeyPart,
                 ].join(':'),
                 preserveFocusOnExternalSelectionChange: true,
                 onSelectImmediate: () => {
@@ -629,6 +687,7 @@ export function useNewSessionAgentPickerControls(rawParams: Readonly<{
                             capabilityServerId={params.capabilityServerId}
                             cwd={params.selectedPath}
                             settings={params.settings}
+                            connectedServicesByTargetKey={favoriteConnectedServicesByTargetKey}
                             refreshProbe={params.refreshProbe ?? null}
                             onSelectFavoriteModel={handleSelectFavoriteModel}
                             onSelectFavoriteModelOptionValue={handleSelectFavoriteModelOptionValue}
@@ -666,6 +725,7 @@ export function useNewSessionAgentPickerControls(rawParams: Readonly<{
         params.settings,
         params.onRememberAgentPickerView,
         profileForAgentSelection,
+        resolveConnectedServicesForEntry,
     ]);
     const favoriteModelSelectionsSignature = React.useMemo(
         () => buildFavoriteModelSelectionsSignature(params.favoriteModelSelections ?? []),

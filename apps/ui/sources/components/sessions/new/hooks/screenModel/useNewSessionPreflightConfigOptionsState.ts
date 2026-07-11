@@ -1,5 +1,10 @@
 import * as React from 'react';
-import { buildBackendTargetKey, isBuiltInAgentTarget, type BackendTargetRefV1 } from '@happier-dev/protocol';
+import {
+    buildBackendTargetKey,
+    isBuiltInAgentTarget,
+    type BackendTargetRefV1,
+    type ConnectedServiceBindingsV1,
+} from '@happier-dev/protocol';
 
 import { resolveProviderAgentIdForBackendTarget } from '@/agents/backendCatalog/getResolvedBackendCatalogEntries';
 import { machineCapabilitiesInvoke } from '@/sync/ops/capabilities';
@@ -19,6 +24,7 @@ import {
 } from '@/components/sessions/new/modules/newSessionCapabilityProbeContext';
 import { NEW_SESSION_CAPABILITY_PROBE_TIMEOUT_MS } from '@/components/sessions/new/modules/newSessionCapabilityProbeTimeoutMs';
 import { scheduleProbedResourceRetryAfterExpiry } from './probedResourceRetrySchedule';
+import { stableJsonStringify } from '@/utils/json/stableJsonStringify';
 
 export function useNewSessionPreflightConfigOptionsState(params: Readonly<{
     backendTarget: BackendTargetRefV1;
@@ -26,6 +32,7 @@ export function useNewSessionPreflightConfigOptionsState(params: Readonly<{
     capabilityServerId: string;
     cwd?: string | null;
     probeContext?: NewSessionCapabilityProbeContext | null;
+    connectedServices?: ConnectedServiceBindingsV1 | null;
 }>): Readonly<{
     configOptions: readonly AcpConfigOption[] | null;
     probe: Readonly<{
@@ -73,14 +80,25 @@ export function useNewSessionPreflightConfigOptionsState(params: Readonly<{
         () => params.probeContext?.capabilityParams ?? null,
         [probeContextKey],
     );
+    const connectedServicesKey = React.useMemo(
+        () => stableJsonStringify(params.connectedServices ?? null),
+        [params.connectedServices],
+    );
+    const cacheKeySuffixParts = React.useMemo(
+        () => [
+            ...(probeContextCacheKeySuffixParts ?? []),
+            ...(params.connectedServices ? [`connectedServices:${connectedServicesKey}`] : []),
+        ],
+        [probeContextCacheKeySuffixParts, connectedServicesKey, params.connectedServices],
+    );
 
     const cacheKey = React.useMemo(() => buildDynamicConfigOptionsProbeCacheKey({
         machineId: params.selectedMachineId,
         targetKey: probeKey,
         serverId: params.capabilityServerId,
         cwd: params.cwd ?? null,
-        extraKeySuffixParts: probeContextCacheKeySuffixParts,
-    }), [params.capabilityServerId, params.cwd, params.selectedMachineId, probeContextCacheKeySuffixParts, probeKey]);
+        extraKeySuffixParts: cacheKeySuffixParts,
+    }), [params.capabilityServerId, params.cwd, params.selectedMachineId, cacheKeySuffixParts, probeKey]);
 
     const probeScopeKey = React.useMemo(() => {
         const machineId = String(params.selectedMachineId ?? '').trim();
@@ -91,9 +109,9 @@ export function useNewSessionPreflightConfigOptionsState(params: Readonly<{
             serverId,
             machineId,
             probeKey,
-            ...(probeContextCacheKeySuffixParts ?? []),
+            ...cacheKeySuffixParts,
         ]);
-    }, [params.capabilityServerId, params.selectedMachineId, probeContextCacheKeySuffixParts, probeKey]);
+    }, [params.capabilityServerId, params.selectedMachineId, cacheKeySuffixParts, probeKey]);
 
     React.useEffect(() => {
         if (!cacheKey) {
@@ -158,6 +176,7 @@ export function useNewSessionPreflightConfigOptionsState(params: Readonly<{
                             timeoutMs: NEW_SESSION_CAPABILITY_PROBE_TIMEOUT_MS,
                             backendTarget,
                             ...(probeContextCapabilityParams ? probeContextCapabilityParams : {}),
+                            ...(params.connectedServices ? { connectedServices: params.connectedServices } : {}),
                             ...(cwd ? { cwd } : {}),
                         },
                     },
@@ -226,7 +245,7 @@ export function useNewSessionPreflightConfigOptionsState(params: Readonly<{
             cancelled = true;
             if (retryTimeout) clearTimeout(retryTimeout);
         };
-    }, [agentType, backendTarget, cacheKey, params.capabilityServerId, params.cwd, params.selectedMachineId, probeContextCapabilityParams, probeContextKey, probeScopeKey, refreshNonce]);
+    }, [agentType, backendTarget, cacheKey, params.capabilityServerId, params.cwd, params.selectedMachineId, probeContextCapabilityParams, probeContextKey, probeScopeKey, refreshNonce, params.connectedServices]);
 
     return {
         configOptions,

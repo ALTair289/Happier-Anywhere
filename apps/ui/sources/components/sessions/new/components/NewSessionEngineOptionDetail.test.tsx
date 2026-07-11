@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { act } from 'react-test-renderer';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { BackendTargetRefV1 } from '@happier-dev/protocol';
+import type { BackendTargetRefV1, ConnectedServiceBindingsV1 } from '@happier-dev/protocol';
 
 import { installNewSessionComponentsCommonModuleMocks } from './newSessionComponentsTestHelpers';
 import { renderScreen } from '@/dev/testkit';
@@ -74,6 +74,11 @@ const probeRefreshSpies = {
     modes: vi.fn(),
     config: vi.fn(),
 };
+const preflightHookCalls = vi.hoisted(() => ({
+    models: [] as Array<Record<string, unknown>>,
+    modes: [] as Array<Record<string, unknown>>,
+    config: [] as Array<Record<string, unknown>>,
+}));
 
 installNewSessionComponentsCommonModuleMocks({
     modal: () => createModalModuleMock({
@@ -166,31 +171,40 @@ vi.mock('@/components/sessions/pickers/OptionPickerOverlay', () => ({
 }));
 
 vi.mock('@/components/sessions/new/hooks/screenModel/useNewSessionPreflightModelsState', () => ({
-    useNewSessionPreflightModelsState: () => ({
-        modelOptions: modelOptionsState.value,
-        preflightModels: preflightModelsState.value,
-        probe: {
-            phase: 'idle',
-            ...(probeEnabledState.models ? { onRefresh: probeRefreshSpies.models } : {}),
-        },
-    }),
+    useNewSessionPreflightModelsState: (params: Record<string, unknown>) => {
+        preflightHookCalls.models.push(params);
+        return {
+            modelOptions: modelOptionsState.value,
+            preflightModels: preflightModelsState.value,
+            probe: {
+                phase: 'idle',
+                ...(probeEnabledState.models ? { onRefresh: probeRefreshSpies.models } : {}),
+            },
+        };
+    },
 }));
 
 vi.mock('@/components/sessions/new/hooks/screenModel/useNewSessionPreflightSessionModesState', () => ({
-    useNewSessionPreflightSessionModesState: () => ({
-        modeOptions: modeOptionsState.value,
-        probe: { phase: 'idle', onRefresh: probeRefreshSpies.modes },
-    }),
+    useNewSessionPreflightSessionModesState: (params: Record<string, unknown>) => {
+        preflightHookCalls.modes.push(params);
+        return {
+            modeOptions: modeOptionsState.value,
+            probe: { phase: 'idle', onRefresh: probeRefreshSpies.modes },
+        };
+    },
 }));
 
 vi.mock('@/components/sessions/new/hooks/screenModel/useNewSessionPreflightConfigOptionsState', () => ({
-    useNewSessionPreflightConfigOptionsState: () => ({
-        configOptions: configOptionsState.value,
-        probe: {
-            phase: 'idle',
-            ...(probeEnabledState.config ? { onRefresh: probeRefreshSpies.config } : {}),
-        },
-    }),
+    useNewSessionPreflightConfigOptionsState: (params: Record<string, unknown>) => {
+        preflightHookCalls.config.push(params);
+        return {
+            configOptions: configOptionsState.value,
+            probe: {
+                phase: 'idle',
+                ...(probeEnabledState.config ? { onRefresh: probeRefreshSpies.config } : {}),
+            },
+        };
+    },
 }));
 
 describe('NewSessionEngineOptionDetail', () => {
@@ -219,6 +233,36 @@ describe('NewSessionEngineOptionDetail', () => {
         probeRefreshSpies.models.mockClear();
         probeRefreshSpies.modes.mockClear();
         probeRefreshSpies.config.mockClear();
+        preflightHookCalls.models = [];
+        preflightHookCalls.modes = [];
+        preflightHookCalls.config = [];
+    });
+
+    it('passes connected-services bindings to every preflight hook it owns', async () => {
+        const connectedServices: ConnectedServiceBindingsV1 = {
+            v: 1,
+            bindingsByServiceId: {
+                'openai-codex': {
+                    source: 'connected',
+                    selection: 'group',
+                    groupId: 'happier',
+                },
+            },
+        };
+        const { NewSessionEngineOptionDetail } = await import('./NewSessionEngineOptionDetail');
+
+        await renderScreen(React.createElement(NewSessionEngineOptionDetail as React.ComponentType<Record<string, unknown>>, {
+            backendTarget,
+            selectedMachineId: 'machine-1',
+            capabilityServerId: 'server-1',
+            connectedServices,
+        }));
+
+        expect(preflightHookCalls.models).toHaveLength(1);
+        expect(preflightHookCalls.models[0]?.connectedServices).toEqual(connectedServices);
+        expect(preflightHookCalls.config).toHaveLength(1);
+        expect(preflightHookCalls.config[0]?.connectedServices).toEqual(connectedServices);
+        expect(preflightHookCalls.modes.every((call) => call.connectedServices === connectedServices)).toBe(true);
     });
 
     it('renders an engine favorite action in the model header and toggles it without refreshing models', async () => {

@@ -14,6 +14,7 @@ import {
     resolveNewSessionCapabilityProbeContext,
 } from '@/components/sessions/new/modules/newSessionCapabilityProbeContext';
 import type { Settings } from '@/sync/domains/settings/settings';
+import type { ConnectedServiceBindingsV1 } from '@happier-dev/protocol';
 import { computeAcpConfigOptionControlsForProvider } from '@/sync/acp/configOptionsControl';
 import type {
     SessionConfigOptionControl,
@@ -67,6 +68,7 @@ export type NewSessionFavoriteModelsDetailProps = Readonly<{
     capabilityServerId: string;
     cwd?: string | null;
     settings: Settings;
+    connectedServicesByTargetKey?: Readonly<Record<string, ConnectedServiceBindingsV1 | null | undefined>>;
     refreshProbe?: OptionPickerProbeState | null;
     onSelectFavoriteModel: (
         entry: ResolvedBackendCatalogEntry,
@@ -176,6 +178,7 @@ function FavoriteBackendModelsCollector(props: Readonly<{
     capabilityServerId: string;
     cwd?: string | null;
     settings: Settings;
+    connectedServices?: ConnectedServiceBindingsV1 | null;
     refreshProbe?: OptionPickerProbeState | null;
     onSnapshot: (targetKey: string, snapshot: FavoriteModelSnapshot) => void;
 }>) {
@@ -192,6 +195,7 @@ function FavoriteBackendModelsCollector(props: Readonly<{
         capabilityServerId: props.capabilityServerId,
         cwd: props.cwd ?? null,
         probeContext: capabilityProbeContext,
+        connectedServices: props.connectedServices ?? null,
     });
 
     const providerCore = React.useMemo(() => getAgentCore(props.entry.providerAgentId), [props.entry.providerAgentId]);
@@ -430,6 +434,7 @@ export function NewSessionFavoriteModelsDetail(props: NewSessionFavoriteModelsDe
                     capabilityServerId={props.capabilityServerId}
                     cwd={props.cwd}
                     settings={props.settings}
+                    connectedServices={props.connectedServicesByTargetKey?.[entry.targetKey] ?? null}
                     refreshProbe={props.refreshProbe}
                     onSnapshot={handleSnapshot}
                 />

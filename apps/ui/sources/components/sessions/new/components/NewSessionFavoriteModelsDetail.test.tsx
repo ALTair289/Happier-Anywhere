@@ -11,7 +11,7 @@ import { createUnistylesMock } from '@/dev/testkit/mocks/unistyles';
 import type { OptionPickerOverlayProps } from '@/components/sessions/pickers/OptionPickerOverlay';
 import type { ModelOption, PreflightModelList } from '@/sync/domains/models/modelOptions';
 import { settingsParse } from '@/sync/domains/settings/settings';
-import type { BackendTargetRefV1 } from '@happier-dev/protocol';
+import type { BackendTargetRefV1, ConnectedServiceBindingsV1 } from '@happier-dev/protocol';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -81,12 +81,22 @@ const preflightModelsByTargetKey: Record<string, {
     preflightModels: PreflightModelList | null;
     probePhase?: 'idle' | 'loading' | 'refreshing';
 }> = {};
+const preflightModelsHookCalls = vi.hoisted(() => ({
+    value: [] as Array<{
+        targetKey: string;
+        connectedServices?: ConnectedServiceBindingsV1 | null;
+    }>,
+}));
 
 vi.mock('@/components/sessions/new/hooks/screenModel/useNewSessionPreflightModelsState', () => ({
-    useNewSessionPreflightModelsState: ({ backendTarget }: { backendTarget: BackendTargetRefV1 }) => {
+    useNewSessionPreflightModelsState: ({ backendTarget, connectedServices }: {
+        backendTarget: BackendTargetRefV1;
+        connectedServices?: ConnectedServiceBindingsV1 | null;
+    }) => {
         const targetKey = backendTarget.kind === 'builtInAgent'
             ? `agent:${backendTarget.agentId}`
             : `acpBackend:${backendTarget.backendId}`;
+        preflightModelsHookCalls.value.push({ targetKey, connectedServices });
         return {
             modelOptions: preflightModelsByTargetKey[targetKey]?.modelOptions ?? [],
             preflightModels: preflightModelsByTargetKey[targetKey]?.preflightModels ?? {
@@ -104,8 +114,66 @@ describe('NewSessionFavoriteModelsDetail', () => {
         for (const key of Object.keys(preflightModelsByTargetKey)) {
             delete preflightModelsByTargetKey[key];
         }
+        preflightModelsHookCalls.value = [];
         agentCoreById.claude = { dynamicProbe: 'dynamic' };
         agentCoreById.codex = { dynamicProbe: 'dynamic' };
+    });
+
+    it('passes connected-services bindings to every favorite backend model probe', async () => {
+        const connectedServices: ConnectedServiceBindingsV1 = {
+            v: 1,
+            bindingsByServiceId: {
+                'openai-codex': {
+                    source: 'connected',
+                    selection: 'group',
+                    groupId: 'happier',
+                },
+            },
+        };
+        const { NewSessionFavoriteModelsDetail } = await import('./NewSessionFavoriteModelsDetail');
+
+        await renderScreen(React.createElement(NewSessionFavoriteModelsDetail as React.ComponentType<Record<string, unknown>>, {
+            favoriteModelSelections: [
+                {
+                    backendTargetKey: 'agent:claude',
+                    providerAgentId: 'claude',
+                    builtInAgentId: 'claude',
+                    backendLabel: 'Claude',
+                    modelId: 'claude-opus-4-6',
+                    modelLabel: 'Opus 4.6',
+                },
+                {
+                    backendTargetKey: 'agent:codex',
+                    providerAgentId: 'codex',
+                    builtInAgentId: 'codex',
+                    backendLabel: 'Codex',
+                    modelId: 'gpt-5.5',
+                    modelLabel: 'GPT 5.5',
+                },
+            ],
+            resolvedBackendEntries: [
+                createBuiltInEntry('claude', 'Claude'),
+                createBuiltInEntry('codex', 'Codex'),
+            ],
+            selectedBackendTargetKey: 'agent:claude',
+            selectedModelId: 'claude-opus-4-6',
+            selectedMachineId: 'machine-1',
+            capabilityServerId: 'server-1',
+            cwd: '/repo',
+            settings,
+            connectedServicesByTargetKey: {
+                'agent:claude': connectedServices,
+                'agent:codex': connectedServices,
+            },
+            onSelectFavoriteModel: vi.fn(),
+            onToggleFavoriteModel: vi.fn(),
+            onRemoveFavoriteModelSelection: vi.fn(),
+        }));
+
+        expect(preflightModelsHookCalls.value).toEqual(expect.arrayContaining([
+            expect.objectContaining({ targetKey: 'agent:claude', connectedServices }),
+            expect.objectContaining({ targetKey: 'agent:codex', connectedServices }),
+        ]));
     });
 
     it('renders all available favorite models in one shared favorites group', async () => {

@@ -334,6 +334,8 @@ export function useNewSessionScreenModel(): NewSessionScreenModel {
         });
     }, [activeServerSource.activeServerId, targetServerId]);
     const directSessionsFeatureEnabled = useFeatureEnabled('sessions.direct', { scopeKind: 'spawn', serverId: targetServerId });
+    const connectedServicesFeatureEnabled = useFeatureEnabled('connectedServices', { scopeKind: 'spawn', serverId: targetServerId });
+    const connectedServicesAccountGroupsFeatureEnabled = useFeatureEnabled('connectedServices.accountGroups', { scopeKind: 'spawn', serverId: targetServerId });
     const executionRunsEnabled = resolveLocalFeaturePolicyEnabled('execution.runs', settings);
     const useMachinePickerSearch = useSetting('useMachinePickerSearch');
     const usePathPickerSearch = useSetting('usePathPickerSearch');
@@ -798,12 +800,43 @@ export function useNewSessionScreenModel(): NewSessionScreenModel {
         }
         setSelectedProfileId(nextProfileId);
     }, [initialImplicitProfileId, selectedProfileId, useProfiles]);
+
+    const agentOptionState = agentNewSessionOptionStateByAgentId[selectedBackendTargetKey] ?? null;
+    const agentCore = React.useMemo(() => getAgentCore(agentType), [agentType]);
+
+    const setAgentOptionStateForCurrentAgent = React.useCallback((key: string, value: unknown) => {
+        setAgentNewSessionOptionStateByAgentId((prev) => {
+            const current = prev[selectedBackendTargetKey] ?? {};
+            const nextForTarget = { ...current, [key]: value };
+            return { ...prev, [selectedBackendTargetKey]: nextForTarget };
+        });
+    }, [selectedBackendTargetKey]);
+
+    const { connectedServicesBindingsPayload, connectedServicesAuthChip } = useNewSessionConnectedServices({
+        agentCore,
+        agentOptionState,
+        settings,
+        targetServerId,
+        router,
+        setAgentOptionStateForCurrentAgent,
+    });
+
+    const agentNewSessionOptions = React.useMemo(() => {
+        const base = buildNewSessionOptionsFromUiState({ agentId: agentType, agentOptionState }) ?? {};
+        const merged: Record<string, unknown> = { ...base };
+        if (connectedServicesBindingsPayload) {
+            merged.connectedServices = connectedServicesBindingsPayload;
+        }
+        return Object.keys(merged).length > 0 ? merged : null;
+    }, [agentOptionState, agentType, connectedServicesBindingsPayload]);
+
     const { preflightModels, preflightModelsTargetKey, modelOptions, probe: modelOptionsProbeState } = useNewSessionPreflightModelsState({
         backendTarget,
         selectedMachineId,
         capabilityServerId,
         cwd: selectedPath,
         probeContext: resolveNewSessionCapabilityProbeContext({ backendTarget, settings }),
+        connectedServices: connectedServicesBindingsPayload,
     });
 
     const { preflightModes: preflightSessionModes, modeOptions: acpSessionModeOptions, probe: acpSessionModeProbeState } =
@@ -813,6 +846,7 @@ export function useNewSessionScreenModel(): NewSessionScreenModel {
             capabilityServerId,
             cwd: selectedPath,
             probeContext: resolveNewSessionCapabilityProbeContext({ backendTarget, settings }),
+            connectedServices: connectedServicesBindingsPayload,
         });
     const { configOptions: acpConfigOptions, probe: acpConfigOptionsProbeState } = useNewSessionPreflightConfigOptionsState({
         backendTarget,
@@ -820,6 +854,7 @@ export function useNewSessionScreenModel(): NewSessionScreenModel {
         capabilityServerId,
         cwd: selectedPath,
         probeContext: resolveNewSessionCapabilityProbeContext({ backendTarget, settings }),
+        connectedServices: connectedServicesBindingsPayload,
     });
 
     const allProfilesRequirementNames = React.useMemo(() => {
@@ -1482,6 +1517,10 @@ export function useNewSessionScreenModel(): NewSessionScreenModel {
         capabilityServerId,
         selectedPath,
         settings,
+        accountProfileConnectedServicesV2: accountProfile?.connectedServicesV2 ?? [],
+        connectedServicesFeatureEnabled,
+        connectedServicesAccountGroupsFeatureEnabled,
+        agentNewSessionOptionStateByAgentId,
         favoriteModelSelections,
         setFavoriteModelSelections,
         favoriteBackendTargetKeys,
@@ -1495,35 +1534,6 @@ export function useNewSessionScreenModel(): NewSessionScreenModel {
         onRememberEngineSelection: rememberEngineSelection,
         onExplicitBackendTargetSelection: clearBackendTargetRouteParamsAfterExplicitSelection,
     });
-
-    const agentOptionState = agentNewSessionOptionStateByAgentId[selectedBackendTargetKey] ?? null;
-    const agentCore = React.useMemo(() => getAgentCore(agentType), [agentType]);
-
-    const setAgentOptionStateForCurrentAgent = React.useCallback((key: string, value: unknown) => {
-        setAgentNewSessionOptionStateByAgentId((prev) => {
-            const current = prev[selectedBackendTargetKey] ?? {};
-            const nextForTarget = { ...current, [key]: value };
-            return { ...prev, [selectedBackendTargetKey]: nextForTarget };
-        });
-    }, [selectedBackendTargetKey]);
-
-    const { connectedServicesBindingsPayload, connectedServicesAuthChip } = useNewSessionConnectedServices({
-        agentCore,
-        agentOptionState,
-        settings,
-        targetServerId,
-        router,
-        setAgentOptionStateForCurrentAgent,
-    });
-
-    const agentNewSessionOptions = React.useMemo(() => {
-        const base = buildNewSessionOptionsFromUiState({ agentId: agentType, agentOptionState }) ?? {};
-        const merged: Record<string, unknown> = { ...base };
-        if (connectedServicesBindingsPayload) {
-            merged.connectedServices = connectedServicesBindingsPayload;
-        }
-        return Object.keys(merged).length > 0 ? merged : null;
-    }, [agentOptionState, agentType, connectedServicesBindingsPayload]);
 
     const resumePopover = React.useMemo<AgentInputContentPopoverConfig>(() => {
         const browseEnabled = Boolean(selectedMachineId) && canBrowseDirectSessions(agentType);

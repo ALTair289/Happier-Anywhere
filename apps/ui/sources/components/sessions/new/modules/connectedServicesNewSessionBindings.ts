@@ -1,4 +1,6 @@
 import type { ConnectedServiceId } from '@happier-dev/agents';
+import type { AccountProfile, ConnectedServiceBindingsV1, ConnectedServicesDefaultAuthByAgentIdV1 } from '@happier-dev/protocol';
+import { ConnectedServicesDefaultAuthByAgentIdV1Schema } from '@happier-dev/protocol';
 import {
   buildConnectedServiceAccountGroupOptionsByServiceId,
   buildConnectedServiceProfileOptionsByServiceId as buildCoreConnectedServiceProfileOptionsByServiceId,
@@ -17,6 +19,11 @@ import {
 } from '@happier-dev/agents';
 
 import { getConnectedServiceRegistryEntry } from '@/sync/domains/connectedServices/connectedServiceRegistry';
+import {
+  CONNECTED_SERVICES_BINDINGS_KEY,
+  parseConnectedServicesBindingsByServiceIdFromAgentOptionState,
+  type ConnectedServicesServiceBinding,
+} from '@/sync/domains/connectedServices/connectedServicesAgentOptionStateBindings';
 
 export {
   buildConnectedServiceAccountGroupOptionsByServiceId,
@@ -43,6 +50,19 @@ export type {
 export type NewSessionConnectedServicesAgentCore = ConnectedServicesSessionAgentCore;
 export type NewSessionConnectedServiceProjection = ConnectedServiceSessionProjection;
 
+const EMPTY_DEFAULT_AUTH_SETTINGS: ConnectedServicesDefaultAuthByAgentIdV1 = {
+  v: 1,
+  bindingsByAgentId: {},
+};
+
+function parseConnectedServicesDefaultAuthSettings(value: unknown): ConnectedServicesDefaultAuthByAgentIdV1 {
+  try {
+    return ConnectedServicesDefaultAuthByAgentIdV1Schema.parse(value ?? EMPTY_DEFAULT_AUTH_SETTINGS);
+  } catch {
+    return EMPTY_DEFAULT_AUTH_SETTINGS;
+  }
+}
+
 function resolveUnsupportedProfileSubtitleKey(serviceId: ConnectedServiceId):
   | 'connectedServices.defaultAuth.warning.connected_service_unsupported'
   | 'connectedServices.detail.connectSetupTokenSubtitle' {
@@ -68,4 +88,83 @@ export function buildConnectedServiceProfileOptionsByServiceId(
   }
 
   return out;
+}
+
+export type NewSessionConnectedServicesBindingsResolution = Readonly<{
+  supportedConnectedServiceIds: ReadonlyArray<ConnectedServiceId>;
+  connectedServiceProfileOptionsByServiceId: ConnectedServicesProfileOptionsByServiceId;
+  connectedServiceAccountGroupOptionsByServiceId: ConnectedServicesAccountGroupOptionsByServiceId;
+  connectedServicesBindingsByServiceId: Readonly<Record<string, ConnectedServicesServiceBinding | undefined>>;
+  connectedServicesBindingsPayload: ConnectedServiceBindingsV1 | null;
+  accountGroupsFeatureEnabled: boolean;
+  accountGroupSwitchingEnabled: boolean;
+}>;
+
+export function resolveNewSessionConnectedServicesBindingsForAgent(params: Readonly<{
+  agentId: string;
+  agentCore: NewSessionConnectedServicesAgentCore;
+  agentOptionState: Record<string, unknown> | null | undefined;
+  accountProfileConnectedServicesV2: AccountProfile['connectedServicesV2'];
+  settings: {
+    connectedServicesProfileLabelByKey: Record<string, string | undefined>;
+    connectedServicesDefaultProfileByServiceId: Record<string, string | undefined>;
+    connectedServicesDefaultAuthByAgentIdV1?: unknown;
+  };
+  connectedServicesFeatureEnabled: boolean;
+  accountGroupsFeatureEnabled: boolean;
+  connectedServicesBindingsByServiceIdOverride?: Readonly<Record<string, ConnectedServicesServiceBinding | undefined>> | null;
+}>): NewSessionConnectedServicesBindingsResolution {
+  const supportedConnectedServiceIds = resolveAgentSupportedConnectedServiceIds({
+    connectedServicesFeatureEnabled: params.connectedServicesFeatureEnabled,
+    agentCore: params.agentCore,
+  });
+  const connectedServiceProfileOptionsByServiceId = buildConnectedServiceProfileOptionsByServiceId({
+    accountProfileConnectedServicesV2: params.accountProfileConnectedServicesV2,
+    agentCore: params.agentCore,
+    supportedConnectedServiceIds,
+    labelsByKey: params.settings.connectedServicesProfileLabelByKey,
+  });
+  const connectedServiceAccountGroupOptionsByServiceId = buildConnectedServiceAccountGroupOptionsByServiceId({
+    accountGroupsFeatureEnabled: params.accountGroupsFeatureEnabled,
+    accountProfileConnectedServicesV2: params.accountProfileConnectedServicesV2,
+    supportedConnectedServiceIds,
+  });
+  const explicitConnectedServicesBindingsByServiceId = parseConnectedServicesBindingsByServiceIdFromAgentOptionState({
+    agentOptionState: params.agentOptionState,
+  });
+  const hasExplicitConnectedServicesBindings = Boolean(
+    params.agentOptionState
+    && Object.prototype.hasOwnProperty.call(params.agentOptionState, CONNECTED_SERVICES_BINDINGS_KEY),
+  );
+  const connectedServicesDefaultAuthSettings = parseConnectedServicesDefaultAuthSettings(
+    params.settings.connectedServicesDefaultAuthByAgentIdV1,
+  );
+  const normalizedAgentId = params.agentId.trim();
+  const connectedServicesBindingsByServiceId = params.connectedServicesBindingsByServiceIdOverride
+    ?? (
+      hasExplicitConnectedServicesBindings || !normalizedAgentId
+        ? explicitConnectedServicesBindingsByServiceId
+        : connectedServicesDefaultAuthSettings.bindingsByAgentId[normalizedAgentId]?.bindingsByServiceId
+          ?? explicitConnectedServicesBindingsByServiceId
+    );
+  const accountGroupSwitchingEnabled = Boolean(params.agentCore.connectedServices?.sessionAuthSwitch);
+  const connectedServicesBindingsPayload = buildConnectedServicesBindingsPayload({
+    supportedConnectedServiceIds,
+    connectedServiceProfileOptionsByServiceId,
+    accountGroupsFeatureEnabled: params.accountGroupsFeatureEnabled,
+    accountGroupSwitchingEnabled,
+    connectedServiceAccountGroupOptionsByServiceId,
+    connectedServicesBindingsByServiceId,
+    defaultProfileByServiceId: params.settings.connectedServicesDefaultProfileByServiceId,
+  });
+
+  return {
+    supportedConnectedServiceIds,
+    connectedServiceProfileOptionsByServiceId,
+    connectedServiceAccountGroupOptionsByServiceId,
+    connectedServicesBindingsByServiceId,
+    connectedServicesBindingsPayload,
+    accountGroupsFeatureEnabled: params.accountGroupsFeatureEnabled,
+    accountGroupSwitchingEnabled,
+  };
 }

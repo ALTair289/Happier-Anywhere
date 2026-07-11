@@ -32,4 +32,45 @@ describe('buildDynamicModelProbeCacheKey', () => {
             }),
         ).toBe(JSON.stringify(['dynamicModelProbe', 'server-a', 'machine-1', 'agent:codex', '/repo', 'appServer']));
     });
+
+    it('includes connected-services selection identity in the cache key', () => {
+        const base = {
+            machineId: 'machine-1',
+            targetKey: 'agent:codex',
+            serverId: 'server-a',
+            cwd: '/repo',
+        };
+
+        const groupKey = buildDynamicModelProbeCacheKey({
+            ...base,
+            connectedServices: {
+                v: 1,
+                bindingsByServiceId: {
+                    'openai-codex': {
+                        source: 'connected',
+                        selection: 'group',
+                        groupId: 'happier',
+                        profileId: 'leeroy',
+                    },
+                },
+            },
+        });
+        const profileKey = buildDynamicModelProbeCacheKey({
+            ...base,
+            connectedServices: {
+                v: 1,
+                bindingsByServiceId: {
+                    'openai-codex': {
+                        source: 'connected',
+                        selection: 'profile',
+                        profileId: 'leeroy',
+                    },
+                },
+            },
+        });
+
+        expect(groupKey).not.toBe(profileKey);
+        expect(groupKey).toContain('group');
+        expect(profileKey).toContain('profile');
+    });
 });

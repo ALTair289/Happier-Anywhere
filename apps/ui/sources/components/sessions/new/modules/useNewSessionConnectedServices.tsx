@@ -7,11 +7,7 @@ import { createConnectedServicesAuthActionChip } from '@/components/sessions/age
 import { useFeatureEnabled } from '@/hooks/server/useFeatureEnabled';
 import { useProfile } from '@/sync/store/hooks';
 import type { ConnectedServiceId } from '@happier-dev/agents';
-import {
-  ConnectedServicesDefaultAuthByAgentIdV1Schema,
-  type ConnectedServiceBindingsV1,
-  type ConnectedServicesDefaultAuthByAgentIdV1,
-} from '@happier-dev/protocol';
+import type { ConnectedServiceBindingsV1 } from '@happier-dev/protocol';
 
 import { NewSessionConnectedServicesSelectionContent } from '@/components/sessions/new/components/NewSessionConnectedServicesSelectionContent';
 import { resolveConnectedServiceDisplayName } from '@/components/settings/connectedServices/model/resolveConnectedServiceDisplayName';
@@ -24,36 +20,20 @@ import {
   type ConnectedServicesServiceBinding,
 } from '@/sync/domains/connectedServices/connectedServicesAgentOptionStateBindings';
 import {
-  buildConnectedServiceProfileOptionsByServiceId,
-  buildConnectedServiceAccountGroupOptionsByServiceId,
-  buildConnectedServicesBindingsPayload,
-  resolveAgentSupportedConnectedServiceIds,
   type NewSessionConnectedServicesAgentCore,
+  resolveNewSessionConnectedServicesBindingsForAgent,
 } from '@/components/sessions/new/modules/connectedServicesNewSessionBindings';
-import { parseConnectedServicesBindingsByServiceIdFromAgentOptionState } from '@/sync/domains/connectedServices/connectedServicesAgentOptionStateBindings';
 import type { ConnectedServicesAuthWarningCode } from '@/components/settings/connectedServices/model/resolveConnectedServicesAuthLabel';
+import { stableJsonStringify } from '@/utils/json/stableJsonStringify';
 
 export type NewSessionConnectedServicesResult = Readonly<{
   connectedServicesBindingsPayload: ConnectedServiceBindingsV1 | null;
   connectedServicesAuthChip: AgentInputExtraActionChip | null;
 }>;
 
-const EMPTY_DEFAULT_AUTH_SETTINGS: ConnectedServicesDefaultAuthByAgentIdV1 = {
-  v: 1,
-  bindingsByAgentId: {},
-};
-
 function resolveDefaultAuthWarningLabel(warningCode: ConnectedServicesAuthWarningCode | undefined): string | undefined {
   const key = resolveConnectedServicesAuthWarningTranslationKey(warningCode);
   return key ? t(key) : undefined;
-}
-
-function parseConnectedServicesDefaultAuthSettings(value: unknown): ConnectedServicesDefaultAuthByAgentIdV1 {
-  try {
-    return ConnectedServicesDefaultAuthByAgentIdV1Schema.parse(value ?? EMPTY_DEFAULT_AUTH_SETTINGS);
-  } catch {
-    return EMPTY_DEFAULT_AUTH_SETTINGS;
-  }
 }
 
 function buildConnectedServiceProfileSettingsPath(params: Readonly<{
@@ -98,81 +78,66 @@ export function useNewSessionConnectedServices(params: Readonly<{
     scopeKind: 'spawn',
     serverId: targetServerId,
   });
-  const accountGroupSwitchingEnabled = Boolean(agentCore.connectedServices?.sessionAuthSwitch);
-
-  const supportedConnectedServiceIds = React.useMemo<ReadonlyArray<ConnectedServiceId>>(() => {
-    return resolveAgentSupportedConnectedServiceIds({
-      connectedServicesFeatureEnabled,
+  const agentId = typeof agentCore?.id === 'string' ? agentCore.id.trim() : '';
+  const baseConnectedServicesResolution = React.useMemo(() => {
+    return resolveNewSessionConnectedServicesBindingsForAgent({
+      agentId,
       agentCore,
-    });
-  }, [agentCore, connectedServicesFeatureEnabled]);
-
-  const connectedServiceProfileOptionsByServiceId = React.useMemo(() => {
-    return buildConnectedServiceProfileOptionsByServiceId({
+      agentOptionState,
       accountProfileConnectedServicesV2: accountProfile?.connectedServicesV2 ?? [],
-      agentCore,
-      supportedConnectedServiceIds,
-      labelsByKey: settings.connectedServicesProfileLabelByKey,
+      settings,
+      connectedServicesFeatureEnabled,
+      accountGroupsFeatureEnabled,
     });
-  }, [accountProfile, agentCore, settings.connectedServicesProfileLabelByKey, supportedConnectedServiceIds]);
-
-  const explicitConnectedServicesBindingsByServiceId = React.useMemo(() => {
-    return parseConnectedServicesBindingsByServiceIdFromAgentOptionState({ agentOptionState });
-  }, [agentOptionState]);
-  const hasExplicitConnectedServicesBindings = React.useMemo(() => {
-    return Boolean(
-      agentOptionState
-      && Object.prototype.hasOwnProperty.call(agentOptionState, CONNECTED_SERVICES_BINDINGS_KEY),
-    );
-  }, [agentOptionState]);
-  const connectedServicesDefaultAuthSettings = React.useMemo(() => {
-    return parseConnectedServicesDefaultAuthSettings(settings.connectedServicesDefaultAuthByAgentIdV1);
-  }, [settings.connectedServicesDefaultAuthByAgentIdV1]);
-  const connectedServicesBindingsByServiceId = React.useMemo(() => {
-    if (hasExplicitConnectedServicesBindings) return explicitConnectedServicesBindingsByServiceId;
-    const agentId = typeof agentCore?.id === 'string' ? agentCore.id.trim() : '';
-    if (!agentId) return explicitConnectedServicesBindingsByServiceId;
-    return connectedServicesDefaultAuthSettings.bindingsByAgentId[agentId]?.bindingsByServiceId
-      ?? explicitConnectedServicesBindingsByServiceId;
   }, [
+    accountGroupsFeatureEnabled,
+    accountProfile?.connectedServicesV2,
     agentCore,
-    connectedServicesDefaultAuthSettings,
-    explicitConnectedServicesBindingsByServiceId,
-    hasExplicitConnectedServicesBindings,
+    agentId,
+    agentOptionState,
+    connectedServicesFeatureEnabled,
+    settings,
   ]);
-  const [optimisticBindingsByServiceId, setOptimisticBindingsByServiceId] = React.useState(connectedServicesBindingsByServiceId);
+  const [optimisticBindingsByServiceId, setOptimisticBindingsByServiceId] = React.useState(
+    baseConnectedServicesResolution.connectedServicesBindingsByServiceId,
+  );
+  const baseConnectedServicesBindingsKey = React.useMemo(
+    () => stableJsonStringify(baseConnectedServicesResolution.connectedServicesBindingsByServiceId),
+    [baseConnectedServicesResolution.connectedServicesBindingsByServiceId],
+  );
 
   React.useEffect(() => {
-    setOptimisticBindingsByServiceId(connectedServicesBindingsByServiceId);
-  }, [connectedServicesBindingsByServiceId]);
+    setOptimisticBindingsByServiceId(baseConnectedServicesResolution.connectedServicesBindingsByServiceId);
+  }, [baseConnectedServicesBindingsKey]);
 
-  const connectedServiceAccountGroupOptionsByServiceId = React.useMemo(() => {
-    return buildConnectedServiceAccountGroupOptionsByServiceId({
-      accountGroupsFeatureEnabled,
+  const connectedServicesResolution = React.useMemo(() => {
+    return resolveNewSessionConnectedServicesBindingsForAgent({
+      agentId,
+      agentCore,
+      agentOptionState,
       accountProfileConnectedServicesV2: accountProfile?.connectedServicesV2 ?? [],
-      supportedConnectedServiceIds,
-    });
-  }, [accountGroupsFeatureEnabled, accountProfile, supportedConnectedServiceIds]);
-
-  const connectedServicesBindingsPayload = React.useMemo(() => {
-    return buildConnectedServicesBindingsPayload({
-      supportedConnectedServiceIds,
-      connectedServiceProfileOptionsByServiceId,
+      settings,
+      connectedServicesFeatureEnabled,
       accountGroupsFeatureEnabled,
-      accountGroupSwitchingEnabled,
-      connectedServiceAccountGroupOptionsByServiceId,
-      connectedServicesBindingsByServiceId: optimisticBindingsByServiceId,
-      defaultProfileByServiceId: settings.connectedServicesDefaultProfileByServiceId,
+      connectedServicesBindingsByServiceIdOverride: optimisticBindingsByServiceId,
     });
   }, [
-    accountGroupSwitchingEnabled,
     accountGroupsFeatureEnabled,
-    connectedServiceAccountGroupOptionsByServiceId,
-    connectedServiceProfileOptionsByServiceId,
+    accountProfile?.connectedServicesV2,
+    agentCore,
+    agentId,
+    agentOptionState,
+    connectedServicesFeatureEnabled,
     optimisticBindingsByServiceId,
-    settings.connectedServicesDefaultProfileByServiceId,
-    supportedConnectedServiceIds,
+    settings,
   ]);
+  const {
+    supportedConnectedServiceIds,
+    connectedServiceProfileOptionsByServiceId,
+    connectedServiceAccountGroupOptionsByServiceId,
+    connectedServicesBindingsPayload,
+    accountGroupSwitchingEnabled,
+  } = connectedServicesResolution;
 
   const setBindingForService = React.useCallback((serviceId: string, binding: ConnectedServicesServiceBinding) => {
     setOptimisticBindingsByServiceId((prev) => {

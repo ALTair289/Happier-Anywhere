@@ -95,6 +95,71 @@ describe('useNewSessionPreflightModelsState', () => {
     });
   });
 
+  it('passes connectedServices to probeModels and re-probes when the selection changes', async () => {
+    const { useNewSessionPreflightModelsState } = await import('./useNewSessionPreflightModelsState');
+
+    machineCapabilitiesInvokeMock.mockClear();
+    resetDynamicModelProbeCacheForTests();
+
+    const groupConnectedServices = {
+      v: 1,
+      bindingsByServiceId: {
+        'openai-codex': {
+          source: 'connected',
+          selection: 'group',
+          groupId: 'happier',
+          profileId: 'leeroy',
+        },
+      },
+    } as const;
+    const profileConnectedServices = {
+      v: 1,
+      bindingsByServiceId: {
+        'openai-codex': {
+          source: 'connected',
+          selection: 'profile',
+          profileId: 'leeroy',
+        },
+      },
+    } as const;
+
+    function Harness(props: { connectedServices: typeof groupConnectedServices | typeof profileConnectedServices }) {
+      useNewSessionPreflightModelsState({
+        backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+        selectedMachineId: 'machine-1',
+        capabilityServerId: 'server-1',
+        cwd: '/repo',
+        connectedServices: props.connectedServices,
+      });
+      return null;
+    }
+
+    let root!: renderer.ReactTestRenderer;
+    root = (await renderScreen(React.createElement(Harness, { connectedServices: groupConnectedServices }))).tree;
+
+    await act(async () => {
+      root.update(React.createElement(Harness, { connectedServices: profileConnectedServices }));
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => {
+      root.unmount();
+    });
+
+    expect(machineCapabilitiesInvokeMock).toHaveBeenCalledTimes(2);
+    expect(machineCapabilitiesInvokeMock.mock.calls[0]?.[1]).toMatchObject({
+      id: 'cli.codex',
+      method: 'probeModels',
+      params: expect.objectContaining({ connectedServices: groupConnectedServices }),
+    });
+    expect(machineCapabilitiesInvokeMock.mock.calls[1]?.[1]).toMatchObject({
+      id: 'cli.codex',
+      method: 'probeModels',
+      params: expect.objectContaining({ connectedServices: profileConnectedServices }),
+    });
+  });
+
   it('uses a long enough timeout for slow ACP providers', async () => {
     const { useNewSessionPreflightModelsState } = await import('./useNewSessionPreflightModelsState');
 
