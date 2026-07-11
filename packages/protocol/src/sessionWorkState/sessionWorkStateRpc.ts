@@ -345,6 +345,7 @@ export const ConnectedServiceQuotaRecoveryCreditConsumeReceiptStatusV1Schema = z
   'consumed',
   'already_consumed',
   'not_available',
+  'nothing_to_reset',
   'unknown_after_timeout',
 ]);
 export type ConnectedServiceQuotaRecoveryCreditConsumeReceiptStatusV1 =

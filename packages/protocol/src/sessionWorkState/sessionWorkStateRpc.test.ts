@@ -93,6 +93,21 @@ describe('session work-state RPC contracts', () => {
                 status: 'consumed',
             },
         });
+        expect(ConnectedServiceQuotaRecoveryCreditConsumeResponseV1Schema.parse({
+            ok: true,
+            snapshot: null,
+            receipt: {
+                idempotencyKey: 'reset-req-neutral',
+                status: 'nothing_to_reset',
+            },
+        })).toEqual({
+            ok: true,
+            snapshot: null,
+            receipt: {
+                idempotencyKey: 'reset-req-neutral',
+                status: 'nothing_to_reset',
+            },
+        });
         expect(() => ConnectedServiceQuotaRecoveryCreditConsumeResponseV1Schema.parse({
             ok: true,
             snapshot: null,
