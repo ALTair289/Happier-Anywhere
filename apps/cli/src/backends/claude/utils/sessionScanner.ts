@@ -1,6 +1,7 @@
 import { InvalidateSync } from "@/utils/sync";
 import { RawJSONLines } from "../types";
 import { dirname, join } from "node:path";
+import { watch, type FSWatcher } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { logger } from "@/ui/logger";
 import { getProjectPath } from "./path";
@@ -28,6 +29,9 @@ export type SessionScannerSessionInfo = {
 };
 
 type SessionScannerUnhookedSessionDisposition = 'ignore' | 'diagnostic' | 'main';
+
+const DISCOVERY_WATCH_FALLBACK_INTERVAL_MS = 30_000;
+const ACTIVE_SESSION_FALLBACK_INTERVAL_MS = 3_000;
 
 export async function createSessionScanner(opts: {
     sessionId: string | null,
@@ -142,6 +146,8 @@ export async function createSessionScanner(opts: {
     let pendingSessions = new Set<string>();
     let currentSessionId: string | null = null;
     let sessionFollowers = new Map<string, { filePath: string; controller: JsonlFollowController }>();
+    let projectDirWatcher: FSWatcher | null = null;
+    let watchedProjectDir: string | null = null;
     let processedMessageKeys = new Set<string>(opts.initialProcessedMessageKeys ?? []);
     const taskToolUseIdByAgentId = new Map<string, string>();
     let invalidate: (() => void) | null = null;
@@ -674,14 +680,52 @@ export async function createSessionScanner(opts: {
     invalidate = () => sync.invalidate();
     await sync.invalidateAndAwait();
 
-    // Periodic sync
-    const intervalId = setInterval(() => { sync.invalidate(); }, opts.discoverNewSessions ? 1000 : 3000);
+    const closeProjectDirWatcher = (): void => {
+        projectDirWatcher?.close();
+        projectDirWatcher = null;
+        watchedProjectDir = null;
+    };
+
+    const refreshProjectDirWatcher = (): void => {
+        if (!opts.discoverNewSessions) {
+            closeProjectDirWatcher();
+            return;
+        }
+
+        const projectDir = effectiveProjectDir();
+        if (projectDirWatcher && watchedProjectDir === projectDir) return;
+        closeProjectDirWatcher();
+
+        try {
+            const watcher = watch(projectDir, (_eventType, filename) => {
+                if (closed) return;
+                const name = typeof filename === 'string' ? filename : null;
+                if (name && !name.endsWith('.jsonl')) return;
+                sync.invalidate();
+            });
+            watcher.unref?.();
+            projectDirWatcher = watcher;
+            watchedProjectDir = projectDir;
+        } catch {
+            // Best-effort only. The slow fallback interval below handles missed or unsupported watches.
+        }
+    };
+
+    refreshProjectDirWatcher();
+
+    // Slow fallback for missed fs.watch events and active follower maintenance.
+    const intervalId = setInterval(
+        () => { sync.invalidate(); },
+        opts.discoverNewSessions ? DISCOVERY_WATCH_FALLBACK_INTERVAL_MS : ACTIVE_SESSION_FALLBACK_INTERVAL_MS,
+    );
+    intervalId.unref?.();
 
     // Public interface
     return {
         cleanup: async () => {
             closed = true;
             clearInterval(intervalId);
+            closeProjectDirWatcher();
             invalidate = null;
             subagentCollector.cleanup();
             teamInboxCollector.cleanup();
@@ -728,6 +772,7 @@ export async function createSessionScanner(opts: {
                 if (!projectDirOverride || projectDirOverride !== nextProjectDir) {
                     projectDirOverride = nextProjectDir;
                     didUpdatePaths = true;
+                    refreshProjectDirWatcher();
                 }
             }
 

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { createSessionScanner } from './sessionScanner'
 import { RawJSONLines } from '../types'
 import { readClaudeTranscriptProviderActivity } from '../localControl/readClaudeTranscriptProviderActivity'
@@ -1276,6 +1276,57 @@ describe('sessionScanner', () => {
 
     expect(collectedMessages).toContainEqual(expect.objectContaining({
       uuid: 'assistant-auth-error-with-coarse-mtime',
+    }))
+  })
+
+  it('does not use a fixed 1s discovery interval when watching for new sessions', async () => {
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+    try {
+      scanner = await createSessionScanner({
+        sessionId: null,
+        workingDirectory: testDir,
+        onMessage: (msg) => collectedMessages.push(msg),
+        discoverNewSessions: true,
+      })
+
+      const intervalDelays = setIntervalSpy.mock.calls
+        .map((call) => call[1])
+        .filter((delay): delay is number => typeof delay === 'number');
+      expect(intervalDelays).not.toContain(1_000);
+    } finally {
+      setIntervalSpy.mockRestore();
+    }
+  })
+
+  it('discovers newly created unhooked transcripts through filesystem events without waiting for the old 1s poll', async () => {
+    scanner = await createSessionScanner({
+      sessionId: null,
+      workingDirectory: testDir,
+      onMessage: (msg) => collectedMessages.push(msg),
+      discoverNewSessions: true,
+    })
+
+    const sessionId = '33333333-3333-4333-8333-333333333333'
+    const sessionFile = join(projectDir, `${sessionId}.jsonl`)
+    await writeFile(sessionFile, `${JSON.stringify({
+      type: 'assistant',
+      uuid: 'assistant-event-driven-discovery',
+      timestamp: new Date().toISOString(),
+      sessionId,
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Connection error.' }],
+      },
+      error_status: 401,
+    } as RawJSONLines)}\n`)
+
+    await waitFor(
+      () => collectedMessages.some((message) => (message as any).uuid === 'assistant-event-driven-discovery'),
+      800,
+    )
+
+    expect(collectedMessages).toContainEqual(expect.objectContaining({
+      uuid: 'assistant-event-driven-discovery',
     }))
   })
 
