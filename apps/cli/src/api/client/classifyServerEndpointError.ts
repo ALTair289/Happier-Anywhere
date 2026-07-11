@@ -164,6 +164,13 @@ export function classifyServerEndpointError(
   }
 
   const code = readErrorCode(error);
+  if (code === 'state_sharing_lock_unavailable') {
+    return {
+      kind: 'dependency_unavailable',
+      retryable: true,
+      retryAfterMs: readRetryAfterMs(error),
+    };
+  }
   if (code === 'HAPPIER_ACCOUNT_MODE_UNKNOWN') {
     return {
       kind: 'dependency_unavailable',

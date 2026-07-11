@@ -70,6 +70,32 @@ describe('logServerEndpointFailure', () => {
     });
   });
 
+  it('treats transient state-sharing lock contention as a retryable dependency failure', () => {
+    resetServerEndpointFailureLogSamplingForTests();
+    const logger = { debug: vi.fn() };
+    const error = Object.assign(new Error('State sharing lock is unavailable'), {
+      code: 'state_sharing_lock_unavailable',
+      retryAfterMs: 1_250,
+    });
+
+    const result = logServerEndpointFailure({
+      logger,
+      operation: 'Failed to materialize connected-service state',
+      error,
+      nowMs: 1_000,
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      logged: true,
+      classification: {
+        kind: 'dependency_unavailable',
+        retryable: true,
+        retryAfterMs: 1_250,
+      },
+    }));
+    expect(logger.debug.mock.calls[0]?.[0]).not.toContain('[ERROR]');
+  });
+
   it('keeps non-retryable failures visible as errors', () => {
     resetServerEndpointFailureLogSamplingForTests();
     const logger = { debug: vi.fn() };
