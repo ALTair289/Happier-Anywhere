@@ -124,6 +124,18 @@ describe('getSessionStatus', () => {
         expect(status.shouldShowStatus).toBe(true);
     });
 
+    it('formats last-seen without throwing when activeAt is missing or invalid', async () => {
+        const { formatLastSeen } = await import('./sessionUtils');
+
+        // Sessions can reach the disconnected status line without a usable
+        // activeAt; the formatter must degrade instead of crashing the row.
+        expect(() => formatLastSeen(undefined as unknown as number)).not.toThrow();
+        expect(() => formatLastSeen(Number.NaN)).not.toThrow();
+        expect(() => formatLastSeen(0)).not.toThrow();
+        expect(typeof formatLastSeen(undefined as unknown as number)).toBe('string');
+        expect(formatLastSeen(undefined as unknown as number).length).toBeGreaterThan(0);
+    });
+
     it('returns permission_required when the agent has pending requests', async () => {
         const { getSessionStatus } = await import('./sessionUtils');
         const now = 1_000_000;

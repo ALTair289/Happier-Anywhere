@@ -24,6 +24,7 @@ import {
     readDisplayPathForSession,
 } from '@/sync/ops/sessionMachineTarget';
 import { t } from '@/text';
+import { getCachedIntlDateTimeFormat } from '@/utils/datetime/cachedIntlFormatters';
 import { formatPathRelativeToHome } from './formatPathRelativeToHome';
 import { useUnistyles } from 'react-native-unistyles';
 export { formatPathRelativeToHome } from './formatPathRelativeToHome';
@@ -472,6 +473,12 @@ export function formatLastSeen(activeAt: number, isActive: boolean = false): str
     if (isActive) {
         return t('status.activeNow');
     }
+    // Sessions can reach this without a usable timestamp (0 is the repo-wide
+    // "no timestamp" convention); formatting an invalid Date throws in the
+    // Intl path, so degrade to the unknown label instead of crashing the row.
+    if (typeof activeAt !== 'number' || !Number.isFinite(activeAt) || activeAt <= 0) {
+        return t('status.unknown');
+    }
 
     const now = Date.now();
     const diffMs = now - activeAt;
@@ -496,7 +503,7 @@ export function formatLastSeen(activeAt: number, isActive: boolean = false): str
             day: 'numeric',
             year: date.getFullYear() !== new Date().getFullYear() ? 'numeric' : undefined
         };
-        return date.toLocaleDateString(undefined, options);
+        return getCachedIntlDateTimeFormat(undefined, options).format(date);
     }
 }
 
