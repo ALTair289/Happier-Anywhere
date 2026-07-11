@@ -113,4 +113,14 @@ describe('classifyHappyProcess', () => {
     expect(res).not.toBeNull();
     expect(res!.type).toBe('daemon-spawned-session');
   });
+
+  it('should detect F4 runner snapshot sessions launched from .runner-snapshots index.mjs', () => {
+    const res = classifyHappyProcess({
+      pid: 67178,
+      name: 'node',
+      cmd: '/managed/node /repo/apps/cli/.runner-snapshots/f4abcd123/index.mjs claude --happy-starting-mode remote --started-by daemon --existing-session sess-live',
+    });
+    expect(res).not.toBeNull();
+    expect(res!.type).toBe('daemon-spawned-session');
+  });
 });

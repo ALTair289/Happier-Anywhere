@@ -277,6 +277,9 @@ export function classifyHappyProcess(proc: RawProcessInfo): HappyProcessInfo | n
       (normalizedCommand.includes('/.project/logs/e2e/') || normalizedCommand.includes('/.project/tmp/')) &&
       /\/cli-[^/\s]+\/src\/index\.ts(?:\s|$)/.test(normalizedCommand)
     );
+  const isRunnerSnapshotCommand =
+    /\/\.runner-snapshots\/[^/\s]+\/index\.mjs(?:\s|$)/.test(normalizedCommand) ||
+    /\/dist\/\.runner-snapshots\/[^/\s]+\/index\.mjs(?:\s|$)/.test(normalizedCommand);
 
   // NOTE: Be intentionally strict here. This classification is used for PID reuse safety
   // (reattach + stopSession). A false positive could cause us to adopt/kill a non-Happy process.
@@ -286,6 +289,7 @@ export function classifyHappyProcess(proc: RawProcessInfo): HappyProcessInfo | n
         normalizedCommand.includes('dist/index.mjs') ||
         normalizedCommand.includes('package-dist/index.mjs') ||
         normalizedCommand.includes('bin/happier.mjs') ||
+        isRunnerSnapshotCommand ||
         // Some runtime handoff paths execute snapshot `src/index.ts` directly under `node`
         // (without the tsx import hook), so keep this as a first-class Happy process shape.
         isCliSourceSnapshotCommand ||
