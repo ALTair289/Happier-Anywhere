@@ -1,22 +1,49 @@
 ---
 name: happier-github-ops
-description: Run GitHub CLI commands as the Happier bot account via `yarn ghops` (forced PAT auth + non-interactive).
+description: Run GitHub CLI commands as the Happier bot account via `yarn ghops` (environment override or validated macOS Keychain PAT + non-interactive).
 ---
 
 # Happier GitHub Ops (bot `gh` wrapper)
 
-This repo provides `yarn ghops` as a thin wrapper around the GitHub CLI (`gh`) that **forces** authentication via the bot Personal Access Token.
+This repo provides `yarn ghops` as a thin wrapper around the GitHub CLI (`gh`) that **forces** authentication via the bot Personal Access Token. `HAPPIER_GITHUB_BOT_TOKEN` has highest priority; on macOS, the wrapper otherwise reads the validated token from Keychain service `happier/ghops`, account `happier-bot`.
 
 ## Prerequisites
 
 - `gh` is installed on the host and reachable on `PATH`.
-- Environment variable `HAPPIER_GITHUB_BOT_TOKEN` is set to the bot's fine-grained PAT.
+- Either environment variable `HAPPIER_GITHUB_BOT_TOKEN` is set to the bot's fine-grained PAT, or the token was stored on macOS with `yarn ghops auth store`.
 
 ## Contract / Safety
 
-- `yarn ghops ...` refuses to run if `HAPPIER_GITHUB_BOT_TOKEN` is missing.
+- `yarn ghops ...` refuses to run if neither the environment override nor the macOS Keychain credential is available.
 - Runs non-interactively (`GH_PROMPT_DISABLED=1`).
 - Uses an isolated repo-local `GH_CONFIG_DIR` by default.
+- Never falls back to personal `gh`, `GH_TOKEN`, or `GITHUB_TOKEN` credentials.
+- Forces `GH_HOST=github.com` so an inherited host override cannot redirect the bot token.
+- `auth store` validates that the token belongs to `happier-bot` before persisting it.
+
+## Bot credential lifecycle
+
+On macOS, configure the bot once without echoing the token:
+
+```bash
+yarn ghops auth store
+```
+
+The command prompts securely when `HAPPIER_GITHUB_BOT_TOKEN` is absent. If the environment variable is present, it validates and stores that value without printing it.
+
+Verify the resolved identity and source:
+
+```bash
+yarn ghops auth status
+```
+
+Remove only the stored Keychain credential:
+
+```bash
+yarn ghops auth clear
+```
+
+On non-macOS platforms, continue providing `HAPPIER_GITHUB_BOT_TOKEN`; Keychain lifecycle commands fail closed until a native credential-store adapter exists.
 
 ## What to write (LLM guidelines)
 
