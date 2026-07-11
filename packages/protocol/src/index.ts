@@ -958,6 +958,13 @@ export {
   sealEncryptedDataKeyEnvelopeV1,
 } from './crypto/encryptedDataKeyEnvelopeV1.js';
 export {
+  parsePublicShareEncryptedDataKeyEnvelopeV0,
+  PUBLIC_SHARE_DATA_ENCRYPTION_KEY_BYTES,
+  PUBLIC_SHARE_ENCRYPTED_DATA_KEY_CURRENT_V0_BYTES,
+  PUBLIC_SHARE_ENCRYPTED_DATA_KEY_LEGACY_V0_BYTES,
+  type PublicShareEncryptedDataKeyEnvelopeV0,
+} from './crypto/publicShareEncryptedDataKeyEnvelopeV0.js';
+export {
   CRYPTO_GOLDEN_VECTORS,
   type CryptoGoldenVectors,
 } from './crypto/cryptoGoldenVectors.js';
