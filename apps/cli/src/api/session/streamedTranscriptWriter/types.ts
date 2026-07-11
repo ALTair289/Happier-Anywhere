@@ -1,6 +1,7 @@
 import type { ACPMessageData, ACPProvider } from '../sessionMessageTypes';
 import type { StreamedTranscriptSegmentKind } from './segmentKey';
 import type { StreamedTranscriptSegmentState } from './segmentRuntime';
+import type { EphemeralSendResult } from '../ephemeralSendOutcome';
 
 export type StreamedTranscriptWriterSession = Readonly<{
   sendAgentMessage?: (
@@ -29,7 +30,7 @@ export type StreamedTranscriptWriterSession = Readonly<{
       /** Live-stream tick this full snapshot corresponds to (delta-chaining checkpoint anchor). */
       tick?: number;
     },
-  ) => void;
+  ) => EphemeralSendResult;
   /**
    * Emit a live delta tick: `body` carries ONLY the text appended since the previous live emission
    * for this segment. Sessions that do not implement this receive full snapshots on every live
@@ -46,7 +47,7 @@ export type StreamedTranscriptWriterSession = Readonly<{
       updatedAt?: number;
       meta?: Record<string, unknown>;
     },
-  ) => void;
+  ) => EphemeralSendResult;
   /**
    * Monotonic counter that increases whenever the underlying live transport (re)connects. The
    * writer emits a full snapshot after an epoch change so receivers resync after reconnects.

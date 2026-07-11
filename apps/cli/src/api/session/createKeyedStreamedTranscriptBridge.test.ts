@@ -39,6 +39,7 @@ describe('createKeyedStreamedTranscriptBridge', () => {
       sendAgentMessage: vi.fn(),
       sendAgentMessageEphemeral: (provider: string, body: unknown, opts: { localId: string; meta?: Record<string, unknown> }) => {
         liveCalls.push({ provider, body, localId: opts.localId, meta: opts.meta });
+        return { accepted: true as const, epoch: 0 };
       },
       sendAgentMessageCommitted: async (provider: string, body: unknown, opts: { localId: string; meta?: Record<string, unknown> }) => {
         durableCalls.push({ provider, body, localId: opts.localId, meta: opts.meta });

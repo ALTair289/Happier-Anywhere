@@ -10,6 +10,14 @@ async function settleCommittedSnapshot() {
   }
 }
 
+function createDeferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 describe('createCurrentSessionTranscriptPort', () => {
   it('routes transcript-vNext writes through the latest swapped session', async () => {
     const firstSession = {
@@ -58,7 +66,9 @@ describe('createCurrentSessionTranscriptPort', () => {
     currentSession = secondSession;
 
     expect(port.sendAgentMessageEphemeral).toBeTypeOf('function');
-    port.sendAgentMessageEphemeral?.(
+    const expectedOutcome = { accepted: true as const, epoch: 2 };
+    secondSession.sendAgentMessageEphemeral.mockReturnValue(expectedOutcome);
+    const outcome = port.sendAgentMessageEphemeral?.(
       'codex',
       { type: 'message', message: 'live' },
       { localId: 'segment-1', createdAt: 1_000, updatedAt: 1_025 },
@@ -70,6 +80,35 @@ describe('createCurrentSessionTranscriptPort', () => {
       { type: 'message', message: 'live' },
       { localId: 'segment-1', createdAt: 1_000, updatedAt: 1_025 },
     );
+    expect(outcome).toBe(expectedOutcome);
+  });
+
+  it('fails closed when support disappears between capability lookup and invocation', () => {
+    const firstSession = {
+      sendAgentMessageEphemeral: vi.fn(() => ({ accepted: true as const, epoch: 1 })),
+      getEphemeralStreamConnectionEpoch: vi.fn(() => 1),
+      sendAgentMessageCommitted: vi.fn(async () => {}),
+    };
+    const secondSession = {
+      getEphemeralStreamConnectionEpoch: vi.fn(() => 8),
+      sendAgentMessageCommitted: vi.fn(async () => {}),
+    };
+    let currentSession: typeof firstSession | typeof secondSession = firstSession;
+    const port = createCurrentSessionTranscriptPort(() => currentSession);
+    const send = port.sendAgentMessageEphemeral;
+
+    currentSession = secondSession;
+    const outcome = send?.(
+      'codex',
+      { type: 'message', message: 'live' },
+      { localId: 'segment-1', createdAt: 1_000 },
+    );
+
+    expect(outcome).toEqual({
+      accepted: false,
+      epoch: 8,
+      reason: { code: 'transport_unavailable' },
+    });
   });
 
   it('routes streamed committed snapshots through the latest session durable enqueue hook', async () => {
@@ -167,5 +206,50 @@ describe('createCurrentSessionTranscriptPort', () => {
 
     expect(port.getEphemeralStreamConnectionEpoch?.()).toBe(7);
     expect(firstSession.getEphemeralStreamConnectionEpoch).not.toHaveBeenCalled();
+  });
+
+  it('forces a full checkpoint when the current session is replaced at the same source epoch', async () => {
+    const firstAcceptance = createDeferred<{ accepted: true; epoch: number }>();
+    const firstSession = {
+      sendAgentMessage: vi.fn(),
+      sendAgentMessageEphemeral: vi.fn(() => firstAcceptance.promise),
+      sendAgentMessageEphemeralDelta: vi.fn(() => ({ accepted: true as const, epoch: 1 })),
+      getEphemeralStreamConnectionEpoch: vi.fn(() => 1),
+      sendAgentMessageCommitted: vi.fn(async () => {}),
+    };
+    const secondSession = {
+      sendAgentMessage: vi.fn(),
+      sendAgentMessageEphemeral: vi.fn(() => ({ accepted: true as const, epoch: 1 })),
+      sendAgentMessageEphemeralDelta: vi.fn(() => ({ accepted: true as const, epoch: 1 })),
+      getEphemeralStreamConnectionEpoch: vi.fn(() => 1),
+      sendAgentMessageCommitted: vi.fn(async () => {}),
+    };
+    let currentSession: typeof firstSession | typeof secondSession = firstSession;
+    const port = createCurrentSessionTranscriptPort(() => currentSession);
+    const writer = createStreamedTranscriptWriter({
+      provider: 'codex',
+      session: port,
+      makeLocalId: () => 'segment-1',
+      initialCheckpointDelayMs: 10_000,
+      checkpointIntervalMs: 10_000,
+      checkpointMinChars: 999,
+      liveSnapshotIntervalMs: 0,
+      liveSnapshotMinChars: 1,
+      liveCheckpointIntervalMs: 10_000,
+    });
+
+    writer.appendAssistantDelta('hello');
+    currentSession = secondSession;
+    writer.appendAssistantDelta(' world');
+    firstAcceptance.resolve({ accepted: true, epoch: 1 });
+    await settleCommittedSnapshot();
+
+    expect(secondSession.sendAgentMessageEphemeral).toHaveBeenCalledWith(
+      'codex',
+      { type: 'message', message: 'hello world' },
+      expect.objectContaining({ localId: 'segment-1' }),
+    );
+    expect(secondSession.sendAgentMessageEphemeralDelta).not.toHaveBeenCalled();
+    writer.discard();
   });
 });
