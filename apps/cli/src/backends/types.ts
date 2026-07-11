@@ -437,6 +437,7 @@ export type AgentCatalogEntry = Readonly<{
   resolveModelsProbeVariant?: (params: Readonly<{
     backendTarget?: BackendTargetRefV1;
     accountSettings?: Readonly<Record<string, unknown>> | null;
+    connectedServices?: ConnectedServiceBindingsV1 | null;
   }>) => string | null;
   /**
    * Optional provider-owned backend options for catalog ACP model probes.

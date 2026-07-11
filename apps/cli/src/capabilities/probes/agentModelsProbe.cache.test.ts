@@ -15,9 +15,21 @@ vi.mock('./createConfiguredAcpProbeBackend', () => ({
 vi.mock('@/backends/catalog', () => ({
   AGENTS: {
     opencode: {
+      resolveModelsProbeVariant: ({ connectedServices }: { connectedServices?: { bindingsByServiceId?: Record<string, { selection?: string; groupId?: string; profileId?: string }> } | null }) => {
+        const binding = connectedServices?.bindingsByServiceId?.['openai-codex'];
+        if (binding?.selection === 'group') return `test:group:${binding.groupId ?? ''}`;
+        if (binding?.selection === 'profile') return `test:profile:${binding.profileId ?? ''}`;
+        return 'test:native';
+      },
       getPreflightSessionControlsProbeAdapter: async () => ({
         failureCacheStrategy: 'cooldown',
         cliModelsCommandArgs: ['models'],
+        probeModelsRaw: async (params: { connectedServices?: { bindingsByServiceId?: Record<string, { selection?: string; groupId?: string; profileId?: string }> } | null }) => {
+          const binding = params.connectedServices?.bindingsByServiceId?.['openai-codex'];
+          if (binding?.selection === 'group') return [{ id: 'group-model', name: 'Group Model' }];
+          if (binding?.selection === 'profile') return [{ id: 'profile-model', name: 'Profile Model' }];
+          return null;
+        },
       }),
     },
   },
@@ -78,4 +90,54 @@ describe('probeAgentModelsBestEffort (cache)', () => {
       await fixture.cleanup();
     }
   }, 20_000);
+
+  it('partitions cached probe results by connected-services identity', async () => {
+    vi.resetModules();
+
+    const fixture = await createProbeTempDir('happier-cli-model-probe-cs-cache');
+    try {
+      const { probeAgentModelsBestEffort, resetAgentModelsProbeCacheForTests } = await import('./agentModelsProbe');
+      resetAgentModelsProbeCacheForTests();
+
+      const groupConnectedServices = {
+        v: 1,
+        bindingsByServiceId: {
+          'openai-codex': {
+            source: 'connected',
+            selection: 'group',
+            groupId: 'happier',
+            profileId: 'leeroy',
+          },
+        },
+      } as const;
+      const profileConnectedServices = {
+        v: 1,
+        bindingsByServiceId: {
+          'openai-codex': {
+            source: 'connected',
+            selection: 'profile',
+            profileId: 'leeroy',
+          },
+        },
+      } as const;
+
+      const group = await probeAgentModelsBestEffort({
+        agentId: 'opencode',
+        cwd: fixture.dir,
+        timeoutMs: 2_000,
+        connectedServices: groupConnectedServices,
+      });
+      const profile = await probeAgentModelsBestEffort({
+        agentId: 'opencode',
+        cwd: fixture.dir,
+        timeoutMs: 2_000,
+        connectedServices: profileConnectedServices,
+      });
+
+      expect(group.availableModels.map((model) => model.id)).toEqual(['default', 'group-model']);
+      expect(profile.availableModels.map((model) => model.id)).toEqual(['default', 'profile-model']);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
 });

@@ -1,6 +1,6 @@
 import { AGENTS } from '@/backends/catalog';
 import type { CatalogAgentId } from '@/backends/types';
-import type { BackendTargetRefV1 } from '@happier-dev/protocol';
+import type { BackendTargetRefV1, ConnectedServiceBindingsV1 } from '@happier-dev/protocol';
 
 import { resolveConfiguredAcpProbeCacheVariant } from './configuredAcpProbeCacheVariant';
 
@@ -8,6 +8,7 @@ export function resolveAgentProbeVariant(params: Readonly<{
   agentId: CatalogAgentId;
   backendTarget?: BackendTargetRefV1;
   accountSettings?: Readonly<Record<string, unknown>> | null;
+  connectedServices?: ConnectedServiceBindingsV1 | null;
 }>): string {
   const configuredAcpVariant = resolveConfiguredAcpProbeCacheVariant({
     agentId: params.agentId,
@@ -20,6 +21,7 @@ export function resolveAgentProbeVariant(params: Readonly<{
   const entryVariant = entry?.resolveModelsProbeVariant?.({
     backendTarget: params.backendTarget,
     accountSettings: params.accountSettings ?? null,
+    connectedServices: params.connectedServices ?? null,
   }) ?? null;
   return entryVariant ?? `${params.agentId}:default`;
 }

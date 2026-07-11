@@ -19,6 +19,7 @@ import { codexAppServerUsageLimitRecoveryControlAdapter } from '@/backends/codex
 import { buildCodexRuntimeLocalHandoffMetadata } from '@/backends/codex/sessionHandoff/runtimeLocalMetadata';
 import type { AgentCatalogEntry } from '../types';
 import type { ConnectedServiceCredentialLifecycleDescriptor } from '@/daemon/connectedServices/credentials/lifecycleTypes';
+import type { ConnectedServiceBindingsV1 } from '@happier-dev/protocol';
 
 const codexConnectedServiceCredentialLifecycleDescriptor: ConnectedServiceCredentialLifecycleDescriptor = {
   providerId: 'codex',
@@ -39,6 +40,15 @@ const codexConnectedServiceCredentialLifecycleDescriptor: ConnectedServiceCreden
     },
   },
 };
+
+function resolveCodexProbeConnectedServicesIdentity(
+  connectedServices?: ConnectedServiceBindingsV1 | null,
+): string {
+  const binding = connectedServices?.bindingsByServiceId['openai-codex'] ?? null;
+  if (!binding || binding.source === 'native') return 'cs=native';
+  if (binding.selection === 'group') return `cs=group:${binding.groupId}`;
+  return `cs=profile:${binding.profileId}`;
+}
 
 export const agent = {
   id: AGENTS_CORE.codex.id,
@@ -75,13 +85,13 @@ export const agent = {
   getAcpForkContinuationHandler: async () => (await import('@/backends/codex/acp/forkContinuationHandler')).codexAcpForkContinuationHandler,
   getProviderNativeForkHandler: async () => (await import('@/backends/codex/appServer/providerNativeForkHandler')).codexAppServerProviderNativeForkHandler,
   needsAccountSettingsForProbes: true,
-  resolveModelsProbeVariant: ({ accountSettings }) => {
+  resolveModelsProbeVariant: ({ accountSettings, connectedServices }) => {
     // Keep dynamic model probes cache-partitioned by runtime flavor (appServer vs ACP vs MCP).
     const backendMode =
       resolveCodexSessionBackendMode({ metadata: null, accountSettings: accountSettings ?? null }) ?? 'appServer';
     // Speed eligibility is auth-dependent; include auth method to avoid stale modelOptions.
     const authMethod = readCodexEnvironmentAuthState().method ?? 'unknown';
-    return `codex:${backendMode}:${authMethod}`;
+    return `codex:${backendMode}:${authMethod}:${resolveCodexProbeConnectedServicesIdentity(connectedServices)}`;
   },
   getPreflightSessionControlsProbeAdapter: async () =>
     (await import('@/backends/codex/preflight/codexPreflightSessionControlsProbeAdapter')).codexPreflightSessionControlsProbeAdapter,

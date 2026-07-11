@@ -1,4 +1,4 @@
-import type { BackendTargetRefV1 } from '@happier-dev/protocol';
+import type { BackendTargetRefV1, ConnectedServiceBindingsV1 } from '@happier-dev/protocol';
 
 export type PreflightSessionControlsProbeFailureCacheStrategy = 'cooldown' | 'retry';
 
@@ -7,6 +7,7 @@ export type PreflightSessionControlsProbeParams = Readonly<{
   cwd: string;
   timeoutMs: number;
   accountSettings?: Readonly<Record<string, unknown>> | null;
+  connectedServices?: ConnectedServiceBindingsV1 | null;
 }>;
 
 /**

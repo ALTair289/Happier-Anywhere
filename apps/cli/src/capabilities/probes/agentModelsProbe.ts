@@ -9,7 +9,7 @@ import { killProcessTree } from '@/agent/acp/killProcessTree';
 import { resolveProviderCliCommand } from '@/runtime/managedTools/providerCliResolution';
 import { resolveWindowsCommandInvocation } from '@happier-dev/cli-common/process';
 import { getAgentModelConfig, getAgentStaticModels } from '@happier-dev/agents';
-import { AsyncTtlCache, type BackendTargetRefV1 } from '@happier-dev/protocol';
+import { AsyncTtlCache, type BackendTargetRefV1, type ConnectedServiceBindingsV1 } from '@happier-dev/protocol';
 import type { Credentials } from '@/persistence';
 import { validateCatalogAcpProbeSpawn } from './validateCatalogAcpProbeSpawn';
 import { createConfiguredAcpProbeBackend } from './createConfiguredAcpProbeBackend';
@@ -415,6 +415,7 @@ export async function probeAgentModelsBestEffort(params: {
   timeoutMs?: number;
   accountSettings?: Readonly<Record<string, unknown>> | null;
   credentials?: Credentials | null;
+  connectedServices?: ConnectedServiceBindingsV1 | null;
 }): Promise<ProbedAgentModelsResult> {
   const nowMs = Date.now();
   const cwd = typeof params.cwd === 'string' && params.cwd.trim().length > 0 ? params.cwd.trim() : process.cwd();
@@ -422,6 +423,7 @@ export async function probeAgentModelsBestEffort(params: {
     agentId: params.agentId,
     backendTarget: params.backendTarget,
     accountSettings: params.accountSettings,
+    connectedServices: params.connectedServices ?? null,
   });
   const cacheKey = buildAgentProbeCacheKey({
     agentId: params.agentId,
@@ -486,6 +488,7 @@ export async function probeAgentModelsBestEffort(params: {
           cwd,
           timeoutMs,
           accountSettings: params.accountSettings ?? null,
+          connectedServices: params.connectedServices ?? null,
         }).catch(() => null);
         return normalizeDynamicModels(modelsRaw);
       };

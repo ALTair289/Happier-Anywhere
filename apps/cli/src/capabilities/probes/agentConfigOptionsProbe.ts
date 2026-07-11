@@ -1,6 +1,6 @@
 import { AGENTS } from '@/backends/catalog';
 import type { CatalogAgentId } from '@/backends/types';
-import { AsyncTtlCache, type BackendTargetRefV1 } from '@happier-dev/protocol';
+import { AsyncTtlCache, type BackendTargetRefV1, type ConnectedServiceBindingsV1 } from '@happier-dev/protocol';
 import type { Credentials } from '@/persistence';
 import { buildAgentProbeCacheKey } from './buildAgentProbeCacheKey';
 import { resolveAgentProbeVariant } from './resolveAgentProbeVariant';
@@ -108,6 +108,7 @@ export async function probeAgentConfigOptionsBestEffort(params: {
   timeoutMs?: number;
   accountSettings?: Readonly<Record<string, unknown>> | null;
   credentials?: Credentials | null;
+  connectedServices?: ConnectedServiceBindingsV1 | null;
 }): Promise<ProbedAgentConfigOptionsResult> {
   const nowMs = Date.now();
   const cwd = typeof params.cwd === 'string' && params.cwd.trim().length > 0 ? params.cwd.trim() : process.cwd();
@@ -115,6 +116,7 @@ export async function probeAgentConfigOptionsBestEffort(params: {
     agentId: params.agentId,
     backendTarget: params.backendTarget,
     accountSettings: params.accountSettings,
+    connectedServices: params.connectedServices ?? null,
   });
   const cacheKey = buildAgentProbeCacheKey({
     agentId: params.agentId,
@@ -146,6 +148,7 @@ export async function probeAgentConfigOptionsBestEffort(params: {
           cwd,
           timeoutMs,
           accountSettings: params.accountSettings ?? null,
+          connectedServices: params.connectedServices ?? null,
         }).catch(() => null);
         return normalizeDynamicConfigOptions(configOptionsRaw);
       };
