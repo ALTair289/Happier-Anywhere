@@ -26,7 +26,7 @@
  */
 
 import { join } from 'node:path';
-import { chmodSync, existsSync, mkdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { configuration } from '@/configuration';
 import { logger } from '@/ui/logger';
 import { buildMissingJavaScriptRuntimeMessage } from '@/runtime/js/buildMissingJavaScriptRuntimeMessage';
@@ -41,6 +41,16 @@ export { DEFAULT_PERMISSION_HOOK_TIMEOUT_SECONDS } from './permissionHookTimeout
 export interface GenerateHookSettingsOptions {
     enableLocalPermissionBridge?: boolean;
     permissionHookSecret?: string;
+    /**
+     * Stable identity for the generated hook plugin directory.
+     *
+     * Claude can retain plugin references across `--resume` turns, so daemon-managed
+     * resumes must not use a runner-PID-scoped path that disappears during auth
+     * switches or planned restarts. When provided, the plugin dir is rewritten in
+     * place and retained across runner cleanup; the next runner for the same session
+     * overwrites the hook commands with its current port/secret.
+     */
+    sessionHookPluginId?: string;
     /**
      * Explicit Claude command-hook `timeout` (seconds) installed on the PermissionRequest /
      * PreToolUse(AskUserQuestion) permission hooks.
@@ -60,6 +70,7 @@ type ClaudeSettingsOverlay = Readonly<{
 }>;
 
 const HOOKS_DISABLED_ENV_VAR = 'HAPPIER_CLAUDE_HOOKS_DISABLED';
+const RETAINED_HOOK_PLUGIN_MARKER_FILE = '.happier-hook-plugin.json';
 
 function areHappierHooksDisabled(): boolean {
     const raw = process.env[HOOKS_DISABLED_ENV_VAR];
@@ -105,6 +116,39 @@ function writePrivateFileSync(path: string, contents: string): void {
     chmodIfSupported(path, 0o600);
 }
 
+function sanitizeHookPluginId(value: string): string | null {
+    const normalized = value.trim().replace(/[^A-Za-z0-9._-]/g, '_').replace(/^[-_.]+|[-_.]+$/g, '');
+    if (normalized.length === 0) return null;
+    return normalized.slice(0, 96);
+}
+
+function resolveHookPluginIdentity(options: GenerateHookSettingsOptions): Readonly<{
+    id: string;
+    retainAcrossRunnerRestarts: boolean;
+}> {
+    const stableId = typeof options.sessionHookPluginId === 'string'
+        ? sanitizeHookPluginId(options.sessionHookPluginId)
+        : null;
+    if (stableId) {
+        return { id: stableId, retainAcrossRunnerRestarts: true };
+    }
+    return { id: String(process.pid), retainAcrossRunnerRestarts: false };
+}
+
+function shouldRetainHookPluginDir(dirpath: string): boolean {
+    try {
+        const raw = readFileSync(join(dirpath, RETAINED_HOOK_PLUGIN_MARKER_FILE), 'utf8');
+        const parsed = JSON.parse(raw) as unknown;
+        return Boolean(
+            parsed
+            && typeof parsed === 'object'
+            && (parsed as { retainAcrossRunnerRestarts?: unknown }).retainAcrossRunnerRestarts === true,
+        );
+    } catch {
+        return false;
+    }
+}
+
 /**
  * Generate a temporary settings JSON file with non-hook configuration only
  * (currently: MCP change_title allow rules). Hooks are no longer carried here;
@@ -147,7 +191,8 @@ export function generateHookPluginDir(port: number, options: GenerateHookSetting
     }
 
     const pluginsRoot = resolveTmpRoot('hook-plugins');
-    const pluginDir = join(pluginsRoot, `session-${process.pid}`);
+    const pluginIdentity = resolveHookPluginIdentity(options);
+    const pluginDir = join(pluginsRoot, `session-${pluginIdentity.id}`);
     const manifestDir = join(pluginDir, '.claude-plugin');
     const hooksDir = join(pluginDir, 'hooks');
     // hooks.json points at the private permission secret file; keep the whole session plugin dir
@@ -157,7 +202,7 @@ export function generateHookPluginDir(port: number, options: GenerateHookSetting
     mkdirPrivateSync(hooksDir);
 
     const manifest = {
-        name: `happier-session-hooks-${process.pid}`,
+        name: `happier-session-hooks-${pluginIdentity.id}`,
         version: '1.0.0',
         description: 'Happier session-scoped Claude Code hooks.',
         author: {
@@ -165,6 +210,10 @@ export function generateHookPluginDir(port: number, options: GenerateHookSetting
         },
     };
     writePrivateFileSync(join(manifestDir, 'plugin.json'), JSON.stringify(manifest, null, 2));
+    writePrivateFileSync(join(pluginDir, RETAINED_HOOK_PLUGIN_MARKER_FILE), JSON.stringify({
+        v: 1,
+        retainAcrossRunnerRestarts: pluginIdentity.retainAcrossRunnerRestarts,
+    }, null, 2));
 
     const nodeExecutable = resolveNodeExecutable();
     // The secret never rides on the command line (argv is world-visible via `ps`); it is written
@@ -176,6 +225,11 @@ export function generateHookPluginDir(port: number, options: GenerateHookSetting
         const secretFile = join(pluginDir, 'permission-hook-secret');
         writePrivateFileSync(secretFile, options.permissionHookSecret);
         secretPart = ` --secret-file ${JSON.stringify(secretFile)}`;
+    } else {
+        const staleSecretFile = join(pluginDir, 'permission-hook-secret');
+        if (existsSync(staleSecretFile)) {
+            unlinkSync(staleSecretFile);
+        }
     }
     const sessionForwarderScript = resolveCliRuntimeAssetPath('scripts', 'session_hook_forwarder.cjs');
     const buildSessionHookCommand = (hookEventName: string): string =>
@@ -272,9 +326,16 @@ export function cleanupHookSettingsFile(filepath: string): void {
 /**
  * Remove the plugin directory produced by `generateHookPluginDir`.
  */
-export function cleanupHookPluginDir(dirpath: string | null | undefined): void {
+export function cleanupHookPluginDir(
+    dirpath: string | null | undefined,
+    options: Readonly<{ force?: boolean }> = {},
+): void {
     if (typeof dirpath !== 'string' || dirpath.length === 0) return;
     try {
+        if (options.force !== true && shouldRetainHookPluginDir(dirpath)) {
+            logger.debug(`[generateHookSettings] Retaining session-scoped hook plugin dir: ${dirpath}`);
+            return;
+        }
         if (existsSync(dirpath)) {
             rmSync(dirpath, { recursive: true, force: true });
             logger.debug(`[generateHookSettings] Cleaned up hook plugin dir: ${dirpath}`);

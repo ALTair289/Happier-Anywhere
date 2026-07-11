@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -33,6 +33,9 @@ describe('generateHookSettingsFile', () => {
     }
     for (const pluginDir of createdPluginDirs.splice(0, createdPluginDirs.length)) {
       cleanupHookPluginDir(pluginDir);
+      if (existsSync(pluginDir)) {
+        rmSync(pluginDir, { recursive: true, force: true });
+      }
     }
     for (const dirPath of createdDirs.splice(0, createdDirs.length)) {
       rmSync(dirPath, { recursive: true, force: true });
@@ -105,6 +108,9 @@ describe('generateHookPluginDir', () => {
     }
     for (const pluginDir of createdPluginDirs.splice(0, createdPluginDirs.length)) {
       cleanupHookPluginDir(pluginDir);
+      if (existsSync(pluginDir)) {
+        rmSync(pluginDir, { recursive: true, force: true });
+      }
     }
     for (const dirPath of createdDirs.splice(0, createdDirs.length)) {
       rmSync(dirPath, { recursive: true, force: true });
@@ -144,6 +150,68 @@ describe('generateHookPluginDir', () => {
     expect(parsed.version).toBe('1.0.0');
     expect(parsed.description).toContain('Happier');
     expect(parsed.author?.name).toBe('Happier');
+  });
+
+  it('uses a stable session-scoped plugin dir when a session hook plugin id is provided', () => {
+    const sessionHookPluginId = 'cmr3dpuka06zhtmtpaa1af5gh';
+    const firstPluginDir = generateHookPluginDir(43132, {
+      sessionHookPluginId,
+      permissionHookSecret: 'first-secret',
+    });
+    expect(firstPluginDir).toBeTruthy();
+    createdPluginDirs.push(firstPluginDir!);
+
+    const secondPluginDir = generateHookPluginDir(53132, {
+      sessionHookPluginId,
+      permissionHookSecret: 'second-secret',
+    });
+    expect(secondPluginDir).toBe(firstPluginDir);
+
+    expect(secondPluginDir).toContain(`session-${sessionHookPluginId}`);
+    expect(secondPluginDir).not.toContain(`session-${process.pid}`);
+
+    const manifest = JSON.parse(readFileSync(join(secondPluginDir!, '.claude-plugin', 'plugin.json'), 'utf8')) as any;
+    expect(manifest.name).toBe(`happier-session-hooks-${sessionHookPluginId}`);
+
+    const hooksPath = join(secondPluginDir!, 'hooks', 'hooks.json');
+    const parsed = JSON.parse(readFileSync(hooksPath, 'utf8')) as any;
+    const command = parsed.hooks?.UserPromptSubmit?.[0]?.hooks?.[0]?.command as string;
+    expect(command).toContain('53132');
+    expect(command).not.toContain('43132');
+    const secretPath = command.match(/--secret-file\s+"([^"]+)"/)?.[1];
+    expect(secretPath).toBeTruthy();
+    expect(readFileSync(secretPath!, 'utf8')).toBe('second-secret');
+  });
+
+  it('keeps stable session-scoped plugin dirs during runner cleanup', () => {
+    const pluginDir = generateHookPluginDir(43132, {
+      sessionHookPluginId: 'cmr3dpuka06zhtmtpaa1af5gh',
+      permissionHookSecret: 'cleanup-secret',
+    });
+    expect(pluginDir).toBeTruthy();
+    createdPluginDirs.push(pluginDir!);
+
+    try {
+      cleanupHookPluginDir(pluginDir);
+
+      expect(existsSync(pluginDir!)).toBe(true);
+      expect(readFileSync(join(pluginDir!, 'permission-hook-secret'), 'utf8')).toBe('cleanup-secret');
+    } finally {
+      rmSync(pluginDir!, { recursive: true, force: true });
+    }
+  });
+
+  it('force-removes stable session-scoped plugin dirs at final session end', () => {
+    const pluginDir = generateHookPluginDir(43132, {
+      sessionHookPluginId: 'cmr3dpuka06zhtmtpaa1af5gh',
+      permissionHookSecret: 'cleanup-secret',
+    });
+    expect(pluginDir).toBeTruthy();
+    createdPluginDirs.push(pluginDir!);
+
+    cleanupHookPluginDir(pluginDir, { force: true });
+
+    expect(existsSync(pluginDir!)).toBe(false);
   });
 
   it('adds PermissionRequest hook using a private secret file instead of command argv', () => {
