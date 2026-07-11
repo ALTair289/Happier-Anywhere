@@ -142,9 +142,17 @@ describe('feature catalog', () => {
     expect(isFeatureId('sharing.contentKeys')).toBe(true);
     expect(isFeatureId('sharing.pendingQueueV2')).toBe(true);
     expect(isFeatureId('sharing.pendingDeliveryState')).toBe(true);
+    expect(isFeatureId('sharing.pendingDeliveryAttempts')).toBe(true);
+    expect(isFeatureId('sharing.pendingDeliveryAttemptClaims')).toBe(true);
     expect(FEATURE_CATALOG['sharing.pendingDeliveryState']?.representation).toBe('server');
     expect(FEATURE_CATALOG['sharing.pendingDeliveryState']?.dependencies).toEqual(['sharing.pendingQueueV2']);
     expect(FEATURE_CATALOG['sharing.pendingDeliveryState']?.defaultFailMode).toBe('fail_closed');
+    expect(FEATURE_CATALOG['sharing.pendingDeliveryAttempts']?.representation).toBe('server');
+    expect(FEATURE_CATALOG['sharing.pendingDeliveryAttempts']?.dependencies).toEqual(['sharing.pendingQueueV2']);
+    expect(FEATURE_CATALOG['sharing.pendingDeliveryAttemptClaims']?.representation).toBe('server');
+    expect(FEATURE_CATALOG['sharing.pendingDeliveryAttemptClaims']?.dependencies).toEqual([
+      'sharing.pendingDeliveryAttempts',
+    ]);
   });
 
   it('includes voice agent feature id', () => {

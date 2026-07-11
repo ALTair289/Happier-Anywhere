@@ -127,4 +127,26 @@ describe('FeatureGatesSchema', () => {
     expect(readServerEnabledBit(parsed, 'sharing.pendingQueueV2')).toBe(true);
     expect(readServerEnabledBit(parsed, 'sharing.pendingDeliveryState')).toBe(false);
   });
+
+  it('preserves attempt contract and claim controls independently', () => {
+    const parsed = FeaturesResponseSchema.parse({
+      features: {
+        sharing: {
+          pendingDeliveryAttempts: { enabled: true },
+          pendingDeliveryAttemptClaims: { enabled: false },
+        },
+      },
+      capabilities: {},
+    });
+
+    expect(readServerEnabledBit(parsed, 'sharing.pendingDeliveryAttempts')).toBe(true);
+    expect(readServerEnabledBit(parsed, 'sharing.pendingDeliveryAttemptClaims')).toBe(false);
+  });
+
+  it('defaults omitted attempt contract and claim controls disabled', () => {
+    const parsed = FeaturesResponseSchema.parse({ features: {}, capabilities: {} });
+
+    expect(readServerEnabledBit(parsed, 'sharing.pendingDeliveryAttempts')).toBe(false);
+    expect(readServerEnabledBit(parsed, 'sharing.pendingDeliveryAttemptClaims')).toBe(false);
+  });
 });

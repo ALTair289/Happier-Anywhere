@@ -135,6 +135,18 @@ const FEATURE_CATALOG_DEFINITION = {
     dependencies: ['sharing.pendingQueueV2'],
     representation: 'server',
   },
+  'sharing.pendingDeliveryAttempts': {
+    description: 'Pending Delivery Attempt V1 contract admission for new sessions and owner-approved promotion.',
+    defaultFailMode: 'fail_closed',
+    dependencies: ['sharing.pendingQueueV2'],
+    representation: 'server',
+  },
+  'sharing.pendingDeliveryAttemptClaims': {
+    description: 'New Pending Delivery Attempt V1 claim admission for capable elected runtimes.',
+    defaultFailMode: 'fail_closed',
+    dependencies: ['sharing.pendingDeliveryAttempts'],
+    representation: 'server',
+  },
   sessions: {
     description: 'Session-level product surfaces and control-plane capabilities.',
     defaultFailMode: 'fail_closed',

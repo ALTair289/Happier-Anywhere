@@ -48,6 +48,11 @@ export type AttachmentsUploadsFeatureEnv = Readonly<{
   enabled: boolean;
 }>;
 
+export type PendingDeliveryAttemptFeatureEnv = Readonly<{
+  attemptsEnabled: boolean;
+  claimsEnabled: boolean;
+}>;
+
 export type PetsFeatureEnv = Readonly<{
   companionEnabled: boolean;
   syncEnabled: boolean;
@@ -264,6 +269,13 @@ export function readUpdatesFeatureEnv(env: NodeJS.ProcessEnv): UpdatesFeatureEnv
 export function readAttachmentsUploadsFeatureEnv(env: NodeJS.ProcessEnv): AttachmentsUploadsFeatureEnv {
   return {
     enabled: parseBooleanEnv(env[FEATURE_ENV_KEYS.attachmentsUploadsEnabled], true),
+  };
+}
+
+export function readPendingDeliveryAttemptFeatureEnv(env: NodeJS.ProcessEnv): PendingDeliveryAttemptFeatureEnv {
+  return {
+    attemptsEnabled: parseBooleanEnv(env[FEATURE_ENV_KEYS.pendingDeliveryAttemptsEnabled], false),
+    claimsEnabled: parseBooleanEnv(env[FEATURE_ENV_KEYS.pendingDeliveryAttemptClaimsEnabled], false),
   };
 }
 

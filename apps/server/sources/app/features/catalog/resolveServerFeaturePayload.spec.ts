@@ -193,6 +193,18 @@ describe("resolveServerFeaturePayload", () => {
         expect(payload.features.sharing.pendingDeliveryState.enabled).toBe(true);
         expect(payload.capabilities.sharing.pendingQueueV2.deliveryState).toBe(true);
         expect(payload.capabilities.sharing.pendingQueueV2.deliveryBlockedReason).toBe(true);
+        expect(payload.features.sharing.pendingDeliveryAttempts.enabled).toBe(false);
+        expect(payload.features.sharing.pendingDeliveryAttemptClaims.enabled).toBe(false);
+    });
+
+    it("enforces attempt claim dependency on attempt contract admission", () => {
+        const payload = resolveServerFeaturePayload({
+            HAPPIER_FEATURE_SHARING_PENDING_DELIVERY_ATTEMPTS__ENABLED: "0",
+            HAPPIER_FEATURE_SHARING_PENDING_DELIVERY_ATTEMPT_CLAIMS__ENABLED: "1",
+        } as NodeJS.ProcessEnv, serverFeatureRegistry);
+
+        expect(payload.features.sharing.pendingDeliveryAttempts.enabled).toBe(false);
+        expect(payload.features.sharing.pendingDeliveryAttemptClaims.enabled).toBe(false);
     });
 
     it("advertises indexed session message role query support", () => {

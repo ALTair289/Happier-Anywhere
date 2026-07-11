@@ -1,9 +1,17 @@
 import { describe, expect, it } from "vitest";
 
 import { createRouteTestBuilder } from "@/app/api/testkit/routeTestBuilder";
-import { createServerFeatureGatedRouteApp } from "./serverFeatureGate";
+import { createServerFeatureGatedRouteApp, isServerFeatureEnabledForRequest } from "./serverFeatureGate";
 
 describe("serverFeatureGate", () => {
+    it("fails closed for attempt admission when its server bit is missing", () => {
+        expect(isServerFeatureEnabledForRequest("sharing.pendingDeliveryAttempts", {})).toBe(false);
+        expect(isServerFeatureEnabledForRequest("sharing.pendingDeliveryAttemptClaims", {})).toBe(false);
+        expect(isServerFeatureEnabledForRequest("sharing.pendingDeliveryAttempts", {
+            HAPPIER_FEATURE_SHARING_PENDING_DELIVERY_ATTEMPTS__ENABLED: "1",
+        })).toBe(true);
+    });
+
     it("supports registering routes with the (path, handler) overload while still injecting a gate preHandler", async () => {
         const route = createRouteTestBuilder({
             method: "GET",
