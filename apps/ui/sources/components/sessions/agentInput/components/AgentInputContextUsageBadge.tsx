@@ -24,7 +24,20 @@ type AgentInputContextUsageBadgeProps = Readonly<{
     marginLeft?: number;
 }>;
 
-export function AgentInputContextUsageBadge(props: AgentInputContextUsageBadgeProps) {
+function areContextUsageBadgePropsEqual(
+    left: AgentInputContextUsageBadgeProps,
+    right: AgentInputContextUsageBadgeProps,
+): boolean {
+    return left.marginLeft === right.marginLeft
+        && left.state.severity === right.state.severity
+        && left.state.usedTokens === right.state.usedTokens
+        && left.state.contextWindowTokens === right.state.contextWindowTokens
+        && left.state.usedPercentage === right.state.usedPercentage;
+}
+
+export const AgentInputContextUsageBadge = React.memo(function AgentInputContextUsageBadge(
+    props: AgentInputContextUsageBadgeProps,
+) {
     const styles = stylesheet;
     const anchorRef = React.useRef<any>(null);
     const [isPinnedOpen, setIsPinnedOpen] = React.useState(false);
@@ -115,7 +128,7 @@ export function AgentInputContextUsageBadge(props: AgentInputContextUsageBadgePr
             />
         </>
     );
-}
+}, areContextUsageBadgePropsEqual);
 
 const stylesheet = StyleSheet.create((theme) => ({
     badge: {
