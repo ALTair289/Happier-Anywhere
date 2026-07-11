@@ -222,6 +222,11 @@ export function parseQueuedSessionMutation(value: unknown, sessionId: string): Q
     const createdAt = typeof value.createdAt === 'number' && Number.isFinite(value.createdAt) ? Math.trunc(value.createdAt) : Date.now();
     const attempts = typeof value.attempts === 'number' && Number.isFinite(value.attempts) ? Math.max(0, Math.trunc(value.attempts)) : 0;
     const nextAttemptAt = typeof value.nextAttemptAt === 'number' && Number.isFinite(value.nextAttemptAt) ? Math.max(0, Math.trunc(value.nextAttemptAt)) : 0;
+    const intentOrder = typeof value.intentOrder === 'number'
+        && Number.isSafeInteger(value.intentOrder)
+        && value.intentOrder > 0
+        ? value.intentOrder
+        : null;
     const mutationId = typeof value.mutationId === 'string' ? value.mutationId : undefined;
     if (value.kind === 'session_turn') {
         const parsedPayload = parseSessionTurnPayload(value.payload);
@@ -302,6 +307,7 @@ export function parseQueuedSessionMutation(value: unknown, sessionId: string): Q
                 kind: 'transcript_message_append',
                 mutationId: payload.mutationId,
                 payload,
+                ...(intentOrder !== null ? { intentOrder } : {}),
                 createdAt,
                 attempts,
                 nextAttemptAt,

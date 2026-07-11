@@ -189,7 +189,10 @@ function createQueuedSessionEnd(mutation: SessionEndMutationV1): QueuedSessionMu
     };
 }
 
-function createQueuedTranscriptMessage(mutation: TranscriptMessageAppendMutationV1): QueuedSessionMutation {
+function createQueuedTranscriptMessage(
+    mutation: TranscriptMessageAppendMutationV1,
+    intentOrder: number,
+): QueuedSessionMutation {
     const now = Date.now();
     const canonicalMutationId = resolveTranscriptMessageAppendMutationId({
         sessionId: mutation.sessionId,
@@ -202,6 +205,7 @@ function createQueuedTranscriptMessage(mutation: TranscriptMessageAppendMutation
         kind: 'transcript_message_append',
         mutationId: canonicalMutationId,
         payload: mutation,
+        intentOrder,
         createdAt: now,
         attempts: 0,
         nextAttemptAt: 0,
@@ -241,8 +245,23 @@ function readTranscriptUpdatedAt(mutation: QueuedSessionMutation): number {
     return Number.isFinite(mutation.payload.updatedAt) ? mutation.payload.updatedAt : mutation.createdAt;
 }
 
+function readTranscriptIntentOrder(mutation: QueuedSessionMutation): number | null {
+    if (mutation.kind !== 'transcript_message_append') return null;
+    return typeof mutation.intentOrder === 'number'
+        && Number.isSafeInteger(mutation.intentOrder)
+        && mutation.intentOrder > 0
+        ? mutation.intentOrder
+        : null;
+}
+
 function shouldReplaceCoalescedMutation(existing: QueuedSessionMutation, next: QueuedSessionMutation): boolean {
     if (existing.kind === 'transcript_message_append' && next.kind === 'transcript_message_append') {
+        const existingIntentOrder = readTranscriptIntentOrder(existing);
+        const nextIntentOrder = readTranscriptIntentOrder(next);
+        if (nextIntentOrder !== null) {
+            return existingIntentOrder === null || nextIntentOrder >= existingIntentOrder;
+        }
+        if (existingIntentOrder !== null) return false;
         return readTranscriptUpdatedAt(next) >= readTranscriptUpdatedAt(existing);
     }
     if (existing.kind === 'session_end' && next.kind === 'session_end') {
@@ -333,6 +352,7 @@ function createSessionMutationOutboxInstance(params: CreateSessionMutationOutbox
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     let loadedMutationsNeedPersist = false;
     let deadLetterRecoveryTail: Promise<void> = Promise.resolve();
+    let nextTranscriptIntentOrder = 1;
 
     async function recoverDeadLetteredAuthoritativeMutations(): Promise<void> {
         const recover = async () => {
@@ -353,6 +373,10 @@ function createSessionMutationOutboxInstance(params: CreateSessionMutationOutbox
     const ready = loadSessionMutationOutbox(params.sessionId)
         .then(async (loaded) => {
             mutations = mergeQueuedSessionMutations([], pruneSessionEndsSupersededByLaterTurnBegins(loaded));
+            const highestPersistedIntentOrder = mutations.reduce((highest, mutation) => (
+                Math.max(highest, readTranscriptIntentOrder(mutation) ?? 0)
+            ), 0);
+            nextTranscriptIntentOrder = Math.min(Number.MAX_SAFE_INTEGER, highestPersistedIntentOrder + 1);
             loadedMutationsNeedPersist = mutations.length !== loaded.length;
             await recoverDeadLetteredAuthoritativeMutations();
         })
@@ -676,7 +700,9 @@ function createSessionMutationOutboxInstance(params: CreateSessionMutationOutbox
             await enqueue(createQueuedSessionEnd(mutation));
         },
         async enqueueTranscriptMessage(mutation) {
-            const result = await enqueue(createQueuedTranscriptMessage(mutation), { awaitFlush: true });
+            const intentOrder = nextTranscriptIntentOrder;
+            nextTranscriptIntentOrder = Math.min(Number.MAX_SAFE_INTEGER, nextTranscriptIntentOrder + 1);
+            const result = await enqueue(createQueuedTranscriptMessage(mutation, intentOrder), { awaitFlush: true });
             return { persisted: result.persisted, delivered: result.delivered };
         },
         flush,

@@ -829,7 +829,7 @@ describe('createSessionMutationOutbox', () => {
         await outbox.close();
     });
 
-    it('keeps a newer transcript snapshot when an older duplicate is enqueued later', async () => {
+    it('uses enqueue intent order when the wall clock moves backward for a newer transcript revision', async () => {
         vi.mocked(axios.post).mockRejectedValue(new Error('server unavailable'));
         const socket = createApiSessionSocketStub({ connected: false });
         const { createSessionMutationOutbox } = await import('./createSessionMutationOutbox');
@@ -846,7 +846,7 @@ describe('createSessionMutationOutbox', () => {
             localId: 'segment-1',
             sidechainId: 'sc-1',
             messageRole: 'agent',
-            content: { t: 'plain', v: { role: 'agent', content: { type: 'text', text: 'Newer first' } } },
+            content: { t: 'plain', v: { role: 'agent', content: { type: 'text', text: 'Revision one' } } },
             createdAt: 1_000,
             updatedAt: 1_200,
         }));
@@ -855,15 +855,15 @@ describe('createSessionMutationOutbox', () => {
             localId: 'segment-1',
             sidechainId: 'sc-1',
             messageRole: 'agent',
-            content: { t: 'plain', v: { role: 'agent', content: { type: 'text', text: 'Older later' } } },
-            createdAt: 1_000,
+            content: { t: 'plain', v: { role: 'agent', content: { type: 'text', text: 'Revision two' } } },
+            createdAt: 900,
             updatedAt: 1_100,
         }));
 
         const persisted = await readPersistedOutboxMutations('s1');
         expect(persisted).toHaveLength(1);
-        expect(JSON.stringify(persisted[0])).toContain('Newer first');
-        expect(JSON.stringify(persisted[0])).not.toContain('Older later');
+        expect(JSON.stringify(persisted[0])).toContain('Revision two');
+        expect(JSON.stringify(persisted[0])).not.toContain('Revision one');
         await outbox.close();
     });
 
@@ -974,8 +974,8 @@ describe('createSessionMutationOutbox', () => {
             localId: 'segment-1',
             messageRole: 'agent',
             content: { t: 'plain', v: { role: 'agent', content: { type: 'text', text: 'Newer queued' } } },
-            createdAt: 1_000,
-            updatedAt: 1_200,
+            createdAt: 900,
+            updatedAt: 1_000,
         }));
         rejectOldDelivery(new Error('old delivery failed'));
         await enqueueNewer;

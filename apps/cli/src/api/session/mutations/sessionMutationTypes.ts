@@ -71,6 +71,8 @@ export type QueuedSessionMutation =
         kind: 'transcript_message_append';
         mutationId: string;
         payload: TranscriptMessageAppendMutationV1;
+        /** Client-local monotonic enqueue order; never sent in the server payload. */
+        intentOrder?: number;
         createdAt: number;
         attempts: number;
         nextAttemptAt: number;
