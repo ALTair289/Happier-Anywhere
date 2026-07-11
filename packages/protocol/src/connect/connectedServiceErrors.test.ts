@@ -20,5 +20,8 @@ describe('connectedServiceErrors', () => {
         expect(ConnectedServiceErrorCodeSchema.parse('connect_reconnect_provider_identity_mismatch')).toBe(
             'connect_reconnect_provider_identity_mismatch',
         );
+        expect(ConnectedServiceErrorCodeSchema.parse('connect_credential_mutation_superseded')).toBe(
+            'connect_credential_mutation_superseded',
+        );
     });
 });
