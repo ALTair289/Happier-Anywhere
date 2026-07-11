@@ -25,6 +25,10 @@ installSessionSubagentCommonModuleMocks({
                 if (key === 'session.subagents.panel.typeFact' && values?.value) return `Type: ${values.value}`;
                 if (key === 'session.subagents.panel.backendFact' && values?.value) return `Backend: ${values.value}`;
                 if (key === 'session.subagents.panel.intentFact' && values?.value) return `Intent: ${values.value}`;
+                if (key === 'session.subagents.panel.nativeTypeFact' && values?.value) return `Native type: ${values.value}`;
+                if (key === 'session.subagents.panel.modelFact' && values?.value) return `Model: ${values.value}`;
+                if (key === 'session.subagents.panel.agentIdFact' && values?.value) return `Agent ID: ${values.value}`;
+                if (key === 'session.subagents.panel.durationFact' && values?.value) return `Duration: ${values.value}`;
                 return key;
             },
         });
@@ -67,5 +71,36 @@ describe('SessionSubagentOverviewCard', () => {
         expect(textContent).toContain('Type: Subagent');
         expect(textContent).toContain('Backend: codex');
         expect(textContent).toContain('Intent: Review');
+    });
+
+    it('renders bounded provider-neutral native task evidence through the shared fact pills', async () => {
+        const { SessionSubagentOverviewCard } = await import('./SessionSubagentOverviewCard');
+
+        const subagent: SessionSubagent = {
+            id: 'subagent_sidechain:opaque-task',
+            kind: 'subagent_sidechain',
+            status: 'succeeded',
+            display: { title: 'Inspect integration', providerLabel: 'Cursor' },
+            transcript: { toolMessageRouteId: 'server:message-1', toolId: 'opaque-task' },
+            nativeRef: {
+                lifecycle: 'completion_only',
+                type: 'custom',
+                customType: 'specialist',
+                model: 'cursor-model',
+                agentId: 'cursor-agent-1',
+                durationMs: 1_500,
+            },
+            recipient: null,
+            capabilities: { canOpen: true, canSend: false, canStop: false, canLaunchChild: false, canDelete: false, canOpenAdvancedRun: false },
+            timestamps: { finishedAtMs: 2_000 },
+        };
+
+        const screen = await renderScreen(<SessionSubagentOverviewCard subagent={subagent} />);
+        const textContent = screen.getTextContent();
+
+        expect(textContent).toContain('Native type: specialist');
+        expect(textContent).toContain('Model: cursor-model');
+        expect(textContent).toContain('Agent ID: cursor-agent-1');
+        expect(textContent).toContain('Duration: 1.5s');
     });
 });

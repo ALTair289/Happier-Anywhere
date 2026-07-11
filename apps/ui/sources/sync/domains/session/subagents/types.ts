@@ -11,6 +11,15 @@ export type SessionSubagentRunRef = Readonly<{
     ioMode?: string | null;
 }>;
 
+export type SessionSubagentNativeRef = Readonly<{
+    lifecycle: 'completion_only';
+    type?: string;
+    customType?: string;
+    model?: string;
+    agentId?: string;
+    durationMs?: number;
+}>;
+
 export type SessionSubagent = Readonly<{
     id: string;
     kind: SessionSubagentKind;
@@ -28,6 +37,7 @@ export type SessionSubagent = Readonly<{
         toolMessageRouteId?: string;
         toolId?: string;
     }>;
+    nativeRef?: SessionSubagentNativeRef;
     runRef?: SessionSubagentRunRef;
     recipient: ParticipantRecipientV1 | null;
     capabilities: Readonly<{

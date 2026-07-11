@@ -12,11 +12,13 @@ function createToolMessage(params: {
     input?: any;
     result?: any;
     toolExtras?: Record<string, unknown>;
+    messageExtras?: Record<string, unknown>;
 }): ToolCallMessage {
     const now = Date.now();
     return {
         kind: 'tool-call',
         id: params.id,
+        ...(params.messageExtras ?? {}),
         ...(typeof params.seq === 'number' ? { seq: params.seq } : {}),
         localId: null,
         createdAt: now,
@@ -379,6 +381,203 @@ describe('deriveSessionSubagents', () => {
                 }),
             ]),
         );
+    });
+
+    it('derives provider-native completion-only SubAgent activity without fabricating a child transcript or controls', async () => {
+        const subagents = await deriveSubagents({
+            session: { metadata: { flavor: 'cursor' } },
+            messages: [
+                createToolMessage({
+                    id: 'message_cursor_task',
+                    name: 'SubAgent',
+                    state: 'completed',
+                    input: {
+                        operation: 'run',
+                        description: 'Inspect the integration',
+                        prompt: 'Sanitized private prompt',
+                        subagent_type: 'specialist',
+                        model: 'cursor-model',
+                        agent_id: 'cursor-agent-1',
+                        duration_ms: 42,
+                        _acp: { snapshotUpdatedAt: 10_000 },
+                        _happier: {
+                            v: 2,
+                            protocol: 'acp',
+                            provider: 'cursor',
+                            rawToolName: 'Task',
+                            canonicalToolName: 'SubAgent',
+                            nativeSubagent: {
+                                v: 1,
+                                lifecycle: 'completion_only',
+                                type: 'custom',
+                                customType: 'specialist',
+                                model: 'cursor-model',
+                                agentId: 'cursor-agent-1',
+                                durationMs: 42,
+                            },
+                        },
+                    },
+                    toolExtras: { id: 'opaque\ncursor-task-id ' },
+                    messageExtras: { realID: 'server-cursor-task' },
+                }),
+            ],
+        });
+
+        expect(subagents).toEqual([
+            expect.objectContaining({
+                id: 'subagent_sidechain:opaque\ncursor-task-id ',
+                kind: 'subagent_sidechain',
+                status: 'succeeded',
+                display: expect.objectContaining({
+                    title: 'Inspect the integration',
+                    subtitle: 'specialist · cursor-model',
+                    providerLabel: 'Cursor',
+                }),
+                transcript: {
+                    toolMessageRouteId: 'server:server-cursor-task',
+                    toolId: 'opaque\ncursor-task-id ',
+                },
+                nativeRef: {
+                    lifecycle: 'completion_only',
+                    type: 'custom',
+                    customType: 'specialist',
+                    model: 'cursor-model',
+                    agentId: 'cursor-agent-1',
+                    durationMs: 42,
+                },
+                recipient: null,
+                capabilities: {
+                    canOpen: true,
+                    canSend: false,
+                    canStop: false,
+                    canLaunchChild: false,
+                    canDelete: false,
+                    canOpenAdvancedRun: false,
+                },
+                timestamps: {
+                    startedAtMs: 9_958,
+                    updatedAtMs: 10_000,
+                    finishedAtMs: 10_000,
+                },
+            }),
+        ]);
+        expect(subagents[0]?.transcript.sidechainId).toBeUndefined();
+        expect(subagents[0]?.timestamps.startedAtMs).toBe(9_958);
+    });
+
+    it('renders a completion-only native task tombstoned without a result as cancelled rather than running', async () => {
+        const subagents = await deriveSubagents({
+            session: { metadata: { flavor: 'cursor' } },
+            messages: [
+                createToolMessage({
+                    id: 'message_cursor_cancelled_task',
+                    name: 'SubAgent',
+                    state: 'running',
+                    input: {
+                        description: 'Cancelled native task',
+                        _acp: { terminalWithoutResult: true },
+                        _happier: {
+                            nativeSubagent: {
+                                v: 1,
+                                lifecycle: 'completion_only',
+                                type: 'browser',
+                            },
+                        },
+                    },
+                    toolExtras: { id: 'cancelled-cursor-task-id' },
+                }),
+            ],
+        });
+
+        expect(subagents).toEqual([
+            expect.objectContaining({
+                id: 'subagent_sidechain:cancelled-cursor-task-id',
+                status: 'cancelled',
+                transcript: expect.not.objectContaining({ sidechainId: expect.anything() }),
+            }),
+        ]);
+    });
+
+    it('fails closed on oversized or out-of-contract native task display metadata from durable history', async () => {
+        const oversized = 'x'.repeat(513);
+        const subagents = await deriveSubagents({
+            session: { metadata: { flavor: 'cursor' } },
+            messages: [
+                createToolMessage({
+                    id: 'message_cursor_malformed_native_task',
+                    name: 'SubAgent',
+                    state: 'completed',
+                    input: {
+                        description: 'Bounded native task',
+                        _happier: {
+                            nativeSubagent: {
+                                v: 1,
+                                lifecycle: 'completion_only',
+                                type: oversized,
+                                model: oversized,
+                                agentId: oversized,
+                                durationMs: 2_592_000_001,
+                            },
+                        },
+                    },
+                    toolExtras: { id: 'malformed-native-task-id' },
+                }),
+            ],
+        });
+
+        expect(subagents).toEqual([
+            expect.objectContaining({
+                display: expect.not.objectContaining({ subtitle: expect.anything() }),
+                nativeRef: { lifecycle: 'completion_only' },
+                timestamps: expect.not.objectContaining({ startedAtMs: expect.anything() }),
+            }),
+        ]);
+    });
+
+    it('bounds completion-only titles and never promotes the private task prompt into the routine subagent list', async () => {
+        const longDescription = `Visible description ${'x'.repeat(700)}`;
+        const privatePrompt = 'PRIVATE_TASK_PROMPT_MUST_NOT_BECOME_A_LIST_TITLE';
+        const nativeMarker = {
+            nativeSubagent: {
+                v: 1,
+                lifecycle: 'completion_only',
+                type: 'explore',
+            },
+        } as const;
+        const subagents = await deriveSubagents({
+            session: { metadata: { flavor: 'cursor' } },
+            messages: [
+                createToolMessage({
+                    id: 'message_cursor_long_description',
+                    name: 'SubAgent',
+                    state: 'completed',
+                    input: {
+                        description: longDescription,
+                        prompt: privatePrompt,
+                        _happier: nativeMarker,
+                    },
+                    toolExtras: { id: 'long-description-task' },
+                }),
+                createToolMessage({
+                    id: 'message_cursor_prompt_only',
+                    name: 'SubAgent',
+                    state: 'completed',
+                    input: {
+                        prompt: privatePrompt,
+                        _happier: nativeMarker,
+                    },
+                    toolExtras: { id: 'prompt-only-task' },
+                }),
+            ],
+        });
+
+        const longDescriptionTask = subagents.find((candidate) => candidate.transcript.toolId === 'long-description-task');
+        const promptOnlyTask = subagents.find((candidate) => candidate.transcript.toolId === 'prompt-only-task');
+        expect(longDescriptionTask?.display.title.startsWith('Visible description')).toBe(true);
+        expect(longDescriptionTask?.display.title.length).toBeLessThanOrEqual(512);
+        expect(longDescriptionTask?.display.title).not.toContain(privatePrompt);
+        expect(promptOnlyTask?.display.title).toBe('SubAgent');
+        expect(promptOnlyTask?.display.title).not.toContain(privatePrompt);
     });
 
     it('prefers a pending permission tool route for generic subagents until the provider sidechain can proceed', async () => {
