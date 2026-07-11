@@ -212,8 +212,15 @@ describe('createPiConnectedServiceRuntimeAuthAdapter', () => {
     });
   });
 
-  it('hot-applies brokered account swaps by bumping the daemon broker selection epoch', async () => {
+  it('declines brokered hot apply without mutating daemon broker selection', async () => {
     const adapter = createPiConnectedServiceRuntimeAuthAdapter();
+
+    expect(adapter.canHotApply({
+      target: { agentId: 'pi' },
+      selection: {
+        brokerSelectionIdentity: 'pi|connected|broker:1|claude-subscription:acct-old:',
+      },
+    })).toEqual({ supported: false, recovery: 'restart_rematerialize' });
 
     await expect(adapter.hotApply({
       target: { agentId: 'pi' },
@@ -227,31 +234,11 @@ describe('createPiConnectedServiceRuntimeAuthAdapter', () => {
         generation: 12,
         record: { serviceId: 'claude-subscription', profileId: 'profile-new' },
       },
-    })).resolves.toEqual({
-      applied: true,
-      recovery: 'provider_owned_broker_selection',
-      verification: {
-        status: 'weakly_verified',
-        proofStrength: 'weak',
-        sharedAuthSurfaceId: 'pi|connected|broker:1|claude-subscription:acct-old:',
-        source: 'broker_selection_indirection',
-        reason: 'daemon_broker_selection_epoch_bumped',
-      },
-    });
+    })).resolves.toEqual({ applied: false, reason: 'hot_apply_unsupported' });
 
     expect(getBrokerBridgeEffectiveSelectionForTest({
       selectionIdentity: 'pi|connected|broker:1|claude-subscription:acct-old:',
       serviceId: 'claude-subscription',
-    })).toMatchObject({
-      selectionEpoch: 1,
-      selection: {
-        kind: 'group',
-        serviceId: 'claude-subscription',
-        groupId: 'main',
-        activeProfileId: 'profile-new',
-        fallbackProfileId: 'profile-old',
-        generation: 12,
-      },
-    });
+    })).toBeNull();
   });
 });

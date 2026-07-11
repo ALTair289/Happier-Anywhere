@@ -88,6 +88,7 @@ export function buildPiBrokerExtensionSource(): string {
     pluginVersionEnv: PI_BROKER_EXTENSION_VERSION_ENV,
     pluginVersion: PI_BROKER_EXTENSION_VERSION,
     sessionTag: 'pi-broker',
+    selectionIdentityEnv: PI_BROKER_SELECTION_IDENTITY_ENV,
   });
   const codexBridge = buildBrokerBridgeCallSource({
     ...resolvePiBrokerBridgeParams('openai'),
@@ -97,6 +98,7 @@ export function buildPiBrokerExtensionSource(): string {
     pluginVersionEnv: PI_BROKER_EXTENSION_VERSION_ENV,
     pluginVersion: PI_BROKER_EXTENSION_VERSION,
     sessionTag: 'pi-broker',
+    selectionIdentityEnv: PI_BROKER_SELECTION_IDENTITY_ENV,
   });
 
   // The shared builder defines top-level `const`/`function` names; emit each provider's bridge call
@@ -104,6 +106,7 @@ export function buildPiBrokerExtensionSource(): string {
   return `// Happier Pi auth broker extension (generated). Version: ${PI_BROKER_EXTENSION_VERSION}.
 // Self-contained: loaded by Pi's jiti runtime. No Happier imports, no npm deps.
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 
 const SELECTIONS_ENV = ${jsString(PI_BROKER_SELECTIONS_ENV)};
 const DAEMON_STATE_PATH_ENV = ${jsString(PI_BROKER_DAEMON_STATE_PATH_ENV)};
@@ -116,6 +119,7 @@ const LOADED_HANDSHAKE_PATH = ${jsString(CONNECTED_SERVICE_BROKER_LOADED_HANDSHA
 const MARKER_PREFIX = ${jsString(PI_BROKER_MARKER_PREFIX)};
 const EXPIRY_SKEW_MS = 60 * 1000;
 const DEFAULT_TTL_MS = 45 * 60 * 1000;
+const BROKER_EPOCH_TTL_MS = 10 * 1000;
 
 // Per-provider bridge fetcher (shared source, block-scoped to avoid name collisions across providers).
 const fetchAnthropicAccessTokenFromBridge = (() => {
@@ -166,12 +170,13 @@ const inFlightByProvider = Object.create(null);
 async function brokeredAccessToken(bridgeTag, forceRefresh) {
   const now = Date.now();
   const cached = cacheByProvider[bridgeTag];
-  if (!forceRefresh && cached && cached.notAfter > now) return cached;
+  if (!forceRefresh && cached && cached.notAfter > now && cached.selectionEpoch === null) return cached;
   if (inFlightByProvider[bridgeTag]) return inFlightByProvider[bridgeTag];
   inFlightByProvider[bridgeTag] = (async () => {
-    const fresh = await fetcherForTag(bridgeTag)(forceRefresh === true);
+    const failingAccessToken = forceRefresh === true && cached ? cached.accessToken : null;
+    const fresh = await fetcherForTag(bridgeTag)(forceRefresh === true, failingAccessToken);
     const notAfter = fresh.expiresAt && fresh.expiresAt > now ? fresh.expiresAt - EXPIRY_SKEW_MS : now + DEFAULT_TTL_MS;
-    const entry = { accessToken: fresh.accessToken, accountId: fresh.accountId, expiresAt: fresh.expiresAt, notAfter: notAfter };
+    const entry = { accessToken: fresh.accessToken, accountId: fresh.accountId, expiresAt: fresh.expiresAt, notAfter: notAfter, selectionEpoch: fresh.selectionEpoch };
     cacheByProvider[bridgeTag] = entry;
     return entry;
   })();
@@ -195,10 +200,11 @@ function buildOauthOverride(bridgeTag) {
     async refreshToken(credentials) {
       const fresh = await brokeredAccessToken(bridgeTag, false);
       const expires = fresh.expiresAt && fresh.expiresAt > Date.now() ? fresh.expiresAt : Date.now() + DEFAULT_TTL_MS;
+      const effectiveExpires = fresh.selectionEpoch === null ? expires : Math.min(expires, Date.now() + BROKER_EPOCH_TTL_MS);
       const next = Object.assign({}, credentials, {
         refresh: MARKER_PREFIX + ":" + registerProviderId + ":" + (process.env[EXTENSION_VERSION_ENV] || EXTENSION_VERSION),
         access: fresh.accessToken,
-        expires: expires,
+        expires: effectiveExpires,
       });
       if (fresh.accountId) next.accountId = fresh.accountId;
       return next;

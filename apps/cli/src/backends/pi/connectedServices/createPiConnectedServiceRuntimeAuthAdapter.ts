@@ -1,5 +1,4 @@
 import { classifyProviderLimitEvidence, parseProviderResetAt } from '@/daemon/connectedServices/quotas/normalization';
-import { applyBrokerBridgeRuntimeAuthSelection } from '@/daemon/connectedServices/broker/applyBrokerBridgeRuntimeAuthSelection';
 import { mapProviderLimitCategoryToRuntimeAuthFailureKind } from '@/daemon/connectedServices/runtimeAuth/mapProviderLimitCategoryToRuntimeAuthFailureKind';
 import type {
   ConnectedServiceProviderRuntimeAuthAdapter,
@@ -200,14 +199,11 @@ export function createPiConnectedServiceRuntimeAuthAdapter(): ConnectedServicePr
     async materializeActiveProfile(input) {
       return { supported: true, activeProfiles: activeProfiles(input) };
     },
-    canHotApply(input) {
-      const selection = readRecord(input.selection);
-      return readString(selection?.brokerSelectionIdentity)
-        ? { supported: true, recovery: 'provider_owned_broker_selection' }
-        : { supported: false, recovery: 'restart_rematerialize' };
+    canHotApply() {
+      return { supported: false, recovery: 'restart_rematerialize' };
     },
-    async hotApply(input) {
-      return applyBrokerBridgeRuntimeAuthSelection(input.selection);
+    async hotApply() {
+      return { applied: false, reason: 'hot_apply_unsupported' };
     },
     async recoverAfterRuntimeAuthSwitch() {
       // Nothing to hot-recover: restart/rematerialize IS the recovery for Pi (no-op success).

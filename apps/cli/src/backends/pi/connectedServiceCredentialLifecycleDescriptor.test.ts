@@ -4,7 +4,7 @@ import { PI_BROKER_SELECTIONS_ENV, serializePiBrokerSelections } from '@/backend
 import { agent } from './index';
 
 describe('Pi connected-service credential lifecycle descriptor', () => {
-  it('advertises provider-owned broker hot apply without claiming in-turn exact identity', async () => {
+  it('advertises restart-only auth application until Pi can invalidate its loaded credential', async () => {
     await expect(agent.getConnectedServiceCredentialLifecycleDescriptor()).resolves.toMatchObject({
       providerId: 'pi',
       refreshedCredentialApplication: {
@@ -16,18 +16,8 @@ describe('Pi connected-service credential lifecycle descriptor', () => {
         noRestartRequiredWhenBrokeredServiceIds: ['claude-subscription'],
       },
       sameAccountFanoutStrategy: 'shared_group_auth_surface',
-      predictiveSoftSwitch: { mode: 'supported' },
-      runtimeAuthApply: {
-        directLiveHotAuth: {
-          supportsInTurnApply: false,
-          requiresExactRuntimeIdentity: false,
-          refreshSelectionResync: 'not_applicable',
-          authMode: {
-            kind: 'provider_owned',
-            name: 'broker_selection_indirection',
-          },
-        },
-      },
+      predictiveSoftSwitch: { mode: 'unsupported' },
+      runtimeAuthApply: { directLiveHotAuth: 'unsupported' },
     });
   });
 

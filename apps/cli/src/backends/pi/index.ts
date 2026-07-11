@@ -1,8 +1,10 @@
 import { AGENTS_CORE } from '@happier-dev/agents';
 
+import { PI_BROKER_SELECTIONS_ENV, parsePiBrokerSelections } from '@/backends/pi/brokerExtension';
 import { checklists } from './cli/checklists';
 import { createPiConnectedServiceRuntimeAuthAdapter } from '@/backends/pi/connectedServices/createPiConnectedServiceRuntimeAuthAdapter';
 import { createPiConnectedServicesMaterializer } from '@/backends/pi/connectedServices/createPiConnectedServicesMaterializer';
+import { materializePiConnectedServiceRuntimeAuthSelection } from '@/backends/pi/connectedServices/materializePiConnectedServiceRuntimeAuthSelection';
 import { piConnectedServiceStateSharingDescriptor } from '@/backends/pi/connectedServices/piConnectedServiceStateSharingDescriptor';
 import { piUsageLimitRecoveryControlAdapter } from '@/backends/pi/connectedServices/piUsageLimitRecoveryControlAdapter';
 import { resolvePiConnectedServiceCandidatePersistedSessionFile } from '@/backends/pi/connectedServices/resolvePiConnectedServiceCandidatePersistedSessionFile';
@@ -16,10 +18,21 @@ const piConnectedServiceCredentialLifecycleDescriptor: ConnectedServiceCredentia
   spawnPreflightOauthRefresh: { mode: 'expiry_window' },
   refreshedCredentialApplication: {
     mode: 'restart_required',
-    noRestartRequiredServiceIds: ['openai-codex', 'claude-subscription'],
+    // openai-codex is OAuth-only ⇒ always brokered ⇒ unconditional no-restart. claude-subscription is
+    // credential-shape-specific: the OAuth shape is brokered (no restart — the daemon re-feeds tokens),
+    // but a SETUP-TOKEN materializes as a raw api_key with no broker, so it must restart to pick up a
+    // reconnected credential. Narrow the no-restart claim to the actually-brokered shape.
+    noRestartRequiredServiceIds: ['openai-codex'],
+    noRestartRequiredWhenBrokeredServiceIds: ['claude-subscription'],
+    isTargetBrokeredForBinding: ({ serviceId, environmentVariables }) => {
+      // Broker-backed for this binding iff the running session carries a Pi broker selection whose
+      // service id matches — the same signal the switch-continuity resolver gates hot-apply on.
+      const selections = parsePiBrokerSelections(environmentVariables[PI_BROKER_SELECTIONS_ENV]);
+      return Object.values(selections).some((selection) => selection?.serviceId === serviceId);
+    },
   },
   predictiveSoftSwitch: { mode: 'unsupported' },
-  sameAccountFanoutStrategy: 'none',
+  sameAccountFanoutStrategy: 'shared_group_auth_surface',
   runtimeAuthApply: { directLiveHotAuth: 'unsupported' },
 };
 
@@ -34,6 +47,7 @@ export const agent = {
   getConnectedServiceStateSharingDescriptor: async () => piConnectedServiceStateSharingDescriptor,
   getConnectedServiceRuntimeAuthAdapter: async () => createPiConnectedServiceRuntimeAuthAdapter(),
   getConnectedServiceCredentialLifecycleDescriptor: async () => piConnectedServiceCredentialLifecycleDescriptor,
+  materializeConnectedServiceRuntimeAuthSelection: materializePiConnectedServiceRuntimeAuthSelection,
   resolveConnectedServiceSwitchContinuity: async (params) => await resolvePiConnectedServiceSwitchContinuity(params),
   resolveConnectedServiceCandidatePersistedSessionFile: resolvePiConnectedServiceCandidatePersistedSessionFile,
   verifyResumeReachable: async (input) =>
