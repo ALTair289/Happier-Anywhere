@@ -49,15 +49,49 @@ export function resolveSessionPendingQueueDeliveryTiming(
 export function runtimeIdleForPendingDrain(
   activity: PendingQueueRuntimeActivityProjection | null | undefined,
   nowMs: unknown,
+  opts: Readonly<{ ownerLive?: boolean }> = {},
 ): boolean {
-  return isSessionRuntimeActivityProjectionIdleForPendingDrain(activity, nowMs);
+  return isSessionRuntimeActivityProjectionIdleForPendingDrain(activity, nowMs, opts);
+}
+
+function readRuntimeActivityExpiry(activity: PendingQueueRuntimeActivityProjection | null | undefined): number | null {
+  const value = activity?.runtimeActivityExpiresAt;
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+function readNowMs(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+export type PendingQueueRuntimeActivityDeferral = Readonly<{
+  defer: boolean;
+  runtimeActivityExpiresAt: number | null;
+}>;
+
+export function resolvePendingQueueRuntimeActivityDeferral(params: Readonly<{
+  settings: Pick<AccountSettings, 'sessionPendingQueueDeliveryTiming'> | null | undefined;
+  activity: PendingQueueRuntimeActivityProjection | null | undefined;
+  nowMs: unknown;
+  ownerLive?: boolean;
+}>): PendingQueueRuntimeActivityDeferral {
+  const runtimeActivityExpiresAt = readRuntimeActivityExpiry(params.activity);
+  const nowMs = readNowMs(params.nowMs);
+  const hasFutureExpiry = runtimeActivityExpiresAt !== null
+    && nowMs !== null
+    && runtimeActivityExpiresAt > nowMs;
+  const defer = resolveSessionPendingQueueDeliveryTiming(params.settings) === 'after_runtime_idle'
+    && !runtimeIdleForPendingDrain(params.activity, params.nowMs, { ownerLive: params.ownerLive });
+  return {
+    defer,
+    runtimeActivityExpiresAt: defer && hasFutureExpiry ? runtimeActivityExpiresAt : null,
+  };
 }
 
 export function shouldDeferPendingQueueDrainForRuntimeActivity(params: Readonly<{
   settings: Pick<AccountSettings, 'sessionPendingQueueDeliveryTiming'> | null | undefined;
   activity: PendingQueueRuntimeActivityProjection | null | undefined;
   nowMs: unknown;
+  ownerLive?: boolean;
 }>): boolean {
-  return resolveSessionPendingQueueDeliveryTiming(params.settings) === 'after_runtime_idle'
-    && !runtimeIdleForPendingDrain(params.activity, params.nowMs);
+  return resolvePendingQueueRuntimeActivityDeferral(params).defer;
 }

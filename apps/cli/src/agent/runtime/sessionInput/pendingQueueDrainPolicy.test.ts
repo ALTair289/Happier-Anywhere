@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { accountSettingsParse } from '@happier-dev/protocol';
 
 import {
+  resolvePendingQueueRuntimeActivityDeferral,
   resolveSessionPendingActiveTurnDeliveryPolicy,
   resolveSessionPendingQueueDeliveryTiming,
   runtimeIdleForPendingDrain,
@@ -70,7 +71,7 @@ describe('pendingQueueDrainPolicy delivery timing', () => {
     }, 1_000)).toBe(true);
   });
 
-  it('treats elapsed projection expiry as idle even when a runtime owner is still connected', () => {
+  it('treats elapsed projection expiry as idle when no runtime owner is known live', () => {
     expect(runtimeIdleForPendingDrain({
       runtimeActivityActiveCount: 1,
       runtimeActivityObservedAt: 500,
@@ -128,5 +129,43 @@ describe('pendingQueueDrainPolicy delivery timing', () => {
       activity,
       nowMs: 1_000,
     })).toBe(true);
+  });
+
+  it('returns the runtime activity expiry wake even when the local runtime owner is live', () => {
+    const activity = {
+      runtimeActivityActiveCount: 1,
+      runtimeActivityObservedAt: 500,
+      runtimeActivityExpiresAt: 2_000,
+      runtimeActivitySourceClass: 'provider_detached_task' as const,
+    };
+
+    expect(resolvePendingQueueRuntimeActivityDeferral({
+      settings: accountSettingsParse({ sessionPendingQueueDeliveryTiming: 'after_runtime_idle' }),
+      activity,
+      nowMs: 1_000,
+      ownerLive: true,
+    })).toEqual({
+      defer: true,
+      runtimeActivityExpiresAt: 2_000,
+    });
+  });
+
+  it('fails open for after-runtime-idle delivery when runtime owner activity expiry has elapsed', () => {
+    const activity = {
+      runtimeActivityActiveCount: 1,
+      runtimeActivityObservedAt: 500,
+      runtimeActivityExpiresAt: 1_000,
+      runtimeActivitySourceClass: 'provider_detached_task' as const,
+    };
+
+    expect(resolvePendingQueueRuntimeActivityDeferral({
+      settings: accountSettingsParse({ sessionPendingQueueDeliveryTiming: 'after_runtime_idle' }),
+      activity,
+      nowMs: 2_000,
+      ownerLive: true,
+    })).toEqual({
+      defer: false,
+      runtimeActivityExpiresAt: null,
+    });
   });
 });

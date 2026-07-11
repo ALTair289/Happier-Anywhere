@@ -14,17 +14,14 @@ export async function waitForNextPermissionModeMessage<Mode, Message>(opts: {
   onMetadataUpdate?: (() => void | Promise<void>) | null;
 }): Promise<MessageBatch<Mode, Message> | null> {
   const session: SessionProviderInputConsumerSession = {
-    popPendingMessage: () => opts.session.popPendingMessage(),
+    materializeNextPendingMessageSafely: (materializeOpts) =>
+      opts.session.materializeNextPendingMessageSafely(materializeOpts),
     shouldAttemptPendingMaterialization: () => opts.session.shouldAttemptPendingMaterialization?.() ?? true,
     reconcilePendingQueueState: async (reconcileOpts) => {
       await opts.session.reconcilePendingQueueState?.(reconcileOpts);
     },
     waitForMetadataUpdate: (signal) => opts.session.waitForMetadataUpdate(signal),
   };
-  const safeMaterialize = opts.session.materializeNextPendingMessageSafely;
-  if (safeMaterialize) {
-    session.materializeNextPendingMessageSafely = (materializeOpts) => safeMaterialize.call(opts.session, materializeOpts);
-  }
 
   const consumerOptions: SessionProviderInputConsumerOptions<Mode, Message> = {
     messageQueue: opts.messageQueue,

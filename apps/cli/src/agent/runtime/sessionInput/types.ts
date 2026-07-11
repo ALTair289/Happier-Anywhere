@@ -63,4 +63,7 @@ export type DrainPendingResult = {
 export interface SessionProviderInputConsumer<Mode, Message> {
   waitForNextInput(opts: { abortSignal: AbortSignal }): Promise<MessageBatch<Mode, Message> | null>;
   drainPending(opts?: DrainPendingOptions): Promise<DrainPendingResult>;
+  setPendingMaterializationRetryEpisodeExhaustedHandler?(
+    handler: ((params: Readonly<{ attemptCount: number }>) => void | Promise<void>) | null,
+  ): void;
 }

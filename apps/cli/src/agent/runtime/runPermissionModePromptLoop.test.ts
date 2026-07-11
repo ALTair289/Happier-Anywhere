@@ -246,6 +246,68 @@ describe('runPermissionModePromptLoop', () => {
     expect(confirmUserMessageDeliveredToProvider).toHaveBeenCalledWith(7, { localIds: ['local-1'] });
   });
 
+  it('marks request-response prompts provider-accepted after a successful send call', async () => {
+    const providerAcceptedLocalIds = new Set<string>();
+    const confirmUserMessageDeliveredToProvider = vi.fn((_seq: number | null, opts?: { localIds?: readonly string[] }) => {
+      for (const localId of opts?.localIds ?? []) {
+        providerAcceptedLocalIds.add(localId);
+      }
+    });
+    const session = createMutableApiSessionClientFixture<PromptLoopMetadata>({
+      overrides: {
+        confirmUserMessageDeliveredToProvider,
+        hasUserMessageProviderAcceptance: ({ localIds }) =>
+          (localIds ?? []).every((localId) => providerAcceptedLocalIds.has(localId)),
+      } as Partial<ApiSessionClient>,
+    });
+    const queue = createModeQueue();
+    const runtime = createRuntime();
+    runtime.sendPrompt = vi.fn(async () => {});
+    const messageBuffer = new MessageBuffer();
+    const permissionHandler = {
+      setPermissionMode: vi.fn(),
+      reset: vi.fn(),
+    } as any;
+
+    queue.push(
+      { text: 'hello', localId: 'local-request-response' },
+      { permissionMode: 'default' },
+      { userMessageSeq: 11, userMessageLocalIds: ['local-request-response'] },
+    );
+
+    let shouldExit = false;
+    await runPermissionModePromptLoop({
+      providerName: 'Request Response Provider',
+      agentMessageType: 'qwen',
+      explicitPermissionMode: undefined,
+      session,
+      messageQueue: queue,
+      permissionHandler,
+      runtime,
+      createOverrideSynchronizer: () => ({ syncFromMetadata: () => {}, flushPendingAfterStart: async () => {} }),
+      messageBuffer,
+      shouldExit: () => shouldExit,
+      getAbortSignal: () => new AbortController().signal,
+      keepAlive: () => {},
+      setThinking: () => {},
+      sendReady: () => {
+        shouldExit = true;
+      },
+      currentPermissionModeUpdatedAt: 0,
+      setCurrentPermissionMode: () => {},
+      setCurrentPermissionModeUpdatedAt: () => {},
+      formatPromptErrorMessage: (error) => `Error: ${String(error)}`,
+    });
+
+    expect(runtime.sendPrompt).toHaveBeenCalledWith('hello');
+    expect(confirmUserMessageDeliveredToProvider).toHaveBeenCalledWith(11, {
+      localIds: ['local-request-response'],
+    });
+    expect(session.hasUserMessageProviderAcceptance?.({
+      localIds: ['local-request-response'],
+    })).toBe(true);
+  });
+
   it('confirms ACP queued delivery after backend acceptance before response completion', async () => {
     let resolveResponseComplete!: (outcome?: { kind: 'completed'; stopReason: 'end_turn' }) => void;
     const responseComplete = new Promise<{ kind: 'completed'; stopReason: 'end_turn' } | undefined>((resolve) => {

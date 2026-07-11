@@ -18,6 +18,10 @@ import type {
   SessionProviderInputConsumer,
 } from './types';
 import { PENDING_QUEUE_ONE_AT_A_TIME_MAX_POP_PER_WAKE } from './pendingQueueDrainPolicy';
+import {
+  createPendingMaterializationRetryEpisode,
+  type PendingMaterializationRetryEpisodeConfig,
+} from './pendingMaterializationRetryEpisode';
 
 export class PendingQueueMaterializationAuthError extends Error {
   constructor() {
@@ -27,17 +31,21 @@ export class PendingQueueMaterializationAuthError extends Error {
 }
 
 export interface SessionProviderInputConsumerSession {
-  materializeNextPendingMessageSafely?: ((opts?: {
+  materializeNextPendingMessageSafely: (opts?: {
+    expectedPendingVersion?: number;
     reconcileWhenEmpty?: PendingMaterializationReconcileWhenEmpty;
     activeTurnDeliveryPolicy?: PendingMaterializationActiveTurnPolicy;
     pendingQueueDeliveryTiming?: PendingQueueDeliveryTiming;
-  }) => Promise<PendingMaterializationResult>) | undefined;
-  popPendingMessage: () => Promise<boolean>;
+  }) => Promise<PendingMaterializationResult>;
   shouldAttemptPendingMaterialization?: ((opts?: {
     activeTurnDeliveryPolicy?: PendingMaterializationActiveTurnPolicy;
     pendingQueueDeliveryTiming?: PendingQueueDeliveryTiming;
   }) => boolean) | undefined;
   reconcilePendingQueueState?: ((opts: { force: boolean }) => unknown | Promise<unknown>) | undefined;
+  blockPendingMessageDelivery?: ((params: Readonly<{
+    localIds: readonly string[];
+    reason: 'unknown';
+  }>) => Promise<boolean>) | undefined;
   waitForMetadataUpdate: (abortSignal?: AbortSignal) => Promise<boolean>;
 }
 
@@ -53,6 +61,11 @@ export interface SessionProviderInputConsumerOptions<Mode, Message> {
   idleWakePollIntervalMs?: number | undefined;
   metadataWaitRetryBackoffMs?: number | undefined;
   pendingDrainMaxPopPerWake?: number | undefined;
+  pendingMaterializationRetryEpisode?: PendingMaterializationRetryEpisodeConfig | undefined;
+  pendingMaterializationEpisodeKey?: string | undefined;
+  onPendingMaterializationRetryEpisodeExhausted?: ((params: Readonly<{
+    attemptCount: number;
+  }>) => void | Promise<void>) | undefined;
 }
 
 type WakeWinner = { kind: 'queue'; hasMessages: boolean } | { kind: 'meta'; ok: boolean } | { kind: 'idle' };
@@ -62,6 +75,7 @@ function buildMaterializeOptions(
   activeTurnDeliveryPolicy: PendingMaterializationActiveTurnPolicy | undefined,
   pendingQueueDeliveryTiming: PendingQueueDeliveryTiming | undefined,
 ): {
+  expectedPendingVersion?: number;
   reconcileWhenEmpty: PendingMaterializationReconcileWhenEmpty;
   activeTurnDeliveryPolicy?: PendingMaterializationActiveTurnPolicy;
   pendingQueueDeliveryTiming?: PendingQueueDeliveryTiming;
@@ -121,12 +135,46 @@ function logInputConsumerMaterializationDecision(opts: {
   });
 }
 
+function readPendingDeliveryLocalIdsFromError(error: unknown): string[] {
+  if (!error || typeof error !== 'object') return [];
+  const record = error as {
+    localId?: unknown;
+    localIds?: unknown;
+    userMessageLocalIds?: unknown;
+  };
+  const rawValues = [
+    record.localId,
+    ...(Array.isArray(record.localIds) ? record.localIds : []),
+    ...(Array.isArray(record.userMessageLocalIds) ? record.userMessageLocalIds : []),
+  ];
+  const seen = new Set<string>();
+  const localIds: string[] = [];
+  for (const rawValue of rawValues) {
+    const localId = typeof rawValue === 'string' ? rawValue.trim() : '';
+    if (!localId || seen.has(localId)) continue;
+    seen.add(localId);
+    localIds.push(localId);
+  }
+  return localIds;
+}
+
 export function createSessionProviderInputConsumer<Mode, Message>(
   opts: SessionProviderInputConsumerOptions<Mode, Message>,
 ): SessionProviderInputConsumer<Mode, Message> {
   let waitForNextInputTurn: Promise<void> = Promise.resolve();
+  let retryEpisodeExhaustedHandler = opts.onPendingMaterializationRetryEpisodeExhausted ?? null;
+  const materializationRetryEpisode = createPendingMaterializationRetryEpisode<PendingMaterializationResult>({
+    config: opts.pendingMaterializationRetryEpisode,
+    isRetryable: (result) => result.type === 'retryable_transport',
+    onExhausted: async ({ attemptCount }) => {
+      await retryEpisodeExhaustedHandler?.({ attemptCount });
+    },
+  });
 
   return {
+    setPendingMaterializationRetryEpisodeExhaustedHandler(handler) {
+      retryEpisodeExhaustedHandler = handler;
+    },
     async waitForNextInput(waitOpts) {
       const previousTurn = waitForNextInputTurn;
       let releaseTurn: () => void = () => {};
@@ -140,7 +188,14 @@ export function createSessionProviderInputConsumer<Mode, Message>(
         if (!canStart || waitOpts.abortSignal.aborted) {
           return null;
         }
-        return await waitForNextInput({ ...opts, abortSignal: waitOpts.abortSignal });
+        return await waitForNextInput({
+          ...opts,
+          abortSignal: waitOpts.abortSignal,
+          materializationRetryEpisode,
+          onPendingMaterializationRetryEpisodeExhausted: async (params) => {
+            await retryEpisodeExhaustedHandler?.(params);
+          },
+        });
       } finally {
         releaseTurn();
       }
@@ -154,7 +209,7 @@ export function createSessionProviderInputConsumer<Mode, Message>(
         opts.pendingQueueDeliveryTiming,
         opts.resolvePendingQueueDeliveryTiming,
         drainOpts,
-      ));
+      ), materializationRetryEpisode, opts.pendingMaterializationEpisodeKey ?? 'session-input');
     },
   };
 }
@@ -195,6 +250,9 @@ export function createSessionProviderPendingDrainAdapter(
     | 'resolvePendingQueueDeliveryTiming'
   >,
 ): Pick<SessionProviderInputConsumer<never, never>, 'drainPending'> {
+  const materializationRetryEpisode = createPendingMaterializationRetryEpisode<PendingMaterializationResult>({
+    isRetryable: (result) => result.type === 'retryable_transport',
+  });
   return {
     async drainPending(drainOpts) {
       return await drainPendingMessages(withDefaultDrainOptions(
@@ -205,13 +263,16 @@ export function createSessionProviderPendingDrainAdapter(
         defaults?.pendingQueueDeliveryTiming,
         defaults?.resolvePendingQueueDeliveryTiming,
         drainOpts,
-      ));
+      ), materializationRetryEpisode, 'session-input');
     },
   };
 }
 
 async function waitForNextInput<Mode, Message>(
-  opts: SessionProviderInputConsumerOptions<Mode, Message> & { abortSignal: AbortSignal },
+  opts: SessionProviderInputConsumerOptions<Mode, Message> & {
+    abortSignal: AbortSignal;
+    materializationRetryEpisode: ReturnType<typeof createPendingMaterializationRetryEpisode<PendingMaterializationResult>>;
+  },
 ): Promise<MessageBatch<Mode, Message> | null> {
   const idleWakePollIntervalMs = opts.idleWakePollIntervalMs ?? configuration.pendingQueueIdleWakePollIntervalMs;
   const metadataWaitRetryBackoffMs = opts.metadataWaitRetryBackoffMs ?? DEFAULT_SESSION_METADATA_WAIT_RETRY_BACKOFF_MS;
@@ -319,42 +380,57 @@ async function collectQueuedBatch<Mode, Message>(
 }
 
 async function materializePendingMessage<Mode, Message>(
-  opts: SessionProviderInputConsumerOptions<Mode, Message>,
+  opts: SessionProviderInputConsumerOptions<Mode, Message> & {
+    abortSignal: AbortSignal;
+    materializationRetryEpisode: ReturnType<typeof createPendingMaterializationRetryEpisode<PendingMaterializationResult>>;
+  },
 ): Promise<void> {
-  const safeMaterialize = opts.session.materializeNextPendingMessageSafely;
-  if (safeMaterialize) {
-    const reconcileWhenEmpty = opts.reconcileWhenEmpty ?? 'skip';
-    const activeTurnDeliveryPolicy = readActiveTurnDeliveryPolicy(opts);
-    const pendingQueueDeliveryTiming = readPendingQueueDeliveryTiming(opts);
-    const result = await safeMaterialize(buildMaterializeOptions(
-      reconcileWhenEmpty,
-      activeTurnDeliveryPolicy,
-      pendingQueueDeliveryTiming,
-    ));
-    logInputConsumerMaterializationDecision({
-      source: 'waitForNextInput',
-      reconcileWhenEmpty,
-      activeTurnDeliveryPolicy,
-      result,
+  const reconcileWhenEmpty = opts.reconcileWhenEmpty ?? 'skip';
+  const activeTurnDeliveryPolicy = readActiveTurnDeliveryPolicy(opts);
+  const pendingQueueDeliveryTiming = readPendingQueueDeliveryTiming(opts);
+  let result: PendingMaterializationResult;
+  const materializeOptions = buildMaterializeOptions(
+    reconcileWhenEmpty,
+    activeTurnDeliveryPolicy,
+    pendingQueueDeliveryTiming,
+  );
+  try {
+    result = await opts.materializationRetryEpisode.run({
+      key: opts.pendingMaterializationEpisodeKey ?? 'session-input',
+      abortSignal: opts.abortSignal,
+      attempt: () => opts.session.materializeNextPendingMessageSafely(materializeOptions),
     });
-    if (result.type === 'materialized') {
-      // The transcript update path owns queue delivery; do not synthesize a provider batch from the pending payload.
-      return;
-    }
-    if (result.type === 'deferred' && result.reason === 'supervisor_auth_failed') {
+  } catch (error) {
+    if (readAuthenticationStatus(error) !== null) {
       throw new PendingQueueMaterializationAuthError();
     }
+    logger.debug('[pendingQueue] input consumer materialization failed (non-fatal)', error);
+    const localIds = readPendingDeliveryLocalIdsFromError(error);
+    if (localIds.length > 0 && opts.session.blockPendingMessageDelivery) {
+      await opts.session.blockPendingMessageDelivery({
+        localIds,
+        reason: 'unknown',
+      });
+    }
+    await opts.onPendingMaterializationRetryEpisodeExhausted?.({ attemptCount: 1 });
     return;
   }
-
-  if (!(opts.session.shouldAttemptPendingMaterialization?.(buildAttemptOptions(
-    readActiveTurnDeliveryPolicy(opts),
-    readPendingQueueDeliveryTiming(opts),
-  )) ?? true)) {
+  logInputConsumerMaterializationDecision({
+    source: 'waitForNextInput',
+    reconcileWhenEmpty,
+    activeTurnDeliveryPolicy,
+    result,
+  });
+  if (result.type === 'materialized') {
+    // The transcript update path owns queue delivery; do not synthesize a provider batch from the pending payload.
     return;
   }
-
-  await opts.session.popPendingMessage();
+  if (result.type === 'auth_failure') {
+    throw new PendingQueueMaterializationAuthError();
+  }
+  if (result.type === 'deferred' && result.reason === 'supervisor_auth_failed') {
+    throw new PendingQueueMaterializationAuthError();
+  }
 }
 
 function withDefaultDrainOptions(
@@ -384,6 +460,8 @@ function withDefaultDrainOptions(
 
 async function drainPendingMessages(
   opts: DrainPendingOptions & { session: SessionProviderInputConsumerSession },
+  materializationRetryEpisode: ReturnType<typeof createPendingMaterializationRetryEpisode<PendingMaterializationResult>>,
+  episodeKey: string,
 ): Promise<DrainPendingResult> {
   const maxPopPerWake = Math.max(1, Math.trunc(opts.maxPopPerWake ?? PENDING_QUEUE_ONE_AT_A_TIME_MAX_POP_PER_WAKE));
   let materialized = 0;
@@ -411,7 +489,12 @@ async function drainPendingMessages(
         }
       }
 
-      const result = await materializeNextPendingForDrain(opts.session, opts);
+      const result = await materializeNextPendingForDrain(
+        opts.session,
+        opts,
+        materializationRetryEpisode,
+        episodeKey,
+      );
       if (result === 'materialized') {
         materialized += 1;
         continue;
@@ -428,43 +511,45 @@ async function drainPendingMessages(
 async function materializeNextPendingForDrain(
   session: SessionProviderInputConsumerSession,
   opts: DrainPendingOptions,
+  materializationRetryEpisode: ReturnType<typeof createPendingMaterializationRetryEpisode<PendingMaterializationResult>>,
+  episodeKey: string,
 ): Promise<Exclude<DrainPendingResult['stoppedReason'], 'aborted' | 'drain_disallowed' | 'materialization_blocked' | 'max_pop_per_wake'> | 'materialized'> {
-  const safeMaterialize = session.materializeNextPendingMessageSafely;
-  if (safeMaterialize) {
-    try {
-      const reconcileWhenEmpty = 'force';
-      const activeTurnDeliveryPolicy = readActiveTurnDeliveryPolicy(opts);
-      const pendingQueueDeliveryTiming = readPendingQueueDeliveryTiming(opts);
-      const result = await safeMaterialize(buildMaterializeOptions(
-        reconcileWhenEmpty,
-        activeTurnDeliveryPolicy,
-        pendingQueueDeliveryTiming,
-      ));
-      logInputConsumerMaterializationDecision({
-        source: 'drainPending',
-        reconcileWhenEmpty,
-        activeTurnDeliveryPolicy,
-        result,
-      });
-      if (result.type === 'materialized') {
-        return 'materialized';
-      }
-      if (result.type === 'deferred') {
-        if (result.reason === 'supervisor_auth_failed') {
-          logTerminalAuthDrainStop(opts, null);
-          return 'auth_failure';
-        }
-        return 'deferred';
-      }
-      return 'no_pending';
-    } catch (error) {
-      return readDrainErrorStoppedReason(error, opts);
-    }
-  }
-
   try {
-    const didPop = await session.popPendingMessage();
-    return didPop ? 'materialized' : 'no_pending';
+    const reconcileWhenEmpty = 'force';
+    const activeTurnDeliveryPolicy = readActiveTurnDeliveryPolicy(opts);
+    const pendingQueueDeliveryTiming = readPendingQueueDeliveryTiming(opts);
+    const materializeOptions = buildMaterializeOptions(
+      reconcileWhenEmpty,
+      activeTurnDeliveryPolicy,
+      pendingQueueDeliveryTiming,
+    );
+    const result = await materializationRetryEpisode.run({
+      key: episodeKey,
+      abortSignal: opts.abortSignal ?? new AbortController().signal,
+      attempt: () => session.materializeNextPendingMessageSafely(materializeOptions),
+    });
+    logInputConsumerMaterializationDecision({
+      source: 'drainPending',
+      reconcileWhenEmpty,
+      activeTurnDeliveryPolicy,
+      result,
+    });
+    if (result.type === 'materialized') {
+      return 'materialized';
+    }
+    if (result.type === 'deferred') {
+      if (result.reason === 'supervisor_auth_failed') {
+        logTerminalAuthDrainStop(opts, null);
+        return 'auth_failure';
+      }
+      return 'deferred';
+    }
+    if (result.type === 'auth_failure') {
+      logTerminalAuthDrainStop(opts, result.statusCode);
+      return 'auth_failure';
+    }
+    if (result.type === 'retryable_transport') return 'error';
+    return 'no_pending';
   } catch (error) {
     return readDrainErrorStoppedReason(error, opts);
   }

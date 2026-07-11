@@ -8,6 +8,7 @@ import { logger } from '@/ui/logger';
 import {
   createSessionProviderInputConsumer,
   createSessionProviderPendingDrainAdapter,
+  PendingQueueMaterializationAuthError,
 } from './SessionProviderInputConsumer';
 import type { DrainPendingOptions, DrainPendingResult } from './types';
 
@@ -39,7 +40,6 @@ describe('SessionProviderInputConsumer drainPending', () => {
       });
 
     const consumer = createDrainConsumer({
-      popPendingMessage: vi.fn(async () => false),
       materializeNextPendingMessageSafely,
       waitForMetadataUpdate: async () => false,
     });
@@ -51,8 +51,7 @@ describe('SessionProviderInputConsumer drainPending', () => {
     expect(materializeNextPendingMessageSafely).toHaveBeenCalledTimes(1);
   });
 
-  it('uses safe pending materialization before legacy pop fallback', async () => {
-    const popPendingMessage = vi.fn(async () => false);
+  it('uses structured pending materialization for every drain', async () => {
     const materializeNextPendingMessageSafely = vi
       .fn<() => Promise<MaterializeNextPendingResult>>()
       .mockResolvedValueOnce({
@@ -64,7 +63,6 @@ describe('SessionProviderInputConsumer drainPending', () => {
       .mockResolvedValueOnce({ type: 'no_pending' });
 
     const consumer = createDrainConsumer({
-      popPendingMessage,
       materializeNextPendingMessageSafely,
       waitForMetadataUpdate: async () => false,
     });
@@ -75,15 +73,13 @@ describe('SessionProviderInputConsumer drainPending', () => {
       stoppedReason: 'no_pending',
     });
     expect(materializeNextPendingMessageSafely).toHaveBeenCalledWith({ reconcileWhenEmpty: 'force' });
-    expect(popPendingMessage).not.toHaveBeenCalled();
   });
 
   it('reconciles before stopping when materialization is disallowed', async () => {
-    const popPendingMessage = vi.fn(async () => true);
     const reconcilePendingQueueState = vi.fn(async () => false);
 
     const consumer = createDrainConsumer({
-      popPendingMessage,
+      materializeNextPendingMessageSafely: vi.fn(async () => ({ type: 'no_pending' as const })),
       shouldAttemptPendingMaterialization: () => false,
       reconcilePendingQueueState,
       waitForMetadataUpdate: async () => false,
@@ -95,7 +91,6 @@ describe('SessionProviderInputConsumer drainPending', () => {
       stoppedReason: 'materialization_blocked',
     });
     expect(reconcilePendingQueueState).toHaveBeenCalledWith({ force: true });
-    expect(popPendingMessage).not.toHaveBeenCalled();
   });
 
   it('passes the active-turn delivery policy into the drain preflight gate', async () => {
@@ -113,7 +108,6 @@ describe('SessionProviderInputConsumer drainPending', () => {
 
     const consumer = createDrainConsumer(
       {
-        popPendingMessage: vi.fn(async () => false),
         materializeNextPendingMessageSafely,
         shouldAttemptPendingMaterialization,
         waitForMetadataUpdate: async () => false,
@@ -142,7 +136,6 @@ describe('SessionProviderInputConsumer drainPending', () => {
 
     const consumer = createDrainConsumer(
       {
-        popPendingMessage: vi.fn(async () => false),
         materializeNextPendingMessageSafely,
         shouldAttemptPendingMaterialization,
         waitForMetadataUpdate: async () => false,
@@ -181,7 +174,6 @@ describe('SessionProviderInputConsumer drainPending', () => {
 
     const adapter = createSessionProviderPendingDrainAdapter(
       {
-        popPendingMessage: vi.fn(async () => false),
         materializeNextPendingMessageSafely,
         shouldAttemptPendingMaterialization,
         waitForMetadataUpdate: async () => false,
@@ -203,13 +195,12 @@ describe('SessionProviderInputConsumer drainPending', () => {
   });
 
   it('returns an error result when reconciliation fails during drain', async () => {
-    const popPendingMessage = vi.fn(async () => true);
     const reconcilePendingQueueState = vi.fn(async () => {
       throw new Error('reconcile failed');
     });
 
     const consumer = createDrainConsumer({
-      popPendingMessage,
+      materializeNextPendingMessageSafely: vi.fn(async () => ({ type: 'no_pending' as const })),
       shouldAttemptPendingMaterialization: () => false,
       reconcilePendingQueueState,
       waitForMetadataUpdate: async () => false,
@@ -220,16 +211,15 @@ describe('SessionProviderInputConsumer drainPending', () => {
       stoppedReason: 'error',
     });
     expect(reconcilePendingQueueState).toHaveBeenCalledWith({ force: true });
-    expect(popPendingMessage).not.toHaveBeenCalled();
   });
 
   it('stops after terminal auth failure without throwing', async () => {
-    const popPendingMessage = vi.fn(async () => {
+    const materializeNextPendingMessageSafely = vi.fn(async () => {
       throw new HttpStatusError(401, 'Authentication failed');
     });
 
     const consumer = createDrainConsumer({
-      popPendingMessage,
+      materializeNextPendingMessageSafely,
       waitForMetadataUpdate: async () => false,
     });
 
@@ -238,7 +228,35 @@ describe('SessionProviderInputConsumer drainPending', () => {
       materialized: 0,
       stoppedReason: 'auth_failure',
     });
-    expect(popPendingMessage).toHaveBeenCalledTimes(1);
+    expect(materializeNextPendingMessageSafely).toHaveBeenCalledTimes(1);
+  });
+
+  it('routes a typed unavailable materializer through the keyed exhaustion policy', async () => {
+    const materializeNextPendingMessageSafely = vi.fn(async () => ({ type: 'retryable_transport' as const }));
+    const onPendingMaterializationRetryEpisodeExhausted = vi.fn();
+
+    const consumer = createDrainConsumer(
+      {
+        materializeNextPendingMessageSafely,
+        waitForMetadataUpdate: async () => false,
+      },
+      {
+        pendingMaterializationRetryEpisode: {
+          maxAttempts: 1,
+          initialDelayMs: 0,
+          maxDelayMs: 0,
+          jitterMs: 0,
+        },
+        onPendingMaterializationRetryEpisodeExhausted,
+      },
+    );
+
+    await expect(consumer.drainPending?.({ reason: 'test-legacy-pop-name' })).resolves.toEqual({
+      materialized: 0,
+      stoppedReason: 'error',
+    });
+    expect(onPendingMaterializationRetryEpisodeExhausted).toHaveBeenCalledWith({ attemptCount: 1 });
+    expect(materializeNextPendingMessageSafely).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -252,7 +270,6 @@ describe('SessionProviderInputConsumer waitForNextInput', () => {
     const consumer = createSessionProviderInputConsumer({
       messageQueue,
       session: {
-        popPendingMessage: vi.fn(async () => false),
         materializeNextPendingMessageSafely,
         shouldAttemptPendingMaterialization: () => false,
         waitForMetadataUpdate: () => new Promise<boolean>(() => {}),
@@ -296,7 +313,6 @@ describe('SessionProviderInputConsumer waitForNextInput', () => {
     const consumer = createSessionProviderInputConsumer({
       messageQueue,
       session: {
-        popPendingMessage: vi.fn(async () => false),
         materializeNextPendingMessageSafely: vi.fn(async () => ({ type: 'no_pending' as const })),
         shouldAttemptPendingMaterialization: () => false,
         waitForMetadataUpdate: () => new Promise<boolean>(() => {}),
@@ -322,7 +338,6 @@ describe('SessionProviderInputConsumer waitForNextInput', () => {
 
   it('routes passive known-empty materialization through the safe materializer policy', async () => {
     const abortController = new AbortController();
-    const popPendingMessage = vi.fn(async () => true);
     const materializeNextPendingMessageSafely = vi
       .fn<() => Promise<MaterializeNextPendingResult>>()
       .mockResolvedValue({
@@ -333,7 +348,6 @@ describe('SessionProviderInputConsumer waitForNextInput', () => {
     const consumer = createSessionProviderInputConsumer({
       messageQueue: new MessageQueue2<TestMode>(() => 'hash'),
       session: {
-        popPendingMessage,
         materializeNextPendingMessageSafely,
         shouldAttemptPendingMaterialization: () => false,
         reconcilePendingQueueState,
@@ -349,7 +363,72 @@ describe('SessionProviderInputConsumer waitForNextInput', () => {
     await expect(consumer.waitForNextInput({ abortSignal: abortController.signal })).resolves.toBeNull();
     expect(materializeNextPendingMessageSafely).toHaveBeenCalledWith({ reconcileWhenEmpty: 'skip' });
     expect(reconcilePendingQueueState).not.toHaveBeenCalled();
-    expect(popPendingMessage).not.toHaveBeenCalled();
+  });
+
+  it('keeps waiting instead of rejecting when safe materialization throws before a batch is queued', async () => {
+    const abortController = new AbortController();
+    const debugSpy = vi.spyOn(logger, 'debug').mockImplementation(() => {});
+    const materializeError = new Error('provider attach returned an unexpected response');
+    const materializeNextPendingMessageSafely = vi
+      .fn<() => Promise<MaterializeNextPendingResult>>()
+      .mockRejectedValue(materializeError);
+
+    const consumer = createSessionProviderInputConsumer({
+      messageQueue: new MessageQueue2<TestMode>(() => 'hash'),
+      session: {
+        materializeNextPendingMessageSafely,
+        waitForMetadataUpdate: async () => {
+          abortController.abort();
+          return false;
+        },
+      },
+      reconcileWhenEmpty: 'skip',
+      idleWakePollIntervalMs: 0,
+    });
+
+    await expect(consumer.waitForNextInput({ abortSignal: abortController.signal })).resolves.toBeNull();
+    expect(debugSpy).toHaveBeenCalledWith(
+      '[pendingQueue] input consumer materialization failed (non-fatal)',
+      materializeError,
+    );
+    debugSpy.mockRestore();
+  });
+
+  it('blocks a visible pending row immediately for a non-transport contract fault with local-id evidence', async () => {
+    const abortController = new AbortController();
+    const materializeError = Object.assign(
+      new Error('provider attach returned malformed pending delivery metadata'),
+      { localId: 'permanent-fault-local' },
+    );
+    const materializeNextPendingMessageSafely = vi
+      .fn<() => Promise<MaterializeNextPendingResult>>()
+      .mockRejectedValue(materializeError);
+    const blockPendingMessageDelivery = vi.fn(async () => true);
+
+    const consumer = createSessionProviderInputConsumer({
+      messageQueue: new MessageQueue2<TestMode>(() => 'hash'),
+      session: {
+        materializeNextPendingMessageSafely,
+        blockPendingMessageDelivery,
+        waitForMetadataUpdate: async () => {
+          if (blockPendingMessageDelivery.mock.calls.length > 0) {
+            abortController.abort();
+            return false;
+          }
+          return true;
+        },
+      },
+      reconcileWhenEmpty: 'skip',
+      idleWakePollIntervalMs: 0,
+    });
+
+    await expect(consumer.waitForNextInput({ abortSignal: abortController.signal })).resolves.toBeNull();
+
+    expect(materializeNextPendingMessageSafely).toHaveBeenCalledTimes(1);
+    expect(blockPendingMessageDelivery).toHaveBeenCalledWith({
+      localIds: ['permanent-fault-local'],
+      reason: 'unknown',
+    });
   });
 
   it('logs text-free materialization decisions with delivery policy metadata', async () => {
@@ -367,7 +446,6 @@ describe('SessionProviderInputConsumer waitForNextInput', () => {
     const consumer = createSessionProviderInputConsumer({
       messageQueue: new MessageQueue2<TestMode>(() => 'hash'),
       session: {
-        popPendingMessage: vi.fn(async () => false),
         materializeNextPendingMessageSafely,
         waitForMetadataUpdate: async () => {
           abortController.abort();
@@ -406,7 +484,6 @@ describe('SessionProviderInputConsumer waitForNextInput', () => {
     const consumer = createSessionProviderInputConsumer({
       messageQueue: new MessageQueue2<TestMode>(() => 'hash'),
       session: {
-        popPendingMessage: vi.fn(async () => false),
         materializeNextPendingMessageSafely,
         shouldAttemptPendingMaterialization: () => false,
         waitForMetadataUpdate: () => new Promise<boolean>(() => {}),
@@ -435,7 +512,6 @@ describe('SessionProviderInputConsumer waitForNextInput', () => {
     const consumer = createSessionProviderInputConsumer({
       messageQueue: new MessageQueue2<TestMode>(() => 'hash'),
       session: {
-        popPendingMessage: vi.fn(async () => false),
         materializeNextPendingMessageSafely,
         shouldAttemptPendingMaterialization: () => false,
         waitForMetadataUpdate: () => new Promise<boolean>(() => {}),
@@ -461,7 +537,6 @@ describe('SessionProviderInputConsumer waitForNextInput', () => {
       const consumer = createSessionProviderInputConsumer({
         messageQueue,
         session: {
-          popPendingMessage: vi.fn(async () => false),
           materializeNextPendingMessageSafely: vi.fn(async () => ({ type: 'no_pending' as const })),
           waitForMetadataUpdate: vi.fn(async () => false),
         },
@@ -494,7 +569,6 @@ describe('SessionProviderInputConsumer waitForNextInput', () => {
       const consumer = createSessionProviderInputConsumer({
         messageQueue,
         session: {
-          popPendingMessage: vi.fn(async () => false),
           materializeNextPendingMessageSafely: vi.fn(async () => ({ type: 'no_pending' as const })),
           waitForMetadataUpdate: vi
             .fn<() => Promise<boolean>>()
@@ -534,7 +608,6 @@ describe('SessionProviderInputConsumer waitForNextInput', () => {
       const consumer = createSessionProviderInputConsumer({
         messageQueue: new MessageQueue2<TestMode>(() => 'hash'),
         session: {
-          popPendingMessage: vi.fn(async () => false),
           materializeNextPendingMessageSafely,
           shouldAttemptPendingMaterialization: () => false,
           waitForMetadataUpdate: vi.fn(async () => false),
@@ -564,7 +637,6 @@ describe('SessionProviderInputConsumer waitForNextInput', () => {
     const consumer = createSessionProviderInputConsumer({
       messageQueue: new MessageQueue2<TestMode>(() => 'hash'),
       session: {
-        popPendingMessage: vi.fn(async () => false),
         materializeNextPendingMessageSafely: vi.fn(async () => ({ type: 'no_pending' as const })),
         waitForMetadataUpdate: vi.fn(async () => false),
       },
@@ -575,5 +647,115 @@ describe('SessionProviderInputConsumer waitForNextInput', () => {
 
     await expect(consumer.waitForNextInput({ abortSignal: abortController.signal })).resolves.toBeNull();
     expect(onMetadataUpdate).not.toHaveBeenCalled();
+  });
+
+  it('owns one bounded retry episode and succeeds after transient transport recovery', async () => {
+    vi.useFakeTimers();
+    try {
+      const abortController = new AbortController();
+      const messageQueue = new MessageQueue2<TestMode>(() => 'hash');
+      const materializeNextPendingMessageSafely = vi
+        .fn<() => Promise<MaterializeNextPendingResult>>()
+        .mockResolvedValueOnce({ type: 'retryable_transport' } as MaterializeNextPendingResult)
+        .mockImplementationOnce(async () => {
+          messageQueue.push('recovered', { id: 'mode' });
+          return { type: 'materialized', localId: 'recovered-local', seq: 1, content: null };
+        });
+      const consumer = createSessionProviderInputConsumer({
+        messageQueue,
+        session: {
+          materializeNextPendingMessageSafely,
+          waitForMetadataUpdate: () => new Promise<boolean>(() => {}),
+        },
+        idleWakePollIntervalMs: 0,
+        pendingMaterializationRetryEpisode: {
+          maxAttempts: 3,
+          initialDelayMs: 10,
+          maxDelayMs: 10,
+          jitterMs: 0,
+        },
+      } as Parameters<typeof createSessionProviderInputConsumer<TestMode, string>>[0]);
+
+      const first = consumer.waitForNextInput({ abortSignal: abortController.signal });
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(10);
+      const attemptCount = materializeNextPendingMessageSafely.mock.calls.length;
+      const firstResult = await first;
+
+      expect(attemptCount).toBe(2);
+      expect(firstResult).toMatchObject({ message: 'recovered' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels retry backoff without another transport attempt', async () => {
+    vi.useFakeTimers();
+    try {
+      const abortController = new AbortController();
+      const materializeNextPendingMessageSafely = vi
+        .fn<() => Promise<MaterializeNextPendingResult>>()
+        .mockResolvedValue({ type: 'retryable_transport' } as MaterializeNextPendingResult);
+      const consumer = createSessionProviderInputConsumer({
+        messageQueue: new MessageQueue2<TestMode>(() => 'hash'),
+        session: {
+          materializeNextPendingMessageSafely,
+          waitForMetadataUpdate: () => new Promise<boolean>(() => {}),
+        },
+        idleWakePollIntervalMs: 0,
+        pendingMaterializationRetryEpisode: {
+          maxAttempts: 3,
+          initialDelayMs: 10,
+          maxDelayMs: 10,
+          jitterMs: 0,
+        },
+      } as Parameters<typeof createSessionProviderInputConsumer<TestMode, string>>[0]);
+
+      const waiting = consumer.waitForNextInput({ abortSignal: abortController.signal });
+      await vi.advanceTimersByTimeAsync(0);
+      abortController.abort();
+      await vi.advanceTimersByTimeAsync(10);
+
+      await expect(waiting).resolves.toBeNull();
+      expect(materializeNextPendingMessageSafely).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('exits through auth policy immediately without consuming retry budget', async () => {
+    const materializeNextPendingMessageSafely = vi
+      .fn<() => Promise<MaterializeNextPendingResult>>()
+      .mockResolvedValue({ type: 'auth_failure', statusCode: 401 } as MaterializeNextPendingResult);
+    const consumer = createSessionProviderInputConsumer({
+      messageQueue: new MessageQueue2<TestMode>(() => 'hash'),
+      session: {
+        materializeNextPendingMessageSafely,
+        waitForMetadataUpdate: () => new Promise<boolean>(() => {}),
+      },
+      idleWakePollIntervalMs: 0,
+    });
+
+    await expect(consumer.waitForNextInput({ abortSignal: new AbortController().signal }))
+      .rejects.toBeInstanceOf(PendingQueueMaterializationAuthError);
+    expect(materializeNextPendingMessageSafely).toHaveBeenCalledTimes(1);
+  });
+
+  it('exits through auth policy when authentication fails during the transport request', async () => {
+    const materializeNextPendingMessageSafely = vi
+      .fn<() => Promise<MaterializeNextPendingResult>>()
+      .mockRejectedValue(new HttpStatusError(403, 'Authentication failed'));
+    const consumer = createSessionProviderInputConsumer({
+      messageQueue: new MessageQueue2<TestMode>(() => 'hash'),
+      session: {
+        materializeNextPendingMessageSafely,
+        waitForMetadataUpdate: () => new Promise<boolean>(() => {}),
+      },
+      idleWakePollIntervalMs: 0,
+    });
+
+    await expect(consumer.waitForNextInput({ abortSignal: new AbortController().signal }))
+      .rejects.toBeInstanceOf(PendingQueueMaterializationAuthError);
+    expect(materializeNextPendingMessageSafely).toHaveBeenCalledTimes(1);
   });
 });
