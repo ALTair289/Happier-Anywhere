@@ -702,7 +702,7 @@ describe("pendingMessageService (shared sessions)", () => {
         await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
     });
 
-    it("skips unresolved provider-delivery rows when materializing later queued rows", async () => {
+    it("does not materialize a later provider-delivery row while the queue head is unresolved", async () => {
         const owner = await createAccount("owner");
         const session = await createSession(owner.id);
         const firstLocalId = `provider-delivery-first-${randomUUID()}`;
@@ -742,8 +742,11 @@ describe("pendingMessageService (shared sessions)", () => {
             deliveryState: "provider",
         });
         expect(secondMaterialize.ok).toBe(true);
-        if (!secondMaterialize.ok || !secondMaterialize.didMaterialize) throw new Error("expected second materialization");
-        expect(secondMaterialize.message.localId).toBe(secondLocalId);
+        if (!secondMaterialize.ok || secondMaterialize.didMaterialize) {
+            throw new Error("expected deferred ordered materialization result");
+        }
+        expect(secondMaterialize.didMaterialize).toBe(false);
+        expect(secondMaterialize.deliveryState).toEqual({ mode: "provider", unresolved: false });
 
         await expect(db.sessionPendingMessage.findMany({
             where: { sessionId: session.id, status: "queued" },
@@ -751,8 +754,79 @@ describe("pendingMessageService (shared sessions)", () => {
             select: { localId: true, deliveryState: true },
         })).resolves.toEqual([
             { localId: firstLocalId, deliveryState: "delivering" },
-            { localId: secondLocalId, deliveryState: "delivering" },
+            { localId: secondLocalId, deliveryState: null },
         ]);
+    });
+
+    it("lets legacy materialization recover only stale inherited provider claims without skipping the head", async () => {
+        const owner = await createAccount("owner");
+        const session = await createSession(owner.id);
+        const firstLocalId = `provider-delivery-legacy-recovery-first-${randomUUID()}`;
+        const secondLocalId = `provider-delivery-legacy-recovery-second-${randomUUID()}`;
+
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: firstLocalId,
+            ciphertext: "cipher-provider-delivery-legacy-recovery-first",
+        })).resolves.toMatchObject({ ok: true });
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: secondLocalId,
+            ciphertext: "cipher-provider-delivery-legacy-recovery-second",
+        })).resolves.toMatchObject({ ok: true });
+
+        const providerClaim = await materializeNextPendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            deliveryState: "provider",
+        });
+        expect(providerClaim.ok).toBe(true);
+        if (!providerClaim.ok || !providerClaim.didMaterialize) throw new Error("expected provider claim");
+        expect(providerClaim.message.localId).toBe(firstLocalId);
+
+        const freshLegacyAttempt = await materializeNextPendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+        });
+        expect(freshLegacyAttempt).toMatchObject({
+            ok: true,
+            didMaterialize: false,
+        });
+        await expect(db.sessionPendingMessage.findMany({
+            where: { sessionId: session.id, status: "queued" },
+            orderBy: [{ position: "asc" }, { localId: "asc" }],
+            select: { localId: true, deliveryState: true, deliveryBlockedReason: true },
+        })).resolves.toEqual([
+            { localId: firstLocalId, deliveryState: "delivering", deliveryBlockedReason: null },
+            { localId: secondLocalId, deliveryState: null, deliveryBlockedReason: null },
+        ]);
+
+        await db.sessionPendingMessage.update({
+            where: { sessionId_localId: { sessionId: session.id, localId: firstLocalId } },
+            data: { updatedAt: new Date(Date.now() - 10 * 60_000) },
+        });
+
+        const staleLegacyAttempt = await materializeNextPendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+        });
+        expect(staleLegacyAttempt).toMatchObject({
+            ok: true,
+            didMaterialize: false,
+            pendingCount: 2,
+            pendingBlockedCount: 0,
+        });
+        await expect(db.sessionPendingMessage.findMany({
+            where: { sessionId: session.id, status: "queued" },
+            orderBy: [{ position: "asc" }, { localId: "asc" }],
+            select: { localId: true, deliveryState: true, deliveryBlockedReason: true },
+        })).resolves.toEqual([
+            { localId: firstLocalId, deliveryState: "delivering", deliveryBlockedReason: null },
+            { localId: secondLocalId, deliveryState: null, deliveryBlockedReason: null },
+        ]);
+        await expect(db.sessionMessage.count({ where: { sessionId: session.id } })).resolves.toBe(0);
     });
 
     it("blocks and retries provider delivery claims without changing pendingCount or writing a transcript row", async () => {
@@ -1129,7 +1203,12 @@ describe("pendingMessageService (shared sessions)", () => {
         await expect(db.sessionPendingMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
     });
 
-    it("does not block a fresh inherited provider-delivery claim on provider attach", async () => {
+    it("blocks a fresh inherited provider-delivery claim on provider attach (orphaned claim after runner restart)", async () => {
+        // Incident cmr38nnxa0ax9tmqp86owwlxo: a user-initiated runner restart leaves the head
+        // pending row `delivering` from the dead runner generation. The freshly attached runner
+        // holds no claim of its own and is the session's sole deliverer, so every inherited
+        // `delivering` claim is provably orphaned and MUST be recovered immediately — not left
+        // stuck for 5+ minutes until the periodic stale-sweep crosses its time cutoff.
         const owner = await createAccount("owner");
         const session = await createSession(owner.id);
         const localId = `provider-delivery-attach-recovery-${randomUUID()}`;
@@ -1150,16 +1229,60 @@ describe("pendingMessageService (shared sessions)", () => {
         if (!firstMaterialize.ok || !firstMaterialize.didMaterialize) throw new Error("expected first materialization");
         expect(firstMaterialize.didWriteMessage).toBe(false);
 
+        // The claim is fresh (just materialized, well within the 5-minute stale cutoff).
         const recovered = await blockPendingDeliveriesOnProviderAttach({
             actorUserId: owner.id,
             sessionId: session.id,
         });
         expect(recovered.ok).toBe(true);
         if (!recovered.ok) throw new Error("expected attach recovery");
-        expect(recovered.didUpdate).toBe(false);
-        expect(recovered.blockedCount).toBe(0);
+        expect(recovered.didUpdate).toBe(true);
+        expect(recovered.blockedCount).toBe(1);
         expect(recovered.pendingCount).toBe(1);
-        expect(recovered.pendingBlockedCount).toBe(0);
+        expect(recovered.pendingBlockedCount).toBe(1);
+
+        // Never fabricate a transcript row; surface a user-visible, retryable blocked state.
+        await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
+        await expect(db.sessionPendingMessage.findUniqueOrThrow({
+            where: { sessionId_localId: { sessionId: session.id, localId } },
+            select: { deliveryState: true, deliveryBlockedReason: true },
+        })).resolves.toEqual({ deliveryState: "blocked", deliveryBlockedReason: "provider_acceptance_timeout" });
+    });
+
+    it("does not block a fresh provider-delivery claim during the periodic stale sweep (protects a live in-flight delivery)", async () => {
+        // The periodic safety tick runs on a LIVE runner that may hold a legitimately in-flight
+        // fresh claim of its own. It must keep the 5-minute time heuristic and never block a
+        // claim younger than the cutoff, or it would cancel the runner's own active delivery.
+        const owner = await createAccount("owner");
+        const session = await createSession(owner.id);
+        const localId = `provider-delivery-live-fresh-${randomUUID()}`;
+
+        await expect(enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId,
+            ciphertext: "cipher-provider-delivery-live-fresh",
+        })).resolves.toMatchObject({ ok: true });
+
+        const firstMaterialize = await materializeNextPendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            deliveryState: "provider",
+        });
+        expect(firstMaterialize.ok).toBe(true);
+        if (!firstMaterialize.ok || !firstMaterialize.didMaterialize) throw new Error("expected first materialization");
+        expect(firstMaterialize.didWriteMessage).toBe(false);
+
+        const swept = await sweepStaleProviderDeliveryClaims({
+            actorUserId: owner.id,
+            sessionId: session.id,
+        });
+        expect(swept.ok).toBe(true);
+        if (!swept.ok) throw new Error("expected stale sweep");
+        expect(swept.didUpdate).toBe(false);
+        expect(swept.blockedCount).toBe(0);
+        expect(swept.pendingCount).toBe(1);
+        expect(swept.pendingBlockedCount).toBe(0);
 
         await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
         await expect(db.sessionPendingMessage.findUniqueOrThrow({
@@ -1484,8 +1607,8 @@ describe("pendingMessageService (shared sessions)", () => {
             deliveryState: "provider",
         });
         expect(secondMaterialize.ok).toBe(true);
-        if (!secondMaterialize.ok || !secondMaterialize.didMaterialize) throw new Error("expected second materialization");
-        expect(secondMaterialize.didWriteMessage).toBe(false);
+        if (!secondMaterialize.ok) throw new Error("expected ordered materialization result");
+        expect(secondMaterialize.didMaterialize).toBe(false);
 
         await createCommittedTranscriptMessage({
             sessionId: session.id,
@@ -1510,6 +1633,17 @@ describe("pendingMessageService (shared sessions)", () => {
             where: { id: session.id },
             select: { pendingCount: true, pendingBlockedCount: true },
         })).resolves.toEqual({ pendingCount: 1, pendingBlockedCount: 0 });
+
+        const secondMaterializeAfterReconcile = await materializeNextPendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            deliveryState: "provider",
+        });
+        expect(secondMaterializeAfterReconcile.ok).toBe(true);
+        if (!secondMaterializeAfterReconcile.ok || !secondMaterializeAfterReconcile.didMaterialize) {
+            throw new Error("expected second materialization after resolving the queue head");
+        }
+        expect(secondMaterializeAfterReconcile.message.localId).toBe(secondLocalId);
 
         await expect(db.sessionPendingMessage.findMany({
             where: { sessionId: session.id },
@@ -1821,7 +1955,7 @@ describe("pendingMessageService (shared sessions)", () => {
         expect(accepted.pendingCount).toBe(0);
     });
 
-    it("does not resolve a later provider-delivery claim while an earlier claim is unresolved", async () => {
+    it("does not claim a later provider-delivery row while an earlier claim is unresolved", async () => {
         const owner = await createAccount("owner");
         const session = await createSession(owner.id);
         const firstLocalId = `provider-delivery-order-first-${randomUUID()}`;
@@ -1855,17 +1989,17 @@ describe("pendingMessageService (shared sessions)", () => {
             deliveryState: "provider",
         });
         expect(secondClaim.ok).toBe(true);
-        if (!secondClaim.ok || !secondClaim.didMaterialize) throw new Error("expected second claim");
-        expect(secondClaim.message.localId).toBe(secondLocalId);
+        if (!secondClaim.ok) throw new Error("expected ordered claim result");
+        expect(secondClaim.didMaterialize).toBe(false);
 
         const secondAcceptedFirst = await resolveAcceptedPendingDelivery({
             actorUserId: owner.id,
             sessionId: session.id,
             localId: secondLocalId,
         });
-        expect(secondAcceptedFirst.ok).toBe(false);
-        if (secondAcceptedFirst.ok) throw new Error("expected ordering rejection");
-        expect(secondAcceptedFirst.error).toBe("blocked-by-earlier-pending");
+        expect(secondAcceptedFirst.ok).toBe(true);
+        if (!secondAcceptedFirst.ok) throw new Error("expected unclaimed acceptance no-op");
+        expect(secondAcceptedFirst.didResolve).toBe(false);
         await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId: secondLocalId } })).resolves.toBe(0);
 
         const firstAccepted = await resolveAcceptedPendingDelivery({
@@ -1875,6 +2009,17 @@ describe("pendingMessageService (shared sessions)", () => {
         });
         expect(firstAccepted.ok).toBe(true);
         if (!firstAccepted.ok || !firstAccepted.didResolve) throw new Error("expected first accept");
+
+        const secondClaimAfterFirstAccepted = await materializeNextPendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            deliveryState: "provider",
+        });
+        expect(secondClaimAfterFirstAccepted.ok).toBe(true);
+        if (!secondClaimAfterFirstAccepted.ok || !secondClaimAfterFirstAccepted.didMaterialize) {
+            throw new Error("expected second claim after resolving the queue head");
+        }
+        expect(secondClaimAfterFirstAccepted.message.localId).toBe(secondLocalId);
 
         const secondAccepted = await resolveAcceptedPendingDelivery({
             actorUserId: owner.id,
@@ -2154,6 +2299,15 @@ describe("pendingMessageService (shared sessions)", () => {
             where: { sessionId_localId: { sessionId: session.id, localId } },
         })).resolves.toBeNull();
         await expect(db.sessionMessage.count({ where: { sessionId: session.id, localId } })).resolves.toBe(0);
+
+        const afterDeleteMaterialize = await materializeNextPendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            deliveryState: "provider",
+        });
+        expect(afterDeleteMaterialize.ok).toBe(true);
+        if (!afterDeleteMaterialize.ok) throw new Error("expected post-delete materialization result");
+        expect(afterDeleteMaterialize.didMaterialize).toBe(false);
     });
 
     it("forbids view-only participants from mutating pending (but allows listing)", async () => {
@@ -2308,5 +2462,49 @@ describe("pendingMessageService (shared sessions)", () => {
         expect(list.ok).toBe(false);
         if (list.ok) throw new Error("expected session-not-found");
         expect(list.error).toBe("session-not-found");
+    });
+
+    it("returns authoritative pending state without mutation when expected pending version is stale", async () => {
+        const owner = await createAccount("owner");
+        const session = await createSession(owner.id, { id: true, pendingVersion: true });
+        const localIdA = `fenced-a-${randomUUID()}`;
+        const localIdB = `fenced-b-${randomUUID()}`;
+
+        const enqueueA = await enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: localIdA,
+            ciphertext: "cipher-fenced-a",
+        });
+        expect(enqueueA.ok).toBe(true);
+        const enqueueB = await enqueuePendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            localId: localIdB,
+            ciphertext: "cipher-fenced-b",
+        });
+        expect(enqueueB.ok).toBe(true);
+        if (!enqueueA.ok || !enqueueB.ok) throw new Error("expected enqueue success");
+
+        const stale = await materializeNextPendingMessage({
+            actorUserId: owner.id,
+            sessionId: session.id,
+            expectedPendingVersion: enqueueA.pendingVersion,
+        });
+
+        expect(stale).toEqual({
+            ok: true,
+            didMaterialize: false,
+            pendingCount: 2,
+            pendingBlockedCount: 0,
+            pendingVersion: enqueueB.pendingVersion,
+            deferredReason: "pending_version_mismatch",
+        });
+        await expect(db.sessionMessage.count({ where: { sessionId: session.id } })).resolves.toBe(0);
+        await expect(db.sessionPendingMessage.findMany({
+            where: { sessionId: session.id },
+            orderBy: [{ position: "asc" }, { createdAt: "asc" }, { localId: "asc" }],
+            select: { localId: true },
+        })).resolves.toEqual([{ localId: localIdA }, { localId: localIdB }]);
     });
 });
