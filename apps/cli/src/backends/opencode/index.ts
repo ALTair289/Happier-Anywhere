@@ -20,9 +20,19 @@ const openCodeConnectedServiceCredentialLifecycleDescriptor: ConnectedServiceCre
     mode: 'restart_required',
     noRestartRequiredServiceIds: ['openai-codex', 'claude-subscription'],
   },
-  predictiveSoftSwitch: { mode: 'unsupported' },
-  sameAccountFanoutStrategy: 'none',
-  runtimeAuthApply: { directLiveHotAuth: 'unsupported' },
+  predictiveSoftSwitch: { mode: 'supported' },
+  sameAccountFanoutStrategy: 'shared_group_auth_surface',
+  runtimeAuthApply: {
+    directLiveHotAuth: {
+      supportsInTurnApply: false,
+      requiresExactRuntimeIdentity: false,
+      refreshSelectionResync: 'not_applicable',
+      authMode: {
+        kind: 'provider_owned',
+        name: 'broker_selection_indirection',
+      },
+    },
+  },
 };
 
 export const agent = {

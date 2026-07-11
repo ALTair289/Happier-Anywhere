@@ -106,10 +106,12 @@ export function buildOpenCodeBrokerPluginSource(provider: OpenCodeBrokerProvider
     pluginVersionEnv: OPEN_CODE_BROKER_PLUGIN_VERSION_ENV,
     pluginVersion: OPEN_CODE_BROKER_PLUGIN_VERSION,
     sessionTag: 'opencode-broker',
+    selectionIdentityEnv: OPEN_CODE_BROKER_SELECTION_IDENTITY_ENV,
   });
   return `// Happier OpenCode auth broker plugin (generated). Provider: ${provider}. Version: ${OPEN_CODE_BROKER_PLUGIN_VERSION}.
 // Self-contained ESM: loaded by OpenCode's Bun runtime. No Happier imports, no npm deps.
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 
 ${sharedBridgeCallSource}
 
@@ -161,14 +163,15 @@ let inFlight = null;
 
 async function getAccessToken(forceRefresh) {
   const now = Date.now();
-  if (!forceRefresh && cached && cached.notAfter > now) return cached;
+  if (!forceRefresh && cached && cached.notAfter > now && cached.selectionEpoch === null) return cached;
   if (inFlight) return inFlight;
   inFlight = (async () => {
-    const fresh = await fetchAccessTokenFromBridge(forceRefresh === true);
+    const failingAccessToken = forceRefresh === true && cached ? cached.accessToken : null;
+    const fresh = await fetchAccessTokenFromBridge(forceRefresh === true, failingAccessToken);
     const notAfter = fresh.expiresAt && fresh.expiresAt > now
       ? fresh.expiresAt - EXPIRY_SKEW_MS
       : now + DEFAULT_TTL_MS;
-    cached = { accessToken: fresh.accessToken, accountId: fresh.accountId, notAfter: notAfter };
+    cached = { accessToken: fresh.accessToken, accountId: fresh.accountId, notAfter: notAfter, selectionEpoch: fresh.selectionEpoch };
     return cached;
   })();
   try { return await inFlight; } finally { inFlight = null; }
