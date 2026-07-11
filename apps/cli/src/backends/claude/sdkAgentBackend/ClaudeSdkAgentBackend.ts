@@ -26,7 +26,11 @@ export class ClaudeSdkAgentBackend implements AgentBackend {
   private readonly toolNameByCallId = new Map<string, string>();
   private readonly suppressedExplicitDiffCallIds = new Set<string>();
   private readonly turnChangeTracker = new ClaudeTurnChangeTracker();
-  private readonly providerActivityLedger = createClaudeProviderActivityLedger();
+  // W-3: when a provider task's TTL expires with no further events, re-check idle emission — a fully
+  // silent session has no other trigger to release the "working" state.
+  private readonly providerActivityLedger = createClaudeProviderActivityLedger({
+    onActiveTasksExpired: () => this.emitIdleIfProviderBackgroundWorkComplete(),
+  });
   private query: ReturnType<typeof query> | null = null;
   private activeTaskId: string | null = null;
 
