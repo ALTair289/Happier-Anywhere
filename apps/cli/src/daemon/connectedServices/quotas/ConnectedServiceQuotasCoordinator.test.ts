@@ -578,7 +578,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
       consumeRecoveryCredit: vi.fn(async ({ record: inputRecord }) => {
         observedAccessToken = inputRecord.kind === 'oauth' ? inputRecord.oauth.accessToken : null;
         observedRefreshTokenVisible = inputRecord.kind === 'oauth' && 'refreshToken' in inputRecord.oauth;
-        return { ok: true, serviceId: inputRecord.serviceId, profileId: inputRecord.profileId };
+        return 'consumed' as const;
       }),
       fetch: vi.fn(async ({ record: inputRecord }: FetchArgs): Promise<ConnectedServiceQuotaSnapshotV1 | null> => ({
         v: 1,
@@ -726,7 +726,7 @@ describe('ConnectedServiceQuotasCoordinator', () => {
     } as unknown as QuotaApi;
     const fetcher: ConnectedServiceQuotaFetcher = {
       serviceId: 'openai-codex',
-      consumeRecoveryCredit: vi.fn(async () => await new Promise(() => {})),
+      consumeRecoveryCredit: vi.fn(async () => await new Promise<never>(() => {})),
       fetch: vi.fn(async () => null),
     };
     const coordinator = new ConnectedServiceQuotasCoordinator({
