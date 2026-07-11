@@ -159,12 +159,31 @@ describe('pageClaudeTranscript', () => {
         }),
         jsonlLine({
           type: 'user',
+          uuid: 'model-empty-args-command-1',
+          message: {
+            content: '<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args></command-args>',
+          },
+        }),
+        jsonlLine({
+          type: 'user',
+          uuid: 'effort-empty-args-command-1',
+          message: {
+            content: '<command-name>/effort</command-name>\n<command-message>effort</command-message>\n<command-args></command-args>',
+          },
+        }),
+        jsonlLine({
+          type: 'user',
           uuid: 'compact-stdout-1',
           message: {
             content: [
               {
                 type: 'text',
-                text: '<local-command-stdout>Compacted\nPreCompact [hook] completed successfully\nPostCompact [hook] completed successfully</local-command-stdout>',
+                text: [
+                  '<local-command-stdout>Compacted',
+                  'PreCompact [hook] completed successfully',
+                  'PostCompact [hook] completed successfully',
+                  'Additional genuine multi-line Claude local-command stdout</local-command-stdout>',
+                ].join('\n'),
               },
             ],
           },
@@ -186,6 +205,8 @@ describe('pageClaudeTranscript', () => {
 
     expect(page.items.map((item) => JSON.stringify(item.raw)).join('\n')).not.toContain('local-command');
     expect(page.items.map((item) => JSON.stringify(item.raw)).join('\n')).not.toContain('<command-name>/compact');
+    expect(page.items.map((item) => JSON.stringify(item.raw)).join('\n')).not.toContain('<command-name>/model');
+    expect(page.items.map((item) => JSON.stringify(item.raw)).join('\n')).not.toContain('<command-name>/effort');
     expect(page.items.map((item) => JSON.stringify(item.raw)).join('\n')).toContain('/compact');
     expect(page.items.map((item) => JSON.stringify(item.raw)).join('\n')).toContain('visible prompt');
   });

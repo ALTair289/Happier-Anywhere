@@ -508,9 +508,24 @@ describe('sessionScanner', () => {
         }),
         JSON.stringify({
           type: 'user',
+          uuid: 'model_empty_args_live',
+          timestamp: '2026-06-11T19:05:00.050Z',
+          message: {
+            role: 'user',
+            content: '<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args></command-args>',
+          },
+        }),
+        JSON.stringify({
+          type: 'user',
           uuid: 'stdout_live',
           timestamp: '2026-06-11T19:05:00.100Z',
-          message: { role: 'user', content: '<local-command-stdout>Cleared conversation</local-command-stdout>' },
+          message: {
+            role: 'user',
+            content: [
+              '<local-command-stdout>Cleared conversation',
+              'Additional genuine multi-line Claude local-command stdout</local-command-stdout>',
+            ].join('\n'),
+          },
         }),
         JSON.stringify({
           type: 'user',
