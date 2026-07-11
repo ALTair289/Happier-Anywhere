@@ -241,11 +241,15 @@ vi.mock('@/agent/runtime/turnAssistantPreviewTracker', () => ({
   })),
 }));
 
+let lastResolveRunnerMcpServersParams: any = null;
 vi.mock('@/mcp/runtime/resolveRunnerMcpServers', () => ({
-  resolveRunnerMcpServers: vi.fn(async () => ({
+  resolveRunnerMcpServers: vi.fn(async (params: any) => {
+    lastResolveRunnerMcpServersParams = params;
+    return {
     happierMcpServer: { stop: vi.fn() },
     mcpServers: [],
-  })),
+    };
+  }),
 }));
 
 vi.mock('@/rpc/handlers/killSession', () => ({
@@ -424,6 +428,7 @@ describe('runGemini input consumer migration', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     messageBufferRecords.length = 0;
+    lastResolveRunnerMcpServersParams = null;
 
     const session = createFakeSession();
     setFakeSession(session);
@@ -473,8 +478,7 @@ describe('runGemini input consumer migration', () => {
       reason: 'gemini-turn-complete',
       logPrefix: '[Gemini]',
     });
-    await expect(consumerOptions.session.popPendingMessage()).resolves.toBe(false);
-    expect(getFakeSession().materializeNextPendingMessageSafely).toHaveBeenCalledWith({ reconcileWhenEmpty: 'force' });
+    expect(consumerOptions.session).not.toHaveProperty('popPendingMessage');
     expect(getFakeSession().popPendingMessage).not.toHaveBeenCalled();
 
     expect(createGeminiBackendInstanceMock).toHaveBeenCalledWith(
@@ -508,7 +512,17 @@ describe('runGemini input consumer migration', () => {
     expect(emitReadyIfIdleMock).toHaveBeenCalledTimes(1);
   });
 
-  it('opts Gemini direct into provider-acceptance pending delivery custody', async () => {
+  it('exposes the current Gemini permission mode to the Happier MCP bridge', async () => {
+    const { resolvePermissionModeSeedForAgentStart } = await import('@/settings/permissions/permissionModeSeed');
+    vi.mocked(resolvePermissionModeSeedForAgentStart).mockReturnValueOnce({ mode: 'yolo', source: 'explicit' });
+    const { runGemini } = await import('./runGemini');
+
+    await expect(runGemini({ credentials, permissionMode: 'yolo' })).resolves.toBeUndefined();
+
+    expect(lastResolveRunnerMcpServersParams?.session?.getPermissionMode?.()).toBe('yolo');
+  });
+
+  it('opts Gemini direct into request-response provider-acceptance pending delivery custody', async () => {
     const session = createFakeSession();
     setFakeSession(session);
     waitForNextInputMock.mockReset();
@@ -519,6 +533,9 @@ describe('runGemini input consumer migration', () => {
     await runGemini({ credentials });
 
     expect(session.deferDeliveredUserMessageWatermarkToProviderAcceptance).toHaveBeenCalledTimes(1);
+    expect(session.deferDeliveredUserMessageWatermarkToProviderAcceptance).toHaveBeenCalledWith({
+      pendingMaterialization: 'commitAtMaterialize',
+    });
   });
 
   it('confirms consumed pending rows when Gemini reports provider prompt acceptance', async () => {

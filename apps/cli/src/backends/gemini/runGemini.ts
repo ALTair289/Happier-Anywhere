@@ -21,6 +21,7 @@ import { MessageQueue2 } from '@/agent/runtime/modeMessageQueue';
 import { emitReadyIfIdle as emitReadyIfIdleShared } from '@/agent/runtime/emitReadyIfIdle';
 import { hashObject } from '@/utils/deterministicJson';
 import { resolveRunnerMcpServers } from '@/mcp/runtime/resolveRunnerMcpServers';
+import { applyRunnerMcpSessionContext } from '@/mcp/runtime/applyRunnerMcpSessionContext';
 import { sendReadyWithPushNotification } from '@/agent/runtime/sendReadyWithPushNotification';
 import { getSessionNotificationTitle } from '@/agent/runtime/readyNotificationContext';
 import { resolveReadyNotificationAssistantText } from '@/agent/runtime/readyNotificationAssistantText';
@@ -232,7 +233,9 @@ export async function runGemini(opts: {
   let pendingSessionSwap: ApiSessionClient | null = null;
 
   const requestProviderAcceptanceDeliveryCustody = (targetSession: ApiSessionClient): void => {
-    targetSession.deferDeliveredUserMessageWatermarkToProviderAcceptance?.();
+    targetSession.deferDeliveredUserMessageWatermarkToProviderAcceptance?.({
+      pendingMaterialization: 'commitAtMaterialize',
+    });
   };
 
   /**
@@ -537,14 +540,23 @@ export async function runGemini(opts: {
     metadata,
     fallbackDirectory: process.cwd(),
   });
+  const mcpSession = applyRunnerMcpSessionContext(session, {
+    getPermissionMode: () => currentPermissionMode ?? initialPermissionMode,
+    getBackendTarget: () => ({ kind: 'builtInAgent', agentId: 'gemini' }),
+    getCurrentSessionLocation: () => ({
+      path: runtimeContext.runtimeDirectory,
+      host: initialMachineMetadata.host,
+      machineId,
+    }),
+  });
 
   const { happierMcpServer, mcpServers } = await resolveRunnerMcpServers({
-    session,
+    session: mcpSession,
     credentials: opts.credentials,
     accountSettings: opts.accountSettingsContext?.settings ?? null,
     machineId,
     directory: runtimeContext.runtimeDirectory,
-    sessionMetadata: runtimeContext.sessionMetadataSnapshot ?? runtimeContext.resolvedMetadata,
+    sessionMetadata: mcpSession.getMetadataSnapshot?.() ?? runtimeContext.sessionMetadataSnapshot ?? runtimeContext.resolvedMetadata,
     commandMode: 'current-process',
   });
 
@@ -716,8 +728,6 @@ export async function runGemini(opts: {
 	      session: {
 	        materializeNextPendingMessageSafely: (materializeOpts) =>
 	          session.materializeNextPendingMessageSafely(materializeOpts),
-	        popPendingMessage: async () =>
-	          (await session.materializeNextPendingMessageSafely({ reconcileWhenEmpty: 'force' })).type === 'materialized',
 	        shouldAttemptPendingMaterialization: () => session.shouldAttemptPendingMaterialization?.() ?? true,
 	        reconcilePendingQueueState: (reconcileOpts) => session.reconcilePendingQueueState?.(reconcileOpts),
 	        waitForMetadataUpdate: (signal) => session.waitForMetadataUpdate(signal),
