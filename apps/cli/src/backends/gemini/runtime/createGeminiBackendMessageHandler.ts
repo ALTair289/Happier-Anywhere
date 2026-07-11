@@ -32,7 +32,7 @@ export function createGeminiBackendMessageHandler(params: {
   turnAssistantPreviewTracker?: TurnAssistantPreviewTracker;
 }): (msg: AgentMessage) => void {
   const forwarder = createAcpAgentMessageForwarder({
-    sendAcp: (provider, body) => params.session.sendAgentMessage(provider, body),
+    sendAcp: (provider, body, options) => params.session.sendAgentMessage(provider, body, options),
     provider: 'gemini',
     makeId: () => randomUUID(),
   });
