@@ -3,7 +3,7 @@ import type { ACPMessageData, ACPProvider } from '@/api/session/sessionMessageTy
 export type AcpSendFn = (
   provider: ACPProvider,
   body: ACPMessageData,
-  opts?: { meta?: Record<string, unknown> },
+  opts?: { localId?: string; meta?: Record<string, unknown> },
 ) => void;
 
 export function namespaceSidechainCallId(params: { sidechainId: string; toolCallId: string }): string {

@@ -103,6 +103,27 @@ describe('createAcpAgentMessageForwarder', () => {
     });
   });
 
+  it('revises repeated tool snapshots through stable call/result localIds', () => {
+    const sent: Array<{ body: ACPMessageData; options?: { localId?: string } }> = [];
+    const forwarder = createAcpAgentMessageForwarder({
+      sendAcp: (_provider, body, options) => sent.push({ body, options }),
+      provider: 'cursor' as any,
+      makeId: () => 'random-id-that-must-not-own-tool-identity',
+    });
+
+    forwarder.forward({ type: 'tool-call', callId: 'tool-1', toolName: 'other', args: {} } as any);
+    forwarder.forward({ type: 'tool-call', callId: 'tool-1', toolName: 'edit', args: { path: 'a.ts' } } as any);
+    forwarder.forward({ type: 'tool-result', callId: 'tool-1', toolName: 'edit', result: { ok: true } } as any);
+
+    expect(sent).toHaveLength(3);
+    const ids = sent.map(({ body }) => 'id' in body ? body.id : undefined);
+    expect(ids[0]).toBe(ids[1]);
+    expect(sent[0]!.options?.localId).toBe(ids[0]);
+    expect(sent[1]!.options?.localId).toBe(ids[0]);
+    expect(sent[2]!.options?.localId).toBe(ids[2]);
+    expect(ids[2]).not.toBe(ids[0]);
+  });
+
   it('converts think tool calls into ACP thinking messages (suppressing tool-call + tool-result)', () => {
     const sent: ACPMessageData[] = [];
     const sendAcp = vi.fn((_provider: any, body: ACPMessageData) => {
@@ -119,5 +140,20 @@ describe('createAcpAgentMessageForwarder', () => {
     forwarder.forward({ type: 'tool-result', callId: 't1', toolName: 'think', result: { ok: true } } as any);
 
     expect(sent).toEqual([{ type: 'thinking', text: 'Hello world' }]);
+  });
+
+  it('disposes bounded tool publication state and ignores later tool lifecycle messages', () => {
+    const sendAcp = vi.fn();
+    const forwarder = createAcpAgentMessageForwarder({
+      sendAcp,
+      provider: 'cursor' as any,
+      makeId: () => 'id',
+    });
+    forwarder.forward({ type: 'tool-call', callId: 'tool-1', toolName: 'read', args: {} } as any);
+
+    forwarder.dispose();
+    forwarder.forward({ type: 'tool-result', callId: 'tool-1', toolName: 'read', result: 'late' } as any);
+
+    expect(sendAcp).toHaveBeenCalledTimes(1);
   });
 });
