@@ -30,7 +30,7 @@ import {
     resolvePendingTranscriptCompatibility,
     type PendingTranscriptMessage,
 } from "@/app/session/pending/pendingMessageTranscriptCommit";
-import { blockStaleProviderDeliveryClaims } from "@/app/session/pending/providerDeliveryClaimStaleness";
+import { blockStaleProviderDeliveryClaims, type ProviderDeliveryClaimRecoveryMode } from "@/app/session/pending/providerDeliveryClaimStaleness";
 import {
     resolveReadyProjectionEventType,
     updateSessionMessageActivityProjection,
@@ -963,9 +963,11 @@ export type SweepStaleProviderDeliveryClaimsResult = BlockPendingDeliveriesOnPro
 export async function sweepStaleProviderDeliveryClaims(params: {
     actorUserId: string;
     sessionId: string;
+    mode?: ProviderDeliveryClaimRecoveryMode;
 }): Promise<SweepStaleProviderDeliveryClaimsResult> {
     const actorUserId = typeof params.actorUserId === "string" ? params.actorUserId : "";
     const sessionId = typeof params.sessionId === "string" ? params.sessionId : "";
+    const mode: ProviderDeliveryClaimRecoveryMode = params.mode === "attach" ? "attach" : "stale-sweep";
 
     if (!actorUserId || !sessionId) return { ok: false, error: "invalid-params" };
 
@@ -986,7 +988,7 @@ export async function sweepStaleProviderDeliveryClaims(params: {
             });
             if (!reconciled.ok) return reconciled;
 
-            const blocked = await blockStaleProviderDeliveryClaims({ tx, sessionId });
+            const blocked = await blockStaleProviderDeliveryClaims({ tx, sessionId, mode });
 
             if (!blocked) {
                 return {
@@ -1021,7 +1023,10 @@ export async function blockPendingDeliveriesOnProviderAttach(params: {
     actorUserId: string;
     sessionId: string;
 }): Promise<BlockPendingDeliveriesOnProviderAttachResult> {
-    return await sweepStaleProviderDeliveryClaims(params);
+    // Attach recovery: the just-attached runner is the sole deliverer and holds no claim yet, so
+    // every inherited `delivering` claim is orphaned by the prior runner generation. Recover them
+    // immediately (age-agnostic) rather than waiting for the periodic stale-sweep time cutoff.
+    return await sweepStaleProviderDeliveryClaims({ ...params, mode: "attach" });
 }
 
 export async function blockPendingDelivery(params: {

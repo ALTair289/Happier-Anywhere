@@ -51,7 +51,7 @@ export type MaterializeNextPendingMessageResult =
         participantCursorsPending?: ParticipantCursor[];
         badgeAttentionChanged?: boolean;
         deliveryState?: PendingMaterializationDeliveryState;
-        deferredReason?: "runtime_activity_active";
+        deferredReason?: "runtime_activity_active" | "pending_version_mismatch" | "blocked_by_earlier";
       }
     | {
         ok: true;
@@ -102,6 +102,7 @@ async function resolveEffectiveDeliveryTiming(params: {
 export async function materializeNextPendingMessage(params: {
     actorUserId: string;
     sessionId: string;
+    expectedPendingVersion?: number;
     deliveryState?: PendingMaterializationDeliveryStateMode;
     deliveryTiming?: SessionPendingQueueDeliveryTiming;
 }): Promise<MaterializeNextPendingMessageResult> {
@@ -111,6 +112,7 @@ export async function materializeNextPendingMessage(params: {
 async function materializeNextPendingMessageWithRaceRetry(params: {
     actorUserId: string;
     sessionId: string;
+    expectedPendingVersion?: number;
     deliveryState?: PendingMaterializationDeliveryStateMode;
     deliveryTiming?: SessionPendingQueueDeliveryTiming;
 }, retryRace: boolean): Promise<MaterializeNextPendingMessageResult> {
@@ -125,7 +127,14 @@ async function materializeNextPendingMessageWithRaceRetry(params: {
         : undefined;
     const pendingMessageMaterializationWhere = pendingMessageEligibleForMaterializationWhere;
 
-    if (!actorUserId || !sessionId) return { ok: false, error: "invalid-params" };
+    if (
+        !actorUserId
+        || !sessionId
+        || (
+            params.expectedPendingVersion !== undefined
+            && (!Number.isSafeInteger(params.expectedPendingVersion) || params.expectedPendingVersion < 0)
+        )
+    ) return { ok: false, error: "invalid-params" };
 
     const access = await resolveSessionPendingOwnerAccess(actorUserId, sessionId);
     if (!access.ok) return { ok: false, error: access.error };
@@ -150,7 +159,7 @@ async function materializeNextPendingMessageWithRaceRetry(params: {
         },
     });
     if (!sessionRow) return { ok: false, error: "session-not-found" };
-    if ((sessionRow.pendingCount ?? 0) <= 0) {
+    if ((sessionRow.pendingCount ?? 0) <= 0 && params.expectedPendingVersion === undefined) {
         // pendingCount is a denormalized counter; treat it as a fast-path hint, not a source of truth.
         // If the counter is inconsistent (e.g. race/data corruption), fall back to checking the queue.
         const hasEligibleQueued = await db.sessionPendingMessage.findFirst({
@@ -183,12 +192,12 @@ async function materializeNextPendingMessageWithRaceRetry(params: {
         requestedDeliveryTiming: params.deliveryTiming,
     });
     if (deliveryTiming === "after_runtime_idle" && !isSessionRuntimeActivityProjectionIdleForPendingDrain(sessionRow, Date.now())) {
-        const hasEligibleQueued = await db.sessionPendingMessage.findFirst({
-            where: { sessionId, ...pendingMessageMaterializationWhere },
+        const earliestQueued = await db.sessionPendingMessage.findFirst({
+            where: { sessionId, status: "queued" },
             orderBy: [{ position: "asc" }, { createdAt: "asc" }, { localId: "asc" }],
-            select: { localId: true },
+            select: { localId: true, deliveryState: true },
         });
-        if (hasEligibleQueued) {
+        if (earliestQueued?.deliveryState === null) {
             return {
                 ok: true,
                 didMaterialize: false,
@@ -225,6 +234,24 @@ async function materializeNextPendingMessageWithRaceRetry(params: {
                 },
             });
 
+            if (
+                params.expectedPendingVersion !== undefined
+                && sessionBefore.pendingVersion !== params.expectedPendingVersion
+            ) {
+                return {
+                    ok: true,
+                    didMaterialize: false,
+                    pendingCount: sessionBefore.pendingCount ?? 0,
+                    pendingBlockedCount: sessionBefore.pendingBlockedCount ?? 0,
+                    pendingVersion: sessionBefore.pendingVersion ?? 0,
+                    deferredReason: "pending_version_mismatch",
+                    ...(noopDeliveryState ? { deliveryState: noopDeliveryState } : {}),
+                } as const;
+            }
+
+            // Recovery follows the durable row state, not the current caller's delivery mode.
+            // The stale-sweep cutoff protects fresh claims held by a live provider-mode runner,
+            // while still making an inherited claim recoverable after a provider→legacy fallback.
             const staleDeliveryBlock = await blockStaleProviderDeliveryClaims({ tx, sessionId });
             if (staleDeliveryBlock) {
                 return {
@@ -236,33 +263,23 @@ async function materializeNextPendingMessageWithRaceRetry(params: {
                     pendingStateChanged: true,
                     participantCursorsPending: staleDeliveryBlock.participantCursors,
                     badgeAttentionChanged: staleDeliveryBlock.badgeAttentionChanged,
-                    ...(noopDeliveryState ? { deliveryState: noopDeliveryState } : {}),
+                    deferredReason: "blocked_by_earlier",
+                    ...(materializedDeliveryState ? { deliveryState: materializedDeliveryState } : {}),
                 } as const;
             }
 
-            if (deliveryTiming === "after_runtime_idle" && !isSessionRuntimeActivityProjectionIdleForPendingDrain(sessionBefore, Date.now())) {
-                const hasEligibleQueued = await tx.sessionPendingMessage.findFirst({
-                    where: { sessionId, ...pendingMessageMaterializationWhere },
-                    orderBy: [{ position: "asc" }, { createdAt: "asc" }, { localId: "asc" }],
-                    select: { localId: true },
-                });
-                if (hasEligibleQueued) {
-                    return {
-                        ok: true,
-                        didMaterialize: false,
-                        pendingCount: sessionBefore.pendingCount ?? 0,
-                        pendingBlockedCount: sessionBefore.pendingBlockedCount ?? 0,
-                        pendingVersion: sessionBefore.pendingVersion ?? 0,
-                        deferredReason: "runtime_activity_active",
-                        ...(noopDeliveryState ? { deliveryState: noopDeliveryState } : {}),
-                    } as const;
-                }
-            }
-
             const nextPending = await tx.sessionPendingMessage.findFirst({
-                where: { sessionId, ...pendingMessageMaterializationWhere },
+                where: { sessionId, status: "queued" },
                 orderBy: [{ position: "asc" }, { createdAt: "asc" }, { localId: "asc" }],
-                select: { localId: true, messageRole: true, content: true, status: true, createdAt: true, updatedAt: true },
+                select: {
+                    localId: true,
+                    messageRole: true,
+                    content: true,
+                    status: true,
+                    deliveryState: true,
+                    createdAt: true,
+                    updatedAt: true,
+                },
             });
 
             if (!nextPending) {
@@ -302,6 +319,30 @@ async function materializeNextPendingMessageWithRaceRetry(params: {
                     pendingCount: sessionBefore.pendingCount ?? 0,
                     pendingBlockedCount: sessionBefore.pendingBlockedCount ?? 0,
                     pendingVersion: sessionBefore.pendingVersion ?? 0,
+                    ...(noopDeliveryState ? { deliveryState: noopDeliveryState } : {}),
+                } as const;
+            }
+
+            if (nextPending.deliveryState !== null) {
+                return {
+                    ok: true,
+                    didMaterialize: false,
+                    pendingCount: sessionBefore.pendingCount ?? 0,
+                    pendingBlockedCount: sessionBefore.pendingBlockedCount ?? 0,
+                    pendingVersion: sessionBefore.pendingVersion ?? 0,
+                    deferredReason: "blocked_by_earlier",
+                    ...(materializedDeliveryState ? { deliveryState: materializedDeliveryState } : {}),
+                } as const;
+            }
+
+            if (deliveryTiming === "after_runtime_idle" && !isSessionRuntimeActivityProjectionIdleForPendingDrain(sessionBefore, Date.now())) {
+                return {
+                    ok: true,
+                    didMaterialize: false,
+                    pendingCount: sessionBefore.pendingCount ?? 0,
+                    pendingBlockedCount: sessionBefore.pendingBlockedCount ?? 0,
+                    pendingVersion: sessionBefore.pendingVersion ?? 0,
+                    deferredReason: "runtime_activity_active",
                     ...(noopDeliveryState ? { deliveryState: noopDeliveryState } : {}),
                 } as const;
             }

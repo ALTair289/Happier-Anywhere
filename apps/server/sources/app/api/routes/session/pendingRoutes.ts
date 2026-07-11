@@ -22,6 +22,7 @@ import {
     resolveAcceptedPendingDelivery,
     retryPendingDelivery,
     restorePendingMessage,
+    sweepStaleProviderDeliveryClaims,
     updatePendingMessage,
     type PendingMessageRow,
 } from "@/app/session/pending/pendingMessageService";
@@ -449,6 +450,7 @@ export function sessionPendingRoutes(app: Fastify) {
             });
             return reply.send({
                 ok: true,
+                didResolve: res.didResolve,
                 pendingCount: res.pendingCount,
                 pendingBlockedCount: res.pendingBlockedCount,
                 pendingVersion: res.pendingVersion,
@@ -512,7 +514,7 @@ export function sessionPendingRoutes(app: Fastify) {
             preHandler: app.authenticate,
             schema: {
                 params: z.object({ sessionId: z.string() }),
-                body: z.object({}).optional(),
+                body: z.object({ recovery: z.enum(["attach", "stale-sweep"]).optional() }).optional(),
             },
             config: {
                 rateLimit: resolveApiHotEndpointRateLimit(process.env, "session.pending.materialize"),
@@ -520,10 +522,20 @@ export function sessionPendingRoutes(app: Fastify) {
         },
         async (request, reply) => {
             const { sessionId } = request.params;
-            const res = await blockPendingDeliveriesOnProviderAttach({
-                actorUserId: request.userId,
-                sessionId,
-            });
+            // `attach` = the freshly-attached runner recovers inherited (orphaned) claims of any age
+            // immediately; `stale-sweep` = the periodic safety tick only blocks claims stuck past the
+            // time cutoff so it never cancels a live runner's own in-flight delivery. Default to the
+            // conservative stale-sweep when the mode is absent (older client / fail-safe).
+            const recovery = request.body?.recovery ?? "stale-sweep";
+            const res = recovery === "attach"
+                ? await blockPendingDeliveriesOnProviderAttach({
+                    actorUserId: request.userId,
+                    sessionId,
+                })
+                : await sweepStaleProviderDeliveryClaims({
+                    actorUserId: request.userId,
+                    sessionId,
+                });
             if (!res.ok) {
                 if (res.error === "invalid-params") return reply.code(400).send({ error: res.error });
                 if (res.error === "forbidden") return reply.code(403).send({ error: res.error });
@@ -832,6 +844,7 @@ export function sessionPendingRoutes(app: Fastify) {
                 params: z.object({ sessionId: z.string() }),
                 body: z
                     .object({
+                        expectedPendingVersion: z.number().int().nonnegative().optional(),
                         deliveryState: z.literal("provider").optional(),
                         deliveryTiming: z
                             .union([z.literal("after_foreground_ready"), z.literal("after_runtime_idle")])
@@ -845,11 +858,13 @@ export function sessionPendingRoutes(app: Fastify) {
         },
         async (request, reply) => {
             const { sessionId } = request.params;
+            const expectedPendingVersion = request.body?.expectedPendingVersion;
             const deliveryState = resolvePendingMaterializeDeliveryStateOptIn(request.body);
             const deliveryTiming = resolvePendingMaterializeDeliveryTimingOptIn(request.body);
             const res = await materializeNextPendingMessage({
                 actorUserId: request.userId,
                 sessionId,
+                ...(expectedPendingVersion !== undefined ? { expectedPendingVersion } : {}),
                 ...(deliveryState ? { deliveryState } : {}),
                 ...(deliveryTiming ? { deliveryTiming } : {}),
             });
