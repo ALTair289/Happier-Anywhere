@@ -9,7 +9,8 @@ import {
   buildCursorSessionModesFromConfigOptions,
   buildCursorSessionModelsFromConfigOptions,
 } from '@/backends/cursor/acp/cursorModelConfig';
-import { createCursorBackend } from '@/backends/cursor/acp/backend';
+import { CursorAcpBackend, createCursorBackend } from '@/backends/cursor/acp/backend';
+import { projectCursorAvailableModels } from '@/backends/cursor/acp/models';
 import {
   mergeCursorCliModelsIntoAcpModels,
   probeCursorCliModels,
@@ -17,6 +18,7 @@ import {
 
 type CursorSessionControlsBackend = AgentBackend & Partial<{
   getSessionConfigOptionsState: () => ReadonlyArray<SessionConfigOption> | null;
+  getCursorAvailableModelsContribution: CursorAcpBackend['getCursorAvailableModelsContribution'];
 }>;
 
 function buildCursorProbeEnv(accountSettings: Readonly<Record<string, unknown>> | null | undefined): NodeJS.ProcessEnv {
@@ -68,7 +70,11 @@ async function probeCursorModelsRaw(params: PreflightSessionControlsProbeParams)
       timeoutMs: params.timeoutMs,
       processEnv: { ...process.env, ...buildCursorProbeEnv(params.accountSettings) },
     }).catch(() => null);
-    const groupedModels = buildCursorSessionModelsFromConfigOptions(backend.getSessionConfigOptionsState?.() ?? null);
+    const standardProjection = buildCursorSessionModelsFromConfigOptions(
+      backend.getSessionConfigOptionsState?.() ?? null,
+    );
+    const proprietaryModels = backend.getCursorAvailableModelsContribution?.() ?? [];
+    const groupedModels = projectCursorAvailableModels({ proprietaryModels, standardProjection });
     if (groupedModels) {
       const acpModels = groupedModels.availableModels.map((model) => ({
         id: model.id,

@@ -52,15 +52,16 @@ if (!process.argv.includes("acp")) {
 
 const acp = await import(pathToFileURL(${JSON.stringify(params.sdkEntry)}).href);
 
-class FakeCursorAgent {
-  async initialize() {
+const objectParams = { parse: (value) => value };
+const app = acp.agent({ name: "happier-cursor-preflight-agent" })
+  .onRequest("initialize", async () => {
     return {
       protocolVersion: acp.PROTOCOL_VERSION,
       agentCapabilities: { loadSession: false },
       authMethods: [{ id: "cursor_login", name: "Cursor Login" }]
     };
-  }
-  async newSession() {
+  })
+  .onRequest("session/new", async () => {
     return {
       sessionId: "cursor-preflight-test",
       configOptions: [
@@ -117,14 +118,37 @@ class FakeCursorAgent {
         }
       ]
     };
-  }
-  async authenticate() { return {}; }
-  async prompt() { return { stopReason: "end_turn" }; }
-  async cancel() { return {}; }
-}
+  })
+  .onRequest("authenticate", async () => ({}))
+  .onRequest("session/prompt", async () => ({ stopReason: "end_turn" }))
+  .onNotification("session/cancel", async () => {})
+  .onRequest("cursor/list_available_models", objectParams, async () => {
+    return {
+      models: [
+        {
+          value: "cursor-exclusive",
+          name: "Cursor Exclusive",
+          configOptions: [
+            {
+              id: "context",
+              name: "Context",
+              category: "model_config",
+              type: "select",
+              currentValue: "1m",
+              options: [
+                { value: "300k", name: "300K" },
+                { value: "1m", name: "1M" }
+              ]
+            }
+          ]
+        }
+      ]
+    };
+  });
 
 const stream = acp.ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin));
-new acp.AgentSideConnection((conn) => new FakeCursorAgent(conn), stream);
+const connection = app.connect(stream);
+await connection.closed;
 `);
   return agentPath;
 }
@@ -147,6 +171,21 @@ describe('cursorPreflightSessionControlsProbeAdapter', () => {
       });
 
       const models = Array.isArray(raw) ? raw : [];
+      expect(models.find((model) => model.id === 'cursor-exclusive')).toEqual({
+        id: 'cursor-exclusive',
+        name: 'Cursor Exclusive',
+        modelOptions: [{
+          id: 'context',
+          name: 'Context',
+          category: 'model_config',
+          type: 'select',
+          currentValue: '1m',
+          options: [
+            { value: '300k', name: '300K' },
+            { value: '1m', name: '1M' },
+          ],
+        }],
+      });
       expect(models.find((model) => model.id === 'gpt-5.5')?.modelOptions).toEqual([
         {
           id: 'context',

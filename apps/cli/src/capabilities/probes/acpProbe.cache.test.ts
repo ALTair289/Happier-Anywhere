@@ -28,20 +28,18 @@ if (countFile) appendFileSync(countFile, "1");
 const sdkPath = ${JSON.stringify(sdkEntry)};
 const acp = await import(pathToFileURL(sdkPath).href);
 
-class FakeAgent {
-  connection;
-  constructor(connection) { this.connection = connection; }
-  async initialize() {
+const app = acp.agent({ name: "happier-probe-cache-agent" })
+  .onRequest("initialize", async () => {
     return { protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: { loadSession: false } };
-  }
-  async newSession() { return { sessionId: "s" }; }
-  async authenticate() { return {}; }
-  async prompt() { return { stopReason: "end_turn" }; }
-  async cancel() { return {}; }
-}
+  })
+  .onRequest("session/new", async () => ({ sessionId: "s" }))
+  .onRequest("authenticate", async () => ({}))
+  .onRequest("session/prompt", async () => ({ stopReason: "end_turn" }))
+  .onNotification("session/cancel", async () => {});
 
 const stream = acp.ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin));
-new acp.AgentSideConnection((conn) => new FakeAgent(conn), stream);
+const connection = app.connect(stream);
+await connection.closed;
 `,
     );
 
