@@ -23,6 +23,8 @@ export type SubmitPersistence =
     | 'provider_direct'
     | 'none';
 
+export type SessionUserMessageRuntimeRpcDeliveryMode = 'best_effort' | 'required';
+
 export type SubmitWakeState =
     | 'not_needed'
     | 'started'
@@ -32,6 +34,7 @@ export type SubmitWakeState =
 export type SubmitSessionUserMessageResult = Readonly<{
     type: SubmitResultType;
     persistence: SubmitPersistence;
+    providerAcceptancePending?: boolean;
     wake: Readonly<{
         attempted: boolean;
         state: SubmitWakeState;
@@ -90,6 +93,8 @@ export type SubmitSessionUserMessageOptions = Readonly<{
     steerWithoutConfig?: boolean;
     profileId?: string | null;
     localId?: string | null;
+    existingDurablePendingMessage?: boolean;
+    runtimeRpcDeliveryMode?: SessionUserMessageRuntimeRpcDeliveryMode;
     resumeCapabilityOptions: ResumeCapabilityOptions;
     resumeTargetOverride?: SessionSubmitWakeTargetOverride | null;
     permissionOverride?: PermissionModeOverrideForSpawn | null;
@@ -109,6 +114,7 @@ export type DirectMessageSubmitResult = Readonly<{
     localId?: string;
     seq?: number;
     persistence?: Extract<SubmitPersistence, 'pending' | 'transcript_committed' | 'provider_direct'>;
+    providerAcceptancePending?: boolean;
 }> | void;
 
 export type SessionMessageLocalPendingProjection = Readonly<{
@@ -138,6 +144,7 @@ export interface SessionSubmitPort {
             profileId?: string | null;
             localId?: string | null;
             bypassPendingQueueReason?: DirectMessageBypassReason;
+            runtimeRpcDeliveryMode?: SessionUserMessageRuntimeRpcDeliveryMode;
             onLocalPendingProjectionCreated?: (event: DirectMessageLocalPendingProjection) => void;
         }>,
     ): Promise<DirectMessageSubmitResult>;

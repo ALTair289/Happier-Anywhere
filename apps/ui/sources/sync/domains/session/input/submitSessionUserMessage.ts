@@ -31,6 +31,15 @@ function getErrorMessage(error: unknown, fallback: string): string {
     return error instanceof Error && error.message.trim().length > 0 ? error.message : fallback;
 }
 
+function getErrorCode(error: unknown): string | undefined {
+    const code = error && typeof error === 'object'
+        ? (error as { code?: unknown }).code
+        : undefined;
+    return typeof code === 'string' && code.trim().length > 0
+        ? code.trim()
+        : undefined;
+}
+
 function readLocalId(result: PendingMessageSubmitResult | DirectMessageSubmitResult): string | undefined {
     return result && typeof result === 'object' && typeof result.localId === 'string'
         ? result.localId
@@ -74,6 +83,14 @@ function resolveDirectSubmitPersistence(
                 : 'transcript_committed');
 }
 
+function hasProviderAcceptancePending(result: DirectMessageSubmitResult): boolean {
+    return Boolean(
+        result
+            && typeof result === 'object'
+            && result.providerAcceptancePending === true,
+    );
+}
+
 function resolveSubmitDecision(opts: SubmitSessionUserMessageOptions): SessionMessageDeliveryDecision {
     return decideSessionMessageDelivery({
         configuredMode: opts.configuredMode,
@@ -92,7 +109,18 @@ function resolveSubmitDecision(opts: SubmitSessionUserMessageOptions): SessionMe
 }
 
 function requestedPendingQueue(opts: SubmitSessionUserMessageOptions): boolean {
-    return (opts.explicitMode ?? opts.configuredMode) === 'server_pending';
+    const requestedMode = opts.explicitMode ?? opts.configuredMode;
+    return requestedMode === 'server_pending' || requestedMode === 'interrupt';
+}
+
+function usesExistingDurablePendingInterrupt(
+    opts: SubmitSessionUserMessageOptions,
+    decision: SessionMessageDeliveryDecision,
+): boolean {
+    return decision.intent === 'interrupt'
+        && opts.existingDurablePendingMessage === true
+        && typeof opts.localId === 'string'
+        && opts.localId.trim().length > 0;
 }
 
 function isUnknownPendingQueueSupport(decision: SessionMessageDeliveryDecision): boolean {
@@ -104,6 +132,10 @@ function shouldFailClosedForUnknownPendingSupport(
     opts: SubmitSessionUserMessageOptions,
     decision: SessionMessageDeliveryDecision,
 ): boolean {
+    if (usesExistingDurablePendingInterrupt(opts, decision)) {
+        return false;
+    }
+
     if (!isUnknownPendingQueueSupport(decision)) {
         return false;
     }
@@ -130,8 +162,13 @@ function shouldRefreshUnknownPendingSupport(
 
 function shouldRejectUnsupportedPendingQueue(
     opts: SubmitSessionUserMessageOptions,
+    decision: SessionMessageDeliveryDecision,
     mode: MessageSendMode,
 ): boolean {
+    if (usesExistingDurablePendingInterrupt(opts, decision)) {
+        return false;
+    }
+
     if (!requestedPendingQueue(opts) || !isPendingQueueSubmitKnownUnsupported(opts.session)) {
         return false;
     }
@@ -269,6 +306,7 @@ async function directSend(
             profileId: opts.profileId ?? undefined,
             localId: opts.localId ?? undefined,
             bypassPendingQueueReason,
+            runtimeRpcDeliveryMode: opts.runtimeRpcDeliveryMode,
             onLocalPendingProjectionCreated: opts.onOutboundHandoff
                 ? ({ localId }: { localId: string }) => {
                     sawLocalPendingProjection = true;
@@ -291,14 +329,17 @@ async function directSend(
         return {
             type: 'success',
             persistence,
+            ...(hasProviderAcceptancePending(sendResult) ? { providerAcceptancePending: true } : {}),
             wake: { attempted: false, state: 'not_needed' },
             localId,
         };
     } catch (error) {
+        const errorCode = getErrorCode(error);
         return {
             type: 'send_failed',
             persistence: 'none',
             wake: { attempted: false, state: 'not_needed' },
+            ...(errorCode ? { errorCode } : {}),
             errorMessage: getErrorMessage(error, 'Failed to send message'),
         };
     }
@@ -445,7 +486,7 @@ export async function submitSessionUserMessage(
         supportRefreshSucceeded: resolved.supportRefreshSucceeded,
     });
 
-    if (shouldRejectUnsupportedPendingQueue(effectiveOpts, mode)) {
+    if (shouldRejectUnsupportedPendingQueue(effectiveOpts, decision, mode)) {
         return rejectUnsupportedPendingQueue();
     }
 
@@ -453,11 +494,8 @@ export async function submitSessionUserMessage(
         return rejectUnknownPendingQueueSupport(resolved.supportRefreshErrorMessage);
     }
 
-    if (mode === 'server_pending') {
-        return enqueuePending(port, effectiveOpts, decision);
-    }
-
-    if (mode === 'interrupt') {
+    const existingDurablePendingInterrupt = usesExistingDurablePendingInterrupt(effectiveOpts, decision);
+    if (decision.intent === 'interrupt') {
         try {
             await port.abortSession?.(effectiveOpts.sessionId);
         } catch {
@@ -465,5 +503,16 @@ export async function submitSessionUserMessage(
         }
     }
 
-    return directSend(port, effectiveOpts, decision.directBypassReason ?? getDirectMessageBypassReason(effectiveOpts, mode));
+    if (mode === 'server_pending' && !existingDurablePendingInterrupt) {
+        return enqueuePending(port, effectiveOpts, decision);
+    }
+
+    if (mode === 'interrupt') {
+        return enqueuePending(port, effectiveOpts, { ...decision, mode: 'server_pending' });
+    }
+
+    const directBypassReason = existingDurablePendingInterrupt
+        ? 'interrupt'
+        : decision.directBypassReason ?? getDirectMessageBypassReason(effectiveOpts, mode);
+    return directSend(port, effectiveOpts, directBypassReason);
 }

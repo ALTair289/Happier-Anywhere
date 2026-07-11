@@ -273,9 +273,6 @@ function getDeliveryIntent(opts: {
 function withDirectReason(
     decision: Omit<SessionMessageDeliveryDecision, 'directBypassReason'>,
 ): SessionMessageDeliveryDecision {
-    if (decision.mode === 'interrupt') {
-        return { ...decision, directBypassReason: 'interrupt' };
-    }
     if (decision.mode === 'agent_queue') {
         return {
             ...decision,
@@ -316,16 +313,9 @@ export function decideSessionMessageDelivery(opts: {
 }): SessionMessageDeliveryDecision {
     const configuredMode = opts.configuredMode;
     const requestedMode = opts.explicitMode ?? configuredMode;
+    const transportMode: MessageSendMode = requestedMode === 'interrupt' ? 'server_pending' : requestedMode;
     const intent = getDeliveryIntent(opts);
     const pendingSupportState = getPendingQueueSubmitSupportState(opts.session);
-    if (requestedMode === 'interrupt') {
-        return withDirectReason({
-            mode: 'interrupt',
-            intent,
-            reason: 'interrupt',
-            pendingSupportState,
-        });
-    }
 
     const session = opts.session;
     if (
@@ -348,9 +338,13 @@ export function decideSessionMessageDelivery(opts: {
         // explicit queueing intent. Preserve server_pending so callers fail closed
         // through the queue path instead of steering directly.
         return withDirectReason({
-            mode: requestedMode,
+            mode: transportMode,
             intent,
-            reason: requestedMode === 'server_pending' ? 'pending_support_unknown' : 'pending_support_unknown_preserve_request',
+            reason: requestedMode === 'server_pending'
+                ? 'pending_support_unknown'
+                : requestedMode === 'interrupt'
+                    ? 'pending_support_unknown_interrupt'
+                    : 'pending_support_unknown_preserve_request',
             pendingSupportState,
         });
     }
@@ -361,6 +355,14 @@ export function decideSessionMessageDelivery(opts: {
     const trimmedCliVersion = typeof cliVersion === 'string' ? cliVersion.trim() : '';
     if (trimmedCliVersion) {
         if (!isVersionSupported(trimmedCliVersion, MINIMUM_CLI_PENDING_QUEUE_V2_VERSION)) {
+            if (requestedMode === 'interrupt') {
+                return {
+                    mode: 'server_pending',
+                    intent,
+                    reason: 'pending_unsupported_cli_interrupt',
+                    pendingSupportState,
+                };
+            }
             return withDirectReason({
                 mode: requestedMode === 'server_pending' ? 'agent_queue' : requestedMode,
                 intent,
@@ -375,6 +377,15 @@ export function decideSessionMessageDelivery(opts: {
             mode: 'server_pending',
             intent,
             reason: 'explicit_pending',
+            pendingSupportState,
+        };
+    }
+
+    if (requestedMode === 'interrupt') {
+        return {
+            mode: 'server_pending',
+            intent,
+            reason: 'interrupt_pending',
             pendingSupportState,
         };
     }
@@ -425,14 +436,15 @@ export function decideSessionMessageDelivery(opts: {
                 nonSteerablePayloadReason === 'mode_change_refused'
                 && opts.steerWithoutConfig === true
             ) {
-                // Lane X (X3 Case B): the user chose to steer the text only; the caller strips the
-                // mode delta from this message and the setting applies on the next message.
-                return withDirectReason({
-                    mode: 'agent_queue',
+                // Lane X (X3 Case B): the user chose to steer the text only. Keep delivery
+                // durable-first; the pending pump will inject the text when the terminal can
+                // safely accept it.
+                return {
+                    mode: 'server_pending',
                     intent,
                     reason: 'busy_steer_text_only',
                     pendingSupportState,
-                });
+                };
             }
             if (
                 nonSteerablePayloadReason === 'mode_change_refused'
@@ -440,13 +452,14 @@ export function decideSessionMessageDelivery(opts: {
                 && runtimeState.inFlightConfigApplySupported
             ) {
                 // Lane Q: the backend applies the mode delta to the running turn, then steers the
-                // text — explicit per-message user choice, capability-gated.
-                return withDirectReason({
-                    mode: 'agent_queue',
+                // text. The prompt itself still starts from the durable pending queue so an
+                // occupied runtime slot cannot drop it.
+                return {
+                    mode: 'server_pending',
                     intent,
                     reason: 'busy_steer_config_apply',
                     pendingSupportState,
-                });
+                };
             }
             return {
                 mode: 'server_pending',
@@ -456,12 +469,12 @@ export function decideSessionMessageDelivery(opts: {
                 nonSteerablePayloadReason,
             };
         }
-        return withDirectReason({
-            mode: 'agent_queue',
+        return {
+            mode: 'server_pending',
             intent,
             reason: 'busy_steer_immediate',
             pendingSupportState,
-        });
+        };
     }
 
     if (runtimeState.localControlBlocksDirectSubmit) {

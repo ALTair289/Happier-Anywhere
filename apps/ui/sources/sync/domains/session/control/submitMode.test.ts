@@ -5,11 +5,26 @@ import { canApplySteerConfigInFlight, canSteerUserMessageNow, chooseSubmitMode, 
 describe('chooseSubmitMode', () => {
     const now = 1_000_000;
 
-    it('preserves interrupt mode', () => {
-        expect(chooseSubmitMode({
+    it('routes interrupt mode through durable pending transport', () => {
+        const decision = decideSessionMessageDelivery({
             configuredMode: 'interrupt',
-            session: { metadata: {} } as any,
-        })).toBe('interrupt');
+            session: {
+                active: true,
+                presence: 'online',
+                agentStateVersion: 1,
+                pendingVersion: 0,
+                pendingCount: 0,
+                metadata: {},
+            } as any,
+        });
+
+        expect(decision).toMatchObject({
+            mode: 'server_pending',
+            intent: 'interrupt',
+            reason: 'interrupt_pending',
+            pendingSupportState: 'supported',
+        });
+        expect(decision.directBypassReason).toBeUndefined();
     });
 
     it('keeps configured server_pending when pending support is not yet represented in the session summary', () => {
@@ -30,7 +45,7 @@ describe('chooseSubmitMode', () => {
         })).toBe('server_pending');
     });
 
-    it('uses agent_queue while thinking when configuredMode=server_pending and in-flight steer is supported and the session is online+ready', () => {
+    it('uses server_pending while thinking when configuredMode=server_pending and in-flight steer is supported and the session is online+ready', () => {
         expect(chooseSubmitMode({
             configuredMode: 'server_pending',
             busySteerSendPolicy: 'steer_immediately',
@@ -46,7 +61,7 @@ describe('chooseSubmitMode', () => {
                 metadata: {},
             } as any,
             nowMs: now,
-        })).toBe('agent_queue');
+        })).toBe('server_pending');
     });
 
     it('uses server_pending while thinking when runtime steer availability has not arrived yet', () => {
@@ -182,7 +197,7 @@ describe('chooseSubmitMode', () => {
         })).toBe('server_pending');
     });
 
-    it('keeps agent_queue while thinking when in-flight steer is supported and the session is online+ready', () => {
+    it('keeps steerable busy sends durable-first while the session is online+ready', () => {
         expect(chooseSubmitMode({
             configuredMode: 'agent_queue',
             session: {
@@ -197,7 +212,7 @@ describe('chooseSubmitMode', () => {
                 metadata: {},
             } as any,
             nowMs: now,
-        })).toBe('agent_queue');
+        })).toBe('server_pending');
     });
 
     it('honors an explicit server_pending send intent even when normal routing would steer immediately', () => {
@@ -465,7 +480,7 @@ describe('decideSessionMessageDelivery — non-steerable payload honesty (lane P
         }
     });
 
-    it('keeps non-Happier slash prompts steerable while busy', () => {
+    it('keeps non-Happier slash prompts eligible for durable-first steering while busy', () => {
         const decision = decideSessionMessageDelivery({
             configuredMode: 'agent_queue',
             busySteerSendPolicy: 'steer_immediately',
@@ -474,11 +489,11 @@ describe('decideSessionMessageDelivery — non-steerable payload honesty (lane P
             nowMs: now,
         });
 
-        expect(decision.mode).toBe('agent_queue');
+        expect(decision.mode).toBe('server_pending');
         expect(decision.nonSteerablePayloadReason ?? null).toBeNull();
     });
 
-    it('keeps steering for a steerable payload while busy (no behavior change)', () => {
+    it('routes steerable payloads through durable pending while busy', () => {
         const decision = decideSessionMessageDelivery({
             configuredMode: 'agent_queue',
             busySteerSendPolicy: 'steer_immediately',
@@ -486,11 +501,11 @@ describe('decideSessionMessageDelivery — non-steerable payload honesty (lane P
             text: 'just steer this text',
             nowMs: now,
         });
-        expect(decision.mode).toBe('agent_queue');
+        expect(decision.mode).toBe('server_pending');
         expect(decision.nonSteerablePayloadReason ?? null).toBeNull();
     });
 
-    it('respects sessionPermissionModeApplyTiming=next_prompt — mode never applies mid-turn, so steering stays honest', () => {
+    it('respects sessionPermissionModeApplyTiming=next_prompt — mode never applies mid-turn, so durable steering stays honest', () => {
         const decision = decideSessionMessageDelivery({
             configuredMode: 'agent_queue',
             busySteerSendPolicy: 'steer_immediately',
@@ -499,11 +514,11 @@ describe('decideSessionMessageDelivery — non-steerable payload honesty (lane P
             permissionModeApplyTiming: 'next_prompt',
             nowMs: now,
         });
-        expect(decision.mode).toBe('agent_queue');
+        expect(decision.mode).toBe('server_pending');
         expect(decision.nonSteerablePayloadReason ?? null).toBeNull();
     });
 
-    it('honors the kill-switch: nonSteerableSendPrompt=off restores legacy steer behavior', () => {
+    it('honors the kill-switch without bypassing durable-first busy steer delivery', () => {
         const decision = decideSessionMessageDelivery({
             configuredMode: 'agent_queue',
             busySteerSendPolicy: 'steer_immediately',
@@ -512,18 +527,40 @@ describe('decideSessionMessageDelivery — non-steerable payload honesty (lane P
             nonSteerableSendPrompt: 'off',
             nowMs: now,
         });
-        expect(decision.mode).toBe('agent_queue');
+        expect(decision.mode).toBe('server_pending');
     });
 
-    it('keeps legacy behavior byte-for-byte when no payload facts exist (no selected mode, no text)', () => {
+    it('keeps the steer-immediate reason when no payload facts exist (no selected mode, no text)', () => {
         const decision = decideSessionMessageDelivery({
             configuredMode: 'agent_queue',
             busySteerSendPolicy: 'steer_immediately',
             session: steerableBusySession({ permissionMode: undefined }),
             nowMs: now,
         });
-        expect(decision.mode).toBe('agent_queue');
+        expect(decision.mode).toBe('server_pending');
         expect(decision.reason).toBe('busy_steer_immediate');
+    });
+
+    it('routes an occupied Claude Unified steer slot to durable pending under steer-immediately policy', () => {
+        const decision = decideSessionMessageDelivery({
+            configuredMode: 'agent_queue',
+            busySteerSendPolicy: 'steer_immediately',
+            session: steerableBusySession({
+                agentState: {
+                    controlledByUser: false,
+                    capabilities: {
+                        inFlightSteer: true,
+                        inFlightSteerSupported: true,
+                        inFlightSteerAvailable: false,
+                    },
+                },
+            }),
+            text: 'second steer while the first steer is still in flight',
+            nowMs: now,
+        });
+
+        expect(decision.mode).toBe('server_pending');
+        expect(decision.reason).toBe('busy_policy_pending');
     });
 
     it('exposes the published session steer-unavailable reason on busy pending decisions (Seam A consumer)', () => {
@@ -582,7 +619,7 @@ describe('decideSessionMessageDelivery — apply-config-and-steer (lane Q)', () 
         ...overrides,
     } as any);
 
-    it('routes a mode-change payload to agent_queue when the user chose apply-and-steer and the backend supports it', () => {
+    it('routes a mode-change payload to durable pending when the user chose apply-and-steer and the backend supports it', () => {
         const decision = decideSessionMessageDelivery({
             configuredMode: 'agent_queue',
             busySteerSendPolicy: 'steer_immediately',
@@ -591,7 +628,7 @@ describe('decideSessionMessageDelivery — apply-config-and-steer (lane Q)', () 
             applyConfigAndSteer: true,
             nowMs: now,
         });
-        expect(decision.mode).toBe('agent_queue');
+        expect(decision.mode).toBe('server_pending');
         expect(decision.reason).toBe('busy_steer_config_apply');
         expect(decision.nonSteerablePayloadReason ?? null).toBeNull();
     });
@@ -720,7 +757,7 @@ describe('decideSessionMessageDelivery — fresh-change gate (lane X, X2, incide
         ...overrides,
     } as any);
 
-    it('a plain message with STALE unconverged drift (change predates the active turn) steers silently — no modal route', () => {
+    it('a plain message with STALE unconverged drift (change predates the active turn) stays steerable via durable pending — no modal route', () => {
         const decision = decideSessionMessageDelivery({
             configuredMode: 'agent_queue',
             busySteerSendPolicy: 'steer_immediately',
@@ -728,7 +765,7 @@ describe('decideSessionMessageDelivery — fresh-change gate (lane X, X2, incide
             text: 'just steer this text',
             nowMs: now,
         });
-        expect(decision.mode).toBe('agent_queue');
+        expect(decision.mode).toBe('server_pending');
         expect(decision.reason).toBe('busy_steer_immediate');
         expect(decision.nonSteerablePayloadReason ?? null).toBeNull();
     });
@@ -741,7 +778,7 @@ describe('decideSessionMessageDelivery — fresh-change gate (lane X, X2, incide
             text: 'just steer this text',
             nowMs: now,
         });
-        expect(decision.mode).toBe('agent_queue');
+        expect(decision.mode).toBe('server_pending');
         expect(decision.nonSteerablePayloadReason ?? null).toBeNull();
     });
 
@@ -782,7 +819,7 @@ describe('decideSessionMessageDelivery — fresh-change gate (lane X, X2, incide
             text: 'text',
             nowMs: now,
         });
-        expect(stale.mode).toBe('agent_queue');
+        expect(stale.mode).toBe('server_pending');
 
         const fresh = decideSessionMessageDelivery({
             configuredMode: 'agent_queue',
@@ -813,7 +850,7 @@ describe('decideSessionMessageDelivery — steer text without applying (lane X, 
         ...overrides,
     } as any);
 
-    it('steers the TEXT only when the user chose defer-and-steer (setting stays desired-state)', () => {
+    it('routes the TEXT only through durable pending when the user chose defer-and-steer (setting stays desired-state)', () => {
         const decision = decideSessionMessageDelivery({
             configuredMode: 'agent_queue',
             busySteerSendPolicy: 'steer_immediately',
@@ -822,7 +859,7 @@ describe('decideSessionMessageDelivery — steer text without applying (lane X, 
             steerWithoutConfig: true,
             nowMs: now,
         });
-        expect(decision.mode).toBe('agent_queue');
+        expect(decision.mode).toBe('server_pending');
         expect(decision.reason).toBe('busy_steer_text_only');
         expect(decision.nonSteerablePayloadReason ?? null).toBeNull();
     });

@@ -75,7 +75,7 @@ export function recordSessionMessageDeliveryDecision(params: Readonly<{
         explicitMode: params.explicitMode ?? 'none',
         busySteerSendPolicy: params.busySteerSendPolicy ?? DEFAULT_BUSY_STEER_SEND_POLICY,
         forceImmediate: params.forceImmediate === true,
-        pendingRequested: requestedMode === 'server_pending',
+        pendingRequested: requestedMode === 'server_pending' || requestedMode === 'interrupt',
         pendingSupportState: getPendingSupportState(session),
         supportRefreshAttempted: params.supportRefreshAttempted === true,
         supportRefreshSucceeded: params.supportRefreshSucceeded === true,

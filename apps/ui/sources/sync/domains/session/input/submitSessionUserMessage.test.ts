@@ -96,6 +96,7 @@ type SubmitCall =
         displayText?: string;
         metaOverrides?: Record<string, unknown>;
         bypassPendingQueueReason?: string;
+        runtimeRpcDeliveryMode?: string;
     }
     | { type: 'resume'; options: ResumeSessionOptions }
     | { type: 'abort'; sessionId: string }
@@ -105,7 +106,12 @@ function createPort(config: {
     enqueueResult?: { localId?: string; accepted?: boolean } | void;
     enqueueReject?: Error;
     enqueueWait?: Promise<void>;
-    sendResult?: { localId?: string; seq?: number } | void;
+    sendResult?: {
+        localId?: string;
+        seq?: number;
+        persistence?: 'pending' | 'transcript_committed' | 'provider_direct';
+        providerAcceptancePending?: boolean;
+    } | void;
     resumeResult?: ResumeSessionResult;
     resumeReject?: Error;
     sendReject?: Error;
@@ -141,10 +147,19 @@ function createPort(config: {
                 profileId?: string | null;
                 localId?: string | null;
                 bypassPendingQueueReason?: string;
+                runtimeRpcDeliveryMode?: string;
                 onLocalPendingProjectionCreated?: (event: Readonly<{ localId: string }>) => void;
             }>,
         ) => {
-            calls.push({ type: 'send', sessionId, text, displayText, metaOverrides, bypassPendingQueueReason: options?.bypassPendingQueueReason });
+            calls.push({
+                type: 'send',
+                sessionId,
+                text,
+                displayText,
+                metaOverrides,
+                bypassPendingQueueReason: options?.bypassPendingQueueReason,
+                runtimeRpcDeliveryMode: options?.runtimeRpcDeliveryMode,
+            });
             if (config.sendReject) throw config.sendReject;
             options?.onLocalPendingProjectionCreated?.({
                 localId: (config.sendResult && typeof config.sendResult === 'object' && config.sendResult.localId) || 'direct-local-id',
@@ -535,6 +550,35 @@ describe('submitSessionUserMessage', () => {
         }));
     });
 
+    it('forwards required runtime delivery through the existing direct send option object', async () => {
+        const subject = await expectSubject();
+        if (!subject) return;
+        const { calls, port } = createPort({
+            sendResult: { localId: 'direct-local-id', persistence: 'provider_direct', providerAcceptancePending: true },
+        });
+
+        const result = await subject.submitSessionUserMessage(port, {
+            sessionId: 's1',
+            session: createSession({ active: true, presence: 'online', agentStateVersion: 1 }),
+            text: 'send now',
+            configuredMode: 'server_pending',
+            forceImmediate: true,
+            runtimeRpcDeliveryMode: 'required',
+            resumeCapabilityOptions: { accountSettings: {} },
+        });
+
+        expect(result).toMatchObject({
+            type: 'success',
+            persistence: 'provider_direct',
+            providerAcceptancePending: true,
+        });
+        expect(calls).toEqual([expect.objectContaining({
+            type: 'send',
+            bypassPendingQueueReason: 'force_immediate',
+            runtimeRpcDeliveryMode: 'required',
+        })]);
+    });
+
     it('lets forceImmediate bypass configured pending when pending support is unknown but direct send is safe', async () => {
         const subject = await expectSubject();
         if (!subject) return;
@@ -602,6 +646,47 @@ describe('submitSessionUserMessage', () => {
             wake: { attempted: false, state: 'not_needed' },
         });
         expect(calls.map((call) => call.type)).toEqual(['enqueue']);
+    });
+
+    it('persists steerable busy sends before runtime delivery so an occupied provider slot cannot drop them', async () => {
+        const subject = await expectSubject();
+        if (!subject) return;
+        const { calls, port } = createPort();
+
+        const result = await subject.submitSessionUserMessage(port, {
+            sessionId: 's1',
+            session: createSession({
+                active: true,
+                presence: 'online',
+                agentStateVersion: 1,
+                thinking: true,
+                thinkingAt: 1_000,
+                agentState: {
+                    controlledByUser: false,
+                    capabilities: {
+                        inFlightSteer: true,
+                        inFlightSteerSupported: true,
+                        inFlightSteerAvailable: true,
+                    },
+                } as any,
+            }),
+            text: 'durable steer while Claude is busy',
+            configuredMode: 'agent_queue',
+            busySteerSendPolicy: 'steer_immediately',
+            resumeCapabilityOptions: { accountSettings: {} },
+            nowMs: 1_100,
+        });
+
+        expect(result).toMatchObject({
+            type: 'wake_pending',
+            persistence: 'pending',
+            wake: { attempted: false, state: 'not_needed' },
+        });
+        expect(calls.map((call) => call.type)).toEqual(['enqueue']);
+        expect(calls[0]).toMatchObject({
+            type: 'enqueue',
+            text: 'durable steer while Claude is busy',
+        });
     });
 
     it('queues busy sends when provider-owned classification marks outgoing config metadata non-steerable', async () => {
@@ -725,10 +810,11 @@ describe('submitSessionUserMessage', () => {
         expect(calls.map((call) => call.type)).toEqual(['send', 'enqueue', 'resume']);
     });
 
-    it('aborts before sending interrupt messages', async () => {
+    it('aborts before enqueueing interrupt messages on the durable pending transport', async () => {
         const subject = await expectSubject();
         if (!subject) return;
         const { calls, port } = createPort();
+        const outboundHandoff = vi.fn();
 
         const result = await subject.submitSessionUserMessage(port, {
             sessionId: 's1',
@@ -736,13 +822,92 @@ describe('submitSessionUserMessage', () => {
             text: 'stop and do this',
             configuredMode: 'interrupt',
             resumeCapabilityOptions: { accountSettings: {} },
+            onOutboundHandoff: outboundHandoff,
         });
 
         expect(result).toMatchObject({
             type: 'success',
-            persistence: 'transcript_committed',
+            persistence: 'pending',
+        });
+        expect(calls[0]?.type).toBe('abort');
+        expect(calls[1]?.type).toBe('enqueue');
+        expect(calls.some((call) => call.type === 'send')).toBe(false);
+        expect(calls[1]).toMatchObject({
+            type: 'enqueue',
+            text: 'stop and do this',
+            metaOverrides: {
+                [SESSION_USER_MESSAGE_DELIVERY_INTENT_META_KEY]: 'interrupt',
+            },
+        });
+        expect(outboundHandoff).toHaveBeenCalledWith({
+            persistence: 'pending',
+            localId: 'pending-local-id',
+        });
+    });
+
+    it('keeps interrupt messages durable when the runner dies before provider acceptance', async () => {
+        const subject = await expectSubject();
+        if (!subject) return;
+        const { calls, port } = createPort({
+            enqueueResult: { localId: 'interrupt-local-id', accepted: false },
+        });
+
+        const result = await subject.submitSessionUserMessage(port, {
+            sessionId: 's1',
+            session: createSession({ active: true, presence: 'online' }),
+            text: 'stop and send durably',
+            configuredMode: 'interrupt',
+            resumeCapabilityOptions: { accountSettings: {} },
+        });
+
+        expect(result).toMatchObject({
+            type: 'wake_pending',
+            persistence: 'pending',
+            localId: 'interrupt-local-id',
+        });
+        expect(calls.map((call) => call.type)).toEqual(['abort', 'enqueue']);
+        expect(calls[1]).toMatchObject({
+            type: 'enqueue',
+            text: 'stop and send durably',
+            metaOverrides: {
+                [SESSION_USER_MESSAGE_DELIVERY_INTENT_META_KEY]: 'interrupt',
+            },
+        });
+    });
+
+    it('uses an existing durable pending row for interrupt send-now without enqueueing a duplicate', async () => {
+        const subject = await expectSubject();
+        if (!subject) return;
+        const { calls, port } = createPort({
+            sendResult: {
+                localId: 'p1',
+                persistence: 'provider_direct',
+                providerAcceptancePending: true,
+            },
+        });
+
+        const result = await subject.submitSessionUserMessage(port, {
+            sessionId: 's1',
+            session: createSession({ active: true, presence: 'online' }),
+            text: 'send this pending row now',
+            configuredMode: 'server_pending',
+            explicitMode: 'interrupt',
+            localId: 'p1',
+            existingDurablePendingMessage: true,
+            resumeCapabilityOptions: { accountSettings: {} },
+        });
+
+        expect(result).toMatchObject({
+            type: 'success',
+            persistence: 'provider_direct',
+            providerAcceptancePending: true,
+            localId: 'p1',
         });
         expect(calls.map((call) => call.type)).toEqual(['abort', 'send']);
+        expect(calls[1]).toMatchObject({
+            type: 'send',
+            bypassPendingQueueReason: 'interrupt',
+        });
     });
 
     it('returns send_failed when direct send fails', async () => {
