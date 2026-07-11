@@ -121,7 +121,7 @@ export class SessionEncryption {
                     createdAt: message.createdAt,
                 };
                 results[i] = result;
-                this.cache.setCachedMessage(message.id, result, fingerprint);
+                this.cache.setCachedMessage(message.id, result, fingerprint, this.sessionId);
             } else {
                 // Invalid content
                 invalidCount++;
@@ -133,7 +133,7 @@ export class SessionEncryption {
                     content: null,
                     createdAt: message.createdAt,
                 };
-                this.cache.setCachedMessage(message.id, results[i]!, fingerprint);
+                this.cache.setCachedMessage(message.id, results[i]!, fingerprint, this.sessionId);
             }
         }
 
@@ -173,7 +173,7 @@ export class SessionEncryption {
                         content: decryptedData,
                         createdAt: message.createdAt,
                     };
-                    this.cache.setCachedMessage(message.id, result, toDecrypt[i].fingerprint);
+                    this.cache.setCachedMessage(message.id, result, toDecrypt[i].fingerprint, this.sessionId);
                     results[index] = result;
                 } else {
                     const result: DecryptedMessage = {

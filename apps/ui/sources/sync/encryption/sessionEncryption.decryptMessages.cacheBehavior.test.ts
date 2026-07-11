@@ -5,12 +5,99 @@ import { SessionEncryption } from './sessionEncryption';
 import { AES256Encryption } from './encryptor';
 import type { ApiMessage } from '../api/types/apiTypes';
 import {
+  clearSessionTranscriptDerivedCachesForSession,
+  registerSessionTranscriptDerivedCacheClear,
+} from '../runtime/sessionTranscriptDerivedCaches';
+import {
   NATIVE_CRYPTO_WORKER_PROBE_FAILURE_REASON,
   type CryptoWorkerScope,
   type NativeCryptoWorker,
 } from './nativeCryptoWorker/types';
 
 describe('SessionEncryption.decryptMessages (cache behavior)', () => {
+  it('evicts decrypted message copies by byte budget instead of entry count alone', () => {
+    const CacheWithOptions = EncryptionCache as new (options?: { maxBytes?: number }) => EncryptionCache;
+    const cache = new CacheWithOptions({ maxBytes: 900 });
+    const setCachedMessage = (
+      messageId: string,
+      data: Parameters<EncryptionCache['setCachedMessage']>[1],
+      fingerprint: string,
+      sessionId: string,
+    ) => {
+      (cache.setCachedMessage as unknown as (
+        messageId: string,
+        data: Parameters<EncryptionCache['setCachedMessage']>[1],
+        fingerprint: string,
+        sessionId: string,
+      ) => void).call(cache, messageId, data, fingerprint, sessionId);
+    };
+
+    setCachedMessage('m_large_1', {
+      id: 'm_large_1',
+      seq: 1,
+      localId: null,
+      createdAt: 1,
+      content: { role: 'agent', content: { type: 'text', text: 'a'.repeat(160) } } as any,
+    }, 'fp-1', 's_large');
+
+    expect(cache.getCachedMessage('m_large_1', 'fp-1')).toBeTruthy();
+
+    setCachedMessage('m_large_2', {
+      id: 'm_large_2',
+      seq: 2,
+      localId: null,
+      createdAt: 2,
+      content: { role: 'agent', content: { type: 'text', text: 'b'.repeat(160) } } as any,
+    }, 'fp-2', 's_large');
+
+    expect(cache.getCachedMessage('m_large_1', 'fp-1')).toBeNull();
+    expect(cache.getCachedMessage('m_large_2', 'fp-2')).toBeTruthy();
+  });
+
+  it('releases session-scoped decrypted message copies through the transcript derived cache seam', () => {
+    const cache = new EncryptionCache();
+    const setCachedMessage = (
+      messageId: string,
+      data: Parameters<EncryptionCache['setCachedMessage']>[1],
+      fingerprint: string,
+      sessionId: string,
+    ) => {
+      (cache.setCachedMessage as unknown as (
+        messageId: string,
+        data: Parameters<EncryptionCache['setCachedMessage']>[1],
+        fingerprint: string,
+        sessionId: string,
+      ) => void).call(cache, messageId, data, fingerprint, sessionId);
+    };
+    const unregister = registerSessionTranscriptDerivedCacheClear((sessionId) => {
+      cache.clearSessionCache(sessionId);
+    });
+
+    try {
+      setCachedMessage('m_release_1', {
+        id: 'm_release_1',
+        seq: 1,
+        localId: null,
+        createdAt: 1,
+        content: { role: 'user', content: { type: 'text', text: 'release me' } } as any,
+      }, 'fp-release-1', 's_release');
+      setCachedMessage('m_keep_1', {
+        id: 'm_keep_1',
+        seq: 1,
+        localId: null,
+        createdAt: 1,
+        content: { role: 'user', content: { type: 'text', text: 'keep me' } } as any,
+      }, 'fp-keep-1', 's_keep');
+
+      clearSessionTranscriptDerivedCachesForSession('s_release');
+
+      expect(cache.getCachedMessage('m_release_1', 'fp-release-1')).toBeNull();
+      expect(cache.getCachedMessage('m_keep_1', 'fp-keep-1')).toBeTruthy();
+    } finally {
+      unregister();
+    }
+  });
+
   it('returns plaintext messages without decrypting and caches them', async () => {
     const cache = new EncryptionCache()
     const sessionId = 's_plain'

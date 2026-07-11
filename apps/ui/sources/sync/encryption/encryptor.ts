@@ -12,6 +12,12 @@ import {
     decryptSecretboxJsonBatchWithNativeWorker,
     type NativeJsonDecryptWorkerBinding,
 } from './nativeCryptoWorker/nativeJsonDecryptBatch';
+import {
+    decryptAesGcmJsonBase64BatchWithWebWorker,
+    estimateBase64DecodedBytes,
+    normalizeLargeJsonDecryptPayloadBytes,
+    type AesGcmJsonWebWorkerOptions,
+} from './webCryptoJsonWorker/webJsonDecryptBatch';
 
 //
 // IMPORTANT: Right now there is a bug in the AES implementation and it works only with a normal strings converted to Uint8Array. 
@@ -28,6 +34,7 @@ export interface Decryptor {
 
 export interface Base64Decryptor {
     decryptBase64(data: readonly string[], options?: DecryptOptions): Promise<(any | null)[]>;
+    shouldDecryptBase64?(data: readonly string[]): boolean;
 }
 
 export type DecryptOptions = Readonly<{
@@ -41,6 +48,11 @@ export function hasBase64Decryptor(decryptor: Decryptor): decryptor is Decryptor
     return typeof candidate.decryptBase64 === 'function';
 }
 
+export function shouldUseBase64Decryptor(decryptor: Decryptor, data: readonly string[]): decryptor is Decryptor & Base64Decryptor {
+    if (!hasBase64Decryptor(decryptor)) return false;
+    return decryptor.shouldDecryptBase64?.(data) ?? true;
+}
+
 export type SecretBoxEncryptionOptions = Readonly<{
     nativeCryptoWorker?: NativeJsonDecryptWorkerBinding;
 }>;
@@ -52,10 +64,17 @@ type AesStringCryptoAdapter = Readonly<{
 
 export type AES256EncryptionOptions = Partial<AesStringCryptoAdapter> & Readonly<{
     batchConcurrencyLimit?: number;
+    largePayloadYieldBytes?: number;
     nativeCryptoWorker?: NativeJsonDecryptWorkerBinding;
+    webJsonDecryptWorker?: AesGcmJsonWebWorkerOptions;
+    yieldBetweenLargePayloadDecrypts?: () => Promise<void>;
 }>;
 
 export const DEFAULT_AES_BATCH_CONCURRENCY_LIMIT = 4;
+
+function yieldToEventLoop(): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+}
 
 export function normalizeAesBatchConcurrencyLimit(value: number | null | undefined): number {
     if (typeof value !== 'number' || !Number.isFinite(value)) {
@@ -233,8 +252,12 @@ export class AES256Encryption implements Encryptor, Decryptor {
     private readonly batchConcurrencyLimit: number;
     private readonly encryptString: AesStringCryptoAdapter['encryptString'];
     private readonly decryptString: AesStringCryptoAdapter['decryptString'];
+    private readonly largePayloadYieldBytes: number;
     private readonly nativeCryptoWorker?: NativeJsonDecryptWorkerBinding;
+    private readonly webJsonDecryptWorker: AesGcmJsonWebWorkerOptions;
+    private readonly yieldBetweenLargePayloadDecrypts: () => Promise<void>;
     readonly decryptBase64?: (data: readonly string[], options?: DecryptOptions) => Promise<(any | null)[]>;
+    readonly shouldDecryptBase64: (data: readonly string[]) => boolean;
 
     constructor(secretKey: Uint8Array, options: AES256EncryptionOptions = {}) {
         this.secretKey = secretKey;
@@ -242,10 +265,12 @@ export class AES256Encryption implements Encryptor, Decryptor {
         this.batchConcurrencyLimit = normalizeAesBatchConcurrencyLimit(options.batchConcurrencyLimit);
         this.encryptString = options.encryptString ?? encryptAESGCMString;
         this.decryptString = options.decryptString ?? decryptAESGCMString;
+        this.largePayloadYieldBytes = normalizeLargeJsonDecryptPayloadBytes(options.largePayloadYieldBytes);
         this.nativeCryptoWorker = options.nativeCryptoWorker;
-        if (this.nativeCryptoWorker) {
-            this.decryptBase64 = async (data, decryptOptions) => this.decryptBase64WithNativeWorker(data, decryptOptions);
-        }
+        this.webJsonDecryptWorker = options.webJsonDecryptWorker ?? {};
+        this.yieldBetweenLargePayloadDecrypts = options.yieldBetweenLargePayloadDecrypts ?? yieldToEventLoop;
+        this.decryptBase64 = async (data, decryptOptions) => this.decryptBase64Batch(data, decryptOptions);
+        this.shouldDecryptBase64 = (data) => this.nativeCryptoWorker !== undefined || this.hasLargeBase64Payload(data);
     }
 
     async encrypt(data: any[]): Promise<Uint8Array[]> {
@@ -288,32 +313,156 @@ export class AES256Encryption implements Encryptor, Decryptor {
     }
 
     private async decryptReference(data: readonly Uint8Array[]): Promise<(any | null)[]> {
-        return await mapWithConcurrency(data, this.batchConcurrencyLimit, async (item) => {
-            try {
-                if (item[0] !== 0) {
-                    return null;
+        if (this.shouldYieldBetweenLargeBytePayloads(data)) {
+            const results: (any | null)[] = [];
+            let hasProcessedLargePayload = false;
+            for (const item of data) {
+                if (item.byteLength >= this.largePayloadYieldBytes) {
+                    if (hasProcessedLargePayload) {
+                        await this.yieldBetweenLargePayloadDecrypts();
+                    }
+                    hasProcessedLargePayload = true;
                 }
-                const decryptedString = await this.decryptString(encodeBase64(item.slice(1)), this.secretKeyB64);
-                if (!decryptedString) {
-                    return null;
-                } else {
-                    // Parse JSON string back to object
-                    return parseSerializedJsonValue(decryptedString);
-                }
-            } catch (error) {
+                results.push(await this.decryptReferenceItem(item));
+            }
+            return results;
+        }
+
+        return await mapWithConcurrency(data, this.batchConcurrencyLimit, async (item) => this.decryptReferenceItem(item));
+    }
+
+    private shouldYieldBetweenLargeBytePayloads(data: readonly Uint8Array[]): boolean {
+        let largePayloads = 0;
+        for (const item of data) {
+            if (item.byteLength >= this.largePayloadYieldBytes) {
+                largePayloads += 1;
+                if (largePayloads > 1) return true;
+            }
+        }
+        return false;
+    }
+
+    private async decryptReferenceItem(item: Uint8Array): Promise<any | null> {
+        try {
+            if (item[0] !== 0) {
                 return null;
             }
-        });
+            const decryptedString = await this.decryptString(encodeBase64(item.slice(1)), this.secretKeyB64);
+            if (!decryptedString) {
+                return null;
+            } else {
+                // Parse JSON string back to object
+                return parseSerializedJsonValue(decryptedString);
+            }
+        } catch {
+            return null;
+        }
     }
 
     private async decryptBase64Reference(data: readonly string[]): Promise<(any | null)[]> {
-        return await mapWithConcurrency(data, this.batchConcurrencyLimit, async (item) => {
-            try {
-                return (await this.decryptReference([decodeBase64(item, 'base64')]))[0] ?? null;
-            } catch {
-                return null;
+        const workerResult = await this.decryptLargeBase64WithWebWorker(data);
+        if (workerResult) {
+            return workerResult;
+        }
+
+        return await this.decryptBase64ReferenceOnJs(data);
+    }
+
+    private async decryptBase64ReferenceOnJs(data: readonly string[]): Promise<(any | null)[]> {
+        if (this.shouldYieldBetweenLargeBase64Payloads(data)) {
+            const results: (any | null)[] = [];
+            let hasProcessedLargePayload = false;
+            for (const item of data) {
+                if (estimateBase64DecodedBytes(item) >= this.largePayloadYieldBytes) {
+                    if (hasProcessedLargePayload) {
+                        await this.yieldBetweenLargePayloadDecrypts();
+                    }
+                    hasProcessedLargePayload = true;
+                }
+                results.push(await this.decryptBase64ReferenceItem(item));
             }
-        });
+            return results;
+        }
+
+        return await mapWithConcurrency(data, this.batchConcurrencyLimit, async (item) => this.decryptBase64ReferenceItem(item));
+    }
+
+    private shouldYieldBetweenLargeBase64Payloads(data: readonly string[]): boolean {
+        let largePayloads = 0;
+        for (const item of data) {
+            if (estimateBase64DecodedBytes(item) >= this.largePayloadYieldBytes) {
+                largePayloads += 1;
+                if (largePayloads > 1) return true;
+            }
+        }
+        return false;
+    }
+
+    private hasLargeBase64Payload(data: readonly string[]): boolean {
+        const thresholdBytes = normalizeLargeJsonDecryptPayloadBytes(this.webJsonDecryptWorker.largePayloadThresholdBytes);
+        for (const item of data) {
+            if (estimateBase64DecodedBytes(item) >= thresholdBytes) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private async decryptBase64ReferenceItem(item: string): Promise<any | null> {
+        try {
+            return await this.decryptReferenceItem(decodeBase64(item, 'base64'));
+        } catch {
+            return null;
+        }
+    }
+
+    private async decryptLargeBase64WithWebWorker(data: readonly string[]): Promise<(any | null)[] | null> {
+        const thresholdBytes = normalizeLargeJsonDecryptPayloadBytes(this.webJsonDecryptWorker.largePayloadThresholdBytes);
+        const largeItems: Array<{ index: number; value: string }> = [];
+        const smallItems: Array<{ index: number; value: string }> = [];
+
+        for (let index = 0; index < data.length; index += 1) {
+            const value = data[index]!;
+            if (estimateBase64DecodedBytes(value) >= thresholdBytes) {
+                largeItems.push({ index, value });
+            } else {
+                smallItems.push({ index, value });
+            }
+        }
+
+        if (largeItems.length === 0) {
+            return null;
+        }
+
+        const largeResults = await decryptAesGcmJsonBase64BatchWithWebWorker(
+            largeItems.map((item) => item.value),
+            this.secretKeyB64,
+            this.webJsonDecryptWorker,
+        );
+        if (!largeResults) {
+            return null;
+        }
+
+        const results: (any | null)[] = new Array(data.length);
+        for (let i = 0; i < largeItems.length; i += 1) {
+            results[largeItems[i]!.index] = i < largeResults.length ? largeResults[i] : null;
+        }
+
+        if (smallItems.length > 0) {
+            const smallResults = await this.decryptBase64ReferenceOnJs(smallItems.map((item) => item.value));
+            for (let i = 0; i < smallItems.length; i += 1) {
+                results[smallItems[i]!.index] = i < smallResults.length ? smallResults[i] : null;
+            }
+        }
+
+        return results;
+    }
+
+    private async decryptBase64Batch(data: readonly string[], options: DecryptOptions = {}): Promise<(any | null)[]> {
+        if (this.nativeCryptoWorker) {
+            return await this.decryptBase64WithNativeWorker(data, options);
+        }
+        return await this.decryptBase64Reference(data);
     }
 
     private async decryptBase64WithNativeWorker(data: readonly string[], options: DecryptOptions = {}): Promise<(any | null)[]> {

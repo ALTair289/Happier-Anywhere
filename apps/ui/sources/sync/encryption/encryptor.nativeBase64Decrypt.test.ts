@@ -80,7 +80,12 @@ describe('encryptor native base64 JSON decrypt', () => {
 
     it('keeps valid AES base64 JSON item order through the native worker', async () => {
         const key = decodeHex(UI_CRYPTO_GOLDEN_VECTORS.aesGcmJson.keyHex);
-        const encryptor = new AES256Encryption(key, { nativeCryptoWorker: nativeBinding() });
+        const encryptor = new AES256Encryption(key, {
+            nativeCryptoWorker: nativeBinding(),
+            decryptString: async () => {
+                throw new Error('native AES base64 JSON decrypt must not parse through decryptString');
+            },
+        });
         const decryptBase64 = requireBase64Decryptor(encryptor);
         const vectors = UI_CRYPTO_GOLDEN_VECTORS.aesGcmJson.values;
 

@@ -411,6 +411,10 @@ export class Encryption {
         this.cache.clearSessionCache(sessionId);
     }
 
+    clearSessionCache(sessionId: string): void {
+        this.cache.clearSession(sessionId);
+    }
+
     //
     // Machine operations
     //
