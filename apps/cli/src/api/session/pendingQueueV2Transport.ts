@@ -43,7 +43,7 @@ export type PendingQueueMaterializeNextResult = {
     deferredReason?: PendingQueueMaterializeDeferredReason;
 };
 
-export type PendingQueueMaterializeDeferredReason = 'runtime_activity_active';
+export type PendingQueueMaterializeDeferredReason = 'runtime_activity_active' | 'pending_version_mismatch' | 'blocked_by_earlier';
 
 type PendingQueueWriteBody = Readonly<
     | { localId: string; ciphertext: string; messageRole?: SessionMessageRole }
@@ -64,6 +64,7 @@ type PendingMaterializeAckSocket = Parameters<typeof emitSocketWithAck>[0]['sock
 type PendingMaterializePayload = Readonly<{
     sid: string;
     pendingVersion?: number;
+    expectedPendingVersion?: number;
     deliveryState?: 'provider';
     deliveryTiming?: SessionPendingQueueDeliveryTiming;
 }>;
@@ -97,10 +98,16 @@ function readPendingMaterializePayload(payload: unknown): PendingMaterializePayl
         throw new Error('Invalid pending queue materialize session id');
     }
     const pendingVersion = record.pendingVersion;
+    const expectedPendingVersion = record.expectedPendingVersion;
     return {
         sid: record.sid,
         ...(typeof pendingVersion === 'number' && Number.isSafeInteger(pendingVersion) && pendingVersion >= 0
             ? { pendingVersion }
+            : {}),
+        ...(typeof expectedPendingVersion === 'number'
+            && Number.isSafeInteger(expectedPendingVersion)
+            && expectedPendingVersion >= 0
+            ? { expectedPendingVersion }
             : {}),
         ...(record.deliveryState === 'provider' ? { deliveryState: 'provider' } : {}),
         ...(record.deliveryTiming === 'after_foreground_ready' || record.deliveryTiming === 'after_runtime_idle'
@@ -112,7 +119,11 @@ function readPendingMaterializePayload(payload: unknown): PendingMaterializePayl
 function readPendingMaterializeDeferredReason(value: unknown): PendingQueueMaterializeDeferredReason | undefined {
     if (!value || typeof value !== 'object') return undefined;
     const reason = (value as { deferredReason?: unknown }).deferredReason;
-    return reason === 'runtime_activity_active' ? reason : undefined;
+    return reason === 'runtime_activity_active'
+        || reason === 'pending_version_mismatch'
+        || reason === 'blocked_by_earlier'
+        ? reason
+        : undefined;
 }
 
 function readPendingRowDeliveryStatus(record: Record<string, unknown>): PendingDeliveryStatusV1 {
@@ -125,10 +136,14 @@ function readPendingRowDeliveryStatus(record: Record<string, unknown>): PendingD
 }
 
 function buildPendingMaterializeBody(params: {
+    expectedPendingVersion?: number;
     deliveryStateOptIn?: boolean;
     deliveryTiming?: SessionPendingQueueDeliveryTiming;
 }): Record<string, unknown> {
     return {
+        ...(typeof params.expectedPendingVersion === 'number'
+            ? { expectedPendingVersion: params.expectedPendingVersion }
+            : {}),
         ...(params.deliveryStateOptIn === true ? { deliveryState: 'provider' } : {}),
         ...(params.deliveryTiming === 'after_foreground_ready' || params.deliveryTiming === 'after_runtime_idle'
             ? { deliveryTiming: params.deliveryTiming }
@@ -329,6 +344,42 @@ export async function listPendingQueueV2LocalIdsFromServer(params: {
     }
 }
 
+export type PendingQueueV2DeliveryStatusEntry = Readonly<{
+    localId: string;
+    status: PendingDeliveryStatusV1['status'];
+}>;
+
+/**
+ * Canonical per-row delivery status projection for every row currently in the server pending
+ * queue. Terminal outcomes (a row resolved/delivered — e.g. user "mark delivered" — or removed)
+ * are represented by the row's ABSENCE from the returned list; a lingering row explicitly reports
+ * its `discarded` status. This is the single delivery-truth source used to retire local canonical
+ * provider-delivery claims whose server row has gone terminal.
+ */
+export async function listPendingQueueV2DeliveryStatusesFromServer(params: {
+    token: string;
+    sessionId: string;
+}): Promise<PendingQueueV2DeliveryStatusEntry[]> {
+    const serverUrl = resolveServerHttpBaseUrl();
+    const response = await axios.get(`${serverUrl}/v2/sessions/${encodeURIComponent(params.sessionId)}/pending`, {
+        headers: { Authorization: `Bearer ${params.token}` },
+        timeout: 10_000,
+    });
+    const data = response?.data as { pending?: unknown } | null | undefined;
+    const pending = Array.isArray(data?.pending) ? data.pending : [];
+    const seen = new Set<string>();
+    const entries: PendingQueueV2DeliveryStatusEntry[] = [];
+    for (const row of pending) {
+        if (!row || typeof row !== 'object') continue;
+        const record = row as Record<string, unknown>;
+        const localId = record.localId;
+        if (typeof localId !== 'string' || localId.length === 0 || seen.has(localId)) continue;
+        seen.add(localId);
+        entries.push({ localId, status: readPendingRowDeliveryStatus(record).status });
+    }
+    return entries;
+}
+
 export async function listPendingQueueV2ProviderDeliveryLocalIdsFromServer(params: {
     token: string;
     sessionId: string;
@@ -452,12 +503,17 @@ export async function resolveAcceptedPendingQueueV2Delivery(params: {
     token: string;
     sessionId: string;
     localId: string;
-}): Promise<{ pendingQueueState?: KnownPendingQueueState; message?: PendingQueueMaterializedMessage | null }> {
-    return postPendingQueueV2DeliveryAction({
+}): Promise<{ didResolve: boolean; pendingQueueState?: KnownPendingQueueState; message?: PendingQueueMaterializedMessage | null }> {
+    const result = await postPendingQueueV2DeliveryAction({
         ...params,
         action: 'accepted',
         body: {},
     });
+    return {
+        didResolve: result.didResolve === true,
+        ...(result.pendingQueueState ? { pendingQueueState: result.pendingQueueState } : {}),
+        ...(result.message !== undefined ? { message: result.message } : {}),
+    };
 }
 
 export async function reconcileAcceptedPendingQueueV2DeliveriesThroughSeq(params: {
@@ -492,14 +548,19 @@ export async function reconcileAcceptedPendingQueueV2DeliveriesThroughSeq(params
     };
 }
 
+export type ProviderDeliveryClaimRecoveryMode = 'attach' | 'stale-sweep';
+
 export async function blockPendingQueueV2ProviderDeliveriesOnAttach(params: {
     token: string;
     sessionId: string;
+    // `attach`: recover inherited (orphaned) claims immediately after a runner (re)attach.
+    // `stale-sweep`: the periodic safety tick that only blocks claims stuck past the time cutoff.
+    mode: ProviderDeliveryClaimRecoveryMode;
 }): Promise<{ pendingQueueState?: KnownPendingQueueState }> {
     const serverUrl = resolveServerHttpBaseUrl();
     const response = await axios.post(
         `${serverUrl}/v2/sessions/${encodeURIComponent(params.sessionId)}/pending/delivery/provider-attach`,
-        {},
+        { recovery: params.mode },
         {
             headers: {
                 Authorization: `Bearer ${params.token}`,
@@ -563,7 +624,7 @@ async function postPendingQueueV2DeliveryAction(params: {
     localId: string;
     action: 'accepted' | 'block' | 'retry' | 'handled';
     body: Record<string, unknown>;
-}): Promise<{ pendingQueueState?: KnownPendingQueueState; message?: PendingQueueMaterializedMessage | null }> {
+}): Promise<{ pendingQueueState?: KnownPendingQueueState; message?: PendingQueueMaterializedMessage | null; didResolve?: boolean }> {
     const serverUrl = resolveServerHttpBaseUrl();
     const response = await axios.post(
         `${serverUrl}/v2/sessions/${encodeURIComponent(params.sessionId)}/pending/${encodeURIComponent(params.localId)}/delivery/${params.action}`,
@@ -585,11 +646,15 @@ async function postPendingQueueV2DeliveryAction(params: {
         throw new Error(`Pending delivery ${params.action} failed: ${typeof error === 'string' ? error : 'unknown'}`);
     }
     const pendingQueueState = readKnownPendingQueueState(data);
-    const message = params.action === 'accepted'
+    const didResolve = params.action === 'accepted'
+        ? (data as Record<string, unknown>).didResolve === true
+        : undefined;
+    const message = params.action === 'accepted' && didResolve === true
         ? readMaterializedMessageFromAck(data)
         : null;
     return {
         ...(pendingQueueState ? { pendingQueueState } : {}),
+        ...(params.action === 'accepted' ? { didResolve } : {}),
         ...(params.action === 'accepted' ? { message } : {}),
     };
 }
@@ -597,6 +662,7 @@ async function postPendingQueueV2DeliveryAction(params: {
 async function tryMaterializeNextViaSocket(params: {
     socket: Socket<ServerToClientEvents, ClientToServerEvents>;
     sessionId: string;
+    expectedPendingVersion?: number;
     knownPendingVersion?: number;
     deliveryStateOptIn?: boolean;
     deliveryTiming?: SessionPendingQueueDeliveryTiming;
@@ -607,7 +673,11 @@ async function tryMaterializeNextViaSocket(params: {
             event: 'pending-materialize-next',
             payload: {
                 sid: params.sessionId,
-                ...(typeof params.knownPendingVersion === 'number' ? { pendingVersion: params.knownPendingVersion } : {}),
+                ...(typeof params.expectedPendingVersion === 'number'
+                    ? { expectedPendingVersion: params.expectedPendingVersion }
+                    : typeof params.knownPendingVersion === 'number'
+                        ? { pendingVersion: params.knownPendingVersion }
+                        : {}),
                 ...(params.deliveryStateOptIn === true ? { deliveryState: 'provider' } : {}),
                 ...(params.deliveryTiming === 'after_foreground_ready' || params.deliveryTiming === 'after_runtime_idle'
                     ? { deliveryTiming: params.deliveryTiming }
@@ -651,6 +721,7 @@ async function tryMaterializeNextViaSocket(params: {
 async function tryMaterializeNextViaHttp(params: {
     token: string;
     sessionId: string;
+    expectedPendingVersion?: number;
     deliveryStateOptIn?: boolean;
     deliveryTiming?: SessionPendingQueueDeliveryTiming;
 }): Promise<PendingQueueHttpMaterializeResult> {
@@ -709,6 +780,7 @@ async function tryMaterializeNextViaHttp(params: {
 export async function materializeNextPendingQueueV2MessageViaHttp(params: {
     token: string;
     sessionId: string;
+    expectedPendingVersion?: number;
     deliveryStateOptIn?: boolean;
     deliveryTiming?: SessionPendingQueueDeliveryTiming;
 }): Promise<PendingQueueMaterializeNextResult> {
@@ -738,6 +810,7 @@ export async function materializeNextPendingQueueV2Message(params: {
     token: string;
     sessionId: string;
     socket?: Socket<ServerToClientEvents, ClientToServerEvents> | null;
+    expectedPendingVersion?: number;
     knownPendingVersion?: number;
     deliveryStateOptIn?: boolean;
     deliveryTiming?: SessionPendingQueueDeliveryTiming;
@@ -747,6 +820,7 @@ export async function materializeNextPendingQueueV2Message(params: {
         ? await tryMaterializeNextViaSocket({
             socket: params.socket,
             sessionId: params.sessionId,
+            expectedPendingVersion: params.expectedPendingVersion,
             knownPendingVersion: params.knownPendingVersion,
             deliveryStateOptIn: params.deliveryStateOptIn === true,
             deliveryTiming: params.deliveryTiming,
@@ -759,6 +833,7 @@ export async function materializeNextPendingQueueV2Message(params: {
         res = await tryMaterializeNextViaHttp({
             token: params.token,
             sessionId: params.sessionId,
+            expectedPendingVersion: params.expectedPendingVersion,
             deliveryStateOptIn: params.deliveryStateOptIn === true,
             deliveryTiming: params.deliveryTiming,
         });
