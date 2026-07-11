@@ -2,8 +2,9 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { decryptLegacyBase64 } from '../../messageCrypto';
-import { fetchSessionV2 } from '../../sessions';
+import { fetchAllMessages, fetchSessionV2 } from '../../sessions';
 import { sleep } from '../../timing';
+import { assertSingleDurableToolCallPerLogicalId, decryptSessionMessageLegacy } from '../assertions';
 import type { ProviderFixtures, ProviderScenario, ProviderUnderTest } from '../types';
 
 const cursorAliasModelId = 'gpt-5.1-codex-max-medium-fast';
@@ -268,6 +269,27 @@ export function makeCursorAcpStubExtensionPlanTodosScenario(provider: ProviderUn
       if (planText !== '# Cursor Stub Plan\n\n1. Verify extension UX parity.') {
         throw new Error('cursor_acp_stub_extension_plan_todos: ExitPlanMode plan text was not visible in fixtures');
       }
+    },
+  };
+}
+
+export function makeCursorAcpStubCapturedLifecycleReplayScenario(provider: ProviderUnderTest): ProviderScenario {
+  const scenarioId = 'cursor_acp_stub_captured_lifecycle_replay';
+  assertCursorBackedProvider(provider, scenarioId);
+
+  return {
+    id: scenarioId,
+    title: 'cursor: captured lifecycle replay preserves one durable row per logical call',
+    tier: 'extended',
+    yolo: true,
+    prompt: () => 'CURSOR_STUB_CAPTURED_REPLAY=1',
+    requiredTraceSubstrings: ['CURSOR_CAPTURED_REPLAY_DONE'],
+    verify: async ({ baseUrl, token, sessionId, secret }) => {
+      const rows = await fetchAllMessages(baseUrl, token, sessionId);
+      const messages = rows
+        .map((row) => decryptSessionMessageLegacy(row, secret))
+        .filter((message): message is NonNullable<typeof message> => message !== null);
+      assertSingleDurableToolCallPerLogicalId(messages);
     },
   };
 }

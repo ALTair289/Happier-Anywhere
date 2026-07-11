@@ -59,6 +59,7 @@ import {
 } from './scenarios.acp';
 import {
   makeCursorAcpStubExtensionPlanTodosScenario,
+  makeCursorAcpStubCapturedLifecycleReplayScenario,
   makeCursorAcpStubModeConfigOptionScenario,
   makeCursorAcpStubModelConfigAliasScenario,
 } from './scenarios.cursor';
@@ -775,6 +776,8 @@ await server.connect(new StdioServerTransport());
   cursor_acp_stub_mode_config_option: makeCursorAcpStubModeConfigOptionScenario,
 
   cursor_acp_stub_extension_plan_todos: makeCursorAcpStubExtensionPlanTodosScenario,
+
+  cursor_acp_stub_captured_lifecycle_replay: makeCursorAcpStubCapturedLifecycleReplayScenario,
 
   acp_probe_models: (provider) => {
     if (provider.protocol !== 'acp') {

@@ -18,6 +18,67 @@ export type DecryptedSessionMessage = {
   meta?: Record<string, unknown>;
 };
 
+type DurableToolCallMultiplicity = {
+  logicalKey: string;
+  callId: string;
+  namespace: string;
+  rows: number;
+};
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function durableToolCallNamespace(message: Record<string, unknown>, content: Record<string, unknown>): string {
+  const meta = record(message.meta);
+  const data = record(content.data);
+  const sidechainId = typeof meta?.sidechainId === 'string'
+    ? meta.sidechainId
+    : typeof data?.sidechainId === 'string'
+      ? data.sidechainId
+      : null;
+  return sidechainId ? `sidechain:${sidechainId}` : 'main';
+}
+
+export function findDurableToolCallMultiplicities(messages: readonly unknown[]): DurableToolCallMultiplicity[] {
+  const counts = new Map<string, DurableToolCallMultiplicity>();
+
+  for (const value of messages) {
+    const message = record(value);
+    const content = record(message?.content);
+    if (!message || !content || content.type !== 'tool-call') continue;
+    const callId = typeof content.callId === 'string'
+      ? content.callId
+      : typeof content.toolCallId === 'string'
+        ? content.toolCallId
+        : null;
+    if (!callId) continue;
+    const namespace = durableToolCallNamespace(message, content);
+    const logicalKey = `${namespace}\u0000${callId}`;
+    const prior = counts.get(logicalKey);
+    counts.set(logicalKey, {
+      logicalKey,
+      callId,
+      namespace,
+      rows: (prior?.rows ?? 0) + 1,
+    });
+  }
+
+  return [...counts.values()].filter((entry) => entry.rows > 1);
+}
+
+export function assertSingleDurableToolCallPerLogicalId(messages: readonly unknown[]): void {
+  const duplicates = findDurableToolCallMultiplicities(messages);
+  if (duplicates.length === 0) return;
+  const detail = duplicates
+    .sort((a, b) => a.logicalKey.localeCompare(b.logicalKey))
+    .map((entry) => `logical tool call ${JSON.stringify(entry.callId)} has ${entry.rows} durable rows in ${entry.namespace}`)
+    .join('; ');
+  throw new Error(`Expected one durable tool-call row per logical id: ${detail}`);
+}
+
 export function decryptSessionMessageLegacy(row: SessionMessageRow, secret: Uint8Array): DecryptedSessionMessage | null {
   const ciphertext = row?.content?.c;
   if (typeof ciphertext !== 'string' || ciphertext.length === 0) return null;

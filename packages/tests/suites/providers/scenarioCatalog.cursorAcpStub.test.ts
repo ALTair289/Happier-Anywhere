@@ -29,6 +29,9 @@ describe('scenarioCatalog: Cursor ACP stub parity scenarios', () => {
       'cursor_acp_stub_mode_config_option',
       'cursor_acp_stub_extension_plan_todos',
     ]);
+    expect(cursorStub?.scenarioRegistry.tiers.extended).toEqual([
+      'cursor_acp_stub_captured_lifecycle_replay',
+    ]);
   });
 
   it('defines a Cursor alias/config-option scenario that verifies normalized ACP payloads', () => {
@@ -97,6 +100,25 @@ describe('scenarioCatalog: Cursor ACP stub parity scenarios', () => {
     expect(scenario.id).toBe('cursor_acp_stub_extension_plan_todos');
     expect(scenario.requiredTraceSubstrings).toEqual(['task_complete']);
     expect(scenario.requiredMessageSubstrings).toBeUndefined();
+    expect(typeof scenario.verify).toBe('function');
+  });
+
+  it('defines the captured lifecycle replay as a deterministic extended scenario', () => {
+    const build = (scenarioCatalog as Record<string, unknown>).cursor_acp_stub_captured_lifecycle_replay;
+    expect(typeof build).toBe('function');
+
+    const scenario = (build as (provider: ProviderUnderTest) => unknown)(cursorAcpStubProvider()) as {
+      id?: unknown;
+      tier?: unknown;
+      prompt?: unknown;
+      requiredTraceSubstrings?: unknown;
+      verify?: unknown;
+    };
+
+    expect(scenario.id).toBe('cursor_acp_stub_captured_lifecycle_replay');
+    expect(scenario.tier).toBe('extended');
+    expect(typeof scenario.prompt).toBe('function');
+    expect(scenario.requiredTraceSubstrings).toEqual(['CURSOR_CAPTURED_REPLAY_DONE']);
     expect(typeof scenario.verify).toBe('function');
   });
 });

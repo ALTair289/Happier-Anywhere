@@ -3,6 +3,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { replayRepresentativeCursorLifecycle } from './cursor-acp-captured-replay-v1.mjs';
 
 const decoder = new TextDecoder();
 let buffer = '';
@@ -106,6 +107,23 @@ function readPromptText(prompt) {
     }
   }
   return parts.join('\n');
+}
+
+function sendSessionUpdate(sessionId, update) {
+  send({
+    jsonrpc: '2.0',
+    method: 'session/update',
+    params: { sessionId, update },
+  });
+}
+
+function runCapturedLifecycleReplay(id, sessionId) {
+  replayRepresentativeCursorLifecycle((update) => sendSessionUpdate(sessionId, update));
+  sendSessionUpdate(sessionId, {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: 'CURSOR_CAPTURED_REPLAY_DONE' },
+  });
+  ok(id, { stopReason: 'end_turn' });
 }
 
 function updateConfigOption(session, configId, value) {
@@ -242,12 +260,16 @@ function handleRequest(req) {
 
   if (method === 'session/prompt') {
     const text = readPromptText(params?.prompt);
+    const sessionId = typeof params?.sessionId === 'string' ? params.sessionId : 'cursor-stub-session';
+    if (text.includes('CURSOR_STUB_CAPTURED_REPLAY=1')) {
+      runCapturedLifecycleReplay(id, sessionId);
+      return;
+    }
     if (text.includes('CURSOR_STUB_EXTENSION_UX=1')) {
       startExtensionUxPrompt(id);
       return;
     }
 
-    const sessionId = typeof params?.sessionId === 'string' ? params.sessionId : 'cursor-stub-session';
     send({
       jsonrpc: '2.0',
       method: 'session/update',

@@ -6,6 +6,6 @@
       "cursor_acp_stub_mode_config_option",
       "cursor_acp_stub_extension_plan_todos"
     ],
-    "extended": []
+    "extended": ["cursor_acp_stub_captured_lifecycle_replay"]
   }
 }
