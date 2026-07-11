@@ -1,8 +1,7 @@
-import { updateMetadataBestEffort } from '@/api/session/sessionWritesBestEffort';
 import { logger } from '@/ui/logger';
 
 import type { Session } from '../session';
-import { buildClaudeSessionModelsMetadataWithCurrentModelId } from '../remote/buildClaudeSessionModelsMetadataFromSupportedModels';
+import { applyClaudeEffectiveModelUpdate } from '../sessionModels/effectiveModelUpdate';
 import type { ClaudeStatuslinePayload } from './statuslinePayload';
 
 /**
@@ -52,7 +51,6 @@ export type ClaudeStatuslineRuntimeReconcileInput = Readonly<{
 }>;
 
 type StatuslineSessionState = {
-    lastModelKey: string | null;
     lastRuntimeReconcileKey: string | null;
     lastCanaryKey: string | null;
 };
@@ -67,7 +65,7 @@ export function createClaudeStatuslineApplier(params: Readonly<{
     const stateFor = (session: Session): StatuslineSessionState => {
         const existing = stateBySession.get(session);
         if (existing) return existing;
-        const created: StatuslineSessionState = { lastModelKey: null, lastRuntimeReconcileKey: null, lastCanaryKey: null };
+        const created: StatuslineSessionState = { lastRuntimeReconcileKey: null, lastCanaryKey: null };
         stateBySession.set(session, created);
         return created;
     };
@@ -75,35 +73,20 @@ export function createClaudeStatuslineApplier(params: Readonly<{
     const maybeAdoptModelAndWindow = (
         session: Session,
         payload: ClaudeStatuslinePayload,
-        state: StatuslineSessionState,
     ): void => {
         const modelId = readString(payload.model?.id);
         if (!modelId) return;
         const contextWindowTokens = readPositiveTokens(payload.context_window?.context_window_size);
         const displayName = readString(payload.model?.display_name);
 
-        // Dedupe: identical payloads (~300ms debounce upstream, but state changes repeat the same
-        // model/window) must not spam metadata writes.
-        const modelKey = `${modelId}|${contextWindowTokens ?? ''}`;
-        if (modelKey === state.lastModelKey) return;
-        state.lastModelKey = modelKey;
-
-        updateMetadataBestEffort(
-            session.client,
-            (metadata) => ({
-                ...metadata,
-                ...(buildClaudeSessionModelsMetadataWithCurrentModelId({
-                    currentModelId: modelId,
-                    metadata,
-                    currentModel: {
-                        ...(displayName ? { name: displayName } : {}),
-                        ...(contextWindowTokens !== null ? { contextWindowTokens } : {}),
-                    },
-                }) ?? {}),
-            }),
-            params.logPrefix,
-            'runtime_model_update',
-        );
+        applyClaudeEffectiveModelUpdate({
+            client: session.client,
+            modelId,
+            displayName,
+            contextWindowTokens,
+            source: 'statusline',
+            logPrefix: params.logPrefix,
+        });
     };
 
     /**
@@ -156,7 +139,7 @@ export function createClaudeStatuslineApplier(params: Readonly<{
                 });
                 return;
             }
-            maybeAdoptModelAndWindow(session, payload, stateFor(session));
+            maybeAdoptModelAndWindow(session, payload);
             maybeReconcileRuntime(session, payload, stateFor(session));
             maybeLogRuntimeCanary(payload, stateFor(session));
         },

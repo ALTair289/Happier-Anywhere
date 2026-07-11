@@ -15,10 +15,12 @@ function createSessionFixture(params?: Readonly<{
   session: Session;
   getMetadata: () => Metadata;
   getUpdateMetadataCallCount: () => number;
+  getSessionEventCalls: () => readonly Readonly<{ event: unknown; id: string | undefined }>[];
   getRuntimeReconcileCalls: () => readonly Readonly<{ model?: string; reasoningEffort?: string }>[];
 }> {
   let metadata: Metadata = {} as Metadata;
   let updateMetadataCallCount = 0;
+  const sessionEventCalls: Array<Readonly<{ event: unknown; id: string | undefined }>> = [];
   const runtimeReconcileCalls: Readonly<{ model?: string; reasoningEffort?: string }>[] = [];
   const session = {
     sessionId: params?.sessionId ?? null,
@@ -29,17 +31,21 @@ function createSessionFixture(params?: Readonly<{
     client: {
       sessionId: 'happy-session-id',
       sendClaudeSessionMessage: vi.fn(),
-      sendSessionEvent: vi.fn(),
+      sendSessionEvent: vi.fn((event: unknown, id?: string) => {
+        sessionEventCalls.push({ event, id });
+      }),
       updateMetadata: (updater: (current: Metadata) => Metadata) => {
         updateMetadataCallCount += 1;
         metadata = updater(metadata);
       },
+      getMetadataSnapshot: () => metadata,
     },
   } as unknown as Session;
   return {
     session,
     getMetadata: () => metadata,
     getUpdateMetadataCallCount: () => updateMetadataCallCount,
+    getSessionEventCalls: () => sessionEventCalls,
     getRuntimeReconcileCalls: () => runtimeReconcileCalls,
   };
 }
@@ -110,6 +116,32 @@ describe('createClaudeStatuslineApplier', () => {
         expect.objectContaining({ id: 'claude-fable-5', contextWindowTokens: 1_000_000 }),
       ],
     });
+  });
+
+  it('emits one visible session event when the statusline reports an active model transition', () => {
+    const fixture = createSessionFixture({ sessionId: 'claude-session-id' });
+    const applier = createClaudeStatuslineApplier({ logPrefix: '[test]' });
+
+    applier.apply(fixture.session, buildPayload({
+      model: { id: 'claude-fable-5', display_name: 'Fable 5' },
+    }));
+    applier.apply(fixture.session, buildPayload({
+      model: { id: 'claude-opus-4-8', display_name: 'Opus 4.8' },
+    }));
+    applier.apply(fixture.session, buildPayload({
+      model: { id: 'claude-opus-4-8', display_name: 'Opus 4.8' },
+    }));
+
+    expect(fixture.getMetadata().sessionModelsV1).toMatchObject({
+      provider: 'claude',
+      currentModelId: 'claude-opus-4-8',
+    });
+    expect(fixture.getSessionEventCalls()).toEqual([
+      {
+        event: { type: 'message', message: 'Model changed to Opus 4.8' },
+        id: 'claude:model-changed:claude-fable-5:claude-opus-4-8',
+      },
+    ]);
   });
 
   it('ignores payloads from a foreign Claude session', () => {
