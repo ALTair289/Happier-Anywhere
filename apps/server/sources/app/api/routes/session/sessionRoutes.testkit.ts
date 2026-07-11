@@ -42,6 +42,7 @@ export const patchSession = vi.fn();
 export const applySessionReadCursorOperation = vi.fn();
 export const applySessionTurnMutation = vi.fn();
 export const applySessionTurnMutationInTx = vi.fn();
+export const clearSessionRuntimeActivityProjectionInTx = vi.fn();
 export const checkSessionAccess = vi.fn(async () => ({ level: "owner" }));
 export const requireAccessLevel = vi.fn((access: any, required: any) => {
     const levels = ["view", "edit", "admin", "owner"];
@@ -176,6 +177,7 @@ vi.mock("@/app/session/sessionWriteService", () => ({
     applySessionReadCursorOperation,
     applySessionTurnMutation,
     applySessionTurnMutationInTx,
+    clearSessionRuntimeActivityProjectionInTx,
 }));
 
 vi.mock("@/app/share/accessControl", () => ({
@@ -212,6 +214,29 @@ export function resetSessionRouteMocks(): void {
     applySessionReadCursorOperation.mockReset();
     applySessionTurnMutation.mockReset();
     applySessionTurnMutationInTx.mockReset();
+    clearSessionRuntimeActivityProjectionInTx.mockReset();
+    clearSessionRuntimeActivityProjectionInTx.mockImplementation(async (params: any) => {
+        const projection = {
+            runtimeActivityActiveCount: 0,
+            runtimeActivityObservedAt: null,
+            runtimeActivityExpiresAt: null,
+            runtimeActivitySourceClass: null,
+        };
+        const row = await params.tx.session.update({
+            where: { id: params.sessionId },
+            data: {
+                ...(params.additionalData ?? {}),
+                ...projection,
+            },
+            ...(params.select ? { select: params.select } : {}),
+        });
+        return {
+            didWrite: true,
+            didChangePresentedProjection: true,
+            projection,
+            row,
+        };
+    });
     checkSessionAccess.mockResolvedValue({ level: "owner" });
     getSessionParticipantUserIds.mockResolvedValue([]);
     sessionFindMany.mockResolvedValue([]);

@@ -4,6 +4,7 @@ import { inTx, type Tx } from "@/storage/inTx";
 import { isPrismaErrorCode } from "@/storage/prisma";
 import { log } from "@/utils/logging/log";
 import { readEncryptionFeatureEnv } from "@/app/features/catalog/readFeatureEnv";
+import type { Prisma } from "@prisma/client";
 import {
     isStoredContentKindAllowedForSessionByStoragePolicy,
     PrimaryTurnStatusV1Schema,
@@ -42,6 +43,8 @@ import {
     type SessionTurnStoredRow,
 } from "./turns/parseSessionTurnState";
 import {
+    hasNonIdleSessionRuntimeActivityProjection,
+    IDLE_SESSION_RUNTIME_ACTIVITY_PROJECTION,
     normalizeSessionRuntimeActivityProjection,
     normalizeStoredSessionRuntimeActivityProjection,
     type SessionRuntimeActivityProjectionUpdate,
@@ -1155,6 +1158,90 @@ function runtimeActivityProjectionEquals(
         && a.runtimeActivitySourceClass === b.runtimeActivitySourceClass;
 }
 
+function isRuntimeActivityProjectionActive(
+    projection: SessionRuntimeActivityProjectionUpdate,
+    now: number,
+): boolean {
+    return projection.runtimeActivityActiveCount > 0
+        && projection.runtimeActivityExpiresAt !== null
+        && projection.runtimeActivityExpiresAt > now;
+}
+
+function runtimeActivityPresentedProjectionChanged(params: {
+    previous: SessionRuntimeActivityProjectionUpdate;
+    next: SessionRuntimeActivityProjectionUpdate;
+    now: number;
+}): boolean {
+    return params.previous.runtimeActivityActiveCount !== params.next.runtimeActivityActiveCount
+        || params.previous.runtimeActivitySourceClass !== params.next.runtimeActivitySourceClass
+        || isRuntimeActivityProjectionActive(params.previous, params.now) !== isRuntimeActivityProjectionActive(params.next, params.now);
+}
+
+function toSessionRuntimeActivityProjectionColumnData(
+    projection: SessionRuntimeActivityProjectionUpdate,
+): Prisma.SessionUpdateInput {
+    return {
+        runtimeActivityActiveCount: projection.runtimeActivityActiveCount,
+        runtimeActivityObservedAt: projection.runtimeActivityObservedAt === null
+            ? null
+            : BigInt(projection.runtimeActivityObservedAt),
+        runtimeActivityExpiresAt: projection.runtimeActivityExpiresAt === null
+            ? null
+            : BigInt(projection.runtimeActivityExpiresAt),
+        runtimeActivitySourceClass: projection.runtimeActivitySourceClass,
+    };
+}
+
+export async function clearSessionRuntimeActivityProjectionInTx(params: {
+    tx: Tx;
+    sessionId: string;
+    current: Readonly<{
+        runtimeActivityActiveCount?: unknown;
+        runtimeActivityObservedAt?: unknown;
+        runtimeActivityExpiresAt?: unknown;
+        runtimeActivitySourceClass?: unknown;
+    }>;
+    additionalData?: Prisma.SessionUpdateInput;
+    select?: Prisma.SessionSelect;
+}): Promise<{
+    didWrite: boolean;
+    didChangePresentedProjection: boolean;
+    projection: SessionRuntimeActivityProjectionUpdate;
+    row: unknown;
+}> {
+    const projection = IDLE_SESSION_RUNTIME_ACTIVITY_PROJECTION;
+    const previousProjection = normalizeStoredSessionRuntimeActivityProjection(params.current);
+    const didWrite = hasNonIdleSessionRuntimeActivityProjection(params.current);
+    const didChangePresentedProjection = runtimeActivityPresentedProjectionChanged({
+        previous: previousProjection,
+        next: projection,
+        now: Date.now(),
+    });
+    if (!didWrite && params.additionalData === undefined) {
+        return {
+            didWrite,
+            didChangePresentedProjection,
+            projection,
+            row: null,
+        };
+    }
+    const data: Prisma.SessionUpdateInput = {
+        ...(params.additionalData ?? {}),
+        ...(didWrite ? toSessionRuntimeActivityProjectionColumnData(projection) : {}),
+    };
+    const row = await params.tx.session.update({
+        where: { id: params.sessionId },
+        data,
+        ...(params.select ? { select: params.select } : {}),
+    });
+    return {
+        didWrite,
+        didChangePresentedProjection,
+        projection,
+        row,
+    };
+}
+
 export async function updateSessionRuntimeActivityProjection(params: {
     actorUserId: string;
     sessionId: string;
@@ -1190,33 +1277,33 @@ export async function updateSessionRuntimeActivityProjection(params: {
             }
 
             const projection = normalizeSessionRuntimeActivityProjection(params);
-            if (runtimeActivityProjectionEquals(normalizeStoredSessionRuntimeActivityProjection(current), projection)) {
+            const previousProjection = normalizeStoredSessionRuntimeActivityProjection(current);
+            if (runtimeActivityProjectionEquals(previousProjection, projection)) {
                 return {
                     ok: true,
                     didWrite: false,
+                    didChangePresentedProjection: false,
                     projection,
                     participantCursors: [],
                     badgeAttentionChanged: false,
                 };
             }
 
+            const didChangePresentedProjection = runtimeActivityPresentedProjectionChanged({
+                previous: previousProjection,
+                next: projection,
+                now: Date.now(),
+            });
+
             await tx.session.updateMany({
                 where: { id: sessionId },
-                data: {
-                    runtimeActivityActiveCount: projection.runtimeActivityActiveCount,
-                    runtimeActivityObservedAt: projection.runtimeActivityObservedAt === null
-                        ? null
-                        : BigInt(projection.runtimeActivityObservedAt),
-                    runtimeActivityExpiresAt: projection.runtimeActivityExpiresAt === null
-                        ? null
-                        : BigInt(projection.runtimeActivityExpiresAt),
-                    runtimeActivitySourceClass: projection.runtimeActivitySourceClass,
-                },
+                data: toSessionRuntimeActivityProjectionColumnData(projection),
             });
             const participantCursors = await markSessionParticipantsChanged({ tx, sessionId });
             return {
                 ok: true,
                 didWrite: true,
+                didChangePresentedProjection,
                 projection,
                 participantCursors,
                 badgeAttentionChanged: false,

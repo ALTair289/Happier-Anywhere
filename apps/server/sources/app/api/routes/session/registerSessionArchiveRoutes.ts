@@ -8,8 +8,8 @@ import { didSessionActivityBadgeContributionChange } from "@/app/activity/accoun
 import { refreshSessionParticipantBadgePushes } from "@/app/activity/refreshAccountActivityBadgePushes";
 import {
     hasNonIdleSessionRuntimeActivityProjection,
-    IDLE_SESSION_RUNTIME_ACTIVITY_PROJECTION,
 } from "@/app/session/runtimeActivityProjection";
+import { clearSessionRuntimeActivityProjectionInTx } from "@/app/session/sessionWriteService";
 import { randomKeyNaked } from "@/utils/keys/randomKeyNaked";
 import { type Fastify } from "../../types";
 
@@ -61,15 +61,17 @@ export function registerSessionArchiveRoutes(app: Fastify) {
             }
 
             const shouldClearRuntimeActivity = hasNonIdleSessionRuntimeActivityProjection(session);
-            const runtimeActivityProjection = shouldClearRuntimeActivity
-                ? IDLE_SESSION_RUNTIME_ACTIVITY_PROJECTION
-                : {};
-
-            const updated = await tx.session.update({
-                where: { id: sessionId },
-                data: { archivedAt: new Date(), ...runtimeActivityProjection },
+            const clearResult = await clearSessionRuntimeActivityProjectionInTx({
+                tx,
+                sessionId,
+                current: session,
+                additionalData: { archivedAt: new Date() },
                 select: { archivedAt: true },
             });
+            const runtimeActivityProjection = shouldClearRuntimeActivity
+                ? clearResult.projection
+                : {};
+            const updated = clearResult.row as { archivedAt?: Date | null };
 
             const participantCursors = await markSessionParticipantsChanged({ tx, sessionId });
 

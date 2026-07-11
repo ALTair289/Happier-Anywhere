@@ -10,6 +10,7 @@ import {
     markAccountChanged,
     buildUpdateSessionUpdate,
     emitUpdate,
+    clearSessionRuntimeActivityProjectionInTx,
 } from "./sessionRoutes.testkit";
 
 describe("sessionRoutes v2 archive", () => {
@@ -45,6 +46,20 @@ describe("sessionRoutes v2 archive", () => {
                 runtimeActivityExpiresAt: null,
                 runtimeActivitySourceClass: null,
             }),
+        }));
+        expect(clearSessionRuntimeActivityProjectionInTx).toHaveBeenCalledWith(expect.objectContaining({
+            tx: expect.any(Object),
+            sessionId: "s1",
+            current: expect.objectContaining({
+                runtimeActivityActiveCount: 1,
+                runtimeActivityObservedAt: BigInt(1_000),
+                runtimeActivityExpiresAt: BigInt(60_000),
+                runtimeActivitySourceClass: "provider_detached_task",
+            }),
+            additionalData: expect.objectContaining({
+                archivedAt: expect.any(Date),
+            }),
+            select: { archivedAt: true },
         }));
         expect(markAccountChanged).toHaveBeenCalledTimes(2);
         expect(buildUpdateSessionUpdate).toHaveBeenCalledTimes(2);
