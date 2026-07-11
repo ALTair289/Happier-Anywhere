@@ -70,6 +70,13 @@ describe('areStoredSessionsEqual', () => {
         )).toBe(false);
     });
 
+    it('detects resume lifecycle marker changes', () => {
+        expect(areStoredSessionsEqual(
+            session({ resumingAt: null }),
+            session({ resumingAt: 200 }),
+        )).toBe(false);
+    });
+
     it('detects rollback-eligible turn start changes', () => {
         expect(areStoredSessionsEqual(
             session({ rollbackEligibleTurnStarts: [1] }),
