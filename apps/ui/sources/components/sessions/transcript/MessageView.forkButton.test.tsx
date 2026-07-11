@@ -326,6 +326,67 @@ describe('MessageView (fork button)', () => {
     assertForkButtonPrecedesCopyButton(screen, 'm1');
   });
 
+  it.each([
+    ['user', { kind: 'user-text', id: 'm1', createdAt: 1, text: 'hi', seq: 5 }],
+    ['agent', { kind: 'agent-text', id: 'm1', createdAt: 1, text: 'hi', isThinking: false, seq: 5 }],
+  ])('does not expose %s fork actions when the surface grant denies fork', async (_kind, message) => {
+    const { MessageView } = await import('./MessageView');
+
+    const screen = await renderScreen(
+      <MessageView
+        message={message as any}
+        metadata={null}
+        sessionId="s1"
+        interaction={{
+          canSendMessages: false,
+          canApprovePermissions: false,
+          permissionDisabledReason: 'public',
+          disableToolNavigation: true,
+          canFork: false,
+        }}
+      />,
+    );
+
+    expect(screen.findByTestId('transcript-message-fork:m1')).toBeNull();
+    expect(forkSessionSpy).not.toHaveBeenCalled();
+  });
+
+  it('rechecks the current surface grant before a stale mounted fork handler can call the RPC', async () => {
+    forkSessionSpy.mockResolvedValueOnce({ ok: true, childSessionId: 'child-1' });
+    const { MessageView } = await import('./MessageView');
+    const message: any = { kind: 'agent-text', id: 'm1', createdAt: 1, text: 'hi', isThinking: false, seq: 5 };
+    const allowedInteraction = {
+      canSendMessages: true,
+      canApprovePermissions: true,
+      canFork: true,
+    } as const;
+    const deniedInteraction = {
+      canSendMessages: false,
+      canApprovePermissions: false,
+      canFork: false,
+      permissionDisabledReason: 'public',
+      disableToolNavigation: true,
+    } as const;
+
+    const screen = await renderScreen(
+      <MessageView message={message} metadata={null} sessionId="s1" interaction={allowedInteraction} />,
+    );
+    const stalePress = screen.findByTestId('transcript-message-fork:m1')?.props.onPress;
+    expect(typeof stalePress).toBe('function');
+
+    act(() => {
+      screen.tree.update(
+        <MessageView message={message} metadata={null} sessionId="s1" interaction={deniedInteraction} />,
+      );
+    });
+    expect(screen.findByTestId('transcript-message-fork:m1')).toBeNull();
+
+    await act(async () => {
+      await stalePress();
+    });
+    expect(forkSessionSpy).not.toHaveBeenCalled();
+  });
+
   it('does not render fork button when message seq is 0 (uncommitted)', async () => {
     const { MessageView } = await import('./MessageView');
 

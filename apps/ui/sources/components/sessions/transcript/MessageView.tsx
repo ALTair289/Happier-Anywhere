@@ -72,10 +72,15 @@ import type {
   TranscriptToolChromeCommon,
   TranscriptToolRouteCommon,
 } from '@/components/sessions/transcript/transcriptSessionCommon';
-import { useTranscriptSessionCommon } from '@/components/sessions/transcript/transcriptSessionCommon';
+import {
+  deriveTranscriptForkCommonForInteraction,
+  useTranscriptSessionCommon,
+} from '@/components/sessions/transcript/transcriptSessionCommon';
 import { TranscriptJumpHighlightOverlay } from '@/components/sessions/transcript/navigation/TranscriptJumpHighlightOverlay';
 import { getCachedIntlDateTimeFormat } from '@/utils/datetime/cachedIntlFormatters';
 import type { TranscriptEventEmphasis } from '@/components/sessions/transcript/events/transcriptEventEmphasis';
+import { deriveTranscriptInteractionFromSession, type TranscriptInteraction } from '@/utils/sessions/deriveTranscriptInteraction';
+import { useSession } from '@/sync/domains/state/storage';
 
 type StreamSegmentStateForRendering = 'streaming' | 'complete' | 'interrupted';
 const TRANSCRIPT_SELECTION_CHECKBOX_ANCHOR_TOP = 0;
@@ -209,12 +214,7 @@ type MessageViewProps = {
   historical?: boolean;
   messageRevision?: number | null;
   eventEmphasis?: TranscriptEventEmphasis;
-  interaction?: {
-    canSendMessages: boolean;
-    canApprovePermissions: boolean;
-    permissionDisabledReason?: 'public' | 'readOnly' | 'notGranted' | 'inactive';
-    disableToolNavigation?: boolean;
-  };
+  interaction?: TranscriptInteraction;
 };
 
 // R3: transcript rows are memoized — the message object's identity changes only on revision
@@ -223,9 +223,19 @@ type MessageViewProps = {
 // re-render every visible message subtree.
 export const MessageView = React.memo(function MessageView(props: MessageViewProps) {
   const transcriptSessionCommon = useTranscriptSessionCommon(props.sessionId);
+  const session = useSession(props.sessionId);
+  const sessionInteraction = React.useMemo(() => session
+    ? deriveTranscriptInteractionFromSession({
+        accessLevel: session.accessLevel,
+        canApprovePermissions: session.canApprovePermissions,
+        active: session.active,
+        presence: session.presence,
+      })
+    : undefined, [session]);
   return (
     <MessageViewWithSessionCommon
       {...props}
+      interaction={props.interaction ?? sessionInteraction}
       forkCommon={transcriptSessionCommon.fork}
       messageDisplayCommon={transcriptSessionCommon.messageDisplay}
       toolChromeCommon={transcriptSessionCommon.toolChrome}
@@ -240,6 +250,13 @@ export const MessageViewWithSessionCommon = React.memo(function MessageViewWithS
   toolChromeCommon: TranscriptToolChromeCommon;
   toolRouteCommon: TranscriptToolRouteCommon;
 }) {
+  const interactionRef = React.useRef(props.interaction);
+  interactionRef.current = props.interaction;
+  const isForkAllowed = React.useCallback(() => interactionRef.current?.canFork === true, []);
+  const forkCommon = React.useMemo(
+    () => deriveTranscriptForkCommonForInteraction(props.forkCommon, props.interaction),
+    [props.forkCommon, props.interaction],
+  );
   if (shouldHideVoiceAgentTurnMessage(props.message)) return null;
   return (
     <View style={styles.messageContainer} renderToHardwareTextureAndroid={true}>
@@ -268,7 +285,8 @@ export const MessageViewWithSessionCommon = React.memo(function MessageViewWithS
           messageRevision={props.messageRevision}
           eventEmphasis={props.eventEmphasis}
           interaction={props.interaction}
-          forkCommon={props.forkCommon}
+          isForkAllowed={isForkAllowed}
+          forkCommon={forkCommon}
           messageDisplayCommon={props.messageDisplayCommon}
           toolChromeCommon={props.toolChromeCommon}
           toolRouteCommon={props.toolRouteCommon}
@@ -290,12 +308,8 @@ function RenderBlock(props: {
   thinkingExpanded?: boolean;
   onThinkingExpandedChange?: (next: boolean) => void;
   getMessageById?: (id: string) => Message | null;
-  interaction?: {
-    canSendMessages: boolean;
-    canApprovePermissions: boolean;
-    permissionDisabledReason?: 'public' | 'readOnly' | 'notGranted' | 'inactive';
-    disableToolNavigation?: boolean;
-  };
+  interaction?: TranscriptInteraction;
+  isForkAllowed: () => boolean;
   rollbackAction?: TranscriptRollbackAction | null;
   messagePins?: readonly PersistedSessionMessagePinV1[];
   onToggleMessagePin?: SessionMessagePinToggleHandler;
@@ -316,6 +330,7 @@ function RenderBlock(props: {
           metadata={props.metadata}
           sessionId={props.sessionId}
           canSendMessages={props.interaction?.canSendMessages ?? true}
+          isForkAllowed={props.isForkAllowed}
           rollbackAction={props.rollbackAction}
           messagePins={props.messagePins}
           onToggleMessagePin={props.onToggleMessagePin}
@@ -333,6 +348,7 @@ function RenderBlock(props: {
           metadata={props.metadata}
           sessionId={props.sessionId}
           canSendMessages={props.interaction?.canSendMessages ?? true}
+          isForkAllowed={props.isForkAllowed}
           activeThinkingMessageId={props.activeThinkingMessageId}
           thinkingExpanded={props.thinkingExpanded}
           onThinkingExpandedChange={props.onThinkingExpandedChange}
@@ -383,6 +399,7 @@ function UserTextBlock(props: {
   metadata: Metadata | null;
   sessionId: string;
   canSendMessages: boolean;
+  isForkAllowed: () => boolean;
   rollbackAction?: TranscriptRollbackAction | null;
   messagePins?: readonly PersistedSessionMessagePinV1[];
   onToggleMessagePin?: SessionMessagePinToggleHandler;
@@ -491,7 +508,7 @@ function UserTextBlock(props: {
     return true;
   }, [pathname, props.sessionId, router, workspacePath]);
   const seq = resolveTranscriptMessageSeq(props.message);
-  const showForkButton = canForkFromMessage({ session: sessionForkSupportSource, messageSeq: seq, replayEnabled: sessionReplayEnabled });
+  const showForkButton = props.isForkAllowed() && canForkFromMessage({ session: sessionForkSupportSource, messageSeq: seq, replayEnabled: sessionReplayEnabled });
   const forkSemantics = React.useMemo(() => {
     if (seq == null) return null;
     return resolveForkFromMessageSemantics({ message: props.message, messageSeqInclusive: seq });
@@ -600,6 +617,7 @@ function UserTextBlock(props: {
                 restoredDraftText={forkSemantics?.restoredDraftText ?? null}
                 messageId={props.message.id}
                 forkCommon={props.forkCommon}
+                isForkAllowed={props.isForkAllowed}
                 onHoverIn={isWeb ? () => setIsCopyButtonHovered(true) : undefined}
                 onHoverOut={isWeb ? () => setIsCopyButtonHovered(false) : undefined}
                 invertedActionsLayout={timestampPresentation.invertTimestampAndActions}
@@ -726,6 +744,7 @@ function UserTextBlock(props: {
                 restoredDraftText={forkSemantics?.restoredDraftText ?? null}
                 messageId={props.message.id}
                 forkCommon={props.forkCommon}
+                isForkAllowed={props.isForkAllowed}
                 onHoverIn={isWeb ? () => setIsCopyButtonHovered(true) : undefined}
                 onHoverOut={isWeb ? () => setIsCopyButtonHovered(false) : undefined}
                 invertedActionsLayout={timestampPresentation.invertTimestampAndActions}
@@ -771,6 +790,7 @@ function AgentTextBlock(props: {
   metadata: Metadata | null;
   sessionId: string;
   canSendMessages: boolean;
+  isForkAllowed: () => boolean;
   activeThinkingMessageId: string | null;
   thinkingExpanded?: boolean;
   onThinkingExpandedChange?: (next: boolean) => void;
@@ -892,7 +912,7 @@ function AgentTextBlock(props: {
     return true;
   }, [pathname, props.sessionId, router, workspacePath]);
   const seq = resolveTranscriptMessageSeq(props.message);
-  const showForkButton = canForkFromMessage({ session: sessionForkSupportSource, messageSeq: seq, replayEnabled: sessionReplayEnabled });
+  const showForkButton = props.isForkAllowed() && canForkFromMessage({ session: sessionForkSupportSource, messageSeq: seq, replayEnabled: sessionReplayEnabled });
   const forkSemantics = React.useMemo(() => {
     if (seq == null) return null;
     return resolveForkFromMessageSemantics({ message: props.message, messageSeqInclusive: seq });
@@ -1159,6 +1179,7 @@ function AgentTextBlock(props: {
               restoredDraftText={forkSemantics?.restoredDraftText ?? null}
               messageId={props.message.id}
               forkCommon={props.forkCommon}
+              isForkAllowed={props.isForkAllowed}
               onHoverIn={isWeb ? () => setIsCopyButtonHovered(true) : undefined}
               onHoverOut={isWeb ? () => setIsCopyButtonHovered(false) : undefined}
               invertedActionsLayout={timestampPresentation.invertTimestampAndActions}
@@ -1204,6 +1225,7 @@ function ForkMessageButton(props: {
   restoredDraftText?: string | null;
   messageId: string;
   forkCommon: TranscriptForkCommon;
+  isForkAllowed: () => boolean;
   invertedActionsLayout?: boolean;
   onHoverIn?: () => void;
   onHoverOut?: () => void;
@@ -1219,7 +1241,7 @@ function ForkMessageButton(props: {
   const sessionReplayMaxSeedChars = props.forkCommon.sessionReplayMaxSeedChars;
 
   const handlePress = React.useCallback(async () => {
-    if (isForking) return;
+    if (isForking || !props.isForkAllowed()) return;
     setIsForking(true);
     try {
       const reachableMachineTarget = readMachineTargetForSession(props.sessionId);
@@ -1253,7 +1275,7 @@ function ForkMessageButton(props: {
     } finally {
       setIsForking(false);
     }
-  }, [executionRunsEnabled, isForking, props.messageId, props.restoredDraftText, props.sessionId, props.upToSeqInclusive, router, sessionForkSupportSource?.metadata?.machineId, sessionReplayMaxSeedChars, sessionReplayStrategy, sessionReplaySummaryRunner]);
+  }, [executionRunsEnabled, isForking, props.isForkAllowed, props.messageId, props.restoredDraftText, props.sessionId, props.upToSeqInclusive, router, sessionForkSupportSource?.metadata?.machineId, sessionReplayMaxSeedChars, sessionReplayStrategy, sessionReplaySummaryRunner]);
 
   if (!sessionForkSupportSource) return null;
 
@@ -1369,12 +1391,7 @@ function ToolCallBlock(props: {
   approvalRequests?: readonly OpenApprovalArtifactForSession[];
   activeThinkingMessageId: string | null;
   getMessageById?: (id: string) => Message | null;
-  interaction?: {
-    canSendMessages: boolean;
-    canApprovePermissions: boolean;
-    permissionDisabledReason?: 'public' | 'readOnly' | 'inactive' | 'notGranted';
-    disableToolNavigation?: boolean;
-  };
+  interaction?: TranscriptInteraction;
   rollbackAction?: TranscriptRollbackAction | null;
   messagePins?: readonly PersistedSessionMessagePinV1[];
   onToggleToolPin?: SessionMessagePinToggleHandler;

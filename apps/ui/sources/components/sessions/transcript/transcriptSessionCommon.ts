@@ -12,6 +12,7 @@ import {
     useSessionWorkspacePath,
     useSetting,
 } from '@/sync/domains/state/storage';
+import type { TranscriptInteraction } from '@/utils/sessions/deriveTranscriptInteraction';
 
 export type TranscriptSessionCommonSettings = Pick<Settings,
     | 'sessionReplayEnabled'
@@ -57,6 +58,17 @@ export type TranscriptForkCommon = Pick<TranscriptSessionCommonSettings,
     executionRunsEnabled: boolean;
     sessionForkSupportSource: SessionForkSupportSource | null;
 }>;
+
+export function deriveTranscriptForkCommonForInteraction(
+    forkCommon: TranscriptForkCommon,
+    interaction: TranscriptInteraction | null | undefined,
+): TranscriptForkCommon {
+    if (interaction?.canFork === true || forkCommon.sessionForkSupportSource == null) return forkCommon;
+    return {
+        ...forkCommon,
+        sessionForkSupportSource: null,
+    };
+}
 
 export type TranscriptToolChromeCommon = Pick<TranscriptSessionCommonSettings,
     | 'toolViewTimelineChromeMode'
