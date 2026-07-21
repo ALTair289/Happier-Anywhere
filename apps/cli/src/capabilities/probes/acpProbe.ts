@@ -45,35 +45,7 @@ function buildAcpProbeCacheKey(params: {
 }
 
 async function terminateProcess(child: ChildProcess): Promise<void> {
-    if (child.killed) return;
-
-    if (process.platform === 'win32') {
-        await killProcessTree(child, { graceMs: 250 }).catch(() => undefined);
-        return;
-    }
-
-    const waitForExit = new Promise<void>((resolve) => {
-        child.once('exit', () => resolve());
-    });
-
-    try {
-        child.kill('SIGTERM');
-    } catch {
-        // ignore
-    }
-
-    await Promise.race([
-        waitForExit,
-        new Promise<void>((resolve) => setTimeout(resolve, 250)),
-    ]);
-
-    if (!child.killed) {
-        try {
-            child.kill('SIGKILL');
-        } catch {
-            // ignore
-        }
-    }
+    await killProcessTree(child, { graceMs: 250 }).catch(() => undefined);
 }
 
 export async function probeAcpAgentCapabilities(params: {

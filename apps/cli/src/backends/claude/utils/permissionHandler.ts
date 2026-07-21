@@ -42,13 +42,19 @@ import {
     SESSION_MODE_OVERRIDE_KEY,
 } from '@happier-dev/agents';
 import { isChangeTitleToolLikeName } from '@happier-dev/protocol/tools/v2';
+import { isAskUserQuestionToolName, type StructuredQuestionAnswersV1 } from '@happier-dev/protocol';
+import {
+    normalizeLegacyStructuredQuestionAnswers,
+    normalizeStructuredQuestionAnswersV1,
+    type StructuredQuestionLike,
+} from '@/agent/questions/normalizeStructuredQuestionAnswersV1';
+import { buildAskUserQuestionAnswersForClaude } from './askUserQuestionAnswersForClaude';
 
 type PermissionResponse = PermissionRpcPayload;
 
 function isInteractiveTool(toolName: string): boolean {
     return (
-        toolName === 'AskUserQuestion' ||
-        toolName === 'ask_user_question' ||
+        isAskUserQuestionToolName(toolName) ||
         toolName === 'ExitPlanMode' ||
         toolName === 'exit_plan_mode'
     );
@@ -280,7 +286,9 @@ export class PermissionHandler {
             this.session.client,
             (currentState) => {
                 const currentCaps = (currentState as any).capabilities;
-                if (currentCaps && currentCaps.askUserQuestionAnswersInPermission === true) {
+                if (currentCaps
+                    && currentCaps.askUserQuestionAnswersInPermission === true
+                    && currentCaps.structuredQuestionAnswersV1Supported === true) {
                     return currentState;
                 }
                 return {
@@ -288,6 +296,7 @@ export class PermissionHandler {
                     capabilities: {
                         ...(currentCaps && typeof currentCaps === 'object' ? currentCaps : {}),
                         askUserQuestionAnswersInPermission: true,
+                        structuredQuestionAnswersV1Supported: true,
                     },
                 };
             },
@@ -296,8 +305,8 @@ export class PermissionHandler {
         );
     }
 
-    approveToolCall(toolCallId: string, opts?: { answers?: Record<string, string> }): void {
-        this.applyPermissionResponse({ id: toolCallId, approved: true, answers: opts?.answers });
+    approveToolCall(toolCallId: string, opts?: { answers?: StructuredQuestionAnswersV1 }): void {
+        this.applyPermissionResponse({ id: toolCallId, approved: true, structuredAnswersV1: opts?.answers });
     }
 
     private tryHandlePermissionRpc(message: PermissionResponse): boolean {
@@ -305,13 +314,38 @@ export class PermissionHandler {
         if (!id) {
             return false;
         }
-        const context = this.permissionCoordinator.getResponseContext(id);
+        const hasStructuredAnswers = message.answers !== undefined || message.structuredAnswersV1 !== undefined;
+        const context = hasStructuredAnswers
+            ? this.permissionCoordinator.getLocallyOwnedLiveResponseContext(id)
+            : this.permissionCoordinator.getResponseContext(id);
         if (!context) {
             return false;
         }
 
-        this.applyPermissionResponse(message, context);
+        const isAskUserQuestion = isAskUserQuestionToolName(context.toolName);
+        if (hasStructuredAnswers && (!this.pendingRequestMetadata.has(id) || !isAskUserQuestion)) return false;
+
+        const structuredAnswersV1 = message.structuredAnswersV1 !== undefined
+            ? normalizeStructuredQuestionAnswersV1(
+                message.structuredAnswersV1,
+                this.readStructuredQuestions(context),
+            )
+            : message.answers !== undefined
+                ? normalizeLegacyStructuredQuestionAnswers({
+                    answers: message.answers,
+                    questions: this.readStructuredQuestions(context),
+                })
+                : undefined;
+
+        this.applyPermissionResponse({ ...message, ...(structuredAnswersV1 ? { structuredAnswersV1 } : {}) }, context);
         return true;
+    }
+
+    private readStructuredQuestions(context: PermissionRequestCoordinatorContext): readonly StructuredQuestionLike[] {
+        const input = context.toolInput;
+        if (!input || typeof input !== 'object' || Array.isArray(input)) return [];
+        const questions = (input as { questions?: unknown }).questions;
+        return Array.isArray(questions) ? questions as readonly StructuredQuestionLike[] : [];
     }
 
     private createCoordinatorStore(): PermissionRequestCoordinatorStore {
@@ -325,6 +359,7 @@ export class PermissionHandler {
                             ? state.capabilities
                             : {}),
                         askUserQuestionAnswersInPermission: true,
+                        structuredQuestionAnswersV1Supported: true,
                     },
                 }),
             }),
@@ -538,25 +573,25 @@ export class PermissionHandler {
             ...(typeof response.mode === 'string' ? { mode: response.mode } : {}),
             ...(Array.isArray(allowedTools) ? { allowedTools } : {}),
             ...(typeof updatedPermissions !== 'undefined' ? { updatedPermissions } : {}),
-            ...(response.answers && typeof response.answers === 'object'
-                ? { extraCompletedFields: { answers: response.answers } }
+            ...(response.structuredAnswersV1
+                ? { extraCompletedFields: { structuredAnswersV1: response.structuredAnswersV1 } }
                 : {}),
         };
 
-        if (context.toolName === 'AskUserQuestion' && response.approved && response.answers) {
+        if (isAskUserQuestionToolName(context.toolName) && response.approved && response.structuredAnswersV1) {
             const baseInput =
                 context.toolInput && typeof context.toolInput === 'object' && !Array.isArray(context.toolInput)
                     ? (context.toolInput as Record<string, unknown>)
                     : {};
             logger.debug(
-                `[AskUserQuestion] Resolving canCallTool with ${Object.keys(response.answers).length} answer(s) via updatedInput`,
+                `[AskUserQuestion] Resolving canCallTool with ${Object.keys(response.structuredAnswersV1).length} answer(s) via updatedInput`,
             );
             return {
                 result: {
                     behavior: 'allow',
                     updatedInput: {
                         ...baseInput,
-                        answers: response.answers,
+                        answers: buildAskUserQuestionAnswersForClaude(response.structuredAnswersV1),
                     },
                 },
                 completedRequest,

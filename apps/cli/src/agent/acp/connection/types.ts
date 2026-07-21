@@ -71,12 +71,20 @@ export function defineAcpExtensionRequest<Params, Response extends Record<string
     kind: 'request',
     method: definition.method,
     register: (app, createContext) => {
-      app.onRequest(definition.method, wrapExtensionParamsParser(definition.params), (context) => (
-        definition.handler(
+      app.onRequest(definition.method, wrapExtensionParamsParser(definition.params), async (context) => {
+        const extensionContext = createContext(definition.method, context.signal);
+        const response = await definition.handler(
           context.params,
-          createContext(definition.method, context.signal),
-        )
-      ));
+          extensionContext,
+        );
+        if (extensionContext.signal.aborted) {
+          throw RequestError.invalidRequest(
+            { reason: 'prompt_turn_ended' },
+            'ACP extension request outlived its prompt turn',
+          );
+        }
+        return response;
+      });
     },
   };
 }

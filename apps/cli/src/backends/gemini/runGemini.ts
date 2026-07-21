@@ -77,7 +77,8 @@ import {
   saveGeminiModelToConfig,
   getInitialGeminiModel
 } from '@/backends/gemini/utils/config';
-import { maybeUpdateGeminiSessionIdMetadata } from '@/backends/gemini/utils/geminiSessionIdMetadata';
+import { createAcpSessionIdentityBinding } from '@/agent/acp/runtime/sessionIdentityBinding';
+import { createVendorResumeIdMetadataPublisher } from '@/session/metadata/createVendorResumeIdMetadataPublisher';
 import { updateMetadataBestEffort } from '@/api/session/sessionWritesBestEffort';
 import {
   parseOptionsFromText,
@@ -94,7 +95,10 @@ import {
   resetGeminiTurnMessageStateForPrompt,
 } from '@/backends/gemini/runtime/geminiTurnMessageState';
 import { createGeminiBackendInstance } from '@/backends/gemini/runtime/createGeminiBackendInstance';
-import { ensureGeminiAcpSession } from '@/backends/gemini/runtime/ensureGeminiAcpSession';
+import {
+  ensureGeminiAcpSession,
+  importGeminiAcpSessionReplay,
+} from '@/backends/gemini/runtime/ensureGeminiAcpSession';
 import { resolveShouldPrependAppendSystemPromptOnNextFreshSessionPrompt } from '@/backends/gemini/runtime/freshSessionSystemPromptState';
 import { sendGeminiPromptWithRetry } from '@/backends/gemini/runtime/sendGeminiPromptWithRetry';
 import { createGeminiTerminalUi } from '@/backends/gemini/runtime/createGeminiTerminalUi';
@@ -290,6 +294,14 @@ export async function runGemini(opts: {
   session = initializedSession.session;
   requestProviderAcceptanceDeliveryCustody(session);
   reconnectionHandle = initializedSession.reconnectionHandle;
+  const geminiSessionIdPublisher = createVendorResumeIdMetadataPublisher({
+    agentId: 'gemini',
+    getMetadataSnapshot: () => session.getMetadataSnapshot(),
+    updateMetadata: (updater) => session.updateMetadata(updater),
+  });
+  const geminiSessionIdentity = createAcpSessionIdentityBinding({
+    persistBound: geminiSessionIdPublisher.persistBound,
+  });
 
   const promptArtifactBodyCache = new Map<string, string | null>();
   const resolveFreshSessionSystemPrompt = async (baseOverride?: string | null): Promise<string> =>
@@ -455,8 +467,6 @@ export async function runGemini(opts: {
     const raw = typeof opts.resume === 'string' ? opts.resume.trim() : '';
     return raw ? raw : null;
   })();
-
-  const lastGeminiSessionIdPublished: { value: string | null } = { value: null };
 
   async function handleAbort() {
     if (!turnMessageState.thinking && !turnMessageState.isResponseInProgress) {
@@ -805,16 +815,15 @@ export async function runGemini(opts: {
         if (!activeBackend) {
           throw new Error('Gemini backend not initialized after mode change');
         }
-        const { sessionId } = await activeBackend.startSession();
-        acpSessionId = sessionId;
+        await geminiSessionIdentity.reset();
+        const openedSession = await geminiSessionIdentity.open({
+          intent: { kind: 'create' },
+          openSession: () => activeBackend.startSession(),
+        });
+        acpSessionId = openedSession.identity.vendorSessionId;
         logger.debug(`[gemini] New ACP session started: ${acpSessionId}`);
         shouldPrependAppendSystemPromptOnNextFreshSessionPrompt =
           resolveShouldPrependAppendSystemPromptOnNextFreshSessionPrompt({ startedFreshSession: true });
-        maybeUpdateGeminiSessionIdMetadata({
-          getGeminiSessionId: () => acpSessionId,
-          updateHappySessionMetadata: (updater) => session.updateMetadata(updater),
-          lastPublished: lastGeminiSessionIdPublished,
-        });
         
         // Update permission handler with current permission mode
         updatePermissionMode(message.mode.permissionMode);
@@ -892,26 +901,47 @@ export async function runGemini(opts: {
             if (!activeBackend) {
               throw new Error('Gemini backend not initialized before session bootstrap');
             }
-            const ensuredSession = await ensureGeminiAcpSession({
-              backend: activeBackend,
-              session,
-              permissionHandler,
-              messageBuffer,
-              storedResumeId,
-              currentPromptText: message.message,
-              onDebug: (msg) => logger.debug(msg),
+            const requestedResumeId = storedResumeId;
+            const openedSession = await geminiSessionIdentity.open({
+              intent: requestedResumeId
+                ? { kind: 'resume', expectedVendorSessionId: requestedResumeId }
+                : { kind: 'create' },
+              openSession: async () => {
+                const ensuredSession = await ensureGeminiAcpSession({
+                  backend: activeBackend,
+                  session,
+                  permissionHandler,
+                  messageBuffer,
+                  storedResumeId: requestedResumeId,
+                  currentPromptText: message.message,
+                  deferReplayImport: true,
+                  onDebug: (msg) => logger.debug(msg),
+                });
+                return {
+                  sessionId: ensuredSession.acpSessionId,
+                  replay: ensuredSession.deferredReplay ?? null,
+                };
+              },
             });
-            acpSessionId = ensuredSession.acpSessionId;
-            storedResumeId = ensuredSession.storedResumeId;
+            acpSessionId = openedSession.identity.vendorSessionId;
+            storedResumeId = requestedResumeId ? null : storedResumeId;
+            if (Array.isArray(openedSession.result.replay) && openedSession.result.replay.length > 0) {
+              try {
+                await importGeminiAcpSessionReplay({
+                  session,
+                  permissionHandler,
+                  remoteSessionId: acpSessionId,
+                  replay: openedSession.result.replay,
+                  currentPromptText: message.message,
+                });
+              } catch (error) {
+                logger.debug('[gemini] Failed to import ACP replay history (non-fatal)', { error });
+              }
+            }
             shouldPrependAppendSystemPromptOnNextFreshSessionPrompt =
               resolveShouldPrependAppendSystemPromptOnNextFreshSessionPrompt({
-                startedFreshSession: ensuredSession.startedFreshSession,
+                startedFreshSession: openedSession.identity.operation === 'create',
               });
-            maybeUpdateGeminiSessionIdMetadata({
-              getGeminiSessionId: () => acpSessionId,
-              updateHappySessionMetadata: (updater) => session.updateMetadata(updater),
-              lastPublished: lastGeminiSessionIdPublished,
-            });
             wasSessionCreated = true;
             currentModeHash = message.hash;
             

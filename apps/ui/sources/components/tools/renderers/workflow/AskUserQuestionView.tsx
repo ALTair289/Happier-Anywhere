@@ -13,15 +13,30 @@ import { Text, TextInput } from '@/components/ui/text/Text';
 import { resolveAgentRequestKind } from '@/utils/sessions/permissions/permissionPromptPolicy';
 import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
 import { resolveClaudeUnifiedDialogQuestionPresentation } from './resolveClaudeUnifiedDialogQuestionPresentation';
+import {
+    buildAskUserQuestionAnswerPayload,
+    normalizeAskUserQuestionRenderQuestions,
+    tryBuildAskUserQuestionAnswerPayload,
+} from './buildAskUserQuestionAnswerPayload';
+import { getStructuredQuestionAnswersV1Supported } from '@/sync/domains/state/agentStateCapabilities';
+import { RPC_ERROR_CODES } from '@happier-dev/protocol/rpc';
+import { PUBLIC_RPC_HANDLER_ERROR_CODES, readRpcErrorCode } from '@happier-dev/protocol/rpcErrors';
+import {
+    isAskUserQuestionToolName,
+    resolveStructuredQuestionOptionAnswerValue,
+    STRUCTURED_QUESTION_LIMITS,
+} from '@happier-dev/protocol';
 
 
 interface QuestionOption {
-    choice?: string;
     label: string;
     description: string;
+    value?: string;
+    choice?: string;
 }
 
 interface Question {
+    responseKey?: string;
     question: string;
     header: string;
     options: QuestionOption[];
@@ -37,16 +52,22 @@ interface AskUserQuestionInput {
     happierDialog?: unknown;
 }
 
-function parseAskUserQuestionAnswersFromToolResult(result: unknown): Record<string, string> | null {
+function readRenderableQuestion(value: unknown): Partial<Question> {
+    return value && typeof value === 'object' && !Array.isArray(value)
+        ? value as Partial<Question>
+        : {};
+}
+
+function parseAskUserQuestionAnswersFromToolResult(result: unknown): Record<string, readonly string[]> | null {
     if (!result || typeof result !== 'object') return null;
-    const maybeAnswers = (result as any).answers;
+    const record = result as Record<string, unknown>;
+    const maybeAnswers = record.structuredAnswersV1 ?? record.answers;
     if (!maybeAnswers || typeof maybeAnswers !== 'object' || Array.isArray(maybeAnswers)) return null;
 
-    const answers: Record<string, string> = {};
+    const answers = Object.create(null) as Record<string, readonly string[]>;
     for (const [key, value] of Object.entries(maybeAnswers as Record<string, unknown>)) {
-        if (typeof value === 'string') {
-            answers[key] = value;
-        }
+        if (Array.isArray(value) && value.every((item) => typeof item === 'string')) answers[key] = value as string[];
+        else if (typeof value === 'string') answers[key] = [value];
     }
     return answers;
 }
@@ -215,25 +236,35 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
     const [freeformAnswers, setFreeformAnswers] = React.useState<Map<number, string>>(new Map());
     const [isSubmitting, setIsSubmitting] = React.useState(false);
     const [isSubmitted, setIsSubmitted] = React.useState(false);
+    const [submissionGuidance, setSubmissionGuidance] = React.useState<'update' | 'reconnect' | null>(null);
 
-    // Parse input
     const input = tool.input as AskUserQuestionInput | undefined;
-    const questions = input
-        ? resolveClaudeUnifiedDialogQuestionPresentation(input, (key) => t(key)).questions as Question[]
-        : undefined;
-
-    if (!questions || !Array.isArray(questions) || questions.length === 0) {
-        return null;
-    }
+    const hasQuestionArray = Array.isArray(input?.questions) && input.questions.length > 0;
+    const presentedInput = hasQuestionArray && input
+        ? resolveClaudeUnifiedDialogQuestionPresentation(input, (key) => t(key))
+        : input;
+    const renderQuestions = hasQuestionArray
+        ? normalizeAskUserQuestionRenderQuestions(presentedInput)
+        : null;
+    const questions = renderQuestions?.ok ? renderQuestions.questions : [];
+    const hasInvalidRenderQuestions = hasQuestionArray && renderQuestions?.ok === false;
 
     const isRunning = tool.state === 'running';
     const canApprovePermissions = interaction?.canApprovePermissions ?? true;
     const toolCallId = resolvePermissionRequestId(tool);
-    const session = sessionId ? storage.getState().sessions[sessionId] : undefined;
-    const activeMatchingRequest = toolCallId ? (session as any)?.agentState?.requests?.[toolCallId] : null;
-    const hasActiveAskUserQuestionRequest =
-        activeMatchingRequest?.tool === 'AskUserQuestion' &&
-        resolveAgentRequestKind({ toolName: activeMatchingRequest.tool, requestKind: activeMatchingRequest.kind }) === 'user_action';
+    const structuredQuestionAnswersV1Supported = storage((state) => getStructuredQuestionAnswersV1Supported(
+        sessionId ? state.sessions[sessionId]?.agentState?.capabilities : undefined,
+    ));
+    const hasActiveAskUserQuestionRequest = storage((state) => {
+        const activeMatchingRequest = sessionId && toolCallId
+            ? state.sessions[sessionId]?.agentState?.requests?.[toolCallId]
+            : null;
+        return isAskUserQuestionToolName(activeMatchingRequest?.tool)
+            && resolveAgentRequestKind({
+                toolName: activeMatchingRequest.tool,
+                requestKind: activeMatchingRequest.kind,
+            }) === 'user_action';
+    });
     const canInteract = isRunning && !isSubmitted && canApprovePermissions && hasActiveAskUserQuestionRequest;
     const disabledMessage =
         interaction?.permissionDisabledReason === 'public'
@@ -256,9 +287,21 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
         const hasSelection = Boolean(selected && selected.size > 0);
         return hasFreeform ? (hasSelection || hasTyped) : hasSelection;
     });
+    const prospectiveBuild = allQuestionsAnswered
+        ? tryBuildAskUserQuestionAnswerPayload({
+            questions,
+            selections,
+            freeformAnswers,
+            structuredQuestionAnswersV1Supported,
+        })
+        : null;
+    const prospectivePayload = prospectiveBuild?.ok ? prospectiveBuild.payload : null;
+    const hasProspectivePayloadError = prospectiveBuild?.ok === false;
+    const requiresCliUpdate = prospectivePayload?.kind === 'requires_cli_update';
 
     const handleOptionToggle = React.useCallback((questionIndex: number, optionIndex: number, multiSelect: boolean) => {
         if (!canInteract) return;
+        setSubmissionGuidance(null);
 
         setSelections(prev => {
             const newMap = new Map(prev);
@@ -269,6 +312,8 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
                 const newSet = new Set(currentSet);
                 if (newSet.has(optionIndex)) {
                     newSet.delete(optionIndex);
+                } else if (newSet.size >= STRUCTURED_QUESTION_LIMITS.maxAnswersPerQuestion) {
+                    return prev;
                 } else {
                     newSet.add(optionIndex);
                 }
@@ -293,44 +338,6 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
     const handleSubmit = React.useCallback(async () => {
         if (!sessionId || !allQuestionsAnswered || isSubmitting) return;
 
-        // Format answers as readable text
-        const responseLines: string[] = [];
-        const answers: Record<string, string> = {};
-        questions.forEach((q, qIndex) => {
-            const questionKey = typeof q.question === 'string' && q.question.trim().length > 0 ? q.question : q.header;
-            const options = Array.isArray(q.options) ? q.options : [];
-            const typed = freeformAnswers.get(qIndex);
-            const typedText = typeof typed === 'string' ? typed.trim() : '';
-            if (options.length === 0) {
-                if (typedText.length > 0) {
-                    responseLines.push(`${q.header}: ${typedText}`);
-                    answers[questionKey] = typedText;
-                }
-                return;
-            }
-
-            const selected = selections.get(qIndex);
-            if (typedText.length > 0) {
-                responseLines.push(`${q.header}: ${typedText}`);
-                answers[questionKey] = typedText;
-                return;
-            }
-            if (selected && selected.size > 0) {
-                const selectedLabelsArray = Array.from(selected)
-                    .map(optIndex => options[optIndex]?.label)
-                    .filter(Boolean);
-                const selectedLabelsText = selectedLabelsArray.join(', ');
-                responseLines.push(`${q.header}: ${selectedLabelsText}`);
-                const selectedAnswerValues = Array.from(selected)
-                    .map(optIndex => options[optIndex])
-                    .filter((option): option is QuestionOption => Boolean(option))
-                    .map((option) => option.choice ?? option.label);
-                answers[questionKey] = selectedAnswerValues.join(', ');
-            }
-        });
-
-        const responseText = responseLines.join('\n');
-
         try {
             if (!toolCallId) {
                 Modal.alert(t('common.error'), t('errors.missingPermissionId'));
@@ -338,15 +345,29 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
             }
 
             const latestSession = storage.getState().sessions[sessionId];
-            const latestRequest = (latestSession as any)?.agentState?.requests?.[toolCallId];
+            const latestRequest = latestSession?.agentState?.requests?.[toolCallId];
             const hasLiveMatchingRequest =
-                latestRequest?.tool === 'AskUserQuestion' &&
+                isAskUserQuestionToolName(latestRequest?.tool) &&
                 resolveAgentRequestKind({ toolName: latestRequest.tool, requestKind: latestRequest.kind }) === 'user_action';
             if (!hasLiveMatchingRequest) {
                 return;
             }
 
+            const payload = buildAskUserQuestionAnswerPayload({
+                questions,
+                selections,
+                freeformAnswers,
+                structuredQuestionAnswersV1Supported: getStructuredQuestionAnswersV1Supported(
+                    latestSession?.agentState?.capabilities,
+                ),
+            });
+            if (payload.kind === 'requires_cli_update') {
+                setSubmissionGuidance('update');
+                return;
+            }
+
             setIsSubmitting(true);
+            setSubmissionGuidance(null);
 
             // HACK: Disable the form immediately by switching to the submitted view.
             // Without this, users could edit their selections while the network calls
@@ -354,14 +375,37 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
             // captured the values above. TODO: Revisit this logic.
             setIsSubmitted(true);
 
-            await sessionAllowWithAnswers(sessionId, toolCallId, answers);
+            await sessionAllowWithAnswers(sessionId, toolCallId, payload.send);
         } catch (error) {
             setIsSubmitted(false);
-            Modal.alert(t('common.error'), error instanceof Error ? error.message : t('errors.failedToSendMessage'));
+            const errorCode = readRpcErrorCode(error);
+            if (errorCode === RPC_ERROR_CODES.METHOD_NOT_AVAILABLE || errorCode === RPC_ERROR_CODES.METHOD_NOT_FOUND) {
+                setSubmissionGuidance('update');
+            } else if (
+                errorCode === PUBLIC_RPC_HANDLER_ERROR_CODES.STRUCTURED_QUESTION_RECEIVER_NOT_OWNER
+                || errorCode === PUBLIC_RPC_HANDLER_ERROR_CODES.STRUCTURED_QUESTION_INVALID
+                || errorCode === PUBLIC_RPC_HANDLER_ERROR_CODES.STRUCTURED_QUESTION_LEGACY_INVALID
+                || errorCode === PUBLIC_RPC_HANDLER_ERROR_CODES.STRUCTURED_QUESTION_LEGACY_AMBIGUOUS
+            ) {
+                setSubmissionGuidance('reconnect');
+            } else {
+                Modal.alert(t('common.error'), error instanceof Error ? error.message : t('errors.failedToSendMessage'));
+            }
         } finally {
             setIsSubmitting(false);
         }
     }, [sessionId, questions, selections, freeformAnswers, allQuestionsAnswered, isSubmitting, toolCallId]);
+
+    if (!hasQuestionArray) return null;
+    if (hasInvalidRenderQuestions) {
+        return (
+            <ToolSectionView>
+                <Text accessibilityLiveRegion="polite" style={{ color: theme.colors.text.secondary }}>
+                    {t('errors.failedToSendMessage')}
+                </Text>
+            </ToolSectionView>
+        );
+    }
 
     // Show submitted state
     if (isSubmitted || tool.state === 'completed') {
@@ -369,16 +413,27 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
         return (
             <ToolSectionView>
                 <View style={styles.submittedContainer}>
-                    {questions.map((q, qIndex) => {
+                    {questions.map((rawQuestion, qIndex) => {
+                        const q = readRenderableQuestion(rawQuestion);
                         const selected = selections.get(qIndex);
-                        const questionKey = typeof q.question === 'string' && q.question.trim().length > 0 ? q.question : q.header;
+                        const questionKey = typeof q.responseKey === 'string'
+                            ? q.responseKey
+                            : typeof q.question === 'string' && q.question.trim().length > 0
+                            ? q.question
+                            : typeof q.header === 'string'
+                                ? q.header
+                                : '';
                         const options = Array.isArray(q.options) ? q.options : [];
                         const freeform = freeformAnswers.get(qIndex);
+                        const displayedResultAnswers = answersFromResult?.[questionKey]?.map((answer: string) => (
+                            options.find((option) => resolveStructuredQuestionOptionAnswerValue(option) === answer)?.label
+                            ?? answer
+                        ));
                         const selectedLabels =
                             options.length === 0
                                 ? ((typeof freeform === 'string' && freeform.trim().length > 0)
                                     ? freeform.trim()
-                                    : (answersFromResult?.[questionKey] ?? '-'))
+                                    : (displayedResultAnswers?.join(', ') ?? '-'))
                                 : ((typeof freeform === 'string' && freeform.trim().length > 0)
                                     ? freeform.trim()
                                     : (selected && selected.size > 0
@@ -386,10 +441,10 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
                                             .map(optIndex => options[optIndex]?.label)
                                             .filter(Boolean)
                                             .join(', ')
-                                        : (answersFromResult?.[questionKey] ?? '-')));
+                                        : (displayedResultAnswers?.join(', ') ?? '-')));
                         return (
                             <View key={qIndex} style={styles.submittedItem}>
-                                <Text style={styles.submittedHeader}>{q.header}:</Text>
+                                <Text style={styles.submittedHeader}>{typeof q.header === 'string' ? q.header : ''}:</Text>
                                 <Text style={styles.submittedValue}>{selectedLabels}</Text>
                             </View>
                         );
@@ -407,16 +462,28 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
                         {disabledMessage}
                     </Text>
                 ) : null}
-                {questions.map((question, qIndex) => {
+                {(requiresCliUpdate || submissionGuidance === 'update') ? (
+                    <Text accessibilityLiveRegion="polite" style={{ color: theme.colors.text.secondary }}>
+                        {t('deps.ui.notAvailableUpdateCli')}
+                    </Text>
+                ) : submissionGuidance === 'reconnect' || hasProspectivePayloadError ? (
+                    <Text accessibilityLiveRegion="polite" style={{ color: theme.colors.text.secondary }}>
+                        {t('errors.failedToSendMessage')}
+                    </Text>
+                ) : null}
+                {questions.map((rawQuestion, qIndex) => {
+                    const question = readRenderableQuestion(rawQuestion);
                     const selectedOptions = selections.get(qIndex) || new Set();
                     const options = Array.isArray(question.options) ? question.options : [];
+                    const selectionLimitReached = question.multiSelect === true
+                        && selectedOptions.size >= STRUCTURED_QUESTION_LIMITS.maxAnswersPerQuestion;
 
                     return (
                         <View key={qIndex} style={styles.questionSection}>
                             <View style={styles.headerChip}>
-                                <Text style={styles.headerText}>{question.header}</Text>
+                                <Text style={styles.headerText}>{typeof question.header === 'string' ? question.header : ''}</Text>
                             </View>
-                            <Text style={styles.questionText}>{question.question}</Text>
+                            <Text style={styles.questionText}>{typeof question.question === 'string' ? question.question : ''}</Text>
                             <View style={styles.optionsContainer}>
                                 {options.length === 0 || question.freeform ? (
                                     <View>
@@ -426,6 +493,7 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
                                             value={freeformAnswers.get(qIndex) ?? ''}
                                             onChangeText={(text) => {
                                                 if (!canInteract) return;
+                                                setSubmissionGuidance(null);
                                                 setFreeformAnswers((prev) => {
                                                     const next = new Map(prev);
                                                     next.set(qIndex, text);
@@ -443,6 +511,7 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
                                             placeholder={question.freeform?.placeholder ?? t('tools.askUserQuestion.otherPlaceholder')}
                                             placeholderTextColor={theme.colors.input.placeholder}
                                             editable={canInteract}
+                                            maxLength={STRUCTURED_QUESTION_LIMITS.maxStringLength}
                                             autoCapitalize="none"
                                             autoCorrect={false}
                                         />
@@ -453,6 +522,7 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
                                 ) : null}
                                 {options.map((option, oIndex) => {
                                     const isSelected = selectedOptions.has(oIndex);
+                                    const isOptionDisabled = !canInteract || (selectionLimitReached && !isSelected);
                                     const testID = `ask-user-question.option:${qIndex}:${oIndex}`;
 
                                     return (
@@ -464,13 +534,13 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
                                             style={[
                                                 styles.optionButton,
                                                 isSelected && styles.optionButtonSelected,
-                                                !canInteract && styles.optionButtonDisabled,
+                                                isOptionDisabled && styles.optionButtonDisabled,
                                             ]}
-                                            onPress={() => handleOptionToggle(qIndex, oIndex, question.multiSelect)}
-                                            disabled={!canInteract}
+                                            onPress={() => handleOptionToggle(qIndex, oIndex, question.multiSelect === true)}
+                                            disabled={isOptionDisabled}
                                             activeOpacity={0.7}
                                         >
-                                            {question.multiSelect ? (
+                                            {question.multiSelect === true ? (
                                                 <View style={[
                                                     styles.checkboxOuter,
                                                     isSelected && styles.checkboxOuterSelected,
@@ -496,6 +566,13 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
                                         </TouchableOpacity>
                                     );
                                 })}
+                                {selectionLimitReached ? (
+                                    <Text accessibilityLiveRegion="polite" style={styles.freeformDescription}>
+                                        {t('tools.askUserQuestion.selectionLimit', {
+                                            count: STRUCTURED_QUESTION_LIMITS.maxAnswersPerQuestion,
+                                        })}
+                                    </Text>
+                                ) : null}
                             </View>
                         </View>
                     );
@@ -509,10 +586,10 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId,
                             accessibilityLabel={t('tools.askUserQuestion.submit')}
                             style={[
                                 styles.submitButton,
-                                (!allQuestionsAnswered || isSubmitting) && styles.submitButtonDisabled,
+                                (!allQuestionsAnswered || isSubmitting || requiresCliUpdate || hasProspectivePayloadError) && styles.submitButtonDisabled,
                             ]}
                             onPress={handleSubmit}
-                            disabled={!allQuestionsAnswered || isSubmitting}
+                            disabled={!allQuestionsAnswered || isSubmitting || requiresCliUpdate || hasProspectivePayloadError}
                             activeOpacity={0.7}
                         >
                             {isSubmitting ? (

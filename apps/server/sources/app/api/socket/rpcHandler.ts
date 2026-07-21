@@ -14,6 +14,7 @@ import { resolveRpcMethodAvailabilityGraceMs, resolveRpcMethodAvailabilityPollMs
 import { createRpcRedisRegistryCoordinator, type RpcRedisRegistryConfig } from "./rpcRedisRegistryCoordinator";
 import { resolveRpcCallTarget } from "./resolveRpcCallTarget";
 import { canRegisterSessionScopedRpcMethod } from "./sessionScopedBinding";
+import { forwardedRpcTargetResponse } from './forwardedRpcTargetResponse';
 import {
     formatCurrentMachineSocketError,
     validateCurrentMachineSocket,
@@ -340,10 +341,7 @@ export function rpcHandler(
                             buildForwardedRequest(),
                         );
                         if (callback) {
-                            callback({
-                                ok: true,
-                                result: response,
-                            });
+                            callback(forwardedRpcTargetResponse({ method, targetResponse: response }));
                         }
                         return;
                     }
@@ -395,10 +393,7 @@ export function rpcHandler(
                     const response = Array.isArray(responses) ? responses[0] : responses;
 
                     if (callback) {
-                        callback({
-                            ok: true,
-                            result: response,
-                        });
+                        callback(forwardedRpcTargetResponse({ method, targetResponse: response }));
                     }
                     return;
                 }
@@ -459,10 +454,7 @@ export function rpcHandler(
                 );
 
                 if (callback) {
-                    callback({
-                        ok: true,
-                        result: response,
-                    });
+                    callback(forwardedRpcTargetResponse({ method, targetResponse: response }));
                 }
 
             } catch (error) {

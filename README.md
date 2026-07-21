@@ -9,31 +9,21 @@
 
   **End-to-end encrypted. Self-hostable.<br />
   Built by developers, for developers.**
+  <br /><br />
 
-  <p><img src="/.github/illustration.png" title="Happier Dev" alt="Happier Dev" width="850" /></p>
+  <p><img src="/.github/mobile-2000.png" title="Happier Dev" alt="Happier Dev" width="640" /></p>
+  <p><img src="/.github/desktop-2000.png" title="Happier Dev" alt="Happier Dev" width="850" /></p>
 </div>
-
-## We want to hear your feedback!
-
-Happier is in alpha preview stage and might be buggy here and there.
-We are iterating fast and adding new features, improvements and bug fixes constantly.
-
-You can also **[join the Discord](https://discord.gg/W6Pb8KuHfg) to ask any questions or report any issues that you might have**.
-
-This project exists because we needed it ourselves, and **we want it to evolve through real feedback**. We aim to keep the community welcoming, and contributor-friendly, whether you’re signaling an issue or proposing a larger idea.
-
-If something feels broken, missing, or awkward, **we really want to hear about it**.
-Happier grows through shared experience and collaboration.
-
-Learn more about the best ways to contribute in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## What is Happier?
 
-**Happier** is an open-source, end-to-end encrypted companion app for AI coding agents.
+**Happier** is an open-source, end-to-end encrypted, cross-device companion app and client for your AI coding agents.
 
 It lets you run AI coding sessions **locally on your computer**, then **continue and control them remotely** — from your phone, web UI, or desktop app, without losing context.
 
 Whether you’re stepping away for a coffee or switching devices mid-task, Happier keeps your AI coding sessions alive and accessible.
+
+**[Join the Discord](https://discord.gg/W6Pb8KuHfg)** to hear all of the latest news about Happier, report issues, discuss new ideas and request features. It would truly make us _happier_ to hear your thoughts and feedback! ;)
 
 ## Installation
 
@@ -107,6 +97,20 @@ happier qwen
 
 Code solo, or invite a friend to jump into the session with you.
 Happier acts as a secure bridge between your local development environment and your other devices.
+
+## We want to hear your feedback!
+
+Happier is in alpha preview stage and might be buggy here and there.
+We are iterating fast and adding new features, improvements and bug fixes constantly.
+
+You can also **[join the Discord](https://discord.gg/W6Pb8KuHfg) to ask any questions or report any issues that you might have**.
+
+This project exists because we needed it ourselves, and **we want it to evolve through real feedback**. We aim to keep the community welcoming, and contributor-friendly, whether you’re signaling an issue or proposing a larger idea.
+
+If something feels broken, missing, or awkward, **we really want to hear about it**.
+Happier grows through shared experience and collaboration.
+
+Learn more about the best ways to contribute in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Why “Happier”?
 

@@ -326,6 +326,7 @@ import { verifyChangesCursorMaterializationProofs } from './runtime/orchestratio
 import { fetchAndApplySessionFolderAssignments } from '@/sync/ops/sessionOrganization';
 import { readMachineControlTargetForSession, readMachineTargetForSession } from './ops/sessionMachineTarget';
 import { deriveSessionAuthoringSnapshot } from './domains/sessionAuthoring/deriveSessionAuthoringSnapshot';
+import { getModelScopedConfigTombstonesV1Supported } from './domains/state/agentStateCapabilities';
 import { socketEmitWithAckFallback } from './engine/socket/socketEmitWithAckFallback';
 import { publishPermissionModeToMetadata as publishPermissionModeToMetadataEngine } from './engine/overrides/permissionModePublish';
 import { publishAcpSessionModeOverrideToMetadata as publishAcpSessionModeOverrideToMetadataEngine } from './engine/overrides/acpSessionModeOverridePublish';
@@ -3125,6 +3126,9 @@ class Sync {
             sessionId: params.sessionId,
             modelId: params.modelId,
             updatedAt: params.updatedAt,
+            retireModelScopedConfigOverrides: getModelScopedConfigTombstonesV1Supported(
+                storage.getState().sessions[params.sessionId]?.agentState?.capabilities,
+            ),
             updateSessionMetadataWithRetry: (sessionId, updater) => this.updateSessionMetadataWithRetry(sessionId, updater),
         });
     }

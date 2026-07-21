@@ -1,5 +1,6 @@
 import { deepEqual } from '@/utils/deterministicJson';
 import type { AgentStateOutstandingRequest } from './agentStateRequestStore';
+import { normalizeAskUserQuestionInputForPublication } from '@/agent/questions/normalizeAskUserQuestionInput';
 
 export type PermissionRequestCoordinatorRequest = Readonly<{
     requestId: string;
@@ -113,6 +114,7 @@ export class PermissionRequestCoordinator<TResult> {
         request: PermissionRequestCoordinatorRequest,
         options?: PermissionRequestCoordinatorOptions,
     ): Promise<TResult> {
+        const normalizedToolInput = normalizeAskUserQuestionInputForPublication(request.toolName, request.toolInput);
         this.pruneDetachedRecords();
 
         if (options?.signal?.aborted) {
@@ -121,7 +123,7 @@ export class PermissionRequestCoordinator<TResult> {
 
         let entry = this.pendingRequests.get(request.requestId);
         if (entry) {
-            if (!isCompatiblePendingRequest(entry, request)) {
+            if (!isCompatiblePendingRequest(entry, { ...request, toolInput: normalizedToolInput })) {
                 return Promise.reject(
                     new Error(`Permission request ${request.requestId} is already pending with different tool input`),
                 );
@@ -132,7 +134,9 @@ export class PermissionRequestCoordinator<TResult> {
 
         const cached = this.cachedDecisions.get(request.requestId);
         const invalidatedDecision = this.invalidatedDecisionRequestIds.delete(request.requestId);
-        const cachedCompatible = cached ? isCompatibleCachedDecision(cached, request) : false;
+        const cachedCompatible = cached
+            ? isCompatibleCachedDecision(cached, { ...request, toolInput: normalizedToolInput })
+            : false;
         if (cached && cachedCompatible && !invalidatedDecision) {
             return Promise.resolve(cached.result);
         }
@@ -144,7 +148,7 @@ export class PermissionRequestCoordinator<TResult> {
         entry = {
             requestId: request.requestId,
             toolName: request.toolName,
-            toolInput: request.toolInput,
+            toolInput: normalizedToolInput,
             createdAt: request.createdAt ?? Date.now(),
             ...(typeof request.kind === 'string' ? { kind: request.kind } : {}),
             ...(typeof request.source === 'string' ? { source: request.source } : {}),
@@ -154,18 +158,25 @@ export class PermissionRequestCoordinator<TResult> {
         };
 
         this.pendingRequests.set(request.requestId, entry);
-        this.store.publishRequest({
-            requestId: entry.requestId,
-            toolName: entry.toolName,
-            toolInput: entry.toolInput,
-            createdAt: entry.createdAt,
-            ...(typeof entry.kind === 'string' ? { kind: entry.kind } : {}),
-            ...(typeof entry.source === 'string' ? { source: entry.source } : {}),
-            ...(Array.isArray(request.permissionSuggestions)
-                ? { permissionSuggestions: [...request.permissionSuggestions] }
-                : {}),
-            ...(replaceCompletedRequest ? { replaceCompletedRequest: true } : {}),
-        });
+        try {
+            this.store.publishRequest({
+                requestId: entry.requestId,
+                toolName: entry.toolName,
+                toolInput: entry.toolInput,
+                createdAt: entry.createdAt,
+                ...(typeof entry.kind === 'string' ? { kind: entry.kind } : {}),
+                ...(typeof entry.source === 'string' ? { source: entry.source } : {}),
+                ...(Array.isArray(request.permissionSuggestions)
+                    ? { permissionSuggestions: [...request.permissionSuggestions] }
+                    : {}),
+                ...(replaceCompletedRequest ? { replaceCompletedRequest: true } : {}),
+            });
+        } catch (error) {
+            if (this.pendingRequests.get(request.requestId) === entry) {
+                this.pendingRequests.delete(request.requestId);
+            }
+            throw error;
+        }
 
         return this.attachWaiter(entry, options?.signal);
     }
@@ -201,6 +212,29 @@ export class PermissionRequestCoordinator<TResult> {
             sourceLocalId: null,
             correlation: 'agent_state',
             status: 'agent_state_only',
+        };
+    }
+
+    /**
+     * Returns response context only when this runtime still owns an active provider waiter.
+     * Persisted agent state and detached records are deliberately insufficient for structured answers.
+     */
+    getLocallyOwnedLiveResponseContext(requestId: string): PermissionRequestCoordinatorContext | null {
+        this.pruneDetachedRecords();
+        const entry = this.pendingRequests.get(requestId);
+        if (!entry || entry.status !== 'live') return null;
+        const hasLiveWaiter = [...entry.waiters.values()].some((waiter) => !waiter.aborted);
+        if (!hasLiveWaiter) return null;
+        return {
+            requestId,
+            toolName: entry.toolName,
+            toolInput: entry.toolInput,
+            createdAt: entry.createdAt,
+            ...(typeof entry.kind === 'string' ? { kind: entry.kind } : {}),
+            ...(typeof entry.source === 'string' ? { source: entry.source } : {}),
+            sourceLocalId: entry.sourceLocalId,
+            correlation: 'record',
+            status: 'live',
         };
     }
 

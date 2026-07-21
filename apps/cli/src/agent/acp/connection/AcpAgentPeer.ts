@@ -74,7 +74,11 @@ export class AcpAgentPeer {
     return this.context.request(methods.agent.session.setConfigOption, params);
   }
 
-  setSessionModelLegacy(params: Readonly<{ sessionId: string; modelId: string }>): Promise<unknown> {
+  setSessionModelLegacy(params: Readonly<{
+    sessionId: string;
+    modelId: string;
+    _meta?: Readonly<Record<string, unknown>>;
+  }>): Promise<unknown> {
     this.assertActive();
     return this.context.request('session/set_model', params);
   }

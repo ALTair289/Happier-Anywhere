@@ -40,6 +40,10 @@ import { logger } from '@/ui/logger';
 import { delay } from '@/utils/time';
 import { createSubprocessStderrAppender, type BoundedTextFileAppender } from '@/agent/runtime/subprocessArtifacts';
 import { createAcpStderrLogSummarizer } from './diagnostics/summarizeAcpStderrForLogs';
+import {
+  resolveAcpAuthenticationSelection,
+  type AcpAuthentication,
+} from './AcpAuthentication';
 import { normalizeAcpConfigOptionChoices } from './configOptionChoiceNormalization';
 import packageJson from '../../../package.json';
 import {
@@ -102,6 +106,23 @@ import type {
   AcpExtensionHandlerContext,
   AcpExtensionRegistration,
 } from './connection/types';
+import { SessionControlApplyError } from '@/agent/runtime/sessionControlApplyError';
+
+function isAcpJsonRpcRejection(error: unknown): boolean {
+  if (error instanceof RequestError) return true;
+  if (!error || typeof error !== 'object' || Array.isArray(error)) return false;
+  const record = error as Record<string, unknown>;
+  return typeof record.code === 'number' && Number.isFinite(record.code) && typeof record.message === 'string';
+}
+
+async function applyAcpSessionControl<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (isAcpJsonRpcRejection(error)) throw SessionControlApplyError.definitive(error);
+    throw error;
+  }
+}
 
 function makeAbortError(message: string): Error {
   const err = new Error(message);
@@ -285,6 +306,21 @@ export type SessionModelState = {
   currentModelId: string;
   availableModels: SessionModel[];
 };
+
+export type AcpSessionModelAdapter = Readonly<{
+  projectModelOptions?: (params: Readonly<{
+    rawModel: Readonly<Record<string, unknown>>;
+    normalizedModelOptions: ReadonlyArray<SessionConfigOption>;
+  }>) => ReadonlyArray<SessionConfigOption>;
+  resolveConfigOptionModelUpdate?: (params: Readonly<{
+    configId: string;
+    value: SessionConfigOptionValueId;
+    modelState: Readonly<SessionModelState> | null;
+  }>) => Readonly<{
+    modelId: string;
+    requestMeta?: Readonly<Record<string, unknown>>;
+  }> | undefined;
+}>;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -585,16 +621,8 @@ export interface AcpBackendOptions {
   /** Optional callback to check if prompt has change_title instruction */
   hasChangeTitleInstruction?: (prompt: string) => boolean;
 
-  /**
-   * Optional ACP authentication method to invoke after `initialize`, before `newSession` / `loadSession`.
-   *
-   * This is primarily used by agents like Codex ACP that advertise auth methods but do not auto-authenticate
-   * from environment variables until the `authenticate` method is called.
-   */
-  authMethodId?: string;
-
-  /** Optional ACP authenticate _meta payload for provider-specific auth methods. */
-  authMeta?: Record<string, unknown>;
+  /** Optional authentication selected only after a successful ACP initialize response. */
+  authentication?: AcpAuthentication;
 
   /** Optional ACP initialize _meta payload for provider-specific extension negotiation. */
   initializeMeta?: Record<string, unknown>;
@@ -604,6 +632,9 @@ export interface AcpBackendOptions {
 
   /** Provider-owned handlers for non-standard ACP extension requests/notifications. */
   extensionHandlers?: AcpExtensionHandlers;
+
+  /** Provider-owned projection/application for model metadata not standardized by ACP. */
+  sessionModelAdapter?: AcpSessionModelAdapter;
 }
 
 /**
@@ -689,7 +720,12 @@ export class AcpBackend implements AgentBackend {
   private pendingTurnOutcome: AcpTurnOutcome | null = null;
   private lastTurnOutcome: AcpTurnOutcome | null = null;
   private permissionFlushTurnGeneration: number | null = null;
-  private extensionAbortController = new AbortController();
+  private extensionConnectionAbortController = new AbortController();
+  private activeExtensionRequestTurn: Readonly<{
+    turnGeneration: number;
+    connectionSignal: AbortSignal;
+    abortController: AbortController;
+  }> | null = null;
   private prePromptResponseUpdateGuard: 'none' | 'completed' | 'terminal' = 'none';
   private dropPromptTurnUpdatesUntilPromptResponse = false;
   private droppedPromptTurnUpdateAfterClosedTurn = false;
@@ -772,6 +808,8 @@ export class AcpBackend implements AgentBackend {
     this.process = null;
     this.connection = null;
     this.acpSessionId = null;
+    this.abortActiveExtensionRequestTurn('ACP connection closed');
+    this.abortExtensionConnectionLifecycle('ACP connection closed');
 
     connection?.close();
 
@@ -811,15 +849,35 @@ export class AcpBackend implements AgentBackend {
     return { ...inheritedEnv, ...this.options.env };
   }
 
-  private resetExtensionAbortControllerForTurn(): void {
-    if (this.extensionAbortController.signal.aborted) {
-      this.extensionAbortController = new AbortController();
+  private beginExtensionConnectionLifecycle(): void {
+    this.abortActiveExtensionRequestTurn('ACP connection replaced');
+    this.abortExtensionConnectionLifecycle('ACP connection replaced');
+    this.extensionConnectionAbortController = new AbortController();
+  }
+
+  private abortExtensionConnectionLifecycle(reason: string): void {
+    if (!this.extensionConnectionAbortController.signal.aborted) {
+      this.extensionConnectionAbortController.abort(makeAbortError(reason));
     }
   }
 
-  private abortPendingExtensionHandlers(reason: string): void {
-    if (!this.extensionAbortController.signal.aborted) {
-      this.extensionAbortController.abort(makeAbortError(reason));
+  private beginExtensionRequestTurn(turnGeneration: number): void {
+    this.abortActiveExtensionRequestTurn('ACP prompt turn superseded');
+    if (this.extensionConnectionAbortController.signal.aborted) {
+      throw new Error('ACP extension connection is not active');
+    }
+    this.activeExtensionRequestTurn = {
+      turnGeneration,
+      connectionSignal: this.extensionConnectionAbortController.signal,
+      abortController: new AbortController(),
+    };
+  }
+
+  private abortActiveExtensionRequestTurn(reason: string): void {
+    const activeTurn = this.activeExtensionRequestTurn;
+    this.activeExtensionRequestTurn = null;
+    if (activeTurn && !activeTurn.abortController.signal.aborted) {
+      activeTurn.abortController.abort(makeAbortError(reason));
     }
   }
 
@@ -827,14 +885,35 @@ export class AcpBackend implements AgentBackend {
     method: string,
     sdkSignal: AbortSignal,
   ): AcpExtensionHandlerContext {
+    const isRequest = this.options.extensionHandlers?.some(
+      (registration) => registration.kind === 'request' && registration.method === method,
+    ) ?? false;
+    const activeTurn = this.activeExtensionRequestTurn;
+    if (isRequest && (
+      !activeTurn
+      || activeTurn.connectionSignal !== this.extensionConnectionAbortController.signal
+      || activeTurn.connectionSignal.aborted
+      || activeTurn.abortController.signal.aborted
+      || activeTurn.turnGeneration !== this.turnGeneration
+      || this.isTurnGenerationClosed(activeTurn.turnGeneration)
+      || !this.waitingForResponse
+    )) {
+      throw RequestError.invalidRequest(
+        { reason: 'no_active_prompt_turn' },
+        'ACP extension requests require an active prompt turn',
+      );
+    }
     return {
       method,
       sessionId: this.acpSessionId,
-      signal: AbortSignal.any([sdkSignal, this.extensionAbortController.signal]),
+      signal: AbortSignal.any([
+        sdkSignal,
+        this.extensionConnectionAbortController.signal,
+        ...(isRequest && activeTurn ? [activeTurn.abortController.signal] : []),
+      ]),
       agentName: this.options.agentName,
     };
   }
-
   private async createConnectionAndInitialize(params: { operationId: string }): Promise<{ initTimeout: number }> {
     logger.debug(`[AcpBackend] Starting process + initializing connection (op=${params.operationId})`);
 
@@ -842,7 +921,7 @@ export class AcpBackend implements AgentBackend {
       throw new Error('ACP backend is already initialized');
     }
 
-    this.resetExtensionAbortControllerForTurn();
+    this.beginExtensionConnectionLifecycle();
     this.recentStderrSummaries.length = 0;
     this.lastProcessExitDetail = null;
 
@@ -925,11 +1004,15 @@ export class AcpBackend implements AgentBackend {
     this.process.on('error', (err) => {
       // Log to file only, not console
       logger.debug(`[AcpBackend] Process error:`, err);
+      this.abortActiveExtensionRequestTurn('ACP process error');
+      this.abortExtensionConnectionLifecycle('ACP process error');
       this.failPendingResponseWait(err instanceof Error ? err : new Error(String(err)));
       this.emit({ type: 'status', status: 'error', detail: err.message });
     });
 
 	    this.process.on('exit', (code, signal) => {
+	      this.abortActiveExtensionRequestTurn('ACP process exited');
+	      this.abortExtensionConnectionLifecycle('ACP process exited');
 	      const hasSignal = typeof signal === 'string' && signal.trim().length > 0;
 	      const hasNonZeroCode = typeof code === 'number' && Number.isFinite(code) && code !== 0;
 	      const hasUnknownExit = code === null && !hasSignal;
@@ -1365,26 +1448,28 @@ export class AcpBackend implements AgentBackend {
 
     logger.debug(`[AcpBackend] Initialize completed`);
 
-    const authMethodId = typeof this.options.authMethodId === 'string' ? this.options.authMethodId.trim() : '';
-    if (authMethodId) {
+    if (this.options.authentication) {
+      const advertisedMethodIds = new Set<string>();
       const methods = (initResponse as InitializeResponse | null)?.authMethods ?? [];
-      const supported = Array.isArray(methods) && methods.some((m) => {
-        const record = asRecord(m);
-        if (!record) return false;
-        return getString(record, 'id') === authMethodId;
-      });
-      if (!supported) {
-        throw new Error(`[AcpBackend] ACP agent does not advertise auth method '${authMethodId}'`);
+      if (Array.isArray(methods)) {
+        for (const method of methods) {
+          const methodRecord = asRecord(method);
+          const methodId = methodRecord ? getString(methodRecord, 'id')?.trim() ?? '' : '';
+          if (methodId) advertisedMethodIds.add(methodId);
+        }
       }
+      const initRecord = asRecord(initResponse);
+      const rawInitializeMeta = asRecord(initRecord?._meta);
+      const selection = resolveAcpAuthenticationSelection({
+        authentication: this.options.authentication,
+        advertisedMethodIds,
+        initializeMeta: rawInitializeMeta ? Object.freeze({ ...rawInitializeMeta }) : null,
+      });
+      const authenticateRequest = selection.meta
+        ? { methodId: selection.methodId, _meta: selection.meta }
+        : { methodId: selection.methodId };
 
-      const authMeta = this.options.authMeta && Object.keys(this.options.authMeta).length > 0
-        ? this.options.authMeta
-        : null;
-      const authenticateRequest = authMeta
-        ? { methodId: authMethodId, _meta: authMeta }
-        : { methodId: authMethodId };
-
-      logger.debug(`[AcpBackend] Authenticating with methodId=${authMethodId}...`);
+      logger.debug(`[AcpBackend] Authenticating with methodId=${selection.methodId}...`);
       await withRetry(
         async () => {
           let timeoutHandle: NodeJS.Timeout | null = null;
@@ -2190,12 +2275,16 @@ export class AcpBackend implements AgentBackend {
         const description = getString(model, 'description');
         const modelOptionsCandidate = model['modelOptions'] ?? model['model_options'];
         const modelOptionsRaw: unknown[] | null = Array.isArray(modelOptionsCandidate) ? modelOptionsCandidate : null;
-        const modelOptions = modelOptionsRaw ? normalizeSessionConfigOptions(modelOptionsRaw) : null;
+        const normalizedModelOptions = modelOptionsRaw ? normalizeSessionConfigOptions(modelOptionsRaw) : [];
+        const modelOptions = this.options.sessionModelAdapter?.projectModelOptions?.({
+          rawModel: model,
+          normalizedModelOptions,
+        }) ?? normalizedModelOptions;
         return {
           id,
           name,
           ...(description ? { description } : {}),
-          ...(modelOptions && modelOptions.length > 0 ? { modelOptions } : {}),
+          ...(modelOptions.length > 0 ? { modelOptions: [...modelOptions] } : {}),
         };
       })
       .filter((model): model is SessionModel => Boolean(model));
@@ -2249,6 +2338,44 @@ export class AcpBackend implements AgentBackend {
       throw new Error('Config value is required');
     }
 
+    let modelUpdate: ReturnType<NonNullable<AcpSessionModelAdapter['resolveConfigOptionModelUpdate']>>;
+    try {
+      modelUpdate = this.options.sessionModelAdapter?.resolveConfigOptionModelUpdate?.({
+        configId: normalizedConfigId,
+        value: normalizedValueId,
+        modelState: this.sessionModelState,
+      });
+    } catch (error) {
+      // Provider adapter validation is local and deterministic for this exact command.
+      throw SessionControlApplyError.definitive(error);
+    }
+    if (modelUpdate) {
+      await this.setSessionModel(
+        normalizedSessionId,
+        modelUpdate.modelId,
+        modelUpdate.requestMeta,
+      );
+      if (this.sessionModelState) {
+        this.sessionModelState = {
+          ...this.sessionModelState,
+          availableModels: this.sessionModelState.availableModels.map((model) =>
+            model.id === modelUpdate.modelId && model.modelOptions
+              ? {
+                  ...model,
+                  modelOptions: model.modelOptions.map((option) =>
+                    option.id === normalizedConfigId
+                      ? { ...option, currentValue: normalizedValueId }
+                      : option
+                  ),
+                }
+              : model
+          ),
+        };
+        this.emit({ type: 'event', name: 'session_models_state', payload: this.sessionModelState });
+      }
+      return;
+    }
+
     const request: SetSessionConfigOptionRequest = typeof normalizedValueId === 'boolean'
       ? {
           sessionId: normalizedSessionId,
@@ -2262,7 +2389,9 @@ export class AcpBackend implements AgentBackend {
           value: normalizedValueId,
         };
 
-    const response = await this.connection.peer.setSessionConfigOption(request);
+    const response = await applyAcpSessionControl(
+      () => this.connection!.peer.setSessionConfigOption(request),
+    );
 
     const configOptionsCandidate = response?.configOptions;
     const configOptionsRaw = Array.isArray(configOptionsCandidate) ? configOptionsCandidate : null;
@@ -2322,6 +2451,7 @@ export class AcpBackend implements AgentBackend {
   }
 
   private closeCurrentTurnGeneration(): void {
+    this.abortActiveExtensionRequestTurn('ACP prompt turn ended');
     this.closedTurnGeneration = this.turnGeneration;
   }
 
@@ -2583,7 +2713,7 @@ export class AcpBackend implements AgentBackend {
     this.closeCurrentTurnGeneration();
     const reason = this.isUserCancellationCompletionError(error) ? 'Cancelled by user' : 'ACP turn failed';
     this.abortPendingPermissionsForCurrentTurn(reason);
-    this.abortPendingExtensionHandlers(reason);
+    this.abortActiveExtensionRequestTurn(reason);
     this.clearActiveToolCallStateForTerminalTurn(reason);
     this.clearResponseCompletionTimeout();
     if (this.postPromptCompletionIdleTimeout) {
@@ -2646,7 +2776,7 @@ export class AcpBackend implements AgentBackend {
     this.sawAssistantMessageSincePrompt = false;
     this.firstSessionUpdateSincePromptResolver = null;
     this.clearResponseCompletionTimeout();
-    this.resetExtensionAbortControllerForTurn();
+    this.beginExtensionRequestTurn(turnGeneration);
     if (this.postPromptCompletionIdleTimeout) {
       clearTimeout(this.postPromptCompletionIdleTimeout);
       this.postPromptCompletionIdleTimeout = null;
@@ -2978,7 +3108,7 @@ export class AcpBackend implements AgentBackend {
     }
 
     const request: SetSessionModeRequest = { sessionId: normalizedSessionId, modeId: normalizedModeId };
-    await this.connection.peer.setSessionMode(request);
+    await applyAcpSessionControl(() => this.connection!.peer.setSessionMode(request));
 
     if (this.sessionModeState) {
       this.sessionModeState = { ...this.sessionModeState, currentModeId: normalizedModeId };
@@ -2987,7 +3117,11 @@ export class AcpBackend implements AgentBackend {
     this.emit({ type: 'event', name: 'current_mode_update', payload: { currentModeId: normalizedModeId } });
   }
 
-  async setSessionModel(sessionId: SessionId, modelId: string): Promise<void> {
+  async setSessionModel(
+    sessionId: SessionId,
+    modelId: string,
+    requestMeta?: Readonly<Record<string, unknown>>,
+  ): Promise<void> {
     if (this.disposed) {
       throw new Error('Backend has been disposed');
     }
@@ -3008,10 +3142,11 @@ export class AcpBackend implements AgentBackend {
       throw new Error('Model ID is required');
     }
 
-    await this.connection.peer.setSessionModelLegacy({
+    await applyAcpSessionControl(() => this.connection!.peer.setSessionModelLegacy({
       sessionId: normalizedSessionId,
       modelId: normalizedModelId,
-    });
+      ...(requestMeta && Object.keys(requestMeta).length > 0 ? { _meta: requestMeta } : {}),
+    }));
 
     if (this.sessionModelState) {
       this.sessionModelState = { ...this.sessionModelState, currentModelId: normalizedModelId };
@@ -3076,7 +3211,7 @@ export class AcpBackend implements AgentBackend {
         this.closeCurrentTurnGeneration();
         this.lastTurnOutcome = { kind: 'failed', error };
         this.abortPendingPermissionsForCurrentTurn('ACP response wait timeout');
-        this.abortPendingExtensionHandlers('ACP response wait timeout');
+        this.abortActiveExtensionRequestTurn('ACP response wait timeout');
         this.clearActiveToolCallStateForTerminalTurn('response wait timeout');
         this.clearResponseCompletionTimeout();
         reject(error);
@@ -3211,7 +3346,7 @@ export class AcpBackend implements AgentBackend {
       this.failPendingResponseWait(makeAbortError('Cancelled by user'));
     } else {
       this.abortPendingPermissionsForCurrentTurn('Cancelled by user');
-      this.abortPendingExtensionHandlers('Cancelled by user');
+      this.abortActiveExtensionRequestTurn('Cancelled by user');
     }
 
     if (this.postPromptCompletionIdleTimeout) {
@@ -3278,8 +3413,9 @@ export class AcpBackend implements AgentBackend {
       this.failPendingResponseWait(makeAbortError('Backend disposed'));
       this.clearResponseCompletionTimeout();
     } else {
-      this.abortPendingExtensionHandlers('Backend disposed');
+      this.abortActiveExtensionRequestTurn('Backend disposed');
     }
+    this.abortExtensionConnectionLifecycle('Backend disposed');
 
     try {
       await this.stderrAppender?.close();
