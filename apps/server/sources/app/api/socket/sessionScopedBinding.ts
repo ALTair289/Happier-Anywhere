@@ -2,6 +2,7 @@ import type { Socket } from "socket.io";
 
 import type { ClientConnection } from "@/app/events/eventPayloadTypes";
 import { db } from "@/storage/db";
+import type { Tx } from "@/storage/inTx";
 
 export type SessionScopedBindingProof = "owner-session" | "machine-access-key";
 
@@ -10,6 +11,43 @@ export type SessionScopedSocketBinding = Readonly<{
     machineId: string | null;
     proof: SessionScopedBindingProof;
 }>;
+
+export async function hasCurrentSessionScopedMachineAccessInTx(params: Readonly<{
+    tx: Tx;
+    accountId: string;
+    machineId: string;
+    sessionId: string;
+}>): Promise<boolean> {
+    const accessKey = await params.tx.accessKey.findUnique({
+        where: {
+            accountId_machineId_sessionId: {
+                accountId: params.accountId,
+                machineId: params.machineId,
+                sessionId: params.sessionId,
+            },
+        },
+        select: {
+            machine: {
+                select: { revokedAt: true, replacedByMachineId: true },
+            },
+            session: {
+                select: { accountId: true },
+            },
+        },
+    });
+    return accessKey !== null
+        && accessKey.session.accountId === params.accountId
+        && accessKey.machine.revokedAt === null
+        && accessKey.machine.replacedByMachineId === null;
+}
+
+export async function hasCurrentSessionScopedMachineAccess(params: Readonly<{
+    accountId: string;
+    machineId: string;
+    sessionId: string;
+}>): Promise<boolean> {
+    return await hasCurrentSessionScopedMachineAccessInTx({ tx: db, ...params });
+}
 
 type SessionScopedBindingResolution =
     | Readonly<{ ok: true; binding: SessionScopedSocketBinding }>
@@ -51,17 +89,11 @@ export async function resolveSessionScopedSocketBinding(params: Readonly<{
         };
     }
 
-    const accessKey = await db.accessKey.findUnique({
-        where: {
-            accountId_machineId_sessionId: {
-                accountId: params.userId,
-                machineId,
-                sessionId,
-            },
-        },
-        select: { machineId: true },
-    });
-    if (!accessKey) {
+    if (!await hasCurrentSessionScopedMachineAccess({
+        accountId: params.userId,
+        machineId,
+        sessionId,
+    })) {
         return { ok: false, statusCode: 403, error: "invalid-session-access-key" };
     }
 
