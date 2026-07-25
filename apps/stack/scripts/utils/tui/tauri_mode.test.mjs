@@ -74,6 +74,65 @@ test('buildTuiChildArgs does not force watch for non-dev forwarded commands', ()
   ]);
 });
 
+test('buildTuiRestartChildArgs preserves the active launch contract and adds restart exactly once', () => {
+  assert.deepEqual(
+    tauriMode.buildTuiRestartChildArgs({
+      childArgs: ['stack', 'dev', 'exp1', '--watch', '--no-browser'],
+    }),
+    ['stack', 'dev', 'exp1', '--watch', '--no-browser', '--restart'],
+  );
+  assert.deepEqual(
+    tauriMode.buildTuiRestartChildArgs({
+      childArgs: ['stack', 'dev', 'exp1', '--restart', '--watch', '--restart', '--no-browser'],
+    }),
+    ['stack', 'dev', 'exp1', '--watch', '--no-browser', '--restart'],
+  );
+});
+
+test('buildTuiRestartChildArgs routes env-named plain commands through the canonical stack owner', () => {
+  assert.deepEqual(
+    tauriMode.buildTuiRestartChildArgs({
+      childArgs: ['dev', '--watch', '--mobile'],
+      stackName: 'env-stack',
+    }),
+    ['stack', 'dev', 'env-stack', '--watch', '--mobile', '--restart'],
+  );
+  assert.deepEqual(
+    tauriMode.buildTuiRestartChildArgs({
+      childArgs: ['start', '--runtime', '--no-browser'],
+      stackName: 'runtime-stack',
+    }),
+    ['stack', 'start', 'runtime-stack', '--runtime', '--no-browser', '--restart'],
+  );
+});
+
+test('buildTuiRestartChildArgs preserves source and runtime start modes', () => {
+  assert.deepEqual(
+    tauriMode.buildTuiRestartChildArgs({ childArgs: ['stack', 'start', 'source-stack', '--source'] }),
+    ['stack', 'start', 'source-stack', '--source', '--restart'],
+  );
+  assert.deepEqual(
+    tauriMode.buildTuiRestartChildArgs({
+      childArgs: ['stack', 'start', 'runtime-stack', '--runtime'],
+    }),
+    ['stack', 'start', 'runtime-stack', '--runtime', '--restart'],
+  );
+});
+
+test('buildTuiRestartChildArgs rejects dry-run and help launch modes', () => {
+  for (const childArgs of [
+    ['dev', '--json'],
+    ['stack', 'start', 'runtime-stack', '--json'],
+    ['dev', '--help'],
+    ['stack', 'dev', 'source-stack', '-h'],
+  ]) {
+    assert.throws(
+      () => tauriMode.buildTuiRestartChildArgs({ childArgs, stackName: 'env-stack' }),
+      (error) => error?.code === 'ESTACKRESTARTCONTROLARG',
+    );
+  }
+});
+
 test('resolveTauriPaneSpawnConfig builds a Tauri env with cargo available even when HOME is stack-isolated', async () => {
   const realHome = await mkdir(`${tmpdir()}/happier-tauri-pane-realhome-${Date.now()}`, { recursive: true });
   const isolatedHome = await mkdir(`${tmpdir()}/happier-tauri-pane-isolatedhome-${Date.now()}`, { recursive: true });

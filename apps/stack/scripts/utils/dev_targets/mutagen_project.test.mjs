@@ -66,6 +66,7 @@ test('renderMutagenProject creates one-way source replicas while retaining targe
     'apps/ui/android/build',
     'apps/ui/android/.gradle',
     'apps/cli/tools/unpacked',
+    'apps/cli/*:*',
     'subagents/dev-plugin-projection-runtime-closure',
     '*.trace',
   ]) {

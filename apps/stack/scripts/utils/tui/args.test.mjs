@@ -77,12 +77,16 @@ test('isTuiStartLikeForwardedArgs matches plain dev/start forms', () => {
   assert.equal(isTuiStartLikeForwardedArgs(['stop']), false);
 });
 
-test('isTuiRestartableForwardedArgs only allows restart for start-like commands', () => {
+test('isTuiRestartableForwardedArgs only allows long-lived start-like commands', () => {
   assert.equal(isTuiRestartableForwardedArgs(['stack', 'dev', 'x']), true);
   assert.equal(isTuiRestartableForwardedArgs(['stack', 'start', 'x']), true);
   assert.equal(isTuiRestartableForwardedArgs(['dev']), true);
   assert.equal(isTuiRestartableForwardedArgs(['start']), true);
 
+  assert.equal(isTuiRestartableForwardedArgs(['dev', '--json']), false);
+  assert.equal(isTuiRestartableForwardedArgs(['stack', 'start', 'x', '--json']), false);
+  assert.equal(isTuiRestartableForwardedArgs(['dev', '--help']), false);
+  assert.equal(isTuiRestartableForwardedArgs(['stack', 'start', 'x', '-h']), false);
   assert.equal(isTuiRestartableForwardedArgs(['stack', 'auth', 'x', 'login']), false);
   assert.equal(isTuiRestartableForwardedArgs(['stack', 'daemon', 'x', 'start']), false);
   assert.equal(isTuiRestartableForwardedArgs(['stack', 'summary', 'x']), false);

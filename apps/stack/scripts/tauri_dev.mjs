@@ -165,6 +165,10 @@ async function main() {
     ? await readStackRuntimeStateFile(getStackRuntimeStatePath(stackName))
     : null;
   const devUrl = (() => {
+    const runtimeExpoPort = Number(runtimeState?.expo?.webPort ?? runtimeState?.expo?.port);
+    if (Number.isFinite(runtimeExpoPort) && runtimeExpoPort > 0) {
+      return resolveStackTauriDevUrl({ runtimeState, defaultPort: runtimeExpoPort });
+    }
     const envExpoPort = Number(envWithStackDefaults.HAPPIER_STACK_EXPO_DEV_PORT ?? '');
     if (Number.isFinite(envExpoPort) && envExpoPort > 0) {
       return `http://localhost:${Math.floor(envExpoPort)}`;

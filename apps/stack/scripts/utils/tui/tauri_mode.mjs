@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { getRepoDir, resolveStackEnvPath } from '../paths/paths.mjs';
 import { readStackRuntimeStateFile } from '../stack/runtime_state.mjs';
+import { assertRestartHasNoControlOnlyArgs } from '../stack/restart_args.mjs';
 import { looksLikeExpoMetro } from '../expo/expo.mjs';
 
 function ensureTuiWatchArg(args) {
@@ -36,6 +37,19 @@ export function buildTuiChildArgs({ forwardedArgs, withTauri } = {}) {
     return childArgs;
   }
   return [...childArgs, '--no-browser'];
+}
+
+export function buildTuiRestartChildArgs({ childArgs, stackName = '' } = {}) {
+  const args = Array.isArray(childArgs) ? childArgs.map((arg) => String(arg ?? '')).filter(Boolean) : [];
+  assertRestartHasNoControlOnlyArgs(args);
+  const withoutRestart = args.filter((arg) => arg !== '--restart');
+  const resolvedStackName = String(stackName ?? '').trim();
+  const command = String(withoutRestart[0] ?? '').trim();
+  const canonicalArgs =
+    resolvedStackName && (command === 'dev' || command === 'start')
+      ? ['stack', command, resolvedStackName, ...withoutRestart.slice(1)]
+      : withoutRestart;
+  return [...canonicalArgs, '--restart'];
 }
 
 export function shouldStartTauriPane(forwardedArgs) {
