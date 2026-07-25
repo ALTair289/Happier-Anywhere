@@ -4,6 +4,7 @@ import { ImageRefSchema } from '../common/imageRef.js';
 import {
   ConnectedServiceAuthGroupIdSchema,
   ConnectedServiceCredentialHealthV1Schema,
+  ConnectedServiceCredentialRevisionV1Schema,
   ConnectedServiceIdSchema,
   ConnectedServiceProfileIdSchema,
 } from '../connect/connectedServiceSchemas.js';
@@ -33,6 +34,12 @@ const ConnectedServiceV2ServiceSchema = z.object({
   groups: z.array(ConnectedServiceV2GroupSchema).default([]),
 }).strict();
 
+const ConnectedServiceCredentialRevisionProjectionV1Schema = z.object({
+  serviceId: ConnectedServiceIdSchema,
+  profileId: ConnectedServiceProfileIdSchema,
+  credentialRevision: ConnectedServiceCredentialRevisionV1Schema,
+}).strict();
+
 export const LinkedProviderSchema = z.object({
   id: z.string(),
   login: z.string().nullable(),
@@ -54,6 +61,9 @@ export const AccountProfileSchema = z.object({
   linkedProviders: z.array(LinkedProviderSchema).default([]),
   connectedServices: z.array(z.string()).default([]),
   connectedServicesV2: z.array(ConnectedServiceV2ServiceSchema).default([]),
+  // Kept top-level for mixed-version rollout: released profile entries are strict,
+  // while the released outer account profile explicitly passes through additions.
+  connectedServiceCredentialRevisionsV1: z.array(ConnectedServiceCredentialRevisionProjectionV1Schema).default([]),
 }).passthrough();
 
 export type AccountProfile = z.infer<typeof AccountProfileSchema>;

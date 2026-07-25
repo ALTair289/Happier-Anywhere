@@ -1,7 +1,10 @@
 import { z } from 'zod';
 
 import { ConnectedServiceIdSchema } from '../connect/connectedServiceBindings.js';
-import { ConnectedServiceQuotaSnapshotV1Schema } from '../connect/connectedServiceSchemas.js';
+import {
+  ConnectedServiceCredentialRevisionV1Schema,
+  ConnectedServiceQuotaSnapshotV1Schema,
+} from '../connect/connectedServiceSchemas.js';
 import { SessionUsageLimitRecoveryOperationResultV1Schema } from '../sessionControl/sessionUsageLimitRecoveryOperationResultV1.js';
 import { SessionUsageLimitRecoveryResumePromptModeV1Schema } from '../sessionMetadata/sessionUsageLimitRecoveryV1.js';
 import { SessionWorkStateStatusV1Schema, SessionWorkStateV1Schema } from './sessionWorkStateV1.js';
@@ -79,6 +82,7 @@ const ConnectedServiceRuntimeControlExpectedV1Schema = z
     profileId: ConnectedServiceRuntimeControlIdV1Schema.optional(),
     groupId: ConnectedServiceRuntimeControlIdV1Schema.optional(),
     generation: z.union([z.string().trim().min(1), z.number().int().nonnegative()]).optional(),
+    credentialRevision: z.string().trim().min(1).optional(),
   })
   .passthrough();
 
@@ -93,6 +97,7 @@ export type SessionConnectedServiceAuthApplyGenerationReasonV1 =
   z.infer<typeof SessionConnectedServiceAuthApplyGenerationReasonV1Schema>;
 
 export const SessionConnectedServiceAuthApplyGenerationAppliedViaV1Schema = z.enum([
+  'current_truth_fence',
   'direct_live_hot_auth',
   'transport_recycle',
   'restart_resume',
@@ -126,13 +131,56 @@ function addMissingExactIdentityMaterialIssue(
   });
 }
 
+const SessionConnectedServiceAuthGenerationApplicationV1Schema = z.object({
+  serviceId: ConnectedServiceIdSchema,
+  groupId: z.string().trim().min(1),
+  profileId: z.string().trim().min(1),
+  generation: z.number().int().nonnegative(),
+  credentialRevision: ConnectedServiceCredentialRevisionV1Schema,
+  credentialFingerprint: z.string().trim().min(1),
+}).passthrough();
+
 const SessionConnectedServiceAuthApplyGenerationVerificationV1Schema = z
-  .record(z.string(), z.unknown())
+  .object({
+    providerAccountId: z.string().trim().min(1).optional(),
+    activeAccountId: z.string().trim().min(1).optional(),
+    sharedAuthSurfaceId: z.string().trim().min(1).optional(),
+    proofStrength: z.enum(['exact', 'weak', 'diagnostic']).optional(),
+    source: z.string().trim().min(1).optional(),
+    reason: z.string().trim().min(1).optional(),
+    credentialRevision: ConnectedServiceCredentialRevisionV1Schema.nullable().optional(),
+    credentialFingerprint: z.string().trim().min(1).nullable().optional(),
+    generationApplication: SessionConnectedServiceAuthGenerationApplicationV1Schema.optional(),
+  })
+  .passthrough()
   .superRefine((value, ctx) => {
     if (value.proofStrength !== 'exact') return;
     if (hasExactIdentityMaterial(value, ['providerAccountId', 'activeAccountId', 'sharedAuthSurfaceId'])) return;
     addMissingExactIdentityMaterialIssue(ctx, ['proofStrength'], 'exact verification requires identity material');
   });
+
+export const SessionConnectedServiceAuthCurrentGroupTruthV1Schema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('current_auth_group_unavailable'),
+    groupId: z.string().trim().min(1),
+    unavailableReason: z.enum(['group_missing', 'active_profile_missing']),
+  }).passthrough(),
+  z.object({
+    kind: z.literal('current_auth_group_available'),
+    groupId: z.string().trim().min(1),
+    generation: z.number().int().nonnegative(),
+    credentialRevision: ConnectedServiceCredentialRevisionV1Schema,
+  }).passthrough(),
+]);
+export type SessionConnectedServiceAuthCurrentGroupTruthV1 =
+  z.infer<typeof SessionConnectedServiceAuthCurrentGroupTruthV1Schema>;
+
+const SessionConnectedServiceAuthLegacyGenerationV1Schema = z
+  .record(z.string(), z.unknown())
+  .refine((value) => Object.keys(value).length > 0)
+  .refine((value) => (
+    typeof value.kind !== 'string' || !value.kind.startsWith('current_auth_group_')
+  ));
 
 export const SessionConnectedServiceAuthApplyGenerationRequestV1Schema = z
   .object({
@@ -140,9 +188,10 @@ export const SessionConnectedServiceAuthApplyGenerationRequestV1Schema = z
     reason: SessionConnectedServiceAuthApplyGenerationReasonV1Schema,
     requireDirectLiveHotApply: z.boolean().optional(),
     expected: ConnectedServiceRuntimeControlExpectedV1Schema.optional(),
-    authGeneration: z
-      .record(z.string(), z.unknown())
-      .refine((value) => Object.keys(value).length > 0),
+    authGeneration: z.union([
+      SessionConnectedServiceAuthCurrentGroupTruthV1Schema,
+      SessionConnectedServiceAuthLegacyGenerationV1Schema,
+    ]),
   })
   .passthrough();
 export type SessionConnectedServiceAuthApplyGenerationRequestV1 =
@@ -253,6 +302,7 @@ export const SessionConnectedServiceAuthReadRuntimeIdentityResponseV1Schema = z.
           profileId: z.string().trim().min(1).optional(),
           groupId: z.string().trim().min(1).optional(),
           generation: z.union([z.string().trim().min(1), z.number().int().nonnegative()]).optional(),
+          credentialRevision: z.string().trim().min(1).optional(),
         })
         .passthrough()
         .optional(),
@@ -287,6 +337,8 @@ export const SessionUsageLimitWaitResumeCancelRequestV1Schema = z
   .object({
     sessionId: SessionIdRequestFieldSchema,
     issueFingerprint: IssueFingerprintFieldSchema.nullable().optional(),
+    armedAtMs: z.number().int().nonnegative().optional(),
+    runtimeAuthRecoveryAttemptId: z.string().trim().min(1).optional(),
   })
   .passthrough();
 export type SessionUsageLimitWaitResumeCancelRequestV1 = z.infer<typeof SessionUsageLimitWaitResumeCancelRequestV1Schema>;

@@ -6,6 +6,32 @@ describe('AccountProfileSchema connectedServicesV2', () => {
   it('defaults connectedServicesV2 to an empty array', () => {
     const parsed = AccountProfileSchema.parse({ id: 'acct' });
     expect(parsed.connectedServicesV2).toEqual([]);
+    expect(parsed.connectedServiceCredentialRevisionsV1).toEqual([]);
+  });
+
+  it('parses exact opaque credential revisions without requiring them from supported older projections', () => {
+    const parsed = AccountProfileSchema.parse({
+      id: 'acct',
+      connectedServiceCredentialRevisionsV1: [{
+        serviceId: 'openai-codex',
+        profileId: 'work',
+        credentialRevision: 'csr_1123456789ABCDEFGHJKMNPQRS',
+      }],
+    });
+
+    expect(parsed.connectedServiceCredentialRevisionsV1).toEqual([{
+      serviceId: 'openai-codex',
+      profileId: 'work',
+      credentialRevision: 'csr_1123456789ABCDEFGHJKMNPQRS',
+    }]);
+    expect(AccountProfileSchema.safeParse({
+      id: 'acct',
+      connectedServiceCredentialRevisionsV1: [{
+        serviceId: 'openai-codex',
+        profileId: 'work',
+        credentialRevision: 'not-a-revision',
+      }],
+    }).success).toBe(false);
   });
 
   it('accepts connectedServicesV2 service + profile projections', () => {

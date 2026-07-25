@@ -240,6 +240,31 @@ describe('session work-state RPC contracts', () => {
                 profileId: 'profile-2',
             },
         });
+        expect(SessionConnectedServiceAuthApplyGenerationRequestV1Schema.parse({
+            serviceId: 'openai-codex',
+            reason: 'diagnostic',
+            authGeneration: {
+                kind: 'current_auth_group_unavailable',
+                groupId: 'group-1',
+                unavailableReason: 'group_missing',
+            },
+        })).toEqual({
+            serviceId: 'openai-codex',
+            reason: 'diagnostic',
+            authGeneration: {
+                kind: 'current_auth_group_unavailable',
+                groupId: 'group-1',
+                unavailableReason: 'group_missing',
+            },
+        });
+        expect(() => SessionConnectedServiceAuthApplyGenerationRequestV1Schema.parse({
+            serviceId: 'openai-codex',
+            reason: 'diagnostic',
+            authGeneration: {
+                kind: 'current_auth_group_unknown',
+                groupId: 'group-1',
+            },
+        })).toThrow();
         expect(() => SessionConnectedServiceAuthApplyGenerationRequestV1Schema.parse({
             serviceId: 'openai-codex',
             reason: 'not-a-reason',
@@ -405,10 +430,14 @@ describe('session work-state RPC contracts', () => {
         });
         expect(SessionUsageLimitWaitResumeCancelRequestV1Schema.parse({
             sessionId: 's1',
-            issueFingerprint: null,
+            issueFingerprint: 'usage-limit:s1:123',
+            armedAtMs: 123,
+            runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:exact-1',
         })).toEqual({
             sessionId: 's1',
-            issueFingerprint: null,
+            issueFingerprint: 'usage-limit:s1:123',
+            armedAtMs: 123,
+            runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:exact-1',
         });
         expect(SessionUsageLimitCheckNowRequestV1Schema.parse({
             sessionId: 's1',

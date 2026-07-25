@@ -76,6 +76,7 @@ describe('FeaturesResponseSchema', () => {
     });
     expect(parsed.capabilities.machines.transfer).toEqual(DEFAULT_MACHINE_TRANSFER_CAPABILITIES);
     expect(parsed.capabilities.sharing).toEqual(DEFAULT_SHARING_CAPABILITIES);
+    expect(parsed.capabilities.connectedServices.credentialDelete.revisionGuard).toBe(false);
     expect(parsed.capabilities.oauth.providers).toEqual({});
     expect(parsed.capabilities.encryption).toEqual({
       storagePolicy: 'required_e2ee',
@@ -97,6 +98,17 @@ describe('FeaturesResponseSchema', () => {
       },
     });
     expect(parsed.capabilities.auth.misconfig).toEqual([]);
+  });
+
+  it('accepts an advertised revision-guarded connected-service delete capability', () => {
+    const parsed = FeaturesResponseSchema.parse({
+      features: {},
+      capabilities: {
+        connectedServices: { credentialDelete: { revisionGuard: true } },
+      },
+    });
+
+    expect(parsed.capabilities.connectedServices.credentialDelete.revisionGuard).toBe(true);
   });
 
   it('accepts direct-peer nested transfer gates', () => {

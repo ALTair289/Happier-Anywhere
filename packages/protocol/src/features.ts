@@ -87,5 +87,12 @@ export {
 } from './features/payload/capabilities/sharingCapabilities.js';
 
 export { CapabilitiesSchema, type Capabilities } from './features/payload/capabilities/capabilitiesSchema.js';
+export {
+  ConnectedServicesCapabilitiesSchema,
+  ConnectedServicesCredentialDeleteCapabilitiesSchema,
+  DEFAULT_CONNECTED_SERVICES_CAPABILITIES,
+  DEFAULT_CONNECTED_SERVICES_CREDENTIAL_DELETE_CAPABILITIES,
+  type ConnectedServicesCapabilities,
+} from './features/payload/capabilities/connectedServicesCapabilities.js';
 export { FeatureGatesSchema, type FeatureGates } from './features/payload/featureGatesSchema.js';
 export { FeaturesResponseSchema, type FeaturesResponse } from './features/payload/featuresResponseSchema.js';

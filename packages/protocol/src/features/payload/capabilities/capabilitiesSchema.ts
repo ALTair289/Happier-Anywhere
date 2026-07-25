@@ -43,6 +43,10 @@ import {
   SharingCapabilitiesSchema,
 } from './sharingCapabilities.js';
 import { ClientCompatibilityCapabilitiesV1Schema } from '../../../clientCompatibility/serverRequirementsV1.js';
+import {
+  ConnectedServicesCapabilitiesSchema,
+  DEFAULT_CONNECTED_SERVICES_CAPABILITIES,
+} from './connectedServicesCapabilities.js';
 
 export const CapabilitiesSchema = z.object({
   bugReports: BugReportsCapabilitiesSchema.optional().default(DEFAULT_BUG_REPORTS_CAPABILITIES),
@@ -73,6 +77,7 @@ export const CapabilitiesSchema = z.object({
   auth: AuthCapabilitiesSchema.optional().default(DEFAULT_AUTH_CAPABILITIES),
   session: SessionCapabilitiesSchema.optional().default(DEFAULT_SESSION_CAPABILITIES),
   sharing: SharingCapabilitiesSchema.optional().default(DEFAULT_SHARING_CAPABILITIES),
+  connectedServices: ConnectedServicesCapabilitiesSchema.optional().default(DEFAULT_CONNECTED_SERVICES_CAPABILITIES),
 });
 
 export type Capabilities = z.infer<typeof CapabilitiesSchema>;

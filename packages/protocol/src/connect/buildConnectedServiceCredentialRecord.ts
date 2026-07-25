@@ -25,8 +25,8 @@ function readString(value: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-function sanitizeOauthRawMetadata(
-  raw: ConnectedServiceOauthCredentialRawMetadata | null | undefined,
+export function normalizeConnectedServiceOauthCredentialRawMetadata(
+  raw: unknown,
 ): ConnectedServiceOauthCredentialRawMetadata | null {
   const root = isRecord(raw) ? raw : {};
   const claudeAiOauthRaw = isRecord(root.claudeAiOauth)
@@ -96,7 +96,7 @@ export function buildConnectedServiceCredentialRecord(
             tokenType: params.oauth.tokenType,
             providerAccountId: params.oauth.providerAccountId,
             providerEmail: params.oauth.providerEmail,
-            raw: sanitizeOauthRawMetadata(params.oauth.raw),
+            raw: normalizeConnectedServiceOauthCredentialRawMetadata(params.oauth.raw),
           },
           token: null,
         }

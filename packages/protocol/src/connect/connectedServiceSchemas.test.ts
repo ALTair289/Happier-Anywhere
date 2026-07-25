@@ -23,6 +23,7 @@ describe('connectedServiceSchemas', () => {
         const revisionSchema = expectSchema('ConnectedServiceCredentialRevisionV1Schema');
         const mutationGuardSchema = expectSchema('ConnectedServiceCredentialMutationGuardV1Schema');
         const mutationSuccessSchema = expectSchema('ConnectedServiceCredentialMutationSuccessV1Schema');
+        const compatibleMutationSuccessSchema = expectSchema('ConnectedServiceCredentialCompatibleMutationSuccessV1Schema');
         const mutationSupersededSchema = expectSchema('ConnectedServiceCredentialMutationSupersededV1Schema');
         const mutationResponseSchema = expectSchema('ConnectedServiceCredentialMutationResponseV1Schema');
 
@@ -35,7 +36,14 @@ describe('connectedServiceSchemas', () => {
             expectedCredentialRevision: 'csr_0123456789ABCDEFGHJKMNPQRS',
             refreshLeaseOwnerId: 'machine:daemon:attempt',
         });
+        expect(mutationGuardSchema.parse({ expectedCredentialRevision: null })).toEqual({
+            expectedCredentialRevision: null,
+        });
         expect(mutationGuardSchema.safeParse({ refreshLeaseOwnerId: 'owner-without-revision' }).success).toBe(false);
+        expect(mutationGuardSchema.safeParse({
+            expectedCredentialRevision: null,
+            refreshLeaseOwnerId: 'owner-without-existing-credential',
+        }).success).toBe(false);
         expect(mutationResponseSchema.parse({
             success: true,
             credentialRevision: 'csr_1123456789ABCDEFGHJKMNPQRS',
@@ -43,6 +51,8 @@ describe('connectedServiceSchemas', () => {
             success: true,
             credentialRevision: 'csr_1123456789ABCDEFGHJKMNPQRS',
         });
+        expect(mutationSuccessSchema.safeParse({ success: true }).success).toBe(false);
+        expect(compatibleMutationSuccessSchema.parse({ success: true })).toEqual({ success: true });
         expect(mutationSuccessSchema.safeParse({ success: true, credentialRevision: 'bad' }).success).toBe(false);
         expect(mutationSupersededSchema.safeParse({
             error: 'connect_credential_mutation_superseded',
@@ -216,6 +226,13 @@ describe('connectedServiceSchemas', () => {
             serviceId: 'openai-codex',
             profileId: 'work',
             bindingKind: 'group_member',
+        }).success).toBe(false);
+        expect(ConnectedServiceUsageSourceV1Schema.safeParse({
+            serviceId: 'openai-codex',
+            profileId: 'work',
+            bindingKind: 'profile',
+            groupId: 'team',
+            groupGeneration: 7,
         }).success).toBe(false);
     });
 
@@ -608,32 +625,24 @@ describe('connectedServiceSchemas', () => {
         expect(parsedPolicy).not.toHaveProperty('recoveryPromptMode');
         expect(parsedPolicy).not.toHaveProperty('effectiveMeterStrategy');
         expect(parsedPolicy).not.toHaveProperty('memberRuntimeStatePersistence');
-        // Migration-safe: stored policy JSON that still carries the removed legacy keys parses
-        // (strips them) instead of failing strict validation and resetting the whole policy.
-        const migrated = ConnectedServiceAuthGroupPolicyV1Schema.parse({
+        // Auth groups did not exist in the supported 0.2.1 predecessor. Removed unreleased knobs
+        // are caller errors, not a compatibility shape.
+        expect(ConnectedServiceAuthGroupPolicyV1Schema.safeParse({
             v: 1,
             strategy: 'manual',
             softSwitchRemainingPercent: 42,
             recoveryPromptMode: 'standard',
             effectiveMeterStrategy: 'weekly',
             memberRuntimeStatePersistence: 'server_state_json',
-        });
-        expect(migrated.strategy).toBe('manual');
-        expect(migrated.softSwitchRemainingPercent).toBe(42);
-        expect(migrated).not.toHaveProperty('recoveryPromptMode');
-        expect(migrated).not.toHaveProperty('effectiveMeterStrategy');
-        expect(migrated).not.toHaveProperty('memberRuntimeStatePersistence');
+        }).success).toBe(false);
         // Genuine typos are still rejected (strict is preserved for non-legacy unknown keys).
         expect(ConnectedServiceAuthGroupPolicyV1Schema.safeParse({ v: 1, bogusKey: true }).success).toBe(false);
-        // The patch schema also tolerates the removed legacy keys from older clients.
-        const migratedPatch = expectSchema('ConnectedServiceAuthGroupPolicyPatchV1Schema').parse({
+        expect(expectSchema('ConnectedServiceAuthGroupPolicyPatchV1Schema').safeParse({
             strategy: 'least_limited',
             recoveryPromptMode: 'standard',
             effectiveMeterStrategy: 'weekly',
             memberRuntimeStatePersistence: 'server_state_json',
-        });
-        expect(migratedPatch.strategy).toBe('least_limited');
-        expect(migratedPatch).not.toHaveProperty('effectiveMeterStrategy');
+        }).success).toBe(false);
     });
 
     it('parses persisted member runtime state by limit category', () => {
@@ -694,6 +703,7 @@ describe('connectedServiceSchemas', () => {
             policy,
             activeProfileId: 'work',
             generation: 2,
+            runtimeStateRevision: 3,
             state: {
                 status: 'ready',
                 lastSwitchAt: 123,
@@ -719,6 +729,10 @@ describe('connectedServiceSchemas', () => {
         });
 
         expect(group.members[0]?.profileId).toBe('work');
+        expect(group.runtimeStateRevision).toBe(3);
+        const groupWithoutRuntimeStateRevision = { ...group } as Record<string, unknown>;
+        delete groupWithoutRuntimeStateRevision.runtimeStateRevision;
+        expect(ConnectedServiceAuthGroupV1Schema.safeParse(groupWithoutRuntimeStateRevision).success).toBe(false);
         expect((group as Record<string, unknown>).credential).toBeUndefined();
         expect(ConnectedServiceAuthGroupCreateRequestV1Schema.parse({
             groupId: 'codex-main',
@@ -971,12 +985,14 @@ describe('connectedServiceSchemas', () => {
 
         expect(ConnectedServiceAuthGroupRuntimeStatePatchRequestV1Schema.parse({
             expectedGeneration: 4,
+            expectedRuntimeStateRevision: 9,
             state: {
                 v: 1,
                 groupSwitchInProgress: false,
             },
         })).toEqual({
             expectedGeneration: 4,
+            expectedRuntimeStateRevision: 9,
             state: {
                 v: 1,
                 groupSwitchInProgress: false,
