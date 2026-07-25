@@ -428,9 +428,9 @@ model SessionOrganizationFolder {
     id             String   @id @default(cuid())
     accountId      String
     folderKey      String @db.LongText
-    folderHash     String
+    folderHash     String @db.VarChar(71)
     parentKey      String? @db.LongText
-    parentHash     String?
+    parentHash     String? @db.VarChar(71)
     sortKey        String?
     displayDbValue String? @db.LongText
     archivedAt     DateTime?
@@ -448,7 +448,7 @@ model SessionOrganizationTag {
     id             String   @id @default(cuid())
     accountId      String
     tagKey         String @db.LongText
-    tagHash        String
+    tagHash        String @db.VarChar(71)
     sortKey        String?
     displayDbValue String? @db.LongText
     archivedAt     DateTime?
@@ -484,12 +484,12 @@ model SessionTagAssignment {
 model SessionOrganizationOrderEntry {
     id        String   @id @default(cuid())
     accountId String
-    scopeKind String
+    scopeKind String @db.VarChar(32)
     scopeKey  String @db.LongText
-    scopeHash String
-    itemKind  String
+    scopeHash String @db.VarChar(71)
+    itemKind  String @db.VarChar(32)
     itemKey   String @db.LongText
-    itemHash  String
+    itemHash  String @db.VarChar(71)
     sortKey   String
     createdAt DateTime @default(now())
     updatedAt DateTime @updatedAt
@@ -503,9 +503,9 @@ model SessionOrganizationOrderEntry {
 model SessionOrganizationLabel {
     id             String   @id @default(cuid())
     accountId      String
-    labelKind      String
+    labelKind      String @db.VarChar(32)
     scopeKey       String @db.LongText
-    scopeHash      String
+    scopeHash      String @db.VarChar(71)
     displayDbValue String? @db.LongText
     archivedAt     DateTime?
     createdAt      DateTime @default(now())
@@ -588,8 +588,8 @@ model SessionSystemRecord {
     id        String   @id @default(cuid())
     accountId String
     sessionId String
-    namespace String
-    kind      String
+    namespace String @db.VarChar(32)
+    kind      String @db.VarChar(32)
     localId   String
     content   Json
     createdAt DateTime @default(now())
