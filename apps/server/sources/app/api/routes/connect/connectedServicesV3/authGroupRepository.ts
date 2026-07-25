@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { db } from "@/storage/db";
 import { inTx, type Tx } from "@/storage/inTx";
+import { resolveEffectiveAccountEncryptionModeFromAccountRow } from "@/app/encryption/accountEncryptionMode";
 import {
     parseConnectedServiceAuthGroupPolicyJson,
     stringifyConnectedServiceAuthGroupPolicy,
@@ -13,11 +14,17 @@ import {
     ConnectedServiceAuthGroupStateSchema,
 } from "./authGroupSchemas";
 import { deleteConnectedServiceUsageSourcesForProfile } from "../providerAccountUsage";
+import { resolveConnectedServiceCredentialRevision } from "../credentials/credentialRevision";
 
 type AuthGroupState = z.infer<typeof ConnectedServiceAuthGroupStateSchema>;
 type AuthGroupMemberState = z.infer<typeof ConnectedServiceAuthGroupMemberStateSchema>;
 type AuthGroupResponse = z.infer<typeof AuthGroupResponseSchema>;
-export type DeleteConnectedServiceCredentialResult = "deleted" | "not_found" | "referenced";
+export type DeleteConnectedServiceCredentialResult =
+    | "deleted"
+    | "not_found"
+    | "referenced"
+    | "storage_mode_mismatch"
+    | Readonly<{ type: "superseded"; credentialRevision: string }>;
 export type AuthGroupGenerationConflictResult = Readonly<{ type: "generation_conflict"; generation: number }>;
 export type CreateAuthGroupMemberResult = "created" | "group_not_found" | "profile_not_found" | AuthGroupGenerationConflictResult;
 export type UpdateAuthGroupMemberResult = "updated" | "unchanged" | "not_found" | AuthGroupGenerationConflictResult;
@@ -219,6 +226,8 @@ export async function deleteConnectedServiceCredentialInTx(tx: Tx, params: {
     serviceId: string;
     profileId: string;
     allowReferencedGroupCleanup: boolean;
+    storageMode: "plain" | "sealed";
+    expectedCredentialRevision?: string;
 }): Promise<DeleteConnectedServiceCredentialResult> {
     const existing = await tx.serviceAccountToken.findUnique({
         where: {
@@ -228,9 +237,20 @@ export async function deleteConnectedServiceCredentialInTx(tx: Tx, params: {
                 profileId: params.profileId,
             },
         },
-        select: { id: true },
+        select: { id: true, metadata: true },
     });
     if (!existing) return "not_found";
+
+    const credentialRevision = resolveConnectedServiceCredentialRevision({
+        rowId: existing.id,
+        metadata: existing.metadata,
+    });
+    if (
+        params.expectedCredentialRevision !== undefined
+        && params.expectedCredentialRevision !== credentialRevision
+    ) {
+        return { type: "superseded", credentialRevision };
+    }
 
     if (!params.allowReferencedGroupCleanup) {
         const reference = await tx.connectedServiceAuthGroupMember.findFirst({
@@ -242,7 +262,20 @@ export async function deleteConnectedServiceCredentialInTx(tx: Tx, params: {
             select: { id: true },
         });
         if (reference) return "referenced";
-    } else {
+    }
+
+    const account = await tx.account.findUnique({
+        where: { id: params.accountId },
+        select: { publicKey: true, encryptionMode: true },
+    });
+    if (
+        !account
+        || (resolveEffectiveAccountEncryptionModeFromAccountRow(account) === "plain") !== (params.storageMode === "plain")
+    ) {
+        return "storage_mode_mismatch";
+    }
+
+    if (params.allowReferencedGroupCleanup) {
         const affectedMembers = await tx.connectedServiceAuthGroupMember.findMany({
             where: {
                 accountId: params.accountId,
@@ -265,24 +298,38 @@ export async function deleteConnectedServiceCredentialInTx(tx: Tx, params: {
                 ...activeGroups.map((group) => group.id),
             ]),
         ];
-        if (affectedGroupDbIds.length > 0) {
-            await tx.connectedServiceAuthGroup.updateMany({
-                where: {
-                    id: { in: affectedGroupDbIds },
-                    accountId: params.accountId,
-                    vendor: params.serviceId,
-                },
-                data: { generation: { increment: 1 } },
-            });
-        }
-        await tx.connectedServiceAuthGroup.updateMany({
+        const affectedGroups = await tx.connectedServiceAuthGroup.findMany({
             where: {
+                id: { in: affectedGroupDbIds },
                 accountId: params.accountId,
                 vendor: params.serviceId,
-                activeProfileId: params.profileId,
             },
-            data: { activeProfileId: null },
+            select: {
+                id: true,
+                activeProfileId: true,
+                members: {
+                    select: { profileId: true, priority: true, enabled: true },
+                },
+            },
         });
+        for (const group of affectedGroups) {
+            const remainingMembers = group.members.filter((member) => member.profileId !== params.profileId);
+            const nextActiveProfileId = (
+                group.activeProfileId === params.profileId
+                || group.activeProfileId === null
+            )
+                ? resolveFirstEnabledMemberProfileId(remainingMembers)
+                : group.activeProfileId;
+            await tx.connectedServiceAuthGroup.update({
+                where: { id: group.id },
+                data: {
+                    generation: { increment: 1 },
+                    ...(group.activeProfileId !== nextActiveProfileId
+                        ? { activeProfileId: nextActiveProfileId }
+                        : {}),
+                },
+            });
+        }
     }
 
     await deleteConnectedServiceUsageSourcesForProfile({
@@ -299,6 +346,8 @@ export async function deleteConnectedServiceCredential(params: {
     serviceId: string;
     profileId: string;
     allowReferencedGroupCleanup: boolean;
+    storageMode: "plain" | "sealed";
+    expectedCredentialRevision?: string;
 }): Promise<DeleteConnectedServiceCredentialResult> {
     return inTx(async (tx) => deleteConnectedServiceCredentialInTx(tx, params));
 }

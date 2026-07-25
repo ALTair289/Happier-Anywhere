@@ -102,7 +102,7 @@ describe("connectRoutes (connected services v2) sealed credential endpoints (int
             },
         });
         expect(register.statusCode).toBe(200);
-        expect(register.json()).toEqual({ success: true });
+        expect(register.json()).toEqual(expect.objectContaining({ success: true, credentialRevision: expect.any(String) }));
 
         const getOne = await app.inject({
             method: "GET",
@@ -111,6 +111,7 @@ describe("connectRoutes (connected services v2) sealed credential endpoints (int
         });
         expect(getOne.statusCode).toBe(200);
         expect(getOne.json()).toEqual({
+            credentialRevision: expect.any(String),
             sealed: { format: "account_scoped_v1", ciphertext: "c2VhbGVk" },
             metadata: expect.objectContaining({ kind: "oauth", providerEmail: "user@example.com" }),
         });
@@ -137,6 +138,395 @@ describe("connectRoutes (connected services v2) sealed credential endpoints (int
                 }),
             }),
         }));
+    });
+
+    it("rejects a stale credential revision without overwriting a newer reconnect", async () => {
+        const user = await db.account.create({ data: { publicKey: "pk-csv2-revision-cas" }, select: { id: true } });
+        const app = createTestApp();
+        connectRoutes(app as any);
+        await app.ready();
+
+        const first = await app.inject({
+            method: "POST",
+            url: "/v2/connect/openai-codex/profiles/work/credential",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: {
+                sealed: { format: "account_scoped_v1", ciphertext: "credential-a" },
+                metadata: { kind: "oauth", providerAccountId: "account-1" },
+            },
+        });
+        expect(first.statusCode).toBe(200);
+        const revisionA = (first.json() as { credentialRevision?: unknown }).credentialRevision;
+        expect(revisionA).toEqual(expect.stringMatching(/^csr_/));
+
+        const reconnect = await app.inject({
+            method: "POST",
+            url: "/v2/connect/openai-codex/profiles/work/credential",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: {
+                sealed: { format: "account_scoped_v1", ciphertext: "credential-b" },
+                metadata: { kind: "oauth", providerAccountId: "account-1" },
+            },
+        });
+        expect(reconnect.statusCode).toBe(200);
+        const revisionB = (reconnect.json() as { credentialRevision?: unknown }).credentialRevision;
+        expect(revisionB).toEqual(expect.stringMatching(/^csr_/));
+        expect(revisionB).not.toBe(revisionA);
+
+        vi.clearAllMocks();
+        const staleRefresh = await app.inject({
+            method: "POST",
+            url: "/v2/connect/openai-codex/profiles/work/credential",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: {
+                sealed: { format: "account_scoped_v1", ciphertext: "stale-refresh-result" },
+                metadata: { kind: "oauth", providerAccountId: "account-1" },
+                expectedCredentialRevision: revisionA,
+            },
+        });
+        expect(staleRefresh.statusCode).toBe(409);
+        expect(staleRefresh.json()).toEqual({
+            error: "connect_credential_mutation_superseded",
+            reason: "revision_mismatch",
+            credentialRevision: revisionB,
+        });
+        expect(emitUpdate).not.toHaveBeenCalled();
+
+        const current = await app.inject({
+            method: "GET",
+            url: "/v2/connect/openai-codex/profiles/work/credential",
+            headers: { "x-test-user-id": user.id },
+        });
+        expect(current.statusCode).toBe(200);
+        expect(current.json()).toEqual(expect.objectContaining({
+            credentialRevision: revisionB,
+            sealed: { format: "account_scoped_v1", ciphertext: "credential-b" },
+        }));
+    });
+
+    it("uses null as an expect-absent guard for first credential creation", async () => {
+        const user = await db.account.create({ data: { publicKey: "pk-csv2-absence-cas" }, select: { id: true } });
+        const app = createTestApp();
+        connectRoutes(app as any);
+        await app.ready();
+
+        const first = await app.inject({
+            method: "POST",
+            url: "/v2/connect/openai-codex/profiles/work/credential",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: {
+                sealed: { format: "account_scoped_v1", ciphertext: "credential-a" },
+                metadata: { kind: "oauth", providerAccountId: "account-1" },
+                expectedCredentialRevision: null,
+            },
+        });
+        expect(first.statusCode).toBe(200);
+        const revision = (first.json() as { credentialRevision: string }).credentialRevision;
+
+        const staleCreate = await app.inject({
+            method: "POST",
+            url: "/v2/connect/openai-codex/profiles/work/credential",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: {
+                sealed: { format: "account_scoped_v1", ciphertext: "credential-b" },
+                metadata: { kind: "oauth", providerAccountId: "account-1" },
+                expectedCredentialRevision: null,
+            },
+        });
+        expect(staleCreate.statusCode).toBe(409);
+        expect(staleCreate.json()).toEqual({
+            error: "connect_credential_mutation_superseded",
+            reason: "revision_mismatch",
+            credentialRevision: revision,
+        });
+    });
+
+    it("allows only one simultaneous expect-absent first credential creation", async () => {
+        const user = await db.account.create({ data: { publicKey: "pk-csv2-absence-race" }, select: { id: true } });
+        const app = createTestApp();
+        connectRoutes(app as any);
+        await app.ready();
+        vi.clearAllMocks();
+
+        const writes = await Promise.all(["credential-a", "credential-b"].map((ciphertext) => app.inject({
+            method: "POST",
+            url: "/v2/connect/openai-codex/profiles/work/credential",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: {
+                sealed: { format: "account_scoped_v1", ciphertext },
+                metadata: { kind: "oauth", providerAccountId: "account-1" },
+                expectedCredentialRevision: null,
+            },
+        })));
+
+        expect(writes.map((response) => response.statusCode).sort()).toEqual([200, 409]);
+        const success = writes.find((response) => response.statusCode === 200)!;
+        const conflict = writes.find((response) => response.statusCode === 409)!;
+        const credentialRevision = (success.json() as { credentialRevision: string }).credentialRevision;
+        expect(conflict.json()).toEqual({
+            error: "connect_credential_mutation_superseded",
+            reason: "revision_mismatch",
+            credentialRevision,
+        });
+        expect(emitUpdate).toHaveBeenCalledTimes(1);
+    });
+
+    it("fences credential persistence with the active refresh lease owner", async () => {
+        const user = await db.account.create({ data: { publicKey: "pk-csv2-revision-lease" }, select: { id: true } });
+        const app = createTestApp();
+        connectRoutes(app as any);
+        await app.ready();
+
+        const registered = await app.inject({
+            method: "POST",
+            url: "/v2/connect/openai-codex/profiles/work/credential",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: {
+                sealed: { format: "account_scoped_v1", ciphertext: "credential-a" },
+                metadata: { kind: "oauth", providerAccountId: "account-1" },
+            },
+        });
+        const revisionA = (registered.json() as { credentialRevision: string }).credentialRevision;
+
+        const lease = await app.inject({
+            method: "POST",
+            url: "/v2/connect/openai-codex/profiles/work/refresh-lease",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: { machineId: "machine-a", ownerId: "machine-a:daemon-a:attempt-a", leaseMs: 10_000 },
+        });
+        expect(lease.statusCode).toBe(200);
+        expect(lease.json()).toEqual(expect.objectContaining({
+            acquired: true,
+            ownerId: "machine-a:daemon-a:attempt-a",
+        }));
+
+        await db.serviceAccountToken.update({
+            where: { accountId_vendor_profileId: { accountId: user.id, vendor: "openai-codex", profileId: "work" } },
+            data: { refreshLeaseExpiresAt: new Date(Date.now() - 1) },
+        });
+        vi.clearAllMocks();
+
+        const expiredOwner = await app.inject({
+            method: "POST",
+            url: "/v2/connect/openai-codex/profiles/work/credential",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: {
+                sealed: { format: "account_scoped_v1", ciphertext: "expired-owner-result" },
+                metadata: { kind: "oauth", providerAccountId: "account-1" },
+                expectedCredentialRevision: revisionA,
+                refreshLeaseOwnerId: "machine-a:daemon-a:attempt-a",
+            },
+        });
+        expect(expiredOwner.statusCode).toBe(409);
+        expect(expiredOwner.json()).toEqual({
+            error: "connect_credential_mutation_superseded",
+            reason: "refresh_lease_lost",
+            credentialRevision: revisionA,
+        });
+        expect(emitUpdate).not.toHaveBeenCalled();
+
+        const current = await app.inject({
+            method: "GET",
+            url: "/v2/connect/openai-codex/profiles/work/credential",
+            headers: { "x-test-user-id": user.id },
+        });
+        expect(current.json()).toEqual(expect.objectContaining({
+            credentialRevision: revisionA,
+            sealed: { format: "account_scoped_v1", ciphertext: "credential-a" },
+        }));
+    });
+
+    it("rejects refresh-owner mutation authority without its leased credential revision", async () => {
+        const user = await db.account.create({ data: { publicKey: "pk-csv2-lease-requires-revision" }, select: { id: true } });
+        const app = createTestApp();
+        connectRoutes(app as any);
+        await app.ready();
+        await app.inject({
+            method: "POST",
+            url: "/v2/connect/openai-codex/profiles/work/credential",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: {
+                sealed: { format: "account_scoped_v1", ciphertext: "credential-a" },
+                metadata: { kind: "oauth", providerAccountId: "account-1" },
+            },
+        });
+        await app.inject({
+            method: "POST",
+            url: "/v2/connect/openai-codex/profiles/work/refresh-lease",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: { machineId: "machine-a", ownerId: "machine-a:daemon-a:attempt-a", leaseMs: 10_000 },
+        });
+
+        const invalid = await app.inject({
+            method: "POST",
+            url: "/v2/connect/openai-codex/profiles/work/credential",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: {
+                sealed: { format: "account_scoped_v1", ciphertext: "unrevisioned-result" },
+                metadata: { kind: "oauth", providerAccountId: "account-1" },
+                refreshLeaseOwnerId: "machine-a:daemon-a:attempt-a",
+            },
+        });
+        expect(invalid.statusCode).toBe(400);
+    });
+
+    it("renews refresh authority and consumes it with exactly one revision-fenced write", async () => {
+        const user = await db.account.create({ data: { publicKey: "pk-csv2-lease-renew" }, select: { id: true } });
+        const app = createTestApp();
+        connectRoutes(app as any);
+        await app.ready();
+        const registered = await app.inject({
+            method: "POST",
+            url: "/v2/connect/openai-codex/profiles/work/credential",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: {
+                sealed: { format: "account_scoped_v1", ciphertext: "credential-a" },
+                metadata: { kind: "oauth", providerAccountId: "account-1" },
+            },
+        });
+        const revisionA = (registered.json() as { credentialRevision: string }).credentialRevision;
+        const ownerId = "machine-a:daemon-a:attempt-a";
+
+        const acquired = await app.inject({
+            method: "POST",
+            url: "/v2/connect/openai-codex/profiles/work/refresh-lease",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: { machineId: "machine-a", ownerId, leaseMs: 1_000 },
+        });
+        const firstLeaseUntil = (acquired.json() as { leaseUntil: number }).leaseUntil;
+        const renewed = await app.inject({
+            method: "POST",
+            url: "/v2/connect/openai-codex/profiles/work/refresh-lease",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: { machineId: "machine-a", ownerId, leaseMs: 10_000 },
+        });
+        expect(renewed.json()).toEqual(expect.objectContaining({
+            acquired: true,
+            ownerId,
+            credentialRevision: revisionA,
+            leaseUntil: expect.any(Number),
+        }));
+        expect((renewed.json() as { leaseUntil: number }).leaseUntil).toBeGreaterThan(firstLeaseUntil);
+
+        vi.clearAllMocks();
+        const persisted = await app.inject({
+            method: "POST",
+            url: "/v2/connect/openai-codex/profiles/work/credential",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: {
+                sealed: { format: "account_scoped_v1", ciphertext: "credential-b" },
+                metadata: { kind: "oauth", providerAccountId: "account-1" },
+                expectedCredentialRevision: revisionA,
+                refreshLeaseOwnerId: ownerId,
+            },
+        });
+        expect(persisted.statusCode).toBe(200);
+        const revisionB = (persisted.json() as { credentialRevision: string }).credentialRevision;
+        expect(revisionB).not.toBe(revisionA);
+        expect(emitUpdate).toHaveBeenCalledTimes(1);
+
+        vi.clearAllMocks();
+        const replay = await app.inject({
+            method: "POST",
+            url: "/v2/connect/openai-codex/profiles/work/credential",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: {
+                sealed: { format: "account_scoped_v1", ciphertext: "credential-c" },
+                metadata: { kind: "oauth", providerAccountId: "account-1" },
+                expectedCredentialRevision: revisionA,
+                refreshLeaseOwnerId: ownerId,
+            },
+        });
+        expect(replay.statusCode).toBe(409);
+        expect(replay.json()).toEqual({
+            error: "connect_credential_mutation_superseded",
+            reason: "revision_mismatch",
+            credentialRevision: revisionB,
+        });
+        expect(emitUpdate).not.toHaveBeenCalled();
+    });
+
+    it("does not renew a refresh owner after the credential revision changes", async () => {
+        const user = await db.account.create({ data: { publicKey: "pk-csv2-lease-revision-renew" }, select: { id: true } });
+        const app = createTestApp();
+        connectRoutes(app as any);
+        await app.ready();
+        const first = await app.inject({
+            method: "POST",
+            url: "/v2/connect/openai-codex/profiles/work/credential",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: {
+                sealed: { format: "account_scoped_v1", ciphertext: "credential-a" },
+                metadata: { kind: "oauth", providerAccountId: "account-1" },
+            },
+        });
+        const revisionA = (first.json() as { credentialRevision: string }).credentialRevision;
+        const ownerId = "machine-a:daemon-a:attempt-a";
+        await app.inject({
+            method: "POST",
+            url: "/v2/connect/openai-codex/profiles/work/refresh-lease",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: { machineId: "machine-a", ownerId, leaseMs: 10_000, expectedCredentialRevision: revisionA },
+        });
+        const reconnect = await app.inject({
+            method: "POST",
+            url: "/v2/connect/openai-codex/profiles/work/credential",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: {
+                sealed: { format: "account_scoped_v1", ciphertext: "credential-b" },
+                metadata: { kind: "oauth", providerAccountId: "account-1" },
+            },
+        });
+        const revisionB = (reconnect.json() as { credentialRevision: string }).credentialRevision;
+
+        const staleRenewal = await app.inject({
+            method: "POST",
+            url: "/v2/connect/openai-codex/profiles/work/refresh-lease",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: { machineId: "machine-a", ownerId, leaseMs: 10_000, expectedCredentialRevision: revisionA },
+        });
+        expect(staleRenewal.statusCode).toBe(200);
+        expect(staleRenewal.json()).toEqual(expect.objectContaining({
+            acquired: false,
+            ownerId,
+            credentialRevision: revisionB,
+        }));
+        const row = await db.serviceAccountToken.findUnique({
+            where: { accountId_vendor_profileId: { accountId: user.id, vendor: "openai-codex", profileId: "work" } },
+            select: { refreshLeaseOwnerMachineId: true },
+        });
+        expect(row?.refreshLeaseOwnerMachineId).toBeNull();
+    });
+
+    it("allows only one concurrent writer for an expected credential revision", async () => {
+        const user = await db.account.create({ data: { publicKey: "pk-csv2-revision-race" }, select: { id: true } });
+        const app = createTestApp();
+        connectRoutes(app as any);
+        await app.ready();
+        const registered = await app.inject({
+            method: "POST",
+            url: "/v2/connect/openai-codex/profiles/work/credential",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: {
+                sealed: { format: "account_scoped_v1", ciphertext: "credential-a" },
+                metadata: { kind: "oauth", providerAccountId: "account-1" },
+            },
+        });
+        const revisionA = (registered.json() as { credentialRevision: string }).credentialRevision;
+        vi.clearAllMocks();
+
+        const writes = await Promise.all(["credential-b", "credential-c"].map((ciphertext) => app.inject({
+            method: "POST",
+            url: "/v2/connect/openai-codex/profiles/work/credential",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: {
+                sealed: { format: "account_scoped_v1", ciphertext },
+                metadata: { kind: "oauth", providerAccountId: "account-1" },
+                expectedCredentialRevision: revisionA,
+            },
+        })));
+        expect(writes.map((response) => response.statusCode).sort()).toEqual([200, 409]);
+        expect(emitUpdate).toHaveBeenCalledTimes(1);
     });
 
     it("rejects sealed ciphertext longer than CONNECTED_SERVICE_CREDENTIAL_MAX_LEN", async () => {
@@ -178,7 +568,23 @@ describe("connectRoutes (connected services v2) sealed credential endpoints (int
             },
         });
         expect(register.statusCode).toBe(200);
-        expect(register.json()).toEqual({ success: true });
+        expect(register.json()).toEqual(expect.objectContaining({ success: true, credentialRevision: expect.any(String) }));
+
+        const sameIdentity = await app.inject({
+            method: "POST",
+            url: "/v1/connect/anthropic/register-sealed",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: { sealed: { format: "account_scoped_v1", ciphertext: "c2VhbGVkLTI=" }, metadata: { kind: "oauth", providerEmail: "user@example.com" } },
+        });
+        expect(sameIdentity.statusCode).toBe(200);
+        const changedIdentity = await app.inject({
+            method: "POST",
+            url: "/v1/connect/anthropic/register-sealed",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: { sealed: { format: "account_scoped_v1", ciphertext: "Zm9yZWlnbg==" }, metadata: { kind: "oauth", providerEmail: "other@example.com" } },
+        });
+        expect(changedIdentity.statusCode).toBe(409);
+        expect(changedIdentity.json()).toEqual({ error: "connect_reconnect_provider_identity_mismatch" });
 
         const getOne = await app.inject({
             method: "GET",
@@ -187,7 +593,8 @@ describe("connectRoutes (connected services v2) sealed credential endpoints (int
         });
         expect(getOne.statusCode).toBe(200);
         expect(getOne.json()).toEqual({
-            sealed: { format: "account_scoped_v1", ciphertext: "c2VhbGVk" },
+            credentialRevision: expect.any(String),
+            sealed: { format: "account_scoped_v1", ciphertext: "c2VhbGVkLTI=" },
             metadata: expect.objectContaining({ kind: "oauth", providerEmail: "user@example.com" }),
         });
     });
@@ -410,7 +817,7 @@ describe("connectRoutes (connected services v2) sealed credential endpoints (int
         expect(res.statusCode).toBe(400);
     });
 
-    it("treats legacy v1 vendor tokens as unsupported for v2 credential reads", async () => {
+    it("preserves released raw v1 vendor-token writes for public-key accounts", async () => {
         const user = await db.account.create({ data: { publicKey: "pk-csv2-u3" }, select: { id: true } });
 
         const app = createTestApp();
@@ -424,6 +831,7 @@ describe("connectRoutes (connected services v2) sealed credential endpoints (int
             payload: { token: "legacy-token" },
         });
         expect(legacyRegister.statusCode).toBe(200);
+        expect(legacyRegister.json()).toEqual({ success: true });
 
         const getOne = await app.inject({
             method: "GET",
@@ -645,7 +1053,7 @@ describe("connectRoutes (connected services v2) sealed credential endpoints (int
             },
         });
         expect(update.statusCode).toBe(200);
-        expect(update.json()).toEqual({ success: true });
+        expect(update.json()).toEqual(expect.objectContaining({ success: true, credentialRevision: expect.any(String) }));
 
         const list = await app.inject({
             method: "GET",
@@ -665,6 +1073,64 @@ describe("connectRoutes (connected services v2) sealed credential endpoints (int
             }),
         ]);
         expect(JSON.stringify(json)).not.toContain("c2VhbGVk");
+    });
+
+    it("does not apply stale credential health to a newer reconnect revision", async () => {
+        const user = await db.account.create({ data: { publicKey: "pk-csv2-health-revision" }, select: { id: true } });
+        const app = createTestApp();
+        connectRoutes(app as any);
+        await app.ready();
+        const first = await app.inject({
+            method: "POST",
+            url: "/v2/connect/openai-codex/profiles/work/credential",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: {
+                sealed: { format: "account_scoped_v1", ciphertext: "credential-a" },
+                metadata: { kind: "oauth", providerAccountId: "account-1" },
+            },
+        });
+        const revisionA = (first.json() as { credentialRevision: string }).credentialRevision;
+        const reconnect = await app.inject({
+            method: "POST",
+            url: "/v2/connect/openai-codex/profiles/work/credential",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: {
+                sealed: { format: "account_scoped_v1", ciphertext: "credential-b" },
+                metadata: { kind: "oauth", providerAccountId: "account-1" },
+            },
+        });
+        const revisionB = (reconnect.json() as { credentialRevision: string }).credentialRevision;
+        vi.clearAllMocks();
+
+        const staleHealth = await app.inject({
+            method: "PATCH",
+            url: "/v3/connect/openai-codex/profiles/work/credential/health",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: {
+                expectedCredentialRevision: revisionA,
+                health: {
+                    v: 1,
+                    status: "needs_reauth",
+                    reconnectRequired: true,
+                    lastRefreshFailureAt: Date.now(),
+                    lastRefreshFailureKind: "invalid_grant",
+                },
+            },
+        });
+        expect(staleHealth.statusCode).toBe(409);
+        expect(staleHealth.json()).toEqual({
+            error: "connect_credential_mutation_superseded",
+            reason: "revision_mismatch",
+            credentialRevision: revisionB,
+        });
+        expect(emitUpdate).not.toHaveBeenCalled();
+
+        const row = await db.serviceAccountToken.findUnique({
+            where: { accountId_vendor_profileId: { accountId: user.id, vendor: "openai-codex", profileId: "work" } },
+            select: { metadata: true },
+        });
+        expect(row?.metadata).toEqual(expect.objectContaining({ credentialRevision: revisionB }));
+        expect((row?.metadata as any)?.health).toBeUndefined();
     });
 
     it("deletes a connected service credential for a profile", async () => {
@@ -725,5 +1191,57 @@ describe("connectRoutes (connected services v2) sealed credential endpoints (int
                 }),
             }),
         }));
+    });
+
+    it("rejects a stale guarded credential delete and preserves the newer credential", async () => {
+        const user = await db.account.create({ data: { publicKey: "pk-csv2-delete-cas" }, select: { id: true } });
+
+        const app = createTestApp();
+        connectRoutes(app as any);
+        await app.ready();
+
+        const first = await app.inject({
+            method: "POST",
+            url: "/v2/connect/openai-codex/profiles/work/credential",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: {
+                sealed: { format: "account_scoped_v1", ciphertext: "Zmlyc3Q=" },
+                metadata: { kind: "oauth", providerEmail: "first@example.com" },
+            },
+        });
+        const revisionA = (first.json() as { credentialRevision: string }).credentialRevision;
+
+        const second = await app.inject({
+            method: "POST",
+            url: "/v2/connect/openai-codex/profiles/work/credential",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: {
+                sealed: { format: "account_scoped_v1", ciphertext: "c2Vjb25k" },
+                metadata: { kind: "oauth", providerEmail: "second@example.com" },
+                expectedCredentialRevision: revisionA,
+                reconnect: { allowProviderIdentityChange: true },
+            },
+        });
+        const revisionB = (second.json() as { credentialRevision: string }).credentialRevision;
+
+        const staleDelete = await app.inject({
+            method: "DELETE",
+            url: `/v2/connect/openai-codex/profiles/work/credential?expectedCredentialRevision=${encodeURIComponent(revisionA)}`,
+            headers: { "x-test-user-id": user.id },
+        });
+        expect(staleDelete.statusCode).toBe(409);
+        expect(staleDelete.json()).toEqual({
+            error: "connect_credential_mutation_superseded",
+            reason: "revision_mismatch",
+            credentialRevision: revisionB,
+        });
+
+        const retained = await app.inject({
+            method: "GET",
+            url: "/v2/connect/openai-codex/profiles/work/credential",
+            headers: { "x-test-user-id": user.id },
+        });
+        expect(retained.statusCode).toBe(200);
+        expect(retained.json()).toEqual(expect.objectContaining({ credentialRevision: revisionB }));
     });
 });

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ConnectedServiceCredentialRevisionV1Schema } from "@happier-dev/protocol";
 
 function parseBooleanQueryFlag(value: unknown): unknown {
     if (typeof value !== "string") return value;
@@ -10,5 +11,5 @@ function parseBooleanQueryFlag(value: unknown): unknown {
 
 export const ConnectedServiceCredentialDeleteQuerySchema = z.object({
     cleanupGroupReferences: z.preprocess(parseBooleanQueryFlag, z.boolean().optional()),
+    expectedCredentialRevision: ConnectedServiceCredentialRevisionV1Schema.optional(),
 });
-

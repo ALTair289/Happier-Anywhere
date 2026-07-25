@@ -41,6 +41,7 @@ export function registerAccountProfileRoute(app: Fastify): void {
             linkedProviders,
             connectedServices: connectedServicesProjection.connectedServices,
             connectedServicesV2: connectedServicesProjection.connectedServicesV2,
+            connectedServiceCredentialRevisionsV1: connectedServicesProjection.connectedServiceCredentialRevisionsV1,
         });
     });
 }

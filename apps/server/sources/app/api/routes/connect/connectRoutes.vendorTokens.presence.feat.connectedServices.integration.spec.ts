@@ -104,6 +104,33 @@ describe("connectRoutes (vendor tokens) presence-only reads (integration)", () =
         });
     });
 
+    it("preserves released raw v1 register and absent-delete behavior for public-key legacy accounts", async () => {
+        const user = await db.account.create({
+            data: { publicKey: "pk-vendor-v021-compat" },
+            select: { id: true },
+        });
+        const app = createTestApp();
+        connectRoutes(app as any);
+        await app.ready();
+
+        const register = await app.inject({
+            method: "POST",
+            url: "/v1/connect/openai/register",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: { token: "legacy-token" },
+        });
+        expect(register.statusCode).toBe(200);
+        expect(register.json()).toEqual({ success: true });
+
+        const absentDelete = await app.inject({
+            method: "DELETE",
+            url: "/v1/connect/gemini",
+            headers: { "x-test-user-id": user.id },
+        });
+        expect(absentDelete.statusCode).toBe(200);
+        expect(absentDelete.json()).toEqual({ success: true });
+    });
+
     it("rejects v1 vendor token registration when a v2 connected service credential already exists", async () => {
         const user = await db.account.create({ data: { publicKey: "pk-vendor-tokens-u2" }, select: { id: true } });
 
@@ -138,6 +165,67 @@ describe("connectRoutes (vendor tokens) presence-only reads (integration)", () =
         expect(row).not.toBeNull();
         expect(Buffer.from(row!.token).toString("utf8")).toBe("c2VhbGVk");
         expect((row!.metadata as any)?.v).toBe(2);
+    });
+
+    it("rejects v1 vendor token registration without corrupting a v3 plaintext credential", async () => {
+        harness.resetEnv({
+            HAPPIER_FEATURE_ENCRYPTION__STORAGE_POLICY: "optional",
+            HAPPIER_FEATURE_ENCRYPTION__DEFAULT_ACCOUNT_MODE: "plain",
+        });
+        const user = await db.account.create({
+            data: { publicKey: null, encryptionMode: "plain" },
+            select: { id: true },
+        });
+        const now = Date.now();
+        const app = createTestApp();
+        connectRoutes(app as any);
+        await app.ready();
+        const registerV3 = await app.inject({
+            method: "POST",
+            url: "/v3/connect/anthropic/profiles/default/credential",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: {
+                content: {
+                    t: "plain",
+                    v: {
+                        v: 1,
+                        serviceId: "anthropic",
+                        profileId: "default",
+                        kind: "token",
+                        createdAt: now,
+                        updatedAt: now,
+                        expiresAt: null,
+                        oauth: null,
+                        token: {
+                            token: "connected-token",
+                            providerAccountId: "account-1",
+                            providerEmail: "user@example.com",
+                            raw: null,
+                        },
+                    },
+                },
+            },
+        });
+        expect(registerV3.statusCode).toBe(200);
+        const before = await db.serviceAccountToken.findUnique({
+            where: { accountId_vendor_profileId: { accountId: user.id, vendor: "anthropic", profileId: "default" } },
+            select: { token: true, metadata: true },
+        });
+
+        const legacyRegister = await app.inject({
+            method: "POST",
+            url: "/v1/connect/anthropic/register",
+            headers: { "content-type": "application/json", "x-test-user-id": user.id },
+            payload: { token: "legacy-token" },
+        });
+        expect(legacyRegister.statusCode).toBe(409);
+        expect(legacyRegister.json()).toEqual({ error: "connect_credential_conflict" });
+        const after = await db.serviceAccountToken.findUnique({
+            where: { accountId_vendor_profileId: { accountId: user.id, vendor: "anthropic", profileId: "default" } },
+            select: { token: true, metadata: true },
+        });
+        expect(after).toEqual(before);
+        expect((after?.metadata as any)?.v).toBe(3);
     });
 
     it("treats v1 vendor token deletion as idempotent when the token is already missing", async () => {
