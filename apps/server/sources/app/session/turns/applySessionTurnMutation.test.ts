@@ -196,6 +196,129 @@ describe("applySessionTurnMutationToTurns", () => {
         expect(decision.materialized.latestTurnStatus).toBe("in_progress");
     });
 
+    it("cancels an exact historical in-progress turn without moving the live successor", () => {
+        const decision = applySessionTurnMutationToTurns({
+            currentLatestTurnId: "turn-2",
+            turns: [
+                {
+                    turnId: "turn-1",
+                    status: "in_progress",
+                    startedAt: 100,
+                    updatedAt: 100,
+                },
+                {
+                    turnId: "turn-2",
+                    status: "in_progress",
+                    startedAt: 300,
+                    updatedAt: 300,
+                },
+            ],
+            appliedAt: 401,
+            mutation: {
+                v: 1,
+                sessionId: "s1",
+                mutationId: "exact-end-historical",
+                action: "end_session",
+                turnId: "turn-1",
+                observedAt: 200,
+            },
+        });
+
+        expect(decision.apply).toBe(true);
+        expect(decision.latestTurnId).toBe("turn-2");
+        expect(decision.turns.find((turn) => turn.turnId === "turn-1")?.status).toBe("cancelled");
+        expect(decision.turns.find((turn) => turn.turnId === "turn-2")?.status).toBe("in_progress");
+        expect(decision.materialized.latestTurnStatus).toBe("in_progress");
+    });
+
+    it("returns exact missing-turn provisionally and only already-cancelled as duplicate-terminal", () => {
+        const base = {
+            currentLatestTurnId: null,
+            appliedAt: 401,
+            mutation: {
+                v: 1,
+                sessionId: "s1",
+                mutationId: "exact-end-missing",
+                action: "end_session",
+                turnId: "turn-1",
+                observedAt: 200,
+            },
+        } as const;
+
+        const missing = applySessionTurnMutationToTurns({ ...base, turns: [] });
+        expect(missing.apply).toBe(false);
+        expect(missing.receipt.decision).toBe("missing-turn");
+
+        const cancelled = applySessionTurnMutationToTurns({
+            ...base,
+            currentLatestTurnId: "turn-1",
+            turns: [{
+                turnId: "turn-1",
+                status: "cancelled",
+                startedAt: 100,
+                updatedAt: 150,
+                terminalAt: 150,
+            }],
+        });
+        expect(cancelled.apply).toBe(false);
+        expect(cancelled.receipt.decision).toBe("duplicate-terminal");
+    });
+
+    it.each(["completed", "failed"] as const)("acknowledges an exact retry against an already-%s target without rewriting it", (status) => {
+        const decision = applySessionTurnMutationToTurns({
+            currentLatestTurnId: "turn-1",
+            turns: [{
+                turnId: "turn-1",
+                status,
+                startedAt: 100,
+                updatedAt: 150,
+                terminalAt: 150,
+            }],
+            appliedAt: 401,
+            mutation: {
+                v: 1,
+                sessionId: "s1",
+                mutationId: `exact-end-${status}`,
+                action: "end_session",
+                turnId: "turn-1",
+                observedAt: 200,
+            },
+        });
+
+        expect(decision.apply).toBe(false);
+        expect(decision.receipt.decision).toBe("duplicate-terminal");
+        expect(decision.turns).toEqual([expect.objectContaining({
+            turnId: "turn-1",
+            status,
+            updatedAt: 150,
+            terminalAt: 150,
+        })]);
+    });
+
+    it("keeps an exact target started after observedAt non-positive", () => {
+        const decision = applySessionTurnMutationToTurns({
+            currentLatestTurnId: "turn-1",
+            turns: [{
+                turnId: "turn-1",
+                status: "in_progress",
+                startedAt: 300,
+                updatedAt: 300,
+            }],
+            appliedAt: 401,
+            mutation: {
+                v: 1,
+                sessionId: "s1",
+                mutationId: "exact-end-before-start",
+                action: "end_session",
+                turnId: "turn-1",
+                observedAt: 200,
+            },
+        });
+
+        expect(decision.apply).toBe(false);
+        expect(decision.receipt.decision).toBe("stale-terminal");
+    });
+
     it("touches the active turn so in-progress freshness follows trusted runtime progress", () => {
         const decision = applySessionTurnMutationToTurns({
             currentLatestTurnId: "turn-1",

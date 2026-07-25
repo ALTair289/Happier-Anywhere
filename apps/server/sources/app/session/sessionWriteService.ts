@@ -10,6 +10,7 @@ import {
     PrimaryTurnStatusV1Schema,
     TranscriptRawRecordV1Schema,
     agentEventLocalIdAttentionImpact,
+    ExactSessionTurnEndMutationV1Schema,
     SessionTurnMutationV1Schema,
     SessionRuntimeIssueV1Schema,
     type PrimaryTurnStatusV1,
@@ -391,6 +392,38 @@ type SessionTurnMutationTxResult = Readonly<{
     badgeAttentionChanged: boolean;
 }>;
 
+export async function applyLatestSessionTurnEndInTx(params: Readonly<{
+    tx: Tx;
+    sessionId: string;
+    mutationId: string;
+    observedAt: number;
+}>): Promise<SessionTurnMutationTxResult | null> {
+    const session = await params.tx.session.findUnique({
+        where: { id: params.sessionId },
+        select: {
+            latestTurnId: true,
+            latestTurnStatusObservedAt: true,
+            ...selectSessionActivityBadgeInputs(),
+        },
+    });
+    if (!session?.latestTurnId) return null;
+
+    return await applySessionTurnMutationInTx({
+        tx: params.tx,
+        sessionId: params.sessionId,
+        mutation: ExactSessionTurnEndMutationV1Schema.parse({
+            v: 1,
+            sessionId: params.sessionId,
+            mutationId: params.mutationId,
+            action: "end_session",
+            turnId: session.latestTurnId,
+            observedAt: params.observedAt,
+        }),
+        session,
+        markParticipants: false,
+    });
+}
+
 export type ReassertSessionLatestTurnStatusResult =
     | {
         ok: true;
@@ -508,11 +541,37 @@ export async function applySessionTurnMutationInTx(params: Readonly<{
     };
     markParticipants: boolean;
 }>): Promise<SessionTurnMutationTxResult> {
+    const exactMutation = ExactSessionTurnEndMutationV1Schema.safeParse(params.mutation);
     const duplicateReceipt = await params.tx.sessionTurnMutationReceipt.findUnique({
         where: { sessionId_mutationId: { sessionId: params.sessionId, mutationId: params.mutation.mutationId } },
     });
     if (duplicateReceipt) {
-        const receipt = parseStoredSessionTurnMutationReceipt(duplicateReceipt) ?? {
+        const parsedReceipt = parseStoredSessionTurnMutationReceipt(duplicateReceipt);
+        const exactReceiptIdentityMatches = exactMutation.success
+            && parsedReceipt !== null
+            && parsedReceipt.v === exactMutation.data.v
+            && parsedReceipt.sessionId === exactMutation.data.sessionId
+            && parsedReceipt.mutationId === exactMutation.data.mutationId
+            && parsedReceipt.action === exactMutation.data.action
+            && parsedReceipt.turnId === exactMutation.data.turnId
+            && parsedReceipt.observedAt === exactMutation.data.observedAt;
+        const shouldReevaluateExactReceipt = exactReceiptIdentityMatches
+            && parsedReceipt !== null
+            && parsedReceipt.decision !== "applied"
+            && parsedReceipt.decision !== "duplicate-terminal";
+        if (!shouldReevaluateExactReceipt) {
+            const receipt = exactMutation.success && !exactReceiptIdentityMatches
+                ? {
+                    v: 1 as const,
+                    sessionId: params.sessionId,
+                    mutationId: params.mutation.mutationId,
+                    turnId: exactMutation.data.turnId,
+                    action: exactMutation.data.action,
+                    decision: "duplicate-mutation" as const,
+                    observedAt: exactMutation.data.observedAt,
+                    appliedAt: exactMutation.data.observedAt,
+                }
+                : parsedReceipt ?? {
             v: 1,
             sessionId: params.sessionId,
             mutationId: params.mutation.mutationId,
@@ -522,14 +581,15 @@ export async function applySessionTurnMutationInTx(params: Readonly<{
             observedAt: params.mutation.observedAt,
             appliedAt: params.mutation.observedAt,
         };
-        return {
-            didApply: false,
-            reason: "duplicate-mutation",
-            receipt,
-            ...readMaterializedProjectionFromSession(params.session),
-            participantCursors: [],
-            badgeAttentionChanged: false,
-        };
+            return {
+                didApply: false,
+                reason: "duplicate-mutation",
+                receipt,
+                ...readMaterializedProjectionFromSession(params.session),
+                participantCursors: [],
+                badgeAttentionChanged: false,
+            };
+        }
     }
 
     const turnRows = await params.tx.sessionTurn.findMany({
@@ -578,8 +638,7 @@ export async function applySessionTurnMutationInTx(params: Readonly<{
         });
     }
 
-    await params.tx.sessionTurnMutationReceipt.create({
-        data: {
+    const receiptWriteData = {
             sessionId: params.sessionId,
             mutationId: params.mutation.mutationId,
             ...(decision.receipt.turnId ? { turnId: decision.receipt.turnId } : {}),
@@ -587,8 +646,19 @@ export async function applySessionTurnMutationInTx(params: Readonly<{
             decision: decision.receipt.decision,
             observedAt: BigInt(decision.receipt.observedAt),
             appliedAt: BigInt(decision.receipt.appliedAt),
-        },
-    });
+    };
+    const exactDecisionIsPositive = exactMutation.success
+        && (decision.receipt.decision === "applied" || decision.receipt.decision === "duplicate-terminal");
+    if (!exactMutation.success || exactDecisionIsPositive) {
+        if (duplicateReceipt) {
+            await params.tx.sessionTurnMutationReceipt.update({
+                where: { sessionId_mutationId: { sessionId: params.sessionId, mutationId: params.mutation.mutationId } },
+                data: receiptWriteData,
+            });
+        } else {
+            await params.tx.sessionTurnMutationReceipt.create({ data: receiptWriteData });
+        }
+    }
 
     const participantCursors = decision.apply && params.markParticipants
         ? await markSessionParticipantsChanged({ tx: params.tx, sessionId: params.sessionId })
