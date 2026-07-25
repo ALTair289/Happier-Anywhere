@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -198,6 +198,24 @@ test('resolveCurrentBinaryTarget maps the current platform to a supported binary
   });
 });
 
+test('resolvePrismaSchemaEngineTarget covers every released server binary target', async () => {
+  const artifacts = await import('../dist/componentArtifacts/index.js');
+  assert.deepEqual(
+    artifacts.SERVER_BINARY_TARGETS.map((target) => [
+      `${target.os}-${target.arch}`,
+      artifacts.resolvePrismaSchemaEngineTarget(target),
+      artifacts.resolveExecutableName({ baseName: 'happier-server-migrate', target }),
+    ]),
+    [
+      ['linux-x64', { binaryTarget: 'debian-openssl-3.0.x', fileName: 'schema-engine-debian-openssl-3.0.x' }, 'happier-server-migrate'],
+      ['linux-arm64', { binaryTarget: 'linux-arm64-openssl-3.0.x', fileName: 'schema-engine-linux-arm64-openssl-3.0.x' }, 'happier-server-migrate'],
+      ['darwin-x64', { binaryTarget: 'darwin', fileName: 'schema-engine-darwin' }, 'happier-server-migrate'],
+      ['darwin-arm64', { binaryTarget: 'darwin-arm64', fileName: 'schema-engine-darwin-arm64' }, 'happier-server-migrate'],
+      ['windows-x64', { binaryTarget: 'windows', fileName: 'schema-engine-windows.exe' }, 'happier-server-migrate.exe'],
+    ],
+  );
+});
+
 test('commandExists does not execute shell metacharacters on Unix', async () => {
   if (process.platform === 'win32') return;
 
@@ -256,6 +274,12 @@ test('buildCliBinaryArtifactPayload compiles the local CLI binary into the paylo
       JSON.stringify({ name: '@huggingface/transformers', version: '1.0.0', dependencies: { 'onnxruntime-node': '1.0.0' } }, null, 2),
     );
     writeFileSync(join(transformersDir, 'index.js'), 'module.exports = {};\n', 'utf8');
+    if (process.platform !== 'win32') {
+      const externalToolPath = join(repoRoot, 'external-transformers-tool.js');
+      writeFileSync(externalToolPath, 'console.log("tool");\n', 'utf8');
+      mkdirSync(join(transformersDir, 'node_modules', '.bin'), { recursive: true });
+      symlinkSync(externalToolPath, join(transformersDir, 'node_modules', '.bin', 'external-transformers-tool'));
+    }
     writeFileSync(
       join(ortDir, 'package.json'),
       JSON.stringify({ name: 'onnxruntime-node', version: '1.0.0', dependencies: { 'onnxruntime-common': '1.0.0' } }, null, 2),
@@ -351,6 +375,13 @@ test('buildCliBinaryArtifactPayload compiles the local CLI binary into the paylo
       },
     );
     assert.equal(existsSync(join(payloadDir, 'tools', 'archives')), false);
+    if (process.platform !== 'win32') {
+      assert.equal(
+        existsSync(join(payloadDir, 'node_modules', '@huggingface', 'transformers', 'node_modules', '.bin')),
+        false,
+        'runtime artifacts must not retain package-manager shims that escape the payload',
+      );
+    }
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }
@@ -898,7 +929,6 @@ test('buildServerBinaryArtifactPayload stages the compiled binary and runtime si
     const sqliteMigrationsDir = join(repoRoot, 'apps', 'server', 'prisma', 'sqlite', 'migrations');
     const postgresClientDir = join(repoRoot, 'node_modules', '.prisma', 'client');
     const prismaClientPackageDir = join(repoRoot, 'node_modules', '@prisma', 'client');
-
     mkdirSync(serverSourcesDir, { recursive: true });
     mkdirSync(uiDistDir, { recursive: true });
     mkdirSync(sqliteClientDir, { recursive: true });
@@ -919,6 +949,12 @@ test('buildServerBinaryArtifactPayload stages the compiled binary and runtime si
       providers: ['sqlite', 'mysql'],
     });
     writeFileSync(join(prismaClientPackageDir, 'index.js'), 'module.exports = { PrismaClient: class PrismaClient {} };\n', 'utf8');
+    if (process.platform !== 'win32') {
+      const externalToolPath = join(repoRoot, 'external-prisma-tool.js');
+      writeFileSync(externalToolPath, 'console.log("tool");\n', 'utf8');
+      mkdirSync(join(prismaClientPackageDir, 'node_modules', '.bin'), { recursive: true });
+      symlinkSync(externalToolPath, join(prismaClientPackageDir, 'node_modules', '.bin', 'external-prisma-tool'));
+    }
 
     const artifacts = await import('../dist/componentArtifacts/index.js');
     const compileCalls = [];
@@ -926,6 +962,7 @@ test('buildServerBinaryArtifactPayload stages the compiled binary and runtime si
     const result = await artifacts.buildServerBinaryArtifactPayload({
       repoRoot,
       payloadDir,
+      serverComponent: 'happier-server-light',
       entrypoint: join(serverSourcesDir, 'main.light.ts'),
       buildDbProviders: 'all',
       target: artifacts.resolveCurrentBinaryTarget({
@@ -945,6 +982,7 @@ test('buildServerBinaryArtifactPayload stages the compiled binary and runtime si
 
     assert.equal(result.executableName, 'happier-server');
     assert.equal(result.entrypoint, 'happier-server');
+    assert.equal(result.migrationEntrypoint, undefined);
     assert.equal(compileCalls.length, 1);
     assert.deepEqual(runCalls, [
       { cmd: 'yarn', args: ['--cwd', 'apps/server', '-s', 'generate:providers'] },
@@ -956,6 +994,9 @@ test('buildServerBinaryArtifactPayload stages the compiled binary and runtime si
     assert.equal(readFileSync(join(payloadDir, 'generated', 'sqlite-client', 'schema.prisma'), 'utf8'), '// sqlite\n');
     assert.equal(readFileSync(join(payloadDir, 'generated', 'mysql-client', 'schema.prisma'), 'utf8'), '// mysql\n');
     assert.equal(readFileSync(join(payloadDir, 'prisma', 'sqlite', 'migrations', 'migration.sql'), 'utf8'), '-- sql\n');
+    assert.equal(existsSync(join(payloadDir, 'happier-server-migrate')), false);
+    assert.equal(existsSync(join(payloadDir, 'prisma', 'schema.prisma')), false);
+    assert.equal(existsSync(join(payloadDir, 'prisma', 'mysql', 'schema.prisma')), false);
     assert.equal(readFileSync(join(payloadDir, 'ui-web', 'current', 'index.html'), 'utf8'), '<html>ui</html>\n');
     assert.equal(
       readFileSync(join(payloadDir, 'node_modules', '.prisma', 'client', 'libquery_engine-debian-openssl-3.0.x.so.node'), 'utf8'),
@@ -964,6 +1005,185 @@ test('buildServerBinaryArtifactPayload stages the compiled binary and runtime si
     assert.equal(
       readFileSync(join(payloadDir, 'node_modules', '@prisma', 'client', 'index.js'), 'utf8'),
       'module.exports = { PrismaClient: class PrismaClient {} };\n'
+    );
+    if (process.platform !== 'win32') {
+      assert.equal(
+        existsSync(join(payloadDir, 'node_modules', '@prisma', 'client', 'node_modules', '.bin')),
+        false,
+        'runtime artifacts must not retain package-manager shims that escape the payload',
+      );
+    }
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('buildServerBinaryArtifactPayload packages the complete full-server migrate deploy closure', async () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), 'component-artifacts-full-server-'));
+  try {
+    const repoRoot = join(tempRoot, 'repo');
+    const payloadDir = join(tempRoot, 'payload');
+    const serverRoot = join(repoRoot, 'apps', 'server');
+    const serverSourcesDir = join(serverRoot, 'sources');
+    const runtimeScriptsDir = join(serverRoot, 'scripts', 'runtime');
+    const uiDistDir = join(repoRoot, 'apps', 'ui', 'dist');
+    const mysqlClientDir = join(serverRoot, 'generated', 'mysql-client');
+    const postgresMigrationsDir = join(serverRoot, 'prisma', 'migrations', '20260719000100_pg_sentinel');
+    const mysqlMigrationsDir = join(serverRoot, 'prisma', 'mysql', 'migrations', '20260719000100_mysql_sentinel');
+    const schemaEngineDir = join(serverRoot, 'generated', 'runtime-migration-engines', 'linux-x64');
+    const postgresClientDir = join(repoRoot, 'node_modules', '.prisma', 'client');
+    const prismaClientPackageDir = join(repoRoot, 'node_modules', '@prisma', 'client');
+    const prismaBuildDir = join(repoRoot, 'node_modules', 'prisma', 'build');
+
+    for (const dir of [
+      serverSourcesDir,
+      runtimeScriptsDir,
+      uiDistDir,
+      mysqlClientDir,
+      postgresMigrationsDir,
+      mysqlMigrationsDir,
+      schemaEngineDir,
+      postgresClientDir,
+      prismaClientPackageDir,
+      prismaBuildDir,
+    ]) {
+      mkdirSync(dir, { recursive: true });
+    }
+
+    writeFileSync(join(serverSourcesDir, 'main.ts'), 'export {};\n', 'utf8');
+    writeFileSync(join(runtimeScriptsDir, 'migrateFullRuntime.ts'), 'export {};\n', 'utf8');
+    writeFileSync(join(uiDistDir, 'index.html'), '<html>full ui</html>\n', 'utf8');
+    writeFileSync(join(mysqlClientDir, 'schema.prisma'), '// generated mysql\n', 'utf8');
+    writeFileSync(join(serverRoot, 'prisma', 'schema.prisma'), '// postgres schema sentinel\n', 'utf8');
+    writeFileSync(join(serverRoot, 'prisma', 'migrations', 'migration_lock.toml'), 'provider = "postgresql"\n', 'utf8');
+    writeFileSync(join(postgresMigrationsDir, 'migration.sql'), '-- postgres migration sentinel\n', 'utf8');
+    writeFileSync(join(serverRoot, 'prisma', 'mysql', 'schema.prisma'), '// mysql schema sentinel\n', 'utf8');
+    writeFileSync(join(serverRoot, 'prisma', 'mysql', 'migrations', 'migration_lock.toml'), 'provider = "mysql"\n', 'utf8');
+    writeFileSync(join(mysqlMigrationsDir, 'migration.sql'), '-- mysql migration sentinel\n', 'utf8');
+    writeFileSync(
+      join(schemaEngineDir, 'schema-engine-debian-openssl-3.0.x'),
+      'schema engine sentinel\n',
+      'utf8',
+    );
+    writeServerPrismaEngineFixtures({
+      mysqlClientDir,
+      postgresClientDir,
+      providers: ['mysql'],
+    });
+    writeFileSync(join(prismaClientPackageDir, 'index.js'), 'module.exports = {};\n', 'utf8');
+    writeFileSync(join(prismaBuildDir, 'prisma_schema_build_bg.wasm'), 'schema wasm sentinel\n', 'utf8');
+
+    const artifacts = await import('../dist/componentArtifacts/index.js');
+    const compileCalls = [];
+    const result = await artifacts.buildServerBinaryArtifactPayload({
+      repoRoot,
+      payloadDir,
+      serverComponent: 'happier-server',
+      entrypoint: join(serverSourcesDir, 'main.ts'),
+      buildDbProviders: 'postgresql',
+      target: artifacts.resolveCurrentBinaryTarget({
+        availableTargets: artifacts.SERVER_BINARY_TARGETS,
+        platform: 'linux',
+        arch: 'x64',
+      }),
+      commandProbe: () => true,
+      runCommand: () => undefined,
+      compileBinary: async (args) => {
+        compileCalls.push(args);
+        writeFileSync(args.outfile, `compiled:${args.entrypoint}\n`, 'utf8');
+      },
+      compilePrismaBinary: async (args) => {
+        writeFileSync(args.outfile, 'packaged Prisma migrate runner\n', 'utf8');
+      },
+    });
+
+    assert.equal(result.migrationEntrypoint, 'happier-server-migrate');
+    assert.deepEqual(
+      compileCalls.map(({ entrypoint, outfile }) => [entrypoint, outfile.slice(payloadDir.length + 1)]),
+      [
+        [join(serverSourcesDir, 'main.ts'), 'happier-server'],
+        [join(runtimeScriptsDir, 'migrateFullRuntime.ts'), 'happier-server-migrate'],
+      ],
+    );
+    assert.match(readFileSync(join(payloadDir, 'happier-server-migrate'), 'utf8'), /migrateFullRuntime\.ts/);
+    assert.equal(
+      readFileSync(join(payloadDir, 'runtime', 'prisma-migrate'), 'utf8'),
+      'packaged Prisma migrate runner\n',
+    );
+    assert.equal(readFileSync(join(payloadDir, 'prisma', 'schema.prisma'), 'utf8'), '// postgres schema sentinel\n');
+    assert.equal(
+      readFileSync(join(payloadDir, 'prisma', 'migrations', '20260719000100_pg_sentinel', 'migration.sql'), 'utf8'),
+      '-- postgres migration sentinel\n',
+    );
+    assert.equal(readFileSync(join(payloadDir, 'prisma', 'mysql', 'schema.prisma'), 'utf8'), '// mysql schema sentinel\n');
+    assert.equal(
+      readFileSync(join(payloadDir, 'prisma', 'mysql', 'migrations', '20260719000100_mysql_sentinel', 'migration.sql'), 'utf8'),
+      '-- mysql migration sentinel\n',
+    );
+    assert.equal(
+      readFileSync(join(payloadDir, 'runtime', 'schema-engine'), 'utf8'),
+      'schema engine sentinel\n',
+    );
+    assert.equal(
+      readFileSync(join(payloadDir, 'runtime', 'prisma_schema_build_bg.wasm'), 'utf8'),
+      'schema wasm sentinel\n',
+    );
+    assert.equal(existsSync(join(payloadDir, 'prisma', 'sqlite')), false);
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('buildServerBinaryArtifactPayload rejects non-bin sidecar symlinks that escape the payload', async () => {
+  if (process.platform === 'win32') return;
+
+  const tempRoot = mkdtempSync(join(tmpdir(), 'component-artifacts-server-external-symlink-'));
+  try {
+    const repoRoot = join(tempRoot, 'repo');
+    const payloadDir = join(tempRoot, 'payload');
+    const serverSourcesDir = join(repoRoot, 'apps', 'server', 'sources');
+    const uiDistDir = join(repoRoot, 'apps', 'ui', 'dist');
+    const sqliteClientDir = join(repoRoot, 'apps', 'server', 'generated', 'sqlite-client');
+    const sqliteMigrationsDir = join(repoRoot, 'apps', 'server', 'prisma', 'sqlite', 'migrations');
+    const postgresClientDir = join(repoRoot, 'node_modules', '.prisma', 'client');
+    const prismaClientPackageDir = join(repoRoot, 'node_modules', '@prisma', 'client');
+
+    mkdirSync(serverSourcesDir, { recursive: true });
+    mkdirSync(uiDistDir, { recursive: true });
+    mkdirSync(sqliteClientDir, { recursive: true });
+    mkdirSync(sqliteMigrationsDir, { recursive: true });
+    mkdirSync(postgresClientDir, { recursive: true });
+    mkdirSync(prismaClientPackageDir, { recursive: true });
+
+    writeFileSync(join(serverSourcesDir, 'main.light.ts'), 'export {};\n', 'utf8');
+    writeFileSync(join(uiDistDir, 'index.html'), '<html>ui</html>\n', 'utf8');
+    writeFileSync(join(sqliteClientDir, 'schema.prisma'), '// sqlite\n', 'utf8');
+    writeFileSync(join(sqliteMigrationsDir, 'migration.sql'), '-- sql\n', 'utf8');
+    writeServerPrismaEngineFixtures({ sqliteClientDir, postgresClientDir, providers: ['sqlite'] });
+    writeFileSync(join(prismaClientPackageDir, 'index.js'), 'module.exports = {};\n', 'utf8');
+    const externalRuntimePath = join(repoRoot, 'external-prisma-runtime.js');
+    writeFileSync(externalRuntimePath, 'module.exports = {};\n', 'utf8');
+    symlinkSync(externalRuntimePath, join(prismaClientPackageDir, 'external-runtime-link.js'));
+
+    const artifacts = await import('../dist/componentArtifacts/index.js');
+    await assert.rejects(
+      artifacts.buildServerBinaryArtifactPayload({
+        repoRoot,
+        payloadDir,
+        entrypoint: join(serverSourcesDir, 'main.light.ts'),
+        buildDbProviders: 'sqlite',
+        target: artifacts.resolveCurrentBinaryTarget({
+          availableTargets: artifacts.SERVER_BINARY_TARGETS,
+          platform: 'linux',
+          arch: 'x64',
+        }),
+        commandProbe: () => true,
+        runCommand: () => {},
+        compileBinary: async ({ outfile }) => {
+          writeFileSync(outfile, '#!/bin/sh\necho happier-server\n', 'utf8');
+        },
+      }),
+      /runtime payload symlink escapes the artifact/,
     );
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });

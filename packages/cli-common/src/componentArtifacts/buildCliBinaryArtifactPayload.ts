@@ -17,6 +17,7 @@ import type {
 } from './ensureBundledWorkspacePackagesBuilt.js';
 import { withCliDistBuildLock } from './withCliDistBuildLock.js';
 import { ensureBundledWorkspacePackagesBuilt } from './ensureBundledWorkspacePackagesBuilt.js';
+import { finalizeRuntimeArtifactPayload } from './finalizeRuntimeArtifactPayload.js';
 import { shouldReuseCliDistSnapshot } from './shouldReuseCliDistSnapshot.js';
 
 const CLI_RUNTIME_SIDECAR_ENTRIES = [
@@ -285,6 +286,7 @@ export async function buildCliBinaryArtifactPayload({
 
   await copyCliRuntimeSidecars(repoRoot, payloadDir);
   await copyCliRuntimeTools(repoRoot, payloadDir, target);
+  await finalizeRuntimeArtifactPayload(payloadDir);
 
   return {
     executableName,
