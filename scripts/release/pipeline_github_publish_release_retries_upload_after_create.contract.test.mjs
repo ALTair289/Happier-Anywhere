@@ -71,6 +71,17 @@ if [ "$1" = "release" ] && [ "$2" = "upload" ]; then
   exit 0
 fi
 
+if [ "$1" = "release" ] && [ "$2" = "download" ]; then
+  destination=""
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = "--dir" ]; then destination="$2"; break; fi
+    shift
+  done
+  mkdir -p "$destination"
+  cp ${JSON.stringify(asset)} "$destination"/
+  exit 0
+fi
+
 if [ "$1" = "api" ]; then
   exit 0
 fi
