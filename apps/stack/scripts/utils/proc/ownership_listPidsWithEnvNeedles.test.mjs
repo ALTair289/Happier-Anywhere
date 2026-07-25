@@ -8,10 +8,82 @@ import { spawnDetachedInlineNodeTestProcess } from '../../testkit/core/spawn_tes
 import {
   listPidsWithEnvNeedles,
   listPidsWithEnvNeedlesAndEnvBindingNames,
+  observePsEnvLine,
   parsePsPidCommandOutputForNeedles,
   parsePsPidCommandOutputForNeedlesAndEnvBindingNames,
   textContainsNeedle,
+  resolvePidStackOwnership,
 } from './ownership.mjs';
+
+test('process identity observation preserves unavailable ps as typed inconclusive', async () => {
+  const unavailable = new Error('ps unavailable');
+  unavailable.code = 'ENOENT';
+  const observation = await observePsEnvLine(process.pid, {
+    runCaptureImpl: async () => { throw unavailable; },
+    readLinuxProcEnvironImpl: async () => '',
+    observePidLivenessImpl: () => ({ status: 'alive', reason: 'test' }),
+  });
+  assert.equal(observation.status, 'inconclusive');
+  assert.equal(observation.reason, 'process-identity-unavailable');
+
+  const ownership = await resolvePidStackOwnership(
+    process.pid,
+    { stackName: 'test-stack', envPath: '/tmp/test-stack/env' },
+    { observePsEnvLineImpl: async () => observation },
+  );
+  assert.deepEqual(
+    { status: ownership.status, owned: ownership.owned, reason: ownership.reason },
+    { status: 'inconclusive', owned: null, reason: 'process-identity-unavailable' },
+  );
+});
+
+test('process identity observation classifies failed ps for an exited pid as not found', async () => {
+  const unavailable = new Error('ps returned no matching process');
+  unavailable.code = 'ENOENT';
+  const observation = await observePsEnvLine(4242, {
+    platform: 'darwin',
+    runCaptureImpl: async () => { throw unavailable; },
+    readLinuxProcEnvironImpl: async () => '',
+    observePidLivenessImpl: () => ({ status: 'dead', reason: 'not_found' }),
+  });
+
+  assert.deepEqual(
+    { status: observation.status, line: observation.line, reason: observation.reason },
+    { status: 'not_found', line: null, reason: 'process-not-found' },
+  );
+});
+
+test('Windows stack ownership uses an exact persisted process-instance fingerprint', async () => {
+  const owned = await resolvePidStackOwnership(
+    4242,
+    {
+      stackName: 'test-stack',
+      processInstanceFingerprint: 'win32-cim:2026-07-23T12:34:56Z',
+    },
+    {
+      platform: 'win32',
+      readProcessInstanceFingerprintImpl: () => 'win32-cim:2026-07-23T12:34:56Z',
+      observePsEnvLineImpl: async () => {
+        throw new Error('Windows ownership must not depend on POSIX environment inspection');
+      },
+    },
+  );
+  assert.deepEqual(owned, { status: 'owned', owned: true, reason: 'process_instance' });
+
+  const reused = await resolvePidStackOwnership(
+    4242,
+    {
+      stackName: 'test-stack',
+      processInstanceFingerprint: 'win32-cim:old',
+    },
+    {
+      platform: 'win32',
+      readProcessInstanceFingerprintImpl: () => 'win32-cim:new',
+    },
+  );
+  assert.equal(reused.owned, false);
+  assert.equal(reused.reason, 'process_instance_mismatch');
+});
 
 test('parsePsPidCommandOutputForNeedles requires all needles to match', () => {
   const output = [

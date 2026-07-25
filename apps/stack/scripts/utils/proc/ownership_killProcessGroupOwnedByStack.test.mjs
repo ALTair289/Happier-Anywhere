@@ -9,6 +9,255 @@ import { isPidAlive } from './pids.mjs';
 import { killPidOwnedByStack, killProcessGroupOwnedByStack } from './ownership.mjs';
 import { spawnDetachedTestProcess } from '../../testkit/core/spawn_test_process.mjs';
 
+test('killProcessGroupOwnedByStack treats an already-exited pid as completed cleanup', async () => {
+  let terminated = false;
+  const result = await killProcessGroupOwnedByStack(4242, {
+    stackName: 't',
+    envPath: '/tmp/t/env',
+    json: true,
+    resolvePidStackOwnershipImpl: async () => ({
+      status: 'not_owned',
+      owned: false,
+      reason: 'process-not-found',
+    }),
+    terminateProcessGroupImpl: async () => {
+      terminated = true;
+      return { ok: true };
+    },
+  });
+
+  assert.deepEqual(result, { killed: true, reason: 'already_exited' });
+  assert.equal(terminated, false);
+});
+
+test('killProcessGroupOwnedByStack routes Windows owned cleanup through the tree owner', async () => {
+  const calls = [];
+  const result = await killProcessGroupOwnedByStack(4242, {
+    stackName: 't',
+    envPath: 'C:\\stack\\env',
+    processInstanceFingerprint: 'win32-cim:owned',
+    json: true,
+    platform: 'win32',
+    resolvePidStackOwnershipImpl: async () => ({ owned: true, reason: 'env_file' }),
+    getProcessGroupIdImpl: async () => { throw new Error('Windows must not require POSIX PGID'); },
+    killPidImpl: async () => { throw new Error('leader-only kill is not tree cleanup'); },
+    terminateProcessGroupImpl: async (pid, options) => {
+      calls.push({ pid, options });
+      return { ok: true, signal: 'SIGKILL' };
+    },
+  });
+
+  assert.equal(result.killed, true);
+  assert.equal(result.reason, 'killed_tree');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].pid, 4242);
+  assert.equal(calls[0]?.options?.identityPid, 4242);
+  assert.equal(calls[0]?.options?.processInstanceFingerprint, 'win32-cim:owned');
+});
+
+test('killProcessGroupOwnedByStack does not report a PID-only no-op signal as killed', async () => {
+  const result = await killProcessGroupOwnedByStack(4242, {
+    stackName: 't',
+    envPath: '/tmp/t/env',
+    processInstanceFingerprint: 'linux-proc:owned',
+    json: true,
+    resolvePidStackOwnershipImpl: async () => ({ owned: true, reason: 'env_file' }),
+    getProcessGroupIdImpl: async () => null,
+    terminateProcessPidImpl: async () => ({ ok: false, reason: 'pid_still_alive' }),
+  });
+
+  assert.deepEqual(result, { killed: false, reason: 'pid_still_alive', signal: undefined });
+});
+
+test('killPidOwnedByStack retains cleanup state when death is unproven', async () => {
+  const result = await killPidOwnedByStack(4242, {
+    stackName: 't',
+    envPath: '/tmp/t/env',
+    processInstanceFingerprint: 'linux-proc:owned',
+    json: true,
+    resolvePidStackOwnershipImpl: async () => ({ owned: true, reason: 'env_file' }),
+    terminateProcessPidImpl: async () => ({ ok: false, reason: 'liveness_inconclusive' }),
+  });
+
+  assert.deepEqual(result, { killed: false, reason: 'liveness_inconclusive', signal: undefined });
+});
+
+test('killPidOwnedByStack retains the proven process incarnation through termination', async () => {
+  const calls = [];
+  const result = await killPidOwnedByStack(4242, {
+    stackName: 't',
+    envPath: '/tmp/t/env',
+    processInstanceFingerprint: 'linux-proc:owned',
+    json: true,
+    readProcessInstanceFingerprintImpl: () => assert.fail('supplied identity must not be replaced by a new snapshot'),
+    resolvePidStackOwnershipImpl: async () => ({ owned: true, reason: 'process_instance' }),
+    terminateProcessPidImpl: async (pid, options) => {
+      calls.push({ pid, options });
+      return { ok: false, reason: 'process_instance_mismatch', signal: 'SIGTERM' };
+    },
+  });
+
+  assert.equal(calls[0]?.pid, 4242);
+  assert.equal(calls[0]?.options?.processInstanceFingerprint, 'linux-proc:owned');
+  assert.deepEqual(result, { killed: false, reason: 'process_instance_mismatch', signal: 'SIGTERM' });
+});
+
+test('killProcessGroupOwnedByStack retains the proven leader incarnation through group termination', async () => {
+  const calls = [];
+  const result = await killProcessGroupOwnedByStack(4242, {
+    stackName: 't',
+    envPath: '/tmp/t/env',
+    processInstanceFingerprint: 'linux-proc:owned',
+    json: true,
+    readProcessInstanceFingerprintImpl: () => assert.fail('supplied identity must not be replaced by a new snapshot'),
+    resolvePidStackOwnershipImpl: async () => ({ owned: true, reason: 'process_instance' }),
+    getProcessGroupIdImpl: async (pid) => Number(pid) === 4242 ? 5151 : 6161,
+    terminateProcessGroupImpl: async (pid, options) => {
+      calls.push({ pid, options });
+      return { ok: false, reason: 'process_instance_mismatch', signal: 'SIGTERM' };
+    },
+  });
+
+  assert.equal(calls[0]?.pid, 5151);
+  assert.equal(calls[0]?.options?.identityPid, 4242);
+  assert.equal(calls[0]?.options?.processInstanceFingerprint, 'linux-proc:owned');
+  assert.deepEqual(result, { killed: false, reason: 'process_instance_mismatch', pgid: 5151, signal: 'SIGTERM' });
+});
+
+const legacyStackStopEntryShapes = [
+  {
+    name: 'old runtime lifecycle owner',
+    invoke: async (dependencies) => await killPidOwnedByStack(4242, {
+      stackName: 't',
+      envPath: '/tmp/t/env',
+      json: true,
+      ...dependencies,
+    }),
+    expectedTerminationTarget: 4242,
+    expectedIdentityPid: null,
+  },
+  {
+    name: 'old runtime process entry',
+    invoke: async (dependencies) => await killProcessGroupOwnedByStack(4242, {
+      stackName: 't',
+      envPath: '/tmp/t/env',
+      json: true,
+      getProcessGroupIdImpl: async (pid) => Number(pid) === 4242 ? 5151 : 6161,
+      ...dependencies,
+    }),
+    expectedTerminationTarget: 5151,
+    expectedIdentityPid: 4242,
+  },
+  {
+    name: 'Expo or mobile state PID entry',
+    invoke: async (dependencies) => await killProcessGroupOwnedByStack(4242, {
+      stackName: 't',
+      envPath: '/tmp/t/env',
+      json: true,
+      getProcessGroupIdImpl: async () => null,
+      ...dependencies,
+    }),
+    expectedTerminationTarget: 4242,
+    expectedIdentityPid: null,
+  },
+  {
+    name: 'env-tagged sweep self-PGID entry',
+    invoke: async (dependencies) => await killProcessGroupOwnedByStack(4242, {
+      stackName: 't',
+      envPath: '/tmp/t/env',
+      json: true,
+      getProcessGroupIdImpl: async () => 5151,
+      ...dependencies,
+    }),
+    expectedTerminationTarget: 4242,
+    expectedIdentityPid: null,
+  },
+];
+
+test('canonical stack termination owners pin legacy numeric PID entry shapes to one process incarnation', async (t) => {
+  for (const entryShape of legacyStackStopEntryShapes) {
+    await t.test(`${entryShape.name} fails closed when process incarnation is unavailable`, async () => {
+      let ownershipCalls = 0;
+      let terminationCalls = 0;
+      const result = await entryShape.invoke({
+        readProcessInstanceFingerprintImpl: () => null,
+        observePidLivenessImpl: () => ({ status: 'alive' }),
+        resolvePidStackOwnershipImpl: async () => {
+          ownershipCalls += 1;
+          return { owned: true, reason: 'env_file' };
+        },
+        terminateProcessPidImpl: async () => {
+          terminationCalls += 1;
+          return { ok: true };
+        },
+        terminateProcessGroupImpl: async () => {
+          terminationCalls += 1;
+          return { ok: true };
+        },
+      });
+
+      assert.deepEqual(result, { killed: false, reason: 'process_instance_unavailable' });
+      assert.equal(ownershipCalls, 0);
+      assert.equal(terminationCalls, 0);
+    });
+
+    await t.test(`${entryShape.name} carries its entry snapshot through same-numeric replacement`, async () => {
+      const fingerprint = `linux-proc:${entryShape.name}`;
+      let ownershipContext = null;
+      const terminationCalls = [];
+      const terminateAsReplaced = async (targetPid, options) => {
+        terminationCalls.push({ targetPid, options });
+        return { ok: false, reason: 'process_instance_mismatch', signal: 'SIGTERM' };
+      };
+      const result = await entryShape.invoke({
+        readProcessInstanceFingerprintImpl: () => fingerprint,
+        resolvePidStackOwnershipImpl: async (_pid, context) => {
+          ownershipContext = context;
+          return { owned: true, reason: 'env_file' };
+        },
+        terminateProcessPidImpl: terminateAsReplaced,
+        terminateProcessGroupImpl: terminateAsReplaced,
+      });
+
+      assert.equal(ownershipContext?.processInstanceFingerprint, fingerprint);
+      assert.equal(terminationCalls.length, 1);
+      assert.equal(terminationCalls[0]?.targetPid, entryShape.expectedTerminationTarget);
+      assert.equal(terminationCalls[0]?.options?.processInstanceFingerprint, fingerprint);
+      assert.equal(
+        terminationCalls[0]?.options?.identityPid ?? null,
+        entryShape.expectedIdentityPid,
+      );
+      assert.equal(result.killed, false);
+      assert.equal(result.reason, 'process_instance_mismatch');
+    });
+  }
+
+  await t.test('Windows legacy numeric PID state fails closed without persisted ownership identity', async () => {
+    let ownershipCalls = 0;
+    let terminationCalls = 0;
+    const result = await killProcessGroupOwnedByStack(4242, {
+      stackName: 't',
+      envPath: 'C:\\stack\\env',
+      json: true,
+      platform: 'win32',
+      readProcessInstanceFingerprintImpl: () => 'win32-cim:unproven-current-process',
+      observePidLivenessImpl: () => ({ status: 'alive' }),
+      resolvePidStackOwnershipImpl: async () => {
+        ownershipCalls += 1;
+        return { owned: true, reason: 'process_instance' };
+      },
+      terminateProcessGroupImpl: async () => {
+        terminationCalls += 1;
+        return { ok: true, signal: 'SIGKILL' };
+      },
+    });
+
+    assert.deepEqual(result, { killed: false, reason: 'process_instance_unavailable' });
+    assert.equal(ownershipCalls, 0);
+    assert.equal(terminationCalls, 0);
+  });
+});
+
 function spawnOwnedGracefulExit({ env, exitFile, readyFile }) {
   const cleanEnv = {};
   for (const [k, v] of Object.entries(env ?? {})) {
