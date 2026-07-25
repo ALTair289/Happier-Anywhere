@@ -22,6 +22,10 @@ const PRODUCT_SOURCES = Object.freeze({
     githubTagPrefix: 'server-v',
     npmPackage: '@happier-dev/relay-server',
   }),
+  'ui-web': Object.freeze({
+    githubTagPrefix: 'ui-web-v',
+    npmPackage: '',
+  }),
 });
 
 /**
@@ -225,6 +229,32 @@ function collectGitHubVersions(opts) {
 }
 
 /**
+ * GitHub Releases, rather than bare tags, are the recoverable immutable asset source.
+ * Drafts are excluded because rolling recovery may consume only published immutable bytes.
+ * @param {{ repoRoot: string; env: Record<string, string | undefined> }} opts
+ */
+function collectGitHubReleaseVersions(opts) {
+  const repo = resolveGitHubRepoSlug({ repoRoot: opts.repoRoot, env: opts.env });
+  if (!repo) return { ok: false, values: [] };
+  return tryExecLines(
+    'gh',
+    [
+      'release',
+      'list',
+      '--repo',
+      repo,
+      '--limit',
+      '1000',
+      '--json',
+      'tagName,isDraft',
+      '--jq',
+      '.[] | select(.isDraft == false) | .tagName',
+    ],
+    { cwd: opts.repoRoot, env: opts.env, timeout: 20_000 },
+  );
+}
+
+/**
  * @param {string} productId
  */
 function getProductSource(productId) {
@@ -281,8 +311,10 @@ export async function resolveRollingPublishVersion(opts) {
     ])) {
       publishedVersions.push({ version, surface: 'github' });
     }
-    for (const version of collectFromFixtureSection(fixture.npm, [product.npmPackage])) {
-      publishedVersions.push({ version, surface: 'npm' });
+    if (product.npmPackage) {
+      for (const version of collectFromFixtureSection(fixture.npm, [product.npmPackage])) {
+        publishedVersions.push({ version, surface: 'npm' });
+      }
     }
   } else {
     const github = collectGitHubVersions({
@@ -298,12 +330,14 @@ export async function resolveRollingPublishVersion(opts) {
       }
     }
 
-    const npm = collectNpmVersions(product.npmPackage, { cwd: opts.repoRoot, env });
-    if (npm.ok) {
-      sourceAvailable = true;
-      sourceLabels.push('npm');
-      for (const version of npm.values) {
-        publishedVersions.push({ version, surface: 'npm' });
+    if (product.npmPackage) {
+      const npm = collectNpmVersions(product.npmPackage, { cwd: opts.repoRoot, env });
+      if (npm.ok) {
+        sourceAvailable = true;
+        sourceLabels.push('npm');
+        for (const version of npm.values) {
+          publishedVersions.push({ version, surface: 'npm' });
+        }
       }
     }
   }
@@ -373,5 +407,118 @@ export async function resolveRollingPublishVersion(opts) {
     version: `${baseVersion}-${channelSuffix}.${nextRun}`,
     source: sourceLabels.join('+') || 'published',
     previousVersion: previous?.version ?? null,
+  };
+}
+
+/**
+ * @param {string} version
+ * @param {{ channelSuffix: string; githubTagPrefix: string; stable: boolean }} opts
+ */
+function parseRecoveryVersion(version, opts) {
+  const candidate = stripKnownPrefix(String(version ?? '').trim(), opts.githubTagPrefix);
+  const match = opts.stable
+    ? candidate.match(/^(\d+)\.(\d+)\.(\d+)$/)
+    : candidate.match(
+      new RegExp(`^(\\d+)\\.(\\d+)\\.(\\d+)-${escapeRegex(opts.channelSuffix)}\\.(\\d+)(?:\\.(\\d+))?$`),
+    );
+  if (!match) return null;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  const patch = Number(match[3]);
+  const run = opts.stable ? 0 : Number(match[4]);
+  const attempt = opts.stable || match[5] == null ? 0 : Number(match[5]);
+  if (![major, minor, patch, run, attempt].every((value) => Number.isSafeInteger(value) && value >= 0)) {
+    return null;
+  }
+  if (!opts.stable && run < 1) return null;
+  if (!opts.stable && match[5] != null && attempt < 1) return null;
+  return { version: candidate, major, minor, patch, run, attempt };
+}
+
+/**
+ * @param {{ major: number; minor: number; patch: number; run: number; attempt: number }} left
+ * @param {{ major: number; minor: number; patch: number; run: number; attempt: number }} right
+ */
+function compareRecoveryVersions(left, right) {
+  for (const field of /** @type {const} */ (['major', 'minor', 'patch', 'run', 'attempt'])) {
+    if (left[field] !== right[field]) return left[field] - right[field];
+  }
+  return 0;
+}
+
+/**
+ * Validate an exact rolling retry from published immutable GitHub Release metadata.
+ * This owner is intentionally independent of the mutable control-checkout package base.
+ *
+ * The downstream rolling promoter independently binds the constructed immutable tag to
+ * the caller-authorized SHA before consuming any assets.
+ *
+ * @param {{
+ *   repoRoot: string;
+ *   productId: string;
+ *   channel: import('@happier-dev/release-runtime/releaseRings').PublicReleaseRingId;
+ *   explicitVersion: string;
+ *   env?: Record<string, string | undefined>;
+ * }} opts
+ */
+export async function resolveRollingRecoveryVersion(opts) {
+  const env = opts.env ?? process.env;
+  const product = getProductSource(opts.productId);
+  const stable = opts.channel === 'stable';
+  const channelSuffix = stable ? 'stable' : resolveRollingReleaseTagSuffix(opts.channel);
+  const requested = parseRecoveryVersion(opts.explicitVersion, {
+    channelSuffix,
+    githubTagPrefix: product.githubTagPrefix,
+    stable,
+  });
+  if (!requested) {
+    throw new Error(
+      `[release] recovery version ${String(opts.explicitVersion ?? '').trim() || '<empty>'}`
+      + ` does not match ${opts.productId} ${channelSuffix} immutable release identity`,
+    );
+  }
+
+  const fixture = parsePublishedVersionsJson(env.HAPPIER_RELEASE_PUBLISHED_VERSIONS_JSON);
+  const releases = fixture
+    ? {
+        ok: true,
+        values: collectFromFixtureSection(fixture.github, [
+          opts.productId,
+          product.githubTagPrefix,
+          product.githubTagPrefix.replace(/-v$/, ''),
+        ]),
+      }
+    : collectGitHubReleaseVersions({ repoRoot: opts.repoRoot, env });
+  if (!releases.ok) {
+    throw new Error(
+      `[release] unable to inspect published immutable GitHub Releases for ${opts.productId} ${channelSuffix}`,
+    );
+  }
+
+  const recoverable = releases.values
+    .filter((version) => String(version ?? '').trim().startsWith(product.githubTagPrefix))
+    .map((version) => parseRecoveryVersion(version, {
+      channelSuffix,
+      githubTagPrefix: product.githubTagPrefix,
+      stable,
+    }))
+    .filter(Boolean)
+    .sort(compareRecoveryVersions);
+  const exact = recoverable.find((entry) => entry.version === requested.version);
+  const immutableTag = `${product.githubTagPrefix}${requested.version}`;
+  if (!exact) {
+    throw new Error(`[release] immutable GitHub Release ${immutableTag} was not found`);
+  }
+  const latest = recoverable.at(-1);
+  if (!latest || compareRecoveryVersions(requested, latest) !== 0) {
+    throw new Error(
+      `[release] refusing to recover ${immutableTag}; latest recoverable ${opts.productId}`
+      + ` ${channelSuffix} release is ${product.githubTagPrefix}${latest?.version ?? '<none>'}`,
+    );
+  }
+  return {
+    version: requested.version,
+    source: 'github-release',
+    previousVersion: latest.version,
   };
 }

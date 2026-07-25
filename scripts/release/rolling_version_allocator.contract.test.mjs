@@ -120,6 +120,125 @@ test('explicit single-sequence rolling versions are accepted', async () => {
   assert.equal(result.version, '0.2.6-dev.127');
 });
 
+test('same-version rolling recovery is explicit and does not allocate a replacement immutable version', async () => {
+  const {
+    resolveRollingPublishVersion,
+    resolveRollingRecoveryVersion,
+  } = await import('../pipeline/release/lib/rolling-version-allocation.mjs');
+  const options = {
+    repoRoot,
+    productId: 'server',
+    channel: 'preview',
+    baseVersion: '0.2.6',
+    explicitVersion: '0.2.6-preview.127',
+    publishSurface: 'github',
+    env: {
+      ...process.env,
+      HAPPIER_RELEASE_PUBLISHED_VERSIONS_JSON: JSON.stringify({
+        github: { server: ['server-v0.2.6-preview.127'] },
+        npm: {},
+      }),
+    },
+  };
+
+  await assert.rejects(
+    resolveRollingPublishVersion(options),
+    /refusing to publish/,
+  );
+  const recovery = await resolveRollingRecoveryVersion(options);
+  assert.equal(recovery.version, '0.2.6-preview.127');
+});
+
+test('preview recovery derives its base from the latest immutable GitHub Release after control advances', async () => {
+  const { resolveRollingRecoveryVersion } = await import('../pipeline/release/lib/rolling-version-allocation.mjs');
+
+  const recovery = await resolveRollingRecoveryVersion({
+    repoRoot,
+    productId: 'cli',
+    channel: 'preview',
+    baseVersion: '0.2.2',
+    explicitVersion: '0.2.1-preview.127',
+    env: {
+      ...process.env,
+      HAPPIER_RELEASE_PUBLISHED_VERSIONS_JSON: JSON.stringify({
+        github: { cli: ['cli-v0.2.1-preview.127'] },
+        npm: {},
+      }),
+    },
+  });
+
+  assert.equal(recovery.version, '0.2.1-preview.127');
+});
+
+test('stable recovery derives its base from the latest immutable GitHub Release after control advances', async () => {
+  const { resolveRollingRecoveryVersion } = await import('../pipeline/release/lib/rolling-version-allocation.mjs');
+
+  const recovery = await resolveRollingRecoveryVersion({
+    repoRoot,
+    productId: 'cli',
+    channel: 'stable',
+    baseVersion: '0.2.2',
+    explicitVersion: '0.2.1',
+    env: {
+      ...process.env,
+      HAPPIER_RELEASE_PUBLISHED_VERSIONS_JSON: JSON.stringify({
+        github: { cli: ['cli-v0.2.1'] },
+        npm: {},
+      }),
+    },
+  });
+
+  assert.equal(recovery.version, '0.2.1');
+});
+
+test('recovery rejects older, wrong-channel, and wrong-product immutable versions', async () => {
+  const { resolveRollingRecoveryVersion } = await import('../pipeline/release/lib/rolling-version-allocation.mjs');
+  const env = {
+    ...process.env,
+    HAPPIER_RELEASE_PUBLISHED_VERSIONS_JSON: JSON.stringify({
+      github: {
+        cli: ['cli-v0.2.0-preview.99', 'cli-v0.2.1-preview.127', 'cli-v0.2.1'],
+        hstack: ['stack-v0.2.1-preview.127'],
+      },
+      npm: {},
+    }),
+  };
+
+  await assert.rejects(
+    resolveRollingRecoveryVersion({
+      repoRoot,
+      productId: 'cli',
+      channel: 'preview',
+      baseVersion: '0.2.2',
+      explicitVersion: '0.2.0-preview.99',
+      env,
+    }),
+    /latest recoverable.*0\.2\.1-preview\.127/i,
+  );
+  await assert.rejects(
+    resolveRollingRecoveryVersion({
+      repoRoot,
+      productId: 'cli',
+      channel: 'stable',
+      baseVersion: '0.2.2',
+      explicitVersion: '0.2.1-preview.127',
+      env,
+    }),
+    /does not match.*stable/i,
+  );
+  await assert.rejects(
+    resolveRollingRecoveryVersion({
+      repoRoot,
+      productId: 'hstack',
+      channel: 'stable',
+      baseVersion: '0.2.2',
+      explicitVersion: '0.2.1',
+      env,
+    }),
+    /immutable GitHub Release stack-v0\.2\.1 was not found/i,
+  );
+});
+
 test('stable version allocation ignores an empty explicit version override', async () => {
   const { resolveRollingPublishVersion } = await import('../pipeline/release/lib/rolling-version-allocation.mjs');
 

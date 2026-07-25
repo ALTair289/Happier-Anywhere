@@ -55,8 +55,10 @@ function parseGitHubRepoSlugFromRemoteUrl(remoteUrl) {
  */
 export function resolveGitHubRepoSlug(opts) {
   const env = opts.env ?? /** @type {any} */ (process.env);
-  const fromEnv = String(env.GH_REPO ?? env.GITHUB_REPOSITORY ?? '').trim();
-  if (fromEnv) return fromEnv;
+  const ghRepo = String(env.GH_REPO ?? '').trim();
+  if (ghRepo) return ghRepo;
+  const githubRepository = String(env.GITHUB_REPOSITORY ?? '').trim();
+  if (githubRepository) return githubRepository;
 
   try {
     const remote = String(
@@ -72,4 +74,3 @@ export function resolveGitHubRepoSlug(opts) {
     return '';
   }
 }
-
