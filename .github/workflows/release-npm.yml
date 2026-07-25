@@ -444,7 +444,7 @@ jobs:
             echo "### GitHub Releases (mirror)"
             echo ""
             if [ "${INPUT_CHANNEL}" = "preview" ]; then
-              if [ "${INPUT_PUBLISH_CLI}" = "true" ]; then echo "- \`cli-preview\` (rolling prerelease)"; fi
+              if [ "${INPUT_PUBLISH_CLI}" = "true" ]; then echo "- CLI npm package (GitHub binary Releases remain owned by publish-cli-binaries.yml)"; fi
             else
               if [ "${INPUT_PUBLISH_CLI}" = "true" ]; then echo "- \`cli-v${cli_version}\`"; fi
             fi
@@ -551,61 +551,3 @@ jobs:
           node scripts/pipeline/run.mjs npm-publish \
             --channel "${{ inputs.channel }}" \
             --tarball-dir "dist/release-assets/server"
-
-  mirror-cli-stable:
-    if: ${{ needs.release.outputs.channel == 'production' && needs.release.outputs.cli_version != 'SKIP' }}
-    needs: release
-    uses: ./.github/workflows/publish-github-release.yml
-    secrets: inherit
-    with:
-      tag: cli-v${{ needs.release.outputs.cli_version }}
-      title: Happier CLI v${{ needs.release.outputs.cli_version }}
-      target_sha: ${{ needs.release.outputs.sha }}
-      prerelease: false
-      rolling_tag: false
-      generate_notes: true
-      clobber: true
-      assets_artifact: npm-pack-cli
-      assets_artifact_path: dist/release-assets/cli
-      assets_dir: dist/release-assets/cli
-      release_message: ${{ inputs.release_message }}
-
-  mirror-cli-stable-rolling:
-    if: ${{ needs.release.outputs.channel == 'production' && needs.release.outputs.cli_version != 'SKIP' }}
-    needs: release
-    uses: ./.github/workflows/publish-github-release.yml
-    secrets: inherit
-    with:
-      tag: cli-stable
-      title: Happier CLI Stable
-      target_sha: ${{ needs.release.outputs.sha }}
-      prerelease: false
-      rolling_tag: true
-      generate_notes: false
-      notes: "Rolling stable build (npm dist-tag: latest)."
-      clobber: true
-      prune_assets: true
-      assets_artifact: npm-pack-cli
-      assets_artifact_path: dist/release-assets/cli
-      assets_dir: dist/release-assets/cli
-      release_message: ${{ inputs.release_message }}
-
-  mirror-cli-preview:
-    if: ${{ needs.release.outputs.channel == 'preview' && needs.release.outputs.cli_version != 'SKIP' }}
-    needs: release
-    uses: ./.github/workflows/publish-github-release.yml
-    secrets: inherit
-    with:
-      tag: cli-preview
-      title: Happier CLI Preview
-      target_sha: ${{ needs.release.outputs.sha }}
-      prerelease: true
-      rolling_tag: true
-      generate_notes: false
-      notes: "Rolling preview build (npm dist-tag: next)."
-      clobber: true
-      prune_assets: true
-      assets_artifact: npm-pack-cli
-      assets_artifact_path: dist/release-assets/cli
-      assets_dir: dist/release-assets/cli
-      release_message: ${{ inputs.release_message }}
