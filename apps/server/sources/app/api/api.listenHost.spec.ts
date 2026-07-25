@@ -45,6 +45,10 @@ describe('API_CORS_ALLOWED_HEADERS', () => {
       'authorization',
       'content-type',
       'x-happier-session-list-timing',
+      'x-happier-client-kind',
+      'x-happier-client-version',
+      'x-happier-client-release-channel',
+      'x-happier-session-sync-protocol',
     ]));
   });
 });
