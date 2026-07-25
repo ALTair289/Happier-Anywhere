@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { AGENT_IDS, DEFAULT_AGENT_ID } from '@happier-dev/agents';
 import { AGENTS_CORE } from '@happier-dev/agents';
 import { buildConnectedServiceCredentialRecord } from '@happier-dev/protocol';
+import type { ConnectedServicesProviderMaterializer } from '@/daemon/connectedServices/materialize/providerMaterializerTypes';
 
 import * as catalog from './catalog';
 import {
@@ -254,6 +255,62 @@ describe('AGENTS', () => {
   });
 
   it('resolves connected-service state sharing descriptors through optional backend catalog hooks', async () => {
+  it('retries a rejected catalog hook load while preserving singleflight and successful caching', async () => {
+    const original = AGENTS.grok;
+    if (!original) throw new Error('Missing grok catalog entry');
+
+    const recoveredMaterializer: ConnectedServicesProviderMaterializer = async () => null;
+    let resolveRecovery!: (materializer: ConnectedServicesProviderMaterializer) => void;
+    const recovery = new Promise<ConnectedServicesProviderMaterializer>((resolve) => {
+      resolveRecovery = resolve;
+    });
+    const getConnectedServiceMaterializerHook = vi.fn()
+      .mockRejectedValueOnce(new Error('transient catalog load failure'))
+      .mockImplementationOnce(() => recovery);
+    AGENTS.grok = {
+      ...original,
+      getConnectedServiceMaterializer: getConnectedServiceMaterializerHook,
+    };
+
+    try {
+      await expect(getConnectedServiceMaterializer('grok')).rejects.toThrow('transient catalog load failure');
+
+      const firstRetry = getConnectedServiceMaterializer('grok');
+      const concurrentRetry = getConnectedServiceMaterializer('grok');
+      resolveRecovery(recoveredMaterializer);
+      const retryResults = await Promise.allSettled([firstRetry, concurrentRetry]);
+
+      expect(getConnectedServiceMaterializerHook).toHaveBeenCalledTimes(2);
+      expect(retryResults).toEqual([
+        { status: 'fulfilled', value: recoveredMaterializer },
+        { status: 'fulfilled', value: recoveredMaterializer },
+      ]);
+      await expect(getConnectedServiceMaterializer('grok')).resolves.toBe(recoveredMaterializer);
+      expect(getConnectedServiceMaterializerHook).toHaveBeenCalledTimes(2);
+    } finally {
+      AGENTS.grok = original;
+    }
+  });
+
+  it('caches a genuine null catalog hook result', async () => {
+    const original = AGENTS.qwen;
+    if (!original) throw new Error('Missing qwen catalog entry');
+
+    const getConnectedServiceMaterializerHook = vi.fn(async () => null);
+    AGENTS.qwen = {
+      ...original,
+      getConnectedServiceMaterializer: getConnectedServiceMaterializerHook,
+    };
+
+    try {
+      await expect(getConnectedServiceMaterializer('qwen')).resolves.toBeNull();
+      await expect(getConnectedServiceMaterializer('qwen')).resolves.toBeNull();
+      expect(getConnectedServiceMaterializerHook).toHaveBeenCalledTimes(1);
+    } finally {
+      AGENTS.qwen = original;
+    }
+  });
+
     await expect(getConnectedServiceStateSharingDescriptor('codex')).resolves.toMatchObject({
       providerId: 'codex',
       providerSupportStatus: 'supported',
