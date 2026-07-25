@@ -64,8 +64,8 @@ test('promote-server runtime publishing uses the shared server binary publisher'
 
   assert.match(
     raw,
-    /node scripts\/pipeline\/run\.mjs publish-server-runtime[\s\S]*?--channel "\$\{CHANNEL\}"[\s\S]*?--allow-stable "\$\{ALLOW_STABLE\}"[\s\S]*?--run-contracts false[\s\S]*?--check-installers false/,
-    'promote-server should delegate build/manifest/verification/release publishing to publish-server-runtime',
+    /publish_runtime_release:[\s\S]*?uses:\s*\.\/\.github\/workflows\/publish-server-runtime\.yml[\s\S]*?source_ref:\s*\$\{\{\s*needs\.finalize_source\.outputs\.authorized_sha\s*\}\}[\s\S]*?authorized_sha:\s*\$\{\{\s*needs\.finalize_source\.outputs\.authorized_sha\s*\}\}/,
+    'promote-server should propagate the exact finalized SHA through the reusable server-runtime publisher boundary',
   );
   assert.doesNotMatch(
     raw,

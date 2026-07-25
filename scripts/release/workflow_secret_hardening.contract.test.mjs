@@ -47,7 +47,8 @@ test('release workflows scope shared signing/publishing secrets to release-share
   const checks = [
     ['release-npm.yml', 'release', 'release-shared'],
     ['promote-ui.yml', 'promote', 'release-shared'],
-    ['promote-server.yml', 'promote', 'release-shared'],
+    ['promote-server.yml', 'apply_bump', 'release-shared'],
+    ['promote-server.yml', 'promote_deploy_ref', 'release-shared'],
     ['promote-website.yml', 'promote', 'release-shared'],
     ['promote-docs.yml', 'promote', 'release-shared'],
     ['promote-branch.yml', 'promote', 'release-shared'],
@@ -158,7 +159,7 @@ test('secret-bearing workflows require release-admin actor guard before privileg
     ['release.yml', 'ci'],
     ['release-npm.yml', 'release'],
     ['promote-ui.yml', 'promote'],
-    ['promote-server.yml', 'promote'],
+    ['promote-server.yml', 'promote_deploy_ref'],
     ['promote-website.yml', 'promote'],
     ['promote-docs.yml', 'promote'],
     ['promote-branch.yml', 'promote'],

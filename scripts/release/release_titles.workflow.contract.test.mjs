@@ -22,10 +22,7 @@ test('GitHub release titles are prefixed with Happier', async () => {
 
   assert.equal(getBinaryPublishProductSpec('server').releaseTitleBase, 'Happier Server');
 
-  const releaseNpm = await loadWorkflow('release-npm.yml');
-  assert.match(releaseNpm, /title: Happier CLI v/);
-  assert.match(releaseNpm, /title: Happier CLI Stable/);
-  assert.match(releaseNpm, /title: Happier CLI Preview/);
+  assert.equal(getBinaryPublishProductSpec('cli').releaseTitleBase, 'Happier CLI');
   assert.equal(getBinaryPublishProductSpec('hstack').releaseTitleBase, 'Happier Stack');
 
   const buildTauri = await loadWorkflow('build-tauri.yml');
