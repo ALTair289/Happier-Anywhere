@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { AccountSettingsV2GetResponseSchema } from './account/settings/accountSettingsApiV2.js';
 import { DirectTranscriptRawMessageV1Schema } from './directSessions/daemonRpcV1.js';
 import { ExecutionRunPublicStateSchema } from './executionRuns.js';
 import {
@@ -6,14 +7,14 @@ import {
 } from './sessionMessages/transcriptRawRecordV1.js';
 import { SessionMessageRoleSchema } from './sessionMessages/sessionMessageRole.js';
 import { SessionStoredMessageContentSchema } from './sessionMessages/sessionStoredMessageContent.js';
+import { SessionTranscriptObservationProvenanceV1Schema } from './sessionMessages/transcriptObservationV1.js';
+import { SessionMessageDeliveryResolutionV1Schema } from './sessionMessages/sessionMessageDeliveryResolutionV1.js';
 import { PrimaryTurnStatusV1Schema, SessionRuntimeIssueV1Schema } from './sessions/control/runtimeIssueV1.js';
-import { SessionRuntimeActivitySourceClassV1Schema } from './sessionRuntimeActivity/sessionRuntimeActivityV1.js';
 import {
-  findPrivateSessionRuntimeActivityPublicFieldV2,
-  SessionRuntimeActivityAggregateStateV2Schema,
-  SessionRuntimeActivityPublicVersionSchema,
-  SessionRuntimeActivitySourceClassV2Schema,
-} from './sessionRuntimeActivity/sessionRuntimeActivityV2.js';
+  parseSessionRuntimeActivityProjectionFields,
+  SessionRuntimeActivityActiveCountSchema,
+  SessionRuntimeActivityStateSchema,
+} from './sessionRuntimeActivity/projection.js';
 
 const TimestampMsSchema = z.number().int().min(0);
 const Base64Schema = z.string();
@@ -44,6 +45,10 @@ export const UpdateBodySchema = z.discriminatedUnion('t', [
         attentionImpact: SessionMessageAttentionImpactSchema.optional(),
         createdAt: TimestampMsSchema,
         updatedAt: TimestampMsSchema,
+        sourceCreatedAt: TimestampMsSchema.optional(),
+        sourceUpdatedAt: TimestampMsSchema.optional(),
+        transcriptObservationProvenance: SessionTranscriptObservationProvenanceV1Schema.optional(),
+        deliveryResolution: SessionMessageDeliveryResolutionV1Schema.optional(),
       })
       .passthrough(),
   }).passthrough(),
@@ -61,6 +66,10 @@ export const UpdateBodySchema = z.discriminatedUnion('t', [
         attentionImpact: SessionMessageAttentionImpactSchema.optional(),
         createdAt: TimestampMsSchema,
         updatedAt: TimestampMsSchema,
+        sourceCreatedAt: TimestampMsSchema.optional(),
+        sourceUpdatedAt: TimestampMsSchema.optional(),
+        transcriptObservationProvenance: SessionTranscriptObservationProvenanceV1Schema.optional(),
+        deliveryResolution: SessionMessageDeliveryResolutionV1Schema.optional(),
       })
       .passthrough(),
   }).passthrough(),
@@ -78,20 +87,11 @@ export const UpdateBodySchema = z.discriminatedUnion('t', [
     createdAt: TimestampMsSchema,
     updatedAt: TimestampMsSchema,
     meaningfulActivityAt: TimestampMsSchema.optional(),
-    runtimeActivityVersion: SessionRuntimeActivityPublicVersionSchema.optional(),
-    runtimeActivityState: SessionRuntimeActivityAggregateStateV2Schema.nullable().optional(),
-    runtimeActivityActiveCount: z.number().int().nonnegative().optional(),
+    runtimeActivityState: SessionRuntimeActivityStateSchema.optional(),
+    runtimeActivityActiveCount: SessionRuntimeActivityActiveCountSchema.optional(),
     runtimeActivityObservedAt: TimestampMsSchema.nullable().optional(),
-    runtimeActivityExpiresAt: TimestampMsSchema.nullable().optional(),
-    runtimeActivitySourceClass: z.union([
-      SessionRuntimeActivitySourceClassV1Schema,
-      SessionRuntimeActivitySourceClassV2Schema,
-    ]).nullable().optional(),
     runtimeActivityRevision: z.number().int().nonnegative().safe().optional(),
-  }).passthrough().superRefine((value, context) => {
-    const privateField = findPrivateSessionRuntimeActivityPublicFieldV2(value);
-    if (privateField) context.addIssue({ code: 'custom', path: [privateField], message: 'Private runtime activity field is not public' });
-  }),
+  }).passthrough(),
   z.object({
     t: z.literal('update-session'),
     id: z.string(),
@@ -109,22 +109,13 @@ export const UpdateBodySchema = z.discriminatedUnion('t', [
     latestTurnStatus: PrimaryTurnStatusV1Schema.nullable().optional(),
     latestTurnStatusObservedAt: TimestampMsSchema.nullable().optional(),
     lastRuntimeIssue: SessionRuntimeIssueV1Schema.nullable().optional(),
-    runtimeActivityVersion: SessionRuntimeActivityPublicVersionSchema.optional(),
-    runtimeActivityState: SessionRuntimeActivityAggregateStateV2Schema.nullable().optional(),
-    runtimeActivityActiveCount: z.number().int().nonnegative().optional(),
+    runtimeActivityState: SessionRuntimeActivityStateSchema.optional(),
+    runtimeActivityActiveCount: SessionRuntimeActivityActiveCountSchema.optional(),
     runtimeActivityObservedAt: TimestampMsSchema.nullable().optional(),
-    runtimeActivityExpiresAt: TimestampMsSchema.nullable().optional(),
-    runtimeActivitySourceClass: z.union([
-      SessionRuntimeActivitySourceClassV1Schema,
-      SessionRuntimeActivitySourceClassV2Schema,
-    ]).nullable().optional(),
     runtimeActivityRevision: z.number().int().nonnegative().safe().optional(),
     meaningfulActivityAt: TimestampMsSchema.optional(),
     archivedAt: TimestampMsSchema.nullable().optional(),
-  }).passthrough().superRefine((value, context) => {
-    const privateField = findPrivateSessionRuntimeActivityPublicFieldV2(value);
-    if (privateField) context.addIssue({ code: 'custom', path: [privateField], message: 'Private runtime activity field is not public' });
-  }),
+  }).passthrough(),
   z.object({
     t: z.literal('pending-changed'),
     sid: z.string(),
@@ -134,6 +125,7 @@ export const UpdateBodySchema = z.discriminatedUnion('t', [
     pendingBlockedCount: z.number().int().min(0).optional(),
     meaningfulActivityAt: TimestampMsSchema.optional(),
     changedByAccountId: z.string().optional(),
+    pendingActivationRequestId: z.string().trim().min(1).optional(),
   }).passthrough(),
   z.object({
     t: z.literal('automation-upsert'),
@@ -172,6 +164,7 @@ export const UpdateBodySchema = z.discriminatedUnion('t', [
   z.object({
     t: z.literal('update-account'),
     id: z.string(),
+    settingsV2: AccountSettingsV2GetResponseSchema.nullable().optional(),
   }).passthrough(),
   z.object({
     t: z.literal('account-settings-changed'),
@@ -295,7 +288,18 @@ export const UpdateBodySchema = z.discriminatedUnion('t', [
     t: z.literal('public-share-deleted'),
     sessionId: z.string(),
   }).passthrough(),
-]);
+]).superRefine((value, context) => {
+  if (value.t !== 'new-session' && value.t !== 'update-session') return;
+
+  const projection = parseSessionRuntimeActivityProjectionFields(value);
+  if (projection.kind === 'invalid') {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Runtime Activity projection fields must form one complete valid tuple',
+      path: ['runtimeActivityState'],
+    });
+  }
+});
 
 export type UpdateBody = z.infer<typeof UpdateBodySchema>;
 

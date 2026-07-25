@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { PendingLocalIdSchema } from '../sessionMessages/pendingLocalId.js';
 import { decodeBase64, encodeBase64 } from '../crypto/base64.js';
 
 import {
@@ -15,21 +16,15 @@ import {
   SessionRuntimeIssueV1Schema,
   SessionRuntimeTemporaryThrottleDetailsV1Schema,
 } from '../sessions/control/runtimeIssueV1.js';
-import { SessionRuntimeActivitySourceClassV1Schema } from '../sessionRuntimeActivity/sessionRuntimeActivityV1.js';
 import {
-  findPrivateSessionRuntimeActivityPublicFieldV2,
-  SessionRuntimeActivityAggregateStateV2Schema,
-  SessionRuntimeActivityPublicVersionSchema,
-  SessionRuntimeActivitySourceClassV2Schema,
-} from '../sessionRuntimeActivity/sessionRuntimeActivityV2.js';
+  parseSessionRuntimeActivityProjectionFields,
+  SessionRuntimeActivityActiveCountSchema,
+  SessionRuntimeActivityStateSchema,
+} from '../sessionRuntimeActivity/projection.js';
 import {
   SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY,
   SessionUsageLimitRecoveryV1Schema,
 } from '../sessionMetadata/sessionUsageLimitRecoveryV1.js';
-import {
-  SESSION_CONTINUATION_RECOVERY_METADATA_KEY,
-  SessionContinuationRecoveryV1Schema,
-} from '../sessionMetadata/sessionContinuationRecoveryV1.js';
 import {
   PROVIDER_ACCOUNT_USAGE_REFS_METADATA_KEY,
   ProviderAccountUsageRefsV1Schema,
@@ -59,10 +54,16 @@ export {
   type SessionTurnV1,
 } from '../sessions/turns/sessionTurnV1.js';
 export {
+  ExactSessionTurnEndMutationV1Schema,
+  ExactSessionTurnMutationPositiveReceiptV1Schema,
+  isExactSessionTurnEndMutationV1,
+  isExactSessionTurnMutationPositiveReceiptV1,
   SessionTurnMutationActionV1Schema,
   SessionTurnMutationDecisionV1Schema,
   SessionTurnMutationReceiptV1Schema,
   SessionTurnMutationV1Schema,
+  type ExactSessionTurnEndMutationV1,
+  type ExactSessionTurnMutationPositiveReceiptV1,
   type SessionTurnMutationActionV1,
   type SessionTurnMutationDecisionV1,
   type SessionTurnMutationReceiptV1,
@@ -88,24 +89,13 @@ export {
   type TurnTerminalStatusV1,
 } from '../sessions/control/runtimeIssueV1.js';
 export {
-  SESSION_CONTINUATION_RECOVERY_METADATA_KEY,
-  SessionContinuationRecoveryAttemptStatusV1Schema,
-  SessionContinuationRecoveryAttemptV1Schema,
   SessionContinuationRecoveryIdentityV1Schema,
   SessionContinuationRecoverySelectionKindV1Schema,
-  SessionContinuationReplayModeV1Schema,
-  SessionContinuationRecoveryV1Schema,
   SessionContinuationResumePromptModeV1Schema,
-  isSessionContinuationRecoveryBlockingPendingDrain,
-  readSessionContinuationRecoveryFromMetadata,
-  type SessionContinuationRecoveryAttemptStatusV1,
-  type SessionContinuationRecoveryAttemptV1,
   type SessionContinuationRecoveryIdentityV1,
   type SessionContinuationRecoverySelectionKindV1,
-  type SessionContinuationReplayModeV1,
-  type SessionContinuationRecoveryV1,
   type SessionContinuationResumePromptModeV1,
-} from '../sessionMetadata/sessionContinuationRecoveryV1.js';
+} from '../sessionMetadata/sessionContinuationRecoveryIdentityV1.js';
 export {
   SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY,
   SESSION_USAGE_LIMIT_RECOVERY_STATE_FIELD_ID,
@@ -220,20 +210,11 @@ export const SessionSummarySchema = z.object({
   latestTurnId: z.string().min(1).nullable().optional(),
   latestTurnStatus: PrimaryTurnStatusV1Schema.nullable().optional(),
   lastRuntimeIssue: SessionRuntimeIssueV1Schema.nullable().optional(),
-  runtimeActivityVersion: SessionRuntimeActivityPublicVersionSchema.optional(),
-  runtimeActivityState: SessionRuntimeActivityAggregateStateV2Schema.nullable().optional(),
-  runtimeActivityActiveCount: z.number().int().nonnegative().optional(),
+  runtimeActivityState: SessionRuntimeActivityStateSchema.nullable().optional(),
+  runtimeActivityActiveCount: SessionRuntimeActivityActiveCountSchema.optional(),
   runtimeActivityObservedAt: z.number().int().nonnegative().nullable().optional(),
-  runtimeActivityExpiresAt: z.number().int().nonnegative().nullable().optional(),
-  runtimeActivitySourceClass: z.union([
-    SessionRuntimeActivitySourceClassV1Schema,
-    SessionRuntimeActivitySourceClassV2Schema,
-  ]).nullable().optional(),
   runtimeActivityRevision: z.number().int().nonnegative().safe().optional(),
-}).passthrough().superRefine((value, context) => {
-  const privateField = findPrivateSessionRuntimeActivityPublicFieldV2(value);
-  if (privateField) context.addIssue({ code: 'custom', path: [privateField], message: 'Private runtime activity field is not public' });
-});
+}).passthrough().superRefine(refineRuntimeActivityProjectionFields);
 export type SessionSummary = z.infer<typeof SessionSummarySchema>;
 
 /**
@@ -259,7 +240,6 @@ export function createSessionMetadataSchema(zod: typeof z) {
       // Remote-dev does not yet have the registered session-state field catalog used by dev.
       // This metadata key is the compatible storage binding for runtime.usageLimitRecovery.
       [SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY]: SessionUsageLimitRecoveryV1Schema.optional(),
-      [SESSION_CONTINUATION_RECOVERY_METADATA_KEY]: SessionContinuationRecoveryV1Schema.optional(),
       [PROVIDER_ACCOUNT_USAGE_REFS_METADATA_KEY]: ProviderAccountUsageRefsV1Schema.optional(),
     })
     .passthrough()
@@ -319,13 +299,6 @@ export const SessionShareSchema = z
   .passthrough();
 export type SessionShare = z.infer<typeof SessionShareSchema>;
 
-export const SessionCatchUpAuthorizationV1Schema = z.enum([
-  'explicit_cursor',
-  'reconnect_watermark',
-  'startup_recovery',
-]);
-export type SessionCatchUpAuthorizationV1 = z.infer<typeof SessionCatchUpAuthorizationV1Schema>;
-
 export const V2SessionRecordSchema = z
   .object({
     id: z.string().min(1),
@@ -358,24 +331,26 @@ export const V2SessionRecordSchema = z
     latestTurnStatus: PrimaryTurnStatusV1Schema.nullable().optional(),
     latestTurnStatusObservedAt: z.number().int().nonnegative().nullable().optional(),
     lastRuntimeIssue: SessionRuntimeIssueV1Schema.nullable().optional(),
-    initialTranscriptCatchUpAuthorization: SessionCatchUpAuthorizationV1Schema.optional(),
-    runtimeActivityVersion: SessionRuntimeActivityPublicVersionSchema.optional(),
-    runtimeActivityState: SessionRuntimeActivityAggregateStateV2Schema.nullable().optional(),
-    runtimeActivityActiveCount: z.number().int().nonnegative().optional(),
+    runtimeActivityState: SessionRuntimeActivityStateSchema.nullable().optional(),
+    runtimeActivityActiveCount: SessionRuntimeActivityActiveCountSchema.optional(),
     runtimeActivityObservedAt: z.number().int().nonnegative().nullable().optional(),
-    runtimeActivityExpiresAt: z.number().int().nonnegative().nullable().optional(),
-    runtimeActivitySourceClass: z.union([
-      SessionRuntimeActivitySourceClassV1Schema,
-      SessionRuntimeActivitySourceClassV2Schema,
-    ]).nullable().optional(),
     runtimeActivityRevision: z.number().int().nonnegative().safe().optional(),
   })
   .passthrough()
-  .superRefine((value, context) => {
-    const privateField = findPrivateSessionRuntimeActivityPublicFieldV2(value);
-    if (privateField) context.addIssue({ code: 'custom', path: [privateField], message: 'Private runtime activity field is not public' });
-  });
+  .superRefine(refineRuntimeActivityProjectionFields);
 export type V2SessionRecord = z.infer<typeof V2SessionRecordSchema>;
+
+function refineRuntimeActivityProjectionFields(
+  value: unknown,
+  context: z.RefinementCtx,
+): void {
+  if (parseSessionRuntimeActivityProjectionFields(value).kind !== 'invalid') return;
+  context.addIssue({
+    code: z.ZodIssueCode.custom,
+    message: 'Runtime Activity projection fields must form one complete valid tuple',
+    path: ['runtimeActivityState'],
+  });
+}
 
 export const V2SessionListResponseSchema = z
   .object({
@@ -477,7 +452,7 @@ export type SessionCreateResult = z.infer<typeof SessionCreateResultSchema>;
 
 export const SessionSendResultSchema = z.object({
   sessionId: z.string().min(1),
-  localId: z.string().min(1),
+  localId: PendingLocalIdSchema,
   waited: z.boolean(),
 }).passthrough();
 export type SessionSendResult = z.infer<typeof SessionSendResultSchema>;

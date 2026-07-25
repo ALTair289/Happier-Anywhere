@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import * as schemas from './connectedServiceSchemas.js';
+import * as protocol from '../index.js';
 
 const {
     ConnectedServiceAuthGroupErrorResponseV1Schema,
@@ -19,6 +20,20 @@ function expectSchema(name: string): any {
 }
 
 describe('connectedServiceSchemas', () => {
+    it('exports the canonical credential mutation contract from the package barrel', () => {
+        for (const name of [
+            'ConnectedServiceCredentialRevisionV1Schema',
+            'ConnectedServiceCredentialMutationGuardV1Schema',
+            'ConnectedServiceCredentialMutationSuccessV1Schema',
+            'ConnectedServiceCredentialCompatibleMutationSuccessV1Schema',
+            'ConnectedServiceCredentialMutationSupersededV1Schema',
+            'ConnectedServiceCredentialMutationResponseV1Schema',
+            'ConnectedServiceCredentialCompatibleMutationResponseV1Schema',
+        ]) {
+            expect(typeof (protocol as Record<string, unknown>)[name]).toBe('object');
+        }
+    });
+
     it('defines one strict credential revision and mutation fence contract', () => {
         const revisionSchema = expectSchema('ConnectedServiceCredentialRevisionV1Schema');
         const mutationGuardSchema = expectSchema('ConnectedServiceCredentialMutationGuardV1Schema');

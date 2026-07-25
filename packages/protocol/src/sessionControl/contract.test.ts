@@ -93,12 +93,13 @@ describe('sessionControl contract exports', () => {
     expect(summaryParsed.success).toBe(true);
   });
 
-  it('declares minimal runtime activity projection fields on session summaries', () => {
+  it('declares the target runtime activity projection fields on session summaries', () => {
     const summaryShape = (protocol as any).SessionSummarySchema.shape;
+    expect(typeof summaryShape.runtimeActivityState?.safeParse).toBe('function');
+    expect(typeof summaryShape.runtimeActivityRevision?.safeParse).toBe('function');
     expect(typeof summaryShape.runtimeActivityActiveCount?.safeParse).toBe('function');
     expect(typeof summaryShape.runtimeActivityObservedAt?.safeParse).toBe('function');
-    expect(typeof summaryShape.runtimeActivityExpiresAt?.safeParse).toBe('function');
-    expect(typeof summaryShape.runtimeActivitySourceClass?.safeParse).toBe('function');
+    expect(summaryShape.runtimeActivitySourceClass).toBeUndefined();
 
     const summaryParsed = (protocol as any).SessionSummarySchema.safeParse({
       id: 'sess_runtime_activity',
@@ -107,14 +108,13 @@ describe('sessionControl contract exports', () => {
       active: false,
       activeAt: 0,
       encryption: { type: 'dataKey' },
+      runtimeActivityState: 'active',
+      runtimeActivityRevision: 3,
       runtimeActivityActiveCount: 2,
       runtimeActivityObservedAt: 1_000,
-      runtimeActivityExpiresAt: 2_000,
-      runtimeActivitySourceClass: 'provider_detached_task',
     });
     expect(summaryParsed.success).toBe(true);
     expect(summaryParsed.data.runtimeActivityActiveCount).toBe(2);
-    expect(summaryParsed.data.runtimeActivitySourceClass).toBe('provider_detached_task');
   });
 
   it('exports and validates session turn schemas', () => {
@@ -478,11 +478,10 @@ describe('sessionControl contract exports', () => {
       latestTurnStatus: 'failed',
       latestTurnStatusObservedAt: 456,
       lastRuntimeIssue: runtimeIssue,
-      initialTranscriptCatchUpAuthorization: 'explicit_cursor',
+      runtimeActivityState: 'active',
+      runtimeActivityRevision: 4,
       runtimeActivityActiveCount: 2,
       runtimeActivityObservedAt: 1_000,
-      runtimeActivityExpiresAt: 2_000,
-      runtimeActivitySourceClass: 'provider_detached_task',
     });
 
     expect(parsed.success).toBe(true);
@@ -504,7 +503,7 @@ describe('sessionControl contract exports', () => {
     });
     expect(invalidTurnStatusObservedAtParsed.success).toBe(false);
 
-    const invalidCatchUpAuthorizationParsed = (protocol as any).V2SessionRecordSchema.safeParse({
+    const minimalRecordParsed = (protocol as any).V2SessionRecordSchema.safeParse({
       id: 'sess_123',
       seq: 7,
       createdAt: 1,
@@ -516,9 +515,8 @@ describe('sessionControl contract exports', () => {
       agentState: null,
       agentStateVersion: 1,
       dataEncryptionKey: null,
-      initialTranscriptCatchUpAuthorization: 'no_explicit_authorization',
     });
-    expect(invalidCatchUpAuthorizationParsed.success).toBe(false);
+    expect(minimalRecordParsed.success).toBe(true);
 
     const invalidAttentionProjectionParsed = (protocol as any).V2SessionRecordSchema.safeParse({
       id: 'sess_123',
@@ -551,10 +549,28 @@ describe('sessionControl contract exports', () => {
       dataEncryptionKey: null,
       runtimeActivityActiveCount: 1,
       runtimeActivityObservedAt: 1_000,
-      runtimeActivityExpiresAt: -1,
-      runtimeActivitySourceClass: 'provider_detached_task',
     });
     expect(invalidRuntimeActivityParsed.success).toBe(false);
+
+    const conflictingRuntimeActivityParsed = (protocol as any).V2SessionRecordSchema.safeParse({
+      id: 'sess_123',
+      seq: 7,
+      createdAt: 1,
+      updatedAt: 2,
+      active: false,
+      activeAt: 0,
+      metadata: '{}',
+      metadataVersion: 1,
+      agentState: null,
+      agentStateVersion: 1,
+      dataEncryptionKey: null,
+      runtimeActivityState: 'idle',
+      runtimeActivityActiveCount: 0,
+      runtimeActivityObservedAt: 1_000,
+      runtimeActivityRevision: 4,
+      runtimeActivitySourceClass: 'agent_detached_task',
+    });
+    expect(conflictingRuntimeActivityParsed.success).toBe(false);
 
     const invalidActivityParsed = (protocol as any).V2SessionRecordSchema.safeParse({
       id: 'sess_123',

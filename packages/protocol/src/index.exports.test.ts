@@ -1,8 +1,31 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
+
+import type {
+    RuntimeIdleAdmission,
+    SessionRuntimeActivityProjection,
+    SessionRuntimeActivitySnapshot,
+} from './index.js';
 
 import * as protocol from './index.js';
 
 describe('protocol package root exports', () => {
+    it('exports the unsuffixed session runtime activity contracts', () => {
+        expectTypeOf<SessionRuntimeActivityProjection>().not.toBeNever();
+        expectTypeOf<SessionRuntimeActivitySnapshot>().not.toBeNever();
+        expectTypeOf<RuntimeIdleAdmission>().not.toBeNever();
+
+        expect(protocol.SessionRuntimeActivitySnapshotSchema.parse({
+            state: 'idle',
+            activeCount: 0,
+        })).toEqual({ state: 'idle', activeCount: 0 });
+        expect(protocol.decideRuntimeIdleAdmission({
+            state: 'idle',
+            activeCount: 0,
+            observedAt: 1,
+            revision: 3,
+        })).toEqual({ decision: 'allow', revision: 3 });
+    });
+
     it('exports the canonical client-compatibility owner', () => {
         expect(protocol.CURRENT_SESSION_SYNC_PROTOCOL_VERSION).toBe(2);
         expect(protocol.ClientCompatibilityDeclarationV1Schema.parse({
@@ -38,6 +61,9 @@ describe('protocol package root exports', () => {
 
     it('exports execution run streaming schemas', () => {
         expect(typeof (protocol as any).ExecutionRunTurnStreamStartRequestSchema).toBe('object');
+        expect(typeof (protocol as any).ExecutionRunTurnStreamStartV2RequestSchema).toBe('object');
+        expect(typeof (protocol as any).ExecutionRunUserTranscriptDirectiveSchema).toBe('object');
+        expect(typeof (protocol as any).ExecutionRunUserTranscriptCommitRequestSchema).toBe('object');
         expect(typeof (protocol as any).ExecutionRunTurnStreamReadResponseSchema).toBe('object');
         expect(typeof (protocol as any).ExecutionRunTurnStreamCancelRequestSchema).toBe('object');
     });

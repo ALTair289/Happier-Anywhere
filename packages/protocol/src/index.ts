@@ -1,6 +1,37 @@
 export const HAPPY_PROTOCOL_PACKAGE = '@happier-dev/protocol';
 
 export {
+  isPendingLocalId,
+  readPendingLocalId,
+  PendingLocalIdSchema,
+  type PendingLocalId,
+} from './sessionMessages/pendingLocalId.js';
+
+export {
+  ACCEPTED_PENDING_SETTLEMENT_EVENT_V1,
+  AcceptedPendingSettlementRequestV1Schema,
+  AcceptedPendingSettlementResponseV1Schema,
+  type AcceptedPendingSettlementRequestV1,
+  type AcceptedPendingSettlementResponseV1,
+} from './sessionMessages/acceptedPendingSettlementV1.js';
+
+export {
+  PendingRequestedActionV1Schema,
+  type PendingRequestedActionV1,
+} from './sessionMessages/pendingRequestedActionV1.js';
+
+export {
+  PendingProviderActionSchema,
+  type PendingProviderAction,
+} from './sessionMessages/pendingProviderAction.js';
+
+
+export {
+  ConnectedServiceCredentialBindingMismatchError,
+  assertConnectedServiceCredentialRecordBinding,
+} from './connect/connectedServiceCredentialBinding.js';
+
+export {
   DaemonSessionGoalClearRequestV1Schema,
   DaemonSessionGoalGetRequestV1Schema,
   DaemonSessionGoalSetRequestV1Schema,
@@ -11,6 +42,7 @@ export {
   ConnectedServiceQuotaRecoveryCreditConsumeRequestV1Schema,
   ConnectedServiceQuotaRecoveryCreditConsumeResponseV1Schema,
   SessionConnectedServiceAuthApplyGenerationAppliedViaV1Schema,
+  SessionConnectedServiceAuthCurrentGroupTruthV1Schema,
   SessionConnectedServiceAuthApplyGenerationReasonV1Schema,
   SessionConnectedServiceAuthApplyGenerationRequestV1Schema,
   SessionConnectedServiceAuthApplyGenerationResponseV1Schema,
@@ -67,6 +99,7 @@ export {
   type ConnectedServiceQuotaRecoveryCreditConsumeRequestV1,
   type ConnectedServiceQuotaRecoveryCreditConsumeResponseV1,
   type SessionConnectedServiceAuthApplyGenerationAppliedViaV1,
+  type SessionConnectedServiceAuthCurrentGroupTruthV1,
   type SessionConnectedServiceAuthApplyGenerationReasonV1,
   type SessionConnectedServiceAuthApplyGenerationRequestV1,
   type SessionConnectedServiceAuthApplyGenerationResponseV1,
@@ -146,32 +179,11 @@ export {
   type SessionWorkflowRunStatusV1,
 } from './sessionWorkflowActivity/index.js';
 
-export {
-  SESSION_RUNTIME_ACTIVITY_PROJECTION_LEASE_MS,
-  SESSION_RUNTIME_ACTIVITY_SOURCE_LIMIT,
-  SessionRuntimeActivitySourceClassV1Schema,
-  SessionRuntimeActivitySourceKindV1Schema,
-  SessionRuntimeActivitySourceStatusV1Schema,
-  SessionRuntimeActivitySourceV1Schema,
-  SessionRuntimeActivityV1Schema,
-  buildSessionRuntimeActivityV1,
-  hasActiveSessionRuntimeActivity,
-  isSessionRuntimeActivityProjectionIdleForPendingDrain,
-  listActiveSessionRuntimeActivitySources,
-  readSessionRuntimeActivityV1,
-  type BuildSessionRuntimeActivityV1Input,
-  type SessionRuntimeActivityProjectionForPendingDrain,
-  type SessionRuntimeActivitySourceClassV1,
-  type SessionRuntimeActivitySourceKindV1,
-  type SessionRuntimeActivitySourceStatusV1,
-  type SessionRuntimeActivitySourceV1,
-  type SessionRuntimeActivityV1,
-} from './sessionRuntimeActivity/index.js';
-
-export * from './sessionRuntimeActivity/sessionRuntimeActivityIdentity.js';
-export * from './sessionRuntimeActivity/sessionRuntimeActivityV2.js';
-export * from './sessionRuntimeActivity/sessionRuntimeActivityReducer.js';
-
+export * from './sessionRuntimeActivity/index.js';
+export * from './sessionRuntimeActivity/projection.js';
+export * from './sessionRuntimeActivity/admission.js';
+export * from './sessionRuntimeActivity/transport.js';
+export * from './sessionStop.js';
 export * from './clientCompatibility/index.js';
 
 export {
@@ -467,6 +479,16 @@ export {
   ConnectedServiceCredentialHealthV1Schema,
   ConnectedServiceCredentialKindSchema,
   ConnectedServiceCredentialRecordV1Schema,
+  ConnectedServiceCredentialRevisionV1Schema,
+  ConnectedServiceExecutionAuthorityV1Schema,
+  ConnectedServiceCredentialMutationGuardV1Schema,
+  ConnectedServiceCredentialRevisionedMutationSuccessV1Schema,
+  ConnectedServiceCredentialLegacyMutationSuccessV1Schema,
+  ConnectedServiceCredentialCompatibleMutationSuccessV1Schema,
+  ConnectedServiceCredentialMutationSuccessV1Schema,
+  ConnectedServiceCredentialMutationSupersededV1Schema,
+  ConnectedServiceCredentialCompatibleMutationResponseV1Schema,
+  ConnectedServiceCredentialMutationResponseV1Schema,
   ConnectedServiceCredentialRefreshFailureKindV1Schema,
   ConnectedServiceIdSchema,
   ConnectedServiceProfileIdSchema,
@@ -489,6 +511,7 @@ export {
   isConnectedServiceCredentialHealthStatusReconnectRequired,
   isConnectedServiceCredentialHealthStatusUsable,
   normalizeConnectedServiceCredentialHealthStatus,
+  readConnectedServiceCredentialRevisionBoundaryV1,
   type ConnectedServiceAuthGroupActiveProfileRequestV1,
   type ConnectedServiceAuthGroupCreateRequestV1,
   type ConnectedServiceAuthGroupId,
@@ -497,6 +520,8 @@ export {
   type ConnectedServiceAuthGroupMemberPatchRequestV1,
   type ConnectedServiceAuthGroupMemberStateV1,
   type ConnectedServiceAuthGroupMemberV1,
+  type ConnectedServiceCredentialCompatibleMutationResponseV1,
+  type ConnectedServiceCredentialCompatibleMutationSuccessV1,
   type ConnectedServiceAuthGroupPatchRequestV1,
   type ConnectedServiceAuthGroupPolicyPatchV1,
   type ConnectedServiceAuthGroupPolicyV1,
@@ -513,6 +538,13 @@ export {
   type ConnectedServiceCredentialHealthV1,
   type ConnectedServiceCredentialKind,
   type ConnectedServiceCredentialRecordV1,
+  type ConnectedServiceCredentialRevisionV1,
+  type ConnectedServiceExecutionAuthorityV1,
+  type ConnectedServiceCredentialMutationGuardV1,
+  type ConnectedServiceCredentialRevisionBoundaryV1,
+  type ConnectedServiceCredentialMutationSuccessV1,
+  type ConnectedServiceCredentialMutationSupersededV1,
+  type ConnectedServiceCredentialMutationResponseV1,
   type ConnectedServiceCredentialRefreshFailureKindV1,
   type ConnectedServiceId,
   type ConnectedServiceProfileId,
@@ -561,6 +593,7 @@ export {
 
 export {
   buildConnectedServiceCredentialRecord,
+  normalizeConnectedServiceOauthCredentialRawMetadata,
   type ConnectedServiceOauthCredentialRawMetadata,
 } from './connect/buildConnectedServiceCredentialRecord.js';
 
@@ -714,6 +747,7 @@ export {
   type PendingDeliveryBlockedReason,
 } from './sessionMessages/pendingDeliveryBlockedReason.js';
 export {
+  isPendingDeliveryProviderEffectPossibleV1,
   isPendingDeliveryStatusTransitionAllowedV1,
   normalizePendingDeliveryStatusV1,
   parsePendingDeliveryStatusV1,
@@ -724,6 +758,10 @@ export {
   type PendingDeliveryStatusTransitionTargetV1,
   type PendingDeliveryStatusV1,
 } from './sessionMessages/pendingDeliveryStatusV1.js';
+export {
+  SessionMessageDeliveryResolutionV1Schema,
+  type SessionMessageDeliveryResolutionV1,
+} from './sessionMessages/sessionMessageDeliveryResolutionV1.js';
 export {
   ACTIVITY_SESSION_SYSTEM_RECORD_KINDS,
   MEMORY_SESSION_SYSTEM_RECORD_KINDS,
@@ -836,6 +874,19 @@ export {
   type TranscriptRawUsageDataV1,
 } from './sessionMessages/transcriptRawRecordV1.js';
 export { coerceSessionUserPromptV1 } from './sessionMessages/coerceSessionUserPromptV1.js';
+export {
+  SESSION_TRANSCRIPT_OBSERVATION_CAPABILITY_V1,
+  SESSION_TRANSCRIPT_OBSERVATION_CAPABILITY_EVENT_V1,
+  SESSION_TRANSCRIPT_OBSERVATION_EVENT_V1,
+  SessionTranscriptObservationProvenanceV1Schema,
+  SessionTranscriptObservationV1Schema,
+  SessionTranscriptObservationCapabilityAckV1Schema,
+  SessionTranscriptObservationAckV1Schema,
+  type SessionTranscriptObservationProvenanceV1,
+  type SessionTranscriptObservationV1,
+  type SessionTranscriptObservationCapabilityAckV1,
+  type SessionTranscriptObservationAckV1,
+} from './sessionMessages/transcriptObservationV1.js';
 export {
   SESSION_ATTACH_METADATA_IDENTITY_POLICIES,
   SessionAttachMetadataIdentityPolicySchema,
@@ -1085,6 +1136,7 @@ export {
 export {
   SPAWN_SESSION_ERROR_CODES,
   SPAWN_SESSION_ERROR_DETAIL_KINDS,
+  SpawnSessionExecutionAuthorizationSchema,
   isConnectedServiceUxDiagnosticSpawnErrorDetail,
   isConnectedServiceResumeUnreachableSpawnErrorDetail,
   isSpawnSessionErrorDetail,
@@ -1095,8 +1147,14 @@ export {
   type SpawnSessionErrorCode,
   type SpawnSessionErrorDetail,
   type SpawnSessionErrorDetailKind,
+  type SpawnSessionExecutionAuthorization,
   type SpawnSessionResult,
 } from './spawnSession.js';
+export {
+  settleSpawnSessionNonce,
+  type SettleSpawnSessionNonceResult,
+  type SpawnSessionNonceResolution,
+} from './spawnSessionNonce.js';
 export {
   HappierReplayDialogItemSchema,
   HappierReplayStrategySchema,
@@ -1282,6 +1340,10 @@ export {
   SessionTurnLifecycleStatusV1Schema,
   SessionTurnMutationActionV1Schema,
   SessionTurnMutationDecisionV1Schema,
+  ExactSessionTurnEndMutationV1Schema,
+  ExactSessionTurnMutationPositiveReceiptV1Schema,
+  isExactSessionTurnEndMutationV1,
+  isExactSessionTurnMutationPositiveReceiptV1,
   SessionTurnMutationReceiptV1Schema,
   SessionTurnMutationV1Schema,
   SessionTurnProviderV1Schema,
@@ -1297,18 +1359,11 @@ export {
   buildSessionTurnsProjectionV1,
   countCompletedSessionTurnsFromStartSeq,
   findCompletedSessionTurnByStartUserSeq,
-  isSessionContinuationRecoveryBlockingPendingDrain,
   listCompletedSessionTurns,
-  readSessionContinuationRecoveryFromMetadata,
   resolveLatestCompletedSessionTurn,
   PrimaryTurnStatusV1Schema,
-  SESSION_CONTINUATION_RECOVERY_METADATA_KEY,
-  SessionContinuationRecoveryAttemptStatusV1Schema,
-  SessionContinuationRecoveryAttemptV1Schema,
   SessionContinuationRecoveryIdentityV1Schema,
   SessionContinuationRecoverySelectionKindV1Schema,
-  SessionContinuationReplayModeV1Schema,
-  SessionContinuationRecoveryV1Schema,
   SessionContinuationResumePromptModeV1Schema,
   SessionRuntimeIssueSourceV1Schema,
   SessionRuntimeTemporaryThrottleDetailsV1Schema,
@@ -1369,6 +1424,8 @@ export {
   type SessionStopResult,
   type SessionShare,
   type SessionTurnLifecycleStatusV1,
+  type ExactSessionTurnEndMutationV1,
+  type ExactSessionTurnMutationPositiveReceiptV1,
   type SessionTurnMutationActionV1,
   type SessionTurnMutationDecisionV1,
   type SessionTurnMutationReceiptV1,
@@ -1379,12 +1436,8 @@ export {
   type SessionTurnTranscriptAnchorsV1,
   type SessionTurnV1,
   type PrimaryTurnStatusV1,
-  type SessionContinuationRecoveryAttemptStatusV1,
-  type SessionContinuationRecoveryAttemptV1,
   type SessionContinuationRecoveryIdentityV1,
   type SessionContinuationRecoverySelectionKindV1,
-  type SessionContinuationReplayModeV1,
-  type SessionContinuationRecoveryV1,
   type SessionContinuationResumePromptModeV1,
   type SessionRuntimeIssueSourceV1,
   type SessionRuntimeTemporaryThrottleDetailsV1,
@@ -1404,8 +1457,6 @@ export {
   type V2SessionListCursorV2,
   type V2SessionMessageResponse,
   type V2SessionRecord,
-  SessionCatchUpAuthorizationV1Schema,
-  type SessionCatchUpAuthorizationV1,
   type SessionSummary,
   SessionMetadataSchema,
   type SessionMetadata,
@@ -1543,8 +1594,22 @@ export {
 export {
   SessionTerminalMetadataSchema,
   type SessionTerminalMetadata,
+  type TerminalControlServiceabilityPolicy,
   createSessionTerminalMetadataSchema,
+  resolveTerminalControlServiceabilityPolicy,
 } from './sessionMetadata/terminalMetadata.js';
+
+export {
+  PROVIDER_SESSION_INFO_PROVIDER_MAX,
+  PROVIDER_SESSION_INFO_SESSION_ID_MAX,
+  PROVIDER_SESSION_INFO_TITLE_MAX,
+  PROVIDER_SESSION_INFO_UPDATED_AT_MAX,
+  ProviderSessionTitleSchema,
+  ProviderSessionUpdatedAtSchema,
+  ProviderSessionInfoV1Schema,
+  type ProviderSessionInfoV1,
+  createProviderSessionInfoV1Schema,
+} from './sessionMetadata/providerSessionInfoV1.js';
 
 export {
   WINDOWS_REMOTE_SESSION_LAUNCH_MODES,
@@ -1980,6 +2045,10 @@ export {
   ExecutionRunActionRequestSchema,
   ExecutionRunActionResponseSchema,
   ExecutionRunTurnStreamStartRequestSchema,
+  ExecutionRunTurnStreamStartV2RequestSchema,
+  ExecutionRunUserTranscriptDirectiveSchema,
+  ExecutionRunUserTranscriptCommitRequestSchema,
+  ExecutionRunUserTranscriptCommitResponseSchema,
   ExecutionRunTurnStreamStartResponseSchema,
   ExecutionRunTurnStreamReadRequestSchema,
   ExecutionRunTurnStreamReadResponseSchema,
@@ -2016,6 +2085,10 @@ export {
   type ExecutionRunActionRequest,
   type ExecutionRunActionResponse,
   type ExecutionRunTurnStreamStartRequest,
+  type ExecutionRunTurnStreamStartV2Request,
+  type ExecutionRunUserTranscriptDirective,
+  type ExecutionRunUserTranscriptCommitRequest,
+  type ExecutionRunUserTranscriptCommitResponse,
   type ExecutionRunTurnStreamStartResponse,
   type ExecutionRunTurnStreamReadRequest,
   type ExecutionRunTurnStreamReadResponse,
@@ -2044,6 +2117,7 @@ export {
 export {
   DaemonTerminalErrorCodeSchema,
   DaemonTerminalErrorSchema,
+  DaemonTerminalLaunchIntentSchema,
   DaemonTerminalEnsureRequestSchema,
   DaemonTerminalEnsureResponseSchema,
   DaemonTerminalStreamReadRequestSchema,
@@ -2063,6 +2137,7 @@ export {
   DaemonTerminalRestartResponseSchema,
   type DaemonTerminalErrorCode,
   type DaemonTerminalError,
+  type DaemonTerminalLaunchIntent,
   type DaemonTerminalEnsureRequest,
   type DaemonTerminalEnsureResponse,
   type DaemonTerminalStreamReadRequest,
