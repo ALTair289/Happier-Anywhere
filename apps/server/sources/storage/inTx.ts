@@ -6,6 +6,17 @@ import { isRetryableSqliteWriteError } from "@/storage/sqliteRetryClassifier";
 
 export type Tx = TransactionClient;
 
+export class TransactionAcquisitionUnavailableError extends Error {
+    readonly code = "P2028";
+    readonly cause: unknown;
+
+    constructor(cause: unknown) {
+        super("Database transaction acquisition is temporarily unavailable");
+        this.name = "TransactionAcquisitionUnavailableError";
+        this.cause = cause;
+    }
+}
+
 const symbol = Symbol();
 
 type SqliteTransactionConfig = Readonly<{
@@ -80,6 +91,8 @@ function canStartAnotherSqliteTransactionAttempt(params: Readonly<{
 }
 
 export function isRetryableTransactionError(params: Readonly<{ provider: string; err: unknown }>): boolean {
+    // Acquisition-shaped P2028 requires callback-entry context, which only inTx owns.
+    if (isTransactionAcquisitionTimeout(params.err)) return false;
     if (isPrismaErrorCode(params.err, "P2034")) return true;
 
     if (params.provider === "sqlite") {
@@ -87,6 +100,25 @@ export function isRetryableTransactionError(params: Readonly<{ provider: string;
     }
 
     return false;
+}
+
+function readTransactionErrorMessage(error: unknown): string {
+    if (error && typeof error === "object" && "meta" in error) {
+        const metaError = (error as { meta?: { error?: unknown } }).meta?.error;
+        if (typeof metaError === "string") return metaError;
+    }
+    return error instanceof Error ? error.message : "";
+}
+
+export function isTransactionAcquisitionTimeout(error: unknown): boolean {
+    return isPrismaErrorCode(error, "P2028")
+        && readTransactionErrorMessage(error).toLowerCase().includes("unable to start a transaction");
+}
+
+export function isTransactionAcquisitionUnavailableError(
+    error: unknown,
+): error is TransactionAcquisitionUnavailableError {
+    return error instanceof TransactionAcquisitionUnavailableError;
 }
 
 export function afterTx(tx: Tx, callback: () => void) {
@@ -108,13 +140,16 @@ export async function inTx<T>(fn: (tx: Tx) => Promise<T>): Promise<T> {
     const maxRetries = sqliteTransactionConfig?.maxRetries ?? 3;
     const startedAtMs = Date.now();
     let counter = 0;
+    let transactionCallbackEntered = false;
     let wrapped = async (tx: Tx) => {
+        transactionCallbackEntered = true;
         (tx as any)[symbol] = [];
         let result = await fn(tx);
         let callbacks = (tx as any)[symbol] as (() => void)[];
         return { result, callbacks };
     }
     while (true) {
+        transactionCallbackEntered = false;
         try {
             const txOpts = sqliteTransactionConfig
                 ? { timeout: sqliteTransactionConfig.timeoutMs, maxWait: sqliteTransactionConfig.maxWaitMs }
@@ -129,7 +164,9 @@ export async function inTx<T>(fn: (tx: Tx) => Promise<T>): Promise<T> {
             }
             return result.result;
         } catch (e) {
-            if (isRetryableTransactionError({ provider, err: e }) && counter < maxRetries) {
+            const acquisitionTimeout = isTransactionAcquisitionTimeout(e) && !transactionCallbackEntered;
+            const retryable = acquisitionTimeout || isRetryableTransactionError({ provider, err: e });
+            if (retryable && counter < maxRetries) {
                 const nextAttempt = counter + 1;
                 const retryDelayMs = sqliteTransactionConfig
                     ? resolveSqliteTransactionRetryDelayMs(nextAttempt, sqliteTransactionConfig)
@@ -142,11 +179,17 @@ export async function inTx<T>(fn: (tx: Tx) => Promise<T>): Promise<T> {
                         startedAtMs,
                     })
                 ) {
+                    if (acquisitionTimeout) {
+                        throw new TransactionAcquisitionUnavailableError(e);
+                    }
                     throw e;
                 }
                 counter = nextAttempt;
                 await delay(retryDelayMs);
                 continue;
+            }
+            if (acquisitionTimeout) {
+                throw new TransactionAcquisitionUnavailableError(e);
             }
             throw e;
         }

@@ -98,6 +98,75 @@ describe("inTx", () => {
         expect(delayMock).toHaveBeenCalledTimes(1);
     });
 
+    it.each(["postgres", "mysql"])("retries an acquisition-shaped P2028 before the transaction callback starts on %s", async (provider) => {
+        restoreEnv(envSnapshot);
+        applyEnvValues({
+            HAPPY_DB_PROVIDER: undefined,
+            HAPPIER_DB_PROVIDER: provider,
+        });
+        const acquisitionError = Object.assign(
+            new Error("Transaction API error: Unable to start a transaction in the given time."),
+            { code: "P2028", meta: { error: "Unable to start a transaction in the given time." } },
+        );
+        transaction
+            .mockRejectedValueOnce(acquisitionError)
+            .mockImplementationOnce(async (fn: any, _opts?: any) => fn({} as any));
+        const transactionBody = vi.fn(async () => 790);
+
+        const { inTx } = await import("./inTx");
+        const result = await inTx(transactionBody);
+
+        expect(result).toBe(790);
+        expect(transaction).toHaveBeenCalledTimes(2);
+        expect(transactionBody).toHaveBeenCalledTimes(1);
+        expect(delayMock).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(["postgres", "mysql"])("reports acquisition unavailability with the original P2028 after retries are exhausted on %s", async (provider) => {
+        restoreEnv(envSnapshot);
+        applyEnvValues({
+            HAPPY_DB_PROVIDER: undefined,
+            HAPPIER_DB_PROVIDER: provider,
+        });
+        const acquisitionError = Object.assign(
+            new Error("Transaction API error: Unable to start a transaction in the given time."),
+            { code: "P2028", meta: { error: "Unable to start a transaction in the given time." } },
+        );
+        transaction.mockRejectedValue(acquisitionError);
+        const transactionBody = vi.fn(async () => 791);
+
+        const { inTx, TransactionAcquisitionUnavailableError } = await import("./inTx");
+        const rejection = await inTx(transactionBody).catch((error: unknown) => error);
+
+        expect(rejection).toBeInstanceOf(TransactionAcquisitionUnavailableError);
+        expect(rejection).toMatchObject({ code: "P2028", cause: acquisitionError });
+        expect(transaction).toHaveBeenCalledTimes(4);
+        expect(transactionBody).not.toHaveBeenCalled();
+        expect(delayMock).toHaveBeenCalledTimes(3);
+    });
+
+    it.each(["postgres", "sqlite", "mysql"])("does not retry an acquisition-shaped P2028 after the transaction callback starts on %s", async (provider) => {
+        restoreEnv(envSnapshot);
+        applyEnvValues({
+            HAPPY_DB_PROVIDER: undefined,
+            HAPPIER_DB_PROVIDER: provider,
+        });
+        const operationError = Object.assign(
+            new Error("Transaction API error: Unable to start a transaction in the given time."),
+            { code: "P2028", meta: { error: "Unable to start a transaction in the given time." } },
+        );
+        const transactionBody = vi.fn(async () => {
+            throw operationError;
+        });
+
+        const { inTx } = await import("./inTx");
+        await expect(inTx(transactionBody)).rejects.toBe(operationError);
+
+        expect(transaction).toHaveBeenCalledTimes(1);
+        expect(transactionBody).toHaveBeenCalledTimes(1);
+        expect(delayMock).not.toHaveBeenCalled();
+    });
+
     it("retries sqlite P1008 socket timeout and eventually succeeds", async () => {
         restoreEnv(envSnapshot);
         applyEnvValues({ HAPPY_DB_PROVIDER: "sqlite" });
