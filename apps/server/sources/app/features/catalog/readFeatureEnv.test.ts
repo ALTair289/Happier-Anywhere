@@ -7,30 +7,10 @@ import {
   readConnectedServicesFeatureEnv,
   readMachineTransferFeatureEnv,
   readPetsFeatureEnv,
-  readPendingDeliveryAttemptFeatureEnv,
   readSessionHandoffFeatureEnv,
   readSessionUsageLimitRecoveryFeatureEnv,
   readTerminalFeatureEnv,
 } from './readFeatureEnv';
-
-describe('readPendingDeliveryAttemptFeatureEnv', () => {
-  it('defaults contract and claim admission off', () => {
-    expect(readPendingDeliveryAttemptFeatureEnv({})).toEqual({
-      attemptsEnabled: false,
-      claimsEnabled: false,
-    });
-  });
-
-  it('reads contract and claim controls independently', () => {
-    expect(readPendingDeliveryAttemptFeatureEnv({
-      HAPPIER_FEATURE_SHARING_PENDING_DELIVERY_ATTEMPTS__ENABLED: '1',
-      HAPPIER_FEATURE_SHARING_PENDING_DELIVERY_ATTEMPT_CLAIMS__ENABLED: '0',
-    })).toEqual({
-      attemptsEnabled: true,
-      claimsEnabled: false,
-    });
-  });
-});
 
 describe('readConnectedServicesFeatureEnv', () => {
   it('defaults child gates to true when env is unset', () => {

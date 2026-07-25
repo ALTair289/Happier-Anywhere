@@ -1,9 +1,8 @@
 import type { FeaturesPayloadDelta } from "./types";
-import { readPendingDeliveryAttemptFeatureEnv } from "./catalog/readFeatureEnv";
 
-export function resolveSharingFeature(env: NodeJS.ProcessEnv): FeaturesPayloadDelta {
-    const pendingDeliveryAttempt = readPendingDeliveryAttemptFeatureEnv(env);
-
+export function resolveSharingFeature(
+    _env: NodeJS.ProcessEnv = {},
+): FeaturesPayloadDelta {
     return {
         features: {
             sharing: {
@@ -12,8 +11,8 @@ export function resolveSharingFeature(env: NodeJS.ProcessEnv): FeaturesPayloadDe
                 contentKeys: { enabled: true },
                 pendingQueueV2: { enabled: true },
                 pendingDeliveryState: { enabled: true },
-                pendingDeliveryAttempts: { enabled: pendingDeliveryAttempt.attemptsEnabled },
-                pendingDeliveryAttemptClaims: { enabled: pendingDeliveryAttempt.claimsEnabled },
+                // PREPARE only. Activation follows once expected provider/mode and cross-row
+                // correlation can be compared against a canonical indexed dispatch identity.
             },
         },
         capabilities: {

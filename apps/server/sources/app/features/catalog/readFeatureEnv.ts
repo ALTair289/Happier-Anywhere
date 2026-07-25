@@ -48,11 +48,6 @@ export type AttachmentsUploadsFeatureEnv = Readonly<{
   enabled: boolean;
 }>;
 
-export type PendingDeliveryAttemptFeatureEnv = Readonly<{
-  attemptsEnabled: boolean;
-  claimsEnabled: boolean;
-}>;
-
 export type PetsFeatureEnv = Readonly<{
   companionEnabled: boolean;
   syncEnabled: boolean;
@@ -70,10 +65,6 @@ export type SessionHandoffFeatureEnv = Readonly<{
 
 export type SessionUsageLimitRecoveryFeatureEnv = Readonly<{
   usageLimitRecoveryEnabled: boolean;
-}>;
-
-export type SessionRuntimeActivityV2FeatureEnv = Readonly<{
-  runtimeActivityV2Enabled: boolean;
 }>;
 
 export type SessionFoldersFeatureEnv = Readonly<{
@@ -276,13 +267,6 @@ export function readAttachmentsUploadsFeatureEnv(env: NodeJS.ProcessEnv): Attach
   };
 }
 
-export function readPendingDeliveryAttemptFeatureEnv(env: NodeJS.ProcessEnv): PendingDeliveryAttemptFeatureEnv {
-  return {
-    attemptsEnabled: parseBooleanEnv(env[FEATURE_ENV_KEYS.pendingDeliveryAttemptsEnabled], false),
-    claimsEnabled: parseBooleanEnv(env[FEATURE_ENV_KEYS.pendingDeliveryAttemptClaimsEnabled], false),
-  };
-}
-
 export function readPetsFeatureEnv(env: NodeJS.ProcessEnv): PetsFeatureEnv {
   const encryptedCustomPetSyncPolicy = PetsEncryptedCustomPetSyncPolicySchema.safeParse(
     env[FEATURE_ENV_KEYS.petsSyncEncryptedCustomPetSyncPolicy]?.trim(),
@@ -325,12 +309,6 @@ export function readSessionHandoffFeatureEnv(env: NodeJS.ProcessEnv): SessionHan
 export function readSessionUsageLimitRecoveryFeatureEnv(env: NodeJS.ProcessEnv): SessionUsageLimitRecoveryFeatureEnv {
   return {
     usageLimitRecoveryEnabled: parseBooleanEnv(env[FEATURE_ENV_KEYS.sessionsUsageLimitRecoveryEnabled], true),
-  };
-}
-
-export function readSessionRuntimeActivityV2FeatureEnv(env: NodeJS.ProcessEnv): SessionRuntimeActivityV2FeatureEnv {
-  return {
-    runtimeActivityV2Enabled: parseBooleanEnv(env[FEATURE_ENV_KEYS.sessionsRuntimeActivityV2Enabled], false),
   };
 }
 
