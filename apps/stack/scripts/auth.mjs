@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 
 import { parseEnvToObject } from './utils/env/dotenv.mjs';
 import { run, runCapture } from './utils/proc/proc.mjs';
-import { applyStackCacheEnv, ensureDepsInstalled } from './utils/proc/pm.mjs';
+import { applyStackCacheEnv, ensureDepsInstalled, pmExecBin } from './utils/proc/pm.mjs';
 import { applyHappyServerMigrations, ensureHappyServerManagedInfra } from './utils/server/infra/happy_server_infra.mjs';
 import { resolvePrismaClientImportForDbProvider, resolvePrismaClientImportForServerComponent } from './utils/server/flavor_scripts.mjs';
 import { clearDevAuthKey, readDevAuthKey, writeDevAuthKey } from './utils/auth/dev_key.mjs';
@@ -52,10 +52,11 @@ import { fileHasContent } from './utils/fs/file_has_content.mjs';
 import { buildConfigureServerLinks } from '@happier-dev/cli-common/links';
 import {
   renderPrismaCompatibleSqliteDatabaseUrl,
-  resolvePrismaSqliteDatabaseUrlOptionsFromEnv,
+  resolveServerLightSqliteDatabaseUrlOptionsFromEnv,
 } from '@happier-dev/cli-common/firstPartyRuntime';
 import { getStackRuntimeStatePath, isPidAlive as isRuntimePidAlive, readStackRuntimeStateFile } from './utils/stack/runtime_state.mjs';
 import { resolveStackRuntimeLaunchContext } from './runtime/launch/resolveStackRuntimeLaunchContext.mjs';
+import { applyEffectiveDbProviderEnv } from './utils/server/effective_db_provider.mjs';
 
 function resolveGuidedStartAction({ healthOk = false, runtimeOwnerAlive = false, autoStart = false } = {}) {
   if (healthOk) return 'proceed';
@@ -615,24 +616,26 @@ export function buildLightMigrationBaseEnv(processEnv, envIn) {
 }
 
 export function resolveDbProviderForLightFromEnv(env) {
-  const raw = (env.HAPPIER_DB_PROVIDER ?? env.HAPPY_DB_PROVIDER ?? '').toString().trim().toLowerCase();
-  if (raw === 'sqlite') return 'sqlite';
-  if (raw === 'pglite') return 'pglite';
-  // Default for light flavor.
-  return 'sqlite';
+  return applyEffectiveDbProviderEnv({
+    serverComponentName: 'happier-server-light',
+    env,
+    targetEnv: { ...env },
+  });
 }
 
 function resolveDbProviderForFullFromEnv(env) {
-  const raw = (env.HAPPIER_DB_PROVIDER ?? env.HAPPY_DB_PROVIDER ?? '').toString().trim().toLowerCase();
-  if (raw === 'mysql') return 'mysql';
-  return 'postgres';
+  return applyEffectiveDbProviderEnv({
+    serverComponentName: 'happier-server',
+    env,
+    targetEnv: { ...env },
+  });
 }
 
 function resolveSqliteDatabaseUrlForLight({ dataDir, env }) {
   return renderPrismaCompatibleSqliteDatabaseUrl({
     dbPath: join(dataDir, 'happier-server-light.sqlite'),
     platform: process.platform,
-    sqlite: resolvePrismaSqliteDatabaseUrlOptionsFromEnv(env ?? {}),
+    sqlite: resolveServerLightSqliteDatabaseUrlOptionsFromEnv(env ?? {}),
   });
 }
 
@@ -649,7 +652,7 @@ async function ensureLightMigrationsApplied({ serverDir, baseDir, envIn, quiet =
   env.HAPPY_SERVER_LIGHT_DB_DIR = env.HAPPY_SERVER_LIGHT_DB_DIR ?? dbDir;
 
   const provider = resolveDbProviderForLightFromEnv(env);
-  env.HAPPIER_DB_PROVIDER = env.HAPPIER_DB_PROVIDER ?? provider;
+  env.HAPPIER_DB_PROVIDER = provider;
 
   // Migration step:
   // - pglite: spins a temporary pglite socket and runs prisma migrate deploy against prisma/schema.prisma
@@ -658,7 +661,7 @@ async function ensureLightMigrationsApplied({ serverDir, baseDir, envIn, quiet =
   // Both are idempotent and safe to re-run when the light DB is not held open.
   const envWithCache = await applyStackCacheEnv(env);
   const migrateScript = provider === 'sqlite' ? 'migrate:sqlite:deploy' : 'migrate:light:deploy';
-  await run('yarn', ['-s', migrateScript], { cwd: serverDir, env: envWithCache, stdio: quiet ? 'ignore' : 'inherit' });
+  await pmExecBin({ dir: serverDir, bin: migrateScript, args: [], env: envWithCache, quiet });
   return { dataDir, filesDir, dbDir };
 }
 
@@ -1475,6 +1478,7 @@ async function cmdCopyFrom({ argv, json }) {
             publicServerUrl,
             envPath,
             env: targetEnv,
+            dbProvider: targetDbProvider,
             quiet: json,
             // Auth seeding only needs Postgres; don't block on Minio bucket init.
             skipMinioInit: true,
@@ -1506,7 +1510,12 @@ async function cmdCopyFrom({ argv, json }) {
         if (targetServerComponent === 'happier-server-light') {
           await ensureLightMigrationsApplied({ serverDir: targetCwd, baseDir: targetBaseDir, envIn: targetEnv, quiet: json }).catch(() => {});
         } else if (targetServerComponent === 'happier-server') {
-          await applyHappyServerMigrations({ serverDir: targetCwd, env: targetEnv, quiet: json }).catch(() => {});
+          await applyHappyServerMigrations({
+            serverDir: targetCwd,
+            env: targetEnv,
+            quiet: json,
+            dbProvider: targetDbProvider,
+          }).catch(() => {});
         }
         return await runInsert();
       }

@@ -34,6 +34,13 @@ test('parseArgs does not infer next-token values for equals-only flags', () => {
   assert.equal(kv.has('--profile'), false);
 });
 
+test('parseArgs preserves equals signs inside an inline value', () => {
+  const databaseUrl = 'postgresql://operator:secret@db.example/happier?sslmode=require&application_name=hstack';
+  const { kv } = parseArgs([`--database-url=${databaseUrl}`]);
+
+  assert.equal(kv.get('--database-url'), databaseUrl);
+});
+
 test('parseArgs does not let undocumented boolean-style flags swallow following positionals', () => {
   for (const flag of ['--force', '--background', '--offline-ok', '--with-infra']) {
     const { flags, kv } = parseArgs([flag, 'feature-123']);

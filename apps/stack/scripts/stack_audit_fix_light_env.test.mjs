@@ -67,6 +67,7 @@ test('hstack stack audit --fix-paths prunes legacy DATABASE_URL for light stacks
   assert.equal(res.code, 0, `expected exit 0, got ${res.code}\nstdout:\n${res.stdout}\nstderr:\n${res.stderr}`);
 
   const raw = await readFile(fixture.envPath, 'utf-8');
+  assert.ok(raw.includes('HAPPIER_DB_PROVIDER=sqlite\n'), `expected the effective light provider to be pinned\n${raw}`);
   assert.ok(raw.includes('HAPPIER_SERVER_LIGHT_DB_DIR='), `expected HAPPIER_SERVER_LIGHT_DB_DIR to be set\n${raw}`);
   assert.ok(!raw.includes('\nDATABASE_URL='), `expected legacy DATABASE_URL to be pruned for light stacks\n${raw}`);
 });

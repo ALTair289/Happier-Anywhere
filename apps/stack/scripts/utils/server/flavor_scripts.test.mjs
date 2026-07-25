@@ -8,7 +8,6 @@ import {
   resolvePrismaClientImportForServerComponent,
   resolveServerDevScript,
   resolveServerLightPrismaClientImport,
-  resolveServerLightPrismaMigrateDeployArgs,
   resolveServerStartScript,
 } from './flavor_scripts.mjs';
 
@@ -57,22 +56,6 @@ test('resolveServer*Script returns start for happier-server', async () => {
     assert.equal(resolveServerDevScript({ serverComponentName: 'happier-server', serverDir: dir, prismaPush: true }), 'start');
     assert.equal(resolveServerDevScript({ serverComponentName: 'happier-server', serverDir: dir, prismaPush: false }), 'start');
     assert.equal(resolveServerStartScript({ serverComponentName: 'happier-server', serverDir: dir }), 'start');
-  });
-});
-
-test('resolveServerLightPrismaMigrateDeployArgs adds --schema when unified light flavor is detected', async () => {
-  await withServerDir(async (dir) => {
-    await writeServerScriptsPackageJson(dir, { 'migrate:light:deploy': 'node z' });
-    assert.deepEqual(resolveServerLightPrismaMigrateDeployArgs({ serverDir: dir }), ['migrate', 'deploy', '--schema', 'prisma/schema.prisma']);
-  });
-});
-
-test('resolveServerLightPrismaMigrateDeployArgs supports legacy schema.sqlite.prisma', async () => {
-  await withServerDir(async (dir) => {
-    await mkdir(join(dir, 'prisma'), { recursive: true });
-    await writeFile(join(dir, 'prisma', 'schema.sqlite.prisma'), 'datasource db { provider = "sqlite" }\n', 'utf-8');
-
-    assert.deepEqual(resolveServerLightPrismaMigrateDeployArgs({ serverDir: dir }), ['migrate', 'deploy', '--schema', 'prisma/schema.sqlite.prisma']);
   });
 });
 

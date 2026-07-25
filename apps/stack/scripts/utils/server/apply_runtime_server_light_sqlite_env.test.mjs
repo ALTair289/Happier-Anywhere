@@ -4,6 +4,19 @@ import { join } from 'node:path';
 
 import { applyRuntimeServerLightSqliteEnv } from './apply_runtime_server_light_sqlite_env.mjs';
 
+test('applyRuntimeServerLightSqliteEnv uses the bounded server-light pool by default', () => {
+  const env = {
+    HAPPIER_SERVER_LIGHT_DATA_DIR: '/tmp/happier-data',
+  };
+
+  applyRuntimeServerLightSqliteEnv({ env, serverDir: '/tmp/happier-server' });
+
+  assert.equal(
+    env.DATABASE_URL,
+    'file:///tmp/happier-data/happier-server-light.sqlite?socket_timeout=30&connection_limit=1',
+  );
+});
+
 test('applyRuntimeServerLightSqliteEnv applies sqlite URL params from env when generating DATABASE_URL', () => {
   const env = {
     HAPPIER_SERVER_LIGHT_DATA_DIR: '/tmp/happier-data',

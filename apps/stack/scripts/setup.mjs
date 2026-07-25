@@ -36,6 +36,7 @@ import { parseGithubOwnerRepo } from './utils/git/worktrees.mjs';
 import { findAnyCredentialPathInCliHome, findExistingStackCredentialPath } from './utils/auth/credentials_paths.mjs';
 import { normalizeStackNameOrNull } from './utils/stack/names.mjs';
 import { parseEnvToObject } from './utils/env/dotenv.mjs';
+import { resolveEffectiveDbProviderTransition } from './utils/server/effective_db_provider.mjs';
 
 function resolveWorkspaceDirDefault() {
   const explicit = (process.env.HAPPIER_STACK_WORKSPACE_DIR ?? '').toString().trim();
@@ -305,6 +306,18 @@ async function ensureSetupConfigPersisted({ rootDir, profile, serverComponent, t
   const repoSourceForProfile = profile === 'selfhost' ? 'upstream' : null;
   const monoRepo = String(happierRepoUrl ?? '').trim();
   const stable = String(stableBranch ?? '').trim();
+  const previousServerComponent = process.env.HAPPIER_STACK_SERVER_COMPONENT?.trim() || 'happier-server-light';
+  const dbTransition = resolveEffectiveDbProviderTransition({
+    previousServerComponentName: previousServerComponent,
+    nextServerComponentName: serverComponent,
+    env: process.env,
+  });
+  if (!dbTransition.ok) {
+    if (dbTransition.reason === 'missing_mysql_database_url') {
+      throw new Error('[setup] mysql requires an explicit DATABASE_URL');
+    }
+    throw new Error(`[setup] invalid DB provider for ${serverComponent}: ${dbTransition.input ?? dbTransition.reason}`);
+  }
   const updates = [
     ...(stable
       ? [
@@ -312,6 +325,10 @@ async function ensureSetupConfigPersisted({ rootDir, profile, serverComponent, t
         ]
       : []),
     { key: 'HAPPIER_STACK_SERVER_COMPONENT', value: serverComponent },
+    { key: 'HAPPIER_DB_PROVIDER', value: dbTransition.provider },
+    ...(dbTransition.provider === 'mysql'
+      ? [{ key: 'DATABASE_URL', value: dbTransition.databaseUrl }]
+      : []),
     // Default for selfhost:
     // - monorepo: upstream (Happier)
     // - server-light: fork-only today (handled in bootstrap)
@@ -334,7 +351,11 @@ async function ensureSetupConfigPersisted({ rootDir, profile, serverComponent, t
         ]
       : []),
   ];
-  await ensureEnvLocalUpdated({ rootDir, updates });
+  await ensureEnvLocalUpdated({
+    rootDir,
+    updates,
+    removeKeys: dbTransition.removeDatabaseUrl ? ['DATABASE_URL'] : [],
+  });
 }
 
 async function ensureSystemdAvailable() {

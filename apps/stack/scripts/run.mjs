@@ -54,6 +54,7 @@ import { isRuntimePortOwnedByStackDevProxy, resolveLocalServerPortForStack } fro
 import { findExistingStackCredentialPath } from './utils/auth/credentials_paths.mjs';
 import { createServiceDaemonAutostarter } from './utils/service/daemon_autostart.mjs';
 import { applyRuntimeServerLightSqliteEnv } from './utils/server/apply_runtime_server_light_sqlite_env.mjs';
+import { applyEffectiveDbProviderEnv } from './utils/server/effective_db_provider.mjs';
 import { resolveStackRuntimeLaunchContext } from './runtime/launch/resolveStackRuntimeLaunchContext.mjs';
 import { resolveCliRuntimeLaunchSpec } from './runtime/launch/resolveCliRuntimeLaunchSpec.mjs';
 import { resolveServerRuntimeLaunchSpec } from './runtime/launch/resolveServerRuntimeLaunchSpec.mjs';
@@ -157,6 +158,10 @@ async function main() {
   const serverLaunchSpec = runtimeSnapshot
     ? resolveServerRuntimeLaunchSpec({ serverComponent: serverComponentName, snapshot: runtimeSnapshot })
     : null;
+  const dbProvider = applyEffectiveDbProviderEnv({ serverComponentName, env: process.env });
+  if (dbProvider === 'mysql' && !String(process.env.DATABASE_URL ?? '').trim()) {
+    throw new Error('[local] mysql requires an explicit DATABASE_URL before startup');
+  }
 
   const startDaemon = !flags.has('--no-daemon') && (process.env.HAPPIER_STACK_DAEMON ?? '1') !== '0';
   const serveUiWanted = !flags.has('--no-ui') && (process.env.HAPPIER_STACK_SERVE_UI ?? '1') !== '0';
@@ -199,6 +204,7 @@ async function main() {
       data: {
         mode: 'start',
         serverComponentName,
+        dbProvider,
         serverDir,
         uiDir,
         cliDir,
@@ -424,7 +430,8 @@ async function main() {
         serverPort,
         publicServerUrl,
         envPath,
-        env: baseEnv,
+        env: serverEnv,
+        dbProvider,
       });
 
       // Backend runs on a separate port; gateway owns the public port.
@@ -439,7 +446,7 @@ async function main() {
       if (!runtimeBackedStart) {
         const autoMigrate = (baseEnv.HAPPIER_STACK_PRISMA_MIGRATE ?? '1') !== '0';
         if (autoMigrate) {
-          await applyHappyServerMigrations({ serverDir: sourceServerDir, env: backendEnv });
+          await applyHappyServerMigrations({ serverDir: sourceServerDir, env: backendEnv, dbProvider });
         }
         // Account probe should use the *actual* DATABASE_URL/infra env (ephemeral stacks do not persist it in env files).
         const acct = await getAccountCountForServerComponent({

@@ -22,7 +22,9 @@ export function parseArgs(argv) {
       continue;
     }
 
-    const [key, value] = raw.split('=', 2);
+    const equalsIndex = raw.indexOf('=');
+    const key = equalsIndex < 0 ? raw : raw.slice(0, equalsIndex);
+    const value = equalsIndex < 0 ? undefined : raw.slice(equalsIndex + 1);
     if (value === undefined) {
       const next = args[index + 1];
       if (shouldConsumeNextTokenAsValue(key, next)) {
