@@ -5,7 +5,7 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
-import { checkDaemonState, checkDaemonStatePingAware, cleanupStaleDaemonState } from './daemon.mjs';
+import { checkDaemonState, checkDaemonStatePingAware, cleanupStaleDaemonState, daemonStateHasLiveProcess } from './daemon.mjs';
 import { spawnDetachedInlineNodeTestProcess } from './testkit/core/spawn_test_process.mjs';
 import { resolveStackDaemonStatePaths } from './utils/auth/credentials_paths.mjs';
 
@@ -37,7 +37,10 @@ test('checkDaemonStatePingAware requires a live authenticated control ping', asy
     if (req.method === 'POST' && req.url === '/ping' && req.headers['x-happier-daemon-token'] === 'state-token') {
       res.statusCode = pingOk ? 200 : 500;
       res.setHeader('content-type', 'application/json');
-      res.end(JSON.stringify({ ok: pingOk }));
+      res.end(JSON.stringify({
+        ok: pingOk,
+        ...(pingOk ? { distClosureFingerprint: 'abcdef1234567890' } : {}),
+      }));
       return;
     }
     res.statusCode = 401;
@@ -60,15 +63,14 @@ test('checkDaemonStatePingAware requires a live authenticated control ping', asy
     );
 
     pingOk = false;
-    assert.deepEqual(
-      await checkDaemonStatePingAware(dir, { serverUrl }),
-      { status: 'stopped', pid: null },
-    );
+    const unreachable = await checkDaemonStatePingAware(dir, { serverUrl });
+    assert.deepEqual(unreachable, { status: 'unreachable', pid: process.pid, reason: 'ping_failed' });
+    assert.equal(daemonStateHasLiveProcess(unreachable), true);
 
     pingOk = true;
     assert.deepEqual(
       await checkDaemonStatePingAware(dir, { serverUrl }),
-      { status: 'running', pid: process.pid },
+      { status: 'running', pid: process.pid, distClosureFingerprint: 'abcdef1234567890' },
     );
   } finally {
     await new Promise((resolve) => server.close(resolve));

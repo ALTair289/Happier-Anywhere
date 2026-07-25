@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 import {
   prepareDevProxyStartup,
@@ -28,6 +33,31 @@ function request(port, path = '/') {
     });
     req.on('error', reject);
   });
+}
+
+async function waitForPidExit(pid, timeoutMs = 1000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return false;
+}
+
+function createFakeProxyChild(onCommand) {
+  const child = new EventEmitter();
+  Object.assign(child, {
+    pid: 4242, connected: true,
+    stdout: new EventEmitter(), stderr: new EventEmitter(),
+    send(message, callback) { onCommand(message, child); callback?.(); },
+    disconnect() { child.connected = false; },
+    kill() { child.connected = false; },
+  });
+  return child;
 }
 
 test('stack dev proxy is default-on and supports flag/env opt-out', () => {
@@ -62,15 +92,92 @@ test('startDevProxy owns the stable port and can flip new connections to a new b
   });
 
   try {
-    assert.equal(proxy.pid, process.pid);
+    assert.notEqual(proxy.pid, process.pid);
     assert.equal((await request(proxy.port)).body, 'first');
 
-    proxy.flipUpstream({ targetPort: secondPort });
+    await proxy.flipUpstream({ targetPort: secondPort });
+    assert.equal((await proxy.getUpstream()).targetPort, secondPort);
     assert.equal((await request(proxy.port)).body, 'second');
   } finally {
     await proxy.stop();
     await new Promise((resolve) => firstBackend.close(() => resolve()));
     await new Promise((resolve) => secondBackend.close(() => resolve()));
+  }
+});
+
+test('stable proxy responds while the parent orchestrator event loop is synchronously stalled', { timeout: 8000 }, async () => {
+  const backend = http.createServer((_req, res) => res.end('alive'));
+  await new Promise((resolve, reject) => backend.once('error', reject).listen(0, '127.0.0.1', resolve));
+  const tmp = await mkdtemp(join(tmpdir(), 'hstack-proxy-stall-'));
+  const resultPath = join(tmp, 'response.json');
+  const readyPath = join(tmp, 'requester-ready');
+  const startPath = join(tmp, 'requester-start');
+  const proxy = await startDevProxy({
+    stableHost: '127.0.0.1',
+    stablePort: 0,
+    targetHost: '127.0.0.1',
+    targetPort: backend.address().port,
+    label: 'dev-proxy-stall-test',
+  });
+
+  let requester = null;
+  let requesterExit = null;
+  try {
+    await proxy.enterMaintenance({ retryAfterMs: 1000, message: 'transport-alive' });
+    requester = spawn(process.execPath, ['-e', `
+const fs = require('node:fs');
+const http = require('node:http');
+fs.writeFileSync(process.argv[3], 'ready');
+const begin = () => {
+  if (!fs.existsSync(process.argv[4])) return setTimeout(begin, 5);
+  const startedAt = Date.now();
+  http.get({ host: '127.0.0.1', port: Number(process.argv[1]), agent: false }, (res) => {
+    let body = '';
+    res.on('data', (chunk) => { body += chunk; });
+    res.on('end', () => {
+      fs.writeFileSync(process.argv[2], JSON.stringify({ elapsedMs: Date.now() - startedAt, body }));
+    });
+  }).on('error', (error) => {
+    fs.writeFileSync(process.argv[2], JSON.stringify({ error: error.message }));
+  });
+};
+begin();
+`, String(proxy.port), resultPath, readyPath, startPath], { stdio: 'ignore' });
+    requesterExit = new Promise((resolve, reject) => {
+      requester.once('exit', (code, signal) => resolve({ code, signal }));
+      requester.once('error', reject);
+    });
+
+    const readyDeadline = Date.now() + 2000;
+    while (true) {
+      try {
+        await readFile(readyPath, 'utf-8');
+        break;
+      } catch (error) {
+        if (Date.now() >= readyDeadline) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
+    await writeFile(startPath, 'start', 'utf-8');
+
+    const stallUntil = Date.now() + 600;
+    while (Date.now() < stallUntil) {
+      // Deliberately model synchronous source scans/build orchestration.
+    }
+
+    const requesterResult = await requesterExit;
+    assert.deepEqual(requesterResult, { code: 0, signal: null });
+    const result = JSON.parse(await readFile(resultPath, 'utf-8'));
+    assert.equal(result.body, 'transport-alive\n');
+    assert.ok(result.elapsedMs < 450, `proxy response took ${result.elapsedMs}ms during parent stall`);
+  } finally {
+    if (requester && requester.exitCode === null && requester.signalCode === null) {
+      requester.kill('SIGKILL');
+      await requesterExit?.catch(() => {});
+    }
+    await proxy.stop();
+    await new Promise((resolve) => backend.close(() => resolve()));
+    await rm(tmp, { recursive: true, force: true });
   }
 });
 
@@ -99,12 +206,61 @@ test('startDevProxy serves maintenance 503 on the stable port during exclusive r
     assert.equal(maintenance.headers['retry-after'], '2');
     assert.equal(maintenance.body, 'maintenance\n');
 
-    proxy.flipUpstream({ targetPort: secondPort });
+    await proxy.flipUpstream({ targetPort: secondPort });
     assert.equal((await request(proxy.port)).body, 'second');
   } finally {
     await proxy.stop();
     await new Promise((resolve) => firstBackend.close(() => resolve()));
     await new Promise((resolve) => secondBackend.close(() => resolve()));
+  }
+});
+
+test('stopping the proxy waits for its transport child to exit', async () => {
+  const backend = http.createServer((_req, res) => res.end('alive'));
+  await new Promise((resolve, reject) => backend.once('error', reject).listen(0, '127.0.0.1', resolve));
+  const proxy = await startDevProxy({
+    stableHost: '127.0.0.1',
+    stablePort: 0,
+    targetHost: '127.0.0.1',
+    targetPort: backend.address().port,
+    label: 'dev-proxy-stop-test',
+  });
+
+  try {
+    await proxy.stop();
+    assert.equal(await waitForPidExit(proxy.pid, 250), true);
+  } finally {
+    await proxy.stop();
+    await new Promise((resolve) => backend.close(() => resolve()));
+  }
+});
+
+test('unexpected proxy child death closes controller state and immediately notifies its owner', async () => {
+  const backend = http.createServer((_req, res) => res.end('alive'));
+  await new Promise((resolve, reject) => backend.once('error', reject).listen(0, '127.0.0.1', resolve));
+  let terminalEvent = null;
+  const terminal = new Promise((resolve) => {
+    terminalEvent = resolve;
+  });
+  const proxy = await startDevProxy({
+    stableHost: '127.0.0.1',
+    stablePort: 0,
+    targetHost: '127.0.0.1',
+    targetPort: backend.address().port,
+    label: 'dev-proxy-unexpected-exit-test',
+    onUnexpectedExit: terminalEvent,
+  });
+
+  try {
+    process.kill(proxy.pid, 'SIGKILL');
+    const event = await terminal;
+    assert.equal(event.expected, false);
+    assert.equal(proxy.available, false);
+    assert.equal(proxy.targetPort, null);
+    await assert.rejects(() => proxy.flipUpstream({ targetPort: backend.address().port }), /unavailable|closed/);
+  } finally {
+    await proxy.stop().catch(() => {});
+    await new Promise((resolve) => backend.close(() => resolve()));
   }
 });
 
@@ -225,6 +381,25 @@ test('maintenance upstream can update retry window and message without restartin
     assert.equal(response.statusCode, 503);
     assert.equal(response.headers['retry-after'], '1');
     assert.equal(response.body, 'new\n');
+  } finally {
+    await upstream.stop();
+  }
+});
+
+test('terminal maintenance is distinguishable from transient retry maintenance', async () => {
+  const upstream = await startDevProxyMaintenanceUpstream({
+    host: '127.0.0.1',
+    port: 0,
+    retryAfterMs: 1000,
+    message: 'retrying',
+  });
+  try {
+    upstream.update({ retryable: false, message: 'Server unavailable; edit or restart the stack.' });
+    const response = await request(upstream.port);
+    assert.equal(response.statusCode, 503);
+    assert.equal(response.headers['retry-after'], undefined);
+    assert.equal(response.headers['x-happier-retry-reason'], 'server_unavailable');
+    assert.match(response.body, /Server unavailable/);
   } finally {
     await upstream.stop();
   }

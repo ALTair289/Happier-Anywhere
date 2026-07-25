@@ -8,6 +8,7 @@ import { ensureDir, readTextIfExists, readTextOrEmpty } from './utils/fs/ops.mjs
 
 import { parseArgs } from './utils/cli/args.mjs';
 import { killProcessTree, run, runCapture } from './utils/proc/proc.mjs';
+import { resolveServerShutdownGraceMs } from './utils/server/shutdown_grace.mjs';
 import {
   coerceHappyMonorepoRootFromPath,
   getComponentDir,
@@ -43,6 +44,7 @@ import {
   writeStackEnv,
 } from './stack/stack_environment.mjs';
 import { cmdAuth, cmdListStacks, cmdRuntime, cmdService, cmdSrv, cmdTailscale, cmdWt } from './stack/delegated_script_commands.mjs';
+import { disableInstalledStackServicesBeforeArchive } from './utils/service/archive_service_lifecycle.mjs';
 import { runStackDaemonCommand } from './stack/stack_daemon_command.mjs';
 import { runStackHappierPassthroughCommand } from './stack/stack_happier_passthrough_command.mjs';
 import { runStackMobileInstallCommand } from './stack/stack_mobile_install_command.mjs';
@@ -85,7 +87,7 @@ import {
 import { killPid } from './utils/expo/expo.mjs';
 import { randomToken } from './utils/crypto/tokens.mjs';
 import { sanitizeSlugPart } from './utils/git/refs.mjs';
-import { readLastLines } from './utils/fs/tail.mjs';
+import { readLastLinesAfterProcessCompletion } from './utils/fs/tail.mjs';
 import { interactiveEdit, interactiveNew } from './utils/stack/interactive_stack_config.mjs';
 import { normalizeStackNameOrNull } from './utils/stack/names.mjs';
 import { runOrchestratedGuidedAuthFlow } from './utils/auth/orchestrated_stack_auth_flow.mjs';
@@ -1225,7 +1227,7 @@ async function cmdCreateDevAuthSeed({ rootDir, argv }) {
                     console.error(`[stack] Expo exited unexpectedly (code=${c ?? 'null'}, sig=${sig ?? 'null'})`);
                     // eslint-disable-next-line no-console
                     console.error(`[stack] expo log: ${expoLogPath}`);
-                    const tail = await readLastLines(expoLogPath, 80);
+                    const tail = await readLastLinesAfterProcessCompletion(uiProc, expoLogPath, 80);
                     if (tail) {
                       // eslint-disable-next-line no-console
                       console.error('');
@@ -1311,7 +1313,7 @@ async function cmdCreateDevAuthSeed({ rootDir, argv }) {
                 console.log('');
                 console.log(`[stack] stopping temporary UI (pid=${uiProc.pid})...`);
                 uiStopRequested = true;
-                killProcessTree(uiProc, 'SIGINT');
+                await killProcessTree(uiProc, 'SIGINT');
                 await Promise.race([
                   new Promise((resolve) => uiProc.on('exit', resolve)),
                   new Promise((resolve) => setTimeout(resolve, 15_000)),
@@ -1320,7 +1322,8 @@ async function cmdCreateDevAuthSeed({ rootDir, argv }) {
               if (serverProc) {
                 console.log('');
                 console.log(`[stack] stopping temporary server (pid=${serverProc.pid})...`);
-                killProcessTree(serverProc, 'SIGINT');
+                const serverShutdownGraceMs = resolveServerShutdownGraceMs(env);
+                await killProcessTree(serverProc, 'SIGINT', { graceMs: serverShutdownGraceMs });
                 await Promise.race([
                   new Promise((resolve) => serverProc.on('exit', resolve)),
                   new Promise((resolve) => setTimeout(resolve, 15_000)),
@@ -1511,6 +1514,15 @@ async function cmdArchiveStack({ rootDir, argv, stackName }) {
     };
   }
 
+  // Remove the durable OS lifecycle owner while its stack env still exists. Otherwise an archived
+  // stack can leave launchd/systemd/schtasks repeatedly starting a wrapper against a missing env.
+  await disableInstalledStackServicesBeforeArchive({
+    rootDir,
+    stackName,
+    homeDir: homedir(),
+    uninstallStackService: cmdService,
+  });
+
   await mkdir(dirname(destStackDir), { recursive: true });
   await rename(baseDir, destStackDir);
 
@@ -1660,6 +1672,17 @@ async function cmdInfo({ rootDir, argv }) {
     const issues = Array.isArray(out.runtime.health.issues) ? out.runtime.health.issues : [];
     const issueSuffix = issues.length > 0 ? ` (${issues.join(',')})` : '';
     console.log(`- health: ${out.runtime.health.status}${issueSuffix}`);
+  }
+  if (out.runtime?.serverLifecycle) {
+    const lifecycle = out.runtime.serverLifecycle;
+    const planned = lifecycle.planned
+      ? ` planned=${lifecycle.planned.mode}@${lifecycle.planned.generation}`
+      : '';
+    const completed = lifecycle.lastCompleted
+      ? ` lastCompleted=${lifecycle.lastCompleted.mode}@${lifecycle.lastCompleted.generation}`
+      : '';
+    const disposition = lifecycle.disposition ? ` disposition=${lifecycle.disposition.code}` : '';
+    console.log(`- server lifecycle: ${lifecycle.phase}${planned}${completed}${disposition}`);
   }
   if (out.ports.server) console.log(`- port: server=${out.ports.server}${out.ports.backend ? ` backend=${out.ports.backend}` : ''}`);
   if (out.ports.ui) {

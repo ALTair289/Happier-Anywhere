@@ -2,11 +2,54 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { once } from 'node:events';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { isStateProcessRunning } from './expo.mjs';
+import {
+  commitExpoPidStatePublication,
+  isStateProcessRunning,
+  readPidState,
+  restoreExpoPidStatePublication,
+} from './expo.mjs';
+
+test('Expo PID publication loser cannot overwrite or roll back a successor', async (t) => {
+  const tmp = await mkdtemp(join(tmpdir(), 'hstack-expo-pid-publication-'));
+  t.after(async () => rm(tmp, { recursive: true, force: true }));
+  const statePath = join(tmp, 'expo.state.json');
+
+  await commitExpoPidStatePublication(statePath, {
+    publicationToken: 'A', expectedPreviousToken: null, generation: 1, state: { pid: 101, port: 8081 },
+  });
+  await commitExpoPidStatePublication(statePath, {
+    publicationToken: 'B', expectedPreviousToken: 'A', generation: 1, state: { pid: 202, port: 8082 },
+  });
+  await assert.rejects(
+    () => commitExpoPidStatePublication(statePath, {
+      publicationToken: 'A-late', expectedPreviousToken: 'A', generation: 2, state: { pid: 303, port: 8083 },
+    }),
+    (error) => error?.code === 'EEXPOPIDGENERATION',
+  );
+  assert.equal(await restoreExpoPidStatePublication(statePath, { publicationToken: 'A', priorState: null }), false);
+  assert.deepEqual(await readPidState(statePath), {
+    pid: 202,
+    port: 8082,
+    publicationGeneration: 1,
+    publicationToken: 'B',
+  });
+});
+
+test('Expo PID publication fails closed on malformed current state', async (t) => {
+  const tmp = await mkdtemp(join(tmpdir(), 'hstack-expo-pid-malformed-'));
+  t.after(async () => rm(tmp, { recursive: true, force: true }));
+  const statePath = join(tmp, 'expo.state.json');
+  await writeFile(statePath, '{broken', 'utf-8');
+  await assert.rejects(() => commitExpoPidStatePublication(statePath, {
+    publicationToken: 'A', expectedPreviousToken: null, generation: 1, state: { pid: 101, port: 8081 },
+  }), SyntaxError);
+  assert.equal(await readFile(statePath, 'utf-8'), '{broken');
+});
 
 function listen(server) {
   return new Promise((resolve, reject) => {
@@ -122,13 +165,18 @@ test('isStateProcessRunning does not trust a live pid whose Expo isolation belon
     await mkdir(join(expectedStateDir, 'expo-home'), { recursive: true });
     await mkdir(join(foreignStateDir, 'expo-home'), { recursive: true });
 
-    child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000);'], {
-      stdio: 'ignore',
+    child = spawn(process.execPath, ['-e', "process.stdout.write('ready\\n'); setInterval(() => {}, 1000);"], {
+      stdio: ['ignore', 'pipe', 'ignore'],
       env: {
-        ...process.env,
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+        TMPDIR: process.env.TMPDIR,
         __UNSAFE_EXPO_HOME_DIRECTORY: join(foreignStateDir, 'expo-home'),
       },
     });
+    const ready = once(child.stdout, 'data');
+    await once(child, 'spawn');
+    await ready;
 
     const statePath = join(expectedStateDir, 'expo.state.json');
     await writeFile(
@@ -145,7 +193,16 @@ test('isStateProcessRunning does not trust a live pid whose Expo isolation belon
       'utf-8'
     );
 
-    const res = await isStateProcessRunning(statePath);
+    let res = null;
+    const identityDeadline = Date.now() + 15_000;
+    while (Date.now() < identityDeadline) {
+      res = await isStateProcessRunning(statePath, {
+        readProcessIdentityLineImpl: async () =>
+          `node __UNSAFE_EXPO_HOME_DIRECTORY=${join(foreignStateDir, 'expo-home')}`,
+      });
+      if (res.reason === 'pid_identity_mismatch') break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
     assert.equal(res.running, false);
     assert.equal(res.reason, 'pid_identity_mismatch');
   } finally {

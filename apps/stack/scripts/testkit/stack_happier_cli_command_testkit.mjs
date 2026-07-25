@@ -24,6 +24,9 @@ export async function createStackHappierCliCommandFixture(
   const stackCliHome = join(storageDir, stackName, 'cli');
 
   await ensureMinimalMonorepoLayout(monoRoot);
+  await mkdir(join(monoRoot, 'apps', 'cli', 'node_modules'), { recursive: true });
+  await writeFile(join(monoRoot, 'apps', 'cli', 'node_modules', '.yarn-integrity'), 'ok\n', 'utf-8');
+  await writeFile(join(monoRoot, 'apps', 'cli', 'yarn.lock'), '# fixture lock\n', 'utf-8');
   await writeStubHappierCliFiles(monoRoot, {
     distIndexScript,
     binHappierScript,
@@ -70,6 +73,7 @@ export async function createStackHappierCliCommandFixture(
       HAPPIER_STACK_STORAGE_DIR: storageDir,
       HAPPIER_STACK_WORKSPACE_DIR: workspaceDir,
       HAPPIER_STACK_CLI_ROOT_DISABLE: '1',
+      HAPPIER_STACK_SKIP_REFRESH_DEPS: '1',
     },
   };
 }

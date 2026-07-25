@@ -1,25 +1,35 @@
-import { EventEmitter } from 'node:events';
+import { EventEmitter, once } from 'node:events';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import {
   ensureExpoIsolationEnv,
+  commitExpoPidStatePublication,
   getExpoStatePaths,
   isStateProcessRunning,
+  readPidState,
   resolveExpoTmpDir,
+  restoreExpoPidStatePublication,
   wantsExpoClearCache,
-  writePidState,
+  waitForExpoMetroRunning,
 } from '../expo/expo.mjs';
-import { pickExpoDevMetroPort } from '../expo/metro_ports.mjs';
-import { ensureEnvFileUpdated } from '../env/env_file.mjs';
-import { isPidAlive, readStackRuntimeStateFile, recordStackRuntimeUpdate } from '../stack/runtime_state.mjs';
+import { selectExpoDevMetroPort } from '../expo/metro_ports.mjs';
+import { compareAndSetEnvFileValue } from '../env/env_file.mjs';
+import {
+  isPidAlive,
+  readStackRuntimeStateFile,
+  recordStackRuntimeExpoPublication,
+  recordStackRuntimeUpdate,
+  restoreStackRuntimeExpoPublication,
+} from '../stack/runtime_state.mjs';
 import { getProcessGroupId, getPsEnvLine, killProcessGroupOwnedByStack, listPidsWithEnvNeedle } from '../proc/ownership.mjs';
 import { terminateProcessGroup } from '../proc/terminate.mjs';
 import { expoSpawn } from '../expo/command.mjs';
-import { run } from '../proc/proc.mjs';
+import { killProcessTree, run } from '../proc/proc.mjs';
 import { resolveMobileExpoConfig } from '../mobile/config.mjs';
 import { resolveMobileReachableServerUrl } from '../server/mobile_api_url.mjs';
 import { getTailscaleStatus } from '../tailscale/ip.mjs';
-import { isTcpPortFree } from '../net/ports.mjs';
 import { resolveExpoTailscaleEnabled, startExpoTailscaleForwarder } from './expo_dev_tailscale.mjs';
 import {
   computeExpoRestartDelayMs,
@@ -39,6 +49,25 @@ function createTrackedExpoProcHandle() {
   let pendingRestartTimer = null;
   let stopRequested = false;
   let exitEmitted = false;
+  let generation = 0;
+  let lifecycleTail = Promise.resolve();
+  let completionSettled = false;
+  let resolveCompletion;
+  handle.completion = new Promise((resolve) => {
+    resolveCompletion = resolve;
+  });
+
+  handle.withLifecycleLock = async (fn) => {
+    const previous = lifecycleTail;
+    let release;
+    lifecycleTail = new Promise((resolve) => { release = resolve; });
+    await previous;
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  };
 
   Object.defineProperties(handle, {
     pid: {
@@ -61,39 +90,56 @@ function createTrackedExpoProcHandle() {
     },
   });
 
-  handle.setCurrentProc = (proc) => {
+  handle.setCurrentProc = (proc) => handle.withLifecycleLock(() => {
     if (pendingRestartTimer) {
       clearTimeout(pendingRestartTimer);
       pendingRestartTimer = null;
     }
     currentProc = proc ?? null;
+    generation += 1;
     exitCode = null;
     signalCode = null;
     stopRequested = false;
     exitEmitted = false;
-  };
+    return handle.snapshot();
+  });
 
-  handle.clearCurrentProc = (proc) => {
+  handle.snapshot = () => ({ generation, proc: currentProc, pid: currentProc?.pid ?? null });
+  handle.matches = ({ generation: expectedGeneration, currentProc: expectedProc } = {}) =>
+    generation === expectedGeneration && currentProc === expectedProc;
+
+  handle.clearCurrentProc = (proc) => handle.withLifecycleLock(() => {
     if (currentProc !== proc) {
       return false;
     }
     currentProc = null;
     return true;
-  };
+  });
 
-  handle.finalizeExit = ({ code = null, signal = null } = {}) => {
-    if (pendingRestartTimer) {
-      clearTimeout(pendingRestartTimer);
-      pendingRestartTimer = null;
-    }
-    currentProc = null;
-    exitCode = typeof code === 'number' ? code : null;
-    signalCode = signal ?? null;
-    if (exitEmitted) {
-      return;
-    }
-    exitEmitted = true;
-    handle.emit('exit', exitCode, signalCode);
+  handle.finalizeExit = async ({ code = null, signal = null, expectedGeneration = null, completion = null } = {}) => {
+    const completionOutcome = completion
+      ? await completion.catch((error) => ({ code: null, signal: null, error }))
+      : { code: typeof code === 'number' ? code : null, signal: signal ?? null };
+    return await handle.withLifecycleLock(() => {
+      if (expectedGeneration != null && generation !== expectedGeneration) return false;
+      if (pendingRestartTimer) {
+        clearTimeout(pendingRestartTimer);
+        pendingRestartTimer = null;
+      }
+      currentProc = null;
+      exitCode = typeof code === 'number' ? code : null;
+      signalCode = signal ?? null;
+      if (exitEmitted) {
+        return false;
+      }
+      exitEmitted = true;
+      if (!completionSettled) {
+        completionSettled = true;
+        resolveCompletion(completionOutcome);
+      }
+      handle.emit('exit', exitCode, signalCode);
+      return true;
+    });
   };
 
   handle.hasPendingRestart = () => Boolean(pendingRestartTimer);
@@ -105,7 +151,7 @@ function createTrackedExpoProcHandle() {
       pendingRestartTimer = null;
     }
     if (!currentProc) {
-      handle.finalizeExit({ code: null, signal });
+      void handle.finalizeExit({ code: null, signal });
     }
   };
 
@@ -118,12 +164,111 @@ function createTrackedExpoProcHandle() {
     pendingRestartTimer = timer ?? null;
   };
 
-  handle.kill = (signal) => {
+  handle.kill = async (signal) => {
     handle.requestStop({ signal });
-    currentProc?.kill?.(signal);
+    return await killProcessTree(currentProc, signal);
   };
 
   return handle;
+}
+
+export async function stopExpoProcessTree(proc, {
+  graceMs = 2000,
+  ownedListenerPids = [],
+  platform = process.platform,
+  killProcessTreeImpl = killProcessTree,
+  killPidImpl = (pid, signal) => process.kill(pid, signal),
+  isPidAliveImpl = isPidAlive,
+} = {}) {
+  if (!proc) return;
+  const listenerPids = Array.from(new Set(ownedListenerPids.map(Number).filter((pid) => Number.isInteger(pid) && pid > 1)));
+  if (platform === 'win32') {
+    for (const pid of listenerPids) {
+      try { killPidImpl(pid, 'SIGTERM'); } catch {}
+    }
+  }
+  await killProcessTreeImpl(proc, 'SIGTERM', { graceMs });
+  const groupAlive = () => {
+    if (platform === 'win32' || !proc.pid) return proc.exitCode === null && proc.signalCode === null;
+    try {
+      process.kill(-proc.pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const deadline = Date.now() + graceMs;
+  while (groupAlive() && Date.now() < deadline) {
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  const exited = !groupAlive();
+  if (!exited) {
+    await killProcessTreeImpl(proc, 'SIGKILL');
+    const killDeadline = Date.now() + 500;
+    while (groupAlive() && Date.now() < killDeadline) {
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+  if (platform === 'win32') {
+    const listenerDeadline = Date.now() + graceMs;
+    while (listenerPids.some((pid) => isPidAliveImpl(pid)) && Date.now() < listenerDeadline) {
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    for (const pid of listenerPids) {
+      if (!isPidAliveImpl(pid)) continue;
+      try { killPidImpl(pid, 'SIGKILL'); } catch {}
+    }
+    const hardDeadline = Date.now() + 500;
+    while (listenerPids.some((pid) => isPidAliveImpl(pid)) && Date.now() < hardDeadline) {
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const survivors = listenerPids.filter((pid) => isPidAliveImpl(pid));
+    if (survivors.length) {
+      const error = new Error(`[expo] failed to terminate certified listener pids: ${survivors.join(', ')}`);
+      error.code = 'EEXPOCLEANUP';
+      throw error;
+    }
+  }
+  if (!proc.__happierClosed) {
+    const closed = await Promise.race([
+      once(proc, 'close').then(() => true).catch(() => true),
+      new Promise((resolve) => setTimeout(() => resolve(false), 2000)),
+    ]);
+    if (!closed) {
+      proc.stdout?.destroy?.();
+      proc.stderr?.destroy?.();
+      await killProcessTreeImpl(proc, 'SIGKILL');
+      const hardClosed = await Promise.race([
+        once(proc, 'close').then(() => true).catch(() => true),
+        new Promise((resolve) => setTimeout(() => resolve(false), 500)),
+      ]);
+      if (!hardClosed && !proc.__happierClosed) {
+        const error = new Error('[expo] spawned process stdio did not close after hard cleanup');
+        error.code = 'EEXPOCLEANUP';
+        throw error;
+      }
+    }
+  }
+}
+
+function throwPublicationFailure(originalError, settledResults) {
+  const secondaryErrors = settledResults
+    .filter((result) => result.status === 'rejected')
+    .map((result) => result.reason);
+  if (!secondaryErrors.length) throw originalError;
+  const aggregate = new AggregateError(
+    [originalError, ...secondaryErrors],
+    originalError instanceof Error ? originalError.message : String(originalError),
+    { cause: originalError },
+  );
+  if (originalError && typeof originalError === 'object' && 'code' in originalError) {
+    aggregate.code = originalError.code;
+  }
+  throw aggregate;
 }
 
 function normalizeExpoHost(raw) {
@@ -274,6 +419,12 @@ export async function ensureDevExpoServer({
   spawnOptions = {},
   expoTailscale = false,
   quiet = false,
+  publicationBarrier = null,
+  getProcessIdentityLine = getPsEnvLine,
+  getProcessGroupIdForCleanup = getProcessGroupId,
+  killOwnedProcessGroup = killProcessGroupOwnedByStack,
+  readStateProcessIdentityLine = null,
+  stopTailscaleProcessTree = stopExpoProcessTree,
 } = {}) {
   const wantWeb = Boolean(startUi);
   const wantDevClient = Boolean(startMobile);
@@ -314,21 +465,34 @@ export async function ensureDevExpoServer({
   const tmpDir = resolveExpoTmpDir({ env, defaultTmpDir: paths.tmpDir, kind: 'expo-dev', projectDir });
   await ensureExpoIsolationEnv({ env, stateDir: paths.stateDir, expoHomeDir: paths.expoHomeDir, tmpDir });
 
-  const running = await isStateProcessRunning(paths.statePath);
+  const running = await isStateProcessRunning(
+    paths.statePath,
+    readStateProcessIdentityLine
+      ? { readProcessIdentityLineImpl: readStateProcessIdentityLine }
+      : undefined,
+  );
   const alreadyRunning = Boolean(running.running);
   let desiredApiServerUrl = normalizeApiServerUrl(env.EXPO_PUBLIC_HAPPIER_SERVER_URL || apiServerUrl);
   const cliHomeDir = (baseEnv?.HAPPIER_STACK_CLI_HOME_DIR ?? '').toString().trim();
-  const stablePortMode =
-    stackMode &&
-    ((baseEnv?.HAPPIER_STACK_EXPO_DEV_PORT_STRATEGY ?? 'ephemeral').toString().trim() || 'ephemeral') === 'stable';
-
   // Always publish runtime metadata when we can.
-  const publishRuntime = async ({ pid, port, tailscaleForwarderPid = null, tailscaleIp = null, tailscaleEnabled = false }) => {
+  const publishRuntime = async ({
+    generation,
+    publicationToken,
+    expectedPreviousToken,
+    pid,
+    port,
+    tailscaleForwarderPid = null,
+    tailscaleIp = null,
+    tailscaleEnabled = false,
+  }) => {
     if (!stackMode || !runtimeStatePath) return;
     const nPid = Number(pid);
     const nPort = Number(port);
     const nTsPid = Number(tailscaleForwarderPid);
-    await recordStackRuntimeUpdate(runtimeStatePath, {
+    await recordStackRuntimeExpoPublication(runtimeStatePath, {
+      generation,
+      publicationToken,
+      expectedPreviousToken,
       processes: {
         expoPid: Number.isFinite(nPid) && nPid > 1 ? nPid : null,
         expoTailscaleForwarderPid: Number.isFinite(nTsPid) && nTsPid > 1 ? nTsPid : null,
@@ -345,7 +509,7 @@ export async function ensureDevExpoServer({
         tailscaleEnabled: Boolean(tailscaleEnabled),
         tailscaleIp: tailscaleIp ?? null,
       },
-    }).catch(() => {});
+    });
   };
 
   const runningStateApiServerUrl = normalizeApiServerUrl(running.state?.apiServerUrl);
@@ -403,7 +567,12 @@ export async function ensureDevExpoServer({
       );
     }
 
+    const currentRuntime = runtimeStatePath ? await readStackRuntimeStateFile(runtimeStatePath) : null;
+    const currentPublicationToken = currentRuntime?.expo?.publicationToken ?? null;
     await publishRuntime({
+      generation: Number(currentRuntime?.expo?.publicationGeneration ?? 1),
+      publicationToken: currentPublicationToken ?? randomUUID(),
+      expectedPreviousToken: currentPublicationToken,
       pid,
       port,
       tailscaleEnabled: Boolean(running.state?.tailscaleEnabled),
@@ -431,91 +600,64 @@ export async function ensureDevExpoServer({
     console.log('[local] expo: restarting to enable Tailscale dev-client URLs.');
   }
 
-  const reservedMetroPorts = new Set();
+  // Prepare runtime dependencies before stopping an existing healthy Metro. A failed
+  // preparation must leave the currently published development runtime untouched.
+  await ensureWorkspacePackagesBuiltForExpoProject({ projectDir, env, quiet });
 
   if (shouldReplaceRunningExpo && running.state?.pid) {
     const prevPid = Number(running.state.pid);
-    const prevPort = Number(running.state?.port);
     const prevPidAlive = Number.isFinite(prevPid) && prevPid > 1 && isPidAlive(prevPid);
     if (prevPidAlive) {
-      const res = await killProcessGroupOwnedByStack(prevPid, { stackName, envPath, cliHomeDir, label: 'expo', json: true });
+      const res = await killOwnedProcessGroup(prevPid, { stackName, envPath, cliHomeDir, label: 'expo', json: true });
       if (!res.killed) {
-        const portInUse =
-          Number.isFinite(prevPort) && prevPort > 0 ? !(await isTcpPortFree(prevPort, { host: '127.0.0.1' })) : false;
         // eslint-disable-next-line no-console
         console.warn(
           `[local] expo: not stopping existing Expo pid=${prevPid} because it does not look stack-owned.\n` +
             `[local] expo: continuing by starting a new Expo process on a free port.`
         );
-        if (portInUse && !stablePortMode) {
-          reservedMetroPorts.add(prevPort);
-        }
       }
     }
   }
 
-  const forcedPortRaw = (baseEnv?.HAPPIER_STACK_EXPO_DEV_PORT ?? '').toString().trim();
-  const forcedPortNum = Number(forcedPortRaw);
-  const hasForcedPort = forcedPortRaw && Number.isFinite(forcedPortNum) && forcedPortNum > 0;
-
-  if (stablePortMode && hasForcedPort) {
-    if (reservedMetroPorts.has(forcedPortNum)) {
-      throw new Error(
-        `[expo] stable expo port ${forcedPortNum} is reserved due to an existing process; refusing to bump the expo port.`
-      );
-    }
-    let free = await isTcpPortFree(forcedPortNum, { host: '127.0.0.1' });
-    if (!free) {
+  const host = resolveExpoDevHost({ env });
+  const cleanupOwnedStablePort = async ({ observation } = {}) => {
       const needle = `__UNSAFE_EXPO_HOME_DIRECTORY=${paths.expoHomeDir}`;
-      const candidates = await listPidsWithEnvNeedle(needle);
-      const selfPgid = await getProcessGroupId(process.pid);
+      const listenerPids = Array.isArray(observation?.pids) ? observation.pids : [];
+      const scannedPids = await listPidsWithEnvNeedle(needle);
+      const candidates = Array.from(new Set([...listenerPids, ...scannedPids].map(Number).filter((pid) => pid > 1)));
+      const selfPgid = await getProcessGroupIdForCleanup(process.pid);
       for (const pid of candidates) {
         // eslint-disable-next-line no-await-in-loop
-        const line = await getPsEnvLine(pid);
-        if (!line) continue;
+        const line = await getProcessIdentityLine(pid);
+        if (!line?.includes(needle)) continue;
         if (stackName && !line.includes(`HAPPIER_STACK_STACK=${stackName}`)) continue;
         // eslint-disable-next-line no-await-in-loop
-        const pgid = await getProcessGroupId(pid);
+        const pgid = await getProcessGroupIdForCleanup(pid);
         if (!pgid) continue;
         if (selfPgid && pgid === selfPgid) continue;
         // eslint-disable-next-line no-await-in-loop
-        await terminateProcessGroup(pgid, { graceMs: 800, signal: 'SIGTERM' }).catch(() => {});
+        await terminateProcessGroup(pgid, { graceMs: 3000, signal: 'SIGTERM' }).catch(() => {});
       }
-      free = await isTcpPortFree(forcedPortNum, { host: '127.0.0.1' });
-    }
-    if (!free) {
-      throw new Error(
-        `[expo] stable expo port ${forcedPortNum} is already in use; refusing to bump the expo port. ` +
-          `Stop the process using it or run with --restart after ensuring the previous stack process is stopped.`
-      );
-    }
-  }
+  };
 
-  const metroPort = stablePortMode && hasForcedPort
-    ? forcedPortNum
-    : await pickExpoDevMetroPort({
-        env: baseEnv,
-        stackMode,
-        stackName,
-        reservedPorts: reservedMetroPorts,
-      });
+  const rejectedEphemeralPorts = new Set();
+  let metroSelection = await selectExpoDevMetroPort({
+    env: baseEnv,
+    stackMode,
+    stackName,
+    reservedPorts: rejectedEphemeralPorts,
+    onStableOccupied: cleanupOwnedStablePort,
+  });
+  let metroPort = metroSelection.port;
 
-  if (stackMode && envPath && hasForcedPort && forcedPortNum !== metroPort) {
-    if (!quiet) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        `[local] expo: requested metro port ${forcedPortNum} is not available; using ${metroPort}.\n` +
-          `[local] expo: updating ${envPath} so future runs keep stable ports.`
-      );
+  const applyMetroPortToEnv = () => {
+    env.RCT_METRO_PORT = String(metroPort);
+    env.HAPPIER_STACK_EXPO_DEV_PORT = String(metroPort);
+    if (wantTailscale && tailscaleStatus?.available && tailscaleStatus?.ip) {
+      env.EXPO_PACKAGER_PROXY_URL = `http://${tailscaleStatus.ip}:${metroPort}`;
     }
-    await ensureEnvFileUpdated({
-      envPath,
-      updates: [{ key: 'HAPPIER_STACK_EXPO_DEV_PORT', value: String(metroPort) }],
-    }).catch(() => {});
-  }
-  env.RCT_METRO_PORT = String(metroPort);
-  env.HAPPIER_STACK_EXPO_DEV_PORT = String(metroPort);
-  const host = resolveExpoDevHost({ env });
+  };
+  applyMetroPortToEnv();
   const baseClearCache = wantsExpoClearCache({ env: baseEnv || process.env });
   const buildStartArgs = ({ forceClearCache = false } = {}) => buildExpoStartArgs({
     port: metroPort,
@@ -525,7 +667,6 @@ export async function ensureDevExpoServer({
     scheme,
     clearCache: baseClearCache || forceClearCache,
   });
-  const args = buildStartArgs();
 
   if (!quiet) {
     // eslint-disable-next-line no-console
@@ -533,22 +674,8 @@ export async function ensureDevExpoServer({
   }
 
   let tailscaleResult = null;
-  if (wantTailscale) {
-    tailscaleResult = await startExpoTailscaleForwarder({
-      metroPort,
-      baseEnv,
-      stackName,
-      children,
-      tailscaleStatus,
-      expoHost: host,
-    });
-    if (tailscaleResult.ok && tailscaleResult.proxyUrl) {
-      env.EXPO_PACKAGER_PROXY_URL = tailscaleResult.proxyUrl;
-      desiredApiServerUrl = normalizeApiServerUrl(env.EXPO_PUBLIC_HAPPIER_SERVER_URL || apiServerUrl);
-    } else if (!tailscaleResult.ok && !quiet) {
-      // eslint-disable-next-line no-console
-      console.warn(`[local] expo: Tailscale forwarder not started: ${tailscaleResult.error}`);
-    }
+  if (wantTailscale && tailscaleStatus?.available && tailscaleStatus?.ip) {
+    desiredApiServerUrl = normalizeApiServerUrl(env.EXPO_PUBLIC_HAPPIER_SERVER_URL || apiServerUrl);
   }
 
   // Some auth flows historically passed `stdio: ['ignore','ignore','ignore']` which drops Expo output entirely.
@@ -561,24 +688,62 @@ export async function ensureDevExpoServer({
   const restartPolicy = resolveExpoRestartPolicy({ env, stackMode });
   const userOnLine = typeof normalizedSpawnOptions.onLine === 'function' ? normalizedSpawnOptions.onLine : null;
   delete normalizedSpawnOptions.onLine;
-  const tailscaleEnabled = Boolean(tailscaleResult?.ok && tailscaleResult?.proxyUrl);
+  let tailscaleEnabled = false;
 
   const writeSupervisorLine = (line) => {
     if (quiet) return;
     process.stderr.write(`[expo] ${line}\n`);
   };
 
-  const writeExpoState = async (proc) => {
+  const assertCurrentCertificate = (certificate) => {
+    if (!certificate || certificate.controller !== trackedProc || !trackedProc.matches(certificate)) {
+      const error = new Error('[expo] readiness certificate was superseded before publication');
+      error.code = 'EEXPOREADINESSSUPERSEDED';
+      throw error;
+    }
+    if (certificate.port !== metroPort || certificate.currentProc?.pid !== certificate.ownerPid) {
+      const error = new Error('[expo] readiness certificate owner/port no longer matches the active command');
+      error.code = 'EEXPOREADINESSSTALE';
+      throw error;
+    }
+    if (certificate.currentProc.exitCode !== null || certificate.currentProc.signalCode !== null) {
+      const error = new Error('[expo] certified process exited before publication committed');
+      error.code = 'EEXPOREADINESSSTALE';
+      throw error;
+    }
+  };
+
+  const runPublicationBarrier = async (phase, certificate) => {
+    if (typeof publicationBarrier !== 'function') return;
+    await publicationBarrier({ phase, certificate });
+    assertCurrentCertificate(certificate);
+  };
+
+  const writeExpoState = async (
+    certificate,
+    { expectedRuntimeToken = null, expectedPidToken = null } = {},
+  ) => {
+    assertCurrentCertificate(certificate);
+    await runPublicationBarrier('runtime', certificate);
+    const proc = certificate.currentProc;
     await publishRuntime({
+      generation: certificate.generation,
+      publicationToken: certificate.publicationToken,
+      expectedPreviousToken: expectedRuntimeToken,
       pid: proc.pid,
       port: metroPort,
       tailscaleForwarderPid: tailscaleResult?.pid ?? null,
       tailscaleIp: tailscaleResult?.tailscaleIp ?? null,
       tailscaleEnabled,
     });
+    assertCurrentCertificate(certificate);
 
-    try {
-      await writePidState(paths.statePath, {
+    await runPublicationBarrier('pid', certificate);
+    await commitExpoPidStatePublication(paths.statePath, {
+      publicationToken: certificate.publicationToken,
+      expectedPreviousToken: expectedPidToken,
+      generation: certificate.generation,
+      state: {
         pid: proc.pid,
         port: metroPort,
         uiDir,
@@ -592,10 +757,9 @@ export async function ensureDevExpoServer({
         tailscaleEnabled,
         tailscaleForwarderPid: tailscaleResult?.pid ?? null,
         tailscaleIp: tailscaleResult?.tailscaleIp ?? null,
-      });
-    } catch {
-      // ignore
-    }
+      },
+    });
+    assertCurrentCertificate(certificate);
   };
 
   const clearRuntimePidIfCurrent = async (pid) => {
@@ -614,6 +778,7 @@ export async function ensureDevExpoServer({
   };
 
   const trackedProc = createTrackedExpoProcHandle();
+  let startupCertified = false;
 
   const spawnTrackedExpo = async ({ restartAttempt = 0, forceClearCache = false } = {}) => {
     const outputTracker = createExpoCrashOutputTracker();
@@ -621,7 +786,7 @@ export async function ensureDevExpoServer({
       label: 'expo',
       dir: uiDir,
       projectDir,
-      args: forceClearCache ? buildStartArgs({ forceClearCache: true }) : args,
+      args: buildStartArgs({ forceClearCache }),
       env,
       options: {
         ...normalizedSpawnOptions,
@@ -633,19 +798,28 @@ export async function ensureDevExpoServer({
       quiet,
     });
     children.push(proc);
-    trackedProc.setCurrentProc(proc);
-    await writeExpoState(proc);
+    const trackedSnapshot = await trackedProc.setCurrentProc(proc);
 
     proc.once('exit', (code, signal) => {
       void (async () => {
-        trackedProc.clearCurrentProc(proc);
+        await trackedProc.clearCurrentProc(proc);
+        const finalizeCurrentExit = () => trackedProc.finalizeExit({
+          code,
+          signal,
+          expectedGeneration: trackedSnapshot.generation,
+          completion: proc.completion,
+        });
         if (isIntentionalExpoTermination({ code, signal })) {
-          trackedProc.finalizeExit({ code, signal });
+          await finalizeCurrentExit();
           return;
         }
         await clearRuntimePidIfCurrent(proc.pid);
+        if (!startupCertified) {
+          await finalizeCurrentExit();
+          return;
+        }
         if (!restartPolicy.enabled || restartPolicy.maxAttempts <= 0) {
-          trackedProc.finalizeExit({ code, signal });
+          await finalizeCurrentExit();
           return;
         }
         const nextAttempt = restartAttempt + 1;
@@ -653,7 +827,7 @@ export async function ensureDevExpoServer({
           writeSupervisorLine(
             `Expo exited unexpectedly (${describeExpoTermination({ code, signal, outputTracker })}); restart suppressed after ${restartPolicy.maxAttempts} attempts.`
           );
-          trackedProc.finalizeExit({ code, signal });
+          await finalizeCurrentExit();
           return;
         }
 
@@ -667,9 +841,44 @@ export async function ensureDevExpoServer({
           if (trackedProc.shouldSuppressRestart()) {
             return;
           }
-          void spawnTrackedExpo({ restartAttempt: nextAttempt, forceClearCache: forceClearCacheOnRestart }).catch((error) => {
+          void spawnTrackedExpo({ restartAttempt: nextAttempt, forceClearCache: forceClearCacheOnRestart }).then(async (restarted) => {
+            try {
+              const certificate = await certifyTrackedSpawn(restarted);
+              await trackedProc.withLifecycleLock(async () => {
+              const priorRuntime = runtimeStatePath ? await readStackRuntimeStateFile(runtimeStatePath).catch(() => null) : null;
+              const priorPidState = await readPidState(paths.statePath);
+              try {
+                await writeExpoState(certificate, {
+                  expectedRuntimeToken: priorRuntime?.expo?.publicationToken ?? null,
+                  expectedPidToken: priorPidState?.publicationToken ?? null,
+                });
+                assertCurrentCertificate(certificate);
+              } catch (error) {
+                const rollbackResults = await Promise.allSettled([
+                  ...(runtimeStatePath ? [restoreStackRuntimeExpoPublication(runtimeStatePath, {
+                    publicationToken: certificate.publicationToken,
+                    priorExpo: priorRuntime?.expo ?? null,
+                    priorProcesses: priorRuntime?.processes ?? null,
+                  })] : []),
+                  restoreExpoPidStatePublication(paths.statePath, {
+                    publicationToken: certificate.publicationToken,
+                    priorState: priorPidState,
+                  }),
+                ]);
+                throwPublicationFailure(error, rollbackResults);
+              }
+              });
+            } catch (error) {
+              if (error && typeof error === 'object') error.expectedGeneration = restarted.generation;
+              throw error;
+            }
+          }).catch(async (error) => {
             writeSupervisorLine(`Expo restart failed: ${error instanceof Error ? error.message : String(error)}`);
-            trackedProc.finalizeExit({ code: null, signal: null });
+            await trackedProc.finalizeExit({
+              code: null,
+              signal: null,
+              expectedGeneration: error?.expectedGeneration ?? null,
+            });
           });
         }, delayMs);
         trackedProc.setPendingRestartTimer(timer);
@@ -677,12 +886,169 @@ export async function ensureDevExpoServer({
       })();
     });
 
-    return proc;
+    return { ...trackedSnapshot, currentProc: proc };
   };
 
-  // Run the Expo CLI from the runner dir (where deps/bins live), but target the actual Expo project dir.
-  await ensureWorkspacePackagesBuiltForExpoProject({ projectDir, env, quiet });
-  const proc = await spawnTrackedExpo();
+  const certifyTrackedSpawn = async (trackedSpawn) => {
+    const ready = await waitForExpoMetroRunning({
+      port: metroPort,
+      ownerPid: trackedSpawn.pid,
+      ownerProc: trackedSpawn.currentProc,
+      env,
+    });
+    if (!ready.ok) {
+      await stopExpoProcessTree(trackedSpawn.currentProc, { ownedListenerPids: ready.ownedListenerPids });
+      const error = new Error(`[expo] owned Metro did not become ready on port ${metroPort}: ${ready.reason}`);
+      error.code = 'EEXPOMETRONOTREADY';
+      error.reason = ready.reason;
+      throw error;
+    }
+    const certificate = Object.freeze({
+      generation: trackedSpawn.generation,
+      publicationToken: randomUUID(),
+      controller: trackedProc,
+      currentProc: trackedSpawn.currentProc,
+      ownerPid: ready.ownerPid,
+      listenerPid: ready.listenerPid,
+      ownedListenerPids: ready.ownedListenerPids,
+      port: ready.port,
+    });
+    assertCurrentCertificate(certificate);
+    return certificate;
+  };
+
+  const stableStrategy = stackMode &&
+    ((baseEnv?.HAPPIER_STACK_EXPO_DEV_PORT_STRATEGY ?? 'ephemeral').toString().trim() || 'ephemeral') === 'stable';
+  const maxSpawnAttemptsRaw = Number(baseEnv?.HAPPIER_STACK_EXPO_EPHEMERAL_SPAWN_ATTEMPTS ?? 20);
+  const maxSpawnAttempts = Number.isFinite(maxSpawnAttemptsRaw) && maxSpawnAttemptsRaw > 0
+    ? Math.min(50, Math.floor(maxSpawnAttemptsRaw))
+    : 20;
+  const startupDeadline = Date.now() + 60_000;
+  let certificate = null;
+  let lastStartupError = null;
+  for (let attempt = 1; attempt <= maxSpawnAttempts && Date.now() < startupDeadline; attempt += 1) {
+    const trackedSpawn = await spawnTrackedExpo();
+    try {
+      certificate = await certifyTrackedSpawn(trackedSpawn);
+      break;
+    } catch (error) {
+      lastStartupError = error;
+      const retryable = !stableStrategy && [
+        'listener_not_owned',
+        'competing_listener',
+        'listener_not_observed',
+        'owner_process_exited',
+        'owner_process_missing',
+      ].includes(error?.reason);
+      if (!retryable) throw error;
+      rejectedEphemeralPorts.add(metroPort);
+      if (attempt === 1) {
+        const processOffset = 1 + (process.pid % 149);
+        for (let port = 8081; port < 8081 + processOffset; port += 1) {
+          rejectedEphemeralPorts.add(port);
+        }
+      } else {
+        rejectedEphemeralPorts.add(metroPort + 1);
+      }
+      metroSelection = await selectExpoDevMetroPort({
+        env: baseEnv,
+        stackMode,
+        stackName,
+        reservedPorts: rejectedEphemeralPorts,
+        onStableOccupied: cleanupOwnedStablePort,
+      });
+      metroPort = metroSelection.port;
+      applyMetroPortToEnv();
+    }
+  }
+  if (!certificate) {
+    throw lastStartupError ?? new Error('[expo] unable to start owned Metro before the startup deadline');
+  }
+  startupCertified = true;
+  try {
+    await trackedProc.withLifecycleLock(async () => {
+      assertCurrentCertificate(certificate);
+      const priorRuntime = runtimeStatePath ? await readStackRuntimeStateFile(runtimeStatePath).catch(() => null) : null;
+      const priorPidState = await readPidState(paths.statePath);
+      const priorEnvRaw = envPath ? await readFile(envPath, 'utf-8').catch(() => null) : null;
+      const priorPin = String(priorEnvRaw ?? '').split('\n').find((line) => line.trim().startsWith('HAPPIER_STACK_EXPO_DEV_PORT='));
+      const priorPinValue = priorPin?.slice(priorPin.indexOf('=') + 1) ?? null;
+      let envCommitted = false;
+      try {
+        if (stackMode && envPath && metroSelection.persistPin) {
+          if (!quiet) {
+            // eslint-disable-next-line no-console
+            console.warn(`[local] expo: persisting first stable metro port ${metroPort} in ${envPath}.`);
+          }
+          await runPublicationBarrier('env', certificate);
+          const committed = await compareAndSetEnvFileValue({
+            envPath,
+            key: 'HAPPIER_STACK_EXPO_DEV_PORT',
+            expectedValue: priorPinValue,
+            nextValue: String(metroPort),
+          });
+          if (!committed) {
+            const publicationError = new Error('[expo] environment port publication was superseded');
+            publicationError.code = 'EEXPOENVGENERATION';
+            throw publicationError;
+          }
+          envCommitted = true;
+          assertCurrentCertificate(certificate);
+        }
+        if (wantTailscale) {
+          await runPublicationBarrier('tailscale', certificate);
+          tailscaleResult = await startExpoTailscaleForwarder({
+            metroPort,
+            baseEnv,
+            stackName,
+            children,
+            tailscaleStatus,
+            expoHost: host,
+          });
+          tailscaleEnabled = Boolean(tailscaleResult.ok && tailscaleResult.proxyUrl);
+          assertCurrentCertificate(certificate);
+          if (!tailscaleResult.ok && !quiet) {
+            // eslint-disable-next-line no-console
+            console.warn(`[local] expo: Tailscale forwarder not started: ${tailscaleResult.error}`);
+          }
+        }
+        await writeExpoState(certificate, {
+          expectedRuntimeToken: priorRuntime?.expo?.publicationToken ?? null,
+          expectedPidToken: priorPidState?.publicationToken ?? null,
+        });
+        assertCurrentCertificate(certificate);
+      } catch (error) {
+        const rollbackResults = await Promise.allSettled([
+          ...(runtimeStatePath ? [restoreStackRuntimeExpoPublication(runtimeStatePath, {
+            publicationToken: certificate.publicationToken,
+            priorExpo: priorRuntime?.expo ?? null,
+            priorProcesses: priorRuntime?.processes ?? null,
+          })] : []),
+          restoreExpoPidStatePublication(paths.statePath, {
+            publicationToken: certificate.publicationToken,
+            priorState: priorPidState,
+          }),
+          ...(envPath && envCommitted ? [compareAndSetEnvFileValue({
+            envPath,
+            key: 'HAPPIER_STACK_EXPO_DEV_PORT',
+            expectedValue: String(metroPort),
+            nextValue: priorPinValue,
+          })] : []),
+        ]);
+        const cleanupResults = await Promise.allSettled([
+          stopTailscaleProcessTree(tailscaleResult?.proc),
+        ]);
+        throwPublicationFailure(error, [...rollbackResults, ...cleanupResults]);
+      }
+    });
+  } catch (error) {
+    const activeProc = trackedProc.snapshot().proc;
+    trackedProc.requestStop({ signal: 'SIGTERM' });
+    const cleanupResults = await Promise.allSettled([
+      stopExpoProcessTree(activeProc, { ownedListenerPids: certificate.ownedListenerPids }),
+    ]);
+    throwPublicationFailure(error, cleanupResults);
+  }
 
   return {
     ok: true,

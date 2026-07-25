@@ -6,9 +6,22 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import { ensureDevExpoServer } from './expo_dev.mjs';
+import { buildStackFixtureEnv } from '../../testkit/core/env_scope.mjs';
+
+async function stopChild(child) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise((resolve) => child.once('exit', resolve));
+  child.kill('SIGTERM');
+  await Promise.race([exited, delay(3000)]);
+  if (child.exitCode === null && child.signalCode === null) {
+    child.kill('SIGKILL');
+    await exited;
+  }
+}
 
 test('ensureDevExpoServer does not drop Expo output when spawnOptions stdio is ignore', async () => {
   const tmp = await mkdtemp(join(tmpdir(), 'hstack-expo-verbose-'));
+  const children = [];
   try {
     const uiDir = join(tmp, 'ui');
     await mkdir(join(uiDir, 'node_modules', '.bin'), { recursive: true });
@@ -20,21 +33,28 @@ test('ensureDevExpoServer does not drop Expo output when spawnOptions stdio is i
       expoBin,
       [
         '#!/usr/bin/env node',
+        "const http = require('node:http');",
         "console.log('hello-from-fake-expo');",
-        "setTimeout(() => process.exit(0), 100);",
+        "http.createServer((req, res) => res.end(req.url === '/status' ? 'packager-status:running' : 'ok')).listen(Number(process.env.RCT_METRO_PORT), '127.0.0.1');",
       ].join('\n') + '\n',
       'utf-8'
     );
     await chmod(expoBin, 0o755);
 
     const teeFile = join(tmp, 'expo.log');
-    const children = [];
     await ensureDevExpoServer({
       startUi: true,
       startMobile: false,
       uiDir,
       autostart: { baseDir: tmp },
-      baseEnv: { ...process.env, HAPPIER_STACK_VERBOSE: '1' },
+      baseEnv: buildStackFixtureEnv({
+        baseEnv: process.env,
+        stripStackEnv: true,
+        extraEnv: {
+          HAPPIER_STACK_VERBOSE: '1',
+          HAPPIER_STACK_SKIP_REFRESH_DEPS: '1',
+        },
+      }),
       apiServerUrl: 'http://127.0.0.1:1',
       restart: true,
       stackMode: false,
@@ -62,6 +82,7 @@ test('ensureDevExpoServer does not drop Expo output when spawnOptions stdio is i
     }
     assert.match(log, /hello-from-fake-expo/);
   } finally {
+    await Promise.all(children.map(stopChild));
     await rm(tmp, { recursive: true, force: true });
   }
 });

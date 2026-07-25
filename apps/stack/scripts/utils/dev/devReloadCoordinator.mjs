@@ -1,57 +1,21 @@
-import { lstatSync, readdirSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 
 import { watchDebounced } from '../proc/watch.mjs';
-import { isDevRuntimeReloadIgnoredPath } from './devRuntimeInputPolicy.mjs';
-export { isDevRuntimeReloadIgnoredPath } from './devRuntimeInputPolicy.mjs';
+import {
+  isDevRuntimeReloadIgnoredPath,
+  readDevReloadWatchChangeSignature,
+  readDevReloadWatchChangeSignatureAsync,
+} from './watchSignature.mjs';
+export {
+  appendWatchSignatureEntries,
+  appendWatchSignatureEntriesAsync,
+  isDevRuntimeReloadIgnoredPath,
+  readDevReloadWatchChangeSignature,
+  readDevReloadWatchChangeSignatureAsync,
+} from './watchSignature.mjs';
 export { resolveDevReloadPollIntervalMs } from './reloadPollInterval.mjs';
 
 const RESTART_ORDER = ['server', 'daemon'];
-
-export function appendWatchSignatureEntries(path, entries, { ignorePath = null } = {}) {
-  if (typeof ignorePath === 'function' && ignorePath(path)) return false;
-
-  let stats;
-  try {
-    stats = lstatSync(path, { bigint: true });
-  } catch {
-    entries.push(`${path}\0missing`);
-    return false;
-  }
-
-  if (stats.isDirectory()) {
-    entries.push(`${path}\0dir`);
-    let names = [];
-    try {
-      names = readdirSync(path, { withFileTypes: true })
-        .map((entry) => entry.name)
-        .sort();
-    } catch {
-      return true;
-    }
-    for (const name of names) {
-      appendWatchSignatureEntries(join(path, name), entries, { ignorePath });
-    }
-    return true;
-  }
-
-  if (stats.isFile() || stats.isSymbolicLink()) {
-    entries.push(`${path}\0file\0${stats.size}\0${stats.mtimeNs}`);
-    return true;
-  }
-
-  entries.push(`${path}\0other\0${stats.mtimeNs}`);
-  return true;
-}
-
-export function readDevReloadWatchChangeSignature(paths, { ignorePath = null } = {}) {
-  const entries = [];
-  let observed = false;
-  for (const path of paths) {
-    observed = appendWatchSignatureEntries(path, entries, { ignorePath }) || observed;
-  }
-  return observed ? entries.join('\n') : null;
-}
 
 function normalizeDescriptors(descriptors) {
   const byId = new Map();
@@ -63,44 +27,55 @@ function normalizeDescriptors(descriptors) {
       byId.set(descriptor.id, {
         ...descriptor,
         paths,
-        readSignatures: [descriptor.readSignature].filter((reader) => typeof reader === 'function'),
       });
       continue;
     }
 
     const mergedPaths = Array.from(new Set([...existing.paths, ...paths]));
-    const readers = [
-      ...(Array.isArray(existing.readSignatures) ? existing.readSignatures : [existing.readSignature]),
-      descriptor.readSignature,
-    ].filter((reader) => typeof reader === 'function');
     byId.set(descriptor.id, {
       ...existing,
       target: existing.target === 'shared' || descriptor.target === 'shared' ? 'shared' : existing.target,
       paths: mergedPaths,
-      readSignatures: readers,
-      readSignature: () => readers.length
-        ? readers.map((reader) => reader()).join('\n')
-        : readDevReloadWatchChangeSignature(mergedPaths),
+      readSignature: () => readDevReloadWatchChangeSignature(mergedPaths, {
+        ignorePath: isDevRuntimeReloadIgnoredPath,
+      }),
+      readSignatureAsync: () => readDevReloadWatchChangeSignatureAsync(mergedPaths, {
+        ignorePath: isDevRuntimeReloadIgnoredPath,
+      }),
     });
   }
   return Array.from(byId.values());
 }
 
-function readDescriptorSignatures(descriptors) {
-  const signatures = new Map();
-  for (const descriptor of descriptors) {
-    let signature = null;
+async function readDescriptorSignaturesAsync(descriptors) {
+  const pairs = await Promise.all(descriptors.map(async (descriptor) => {
     try {
-      signature =
-        typeof descriptor.readSignature === 'function'
+      const signature = typeof descriptor.readSignatureAsync === 'function'
+        ? await descriptor.readSignatureAsync(descriptor)
+        : typeof descriptor.readSignature === 'function'
           ? descriptor.readSignature(descriptor)
-          : readDevReloadWatchChangeSignature(descriptor.paths);
+          : await readDevReloadWatchChangeSignatureAsync(descriptor.paths, {
+            ignorePath: isDevRuntimeReloadIgnoredPath,
+          });
+      return [descriptor.id, signature ?? null];
     } catch (error) {
-      signature = `error:${error instanceof Error ? error.message : String(error)}`;
+      return [descriptor.id, `error:${error instanceof Error ? error.message : String(error)}`];
     }
-    signatures.set(descriptor.id, signature ?? null);
-  }
-  return signatures;
+  }));
+  return new Map(pairs);
+}
+
+function createSingleFlightSampler(readSample) {
+  let inFlight = null;
+  return () => {
+    if (inFlight) return inFlight;
+    const sample = readSample();
+    inFlight = sample;
+    void sample.finally(() => {
+      if (inFlight === sample) inFlight = null;
+    });
+    return sample;
+  };
 }
 
 function serializeDescriptorSignatures(descriptors, signatures) {
@@ -112,10 +87,19 @@ function serializeDescriptorSignatures(descriptors, signatures) {
 function classifyChangedTargets({ descriptors, previous, next, executorsByTarget }) {
   const targets = new Set();
   const changedDescriptors = [];
+  let descriptorEvidenceConclusive = true;
 
   for (const descriptor of descriptors) {
     const before = previous.get(descriptor.id) ?? null;
     const after = next.get(descriptor.id) ?? null;
+    if (
+      typeof before !== 'string'
+      || typeof after !== 'string'
+      || before.startsWith('error:')
+      || after.startsWith('error:')
+    ) {
+      descriptorEvidenceConclusive = false;
+    }
     if (before === after) continue;
     changedDescriptors.push(descriptor.id);
     if (descriptor.target === 'shared') {
@@ -127,7 +111,11 @@ function classifyChangedTargets({ descriptors, previous, next, executorsByTarget
     }
   }
 
-  return { targets: RESTART_ORDER.filter((target) => targets.has(target)), changedDescriptors };
+  return {
+    targets: RESTART_ORDER.filter((target) => targets.has(target)),
+    changedDescriptors,
+    descriptorEvidenceConclusive,
+  };
 }
 
 function createExecutorMap(executors) {
@@ -154,6 +142,8 @@ export function startDevReloadCoordinator({
   logger = console,
 } = {}, {
   watchDebouncedImpl = watchDebounced,
+  setTimeoutImpl = setTimeout,
+  clearTimeoutImpl = clearTimeout,
 } = {}) {
   if (!enabled) {
     logger.log?.('[local] watch: reload coordinator disabled.');
@@ -178,97 +168,375 @@ export function startDevReloadCoordinator({
     logger.warn?.('[local] watch: reload coordinator has no watch paths; watcher not started.');
     return null;
   }
+  const descriptorIdsByWatchPath = new Map();
+  for (const descriptor of normalizedDescriptors) {
+    for (const path of descriptor.paths) {
+      const watchPath = resolve(path);
+      const ids = descriptorIdsByWatchPath.get(watchPath) ?? new Set();
+      ids.add(descriptor.id);
+      descriptorIdsByWatchPath.set(watchPath, ids);
+    }
+  }
 
-  let lastSignatures = readDescriptorSignatures(normalizedDescriptors);
+  const sampleSignatures = createSingleFlightSampler(
+    () => readDescriptorSignaturesAsync(normalizedDescriptors),
+  );
+  let lastSignatures = null;
+  let initialSignaturesPromise = sampleSignatures();
   let inFlight = false;
+  let inFlightPromise = null;
   let pending = false;
   let cycle = 0;
+  let retryTimer = null;
+  let retryTimerGeneration = 0;
+  let retryEpisodeSignature = null;
+  let retryEpisodeState = 'initial';
+  let admittedSignature = null;
+  const forcedTargets = new Set();
+  const signatureInitializationPendingDescriptorIds = new Set();
+  let signatureInitializationFallbackAll = false;
+  let closed = false;
+
+  const recordSignatureInitializationEvent = (event) => {
+    if (event?.signatureInitializedAtObservation !== false) return;
+    const watchPath = typeof event?.watchPath === 'string' && event.watchPath
+      ? resolve(event.watchPath)
+      : null;
+    const descriptorIds = watchPath ? descriptorIdsByWatchPath.get(watchPath) : null;
+    if (!descriptorIds?.size) {
+      signatureInitializationFallbackAll = true;
+      return;
+    }
+    for (const descriptorId of descriptorIds) {
+      signatureInitializationPendingDescriptorIds.add(descriptorId);
+    }
+  };
+
+  const clearScheduledRetry = () => {
+    if (!retryTimer) return;
+    clearTimeoutImpl(retryTimer);
+    retryTimer = null;
+    retryTimerGeneration += 1;
+  };
+
+  const scheduleRetry = (error) => {
+    const delayMs = Number(error?.reloadRetryAfterMs);
+    if (
+      closed
+      || !Number.isFinite(delayMs)
+      || delayMs <= 0
+      || retryTimer
+      || retryEpisodeState !== 'initial'
+      || isShuttingDown?.()
+    ) return false;
+    const scheduledEpisodeSignature = retryEpisodeSignature;
+    const scheduledGeneration = retryTimerGeneration + 1;
+    retryTimerGeneration = scheduledGeneration;
+    retryTimer = setTimeoutImpl(() => {
+      if (
+        closed
+        || scheduledGeneration !== retryTimerGeneration
+        || scheduledEpisodeSignature !== retryEpisodeSignature
+      ) return undefined;
+      retryTimer = null;
+      retryEpisodeState = 'retrying';
+      return onChange({ eventType: 'retry', filename: null });
+    }, Math.trunc(delayMs));
+    retryTimer?.unref?.();
+    retryEpisodeState = 'scheduled';
+    logger.warn?.(`[local] watch: reload will retry in ${Math.trunc(delayMs)}ms without waiting for another edit.`);
+    return true;
+  };
 
   const runCycle = async () => {
-    if (isShuttingDown?.()) return;
+    if (closed || isShuttingDown?.()) return;
 
-    const nextSignatures = readDescriptorSignatures(normalizedDescriptors);
-    const { targets, changedDescriptors } = classifyChangedTargets({
+    if (!lastSignatures) {
+      lastSignatures = await initialSignaturesPromise;
+      initialSignaturesPromise = null;
+      if (closed || isShuttingDown?.()) return;
+    }
+
+    const nextSignatures = await sampleSignatures();
+    if (closed || isShuttingDown?.()) return;
+    const forcedTargetsForCycle = new Set(forcedTargets);
+    forcedTargets.clear();
+    let { targets, changedDescriptors, descriptorEvidenceConclusive } = classifyChangedTargets({
       descriptors: normalizedDescriptors,
       previous: lastSignatures,
       next: nextSignatures,
       executorsByTarget,
     });
+    if (forcedTargetsForCycle.size) {
+      const targetSet = new Set(targets);
+      for (const target of forcedTargetsForCycle) targetSet.add(target);
+      targets = RESTART_ORDER.filter((target) => targetSet.has(target));
+    }
+    if (signatureInitializationFallbackAll || signatureInitializationPendingDescriptorIds.size) {
+      descriptorEvidenceConclusive = false;
+      const forcedDescriptors = signatureInitializationFallbackAll
+        ? normalizedDescriptors
+        : normalizedDescriptors.filter((descriptor) => (
+          signatureInitializationPendingDescriptorIds.has(descriptor.id)
+        ));
+      const changedDescriptorIds = new Set(changedDescriptors);
+      const changedTargets = new Set(targets);
+      for (const descriptor of forcedDescriptors) {
+        changedDescriptorIds.add(descriptor.id);
+        if (descriptor.target === 'shared') {
+          for (const target of RESTART_ORDER) {
+            if (executorsByTarget.has(target)) changedTargets.add(target);
+          }
+        } else if (executorsByTarget.has(descriptor.target)) {
+          changedTargets.add(descriptor.target);
+        }
+      }
+      targets = RESTART_ORDER.filter((target) => changedTargets.has(target));
+      changedDescriptors = normalizedDescriptors
+        .filter((descriptor) => changedDescriptorIds.has(descriptor.id))
+        .map((descriptor) => descriptor.id);
+    }
     if (!targets.length) {
       logger.log?.('[local] watch: event produced no signature delta; no reload scheduled.');
       lastSignatures = nextSignatures;
       return;
     }
 
+    const episodeSignature = serializeDescriptorSignatures(normalizedDescriptors, nextSignatures);
+    if (retryEpisodeSignature !== episodeSignature) {
+      clearScheduledRetry();
+      retryEpisodeSignature = episodeSignature;
+      retryEpisodeState = 'initial';
+    } else if (retryEpisodeState === 'scheduled' || retryEpisodeState === 'consumed') {
+      logger.log?.('[local] watch: unchanged reload episode already has its bounded retry disposition.');
+      return;
+    }
+    admittedSignature = episodeSignature;
+
     cycle += 1;
     const context = {
       cycle,
+      generation: cycle,
       targets,
       changedDescriptors,
+      descriptorEvidenceConclusive,
       signatures: nextSignatures,
+      reloadPlans: {},
+    };
+    const transitionEmitter = targets
+      .map((target) => executorsByTarget.get(target))
+      .find((executor) => typeof executor?.emitTransitionEvent === 'function');
+    try {
+      transitionEmitter?.emitTransitionEvent('source_generation_admitted', {
+        generation: context.generation,
+        changedDescriptors: [...changedDescriptors],
+        targets: [...targets],
+      });
+    } catch {
+      // Observability must not become reload authority.
+    }
+    let staleGenerationLogged = false;
+    context.revalidateGeneration = async () => {
+      if (closed || isShuttingDown?.()) return false;
+      const currentSignatures = await sampleSignatures();
+      const current = !closed
+        && !isShuttingDown?.()
+        && !pending
+        && serializeDescriptorSignatures(normalizedDescriptors, currentSignatures)
+          === serializeDescriptorSignatures(normalizedDescriptors, nextSignatures);
+      if (!current) {
+        pending = true;
+        if (!staleGenerationLogged) {
+          staleGenerationLogged = true;
+          logger.log?.(`[local] watch: reload generation ${context.generation} became stale; replanning.`);
+        }
+      }
+      return current;
     };
 
+    for (const target of targets) {
+      const executor = executorsByTarget.get(target);
+      const plan = executor?.createPlan?.(context);
+      if (plan) context.reloadPlans[target] = plan;
+      await executor?.publishLifecycle?.({ phase: 'planned', plan });
+    }
+
+    const supersededColdStartTargets = new Set();
     try {
       const restartTargets = [];
       for (const target of targets) {
-        if (isShuttingDown?.()) return;
+        if (closed || isShuttingDown?.()) return;
         const result = await executorsByTarget.get(target)?.build?.(context);
+        if (result?.allowSupersededColdStart === true) {
+          supersededColdStartTargets.add(target);
+        }
         if (result?.skipped === true) continue;
         restartTargets.push(target);
       }
       context.restartTargets = restartTargets;
     } catch (error) {
+      for (const target of targets) {
+        const executor = executorsByTarget.get(target);
+        await executor?.publishLifecycle?.({
+          phase: 'blocked',
+          plan: context.reloadPlans?.[target] ?? null,
+          disposition: { code: 'build_failed' },
+        });
+      }
       logger.error?.('[local] watch: reload build/preflight failed; keeping existing services running.');
       logger.error?.(formatError(error));
       return;
     }
 
-    if (isShuttingDown?.()) return;
+    if (!await context.revalidateGeneration()) {
+      const canceledTargets = targets.filter((target) => (
+        !supersededColdStartTargets.has(target)
+      ));
+      for (const target of canceledTargets) {
+        try {
+          await executorsByTarget.get(target)?.publishLifecycle?.({ phase: 'idle' });
+        } catch (projectionError) {
+          logger.error?.(
+            `[local] watch: ${target} reload was superseded, but its idle lifecycle projection needs attention.`,
+          );
+          logger.error?.(formatError(projectionError));
+        }
+      }
+      context.restartTargets = (context.restartTargets ?? []).filter((target) => (
+        supersededColdStartTargets.has(target)
+      ));
+      if (!context.restartTargets.length) return;
+    }
+
+    if (closed || isShuttingDown?.()) return;
 
     for (const target of context.restartTargets ?? targets) {
       try {
-        if (isShuttingDown?.()) return;
-        await executorsByTarget.get(target)?.restart?.(context);
+        if (closed || isShuttingDown?.()) return;
+        const executor = executorsByTarget.get(target);
+        const result = await executor?.restart?.(context);
+        if (result?.skipped === true && result?.reason === 'backoff') {
+          const remainingMs = Number(result.retryAfterMs);
+          const error = new Error(`[local] watch: ${target} reload remains deferred by its failure backoff.`);
+          error.code = 'ERELOADBACKOFF';
+          if (Number.isFinite(remainingMs) && remainingMs > 0) {
+            error.reloadRetryAfterMs = remainingMs;
+          }
+          throw error;
+        }
+        if (!await context.revalidateGeneration()) return;
       } catch (error) {
-        logger.error?.(`[local] watch: ${target} reload failed; keeping coordinator alive (will retry on next change).`);
+        const executor = executorsByTarget.get(target);
+        const plan = context.reloadPlans?.[target] ?? null;
+        const retryScheduled = scheduleRetry(error);
+        retryEpisodeState = retryScheduled ? 'scheduled' : 'consumed';
+        const retryAfterMs = retryScheduled ? Math.trunc(Number(error?.reloadRetryAfterMs)) : null;
+        try {
+          if (typeof executor?.publishFailureDisposition === 'function') {
+            await executor.publishFailureDisposition({ error, plan, retryScheduled, retryAfterMs });
+          } else if (retryScheduled) {
+            await executor?.publishLifecycle?.({ phase: 'retry-scheduled', plan, retryAfterMs });
+          }
+        } catch (projectionError) {
+          logger.error?.(
+            `[local] watch: ${retryScheduled ? 'retry is scheduled' : 'reload failure is terminal'}, ` +
+              'but lifecycle projection needs attention.',
+          );
+          logger.error?.(formatError(projectionError));
+        }
+        logger.error?.(
+          `[local] watch: ${target} reload failed; keeping coordinator alive ` +
+            (retryScheduled ? '(bounded retry scheduled).' : '(will retry on next change).')
+        );
         logger.error?.(formatError(error));
         return;
       }
     }
 
     lastSignatures = nextSignatures;
+    signatureInitializationPendingDescriptorIds.clear();
+    signatureInitializationFallbackAll = false;
+    clearScheduledRetry();
+    retryEpisodeSignature = null;
+    retryEpisodeState = 'initial';
   };
 
-  const onChange = async () => {
-    if (isShuttingDown?.()) return;
+  const shouldObserve = (event) => (
+    !isDevRuntimeReloadIgnoredPath(event?.filename)
+    && !(event?.eventType === 'poll' && event?.signature === admittedSignature)
+  );
+
+  const onChange = (event) => {
+    if (closed || isShuttingDown?.()) return;
+    if (!shouldObserve(event)) return;
+    if (executorsByTarget.has(event?.forcedTarget)) forcedTargets.add(event.forcedTarget);
+    recordSignatureInitializationEvent(event);
     if (inFlight) {
-      pending = true;
+      if (event?.observationHandled !== true) pending = true;
       return;
     }
 
     inFlight = true;
-    try {
-      do {
-        pending = false;
-        await runCycle();
-      } while (pending && !isShuttingDown?.());
-    } catch (error) {
-      logger.error?.('[local] watch: unexpected reload coordinator error (continuing):');
-      logger.error?.(formatError(error));
-    } finally {
-      inFlight = false;
-    }
+    inFlightPromise = (async () => {
+      try {
+        do {
+          pending = false;
+          await runCycle();
+        } while (pending && !closed && !isShuttingDown?.());
+      } catch (error) {
+        logger.error?.('[local] watch: unexpected reload coordinator error (continuing):');
+        logger.error?.(formatError(error));
+      } finally {
+        inFlight = false;
+        inFlightPromise = null;
+      }
+    })();
+    return inFlightPromise;
   };
 
-  return watchDebouncedImpl({
+  const onObservation = (event) => {
+    if (closed || isShuttingDown?.()) return false;
+    if (!shouldObserve(event)) return false;
+    recordSignatureInitializationEvent(event);
+    if (!inFlight) return false;
+    pending = true;
+    return true;
+  };
+
+  const watcher = watchDebouncedImpl({
     paths: watchPaths,
     debounceMs,
+    shouldObserve,
+    onObservation,
     onChange,
     pollIntervalMs,
     logger,
-    readSignature: () => serializeDescriptorSignatures(
+    readSignature: async () => serializeDescriptorSignatures(
       normalizedDescriptors,
-      readDescriptorSignatures(normalizedDescriptors),
+      await sampleSignatures(),
     ),
   });
+  if (!watcher) return null;
+  for (const [target, executor] of executorsByTarget) {
+    executor?.setUnexpectedExitHandler?.((event) => onChange({
+      eventType: 'active-exit',
+      filename: null,
+      forcedTarget: target,
+      activeExit: event,
+    }));
+  }
+  return {
+    ...watcher,
+    async close() {
+      if (closed) return await inFlightPromise;
+      closed = true;
+      clearScheduledRetry();
+      forcedTargets.clear();
+      for (const executor of executorsByTarget.values()) executor?.setUnexpectedExitHandler?.(null);
+      signatureInitializationPendingDescriptorIds.clear();
+      signatureInitializationFallbackAll = false;
+      watcher.close?.();
+      await inFlightPromise;
+    },
+  };
 }

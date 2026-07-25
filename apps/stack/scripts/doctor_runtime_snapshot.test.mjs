@@ -30,9 +30,10 @@ test('doctor --json reports the active runtime snapshot', async (t) => {
   assert.equal(parsed.runtime.activeSnapshotId, 'snap-1');
   assert.equal(parsed.runtime.snapshotPath, fixture.snapshotDir);
   assert.equal(parsed.runtime.mode, 'prefer');
-  assert.equal(parsed.uiBuildDir, join(fixture.stackDir, 'runtime', 'current', 'ui'));
+  assert.equal(parsed.uiBuildDir, join(fixture.snapshotDir, 'ui'));
+  assert.notEqual(parsed.uiBuildDir, join(fixture.stackDir, 'runtime', 'current', 'ui'));
   assert.equal(parsed.checks.uiBuildDir?.ok, true);
-  assert.equal(parsed.checks.uiBuildDir?.path, join(fixture.stackDir, 'runtime', 'current', 'ui'));
+  assert.equal(parsed.checks.uiBuildDir?.path, join(fixture.snapshotDir, 'ui'));
 });
 
 test('doctor --json reports invalid active runtime snapshots even in prefer mode', async (t) => {

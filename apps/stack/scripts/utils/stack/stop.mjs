@@ -3,10 +3,15 @@ import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { getComponentDir, resolveExplicitStackEnvFilePath } from '../paths/paths.mjs';
-import { isPidAlive, killPid, readPidState } from '../expo/expo.mjs';
+import { isPidAlive, readPidState } from '../expo/expo.mjs';
 import { stopLocalDaemon } from '../../daemon.mjs';
 import { stopHappyServerManagedInfra } from '../server/infra/happy_server_infra.mjs';
-import { deleteStackRuntimeStateFile, readStackRuntimeStateFile, recordStackRuntimeStopRequest } from './runtime_state.mjs';
+import {
+  finalizeStackRuntimeStop,
+  readStackRuntimeStateFile,
+  recordStackRuntimeStopRequest,
+  withStackRuntimeStopTransaction,
+} from './runtime_state.mjs';
 import {
   getProcessGroupId,
   getPsEnvLine,
@@ -14,12 +19,19 @@ import {
   killProcessGroupOwnedByStack,
   listPidsWithEnvNeedles,
   listPidsWithEnvNeedlesAndEnvBindingNames,
+  observePsEnvLine,
   readStackProcessKindFromEnvLine,
   textContainsEnvBindingName,
   textContainsNeedle,
 } from '../proc/ownership.mjs';
-import { terminateProcessGroup } from '../proc/terminate.mjs';
+import { terminateProcessGroup, terminateProcessPid } from '../proc/terminate.mjs';
+import {
+  processInstanceFingerprintMatches,
+  readProcessInstanceFingerprintSync,
+} from '@happier-dev/cli-common/processInstance';
+import { withJsonOwnerFileLock } from '../proc/jsonOwnerFileLock.mjs';
 import { coercePort } from '../server/port.mjs';
+import { resolveServerShutdownGraceMs } from '../server/shutdown_grace.mjs';
 import { daemonControlPost, readDaemonControlState } from './daemonControlClient.mjs';
 
 function resolveServerComponentFromStackEnv(env) {
@@ -33,19 +45,24 @@ function normalizeRuntimePid(pid) {
   return Number.isFinite(n) && n > 1 ? n : null;
 }
 
-function getRuntimeProcessEntries(processes) {
+function getRuntimeProcessEntries(processes, processInstances = {}) {
   const entries = [];
   const seen = new Set();
   const source = processes && typeof processes === 'object' ? processes : {};
   for (const [key, rawValue] of Object.entries(source)) {
     const values = Array.isArray(rawValue) ? rawValue : [rawValue];
-    for (const rawPid of values) {
+    for (const [index, rawPid] of values.entries()) {
       const pid = normalizeRuntimePid(rawPid);
       if (!pid) continue;
       const id = `${key}:${pid}`;
       if (seen.has(id)) continue;
       seen.add(id);
-      entries.push({ key, pid });
+      const identityValue = processInstances?.[key];
+      const identity = Array.isArray(identityValue) ? identityValue[index] : identityValue;
+      const processInstanceFingerprint = Number(identity?.pid) === pid
+        ? String(identity?.fingerprint ?? '').trim() || null
+        : null;
+      entries.push({ key, pid, processInstanceFingerprint });
     }
   }
   return entries;
@@ -66,6 +83,14 @@ function isDaemonRuntimeProcessKey(key) {
   return key === 'daemonPid' || key === 'daemonPids';
 }
 
+function isServerRuntimeProcessKey(key) {
+  return key === 'serverPid'
+    || key === 'serverWrapperPid'
+    || key === 'happierServerBackendPid'
+    || key === 'serverBackendPid'
+    || key === 'serverDrainingPid';
+}
+
 function isEphemeralRuntimeFallbackKillAllowed(line, stackName) {
   if (!line || !textContainsNeedle(line, `HAPPIER_STACK_STACK=${stackName}`)) {
     return false;
@@ -79,6 +104,54 @@ function isEphemeralRuntimeFallbackKillAllowed(line, stackName) {
     textContainsNeedle(line, 'npm_package_name=@happier-dev/server') &&
     textContainsEnvBindingName(line, 'npm_lifecycle_event')
   );
+}
+
+function normalizeCleanupResults(results) {
+  const normalized = [];
+  const pidIndexes = new Map();
+  for (const result of results) {
+    const pid = normalizeRuntimePid(result?.pid);
+    if (!pid) {
+      normalized.push(result);
+      continue;
+    }
+    const existingIndex = pidIndexes.get(pid);
+    if (existingIndex == null) {
+      pidIndexes.set(pid, normalized.length);
+      normalized.push(result);
+    } else {
+      normalized[existingIndex] = result;
+    }
+  }
+  return normalized;
+}
+
+const DEFINITIVE_NOT_OWNED_REASONS = new Set([
+  'not_owned',
+  'session_process_kind',
+  'stack_name_mismatch',
+  'missing_process_env',
+  'process-not-found',
+]);
+
+async function requestLifecycleOwnerShutdown(pid, {
+  stackName,
+  envPath,
+  cliHomeDir,
+  processInstanceFingerprint,
+  json,
+  serverShutdownGraceMs,
+}) {
+  return await killPidOwnedByStack(pid, {
+    stackName,
+    envPath,
+    cliHomeDir,
+    processInstanceFingerprint,
+    label: 'runner',
+    json,
+    signal: 'SIGTERM',
+    graceMs: serverShutdownGraceMs,
+  });
 }
 
 async function stopDaemonTrackedSessions({ cliHomeDir, serverUrl, env, stackName, json }) {
@@ -128,7 +201,17 @@ async function stopDaemonTrackedSessions({ cliHomeDir, serverUrl, env, stackName
   return { ok: true, skipped: false, stoppedSessionIds };
 }
 
-async function stopExpoStateDir({ stackName, baseDir, kind, stateFileName, envPath, json }) {
+async function stopExpoStateDir({
+  stackName,
+  baseDir,
+  kind,
+  stateFileName,
+  envPath,
+  json,
+  cleanupResults,
+  confirmedCleanupPids,
+  killProcessGroupOwnedByStackImpl,
+}) {
   const root = join(baseDir, kind);
   let entries = [];
   try {
@@ -147,6 +230,7 @@ async function stopExpoStateDir({ stackName, baseDir, kind, stateFileName, envPa
     const pid = Number(state.pid);
 
     if (!Number.isFinite(pid) || pid <= 1) continue;
+    if (confirmedCleanupPids?.has(pid)) continue;
     if (!isPidAlive(pid)) continue;
 
     if (!json) {
@@ -154,13 +238,139 @@ async function stopExpoStateDir({ stackName, baseDir, kind, stateFileName, envPa
       console.log(`[stack] stopping ${kind} (pid=${pid}) for ${stackName}`);
     }
     // eslint-disable-next-line no-await-in-loop
-    await killProcessGroupOwnedByStack(pid, { stackName, envPath, label: kind, json });
-    killed.push({ pid, port: null, statePath });
+    const result = await killProcessGroupOwnedByStackImpl(pid, { stackName, envPath, label: kind, json });
+    if (result?.killed === true) {
+      cleanupResults.push({ ok: true, step: kind, pid, reason: result.reason ?? 'killed' });
+      confirmedCleanupPids?.add(pid);
+      killed.push({ pid, port: null, statePath });
+    } else if (!DEFINITIVE_NOT_OWNED_REASONS.has(result?.reason)) {
+      cleanupResults.push({ ok: false, step: kind, pid, reason: result?.reason ?? 'cleanup_unconfirmed' });
+    }
   }
   return killed;
 }
 
-export async function stopStackWithEnv({
+export function resolveStackCleanupExecutorLockPath(baseDir) {
+  const root = String(baseDir ?? '').trim();
+  if (!root) throw new Error('resolveStackCleanupExecutorLockPath requires baseDir');
+  return join(root, 'stack.cleanup-executor.lock');
+}
+
+async function withStackCleanupExecutorLock(input, dependencies, fn) {
+  const lockOptions = dependencies.cleanupExecutorLockOptions ?? {};
+  const lockPath = lockOptions.lockPath ?? resolveStackCleanupExecutorLockPath(input.baseDir);
+  const timeoutMs = lockOptions.timeoutMs ?? 300_000;
+  return await withJsonOwnerFileLock(fn, {
+    lockPath,
+    timeoutMs,
+    pollIntervalMs: lockOptions.pollIntervalMs ?? 125,
+    staleAfterMs: lockOptions.staleAfterMs ?? Math.max(60_000, timeoutMs),
+    errorLabel: 'stack cleanup executor lock',
+    allowLiveOwnerStaleReclaim: true,
+    onWait: lockOptions.onWait,
+  });
+}
+
+export async function stopStackWithEnv(input = {}, dependencies = {}) {
+  return await withStackCleanupExecutorLock(input, dependencies, async () => {
+    return await stopStackWithEnvSerialized(input, dependencies);
+  });
+}
+
+export async function stopStackServiceWithEnv(input = {}, stopServiceImpl, dependencies = {}) {
+  if (typeof stopServiceImpl !== 'function') throw new Error('stopStackServiceWithEnv requires stopServiceImpl');
+  return await withStackCleanupExecutorLock(input, dependencies, async () => {
+    const runtimeStatePath = join(input.baseDir, 'stack.runtime.json');
+    const attribution = {
+      requestedBy: String(input.stopAttribution?.requestedBy ?? 'service stop'),
+      reason: String(input.stopAttribution?.reason ?? 'service lifecycle stop'),
+    };
+    await recordStackRuntimeStopRequest(runtimeStatePath, {
+      signal: 'SIGTERM',
+      requestedBy: attribution.requestedBy,
+      reason: attribution.reason,
+      preserveDaemon: input.preserveDaemon === true,
+    });
+    await stopServiceImpl();
+    const actions = await stopStackWithEnvSerialized({ ...input, stopAttribution: attribution }, dependencies);
+    if (actions.finalization?.finalized !== true) {
+      const error = new Error(`[stack] service cleanup is incomplete (${String(actions.finalization?.reason ?? 'unknown')})`);
+      error.code = 'ESTACKRUNTIMECLEANUPINCOMPLETE';
+      error.actions = actions;
+      throw error;
+    }
+    return actions;
+  });
+}
+
+export async function completeInterruptedStackStopBeforeStart(input = {}, dependencies = {}) {
+  const runtimeStatePath = join(input.baseDir, 'stack.runtime.json');
+  const observed = await readStackRuntimeStateFile(runtimeStatePath);
+  if (!observed?.stopRequest || typeof observed.stopRequest !== 'object') {
+    return { completed: false, reason: 'no_stop_request' };
+  }
+
+  return await withStackCleanupExecutorLock(input, dependencies, async ({ waited }) => {
+    const current = await readStackRuntimeStateFile(runtimeStatePath);
+    if (!current?.stopRequest || typeof current.stopRequest !== 'object') {
+      return { completed: true, reason: 'completed_by_active_cleanup', waited };
+    }
+    const ownerPid = normalizeRuntimePid(current.ownerPid);
+    const ownerStartedAt = String(current.startedAt ?? '').trim();
+    const stopRequest = current.stopRequest;
+    const actions = await stopStackWithEnvSerialized({
+      ...input,
+      preserveDaemon: stopRequest.preserveDaemon === true,
+      stopAttribution: {
+        requestedBy: String(stopRequest.requestedBy ?? 'startup cleanup continuation'),
+        reason: String(stopRequest.reason ?? 'complete interrupted stop before startup'),
+      },
+      ...(ownerPid && ownerStartedAt
+        ? { expectedOwnerPid: ownerPid, expectedOwnerStartedAt: ownerStartedAt }
+        : {}),
+    }, dependencies);
+    if (actions.finalization?.finalized !== true) {
+      const error = new Error(
+        `[stack] ${String(input.stackName ?? 'stack')} stop cleanup is incomplete (${String(actions.finalization?.reason ?? actions.stopAuthorization?.reason ?? 'unknown')})`,
+      );
+      error.code = 'ESTACKRUNTIMECLEANUPINCOMPLETE';
+      error.actions = actions;
+      throw error;
+    }
+    return { completed: true, waited, ...actions };
+  });
+}
+
+async function stopStackWithEnvSerialized(input = {}, dependencies = {}) {
+  if (input.expectedOwnerPid == null) {
+    return await stopStackWithEnvInternal(input, dependencies);
+  }
+  const resolvedStopAttribution = {
+    requestedBy: String(input.stopAttribution?.requestedBy ?? 'stack stop'),
+    reason: String(input.stopAttribution?.reason ?? persistentReason(input.aggressive, input.sweepOwned, input.autoSweep)),
+  };
+  const runtimeStatePath = join(input.baseDir, 'stack.runtime.json');
+  return await withStackRuntimeStopTransaction(runtimeStatePath, {
+    signal: 'SIGTERM',
+    requestedBy: resolvedStopAttribution.requestedBy,
+    reason: resolvedStopAttribution.reason,
+    preserveDaemon: input.preserveDaemon === true,
+    expectedOwnerPid: input.expectedOwnerPid,
+    expectedOwnerStartedAt: input.expectedOwnerStartedAt,
+  }, async (transaction) => {
+    const freshRequest = transaction.runtimeState?.stopRequest;
+    return await stopStackWithEnvInternal({
+      ...input,
+      preserveDaemon: transaction.preserveDaemon,
+      stopAttribution: freshRequest ? {
+        requestedBy: freshRequest.requestedBy,
+        reason: freshRequest.reason,
+      } : input.stopAttribution,
+    }, dependencies, transaction);
+  });
+}
+
+async function stopStackWithEnvInternal({
   rootDir,
   stackName,
   baseDir,
@@ -171,13 +381,31 @@ export async function stopStackWithEnv({
   sweepOwned = false,
   autoSweep = true,
   preserveDaemon = false,
-}) {
+  stopAttribution = null,
+  expectedOwnerPid = null,
+  expectedOwnerStartedAt = null,
+}, {
+  killProcessGroupOwnedByStackImpl = killProcessGroupOwnedByStack,
+  stopHappyServerManagedInfraImpl = stopHappyServerManagedInfra,
+  observePsEnvLineImpl = observePsEnvLine,
+  requestLifecycleOwnerShutdownImpl = requestLifecycleOwnerShutdown,
+  getProcessGroupIdImpl = getProcessGroupId,
+  readProcessInstanceFingerprintImpl = readProcessInstanceFingerprintSync,
+  terminateProcessPidImpl = terminateProcessPid,
+  terminateProcessGroupImpl = terminateProcessGroup,
+} = {}, runtimeStopTransaction = null) {
+  const resolvedStopAttribution = {
+    requestedBy: String(stopAttribution?.requestedBy ?? 'stack stop'),
+    reason: String(stopAttribution?.reason ?? persistentReason(aggressive, sweepOwned, autoSweep)),
+  };
   const actions = {
     stackName,
     baseDir,
     aggressive,
     sweepOwned,
     preserveDaemon,
+    stopAttribution: resolvedStopAttribution,
+    stopAuthorization: null,
     runner: null,
     daemonSessionsStopped: null,
     daemonStopped: false,
@@ -197,27 +425,80 @@ export async function stopStackWithEnv({
   const cliDir = getComponentDir(rootDir, 'happier-cli', env);
   const cliBin = join(cliDir, 'bin', 'happier.mjs');
   const envPath = resolveExplicitStackEnvFilePath(env);
-  const selfPgid = await getProcessGroupId(process.pid);
+  const selfPgid = await getProcessGroupIdImpl(process.pid);
+  const cleanupResults = [];
+  const confirmedCleanupPids = new Set();
+  const serverShutdownGraceMs = resolveServerShutdownGraceMs(env);
 
   // Preferred: stop stack-started processes (by PID) recorded in stack.runtime.json.
   // This is safer than killing whatever happens to listen on a port, and doesn't rely on the runner's shutdown handler.
   const runtimeStatePath = join(baseDir, 'stack.runtime.json');
-  const runtimeState = await readStackRuntimeStateFile(runtimeStatePath);
-  if (runtimeState) {
-    await recordStackRuntimeStopRequest(runtimeStatePath, {
-      signal: 'SIGTERM',
-      requestedBy: 'stack stop',
-      reason: persistentReason(aggressive, sweepOwned, autoSweep),
-      preserveDaemon,
-    }).catch(() => {});
+  let runtimeState = runtimeStopTransaction?.runtimeState ?? await readStackRuntimeStateFile(runtimeStatePath);
+  let expectedStopState = null;
+  if (runtimeStopTransaction || runtimeState || expectedOwnerPid != null) {
+    let stopTransaction = runtimeStopTransaction;
+    try {
+      if (!stopTransaction) stopTransaction = await recordStackRuntimeStopRequest(runtimeStatePath, {
+        signal: 'SIGTERM',
+        requestedBy: resolvedStopAttribution.requestedBy,
+        reason: resolvedStopAttribution.reason,
+        preserveDaemon,
+        expectedOwnerPid,
+        expectedOwnerStartedAt,
+      });
+    } catch (error) {
+      if (expectedOwnerPid != null) {
+        actions.stopAuthorization = { authorized: false, reason: 'authorization_failed' };
+        actions.errors.push({ step: 'stop-authorization', error: error instanceof Error ? error.message : String(error) });
+        return actions;
+      }
+    }
+    if (expectedOwnerPid != null && stopTransaction?.authorized !== true) {
+      actions.stopAuthorization = {
+        authorized: false,
+        reason: stopTransaction?.reason ?? 'authorization_failed',
+        expectedOwnerPid: Number(expectedOwnerPid),
+        expectedOwnerStartedAt: String(expectedOwnerStartedAt ?? '') || null,
+        currentOwnerPid: stopTransaction?.currentOwnerPid ?? null,
+        currentOwnerStartedAt: stopTransaction?.currentOwnerStartedAt ?? null,
+      };
+      return actions;
+    }
+    actions.stopAuthorization = stopTransaction
+      ? { authorized: stopTransaction.authorized !== false, reason: stopTransaction.reason ?? 'authorized' }
+      : null;
+    runtimeState = stopTransaction?.runtimeState ?? runtimeState;
+    expectedStopState = stopTransaction?.expected ?? null;
   }
   const runnerPid = Number(runtimeState?.ownerPid);
   const processes = runtimeState?.processes && typeof runtimeState.processes === 'object' ? runtimeState.processes : {};
+  const processInstances = runtimeState?.processInstances?.processes ?? {};
+  const ownerProcessInstanceFingerprint =
+    Number(runtimeState?.processInstances?.owner?.pid) === runnerPid
+      ? String(runtimeState?.processInstances?.owner?.fingerprint ?? '').trim() || null
+      : null;
 
-  // Kill known child processes first (process groups), then stop daemon, then stop runner.
+  // The trusted lifecycle owner receives the bounded shutdown request first. Child termination below
+  // is fallback cleanup only after that owner has had a chance to stop its own topology.
+  actions.runner = { stopped: false, pid: Number.isFinite(runnerPid) ? runnerPid : null, reason: runtimeState ? 'not_running_or_not_owned' : 'missing_state' };
+  if (Number.isFinite(runnerPid) && runnerPid > 1 && isPidAlive(runnerPid)) {
+    const res = await requestLifecycleOwnerShutdownImpl(runnerPid, {
+      stackName,
+      envPath,
+      cliHomeDir,
+      json,
+      serverShutdownGraceMs,
+      processInstanceFingerprint: ownerProcessInstanceFingerprint,
+    });
+    actions.runner = { stopped: res.killed, pid: runnerPid, reason: res.reason };
+    const definitivelyUnowned = DEFINITIVE_NOT_OWNED_REASONS.has(res?.reason);
+    cleanupResults.push({ ok: res.killed === true || definitivelyUnowned, step: 'lifecycle-owner', pid: runnerPid, reason: res.reason ?? 'cleanup_unconfirmed' });
+    if (res.killed === true) confirmedCleanupPids.add(runnerPid);
+  }
+
   const killedProcessPids = [];
   const visitedProcessPids = new Set();
-  for (const { key, pid } of getRuntimeProcessEntries(processes)) {
+  for (const { key, pid, processInstanceFingerprint } of getRuntimeProcessEntries(processes, processInstances)) {
     if (preserveDaemon && isDaemonRuntimeProcessKey(key)) {
       continue;
     }
@@ -226,9 +507,14 @@ export async function stopStackWithEnv({
     visitedProcessPids.add(pid);
     if (!isPidAlive(pid)) continue;
     // eslint-disable-next-line no-await-in-loop
-    const res = await killProcessGroupOwnedByStack(pid, { stackName, envPath, cliHomeDir, label: key, json });
+    const res = await killProcessGroupOwnedByStackImpl(pid, {
+      stackName, envPath, cliHomeDir, processInstanceFingerprint, label: key, json,
+      ...(isServerRuntimeProcessKey(key) ? { graceMs: serverShutdownGraceMs } : {}),
+    });
     if (res.killed) {
+      confirmedCleanupPids.add(pid);
       killedProcessPids.push({ key, pid, reason: res.reason, pgid: res.pgid ?? null });
+      cleanupResults.push({ ok: true, step: key, pid, reason: res.reason ?? 'killed' });
       continue;
     }
 
@@ -237,34 +523,83 @@ export async function stopStackWithEnv({
     // For ephemeral stacks, allow stopping runtime-recorded PIDs when the process environment still
     // proves the stack name, to avoid leaving orphaned servers/expo after quitting the TUI.
     if (runtimeState?.ephemeral && res.reason === 'not_owned') {
+      const fingerprintBeforeProof =
+        processInstanceFingerprint ?? readProcessInstanceFingerprintImpl(pid);
       // eslint-disable-next-line no-await-in-loop
       const line = await getPsEnvLine(pid);
       if (isEphemeralRuntimeFallbackKillAllowed(line, stackName)) {
+        const fingerprintAfterProof =
+          processInstanceFingerprint ?? readProcessInstanceFingerprintImpl(pid);
+        const exactProcessInstanceFingerprint = processInstanceFingerprint
+          ?? (
+            processInstanceFingerprintMatches(fingerprintBeforeProof, fingerprintAfterProof)
+              ? fingerprintBeforeProof
+              : null
+          );
+        if (!exactProcessInstanceFingerprint) {
+          cleanupResults.push({
+            ok: false,
+            step: key,
+            pid,
+            reason: fingerprintBeforeProof ? 'process_instance_mismatch' : 'process_instance_unavailable',
+          });
+          continue;
+        }
         // eslint-disable-next-line no-await-in-loop
-        const pgid = await getProcessGroupId(pid);
+        const pgid = await getProcessGroupIdImpl(pid);
         if (pgid) {
           if (selfPgid && pgid === selfPgid) {
             // Avoid killing the stop command / TUI manager itself when PGIDs are shared.
             // eslint-disable-next-line no-await-in-loop
-            await killPid(pid);
-            killedProcessPids.push({ key, pid, reason: 'killed_ephemeral_runtime_pid_only_same_pgid', pgid });
+            const terminated = await terminateProcessPidImpl(pid, {
+              graceMs: 800,
+              signal: 'SIGTERM',
+              processInstanceFingerprint: exactProcessInstanceFingerprint,
+            });
+            const stopped = terminated.ok === true;
+            if (stopped) {
+              killedProcessPids.push({ key, pid, reason: 'killed_ephemeral_runtime_pid_only_same_pgid', pgid });
+            }
+            if (stopped) confirmedCleanupPids.add(pid);
+            cleanupResults.push({ ok: stopped, step: key, pid, reason: stopped ? 'killed_ephemeral_runtime_pid_only_same_pgid' : 'pid_still_alive' });
             continue;
           }
           // eslint-disable-next-line no-await-in-loop
-          const terminated = await terminateProcessGroup(pgid, { graceMs: 800, signal: 'SIGTERM' });
+          const terminated = await terminateProcessGroupImpl(pgid, {
+            graceMs: 800,
+            signal: 'SIGTERM',
+            identityPid: pid,
+            processInstanceFingerprint: exactProcessInstanceFingerprint,
+          });
           if (terminated.ok) {
+            confirmedCleanupPids.add(pid);
             killedProcessPids.push({ key, pid, reason: 'killed_ephemeral_runtime_pgid', pgid });
+            cleanupResults.push({ ok: true, step: key, pid, reason: 'killed_ephemeral_runtime_pgid' });
             continue;
           }
         }
         // Fallback: kill the pid directly.
         // eslint-disable-next-line no-await-in-loop
-        await killPid(pid);
-        killedProcessPids.push({ key, pid, reason: 'killed_ephemeral_runtime_pid_only', pgid: pgid ?? null });
+        const terminated = await terminateProcessPidImpl(pid, {
+          graceMs: 800,
+          signal: 'SIGTERM',
+          processInstanceFingerprint: exactProcessInstanceFingerprint,
+        });
+        const stopped = terminated.ok === true;
+        if (stopped) {
+          killedProcessPids.push({ key, pid, reason: 'killed_ephemeral_runtime_pid_only', pgid: pgid ?? null });
+        }
+        if (stopped) confirmedCleanupPids.add(pid);
+        cleanupResults.push({ ok: stopped, step: key, pid, reason: stopped ? 'killed_ephemeral_runtime_pid_only' : 'pid_still_alive' });
+        continue;
       }
     }
+    if (DEFINITIVE_NOT_OWNED_REASONS.has(res?.reason)) {
+      cleanupResults.push({ ok: true, step: key, pid, reason: res.reason });
+      continue;
+    }
+    cleanupResults.push({ ok: false, step: key, pid, reason: res.reason ?? 'cleanup_unconfirmed' });
   }
-  actions.runner = { stopped: false, pid: Number.isFinite(runnerPid) ? runnerPid : null, reason: runtimeState ? 'not_running_or_not_owned' : 'missing_state' };
   actions.killedPorts = actions.killedPorts ?? [];
   actions.processes = { killed: killedProcessPids };
 
@@ -284,48 +619,45 @@ export async function stopStackWithEnv({
       // Stopping stack infra should still work without the daemon stop step.
       const cliDistIndex = join(cliDir, 'dist', 'index.mjs');
       if (existsSync(cliDistIndex)) {
-        await stopLocalDaemon({ cliBin, internalServerUrl, cliHomeDir });
+        await stopLocalDaemon({
+          cliBin,
+          internalServerUrl,
+          cliHomeDir,
+          runtimeStatePath: runtimeStopTransaction ? null : runtimeStatePath,
+          env,
+          stackName,
+          cliIdentity: String(env.HAPPIER_STACK_CLI_IDENTITY ?? '').trim() || 'default',
+        });
         actions.daemonStopped = true;
       }
     } catch (e) {
-      actions.errors.push({ step: 'daemon', error: e instanceof Error ? e.message : String(e) });
+      actions.errors.push({
+        step: 'daemon',
+        error: e instanceof Error ? e.message : String(e),
+        ...(typeof e?.code === 'string' ? { code: e.code } : {}),
+        ...(Number.isFinite(Number(e?.childPid)) ? { childPid: Number(e.childPid) } : {}),
+        ...(typeof e?.processGroupTerminated === 'boolean'
+          ? { processGroupTerminated: e.processGroupTerminated }
+          : {}),
+      });
     }
-  }
-
-  // Now stop the runner PID last (if it exists). This should clean up any remaining state files it owns.
-  if (Number.isFinite(runnerPid) && runnerPid > 1 && isPidAlive(runnerPid)) {
-    if (!json) {
-      // eslint-disable-next-line no-console
-      console.log(`[stack] stopping runner (pid=${runnerPid}) for ${stackName}`);
-    }
-    const res = await killPidOwnedByStack(runnerPid, { stackName, envPath, cliHomeDir, label: 'runner', json });
-    actions.runner = { stopped: res.killed, pid: runnerPid, reason: res.reason };
-  }
-
-  // Only delete runtime state if all runtime-tracked pids are confirmed stopped.
-  // This avoids losing the only reliable link between a stack and its infra pids.
-  const runtimeTrackedPids = [
-    normalizeRuntimePid(runnerPid),
-    ...getRuntimeProcessPids(processes),
-  ].filter(Boolean);
-  const anyRuntimePidAlive = runtimeTrackedPids.some((p) => isPidAlive(p));
-  if (!anyRuntimePidAlive) {
-    await deleteStackRuntimeStateFile(runtimeStatePath);
   }
 
   try {
-    actions.expoDev = await stopExpoStateDir({ stackName, baseDir, kind: 'expo-dev', stateFileName: 'expo.state.json', envPath, json });
+    actions.expoDev = await stopExpoStateDir({ stackName, baseDir, kind: 'expo-dev', stateFileName: 'expo.state.json', envPath, json, cleanupResults, confirmedCleanupPids, killProcessGroupOwnedByStackImpl });
   } catch (e) {
     actions.errors.push({ step: 'expo-dev', error: e instanceof Error ? e.message : String(e) });
+    cleanupResults.push({ ok: false, step: 'expo-dev', reason: 'cleanup_failed' });
   }
   try {
     // Legacy cleanups (best-effort): older runs used separate state dirs.
-    actions.uiDev = await stopExpoStateDir({ stackName, baseDir, kind: 'ui-dev', stateFileName: 'ui.state.json', envPath, json });
-    const killedDev = await stopExpoStateDir({ stackName, baseDir, kind: 'mobile-dev', stateFileName: 'mobile.state.json', envPath, json });
-    const killedLegacy = await stopExpoStateDir({ stackName, baseDir, kind: 'mobile', stateFileName: 'expo.state.json', envPath, json });
+    actions.uiDev = await stopExpoStateDir({ stackName, baseDir, kind: 'ui-dev', stateFileName: 'ui.state.json', envPath, json, cleanupResults, confirmedCleanupPids, killProcessGroupOwnedByStackImpl });
+    const killedDev = await stopExpoStateDir({ stackName, baseDir, kind: 'mobile-dev', stateFileName: 'mobile.state.json', envPath, json, cleanupResults, confirmedCleanupPids, killProcessGroupOwnedByStackImpl });
+    const killedLegacy = await stopExpoStateDir({ stackName, baseDir, kind: 'mobile', stateFileName: 'expo.state.json', envPath, json, cleanupResults, confirmedCleanupPids, killProcessGroupOwnedByStackImpl });
     actions.mobile = [...killedDev, ...killedLegacy];
   } catch (e) {
     actions.errors.push({ step: 'expo-mobile', error: e instanceof Error ? e.message : String(e) });
+    cleanupResults.push({ ok: false, step: 'expo-mobile', reason: 'cleanup_failed' });
   }
 
   // IMPORTANT:
@@ -336,9 +668,11 @@ export async function stopStackWithEnv({
   const managed = (env.HAPPIER_STACK_MANAGED_INFRA ?? '1').toString().trim() !== '0';
   if (!noDocker && serverComponent === 'happier-server' && managed) {
     try {
-      actions.infra = await stopHappyServerManagedInfra({ stackName, baseDir, removeVolumes: false });
+      actions.infra = await stopHappyServerManagedInfraImpl({ stackName, baseDir, removeVolumes: false });
+      cleanupResults.push({ ok: actions.infra?.ok === true, step: 'infra', reason: actions.infra?.reason ?? (actions.infra?.ok ? 'stopped' : 'cleanup_unconfirmed') });
     } catch (e) {
       actions.errors.push({ step: 'infra', error: e instanceof Error ? e.message : String(e) });
+      cleanupResults.push({ ok: false, step: 'infra', reason: 'cleanup_failed' });
     }
   } else {
     actions.infra = { ok: true, skipped: true, reason: noDocker ? 'no_docker' : 'not_managed_or_not_happier_server' };
@@ -377,33 +711,55 @@ export async function stopStackWithEnv({
     const preservedPids = preserveDaemon && daemonPids.length > 0 ? new Set(daemonPids) : null;
 
     const swept = [];
-    const sweepPidDirect = async (pid, reason) => {
-      const pgid = await getProcessGroupId(pid);
+    const sweepSkipped = [];
+    const sweepPidDirect = async (pid, reason, processInstanceFingerprint) => {
+      const pgid = await getProcessGroupIdImpl(pid);
       if (pgid) {
         if (selfPgid && pgid === selfPgid) {
-          await killPid(pid);
-          swept.push({ pid, reason: `${reason}_pid_only_same_pgid`, pgid });
-          return true;
+          const terminated = await terminateProcessPidImpl(pid, {
+            graceMs: 800,
+            signal: 'SIGTERM',
+            processInstanceFingerprint,
+          });
+          if (terminated.ok) swept.push({ pid, reason: `${reason}_pid_only_same_pgid`, pgid });
+          return terminated.ok;
         }
-        const terminated = await terminateProcessGroup(pgid, { graceMs: 800, signal: 'SIGTERM' });
+        const terminated = await terminateProcessGroupImpl(pgid, {
+          graceMs: 800,
+          signal: 'SIGTERM',
+          identityPid: pid,
+          processInstanceFingerprint,
+        });
         if (terminated.ok) {
           swept.push({ pid, reason, pgid });
           return true;
         }
       }
-      await killPid(pid);
-      swept.push({ pid, reason, pgid: pgid ?? null });
-      return true;
+      const terminated = await terminateProcessPidImpl(pid, {
+        graceMs: 800,
+        signal: 'SIGTERM',
+        processInstanceFingerprint,
+      });
+      if (terminated.ok) swept.push({ pid, reason, pgid: pgid ?? null });
+      return terminated.ok;
     };
 
     for (const pid of Array.from(new Set(pids))) {
       if (preservedPids?.has(pid)) continue;
+      if (confirmedCleanupPids.has(pid)) continue;
       if (!isPidAlive(pid)) continue;
       // eslint-disable-next-line no-await-in-loop
-      const res = await killProcessGroupOwnedByStack(pid, { stackName, envPath, cliHomeDir, label: 'sweep', json });
+      const res = await killProcessGroupOwnedByStackImpl(pid, { stackName, envPath, cliHomeDir, label: 'sweep', json });
       if (res.killed) {
+        confirmedCleanupPids.add(pid);
         swept.push({ pid, reason: res.reason, pgid: res.pgid ?? null });
       }
+      cleanupResults.push({
+        ok: res?.killed === true || DEFINITIVE_NOT_OWNED_REASONS.has(res?.reason),
+        step: 'sweep',
+        pid,
+        reason: res?.reason ?? 'cleanup_unconfirmed',
+      });
     }
 
     // Repo-local fallback: older stackless infra runs may have omitted HAPPIER_STACK_ENV_FILE.
@@ -421,21 +777,79 @@ export async function stopStackWithEnv({
         ...repoLocalNeedles,
         'npm_package_name=@happier-dev/server',
       ], ['npm_lifecycle_event']);
+      const repoLocalInfraPidSet = new Set(repoLocalInfraTagged);
+      const repoLocalLegacyPidSet = new Set(repoLocalLegacyServer);
       const repoLocalPids = [...new Set([...repoLocalInfraTagged, ...repoLocalLegacyServer])]
         .filter((pid) => pid !== process.pid)
         .filter((pid) => Number.isFinite(pid) && pid > 1);
       for (const pid of Array.from(new Set(repoLocalPids))) {
         if (preservedPids?.has(pid)) continue;
+        if (confirmedCleanupPids.has(pid)) continue;
         if (!isPidAlive(pid)) continue;
+        const fingerprintBeforeProof = readProcessInstanceFingerprintImpl(pid);
         // eslint-disable-next-line no-await-in-loop
-        const line = await getPsEnvLine(pid);
-        if (readStackProcessKindFromEnvLine(line) === 'session') continue;
+        const identity = await observePsEnvLineImpl(pid);
+        if (identity?.status !== 'ok' || !identity.line) {
+          const reason = identity?.reason ?? 'process-identity-inconclusive';
+          sweepSkipped.push({ pid, reason });
+          if (identity?.status !== 'not_found') {
+            cleanupResults.push({ ok: false, step: 'repo-local-sweep', pid, reason });
+          }
+          continue;
+        }
+        const line = identity.line;
+        const processKind = readStackProcessKindFromEnvLine(line);
+        const exactRepoIdentity = repoLocalNeedles.every((needle) => textContainsNeedle(line, needle));
+        const stillInfraTagged = repoLocalInfraPidSet.has(pid) && processKind === 'infra';
+        const stillLegacyServer = repoLocalLegacyPidSet.has(pid)
+          && textContainsNeedle(line, 'npm_package_name=@happier-dev/server')
+          && textContainsEnvBindingName(line, 'npm_lifecycle_event');
+        if (processKind === 'session' || !exactRepoIdentity || (!stillInfraTagged && !stillLegacyServer)) {
+          const reason = processKind === 'session' ? 'session_process_kind' : 'process_identity_mismatch';
+          sweepSkipped.push({ pid, reason });
+          continue;
+        }
+        const fingerprintAfterProof = readProcessInstanceFingerprintImpl(pid);
+        if (!fingerprintBeforeProof || !fingerprintAfterProof) {
+          const reason = 'process_instance_unavailable';
+          sweepSkipped.push({ pid, reason });
+          cleanupResults.push({ ok: false, step: 'repo-local-sweep', pid, reason });
+          continue;
+        }
+        if (!processInstanceFingerprintMatches(fingerprintBeforeProof, fingerprintAfterProof)) {
+          const reason = 'process_instance_mismatch';
+          sweepSkipped.push({ pid, reason });
+          cleanupResults.push({ ok: false, step: 'repo-local-sweep', pid, reason });
+          continue;
+        }
         // eslint-disable-next-line no-await-in-loop
-        await sweepPidDirect(pid, 'killed_repo_local_stackless_sweep');
+        const stopped = await sweepPidDirect(
+          pid,
+          'killed_repo_local_stackless_sweep',
+          fingerprintBeforeProof,
+        );
+        const confirmed = stopped === true && !isPidAlive(pid);
+        if (confirmed) confirmedCleanupPids.add(pid);
+        cleanupResults.push({ ok: confirmed, step: 'repo-local-sweep', pid, reason: confirmed ? 'killed_repo_local_stackless_sweep' : 'cleanup_unconfirmed' });
       }
     }
 
-    actions.sweep = { pids: swept, auto: shouldAutoSweep && !sweepOwned };
+    actions.sweep = { pids: swept, skipped: sweepSkipped, auto: shouldAutoSweep && !sweepOwned };
+  }
+
+  actions.finalization = await (runtimeStopTransaction
+    ? runtimeStopTransaction.finalize({ cleanupResults: normalizeCleanupResults(cleanupResults) })
+    : finalizeStackRuntimeStop(runtimeStatePath, {
+      expected: expectedStopState,
+      preserveDaemon,
+      cleanupResults: normalizeCleanupResults(cleanupResults),
+    })).catch((error) => ({ finalized: false, reason: 'finalization_failed', error: error instanceof Error ? error.message : String(error) }));
+  if (actions.finalization.reason === 'cleanup_incomplete' || actions.finalization.reason === 'finalization_failed') {
+    actions.errors.push({
+      step: 'runtime-finalization',
+      reason: actions.finalization.reason,
+      ...(actions.finalization.error ? { error: actions.finalization.error } : {}),
+    });
   }
 
   return actions;

@@ -12,8 +12,125 @@ import {
   startStackRuntimeDaemonPidReconciler,
   syncStackRuntimeDaemonPidFromDaemonState,
 } from './runtime_daemon_state.mjs';
+import { finalizeStackRuntimeStop, recordStackRuntimeStopRequest } from './runtime_state.mjs';
 
 const acceptAllStackOwnership = async () => ({ owned: true, reason: 'test_owned' });
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((resolvePromise) => { resolve = resolvePromise; });
+  return { promise, resolve };
+}
+
+for (const order of ['first-second', 'second-first']) {
+  test(`recordStackRuntimeDaemonPid commits concurrent add/add membership in ${order} order`, async (t) => {
+    const root = await mkdtemp(join(tmpdir(), 'hstack-runtime-daemon-add-add-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const statePath = join(root, 'stack.runtime.json');
+    await writeFile(statePath, JSON.stringify({ processes: {} }) + '\n', 'utf8');
+    const firstPid = order === 'first-second' ? 101 : 202;
+    const secondPid = firstPid === 101 ? 202 : 101;
+    const entered = deferred();
+    const release = deferred();
+    const eligible = async (pid) => {
+      if (pid === firstPid) {
+        entered.resolve();
+        await release.promise;
+      }
+      return true;
+    };
+
+    const first = recordStackRuntimeDaemonPid(statePath, firstPid, {
+      daemonDistFingerprint: `fingerprint-${firstPid}`,
+      isPidAliveImpl: () => true,
+      isDaemonPidEligibleImpl: eligible,
+    });
+    await entered.promise;
+    const second = recordStackRuntimeDaemonPid(statePath, secondPid, {
+      daemonDistFingerprint: `fingerprint-${secondPid}`,
+      isPidAliveImpl: () => true,
+      isDaemonPidEligibleImpl: eligible,
+    });
+    release.resolve();
+    await Promise.all([first, second]);
+
+    const state = JSON.parse(await readFile(statePath, 'utf8'));
+    assert.deepEqual(new Set(state.processes.daemonPids), new Set([101, 202]));
+    assert.equal(state.processes.daemonPid, secondPid);
+    assert.equal(state.daemon.distClosureFingerprint, `fingerprint-${secondPid}`);
+  });
+}
+
+for (const order of ['clear-add', 'add-clear']) {
+  test(`recordStackRuntimeDaemonPid commits concurrent ${order} membership without stale resurrection`, async (t) => {
+    const root = await mkdtemp(join(tmpdir(), 'hstack-runtime-daemon-clear-add-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const statePath = join(root, 'stack.runtime.json');
+    await writeFile(statePath, JSON.stringify({
+      processes: { daemonPid: 101, daemonPids: [101] },
+      daemon: { distClosureFingerprint: 'fingerprint-101' },
+    }) + '\n', 'utf8');
+    const entered = deferred();
+    const release = deferred();
+    let firstOperation = true;
+    const eligible = async (pid) => {
+      if (pid === 101 && firstOperation) {
+        firstOperation = false;
+        entered.resolve();
+        await release.promise;
+      }
+      return true;
+    };
+    const optionsFor = (fingerprint) => ({ daemonDistFingerprint: fingerprint, isPidAliveImpl: () => true, isDaemonPidEligibleImpl: eligible });
+    const first = order === 'clear-add'
+      ? recordStackRuntimeDaemonPid(statePath, null, optionsFor(null))
+      : recordStackRuntimeDaemonPid(statePath, 202, optionsFor('fingerprint-202'));
+    await entered.promise;
+    const second = order === 'clear-add'
+      ? recordStackRuntimeDaemonPid(statePath, 202, optionsFor('fingerprint-202'))
+      : recordStackRuntimeDaemonPid(statePath, null, optionsFor(null));
+    release.resolve();
+    await Promise.all([first, second]);
+
+    const state = JSON.parse(await readFile(statePath, 'utf8'));
+    if (order === 'clear-add') {
+      assert.deepEqual(state.processes.daemonPids, [202]);
+      assert.equal(state.processes.daemonPid, 202);
+      assert.equal(state.daemon.distClosureFingerprint, 'fingerprint-202');
+    } else {
+      assert.deepEqual(state.processes.daemonPids, []);
+      assert.equal(state.processes.daemonPid, null);
+      assert.equal(state.daemon.distClosureFingerprint, null);
+    }
+  });
+}
+
+test('stop finalizer racing daemon reconciliation preserves replacement membership', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hstack-runtime-finalizer-reconcile-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const statePath = join(root, 'stack.runtime.json');
+  await writeFile(statePath, JSON.stringify({ ownerPid: 500, processes: { daemonPid: 101, daemonPids: [101] }, daemon: { distClosureFingerprint: 'fingerprint-101' } }) + '\n', 'utf8');
+  const stop = await recordStackRuntimeStopRequest(statePath, {});
+  const entered = deferred();
+  const release = deferred();
+  const replacement = recordStackRuntimeDaemonPid(statePath, 202, {
+    daemonDistFingerprint: 'fingerprint-202',
+    isPidAliveImpl: () => true,
+    isDaemonPidEligibleImpl: async (pid) => {
+      if (pid === 101) { entered.resolve(); await release.promise; }
+      return true;
+    },
+  });
+  await entered.promise;
+  const finalizer = finalizeStackRuntimeStop(statePath, { expected: stop.expected });
+  release.resolve();
+  await replacement;
+  const result = await finalizer;
+  assert.equal(result.finalized, false);
+  const state = JSON.parse(await readFile(statePath, 'utf8'));
+  assert.equal(state.processes.daemonPid, 202);
+  assert.equal(state.daemon.distClosureFingerprint, 'fingerprint-202');
+});
 
 test('getObservedStackDaemon prefers daemon.state over stale runtime daemon pid', () => {
   const observed = getObservedStackDaemon(
@@ -92,6 +209,139 @@ test('getObservedStackDaemon reports live runtime daemonPids entries without mar
   assert.equal(observed.pid, 222);
   assert.equal(observed.source, 'runtime_pid');
   assert.equal(observed.status, 'stopped');
+});
+
+test('getObservedStackDaemon preserves a known-live unreachable daemon pid', () => {
+  const observed = getObservedStackDaemon(
+    {
+      cliHomeDir: '/tmp/stack-cli-home',
+      internalServerUrl: 'http://127.0.0.1:3009',
+      env: {},
+    },
+    {
+      checkDaemonStateImpl: () => ({ status: 'unreachable', pid: 333 }),
+      isPidAliveImpl: (pid) => Number(pid) === 333,
+    },
+  );
+
+  assert.equal(observed.running, false);
+  assert.equal(observed.pid, 333);
+  assert.equal(observed.source, 'daemon_state');
+  assert.equal(observed.status, 'unreachable');
+});
+
+test('syncStackRuntimeDaemonPidFromDaemonState preserves an ownership-eligible known-live unreachable daemon pid', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hstack-runtime-daemon-unreachable-'));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const runtimeStatePath = join(root, 'stack.runtime.json');
+  await writeFile(
+    runtimeStatePath,
+    JSON.stringify({
+      version: 1,
+      stackName: 'dev',
+      processes: {
+        daemonPid: 111,
+        daemonPids: [111],
+      },
+    }) + '\n',
+    'utf8',
+  );
+
+  const result = await syncStackRuntimeDaemonPidFromDaemonState(
+    {
+      runtimeStatePath,
+      cliHomeDir: join(root, 'cli'),
+      internalServerUrl: 'http://127.0.0.1:3009',
+      env: {},
+    },
+    {
+      checkDaemonStateImpl: () => ({ status: 'unreachable', pid: 333 }),
+      isPidAliveImpl: (pid) => Number(pid) === 333,
+      resolvePidStackOwnershipImpl: acceptAllStackOwnership,
+    },
+  );
+
+  assert.equal(result.running, false);
+  assert.equal(result.pid, 333);
+  assert.equal(result.source, 'daemon_state');
+  assert.equal(result.status, 'unreachable');
+
+  const runtime = JSON.parse(await readFile(runtimeStatePath, 'utf8'));
+  assert.equal(runtime?.processes?.daemonPid, 333);
+  assert.deepEqual(runtime?.processes?.daemonPids, [333]);
+});
+
+test('syncStackRuntimeDaemonPidFromDaemonState rejects an unowned unreachable pid and retains an eligible runtime fallback', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hstack-runtime-daemon-unreachable-unowned-'));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const runtimeStatePath = join(root, 'stack.runtime.json');
+  await writeFile(runtimeStatePath, JSON.stringify({
+    version: 1,
+    stackName: 'dev',
+    processes: { daemonPid: 111, daemonPids: [111] },
+  }) + '\n', 'utf8');
+
+  const result = await syncStackRuntimeDaemonPidFromDaemonState(
+    {
+      runtimeStatePath,
+      cliHomeDir: join(root, 'cli'),
+      internalServerUrl: 'http://127.0.0.1:3009',
+      env: {},
+    },
+    {
+      checkDaemonStateImpl: () => ({ status: 'unreachable', pid: 333 }),
+      isPidAliveImpl: (pid) => Number(pid) === 111 || Number(pid) === 333,
+      resolvePidStackOwnershipImpl: async (pid) => ({
+        owned: Number(pid) === 111,
+        reason: Number(pid) === 111 ? 'test_owned' : 'stack_name_mismatch',
+      }),
+    },
+  );
+
+  assert.equal(result.running, false);
+  assert.equal(result.pid, 111);
+  assert.equal(result.source, 'runtime_pid');
+  const runtime = JSON.parse(await readFile(runtimeStatePath, 'utf8'));
+  assert.deepEqual(runtime?.processes?.daemonPids, [111]);
+});
+
+test('syncStackRuntimeDaemonPidFromDaemonState clears a dead unreachable pid', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hstack-runtime-daemon-unreachable-dead-'));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const runtimeStatePath = join(root, 'stack.runtime.json');
+  await writeFile(runtimeStatePath, JSON.stringify({
+    version: 1,
+    stackName: 'dev',
+    processes: { daemonPid: 333, daemonPids: [333] },
+  }) + '\n', 'utf8');
+
+  const result = await syncStackRuntimeDaemonPidFromDaemonState(
+    {
+      runtimeStatePath,
+      cliHomeDir: join(root, 'cli'),
+      internalServerUrl: 'http://127.0.0.1:3009',
+      env: {},
+    },
+    {
+      checkDaemonStateImpl: () => ({ status: 'unreachable', pid: 333 }),
+      isPidAliveImpl: () => false,
+      resolvePidStackOwnershipImpl: acceptAllStackOwnership,
+    },
+  );
+
+  assert.equal(result.running, false);
+  assert.equal(result.pid, null);
+  const runtime = JSON.parse(await readFile(runtimeStatePath, 'utf8'));
+  assert.deepEqual(runtime?.processes?.daemonPids, []);
 });
 
 test('syncStackRuntimeDaemonPidFromDaemonState records the live daemon pid without disturbing sibling process metadata', async (t) => {
@@ -371,6 +621,52 @@ test('syncStackRuntimeDaemonPidFromDaemonState preserves the recorded dist finge
   const runtime = JSON.parse(await readFile(runtimeStatePath, 'utf-8'));
   assert.equal(runtime?.processes?.daemonPid, 222);
   assert.equal(runtime?.daemon?.distClosureFingerprint, 'fingerprint-before-sync');
+});
+
+test('daemon sync rejects fingerprint and running observation when the authenticated pid dies before publication', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hstack-runtime-daemon-publication-race-'));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const runtimeStatePath = join(root, 'stack.runtime.json');
+  await mkdir(root, { recursive: true });
+  await writeFile(
+    runtimeStatePath,
+    JSON.stringify({
+      version: 1,
+      stackName: 'dev',
+      processes: { daemonPid: null, daemonPids: [] },
+      daemon: { distClosureFingerprint: 'fingerprint-before-sync' },
+    }) + '\n',
+    'utf-8',
+  );
+
+  let livenessChecks = 0;
+  const result = await syncStackRuntimeDaemonPidFromDaemonState(
+    {
+      runtimeStatePath,
+      cliHomeDir: join(root, 'cli'),
+      internalServerUrl: 'http://127.0.0.1:3009',
+      daemonDistFingerprint: 'fingerprint-for-dead-pid',
+      env: {},
+    },
+    {
+      checkDaemonStateImpl: () => ({ status: 'running', pid: 222 }),
+      isPidAliveImpl: () => ++livenessChecks === 1,
+      resolvePidStackOwnershipImpl: acceptAllStackOwnership,
+    },
+  );
+
+  assert.equal(livenessChecks, 2);
+  assert.equal(result.running, false);
+  assert.equal(result.pid, null);
+  assert.equal(result.daemonDistFingerprint, null);
+
+  const runtime = JSON.parse(await readFile(runtimeStatePath, 'utf-8'));
+  assert.equal(runtime?.processes?.daemonPid, null);
+  assert.deepEqual(runtime?.processes?.daemonPids, []);
+  assert.equal(runtime?.daemon?.distClosureFingerprint, null);
 });
 
 test('recordStackRuntimeDaemonPid clears daemon pid when requested explicitly', async (t) => {

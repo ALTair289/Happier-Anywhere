@@ -1,11 +1,13 @@
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, unlink } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { isPidAlive } from '../proc/pids.mjs';
-import { isTcpPortFree, listListenPids } from '../net/ports.mjs';
+import { isTcpPortFree, listListenPidsWithStatus } from '../net/ports.mjs';
 import { runCapture } from '../proc/proc.mjs';
+import { writeJsonAtomic } from '../fs/json.mjs';
+import { withJsonOwnerFileLock } from '../proc/jsonOwnerFileLock.mjs';
 
 export { isPidAlive };
 
@@ -16,10 +18,10 @@ function resolveMetroStatusTimeoutMsFromEnv(env = process.env) {
   return 800;
 }
 
-export async function looksLikeExpoMetro({ port, timeoutMs = null } = {}) {
+export async function looksLikeExpoMetro({ port, timeoutMs = null, env = process.env } = {}) {
   const p = Number(port);
   if (!Number.isFinite(p) || p <= 0) return false;
-  const ms = Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0 ? Number(timeoutMs) : resolveMetroStatusTimeoutMsFromEnv();
+  const ms = Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0 ? Number(timeoutMs) : resolveMetroStatusTimeoutMsFromEnv(env);
   const url = `http://127.0.0.1:${p}/status`;
   try {
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
@@ -50,9 +52,105 @@ function resolveMetroWaitIntervalMsFromEnv(env = process.env) {
   return 500;
 }
 
+async function getProcessGroupIdForReadiness(pid) {
+  const n = Number(pid);
+  if (!Number.isFinite(n) || n <= 1 || process.platform === 'win32') return null;
+  try {
+    const out = await runCapture('ps', ['-o', 'pgid=', '-p', String(n)]);
+    const pgid = Number(String(out ?? '').trim());
+    return Number.isFinite(pgid) && pgid > 1 ? pgid : null;
+  } catch {
+    return null;
+  }
+}
+
+async function isWindowsDescendantProcess(listenerPid, ownerPid) {
+  if (process.platform !== 'win32') return false;
+  const script = [
+    `$target=${Number(listenerPid)};`,
+    `$owner=${Number(ownerPid)};`,
+    'while ($target -gt 1) {',
+    '  $p=Get-CimInstance Win32_Process -Filter "ProcessId=$target";',
+    '  if (-not $p) { break };',
+    '  $target=[int]$p.ParentProcessId;',
+    '  if ($target -eq $owner) { Write-Output owned; exit 0 }',
+    '};',
+    'exit 1',
+  ].join(' ');
+  try {
+    const out = await runCapture('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeoutMs: 4000 });
+    return String(out ?? '').trim() === 'owned';
+  } catch {
+    return false;
+  }
+}
+
+async function observeMetroListenerOwnership(
+  { port, ownerPid, env },
+  {
+    listListenPidsWithStatusImpl = listListenPidsWithStatus,
+    getProcessGroupIdImpl = getProcessGroupIdForReadiness,
+    isWindowsDescendantProcessImpl = isWindowsDescendantProcess,
+    platform = process.platform,
+  } = {},
+) {
+  const listeners = await listListenPidsWithStatusImpl(port, { timeoutMs: 4000, env });
+  if (listeners.status !== 'ok') {
+    return { status: 'inconclusive', reason: listeners.reason ?? listeners.status, observation: listeners };
+  }
+  const listenerPids = listeners.pids;
+  if (!listenerPids.length) return { status: 'not_ready', reason: 'listener_not_observed', listenerPids };
+  const ownedListenerPids = [];
+  const foreignListenerPids = [];
+  if (platform === 'win32') {
+    for (const listenerPid of listenerPids) {
+      if (listenerPid === Number(ownerPid)) {
+        ownedListenerPids.push(listenerPid);
+        continue;
+      }
+      // eslint-disable-next-line no-await-in-loop
+      if (await isWindowsDescendantProcessImpl(listenerPid, ownerPid)) {
+        ownedListenerPids.push(listenerPid);
+      } else {
+        foreignListenerPids.push(listenerPid);
+      }
+    }
+  } else {
+    const ownerPgid = await getProcessGroupIdImpl(ownerPid);
+    for (const listenerPid of listenerPids) {
+      if (listenerPid === Number(ownerPid)) {
+        ownedListenerPids.push(listenerPid);
+        continue;
+      }
+      // eslint-disable-next-line no-await-in-loop
+      const listenerPgid = await getProcessGroupIdImpl(listenerPid);
+      if (ownerPgid && listenerPgid && listenerPgid === ownerPgid) {
+        ownedListenerPids.push(listenerPid);
+      } else {
+        foreignListenerPids.push(listenerPid);
+      }
+    }
+  }
+  if (foreignListenerPids.length) {
+    return {
+      status: 'not_owned',
+      reason: ownedListenerPids.length ? 'competing_listener' : 'listener_not_owned',
+      listenerPids,
+      ownedListenerPids,
+      foreignListenerPids,
+    };
+  }
+  if (!ownedListenerPids.length) {
+    return { status: 'not_owned', reason: 'listener_not_owned', listenerPids };
+  }
+  return { status: 'owned', reason: 'all_listeners_owned', listenerPids, ownedListenerPids };
+}
+
 export async function waitForExpoMetroRunning(
   {
     port,
+    ownerPid = null,
+    ownerProc = null,
     timeoutMs = null,
     intervalMs = null,
     env = process.env,
@@ -61,6 +159,10 @@ export async function waitForExpoMetroRunning(
     looksLikeExpoMetroImpl = looksLikeExpoMetro,
     delayImpl = delay,
     nowMsImpl = () => Date.now(),
+    listListenPidsWithStatusImpl = listListenPidsWithStatus,
+    getProcessGroupIdImpl = getProcessGroupIdForReadiness,
+    isWindowsDescendantProcessImpl = isWindowsDescendantProcess,
+    platform = process.platform,
   } = {},
 ) {
   const p = Number(port);
@@ -78,17 +180,92 @@ export async function waitForExpoMetroRunning(
 
   const startMs = nowMsImpl();
   let probes = 0;
+  let lastOwnership = null;
+  const ownershipRequired = typeof ownerPid === 'function' || (Number.isFinite(Number(ownerPid)) && Number(ownerPid) > 1);
   while (nowMsImpl() - startMs <= resolvedTimeoutMs) {
+    if (ownerProc && (ownerProc.exitCode !== null || ownerProc.signalCode !== null)) {
+      return { ok: false, reason: 'owner_process_exited', probes };
+    }
     // eslint-disable-next-line no-await-in-loop
-    const ok = await looksLikeExpoMetroImpl({ port: p });
+    const statusProbe = looksLikeExpoMetroImpl({ port: p, env });
+    // eslint-disable-next-line no-await-in-loop
+    const statusResult = ownerProc
+      ? await new Promise((resolvePromise) => {
+          const onExit = () => resolvePromise({ kind: 'exit' });
+          ownerProc.once('exit', onExit);
+          statusProbe.then((ok) => {
+            ownerProc.removeListener('exit', onExit);
+            resolvePromise({ kind: 'status', ok });
+          });
+        })
+      : { kind: 'status', ok: await statusProbe };
+    if (statusResult.kind === 'exit') {
+      return { ok: false, reason: 'owner_process_exited', probes };
+    }
+    const ok = statusResult.ok;
     probes += 1;
     if (ok) {
-      return { ok: true, probes };
+      const currentOwnerPid = typeof ownerPid === 'function' ? ownerPid() : ownerPid;
+      if (!ownershipRequired) {
+        return { ok: true, probes };
+      }
+      if (!Number.isFinite(Number(currentOwnerPid)) || Number(currentOwnerPid) <= 1) {
+        lastOwnership = { status: 'not_owned', reason: 'owner_process_missing', listenerPids: [] };
+        // eslint-disable-next-line no-await-in-loop
+        await delayImpl(resolvedIntervalMs);
+        continue;
+      }
+      // eslint-disable-next-line no-await-in-loop
+      lastOwnership = await observeMetroListenerOwnership(
+        { port: p, ownerPid: Number(currentOwnerPid), env },
+        { listListenPidsWithStatusImpl, getProcessGroupIdImpl, isWindowsDescendantProcessImpl, platform },
+      );
+      if (lastOwnership.status === 'owned') {
+        return {
+          ok: true,
+          probes,
+          ownerPid: Number(currentOwnerPid),
+          listenerPid: lastOwnership.ownedListenerPids.includes(Number(currentOwnerPid))
+            ? Number(currentOwnerPid)
+            : lastOwnership.ownedListenerPids[0],
+          ownedListenerPids: Object.freeze([...lastOwnership.ownedListenerPids]),
+          listenerPids: lastOwnership.listenerPids,
+          port: p,
+        };
+      }
+      if (lastOwnership.status === 'not_owned') {
+        return {
+          ok: false,
+          reason: lastOwnership.reason,
+          probes,
+          listenerPids: lastOwnership.listenerPids,
+          ownedListenerPids: lastOwnership.ownedListenerPids ?? [],
+          foreignListenerPids: lastOwnership.foreignListenerPids ?? [],
+        };
+      }
     }
     // eslint-disable-next-line no-await-in-loop
     await delayImpl(resolvedIntervalMs);
   }
-  return { ok: false, reason: 'timeout', probes };
+  if (lastOwnership?.status === 'inconclusive') {
+    return {
+      ok: false,
+      reason: 'listener_ownership_inconclusive',
+      probes,
+      observation: lastOwnership.observation,
+    };
+  }
+  if (lastOwnership?.status === 'not_owned') {
+    return {
+      ok: false,
+      reason: lastOwnership.reason,
+      probes,
+      listenerPids: lastOwnership.listenerPids,
+      ownedListenerPids: lastOwnership.ownedListenerPids ?? [],
+      foreignListenerPids: lastOwnership.foreignListenerPids ?? [],
+    };
+  }
+  return { ok: false, reason: lastOwnership?.reason ?? 'timeout', probes };
 }
 
 function hashDir(dir) {
@@ -184,8 +361,8 @@ async function readProcessIdentityLine(pid) {
   }
 }
 
-async function verifyStatePidIdentity({ pid, state, statePath }) {
-  const line = await readProcessIdentityLine(pid);
+async function verifyStatePidIdentity({ pid, state, statePath, readProcessIdentityLineImpl = readProcessIdentityLine }) {
+  const line = await readProcessIdentityLineImpl(pid);
   if (!line) {
     return { ok: process.platform === 'win32', reason: 'pid_unverified' };
   }
@@ -212,12 +389,15 @@ async function verifyStatePidIdentity({ pid, state, statePath }) {
   return { ok: true, reason: 'pid' };
 }
 
-export async function isStateProcessRunning(statePath) {
+export async function isStateProcessRunning(
+  statePath,
+  { readProcessIdentityLineImpl = readProcessIdentityLine } = {},
+) {
   const state = await readPidState(statePath);
   if (!state) return { running: false, state: null };
   const pid = Number(state.pid);
   if (isPidAlive(pid)) {
-    const identity = await verifyStatePidIdentity({ pid, state, statePath });
+    const identity = await verifyStatePidIdentity({ pid, state, statePath, readProcessIdentityLineImpl });
     if (!identity.ok) {
       return { running: false, state, reason: identity.reason };
     }
@@ -230,7 +410,9 @@ export async function isStateProcessRunning(statePath) {
     if (!Number.isFinite(p) || p <= 0) return false;
     if (!raw) return false;
     const needle = resolve(raw);
-    const pids = await listListenPids(p, { timeoutMs: 4000 }).catch(() => []);
+    const listenerObservation = await listListenPidsWithStatus(p, { timeoutMs: 4000 });
+    if (listenerObservation.status !== 'ok') return false;
+    const pids = listenerObservation.pids;
     for (const listenPid of pids) {
       // eslint-disable-next-line no-await-in-loop
       const line = await runCapture('ps', ['-o', 'command=', '-p', String(listenPid)]).catch(() => '');
@@ -270,8 +452,81 @@ export async function isStateProcessRunning(statePath) {
 }
 
 export async function writePidState(statePath, state) {
-  await mkdir(dirname(statePath), { recursive: true }).catch(() => {});
-  await writeFile(statePath, JSON.stringify(state, null, 2) + '\n', 'utf-8');
+  await withJsonOwnerFileLock(
+    () => writeJsonAtomic(statePath, state),
+    {
+      lockPath: `${statePath}.publication.lock`,
+      timeoutMs: 30_000,
+      pollIntervalMs: 50,
+      staleAfterMs: 60_000,
+      errorLabel: 'Expo PID state publication',
+    },
+  );
+}
+
+async function readExpoPidStateForMutation(statePath) {
+  try {
+    return JSON.parse(await readFile(statePath, 'utf-8'));
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+export async function commitExpoPidStatePublication(statePath, {
+  publicationToken,
+  expectedPreviousToken = null,
+  generation,
+  state,
+} = {}) {
+  const token = String(publicationToken ?? '').trim();
+  const expectedGeneration = Number(generation);
+  if (!token) throw new Error('[expo] missing PID publication token');
+  if (!Number.isInteger(expectedGeneration) || expectedGeneration < 1) {
+    throw new Error('[expo] invalid PID publication generation');
+  }
+  return await withJsonOwnerFileLock(async () => {
+    const current = await readExpoPidStateForMutation(statePath);
+    if ((current?.publicationToken ?? null) !== expectedPreviousToken) {
+      const error = new Error('[expo] PID state publication generation was superseded');
+      error.code = 'EEXPOPIDGENERATION';
+      throw error;
+    }
+    const next = {
+      ...(state ?? {}),
+      publicationGeneration: expectedGeneration,
+      publicationToken: token,
+    };
+    await writeJsonAtomic(statePath, next);
+    return next;
+  }, {
+    lockPath: `${statePath}.publication.lock`,
+    timeoutMs: 30_000,
+    pollIntervalMs: 50,
+    staleAfterMs: 60_000,
+    errorLabel: 'Expo PID state publication',
+  });
+}
+
+export async function restoreExpoPidStatePublication(statePath, { publicationToken, priorState } = {}) {
+  return await withJsonOwnerFileLock(async () => {
+    const current = await readExpoPidStateForMutation(statePath);
+    if (current?.publicationToken !== publicationToken) return false;
+    if (priorState == null) {
+      await unlink(statePath).catch((error) => {
+        if (error?.code !== 'ENOENT') throw error;
+      });
+    } else {
+      await writeJsonAtomic(statePath, priorState);
+    }
+    return true;
+  }, {
+    lockPath: `${statePath}.publication.lock`,
+    timeoutMs: 30_000,
+    pollIntervalMs: 50,
+    staleAfterMs: 60_000,
+    errorLabel: 'Expo PID state rollback',
+  });
 }
 
 export async function findRunningExpoStateInRoot({ expoDevRoot, requireWeb = false, expectedProjectDir = '' } = {}) {

@@ -45,7 +45,7 @@ test('probeExistingAccountCountForServerComponent reads account count from a run
   }
 });
 
-test('probeExistingAccountCountForServerComponent generates sqlite URL params from env when DATABASE_URL is absent', async () => {
+test('probeExistingAccountCountForServerComponent uses the bounded server-light sqlite pool without mutating caller env', async () => {
   const root = await mkdtemp(join(tmpdir(), 'stack-startup-runtime-probe-env-'));
   const serverDir = join(root, 'server');
   const generatedDir = join(serverDir, 'generated', 'sqlite-client');
@@ -71,17 +71,19 @@ test('probeExistingAccountCountForServerComponent generates sqlite URL params fr
       'utf-8',
     );
 
+    const env = {
+      HAPPIER_SERVER_LIGHT_DATA_DIR: dataDir,
+      HAPPIER_SQLITE_BUSY_TIMEOUT_MS: '500',
+    };
     const result = await probeExistingAccountCountForServerComponent({
       serverComponentName: 'happier-server-light',
       serverDir,
-      env: {
-        HAPPIER_SERVER_LIGHT_DATA_DIR: dataDir,
-        HAPPIER_SQLITE_BUSY_TIMEOUT_MS: '500',
-      },
+      env,
     });
 
     assert.equal(result.ok, true);
     assert.equal(result.accountCount, 3);
+    assert.equal(Object.hasOwn(env, 'DATABASE_URL'), false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -1,7 +1,8 @@
 import http from 'node:http';
+import { fork } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 import { isTcpPortFree, pickNextFreeTcpPort } from '../net/ports.mjs';
-import { startTcpForwarder, stopTcpForwarder } from '../net/tcp_forward.mjs';
 
 const DISABLED_ENV_VALUES = new Set(['0', 'false', 'no', 'off']);
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
@@ -44,6 +45,7 @@ export async function prepareDevProxyStartup({
   pickNextFreeTcpPortImpl = pickNextFreeTcpPort,
   startDevProxyImpl = startDevProxy,
   isTcpPortFreeImpl = isTcpPortFree,
+  onUnexpectedExit,
 } = {}) {
   const publicPort = Number(stablePort);
   if (!enabled) {
@@ -68,6 +70,7 @@ export async function prepareDevProxyStartup({
       targetHost,
       targetPort: backendPort,
       label,
+      onUnexpectedExit,
     });
     return {
       mode: 'proxy',
@@ -110,21 +113,24 @@ export async function startDevProxyMaintenanceUpstream({
   host = '127.0.0.1',
   port = 0,
   retryAfterMs = 1000,
+  retryable = true,
   message = 'Server reload in progress',
 } = {}) {
   let currentRetryAfterMs = retryAfterMs;
+  let currentRetryable = retryable !== false;
   let currentMessage = message;
 
   const server = http.createServer((_req, res) => {
     const body = `${currentMessage}\n`;
-    res.writeHead(503, {
+    const headers = {
       'Content-Type': 'text/plain; charset=utf-8',
       'Content-Length': Buffer.byteLength(body),
-      'Retry-After': normalizeRetryAfterSeconds(currentRetryAfterMs),
-      'X-Happier-Retry-Reason': 'server_restarting',
+      'X-Happier-Retry-Reason': currentRetryable ? 'server_restarting' : 'server_unavailable',
       'Cache-Control': 'no-store',
       Connection: 'close',
-    });
+    };
+    if (currentRetryable) headers['Retry-After'] = normalizeRetryAfterSeconds(currentRetryAfterMs);
+    res.writeHead(503, headers);
     res.end(body);
   });
 
@@ -142,8 +148,13 @@ export async function startDevProxyMaintenanceUpstream({
     server,
     address,
     port: resolvedPort,
-    update({ retryAfterMs: nextRetryAfterMs = currentRetryAfterMs, message: nextMessage = currentMessage } = {}) {
+    update({
+      retryAfterMs: nextRetryAfterMs = currentRetryAfterMs,
+      retryable: nextRetryable = currentRetryable,
+      message: nextMessage = currentMessage,
+    } = {}) {
       currentRetryAfterMs = nextRetryAfterMs;
+      currentRetryable = nextRetryable !== false;
       currentMessage = nextMessage;
     },
     async stop() {
@@ -162,73 +173,138 @@ export async function startDevProxy({
   targetHost = '127.0.0.1',
   targetPort,
   label = 'server-proxy',
+  onUnexpectedExit,
+  forkImpl = fork,
+  commandTimeoutMs = 5000,
 } = {}) {
-  const forwarder = await startTcpForwarder({
-    listenHost: stableHost,
-    listenPort: Number(stablePort),
-    targetHost,
-    targetPort: Number(targetPort),
-    label,
+  const runtimePath = fileURLToPath(new URL('./devProxyRuntime.mjs', import.meta.url));
+  const child = forkImpl(runtimePath, [], {
+    env: process.env,
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+    detached: process.platform !== 'win32',
   });
-  let maintenance = null;
+  child.stdout?.on('data', (chunk) => process.stdout.write(chunk));
+  child.stderr?.on('data', (chunk) => process.stderr.write(chunk));
+
+  let requestId = 0;
+  const pending = new Map();
   let stopped = false;
+  let available = false;
+  let expectedExit = false;
+  let currentTargetPort = Number(targetPort);
+  let resolveClosed;
+  const closed = new Promise((resolve) => { resolveClosed = resolve; });
+
+  const rejectPending = (error) => {
+    for (const { reject, timer } of pending.values()) {
+      clearTimeout(timer);
+      reject(error);
+    }
+    pending.clear();
+  };
+  child.on('exit', (code, signal) => {
+    available = false;
+    currentTargetPort = null;
+    const error = new Error(`[${label}] proxy runtime exited (code=${code ?? 'null'}, signal=${signal ?? 'null'})`);
+    rejectPending(error);
+    const event = { expected: expectedExit, code: code ?? null, signal: signal ?? null, error };
+    resolveClosed(event);
+    if (!expectedExit && typeof onUnexpectedExit === 'function') {
+      Promise.resolve(onUnexpectedExit(event)).catch((callbackError) => {
+        process.stderr.write(`[${label}] unexpected-exit handler failed: ${callbackError instanceof Error ? callbackError.message : String(callbackError)}\n`);
+      });
+    }
+  });
+  child.on('error', rejectPending);
+  child.on('message', (message) => {
+    if (!message || typeof message !== 'object' || message.type !== 'response') return;
+    const waiter = pending.get(message.id);
+    if (!waiter) return;
+    pending.delete(message.id);
+    clearTimeout(waiter.timer);
+    if (message.ok) waiter.resolve(message.result);
+    else waiter.reject(new Error(String(message.error || 'proxy runtime command failed')));
+  });
+
+  const command = (name, payload = {}, { timeoutMs = commandTimeoutMs } = {}) => new Promise((resolve, reject) => {
+    if (!child.connected || (name !== 'start' && !available)) {
+      reject(new Error(`[${label}] proxy runtime is unavailable (control channel closed)`));
+      return;
+    }
+    const id = ++requestId;
+    const timer = setTimeout(() => {
+      if (!pending.delete(id)) return;
+      const error = new Error(`[${label}] proxy runtime command '${name}' timed out after ${timeoutMs}ms`);
+      error.code = 'EPROXYCOMMANDTIMEOUT';
+      error.command = name;
+      reject(error);
+    }, Math.max(1, Number(timeoutMs) || commandTimeoutMs));
+    pending.set(id, { resolve, reject, timer });
+    child.send({ type: 'command', id, name, payload }, (error) => {
+      if (!error) return;
+      const waiter = pending.get(id);
+      if (!waiter) return;
+      pending.delete(id);
+      clearTimeout(waiter.timer);
+      reject(error);
+    });
+  });
+
+  let started;
+  try {
+    started = await command('start', {
+      stableHost,
+      stablePort: Number(stablePort),
+      targetHost,
+      targetPort: Number(targetPort),
+      label,
+    });
+  } catch (error) {
+    expectedExit = true;
+    child.kill('SIGKILL');
+    throw error;
+  }
+  available = true;
 
   const controller = {
-    pid: process.pid,
-    host: forwarder.address,
-    port: forwarder.port,
-    get targetPort() {
-      return forwarder.server.getUpstream?.().targetPort ?? null;
+    pid: child.pid,
+    closed,
+    get available() {
+      return available;
     },
-    flipUpstream({ targetHost: nextTargetHost = targetHost, targetPort: nextTargetPort } = {}) {
-      return forwarder.server.setUpstream({
+    host: started.address,
+    port: started.port,
+    get targetPort() {
+      return currentTargetPort;
+    },
+    async getUpstream() {
+      return await command('getUpstream');
+    },
+    async flipUpstream({ targetHost: nextTargetHost = targetHost, targetPort: nextTargetPort } = {}) {
+      const result = await command('flip', {
         targetHost: nextTargetHost,
         targetPort: Number(nextTargetPort),
       });
+      currentTargetPort = Number(nextTargetPort);
+      return result;
     },
-    async enterMaintenance({ retryAfterMs = 2000, message = 'Server reload in progress' } = {}) {
-      if (!maintenance) {
-        maintenance = await startDevProxyMaintenanceUpstream({
-          host: '127.0.0.1',
-          port: 0,
-          retryAfterMs,
-          message,
-        });
-      } else {
-        maintenance.update({ retryAfterMs, message });
-      }
-      forwarder.server.setUpstream({
-        targetHost: maintenance.address,
-        targetPort: maintenance.port,
-      });
-      return { targetHost: maintenance.address, targetPort: maintenance.port, port: maintenance.port };
+    async enterMaintenance({ retryAfterMs = 2000, retryable = true, message = 'Server reload in progress' } = {}) {
+      return await command('maintenance', { retryAfterMs, retryable, message });
     },
     async drainConnections({ graceMs = 0, targetHost, targetPort } = {}) {
-      if (typeof forwarder.server.closeConnectionsAfterGrace === 'function') {
-        const target = Number.isInteger(Number(targetPort)) && Number(targetPort) > 0
-          ? { targetHost: targetHost || targetHostDefault(), targetPort: Number(targetPort) }
-          : null;
-        await forwarder.server.closeConnectionsAfterGrace({ graceMs, target });
-        return;
-      }
-      if (typeof forwarder.server.closeIdleOrAllConnectionsAfterGrace === 'function') {
-        await forwarder.server.closeIdleOrAllConnectionsAfterGrace({ graceMs });
-      }
+      await command('drain', { graceMs, targetHost, targetPort });
     },
     async stop() {
       if (stopped) return;
       stopped = true;
-      await stopTcpForwarder(forwarder.server, label);
-      if (maintenance) {
-        await maintenance.stop();
-        maintenance = null;
+      expectedExit = true;
+      try {
+        if (available) await command('stop');
+      } finally {
+        if (child.connected) child.disconnect();
       }
     },
   };
 
   return controller;
-}
-
-function targetHostDefault() {
-  return '127.0.0.1';
 }

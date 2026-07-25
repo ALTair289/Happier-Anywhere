@@ -6,7 +6,9 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { stopStackWithEnv } from './utils/stack/stop.mjs';
+import { terminateProcessGroup } from './utils/proc/terminate.mjs';
 import { isAlive, spawnOwnedSleep, waitForProcessAlive, waitForProcessExit } from './testkit/stack_stop_sweeps_testkit.mjs';
+import { readProcessInstanceFingerprintSync } from '@happier-dev/cli-common/processInstance';
 
 test('stopStackWithEnv kills runtime-tracked pids for ephemeral stacks even when env/home markers are missing', async (t) => {
   const scriptsDir = dirname(fileURLToPath(import.meta.url));
@@ -79,6 +81,10 @@ test('stopStackWithEnv kills runtime-tracked pids for ephemeral stacks even when
   await waitForProcessAlive({ pid: drainingChild.pid, timeoutMs: 2_000, intervalMs: 25, label: 'ephemeral draining runtime child (pre-stop)' });
   assert.ok(isAlive(child.pid), 'expected child to be alive');
   assert.ok(isAlive(drainingChild.pid), 'expected draining child to be alive');
+  const childFingerprint = readProcessInstanceFingerprintSync(child.pid);
+  const drainingChildFingerprint = readProcessInstanceFingerprintSync(drainingChild.pid);
+  assert.ok(childFingerprint, 'expected child process incarnation');
+  assert.ok(drainingChildFingerprint, 'expected draining child process incarnation');
 
   // Runtime state file records the pid under this stack, and marks it ephemeral.
   await writeFile(
@@ -98,6 +104,14 @@ test('stopStackWithEnv kills runtime-tracked pids for ephemeral stacks even when
           serverDrainingPid: drainingChild.pid,
           proxyPid: null,
         },
+        processInstances: {
+          processes: {
+            serverPid: { pid: child.pid, fingerprint: childFingerprint },
+            serverWrapperPid: { pid: child.pid, fingerprint: childFingerprint },
+            serverBackendPid: { pid: child.pid, fingerprint: childFingerprint },
+            serverDrainingPid: { pid: drainingChild.pid, fingerprint: drainingChildFingerprint },
+          },
+        },
       },
       null,
       2
@@ -105,6 +119,7 @@ test('stopStackWithEnv kills runtime-tracked pids for ephemeral stacks even when
     'utf-8'
   );
 
+  const terminationCalls = [];
   await stopStackWithEnv({
     rootDir,
     stackName,
@@ -121,8 +136,23 @@ test('stopStackWithEnv kills runtime-tracked pids for ephemeral stacks even when
     aggressive: false,
     sweepOwned: false,
     autoSweep: false,
+  }, {
+    terminateProcessGroupImpl: async (pgid, options) => {
+      terminationCalls.push({ pgid, options });
+      return await terminateProcessGroup(pgid, options);
+    },
   });
 
+  assert.deepEqual(
+    new Map(terminationCalls.map((call) => [
+      call.options.identityPid,
+      call.options.processInstanceFingerprint,
+    ])),
+    new Map([
+      [child.pid, childFingerprint],
+      [drainingChild.pid, drainingChildFingerprint],
+    ]),
+  );
   await waitForProcessExit({ pid: child.pid, timeoutMs: 20_000, intervalMs: 50, label: 'ephemeral runtime child (post-stop)' });
   await waitForProcessExit({ pid: drainingChild.pid, timeoutMs: 20_000, intervalMs: 50, label: 'ephemeral draining runtime child (post-stop)' });
   assert.ok(!isAlive(child.pid), `expected pid ${child.pid} to be killed by stopStackWithEnv fallback`);

@@ -3,18 +3,21 @@ import { parseArgs } from './utils/cli/args.mjs';
 import { killProcessTree } from './utils/proc/proc.mjs';
 import { spawnProc } from './utils/proc/proc.mjs';
 import { getComponentDir, getDefaultAutostartPaths, getRootDir } from './utils/paths/paths.mjs';
-import { killPortListeners } from './utils/net/ports.mjs';
-import { getServerComponentName, isHappierServerRunning } from './utils/server/server.mjs';
+import { killPortListeners, observeTcpPortAvailability } from './utils/net/ports.mjs';
+import { fetchHappierHealth, getServerComponentName } from './utils/server/server.mjs';
+import { resolveServerShutdownGraceMs } from './utils/server/shutdown_grace.mjs';
 import { requireDir } from './utils/proc/pm.mjs';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { checkDaemonStatePingAware, getDaemonEnv, stopLocalDaemon } from './daemon.mjs';
 import { printResult, wantsHelp, wantsJson } from './utils/cli/cli.mjs';
 import { assertServerComponentDirMatches, assertServerPrismaProviderMatches } from './utils/server/validate.mjs';
 import { getExpoStatePaths, isStateProcessRunning } from './utils/expo/expo.mjs';
 import {
-  createStackServerRuntimeProcessPatch,
-  createStackDevProxyRuntimePatch,
+  captureStackRuntimeStopSnapshot,
+  finalizeStackRuntimeStop,
+  readStackRuntimeStateFile,
+  recordStackRuntimeServerPids,
   recordStackRuntimeStart,
   recordStackRuntimeUpdate,
 } from './utils/stack/runtime_state.mjs';
@@ -22,28 +25,29 @@ import { startStackRuntimeDaemonPidReconciler } from './utils/stack/runtime_daem
 import { resolveStackContext } from './utils/stack/context.mjs';
 import { resolveServerPortFromEnv, resolveServerUrls } from './utils/server/urls.mjs';
 import {
-  createHappyCliReloadDescriptors,
-  createHappyCliReloadExecutor,
-  ensureDevCliReady,
   prepareDaemonAuthSeed,
   startDevDaemon,
 } from './utils/dev/daemon.mjs';
+import { startDevDaemonLifecycleReconciler } from './utils/dev/daemonLifecycleReconciler.mjs';
 import {
-  createDevServerReloadDescriptors,
-  createDevServerReloadExecutor,
+  resolveStackOwnedServerListenPid,
   resolveStackOwnedServerRuntimePid,
   startDevServer,
 } from './utils/dev/server.mjs';
-import { resolveDevReloadPollIntervalMs, startDevReloadCoordinator } from './utils/dev/devReloadCoordinator.mjs';
+import { decideDevStartupTopology, observeDevServerStartupTopology } from './utils/dev/devStartupTopology.mjs';
+import { resolveDevReloadPollIntervalMs } from './utils/dev/devReloadCoordinator.mjs';
+import { startDevReloadComposition } from './utils/dev/devReloadComposition.mjs';
 import { prepareDevProxyStartup, resolveDevProxyStableHost, shouldEnableStackDevProxy } from './utils/dev/devProxy.mjs';
+import { createDevProxyUnexpectedExitHandler } from './utils/dev/devProxyLifecycle.mjs';
 import { resolveDevServerConnection } from './utils/dev/resolveDevServerConnection.mjs';
-import { isRuntimePortOwnedByStackDevProxy, resolveLocalServerPortForStack } from './utils/server/resolve_stack_server_port.mjs';
+import { observeRuntimePortOwnedByStackDevProxy, selectLocalServerPortCandidateForStack } from './utils/server/resolve_stack_server_port.mjs';
+import { createListenerOwnershipCommandScope } from './utils/server/listener_ownership.mjs';
 import { ensureDevExpoServer, resolveExpoTailscaleEnabled } from './utils/dev/expo_dev.mjs';
 import { preferStackLocalhostUrl } from './utils/paths/localhost_host.mjs';
 import { openUrlInBrowser } from './utils/ui/browser.mjs';
 import { waitForHttpOk } from './utils/server/server.mjs';
 import { sanitizeDnsLabel } from './utils/net/dns.mjs';
-import { getAccountCountForServerComponent, resolveAutoCopyFromMainEnabled } from './utils/stack/startup.mjs';
+import { getAccountCountForServerComponent, probeExistingAccountCountForServerComponent, resolveAutoCopyFromMainEnabled } from './utils/stack/startup.mjs';
 import { maybeRunInteractiveStackAuthSetup } from './utils/auth/interactive_stack_auth.mjs';
 import { getInvokedCwd, inferComponentFromCwd } from './utils/cli/cwd_scope.mjs';
 import { daemonStartGate, formatDaemonAuthRequiredError } from './utils/auth/daemon_gate.mjs';
@@ -57,8 +61,12 @@ import { installExitCleanup } from './utils/proc/exit_cleanup.mjs';
 import { expandHome } from './utils/paths/canonical_home.mjs';
 import { buildConfigureServerLinks } from '@happier-dev/cli-common/links';
 import { spawnStackOwnerDeathWatchdog } from './utils/stack/owner_death_watchdog.mjs';
+import { completeInterruptedStackStopBeforeStart } from './utils/stack/stop.mjs';
 import { resolveTauriPaneInvocation } from './utils/tui/tauri_mode.mjs';
 import { resolveReactNativeDevtoolsUrl } from './utils/dev/react_native_devtools.mjs';
+import { loadDevTargetsConfig } from './utils/dev_targets/config.mjs';
+import { startStackDevTargets } from './utils/dev_targets/supervisor.mjs';
+import { findExistingStackCredentialPath } from './utils/auth/credentials_paths.mjs';
 
  /**
   * Dev mode stack:
@@ -85,6 +93,7 @@ async function main() {
               '--no-server',
 		          '--no-ui',
 		          '--no-daemon',
+          '--no-dev-targets',
           '--restart',
           '--watch',
           '--no-watch',
@@ -107,6 +116,7 @@ async function main() {
 		        '  hstack dev --watch         # rebuild/restart happier-cli daemon on file changes (TTY default)',
 	        '  hstack dev --no-watch      # disable watch mode (always disabled in non-interactive mode)',
 	        '  hstack dev --no-browser    # do not open the UI in your browser automatically',
+          '  hstack dev --no-dev-targets # skip configured Mutagen-backed remote daemons for this run',
 	        '  hstack dev --no-proxy      # bind the dev server directly instead of using the stable-port proxy',
 	        '  hstack dev --mobile        # also start Expo dev-client Metro for mobile',
 	        '  hstack dev --rn-devtools   # open React Native DevTools (Metro debugger UI) in your browser',
@@ -185,10 +195,26 @@ async function main() {
 	  const cliBin = join(cliDir, 'bin', 'happier.mjs');
   const autostart = getDefaultAutostartPaths();
   const baseEnv = { ...process.env };
+  const parentServerRestartPreflightAlreadyDone = String(
+    baseEnv.HAPPIER_STACK_SERVER_RESTART_PREFLIGHT_ALREADY_DONE ?? '',
+  ).trim() === '1';
+  delete baseEnv.HAPPIER_STACK_SERVER_RESTART_PREFLIGHT_ALREADY_DONE;
   const stackCtx = resolveStackContext({ env: baseEnv, autostart });
   const { stackMode, runtimeStatePath, stackName, envPath, ephemeral } = stackCtx;
-
-  const serverPort = await resolveLocalServerPortForStack({
+  const loadedDevTargets = flags.has('--no-dev-targets')
+    ? { path: null, config: { version: 1, targets: [] } }
+    : await loadDevTargetsConfig({ stackName, env: baseEnv, allowMissing: true });
+  const devTargets = loadedDevTargets.config.targets;
+  if (!json && stackMode && runtimeStatePath) {
+    await completeInterruptedStackStopBeforeStart({
+      rootDir,
+      stackName,
+      baseDir: autostart.baseDir,
+      env: baseEnv,
+      json,
+    });
+  }
+  const serverPort = await selectLocalServerPortCandidateForStack({
     env: baseEnv,
     stackMode,
     stackName,
@@ -211,6 +237,12 @@ async function main() {
     resolvedLocalUrls: resolvedUrls,
   });
   const startServer = serverConnection.startServer;
+  if (devTargets.length > 0 && !startServer) {
+    throw new Error(
+      '[dev-targets] configured dev targets require the local Stack server; ' +
+        'use --no-dev-targets when running dev with --no-server or --server-url',
+    );
+  }
   const localInternalServerUrl = resolvedUrls.internalServerUrl;
   const internalServerUrl = serverConnection.internalServerUrl;
   let publicServerUrl = serverConnection.publicServerUrl;
@@ -248,6 +280,7 @@ async function main() {
         startMobile,
         startTauri,
         startDaemon,
+        devTargets,
         openReactNativeDevtools,
         cliHomeDir,
       },
@@ -264,34 +297,62 @@ async function main() {
   await requireDir('happier-cli', cliDir);
 
   const children = [];
+  let devTargetsController = null;
   let shuttingDown = false;
+  let shutdown = null;
+  let pendingShutdownSignal = null;
+  let shutdownDispatchStarted = false;
+  const dispatchShutdown = (signal) => {
+    if (shutdownDispatchStarted) return;
+    if (!shutdown) {
+      pendingShutdownSignal = signal;
+      return;
+    }
+    shutdownDispatchStarted = true;
+    shutdown({ signal }).then(() => process.exit(0)).catch((error) => {
+      console.error('[local] shutdown failed:', error);
+      process.exit(1);
+    });
+  };
+  process.on('SIGINT', () => dispatchShutdown('SIGINT'));
+  process.on('SIGTERM', () => dispatchShutdown('SIGTERM'));
   installExitCleanup({ label: 'local', children });
 
-  // Ensure happier-cli is install+build ready before starting the daemon.
-  // Worktrees often don't have dist/ built yet, which causes MODULE_NOT_FOUND on dist/index.mjs.
   const buildCli = (baseEnv.HAPPIER_STACK_CLI_BUILD ?? '1').toString().trim() !== '0';
-  await ensureDevCliReady({ cliDir, buildCli });
 
   // Watch mode (interactive only by default): rebuild happier-cli and restart daemon when code changes.
   const watchEnabled =
     flags.has('--watch') || (!flags.has('--no-watch') && Boolean(process.stdin.isTTY && process.stdout.isTTY));
   const watchers = [];
 
-  const serverAlreadyRunning = startServer
-    ? await isHappierServerRunning(localInternalServerUrl)
-    : false;
-  const serverRuntimeProxyAlreadyOwned = startServer && stackMode && runtimeStatePath && !restart
-    ? await isRuntimePortOwnedByStackDevProxy({
-        env: baseEnv,
-        port: serverPort,
-        stackName,
-        runtimeStatePath,
-      })
-    : false;
+  const serverHealthObservation = startServer
+    ? await fetchHappierHealth(localInternalServerUrl)
+    : null;
+  const serverAlreadyRunning = serverHealthObservation?.ok === true;
+  let serverRuntimeProxyAlreadyOwned = false;
+  let serverTopology = 'absent';
+  if (startServer) {
+    const topologyScope = createListenerOwnershipCommandScope();
+    const serverTopologyObservation = await observeDevServerStartupTopology({
+      serverRequested: true, stackMode, serverPort, serverHealthObservation,
+      ownershipArgs: { env: baseEnv, port: serverPort, stackName, runtimeStatePath, listenerObservationScope: topologyScope },
+    }, {
+      observeTcpPortAvailabilityImpl: observeTcpPortAvailability,
+      observeRuntimePortOwnedByStackDevProxyImpl: observeRuntimePortOwnedByStackDevProxy,
+      resolveStackOwnedServerListenPidImpl: () => resolveStackOwnedServerListenPid(
+        { serverPort, stackName, envPath }, { observationScope: topologyScope },
+      ),
+    });
+    serverTopology = serverTopologyObservation.topology;
+    serverRuntimeProxyAlreadyOwned = serverTopologyObservation.proxyOwned;
+  }
   const daemonAlreadyRunning = startDaemon
-    ? ['running', 'starting'].includes((await checkDaemonStatePingAware(cliHomeDir, { serverUrl: internalServerUrl, env: baseEnv })).status)
+    ? ['running', 'starting'].includes((await checkDaemonStatePingAware(cliHomeDir, {
+        serverUrl: internalServerUrl,
+        env: baseEnv,
+        stackName,
+      })).status)
     : false;
-
   // Expo dev server state (worktree-scoped): single Expo process per stack/worktree.
   const startExpo = startUi || startMobile;
   const expoPaths = getExpoStatePaths({
@@ -302,8 +363,23 @@ async function main() {
   });
   const expoRunning = startExpo ? await isStateProcessRunning(expoPaths.statePath) : { running: false, state: null };
   let expoAlreadyRunning = Boolean(expoRunning.running);
+  const startupDecision = decideDevStartupTopology({
+    serverRequested: startServer,
+    serverTopology,
+    daemonRequested: startDaemon,
+    daemonRunning: daemonAlreadyRunning,
+    expoRequested: startExpo,
+    expoRunning: expoAlreadyRunning,
+    restart,
+  });
 
-  if (!restart && (!startServer || serverAlreadyRunning) && (!startDaemon || daemonAlreadyRunning) && (!startExpo || expoAlreadyRunning)) {
+  if (
+    devTargets.length === 0 &&
+    !restart &&
+    (!startServer || startupDecision.adoptedServer) &&
+    (!startDaemon || daemonAlreadyRunning) &&
+    (!startExpo || expoAlreadyRunning)
+  ) {
     console.log(
       `${green('✓')} dev: already running ${dim('(')}` +
         `${dim('server=')}${cyan(internalServerUrl)}${startServer ? '' : dim(' (external)')}` +
@@ -316,13 +392,15 @@ async function main() {
   }
 
   if (stackMode && runtimeStatePath) {
-    await recordStackRuntimeStart(runtimeStatePath, {
+    const startedRuntime = await recordStackRuntimeStart(runtimeStatePath, {
       stackName,
       script: 'dev.mjs',
       ephemeral,
       ownerPid: process.pid,
       ports: startServer ? { server: serverPort } : {},
-    }).catch(() => {});
+      runtimeSnapshotId: null,
+      serveUi: null,
+    });
     spawnStackOwnerDeathWatchdog({
       rootDir,
       stackName,
@@ -330,6 +408,7 @@ async function main() {
       envPath,
       runtimeStatePath,
       ownerPid: process.pid,
+      ownerStartedAt: startedRuntime.startedAt,
       env: baseEnv,
     });
   }
@@ -348,8 +427,17 @@ async function main() {
     proxyController: null,
     fallbackReason: null,
   };
-  if (startServer && devProxyEnabled && (!serverAlreadyRunning || restart)) {
+  if (startServer && devProxyEnabled && startupDecision.startServer) {
     const stableHost = resolveDevProxyStableHost({ env: baseEnv });
+    const onUnexpectedExit = createDevProxyUnexpectedExitHandler({
+      stackMode,
+      runtimeStatePath,
+      requestShutdownImpl: () => {
+        process.exitCode = 1;
+        process.kill(process.pid, 'SIGTERM');
+      },
+      logger: console,
+    });
     proxyPlan = await prepareDevProxyStartup({
       enabled: true,
       stablePort: serverPort,
@@ -357,17 +445,20 @@ async function main() {
       targetHost: '127.0.0.1',
       label: `${stackName ?? 'stack'}-server-proxy`,
       logger: console,
+      onUnexpectedExit,
     });
   }
   const serverBindPort = proxyPlan.backendPort;
   const serverBackendInternalUrl = `http://127.0.0.1:${serverBindPort}`;
 
-  const { serverEnv, serverScript, serverProc } = startServer
+  const { serverEnv, serverScript, serverProc } = startServer && startupDecision.startServer
     ? await startDevServer({
         serverComponentName,
         serverDir,
         autostart,
-        baseEnv,
+        baseEnv: parentServerRestartPreflightAlreadyDone
+          ? { ...baseEnv, HAPPIER_STACK_SERVER_RESTART_PREFLIGHT_ALREADY_DONE: '1' }
+          : baseEnv,
         serverPort,
         serverBindPort,
         internalServerUrl: serverBackendInternalUrl,
@@ -383,30 +474,20 @@ async function main() {
               enabled: true,
               proxyPid: proxyPlan.proxyController?.pid,
               mode: 'proxy',
-              restartMode: 'exclusiveDb',
             }
-          : null,
+          : proxyPlan.mode === 'directFallback'
+            ? {
+                enabled: true,
+                proxyPid: null,
+                mode: 'directFallback',
+                fallbackReason: proxyPlan.fallbackReason,
+              }
+            : null,
       })
     : { serverEnv: baseEnv, serverScript: null, serverProc: null };
-
-  if (startServer && stackMode && runtimeStatePath && proxyPlan.mode === 'directFallback') {
-    await recordStackRuntimeUpdate(
-      runtimeStatePath,
-      createStackDevProxyRuntimePatch({
-        stablePort: serverPort,
-        backendPort: null,
-        proxyPid: null,
-        backendPid: null,
-        drainingPid: null,
-        mode: 'directFallback',
-        fallbackReason: proxyPlan.fallbackReason,
-      }),
-    ).catch(() => {});
-  }
-
   if (!startServer) {
     console.log(`${green('✓')} server: external ${cyan(internalServerUrl)}`);
-  } else if (!serverAlreadyRunning || restart) {
+  } else if (startupDecision.startServer) {
     console.log(`${green('✓')} server: ready at ${cyan(internalServerUrl)}`);
   } else {
     console.log(`${green('✓')} server: already running at ${cyan(internalServerUrl)}`);
@@ -422,11 +503,14 @@ async function main() {
   );
 
   // Reliability before daemon start:
-  // - Ensure schema exists (server-light: prisma migrate deploy; happier-server: migrate deploy if tables missing)
+  // - Ensure schema exists (server-light: canonical provider migration script; happier-server: migrate deploy if tables missing)
   // - Auto-seed from main only when needed (non-main + non-interactive default, and only if missing creds or 0 accounts)
   const isInteractive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  const accountProbeImpl = startupDecision.adoptedServer
+    ? probeExistingAccountCountForServerComponent
+    : getAccountCountForServerComponent;
   const accountProbe = startServer
-    ? await getAccountCountForServerComponent({
+    ? await accountProbeImpl({
         serverComponentName,
         serverDir,
         env: serverEnv,
@@ -505,7 +589,7 @@ async function main() {
       env: baseEnv,
       stackName,
       cliHomeDir,
-      startDaemon,
+      startDaemon: startupDecision.startDaemon,
       isInteractive,
       serverComponentName,
       serverDir,
@@ -514,7 +598,7 @@ async function main() {
     });
   }
 
-  if (startDaemon) {
+  if (startupDecision.startDaemon) {
     const gate = daemonStartGate({ env: baseEnv, cliHomeDir, serverUrl: internalServerUrl });
     if (!gate.ok) {
       // In orchestrated auth flows (setup-pr/review-pr), we intentionally keep server/UI up
@@ -529,7 +613,7 @@ async function main() {
       }
     } else {
       await startDevDaemon({
-        startDaemon,
+        startDaemon: true,
         cliBin,
         cliHomeDir,
         internalServerUrl,
@@ -568,6 +652,54 @@ async function main() {
       watchers.push(daemonRuntimeReconciler);
       await daemonRuntimeReconciler.syncNow();
     }
+
+    const daemonLifecycleReconciler = startDevDaemonLifecycleReconciler({
+      enabled: true,
+      isShuttingDown: () => shuttingDown,
+      observe: async () => {
+        const gate = daemonStartGate({ env: baseEnv, cliHomeDir, serverUrl: internalServerUrl });
+        if (!gate.ok) return { status: 'inconclusive', reason: gate.reason };
+        return await checkDaemonStatePingAware(cliHomeDir, {
+          serverUrl: internalServerUrl,
+          env: daemonRuntimeEnv,
+          stackName,
+        });
+      },
+      recover: async () => {
+        await startDevDaemon({
+          startDaemon: true,
+          cliBin,
+          cliHomeDir,
+          internalServerUrl,
+          publicServerUrl,
+          runtimeStatePath,
+          restart: false,
+          isShuttingDown: () => shuttingDown,
+          env: baseEnv,
+          stackName,
+        });
+        return { started: true };
+      },
+    });
+    if (daemonLifecycleReconciler) watchers.push(daemonLifecycleReconciler);
+  }
+
+  if (devTargets.length > 0) {
+    const credentialPath = findExistingStackCredentialPath({
+      cliHomeDir,
+      serverUrl: internalServerUrl,
+      env: baseEnv,
+    });
+    devTargetsController = await startStackDevTargets({
+      stackName,
+      stackBaseDir: loadedDevTargets.path ? dirname(loadedDevTargets.path) : autostart.baseDir,
+      sourceDir: resolve(cliDir, '..', '..'),
+      localServerPort: serverPort,
+      activeServerId: resolveStackActiveServerId({ env: baseEnv, stackName }),
+      credentialPath,
+      targets: devTargets,
+      env: baseEnv,
+    });
   }
 
   const serverProcRef = { current: serverProc };
@@ -579,29 +711,24 @@ async function main() {
       serverPort: proxyPlan.mode === 'proxy' ? serverBindPort : serverPort,
       stackName,
       envPath,
-    });
+    }, { observationScope: createListenerOwnershipCommandScope() });
     if (Number.isFinite(pid) && pid > 1) {
       serverProcRef.current = { pid: Number(pid), exitCode: null };
-      await recordStackRuntimeUpdate(
-        runtimeStatePath,
-        createStackServerRuntimeProcessPatch({
-          listenerPid: Number(pid),
-          wrapperPid: null,
-          serverPort,
-          clearProxyState: proxyPlan.mode !== 'proxy',
-        }),
-      ).catch(() => {});
+      await recordStackRuntimeServerPids(runtimeStatePath, {
+        listenerPid: Number(pid),
+        wrapperPid: null,
+        serverPort,
+        clearProxyState: proxyPlan.mode !== 'proxy',
+      });
     }
   }
 
-  const reloadDescriptors = [];
-  const reloadExecutors = [];
   const daemonReloadEnabled = watchEnabled && startDaemon && daemonStartGate({ env: baseEnv, cliHomeDir, serverUrl: internalServerUrl }).ok;
   const serverReloadEnabled = startServer && watchEnabled && Boolean(serverProcRef.current?.pid);
-
-  if (daemonReloadEnabled) {
-    reloadDescriptors.push(...createHappyCliReloadDescriptors({ cliDir }));
-    reloadExecutors.push(createHappyCliReloadExecutor({
+  const reloadWatcher = startDevReloadComposition({
+    watchEnabled,
+    daemonReloadEnabled,
+    daemonOptions: {
       startDaemon,
       buildCli,
       cliDir,
@@ -613,12 +740,9 @@ async function main() {
       isShuttingDown: () => shuttingDown,
       env: baseEnv,
       stackName,
-    }));
-  }
-
-  if (serverReloadEnabled) {
-    reloadDescriptors.push(...createDevServerReloadDescriptors({ serverDir }));
-    reloadExecutors.push(createDevServerReloadExecutor({
+    },
+    serverReloadEnabled,
+    serverOptions: {
       enabled: true,
       stackMode,
       serverComponentName,
@@ -635,13 +759,7 @@ async function main() {
       serverProcRef,
       isShuttingDown: () => shuttingDown,
       proxyController: proxyPlan.mode === 'proxy' ? proxyPlan.proxyController : null,
-    }));
-  }
-
-  const reloadWatcher = startDevReloadCoordinator({
-    enabled: watchEnabled,
-    descriptors: reloadDescriptors,
-    executors: reloadExecutors,
+    },
     debounceMs: 500,
     pollIntervalMs: resolveDevReloadPollIntervalMs(baseEnv),
     isShuttingDown: () => shuttingDown,
@@ -740,16 +858,27 @@ async function main() {
     console.log(`[local] expo tailscale: http://${expoRes.tailscale.tailscaleIp}:${expoRes.port}`);
   }
 
-  const shutdown = async () => {
+  shutdown = async () => {
     if (shuttingDown) {
       return;
     }
     shuttingDown = true;
+    const shutdownRequest = runtimeStatePath
+      ? (await readStackRuntimeStateFile(runtimeStatePath).catch(() => null))?.stopRequest ?? null
+      : null;
+    const expectedStopState = runtimeStatePath
+      ? await captureStackRuntimeStopSnapshot(runtimeStatePath).catch(() => null)
+      : null;
+    const preserveDaemonOnShutdown = shutdownRequest?.preserveDaemon === true;
     console.log('\n[local] shutting down...');
+
+    if (devTargetsController) {
+      await devTargetsController.close().catch(() => {});
+    }
 
     for (const w of watchers) {
       try {
-        w.close();
+        await w.close?.();
       } catch {
         // ignore
       }
@@ -759,31 +888,49 @@ async function main() {
       await proxyPlan.proxyController.stop().catch(() => {});
     }
 
-    if (startDaemon) {
-      await stopLocalDaemon({ cliBin, internalServerUrl, cliHomeDir, runtimeStatePath });
+    if (startDaemon && !preserveDaemonOnShutdown) {
+      await stopLocalDaemon({
+        cliBin,
+        internalServerUrl,
+        cliHomeDir,
+        runtimeStatePath,
+        env: baseEnv,
+        stackName,
+        cliIdentity: String(baseEnv.HAPPIER_STACK_CLI_IDENTITY ?? '').trim() || 'default',
+      });
     }
 
-    for (const child of children) {
-      if (child.exitCode == null) {
-        killProcessTree(child, 'SIGINT');
-      }
-    }
+    const serverShutdownGraceMs = resolveServerShutdownGraceMs(baseEnv);
+    const cleanupResults = await Promise.all(children
+      .filter((child) => child.exitCode == null)
+      .map((child) => killProcessTree(child, 'SIGINT',
+        child === serverProcRef.current ? { graceMs: serverShutdownGraceMs } : undefined)));
 
     await delay(1500);
-    for (const child of children) {
-      if (child.exitCode == null) {
-        killProcessTree(child, 'SIGKILL');
-      }
+    cleanupResults.push(...await Promise.all(children
+      .filter((child) => child.exitCode == null)
+      .map((child) => killProcessTree(child, 'SIGKILL'))));
+    if (runtimeStatePath && expectedStopState) {
+      await finalizeStackRuntimeStop(runtimeStatePath, {
+        expected: expectedStopState,
+        preserveDaemon: preserveDaemonOnShutdown,
+        cleanupResults,
+        requireNoStopRequest: true,
+      }).catch(() => {});
     }
   };
 
-  process.on('SIGINT', () => shutdown().then(() => process.exit(0)));
-  process.on('SIGTERM', () => shutdown().then(() => process.exit(0)));
+  if (pendingShutdownSignal) dispatchShutdown(pendingShutdownSignal);
 
   await new Promise(() => {});
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   console.error('[local] failed:', err);
+  if (err?.code === 'ESERVERRUNTIMEPROJECTION' && err?.serverActivationCommitted === true) {
+    process.exitCode = 1;
+    await new Promise(() => {});
+    return;
+  }
   process.exit(1);
 });

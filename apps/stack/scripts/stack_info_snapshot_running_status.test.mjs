@@ -292,7 +292,14 @@ test('readStackInfoSnapshot resolves listener child owned by recorded runtime pr
 
     const restore = withPatchedProcessEnv(t, { HAPPIER_STACK_STORAGE_DIR: storageDir });
     try {
-      const out = await readStackInfoSnapshot({ rootDir: process.cwd(), stackName });
+      const out = await readStackInfoSnapshot({
+        rootDir: process.cwd(),
+        stackName,
+        isPidOwnedByStackImpl: async () => false,
+        getProcessGroupIdImpl: async (pid) => pid === listener.ownerPid || pid === listener.listenerPid
+          ? listener.ownerPid
+          : null,
+      });
       assert.equal(out.runtime.running, true);
       assert.equal(out.runtime.components.server.pid, listener.listenerPid);
       assert.equal(out.runtime.components.server.running, true);
@@ -314,7 +321,7 @@ test('readStackInfoSnapshot falls back to live recorded pid and reachable port w
   const port = await reserveUnusedPort();
 
   await mkdir(baseDir, { recursive: true });
-  await writeFile(join(baseDir, 'env'), `HAPPIER_STACK_SERVER_PORT=${port}\n`, 'utf-8');
+  await writeFile(join(baseDir, 'env'), `HAPPIER_STACK_SERVER_PORT=${port}\nHAPPIER_STACK_DAEMON=0\n`, 'utf-8');
   await writeFile(
     join(baseDir, 'stack.runtime.json'),
     JSON.stringify({
@@ -350,6 +357,107 @@ test('readStackInfoSnapshot falls back to live recorded pid and reachable port w
   }
 });
 
+test('readStackInfoSnapshot reports ownership_unknown instead of server_down when listener discovery times out', async (t) => {
+  const tmp = await mkdtemp(join(tmpdir(), 'hstack-info-listener-discovery-timeout-'));
+  const storageDir = join(tmp, 'storage');
+  const stackName = 'dev-auth';
+  const baseDir = join(storageDir, stackName);
+  const port = await reserveUnusedPort();
+
+  await mkdir(baseDir, { recursive: true });
+  await writeFile(join(baseDir, 'env'), `HAPPIER_STACK_SERVER_PORT=${port}\nHAPPIER_STACK_DAEMON=0\n`, 'utf-8');
+  await writeFile(
+    join(baseDir, 'stack.runtime.json'),
+    JSON.stringify({
+      version: 1,
+      stackName,
+      ownerPid: process.pid,
+      processes: { serverPid: process.pid },
+      ports: { server: port },
+    }) + '\n',
+    'utf-8',
+  );
+
+  const restore = withPatchedProcessEnv(t, { HAPPIER_STACK_STORAGE_DIR: storageDir });
+  try {
+    const out = await readStackInfoSnapshot({
+      rootDir: process.cwd(),
+      stackName,
+      listListenPidsWithStatusImpl: async () => ({
+        status: 'timeout',
+        supported: true,
+        pids: [],
+        reason: 'listener-discovery-timeout',
+      }),
+      isTcpPortListeningImpl: async () => true,
+    });
+    assert.equal(out.runtime.components.server.running, true);
+    assert.equal(out.runtime.components.server.ownershipStatus, 'unknown');
+    assert.equal(out.runtime.components.server.listenerDiscoveryStatus, 'timeout');
+    assert.equal(out.runtime.health.status, 'degraded');
+    assert.deepEqual(out.runtime.health.issues, ['ownership_unknown']);
+  } finally {
+    restore();
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('readStackInfoSnapshot shares one listener deadline across server, backend, and UI observations', async (t) => {
+  const tmp = await mkdtemp(join(tmpdir(), 'hstack-info-shared-listener-deadline-'));
+  const storageDir = join(tmp, 'storage');
+  const stackName = 'dev-auth';
+  const baseDir = join(storageDir, stackName);
+  await mkdir(baseDir, { recursive: true });
+  await writeFile(
+    join(baseDir, 'env'),
+    'HAPPIER_STACK_SERVER_PORT=4101\nHAPPIER_STACK_UI_PORT=4103\nHAPPIER_STACK_DAEMON=0\n',
+    'utf-8',
+  );
+  await writeFile(
+    join(baseDir, 'stack.runtime.json'),
+    JSON.stringify({
+      version: 1,
+      stackName,
+      ownerPid: process.pid,
+      processes: { proxyPid: process.pid, serverPid: process.pid, serverBackendPid: process.pid, expoPid: process.pid },
+      ports: { server: 4101, serverBackend: 4102 },
+      expo: { pid: process.pid, webPort: 4103 },
+      serverProxy: { enabled: true, mode: 'proxy' },
+    }) + '\n',
+    'utf-8',
+  );
+
+  const restore = withPatchedProcessEnv(t, { HAPPIER_STACK_STORAGE_DIR: storageDir });
+  const attemptBudgetsMs = [];
+  try {
+    const startedAt = Date.now();
+    const out = await readStackInfoSnapshot({
+      rootDir: process.cwd(),
+      stackName,
+      listenerObservationTimeoutMs: 40,
+      listListenPidsWithStatusImpl: async (_port, { signal, timeoutMs } = {}) => await new Promise((resolve) => {
+        attemptBudgetsMs.push(Number(timeoutMs));
+        const timer = setTimeout(() => resolve({ status: 'ok', supported: true, pids: [process.pid] }), 120);
+        signal?.addEventListener('abort', () => clearTimeout(timer), { once: true });
+      }),
+      isTcpPortListeningImpl: async () => true,
+    });
+    const elapsedMs = Date.now() - startedAt;
+    assert.ok(elapsedMs < 250, `status listener observations compounded to ${elapsedMs}ms`);
+    assert.ok(
+      attemptBudgetsMs.reduce((total, timeoutMs) => total + timeoutMs, 0) <= 45,
+      `listener attempts received independent budgets: ${attemptBudgetsMs.join(',')}`,
+    );
+    assert.equal(out.runtime.components.server.ownershipStatus, 'unknown');
+    assert.equal(out.runtime.components.serverBackend.ownershipStatus, 'unknown');
+    assert.equal(out.runtime.components.ui.ownershipStatus, 'unknown');
+    assert.deepEqual(out.runtime.health.issues, ['ownership_unknown']);
+  } finally {
+    restore();
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
 test('readStackInfoSnapshot reports proxy and active backend separately in proxy mode', async (t) => {
   const tmp = await mkdtemp(join(tmpdir(), 'hstack-info-proxy-mode-'));
   const storageDir = join(tmp, 'storage');
@@ -378,6 +486,13 @@ test('readStackInfoSnapshot reports proxy and active backend separately in proxy
         mode: 'proxy',
         restartMode: 'exclusiveDb',
       },
+      serverLifecycle: {
+        phase: 'retry-scheduled',
+        planned: { mode: 'exclusiveDb', generation: 8, reason: 'prisma_changed' },
+        lastCompleted: { mode: 'exclusiveDb', generation: 7 },
+        retry: { afterMs: 250 },
+        disposition: null,
+      },
     }) + '\n',
     'utf-8',
   );
@@ -405,7 +520,15 @@ test('readStackInfoSnapshot reports proxy and active backend separately in proxy
       mode: 'proxy',
       restartMode: 'exclusiveDb',
     });
-    assert.equal(out.runtime.health.status, 'healthy');
+    assert.deepEqual(out.runtime.serverLifecycle, {
+      phase: 'retry-scheduled',
+      planned: { mode: 'exclusiveDb', generation: 8, reason: 'prisma_changed' },
+      lastCompleted: { mode: 'exclusiveDb', generation: 7 },
+      retry: { afterMs: 250 },
+      disposition: null,
+    });
+    assert.equal(out.runtime.health.status, 'degraded');
+    assert.deepEqual(out.runtime.health.issues, ['ownership_unknown']);
   } finally {
     restore();
     await rm(tmp, { recursive: true, force: true });
@@ -436,7 +559,17 @@ test('readStackInfoSnapshot does not report running when stale metadata points a
 
   const restore = withPatchedProcessEnv(t, { HAPPIER_STACK_STORAGE_DIR: storageDir });
   try {
-    const out = await readStackInfoSnapshot({ rootDir: process.cwd(), stackName });
+    const out = await readStackInfoSnapshot({
+      rootDir: process.cwd(),
+      stackName,
+      listListenPidsWithStatusImpl: async (port) => ({
+        status: 'ok',
+        supported: true,
+        pids: Number(port) === listener.port ? [process.pid] : [],
+      }),
+      isTcpPortListeningImpl: async (port) => Number(port) === listener.port,
+      isPidOwnedByStackImpl: async () => false,
+    });
     assert.equal(out.runtime.running, false);
     assert.equal(out.runtime.components.server.running, false);
     assert.equal(out.runtime.components.server.portListening, true);
@@ -502,7 +635,22 @@ test('readStackInfoSnapshot resolves stale server and UI pids from stack-owned l
 
     const restore = withPatchedProcessEnv(t, { HAPPIER_STACK_STORAGE_DIR: storageDir });
     try {
-      const out = await readStackInfoSnapshot({ rootDir: process.cwd(), stackName });
+      const ownedPids = new Set([serverListener.pid, uiListener.pid]);
+      const out = await readStackInfoSnapshot({
+        rootDir: process.cwd(),
+        stackName,
+        listListenPidsWithStatusImpl: async (port) => ({
+          status: 'ok',
+          supported: true,
+          pids: port === serverListener.port
+            ? [serverListener.pid]
+            : port === uiListener.port
+              ? [uiListener.pid]
+              : [],
+        }),
+        isTcpPortListeningImpl: async (port) => port === serverListener.port || port === uiListener.port,
+        isPidOwnedByStackImpl: async (pid) => ownedPids.has(pid),
+      });
       assert.equal(out.runtime.running, true);
       assert.ok([serverListener.pid, uiListener.pid].includes(out.runtime.runningPid));
       assert.equal(out.runtime.health.status, 'healthy');
@@ -524,6 +672,137 @@ test('readStackInfoSnapshot resolves stale server and UI pids from stack-owned l
     await rm(tmp, { recursive: true, force: true });
   }
 });
+
+test('readStackInfoSnapshot projects a runtime-backed static UI through the server instead of stale Expo metadata', async (t) => {
+  const tmp = await mkdtemp(join(tmpdir(), 'hstack-info-runtime-ui-'));
+  const storageDir = join(tmp, 'storage');
+  const stackName = 'runtime-ui';
+  const baseDir = join(storageDir, stackName);
+
+  await mkdir(baseDir, { recursive: true });
+
+  const serverListener = await withListeningServer();
+  const staleUiPort = await reserveUnusedPort();
+  await writeFile(
+    join(baseDir, 'env'),
+    `HAPPIER_STACK_SERVER_PORT=${serverListener.port}\nHAPPIER_STACK_RUNTIME_MODE=require\nHAPPIER_STACK_DAEMON=0\n`,
+    'utf-8',
+  );
+  await writeFile(
+    join(baseDir, 'stack.runtime.json'),
+    JSON.stringify({
+      version: 1,
+      stackName,
+      ownerPid: process.pid,
+      runtimeSnapshotId: 'snapshot-1',
+      processes: { serverPid: process.pid, expoPid: 999_999_998 },
+      ports: { server: serverListener.port },
+      expo: { webPort: staleUiPort, webEnabled: true },
+    }) + '\n',
+    'utf-8',
+  );
+
+  const restore = withPatchedProcessEnv(t, { HAPPIER_STACK_STORAGE_DIR: storageDir });
+  try {
+    const out = await readStackInfoSnapshot({
+      rootDir: process.cwd(),
+      stackName,
+      listListenPidsWithStatusImpl: async (port) => ({
+        status: 'ok',
+        supported: true,
+        pids: port === serverListener.port ? [process.pid] : [],
+      }),
+      isTcpPortListeningImpl: async (port) => port === serverListener.port,
+      isPidOwnedByStackImpl: async (pid) => pid === process.pid,
+    });
+
+    assert.equal(out.runtime.components.server.running, true);
+    assert.equal(out.runtime.components.ui.running, true);
+    assert.equal(out.runtime.components.ui.pid, process.pid);
+    assert.equal(out.ports.ui, serverListener.port);
+    assert.equal(out.urls.uiUrl, `http://${out.urls.host}:${serverListener.port}`);
+    assert.equal(out.runtime.health.status, 'healthy');
+    assert.deepEqual(out.runtime.health.issues, []);
+  } finally {
+    restore();
+    await serverListener.close();
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+for (const scenario of [
+  {
+    name: 'environment-disabled',
+    envLine: 'HAPPIER_STACK_SERVE_UI=0',
+    runtimeServeUi: undefined,
+  },
+  {
+    name: 'launch-disabled',
+    envLine: '',
+    runtimeServeUi: false,
+  },
+]) {
+  test(`readStackInfoSnapshot keeps runtime-backed UI disabled for ${scenario.name} truth despite stale live Expo metadata`, async (t) => {
+    const tmp = await mkdtemp(join(tmpdir(), `hstack-info-runtime-ui-${scenario.name}-`));
+    const storageDir = join(tmp, 'storage');
+    const stackName = `runtime-ui-${scenario.name}`;
+    const baseDir = join(storageDir, stackName);
+
+    await mkdir(baseDir, { recursive: true });
+    const serverListener = await withListeningServer();
+    const staleUiPort = await reserveUnusedPort();
+    await writeFile(
+      join(baseDir, 'env'),
+      [
+        `HAPPIER_STACK_SERVER_PORT=${serverListener.port}`,
+        'HAPPIER_STACK_RUNTIME_MODE=require',
+        'HAPPIER_STACK_DAEMON=0',
+        scenario.envLine,
+        '',
+      ].filter((line) => line !== '').join('\n') + '\n',
+      'utf-8',
+    );
+    await writeFile(
+      join(baseDir, 'stack.runtime.json'),
+      JSON.stringify({
+        version: 1,
+        stackName,
+        ownerPid: process.pid,
+        runtimeSnapshotId: 'snapshot-1',
+        ...(typeof scenario.runtimeServeUi === 'boolean' ? { serveUi: scenario.runtimeServeUi } : {}),
+        processes: { serverPid: process.pid, expoPid: process.pid },
+        ports: { server: serverListener.port },
+        expo: { webPort: staleUiPort, webEnabled: true },
+      }) + '\n',
+      'utf-8',
+    );
+
+    const restore = withPatchedProcessEnv(t, { HAPPIER_STACK_STORAGE_DIR: storageDir });
+    try {
+      const out = await readStackInfoSnapshot({
+        rootDir: process.cwd(),
+        stackName,
+        listListenPidsWithStatusImpl: async (port) => ({
+          status: 'ok',
+          supported: true,
+          pids: port === serverListener.port ? [process.pid] : [],
+        }),
+        isTcpPortListeningImpl: async (port) => port === serverListener.port,
+        isPidOwnedByStackImpl: async (pid) => pid === process.pid,
+      });
+
+      assert.equal(out.runtime.components.ui.running, false);
+      assert.equal(out.runtime.components.ui.pid, null);
+      assert.equal(out.ports.ui, null);
+      assert.equal(out.urls.uiUrl, null);
+      assert.equal(out.runtime.health.issues.includes('ui_down'), false);
+    } finally {
+      restore();
+      await serverListener.close();
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+}
 
 test('readStackInfoSnapshot marks UI as down when expo runtime metadata is stale', async (t) => {
   const tmp = await mkdtemp(join(tmpdir(), 'hstack-info-ui-stale-'));
@@ -551,7 +830,16 @@ test('readStackInfoSnapshot marks UI as down when expo runtime metadata is stale
 
   const restore = withPatchedProcessEnv(t, { HAPPIER_STACK_STORAGE_DIR: storageDir });
   try {
-    const out = await readStackInfoSnapshot({ rootDir: process.cwd(), stackName });
+    const out = await readStackInfoSnapshot({
+      rootDir: process.cwd(),
+      stackName,
+      listListenPidsWithStatusImpl: async (port) => ({
+        status: 'ok',
+        supported: true,
+        pids: port === serverListener.port ? [process.pid] : [],
+      }),
+      isTcpPortListeningImpl: async (port) => port === serverListener.port,
+    });
     assert.equal(out.runtime.running, true);
     assert.equal(out.runtime.components.server.running, true);
     assert.equal(out.runtime.components.ui.running, false);
@@ -590,7 +878,16 @@ test('readStackInfoSnapshot requires UI port reachability even when expo pid is 
 
   const restore = withPatchedProcessEnv(t, { HAPPIER_STACK_STORAGE_DIR: storageDir });
   try {
-    const out = await readStackInfoSnapshot({ rootDir: process.cwd(), stackName });
+    const out = await readStackInfoSnapshot({
+      rootDir: process.cwd(),
+      stackName,
+      listListenPidsWithStatusImpl: async (port) => ({
+        status: 'ok',
+        supported: true,
+        pids: port === serverListener.port ? [process.pid] : [],
+      }),
+      isTcpPortListeningImpl: async (port) => port === serverListener.port,
+    });
     assert.equal(out.runtime.running, true);
     assert.equal(out.runtime.components.ui.pidAlive, true);
     assert.equal(out.runtime.components.ui.running, false);
@@ -665,7 +962,17 @@ test('readStackInfoSnapshot refreshes stale runtime daemonPid from daemon.state.
 
   const restore = withPatchedProcessEnv(t, { HAPPIER_STACK_STORAGE_DIR: storageDir });
   try {
-    const out = await readStackInfoSnapshot({ rootDir: process.cwd(), stackName });
+    const out = await readStackInfoSnapshot({
+      rootDir: process.cwd(),
+      stackName,
+      resolvePidStackOwnershipImpl: async (pid, ownershipContext) => {
+        assert.equal(pid, daemonProcess.pid);
+        assert.equal(ownershipContext.stackName, stackName);
+        assert.equal(ownershipContext.envPath, envPath);
+        assert.equal(ownershipContext.cliHomeDir, join(baseDir, 'cli'));
+        return { status: 'owned', owned: true, reason: 'test_process' };
+      },
+    });
     assert.equal(out.runtime.processes?.daemonPid, daemonProcess.pid);
   } finally {
     restore();
@@ -747,7 +1054,17 @@ test('readStackInfoSnapshot marks daemon as down when stack runtime is otherwise
 
   const restore = withPatchedProcessEnv(t, { HAPPIER_STACK_STORAGE_DIR: storageDir });
   try {
-    const out = await readStackInfoSnapshot({ rootDir: process.cwd(), stackName });
+    const out = await readStackInfoSnapshot({
+      rootDir: process.cwd(),
+      stackName,
+      listListenPidsWithStatusImpl: async (port) => ({
+        status: 'ok',
+        supported: true,
+        pids: Number(port) === serverListener.port ? [process.pid] : [],
+      }),
+      isTcpPortListeningImpl: async (port) => Number(port) === serverListener.port,
+      isPidOwnedByStackImpl: async (pid) => Number(pid) === process.pid,
+    });
     assert.equal(out.runtime.running, true);
     assert.equal(out.runtime.components.server.running, true);
     assert.equal(out.runtime.components.daemon.running, false);

@@ -1,6 +1,11 @@
 import { dirname, join } from 'node:path';
 import { resolvePidStackOwnership } from '../proc/ownership.mjs';
-import { isPidAlive, readStackRuntimeStateFile, recordStackRuntimeUpdate } from './runtime_state.mjs';
+import {
+  isPidAlive,
+  mutateStackRuntimeDaemonMembership,
+  readStackRuntimeStateFile,
+  recordStackRuntimeUpdate,
+} from './runtime_state.mjs';
 
 export function normalizeDaemonPid(value) {
   const pid = Number(value);
@@ -142,6 +147,15 @@ export function observeStackDaemonRuntime(
       daemonState,
     };
   }
+  if (statePid && isPidAliveImpl(statePid)) {
+    return {
+      running: false,
+      pid: statePid,
+      status: status || 'unreachable',
+      source: 'daemon_state',
+      daemonState,
+    };
+  }
 
   const runtimePidCandidates = [
     normalizeDaemonPid(runtimeDaemonPid),
@@ -234,49 +248,40 @@ export async function recordStackRuntimeDaemonPid(
   const desiredFingerprint = shouldUpdateFingerprint
     ? normalizeDaemonDistFingerprint(daemonDistFingerprint)
     : undefined;
-  const existing = await readStackRuntimeStateFileImpl(statePath).catch(() => null);
-  const liveExistingPids = await pruneEligibleDaemonPids(
-    getRuntimeDaemonPidSet(existing?.processes),
-    { isPidAliveImpl, isDaemonPidEligibleImpl },
-  );
-  const acceptedDesiredPid = desiredPid && await isDaemonPidEligible(
-    desiredPid,
-    { isPidAliveImpl, isDaemonPidEligibleImpl },
-  )
-    ? desiredPid
-    : null;
-  const desiredDaemonPids = desiredPid
-    ? [...liveExistingPids.filter((pid) => pid !== acceptedDesiredPid), ...(acceptedDesiredPid ? [acceptedDesiredPid] : [])]
-    : [];
-  const currentPid = normalizeDaemonPid(existing?.processes?.daemonPid);
-  const currentDaemonPids = normalizeDaemonPidList(existing?.processes?.daemonPids);
-  const currentFingerprint = normalizeDaemonDistFingerprint(existing?.daemon?.distClosureFingerprint);
-  if (
-    currentPid === acceptedDesiredPid
-    && currentDaemonPids.length === desiredDaemonPids.length
-    && currentDaemonPids.every((pid, index) => pid === desiredDaemonPids[index])
-    && (!shouldUpdateFingerprint || currentFingerprint === desiredFingerprint)
-  ) {
-    return {
-      updated: false,
-      pid: acceptedDesiredPid,
-      daemonPids: desiredDaemonPids,
-      daemonDistFingerprint: shouldUpdateFingerprint ? desiredFingerprint : currentFingerprint,
-    };
-  }
-
-  const patch = { processes: { daemonPid: acceptedDesiredPid, daemonPids: desiredDaemonPids } };
-  if (shouldUpdateFingerprint) {
-    patch.daemon = { distClosureFingerprint: desiredFingerprint };
-  }
-
-  await recordStackRuntimeUpdateImpl(statePath, patch);
-  return {
-    updated: true,
-    pid: acceptedDesiredPid,
-    daemonPids: desiredDaemonPids,
-    daemonDistFingerprint: shouldUpdateFingerprint ? desiredFingerprint : currentFingerprint,
+  const buildMutation = async (existing) => {
+    const liveExistingPids = await pruneEligibleDaemonPids(
+      getRuntimeDaemonPidSet(existing?.processes),
+      { isPidAliveImpl, isDaemonPidEligibleImpl },
+    );
+    const acceptedDesiredPid = desiredPid && await isDaemonPidEligible(
+      desiredPid,
+      { isPidAliveImpl, isDaemonPidEligibleImpl },
+    ) ? desiredPid : null;
+    const desiredDaemonPids = desiredPid
+      ? [...liveExistingPids.filter((pid) => pid !== acceptedDesiredPid), ...(acceptedDesiredPid ? [acceptedDesiredPid] : [])]
+      : [];
+    const currentPid = normalizeDaemonPid(existing?.processes?.daemonPid);
+    const currentDaemonPids = normalizeDaemonPidList(existing?.processes?.daemonPids);
+    const currentFingerprint = normalizeDaemonDistFingerprint(existing?.daemon?.distClosureFingerprint);
+    const acceptedFingerprint = shouldUpdateFingerprint ? (acceptedDesiredPid ? desiredFingerprint : null) : currentFingerprint;
+    const unchanged = currentPid === acceptedDesiredPid
+      && currentDaemonPids.length === desiredDaemonPids.length
+      && currentDaemonPids.every((pid, index) => pid === desiredDaemonPids[index])
+      && (!shouldUpdateFingerprint || currentFingerprint === acceptedFingerprint);
+    const result = { updated: !unchanged, pid: acceptedDesiredPid, daemonPids: desiredDaemonPids, daemonDistFingerprint: acceptedFingerprint };
+    if (unchanged) return { patch: null, result };
+    const patch = { processes: { daemonPid: acceptedDesiredPid, daemonPids: desiredDaemonPids } };
+    if (shouldUpdateFingerprint) patch.daemon = { distClosureFingerprint: acceptedFingerprint };
+    return { patch, result };
   };
+
+  if (readStackRuntimeStateFileImpl === readStackRuntimeStateFile && recordStackRuntimeUpdateImpl === recordStackRuntimeUpdate) {
+    return await mutateStackRuntimeDaemonMembership(statePath, buildMutation);
+  }
+  const existing = await readStackRuntimeStateFileImpl(statePath).catch(() => null);
+  const mutation = await buildMutation(existing);
+  if (mutation.patch) await recordStackRuntimeUpdateImpl(statePath, mutation.patch);
+  return mutation.result;
 }
 
 export async function readStackRuntimeStateWithDaemonSync(
@@ -377,7 +382,7 @@ export async function syncStackRuntimeDaemonPidFromDaemonState(
   );
 
   let acceptedObserved = observed;
-  if (observed.running && observed.pid) {
+  if (observed.pid) {
     const observedEligible = await isDaemonPidEligible(observed.pid, {
       isPidAliveImpl,
       isDaemonPidEligibleImpl,
@@ -413,21 +418,24 @@ export async function syncStackRuntimeDaemonPidFromDaemonState(
     isDaemonPidEligibleImpl,
   };
   if (shouldSyncFingerprint) {
-    recordOptions.daemonDistFingerprint = acceptedObserved.running ? daemonDistFingerprint : null;
+    recordOptions.daemonDistFingerprint = acceptedObserved.pid ? daemonDistFingerprint : null;
   }
 
-  const pidToRecord =
-    acceptedObserved.running || acceptedObserved.source === 'runtime_pid'
-      ? acceptedObserved.pid
-      : null;
+  const pidToRecord = acceptedObserved.pid;
   const recorded = await recordStackRuntimeDaemonPid(
     runtimeStatePath,
     pidToRecord,
     recordOptions,
   );
+  const recordedPid = normalizeDaemonPid(recorded.pid);
+  const recordedMatches = recordedPid === normalizeDaemonPid(acceptedObserved.pid);
+  const recordedRunning = acceptedObserved.running === true && recordedMatches;
 
   return {
     ...acceptedObserved,
+    running: recordedRunning,
+    pid: recordedPid,
+    status: recordedMatches ? acceptedObserved.status : 'stopped',
     updated: recorded.updated,
     daemonDistFingerprint: recorded.daemonDistFingerprint,
   };

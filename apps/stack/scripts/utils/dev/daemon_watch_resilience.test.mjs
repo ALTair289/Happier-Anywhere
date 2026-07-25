@@ -1,15 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 import {
+  createHappyCliReloadDescriptors,
   createHappyCliReloadExecutor,
-  ensureDevCliReady,
   startDevDaemon,
-  watchHappyCliAndRestartDaemon,
 } from './daemon.mjs';
+import { syncStackRuntimeDaemonPidFromDaemonState } from '../stack/runtime_daemon_state.mjs';
 
 async function writeDistBuildManifest(distIndexPath, fingerprint = 'abc123def4567890') {
   await writeFile(
@@ -24,145 +24,164 @@ async function writeDistBuildManifest(distIndexPath, fingerprint = 'abc123def456
   );
 }
 
-test('watch onChange does not throw when daemon restart fails', async () => {
-  let capturedOnChange = null;
-  let restartCalls = 0;
-  let buildCalls = 0;
+test('CLI reload descriptors share the scoped runtime inventory and exclude generated refresh outputs', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hs-daemon-cli-inputs-'));
+  t.after(async () => rm(root, { recursive: true, force: true }));
 
-  const watcher = watchHappyCliAndRestartDaemon(
-    {
-      enabled: true,
-      startDaemon: true,
-      buildCli: true,
-      cliDir: '/tmp/happy-cli',
-      cliBin: '/tmp/happy-cli/bin/happier.mjs',
-      cliHomeDir: '/tmp/happy-cli-home',
-      internalServerUrl: 'http://127.0.0.1:3009',
-      publicServerUrl: 'http://localhost:3009',
-      isShuttingDown: () => false,
-    },
-    {
-      watchDebouncedImpl: ({ onChange }) => {
-        capturedOnChange = onChange;
-        return { close() {} };
+  const cliDir = join(root, 'apps', 'cli');
+  const agentsDir = join(root, 'packages', 'agents');
+  const cliCommonDir = join(root, 'packages', 'cli-common');
+  const connectionSupervisorDir = join(root, 'packages', 'connection-supervisor');
+  const protocolDir = join(root, 'packages', 'protocol');
+  const releaseRuntimeDir = join(root, 'packages', 'release-runtime');
+  const transfersDir = join(root, 'packages', 'transfers');
+  for (const path of [
+    join(cliDir, 'src'),
+    join(cliDir, 'src', 'agent', 'tools', 'trace'),
+    join(cliDir, 'bin'),
+    join(cliDir, 'codex'),
+    join(cliDir, 'scripts'),
+    join(agentsDir, 'src'),
+    join(agentsDir, 'scripts'),
+    join(cliCommonDir, 'src'),
+    join(connectionSupervisorDir, 'src'),
+    join(protocolDir, 'src'),
+    join(releaseRuntimeDir, 'src'),
+    join(transfersDir, 'src'),
+    join(root, 'scripts', 'workspaces'),
+    join(root, 'apps', 'ui', 'src'),
+  ]) {
+    await mkdir(path, { recursive: true });
+  }
+  await writeFile(
+    join(cliDir, 'package.json'),
+    JSON.stringify({
+      name: '@happier-dev/cli',
+      dependencies: {
+        '@happier-dev/agents': '0.0.0',
+        '@happier-dev/cli-common': '0.0.0',
+        '@happier-dev/connection-supervisor': '0.0.0',
+        '@happier-dev/protocol': '0.0.0',
+        '@happier-dev/release-runtime': '0.0.0',
+        '@happier-dev/transfers': '0.0.0',
       },
-      ensureCliBuiltImpl: async () => {
-        buildCalls += 1;
-        return { built: true, reason: 'test' };
-      },
-      startLocalDaemonWithAuthImpl: async () => {
-        restartCalls += 1;
-        throw new Error('restart failed');
-      },
-      existsSyncImpl: () => true,
-      logger: { log() {}, warn() {}, error() {} },
-    }
+    }) + '\n',
+    'utf-8',
   );
-
-  assert.ok(watcher);
-  assert.equal(typeof capturedOnChange, 'function');
-
-  await assert.doesNotReject(async () => {
-    await capturedOnChange({ eventType: 'change', filename: 'foo.ts' });
-  });
-
-  assert.equal(buildCalls, 1);
-  assert.equal(restartCalls, 1);
-});
-
-test('watch retries restart when a pending change arrives during a failed restart', async () => {
-  let capturedOnChange = null;
-  let restartCalls = 0;
-  let buildCalls = 0;
-
-  const watcher = watchHappyCliAndRestartDaemon(
-    {
-      enabled: true,
-      startDaemon: true,
-      buildCli: true,
-      cliDir: '/tmp/happy-cli',
-      cliBin: '/tmp/happy-cli/bin/happier.mjs',
-      cliHomeDir: '/tmp/happy-cli-home',
-      internalServerUrl: 'http://127.0.0.1:3009',
-      publicServerUrl: 'http://localhost:3009',
-      isShuttingDown: () => false,
-    },
-    {
-      watchDebouncedImpl: ({ onChange }) => {
-        capturedOnChange = onChange;
-        return { close() {} };
-      },
-      ensureCliBuiltImpl: async () => {
-        buildCalls += 1;
-        return { built: true, reason: 'test' };
-      },
-      startLocalDaemonWithAuthImpl: async () => {
-        restartCalls += 1;
-        if (restartCalls === 1) {
-          await capturedOnChange({ eventType: 'change', filename: 'second-change.ts' });
-          throw new Error('restart failed');
-        }
-      },
-      existsSyncImpl: () => true,
-      logger: { log() {}, warn() {}, error() {} },
-    }
+  await writeFile(
+    join(agentsDir, 'package.json'),
+    JSON.stringify({ name: '@happier-dev/agents', dependencies: { '@happier-dev/protocol': '0.0.0' } }) + '\n',
+    'utf-8',
   );
-
-  assert.ok(watcher);
-  assert.equal(typeof capturedOnChange, 'function');
-
-  await assert.doesNotReject(async () => {
-    await capturedOnChange({ eventType: 'change', filename: 'first-change.ts' });
-  });
-
-  assert.equal(buildCalls, 2);
-  assert.equal(restartCalls, 2);
-});
-
-test('watch rebuilds again when a pending change arrives during a successful build', async () => {
-  let capturedOnChange = null;
-  let restartCalls = 0;
-  let buildCalls = 0;
-
-  const watcher = watchHappyCliAndRestartDaemon(
-    {
-      enabled: true,
-      startDaemon: true,
-      buildCli: true,
-      cliDir: '/tmp/happy-cli',
-      cliBin: '/tmp/happy-cli/bin/happier.mjs',
-      cliHomeDir: '/tmp/happy-cli-home',
-      internalServerUrl: 'http://127.0.0.1:3009',
-      publicServerUrl: 'http://localhost:3009',
-      isShuttingDown: () => false,
-    },
-    {
-      watchDebouncedImpl: ({ onChange }) => {
-        capturedOnChange = onChange;
-        return { close() {} };
+  await writeFile(
+    join(cliCommonDir, 'package.json'),
+    JSON.stringify({
+      name: '@happier-dev/cli-common',
+      dependencies: {
+        '@happier-dev/agents': '0.0.0',
+        '@happier-dev/protocol': '0.0.0',
+        '@happier-dev/release-runtime': '0.0.0',
       },
-      ensureCliBuiltImpl: async () => {
-        buildCalls += 1;
-        if (buildCalls === 1) {
-          await capturedOnChange({ eventType: 'change', filename: 'second-change.ts' });
-        }
-        return { built: true, reason: 'test' };
-      },
-      startLocalDaemonWithAuthImpl: async () => {
-        restartCalls += 1;
-      },
-      existsSyncImpl: () => true,
-      logger: { log() {}, warn() {}, error() {} },
-    }
+    }) + '\n',
+    'utf-8',
   );
+  await writeFile(
+    join(connectionSupervisorDir, 'package.json'),
+    '{"name":"@happier-dev/connection-supervisor"}\n',
+    'utf-8',
+  );
+  await writeFile(join(protocolDir, 'package.json'), '{"name":"@happier-dev/protocol"}\n', 'utf-8');
+  await writeFile(join(releaseRuntimeDir, 'package.json'), '{"name":"@happier-dev/release-runtime"}\n', 'utf-8');
+  await writeFile(
+    join(transfersDir, 'package.json'),
+    '{"name":"@happier-dev/transfers","dependencies":{"@happier-dev/protocol":"0.0.0"}}\n',
+    'utf-8',
+  );
+  for (const path of [
+    join(cliDir, 'tsconfig.json'),
+    join(cliDir, 'tsconfig.build.json'),
+    join(cliDir, 'pkgroll.config.mjs'),
+    join(agentsDir, 'tsconfig.json'),
+    join(agentsDir, 'tsconfig.build.json'),
+    join(cliCommonDir, 'tsconfig.json'),
+    join(connectionSupervisorDir, 'tsconfig.json'),
+    join(protocolDir, 'tsconfig.json'),
+    join(releaseRuntimeDir, 'tsconfig.json'),
+    join(transfersDir, 'tsconfig.json'),
+    join(root, 'package.json'),
+    join(root, 'yarn.lock'),
+  ]) {
+    await writeFile(path, '{}\n', 'utf-8');
+  }
+  await writeFile(join(cliDir, 'src', 'index.ts'), 'export {};\n', 'utf-8');
+  await writeFile(join(agentsDir, 'src', 'index.ts'), 'export {};\n', 'utf-8');
+  await writeFile(join(cliCommonDir, 'src', 'index.ts'), 'export {};\n', 'utf-8');
+  await writeFile(join(connectionSupervisorDir, 'src', 'index.ts'), 'export {};\n', 'utf-8');
+  await writeFile(join(protocolDir, 'src', 'index.ts'), 'export {};\n', 'utf-8');
+  await writeFile(join(releaseRuntimeDir, 'src', 'index.ts'), 'export {};\n', 'utf-8');
+  await writeFile(join(transfersDir, 'src', 'index.ts'), 'export {};\n', 'utf-8');
+  await writeFile(join(agentsDir, 'scripts', 'release-only.mjs'), 'export {};\n', 'utf-8');
 
-  assert.ok(watcher);
-  assert.equal(typeof capturedOnChange, 'function');
+  const descriptors = createHappyCliReloadDescriptors({ cliDir, logger: { warn() {} } });
+  const paths = descriptors.flatMap((descriptor) => descriptor.paths);
+  const targetsById = new Map(descriptors.map(({ id, target }) => [id, target]));
+  assert.equal(targetsById.get('shared:agents'), 'shared');
+  assert.equal(targetsById.get('shared:cli-common'), 'shared');
+  assert.equal(targetsById.get('shared:protocol'), 'shared');
+  assert.equal(targetsById.get('daemon:connection-supervisor'), 'daemon');
+  assert.equal(targetsById.get('daemon:release-runtime'), 'daemon');
+  assert.equal(targetsById.get('daemon:transfers'), 'daemon');
+  assert.ok(
+    descriptors.every((descriptor) => typeof descriptor.readSignatureAsync === 'function'),
+    'runtime descriptors must keep recursive signature reads off the lifecycle event loop',
+  );
+  assert.ok(paths.includes(join(agentsDir, 'src')));
+  assert.ok(paths.includes(join(agentsDir, 'tsconfig.build.json')));
+  assert.ok(paths.includes(join(protocolDir, 'src')), 'recursive runtime workspace dependencies must be included');
+  assert.ok(paths.includes(join(cliDir, 'pkgroll.config.mjs')));
+  assert.ok(!paths.includes(join(agentsDir, 'scripts')), 'workspace release/build scripts are not runtime inputs');
+  assert.ok(!paths.some((path) => path.includes('/dist') || path.includes('/node_modules')));
 
-  await capturedOnChange({ eventType: 'change', filename: 'first-change.ts' });
+  const before = descriptors.map((descriptor) => descriptor.readSignature());
+  const assertIgnoredFileLifecycle = async (path) => {
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, 'export const testOnly = 1;\n', 'utf-8');
+    assert.deepEqual(descriptors.map((descriptor) => descriptor.readSignature()), before, `adding ${path} must be ignored`);
+    await writeFile(path, 'export const testOnly = 2;\n', 'utf-8');
+    assert.deepEqual(descriptors.map((descriptor) => descriptor.readSignature()), before, `editing ${path} must be ignored`);
+    await rm(path, { force: true });
+    assert.deepEqual(descriptors.map((descriptor) => descriptor.readSignature()), before, `deleting ${path} must be ignored`);
+  };
+  await assertIgnoredFileLifecycle(join(cliDir, 'src', 'testkit', 'nested', 'runtimeFixture.ts'));
+  await assertIgnoredFileLifecycle(join(cliDir, 'src', 'agent', 'tools', 'trace', 'runtimeFixture.testkit.ts'));
+  await assertIgnoredFileLifecycle(join(cliDir, 'src', 'vitestSetup.ts'));
+  await assertIgnoredFileLifecycle(join(cliDir, 'src', 'runtime.test.ts'));
+  const assertRuntimeFileLifecycle = async (path) => {
+    await writeFile(path, 'export const runtimeValue = 1;\n', 'utf-8');
+    const added = descriptors.map((descriptor) => descriptor.readSignature());
+    assert.notDeepEqual(added, before, `adding ${path} must change the runtime signature`);
+    await writeFile(path, 'export const runtimeValue = 200;\n', 'utf-8');
+    const edited = descriptors.map((descriptor) => descriptor.readSignature());
+    assert.notDeepEqual(edited, added, `editing ${path} must change the runtime signature`);
+    await rm(path, { force: true });
+    assert.deepEqual(descriptors.map((descriptor) => descriptor.readSignature()), before, `deleting ${path} must restore the runtime signature`);
+  };
+  await assertRuntimeFileLifecycle(join(cliDir, 'src', 'runtime-testkit.ts'));
+  await assertRuntimeFileLifecycle(join(cliDir, 'src', 'runtime_testkit.ts'));
+  await mkdir(join(cliDir, 'dist'), { recursive: true });
+  await mkdir(join(root, 'node_modules'), { recursive: true });
+  await writeFile(join(cliDir, 'dist', 'index.mjs'), 'export const generated = true;\n', 'utf-8');
+  await writeFile(join(root, 'node_modules', '.happier-stack-dependencies-ready'), '{}\n', 'utf-8');
+  await writeFile(join(root, 'apps', 'ui', 'src', 'unrelated.ts'), 'export {};\n', 'utf-8');
+  const after = descriptors.map((descriptor) => descriptor.readSignature());
+  assert.deepEqual(after, before, 'build outputs, dependency markers, and unrelated UI must not self-trigger CLI reload');
 
-  assert.equal(buildCalls, 2);
-  assert.equal(restartCalls, 2);
+  await writeFile(join(cliDir, 'src', 'index.ts'), 'export const runtime = true;\n', 'utf-8');
+  assert.notDeepEqual(
+    descriptors.map((descriptor) => descriptor.readSignature()),
+    before,
+    'runtime CLI source changes must trigger daemon reload',
+  );
 });
 
 test('startDevDaemon forwards stack context to daemon startup', async () => {
@@ -195,607 +214,6 @@ test('startDevDaemon forwards stack context to daemon startup', async () => {
   assert.equal(capturedArgs.env?.TEST_ENV, '1');
 });
 
-test('watch forwards stack context to daemon restart', async () => {
-  let capturedOnChange = null;
-  let restartArgs = null;
-
-  watchHappyCliAndRestartDaemon(
-    {
-      enabled: true,
-      startDaemon: true,
-      buildCli: true,
-      cliDir: '/tmp/happy-cli',
-      cliBin: '/tmp/happy-cli/bin/happier.mjs',
-      cliHomeDir: '/tmp/happy-cli-home',
-      internalServerUrl: 'http://127.0.0.1:3009',
-      publicServerUrl: 'http://localhost:3009',
-      isShuttingDown: () => false,
-      env: { TEST_ENV: '1' },
-      stackName: 'dev',
-      cliIdentity: 'reviewer',
-    },
-    {
-      watchDebouncedImpl: ({ onChange }) => {
-        capturedOnChange = onChange;
-        return { close() {} };
-      },
-      ensureCliBuiltImpl: async () => ({ built: true, reason: 'test' }),
-      startLocalDaemonWithAuthImpl: async (args) => {
-        restartArgs = args;
-      },
-      existsSyncImpl: () => true,
-      logger: { log() {}, warn() {}, error() {} },
-    }
-  );
-
-  assert.equal(typeof capturedOnChange, 'function');
-  await capturedOnChange({ eventType: 'change', filename: 'foo.ts' });
-
-  assert.ok(restartArgs);
-  assert.equal(restartArgs.stackName, 'dev');
-  assert.equal(restartArgs.cliIdentity, 'reviewer');
-  assert.equal(restartArgs.env?.TEST_ENV, '1');
-  assert.equal(restartArgs.forceRestart, false);
-});
-
-test('watch uses daemon control restart for a pingable running daemon and syncs runtime state', async () => {
-  let capturedOnChange = null;
-  let coldStartCalls = 0;
-  let controlRestartCalls = 0;
-  let syncCalls = 0;
-
-  watchHappyCliAndRestartDaemon(
-    {
-      enabled: true,
-      startDaemon: true,
-      buildCli: true,
-      cliDir: '/tmp/happy-cli',
-      cliBin: '/tmp/happy-cli/bin/happier.mjs',
-      cliHomeDir: '/tmp/happy-cli-home',
-      internalServerUrl: 'http://127.0.0.1:3009',
-      publicServerUrl: 'http://localhost:3009',
-      runtimeStatePath: '/tmp/stack.runtime.json',
-      isShuttingDown: () => false,
-      env: { TEST_ENV: '1' },
-      stackName: 'dev',
-    },
-    {
-      watchDebouncedImpl: ({ onChange }) => {
-        capturedOnChange = onChange;
-        return { close() {} };
-      },
-      ensureCliBuiltImpl: async () => ({ built: true, reason: 'test' }),
-      pingDaemonImpl: async () => ({ ok: true, pid: 111 }),
-      restartDaemonViaControlServerImpl: async (args) => {
-        controlRestartCalls += 1;
-        assert.equal(args.cliHomeDir, '/tmp/happy-cli-home');
-        assert.equal(args.internalServerUrl, 'http://127.0.0.1:3009');
-        assert.equal(args.stackName, 'dev');
-        assert.equal(Object.prototype.hasOwnProperty.call(args, 'restartSessionRunners'), false);
-      },
-      syncStackRuntimeDaemonPidFromDaemonStateImpl: async (args) => {
-        syncCalls += 1;
-        assert.equal(args.runtimeStatePath, '/tmp/stack.runtime.json');
-      },
-      startLocalDaemonWithAuthImpl: async (args) => {
-        coldStartCalls += 1;
-      },
-      existsSyncImpl: () => true,
-      logger: { log() {}, warn() {}, error() {} },
-    },
-  );
-
-  assert.equal(typeof capturedOnChange, 'function');
-  await capturedOnChange({ eventType: 'change', filename: 'foo.ts' });
-
-  assert.equal(controlRestartCalls, 1);
-  assert.equal(syncCalls, 1);
-  assert.equal(coldStartCalls, 0);
-});
-
-test('watch falls back to cold start when daemon control ping is unavailable', async () => {
-  let capturedOnChange = null;
-  let coldStartCalls = 0;
-  let controlRestartCalls = 0;
-  let coldStartArgs = null;
-
-  watchHappyCliAndRestartDaemon(
-    {
-      enabled: true,
-      startDaemon: true,
-      buildCli: true,
-      cliDir: '/tmp/happy-cli',
-      cliBin: '/tmp/happy-cli/bin/happier.mjs',
-      cliHomeDir: '/tmp/happy-cli-home',
-      internalServerUrl: 'http://127.0.0.1:3009',
-      publicServerUrl: 'http://localhost:3009',
-      isShuttingDown: () => false,
-    },
-    {
-      watchDebouncedImpl: ({ onChange }) => {
-        capturedOnChange = onChange;
-        return { close() {} };
-      },
-      ensureCliBuiltImpl: async () => ({ built: true, reason: 'test' }),
-      pingDaemonImpl: async () => ({ ok: false, reason: 'missing_state' }),
-      restartDaemonViaControlServerImpl: async () => {
-        controlRestartCalls += 1;
-      },
-      startLocalDaemonWithAuthImpl: async (args) => {
-        coldStartCalls += 1;
-        coldStartArgs = args;
-      },
-      existsSyncImpl: () => true,
-      logger: { log() {}, warn() {}, error() {} },
-    },
-  );
-
-  assert.equal(typeof capturedOnChange, 'function');
-  await capturedOnChange({ eventType: 'change', filename: 'foo.ts' });
-
-  assert.equal(controlRestartCalls, 0);
-  assert.equal(coldStartCalls, 1);
-  assert.equal(coldStartArgs?.preserveExistingRunning, true);
-});
-
-test('watch keeps existing daemon when daemon control restart is unavailable', async () => {
-  let capturedOnChange = null;
-  let coldStartCalls = 0;
-  let controlRestartCalls = 0;
-
-  watchHappyCliAndRestartDaemon(
-    {
-      enabled: true,
-      startDaemon: true,
-      buildCli: true,
-      cliDir: '/tmp/happy-cli',
-      cliBin: '/tmp/happy-cli/bin/happier.mjs',
-      cliHomeDir: '/tmp/happy-cli-home',
-      internalServerUrl: 'http://127.0.0.1:3009',
-      publicServerUrl: 'http://localhost:3009',
-      isShuttingDown: () => false,
-      stackName: 'dev',
-    },
-    {
-      watchDebouncedImpl: ({ onChange }) => {
-        capturedOnChange = onChange;
-        return { close() {} };
-      },
-      ensureCliBuiltImpl: async () => ({ built: true, reason: 'test' }),
-      pingDaemonImpl: async () => ({ ok: true, pid: 111 }),
-      restartDaemonViaControlServerImpl: async () => {
-        controlRestartCalls += 1;
-        const error = new Error('daemon control /restart failed (http 501): {"status":"restart_unavailable"}');
-        error.daemonControlPath = '/restart';
-        error.status = 501;
-        throw error;
-      },
-      startLocalDaemonWithAuthImpl: async () => {
-        coldStartCalls += 1;
-      },
-      existsSyncImpl: () => true,
-      logger: { log() {}, warn() {}, error() {} },
-    },
-  );
-
-  assert.equal(typeof capturedOnChange, 'function');
-  await capturedOnChange({ eventType: 'change', filename: 'foo.ts' });
-
-  assert.equal(controlRestartCalls, 1);
-  assert.equal(coldStartCalls, 0);
-});
-
-test('watch keeps a live runtime daemon when daemon control state is temporarily missing', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'hs-daemon-runtime-live-'));
-  t.after(async () => {
-    await rm(root, { recursive: true, force: true });
-  });
-
-  const runtimeStatePath = join(root, 'stack.runtime.json');
-  await writeFile(
-    runtimeStatePath,
-    JSON.stringify({ processes: { daemonPid: 4242, daemonPids: [4242] } }),
-    'utf-8',
-  );
-
-  let capturedOnChange = null;
-  let coldStartCalls = 0;
-  let controlRestartCalls = 0;
-
-  watchHappyCliAndRestartDaemon(
-    {
-      enabled: true,
-      startDaemon: true,
-      buildCli: true,
-      cliDir: '/tmp/happy-cli',
-      cliBin: '/tmp/happy-cli/bin/happier.mjs',
-      cliHomeDir: '/tmp/happy-cli-home',
-      internalServerUrl: 'http://127.0.0.1:3009',
-      publicServerUrl: 'http://localhost:3009',
-      runtimeStatePath,
-      isShuttingDown: () => false,
-      stackName: 'dev',
-    },
-    {
-      watchDebouncedImpl: ({ onChange }) => {
-        capturedOnChange = onChange;
-        return { close() {} };
-      },
-      ensureCliBuiltImpl: async () => ({ built: true, reason: 'test' }),
-      pingDaemonImpl: async () => ({ ok: false, reason: 'missing_state' }),
-      restartDaemonViaControlServerImpl: async () => {
-        controlRestartCalls += 1;
-      },
-      startLocalDaemonWithAuthImpl: async () => {
-        coldStartCalls += 1;
-      },
-      isPidAliveImpl: (pid) => pid === 4242,
-      existsSyncImpl: () => true,
-      logger: { log() {}, warn() {}, error() {} },
-    },
-  );
-
-  assert.equal(typeof capturedOnChange, 'function');
-  await capturedOnChange({ eventType: 'change', filename: 'foo.ts' });
-
-  assert.equal(controlRestartCalls, 0);
-  assert.equal(coldStartCalls, 0);
-});
-
-test('watch ignores no-op manifest events without missing real source edits', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'hs-daemon-watch-noop-'));
-  t.after(async () => {
-    await rm(root, { recursive: true, force: true });
-  });
-
-  const cliDir = join(root, 'apps', 'cli');
-  const cliSrcDir = join(cliDir, 'src');
-  const cliDistIndex = join(cliDir, 'dist', 'index.mjs');
-  await mkdir(cliSrcDir, { recursive: true });
-  await mkdir(dirname(cliDistIndex), { recursive: true });
-  await writeFile(join(cliDir, 'package.json'), '{ "name": "@happier-dev/cli" }\n', 'utf-8');
-  await writeFile(join(cliSrcDir, 'index.ts'), 'export const value = 1;\n', 'utf-8');
-  await writeFile(cliDistIndex, 'export const daemon = true;\n', 'utf-8');
-  await writeFile(join(dirname(cliDistIndex), '.build-manifest.json'), '{"fingerprint":"watch-test"}\n', 'utf-8');
-
-  let capturedOnChange = null;
-  let buildCalls = 0;
-  let restartCalls = 0;
-
-  watchHappyCliAndRestartDaemon(
-    {
-      enabled: true,
-      startDaemon: true,
-      buildCli: true,
-      cliDir,
-      cliBin: join(cliDir, 'bin', 'happier.mjs'),
-      cliHomeDir: join(root, 'home'),
-      internalServerUrl: 'http://127.0.0.1:3009',
-      publicServerUrl: 'http://localhost:3009',
-      isShuttingDown: () => false,
-    },
-    {
-      watchDebouncedImpl: ({ onChange }) => {
-        capturedOnChange = onChange;
-        return { close() {} };
-      },
-      ensureCliBuiltImpl: async () => {
-        buildCalls += 1;
-        return { built: true, reason: 'test' };
-      },
-      startLocalDaemonWithAuthImpl: async () => {
-        restartCalls += 1;
-      },
-      pingDaemonImpl: async () => ({ ok: false, reason: 'daemon_not_running' }),
-      logger: { log() {}, warn() {}, error() {} },
-    },
-  );
-
-  assert.equal(typeof capturedOnChange, 'function');
-
-  await capturedOnChange({ eventType: 'change', filename: 'package.json' });
-  assert.equal(buildCalls, 0);
-  assert.equal(restartCalls, 0);
-
-  await writeFile(join(cliSrcDir, 'index.ts'), 'export const value = 200;\n', 'utf-8');
-  await capturedOnChange({ eventType: 'change', filename: 'index.ts' });
-  assert.equal(buildCalls, 1);
-  assert.equal(restartCalls, 1);
-});
-
-test('watch ignores CLI test-only source edits without missing real runtime source edits', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'hs-daemon-watch-test-only-'));
-  t.after(async () => {
-    await rm(root, { recursive: true, force: true });
-  });
-
-  const cliDir = join(root, 'apps', 'cli');
-  const cliSrcDir = join(cliDir, 'src');
-  const cliDistIndex = join(cliDir, 'dist', 'index.mjs');
-  await mkdir(cliSrcDir, { recursive: true });
-  await mkdir(dirname(cliDistIndex), { recursive: true });
-  await writeFile(join(cliDir, 'package.json'), '{ "name": "@happier-dev/cli" }\n', 'utf-8');
-  await writeFile(join(cliSrcDir, 'runtime.ts'), 'export const value = 1;\n', 'utf-8');
-  await writeFile(cliDistIndex, 'export const daemon = true;\n', 'utf-8');
-  await writeFile(join(dirname(cliDistIndex), '.build-manifest.json'), '{"fingerprint":"watch-test"}\n', 'utf-8');
-
-  let capturedOnChange = null;
-  let buildCalls = 0;
-  let restartCalls = 0;
-
-  watchHappyCliAndRestartDaemon(
-    {
-      enabled: true,
-      startDaemon: true,
-      buildCli: true,
-      cliDir,
-      cliBin: join(cliDir, 'bin', 'happier.mjs'),
-      cliHomeDir: join(root, 'home'),
-      internalServerUrl: 'http://127.0.0.1:3009',
-      publicServerUrl: 'http://localhost:3009',
-      isShuttingDown: () => false,
-    },
-    {
-      watchDebouncedImpl: ({ onChange }) => {
-        capturedOnChange = onChange;
-        return { close() {} };
-      },
-      ensureCliBuiltImpl: async () => {
-        buildCalls += 1;
-        return { built: true, reason: 'test' };
-      },
-      pingDaemonImpl: async () => ({ ok: true }),
-      restartDaemonViaControlServerImpl: async () => {
-        restartCalls += 1;
-      },
-      logger: { log() {}, warn() {}, error() {} },
-    },
-  );
-
-  assert.equal(typeof capturedOnChange, 'function');
-
-  await writeFile(join(cliSrcDir, 'runtime.test.ts'), 'export const testOnly = true;\n', 'utf-8');
-  await capturedOnChange({ eventType: 'change', filename: 'runtime.test.ts' });
-  assert.equal(buildCalls, 0);
-  assert.equal(restartCalls, 0);
-
-  await writeFile(join(cliSrcDir, 'runtime.ts'), 'export const value = 2;\n', 'utf-8');
-  await capturedOnChange({ eventType: 'change', filename: 'runtime.ts' });
-  assert.equal(buildCalls, 1);
-  assert.equal(restartCalls, 1);
-});
-
-test('watch logs an ensureCliBuilt skip and does not restart the daemon with stale dist', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'hs-daemon-watch-build-skip-'));
-  t.after(async () => {
-    await rm(root, { recursive: true, force: true });
-  });
-
-  const cliDir = join(root, 'apps', 'cli');
-  const cliSrcDir = join(cliDir, 'src');
-  const cliDistIndex = join(cliDir, 'dist', 'index.mjs');
-  await mkdir(cliSrcDir, { recursive: true });
-  await mkdir(dirname(cliDistIndex), { recursive: true });
-  await writeFile(join(cliDir, 'package.json'), '{ "name": "@happier-dev/cli" }\n', 'utf-8');
-  await writeFile(join(cliSrcDir, 'runtime.ts'), 'export const value = 1;\n', 'utf-8');
-  await writeFile(cliDistIndex, 'export const daemon = true;\n', 'utf-8');
-  await writeDistBuildManifest(cliDistIndex, 'stale-fingerprint');
-
-  const messages = [];
-  let capturedOnChange = null;
-  let restartCalls = 0;
-  watchHappyCliAndRestartDaemon(
-    {
-      enabled: true,
-      startDaemon: true,
-      buildCli: true,
-      cliDir,
-      cliBin: join(cliDir, 'bin', 'happier.mjs'),
-      cliHomeDir: join(root, 'home'),
-      internalServerUrl: 'http://127.0.0.1:3009',
-      publicServerUrl: 'http://localhost:3009',
-      isShuttingDown: () => false,
-    },
-    {
-      watchDebouncedImpl: ({ onChange }) => {
-        capturedOnChange = onChange;
-        return { close() {} };
-      },
-      ensureCliBuiltImpl: async () => ({ built: false, reason: 'up_to_date' }),
-      pingDaemonImpl: async () => ({ ok: true }),
-      restartDaemonViaControlServerImpl: async () => {
-        restartCalls += 1;
-      },
-      logger: {
-        log(message) { messages.push(String(message)); },
-        warn(message) { messages.push(String(message)); },
-        error(message) { messages.push(String(message)); },
-      },
-    },
-  );
-
-  await writeFile(join(cliSrcDir, 'runtime.ts'), 'export const value = 2;\n', 'utf-8');
-  await capturedOnChange({ eventType: 'change', filename: 'runtime.ts' });
-
-  assert.equal(restartCalls, 0);
-  assert.ok(messages.some((message) => message.includes('up_to_date')));
-});
-
-test('watch does not include cliDir/yarn.lock in watched paths (prevents rebuild loops)', async () => {
-  let capturedPaths = null;
-
-  watchHappyCliAndRestartDaemon(
-    {
-      enabled: true,
-      startDaemon: true,
-      buildCli: true,
-      cliDir: '/tmp/happy-cli',
-      cliBin: '/tmp/happy-cli/bin/happier.mjs',
-      cliHomeDir: '/tmp/happy-cli-home',
-      internalServerUrl: 'http://127.0.0.1:3009',
-      publicServerUrl: 'http://localhost:3009',
-      isShuttingDown: () => false,
-    },
-    {
-      watchDebouncedImpl: ({ paths }) => {
-        capturedPaths = paths;
-        return { close() {} };
-      },
-      ensureCliBuiltImpl: async () => ({ built: true, reason: 'test' }),
-      startLocalDaemonWithAuthImpl: async () => {},
-      existsSyncImpl: () => true,
-      logger: { log() {}, warn() {}, error() {} },
-    },
-  );
-
-  assert.ok(Array.isArray(capturedPaths));
-  assert.ok(!capturedPaths.includes('/tmp/happy-cli/yarn.lock'));
-});
-
-test('watch derives the full shared CLI runtime package closure from package manifests', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'hs-daemon-watch-package-closure-'));
-  t.after(async () => {
-    await rm(root, { recursive: true, force: true });
-  });
-
-  const cliDir = join(root, 'apps', 'cli');
-  await mkdir(join(cliDir, 'src'), { recursive: true });
-  await writeFile(
-    join(cliDir, 'package.json'),
-    JSON.stringify({
-      name: '@happier-dev/cli',
-      dependencies: {
-        '@happier-dev/connection-supervisor': '0.0.0',
-        '@happier-dev/transfers': '0.0.0',
-      },
-    }),
-    'utf-8',
-  );
-  for (const [id, dependencies] of [
-    ['connection-supervisor', { '@happier-dev/protocol': '0.0.0' }],
-    ['transfers', {}],
-    ['protocol', {}],
-    ['unrelated', {}],
-  ]) {
-    const packageDir = join(root, 'packages', id);
-    await mkdir(join(packageDir, 'src'), { recursive: true });
-    await writeFile(
-      join(packageDir, 'package.json'),
-      JSON.stringify({ name: `@happier-dev/${id}`, dependencies }),
-      'utf-8',
-    );
-  }
-
-  let capturedPaths = null;
-
-  watchHappyCliAndRestartDaemon(
-    {
-      enabled: true,
-      startDaemon: true,
-      buildCli: true,
-      cliDir,
-      cliBin: join(cliDir, 'bin', 'happier.mjs'),
-      cliHomeDir: join(root, 'home'),
-      internalServerUrl: 'http://127.0.0.1:3009',
-      publicServerUrl: 'http://localhost:3009',
-      isShuttingDown: () => false,
-    },
-    {
-      watchDebouncedImpl: ({ paths }) => {
-        capturedPaths = paths;
-        return { close() {} };
-      },
-      ensureCliBuiltImpl: async () => ({ built: true, reason: 'test' }),
-      startLocalDaemonWithAuthImpl: async () => {},
-      logger: { log() {}, warn() {}, error() {} },
-    },
-  );
-
-  assert.ok(Array.isArray(capturedPaths));
-  assert.ok(capturedPaths.includes(join(root, 'packages', 'connection-supervisor', 'src')));
-  assert.ok(capturedPaths.includes(join(root, 'packages', 'transfers', 'src')));
-  assert.ok(capturedPaths.includes(join(root, 'packages', 'protocol', 'src')));
-  assert.ok(!capturedPaths.includes(join(root, 'packages', 'unrelated', 'src')));
-});
-
-test('ensureDevCliReady keeps existing dist output when build fails', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'hs-daemon-cli-ready-'));
-  t.after(async () => {
-    await rm(root, { recursive: true, force: true });
-  });
-
-  const cliDir = join(root, 'apps', 'cli');
-  const binDir = join(root, 'bin');
-  const distIndexPath = join(cliDir, 'dist', 'index.mjs');
-  const yarnPath = join(binDir, 'yarn');
-
-  await mkdir(dirname(distIndexPath), { recursive: true });
-  await mkdir(join(cliDir, 'node_modules'), { recursive: true });
-  await mkdir(binDir, { recursive: true });
-  await writeFile(join(cliDir, 'package.json'), '{ "name": "cli-test" }\n', 'utf-8');
-  await writeFile(join(cliDir, 'yarn.lock'), '# yarn\n', 'utf-8');
-  await writeFile(join(cliDir, 'node_modules', '.yarn-integrity'), 'ok\n', 'utf-8');
-  await writeFile(distIndexPath, 'export const stable = true;\n', 'utf-8');
-  await writeDistBuildManifest(distIndexPath);
-  await writeFile(
-    yarnPath,
-    [
-      '#!/usr/bin/env bash',
-      'set -euo pipefail',
-      'if [ "${1:-}" = "--version" ]; then',
-      '  echo "1.22.22"',
-      '  exit 0',
-      'fi',
-      'if [ "${1:-}" = "build" ]; then',
-      '  echo "simulated build failure" >&2',
-      '  exit 2',
-      'fi',
-      'exit 0',
-    ].join('\n') + '\n',
-    'utf-8',
-  );
-  await chmod(yarnPath, 0o755);
-
-  const env = {
-    ...process.env,
-    PATH: `${binDir}:/usr/bin:/bin`,
-    HAPPIER_STACK_CLI_BUILD_MODE: 'always',
-  };
-  await assert.doesNotReject(async () => {
-    await ensureDevCliReady({ cliDir, buildCli: true, env });
-  });
-  const restored = await readFile(distIndexPath, 'utf-8');
-  assert.equal(restored, 'export const stable = true;\n');
-});
-
-test('ensureDevCliReady rejects bare dist entrypoint without build manifest', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'hs-daemon-cli-ready-manifest-'));
-  t.after(async () => {
-    await rm(root, { recursive: true, force: true });
-  });
-
-  const cliDir = join(root, 'apps', 'cli');
-  const distIndexPath = join(cliDir, 'dist', 'index.mjs');
-  await mkdir(dirname(distIndexPath), { recursive: true });
-  await mkdir(join(cliDir, 'node_modules'), { recursive: true });
-  await writeFile(join(cliDir, 'package.json'), '{ "name": "cli-test" }\n', 'utf-8');
-  await writeFile(join(cliDir, 'yarn.lock'), '# yarn\n', 'utf-8');
-  await writeFile(join(cliDir, 'node_modules', '.yarn-integrity'), 'ok\n', 'utf-8');
-  await writeFile(distIndexPath, 'export const stale = true;\n', 'utf-8');
-
-  await assert.rejects(
-    () => ensureDevCliReady({
-      cliDir,
-      buildCli: false,
-      env: {
-        ...process.env,
-        HAPPIER_STACK_CLI_BUILD_MODE: 'never',
-      },
-    }),
-    /build manifest/,
-  );
-});
-
 test('reload executor rejects bare dist entrypoint without build manifest', async () => {
   const cliDir = '/tmp/repo/apps/cli';
   const executor = createHappyCliReloadExecutor(
@@ -817,4 +235,418 @@ test('reload executor rejects bare dist entrypoint without build manifest', asyn
   );
 
   await assert.rejects(() => executor.build(), /build manifest/);
+});
+
+test('reload executor restarts from an already-current dist and preserves the stack build environment', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hs-daemon-reload-current-dist-'));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+
+  const cliDir = join(root, 'apps', 'cli');
+  const distIndexPath = join(cliDir, 'dist', 'index.mjs');
+  await mkdir(dirname(distIndexPath), { recursive: true });
+  await writeFile(distIndexPath, 'export const daemon = true;\n', 'utf-8');
+  await writeDistBuildManifest(distIndexPath, 'abcdef1234567890');
+
+  const env = { HAPPIER_STACK_CLI_BUILD_MODE: 'auto', STACK_TOKEN: 'preserved' };
+  let capturedBuildOptions = null;
+  let restartCalls = 0;
+  const executor = createHappyCliReloadExecutor(
+    {
+      startDaemon: true,
+      buildCli: true,
+      cliDir,
+      cliBin: join(cliDir, 'bin', 'happier.mjs'),
+      cliHomeDir: join(root, 'home'),
+      internalServerUrl: 'http://127.0.0.1:3009',
+      publicServerUrl: 'http://localhost:3009',
+      isShuttingDown: () => false,
+      env,
+      stackName: 'dev',
+    },
+    {
+      ensureCliBuiltImpl: async (_cliDir, options) => {
+        capturedBuildOptions = options;
+        return { built: false, current: true, reason: 'cache_hit' };
+      },
+      pingDaemonImpl: async () => ({ ok: true, pid: 111 }),
+      restartDaemonViaControlServerImpl: async () => {
+        restartCalls += 1;
+        return { status: 'restarting', previousPid: 111, pid: 222 };
+      },
+      logger: { log() {}, warn() {}, error() {} },
+    },
+  );
+
+  assert.deepEqual(await executor.build(), { ok: true });
+  assert.equal(capturedBuildOptions?.env, env);
+  assert.deepEqual(await executor.restart(), { restarted: true, mode: 'overlap' });
+  assert.equal(restartCalls, 1, 'a watcher generation must not be consumed without activating the current dist');
+});
+
+test('reload executor cold-starts an absent daemon from a runnable superseded publication', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hs-daemon-reload-superseded-cold-start-'));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+
+  const cliDir = join(root, 'apps', 'cli');
+  const distIndexPath = join(cliDir, 'dist', 'index.mjs');
+  await mkdir(dirname(distIndexPath), { recursive: true });
+  await writeFile(distIndexPath, 'export const daemon = true;\n', 'utf-8');
+  await writeDistBuildManifest(distIndexPath, 'abcdef1234567890');
+
+  const starts = [];
+  const warnings = [];
+  const executor = createHappyCliReloadExecutor(
+    {
+      startDaemon: true,
+      buildCli: true,
+      cliDir,
+      cliBin: join(cliDir, 'bin', 'happier.mjs'),
+      cliHomeDir: join(root, 'home'),
+      internalServerUrl: 'http://127.0.0.1:3009',
+      publicServerUrl: 'http://localhost:3009',
+      isShuttingDown: () => false,
+      stackName: 'dev',
+    },
+    {
+      ensureCliBuiltImpl: async () => ({
+        built: true,
+        current: false,
+        reason: 'inputs_changed_during_build',
+      }),
+      pingDaemonImpl: async () => ({ ok: false, reason: 'daemon_not_running' }),
+      startLocalDaemonWithAuthImpl: async (args) => {
+        starts.push(args);
+      },
+      logger: { log() {}, warn(message) { warnings.push(String(message)); }, error() {} },
+    },
+  );
+
+  assert.deepEqual(await executor.build(), {
+    ok: true,
+    allowSupersededColdStart: true,
+  });
+  assert.deepEqual(
+    await executor.restart({ revalidateGeneration: async () => false }),
+    { restarted: true, mode: 'cold-start', degraded: true },
+  );
+  assert.equal(starts.length, 1);
+  assert.equal(starts[0].admittedDistClosureFingerprint, 'abcdef1234567890');
+  assert.ok(warnings.some((message) => /superseded.*degraded/i.test(message)));
+});
+
+test('reload executor preserves a healthy incumbent instead of activating a superseded publication', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hs-daemon-reload-superseded-incumbent-'));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+
+  const cliDir = join(root, 'apps', 'cli');
+  const distIndexPath = join(cliDir, 'dist', 'index.mjs');
+  await mkdir(dirname(distIndexPath), { recursive: true });
+  await writeFile(distIndexPath, 'export const daemon = true;\n', 'utf-8');
+  await writeDistBuildManifest(distIndexPath, 'abcdef1234567890');
+
+  let replacementCalls = 0;
+  const executor = createHappyCliReloadExecutor(
+    {
+      startDaemon: true,
+      buildCli: true,
+      cliDir,
+      cliBin: join(cliDir, 'bin', 'happier.mjs'),
+      cliHomeDir: join(root, 'home'),
+      internalServerUrl: 'http://127.0.0.1:3009',
+      publicServerUrl: 'http://localhost:3009',
+      isShuttingDown: () => false,
+      stackName: 'dev',
+    },
+    {
+      ensureCliBuiltImpl: async () => ({
+        built: true,
+        current: false,
+        reason: 'inputs_changed_during_build',
+      }),
+      pingDaemonImpl: async () => ({ ok: true, pid: 111 }),
+      restartDaemonViaControlServerImpl: async () => {
+        replacementCalls += 1;
+      },
+      logger: { log() {}, warn() {}, error() {} },
+    },
+  );
+
+  assert.deepEqual(await executor.build(), {
+    ok: true,
+    allowSupersededColdStart: true,
+  });
+  assert.deepEqual(
+    await executor.restart({ revalidateGeneration: async () => false }),
+    { skipped: true, reason: 'superseded-incumbent-healthy' },
+  );
+  assert.equal(replacementCalls, 0);
+});
+
+test('reload executor persists the authenticated overlap successor for new and already-running restarts', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hs-daemon-reload-fingerprint-'));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+  const cliDir = join(root, 'apps', 'cli');
+  const distIndexPath = join(cliDir, 'dist', 'index.mjs');
+  await mkdir(dirname(distIndexPath), { recursive: true });
+  await writeFile(distIndexPath, 'export const daemon = true;\n', 'utf-8');
+  await writeDistBuildManifest(distIndexPath, 'abcdef1234567890');
+
+  for (const restartStatus of ['restarting', 'already_restarting']) {
+    const runtimeStatePath = join(root, `${restartStatus}.runtime.json`);
+    await writeFile(
+      runtimeStatePath,
+      JSON.stringify({
+        version: 1,
+        stackName: 'dev',
+        processes: { serverPid: 999, daemonPid: 111, daemonPids: [111] },
+        daemon: { distClosureFingerprint: '0000000000000000' },
+      }) + '\n',
+      'utf-8',
+    );
+
+    let restartFingerprint = null;
+    const executor = createHappyCliReloadExecutor(
+      {
+        startDaemon: true,
+        buildCli: true,
+        cliDir,
+        cliBin: join(cliDir, 'bin', 'happier.mjs'),
+        cliHomeDir: join(root, 'home'),
+        internalServerUrl: 'http://127.0.0.1:3009',
+        publicServerUrl: 'http://localhost:3009',
+        runtimeStatePath,
+        isShuttingDown: () => false,
+        stackName: 'dev',
+      },
+      {
+        ensureCliBuiltImpl: async () => ({ built: true, current: true, reason: 'test' }),
+        pingDaemonImpl: async () => ({ ok: true, pid: 111 }),
+        restartDaemonViaControlServerImpl: async (args) => {
+          restartFingerprint = args.successorDistClosureFingerprint;
+          return { status: restartStatus, previousPid: 111, pid: 222 };
+        },
+        syncStackRuntimeDaemonPidFromDaemonStateImpl: async (args, options) =>
+          await syncStackRuntimeDaemonPidFromDaemonState(args, {
+            ...options,
+            isPidAliveImpl: (pid) => pid === 111 || pid === 222,
+            resolvePidStackOwnershipImpl: async () => ({ owned: true, reason: 'test_owned' }),
+          }),
+        logger: { log() {}, warn() {}, error() {} },
+      },
+    );
+
+    await executor.build();
+    assert.deepEqual(await executor.restart(), { restarted: true, mode: 'overlap' });
+
+    assert.equal(restartFingerprint, 'abcdef1234567890');
+    const runtimeState = JSON.parse(await readFile(runtimeStatePath, 'utf-8'));
+    assert.equal(runtimeState.processes.serverPid, 999);
+    assert.equal(runtimeState.processes.daemonPid, 222);
+    assert.equal(runtimeState.daemon.distClosureFingerprint, 'abcdef1234567890');
+  }
+});
+
+test('reload executor does not sync runtime state when overlap confirmation fails', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hs-daemon-reload-no-sync-'));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+  const cliDir = join(root, 'apps', 'cli');
+  const distIndexPath = join(cliDir, 'dist', 'index.mjs');
+  await mkdir(dirname(distIndexPath), { recursive: true });
+  await writeFile(distIndexPath, 'export const daemon = true;\n', 'utf-8');
+  await writeDistBuildManifest(distIndexPath, 'abcdef1234567890');
+
+  let syncCalls = 0;
+  const executor = createHappyCliReloadExecutor(
+    {
+      startDaemon: true,
+      buildCli: true,
+      cliDir,
+      cliBin: join(cliDir, 'bin', 'happier.mjs'),
+      cliHomeDir: join(root, 'home'),
+      internalServerUrl: 'http://127.0.0.1:3009',
+      publicServerUrl: 'http://localhost:3009',
+      runtimeStatePath: join(root, 'failed.runtime.json'),
+      isShuttingDown: () => false,
+      stackName: 'dev',
+    },
+    {
+      ensureCliBuiltImpl: async () => ({ built: true, current: true, reason: 'test' }),
+      pingDaemonImpl: async () => ({ ok: true, pid: 111 }),
+      restartDaemonViaControlServerImpl: async () => {
+        throw new Error('successor_fingerprint_mismatch');
+      },
+      syncStackRuntimeDaemonPidFromDaemonStateImpl: async () => {
+        syncCalls += 1;
+      },
+      logger: { log() {}, warn() {}, error() {} },
+    },
+  );
+
+  await executor.build();
+  await assert.rejects(() => executor.restart(), /successor_fingerprint_mismatch/);
+  assert.equal(syncCalls, 0);
+});
+
+test('reload executor awaits a stale source generation after control ping before overlap activation', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hs-daemon-reload-generation-fence-'));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+
+  const cliDir = join(root, 'apps', 'cli');
+  const distIndexPath = join(cliDir, 'dist', 'index.mjs');
+  await mkdir(dirname(distIndexPath), { recursive: true });
+  await writeFile(distIndexPath, 'export const daemon = true;\n', 'utf-8');
+  await writeDistBuildManifest(distIndexPath, 'abcdef1234567890');
+
+  let releasePing;
+  const pingBlocked = new Promise((resolve) => {
+    releasePing = resolve;
+  });
+  let notifyPingStarted;
+  const pingStarted = new Promise((resolve) => {
+    notifyPingStarted = resolve;
+  });
+  let restartCalls = 0;
+  let releaseRevalidation;
+  const revalidationBlocked = new Promise((resolve) => {
+    releaseRevalidation = resolve;
+  });
+  let notifyRevalidationStarted;
+  const revalidationStarted = new Promise((resolve) => {
+    notifyRevalidationStarted = resolve;
+  });
+  const executor = createHappyCliReloadExecutor(
+    {
+      startDaemon: true,
+      buildCli: true,
+      cliDir,
+      cliBin: join(cliDir, 'bin', 'happier.mjs'),
+      cliHomeDir: join(root, 'home'),
+      internalServerUrl: 'http://127.0.0.1:3009',
+      publicServerUrl: 'http://localhost:3009',
+      runtimeStatePath: join(root, 'stack.runtime.json'),
+      isShuttingDown: () => false,
+      stackName: 'dev',
+    },
+    {
+      ensureCliBuiltImpl: async () => ({ built: true, current: true, reason: 'test' }),
+      pingDaemonImpl: async () => {
+        notifyPingStarted();
+        await pingBlocked;
+        return { ok: true, pid: 111, distClosureFingerprint: '0000000000000000' };
+      },
+      restartDaemonViaControlServerImpl: async () => {
+        restartCalls += 1;
+        return { status: 'restarting', previousPid: 111, pid: 222 };
+      },
+      logger: { log() {}, warn() {}, error() {} },
+    },
+  );
+
+  await executor.build();
+  const restart = executor.restart({
+    revalidateGeneration: async () => {
+      notifyRevalidationStarted();
+      await revalidationBlocked;
+      return false;
+    },
+  });
+  await pingStarted;
+  releasePing();
+  await revalidationStarted;
+  assert.equal(restartCalls, 0, 'control restart must wait for generation revalidation');
+  releaseRevalidation();
+
+  assert.deepEqual(await restart, { skipped: true, reason: 'stale-generation' });
+  assert.equal(restartCalls, 0, 'a stale generation must not reach the irreversible control restart');
+});
+
+test('reload executor awaits a stale source generation before cold-start activation', async () => {
+  let coldStarts = 0;
+  let releaseRevalidation;
+  const revalidationBlocked = new Promise((resolve) => {
+    releaseRevalidation = resolve;
+  });
+  let notifyRevalidationStarted;
+  const revalidationStarted = new Promise((resolve) => {
+    notifyRevalidationStarted = resolve;
+  });
+  const executor = createHappyCliReloadExecutor(
+    {
+      startDaemon: true,
+      buildCli: true,
+      cliDir: '/tmp/repo/apps/cli',
+      cliBin: '/tmp/repo/apps/cli/bin/happier.mjs',
+      cliHomeDir: '/tmp/repo/home',
+      internalServerUrl: 'http://127.0.0.1:3009',
+      publicServerUrl: 'http://localhost:3009',
+      isShuttingDown: () => false,
+      stackName: 'dev',
+    },
+    {
+      pingDaemonImpl: async () => ({ ok: false, reason: 'daemon_not_running' }),
+      startLocalDaemonWithAuthImpl: async () => {
+        coldStarts += 1;
+      },
+      logger: { log() {}, warn() {}, error() {} },
+    },
+  );
+
+  const restart = executor.restart({
+    revalidateGeneration: async () => {
+      notifyRevalidationStarted();
+      await revalidationBlocked;
+      return false;
+    },
+  });
+  await revalidationStarted;
+  assert.equal(coldStarts, 0, 'cold start must wait for generation revalidation');
+  releaseRevalidation();
+
+  assert.deepEqual(
+    await restart,
+    { skipped: true, reason: 'stale-generation' },
+  );
+  assert.equal(coldStarts, 0, 'a stale generation must not reach cold-start activation');
+});
+
+test('reload executor cold-start carries the admitted build fingerprint into daemon generation admission', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hs-daemon-reload-cold-start-admission-'));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  const cliDir = join(root, 'apps', 'cli');
+  const distIndexPath = join(cliDir, 'dist', 'index.mjs');
+  await mkdir(dirname(distIndexPath), { recursive: true });
+  await writeFile(distIndexPath, 'export const daemon = true;\n', 'utf-8');
+  await writeDistBuildManifest(distIndexPath, 'abcdef1234567890');
+
+  let coldStartArgs = null;
+  const executor = createHappyCliReloadExecutor(
+    {
+      startDaemon: true,
+      buildCli: true,
+      cliDir,
+      cliBin: join(cliDir, 'bin', 'happier.mjs'),
+      cliHomeDir: join(root, 'home'),
+      internalServerUrl: 'http://127.0.0.1:3009',
+      publicServerUrl: 'http://localhost:3009',
+      isShuttingDown: () => false,
+      env: { HAPPIER_STACK_CLI_BUILD_MODE: 'always' },
+      stackName: 'dev',
+    },
+    {
+      ensureCliBuiltImpl: async () => ({ built: true, current: true, reason: 'always' }),
+      pingDaemonImpl: async () => ({ ok: false, reason: 'daemon_not_running' }),
+      startLocalDaemonWithAuthImpl: async (args) => {
+        coldStartArgs = args;
+      },
+      logger: { log() {}, warn() {}, error() {} },
+    },
+  );
+
+  assert.deepEqual(await executor.build(), { ok: true });
+  assert.deepEqual(await executor.restart(), { restarted: true, mode: 'cold-start' });
+  assert.equal(coldStartArgs?.admittedDistClosureFingerprint, 'abcdef1234567890');
 });

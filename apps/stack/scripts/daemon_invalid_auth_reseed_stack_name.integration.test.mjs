@@ -68,7 +68,42 @@ async function writeStackEnv({ storageDir, stackName, env }) {
   return baseDir;
 }
 
+async function writeStubDistManifest(cliDir) {
+  await writeFile(
+    join(cliDir, 'dist', '.build-manifest.json'),
+    JSON.stringify({ fingerprint: '0000000000000000', fileCount: 1 }) + '\n',
+    'utf-8',
+  );
+}
+
 async function writeStubHappyCli({ cliDir }) {
+  const daemonChildSource = `
+const { createServer } = require('node:http');
+const { mkdirSync, writeFileSync } = require('node:fs');
+const { dirname } = require('node:path');
+const statePath = process.argv[1];
+const controlToken = 'auth-reseed-fixture';
+const server = createServer((req, res) => {
+  if (req.method === 'POST' && req.url === '/ping' && req.headers['x-happier-daemon-token'] === controlToken) {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, distClosureFingerprint: '0000000000000000' }));
+    return;
+  }
+  res.writeHead(404).end();
+});
+server.listen(0, '127.0.0.1', () => {
+  mkdirSync(dirname(statePath), { recursive: true });
+  writeFileSync(statePath, JSON.stringify({
+    pid: process.pid,
+    httpPort: server.address().port,
+    controlToken,
+    startTime: new Date().toISOString(),
+  }) + '\\n', 'utf-8');
+});
+const shutdown = () => server.close(() => process.exit(0));
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
+`;
   const script = `
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -122,9 +157,8 @@ if (sub === 'start') {
     process.exit(1);
   }
 
-  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
+  const child = spawn(process.execPath, ['-e', ${JSON.stringify(daemonChildSource)}, statePath], { detached: true, stdio: 'ignore' });
   child.unref();
-  writeFileSync(statePath, JSON.stringify({ pid: child.pid, httpPort: 0 }) + '\\n', 'utf-8');
   process.exit(0);
 }
 
@@ -418,6 +452,7 @@ if (sub === 'start') {
 	`;
     const cliBin = join(cliDir, 'bin', 'happier.mjs');
     await writeFile(join(cliDir, 'dist', 'index.mjs'), stub.trimStart(), 'utf-8');
+    await writeStubDistManifest(cliDir);
     // If daemon.mjs accidentally invokes bin/happier.mjs, fail loudly.
     await writeFile(cliBin, 'process.exit(42);\n', 'utf-8');
 
@@ -610,6 +645,7 @@ if (sub === 'start') {
 	`;
     const cliBin = join(cliDir, 'bin', 'happier.mjs');
     await writeFile(join(cliDir, 'dist', 'index.mjs'), stub.trimStart(), 'utf-8');
+    await writeStubDistManifest(cliDir);
     // If daemon.mjs accidentally invokes bin/happier.mjs, fail loudly.
     await writeFile(cliBin, 'process.exit(42);\n', 'utf-8');
 

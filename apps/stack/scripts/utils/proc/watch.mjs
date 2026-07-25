@@ -25,12 +25,16 @@ function safeWatch(path, handler, watchImpl = watch, logger = console) {
 export function watchDebounced({
   paths,
   debounceMs = 500,
+  shouldObserve = null,
+  onObservation = null,
   onChange,
   readSignature = null,
   pollIntervalMs = 0,
   watchImpl = watch,
   setIntervalImpl = setInterval,
   clearIntervalImpl = clearInterval,
+  setTimeoutImpl = setTimeout,
+  clearTimeoutImpl = clearTimeout,
   logger = console,
 } = {}) {
   const list = Array.isArray(paths) ? paths.filter(Boolean) : [];
@@ -45,24 +49,61 @@ export function watchDebounced({
 
   let closed = false;
   let t = null;
+  let pendingSignatureInitializedAtObservation = null;
+  let pendingObservationHandled = false;
   const watchers = [];
   let lastSignature = null;
+  let signatureInitialized = false;
+  let initialSignaturePromise = null;
   if (typeof readSignature === 'function') {
     try {
-      lastSignature = readSignature();
+      const initialSignature = readSignature();
+      if (initialSignature && typeof initialSignature.then === 'function') {
+        initialSignaturePromise = Promise.resolve(initialSignature).then((signature) => {
+          if (closed) return;
+          lastSignature = signature;
+          signatureInitialized = true;
+        }).catch((error) => {
+          logger.warn?.(`[local] watch: initial signature read failed; filesystem events remain active: ${formatError(error)}`);
+        });
+      } else {
+        lastSignature = initialSignature;
+        signatureInitialized = true;
+      }
     } catch (error) {
       lastSignature = null;
       logger.warn?.(`[local] watch: initial signature read failed; filesystem events remain active: ${formatError(error)}`);
     }
   }
 
-  const trigger = (eventType, filename) => {
+  const trigger = (eventType, filename, details = {}) => {
     if (closed) return;
-    if (t) clearTimeout(t);
-    t = setTimeout(() => {
+    const observation = { eventType, filename, ...details };
+    if (typeof shouldObserve === 'function' && !shouldObserve(observation)) return;
+    try {
+      pendingObservationHandled = onObservation?.({
+        ...observation,
+        signatureInitializedAtObservation: signatureInitialized,
+      }) === true || pendingObservationHandled;
+    } catch (error) {
+      logger.error?.(`[local] watch: observation handler failed; watcher remains active: ${formatError(error)}`);
+    }
+    pendingSignatureInitializedAtObservation = pendingSignatureInitializedAtObservation === false
+      ? false
+      : signatureInitialized;
+    if (t) clearTimeoutImpl(t);
+    t = setTimeoutImpl(() => {
       t = null;
+      const signatureInitializedAtObservation = pendingSignatureInitializedAtObservation;
+      const observationHandled = pendingObservationHandled;
+      pendingSignatureInitializedAtObservation = null;
+      pendingObservationHandled = false;
       Promise.resolve()
-        .then(() => onChange({ eventType, filename }))
+        .then(() => onChange({
+          ...observation,
+          signatureInitializedAtObservation,
+          observationHandled,
+        }))
         .catch((error) => {
           logger.error?.(`[local] watch: change handler failed; watcher remains active: ${formatError(error)}`);
         });
@@ -70,7 +111,12 @@ export function watchDebounced({
   };
 
   for (const p of list) {
-    const w = safeWatch(p, trigger, watchImpl, logger);
+    const w = safeWatch(
+      p,
+      (eventType, filename) => trigger(eventType, filename, { watchPath: p }),
+      watchImpl,
+      logger,
+    );
     if (w) watchers.push(w);
   }
 
@@ -82,10 +128,20 @@ export function watchDebounced({
       if (closed || polling) return;
       polling = true;
       try {
-        const nextSignature = readSignature();
+        if (initialSignaturePromise) {
+          await initialSignaturePromise;
+          initialSignaturePromise = null;
+          if (closed) return;
+        }
+        const nextSignature = await readSignature();
+        if (!signatureInitialized) {
+          lastSignature = nextSignature;
+          signatureInitialized = true;
+          return;
+        }
         if (nextSignature !== lastSignature) {
           lastSignature = nextSignature;
-          trigger('poll', null);
+          trigger('poll', null, { signature: nextSignature });
         }
       } catch (error) {
         logger.warn?.(`[local] watch: signature poll failed; filesystem events remain active: ${formatError(error)}`);
@@ -105,7 +161,9 @@ export function watchDebounced({
   return {
     close() {
       closed = true;
-      if (t) clearTimeout(t);
+      if (t) clearTimeoutImpl(t);
+      pendingSignatureInitializedAtObservation = null;
+      pendingObservationHandled = false;
       for (const w of watchers) {
         try {
           w.close();

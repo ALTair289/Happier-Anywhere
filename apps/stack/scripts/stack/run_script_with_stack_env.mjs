@@ -4,33 +4,112 @@ import { join } from 'node:path';
 import { buildConfigureServerLinks } from '@happier-dev/cli-common/links';
 
 import { findExistingStackCredentialPath } from '../utils/auth/credentials_paths.mjs';
+import { isAuthFlowEnabled } from '../utils/auth/daemon_gate.mjs';
 import { ensureDir } from '../utils/fs/ops.mjs';
 import { readLastLines } from '../utils/fs/tail.mjs';
-import { isTcpPortFree, listListenPids, pickNextFreeTcpPort } from '../utils/net/ports.mjs';
+import { isTcpPortFree, pickNextFreeTcpPort } from '../utils/net/ports.mjs';
 import { getComponentDir, resolveStackEnvPath } from '../utils/paths/paths.mjs';
 import { resolveLocalhostHost } from '../utils/paths/localhost_host.mjs';
-import { killProcessGroupOwnedByStack } from '../utils/proc/ownership.mjs';
-import { run } from '../utils/proc/proc.mjs';
+import { killProcessTree, run } from '../utils/proc/proc.mjs';
 import { pruneLogsByCount } from '../utils/proc/pruneLogsByCount.mjs';
 import { coercePort } from '../utils/server/port.mjs';
 import { waitForHttpOk } from '../utils/server/server.mjs';
 import { getCliHomeDirFromEnvOrDefault } from '../utils/stack/dirs.mjs';
 import { findRunningExpoStateInRoot, looksLikeExpoMetro } from '../utils/expo/expo.mjs';
 import {
-  deleteStackRuntimeStateFile,
+  deleteStackRuntimeStateIfOwnedBy,
   getStackRuntimeStatePath,
   isPidAlive,
-  recordStackRuntimeStart,
   readStackRuntimeStateFile,
+  withStackRuntimeStartClaim,
 } from '../utils/stack/runtime_state.mjs';
 import { listAllStackNames } from '../utils/stack/stacks.mjs';
-import { stopStackWithEnv } from '../utils/stack/stop.mjs';
+import { completeInterruptedStackStopBeforeStart, stopStackWithEnv } from '../utils/stack/stop.mjs';
 import { openUrlInBrowser } from '../utils/ui/browser.mjs';
 import { preflightDevServerRestart } from '../utils/dev/server.mjs';
 
 import { collectReservedStackPorts, getDefaultPortStart } from './port_reservation.mjs';
 import { withStackEnv } from './stack_environment.mjs';
 import { resolveStackRuntimeLaunchContext } from '../runtime/launch/resolveStackRuntimeLaunchContext.mjs';
+import { assertRestartHasNoControlOnlyArgs } from '../utils/stack/restart_args.mjs';
+import { checkDaemonStatePingAware } from '../daemon.mjs';
+import { parseArgs } from '../utils/cli/args.mjs';
+import { resolveDevServerConnection } from '../utils/dev/resolveDevServerConnection.mjs';
+
+function shouldAwaitRequestedDaemonForBackgroundStart({ scriptPath, args = [], env = {} } = {}) {
+  if (scriptPath !== 'run.mjs' && scriptPath !== 'dev.mjs') return false;
+  if (args.includes('--no-daemon')) return false;
+  if ((env.HAPPIER_STACK_DAEMON ?? '1').toString().trim() === '0') return false;
+  // Orchestrated/service auth flows intentionally keep the server alive while daemon startup is
+  // deferred until credentials arrive. The inner runner remains the owner of that lifecycle.
+  if (isAuthFlowEnabled(env)) return false;
+  return true;
+}
+
+export async function waitForBackgroundStackReadiness({
+  stackName,
+  scriptPath,
+  args = [],
+  env,
+  runtimeStatePath,
+  internalServerUrl,
+  expectedDaemonDistClosureFingerprint = null,
+  timeoutMs = 180_000,
+  checkDaemonStateImpl = checkDaemonStatePingAware,
+  isRunnerAlive = null,
+} = {}) {
+  const readyTimeoutMs = Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0
+    ? Number(timeoutMs)
+    : 180_000;
+  const startedAt = Date.now();
+  await waitForHttpOk(`${internalServerUrl}/health`, {
+    timeoutMs: readyTimeoutMs,
+    intervalMs: 300,
+  });
+
+  if (!shouldAwaitRequestedDaemonForBackgroundStart({ scriptPath, args, env })) return;
+
+  const stackBaseDir = resolveStackEnvPath(stackName, env).baseDir;
+  const cliHomeDir = getCliHomeDirFromEnvOrDefault({ stackBaseDir, env });
+  const expectedFingerprint = String(expectedDaemonDistClosureFingerprint ?? '').trim().toLowerCase();
+  let lastObservation = null;
+  while (Date.now() - startedAt < readyTimeoutMs) {
+    if (typeof isRunnerAlive === 'function' && !isRunnerAlive()) {
+      throw new Error(`[stack] ${stackName}: runner exited before requested daemon readiness was published.`);
+    }
+    const remainingMs = Math.max(100, readyTimeoutMs - (Date.now() - startedAt));
+    const daemonState = await checkDaemonStateImpl(cliHomeDir, {
+      serverUrl: internalServerUrl,
+      env,
+      stackName,
+      pingTimeoutMs: Math.min(1_000, remainingMs),
+    });
+    const runtimeState = await readStackRuntimeStateFile(runtimeStatePath);
+    const daemonPid = Number(daemonState?.pid);
+    const runtimeDaemonPid = Number(runtimeState?.processes?.daemonPid);
+    const observedFingerprint = String(daemonState?.distClosureFingerprint ?? '').trim().toLowerCase();
+    lastObservation = {
+      status: daemonState?.status ?? null,
+      daemonPid: Number.isFinite(daemonPid) ? daemonPid : null,
+      runtimeDaemonPid: Number.isFinite(runtimeDaemonPid) ? runtimeDaemonPid : null,
+      distClosureFingerprint: observedFingerprint || null,
+    };
+    if (
+      daemonState?.status === 'running'
+      && daemonPid > 1
+      && runtimeDaemonPid === daemonPid
+      && (!expectedFingerprint || observedFingerprint === expectedFingerprint)
+    ) {
+      return;
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, Math.min(250, remainingMs)));
+  }
+
+  throw new Error(
+    `[stack] ${stackName}: server became healthy but requested daemon readiness was not authenticated ` +
+      `and published before timeout (${JSON.stringify(lastObservation)}).`,
+  );
+}
 
 export function hasRecordedRuntimePortsForRestart(runtimeState = null) {
   const ports = runtimeState?.ports && typeof runtimeState.ports === 'object' ? runtimeState.ports : null;
@@ -39,6 +118,56 @@ export function hasRecordedRuntimePortsForRestart(runtimeState = null) {
 
 export function shouldReuseRuntimePortsOnRestart({ wantsRestart = false, runtimeState = null, wasRunning = false } = {}) {
   return Boolean(wantsRestart && (wasRunning || hasRecordedRuntimePortsForRestart(runtimeState)));
+}
+
+export function resolveRequestedStackServeUi({ args = [], env = {} } = {}) {
+  return !args.includes('--no-ui') && String(env.HAPPIER_STACK_SERVE_UI ?? '1').trim() !== '0';
+}
+
+export function createOuterStackRuntimeStartPublication({
+  stackName,
+  scriptPath,
+  ephemeral,
+  ownerPid,
+  ports,
+  runtimeSnapshotId,
+  args = [],
+  env = {},
+  logs,
+} = {}) {
+  return {
+    stackName,
+    script: scriptPath,
+    ephemeral: Boolean(ephemeral),
+    ownerPid,
+    ports,
+    runtimeSnapshotId,
+    serveUi: resolveRequestedStackServeUi({ args, env }),
+    ...(logs ? { logs } : {}),
+  };
+}
+
+export async function terminateSpawnedRunnerForBootFailure(
+  child,
+  {
+    runtimeStatePath,
+    expectedRuntimeState = null,
+    preserveRuntimeState = false,
+    killProcessTreeImpl = killProcessTree,
+    deleteStackRuntimeStateIfOwnedByImpl = deleteStackRuntimeStateIfOwnedBy,
+  } = {},
+) {
+  const termination = await killProcessTreeImpl(child, 'SIGTERM');
+  if (
+    termination?.ok === true
+    && !preserveRuntimeState
+    && runtimeStatePath
+    && child?.pid
+    && Number(expectedRuntimeState?.ownerPid) === Number(child.pid)
+  ) {
+    await deleteStackRuntimeStateIfOwnedByImpl(runtimeStatePath, expectedRuntimeState);
+  }
+  return termination;
 }
 
 function resolveLogKeepCount(rawValue, fallback) {
@@ -153,24 +282,94 @@ export function buildAlreadyRunningMobileMetroArgs(args = []) {
   return out;
 }
 
+export async function cleanupExitedStackRuntimeOwner({
+  runtimeStatePath,
+  expectedRuntimeState = null,
+  stackName = '',
+  wantsJson = false,
+  isTcpPortFreeImpl = isTcpPortFree,
+} = {}) {
+  if (!expectedRuntimeState) return { deleted: false, reason: 'missing_owner_identity' };
+  const current = await readStackRuntimeStateFile(runtimeStatePath);
+  if (Number(current?.ownerPid) !== Number(expectedRuntimeState.ownerPid)) return { deleted: false, reason: 'not_owner' };
+
+  const processes = current?.processes && typeof current.processes === 'object' ? current.processes : {};
+  const anyAlive = Object.values(processes)
+    .map((pid) => Number(pid))
+    .some((pid) => Number.isFinite(pid) && pid > 1 && isPidAlive(pid));
+  const port = Number(current?.ports?.server);
+  const portOccupied = Number.isFinite(port) && port > 0
+    ? !(await isTcpPortFreeImpl(port, { host: '127.0.0.1' }).catch(() => true))
+    : false;
+  if (anyAlive || portOccupied) {
+    if (!wantsJson) {
+      console.warn(
+        `[stack] ${stackName}: preserving ${runtimeStatePath} after runner exit (child processes still alive). ` +
+          `Run: hstack stack stop ${stackName} --yes --aggressive`,
+      );
+    }
+    return { deleted: false, reason: 'runtime_still_live' };
+  }
+
+  const deleted = await deleteStackRuntimeStateIfOwnedBy(runtimeStatePath, expectedRuntimeState);
+  return { deleted, reason: deleted ? 'deleted' : 'owner_changed' };
+}
+
+export function shouldPreflightLocalDevServerRestart({ scriptPath, args = [], env = process.env } = {}) {
+  if (scriptPath !== 'dev.mjs') return false;
+  const { flags, kv } = parseArgs(args);
+  return resolveDevServerConnection({
+    flags,
+    kv,
+    env,
+    resolvedLocalUrls: {
+      internalServerUrl: 'http://127.0.0.1',
+      publicServerUrl: 'http://localhost',
+      defaultPublicUrl: 'http://localhost',
+    },
+  }).startServer;
+}
+
 export async function runStackScriptWithStackEnv({ rootDir, stackName, scriptPath, args, extraEnv = {}, background = false }) {
+  const isStartLike = scriptPath === 'dev.mjs' || scriptPath === 'run.mjs';
+  const wantsRestart = args.includes('--restart');
+  const wantsJson = args.includes('--json');
+  const isStartLikeJsonDryRun = isStartLike && wantsJson;
+  if (isStartLike && wantsRestart && !isStartLikeJsonDryRun) {
+    assertRestartHasNoControlOnlyArgs(args);
+  }
   await withStackEnv({
     stackName,
     extraEnv,
+    reconcileDaemonRuntimeState: !isStartLikeJsonDryRun,
+    beforeRuntimeReconcile: isStartLike && !isStartLikeJsonDryRun
+      ? async ({ env }) => {
+          await completeInterruptedStackStopBeforeStart({
+            rootDir,
+            stackName,
+            baseDir: resolveStackEnvPath(stackName, env).baseDir,
+            env,
+            json: wantsJson,
+          });
+        }
+      : null,
     fn: async ({ env, envPath, stackEnv, runtimeStatePath, runtimeState }) => {
+      if (isStartLikeJsonDryRun) {
+        // JSON is a dry-run owned by the inner command. Do not preflight, stop, allocate ports,
+        // claim runtime state, or wait for readiness in the outer stack wrapper.
+        await run(process.execPath, [join(rootDir, 'scripts', scriptPath), ...args], { cwd: rootDir, env });
+        return;
+      }
       const runtimeLaunchContext =
         scriptPath === 'run.mjs'
           ? await resolveStackRuntimeLaunchContext({ argv: args, env })
           : { snapshot: null };
       const runtimeSnapshotId = runtimeLaunchContext.snapshot?.snapshotId ?? null;
-      const isStartLike = scriptPath === 'dev.mjs' || scriptPath === 'run.mjs';
       if (!isStartLike) {
         await run(process.execPath, [join(rootDir, 'scripts', scriptPath), ...args], { cwd: rootDir, env });
         return;
       }
 
-      const wantsRestart = args.includes('--restart');
-      const wantsJson = args.includes('--json');
       const pinnedServerPort = Boolean((stackEnv.HAPPIER_STACK_SERVER_PORT ?? '').trim());
       const serverComponent = (stackEnv.HAPPIER_STACK_SERVER_COMPONENT ?? '').toString().trim() || 'happier-server-light';
       const managedInfra =
@@ -204,9 +403,9 @@ export async function runStackScriptWithStackEnv({ rootDir, stackName, scriptPat
       // - Stop stack-owned processes after preflight (runner, daemon, Expo, etc.)
       // - Never kill arbitrary port listeners
       // - Preserve previous runtime ports in memory so a true restart can reuse them
-      if (wantsRestart && !wantsJson) {
+      if (wantsRestart) {
         const baseDir = resolveStackEnvPath(stackName).baseDir;
-        if (scriptPath === 'dev.mjs') {
+        if (shouldPreflightLocalDevServerRestart({ scriptPath, args, env })) {
           const serverDir = getComponentDir(rootDir, serverComponent, env);
           await preflightDevServerRestart({
             serverDir,
@@ -216,20 +415,22 @@ export async function runStackScriptWithStackEnv({ rootDir, stackName, scriptPat
           });
           env.HAPPIER_STACK_SERVER_RESTART_PREFLIGHT_ALREADY_DONE = '1';
         }
-        try {
-          await stopStackWithEnv({
-            rootDir,
-            stackName,
-            baseDir,
-            env,
-            json: false,
-            noDocker: false,
-            aggressive: false,
-            sweepOwned: true,
-            preserveDaemon: true,
-          });
-        } catch {
-          // ignore (fail-closed below on port checks)
+        if (isTrueRestart) {
+          try {
+            await stopStackWithEnv({
+              rootDir,
+              stackName,
+              baseDir,
+              env,
+              json: false,
+              noDocker: false,
+              aggressive: false,
+              sweepOwned: true,
+              preserveDaemon: true,
+            });
+          } catch {
+            // ignore (fail-closed below on port checks)
+          }
         }
       }
       if (existingRuntimeStatus.canShortCircuit) {
@@ -395,19 +596,6 @@ export async function runStackScriptWithStackEnv({ rootDir, stackName, scriptPat
                   continue;
                 }
 
-                // Last resort: if we can prove the listener is stack-owned, kill it.
-                // eslint-disable-next-line no-await-in-loop
-                const pids = await listListenPids(p);
-                const stackBaseDir = resolveStackEnvPath(stackName).baseDir;
-                const cliHomeDir = getCliHomeDirFromEnvOrDefault({ stackBaseDir, env });
-                for (const pid of pids) {
-                  // eslint-disable-next-line no-await-in-loop
-                  await killProcessGroupOwnedByStack(pid, { stackName, envPath, cliHomeDir, label: `port:${p}`, json: false });
-                }
-                // eslint-disable-next-line no-await-in-loop
-                if (await isTcpPortFree(p)) {
-                  continue;
-                }
               }
               throw new Error(
                 `[stack] ${stackName}: cannot reuse port ${p} on restart (port is not free).\n` +
@@ -468,7 +656,7 @@ export async function runStackScriptWithStackEnv({ rootDir, stackName, scriptPat
         // We must NOT start the daemon before credentials exist in orchestrated flows (setup-pr/review-pr),
         // because the daemon can enter its own auth flow and become stranded (lock held, no machine registration).
         if (background && scriptPath === 'dev.mjs') {
-          const startUi = !args.includes('--no-ui') && (env.HAPPIER_STACK_SERVE_UI ?? '1').toString().trim() !== '0';
+          const startUi = resolveRequestedStackServeUi({ args, env });
           const startDaemon = !args.includes('--no-daemon') && (env.HAPPIER_STACK_DAEMON ?? '1').toString().trim() !== '0';
           if (startUi && startDaemon) {
             try {
@@ -489,43 +677,41 @@ export async function runStackScriptWithStackEnv({ rootDir, stackName, scriptPat
         // remain clean while still providing actionable error logs.
         const stackBaseDir = resolveStackEnvPath(stackName).baseDir;
         const logsDir = join(stackBaseDir, 'logs');
-        let logPath = join(logsDir, `${scriptPath.replace(/\.mjs$/, '')}.${Date.now()}.log`);
-        if (background) {
-          logPath = await createStackRunnerLogPath({ logsDir, scriptPath });
-        }
-
-        let logHandle = null;
-        let outFd = null;
-        if (background) {
-          logHandle = await open(logPath, 'a');
-          outFd = logHandle.fd;
-        }
-
-        // Spawn the runner (long-lived) and record its pid + ports for other stack-scoped commands.
-        const child = spawn(process.execPath, [join(rootDir, 'scripts', scriptPath), ...args], {
-          cwd: rootDir,
-          env: childEnv,
-          stdio: background ? ['ignore', outFd ?? 'ignore', outFd ?? 'ignore'] : 'inherit',
-          shell: false,
-          detached: background && process.platform !== 'win32',
+        const launched = await withStackRuntimeStartClaim(runtimeStatePath, { stackName }, async ({ recordStart }) => {
+          let logPath = join(logsDir, `${scriptPath.replace(/\.mjs$/, '')}.${Date.now()}.log`);
+          if (background) logPath = await createStackRunnerLogPath({ logsDir, scriptPath });
+          const logHandle = background ? await open(logPath, 'a') : null;
+          const outFd = logHandle?.fd ?? null;
+          const child = spawn(process.execPath, [join(rootDir, 'scripts', scriptPath), ...args], {
+            cwd: rootDir,
+            env: childEnv,
+            stdio: background ? ['ignore', outFd ?? 'ignore', outFd ?? 'ignore'] : 'inherit',
+            shell: false,
+            detached: background && process.platform !== 'win32',
+          });
+          let startedRuntime = null;
+          try {
+            startedRuntime = await recordStart(createOuterStackRuntimeStartPublication({
+              stackName,
+              scriptPath,
+              ephemeral: true,
+              ownerPid: child.pid,
+              ports,
+              runtimeSnapshotId,
+              args,
+              env: childEnv,
+              logs: background ? { runner: logPath } : null,
+            }));
+          } catch (error) {
+            await terminateSpawnedRunnerForBootFailure(child, { preserveRuntimeState: true })
+              .catch(() => ({ ok: false }));
+            throw error;
+          } finally {
+            await logHandle?.close().catch(() => {});
+          }
+          return { child, logPath, expectedRuntimeState: startedRuntime };
         });
-        try {
-          await logHandle?.close();
-        } catch {
-          // ignore
-        }
-
-        // Record the chosen ports immediately (before the runner finishes booting), so other stack commands
-        // can resolve the correct endpoints and `--restart` can reliably reuse the same ports.
-        await recordStackRuntimeStart(runtimeStatePath, {
-          stackName,
-          script: scriptPath,
-          ephemeral: true,
-          ownerPid: child.pid,
-          ports,
-          runtimeSnapshotId,
-          ...(background ? { logs: { runner: logPath } } : {}),
-        }).catch(() => {});
+        const { child, logPath, expectedRuntimeState } = launched;
 
         if (background) {
           // Keep stack.runtime.json so stack-scoped stop/restart can manage this runner.
@@ -553,9 +739,16 @@ export async function runStackScriptWithStackEnv({ rootDir, stackName, scriptPat
             const readyPromise = (async () => {
               const timeoutMsRaw = (process.env.HAPPIER_STACK_STACK_BACKGROUND_READY_TIMEOUT_MS ?? '180000').toString().trim();
               const timeoutMs = timeoutMsRaw ? Number(timeoutMsRaw) : 180_000;
-              await waitForHttpOk(`${internalServerUrl}/health`, {
-                timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 180_000,
-                intervalMs: 300,
+              await waitForBackgroundStackReadiness({
+                stackName,
+                scriptPath,
+                args,
+                env: childEnv,
+                runtimeStatePath,
+                internalServerUrl,
+                expectedDaemonDistClosureFingerprint: runtimeLaunchContext.snapshot?.daemonDistClosureFingerprint ?? null,
+                timeoutMs,
+                isRunnerAlive: () => isPidAlive(child.pid),
               });
               return { kind: 'ready' };
             })();
@@ -587,26 +780,10 @@ export async function runStackScriptWithStackEnv({ rootDir, stackName, scriptPat
             } catch {
               // ignore
             }
-            // Best-effort cleanup on boot failure.
-            try {
-              // We spawned this runner process, so we can safely terminate it without relying
-              // on ownership heuristics (which can be unreliable on some platforms due to `ps` truncation).
-              if (background && process.platform !== 'win32') {
-                try {
-                  process.kill(-child.pid, 'SIGTERM');
-                } catch {
-                  // ignore
-                }
-              }
-              try {
-                child.kill('SIGTERM');
-              } catch {
-                // ignore
-              }
-            } catch {
-              // ignore
-            }
-            await deleteStackRuntimeStateFile(runtimeStatePath).catch(() => {});
+            await terminateSpawnedRunnerForBootFailure(child, {
+              runtimeStatePath,
+              expectedRuntimeState,
+            }).catch(() => ({ ok: false }));
             throw e;
           }
 
@@ -632,28 +809,12 @@ export async function runStackScriptWithStackEnv({ rootDir, stackName, scriptPat
             });
           });
         } finally {
-          const cur = await readStackRuntimeStateFile(runtimeStatePath);
-          if (Number(cur?.ownerPid) === Number(child.pid)) {
-            // Only delete runtime state when we're confident no child processes are left behind.
-            // If the runner crashes but a child (server/expo/daemon) stays alive, keeping stack.runtime.json
-            // allows `hstack stack stop --aggressive` to kill the recorded PIDs safely.
-            const processes = cur?.processes && typeof cur.processes === 'object' ? cur.processes : {};
-            const anyAlive = Object.values(processes)
-              .map((p) => Number(p))
-              .some((pid) => Number.isFinite(pid) && pid > 1 && isPidAlive(pid));
-            const portRaw = cur?.ports && typeof cur.ports === 'object' ? cur.ports.server : null;
-            const port = Number(portRaw);
-            const portOccupied = Number.isFinite(port) && port > 0 ? !(await isTcpPortFree(port, { host: '127.0.0.1' }).catch(() => true)) : false;
-
-            if (!anyAlive && !portOccupied) {
-              await deleteStackRuntimeStateFile(runtimeStatePath);
-            } else if (!wantsJson) {
-              console.warn(
-                `[stack] ${stackName}: preserving ${runtimeStatePath} after runner exit (child processes still alive). ` +
-                  `Run: hstack stack stop ${stackName} --yes --aggressive`
-              );
-            }
-          }
+          await cleanupExitedStackRuntimeOwner({
+            runtimeStatePath,
+            expectedRuntimeState,
+            stackName,
+            wantsJson,
+          });
         }
         return;
       }
@@ -673,33 +834,42 @@ export async function runStackScriptWithStackEnv({ rootDir, stackName, scriptPat
 
         const stackBaseDir = resolveStackEnvPath(stackName).baseDir;
         const logsDir = join(stackBaseDir, 'logs');
-        const logPath = await createStackRunnerLogPath({ logsDir, scriptPath });
-
-        const logHandle = await open(logPath, 'a');
-        const outFd = logHandle.fd;
-
-        const child = spawn(process.execPath, [join(rootDir, 'scripts', scriptPath), ...args], {
-          cwd: rootDir,
-          env,
-          stdio: ['ignore', outFd ?? 'ignore', outFd ?? 'ignore'],
-          shell: false,
-          detached: process.platform !== 'win32',
-        });
-        try {
-          await logHandle?.close();
-        } catch {
-          // ignore
-        }
-
-        await recordStackRuntimeStart(runtimeStatePath, {
-          stackName,
-          script: scriptPath,
-          ephemeral: false,
-          ownerPid: child.pid,
-          ports: { server: pinnedPort },
-          runtimeSnapshotId,
-          logs: { runner: logPath },
-        }).catch(() => {});
+        const { child, logPath, expectedRuntimeState } = await withStackRuntimeStartClaim(
+          runtimeStatePath,
+          { stackName },
+          async ({ recordStart }) => {
+            const logPath = await createStackRunnerLogPath({ logsDir, scriptPath });
+            const logHandle = await open(logPath, 'a');
+            const child = spawn(process.execPath, [join(rootDir, 'scripts', scriptPath), ...args], {
+              cwd: rootDir,
+              env,
+              stdio: ['ignore', logHandle.fd, logHandle.fd],
+              shell: false,
+              detached: process.platform !== 'win32',
+            });
+            let startedRuntime = null;
+            try {
+              startedRuntime = await recordStart(createOuterStackRuntimeStartPublication({
+                stackName,
+                scriptPath,
+                ephemeral: false,
+                ownerPid: child.pid,
+                ports: { server: pinnedPort },
+                runtimeSnapshotId,
+                args,
+                env,
+                logs: { runner: logPath },
+              }));
+            } catch (error) {
+              await terminateSpawnedRunnerForBootFailure(child, { preserveRuntimeState: true })
+                .catch(() => ({ ok: false }));
+              throw error;
+            } finally {
+              await logHandle.close().catch(() => {});
+            }
+            return { child, logPath, expectedRuntimeState: startedRuntime };
+          },
+        );
 
         const internalServerUrl = `http://127.0.0.1:${pinnedPort}`;
         try {
@@ -717,9 +887,16 @@ export async function runStackScriptWithStackEnv({ rootDir, stackName, scriptPat
           const readyPromise = (async () => {
             const timeoutMsRaw = (process.env.HAPPIER_STACK_STACK_BACKGROUND_READY_TIMEOUT_MS ?? '180000').toString().trim();
             const timeoutMs = timeoutMsRaw ? Number(timeoutMsRaw) : 180_000;
-            await waitForHttpOk(`${internalServerUrl}/health`, {
-              timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 180_000,
-              intervalMs: 300,
+            await waitForBackgroundStackReadiness({
+              stackName,
+              scriptPath,
+              args,
+              env,
+              runtimeStatePath,
+              internalServerUrl,
+              expectedDaemonDistClosureFingerprint: runtimeLaunchContext.snapshot?.daemonDistClosureFingerprint ?? null,
+              timeoutMs,
+              isRunnerAlive: () => isPidAlive(child.pid),
             });
             return { kind: 'ready' };
           })();
@@ -747,23 +924,10 @@ export async function runStackScriptWithStackEnv({ rootDir, stackName, scriptPat
           } catch {
             // ignore
           }
-          try {
-            if (process.platform !== 'win32') {
-              try {
-                process.kill(-child.pid, 'SIGTERM');
-              } catch {
-                // ignore
-              }
-            }
-            try {
-              child.kill('SIGTERM');
-            } catch {
-              // ignore
-            }
-          } catch {
-            // ignore
-          }
-          await deleteStackRuntimeStateFile(runtimeStatePath).catch(() => {});
+          await terminateSpawnedRunnerForBootFailure(child, {
+            runtimeStatePath,
+            expectedRuntimeState,
+          }).catch(() => ({ ok: false }));
           throw e;
         }
 
@@ -777,23 +941,13 @@ export async function runStackScriptWithStackEnv({ rootDir, stackName, scriptPat
         }
         return;
       }
-      if (wantsRestart && !wantsJson) {
+      if (isTrueRestart) {
         const pinnedPort = coercePort(env.HAPPIER_STACK_SERVER_PORT);
         if (pinnedPort && !(await isTcpPortFree(pinnedPort))) {
-          // Last resort: kill listener only if it is stack-owned.
-          const pids = await listListenPids(pinnedPort);
-          const stackBaseDir = resolveStackEnvPath(stackName).baseDir;
-          const cliHomeDir = getCliHomeDirFromEnvOrDefault({ stackBaseDir, env });
-          for (const pid of pids) {
-            // eslint-disable-next-line no-await-in-loop
-            await killProcessGroupOwnedByStack(pid, { stackName, envPath, cliHomeDir, label: `port:${pinnedPort}`, json: false });
-          }
-          if (!(await isTcpPortFree(pinnedPort))) {
-            throw new Error(
-              `[stack] ${stackName}: server port ${pinnedPort} is not free on restart.\n` +
-                `[stack] Refusing to kill unknown listeners. Stop the process using it, or change the pinned port.`
-            );
-          }
+          throw new Error(
+            `[stack] ${stackName}: server port ${pinnedPort} is not free on restart.\n` +
+              `[stack] Refusing to kill listeners selected by port. Stop the process using it, or change the pinned port.`
+          );
         }
       }
       await run(process.execPath, [join(rootDir, 'scripts', scriptPath), ...args], { cwd: rootDir, env });

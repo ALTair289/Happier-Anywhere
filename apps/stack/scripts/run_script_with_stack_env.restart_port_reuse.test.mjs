@@ -1,10 +1,30 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 
 import {
+  createOuterStackRuntimeStartPublication,
   hasRecordedRuntimePortsForRestart,
   shouldReuseRuntimePortsOnRestart,
 } from './stack/run_script_with_stack_env.mjs';
+
+test('outer start publication records requested UI truth before the child runner starts', () => {
+  const base = {
+    stackName: 'runtime-ui',
+    scriptPath: 'run.mjs',
+    ephemeral: false,
+    ownerPid: 4242,
+    ports: { server: 4101 },
+    runtimeSnapshotId: 'snapshot-1',
+  };
+
+  assert.equal(createOuterStackRuntimeStartPublication({ ...base, args: ['--no-ui'], env: {} }).serveUi, false);
+  assert.equal(
+    createOuterStackRuntimeStartPublication({ ...base, args: [], env: { HAPPIER_STACK_SERVE_UI: '0' } }).serveUi,
+    false,
+  );
+  assert.equal(createOuterStackRuntimeStartPublication({ ...base, args: [], env: {} }).serveUi, true);
+});
 
 test('hasRecordedRuntimePortsForRestart requires a positive server port', () => {
   assert.equal(hasRecordedRuntimePortsForRestart(null), false);
@@ -26,5 +46,26 @@ test('shouldReuseRuntimePortsOnRestart stays false when restart was not requeste
   assert.equal(
     shouldReuseRuntimePortsOnRestart({ wantsRestart: false, runtimeState, wasRunning: true }),
     false
+  );
+});
+
+test('stopped-stack restart cannot authorize the outer destructive stop path', async () => {
+  assert.equal(
+    shouldReuseRuntimePortsOnRestart({ wantsRestart: true, runtimeState: null, wasRunning: false }),
+    false,
+  );
+
+  const source = await readFile(new URL('./stack/run_script_with_stack_env.mjs', import.meta.url), 'utf8');
+  const decisionBoundary = source.indexOf('const isTrueRestart =');
+  const stopBoundary = source.indexOf('await stopStackWithEnv({', decisionBoundary);
+  const stopGuardBoundary = source.lastIndexOf('if (isTrueRestart)', stopBoundary);
+  assert.ok(
+    decisionBoundary >= 0 && stopGuardBoundary > decisionBoundary && stopBoundary > stopGuardBoundary,
+    'the canonical true-restart decision must guard the destructive outer stop',
+  );
+  assert.doesNotMatch(
+    source,
+    /listListenPids\([^)]*\)[\s\S]{0,1200}killProcessGroupOwnedByStack\(/,
+    'restart wrappers must never select a termination target from a listening port',
   );
 });

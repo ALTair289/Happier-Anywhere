@@ -1,7 +1,67 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 
-import { buildExpoDevEnv, buildExpoStartArgs, resolveExpoDevHost } from './expo_dev.mjs';
+import { buildExpoDevEnv, buildExpoStartArgs, resolveExpoDevHost, stopExpoProcessTree } from './expo_dev.mjs';
+
+test('stopExpoProcessTree forwards its declared grace to the canonical tree owner', async () => {
+  const proc = new EventEmitter();
+  proc.pid = 100;
+  proc.exitCode = null;
+  proc.signalCode = null;
+  proc.__happierClosed = false;
+  let receivedOptions = null;
+  await stopExpoProcessTree(proc, {
+    graceMs: 17,
+    killProcessTreeImpl: async (_proc, _signal, options) => {
+      receivedOptions = options;
+      proc.exitCode = 0;
+      proc.__happierClosed = true;
+    },
+    isPidAliveImpl: () => false,
+  });
+  assert.deepEqual(receivedOptions, { graceMs: 17 });
+});
+
+test('stopExpoProcessTree kills a certified Windows listener after its wrapper has exited', async () => {
+  const proc = new EventEmitter();
+  proc.pid = 100;
+  proc.exitCode = 1;
+  proc.signalCode = null;
+  proc.__happierClosed = true;
+  const alive = new Set([200]);
+  const killed = [];
+  await stopExpoProcessTree(proc, {
+    platform: 'win32',
+    ownedListenerPids: [200],
+    killProcessTreeImpl: () => {},
+    killPidImpl: (pid, signal) => {
+      killed.push([pid, signal]);
+      alive.delete(pid);
+    },
+    isPidAliveImpl: (pid) => alive.has(pid),
+  });
+  assert.deepEqual(killed, [[200, 'SIGTERM']]);
+});
+
+test('stopExpoProcessTree surfaces a certified Windows listener that survives TERM and KILL', async () => {
+  const proc = new EventEmitter();
+  proc.pid = 100;
+  proc.exitCode = 1;
+  proc.signalCode = null;
+  proc.__happierClosed = true;
+  await assert.rejects(
+    () => stopExpoProcessTree(proc, {
+      platform: 'win32',
+      graceMs: 1,
+      ownedListenerPids: [200],
+      killProcessTreeImpl: () => {},
+      killPidImpl: () => {},
+      isPidAliveImpl: () => true,
+    }),
+    (error) => error?.code === 'EEXPOCLEANUP',
+  );
+});
 
 test('resolveExpoDevHost defaults to lan and normalizes values', () => {
   assert.equal(resolveExpoDevHost({ env: {} }), 'lan');

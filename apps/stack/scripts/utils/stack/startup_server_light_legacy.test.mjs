@@ -3,8 +3,6 @@ import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { renderPrismaCompatibleSqliteDatabaseUrl } from '@happier-dev/cli-common/firstPartyRuntime';
-
 import { ensureServerLightSchemaReady } from './startup.mjs';
 import { buildServerLightEnv, createServerLightFixture } from './startup_server_light_testkit.mjs';
 
@@ -39,9 +37,9 @@ test('ensureServerLightSchemaReady honors HAPPY_SERVER_LIGHT_DATA_DIR legacy fal
       HAPPY_SERVER_LIGHT_DATA_DIR: dataDir,
       HAPPIER_SQLITE_BUSY_TIMEOUT_MS: '500',
       HAPPIER_SQLITE_CONNECTION_LIMIT: '1',
-      DATABASE_URL: undefined,
     },
   });
+  delete env.DATABASE_URL;
 
   assert.equal(existsSync(dataDir), false);
   assert.equal(Boolean(env.DATABASE_URL), false);
@@ -49,11 +47,7 @@ test('ensureServerLightSchemaReady honors HAPPY_SERVER_LIGHT_DATA_DIR legacy fal
   const res = await ensureServerLightSchemaReady({ serverDir, env });
   assert.equal(res.ok, true);
   assert.equal(existsSync(dataDir), true);
-  assert.equal(env.DATABASE_URL, renderPrismaCompatibleSqliteDatabaseUrl({
-    dbPath: join(dataDir, 'happier-server-light.sqlite'),
-    platform: process.platform,
-    sqlite: { busyTimeoutMs: 500, connectionLimit: 1 },
-  }));
+  assert.equal(Object.hasOwn(env, 'DATABASE_URL'), false, 'schema readiness must not pollute the env reused by dev reloads');
   assert.equal(existsSync(markerPath), true, `expected migrate:sqlite:deploy to be invoked (${markerPath})`);
 });
 
@@ -72,9 +66,9 @@ test('ensureServerLightSchemaReady falls back to HAPPY_SERVER_LIGHT_DATA_DIR whe
       HAPPIER_SERVER_LIGHT_FILES_DIR: '',
       HAPPIER_SERVER_LIGHT_DB_DIR: '',
       HAPPY_SERVER_LIGHT_DATA_DIR: dataDir,
-      DATABASE_URL: undefined,
     },
   });
+  delete env.DATABASE_URL;
 
   assert.equal(existsSync(dataDir), false);
   assert.equal(Boolean(env.DATABASE_URL), false);
@@ -82,10 +76,6 @@ test('ensureServerLightSchemaReady falls back to HAPPY_SERVER_LIGHT_DATA_DIR whe
   const res = await ensureServerLightSchemaReady({ serverDir, env });
   assert.equal(res.ok, true);
   assert.equal(existsSync(dataDir), true);
-  assert.equal(env.DATABASE_URL, renderPrismaCompatibleSqliteDatabaseUrl({
-    dbPath: join(dataDir, 'happier-server-light.sqlite'),
-    platform: process.platform,
-    sqlite: { connectionLimit: 1 },
-  }));
+  assert.equal(Object.hasOwn(env, 'DATABASE_URL'), false, 'schema readiness must not pollute the env reused by dev reloads');
   assert.equal(existsSync(markerPath), true, `expected migrate:sqlite:deploy to be invoked (${markerPath})`);
 });

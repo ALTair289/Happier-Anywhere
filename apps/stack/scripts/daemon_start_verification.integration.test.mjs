@@ -142,7 +142,7 @@ async function writeAccessKeyFile(path, token) {
 }
 
 test('stack daemon start verification default matches the daemon restart wait budget', () => {
-  assert.equal(resolveStackDaemonStartVerifyTimeoutMs({}), 60_000);
+  assert.equal(resolveStackDaemonStartVerifyTimeoutMs({}), 120_000);
   assert.equal(resolveStackDaemonStartVerifyTimeoutMs({ HAPPIER_STACK_DAEMON_START_VERIFY_TIMEOUT_MS: '1234' }), 1234);
 });
 
@@ -161,6 +161,9 @@ test('startLocalDaemonWithAuth treats daemon start exit=0 as failure when daemon
       HAPPIER_STACK_AUTO_AUTH_SEED: '0',
       HAPPIER_STACK_MIGRATE_CREDENTIALS: '0',
       HAPPIER_STACK_CLI_BUILD: '0',
+      HAPPIER_STACK_DAEMON_START_VERIFY_TIMEOUT_MS: '20',
+      HAPPIER_STACK_DAEMON_START_VERIFY_POLL_MS: '1',
+      HAPPIER_STACK_DAEMON_START_VERIFY_STABLE_MS: '0',
     });
 
     await assert.rejects(
@@ -196,6 +199,9 @@ test('startLocalDaemonWithAuth fails fast when stack-scoped auth is stale and on
       HAPPIER_STACK_AUTO_AUTH_SEED: '0',
       HAPPIER_STACK_MIGRATE_CREDENTIALS: '0',
       HAPPIER_STACK_CLI_BUILD: '0',
+      HAPPIER_STACK_DAEMON_START_VERIFY_TIMEOUT_MS: '20',
+      HAPPIER_STACK_DAEMON_START_VERIFY_POLL_MS: '1',
+      HAPPIER_STACK_DAEMON_START_VERIFY_STABLE_MS: '0',
       HAPPIER_ACTIVE_SERVER_ID: 'stack_dev__id_default',
     });
 
@@ -248,6 +254,9 @@ test('startLocalDaemonWithAuth does not backfill legacy access.key from main whe
       HAPPIER_STACK_AUTO_AUTH_SEED: '0',
       HAPPIER_STACK_MIGRATE_CREDENTIALS: '1',
       HAPPIER_STACK_CLI_BUILD: '0',
+      HAPPIER_STACK_DAEMON_START_VERIFY_TIMEOUT_MS: '20',
+      HAPPIER_STACK_DAEMON_START_VERIFY_POLL_MS: '1',
+      HAPPIER_STACK_DAEMON_START_VERIFY_STABLE_MS: '0',
       HAPPIER_ACTIVE_SERVER_ID: `stack_${stackName}__id_default`,
     });
 
@@ -422,6 +431,126 @@ await startLocalDaemonWithAuth({
     const res = await runNode([runnerPath], { cwd: tmp, env: createStubStackEnv() });
     assert.equal(res.code, 0, `${res.stdout}${res.stderr}`);
     assert.match(res.stdout + res.stderr, /\[daemon\] .*keeping TUI running\./);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('startLocalDaemonWithAuth keeps TUI alive when the daemon start wrapper exits by signal', async () => {
+  const scriptsDir = dirname(fileURLToPath(import.meta.url));
+  const rootDir = dirname(scriptsDir);
+  const tmp = await mkdtemp(join(tmpdir(), 'happy-stacks-daemon-tui-signaled-start-'));
+
+  try {
+    const cliDir = join(tmp, 'apps', 'cli');
+    await writeStubHappyCli({ cliDir });
+    const cliBin = join(cliDir, 'bin', 'happier.mjs');
+    const cliEntrypoint = join(cliDir, 'dist', 'index.mjs');
+    await writeFile(
+      cliEntrypoint,
+      `
+const args = process.argv.slice(2);
+if (args[0] === 'daemon' && args[1] === 'start') {
+  process.kill(process.pid, 'SIGTERM');
+  setInterval(() => {}, 1000);
+}
+process.exit(0);
+`.trimStart(),
+      'utf-8',
+    );
+
+    const cliHomeDir = join(tmp, 'stack', 'cli');
+    await mkdir(cliHomeDir, { recursive: true });
+    await writeFile(join(cliHomeDir, 'access.key'), 'seed-access-key\n', 'utf-8');
+    await writeFile(join(cliHomeDir, 'settings.json'), JSON.stringify({ machineId: 'test-machine' }) + '\n', 'utf-8');
+
+    const runnerPath = join(tmp, 'runner.mjs');
+    await writeFile(
+      runnerPath,
+      `
+import { startLocalDaemonWithAuth } from ${JSON.stringify(join(rootDir, 'scripts', 'daemon.mjs'))};
+
+await startLocalDaemonWithAuth({
+  cliBin: ${JSON.stringify(cliBin)},
+  cliCommand: process.execPath,
+  cliCommandArgs: [${JSON.stringify(cliEntrypoint)}],
+  cliHomeDir: ${JSON.stringify(cliHomeDir)},
+  internalServerUrl: 'http://127.0.0.1:4301',
+  publicServerUrl: 'http://localhost:4301',
+  isShuttingDown: () => false,
+  forceRestart: true,
+  env: {
+    ...process.env,
+    HAPPIER_STACK_TUI: '1',
+    HAPPIER_STACK_STACK: 'dev',
+    HAPPIER_STACK_AUTO_AUTH_SEED: '0',
+    HAPPIER_STACK_MIGRATE_CREDENTIALS: '0',
+    HAPPIER_STACK_CLI_BUILD: '0',
+    HAPPIER_STACK_DAEMON_START_VERIFY_TIMEOUT_MS: '20',
+    HAPPIER_STACK_DAEMON_START_VERIFY_POLL_MS: '1',
+    HAPPIER_STACK_DAEMON_START_VERIFY_STABLE_MS: '0',
+  },
+  stackName: 'dev',
+});
+`.trimStart(),
+      'utf-8',
+    );
+
+    const res = await runNode([runnerPath], { cwd: tmp, env: createStubStackEnv() });
+    assert.equal(res.code, 0, `${res.stdout}${res.stderr}`);
+    assert.match(res.stdout + res.stderr, /daemon start failed before the relay came up; keeping TUI running/);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('startLocalDaemonWithAuth keeps TUI alive when the daemon log reports invalid auth', async () => {
+  const scriptsDir = dirname(fileURLToPath(import.meta.url));
+  const rootDir = dirname(scriptsDir);
+  const tmp = await mkdtemp(join(tmpdir(), 'happy-stacks-daemon-tui-invalid-auth-'));
+
+  try {
+    const cliDir = join(tmp, 'apps', 'cli');
+    const cliBin = await writeStubHappyCli({ cliDir });
+    const cliHomeDir = join(tmp, 'stack', 'cli');
+    await mkdir(cliHomeDir, { recursive: true });
+    await writeFile(join(cliHomeDir, 'access.key'), 'seed-access-key\n', 'utf-8');
+    await writeFile(join(cliHomeDir, 'settings.json'), JSON.stringify({ machineId: 'test-machine' }) + '\n', 'utf-8');
+
+    const runnerPath = join(tmp, 'runner.mjs');
+    await writeFile(
+      runnerPath,
+      `
+import { startLocalDaemonWithAuth } from ${JSON.stringify(join(rootDir, 'scripts', 'daemon.mjs'))};
+
+await startLocalDaemonWithAuth({
+  cliBin: ${JSON.stringify(cliBin)},
+  cliCommand: process.execPath,
+  cliCommandArgs: [${JSON.stringify(join(cliDir, 'dist', 'index.mjs'))}],
+  cliHomeDir: ${JSON.stringify(cliHomeDir)},
+  internalServerUrl: 'http://127.0.0.1:4301',
+  publicServerUrl: 'http://localhost:4301',
+  isShuttingDown: () => false,
+  forceRestart: true,
+  env: {
+    ...process.env,
+    HAPPIER_STACK_TUI: '1',
+    HAPPIER_STACK_AUTO_AUTH_SEED: '0',
+    HAPPIER_STACK_MIGRATE_CREDENTIALS: '0',
+    HAPPIER_STACK_CLI_BUILD: '0',
+    HAPPIER_STACK_DAEMON_START_VERIFY_TIMEOUT_MS: '1',
+    HAPPIER_STACK_DAEMON_START_VERIFY_POLL_MS: '1',
+    HAPPIER_STACK_DAEMON_START_VERIFY_STABLE_MS: '0',
+  },
+  stackName: 'dev',
+});
+`.trimStart(),
+      'utf-8',
+    );
+
+    const res = await runNode([runnerPath], { cwd: tmp, env: createStubStackEnv() });
+    assert.equal(res.code, 0, `${res.stdout}${res.stderr}`);
+    assert.match(res.stdout + res.stderr, /daemon start failed before the relay came up; keeping TUI running/);
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }
@@ -633,13 +762,12 @@ try {
     const res = await runNode([runnerPath], { cwd: tmp, env: createStubStackEnv() });
     assert.equal(res.code, 0, res.stdout + res.stderr);
     assert.match(res.stdout + res.stderr, /dummy-alive/);
-    assert.match(res.stdout + res.stderr, /keeping existing daemon/i);
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }
 });
 
-test('startLocalDaemonWithAuth does not accept an unpingable daemon state as already running', async () => {
+test('startLocalDaemonWithAuth preserves a live daemon across a transient control ping miss', async () => {
   const tmp = await mkdtemp(join(tmpdir(), 'happy-stacks-daemon-unpingable-running-'));
   let dummy = null;
   try {
@@ -677,7 +805,7 @@ test('startLocalDaemonWithAuth does not accept an unpingable daemon state as alr
       'utf-8',
     );
 
-    await assert.rejects(
+    await assert.doesNotReject(
       startLocalDaemonWithAuth({
         cliBin,
         cliHomeDir,
@@ -685,6 +813,7 @@ test('startLocalDaemonWithAuth does not accept an unpingable daemon state as alr
         publicServerUrl,
         isShuttingDown: () => false,
         forceRestart: false,
+        preserveExistingRunning: true,
         env: createStubStackEnv({
           HAPPIER_STACK_STACK: 'dev',
           HAPPIER_STACK_AUTO_AUTH_SEED: '0',
@@ -696,8 +825,8 @@ test('startLocalDaemonWithAuth does not accept an unpingable daemon state as alr
         }),
         stackName: 'dev',
       }),
-      /Failed to auto re-seed daemon credentials|Failed to start daemon|daemon is not authenticated yet/,
     );
+    assert.doesNotThrow(() => process.kill(dummy.pid, 0), 'transient control failure must not kill the live daemon');
   } finally {
     if (dummy?.pid) {
       try {

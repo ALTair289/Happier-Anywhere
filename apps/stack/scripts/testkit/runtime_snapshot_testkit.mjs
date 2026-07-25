@@ -27,6 +27,9 @@ export async function createRuntimeSnapshotFixture(
     stackDir,
     snapshotId: 'snap-1',
     sourceFingerprint: 'src-1',
+    source: {
+      serverComponent: 'happier-server-light',
+    },
     writeCurrentMirror: true,
     web: {
       content: '<html></html>\n',

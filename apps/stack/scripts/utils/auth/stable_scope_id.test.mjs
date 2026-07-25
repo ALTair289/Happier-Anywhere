@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   applyStackActiveServerScopeEnv,
+  applyStackDaemonLifecycleScopeEnv,
   buildStackStableScopeId,
   resolveStackActiveServerId,
 } from './stable_scope_id.mjs';
@@ -48,4 +49,19 @@ test('applyStackActiveServerScopeEnv sets generated stable scope id by default',
   const env = { HAPPIER_STACK_STACK: 'feature-123' };
   const next = applyStackActiveServerScopeEnv({ env, stackName: 'feature-123', cliIdentity: 'account-b' });
   assert.equal(next.HAPPIER_ACTIVE_SERVER_ID, 'stack_feature-123__id_account-b');
+});
+
+test('applyStackDaemonLifecycleScopeEnv keeps endpoint profile selection independent', () => {
+  const env = {
+    HAPPIER_ACTIVE_SERVER_ID: 'android-keyboard-qa',
+    HAPPIER_STACK_STACK: 'repo-remote-dev-d72117acdb',
+  };
+  const next = applyStackDaemonLifecycleScopeEnv({
+    env,
+    stackName: 'repo-remote-dev-d72117acdb',
+    cliIdentity: 'default',
+  });
+
+  assert.equal(next.HAPPIER_ACTIVE_SERVER_ID, 'android-keyboard-qa');
+  assert.equal(next.HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID, 'stack_repo-remote-dev-d72117acdb__id_default');
 });

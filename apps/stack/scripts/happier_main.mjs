@@ -12,11 +12,18 @@ import { resolveLocalServerPortForStack } from './utils/server/resolve_stack_ser
 import { STACK_RESERVED_PORT_KEYS } from './utils/server/port.mjs';
 import { resolveStackEnvPath } from './utils/paths/paths.mjs';
 import { parseEnvToObject } from './utils/env/dotenv.mjs';
-import { applyStackActiveServerScopeEnv, buildStackStableScopeId } from './utils/auth/stable_scope_id.mjs';
+import {
+  applyStackActiveServerScopeEnv,
+  applyStackDaemonLifecycleScopeEnv,
+  buildStackStableScopeId,
+} from './utils/auth/stable_scope_id.mjs';
 import { resolvePreferredStackServerIdFromCliSettings } from './utils/auth/credentials_paths.mjs';
-import { readCliDistIntegrity } from './utils/cli/cliDistIntegrity.mjs';
+import { probeCliDistRuntimeImport, readCliDistIntegrity } from './utils/cli/cliDistIntegrity.mjs';
 import { resolveStackRuntimeLaunchContext } from './runtime/launch/resolveStackRuntimeLaunchContext.mjs';
-import { resolveCliRuntimeLaunchSpec } from './runtime/launch/resolveCliRuntimeLaunchSpec.mjs';
+import {
+  applyCliRuntimeLaunchProvenanceEnv,
+  resolveCliRuntimeLaunchSpec,
+} from './runtime/launch/resolveCliRuntimeLaunchSpec.mjs';
 import { resolveJavaScriptRuntimeCommand } from '@happier-dev/cli-common/providers/managedJavaScriptRuntime';
 import { createServerUrlComparableKey } from '@happier-dev/protocol';
 
@@ -288,11 +295,16 @@ function bestEffortSeedStackServerProfileInCliSettings({ cliHomeDir, stackName, 
   }
 }
 
-function resolveCliEntrypoint(cliDir) {
+async function resolveCliEntrypoint(cliDir) {
   const distEntrypoint = join(cliDir, 'dist', 'index.mjs');
   const distIntegrity = readCliDistIntegrity(distEntrypoint);
   if (distIntegrity.ok) {
-    return { kind: 'dist', nodeArgs: [distEntrypoint], distEntrypoint };
+    try {
+      await probeCliDistRuntimeImport(distEntrypoint, { cwd: cliDir });
+      return { kind: 'dist', nodeArgs: [distEntrypoint], distEntrypoint };
+    } catch {
+      // Fall through to the source entrypoint when the completed build cannot link at runtime.
+    }
   }
 
   const srcEntrypoint = join(cliDir, 'src', 'index.ts');
@@ -364,7 +376,7 @@ async function main() {
           args: cliLaunchSpec.args,
           distEntrypoint: cliLaunchSpec.entrypoint,
         }
-    : resolveCliEntrypoint(cliDir);
+    : await resolveCliEntrypoint(cliDir);
   if (wantsHelp(argv, { flags }) && !resolvedCli) {
     printHstackHappierHelp({ json });
     return;
@@ -439,6 +451,7 @@ async function main() {
     }
     env.HAPPIER_WEBAPP_URL = settingsDefaults.webappUrl;
     delete env.HAPPIER_ACTIVE_SERVER_ID;
+    delete env.HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID;
   }
   // Only set default env vars when no explicit server selection flags are present
   if (!prefixServerSelection.hasExplicitSelection && !settingsDefaults) {
@@ -467,9 +480,14 @@ async function main() {
     } else {
       delete env.HAPPIER_ACTIVE_SERVER_ID;
     }
+    delete env.HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID;
   } else if (!settingsDefaults) {
-    env = applyStackActiveServerScopeEnv({
-      env,
+    env = applyStackDaemonLifecycleScopeEnv({
+      env: applyStackActiveServerScopeEnv({
+        env,
+        stackName,
+        cliIdentity: (env.HAPPIER_STACK_CLI_IDENTITY ?? '').toString().trim() || 'default',
+      }),
       stackName,
       cliIdentity: (env.HAPPIER_STACK_CLI_IDENTITY ?? '').toString().trim() || 'default',
     });
@@ -495,6 +513,7 @@ async function main() {
     }
   }
 
+  env = applyCliRuntimeLaunchProvenanceEnv({ env, cliLaunchSpec });
   const forwardedArgv = stripHstackHappierWrapperFlags(argv);
   const res =
     resolvedCli.kind === 'runtime'

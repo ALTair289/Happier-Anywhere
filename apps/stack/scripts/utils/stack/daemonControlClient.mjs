@@ -1,8 +1,11 @@
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 
 import { resolvePreferredStackDaemonStatePaths } from '../auth/credentials_paths.mjs';
+import { applyStackDaemonLifecycleScopeEnv } from '../auth/stable_scope_id.mjs';
 import { resolvePidStackOwnership } from '../proc/ownership.mjs';
+import { readStackRuntimeStateFile } from './runtime_state.mjs';
 
 const DEFAULT_RESTART_CONFIRM_POLL_MS = 200;
 const DEFAULT_RESTART_CONFIRM_TIMEOUT_MS = 60_000;
@@ -20,6 +23,15 @@ export class DaemonControlPostError extends Error {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+}
+
+function normalizeSuccessorDistClosureFingerprint(value) {
+  if (value === undefined || value === null) return null;
+  const fingerprint = String(value).trim().toLowerCase();
+  if (!/^[a-f0-9]{16}$/.test(fingerprint)) {
+    throw new Error('successor dist closure fingerprint must be exactly 16 hexadecimal characters');
+  }
+  return fingerprint;
 }
 
 export async function daemonControlPost({ httpPort, path, body = {}, controlToken = '', timeoutMs = DEFAULT_DAEMON_CONTROL_POST_TIMEOUT_MS }) {
@@ -68,6 +80,22 @@ function resolveDaemonControlOwnershipContext({ cliHomeDir, stackName, env } = {
   };
 }
 
+async function readDaemonProcessInstanceFingerprint({ pid, cliHomeDir, env } = {}) {
+  const envPath = String(env?.HAPPIER_STACK_ENV_FILE ?? '').trim();
+  const baseDir = envPath ? dirname(envPath) : dirname(String(cliHomeDir ?? '').trim());
+  if (!baseDir) return null;
+  const runtime = await readStackRuntimeStateFile(join(baseDir, 'stack.runtime.json')).catch(() => null);
+  for (const key of ['daemonPid', 'daemonPids']) {
+    const identities = runtime?.processInstances?.processes?.[key];
+    for (const identity of Array.isArray(identities) ? identities : [identities]) {
+      if (Number(identity?.pid) === Number(pid)) {
+        return String(identity?.fingerprint ?? '').trim() || null;
+      }
+    }
+  }
+  return null;
+}
+
 export async function readDaemonControlState({
   cliHomeDir,
   serverUrl,
@@ -75,7 +103,15 @@ export async function readDaemonControlState({
   stackName = null,
   resolvePidStackOwnershipImpl = resolvePidStackOwnership,
 }) {
-  const { statePath } = resolvePreferredStackDaemonStatePaths({ cliHomeDir, serverUrl, env });
+  const resolvedStackName = String(stackName ?? '').trim();
+  const stateEnv = resolvedStackName
+    ? applyStackDaemonLifecycleScopeEnv({
+        env,
+        stackName: resolvedStackName,
+        cliIdentity: String(env?.HAPPIER_STACK_CLI_IDENTITY ?? '').trim() || 'default',
+      })
+    : env;
+  const { statePath } = resolvePreferredStackDaemonStatePaths({ cliHomeDir, serverUrl, env: stateEnv });
   if (!existsSync(statePath)) {
     return { ok: false, reason: 'missing_state', statePath };
   }
@@ -103,6 +139,12 @@ export async function readDaemonControlState({
   }
   const ownershipContext = resolveDaemonControlOwnershipContext({ cliHomeDir, stackName, env });
   if (ownershipContext && typeof resolvePidStackOwnershipImpl === 'function') {
+    const processInstanceFingerprint = await readDaemonProcessInstanceFingerprint({
+      pid,
+      cliHomeDir,
+      env,
+    });
+    if (processInstanceFingerprint) ownershipContext.processInstanceFingerprint = processInstanceFingerprint;
     const ownership = await resolvePidStackOwnershipImpl(pid, ownershipContext);
     if (ownership?.owned !== true) {
       return {
@@ -143,13 +185,21 @@ export async function pingDaemon({
   });
   if (!controlState.ok) return controlState;
   try {
-    await daemonControlPost({
+    const ping = await daemonControlPost({
       httpPort: controlState.httpPort,
       path: '/ping',
       controlToken: controlState.controlToken,
       timeoutMs,
     });
-    return { ok: true, pid: controlState.pid, state: controlState.state };
+    const distClosureFingerprint = String(ping?.distClosureFingerprint ?? '').trim().toLowerCase();
+    return {
+      ok: true,
+      pid: controlState.pid,
+      state: controlState.state,
+      distClosureFingerprint: /^[a-f0-9]{16}$/.test(distClosureFingerprint)
+        ? distClosureFingerprint
+        : null,
+    };
   } catch {
     return { ok: false, reason: 'ping_failed', pid: controlState.pid };
   }
@@ -164,10 +214,14 @@ export async function restartDaemonViaControlServer({
   timeoutMs = null,
   requestTimeoutMs = DEFAULT_DAEMON_CONTROL_POST_TIMEOUT_MS,
   pollMs = DEFAULT_RESTART_CONFIRM_POLL_MS,
+  successorDistClosureFingerprint = null,
   readDaemonControlStateImpl = readDaemonControlState,
   daemonControlPostImpl = daemonControlPost,
   delayImpl = delay,
 }) {
+  const normalizedSuccessorDistClosureFingerprint = normalizeSuccessorDistClosureFingerprint(
+    successorDistClosureFingerprint,
+  );
   const confirmTimeoutMs = resolveDaemonRestartConfirmTimeoutMs(env, timeoutMs);
   const controlPostTimeoutMs = Math.max(100, Number(requestTimeoutMs) || DEFAULT_DAEMON_CONTROL_POST_TIMEOUT_MS);
   const controlState = await readDaemonControlStateImpl({
@@ -182,7 +236,9 @@ export async function restartDaemonViaControlServer({
   const restartResult = await daemonControlPostImpl({
     httpPort: controlState.httpPort,
     path: '/restart',
-    body: {},
+    body: normalizedSuccessorDistClosureFingerprint
+      ? { successorDistClosureFingerprint: normalizedSuccessorDistClosureFingerprint }
+      : {},
     controlToken: controlState.controlToken,
     timeoutMs: controlPostTimeoutMs,
   });
@@ -212,12 +268,21 @@ export async function restartDaemonViaControlServer({
       continue;
     }
     try {
-      await daemonControlPostImpl({
+      const replacementPing = await daemonControlPostImpl({
         httpPort: replacementState.httpPort,
         path: '/ping',
         controlToken: replacementState.controlToken,
         timeoutMs: controlPostTimeoutMs,
       });
+      if (
+        normalizedSuccessorDistClosureFingerprint
+        && String(replacementPing?.distClosureFingerprint ?? '').trim()
+          !== normalizedSuccessorDistClosureFingerprint
+      ) {
+        lastReason = 'successor_fingerprint_mismatch';
+        await delayImpl(pollMs);
+        continue;
+      }
       return {
         status: restartStatus,
         previousPid,

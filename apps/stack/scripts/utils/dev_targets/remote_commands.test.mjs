@@ -1,0 +1,108 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+
+import {
+  buildRemoteBootstrapCommand,
+  buildRemoteDoctorCommand,
+  buildRemoteDaemonCommand,
+  buildSshWorkerArgs,
+} from './remote_commands.mjs';
+
+const posix = {
+  name: 'linux',
+  platform: 'posix',
+  ssh: 'happier-stack-linux',
+  repoDir: '/home/dev/Happier repo',
+  cliHomeDir: '/home/dev/.happier/dev linux',
+  remoteServerPort: null,
+};
+
+const windows = {
+  name: 'windows',
+  platform: 'windows',
+  ssh: 'happier-stack-windows',
+  repoDir: 'C:/Users/test qa/Happier',
+  cliHomeDir: 'C:/Users/test qa/.happier/windows',
+  remoteServerPort: 43105,
+};
+
+test('remote bootstrap installs target-local dependencies from synchronized source', () => {
+  const posixCommand = buildRemoteBootstrapCommand(posix);
+  assert.match(posixCommand, /^bash -lc /);
+  assert.match(posixCommand, /corepack yarn install --frozen-lockfile/);
+  assert.match(posixCommand, /Happier repo/);
+
+  const windowsCommand = buildRemoteBootstrapCommand(windows);
+  assert.match(windowsCommand, /^powershell\.exe -NoProfile -NonInteractive -EncodedCommand /);
+  assert.doesNotMatch(windowsCommand, /test qa/);
+});
+
+test('remote doctor checks prerequisites without changing the target', () => {
+  const posixCommand = buildRemoteDoctorCommand(posix);
+  assert.match(posixCommand, /command -v node/);
+  assert.match(posixCommand, /command -v corepack/);
+  assert.doesNotMatch(posixCommand, /yarn install/);
+
+  const windowsCommand = buildRemoteDoctorCommand(windows);
+  const decodedPowerShell = Buffer.from(windowsCommand.split(' ').at(-1), 'base64').toString('utf16le');
+  assert.match(decodedPowerShell, /Get-Command node/);
+  assert.match(decodedPowerShell, /Get-Command corepack/);
+  assert.doesNotMatch(decodedPowerShell, /yarn install/);
+});
+
+test('remote daemon command reuses the Stack dev owner without the repo-local env scrubber', () => {
+  const command = buildRemoteDaemonCommand(posix, {
+    serverUrl: 'http://127.0.0.1:43005',
+    activeServerId: 'stack_repo__id_default',
+    stackName: 'repo-local-dev',
+  });
+  assert.match(
+    command,
+    /corepack yarn workspace @happier-dev\/stack dev --no-server --no-ui --no-browser --no-dev-targets --watch/,
+  );
+  assert.match(command, /HAPPIER_HOME_DIR/);
+  assert.match(command, /HAPPIER_STACK_CLI_HOME_DIR/);
+  assert.match(command, /HAPPIER_STACK_STORAGE_DIR/);
+  assert.match(command, /HAPPIER_STACK_STACK/);
+  assert.match(command, /HAPPIER_ACTIVE_SERVER_ID/);
+  assert.match(command, /http:\/\/127\.0\.0\.1:43005/);
+  assert.doesNotMatch(command, /corepack yarn dev /);
+
+  const windowsCommand = buildRemoteDaemonCommand(windows, {
+    serverUrl: 'http://127.0.0.1:43105',
+    activeServerId: 'stack_repo__id_default',
+    stackName: 'repo-local-dev',
+  });
+  const decodedPowerShell = Buffer.from(windowsCommand.split(' ').at(-1), 'base64').toString('utf16le');
+  assert.match(decodedPowerShell, /\$env:HAPPIER_STACK_CLI_HOME_DIR/);
+  assert.match(decodedPowerShell, /\$env:HAPPIER_STACK_STACK = 'repo-local-dev'/);
+  assert.match(
+    decodedPowerShell,
+    /corepack yarn workspace @happier-dev\/stack dev --no-server --no-ui --no-browser --no-dev-targets --watch/,
+  );
+});
+
+test('SSH worker owns the reverse tunnel to the existing local server', () => {
+  assert.deepEqual(
+    buildSshWorkerArgs(posix, {
+      localServerPort: 3005,
+      remoteServerPort: 43005,
+      remoteCommand: 'bash -lc true',
+    }),
+    [
+      '-tt',
+      '-o',
+      'BatchMode=yes',
+      '-o',
+      'ExitOnForwardFailure=yes',
+      '-o',
+      'ServerAliveInterval=15',
+      '-o',
+      'ServerAliveCountMax=3',
+      '-R',
+      '127.0.0.1:43005:127.0.0.1:3005',
+      'happier-stack-linux',
+      'bash -lc true',
+    ],
+  );
+});

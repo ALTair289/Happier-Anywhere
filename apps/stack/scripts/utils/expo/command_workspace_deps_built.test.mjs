@@ -22,6 +22,7 @@ async function writeYarnStub({ binDir, outputPath }) {
       'echo "$(pwd) :: $*" >> "${OUTPUT_PATH:?}"',
       '',
       'if [[ "${1:-}" == "--version" ]]; then',
+      '  IFS= read -r _ || true',
       '  echo "1.22.22"',
       '  exit 0',
       'fi',
@@ -31,11 +32,12 @@ async function writeYarnStub({ binDir, outputPath }) {
       'fi',
       '',
       'if [[ "${1:-}" == "-s" && "${2:-}" == "build" && "$(pwd)" == */packages/protocol ]]; then',
-      '  mkdir -p dist',
-      "  printf '%s\\n' 'export const ok = true;' > dist/index.js",
-      "  printf '%s\\n' 'export const ok = true;' > dist/rpcErrors.js",
-      "  printf '%s\\n' 'export declare const ok: boolean;' > dist/index.d.ts",
-      "  printf '%s\\n' 'export declare const ok: boolean;' > dist/rpcErrors.d.ts",
+      '  out="${HAPPIER_WORKSPACE_DIST_OUTPUT_DIR:-dist}"',
+      '  mkdir -p "$out"',
+      "  printf '%s\\n' 'export const ok = true;' > \"$out/index.js\"",
+      "  printf '%s\\n' 'export const ok = true;' > \"$out/rpcErrors.js\"",
+      "  printf '%s\\n' 'export declare const ok: boolean;' > \"$out/index.d.ts\"",
+      "  printf '%s\\n' 'export declare const ok: boolean;' > \"$out/rpcErrors.d.ts\"",
       '  exit 0',
       'fi',
       '',
@@ -48,19 +50,23 @@ async function writeYarnStub({ binDir, outputPath }) {
     join(binDir, 'yarn.cmd'),
     [
       '@echo off',
+      'setlocal EnableExtensions EnableDelayedExpansion',
       'echo %CD% :: %*>>"%OUTPUT_PATH%"',
       'if "%~1"=="--version" (',
+      '  set /p "_="',
       '  echo 1.22.22',
       '  exit /b 0',
       ')',
       'if "%~1"=="install" exit /b 0',
       'if "%~1"=="-s" if "%~2"=="build" (',
       '  if /I "%CD%"=="' + join(binDir, '..', 'packages', 'protocol') + '" (',
-      '    if not exist dist mkdir dist',
-      "    >dist\\index.js echo export const ok = true;",
-      "    >dist\\rpcErrors.js echo export const ok = true;",
-      "    >dist\\index.d.ts echo export declare const ok: boolean;",
-      "    >dist\\rpcErrors.d.ts echo export declare const ok: boolean;",
+      '    set "out=%HAPPIER_WORKSPACE_DIST_OUTPUT_DIR%"',
+      '    if not defined out set "out=dist"',
+      '    if not exist "!out!" mkdir "!out!"',
+      "    >\"!out!\\index.js\" echo export const ok = true;",
+      "    >\"!out!\\rpcErrors.js\" echo export const ok = true;",
+      "    >\"!out!\\index.d.ts\" echo export declare const ok: boolean;",
+      "    >\"!out!\\rpcErrors.d.ts\" echo export declare const ok: boolean;",
       '  )',
       '  exit /b 0',
       ')',
@@ -185,6 +191,10 @@ test('expoExec builds workspace dist deps for the projectDir (not the runnerDir)
   const binDir = join(root, 'bin');
   const outputPath = join(root, 'argv.txt');
   await writeYarnStub({ binDir, outputPath });
+  const yarnCmd = await readFile(join(binDir, 'yarn.cmd'), 'utf-8');
+  assert.match(yarnCmd, /setlocal EnableExtensions EnableDelayedExpansion/);
+  assert.doesNotMatch(yarnCmd, /%out%/);
+  assert.equal((yarnCmd.match(/!out!\\(?:index|rpcErrors)(?:\.d\.ts|\.js)/g) ?? []).length, 4);
 
   const expoPath = join(root, 'node_modules', '.bin', 'expo');
   await writeExpoStub({ expoPath });
