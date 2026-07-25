@@ -52,6 +52,7 @@ describe('buildCliBinaryArtifactPayload Windows rename fallback', () => {
         const newer = new Date('2026-04-13T18:05:00.000Z');
         const cliDir = join(repoRoot, 'apps', 'cli');
         const cliDistDir = join(cliDir, 'dist');
+        const abandonedSnapshotDir = join(cliDir, '.dist.hstack-snapshot-abandoned');
 
         if (!renameDelegate.current) {
             throw new Error('expected node:fs/promises.rename delegate to be initialized');
@@ -79,6 +80,7 @@ describe('buildCliBinaryArtifactPayload Windows rename fallback', () => {
             },
         }, null, 2)}\n`, older);
         await writeRepoFile(join(cliDir, 'src', 'index.ts'), 'export default "cli-source";\n', older);
+        await writeRepoFile(join(abandonedSnapshotDir, 'index.mjs'), 'export const abandoned = true;\n', older);
         for (const sidecarPath of [
             ['apps', 'cli', 'scripts', 'childProcessOptions.cjs'],
             ['apps', 'cli', 'scripts', 'claude_launcher_runtime.cjs'],
@@ -130,6 +132,11 @@ module.exports = { unpackTools };
         await buildCliBinaryArtifactPayload({
             repoRoot,
             payloadDir,
+            ensureWorkspacePackagesBuiltByName: async (_root, packageNames) => ({
+                ok: true,
+                built: [],
+                skipped: packageNames,
+            }),
             commandProbe: (command) => command === 'bun' || command === 'yarn',
             runCommand: async () => {
                 await writeRepoFile(join(cliDistDir, 'index.mjs'), 'export const cli = "fresh";\n', newer);
@@ -142,5 +149,6 @@ module.exports = { unpackTools };
         await expect(readFile(join(payloadDir, 'package-dist', 'index.mjs'), 'utf8')).resolves.toBe('export const cli = "fresh";\n');
         await expect(readFile(join(cliDistDir, 'index.mjs'), 'utf8')).resolves.toBe('export const cli = "fresh";\n');
         expect(existsSync(join(payloadDir, 'happier'))).toBe(true);
+        expect(existsSync(abandonedSnapshotDir)).toBe(false);
     });
 });

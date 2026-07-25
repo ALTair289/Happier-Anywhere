@@ -210,6 +210,11 @@ describe('buildCliBinaryArtifactPayload bundled workspace sync', () => {
         await buildCliBinaryArtifactPayload({
             repoRoot,
             payloadDir,
+            ensureWorkspacePackagesBuiltByName: async (_root, packageNames) => ({
+                ok: true,
+                built: [],
+                skipped: packageNames,
+            }),
             commandProbe: (command) => command === 'bun' || command === 'yarn',
             runCommand: () => {
                 throw new Error('buildCliBinaryArtifactPayload should not rebuild the cli dist in this scenario');

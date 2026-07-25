@@ -4,6 +4,10 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
+async function acceptWorkspacePackageFixtures(_repoRoot, packageNames) {
+  return { ok: true, built: [], skipped: [...packageNames] };
+}
+
 function writeWorkspacePackageFixture({ repoRoot, packageName, relativeDir }) {
   const packageDir = join(repoRoot, ...relativeDir);
   const distDir = join(packageDir, 'dist');
@@ -279,6 +283,7 @@ test('buildCliBinaryArtifactPayload compiles the local CLI binary into the paylo
     const result = await artifacts.buildCliBinaryArtifactPayload({
       repoRoot,
       payloadDir,
+      ensureWorkspacePackagesBuiltByName: acceptWorkspacePackageFixtures,
       target: artifacts.resolveCurrentBinaryTarget({
         availableTargets: artifacts.CLI_BINARY_TARGETS,
         platform: 'linux',
@@ -451,6 +456,7 @@ test('buildCliBinaryArtifactPayload removes compile-generated node_modules befor
     await artifacts.buildCliBinaryArtifactPayload({
       repoRoot,
       payloadDir,
+      ensureWorkspacePackagesBuiltByName: acceptWorkspacePackageFixtures,
       target: artifacts.resolveCurrentBinaryTarget({
         availableTargets: artifacts.CLI_BINARY_TARGETS,
         platform: 'linux',
@@ -562,6 +568,7 @@ test('buildCliBinaryArtifactPayload snapshots CLI dist before compile/copy so la
     await artifacts.buildCliBinaryArtifactPayload({
       repoRoot,
       payloadDir,
+      ensureWorkspacePackagesBuiltByName: acceptWorkspacePackageFixtures,
       target: artifacts.resolveCurrentBinaryTarget({
         availableTargets: artifacts.CLI_BINARY_TARGETS,
         platform: 'linux',
@@ -646,6 +653,7 @@ test('buildCliBinaryArtifactPayload derives bundled workspace packages from apps
     await artifacts.buildCliBinaryArtifactPayload({
       repoRoot,
       payloadDir,
+      ensureWorkspacePackagesBuiltByName: acceptWorkspacePackageFixtures,
       target: artifacts.resolveCurrentBinaryTarget({
         availableTargets: artifacts.CLI_BINARY_TARGETS,
         platform: 'linux',
@@ -728,6 +736,7 @@ test('buildCliBinaryArtifactPayload restores runtime sidecars after compile rewr
     await artifacts.buildCliBinaryArtifactPayload({
       repoRoot,
       payloadDir,
+      ensureWorkspacePackagesBuiltByName: acceptWorkspacePackageFixtures,
       target: artifacts.resolveCurrentBinaryTarget({
         availableTargets: artifacts.CLI_BINARY_TARGETS,
         platform: 'linux',
@@ -825,6 +834,7 @@ test('buildCliBinaryArtifactPayload stages embeddings runtime packages and exter
     await artifacts.buildCliBinaryArtifactPayload({
       repoRoot,
       payloadDir,
+      ensureWorkspacePackagesBuiltByName: acceptWorkspacePackageFixtures,
       target: artifacts.resolveCurrentBinaryTarget({
         availableTargets: artifacts.CLI_BINARY_TARGETS,
         platform: 'linux',
