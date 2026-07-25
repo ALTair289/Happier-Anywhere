@@ -4,6 +4,7 @@ import { normalizePendingDeliveryBlockedReason } from './pendingDeliveryBlockedR
 export type PendingDeliveryStatusV1 =
   | Readonly<{ status: 'queued' }>
   | Readonly<{ status: 'delivering' }>
+  | Readonly<{ status: 'external_handoff' }>
   | Readonly<{ status: 'blocked'; reason: PendingDeliveryBlockedReason }>
   | Readonly<{ status: 'discarded'; reason: string | null }>;
 
@@ -14,7 +15,6 @@ export type PendingDeliveryStatusTransitionTargetV1 =
   | Readonly<{
       status: 'resolved';
       reason: 'provider_accepted';
-      acceptedThroughSeq?: boolean;
     }>
   | Readonly<{
       status: 'resolved';
@@ -30,7 +30,7 @@ export type PendingDeliveryStatusPersistedFieldsV1 = Readonly<{
 
 export type PendingDeliveryStatusPersistedProjectionV1 = Readonly<{
   status: 'queued' | 'discarded';
-  deliveryState: 'delivering' | 'blocked' | null;
+  deliveryState: 'delivering' | 'external_handoff' | 'blocked' | null;
   deliveryBlockedReason: PendingDeliveryBlockedReason | null;
   discardedReason: string | null;
 }>;
@@ -52,6 +52,10 @@ export function normalizePendingDeliveryStatusV1(fields: PendingDeliveryStatusPe
     return { status: 'delivering' };
   }
 
+  if (fields.deliveryState === 'external_handoff') {
+    return { status: 'external_handoff' };
+  }
+
   if (fields.deliveryState === 'blocked') {
     return {
       status: 'blocked',
@@ -70,6 +74,9 @@ export function parsePendingDeliveryStatusV1(value: unknown): PendingDeliverySta
   }
   if (record.status === 'delivering') {
     return { status: 'delivering' };
+  }
+  if (record.status === 'external_handoff') {
+    return { status: 'external_handoff' };
   }
   if (record.status === 'blocked') {
     return {
@@ -91,6 +98,8 @@ export function pendingDeliveryStatusV1ToPersistedFields(
       return { status: 'queued', deliveryState: null, deliveryBlockedReason: null, discardedReason: null };
     case 'delivering':
       return { status: 'queued', deliveryState: 'delivering', deliveryBlockedReason: null, discardedReason: null };
+    case 'external_handoff':
+      return { status: 'queued', deliveryState: 'external_handoff', deliveryBlockedReason: null, discardedReason: null };
     case 'blocked':
       return {
         status: 'queued',
@@ -103,18 +112,24 @@ export function pendingDeliveryStatusV1ToPersistedFields(
   }
 }
 
+export function isPendingDeliveryProviderEffectPossibleV1(status: PendingDeliveryStatusV1): boolean {
+  if (status.status === 'delivering' || status.status === 'external_handoff') return true;
+  if (status.status !== 'blocked') return false;
+  return status.reason === 'ambiguous_terminal_delivery'
+    || status.reason === 'delivery_outcome_uncertain'
+    || status.reason === 'unknown';
+}
+
 export function isPendingDeliveryStatusTransitionAllowedV1(
   from: PendingDeliveryStatusV1,
   to: PendingDeliveryStatusTransitionTargetV1,
 ): boolean {
   if (to.status === 'resolved') {
     if (to.reason === 'provider_accepted') {
-      return to.acceptedThroughSeq === true
-        ? from.status === 'delivering' || from.status === 'blocked'
-        : from.status === 'delivering';
+      return from.status === 'delivering' || from.status === 'external_handoff' || from.status === 'blocked';
     }
     if (to.reason === 'manual_handled') {
-      return from.status === 'delivering' || from.status === 'blocked';
+      return from.status === 'delivering' || from.status === 'external_handoff' || from.status === 'blocked';
     }
     return from.status === 'queued';
   }
@@ -128,7 +143,11 @@ export function isPendingDeliveryStatusTransitionAllowedV1(
   }
 
   if (from.status === 'delivering') {
-    return to.status === 'blocked' || to.status === 'discarded';
+    return to.status === 'blocked';
+  }
+
+  if (from.status === 'external_handoff') {
+    return to.status === 'blocked';
   }
 
   if (from.status === 'blocked') {

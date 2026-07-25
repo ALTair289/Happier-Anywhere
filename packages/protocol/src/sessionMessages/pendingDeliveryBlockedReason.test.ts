@@ -22,6 +22,24 @@ describe('pending delivery blocked reason contract', () => {
     expect(normalizePendingDeliveryBlockedReason('runtime_config_blocked')).toBe('runtime_config_blocked');
   });
 
+  it('accepts the proven pre-effect steering-unavailable block', () => {
+    expect(PendingDeliveryBlockedReasonSchema.parse('steering_unavailable')).toBe('steering_unavailable');
+    expect(normalizePendingDeliveryBlockedReason('steering_unavailable')).toBe('steering_unavailable');
+    expect(PendingDeliveryBlockedReasonSchema.parse('unsupported_action')).toBe('unsupported_action');
+    expect(normalizePendingDeliveryBlockedReason('unsupported_action')).toBe('unsupported_action');
+  });
+
+  it('accepts inherited provider claims with an uncertain outcome', () => {
+    expect(PendingDeliveryBlockedReasonSchema.parse('delivery_outcome_uncertain')).toBe('delivery_outcome_uncertain');
+    expect(normalizePendingDeliveryBlockedReason('delivery_outcome_uncertain')).toBe('delivery_outcome_uncertain');
+  });
+
+  it('rejects the retired provider-acceptance timeout reason after retained rows are contracted', () => {
+    expect(PENDING_DELIVERY_BLOCKED_REASONS).not.toContain('provider_acceptance_timeout');
+    expect(isPendingDeliveryBlockedReason('provider_acceptance_timeout')).toBe(false);
+    expect(normalizePendingDeliveryBlockedReason('provider_acceptance_timeout')).toBeNull();
+  });
+
   it('rejects missing and future blocked reasons', () => {
     expect(isPendingDeliveryBlockedReason('future_reason')).toBe(false);
     expect(normalizePendingDeliveryBlockedReason('future_reason')).toBeNull();

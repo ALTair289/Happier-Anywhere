@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  isPendingDeliveryProviderEffectPossibleV1,
   isPendingDeliveryStatusTransitionAllowedV1,
   normalizePendingDeliveryStatusV1,
   parsePendingDeliveryStatusV1,
@@ -22,6 +23,12 @@ describe('pending delivery status v1 contract', () => {
       { status: 'queued', deliveryState: 'delivering', deliveryBlockedReason: null },
       { status: 'delivering' },
       { status: 'queued', deliveryState: 'delivering', deliveryBlockedReason: null, discardedReason: null },
+    ],
+    [
+      'external handoff row',
+      { status: 'queued', deliveryState: 'external_handoff', deliveryBlockedReason: null },
+      { status: 'external_handoff' },
+      { status: 'queued', deliveryState: 'external_handoff', deliveryBlockedReason: null, discardedReason: null },
     ],
     [
       'blocked row',
@@ -53,11 +60,16 @@ describe('pending delivery status v1 contract', () => {
 
   it('parses typed status values received from server projections', () => {
     expect(parsePendingDeliveryStatusV1({ status: 'delivering' })).toEqual({ status: 'delivering' });
+    expect(parsePendingDeliveryStatusV1({ status: 'external_handoff' })).toEqual({ status: 'external_handoff' });
     expect(parsePendingDeliveryStatusV1({ status: 'blocked', reason: 'payload_too_large' })).toEqual({
       status: 'blocked',
       reason: 'payload_too_large',
     });
     expect(parsePendingDeliveryStatusV1({ status: 'blocked', reason: 'future_reason' })).toEqual({
+      status: 'blocked',
+      reason: 'unknown',
+    });
+    expect(parsePendingDeliveryStatusV1({ status: 'blocked', reason: 'provider_acceptance_timeout' })).toEqual({
       status: 'blocked',
       reason: 'unknown',
     });
@@ -69,15 +81,32 @@ describe('pending delivery status v1 contract', () => {
   });
 
   it.each([
+    [{ status: 'queued' }, false],
+    [{ status: 'delivering' }, true],
+    [{ status: 'external_handoff' }, true],
+    [{ status: 'blocked', reason: 'ambiguous_terminal_delivery' }, true],
+    [{ status: 'blocked', reason: 'delivery_outcome_uncertain' }, true],
+    [{ status: 'blocked', reason: 'unknown' }, true],
+    [{ status: 'blocked', reason: 'provider_rejected_before_acceptance' }, false],
+    [{ status: 'blocked', reason: 'payload_too_large' }, false],
+    [{ status: 'discarded', reason: null }, false],
+  ] satisfies readonly (readonly [PendingDeliveryStatusV1, boolean])[])(
+    'classifies %# provider-effect possibility',
+    (status, possible) => {
+      expect(isPendingDeliveryProviderEffectPossibleV1(status)).toBe(possible);
+    },
+  );
+
+  it.each([
     [{ status: 'queued' }, { status: 'resolved', reason: 'provider_accepted' }, false],
     [{ status: 'delivering' }, { status: 'resolved', reason: 'provider_accepted' }, true],
-    [{ status: 'blocked', reason: 'terminal_composer_draft' }, { status: 'resolved', reason: 'provider_accepted' }, false],
-    [{ status: 'queued' }, { status: 'resolved', reason: 'provider_accepted', acceptedThroughSeq: true }, false],
-    [{ status: 'delivering' }, { status: 'resolved', reason: 'provider_accepted', acceptedThroughSeq: true }, true],
-    [{ status: 'blocked', reason: 'terminal_composer_draft' }, { status: 'resolved', reason: 'provider_accepted', acceptedThroughSeq: true }, true],
+    [{ status: 'external_handoff' }, { status: 'resolved', reason: 'provider_accepted' }, true],
+    [{ status: 'blocked', reason: 'terminal_composer_draft' }, { status: 'resolved', reason: 'provider_accepted' }, true],
     [{ status: 'queued' }, { status: 'resolved', reason: 'materialized' }, true],
     [{ status: 'blocked', reason: 'terminal_composer_draft' }, { status: 'queued' }, true],
     [{ status: 'blocked', reason: 'terminal_composer_draft' }, { status: 'blocked', reason: 'payload_too_large' }, true],
+    [{ status: 'delivering' }, { status: 'discarded', reason: 'user_discarded' }, false],
+    [{ status: 'external_handoff' }, { status: 'discarded', reason: 'user_discarded' }, false],
     [{ status: 'discarded', reason: null }, { status: 'delivering' }, false],
   ] satisfies readonly (readonly [PendingDeliveryStatusV1, PendingDeliveryStatusTransitionTargetV1, boolean])[])(
     'validates %# transition',
