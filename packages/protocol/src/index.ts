@@ -970,6 +970,7 @@ export {
   PUBLIC_SHARE_ENCRYPTED_DATA_KEY_LEGACY_V0_BYTES,
   type PublicShareEncryptedDataKeyEnvelopeV0,
 } from './crypto/publicShareEncryptedDataKeyEnvelopeV0.js';
+export { redactPublicShareCapabilityUrl } from './crypto/publicShareCapabilityUrl.js';
 export {
   CRYPTO_GOLDEN_VECTORS,
   type CryptoGoldenVectors,
