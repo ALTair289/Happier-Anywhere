@@ -5,6 +5,7 @@ import {
   LEGACY_ACP_SESSION_MODELS_STATE_KEY,
   readNewestMetadataAliasValue,
   SESSION_CONFIG_OPTION_OVERRIDES_KEY,
+  SESSION_APPLIED_MODEL_STATE_KEY,
   SESSION_MODELS_STATE_KEY,
 } from './metadataKeys.js';
 
@@ -52,6 +53,31 @@ export type SessionModelsMetadataStateV1 = Readonly<{
     [key: string]: unknown;
   }>[];
 }>;
+
+export type SessionAppliedModelMetadataStateV1 = Readonly<{
+  v: 1;
+  provider: string;
+  updatedAt: number;
+  modelId: string;
+}>;
+
+export function parseSessionAppliedModelMetadataStateV1(
+  raw: unknown,
+): SessionAppliedModelMetadataStateV1 | null {
+  const record = asRecord(raw);
+  if (!record || record.v !== 1) return null;
+  if (typeof record.provider !== 'string' || !record.provider.trim()) return null;
+  if (typeof record.updatedAt !== 'number' || !Number.isFinite(record.updatedAt)) return null;
+  if (typeof record.modelId !== 'string' || !record.modelId.trim()) return null;
+  return record as SessionAppliedModelMetadataStateV1;
+}
+
+export function readSessionAppliedModelMetadataStateV1(
+  metadata: Record<string, unknown> | null | undefined,
+): SessionAppliedModelMetadataStateV1 | null {
+  if (!metadata) return null;
+  return parseSessionAppliedModelMetadataStateV1(metadata[SESSION_APPLIED_MODEL_STATE_KEY]);
+}
 
 function isSessionModelOptionValueV1(value: unknown): value is SessionModelOptionValueV1 {
   return value === null
@@ -194,14 +220,16 @@ export function resolveMetadataStringOverrideStateV1(
   if (!obj) return null;
 
   const rawOverride = asRecord(obj[overrideKey]);
-  if (!rawOverride) return null;
+  if (!rawOverride || rawOverride.v !== 1) return null;
   if (!Object.prototype.hasOwnProperty.call(rawOverride, valueKey)) return null;
 
-  const updatedAt = asFiniteNumber(rawOverride.updatedAt);
+  const updatedAt = rawOverride.updatedAt;
+  if (typeof updatedAt !== 'number' || !Number.isFinite(updatedAt)) return null;
   const rawValue = rawOverride[valueKey];
   if (typeof rawValue === 'string') {
-    const value = rawValue.trim();
-    return value ? { state: 'set', value, updatedAt } : { state: 'cleared', updatedAt };
+    return rawValue.trim().length > 0
+      ? { state: 'set', value: rawValue, updatedAt }
+      : { state: 'cleared', updatedAt };
   }
   if (rawValue === null) return { state: 'cleared', updatedAt };
   return null;

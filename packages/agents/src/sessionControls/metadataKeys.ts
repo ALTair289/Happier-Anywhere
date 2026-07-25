@@ -6,6 +6,7 @@ export const LEGACY_ACP_SESSION_MODE_OVERRIDE_KEY = 'acpSessionModeOverrideV1';
 
 export const SESSION_MODELS_STATE_KEY = 'sessionModelsV1';
 export const LEGACY_ACP_SESSION_MODELS_STATE_KEY = 'acpSessionModelsV1';
+export const SESSION_APPLIED_MODEL_STATE_KEY = 'sessionAppliedModelV1';
 
 export const SESSION_CONFIG_OPTIONS_STATE_KEY = 'sessionConfigOptionsV1';
 export const LEGACY_ACP_CONFIG_OPTIONS_STATE_KEY = 'acpConfigOptionsV1';

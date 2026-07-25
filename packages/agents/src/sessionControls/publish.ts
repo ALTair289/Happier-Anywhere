@@ -17,6 +17,10 @@ function asTrimmedString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+function asNonBlankOpaqueString(value: unknown): string {
+  return typeof value === 'string' && value.trim().length > 0 ? value : '';
+}
+
 export function computeNextPermissionIntentMetadata(params: Readonly<{
   metadata: Record<string, unknown>;
   permissionMode: string;
@@ -56,13 +60,13 @@ export function computeNextMetadataStringOverrideV1(params: Readonly<{
   const valueKey = asTrimmedString(params.valueKey);
   if (!overrideKey || !valueKey) return params.metadata;
 
-  const value = asTrimmedString(params.value);
+  const value = asNonBlankOpaqueString(params.value);
   const isClear = !value;
 
   const prev = params.metadata[overrideKey] as Record<string, unknown> | null | undefined;
   const prevUpdatedAt = prev ? asFiniteNumber(prev.updatedAt) : 0;
   const prevRawValue = prev ? prev[valueKey] : null;
-  const prevValue = typeof prevRawValue === 'string' && prevRawValue.trim() ? prevRawValue.trim() : '__cleared__';
+  const prevValue = asNonBlankOpaqueString(prevRawValue) || '__cleared__';
   const desiredValue = isClear ? '__cleared__' : value;
 
   const nextUpdatedAt = computeMonotonicUpdatedAt({
@@ -91,13 +95,12 @@ export function computeNextMetadataStringOverrideV1(params: Readonly<{
 }
 
 function normalizeConfigOptionId(value: unknown): string {
-  return typeof value === 'string' ? value.trim() : '';
+  return asNonBlankOpaqueString(value);
 }
 
 function normalizeConfigOptionValueId(value: unknown): string | null {
   if (typeof value !== 'string') return null;
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
+  return value.trim().length > 0 ? value : null;
 }
 
 export function computeNextMetadataConfigOptionOverrideV1(params: Readonly<{

@@ -171,6 +171,29 @@ describe("sessionControls publish metadata", () => {
         });
     });
 
+    it("preserves exact nonblank opaque model and config-option identifiers and values", () => {
+        const withModel = computeNextMetadataStringOverrideV1({
+            metadata: {},
+            overrideKey: "modelOverrideV1",
+            valueKey: "modelId",
+            value: " model-a ",
+            updatedAt: 40,
+        });
+        const withConfig = computeNextMetadataConfigOptionOverrideV1({
+            metadata: withModel,
+            configId: " effort ",
+            value: " high ",
+            updatedAt: 41,
+        });
+
+        expect(withConfig).toMatchObject({
+            modelOverrideV1: { modelId: " model-a " },
+            sessionConfigOptionOverridesV1: {
+                overrides: { " effort ": { value: " high " } },
+            },
+        });
+    });
+
     it("writes a nullable clear without deleting sibling config overrides", () => {
         const next = computeNextMetadataConfigOptionOverrideV1({
             metadata: {

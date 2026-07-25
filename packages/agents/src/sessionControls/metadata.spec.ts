@@ -6,11 +6,44 @@ import {
     SESSION_MODE_OVERRIDE_KEY,
 } from './metadataKeys.js';
 import {
+    parseSessionAppliedModelMetadataStateV1,
     parseSessionModelsMetadataStateV1,
+    readSessionAppliedModelMetadataStateV1,
     resolveMetadataStringOverrideStateV1,
     resolveMetadataStringOverrideStateV1FromAliases,
     resolveMetadataStringOverrideV1,
 } from './metadata.js';
+
+describe('sessionAppliedModelV1', () => {
+    it('accepts the additive applied-model fact and preserves opaque model ids', () => {
+        const state = {
+            v: 1,
+            provider: 'codex',
+            updatedAt: 42,
+            modelId: ' gpt-5.6-sol ',
+        } as const;
+
+        expect(parseSessionAppliedModelMetadataStateV1(state)).toEqual(state);
+        expect(readSessionAppliedModelMetadataStateV1({
+            sessionAppliedModelV1: state,
+        })).toEqual(state);
+    });
+
+    it('rejects malformed applied-model facts', () => {
+        expect(parseSessionAppliedModelMetadataStateV1({
+            v: 1,
+            provider: 'codex',
+            updatedAt: 42,
+            modelId: '   ',
+        })).toBeNull();
+        expect(parseSessionAppliedModelMetadataStateV1({
+            v: 1,
+            provider: 'codex',
+            updatedAt: Number.NaN,
+            modelId: 'gpt-5.6-sol',
+        })).toBeNull();
+    });
+});
 
 describe('parseSessionModelsMetadataStateV1', () => {
     const base = {
@@ -115,9 +148,28 @@ describe('resolveMetadataStringOverrideStateV1', () => {
             'modeId',
         )).toBeNull();
     });
+
+    it('preserves exact nonblank opaque override values', () => {
+        expect(resolveMetadataStringOverrideStateV1(
+            { sessionModeOverrideV1: { v: 1, updatedAt: 105, modeId: ' plan ' } },
+            SESSION_MODE_OVERRIDE_KEY,
+            'modeId',
+        )).toEqual({ state: 'set', value: ' plan ', updatedAt: 105 });
+    });
 });
 
 describe('resolveMetadataStringOverrideStateV1FromAliases', () => {
+    it('ignores malformed canonical timestamps before selecting the newest alias', () => {
+        expect(resolveMetadataStringOverrideStateV1FromAliases(
+            {
+                sessionModeOverrideV1: { v: 1, updatedAt: Number.NaN, modeId: 'plan' },
+                acpSessionModeOverrideV1: { v: 1, updatedAt: -1, modeId: 'build' },
+            },
+            [SESSION_MODE_OVERRIDE_KEY, LEGACY_ACP_SESSION_MODE_OVERRIDE_KEY],
+            'modeId',
+        )).toEqual({ state: 'set', value: 'build', updatedAt: -1 });
+    });
+
     it('prefers a newer canonical clear over a stale legacy value', () => {
         expect(resolveMetadataStringOverrideStateV1FromAliases(
             {

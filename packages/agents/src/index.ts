@@ -292,8 +292,10 @@ export {
   resolveOpenCodeSessionBackendMode,
 } from './sessionControls/providerSessionBackends.js';
 export {
+  parseSessionAppliedModelMetadataStateV1,
   parseSessionConfigOptionOverridesMetadataStateV1,
   parseSessionModelsMetadataStateV1,
+  readSessionAppliedModelMetadataStateV1,
   readNewestSessionConfigOptionOverridesMetadataStateV1,
   readNewestSessionModelsMetadataStateV1,
   resolveMetadataStringOverrideStateV1,
@@ -301,6 +303,7 @@ export {
   resolveMetadataStringOverrideV1,
   resolvePermissionIntentFromSessionMetadata,
   type MetadataStringOverrideStateV1,
+  type SessionAppliedModelMetadataStateV1,
   type SessionConfigOptionOverridesMetadataStateV1,
   type SessionModelsMetadataStateV1,
 } from './sessionControls/metadata.js';
