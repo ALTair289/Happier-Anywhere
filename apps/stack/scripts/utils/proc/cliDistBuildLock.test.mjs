@@ -7,6 +7,134 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import { withCliDistBuildLock } from './cliDistBuildLock.mjs';
+import { withBuildSharedDepsLock } from '../../../../cli/scripts/buildSharedDeps.mjs';
+
+test('withCliDistBuildLock passes its current owner lease to the real buildSharedDeps lock owner', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'happier-cli-dist-lock-build-shared-reentry-'));
+  try {
+    const lockPath = join(root, 'cli-dist-build.lock');
+    const result = await withCliDistBuildLock(
+      async ({ heldLockValue }) =>
+        await withBuildSharedDepsLock(
+          async () => 'nested',
+          {
+            lockPath,
+            env: { HAPPIER_WORKSPACE_DIST_BUILD_LOCK_HELD: heldLockValue },
+            timeoutMs: 60,
+            pollIntervalMs: 10,
+            staleAfterMs: 1_000,
+          },
+        ),
+      {
+        lockPath,
+        timeoutMs: 2_000,
+        pollIntervalMs: 10,
+        staleAfterMs: 1_000,
+      },
+    );
+
+    assert.equal(result, 'nested');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('the real buildSharedDeps lock owner rejects a path-only inherited marker', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'happier-cli-dist-lock-path-only-reentry-'));
+  try {
+    const lockPath = join(root, 'cli-dist-build.lock');
+    await withCliDistBuildLock(
+      async () => {
+        await assert.rejects(
+          () => withBuildSharedDepsLock(
+            async () => 'nested',
+            {
+              lockPath,
+              env: { HAPPIER_WORKSPACE_DIST_BUILD_LOCK_HELD: lockPath },
+              timeoutMs: 60,
+              pollIntervalMs: 10,
+              staleAfterMs: 1_000,
+            },
+          ),
+          /Timed out waiting for workspace bundle lock/,
+        );
+      },
+      {
+        lockPath,
+        timeoutMs: 2_000,
+        pollIntervalMs: 10,
+        staleAfterMs: 1_000,
+      },
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('the real buildSharedDeps lock owner rejects a foreign token for the current path', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'happier-cli-dist-lock-foreign-lease-'));
+  try {
+    const lockPath = join(root, 'cli-dist-build.lock');
+    const foreignLease = JSON.stringify({ v: 1, path: lockPath, token: 'foreign-owner-token' });
+    await withCliDistBuildLock(
+      async () => {
+        await assert.rejects(
+          () => withBuildSharedDepsLock(
+            async () => 'nested',
+            {
+              lockPath,
+              env: { HAPPIER_WORKSPACE_DIST_BUILD_LOCK_HELD: foreignLease },
+              timeoutMs: 60,
+              pollIntervalMs: 10,
+              staleAfterMs: 1_000,
+            },
+          ),
+          /Timed out waiting for workspace bundle lock/,
+        );
+      },
+      {
+        lockPath,
+        timeoutMs: 2_000,
+        pollIntervalMs: 10,
+        staleAfterMs: 1_000,
+      },
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('the real buildSharedDeps lock owner rejects a stale lease after a successor owns the path', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'happier-cli-dist-lock-stale-lease-'));
+  try {
+    const lockPath = join(root, 'cli-dist-build.lock');
+    const staleLease = await withCliDistBuildLock(
+      async ({ heldLockValue }) => heldLockValue,
+      { lockPath, timeoutMs: 2_000, pollIntervalMs: 10, staleAfterMs: 1_000 },
+    );
+
+    await withCliDistBuildLock(
+      async () => {
+        await assert.rejects(
+          () => withBuildSharedDepsLock(
+            async () => 'nested',
+            {
+              lockPath,
+              env: { HAPPIER_WORKSPACE_DIST_BUILD_LOCK_HELD: staleLease },
+              timeoutMs: 60,
+              pollIntervalMs: 10,
+              staleAfterMs: 1_000,
+            },
+          ),
+          /Timed out waiting for workspace bundle lock/,
+        );
+      },
+      { lockPath, timeoutMs: 2_000, pollIntervalMs: 10, staleAfterMs: 1_000 },
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test('withCliDistBuildLock reclaims a fresh lock from a dead owner pid immediately', async () => {
   const root = await mkdtemp(join(tmpdir(), 'hstack-cli-dist-lock-'));

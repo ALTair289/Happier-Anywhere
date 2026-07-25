@@ -2,35 +2,11 @@ import { lstatSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 import { watchDebounced } from '../proc/watch.mjs';
+import { isDevRuntimeReloadIgnoredPath } from './devRuntimeInputPolicy.mjs';
+export { isDevRuntimeReloadIgnoredPath } from './devRuntimeInputPolicy.mjs';
 export { resolveDevReloadPollIntervalMs } from './reloadPollInterval.mjs';
 
 const RESTART_ORDER = ['server', 'daemon'];
-const TEST_ONLY_DIRECTORY_NAMES = new Set([
-  '__fixtures__',
-  '__snapshots__',
-  '__tests__',
-  'coverage',
-  'fixtures',
-  'snapshots',
-  'test',
-  'tests',
-]);
-const TEST_ONLY_FILE_RE = /(?:^|[._-])(?:test|spec|bench|benchmark)\.[cm]?[jt]sx?$/;
-
-export function isDevRuntimeReloadIgnoredPath(path) {
-  const normalized = String(path ?? '').replaceAll('\\', '/');
-  if (!normalized) return false;
-  const parts = normalized.split('/').filter(Boolean);
-  if (parts.some((part) => TEST_ONLY_DIRECTORY_NAMES.has(part))) return true;
-  const base = parts.at(-1) ?? '';
-  return (
-    TEST_ONLY_FILE_RE.test(base)
-    || base === 'vitest.config.ts'
-    || base.startsWith('vitest.')
-    || base.startsWith('test-setup.')
-    || base.endsWith('.snap')
-  );
-}
 
 export function appendWatchSignatureEntries(path, entries, { ignorePath = null } = {}) {
   if (typeof ignorePath === 'function' && ignorePath(path)) return false;

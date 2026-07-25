@@ -3,6 +3,23 @@
   "main": "index.ts",
   "version": "0.2.10",
   "happierExpoRuntimeVersion": "0.2.7-native",
+  "happier": {
+    "installFreshnessInputs": [
+      "patches",
+      "sources/components/ui/markdown/editor/bridge/tiptapWebViewEntry.ts",
+      "sources/components/markdown/mermaidWebViewEntry.ts",
+      "tools/postinstall.mjs",
+      "tools/resolveUiPostinstallTasks.mjs",
+      "tools/ensureNohoistPeerLinks.mjs",
+      "tools/postinstall",
+      "tools/react-native-enriched-markdown",
+      "tools/diffs",
+      "tools/codemirror",
+      "tools/xterm",
+      "tools/tiptap",
+      "tools/mermaid"
+    ]
+  },
   "expo": {
     "autolinking": {
       "searchPaths": [
@@ -21,7 +38,7 @@
     "ios:publicdev-dev-client": "yarn -s ensure:workspace:built && node ./scripts/runPublicdevDevClientIos.mjs",
     "submit": "eas submit --platform ios",
     "web": "yarn -s ensure:workspace:built && cross-env EXPO_UNSTABLE_WEB_MODAL=1 expo start --web",
-    "test": "yarn -s test:unit && yarn -s test:built-in-prompts",
+    "test": "yarn -s test:unit && yarn -s test:built-in-prompts && node --test ./scripts/installFreshnessInputs.contract.test.mjs",
     "test:built-in-prompts": "node --test ../../scripts/generateBuiltInPrompts.test.mjs",
     "test:unit": "yarn -s ensure:workspace:built && node ./scripts/runVitestShards.mjs --config vitest.config.ts",
     "test:integration": "yarn -s ensure:workspace:built && vitest run --config vitest.integration.config.ts",
