@@ -13,6 +13,7 @@ export type AccountScopedBlobKind =
   | 'connected_service_quota_snapshot'
   | 'provider_account_usage_snapshot'
   | 'session_organization_display'
+  | 'session_first_intent'
   | 'session_respawn_environment';
 
 export type AccountScopedCryptoMaterial =
@@ -35,6 +36,7 @@ const ACCOUNT_SCOPED_KIND_BYTE: Record<AccountScopedBlobKind, number> = {
   session_respawn_environment: 5,
   provider_account_usage_snapshot: 6,
   session_organization_display: 7,
+  session_first_intent: 8,
 };
 
 const LEGACY_READ_ONLY_ACCOUNT_SCOPED_BLOB_KINDS = new Set<AccountScopedBlobKind>([

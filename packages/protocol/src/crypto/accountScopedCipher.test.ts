@@ -153,7 +153,7 @@ describe('accountScopedCipher', () => {
     expect(opened?.value).toEqual(payload);
   });
 
-  it('keeps existing account-scoped v1 kind bytes stable while adding provider usage snapshots and session organization display', () => {
+  it('keeps existing account-scoped v1 kind bytes stable while adding provider usage snapshots, session organization display, and first intent', () => {
     const machineKey = new Uint8Array(32).fill(7);
     const material: AccountScopedCryptoMaterial = { type: 'dataKey', machineKey };
     const randomBytes = deterministicRandomBytesFactory();
@@ -176,15 +176,32 @@ describe('accountScopedCipher', () => {
       payload: { label: 'Project A' },
       randomBytes,
     });
+    const sessionFirstIntentCiphertext = sealAccountScopedBlobCiphertext({
+      kind: 'session_first_intent',
+      material,
+      payload: { localId: 'first-turn-1', content: { type: 'text', text: 'private prompt' } },
+      randomBytes,
+    });
 
     expect(decodeBase64(sessionRespawnCiphertext, 'base64')[1]).toBe(5);
     expect(decodeBase64(providerUsageCiphertext, 'base64')[1]).toBe(6);
     expect(decodeBase64(sessionOrganizationDisplayCiphertext, 'base64')[1]).toBe(7);
+    expect(decodeBase64(sessionFirstIntentCiphertext, 'base64')[1]).toBe(8);
     expect(openAccountScopedBlobCiphertext({
       kind: 'session_organization_display',
       material,
       ciphertext: sessionOrganizationDisplayCiphertext,
     })?.value).toEqual({ label: 'Project A' });
+    expect(openAccountScopedBlobCiphertext({
+      kind: 'session_first_intent',
+      material,
+      ciphertext: sessionFirstIntentCiphertext,
+    })?.value).toEqual({ localId: 'first-turn-1', content: { type: 'text', text: 'private prompt' } });
+    expect(openAccountScopedBlobCiphertext({
+      kind: 'session_respawn_environment',
+      material,
+      ciphertext: sessionFirstIntentCiphertext,
+    })).toBeNull();
   });
 
   it('allows legacy and dataKey devices to read the same v1 ciphertext', () => {
