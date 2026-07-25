@@ -311,17 +311,10 @@ test('release workflow can pass a top-level release message down to promote-ui f
   assert.match(raw, /expo_update_message:\s*\$\{\{\s*inputs\.release_message\s*\}\}/);
 });
 
-test('local release planning fetches branches plus immutable version tags without syncing rolling tags', async () => {
+test('local release planning resolves remote identities without changing local refs', async () => {
   const run = await loadFile('scripts/pipeline/run.mjs');
 
-  assert.match(
-    run,
-    /execFileSync\(\s*'git',\s*\[\s*'fetch',\s*'origin',\s*'main',\s*'dev',\s*'preview',\s*'--prune',\s*'--no-tags'[\s\S]*?refs\/tags\/cli-v\*:refs\/tags\/cli-v\*[\s\S]*?refs\/tags\/stack-v\*:refs\/tags\/stack-v\*[\s\S]*?refs\/tags\/server-v\*:refs\/tags\/server-v\*[\s\S]*?refs\/tags\/ui-web-v\*:refs\/tags\/ui-web-v\*/,
-    'local release planning should fetch branches plus immutable version tags while avoiding rolling tag sync',
-  );
-  assert.doesNotMatch(
-    run,
-    /const fetchTagsArg = dryRun \? '--no-tags' : '--tags';/,
-    'local release planning should not switch to --tags during mutating runs',
-  );
+  assert.match(run, /resolveRemoteReleasePlanningRefs\(\{/);
+  assert.doesNotMatch(run, /'--prune'/);
+  assert.doesNotMatch(run, /refs\/tags\/[^'"]+:[^'"]+/);
 });

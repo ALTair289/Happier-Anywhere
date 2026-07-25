@@ -85,3 +85,32 @@ test('compute-versioned-component-changes uses stable baselines for production a
   assert.equal(productionParsed.changed_cli, 'true');
   assert.equal(productionParsed.cli_baseline_tag, 'cli-v0.1.0');
 });
+
+test('compute-versioned-component-changes accepts remote tag identities without creating local tag refs', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'happier-versioned-components-'));
+
+  git(dir, ['init']);
+  git(dir, ['config', 'user.email', 'test@example.com']);
+  git(dir, ['config', 'user.name', 'Test']);
+  await writeRepoFile(dir, 'apps/cli/README.md', 'base cli\n');
+  git(dir, ['add', '.']);
+  git(dir, ['commit', '-m', 'stable base']);
+  const baselineSha = git(dir, ['rev-parse', 'HEAD']);
+  await writeRepoFile(dir, 'apps/cli/README.md', 'changed cli\n');
+  git(dir, ['add', '.']);
+  git(dir, ['commit', '-m', 'changed']);
+
+  const script = resolve(process.cwd(), 'scripts', 'pipeline', 'release', 'compute-versioned-component-changes.mjs');
+  const res = run(dir, process.execPath, [
+    script,
+    '--environment', 'production',
+    '--head', 'HEAD',
+    '--tag-refs-json', JSON.stringify({ 'cli-v0.1.0': baselineSha }),
+  ]);
+  assert.equal(res.status, 0, res.stderr || res.stdout);
+
+  const parsed = JSON.parse(String(res.stdout).trim());
+  assert.equal(parsed.changed_cli, 'true');
+  assert.equal(parsed.cli_baseline_tag, 'cli-v0.1.0');
+  assert.equal(git(dir, ['for-each-ref', '--format=%(refname)', 'refs/tags']), '');
+});

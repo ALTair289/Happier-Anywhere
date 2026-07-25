@@ -39,6 +39,7 @@ import {
   resolveRollingReleaseTagSuffix,
   normalizePublicReleaseChannel,
 } from './release/lib/public-release-rings.mjs';
+import { resolveRemoteReleasePlanningRefs } from './release/lib/release-planning-remote-refs.mjs';
 
 function fail(message) {
   console.error(message);
@@ -4323,33 +4324,13 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
             console.log(`[pipeline] rolling version suffix: ${releaseRing.rollingVersionPrefix}.${runNumber}`);
           }
 
-            // Plan: compute changed components (main..dev) and resolve bump/publish plan.
-            console.log('[pipeline] release: fetching origin main/dev/preview for plan');
-            // Release planning only needs branch refs plus immutable component version tags.
-            // Rolling tags move during publishing, so syncing all tags here can fail with
-            // "would clobber existing tag" on healthy repos.
-            execFileSync(
-              'git',
-              [
-                'fetch',
-                'origin',
-                'main',
-                'dev',
-                'preview',
-                '--prune',
-                '--no-tags',
-                'refs/tags/cli-v*:refs/tags/cli-v*',
-                'refs/tags/stack-v*:refs/tags/stack-v*',
-                'refs/tags/server-v*:refs/tags/server-v*',
-                'refs/tags/ui-web-v*:refs/tags/ui-web-v*',
-              ],
-              {
-              cwd: repoRoot,
-              env: process.env,
-              stdio: 'inherit',
-              timeout: 120_000,
-              },
-            );
+            // Plan against remote identities while leaving user-owned local refs untouched.
+            console.log('[pipeline] release: resolving remote main/dev/preview and immutable version tags for plan');
+            const remotePlanningRefs = resolveRemoteReleasePlanningRefs({
+              repoRoot,
+              branchNames: ['main', 'dev', 'preview'],
+              tagPrefixes: ['cli-v', 'stack-v', 'server-v', 'ui-web-v'],
+            });
 
             const currentBranch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
               cwd: repoRoot,
@@ -4370,21 +4351,8 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
             stdio: ['ignore', 'pipe', 'pipe'],
             timeout: 10_000,
           }).trim();
-          const mainSha = execFileSync('git', ['rev-parse', 'origin/main'], {
-            cwd: repoRoot,
-            env: process.env,
-            encoding: 'utf8',
-            stdio: ['ignore', 'pipe', 'pipe'],
-            timeout: 10_000,
-          }).trim();
-
-          const previewSha = execFileSync('git', ['rev-parse', 'origin/preview'], {
-            cwd: repoRoot,
-            env: process.env,
-            encoding: 'utf8',
-            stdio: ['ignore', 'pipe', 'pipe'],
-            timeout: 10_000,
-          }).trim();
+          const mainSha = remotePlanningRefs.branches.main;
+          const previewSha = remotePlanningRefs.branches.preview;
 
           const planHeadSha =
             action === 'release preview to main' || action === 'reset main from preview' ? previewSha : devSha;
@@ -4410,7 +4378,14 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
             repoRoot,
             env: { ...process.env },
             scriptRel: 'scripts/pipeline/release/compute-versioned-component-changes.mjs',
-            args: ['--environment', deployEnvironment, '--head', planHeadSha],
+            args: [
+              '--environment',
+              deployEnvironment,
+              '--head',
+              planHeadSha,
+              '--tag-refs-json',
+              JSON.stringify(remotePlanningRefs.tags),
+            ],
           });
 
           const versionedChanged = {
