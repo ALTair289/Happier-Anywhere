@@ -1,9 +1,18 @@
 import { z } from 'zod';
 
 export const SESSION_MEDIA_MESSAGE_META_KIND_V1 = 'session_media.v1' as const;
+export const SESSION_MEDIA_MESSAGE_MAX_ENTRIES_V1 = 256;
 
 const SafeStringSchema = z.string().trim().min(1).max(512);
 const OriginIdentifierSchema = z.string().trim().min(1).max(16_384);
+const SessionMediaOriginSourceV1Schema = z.enum([
+  'user-upload',
+  'provider-generated',
+  'tool-output',
+  'acp-content',
+  'mcp-content',
+  'local-file',
+]);
 
 const SessionMediaPathSchema = z
   .string()
@@ -35,7 +44,7 @@ const SessionMediaPathSchema = z
 
 export const SessionMediaOriginV1Schema = z
   .object({
-    source: z.enum(['user-upload', 'provider-generated', 'tool-output', 'acp-content', 'mcp-content', 'local-file']),
+    source: SessionMediaOriginSourceV1Schema,
     agentId: OriginIdentifierSchema.optional(),
     toolCallId: OriginIdentifierSchema.optional(),
     generationId: OriginIdentifierSchema.optional(),
@@ -73,11 +82,44 @@ export const SessionMediaItemV1Schema = z
   })
   .strict();
 
-export const SessionMediaMessagePayloadV1Schema = z
+export const SessionMediaUnavailableOriginV1Schema = z
   .object({
-    media: z.array(SessionMediaItemV1Schema).min(1).max(256),
+    source: SessionMediaOriginSourceV1Schema,
+    agentId: SafeStringSchema.optional(),
+    toolCallIdHash: z.string().regex(/^[a-f0-9]{64}$/i).optional(),
+    generationIdHash: z.string().regex(/^[a-f0-9]{64}$/i).optional(),
   })
   .strict();
+
+export const SessionMediaUnavailableV1Schema = z
+  .object({
+    id: SafeStringSchema,
+    role: z.enum(['input', 'output']),
+    category: z.enum(['attachment', 'generated', 'tool-artifact']),
+    mediaKind: z.literal('image'),
+    code: z.string().trim().min(1).max(128).regex(/^[a-z0-9._-]+$/),
+    origin: SessionMediaUnavailableOriginV1Schema,
+  })
+  .strict();
+
+export const SessionMediaMessagePayloadV1Schema = z
+  .object({
+    media: z.array(SessionMediaItemV1Schema).max(SESSION_MEDIA_MESSAGE_MAX_ENTRIES_V1),
+    unavailable: z.array(SessionMediaUnavailableV1Schema).max(SESSION_MEDIA_MESSAGE_MAX_ENTRIES_V1).optional(),
+  })
+  .strict()
+  .superRefine((payload, ctx) => {
+    const unavailableCount = payload.unavailable?.length ?? 0;
+    if (payload.media.length + unavailableCount === 0) {
+      ctx.addIssue({ code: 'custom', message: 'Session media envelope must contain media or unavailable states' });
+    }
+    if (payload.media.length + unavailableCount > SESSION_MEDIA_MESSAGE_MAX_ENTRIES_V1) {
+      ctx.addIssue({
+        code: 'custom',
+        message: `Session media envelope must contain at most ${SESSION_MEDIA_MESSAGE_MAX_ENTRIES_V1} entries`,
+      });
+    }
+  });
 
 export const SessionMediaMessageMetaEnvelopeV1Schema = z
   .object({
@@ -89,5 +131,7 @@ export const SessionMediaMessageMetaEnvelopeV1Schema = z
 export type SessionMediaOriginV1 = z.infer<typeof SessionMediaOriginV1Schema>;
 export type SessionMediaReferenceV1 = z.infer<typeof SessionMediaReferenceV1Schema>;
 export type SessionMediaItemV1 = z.infer<typeof SessionMediaItemV1Schema>;
+export type SessionMediaUnavailableOriginV1 = z.infer<typeof SessionMediaUnavailableOriginV1Schema>;
+export type SessionMediaUnavailableV1 = z.infer<typeof SessionMediaUnavailableV1Schema>;
 export type SessionMediaMessagePayloadV1 = z.infer<typeof SessionMediaMessagePayloadV1Schema>;
 export type SessionMediaMessageMetaEnvelopeV1 = z.infer<typeof SessionMediaMessageMetaEnvelopeV1Schema>;

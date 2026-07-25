@@ -46,6 +46,10 @@ const validMediaItem = {
 } as const;
 
 describe('session media v1 schemas', () => {
+  it('exports the canonical combined durable-envelope entry limit', () => {
+    expect(Reflect.get(protocol, 'SESSION_MEDIA_MESSAGE_MAX_ENTRIES_V1')).toBe(256);
+  });
+
   it('accepts persisted generated image metadata with provider origin identifiers', () => {
     const schema = readSchema('SessionMediaItemV1Schema');
 
@@ -100,6 +104,71 @@ describe('session media v1 schemas', () => {
     const schema = readSchema('SessionMediaMessageMetaEnvelopeV1Schema');
 
     expect(schema.safeParse({ kind: 'session_media.v1', payload: { media: [] } }).success).toBe(false);
+  });
+
+  it('accepts a bounded unavailable-media state without fabricating persisted file metadata', () => {
+    const schema = readSchema('SessionMediaMessageMetaEnvelopeV1Schema');
+    const unavailable = {
+      id: 'b'.repeat(64),
+      role: 'output',
+      category: 'generated',
+      mediaKind: 'image',
+      code: 'provider_file_unavailable',
+      origin: {
+        source: 'provider-generated',
+        agentId: 'cursor',
+        toolCallIdHash: 'c'.repeat(64),
+      },
+    } as const;
+
+    expect(schema.parse({
+      kind: 'session_media.v1',
+      payload: { media: [], unavailable: [unavailable] },
+    })).toEqual({
+      kind: 'session_media.v1',
+      payload: { media: [], unavailable: [unavailable] },
+    });
+    expect(schema.safeParse({
+      kind: 'session_media.v1',
+      payload: {
+        media: [],
+        unavailable: [{ ...unavailable, path: '/tmp/not-a-real-image.png' }],
+      },
+    }).success).toBe(false);
+    expect(schema.safeParse({
+      kind: 'session_media.v1',
+      payload: {
+        media: [],
+        unavailable: [{
+          ...unavailable,
+          origin: { ...unavailable.origin, toolCallId: 'raw-provider-call-id' },
+        }],
+      },
+    }).success).toBe(false);
+  });
+
+  it('bounds unavailable-media states and the combined durable envelope size', () => {
+    const schema = readSchema('SessionMediaMessageMetaEnvelopeV1Schema');
+    const unavailable = {
+      id: 'b'.repeat(64),
+      role: 'output',
+      category: 'generated',
+      mediaKind: 'image',
+      code: 'persistence_failed',
+      origin: { source: 'provider-generated' },
+    } as const;
+
+    expect(schema.safeParse({
+      kind: 'session_media.v1',
+      payload: {
+        media: [validMediaItem],
+        unavailable: Array.from({ length: 256 }, (_, index) => ({ ...unavailable, id: `${index}` })),
+      },
+    }).success).toBe(false);
+    expect(schema.safeParse({
+      kind: 'session_media.v1',
+      payload: { media: [], unavailable: [{ ...unavailable, code: 'UPPER CASE' }] },
+    }).success).toBe(false);
   });
 
   it('bounds the number of media items in one durable envelope', () => {
