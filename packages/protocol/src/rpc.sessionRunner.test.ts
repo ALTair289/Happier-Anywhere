@@ -13,11 +13,15 @@ describe('RPC_METHODS (session runner)', () => {
     expect((RPC_METHODS as Record<string, string>).DAEMON_SESSION_RUNNER_RESTART_ALL).toBe('daemon.sessionRunner.restartAll');
   });
 
-  it('requires session-write authorization for session-runner restart RPCs', () => {
+  it('requires session-write authorization for session-runner restart and explicit Stop RPCs', () => {
     expect(resolveSocketRpcSessionWriteAuthorizationMethod(RPC_METHODS.DAEMON_SESSION_RUNNER_RESTART))
       .toBe(RPC_METHODS.DAEMON_SESSION_RUNNER_RESTART);
     expect(resolveSocketRpcSessionWriteAuthorizationMethod(`machine-1:${RPC_METHODS.DAEMON_SESSION_RUNNER_RESTART}`))
       .toBe(RPC_METHODS.DAEMON_SESSION_RUNNER_RESTART);
+    expect(resolveSocketRpcSessionWriteAuthorizationMethod(RPC_METHODS.STOP_SESSION))
+      .toBe(RPC_METHODS.STOP_SESSION);
+    expect(resolveSocketRpcSessionWriteAuthorizationMethod(`machine-1:${RPC_METHODS.STOP_SESSION}`))
+      .toBe(RPC_METHODS.STOP_SESSION);
     expect(resolveSocketRpcSessionWriteAuthorizationMethod(RPC_METHODS.DAEMON_SESSION_RUNNER_STATUS_GET))
       .toBeNull();
     expect(resolveSocketRpcSessionWriteAuthorizationMethod(RPC_METHODS.DAEMON_SESSION_RUNNER_RESTART_ALL))

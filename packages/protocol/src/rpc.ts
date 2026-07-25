@@ -3,6 +3,7 @@ export const RPC_METHODS = {
   STOP_SESSION: 'stop-session',
   STOP_DAEMON: 'stop-daemon',
   DAEMON_SPAWN_SESSION_RESOLVE: 'daemon.spawnSession.resolve',
+  DAEMON_SPAWN_SESSION_ABANDON: 'daemon.spawnSession.abandon',
   DAEMON_EXECUTION_RUNS_LIST: 'daemon.executionRuns.list',
   DAEMON_TERMINAL_ENSURE: 'daemon.terminal.ensure',
   DAEMON_TERMINAL_STREAM_READ: 'daemon.terminal.stream.read',
@@ -174,7 +175,22 @@ export type SocketRpcAuthorizationContext = SocketRpcSessionWriteAuthorizationCo
 const MAX_SOCKET_RPC_AUTHORIZATION_SESSION_ID_LENGTH = 512;
 
 const SOCKET_RPC_SESSION_WRITE_AUTHORIZATION_METHODS = new Set<string>([
+  RPC_METHODS.STOP_SESSION,
   RPC_METHODS.DAEMON_SESSION_RUNNER_RESTART,
+]);
+
+const SOCKET_RPC_PROVIDER_STARTING_METHODS = new Set<string>([
+  RPC_METHODS.SPAWN_HAPPY_SESSION,
+  RPC_METHODS.SESSION_CONTINUE_WITH_REPLAY,
+  RPC_METHODS.SESSION_FORK,
+  RPC_METHODS.DAEMON_SESSION_CONNECTED_SERVICE_AUTH_SWITCH,
+  RPC_METHODS.DAEMON_SESSION_RUNNER_RESTART,
+  RPC_METHODS.DAEMON_SESSION_RUNNER_RESTART_ALL,
+  RPC_METHODS.DAEMON_SESSION_USAGE_LIMIT_WAIT_RESUME_ENABLE,
+  RPC_METHODS.DAEMON_SESSION_USAGE_LIMIT_CHECK_NOW,
+  RPC_METHODS.DAEMON_SESSION_HANDOFF_TARGET_RESUME_V2,
+  RPC_METHODS.DAEMON_DIRECT_SESSION_TAKEOVER,
+  RPC_METHODS.DAEMON_DIRECT_SESSION_TAKEOVER_PERSIST,
 ]);
 
 function normalizeSocketRpcSessionId(value: unknown): string | null {
@@ -205,6 +221,18 @@ export function resolveSocketRpcSessionWriteAuthorizationMethod(method: string):
   if (separatorIndex <= 0 || separatorIndex >= trimmed.length - 1) return null;
   const unprefixedMethod = trimmed.slice(separatorIndex + 1);
   return SOCKET_RPC_SESSION_WRITE_AUTHORIZATION_METHODS.has(unprefixedMethod)
+    ? unprefixedMethod
+    : null;
+}
+
+export function resolveSocketRpcProviderStartingMethod(method: string): string | null {
+  const trimmed = method.trim();
+  if (SOCKET_RPC_PROVIDER_STARTING_METHODS.has(trimmed)) return trimmed;
+
+  const separatorIndex = trimmed.indexOf(':');
+  if (separatorIndex <= 0 || separatorIndex >= trimmed.length - 1) return null;
+  const unprefixedMethod = trimmed.slice(separatorIndex + 1);
+  return SOCKET_RPC_PROVIDER_STARTING_METHODS.has(unprefixedMethod)
     ? unprefixedMethod
     : null;
 }
@@ -250,6 +278,8 @@ export const SESSION_RPC_METHODS = {
   EXECUTION_RUN_ENSURE_OR_START: 'execution.run.ensureOrStart',
   EXECUTION_RUN_SEND: 'execution.run.send',
   EXECUTION_RUN_STREAM_START: 'execution.run.stream.start',
+  EXECUTION_RUN_STREAM_START_V2: 'execution.run.stream.start.v2',
+  EXECUTION_RUN_USER_TRANSCRIPT_COMMIT_V1: 'execution.run.userTranscript.commit.v1',
   EXECUTION_RUN_STREAM_READ: 'execution.run.stream.read',
   EXECUTION_RUN_STREAM_CANCEL: 'execution.run.stream.cancel',
   EXECUTION_RUN_STOP: 'execution.run.stop',

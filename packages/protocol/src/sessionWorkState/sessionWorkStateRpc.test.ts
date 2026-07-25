@@ -40,6 +40,7 @@ describe('session work-state RPC contracts', () => {
         expect(SESSION_RPC_METHODS.SESSION_CONNECTED_SERVICE_AUTH_READ_RUNTIME_IDENTITY).toBe(
             'session.connectedServiceAuth.readRuntimeIdentity',
         );
+        expect(SESSION_RPC_METHODS).not.toHaveProperty('SESSION_PROVIDER_INPUT_ADMISSION');
         expect(RPC_METHODS.DAEMON_SESSION_GOAL_GET).toBe('daemon.sessionGoal.get');
         expect(RPC_METHODS.DAEMON_SESSION_GOAL_SET).toBe('daemon.sessionGoal.set');
         expect(RPC_METHODS.DAEMON_SESSION_GOAL_CLEAR).toBe('daemon.sessionGoal.clear');
