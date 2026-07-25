@@ -11,9 +11,12 @@ async function loadWorkflow(name) {
   return readFile(join(repoRoot, '.github', 'workflows', name), 'utf8');
 }
 
-test('promote-server delegates deploy branch promotion to pipeline script', async () => {
+test('promote-server isolates deploy branch promotion and force webhook in trusted captured scripts', async () => {
   const raw = await loadWorkflow('promote-server.yml');
-  assert.match(raw, /node scripts\/pipeline\/run\.mjs promote-deploy-branch/);
-  assert.match(raw, /node scripts\/pipeline\/run\.mjs deploy/);
+  assert.doesNotMatch(raw, /node scripts\/pipeline\/run\.mjs promote-deploy-branch/);
+  assert.doesNotMatch(raw, /node scripts\/pipeline\/run\.mjs deploy/);
+  assert.match(raw, /\$RUNNER_TEMP\/promote-server-deploy-ref\.mjs/);
+  assert.match(raw, /\$RUNNER_TEMP\/trigger-server-deploy-webhooks\.mjs/);
+  assert.match(raw, /--force-with-lease|--expected-current-sha/);
   assert.doesNotMatch(raw, /Wait for deploy workflow/i);
 });

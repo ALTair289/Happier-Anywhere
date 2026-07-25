@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       channel:
-        description: "Release channel"
+        description: Release channel
         required: true
         type: choice
         default: preview
@@ -13,148 +13,312 @@ on:
           - dev
           - stable
       source_ref:
-        description: "Source ref to publish (auto => dev:dev, preview:preview, stable:main)"
+        description: Source ref to publish (auto resolves from channel)
         required: true
         default: auto
         type: string
       allow_stable:
-        description: "Safety — allow publishing stable artifacts (disabled by default)"
+        description: Safety — allow publishing stable artifacts
         required: true
         default: false
         type: boolean
       release_message:
-        description: "Release message — Optional note to include at the top of the GitHub rolling release notes"
         required: false
-        default: ""
+        default: ''
+        type: string
+      retry_version:
+        description: Existing immutable version to re-promote after an interrupted rolling upload
+        required: false
+        default: ''
         type: string
   workflow_call:
     inputs:
-      channel:
-        required: true
-        type: string
-      source_ref:
-        required: false
-        default: auto
-        type: string
-      allow_stable:
-        required: false
-        default: false
-        type: boolean
-      release_message:
-        required: false
-        default: ""
-        type: string
+      channel: { required: true, type: string }
+      source_ref: { required: false, default: auto, type: string }
+      authorized_sha: { required: false, default: '', type: string }
+      allow_stable: { required: false, default: false, type: boolean }
+      release_message: { required: false, default: '', type: string }
+      retry_version: { required: false, default: '', type: string }
 
 permissions:
   contents: read
 
 concurrency:
-  group: publish-server-runtime-${{ inputs.channel }}-${{ github.ref }}
+  group: publish-server-runtime-${{ github.repository }}-${{ inputs.channel }}
   cancel-in-progress: false
 
 jobs:
-  release_actor_guard:
-    name: Release actor guard
+  trusted_ref_guard:
+    name: Trust called workflow repository and ref
+    runs-on: ubuntu-latest
     permissions:
       contents: read
-    runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Reject cross-repository or untrusted workflow control
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          CALLER_REPOSITORY: ${{ github.repository }}
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          WORKFLOW_REF: ${{ job.workflow_ref }}
+        run: |
+          set -euo pipefail
+          case "$CHANNEL" in
+            stable|preview|dev) ;;
+            *) echo "Noncanonical server-runtime workflow channel: $CHANNEL" >&2; exit 1 ;;
+          esac
+          test "$CALLER_REPOSITORY" = "$WORKFLOW_REPOSITORY"
+          case "$WORKFLOW_REF" in
+            "$WORKFLOW_REPOSITORY/.github/workflows/publish-server-runtime.yml@refs/heads/dev"|\
+            "$WORKFLOW_REPOSITORY/.github/workflows/publish-server-runtime.yml@refs/heads/preview"|\
+            "$WORKFLOW_REPOSITORY/.github/workflows/publish-server-runtime.yml@refs/heads/main") ;;
+            *) echo "Untrusted server-runtime publisher control ref: $WORKFLOW_REF" >&2; exit 1 ;;
+          esac
+
+  release_actor_guard:
+    name: Release actor guard and bind source
+    runs-on: ubuntu-latest
+    needs: [trusted_ref_guard]
+    permissions:
+      contents: read
+    outputs:
+      authorized_sha: ${{ steps.source.outputs.authorized_sha }}
+      source_ref: ${{ steps.source.outputs.canonical_ref }}
+      embedded_policy_env: ${{ steps.channel_meta.outputs.embedded_policy_env }}
+      version: ${{ steps.version.outputs.version }}
+      base_version: ${{ steps.source_version.outputs.base_version }}
+      artifact_name: ${{ steps.source.outputs.artifact_name }}
+      repository_owner: ${{ steps.source.outputs.repository_owner }}
+      repository_name: ${{ steps.source.outputs.repository_name }}
+    steps:
+      - name: Checkout called workflow control bytes
         uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+      - name: Enforce stable publishing gate
+        if: ${{ inputs.channel == 'stable' && inputs.allow_stable != true }}
+        run: exit 1
+      - name: Resolve channel metadata from control bytes
+        id: channel_meta
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          node scripts/pipeline/release/resolve-public-release-channel-meta.mjs \
+            --channel "$CHANNEL" --source-ref "$SOURCE_REF" --github-output "$GITHUB_OUTPUT"
       - name: Authorize release actor
         uses: ./.github/actions/release-actor-guard
         with:
           team_slug: release-admins
           app_id: ${{ secrets.RELEASE_BOT_APP_ID }}
           private_key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
-
-  publish:
-    needs: [release_actor_guard]
-    runs-on: ubuntu-latest
-    environment: release-shared
-    steps:
-      - name: Enforce stable publishing gate
-        if: ${{ inputs.channel == 'stable' && inputs.allow_stable != true }}
+      - name: Bind authorized remote source SHA
+        id: source
+        env:
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          SOURCE_REF: ${{ steps.channel_meta.outputs.source_ref }}
+          AUTHORIZED_SHA: ${{ inputs.authorized_sha }}
+          RETRY_VERSION: ${{ inputs.retry_version }}
+          ARTIFACT_NAME: server-runtime-candidate-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
-          echo "Stable server runtime publishing is disabled. Re-run with allow_stable=true if intentional." >&2
-          exit 1
-
-      - name: Checkout workflow repo
+          if [[ -n "$RETRY_VERSION" ]]; then
+            SOURCE_REF="refs/tags/server-v$RETRY_VERSION"
+          fi
+          node scripts/pipeline/github/resolve-authorized-release-source.mjs \
+            --source-ref "$SOURCE_REF" --authorized-sha "$AUTHORIZED_SHA" --remote origin --github-output "$GITHUB_OUTPUT"
+          echo "artifact_name=$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+          echo "repository_owner=${WORKFLOW_REPOSITORY%%/*}" >> "$GITHUB_OUTPUT"
+          echo "repository_name=${WORKFLOW_REPOSITORY#*/}" >> "$GITHUB_OUTPUT"
+      - name: Checkout authorized source as non-executable data
         uses: actions/checkout@v4
         with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ steps.source.outputs.authorized_sha }}
+          path: authorized-source
           fetch-depth: 1
+          persist-credentials: false
+      - name: Read synchronized version from authorized source data
+        id: source_version
+        run: node scripts/pipeline/release/publishing/authorized-server-version.mjs --source-dir authorized-source --github-output "$GITHUB_OUTPUT"
+      - name: Resolve authorized release version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ job.workflow_repository }}
+          CHANNEL: ${{ inputs.channel }}
+          ALLOW_STABLE: ${{ inputs.allow_stable }}
+          BASE_VERSION: ${{ steps.source_version.outputs.base_version }}
+          RETRY_VERSION: ${{ inputs.retry_version }}
+          AUTHORIZED_SHA: ${{ steps.source.outputs.authorized_sha }}
+        run: |
+          PHASE=build-candidate
+          VERSION_ARGS=()
+          if [[ -n "$RETRY_VERSION" ]]; then
+            PHASE=promote-rolling
+            VERSION_ARGS=(--version "$RETRY_VERSION" --authorized-sha "$AUTHORIZED_SHA")
+          fi
+          node scripts/pipeline/release/publish-server-runtime.mjs \
+            --phase "$PHASE" --channel "$CHANNEL" --base-version "$BASE_VERSION" \
+            "${VERSION_ARGS[@]}" \
+            --allow-stable "$ALLOW_STABLE" --run-contracts false --check-installers false \
+            --dry-run --github-output "$GITHUB_OUTPUT"
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+  build_candidate:
+    name: Build and smoke-test unsigned candidate
+    needs: [trusted_ref_guard, release_actor_guard]
+    if: ${{ inputs.retry_version == '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout exact authorized candidate
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ needs.release_actor_guard.outputs.authorized_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@v4
         with:
           node-version: 22.x
           cache: yarn
           cache-dependency-path: yarn.lock
-
-      - name: Resolve channel metadata
-        id: channel_meta
+      - run: corepack enable && corepack prepare yarn@1.22.22 --activate
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.5
+      - name: Install candidate dependencies without credentials
+        env:
+          YARN_PRODUCTION: 'false'
+          npm_config_production: 'false'
+          HAPPIER_UI_VENDOR_WEB_ASSETS: '0'
+          HAPPIER_EMBEDDED_POLICY_ENV: ${{ needs.release_actor_guard.outputs.embedded_policy_env }}
+        uses: ./.github/actions/install-yarn-dependencies
+        with:
+          args: --frozen-lockfile --ignore-engines
+      - name: Build and smoke-test opaque unsigned archives
+        env:
+          HAPPIER_EMBEDDED_POLICY_ENV: ${{ needs.release_actor_guard.outputs.embedded_policy_env }}
+          CHANNEL: ${{ inputs.channel }}
+          VERSION: ${{ needs.release_actor_guard.outputs.version }}
+          ALLOW_STABLE: ${{ inputs.allow_stable }}
+          BASE_VERSION: ${{ needs.release_actor_guard.outputs.base_version }}
         run: |
-          set -euo pipefail
-          node scripts/pipeline/release/resolve-public-release-channel-meta.mjs \
-            --channel "${{ inputs.channel }}" \
-            --source-ref "${{ inputs.source_ref }}" \
-            --github-output "$GITHUB_OUTPUT"
+          node scripts/pipeline/release/publish-server-runtime.mjs \
+            --phase build-candidate --channel "$CHANNEL" --base-version "$BASE_VERSION" \
+            --version "$VERSION" --allow-stable "$ALLOW_STABLE" --run-contracts true --check-installers true \
+            --candidate-dir dist/release-assets/server
+      - name: Upload opaque unsigned archives
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.release_actor_guard.outputs.artifact_name }}
+          path: dist/release-assets/server/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
 
-      - name: Create GitHub App token
+  finalize_publish:
+    name: Validate, sign, manifest, and publish authorized candidate
+    needs: [trusted_ref_guard, release_actor_guard, build_candidate]
+    if: ${{ inputs.retry_version == '' }}
+    runs-on: ubuntu-latest
+    environment: release-shared
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout called workflow control bytes only
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+      - name: Download candidate as hostile opaque data
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.release_actor_guard.outputs.artifact_name }}
+          path: ${{ runner.temp }}/server-runtime-candidate
+      - name: Install minisign only from trusted control bytes
+        uses: ./.github/actions/bootstrap-minisign
+      - name: Create narrowly scoped publish token
         id: app_token
         uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
-
-      - name: Checkout source ref
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ steps.channel_meta.outputs.source_ref }}
-          fetch-depth: 0
-          token: ${{ steps.app_token.outputs.token }}
-          persist-credentials: false
-
-      - name: Enable Corepack (Yarn)
-        run: |
-          set -euo pipefail
-          corepack enable
-          corepack prepare yarn@1.22.22 --activate
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.3.5
-
-      - name: Install minisign (signing + verification)
-        uses: ./.github/actions/bootstrap-minisign
-
-      - name: Install dependencies
-        env:
-          YARN_PRODUCTION: "false"
-          npm_config_production: "false"
-          # Speed up installs: server runtime publishing does not require UI web-only vendored assets.
-          HAPPIER_UI_VENDOR_WEB_ASSETS: "0"
-          HAPPIER_EMBEDDED_POLICY_ENV: ${{ steps.channel_meta.outputs.embedded_policy_env }}
-        uses: ./.github/actions/install-yarn-dependencies
-        with:
-          args: --frozen-lockfile --ignore-engines
-
-      - name: Publish server runtime (pipeline)
+          owner: ${{ needs.release_actor_guard.outputs.repository_owner }}
+          repositories: ${{ needs.release_actor_guard.outputs.repository_name }}
+          permission-contents: write
+      - name: Validate opaque files, recompute, sign, manifest, and publish
         env:
           GH_TOKEN: ${{ steps.app_token.outputs.token }}
-          GH_REPO: ${{ github.repository }}
+          GH_REPO: ${{ job.workflow_repository }}
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
           MINISIGN_PASSPHRASE: ${{ secrets.MINISIGN_PASSPHRASE }}
-          HAPPIER_EMBEDDED_POLICY_ENV: ${{ steps.channel_meta.outputs.embedded_policy_env }}
+          HAPPIER_EMBEDDED_POLICY_ENV: ${{ needs.release_actor_guard.outputs.embedded_policy_env }}
+          AUTHORIZED_SHA: ${{ needs.release_actor_guard.outputs.authorized_sha }}
+          VERSION: ${{ needs.release_actor_guard.outputs.version }}
+          BASE_VERSION: ${{ needs.release_actor_guard.outputs.base_version }}
+          CHANNEL: ${{ inputs.channel }}
+          ALLOW_STABLE: ${{ inputs.allow_stable }}
+          RELEASE_MESSAGE: ${{ inputs.release_message }}
         run: |
-          set -euo pipefail
-          node scripts/pipeline/run.mjs publish-server-runtime \
-            --channel "${{ inputs.channel }}" \
-            --allow-stable "${{ inputs.allow_stable }}" \
-            --release-message "${{ inputs.release_message }}" \
-            --run-contracts "true" \
-            --check-installers "true"
+          node scripts/pipeline/release/publish-server-runtime.mjs \
+            --phase finalize-candidate --candidate-dir "$RUNNER_TEMP/server-runtime-candidate" \
+            --authorized-sha "$AUTHORIZED_SHA" --base-version "$BASE_VERSION" --version "$VERSION" \
+            --channel "$CHANNEL" --allow-stable "$ALLOW_STABLE" \
+            --release-message "$RELEASE_MESSAGE" --run-contracts false --check-installers false
 
+  promote_existing:
+    name: Re-promote exact immutable version after interrupted rolling upload
+    needs: [trusted_ref_guard, release_actor_guard]
+    if: ${{ inputs.retry_version != '' }}
+    runs-on: ubuntu-latest
+    environment: release-shared
     permissions:
-      contents: write
+      contents: read
+    steps:
+      - name: Checkout called workflow control bytes only
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+      - name: Install minisign only from trusted control bytes
+        uses: ./.github/actions/bootstrap-minisign
+      - name: Create narrowly scoped publish token
+        id: app_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          owner: ${{ needs.release_actor_guard.outputs.repository_owner }}
+          repositories: ${{ needs.release_actor_guard.outputs.repository_name }}
+          permission-contents: write
+      - name: Re-promote exact verified immutable release bytes
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          GH_REPO: ${{ job.workflow_repository }}
+          AUTHORIZED_SHA: ${{ needs.release_actor_guard.outputs.authorized_sha }}
+          VERSION: ${{ needs.release_actor_guard.outputs.version }}
+          BASE_VERSION: ${{ needs.release_actor_guard.outputs.base_version }}
+          CHANNEL: ${{ inputs.channel }}
+          ALLOW_STABLE: ${{ inputs.allow_stable }}
+          RELEASE_MESSAGE: ${{ inputs.release_message }}
+        run: |
+          node scripts/pipeline/release/publish-server-runtime.mjs \
+            --phase promote-rolling --authorized-sha "$AUTHORIZED_SHA" --version "$VERSION" \
+            --base-version "$BASE_VERSION" --channel "$CHANNEL" --allow-stable "$ALLOW_STABLE" \
+            --release-message "$RELEASE_MESSAGE" --run-contracts false --check-installers false

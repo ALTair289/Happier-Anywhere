@@ -523,6 +523,35 @@ jobs:
             --bump-stack "${{ needs.plan.outputs.bump_stack }}" \
             --github-output "$GITHUB_OUTPUT"
 
+  bind_server_source:
+    if: always() && needs.plan.result == 'success' && inputs.dry_run != true && (needs.bump_versions_dev.result == 'success' || needs.bump_versions_dev.result == 'skipped') && ((inputs.environment == 'production' && needs.promote_main.result == 'success') || (inputs.environment == 'preview' && needs.promote_preview.result == 'success'))
+    needs: [plan, bump_versions_dev, promote_preview, promote_main]
+    runs-on: ubuntu-latest
+    outputs:
+      authorized_sha: ${{ steps.source.outputs.authorized_sha }}
+    steps:
+      - name: Checkout trusted release policy
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+      - name: Bind one exact post-promotion server SHA
+        id: source
+        env:
+          SOURCE_REF: ${{ inputs.environment == 'production' && 'main' || 'preview' }}
+        run: |
+          set -euo pipefail
+          node scripts/pipeline/github/resolve-authorized-release-source.mjs \
+            --source-ref "$SOURCE_REF" \
+            --remote origin \
+            --github-output "$GITHUB_OUTPUT"
+
   deploy_ui:
     if: always() && needs.plan.result == 'success' && inputs.dry_run != true && contains(format(',{0},', inputs.deploy_targets), ',ui,') && (needs.deploy_plan.outputs.deploy_ui_needed == 'true' || needs.plan.outputs.bump_app != 'none' || inputs.force_deploy == true || inputs.ui_expo_action != 'none') && (needs.bump_versions_dev.result == 'success' || needs.bump_versions_dev.result == 'skipped') && ((inputs.environment == 'production' && needs.promote_main.result == 'success') || (inputs.environment == 'preview' && needs.promote_preview.result == 'success'))
     needs: [plan, bump_versions_dev, promote_preview, promote_main, deploy_plan]
@@ -545,8 +574,8 @@ jobs:
       expo_update_message: ${{ inputs.release_message }}
 
   deploy_server:
-    if: always() && needs.plan.result == 'success' && inputs.dry_run != true && contains(format(',{0},', inputs.deploy_targets), ',server,') && (needs.deploy_plan.outputs.deploy_server_needed == 'true' || needs.plan.outputs.bump_server != 'none' || inputs.force_deploy == true) && (needs.bump_versions_dev.result == 'success' || needs.bump_versions_dev.result == 'skipped') && ((inputs.environment == 'production' && needs.promote_main.result == 'success') || (inputs.environment == 'preview' && needs.promote_preview.result == 'success'))
-    needs: [plan, bump_versions_dev, promote_preview, promote_main, deploy_plan]
+    if: always() && needs.plan.result == 'success' && needs.bind_server_source.result == 'success' && (needs.publish_server_runtime.result == 'success' || needs.publish_server_runtime.result == 'skipped') && inputs.dry_run != true && contains(format(',{0},', inputs.deploy_targets), ',server,') && (needs.deploy_plan.outputs.deploy_server_needed == 'true' || needs.plan.outputs.bump_server != 'none' || inputs.force_deploy == true) && (needs.bump_versions_dev.result == 'success' || needs.bump_versions_dev.result == 'skipped') && ((inputs.environment == 'production' && needs.promote_main.result == 'success') || (inputs.environment == 'preview' && needs.promote_preview.result == 'success'))
+    needs: [plan, bump_versions_dev, promote_preview, promote_main, deploy_plan, bind_server_source, publish_server_runtime]
     permissions:
       contents: write
       actions: read
@@ -555,15 +584,15 @@ jobs:
     with:
       environment: ${{ inputs.environment }}
       force_deploy: ${{ inputs.force_deploy }}
-      source_ref: ${{ inputs.environment == 'production' && 'main' || 'preview' }}
-      allow_cross_promote: false
+      source_ref: ${{ needs.bind_server_source.outputs.authorized_sha }}
+      allow_cross_promote: true
       bump: none
       publish_runtime_release: false
       run_tests: false
 
   publish_server_runtime:
-    if: always() && needs.plan.result == 'success' && inputs.dry_run != true && (needs.plan.outputs.publish_server == 'true' || inputs.force_deploy == true || needs.plan.outputs.changed_server == 'true' || needs.plan.outputs.changed_shared == 'true') && (needs.bump_versions_dev.result == 'success' || needs.bump_versions_dev.result == 'skipped') && ((inputs.environment == 'production' && needs.promote_main.result == 'success') || (inputs.environment == 'preview' && needs.promote_preview.result == 'success'))
-    needs: [plan, bump_versions_dev, promote_preview, promote_main]
+    if: always() && needs.plan.result == 'success' && needs.bind_server_source.result == 'success' && inputs.dry_run != true && (needs.plan.outputs.publish_server == 'true' || inputs.force_deploy == true || needs.plan.outputs.changed_server == 'true' || needs.plan.outputs.changed_shared == 'true') && (needs.bump_versions_dev.result == 'success' || needs.bump_versions_dev.result == 'skipped') && ((inputs.environment == 'production' && needs.promote_main.result == 'success') || (inputs.environment == 'preview' && needs.promote_preview.result == 'success'))
+    needs: [plan, bump_versions_dev, promote_preview, promote_main, bind_server_source]
     permissions:
       contents: write
     uses: ./.github/workflows/publish-server-runtime.yml
@@ -571,6 +600,7 @@ jobs:
     with:
       channel: ${{ inputs.environment == 'production' && 'stable' || 'preview' }}
       source_ref: ${{ inputs.environment == 'production' && 'main' || 'preview' }}
+      authorized_sha: ${{ needs.bind_server_source.outputs.authorized_sha }}
       allow_stable: ${{ inputs.environment == 'production' }}
       release_message: ${{ inputs.release_message }}
 

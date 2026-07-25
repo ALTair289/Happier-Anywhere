@@ -98,6 +98,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
       - name: Authorize release actor
         uses: ./.github/actions/release-actor-guard
         with:
@@ -105,66 +109,212 @@ jobs:
           app_id: ${{ secrets.RELEASE_BOT_APP_ID }}
           private_key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
 
-  promote:
+  resolve_source:
     needs: [release_actor_guard]
     runs-on: ubuntu-latest
-    environment: release-shared
+    outputs:
+      candidate_sha: ${{ steps.candidate.outputs.authorized_sha }}
+      source_ref: ${{ steps.resolve.outputs.source_ref }}
+    env:
+      RUNTIME_ACTIVITY_ROLLOUT_STAGE: ${{ inputs.environment == 'production' && vars.HAPPIER_PRODUCTION_SERVER_RUNTIME_ACTIVITY_ROLLOUT_STAGE || vars.HAPPIER_PREVIEW_SERVER_RUNTIME_ACTIVITY_ROLLOUT_STAGE }}
+      RUNTIME_ACTIVITY_MINIMUM_FENCE_SHA: ${{ inputs.environment == 'production' && vars.HAPPIER_PRODUCTION_SERVER_FENCE_AWARE_MINIMUM_SHA || vars.HAPPIER_PREVIEW_SERVER_FENCE_AWARE_MINIMUM_SHA }}
+      RUNTIME_ACTIVITY_R2_DRAINED_SHA: ${{ inputs.environment == 'production' && vars.HAPPIER_PRODUCTION_SERVER_SESSION_SYNC_R2_DRAINED_SHA || vars.HAPPIER_PREVIEW_SERVER_SESSION_SYNC_R2_DRAINED_SHA }}
     steps:
-      - name: Resolve source ref
-        id: resolve
+      - name: Checkout trusted workflow policy
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+
+      - name: Capture trusted server release policy
         run: |
           set -euo pipefail
-          env_name="${{ inputs.environment }}"
-          src="${{ inputs.source_ref }}"
-          if [ "$src" = "auto" ]; then
-            if [ "$env_name" = "preview" ]; then
-              src="preview"
-            else
-              src="main"
-            fi
-          fi
+          cp scripts/pipeline/github/enforce-server-runtime-activity-rollout.mjs \
+            "$RUNNER_TEMP/enforce-server-runtime-activity-rollout.mjs"
+          cp scripts/pipeline/github/resolve-server-promotion-inputs.mjs \
+            "$RUNNER_TEMP/resolve-server-promotion-inputs.mjs"
+          cp scripts/pipeline/github/resolve-authorized-release-source.mjs \
+            "$RUNNER_TEMP/resolve-authorized-release-source.mjs"
 
-          # Guardrails: allow using non-default source ref only when explicitly confirmed.
-          if [ "$env_name" = "production" ] && [ "$src" != "main" ] && [ "${{ inputs.allow_cross_promote }}" != "true" ]; then
-            echo "Refusing to promote '$src' to production without allow_cross_promote=true." >&2
-            exit 1
-          fi
-
-          # Bumps require a real branch target we can push back to.
-          if [ "${{ inputs.bump }}" != "none" ] && [ "$src" != "main" ] && [ "$src" != "preview" ] && [ "$src" != "dev" ]; then
-            echo "Refusing to bump versions when source_ref is not a branch (main/preview/dev). Set bump=none or use a branch." >&2
-            exit 1
-          fi
-
-          echo "ref=$src" >> "$GITHUB_OUTPUT"
+      - name: Enforce trusted workflow control ref
+        env:
+          TRUSTED_WORKFLOW_REF: ${{ job.workflow_ref }}
+        run: |
+          set -euo pipefail
+          test -n "${TRUSTED_WORKFLOW_REF}"
+          workflow_ref="${TRUSTED_WORKFLOW_REF##*@}"
+          case "${workflow_ref}" in
+            refs/heads/dev|refs/heads/preview|refs/heads/main) ;;
+            *) echo "Refusing untrusted workflow ref '${TRUSTED_WORKFLOW_REF}'." >&2; exit 1 ;;
+          esac
 
       - name: Enforce trusted refs for manual dispatch
         run: |
           set -euo pipefail
-          if [ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ]; then
-            exit 0
-          fi
+          if [ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ]; then exit 0; fi
           case "${GITHUB_REF_NAME}" in
             dev|preview|main) ;;
-            *)
-              echo "Refusing workflow_dispatch from untrusted ref '${GITHUB_REF_NAME}'. Use dev, preview, or main." >&2
-              exit 1
-              ;;
+            *) echo "Refusing workflow_dispatch from untrusted ref '${GITHUB_REF_NAME}'." >&2; exit 1 ;;
           esac
 
-      - name: Create GitHub App token
-        id: app_token
+      - name: Resolve source ref
+        id: resolve
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
+          DEPLOY_ENVIRONMENT: ${{ inputs.environment }}
+          ALLOW_CROSS_PROMOTE: ${{ inputs.allow_cross_promote }}
+          BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+          test "${{ github.repository }}" = "${{ job.workflow_repository }}" || {
+            echo "Cross-repository callers are not supported for server promotion." >&2
+            exit 1
+          }
+          node "$RUNNER_TEMP/resolve-server-promotion-inputs.mjs" \
+            --environment "$DEPLOY_ENVIRONMENT" \
+            --source-ref "$SOURCE_REF" \
+            --allow-cross-promote "$ALLOW_CROSS_PROMOTE" \
+            --bump "$BUMP" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Bind exact authorized source SHA
+        id: candidate
+        env:
+          SOURCE_REF: ${{ steps.resolve.outputs.source_ref }}
+        run: |
+          set -euo pipefail
+          node "$RUNNER_TEMP/resolve-authorized-release-source.mjs" \
+            --source-ref "$SOURCE_REF" \
+            --remote origin \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Checkout exact authorized source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ steps.candidate.outputs.authorized_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Enforce server runtime-activity rollout policy
+        run: |
+          node "$RUNNER_TEMP/enforce-server-runtime-activity-rollout.mjs" \
+            --rollout-stage "${RUNTIME_ACTIVITY_ROLLOUT_STAGE}" \
+            --candidate-sha "$(git rev-parse HEAD)" \
+            --minimum-fence-sha "${RUNTIME_ACTIVITY_MINIMUM_FENCE_SHA}" \
+            --r2-drained-sha "${RUNTIME_ACTIVITY_R2_DRAINED_SHA}"
+
+      - name: Verify authorized source checkout
+        run: |
+          set -euo pipefail
+          candidate_sha="$(git rev-parse HEAD)"
+          test "${candidate_sha}" = "${{ steps.candidate.outputs.authorized_sha }}"
+          test "$(git rev-parse --verify HEAD^{commit})" = "${candidate_sha}"
+
+  apply_bump:
+    needs: [release_actor_guard, resolve_source, validate_candidate]
+    runs-on: ubuntu-latest
+    environment: release-shared
+    outputs:
+      candidate_sha: ${{ steps.select.outputs.candidate_sha }}
+    steps:
+      - name: Checkout trusted bump policy
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Capture trusted server bump helper
+        run: cp scripts/pipeline/github/prepare-server-release-bump.mjs "$RUNNER_TEMP/prepare-server-release-bump.mjs"
+
+      - name: Checkout exact pre-bump source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ needs.resolve_source.outputs.candidate_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Create bump GitHub App token
+        if: inputs.bump != 'none'
+        id: bump_token
         uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
 
-      - name: Checkout source ref
+      - name: Apply trusted server version bump
+        if: inputs.bump != 'none'
+        id: bump
+        env:
+          HAPPIER_GIT_AUTHORIZATION_HEADER: "AUTHORIZATION: bearer ${{ steps.bump_token.outputs.token }}"
+          BUMP: ${{ inputs.bump }}
+          SOURCE_BRANCH: ${{ needs.resolve_source.outputs.source_ref }}
+        run: |
+          set -euo pipefail
+          node "$RUNNER_TEMP/prepare-server-release-bump.mjs" \
+            --bump "$BUMP" \
+            --source-branch "$SOURCE_BRANCH" \
+            --expected-sha "${{ needs.resolve_source.outputs.candidate_sha }}" \
+            --push true \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Select candidate SHA after optional bump
+        id: select
+        run: |
+          set -euo pipefail
+          candidate_sha="${{ steps.bump.outputs.candidate_sha }}"
+          if [ -z "${candidate_sha}" ]; then candidate_sha="${{ needs.resolve_source.outputs.candidate_sha }}"; fi
+          echo "candidate_sha=${candidate_sha}" >> "$GITHUB_OUTPUT"
+
+  validate_candidate:
+    needs: [release_actor_guard, resolve_source]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout trusted candidate validation policy
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.resolve.outputs.ref }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Capture trusted server bump transform
+        run: cp scripts/pipeline/github/prepare-server-release-bump.mjs "$RUNNER_TEMP/prepare-server-release-bump.mjs"
+
+      - name: Checkout exact authorized candidate
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ needs.resolve_source.outputs.candidate_sha }}
           fetch-depth: 0
-          token: ${{ steps.app_token.outputs.token }}
+          persist-credentials: false
+
+      - name: Apply trusted bump transform locally
+        if: inputs.bump != 'none'
+        env:
+          BUMP: ${{ inputs.bump }}
+          SOURCE_BRANCH: ${{ needs.resolve_source.outputs.source_ref }}
+        run: |
+          node "$RUNNER_TEMP/prepare-server-release-bump.mjs" \
+            --bump "$BUMP" \
+            --source-branch "$SOURCE_BRANCH" \
+            --expected-sha "${{ needs.resolve_source.outputs.candidate_sha }}" \
+            --push false
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -175,7 +325,6 @@ jobs:
 
       - name: Enable Corepack (Yarn)
         run: |
-          set -euo pipefail
           corepack enable
           corepack prepare yarn@1.22.22 --activate
 
@@ -194,113 +343,193 @@ jobs:
       - name: Verify installer assets are synced
         run: node scripts/pipeline/run.mjs release-sync-installers --check
 
-      - name: Setup Bun
-        if: inputs.publish_runtime_release == true
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.3.5
-
-      - name: Bump server version (source ref)
-        id: bump_server
-        run: |
-          set -euo pipefail
-          out="$(node scripts/pipeline/run.mjs release-bump-version --component server --bump "${{ inputs.bump }}")"
-          if [ "$out" = "SKIP" ]; then
-            echo "skipped=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "skipped=false" >> "$GITHUB_OUTPUT"
-          echo "version=$out" >> "$GITHUB_OUTPUT"
-
       - name: Run server tests
         if: inputs.run_tests
         run: yarn --cwd apps/server test
 
-      - name: Commit + push version bump (pipeline)
-        if: steps.bump_server.outputs.skipped != 'true'
-        run: |
-          set -euo pipefail
-          src="${{ steps.resolve.outputs.ref }}"
-          node scripts/pipeline/run.mjs github-commit-and-push \
-            --paths "apps/server/package.json,packages/relay-server/package.json" \
-            --allow-missing false \
-            --message "chore(release): bump server to v${{ steps.bump_server.outputs.version }}" \
-            --push-ref "${src}" \
-            --push-mode auto
+  finalize_source:
+    needs: [release_actor_guard, resolve_source, apply_bump, validate_candidate]
+    runs-on: ubuntu-latest
+    outputs:
+      authorized_sha: ${{ steps.bind.outputs.authorized_sha }}
+    steps:
+      - name: Checkout independently resolved source head
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ needs.resolve_source.outputs.source_ref }}
+          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Publish server runtime release (pipeline)
-        if: inputs.publish_runtime_release == true
+      - name: Bind independently verified final source
+        id: bind
         env:
-          CHANNEL: ${{ inputs.environment == 'production' && 'stable' || 'preview' }}
-          ALLOW_STABLE: ${{ inputs.environment == 'production' && 'true' || 'false' }}
-          HAPPIER_EMBEDDED_POLICY_ENV: ${{ inputs.environment == 'production' && 'production' || 'preview' }}
-          GH_TOKEN: ${{ steps.app_token.outputs.token }}
-          GH_REPO: ${{ github.repository }}
-          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
-          MINISIGN_PASSPHRASE: ${{ secrets.MINISIGN_PASSPHRASE }}
+          BUMP: ${{ inputs.bump }}
         run: |
           set -euo pipefail
-          node scripts/pipeline/run.mjs publish-server-runtime \
-            --channel "${CHANNEL}" \
-            --allow-stable "${ALLOW_STABLE}" \
-            --release-message "" \
-            --run-contracts false \
-            --check-installers false
+          pre_sha="${{ needs.resolve_source.outputs.candidate_sha }}"
+          authorized_sha="$(git rev-parse HEAD)"
+          test "${authorized_sha}" = "${{ needs.apply_bump.outputs.candidate_sha }}"
+          if [ "$BUMP" = "none" ]; then
+            test "${authorized_sha}" = "${pre_sha}"
+          else
+            test "$(git rev-parse "${authorized_sha}^")" = "${pre_sha}"
+            test "$(git diff --name-only "${pre_sha}" "${authorized_sha}")" = $'apps/server/package.json\npackages/relay-server/package.json'
+            node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const server = JSON.parse(fs.readFileSync('apps/server/package.json', 'utf8')).version;
+          const runner = JSON.parse(fs.readFileSync('packages/relay-server/package.json', 'utf8')).version;
+          if (!/^\d+\.\d+\.\d+$/.test(server) || server !== runner) process.exit(1);
+          NODE
+          fi
+          echo "authorized_sha=${authorized_sha}" >> "$GITHUB_OUTPUT"
 
-      - name: Resolve deploy branch SHA (before)
+  publish_runtime_release:
+    if: inputs.publish_runtime_release == true
+    needs: [resolve_source, finalize_source]
+    uses: ./.github/workflows/publish-server-runtime.yml
+    with:
+      channel: ${{ inputs.environment == 'production' && 'stable' || 'preview' }}
+      source_ref: ${{ needs.finalize_source.outputs.authorized_sha }}
+      authorized_sha: ${{ needs.finalize_source.outputs.authorized_sha }}
+      allow_stable: ${{ inputs.environment == 'production' }}
+      release_message: ""
+    secrets: inherit
+
+  promote_deploy_ref:
+    if: always() && needs.finalize_source.result == 'success' && (needs.publish_runtime_release.result == 'success' || needs.publish_runtime_release.result == 'skipped')
+    needs: [release_actor_guard, resolve_source, apply_bump, validate_candidate, finalize_source, publish_runtime_release]
+    runs-on: ubuntu-latest
+    environment: release-shared
+    env:
+      RUNTIME_ACTIVITY_ROLLOUT_STAGE: ${{ inputs.environment == 'production' && vars.HAPPIER_PRODUCTION_SERVER_RUNTIME_ACTIVITY_ROLLOUT_STAGE || vars.HAPPIER_PREVIEW_SERVER_RUNTIME_ACTIVITY_ROLLOUT_STAGE }}
+      RUNTIME_ACTIVITY_MINIMUM_FENCE_SHA: ${{ inputs.environment == 'production' && vars.HAPPIER_PRODUCTION_SERVER_FENCE_AWARE_MINIMUM_SHA || vars.HAPPIER_PREVIEW_SERVER_FENCE_AWARE_MINIMUM_SHA }}
+      RUNTIME_ACTIVITY_R2_DRAINED_SHA: ${{ inputs.environment == 'production' && vars.HAPPIER_PRODUCTION_SERVER_SESSION_SYNC_R2_DRAINED_SHA || vars.HAPPIER_PREVIEW_SERVER_SESSION_SYNC_R2_DRAINED_SHA }}
+    steps:
+      - name: Checkout trusted server promotion policy
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Capture trusted server deploy mutation
+        run: |
+          set -euo pipefail
+          cp scripts/pipeline/github/enforce-server-runtime-activity-rollout.mjs \
+            "$RUNNER_TEMP/enforce-server-runtime-activity-rollout.mjs"
+          cp scripts/pipeline/github/promote-server-deploy-ref.mjs \
+            "$RUNNER_TEMP/promote-server-deploy-ref.mjs"
+          cp scripts/pipeline/deploy/trigger-webhooks.mjs \
+            "$RUNNER_TEMP/trigger-server-deploy-webhooks.mjs"
+          cp scripts/pipeline/github/resolve-server-promotion-inputs.mjs \
+            "$RUNNER_TEMP/resolve-server-promotion-inputs.mjs"
+
+      - name: Enforce trusted server promotion control ref
+        env:
+          TRUSTED_WORKFLOW_REF: ${{ job.workflow_ref }}
+        run: |
+          set -euo pipefail
+          test -n "${TRUSTED_WORKFLOW_REF}"
+          workflow_ref="${TRUSTED_WORKFLOW_REF##*@}"
+          case "${workflow_ref}" in
+            refs/heads/dev|refs/heads/preview|refs/heads/main) ;;
+            *) echo "Refusing untrusted workflow ref '${TRUSTED_WORKFLOW_REF}'." >&2; exit 1 ;;
+          esac
+
+      - name: Resolve exact authorized server release SHA
+        id: trusted_resolve
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
+          DEPLOY_ENVIRONMENT: ${{ inputs.environment }}
+          ALLOW_CROSS_PROMOTE: ${{ inputs.allow_cross_promote }}
+          BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+          node "$RUNNER_TEMP/resolve-server-promotion-inputs.mjs" \
+            --environment "$DEPLOY_ENVIRONMENT" \
+            --source-ref "$SOURCE_REF" \
+            --allow-cross-promote "$ALLOW_CROSS_PROMOTE" \
+            --bump "$BUMP" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Checkout exact authorized server release SHA
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ steps.trusted_resolve.outputs.source_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Revalidate exact server promotion SHA in trusted job
+        id: bind
+        run: |
+          set -euo pipefail
+          candidate_sha="$(git rev-parse HEAD)"
+          test "${candidate_sha}" = "${{ needs.finalize_source.outputs.authorized_sha }}"
+          node "$RUNNER_TEMP/enforce-server-runtime-activity-rollout.mjs" \
+            --rollout-stage "${RUNTIME_ACTIVITY_ROLLOUT_STAGE}" \
+            --candidate-sha "${candidate_sha}" \
+            --minimum-fence-sha "${RUNTIME_ACTIVITY_MINIMUM_FENCE_SHA}" \
+            --r2-drained-sha "${RUNTIME_ACTIVITY_R2_DRAINED_SHA}"
+          test "$(git rev-parse HEAD)" = "${candidate_sha}"
+          echo "candidate_sha=${candidate_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Create trusted promotion GitHub App token
+        id: promotion_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+
+      - name: Resolve exact server deploy ref before promotion
         id: deploy_before
         env:
-          GH_TOKEN: ${{ steps.app_token.outputs.token }}
-          GH_REPO: ${{ github.repository }}
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: http.extraHeader
+          GIT_CONFIG_VALUE_0: "AUTHORIZATION: bearer ${{ steps.promotion_token.outputs.token }}"
+          DEPLOY_ENVIRONMENT: ${{ inputs.environment }}
         run: |
           set -euo pipefail
-          ref="deploy/${{ inputs.environment }}/server"
-          sha="$(gh api "repos/${{ github.repository }}/git/ref/heads/${ref}" --jq .object.sha 2>/dev/null || true)"
+          ref="refs/heads/deploy/${DEPLOY_ENVIRONMENT}/server"
+          row="$(git ls-remote --refs origin "${ref}")"
+          sha="${row%%[[:space:]]*}"
+          if [ -n "${sha}" ] && ! [[ "${sha}" =~ ^[0-9a-fA-F]{40}$ ]]; then exit 1; fi
           echo "sha=${sha}" >> "$GITHUB_OUTPUT"
 
-      - name: Promote source ref to deploy branch
+      - name: Promote exact validated SHA to server deploy branch
+        id: promote_ref
         env:
-          GH_TOKEN: ${{ steps.app_token.outputs.token }}
-          GH_REPO: ${{ github.repository }}
+          HAPPIER_GIT_AUTHORIZATION_HEADER: "AUTHORIZATION: bearer ${{ steps.promotion_token.outputs.token }}"
+          DEPLOY_ENVIRONMENT: ${{ inputs.environment }}
         run: |
           set -euo pipefail
-          node scripts/pipeline/run.mjs promote-deploy-branch \
-            --deploy-environment "${{ inputs.environment }}" \
-            --component server \
-            --sha "$(git rev-parse HEAD)" \
-            --summary-file "${GITHUB_STEP_SUMMARY}"
+          expected="${{ steps.deploy_before.outputs.sha }}"
+          if [ -z "${expected}" ]; then expected="missing"; fi
+          node "$RUNNER_TEMP/promote-server-deploy-ref.mjs" \
+            --deploy-environment "$DEPLOY_ENVIRONMENT" \
+            --candidate-sha "${{ steps.bind.outputs.candidate_sha }}" \
+            --expected-current-sha "${expected}" \
+            --summary-file "$GITHUB_STEP_SUMMARY" \
+            --github-output "$GITHUB_OUTPUT"
 
-      - name: Resolve deploy branch SHA (after)
-        id: deploy_after
+      - name: Trigger trusted deploy webhook(s) (force_deploy, no branch change)
+        if: inputs.force_deploy && steps.promote_ref.outputs.changed == 'false'
         env:
-          GH_TOKEN: ${{ steps.app_token.outputs.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          ref="deploy/${{ inputs.environment }}/server"
-          sha="$(gh api "repos/${{ github.repository }}/git/ref/heads/${ref}" --jq .object.sha 2>/dev/null || true)"
-          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
-
-      - name: Trigger deploy webhook(s) (force_deploy, no branch change)
-        if: inputs.force_deploy && steps.deploy_before.outputs.sha == steps.deploy_after.outputs.sha
-        env:
-          GH_TOKEN: ${{ steps.app_token.outputs.token }}
           CF_WEBHOOK_DEPLOY_CLIENT_ID: ${{ secrets.CF_WEBHOOK_DEPLOY_CLIENT_ID }}
           CF_WEBHOOK_DEPLOY_CLIENT_SECRET: ${{ secrets.CF_WEBHOOK_DEPLOY_CLIENT_SECRET }}
           DEPLOY_WEBHOOK_URL: ${{ vars.DEPLOY_WEBHOOK_URL != '' && vars.DEPLOY_WEBHOOK_URL || secrets.DEPLOY_WEBHOOK_URL }}
           HAPPIER_SERVER_API_DEPLOY_WEBHOOKS: ${{ vars.HAPPIER_SERVER_API_DEPLOY_WEBHOOKS != '' && vars.HAPPIER_SERVER_API_DEPLOY_WEBHOOKS || secrets.HAPPIER_SERVER_API_DEPLOY_WEBHOOKS }}
           HAPPIER_SERVER_WORKER_DEPLOY_WEBHOOKS: ${{ vars.HAPPIER_SERVER_WORKER_DEPLOY_WEBHOOKS != '' && vars.HAPPIER_SERVER_WORKER_DEPLOY_WEBHOOKS || secrets.HAPPIER_SERVER_WORKER_DEPLOY_WEBHOOKS }}
+          DEPLOY_ENVIRONMENT: ${{ inputs.environment }}
         run: |
-          set -euo pipefail
-          node scripts/pipeline/run.mjs deploy \
-            --deploy-environment "${{ inputs.environment }}" \
-            --component "server" \
-            --repository "${{ github.repository }}" \
-            --ref-name "deploy/${{ inputs.environment }}/server"
-
-      - name: Deploy note
-        run: |
-          set -euo pipefail
-          echo "Deployment is triggered automatically by pushes to deploy/${{ inputs.environment }}/server." >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "- deploy_branch_sha: \`${{ steps.deploy_after.outputs.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          node "$RUNNER_TEMP/trigger-server-deploy-webhooks.mjs" \
+            --environment "$DEPLOY_ENVIRONMENT" \
+            --component server \
+            --repository "${{ job.workflow_repository }}" \
+            --ref-name "deploy/${DEPLOY_ENVIRONMENT}/server" \
+            --sha "${{ steps.promote_ref.outputs.new_sha }}"
