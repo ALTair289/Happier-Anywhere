@@ -34,6 +34,14 @@ describe("encrypted public-share data-key envelope validation", () => {
             type: "error",
             error: "Invalid encryptedDataKey",
         });
+        const structurallyValidBoxEnvelope = new Uint8Array(105).fill(7);
+        structurallyValidBoxEnvelope[0] = 0;
+        expect(tryParseEncryptedDataKeyEnvelopeV1(
+            encodeBase64(structurallyValidBoxEnvelope, "base64"),
+        )).toEqual({
+            type: "error",
+            error: "Invalid encryptedDataKey",
+        });
     });
 
     it("accepts current and legacy public-share SecretBox envelopes", () => {

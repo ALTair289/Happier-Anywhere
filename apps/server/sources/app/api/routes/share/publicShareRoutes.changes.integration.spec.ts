@@ -83,7 +83,6 @@ describe("publicShareRoutes (AccountChange integration)", () => {
         harness.resetEnv();
         await harness.resetDbTables([
             () => db.publicShareAccessLog.deleteMany(),
-            () => db.publicShareBlockedUser.deleteMany(),
             () => db.publicSessionShare.deleteMany(),
             () => db.sessionMessage.deleteMany(),
             () => db.accountChange.deleteMany(),

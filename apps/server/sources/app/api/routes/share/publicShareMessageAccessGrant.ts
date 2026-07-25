@@ -26,10 +26,6 @@ export function resolvePublicShareUseLimit(maxUses: number | null | undefined): 
     return { type: "capped", maxUses };
 }
 
-export function isPublicShareUseCapped(maxUses: number | null | undefined): maxUses is number {
-    return resolvePublicShareUseLimit(maxUses).type === "capped";
-}
-
 export function requirePublicShareAccessGrantSecret(env: NodeJS.ProcessEnv = process.env): string {
     const secret = (env.HANDY_MASTER_SECRET ?? "").toString().trim();
     if (!secret) {

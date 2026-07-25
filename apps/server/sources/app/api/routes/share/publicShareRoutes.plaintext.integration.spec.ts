@@ -6,6 +6,15 @@ import { createLightSqliteHarness, type LightSqliteHarness } from "@/testkit/lig
 import { createAuthenticatedTestApp } from "../../testkit/sqliteFastify";
 import { publicShareRoutes } from "./publicShareRoutes";
 
+function currentPublicShareEncryptedDataKey(): Uint8Array<ArrayBuffer> {
+    const serializedPayload = JSON.stringify({
+        __happierSerializedJsonValueV1: true,
+        type: "json",
+        value: { v: 0, keyB64: "A".repeat(44) },
+    });
+    return new Uint8Array(24 + 16 + Buffer.byteLength(serializedPayload, "utf8")).fill(1);
+}
+
 describe("publicShareRoutes plaintext sessions (integration)", () => {
     let harness: LightSqliteHarness;
 
@@ -162,6 +171,74 @@ describe("publicShareRoutes plaintext sessions (integration)", () => {
             where: { id: share.id },
             select: { useCount: true },
         })).resolves.toEqual({ useCount: 0 });
+    });
+
+    it("returns public transcript history in canonical seq order, not createdAt order", async () => {
+        const owner = await db.account.create({ data: { publicKey: "pk_owner_seq_order" }, select: { id: true } });
+        const session = await db.session.create({
+            data: {
+                accountId: owner.id,
+                tag: "s_plain_seq_order",
+                encryptionMode: "plain",
+                metadata: JSON.stringify({ v: 1, flavor: "codex" }),
+                agentState: null,
+                dataEncryptionKey: null,
+            },
+            select: { id: true },
+        });
+        // createdAt deliberately disagrees with seq (imported/migrated sessions, clock
+        // skew, out-of-order writes): the transcript's canonical order is seq. Selecting
+        // the newest page by createdAt can silently omit newer transcript rows.
+        const base = Date.now();
+        for (const message of [
+            { seq: 1, createdAt: new Date(base + 30_000), text: "first" },
+            { seq: 2, createdAt: new Date(base + 10_000), text: "second" },
+            { seq: 3, createdAt: new Date(base + 20_000), text: "third" },
+        ]) {
+            await db.sessionMessage.create({
+                data: {
+                    sessionId: session.id,
+                    seq: message.seq,
+                    createdAt: message.createdAt,
+                    messageRole: "user",
+                    content: { t: "plain", v: { role: "user", content: { type: "text", text: message.text } } },
+                },
+            });
+        }
+
+        const token = "tok_plain_seq_order";
+        await db.publicSessionShare.create({
+            data: {
+                sessionId: session.id,
+                createdByUserId: owner.id,
+                tokenHash: createHash("sha256").update(token, "utf8").digest(),
+                encryptedDataKey: null,
+                isConsentRequired: false,
+                maxUses: null,
+                useCount: 0,
+            },
+            select: { id: true },
+        });
+
+        const app = createAuthenticatedTestApp();
+        publicShareRoutes(app as any);
+        await app.ready();
+        try {
+            const metadata = await app.inject({
+                method: "GET",
+                url: `/v1/public-share/${encodeURIComponent(token)}`,
+            });
+            const messages = await app.inject({
+                method: "GET",
+                url: `/v1/public-share/${encodeURIComponent(token)}/messages`,
+            });
+
+            expect(messages.statusCode).toBe(200);
+            const seqs = messages.json().messages.map((message: { seq: number }) => message.seq);
+            expect(seqs).toEqual([3, 2, 1]);
+        } finally {
+            await app.close();
+        }
     });
 
     it("counts a capped public viewer open once and grants its paired message read", async () => {
@@ -456,14 +533,178 @@ describe("publicShareRoutes plaintext sessions (integration)", () => {
         publicShareRoutes(app as any);
         await app.ready();
         try {
+            const root = await app.inject({
+                method: "GET",
+                url: `/v1/public-share/${encodeURIComponent(token)}`,
+            });
             const messages = await app.inject({
                 method: "GET",
                 url: `/v1/public-share/${encodeURIComponent(token)}/messages`,
             });
 
+            expect(root.statusCode).toBe(200);
             expect(messages.statusCode).toBe(200);
             expect(messages.json().messages).toEqual([
                 expect.objectContaining({ seq: 1, messageRole: "event" }),
+            ]);
+        } finally {
+            await app.close();
+        }
+    });
+
+    it("keeps the exact cli-v0.2.1 viewer request valid for unlimited shares while treating literal false consent as false", async () => {
+        const owner = await db.account.create({ data: { publicKey: "pk_owner_strict_consent" }, select: { id: true } });
+        const session = await db.session.create({
+            data: {
+                accountId: owner.id,
+                tag: "s_plain_strict_consent",
+                encryptionMode: "plain",
+                metadata: JSON.stringify({ v: 1, flavor: "codex" }),
+                agentState: null,
+                dataEncryptionKey: null,
+            },
+            select: { id: true },
+        });
+        await db.sessionMessage.create({
+            data: {
+                sessionId: session.id,
+                seq: 1,
+                messageRole: "user",
+                content: { t: "plain", v: { role: "user", content: { type: "text", text: "main" } } },
+            },
+        });
+        const token = "tok_plain_strict_consent";
+        const share = await db.publicSessionShare.create({
+            data: {
+                sessionId: session.id,
+                createdByUserId: owner.id,
+                tokenHash: createHash("sha256").update(token, "utf8").digest(),
+                encryptedDataKey: null,
+                isConsentRequired: true,
+                maxUses: null,
+                useCount: 0,
+            },
+            select: { id: true },
+        });
+
+        const app = createAuthenticatedTestApp();
+        publicShareRoutes(app as any);
+        await app.ready();
+        try {
+            const deniedRoot = await app.inject({
+                method: "GET",
+                url: `/v1/public-share/${encodeURIComponent(token)}?consent=false`,
+            });
+            const deniedMessages = await app.inject({
+                method: "GET",
+                url: `/v1/public-share/${encodeURIComponent(token)}/messages?consent=0`,
+            });
+            expect(deniedRoot.statusCode).toBe(403);
+            expect(deniedMessages.statusCode).toBe(403);
+
+            const root = await app.inject({
+                method: "GET",
+                url: `/v1/public-share/${encodeURIComponent(token)}?consent=true`,
+            });
+            const grant = root.json().messagesAccessToken;
+            expect(root.statusCode).toBe(200);
+            expect(grant).toBeUndefined();
+
+            // Exact cli-v0.2.1 viewer request shape at
+            // b1d15a8a9c241737d1ca9b167459901e6259173a: no messages grant header.
+            const direct = await app.inject({
+                method: "GET",
+                url: `/v1/public-share/${encodeURIComponent(token)}/messages?consent=true`,
+            });
+            expect(direct.statusCode).toBe(200);
+        } finally {
+            await app.close();
+        }
+
+        await expect(db.publicSessionShare.findUnique({
+            where: { id: share.id },
+            select: { useCount: true },
+        })).resolves.toEqual({ useCount: 1 });
+    });
+
+    it.each([
+        { encryptionMode: "plain" as const, suffix: "plain" },
+        { encryptionMode: "e2ee" as const, suffix: "e2ee" },
+    ])("returns only canonical main rows for a $suffix public transcript", async ({ encryptionMode, suffix }) => {
+        const owner = await db.account.create({
+            data: { publicKey: `pk_owner_main_scope_${suffix}` },
+            select: { id: true },
+        });
+        const session = await db.session.create({
+            data: {
+                accountId: owner.id,
+                tag: `s_main_scope_${suffix}`,
+                encryptionMode,
+                metadata: encryptionMode === "plain" ? JSON.stringify({ v: 1 }) : "encrypted-metadata",
+                agentState: null,
+                dataEncryptionKey: encryptionMode === "plain" ? null : Buffer.from([1, 2, 3]),
+            },
+            select: { id: true },
+        });
+        await db.sessionMessage.createMany({
+            data: [
+                {
+                    sessionId: session.id,
+                    seq: 1,
+                    sidechainId: null,
+                    messageRole: "user",
+                    content: encryptionMode === "plain"
+                        ? { t: "plain", v: { role: "user", content: { type: "text", text: "main" } } }
+                        : { t: "encrypted", c: "encrypted-main" },
+                },
+                {
+                    sessionId: session.id,
+                    seq: 2,
+                    sidechainId: "sidechain-1",
+                    messageRole: "agent",
+                    content: encryptionMode === "plain"
+                        ? { t: "plain", v: { role: "agent", content: { type: "text", text: "sidechain" } } }
+                        : { t: "encrypted", c: "encrypted-sidechain" },
+                },
+            ],
+        });
+        const token = `tok_main_scope_${suffix}`;
+        await db.publicSessionShare.create({
+            data: {
+                sessionId: session.id,
+                createdByUserId: owner.id,
+                tokenHash: createHash("sha256").update(token, "utf8").digest(),
+                encryptedDataKey: encryptionMode === "plain"
+                    ? null
+                    : Uint8Array.from(currentPublicShareEncryptedDataKey()),
+                isConsentRequired: false,
+                maxUses: null,
+                useCount: 0,
+            },
+        });
+
+        const app = createAuthenticatedTestApp();
+        publicShareRoutes(app as any);
+        await app.ready();
+        try {
+            const root = await app.inject({
+                method: "GET",
+                url: `/v1/public-share/${encodeURIComponent(token)}`,
+            });
+            const messages = await app.inject({
+                method: "GET",
+                url: `/v1/public-share/${encodeURIComponent(token)}/messages`,
+            });
+
+            expect(root.statusCode).toBe(200);
+            expect(messages.statusCode).toBe(200);
+            expect(messages.json().messages).toEqual([
+                expect.objectContaining({
+                    seq: 1,
+                    content: encryptionMode === "plain"
+                        ? expect.objectContaining({ t: "plain" })
+                        : { t: "encrypted", c: "encrypted-main" },
+                }),
             ]);
         } finally {
             await app.close();

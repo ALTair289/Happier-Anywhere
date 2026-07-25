@@ -7,17 +7,27 @@ import { createHash } from "crypto";
 import { auth } from "@/app/auth/auth";
 import { resolveApiHotEndpointRateLimit } from "@/app/api/utils/apiRateLimitCatalog";
 import { parseSessionMessageRole } from "@/app/session/messageRole/resolveSessionMessageRole";
-import type { Tx } from "@/storage/inTx";
+import { inTx, type Tx } from "@/storage/inTx";
 import * as privacyKit from "privacy-kit";
 import { tryParsePersistedEncryptedDataKeyEnvelopeV1 } from "./encryptedDataKeyValidation";
 import {
     createPublicShareMessagesAccessToken,
-    isPublicShareUseCapped,
     PUBLIC_SHARE_MESSAGES_ACCESS_TOKEN_HEADER,
     requirePublicShareAccessGrantSecret,
     resolvePublicShareUseLimit,
     validatePublicShareMessagesAccessToken,
 } from "./publicShareMessageAccessGrant";
+
+const PublicShareConsentQuerySchema = z.object({
+    consent: z.union([
+        z.literal(true),
+        z.literal(false),
+        z.literal("true"),
+        z.literal("false"),
+        z.literal("0"),
+        z.literal(0),
+    ]).transform((value) => value === true || value === "true").optional(),
+}).optional();
 
 async function getOptionalAuthenticatedUserId(request: any): Promise<string | null> {
     const authHeader = request?.headers?.authorization;
@@ -37,28 +47,31 @@ async function getOptionalAuthenticatedUserId(request: any): Promise<string | nu
 interface PublicShareUseRecord {
     id: string;
     maxUses: number | null;
+    expiresAt: Date | null;
+    isConsentRequired: boolean;
 }
 
-async function consumePublicShareUse(tx: Tx, publicShare: PublicShareUseRecord): Promise<boolean> {
+async function consumePublicShareUse(
+    tx: Tx,
+    publicShare: PublicShareUseRecord,
+    tokenHash: Uint8Array<ArrayBuffer>,
+): Promise<boolean> {
     const useLimit = resolvePublicShareUseLimit(publicShare.maxUses);
     if (useLimit.type === "invalid") return false;
-    if (useLimit.type === "capped") {
-        const consumed = await tx.publicSessionShare.updateMany({
-            where: {
-                id: publicShare.id,
-                maxUses: useLimit.maxUses,
+    const consumed = await tx.publicSessionShare.updateMany({
+        where: {
+            id: publicShare.id,
+            tokenHash,
+            maxUses: publicShare.maxUses,
+            expiresAt: publicShare.expiresAt,
+            isConsentRequired: publicShare.isConsentRequired,
+            ...(useLimit.type === "capped" ? {
                 useCount: { lt: useLimit.maxUses },
-            },
-            data: { useCount: { increment: 1 } },
-        });
-        return consumed.count === 1;
-    }
-
-    await tx.publicSessionShare.update({
-        where: { id: publicShare.id },
+            } : {}),
+        },
         data: { useCount: { increment: 1 } },
     });
-    return true;
+    return consumed.count === 1;
 }
 
 export function registerPublicShareReadRoutes(app: Fastify): void {
@@ -75,15 +88,15 @@ export function registerPublicShareReadRoutes(app: Fastify): void {
             params: z.object({
                 token: z.string()
             }),
-            querystring: z.object({
-                consent: z.coerce.boolean().optional()
-            }).optional()
+            querystring: PublicShareConsentQuerySchema,
         }
     }, async (request, reply) => {
         const { token } = request.params;
         const { consent } = request.query || {};
-        const tokenHash = createHash('sha256').update(token, 'utf8').digest();
-        const tokenHashHex = tokenHash.toString("hex");
+        const tokenHashDigest = createHash('sha256').update(token, 'utf8').digest();
+        const tokenHash: Uint8Array<ArrayBuffer> = new Uint8Array(tokenHashDigest.byteLength);
+        tokenHash.set(tokenHashDigest);
+        const tokenHashHex = tokenHashDigest.toString("hex");
 
         // Optional auth: never call `app.authenticate()` here because it sends a reply on failure,
         // which can cause "Reply was already sent" issues for public routes.
@@ -92,7 +105,7 @@ export function registerPublicShareReadRoutes(app: Fastify): void {
         const userAgent = getUserAgent(request.headers);
 
         // Use transaction to atomically check limits and increment use count
-        const result = await db.$transaction(async (tx) => {
+        const result = await inTx(async (tx) => {
             // Check access and get full public share data
             const publicShare = await tx.publicSessionShare.findUnique({
                 where: { tokenHash },
@@ -103,10 +116,6 @@ export function registerPublicShareReadRoutes(app: Fastify): void {
                     maxUses: true,
                     isConsentRequired: true,
                     encryptedDataKey: true,
-                    blockedUsers: userId ? {
-                        where: { userId },
-                        select: { id: true }
-                    } : undefined
                 }
             });
 
@@ -116,11 +125,6 @@ export function registerPublicShareReadRoutes(app: Fastify): void {
 
             // Check if expired
             if (publicShare.expiresAt && publicShare.expiresAt < new Date()) {
-                return { error: 'Public share not found or expired' };
-            }
-
-            // Check if user is blocked
-            if (userId && publicShare.blockedUsers && publicShare.blockedUsers.length > 0) {
                 return { error: 'Public share not found or expired' };
             }
 
@@ -134,13 +138,29 @@ export function registerPublicShareReadRoutes(app: Fastify): void {
                 };
             }
 
-            if (resolvePublicShareUseLimit(publicShare.maxUses).type === "invalid") {
+            const useLimit = resolvePublicShareUseLimit(publicShare.maxUses);
+            if (useLimit.type === "invalid") {
                 return { error: 'Public share not found or expired' };
             }
 
             const session = await tx.session.findUnique({
                 where: { id: publicShare.sessionId },
-                select: { encryptionMode: true },
+                select: {
+                    id: true,
+                    seq: true,
+                    encryptionMode: true,
+                    createdAt: true,
+                    updatedAt: true,
+                    metadata: true,
+                    metadataVersion: true,
+                    agentState: true,
+                    agentStateVersion: true,
+                    active: true,
+                    lastActiveAt: true,
+                    account: {
+                        select: PROFILE_SELECT,
+                    },
+                },
             });
             if (!session) {
                 return { error: 'Public share not found or expired' };
@@ -155,7 +175,7 @@ export function registerPublicShareReadRoutes(app: Fastify): void {
                 encryptedDataKey = parsedEncryptedDataKey.encryptedDataKey;
             }
 
-            const consumed = await consumePublicShareUse(tx, publicShare);
+            const consumed = await consumePublicShareUse(tx, publicShare, tokenHash);
             if (!consumed) {
                 return { error: 'Public share not found or expired' };
             }
@@ -166,19 +186,19 @@ export function registerPublicShareReadRoutes(app: Fastify): void {
                 publicShare.isConsentRequired ? userAgent : undefined,
                 tx,
             );
-            const messagesAccessToken = isPublicShareUseCapped(publicShare.maxUses)
+            const messagesAccessToken = useLimit.type === "capped"
                 ? createPublicShareMessagesAccessToken({
                     secret: requirePublicShareAccessGrantSecret(),
                     publicShareId: publicShare.id,
                     sessionId: publicShare.sessionId,
                     tokenHashHex,
                 })
-                : null;
+                : undefined;
 
             return {
                 success: true,
                 publicShareId: publicShare.id,
-                sessionId: publicShare.sessionId,
+                session,
                 isConsentRequired: publicShare.isConsentRequired,
                 encryptedDataKey,
                 messagesAccessToken,
@@ -208,31 +228,7 @@ export function registerPublicShareReadRoutes(app: Fastify): void {
             return reply.code(404).send({ error: result.error });
         }
 
-        // Get session info with owner profile
-        const session = await db.session.findUnique({
-            where: { id: result.sessionId },
-            select: {
-                id: true,
-                seq: true,
-                encryptionMode: true,
-                createdAt: true,
-                updatedAt: true,
-                metadata: true,
-                metadataVersion: true,
-                agentState: true,
-                agentStateVersion: true,
-                active: true,
-                lastActiveAt: true,
-                account: {
-                    select: PROFILE_SELECT
-                }
-            }
-        });
-
-        if (!session) {
-            return reply.code(404).send({ error: 'Session not found' });
-        }
-
+        const session = result.session;
         const sessionEncryptionMode: "e2ee" | "plain" = session.encryptionMode === "plain" ? "plain" : "e2ee";
         const encryptedDataKeyB64 =
             sessionEncryptionMode === "plain"
@@ -277,9 +273,7 @@ export function registerPublicShareReadRoutes(app: Fastify): void {
             params: z.object({
                 token: z.string()
             }),
-            querystring: z.object({
-                consent: z.coerce.boolean().optional()
-            }).optional()
+            querystring: PublicShareConsentQuerySchema,
         }
     }, async (request, reply) => {
         const { token } = request.params;
@@ -295,7 +289,7 @@ export function registerPublicShareReadRoutes(app: Fastify): void {
         // which can cause "Reply was already sent" issues for public routes.
         const userId = await getOptionalAuthenticatedUserId(request);
 
-        const accessResult = await db.$transaction(async (tx) => {
+        const accessResult = await inTx(async (tx) => {
             const publicShare = await tx.publicSessionShare.findUnique({
                 where: { tokenHash },
                 select: {
@@ -305,10 +299,6 @@ export function registerPublicShareReadRoutes(app: Fastify): void {
                     maxUses: true,
                     isConsentRequired: true,
                     encryptedDataKey: true,
-                    blockedUsers: userId ? {
-                        where: { userId },
-                        select: { id: true }
-                    } : undefined
                 }
             });
 
@@ -320,10 +310,6 @@ export function registerPublicShareReadRoutes(app: Fastify): void {
                 return { error: 'Public share not found or expired' };
             }
 
-            if (userId && publicShare.blockedUsers && publicShare.blockedUsers.length > 0) {
-                return { error: 'Public share not found or expired' };
-            }
-
             if (publicShare.isConsentRequired && !consent) {
                 return {
                     error: 'Consent required',
@@ -332,11 +318,12 @@ export function registerPublicShareReadRoutes(app: Fastify): void {
                 };
             }
 
-            if (resolvePublicShareUseLimit(publicShare.maxUses).type === "invalid") {
+            const useLimit = resolvePublicShareUseLimit(publicShare.maxUses);
+            if (useLimit.type === "invalid") {
                 return { error: 'Public share not found or expired' };
             }
 
-            if (isPublicShareUseCapped(publicShare.maxUses)) {
+            if (useLimit.type === "capped") {
                 const hasMessageAccess = validatePublicShareMessagesAccessToken({
                     secret: requirePublicShareAccessGrantSecret(),
                     token: messagesAccessToken,
@@ -364,7 +351,26 @@ export function registerPublicShareReadRoutes(app: Fastify): void {
                 }
             }
 
-            return { success: true, sessionId: publicShare.sessionId };
+            const messages = await tx.sessionMessage.findMany({
+                where: { sessionId: publicShare.sessionId, sidechainId: null },
+                // Canonical transcript order is seq, not wall-clock: createdAt can
+                // disagree with seq (imported/migrated sessions, clock skew, out-of-order
+                // writes), and selecting the newest page by createdAt silently omits
+                // newer transcript rows under the page cap.
+                orderBy: { seq: 'desc' },
+                take: 150,
+                select: {
+                    id: true,
+                    seq: true,
+                    localId: true,
+                    messageRole: true,
+                    content: true,
+                    createdAt: true,
+                    updatedAt: true,
+                },
+            });
+
+            return { success: true, messages };
         });
 
         if ('error' in accessResult) {
@@ -388,23 +394,8 @@ export function registerPublicShareReadRoutes(app: Fastify): void {
             return reply.code(404).send({ error: accessResult.error });
         }
 
-        const messages = await db.sessionMessage.findMany({
-            where: { sessionId: accessResult.sessionId },
-            orderBy: { createdAt: 'desc' },
-            take: 150,
-            select: {
-                id: true,
-                seq: true,
-                localId: true,
-                messageRole: true,
-                content: true,
-                createdAt: true,
-                updatedAt: true
-            }
-        });
-
         return reply.send({
-            messages: messages.map((v) => {
+            messages: accessResult.messages.map((v) => {
                 const messageRole = parseSessionMessageRole(v.messageRole);
                 return {
                     id: v.id,

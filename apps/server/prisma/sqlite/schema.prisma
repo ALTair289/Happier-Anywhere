@@ -76,7 +76,6 @@ model Account {
     SessionShareAccessLogs SessionShareAccessLog[]    @relation("SessionShareAccessLogs")
     PublicSessionShares    PublicSessionShare[]       @relation("PublicSessionShares")
     PublicShareAccessLogs  PublicShareAccessLog[]     @relation("PublicShareAccessLogs")
-    PublicShareBlockedUsers PublicShareBlockedUser[]  @relation("PublicShareBlockedUsers")
     AccountChanges         AccountChange[]
     AccountSettingsSnapshots AccountSettingsSnapshot[]
     SessionPendingMessage  SessionPendingMessage[]
@@ -1183,7 +1182,6 @@ model PublicSessionShare {
     createdAt         DateTime                  @default(now())
     updatedAt         DateTime                  @updatedAt
     accessLogs        PublicShareAccessLog[]
-    blockedUsers      PublicShareBlockedUser[]
 
     @@index([tokenHash])
     @@index([sessionId])
@@ -1204,19 +1202,4 @@ model PublicShareAccessLog {
     @@index([publicShareId])
     @@index([userId])
     @@index([accessedAt])
-}
-
-/// Blocked users for public session shares
-model PublicShareBlockedUser {
-    id            String             @id @default(cuid())
-    publicShareId String
-    publicShare   PublicSessionShare @relation(fields: [publicShareId], references: [id], onDelete: Cascade)
-    userId        String
-    user          Account            @relation("PublicShareBlockedUsers", fields: [userId], references: [id])
-    blockedAt     DateTime           @default(now())
-    reason        String?
-
-    @@unique([publicShareId, userId])
-    @@index([publicShareId])
-    @@index([userId])
 }
