@@ -39,7 +39,6 @@ yarn-error.*
 .yarn-global/
 
 # local build/log artifacts
-apps/cli/.dist.hstack-backup/
 apps/stack/resume-invocations.log
 apps/stack/*.tgz
 packages/relay-server/*.tgz
@@ -95,6 +94,7 @@ notes/
 
 # Android build artifacts
 packages/*/android/build/
+packages/*/android/.cxx/
 /.tmp
 /packages/tests/playwright-report/
 /packages/tests/test-results/
@@ -115,6 +115,7 @@ _.env.pipeline.production.local
 /.fallow/
 /.reviews/
 /.antigravitycli/
+/subagents/dev-plugin-projection-runtime-closure/
 
 # Local QA screenshots
 /authoring-qa-*.png
@@ -136,7 +137,6 @@ _.env.pipeline.production.local
 /.codex-tmp
 /apps/stack/output
 
-/cli/.dist*
 /packages/cli-common/.dist*
 /.playwright-mcp
 /.clawpatch
