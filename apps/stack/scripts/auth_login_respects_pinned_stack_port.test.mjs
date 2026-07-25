@@ -5,7 +5,9 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import net from 'node:net';
+
+import { sanitizeStackTestRunnerEnv } from './utils/test/test_env.mjs';
+import { terminateDetachedTestProcess } from './testkit/core/spawn_test_process.mjs';
 
 function runNode(args, { cwd, env } = {}) {
   return new Promise((resolve, reject) => {
@@ -28,19 +30,58 @@ async function ensureMinimalMonorepo({ monoRoot }) {
   await writeFile(join(monoRoot, 'apps', 'server', 'package.json'), '{}\n', 'utf-8');
 }
 
-async function pickFreeLocalPort() {
-  const srv = net.createServer();
-  await new Promise((resolvePromise, rejectPromise) => {
-    srv.once('error', rejectPromise);
-    srv.listen({ host: '127.0.0.1', port: 0 }, () => resolvePromise());
+async function spawnStackOwnedHealthServer({ stackName, envPath, env }) {
+  const child = spawn(process.execPath, ['-e', `
+    const { createServer } = require('node:http');
+    const server = createServer((req, res) => {
+      if (req.url === '/health') {
+        res.statusCode = 200;
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({ service: 'happier-server', status: 'ok' }));
+        return;
+      }
+      res.statusCode = 404;
+      res.end('not found');
+    });
+    server.listen(0, '127.0.0.1', () => process.stdout.write(String(server.address().port) + '\\n'));
+  `], {
+    detached: true,
+    env: {
+      ...env,
+      HAPPIER_STACK_STACK: stackName,
+      HAPPIER_STACK_ENV_FILE: envPath,
+      HAPPIER_STACK_PROCESS_KIND: 'server',
+    },
+    stdio: ['ignore', 'pipe', 'ignore'],
   });
-  const addr = srv.address();
-  const port = typeof addr === 'object' && addr ? Number(addr.port) : NaN;
-  await new Promise((resolvePromise) => srv.close(() => resolvePromise()));
-  if (!Number.isFinite(port) || port <= 0) {
-    throw new Error(`failed to pick a free local port (got: ${String(port)})`);
+  assert.ok(child.pid && child.stdout, 'expected stack-owned health server process');
+  try {
+    const port = await new Promise((resolve, reject) => {
+    let output = '';
+    const timer = setTimeout(() => reject(new Error('timed out waiting for stack-owned health server')), 10_000);
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      output += chunk;
+      const parsed = Number(output.split(/\r?\n/).find(Boolean));
+      if (Number.isInteger(parsed) && parsed > 0) {
+        clearTimeout(timer);
+        resolve(parsed);
+      }
+    });
+    child.once('exit', (code, signal) => {
+      clearTimeout(timer);
+      reject(new Error(`stack-owned health server exited early (code=${code}, signal=${signal})`));
+    });
+    });
+    return { child, port };
+  } catch (error) {
+    await terminateDetachedTestProcess(child);
+    throw error;
   }
-  return port;
+}
+
+async function stopChild(child) {
+  await terminateDetachedTestProcess(child);
 }
 
 test('hstack stack auth <stack> login --print prefers pinned env port over stale runtime port', async () => {
@@ -80,7 +121,7 @@ test('hstack stack auth <stack> login --print prefers pinned env port over stale
     );
 
     const env = {
-      ...process.env,
+      ...sanitizeStackTestRunnerEnv(process.env),
       HAPPIER_STACK_STORAGE_DIR: storageDir,
     };
 
@@ -131,7 +172,7 @@ test('hstack stack auth <stack> login --print uses last runtime port when stack 
     );
 
     const env = {
-      ...process.env,
+      ...sanitizeStackTestRunnerEnv(process.env),
       HAPPIER_STACK_STORAGE_DIR: storageDir,
     };
 
@@ -152,6 +193,7 @@ test('hstack stack dev <stack> --json reuses recorded runtime port for ephemeral
   const rootDir = dirname(scriptsDir);
 
   const tmp = await mkdtemp(join(tmpdir(), 'hstack-stack-ephemeral-reuse-'));
+  let ownedServer = null;
   try {
     const storageDir = join(tmp, 'storage');
     const monoRoot = join(tmp, 'happier');
@@ -175,15 +217,23 @@ test('hstack stack dev <stack> --json reuses recorded runtime port for ephemeral
       'utf-8'
     );
 
-    const runtimePort = await pickFreeLocalPort();
+    const isolatedEnv = sanitizeStackTestRunnerEnv(process.env);
+    ownedServer = await spawnStackOwnedHealthServer({ stackName, envPath, env: isolatedEnv });
+    const runtimePort = ownedServer.port;
     await writeFile(
       join(stackDir, 'stack.runtime.json'),
-      JSON.stringify({ version: 1, ownerPid: 0, ports: { server: runtimePort } }, null, 2) + '\n',
+      JSON.stringify({
+        version: 1,
+        stackName,
+        ownerPid: 0,
+        ports: { server: runtimePort },
+        processes: { serverPid: ownedServer.child.pid },
+      }, null, 2) + '\n',
       'utf-8'
     );
 
     const env = {
-      ...process.env,
+      ...isolatedEnv,
       HAPPIER_STACK_STORAGE_DIR: storageDir,
     };
 
@@ -195,6 +245,7 @@ test('hstack stack dev <stack> --json reuses recorded runtime port for ephemeral
     const parsed = JSON.parse(res.stdout.trim());
     assert.equal(parsed?.serverPort, runtimePort);
   } finally {
+    await stopChild(ownedServer?.child);
     await rm(tmp, { recursive: true, force: true });
   }
 });

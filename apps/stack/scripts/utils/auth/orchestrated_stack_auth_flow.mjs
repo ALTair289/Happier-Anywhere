@@ -18,6 +18,10 @@ import {
 import { checkDaemonStatePingAware, startLocalDaemonWithAuth } from '../../daemon.mjs';
 import { isTty } from '../cli/wizard.mjs';
 import { resolveStackRuntimeLaunchContext } from '../../runtime/launch/resolveStackRuntimeLaunchContext.mjs';
+import {
+  resolveCliRuntimeLaunchProvenance,
+  resolveCliRuntimeLaunchSpec,
+} from '../../runtime/launch/resolveCliRuntimeLaunchSpec.mjs';
 
 function appendCauseText(baseMessage, cause) {
   const msg = String(baseMessage ?? '').trim();
@@ -354,6 +358,20 @@ export async function startDaemonPostAuth({
   webappUrl = '',
 } = {}) {
   const name = String(stackName ?? '').trim() || 'main';
+  const runtimeStatePath = getStackRuntimeStatePath(name);
+  const runtimeState = await readStackRuntimeStateFile(runtimeStatePath).catch(() => null);
+  const lifecycleOwnerPid = Number(runtimeState?.ownerPid);
+  if (Number.isFinite(lifecycleOwnerPid) && lifecycleOwnerPid > 1 && isPidAlive(lifecycleOwnerPid)) {
+    const runtimePort = Number(runtimeState?.ports?.server);
+    return {
+      ok: true,
+      status: 'delegated_to_lifecycle_owner',
+      ownerPid: lifecycleOwnerPid,
+      ...(Number.isFinite(runtimePort) && runtimePort > 0
+        ? { internalServerUrl: `http://127.0.0.1:${runtimePort}` }
+        : {}),
+    };
+  }
   const serverPort = await resolveServerPortForPostAuthDaemonStart({ stackName: name, env });
 
   const { envPath, baseDir } = resolveStackEnvPath(name, env);
@@ -363,7 +381,13 @@ export async function startDaemonPostAuth({
   const cliHomeDir =
     (mergedEnv.HAPPIER_STACK_CLI_HOME_DIR ?? '').toString().trim() ||
     join(baseDir, 'cli');
-  const cliBin = await resolveStackAuthCliExecutable({ rootDir, env: mergedEnv });
+  const runtimeLaunchContext = await resolveStackRuntimeLaunchContext({ argv: [], env: mergedEnv });
+  const cliLaunchSpec = runtimeLaunchContext.snapshot
+    ? resolveCliRuntimeLaunchSpec({ snapshot: runtimeLaunchContext.snapshot })
+    : null;
+  const runtimeProvenance = resolveCliRuntimeLaunchProvenance(cliLaunchSpec);
+  const cliBin = cliLaunchSpec?.command
+    || await resolveStackAuthCliExecutable({ rootDir, env: mergedEnv });
 
   const internalServerUrl = `http://127.0.0.1:${serverPort}`;
   const explicitWebappUrl = String(webappUrl ?? '').trim();
@@ -377,13 +401,19 @@ export async function startDaemonPostAuth({
 
   await startLocalDaemonWithAuth({
     cliBin,
+    cliEntrypoint: cliLaunchSpec?.entrypoint ?? '',
+    cliNodeEntrypoint: cliLaunchSpec?.nodeEntrypoint ?? '',
+    cliCommand: cliLaunchSpec?.command ?? '',
+    cliCommandArgs: cliLaunchSpec?.args ?? [],
     cliHomeDir,
     internalServerUrl,
     publicServerUrl,
+    runtimeStatePath,
     isShuttingDown: () => false,
     forceRestart: Boolean(forceRestart),
     env: mergedEnv,
     stackName: name,
+    ...runtimeProvenance,
   });
 
   // Verify (best-effort): daemon wrote state.

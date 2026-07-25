@@ -57,7 +57,7 @@ test('resolveRunnerLogPathFromRuntime returns runtime logs.runner path', async (
   }
 });
 
-test('startDaemonPostAuth throws a clear error when runtime server port is missing', async () => {
+test('startDaemonPostAuth delegates before resolving a missing runtime server port for a live owner', async () => {
   const tmp = await mkdtemp(join(tmpdir(), 'hstack-auth-flow-'));
   try {
     const storageDir = join(tmp, 'storage');
@@ -84,12 +84,48 @@ test('startDaemonPostAuth throws a clear error when runtime server port is missi
     const prev = process.env[envKey];
     process.env[envKey] = storageDir;
     try {
-      await assert.rejects(
-        () => startDaemonPostAuth({ rootDir: tmp, stackName, env: process.env, forceRestart: true }),
-        /could not resolve server port/i
-      );
+      const result = await startDaemonPostAuth({
+        rootDir: tmp,
+        stackName,
+        env: { ...process.env, HAPPIER_STACK_SERVER_PORT: '' },
+        forceRestart: true,
+      });
+      assert.equal(result.status, 'delegated_to_lifecycle_owner');
+      assert.equal(result.ownerPid, process.pid);
     } finally {
       restoreEnvVar(envKey, prev);
+    }
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('startDaemonPostAuth still rejects a missing server port when no lifecycle owner is live', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'hstack-auth-flow-no-owner-'));
+  try {
+    const storageDir = join(tmp, 'storage');
+    const stackName = 's2-no-owner';
+    const baseDir = join(storageDir, stackName);
+    await mkdir(baseDir, { recursive: true });
+    await writeFile(join(baseDir, 'stack.runtime.json'), JSON.stringify({
+      version: 1,
+      stackName,
+      ownerPid: 999_999_999,
+      ports: {},
+    }), 'utf-8');
+    const prev = process.env.HAPPIER_STACK_STORAGE_DIR;
+    process.env.HAPPIER_STACK_STORAGE_DIR = storageDir;
+    try {
+      await assert.rejects(
+        () => startDaemonPostAuth({
+          rootDir: tmp,
+          stackName,
+          env: { ...process.env, HAPPIER_STACK_SERVER_PORT: '' },
+        }),
+        /could not resolve server port/i,
+      );
+    } finally {
+      restoreEnvVar('HAPPIER_STACK_STORAGE_DIR', prev);
     }
   } finally {
     await rm(tmp, { recursive: true, force: true });

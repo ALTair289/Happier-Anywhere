@@ -73,7 +73,7 @@ async function validateTokenAgainstServer({ token, serverUrl, timeoutMs }) {
  * Ensures the active server-scoped `access.key` file is usable for API calls.
  *
  * Context:
- * - stack daemons often force a stable `HAPPIER_ACTIVE_SERVER_ID` (e.g. stack_<name>__id_default)
+ * - stack daemons may use a stable server profile id while older/auth-specific flows use a URL/profile id
  * - interactive logins may have written credentials under the url-hash server id (env_<hash>)
  * - if the stable-scoped credentials are missing or stale, the daemon will fail to register the machine (401)
  *

@@ -1652,6 +1652,8 @@ async function cmdStatus({ json }) {
       ? `✅ daemon: running (pid=${daemon.pid})`
       : daemon.status === 'starting'
         ? `⏳ daemon: starting (pid=${daemon.pid})`
+        : daemon.status === 'unreachable'
+          ? `⚠️ daemon: process alive but control unavailable (pid=${daemon.pid})`
         : daemon.status === 'stale_state'
           ? `⚠️ daemon: stale state file (pid=${daemon.pid} not running)`
           : daemon.status === 'stale_lock'
@@ -1687,7 +1689,7 @@ async function cmdStatus({ json }) {
     console.log(`  ↪ this stack does not appear to be running. Start it with: ${startHint}`);
     return;
   }
-  if (auth.ok && daemon.status !== 'running') {
+  if (auth.ok && daemon.status !== 'running' && daemon.status !== 'unreachable') {
     console.log(`  ↪ daemon is not running for this stack. If you expected it to be running, try: hstack doctor`);
   }
 }

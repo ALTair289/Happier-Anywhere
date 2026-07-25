@@ -1,13 +1,25 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { createServer } from 'node:net';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { resolveStackCredentialPaths } from './utils/auth/credentials_paths.mjs';
-import { pickNextFreeTcpPort } from './utils/net/ports.mjs';
+
+async function reserveSourceServerIdentityPort(t) {
+  const server = createServer();
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  return address.port;
+}
 
 function runNode(args, { cwd, env }) {
   return new Promise((resolve, reject) => {
@@ -21,7 +33,7 @@ function runNode(args, { cwd, env }) {
   });
 }
 
-test('hstack stack new copies server-scoped credentials from source stack', async () => {
+test('hstack stack new copies server-scoped credentials from source stack', async (t) => {
   const scriptsDir = dirname(fileURLToPath(import.meta.url));
   const rootDir = dirname(scriptsDir);
   const tmp = await mkdtemp(join(tmpdir(), 'hstack-stack-copy-auth-server-scoped-'));
@@ -32,7 +44,7 @@ test('hstack stack new copies server-scoped credentials from source stack', asyn
   const sandboxDir = join(tmp, 'sandbox');
   const sourceStack = 'seed-auth';
   const targetStack = 'exp-copy-auth';
-  const serverPort = await pickNextFreeTcpPort(4101, { host: '127.0.0.1' });
+  const serverPort = await reserveSourceServerIdentityPort(t);
   const serverUrl = `http://127.0.0.1:${serverPort}`;
 
   const monoRoot = join(workspaceDir, 'tmp', 'leeroy-wip');
@@ -81,8 +93,6 @@ test('hstack stack new copies server-scoped credentials from source stack', asyn
       `--repo=${monoRoot}`,
       '--server=happier-server-light',
       `--copy-auth-from=${sourceStack}`,
-      `--port=${serverPort}`,
-      '--force-port',
       '--json',
     ],
     { cwd: rootDir, env }
@@ -97,11 +107,12 @@ test('hstack stack new copies server-scoped credentials from source stack', asyn
   const targetEnvRaw = await readFile(join(storageDir, targetStack, 'env'), 'utf-8');
   assert.match(targetEnvRaw, new RegExp(`^HAPPIER_STACK_AUTH_SEED_FROM=${sourceStack}$`, 'm'));
   assert.match(targetEnvRaw, /^HAPPIER_STACK_AUTO_AUTH_SEED=1$/m);
+  assert.doesNotMatch(targetEnvRaw, /^HAPPIER_STACK_SERVER_PORT=/m);
 
   await rm(tmp, { recursive: true, force: true });
 });
 
-test('hstack stack new copy-auth prefers source server-scoped credentials over unrelated legacy access.key', async () => {
+test('hstack stack new copy-auth prefers source server-scoped credentials over unrelated legacy access.key', async (t) => {
   const scriptsDir = dirname(fileURLToPath(import.meta.url));
   const rootDir = dirname(scriptsDir);
   const tmp = await mkdtemp(join(tmpdir(), 'hstack-stack-copy-auth-prefer-server-scoped-'));
@@ -112,7 +123,7 @@ test('hstack stack new copy-auth prefers source server-scoped credentials over u
   const sandboxDir = join(tmp, 'sandbox');
   const sourceStack = 'seed-auth';
   const targetStack = 'exp-copy-auth';
-  const serverPort = await pickNextFreeTcpPort(4101, { host: '127.0.0.1' });
+  const serverPort = await reserveSourceServerIdentityPort(t);
   const serverUrl = `http://127.0.0.1:${serverPort}`;
 
   const monoRoot = join(workspaceDir, 'tmp', 'leeroy-wip');
@@ -162,8 +173,6 @@ test('hstack stack new copy-auth prefers source server-scoped credentials over u
       `--repo=${monoRoot}`,
       '--server=happier-server-light',
       `--copy-auth-from=${sourceStack}`,
-      `--port=${serverPort}`,
-      '--force-port',
       '--json',
     ],
     { cwd: rootDir, env }
@@ -179,7 +188,7 @@ test('hstack stack new copy-auth prefers source server-scoped credentials over u
   await rm(tmp, { recursive: true, force: true });
 });
 
-test('hstack stack new copy-auth copies stable-scope credentials from source stack', async () => {
+test('hstack stack new copy-auth copies stable-scope credentials from source stack', async (t) => {
   const scriptsDir = dirname(fileURLToPath(import.meta.url));
   const rootDir = dirname(scriptsDir);
   const tmp = await mkdtemp(join(tmpdir(), 'hstack-stack-copy-auth-stable-scope-'));
@@ -190,7 +199,7 @@ test('hstack stack new copy-auth copies stable-scope credentials from source sta
   const sandboxDir = join(tmp, 'sandbox');
   const sourceStack = 'seed-auth';
   const targetStack = 'exp-copy-auth';
-  const serverPort = await pickNextFreeTcpPort(4101, { host: '127.0.0.1' });
+  const serverPort = await reserveSourceServerIdentityPort(t);
   const serverUrl = `http://127.0.0.1:${serverPort}`;
 
   const monoRoot = join(workspaceDir, 'tmp', 'leeroy-wip');
@@ -237,8 +246,6 @@ test('hstack stack new copy-auth copies stable-scope credentials from source sta
       `--repo=${monoRoot}`,
       '--server=happier-server-light',
       `--copy-auth-from=${sourceStack}`,
-      `--port=${serverPort}`,
-      '--force-port',
       '--json',
     ],
     { cwd: rootDir, env }

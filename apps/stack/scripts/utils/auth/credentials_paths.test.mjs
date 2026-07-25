@@ -17,6 +17,7 @@ function neutralStackEnv(overrides = {}) {
   const {
     HAPPIER_ACTIVE_SERVER_ID,
     HAPPY_ACTIVE_SERVER_ID,
+    HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID,
     ...baseEnv
   } = process.env;
   return { ...baseEnv, ...overrides };
@@ -219,20 +220,21 @@ test('resolveStackCredentialPaths prefers a matching explicit active server id w
   assert.ok(out.paths.includes(join(dir, 'servers', defaultServerId, 'access.key')) === false);
 });
 
-test('resolveStackDaemonStatePaths prefers the matching cli settings server id over a leaked stable scope alias', async () => {
+test('resolveStackDaemonStatePaths ignores matching cli settings profiles and keeps the stable lifecycle scope canonical', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'happy-stacks-daemon-paths-settings-'));
   const serverUrl = 'http://127.0.0.1:3012';
-  const canonicalServerId = 'stack-dev-profile';
+  const settingsServerId = 'stack-dev-profile';
+  const lifecycleScopeId = 'stack_dev__id_default';
   await writeFile(
     join(dir, 'settings.json'),
     JSON.stringify(
       {
         schemaVersion: 6,
-        activeServerId: canonicalServerId,
+        activeServerId: settingsServerId,
         servers: {
-          [canonicalServerId]: {
-            id: canonicalServerId,
-            name: canonicalServerId,
+          [settingsServerId]: {
+            id: settingsServerId,
+            name: settingsServerId,
             serverUrl,
             webappUrl: 'http://localhost:3012',
             createdAt: 1,
@@ -250,64 +252,70 @@ test('resolveStackDaemonStatePaths prefers the matching cli settings server id o
   const out = resolveStackDaemonStatePaths({
     cliHomeDir: dir,
     serverUrl,
-    env: { HAPPIER_ACTIVE_SERVER_ID: 'stack_dev__id_default' },
+    env: { HAPPIER_ACTIVE_SERVER_ID: lifecycleScopeId },
   });
 
-  assert.equal(out.activeServerId, canonicalServerId);
-  assert.equal(out.serverScopedStatePath, join(dir, 'servers', canonicalServerId, 'daemon.state.json'));
-  assert.ok(out.pairs.some((pair) => pair.statePath === join(dir, 'servers', 'stack_dev__id_default', 'daemon.state.json')));
+  assert.equal(out.activeServerId, lifecycleScopeId);
+  assert.equal(out.serverScopedStatePath, join(dir, 'servers', lifecycleScopeId, 'daemon.state.json'));
+  assert.equal(
+    out.pairs.some((pair) => pair.statePath === join(dir, 'servers', settingsServerId, 'daemon.state.json')),
+    false,
+  );
 });
 
-test('resolveStackDaemonStatePaths prefers a matching explicit active server id when settings profiles share the URL', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'happy-stacks-daemon-paths-settings-explicit-'));
-  const serverUrl = 'http://127.0.0.1:52753';
-  const defaultServerId = 'stack_repo-remote-dev-d72117acdb__id_default';
-  const explicitServerId = 'android-keyboard-qa';
+test('resolveStackDaemonStatePaths uses the daemon lifecycle scope without changing credential profile selection', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'happy-stacks-daemon-lifecycle-scope-'));
+  const serverUrl = 'http://127.0.0.1:3012';
+  const settingsServerId = 'android-keyboard-qa';
+  const lifecycleScopeId = 'stack_repo-remote-dev-d72117acdb__id_default';
   await writeFile(
     join(dir, 'settings.json'),
-    JSON.stringify(
-      {
-        schemaVersion: 6,
-        activeServerId: defaultServerId,
-        servers: {
-          [defaultServerId]: {
-            id: defaultServerId,
-            name: 'Default',
-            serverUrl,
-            localServerUrl: serverUrl,
-            webappUrl: 'http://localhost:52753',
-            createdAt: 1,
-            updatedAt: 1,
-            lastUsedAt: 1,
-          },
-          [explicitServerId]: {
-            id: explicitServerId,
-            name: 'Android keyboard QA',
-            serverUrl: 'http://10.0.2.2:52753',
-            localServerUrl: serverUrl,
-            webappUrl: 'http://10.0.2.2:52753',
-            createdAt: 1,
-            updatedAt: 1,
-            lastUsedAt: 1,
-          },
+    JSON.stringify({
+      schemaVersion: 6,
+      activeServerId: settingsServerId,
+      servers: {
+        [settingsServerId]: {
+          id: settingsServerId,
+          name: 'Android keyboard QA',
+          serverUrl,
+          webappUrl: 'http://localhost:3012',
+          createdAt: 1,
+          updatedAt: 1,
+          lastUsedAt: 1,
         },
       },
-      null,
-      2,
-    ) + '\n',
+    }) + '\n',
     'utf-8',
   );
+  const env = {
+    HAPPIER_ACTIVE_SERVER_ID: settingsServerId,
+    HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID: lifecycleScopeId,
+  };
 
+  const credentialPaths = resolveStackCredentialPaths({ cliHomeDir: dir, serverUrl, env });
+  const daemonPaths = resolveStackDaemonStatePaths({ cliHomeDir: dir, serverUrl, env });
+
+  assert.equal(credentialPaths.activeServerId, settingsServerId);
+  assert.equal(credentialPaths.serverScopedPath, join(dir, 'servers', settingsServerId, 'access.key'));
+  assert.equal(daemonPaths.activeServerId, lifecycleScopeId);
+  assert.equal(daemonPaths.serverScopedStatePath, join(dir, 'servers', lifecycleScopeId, 'daemon.state.json'));
+  assert.equal(daemonPaths.serverScopedLockPath, join(dir, 'servers', lifecycleScopeId, 'daemon.state.json.lock'));
+});
+
+test('resolveStackDaemonStatePaths rejects an unsafe daemon lifecycle scope instead of selecting a default directory', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'happy-stacks-daemon-lifecycle-unsafe-'));
   const out = resolveStackDaemonStatePaths({
     cliHomeDir: dir,
-    serverUrl,
-    env: { HAPPIER_ACTIVE_SERVER_ID: explicitServerId },
+    serverUrl: 'http://127.0.0.1:3014',
+    env: {
+      HAPPIER_ACTIVE_SERVER_ID: 'safe-profile',
+      HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID: '../../escape',
+    },
   });
 
-  assert.equal(out.activeServerId, explicitServerId);
-  assert.equal(out.settingsServerId, explicitServerId);
-  assert.equal(out.serverScopedStatePath, join(dir, 'servers', explicitServerId, 'daemon.state.json'));
-  assert.ok(out.pairs.some((pair) => pair.statePath === join(dir, 'servers', defaultServerId, 'daemon.state.json')) === false);
+  assert.equal(out.daemonLifecycleScopeId, '');
+  assert.equal(out.activeServerId, 'safe-profile');
+  assert.equal(out.serverScopedStatePath, join(dir, 'servers', 'safe-profile', 'daemon.state.json'));
 });
 
 test('findExistingStackCredentialPath falls back to url-hash path when stable scope path is empty', async () => {
@@ -422,6 +430,28 @@ test('resolvePreferredStackDaemonStatePaths does not fall back to another server
     cliHomeDir: dir,
     serverUrl,
     env: { HAPPIER_ACTIVE_SERVER_ID: 'stack_dev2__id_default' },
+  });
+
+  assert.equal(preferred.statePath, paths.serverScopedStatePath);
+  assert.equal(preferred.lockPath, paths.serverScopedLockPath);
+});
+
+test('resolvePreferredStackDaemonStatePaths does not scan other server scopes when lifecycle scope is explicit', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'happy-stacks-daemon-explicit-lifecycle-isolated-'));
+  const lifecycleScopeId = 'stack_current__id_account-b';
+  const paths = resolveStackDaemonStatePaths({
+    cliHomeDir: dir,
+    serverUrl: '',
+    env: { HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID: lifecycleScopeId },
+  });
+  const otherServerDir = join(dir, 'servers', 'stack_other__id_account-a');
+  await mkdir(otherServerDir, { recursive: true });
+  await writeFile(join(otherServerDir, 'daemon.state.json'), '{"pid":3}\n', 'utf-8');
+
+  const preferred = resolvePreferredStackDaemonStatePaths({
+    cliHomeDir: dir,
+    serverUrl: '',
+    env: { HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID: lifecycleScopeId },
   });
 
   assert.equal(preferred.statePath, paths.serverScopedStatePath);
