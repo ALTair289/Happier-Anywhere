@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { ensureEnvFilePruned, ensureEnvFileUpdated } from './env_file.mjs';
+import { compareAndSetEnvFileValue, ensureEnvFilePruned, ensureEnvFileUpdated } from './env_file.mjs';
 
 async function withTempRoot(t) {
   const dir = await mkdtemp(join(tmpdir(), 'happy-stacks-env-file-'));
@@ -46,4 +46,21 @@ test('ensureEnvFilePruned removes a key but keeps comments/blank lines', async (
 
   const next = await readFile(envPath, 'utf-8');
   assert.equal(next, '# header\n\nBAZ=qux\n');
+});
+
+test('compareAndSetEnvFileValue preserves a successor value and unrelated edits', async (t) => {
+  const dir = await withTempRoot(t);
+  const envPath = join(dir, 'env');
+  await writeFile(envPath, 'EXPO_PORT=8081\nOTHER=before\n', 'utf-8');
+  await ensureEnvFileUpdated({
+    envPath,
+    updates: [{ key: 'EXPO_PORT', value: '9090' }, { key: 'CONCURRENT', value: 'kept' }],
+  });
+  assert.equal(await compareAndSetEnvFileValue({
+    envPath,
+    key: 'EXPO_PORT',
+    expectedValue: '8081',
+    nextValue: null,
+  }), false);
+  assert.equal(await readFile(envPath, 'utf-8'), 'EXPO_PORT=9090\nOTHER=before\n\nCONCURRENT=kept\n');
 });

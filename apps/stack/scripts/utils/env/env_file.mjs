@@ -1,15 +1,43 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
-import { pathExists } from '../fs/fs.mjs';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { withJsonOwnerFileLock } from '../proc/jsonOwnerFileLock.mjs';
+
+function envFileLockPath(envPath) {
+  return `${envPath}.owner.lock`;
+}
+
+async function withEnvFileLock(envPath, fn) {
+  return await withJsonOwnerFileLock(fn, {
+    lockPath: envFileLockPath(envPath),
+    timeoutMs: 30_000,
+    pollIntervalMs: 50,
+    staleAfterMs: 60_000,
+    errorLabel: 'stack env file update',
+  });
+}
 
 export async function ensureEnvFileUpdated({ envPath, updates }) {
   if (!updates.length) {
     return;
   }
-  await mkdir(dirname(envPath), { recursive: true });
-  const existing = await readText(envPath);
-  const next = applyEnvUpdates(existing, updates);
-  await writeFileIfChanged(existing, next, envPath);
+  await withEnvFileLock(envPath, async () => {
+    await mkdir(dirname(envPath), { recursive: true });
+    const existing = await readText(envPath);
+    const next = applyEnvUpdates(existing, updates);
+    await writeFileIfChanged(existing, next, envPath);
+  });
+}
+
+export async function ensureEnvFileMutated({ envPath, updates = [], removeKeys = [] }) {
+  const keys = Array.from(new Set(removeKeys.map((key) => String(key).trim()).filter(Boolean)));
+  if (!updates.length && !keys.length) return;
+  await withEnvFileLock(envPath, async () => {
+    await mkdir(dirname(envPath), { recursive: true });
+    const existing = await readText(envPath);
+    const pruned = keys.length ? pruneEnvKeys(existing, keys) : existing;
+    const next = updates.length ? applyEnvUpdates(pruned, updates) : pruned;
+    await writeFileIfChanged(existing, next, envPath);
+  });
 }
 
 export async function ensureEnvFilePruned({ envPath, removeKeys }) {
@@ -17,17 +45,45 @@ export async function ensureEnvFilePruned({ envPath, removeKeys }) {
   if (!keys.length) {
     return;
   }
-  await mkdir(dirname(envPath), { recursive: true });
-  const existing = await readText(envPath);
-  const next = pruneEnvKeys(existing, keys);
-  await writeFileIfChanged(existing, next, envPath);
+  await withEnvFileLock(envPath, async () => {
+    await mkdir(dirname(envPath), { recursive: true });
+    const existing = await readText(envPath);
+    const next = pruneEnvKeys(existing, keys);
+    await writeFileIfChanged(existing, next, envPath);
+  });
+}
+
+export async function compareAndSetEnvFileValue({ envPath, key, expectedValue = null, nextValue = null }) {
+  const normalizedKey = String(key ?? '').trim();
+  if (!normalizedKey) throw new Error('compareAndSetEnvFileValue requires a key');
+  return await withEnvFileLock(envPath, async () => {
+    await mkdir(dirname(envPath), { recursive: true });
+    const existing = await readText(envPath);
+    const line = existing.split('\n').find((candidate) => candidate.trim().startsWith(`${normalizedKey}=`));
+    const currentValue = line ? line.slice(line.indexOf('=') + 1) : null;
+    if (currentValue !== expectedValue) return false;
+    const next = nextValue == null
+      ? pruneEnvKeys(existing, [normalizedKey])
+      : applyEnvUpdates(existing, [{ key: normalizedKey, value: String(nextValue) }]);
+    await writeFileIfChanged(existing, next, envPath);
+    return true;
+  });
+}
+
+export async function replaceEnvFile({ envPath, content }) {
+  return await withEnvFileLock(envPath, async () => {
+    await mkdir(dirname(envPath), { recursive: true });
+    const existing = await readText(envPath);
+    await writeFileIfChanged(existing, String(content ?? ''), envPath);
+  });
 }
 
 async function readText(path) {
   try {
-    return (await pathExists(path)) ? await readFile(path, 'utf-8') : '';
-  } catch {
-    return '';
+    return await readFile(path, 'utf-8');
+  } catch (error) {
+    if (error?.code === 'ENOENT') return '';
+    throw error;
   }
 }
 
@@ -93,6 +149,7 @@ async function writeFileIfChanged(existingContent, nextContent, path) {
   } catch {
     // ignore
   }
-  await writeFile(path, normalizedNext, 'utf-8');
+  const tmp = join(dirname(path), `.tmp.${Date.now()}.${Math.random().toString(16).slice(2)}.env`);
+  await writeFile(tmp, normalizedNext, 'utf-8');
+  await rename(tmp, path);
 }
-

@@ -39,3 +39,26 @@ test('collectBuildSourceMetadata changes dirtyHash when dirty file contents chan
   assert.notEqual(first.dirtyHash, second.dirtyHash);
   assert.notEqual(first.sourceFingerprint, second.sourceFingerprint);
 });
+
+test('collectBuildSourceMetadata delegates provider aliases and cross-flavor rejection to the canonical owner', async (t) => {
+  const repoDir = await createTempRepo(t);
+  const baseEnv = {
+    ...process.env,
+    HAPPIER_STACK_REPO_DIR: repoDir,
+    HAPPIER_STACK_SERVER_COMPONENT: 'happier-server',
+  };
+
+  const aliased = await collectBuildSourceMetadata({
+    rootDir: repoDir,
+    env: { ...baseEnv, HAPPIER_DB_PROVIDER: ' PostgreSQL ' },
+  });
+  assert.equal(aliased.dbProvider, 'postgres');
+
+  await assert.rejects(
+    () => collectBuildSourceMetadata({
+      rootDir: repoDir,
+      env: { ...baseEnv, HAPPIER_DB_PROVIDER: 'sqlite' },
+    }),
+    /unsupported DB provider/i,
+  );
+});
