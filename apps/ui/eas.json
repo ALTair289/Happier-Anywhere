@@ -154,9 +154,7 @@
         "EXPO_ANDROID_PACKAGE": "dev.happier.app.publicdev.devclient",
         "EXPO_APP_SCHEME": "happier-dev-devclient",
         "HAPPIER_EXPO_DEVCLIENT_LAUNCH_MODE": "most-recent",
-        "HAPPIER_EXPO_DEVCLIENT_SILENT_LAUNCH": "true",
-        "HAPPIER_EXPO_USE_NATIVE_DEBUG": "true",
-        "EX_UPDATES_NATIVE_DEBUG": "1"
+        "HAPPIER_EXPO_DEVCLIENT_SILENT_LAUNCH": "true"
       }
     },
     "preview": {

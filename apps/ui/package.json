@@ -18,6 +18,7 @@
     "android": "yarn -s ensure:workspace:built && cross-env EXPO_UNSTABLE_WEB_MODAL=1 expo run:android",
     "ios": "yarn -s ensure:workspace:built && cross-env EXPO_UNSTABLE_WEB_MODAL=1 expo run:ios",
     "ios:connected-device": "yarn ios -d",
+    "ios:publicdev-dev-client": "yarn -s ensure:workspace:built && node ./scripts/runPublicdevDevClientIos.mjs",
     "submit": "eas submit --platform ios",
     "web": "yarn -s ensure:workspace:built && cross-env EXPO_UNSTABLE_WEB_MODAL=1 expo start --web",
     "test": "yarn -s test:unit && yarn -s test:built-in-prompts",
