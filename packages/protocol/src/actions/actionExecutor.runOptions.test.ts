@@ -65,6 +65,30 @@ describe('createActionExecutor model/effort run-option parity', () => {
     expect(overrides?.overrides.reasoning_effort?.value).toBe('high');
   });
 
+  it('preserves exact nonblank opaque model, config, and value identifiers', async () => {
+    const executionRunStart = vi.fn(async () => ({ runId: 'run_1', callId: 'call_1', sidechainId: 'call_1' }));
+    const executor = createActionExecutor(createDeps({ executionRunStart }));
+
+    const res = await executor.execute(
+      'subagents.delegate.start',
+      {
+        sessionId: 's1',
+        backendTargetKeys: ['agent:cursor'],
+        instructions: 'Do the thing.',
+        modelId: ' model-a ',
+        configOptions: { ' effort ': ' high ' },
+      },
+      { defaultSessionId: 's1' },
+    );
+
+    expect(res.ok).toBe(true);
+    const [, request] = executionRunStart.mock.calls[0]!;
+    expect((request as { modelId?: string }).modelId).toBe(' model-a ');
+    const overrides = (request as { sessionConfigOptionOverrides?: { overrides: Record<string, { value: unknown }> } })
+      .sessionConfigOptionOverrides;
+    expect(overrides?.overrides[' effort ']?.value).toBe(' high ');
+  });
+
   it('threads modelId + sessionConfigOptionOverrides into execution.run.start', async () => {
     const executionRunStart = vi.fn(async () => ({ runId: 'run_1', callId: 'call_1', sidechainId: 'call_1' }));
     const executor = createActionExecutor(createDeps({ executionRunStart }));

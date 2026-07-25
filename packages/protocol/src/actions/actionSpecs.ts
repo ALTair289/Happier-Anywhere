@@ -22,6 +22,7 @@ import {
 } from '../sessionWorkState/sessionWorkStateRpc.js';
 import { SessionTerminalComposerClearRequestV1Schema } from '../sessionControl/sessionTerminalComposerClearV1.js';
 import { SessionWorkStateStatusV1Schema } from '../sessionWorkState/sessionWorkStateV1.js';
+import { STRUCTURED_QUESTION_LIMITS } from '../tools/structuredQuestionAnswersV1.js';
 import { AcpConfigOptionOverridesV1Schema } from '../sessionMetadata/metadataOverridesV1.js';
 import { SessionPermissionModeSchema } from '../sessionMetadata/sessionPermissionModes.js';
 import { AgentRuntimeDescriptorV1Schema } from '../sessionMetadata/agentRuntimeDescriptorV1.js';
@@ -31,7 +32,6 @@ import {
   SpawnConfigOptionValueSchema,
   findSpawnConfigOptionAliasConflicts,
 } from './sessionSpawnConfigOptions.js';
-import { STRUCTURED_QUESTION_LIMITS } from '../tools/structuredQuestionAnswersV1.js';
 
 export {
   ActionApprovalFlowSchema,
@@ -232,7 +232,7 @@ const SessionPermissionModeSetInputSchema = z.object({
 
 const SessionModelSetInputSchema = z.object({
   sessionId: z.string().min(1),
-  modelId: z.string().trim().min(1),
+  modelId: z.string().refine((value) => value.trim().length > 0, { message: 'Model ID must not be blank' }),
 }).passthrough();
 
 const SessionStatusGetInputSchema = z.object({
@@ -783,7 +783,10 @@ const SessionSendMessageInputSchema = z.object({
   sessionId: z.string().min(1).optional(),
   message: z.string().min(1),
   permissionModeOverride: z.string().trim().min(1).optional(),
-  modelOverride: z.union([z.string().trim().min(1), z.null()]).optional(),
+  modelOverride: z.union([
+    z.string().refine((value) => value.trim().length > 0, { message: 'Model override must not be blank' }),
+    z.null(),
+  ]).optional(),
   wait: z.boolean().optional(),
   timeoutSeconds: z.number().int().min(1).max(3600).optional(),
 }).passthrough();
@@ -2996,7 +2999,7 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
     examples: {
       voice: {
         argsExample:
-        '{"sessionId":"{{sessionId}}","answers":[{"question":"Continue?","values":["Yes"]}]}',
+          '{"sessionId":"{{sessionId}}","answers":[{"question":"Continue?","values":["Yes"]}]}',
       },
     },
     surfaces: {

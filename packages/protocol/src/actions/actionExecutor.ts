@@ -54,7 +54,7 @@ function resolveRunStartModelAndConfig(input: Readonly<Record<string, unknown>>)
   | { ok: true; modelId?: string; sessionConfigOptionOverrides?: AcpConfigOptionOverridesV1 }
   | { ok: false; error: string } {
   const modelIdRaw = input.modelId;
-  const modelId = typeof modelIdRaw === 'string' && modelIdRaw.trim().length > 0 ? modelIdRaw.trim() : undefined;
+  const modelId = typeof modelIdRaw === 'string' && modelIdRaw.trim().length > 0 ? modelIdRaw : undefined;
   const merged = mergeSpawnConfigOptionAliases({
     sessionConfigOptionOverrides: (input.sessionConfigOptionOverrides as AcpConfigOptionOverridesV1 | undefined) ?? null,
     configOptions: (input.configOptions as Readonly<Record<string, SpawnConfigOptionValue>> | undefined) ?? null,
@@ -486,6 +486,10 @@ function normalizeId(raw: unknown): string {
   return String(raw ?? '').trim();
 }
 
+function readOpaqueIdentifier(raw: unknown): string {
+  return typeof raw === 'string' && raw.trim().length > 0 ? raw : '';
+}
+
 function normalizeUsageLimitActionResult(result: unknown, sessionId: string): unknown {
   return normalizeSessionUsageLimitRecoveryOperationResultV1(result, { sessionId });
 }
@@ -824,7 +828,7 @@ function resolveAgentInventoryRequest(input: Record<string, unknown>): AgentInve
   if (!resolvedAgentId) {
     return { ok: false };
   }
-  const modelId = normalizeId(input.modelId);
+  const modelId = readOpaqueIdentifier(input.modelId);
 
   return {
     ok: true,
@@ -2161,10 +2165,14 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
           }
           const data = parsed.data as Record<string, unknown>;
           const issueFingerprint = data.issueFingerprint;
+          const armedAtMs = data.armedAtMs;
+          const runtimeAuthRecoveryAttemptId = data.runtimeAuthRecoveryAttemptId;
           const serverId = resolveServerIdForSession(deps, ctx, sessionId);
           const res = await deps.sessionUsageLimitWaitResumeCancel({
             sessionId,
             ...(typeof issueFingerprint === 'string' || issueFingerprint === null ? { issueFingerprint } : {}),
+            ...(typeof armedAtMs === 'number' ? { armedAtMs } : {}),
+            ...(typeof runtimeAuthRecoveryAttemptId === 'string' ? { runtimeAuthRecoveryAttemptId } : {}),
             ...(serverId ? { serverId } : {}),
           });
           return { ok: true, result: normalizeUsageLimitActionResult(res, sessionId) };

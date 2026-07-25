@@ -77,6 +77,22 @@ describe('createActionExecutor (session control)', () => {
     }));
   });
 
+  it('preserves exact nonblank opaque model override bytes when sending a message', async () => {
+    const sessionSendMessage = vi.fn(async () => ({ ok: true }));
+    const executor = createExecutor({ sessionSendMessage });
+
+    const res = await executor.execute(
+      'session.message.send' as any,
+      { sessionId: 's1', message: 'Hello', modelOverride: ' model-a\t' },
+      { surface: 'cli', defaultSessionId: null },
+    );
+
+    expect(res).toEqual({ ok: true, result: { ok: true } });
+    expect(sessionSendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      modelOverride: ' model-a\t',
+    }));
+  });
+
   it('executes session.title.set via deps.sessionTitleSet', async () => {
     const sessionTitleSet = vi.fn(async () => ({ ok: true }));
     const executor = createExecutor({ sessionTitleSet });
@@ -490,7 +506,12 @@ describe('createActionExecutor (session control)', () => {
     );
     await executor.execute(
       'session.usageLimit.waitResume.cancel' as any,
-      { sessionId: 's1', issueFingerprint: null },
+      {
+        sessionId: 's1',
+        issueFingerprint: 'usage-limit:s1:reset',
+        armedAtMs: 123,
+        runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:exact-1',
+      },
       { surface: 'cli' },
     );
     await executor.execute('session.usageLimit.checkNow' as any, { sessionId: 's1', provider: ' codex ' }, { surface: 'cli' });
