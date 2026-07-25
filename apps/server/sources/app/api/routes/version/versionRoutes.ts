@@ -1,7 +1,25 @@
 import { z } from "zod";
 import { type Fastify } from "../../types";
-import * as semver from 'semver';
 import { ANDROID_UP_TO_DATE, IOS_UP_TO_DATE } from "@/versions";
+import {
+    ClientVersionCheckRequestV1Schema,
+    ClientVersionCheckResponseV1Schema,
+} from '@happier-dev/protocol';
+import { resolveSessionSyncCompatibilityPolicy } from '@/app/clientCompatibility/policy';
+import { resolveClientVersionDecision } from '@/app/clientCompatibility/versionDecision';
+
+const IOS_UPDATE_URL = 'https://apps.apple.com/us/app/happier-claude-codex-opencode/id6758537388';
+
+const LegacyClientVersionCheckRequestSchema = z.object({
+    platform: z.string(),
+    version: z.string(),
+    app_id: z.string(),
+}).strict();
+
+const LegacyClientVersionCheckResponseSchema = z.object({
+    update_required: z.boolean(),
+    update_url: z.string().nullable(),
+}).strict();
 
 export function versionRoutes(app: Fastify) {
     app.get('/v1/version', {
@@ -18,42 +36,43 @@ export function versionRoutes(app: Fastify) {
 
     app.post('/v1/version', {
         schema: {
-            body: z.object({
-                platform: z.string(),
-                version: z.string(),
-                app_id: z.string()
-            }),
+            body: z.union([ClientVersionCheckRequestV1Schema, LegacyClientVersionCheckRequestSchema]),
             response: {
-                200: z.object({
-                    updateUrl: z.string().nullable()
-                })
+                200: z.union([ClientVersionCheckResponseV1Schema, LegacyClientVersionCheckResponseSchema]),
             }
         }
-    }, async (request, reply) => {
-        const { platform, version, app_id } = request.body;
-
-        // Check ios
-        if (platform.toLowerCase() === 'ios') {
-            if (semver.satisfies(version, IOS_UP_TO_DATE)) {
-                reply.send({ updateUrl: null });
-            } else {
-                reply.send({ updateUrl: 'https://apps.apple.com/us/app/happier-claude-codex-opencode/id6758537388' });
+    }, async (request) => {
+        const policy = resolveSessionSyncCompatibilityPolicy(process.env);
+        if (!('v' in request.body)) {
+            const platform = request.body.platform.toLowerCase();
+            if (platform !== 'ios' && platform !== 'android') {
+                return { update_required: false, update_url: null };
             }
-            return;
+            const range = platform === 'ios' ? IOS_UP_TO_DATE : ANDROID_UP_TO_DATE;
+            const decision = resolveClientVersionDecision({
+                clientKind: platform === 'ios' ? 'ui-ios' : 'ui-android',
+                appVersion: request.body.version,
+                policy,
+                distributionSupportedRange: range,
+                distributionUpdateUrl: platform === 'ios' ? IOS_UPDATE_URL : null,
+            });
+            return {
+                update_required: decision.status !== 'current',
+                update_url: decision.status === 'current' ? null : decision.updateUrl,
+            };
         }
-
-        // Check android
-        if (platform.toLowerCase() === 'android') {
-            if (semver.satisfies(version, ANDROID_UP_TO_DATE)) {
-                reply.send({ updateUrl: null });
-            } else {
-                // TODO: Update once the Play Store listing for Happier is finalized.
-                reply.send({ updateUrl: null });
-            }
-            return;
-        }
-
-        // Fallbacke
-        reply.send({ updateUrl: null });
+        const { clientKind, appVersion } = request.body;
+        const nativeRange = clientKind === 'ui-ios'
+            ? IOS_UP_TO_DATE
+            : clientKind === 'ui-android'
+                ? ANDROID_UP_TO_DATE
+                : undefined;
+        return resolveClientVersionDecision({
+            clientKind,
+            appVersion,
+            policy,
+            ...(nativeRange === undefined ? null : { distributionSupportedRange: nativeRange }),
+            ...(clientKind === 'ui-ios' ? { distributionUpdateUrl: IOS_UPDATE_URL } : null),
+        });
     });
 }
