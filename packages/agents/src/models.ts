@@ -330,15 +330,8 @@ export const AGENT_MODEL_CONFIG: Readonly<Record<AgentId, AgentModelConfig>> = O
     nonAcpApplyScope: 'next_prompt',
     acpApplyBehavior: 'set_model',
     dynamicProbe: 'auto',
-    defaultMode: 'grok-build',
-    allowedModes: ['grok-build'],
-    staticModels: [
-      {
-        id: 'grok-build',
-        name: 'Grok Build',
-        description: 'Fallback Grok Build model when the provider does not advertise selectable models.',
-      },
-    ],
+    defaultMode: 'default',
+    allowedModes: [],
   },
 });
 
