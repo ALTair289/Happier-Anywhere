@@ -9,6 +9,8 @@ export {
   type ClaudeEffortLevel,
 } from './effort.js';
 
+export { CURRENT_FLAGSHIP_CLAUDE_MODEL_ID } from './flagshipModel.js';
+
 export {
   CLAUDE_1M_CONTEXT_WINDOW_TOKENS,
   CLAUDE_1M_SUFFIX,

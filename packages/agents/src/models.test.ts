@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { AGENT_IDS } from './types.js';
 import type { AgentId } from './types.js';
 import { AGENT_MODEL_CONFIG, getAgentModelConfig, getAgentStaticModels } from './models.js';
+import { CURRENT_FLAGSHIP_CLAUDE_MODEL_ID } from './providers/claude/flagshipModel.js';
 
 const cursorAgentId = 'cursor' as AgentId;
 
@@ -14,6 +15,11 @@ describe('agent model config', () => {
     }
   });
 
+  it('keeps the flagship Claude default pointing at a real catalog model', () => {
+    const claudeModels = getAgentStaticModels('claude');
+    expect(claudeModels.some((model) => model.id === CURRENT_FLAGSHIP_CLAUDE_MODEL_ID)).toBe(true);
+  });
+
   it('uses the same name and description contract for static models as dynamic models', () => {
     const claude = getAgentModelConfig('claude');
     const gemini = getAgentModelConfig('gemini');
@@ -23,6 +29,22 @@ describe('agent model config', () => {
     expect(claude.staticModels?.find((model) => model.id === 'claude-fable-5')).toMatchObject({
       id: 'claude-fable-5',
       name: 'Fable 5',
+      description: expect.any(String),
+      contextWindowTokens: 1_000_000,
+      modelOptions: expect.arrayContaining([
+        expect.objectContaining({
+          id: 'reasoning_effort',
+          currentValue: 'high',
+          options: expect.arrayContaining([
+            expect.objectContaining({ value: 'xhigh' }),
+            expect.objectContaining({ value: 'max' }),
+          ]),
+        }),
+      ]),
+    });
+    expect(claude.staticModels?.find((model) => model.id === 'claude-opus-5')).toMatchObject({
+      id: 'claude-opus-5',
+      name: 'Opus 5',
       description: expect.any(String),
       contextWindowTokens: 1_000_000,
       modelOptions: expect.arrayContaining([
@@ -76,8 +98,8 @@ describe('agent model config', () => {
     expect(claude.staticModels?.map((model) => model.id)).toEqual(claude.allowedModes);
     expect(gemini.staticModels?.map((model) => model.id)).toEqual(gemini.allowedModes);
     expect(claudeModels[0]).toMatchObject({
-      id: 'claude-fable-5',
-      name: 'Fable 5',
+      id: 'claude-opus-5',
+      name: 'Opus 5',
       description: expect.any(String),
       contextWindowTokens: 1_000_000,
     });
@@ -89,7 +111,7 @@ describe('agent model config', () => {
     const optionIdsFor = (modelId: string): string[] =>
       claudeModels.find((model) => model.id === modelId)?.modelOptions?.map((option) => option.id) ?? [];
 
-    for (const modelId of ['claude-fable-5', 'claude-opus-4-8', 'claude-opus-4-7']) {
+    for (const modelId of ['claude-opus-5', 'claude-fable-5', 'claude-opus-4-8', 'claude-opus-4-7']) {
       expect(optionIdsFor(modelId)).toContain('ultracode');
       const ultracode = claudeModels
         .find((model) => model.id === modelId)?.modelOptions?.find((option) => option.id === 'ultracode');
@@ -114,6 +136,7 @@ describe('agent model config', () => {
     expect(variantFor('claude-sonnet-4-6')).toBe('claude-sonnet-4-6[1m]');
     expect(variantFor('claude-opus-4-6')).toBe('claude-opus-4-6[1m]');
     // Always-1M on the API: no opt-in toggle surfaced.
+    expect(variantFor('claude-opus-5')).toBeUndefined();
     expect(variantFor('claude-fable-5')).toBeUndefined();
     expect(variantFor('claude-opus-4-8')).toBeUndefined();
     expect(variantFor('claude-opus-4-7')).toBeUndefined();
