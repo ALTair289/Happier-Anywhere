@@ -26,7 +26,7 @@ function buildStubHappyCliScript({ message }) {
 }
 
 function buildFailingStubHappyCliScript({ errorMessage }) {
-  return `console.error(${JSON.stringify(errorMessage)});\nprocess.exit(1);\n`;
+  return `if (process.env.HAPPIER_CLI_DIST_INTEGRITY_PROBE === 'daemon-command') process.exit(0);\nconsole.error(${JSON.stringify(errorMessage)});\nprocess.exit(1);\n`;
 }
 
 async function createHappyStackFixture(

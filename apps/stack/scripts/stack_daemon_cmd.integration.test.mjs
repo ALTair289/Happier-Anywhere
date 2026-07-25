@@ -11,6 +11,7 @@ import { runNodeCapture as runNode } from './testkit/core/run_node_capture.mjs';
 import { spawnTestProcess } from './testkit/core/spawn_test_process.mjs';
 import { createTempFixture } from './testkit/core/temp_fixture.mjs';
 import { createStackHappierCliCommandFixture } from './testkit/stack_happier_cli_command_testkit.mjs';
+import { recordStackRuntimeStart } from './utils/stack/runtime_state.mjs';
 
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
 const rootDir = dirname(scriptsDir);
@@ -61,6 +62,33 @@ async function writeServerScopedAuth({ cliHomeDir, serverUrl, env = {} }) {
 }
 
 function buildStubHappyCliScript() {
+  const daemonChildSource = `
+const { createServer } = require('node:http');
+const { mkdirSync, writeFileSync } = require('node:fs');
+const { dirname } = require('node:path');
+const statePath = process.argv[1];
+const controlToken = 'stack-daemon-fixture';
+const server = createServer((req, res) => {
+  if (req.method === 'POST' && req.url === '/ping' && req.headers['x-happier-daemon-token'] === controlToken) {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, distClosureFingerprint: '0000000000000000' }));
+    return;
+  }
+  res.writeHead(404).end();
+});
+server.listen(0, '127.0.0.1', () => {
+  mkdirSync(dirname(statePath), { recursive: true });
+  writeFileSync(statePath, JSON.stringify({
+    pid: process.pid,
+    httpPort: server.address().port,
+    controlToken,
+    startTime: new Date().toISOString(),
+  }) + '\\n', 'utf-8');
+});
+const shutdown = () => server.close(() => process.exit(0));
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
+`;
   return `
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
@@ -108,9 +136,8 @@ if (sub === 'start') {
   append('direct_peer_advertised_hosts=' + String(process.env.HAPPIER_MACHINE_TRANSFER_DIRECT_PEER_ADVERTISED_HOSTS || ''));
   append('direct_peer_feature_enabled=' + String(process.env.HAPPIER_FEATURE_MACHINES_TRANSFER_DIRECT_PEER__ENABLED || ''));
   append('direct_peer_server_enabled=' + String(process.env.HAPPIER_MACHINE_TRANSFER_DIRECT_PEER_SERVER_ENABLED || ''));
-  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
+  const child = spawn(process.execPath, ['-e', ${JSON.stringify(daemonChildSource)}, state], { detached: true, stdio: 'ignore' });
   child.unref();
-  writeFileSync(state, JSON.stringify({ pid: child.pid, httpPort: 0, startTime: new Date().toISOString() }) + '\\n', 'utf-8');
   process.exit(0);
 }
 
@@ -232,6 +259,12 @@ test('hstack stack daemon <name> start records daemon pid in stack.runtime.json 
   await fixture.writeStackEnv();
   registerDaemonCleanup(t, { env: fixture.baseEnv, stackName: fixture.stackName });
 
+  const runtimePath = join(fixture.storageDir, fixture.stackName, 'stack.runtime.json');
+  await recordStackRuntimeStart(runtimePath, {
+    stackName: fixture.stackName,
+    ownerPid: process.pid,
+  });
+
   const startRes = await runHstack(['stack', 'daemon', fixture.stackName, 'start', '--json'], { env: fixture.baseEnv });
   assertExitOk(startRes, 'stack daemon start');
 
@@ -241,7 +274,6 @@ test('hstack stack daemon <name> start records daemon pid in stack.runtime.json 
   const pidFromDaemon = Number(state?.pid);
   assert.ok(Number.isFinite(pidFromDaemon) && pidFromDaemon > 1, `expected pid in daemon.state.json, got ${pidFromDaemon}`);
 
-  const runtimePath = join(fixture.storageDir, fixture.stackName, 'stack.runtime.json');
   assert.equal(existsSync(runtimePath), true, 'expected stack.runtime.json to exist after daemon start');
   const runtime = JSON.parse(await readFile(runtimePath, 'utf-8'));
   const pidFromRuntime = Number(runtime?.processes?.daemonPid);
