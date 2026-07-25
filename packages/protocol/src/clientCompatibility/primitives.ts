@@ -1,12 +1,21 @@
 import { z } from 'zod';
 
 export const SESSION_SYNC_PROTOCOL_VERSION_V1 = 1 as const;
+export const SESSION_SYNC_PROTOCOL_VERSION_RUNTIME_ACTIVITY = 2 as const;
 export const CURRENT_SESSION_SYNC_PROTOCOL_VERSION = 2 as const;
+export const PENDING_INPUT_PROTOCOL_VERSION_V1 = 1 as const;
+export const CURRENT_PENDING_INPUT_PROTOCOL_VERSION = PENDING_INPUT_PROTOCOL_VERSION_V1;
 
 export const SessionSyncProtocolVersionSchema = z
   .number()
   .int()
   .min(SESSION_SYNC_PROTOCOL_VERSION_V1)
+  .max(Number.MAX_SAFE_INTEGER);
+
+export const PendingInputProtocolVersionSchema = z
+  .number()
+  .int()
+  .min(PENDING_INPUT_PROTOCOL_VERSION_V1)
   .max(Number.MAX_SAFE_INTEGER);
 
 export const ClientKindSchema = z.enum([

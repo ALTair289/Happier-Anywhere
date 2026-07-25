@@ -4,7 +4,11 @@ import {
   CLIENT_COMPATIBILITY_HTTP_HEADERS_V1,
   CLIENT_UPGRADE_REQUIRED_ERROR_CODE,
   CLIENT_UPGRADE_REQUIRED_HTTP_STATUS,
+  CURRENT_PENDING_INPUT_PROTOCOL_VERSION,
   CURRENT_SESSION_SYNC_PROTOCOL_VERSION,
+  PENDING_INPUT_PROTOCOL_VERSION_V1,
+  SESSION_SYNC_PROTOCOL_VERSION_RUNTIME_ACTIVITY,
+  SessionSyncPendingInputCompatibilityPingAckV1Schema,
   ClientCompatibilityCapabilitiesV1Schema,
   ClientCompatibilityDeclarationV1Schema,
   ClientCompatibilitySocketAuthV1Schema,
@@ -34,7 +38,10 @@ describe('client compatibility protocol contracts', () => {
   it('defines a monotonic session-sync protocol epoch', () => {
     expect(SESSION_SYNC_PROTOCOL_VERSION_V1).toBe(1);
     expect(CURRENT_SESSION_SYNC_PROTOCOL_VERSION).toBe(2);
+    expect(SESSION_SYNC_PROTOCOL_VERSION_RUNTIME_ACTIVITY).toBe(2);
     expect(CURRENT_SESSION_SYNC_PROTOCOL_VERSION).toBeGreaterThan(SESSION_SYNC_PROTOCOL_VERSION_V1);
+    expect(PENDING_INPUT_PROTOCOL_VERSION_V1).toBe(1);
+    expect(CURRENT_PENDING_INPUT_PROTOCOL_VERSION).toBe(PENDING_INPUT_PROTOCOL_VERSION_V1);
   });
 
   it('accepts only strict, bounded, canonical client declarations', () => {
@@ -51,6 +58,7 @@ describe('client compatibility protocol contracts', () => {
       v: 1 as const,
       enforcement: 'required' as const,
       minimumSessionSyncProtocolVersion: 2,
+      currentSessionSyncProtocolVersion: 2,
       declarationTransport: 'headers-v1' as const,
       minimumVersionsByClientKind: {
         'ui-web': '0.12.0',
@@ -62,9 +70,13 @@ describe('client compatibility protocol contracts', () => {
     };
 
     expect(SessionSyncServerRequirementsV1Schema.parse(requirements)).toEqual(requirements);
-    expect(ClientCompatibilityCapabilitiesV1Schema.parse({ v: 1, sessionSync: requirements })).toEqual({
+    const pendingInput = {
+      currentPendingInputProtocolVersion: 1,
+    };
+    expect(ClientCompatibilityCapabilitiesV1Schema.parse({ v: 1, sessionSync: requirements, pendingInput })).toEqual({
       v: 1,
       sessionSync: requirements,
+      pendingInput,
     });
     expect(SessionSyncServerRequirementsV1Schema.safeParse({ ...requirements, enforcement: 'warn' }).success).toBe(false);
     expect(SessionSyncServerRequirementsV1Schema.safeParse({
@@ -80,6 +92,10 @@ describe('client compatibility protocol contracts', () => {
       upgradeUrlsByClientKind: { 'ui-web': 'https://app.happier.dev/\tupdate' },
     }).success).toBe(false);
     expect(SessionSyncServerRequirementsV1Schema.safeParse({ ...requirements, extra: true }).success).toBe(false);
+    expect(SessionSyncPendingInputCompatibilityPingAckV1Schema.parse({
+      v: 1,
+      compatibility: { v: 1, sessionSync: requirements, pendingInput },
+    })).toEqual({ v: 1, compatibility: { v: 1, sessionSync: requirements, pendingInput } });
   });
 
   it('uses one bounded upgrade-required payload for HTTP and socket failures', () => {

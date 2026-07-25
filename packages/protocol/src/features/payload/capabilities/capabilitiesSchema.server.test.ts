@@ -13,7 +13,11 @@ describe('CapabilitiesSchema (server capabilities)', () => {
           v: 1,
           enforcement: 'required',
           minimumSessionSyncProtocolVersion: 2,
+          currentSessionSyncProtocolVersion: 2,
           declarationTransport: 'headers-v1',
+        },
+        pendingInput: {
+          currentPendingInputProtocolVersion: 1,
         },
       },
     });
@@ -22,6 +26,7 @@ describe('CapabilitiesSchema (server capabilities)', () => {
       enforcement: 'required',
       minimumSessionSyncProtocolVersion: 2,
     });
+    expect(parsed.compatibility?.pendingInput).toEqual({ currentPendingInputProtocolVersion: 1 });
     expect(CapabilitiesSchema.safeParse({
       server: {
         compatibility: {
@@ -30,6 +35,7 @@ describe('CapabilitiesSchema (server capabilities)', () => {
             v: 1,
             enforcement: 'required',
             minimumSessionSyncProtocolVersion: 2,
+            currentSessionSyncProtocolVersion: 2,
             declarationTransport: 'headers-v1',
           },
         },

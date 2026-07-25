@@ -1,9 +1,13 @@
 export {
   CURRENT_SESSION_SYNC_PROTOCOL_VERSION,
+  CURRENT_PENDING_INPUT_PROTOCOL_VERSION,
+  PENDING_INPUT_PROTOCOL_VERSION_V1,
   SESSION_SYNC_PROTOCOL_VERSION_V1,
+  SESSION_SYNC_PROTOCOL_VERSION_RUNTIME_ACTIVITY,
   ClientAppVersionSchema,
   ClientKindSchema,
   ClientReleaseChannelSchema,
+  PendingInputProtocolVersionSchema,
   SafeHttpsUrlSchema,
   SessionSyncProtocolVersionSchema,
   type ClientKind,
@@ -14,10 +18,14 @@ export {
 } from './clientDeclarationV1.js';
 export {
   ClientCompatibilityCapabilitiesV1Schema,
+  PendingInputServerContractV1Schema,
   SessionSyncCompatibilityEnforcementSchema,
   SessionSyncServerRequirementsV1Schema,
+  SessionSyncPendingInputCompatibilityPingAckV1Schema,
   type ClientCompatibilityCapabilitiesV1,
+  type PendingInputServerContractV1,
   type SessionSyncServerRequirementsV1,
+  type SessionSyncPendingInputCompatibilityPingAckV1,
 } from './serverRequirementsV1.js';
 export {
   CLIENT_UPGRADE_REQUIRED_ERROR_CODE,

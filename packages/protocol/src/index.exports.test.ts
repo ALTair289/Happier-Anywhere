@@ -3,6 +3,17 @@ import { describe, expect, it } from 'vitest';
 import * as protocol from './index.js';
 
 describe('protocol package root exports', () => {
+    it('exports the canonical client-compatibility owner', () => {
+        expect(protocol.CURRENT_SESSION_SYNC_PROTOCOL_VERSION).toBe(2);
+        expect(protocol.ClientCompatibilityDeclarationV1Schema.parse({
+            v: 1,
+            clientKind: 'ui-web',
+            appVersion: '0.2.10',
+            sessionSyncProtocolVersion: 2,
+        })).toMatchObject({ clientKind: 'ui-web', sessionSyncProtocolVersion: 2 });
+        expect(protocol.CLIENT_UPGRADE_REQUIRED_HTTP_STATUS).toBe(426);
+    });
+
     it('exports scm commit limits and operation codes for CLI consumers', () => {
         expect(protocol.SCM_COMMIT_MESSAGE_MAX_LENGTH).toBe(4096);
         expect(protocol.SCM_OPERATION_ERROR_CODES.NOT_REPOSITORY).toBe('NOT_REPOSITORY');
