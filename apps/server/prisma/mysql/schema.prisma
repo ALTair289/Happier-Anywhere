@@ -316,12 +316,12 @@ model Session {
     latestTurnStatus String?
     latestTurnStatusObservedAt BigInt?
     lastRuntimeIssue String?
+    runtimeActivityState String @default("unknown")
     runtimeActivityActiveCount Int @default(0)
     runtimeActivityObservedAt BigInt?
-    runtimeActivityExpiresAt BigInt?
-    runtimeActivitySourceClass String?
+    runtimeActivityRevision BigInt @default(0)
     meaningfulActivityAt DateTime?
-    active            Boolean             @default(true)
+    active            Boolean             @default(false)
     archivedAt        DateTime?
     lastActiveAt      DateTime            @default(now())
     createdAt         DateTime            @default(now())
@@ -539,6 +539,13 @@ model SessionMessage {
     messageRole String?
     /// [SessionMessageContent]
     content   Json
+    /// Source chronology is provider-observed; createdAt/updatedAt remain server ingestion chronology.
+    sourceCreatedAt DateTime?
+    sourceUpdatedAt DateTime?
+    /// Bounded, versioned [SessionTranscriptObservationProvenanceV1].
+    transcriptObservationProvenance Json?
+    /// Minimal manual pending-delivery resolution retained after the Pending row is deleted.
+    deliveryResolution Json?
     createdAt DateTime @default(now())
     updatedAt DateTime @updatedAt
 
@@ -553,6 +560,12 @@ model SessionMessage {
 enum SessionPendingMessageStatus {
     queued
     discarded
+}
+
+enum PendingProviderAction {
+    send
+    steer
+    interrupt_and_send
 }
 
 model SessionPendingMessage {
@@ -571,6 +584,10 @@ model SessionPendingMessage {
     status                SessionPendingMessageStatus @default(queued)
     deliveryState         String?
     deliveryBlockedReason String?
+    /// Canonical requested action.
+    requestedAction Json
+    /// Frozen provider operation for a claimed Pending row.
+    providerAction PendingProviderAction?
     position         Int
     discardedAt      DateTime?
     discardedReason  String?

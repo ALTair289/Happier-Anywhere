@@ -52,10 +52,10 @@ describe("storage/prisma", () => {
             join(root, "prisma", "mysql", "migrations", migrationName, "migration.sql"),
         ];
         const fields = [
+            "runtimeActivityState",
             "runtimeActivityActiveCount",
             "runtimeActivityObservedAt",
-            "runtimeActivityExpiresAt",
-            "runtimeActivitySourceClass",
+            "runtimeActivityRevision",
         ];
 
         for (const migrationFile of migrationFiles) {
