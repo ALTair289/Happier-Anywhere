@@ -1,5 +1,6 @@
 export {
     deleteProviderAccountUsageRecord,
+    deleteProviderAccountUsageRecordsForAccount,
     readProviderAccountUsageRecord,
     requestProviderAccountUsageRefresh,
     upsertProviderAccountUsageRecord,

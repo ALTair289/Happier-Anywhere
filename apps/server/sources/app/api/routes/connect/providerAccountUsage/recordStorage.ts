@@ -304,3 +304,12 @@ export async function deleteProviderAccountUsageRecord(params: Readonly<{
     });
     return deleted.count > 0 ? "deleted" : "not_found";
 }
+
+export async function deleteProviderAccountUsageRecordsForAccount(params: Readonly<{
+    accountId: string;
+}>, client: ProviderAccountUsageRecordClient = db): Promise<number> {
+    const deleted = await client.providerAccountUsageRecord.deleteMany({
+        where: { accountId: params.accountId },
+    });
+    return deleted.count;
+}

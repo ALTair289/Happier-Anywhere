@@ -10,6 +10,7 @@ import {
     AccountEncryptionMigrateConflictResponseSchema,
     AccountEncryptionMigrateInternalResponseSchema,
     AccountEncryptionMigrateInvalidParamsReasonSchema,
+    assertConnectedServiceCredentialRecordBinding,
 } from "@happier-dev/protocol";
 import { storePlainAccountSettingsDbValue } from "@/app/encryption/accountSettingsStorage";
 import * as privacyKit from "privacy-kit";
@@ -17,7 +18,12 @@ import tweetnacl from "tweetnacl";
 import { encodeCredentialTokenBytes } from "@/app/api/routes/connect/connectedServicesV2/credentialTokenCodec";
 import { encryptString } from "@/modules/encrypt";
 import { encodeUtf8Bytes } from "@/app/api/routes/connect/connectedServicesV3/bytesCodec";
-import { deleteConnectedServiceUsageSourcesForAccount } from "@/app/api/routes/connect/providerAccountUsage";
+import { mutateConnectedServiceCredentialInTx } from "@/app/api/routes/connect/credentials/mutation";
+import {
+    deleteConnectedServiceUsageSourcesForAccount,
+    deleteProviderAccountUsageRecordsForAccount,
+} from "@/app/api/routes/connect/providerAccountUsage";
+import { recordConnectedServiceAccountProfileChange } from "@/app/api/routes/connect/connectedServicesAccountProfileChange";
 import { AutomationValidationError, parseAutomationPatchInput } from "@/app/automations/automationValidation";
 import { markAccountChanged } from "@/app/changes/markAccountChanged";
 import { eventRouter } from "@/app/events/eventRouter";
@@ -25,6 +31,13 @@ import { buildAccountSettingsChangedUpdate } from "@/app/events/eventPayloadBuil
 import { randomKeyNaked } from "@/utils/keys/randomKeyNaked";
 import { resolveEffectiveAccountEncryptionModeFromAccountRow } from "@/app/encryption/accountEncryptionMode";
 import { recordAccountSettingsSnapshotsForWrite } from "@/app/accountSettings/accountSettingsHistoryRepository";
+
+class AccountEncryptionMigrationCredentialRejectedError extends Error {
+    constructor(status: string) {
+        super(`Connected service credential migration rejected: ${status}`);
+        this.name = "AccountEncryptionMigrationCredentialRejectedError";
+    }
+}
 
 export function registerAccountEncryptionMigrateRoutes(app: Fastify): void {
     app.post("/v1/account/encryption/migrate", {
@@ -162,111 +175,12 @@ export function registerAccountEncryptionMigrateRoutes(app: Fastify): void {
                     }
                 }
 
-                if (connectedServices.action === "assert_empty") {
-                    const count = await tx.serviceAccountToken.count({ where: { accountId: userId } });
-                    if (count > 0) return { type: "connected-services-not-empty" as const };
-                } else if (connectedServices.action === "clear") {
-                    await deleteConnectedServiceUsageSourcesForAccount({ accountId: userId }, tx);
-                    await tx.serviceAccountToken.deleteMany({ where: { accountId: userId } });
-                } else if (connectedServices.action === "migrate") {
-                    const existing = await tx.serviceAccountToken.findMany({
-                        where: { accountId: userId },
-                        select: { vendor: true, profileId: true },
-                    });
-                    const existingKeys = new Set(existing.map((row) => `${row.vendor}:${row.profileId}`));
-                    const incomingKeys = new Set(connectedServices.credentials.map((row) => `${row.serviceId}:${row.profileId}`));
-                    if (existingKeys.size !== incomingKeys.size) {
-                        return { type: "connected-services-migration-incomplete" as const };
-                    }
-                    for (const key of existingKeys) {
-                        if (!incomingKeys.has(key)) return { type: "connected-services-migration-incomplete" as const };
-                    }
-
-                    const atRest = encryptionEnv.plainAccountCredentialsAtRest === "none" ? "none" : "server_sealed";
-
-                    for (const cred of connectedServices.credentials) {
-                        if (toMode === "plain") {
-                            if (cred.kind !== "plain" || !cred.record) return { type: "invalid-params" as const };
-                            const json = JSON.stringify(cred.record);
-                            const keyPath = ["storage", "connect_credential", userId, cred.serviceId, cred.profileId, "v1"];
-                            const tokenBytes =
-                                atRest === "server_sealed"
-                                    ? (encryptString(keyPath, json) as Uint8Array<ArrayBuffer>)
-                                    : encodeUtf8Bytes(json);
-                            const providerEmail =
-                                cred.record.kind === "oauth"
-                                    ? cred.record.oauth?.providerEmail ?? null
-                                    : cred.record.token?.providerEmail ?? null;
-                            const providerAccountId =
-                                cred.record.kind === "oauth"
-                                    ? cred.record.oauth?.providerAccountId ?? null
-                                    : cred.record.token?.providerAccountId ?? null;
-                            const metadata = {
-                                v: 3,
-                                storage: atRest === "server_sealed" ? "server_sealed_json_v1" : "plain_json_v1",
-                                kind: cred.record.kind,
-                                providerEmail,
-                                providerAccountId,
-                            };
-                            const expiresAt =
-                                typeof cred.record.expiresAt === "number" && Number.isFinite(cred.record.expiresAt)
-                                    ? new Date(cred.record.expiresAt)
-                                    : null;
-                            await tx.serviceAccountToken.upsert({
-                                where: {
-                                    accountId_vendor_profileId: {
-                                        accountId: userId,
-                                        vendor: cred.serviceId,
-                                        profileId: cred.profileId,
-                                    },
-                                },
-                                update: { updatedAt: new Date(), token: tokenBytes, metadata: metadata as any, expiresAt },
-                                create: { accountId: userId, vendor: cred.serviceId, profileId: cred.profileId, token: tokenBytes, metadata: metadata as any, expiresAt },
-                            });
-                            continue;
-                        }
-
-                        // toMode === "e2ee"
-                        if (cred.kind !== "sealed" || !cred.sealed) return { type: "invalid-params" as const };
-                        const meta = cred.metadata;
-                        const metadata = {
-                            v: 2,
-                            format: cred.sealed.format,
-                            kind: meta?.kind ?? "oauth",
-                            providerEmail: meta?.providerEmail ?? null,
-                            providerAccountId: meta?.providerAccountId ?? null,
-                        };
-                        await tx.serviceAccountToken.upsert({
-                            where: {
-                                accountId_vendor_profileId: {
-                                    accountId: userId,
-                                    vendor: cred.serviceId,
-                                    profileId: cred.profileId,
-                                },
-                            },
-                            update: {
-                                updatedAt: new Date(),
-                                token: encodeCredentialTokenBytes(cred.sealed.ciphertext),
-                                metadata: metadata as any,
-                                expiresAt: meta?.expiresAt ? new Date(meta.expiresAt) : null,
-                            },
-                            create: {
-                                accountId: userId,
-                                vendor: cred.serviceId,
-                                profileId: cred.profileId,
-                                token: encodeCredentialTokenBytes(cred.sealed.ciphertext),
-                                metadata: metadata as any,
-                                expiresAt: meta?.expiresAt ? new Date(meta.expiresAt) : null,
-                            },
-                        });
-                    }
-                }
-
+                // Validate every automation precondition before the first credential write. Returning a
+                // typed validation result after a write would commit that partial rewrite in Prisma's
+                // interactive transaction instead of rolling it back.
                 if (automations.action === "assert_empty") {
                     const count = await tx.automation.count({ where: { accountId: userId } });
                     if (count > 0) return { type: "automations-not-empty" as const };
-                } else if (automations.action === "clear") {
-                    await tx.automation.deleteMany({ where: { accountId: userId } });
                 } else if (automations.action === "migrate") {
                     const existing = await tx.automation.findMany({
                         where: { accountId: userId },
@@ -274,13 +188,12 @@ export function registerAccountEncryptionMigrateRoutes(app: Fastify): void {
                     });
                     const existingIds = new Set(existing.map((row) => row.id));
                     const incomingIds = new Set(automations.templates.map((row) => row.automationId));
-                    if (existingIds.size !== incomingIds.size) {
+                    if (incomingIds.size !== automations.templates.length || existingIds.size !== incomingIds.size) {
                         return { type: "automations-migration-incomplete" as const };
                     }
                     for (const id of existingIds) {
                         if (!incomingIds.has(id)) return { type: "automations-migration-incomplete" as const };
                     }
-
                     for (const item of automations.templates) {
                         try {
                             parseAutomationPatchInput(
@@ -293,10 +206,42 @@ export function registerAccountEncryptionMigrateRoutes(app: Fastify): void {
                             }
                             throw error;
                         }
-                        await tx.automation.update({
-                            where: { id: item.automationId },
-                            data: { templateCiphertext: item.templateCiphertext, updatedAt: new Date() },
-                        });
+                    }
+                }
+
+                if (connectedServices.action === "assert_empty") {
+                    const count = await tx.serviceAccountToken.count({ where: { accountId: userId } });
+                    if (count > 0) return { type: "connected-services-not-empty" as const };
+                } else if (connectedServices.action === "migrate") {
+                    const existing = await tx.serviceAccountToken.findMany({
+                        where: { accountId: userId },
+                        select: { vendor: true, profileId: true },
+                    });
+                    const existingKeys = new Set(existing.map((row) => `${row.vendor}:${row.profileId}`));
+                    const incomingKeys = new Set(connectedServices.credentials.map((row) => `${row.serviceId}:${row.profileId}`));
+                    if (
+                        incomingKeys.size !== connectedServices.credentials.length
+                        || existingKeys.size !== incomingKeys.size
+                    ) {
+                        return { type: "connected-services-migration-incomplete" as const };
+                    }
+                    for (const key of existingKeys) {
+                        if (!incomingKeys.has(key)) return { type: "connected-services-migration-incomplete" as const };
+                    }
+                    for (const cred of connectedServices.credentials) {
+                        if (toMode === "plain") {
+                            if (cred.kind !== "plain" || !cred.record) return { type: "invalid-params" as const };
+                            try {
+                                assertConnectedServiceCredentialRecordBinding({
+                                    binding: { serviceId: cred.serviceId, profileId: cred.profileId },
+                                    record: cred.record,
+                                });
+                            } catch {
+                                return { type: "invalid-params" as const };
+                            }
+                        } else if (cred.kind !== "sealed" || !cred.sealed) {
+                            return { type: "invalid-params" as const };
+                        }
                     }
                 }
 
@@ -306,6 +251,9 @@ export function registerAccountEncryptionMigrateRoutes(app: Fastify): void {
                         : (settingsContent?.t === "encrypted" ? settingsContent.c : null);
                 const currentMode = resolveEffectiveAccountEncryptionModeFromAccountRow(account);
 
+                // The account row is the storage-mode authority consulted by the canonical credential writer.
+                // Updating it first inside this serializable transaction fences both race orders: an earlier
+                // credential writer is observed here, while a later old-mode writer sees the new account mode.
                 await tx.account.update({
                     where: { id: userId },
                     data: {
@@ -321,6 +269,118 @@ export function registerAccountEncryptionMigrateRoutes(app: Fastify): void {
                         } : {}),
                     },
                 });
+
+                if (currentMode !== toMode) {
+                    await deleteConnectedServiceUsageSourcesForAccount({ accountId: userId }, tx);
+                    await deleteProviderAccountUsageRecordsForAccount({ accountId: userId }, tx);
+                }
+
+                let connectedServicesChanged = false;
+                if (connectedServices.action === "clear") {
+                    if (currentMode === toMode) {
+                        await deleteConnectedServiceUsageSourcesForAccount({ accountId: userId }, tx);
+                    }
+                    const deleted = await tx.serviceAccountToken.deleteMany({ where: { accountId: userId } });
+                    connectedServicesChanged = deleted.count > 0;
+                } else if (connectedServices.action === "migrate") {
+
+                    const atRest = encryptionEnv.plainAccountCredentialsAtRest === "none" ? "none" : "server_sealed";
+
+                    for (const cred of connectedServices.credentials) {
+                        if (toMode === "plain") {
+                            const record = cred.record!;
+                            const json = JSON.stringify(record);
+                            const keyPath = ["storage", "connect_credential", userId, cred.serviceId, cred.profileId, "v1"];
+                            const tokenBytes =
+                                atRest === "server_sealed"
+                                    ? (encryptString(keyPath, json) as Uint8Array<ArrayBuffer>)
+                                    : encodeUtf8Bytes(json);
+                            const providerEmail =
+                                record.kind === "oauth"
+                                    ? record.oauth?.providerEmail ?? null
+                                    : record.token?.providerEmail ?? null;
+                            const providerAccountId =
+                                record.kind === "oauth"
+                                    ? record.oauth?.providerAccountId ?? null
+                                    : record.token?.providerAccountId ?? null;
+                            const metadata = {
+                                v: 3,
+                                storage: atRest === "server_sealed" ? "server_sealed_json_v1" : "plain_json_v1",
+                                kind: record.kind,
+                                providerEmail,
+                                providerAccountId,
+                            };
+                            const expiresAt =
+                                typeof record.expiresAt === "number" && Number.isFinite(record.expiresAt)
+                                    ? new Date(record.expiresAt)
+                                    : null;
+                            const mutation = await mutateConnectedServiceCredentialInTx(tx, {
+                                accountId: userId,
+                                serviceId: cred.serviceId,
+                                profileId: cred.profileId,
+                                token: tokenBytes,
+                                metadata,
+                                expiresAt,
+                                storageMode: "plain",
+                                incomingIdentity: { providerEmail, providerAccountId },
+                                allowProviderIdentityChange: false,
+                            });
+                            if (mutation.status !== "written") {
+                                throw new AccountEncryptionMigrationCredentialRejectedError(mutation.status);
+                            }
+                            connectedServicesChanged = true;
+                            continue;
+                        }
+
+                        // toMode === "e2ee"
+                        const sealed = cred.sealed!;
+                        const meta = cred.metadata;
+                        const metadata = {
+                            v: 2,
+                            format: sealed.format,
+                            kind: meta?.kind ?? "oauth",
+                            providerEmail: meta?.providerEmail ?? null,
+                            providerAccountId: meta?.providerAccountId ?? null,
+                        };
+                        const expiresAt =
+                            typeof meta?.expiresAt === "number" && Number.isFinite(meta.expiresAt)
+                                ? new Date(meta.expiresAt)
+                                : null;
+                        const mutation = await mutateConnectedServiceCredentialInTx(tx, {
+                            accountId: userId,
+                            serviceId: cred.serviceId,
+                            profileId: cred.profileId,
+                            token: encodeCredentialTokenBytes(sealed.ciphertext),
+                            metadata,
+                            expiresAt,
+                            storageMode: "sealed",
+                            incomingIdentity: {
+                                providerEmail: meta?.providerEmail ?? null,
+                                providerAccountId: meta?.providerAccountId ?? null,
+                            },
+                            allowProviderIdentityChange: false,
+                        });
+                        if (mutation.status !== "written") {
+                            throw new AccountEncryptionMigrationCredentialRejectedError(mutation.status);
+                        }
+                        connectedServicesChanged = true;
+                    }
+                }
+
+                if (connectedServicesChanged) {
+                    await recordConnectedServiceAccountProfileChange(tx, { accountId: userId });
+                }
+
+                if (automations.action === "clear") {
+                    await tx.automation.deleteMany({ where: { accountId: userId } });
+                } else if (automations.action === "migrate") {
+                    for (const item of automations.templates) {
+                        await tx.automation.update({
+                            where: { id: item.automationId },
+                            data: { templateCiphertext: item.templateCiphertext, updatedAt: new Date() },
+                        });
+                    }
+                }
 
                 await recordAccountSettingsSnapshotsForWrite({
                     tx,
@@ -385,7 +445,10 @@ export function registerAccountEncryptionMigrateRoutes(app: Fastify): void {
                 mode: result.mode,
                 settingsVersion: result.settingsVersion,
             });
-        } catch {
+        } catch (error) {
+            if (error instanceof AccountEncryptionMigrationCredentialRejectedError) {
+                return reply.code(400).send({ error: "invalid-params" });
+            }
             return reply.code(500).send({ error: "internal" });
         }
     });

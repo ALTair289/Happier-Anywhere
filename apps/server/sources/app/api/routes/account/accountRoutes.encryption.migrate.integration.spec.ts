@@ -11,6 +11,8 @@ import {
     createProviderAccountUsageRecordKey,
     createUsageSnapshot,
 } from "../connect/providerAccountUsageTestkit";
+import { mutateConnectedServiceCredential } from "../connect/credentials/mutation";
+import { registerAutomationCrudRoutes } from "../automations/registerAutomationCrudRoutes";
 import tweetnacl from "tweetnacl";
 import * as privacyKit from "privacy-kit";
 
@@ -20,9 +22,13 @@ const { emitUpdate } = vi.hoisted(() => ({
     emitUpdate: vi.fn(),
 }));
 
-vi.mock("@/app/events/eventRouter", () => ({
-    eventRouter: { emitUpdate },
-}));
+vi.mock("@/app/events/eventRouter", async () => {
+    const actual = await vi.importActual<typeof import("@/app/events/eventRouter")>("@/app/events/eventRouter");
+    return {
+        ...actual,
+        eventRouter: { emitUpdate },
+    };
+});
 
 function createTestApp() {
     const app = Fastify({ logger: false });
@@ -41,12 +47,54 @@ function createTestApp() {
     return typed;
 }
 
+function deferred(): Readonly<{ promise: Promise<void>; resolve: () => void }> {
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => {
+        resolve = done;
+    });
+    return { promise, resolve };
+}
+
+function installAccountModeReadBarrier(accountId: string): Readonly<{
+    modeObserved: Promise<void>;
+    release: () => void;
+    restore: () => void;
+}> {
+    const modeObserved = deferred();
+    const releaseRead = deferred();
+    let paused = false;
+    const mutableDb = db as any;
+    const accountDelegate = mutableDb.account;
+    const originalFindUnique = accountDelegate.findUnique;
+
+    accountDelegate.findUnique = async (args: unknown) => {
+        const result = await originalFindUnique.call(accountDelegate, args);
+        const query = args as { where?: { id?: string }; select?: { encryptionMode?: boolean } } | undefined;
+        if (!paused && query?.where?.id === accountId && query.select?.encryptionMode === true) {
+            paused = true;
+            modeObserved.resolve();
+            await releaseRead.promise;
+        }
+        return result;
+    };
+
+    return {
+        modeObserved: modeObserved.promise,
+        release: releaseRead.resolve,
+        restore: () => {
+            releaseRead.resolve();
+            accountDelegate.findUnique = originalFindUnique;
+        },
+    };
+}
+
 describe("registerAccountEncryptionMigrateRoutes (integration)", () => {
     let harness: LightSqliteHarness;
     beforeAll(async () => {
         harness = await createLightSqliteHarness({
             tempDirPrefix: "happier-account-encryption-migrate-",
             initEncrypt: true,
+            env: { HAPPIER_SQLITE_CONNECTION_LIMIT: "2" },
         });
     }, 120_000);
 
@@ -164,12 +212,12 @@ describe("registerAccountEncryptionMigrateRoutes (integration)", () => {
             accountId: account.id,
             recordId: snapshot.recordId,
             recordKey: snapshot.recordKey,
-            payloadMode: "plain_json_v1",
+            payloadMode: "sealed_account_scoped_v1",
+            sealedPayload: { format: "account_scoped_v1", ciphertext: "sealed-usage-before-mode-change" },
             status: "ok",
             fetchedAt: snapshot.fetchedAtMs,
             staleAfterMs: snapshot.staleAfterMs,
             materialFingerprint: "usage:account-clear-source",
-            snapshot,
             source: {
                 serviceId: "openai-codex",
                 profileId: "work",
@@ -197,16 +245,218 @@ describe("registerAccountEncryptionMigrateRoutes (integration)", () => {
         });
 
         expect(res.statusCode).toBe(200);
-        expect(await db.connectedServiceUsageSource.findUnique({
+        expect(await db.connectedServiceUsageSource.findFirst({
             where: {
-                accountId_serviceId_profileId: {
                     accountId: account.id,
                     serviceId: "openai-codex",
                     profileId: "work",
-                },
             },
             select: { id: true },
         })).toBeNull();
+        expect(await db.providerAccountUsageRecord.count({ where: { accountId: account.id } })).toBe(0);
+    });
+
+    it("retains mode-compatible provider usage records and sources during a same-mode credential rewrite", async () => {
+        harness.resetEnv({
+            HAPPIER_FEATURE_ENCRYPTION__STORAGE_POLICY: "optional",
+            HAPPIER_FEATURE_ENCRYPTION__ALLOW_ACCOUNT_OPTOUT: "1",
+            HAPPIER_FEATURE_ENCRYPTION__PLAIN_ACCOUNT_CREDENTIALS_AT_REST: "none",
+        });
+        const account = await db.account.create({
+            data: { publicKey: null, encryptionMode: "plain", settings: null, settingsVersion: 0 },
+            select: { id: true },
+        });
+        await db.serviceAccountToken.create({
+            data: {
+                accountId: account.id,
+                vendor: "openai-codex",
+                profileId: "work",
+                token: new TextEncoder().encode("before"),
+                metadata: { v: 3, storage: "plain_json_v1", kind: "token", providerAccountId: "acct-retained", providerEmail: null },
+            },
+        });
+        const snapshot = createUsageSnapshot({
+            fetchedAt: Date.now(),
+            recordKey: createProviderAccountUsageRecordKey({ accountSubjectId: "acct-retained" }),
+            profileId: "work",
+        });
+        await writeProviderAccountUsageRecordAndLinkConnectedServiceUsageSource({
+            accountId: account.id,
+            recordId: snapshot.recordId,
+            recordKey: snapshot.recordKey,
+            payloadMode: "plain_json_v1",
+            status: "ok",
+            fetchedAt: snapshot.fetchedAtMs,
+            staleAfterMs: snapshot.staleAfterMs,
+            snapshot,
+            source: { serviceId: "openai-codex", profileId: "work", bindingKind: "profile" },
+        });
+
+        const app = createTestApp();
+        registerAccountEncryptionMigrateRoutes(app as any);
+        await app.ready();
+        const res = await app.inject({
+            method: "POST",
+            url: "/v1/account/encryption/migrate",
+            headers: { "content-type": "application/json", "x-test-user-id": account.id },
+            payload: {
+                toMode: "plain",
+                expectedSettingsVersion: 0,
+                settingsContent: { t: "plain", v: { schemaVersion: 2 } },
+                connectedServices: {
+                    action: "migrate",
+                    credentials: [{
+                        serviceId: "openai-codex",
+                        profileId: "work",
+                        kind: "plain",
+                        record: {
+                            v: 1,
+                            serviceId: "openai-codex",
+                            profileId: "work",
+                            createdAt: 1,
+                            updatedAt: 2,
+                            expiresAt: null,
+                            kind: "token",
+                            oauth: null,
+                            token: { token: "after", providerAccountId: "acct-retained", providerEmail: null, raw: null },
+                        },
+                    }],
+                },
+                automations: { action: "assert_empty" },
+            },
+        });
+
+        expect(res.statusCode).toBe(200);
+        expect(await db.providerAccountUsageRecord.count({ where: { accountId: account.id } })).toBe(1);
+        expect(await db.connectedServiceUsageSource.count({ where: { accountId: account.id } })).toBe(1);
+        await app.close();
+    });
+
+    it("rejects a plaintext migration item whose embedded credential binding differs from its outer key", async () => {
+        harness.resetEnv({
+            HAPPIER_FEATURE_ENCRYPTION__STORAGE_POLICY: "optional",
+            HAPPIER_FEATURE_ENCRYPTION__ALLOW_ACCOUNT_OPTOUT: "1",
+            HAPPIER_FEATURE_ENCRYPTION__PLAIN_ACCOUNT_CREDENTIALS_AT_REST: "none",
+        });
+        const account = await db.account.create({
+            data: { publicKey: "pk-misbound-migration", encryptionMode: "e2ee", settings: "ciphertext", settingsVersion: 0 },
+            select: { id: true },
+        });
+        await db.serviceAccountToken.create({
+            data: {
+                accountId: account.id,
+                vendor: "openai-codex",
+                profileId: "work",
+                token: new TextEncoder().encode("sealed-before"),
+                metadata: { v: 2, format: "account_scoped_v1", kind: "token", providerAccountId: "acct-1", credentialRevision: "csr_AAAAAAAAAAAAAAAAAAAAAA" },
+            },
+        });
+        const app = createTestApp();
+        registerAccountEncryptionMigrateRoutes(app as any);
+        await app.ready();
+
+        const res = await app.inject({
+            method: "POST",
+            url: "/v1/account/encryption/migrate",
+            headers: { "content-type": "application/json", "x-test-user-id": account.id },
+            payload: {
+                toMode: "plain",
+                expectedSettingsVersion: 0,
+                settingsContent: { t: "plain", v: { schemaVersion: 2 } },
+                connectedServices: {
+                    action: "migrate",
+                    credentials: [{
+                        serviceId: "openai-codex",
+                        profileId: "work",
+                        kind: "plain",
+                        record: {
+                            v: 1,
+                            serviceId: "openai-codex",
+                            profileId: "other",
+                            createdAt: 1,
+                            updatedAt: 2,
+                            expiresAt: null,
+                            kind: "token",
+                            oauth: null,
+                            token: { token: "foreign", providerAccountId: "acct-1", providerEmail: null, raw: null },
+                        },
+                    }],
+                },
+                automations: { action: "assert_empty" },
+            },
+        });
+
+        expect(res.statusCode).toBe(400);
+        await expect(db.account.findUnique({ where: { id: account.id }, select: { encryptionMode: true, settingsVersion: true } }))
+            .resolves.toEqual({ encryptionMode: "e2ee", settingsVersion: 0 });
+        expect(new TextDecoder().decode((await db.serviceAccountToken.findFirst({ where: { accountId: account.id }, select: { token: true } }))?.token))
+            .toBe("sealed-before");
+        expect(emitUpdate).not.toHaveBeenCalled();
+    });
+
+    it("rejects provider identity changes during credential migration and rolls back account/settings writes", async () => {
+        harness.resetEnv({
+            HAPPIER_FEATURE_ENCRYPTION__STORAGE_POLICY: "optional",
+            HAPPIER_FEATURE_ENCRYPTION__ALLOW_ACCOUNT_OPTOUT: "1",
+            HAPPIER_FEATURE_ENCRYPTION__PLAIN_ACCOUNT_CREDENTIALS_AT_REST: "none",
+        });
+        const account = await db.account.create({
+            data: { publicKey: "pk-identity-migration", encryptionMode: "e2ee", settings: "ciphertext", settingsVersion: 0 },
+            select: { id: true },
+        });
+        await expect(mutateConnectedServiceCredential({
+            accountId: account.id,
+            serviceId: "openai-codex",
+            profileId: "work",
+            token: new TextEncoder().encode("sealed-before"),
+            metadata: { v: 2, format: "account_scoped_v1", kind: "token", providerAccountId: "acct-old" },
+            expiresAt: null,
+            storageMode: "sealed",
+            incomingIdentity: { providerAccountId: "acct-old" },
+            allowProviderIdentityChange: false,
+        })).resolves.toMatchObject({ status: "written" });
+        emitUpdate.mockClear();
+        const app = createTestApp();
+        registerAccountEncryptionMigrateRoutes(app as any);
+        await app.ready();
+
+        const res = await app.inject({
+            method: "POST",
+            url: "/v1/account/encryption/migrate",
+            headers: { "content-type": "application/json", "x-test-user-id": account.id },
+            payload: {
+                toMode: "plain",
+                expectedSettingsVersion: 0,
+                settingsContent: { t: "plain", v: { schemaVersion: 2 } },
+                connectedServices: {
+                    action: "migrate",
+                    credentials: [{
+                        serviceId: "openai-codex",
+                        profileId: "work",
+                        kind: "plain",
+                        record: {
+                            v: 1,
+                            serviceId: "openai-codex",
+                            profileId: "work",
+                            createdAt: 1,
+                            updatedAt: 2,
+                            expiresAt: null,
+                            kind: "token",
+                            oauth: null,
+                            token: { token: "changed", providerAccountId: "acct-new", providerEmail: null, raw: null },
+                        },
+                    }],
+                },
+                automations: { action: "assert_empty" },
+            },
+        });
+
+        expect(res.statusCode).toBe(400);
+        await expect(db.account.findUnique({ where: { id: account.id }, select: { encryptionMode: true, settingsVersion: true, settings: true } }))
+            .resolves.toEqual({ encryptionMode: "e2ee", settingsVersion: 0, settings: "ciphertext" });
+        expect(new TextDecoder().decode((await db.serviceAccountToken.findFirst({ where: { accountId: account.id }, select: { token: true } }))?.token))
+            .toBe("sealed-before");
+        expect(emitUpdate).not.toHaveBeenCalled();
     });
 
     it("does not emit a settings version hint when migration preconditions fail", async () => {
@@ -509,6 +759,8 @@ describe("registerAccountEncryptionMigrateRoutes (integration)", () => {
                 vendor: "openai-codex",
                 profileId: "work",
                 token: new TextEncoder().encode("{\"kind\":\"oauth\"}"),
+                refreshLeaseOwnerMachineId: "stale-daemon:refresh-attempt",
+                refreshLeaseExpiresAt: new Date(Date.now() + 60_000),
             },
         });
 
@@ -589,17 +841,329 @@ describe("registerAccountEncryptionMigrateRoutes (integration)", () => {
 
         const tokenRow = await db.serviceAccountToken.findUnique({
             where: { accountId_vendor_profileId: { accountId: account.id, vendor: "openai-codex", profileId: "work" } },
-            select: { token: true, metadata: true },
+            select: {
+                token: true,
+                metadata: true,
+                refreshLeaseOwnerMachineId: true,
+                refreshLeaseExpiresAt: true,
+            },
         });
         expect(tokenRow?.token?.byteLength).toBeGreaterThan(0);
         expect((tokenRow?.metadata as any)?.v).toBe(2);
         expect((tokenRow?.metadata as any)?.format).toBe("account_scoped_v1");
+        expect((tokenRow?.metadata as any)?.credentialRevision).toEqual(expect.stringMatching(/^csr_/));
+        expect(tokenRow?.refreshLeaseOwnerMachineId).toBeNull();
+        expect(tokenRow?.refreshLeaseExpiresAt).toBeNull();
+
+        const stalePlainWrite = await mutateConnectedServiceCredential({
+            accountId: account.id,
+            serviceId: "openai-codex",
+            profileId: "work",
+            token: new TextEncoder().encode("stale-plain-write"),
+            metadata: { v: 3, storage: "plain_json_v1", kind: "oauth", providerEmail: "x@example.com", providerAccountId: "acct" },
+            expiresAt: null,
+            storageMode: "plain",
+            incomingIdentity: { providerEmail: "x@example.com", providerAccountId: "acct" },
+            allowProviderIdentityChange: false,
+        });
+        expect(stalePlainWrite).toEqual({ status: "storage_mode_mismatch" });
+        await expect(db.serviceAccountToken.findUnique({
+            where: { accountId_vendor_profileId: { accountId: account.id, vendor: "openai-codex", profileId: "work" } },
+            select: { token: true },
+        })).resolves.toEqual({ token: tokenRow?.token });
+
+        expect(emitUpdate).toHaveBeenCalledWith(expect.objectContaining({
+            userId: account.id,
+            payload: expect.objectContaining({
+                body: expect.objectContaining({ t: "update-account", connectedServicesV2: expect.any(Array) }),
+            }),
+            recipientFilter: { type: "user-scoped-only" },
+        }));
 
         const updatedAutomation = await db.automation.findUnique({
             where: { id: automation.id },
             select: { templateCiphertext: true },
         });
         expect(updatedAutomation?.templateCiphertext).toBe(encryptedTemplateCiphertext);
+
+        await app.close();
+    });
+
+    it("rejects a stale plain automation template update after a plain-to-e2ee migration commits", async () => {
+        harness.resetEnv({
+            HAPPIER_FEATURE_ENCRYPTION__STORAGE_POLICY: "optional",
+            HAPPIER_FEATURE_ENCRYPTION__ALLOW_ACCOUNT_OPTOUT: "1",
+        });
+        const kp = tweetnacl.sign.keyPair();
+        const publicKey = Uint8Array.from(kp.publicKey);
+        const challenge = Uint8Array.from(crypto.getRandomValues(new Uint8Array(32)));
+        const signature = Uint8Array.from(tweetnacl.sign.detached(challenge, Uint8Array.from(kp.secretKey)));
+        const account = await db.account.create({
+            data: {
+                publicKey: privacyKit.encodeHex(publicKey),
+                encryptionMode: "plain",
+                settings: null,
+                settingsVersion: 0,
+            },
+            select: { id: true },
+        });
+        const initialPlainTemplate = JSON.stringify({
+            kind: "happier_automation_template_plain_v1",
+            payload: { prompt: "initial" },
+        });
+        const stalePlainTemplate = JSON.stringify({
+            kind: "happier_automation_template_plain_v1",
+            payload: { prompt: "stale update" },
+        });
+        const migratedEncryptedTemplate = JSON.stringify({
+            kind: "happier_automation_template_encrypted_v1",
+            payloadCiphertext: "migrated-ciphertext",
+        });
+        const automation = await db.automation.create({
+            data: {
+                accountId: account.id,
+                name: "Migration race",
+                enabled: false,
+                scheduleKind: "interval",
+                everyMs: 60_000,
+                timezone: null,
+                scheduleExpr: null,
+                targetType: "new_session",
+                templateCiphertext: initialPlainTemplate,
+            },
+            select: { id: true },
+        });
+
+        const app = createTestApp();
+        registerAccountEncryptionMigrateRoutes(app as any);
+        registerAutomationCrudRoutes(app as any);
+        await app.ready();
+        const barrier = installAccountModeReadBarrier(account.id);
+        try {
+            const automationPatch = app.inject({
+                method: "PATCH",
+                url: `/v2/automations/${automation.id}`,
+                headers: { "content-type": "application/json", "x-test-user-id": account.id },
+                payload: { templateCiphertext: stalePlainTemplate },
+            });
+            await barrier.modeObserved;
+
+            const migration = await app.inject({
+                method: "POST",
+                url: "/v1/account/encryption/migrate",
+                headers: { "content-type": "application/json", "x-test-user-id": account.id },
+                payload: {
+                    toMode: "e2ee",
+                    expectedSettingsVersion: 0,
+                    settingsContent: { t: "encrypted", c: "settings-ciphertext" },
+                    connectedServices: { action: "assert_empty" },
+                    automations: {
+                        action: "migrate",
+                        templates: [{ automationId: automation.id, templateCiphertext: migratedEncryptedTemplate }],
+                    },
+                    keyProof: {
+                        publicKey: privacyKit.encodeBase64(publicKey),
+                        challenge: privacyKit.encodeBase64(challenge),
+                        signature: privacyKit.encodeBase64(signature),
+                    },
+                },
+            });
+            expect(migration.statusCode).toBe(200);
+
+            barrier.release();
+            const patchResult = await automationPatch;
+            expect(patchResult.statusCode).toBe(400);
+            expect(patchResult.json()).toEqual({
+                error: "templateCiphertext: expected encrypted template envelope",
+            });
+        } finally {
+            barrier.restore();
+            await app.close();
+        }
+
+        await expect(db.account.findUniqueOrThrow({
+            where: { id: account.id },
+            select: { encryptionMode: true },
+        })).resolves.toEqual({ encryptionMode: "e2ee" });
+        await expect(db.automation.findUniqueOrThrow({
+            where: { id: automation.id },
+            select: { templateCiphertext: true },
+        })).resolves.toEqual({ templateCiphertext: migratedEncryptedTemplate });
+    });
+
+    it("rolls back credential rewrites when a later automation migration fails", async () => {
+        harness.resetEnv({
+            HAPPIER_FEATURE_ENCRYPTION__STORAGE_POLICY: "optional",
+            HAPPIER_FEATURE_ENCRYPTION__ALLOW_ACCOUNT_OPTOUT: "1",
+            HAPPIER_FEATURE_ENCRYPTION__PLAIN_ACCOUNT_CREDENTIALS_AT_REST: "none",
+        });
+
+        const account = await db.account.create({
+            data: { publicKey: "pk-mode-rollback", encryptionMode: "e2ee", settings: "ciphertext", settingsVersion: 0 },
+            select: { id: true },
+        });
+        const previousRevision = "csr_AAAAAAAAAAAAAAAAAAAAAA";
+        await db.serviceAccountToken.create({
+            data: {
+                accountId: account.id,
+                vendor: "openai-codex",
+                profileId: "default",
+                token: new TextEncoder().encode("sealed-before-rollback"),
+                metadata: { v: 2, format: "account_scoped_v1", kind: "token", credentialRevision: previousRevision },
+                refreshLeaseOwnerMachineId: "stale-daemon:rollback",
+                refreshLeaseExpiresAt: new Date(Date.now() + 60_000),
+            },
+        });
+        const automation = await db.automation.create({
+            data: {
+                accountId: account.id,
+                name: "rollback automation",
+                scheduleKind: "interval",
+                everyMs: 60_000,
+                timezone: null,
+                scheduleExpr: null,
+                targetType: "new_session",
+                templateCiphertext: JSON.stringify({ kind: "happier_automation_template_encrypted_v1", payloadCiphertext: "before" }),
+            },
+            select: { id: true },
+        });
+
+        const app = createTestApp();
+        registerAccountEncryptionMigrateRoutes(app as any);
+        await app.ready();
+        const res = await app.inject({
+            method: "POST",
+            url: "/v1/account/encryption/migrate",
+            headers: { "content-type": "application/json", "x-test-user-id": account.id },
+            payload: {
+                toMode: "plain",
+                expectedSettingsVersion: 0,
+                settingsContent: { t: "plain", v: { schemaVersion: 2 } },
+                connectedServices: {
+                    action: "migrate",
+                    credentials: [{
+                        serviceId: "openai-codex",
+                        profileId: "default",
+                        kind: "plain",
+                        record: {
+                            v: 1,
+                            serviceId: "openai-codex",
+                            profileId: "default",
+                            createdAt: 1,
+                            updatedAt: 2,
+                            expiresAt: null,
+                            kind: "token",
+                            oauth: null,
+                            token: { token: "plain-should-rollback", providerAccountId: null, providerEmail: null, raw: null },
+                        },
+                    }],
+                },
+                automations: {
+                    action: "migrate",
+                    templates: [{ automationId: automation.id, templateCiphertext: "invalid-template" }],
+                },
+            },
+        });
+
+        expect(res.statusCode).toBe(400);
+        await expect(db.account.findUnique({
+            where: { id: account.id },
+            select: { encryptionMode: true, settingsVersion: true, settings: true },
+        })).resolves.toEqual({ encryptionMode: "e2ee", settingsVersion: 0, settings: "ciphertext" });
+        const credential = await db.serviceAccountToken.findUnique({
+            where: { accountId_vendor_profileId: { accountId: account.id, vendor: "openai-codex", profileId: "default" } },
+            select: { token: true, metadata: true, refreshLeaseOwnerMachineId: true, refreshLeaseExpiresAt: true },
+        });
+        expect(new TextDecoder().decode(credential?.token)).toBe("sealed-before-rollback");
+        expect(credential?.metadata).toEqual(expect.objectContaining({ credentialRevision: previousRevision }));
+        expect(credential?.refreshLeaseOwnerMachineId).toBe("stale-daemon:rollback");
+        expect(credential?.refreshLeaseExpiresAt).not.toBeNull();
+
+        await app.close();
+    });
+
+    it("does not rewrite an earlier credential when a later credential has the wrong target mode", async () => {
+        harness.resetEnv({
+            HAPPIER_FEATURE_ENCRYPTION__STORAGE_POLICY: "optional",
+            HAPPIER_FEATURE_ENCRYPTION__ALLOW_ACCOUNT_OPTOUT: "1",
+            HAPPIER_FEATURE_ENCRYPTION__PLAIN_ACCOUNT_CREDENTIALS_AT_REST: "none",
+        });
+        const account = await db.account.create({
+            data: { publicKey: "pk-credential-mode-rollback", encryptionMode: "e2ee", settings: "ciphertext", settingsVersion: 0 },
+            select: { id: true },
+        });
+        const previousRevision = "csr_AAAAAAAAAAAAAAAAAAAAAA";
+        for (const profileId of ["default", "work"] as const) {
+            await db.serviceAccountToken.create({
+                data: {
+                    accountId: account.id,
+                    vendor: "openai-codex",
+                    profileId,
+                    token: new TextEncoder().encode(`sealed-${profileId}-before-rollback`),
+                    metadata: { v: 2, format: "account_scoped_v1", kind: "token", credentialRevision: previousRevision },
+                    refreshLeaseOwnerMachineId: `stale-daemon:${profileId}`,
+                    refreshLeaseExpiresAt: new Date(Date.now() + 60_000),
+                },
+            });
+        }
+
+        const app = createTestApp();
+        registerAccountEncryptionMigrateRoutes(app as any);
+        await app.ready();
+        const res = await app.inject({
+            method: "POST",
+            url: "/v1/account/encryption/migrate",
+            headers: { "content-type": "application/json", "x-test-user-id": account.id },
+            payload: {
+                toMode: "plain",
+                expectedSettingsVersion: 0,
+                settingsContent: { t: "plain", v: { schemaVersion: 2 } },
+                connectedServices: {
+                    action: "migrate",
+                    credentials: [
+                        {
+                            serviceId: "openai-codex",
+                            profileId: "default",
+                            kind: "plain",
+                            record: {
+                                v: 1,
+                                serviceId: "openai-codex",
+                                profileId: "default",
+                                createdAt: 1,
+                                updatedAt: 2,
+                                expiresAt: null,
+                                kind: "token",
+                                oauth: null,
+                                token: { token: "plain-should-rollback", providerAccountId: null, providerEmail: null, raw: null },
+                            },
+                        },
+                        {
+                            serviceId: "openai-codex",
+                            profileId: "work",
+                            kind: "sealed",
+                            sealed: { format: "account_scoped_v1", ciphertext: "wrong-mode-late" },
+                        },
+                    ],
+                },
+                automations: { action: "assert_empty" },
+            },
+        });
+
+        expect(res.statusCode).toBe(400);
+        await expect(db.account.findUnique({
+            where: { id: account.id },
+            select: { encryptionMode: true, settingsVersion: true, settings: true },
+        })).resolves.toEqual({ encryptionMode: "e2ee", settingsVersion: 0, settings: "ciphertext" });
+        for (const profileId of ["default", "work"] as const) {
+            const credential = await db.serviceAccountToken.findUnique({
+                where: { accountId_vendor_profileId: { accountId: account.id, vendor: "openai-codex", profileId } },
+                select: { token: true, metadata: true, refreshLeaseOwnerMachineId: true, refreshLeaseExpiresAt: true },
+            });
+            expect(new TextDecoder().decode(credential?.token)).toBe(`sealed-${profileId}-before-rollback`);
+            expect(credential?.metadata).toEqual(expect.objectContaining({ credentialRevision: previousRevision }));
+            expect(credential?.refreshLeaseOwnerMachineId).toBe(`stale-daemon:${profileId}`);
+            expect(credential?.refreshLeaseExpiresAt).not.toBeNull();
+        }
 
         await app.close();
     });
