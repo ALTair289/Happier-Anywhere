@@ -18,6 +18,7 @@ import {
   SessionHandoffWorkspacePreflightSummarySchema,
 } from './handoffStatus.js';
 import { TransferChunkEnvelopeSchema, TransferEndpointCandidateSchema } from '../../machineTransfer/transferStream.js';
+import { ConnectedServiceBindingsV1Schema } from '../../connect/connectedServiceBindings.js';
 
 const MAX_HANDOFF_ID_LENGTH = 256;
 const MAX_MACHINE_ID_LENGTH = 256;
@@ -165,12 +166,21 @@ export const SessionHandoffPrepareTargetRequestSchema = z
   .strict();
 export type SessionHandoffPrepareTargetRequest = z.infer<typeof SessionHandoffPrepareTargetRequestSchema>;
 
+export const SessionHandoffPrepareTargetRequestV2Schema = SessionHandoffPrepareTargetRequestSchema.extend({
+  sessionId: z.string().min(1).max(MAX_HANDOFF_ID_LENGTH),
+}).strict();
+export type SessionHandoffPrepareTargetRequestV2 = z.infer<typeof SessionHandoffPrepareTargetRequestV2Schema>;
+
 export const SessionHandoffPrepareTargetResultGetRequestSchema = z
   .object({
     handoffId: z.string().min(1).max(MAX_HANDOFF_ID_LENGTH),
   })
   .strict();
 export type SessionHandoffPrepareTargetResultGetRequest = z.infer<typeof SessionHandoffPrepareTargetResultGetRequestSchema>;
+export const SessionHandoffPrepareTargetResultGetRequestV2Schema = SessionHandoffPrepareTargetResultGetRequestSchema.extend({
+  sessionId: z.string().min(1).max(MAX_HANDOFF_ID_LENGTH),
+}).strict();
+export type SessionHandoffPrepareTargetResultGetRequestV2 = z.infer<typeof SessionHandoffPrepareTargetResultGetRequestV2Schema>;
 
 export const SessionHandoffCommitRequestSchema = z
   .object({
@@ -189,6 +199,39 @@ export const SessionHandoffAbortRequestSchema = z
   })
   .strict();
 export type SessionHandoffAbortRequest = z.infer<typeof SessionHandoffAbortRequestSchema>;
+
+export const SessionHandoffAbortRequestV2Schema = SessionHandoffAbortRequestSchema.extend({
+  sessionId: z.string().min(1).max(MAX_HANDOFF_ID_LENGTH),
+}).strict();
+export type SessionHandoffAbortRequestV2 = z.infer<typeof SessionHandoffAbortRequestV2Schema>;
+
+export const SessionHandoffTargetResumeRequestV2Schema = z.object({
+  handoffId: z.string().min(1).max(MAX_HANDOFF_ID_LENGTH),
+  sessionId: z.string().min(1).max(MAX_HANDOFF_ID_LENGTH),
+  attemptId: z.string().min(1).max(MAX_HANDOFF_ID_LENGTH),
+  connectedServices: ConnectedServiceBindingsV1Schema.optional(),
+}).strict();
+export type SessionHandoffTargetResumeRequestV2 = z.infer<typeof SessionHandoffTargetResumeRequestV2Schema>;
+
+export const SessionHandoffTargetResumeResponseV2Schema = z.object({
+  handoffId: z.string().min(1).max(MAX_HANDOFF_ID_LENGTH),
+  sessionId: z.string().min(1).max(MAX_HANDOFF_ID_LENGTH),
+  disposition: z.enum(['started_for_handoff', 'same_request_runner', 'preexisting_or_adopted']),
+}).strict();
+export type SessionHandoffTargetResumeResponseV2 = z.infer<typeof SessionHandoffTargetResumeResponseV2Schema>;
+
+export const SessionHandoffTargetConfirmRequestV2Schema = z.object({
+  handoffId: z.string().min(1).max(MAX_HANDOFF_ID_LENGTH),
+  sessionId: z.string().min(1).max(MAX_HANDOFF_ID_LENGTH),
+  attemptId: z.string().min(1).max(MAX_HANDOFF_ID_LENGTH),
+}).strict();
+export type SessionHandoffTargetConfirmRequestV2 = z.infer<typeof SessionHandoffTargetConfirmRequestV2Schema>;
+
+export const SessionHandoffCommitRequestV2Schema = SessionHandoffCommitRequestSchema.extend({
+  sessionId: z.string().min(1).max(MAX_HANDOFF_ID_LENGTH),
+  attemptId: z.string().min(1).max(MAX_HANDOFF_ID_LENGTH),
+}).strict();
+export type SessionHandoffCommitRequestV2 = z.infer<typeof SessionHandoffCommitRequestV2Schema>;
 
 export const SessionHandoffStartResponseSchema = z
   .object({
@@ -237,6 +280,34 @@ export const SessionHandoffCommitResponseSchema = z
   .strict();
 export type SessionHandoffCommitResponse = z.infer<typeof SessionHandoffCommitResponseSchema>;
 
+export const SessionHandoffTargetCleanupSchema = z.discriminatedUnion('status', [
+  z.object({ status: z.literal('legacy_cleanup_unavailable') }).strict(),
+  z.object({ status: z.literal('not_applicable'), reason: z.literal('source_only') }).strict(),
+  z.object({ status: z.literal('not_required') }).strict(),
+  z.object({ status: z.literal('pending') }).strict(),
+  z
+    .object({
+      status: z.literal('proved_absent'),
+      proof: z.enum(['stopped', 'already_inactive']),
+      provedAtMs: z.number().int().min(0),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal('not_owned'),
+      reason: z.enum(['resume_not_attempted', 'preexisting_or_adopted']),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal('failed'),
+      reason: z.enum(['failed', 'unreachable', 'ambiguous']),
+      attemptedAtMs: z.number().int().min(0),
+    })
+    .strict(),
+]);
+export type SessionHandoffTargetCleanup = z.infer<typeof SessionHandoffTargetCleanupSchema>;
+
 export const SessionHandoffAbortResponseSchema = z
   .object({
     handoffId: z.string().min(1).max(MAX_HANDOFF_ID_LENGTH),
@@ -244,6 +315,15 @@ export const SessionHandoffAbortResponseSchema = z
   })
   .strict();
 export type SessionHandoffAbortResponse = z.infer<typeof SessionHandoffAbortResponseSchema>;
+
+export const SessionHandoffAbortResponseV2Schema = z
+  .object({
+    handoffId: z.string().min(1).max(MAX_HANDOFF_ID_LENGTH),
+    status: SessionHandoffStatusSchema,
+    targetCleanup: SessionHandoffTargetCleanupSchema,
+  })
+  .strict();
+export type SessionHandoffAbortResponseV2 = z.infer<typeof SessionHandoffAbortResponseV2Schema>;
 
 export const SessionHandoffStatusGetRequestSchema = z
   .object({

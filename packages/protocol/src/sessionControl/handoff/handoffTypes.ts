@@ -16,7 +16,7 @@ export type SessionHandoffConflictPolicy = z.infer<typeof SessionHandoffConflict
 export const SessionHandoffWorkspaceTransferStrategySchema = z.enum(['transfer_snapshot', 'sync_changes']);
 export type SessionHandoffWorkspaceTransferStrategy = z.infer<typeof SessionHandoffWorkspaceTransferStrategySchema>;
 
-export const SessionHandoffRecoveryActionSchema = z.enum(['restart_on_source', 'keep_stopped']);
+export const SessionHandoffRecoveryActionSchema = z.enum(['restart_on_source', 'retry_target_cleanup', 'keep_stopped']);
 export type SessionHandoffRecoveryAction = z.infer<typeof SessionHandoffRecoveryActionSchema>;
 
 export const SessionHandoffCodexBackendModeSchema = z.enum(CODEX_BACKEND_MODES);

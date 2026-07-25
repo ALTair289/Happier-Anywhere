@@ -530,4 +530,87 @@ describe('session handoff schemas', () => {
     ).toBe(false);
   });
 
+  it('preserves the strict v1 abort response and requires explicit cleanup only in v2', async () => {
+    const mod = await loadHandoffModule();
+    expect(mod).not.toHaveProperty('error');
+    if ('error' in mod) return;
+    const schemas = await import(new URL('./handoffSchemas.js', import.meta.url).href);
+
+    const baseResponse = {
+      handoffId: 'handoff_cleanup_1',
+      status: {
+        handoffId: 'handoff_cleanup_1',
+        status: 'aborted',
+        phase: 'cutover',
+        recoveryActions: ['keep_stopped'],
+      },
+    };
+
+    expect(mod.SessionHandoffAbortResponseSchema.safeParse(baseResponse).success).toBe(true);
+    expect(
+      mod.SessionHandoffAbortResponseSchema.safeParse({
+        ...baseResponse,
+        targetCleanup: { status: 'legacy_cleanup_unavailable' },
+      }).success,
+    ).toBe(false);
+    expect(schemas.SessionHandoffAbortResponseV2Schema.safeParse(baseResponse).success).toBe(false);
+    expect(
+      schemas.SessionHandoffAbortResponseV2Schema.safeParse({
+        ...baseResponse,
+        targetCleanup: { status: 'legacy_cleanup_unavailable' },
+      }).success,
+    ).toBe(true);
+    expect(
+      schemas.SessionHandoffAbortResponseV2Schema.safeParse({
+        ...baseResponse,
+        targetCleanup: { status: 'not_applicable', reason: 'source_only' },
+      }).success,
+    ).toBe(true);
+    expect(
+      schemas.SessionHandoffAbortResponseV2Schema.safeParse({
+        ...baseResponse,
+        targetCleanup: { status: 'not_owned', reason: 'resume_not_attempted' },
+      }).success,
+    ).toBe(true);
+    expect(
+      schemas.SessionHandoffAbortResponseV2Schema.safeParse({
+        ...baseResponse,
+        targetCleanup: { status: 'not_owned', reason: 'guessed_ownership' },
+      }).success,
+    ).toBe(false);
+    expect(
+      schemas.SessionHandoffAbortResponseV2Schema.safeParse({
+        ...baseResponse,
+        targetCleanup: { status: 'not_applicable', reason: 'source_only', proof: 'already_inactive' },
+      }).success,
+    ).toBe(false);
+  });
+
+  it('exports the canonical target-cleanup contract through the handoff protocol boundary', async () => {
+    const mod = await loadHandoffModule();
+    expect(mod).not.toHaveProperty('error');
+    if ('error' in mod) return;
+
+    expect(mod.SessionHandoffTargetCleanupSchema.safeParse({
+      status: 'not_owned',
+      reason: 'resume_not_attempted',
+    }).success).toBe(true);
+  });
+
+  it('requires exact session and attempt identity on v2 handoff mutations', async () => {
+    const schemas = await import(new URL('./handoffSchemas.js', import.meta.url).href);
+    expect(schemas.SessionHandoffTargetResumeRequestV2Schema.safeParse({
+      handoffId: 'handoff_1', sessionId: 'session_1', attemptId: 'attempt_1',
+    }).success).toBe(true);
+    expect(schemas.SessionHandoffTargetResumeRequestV2Schema.safeParse({
+      handoffId: 'handoff_1', sessionId: 'session_1',
+    }).success).toBe(false);
+    expect(schemas.SessionHandoffAbortRequestV2Schema.safeParse({
+      handoffId: 'handoff_1', sessionId: 'session_1', reason: 'failed',
+    }).success).toBe(true);
+    expect(schemas.SessionHandoffAbortRequestV2Schema.safeParse({
+      handoffId: 'handoff_1', reason: 'failed',
+    }).success).toBe(false);
+  });
+
 });

@@ -2249,14 +2249,20 @@ export {
   type TailscaleSecureAccessInstallPolicy,
   type TailscaleSecureAccessLoginPolicy,
   type TailscaleSecureAccessMode,
+  SessionHandoffAbortRequestV2Schema,
   type TailscaleSecureAccessSystemTaskStepId,
+  SessionHandoffAbortResponseV2Schema,
+  SessionHandoffTargetCleanupSchema,
   type TailscaleSecureAccessTaskParams,
   type TailscaleSecureAccessTaskResult,
+  SessionHandoffCommitRequestV2Schema,
   type TailscaleSecureAccessTaskSpec,
 } from './systemTasks/index.js';
 
+  SessionHandoffPrepareTargetResultGetRequestV2Schema,
 export {
   LlmTaskRunnerConfigV1Schema,
+  SessionHandoffPrepareTargetRequestV2Schema,
   type LlmTaskRunnerConfigV1,
 } from './llmTasks/llmTaskRunnerConfigV1.js';
 
@@ -2264,16 +2270,25 @@ export {
   ReviewFindingSchema,
   type ReviewFinding,
   type ReviewFindingId,
+  SessionHandoffTargetResumeRequestV2Schema,
+  SessionHandoffTargetResumeResponseV2Schema,
+  SessionHandoffTargetConfirmRequestV2Schema,
 } from './reviews/ReviewFinding.js';
 
+  type SessionHandoffAbortRequestV2,
 export {
+  type SessionHandoffAbortResponseV2,
+  type SessionHandoffTargetCleanup,
   ReviewQuestionSchema,
   ReviewQuestionStatusSchema,
+  type SessionHandoffCommitRequestV2,
   type ReviewQuestion,
   type ReviewQuestionStatus,
 } from './reviews/ReviewQuestion.js';
+  type SessionHandoffPrepareTargetResultGetRequestV2,
 
 export {
+  type SessionHandoffPrepareTargetRequestV2,
   ReviewAssumptionSchema,
   type ReviewAssumption,
 } from './reviews/ReviewAssumption.js';
@@ -2284,6 +2299,9 @@ export {
   ReviewEngineIdSchema,
   ReviewRunLocationSchema,
   CodeRabbitReviewEngineInputSchema,
+  type SessionHandoffTargetResumeRequestV2,
+  type SessionHandoffTargetResumeResponseV2,
+  type SessionHandoffTargetConfirmRequestV2,
   ReviewEngineInputsSchema,
   ReviewStartInputSchema,
   type ReviewChangeType,
