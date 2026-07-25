@@ -17,11 +17,17 @@ Store browser auth state under the live validation workspace `credentials/` and 
 
 Manual QA simulates real user upgrades without deploying the candidate:
 
-- Use the currently published `preview` release only for the starting install/before-upgrade state.
+- Use the active released stable and preview baselines relevant to the changed components. Resolve rolling channel pointers to immutable component version tags/commits and record artifact evidence before mutating the environment.
 - Build or bundle the candidate locally from the validation worktree.
 - Upgrade CLI, daemon/service, server/relay, web UI, and installer artifacts using those local candidate artifacts.
 - Do not use deployed preview install scripts to install the candidate. If a script is used, it must be wired to the local artifact and the evidence must include the exact local path or local URL.
 - For Lima/Windows, transfer local candidate artifacts explicitly and record source path, destination path, checksum when practical, and the command that installed them.
+
+## Mixed-Version Selection
+
+Before manual QA, use `skills/happier-compatibility` to list affected reachable old/new directions. At minimum consider server-first, UI-first, and CLI/daemon-first rollout; CLI frontend versus already-running daemon skew; and released-writer/candidate-reader persisted state. Add candidate-writer/released-reader only when coexistence or rollback makes it reachable.
+
+Run direct contract/vector coverage for every required direction. Select manual end-to-end rows by changed seam, deployment order, and failure cost. Do not multiply every row across every provider and OS when those dimensions cannot affect the contract; record why omitted dimensions are irrelevant rather than silently skipping them.
 
 ## Agent-Browser State Seeding
 
@@ -57,7 +63,7 @@ Prefer explicit evidence over prose: command transcript path, service/daemon JSO
 Run each flow on Linux, macOS, and Windows unless explicitly impossible. Mark impossible cells `N/A` with rationale.
 
 1. Fresh preview install.
-2. Current preview daemon login, then upgrade to local candidate with same browser/account/server URL.
+2. Current released stable/preview daemon login, then upgrade to local candidate with the same browser/account/server URL.
 3. Duplicate or legacy service conflict: manual plus service, old preview plus dev, same relay and different relay.
 4. Create sessions after upgrade for Claude, Codex, and OpenCode.
 5. Continue existing sessions across server restart, daemon restart, CLI update, and UI reload.
@@ -66,6 +72,7 @@ Run each flow on Linux, macOS, and Windows unless explicitly impossible. Mark im
 8. Direct session, tail, attach, and takeover for Claude, Codex, and OpenCode.
 9. Installer/update rollback: failed update does not break daemon and status gives correct guidance.
 10. Native mobile preview install, launch, login, and session creation on Android and iOS.
+11. Affected mixed-version topology rows: released clients with candidate server, candidate clients with released server, and released/candidate UI-daemon skew where reachable.
 
 ## Flow Acceptance Checklists
 

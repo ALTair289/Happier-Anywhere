@@ -1,6 +1,6 @@
 # Happier Stack Instructions
 
-Package-specific instructions for `apps/stack` (`@happier-dev/stack`). Read the repository root `AGENTS.md` first. More-specific rules here override root rules.
+Package-specific instructions for `apps/stack` (`@happier-dev/stack`). These supplement the root constitution and override broader guidance where more specific.
 
 ## Ownership
 

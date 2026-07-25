@@ -1,8 +1,6 @@
 # Happier Server Instructions
 
-This file is the package-specific instruction file for `apps/server`.
-
-Read the root `AGENTS.md` first. Package rules here override root rules only where they are more specific.
+Package-specific instructions for `apps/server`. These supplement the root constitution and override broader guidance where more specific.
 
 ## Commands
 

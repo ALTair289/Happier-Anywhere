@@ -1,6 +1,6 @@
 # Claude Code Project Notes
 
-Read the root `AGENTS.md` constitution for repository rules. The root `CLAUDE.md` imports it for Claude Code.
+The root `CLAUDE.md` imports the repository constitution from `AGENTS.md`; do not reread it when it is already present in active context.
 
 ## Background subagents and permissions
 
@@ -13,7 +13,8 @@ Run commands in the foreground when interactive approval may be required.
 Proven on the 2026-07-02/03 transcript corridor program; these are defaults, not suggestions.
 
 - **Fable is the orchestrator and the corridor-gate reviewer — nothing else.** The main Fable
-  session plans, writes lane briefs, validates deliverables, and steers. Independent reviews of
+  session orchestrates authorized work, writes lane briefs, validates deliverables, and steers;
+  it authors a repository plan only when the user explicitly requests planning. Independent reviews of
   completed corridors/critical changes run on Fable or Opus.
 - **Never use Sonnet** for reviews, implementation, or QA/diagnosis/fix — its claims/diagnostics are unreliable. Use **gpt-5.5-high (Codex)** or **Fable** for everything, including browser/live/device QA lanes (Codex drives the agent-browser/agent-device CLI and owns the fixes). Subagents inherit the parent (Fable) model by default — always set `model` explicitly on Agent calls so a QA lane doesn't silently burn Fable budget; QA/evidence/mechanical → Codex; DEEP/independent reviews (adversarial passes, ship gates) → FABLE specifically.
 - **Implementation lanes go to Codex (gpt-5.5, high reasoning), driven RAW** — no Claude wrapper
@@ -47,10 +48,9 @@ Proven on the 2026-07-02/03 transcript corridor program; these are defaults, not
   user-facing work; reviews → fable/opus; intelligence > taste > cost for anything that ships.
 - **Deep/independent reviews, ship gates, corridor-gate reviewing, and taste-critical decisions run
   on Fable or Opus.** Reviewer ≠ author is absolute; never Codex-reviews-Codex on a gate. Large
-  plans carry an `OPERATING-MANUAL.md` encoding the authoring orchestrator's working method —
-  implementing/reviewing agents read it FIRST (exemplar in the dev repo:
-  `.project/plans/2026-07-09-voice-deep-audit-and-provider-extensibility/OPERATING-MANUAL.md`,
-  incl. the five-question self-test every lane runs before reporting).
+  plans reference the root constitution and repository skills rather than copying a private
+  operating manual. Plan-local documents contain only product decisions, seam ownership,
+  acceptance criteria, and evidence that are specific to that program.
 - **Large UI implementation goes to OPUS, not Codex** (proven better UI taste). Any lane touching
   user-facing surfaces/components/animations MUST load the `make-interfaces-feel-better` +
   `interface-details` skills before writing surface code, reuse existing components/themed tokens/
@@ -64,7 +64,7 @@ The Happier MCP (`mcp__happier__action_execute`, plus `action_spec_search` / `ac
 **The subagent primitive is an EXECUTION RUN within a session — NOT a new session.** Use `subagents.delegate.start` / `execution.run.start`, which parent a bounded, ephemeral subagent run (a sidechain) under the ORCHESTRATOR's session. Do NOT use `session.spawn_new` for lane delegation — that creates a heavy independent top-level session and loses fleet management. (Round-trip verified live 2026-07-08: a `subagents.delegate.start` codex run succeeded in ~16s and `execution.run.wait` returned the structured result inline — `summary` + `deliverablesDigest` — no cold start, no separate transcript fetch.)
 
 Round-trip (every action below confirmed working):
-- **Delegate a lane (ergonomic default)** → `action_execute` `subagents.delegate.start` `{ sessionId, backendTargetKeys: ["agent:codex", …], instructions: "<lane brief>" }` → returns per-target `{ runId, callId, sidechainId }`. Fans out to multiple backends in one call. `subagents.plan.start` (`/h.plan`) is the planning variant; `review.start` runs parallel review engines (each engine = its own run).
+- **Delegate a lane (ergonomic default)** → `action_execute` `subagents.delegate.start` `{ sessionId, backendTargetKeys: ["agent:codex", …], instructions: "<lane brief>" }` → returns per-target `{ runId, callId, sidechainId }`. Fans out to multiple backends in one call. `subagents.plan.start` (`/h.plan`) is the planning variant and is used only for an explicit user-requested planning task; `review.start` runs parallel review engines (each engine = its own run).
 - **Delegate with full control** → `execution.run.start` `{ sessionId, intent, backendTarget: { kind:"builtInAgent", agentId:"codex" }, instructions, permissionMode, retentionPolicy, runClass, ioMode, initialContextMode }` when you need to set permission mode / retention / run class / io mode explicitly.
 - **Await + get result (best — returns result inline)** → `execution.run.wait` `{ sessionId, runId, timeoutSeconds, pollIntervalMs }` → `{ status, result: { run, latestToolResult: { summary, deliverablesDigest } } }`. Polls to terminal status; no separate transcript read needed for the headline result.
 - **Fleet monitor / continue / stop** → `execution.run.list` `{ sessionId, status:"running"|"succeeded"|… }`, `execution.run.send` `{ runId, message, resume:true }` (iterate/continue a run), `execution.run.stop` `{ runId }`. For deep verification of what a run DID, read its sidechain: `session.transcript.get`/`session.events.get` `{ sessionId, scope:"sidechain", sidechainId, kinds:["tool_call","tool_result"] }`.
@@ -113,50 +113,44 @@ profile.
 - **Corridor-sized lanes, never micro-tasks.** A lane owns a whole responsibility (a corridor, a
   full QA matrix, a full review) end to end: analysis, implementation, tests, validation, ledger
   updates. Micro-slicing (one-boolean extractions) provably grows god-files instead of shrinking
-  them. Extraction lanes carry a hard **net-negative LOC gate** on the god-file, measured with
-  `wc -l` before/after (reviewers re-measure; lanes mis-report).
-- **One writer per file AND per seam.** Maintain an explicit file-ownership map in the tracking
-  doc while lanes run. QA lanes may root-cause-and-fix in unowned files; findings rooted in owned
-  files are queued to the owning lane with full evidence, never patched around. Adjacent-seam
-  work (e.g. entryRestore vs sessionOpen) counts as a conflict even across different files.
-- **Demand incremental landing.** Every lane brief requires: update the lane report + ledger after
-  each gate/defect closes. Crashed lanes then lose at most one gate. Agents die constantly
-  (usage limits, auth flaps, process exits) — design for it, don't hope against it.
+  them. A lane-specific net-negative LOC gate is allowed when measured god-file contraction is the
+  explicit outcome; it is not a universal architecture or review rule.
+- **Coordinate real collisions, not dirty files.** Uncommitted and concurrently edited files are
+  normal shared state and do not reserve a file. Inspect current bytes and layer compatible changes;
+  coordinate only overlapping hunks, incompatible decisions for one live seam, generated outputs
+  with one producer, destructive moves/rewrites, or exclusive mutable runtime resources.
+- **Record material transitions, not every thought.** Update the lane report and orchestrator
+  ledger when scope, ownership, candidate identity, finding disposition, validation state, or a
+  blocker materially changes. Do not create per-microchange packets or ledger churn.
 - **Stalled/killed agent ≠ lost work.** Before re-running, check its artifacts (report, evidence
   files, ledger rows, codex session). Resume with context (SendMessage / `codex exec resume`)
   instead of restarting; only fresh-start when the transcript/session is genuinely gone.
 - **Verify lane claims.** Reports referencing files that don't exist, "green" suites that are red
   at the lane's own commit, and inflated LOC deltas all happened. Reviewers rerun the tests
   themselves against a frozen snapshot/commit basis and attribute concurrent churn explicitly.
-- **Auto-adversarial review on every lane deliverable.** Before merging a lane's result, the
-  orchestrator (or an independent review lane) runs `skills/verify-claims` on the lane's claims
-  and `skills/attack-conclusion` on its conclusion. Author ≠ reviewer for corridor gates and ship
-  decisions — sonnet/codex lanes get fable/opus review; nothing is self-signed. Schedule the
-  review in the lane brief at launch, not after the fact.
+- **Adversarial review at composed boundaries.** Authors run `skills/attack-conclusion` while
+  building. Independent review and `skills/verify-claims` target load-bearing delegated claims and
+  the frozen consumed vertical, corridor gate, or ship candidate—not every microchange. After
+  accepted fixes, review the finding delta unless the candidate, contract, scope, or risk changed
+  materially. Author ≠ reviewer remains mandatory for corridor and ship gates.
 
 ## Validation doctrine
 
-Moved to the root `AGENTS.md` ("Risk-weighted verification" and "Live validation doctrine") so it applies to every tool driving this repo, not only Claude sessions. Read it there.
+Use the active root `AGENTS.md` rules ("Risk-weighted execution" and "Testing: contract value, not test volume") plus `skills/happier-testing`; do not maintain a Claude-only copy or reread the root file when it is already in context.
 
-## Living-truth discipline
+## Plan execution and recovery
 
-- Plan file = markers + one-line notes only; execution detail goes to the workspace TRACKING.md;
-  orchestrator sequencing decisions go to ORCHESTRATOR-DECISIONS.md next to it. After any
-  compaction (agent or orchestrator): re-read plan pivot section, then the ledger, before acting.
-- Snapshot (`tar` to `.project/backups/`) both transcript trees before every implementation lane.
-  Agents never run git write commands; snapshots are the only agent-side safety net.
+Use `skills/happier-implement-plan` for generic approved-plan execution, parallelism, dirty-worktree
+coordination, uncertainty resolution, status/evidence, QA/review boundaries, amendments, and
+completion. This file owns only the Claude/Happier execution-run mechanics above and the
+program-specific facts below; do not maintain a second copy of the cross-tool workflow here.
 
-## Plan-execution craft (learned 2026-07-09, voice program in the dev repo)
+Use Git safety and the existing plan/review workspace as the normal recovery surface. Snapshot only
+genuinely non-recoverable external/session evidence or when the user explicitly requests it; do not
+tar transcript trees before routine lanes.
 
-- **Wave −1 anchor verification is mandatory for any plan citing file:line evidence.** The tree is
-  hot with parallel sessions; before implementation lanes launch, one pre-flight lane re-verifies
-  every spec anchor against the current tree, corrects drifted anchors in the spec files, and
-  escalates material changes. Specs are living docs.
-- **Specs define tasks by defect-class + target behavior + named deletions + RED tests + DoD, never
-  by summary lines.** A task implemented simpler than its spec is NOT done — meet the spec or mark
-  `[!]` with the blocker. Markers: `[x]` requires linked validation evidence; finished-code-pending-
-  validation is `[~]`. Findings that fail to reproduce as RED are demoted `[r]` with evidence, never
-  silently "fixed".
+## Program-specific execution facts
+
 - **Vocabulary coordination before introducing manifest/SDK/cross-package names:** plugin-sdk-v1
   DEC-4 + providers-first-class reserve bare `provider(s)`/`providerId` for model providers and
   mandate `agent*` for executable agents; voice/oauth/scm provider naming is on the keep-list.

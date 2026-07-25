@@ -14,17 +14,18 @@ Validate the current development release lane end-to-end before preview promotio
 
 This skill may create branches/worktrees, run local checks, run VM/host QA, and implement root-cause fixes. It must not publish, promote, submit mobile builds, or trigger production/preview release side effects.
 
-Candidate validation must use local candidate artifacts. It may install the currently published `preview` release only to create a realistic before-upgrade baseline; after that, upgrades and installer/artifact checks must use locally built artifacts from the validation worktree, `--source local-build --ref .`, or an explicitly recorded local artifact transfer to the target machine.
+Candidate validation must use local candidate artifacts. Released baselines come from the active stable and preview components affected by the candidate. Resolve each rolling channel pointer to an immutable component version tag/commit plus artifact checksum or equivalent release evidence before testing. After seeding a released baseline, upgrades and candidate checks use locally built artifacts from the validation worktree, `--source local-build --ref .`, or an explicitly recorded local artifact transfer to the target machine.
 
 ## Start
 
-1. Re-read `AGENTS.md` and `docs/release-process.md`.
+1. Read `docs/release-process.md`.
 2. Read `references/workflow.md` for the orchestration loop and human gates.
 3. Read `references/lane-catalog.md` for current lanes and commands.
 4. Read `references/manual-qa-matrix.md` before any OS QA lane.
 5. Read `references/daemon-ownership-scenarios.md` before lane L21.
-6. During Phase 0, read the prior battle-tested release-readiness run at `.project/reviews/2026-04-15-preview-release-readiness-orchestrated-audit/` if it exists. Harvest still-relevant scenarios into the new run instead of rediscovering them.
-7. Bootstrap the run:
+6. Read `skills/happier-compatibility` and `docs/compatibility.md`; during Phase 0 record immutable per-component stable/preview baselines and the affected reachable version-skew directions.
+7. During Phase 0, read the prior battle-tested release-readiness run at `.project/reviews/2026-04-15-preview-release-readiness-orchestrated-audit/` if it exists. Harvest still-relevant scenarios into the new run instead of rediscovering them.
+8. Bootstrap the run:
 
 ```bash
 node skills/happier-release-validation/scripts/bootstrap-release-validation.mjs --version <version>
@@ -65,15 +66,14 @@ Stop and ask only for:
 
 ## Parallelism
 
-Keep useful work in flight. Default targets:
-- total active agents: up to 12
-- read-only auditors/reviewers: up to 12
-- fix agents: up to 8, only with narrow disjoint write scopes
-- OS/manual QA agents: limited by real machines and mutable daemon/service state
+Keep useful work in flight without a hardcoded agent cap or required minimum:
+- use available capacity for ready independent auditors, reviewers, and fix lanes when it shortens the critical path;
+- coordinate fix agents around actual overlapping hunks, incompatible seam decisions, generated outputs, and exclusive mutable resources—not dirty files or prior edits;
+- limit OS/manual QA concurrency only by real machines and mutable daemon/service state.
 
 Begin automated validation with a parallel failure-collection sweep by resource group. Collect failures before fixing unless one blocker prevents trustworthy evidence collection.
 
-Cluster failures by root-cause surface, not by package. Use narrow ownership such as `apps/ui new-session composer`, `apps/cli service takeover`, `packages/tests UI fixture`, or `scripts/pipeline installer local-build`, and give each fix agent exact allowed write paths.
+Cluster failures by root-cause surface, not by package. Use focused responsibilities such as `apps/ui new-session composer`, `apps/cli service takeover`, `packages/tests UI fixture`, or `scripts/pipeline installer local-build`, and give each fix agent expected paths plus any shared seam/resource coordination.
 
 Delegate lane-sized work, not tiny errands. Each lane agent should own execution, evidence, diagnosis, in-scope root-cause fixes, targeted reruns, and lane-doc updates. As agents complete, update `PLAN.md`/`LEDGER.md` and dispatch the next safe non-colliding lane while other agents keep running.
 
@@ -83,12 +83,15 @@ Add lanes dynamically when new risks surface. The 27 generated lanes are a start
 
 Follow `AGENTS.md` testing rules. In release validation, this especially means: do not patch stale local mocks across many test files; first inspect and improve the owning shared testkit/mock/factory. Use TDD for behavior fixes, avoid deleting valuable tests, and rerun broader related lanes after shared test infrastructure changes.
 
+For compatibility findings, do not recreate the released implementation in a new fixture. Use the real released artifact/serializer/client or a provenance-pinned golden vector. Exercise every affected reachable old/new direction, but do not generate a full UI × CLI × daemon × server × platform matrix when the candidate did not change the shared seam. Select end-to-end rows from actual rollout/rollback order and risk.
+
 ## Required Finish
 
 The validation skill is done only when:
 - every required lane in `PLAN.md` is `[x]` or explicitly `[DEFERRED-HUMAN-APPROVED]`
 - `TRACKING.md` has no unanswered open questions or unresolved suspected issues
 - every QA matrix row is green, fixed-and-rerun-green, or human-approved deferred with release-note text
+- every affected required compatibility direction has immutable baseline evidence and a deciding contract/vector or end-to-end result; unreachable/unsupported directions have a recorded rationale
 - independent reviewers for daemon ownership, installer/update, session continuity, and final cross-cutting review are GREEN
 - final integrated custom checks are green
 - local release dry-run is complete and recorded
@@ -107,5 +110,6 @@ The validation skill is done only when:
 
 - `happier-testing`: lane semantics, TDD, fixture policy, and anti-flake rules.
 - `happier-session-control`: scripted session create/send/wait/status flows in manual QA lanes.
-- `happier-diagnose`: structured root-cause investigation when a lane fails.
+- `happier-implement`: evidence-driven root-cause correction when a code, harness, or product-behavior lane fails.
+- `happier-diagnose`: read-only investigation when the failure is specifically a runtime, session, daemon, provider, authentication, or connectivity incident.
 - `happier-github-ops`: optional sanitized issue filing for human-approved deferred release blockers.

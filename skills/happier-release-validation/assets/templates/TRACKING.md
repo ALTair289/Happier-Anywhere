@@ -28,7 +28,7 @@ This validation may implement root-cause fixes. It must not release, promote, pu
 - For behavior changes, follow TDD and record RED/GREEN evidence.
 - For test fixes, prefer shared testkit/mock/factory repairs over repeated local mock patches.
 - Start automated validation with parallel failure collection by resource group; cluster failures before fix dispatch unless a blocker makes evidence untrustworthy.
-- Use high parallelism, but only with narrow disjoint write scopes for fix agents.
+- Use high useful parallelism. Dirty or previously touched files do not reserve a scope; coordinate fix agents only where edit hunks, conceptual seams, generated outputs, or exclusive runtime resources actually collide.
 - Keep `PLAN.md` as the concise marker board and active-agent queue; keep detailed execution in `LEDGER.md` and evidence files.
 - Reuse the same account/browser/server URL for continuity QA unless a scenario explicitly tests account switching.
 
@@ -45,6 +45,22 @@ This validation may implement root-cause fixes. It must not release, promote, pu
 - Predecessor audit: `.project/reviews/2026-04-15-preview-release-readiness-orchestrated-audit/`
 - Stack publish scope: default out of scope unless human says otherwise
 - Bump mode for dry-run: default `none` if versions are already candidate versions
+
+### Released Component Baselines
+
+Resolve rolling channel pointers once, then pin immutable evidence for the run. Add rows only for components relevant to this candidate.
+
+| Component | Channel | Rolling pointer | Immutable version tag | Commit | Artifact/checksum evidence |
+|---|---|---|---|---|---|
+| TODO | stable/preview | TODO | TODO | TODO | TODO |
+
+### Affected Version-Skew Directions
+
+List directions coupled by the changed seam; do not manufacture unaffected Cartesian rows.
+
+| Writer/producer | Reader/consumer | Upgrade/coexistence/rollback reason | Required/unreachable/unsupported | Deciding evidence |
+|---|---|---|---|---|
+| TODO | TODO | TODO | TODO | TODO |
 
 ## Open Questions
 
@@ -121,6 +137,7 @@ The validation skill can stop only when all are true:
 - Every required lane is `[x]` or `[DEFERRED-HUMAN-APPROVED]` in `PLAN.md`.
 - Every row in Lane Status is DONE, green, or human-approved deferred.
 - Every manual QA row is green, fixed-and-rerun-green, or human-approved deferred with release-note text.
+- Every affected required version-skew direction has immutable baseline provenance and deciding evidence; unreachable/unsupported rows have rationale.
 - No open questions remain unanswered.
 - No suspected issue remains unresolved.
 - Process Feedback items are either recorded for later template improvement or marked `none`.

@@ -23,16 +23,15 @@ Perform the actual release promotion through the canonical repo release orchestr
 
 ## Process
 
-1. Re-read `AGENTS.md`.
-2. Read `references/promotion-commands.md`.
-3. Confirm validation review verdict is `APPROVE_FOR_PREVIEW_PROMOTION` or equivalent production approval.
-4. Run dry-run command.
-5. Summarize planned side effects.
-6. Ask for explicit approval to run the real command.
-7. Execute only after approval.
-8. Monitor GitHub/release jobs until completion.
-9. Verify the post-publish `release-verify.yml` result when the release profile triggers it, or explicitly record why it was skipped.
-10. Report published versions/artifacts and any follow-up verification.
+1. Read `references/promotion-commands.md`.
+2. Confirm validation review verdict is `APPROVE_FOR_PREVIEW_PROMOTION` or equivalent production approval.
+3. Run dry-run command.
+4. Summarize planned side effects.
+5. Ask for explicit approval to run the real command.
+6. Execute only after approval.
+7. Monitor GitHub/release jobs until completion.
+8. Verify the post-publish `release-verify.yml` result when the release profile triggers it, or explicitly record why it was skipped.
+9. Report published versions/artifacts and any follow-up verification.
 
 Never bypass `node scripts/pipeline/run.mjs release` for full releases unless the user explicitly requests a manual partial publish.
 

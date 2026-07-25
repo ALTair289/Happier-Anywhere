@@ -23,12 +23,12 @@ Act as a skeptical release-candidate reviewer. Verify that the validation branch
 
 ## Process
 
-1. Re-read `AGENTS.md`.
-2. Read `references/review-rubric.md`.
-3. In the validation worktree, read `TRACKING.md`, `PLAN.md`, and `LEDGER.md`.
-4. Verify every completed lane has evidence for its claim.
-5. Review every code change made during validation with normal code-review severity.
-6. Confirm tests follow TDD expectations where behavior changed.
+1. Read `references/review-rubric.md`.
+2. In the validation worktree, read `TRACKING.md`, `PLAN.md`, and `LEDGER.md`.
+3. Verify every completed lane has evidence for its claim.
+4. Review every code change made during validation with normal code-review severity.
+5. Confirm tests follow TDD expectations where behavior changed.
+6. Use `skills/happier-compatibility` to re-derive baseline provenance, affected old/new directions, and every retained compatibility path from released artifacts rather than the candidate's own fixtures.
 7. Confirm no workaround fixes, hidden skips, destructive cleanup, or release side effects happened.
 8. Review `TRACKING.md#Process Feedback` and classify each item as `back-port now`, `back-port later`, or `ignore`.
 9. Produce a concise sign-off packet.

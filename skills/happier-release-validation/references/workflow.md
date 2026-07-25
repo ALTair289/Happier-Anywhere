@@ -81,7 +81,7 @@ Run deep QA on Linux Lima VMs, macOS host, and Windows through `~/connect_window
 When failures appear:
 - collect failures from lanes
 - group by root-cause surface
-- dispatch narrow fix agents with disjoint write sets
+- dispatch focused fix agents and coordinate only actual overlapping hunks, incompatible seam decisions, generated outputs, or exclusive mutable resources
 - require targeted RED/GREEN evidence for behavior changes
 - rerun impacted lane
 - rerun the harness invariant after each fix cluster: the immediately affected lane plus `node scripts/pipeline/run.mjs checks --profile fast`
