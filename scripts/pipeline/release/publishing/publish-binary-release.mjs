@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { rm } from 'node:fs/promises';
+import { readdir, rm } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 
 import {
@@ -16,15 +16,21 @@ import {
   resolveRollingReleaseLabel,
   resolveRollingReleaseTagSuffix,
 } from '../lib/public-release-rings.mjs';
-import { resolveRollingPublishVersion } from '../lib/rolling-version-allocation.mjs';
+import {
+  resolveRollingPublishVersion,
+  resolveRollingRecoveryVersion,
+} from '../lib/rolling-version-allocation.mjs';
 import { withCurrentVersionLine } from '../lib/rolling-release-notes.mjs';
 import { resolveGitHubRepoSlug } from '../../github/resolve-github-repo-slug.mjs';
 import { prepareBinaryReleaseAssets } from './prepare-binary-assets.mjs';
 import { getBinaryPublishProductSpec } from './product-specs.mjs';
+import { inspectServerRuntimeCandidate } from './server-runtime-candidate.mjs';
 
 const GITHUB_RELEASE_SCRIPT_RELATIVE_PATH = 'scripts/pipeline/github/publish-release.mjs';
+const ROLLING_PROMOTION_SCRIPT_RELATIVE_PATH = 'scripts/pipeline/github/promote-rolling-release.mjs';
 const INSTALLER_SYNC_SCRIPT_RELATIVE_PATH = 'scripts/pipeline/release/sync-installers.mjs';
 const MINISIGN_BOOTSTRAP_RELATIVE_PATH = '.github/actions/bootstrap-minisign/bootstrap-minisign.sh';
+const RELEASE_PUBLIC_KEY_RELATIVE_PATH = 'scripts/release/installers/happier-release.pub';
 
 /**
  * @param {unknown} value
@@ -181,6 +187,11 @@ function parsePublishBinaryReleaseArgs(argv) {
       'run-contracts': { type: 'string', default: 'auto' },
       'check-installers': { type: 'string', default: 'true' },
       version: { type: 'string', default: '' },
+      phase: { type: 'string', default: 'publish' },
+      'candidate-dir': { type: 'string', default: '' },
+      'authorized-sha': { type: 'string', default: '' },
+      'github-output': { type: 'string', default: '' },
+      'base-version': { type: 'string', default: '' },
       'dry-run': { type: 'boolean', default: false },
     },
     allowPositionals: false,
@@ -221,15 +232,40 @@ export async function publishBinaryReleaseMain(options = {}) {
   const checkInstallers = parseBool(values['check-installers'], '--check-installers');
   const releaseMessage = String(values['release-message'] ?? '').trim();
   const explicitVersion = String(values.version ?? '').trim();
+  const phase = String(values.phase ?? 'publish').trim();
+  if (!['publish', 'build-candidate', 'finalize-candidate', 'promote-rolling'].includes(phase)) {
+    throw new Error('--phase must be publish|build-candidate|finalize-candidate|promote-rolling');
+  }
+  if (phase !== 'publish' && phase !== 'promote-rolling' && productSpec.id !== 'server') {
+    throw new Error('candidate phases are supported only for server runtime publishing');
+  }
 
   const releaseRing = getPublicReleaseRingEntry(channel);
   const embeddedPolicy = resolveEmbeddedPolicyForChannel(channel);
-  const baseVersion = readBaseVersion(repoRoot, productSpec);
-  const version = await computePublishVersion(productSpec, channel, baseVersion, {
-    repoRoot,
-    explicitVersion,
-    dryRun: opts.dryRun,
-  });
+  if (phase === 'promote-rolling' && !explicitVersion) {
+    throw new Error('--version is required for same-version rolling promotion');
+  }
+  const version =
+    phase === 'promote-rolling'
+      ? (
+          await resolveRollingRecoveryVersion({
+            repoRoot,
+            productId: productSpec.id,
+            channel,
+            explicitVersion,
+            env: process.env,
+          })
+        ).version
+      : await computePublishVersion(
+          productSpec,
+          channel,
+          String(values['base-version'] ?? '').trim() || readBaseVersion(repoRoot, productSpec),
+          {
+            repoRoot,
+            explicitVersion,
+            dryRun: opts.dryRun,
+          },
+        );
   const rollingTag = `${productSpec.rollingTagPrefix}-${resolveRollingReleaseTagSuffix(channel)}`;
   const rollingTitle = `${productSpec.releaseTitleBase} ${resolveRollingReleaseLabel(channel)}`;
   const prerelease = resolveRollingPrerelease(channel);
@@ -238,7 +274,13 @@ export async function publishBinaryReleaseMain(options = {}) {
   const versionTag = `${productSpec.versionTagPrefix}${version}`;
   const versionTitle = `${productSpec.releaseTitleBase} v${version}`;
   const versionNotes = `${productSpec.versionNotesSubject} ${releaseRing.publicLabel} build v${version}.`;
-  const targetSha = run(opts, 'git', ['rev-parse', 'HEAD'], { cwd: repoRoot, stdio: 'pipe' }).trim() || 'UNKNOWN_SHA';
+  const authorizedSha = String(values['authorized-sha'] ?? '').trim();
+  const targetSha = phase === 'finalize-candidate' || phase === 'promote-rolling'
+    ? authorizedSha
+    : run(opts, 'git', ['rev-parse', 'HEAD'], { cwd: repoRoot, stdio: 'pipe' }).trim() || 'UNKNOWN_SHA';
+  if ((phase === 'finalize-candidate' || phase === 'promote-rolling') && !targetSha) {
+    throw new Error('--authorized-sha is required for privileged publish and rolling recovery phases');
+  }
 
   console.log(
     `[pipeline] ${productSpec.pipelineLabel}: channel=${formatPublicReleaseChannel(channel)} tag=${rollingTag}${
@@ -246,7 +288,7 @@ export async function publishBinaryReleaseMain(options = {}) {
     }`,
   );
 
-  await preflightMinisignKey(productSpec, opts);
+  if (phase !== 'build-candidate' && phase !== 'promote-rolling') await preflightMinisignKey(productSpec, opts);
 
   if (runContracts) {
     run(opts, 'yarn', ['-s', 'test:release:contracts'], {
@@ -258,7 +300,52 @@ export async function publishBinaryReleaseMain(options = {}) {
     run(opts, process.execPath, [INSTALLER_SYNC_SCRIPT_RELATIVE_PATH, '--check'], { cwd: repoRoot });
   }
 
-  ensureMinisign(repoRoot, productSpec, opts);
+  if (phase !== 'build-candidate') ensureMinisign(repoRoot, productSpec, opts);
+
+  if (phase === 'promote-rolling') {
+    const githubOutput = String(values['github-output'] ?? '').trim();
+    if (githubOutput) fs.appendFileSync(githubOutput, `version=${version}\n`, 'utf8');
+    const repoSlug = resolveGitHubRepoSlug({ repoRoot, env: process.env });
+    if (!repoSlug) throw new Error('Unable to resolve GitHub repo slug for rolling promotion.');
+    run(opts, process.execPath, [
+      ROLLING_PROMOTION_SCRIPT_RELATIVE_PATH,
+      '--source-tag', versionTag,
+      '--rolling-tag', rollingTag,
+      '--title', rollingTitle,
+      '--target-sha', targetSha,
+      '--prerelease', prerelease,
+      '--notes', notes,
+      '--release-message', releaseMessage,
+      '--repo', repoSlug,
+      '--public-key', RELEASE_PUBLIC_KEY_RELATIVE_PATH,
+      ...(opts.dryRun ? ['--dry-run'] : []),
+    ], { cwd: repoRoot });
+    return;
+  }
+
+  if (phase === 'build-candidate') {
+    const candidateDir = path.resolve(String(values['candidate-dir'] ?? '').trim() || productSpec.artifactsDir);
+    if (!opts.dryRun) await rm(candidateDir, { recursive: true, force: true });
+    run(opts, process.execPath, [productSpec.buildScriptPath, '--channel', channel, '--version', version], {
+      cwd: repoRoot,
+      env: { ...process.env, MINISIGN_SECRET_KEY: '', MINISIGN_PASSPHRASE: '' },
+    });
+    if (!opts.dryRun) {
+      run(opts, process.execPath, [
+        'scripts/pipeline/release/verify-artifacts.mjs',
+        '--artifacts-dir', candidateDir,
+        '--checksums', path.join(candidateDir, `checksums-happier-server-v${version}.txt`),
+      ], { cwd: repoRoot });
+      for (const name of await readdir(candidateDir)) {
+        if (!name.endsWith('.tar.gz')) await rm(path.join(candidateDir, name), { recursive: true, force: true });
+      }
+      await inspectServerRuntimeCandidate({ candidateDir, version });
+    }
+    const githubOutput = String(values['github-output'] ?? '').trim();
+    if (githubOutput) fs.appendFileSync(githubOutput, `version=${version}\n`, 'utf8');
+    console.log(`[pipeline] unsigned server-runtime candidate ready: ${candidateDir}`);
+    return;
+  }
 
   const packageJsonPath = withinRepo(repoRoot, productSpec.packageJsonPath);
   /** @type {null | (() => void)} */
@@ -281,7 +368,7 @@ export async function publishBinaryReleaseMain(options = {}) {
         ].join('\n'),
       );
     }
-    const assetsBaseUrl = `https://github.com/${repoSlug}/releases/download/${rollingTag}`;
+    const assetsBaseUrl = `https://github.com/${repoSlug}/releases/download/${versionTag}`;
 
     await prepareBinaryReleaseAssets({
       repoRoot,
@@ -291,62 +378,48 @@ export async function publishBinaryReleaseMain(options = {}) {
       assetsBaseUrl,
       commitSha: targetSha,
       workflowRunId: String(process.env.GITHUB_RUN_ID ?? ''),
+      skipSmoke: phase === 'finalize-candidate',
       dryRun: opts.dryRun,
       env: {
         HAPPIER_EMBEDDED_POLICY_ENV: process.env.HAPPIER_EMBEDDED_POLICY_ENV ?? embeddedPolicy,
       },
+      ...(phase === 'finalize-candidate' ? {
+        candidateDir: String(values['candidate-dir'] ?? ''),
+        authorizedSha,
+      } : {}),
     });
 
     const artifactsDir = withinRepo(repoRoot, productSpec.artifactsDir);
 
-    for (const release of [
-      {
-        tag: rollingTag,
-        title: rollingTitle,
-        notes,
-        rollingTag: 'true',
-        generateNotes: 'false',
-      },
-      {
-        tag: versionTag,
-        title: versionTitle,
-        notes: versionNotes,
-        rollingTag: 'false',
-        generateNotes: 'true',
-      },
-    ]) {
-      run(
-        opts,
-        process.execPath,
-        [
-          GITHUB_RELEASE_SCRIPT_RELATIVE_PATH,
-          '--tag',
-          release.tag,
-          '--title',
-          release.title,
-          '--target-sha',
-          targetSha,
-          '--prerelease',
-          prerelease,
-          '--rolling-tag',
-          release.rollingTag,
-          '--generate-notes',
-          release.generateNotes,
-          '--notes',
-          release.notes,
-          '--assets-dir',
-          path.relative(repoRoot, artifactsDir),
-          '--clobber',
-          'true',
-          '--prune-assets',
-          'true',
-          '--release-message',
-          releaseMessage,
-          ...(opts.dryRun ? ['--dry-run'] : []),
-        ],
-        { cwd: repoRoot },
-      );
-    }
+    run(opts, process.execPath, [
+      GITHUB_RELEASE_SCRIPT_RELATIVE_PATH,
+      '--tag', versionTag,
+      '--title', versionTitle,
+      '--target-sha', targetSha,
+      '--prerelease', prerelease,
+      '--rolling-tag', 'false',
+      '--generate-notes', 'true',
+      '--notes', versionNotes,
+      '--assets-dir', path.relative(repoRoot, artifactsDir),
+      '--clobber', 'false',
+      '--prune-assets', 'false',
+      '--release-message', releaseMessage,
+      ...(opts.dryRun ? ['--dry-run'] : []),
+    ], { cwd: repoRoot });
+
+    run(opts, process.execPath, [
+      ROLLING_PROMOTION_SCRIPT_RELATIVE_PATH,
+      '--source-tag', versionTag,
+      '--rolling-tag', rollingTag,
+      '--title', rollingTitle,
+      '--target-sha', targetSha,
+      '--prerelease', prerelease,
+      '--notes', notes,
+      '--release-message', releaseMessage,
+      '--repo', repoSlug,
+      '--public-key', RELEASE_PUBLIC_KEY_RELATIVE_PATH,
+      ...(opts.dryRun ? ['--dry-run'] : []),
+    ], { cwd: repoRoot });
 
     if (!opts.dryRun && productSpec.id === 'cli') {
       console.log(`[pipeline] published GitHub rolling release: ${rollingTag}`);

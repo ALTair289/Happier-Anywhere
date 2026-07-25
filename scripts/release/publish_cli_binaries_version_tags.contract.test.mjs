@@ -59,16 +59,20 @@ for (const { channel, rollingTag, versionSuffix } of [
       },
     );
 
-    assert.match(out, new RegExp(`--tag\\s+${rollingTag}\\b`));
-    assert.match(out, new RegExp(`--tag\\s+${rollingTag}\\b[^\\n]*--generate-notes\\s+false\\b`));
+    assert.match(out, new RegExp(`promote-rolling-release\\.mjs[^\\n]*--rolling-tag\\s+${rollingTag}\\b`));
     assert.match(out, /--tag\s+cli-v/);
     assert.match(out, new RegExp(`cli-v[^\\s"]*${versionSuffix.replace('.', '\\.')}[^\\s"]*`));
     assert.match(out, /--tag\s+cli-v[^\s"]+[^\n]*--generate-notes\s+true\b/);
+    assert.ok(
+      out.search(/publish-release\.mjs\s+--tag\s+cli-v/) < out.search(/promote-rolling-release\.mjs/),
+      'immutable version publication must complete before rolling promotion',
+    );
     assert.match(out, /clean artifacts dir: dist\/release-assets\/cli|ensure clean artifacts dir: dist\/release-assets\/cli/i);
   });
 }
 
-test('publish-cli-binaries fails fast with helpful message when MINISIGN_SECRET_KEY is invalid', async () => {
+test('publish-cli-binaries rejects an invalid MINISIGN_SECRET_KEY before build without disclosing it', async () => {
+  const invalidSecret = 'RWQpH1vH1vH1vH1vH1vH1vH1vH1vH1vH1vH1vH1vH1';
   const result = spawnSync(
     process.execPath,
     [
@@ -88,7 +92,7 @@ test('publish-cli-binaries fails fast with helpful message when MINISIGN_SECRET_
       cwd: repoRoot,
       env: {
         ...process.env,
-        MINISIGN_SECRET_KEY: 'RWQpH1vH1vH1vH1vH1vH1vH1vH1vH1vH1vH1vH1vH1',
+        MINISIGN_SECRET_KEY: invalidSecret,
         MINISIGN_PASSPHRASE: 'x',
       },
       encoding: 'utf8',
@@ -97,11 +101,10 @@ test('publish-cli-binaries fails fast with helpful message when MINISIGN_SECRET_
     },
   );
 
-  assert.notEqual(result.status, 0, 'expected publish-cli-binaries to fail for invalid minisign key');
-  const stderr = String(result.stderr ?? '');
-  assert.match(stderr, /MINISIGN_SECRET_KEY/i);
-  assert.match(stderr, /truncated|dotenv|multiline|file|path/i);
-  assert.doesNotMatch(String(result.stdout ?? ''), /build-cli-binaries\.mjs/i, 'should fail before running the heavy build');
+  assert.equal(result.status, 1);
+  const output = `${String(result.stdout ?? '')}\n${String(result.stderr ?? '')}`;
+  assert.doesNotMatch(output, new RegExp(invalidSecret));
+  assert.doesNotMatch(output, /build-cli-binaries\.mjs/i, 'should fail before running the heavy build');
 });
 
 test('publish-cli-binaries allocates dev versions from the published CLI channel instead of workflow run number', async () => {
@@ -150,3 +153,48 @@ test('publish-cli-binaries allocates dev versions from the published CLI channel
   assert.match(out, new RegExp(`cli-v${cliBaseVersion.replaceAll('.', '\\.')}-dev\\.126\\b`));
   assert.doesNotMatch(out, new RegExp(`cli-v${cliBaseVersion.replaceAll('.', '\\.')}-dev\\.16\\.1\\b`));
 });
+
+for (const { channel, version, allowStable } of [
+  { channel: 'preview', version: '0.2.1-preview.41', allowStable: 'false' },
+  { channel: 'stable', version: '0.2.1', allowStable: 'true' },
+]) {
+  test(`publish-cli-binaries recovers exact ${channel} immutable bytes after the control package base advances`, () => {
+    const authorizedSha = '0123456789abcdef0123456789abcdef01234567';
+    const out = execFileSync(
+      process.execPath,
+      [
+        sharedPublishScriptPath,
+        '--product', 'cli',
+        '--phase', 'promote-rolling',
+        '--channel', channel,
+        '--version', version,
+        '--base-version', '0.2.2',
+        '--authorized-sha', authorizedSha,
+        '--allow-stable', allowStable,
+        '--run-contracts', 'false',
+        '--check-installers', 'false',
+        '--dry-run',
+      ],
+      {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          GH_REPO: 'example/fork',
+          HAPPIER_RELEASE_PUBLISHED_VERSIONS_JSON: JSON.stringify({
+            github: { cli: [`cli-v${version}`] },
+            npm: {},
+          }),
+          MINISIGN_SECRET_KEY: '',
+          MINISIGN_PASSPHRASE: '',
+        },
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 30_000,
+      },
+    );
+
+    assert.match(out, new RegExp(`--source-tag\\s+cli-v${version.replaceAll('.', '\\.')}`));
+    assert.match(out, new RegExp(`--target-sha\\s+${authorizedSha}`));
+    assert.doesNotMatch(out, /build-cli-binaries\.mjs|publish-release\.mjs/);
+  });
+}

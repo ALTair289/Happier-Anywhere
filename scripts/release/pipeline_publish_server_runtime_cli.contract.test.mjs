@@ -32,7 +32,10 @@ for (const { channel, rollingTag } of [
       ],
       {
         cwd: repoRoot,
-        env: { ...process.env },
+        env: {
+          ...process.env,
+          HAPPIER_RELEASE_PUBLISHED_VERSIONS_JSON: JSON.stringify({ github: {}, npm: {} }),
+        },
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe'],
         timeout: 30_000,
@@ -48,3 +51,13 @@ for (const { channel, rollingTag } of [
     assert.match(wrapperSource, /publishing\/publish-binary-release\.mjs/);
   });
 }
+
+test('server runtime publisher exposes separate unsigned candidate build and authorized finalize modes', () => {
+  const wrapperSource = fs.readFileSync(resolve(repoRoot, 'scripts', 'pipeline', 'release', 'publish-server-runtime.mjs'), 'utf8');
+  const publisherSource = fs.readFileSync(resolve(repoRoot, 'scripts', 'pipeline', 'release', 'publishing', 'publish-binary-release.mjs'), 'utf8');
+  assert.match(publisherSource, /build-candidate/);
+  assert.match(publisherSource, /finalize-candidate/);
+  assert.match(publisherSource, /authorized-sha/);
+  assert.match(publisherSource, /server-runtime-candidate\.mjs/);
+  assert.match(wrapperSource, /publishing\/publish-binary-release\.mjs/);
+});

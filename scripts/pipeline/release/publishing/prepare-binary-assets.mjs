@@ -9,6 +9,8 @@ import { parseArgs } from 'node:util';
 import { normalizePublicReleaseChannel } from '../lib/public-release-rings.mjs';
 import { resolveArtifactVerifyExecution, resolveArtifactVerifyTarget } from './artifact-verify-target.mjs';
 import { getBinaryPublishProductSpec } from './product-specs.mjs';
+import { finalizeServerRuntimeCandidate } from './server-runtime-candidate.mjs';
+import { maybeSignFile } from '../lib/binary-release.mjs';
 
 const MANIFEST_PUBLISH_SCRIPT_RELATIVE_PATH = 'scripts/pipeline/release/publish-manifests.mjs';
 
@@ -72,6 +74,8 @@ export async function ensureCleanBinaryArtifactsDir(repoRoot, productSpec, opts)
  *   skipSmoke?: boolean;
  *   dryRun?: boolean;
  *   env?: Record<string, string | undefined>;
+ *   candidateDir?: string;
+ *   authorizedSha?: string;
  * }} params
  */
 export async function prepareBinaryReleaseAssets(params) {
@@ -97,13 +101,30 @@ export async function prepareBinaryReleaseAssets(params) {
   const opts = { dryRun: params.dryRun === true };
   await ensureCleanBinaryArtifactsDir(repoRoot, productSpec, opts);
 
-  runBinaryAssetStep(opts, process.execPath, [productSpec.buildScriptPath, '--channel', channel, '--version', version], {
-    cwd: repoRoot,
-    env: {
-      ...process.env,
-      ...params.env,
-    },
-  });
+  if (params.candidateDir) {
+    if (productSpec.id !== 'server') throw new Error('candidate finalization is supported only for server runtime assets');
+    if (opts.dryRun) {
+      console.log(`[dry-run] validate opaque candidate files from ${params.candidateDir}`);
+    } else {
+      await finalizeServerRuntimeCandidate({
+        candidateDir: params.candidateDir,
+        outDir: withinRepo(repoRoot, productSpec.artifactsDir),
+        version,
+        authorizedSha: String(params.authorizedSha ?? ''),
+        sign: async (checksumsPath) => {
+          await maybeSignFile({ path: checksumsPath, trustedComment: `happier-server ${version} ${channel}` });
+        },
+      });
+    }
+  } else {
+    runBinaryAssetStep(opts, process.execPath, [productSpec.buildScriptPath, '--channel', channel, '--version', version], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        ...params.env,
+      },
+    });
+  }
 
   runBinaryAssetStep(
     opts,
