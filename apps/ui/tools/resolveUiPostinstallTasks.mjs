@@ -27,6 +27,7 @@ export function resolveUiPostinstallTasks({ env }) {
             'vendor-codemirror-webview-bundle',
             'vendor-xterm-webview-bundle',
             'vendor-tiptap-webview-bundle',
+            'vendor-mermaid-webview-bundle',
         )
     }
 

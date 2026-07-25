@@ -247,6 +247,9 @@ jobs:
         with:
           args: --frozen-lockfile --ignore-engines
 
+      - name: Verify generated Mermaid WebView bundle
+        run: yarn --cwd apps/ui verify:mermaid-webview-bundle
+
       - name: Bump app version (source ref)
         id: bump_app
         run: |

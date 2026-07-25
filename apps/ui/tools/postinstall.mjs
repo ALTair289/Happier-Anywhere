@@ -478,3 +478,27 @@ if (wants('vendor-tiptap-webview-bundle')) {
         // Best-effort: the rich markdown editor is experimental and degrades to raw mode without it.
     }
 }
+
+// Bundle Mermaid for the native transcript WebView. The committed generated
+// module is the runtime fallback if rebuilding is unavailable; product code has
+// no CDN or other runtime-network fallback.
+if (wants('vendor-mermaid-webview-bundle')) {
+    try {
+        const result = runCommandBestEffort({
+            command: process.execPath,
+            args: [path.resolve(expoAppDir, 'tools', 'mermaid', 'buildMermaidWebViewBundle.mjs')],
+            options: { cwd: expoAppDir },
+        });
+        if (!result.ok) {
+            console.warn(
+                `[postinstall] Mermaid WebView bundle refresh exited with status ${result.status}; `
+                + 'the committed bundle was retained and candidate verification will reject stale bytes.',
+            );
+        }
+    } catch (e) {
+        console.warn(
+            `[postinstall] Mermaid WebView bundle refresh failed: ${e instanceof Error ? e.message : String(e)}; `
+            + 'the committed bundle was retained and candidate verification will reject stale bytes.',
+        );
+    }
+}
