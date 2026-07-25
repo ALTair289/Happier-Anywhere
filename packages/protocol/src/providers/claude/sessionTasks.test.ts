@@ -31,6 +31,9 @@ describe('normalizeClaudeActivityStatusSignal (canonical Claude status classifie
         expect(normalizeClaudeActivityStatusSignal('cancelled')).toBe('cancelled');
         expect(normalizeClaudeActivityStatusSignal('canceled')).toBe('cancelled');
         expect(normalizeClaudeActivityStatusSignal('stopped')).toBe('cancelled');
+        expect(normalizeClaudeActivityStatusSignal('killed')).toBe('cancelled');
+        expect(normalizeClaudeActivityStatusSignal('aborted')).toBe('cancelled');
+        expect(normalizeClaudeActivityStatusSignal('interrupted')).toBe('cancelled');
     });
 
     it('treats task_started / task_progress event types as active when status is absent', () => {
@@ -83,6 +86,8 @@ describe('Claude Agent SDK provider task status normalization', () => {
     it('treats all known SDK terminal task statuses as terminal', () => {
         for (const status of [
             'completed',
+            'complete',
+            'done',
             'succeeded',
             'success',
             'stopped',
@@ -90,6 +95,8 @@ describe('Claude Agent SDK provider task status normalization', () => {
             'error',
             'errored',
             'killed',
+            'aborted',
+            'interrupted',
             'cancelled',
             'canceled',
         ]) {
@@ -99,6 +106,22 @@ describe('Claude Agent SDK provider task status normalization', () => {
         expect(isTerminalClaudeAgentSdkProviderTaskStatus('running')).toBe(false);
         expect(isTerminalClaudeAgentSdkProviderTaskStatus('async_launched')).toBe(false);
         expect(isTerminalClaudeAgentSdkProviderTaskStatus('unknown')).toBe(false);
+    });
+
+    it('derives terminality from the canonical neutral status classifier', () => {
+        for (const status of [
+            'completed', 'complete', 'done', 'succeeded', 'success',
+            'failed', 'error', 'errored',
+            'stopped', 'killed', 'aborted', 'interrupted', 'cancelled', 'canceled',
+        ]) {
+            const signal = normalizeClaudeActivityStatusSignal(status);
+            expect(['complete', 'failed', 'cancelled']).toContain(signal);
+            expect(isTerminalClaudeAgentSdkProviderTaskStatus(status)).toBe(true);
+        }
+
+        for (const status of ['pending', 'running', 'active', 'in_progress', 'progress', 'blocked', 'unknown']) {
+            expect(isTerminalClaudeAgentSdkProviderTaskStatus(status)).toBe(false);
+        }
     });
 });
 

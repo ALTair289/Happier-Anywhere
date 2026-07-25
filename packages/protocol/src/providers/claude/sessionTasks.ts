@@ -89,7 +89,14 @@ export function normalizeClaudeActivityStatusSignal(status: unknown, type?: stri
   ) {
     return 'complete';
   }
-  if (normalizedStatus === 'stopped' || normalizedStatus === 'cancelled' || normalizedStatus === 'canceled') return 'cancelled';
+  if (
+    normalizedStatus === 'stopped'
+    || normalizedStatus === 'killed'
+    || normalizedStatus === 'aborted'
+    || normalizedStatus === 'interrupted'
+    || normalizedStatus === 'cancelled'
+    || normalizedStatus === 'canceled'
+  ) return 'cancelled';
   if (normalizedStatus === 'failed' || normalizedStatus === 'error' || normalizedStatus === 'errored') return 'failed';
   if (normalizedStatus === 'blocked') return 'blocked';
   if (normalizedStatus === 'pending') return 'pending';
@@ -130,43 +137,26 @@ export function readClaudeAgentSdkProviderTaskStatus(message: unknown): string |
 }
 
 export function isTerminalClaudeAgentSdkProviderTaskStatus(status: unknown): boolean {
-  switch (normalizeClaudeAgentSdkProviderTaskStatus(status)) {
-    case 'completed':
-    case 'succeeded':
-    case 'success':
-    case 'stopped':
-    case 'failed':
-    case 'error':
-    case 'errored':
-    case 'killed':
-    case 'cancelled':
-    case 'canceled':
-      return true;
-    default:
-      return false;
-  }
+  const signal = normalizeClaudeActivityStatusSignal(status);
+  return signal === 'complete' || signal === 'failed' || signal === 'cancelled';
 }
 
-function normalizeClaudeTaskStatus(status: unknown, type: string): SessionWorkStateStatusV1 {
-  const signal = normalizeClaudeActivityStatusSignal(status, type);
+function projectClaudeActivitySignalToWorkState(signal: ClaudeActivityStatusSignal): SessionWorkStateStatusV1 {
   // Work-state has no `failed` status; provider failures surface as `blocked`.
   return signal === 'failed' ? 'blocked' : signal;
 }
 
+function normalizeClaudeTaskStatus(status: unknown, type: string): SessionWorkStateStatusV1 {
+  return projectClaudeActivitySignalToWorkState(normalizeClaudeActivityStatusSignal(status, type));
+}
+
 function normalizeClaudeTodoStatus(status: string): SessionWorkStateStatusV1 {
-  if (status === 'pending') return 'pending';
-  if (status === 'in_progress') return 'active';
-  if (status === 'completed') return 'complete';
-  return 'unknown';
+  return projectClaudeActivitySignalToWorkState(normalizeClaudeActivityStatusSignal(status));
 }
 
 function normalizeClaudeTaskToolStatus(status: unknown, fallback: SessionWorkStateStatusV1): SessionWorkStateStatusV1 {
-  if (status === 'pending') return 'pending';
-  if (status === 'in_progress' || status === 'active' || status === 'running') return 'active';
-  if (status === 'completed' || status === 'complete') return 'complete';
-  if (status === 'failed' || status === 'error' || status === 'blocked') return 'blocked';
-  if (status === 'cancelled' || status === 'canceled' || status === 'stopped') return 'cancelled';
-  return fallback;
+  const signal = normalizeClaudeActivityStatusSignal(status);
+  return signal === 'unknown' ? fallback : projectClaudeActivitySignalToWorkState(signal);
 }
 
 function readTaskToolTitle(record: ClaudeTaskToolInput): string | null {
