@@ -1,9 +1,20 @@
 import { z } from 'zod';
 
 import { buildVendorSessionWorkStateItemId } from '../../sessionWorkState/sessionWorkStateItemIds.js';
-import type { SessionWorkStateItemV1, SessionWorkStateStatusV1 } from '../../sessionWorkState/sessionWorkStateV1.js';
+import type {
+  SessionWorkStateItemV1,
+  SessionWorkStateStatusReasonV1,
+  SessionWorkStateStatusV1,
+} from '../../sessionWorkState/sessionWorkStateV1.js';
 
-export const CodexAppServerGoalStatusSchema = z.enum(['active', 'paused', 'budgetLimited', 'complete']);
+export const CodexAppServerGoalStatusSchema = z.enum([
+  'active',
+  'paused',
+  'blocked',
+  'usageLimited',
+  'budgetLimited',
+  'complete',
+]);
 export type CodexAppServerGoalStatus = z.infer<typeof CodexAppServerGoalStatusSchema>;
 
 export const CodexAppServerGoalSchema = z
@@ -21,20 +32,24 @@ export const CodexAppServerGoalSchema = z
 export type CodexAppServerGoal = z.infer<typeof CodexAppServerGoalSchema>;
 
 function normalizeTimestampMs(value: unknown): number | null {
-  if (typeof value === 'number' && Number.isInteger(value) && value >= 0) return value;
+  if (typeof value === 'number') {
+    if (!Number.isSafeInteger(value) || value < 0 || value > 8_640_000_000_000) return null;
+    return value * 1_000;
+  }
   if (typeof value !== 'string') return null;
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
 function normalizeCodexGoalStatus(status: CodexAppServerGoalStatus): SessionWorkStateStatusV1 {
-  if (status === 'budgetLimited') return 'blocked';
+  if (status === 'blocked' || status === 'usageLimited' || status === 'budgetLimited') return 'blocked';
   if (status === 'complete') return 'complete';
   return status;
 }
 
-function normalizeCodexGoalStatusReason(status: CodexAppServerGoalStatus): 'budgetLimited' | undefined {
-  return status === 'budgetLimited' ? 'budgetLimited' : undefined;
+function normalizeCodexGoalStatusReason(status: CodexAppServerGoalStatus): SessionWorkStateStatusReasonV1 | undefined {
+  if (status === 'blocked' || status === 'usageLimited' || status === 'budgetLimited') return status;
+  return undefined;
 }
 
 export function normalizeCodexAppServerGoalToSessionWorkStateItem(params: Readonly<{
@@ -48,6 +63,7 @@ export function normalizeCodexAppServerGoalToSessionWorkStateItem(params: Readon
   const updatedAt = normalizeTimestampMs(parsed.data.updatedAt);
   if (updatedAt === null) return null;
   const createdAt = normalizeTimestampMs(parsed.data.createdAt);
+  if (parsed.data.createdAt !== undefined && createdAt === null) return null;
   const statusReason = normalizeCodexGoalStatusReason(parsed.data.status);
 
   return {
