@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 import { bundleWorkspaceDeps } from '../bundleWorkspaceDeps.mjs';
@@ -73,8 +73,19 @@ describe('bundleWorkspaceDeps', () => {
       repoRoot,
       workspacePath: 'packages/cli-common',
       packageName: '@happier-dev/cli-common',
-      manifestOverrides: { scripts: { postinstall: 'echo should-not-run' } },
-      files: { 'dist/index.js': 'export const z = 3;\n' },
+      manifestOverrides: {
+        scripts: { postinstall: 'echo should-not-run' },
+        exports: {
+          '.': { default: './dist/index.js' },
+          './workspaceLockLease': { default: './workspaceLockLease.mjs' },
+          './workspaceBundleLock': { default: './workspaceBundleLock.mjs' },
+        },
+      },
+      files: {
+        'dist/index.js': 'export const z = 3;\n',
+        'workspaceLockLease.mjs': 'export const lease = "canonical";\n',
+        'workspaceBundleLock.mjs': 'export { lease } from "./workspaceLockLease.mjs";\n',
+      },
     });
     writeWorkspacePackageFixture({
       repoRoot,
@@ -157,6 +168,12 @@ describe('bundleWorkspaceDeps', () => {
 
     expect(bundledCommonPkgJson.scripts).toBeUndefined();
     expect(bundledCommonPkgJson.name).toBe('@happier-dev/cli-common');
+    expect(
+      existsSync(resolve(happyCliDir, 'node_modules', '@happier-dev', 'cli-common', 'workspaceLockLease.mjs')),
+    ).toBe(true);
+    expect(
+      existsSync(resolve(happyCliDir, 'node_modules', '@happier-dev', 'cli-common', 'workspaceBundleLock.mjs')),
+    ).toBe(true);
 
     expect(bundledConnectionSupervisorPkgJson.scripts).toBeUndefined();
     expect(bundledConnectionSupervisorPkgJson.name).toBe('@happier-dev/connection-supervisor');

@@ -156,9 +156,13 @@ describe('prepareRuntimeEntrypoint', () => {
             `const lockPath = ${JSON.stringify(lockPath)};`,
             `const eventsPath = ${JSON.stringify(eventsPath)};`,
             `const distDir = ${JSON.stringify(distDir)};`,
-            'export async function buildCliDist() {',
+            'export async function buildCliDist(options) {',
             '  mkdirSync(dirname(eventsPath), { recursive: true });',
             "  appendFileSync(eventsPath, `build:${existsSync(lockPath)}\\n`, 'utf8');",
+            '  const heldLockValue = options.env?.HAPPIER_WORKSPACE_DIST_BUILD_LOCK_HELD;',
+            '  const heldLock = JSON.parse(heldLockValue);',
+            "  appendFileSync(eventsPath, `lease:${heldLock.path === lockPath}:${typeof heldLock.token === 'string' && heldLock.token.length > 0}\\n`, 'utf8');",
+            "  appendFileSync(eventsPath, `explicit:${options.heldLockValue === heldLockValue}\\n`, 'utf8');",
             '  mkdirSync(distDir, { recursive: true });',
             "  writeFileSync(join(distDir, 'index.mjs'), 'export const built = true;\\n', 'utf8');",
             "  writeFileSync(join(distDir, '.build-manifest.json'), JSON.stringify({ fingerprint: 'fedcba9876543210', builtAt: '2026-07-09T00:00:00.000Z', fileCount: 1, toolVersion: '1' }) + '\\n', 'utf8');",
@@ -176,7 +180,9 @@ describe('prepareRuntimeEntrypoint', () => {
             lockStaleAfterMs: 1_000,
           }),
         ).resolves.toBe(resolve(distDir, 'index.mjs'));
-        expect(readFileSync(eventsPath, 'utf8')).toBe('shared:true\nbuild:true\n');
+        expect(readFileSync(eventsPath, 'utf8')).toBe(
+          'shared:true\nbuild:true\nlease:true:true\nexplicit:true\n',
+        );
         expect(existsSync(syncCalledPath)).toBe(false);
       } finally {
         rmSync(repoRoot, { recursive: true, force: true });

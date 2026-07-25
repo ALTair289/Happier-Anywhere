@@ -1,14 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join, resolve, sep } from 'node:path';
+import { join, resolve } from 'node:path';
 
 import { createTempDirSync, removeTempDirSync } from '../../src/testkit/fs/tempDir';
 import { resolveBundledWorkspaceDependencyBuildOrder } from '../../../../scripts/workspaces/resolveWorkspaceDependencyBuildOrder.mjs';
 import {
-  execYarn,
-  resolveTscBin,
-  resolveYarnInvocation,
-  runTsc,
   syncBundledWorkspaceDist,
   syncCliRuntimeDependencies,
   withBuildSharedDepsLock,
@@ -20,71 +16,6 @@ import {
 } from './testkit/packageLayoutSandbox';
 
 describe('buildSharedDeps', () => {
-  it('surfaces which tsconfig failed when compilation throws', () => {
-    const execFileSync = vi.fn(() => {
-      throw new Error('tsc failed');
-    });
-
-    expect(() => runTsc('/repo/packages/protocol/tsconfig.json', {
-      execFileSync,
-      tscBin: '/repo/node_modules/@typescript/native/bin/tsc',
-    })).toThrow(
-      /tsconfig\.json/i,
-    );
-  });
-
-  it('invokes the native TypeScript JavaScript entrypoint via Node on Windows', () => {
-    const execFileSync = vi.fn(() => undefined);
-
-    runTsc('C:\\repo\\packages\\protocol\\tsconfig.json', {
-      execFileSync,
-      tscBin: 'C:\\repo\\node_modules\\@typescript\\native\\bin\\tsc',
-      platform: 'win32',
-    });
-
-    expect(execFileSync).toHaveBeenCalled();
-    const nodeCall = execFileSync.mock.calls[0] as unknown as [string, string[], { stdio: string }] | undefined;
-    if (!nodeCall) throw new Error('expected execFileSync call');
-    const [cmd, args, opts] = nodeCall;
-    expect(cmd).toBe(process.execPath);
-    expect(args).toEqual([
-      'C:\\repo\\node_modules\\@typescript\\native\\bin\\tsc',
-      '-p',
-      'C:\\repo\\packages\\protocol\\tsconfig.json',
-    ]);
-    expect(opts).toEqual({ stdio: 'inherit' });
-  });
-
-  it('prefers the workspace root tsc binary when present', () => {
-    const bin = resolveTscBin({
-      resolveTypeScriptCliPathImpl: () => '/repo/node_modules/@typescript/native/bin/tsc',
-      exists: (candidate: string) =>
-        candidate.includes(`${sep}node_modules${sep}@typescript${sep}native${sep}bin${sep}`) &&
-        !candidate.includes(`${sep}cli${sep}node_modules${sep}`),
-    });
-
-    expect(bin).toMatch(/node_modules[\\/]@typescript[\\/]native[\\/]bin[\\/]tsc$/);
-    expect(bin).not.toMatch(/cli[\\/]+node_modules/);
-  });
-
-  it('falls back to yarn on PATH when npm_execpath points at npm-cli.js', () => {
-    const invocation = resolveYarnInvocation('/somewhere/lib/node_modules/npm/bin/npm-cli.js');
-
-    expect(invocation).toEqual({
-      command: process.platform === 'win32' ? 'yarn.cmd' : 'yarn',
-      args: [],
-    });
-  });
-
-  it('uses node + npm_execpath when npm_execpath points at a Yarn entrypoint', () => {
-    const invocation = resolveYarnInvocation('/somewhere/lib/node_modules/yarn/bin/yarn.js');
-
-    expect(invocation).toEqual({
-      command: process.execPath,
-      args: ['/somewhere/lib/node_modules/yarn/bin/yarn.js'],
-    });
-  });
-
   it('orders bundled workspace builds so internal workspace dependencies compile first', () => {
     const repoRoot = createTempDirSync('happier-cli-build-shared-order-');
     try {
@@ -149,47 +80,6 @@ describe('buildSharedDeps', () => {
     } finally {
       removeTempDirSync(repoRoot);
     }
-  });
-
-  it('runs yarn.cmd through cmd.exe on Windows to avoid spawn EINVAL', () => {
-    const execFileSync = vi.fn(() => undefined);
-
-    execYarn(['-s', 'workspace', '@happier-dev/cli-common', 'build'], {
-      execFileSync,
-      npmExecPath: '/somewhere/lib/node_modules/npm/bin/npm-cli.js',
-      platform: 'win32',
-      cwd: 'C:\\repo',
-      stdio: 'inherit',
-    });
-
-    const cmdCall = execFileSync.mock.calls[0] as
-      | [string, string[], { cwd: string; stdio: string; windowsVerbatimArguments?: boolean }]
-      | undefined;
-    if (!cmdCall) throw new Error('expected execFileSync call');
-    const [cmd, args, options] = cmdCall;
-    expect(cmd).toBe('cmd.exe');
-    expect(args.slice(0, 3)).toEqual(['/d', '/s', '/c']);
-    expect(String(args[3])).toContain('yarn.cmd');
-    expect(String(args[3])).toContain('@happier-dev/cli-common');
-    expect(options.cwd).toBe('C:\\repo');
-    expect(options.stdio).toBe('inherit');
-    expect(options.windowsVerbatimArguments).toBe(true);
-  });
-
-  it('executes tsc via node to avoid .bin symlink ENOENT issues', () => {
-    const execFileSync = vi.fn(() => undefined);
-
-    runTsc('/repo/packages/protocol/tsconfig.json', {
-      execFileSync,
-      tscBin: '/repo/node_modules/@typescript/native/bin/tsc',
-      platform: 'darwin',
-    });
-
-    const nodeCall = execFileSync.mock.calls[0] as unknown as [string, string[]] | undefined;
-    if (!nodeCall) throw new Error('expected execFileSync call');
-    const [cmd, args] = nodeCall;
-    expect(cmd).toBe(process.execPath);
-    expect(args).toEqual(['/repo/node_modules/@typescript/native/bin/tsc', '-p', '/repo/packages/protocol/tsconfig.json']);
   });
 
   it('syncs workspace dist outputs into bundled deps for local bundled hosts when present', () => {
@@ -353,7 +243,7 @@ describe('buildSharedDeps', () => {
     ).toBe(true);
   });
 
-  it('bundles tweetnacl into the CLI publish tree for packaged installs', () => {
+  it('bundles tweetnacl into the CLI publish tree for packaged installs', async () => {
     const { repoRoot, happyCliDir, cleanup } = createPackageLayoutSandbox('happy-build-shared-runtime-');
 
     try {
@@ -375,7 +265,7 @@ describe('buildSharedDeps', () => {
         },
       });
 
-      syncCliRuntimeDependencies({ repoRoot });
+      await syncCliRuntimeDependencies({ repoRoot });
 
       expect(existsSync(resolve(repoRoot, 'apps', 'cli', 'node_modules', 'tweetnacl', 'package.json'))).toBe(true);
       expect(existsSync(resolve(repoRoot, 'apps', 'cli', 'node_modules', 'tweetnacl', 'nacl-fast.js'))).toBe(true);
@@ -434,7 +324,7 @@ describe('buildSharedDeps', () => {
       const lockPath = resolve(rootDir, 'cli-dist-build.lock');
       const events: string[] = [];
 
-      await withBuildSharedDepsLock(async () => {
+      await withBuildSharedDepsLock(async ({ heldLockValue }) => {
         events.push('parent:start');
         await withBuildSharedDepsLock(async () => {
           events.push('child:start');
@@ -443,7 +333,7 @@ describe('buildSharedDeps', () => {
           timeoutMs: 50,
           pollIntervalMs: 10,
           staleAfterMs: 1_000,
-          env: { HAPPIER_WORKSPACE_DIST_BUILD_LOCK_HELD: lockPath },
+          env: { HAPPIER_WORKSPACE_DIST_BUILD_LOCK_HELD: heldLockValue },
         });
         events.push('parent:end');
       }, {

@@ -1,7 +1,13 @@
-import { createRequire } from 'node:module';
-import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { dirname, resolve } from 'node:path';
+import { createRequire } from 'node:module';
+import {
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { dirname, join, relative, resolve } from 'node:path';
 
 const require = createRequire(import.meta.url);
 const DEFAULT_PKGROLL_TIMEOUT_MS = 600_000;
@@ -26,6 +32,25 @@ function normalizePkgrollOutputDir(value) {
   if (!segments.length) return 'dist';
   if (segments.includes('.') || segments.includes('..')) return 'dist';
   if (normalized.startsWith('/')) return 'dist';
+  return segments.join('/');
+}
+
+function resolveRequiredPkgrollOutputDir(value) {
+  const raw = String(value ?? '').trim();
+  const slashNormalized = raw.replace(/\\/g, '/').replace(/^\.\/+/, '');
+  const segments = slashNormalized.split('/').filter(Boolean);
+  if (
+    !raw
+    || raw.startsWith('-')
+    || slashNormalized.startsWith('/')
+    || /^[A-Za-z]:\//.test(slashNormalized)
+    || segments.length === 0
+    || segments.includes('.')
+    || segments.includes('..')
+    || segments.some((segment) => segment.includes(':'))
+  ) {
+    throw new Error('runPkgrollBuild requires an explicit relative builder-owned output directory');
+  }
   return segments.join('/');
 }
 
@@ -95,9 +120,7 @@ export function preparePkgrollPackageManifest(value, options = {}) {
 
   const out = {};
   for (const [key, entryValue] of Object.entries(value)) {
-    // pkgroll emits warnings for `bin` entries that point outside the built output.
-    // Since bin files are not part of pkgroll's bundling inputs, omit them from the
-    // temporary manifest we hand to pkgroll (the original package.json is restored).
+    // Pkgroll warns for bin entries outside its output, but does not use them as inputs.
     if (key === 'bin') continue;
     if (key === 'files') {
       out[key] = entryValue;
@@ -108,35 +131,126 @@ export function preparePkgrollPackageManifest(value, options = {}) {
   return out;
 }
 
+function prepareRuntimeGenerationManifest(manifest, outputDir) {
+  const prepared = preparePkgrollPackageManifest(manifest, { outputDir });
+  const bundled = new Set(
+    (Array.isArray(manifest?.bundledDependencies) ? manifest.bundledDependencies : [])
+      .map((name) => String(name))
+      .filter((name) => name.startsWith('@happier-dev/')),
+  );
+  if (bundled.size === 0) return prepared;
+
+  const dependencies = { ...(prepared.dependencies ?? {}) };
+  const devDependencies = { ...(prepared.devDependencies ?? {}) };
+  for (const packageName of bundled) {
+    if (!Object.prototype.hasOwnProperty.call(dependencies, packageName)) continue;
+    devDependencies[packageName] = dependencies[packageName];
+    delete dependencies[packageName];
+  }
+  return {
+    ...prepared,
+    dependencies,
+    devDependencies,
+  };
+}
+
+function rebaseManifestOutputPathToStage(value, outputDir) {
+  if (typeof value !== 'string') return value;
+  const normalized = value.replace(/\\/g, '/').replace(/^\.\/+/, '');
+  for (const outputRoot of [outputDir, 'dist', 'package-dist']) {
+    if (normalized === outputRoot) return '.';
+    const prefix = `${outputRoot}/`;
+    if (normalized.startsWith(prefix)) {
+      return `./${normalized.slice(prefix.length)}`;
+    }
+  }
+  return value;
+}
+
+function prepareStageOwnedManifest(value, outputDir) {
+  if (Array.isArray(value)) {
+    return value.map((item) => prepareStageOwnedManifest(item, outputDir));
+  }
+  if (!value || typeof value !== 'object') {
+    return rebaseManifestOutputPathToStage(value, outputDir);
+  }
+
+  const out = {};
+  for (const [key, entryValue] of Object.entries(value)) {
+    if (key === 'files') {
+      out[key] = entryValue;
+      continue;
+    }
+    out[key] = prepareStageOwnedManifest(entryValue, outputDir);
+  }
+  return out;
+}
+
+function toSlashNormalizedRelativePath(from, to) {
+  const value = relative(from, to).replace(/\\/g, '/');
+  return value || '.';
+}
+
+function rebasePkgrollInputPathToStage(inputPath, outputDir) {
+  const normalized = String(inputPath).replace(/\\/g, '/').replace(/^\.\/+/, '');
+  const prefix = `${outputDir}/`;
+  if (!normalized.startsWith(prefix)) {
+    throw new Error(`Pkgroll input is outside the builder-owned output directory: ${inputPath}`);
+  }
+  return normalized.slice(prefix.length);
+}
+
 export function resolvePkgrollCliPath() {
   return require.resolve('pkgroll/dist/cli.mjs');
 }
 
-export function runPkgrollBuild(options = {}) {
+function runPkgrollBuildStage(options = {}) {
   const packageJsonPath = resolve(String(options.packageJsonPath ?? 'package.json'));
+  const packageRoot = dirname(packageJsonPath);
   const spawn = options.spawn ?? spawnSync;
   const nodeExecutable = options.nodeExecutable ?? process.execPath;
   const env = options.env ?? process.env;
   const timeoutMs = resolvePkgrollTimeoutMs(env, options.timeoutMs);
-  const outputDir = normalizePkgrollOutputDir(options.outputDir ?? env?.HAPPIER_CLI_BUILD_OUTPUT_DIR);
-  const original = readFileSync(packageJsonPath, 'utf8');
-  const manifest = JSON.parse(original);
+  const outputDir = resolveRequiredPkgrollOutputDir(
+    options.outputDir ?? env?.HAPPIER_CLI_BUILD_OUTPUT_DIR,
+  );
+  const stagingDir = resolve(packageRoot, outputDir);
+  const sourceDir = resolve(packageRoot, 'src');
+  const manifest = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
+  const buildManifest = prepareRuntimeGenerationManifest(manifest, outputDir);
+  const stageManifest = prepareStageOwnedManifest(buildManifest, outputDir);
+  const stageManifestRaw = `${JSON.stringify(stageManifest, null, 2)}\n`;
+  const stageManifestPath = join(stagingDir, 'package.json');
   const pkgrollCliPath = options.pkgrollCliPath ?? resolvePkgrollCliPath();
-  const inputPaths = collectPkgrollInputPaths(manifest, { outputDir });
+  const inputPaths = collectPkgrollInputPaths(manifest, { outputDir })
+    .map((inputPath) => rebasePkgrollInputPathToStage(inputPath, outputDir));
   if (inputPaths.length === 0) {
     throw new Error('No package entrypoints found for pkgroll build');
   }
 
-  const pkgrollArgs = [pkgrollCliPath, '--packagejson=false', '--srcdist', `src:${outputDir}`];
+  mkdirSync(stagingDir, { recursive: true });
+  const physicalStagingDir = realpathSync.native(stagingDir);
+  const srcdist = `${toSlashNormalizedRelativePath(physicalStagingDir, sourceDir)}:.`;
+  const pkgrollArgs = [pkgrollCliPath, '--packagejson=false', '--srcdist', srcdist];
   for (const inputPath of inputPaths) {
     pkgrollArgs.push('--input', inputPath);
   }
 
-  const result = spawn(nodeExecutable, pkgrollArgs, {
-    cwd: dirname(packageJsonPath),
-    stdio: ['ignore', 'inherit', 'inherit'],
-    timeout: timeoutMs,
-  });
+  let result;
+  let manifestWritten = false;
+  try {
+    writeFileSync(stageManifestPath, stageManifestRaw, { encoding: 'utf8', flag: 'wx' });
+    manifestWritten = true;
+    result = spawn(nodeExecutable, pkgrollArgs, {
+      cwd: physicalStagingDir,
+      stdio: ['ignore', 'inherit', 'inherit'],
+      timeout: timeoutMs,
+    });
+  } finally {
+    if (manifestWritten) {
+      rmSync(stageManifestPath, { force: true });
+    }
+  }
   if (typeof result.status === 'number' && result.status !== 0) {
     throw new Error(`pkgroll exited with status ${result.status}`);
   }
@@ -149,11 +263,9 @@ export function runPkgrollBuild(options = {}) {
   }
 }
 
-const isEntrypoint = (() => {
-  const arg = typeof process.argv?.[1] === 'string' ? process.argv[1] : '';
-  return arg.endsWith('/runPkgrollBuild.mjs') || arg.endsWith('\\runPkgrollBuild.mjs');
-})();
-
-if (isEntrypoint) {
-  runPkgrollBuild();
+export function runPkgrollBuild(options = {}) {
+  const packageJsonPath = realpathSync.native(
+    resolve(String(options.packageJsonPath ?? 'package.json')),
+  );
+  return runPkgrollBuildStage({ ...options, packageJsonPath });
 }

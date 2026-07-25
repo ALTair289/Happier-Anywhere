@@ -50,9 +50,10 @@ describe('Vitest lane separation', () => {
         expect(fastScripts).not.toContain('runPkgrollBuild');
         expect(fastScripts).not.toContain('syncPackageDist');
 
-        // `yarn vitest ...` (without going through `yarn test:unit`) should still build internal
-        // workspaces first so protocol/agents dist artifacts are never stale/missing.
-        expect(packageJson.scripts?.vitest).toBe('$npm_execpath run -s build:shared && vitest');
+        expect(packageJson.scripts?.vitest).toBe('vitest');
+        expect(packageJson.scripts?.pretest).toBeUndefined();
+        expect(packageJson.scripts?.pretypecheck).toBe('yarn -s prepare:declarations');
+        expect(packageJson.scripts?.['prepare:declarations']).toBe('node scripts/buildSharedDeps.mjs --declarations');
     });
 
     it('keeps build-output dist verification out of the unit lane', () => {

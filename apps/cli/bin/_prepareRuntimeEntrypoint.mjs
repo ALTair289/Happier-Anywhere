@@ -17,7 +17,7 @@ function resolveLocalRepoRoot(projectRoot) {
   return existsSync(syncModulePath) ? repoRoot : null;
 }
 
-async function buildLocalRuntimeSnapshot(projectRoot, repoRoot, opts) {
+async function buildLocalRuntimeSnapshot(projectRoot, repoRoot, opts, heldLockValue) {
   const buildSharedDepsModulePath = resolve(projectRoot, 'scripts', 'buildSharedDeps.mjs');
   const buildModulePath = resolve(projectRoot, 'scripts', 'build.mjs');
   if (!existsSync(buildSharedDepsModulePath) || !existsSync(buildModulePath)) {
@@ -27,9 +27,8 @@ async function buildLocalRuntimeSnapshot(projectRoot, repoRoot, opts) {
   const buildEnv = {
     ...(opts.env ?? process.env),
   };
-  const lockPath = String(opts.lockPath ?? '').trim();
-  if (lockPath) {
-    buildEnv.HAPPIER_WORKSPACE_DIST_BUILD_LOCK_HELD = resolve(lockPath);
+  if (heldLockValue) {
+    buildEnv.HAPPIER_WORKSPACE_DIST_BUILD_LOCK_HELD = heldLockValue;
   }
 
   const [{ main: buildSharedDeps }, { buildCliDist }] = await Promise.all([
@@ -45,6 +44,7 @@ async function buildLocalRuntimeSnapshot(projectRoot, repoRoot, opts) {
     lockPollIntervalMs: opts.lockPollIntervalMs,
     lockStaleAfterMs: opts.lockStaleAfterMs,
     skipLock: true,
+    heldLockValue,
     env: buildEnv,
   });
 }
@@ -60,14 +60,14 @@ export async function prepareRuntimeEntrypoint(projectRoot, relativePath, opts =
     return readyEntrypoint;
   }
 
-  return await withOptionalCliSharedDepsBuildLock(async () => {
+  return await withOptionalCliSharedDepsBuildLock(async ({ heldLockValue }) => {
     // A writer may have completed while this cold reader waited for the build lock.
     const concurrentlyBuiltEntrypoint = resolveValidRuntimeEntrypoint(projectRoot, relativePath);
     if (concurrentlyBuiltEntrypoint) {
       return concurrentlyBuiltEntrypoint;
     }
 
-    await buildLocalRuntimeSnapshot(projectRoot, repoRoot, opts);
+    await buildLocalRuntimeSnapshot(projectRoot, repoRoot, opts, heldLockValue);
     const builtEntrypoint = resolveValidRuntimeEntrypoint(projectRoot, relativePath);
     if (!builtEntrypoint) {
       throw new Error(`CLI build completed without a valid runtime snapshot under ${projectRoot}`);

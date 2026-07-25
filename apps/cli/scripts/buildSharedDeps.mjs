@@ -1,23 +1,27 @@
-import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { resolveTypeScriptCliPath } from '../../../scripts/workspaces/typescriptCommand.mjs';
 import { syncBundledWorkspacePackages } from '../../../scripts/workspaces/syncBundledWorkspacePackages.mjs';
 import { resolveBundledWorkspaceDependencyBuildOrder } from '../../../scripts/workspaces/resolveWorkspaceDependencyBuildOrder.mjs';
-import {
-  execYarn as execYarnCommand,
-  resolveYarnInvocation as resolveYarnCommandInvocation,
-} from '../../../scripts/workspaces/execYarnCommand.mjs';
 import { withWorkspaceBundleLock } from '../../../scripts/workspaces/workspaceBundleLock.mjs';
+import {
+  ensureWorkspacePackagesBuiltByName,
+  ensureWorkspacePackagesBuiltForComponent,
+} from '../../../scripts/workspaces/ensureWorkspacePackagesBuilt.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export async function withBuildSharedDepsLock(fn, options = {}) {
   const lockPath = options.lockPath ?? DEFAULT_BUILD_LOCK_PATH;
-  return await withWorkspaceBundleLock(fn, { ...options, lockPath });
+  return await withWorkspaceBundleLock(fn, {
+    ...options,
+    lockPath,
+    heldLockValue: options.heldLockValue
+      ?? options.heldLockPath
+      ?? (options.env ?? process.env)?.HAPPIER_WORKSPACE_DIST_BUILD_LOCK_HELD,
+  });
 }
 
 function findRepoRoot(startDir) {
@@ -36,71 +40,120 @@ function findRepoRoot(startDir) {
 
 const repoRoot = findRepoRoot(__dirname);
 const DEFAULT_BUILD_LOCK_PATH = resolve(repoRoot, '.project', 'tmp', 'cli-dist-build.lock');
+let loadedCliCommonWorkspacesModule = null;
 
-export function execYarn(args, options = {}) {
-  return execYarnCommand(args, options);
-}
-
-export function resolveYarnInvocation(npmExecPath = process.env.npm_execpath, options = {}) {
-  return resolveYarnCommandInvocation(npmExecPath, options);
-}
-
-async function loadCliCommonWorkspacesModule() {
+async function loadCliCommonWorkspacesModule(options = {}) {
+  if (loadedCliCommonWorkspacesModule) {
+    return { helpers: loadedCliCommonWorkspacesModule };
+  }
   const modulePath = resolve(repoRoot, 'packages', 'cli-common', 'dist', 'workspaces', 'index.js');
 
   if (!existsSync(modulePath)) {
-    for (const workspaceName of resolveCliBundledWorkspacePackageNames()) {
-      execYarn(['-s', 'workspace', `@happier-dev/${workspaceName}`, 'build'], {
-        cwd: repoRoot,
-        stdio: 'inherit',
-      });
-      if (workspaceName === 'cli-common' && existsSync(modulePath)) {
-        break;
-      }
-    }
+    await ensureWorkspacePackagesBuiltByName(repoRoot, ['@happier-dev/cli-common'], {
+      quiet: options.quiet === true,
+      env: options.env ?? process.env,
+    });
   }
 
   if (!existsSync(modulePath)) {
     throw new Error(`Missing cli-common workspaces build helpers: ${modulePath}`);
   }
 
-  return await import(pathToFileURL(modulePath).href);
+  loadedCliCommonWorkspacesModule = await import(pathToFileURL(modulePath).href);
+  return { helpers: loadedCliCommonWorkspacesModule };
 }
-
-const {
-  bundleInstalledPackageWithRuntimeDependencies,
-  resolveWorkspaceBundlesFromPackageJson,
-  vendorBundledPackageRuntimeDependencies,
-} = await loadCliCommonWorkspacesModule();
 const CLI_BUNDLED_HOST_APPS = ['cli'];
-function resolveCliBundledWorkspacePackageNames({ exists = existsSync } = {}) {
+function resolveCliBundledWorkspacePackageNames({ root = repoRoot, exists = existsSync } = {}) {
   return resolveBundledWorkspaceDependencyBuildOrder({
-    repoRoot,
-    hostPackageDir: resolve(repoRoot, 'apps', 'cli'),
+    repoRoot: root,
+    hostPackageDir: resolve(root, 'apps', 'cli'),
     existsSync: exists,
-  }).filter((workspaceName) => exists(resolve(repoRoot, 'packages', workspaceName, 'tsconfig.json')));
+  }).filter((workspaceName) => exists(resolve(root, 'packages', workspaceName, 'tsconfig.json')));
 }
 
-export function resolveTscBin({ exists, resolveTypeScriptCliPathImpl = resolveTypeScriptCliPath } = {}) {
-  const existsImpl = exists ?? existsSync;
-  const candidate = resolveTypeScriptCliPathImpl({ cwd: resolve(repoRoot, 'apps', 'cli') });
-  if (!existsImpl(candidate)) {
-    throw new Error(`Native TypeScript compiler entrypoint not found: ${candidate}`);
+function collectDeclarationTargets(value, result) {
+  if (typeof value === 'string') {
+    if (/^\.\/dist\/.*\.d\.(?:ts|mts|cts)$/.test(value)) result.add(value.slice(2));
+    return;
   }
-  return candidate;
+  if (!value || typeof value !== 'object') return;
+  for (const nested of Array.isArray(value) ? value : Object.values(value)) {
+    collectDeclarationTargets(nested, result);
+  }
 }
 
-export function runTsc(tsconfigPath, opts) {
-  const exec = opts?.execFileSync ?? execFileSync;
-  const tsc = opts?.tscBin ?? resolveTscBin();
+function resolveWorkspaceDeclarationPaths(packageDir, readFile = readFileSync) {
+  const targets = new Set();
   try {
-    // Execute the exported JavaScript entrypoint via the managed Node runtime on every platform.
-    exec(process.execPath, [tsc, '-p', tsconfigPath], { stdio: 'inherit' });
-  } catch (error) {
-    const suffix = tsconfigPath ? ` (${tsconfigPath})` : '';
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Failed to compile shared workspace deps${suffix}: ${message}`);
+    const packageJson = JSON.parse(readFile(resolve(packageDir, 'package.json'), 'utf8'));
+    collectDeclarationTargets(packageJson.types, targets);
+    collectDeclarationTargets(packageJson.exports, targets);
+  } catch {
+    // A malformed or absent manifest is handled as a missing declaration below.
   }
+  if (targets.size === 0) targets.add('dist/index.d.ts');
+  return [...targets].map((target) => resolve(packageDir, target));
+}
+
+function isBundledDeclarationCopyStale({ root, packageDir, workspaceName, fsOps = {} }) {
+  const exists = fsOps.exists ?? existsSync;
+  const stat = fsOps.stat ?? statSync;
+  const destPackageDir = resolve(root, 'apps', 'cli', 'node_modules', '@happier-dev', workspaceName);
+  if (!exists(resolve(destPackageDir, 'package.json'))) return true;
+  for (const sourcePath of resolveWorkspaceDeclarationPaths(packageDir, fsOps.readFile ?? readFileSync)) {
+    const relativePath = sourcePath.slice(packageDir.length + 1);
+    const destPath = resolve(destPackageDir, relativePath);
+    if (!exists(destPath)) return true;
+    try {
+      if (Number(stat(sourcePath).mtimeMs ?? 0) > Number(stat(destPath).mtimeMs ?? 0)) return true;
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
+
+export async function ensureCliDeclarationPrerequisites(options = {}) {
+  const root = typeof options.repoRoot === 'string' ? options.repoRoot : repoRoot;
+  const workspaceNames = options.workspaceNames ?? resolveCliBundledWorkspacePackageNames({ root });
+  const fsOps = {
+    exists: options.existsSync,
+    readFile: options.readFileSync,
+    stat: options.statSync,
+  };
+  const collectSyncPlan = () => workspaceNames.filter((name) => {
+    const packageDir = resolve(root, 'packages', name);
+    return isBundledDeclarationCopyStale({ root, packageDir, workspaceName: name, fsOps });
+  });
+  const ensureWorkspaceOutputs = () => ensureWorkspacePackagesBuiltForComponent(resolve(root, 'apps', 'cli'), {
+    quiet: options.quiet !== false,
+    env: options.env ?? process.env,
+  });
+
+  // The workspace owner performs its read-only freshness admission before taking
+  // each package publication lock. Bundled-copy freshness remains local to this
+  // CLI host because it does not own the source package's dist lifecycle.
+  const initialBuild = await ensureWorkspaceOutputs();
+  if (collectSyncPlan().length === 0) {
+    return { built: initialBuild.built.length > 0, reason: 'current' };
+  }
+
+  const withLock = options.withBuildSharedDepsLockImpl ?? withBuildSharedDepsLock;
+  return withLock(async () => {
+    const lockedBuild = await ensureWorkspaceOutputs();
+    const syncNames = collectSyncPlan();
+    if (syncNames.length === 0) return { built: false, reason: 'current-after-lock' };
+    const syncDist = options.syncBundledWorkspaceDistImpl ?? syncBundledWorkspaceDist;
+    await syncDist({
+      repoRoot: root,
+      workspaceNames: syncNames,
+      includeRuntimeDependencies: options.includeRuntimeDependencies === true,
+    });
+    return {
+      built: initialBuild.built.length > 0 || lockedBuild.built.length > 0,
+      workspaces: syncNames,
+    };
+  }, options);
 }
 
 export function syncBundledWorkspaceDist(opts = {}) {
@@ -109,6 +162,10 @@ export function syncBundledWorkspaceDist(opts = {}) {
   syncBundledWorkspacePackages({
     repoRoot,
     hostApps: Array.isArray(opts.bundledHostApps) && opts.bundledHostApps.length > 0 ? opts.bundledHostApps : CLI_BUNDLED_HOST_APPS,
+    ...(Array.isArray(opts.workspaceNames) && opts.workspaceNames.length > 0 ? { packages: opts.workspaceNames } : {}),
+    ...(opts.includeRuntimeDependencies === false
+      ? { vendorBundledPackageRuntimeDependencies: () => {} }
+      : {}),
     existsSync: opts.existsSync,
     cpSync: opts.cpSync,
     mkdirSync: opts.mkdirSync,
@@ -118,7 +175,9 @@ export function syncBundledWorkspaceDist(opts = {}) {
   });
 }
 
-export function syncCliRuntimeDependencies(opts = {}) {
+export async function syncCliRuntimeDependencies(opts = {}) {
+  const helpers = opts.workspaceHelpers ?? (await loadCliCommonWorkspacesModule()).helpers;
+  const { bundleInstalledPackageWithRuntimeDependencies } = helpers;
   const repoRootArg = opts.repoRoot;
   const repoRoot = typeof repoRootArg === 'string' && repoRootArg.trim() ? repoRootArg : findRepoRoot(__dirname);
   const cliPackageJsonPath = resolve(repoRoot, 'apps', 'cli', 'package.json');
@@ -138,7 +197,9 @@ export function syncCliRuntimeDependencies(opts = {}) {
   });
 }
 
-export function syncBundledWorkspaceRuntimeDependencies(opts = {}) {
+export async function syncBundledWorkspaceRuntimeDependencies(opts = {}) {
+  const helpers = opts.workspaceHelpers ?? (await loadCliCommonWorkspacesModule()).helpers;
+  const { resolveWorkspaceBundlesFromPackageJson, vendorBundledPackageRuntimeDependencies } = helpers;
   const repoRootArg = opts.repoRoot;
   const repoRoot = typeof repoRootArg === 'string' && repoRootArg.trim() ? repoRootArg : findRepoRoot(__dirname);
   const bundles = resolveWorkspaceBundlesFromPackageJson({
@@ -155,11 +216,23 @@ export function syncBundledWorkspaceRuntimeDependencies(opts = {}) {
 }
 
 export function main(options = {}) {
+  if (options.mode === 'declarations' || options.mode === 'source-dev') {
+    return ensureCliDeclarationPrerequisites({
+      ...options,
+      includeRuntimeDependencies: options.mode === 'source-dev',
+    });
+  }
+
   const build = async () => {
-    const bundledWorkspaceNames = resolveCliBundledWorkspacePackageNames();
-    for (const name of bundledWorkspaceNames) {
-      runTsc(resolve(repoRoot, 'packages', name, 'tsconfig.json'));
-    }
+    await ensureWorkspacePackagesBuiltForComponent(resolve(repoRoot, 'apps', 'cli'), {
+      quiet: options.quiet === true,
+      env: options.env ?? process.env,
+    });
+    const loadHelpersImpl = options.loadCliCommonWorkspacesModuleImpl ?? loadCliCommonWorkspacesModule;
+    const { helpers } = await loadHelpersImpl(options);
+    const syncDistImpl = options.syncBundledWorkspaceDistImpl ?? syncBundledWorkspaceDist;
+    const syncRuntimeDepsImpl = options.syncBundledWorkspaceRuntimeDependenciesImpl ?? syncBundledWorkspaceRuntimeDependencies;
+    const syncCliDepsImpl = options.syncCliRuntimeDependenciesImpl ?? syncCliRuntimeDependencies;
 
     const protocolDist = resolve(repoRoot, 'packages', 'protocol', 'dist', 'index.js');
     if (!existsSync(protocolDist)) {
@@ -168,9 +241,9 @@ export function main(options = {}) {
 
     // If the CLI currently has bundled workspace deps under apps/cli/node_modules,
     // keep their dist outputs in sync so local builds/tests do not consume stale artifacts.
-    syncBundledWorkspaceDist({ repoRoot });
-    syncBundledWorkspaceRuntimeDependencies({ repoRoot });
-    syncCliRuntimeDependencies({ repoRoot });
+    await syncDistImpl({ repoRoot, workspaceHelpers: helpers });
+    await syncRuntimeDepsImpl({ repoRoot, workspaceHelpers: helpers });
+    await syncCliDepsImpl({ repoRoot, workspaceHelpers: helpers });
   };
 
   if (options.skipLock === true) {
@@ -186,7 +259,12 @@ const invokedAsMain = (() => {
 })();
 
 if (invokedAsMain) {
-  main().catch((error) => {
+  const mode = process.argv.includes('--declarations')
+    ? 'declarations'
+    : process.argv.includes('--source-dev')
+      ? 'source-dev'
+      : 'runtime';
+  main({ mode }).catch((error) => {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);
   });

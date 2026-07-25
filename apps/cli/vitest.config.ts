@@ -3,6 +3,11 @@ import { resolve } from 'node:path'
 
 import dotenv from 'dotenv'
 import { resolveVitestFeatureTestExcludeGlobs } from '../../scripts/testing/featureTestGating'
+import {
+    workspacePackageAliases,
+    workspacePackageOptimizationExcludes,
+    workspacePackageSourcesPlugin,
+} from './scripts/vitestWorkspacePackageResolution'
 
 const testEnv = dotenv.config({
     path: '.env.integration-test'
@@ -22,6 +27,9 @@ if (mergedTestEnv.HAPPIER_SERVER_URL && !mergedTestEnv.HAPPIER_WEBAPP_URL) {
 mergedTestEnv.HAPPIER_FEATURE_POLICY_ENV = '';
 
 export default defineConfig({
+    optimizeDeps: {
+        exclude: workspacePackageOptimizationExcludes,
+    },
     test: {
         // Keep per-file module isolation so cross-file mocks/env mutations cannot leak.
         // This matches our integration suite configuration and prevents order-dependent failures.
@@ -62,8 +70,7 @@ export default defineConfig({
         }
     },
     resolve: {
-        alias: {
-            '@': resolve('./src'),
-        },
+        alias: [...workspacePackageAliases, { find: '@', replacement: resolve('./src') }],
     },
+    plugins: [workspacePackageSourcesPlugin],
 })
