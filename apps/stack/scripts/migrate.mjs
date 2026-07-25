@@ -7,12 +7,13 @@ import { printResult, wantsHelp, wantsJson } from './utils/cli/cli.mjs';
 import { ensureEnvFileUpdated } from './utils/env/env_file.mjs';
 import { readEnvObjectFromFile } from './utils/env/read.mjs';
 import { getComponentDir, getRootDir, resolveStackEnvPath } from './utils/paths/paths.mjs';
-import { ensureDepsInstalled } from './utils/proc/pm.mjs';
+import { ensureDepsInstalled, pmExecBin } from './utils/proc/pm.mjs';
 import { ensureHappyServerManagedInfra, applyHappyServerMigrations } from './utils/server/infra/happy_server_infra.mjs';
 import { runCapture } from './utils/proc/proc.mjs';
 import { pickNextFreeTcpPort } from './utils/net/ports.mjs';
 import { getEnvValue } from './utils/env/values.mjs';
 import { importPrismaClientFromNodeModules } from './utils/server/prisma_import.mjs';
+import { resolveEffectiveDbProvider } from './utils/server/effective_db_provider.mjs';
 
 function usage() {
   return [
@@ -20,7 +21,8 @@ function usage() {
     '  hstack migrate light-to-server --from-stack=<name> --to-stack=<name> [--include-files] [--force] [--json]',
     '',
     'Notes:',
-    '- This migrates chat data from happier-server-light (PG_Light via embedded PGlite) to happier-server (Docker Postgres).',
+    '- The only supported provider pair is PGlite -> Postgres.',
+    '- This migrates chat data from happier-server-light (embedded PGlite) to happier-server (Postgres).',
     '- It preserves IDs, so existing session URLs keep working on the new server.',
     '- If --include-files is set, it mirrors server-light local files into Minio (S3) in the target stack.',
   ].join('\n');
@@ -75,6 +77,20 @@ async function migrateLightToServer({ rootDir, fromStack, toStack, includeFiles,
   if (toFlavor !== 'happier-server') {
     throw new Error(`[migrate] to-stack must use happier-server (got: ${toFlavor})`);
   }
+  const fromProvider = resolveEffectiveDbProvider({ serverComponentName: fromFlavor, env: fromEnv });
+  const toProvider = resolveEffectiveDbProvider({ serverComponentName: toFlavor, env: toEnv });
+  if (!fromProvider.ok) {
+    throw new Error(`[migrate] invalid from-stack DB provider: ${fromProvider.input ?? fromProvider.reason}`);
+  }
+  if (!toProvider.ok) {
+    throw new Error(`[migrate] invalid to-stack DB provider: ${toProvider.input ?? toProvider.reason}`);
+  }
+  if (fromProvider.provider !== 'pglite' || toProvider.provider !== 'postgres') {
+    throw new Error(
+      `[migrate] supported provider pair is pglite -> postgres ` +
+      `(got: ${fromProvider.provider} -> ${toProvider.provider})`,
+    );
+  }
 
   const fromDataDir = getEnvValue(fromEnv, 'HAPPIER_SERVER_LIGHT_DATA_DIR') || join(from.baseDir, 'server-light');
   const fromFilesDir = getEnvValue(fromEnv, 'HAPPIER_SERVER_LIGHT_FILES_DIR') || join(fromDataDir, 'files');
@@ -117,10 +133,16 @@ async function migrateLightToServer({ rootDir, fromStack, toStack, includeFiles,
     envPath: to.envPath,
     env: {
       ...process.env,
+      ...toEnv,
       ...(toEphemeral ? { HAPPIER_STACK_EPHEMERAL_PORTS: '1' } : {}),
     },
+    dbProvider: toProvider.provider,
   });
-  await applyHappyServerMigrations({ serverDir: fullDir, env: { ...process.env, ...infra.env } });
+  await applyHappyServerMigrations({
+    serverDir: fullDir,
+    env: { ...process.env, ...infra.env },
+    dbProvider: toProvider.provider,
+  });
 
   // Snapshot the embedded DB dir so migration is consistent even if the source server is running.
   const snapshotDir = join(to.baseDir, 'migrations');
@@ -129,14 +151,17 @@ async function migrateLightToServer({ rootDir, fromStack, toStack, includeFiles,
   await cp(fromDbDir, snapshotDbDir, { recursive: true, force: true });
 
   // Ensure schema is applied on the snapshot DB (idempotent).
-  await runCapture('yarn', ['-s', 'migrate:light:deploy'], {
-    cwd: lightDir,
+  await pmExecBin({
+    dir: lightDir,
+    bin: 'migrate:light:deploy',
+    args: [],
     env: {
       ...process.env,
       HAPPIER_SERVER_LIGHT_DATA_DIR: fromDataDir,
       HAPPIER_SERVER_LIGHT_FILES_DIR: fromFilesDir,
       HAPPIER_SERVER_LIGHT_DB_DIR: snapshotDbDir,
     },
+    quiet: true,
   });
 
   // Read from the snapshot via a temporary pglite socket and the standard Prisma client.
