@@ -16,6 +16,13 @@ function buildTemplateEnvelope(existingSessionId?: string): string {
     });
 }
 
+function buildPlainTemplateEnvelope(): string {
+    return JSON.stringify({
+        kind: "happier_automation_template_plain_v1",
+        payload: { directory: "/tmp/project", prompt: "run automation" },
+    });
+}
+
 describe("automationCrudService (integration)", () => {
     let harness: LightSqliteHarness;
     let ioTo: ReturnType<typeof vi.fn>;
@@ -488,6 +495,55 @@ describe("automationCrudService (integration)", () => {
                     templateCiphertext: buildTemplateEnvelope(),
                     assignments: [{ machineId: "machine-not-owned", enabled: true, priority: 0 }],
                 },
+            }),
+        ).rejects.toBeInstanceOf(AutomationValidationError);
+    });
+
+    it("revalidates create templates against the account's current encryption mode", async () => {
+        const account = await db.account.create({
+            data: { publicKey: "pk-automation-crud-e2ee-create", encryptionMode: "e2ee" },
+            select: { id: true },
+        });
+
+        await expect(() =>
+            createAutomation({
+                accountId: account.id,
+                input: {
+                    name: "Wrong envelope",
+                    description: null,
+                    enabled: true,
+                    schedule: { kind: "interval", everyMs: 60_000, timezone: null },
+                    targetType: "new_session",
+                    templateCiphertext: buildPlainTemplateEnvelope(),
+                    assignments: [],
+                },
+            }),
+        ).rejects.toBeInstanceOf(AutomationValidationError);
+    });
+
+    it("revalidates replacement templates against the account's current encryption mode", async () => {
+        const account = await db.account.create({
+            data: { publicKey: "pk-automation-crud-e2ee-update", encryptionMode: "e2ee" },
+            select: { id: true },
+        });
+        const created = await createAutomation({
+            accountId: account.id,
+            input: {
+                name: "Valid envelope",
+                description: null,
+                enabled: true,
+                schedule: { kind: "interval", everyMs: 60_000, timezone: null },
+                targetType: "new_session",
+                templateCiphertext: buildTemplateEnvelope(),
+                assignments: [],
+            },
+        });
+
+        await expect(() =>
+            updateAutomation({
+                accountId: account.id,
+                automationId: created.id,
+                input: { templateCiphertext: buildPlainTemplateEnvelope() },
             }),
         ).rejects.toBeInstanceOf(AutomationValidationError);
     });
