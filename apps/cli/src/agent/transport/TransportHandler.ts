@@ -272,11 +272,4 @@ export interface TransportHandler {
    */
   sanitizeToolUpdateContent?<T extends { content?: unknown }>(update: T): T;
 
-  /**
-   * Whether this provider delivers plans/todos through a richer proprietary channel and therefore
-   * opts out of the generic ACP `plan` SessionUpdate -> TodoWrite render (to avoid a duplicate
-   * checklist). Example: Cursor delivers plans via the `cursor/create_plan` extension method.
-   * Defaults to false (render standard ACP plan updates).
-   */
-  suppressAcpPlanUpdate?(): boolean;
 }

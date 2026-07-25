@@ -1,3 +1,5 @@
+import type { StructuredQuestionAnswersV1 } from '@happier-dev/protocol';
+
 /**
  * Provider-neutral result returned by the canonical permission coordinator.
  *
@@ -10,5 +12,5 @@ export interface PermissionResult {
   execPolicyAmendment?: Readonly<{
     command: string[];
   }>;
-  answers?: Record<string, string>;
+  answers?: StructuredQuestionAnswersV1;
 }

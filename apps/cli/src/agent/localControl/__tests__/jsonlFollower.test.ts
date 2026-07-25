@@ -292,6 +292,174 @@ describe('JsonlFollower', () => {
     }
   });
 
+  it('preserves exact continuity across a transient pathname absence', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'jsonl-follower-transient-missing-'));
+    const filePath = join(root, 'rollout.jsonl');
+    const temporarilyMovedPath = join(root, 'rollout.moved.jsonl');
+    await writeFile(filePath, '{"seq":1}\n');
+
+    const received: unknown[] = [];
+    const metrics: Array<{ type: string; reason?: string }> = [];
+    const follower = new JsonlFollower({
+      filePath,
+      pollIntervalMs: 60_000,
+      metrics: {
+        emit: (event) => {
+          metrics.push(event);
+        },
+      },
+      onJson: (value: unknown) => {
+        received.push(value);
+      },
+    });
+
+    try {
+      await follower.drainNow();
+      await rename(filePath, temporarilyMovedPath);
+      await follower.drainNow();
+      await appendFile(temporarilyMovedPath, '{"seq":2}\n');
+      await rename(temporarilyMovedPath, filePath);
+      await follower.drainNow();
+
+      expect(received).toEqual([{ seq: 1 }, { seq: 2 }]);
+      expect(metrics).not.toContainEqual(expect.objectContaining({
+        type: 'file_reset',
+        reason: 'missing',
+      }));
+    } finally {
+      await follower.stop().catch(() => {});
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the identity of the file that supplied a line when the path is replaced before the callback completes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'jsonl-follower-source-identity-'));
+    const filePath = join(root, 'rollout.jsonl');
+    const replacementPath = join(root, 'replacement.jsonl');
+    await writeFile(filePath, '{"source":"original"}\n');
+    await writeFile(replacementPath, '{"source":"replacement"}\n');
+    const originalStats = await stat(filePath);
+
+    let observedSource: {
+      lineStartOffsetBytes?: number;
+      fileIdentity?: { dev: number | bigint; ino: number | bigint };
+    } | null = null;
+    const follower = new JsonlFollower({
+      filePath,
+      pollIntervalMs: 5,
+      onJson: async (_value, source) => {
+        if (!source) throw new Error('Expected JSONL source metadata');
+        await rename(replacementPath, filePath);
+        observedSource = source;
+      },
+    });
+
+    try {
+      await follower.drainNow();
+      expect(observedSource).toEqual({
+        lineStartOffsetBytes: 0,
+        fileIdentity: { dev: originalStats.dev, ino: originalStats.ino },
+      });
+      const replacementStats = await stat(filePath);
+      expect(replacementStats.ino).not.toBe(originalStats.ino);
+    } finally {
+      await follower.stop().catch(() => {});
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('reports byte-accurate line starts across multi-byte and blank lines', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'jsonl-follower-source-offset-'));
+    const filePath = join(root, 'rollout.jsonl');
+    const firstLine = '{"value":"💩"}';
+    await writeFile(filePath, `${firstLine}\n\n{"value":2}\n`, 'utf8');
+
+    const starts: number[] = [];
+    const follower = new JsonlFollower({
+      filePath,
+      pollIntervalMs: 5,
+      onJson: (_value, source) => {
+        if (!source) throw new Error('Expected JSONL source metadata');
+        starts.push(source.lineStartOffsetBytes);
+      },
+    });
+
+    try {
+      await follower.drainNow();
+      expect(starts).toEqual([0, Buffer.byteLength(`${firstLine}\n\n`, 'utf8')]);
+    } finally {
+      await follower.stop().catch(() => {});
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('redrives a rejected line and its suffix on the same live follower', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'jsonl-follower-rejected-line-'));
+    const filePath = join(root, 'rollout.jsonl');
+    await writeFile(
+      filePath,
+      ['{"seq":1}', '{"seq":2}', '{"seq":3}'].join('\n') + '\n',
+      'utf8',
+    );
+
+    const attempts: number[] = [];
+    const acknowledged: number[] = [];
+    let rejectSecond = true;
+    const follower = new JsonlFollower({
+      filePath,
+      pollIntervalMs: 5,
+      onJson: async (value) => {
+        const seq = (value as { seq: number }).seq;
+        attempts.push(seq);
+        if (seq === 2 && rejectSecond) {
+          rejectSecond = false;
+          throw new Error('transient delivery rejection');
+        }
+        acknowledged.push(seq);
+      },
+    });
+
+    try {
+      await follower.start();
+      await waitFor(() => {
+        expect(acknowledged).toEqual([1, 2, 3]);
+      });
+      expect(attempts).toEqual([1, 2, 2, 3]);
+    } finally {
+      await follower.stop().catch(() => {});
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('consumes malformed JSON while continuing with later valid rows', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'jsonl-follower-malformed-row-'));
+    const filePath = join(root, 'rollout.jsonl');
+    await writeFile(filePath, 'not-json\n{"seq":1}\n', 'utf8');
+
+    const received: unknown[] = [];
+    const errors: unknown[] = [];
+    const follower = new JsonlFollower({
+      filePath,
+      pollIntervalMs: 60_000,
+      onJson: (value) => {
+        received.push(value);
+      },
+      onError: (error) => {
+        errors.push(error);
+      },
+    });
+
+    try {
+      await follower.drainNow();
+      await follower.drainNow();
+      expect(received).toEqual([{ seq: 1 }]);
+      expect(errors).toHaveLength(1);
+    } finally {
+      await follower.stop().catch(() => {});
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('uses named adaptive fallback policy instead of a steady fixed interval', async () => {
     const root = await mkdtemp(join(tmpdir(), 'jsonl-follower-policy-'));
     const filePath = join(root, 'rollout.jsonl');

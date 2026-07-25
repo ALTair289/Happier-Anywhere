@@ -22,6 +22,7 @@ type ActionExecutorLike = Readonly<{
       approvalOrigin?: ApprovalRequestOriginV1 | null;
       callerPermissionMode?: string | null;
       actionsSettings?: ActionsSettingsV1 | null;
+      actionRequestId?: string | null;
     }>,
   ) => Promise<ActionExecutorResult>;
 }>;
@@ -84,6 +85,14 @@ function normalizeActionExecuteInput(input: unknown): unknown {
   }
 }
 
+function readActionRequestId(origin: ApprovalRequestOriginV1 | null | undefined): string | null {
+  if (!origin) return null;
+  for (const value of [origin.toolCallId, origin.mcpRequestId, origin.messageId, origin.parentMessageId]) {
+    if (typeof value === 'string' && value.trim().length > 0) return value.trim();
+  }
+  return null;
+}
+
 export function createActionToolExecutorBridge(params: Readonly<{
   executor: ActionExecutorLike;
   isActionEnabled?: (id: ActionId) => boolean;
@@ -111,11 +120,13 @@ export function createActionToolExecutorBridge(params: Readonly<{
   return {
     executeActionByToolName: async (toolName, toolArgs, defaultSessionId, options) => {
       const callerPermissionMode = readCallerPermissionMode();
+      const actionRequestId = readActionRequestId(options?.approvalOrigin);
       const context = {
         defaultSessionId,
         surface,
         ...(options?.approvalOrigin ? { approvalOrigin: options.approvalOrigin } : {}),
         ...(callerPermissionMode ? { callerPermissionMode } : {}),
+        ...(actionRequestId ? { actionRequestId } : {}),
         actionsSettings: readActionsSettings(),
       } as const;
       if (toolName === 'action_execute') {

@@ -241,6 +241,7 @@ export function canonicalizeToolNameV2(opts: {
     if (lower === 'ls') return 'LS';
     if (lower === 'search' && inferredFromTitle === 'WebSearch') return inferredFromTitle;
     if (lower === 'search') return 'CodeSearch';
+    if (lower === 'switch_mode' || lower === 'switchmode') return 'SwitchMode';
 
     // Web.
     if (lower === 'webfetch' || lower === 'web_fetch') return 'WebFetch';

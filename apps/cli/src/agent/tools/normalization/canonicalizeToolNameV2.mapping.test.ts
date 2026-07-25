@@ -33,6 +33,7 @@ describe('canonicalizeToolNameV2 mappings', () => {
     { toolName: 'ls_files', expected: 'LS' },
     { toolName: 'search_code', expected: 'CodeSearch' },
     { toolName: 'code_search', expected: 'CodeSearch' },
+    { toolName: 'switch_mode', expected: 'SwitchMode' },
   ])('normalizes `$toolName` to `$expected`', ({ toolName, expected }) => {
     expect(canonicalize(toolName)).toBe(expected);
   });

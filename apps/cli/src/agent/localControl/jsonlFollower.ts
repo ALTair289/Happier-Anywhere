@@ -1,4 +1,4 @@
-import { JsonlLineFollower } from './jsonlLineFollower';
+import { JsonlLineFollower, type JsonlLineSource } from './jsonlLineFollower';
 import type { JsonlFollowPolicyInput } from './jsonlFollowPolicy';
 import type { JsonlFollowerDrainSource, JsonlFollowerMetrics } from './jsonlFollowMetrics';
 
@@ -8,7 +8,7 @@ export type JsonlFollowerOptions = Readonly<{
     pollPolicy?: JsonlFollowPolicyInput;
     startAtEnd?: boolean;
     startOffsetBytes?: number;
-    onJson: (value: unknown) => void | Promise<void>;
+    onJson: (value: unknown, source?: JsonlLineSource) => void | Promise<void>;
     onError?: (error: unknown) => void;
     metrics?: JsonlFollowerMetrics;
 }>;
@@ -25,10 +25,16 @@ export class JsonlFollower {
             startOffsetBytes: opts.startOffsetBytes,
             metrics: opts.metrics,
             onError: opts.onError,
-            onLine: async (line) => {
-                const parsed = parseJsonlCompatibility(line);
+            onLine: async (line, source) => {
+                let parsed: unknown | undefined;
+                try {
+                    parsed = parseJsonlCompatibility(line);
+                } catch (error) {
+                    opts.onError?.(error);
+                    return;
+                }
                 if (parsed === undefined) return;
-                await opts.onJson(parsed);
+                await opts.onJson(parsed, source);
             },
         });
     }

@@ -5,6 +5,38 @@ function asRecord(value: unknown): UnknownRecord | null {
     return value as UnknownRecord;
 }
 
+function readAggregateCount(record: UnknownRecord): number | null {
+    const totalMatches = record.totalMatches;
+    if (typeof totalMatches === 'number' && Number.isSafeInteger(totalMatches) && totalMatches >= 0) {
+        return totalMatches;
+    }
+    const totalFiles = record.totalFiles;
+    if (typeof totalFiles === 'number' && Number.isSafeInteger(totalFiles) && totalFiles >= 0) {
+        return totalFiles;
+    }
+    return null;
+}
+
+function hasSearchError(record: UnknownRecord): boolean {
+    const error = record.error;
+    return record.isError === true
+        || error === true
+        || (typeof error === 'string' && error.trim().length > 0)
+        || (error !== null && typeof error === 'object')
+        || record.status === 'error'
+        || record.status === 'failed';
+}
+
+function withCanonicalSearchDetailAvailability(record: UnknownRecord, matches: unknown[]): UnknownRecord {
+    const normalized: UnknownRecord = { ...record, matches };
+    delete normalized.detailsUnavailable;
+    const count = readAggregateCount(record);
+    if (matches.length === 0 && count !== null && count > 0) {
+        normalized.detailsUnavailable = true;
+    }
+    return normalized;
+}
+
 function parseGrepLine(line: string): { filePath: string; line?: number; excerpt?: string } | null {
     const trimmed = line.trim();
     if (trimmed.length === 0) return null;
@@ -118,7 +150,7 @@ export function normalizeGlobResult(rawOutput: unknown): UnknownRecord {
 
     const record = asRecord(rawOutput);
     if (record) {
-        const contentText = coerceTextFromContentBlocks((record as any).content);
+        const contentText = coerceTextFromContentBlocks(record.content);
         if (contentText) {
             const lines = contentText
                 .replace(/\r\n/g, '\n')
@@ -128,8 +160,8 @@ export function normalizeGlobResult(rawOutput: unknown): UnknownRecord {
             return { ...record, matches: lines.length > 0 ? lines : [contentText] };
         }
     }
-    if (record && Array.isArray((record as any).matches)) {
-        return { matches: (record as any).matches };
+    if (record && Array.isArray(record.matches)) {
+        return { matches: record.matches };
     }
 
     return { value: rawOutput };
@@ -146,10 +178,10 @@ export function normalizeCodeSearchInput(rawInput: unknown): UnknownRecord {
                 ? out.q.trim()
                 : typeof out.pattern === 'string' && out.pattern.trim().length > 0
                     ? out.pattern.trim()
-                    : typeof (out as any).information_request === 'string' && (out as any).information_request.trim().length > 0
-                        ? (out as any).information_request.trim()
-                        : typeof (out as any).informationRequest === 'string' && (out as any).informationRequest.trim().length > 0
-                            ? (out as any).informationRequest.trim()
+                    : typeof out.information_request === 'string' && out.information_request.trim().length > 0
+                        ? out.information_request.trim()
+                        : typeof out.informationRequest === 'string' && out.informationRequest.trim().length > 0
+                            ? out.informationRequest.trim()
                     : null;
 
     if (query && typeof out.query !== 'string') out.query = query;
@@ -179,26 +211,35 @@ export function normalizeCodeSearchResult(rawOutput: unknown): UnknownRecord {
     const record = asRecord(rawOutput);
     if (!record) return { value: rawOutput };
 
-    if (Array.isArray((record as any).matches)) {
-        return { matches: (record as any).matches };
+    // Error state is authoritative even when a provider also emits an explicit
+    // empty matches array and aggregate counters. Preserve those diagnostics,
+    // but never turn them into a successful aggregate-only result.
+    if (hasSearchError(record)) {
+        const normalized = { ...record };
+        delete normalized.detailsUnavailable;
+        return normalized;
     }
 
-    const metadata = asRecord((record as any).metadata);
+    if (Array.isArray(record.matches)) {
+        return withCanonicalSearchDetailAvailability(record, record.matches);
+    }
+
+    const metadata = asRecord(record.metadata);
     const textCandidate =
-        typeof (record as any).output === 'string'
-            ? (record as any).output
+        typeof record.output === 'string'
+            ? record.output
             : typeof metadata?.output === 'string'
                 ? metadata.output
-                : typeof (record as any).aggregated_output === 'string'
-                    ? (record as any).aggregated_output
-                    : typeof (record as any).formatted_output === 'string'
-                        ? (record as any).formatted_output
-                        : typeof (record as any).stdout === 'string'
-                            ? (record as any).stdout
-                            : typeof (record as any).text === 'string'
-                                ? (record as any).text
-                                : typeof (record as any).value === 'string'
-                                    ? (record as any).value
+                : typeof record.aggregated_output === 'string'
+                    ? record.aggregated_output
+                    : typeof record.formatted_output === 'string'
+                        ? record.formatted_output
+                        : typeof record.stdout === 'string'
+                            ? record.stdout
+                            : typeof record.text === 'string'
+                                ? record.text
+                                : typeof record.value === 'string'
+                                    ? record.value
                                     : null;
 
     if (typeof textCandidate === 'string' && textCandidate.trim().length > 0) {
@@ -212,8 +253,14 @@ export function normalizeCodeSearchResult(rawOutput: unknown): UnknownRecord {
         if (lines.length > 0) return { ...record, matches: lines.map((l) => ({ excerpt: l })) };
     }
 
-    // Always guarantee a stable schema for the UI/tests, even for error-only outputs.
-    return { ...record, matches: [] };
+    if (readAggregateCount(record) !== null) {
+        return withCanonicalSearchDetailAvailability(record, []);
+    }
+
+    // Error-only and malformed records must not be turned into a false zero-result assertion.
+    const normalized = { ...record };
+    delete normalized.detailsUnavailable;
+    return normalized;
 }
 
 export function normalizeGrepInput(rawInput: unknown): UnknownRecord {
@@ -243,7 +290,7 @@ export function normalizeGrepResult(rawOutput: unknown): UnknownRecord {
 
     const record = asRecord(rawOutput);
     if (record) {
-        const contentText = coerceTextFromContentBlocks((record as any).content);
+        const contentText = coerceTextFromContentBlocks(record.content);
         if (contentText && contentText.trim().length > 0) {
             const lines = contentText.replace(/\r\n/g, '\n').split('\n');
             const matches: Array<{ filePath: string; line?: number; excerpt?: string }> = [];
@@ -255,7 +302,7 @@ export function normalizeGrepResult(rawOutput: unknown): UnknownRecord {
             return { ...record, matches: [{ excerpt: contentText.trim() }] };
         }
     }
-    if (record && Array.isArray((record as any).matches)) return { matches: (record as any).matches };
+    if (record && Array.isArray(record.matches)) return { matches: record.matches };
     if (record) return { ...record };
     return { value: rawOutput };
 }
@@ -278,7 +325,7 @@ export function normalizeLsResult(rawOutput: unknown): UnknownRecord {
 
     const record = asRecord(rawOutput);
     if (record) {
-        const contentText = coerceTextFromContentBlocks((record as any).content);
+        const contentText = coerceTextFromContentBlocks(record.content);
         if (contentText) {
             const lines = contentText
                 .replace(/\r\n/g, '\n')
@@ -288,8 +335,8 @@ export function normalizeLsResult(rawOutput: unknown): UnknownRecord {
             return { ...record, entries: lines };
         }
     }
-    if (record && Array.isArray((record as any).entries)) return { entries: (record as any).entries };
-    if (record && Array.isArray((record as any).files)) return { entries: (record as any).files };
+    if (record && Array.isArray(record.entries)) return { entries: record.entries };
+    if (record && Array.isArray(record.files)) return { entries: record.files };
     if (record) return { ...record };
     return { value: rawOutput };
 }

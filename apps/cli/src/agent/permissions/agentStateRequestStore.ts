@@ -110,6 +110,8 @@ export class AgentStateRequestStore {
         source?: string;
         permissionSuggestions?: unknown[] | null;
         replaceCompletedRequest?: boolean;
+        /** Persist the request but suppress push rendering when its input contains private context. */
+        notifyPush?: boolean;
         updateState?: (state: AgentState) => AgentState;
     }>): void {
         const normalizedToolInput = normalizeAskUserQuestionInputForPublication(params.toolName, params.toolInput);
@@ -153,12 +155,14 @@ export class AgentStateRequestStore {
             'publish_request',
         );
 
+        if (params.notifyPush !== false) {
         this.notifyPermissionRequestPushBestEffort({
             permissionId: params.requestId,
             toolName: params.toolName,
             toolInput: normalizedToolInput,
             createdAtMs: params.createdAt,
         });
+    }
     }
 
     completeRequest(params: Readonly<{
@@ -172,8 +176,8 @@ export class AgentStateRequestStore {
         extraCompletedFields?: Readonly<Record<string, unknown>> | null;
         fallback?: Readonly<{ toolName: string; toolInput: unknown; createdAt: number; kind?: string; source?: string }> | null;
         updateState?: (state: AgentState) => AgentState;
-    }>): void {
-        updateAgentStateBestEffort(
+    }>): Promise<void> {
+        const completion = updateAgentStateBestEffort(
             this.session,
             (currentState) => {
                 const requests = cloneStringKeyedRecordToNullProto(currentState.requests);
@@ -256,7 +260,9 @@ export class AgentStateRequestStore {
             'complete_request',
         );
 
-        this.markPermissionRequestCompletedBestEffort(params.requestId);
+        return completion.then(() => {
+            this.markPermissionRequestCompletedBestEffort(params.requestId);
+        });
     }
 
     recordCompletedRequest(params: Readonly<{

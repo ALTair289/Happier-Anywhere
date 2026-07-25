@@ -226,12 +226,6 @@ export class DefaultTransport implements TransportHandler {
     return update;
   }
 
-  /**
-   * Default: render standard ACP plan updates through the shared TodoWrite checklist.
-   */
-  suppressAcpPlanUpdate(): boolean {
-    return false;
-  }
 }
 
 /**

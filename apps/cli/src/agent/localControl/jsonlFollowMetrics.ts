@@ -1,4 +1,4 @@
-export type JsonlFollowerResetReason = 'truncated' | 'replaced' | 'missing';
+export type JsonlFollowerResetReason = 'truncated' | 'replaced';
 
 export type JsonlFollowerDrainSource = 'poll' | 'manual' | 'watcher' | 'queued';
 

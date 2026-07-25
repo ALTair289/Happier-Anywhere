@@ -37,13 +37,16 @@ describe('normalizeCodeSearchResult (Kilo ACP shapes)', () => {
     expect(matches[0]).toMatchObject({ filePath: '/repo/src/preferred.ts', line: 10 });
   });
 
-  it('returns stable empty matches for record outputs without parseable text', () => {
+  it('preserves error-only records without claiming a zero-result search', () => {
     const normalized = normalizeCodeSearchResult({
       error: 'provider unavailable',
       metadata: { retryable: true },
     });
 
-    expect(normalized.matches).toEqual([]);
+    expect(normalized).toEqual({
+      error: 'provider unavailable',
+      metadata: { retryable: true },
+    });
   });
 
   it('falls back to excerpt-only matches for non-structured string output', () => {

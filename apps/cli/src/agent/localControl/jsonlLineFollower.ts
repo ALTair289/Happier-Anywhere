@@ -17,7 +17,7 @@ import {
 
 const JSONL_READ_CHUNK_BYTES = 64 * 1024;
 
-type JsonlFileIdentity = Readonly<{
+export type JsonlFileIdentity = Readonly<{
     dev: number | bigint;
     ino: number | bigint;
 }>;
@@ -28,9 +28,14 @@ export type JsonlLineFollowerOptions = Readonly<{
     pollPolicy?: JsonlFollowPolicyInput;
     startAtEnd?: boolean;
     startOffsetBytes?: number;
-    onLine: (line: string) => void | Promise<void>;
+    onLine: (line: string, source: JsonlLineSource) => void | Promise<void>;
     onError?: (error: unknown) => void;
     metrics?: JsonlFollowerMetrics;
+}>;
+
+export type JsonlLineSource = Readonly<{
+    lineStartOffsetBytes: number;
+    fileIdentity: JsonlFileIdentity;
 }>;
 
 type JsonlFollowerDrainOutcome = Readonly<{
@@ -47,11 +52,12 @@ export class JsonlLineFollower {
     private readonly pollPolicy: JsonlFollowPolicyV1;
     private readonly startAtEnd: boolean;
     private readonly startOffsetBytes: number | null;
-    private readonly onLine: (line: string) => void | Promise<void>;
+    private readonly onLine: (line: string, source: JsonlLineSource) => void | Promise<void>;
     private readonly onError?: (error: unknown) => void;
     private readonly metrics?: JsonlFollowerMetrics;
 
     private offsetBytes = 0;
+    private bufferStartOffsetBytes = 0;
     private buffer = '';
     private timer: NodeJS.Timeout | null = null;
     private startPromise: Promise<void> | null = null;
@@ -62,6 +68,7 @@ export class JsonlLineFollower {
     private stopped = false;
     private decoder = new StringDecoder('utf8');
     private fileIdentity: JsonlFileIdentity | null = null;
+    private bufferFileIdentity: JsonlFileIdentity | null = null;
     private activeStartedAtMs = Date.now();
     private mode: JsonlFollowPollMode = 'active';
 
@@ -91,6 +98,7 @@ export class JsonlLineFollower {
                     const s = await stat(this.filePath);
                     this.fileIdentity = { dev: s.dev, ino: s.ino };
                     this.offsetBytes = this.startOffsetBytes <= s.size ? this.startOffsetBytes : 0;
+                    this.bufferStartOffsetBytes = this.offsetBytes;
                 } catch (error) {
                     const code = (error as NodeJS.ErrnoException | null | undefined)?.code;
                     if (code !== 'ENOENT') {
@@ -103,6 +111,7 @@ export class JsonlLineFollower {
                     const s = await stat(this.filePath);
                     this.fileIdentity = { dev: s.dev, ino: s.ino };
                     this.offsetBytes = s.size;
+                    this.bufferStartOffsetBytes = this.offsetBytes;
                 } catch (error) {
                     const code = (error as NodeJS.ErrnoException | null | undefined)?.code;
                     if (code !== 'ENOENT') {
@@ -174,7 +183,9 @@ export class JsonlLineFollower {
             this.drainQueued = false;
             const outcome = await this.drainInner(source);
             aggregate = mergeDrainOutcome(aggregate, outcome);
-            if (outcome.hasBufferedCompleteRows && !this.drainQueued) {
+            if (outcome.hadError) {
+                this.drainQueued = false;
+            } else if (outcome.hasBufferedCompleteRows && !this.drainQueued) {
                 this.drainQueued = true;
             }
             source = 'queued';
@@ -194,10 +205,10 @@ export class JsonlLineFollower {
             if (code !== 'ENOENT') {
                 this.onError?.(error);
                 return { ...emptyDrainOutcome(), hadError: true };
-            } else if (this.fileIdentity) {
-                this.resetReadState('missing');
-                return { ...emptyDrainOutcome(), hadReset: true, fileMissing: true };
             }
+            // Path absence alone does not prove a transcript discontinuity. Preserve
+            // the cursor/buffer until the path returns; identity/size then proves
+            // whether continuity held or a replaced/truncated reset is required.
             return { ...emptyDrainOutcome(), fileMissing: true };
         }
 
@@ -239,8 +250,20 @@ export class JsonlLineFollower {
         const fh = await open(this.filePath, 'r');
         let bytesReadTotal = 0;
         try {
+            const openedStats = await fh.stat();
+            const openedIdentity = { dev: openedStats.dev, ino: openedStats.ino };
+            if (this.fileIdentity && !isSameFileIdentity(this.fileIdentity, openedIdentity)) {
+                this.resetReadState('replaced');
+            }
+            this.fileIdentity = openedIdentity;
+            if (this.bufferFileIdentity && !isSameFileIdentity(this.bufferFileIdentity, openedIdentity)) {
+                this.resetReadState('replaced');
+                this.fileIdentity = openedIdentity;
+            }
+            this.bufferFileIdentity = openedIdentity;
+
             let position = this.offsetBytes;
-            let remaining = maxBytes;
+            let remaining = Math.min(maxBytes, Math.max(0, openedStats.size - position));
             const chunkBuffer = Buffer.allocUnsafe(Math.min(JSONL_READ_CHUNK_BYTES, remaining));
 
             while (remaining > 0) {
@@ -274,22 +297,40 @@ export class JsonlLineFollower {
         const trailing = this.buffer.slice(newlineIndex + 1);
         const lines = complete.split('\n');
         const emitLines = lines.slice(0, this.pollPolicy.maxDrainRowsPerTick);
-        const remainingLines = lines.slice(this.pollPolicy.maxDrainRowsPerTick);
-        this.buffer = remainingLines.length > 0 ? `${remainingLines.join('\n')}\n${trailing}` : trailing;
 
         let rowsEmitted = 0;
         let hadError = false;
+        let consumedLines = 0;
+        let consumedBytes = 0;
+        const fileIdentity = this.bufferFileIdentity;
+        if (!fileIdentity) {
+            throw new Error('JSONL follower buffered complete lines without a source file identity');
+        }
         for (const line of emitLines) {
-            if (line.trim() === '') continue;
+            const lineBytes = Buffer.byteLength(line, 'utf8') + 1;
+            const lineStartOffsetBytes = this.bufferStartOffsetBytes + consumedBytes;
+            if (line.trim() === '') {
+                consumedLines += 1;
+                consumedBytes += lineBytes;
+                continue;
+            }
             try {
-                await this.onLine(line);
+                await this.onLine(line, { lineStartOffsetBytes, fileIdentity });
                 rowsEmitted += 1;
+                consumedLines += 1;
+                consumedBytes += lineBytes;
                 this.emitMetric({ type: 'row_emitted' });
             } catch (error) {
                 this.onError?.(error);
                 hadError = true;
+                break;
             }
         }
+        const remainingLines = lines.slice(consumedLines);
+        this.buffer = remainingLines.length > 0
+            ? `${remainingLines.join('\n')}\n${trailing}`
+            : trailing;
+        this.bufferStartOffsetBytes += consumedBytes;
 
         return {
             rowsEmitted,
@@ -311,11 +352,10 @@ export class JsonlLineFollower {
 
     private resetReadState(reason: JsonlFollowerResetReason): void {
         this.offsetBytes = 0;
+        this.bufferStartOffsetBytes = 0;
         this.buffer = '';
+        this.bufferFileIdentity = null;
         this.decoder = new StringDecoder('utf8');
-        if (reason === 'missing') {
-            this.fileIdentity = null;
-        }
         this.emitMetric({ type: 'file_reset', reason });
     }
 
