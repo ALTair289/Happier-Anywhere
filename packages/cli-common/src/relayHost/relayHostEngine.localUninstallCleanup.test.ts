@@ -201,7 +201,7 @@ describe('RelayHostEngine (local uninstall cleanup)', () => {
         const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
         return {
           ...actual,
-          existsSync: () => false,
+          existsSync: (path: string) => path.endsWith('happier-server.plist'),
         };
       });
 
@@ -244,7 +244,9 @@ describe('RelayHostEngine (local uninstall cleanup)', () => {
         action: 'uninstall',
       });
 
-      expect(invoked.some((cmd) => cmd.includes('launchctl remove happier-server'))).toBe(true);
+      expect(invoked).toContain('launchctl bootout gui/501/happier-server');
+      expect(invoked).toContain('launchctl disable gui/501/happier-server');
+      expect(invoked).not.toContain('launchctl bootout gui/501/happier-server-preview');
     } finally {
       Object.defineProperty(process, 'platform', { value: originalPlatform });
       if (originalGetuid) (process as unknown as { getuid?: (() => number) | undefined }).getuid = originalGetuid;
