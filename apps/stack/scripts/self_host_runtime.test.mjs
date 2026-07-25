@@ -103,6 +103,58 @@ test('parseSelfHostInvocation supports direct command invocation', () => {
   assert.deepEqual(parsed.rest, ['--json']);
 });
 
+test('self-host install-time SQLite migration delegates to the installed canonical server-light binary', async () => {
+  assert.equal(typeof selfHostRuntimeModule.applySelfHostSqliteMigrationsAtInstallTime, 'function');
+  const calls = [];
+  const env = {
+    HAPPIER_SQLITE_AUTO_MIGRATE: '0',
+    HAPPIER_SQLITE_MIGRATIONS_DIR: '/var/lib/happier/migrations/sqlite',
+    DATABASE_URL: 'file:/var/lib/happier/happier-server-light.sqlite',
+  };
+  const config = {
+    installRoot: '/opt/happier',
+    serverBinaryPath: '/opt/happier/bin/happier-server',
+  };
+
+  await selfHostRuntimeModule.applySelfHostSqliteMigrationsAtInstallTime({
+    config,
+    env,
+    runCommandImpl: (cmd, args, options) => {
+      calls.push({ cmd, args, options });
+      return { status: 0 };
+    },
+  });
+
+  assert.deepEqual(calls, [
+    {
+      cmd: config.serverBinaryPath,
+      args: ['--migrate-only'],
+      options: {
+        cwd: config.installRoot,
+        env,
+        stdio: 'pipe',
+      },
+    },
+  ]);
+});
+
+test('self-host install-time SQLite migration preserves canonical binary failure', async () => {
+  const failure = new Error('canonical migration exit 23');
+  await assert.rejects(
+    selfHostRuntimeModule.applySelfHostSqliteMigrationsAtInstallTime({
+      config: {
+        installRoot: '/opt/happier',
+        serverBinaryPath: '/opt/happier/bin/happier-server',
+      },
+      env: { HAPPIER_SQLITE_AUTO_MIGRATE: '0' },
+      runCommandImpl: () => {
+        throw failure;
+      },
+    }),
+    (error) => error === failure,
+  );
+});
+
 test('pickReleaseAsset returns matching archive and checksum assets', () => {
   const assets = [
     { name: 'happier-server-v1.2.3-linux-x64.tar.gz', browser_download_url: 'https://example.test/server.tar.gz' },

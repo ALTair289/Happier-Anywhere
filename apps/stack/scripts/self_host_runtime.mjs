@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import {
   cp,
@@ -40,11 +40,13 @@ import {
   resolveServiceBackend,
 } from '@happier-dev/cli-common/service';
 import {
-  parseEnvText as parseEnvTextShared,
   resolveConfiguredRelayRuntimeBinaryOverride,
   resolveConfiguredRelayRuntimePaths,
+} from '@happier-dev/cli-common/firstPartyRuntime/relayRuntime';
+import {
+  parseEnvText as parseEnvTextShared,
   renderSelfHostServerEnvText as renderSelfHostServerEnvTextShared,
-} from '@happier-dev/cli-common/firstPartyRuntime';
+} from '@happier-dev/cli-common/firstPartyRuntime/selfHostServerEnv';
 import { DEFAULT_MINISIGN_PUBLIC_KEY } from '@happier-dev/release-runtime/minisign';
 import {
   PUBLIC_RELEASE_RING_IDS,
@@ -343,138 +345,16 @@ export function pickReleaseAsset({ assets, product, os, arch }) {
   };
 }
 
-function resolveSqliteDatabaseFilePath(databaseUrl) {
-  const raw = String(databaseUrl ?? '').trim();
-  if (!raw) return '';
-  if (!raw.startsWith('file:')) return '';
-  try {
-    const url = new URL(raw);
-    if (url.protocol !== 'file:') return '';
-    const pathname = url.pathname || '';
-    // On Windows, URL.pathname can start with /C:/...
-    return pathname.startsWith('/') && /^[A-Za-z]:\//.test(pathname.slice(1))
-      ? pathname.slice(1)
-      : pathname;
-  } catch {
-    const value = raw.slice('file:'.length);
-    return value.startsWith('//') ? value.replace(/^\/+/, '/') : value;
-  }
-}
-
-async function applySelfHostSqliteMigrationsAtInstallTime({ env }) {
-  if (typeof globalThis.Bun === 'undefined') {
-    return { applied: [], skipped: true, reason: 'bun-unavailable' };
-  }
-  const databaseUrl = String(env?.DATABASE_URL ?? '').trim();
-  const migrationsDir = String(env?.HAPPIER_SQLITE_MIGRATIONS_DIR ?? env?.HAPPY_SQLITE_MIGRATIONS_DIR ?? '').trim();
-  if (!databaseUrl || !migrationsDir) {
-    return { applied: [], skipped: true, reason: 'missing-config' };
-  }
-  const dbPath = resolveSqliteDatabaseFilePath(databaseUrl);
-  if (!dbPath) {
-    return { applied: [], skipped: true, reason: 'unsupported-database-url' };
-  }
-  const migrationsInfo = await stat(migrationsDir).catch(() => null);
-  if (!migrationsInfo?.isDirectory()) {
-    return { applied: [], skipped: true, reason: 'migrations-dir-missing' };
-  }
-
-  const mod = await import('bun:sqlite');
-  const Database = mod?.Database;
-  if (!Database) {
-    return { applied: [], skipped: true, reason: 'bun-sqlite-unavailable' };
-  }
-  const db = new Database(dbPath);
-  db.exec(
-    [
-      'CREATE TABLE IF NOT EXISTS _prisma_migrations (',
-      '  id TEXT PRIMARY KEY,',
-      '  checksum TEXT NOT NULL,',
-      '  finished_at DATETIME,',
-      '  migration_name TEXT NOT NULL,',
-      '  logs TEXT,',
-      '  rolled_back_at DATETIME,',
-      '  started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,',
-      '  applied_steps_count INTEGER NOT NULL DEFAULT 0',
-      ');',
-    ].join('\n'),
-  );
-
-  const tableNamesQuery = db.query(`SELECT name FROM sqlite_master WHERE type='table'`);
-  const appliedQuery = db.query(
-    `SELECT migration_name FROM _prisma_migrations WHERE rolled_back_at IS NULL AND finished_at IS NOT NULL`,
-  );
-  const insertQuery = db.query(
-    `INSERT INTO _prisma_migrations (id, checksum, finished_at, migration_name, applied_steps_count) VALUES (?, ?, CURRENT_TIMESTAMP, ?, 1)`,
-  );
-
-  const applied = new Set(
-    appliedQuery.all().map((row) => String(row?.migration_name ?? '').trim()).filter(Boolean),
-  );
-
-  const existingTables = new Set(
-    tableNamesQuery.all().map((row) => String(row?.name ?? '').trim()).filter(Boolean),
-  );
-  const hasCoreTables =
-    existingTables.has('Account')
-    || existingTables.has('account')
-    || existingTables.has('accounts');
-  const legacyMode = applied.size === 0 && hasCoreTables;
-
-  const isLikelyAlreadyAppliedError = (err) => {
-    const msg = String(err?.message ?? err ?? '').toLowerCase();
-    return msg.includes('already exists') || msg.includes('duplicate column') || msg.includes('duplicate');
-  };
-
-  const entries = await readdir(migrationsDir, { withFileTypes: true }).catch(() => []);
-  const dirs = entries
-    .filter((e) => e.isDirectory())
-    .map((e) => e.name)
-    .sort((a, b) => a.localeCompare(b));
-
-  const sha256Hex = (input) => createHash('sha256').update(String(input)).digest('hex');
-  const appliedNow = [];
-  for (const name of dirs) {
-    if (applied.has(name)) continue;
-    const sqlPath = join(migrationsDir, name, 'migration.sql');
-    const sql = await readFile(sqlPath, 'utf8').catch(() => '');
-    if (!sql.trim()) continue;
-    const checksum = sha256Hex(sql);
-    db.exec('BEGIN');
-    try {
-      db.exec(sql);
-      insertQuery.run(randomUUID(), checksum, name);
-      db.exec('COMMIT');
-      appliedNow.push(name);
-      applied.add(name);
-    } catch (e) {
-      try {
-        db.exec('ROLLBACK');
-      } catch {
-        // ignore
-      }
-      if (legacyMode && isLikelyAlreadyAppliedError(e)) {
-        db.exec('BEGIN');
-        try {
-          insertQuery.run(randomUUID(), checksum, name);
-          db.exec('COMMIT');
-        } catch (inner) {
-          try {
-            db.exec('ROLLBACK');
-          } catch {
-            // ignore
-          }
-          throw inner;
-        }
-        appliedNow.push(name);
-        applied.add(name);
-        continue;
-      }
-      throw e;
-    }
-  }
-
-  return { applied: appliedNow, skipped: false, reason: 'ok' };
+export async function applySelfHostSqliteMigrationsAtInstallTime({
+  config,
+  env,
+  runCommandImpl = runCommand,
+}) {
+  return runCommandImpl(config.serverBinaryPath, ['--migrate-only'], {
+    cwd: config.installRoot,
+    env,
+    stdio: 'pipe',
+  });
 }
 
 export function resolveConfig({ channel, mode = 'user', platform = process.platform } = {}) {
@@ -2117,7 +1997,7 @@ async function performSelfHostPostPromoteSteps({
   const installEnv = parseEnvText(envTextWithOverrides);
   const healthPort = resolveSelfHostEffectiveServerPort({ config, env: installEnv });
   if (!parseBoolean(installEnv.HAPPIER_SQLITE_AUTO_MIGRATE ?? installEnv.HAPPY_SQLITE_AUTO_MIGRATE, true)) {
-    await applySelfHostSqliteMigrationsAtInstallTime({ env: installEnv }).catch((e) => {
+    await applySelfHostSqliteMigrationsAtInstallTime({ config, env: installEnv }).catch((e) => {
       throw new Error(`[self-host] failed to apply sqlite migrations at install time: ${String(e?.message ?? e)}`);
     });
   }
@@ -2663,7 +2543,7 @@ function redactEnvForDisplay(env) {
   return out;
 }
 
-async function cmdConfig({ channel, mode, argv, json }) {
+async function cmdConfig({ channel, mode, argv, json, output }) {
   const args = Array.isArray(argv) ? argv.map(String) : [];
   const sub = pickFirstPositional(args) || 'view';
   const subIndex = args.indexOf(sub);
@@ -2684,6 +2564,7 @@ async function cmdConfig({ channel, mode, argv, json }) {
   if (sub === 'view') {
     printResult({
       json,
+      output,
       data: {
         ok: true,
         channel,
@@ -2792,6 +2673,7 @@ async function cmdConfig({ channel, mode, argv, json }) {
 
     printResult({
       json,
+      output,
       data: {
         ok: true,
         channel,
@@ -2862,7 +2744,7 @@ function resolveRelayHostForwardSupport(env = process.env) {
   return cachedRelayHostForwardSupport;
 }
 
-export async function runSelfHostCli(argv = process.argv.slice(2)) {
+export async function runSelfHostCli(argv = process.argv.slice(2), { configOutput = process.stdout } = {}) {
   if (shouldAttemptRelayHostForward(process.env) && resolveRelayHostForwardSupport(process.env)) {
     const forwarded = spawnSync('happier', ['relay', 'host', ...argv], {
       env: process.env,
@@ -2926,7 +2808,7 @@ export async function runSelfHostCli(argv = process.argv.slice(2)) {
     return;
   }
   if (parsed.subcommand === 'config') {
-    await cmdConfig({ channel, mode, argv: parsed.rest, json });
+    await cmdConfig({ channel, mode, argv: parsed.rest, json, output: configOutput });
     return;
   }
 

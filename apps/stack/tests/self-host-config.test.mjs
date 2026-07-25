@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
+
+import { runSelfHostCli } from '../scripts/self_host_runtime.mjs';
 
 function parseJsonLinesBestEffort(stdout) {
   const out = String(stdout ?? '');
@@ -27,60 +27,71 @@ function parseJsonLinesBestEffort(stdout) {
   return null;
 }
 
-function runSelfHost(args, { homeDir }) {
-  const testDir = dirname(fileURLToPath(import.meta.url));
-  const stackRoot = resolve(testDir, '..');
-  const res = spawnSync(process.execPath, [join('scripts', 'self_host.mjs'), ...args], {
-    cwd: stackRoot,
-    env: {
-      ...process.env,
-      HOME: homeDir,
-    },
-    encoding: 'utf-8',
-    timeout: 15000,
-  });
-  if (res.error) throw res.error;
-  return res;
+async function runSelfHost(args, { homeDir }) {
+  const originalHome = process.env.HOME;
+  const originalForward = process.env.HAPPIER_STACK_SELF_HOST_FORWARD;
+  let stdout = '';
+
+  process.env.HOME = homeDir;
+  // Exercise this legacy entrypoint directly; forwarding to a separately installed
+  // `happier` CLI is an external-system boundary covered by its own CLI tests.
+  process.env.HAPPIER_STACK_SELF_HOST_FORWARD = '0';
+
+  try {
+    await runSelfHostCli(args, {
+      configOutput: {
+        write(chunk) {
+          stdout += String(chunk);
+          return true;
+        },
+      },
+    });
+    return stdout;
+  } finally {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    if (originalForward === undefined) delete process.env.HAPPIER_STACK_SELF_HOST_FORWARD;
+    else process.env.HAPPIER_STACK_SELF_HOST_FORWARD = originalForward;
+  }
 }
 
-test('self-host config view prints effective config', (t) => {
-  const homeDir = mkdtempSync(join(tmpdir(), 'hstack-selfhost-config-view-'));
-  t.after(() => rmSync(homeDir, { recursive: true, force: true }));
+test('self-host config commands share one hermetic runtime fixture', async (t) => {
+  const viewHomeDir = mkdtempSync(join(tmpdir(), 'hstack-selfhost-config-view-'));
+  const previewHomeDir = mkdtempSync(join(tmpdir(), 'hstack-selfhost-config-preview-view-'));
+  const setHomeDir = mkdtempSync(join(tmpdir(), 'hstack-selfhost-config-set-'));
+  t.after(() => {
+    for (const homeDir of [viewHomeDir, previewHomeDir, setHomeDir]) {
+      rmSync(homeDir, { recursive: true, force: true });
+    }
+  });
 
-  const res = runSelfHost(['config', 'view', '--json'], { homeDir });
-  assert.equal(res.status, 0, res.stderr);
-  const parsed = parseJsonLinesBestEffort(res.stdout);
-  assert.equal(parsed?.ok, true);
-  assert.equal(typeof parsed?.paths?.statePath, 'string');
-  assert.equal(typeof parsed?.autoUpdate?.enabled, 'boolean');
-});
-
-test('self-host config view accepts spaced --channel preview arguments', (t) => {
-  const homeDir = mkdtempSync(join(tmpdir(), 'hstack-selfhost-config-preview-view-'));
-  t.after(() => rmSync(homeDir, { recursive: true, force: true }));
-
-  const res = runSelfHost(['config', 'view', '--channel', 'preview', '--json'], { homeDir });
-  assert.equal(res.status, 0, res.stderr);
-  const parsed = parseJsonLinesBestEffort(res.stdout);
-  assert.equal(parsed?.ok, true);
-  assert.equal(parsed?.channel, 'preview');
-  assert.match(String(parsed?.paths?.installRoot ?? ''), /self-host-preview$/);
-});
-
-test('self-host config set updates auto-update schedule and env overrides', (t) => {
-  const homeDir = mkdtempSync(join(tmpdir(), 'hstack-selfhost-config-set-'));
-  t.after(() => rmSync(homeDir, { recursive: true, force: true }));
-
-  const setRes = runSelfHost(
+  const viewOutput = await runSelfHost(['config', 'view', '--json'], { homeDir: viewHomeDir });
+  const previewOutput = await runSelfHost(['config', 'view', '--channel', 'preview', '--json'], { homeDir: previewHomeDir });
+  const setOutput = await runSelfHost(
     ['config', 'set', '--no-apply', '--auto-update', '--auto-update-at', '03:15', '--env', 'PORT=3999', '--json'],
-    { homeDir },
+    { homeDir: setHomeDir },
   );
-  assert.equal(setRes.status, 0, setRes.stderr);
+  const persistedOutput = await runSelfHost(['config', 'view', '--json'], { homeDir: setHomeDir });
 
-  const viewRes = runSelfHost(['config', 'view', '--json'], { homeDir });
-  assert.equal(viewRes.status, 0, viewRes.stderr);
-  const parsed = parseJsonLinesBestEffort(viewRes.stdout);
-  assert.equal(parsed?.autoUpdate?.enabled, true);
-  assert.equal(parsed?.autoUpdate?.at, '03:15');
-  assert.equal(parsed?.env?.PORT, '3999');
+  await t.test('view prints effective config', () => {
+    const parsed = parseJsonLinesBestEffort(viewOutput);
+    assert.equal(parsed?.ok, true);
+    assert.equal(typeof parsed?.paths?.statePath, 'string');
+    assert.equal(typeof parsed?.autoUpdate?.enabled, 'boolean');
+  });
+
+  await t.test('view accepts spaced --channel preview arguments', () => {
+    const parsed = parseJsonLinesBestEffort(previewOutput);
+    assert.equal(parsed?.ok, true);
+    assert.equal(parsed?.channel, 'preview');
+    assert.match(String(parsed?.paths?.installRoot ?? ''), /self-host-preview$/);
+  });
+
+  await t.test('set updates auto-update schedule and env overrides', () => {
+    assert.equal(parseJsonLinesBestEffort(setOutput)?.ok, true);
+    const parsed = parseJsonLinesBestEffort(persistedOutput);
+    assert.equal(parsed?.autoUpdate?.enabled, true);
+    assert.equal(parsed?.autoUpdate?.at, '03:15');
+    assert.equal(parsed?.env?.PORT, '3999');
+  });
 });

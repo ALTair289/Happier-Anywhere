@@ -40,6 +40,7 @@ export async function buildServerArtifact({
       repoRoot: sourceMetadata.repoDir,
       payloadDir,
       target,
+      serverComponent: sourceMetadata.serverComponent,
       entrypoint: serverEntrypoint,
       externals,
     });
