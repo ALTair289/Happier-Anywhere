@@ -358,9 +358,33 @@ function copyBundledWorkspacePackageContents(params: Readonly<{
   copyDirSafeSync(params.distDir, resolve(params.tempDir, 'dist'));
   writeJson(resolve(params.tempDir, 'package.json'), sanitizeBundledPackageJson(params.rawPackageJson));
 
-  const files = params.includeFiles ?? ['README.md'];
+  const files = new Set(params.includeFiles ?? ['README.md']);
+  collectNonDistPackageEntryTargets(params.rawPackageJson?.main, files);
+  collectNonDistPackageEntryTargets(params.rawPackageJson?.module, files);
+  collectNonDistPackageEntryTargets(params.rawPackageJson?.types, files);
+  collectNonDistPackageEntryTargets(params.rawPackageJson?.exports, files);
   for (const f of files) {
     copyIfExists(resolve(params.srcDir, f), resolve(params.tempDir, f));
+  }
+}
+
+function collectNonDistPackageEntryTargets(value: unknown, result: Set<string>): void {
+  if (typeof value === 'string') {
+    const target = value.trim();
+    if (
+      target.startsWith('./')
+      && !target.includes('*')
+      && !target.startsWith('./dist/')
+      && target !== './dist'
+      && !target.split('/').includes('..')
+    ) {
+      result.add(target.slice(2));
+    }
+    return;
+  }
+  if (!value || typeof value !== 'object') return;
+  for (const nestedValue of Object.values(value)) {
+    collectNonDistPackageEntryTargets(nestedValue, result);
   }
 }
 

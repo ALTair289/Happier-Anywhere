@@ -64,12 +64,13 @@ test('buildTypeScriptPackageDist preserves previous dist when TypeScript compila
   assert.equal(await readFile(join(packageDir, 'dist', 'index.js'), 'utf-8'), 'export const stable = true;\n');
 });
 
-test('buildTypeScriptPackageDist can write to an explicit staged output directory without mutating live dist', async (t) => {
+test('buildTypeScriptPackageDist compiles directly into caller-owned staged output without promoting it', async (t) => {
   const packageDir = await createPackageFixture(t, 'build-ts-package-staged');
   const stagedDist = join(packageDir, '.staged-dist');
   await writeFile(join(packageDir, 'src', 'index.ts'), 'export const built = true;\n', 'utf-8');
+  let compilerOutputDir = null;
 
-  await buildTypeScriptPackageDist({
+  const result = await buildTypeScriptPackageDist({
     packageDir,
     args: ['-p', 'tsconfig.json'],
     outputDir: stagedDist,
@@ -77,6 +78,7 @@ test('buildTypeScriptPackageDist can write to an explicit staged output director
     resolveTypeScriptCommandInvocationImpl: ({ args }) => ({ command: 'tsc', args }),
     runCommandImpl: (_command, args) => {
       const outDir = args[args.indexOf('--outDir') + 1];
+      compilerOutputDir = outDir;
       mkdirSync(outDir, { recursive: true });
       writeFileSync(join(outDir, 'index.js'), 'export const built = true;\n', 'utf-8');
       writeFileSync(join(outDir, 'index.d.ts'), 'export declare const built: boolean;\n', 'utf-8');
@@ -84,6 +86,8 @@ test('buildTypeScriptPackageDist can write to an explicit staged output director
     },
   });
 
+  assert.equal(compilerOutputDir, stagedDist);
+  assert.deepEqual(result, { outputDir: stagedDist, promoted: false });
   assert.equal(await readFile(join(packageDir, 'dist', 'index.js'), 'utf-8'), 'export const stable = true;\n');
   assert.match(await readFile(join(stagedDist, 'index.js'), 'utf-8'), /built/);
 });
@@ -109,4 +113,33 @@ test('buildTypeScriptPackageDist keeps TypeScript incremental metadata out of pr
   });
 
   assert.equal(existsSync(join(packageDir, 'dist', '.tsbuildinfo')), false);
+});
+
+test('buildTypeScriptPackageDist promotes live dist under the canonical package build lock', async (t) => {
+  const packageDir = await createPackageFixture(t, 'build-ts-package-lock');
+  await writeFile(join(packageDir, 'src', 'index.ts'), 'export const built = true;\n', 'utf-8');
+  let observedLockOptions = null;
+  let compilerLockValue = null;
+
+  await buildTypeScriptPackageDist({
+    packageDir,
+    args: ['-p', 'tsconfig.json'],
+    stdio: 'ignore',
+    withWorkspaceBundleLockImpl: async (fn, options) => {
+      observedLockOptions = options;
+      return await fn({ heldLockValue: 'test-package-lock-lease' });
+    },
+    resolveTypeScriptCommandInvocationImpl: ({ args }) => ({ command: 'tsc', args }),
+    runCommandImpl: (_command, args, options) => {
+      compilerLockValue = options.env.HAPPIER_WORKSPACE_DIST_BUILD_LOCK_HELD;
+      const outDir = args[args.indexOf('--outDir') + 1];
+      mkdirSync(outDir, { recursive: true });
+      writeFileSync(join(outDir, 'index.js'), 'export const built = true;\n', 'utf-8');
+      writeFileSync(join(outDir, 'index.d.ts'), 'export declare const built: boolean;\n', 'utf-8');
+      return { status: 0 };
+    },
+  });
+
+  assert.match(observedLockOptions?.lockPath ?? '', /\.dist-build-happier-dev-build-ts-package-lock\.lock$/);
+  assert.equal(compilerLockValue, 'test-package-lock-lease');
 });

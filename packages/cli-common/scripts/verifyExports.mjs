@@ -2,19 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-function collectExportTargetStrings(value, acc) {
-  if (typeof value === 'string') {
-    acc.push(value);
-    return;
-  }
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return;
-  }
-
-  for (const nested of Object.values(value)) {
-    collectExportTargetStrings(nested, acc);
-  }
-}
+import { collectMissingPackageExportTargets } from '../../../scripts/workspaces/buildTypeScriptPackageDist.mjs';
 
 export function collectMissingExportTargets({
   packageDir,
@@ -22,16 +10,14 @@ export function collectMissingExportTargets({
   existsSyncImpl = existsSync,
 }) {
   const resolvedPackageDir = resolve(packageDir);
-  const targets = [];
-  collectExportTargetStrings(packageJson.exports ?? {}, targets);
-
-  return [...new Set(targets)]
-    .map((target) => String(target).trim())
-    .filter((target) => target.startsWith('./'))
-    .filter((target) => !existsSyncImpl(resolve(resolvedPackageDir, target)))
-    .map((target) => ({
+  return collectMissingPackageExportTargets({
+    packageDir: resolvedPackageDir,
+    outputDir: join(resolvedPackageDir, 'dist'),
+    packageJson,
+    existsSyncImpl,
+  }).map(({ target, path }) => ({
       target,
-      relativePath: relative(resolvedPackageDir, resolve(resolvedPackageDir, target)),
+      relativePath: relative(resolvedPackageDir, path),
     }));
 }
 

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -75,7 +75,7 @@ test('withWorkspaceBundleLock lets a child continue when its parent handed off t
     const events = [];
 
     await withWorkspaceBundleLock(
-      async () => {
+      async ({ heldLockValue }) => {
         events.push('parent:start');
         await withWorkspaceBundleLock(
           async () => {
@@ -86,7 +86,7 @@ test('withWorkspaceBundleLock lets a child continue when its parent handed off t
             timeoutMs: 50,
             pollIntervalMs: 10,
             staleAfterMs: 1_000,
-            env: { HAPPIER_WORKSPACE_DIST_BUILD_LOCK_HELD: lockPath },
+            heldLockValue,
           },
         );
         events.push('parent:end');
@@ -100,6 +100,36 @@ test('withWorkspaceBundleLock lets a child continue when its parent handed off t
     );
 
     assert.deepEqual(events, ['parent:start', 'child:start', 'parent:end']);
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('withWorkspaceBundleLock preserves same-file lock path aliases while authenticating the owner token', async () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), 'happier-workspace-bundle-lock-alias-'));
+  try {
+    const lockPath = join(tempRoot, 'workspace-bundling.lock');
+    const aliasPath = join(tempRoot, 'workspace-bundling.alias.lock');
+
+    const result = await withWorkspaceBundleLock(
+      async ({ heldLockValue }) => {
+        linkSync(lockPath, aliasPath);
+        const lease = JSON.parse(heldLockValue);
+        return await withWorkspaceBundleLock(
+          async () => 'nested',
+          {
+            lockPath,
+            heldLockValue: JSON.stringify({ ...lease, path: aliasPath }),
+            timeoutMs: 50,
+            pollIntervalMs: 10,
+            staleAfterMs: 1_000,
+          },
+        );
+      },
+      { lockPath, timeoutMs: 2_000, pollIntervalMs: 10, staleAfterMs: 1_000 },
+    );
+
+    assert.equal(result, 'nested');
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }
@@ -167,6 +197,43 @@ test('withWorkspaceBundleLock still reclaims a stale dead-owner lock', async () 
   }
 });
 
+test('withWorkspaceBundleLock reclaims a live reused pid whose process instance no longer matches', async () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), 'happier-workspace-bundle-lock-reused-pid-'));
+  try {
+    const lockPath = join(tempRoot, 'workspace-bundling.lock');
+    writeFileSync(
+      lockPath,
+      JSON.stringify({
+        pid: process.pid,
+        createdAtMs: Date.now(),
+        token: 'stale-owner',
+        processInstanceFingerprint: 'process-instance:old',
+      }),
+      'utf8',
+    );
+
+    let entered = false;
+    await withWorkspaceBundleLock(
+      async () => {
+        entered = true;
+      },
+      {
+        lockPath,
+        timeoutMs: 500,
+        pollIntervalMs: 10,
+        staleAfterMs: 1_000,
+        isRunningPidImpl: () => true,
+        readProcessInstanceFingerprintImpl: () => 'process-instance:new',
+      },
+    );
+
+    assert.equal(entered, true);
+    assert.equal(existsSync(lockPath), false);
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test('withWorkspaceBundleLock does not remove a lock file that was replaced by a successor owner', async () => {
   const tempRoot = mkdtempSync(join(tmpdir(), 'happier-workspace-bundle-lock-successor-'));
   try {
@@ -215,6 +282,7 @@ test('withWorkspaceBundleLockSync uses the shared workspace bundle lock owner fo
     assert.equal(observedOwner.pid, process.pid);
     assert.equal(typeof observedOwner.createdAtMs, 'number');
     assert.equal(typeof observedOwner.token, 'string');
+    assert.equal(typeof observedOwner.processInstanceFingerprint, 'string');
     assert.equal(existsSync(lockPath), false);
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });

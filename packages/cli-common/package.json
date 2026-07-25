@@ -15,6 +15,21 @@
       "require": "./jsonOwnerBuildLockState.cjs",
       "default": "./jsonOwnerBuildLockState.cjs"
     },
+    "./workspaceLockLease": {
+      "types": "./workspaceLockLease.d.mts",
+      "import": "./workspaceLockLease.mjs",
+      "default": "./workspaceLockLease.mjs"
+    },
+    "./workspaceBundleLock": {
+      "types": "./workspaceBundleLock.d.mts",
+      "import": "./workspaceBundleLock.mjs",
+      "default": "./workspaceBundleLock.mjs"
+    },
+    "./processInstance": {
+      "types": "./processInstance.d.mts",
+      "import": "./processInstance.mjs",
+      "default": "./processInstance.mjs"
+    },
     "./links": {
       "types": "./dist/links.d.ts",
       "default": "./dist/links.js"

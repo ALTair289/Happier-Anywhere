@@ -78,9 +78,7 @@ describe('cli-common build export verification', () => {
           const oldDistDuringBuild = readFileSync(join(fixtureDir, 'dist', 'index.js'), 'utf8');
           expect(oldDistDuringBuild).toContain('oldValue');
 
-          const tsconfigPath = args.at(-1);
-          const tsconfig = JSON.parse(readFileSync(tsconfigPath, 'utf8'));
-          const outDir = tsconfig.compilerOptions.outDir;
+          const outDir = args[args.indexOf('--outDir') + 1];
           mkdirSync(outDir, { recursive: true });
           writeFileSync(join(outDir, 'index.js'), 'export const newValue = true;\n', 'utf8');
           writeFileSync(join(outDir, 'index.d.ts'), 'export declare const newValue: boolean;\n', 'utf8');
@@ -138,9 +136,7 @@ describe('cli-common build export verification', () => {
         }),
         runCommandImpl: (cmd, args, options = {}) => {
           commands.push({ cmd, args, options });
-          const tsconfigPath = join(fixtureDir, `.tsconfig.build.${buildId}.json`);
-          const tsconfig = JSON.parse(readFileSync(tsconfigPath, 'utf8'));
-          const outDir = tsconfig.compilerOptions.outDir;
+          const outDir = args[args.indexOf('--outDir') + 1];
           mkdirSync(outDir, { recursive: true });
           writeFileSync(join(outDir, 'index.js'), 'export const newValue = true;\n', 'utf8');
           writeFileSync(join(outDir, 'index.d.ts'), 'export declare const newValue: boolean;\n', 'utf8');
@@ -201,9 +197,7 @@ describe('cli-common build export verification', () => {
           expect(cmd).toBe(process.execPath);
           expect(args[0]).toBe(typescriptBinPath);
 
-          const tsconfigPath = join(fixtureDir, `.tsconfig.build.${buildId}.json`);
-          const tsconfig = JSON.parse(readFileSync(tsconfigPath, 'utf8'));
-          const outDir = tsconfig.compilerOptions.outDir;
+          const outDir = args[args.indexOf('--outDir') + 1];
           mkdirSync(outDir, { recursive: true });
           writeFileSync(join(outDir, 'index.js'), 'export const newValue = true;\n', 'utf8');
           writeFileSync(join(outDir, 'index.d.ts'), 'export declare const newValue: boolean;\n', 'utf8');

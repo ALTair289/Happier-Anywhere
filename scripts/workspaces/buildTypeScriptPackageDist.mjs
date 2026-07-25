@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdir, rename, rm } from 'node:fs/promises';
+import { rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import { buildIntoTempThenReplace } from '../../apps/stack/scripts/utils/fs/atomic_dir_swap.mjs';
 import { resolveTypeScriptCommandInvocation } from './typescriptCommand.mjs';
+import { withWorkspaceBundleLock } from './workspaceBundleLock.mjs';
+import { resolveWorkspacePackageBuildLockPath } from './workspacePackageBuildLock.mjs';
 
 function rand() {
   return Math.random().toString(16).slice(2);
@@ -51,14 +54,23 @@ function resolveTargetPath({ packageDir, outputDir, target }) {
   return resolve(packageDir, normalized);
 }
 
-function verifyStagedExportTargets({ packageDir, outputDir, packageJson }) {
-  const missing = collectExpectedPackageTargets(packageJson)
+export function collectMissingPackageExportTargets({
+  packageDir,
+  outputDir,
+  packageJson,
+  existsSyncImpl = existsSync,
+}) {
+  return collectExpectedPackageTargets(packageJson)
     .filter((target) => target.startsWith('./') || target.startsWith('dist/'))
     .map((target) => ({
       target,
       path: resolveTargetPath({ packageDir, outputDir, target }),
     }))
-    .filter(({ path }) => !existsSync(path));
+    .filter(({ path }) => !existsSyncImpl(path));
+}
+
+export function verifyStagedPackageExportTargets({ packageDir, outputDir, packageJson, existsSyncImpl }) {
+  const missing = collectMissingPackageExportTargets({ packageDir, outputDir, packageJson, existsSyncImpl });
 
   if (missing.length === 0) return;
 
@@ -73,34 +85,6 @@ function runChecked(command, args, options, runCommandImpl) {
   if (result?.error) throw result.error;
   if ((result?.status ?? 0) !== 0) {
     throw new Error(`TypeScript package build failed with code ${result?.status ?? 'unknown'}`);
-  }
-}
-
-async function replaceDistWithStagedBuild({ distDir, stagedDistDir, backupDir }) {
-  let hadExisting = false;
-  await rm(backupDir, { recursive: true, force: true });
-  try {
-    await rename(distDir, backupDir);
-    hadExisting = true;
-  } catch (error) {
-    if (error?.code !== 'ENOENT') throw error;
-  }
-
-  try {
-    await rename(stagedDistDir, distDir);
-  } catch (error) {
-    if (hadExisting) {
-      await rename(backupDir, distDir).catch((restoreError) => {
-        if (error && typeof error === 'object') {
-          error.restoreError = restoreError;
-        }
-      });
-    }
-    throw error;
-  }
-
-  if (hadExisting) {
-    await rm(backupDir, { recursive: true, force: true }).catch(() => {});
   }
 }
 
@@ -123,22 +107,21 @@ export async function buildTypeScriptPackageDist({
   platform = process.platform,
   runCommandImpl = spawnSync,
   resolveTypeScriptCommandInvocationImpl = resolveTypeScriptCommandInvocation,
+  validateStagedOutput,
+  withWorkspaceBundleLockImpl = withWorkspaceBundleLock,
 } = {}) {
   const resolvedPackageDir = resolve(packageDir);
   const packageJson = readJson(join(resolvedPackageDir, 'package.json'));
-  const explicitOutputDir = typeof outputDir === 'string' && outputDir.trim();
   const distDir = join(resolvedPackageDir, 'dist');
   const buildId = `${Date.now()}.${process.pid}.${rand()}`;
-  const stagedDistDir = resolve(explicitOutputDir || join(resolvedPackageDir, `.dist.build.${buildId}`));
-  const backupDir = join(resolvedPackageDir, `.dist.backup.${buildId}`);
+  const callerOwnedOutputDir = typeof outputDir === 'string' && outputDir.trim()
+    ? resolve(outputDir)
+    : null;
+  const targetDistDir = callerOwnedOutputDir ?? distDir;
   const tsBuildInfoFile = join(resolvedPackageDir, `.tsbuildinfo.build.${buildId}`);
   const commandEnv = { ...process.env, ...env };
 
-  await rm(stagedDistDir, { recursive: true, force: true });
-  await mkdir(stagedDistDir, { recursive: true });
-  await rm(backupDir, { recursive: true, force: true });
-
-  try {
+  const compileAndValidate = async (stagedDistDir, buildEnv = commandEnv) => {
     const invocation = resolveTypeScriptCommandInvocationImpl({
       cwd: resolvedPackageDir,
       args: withOutputCompilerArgs(Array.isArray(args) ? args : [], stagedDistDir, tsBuildInfoFile),
@@ -149,7 +132,7 @@ export async function buildTypeScriptPackageDist({
       invocation.args,
       {
         cwd: resolvedPackageDir,
-        env: commandEnv,
+        env: buildEnv,
         stdio,
         ...(invocation.windowsVerbatimArguments
           ? { windowsVerbatimArguments: invocation.windowsVerbatimArguments }
@@ -158,20 +141,37 @@ export async function buildTypeScriptPackageDist({
       runCommandImpl,
     );
 
-    verifyStagedExportTargets({ packageDir: resolvedPackageDir, outputDir: stagedDistDir, packageJson });
-
-    if (explicitOutputDir) {
-      return { outputDir: stagedDistDir, promoted: false };
+    verifyStagedPackageExportTargets({ packageDir: resolvedPackageDir, outputDir: stagedDistDir, packageJson });
+    if (typeof validateStagedOutput === 'function') {
+      await validateStagedOutput({ outputDir: stagedDistDir, packageDir: resolvedPackageDir, packageJson });
     }
+  };
 
-    await replaceDistWithStagedBuild({ distDir, stagedDistDir, backupDir });
-    return { outputDir: distDir, promoted: true };
+  try {
+    if (callerOwnedOutputDir) {
+      await compileAndValidate(callerOwnedOutputDir);
+      return { outputDir: callerOwnedOutputDir, promoted: false };
+    }
+    const lockPath = resolveWorkspacePackageBuildLockPath(resolvedPackageDir, packageJson);
+    return await withWorkspaceBundleLockImpl(
+      async ({ heldLockValue }) => {
+        await buildIntoTempThenReplace(
+          distDir,
+          (stagedDistDir) => compileAndValidate(stagedDistDir, {
+            ...commandEnv,
+            HAPPIER_WORKSPACE_DIST_BUILD_LOCK_HELD: heldLockValue,
+          }),
+        );
+        return { outputDir: distDir, promoted: true };
+      },
+      {
+        lockPath,
+        heldLockValue: commandEnv.HAPPIER_WORKSPACE_DIST_BUILD_LOCK_HELD,
+        errorLabel: `${packageJson?.name ?? resolvedPackageDir} workspace dist build lock`,
+      },
+    );
   } finally {
     await rm(tsBuildInfoFile, { force: true }).catch(() => {});
-    if (!explicitOutputDir) {
-      await rm(stagedDistDir, { recursive: true, force: true }).catch(() => {});
-    }
-    await rm(backupDir, { recursive: true, force: true }).catch(() => {});
   }
 }
 

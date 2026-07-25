@@ -34,65 +34,36 @@ test('buildIntoTempThenReplace preserves existing dir when build fails', async (
   assert.equal(after, 'old\n');
 });
 
-test('buildIntoTempThenReplace restores contents when staged build fails', async (t) => {
+test('a stale failed build cannot overwrite a newer successful publication', async (t) => {
   const root = await withTempRoot(t);
   const outDir = join(root, 'ui');
   await mkdir(outDir, { recursive: true });
   await writeFile(join(outDir, 'marker.txt'), 'old\n', 'utf-8');
 
-  await assert.rejects(
-    async () => {
-      await buildIntoTempThenReplace(outDir, async (tmp) => {
-        await writeFile(join(tmp, 'marker.txt'), 'new\n', 'utf-8');
-        throw new Error('boom');
-      });
-    },
-    /boom/
-  );
+  let releaseFailedBuild;
+  let failedBuildStaged;
+  const staleFailure = buildIntoTempThenReplace(outDir, async (tmp) => {
+    await writeFile(join(tmp, 'marker.txt'), 'failed candidate\n', 'utf-8');
+    failedBuildStaged?.();
+    await new Promise((resolve) => {
+      releaseFailedBuild = resolve;
+    });
+    throw new Error('stale failure');
+  });
+  await new Promise((resolve) => {
+    failedBuildStaged = resolve;
+    setImmediate(() => {
+      if (releaseFailedBuild) resolve();
+    });
+  });
 
-  assert.equal(await readFile(join(outDir, 'marker.txt'), 'utf-8'), 'old\n');
-});
+  await buildIntoTempThenReplace(outDir, async (tmp) => {
+    await writeFile(join(tmp, 'marker.txt'), 'new success\n', 'utf-8');
+  });
+  releaseFailedBuild?.();
 
-test('buildIntoTempThenReplace restores existing dir when a failed build deletes it', async (t) => {
-  const root = await withTempRoot(t);
-  const outDir = join(root, 'ui');
-  await mkdir(outDir, { recursive: true });
-  await writeFile(join(outDir, 'marker.txt'), 'old\n', 'utf-8');
-
-  await assert.rejects(
-    async () => {
-      await buildIntoTempThenReplace(outDir, async (tmp) => {
-        await writeFile(join(tmp, 'marker.txt'), 'new\n', 'utf-8');
-        await rm(outDir, { recursive: true, force: true });
-        throw new Error('boom');
-      });
-    },
-    /boom/
-  );
-
-  const after = await readFile(join(outDir, 'marker.txt'), 'utf-8');
-  assert.equal(after, 'old\n');
-});
-
-test('buildIntoTempThenReplace restores existing dir when a failed build mutates it', async (t) => {
-  const root = await withTempRoot(t);
-  const outDir = join(root, 'ui');
-  await mkdir(outDir, { recursive: true });
-  await writeFile(join(outDir, 'marker.txt'), 'old\n', 'utf-8');
-
-  await assert.rejects(
-    async () => {
-      await buildIntoTempThenReplace(outDir, async (tmp) => {
-        await writeFile(join(tmp, 'marker.txt'), 'new staged\n', 'utf-8');
-        await writeFile(join(outDir, 'marker.txt'), 'mutated live\n', 'utf-8');
-        throw new Error('boom');
-      });
-    },
-    /boom/
-  );
-
-  const after = await readFile(join(outDir, 'marker.txt'), 'utf-8');
-  assert.equal(after, 'old\n');
+  await assert.rejects(staleFailure, /stale failure/);
+  assert.equal(await readFile(join(outDir, 'marker.txt'), 'utf-8'), 'new success\n');
 });
 
 test('buildIntoTempThenReplace replaces dir on success', async (t) => {

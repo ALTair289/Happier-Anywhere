@@ -119,6 +119,49 @@ describe('bundleWorkspacePackage', () => {
       'export const schemas = {};\n',
     );
   });
+
+  it('copies non-dist package export targets so the bundled public surface remains loadable', async () => {
+    rootDir = mkdtempSync(join(tmpdir(), 'happier-cli-common-bundle-workspace-'));
+
+    const srcPackageDir = resolve(rootDir, 'packages/cli-common');
+    const srcDistDir = resolve(srcPackageDir, 'dist');
+    mkdirSync(srcDistDir, { recursive: true });
+    writeFileSync(
+      resolve(srcPackageDir, 'package.json'),
+      JSON.stringify(
+        {
+          name: '@happier-dev/cli-common',
+          version: '0.0.0',
+          type: 'module',
+          exports: {
+            '.': { default: './dist/index.js' },
+            './workspaceLockLease': { default: './workspaceLockLease.mjs' },
+            './workspaceBundleLock': { default: './workspaceBundleLock.mjs' },
+          },
+        },
+        null,
+        2,
+      ),
+    );
+    writeFileSync(resolve(srcDistDir, 'index.js'), 'export {};\n');
+    writeFileSync(resolve(srcPackageDir, 'workspaceLockLease.mjs'), 'export const lease = "canonical";\n');
+    writeFileSync(
+      resolve(srcPackageDir, 'workspaceBundleLock.mjs'),
+      'export { lease } from "./workspaceLockLease.mjs";\n',
+    );
+
+    const destPackageDir = resolve(rootDir, 'apps/cli/node_modules/@happier-dev/cli-common');
+    bundleWorkspacePackage({
+      packageName: '@happier-dev/cli-common',
+      srcDir: srcPackageDir,
+      destDir: destPackageDir,
+    });
+
+    expect(readFileSync(resolve(destPackageDir, 'workspaceBundleLock.mjs'), 'utf8')).toContain(
+      './workspaceLockLease.mjs',
+    );
+    expect(readFileSync(resolve(destPackageDir, 'workspaceLockLease.mjs'), 'utf8')).toContain('canonical');
+  });
 });
 
 describe('atomicReplaceDirSync', () => {

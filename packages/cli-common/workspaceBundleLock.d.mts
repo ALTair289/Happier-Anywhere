@@ -1,0 +1,37 @@
+export interface WorkspaceBundleLockContext {
+  waited: boolean;
+  lockPath: string;
+  heldLockValue: string;
+  inherited: boolean;
+}
+
+export interface WorkspaceBundleLockOptions {
+  lockPath: string;
+  heldLockValue?: string;
+  heldLockPath?: string;
+  timeoutMs?: number;
+  pollIntervalMs?: number;
+  staleAfterMs?: number;
+  errorLabel?: string;
+  onWait?: (event: {
+    lockPath: string;
+    owner: Record<string, unknown> | null;
+    staleAfterMs: number;
+    timeoutMs: number;
+    waitedMs: number;
+  }) => void;
+}
+
+export function resolveWorkspaceBundleLockPath(repoRoot: string): string;
+export function isWorkspaceBundleLockActive(
+  lockPath: string,
+  options?: { staleAfterMs?: number; nowMs?: number },
+): boolean;
+export function withWorkspaceBundleLock<T>(
+  fn: (context: WorkspaceBundleLockContext) => Promise<T> | T,
+  options: WorkspaceBundleLockOptions,
+): Promise<T>;
+export function withWorkspaceBundleLockSync<T>(
+  fn: (context: WorkspaceBundleLockContext) => T,
+  options: WorkspaceBundleLockOptions,
+): T;

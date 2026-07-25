@@ -39,6 +39,11 @@ happy-coder-*.tgz
 /dist/
 /package-dist/
 
+# Lock-owned transient build generations. These may survive a force-killed build.
+/.dist.hstack-*
+/dist.staging.*/
+/dist.__finalize_backup__.*/
+
 # npm auth token (never commit)
 .npmrc
 

@@ -1,4 +1,4 @@
-import { cp, mkdir, rename, rm } from 'node:fs/promises';
+import { mkdir, rename, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 function rand() {
@@ -12,63 +12,47 @@ export async function buildIntoTempThenReplace(targetDir, buildFn) {
 
   const parent = dirname(outDir);
   const tmpDir = join(parent, `.tmp.${Date.now()}.${process.pid}.${rand()}`);
-  const restoreDir = join(parent, `.restore.${Date.now()}.${process.pid}.${rand()}`);
 
   await rm(tmpDir, { recursive: true, force: true });
-  await rm(restoreDir, { recursive: true, force: true });
   await mkdir(tmpDir, { recursive: true });
 
-  let hasRestore = false;
-  try {
-    await cp(outDir, restoreDir, { recursive: true, force: false, errorOnExist: true });
-    hasRestore = true;
-  } catch (err) {
-    if (err?.code !== 'ENOENT') throw err;
-  }
-
-  let ok = false;
+  let backupDir = null;
+  let preserveBackup = false;
   try {
     await buildFn(tmpDir);
-    ok = true;
-  } finally {
-    if (!ok) {
-      await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
-      if (hasRestore) {
-        await rm(outDir, { recursive: true, force: true }).catch(() => {});
-        await rename(restoreDir, outDir);
-      } else {
-        await rm(outDir, { recursive: true, force: true }).catch(() => {});
+
+    // Swap only after a successful build.
+    backupDir = join(parent, `.backup.${Date.now()}.${process.pid}.${rand()}`);
+    let hadExisting = false;
+    try {
+      await rename(outDir, backupDir);
+      hadExisting = true;
+    } catch (err) {
+      if (err?.code !== 'ENOENT') throw err;
+    }
+
+    try {
+      await rename(tmpDir, outDir);
+    } catch (err) {
+      if (hadExisting) {
+        await rename(backupDir, outDir).then(() => {
+          backupDir = null;
+        }).catch((restoreErr) => {
+          preserveBackup = true;
+          if (err && typeof err === 'object') err.restoreError = restoreErr;
+        });
       }
+      throw err;
     }
-  }
 
-  // Swap only after a successful build.
-  const backupDir = join(parent, `.backup.${Date.now()}.${process.pid}.${rand()}`);
-  let hadExisting = false;
-  try {
-    await rename(outDir, backupDir);
-    hadExisting = true;
-  } catch (err) {
-    if (err?.code !== 'ENOENT') throw err;
-  }
-
-  try {
-    await rename(tmpDir, outDir);
-  } catch (err) {
-    if (hadExisting) {
-      await rename(backupDir, outDir).catch((restoreErr) => {
-        if (err && typeof err === 'object') {
-          err.restoreError = restoreErr;
-        }
-      });
+    if (hadExisting && backupDir) {
+      await rm(backupDir, { recursive: true, force: true }).catch(() => {});
+      backupDir = null;
     }
-    throw err;
-  }
-
-  if (hadExisting) {
-    await rm(backupDir, { recursive: true, force: true }).catch(() => {});
-  }
-  if (hasRestore) {
-    await rm(restoreDir, { recursive: true, force: true }).catch(() => {});
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+    if (backupDir && !preserveBackup) {
+      await rm(backupDir, { recursive: true, force: true }).catch(() => {});
+    }
   }
 }
