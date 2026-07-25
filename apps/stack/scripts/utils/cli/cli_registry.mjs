@@ -120,6 +120,13 @@ export function gethstackRegistry() {
       description: 'Start local stack (dev)',
     },
     {
+      name: 'dev-targets',
+      kind: 'node',
+      scriptRelPath: 'scripts/dev_targets.mjs',
+      rootUsage: 'hstack dev-targets add|remove|list|show|doctor|path [--stack=NAME]',
+      description: 'Configure Mutagen-backed remote development daemons',
+    },
+    {
       name: 'stop',
       kind: 'node',
       scriptRelPath: 'scripts/stop.mjs',
@@ -192,6 +199,16 @@ export function gethstackRegistry() {
       scriptRelPath: 'scripts/migrate.mjs',
       rootUsage: 'hstack migrate light-to-server --from-stack=<name> --to-stack=<name> [--include-files] [--force] [--json]',
       description: 'Migrate data between server flavors (experimental)',
+    },
+    {
+      name: 'sqlite-snapshot',
+      kind: 'node',
+      scriptRelPath: 'scripts/sqlite_snapshot.mjs',
+      rootUsage: [
+        'hstack sqlite-snapshot snapshot --source PATH --output PATH --disposable-root PATH [--json]',
+        'hstack sqlite-snapshot restore --snapshot PATH --output PATH --disposable-root PATH [--json]',
+      ],
+      description: 'Create or restore-verify an explicit disposable SQLite snapshot',
     },
     {
       name: 'monorepo',
