@@ -3,9 +3,11 @@ import { createRequire } from 'node:module';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { ensureWorkspacePackagesBuiltForComponent } from './utils/proc/pm.mjs';
+import {
+  ensureWorkspacePackagesBuiltByName as ensureWorkspacePackagesBuiltByNameDefault,
+  ensureWorkspacePackagesBuiltForComponent,
+} from './utils/proc/pm.mjs';
 import { withWorkspaceBundleLock } from './utils/workspaces/workspaceBundleLock.mjs';
-import { execYarn } from '../../../scripts/workspaces/execYarnCommand.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const WORKSPACE_BUNDLE_MANIFEST_FILENAME = '.workspace-bundle-manifest.json';
@@ -27,7 +29,7 @@ function findRepoRoot(startDir) {
   return resolve(startDir, '..', '..', '..');
 }
 
-async function loadCliCommonWorkspacesModule(repoRoot) {
+async function loadCliCommonWorkspacesModule(repoRoot, heldLockValue, env = process.env) {
   const cliCommonPackageJsonPath = resolve(repoRoot, 'packages', 'cli-common', 'package.json');
   if (existsSync(cliCommonPackageJsonPath)) {
     // Fail fast with a JSON parse error instead of surfacing Node's less-specific
@@ -46,13 +48,12 @@ async function loadCliCommonWorkspacesModule(repoRoot) {
 
     if (hasWorkspaces) {
       const stackDir = resolve(repoRoot, 'apps', 'stack');
-      await ensureWorkspacePackagesBuiltForComponent(stackDir, { quiet: true, env: process.env });
-      if (!existsSync(modulePath)) {
-        execYarn(['-s', 'workspace', '@happier-dev/cli-common', 'build'], {
-          cwd: repoRoot,
-          stdio: 'inherit',
-        });
-      }
+      const buildEnv = {
+        ...env,
+        HAPPIER_WORKSPACE_DIST_BUILD_LOCK_HELD: heldLockValue,
+      };
+      delete buildEnv.HAPPIER_WORKSPACE_DIST_OUTPUT_DIR;
+      await ensureWorkspacePackagesBuiltForComponent(stackDir, { quiet: true, env: buildEnv });
     }
   }
 
@@ -300,12 +301,19 @@ function buildWorkspaceBundleSourceSignature({ bundles }) {
     bundles: bundles.map((bundle) => {
       const packageJsonPath = resolve(bundle.srcDir, 'package.json');
       const packageJson = JSON.parse(String(readFileSync(packageJsonPath, 'utf8')));
+      const expectedFiles = collectExpectedPackageFiles(packageJson, bundle.srcDir);
       return {
         packageName: resolveBundlePackageName(bundle),
         packageJson: collectPathFingerprint(packageJsonPath),
         dist: collectPathFingerprint(resolve(bundle.srcDir, 'dist')),
         distFiles: collectRelativeFilePaths(resolve(bundle.srcDir, 'dist'), 'dist'),
-        expectedFiles: collectExpectedPackageFiles(packageJson, bundle.srcDir),
+        expectedFiles,
+        expectedRootFiles: expectedFiles
+          .filter((relativePath) => !relativePath.startsWith('dist/'))
+          .map((relativePath) => ({
+            relativePath,
+            fingerprint: collectPathFingerprint(resolve(bundle.srcDir, relativePath)),
+          })),
         externalRuntimeDependencies: collectRuntimeDependencySignatures({
           packageJsonPath,
           pkgJson: packageJson,
@@ -332,6 +340,14 @@ function isBundledWorkspaceComplete({ bundle, sourceBundleSignature }) {
 
   for (const relativePath of sourceBundleSignature.expectedFiles) {
     if (!existsSync(resolve(bundle.destDir, relativePath))) {
+      return false;
+    }
+  }
+
+  for (const { relativePath } of sourceBundleSignature.expectedRootFiles ?? []) {
+    const sourcePath = resolve(bundle.srcDir, relativePath);
+    const bundledPath = resolve(bundle.destDir, relativePath);
+    if (!existsSync(sourcePath) || !readFileSync(sourcePath).equals(readFileSync(bundledPath))) {
       return false;
     }
   }
@@ -425,18 +441,31 @@ export async function bundleWorkspaceDeps(opts = {}) {
   const repoRoot = opts.repoRoot ?? findRepoRoot(__dirname);
   const stackDir = opts.stackDir ?? resolve(repoRoot, 'apps', 'stack');
   const lockPath = opts.lockPath ?? resolve(repoRoot, '.project', 'tmp', 'cli-dist-build.lock');
+  const baseEnv = opts.env ?? process.env;
+  const ensureWorkspacePackagesBuiltByName = opts.ensureWorkspacePackagesBuiltByName
+    ?? ensureWorkspacePackagesBuiltByNameDefault;
 
-  return withWorkspaceBundleLock(async () => {
+  return withWorkspaceBundleLock(async ({ heldLockValue }) => {
+    const heldLockEnv = {
+      ...baseEnv,
+      HAPPIER_WORKSPACE_DIST_BUILD_LOCK_HELD: heldLockValue,
+    };
+    delete heldLockEnv.HAPPIER_WORKSPACE_DIST_OUTPUT_DIR;
     const {
       bundleWorkspacePackages,
       resolveWorkspaceBundlesFromPackageJson,
       vendorBundledPackageRuntimeDependencies,
-    } = await loadCliCommonWorkspacesModule(repoRoot);
+    } = await loadCliCommonWorkspacesModule(repoRoot, heldLockValue, heldLockEnv);
 
     const bundles = resolveWorkspaceBundlesFromPackageJson({
       repoRoot,
       hostPackageDir: stackDir,
     });
+    await ensureWorkspacePackagesBuiltByName(
+      repoRoot,
+      [...new Set(bundles.map(resolveBundlePackageName).filter(Boolean))],
+      { quiet: true, env: heldLockEnv },
+    );
 
     const sourceSignature = buildWorkspaceBundleSourceSignature({ bundles });
     if (bundledWorkspaceManifestIsFresh({ stackDir, bundles, sourceSignature })) {
@@ -453,7 +482,18 @@ export async function bundleWorkspaceDeps(opts = {}) {
     }
 
     writeWorkspaceBundleManifest({ stackDir, sourceSignature });
-  }, { lockPath, timeoutMs: 240_000, pollIntervalMs: 250, staleAfterMs: 240_000 });
+  }, {
+    lockPath,
+    heldLockValue: String(
+      opts.heldLockValue
+        ?? opts.heldLockPath
+        ?? baseEnv?.HAPPIER_WORKSPACE_DIST_BUILD_LOCK_HELD
+        ?? '',
+    ).trim(),
+    timeoutMs: 240_000,
+    pollIntervalMs: 250,
+    staleAfterMs: 240_000,
+  });
 }
 
 const invokedAsMain = (() => {

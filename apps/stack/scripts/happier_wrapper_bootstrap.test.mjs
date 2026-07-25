@@ -150,3 +150,59 @@ test('happier wrapper skips bundled workspace preflight when disabled', async ()
     rmSync(fixtureDir, { recursive: true, force: true });
   }
 });
+
+test('scripts/happier delegates to the command owner without a second bundled workspace preflight', async () => {
+  const rootDir = stackRootDirFromMeta(import.meta.url);
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'happier-script-single-preflight-'));
+  try {
+    const bundleMarkerPath = join(fixtureDir, 'bundle-imported.txt');
+    const bundleStubPath = join(fixtureDir, 'bundleWorkspaceDeps.mjs');
+    const cliStubPath = join(fixtureDir, 'happier_main.mjs');
+    const loaderPath = join(fixtureDir, 'loader.mjs');
+
+    writeFileSync(
+      bundleStubPath,
+      [
+        "import { writeFileSync } from 'node:fs';",
+        'export async function bundleWorkspaceDeps() {',
+        `  writeFileSync(${JSON.stringify(bundleMarkerPath)}, 'called', 'utf8');`,
+        '}',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    writeFileSync(cliStubPath, "process.stdout.write('command-owner-ran\\n');\n", 'utf8');
+    writeFileSync(
+      loaderPath,
+      [
+        "import { pathToFileURL } from 'node:url';",
+        '',
+        'export async function resolve(specifier, context, defaultResolve) {',
+        "  if (specifier === './bundleWorkspaceDeps.mjs') {",
+        `    return { url: pathToFileURL(${JSON.stringify(bundleStubPath)}).href, shortCircuit: true };`,
+        '  }',
+        "  if (specifier === './happier_main.mjs') {",
+        `    return { url: pathToFileURL(${JSON.stringify(cliStubPath)}).href, shortCircuit: true };`,
+        '  }',
+        '  return defaultResolve(specifier, context, defaultResolve);',
+        '}',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+
+    const res = await runNodeCapture([join(rootDir, 'scripts', 'happier.mjs')], {
+      cwd: rootDir,
+      env: {
+        ...process.env,
+        NODE_OPTIONS: `--experimental-loader=${loaderPath}`,
+      },
+    });
+
+    assert.equal(res.code, 0, `expected exit 0, got ${res.code}\nstderr:\n${res.stderr}\nstdout:\n${res.stdout}`);
+    assert.equal(existsSync(bundleMarkerPath), false);
+    assert.match(res.stdout, /command-owner-ran/);
+  } finally {
+    rmSync(fixtureDir, { recursive: true, force: true });
+  }
+});

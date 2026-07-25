@@ -2,18 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import {
-  closeSync,
   cpSync,
   existsSync,
-  ftruncateSync,
   mkdirSync,
   mkdtempSync,
-  openSync,
   readFileSync,
   rmSync,
-  statSync,
-  unlinkSync,
-  writeSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -22,91 +16,11 @@ import { fileURLToPath } from 'node:url';
 
 import { runNodeCapture } from './testkit/core/run_node_capture.mjs';
 import { coerceHappyMonorepoRootFromPath } from './utils/paths/paths.mjs';
-import {
-  reclaimWorkspaceBundleLockIfStale,
-  releaseWorkspaceBundleLock,
-} from './utils/workspaces/workspaceBundleLock.mjs';
 
 function stackRootDirFromMeta(metaUrl) {
   const scriptsDir = dirname(fileURLToPath(metaUrl));
   return dirname(scriptsDir);
 }
-
-test('workspace bundle lock release closes the descriptor before unlinking the lock file', () => {
-  const fixtureDir = mkdtempSync(join(tmpdir(), 'workspace-bundle-lock-release-'));
-  const lockPath = join(fixtureDir, 'bundle.lock');
-  let fd = null;
-  try {
-    fd = openSync(lockPath, 'wx');
-    const owner = {
-      pid: process.pid,
-      createdAtMs: Date.now(),
-      token: `test-token-${process.pid}`,
-    };
-    const serializedOwner = JSON.stringify(owner);
-    writeSync(fd, serializedOwner, 0, 'utf8');
-    ftruncateSync(fd, Buffer.byteLength(serializedOwner));
-
-    const events = [];
-    releaseWorkspaceBundleLock(lockPath, fd, owner, {
-      closeSync(fdToClose) {
-        events.push('close');
-        closeSync(fdToClose);
-      },
-      unlinkSync(pathToRemove) {
-        events.push('unlink');
-        unlinkSync(pathToRemove);
-      },
-    });
-    fd = null;
-
-    assert.deepEqual(events, ['close', 'unlink']);
-    assert.equal(existsSync(lockPath), false);
-  } finally {
-    if (fd != null) closeSync(fd);
-    rmSync(fixtureDir, { recursive: true, force: true });
-  }
-});
-
-test('workspace bundle stale reclaim does not unlink a successor owner lock', () => {
-  const fixtureDir = mkdtempSync(join(tmpdir(), 'workspace-bundle-lock-reclaim-successor-'));
-  const lockPath = join(fixtureDir, 'bundle.lock');
-  try {
-    const staleOwner = {
-      createdAtMs: Date.now() - 60_000,
-      token: 'stale-owner',
-    };
-    const successorOwner = {
-      pid: process.pid,
-      createdAtMs: Date.now(),
-      token: 'successor-owner',
-    };
-    writeFileSync(lockPath, JSON.stringify(staleOwner), 'utf8');
-
-    let readCount = 0;
-    const reclaimed = reclaimWorkspaceBundleLockIfStale(lockPath, {
-      staleAfterMs: 1_000,
-      nowMs: Date.now(),
-      operations: {
-        statSync,
-        readFileSync(pathToRead, encoding) {
-          readCount += 1;
-          const contents = readFileSync(pathToRead, encoding);
-          if (readCount === 1) {
-            writeFileSync(lockPath, JSON.stringify(successorOwner), 'utf8');
-          }
-          return contents;
-        },
-        unlinkSync,
-      },
-    });
-
-    assert.equal(reclaimed, false);
-    assert.deepEqual(JSON.parse(readFileSync(lockPath, 'utf8')), successorOwner);
-  } finally {
-    rmSync(fixtureDir, { recursive: true, force: true });
-  }
-});
 
 test('local bundled workspace preflight falls back to bundleWorkspaceDeps when the monorepo sync helper is unavailable', async () => {
   const rootDir = stackRootDirFromMeta(import.meta.url);

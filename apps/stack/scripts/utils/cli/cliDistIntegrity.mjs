@@ -1,10 +1,10 @@
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { pathToFileURL } from 'node:url';
 
 export const CLI_DIST_INTEGRITY_PROBE_ENV = 'HAPPIER_CLI_DIST_INTEGRITY_PROBE';
 export const CLI_DIST_BUILD_MANIFEST = '.build-manifest.json';
+export const DEFAULT_CLI_DIST_RUNTIME_IMPORT_TIMEOUT_MS = 120_000;
 
 export function isCliScriptEntrypoint(pathLike) {
   const value = String(pathLike ?? '').trim().toLowerCase();
@@ -102,43 +102,54 @@ export async function probeCliDistRuntimeImport(entrypoint, options = {}) {
     throw new Error('[cli-dist] runtime import probe missing entrypoint');
   }
   const nodeExecutable = options.nodeExecutable ?? process.execPath;
-  const timeoutMsRaw = Number(options.timeoutMs ?? 30_000);
-  const timeoutMs = Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0 ? Math.trunc(timeoutMsRaw) : 30_000;
+  const timeoutMsRaw = Number(options.timeoutMs ?? DEFAULT_CLI_DIST_RUNTIME_IMPORT_TIMEOUT_MS);
+  const timeoutMs = Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0
+    ? Math.trunc(timeoutMsRaw)
+    : DEFAULT_CLI_DIST_RUNTIME_IMPORT_TIMEOUT_MS;
   const env = {
     ...process.env,
     ...(options.env ?? {}),
-    [CLI_DIST_INTEGRITY_PROBE_ENV]: '1',
+    // Run the real daemon command loader rather than suppressing CLI dispatch.
+    // This reaches command-owned lazy imports while --help keeps the probe side-effect free.
+    [CLI_DIST_INTEGRITY_PROBE_ENV]: 'daemon-command',
+    HAPPIER_CLI_RUNTIME_DISABLE: '1',
+    HAPPIER_CLI_UPDATE_CHECK: '0',
   };
-  const source = `await import(${JSON.stringify(pathToFileURL(entry).href)});`;
 
   await new Promise((resolve, reject) => {
-    const child = spawn(nodeExecutable, ['--input-type=module', '--eval', source], {
+    const child = spawn(nodeExecutable, [entry, 'daemon', '--help'], {
       cwd: options.cwd,
       env,
       stdio: ['ignore', 'ignore', 'pipe'],
     });
     let stderr = '';
     let settled = false;
+    let timedOut = false;
+    let spawnError = null;
     const timeout = setTimeout(() => {
       if (settled) return;
-      settled = true;
+      timedOut = true;
       child.kill('SIGKILL');
-      reject(new Error(`[cli-dist] runtime import probe timed out after ${timeoutMs}ms for ${entry}`));
     }, timeoutMs);
     timeout.unref?.();
     child.stderr?.on('data', (chunk) => {
       stderr += String(chunk);
     });
     child.on('error', (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      reject(error);
+      spawnError = error;
     });
     child.on('close', (code, signal) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
+      if (timedOut) {
+        reject(new Error(`[cli-dist] runtime import probe timed out after ${timeoutMs}ms for ${entry}`));
+        return;
+      }
+      if (spawnError) {
+        reject(spawnError);
+        return;
+      }
       if (code === 0) {
         resolve();
         return;

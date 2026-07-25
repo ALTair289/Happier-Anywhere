@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { hstackBinPath, runNodeCapture } from './testkit/auth_testkit.mjs';
 import { createHappierCliMonorepoFixture } from './testkit/happier_cli_monorepo_testkit.mjs';
 import { writeStubHappierCliFiles } from './testkit/core/stub_happier_cli_files.mjs';
+import { sanitizeStackTestRunnerEnv } from './utils/test/test_env.mjs';
 
 async function createMonorepoFixture(t, { prefix }) {
   return createHappierCliMonorepoFixture(t, {
@@ -34,9 +35,9 @@ test('hstack happier falls back to tsx when CLI dist is missing', async (t) => {
   const fixture = await createMonorepoFixture(t, { prefix: 'hstack-happier-tsx-fallback-' });
 
   const env = {
-    ...process.env,
+    ...sanitizeStackTestRunnerEnv(process.env),
     // Keep the test hermetic: do not load a real stack env file.
-    HAPPIER_STACK_STACK: 'test-stack',
+    HAPPIER_STACK_STACK: 'main',
     HAPPIER_STACK_ENV_FILE: join(rootDir, 'scripts', 'nonexistent-env'),
     HAPPIER_STACK_REPO_DIR: fixture.dir,
     HAPPIER_HOME_DIR: join(fixture.dir, '.happy-home'),
@@ -61,8 +62,8 @@ test('hstack happier falls back to tsx when dist entrypoint exists but is incomp
   });
 
   const env = {
-    ...process.env,
-    HAPPIER_STACK_STACK: 'test-stack',
+    ...sanitizeStackTestRunnerEnv(process.env),
+    HAPPIER_STACK_STACK: 'main',
     HAPPIER_STACK_ENV_FILE: join(rootDir, 'scripts', 'nonexistent-env'),
     HAPPIER_STACK_REPO_DIR: fixture.dir,
     HAPPIER_HOME_DIR: join(fixture.dir, '.happy-home'),

@@ -12,13 +12,12 @@ export function wantsHelp(argv, { flags = null } = {}) {
   return argv.includes('--help') || argv.includes('-h');
 }
 
-export function printResult({ json, data, text }) {
+export function printResult({ json, data, text, output = process.stdout }) {
   if (json) {
-    process.stdout.write(JSON.stringify(data ?? null, null, 2) + '\n');
+    output.write(JSON.stringify(data ?? null, null, 2) + '\n');
     return;
   }
   if (text) {
-    process.stdout.write(text.endsWith('\n') ? text : text + '\n');
+    output.write(text.endsWith('\n') ? text : text + '\n');
   }
 }
-

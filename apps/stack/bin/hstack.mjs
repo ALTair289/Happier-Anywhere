@@ -9,7 +9,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { commandHelpArgs, renderhstackRootHelp, resolvehstackCommand } from '../scripts/utils/cli/cli_registry.mjs';
 import { expandHome, getCanonicalHomeEnvPathFromEnv } from '../scripts/utils/paths/canonical_home.mjs';
-import { resolveStackEnvPath } from '../scripts/utils/paths/paths.mjs';
+import { resolveExplicitStackEnvFilePath, resolveStackEnvPath } from '../scripts/utils/paths/paths.mjs';
 import { SANDBOX_PRESERVE_KEYS, scrubHappierStackEnv } from '../scripts/utils/env/scrub_env.mjs';
 import { refreshLocalBundledWorkspacePackages } from './localBundledWorkspacePreflight.mjs';
 
@@ -294,6 +294,38 @@ function maybeWarnDeprecatedSetup(cmd, rest) {
   console.error('');
 }
 
+function isHelpInvocation(argv) {
+  const args = Array.isArray(argv) ? argv : [];
+  const separatorIndex = args.indexOf('--');
+  const helpScope = separatorIndex === -1 ? args : args.slice(0, separatorIndex);
+  if (helpScope.length === 0) return true;
+  if (helpScope.includes('--help') || helpScope.includes('-h')) return true;
+  return (helpScope.find((arg) => !String(arg).startsWith('-')) ?? '') === 'help';
+}
+
+function isInstalledServiceStartInvocation(argv) {
+  return Array.isArray(argv) && argv.length === 2 && argv[0] === 'start' && argv[1] === '--restart';
+}
+
+function handleMissingExplicitStackEnvBeforePreflight(argv) {
+  const envPath = resolveExplicitStackEnvFilePath(process.env);
+  if (!envPath || existsSync(envPath)) return false;
+
+  if (isHelpInvocation(argv)) return false;
+  const serviceMode = (process.env.HAPPIER_STACK_SERVICE_MODE ?? '').trim() === '1';
+
+  console.error(`[hstack] configured stack env file is missing: ${envPath}`);
+  if (serviceMode && isInstalledServiceStartInvocation(argv)) {
+    console.error('[hstack] service start skipped; reinstall or remove the archived stack service before starting it again.');
+    return true;
+  }
+
+  throw new Error(
+    `Configured HAPPIER_STACK_ENV_FILE does not exist: ${envPath}\n` +
+      'Fix the path, unset HAPPIER_STACK_ENV_FILE, or recreate the stack.',
+  );
+}
+
 async function main() {
   const cliRootDir = getCliRootDir();
   const initialArgv = process.argv.slice(2);
@@ -307,8 +339,9 @@ async function main() {
     process.env.HAPPIER_STACK_INVOKED_CWD = process.cwd();
   }
 
+  if (handleMissingExplicitStackEnvBeforePreflight(argv)) return;
+
   maybeReexecToCliRoot(cliRootDir);
-  await refreshLocalBundledWorkspacePackages(cliRootDir);
 
   // If the user passed only flags (common via `npx --yes -p @happier-dev/stack hstack --help`),
   // treat it as root help rather than `help --help` (which would look like
@@ -317,14 +350,16 @@ async function main() {
   const cmdIndex = argv.indexOf(cmd);
   const rest = cmdIndex >= 0 ? argv.slice(cmdIndex + 1) : [];
 
+  if ((cmd === 'help' || cmd === '--help' || cmd === '-h') && (!rest[0] || rest[0].startsWith('-'))) {
+    console.log(usage());
+    return;
+  }
+
+  await refreshLocalBundledWorkspacePackages(cliRootDir);
   await maybeAutoUpdateNotice(cliRootDir, cmd);
 
   if (cmd === 'help' || cmd === '--help' || cmd === '-h') {
     const target = rest[0];
-    if (!target || target.startsWith('-')) {
-      console.log(usage());
-      return;
-    }
     const targetCmd = resolvehstackCommand(target);
     if (!targetCmd || targetCmd.kind !== 'node') {
       console.error(`[hstack] unknown command: ${target}`);

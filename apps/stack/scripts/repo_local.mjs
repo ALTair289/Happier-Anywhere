@@ -10,7 +10,7 @@ import { applyStackActiveServerScopeEnv } from './utils/auth/stable_scope_id.mjs
 import { ensureDepsInstalled } from './utils/proc/pm.mjs';
 import { ensureEnvFileMutated } from './utils/env/env_file.mjs';
 import { parseEnvToObject } from './utils/env/dotenv.mjs';
-import { resolveLocalServerPortForStack } from './utils/server/resolve_stack_server_port.mjs';
+import { selectLocalServerPortCandidateForStack } from './utils/server/resolve_stack_server_port.mjs';
 import { resolveEffectiveDbProviderTransition } from './utils/server/effective_db_provider.mjs';
 
 function shouldAutoInstallDepsForRepoLocalCommand(cmd) {
@@ -30,6 +30,12 @@ async function maybeAutoInstallRepoDeps({ repoRoot, cmd, env, autoInstallOverrid
 
   // Test hook: allow validating auto-install behavior without mutating the real repo checkout.
   const preflightRoot = String(preflightRootOverride ?? '').trim() || repoRoot;
+
+  // This wrapper owns only clean-checkout bootstrap. Once a dependency tree exists, the
+  // component startup owner performs the canonical freshness check after hstack is running.
+  // Repeating that admission here can hold the CLI publication lock before the TUI or stack
+  // lifecycle has even had an opportunity to preserve/adopt an incumbent runtime.
+  if (existsSync(join(preflightRoot, 'node_modules'))) return;
 
   await ensureDepsInstalled(preflightRoot, 'happier-monorepo', { quiet: false, env });
 }
@@ -459,7 +465,7 @@ async function main() {
 	      if (runtimeServerPort && isPortWithinRange(runtimeServerPort, serverBase, serverRange)) {
 	        persistedServerPort = runtimeServerPort;
 	      } else {
-	        persistedServerPort = await resolveLocalServerPortForStack({
+		        persistedServerPort = await selectLocalServerPortCandidateForStack({
 	          env: {
 	            ...effectiveEnv,
 	            HAPPIER_STACK_SERVER_PORT_BASE: (effectiveEnv.HAPPIER_STACK_SERVER_PORT_BASE ?? '52005').toString(),

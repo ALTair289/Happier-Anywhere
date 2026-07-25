@@ -29,12 +29,14 @@ function stackRootDirFromMeta(metaUrl) {
 test('hstack happier --server-url clears stack-scoped HAPPIER_ACTIVE_SERVER_ID', async (t) => {
   const rootDir = stackRootDirFromMeta(import.meta.url);
   const fixture = await createMonorepoFixture(t, { prefix: 'hstack-happier-scope-' });
+  const stackEnvPath = join(fixture.dir, 'stack.env');
+  await writeFile(stackEnvPath, 'HAPPIER_STACK_STACK=test-stack\n', 'utf8');
 
   const env = {
     ...process.env,
     // Keep the test hermetic: do not load a real stack env file.
     HAPPIER_STACK_STACK: 'test-stack',
-    HAPPIER_STACK_ENV_FILE: join(rootDir, 'scripts', 'nonexistent-env'),
+    HAPPIER_STACK_ENV_FILE: stackEnvPath,
     HAPPIER_STACK_REPO_DIR: fixture.dir,
     HAPPIER_HOME_DIR: join(fixture.dir, '.happy-home'),
     // Simulate a stack-scoped active server id (common in stack env files).
