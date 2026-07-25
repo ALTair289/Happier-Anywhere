@@ -721,6 +721,7 @@ describe('RelayHostEngine (remote SSH)', () => {
     });
 
     expect(renderedEnvText).toContain('HAPPIER_SQLITE_MIGRATIONS_DIR=/home/remote-user/.happier/happier-server/current/prisma/sqlite/migrations');
+    expect(renderedEnvText).toContain('connection_limit=1');
   });
 
   it('keeps sqlite auto-migrate enabled in remote darwin relay env', async () => {

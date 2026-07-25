@@ -3,7 +3,7 @@ import { join, win32 as win32Path } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 export const DEFAULT_PRISMA_SQLITE_BUSY_TIMEOUT_MS = 30_000;
-export const DEFAULT_PRISMA_SQLITE_CONNECTION_LIMIT = 1;
+export const DEFAULT_SERVER_LIGHT_SQLITE_CONNECTION_LIMIT = 1;
 const PRISMA_SQLITE_BUSY_TIMEOUT_MS_MAX = 600_000;
 const PRISMA_SQLITE_CONNECTION_LIMIT_MAX = 64;
 
@@ -102,7 +102,7 @@ export function renderSelfHostServerEnvText(params: Readonly<{
     const databaseUrl = renderPrismaCompatibleSqliteDatabaseUrl({
         dbPath,
         platform,
-        sqlite: resolvePrismaSqliteDatabaseUrlOptionsFromEnv(process.env),
+        sqlite: resolveServerLightSqliteDatabaseUrlOptionsFromEnv(process.env),
     });
 
     const prismaEngineCandidates: string[] = [];
@@ -229,7 +229,17 @@ export function resolvePrismaSqliteDatabaseUrlOptionsFromEnv(
                 min: 1,
                 max: PRISMA_SQLITE_CONNECTION_LIMIT_MAX,
             })
-            : DEFAULT_PRISMA_SQLITE_CONNECTION_LIMIT,
+            : undefined,
+    };
+}
+
+export function resolveServerLightSqliteDatabaseUrlOptionsFromEnv(
+    env: Readonly<Record<string, unknown>>,
+): PrismaSqliteDatabaseUrlOptions {
+    const options = resolvePrismaSqliteDatabaseUrlOptionsFromEnv(env);
+    return {
+        ...options,
+        connectionLimit: options.connectionLimit ?? DEFAULT_SERVER_LIGHT_SQLITE_CONNECTION_LIMIT,
     };
 }
 

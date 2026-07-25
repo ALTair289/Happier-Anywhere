@@ -84,6 +84,14 @@
       "types": "./dist/firstPartyRuntime/index.d.ts",
       "default": "./dist/firstPartyRuntime/index.js"
     },
+    "./firstPartyRuntime/relayRuntime": {
+      "types": "./dist/firstPartyRuntime/relayRuntime.d.ts",
+      "default": "./dist/firstPartyRuntime/relayRuntime.js"
+    },
+    "./firstPartyRuntime/selfHostServerEnv": {
+      "types": "./dist/firstPartyRuntime/selfHostServerEnv.d.ts",
+      "default": "./dist/firstPartyRuntime/selfHostServerEnv.js"
+    },
     "./relayHost": {
       "types": "./dist/relayHost/index.d.ts",
       "default": "./dist/relayHost/index.js"

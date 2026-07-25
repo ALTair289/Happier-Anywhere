@@ -163,6 +163,21 @@ describe('renderSelfHostServerEnvText', () => {
         );
     });
 
+    it('renders generated sqlite DATABASE_URL with the server-light bounded connection pool by default', () => {
+      const rendered = renderSelfHostServerEnvText({
+        port: 3005,
+        host: '127.0.0.1',
+        dataDir: '/tmp/happier-data',
+        filesDir: '/tmp/happier-data/files',
+        dbDir: '/tmp/happier-data/pglite',
+        platform: 'darwin',
+      });
+
+      expect(rendered).toContain(
+        'DATABASE_URL=file:///tmp/happier-data/happier-server-light.sqlite?socket_timeout=30&connection_limit=1',
+      );
+    });
+
     it('applies sqlite URL params from process env when rendering generated DATABASE_URL', () => {
       const previousBusyTimeout = process.env.HAPPIER_SQLITE_BUSY_TIMEOUT_MS;
       const previousConnectionLimit = process.env.HAPPIER_SQLITE_CONNECTION_LIMIT;
@@ -262,10 +277,10 @@ describe('resolvePrismaSqliteDatabaseUrlOptionsFromEnv', () => {
     })).toEqual({ busyTimeoutMs: 500, connectionLimit: 2 });
   });
 
-  it('defaults sqlite connection limit to one for server-light env-derived options', () => {
+  it('leaves the generic sqlite connection limit unspecified when no override is configured', () => {
     expect(resolvePrismaSqliteDatabaseUrlOptionsFromEnv({})).toEqual({
       busyTimeoutMs: 30_000,
-      connectionLimit: 1,
+      connectionLimit: undefined,
     });
   });
 });
