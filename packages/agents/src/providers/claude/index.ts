@@ -29,10 +29,8 @@ export {
 export {
   CLAUDE_LOCAL_PERMISSION_BRIDGE_REQUEST_SOURCE,
   CLAUDE_LOCAL_PERMISSION_BRIDGE_STOPPED_REASON,
-  CLAUDE_UNIFIED_TERMINAL_RESUME_CHOICE_REQUEST_SOURCE,
   CLAUDE_UNIFIED_TERMINAL_DIALOG_CHOICE_REQUEST_SOURCE,
   isClaudeLocalPermissionBridgeAgentStateRequest,
-  isClaudeUnifiedTerminalResumeChoiceAgentStateRequest,
   isClaudeUnifiedTerminalDialogChoiceAgentStateRequest,
 } from './permissionRequestSource.js';
 

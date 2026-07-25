@@ -3,13 +3,11 @@ import { describe, expect, it } from 'vitest';
 import {
   CLAUDE_LOCAL_PERMISSION_BRIDGE_REQUEST_SOURCE,
   CLAUDE_LOCAL_PERMISSION_BRIDGE_STOPPED_REASON,
-  CLAUDE_UNIFIED_TERMINAL_RESUME_CHOICE_REQUEST_SOURCE,
   CLAUDE_UNIFIED_TERMINAL_DIALOG_CHOICE_REQUEST_SOURCE,
   connectedServiceProfileKey,
   isAgentStateRequestCoveredByCompletedRequests,
   getAgentMediaCapabilities,
   isClaudeLocalPermissionBridgeAgentStateRequest,
-  isClaudeUnifiedTerminalResumeChoiceAgentStateRequest,
   isClaudeUnifiedTerminalDialogChoiceAgentStateRequest,
   KIMI_PROVIDER_FIELDS,
   resolveConnectedServiceDefaultProfileId,
@@ -18,10 +16,8 @@ import {
 import {
   CLAUDE_LOCAL_PERMISSION_BRIDGE_REQUEST_SOURCE as CLAUDE_LOCAL_PERMISSION_BRIDGE_REQUEST_SOURCE_FROM_CLAUDE_INDEX,
   CLAUDE_LOCAL_PERMISSION_BRIDGE_STOPPED_REASON as CLAUDE_LOCAL_PERMISSION_BRIDGE_STOPPED_REASON_FROM_CLAUDE_INDEX,
-  CLAUDE_UNIFIED_TERMINAL_RESUME_CHOICE_REQUEST_SOURCE as CLAUDE_UNIFIED_TERMINAL_RESUME_CHOICE_REQUEST_SOURCE_FROM_CLAUDE_INDEX,
   CLAUDE_UNIFIED_TERMINAL_DIALOG_CHOICE_REQUEST_SOURCE as CLAUDE_UNIFIED_TERMINAL_DIALOG_CHOICE_REQUEST_SOURCE_FROM_CLAUDE_INDEX,
   isClaudeLocalPermissionBridgeAgentStateRequest as isClaudeLocalPermissionBridgeAgentStateRequestFromClaudeIndex,
-  isClaudeUnifiedTerminalResumeChoiceAgentStateRequest as isClaudeUnifiedTerminalResumeChoiceAgentStateRequestFromClaudeIndex,
   isClaudeUnifiedTerminalDialogChoiceAgentStateRequest as isClaudeUnifiedTerminalDialogChoiceAgentStateRequestFromClaudeIndex,
 } from './providers/claude/index.js';
 
@@ -31,16 +27,6 @@ describe('agents package exports', () => {
     expect(CLAUDE_LOCAL_PERMISSION_BRIDGE_STOPPED_REASON).toBe('Local permission bridge stopped');
     expect(isClaudeLocalPermissionBridgeAgentStateRequest({ source: CLAUDE_LOCAL_PERMISSION_BRIDGE_REQUEST_SOURCE })).toBe(true);
     expect(isClaudeLocalPermissionBridgeAgentStateRequest({ source: 'other' })).toBe(false);
-  });
-
-  it('re-exports the Claude unified terminal resume-choice request helper from the package root', () => {
-    expect(CLAUDE_UNIFIED_TERMINAL_RESUME_CHOICE_REQUEST_SOURCE).toBe('claude_unified_terminal_resume_choice');
-    expect(isClaudeUnifiedTerminalResumeChoiceAgentStateRequest({
-      source: CLAUDE_UNIFIED_TERMINAL_RESUME_CHOICE_REQUEST_SOURCE,
-    })).toBe(true);
-    expect(isClaudeUnifiedTerminalResumeChoiceAgentStateRequest({
-      source: CLAUDE_LOCAL_PERMISSION_BRIDGE_REQUEST_SOURCE,
-    })).toBe(false);
   });
 
   it('re-exports the Claude unified terminal dialog-choice request helper from the package root', () => {
@@ -68,14 +54,6 @@ describe('agents package exports', () => {
       request: { tool: 'Write', arguments: { file_path: '/tmp/a' }, createdAt: 1 },
       completedRequests: { req: { tool: 'Write', arguments: { file_path: '/tmp/a' }, completedAt: 2 } },
     })).toBe(true);
-  });
-
-  it('re-exports the Claude unified terminal resume-choice request helper from the Claude provider entrypoint', () => {
-    expect(CLAUDE_UNIFIED_TERMINAL_RESUME_CHOICE_REQUEST_SOURCE_FROM_CLAUDE_INDEX).toBe('claude_unified_terminal_resume_choice');
-    expect(isClaudeUnifiedTerminalResumeChoiceAgentStateRequestFromClaudeIndex({
-      source: CLAUDE_UNIFIED_TERMINAL_RESUME_CHOICE_REQUEST_SOURCE_FROM_CLAUDE_INDEX,
-    })).toBe(true);
-    expect(isClaudeUnifiedTerminalResumeChoiceAgentStateRequestFromClaudeIndex({ source: 'other' })).toBe(false);
   });
 
   it('re-exports the Claude unified terminal dialog-choice request helper from the Claude provider entrypoint', () => {

@@ -18,6 +18,15 @@ export const CLAUDE_UNIFIED_TERMINAL_RESUME_CHOICES = [
 ] as const;
 export type ClaudeUnifiedTerminalResumeChoice = (typeof CLAUDE_UNIFIED_TERMINAL_RESUME_CHOICES)[number];
 
+export const CLAUDE_UNIFIED_TERMINAL_WORKSPACE_TRUST_POLICIES = [
+  'ask_every_time',
+  'always_trust_happier_workspaces',
+  'always_reject_happier_workspaces',
+] as const;
+export type ClaudeUnifiedTerminalWorkspaceTrustPolicy =
+  (typeof CLAUDE_UNIFIED_TERMINAL_WORKSPACE_TRUST_POLICIES)[number];
+export type ClaudeUnifiedTerminalWorkspaceTrust = ClaudeUnifiedTerminalWorkspaceTrustPolicy;
+
 const CLAUDE_REMOTE_DEBUG_CATEGORIES = ['api', 'mcp', 'hooks', 'file', '1p'] as const;
 export type ClaudeRemoteDebugCategory = (typeof CLAUDE_REMOTE_DEBUG_CATEGORIES)[number];
 
@@ -57,6 +66,15 @@ function normalizeClaudeUnifiedTerminalHost(raw: unknown): ClaudeUnifiedTerminal
 function normalizeClaudeUnifiedTerminalResumeChoice(raw: unknown): ClaudeUnifiedTerminalResumeChoice | null {
   return typeof raw === 'string' && (CLAUDE_UNIFIED_TERMINAL_RESUME_CHOICES as readonly string[]).includes(raw)
     ? raw as ClaudeUnifiedTerminalResumeChoice
+    : null;
+}
+
+function normalizeClaudeUnifiedTerminalWorkspaceTrustPolicy(
+  raw: unknown,
+): ClaudeUnifiedTerminalWorkspaceTrustPolicy | null {
+  return typeof raw === 'string'
+    && (CLAUDE_UNIFIED_TERMINAL_WORKSPACE_TRUST_POLICIES as readonly string[]).includes(raw)
+    ? raw as ClaudeUnifiedTerminalWorkspaceTrustPolicy
     : null;
 }
 
@@ -134,6 +152,13 @@ export const CLAUDE_REMOTE_PROVIDER_FIELDS = {
     schema: z.enum(CLAUDE_UNIFIED_TERMINAL_RESUME_CHOICES),
     default: 'ask_every_time' as ClaudeUnifiedTerminalResumeChoice,
     description: 'How Claude unified terminal should answer heavy-session resume prompts',
+    storageScope: 'account',
+    analytics: { trackCurrentState: true, trackChanges: true, valueKind: 'enum', privacy: 'safe', identityScope: 'person' },
+  },
+  claudeUnifiedTerminalWorkspaceTrust: {
+    schema: z.enum(CLAUDE_UNIFIED_TERMINAL_WORKSPACE_TRUST_POLICIES),
+    default: 'ask_every_time' as ClaudeUnifiedTerminalWorkspaceTrustPolicy,
+    description: 'How Claude unified terminal should answer Happier workspace trust prompts',
     storageScope: 'account',
     analytics: { trackCurrentState: true, trackChanges: true, valueKind: 'enum', privacy: 'safe', identityScope: 'person' },
   },
@@ -303,6 +328,9 @@ export function buildClaudeRemoteOutgoingMessageMetaExtras(settings: Readonly<Re
     claudeUnifiedTerminalResumeChoice:
       normalizeClaudeUnifiedTerminalResumeChoice(settings.claudeUnifiedTerminalResumeChoice)
       ?? CLAUDE_REMOTE_PROVIDER_SETTINGS_DEFAULTS.claudeUnifiedTerminalResumeChoice,
+    claudeUnifiedTerminalWorkspaceTrust:
+      normalizeClaudeUnifiedTerminalWorkspaceTrustPolicy(settings.claudeUnifiedTerminalWorkspaceTrust)
+      ?? CLAUDE_REMOTE_PROVIDER_SETTINGS_DEFAULTS.claudeUnifiedTerminalWorkspaceTrust,
     claudeRemoteSettingSourcesV2: effectiveV2,
     ...(legacyFromV2 ? { claudeRemoteSettingSources: legacyFromV2 } : {}),
     claudeCodeExperimentalAgentTeamsEnabled: readBoolean('claudeCodeExperimentalAgentTeamsEnabled'),
