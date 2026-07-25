@@ -125,6 +125,26 @@ export type ActionExecutorContext = Readonly<{
    * execute-time availability report the same disabled reason as spec discovery.
    */
   actionsSettings?: ActionsSettingsV1 | null;
+
+  /** Stable identity for one externally retryable action invocation. */
+  actionRequestId?: string | null;
+
+  /** Resolve the existing action attempt without repeating its outward write. */
+  resumeActionRequest?: boolean;
+}>;
+
+type SessionStopActionDependencyResult = Readonly<{
+  success: boolean;
+  message?: string;
+  code?: string;
+  recovery?: string;
+}> | Readonly<{
+  ok: boolean;
+  code?: string;
+  errorCode?: string;
+  error?: string;
+  message?: string;
+  [key: string]: unknown;
 }>;
 
 export type ActionExecutorDeps = Readonly<{
@@ -192,6 +212,8 @@ export type ActionExecutorDeps = Readonly<{
     surface?: keyof ActionSurfaces | null;
     callerSurface?: keyof ActionSurfaces | null;
     callerPermissionMode?: string | null;
+    actionRequestId?: string | null;
+    resumeActionRequest?: boolean;
   }>) => Promise<unknown>;
   sessionSpawnPicker: (args: Readonly<{ tag?: string; agentId?: string; modelId?: string; initialMessage?: string }>) => Promise<unknown>;
 
@@ -242,7 +264,7 @@ export type ActionExecutorDeps = Readonly<{
     callerPermissionMode?: string | null;
   }>) => Promise<unknown>;
   sessionTitleSet?: (args: Readonly<{ sessionId: string; title: string; serverId?: string | null }>) => Promise<unknown>;
-  sessionStop?: (args: Readonly<{ sessionId: string; serverId?: string | null }>) => Promise<unknown>;
+  sessionStop?: (args: Readonly<{ sessionId: string; serverId?: string | null }>) => Promise<SessionStopActionDependencyResult>;
   sessionPermissionModeSet?: (args: Readonly<{
     sessionId: string;
     permissionMode: string;
@@ -280,6 +302,8 @@ export type ActionExecutorDeps = Readonly<{
   sessionUsageLimitWaitResumeCancel?: (args: Readonly<{
     sessionId: string;
     issueFingerprint?: string | null;
+    armedAtMs?: number;
+    runtimeAuthRecoveryAttemptId?: string;
     serverId?: string | null;
   }>) => Promise<unknown>;
   sessionUsageLimitCheckNow?: (args: Readonly<{
@@ -1101,8 +1125,15 @@ function resolveApprovalRequestExecutionSurface(createdBySurface: ApprovalReques
   return null;
 }
 
-function normalizeActionExecutorThrownError(error: unknown): Readonly<{ errorCode: string; error: string }> {
+function normalizeActionExecutorThrownError(error: unknown): Readonly<{ errorCode: string; error: string; details?: unknown }> {
   const anyErr = error as any;
+  const rawDetails = anyErr?.details;
+  const details = rawDetails && typeof rawDetails === 'object'
+    && Object.hasOwn(rawDetails, 'spawnResponse')
+    && typeof (rawDetails as { spawnNonce?: unknown }).spawnNonce === 'string'
+    && (rawDetails as { spawnNonce: string }).spawnNonce.trim().length > 0
+    ? { spawnNonce: (rawDetails as { spawnNonce: string }).spawnNonce.trim(), accepted: true as const }
+    : undefined;
   const rawCode = typeof anyErr?.code === 'string' ? String(anyErr.code).trim() : '';
   const message =
     error instanceof Error
@@ -1114,15 +1145,27 @@ function normalizeActionExecutorThrownError(error: unknown): Readonly<{ errorCod
         : '';
 
   if (rawCode && SessionControlErrorCodeSchema.safeParse(rawCode).success) {
-    return { errorCode: rawCode, error: message || rawCode };
+    return {
+      errorCode: rawCode,
+      error: message || rawCode,
+      ...(details !== undefined ? { details } : {}),
+    };
   }
 
   // Common network failures from axios/node.
   if (rawCode && ['ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'EAI_AGAIN', 'ETIMEDOUT'].includes(rawCode)) {
-    return { errorCode: 'server_unreachable', error: message || 'server_unreachable' };
+    return {
+      errorCode: 'server_unreachable',
+      error: message || 'server_unreachable',
+      ...(details !== undefined ? { details } : {}),
+    };
   }
 
-  return { errorCode: 'action_failed', error: message || 'action_failed' };
+  return {
+    errorCode: 'action_failed',
+    error: message || 'action_failed',
+    ...(details !== undefined ? { details } : {}),
+  };
 }
 
 function readActionExecuteFailure(result: unknown): Readonly<{ errorCode: string; error: string }> | null {
@@ -1808,6 +1851,8 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
           const res = await deps.sessionSpawnNew({
             ...effectiveSpawnInput,
             surface: ctx.surface ?? null,
+            ...(ctx.actionRequestId ? { actionRequestId: ctx.actionRequestId } : {}),
+            ...(ctx.resumeActionRequest === true ? { resumeActionRequest: true } : {}),
             ...(isSessionAgentCaller(ctx)
               ? { callerSurface: 'session_agent' as const, callerPermissionMode: ctx.callerPermissionMode ?? null }
               : {}),
@@ -1970,6 +2015,21 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
           }
           const serverId = resolveServerIdForSession(deps, ctx, sessionId);
           const res = await deps.sessionStop({ sessionId, ...(serverId ? { serverId } : {}) });
+          const stopFailed = 'success' in res ? res.success === false : res.ok === false;
+          if (stopFailed) {
+            const errorCode = res.code?.trim()
+              || ('errorCode' in res ? res.errorCode?.trim() : undefined)
+              || 'session_stop_failed';
+            const error = ('error' in res ? res.error?.trim() : undefined)
+              || res.message?.trim()
+              || errorCode;
+            return {
+              ok: false,
+              errorCode,
+              error,
+              details: res,
+            };
+          }
           return { ok: true, result: res };
         }
 
@@ -2165,10 +2225,14 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
           }
           const data = parsed.data as Record<string, unknown>;
           const issueFingerprint = data.issueFingerprint;
+          const armedAtMs = data.armedAtMs;
+          const runtimeAuthRecoveryAttemptId = data.runtimeAuthRecoveryAttemptId;
           const serverId = resolveServerIdForSession(deps, ctx, sessionId);
           const res = await deps.sessionUsageLimitWaitResumeCancel({
             sessionId,
             ...(typeof issueFingerprint === 'string' || issueFingerprint === null ? { issueFingerprint } : {}),
+            ...(typeof armedAtMs === 'number' ? { armedAtMs } : {}),
+            ...(typeof runtimeAuthRecoveryAttemptId === 'string' ? { runtimeAuthRecoveryAttemptId } : {}),
             ...(serverId ? { serverId } : {}),
           });
           return { ok: true, result: normalizeUsageLimitActionResult(res, sessionId) };
@@ -2780,7 +2844,12 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
       return { ok: false, errorCode: 'unsupported_action', error: `unsupported_action:${actionId}` };
     } catch (error) {
       const normalized = normalizeActionExecutorThrownError(error);
-      return { ok: false, errorCode: normalized.errorCode, error: normalized.error };
+      return {
+        ok: false,
+        errorCode: normalized.errorCode,
+        error: normalized.error,
+        ...(normalized.details !== undefined ? { details: normalized.details } : {}),
+      };
     }
   };
 

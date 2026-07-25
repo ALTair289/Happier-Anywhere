@@ -108,7 +108,7 @@ describe('createActionExecutor (session control)', () => {
   });
 
   it('executes session.stop via deps.sessionStop', async () => {
-    const sessionStop = vi.fn(async () => ({ ok: true, stopped: true }));
+    const sessionStop = vi.fn(async () => ({ success: true }));
     const executor = createExecutor({
       sessionStop,
       resolveServerIdForSessionId: (sessionId) => sessionId === 's1' ? 'server-a' : null,
@@ -120,8 +120,90 @@ describe('createActionExecutor (session control)', () => {
       { surface: 'cli', defaultSessionId: null },
     );
 
-    expect(res).toEqual({ ok: true, result: { ok: true, stopped: true } });
+    expect(res).toEqual({ ok: true, result: { success: true } });
     expect(sessionStop).toHaveBeenCalledWith({ sessionId: 's1', serverId: 'server-a' });
+  });
+
+  it.each([
+    {
+      label: 'unsupported',
+      dependencyResult: {
+        success: false as const,
+        message: 'Update the session runtime',
+        code: 'session_stop_unsupported',
+        recovery: 'upgrade_runtime' as const,
+      },
+      errorCode: 'session_stop_unsupported',
+    },
+    {
+      label: 'rejected',
+      dependencyResult: {
+        success: false as const,
+        message: 'runner refused stop',
+        code: 'session_stop_failed',
+      },
+      errorCode: 'session_stop_failed',
+    },
+  ])('reports $label session.stop dependency results as top-level action failures', async ({ dependencyResult, errorCode }) => {
+    const executor = createExecutor({
+      sessionStop: vi.fn(async () => dependencyResult),
+    });
+
+    const result = await executor.execute(
+      'session.stop' as any,
+      { sessionId: 's1' },
+      { surface: 'cli', defaultSessionId: null },
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      errorCode,
+      error: dependencyResult.message,
+      details: dependencyResult,
+    });
+  });
+
+  it('reports legacy ok:false session.stop dependency results as top-level action failures', async () => {
+    const dependencyResult = {
+      ok: false as const,
+      code: 'unsupported',
+      message: 'session stop is unsupported',
+    };
+    const executor = createExecutor({
+      sessionStop: vi.fn(async () => dependencyResult),
+    });
+
+    const result = await executor.execute(
+      'session.stop' as any,
+      { sessionId: 's1' },
+      { surface: 'cli', defaultSessionId: null },
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      errorCode: 'unsupported',
+      error: 'session stop is unsupported',
+      details: dependencyResult,
+    });
+  });
+
+  it('preserves legacy ok:true session.stop dependency results as top-level action success', async () => {
+    const dependencyResult = {
+      ok: true as const,
+      sessionId: 's1',
+      stopped: true,
+    };
+    const executor = createExecutor({
+      sessionStop: vi.fn(async () => dependencyResult),
+    });
+
+    const result = await executor.execute(
+      'session.stop' as any,
+      { sessionId: 's1' },
+      { surface: 'cli', defaultSessionId: null },
+    );
+
+    expect(result).toEqual({ ok: true, result: dependencyResult });
   });
 
   it('executes session.permission_mode.set via deps.sessionPermissionModeSet', async () => {
@@ -523,7 +605,12 @@ describe('createActionExecutor (session control)', () => {
     );
     await executor.execute(
       'session.usageLimit.waitResume.cancel' as any,
-      { sessionId: 's1', issueFingerprint: null },
+      {
+        sessionId: 's1',
+        issueFingerprint: 'usage-limit:s1:reset',
+        armedAtMs: 123,
+        runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:exact-1',
+      },
       { surface: 'cli' },
     );
     await executor.execute('session.usageLimit.checkNow' as any, { sessionId: 's1', provider: ' codex ' }, { surface: 'cli' });
@@ -547,7 +634,9 @@ describe('createActionExecutor (session control)', () => {
     });
     expect(sessionUsageLimitWaitResumeCancel).toHaveBeenCalledWith({
       sessionId: 's1',
-      issueFingerprint: null,
+      issueFingerprint: 'usage-limit:s1:reset',
+      armedAtMs: 123,
+      runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:exact-1',
       serverId: 'server-a',
     });
     expect(sessionUsageLimitCheckNow).toHaveBeenCalledWith({
@@ -684,6 +773,41 @@ describe('createActionExecutor (session control)', () => {
         },
       },
     });
+    expect(JSON.stringify(res)).not.toContain('do-not-leak');
+  });
+
+  it('preserves a thrown session.spawn_new attempt nonce so CLI callers can resume without resubmitting', async () => {
+    const error = Object.assign(new Error('session_spawn_resolve_unsupported'), {
+      code: 'session_spawn_resolve_unsupported',
+      details: { spawnResponse: { status: 'pending' }, spawnNonce: 'stable-attempt-1' },
+    });
+    const executor = createExecutor({ sessionSpawnNew: vi.fn(async () => { throw error; }) });
+
+    const res = await executor.execute(
+      'session.spawn_new' as any,
+      { path: '/repo' },
+      { surface: 'cli', defaultSessionId: null, actionRequestId: 'attempt-1' },
+    );
+
+    expect(res).toMatchObject({
+      ok: false,
+      error: 'session_spawn_resolve_unsupported',
+      details: { spawnNonce: 'stable-attempt-1', accepted: true },
+    });
+  });
+
+  it('does not expose arbitrary thrown action details while preserving spawn retry details', async () => {
+    const error = Object.assign(new Error('action failed'), {
+      details: { token: 'do-not-leak' },
+    });
+    const executor = createExecutor({ sessionSpawnNew: vi.fn(async () => { throw error; }) });
+    const res = await executor.execute(
+      'session.spawn_new' as any,
+      { path: '/repo' },
+      { surface: 'cli', defaultSessionId: null },
+    );
+
+    expect(res).not.toHaveProperty('details');
     expect(JSON.stringify(res)).not.toContain('do-not-leak');
   });
 

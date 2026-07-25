@@ -1,3 +1,5 @@
+import { z } from 'zod';
+
 import {
   CONNECTED_SERVICE_UX_DIAGNOSTIC_ACTIONS,
   CONNECTED_SERVICE_UX_DIAGNOSTIC_CODES,
@@ -5,6 +7,15 @@ import {
   normalizeConnectedServiceUxDiagnosticV1,
   type ConnectedServiceUxDiagnosticV1,
 } from './connect/connectedServiceUxDiagnostics.js';
+
+/** Fresh execution authority is bound to the exact opaque user-message local id. */
+export const SpawnSessionExecutionAuthorizationSchema = z.object({
+  provenance: z.literal('user_request'),
+  requestId: z.string().refine((value) => value.trim().length > 0, {
+    message: 'Execution authorization request id must not be blank',
+  }),
+}).strict();
+export type SpawnSessionExecutionAuthorization = z.infer<typeof SpawnSessionExecutionAuthorizationSchema>;
 
 export const SPAWN_SESSION_ERROR_CODES = {
   INVALID_REQUEST: 'INVALID_REQUEST',
@@ -21,6 +32,7 @@ export const SPAWN_SESSION_ERROR_CODES = {
   ACCOUNT_SCOPE_CHANGED: 'ACCOUNT_SCOPE_CHANGED',
   SPAWN_FAILED: 'SPAWN_FAILED',
   DAEMON_RPC_UNAVAILABLE: 'DAEMON_RPC_UNAVAILABLE',
+  DAEMON_UPGRADE_REQUIRED: 'DAEMON_UPGRADE_REQUIRED',
   UNEXPECTED: 'UNEXPECTED',
 } as const;
 

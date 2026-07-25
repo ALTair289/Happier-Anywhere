@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   SPAWN_SESSION_ERROR_CODES,
   SPAWN_SESSION_ERROR_DETAIL_KINDS,
+  SpawnSessionExecutionAuthorizationSchema,
   isConnectedServiceUxDiagnosticSpawnErrorDetail,
   isConnectedServiceResumeUnreachableSpawnErrorDetail,
   isSpawnSessionErrorDetail,
@@ -10,6 +11,40 @@ import {
   type SpawnSessionErrorDetail,
   type SpawnSessionResult,
 } from './spawnSession.js';
+
+describe('spawn-session execution authorization', () => {
+  it('preserves opaque request-id bytes and rejects blank ids without collapsing identities', () => {
+    const first = SpawnSessionExecutionAuthorizationSchema.parse({
+      provenance: 'user_request',
+      requestId: ' request-1',
+    });
+    const second = SpawnSessionExecutionAuthorizationSchema.parse({
+      provenance: 'user_request',
+      requestId: 'request-1 ',
+    });
+
+    expect(first.requestId).toBe(' request-1');
+    expect(second.requestId).toBe('request-1 ');
+    expect(first.requestId).not.toBe(second.requestId);
+    expect(() => SpawnSessionExecutionAuthorizationSchema.parse({
+      provenance: 'user_request',
+      requestId: '   ',
+    })).toThrow();
+  });
+
+  it('rejects the removed pending delivery selector and command', () => {
+    expect(() => SpawnSessionExecutionAuthorizationSchema.parse({
+      provenance: 'user_request',
+      requestId: 'pending-local-1',
+      pendingDeliverySelector: {
+        kind: 'exact_target',
+        localId: 'pending-local-1',
+        ownerAuthorizedOverride: 'send_now',
+      },
+      pendingDeliveryCommand: 'resume_process_now',
+    })).toThrow();
+  });
+});
 
 describe('spawn-session error detail contract (D2 structured continuity)', () => {
   it('keeps the existing error result shape valid without an errorDetail (backward compatibility)', () => {
