@@ -64,4 +64,83 @@ describe('sessionMetadata terminal metadata', () => {
     expect(parsed.mode).toBe('windows_console');
     expect((parsed as any).windows?.host).toBe('console');
   });
+
+  it('parses the public recoverable terminal-host lifecycle projection', () => {
+    const parsed = (protocol as any).SessionTerminalMetadataSchema.parse({
+      mode: 'tmux',
+      tmux: { target: 'happy:win-1' },
+      controlServiceabilityV1: {
+        v: 1,
+        attachmentId: 'attachment-1',
+        state: 'recoverable_unservable',
+        observedAt: 123,
+        reason: 'session_rpc_unavailable',
+      },
+    });
+    expect(parsed.controlServiceabilityV1).toEqual({
+      v: 1,
+      attachmentId: 'attachment-1',
+      state: 'recoverable_unservable',
+      observedAt: 123,
+      reason: 'session_rpc_unavailable',
+    });
+  });
+
+  it('derives one fail-closed terminal host policy for destructive actions', () => {
+    const resolvePolicy = (protocol as any).resolveTerminalControlServiceabilityPolicy;
+    expect(resolvePolicy(undefined)).toEqual({
+      hostPresence: 'absent',
+      canRequestStop: false,
+    });
+    expect(resolvePolicy({
+      v: 1,
+      state: 'recoverable_unservable',
+      observedAt: 123,
+      reason: 'control_descriptor_missing',
+    })).toEqual({
+      hostPresence: 'preserved',
+      canRequestStop: false,
+    });
+    expect(resolvePolicy({
+      v: 1,
+      attachmentId: 'attachment-retired',
+      state: 'recoverable_unservable',
+      observedAt: 124,
+      retired: true,
+    })).toEqual({
+      hostPresence: 'retired',
+      canRequestStop: false,
+    });
+  });
+
+  it('accepts a legacy retirement tombstone written before terminal mode was preserved', () => {
+    const parsed = (protocol as any).SessionTerminalMetadataSchema.parse({
+      controlServiceabilityV1: {
+        v: 1,
+        attachmentId: 'attachment-retired',
+        state: 'unknown',
+        observedAt: 456,
+        reason: 'attachment_retired',
+        retired: true,
+      },
+    });
+
+    expect(parsed.mode).toBeUndefined();
+    expect(parsed.controlServiceabilityV1).toMatchObject({
+      attachmentId: 'attachment-retired',
+      state: 'unknown',
+      retired: true,
+    });
+  });
+
+  it('still rejects mode-less terminal metadata that is not a retirement tombstone', () => {
+    expect((protocol as any).SessionTerminalMetadataSchema.safeParse({
+      controlServiceabilityV1: {
+        v: 1,
+        attachmentId: 'attachment-live',
+        state: 'servable',
+        observedAt: 789,
+      },
+    }).success).toBe(false);
+  });
 });
