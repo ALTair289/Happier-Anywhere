@@ -369,6 +369,30 @@ export function buildConnectedServicesBindingsPayload(params: Readonly<{
         const mode = binding?.source === 'connected' ? 'connected' : 'native';
 
         if (mode === 'connected') {
+            const explicitGroupId = binding?.selection === 'group'
+                ? readString(binding.groupId)
+                : '';
+            if (explicitGroupId) {
+                bindingsByServiceId[serviceId] = {
+                    source: 'connected',
+                    selection: 'group',
+                    groupId: explicitGroupId,
+                };
+                connectedCount += 1;
+                continue;
+            }
+            const explicitProfileId = binding?.selection !== 'group'
+                ? readString(binding?.profileId)
+                : '';
+            if (explicitProfileId) {
+                bindingsByServiceId[serviceId] = {
+                    source: 'connected',
+                    selection: 'profile',
+                    profileId: explicitProfileId,
+                };
+                connectedCount += 1;
+                continue;
+            }
             if (connected.length === 0) {
                 bindingsByServiceId[serviceId] = { source: 'native' };
                 continue;
@@ -400,16 +424,7 @@ export function buildConnectedServicesBindingsPayload(params: Readonly<{
                 connectedCount += 1;
                 continue;
             }
-            const explicit = binding?.source === 'connected' && binding.selection === 'profile' && typeof binding.profileId === 'string'
-                ? binding.profileId.trim()
-                : '';
-            if (explicit && !connectedProfileIds.includes(explicit)) {
-                bindingsByServiceId[serviceId] = { source: 'native' };
-                continue;
-            }
-            const selected = explicit
-                ? explicit
-                : resolveConnectedServiceDefaultProfileId({
+            const selected = resolveConnectedServiceDefaultProfileId({
                     serviceId,
                     connectedProfileIds,
                     defaultProfileByServiceId: params.defaultProfileByServiceId,

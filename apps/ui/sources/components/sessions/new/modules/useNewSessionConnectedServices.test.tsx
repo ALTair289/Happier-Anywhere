@@ -553,7 +553,12 @@ describe('useNewSessionConnectedServices', () => {
             }),
         );
 
-        expect(hook.getCurrent().connectedServicesBindingsPayload).toBeNull();
+        expect(hook.getCurrent().connectedServicesBindingsPayload).toEqual({
+            v: 1,
+            bindingsByServiceId: {
+                'openai-codex': { source: 'connected', selection: 'group', groupId: 'primary' },
+            },
+        });
 
         const popoverRenderer = requireCollapsedContentPopover(
             hook.getCurrent().connectedServicesAuthChip,
@@ -637,7 +642,12 @@ describe('useNewSessionConnectedServices', () => {
             }),
         );
 
-        expect(hook.getCurrent().connectedServicesBindingsPayload).toBeNull();
+        expect(hook.getCurrent().connectedServicesBindingsPayload).toEqual({
+            v: 1,
+            bindingsByServiceId: {
+                'openai-codex': { source: 'connected', selection: 'group', groupId: 'missing-group' },
+            },
+        });
         expect(requireCollapsedContentPopover(hook.getCurrent().connectedServicesAuthChip).label)
             .toBe('connectedServices.authChip.nativeLabel');
 

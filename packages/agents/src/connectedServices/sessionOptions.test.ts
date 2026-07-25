@@ -203,7 +203,33 @@ describe('connected-service session options', () => {
             v: 1,
             bindingsByServiceId: {
                 'openai-codex': { source: 'connected', selection: 'group', groupId: 'group_1' },
-                github: { source: 'native' },
+                github: { source: 'connected', selection: 'profile', profileId: 'gh_profile' },
+            },
+        });
+    });
+
+    it('preserves explicit connected intent when the selected target is currently unavailable', () => {
+        expect(buildConnectedServicesBindingsPayload({
+            supportedConnectedServiceIds: ['openai-codex', 'github'],
+            connectedServiceProfileOptionsByServiceId: {
+                'openai-codex': [],
+                github: [],
+            },
+            accountGroupsFeatureEnabled: true,
+            accountGroupSwitchingEnabled: true,
+            connectedServiceAccountGroupOptionsByServiceId: {
+                'openai-codex': [],
+            },
+            connectedServicesBindingsByServiceId: {
+                'openai-codex': { source: 'connected', selection: 'group', groupId: 'missing-group' },
+                github: { source: 'connected', selection: 'profile', profileId: 'needs-reauth' },
+            },
+            defaultProfileByServiceId: {},
+        })).toEqual({
+            v: 1,
+            bindingsByServiceId: {
+                'openai-codex': { source: 'connected', selection: 'group', groupId: 'missing-group' },
+                github: { source: 'connected', selection: 'profile', profileId: 'needs-reauth' },
             },
         });
     });

@@ -98,7 +98,7 @@ describe('buildConnectedServicesBindingsPayload', () => {
         });
     });
 
-    it('degrades a missing group binding to native instead of a stale profile preference', () => {
+    it('preserves a missing explicit group binding instead of silently selecting native auth', () => {
         const payload = buildConnectedServicesBindingsPayload({
             supportedConnectedServiceIds: ['openai-codex'],
             connectedServiceProfileOptionsByServiceId: profileOptionsByServiceId,
@@ -124,10 +124,15 @@ describe('buildConnectedServicesBindingsPayload', () => {
             defaultProfileByServiceId: { 'openai-codex': 'backup' },
         });
 
-        expect(payload).toBeNull();
+        expect(payload).toEqual({
+            v: 1,
+            bindingsByServiceId: {
+                'openai-codex': { source: 'connected', selection: 'group', groupId: 'missing-group' },
+            },
+        });
     });
 
-    it('degrades a group binding to native when account groups are disabled for the target server', () => {
+    it('preserves explicit group intent when the target server cannot currently use account groups', () => {
         const payload = buildConnectedServicesBindingsPayload({
             supportedConnectedServiceIds: ['openai-codex'],
             connectedServiceProfileOptionsByServiceId: profileOptionsByServiceId,
@@ -153,10 +158,15 @@ describe('buildConnectedServicesBindingsPayload', () => {
             defaultProfileByServiceId: {},
         });
 
-        expect(payload).toBeNull();
+        expect(payload).toEqual({
+            v: 1,
+            bindingsByServiceId: {
+                'openai-codex': { source: 'connected', selection: 'group', groupId: 'codex-main' },
+            },
+        });
     });
 
-    it('degrades a group binding to native when the target runtime cannot switch account groups', () => {
+    it('preserves explicit group intent when the target runtime cannot currently switch account groups', () => {
         const payload = buildConnectedServicesBindingsPayload({
             supportedConnectedServiceIds: ['openai-codex'],
             connectedServiceProfileOptionsByServiceId: profileOptionsByServiceId,
@@ -183,7 +193,12 @@ describe('buildConnectedServicesBindingsPayload', () => {
             defaultProfileByServiceId: {},
         });
 
-        expect(payload).toBeNull();
+        expect(payload).toEqual({
+            v: 1,
+            bindingsByServiceId: {
+                'openai-codex': { source: 'connected', selection: 'group', groupId: 'codex-main' },
+            },
+        });
     });
 });
 
