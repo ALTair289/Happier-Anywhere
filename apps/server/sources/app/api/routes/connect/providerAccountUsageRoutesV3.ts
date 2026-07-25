@@ -6,6 +6,8 @@ import { resolveApiHotEndpointRateLimit } from "@/app/api/utils/apiRateLimitCata
 import { resolveEffectiveAccountEncryptionModeFromAccountRow } from "@/app/encryption/accountEncryptionMode";
 import { db } from "@/storage/db";
 import {
+    ConnectedServiceIdSchema,
+    ConnectedServiceProfileIdSchema,
     ConnectedServiceUsageSourceV1Schema,
     ProviderAccountUsageRecordIdSchema,
     ProviderAccountUsageSnapshotV1Schema,
@@ -23,6 +25,7 @@ import {
     ConnectedServiceUsageSourceOwnershipError,
     deleteProviderAccountUsageRecord,
     listConnectedServiceUsageSourcesForProviderAccountUsageRecord,
+    readExactConnectedServiceUsageSource,
     readProviderAccountUsageRecord,
     requestProviderAccountUsageRefresh,
     toConnectedServiceUsageSourceV1,
@@ -50,6 +53,31 @@ function sendProviderAccountUsageInvalidParams(
     return reply.code(400).send({ error: "invalid-params" as const, reason });
 }
 
+const ConnectedServiceUsageSourceQueryBindingV1Schema = z.discriminatedUnion("bindingKind", [
+    z.object({
+        serviceId: ConnectedServiceIdSchema,
+        profileId: ConnectedServiceProfileIdSchema,
+        bindingKind: z.literal("profile"),
+    }).strict(),
+    z.object({
+        serviceId: ConnectedServiceIdSchema,
+        profileId: ConnectedServiceProfileIdSchema,
+        bindingKind: z.literal("group_member"),
+        groupId: z.string().trim().min(1),
+        groupGeneration: z.number().int().nonnegative(),
+    }).strict(),
+]);
+
+const ConnectedServiceUsageSourceQueryV1Schema = z.preprocess((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+    const groupGeneration = (value as { groupGeneration?: unknown }).groupGeneration;
+    if (typeof groupGeneration !== "string") return value;
+    if (!/^(0|[1-9]\d*)$/.test(groupGeneration)) return value;
+    const parsed = Number(groupGeneration);
+    if (!Number.isSafeInteger(parsed)) return value;
+    return { ...value, groupGeneration: parsed };
+}, ConnectedServiceUsageSourceQueryBindingV1Schema);
+
 async function readPlainAccount(accountId: string) {
     const account = await db.account.findUnique({
         where: { id: accountId },
@@ -59,6 +87,33 @@ async function readPlainAccount(accountId: string) {
 }
 
 export function registerProviderAccountUsageRoutesV3(app: Fastify): void {
+    app.get("/v3/connect/provider-account-usage/sources/resolve", {
+        config: { rateLimit: resolveApiHotEndpointRateLimit(process.env, "connectedServices.quotas.read") },
+        preHandler: app.authenticate,
+        schema: {
+            querystring: ConnectedServiceUsageSourceQueryV1Schema,
+            response: {
+                200: z.object({
+                    source: ConnectedServiceUsageSourceV1Schema,
+                    recordId: ProviderAccountUsageRecordIdSchema,
+                    providerAccountId: z.string().trim().min(1).max(512),
+                    fetchedAt: z.number().int().nonnegative().nullable(),
+                    staleAfterMs: z.number().int().nonnegative().nullable(),
+                }).strict(),
+                404: z.object({ error: z.literal("provider_account_usage_source_not_found") }),
+            },
+        },
+    }, async (request, reply) => {
+        const resolved = await readExactConnectedServiceUsageSource({
+            accountId: request.userId,
+            source: request.query,
+        });
+        if (!resolved) {
+            return reply.code(404).send({ error: "provider_account_usage_source_not_found" });
+        }
+        return reply.send(resolved);
+    });
+
     app.post("/v3/connect/provider-account-usage/:recordId", {
         config: { rateLimit: resolveApiHotEndpointRateLimit(process.env, "connectedServices.quotas.write") },
         preHandler: app.authenticate,

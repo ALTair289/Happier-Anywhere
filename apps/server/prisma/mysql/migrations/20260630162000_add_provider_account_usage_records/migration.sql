@@ -23,7 +23,6 @@ CREATE TABLE `ProviderAccountUsageRecord` (
     `updatedAt` DATETIME(3) NOT NULL,
 
     UNIQUE INDEX `ProviderAccountUsageRecord_accountId_recordId_key`(`accountId`, `recordId`),
-    UNIQUE INDEX `paur_identity_key`(`accountId`, `providerId`, `accountSubjectId`, `quotaScope`, `quotaScopeIdKey`),
     INDEX `ProviderAccountUsageRecord_accountId_providerId_idx`(`accountId`, `providerId`),
     INDEX `ProviderAccountUsageRecord_accountId_status_idx`(`accountId`, `status`),
     PRIMARY KEY (`id`)
@@ -42,7 +41,7 @@ CREATE TABLE `ConnectedServiceUsageSource` (
     `createdAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     `updatedAt` DATETIME(3) NOT NULL,
 
-    UNIQUE INDEX `ConnectedServiceUsageSource_accountId_serviceId_profileId_key`(`accountId`, `serviceId`, `profileId`),
+    INDEX `csus_account_service_profile_idx`(`accountId`, `serviceId`, `profileId`),
     UNIQUE INDEX `ConnectedServiceUsageSource_accountId_sourceKey_key`(`accountId`, `sourceKey`),
     INDEX `csus_paur_idx`(`accountId`, `providerAccountUsageRecordId`),
     PRIMARY KEY (`id`)

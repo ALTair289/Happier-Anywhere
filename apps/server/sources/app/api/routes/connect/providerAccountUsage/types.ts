@@ -1,5 +1,6 @@
 import type {
     ConnectedServiceQuotaSnapshotV1,
+    ConnectedServiceUsageSourceV1,
     ProviderAccountUsageRecordId,
     ProviderAccountUsageRecordKeyV1,
     ProviderAccountUsageSnapshotV1,
@@ -8,8 +9,6 @@ import type {
 
 export type ProviderAccountUsagePayloadMode = "plain_json_v1" | "sealed_account_scoped_v1";
 export type ProviderAccountUsageStatus = "ok" | "unavailable" | "estimated" | "error" | "refresh_requested";
-export type ConnectedServiceUsageBindingKind = "profile" | "group_member";
-
 export type ProviderAccountUsageRecordMetadata = Readonly<{
     materialFingerprint?: string;
 }>;
@@ -44,24 +43,14 @@ export type StoredProviderAccountUsageRecord = Readonly<{
 
 export type UpsertConnectedServiceUsageSourceParams = Readonly<{
     accountId: string;
-    serviceId: string;
-    profileId: string;
     providerAccountUsageRecordId: ProviderAccountUsageRecordId;
-    bindingKind: ConnectedServiceUsageBindingKind;
-    groupId?: string;
-    groupGeneration?: number;
-}>;
+}> & ConnectedServiceUsageSourceV1;
 
 export type StoredConnectedServiceUsageSource = Readonly<{
     accountId: string;
-    serviceId: string;
-    profileId: string;
     sourceKey: string;
     providerAccountUsageRecordId: ProviderAccountUsageRecordId;
-    bindingKind: ConnectedServiceUsageBindingKind;
-    groupId?: string;
-    groupGeneration?: number;
-}>;
+}> & ConnectedServiceUsageSourceV1;
 
 export type ProviderAccountUsageSourceLinkOutcome = Readonly<
     | { status: "linked" }

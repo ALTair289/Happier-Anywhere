@@ -1,7 +1,7 @@
-import { Prisma } from "@prisma/client";
+import type { Prisma } from "@prisma/client";
 
 import { db } from "@/storage/db";
-import type { TransactionClient } from "@/storage/prisma";
+import { prismaRuntime, type TransactionClient } from "@/storage/prisma";
 import {
     ProviderAccountUsageRecordKeyV1Schema,
     ProviderAccountUsageSnapshotV1Schema,
@@ -154,12 +154,12 @@ function buildProviderAccountUsageRecordUpdateData(parsed: ParsedProviderAccount
         recordKeyJson: parsed.recordKey,
         payloadMode: parsed.payloadMode,
         status: parsed.status,
-        snapshot: parsed.snapshot ? parsed.snapshot as Prisma.InputJsonValue : Prisma.DbNull,
-        sealedPayload: parsed.sealedPayload ? parsed.sealedPayload as Prisma.InputJsonValue : Prisma.DbNull,
+        snapshot: parsed.snapshot ? parsed.snapshot as Prisma.InputJsonValue : prismaRuntime.DbNull,
+        sealedPayload: parsed.sealedPayload ? parsed.sealedPayload as Prisma.InputJsonValue : prismaRuntime.DbNull,
         fetchedAt: parsed.fetchedAt !== undefined ? new Date(parsed.fetchedAt) : null,
         staleAfterMs: parsed.staleAfterMs ?? null,
         refreshRequestedAt: parsed.refreshRequestedAt !== undefined ? new Date(parsed.refreshRequestedAt) : null,
-        metadata: parsed.metadata ? parsed.metadata as Prisma.InputJsonValue : Prisma.DbNull,
+        metadata: parsed.metadata ? parsed.metadata as Prisma.InputJsonValue : prismaRuntime.DbNull,
     };
 }
 

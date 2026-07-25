@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import {
     buildProviderAccountUsageRecordId,
     ProviderAccountUsageSnapshotV1Schema,
+    type ConnectedServiceUsageSourceV1,
 } from "@happier-dev/protocol";
 
 import { db } from "@/storage/db";
@@ -14,7 +15,10 @@ import * as providerAccountUsageStorage from "./index";
 import {
     linkConnectedServiceUsageSource,
     ConnectedServiceUsageSourceOwnershipError,
+    deleteConnectedServiceUsageSourcesForGroup,
+    deleteConnectedServiceUsageSourcesForGroupMember,
     readConnectedServiceQuotaView,
+    readExactConnectedServiceUsageSource,
     readConnectedServiceUsageSource,
     requestConnectedServiceQuotaRefresh,
     requestProviderAccountUsageRefresh,
@@ -201,6 +205,104 @@ describe("providerAccountUsage storage", () => {
         }));
     });
 
+    it("rejects a PAU payload mode that disagrees with account mode inside the write transaction", async () => {
+        const user = await db.account.create({ data: { publicKey: "pk-pau-mode", encryptionMode: "e2ee" }, select: { id: true } });
+        const snapshot = createUsageSnapshot({ fetchedAt: Date.now() });
+        await expect(writeProviderAccountUsageRecordWithPolicy({
+            accountId: user.id,
+            recordId: snapshot.recordId,
+            recordKey: snapshot.recordKey,
+            payloadMode: "plain_json_v1",
+            snapshot,
+            status: "ok",
+            fetchedAt: snapshot.fetchedAtMs,
+            staleAfterMs: snapshot.staleAfterMs,
+        })).rejects.toBeInstanceOf(ProviderAccountUsagePayloadInvariantError);
+        expect(await db.providerAccountUsageRecord.count({ where: { accountId: user.id } })).toBe(0);
+    });
+
+    it("deletes only the exact group or member source topology and retains same-profile independent groups", async () => {
+        const user = await db.account.create({ data: { publicKey: null, encryptionMode: "plain" }, select: { id: true } });
+        await createGroupMemberBinding({ accountId: user.id, profileId: "work", groupId: "left", generation: 3 });
+        const rightGroup = await db.connectedServiceAuthGroup.create({
+            data: {
+                accountId: user.id,
+                vendor: "openai-codex",
+                groupId: "right",
+                displayName: "Right",
+                policyJson: "{}",
+                activeProfileId: "work",
+                generation: 5,
+            },
+            select: { id: true },
+        });
+        await db.connectedServiceAuthGroupMember.create({
+            data: { groupDbId: rightGroup.id, accountId: user.id, vendor: "openai-codex", groupId: "right", profileId: "work", priority: 1, enabled: true },
+        });
+        const snapshot = createUsageSnapshot({ fetchedAt: Date.now() });
+        await upsertProviderAccountUsageRecord({
+            accountId: user.id,
+            recordId: snapshot.recordId,
+            recordKey: snapshot.recordKey,
+            payloadMode: "plain_json_v1",
+            snapshot,
+            status: "ok",
+            fetchedAt: snapshot.fetchedAtMs,
+            staleAfterMs: snapshot.staleAfterMs,
+        });
+        for (const [groupId, groupGeneration] of [["left", 3], ["right", 5]] as const) {
+            await upsertConnectedServiceUsageSource({
+                accountId: user.id,
+                serviceId: "openai-codex",
+                profileId: "work",
+                providerAccountUsageRecordId: snapshot.recordId,
+                bindingKind: "group_member",
+                groupId,
+                groupGeneration,
+            });
+        }
+
+        await expect(deleteConnectedServiceUsageSourcesForGroupMember({
+            accountId: user.id, serviceId: "openai-codex", groupId: "left", profileId: "work",
+        })).resolves.toBe(1);
+        expect(await db.connectedServiceUsageSource.findMany({ where: { accountId: user.id }, select: { groupId: true } }))
+            .toEqual([{ groupId: "right" }]);
+
+        await db.connectedServiceAuthGroupMember.deleteMany({ where: { accountId: user.id, vendor: "openai-codex", groupId: "left" } });
+        await db.connectedServiceAuthGroup.delete({ where: { accountId_vendor_groupId: { accountId: user.id, vendor: "openai-codex", groupId: "left" } } });
+        const recreatedLeft = await db.connectedServiceAuthGroup.create({
+            data: { accountId: user.id, vendor: "openai-codex", groupId: "left", displayName: "Left recreated", policyJson: "{}", activeProfileId: "work", generation: 0 },
+            select: { id: true },
+        });
+        await db.connectedServiceAuthGroupMember.create({
+            data: { groupDbId: recreatedLeft.id, accountId: user.id, vendor: "openai-codex", groupId: "left", profileId: "work", priority: 1, enabled: true },
+        });
+        await upsertConnectedServiceUsageSource({
+            accountId: user.id,
+            serviceId: "openai-codex",
+            profileId: "work",
+            providerAccountUsageRecordId: snapshot.recordId,
+            bindingKind: "group_member",
+            groupId: "left",
+            groupGeneration: 0,
+        });
+        expect(await db.connectedServiceUsageSource.findMany({
+            where: { accountId: user.id },
+            orderBy: { groupId: "asc" },
+            select: { groupId: true, groupGeneration: true },
+        })).toEqual([
+            { groupId: "left", groupGeneration: 0 },
+            { groupId: "right", groupGeneration: 5 },
+        ]);
+
+        await expect(deleteConnectedServiceUsageSourcesForGroup({
+            accountId: user.id, serviceId: "openai-codex", groupId: "right",
+        })).resolves.toBe(1);
+        expect(await db.connectedServiceUsageSource.findMany({ where: { accountId: user.id }, select: { groupId: true, groupGeneration: true } }))
+            .toEqual([{ groupId: "left", groupGeneration: 0 }]);
+        expect(await db.providerAccountUsageRecord.count({ where: { accountId: user.id } })).toBe(1);
+    });
+
     it("requires a stored source row to resolve a connected-service quota view and does not fall back to snapshot aliases", async () => {
         const user = await db.account.create({ data: { publicKey: null, encryptionMode: "plain" }, select: { id: true } });
         await createProfileBinding({ accountId: user.id });
@@ -300,6 +402,27 @@ describe("providerAccountUsage storage", () => {
             sourceKey: expect.any(String),
         }));
         expect(source?.sourceKey).not.toContain("\u0000");
+    });
+
+    it("rejects impossible connected-service usage source identity combinations before storage", async () => {
+        const recordKey = createProviderAccountUsageRecordKey();
+        const base = {
+            accountId: "missing-account",
+            serviceId: "openai-codex",
+            profileId: "work",
+            providerAccountUsageRecordId: buildProviderAccountUsageRecordId(recordKey),
+        };
+
+        await expect(upsertConnectedServiceUsageSource({
+            ...base,
+            bindingKind: "profile",
+            groupId: "team",
+            groupGeneration: 7,
+        } as unknown as Parameters<typeof upsertConnectedServiceUsageSource>[0])).rejects.toMatchObject({ name: "ZodError" });
+        await expect(upsertConnectedServiceUsageSource({
+            ...base,
+            bindingKind: "group_member",
+        } as unknown as Parameters<typeof upsertConnectedServiceUsageSource>[0])).rejects.toMatchObject({ name: "ZodError" });
     });
 
     it("preserves shared provider usage records when unlinking one connected-service source", async () => {
@@ -824,6 +947,85 @@ describe("providerAccountUsage storage", () => {
         expect(rows).toEqual([{ groupGeneration: 7 }]);
     });
 
+    it("resolves only an exact account-scoped current group source with record identity and freshness", async () => {
+        const owner = await db.account.create({ data: { publicKey: null, encryptionMode: "plain" }, select: { id: true } });
+        const other = await db.account.create({ data: { publicKey: null, encryptionMode: "plain" }, select: { id: true } });
+        await createGroupMemberBinding({ accountId: owner.id, profileId: "work", groupId: "team", generation: 7 });
+        const snapshot = createUsageSnapshot({ fetchedAt: Date.now(), planLabel: "exact-source" });
+        await writeProviderAccountUsageRecord({
+            accountId: owner.id,
+            recordId: snapshot.recordId,
+            recordKey: snapshot.recordKey,
+            payloadMode: "plain_json_v1",
+            snapshot,
+            status: "ok",
+            fetchedAt: snapshot.fetchedAtMs,
+            staleAfterMs: snapshot.staleAfterMs,
+        });
+        const source = {
+            serviceId: "openai-codex",
+            profileId: "work",
+            bindingKind: "group_member" as const,
+            groupId: "team",
+            groupGeneration: 7,
+        } as const satisfies ConnectedServiceUsageSourceV1;
+        await linkConnectedServiceUsageSource({
+            accountId: owner.id,
+            providerAccountUsageRecordId: snapshot.recordId,
+            source,
+        });
+
+        await expect(readExactConnectedServiceUsageSource({ accountId: owner.id, source })).resolves.toEqual({
+            source,
+            recordId: snapshot.recordId,
+            providerAccountId: snapshot.recordKey.accountSubjectId,
+            fetchedAt: snapshot.fetchedAtMs,
+            staleAfterMs: snapshot.staleAfterMs,
+        });
+        await expect(readExactConnectedServiceUsageSource({ accountId: other.id, source })).resolves.toBeNull();
+        await expect(readExactConnectedServiceUsageSource({
+            accountId: owner.id,
+            source: { ...source, groupGeneration: 6 },
+        })).resolves.toBeNull();
+    });
+
+    it("rejects a superseded group-generation source even if its legacy row remains", async () => {
+        const user = await db.account.create({ data: { publicKey: null, encryptionMode: "plain" }, select: { id: true } });
+        await createGroupMemberBinding({ accountId: user.id, profileId: "work", groupId: "team", generation: 3 });
+        const snapshot = createUsageSnapshot({ fetchedAt: Date.now(), planLabel: "superseded-source" });
+        await writeProviderAccountUsageRecord({
+            accountId: user.id,
+            recordId: snapshot.recordId,
+            recordKey: snapshot.recordKey,
+            payloadMode: "plain_json_v1",
+            snapshot,
+            status: "ok",
+            fetchedAt: snapshot.fetchedAtMs,
+            staleAfterMs: snapshot.staleAfterMs,
+        });
+        const staleSource = {
+            serviceId: "openai-codex",
+            profileId: "work",
+            bindingKind: "group_member" as const,
+            groupId: "team",
+            groupGeneration: 3,
+        } as const satisfies ConnectedServiceUsageSourceV1;
+        await linkConnectedServiceUsageSource({
+            accountId: user.id,
+            providerAccountUsageRecordId: snapshot.recordId,
+            source: staleSource,
+        });
+        await db.connectedServiceAuthGroup.update({
+            where: { accountId_vendor_groupId: { accountId: user.id, vendor: "openai-codex", groupId: "team" } },
+            data: { generation: 4 },
+        });
+
+        await expect(readExactConnectedServiceUsageSource({
+            accountId: user.id,
+            source: staleSource,
+        })).resolves.toBeNull();
+    });
+
     it("keeps per-group source links independent when one profile belongs to multiple groups", async () => {
         const user = await db.account.create({ data: { publicKey: null, encryptionMode: "plain" }, select: { id: true } });
         // One shared credential for profile "work"...
@@ -1209,6 +1411,7 @@ describe("providerAccountUsage storage", () => {
 
         let returnedLaggingRead = false;
         const interleavedClient = {
+            account: db.account,
             providerAccountUsageRecord: {
                 findUnique: async (args: Parameters<typeof db.providerAccountUsageRecord.findUnique>[0]) => {
                     if (!returnedLaggingRead) {
@@ -1222,7 +1425,7 @@ describe("providerAccountUsage storage", () => {
                 upsert: db.providerAccountUsageRecord.upsert.bind(db.providerAccountUsageRecord),
             },
             // Boundary fixture: emulate one lagging Prisma read while all writes still hit the real test database.
-        } as unknown as Pick<typeof db, "providerAccountUsageRecord">;
+        } as unknown as Pick<typeof db, "account" | "providerAccountUsageRecord">;
 
         await expect(writeProviderAccountUsageRecordWithPolicy({
             accountId: user.id,

@@ -1,17 +1,14 @@
 import { z } from "zod";
 
 import {
+    ConnectedServiceUsageSourceV1Schema,
     ProviderAccountUsageRecordIdSchema,
     ProviderAccountUsageRecordKeyV1Schema,
     ProviderAccountUsageSnapshotV1Schema,
     SealedProviderAccountUsageSnapshotV1Schema,
     buildProviderAccountUsageRecordId,
 } from "@happier-dev/protocol";
-import type {
-    ConnectedServiceUsageBindingKind,
-    ProviderAccountUsagePayloadMode,
-    ProviderAccountUsageStatus,
-} from "./types";
+import type { ProviderAccountUsagePayloadMode, ProviderAccountUsageStatus } from "./types";
 
 export const ProviderAccountUsagePayloadModeSchema = z.enum([
     "plain_json_v1",
@@ -43,11 +40,6 @@ export const UpsertProviderAccountUsageRecordSchema = z.object({
     refreshRequestedAt: z.number().int().nonnegative().optional(),
     metadata: ProviderAccountUsageRecordMetadataSchema.optional(),
 }).strict();
-
-export const ConnectedServiceUsageBindingKindSchema = z.enum([
-    "profile",
-    "group_member",
-]) satisfies z.ZodType<ConnectedServiceUsageBindingKind>;
 
 export const ProviderAccountUsageInvalidParamsReasonSchema = z.enum([
     "provider_account_usage_e2ee_required",
@@ -91,13 +83,8 @@ export const ProviderAccountUsageWriteSuccessResponseSchema = z.object({
 
 export const UpsertConnectedServiceUsageSourceSchema = z.object({
     accountId: z.string().trim().min(1),
-    serviceId: z.string().trim().min(1).max(128),
-    profileId: z.string().trim().min(1).max(128),
     providerAccountUsageRecordId: ProviderAccountUsageRecordIdSchema,
-    bindingKind: ConnectedServiceUsageBindingKindSchema,
-    groupId: z.string().trim().min(1).max(128).optional(),
-    groupGeneration: z.number().int().nonnegative().optional(),
-}).strict();
+}).strict().and(ConnectedServiceUsageSourceV1Schema);
 
 export function validateProviderAccountUsageRecordWrite(raw: unknown) {
     const parsed = UpsertProviderAccountUsageRecordSchema.parse(raw);

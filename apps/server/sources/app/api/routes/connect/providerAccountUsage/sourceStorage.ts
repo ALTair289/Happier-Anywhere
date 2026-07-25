@@ -57,16 +57,10 @@ function readCredentialBindingIdentity(metadata: unknown): ConnectedServiceBindi
     };
 }
 
-function buildConnectedServiceUsageSourceKey(params: Readonly<{
-    bindingKind: "profile" | "group_member";
-    serviceId: string;
-    profileId: string;
-    groupId?: string;
-    groupGeneration?: number;
-}>): string {
-    const tuple = params.bindingKind === "group_member"
-        ? ["group", params.serviceId, params.profileId, params.groupId ?? "", params.groupGeneration ?? "current"]
-        : ["profile", params.serviceId, params.profileId];
+function buildConnectedServiceUsageSourceKey(source: ConnectedServiceUsageSourceV1): string {
+    const tuple = source.bindingKind === "group_member"
+        ? ["group", source.serviceId, source.profileId, source.groupId, source.groupGeneration ?? "current"]
+        : ["profile", source.serviceId, source.profileId];
     const digest = createHash("sha256").update(JSON.stringify(tuple)).digest("base64url");
     return `csus_v1_${digest}`;
 }
@@ -81,31 +75,40 @@ function mapStoredConnectedServiceUsageSource(row: Readonly<{
     groupId: string | null;
     groupGeneration: number | null;
 }>): StoredConnectedServiceUsageSource {
-    if (row.bindingKind !== "profile" && row.bindingKind !== "group_member") {
-        throw new ConnectedServiceUsageSourceBindingError(`Unsupported connected service usage source binding kind: ${row.bindingKind}`);
+    const parsedSource = ConnectedServiceUsageSourceV1Schema.safeParse({
+        serviceId: row.serviceId,
+        profileId: row.profileId,
+        bindingKind: row.bindingKind,
+        ...(row.groupId !== null ? { groupId: row.groupId } : {}),
+        ...(row.groupGeneration !== null ? { groupGeneration: row.groupGeneration } : {}),
+    });
+    if (!parsedSource.success) {
+        throw new ConnectedServiceUsageSourceBindingError("Stored connected service usage source has an invalid binding shape");
     }
     return {
         accountId: row.accountId,
-        serviceId: row.serviceId,
-        profileId: row.profileId,
         sourceKey: row.sourceKey,
         providerAccountUsageRecordId: row.providerAccountUsageRecordId as StoredConnectedServiceUsageSource["providerAccountUsageRecordId"],
-        bindingKind: row.bindingKind,
-        ...(row.groupId ? { groupId: row.groupId } : {}),
-        ...(typeof row.groupGeneration === "number" ? { groupGeneration: row.groupGeneration } : {}),
+        ...parsedSource.data,
     };
 }
 
 export function toConnectedServiceUsageSourceV1(
     source: StoredConnectedServiceUsageSource,
 ): ConnectedServiceUsageSourceV1 {
-    return ConnectedServiceUsageSourceV1Schema.parse({
-        serviceId: source.serviceId,
-        profileId: source.profileId,
-        bindingKind: source.bindingKind,
-        ...(source.groupId ? { groupId: source.groupId } : {}),
-        ...(source.groupGeneration !== undefined ? { groupGeneration: source.groupGeneration } : {}),
-    });
+    return source.bindingKind === "profile"
+        ? ConnectedServiceUsageSourceV1Schema.parse({
+            serviceId: source.serviceId,
+            profileId: source.profileId,
+            bindingKind: "profile",
+        })
+        : ConnectedServiceUsageSourceV1Schema.parse({
+            serviceId: source.serviceId,
+            profileId: source.profileId,
+            bindingKind: "group_member",
+            groupId: source.groupId,
+            ...(source.groupGeneration !== undefined ? { groupGeneration: source.groupGeneration } : {}),
+        });
 }
 
 function isProviderUsageRecordCompatibleWithConnectedService(params: Readonly<{
@@ -132,6 +135,7 @@ export function assertProviderUsageRecordCompatibleWithConnectedServiceSource(pa
 async function isStoredConnectedServiceUsageSourceActive(
     source: StoredConnectedServiceUsageSource,
     client: ConnectedServiceUsageSourceClient,
+    options?: Readonly<{ requireGroupGenerationMatch?: boolean }>,
 ): Promise<boolean> {
     try {
         const record = await resolveLinkedProviderUsageRecordIdentity(source, client);
@@ -149,7 +153,7 @@ async function isStoredConnectedServiceUsageSourceActive(
                 profileId: source.profileId,
                 groupId: source.groupId,
                 groupGeneration: source.groupGeneration,
-                requireGenerationMatch: false,
+                requireGenerationMatch: options?.requireGroupGenerationMatch ?? false,
             }, client)).identity;
         }
         assertConnectedServiceBindingIdentityMatchesProviderUsageRecord({
@@ -292,14 +296,18 @@ export async function upsertConnectedServiceUsageSource(
         serviceId: parsed.serviceId,
     });
 
-    let groupGeneration = parsed.groupGeneration;
     let bindingIdentity: ConnectedServiceBindingIdentity;
+    let source: ConnectedServiceUsageSourceV1;
     if (parsed.bindingKind === "profile") {
         bindingIdentity = await resolveProfileBinding(parsed, client);
+        source = parsed;
     } else {
         const groupBinding = await resolveGroupBinding(parsed, client);
-        groupGeneration = groupBinding.groupGeneration;
         bindingIdentity = groupBinding.identity;
+        source = {
+            ...parsed,
+            groupGeneration: groupBinding.groupGeneration,
+        };
     }
     assertConnectedServiceBindingIdentityMatchesProviderUsageRecord({
         providerAccountSubjectId: record.accountSubjectId,
@@ -307,13 +315,7 @@ export async function upsertConnectedServiceUsageSource(
         bindingIdentity,
     });
 
-    const sourceKey = buildConnectedServiceUsageSourceKey({
-        bindingKind: parsed.bindingKind,
-        serviceId: parsed.serviceId,
-        profileId: parsed.profileId,
-        groupId: parsed.groupId,
-        groupGeneration,
-    });
+    const sourceKey = buildConnectedServiceUsageSourceKey(source);
 
     // Source identity is the full sourceKey (serviceId + profileId + group identity),
     // NOT the profile tuple: one profile can belong to multiple auth groups, and each
@@ -332,15 +334,17 @@ export async function upsertConnectedServiceUsageSource(
             profileId: parsed.profileId,
             sourceKey,
             providerAccountUsageRecordId: parsed.providerAccountUsageRecordId,
-            bindingKind: parsed.bindingKind,
-            ...(parsed.groupId ? { groupId: parsed.groupId } : {}),
-            ...(groupGeneration !== undefined ? { groupGeneration } : {}),
+            bindingKind: source.bindingKind,
+            ...(source.bindingKind === "group_member" ? {
+                groupId: source.groupId,
+                ...(source.groupGeneration !== undefined ? { groupGeneration: source.groupGeneration } : {}),
+            } : {}),
         },
         update: {
             providerAccountUsageRecordId: parsed.providerAccountUsageRecordId,
-            bindingKind: parsed.bindingKind,
-            groupId: parsed.groupId ?? null,
-            groupGeneration: groupGeneration ?? null,
+            bindingKind: source.bindingKind,
+            groupId: source.bindingKind === "group_member" ? source.groupId : null,
+            groupGeneration: source.bindingKind === "group_member" ? source.groupGeneration ?? null : null,
         },
         select: {
             accountId: true,
@@ -353,7 +357,7 @@ export async function upsertConnectedServiceUsageSource(
             groupGeneration: true,
         },
     });
-    if (parsed.bindingKind === "group_member") {
+    if (source.bindingKind === "group_member") {
         // SD-2: the sourceKey embeds the group generation, so every generation bump mints a NEW
         // row for the SAME logical link (service + profile + group) and the superseded row would
         // accumulate forever. Prune superseded generations of this exact logical source here, at
@@ -366,7 +370,7 @@ export async function upsertConnectedServiceUsageSource(
                 serviceId: parsed.serviceId,
                 profileId: parsed.profileId,
                 bindingKind: "group_member",
-                groupId: parsed.groupId,
+                groupId: source.groupId,
                 sourceKey: { not: sourceKey },
             },
         });
@@ -411,6 +415,77 @@ export async function readConnectedServiceUsageSource(params: Readonly<{
         }
     }
     return null;
+}
+
+export type ExactConnectedServiceUsageSourceResolution = Readonly<{
+    source: ConnectedServiceUsageSourceV1;
+    recordId: StoredConnectedServiceUsageSource["providerAccountUsageRecordId"];
+    providerAccountId: string;
+    fetchedAt: number | null;
+    staleAfterMs: number | null;
+}>;
+
+/**
+ * Resolves one exact current source tuple for the authenticated account.
+ *
+ * Unlike the settings-oriented profile reader, group-member resolution requires the supplied
+ * generation to still equal authoritative group truth. This makes the result suitable as startup
+ * hydration proof without changing the intentionally tolerant settings projection.
+ */
+export async function readExactConnectedServiceUsageSource(params: Readonly<{
+    accountId: string;
+    source: ConnectedServiceUsageSourceV1;
+}>, client: ConnectedServiceUsageSourceClient = db): Promise<ExactConnectedServiceUsageSourceResolution | null> {
+    const source = ConnectedServiceUsageSourceV1Schema.parse(params.source);
+    const sourceKey = buildConnectedServiceUsageSourceKey(source);
+    const row = await client.connectedServiceUsageSource.findUnique({
+        where: {
+            accountId_sourceKey: {
+                accountId: params.accountId,
+                sourceKey,
+            },
+        },
+        select: {
+            accountId: true,
+            serviceId: true,
+            profileId: true,
+            sourceKey: true,
+            providerAccountUsageRecordId: true,
+            bindingKind: true,
+            groupId: true,
+            groupGeneration: true,
+        },
+    });
+    if (!row) return null;
+
+    const storedSource = mapStoredConnectedServiceUsageSource(row);
+    if (!await isStoredConnectedServiceUsageSourceActive(storedSource, client, {
+        requireGroupGenerationMatch: true,
+    })) return null;
+
+    const record = await client.providerAccountUsageRecord.findUnique({
+        where: {
+            accountId_recordId: {
+                accountId: params.accountId,
+                recordId: storedSource.providerAccountUsageRecordId,
+            },
+        },
+        select: {
+            accountSubjectId: true,
+            subjectKind: true,
+            fetchedAt: true,
+            staleAfterMs: true,
+        },
+    });
+    if (!record || record.subjectKind !== "account") return null;
+
+    return {
+        source: toConnectedServiceUsageSourceV1(storedSource),
+        recordId: storedSource.providerAccountUsageRecordId,
+        providerAccountId: record.accountSubjectId,
+        fetchedAt: record.fetchedAt?.getTime() ?? null,
+        staleAfterMs: record.staleAfterMs,
+    };
 }
 
 export async function listConnectedServiceUsageSourcesForProviderAccountUsageRecord(params: Readonly<{
@@ -477,6 +552,40 @@ export async function deleteConnectedServiceUsageSourcesForProfile(params: Reado
     return deleted.count;
 }
 
+export async function deleteConnectedServiceUsageSourcesForGroup(params: Readonly<{
+    accountId: string;
+    serviceId: string;
+    groupId: string;
+}>, client: ConnectedServiceUsageSourceClient = db): Promise<number> {
+    const deleted = await client.connectedServiceUsageSource.deleteMany({
+        where: {
+            accountId: params.accountId,
+            serviceId: params.serviceId,
+            bindingKind: "group_member",
+            groupId: params.groupId,
+        },
+    });
+    return deleted.count;
+}
+
+export async function deleteConnectedServiceUsageSourcesForGroupMember(params: Readonly<{
+    accountId: string;
+    serviceId: string;
+    groupId: string;
+    profileId: string;
+}>, client: ConnectedServiceUsageSourceClient = db): Promise<number> {
+    const deleted = await client.connectedServiceUsageSource.deleteMany({
+        where: {
+            accountId: params.accountId,
+            serviceId: params.serviceId,
+            profileId: params.profileId,
+            bindingKind: "group_member",
+            groupId: params.groupId,
+        },
+    });
+    return deleted.count;
+}
+
 export async function deleteConnectedServiceUsageSourcesForAccount(params: Readonly<{
     accountId: string;
 }>, client: ConnectedServiceUsageSourceClient = db): Promise<number> {
@@ -493,11 +602,7 @@ export async function linkConnectedServiceUsageSource(params: Readonly<{
 }>, client: ConnectedServiceUsageSourceClient = db): Promise<StoredConnectedServiceUsageSource> {
     return await upsertConnectedServiceUsageSource({
         accountId: params.accountId,
-        serviceId: params.source.serviceId,
-        profileId: params.source.profileId,
         providerAccountUsageRecordId: params.providerAccountUsageRecordId as StoredConnectedServiceUsageSource["providerAccountUsageRecordId"],
-        bindingKind: params.source.bindingKind,
-        groupId: params.source.groupId,
-        groupGeneration: params.source.groupGeneration,
+        ...params.source,
     }, client);
 }

@@ -15,6 +15,7 @@ import { inTx } from "@/storage/inTx";
 import { isPrismaErrorCode } from "@/storage/prisma";
 import { isServerFeatureEnabledForRequest } from "@/app/features/catalog/serverFeatureGate";
 import { recordConnectedServiceAccountProfileChange } from "../connectedServicesAccountProfileChange";
+import { deleteConnectedServiceUsageSourcesForGroup } from "../providerAccountUsage";
 import {
     DEFAULT_CONNECTED_SERVICE_AUTH_GROUP_POLICY_V1,
     ConnectedServiceAuthGroupPolicyPatchSchema,
@@ -439,6 +440,11 @@ export function registerConnectedServiceAuthGroupRoutesV3(app: Fastify): void {
         const existing = await findAuthGroupForAccount({ accountId: request.userId, serviceId, groupId });
         if (!existing) return reply.code(404).send({ error: "connect_group_not_found" });
         await inTx(async (tx) => {
+            await deleteConnectedServiceUsageSourcesForGroup({
+                accountId: request.userId,
+                serviceId,
+                groupId,
+            }, tx);
             await tx.connectedServiceAuthGroup.delete({
                 where: { accountId_vendor_groupId: { accountId: request.userId, vendor: serviceId, groupId } },
             });

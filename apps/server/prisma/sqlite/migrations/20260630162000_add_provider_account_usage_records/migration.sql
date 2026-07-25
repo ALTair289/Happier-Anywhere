@@ -53,7 +53,7 @@ ON "ProviderAccountUsageRecord"("accountId", "providerId");
 CREATE INDEX "ProviderAccountUsageRecord_accountId_status_idx"
 ON "ProviderAccountUsageRecord"("accountId", "status");
 
-CREATE UNIQUE INDEX "ConnectedServiceUsageSource_accountId_serviceId_profileId_key"
+CREATE INDEX "csus_account_service_profile_idx"
 ON "ConnectedServiceUsageSource"("accountId", "serviceId", "profileId");
 
 CREATE UNIQUE INDEX "ConnectedServiceUsageSource_accountId_sourceKey_key"

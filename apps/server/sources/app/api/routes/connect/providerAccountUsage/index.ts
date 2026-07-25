@@ -7,10 +7,13 @@ export {
 } from "./recordStorage";
 export {
     deleteConnectedServiceUsageSourcesForAccount,
+    deleteConnectedServiceUsageSourcesForGroup,
+    deleteConnectedServiceUsageSourcesForGroupMember,
     deleteConnectedServiceUsageSourcesForProfile,
     linkConnectedServiceUsageSource,
     listConnectedServiceUsageSourcesForProviderAccountUsageRecord,
     readConnectedServiceUsageSource,
+    readExactConnectedServiceUsageSource,
     toConnectedServiceUsageSourceV1,
     unlinkConnectedServiceUsageSource,
     upsertConnectedServiceUsageSource,

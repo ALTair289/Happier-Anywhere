@@ -21,6 +21,14 @@ import { createLightSqliteHarness, type LightSqliteHarness } from "@/testkit/lig
 import { connectRoutes } from "./connectRoutes";
 import { DEFAULT_CONNECTED_SERVICE_AUTH_GROUP_POLICY_V1 } from "./connectedServicesV3/authGroupPolicy";
 import { createAppCloseTracker } from "../../testkit/appLifecycle";
+import {
+    upsertConnectedServiceUsageSource,
+    upsertProviderAccountUsageRecord,
+} from "./providerAccountUsage";
+import {
+    createProviderAccountUsageRecordKey,
+    createUsageSnapshot,
+} from "./providerAccountUsageTestkit";
 
 const { trackApp, closeTrackedApps } = createAppCloseTracker();
 
@@ -193,6 +201,8 @@ describe("connectRoutes connected service auth groups (integration)", () => {
         vi.unstubAllGlobals();
         vi.clearAllMocks();
         await db.accountChange.deleteMany().catch(() => {});
+        await db.connectedServiceUsageSource.deleteMany().catch(() => {});
+        await db.providerAccountUsageRecord.deleteMany().catch(() => {});
         await db.serviceAccountToken.deleteMany().catch(() => {});
         await db.account.deleteMany().catch(() => {});
     });
@@ -1427,6 +1437,118 @@ describe("connectRoutes connected service auth groups (integration)", () => {
             select: { id: true },
         });
         expect(credential).not.toBeNull();
+    });
+
+    it("cleans exact group-member usage sources through member and group DELETE routes without deleting shared usage records", async () => {
+        const user = await db.account.create({
+            data: { publicKey: null, encryptionMode: "plain" },
+            select: { id: true },
+        });
+        await createConnectedProfile(user.id, "openai-codex", "work");
+        await createConnectedProfile(user.id, "openai-codex", "backup");
+        await db.serviceAccountToken.updateMany({
+            where: { accountId: user.id, vendor: "openai-codex" },
+            data: {
+                metadata: {
+                    v: 3,
+                    storage: "plain_json_v1",
+                    kind: "token",
+                    providerAccountId: "acct-route-cleanup",
+                    providerEmail: null,
+                },
+            },
+        });
+        const app = await createReadyApp();
+
+        for (const group of [
+            { groupId: "left", members: [{ profileId: "work" }, { profileId: "backup" }], activeProfileId: "work" },
+            { groupId: "right", members: [{ profileId: "backup" }], activeProfileId: "backup" },
+        ]) {
+            const created = await app.inject({
+                method: "POST",
+                url: "/v3/connect/openai-codex/groups",
+                headers: authHeaders(user.id),
+                payload: group,
+            });
+            expect(created.statusCode).toBe(200);
+            expect(created.json().group).toMatchObject({ groupId: group.groupId, generation: 0 });
+        }
+
+        const snapshot = createUsageSnapshot({
+            fetchedAt: Date.now(),
+            recordKey: createProviderAccountUsageRecordKey({ accountSubjectId: "acct-route-cleanup" }),
+            profileId: "backup",
+        });
+        await upsertProviderAccountUsageRecord({
+            accountId: user.id,
+            recordId: snapshot.recordId,
+            recordKey: snapshot.recordKey,
+            payloadMode: "plain_json_v1",
+            snapshot,
+            status: "ok",
+            fetchedAt: snapshot.fetchedAtMs,
+            staleAfterMs: snapshot.staleAfterMs,
+        });
+        for (const groupId of ["left", "right"] as const) {
+            await upsertConnectedServiceUsageSource({
+                accountId: user.id,
+                serviceId: "openai-codex",
+                profileId: "backup",
+                providerAccountUsageRecordId: snapshot.recordId,
+                bindingKind: "group_member",
+                groupId,
+                groupGeneration: 0,
+            });
+        }
+
+        const removedMember = await app.inject({
+            method: "DELETE",
+            url: "/v3/connect/openai-codex/groups/left/members/backup?expectedGeneration=0",
+            headers: { "x-test-user-id": user.id },
+        });
+        expect(removedMember.statusCode).toBe(200);
+        expect(removedMember.json().group).toMatchObject({ groupId: "left", generation: 1 });
+        expect(await db.connectedServiceUsageSource.findMany({
+            where: { accountId: user.id },
+            select: { groupId: true, groupGeneration: true },
+        })).toEqual([{ groupId: "right", groupGeneration: 0 }]);
+
+        expect((await app.inject({
+            method: "DELETE",
+            url: "/v3/connect/openai-codex/groups/left",
+            headers: { "x-test-user-id": user.id },
+        })).statusCode).toBe(200);
+        expect((await app.inject({
+            method: "POST",
+            url: "/v3/connect/openai-codex/groups",
+            headers: authHeaders(user.id),
+            payload: {
+                groupId: "left",
+                members: [{ profileId: "backup" }],
+                activeProfileId: "backup",
+            },
+        })).json().group).toMatchObject({ groupId: "left", generation: 0 });
+        await upsertConnectedServiceUsageSource({
+            accountId: user.id,
+            serviceId: "openai-codex",
+            profileId: "backup",
+            providerAccountUsageRecordId: snapshot.recordId,
+            bindingKind: "group_member",
+            groupId: "left",
+            groupGeneration: 0,
+        });
+
+        const deletedGroup = await app.inject({
+            method: "DELETE",
+            url: "/v3/connect/openai-codex/groups/right",
+            headers: { "x-test-user-id": user.id },
+        });
+        expect(deletedGroup.statusCode).toBe(200);
+        expect(await db.connectedServiceUsageSource.findMany({
+            where: { accountId: user.id },
+            select: { groupId: true, groupGeneration: true },
+        })).toEqual([{ groupId: "left", groupGeneration: 0 }]);
+        expect(await db.providerAccountUsageRecord.count({ where: { accountId: user.id } })).toBe(1);
     });
 
     it("deletes an active setup-token-like member at high generation and returns a valid envelope", async () => {

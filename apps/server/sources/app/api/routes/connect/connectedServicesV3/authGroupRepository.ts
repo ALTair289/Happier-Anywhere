@@ -13,7 +13,10 @@ import {
     ConnectedServiceAuthGroupMemberStateSchema,
     ConnectedServiceAuthGroupStateSchema,
 } from "./authGroupSchemas";
-import { deleteConnectedServiceUsageSourcesForProfile } from "../providerAccountUsage";
+import {
+    deleteConnectedServiceUsageSourcesForGroupMember,
+    deleteConnectedServiceUsageSourcesForProfile,
+} from "../providerAccountUsage";
 import { resolveConnectedServiceCredentialRevision } from "../credentials/credentialRevision";
 
 type AuthGroupState = z.infer<typeof ConnectedServiceAuthGroupStateSchema>;
@@ -566,5 +569,6 @@ export async function deleteAuthGroupMemberAndBumpGenerationInTx(tx: Tx, params:
     }
 
     await tx.connectedServiceAuthGroupMember.delete({ where: { id: member.id } });
+    await deleteConnectedServiceUsageSourcesForGroupMember(params, tx);
     return "deleted";
 }

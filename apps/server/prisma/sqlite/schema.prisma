@@ -928,7 +928,7 @@ model ProviderAccountUsageRecord {
     sources         ConnectedServiceUsageSource[]
 
     @@unique([accountId, recordId])
-    @@unique([accountId, providerId, accountSubjectId, quotaScope, quotaScopeIdKey])
+    @@unique([accountId, providerId, accountSubjectId, quotaScope, quotaScopeIdKey], map: "paur_identity_key")
     @@index([accountId, providerId])
     @@index([accountId, status])
 }
@@ -948,9 +948,9 @@ model ConnectedServiceUsageSource {
 
     providerAccountUsageRecord ProviderAccountUsageRecord @relation(fields: [accountId, providerAccountUsageRecordId], references: [accountId, recordId], onDelete: Cascade, onUpdate: Cascade)
 
-    @@unique([accountId, serviceId, profileId])
     @@unique([accountId, sourceKey])
-    @@index([accountId, providerAccountUsageRecordId])
+    @@index([accountId, serviceId, profileId], map: "csus_account_service_profile_idx")
+    @@index([accountId, providerAccountUsageRecordId], map: "csus_paur_idx")
 }
 
 model ConnectedServiceAuthGroup {

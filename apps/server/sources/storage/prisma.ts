@@ -42,6 +42,15 @@ function loadDefaultPrismaClientModule(): typeof import("@prisma/client") {
     return requireFromHere("@prisma/client") as typeof import("@prisma/client");
 }
 
+/**
+ * Canonical runtime Prisma namespace.
+ *
+ * Runtime callers must use this sidecar-aware CommonJS loader instead of a
+ * named ESM import from `@prisma/client`; packaged server builds externalize
+ * Prisma and cannot rely on named-import interop from its generated module.
+ */
+export const prismaRuntime: typeof import("@prisma/client").Prisma = loadDefaultPrismaClientModule().Prisma;
+
 function createDefaultPrismaClient(): PrismaClientType {
     const { PrismaClient } = loadDefaultPrismaClientModule();
     return new PrismaClient();

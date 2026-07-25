@@ -1,22 +1,23 @@
-import { Prisma } from "@prisma/client";
 import type {
     ProviderAccountUsageRecordId,
     ProviderAccountUsageRecordKeyV1,
     ProviderAccountUsageSnapshotV1,
     SealedProviderAccountUsageSnapshotV1,
 } from "@happier-dev/protocol";
-import type { TransactionClient } from "@/storage/prisma";
+import { isPrismaErrorCode, type TransactionClient } from "@/storage/prisma";
 
 import { inTx } from "@/storage/inTx";
+import { resolveEffectiveAccountEncryptionModeFromAccountRow } from "@/app/encryption/accountEncryptionMode";
 import {
     createProviderAccountUsageRecord,
     readProviderAccountUsageRecord,
     updateProviderAccountUsageRecordIfCurrent,
 } from "./recordStorage";
 import type { ProviderAccountUsagePayloadMode, ProviderAccountUsageStatus } from "./types";
+import { ProviderAccountUsagePayloadInvariantError } from "./types";
 
-type ProviderAccountUsagePolicyClient = Pick<typeof import("@/storage/db").db, "providerAccountUsageRecord">
-    | Pick<TransactionClient, "providerAccountUsageRecord">;
+type ProviderAccountUsagePolicyClient = Pick<typeof import("@/storage/db").db, "account" | "providerAccountUsageRecord">
+    | Pick<TransactionClient, "account" | "providerAccountUsageRecord">;
 
 export type ProviderAccountUsageWritePolicyParams = Readonly<{
     accountId: string;
@@ -49,7 +50,7 @@ function shouldPreserveRefreshRequest(refreshRequestedAt: number | undefined, fe
 }
 
 function isUniqueConstraintError(error: unknown): boolean {
-    return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
+    return isPrismaErrorCode(error, "P2002");
 }
 
 function buildWriteParams(
@@ -75,6 +76,14 @@ function buildWriteParams(
 async function writeProviderAccountUsageRecordWithPolicyInClient(
     params: ProviderAccountUsageWritePolicyParams & Readonly<{ client: ProviderAccountUsagePolicyClient }>,
 ): Promise<"written" | "noop" | "stale"> {
+    const account = await params.client.account.findUnique({
+        where: { id: params.accountId },
+        select: { publicKey: true, encryptionMode: true },
+    });
+    const expectedMode = params.payloadMode === "plain_json_v1" ? "plain" : "e2ee";
+    if (!account || resolveEffectiveAccountEncryptionModeFromAccountRow(account) !== expectedMode) {
+        throw new ProviderAccountUsagePayloadInvariantError("Provider account usage payload mode does not match account storage mode");
+    }
     const incomingFingerprint = normalizeFingerprint(params.materialFingerprint);
     for (let attempt = 0; attempt < 5; attempt += 1) {
         const existing = await readProviderAccountUsageRecord({
