@@ -886,6 +886,47 @@ describe('createTmuxTerminalHostAdapter', () => {
     expect(captureCurrentInput).toHaveBeenNthCalledWith(2, 'happy:claude.1');
   });
 
+  it('authorizes only after final quiet checks and classifies the first post-authorization failure as possible-write', async () => {
+    const order: string[] = [];
+    const tmux = new TmuxUtilities();
+    vi.spyOn(tmux, 'captureCurrentInput').mockResolvedValue('');
+    vi.spyOn(tmux, 'executeTmuxCommand').mockImplementation(async (args) => {
+      order.push(String(args[0]));
+      return {
+        returncode: args[0] === 'paste-buffer' ? 1 : 0,
+        stdout: args[0] === 'display-message' && args.includes('#{pane_dead}\t#{pane_pid}\t#{pane_current_command}')
+          ? '0\t12345\tclaude\n'
+          : '',
+        stderr: '',
+        command: [],
+      };
+    });
+    const authorizeBeforeWrite = vi.fn(async () => {
+      order.push('authorize_write');
+      return true;
+    });
+    const adapter = createTmuxTerminalHostAdapter({ tmux });
+
+    await expect(adapter.injectUserPrompt(
+      TMUX_HANDLE,
+      {
+        text: 'attempt prompt',
+        multiline: false,
+        origin: { kind: 'ui_pending', nonce: 'attempt-tmux' },
+        scheduling: { deferredUntilQuietMs: 1 },
+      },
+      { authorizeBeforeWrite },
+    )).resolves.toMatchObject({
+      status: 'failed',
+      phase: 'during_write',
+      duplicateRisk: 'possible',
+    });
+
+    expect(authorizeBeforeWrite).toHaveBeenCalledTimes(1);
+    expect(order.indexOf('authorize_write')).toBeGreaterThan(order.lastIndexOf('load-buffer'));
+    expect(order.indexOf('authorize_write')).toBeLessThan(order.indexOf('paste-buffer'));
+  });
+
   it('exposes a runtime-control port bound to the pane that is distinct from prompt injection', async () => {
     const tmux = new TmuxUtilities();
     const adapter = createTmuxTerminalHostAdapter({ tmux });

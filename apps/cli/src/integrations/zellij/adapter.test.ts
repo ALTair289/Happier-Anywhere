@@ -3870,6 +3870,69 @@ describe('createZellijTerminalHostAdapter', () => {
     expect(calls).toEqual([]);
   });
 
+  it('does not authorize a final-check deferral and makes a post-authorization write throw ambiguous', async () => {
+    const calls: string[] = [];
+    let stable = false;
+    let captureCount = 0;
+    const actions: ZellijActions = {
+      attachCreateBackground: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+      runCommand: async () => ({ exitCode: 0, stdout: 'terminal_1', stderr: '' }),
+      pasteText: async () => {
+        calls.push('paste');
+        throw new Error('write race');
+      },
+      writeBytesChunked: async () => {
+        calls.push('write');
+        throw new Error('write race');
+      },
+      sendEnter: async () => { calls.push('enter'); },
+      sendEscape: async () => undefined,
+      listPanes: async () => [{ id: 1, is_plugin: false, is_focused: true }],
+      dumpScreen: async () => stable ? 'idle' : captureCount++ === 0 ? 'draft-a' : 'draft-b',
+      closePane: async () => undefined,
+      killSession: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+      deleteSession: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+    };
+    const authorizeBeforeWrite = vi.fn(async () => {
+      calls.push('authorize_write');
+      return true;
+    });
+    const adapter = createZellijTerminalHostAdapter({
+      zellijBinary: '/tools/zellij',
+      happyHomeDir: '/home/happier',
+      inputStabilityDelayMs: 0,
+      actions,
+    });
+    const input = {
+      text: 'attempt prompt',
+      multiline: false,
+      origin: { kind: 'ui_pending' as const, nonce: 'attempt-zellij' },
+      scheduling: { deferredUntilQuietMs: 1 },
+    };
+
+    await expect(adapter.injectUserPrompt(
+      { kind: 'zellij', sessionName: 'session-a', paneId: 'terminal_1', attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' } },
+      input,
+      { authorizeBeforeWrite },
+    )).resolves.toMatchObject({ status: 'deferred', reason: 'user_typing' });
+    expect(authorizeBeforeWrite).not.toHaveBeenCalled();
+
+    stable = true;
+    captureCount = 0;
+    calls.length = 0;
+    await expect(adapter.injectUserPrompt(
+      { kind: 'zellij', sessionName: 'session-a', paneId: 'terminal_1', attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' } },
+      input,
+      { authorizeBeforeWrite },
+    )).resolves.toMatchObject({
+      status: 'failed',
+      phase: 'during_write',
+      duplicateRisk: 'possible',
+    });
+    expect(calls[0]).toBe('authorize_write');
+    expect(authorizeBeforeWrite).toHaveBeenCalledTimes(1);
+  });
+
   it('interrupts the active zellij turn with a bounded Escape action', async () => {
     const calls: string[] = [];
     const actions = {

@@ -5,6 +5,7 @@ import type {
   TerminalInjectionFailurePhase,
   TerminalInputInjectionResult,
   TerminalPromptInput,
+  TerminalPromptWriteBoundaryV1,
 } from '@happier-dev/agents';
 import type { AttachSurfaceStaticMetadataV1 } from '@happier-dev/protocol';
 
@@ -14,6 +15,7 @@ export type {
   TerminalInjectionFailurePhase,
   TerminalInputInjectionResult,
   TerminalPromptInput,
+  TerminalPromptWriteBoundaryV1,
 } from '@happier-dev/agents';
 
 export type TerminalHostPreference = 'auto' | TerminalHostKind;
@@ -65,7 +67,11 @@ export type TerminalHostAdapter = Readonly<{
   createOrAttachHost(opts: TerminalHostCreateOrAttachOptions): Promise<TerminalHostHandle>;
   adoptExistingHost?(handle: TerminalHostHandle): Promise<TerminalHostHandle>;
   relaunchExistingHost?(handle: TerminalHostHandle, opts: TerminalHostCreateOrAttachOptions): Promise<TerminalHostHandle>;
-  injectUserPrompt(handle: TerminalHostHandle, input: TerminalPromptInput): Promise<TerminalInputInjectionResult>;
+  injectUserPrompt(
+    handle: TerminalHostHandle,
+    input: TerminalPromptInput,
+    writeBoundary?: TerminalPromptWriteBoundaryV1,
+  ): Promise<TerminalInputInjectionResult>;
   interruptTurn(handle: TerminalHostHandle): Promise<void>;
   evaluateLiveness(handle: TerminalHostHandle): Promise<TerminalHostLiveness>;
   captureInputState?(handle: TerminalHostHandle): Promise<TerminalInputState>;

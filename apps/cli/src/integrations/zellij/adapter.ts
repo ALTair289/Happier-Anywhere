@@ -12,6 +12,7 @@ import type {
   TerminalInputInjectionResult,
   TerminalInputState,
   TerminalPromptInput,
+  TerminalPromptWriteBoundaryV1,
 } from '../terminalHost/_types';
 import {
   createTerminalHostDeadline,
@@ -1435,7 +1436,11 @@ export function createZellijTerminalHostAdapter(params: Readonly<{
         });
       }
     },
-    async injectUserPrompt(handle: TerminalHostHandle, input: TerminalPromptInput): Promise<TerminalInputInjectionResult> {
+    async injectUserPrompt(
+      handle: TerminalHostHandle,
+      input: TerminalPromptInput,
+      writeBoundary?: TerminalPromptWriteBoundaryV1,
+    ): Promise<TerminalInputInjectionResult> {
       const deferral = scheduledDeferral(input);
       if (deferral) return deferral;
 
@@ -1503,6 +1508,22 @@ export function createZellijTerminalHostAdapter(params: Readonly<{
       const textToWriteBytes = Buffer.byteLength(textToWrite, 'utf8');
       let failurePhase: TerminalInjectionFailurePhase = 'during_write';
       let duplicateRisk: TerminalInjectionDuplicateRisk = 'possible';
+      if (writeBoundary) {
+        let authorized = false;
+        try {
+          authorized = await writeBoundary.authorizeBeforeWrite();
+        } catch {
+          authorized = false;
+        }
+        if (!authorized) {
+          return failedInjectionResult({
+            reason: 'no_target',
+            phase: 'before_write',
+            duplicateRisk: 'none',
+            recoverable: false,
+          });
+        }
+      }
       try {
         const paneEnv = sessionEnv(env, handle.sessionName);
         const writeBytes = () => actions.writeBytesChunked({

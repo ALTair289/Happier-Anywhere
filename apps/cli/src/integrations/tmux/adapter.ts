@@ -8,6 +8,7 @@ import type {
   TerminalInputInjectionResult,
   TerminalInputState,
   TerminalPromptInput,
+  TerminalPromptWriteBoundaryV1,
 } from '../terminalHost/_types';
 import { delay } from '@/utils/time';
 
@@ -144,7 +145,11 @@ export function createTmuxTerminalHostAdapter(params?: Readonly<{
       }
       return createOrAttachHost({ ...opts, sessionName: handle.sessionName });
     },
-    async injectUserPrompt(handle: TerminalHostHandle, input: TerminalPromptInput): Promise<TerminalInputInjectionResult> {
+    async injectUserPrompt(
+      handle: TerminalHostHandle,
+      input: TerminalPromptInput,
+      writeBoundary?: TerminalPromptWriteBoundaryV1,
+    ): Promise<TerminalInputInjectionResult> {
       const deferral = scheduledDeferral(input);
       if (deferral) return deferral;
 
@@ -183,6 +188,7 @@ export function createTmuxTerminalHostAdapter(params?: Readonly<{
           };
         }
       }
+      let writeAuthorized = false;
       const result = await pasteTextViaTmuxBuffer({
         target: targetFromHandle(handle),
         text: input.text,
@@ -190,6 +196,15 @@ export function createTmuxTerminalHostAdapter(params?: Readonly<{
         submitDelayMs: resolveTmuxPromptSubmitDelayMs(),
         submitRetryDelayMs: resolveTmuxPromptSubmitDelayMs(),
         timeoutMs: input.scheduling.timeoutMs,
+        ...(writeBoundary
+          ? {
+              authorizeBeforeWrite: async () => {
+                const authorized = await writeBoundary.authorizeBeforeWrite();
+                writeAuthorized = authorized;
+                return authorized;
+              },
+            }
+          : {}),
         ...(promptSubmitVerification?.shouldVerifyBeforeSubmit(input.text)
           ? {
             verifyBeforeSubmit: async ({ text }) => promptSubmitVerification.verifyScreenBeforeSubmit({
@@ -217,10 +232,18 @@ export function createTmuxTerminalHostAdapter(params?: Readonly<{
         ),
       });
       if (!result.success) {
+        if (result.reason === 'write_not_authorized') {
+          return failedInjectionResult({
+            reason: 'no_target',
+            phase: 'before_write',
+            duplicateRisk: 'none',
+            recoverable: false,
+          });
+        }
         return failedInjectionResult({
           reason: result.reason === 'timeout' ? 'timeout' : 'host_unreachable',
-          phase: result.phase,
-          duplicateRisk: result.duplicateRisk,
+          phase: writeAuthorized && result.phase === 'before_write' ? 'during_write' : result.phase,
+          duplicateRisk: writeAuthorized && result.duplicateRisk === 'none' ? 'possible' : result.duplicateRisk,
           recoverable: true,
         });
       }

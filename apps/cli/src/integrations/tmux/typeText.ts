@@ -34,7 +34,7 @@ export type TmuxNativePasteTextResult =
   | Readonly<{ success: true }>
   | Readonly<{
     success: false;
-    reason: 'load_failed' | 'paste_failed' | 'verification_failed' | 'submit_failed' | 'timeout';
+    reason: 'load_failed' | 'write_not_authorized' | 'paste_failed' | 'verification_failed' | 'submit_failed' | 'timeout';
     phase: TerminalInjectionFailurePhase;
     duplicateRisk: TerminalInjectionDuplicateRisk;
     progress: Readonly<{
@@ -137,6 +137,7 @@ export async function pasteTextViaTmuxBuffer(params: Readonly<{
   wait?: ((delayMs: number) => Promise<void>) | undefined;
   verifyBeforeSubmit?: ((params: Readonly<{ text: string; remainingTimeoutMs?: number | undefined }>) => Promise<boolean>) | undefined;
   verifyAfterSubmit?: ((params: Readonly<{ text: string; remainingTimeoutMs?: number | undefined }>) => Promise<boolean>) | undefined;
+  authorizeBeforeWrite?: (() => boolean | Promise<boolean>) | undefined;
 }>): Promise<TmuxNativePasteTextResult> {
   const progress: TmuxNativePasteProgress = {
     bufferLoaded: false,
@@ -180,6 +181,25 @@ export async function pasteTextViaTmuxBuffer(params: Readonly<{
       duplicateRisk: 'none',
       progress,
     });
+  }
+
+  if (params.authorizeBeforeWrite) {
+    let authorized = false;
+    try {
+      authorized = await params.authorizeBeforeWrite();
+    } catch {
+      authorized = false;
+    }
+    if (!authorized) {
+      progress.cleanupAttempted = true;
+      progress.cleanupSucceeded = await cleanupTmuxBuffer(params.executor, params.bufferName, deadline);
+      return failedNativePasteResult({
+        reason: 'write_not_authorized',
+        phase: 'before_write',
+        duplicateRisk: 'none',
+        progress,
+      });
+    }
   }
 
   const pasted = await timedCommandSucceeded(params.executor, [

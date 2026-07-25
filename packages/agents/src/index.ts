@@ -96,6 +96,7 @@ export {
   type TerminalInputInjectionResult,
   type TerminalInputInjectionV1,
   type TerminalPromptInput,
+  type TerminalPromptWriteBoundaryV1,
 } from './runtime/terminal/inputInjection.js';
 export {
   TERMINAL_SHIFT_TAB_SEQUENCE,

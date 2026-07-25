@@ -41,7 +41,18 @@ export type TerminalInputInjectionResult =
       recoverable: boolean;
     }>;
 
+/**
+ * Optional local authorization gate invoked by a terminal host at its final
+ * pre-byte-write boundary, after host-specific liveness/readiness checks.
+ */
+export type TerminalPromptWriteBoundaryV1 = Readonly<{
+  authorizeBeforeWrite: () => boolean | Promise<boolean>;
+}>;
+
 export type TerminalInputInjectionV1 = Readonly<{
   hostKind: TerminalHostKind;
-  injectUserPrompt(input: TerminalPromptInput): Promise<TerminalInputInjectionResult>;
+  injectUserPrompt(
+    input: TerminalPromptInput,
+    writeBoundary?: TerminalPromptWriteBoundaryV1,
+  ): Promise<TerminalInputInjectionResult>;
 }>;

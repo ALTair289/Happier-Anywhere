@@ -5,4 +5,5 @@ export type {
   TerminalInputInjectionResult,
   TerminalInputInjectionV1,
   TerminalPromptInput,
+  TerminalPromptWriteBoundaryV1,
 } from '@happier-dev/agents';

@@ -170,6 +170,57 @@ describe('createPtyTerminalHostAdapter', () => {
     ]);
   });
 
+  it('authorizes at the final PTY write boundary and leaves the terminal untouched when denied', async () => {
+    const order: string[] = [];
+    const fake = createFakeProviderWithProcess(() => new FakePtyProcess((_process, data) => {
+      order.push(`write:${data}`);
+    }));
+    const adapter = createPtyTerminalHostAdapter({
+      ptyProvider: fake.provider,
+      inputStabilityDelayMs: 0,
+    });
+    const handle = await adapter.createOrAttachHost({
+      sessionName: 'happier-claude-windows',
+      workingDirectory: 'C:\\repo',
+      spawnArgv: ['node.exe'],
+      spawnEnv: {},
+      isolatedEnv: true,
+    });
+    const input = {
+      text: 'attempt prompt',
+      multiline: false,
+      origin: { kind: 'ui_pending' as const, nonce: 'n-authorize' },
+      scheduling: {},
+    };
+
+    await expect(adapter.injectUserPrompt(handle, input, {
+      authorizeBeforeWrite: async () => {
+        order.push('authorize:denied');
+        return false;
+      },
+    })).resolves.toEqual({
+      status: 'failed',
+      reason: 'no_target',
+      phase: 'before_write',
+      duplicateRisk: 'none',
+      recoverable: false,
+    });
+    expect(order).toEqual(['authorize:denied']);
+
+    await expect(adapter.injectUserPrompt(handle, input, {
+      authorizeBeforeWrite: async () => {
+        order.push('authorize:accepted');
+        return true;
+      },
+    })).resolves.toMatchObject({ status: 'injected' });
+    expect(order).toEqual([
+      'authorize:denied',
+      'authorize:accepted',
+      'write:attempt prompt',
+      'write:\r',
+    ]);
+  });
+
   it('writes large prompts to the PTY as one text operation plus a submit carriage return', async () => {
     const fake = createFakeProvider();
     const adapter = createPtyTerminalHostAdapter({

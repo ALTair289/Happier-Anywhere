@@ -14,6 +14,7 @@ import type {
   TerminalInputInjectionResult,
   TerminalInputState,
   TerminalPromptInput,
+  TerminalPromptWriteBoundaryV1,
 } from '../terminalHost/_types';
 import { buildTerminalControlCapture } from '../terminalHost/controlCapture';
 import { TERMINAL_SHIFT_TAB_SEQUENCE } from '../terminalHost/controlTypes';
@@ -261,7 +262,7 @@ export function createPtyTerminalHostAdapter(params?: Readonly<{
         },
       };
     },
-    async injectUserPrompt(handle, input) {
+    async injectUserPrompt(handle, input, writeBoundary?: TerminalPromptWriteBoundaryV1) {
       const deferral = scheduledDeferral(input);
       if (deferral) return deferral;
 
@@ -290,6 +291,22 @@ export function createPtyTerminalHostAdapter(params?: Readonly<{
             reason: 'user_typing',
             retryAfterMs: input.scheduling.deferredUntilQuietMs,
           };
+        }
+      }
+      if (writeBoundary) {
+        let authorized = false;
+        try {
+          authorized = await writeBoundary.authorizeBeforeWrite();
+        } catch {
+          authorized = false;
+        }
+        if (!authorized) {
+          return failedInjectionResult({
+            reason: 'no_target',
+            phase: 'before_write',
+            duplicateRisk: 'none',
+            recoverable: false,
+          });
         }
       }
       if (!writeToSession(session, input.text)) {
