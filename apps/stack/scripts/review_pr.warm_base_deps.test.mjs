@@ -69,6 +69,10 @@ export function spawn(cmd, args, options = {}) {
   queueMicrotask(() => child.emit('close', 0, null));
   return child;
 }
+
+export function spawnSync() {
+  throw new Error('unexpected spawnSync call in review-pr fixture');
+}
 `),
     './utils/cli/prereqs.mjs': toDataUrl(`
 export async function assertCliPrereqs() {}
@@ -84,7 +88,10 @@ export async function resolveDefaultRemoteBranch() {
 }
 `),
     './utils/worktrees/yarn_install_guard.mjs': toDataUrl(`
-export async function shouldRunYarnInstall() { return true; }
+export async function withYarnInstallGuard(_options, install) {
+  await install();
+  return { refreshed: true, reason: 'stale-inputs' };
+}
 `),
     './utils/proc/pm.mjs': toDataUrl(`
 export async function applyStackCacheEnv(env) { return env; }

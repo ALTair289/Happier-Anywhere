@@ -66,6 +66,14 @@ export function spawn(cmd, args, options = {}) {
   queueMicrotask(() => child.emit('close', 0, null));
   return child;
 }
+
+export function spawnSync() {
+  throw new Error('unexpected spawnSync call in review-pr fixture');
+}
+
+export function execFileSync() {
+  throw new Error('unexpected execFileSync call in review-pr fixture');
+}
 `),
     './utils/cli/prereqs.mjs': toDataUrl(`
 export async function assertCliPrereqs() {}
@@ -144,6 +152,14 @@ export function spawn(cmd, args, options = {}) {
   child.kill = () => true;
   queueMicrotask(() => child.emit('close', 0, null));
   return child;
+}
+
+export function spawnSync() {
+  throw new Error('unexpected spawnSync call in review-pr fixture');
+}
+
+export function execFileSync() {
+  throw new Error('unexpected execFileSync call in review-pr fixture');
 }
 `),
     './utils/cli/prereqs.mjs': toDataUrl(`
