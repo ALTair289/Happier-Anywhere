@@ -98,7 +98,19 @@ describe("exchangeConnectedServiceOauthTokens", () => {
     });
 
     it("exchanges claude-subscription tokens", async () => {
-        const fetchMock = vi.fn(async (_url: any, init: any) => {
+        const recipient = buildRecipientKeyPair();
+        const fetchMock = vi.fn(async (url: any, init: any) => {
+            if (String(url).endsWith('/api/oauth/profile')) {
+                expect(init?.headers?.Authorization).toBe('Bearer at');
+                return new Response(JSON.stringify({
+                    account: { has_claude_max: true },
+                    organization: {
+                        organization_type: 'claude_max',
+                        rate_limit_tier: 'default_claude_max_20x',
+                    },
+                }), { status: 200, headers: { "Content-Type": "application/json" } });
+            }
+            expect(String(url)).toBe("https://platform.claude.com/v1/oauth/token");
             const body = JSON.parse(String(init?.body ?? "{}"));
             expect(body.grant_type).toBe("authorization_code");
             expect(body.code).toBe("c");
@@ -117,7 +129,7 @@ describe("exchangeConnectedServiceOauthTokens", () => {
 
         const res = await exchangeConnectedServiceOauthTokens({
             serviceId: "claude-subscription",
-            publicKeyB64Url: buildRecipientPublicKeyB64Url(),
+            publicKeyB64Url: recipient.publicKeyB64Url,
             code: "c",
             verifier: "v",
             redirectUri: "http://localhost:54545/oauth2callback",
@@ -126,9 +138,73 @@ describe("exchangeConnectedServiceOauthTokens", () => {
             state: "s",
         });
 
-        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(fetchMock).toHaveBeenCalledTimes(2);
         expect(typeof res.bundleB64Url).toBe("string");
         expect(res.bundleB64Url.length).toBeGreaterThan(0);
+        const opened = openBoxBundle({
+            bundle: decodeBase64(res.bundleB64Url, "base64url"),
+            recipientSecretKeyOrSeed: recipient.secretKey,
+        });
+        expect(opened).toBeTruthy();
+        const payload = JSON.parse(new TextDecoder().decode(opened!));
+        expect(payload.raw).toEqual({
+            claudeAiOauth: {
+                subscriptionType: 'max',
+                rateLimitTier: 'default_claude_max_20x',
+            },
+        });
+    });
+
+    it("rejects a Claude exchange when the provider profile endpoint rejects the issued access token", async () => {
+        const recipient = buildRecipientKeyPair();
+        const fetchMock = vi.fn(async (url: any) => {
+            if (String(url).endsWith("/api/oauth/profile")) {
+                return new Response("", { status: 401, statusText: "Unauthorized" });
+            }
+            return new Response(JSON.stringify({
+                access_token: "provider-rejected-access",
+                refresh_token: "refresh",
+                expires_in: 3600,
+                token_type: "Bearer",
+            }), { status: 200, headers: { "Content-Type": "application/json" } });
+        });
+
+        await expect(exchangeConnectedServiceOauthTokens({
+            serviceId: "claude-subscription",
+            publicKeyB64Url: recipient.publicKeyB64Url,
+            code: "c",
+            verifier: "v",
+            redirectUri: "https://platform.claude.com/oauth/code/callback",
+            now: 1700000000000,
+            fetcher: fetchMock as any,
+            state: "s",
+        })).rejects.toThrow(/access-token verification failed \(401\)/);
+    });
+
+    it("keeps Claude exchange usable when optional profile evidence is temporarily unavailable", async () => {
+        const recipient = buildRecipientKeyPair();
+        const fetchMock = vi.fn(async (url: any) => {
+            if (String(url).endsWith("/api/oauth/profile")) {
+                return new Response("", { status: 503, statusText: "Service Unavailable" });
+            }
+            return new Response(JSON.stringify({
+                access_token: "accepted-access",
+                refresh_token: "refresh",
+                expires_in: 3600,
+                token_type: "Bearer",
+            }), { status: 200, headers: { "Content-Type": "application/json" } });
+        });
+
+        await expect(exchangeConnectedServiceOauthTokens({
+            serviceId: "claude-subscription",
+            publicKeyB64Url: recipient.publicKeyB64Url,
+            code: "c",
+            verifier: "v",
+            redirectUri: "https://platform.claude.com/oauth/code/callback",
+            now: 1700000000000,
+            fetcher: fetchMock as any,
+            state: "s",
+        })).resolves.toEqual({ bundleB64Url: expect.any(String) });
     });
 
     it("rejects claude-subscription exchange when state is missing", async () => {

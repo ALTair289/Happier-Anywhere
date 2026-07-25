@@ -1,3 +1,5 @@
+import { CLAUDE_OAUTH_TOKEN_URL } from "@happier-dev/agents";
+
 function resolveNonEmptyEnv(raw: string | undefined, fallback: string): string {
   if (typeof raw !== "string") return fallback;
   const trimmed = raw.trim();
@@ -35,5 +37,5 @@ export function resolveClaudeSubscriptionOauthClientId(env: NodeJS.ProcessEnv): 
 }
 
 export function resolveClaudeSubscriptionOauthTokenUrl(env: NodeJS.ProcessEnv): string {
-  return resolveNonEmptyEnv(env.HAPPIER_CONNECTED_SERVICES_CLAUDE_SUBSCRIPTION_OAUTH_TOKEN_URL, "https://console.anthropic.com/v1/oauth/token");
+  return resolveNonEmptyEnv(env.HAPPIER_CONNECTED_SERVICES_CLAUDE_SUBSCRIPTION_OAUTH_TOKEN_URL, CLAUDE_OAUTH_TOKEN_URL);
 }

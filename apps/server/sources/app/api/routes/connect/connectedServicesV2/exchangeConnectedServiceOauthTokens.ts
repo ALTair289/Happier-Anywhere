@@ -8,6 +8,11 @@ import {
     type ConnectedServiceId,
     CONNECTED_SERVICE_ERROR_CODES,
 } from "@happier-dev/protocol";
+import {
+    CLAUDE_OAUTH_PROFILE_BETA_HEADER,
+    CLAUDE_OAUTH_PROFILE_URL,
+    normalizeClaudeOauthProfileEntitlement,
+} from "@happier-dev/agents";
 import { parseIntEnv } from "@/config/env";
 import { assertNonEmptyString } from "./connectValueParsers";
 import {
@@ -268,6 +273,31 @@ async function exchangeClaudeSubscription(params: Readonly<{
 
     const providerEmail = typeof json?.account?.email_address === "string" ? json.account.email_address : null;
     const providerAccountId = typeof json?.account?.uuid === "string" ? json.account.uuid : null;
+    const raw = await (async () => {
+        let profileResponse: Response;
+        try {
+            profileResponse = await params.fetcher(CLAUDE_OAUTH_PROFILE_URL, {
+                method: "GET",
+                headers: {
+                    Authorization: `Bearer ${accessToken}`,
+                    "anthropic-beta": CLAUDE_OAUTH_PROFILE_BETA_HEADER,
+                },
+            });
+        } catch {
+            // Entitlement metadata improves native materialization but is not required for a valid
+            // OAuth credential. A transient profile lookup must not reject the completed login.
+            return null;
+        }
+        if (profileResponse.status === 401) {
+            throw new Error("Claude OAuth access-token verification failed (401)");
+        }
+        if (!profileResponse.ok) return null;
+        try {
+            return normalizeClaudeOauthProfileEntitlement(await profileResponse.json());
+        } catch {
+            return null;
+        }
+    })();
 
     return {
         serviceId: "claude-subscription",
@@ -279,7 +309,7 @@ async function exchangeClaudeSubscription(params: Readonly<{
         providerEmail,
         providerAccountId,
         expiresAt,
-        raw: json,
+        raw,
     };
 }
 

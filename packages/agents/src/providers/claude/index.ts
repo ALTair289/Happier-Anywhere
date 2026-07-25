@@ -39,3 +39,12 @@ export {
   CLAUDE_CODE_RECOMMENDED_OAUTH_SCOPES,
   CLAUDE_CODE_REQUIRED_OAUTH_SCOPES,
 } from './oauthScopes.js';
+
+export {
+  CLAUDE_OAUTH_AUTHORIZE_URL,
+  normalizeClaudeOauthProfileEntitlement,
+  CLAUDE_OAUTH_PROFILE_BETA_HEADER,
+  CLAUDE_OAUTH_PROFILE_URL,
+  CLAUDE_OAUTH_TOKEN_URL,
+  type ClaudeOauthEntitlementMetadata,
+} from './oauthProfile.js';
