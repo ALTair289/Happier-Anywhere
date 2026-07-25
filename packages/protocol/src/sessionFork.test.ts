@@ -52,7 +52,7 @@ describe('SessionForkRpcParamsSchema', () => {
       v: 1,
       parentSessionId: 'sess_parent',
       forkPoint: { type: 'latest' },
-      requestId: 'fork-request-1',
+      requestId: ' fork-request-1\n',
     });
     const empty = SessionForkRpcParamsSchema.safeParse({
       v: 1,
@@ -66,9 +66,17 @@ describe('SessionForkRpcParamsSchema', () => {
       forkPoint: { type: 'latest' },
       requestId: 'x'.repeat(129),
     });
+    const blank = SessionForkRpcParamsSchema.safeParse({
+      v: 1,
+      parentSessionId: 'sess_parent',
+      forkPoint: { type: 'latest' },
+      requestId: ' \n',
+    });
 
     expect(valid.success).toBe(true);
+    if (valid.success) expect(valid.data.requestId).toBe(' fork-request-1\n');
     expect(empty.success).toBe(false);
+    expect(blank.success).toBe(false);
     expect(oversized.success).toBe(false);
   });
 

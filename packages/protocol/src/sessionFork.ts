@@ -30,7 +30,7 @@ export const SessionForkRpcParamsSchema = z
      * MUST reuse it so the daemon can coalesce them onto the in-flight fork
      * instead of committing a second provider-side fork.
      */
-    requestId: z.string().min(1).max(128).optional(),
+    requestId: z.string().min(1).max(128).refine((value) => value.trim().length > 0).optional(),
   })
   .strict();
 export type SessionForkRpcParams = z.infer<typeof SessionForkRpcParamsSchema>;
