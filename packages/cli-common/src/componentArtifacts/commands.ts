@@ -5,7 +5,7 @@ import { accessSync, constants as fsConstants } from 'node:fs';
 
 import { commandExistsOnPath } from '../process/index.js';
 import { resolveWindowsCommandInvocation } from '../process/index.js';
-import { expandHomeDirPath } from '../providers/resolution.js';
+import { expandHomeDirPath } from '../path/expandHomeDirPath.js';
 
 export type RunCommand = (
   cmd: string,

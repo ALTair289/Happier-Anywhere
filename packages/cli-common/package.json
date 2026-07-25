@@ -50,6 +50,12 @@
       "types": "./dist/providers/index.d.ts",
       "default": "./dist/providers/index.js"
     },
+    "./expandHomeDirPath": {
+      "types": "./expandHomeDirPath.d.cts",
+      "import": "./expandHomeDirPath.cjs",
+      "require": "./expandHomeDirPath.cjs",
+      "default": "./expandHomeDirPath.cjs"
+    },
     "./providers/managedJavaScriptRuntime": {
       "types": "./dist/providers/managedJavaScriptRuntime.d.ts",
       "default": "./dist/providers/managedJavaScriptRuntime.js"

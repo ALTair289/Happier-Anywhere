@@ -16,6 +16,13 @@ test('package export entrypoints load in Node ESM', async () => {
   const providers = await import('../dist/providers/index.js');
   assert.equal(typeof providers.planProviderCliInstall, 'function');
 
+  const homeDirPath = await import('../expandHomeDirPath.cjs');
+  assert.equal(typeof homeDirPath.expandHomeDirPath, 'function');
+  assert.equal(
+    homeDirPath.expandHomeDirPath('~/project\\mixed', { HOME: '/users/alice' }, 'linux'),
+    '/users/alice/project/mixed',
+  );
+
   const root = await import('../dist/index.js');
   assert.equal(typeof root.links.buildTerminalConnectLinks, 'function');
   assert.equal(typeof root.tailscale.resolveTailscaleBin, 'function');

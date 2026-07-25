@@ -39,7 +39,7 @@ function normalizeReleaseAssetOs(value: unknown): 'linux' | 'darwin' | 'windows'
   throw new Error(`Unsupported first-party release OS: ${normalized}`);
 }
 
-function normalizeReleaseAssetArch(value: unknown): 'x64' | 'arm64' {
+export function normalizeReleaseAssetArch(value: unknown): 'x64' | 'arm64' {
   const normalized = String(value ?? process.arch).trim().toLowerCase();
   if (normalized === 'x64' || normalized === 'amd64' || normalized === 'x86_64') return 'x64';
   if (normalized === 'arm64' || normalized === 'aarch64') return 'arm64';

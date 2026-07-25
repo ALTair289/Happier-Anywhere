@@ -5,11 +5,11 @@ import { basename, dirname, join } from 'node:path';
 
 import { resolveWindowsCommandOnPath, resolveWindowsCommandPath } from '../process/index.js';
 
+import { expandHomeDirPath } from '../path/expandHomeDirPath.js';
 import { createManagedToolScratchDir } from './createManagedToolScratchDir.js';
 import { downloadGitHubReleaseAsset } from './downloadGitHubReleaseAsset.js';
 import { extractGitHubReleaseAsset } from './extractGitHubReleaseAsset.js';
 import { fetchNodeRuntimeReleaseAsset } from './nodeRelease.js';
-import { expandHomeDirPath } from './resolution.js';
 import { resolveHappyHomeDirFromEnvironment } from './resolveHappyHomeDir.js';
 
 function resolveManagedJavaScriptRuntimeBinaryName(): string {

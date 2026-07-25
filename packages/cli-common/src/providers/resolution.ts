@@ -1,6 +1,5 @@
 import { spawnSync } from 'node:child_process';
 import { accessSync, closeSync, constants as fsConstants, existsSync, openSync, readSync, readdirSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { delimiter, isAbsolute, join, resolve } from 'node:path';
 
 import {
@@ -13,6 +12,7 @@ import {
 } from '@happier-dev/agents';
 import { buildBackendTargetKey } from '@happier-dev/protocol';
 
+import { expandHomeDirPath, resolveHomeDirFromEnvironment } from '../path/expandHomeDirPath.js';
 import { resolveWindowsCommandOnPath, resolveWindowsCommandPath } from '../process/index.js';
 import { resolveJavaScriptRuntimeCommand } from './managedJavaScriptRuntime.js';
 import { resolveHappyHomeDirFromEnvironment } from './resolveHappyHomeDir.js';
@@ -73,22 +73,7 @@ export function readProviderCliOverride(agentId: AgentId, processEnv: NodeJS.Pro
   return override || null;
 }
 
-export function resolveHomeDirFromEnvironment(processEnv: NodeJS.ProcessEnv = process.env): string {
-  const envHome =
-    process.platform === 'win32'
-      ? (processEnv.USERPROFILE || processEnv.HOME)
-      : processEnv.HOME;
-  const trimmed = typeof envHome === 'string' ? envHome.trim() : '';
-  return trimmed.length > 0 ? trimmed : homedir();
-}
-
-export function expandHomeDirPath(value: string, processEnv: NodeJS.ProcessEnv = process.env): string {
-  if (value === '~') return resolveHomeDirFromEnvironment(processEnv);
-  if (value.startsWith('~/') || value.startsWith('~\\')) {
-    return join(resolveHomeDirFromEnvironment(processEnv), value.slice(2));
-  }
-  return value;
-}
+export { expandHomeDirPath, resolveHomeDirFromEnvironment };
 
 function providerCliCandidatePathExists(agentId: AgentId, candidatePath: string): boolean {
   const runtimeSpec = getProviderCliRuntimeSpec(agentId);
