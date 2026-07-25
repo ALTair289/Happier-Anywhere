@@ -12,6 +12,27 @@ export const ConnectedServiceAuthGroupPolicyPatchSchema = ProtocolConnectedServi
 
 export type ConnectedServiceAuthGroupPolicyPatch = z.infer<typeof ConnectedServiceAuthGroupPolicyPatchSchema>;
 
+// Older persisted policy blobs can still carry these retired no-op fields. Ignore only these
+// known keys at the storage boundary; strict schema validation remains authoritative for every
+// other field. This compatibility path can be removed after stored blobs are rewritten.
+const RETIRED_PERSISTED_AUTH_GROUP_POLICY_KEYS = [
+    "effectiveMeterStrategy",
+    "memberRuntimeStatePersistence",
+    "recoveryPromptMode",
+] as const;
+
+function omitRetiredPersistedAuthGroupPolicyKeys(value: unknown): unknown {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+        return value;
+    }
+
+    const policy = { ...value } as Record<string, unknown>;
+    for (const key of RETIRED_PERSISTED_AUTH_GROUP_POLICY_KEYS) {
+        delete policy[key];
+    }
+    return policy;
+}
+
 export const DEFAULT_CONNECTED_SERVICE_AUTH_GROUP_POLICY_V1: ConnectedServiceAuthGroupPolicyV1 = Object.freeze({
     ...ConnectedServiceAuthGroupPolicyV1Schema.parse({}),
 });
@@ -33,7 +54,10 @@ export function mergeConnectedServiceAuthGroupPolicyPatch(
 
 export function parseConnectedServiceAuthGroupPolicyJson(policyJson: string): ConnectedServiceAuthGroupPolicyV1 {
     try {
-        return ConnectedServiceAuthGroupPolicyV1Schema.parse(JSON.parse(policyJson));
+        const storedPolicy: unknown = JSON.parse(policyJson);
+        return ConnectedServiceAuthGroupPolicyV1Schema.parse(
+            omitRetiredPersistedAuthGroupPolicyKeys(storedPolicy),
+        );
     } catch {
         return DEFAULT_CONNECTED_SERVICE_AUTH_GROUP_POLICY_V1;
     }
