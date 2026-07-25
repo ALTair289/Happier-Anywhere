@@ -23,6 +23,7 @@ export const SESSION_RUNNER_RESTART_REASONS_V1 = [
   'self_update_interactive_prompt',
   'doctor_repair',
   'restart_session_runners_on_update_config',
+  'daemon_dist_generation_rollout',
 ] as const;
 export const SessionRunnerRestartReasonV1Schema = z.enum(SESSION_RUNNER_RESTART_REASONS_V1);
 export type SessionRunnerRestartReasonV1 = z.infer<typeof SessionRunnerRestartReasonV1Schema>;
@@ -40,10 +41,12 @@ export const SESSION_RUNNER_RESTART_DISABLED_REASONS = [
   'approval_pending',
   'terminal_detached',
   'terminal_host_attached',
+  'non_destructive_refresh_unsupported',
   'windows_hosted_runner',
   'restart_already_running',
   'current_entrypoint_unknown',
   'runner_entrypoint_unknown',
+  'runner_generation_unattested',
   'unsupported_daemon_version',
 ] as const;
 export const SessionRunnerRestartDisabledReasonSchema = z.enum(SESSION_RUNNER_RESTART_DISABLED_REASONS);

@@ -28,6 +28,7 @@ const restartReasons = [
   'self_update_interactive_prompt',
   'doctor_repair',
   'restart_session_runners_on_update_config',
+  'daemon_dist_generation_rollout',
 ] as const;
 
 const restartStatuses = [
@@ -63,10 +64,12 @@ const disabledReasons = [
   'approval_pending',
   'terminal_detached',
   'terminal_host_attached',
+  'non_destructive_refresh_unsupported',
   'windows_hosted_runner',
   'restart_already_running',
   'current_entrypoint_unknown',
   'runner_entrypoint_unknown',
+  'runner_generation_unattested',
   'unsupported_daemon_version',
 ] as const;
 
