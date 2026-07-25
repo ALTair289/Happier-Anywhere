@@ -97,10 +97,25 @@ function generateProviderSchemaFromPostgres(
         .replace(/^\s+/, '')
         .replace(/(\w+)\(\s*sort\s*:\s*\w+\s*\)/g, '$1');
 
+    if (opts.provider === "sqlite") {
+        body = stripRelationMapArguments(body);
+    }
+
     if (opts.provider === "mysql") {
         // MySQL cannot create UNIQUE/INDEX keys on BLOB/TEXT columns without a key length.
         // `PublicSessionShare.tokenHash` stores a sha256 digest (32 bytes) and must be indexed.
         body = body.replace(/^(\s*tokenHash\s+Bytes\s+)@unique\b/gm, "$1@db.VarBinary(32) @unique");
+
+        // Session-system-record namespace and kind are closed protocol enums. Bounding only these
+        // discriminator columns keeps their MySQL composite indexes below InnoDB's key-size limit.
+        body = body.replace(/^model SessionSystemRecord\s*\{[\s\S]*?^\}/m, (model) => model
+            .replace(/^(\s*namespace\s+String\b)(?![^\n]*@db\.)/m, "$1 @db.VarChar(32)")
+            .replace(/^(\s*kind\s+String\b)(?![^\n]*@db\.)/m, "$1 @db.VarChar(32)"));
+
+        // The canonical account-scoped recordId is a digest of the complete provider-usage key.
+        // Its unique constraint already owns identity; the expanded five-text-column duplicate
+        // index cannot fit within MySQL's InnoDB key-size limit.
+        body = body.replace(/^\s*@@unique\(\[accountId, providerId, accountSubjectId, quotaScope, quotaScopeIdKey\], map: "paur_identity_key"\)\s*$/m, "");
 
 	        // MySQL defaults `String` to VARCHAR(191), which is too small for our encrypted state blobs.
 	        body = body.replace(/^(\s*metadata\s+String\b)(?![^\n]*@db\.)/gm, "$1 @db.LongText");
@@ -120,6 +135,9 @@ function generateProviderSchemaFromPostgres(
 	        body = body.replace(/^(\s*scopeKey\s+String\b)(?![^\n]*@db\.)/gm, "$1 @db.LongText");
 	        body = body.replace(/^(\s*itemKey\s+String\b)(?![^\n]*@db\.)/gm, "$1 @db.LongText");
 	        body = body.replace(/^(\s*displayDbValue\s+String\?)(?![^\n]*@db\.)/gm, "$1 @db.LongText");
+	        body = body.replace(/^(\s*(?:folderHash|tagHash|scopeHash|itemHash)\s+String\b)(?![^\n]*@db\.)/gm, "$1 @db.VarChar(71)");
+	        body = body.replace(/^(\s*parentHash\s+String\?)(?![^\n]*@db\.)/gm, "$1 @db.VarChar(71)");
+	        body = body.replace(/^(\s*(?:scopeKind|itemKind|labelKind)\s+String\b)(?![^\n]*@db\.)/gm, "$1 @db.VarChar(32)");
 	    }
 
     const header = [
@@ -149,6 +167,59 @@ function generateProviderSchemaFromPostgres(
     ].join('\n');
 
     return normalizeSchemaText([header, '', generatorClient, '', datasourceDb, '', body].join('\n'));
+}
+
+function stripRelationMapArguments(schemaBody: string): string {
+    return schemaBody.replace(/@relation\(([^)]*)\)/g, (_match, args: string) => {
+        const keptArgs = splitTopLevelArgs(args).filter((arg) => !/^\s*map\s*:/.test(arg));
+        return `@relation(${keptArgs.map((arg) => arg.trim()).join(", ")})`;
+    });
+}
+
+function splitTopLevelArgs(args: string): string[] {
+    const out: string[] = [];
+    let start = 0;
+    let bracketDepth = 0;
+    let inString = false;
+    let escaped = false;
+
+    for (let i = 0; i < args.length; i += 1) {
+        const ch = args[i]!;
+        if (inString) {
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (ch === "\\") {
+                escaped = true;
+                continue;
+            }
+            if (ch === '"') {
+                inString = false;
+            }
+            continue;
+        }
+        if (ch === '"') {
+            inString = true;
+            escaped = false;
+            continue;
+        }
+        if (ch === "[") {
+            bracketDepth += 1;
+            continue;
+        }
+        if (ch === "]") {
+            bracketDepth = Math.max(0, bracketDepth - 1);
+            continue;
+        }
+        if (ch === "," && bracketDepth === 0) {
+            out.push(args.slice(start, i));
+            start = i + 1;
+        }
+    }
+
+    out.push(args.slice(start));
+    return out.filter((arg) => arg.trim().length > 0);
 }
 
 function resolveRepoRoot(): string {

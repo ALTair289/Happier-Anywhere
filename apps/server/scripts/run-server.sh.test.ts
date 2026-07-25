@@ -109,7 +109,7 @@ describe('run-server.sh', () => {
     expect(yarnLines[0]).toContain('YARN --cwd apps/server prisma migrate deploy --schema prisma/mysql/schema.prisma');
   });
 
-  it('runs migrate deploy for sqlite and derives DATABASE_URL from HAPPIER_SERVER_LIGHT_DATA_DIR when missing', async () => {
+  it('runs the canonical sqlite migration deploy script and derives DATABASE_URL when missing', async () => {
     const res = spawnSync('sh', [getScriptPath()], {
       env: {
         ...process.env,
@@ -127,7 +127,8 @@ describe('run-server.sh', () => {
     expect(res.status).toBe(0);
     const lines = await readLogLines(logPath);
     const yarnLines = lines.filter((l) => l.startsWith('YARN '));
-    expect(yarnLines[0]).toContain('YARN --cwd apps/server prisma migrate deploy --schema prisma/sqlite/schema.prisma');
+    expect(yarnLines[0]).toContain('YARN --cwd apps/server migrate:sqlite:deploy');
+    expect(yarnLines[0]).not.toContain('prisma migrate deploy');
     expect(lines.join('\n')).toContain('ENV DATABASE_URL=file:/data/server-light/happier-server-light.sqlite?socket_timeout=30&connection_limit=1');
     expect(yarnLines[yarnLines.length - 1]).toContain('YARN --cwd apps/server start:light');
   });

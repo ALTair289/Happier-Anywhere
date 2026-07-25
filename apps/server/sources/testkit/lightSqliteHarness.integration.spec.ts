@@ -61,7 +61,7 @@ describe("createLightSqliteHarness", () => {
                 initEncrypt: false,
                 initFiles: false,
             }),
-        ).rejects.toThrow(/prisma migrate deploy failed/i);
+        ).rejects.toThrow(/sqlite migration deploy failed/i);
 
         restoreEnvValues(envSnapshot);
         const after = await listHarnessDirs();

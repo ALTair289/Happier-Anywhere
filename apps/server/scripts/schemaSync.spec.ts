@@ -99,6 +99,93 @@ model InviteToken {
         expect(matches).toHaveLength(2);
     });
 
+    it("bounds MySQL session-system-record discriminator columns used in composite indexes", () => {
+        const master = `
+generator client { provider = "prisma-client-js" }
+
+datasource db {
+    provider = "postgresql"
+    url      = env("DATABASE_URL")
+}
+
+model SessionSystemRecord {
+    id        String @id
+    accountId String
+    sessionId String
+    namespace String
+    kind      String
+    localId   String
+}
+`;
+
+        const mysql = generateMySqlSchemaFromPostgres(master);
+        expect(mysql).toContain("namespace String @db.VarChar(32)");
+        expect(mysql).toContain("kind      String @db.VarChar(32)");
+    });
+
+    it("omits the redundant overwide MySQL provider-usage identity index", () => {
+        const master = `
+generator client { provider = "prisma-client-js" }
+
+datasource db {
+    provider = "postgresql"
+    url      = env("DATABASE_URL")
+}
+
+model ProviderAccountUsageRecord {
+    id                String @id
+    accountId         String
+    recordId          String
+    providerId        String
+    accountSubjectId  String
+    quotaScope        String
+    quotaScopeIdKey   String
+
+    @@unique([accountId, recordId])
+    @@unique([accountId, providerId, accountSubjectId, quotaScope, quotaScopeIdKey], map: "paur_identity_key")
+}
+`;
+
+        const mysql = generateMySqlSchemaFromPostgres(master);
+        expect(mysql).toContain("@@unique([accountId, recordId])");
+        expect(mysql).not.toContain("paur_identity_key");
+    });
+
+    it("strips SQLite relation maps while preserving index maps", () => {
+        const master = `
+generator client {
+    provider = "prisma-client-js"
+}
+
+datasource db {
+    provider = "postgresql"
+    url      = env("DATABASE_URL")
+}
+
+model Account {
+    id      String  @id
+    records Record[]
+}
+
+model Record {
+    id        String  @id
+    accountId String
+    account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade, map: "record_account_fkey")
+
+    @@index([accountId], map: "record_account_idx")
+}
+`;
+
+        const sqlite = generateSqliteSchemaFromPostgres(master);
+        expect(sqlite).toContain('@@index([accountId], map: "record_account_idx")');
+        expect(sqlite).toContain("Account @relation(fields: [accountId], references: [id], onDelete: Cascade)");
+        expect(sqlite).not.toContain('map: "record_account_fkey"');
+
+        const mysql = generateMySqlSchemaFromPostgres(master);
+        expect(mysql).toContain('map: "record_account_fkey"');
+        expect(mysql).toContain('@@index([accountId], map: "record_account_idx")');
+    });
+
 	    it("uses LongText for large encrypted state blobs in MySQL", () => {
 	        const master = `
 	generator client {
@@ -184,19 +271,27 @@ datasource db {
 model SessionOrganizationFolder {
     id             String @id
     folderKey      String
+    folderHash     String
     parentKey      String?
+    parentHash     String?
     displayDbValue String?
 }
 
 model SessionOrganizationOrderEntry {
-    id       String @id
-    scopeKey String
-    itemKey  String
+    id        String @id
+    scopeKind String
+    scopeKey  String
+    scopeHash String
+    itemKind  String
+    itemKey   String
+    itemHash  String
 }
 
 model SessionOrganizationLabel {
     id             String @id
+    labelKind      String
     scopeKey       String
+    scopeHash      String
     displayDbValue String?
 }
 `;
@@ -205,7 +300,14 @@ model SessionOrganizationLabel {
         expect(mysql).toContain("folderKey      String @db.LongText");
         expect(mysql).toContain("parentKey      String? @db.LongText");
         expect(mysql).toContain("displayDbValue String? @db.LongText");
-        expect(mysql).toContain("scopeKey String @db.LongText");
-        expect(mysql).toContain("itemKey  String @db.LongText");
+        expect(mysql).toContain("scopeKey  String @db.LongText");
+        expect(mysql).toContain("itemKey   String @db.LongText");
+        expect(mysql).toContain("folderHash     String @db.VarChar(71)");
+        expect(mysql).toContain("parentHash     String? @db.VarChar(71)");
+        expect(mysql).toContain("scopeKind String @db.VarChar(32)");
+        expect(mysql).toContain("scopeHash String @db.VarChar(71)");
+        expect(mysql).toContain("itemKind  String @db.VarChar(32)");
+        expect(mysql).toContain("itemHash  String @db.VarChar(71)");
+        expect(mysql).toContain("labelKind      String @db.VarChar(32)");
     });
 	});

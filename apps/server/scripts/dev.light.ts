@@ -1,6 +1,6 @@
 import { mkdir } from 'node:fs/promises';
 import { applyLightDefaultEnv } from '../sources/flavors/light/env';
-import { buildLightDevPlan, recordLightDevMigrationSignature } from './dev.lightPlan';
+import { buildLightDevPlan } from './dev.lightPlan';
 import { runCommand } from './runCommand';
 
 async function main() {
@@ -18,8 +18,9 @@ async function main() {
     await mkdir(dbDir, { recursive: true });
 
     if (plan.shouldRunMigrateDeploy && plan.migrateDeployArgs) {
+        console.log(JSON.stringify({ happierStackTransition: 'migration_started' }));
         await runCommand('yarn', plan.migrateDeployArgs, env);
-        await recordLightDevMigrationSignature(plan);
+        console.log(JSON.stringify({ happierStackTransition: 'migration_completed' }));
     }
 
     // Run the light flavor.

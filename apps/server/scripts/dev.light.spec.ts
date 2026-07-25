@@ -31,7 +31,12 @@ async function readLogLines(path: string): Promise<string[]> {
         .filter(Boolean);
 }
 
-function runDevLightScript(params: Readonly<{ binDir: string; tmpDir: string; lightDataDir: string }>) {
+function runDevLightScript(params: Readonly<{
+    binDir: string;
+    tmpDir: string;
+    lightDataDir: string;
+    migrateMode?: 'always' | 'auto' | 'skip';
+}>) {
     return spawnSync('sh', ['-c', `
             set -eu
             cd "${getServerDir()}"
@@ -46,6 +51,7 @@ function runDevLightScript(params: Readonly<{ binDir: string; tmpDir: string; li
             HAPPY_SERVER_LIGHT_FILES_DIR="${join(params.lightDataDir, 'files')}" \
             HAPPIER_SERVER_LIGHT_DB_DIR="${join(params.lightDataDir, 'db')}" \
             HAPPY_SERVER_LIGHT_DB_DIR="${join(params.lightDataDir, 'db')}" \
+            HAPPIER_STACK_MIGRATE_MODE="${params.migrateMode ?? ''}" \
             node --import tsx "${getScriptPath()}"
         `], {
         env: {
@@ -81,12 +87,14 @@ describe('dev.light.ts', () => {
         const result = runDevLightScript({ binDir, tmpDir, lightDataDir });
 
         expect(result.status).toBe(0);
+        expect(result.stdout).toContain('{"happierStackTransition":"migration_started"}');
+        expect(result.stdout).toContain('{"happierStackTransition":"migration_completed"}');
         const lines = await readLogLines(logPath);
         expect(lines).toEqual(['YARN -s migrate:sqlite:deploy', 'YARN -s start:light']);
     });
 
-    it('skips light migrate on the second run when the migration signature is unchanged', async () => {
-        const lightDataDir = join(tmpDir, 'server-light-cache-hit');
+    it('does not let a previous local run authorize skipping migrations', async () => {
+        const lightDataDir = join(tmpDir, 'server-light-repeat');
 
         const first = runDevLightScript({ binDir, tmpDir, lightDataDir });
         expect(first.status).toBe(0);
@@ -95,6 +103,15 @@ describe('dev.light.ts', () => {
         const second = runDevLightScript({ binDir, tmpDir, lightDataDir });
         expect(second.status).toBe(0);
 
+        const lines = await readLogLines(logPath);
+        expect(lines).toEqual(['YARN -s migrate:sqlite:deploy', 'YARN -s start:light']);
+    }, 60_000);
+
+    it('skips light migrate only when the Stack planner explicitly admits skip', async () => {
+        const lightDataDir = join(tmpDir, 'server-light-explicit-skip');
+        const result = runDevLightScript({ binDir, tmpDir, lightDataDir, migrateMode: 'skip' });
+
+        expect(result.status).toBe(0);
         const lines = await readLogLines(logPath);
         expect(lines).toEqual(['YARN -s start:light']);
     }, 60_000);
