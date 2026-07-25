@@ -2,13 +2,19 @@ import Fastify from "fastify";
 import { describe, expect, it, vi } from "vitest";
 
 const captureExceptionSpy = vi.hoisted(() => vi.fn());
+const capturedScopes = vi.hoisted(() => [] as Array<{
+    tags: Array<[string, unknown]>;
+    extras: Array<[string, unknown]>;
+}>);
 
 vi.mock("@sentry/node", () => ({
     getClient: () => ({}),
     withScope: (callback: (scope: any) => void) => {
+        const captured = { tags: [] as Array<[string, unknown]>, extras: [] as Array<[string, unknown]> };
+        capturedScopes.push(captured);
         callback({
-            setTag: vi.fn(),
-            setExtra: vi.fn(),
+            setTag: (key: string, value: unknown) => captured.tags.push([key, value]),
+            setExtra: (key: string, value: unknown) => captured.extras.push([key, value]),
             setUser: vi.fn(),
         });
     },
@@ -47,5 +53,26 @@ describe("app/api/utils/enableErrorHandlers (sentry)", () => {
         const response = await app.inject({ method: "GET", url: "/bad" });
         expect(response.statusCode).toBe(400);
         expect(captureExceptionSpy).toHaveBeenCalledTimes(0);
+    });
+
+    it("templates public-share capability paths before adding Sentry context", async () => {
+        captureExceptionSpy.mockClear();
+        capturedScopes.length = 0;
+        const secret = "SENTINEL_PUBLIC_SHARE_CAPABILITY";
+        const app = Fastify({ logger: false }) as any;
+        enableErrorHandlers(app);
+        app.get("/v1/public-share/:token", async () => {
+            throw new Error(`boom at /v1/public-share/${secret}`);
+        });
+
+        const response = await app.inject({ method: "GET", url: `/v1/public-share/${secret}` });
+
+        expect(response.statusCode).toBe(500);
+        expect(JSON.stringify(capturedScopes)).not.toContain(secret);
+        expect(capturedScopes.flatMap((scope) => scope.tags)).toContainEqual([
+            "http.path",
+            "/v1/public-share/:token",
+        ]);
+        expect(String(captureExceptionSpy.mock.calls.at(-1)?.[0])).not.toContain(secret);
     });
 });
