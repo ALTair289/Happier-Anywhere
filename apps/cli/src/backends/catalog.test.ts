@@ -254,7 +254,6 @@ describe('AGENTS', () => {
     await expect(getConnectedServiceMaterializer('kilo')).resolves.toBeNull();
   });
 
-  it('resolves connected-service state sharing descriptors through optional backend catalog hooks', async () => {
   it('retries a rejected catalog hook load while preserving singleflight and successful caching', async () => {
     const original = AGENTS.grok;
     if (!original) throw new Error('Missing grok catalog entry');
@@ -311,6 +310,7 @@ describe('AGENTS', () => {
     }
   });
 
+  it('resolves connected-service state sharing descriptors through optional backend catalog hooks', async () => {
     await expect(getConnectedServiceStateSharingDescriptor('codex')).resolves.toMatchObject({
       providerId: 'codex',
       providerSupportStatus: 'supported',
