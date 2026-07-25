@@ -35,6 +35,15 @@ describe('SessionUsageLimitRecoveryV1', () => {
     }).success).toBe(false);
   });
 
+  it('preserves the exact runtime-auth recovery attempt identity when projected', () => {
+    expect(SessionUsageLimitRecoveryV1Schema.parse({
+      ...baseIntent,
+      runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:exact-1',
+    })).toMatchObject({
+      runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:exact-1',
+    });
+  });
+
   it('accepts group recovery auth selections without a known profile id', () => {
     expect(SessionUsageLimitRecoveryV1Schema.safeParse({
       ...baseIntent,
@@ -81,14 +90,12 @@ describe('SessionUsageLimitRecoveryV1', () => {
     });
   });
 
-  it('resolves resumePromptMode by explicit, existing intent, account, group, provider, then default precedence', () => {
+  it('resolves resumePromptMode by explicit, existing intent, group, account, then default precedence', () => {
     expect(resolveSessionUsageLimitRecoveryResumePromptModeV1({
       explicit: 'standard',
       existingIntent: { resumePromptMode: 'off' },
       accountSettings: { usageLimitRecoverySettingsV1: { resumePromptMode: 'off' } },
       groupPolicy: { resumePromptMode: 'off' },
-      providerConfig: { resumePromptMode: 'off' },
-      defaultMode: 'off',
     })).toBe('standard');
 
     expect(resolveSessionUsageLimitRecoveryResumePromptModeV1({
@@ -96,27 +103,22 @@ describe('SessionUsageLimitRecoveryV1', () => {
       existingIntent: { resumePromptMode: 'off' },
       accountSettings: { usageLimitRecoverySettingsV1: { resumePromptMode: 'standard' } },
       groupPolicy: { resumePromptMode: 'standard' },
-      providerConfig: { resumePromptMode: 'standard' },
     })).toBe('off');
 
     expect(resolveSessionUsageLimitRecoveryResumePromptModeV1({
       existingIntent: {},
       accountSettings: { usageLimitRecoverySettingsV1: { resumePromptMode: 'off' } },
       groupPolicy: { resumePromptMode: 'standard' },
-      providerConfig: { resumePromptMode: 'standard' },
-    })).toBe('off');
+    })).toBe('standard');
 
     expect(resolveSessionUsageLimitRecoveryResumePromptModeV1({
       accountSettings: {},
       groupPolicy: { resumePromptMode: 'off' },
-      providerConfig: { resumePromptMode: 'standard' },
     })).toBe('off');
 
     expect(resolveSessionUsageLimitRecoveryResumePromptModeV1({
       groupPolicy: {},
-      providerConfig: { resumePromptMode: 'off' },
-      defaultMode: 'standard',
-    })).toBe('off');
+    })).toBe('standard');
 
     expect(resolveSessionUsageLimitRecoveryResumePromptModeV1({})).toBe('standard');
   });
@@ -130,6 +132,6 @@ describe('SessionUsageLimitRecoveryV1', () => {
     expect(resolveSessionUsageLimitRecoveryResumePromptModeV1({
       accountSettings: { usageLimitRecoverySettingsV1: { resumePromptMode: 'custom' } },
       groupPolicy: { resumePromptMode: 'off' },
-    })).toBe('custom');
+    })).toBe('off');
   });
 });

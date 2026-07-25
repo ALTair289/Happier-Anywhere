@@ -53,6 +53,7 @@ export const SessionUsageLimitRecoveryV1Schema = z
     status: z.enum(['armed', 'waiting', 'checking', 'paused', 'exhausted', 'cancelled']),
     issueFingerprint: z.string().trim().min(1),
     armedAtMs: z.number().int().nonnegative(),
+    runtimeAuthRecoveryAttemptId: z.string().trim().min(1).optional(),
     resetAtMs: z.number().int().nonnegative().nullable(),
     nextCheckAtMs: z.number().int().nonnegative().nullable(),
     attemptCount: z.number().int().nonnegative(),
@@ -89,20 +90,15 @@ function readAccountSettingsResumePromptMode(value: unknown): SessionUsageLimitR
 export function resolveSessionUsageLimitRecoveryResumePromptModeV1(input: Readonly<{
   explicit?: unknown;
   existingIntent?: unknown;
-  accountSettings?: unknown;
   groupPolicy?: unknown;
-  providerConfig?: unknown;
-  defaultMode?: unknown;
+  accountSettings?: unknown;
 }>): SessionUsageLimitRecoveryResumePromptModeV1 {
   const existingIntent = readRecord(input.existingIntent);
   const groupPolicy = readRecord(input.groupPolicy);
-  const providerConfig = readRecord(input.providerConfig);
 
   return readResumePromptMode(input.explicit)
     ?? readResumePromptMode(existingIntent?.resumePromptMode)
-    ?? readAccountSettingsResumePromptMode(input.accountSettings)
     ?? readResumePromptMode(groupPolicy?.resumePromptMode)
-    ?? readResumePromptMode(providerConfig?.resumePromptMode)
-    ?? readResumePromptMode(input.defaultMode)
+    ?? readAccountSettingsResumePromptMode(input.accountSettings)
     ?? 'standard';
 }
