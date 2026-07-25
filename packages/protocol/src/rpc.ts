@@ -78,7 +78,6 @@ export const RPC_METHODS = {
   DAEMON_SESSION_HANDOFF_COMMIT: 'daemon.sessionHandoff.commit',
   DAEMON_SESSION_HANDOFF_ABORT: 'daemon.sessionHandoff.abort',
   DAEMON_SESSION_HANDOFF_STATUS_GET: 'daemon.sessionHandoff.status.get',
-  SESSION_CONTINUE_WITH_REPLAY: 'session.continueWithReplay',
   DAEMON_SESSION_HANDOFF_CAPABILITY_V2_GET: 'daemon.sessionHandoff.capability.v2.get',
   DAEMON_SESSION_HANDOFF_PREPARE_TARGET_V2: 'daemon.sessionHandoff.prepareTarget.v2',
   DAEMON_SESSION_HANDOFF_PREPARE_TARGET_RESULT_GET_V2: 'daemon.sessionHandoff.prepareTargetResult.get.v2',
@@ -86,6 +85,7 @@ export const RPC_METHODS = {
   DAEMON_SESSION_HANDOFF_TARGET_CONFIRM_V2: 'daemon.sessionHandoff.targetConfirm.v2',
   DAEMON_SESSION_HANDOFF_COMMIT_V2: 'daemon.sessionHandoff.commit.v2',
   DAEMON_SESSION_HANDOFF_ABORT_V2: 'daemon.sessionHandoff.abort.v2',
+  SESSION_CONTINUE_WITH_REPLAY: 'session.continueWithReplay',
   SESSION_FORK: 'session.fork',
   BASH: 'bash',
   PREVIEW_ENV: 'preview-env',
@@ -179,20 +179,6 @@ const SOCKET_RPC_SESSION_WRITE_AUTHORIZATION_METHODS = new Set<string>([
 
 function normalizeSocketRpcSessionId(value: unknown): string | null {
   if (typeof value !== 'string') return null;
-const SOCKET_RPC_PROVIDER_STARTING_METHODS = new Set<string>([
-  RPC_METHODS.SPAWN_HAPPY_SESSION,
-  RPC_METHODS.SESSION_CONTINUE_WITH_REPLAY,
-  RPC_METHODS.SESSION_FORK,
-  RPC_METHODS.DAEMON_SESSION_CONNECTED_SERVICE_AUTH_SWITCH,
-  RPC_METHODS.DAEMON_SESSION_RUNNER_RESTART,
-  RPC_METHODS.DAEMON_SESSION_RUNNER_RESTART_ALL,
-  RPC_METHODS.DAEMON_SESSION_USAGE_LIMIT_WAIT_RESUME_ENABLE,
-  RPC_METHODS.DAEMON_SESSION_USAGE_LIMIT_CHECK_NOW,
-  RPC_METHODS.DAEMON_SESSION_HANDOFF_TARGET_RESUME_V2,
-  RPC_METHODS.DAEMON_DIRECT_SESSION_TAKEOVER,
-  RPC_METHODS.DAEMON_DIRECT_SESSION_TAKEOVER_PERSIST,
-]);
-
   const trimmed = value.trim();
   if (!trimmed) return null;
   if (trimmed.length > MAX_SOCKET_RPC_AUTHORIZATION_SESSION_ID_LENGTH) return null;
