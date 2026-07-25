@@ -27,6 +27,11 @@ on:
         required: false
         default: ""
         type: string
+      retry_version:
+        description: "Existing immutable version to re-promote after an interrupted rolling upload"
+        required: false
+        default: ""
+        type: string
   workflow_call:
     inputs:
       channel:
@@ -44,12 +49,16 @@ on:
         required: false
         default: ""
         type: string
+      retry_version:
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: publish-cli-binaries-${{ inputs.channel }}-${{ github.ref }}
+  group: publish-cli-binaries-${{ github.repository }}-${{ inputs.channel }}
   cancel-in-progress: false
 
 jobs:
@@ -70,6 +79,7 @@ jobs:
 
   publish:
     needs: [release_actor_guard]
+    if: ${{ inputs.retry_version == '' }}
     runs-on: ubuntu-latest
     environment: release-shared
     steps:
@@ -161,3 +171,58 @@ jobs:
 
     permissions:
       contents: write
+
+  promote_existing:
+    name: Re-promote exact immutable CLI version after interrupted rolling upload
+    needs: [release_actor_guard]
+    if: ${{ inputs.retry_version != '' }}
+    runs-on: ubuntu-latest
+    environment: release-shared
+    permissions:
+      contents: read
+    steps:
+      - name: Enforce stable publishing gate
+        if: ${{ inputs.channel == 'stable' && inputs.allow_stable != true }}
+        run: exit 1
+      - name: Checkout workflow control bytes
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+      - name: Create narrowly scoped publish token
+        id: app_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+      - name: Bind exact immutable version tag SHA
+        id: source
+        env:
+          RETRY_VERSION: ${{ inputs.retry_version }}
+        run: |
+          node scripts/pipeline/github/resolve-authorized-release-source.mjs \
+            --source-ref "refs/tags/cli-v$RETRY_VERSION" \
+            --remote origin \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Install minisign for immutable bundle verification
+        uses: ./.github/actions/bootstrap-minisign
+      - name: Re-promote exact verified immutable release bytes
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          RETRY_VERSION: ${{ inputs.retry_version }}
+          AUTHORIZED_SHA: ${{ steps.source.outputs.authorized_sha }}
+        run: |
+          node scripts/pipeline/release/publish-cli-binaries.mjs \
+            --phase promote-rolling --channel "${{ inputs.channel }}" \
+            --allow-stable "${{ inputs.allow_stable }}" \
+            --version "$RETRY_VERSION" --authorized-sha "$AUTHORIZED_SHA" \
+            --release-message "${{ inputs.release_message }}" \
+            --run-contracts false --check-installers false
