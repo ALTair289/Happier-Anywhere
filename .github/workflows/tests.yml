@@ -1674,6 +1674,20 @@ jobs:
         with:
           args: --frozen-lockfile --ignore-engines
 
+      - name: Prepare immutable server-v0.2.1 artifact
+        run: |
+          set -euo pipefail
+          artifact_dir="${RUNNER_TEMP}/happier-server-v0.2.1"
+          echo "HAPPIER_E2E_RELEASED_SERVER_V0_2_1_DIR=${artifact_dir}" >> "$GITHUB_ENV"
+          HAPPIER_E2E_RELEASED_SERVER_V0_2_1_DIR="${artifact_dir}" \
+            yarn workspace @happier-dev/tests prepare:compat:released-server-v0.2.1
+
+      - name: Install exact-compatibility Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Run exact server-v0.2.1 compatibility gate
+        run: yarn workspace @happier-dev/tests test:compat:released-server-v0.2.1
+
       - name: Run core e2e suite (slow)
         env:
           CI: "1"

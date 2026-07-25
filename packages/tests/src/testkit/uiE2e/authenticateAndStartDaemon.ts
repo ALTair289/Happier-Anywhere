@@ -13,30 +13,57 @@ export async function authenticateAndStartDaemon(params: Readonly<{
   testDir: string;
   cliHomeDir: string;
   serverUrl: string;
+  cliServerUrl?: string;
   uiBaseUrl: string;
   createAccount?: boolean;
+  accountReadyTimeoutMs?: number;
+  allowStoredCredentialsWithoutReady?: boolean;
+  beforeTerminalConnect?: (page: Page) => Promise<void>;
   initialUiGotoTimeoutMs?: number;
   initialUiReadyTimeoutMs?: number;
   terminalConnectUrlTimeoutMs?: number;
   daemonStartupTimeoutMs?: number;
   extraEnv?: NodeJS.ProcessEnv;
 }>): Promise<StartedDaemon> {
+  const cliServerUrl = params.cliServerUrl ?? params.serverUrl;
   await gotoCommittedWithRetries(params.page, params.uiBaseUrl, params.initialUiGotoTimeoutMs);
   await waitForInitialAppUi({
     page: params.page,
     timeoutMs: params.initialUiReadyTimeoutMs,
     reloadOnFailure: false,
   });
-  await ensureAccountReadyForConnect({
-    page: params.page,
-    timeoutMs: 120_000,
-    clickCreateAccount: params.createAccount !== false,
-  });
+  try {
+    await ensureAccountReadyForConnect({
+      page: params.page,
+      timeoutMs: params.accountReadyTimeoutMs ?? 120_000,
+      clickCreateAccount: params.createAccount !== false,
+    });
+  } catch (error) {
+    const hasStoredCredentials = params.allowStoredCredentialsWithoutReady === true
+      && await params.page.evaluate(() => {
+        for (let index = 0; index < localStorage.length; index += 1) {
+          const key = localStorage.key(index);
+          if (!key?.startsWith('auth_credentials')) continue;
+          const raw = localStorage.getItem(key);
+          if (!raw) continue;
+          try {
+            const parsed = JSON.parse(raw) as { token?: unknown };
+            if (typeof parsed.token === 'string' && parsed.token.trim()) return true;
+          } catch {
+            // Keep scanning; a malformed unrelated server scope is not enough.
+          }
+        }
+        return false;
+      });
+    if (!hasStoredCredentials) throw error;
+  }
+
+  await params.beforeTerminalConnect?.(params.page);
 
   const cliLogin = await startCliAuthLoginForTerminalConnect({
     testDir: params.testDir,
     cliHomeDir: params.cliHomeDir,
-    serverUrl: params.serverUrl,
+    serverUrl: cliServerUrl,
     webappUrl: params.uiBaseUrl,
     connectUrlTimeoutMs: params.terminalConnectUrlTimeoutMs,
     env: {
@@ -67,7 +94,7 @@ export async function authenticateAndStartDaemon(params: Readonly<{
       ...(params.extraEnv ?? {}),
       CI: '1',
       HAPPIER_HOME_DIR: params.cliHomeDir,
-      HAPPIER_SERVER_URL: params.serverUrl,
+      HAPPIER_SERVER_URL: cliServerUrl,
       HAPPIER_WEBAPP_URL: params.uiBaseUrl,
       HAPPIER_DISABLE_CAFFEINATE: '1',
       HAPPIER_VARIANT: 'dev',

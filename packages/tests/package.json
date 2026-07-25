@@ -8,6 +8,8 @@
     "test": "node scripts/run-vitest-with-heartbeat.mjs --config vitest.core.config.ts",
     "test:core:fast": "node scripts/run-vitest-with-heartbeat.mjs --config vitest.core.fast.config.ts",
     "test:core:slow": "node scripts/run-vitest-with-heartbeat.mjs --config vitest.core.slow.config.ts $(find suites/core-e2e -name '*.slow.e2e.test.ts' -print | sort)",
+    "prepare:compat:released-server-v0.2.1": "tsx scripts/prepare-released-server-v0.2.1.ts",
+    "test:compat:released-server-v0.2.1": "yarn -s prepare:compat:released-server-v0.2.1 && node scripts/run-vitest-with-heartbeat.mjs --config vitest.core.slow.config.ts suites/core-e2e/pendingQueue.releasedServerV021.cli.slow.e2e.test.ts && node scripts/run-playwright-with-heartbeat.mjs --config playwright.ui.config.mjs suites/ui-e2e/pendingQueue.releasedServerV021.firstPrompt.spec.ts",
     "test:stress": "node scripts/run-vitest-with-heartbeat.mjs --config vitest.stress.config.ts",
     "test:providers": "node scripts/run-vitest-with-heartbeat.mjs --config vitest.providers.config.ts",
     "test:ui:e2e": "node scripts/run-playwright-with-heartbeat.mjs --config playwright.ui.config.mjs",
