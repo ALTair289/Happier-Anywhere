@@ -12,6 +12,9 @@ describe("resolveConnectedServicesFeature", () => {
             accountGroups: { enabled: true },
             accountFallback: { enabled: true },
         });
+        expect(feature.capabilities?.connectedServices).toEqual({
+            credentialDelete: { revisionGuard: true },
+        });
     });
 
     it("reads child enablement independently from connected services enablement", () => {

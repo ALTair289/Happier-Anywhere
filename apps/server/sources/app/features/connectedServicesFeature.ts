@@ -19,5 +19,10 @@ export function resolveConnectedServicesFeature(
                 accountFallback: { enabled: accountFallbackEnabled },
             },
         },
+        capabilities: {
+            connectedServices: {
+                credentialDelete: { revisionGuard: true },
+            },
+        },
     };
 }
