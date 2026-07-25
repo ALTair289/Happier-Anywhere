@@ -1935,7 +1935,7 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
             ...(modelOverrideRaw === null
               ? { modelOverride: null }
               : typeof modelOverrideRaw === 'string' && modelOverrideRaw.trim().length > 0
-                ? { modelOverride: modelOverrideRaw.trim() }
+                ? { modelOverride: modelOverrideRaw }
                 : {}),
             ...(typeof (parsed.data as any).wait === 'boolean' ? { wait: (parsed.data as any).wait } : {}),
             ...(typeof (parsed.data as any).timeoutSeconds === 'number' ? { timeoutSeconds: (parsed.data as any).timeoutSeconds } : {}),
@@ -2003,7 +2003,7 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
           if (!deps.sessionModelSet) {
             return { ok: false, errorCode: 'unsupported_action', error: 'unsupported_action:session.model.set' };
           }
-          const modelId = normalizeId((parsed.data as any).modelId);
+          const modelId = readOpaqueIdentifier((parsed.data as any).modelId);
           if (!modelId) return { ok: false, errorCode: 'invalid_parameters', error: 'invalid_parameters' };
           const serverId = resolveServerIdForSession(deps, ctx, sessionId);
           const res = await deps.sessionModelSet({ sessionId, modelId, ...(serverId ? { serverId } : {}) });
@@ -2165,14 +2165,10 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
           }
           const data = parsed.data as Record<string, unknown>;
           const issueFingerprint = data.issueFingerprint;
-          const armedAtMs = data.armedAtMs;
-          const runtimeAuthRecoveryAttemptId = data.runtimeAuthRecoveryAttemptId;
           const serverId = resolveServerIdForSession(deps, ctx, sessionId);
           const res = await deps.sessionUsageLimitWaitResumeCancel({
             sessionId,
             ...(typeof issueFingerprint === 'string' || issueFingerprint === null ? { issueFingerprint } : {}),
-            ...(typeof armedAtMs === 'number' ? { armedAtMs } : {}),
-            ...(typeof runtimeAuthRecoveryAttemptId === 'string' ? { runtimeAuthRecoveryAttemptId } : {}),
             ...(serverId ? { serverId } : {}),
           });
           return { ok: true, result: normalizeUsageLimitActionResult(res, sessionId) };

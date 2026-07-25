@@ -162,6 +162,23 @@ describe('createActionExecutor (session control)', () => {
     expect(sessionModelSet).toHaveBeenCalledWith({ sessionId: 's1', modelId: 'default', serverId: 'server-a' });
   });
 
+  it('preserves exact nonblank opaque model identifiers for session.model.set', async () => {
+    const sessionModelSet = vi.fn(async () => ({ ok: true }));
+    const executor = createExecutor({
+      sessionModelSet,
+      resolveServerIdForSessionId: () => 'server-a',
+    });
+
+    const res = await executor.execute(
+      'session.model.set' as any,
+      { sessionId: 's1', modelId: ' model-a ' },
+      { surface: 'cli', defaultSessionId: null },
+    );
+
+    expect(res).toEqual({ ok: true, result: { ok: true } });
+    expect(sessionModelSet).toHaveBeenCalledWith({ sessionId: 's1', modelId: ' model-a ', serverId: 'server-a' });
+  });
+
   it('executes session.archive via deps.sessionArchiveSet', async () => {
     const sessionArchiveSet = vi.fn(async () => ({ ok: true }));
     const executor = createExecutor({
@@ -506,12 +523,7 @@ describe('createActionExecutor (session control)', () => {
     );
     await executor.execute(
       'session.usageLimit.waitResume.cancel' as any,
-      {
-        sessionId: 's1',
-        issueFingerprint: 'usage-limit:s1:reset',
-        armedAtMs: 123,
-        runtimeAuthRecoveryAttemptId: 'runtime-auth-attempt:exact-1',
-      },
+      { sessionId: 's1', issueFingerprint: null },
       { surface: 'cli' },
     );
     await executor.execute('session.usageLimit.checkNow' as any, { sessionId: 's1', provider: ' codex ' }, { surface: 'cli' });
