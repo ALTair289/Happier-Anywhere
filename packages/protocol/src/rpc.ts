@@ -229,6 +229,8 @@ export const SESSION_RPC_METHODS = {
   SESSION_STRUCTURED_QUESTION_RESPOND_V1: 'session.structuredQuestion.respond.v1',
   SESSION_USER_MESSAGE_SEND: 'session.userMessage.send',
   SESSION_PENDING_QUEUE_MATERIALIZE_NEXT: 'session.pendingQueue.materializeNext',
+  SESSION_PENDING_QUEUE_WAKE_CAPABILITY_GET_V1: 'session.pendingQueue.wakeCapability.v1.get',
+  SESSION_PENDING_QUEUE_WAKE_V1: 'session.pendingQueue.wake.v1',
   SESSION_WORK_STATE_GET: 'session.workState.get',
   SESSION_GOAL_GET: 'session.goal.get',
   SESSION_GOAL_SET: 'session.goal.set',

@@ -32,6 +32,16 @@ export {
 } from './connect/connectedServiceCredentialBinding.js';
 
 export {
+  SessionPendingQueueLegacyMaterializeDeferredResponseV0Schema,
+  SessionPendingQueueWakeCapabilityRequestV1Schema,
+  SessionPendingQueueWakeCapabilityResponseV1Schema,
+  SessionPendingQueueWakeRequestV1Schema,
+  SessionPendingQueueWakeResponseV1Schema,
+  type SessionPendingQueueLegacyMaterializeDeferredResponseV0,
+  type SessionPendingQueueWakeCapabilityResponseV1,
+  type SessionPendingQueueWakeResponseV1,
+} from './sessionControl/sessionPendingQueueWakeV1.js';
+export {
   DaemonSessionGoalClearRequestV1Schema,
   DaemonSessionGoalGetRequestV1Schema,
   DaemonSessionGoalSetRequestV1Schema,
