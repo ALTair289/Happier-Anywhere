@@ -609,6 +609,7 @@ describe("connectRoutes connected service auth groups (integration)", () => {
             headers: authHeaders(user.id),
             payload: {
                 expectedGeneration: 0,
+                expectedRuntimeStateRevision: 0,
                 memberStates: [
                     {
                         profileId: "work",
@@ -635,6 +636,7 @@ describe("connectRoutes connected service auth groups (integration)", () => {
             headers: authHeaders(user.id),
             payload: {
                 expectedGeneration: 0,
+                expectedRuntimeStateRevision: 1,
                 memberStates: [
                     {
                         profileId: "work",
@@ -702,6 +704,7 @@ describe("connectRoutes connected service auth groups (integration)", () => {
             headers: authHeaders(user.id),
             payload: {
                 expectedGeneration: 0,
+                expectedRuntimeStateRevision: 0,
                 memberStates: [
                     {
                         profileId: "plan-blocked",
@@ -796,6 +799,7 @@ describe("connectRoutes connected service auth groups (integration)", () => {
                 headers: authHeaders(user.id),
                 payload: {
                     expectedGeneration: 0,
+                    expectedRuntimeStateRevision: 0,
                     memberStates: [{ profileId: "backup", state: blockedState }],
                 },
             })).statusCode).toBe(200);
@@ -863,6 +867,7 @@ describe("connectRoutes connected service auth groups (integration)", () => {
                 headers: authHeaders(user.id),
                 payload: {
                     expectedGeneration: 0,
+                    expectedRuntimeStateRevision: 0,
                     memberStates: [
                         {
                             profileId: "backup",
@@ -927,6 +932,7 @@ describe("connectRoutes connected service auth groups (integration)", () => {
             headers: authHeaders(user.id),
             payload: {
                 expectedGeneration: 0,
+                expectedRuntimeStateRevision: 0,
                 memberStates: [
                     {
                         profileId: "work",
@@ -999,6 +1005,7 @@ describe("connectRoutes connected service auth groups (integration)", () => {
             headers: authHeaders(user.id),
             payload: {
                 expectedGeneration: 0,
+                expectedRuntimeStateRevision: 0,
                 memberStates: [
                     {
                         profileId: "work",
@@ -1078,7 +1085,7 @@ describe("connectRoutes connected service auth groups (integration)", () => {
         });
     });
 
-    it("canonicalizes a stored-null synthesized active profile through PATCH and active-profile routes", async () => {
+    it("preserves stored-null active profile truth until an explicit mutation selects a member", async () => {
         const user = await createAccount("pk-groups-stored-null-fallback-canonicalize");
         await createConnectedProfile(user.id, "openai-codex", "work");
         await createConnectedProfile(user.id, "openai-codex", "backup");
@@ -1104,7 +1111,7 @@ describe("connectRoutes connected service auth groups (integration)", () => {
             headers: authHeaders(user.id),
         });
         expect(patchBefore.statusCode).toBe(200);
-        expect(patchBefore.json().group).toMatchObject({ activeProfileId: "work", generation: 0 });
+        expect(patchBefore.json().group).toMatchObject({ activeProfileId: null, generation: 0 });
         expect(await readStoredAuthGroupActiveState({
             accountId: user.id,
             serviceId: "openai-codex",
@@ -1165,7 +1172,7 @@ describe("connectRoutes connected service auth groups (integration)", () => {
         expect(postCursor).toBeGreaterThan(patchCursor ?? -1);
     });
 
-    it("treats explicit null PATCH against a stored-null synthesized active profile as idempotent", async () => {
+    it("treats explicit null PATCH against a stored-null active profile as idempotent", async () => {
         const user = await createAccount("pk-groups-stored-null-fallback-null-idempotent");
         await createConnectedProfile(user.id, "openai-codex", "work");
         await createConnectedProfile(user.id, "openai-codex", "backup");
@@ -1184,7 +1191,7 @@ describe("connectRoutes connected service auth groups (integration)", () => {
             headers: authHeaders(user.id),
         });
         expect(before.statusCode).toBe(200);
-        expect(before.json().group).toMatchObject({ activeProfileId: "work", generation: 0 });
+        expect(before.json().group).toMatchObject({ activeProfileId: null, generation: 0 });
         expect(await readStoredAuthGroupActiveState({
             accountId: user.id,
             serviceId: "openai-codex",
@@ -1200,7 +1207,7 @@ describe("connectRoutes connected service auth groups (integration)", () => {
         });
 
         expect(patched.statusCode).toBe(200);
-        expect(patched.json().group).toMatchObject({ activeProfileId: "work", generation: 0 });
+        expect(patched.json().group).toMatchObject({ activeProfileId: null, generation: 0 });
         expect(await readStoredAuthGroupActiveState({
             accountId: user.id,
             serviceId: "openai-codex",
@@ -1216,7 +1223,7 @@ describe("connectRoutes connected service auth groups (integration)", () => {
         });
 
         expect(repeated.statusCode).toBe(200);
-        expect(repeated.json().group).toMatchObject({ activeProfileId: "work", generation: 0 });
+        expect(repeated.json().group).toMatchObject({ activeProfileId: null, generation: 0 });
         expect(await readStoredAuthGroupActiveState({
             accountId: user.id,
             serviceId: "openai-codex",
@@ -2450,6 +2457,7 @@ describe("connectRoutes connected service auth groups (integration)", () => {
             headers: authHeaders(user.id),
             payload: {
                 expectedGeneration: 0,
+                expectedRuntimeStateRevision: 0,
                 state: {
                     status: "exhausted",
                     lastSwitchReason: "usage_limit",
@@ -2476,6 +2484,7 @@ describe("connectRoutes connected service auth groups (integration)", () => {
         expect(updated.json()).toEqual({
             group: expect.objectContaining({
                 generation: 0,
+                runtimeStateRevision: 1,
                 state: expect.objectContaining({ status: "exhausted", lastSwitchReason: "usage_limit" }),
                 members: [
                     expect.objectContaining({
@@ -2494,6 +2503,60 @@ describe("connectRoutes connected service auth groups (integration)", () => {
                 ],
             }),
         });
+    });
+
+    it("rejects a second same-generation runtime writer with a stale runtime-state revision", async () => {
+        const user = await createAccount("pk-groups-runtime-state-revision-conflict");
+        await createConnectedProfile(user.id, "openai-codex", "work");
+        const app = await createReadyApp();
+        const created = await app.inject({
+            method: "POST",
+            url: "/v3/connect/openai-codex/groups",
+            headers: authHeaders(user.id),
+            payload: { groupId: "codex-main", members: [{ profileId: "work" }], activeProfileId: "work" },
+        });
+        expect(created.statusCode).toBe(200);
+        expect(created.json().group.runtimeStateRevision).toBe(0);
+
+        const first = await app.inject({
+            method: "PATCH",
+            url: "/v3/connect/openai-codex/groups/codex-main/runtime-state",
+            headers: authHeaders(user.id),
+            payload: {
+                expectedGeneration: 0,
+                expectedRuntimeStateRevision: 0,
+                memberStates: [{ profileId: "work", state: { quotaExhaustedUntilMs: 10 } }],
+            },
+        });
+        expect(first.statusCode).toBe(200);
+        expect(first.json().group.runtimeStateRevision).toBe(1);
+
+        const stale = await app.inject({
+            method: "PATCH",
+            url: "/v3/connect/openai-codex/groups/codex-main/runtime-state",
+            headers: authHeaders(user.id),
+            payload: {
+                expectedGeneration: 0,
+                expectedRuntimeStateRevision: 0,
+                memberStates: [{ profileId: "work", state: { authInvalidUntilMs: 20 } }],
+            },
+        });
+        expect(stale.statusCode).toBe(409);
+        expect(stale.json()).toEqual({
+            error: "connect_group_runtime_state_revision_conflict",
+            runtimeStateRevision: 1,
+        });
+        const fetched = await app.inject({
+            method: "GET",
+            url: "/v3/connect/openai-codex/groups/codex-main",
+            headers: authHeaders(user.id),
+        });
+        expect(fetched.json().group.members).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                profileId: "work",
+                state: { quotaExhaustedUntilMs: 10 },
+            }),
+        ]));
     });
 
     it("rejects changed runtime state updates that omit expectedGeneration", async () => {
@@ -2529,6 +2592,23 @@ describe("connectRoutes connected service auth groups (integration)", () => {
         expect(updated.statusCode).toBe(400);
         expect(updated.json()).toEqual({ error: "connect_group_generation_required" });
 
+        const missingRuntimeRevision = await app.inject({
+            method: "PATCH",
+            url: "/v3/connect/openai-codex/groups/codex-main/runtime-state",
+            headers: authHeaders(user.id),
+            payload: {
+                expectedGeneration: 0,
+                memberStates: [{
+                    profileId: "work",
+                    state: { quotaExhaustedUntilMs: 10 },
+                }],
+            },
+        });
+        expect(missingRuntimeRevision.statusCode).toBe(400);
+        expect(missingRuntimeRevision.json()).toEqual({
+            error: "connect_group_runtime_state_revision_required",
+        });
+
         const fetched = await app.inject({
             method: "GET",
             url: "/v3/connect/openai-codex/groups/codex-main",
@@ -2560,6 +2640,7 @@ describe("connectRoutes connected service auth groups (integration)", () => {
             headers: authHeaders(user.id),
             payload: {
                 expectedGeneration: 0,
+                expectedRuntimeStateRevision: 0,
                 memberStates: [
                     {
                         profileId: "work",
@@ -2578,6 +2659,7 @@ describe("connectRoutes connected service auth groups (integration)", () => {
 
         const clearPayload = {
             expectedGeneration: 0,
+            expectedRuntimeStateRevision: 1,
             memberStates: [
                 {
                     profileId: "work",

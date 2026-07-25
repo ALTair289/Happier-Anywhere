@@ -47,6 +47,7 @@ type AuthGroupRow = Readonly<{
     policyJson: string;
     activeProfileId: string | null;
     generation: number;
+    runtimeStateRevision: number;
     stateJson: string | null;
     createdAt: Date;
     updatedAt: Date;
@@ -112,8 +113,9 @@ export function toAuthGroupResponse(row: AuthGroupRow): AuthGroupResponse {
         groupId: row.groupId,
         displayName: row.displayName,
         policy: parseConnectedServiceAuthGroupPolicyJson(row.policyJson),
-        activeProfileId: row.activeProfileId ?? resolveFirstEnabledMemberProfileId(row.members),
+        activeProfileId: row.activeProfileId,
         generation: row.generation,
+        runtimeStateRevision: row.runtimeStateRevision,
         state: parseAuthGroupStateJson(row.stateJson),
         members: row.members.map((member) => ({
             v: 1,

@@ -89,6 +89,7 @@ const RuntimeStateMemberPatchBodySchema = z
 export const RuntimeStatePatchBodySchema = z
     .object({
         expectedGeneration: z.number().int().nonnegative().optional(),
+        expectedRuntimeStateRevision: z.number().int().nonnegative().optional(),
         state: ConnectedServiceAuthGroupStateV1Schema.optional(),
         memberStates: z.array(RuntimeStateMemberPatchBodySchema).default([]),
     })

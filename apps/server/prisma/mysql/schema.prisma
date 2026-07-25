@@ -962,6 +962,7 @@ model ConnectedServiceAuthGroup {
     policyJson      String @db.LongText
     activeProfileId String?
     generation      Int      @default(0)
+    runtimeStateRevision Int  @default(0)
     stateJson       String? @db.LongText
     createdAt       DateTime @default(now())
     updatedAt       DateTime @updatedAt
