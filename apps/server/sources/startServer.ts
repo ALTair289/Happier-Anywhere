@@ -323,7 +323,7 @@ export async function startServer(flavor: ServerFlavor): Promise<void> {
     }
 
     // Expose health + metrics in all roles (metrics server can be disabled via METRICS_ENABLED=false).
-    await startMetricsServer();
+    const metricsServerStarted = await startMetricsServer();
 
     if (role === 'all' || role === 'api') {
         void inferAndApplyTailscaleServePublicServerUrl(process.env);
@@ -337,7 +337,11 @@ export async function startServer(flavor: ServerFlavor): Promise<void> {
                 retentionWorker.stop();
             });
         }
-        startDatabaseMetricsUpdater();
+        // SQLite intentionally uses one Prisma connection. Exact table counts can hold that
+        // sole connection long enough to starve readiness and presence transactions.
+        if (metricsServerStarted && dbProvider !== 'sqlite') {
+            startDatabaseMetricsUpdater();
+        }
         startTimeout();
     }
 
