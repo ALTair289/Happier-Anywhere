@@ -16,7 +16,13 @@ const markAccountChanged = vi.fn(async (_tx: unknown, params: { entityId: string
 vi.mock("@/app/changes/markAccountChanged", () => ({ markAccountChanged }));
 
 const emitUpdate = vi.fn();
+const disconnectReplacedMachineSocket = vi.fn();
 const getConnections = vi.fn(() => new Set([
+    {
+        connectionType: "machine-scoped",
+        machineId: "m1",
+        socket: { connected: true, disconnect: disconnectReplacedMachineSocket },
+    },
     {
         connectionType: "machine-scoped",
         machineId: "m2",
@@ -173,6 +179,11 @@ describe("machinesRoutes machine replacement", () => {
     beforeEach(() => {
         vi.clearAllMocks();
         getConnections.mockReturnValue(new Set([
+            {
+                connectionType: "machine-scoped",
+                machineId: "m1",
+                socket: { connected: true, disconnect: disconnectReplacedMachineSocket },
+            },
             {
                 connectionType: "machine-scoped",
                 machineId: "m2",
@@ -349,6 +360,10 @@ describe("machinesRoutes machine replacement", () => {
                 replacementActorUserId: null,
             }),
         }));
+        expect(disconnectReplacedMachineSocket).toHaveBeenCalledWith(true);
+        expect(disconnectReplacedMachineSocket.mock.invocationCallOrder[0]).toBeGreaterThan(
+            txDbMocks.db.machine.updateMany.mock.invocationCallOrder[0]!,
+        );
         expect(markAccountChanged).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ entityId: "m1" }));
         expect(markAccountChanged).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ entityId: "m2" }));
         expect(response).toEqual(expect.objectContaining({

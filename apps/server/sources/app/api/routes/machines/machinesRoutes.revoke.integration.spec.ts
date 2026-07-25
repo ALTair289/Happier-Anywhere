@@ -107,6 +107,12 @@ describe("machinesRoutes (revoke machine)", () => {
         expect(txDbMocks.db.automationAssignment.deleteMany).toHaveBeenCalledWith(expect.objectContaining({
             where: expect.objectContaining({ machineId: "m1" }),
         }));
+        expect(txDbMocks.db.machine.update).toHaveBeenCalledWith(expect.objectContaining({
+            data: expect.objectContaining({
+                active: false,
+                revokedAt: expect.any(Date),
+            }),
+        }));
         expect(markAccountChanged).toHaveBeenCalledWith(
             expect.anything(),
             expect.objectContaining({ accountId: "u1", kind: "machine", entityId: "m1" }),
