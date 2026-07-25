@@ -89,8 +89,6 @@ export const FeatureGatesSchema = z.object({
       contentKeys: FeatureGateSchema.optional().default(DEFAULT_GATE_DISABLED),
       pendingQueueV2: FeatureGateSchema.optional().default(DEFAULT_GATE_DISABLED),
       pendingDeliveryState: FeatureGateSchema.optional().default(DEFAULT_GATE_DISABLED),
-      pendingDeliveryAttempts: FeatureGateSchema.optional().default(DEFAULT_GATE_DISABLED),
-      pendingDeliveryAttemptClaims: FeatureGateSchema.optional().default(DEFAULT_GATE_DISABLED),
     })
     .optional()
     .default({
@@ -99,15 +97,12 @@ export const FeatureGatesSchema = z.object({
       contentKeys: DEFAULT_GATE_DISABLED,
       pendingQueueV2: DEFAULT_GATE_DISABLED,
       pendingDeliveryState: DEFAULT_GATE_DISABLED,
-      pendingDeliveryAttempts: DEFAULT_GATE_DISABLED,
-      pendingDeliveryAttemptClaims: DEFAULT_GATE_DISABLED,
     }),
   sessions: z
     .object({
       enabled: z.boolean(),
       folders: FeatureGateSchema.optional().default(DEFAULT_GATE_DISABLED),
       usageLimitRecovery: FeatureGateSchema.optional().default(DEFAULT_GATE_DISABLED),
-      runtimeActivityV2: FeatureGateSchema.optional().default(DEFAULT_GATE_DISABLED),
       handoff: z
         .object({
           enabled: z.boolean(),
@@ -120,7 +115,6 @@ export const FeatureGatesSchema = z.object({
       enabled: false,
       folders: DEFAULT_GATE_DISABLED,
       usageLimitRecovery: DEFAULT_GATE_DISABLED,
-      runtimeActivityV2: DEFAULT_GATE_DISABLED,
       handoff: { enabled: false },
     }),
   machines: z

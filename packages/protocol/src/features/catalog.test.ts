@@ -61,13 +61,6 @@ describe('feature catalog', () => {
     expect(FEATURE_CATALOG['sessions.usageLimitRecovery']?.dependencies).toEqual(['sessions']);
   });
 
-  it('represents runtime activity v2 as a fail-closed server feature under sessions', () => {
-    expect(isFeatureId('sessions.runtimeActivityV2')).toBe(true);
-    expect(FEATURE_CATALOG['sessions.runtimeActivityV2']?.representation).toBe('server');
-    expect(FEATURE_CATALOG['sessions.runtimeActivityV2']?.dependencies).toEqual(['sessions']);
-    expect(FEATURE_CATALOG['sessions.runtimeActivityV2']?.defaultFailMode).toBe('fail_closed');
-  });
-
   it('includes channel bridge feature ids', () => {
     expect(isFeatureId('channelBridges')).toBe(true);
     expect(isFeatureId('channelBridges.telegram')).toBe(true);
@@ -149,17 +142,9 @@ describe('feature catalog', () => {
     expect(isFeatureId('sharing.contentKeys')).toBe(true);
     expect(isFeatureId('sharing.pendingQueueV2')).toBe(true);
     expect(isFeatureId('sharing.pendingDeliveryState')).toBe(true);
-    expect(isFeatureId('sharing.pendingDeliveryAttempts')).toBe(true);
-    expect(isFeatureId('sharing.pendingDeliveryAttemptClaims')).toBe(true);
     expect(FEATURE_CATALOG['sharing.pendingDeliveryState']?.representation).toBe('server');
     expect(FEATURE_CATALOG['sharing.pendingDeliveryState']?.dependencies).toEqual(['sharing.pendingQueueV2']);
     expect(FEATURE_CATALOG['sharing.pendingDeliveryState']?.defaultFailMode).toBe('fail_closed');
-    expect(FEATURE_CATALOG['sharing.pendingDeliveryAttempts']?.representation).toBe('server');
-    expect(FEATURE_CATALOG['sharing.pendingDeliveryAttempts']?.dependencies).toEqual(['sharing.pendingQueueV2']);
-    expect(FEATURE_CATALOG['sharing.pendingDeliveryAttemptClaims']?.representation).toBe('server');
-    expect(FEATURE_CATALOG['sharing.pendingDeliveryAttemptClaims']?.dependencies).toEqual([
-      'sharing.pendingDeliveryAttempts',
-    ]);
   });
 
   it('includes voice agent feature id', () => {

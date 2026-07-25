@@ -127,40 +127,4 @@ describe('FeatureGatesSchema', () => {
     expect(readServerEnabledBit(parsed, 'sharing.pendingQueueV2')).toBe(true);
     expect(readServerEnabledBit(parsed, 'sharing.pendingDeliveryState')).toBe(false);
   });
-
-  it('preserves attempt contract and claim controls independently', () => {
-    const parsed = FeaturesResponseSchema.parse({
-      features: {
-        sharing: {
-          pendingDeliveryAttempts: { enabled: true },
-          pendingDeliveryAttemptClaims: { enabled: false },
-        },
-      },
-      capabilities: {},
-    });
-
-    expect(readServerEnabledBit(parsed, 'sharing.pendingDeliveryAttempts')).toBe(true);
-    expect(readServerEnabledBit(parsed, 'sharing.pendingDeliveryAttemptClaims')).toBe(false);
-  });
-
-  it('defaults omitted attempt contract and claim controls disabled', () => {
-    const parsed = FeaturesResponseSchema.parse({ features: {}, capabilities: {} });
-
-    expect(readServerEnabledBit(parsed, 'sharing.pendingDeliveryAttempts')).toBe(false);
-    expect(readServerEnabledBit(parsed, 'sharing.pendingDeliveryAttemptClaims')).toBe(false);
-  });
-
-  it('preserves runtime activity v2 and defaults it fail closed when omitted', () => {
-    const enabled = FeaturesResponseSchema.parse({
-      features: { sessions: { enabled: true, runtimeActivityV2: { enabled: true } } },
-      capabilities: {},
-    });
-    const omitted = FeaturesResponseSchema.parse({
-      features: { sessions: { enabled: true } },
-      capabilities: {},
-    });
-
-    expect(readServerEnabledBit(enabled, 'sessions.runtimeActivityV2')).toBe(true);
-    expect(readServerEnabledBit(omitted, 'sessions.runtimeActivityV2')).toBe(false);
-  });
 });

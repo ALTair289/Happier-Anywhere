@@ -16,18 +16,6 @@ describe('server enabled bit helpers', () => {
       'pendingDeliveryState',
       'enabled',
     ]);
-    expect(resolveServerEnabledBitPath('sharing.pendingDeliveryAttempts')).toEqual([
-      'features',
-      'sharing',
-      'pendingDeliveryAttempts',
-      'enabled',
-    ]);
-    expect(resolveServerEnabledBitPath('sharing.pendingDeliveryAttemptClaims')).toEqual([
-      'features',
-      'sharing',
-      'pendingDeliveryAttemptClaims',
-      'enabled',
-    ]);
     expect(resolveServerEnabledBitPath('machines.transfer.directPeer')).toEqual([
       'features',
       'machines',
