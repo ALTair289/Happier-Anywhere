@@ -18,13 +18,33 @@ export const DaemonTerminalErrorSchema = z.object({
 }).passthrough();
 export type DaemonTerminalError = z.infer<typeof DaemonTerminalErrorSchema>;
 
-export const DaemonTerminalEnsureRequestSchema = z.object({
-  terminalKey: z.string().min(1).max(2000),
+export const DaemonTerminalLaunchIntentSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('session_attach'),
+    sessionId: z.string().trim().min(1).max(512),
+  }),
+]);
+export type DaemonTerminalLaunchIntent = z.infer<typeof DaemonTerminalLaunchIntentSchema>;
+
+function buildDaemonTerminalLaunchRequestSchema() {
+  return z.object({
+  terminalKey: z.string().min(1).max(2000).optional(),
   cwd: z.string().min(1).max(10_000).optional(),
   cols: z.number().int().min(2).max(500).optional(),
   rows: z.number().int().min(2).max(500).optional(),
   initialCommand: z.string().max(100_000).optional(),
-}).passthrough();
+  launch: DaemonTerminalLaunchIntentSchema.optional(),
+  }).passthrough().superRefine((value, ctx) => {
+    if (!value.terminalKey && !value.launch) {
+      ctx.addIssue({ code: 'custom', path: ['terminalKey'], message: 'terminalKey or launch is required' });
+    }
+    if (value.launch && value.initialCommand !== undefined) {
+      ctx.addIssue({ code: 'custom', path: ['initialCommand'], message: 'initialCommand cannot be combined with launch' });
+    }
+  });
+}
+
+export const DaemonTerminalEnsureRequestSchema = buildDaemonTerminalLaunchRequestSchema();
 export type DaemonTerminalEnsureRequest = z.infer<typeof DaemonTerminalEnsureRequestSchema>;
 
 export const DaemonTerminalEnsureResponseSchema = z.union([
@@ -128,13 +148,7 @@ export const DaemonTerminalCloseResponseSchema = z.union([
 ]);
 export type DaemonTerminalCloseResponse = z.infer<typeof DaemonTerminalCloseResponseSchema>;
 
-export const DaemonTerminalRestartRequestSchema = z.object({
-  terminalKey: z.string().min(1).max(2000),
-  cwd: z.string().min(1).max(10_000).optional(),
-  cols: z.number().int().min(2).max(500).optional(),
-  rows: z.number().int().min(2).max(500).optional(),
-  initialCommand: z.string().max(100_000).optional(),
-}).passthrough();
+export const DaemonTerminalRestartRequestSchema = buildDaemonTerminalLaunchRequestSchema();
 export type DaemonTerminalRestartRequest = z.infer<typeof DaemonTerminalRestartRequestSchema>;
 
 export const DaemonTerminalRestartResponseSchema = DaemonTerminalEnsureResponseSchema;
