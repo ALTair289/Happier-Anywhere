@@ -29,6 +29,20 @@ const connectedServiceSelectionsEnv = {
   }]),
 } as const;
 
+function connectedServiceSelectionsEnvWithCredentialRevision(credentialRevision: string) {
+  return {
+    [HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY]: JSON.stringify([{
+      kind: 'group',
+      serviceId: 'openai-codex',
+      groupId: 'team',
+      activeProfileId: 'codex-a',
+      fallbackProfileId: 'codex-b',
+      generation: 7,
+      credentialRevision,
+    }]),
+  } as const;
+}
+
 function registerFullTarget(registry: ConnectedServiceRuntimeRegistry) {
   return registry.registerTarget({
     pid: 42,
@@ -47,6 +61,70 @@ function registerFullTarget(registry: ConnectedServiceRuntimeRegistry) {
 }
 
 describe('ConnectedServiceRuntimeRegistry', () => {
+  it('publishes current registrations from both keyspaces and fences replaced registrations', () => {
+    const registry = new ConnectedServiceRuntimeRegistry();
+    const registrations: Array<{
+      key: { kind: 'session'; pid: number } | { kind: 'execution_run'; runKey: string };
+      target: ReturnType<ConnectedServiceRuntimeRegistry['registerTarget']>;
+    }> = [];
+    const unsubscribe = registry.onTargetRegistration((registration) => registrations.push(registration));
+
+    const session = registry.registerTarget({
+      pid: 42,
+      agentId: 'codex',
+      sessionId: 'session-observed',
+      connectedServicesBindingsRaw,
+      connectedServiceSelectionsEnv,
+      materializationKey: 'session-observed-key',
+    });
+    const run = registry.registerRunTarget({
+      runKey: 'execution_run:observed',
+      pid: 42,
+      agentId: 'codex',
+      sessionId: 'session-observed',
+      connectedServicesBindingsRaw,
+      connectedServiceSelectionsEnv,
+      materializationKey: 'execution_run:observed',
+    });
+
+    expect(registrations).toEqual([
+      { key: { kind: 'session', pid: 42 }, target: session },
+      { key: { kind: 'execution_run', runKey: 'execution_run:observed' }, target: run },
+    ]);
+    expect(registry.listTargetRegistrations()).toEqual(registrations);
+    expect(registry.isCurrentTargetRegistration(registrations[0]!)).toBe(true);
+    expect(registry.isCurrentTargetRegistration(registrations[1]!)).toBe(true);
+
+    const unchangedRun = registry.registerRunTarget({
+      runKey: 'execution_run:observed',
+      pid: 42,
+      agentId: 'codex',
+      sessionId: 'session-observed',
+      connectedServicesBindingsRaw,
+      connectedServiceSelectionsEnv,
+      materializationKey: 'execution_run:observed',
+    });
+    expect(unchangedRun).toBe(run);
+    expect(registrations.at(-1)).toEqual({
+      key: { kind: 'execution_run', runKey: 'execution_run:observed' },
+      target: run,
+    });
+
+    registry.registerTarget({
+      pid: 42,
+      agentId: 'codex',
+      sessionId: 'session-observed',
+      connectedServicesBindingsRaw,
+      connectedServiceSelectionsEnv: connectedServiceSelectionsEnvWithCredentialRevision('csr_cccccccccccccccccccccc'),
+      materializationKey: 'session-observed-key',
+    });
+    registry.unregisterRunKey('execution_run:observed');
+
+    expect(registry.isCurrentTargetRegistration({ key: { kind: 'session', pid: 42 }, target: session })).toBe(false);
+    expect(registry.isCurrentTargetRegistration({ key: { kind: 'execution_run', runKey: 'execution_run:observed' }, target: run })).toBe(false);
+    unsubscribe();
+  });
+
   it('indexes and evicts targets by broker selection identity (R3-6)', () => {
     const registry = new ConnectedServiceRuntimeRegistry();
     const identity = 'opencode|connected|broker:1|openai-codex:codex-a:acct';
@@ -188,6 +266,142 @@ describe('ConnectedServiceRuntimeRegistry', () => {
     expect(unchanged).toBe(registered);
   });
 
+  it('changes the runtime binding identity when the same profile receives a new credential revision', () => {
+    const registry = new ConnectedServiceRuntimeRegistry();
+    const firstRevision = 'csr_aaaaaaaaaaaaaaaaaaaaaa';
+    const secondRevision = 'csr_bbbbbbbbbbbbbbbbbbbbbb';
+
+    const first = registry.registerTarget({
+      pid: 42,
+      agentId: 'codex',
+      sessionId: 'sess-a',
+      connectedServicesBindingsRaw,
+      connectedServiceSelectionsEnv: connectedServiceSelectionsEnvWithCredentialRevision(firstRevision),
+      materializationKey: 'csm_runtime_registry',
+    });
+    const second = registry.registerTarget({
+      pid: 42,
+      agentId: 'codex',
+      sessionId: 'sess-a',
+      connectedServicesBindingsRaw,
+      connectedServiceSelectionsEnv: connectedServiceSelectionsEnvWithCredentialRevision(secondRevision),
+      materializationKey: 'csm_runtime_registry',
+    });
+
+    expect(first.activeBindings).toEqual([expect.objectContaining({
+      profileId: 'codex-a',
+      credentialRevision: firstRevision,
+    })]);
+    expect(second.activeBindings).toEqual([expect.objectContaining({
+      profileId: 'codex-a',
+      credentialRevision: secondRevision,
+    })]);
+    expect(second.runtimeIdentityKey).not.toBe(first.runtimeIdentityKey);
+    expect(second.revision).toBe(first.revision + 1);
+  });
+
+  it('advances the existing session binding only after exact group application settles', () => {
+    const registry = new ConnectedServiceRuntimeRegistry();
+    registry.registerTarget({
+      pid: 42,
+      agentId: 'codex',
+      sessionId: 'sess-a',
+      connectedServicesBindingsRaw,
+      connectedServiceSelectionsEnv: connectedServiceSelectionsEnvWithCredentialRevision(
+        'csr_aaaaaaaaaaaaaaaaaaaaaa',
+      ),
+      materializationKey: 'csm_runtime_registry',
+    });
+
+    const settled = registry.adoptExactGroupApplicationForSession({
+      sessionId: 'sess-a',
+      serviceId: 'openai-codex',
+      groupId: 'team',
+      profileId: 'codex-b',
+      generation: 8,
+      credentialRevision: 'csr_bbbbbbbbbbbbbbbbbbbbbb',
+    });
+
+    expect(settled?.activeBindings).toEqual([{
+      serviceId: 'openai-codex',
+      groupId: 'team',
+      profileId: 'codex-b',
+      generation: 8,
+      credentialRevision: 'csr_bbbbbbbbbbbbbbbbbbbbbb',
+    }]);
+    expect(registry.getBySessionId('sess-a')).toBe(settled);
+  });
+
+  it('does not fabricate an exact group binding for an unregistered scope', () => {
+    const registry = new ConnectedServiceRuntimeRegistry();
+    const original = registry.registerTarget({
+      pid: 42,
+      agentId: 'codex',
+      sessionId: 'sess-a',
+      connectedServicesBindingsRaw,
+      connectedServiceSelectionsEnv: connectedServiceSelectionsEnvWithCredentialRevision(
+        'csr_aaaaaaaaaaaaaaaaaaaaaa',
+      ),
+      materializationKey: 'csm_runtime_registry',
+    });
+
+    expect(registry.adoptExactGroupApplicationForSession({
+      sessionId: 'sess-a',
+      serviceId: 'openai-codex',
+      groupId: 'other-team',
+      profileId: 'codex-b',
+      generation: 8,
+      credentialRevision: 'csr_bbbbbbbbbbbbbbbbbbbbbb',
+    })).toBeNull();
+    expect(registry.getBySessionId('sess-a')).toBe(original);
+  });
+
+  it('adopts a refreshed credential revision only for represented runtime identities that applied it', () => {
+    const registry = new ConnectedServiceRuntimeRegistry();
+    const firstRevision = 'csr_aaaaaaaaaaaaaaaaaaaaaa';
+    const secondRevision = 'csr_bbbbbbbbbbbbbbbbbbbbbb';
+    const first = registry.registerTarget({
+      pid: 42,
+      agentId: 'codex',
+      sessionId: 'sess-a',
+      connectedServicesBindingsRaw,
+      connectedServiceSelectionsEnv: connectedServiceSelectionsEnvWithCredentialRevision(firstRevision),
+      materializationKey: 'session-a',
+    });
+    const run = registry.registerRunTarget({
+      runKey: 'execution_run:a',
+      pid: 42,
+      agentId: 'codex',
+      sessionId: 'sess-a',
+      connectedServicesBindingsRaw,
+      connectedServiceSelectionsEnv: connectedServiceSelectionsEnvWithCredentialRevision(firstRevision),
+      materializationKey: 'execution_run:a',
+    });
+    registry.registerTarget({
+      pid: 84,
+      agentId: 'codex',
+      sessionId: 'sess-b',
+      connectedServicesBindingsRaw,
+      connectedServiceSelectionsEnv: connectedServiceSelectionsEnvWithCredentialRevision(firstRevision),
+      materializationKey: 'session-b',
+    });
+
+    expect(registry.adoptCredentialRevisionForProfile({
+      serviceId: 'openai-codex',
+      profileId: 'codex-a',
+      credentialRevision: secondRevision,
+      runtimeIdentityKeys: new Set([first.runtimeIdentityKey, run.runtimeIdentityKey]),
+    })).toBe(2);
+
+    const registrations = registry.listTargetRegistrations();
+    expect(registrations.find((entry) => entry.key.kind === 'session' && entry.key.pid === 42)
+      ?.target.activeBindings[0]?.credentialRevision).toBe(secondRevision);
+    expect(registrations.find((entry) => entry.key.kind === 'execution_run')
+      ?.target.activeBindings[0]?.credentialRevision).toBe(secondRevision);
+    expect(registrations.find((entry) => entry.key.kind === 'session' && entry.key.pid === 84)
+      ?.target.activeBindings[0]?.credentialRevision).toBe(firstRevision);
+  });
+
   it('exposes the same connected-service runtime identity to refresh and quota views', () => {
     const registry = new ConnectedServiceRuntimeRegistry();
     registerFullTarget(registry);
@@ -320,6 +534,36 @@ describe('ConnectedServiceRuntimeRegistry', () => {
 
     registry.unregisterPid(6200);
     expect(registry.getByBrokerSelectionIdentity('pi-pool-y')).toBeNull();
+  });
+
+  it('can retire only a superseded session registration without deleting live run targets on the pid', () => {
+    const registry = new ConnectedServiceRuntimeRegistry();
+    registry.registerTarget({
+      pid: 6201,
+      sessionId: 'superseded-session',
+      connectedServicesBindingsRaw: {
+        v: 1,
+        bindingsByServiceId: {
+          'openai-codex': { source: 'connected', selection: 'profile', profileId: 'direct' },
+        },
+      },
+    });
+    registry.registerRunTarget({
+      runKey: 'execution_run:still-live',
+      pid: 6201,
+      connectedServicesBindingsRaw: {
+        v: 1,
+        bindingsByServiceId: {
+          'openai-codex': { source: 'connected', selection: 'profile', profileId: 'run-profile' },
+        },
+      },
+    });
+
+    expect(registry.unregisterSessionTargetByPid(6201)?.sessionId).toBe('superseded-session');
+    expect(registry.getBySessionId('superseded-session')).toBeNull();
+    expect(registry.listTargetRegistrations()).toEqual([
+      expect.objectContaining({ key: { kind: 'execution_run', runKey: 'execution_run:still-live' } }),
+    ]);
   });
 
   it('owns session runtime account identity and clears it with the session target', () => {

@@ -1,3 +1,12 @@
+import type {
+  ConnectedServiceCredentialRevisionV1,
+  ConnectedServiceId,
+} from '@happier-dev/protocol';
+
+import {
+  HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY,
+  serializeConnectedServiceChildSelections,
+} from '../connectedServiceChildEnvironment';
 import { readConnectedServiceMaterializationIdentityV1 } from '../materialize/createConnectedServiceMaterializationIdentity';
 import { RuntimeAccountIdentityIndex } from '../quotas/identity/RuntimeAccountIdentityIndex';
 import type {
@@ -36,6 +45,15 @@ export type {
 } from './target';
 export type { ConnectedServiceRuntimeIdentity } from './identity';
 
+export type ConnectedServiceRuntimeTargetRegistrationKey =
+  | Readonly<{ kind: 'session'; pid: number }>
+  | Readonly<{ kind: 'execution_run'; runKey: string }>;
+
+export type ConnectedServiceRuntimeTargetRegistration = Readonly<{
+  key: ConnectedServiceRuntimeTargetRegistrationKey;
+  target: ConnectedServiceRuntimeTarget;
+}>;
+
 type IndexedTarget = Readonly<{
   target: ConnectedServiceRuntimeTarget;
   fingerprint: string;
@@ -62,6 +80,81 @@ function omitRevision(target: ConnectedServiceRuntimeTarget): Omit<ConnectedServ
   return withoutRevision;
 }
 
+function buildCredentialRevisionSelectionEnv(
+  target: ConnectedServiceRuntimeTarget,
+  input: Readonly<{
+    serviceId: ConnectedServiceId;
+    profileId: string;
+    credentialRevision: ConnectedServiceCredentialRevisionV1;
+  }>,
+): Readonly<Record<string, string>> | null {
+  let changed = false;
+  const selections = target.connectedServiceSelections.map((selection) => {
+    const activeProfileId = selection.kind === 'profile'
+      ? selection.profileId
+      : selection.activeProfileId;
+    if (
+      selection.serviceId !== input.serviceId
+      || activeProfileId !== input.profileId
+      || selection.credentialRevision === input.credentialRevision
+    ) {
+      return selection;
+    }
+    changed = true;
+    return {
+      ...selection,
+      credentialRevision: input.credentialRevision,
+    };
+  });
+  if (!changed) return null;
+  const serialized = serializeConnectedServiceChildSelections(
+    new Map(selections.map((selection) => [selection.serviceId, selection])),
+  );
+  if (!serialized) return null;
+  return {
+    ...target.connectedServiceSelectionsEnv,
+    [HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY]: serialized,
+  };
+}
+
+function buildExactGroupApplicationSelectionEnv(
+  target: ConnectedServiceRuntimeTarget,
+  input: Readonly<{
+    serviceId: ConnectedServiceId;
+    groupId: string;
+    profileId: string;
+    generation: number;
+    credentialRevision: ConnectedServiceCredentialRevisionV1 | null;
+  }>,
+): Readonly<Record<string, string>> | null {
+  let matched = false;
+  const selections = target.connectedServiceSelections.map((selection) => {
+    if (
+      selection.kind !== 'group'
+      || selection.serviceId !== input.serviceId
+      || selection.groupId !== input.groupId
+    ) {
+      return selection;
+    }
+    matched = true;
+    return {
+      ...selection,
+      activeProfileId: input.profileId,
+      generation: input.generation,
+      credentialRevision: input.credentialRevision,
+    };
+  });
+  if (!matched) return null;
+  const serialized = serializeConnectedServiceChildSelections(
+    new Map(selections.map((selection) => [selection.serviceId, selection])),
+  );
+  if (!serialized) return null;
+  return {
+    ...target.connectedServiceSelectionsEnv,
+    [HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY]: serialized,
+  };
+}
+
 export class ConnectedServiceRuntimeRegistry {
   private readonly targetsByPid = new Map<number, IndexedTarget>();
   private readonly pidBySessionId = new Map<string, number>();
@@ -77,6 +170,9 @@ export class ConnectedServiceRuntimeRegistry {
   // run key (not pid, and several runs can share a runner pid), so their broker index is separate from
   // the pid-keyed session index but folds into the same getByBrokerSelectionIdentity resolution.
   private readonly runKeysByBrokerSelectionIdentity = new Map<string, Set<string>>();
+  private readonly targetRegistrationListeners = new Set<(
+    registration: ConnectedServiceRuntimeTargetRegistration,
+  ) => void>();
   private readonly runtimeAccountIdentities: RuntimeAccountIdentityIndex;
 
   constructor(params: Readonly<{
@@ -91,7 +187,9 @@ export class ConnectedServiceRuntimeRegistry {
 
   public registerTarget(input: ConnectedServiceRuntimeTargetInput): ConnectedServiceRuntimeTarget {
     const existing = this.getIndexedByPid(input.pid);
-    return this.writeTarget(input.pid, input, existing?.target ?? null);
+    const target = this.writeTarget(input.pid, input, existing?.target ?? null);
+    this.emitTargetRegistration({ key: { kind: 'session', pid: target.pid }, target });
+    return target;
   }
 
   public registerRunTarget(
@@ -102,12 +200,49 @@ export class ConnectedServiceRuntimeRegistry {
       throw new Error('Execution-run runtime target registration requires a non-empty runKey');
     }
     const { runKey: _runKey, ...targetInput } = input;
-    const previous = this.runTargetsByRunKey.get(runKey)?.target ?? null;
-    if (previous) this.deleteRunBrokerSelectionIdentityIndex(runKey, previous);
-    const entry = this.buildStandaloneTarget(targetInput, previous);
+    const previousEntry = this.runTargetsByRunKey.get(runKey) ?? null;
+    const candidate = this.buildStandaloneTarget(targetInput, previousEntry?.target ?? null);
+    const entry = previousEntry?.fingerprint === candidate.fingerprint ? previousEntry : candidate;
+    if (previousEntry && entry !== previousEntry) {
+      this.deleteRunBrokerSelectionIdentityIndex(runKey, previousEntry.target);
+    }
     this.runTargetsByRunKey.set(runKey, entry);
-    this.indexRunBrokerSelectionIdentity(runKey, entry.target);
+    if (entry !== previousEntry) this.indexRunBrokerSelectionIdentity(runKey, entry.target);
+    this.emitTargetRegistration({ key: { kind: 'execution_run', runKey }, target: entry.target });
     return entry.target;
+  }
+
+  public onTargetRegistration(
+    listener: (registration: ConnectedServiceRuntimeTargetRegistration) => void,
+  ): () => void {
+    this.targetRegistrationListeners.add(listener);
+    return () => this.targetRegistrationListeners.delete(listener);
+  }
+
+  public listTargetRegistrations(): ReadonlyArray<ConnectedServiceRuntimeTargetRegistration> {
+    return [
+      ...Array.from(this.targetsByPid.entries()).map(([pid, entry]) => ({
+        key: { kind: 'session' as const, pid },
+        target: entry.target,
+      })),
+      ...Array.from(this.runTargetsByRunKey.entries()).map(([runKey, entry]) => ({
+        key: { kind: 'execution_run' as const, runKey },
+        target: entry.target,
+      })),
+    ].sort((left, right) => {
+      const pidDelta = left.target.pid - right.target.pid;
+      if (pidDelta !== 0) return pidDelta;
+      if (left.key.kind !== right.key.kind) return left.key.kind === 'session' ? -1 : 1;
+      const leftKey = left.key.kind === 'session' ? `session:${left.key.pid}` : `run:${left.key.runKey}`;
+      const rightKey = right.key.kind === 'session' ? `session:${right.key.pid}` : `run:${right.key.runKey}`;
+      return leftKey.localeCompare(rightKey);
+    });
+  }
+
+  public isCurrentTargetRegistration(registration: ConnectedServiceRuntimeTargetRegistration): boolean {
+    return registration.key.kind === 'session'
+      ? this.targetsByPid.get(registration.key.pid)?.target === registration.target
+      : this.runTargetsByRunKey.get(registration.key.runKey)?.target === registration.target;
   }
 
   public unregisterRunKey(runKeyRaw: string): ConnectedServiceRuntimeTarget | null {
@@ -126,6 +261,80 @@ export class ConnectedServiceRuntimeRegistry {
     return this.writeTarget(input.pid, input, existing.target);
   }
 
+  public adoptExactGroupApplicationForSession(input: Readonly<{
+    sessionId: string;
+    serviceId: ConnectedServiceId;
+    groupId: string;
+    profileId: string;
+    generation: number;
+    credentialRevision: ConnectedServiceCredentialRevisionV1 | null;
+  }>): ConnectedServiceRuntimeTarget | null {
+    const sessionId = normalizeString(input.sessionId);
+    const groupId = normalizeString(input.groupId);
+    const profileId = normalizeString(input.profileId);
+    const generation = Math.trunc(Number(input.generation));
+    if (
+      !sessionId
+      || !groupId
+      || !profileId
+      || !Number.isFinite(generation)
+      || generation < 0
+    ) {
+      return null;
+    }
+    const existing = this.getBySessionId(sessionId);
+    if (!existing) return null;
+    if (existing.activeBindings.some((binding) => (
+      binding.serviceId === input.serviceId
+      && binding.groupId === groupId
+      && binding.profileId === profileId
+      && binding.generation === generation
+      && binding.credentialRevision === input.credentialRevision
+    ))) {
+      return existing;
+    }
+    const connectedServiceSelectionsEnv = buildExactGroupApplicationSelectionEnv(existing, {
+      serviceId: input.serviceId,
+      groupId,
+      profileId,
+      generation,
+      credentialRevision: input.credentialRevision,
+    });
+    if (!connectedServiceSelectionsEnv) return null;
+    return this.updateTarget({
+      pid: existing.pid,
+      connectedServiceSelectionsEnv,
+    });
+  }
+
+  public adoptCredentialRevisionForProfile(input: Readonly<{
+    serviceId: ConnectedServiceId;
+    profileId: string;
+    credentialRevision: ConnectedServiceCredentialRevisionV1;
+    runtimeIdentityKeys?: ReadonlySet<string>;
+  }>): number {
+    let updatedTargetCount = 0;
+    for (const [pid, entry] of this.targetsByPid) {
+      if (input.runtimeIdentityKeys && !input.runtimeIdentityKeys.has(entry.target.runtimeIdentityKey)) continue;
+      const connectedServiceSelectionsEnv = buildCredentialRevisionSelectionEnv(entry.target, input);
+      if (!connectedServiceSelectionsEnv) continue;
+      this.writeTarget(pid, { pid, connectedServiceSelectionsEnv }, entry.target);
+      updatedTargetCount += 1;
+    }
+    for (const [runKey, entry] of this.runTargetsByRunKey) {
+      if (input.runtimeIdentityKeys && !input.runtimeIdentityKeys.has(entry.target.runtimeIdentityKey)) continue;
+      const connectedServiceSelectionsEnv = buildCredentialRevisionSelectionEnv(entry.target, input);
+      if (!connectedServiceSelectionsEnv) continue;
+      const next = this.buildStandaloneTarget({
+        pid: entry.target.pid,
+        connectedServiceSelectionsEnv,
+      }, entry.target);
+      this.runTargetsByRunKey.set(runKey, next);
+      updatedTargetCount += 1;
+    }
+    return updatedTargetCount;
+  }
+
   public adoptSessionId(input: Readonly<{ pid: number; sessionId?: string | null }>): ConnectedServiceRuntimeTarget | null {
     return this.updateTarget({
       pid: input.pid,
@@ -138,6 +347,12 @@ export class ConnectedServiceRuntimeRegistry {
     if (pid === null) return null;
     // A dead runner's execution runs are dead too: drop run targets bound to this pid.
     this.dropRunTargetsForPid(pid);
+    return this.unregisterSessionTargetByPid(pid);
+  }
+
+  public unregisterSessionTargetByPid(pidRaw: number): ConnectedServiceRuntimeTarget | null {
+    const pid = normalizePid(pidRaw);
+    if (pid === null) return null;
     const existing = this.targetsByPid.get(pid);
     if (!existing) return null;
     this.targetsByPid.delete(pid);
@@ -285,6 +500,10 @@ export class ConnectedServiceRuntimeRegistry {
     const pid = normalizePid(pidRaw);
     if (pid === null) return null;
     return this.targetsByPid.get(pid) ?? null;
+  }
+
+  private emitTargetRegistration(registration: ConnectedServiceRuntimeTargetRegistration): void {
+    for (const listener of this.targetRegistrationListeners) listener(registration);
   }
 
   private dropRunTargetsForPid(pid: number): void {

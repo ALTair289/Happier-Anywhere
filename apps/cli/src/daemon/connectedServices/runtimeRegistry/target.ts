@@ -1,18 +1,22 @@
 import type {
+  ConnectedServiceCredentialRevisionV1,
   ConnectedServiceId,
   ConnectedServiceMaterializationIdentityV1,
 } from '@happier-dev/protocol';
 
 import type { CatalogAgentId } from '@/backends/types';
 import type {
-  RuntimeAccountIdentitySelectionInput,
+  RuntimeAccountIdentitySelection,
 } from '../quotas/identity/runtimeAccountIdentityTypes';
 import type {
   ConnectedServiceChildSelection,
 } from '../connectedServiceChildEnvironment';
 
 export type ConnectedServiceRuntimeAccessTokenRefreshCapability =
-  Readonly<{ mode: 'daemon_callback' }>;
+  Readonly<{
+    mode: 'daemon_callback';
+    serviceIds: ReadonlyArray<ConnectedServiceId>;
+  }>;
 
 export type ConnectedServiceRuntimeBoundProfile = Readonly<{
   serviceId: ConnectedServiceId;
@@ -22,6 +26,7 @@ export type ConnectedServiceRuntimeBoundProfile = Readonly<{
 export type ConnectedServiceRuntimeBindingIdentity = ConnectedServiceRuntimeBoundProfile & Readonly<{
   groupId: string | null;
   generation: number | null;
+  credentialRevision: ConnectedServiceCredentialRevisionV1 | null;
 }>;
 
 export type ConnectedServicesRuntimeBindingsV1Like = Readonly<{
@@ -45,7 +50,7 @@ export type ConnectedServiceRuntimeTargetInput = Readonly<{
   materializationKey?: string | null;
   connectedServiceMaterializationIdentityV1?: unknown;
   sessionDirectory?: string | null;
-  runtimeAccountIdentitySelections?: ReadonlyArray<RuntimeAccountIdentitySelectionInput> | null;
+  runtimeAccountIdentitySelections?: ReadonlyArray<RuntimeAccountIdentitySelection> | null;
   accessTokenRefresh?: ConnectedServiceRuntimeAccessTokenRefreshCapability | null;
 }>;
 
@@ -59,7 +64,7 @@ export type ConnectedServiceRuntimeTargetUpdate = Readonly<{
   materializationKey?: string | null;
   connectedServiceMaterializationIdentityV1?: unknown;
   sessionDirectory?: string | null;
-  runtimeAccountIdentitySelections?: ReadonlyArray<RuntimeAccountIdentitySelectionInput> | null;
+  runtimeAccountIdentitySelections?: ReadonlyArray<RuntimeAccountIdentitySelection> | null;
   accessTokenRefresh?: ConnectedServiceRuntimeAccessTokenRefreshCapability | null;
 }>;
 
@@ -74,7 +79,7 @@ export type ConnectedServiceRuntimeTarget = Readonly<{
   materializationKey: string | null;
   connectedServiceMaterializationIdentityV1: ConnectedServiceMaterializationIdentityV1 | null;
   sessionDirectory: string | null;
-  runtimeAccountIdentitySelections: ReadonlyArray<RuntimeAccountIdentitySelectionInput>;
+  runtimeAccountIdentitySelections: ReadonlyArray<RuntimeAccountIdentitySelection>;
   accessTokenRefresh: ConnectedServiceRuntimeAccessTokenRefreshCapability | null;
   boundProfiles: ReadonlyArray<ConnectedServiceRuntimeBoundProfile>;
   activeBindings: ReadonlyArray<ConnectedServiceRuntimeBindingIdentity>;
@@ -92,5 +97,5 @@ export type ConnectedServiceRuntimeRefreshTarget = ConnectedServiceRuntimeTarget
 export type ConnectedServiceRuntimeQuotaTarget = ConnectedServiceRuntimeTarget & Readonly<{
   bindings: ConnectedServicesRuntimeBindingsV1Like;
   connectedServiceSelectionsEnv?: Readonly<Record<string, string>>;
-  runtimeAccountIdentitySelections?: ReadonlyArray<RuntimeAccountIdentitySelectionInput>;
+  runtimeAccountIdentitySelections?: ReadonlyArray<RuntimeAccountIdentitySelection>;
 }>;

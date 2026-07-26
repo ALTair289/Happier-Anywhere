@@ -1,6 +1,9 @@
-import type {
-  ConnectedServiceCredentialRecordV1,
-  ConnectedServiceId,
+import { z } from 'zod';
+import {
+  type ConnectedServiceCredentialRevisionV1,
+  ConnectedServiceIdSchema,
+  type ConnectedServiceCredentialRecordV1,
+  type ConnectedServiceId,
 } from '@happier-dev/protocol';
 
 export type RuntimeAccountIdentityProofStrength = 'exact' | 'weak';
@@ -69,6 +72,46 @@ export type RuntimeAccountIdentitySelectionInput = Readonly<{
   >;
 }>;
 
+export const RuntimeAccountIdentitySelectionFactV1Schema = z.object({
+  serviceId: ConnectedServiceIdSchema,
+  profileId: z.string().trim().min(1),
+  groupId: z.string().trim().min(1).nullable(),
+  groupGeneration: z.number().int().nonnegative().nullable(),
+  providerAccountId: z.string().trim().min(1),
+  accountLabel: z.string().trim().min(1).nullable(),
+  source: z.enum(['spawn_selection', 'group_switch_selection', 'codex_live_auth_apply']),
+}).strict();
+
+/** Durable exact account identity without the credential/token material used to derive it. */
+export type RuntimeAccountIdentitySelectionFactV1 = z.infer<
+  typeof RuntimeAccountIdentitySelectionFactV1Schema
+>;
+
+export type RuntimeAccountIdentitySelection =
+  | RuntimeAccountIdentitySelectionInput
+  | RuntimeAccountIdentitySelectionFactV1;
+
+export function buildRuntimeAccountIdentitySelectionFactV1(
+  selection: RuntimeAccountIdentitySelectionInput,
+): RuntimeAccountIdentitySelectionFactV1 | null {
+  const providerAccountId = selection.record.kind === 'oauth'
+    ? selection.record.oauth.providerAccountId?.trim() ?? ''
+    : selection.record.token.providerAccountId?.trim() ?? '';
+  if (!providerAccountId) return null;
+  const accountLabel = selection.record.kind === 'oauth'
+    ? selection.record.oauth.providerEmail?.trim() || null
+    : selection.record.token.providerEmail?.trim() || null;
+  return RuntimeAccountIdentitySelectionFactV1Schema.parse({
+    serviceId: selection.serviceId,
+    profileId: selection.profileId,
+    groupId: selection.groupId ?? null,
+    groupGeneration: selection.groupGeneration ?? null,
+    providerAccountId,
+    accountLabel,
+    source: selection.source,
+  });
+}
+
 export type RuntimeAccountIdentityProbeResult =
   | Readonly<{
       status: 'verified';
@@ -81,6 +124,7 @@ export type RuntimeAccountIdentityProbeResult =
       profileId?: string | null;
       groupId?: string | null;
       groupGeneration?: number | null;
+      credentialRevision?: ConnectedServiceCredentialRevisionV1 | null;
       runtime?: Readonly<{
         safeToApply?: boolean;
         inProviderTurn?: boolean;

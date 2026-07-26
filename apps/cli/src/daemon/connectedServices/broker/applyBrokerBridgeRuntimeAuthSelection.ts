@@ -1,6 +1,7 @@
 import { ConnectedServiceIdSchema } from '@happier-dev/protocol';
 
 import { updateBrokerBridgeEffectiveSelection } from './brokerBridgeEffectiveSelectionRegistry';
+import { computeConnectedServiceAccessTokenFingerprint } from '../refresh/credentialFreshness/tokenFingerprint';
 
 function readRecord(value: unknown): Readonly<Record<string, unknown>> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -31,6 +32,18 @@ export function applyBrokerBridgeRuntimeAuthSelection(selection: unknown): Reado
 
   const groupId = readString(record.groupId);
   const generation = readNumber(record.generation ?? record.groupGeneration);
+  const credentialRevision = readString(record.credentialRevision);
+  const credentialRecord = readRecord(record.record);
+  const oauth = readRecord(credentialRecord?.oauth);
+  const token = readRecord(credentialRecord?.token);
+  const credentialSecret = readString(oauth?.accessToken) ?? readString(token?.token);
+  const providerAccountId = readString(oauth?.providerAccountId) ?? readString(token?.providerAccountId);
+  const credentialFingerprint = credentialSecret
+    ? computeConnectedServiceAccessTokenFingerprint(credentialSecret)
+    : null;
+  if (groupId && (generation === null || !credentialRevision || !credentialFingerprint || !providerAccountId)) {
+    return { applied: false, reason: 'exact_broker_application_proof_unavailable', recovery: 'restart_resume' };
+  }
   const effectiveSelection = groupId && generation !== null
     ? {
         kind: 'group' as const,
@@ -39,6 +52,8 @@ export function applyBrokerBridgeRuntimeAuthSelection(selection: unknown): Reado
         activeProfileId: profileId,
         fallbackProfileId: readString(record.fallbackProfileId) ?? profileId,
         generation,
+        credentialRevision: credentialRevision!,
+        credentialFingerprint: credentialFingerprint!,
       }
     : {
         kind: 'profile' as const,
@@ -56,11 +71,26 @@ export function applyBrokerBridgeRuntimeAuthSelection(selection: unknown): Reado
     applied: true,
     recovery: 'provider_owned_broker_selection',
     verification: {
-      status: 'weakly_verified',
-      proofStrength: 'weak',
+      status: groupId ? 'verified' : 'weakly_verified',
+      proofStrength: groupId ? 'exact' : 'weak',
+      ...(providerAccountId ? { providerAccountId } : {}),
       sharedAuthSurfaceId: brokerSelectionIdentity,
       source: 'broker_selection_indirection',
       reason: 'daemon_broker_selection_epoch_bumped',
+      ...(groupId && generation !== null && credentialRevision && credentialFingerprint
+        ? {
+            credentialRevision,
+            credentialFingerprint,
+            generationApplication: {
+              serviceId: serviceIdParsed.data,
+              groupId,
+              profileId,
+              generation,
+              credentialRevision,
+              credentialFingerprint,
+            },
+          }
+        : {}),
     },
   };
 }

@@ -140,6 +140,7 @@ export function buildRuntimeActiveBindings(input: Readonly<{
       profileId,
       groupId: groupId || null,
       generation: selection?.kind === 'group' ? selection.generation : null,
+      credentialRevision: selection?.credentialRevision ?? null,
     });
   }
   return out.sort((left, right) => (
