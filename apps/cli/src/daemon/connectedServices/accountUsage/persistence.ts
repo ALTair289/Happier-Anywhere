@@ -67,7 +67,7 @@ export type ProviderAccountUsagePersistenceScheduler = Readonly<{
     options?: Readonly<{ source?: ConnectedServiceUsageSourceV1; sources?: readonly ConnectedServiceUsageSourceV1[] }>,
   ): Promise<
     | Readonly<{ status: 'enqueued'; enqueue: 'accepted' | 'coalesced' }>
-    | Readonly<{ status: 'suppressed'; reason: string }>
+    | Readonly<{ status: 'already_persisted'; reason: string }>
   >;
   flush(timeoutMs: number): Promise<unknown>;
   dispose(): void;
@@ -263,12 +263,14 @@ export function createProviderAccountUsagePersistenceScheduler(params: Readonly<
         });
         if (enqueue.type === 'accepted') accepted = true;
         if (enqueue.type === 'coalesced') coalesced = true;
-        if (enqueue.type === 'suppressed') lastSuppressionReason = enqueue.reason;
+        if (enqueue.type === 'suppressed') {
+          throw new Error(`provider_account_usage_persistence_${enqueue.reason}`);
+        }
       }
       if (accepted || coalesced) {
         return { status: 'enqueued', enqueue: accepted ? 'accepted' : 'coalesced' };
       }
-      return { status: 'suppressed', reason: lastSuppressionReason };
+      return { status: 'already_persisted', reason: lastSuppressionReason };
     },
     flush: async (timeoutMs) => await scheduler.flushAll(timeoutMs),
     dispose: () => scheduler.dispose(),

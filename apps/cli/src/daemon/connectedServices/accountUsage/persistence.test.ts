@@ -52,7 +52,7 @@ type PersistenceModule = Readonly<{
       options?: Readonly<{ source?: ConnectedServiceUsageSourceV1; sources?: readonly ConnectedServiceUsageSourceV1[] }>,
     ): Promise<
       | Readonly<{ status: 'enqueued'; enqueue: 'accepted' | 'coalesced' }>
-      | Readonly<{ status: 'suppressed'; reason: string }>
+      | Readonly<{ status: 'already_persisted'; reason: string }>
     >;
     flush(timeoutMs: number): Promise<unknown>;
     dispose(): void;
@@ -148,6 +148,52 @@ describe('provider account usage persistence', () => {
     });
     expect(api.registerProviderAccountUsageSnapshotSealed).not.toHaveBeenCalled();
     expect(api.registerConnectedServiceQuotaSnapshotPlain).not.toHaveBeenCalled();
+  });
+
+  it('reports an identical snapshot as already persisted after the first write drains', async () => {
+    const module = await loadPersistenceModule();
+    expect(module).not.toBeNull();
+    const scheduler = module!.createProviderAccountUsagePersistenceScheduler({
+      api: {
+        getAccountEncryptionMode: async () => 'plain',
+        registerProviderAccountUsageSnapshotPlain: async () => {},
+      },
+      now: () => 1_000,
+      fingerprintKey: new Uint8Array(32).fill(9),
+      minFreshnessMs: 60_000,
+    });
+    const snapshot = createSnapshot();
+    try {
+      await expect(scheduler.recordInBandSnapshot(snapshot)).resolves.toEqual({
+        status: 'enqueued',
+        enqueue: 'accepted',
+      });
+      await scheduler.flush(1_000);
+
+      await expect(scheduler.recordInBandSnapshot(snapshot)).resolves.toEqual({
+        status: 'already_persisted',
+        reason: 'unchanged',
+      });
+    } finally {
+      scheduler.dispose();
+    }
+  });
+
+  it('rejects intake when the persistence scheduler cannot take custody', async () => {
+    const module = await loadPersistenceModule();
+    expect(module).not.toBeNull();
+    const scheduler = module!.createProviderAccountUsagePersistenceScheduler({
+      api: {
+        getAccountEncryptionMode: async () => 'plain',
+        registerProviderAccountUsageSnapshotPlain: async () => {},
+      },
+      now: () => 1_000,
+      fingerprintKey: new Uint8Array(32).fill(9),
+    });
+    scheduler.dispose();
+
+    await expect(scheduler.recordInBandSnapshot(createSnapshot()))
+      .rejects.toThrow('provider_account_usage_persistence_disposed');
   });
 
   it('passes explicit connected-service source context through plaintext provider-account usage persistence', async () => {
