@@ -195,6 +195,15 @@ function isMeaningfulSessionTitle(value: unknown, metadata?: Readonly<Record<str
 
 function resolveRefreshedDirectSessionMetadata(params: Readonly<{
   currentMetadata: Readonly<Record<string, unknown>>;
+  directSessionIdentity?: Readonly<{
+    tag: string;
+    machineId: string;
+    providerId: DirectSessionsProviderId;
+    remoteSessionId: string;
+    source: DirectSessionsSource;
+    codexBackendMode?: CodexBackendMode | null;
+    runtimeDescriptor?: AgentRuntimeDescriptorV1 | null;
+  }>;
   titleHint?: string | null;
   directoryHint?: string | null;
   connectedServiceRuntimeSnapshot?: ConnectedServiceRuntimeSnapshot;
@@ -204,6 +213,45 @@ function resolveRefreshedDirectSessionMetadata(params: Readonly<{
 
   let didChange = false;
   const nextMetadata: Record<string, unknown> = { ...params.currentMetadata };
+
+  const identity = params.directSessionIdentity;
+  if (identity) {
+    const currentDirectSession = asMetadataRecord(params.currentMetadata.directSessionV1) ?? {};
+    const nextDirectSession = {
+      ...currentDirectSession,
+      v: 1,
+      providerId: identity.providerId,
+      machineId: identity.machineId,
+      remoteSessionId: identity.remoteSessionId,
+      source: identity.source,
+      ...(identity.providerId === 'codex' && identity.codexBackendMode
+        ? { codexBackendMode: identity.codexBackendMode }
+        : {}),
+      ...(identity.runtimeDescriptor ? { agentRuntimeDescriptorV1: identity.runtimeDescriptor } : {}),
+    };
+    if (params.currentMetadata.tag !== identity.tag) {
+      nextMetadata.tag = identity.tag;
+      didChange = true;
+    }
+    if (JSON.stringify(currentDirectSession) !== JSON.stringify(nextDirectSession)) {
+      nextMetadata.directSessionV1 = nextDirectSession;
+      didChange = true;
+    }
+    if (identity.providerId === 'codex') {
+      if (params.currentMetadata.codexSessionId !== identity.remoteSessionId) {
+        nextMetadata.codexSessionId = identity.remoteSessionId;
+        didChange = true;
+      }
+      if (identity.codexBackendMode && params.currentMetadata.codexBackendMode !== identity.codexBackendMode) {
+        nextMetadata.codexBackendMode = identity.codexBackendMode;
+        didChange = true;
+      }
+      if (identity.runtimeDescriptor && JSON.stringify(params.currentMetadata.agentRuntimeDescriptorV1) !== JSON.stringify(identity.runtimeDescriptor)) {
+        nextMetadata.agentRuntimeDescriptorV1 = identity.runtimeDescriptor;
+        didChange = true;
+      }
+    }
+  }
 
   const currentTitle =
     (isMeaningfulSessionTitle(resolveSessionSummaryTitle(params.currentMetadata), params.currentMetadata)
@@ -250,12 +298,22 @@ function resolveRefreshedDirectSessionMetadata(params: Readonly<{
 async function refreshExistingDirectSessionMetadataIfNeeded(params: Readonly<{
   credentials: Credentials;
   sessionId: string;
+  directSessionIdentity?: Readonly<{
+    tag: string;
+    machineId: string;
+    providerId: DirectSessionsProviderId;
+    remoteSessionId: string;
+    source: DirectSessionsSource;
+    codexBackendMode?: CodexBackendMode | null;
+    runtimeDescriptor?: AgentRuntimeDescriptorV1 | null;
+  }>;
   titleHint?: string | null;
   directoryHint?: string | null;
   connectedServiceRuntimeSnapshot?: ConnectedServiceRuntimeSnapshot;
 }>): Promise<void> {
   if (
-    !normalizeNullableString(params.titleHint)
+    !params.directSessionIdentity
+    && !normalizeNullableString(params.titleHint)
     && !normalizeNullableString(params.directoryHint)
     && !hasConnectedServiceBindings(params.connectedServiceRuntimeSnapshot ?? {})
   ) {
@@ -277,6 +335,7 @@ async function refreshExistingDirectSessionMetadataIfNeeded(params: Readonly<{
 
   const nextMetadata = resolveRefreshedDirectSessionMetadata({
     currentMetadata: initialMetadataRecord,
+    directSessionIdentity: params.directSessionIdentity,
     titleHint: params.titleHint,
     directoryHint: params.directoryHint,
     connectedServiceRuntimeSnapshot: params.connectedServiceRuntimeSnapshot,
@@ -291,6 +350,7 @@ async function refreshExistingDirectSessionMetadataIfNeeded(params: Readonly<{
     updater: (currentMetadata) =>
       resolveRefreshedDirectSessionMetadata({
         currentMetadata,
+        directSessionIdentity: params.directSessionIdentity,
         titleHint: params.titleHint,
         directoryHint: params.directoryHint,
         connectedServiceRuntimeSnapshot: params.connectedServiceRuntimeSnapshot,
@@ -305,8 +365,12 @@ function resolveSourceKey(providerId: DirectSessionsProviderId, source: DirectSe
       const home = source.home === 'connectedService' ? 'connectedService' : 'user';
       const connectedServiceId = home === 'connectedService' ? normalizeNullableString(source.connectedServiceId) ?? '' : '';
       const connectedServiceProfileId = home === 'connectedService' ? normalizeNullableString(source.connectedServiceProfileId) ?? '' : '';
+      const connectedServiceGroupId = home === 'connectedService' ? normalizeNullableString(source.connectedServiceGroupId) ?? '' : '';
       const homePath = normalizeNullableString(source.homePath) ?? '';
-      return `codexHome:${home}:${connectedServiceId}:${connectedServiceProfileId}:${homePath}`;
+      const connectedServiceScope = connectedServiceGroupId
+        ? `group:${connectedServiceGroupId}`
+        : connectedServiceProfileId;
+      return `codexHome:${home}:${connectedServiceId}:${connectedServiceScope}:${homePath}`;
     }
     case 'claude': {
       if (source.kind !== 'claudeConfig') return 'claudeConfig:invalid';
@@ -325,10 +389,21 @@ function resolveSourceKey(providerId: DirectSessionsProviderId, source: DirectSe
   }
 }
 
+function resolveRemotePredecessorSourceKey(providerId: DirectSessionsProviderId, source: DirectSessionsSource): string | null {
+  if (providerId !== 'codex' || source.kind !== 'codexHome' || source.home !== 'connectedService') return null;
+  const connectedServiceGroupId = normalizeNullableString(source.connectedServiceGroupId);
+  if (!connectedServiceGroupId) return null;
+  const connectedServiceId = normalizeNullableString(source.connectedServiceId) ?? '';
+  const connectedServiceProfileId = normalizeNullableString(source.connectedServiceProfileId) ?? '';
+  const homePath = normalizeNullableString(source.homePath) ?? '';
+  return `codexHome:connectedService:${connectedServiceId}:${connectedServiceProfileId}:${homePath}`;
+}
+
 function resolveCodexRuntimeSourceAffinity(source: DirectSessionsSource): Readonly<{
   home: 'user' | 'connectedService';
   connectedServiceId?: string;
   connectedServiceProfileId?: string;
+  connectedServiceGroupId?: string;
   homePath?: string;
 }> {
   if (source.kind !== 'codexHome' || source.home !== 'connectedService') {
@@ -347,6 +422,9 @@ function resolveCodexRuntimeSourceAffinity(source: DirectSessionsSource): Readon
       : {}),
     ...(typeof source.connectedServiceProfileId === 'string' && source.connectedServiceProfileId.trim().length > 0
       ? { connectedServiceProfileId: source.connectedServiceProfileId.trim() }
+      : {}),
+    ...(typeof source.connectedServiceGroupId === 'string' && source.connectedServiceGroupId.trim().length > 0
+      ? { connectedServiceGroupId: source.connectedServiceGroupId.trim() }
       : {}),
     ...(typeof source.homePath === 'string' && source.homePath.trim().length > 0
       ? { homePath: source.homePath.trim() }
@@ -388,6 +466,7 @@ function resolveCodexDirectSessionLinkIdentity(params: Readonly<{
       home: 'connectedService',
       ...(canonicalRuntimeDescriptor.connectedServiceId ? { connectedServiceId: canonicalRuntimeDescriptor.connectedServiceId } : {}),
       ...(canonicalRuntimeDescriptor.connectedServiceProfileId ? { connectedServiceProfileId: canonicalRuntimeDescriptor.connectedServiceProfileId } : {}),
+      ...(canonicalRuntimeDescriptor.connectedServiceGroupId ? { connectedServiceGroupId: canonicalRuntimeDescriptor.connectedServiceGroupId } : {}),
       ...(canonicalRuntimeDescriptor.homePath ? { homePath: canonicalRuntimeDescriptor.homePath } : {}),
     }
     : canonicalRuntimeDescriptor?.home === 'user'
@@ -409,6 +488,8 @@ function resolveCodexDirectSessionLinkIdentity(params: Readonly<{
       connectedServiceId: canonicalRuntimeDescriptor?.connectedServiceId ?? sourceAffinity.connectedServiceId,
       connectedServiceProfileId:
         canonicalRuntimeDescriptor?.connectedServiceProfileId ?? sourceAffinity.connectedServiceProfileId,
+      connectedServiceGroupId:
+        canonicalRuntimeDescriptor?.connectedServiceGroupId ?? sourceAffinity.connectedServiceGroupId,
       homePath: canonicalRuntimeDescriptor?.homePath ?? sourceAffinity.homePath,
     }),
   };
@@ -466,6 +547,17 @@ function computeDirectSessionTag(params: Readonly<{
   return `direct:v1:${sha256Hex(fingerprint)}`;
 }
 
+function computeRemotePredecessorDirectSessionTag(params: Readonly<{
+  machineId: string;
+  providerId: DirectSessionsProviderId;
+  remoteSessionId: string;
+  source: DirectSessionsSource;
+}>): string | null {
+  const sourceKey = resolveRemotePredecessorSourceKey(params.providerId, params.source);
+  if (!sourceKey) return null;
+  return `direct:v1:${sha256Hex(`${params.machineId}|${params.providerId}|${params.remoteSessionId}|${sourceKey}`)}`;
+}
+
 function resolveMaxScanPages(): number {
   const maxPagesRaw = (process.env.HAPPIER_SESSION_ID_PREFIX_SCAN_MAX_PAGES ?? '').trim();
   const maxPagesParsed = maxPagesRaw ? Number.parseInt(maxPagesRaw, 10) : NaN;
@@ -473,7 +565,12 @@ function resolveMaxScanPages(): number {
   return Math.max(1, maxPages);
 }
 
-async function findExistingSessionIdByTag(params: Readonly<{ credentials: Credentials; tag: string }>): Promise<string | null> {
+async function findExistingSessionIdByTag(params: Readonly<{
+  credentials: Credentials;
+  tag: string;
+  metadataMatches?: (metadata: Readonly<Record<string, unknown>>) => boolean;
+  metadataIdentityMatches?: (metadata: Readonly<Record<string, unknown>>) => boolean;
+}>): Promise<string | null> {
   const maxPages = resolveMaxScanPages();
 
   const scan = async (archivedOnly: boolean): Promise<string | null> => {
@@ -484,7 +581,10 @@ async function findExistingSessionIdByTag(params: Readonly<{ credentials: Creden
         const meta = tryDecryptSessionMetadata({ credentials: params.credentials, rawSession: row });
         const rowTagRaw = meta?.['tag'];
         const rowTag = typeof rowTagRaw === 'string' ? rowTagRaw.trim() : '';
-        if (rowTag && rowTag === params.tag) {
+        if (meta !== null && (
+          (rowTag && rowTag === params.tag && (!params.metadataMatches || params.metadataMatches(meta)))
+          || params.metadataIdentityMatches?.(meta) === true
+        )) {
           return row.id;
         }
       }
@@ -497,6 +597,33 @@ async function findExistingSessionIdByTag(params: Readonly<{ credentials: Creden
   const activeHit = await scan(false);
   if (activeHit) return activeHit;
   return await scan(true);
+}
+
+function metadataProvesCodexGroup(metadata: Readonly<Record<string, unknown>>, expectedGroupId: string): boolean {
+  const directSession = asMetadataRecord(metadata.directSessionV1);
+  const directSource = asMetadataRecord(directSession?.source);
+  const directGroupId = normalizeNullableString(directSource?.connectedServiceGroupId);
+  if (directGroupId === expectedGroupId) return true;
+
+  const topRuntimeDescriptor = readCanonicalAgentRuntimeDescriptorV1ForProvider(metadata.agentRuntimeDescriptorV1, 'codex');
+  if (topRuntimeDescriptor?.connectedServiceGroupId === expectedGroupId) return true;
+  const nestedRuntimeDescriptor = readCanonicalAgentRuntimeDescriptorV1ForProvider(
+    directSession?.agentRuntimeDescriptorV1,
+    'codex',
+  );
+  return nestedRuntimeDescriptor?.connectedServiceGroupId === expectedGroupId;
+}
+
+function metadataProvesCodexDirectSessionGroupIdentity(
+  metadata: Readonly<Record<string, unknown>>,
+  expected: Readonly<{ machineId: string; remoteSessionId: string; groupId: string }>,
+): boolean {
+  const directSession = asMetadataRecord(metadata.directSessionV1);
+  return directSession?.v === 1
+    && normalizeNullableString(directSession.providerId) === 'codex'
+    && normalizeNullableString(directSession.machineId) === expected.machineId
+    && normalizeNullableString(directSession.remoteSessionId) === expected.remoteSessionId
+    && metadataProvesCodexGroup(metadata, expected.groupId);
 }
 
 function buildDirectSessionMetadata(params: Readonly<{
@@ -626,11 +753,41 @@ export async function ensureDirectSessionLink(params: Readonly<{
     remoteSessionId,
     source,
   });
-  const existingSessionId = await findExistingSessionIdByTag({ credentials: params.credentials, tag });
+  let existingSessionId = await findExistingSessionIdByTag({ credentials: params.credentials, tag });
+  if (!existingSessionId && params.providerId === 'codex' && source.kind === 'codexHome') {
+    const expectedGroupId = normalizeNullableString(source.connectedServiceGroupId);
+    const predecessorTag = computeRemotePredecessorDirectSessionTag({
+      machineId: params.machineId,
+      providerId: params.providerId,
+      remoteSessionId,
+      source,
+    });
+    if (expectedGroupId && predecessorTag && predecessorTag !== tag) {
+      existingSessionId = await findExistingSessionIdByTag({
+        credentials: params.credentials,
+        tag: predecessorTag,
+        metadataMatches: (metadata) => metadataProvesCodexGroup(metadata, expectedGroupId),
+        metadataIdentityMatches: (metadata) => metadataProvesCodexDirectSessionGroupIdentity(metadata, {
+          machineId: params.machineId,
+          remoteSessionId,
+          groupId: expectedGroupId,
+        }),
+      });
+    }
+  }
   if (existingSessionId) {
     await refreshExistingDirectSessionMetadataIfNeeded({
       credentials: params.credentials,
       sessionId: existingSessionId,
+      directSessionIdentity: {
+        tag,
+        machineId: params.machineId,
+        providerId: params.providerId,
+        remoteSessionId,
+        source,
+        codexBackendMode,
+        runtimeDescriptor,
+      },
       titleHint: params.titleHint,
       directoryHint: params.directoryHint,
       connectedServiceRuntimeSnapshot,

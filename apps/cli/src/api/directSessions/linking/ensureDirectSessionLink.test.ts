@@ -60,7 +60,7 @@ describe('ensureDirectSessionLink', () => {
       },
     });
 
-    await ensureDirectSessionLink({
+    const result = await ensureDirectSessionLink({
       credentials: { token: 'token', encryption: { type: 'legacy', secret: new Uint8Array([1]) } },
       machineId: 'machine_1',
       providerId: 'codex',
@@ -72,15 +72,19 @@ describe('ensureDirectSessionLink', () => {
         home: 'connectedService',
         connectedServiceId: 'openai-codex',
         connectedServiceProfileId: 'work',
+        connectedServiceGroupId: 'happier',
         homePath: '/tmp/connected-codex-home',
       }),
-      source: { kind: 'codexHome', home: 'connectedService', connectedServiceId: 'openai-codex', connectedServiceProfileId: 'work', homePath: '/tmp/connected-codex-home' },
+      source: { kind: 'codexHome', home: 'connectedService', connectedServiceId: 'openai-codex', connectedServiceProfileId: 'work', connectedServiceGroupId: 'happier', homePath: '/tmp/connected-codex-home' },
       titleHint: 'Codex linked session',
       directoryHint: '/repo',
       nowMs: () => 123,
     });
 
     const createdMetadata = getOrCreateSessionByTagMock.mock.calls[0]?.[0]?.metadata;
+    const expectedTag = `direct:v1:${sha256Hex('machine_1|codex|thread_runtime|codexHome:connectedService:openai-codex:group:happier:/tmp/connected-codex-home')}`;
+    expect(result.tag).toBe(expectedTag);
+    expect(getOrCreateSessionByTagMock.mock.calls[0]?.[0]?.tag).toBe(expectedTag);
     expect(createdMetadata).toMatchObject({
       codexSessionId: 'thread_runtime',
       codexBackendMode: 'appServer',
@@ -93,12 +97,13 @@ describe('ensureDirectSessionLink', () => {
           home: 'connectedService',
           connectedServiceId: 'openai-codex',
           connectedServiceProfileId: 'work',
+          connectedServiceGroupId: 'happier',
           homePath: '/tmp/connected-codex-home',
         },
       },
       directSessionV1: {
         remoteSessionId: 'thread_runtime',
-        source: { kind: 'codexHome', home: 'connectedService', connectedServiceId: 'openai-codex', connectedServiceProfileId: 'work', homePath: '/tmp/connected-codex-home' },
+        source: { kind: 'codexHome', home: 'connectedService', connectedServiceId: 'openai-codex', connectedServiceProfileId: 'work', connectedServiceGroupId: 'happier', homePath: '/tmp/connected-codex-home' },
         agentRuntimeDescriptorV1: {
           v: 1,
           providerId: 'codex',
@@ -108,7 +113,84 @@ describe('ensureDirectSessionLink', () => {
             home: 'connectedService',
             connectedServiceId: 'openai-codex',
             connectedServiceProfileId: 'work',
+            connectedServiceGroupId: 'happier',
             homePath: '/tmp/connected-codex-home',
+          },
+        },
+      },
+    });
+  });
+
+  it('reuses an exact group-proven predecessor tag after member rotation and repairs canonical linked identity', async () => {
+    const legacyTag = `direct:v1:${sha256Hex('machine_1|codex|thread_group|codexHome:connectedService:openai-codex:member-a:/tmp/connected-codex-home')}`;
+    const canonicalTag = `direct:v1:${sha256Hex('machine_1|codex|thread_group|codexHome:connectedService:openai-codex:group:primary-pool:/tmp/connected-codex-home')}`;
+    const existingMetadata = {
+      tag: legacyTag,
+      path: '/repo',
+      flavor: 'codex',
+      codexSessionId: 'thread_group',
+      directSessionV1: {
+        v: 1,
+        providerId: 'codex',
+        machineId: 'machine_1',
+        remoteSessionId: 'thread_group',
+        source: {
+          kind: 'codexHome',
+          home: 'connectedService',
+          connectedServiceId: 'openai-codex',
+          connectedServiceProfileId: 'member-a',
+          connectedServiceGroupId: 'primary-pool',
+          homePath: '/tmp/connected-codex-home',
+        },
+        linkedAtMs: 1,
+      },
+    };
+    fetchSessionsPageMock
+      .mockResolvedValueOnce({ sessions: [], hasNext: false, nextCursor: null })
+      .mockResolvedValueOnce({ sessions: [], hasNext: false, nextCursor: null })
+      .mockResolvedValueOnce({ sessions: [{ id: 'sess_group', metadata: existingMetadata }], hasNext: false, nextCursor: null });
+    fetchSessionByIdMock.mockResolvedValueOnce({ id: 'sess_group', metadata: existingMetadata });
+    tryDecryptSessionMetadataMock.mockImplementation(({ rawSession }: { rawSession: { metadata?: unknown } }) => rawSession.metadata);
+
+    const result = await ensureDirectSessionLink({
+      credentials: { token: 'token', encryption: { type: 'legacy', secret: new Uint8Array([1]) } },
+      machineId: 'machine_1',
+      providerId: 'codex',
+      remoteSessionId: 'thread_group',
+      codexBackendMode: 'appServer',
+      source: {
+        kind: 'codexHome',
+        home: 'connectedService',
+        connectedServiceId: 'openai-codex',
+        connectedServiceProfileId: 'member-b',
+        connectedServiceGroupId: 'primary-pool',
+        homePath: '/tmp/connected-codex-home',
+      },
+      directoryHint: '/repo',
+      nowMs: () => 123,
+    });
+
+    expect(result).toEqual({ sessionId: 'sess_group', created: false, tag: canonicalTag });
+    expect(getOrCreateSessionByTagMock).not.toHaveBeenCalled();
+    const updater = updateSessionMetadataWithRetryMock.mock.calls[0]?.[0]?.updater;
+    expect(typeof updater).toBe('function');
+    expect(updater(existingMetadata)).toMatchObject({
+      tag: canonicalTag,
+      codexSessionId: 'thread_group',
+      agentRuntimeDescriptorV1: {
+        provider: {
+          vendorSessionId: 'thread_group',
+          connectedServiceGroupId: 'primary-pool',
+        },
+      },
+      directSessionV1: {
+        remoteSessionId: 'thread_group',
+        source: {
+          connectedServiceGroupId: 'primary-pool',
+        },
+        agentRuntimeDescriptorV1: {
+          provider: {
+            connectedServiceGroupId: 'primary-pool',
           },
         },
       },

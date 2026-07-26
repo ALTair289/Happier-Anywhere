@@ -52,6 +52,7 @@ type CanonicalCodexRuntimeDescriptor = Readonly<{
   home: 'user' | 'connectedService' | null;
   connectedServiceId: string | null;
   connectedServiceProfileId: string | null;
+  connectedServiceGroupId: string | null;
   homePath: string | null;
   backendMode?: CodexBackendMode | null;
 }>; 
@@ -85,6 +86,7 @@ function resolveCanonicalDirectSource(params: Readonly<{
       home: runtime.home === 'connectedService' ? 'connectedService' : 'user',
       ...(runtime.connectedServiceId ? { connectedServiceId: runtime.connectedServiceId } : {}),
       ...(runtime.connectedServiceProfileId ? { connectedServiceProfileId: runtime.connectedServiceProfileId } : {}),
+      ...(runtime.connectedServiceGroupId ? { connectedServiceGroupId: runtime.connectedServiceGroupId } : {}),
       ...(runtime.homePath ? { homePath: runtime.homePath } : {}),
     };
   }

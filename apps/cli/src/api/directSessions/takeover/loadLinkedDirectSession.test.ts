@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { buildCodexAgentRuntimeDescriptorV1 } from '@happier-dev/protocol';
 
 const fetchSessionByIdMock = vi.fn();
 const tryDecryptSessionMetadataMock = vi.fn();
@@ -66,6 +67,59 @@ describe('loadLinkedDirectSession', () => {
       session: expect.objectContaining({
         providerId: 'opencode',
         remoteSessionId: 'runtime-session',
+      }),
+    });
+  });
+
+  it('preserves connected-service group identity from the canonical Codex runtime descriptor', async () => {
+    const homePath = '/tmp/happier/daemon/connected-services/materialized/csm_session_1/codex/codex-home';
+    fetchSessionByIdMock.mockResolvedValueOnce({ id: 'sess_codex_group' });
+    tryDecryptSessionMetadataMock.mockReturnValueOnce({
+      path: '/repo',
+      directSessionV1: {
+        v: 1,
+        providerId: 'codex',
+        machineId: 'machine_1',
+        remoteSessionId: 'legacy-thread',
+        source: {
+          kind: 'codexHome',
+          home: 'connectedService',
+          connectedServiceId: 'openai-codex',
+          connectedServiceProfileId: 'work',
+          connectedServiceGroupId: 'happier',
+          homePath,
+        },
+        linkedAtMs: 1,
+        agentRuntimeDescriptorV1: buildCodexAgentRuntimeDescriptorV1({
+          backendMode: 'appServer',
+          vendorSessionId: 'runtime-thread',
+          home: 'connectedService',
+          connectedServiceId: 'openai-codex',
+          connectedServiceProfileId: 'work',
+          connectedServiceGroupId: 'happier',
+          homePath,
+        }),
+      },
+    });
+
+    const result = await loadLinkedDirectSession({
+      credentials: { token: 'token', encryption: { type: 'legacy', secret: new Uint8Array([1]) } },
+      sessionId: 'sess_codex_group',
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      session: expect.objectContaining({
+        providerId: 'codex',
+        remoteSessionId: 'runtime-thread',
+        source: {
+          kind: 'codexHome',
+          home: 'connectedService',
+          connectedServiceId: 'openai-codex',
+          connectedServiceProfileId: 'work',
+          connectedServiceGroupId: 'happier',
+          homePath,
+        },
       }),
     });
   });
