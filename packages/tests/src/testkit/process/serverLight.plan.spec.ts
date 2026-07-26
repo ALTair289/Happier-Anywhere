@@ -66,6 +66,16 @@ describe("startServerLight planning helpers", () => {
     expect(normalizeForPathAssertions(tsconfigPath ?? "")).toContain("/apps/server/tsconfig.json");
   });
 
+  it("launches through the production light migration-plan owner when requested", () => {
+    const launch = resolveServerStartLaunchSpec({
+      provider: "sqlite",
+      env: { HAPPIER_STACK_MIGRATE_MODE: "skip" },
+      useDevLightMigrationOwner: true,
+    });
+
+    expect(launch.args).toEqual(["-s", "workspace", resolveServerAppWorkspaceName(), "dev:light"]);
+  });
+
   it.each<[TestDbProvider, string]>([
     ["pglite", "migrate:light:deploy"],
     ["sqlite", "migrate:sqlite:deploy"],
