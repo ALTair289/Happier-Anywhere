@@ -4,6 +4,7 @@ export type TerminalHostStartupFailureReason =
   | 'startup_action_timeout'
   | 'startup_action_failed'
   | 'recovery_probe_inconclusive'
+  | 'live_attachment_adoption_unavailable'
   | 'bootstrap_cleanup_did_not_converge'
   | 'pane_disappeared_after_bootstrap_cleanup';
 

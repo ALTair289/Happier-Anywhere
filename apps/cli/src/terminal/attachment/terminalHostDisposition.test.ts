@@ -95,6 +95,27 @@ describe('executeTerminalHostDisposition', () => {
     }
   });
 
+  it('keeps physical destruction final when descriptor removal loses a replacement race', async () => {
+    const dispose = vi.fn(async () => undefined);
+    await expect(executeTerminalHostDisposition({
+      happyHomeDir: '/tmp/happy',
+      sessionId: 'session-removal-race',
+      expectedAttachmentId: HANDLE.attachmentId!,
+      intent: { kind: 'destroy_owned_host', reason: 'explicit_user_stop' },
+      adapter: buildAdapter(dispose),
+      readAttachmentInfo: vi.fn(async () => ({
+        version: 2 as const,
+        attachmentId: HANDLE.attachmentId!,
+        sessionId: 'session-removal-race',
+        handle: { ...HANDLE, attachmentId: HANDLE.attachmentId! },
+        terminal: { mode: 'zellij' as const, zellij: { sessionName: HANDLE.sessionName, paneId: HANDLE.paneId!, socketDirV1: HANDLE.socketDir! } },
+        updatedAt: 1,
+      })),
+      removeAttachmentInfo: vi.fn(async () => false),
+    })).resolves.toEqual({ status: 'destroyed', attachmentId: HANDLE.attachmentId, descriptorRetained: true });
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
   it('claims explicit stop once, destroys the persisted handle, and removes by expected-id CAS', async () => {
     const dir = tmp.dirSync({ unsafeCleanup: true });
     try {
@@ -129,6 +150,30 @@ describe('executeTerminalHostDisposition', () => {
     }
   });
 
+  it('retires an exactly bound confirmed-dead attachment without trying to destroy the already-dead host', async () => {
+    const dir = tmp.dirSync({ unsafeCleanup: true });
+    try {
+      await persistBoundAttachment(dir.name);
+      const dispose = vi.fn(async () => {
+        throw new Error('the confirmed-dead pane cannot be closed');
+      });
+
+      await expect(executeTerminalHostDisposition({
+        happyHomeDir: dir.name,
+        sessionId: 'session-1',
+        expectedAttachmentId: HANDLE.attachmentId!,
+        intent: { kind: 'retire_confirmed_dead_attachment', reason: 'positive_dead_recovery' },
+        adapter: buildAdapter(dispose),
+      })).resolves.toEqual({ status: 'retired', attachmentId: HANDLE.attachmentId });
+
+      expect(dispose).not.toHaveBeenCalled();
+      await expect(readTerminalAttachmentInfo({ happyHomeDir: dir.name, sessionId: 'session-1' }))
+        .resolves.toBeNull();
+    } finally {
+      dir.removeCallback();
+    }
+  });
+
   it('parks legacy and shared missing-pane attachments without physical destruction', async () => {
     const dir = tmp.dirSync({ unsafeCleanup: true });
     try {
@@ -143,7 +188,7 @@ describe('executeTerminalHostDisposition', () => {
         happyHomeDir: dir.name,
         sessionId: 'legacy-session',
         expectedAttachmentId: 'attachment-guessed',
-        intent: { kind: 'destroy_owned_host', reason: 'positive_dead_recovery' },
+        intent: { kind: 'retire_confirmed_dead_attachment', reason: 'positive_dead_recovery' },
         adapter: buildAdapter(dispose),
       })).resolves.toMatchObject({ status: 'parked', reason: 'legacy_attachment' });
       expect(dispose).not.toHaveBeenCalled();

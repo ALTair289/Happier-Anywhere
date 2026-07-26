@@ -20,11 +20,18 @@ export type {
 
 export type TerminalHostPreference = 'auto' | TerminalHostKind;
 
+declare const terminalAttachmentIdBrand: unique symbol;
+
+export type TerminalAttachmentId = string & Readonly<{
+  [terminalAttachmentIdBrand]: 'TerminalAttachmentId';
+}>;
+
 export type TerminalHostAttachMetadata = AttachSurfaceStaticMetadataV1 & Readonly<{
   attachStrategy: 'terminal_host';
 }>;
 
 export type TerminalHostHandle = Readonly<{
+  attachmentId?: TerminalAttachmentId;
   kind: TerminalHostKind;
   sessionName: string;
   paneId?: string;
@@ -66,7 +73,6 @@ export type TerminalHostAdapter = Readonly<{
   kind: TerminalHostKind;
   createOrAttachHost(opts: TerminalHostCreateOrAttachOptions): Promise<TerminalHostHandle>;
   adoptExistingHost?(handle: TerminalHostHandle): Promise<TerminalHostHandle>;
-  relaunchExistingHost?(handle: TerminalHostHandle, opts: TerminalHostCreateOrAttachOptions): Promise<TerminalHostHandle>;
   injectUserPrompt(
     handle: TerminalHostHandle,
     input: TerminalPromptInput,

@@ -3,7 +3,12 @@ import * as tmp from 'tmp';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { readTerminalAttachmentInfo, removeTerminalAttachmentInfo, writeTerminalAttachmentInfo } from './terminalAttachmentInfo';
+import {
+  readTerminalAttachmentInfo,
+  readTerminalAttachmentState,
+  removeTerminalAttachmentInfo,
+  writeTerminalAttachmentInfo,
+} from './terminalAttachmentInfo';
 
 describe('terminalAttachmentInfo', () => {
   it('writes attachment info with private file permissions', async () => {
@@ -80,12 +85,20 @@ describe('terminalAttachmentInfo', () => {
       await writeTerminalAttachmentInfo({
         happyHomeDir: dir.name,
         sessionId: 'sess_zellij_remove',
+        attachmentId: 'attachment-original',
+        handle: {
+          kind: 'zellij',
+          sessionName: 'happier-claude-unified-old',
+          paneId: 'terminal_1',
+          attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' },
+        },
         terminal: originalTerminal as Parameters<typeof writeTerminalAttachmentInfo>[0]['terminal'],
       });
 
       await expect(removeTerminalAttachmentInfo({
         happyHomeDir: dir.name,
         sessionId: 'sess_zellij_remove',
+        expectedAttachmentId: 'attachment-replacement',
         expectedTerminal: replacementTerminal as Parameters<typeof removeTerminalAttachmentInfo>[0]['expectedTerminal'],
       })).resolves.toBe(false);
       expect((await readTerminalAttachmentInfo({
@@ -96,12 +109,161 @@ describe('terminalAttachmentInfo', () => {
       await expect(removeTerminalAttachmentInfo({
         happyHomeDir: dir.name,
         sessionId: 'sess_zellij_remove',
+        expectedAttachmentId: 'attachment-original',
         expectedTerminal: originalTerminal as Parameters<typeof removeTerminalAttachmentInfo>[0]['expectedTerminal'],
       })).resolves.toBe(true);
       await expect(readTerminalAttachmentInfo({
         happyHomeDir: dir.name,
         sessionId: 'sess_zellij_remove',
       })).resolves.toBeNull();
+    } finally {
+      dir.removeCallback();
+    }
+  });
+
+  it('persists one opaque attachment id with the full bound host handle', async () => {
+    const dir = tmp.dirSync({ unsafeCleanup: true });
+    try {
+      const handle = {
+        kind: 'zellij',
+        sessionName: 'happier-claude-unified-zellij',
+        paneId: 'terminal_7',
+        socketDir: '/tmp/happier-zellij-a',
+        attachMetadata: {
+          attachStrategy: 'terminal_host',
+          topology: 'shared',
+          locality: 'same_machine',
+          maxClients: null,
+          requiresLocalAttachmentInfo: true,
+          liveProbe: 'required',
+        },
+      } as const;
+
+      await writeTerminalAttachmentInfo({
+        happyHomeDir: dir.name,
+        sessionId: 'sess_identity',
+        attachmentId: 'attachment-seed-1',
+        handle,
+        terminal: {
+          mode: 'zellij',
+          zellij: {
+            sessionName: handle.sessionName,
+            paneId: handle.paneId,
+            socketDirV1: handle.socketDir,
+          },
+        },
+      });
+
+      await expect(readTerminalAttachmentInfo({
+        happyHomeDir: dir.name,
+        sessionId: 'sess_identity',
+      })).resolves.toMatchObject({
+        version: 2,
+        attachmentId: 'attachment-seed-1',
+        handle,
+      });
+    } finally {
+      dir.removeCallback();
+    }
+  });
+
+  it('uses expected attachment id CAS so stale release cannot delete a replacement', async () => {
+    const dir = tmp.dirSync({ unsafeCleanup: true });
+    try {
+      const handle = {
+        kind: 'tmux',
+        sessionName: 'happy',
+        paneId: 'replacement-window',
+        attachMetadata: {
+          attachStrategy: 'terminal_host',
+          topology: 'shared',
+          locality: 'same_machine',
+          maxClients: null,
+          requiresLocalAttachmentInfo: true,
+          liveProbe: 'required',
+        },
+      } as const;
+      await writeTerminalAttachmentInfo({
+        happyHomeDir: dir.name,
+        sessionId: 'sess_stale_release',
+        attachmentId: 'attachment-new',
+        handle,
+        terminal: { mode: 'tmux', tmux: { target: 'happy:replacement-window' } },
+      });
+
+      await expect(removeTerminalAttachmentInfo({
+        happyHomeDir: dir.name,
+        sessionId: 'sess_stale_release',
+        expectedAttachmentId: 'attachment-old',
+      })).resolves.toBe(false);
+      await expect(readTerminalAttachmentInfo({
+        happyHomeDir: dir.name,
+        sessionId: 'sess_stale_release',
+      })).resolves.toMatchObject({ attachmentId: 'attachment-new' });
+
+      await expect(removeTerminalAttachmentInfo({
+        happyHomeDir: dir.name,
+        sessionId: 'sess_stale_release',
+        expectedAttachmentId: 'attachment-new',
+      })).resolves.toBe(true);
+    } finally {
+      dir.removeCallback();
+    }
+  });
+
+  it('rejects a bound attachment whose persisted terminal root disagrees with its full handle', async () => {
+    const dir = tmp.dirSync({ unsafeCleanup: true });
+    try {
+      await expect(writeTerminalAttachmentInfo({
+        happyHomeDir: dir.name,
+        sessionId: 'sess_root_mismatch',
+        attachmentId: 'attachment-root-1',
+        handle: {
+          kind: 'zellij',
+          sessionName: 'owned-session',
+          paneId: 'terminal_3',
+          socketDir: '/tmp/owned-root',
+          attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' },
+        },
+        terminal: {
+          mode: 'zellij',
+          zellij: {
+            sessionName: 'replacement-session',
+            paneId: 'terminal_3',
+            socketDirV1: '/tmp/owned-root',
+          },
+        },
+      })).rejects.toThrow(/root.*handle/i);
+
+      await expect(readTerminalAttachmentInfo({
+        happyHomeDir: dir.name,
+        sessionId: 'sess_root_mismatch',
+      })).resolves.toBeNull();
+    } finally {
+      dir.removeCallback();
+    }
+  });
+
+  it('parks legacy v1 attachment removal even when its terminal metadata matches', async () => {
+    const dir = tmp.dirSync({ unsafeCleanup: true });
+    try {
+      const sessionId = 'sess_legacy_no_identity';
+      const terminal = { mode: 'tmux', tmux: { target: 'happy:legacy-window' } } as const;
+      await writeTerminalAttachmentInfo({
+        happyHomeDir: dir.name,
+        sessionId,
+        terminal,
+      });
+
+      await expect(removeTerminalAttachmentInfo({
+        happyHomeDir: dir.name,
+        sessionId,
+        expectedAttachmentId: 'attachment-guessed',
+        expectedTerminal: terminal,
+      })).resolves.toBe(false);
+      await expect(readTerminalAttachmentInfo({ happyHomeDir: dir.name, sessionId })).resolves.toMatchObject({
+        version: 1,
+      });
     } finally {
       dir.removeCallback();
     }
@@ -210,6 +372,32 @@ describe('terminalAttachmentInfo', () => {
         'utf8',
       );
       expect(await readTerminalAttachmentInfo({ happyHomeDir: dir.name, sessionId })).toBeNull();
+    } finally {
+      dir.removeCallback();
+    }
+  });
+
+  it('distinguishes absent, invalid, and I/O-failed attachment evidence', async () => {
+    const dir = tmp.dirSync({ unsafeCleanup: true });
+    try {
+      await expect(readTerminalAttachmentState({
+        happyHomeDir: dir.name,
+        sessionId: 'sess_absent',
+      })).resolves.toEqual({ status: 'absent' });
+
+      const sessionsDir = join(dir.name, 'terminal', 'sessions');
+      await mkdir(sessionsDir, { recursive: true });
+      await writeFile(join(sessionsDir, 'sess_invalid.json'), 'not-json', 'utf8');
+      await expect(readTerminalAttachmentState({
+        happyHomeDir: dir.name,
+        sessionId: 'sess_invalid',
+      })).resolves.toEqual({ status: 'unreadable', reason: 'invalid' });
+
+      await mkdir(join(sessionsDir, 'sess_io.json'));
+      await expect(readTerminalAttachmentState({
+        happyHomeDir: dir.name,
+        sessionId: 'sess_io',
+      })).resolves.toEqual({ status: 'unreadable', reason: 'io_error' });
     } finally {
       dir.removeCallback();
     }

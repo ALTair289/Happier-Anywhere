@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import type { TerminalAttachmentInfo } from '@/terminal/attachment/terminalAttachmentInfo';
+import type {
+  BoundTerminalAttachmentInfo,
+  TerminalAttachmentInfo,
+} from '@/terminal/attachment/terminalAttachmentInfo';
 
 const { spawnSyncMock } = vi.hoisted(() => ({
   spawnSyncMock: vi.fn(() => ({ status: 0, stdout: '', stderr: '' })),
@@ -23,8 +26,18 @@ const readTerminalAttachmentInfo = vi.fn<(_: {
   happyHomeDir: string;
   sessionId: string;
 }) => Promise<TerminalAttachmentInfo | null>>(async () => null);
+const readTerminalAttachmentState = vi.fn(async (params: {
+  happyHomeDir: string;
+  sessionId: string;
+}) => {
+  const info = await readTerminalAttachmentInfo(params);
+  return info ? { status: 'present' as const, info } : { status: 'absent' as const };
+});
+const removeTerminalAttachmentInfo = vi.fn(async () => true);
 vi.mock('@/terminal/attachment/terminalAttachmentInfo', () => ({
   readTerminalAttachmentInfo,
+  readTerminalAttachmentState,
+  removeTerminalAttachmentInfo,
 }));
 
 const resolveZellijRuntimeBinary = vi.fn<(params?: { expectedVersion?: string }) => Promise<string | null>>(
@@ -42,10 +55,17 @@ vi.mock('@/integrations/zellij/socketDir', () => ({
 }));
 
 const zellijKillSession = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
+const zellijDeleteSession = vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
 vi.mock('@/integrations/zellij/actions', () => ({
   defaultZellijActions: {
     killSession: zellijKillSession,
+    deleteSession: zellijDeleteSession,
   },
+}));
+
+const recordTerminalHostKillAudit = vi.fn();
+vi.mock('@/daemon/sessionKillAudit', () => ({
+  recordTerminalHostKillAudit,
 }));
 
 const tmuxKillWindow = vi.fn(async (_sessionIdentifier: string) => true);
@@ -88,7 +108,109 @@ function withProcessPlatform<T>(platform: NodeJS.Platform, fn: () => Promise<T>)
   });
 }
 
+function createBoundAttachment(sessionId: string, attachmentIdRaw: string): BoundTerminalAttachmentInfo {
+  const attachmentId = attachmentIdRaw as BoundTerminalAttachmentInfo['attachmentId'];
+  const sessionName = `happier-${sessionId}`;
+  const socketDir = `/tmp/${sessionId}`;
+  return {
+    version: 2,
+    attachmentId,
+    sessionId,
+    handle: {
+      attachmentId,
+      kind: 'zellij',
+      sessionName,
+      paneId: 'terminal_1',
+      socketDir,
+      attachMetadata: {
+        attachStrategy: 'terminal_host',
+        topology: 'shared',
+        locality: 'same_machine',
+        liveProbe: 'required',
+      },
+    },
+    terminal: {
+      mode: 'zellij',
+      zellij: { sessionName, paneId: 'terminal_1', socketDirV1: socketDir },
+    },
+    updatedAt: 1,
+  };
+}
+
 describe('createStopSession', () => {
+  it('fails closed before signaling when attachment topology evidence is unreadable', async () => {
+    const { createStopSession } = await import('./stopSession');
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true as any);
+    const stop = createStopSession({
+      pidToTrackedSession: new Map<number, any>([[
+        110,
+        {
+          startedBy: 'terminal',
+          pid: 110,
+          happySessionId: 'sess-unreadable',
+          processCommandHash: 'h0',
+          spawnOptions: { terminal: { mode: 'plain' } },
+        },
+      ]]),
+      readAttachmentState: vi.fn(async () => ({ status: 'unreadable', reason: 'invalid' } as const)),
+      waitForTrackedRunnersExit: vi.fn(async () => true),
+    });
+
+    await expect(stop('sess-unreadable')).resolves.toEqual({
+      status: 'incomplete',
+      reason: 'missing_topology_proof',
+    });
+    expect(killSpy).not.toHaveBeenCalled();
+  });
+
+  it('allows descriptor absence only when marker provenance proves a plain runner', async () => {
+    const { createStopSession } = await import('./stopSession');
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true as any);
+    const stop = createStopSession({
+      pidToTrackedSession: new Map<number, any>([[
+        111,
+        {
+          startedBy: 'terminal',
+          pid: 111,
+          happySessionId: 'sess-proven-plain',
+          processCommandHash: 'h1',
+          spawnOptions: { terminal: { mode: 'plain' } },
+        },
+      ]]),
+      requireTerminalTopologyProof: true,
+      readAttachmentState: vi.fn(async () => ({ status: 'absent' } as const)),
+      waitForTrackedRunnersExit: vi.fn(async () => true),
+    });
+
+    await expect(stop('sess-proven-plain')).resolves.toEqual({ status: 'stopped' });
+    expect(killSpy).toHaveBeenCalledWith(111, 'SIGTERM');
+  });
+
+  it('fails closed when marker provenance cannot prove whether a host exists', async () => {
+    const { createStopSession } = await import('./stopSession');
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true as any);
+    const stop = createStopSession({
+      pidToTrackedSession: new Map<number, any>([[
+        112,
+        {
+          startedBy: 'terminal',
+          pid: 112,
+          happySessionId: 'sess-unknown-topology',
+          processCommandHash: 'h2',
+        },
+      ]]),
+      requireTerminalTopologyProof: true,
+      readAttachmentState: vi.fn(async () => ({ status: 'absent' } as const)),
+      waitForTrackedRunnersExit: vi.fn(async () => true),
+    });
+
+    await expect(stop('sess-unknown-topology')).resolves.toEqual({
+      status: 'incomplete',
+      reason: 'missing_topology_proof',
+    });
+    expect(killSpy).not.toHaveBeenCalled();
+  });
+
   it('keeps matched tracked sessions until exit is observed', async () => {
     const { createStopSession } = await import('./stopSession');
 
@@ -105,10 +227,13 @@ describe('createStopSession', () => {
       [222, { startedBy: 'terminal', pid: 222, happySessionId: 'sess-1', processCommandHash: 'h2' }],
     ]);
 
-    const stop = createStopSession({ pidToTrackedSession });
+    const stop = createStopSession({
+      pidToTrackedSession,
+      waitForTrackedRunnersExit: vi.fn(async () => true),
+    });
     const ok = await stop('sess-1');
 
-    expect(ok).toBe(true);
+    expect(ok).toEqual({ status: 'stopped' });
     expect(killDaemonChild).not.toHaveBeenCalled();
     expect(killSpy).toHaveBeenCalledWith(-111, 'SIGTERM');
     expect(killSpy).toHaveBeenCalledWith(222, 'SIGTERM');
@@ -140,10 +265,13 @@ describe('createStopSession', () => {
       [222, { startedBy: 'terminal', pid: 222, happySessionId: 'sess-1', processCommandHash: 'h2' }],
     ]);
 
-    const stop = createStopSession({ pidToTrackedSession });
+    const stop = createStopSession({
+      pidToTrackedSession,
+      waitForTrackedRunnersExit: vi.fn(async () => true),
+    });
     const ok = await stop('sess-1');
 
-    expect(ok).toBe(true);
+    expect(ok).toEqual({ status: 'stopped' });
     expect(killSpy).toHaveBeenCalledWith(-111, 'SIGTERM');
     expect(killDaemonChild).toHaveBeenCalledWith('SIGTERM');
     expect(killSpy).toHaveBeenCalledWith(222, 'SIGTERM');
@@ -183,10 +311,50 @@ describe('createStopSession', () => {
     const stop = createStopSession({ pidToTrackedSession });
     const ok = await stop('sess-1');
 
-    expect(ok).toBe(false);
+    expect(ok).toEqual({ status: 'incomplete', reason: 'runner_signal_incomplete' });
     expect(killSpy).toHaveBeenCalledWith(-111, 'SIGTERM');
     expect(killDaemonChild).toHaveBeenCalledWith('SIGTERM');
     expect(pidToTrackedSession.get(111)).toBe(trackedSession);
+  });
+
+  it('treats an exact tracked runner that exits during stop signaling as positively stopped', async () => {
+    const { createStopSession } = await import('./stopSession');
+
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true as any);
+    isPidSafeHappySessionProcess.mockResolvedValueOnce(false);
+    const areTrackedRunnersExited = vi.fn()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    const waitForTrackedRunnersExit = vi.fn(async () => {
+      throw new Error('already-exited runners must not enter the exit wait');
+    });
+    const pidToTrackedSession = new Map<number, any>([
+      [222, {
+        startedBy: 'terminal',
+        pid: 222,
+        happySessionId: 'sess-exited-during-stop',
+        processCommandHash: 'expected-command',
+      }],
+    ]);
+
+    const stop = createStopSession({
+      pidToTrackedSession,
+      areTrackedRunnersExited,
+      waitForTrackedRunnersExit,
+    });
+    const result = await stop('sess-exited-during-stop');
+
+    expect(result).toEqual({ status: 'stopped' });
+    expect(areTrackedRunnersExited).toHaveBeenNthCalledWith(1, {
+      sessionId: 'sess-exited-during-stop',
+      trackedPids: [222],
+    });
+    expect(areTrackedRunnersExited).toHaveBeenNthCalledWith(2, {
+      sessionId: 'sess-exited-during-stop',
+      trackedPids: [222],
+    });
+    expect(waitForTrackedRunnersExit).not.toHaveBeenCalled();
+    expect(killSpy).not.toHaveBeenCalled();
   });
 
   it('keeps tracked in-flight attaches until exit is observed', async () => {
@@ -202,16 +370,19 @@ describe('createStopSession', () => {
       [333, { startedBy: 'terminal', pid: 333, spawnOptions: { existingSessionId: 'sess-2' }, processCommandHash: 'h3' }],
     ]);
 
-    const stop = createStopSession({ pidToTrackedSession });
+    const stop = createStopSession({
+      pidToTrackedSession,
+      waitForTrackedRunnersExit: vi.fn(async () => true),
+    });
     const ok = await stop('sess-2');
 
-    expect(ok).toBe(true);
+    expect(ok).toEqual({ status: 'stopped' });
     expect(killSpy).toHaveBeenCalledWith(333, 'SIGTERM');
     expect(pidToTrackedSession.size).toBe(1);
     expect(pidToTrackedSession.has(333)).toBe(true);
   });
 
-  it('kills the zellij terminal host recorded for a stopped terminal-hosted session', async () => {
+  it('parks a legacy zellij attachment without signaling either host or runner', async () => {
     const { createStopSession } = await import('./stopSession');
 
     readTerminalAttachmentInfo.mockResolvedValueOnce({
@@ -226,8 +397,6 @@ describe('createStopSession', () => {
       },
       updatedAt: 1,
     });
-    resolveZellijRuntimeBinary.mockResolvedValueOnce('/tools/zellij');
-    zellijKillSession.mockResolvedValueOnce({ exitCode: 0, stdout: '', stderr: '' });
     const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true as any);
 
     const pidToTrackedSession = new Map<number, any>([
@@ -237,18 +406,642 @@ describe('createStopSession', () => {
     const stop = createStopSession({ pidToTrackedSession });
     const ok = await stop('sess-zellij');
 
-    expect(ok).toBe(true);
-    expect(prepareZellijSocketDir).toHaveBeenCalledWith('/happy-home/terminal/zellij');
-    expect(zellijKillSession).toHaveBeenCalledWith({
-      zellijBinary: '/tools/zellij',
-      env: { ZELLIJ_SOCKET_DIR: '/happy-home/terminal/zellij' },
-      sessionName: 'happier-claude-unified-123',
-      timeoutMs: expect.any(Number),
-    });
-    expect(killSpy).toHaveBeenCalledWith(333, 'SIGTERM');
+    expect(ok).toEqual({ status: 'incomplete', reason: 'legacy_attachment' });
+    expect(zellijKillSession).not.toHaveBeenCalled();
+    expect(zellijDeleteSession).not.toHaveBeenCalled();
+    expect(killSpy).not.toHaveBeenCalled();
   });
 
-  it('treats an already-missing recorded zellij terminal host as stopped', async () => {
+  it('does not destroy an exact host when no tracked runner exit can be proven', async () => {
+    const { createStopSession } = await import('./stopSession');
+    const attachmentId = 'attachment-untracked-host' as NonNullable<import('@/integrations/terminalHost/_types').TerminalHostHandle['attachmentId']>;
+    const dispose = vi.fn(async () => undefined);
+    const stop = createStopSession({
+      pidToTrackedSession: new Map(),
+      terminalHostAdapters: {
+        zellij: {
+          kind: 'zellij',
+          createOrAttachHost: vi.fn(),
+          injectUserPrompt: vi.fn(),
+          interruptTurn: vi.fn(),
+          evaluateLiveness: vi.fn(),
+          dispose,
+        } as any,
+      },
+      readAttachmentInfo: vi.fn(async () => ({
+        version: 2,
+        attachmentId,
+        sessionId: 'sess-untracked-host',
+        handle: {
+          attachmentId,
+          kind: 'zellij',
+          sessionName: 'happier-untracked-host',
+          paneId: 'terminal_1',
+          socketDir: '/tmp/happier-untracked-host',
+          attachMetadata: {
+            attachStrategy: 'terminal_host',
+            topology: 'shared',
+            locality: 'same_machine',
+            liveProbe: 'required',
+          },
+        },
+        terminal: {
+          mode: 'zellij',
+          zellij: {
+            sessionName: 'happier-untracked-host',
+            paneId: 'terminal_1',
+            socketDirV1: '/tmp/happier-untracked-host',
+          },
+        },
+        updatedAt: 1,
+      } as const)),
+    });
+
+    await expect(stop('sess-untracked-host')).resolves.toEqual({
+      status: 'incomplete',
+      reason: 'tracked_runner_absent',
+    });
+    expect(dispose).not.toHaveBeenCalled();
+  });
+
+  it('signals and observes the exact runner before destroying its exact terminal attachment', async () => {
+    const { createStopSession } = await import('./stopSession');
+    const attachmentId = 'attachment-stop-1' as NonNullable<import('@/integrations/terminalHost/_types').TerminalHostHandle['attachmentId']>;
+    const handle = {
+      attachmentId,
+      kind: 'zellij',
+      sessionName: 'happier-claude-unified-owned',
+      paneId: 'terminal_9',
+      socketDir: '/happy-home/terminal/zellij-owned',
+      attachMetadata: {
+        attachStrategy: 'terminal_host',
+        topology: 'shared',
+        locality: 'same_machine',
+        liveProbe: 'required',
+      },
+    } as const;
+    const attachmentInfo = {
+      version: 2,
+      attachmentId,
+      sessionId: 'sess-disposition',
+      handle,
+      terminal: {
+        mode: 'zellij',
+        zellij: {
+          sessionName: handle.sessionName,
+          paneId: handle.paneId,
+          socketDirV1: handle.socketDir,
+        },
+      },
+      updatedAt: 1,
+    } as const;
+    const order: string[] = [];
+    const dispose = vi.fn(async () => {
+      order.push('dispose-host');
+    });
+    const adapter = {
+      kind: 'zellij',
+      createOrAttachHost: vi.fn(),
+      injectUserPrompt: vi.fn(),
+      interruptTurn: vi.fn(),
+      evaluateLiveness: vi.fn(),
+      dispose,
+    } as any;
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
+      order.push('signal-runner');
+      return true as any;
+    });
+    const waitForTrackedRunnersExit = vi.fn(async () => {
+      order.push('observe-runner-exit');
+      return true;
+    });
+    const onExactTerminalAttachmentRetired = vi.fn(async () => {
+      order.push('cleanup-retired-artifacts');
+    });
+    const pidToTrackedSession = new Map<number, any>([
+      [333, {
+        startedBy: 'terminal',
+        pid: 333,
+        happySessionId: 'sess-disposition',
+        processCommandHash: 'h3',
+        spawnOptions: { terminal: { mode: 'zellij' } },
+      }],
+    ]);
+
+    const stop = createStopSession({
+      pidToTrackedSession,
+      loadTerminalHostAdapters: vi.fn(async () => {
+        order.push('resolve-adapter');
+        return { zellij: adapter };
+      }),
+      readAttachmentInfo: vi.fn(async () => attachmentInfo),
+      waitForTrackedRunnersExit,
+      onExactTerminalAttachmentRetired,
+    });
+    await expect(stop('sess-disposition')).resolves.toEqual({ status: 'stopped' });
+
+    expect(killSpy).toHaveBeenCalledWith(333, 'SIGTERM');
+    expect(waitForTrackedRunnersExit).toHaveBeenCalledWith({
+      sessionId: 'sess-disposition',
+      trackedPids: [333],
+    });
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(dispose).toHaveBeenCalledWith(expect.objectContaining({
+      attachmentId: 'attachment-stop-1',
+      paneId: 'terminal_9',
+      socketDir: '/happy-home/terminal/zellij-owned',
+    }));
+    expect(onExactTerminalAttachmentRetired).toHaveBeenCalledWith({
+      happyHomeDir: expect.any(String),
+      sessionId: 'sess-disposition',
+      attachmentInfo,
+    });
+    expect(order).toEqual([
+      'resolve-adapter',
+      'signal-runner',
+      'observe-runner-exit',
+      'dispose-host',
+      'cleanup-retired-artifacts',
+    ]);
+  });
+
+  it('does not destroy the terminal attachment when the exact runner does not exit before the bound', async () => {
+    const { createStopSession } = await import('./stopSession');
+    const attachmentId = 'attachment-stop-timeout' as NonNullable<import('@/integrations/terminalHost/_types').TerminalHostHandle['attachmentId']>;
+    const attachmentInfo = {
+      version: 2,
+      attachmentId,
+      sessionId: 'sess-timeout',
+      handle: {
+        attachmentId,
+        kind: 'zellij',
+        sessionName: 'happier-claude-unified-timeout',
+        paneId: 'terminal_1',
+        socketDir: '/happy-home/terminal/zellij-timeout',
+        attachMetadata: {
+          attachStrategy: 'terminal_host',
+          topology: 'shared',
+          locality: 'same_machine',
+          liveProbe: 'required',
+        },
+      },
+      terminal: {
+        mode: 'zellij',
+        zellij: {
+          sessionName: 'happier-claude-unified-timeout',
+          paneId: 'terminal_1',
+          socketDirV1: '/happy-home/terminal/zellij-timeout',
+        },
+      },
+      updatedAt: 1,
+    } as const;
+    const dispose = vi.fn(async () => undefined);
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true as any);
+    const waitForTrackedRunnersExit = vi.fn(async () => false);
+    const stop = createStopSession({
+      pidToTrackedSession: new Map<number, any>([
+        [444, { startedBy: 'terminal', pid: 444, happySessionId: 'sess-timeout', processCommandHash: 'h4' }],
+      ]),
+      terminalHostAdapters: {
+        zellij: {
+          kind: 'zellij',
+          createOrAttachHost: vi.fn(),
+          injectUserPrompt: vi.fn(),
+          interruptTurn: vi.fn(),
+          evaluateLiveness: vi.fn(),
+          dispose,
+        } as any,
+      },
+      readAttachmentInfo: vi.fn(async () => attachmentInfo),
+      waitForTrackedRunnersExit,
+    });
+
+    await expect(stop('sess-timeout')).resolves.toEqual({
+      status: 'incomplete',
+      reason: 'runner_exit_timeout',
+    });
+
+    expect(killSpy).toHaveBeenCalledWith(444, 'SIGTERM');
+    expect(waitForTrackedRunnersExit).toHaveBeenCalledTimes(1);
+    expect(dispose).not.toHaveBeenCalled();
+  });
+
+  it('does not destroy a replacement attachment installed after the runner exits', async () => {
+    const { createStopSession } = await import('./stopSession');
+    const attachmentId = 'attachment-stop-original' as NonNullable<import('@/integrations/terminalHost/_types').TerminalHostHandle['attachmentId']>;
+    const replacementAttachmentId = 'attachment-stop-replacement' as NonNullable<import('@/integrations/terminalHost/_types').TerminalHostHandle['attachmentId']>;
+    const attachmentInfo = {
+      version: 2,
+      attachmentId,
+      sessionId: 'sess-replaced',
+      handle: {
+        attachmentId,
+        kind: 'zellij',
+        sessionName: 'happier-claude-unified-original',
+        paneId: 'terminal_1',
+        socketDir: '/happy-home/terminal/zellij-original',
+        attachMetadata: {
+          attachStrategy: 'terminal_host',
+          topology: 'shared',
+          locality: 'same_machine',
+          liveProbe: 'required',
+        },
+      },
+      terminal: {
+        mode: 'zellij',
+        zellij: {
+          sessionName: 'happier-claude-unified-original',
+          paneId: 'terminal_1',
+          socketDirV1: '/happy-home/terminal/zellij-original',
+        },
+      },
+      updatedAt: 1,
+    } as const;
+    const replacementAttachmentInfo = {
+      ...attachmentInfo,
+      attachmentId: replacementAttachmentId,
+      handle: {
+        ...attachmentInfo.handle,
+        attachmentId: replacementAttachmentId,
+        sessionName: 'happier-claude-unified-replacement',
+      },
+      terminal: {
+        mode: 'zellij',
+        zellij: {
+          ...attachmentInfo.terminal.zellij,
+          sessionName: 'happier-claude-unified-replacement',
+        },
+      },
+      updatedAt: 2,
+    } as const;
+    const readAttachmentInfo = vi.fn()
+      .mockResolvedValueOnce(attachmentInfo)
+      .mockResolvedValue(replacementAttachmentInfo);
+    const dispose = vi.fn(async () => undefined);
+    const onExactTerminalAttachmentRetired = vi.fn(async () => undefined);
+    vi.spyOn(process, 'kill').mockImplementation(() => true as any);
+    const stop = createStopSession({
+      pidToTrackedSession: new Map<number, any>([
+        [555, { startedBy: 'terminal', pid: 555, happySessionId: 'sess-replaced', processCommandHash: 'h5' }],
+      ]),
+      terminalHostAdapters: {
+        zellij: {
+          kind: 'zellij',
+          createOrAttachHost: vi.fn(),
+          injectUserPrompt: vi.fn(),
+          interruptTurn: vi.fn(),
+          evaluateLiveness: vi.fn(),
+          dispose,
+        } as any,
+      },
+      readAttachmentInfo,
+      waitForTrackedRunnersExit: vi.fn(async () => true),
+      onExactTerminalAttachmentRetired,
+    });
+
+    await expect(stop('sess-replaced')).resolves.toEqual({
+      status: 'incomplete',
+      reason: 'attachment_mismatch',
+    });
+
+    expect(dispose).not.toHaveBeenCalled();
+    expect(onExactTerminalAttachmentRetired).not.toHaveBeenCalled();
+  });
+
+  it('fails before signaling when the exact terminal-host adapter is unavailable', async () => {
+    const { createStopSession } = await import('./stopSession');
+    const attachmentId = 'attachment-adapter-missing' as NonNullable<import('@/integrations/terminalHost/_types').TerminalHostHandle['attachmentId']>;
+    const attachmentInfo = {
+      version: 2,
+      attachmentId,
+      sessionId: 'sess-adapter-missing',
+      handle: {
+        attachmentId,
+        kind: 'zellij',
+        sessionName: 'happier-adapter-missing',
+        paneId: 'terminal_1',
+        socketDir: '/tmp/happier-adapter-missing',
+        attachMetadata: {
+          attachStrategy: 'terminal_host',
+          topology: 'shared',
+          locality: 'same_machine',
+          liveProbe: 'required',
+        },
+      },
+      terminal: {
+        mode: 'zellij',
+        zellij: {
+          sessionName: 'happier-adapter-missing',
+          paneId: 'terminal_1',
+          socketDirV1: '/tmp/happier-adapter-missing',
+        },
+      },
+      updatedAt: 1,
+    } as const;
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true as any);
+    const stop = createStopSession({
+      pidToTrackedSession: new Map<number, any>([
+        [777, { startedBy: 'terminal', pid: 777, happySessionId: 'sess-adapter-missing', processCommandHash: 'h7' }],
+      ]),
+      terminalHostAdapters: {},
+      readAttachmentInfo: vi.fn(async () => attachmentInfo),
+      waitForTrackedRunnersExit: vi.fn(async () => true),
+    });
+
+    await expect(stop('sess-adapter-missing')).resolves.toEqual({
+      status: 'incomplete',
+      reason: 'terminal_host_adapter_unavailable',
+    });
+    expect(killSpy).not.toHaveBeenCalled();
+  });
+
+  it('fails before signaling when injected adapter registry acquisition fails', async () => {
+    const { createStopSession } = await import('./stopSession');
+    const attachmentInfo = createBoundAttachment('sess-adapter-load-failure', 'attachment-adapter-load-failure');
+    const loadTerminalHostAdapters = vi.fn(async () => {
+      throw new Error('registry load failed');
+    });
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true as any);
+    const stop = createStopSession({
+      pidToTrackedSession: new Map<number, any>([
+        [778, {
+          startedBy: 'terminal',
+          pid: 778,
+          happySessionId: 'sess-adapter-load-failure',
+          processCommandHash: 'h8',
+          spawnOptions: { terminal: { mode: 'zellij' } },
+        }],
+      ]),
+      loadTerminalHostAdapters,
+      readAttachmentInfo: vi.fn(async () => attachmentInfo),
+      waitForTrackedRunnersExit: vi.fn(async () => true),
+    });
+
+    await expect(stop('sess-adapter-load-failure')).resolves.toEqual({
+      status: 'incomplete',
+      reason: 'terminal_host_adapter_unavailable',
+    });
+    expect(loadTerminalHostAdapters).toHaveBeenCalledTimes(1);
+    expect(killSpy).not.toHaveBeenCalled();
+  });
+
+  it('refuses a replacement attachment that does not match the caller-pinned identity', async () => {
+    const { createStopSession } = await import('./stopSession');
+    const replacementAttachmentId = 'attachment-pinned-replacement' as NonNullable<import('@/integrations/terminalHost/_types').TerminalHostHandle['attachmentId']>;
+    const replacement = {
+      version: 2,
+      attachmentId: replacementAttachmentId,
+      sessionId: 'sess-pinned-original',
+      handle: {
+        attachmentId: replacementAttachmentId,
+        kind: 'zellij',
+        sessionName: 'replacement',
+        paneId: 'terminal_1',
+        socketDir: '/tmp/replacement',
+        attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared', locality: 'same_machine', liveProbe: 'required' },
+      },
+      terminal: { mode: 'zellij', zellij: { sessionName: 'replacement', paneId: 'terminal_1', socketDirV1: '/tmp/replacement' } },
+      updatedAt: 2,
+    } as const;
+    const dispose = vi.fn(async () => undefined);
+    const stop = createStopSession({
+      pidToTrackedSession: new Map([[556, { startedBy: 'terminal', pid: 556, happySessionId: 'sess-pinned-original' } as any]]),
+      expectedTerminalAttachmentId: 'attachment-pinned-original',
+      terminalHostAdapters: { zellij: { kind: 'zellij', dispose } as any },
+      readAttachmentInfo: vi.fn(async () => replacement),
+      waitForTrackedRunnersExit: vi.fn(async () => true),
+    });
+
+    await expect(stop('sess-pinned-original')).resolves.toEqual({ status: 'incomplete', reason: 'attachment_mismatch' });
+    expect(dispose).not.toHaveBeenCalled();
+  });
+
+  it('reports destroy failure as incomplete after proving the exact runner exited', async () => {
+    const { createStopSession } = await import('./stopSession');
+    const attachmentId = 'attachment-destroy-failure' as NonNullable<import('@/integrations/terminalHost/_types').TerminalHostHandle['attachmentId']>;
+    const attachmentInfo = {
+      version: 2,
+      attachmentId,
+      sessionId: 'sess-destroy-failure',
+      handle: {
+        attachmentId,
+        kind: 'zellij',
+        sessionName: 'happier-destroy-failure',
+        paneId: 'terminal_1',
+        socketDir: '/tmp/happier-destroy-failure',
+        attachMetadata: {
+          attachStrategy: 'terminal_host',
+          topology: 'shared',
+          locality: 'same_machine',
+          liveProbe: 'required',
+        },
+      },
+      terminal: {
+        mode: 'zellij',
+        zellij: {
+          sessionName: 'happier-destroy-failure',
+          paneId: 'terminal_1',
+          socketDirV1: '/tmp/happier-destroy-failure',
+        },
+      },
+      updatedAt: 1,
+    } as const;
+    vi.spyOn(process, 'kill').mockImplementation(() => true as any);
+    const stop = createStopSession({
+      pidToTrackedSession: new Map<number, any>([
+        [778, { startedBy: 'terminal', pid: 778, happySessionId: 'sess-destroy-failure', processCommandHash: 'h8' }],
+      ]),
+      terminalHostAdapters: {
+        zellij: {
+          kind: 'zellij',
+          createOrAttachHost: vi.fn(),
+          injectUserPrompt: vi.fn(),
+          interruptTurn: vi.fn(),
+          evaluateLiveness: vi.fn(),
+          dispose: vi.fn(async () => { throw new Error('destroy failed'); }),
+        } as any,
+      },
+      readAttachmentInfo: vi.fn(async () => attachmentInfo),
+      waitForTrackedRunnersExit: vi.fn(async () => true),
+    });
+
+    await expect(stop('sess-destroy-failure')).resolves.toEqual({
+      status: 'incomplete',
+      reason: 'destroy_failed',
+    });
+  });
+
+  it('reports an in-flight exact disposition as incomplete instead of claiming success', async () => {
+    const { createStopSession } = await import('./stopSession');
+    const attachmentId = 'attachment-disposition-in-progress' as NonNullable<import('@/integrations/terminalHost/_types').TerminalHostHandle['attachmentId']>;
+    const attachmentInfo = {
+      version: 2,
+      attachmentId,
+      sessionId: 'sess-disposition-in-progress',
+      handle: {
+        attachmentId,
+        kind: 'zellij',
+        sessionName: 'happier-disposition-in-progress',
+        paneId: 'terminal_1',
+        socketDir: '/tmp/happier-disposition-in-progress',
+        attachMetadata: {
+          attachStrategy: 'terminal_host',
+          topology: 'shared',
+          locality: 'same_machine',
+          liveProbe: 'required',
+        },
+      },
+      terminal: {
+        mode: 'zellij',
+        zellij: {
+          sessionName: 'happier-disposition-in-progress',
+          paneId: 'terminal_1',
+          socketDirV1: '/tmp/happier-disposition-in-progress',
+        },
+      },
+      updatedAt: 1,
+    } as const;
+    let releaseDispose!: () => void;
+    const disposePending = new Promise<void>((resolve) => { releaseDispose = resolve; });
+    const adapter = {
+      kind: 'zellij',
+      createOrAttachHost: vi.fn(),
+      injectUserPrompt: vi.fn(),
+      interruptTurn: vi.fn(),
+      evaluateLiveness: vi.fn(),
+      dispose: vi.fn(async () => await disposePending),
+    } as any;
+    vi.spyOn(process, 'kill').mockImplementation(() => true as any);
+    const createStop = () => createStopSession({
+      pidToTrackedSession: new Map<number, any>([
+        [779, { startedBy: 'terminal', pid: 779, happySessionId: 'sess-disposition-in-progress', processCommandHash: 'h9' }],
+      ]),
+      terminalHostAdapters: { zellij: adapter },
+      readAttachmentInfo: vi.fn(async () => attachmentInfo),
+      removeAttachmentInfo: vi.fn(async () => true),
+      waitForTrackedRunnersExit: vi.fn(async () => true),
+    });
+
+    const firstStop = createStop()('sess-disposition-in-progress');
+    await vi.waitFor(() => expect(adapter.dispose).toHaveBeenCalledTimes(1));
+    await expect(createStop()('sess-disposition-in-progress')).resolves.toEqual({
+      status: 'incomplete',
+      reason: 'disposition_in_progress',
+    });
+
+    releaseDispose();
+    await expect(firstStop).resolves.toEqual({ status: 'stopped' });
+  });
+
+  it('keeps stop successful when provider artifact cleanup fails after exact host retirement', async () => {
+    const { createStopSession } = await import('./stopSession');
+    const attachmentId = 'attachment-stop-cleanup-failure' as NonNullable<import('@/integrations/terminalHost/_types').TerminalHostHandle['attachmentId']>;
+    const attachmentInfo = {
+      version: 2,
+      attachmentId,
+      sessionId: 'sess-cleanup-failure',
+      handle: {
+        attachmentId,
+        kind: 'zellij',
+        sessionName: 'happier-claude-unified-cleanup-failure',
+        paneId: 'terminal_1',
+        socketDir: '/happy-home/terminal/zellij-cleanup-failure',
+        attachMetadata: {
+          attachStrategy: 'terminal_host',
+          topology: 'shared',
+          locality: 'same_machine',
+          liveProbe: 'required',
+        },
+      },
+      terminal: {
+        mode: 'zellij',
+        zellij: {
+          sessionName: 'happier-claude-unified-cleanup-failure',
+          paneId: 'terminal_1',
+          socketDirV1: '/happy-home/terminal/zellij-cleanup-failure',
+        },
+      },
+      updatedAt: 1,
+    } as const;
+    const dispose = vi.fn(async () => undefined);
+    const onExactTerminalAttachmentRetired = vi.fn(async () => {
+      throw new Error('endpoint cleanup unavailable');
+    });
+    vi.spyOn(process, 'kill').mockImplementation(() => true as any);
+    const stop = createStopSession({
+      pidToTrackedSession: new Map<number, any>([
+        [666, { startedBy: 'terminal', pid: 666, happySessionId: 'sess-cleanup-failure', processCommandHash: 'h6' }],
+      ]),
+      terminalHostAdapters: {
+        zellij: {
+          kind: 'zellij',
+          createOrAttachHost: vi.fn(),
+          injectUserPrompt: vi.fn(),
+          interruptTurn: vi.fn(),
+          evaluateLiveness: vi.fn(),
+          dispose,
+        } as any,
+      },
+      readAttachmentInfo: vi.fn(async () => attachmentInfo),
+      waitForTrackedRunnersExit: vi.fn(async () => true),
+      onExactTerminalAttachmentRetired,
+    });
+
+    await expect(stop('sess-cleanup-failure')).resolves.toEqual({ status: 'stopped' });
+
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(onExactTerminalAttachmentRetired).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not report fully stopped when required serviceability retirement fails after exact host destruction', async () => {
+    const { createStopSession } = await import('./stopSession');
+    const attachmentInfo = createBoundAttachment(
+      'sess-serviceability-retirement-failure',
+      'attachment-serviceability-retirement-failure',
+    );
+    const dispose = vi.fn(async () => undefined);
+    const retireExactTerminalControlServiceability = vi.fn(async () => {
+      throw new Error('metadata persistence unavailable');
+    });
+    vi.spyOn(process, 'kill').mockImplementation(() => true as any);
+    const stop = createStopSession({
+      pidToTrackedSession: new Map<number, any>([[
+        667,
+        {
+          startedBy: 'terminal',
+          pid: 667,
+          happySessionId: attachmentInfo.sessionId,
+          processCommandHash: 'h7',
+        },
+      ]]),
+      terminalHostAdapters: {
+        zellij: {
+          kind: 'zellij',
+          createOrAttachHost: vi.fn(),
+          injectUserPrompt: vi.fn(),
+          interruptTurn: vi.fn(),
+          evaluateLiveness: vi.fn(),
+          dispose,
+        } as any,
+      },
+      readAttachmentInfo: vi.fn(async () => attachmentInfo),
+      removeAttachmentInfo: vi.fn(async () => true),
+      waitForTrackedRunnersExit: vi.fn(async () => true),
+      retireExactTerminalControlServiceability,
+    });
+
+    await expect(stop(attachmentInfo.sessionId)).resolves.toEqual({
+      status: 'incomplete',
+      reason: 'terminal_control_serviceability_retirement_failed',
+    });
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(retireExactTerminalControlServiceability).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: attachmentInfo.sessionId,
+      attachmentInfo,
+    }));
+  });
+
+  it('parks a legacy attachment even when its old host is already missing', async () => {
     const { createStopSession } = await import('./stopSession');
 
     readTerminalAttachmentInfo.mockResolvedValueOnce({
@@ -263,12 +1056,6 @@ describe('createStopSession', () => {
       },
       updatedAt: 1,
     });
-    resolveZellijRuntimeBinary.mockResolvedValueOnce('/tools/zellij');
-    zellijKillSession.mockResolvedValueOnce({
-      exitCode: 1,
-      stdout: '',
-      stderr: 'No session named "happier-claude-unified-123" found',
-    });
     const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true as any);
 
     const pidToTrackedSession = new Map<number, any>([
@@ -278,12 +1065,12 @@ describe('createStopSession', () => {
     const stop = createStopSession({ pidToTrackedSession });
     const ok = await stop('sess-zellij');
 
-    expect(ok).toBe(true);
-    expect(zellijKillSession).toHaveBeenCalled();
-    expect(killSpy).toHaveBeenCalledWith(333, 'SIGTERM');
+    expect(ok).toEqual({ status: 'incomplete', reason: 'legacy_attachment' });
+    expect(zellijKillSession).not.toHaveBeenCalled();
+    expect(killSpy).not.toHaveBeenCalled();
   });
 
-  it('still signals the tracked runner when recorded zellij terminal host cleanup fails', async () => {
+  it('does not fall through to runner signaling for a legacy zellij attachment', async () => {
     const { createStopSession } = await import('./stopSession');
 
     readTerminalAttachmentInfo.mockResolvedValueOnce({
@@ -298,12 +1085,6 @@ describe('createStopSession', () => {
       },
       updatedAt: 1,
     });
-    resolveZellijRuntimeBinary.mockResolvedValueOnce('/tools/zellij');
-    zellijKillSession.mockResolvedValueOnce({
-      exitCode: 1,
-      stdout: '',
-      stderr: 'permission denied',
-    });
     const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true as any);
 
     const pidToTrackedSession = new Map<number, any>([
@@ -313,12 +1094,12 @@ describe('createStopSession', () => {
     const stop = createStopSession({ pidToTrackedSession });
     const ok = await stop('sess-zellij');
 
-    expect(ok).toBe(true);
-    expect(zellijKillSession).toHaveBeenCalled();
-    expect(killSpy).toHaveBeenCalledWith(333, 'SIGTERM');
+    expect(ok).toEqual({ status: 'incomplete', reason: 'legacy_attachment' });
+    expect(zellijKillSession).not.toHaveBeenCalled();
+    expect(killSpy).not.toHaveBeenCalled();
   });
 
-  it('stops daemon-spawned tmux sessions using a tmux socket derived from the tracked tmpDir', async () => {
+  it('parks a tracked tmux host when no committed attachment identity exists', async () => {
     const { createStopSession } = await import('./stopSession');
 
     tmuxKillWindow.mockReset();
@@ -330,9 +1111,6 @@ describe('createStopSession', () => {
     const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(123456789);
 
     const tmuxTmpDir = '/tmp/happy-e2e-tmux-test';
-    const uid = typeof (process as any).getuid === 'function' ? ((process as any).getuid() as number) : null;
-    const expectedSocketPath = uid === null ? undefined : `${tmuxTmpDir}/tmux-${uid}/default`;
-
     const pidToTrackedSession = new Map<number, any>([
       [
         444,
@@ -350,21 +1128,16 @@ describe('createStopSession', () => {
     const stop = createStopSession({ pidToTrackedSession });
     const ok = await stop('sess-3');
 
-    expect(ok).toBe(true);
+    expect(ok).toEqual({ status: 'incomplete', reason: 'missing_attachment_identity' });
     expect(killSpy).not.toHaveBeenCalled();
-
-    expect(tmuxCtorCalls.length).toBe(1);
-    expect(tmuxCtorCalls[0]?.env).toEqual({ TMUX_TMPDIR: tmuxTmpDir });
-    if (expectedSocketPath) {
-      expect(tmuxCtorCalls[0]?.socketPath).toBe(expectedSocketPath);
-    }
-    expect(tmuxKillWindow).toHaveBeenCalledWith('happy-e2e:happy-window');
-    expect(pidToTrackedSession.get(444)?.stopRequestedAtMs).toBe(123456789);
+    expect(tmuxCtorCalls).toHaveLength(0);
+    expect(tmuxKillWindow).not.toHaveBeenCalled();
+    expect(pidToTrackedSession.get(444)?.stopRequestedAtMs).toBeUndefined();
 
     nowSpy.mockRestore();
   });
 
-  it('stops daemon-spawned isolated tmux sessions even before a window target is recorded', async () => {
+  it('parks an isolated tmux host before a window target is recorded', async () => {
     const { createStopSession } = await import('./stopSession');
 
     tmuxKillWindow.mockReset();
@@ -398,14 +1171,11 @@ describe('createStopSession', () => {
     const stop = createStopSession({ pidToTrackedSession });
     const ok = await stop('sess-4');
 
-    expect(ok).toBe(true);
+    expect(ok).toEqual({ status: 'incomplete', reason: 'missing_attachment_identity' });
     expect(killSpy).not.toHaveBeenCalled();
     expect(tmuxKillWindow).not.toHaveBeenCalled();
-    expect(tmuxExecuteTmuxCommand).toHaveBeenCalled();
-    const call = tmuxExecuteTmuxCommand.mock.calls[0];
-    expect(call?.[0]).toEqual(['kill-session']);
-    expect(call?.[1]).toBe('happy-e2e');
-    expect(pidToTrackedSession.get(555)?.stopRequestedAtMs).toBe(123456789);
+    expect(tmuxExecuteTmuxCommand).not.toHaveBeenCalled();
+    expect(pidToTrackedSession.get(555)?.stopRequestedAtMs).toBeUndefined();
 
     nowSpy.mockRestore();
   });
@@ -443,7 +1213,7 @@ describe('createStopSession', () => {
       const stop = createStopSession({ pidToTrackedSession });
       const ok = await stop('sess-win');
 
-      expect(ok).toBe(false);
+      expect(ok).toEqual({ status: 'incomplete', reason: 'runner_signal_incomplete' });
       expect(isPidSafeHappySessionProcess).toHaveBeenCalledWith({
         pid: 777,
         expectedProcessCommandHash: 'expected-hash',
@@ -486,10 +1256,13 @@ describe('createStopSession', () => {
         ],
       ]);
 
-      const stop = createStopSession({ pidToTrackedSession });
+      const stop = createStopSession({
+        pidToTrackedSession,
+        waitForTrackedRunnersExit: vi.fn(async () => true),
+      });
       const ok = await stop('sess-win');
 
-      expect(ok).toBe(true);
+      expect(ok).toEqual({ status: 'stopped' });
       expect(isPidSafeHappySessionProcess).toHaveBeenCalledWith({
         pid: 778,
         expectedProcessCommandHash: 'expected-hash',

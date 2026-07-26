@@ -13,18 +13,23 @@ export type TerminalHostDispositionIntent =
     }>
   | Readonly<{
       kind: 'destroy_owned_host';
-      reason: 'explicit_user_stop' | 'positive_dead_recovery';
+      reason: 'explicit_user_stop' | 'unrecoverable_control_recovery';
+    }>
+  | Readonly<{
+      kind: 'retire_confirmed_dead_attachment';
+      reason: 'positive_dead_recovery';
     }>;
 
 export type TerminalHostDispositionResult =
   | Readonly<{ status: 'preserved'; attachmentId: TerminalAttachmentId }>
-  | Readonly<{ status: 'destroyed'; attachmentId: TerminalAttachmentId }>
+  | Readonly<{ status: 'retired'; attachmentId: TerminalAttachmentId }>
+  | Readonly<{ status: 'destroyed'; attachmentId: TerminalAttachmentId; descriptorRetained?: true }>
   | Readonly<{
       status: 'parked';
       reason: 'legacy_attachment' | 'attachment_mismatch' | 'missing_topology_proof' | 'disposition_in_progress' | 'destroy_failed';
     }>;
 
-const activeDestroyClaims = new Set<string>();
+const activeDispositionClaims = new Set<string>();
 
 export async function executeTerminalHostDisposition(input: Readonly<{
   happyHomeDir: string;
@@ -56,21 +61,11 @@ export async function executeTerminalHostDisposition(input: Readonly<{
     return { status: 'preserved', attachmentId: attachmentInfo.attachmentId };
   }
 
-  const handle = attachmentInfo.handle;
-  if (
-    !input.adapter
-    || input.adapter.kind !== handle.kind
-    || handle.attachmentId !== attachmentInfo.attachmentId
-    || (handle.attachMetadata.topology === 'shared' && !handle.paneId?.trim())
-  ) {
-    return { status: 'parked', reason: 'missing_topology_proof' };
-  }
-
   const claimKey = `${input.happyHomeDir}\u0000${input.sessionId}\u0000${attachmentInfo.attachmentId}`;
-  if (activeDestroyClaims.has(claimKey)) {
+  if (activeDispositionClaims.has(claimKey)) {
     return { status: 'parked', reason: 'disposition_in_progress' };
   }
-  activeDestroyClaims.add(claimKey);
+  activeDispositionClaims.add(claimKey);
   try {
     const current = await readAttachment({
       happyHomeDir: input.happyHomeDir,
@@ -79,19 +74,43 @@ export async function executeTerminalHostDisposition(input: Readonly<{
     if (current?.version !== 2 || current.attachmentId !== attachmentInfo.attachmentId) {
       return { status: 'parked', reason: 'attachment_mismatch' };
     }
+
+    if (input.intent.kind === 'retire_confirmed_dead_attachment') {
+      const removed = await removeAttachment({
+        happyHomeDir: input.happyHomeDir,
+        sessionId: input.sessionId,
+        expectedAttachmentId: current.attachmentId,
+        expectedTerminal: current.terminal,
+      });
+      return removed
+        ? { status: 'retired', attachmentId: current.attachmentId }
+        : { status: 'parked', reason: 'attachment_mismatch' };
+    }
+
+    const handle = current.handle;
+    if (
+      !input.adapter
+      || input.adapter.kind !== handle.kind
+      || handle.attachmentId !== current.attachmentId
+      || (handle.attachMetadata.topology === 'shared' && !handle.paneId?.trim())
+    ) {
+      return { status: 'parked', reason: 'missing_topology_proof' };
+    }
     try {
-      await input.adapter.dispose(current.handle);
+      await input.adapter.dispose(handle);
     } catch {
       return { status: 'parked', reason: 'destroy_failed' };
     }
-    await removeAttachment({
+    const removed = await removeAttachment({
       happyHomeDir: input.happyHomeDir,
       sessionId: input.sessionId,
       expectedAttachmentId: current.attachmentId,
       expectedTerminal: current.terminal,
     });
-    return { status: 'destroyed', attachmentId: current.attachmentId };
+    return removed
+      ? { status: 'destroyed', attachmentId: current.attachmentId }
+      : { status: 'destroyed', attachmentId: current.attachmentId, descriptorRetained: true };
   } finally {
-    activeDestroyClaims.delete(claimKey);
+    activeDispositionClaims.delete(claimKey);
   }
 }
