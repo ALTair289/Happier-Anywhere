@@ -160,7 +160,6 @@ describe('core e2e: Claude local→remote switch drains pending UI message', () 
         HAPPIER_E2E_FAKE_CLAUDE_LOCAL_ACTIVE_TURN: '1',
         HAPPIER_E2E_FAKE_CLAUDE_LOCAL_START_SIGNAL: startLocalTurnSignalPath,
         HAPPIER_E2E_FAKE_CLAUDE_LOCAL_COMPLETE_SIGNAL: completeLocalTurnSignalPath,
-        HAPPIER_PENDING_QUEUE_IDLE_WAKE_POLL_INTERVAL_MS: '100',
       };
       await ensureCliDistBuilt({ testDir, env: cliEnv }, { skipSourceFreshnessCheck: true });
 

@@ -8,7 +8,7 @@ import { createSession, fetchAllMessages, fetchSessionV2 } from '../../src/testk
 import { FailureArtifacts } from '../../src/testkit/failureArtifacts';
 import { envFlag } from '../../src/testkit/env';
 import { writeTestManifestForServer } from '../../src/testkit/manifestForServer';
-import { createSessionScopedSocketCollector } from '../../src/testkit/socketClient';
+import { createMachineBoundSessionScopedSocketCollector } from '../../src/testkit/sessionSocketBinding';
 import { waitFor } from '../../src/testkit/timing';
 import { enqueuePendingQueueV2, listPendingQueueV2, reorderPendingQueueV2 } from '../../src/testkit/pendingQueueV2';
 
@@ -30,7 +30,11 @@ describe('core e2e: pending queue v2 materialize via socket RPC', () => {
     const auth = await createTestAuth(server.baseUrl);
     const { sessionId } = await createSession(server.baseUrl, auth.token);
 
-    const socket = createSessionScopedSocketCollector(server.baseUrl, auth.token, sessionId);
+    const { socket } = await createMachineBoundSessionScopedSocketCollector({
+      baseUrl: server.baseUrl,
+      token: auth.token,
+      sessionId,
+    });
 
     writeTestManifestForServer({
       testDir,
@@ -56,6 +60,11 @@ describe('core e2e: pending queue v2 materialize via socket RPC', () => {
     try {
       socket.connect();
       await waitFor(() => socket.isConnected(), { timeoutMs: 20_000 });
+      socket.emit('session-alive', { sid: sessionId, time: Date.now(), thinking: false });
+      await waitFor(
+        async () => (await fetchSessionV2(server!.baseUrl, auth.token, sessionId)).active === true,
+        { timeoutMs: 20_000, context: 'machine-bound session publisher registration' },
+      );
 
       const localIds = [randomUUID(), randomUUID(), randomUUID()];
       for (const localId of localIds) {
@@ -71,7 +80,11 @@ describe('core e2e: pending queue v2 materialize via socket RPC', () => {
 
       const materialized: string[] = [];
       for (;;) {
-        const ack = await socket.emitWithAck<any>('pending-materialize-next', { sid: sessionId }, 20_000);
+        const ack = await socket.emitWithAck<any>(
+          'pending-materialize-next',
+          { sid: sessionId, deliveryState: 'provider' },
+          20_000,
+        );
         expect(ack && typeof ack === 'object').toBe(true);
         if (ack?.ok !== true) {
           throw new Error(`pending-materialize-next failed: ${typeof ack?.error === 'string' ? ack.error : 'unknown'}`);
@@ -81,6 +94,12 @@ describe('core e2e: pending queue v2 materialize via socket RPC', () => {
           throw new Error('pending-materialize-next ack missing message.localId');
         }
         materialized.push(ack.message.localId);
+        const accepted = await socket.emitWithAck<any>('pending-delivery-accepted-v1', {
+          v: 1,
+          sessionId,
+          localId: ack.message.localId,
+        }, 20_000);
+        expect(accepted).toMatchObject({ ok: true });
       }
 
       expect(materialized).toEqual(expected);
@@ -94,6 +113,55 @@ describe('core e2e: pending queue v2 materialize via socket RPC', () => {
 
       const snap: any = await fetchSessionV2(server.baseUrl, auth.token, sessionId);
       expect(snap.pendingCount).toBe(0);
+
+      const lostSocketAckLocalIds = [randomUUID(), randomUUID()];
+      let lostSocketAckExpectedVersion = -1;
+      for (const localId of lostSocketAckLocalIds) {
+        const enqueue = await enqueuePendingQueueV2({
+          baseUrl: server.baseUrl,
+          token: auth.token,
+          sessionId,
+          localId,
+          ciphertext: Buffer.from(`lost-socket-ack:${localId}`, 'utf8').toString('base64'),
+          timeoutMs: 20_000,
+        });
+        expect(enqueue.status).toBe(200);
+        lostSocketAckExpectedVersion = enqueue.data.pendingVersion;
+      }
+
+      const firstSocketMaterialize = await socket.emitWithAck<any>('pending-materialize-next', {
+        sid: sessionId,
+        deliveryState: 'provider',
+        expectedPendingVersion: lostSocketAckExpectedVersion,
+      }, 20_000);
+      expect(firstSocketMaterialize).toMatchObject({
+        ok: true,
+        didMaterialize: true,
+        message: { localId: lostSocketAckLocalIds[0] },
+      });
+      const socketReplay = await socket.emitWithAck<any>('pending-materialize-next', {
+        sid: sessionId,
+        deliveryState: 'provider',
+        expectedPendingVersion: lostSocketAckExpectedVersion,
+      }, 20_000);
+      expect(socketReplay).toMatchObject({
+        ok: true,
+        didMaterialize: true,
+        message: { localId: lostSocketAckLocalIds[0] },
+      });
+      const acceptedAfterReplay = await socket.emitWithAck<any>('pending-delivery-accepted-v1', {
+        v: 1,
+        sessionId,
+        localId: lostSocketAckLocalIds[0],
+      }, 20_000);
+      expect(acceptedAfterReplay).toMatchObject({ ok: true });
+      expect((await fetchAllMessages(server.baseUrl, auth.token, sessionId)).map((message) => message.localId)).toEqual([
+        ...expected,
+        lostSocketAckLocalIds[0],
+      ]);
+      expect((await listPendingQueueV2({ baseUrl: server.baseUrl, token: auth.token, sessionId })).data.pending?.map((row) => row.localId)).toEqual([
+        lostSocketAckLocalIds[1],
+      ]);
 
       passed = true;
     } finally {

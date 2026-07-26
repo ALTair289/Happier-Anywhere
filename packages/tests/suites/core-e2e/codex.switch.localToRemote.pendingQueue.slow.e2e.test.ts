@@ -173,7 +173,7 @@ setInterval(() => {}, 1000);
 
     expect(existsSync(rolloutPath)).toBe(false);
 
-    const sdkEntry = requireFromRepoRoot.resolve('@agentclientprotocol/sdk/dist/acp.js', {
+    const sdkEntry = requireFromRepoRoot.resolve('@agentclientprotocol/sdk', {
       paths: [resolve(repoRootDir(), 'apps/cli')],
     });
     const acpStubProviderPath = resolve(
