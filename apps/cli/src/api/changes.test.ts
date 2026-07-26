@@ -49,6 +49,17 @@ describe('fetchChanges', () => {
     expect(result.response.changes).toHaveLength(1);
   });
 
+  it('declares the caller-specific sync role instead of hardcoding the session runner', async () => {
+    const { fetchChanges } = await import('./changes');
+    (axios.get as any).mockResolvedValue({ status: 200, data: { changes: [], nextCursor: 0 } });
+
+    await fetchChanges({ token: 't', after: 0, clientKind: 'daemon' });
+
+    expect((axios.get as any).mock.calls[0]?.[1]?.headers).toMatchObject({
+      'x-happier-client-kind': 'daemon',
+    });
+  });
+
   it('parses cursor-gone (410)', async () => {
     const { fetchChanges } = await import('./changes');
     (axios.get as any).mockResolvedValue({

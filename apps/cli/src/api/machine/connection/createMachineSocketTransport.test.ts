@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const ioMock = vi.hoisted(() => vi.fn(() => ({
   on: vi.fn(),
@@ -8,15 +8,15 @@ vi.mock('socket.io-client', () => ({
   io: ioMock,
 }));
 
-vi.mock('@/api/connection/createSocketTransportAdapter', () => ({
-  createSocketTransportAdapter: () => ({ kind: 'transport' }),
-}));
-
 vi.mock('@/utils/proxy/socketIoProxy', () => ({
   getSocketIoProxyOptions: () => ({}),
 }));
 
 describe('createMachineSocketTransport', () => {
+  beforeEach(() => {
+    ioMock.mockClear();
+  });
+
   it('includes installation identity fields in machine-scoped socket auth when provided', async () => {
     const { createMachineSocketTransport } = await import('./createMachineSocketTransport');
 
@@ -45,6 +45,11 @@ describe('createMachineSocketTransport', () => {
           algorithm: 'ed25519',
           signature: 'signature',
         },
+        clientCompatibility: expect.objectContaining({
+          v: 1,
+          clientKind: 'daemon',
+          sessionSyncProtocolVersion: 2,
+        }),
       }),
     }));
   });

@@ -2,6 +2,7 @@ import axios from 'axios';
 import * as z from 'zod';
 import { createAuthenticationHttpStatusError, createHttpStatusError, isAuthenticationStatus } from './client/httpStatusError';
 import { resolveServerHttpBaseUrl } from '@/session/transport/http/serverHttpBaseUrl';
+import { buildCurrentCliClientCompatibilityHttpHeaders } from './clientCompatibility/cliClientCompatibility';
 
 export const ChangeEntrySchema = z.object({
   cursor: z.number().int().min(0),
@@ -27,7 +28,7 @@ export const CursorGoneErrorSchema = z.object({
 
 export type CursorGoneError = z.infer<typeof CursorGoneErrorSchema>;
 
-export async function fetchChangesAccountId(opts: { token: string }): Promise<string> {
+export async function fetchChangesAccountId(opts: { token: string; signal?: AbortSignal }): Promise<string> {
   const serverUrl = resolveServerHttpBaseUrl();
   const response = await axios.get(`${serverUrl}/v1/account/profile`, {
     headers: {
@@ -35,6 +36,7 @@ export async function fetchChangesAccountId(opts: { token: string }): Promise<st
       'Content-Type': 'application/json',
     },
     timeout: 15_000,
+    ...(opts.signal ? { signal: opts.signal } : {}),
     validateStatus: () => true,
   });
 
@@ -57,7 +59,13 @@ export async function fetchChangesAccountId(opts: { token: string }): Promise<st
   return id;
 }
 
-export async function fetchChanges(opts: { token: string; after: number; limit?: number }): Promise<{
+export async function fetchChanges(opts: {
+  token: string;
+  after: number;
+  limit?: number;
+  clientKind?: 'cli' | 'daemon' | 'session-runner';
+  signal?: AbortSignal;
+}): Promise<{
   status: 'ok';
   response: ChangesResponse;
 } | {
@@ -76,9 +84,11 @@ export async function fetchChanges(opts: { token: string; after: number; limit?:
       headers: {
         Authorization: `Bearer ${opts.token}`,
         'Content-Type': 'application/json',
+        ...buildCurrentCliClientCompatibilityHttpHeaders(opts.clientKind ?? 'cli'),
       },
       params: { after, limit },
       timeout: 15_000,
+      ...(opts.signal ? { signal: opts.signal } : {}),
       validateStatus: () => true,
     });
 
