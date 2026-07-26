@@ -19,6 +19,8 @@ import { fetchAllMessages, fetchSessionV2, type SessionMessageRow } from '../../
 import { waitFor } from '../../src/testkit/timing';
 import { postEncryptedUiTextMessage } from '../../src/testkit/uiMessages';
 
+import { resolveAcpSdkTestRuntime } from "../../src/testkit/providers/acpSdkTestRuntime";
+
 const run = createRunDirs({ runLabel: 'core' });
 
 type WakeSubmitPath = 'pending_queue' | 'direct_commit';
@@ -225,7 +227,7 @@ async function writeFakeGeminiAcpCli(params: {
   fakeGeminiLogPath: string;
   fakeGeminiPath: string;
 }): Promise<void> {
-  const acpSdkEntry = resolve(repoRootDir(), 'apps/cli/node_modules/@agentclientprotocol/sdk/dist/acp.js');
+  const { sdkEntry: acpSdkEntry, agentAppAdapterEntry } = resolveAcpSdkTestRuntime(repoRootDir());
   await writeFile(
     params.fakeGeminiPath,
     `#!/usr/bin/env node
@@ -251,6 +253,9 @@ function promptText(blocks) {
 }
 
 const acp = await import(pathToFileURL(${JSON.stringify(acpSdkEntry)}).href);
+const adapterEntry = process.env.HAPPIER_E2E_ACP_AGENT_APP_ADAPTER_ENTRY ?? ${JSON.stringify(agentAppAdapterEntry)};
+if (!adapterEntry) throw new Error("Missing HAPPIER_E2E_ACP_AGENT_APP_ADAPTER_ENTRY");
+const { connectAcpTestAgentApp } = await import(pathToFileURL(adapterEntry).href);
 
 class FakeGeminiAgent {
   connection;
@@ -296,7 +301,8 @@ class FakeGeminiAgent {
 }
 
 const stream = acp.ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin));
-new acp.AgentSideConnection((conn) => new FakeGeminiAgent(conn), stream);
+const connection = connectAcpTestAgentApp({ acp, stream, createAgent: (client) => new FakeGeminiAgent(client) });
+await connection.closed;
 `,
     'utf8',
   );
