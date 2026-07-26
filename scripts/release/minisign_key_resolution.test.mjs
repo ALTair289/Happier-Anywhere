@@ -23,16 +23,18 @@ test('prepareMinisignSecretKeyFile materializes inline key content', async () =>
   assert.equal(written, keyContent);
 });
 
-test('prepareMinisignSecretKeyFile rejects likely-truncated minisign key headers (dotenv-safe guidance)', async () => {
+test('prepareMinisignSecretKeyFile rejects incomplete minisign key headers without disclosing them', async () => {
+  const secret = 'untrusted comment: minisign secret key';
   await assert.rejects(
-    () => prepareMinisignSecretKeyFile('untrusted comment: minisign secret key'),
-    /truncated|dotenv|multiline|file/i,
+    () => prepareMinisignSecretKeyFile(secret),
+    (error) => error instanceof Error && !error.message.includes(secret),
   );
 });
 
 test('prepareMinisignSecretKeyFile rejects short single-line key values that are not file paths', async () => {
+  const secret = 'RWQpH1vH1vH1vH1vH1vH1vH1vH1vH1vH1vH1vH1vH1';
   await assert.rejects(
-    () => prepareMinisignSecretKeyFile('RWQpH1vH1vH1vH1vH1vH1vH1vH1vH1vH1vH1vH1vH1'),
-    /truncated|dotenv|multiline|file|path/i,
+    () => prepareMinisignSecretKeyFile(secret),
+    (error) => error instanceof Error && !error.message.includes(secret),
   );
 });
