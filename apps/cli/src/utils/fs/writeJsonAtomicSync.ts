@@ -4,6 +4,29 @@ import { chmodSync, mkdirSync, readdirSync, renameSync, unlinkSync, writeFileSyn
 import { readdir, unlink } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 
+const ATOMIC_RENAME_MAX_ATTEMPTS = 3;
+const ATOMIC_RENAME_RETRY_DELAY_MS = 2;
+const atomicRenameRetryWaitArray = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+
+function isRetryableAtomicRenameConflict(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException)?.code;
+  return code === 'EPERM' || code === 'EEXIST';
+}
+
+function renameWithBoundedConflictRetrySync(sourcePath: string, destinationPath: string): void {
+  for (let attempt = 1; attempt <= ATOMIC_RENAME_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      renameSync(sourcePath, destinationPath);
+      return;
+    } catch (error) {
+      if (!isRetryableAtomicRenameConflict(error) || attempt === ATOMIC_RENAME_MAX_ATTEMPTS) {
+        throw error;
+      }
+      Atomics.wait(atomicRenameRetryWaitArray, 0, 0, ATOMIC_RENAME_RETRY_DELAY_MS);
+    }
+  }
+}
+
 function bestEffortChmod0600Sync(path: string): void {
   if (process.platform === 'win32') return;
   try {
@@ -29,23 +52,7 @@ export function writeJsonAtomicSync(path: string, value: unknown): void {
   try {
     writeFileSync(tmpPath, JSON.stringify(value, null, 2), { encoding: 'utf-8', mode: 0o600 });
     bestEffortChmod0600Sync(tmpPath);
-    try {
-      renameSync(tmpPath, path);
-    } catch (error) {
-      const err = error as NodeJS.ErrnoException;
-      if (err?.code !== 'EEXIST' && err?.code !== 'EPERM') {
-        throw error;
-      }
-      try {
-        unlinkSync(path);
-      } catch (unlinkError) {
-        const unlinkErr = unlinkError as NodeJS.ErrnoException;
-        if (unlinkErr?.code !== 'ENOENT') {
-          throw unlinkError;
-        }
-      }
-      renameSync(tmpPath, path);
-    }
+    renameWithBoundedConflictRetrySync(tmpPath, path);
     bestEffortChmod0600Sync(path);
   } catch (error) {
     try {

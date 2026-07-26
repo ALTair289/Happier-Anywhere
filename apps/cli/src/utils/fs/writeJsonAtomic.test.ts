@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -16,6 +16,8 @@ describe('writeJsonAtomic', () => {
 
     const raw = await readFile(path, 'utf8');
     expect(JSON.parse(raw)).toEqual({ a: 2, b: 'x' });
+    if (process.platform !== 'win32') {
+      expect((await stat(path)).mode & 0o777).toBe(0o600);
+    }
   });
 });
-
