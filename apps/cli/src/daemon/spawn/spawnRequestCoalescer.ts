@@ -1,6 +1,11 @@
 import { createHash } from 'node:crypto';
 
-import { SessionMcpSelectionV1Schema } from '@happier-dev/protocol';
+import {
+  AcpConfigOptionOverridesV1Schema,
+  readAgentRuntimeDescriptorV1,
+  SessionMcpSelectionV1Schema,
+  SPAWN_SESSION_ERROR_CODES,
+} from '@happier-dev/protocol';
 
 import { resolveCanonicalCodexBackendMode } from '@/rpc/handlers/codexBackendMode';
 import type { SpawnSessionOptions, SpawnSessionResult } from '@/rpc/handlers/registerSessionHandlers';
@@ -66,34 +71,42 @@ function normalizeMcpSelectionForFingerprint(value: SpawnSessionOptions['mcpSele
   };
 }
 
-export type DaemonSpawnRequestKey = Readonly<{ kind: 'existing' | 'new'; key: string }>;
+function normalizeSessionConfigOptionOverridesForFingerprint(
+  value: SpawnSessionOptions['sessionConfigOptionOverrides'],
+): Json {
+  if (value === undefined) return null;
+  const parsed = AcpConfigOptionOverridesV1Schema.safeParse(value);
+  if (!parsed.success) return null;
 
-export function computeDaemonSpawnRequestKey(options: SpawnSessionOptions): DaemonSpawnRequestKey {
-  const existingSessionId = normalizeNonEmptyString(options.existingSessionId);
-  if (existingSessionId) {
-    return { kind: 'existing', key: `existing:${existingSessionId}` };
-  }
+  return {
+    v: parsed.data.v,
+    overrides: Object.fromEntries(
+      Object.entries(parsed.data.overrides)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([key, override]) => [key, override.value]),
+    ),
+  };
+}
 
+function normalizeRuntimeDescriptorForFingerprint(
+  value: SpawnSessionOptions['agentRuntimeDescriptorV1'],
+): Json {
+  const parsed = readAgentRuntimeDescriptorV1(value);
+  if (!parsed) return null;
+
+  return toStableJson(parsed, new WeakSet());
+}
+
+function buildSpawnSemanticFingerprint(options: SpawnSessionOptions): Json {
   const directory = normalizeSpawnSessionDirectory(String(options.directory ?? ''), process.env);
-  const backendTarget =
-    options.backendTarget === undefined
-      ? null
-      : toStableJson(options.backendTarget, new WeakSet());
+  const backendTarget = options.backendTarget === undefined
+    ? null
+    : toStableJson(options.backendTarget, new WeakSet());
   const transcriptStorage = normalizeNonEmptyString(options.transcriptStorage) === 'direct' ? 'direct' : null;
-  const spawnNonce = normalizeNonEmptyString(options.spawnNonce);
-  if (spawnNonce) {
-    return { kind: 'new', key: `new:nonce:${sha256Hex(spawnNonce)}` };
-  }
-
   const profileId = options.profileId !== undefined ? String(options.profileId ?? '') : null;
   const terminal = options.terminal ?? null;
-  const windowsRemoteSessionLaunchMode = normalizeNonEmptyString(options.windowsRemoteSessionLaunchMode);
-  const windowsRemoteSessionConsole = normalizeNonEmptyString(options.windowsRemoteSessionConsole);
-  const windowsTerminalWindowName = normalizeNonEmptyString(options.windowsTerminalWindowName);
-
   const permissionMode = normalizeNonEmptyString(options.permissionMode);
   const agentModeId = normalizeNonEmptyString(options.agentModeId);
-
   const modelId = normalizeNonEmptyString(options.modelId);
   const codexBackendMode = resolveCanonicalCodexBackendMode({
     codexBackendMode: options.codexBackendMode,
@@ -101,48 +114,93 @@ export function computeDaemonSpawnRequestKey(options: SpawnSessionOptions): Daem
     agentRuntimeDescriptorV1: options.agentRuntimeDescriptorV1,
   }) ?? null;
   const resume = normalizeNonEmptyString(options.resume);
-  const initialPrompt = normalizeNonEmptyString(options.initialPrompt);
+  const pendingFirstInput = options.pendingFirstInput ?? null;
+  const initialTranscriptAfterSeq = typeof options.initialTranscriptAfterSeq === 'number'
+    && Number.isSafeInteger(options.initialTranscriptAfterSeq)
+    && options.initialTranscriptAfterSeq >= 0
+    ? options.initialTranscriptAfterSeq
+    : null;
 
-  const environmentVariables = options.environmentVariables;
-  const connectedServices = options.connectedServices;
-  const mcpSelection = normalizeMcpSelectionForFingerprint(options.mcpSelection);
-  const sessionConfigOptionOverrides = options.sessionConfigOptionOverrides === undefined
-    ? null
-    : toStableJson(options.sessionConfigOptionOverrides, new WeakSet());
-
-  const fingerprint = {
+  return {
     directory,
     backendTarget,
+    runtimeDescriptor: normalizeRuntimeDescriptorForFingerprint(options.agentRuntimeDescriptorV1),
     approvedNewDirectoryCreation: options.approvedNewDirectoryCreation === true,
     profileId,
     terminal: toStableJson(terminal, new WeakSet()),
-    windowsRemoteSessionLaunchMode: windowsRemoteSessionLaunchMode ?? null,
-    windowsRemoteSessionConsole: windowsRemoteSessionConsole ?? null,
-    windowsTerminalWindowName: windowsTerminalWindowName ?? null,
-    permissionMode: permissionMode ?? null,
-    agentModeId: agentModeId ?? null,
-    modelId: modelId ?? null,
+    windowsRemoteSessionLaunchMode: normalizeNonEmptyString(options.windowsRemoteSessionLaunchMode),
+    windowsRemoteSessionConsole: normalizeNonEmptyString(options.windowsRemoteSessionConsole),
+    windowsTerminalWindowName: normalizeNonEmptyString(options.windowsTerminalWindowName),
+    permissionMode,
+    agentModeId,
+    modelId,
     codexBackendMode,
-    resume: resume ?? null,
-    initialPromptHash: initialPrompt ? sha256Hex(initialPrompt) : null,
-    envValueHashes: hashRecordValues(environmentVariables),
-    connectedServicesHash: connectedServices === undefined ? null : sha256Hex(stableJsonStringify(connectedServices)),
-    mcpSelection,
-    sessionConfigOptionOverrides,
+    resume,
+    pendingFirstInputHash: pendingFirstInput ? sha256Hex(stableJsonStringify(pendingFirstInput)) : null,
+    initialTranscriptAfterSeq,
+    initialGoal: options.initialGoal === undefined ? null : toStableJson(options.initialGoal, new WeakSet()),
+    attachMetadataIdentityPolicy: normalizeNonEmptyString(options.attachMetadataIdentityPolicy),
+    existingSessionAttachPayloadHash: options.existingSessionAttachPayload === undefined
+      ? null
+      : sha256Hex(stableJsonStringify(options.existingSessionAttachPayload)),
+    envValueHashes: hashRecordValues(options.environmentVariables),
+    connectedServicesHash: options.connectedServices === undefined
+      ? null
+      : sha256Hex(stableJsonStringify(options.connectedServices)),
+    connectedServiceMaterializationIdentity: options.connectedServiceMaterializationIdentityV1 === undefined
+      ? null
+      : toStableJson(options.connectedServiceMaterializationIdentityV1, new WeakSet()),
+    mcpSelection: normalizeMcpSelectionForFingerprint(options.mcpSelection),
+    sessionConfigOptionOverrides: normalizeSessionConfigOptionOverridesForFingerprint(
+      options.sessionConfigOptionOverrides,
+    ),
     ...(transcriptStorage ? { transcriptStorage } : {}),
-  } as const;
+  };
+}
 
-  return { kind: 'new', key: `new:${sha256Hex(stableJsonStringify(fingerprint))}` };
+export type DaemonSpawnRequestKey =
+  | Readonly<{ kind: 'existing'; key: string; serializationKey: string; authorizationKey?: string }>
+  | Readonly<{ kind: 'new'; key: string }>;
+
+export function computeDaemonSpawnRequestKey(options: SpawnSessionOptions): DaemonSpawnRequestKey {
+  const existingSessionId = normalizeNonEmptyString(options.existingSessionId);
+  if (existingSessionId) {
+    const serializationKey = `existing:${existingSessionId}`;
+    const executionAuthorization = options.executionAuthorization;
+    const requestKey = executionAuthorization
+      ? `:request:${sha256Hex(stableJsonStringify({
+        executionAuthorization,
+        spawnSemantics: buildSpawnSemanticFingerprint(options),
+      }))}`
+      : '';
+    return {
+      kind: 'existing',
+      key: `${serializationKey}${requestKey}`,
+      serializationKey,
+      ...(executionAuthorization
+        ? { authorizationKey: `${serializationKey}:authorization:${sha256Hex(executionAuthorization.requestId)}` }
+        : {}),
+    };
+  }
+
+  const spawnNonce = normalizeNonEmptyString(options.spawnNonce);
+  if (spawnNonce) {
+    return { kind: 'new', key: `new:nonce:${sha256Hex(spawnNonce)}` };
+  }
+
+  return { kind: 'new', key: `new:${sha256Hex(stableJsonStringify(buildSpawnSemanticFingerprint(options)))}` };
 }
 
 export function createSpawnRequestCoalescer(params: Readonly<{ recentSuccessTtlMs: number; nowMs?: () => number }>) {
   const inFlightByKey = new Map<string, Promise<SpawnSessionResult>>();
-  const recentSuccessByKey = new Map<string, { sessionId: string; atMs: number }>();
+  const inFlightKeyByAuthorizationKey = new Map<string, string>();
+  const serializationTailByKey = new Map<string, Promise<SpawnSessionResult>>();
+  const recentSuccessByKey = new Map<string, { result: SpawnSessionResult; atMs: number }>();
   const nowMs = params.nowMs ?? (() => Date.now());
   const ttlMs = Math.max(0, Math.floor(Number(params.recentSuccessTtlMs)));
 
   const tryGetRecent = (key: DaemonSpawnRequestKey): SpawnSessionResult | null => {
-    if (key.kind !== 'new') return null;
+    if (key.kind === 'existing' && !key.authorizationKey) return null;
     if (ttlMs <= 0) return null;
     const cached = recentSuccessByKey.get(key.key);
     if (!cached) return null;
@@ -151,16 +209,23 @@ export function createSpawnRequestCoalescer(params: Readonly<{ recentSuccessTtlM
       recentSuccessByKey.delete(key.key);
       return null;
     }
-    return { type: 'success', sessionId: cached.sessionId };
+    return cached.result;
   };
 
   const recordRecentSuccess = (key: DaemonSpawnRequestKey, result: SpawnSessionResult) => {
-    if (key.kind !== 'new') return;
+    if (key.kind === 'existing' && !key.authorizationKey) return;
     if (ttlMs <= 0) return;
     if (result.type !== 'success') return;
+    if (key.kind === 'existing') {
+      recentSuccessByKey.set(key.key, { result, atMs: nowMs() });
+      return;
+    }
     const sessionId = normalizeNonEmptyString(result.sessionId);
     if (!sessionId) return;
-    recentSuccessByKey.set(key.key, { sessionId, atMs: nowMs() });
+    recentSuccessByKey.set(key.key, {
+      result: { type: 'success', sessionId },
+      atMs: nowMs(),
+    });
   };
 
   return {
@@ -171,16 +236,59 @@ export function createSpawnRequestCoalescer(params: Readonly<{ recentSuccessTtlM
       const existing = inFlightByKey.get(key.key);
       if (existing) return await existing;
 
-      const promise = (async () => {
+      if (key.kind === 'existing' && key.authorizationKey) {
+        const activeKey = inFlightKeyByAuthorizationKey.get(key.authorizationKey);
+        if (activeKey && activeKey !== key.key) {
+          return {
+            type: 'error',
+            errorCode: SPAWN_SESSION_ERROR_CODES.INVALID_REQUEST,
+            errorMessage: 'Conflicting exact execution authorization is already in flight for this pending input',
+          };
+        }
+      }
+
+      const previousInSerializationLane = key.kind === 'existing'
+        ? serializationTailByKey.get(key.serializationKey)
+        : undefined;
+      let promise!: Promise<SpawnSessionResult>;
+      promise = (async () => {
         try {
+          if (previousInSerializationLane) {
+            try {
+              await previousInSerializationLane;
+            } catch {
+              // A failed predecessor must not poison subsequent exact requests.
+            }
+          }
           const result = await work();
           recordRecentSuccess(key, result);
           return result;
         } finally {
-          inFlightByKey.delete(key.key);
+          if (inFlightByKey.get(key.key) === promise) {
+            inFlightByKey.delete(key.key);
+          }
+          if (
+            key.kind === 'existing'
+            && serializationTailByKey.get(key.serializationKey) === promise
+          ) {
+            serializationTailByKey.delete(key.serializationKey);
+          }
+          if (
+            key.kind === 'existing'
+            && key.authorizationKey
+            && inFlightKeyByAuthorizationKey.get(key.authorizationKey) === key.key
+          ) {
+            inFlightKeyByAuthorizationKey.delete(key.authorizationKey);
+          }
         }
       })();
       inFlightByKey.set(key.key, promise);
+      if (key.kind === 'existing') {
+        serializationTailByKey.set(key.serializationKey, promise);
+        if (key.authorizationKey) {
+          inFlightKeyByAuthorizationKey.set(key.authorizationKey, key.key);
+        }
+      }
       return await promise;
     },
   };

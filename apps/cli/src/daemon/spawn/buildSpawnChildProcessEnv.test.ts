@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { HAPPIER_DAEMON_SPAWN_SELF_MIGRATE_CGROUP_ENV_KEY } from '@/daemon/platform/linux/daemonSpawnedSessionCgroupSelfMigration';
+import { resolveFileLogLevel } from '@/ui/logFileLevel';
 import { buildSpawnChildProcessEnv } from './buildSpawnChildProcessEnv';
 
 describe('buildSpawnChildProcessEnv', () => {
@@ -54,6 +55,7 @@ describe('buildSpawnChildProcessEnv', () => {
       processEnv: {
         PATH: '/bin',
         HAPPIER_ACTIVE_SERVER_ID: 'stale-server',
+        HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID: 'stack_repo-remote-dev-d72117acdb__id_default',
         HAPPIER_SERVER_URL: 'https://stale.example.test',
         HAPPIER_LOCAL_SERVER_URL: 'http://127.0.0.1:4999',
         HAPPIER_PUBLIC_SERVER_URL: 'https://stale-public.example.test',
@@ -71,10 +73,33 @@ describe('buildSpawnChildProcessEnv', () => {
 
     expect(env.PATH).toBe('/bin');
     expect(env.HAPPIER_ACTIVE_SERVER_ID).toBe('stack-a');
+    expect(env.HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID).toBe(
+      'stack_repo-remote-dev-d72117acdb__id_default',
+    );
     expect(env.HAPPIER_SERVER_URL).toBe('http://127.0.0.1:3005');
     expect(env.HAPPIER_LOCAL_SERVER_URL).toBe('http://127.0.0.1:3005');
     expect(env.HAPPIER_PUBLIC_SERVER_URL).toBe('http://127.0.0.1:13155');
     expect(env.HAPPIER_WEBAPP_URL).toBe('http://127.0.0.1:13155');
+  });
+
+  it('promotes an old stack daemon active scope into the child lifecycle scope', () => {
+    const env = buildSpawnChildProcessEnv({
+      processEnv: {
+        PATH: '/bin',
+        HAPPIER_ACTIVE_SERVER_ID: 'stack_repo-remote-dev-d72117acdb__id_default',
+      },
+      extraEnv: {},
+      serverSelectionEnv: {
+        activeServerId: 'stack_repo-remote-dev-d72117acdb__id_default',
+        canonicalServerUrl: 'http://127.0.0.1:52753',
+        apiServerUrl: 'http://127.0.0.1:52753',
+        webappUrl: 'http://localhost:52753',
+      },
+    });
+
+    expect(env.HAPPIER_DAEMON_LIFECYCLE_SCOPE_ID).toBe(
+      'stack_repo-remote-dev-d72117acdb__id_default',
+    );
   });
 
   it('enables self-migration for child runners spawned by a background-service daemon', () => {
@@ -116,6 +141,67 @@ describe('buildSpawnChildProcessEnv', () => {
     expect(env.HAPPIER_DAEMON_RUNTIME_ID).toBeUndefined();
     expect(env.HAPPIER_DAEMON_STARTUP_SOURCE).toBeUndefined();
     expect(env.HAPPIER_DAEMON_TAKEOVER).toBeUndefined();
+  });
+
+  it('strips obsolete daemon-generation authority from parent and session overrides', () => {
+    const env = buildSpawnChildProcessEnv({
+      processEnv: {
+        PATH: '/bin',
+        HAPPIER_DAEMON_EXECUTION_GENERATION_V1: 'spawning-daemon',
+      },
+      extraEnv: {
+        HAPPIER_DAEMON_EXECUTION_GENERATION_V1: 'untrusted-session-override',
+      },
+    });
+
+    expect(env.HAPPIER_DAEMON_EXECUTION_GENERATION_V1).toBeUndefined();
+  });
+
+  it('does not force debug file logging for prod-shaped daemon-spawned runners', () => {
+    const env = buildSpawnChildProcessEnv({
+      processEnv: { PATH: '/bin' },
+      extraEnv: {},
+    });
+
+    expect(env.HAPPIER_LOG_LEVEL).toBeUndefined();
+    expect(resolveFileLogLevel({ env, isDaemonProcess: false })).toBe('info');
+  });
+
+  it('defaults stack daemon-spawned runners to debug file logging so headless stack runners leave forensics logs (RC-RESUMEFLAP)', () => {
+    const env = buildSpawnChildProcessEnv({
+      processEnv: {
+        PATH: '/bin',
+        HAPPIER_STACK_ENV_FILE: '/tmp/repo-remote-dev/env',
+        HAPPIER_STACK_PROCESS_KIND: 'infra',
+      },
+      extraEnv: {},
+    });
+
+    expect(env.HAPPIER_LOG_LEVEL).toBe('debug');
+  });
+
+  it('honors an explicit file log level override instead of forcing debug on daemon children or stack children', () => {
+    const inherited = buildSpawnChildProcessEnv({
+      processEnv: { PATH: '/bin', HAPPIER_LOG_LEVEL: 'silent' },
+      extraEnv: {},
+    });
+    expect(inherited.HAPPIER_LOG_LEVEL).toBe('silent');
+
+    const explicit = buildSpawnChildProcessEnv({
+      processEnv: { PATH: '/bin' },
+      extraEnv: { HAPPIER_LOG_LEVEL: 'warn' },
+    });
+    expect(explicit.HAPPIER_LOG_LEVEL).toBe('warn');
+
+    const stackExplicit = buildSpawnChildProcessEnv({
+      processEnv: {
+        PATH: '/bin',
+        HAPPIER_STACK_ENV_FILE: '/tmp/repo-remote-dev/env',
+        HAPPIER_LOG_LEVEL: 'info',
+      },
+      extraEnv: {},
+    });
+    expect(stackExplicit.HAPPIER_LOG_LEVEL).toBe('info');
   });
 
   it('marks daemon-spawned stack child runners as session processes', () => {
