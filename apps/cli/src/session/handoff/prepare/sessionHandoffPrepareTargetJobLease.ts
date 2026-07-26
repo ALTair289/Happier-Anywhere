@@ -2,6 +2,11 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
+import { writeJsonAtomic } from '@/utils/fs/writeJsonAtomic';
+
+import { assertSessionHandoffPrepareTargetJobId } from './sessionHandoffPrepareTargetJobId';
+import { withSessionHandoffPrepareTargetJobLeaseOperationLock } from './sessionHandoffPrepareTargetJobLeaseOperationLock';
+
 export type SessionHandoffPrepareTargetJobLeaseRecord = Readonly<{
   leaseId?: string;
   attempt?: number;
@@ -9,6 +14,31 @@ export type SessionHandoffPrepareTargetJobLeaseRecord = Readonly<{
   acquiredAtMs: number;
   renewedAtMs: number;
   expiresAtMs: number;
+}>;
+
+type AcquiredSessionHandoffPrepareTargetJobLeaseRecord = Readonly<
+  Omit<SessionHandoffPrepareTargetJobLeaseRecord, 'leaseId'> & { leaseId: string }
+>;
+
+export type SessionHandoffPrepareTargetJobLeaseHeartbeatState =
+  | Readonly<{ status: 'active' }>
+  | Readonly<{ status: 'lost' }>
+  | Readonly<{ status: 'error'; error: unknown }>;
+
+export type SessionHandoffPrepareTargetJobLeaseProof = Readonly<{
+  ownerId: string;
+  leaseId: string;
+  validate: () => Promise<boolean>;
+  runIfValid: <T>(operation: () => Promise<T>) => Promise<Readonly<
+    | { valid: true; value: T }
+    | { valid: false }
+  >>;
+}>;
+
+export type SessionHandoffPrepareTargetJobLeaseHeartbeat = Readonly<{
+  proof: SessionHandoffPrepareTargetJobLeaseProof;
+  getState: () => SessionHandoffPrepareTargetJobLeaseHeartbeatState;
+  stop: () => Promise<SessionHandoffPrepareTargetJobLeaseHeartbeatState>;
 }>;
 
 const DEFAULT_LEASE_TTL_MS = 60 * 1000;
@@ -31,9 +61,7 @@ function resolveLeasePaths(input: Readonly<{
   activeServerDir: string;
   jobId: string;
 }>) {
-  if (!/^[A-Za-z0-9._-]+$/u.test(input.jobId)) {
-    throw new Error(`Invalid session handoff prepare-target job id: ${input.jobId}`);
-  }
+  assertSessionHandoffPrepareTargetJobId(input.jobId);
   const jobStagingDirectory = join(
     input.activeServerDir,
     'session-handoff',
@@ -84,6 +112,30 @@ async function writeLeaseRecord(filePath: string, record: SessionHandoffPrepareT
   await writeFile(filePath, `${JSON.stringify(record)}\n`, 'utf8');
 }
 
+function isExactLiveLease(
+  record: SessionHandoffPrepareTargetJobLeaseRecord | null,
+  input: Readonly<{ ownerId: string; leaseId: string; nowMs: number }>,
+): boolean {
+  return record?.ownerId === input.ownerId
+    && record.leaseId === input.leaseId
+    && record.expiresAtMs > input.nowMs;
+}
+
+async function validateExactLiveLease(input: Readonly<{
+  activeServerDir: string;
+  jobId: string;
+  ownerId: string;
+  leaseId: string;
+  nowMs: number;
+}>): Promise<boolean> {
+  const resolved = resolveLeasePaths(input);
+  const [lease, runner] = await Promise.all([
+    readLeaseRecord(resolved.leaseFilePath),
+    readLeaseRecord(resolved.runnerFilePath),
+  ]);
+  return isExactLiveLease(lease, input) && isExactLiveLease(runner, input);
+}
+
 function isLeaseAlreadyExistsError(error: unknown): boolean {
   const nodeError = error as NodeJS.ErrnoException;
   return nodeError?.code === 'EEXIST' || nodeError?.code === 'ENOTEMPTY' || nodeError?.code === 'EPERM';
@@ -127,20 +179,23 @@ export async function tryAcquireSessionHandoffPrepareTargetJobLease(input: Reado
   ownerId: string;
   nowMs: number;
   ttlMs?: number;
-}>): Promise<Readonly<{ acquired: boolean; lease: SessionHandoffPrepareTargetJobLeaseRecord | null }>> {
-  const ttlMs = input.ttlMs ?? resolveSessionHandoffPrepareTargetJobLeaseTtlMs();
-  const resolved = resolveLeasePaths(input);
-  await mkdir(resolved.jobStagingDirectory, { recursive: true });
+}>): Promise<
+  | Readonly<{ acquired: true; lease: AcquiredSessionHandoffPrepareTargetJobLeaseRecord }>
+  | Readonly<{ acquired: false; lease: SessionHandoffPrepareTargetJobLeaseRecord | null }>
+> {
+  return await withSessionHandoffPrepareTargetJobLeaseOperationLock(input, async () => {
+    const ttlMs = input.ttlMs ?? resolveSessionHandoffPrepareTargetJobLeaseTtlMs();
+    const resolved = resolveLeasePaths(input);
+    await mkdir(resolved.jobStagingDirectory, { recursive: true });
 
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const existing = await readLeaseRecord(resolved.leaseFilePath);
-    if (existing && existing.expiresAtMs > input.nowMs) {
-      const pid = resolveDaemonPidFromOwnerId(existing.ownerId);
-      if (pid !== null && !isPidAlive(pid)) {
-        // Daemon process is gone; treat the lease as stale to avoid restart stalls.
-        await rm(resolved.leaseDirectory, { recursive: true, force: true }).catch(() => undefined);
-      } else {
-        if (pid === process.pid) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const existing = await readLeaseRecord(resolved.leaseFilePath);
+      if (existing && existing.expiresAtMs > input.nowMs) {
+        const pid = resolveDaemonPidFromOwnerId(existing.ownerId);
+        if (pid !== null && !isPidAlive(pid)) {
+          // Daemon process is gone; treat the lease as stale to avoid restart stalls.
+          await rm(resolved.leaseDirectory, { recursive: true, force: true }).catch(() => undefined);
+        } else if (pid === process.pid) {
           const runner = await readLeaseRecord(resolved.runnerFilePath);
           const runnerIsFresh =
             runner
@@ -155,109 +210,198 @@ export async function tryAcquireSessionHandoffPrepareTargetJobLease(input: Reado
           return { acquired: false, lease: existing };
         }
       }
-    }
-    const previousAttempt = existing?.attempt ?? 0;
-    if (existing) {
+      const previousAttempt = existing?.attempt ?? 0;
+      if (existing) {
+        await rm(resolved.leaseDirectory, { recursive: true, force: true }).catch(() => undefined);
+      }
+
+      const next: AcquiredSessionHandoffPrepareTargetJobLeaseRecord = {
+        leaseId: randomUUID(),
+        attempt: previousAttempt + 1,
+        ownerId: input.ownerId,
+        acquiredAtMs: input.nowMs,
+        renewedAtMs: input.nowMs,
+        expiresAtMs: input.nowMs + ttlMs,
+      };
+
+      const tempLeaseDirectory = `${resolved.leaseDirectory}.tmp-${randomUUID()}`;
+      await mkdir(tempLeaseDirectory, { recursive: false });
+      await writeLeaseRecord(join(tempLeaseDirectory, 'lease.json'), next);
+      await writeLeaseRecord(join(tempLeaseDirectory, 'runner.json'), next);
+      try {
+        await rename(tempLeaseDirectory, resolved.leaseDirectory);
+        return { acquired: true, lease: next };
+      } catch (error) {
+        if (!isLeaseAlreadyExistsError(error)) {
+          await rm(tempLeaseDirectory, { recursive: true, force: true }).catch(() => undefined);
+          throw error;
+        }
+        await rm(tempLeaseDirectory, { recursive: true, force: true }).catch(() => undefined);
+      }
+
+      const locked = await readLeaseRecord(resolved.leaseFilePath);
+      if (locked && locked.expiresAtMs > input.nowMs) {
+        return { acquired: false, lease: locked };
+      }
+
       await rm(resolved.leaseDirectory, { recursive: true, force: true }).catch(() => undefined);
     }
 
-    const next: SessionHandoffPrepareTargetJobLeaseRecord = {
-      leaseId: randomUUID(),
-      attempt: previousAttempt + 1,
-      ownerId: input.ownerId,
-      acquiredAtMs: input.nowMs,
-      renewedAtMs: input.nowMs,
-      expiresAtMs: input.nowMs + ttlMs,
-    };
-
-    const tempLeaseDirectory = `${resolved.leaseDirectory}.tmp-${randomUUID()}`;
-    await mkdir(tempLeaseDirectory, { recursive: false });
-    await writeLeaseRecord(join(tempLeaseDirectory, 'lease.json'), next);
-    await writeLeaseRecord(join(tempLeaseDirectory, 'runner.json'), next);
-    try {
-      await rename(tempLeaseDirectory, resolved.leaseDirectory);
-      return { acquired: true, lease: next };
-    } catch (error) {
-      if (!isLeaseAlreadyExistsError(error)) {
-        await rm(tempLeaseDirectory, { recursive: true, force: true }).catch(() => undefined);
-        throw error;
-      }
-      await rm(tempLeaseDirectory, { recursive: true, force: true }).catch(() => undefined);
-    }
-
-    const locked = await readLeaseRecord(resolved.leaseFilePath);
-    if (locked && locked.expiresAtMs > input.nowMs) {
-      return { acquired: false, lease: locked };
-    }
-
-    await rm(resolved.leaseDirectory, { recursive: true, force: true }).catch(() => undefined);
-  }
-
-  const existing = await readLeaseRecord(resolved.leaseFilePath);
-  return { acquired: false, lease: existing };
+    const existing = await readLeaseRecord(resolved.leaseFilePath);
+    return { acquired: false, lease: existing };
+  });
 }
 
 export async function renewSessionHandoffPrepareTargetJobLease(input: Readonly<{
   activeServerDir: string;
   jobId: string;
   ownerId: string;
+  leaseId: string;
   nowMs: number;
   ttlMs?: number;
 }>): Promise<Readonly<{ renewed: boolean; lease: SessionHandoffPrepareTargetJobLeaseRecord | null }>> {
-  const ttlMs = input.ttlMs ?? resolveSessionHandoffPrepareTargetJobLeaseTtlMs();
-  const resolved = resolveLeasePaths(input);
-  const existing = await readLeaseRecord(resolved.leaseFilePath);
-  if (!existing || existing.ownerId !== input.ownerId) {
-    return { renewed: false, lease: existing };
-  }
-  const next: SessionHandoffPrepareTargetJobLeaseRecord = {
-    ...existing,
-    renewedAtMs: input.nowMs,
-    expiresAtMs: input.nowMs + ttlMs,
-  };
-  // Best-effort atomic: overwrite within the lease directory, which is already acquired/owned.
-  await writeLeaseRecord(resolved.leaseFilePath, next);
-  await writeLeaseRecord(resolved.runnerFilePath, next);
-  return { renewed: true, lease: next };
+  return await withSessionHandoffPrepareTargetJobLeaseOperationLock(input, async () => {
+    const ttlMs = input.ttlMs ?? resolveSessionHandoffPrepareTargetJobLeaseTtlMs();
+    const resolved = resolveLeasePaths(input);
+    const existing = await readLeaseRecord(resolved.leaseFilePath);
+    if (
+      !existing
+      || existing.ownerId !== input.ownerId
+      || existing.leaseId !== input.leaseId
+      || existing.expiresAtMs <= input.nowMs
+    ) {
+      return { renewed: false, lease: existing };
+    }
+    const next: SessionHandoffPrepareTargetJobLeaseRecord = {
+      ...existing,
+      renewedAtMs: input.nowMs,
+      expiresAtMs: input.nowMs + ttlMs,
+    };
+    // The lease directory remains the acquisition boundary. Each visible heartbeat record is still
+    // replaced atomically so contenders never interpret a truncated renewal as an absent owner.
+    await writeJsonAtomic(resolved.runnerFilePath, next);
+    await writeJsonAtomic(resolved.leaseFilePath, next);
+    return { renewed: true, lease: next };
+  });
 }
 
 export async function releaseSessionHandoffPrepareTargetJobLease(input: Readonly<{
   activeServerDir: string;
   jobId: string;
   ownerId: string;
+  leaseId: string;
 }>): Promise<void> {
-  const resolved = resolveLeasePaths(input);
-  const existing = await readLeaseRecord(resolved.leaseFilePath);
-  if (!existing || existing.ownerId !== input.ownerId) {
-    return;
-  }
-  await rm(resolved.leaseDirectory, { recursive: true, force: true }).catch(() => undefined);
+  await withSessionHandoffPrepareTargetJobLeaseOperationLock(input, async () => {
+    const resolved = resolveLeasePaths(input);
+    const existing = await readLeaseRecord(resolved.leaseFilePath);
+    if (!existing || existing.ownerId !== input.ownerId || existing.leaseId !== input.leaseId) {
+      return;
+    }
+    await rm(resolved.leaseDirectory, { recursive: true, force: true }).catch(() => undefined);
+  });
 }
 
 export function startSessionHandoffPrepareTargetJobLeaseHeartbeat(input: Readonly<{
   activeServerDir: string;
   jobId: string;
   ownerId: string;
+  leaseId: string;
   ttlMs: number;
   nowMs: () => number;
-}>): Readonly<{ stop: () => Promise<void> }> {
-  const intervalMs = Math.max(250, Math.floor(input.ttlMs / 3));
+}>): SessionHandoffPrepareTargetJobLeaseHeartbeat {
+  const intervalMs = Math.max(250, Math.floor(input.ttlMs / 4));
   let stopped = false;
+  let state: SessionHandoffPrepareTargetJobLeaseHeartbeatState = { status: 'active' };
+  let inFlight: Promise<void> | null = null;
+
+  const runSerialized = async <T>(operation: () => Promise<T>): Promise<T> => {
+    while (inFlight) {
+      await inFlight;
+    }
+    let resolveWork!: () => void;
+    inFlight = new Promise<void>((resolve) => {
+      resolveWork = resolve;
+    });
+    try {
+      return await operation();
+    } finally {
+      inFlight = null;
+      resolveWork();
+    }
+  };
+
+  const renew = async (): Promise<void> => {
+    if (stopped || state.status !== 'active' || inFlight) return;
+    await runSerialized(async () => {
+      if (stopped || state.status !== 'active') return;
+      try {
+        const result = await renewSessionHandoffPrepareTargetJobLease({
+          activeServerDir: input.activeServerDir,
+          jobId: input.jobId,
+          ownerId: input.ownerId,
+          leaseId: input.leaseId,
+          nowMs: input.nowMs(),
+          ttlMs: input.ttlMs,
+        });
+        if (!result.renewed) {
+          state = { status: 'lost' };
+        }
+      } catch (error) {
+        state = { status: 'error', error };
+      }
+    });
+  };
+
   const handle = setInterval(() => {
-    if (stopped) return;
-    void renewSessionHandoffPrepareTargetJobLease({
-      activeServerDir: input.activeServerDir,
-      jobId: input.jobId,
-      ownerId: input.ownerId,
-      nowMs: input.nowMs(),
-      ttlMs: input.ttlMs,
-    }).catch(() => undefined);
+    void renew();
   }, intervalMs);
 
+  const proof: SessionHandoffPrepareTargetJobLeaseProof = {
+    ownerId: input.ownerId,
+    leaseId: input.leaseId,
+    validate: async () => await runSerialized(async () => {
+      if (stopped || state.status !== 'active') return false;
+      const valid = await validateExactLiveLease({
+        activeServerDir: input.activeServerDir,
+        jobId: input.jobId,
+        ownerId: input.ownerId,
+        leaseId: input.leaseId,
+        nowMs: input.nowMs(),
+      });
+      if (!valid) {
+        state = { status: 'lost' };
+      }
+      return valid;
+    }),
+    runIfValid: async <T>(operation: () => Promise<T>) => await runSerialized(async () => {
+      if (stopped || state.status !== 'active') return { valid: false };
+      return await withSessionHandoffPrepareTargetJobLeaseOperationLock(input, async () => {
+        const valid = await validateExactLiveLease({
+          activeServerDir: input.activeServerDir,
+          jobId: input.jobId,
+          ownerId: input.ownerId,
+          leaseId: input.leaseId,
+          nowMs: input.nowMs(),
+        });
+        if (!valid) {
+          state = { status: 'lost' };
+          return { valid: false };
+        }
+        return { valid: true, value: await operation() };
+      });
+    }),
+  };
+
   return {
+    proof,
+    getState: () => state,
     stop: async () => {
       stopped = true;
       clearInterval(handle);
+      while (inFlight) {
+        await inFlight;
+      }
+      return state;
     },
   };
 }

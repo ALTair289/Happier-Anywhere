@@ -8,19 +8,28 @@ import {
   SessionHandoffPrepareTargetRequestSchema,
   SessionHandoffPrepareTargetResultGetResponseSchema,
   SessionHandoffStatusSchema,
+  SessionHandoffTargetCleanupSchema,
 } from '@happier-dev/protocol';
 
 import {
   releaseSessionHandoffPrepareTargetJobLease,
+  startSessionHandoffPrepareTargetJobLeaseHeartbeat,
   tryAcquireSessionHandoffPrepareTargetJobLease,
+  type SessionHandoffPrepareTargetJobLeaseProof,
 } from './sessionHandoffPrepareTargetJobLease';
+import {
+  SESSION_HANDOFF_PREPARE_TARGET_JOB_RECORD_LOCK_TIMEOUT_MS,
+  SESSION_HANDOFF_PREPARE_TARGET_JOB_RECOVERY_PROOF_TTL_MS,
+} from './sessionHandoffPrepareTargetJobTiming';
+import { withJsonOwnerFileLock } from '@/utils/fs/jsonOwnerFileLock';
 import { writeJsonAtomic } from '@/utils/fs/writeJsonAtomic';
 
-const SESSION_HANDOFF_PREPARE_TARGET_JOB_SCHEMA_VERSION = 1 as const;
+import { assertSessionHandoffPrepareTargetJobId } from './sessionHandoffPrepareTargetJobId';
 
-const SessionHandoffPrepareTargetJobRecordSchema = z
-  .object({
-    schemaVersion: z.literal(SESSION_HANDOFF_PREPARE_TARGET_JOB_SCHEMA_VERSION),
+const SESSION_HANDOFF_PREPARE_TARGET_JOB_SCHEMA_VERSION_V1 = 1 as const;
+const SESSION_HANDOFF_PREPARE_TARGET_JOB_SCHEMA_VERSION_V2 = 2 as const;
+
+const sessionHandoffPrepareTargetJobCommonShape = {
     jobId: z.string().min(1),
     handoffId: z.string().min(1),
     createdAtMs: z.number().int().min(0),
@@ -29,6 +38,7 @@ const SessionHandoffPrepareTargetJobRecordSchema = z
     abortedAtMs: z.number().int().min(0).optional(),
     completedAtMs: z.number().int().min(0).optional(),
     failedAtMs: z.number().int().min(0).optional(),
+    lastErrorCode: z.string().min(1).optional(),
     lastErrorMessage: z.string().min(1).optional(),
     workspaceReplicationJobId: z.string().min(1).optional(),
     status: SessionHandoffStatusSchema,
@@ -36,9 +46,166 @@ const SessionHandoffPrepareTargetJobRecordSchema = z
     // even when callers keep polling status/result without issuing a second PREPARE_TARGET call.
     prepareTargetRequest: SessionHandoffPrepareTargetRequestSchema.optional(),
     prepareTargetResult: SessionHandoffPrepareTargetResultGetResponseSchema.optional(),
+} as const;
+
+const SessionHandoffPrepareTargetJobRecordV1Schema = z
+  .object({
+    schemaVersion: z.literal(SESSION_HANDOFF_PREPARE_TARGET_JOB_SCHEMA_VERSION_V1),
+    ...sessionHandoffPrepareTargetJobCommonShape,
   })
   .strip()
-  .superRefine((record, ctx) => {
+  .superRefine(refineSessionHandoffPrepareTargetJobRecordCoherence);
+
+const SessionHandoffPreparedTargetResumeStateV2Schema = z.discriminatedUnion('status', [
+  z.object({ status: z.literal('not_attempted') }).strict(),
+  z.object({ status: z.literal('preexisting_unowned') }).strict(),
+  z
+    .object({
+      status: z.literal('attempted'),
+      attemptId: z.string().min(1),
+      acceptedAtMs: z.number().int().min(0),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal('confirmed'),
+      attemptId: z.string().min(1),
+      acceptedAtMs: z.number().int().min(0),
+      confirmedAtMs: z.number().int().min(0),
+    })
+    .strict(),
+]);
+
+const SessionHandoffTerminalStateV2Schema = z.discriminatedUnion('status', [
+  z.object({ status: z.literal('open') }).strict(),
+  z
+    .object({
+      status: z.literal('aborting'),
+      operationId: z.string().min(1),
+      claimedRevision: z.number().int().min(0),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal('aborted'),
+      operationId: z.string().min(1),
+      completedRevision: z.number().int().min(0),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal('completed'),
+      operationId: z.string().min(1),
+      completedRevision: z.number().int().min(0),
+    })
+    .strict(),
+]);
+
+const SessionHandoffPreparedTargetJobRecordV2Schema = z
+  .object({
+    schemaVersion: z.literal(SESSION_HANDOFF_PREPARE_TARGET_JOB_SCHEMA_VERSION_V2),
+    recordKind: z.literal('prepared_target'),
+    ...sessionHandoffPrepareTargetJobCommonShape,
+    sessionId: z.string().min(1),
+    transitionRevision: z.number().int().min(0),
+    resume: SessionHandoffPreparedTargetResumeStateV2Schema,
+    terminal: SessionHandoffTerminalStateV2Schema,
+    targetCleanup: SessionHandoffTargetCleanupSchema,
+  })
+  .strip();
+
+const SessionHandoffLegacyTargetJobRecordV2Schema = z
+  .object({
+    schemaVersion: z.literal(SESSION_HANDOFF_PREPARE_TARGET_JOB_SCHEMA_VERSION_V2),
+    recordKind: z.literal('legacy_target'),
+    ...sessionHandoffPrepareTargetJobCommonShape,
+    transitionRevision: z.number().int().min(0),
+    resume: z.object({ status: z.literal('legacy_unknown') }).strict(),
+    terminal: SessionHandoffTerminalStateV2Schema,
+    targetCleanup: z.object({ status: z.literal('legacy_cleanup_unavailable') }).strict(),
+  })
+  .strip();
+
+const SessionHandoffSourceOnlyJobRecordV2Schema = z
+  .object({
+    schemaVersion: z.literal(SESSION_HANDOFF_PREPARE_TARGET_JOB_SCHEMA_VERSION_V2),
+    recordKind: z.literal('source_only'),
+    ...sessionHandoffPrepareTargetJobCommonShape,
+    sessionId: z.string().min(1).optional(),
+    transitionRevision: z.number().int().min(0),
+    resume: z.object({ status: z.literal('not_applicable') }).strict(),
+    terminal: SessionHandoffTerminalStateV2Schema,
+    targetCleanup: z.object({ status: z.literal('not_applicable'), reason: z.literal('source_only') }).strict(),
+  })
+  .strip();
+
+const SessionHandoffPrepareTargetJobRecordV2Schema = z.discriminatedUnion('recordKind', [
+  SessionHandoffPreparedTargetJobRecordV2Schema,
+  SessionHandoffLegacyTargetJobRecordV2Schema,
+  SessionHandoffSourceOnlyJobRecordV2Schema,
+]).superRefine((record, context) => {
+  refineSessionHandoffPrepareTargetJobRecordCoherence(record, context);
+  const publicStatus = record.status.status;
+  const terminalStatus = record.terminal.status;
+  const terminalMatchesPublicStatus = terminalStatus === 'aborted'
+    ? publicStatus === 'aborted'
+    : terminalStatus === 'completed'
+      ? publicStatus === 'completed'
+      : publicStatus !== 'aborted' && publicStatus !== 'completed';
+  if (!terminalMatchesPublicStatus) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['terminal'],
+      message: 'V2 terminal state must match the public handoff status',
+    });
+  }
+  if (record.recordKind === 'prepared_target') {
+    const cleanupIsLegal = record.terminal.status === 'aborted'
+      ? record.resume.status === 'not_attempted'
+        ? record.targetCleanup.status === 'not_owned' && record.targetCleanup.reason === 'resume_not_attempted'
+        : record.resume.status === 'preexisting_unowned'
+          ? record.targetCleanup.status === 'not_owned' && record.targetCleanup.reason === 'preexisting_or_adopted'
+          : record.targetCleanup.status === 'proved_absent'
+      : record.terminal.status === 'aborting'
+        ? (record.resume.status === 'attempted' || record.resume.status === 'confirmed')
+          && (record.targetCleanup.status === 'pending' || record.targetCleanup.status === 'failed')
+        : record.targetCleanup.status === 'not_required';
+    if (!cleanupIsLegal) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['targetCleanup'],
+        message: 'Prepared target cleanup state must match its resume ownership state',
+      });
+    }
+  }
+  const terminalRevision = record.terminal.status === 'aborting'
+    ? record.terminal.claimedRevision
+    : record.terminal.status === 'aborted' || record.terminal.status === 'completed'
+      ? record.terminal.completedRevision
+      : null;
+  if (terminalRevision !== null && terminalRevision !== record.transitionRevision) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['terminal'],
+      message: 'Terminal transition revision must match the record transitionRevision',
+    });
+  }
+});
+
+const SessionHandoffPrepareTargetJobRecordSchema = z.union([
+  SessionHandoffPrepareTargetJobRecordV1Schema,
+  SessionHandoffPrepareTargetJobRecordV2Schema,
+]);
+
+function refineSessionHandoffPrepareTargetJobRecordCoherence(
+  record: Readonly<{
+    jobId: string;
+    handoffId: string;
+    status: z.infer<typeof SessionHandoffStatusSchema>;
+    prepareTargetResult?: z.infer<typeof SessionHandoffPrepareTargetResultGetResponseSchema>;
+  }>,
+  ctx: z.RefinementCtx,
+): void {
     if (record.status.handoffId !== record.handoffId) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -73,21 +240,174 @@ const SessionHandoffPrepareTargetJobRecordSchema = z
         message: 'Prepare-target job result status must use the same handoffId as the record',
       });
     }
-  });
+}
 
 export type SessionHandoffPrepareTargetJobRecord = z.output<typeof SessionHandoffPrepareTargetJobRecordSchema>;
-export type SessionHandoffPrepareTargetJobRecordInput = Omit<SessionHandoffPrepareTargetJobRecord, 'schemaVersion'>;
+export type SessionHandoffPrepareTargetJobRecordInput = Omit<z.output<typeof SessionHandoffPrepareTargetJobRecordV1Schema>, 'schemaVersion'>;
+export type SessionHandoffPrepareTargetJobRecordV2 = z.output<typeof SessionHandoffPrepareTargetJobRecordV2Schema>;
+export type SessionHandoffPreparedTargetJobRecordV2 = z.output<typeof SessionHandoffPreparedTargetJobRecordV2Schema>;
+export type SessionHandoffPreparedTargetJobRecordV2Input = Omit<z.input<typeof SessionHandoffPreparedTargetJobRecordV2Schema>, 'schemaVersion' | 'recordKind'>;
+type SessionHandoffLegacyTargetJobRecordV2Input = Omit<z.input<typeof SessionHandoffLegacyTargetJobRecordV2Schema>, 'schemaVersion' | 'recordKind'>;
+type SessionHandoffSourceOnlyJobRecordV2Input = Omit<z.input<typeof SessionHandoffSourceOnlyJobRecordV2Schema>, 'schemaVersion' | 'recordKind'>;
+type SessionHandoffPrepareTargetJobRecordAnyInput =
+  | SessionHandoffPrepareTargetJobRecordInput
+  | Omit<SessionHandoffPrepareTargetJobRecordV2, 'schemaVersion'>;
 
 export type SessionHandoffPrepareTargetJobStore = Readonly<{
   write: (record: SessionHandoffPrepareTargetJobRecordInput) => Promise<void>;
+  writePreparedV2: (record: SessionHandoffPreparedTargetJobRecordV2Input) => Promise<void>;
+  writeLegacyCleanupUnavailableV2: (record: SessionHandoffLegacyTargetJobRecordV2Input) => Promise<void>;
+  writeSourceOnlyV2: (record: SessionHandoffSourceOnlyJobRecordV2Input) => Promise<void>;
+  upgradeReadyV1ToPreparedV2: (input: Readonly<{ jobId: string; sessionId: string }>) => Promise<SessionHandoffPreparedTargetJobRecordV2>;
+  transitionV2: (
+    jobId: string,
+    updater: (current: SessionHandoffPrepareTargetJobRecordV2) => Omit<SessionHandoffPrepareTargetJobRecordV2, 'schemaVersion'> | null,
+  ) => Promise<SessionHandoffPrepareTargetJobRecordV2 | null>;
+  recoverMissingRunner: (
+    jobId: string,
+    nowMs: number,
+    proof: SessionHandoffPrepareTargetJobLeaseProof,
+  ) => Promise<SessionHandoffPrepareTargetJobRecord | null>;
   read: (jobId: string) => Promise<SessionHandoffPrepareTargetJobRecord | null>;
   findByHandoffId: (handoffId: string) => Promise<SessionHandoffPrepareTargetJobRecord | null>;
   list: (input?: Readonly<{ handoffId?: string }>) => Promise<readonly SessionHandoffPrepareTargetJobRecord[]>;
   update: (
     jobId: string,
-    updater: (current: SessionHandoffPrepareTargetJobRecord) => SessionHandoffPrepareTargetJobRecordInput,
+    updater: (current: SessionHandoffPrepareTargetJobRecord) => SessionHandoffPrepareTargetJobRecordAnyInput,
   ) => Promise<SessionHandoffPrepareTargetJobRecord | null>;
 }>;
+
+const PREPARE_TARGET_JOB_LOCK_STALE_AFTER_MS = 30_000;
+
+async function withPrepareTargetJobMutationLock<T>(jobPath: string, mutation: () => Promise<T>): Promise<T> {
+  return await withJsonOwnerFileLock({
+    lockPath: `${jobPath}.lock`,
+    timeoutMs: SESSION_HANDOFF_PREPARE_TARGET_JOB_RECORD_LOCK_TIMEOUT_MS,
+    staleAfterMs: PREPARE_TARGET_JOB_LOCK_STALE_AFTER_MS,
+    errorCode: 'session_handoff_prepare_target_job_lock_timeout',
+  }, mutation);
+}
+
+function deepFreeze<T>(value: T): void {
+  if (typeof value !== 'object' || value === null || Object.isFrozen(value)) {
+    return;
+  }
+  for (const nestedValue of Object.values(value)) {
+    deepFreeze(nestedValue);
+  }
+  Object.freeze(value);
+}
+
+function createFrozenUpdaterSnapshot<T>(baseline: T): T {
+  const snapshot = structuredClone(baseline);
+  deepFreeze(snapshot);
+  return snapshot;
+}
+
+function assertInitialPreparedTargetJob(record: SessionHandoffPrepareTargetJobRecordV2): asserts record is SessionHandoffPreparedTargetJobRecordV2 {
+  if (record.recordKind !== 'prepared_target') {
+    throw new Error('Session handoff prepared-target job creation must use prepared_target record kind');
+  }
+  if (record.transitionRevision !== 0) {
+    throw new Error('Session handoff prepared-target job initial revision must be zero');
+  }
+  if (record.resume.status !== 'not_attempted') {
+    throw new Error('Session handoff prepared-target job initial resume state must be not_attempted');
+  }
+  if (record.terminal.status !== 'open') {
+    throw new Error('Session handoff prepared-target job initial terminal state must be open');
+  }
+  if (record.targetCleanup.status !== 'not_required') {
+    throw new Error('Session handoff prepared-target job initial cleanup state must be not_required');
+  }
+}
+
+function assertPreparedTargetResumeTransition(
+  current: SessionHandoffPreparedTargetJobRecordV2['resume'],
+  next: SessionHandoffPreparedTargetJobRecordV2['resume'],
+): void {
+  if (current.status === 'not_attempted') {
+    if (next.status === 'not_attempted' || next.status === 'preexisting_unowned' || next.status === 'attempted') return;
+    throw new Error('Session handoff prepared-target resume state cannot skip directly to confirmed');
+  }
+  if (current.status === 'preexisting_unowned') {
+    if (next.status === 'preexisting_unowned') return;
+    throw new Error('Session handoff prepared-target unowned resume classification is immutable');
+  }
+  if (current.status === 'attempted') {
+    if (next.status !== 'attempted' && next.status !== 'confirmed') {
+      throw new Error('Session handoff prepared-target resume ownership cannot move backward');
+    }
+    if (next.attemptId !== current.attemptId || next.acceptedAtMs !== current.acceptedAtMs) {
+      throw new Error('Session handoff prepared-target resume attempt identity is immutable');
+    }
+    if (next.status === 'confirmed' && next.confirmedAtMs < next.acceptedAtMs) {
+      throw new Error('Session handoff prepared-target resume confirmation cannot precede acceptance');
+    }
+    return;
+  }
+  if (
+    next.status !== 'confirmed'
+    || next.attemptId !== current.attemptId
+    || next.acceptedAtMs !== current.acceptedAtMs
+    || next.confirmedAtMs !== current.confirmedAtMs
+  ) {
+    throw new Error('Session handoff prepared-target confirmed resume ownership is immutable');
+  }
+}
+
+function assertLegacyV1Identity(
+  current: z.output<typeof SessionHandoffPrepareTargetJobRecordV1Schema>,
+  next: Readonly<{ jobId: string; handoffId: string; createdAtMs: number }>,
+): void {
+  if (
+    next.jobId !== current.jobId
+    || next.handoffId !== current.handoffId
+    || next.createdAtMs !== current.createdAtMs
+  ) {
+    throw new Error('Session handoff legacy v1 job identity is immutable');
+  }
+}
+
+function assertV2Transition(current: SessionHandoffPrepareTargetJobRecordV2, next: SessionHandoffPrepareTargetJobRecordV2): void {
+  const currentSessionId = 'sessionId' in current ? current.sessionId : undefined;
+  const nextSessionId = 'sessionId' in next ? next.sessionId : undefined;
+  if (
+    next.jobId !== current.jobId
+    || next.handoffId !== current.handoffId
+    || next.recordKind !== current.recordKind
+    || next.createdAtMs !== current.createdAtMs
+    || nextSessionId !== currentSessionId
+  ) {
+    throw new Error('Session handoff v2 job identity is immutable');
+  }
+  if (next.transitionRevision !== current.transitionRevision + 1) {
+    throw new Error('Session handoff v2 transition revision must advance exactly once');
+  }
+  if (next.updatedAtMs < current.updatedAtMs) {
+    throw new Error('Session handoff v2 updatedAtMs cannot move backward');
+  }
+  if (current.recordKind === 'prepared_target' && next.recordKind === 'prepared_target') {
+    assertPreparedTargetResumeTransition(current.resume, next.resume);
+  }
+  if (current.terminal.status === 'aborted' || current.terminal.status === 'completed') {
+    throw new Error('Session handoff v2 terminal state is immutable');
+  }
+  if (current.terminal.status === 'aborting') {
+    if (
+      (next.terminal.status !== 'aborting' && next.terminal.status !== 'aborted')
+      || next.terminal.operationId !== current.terminal.operationId
+    ) {
+      throw new Error('Session handoff v2 abort retry/completion must preserve its operation identity');
+    }
+    if (
+      next.terminal.status === 'aborting'
+      && next.terminal.claimedRevision !== current.terminal.claimedRevision
+    ) {
+      throw new Error('Session handoff v2 abort retry must preserve its claimed revision');
+    }
+  }
+}
 
 function isTerminalPrepareTargetStatusCode(status: SessionHandoffPrepareTargetJobRecord['status']['status']): boolean {
   return status === 'ready_for_cutover'
@@ -95,6 +415,23 @@ function isTerminalPrepareTargetStatusCode(status: SessionHandoffPrepareTargetJo
     || status === 'aborted'
     || status === 'failed'
     || status === 'awaiting_recovery';
+}
+
+function buildMissingRunnerRecoveryProgress(
+  current: SessionHandoffPrepareTargetJobRecord,
+  nowMs: number,
+): SessionHandoffPrepareTargetJobRecord['status']['progress'] {
+  const previousProgress = current.status.progress;
+  return previousProgress
+    ? {
+        ...previousProgress,
+        updatedAtMs: nowMs,
+        current: {
+          ...(previousProgress.current ?? {}),
+          phaseDetail: 'daemon_restart_missing_runner',
+        },
+      }
+    : previousProgress;
 }
 
 export async function recoverSessionHandoffPrepareTargetJobsAfterRestart(input: Readonly<{
@@ -117,63 +454,44 @@ export async function recoverSessionHandoffPrepareTargetJobsAfterRestart(input: 
     // Fail closed: if another daemon instance still owns a live durable lease, do not flip the job
     // into awaiting_recovery, since doing so would clobber a legitimately advancing job.
     const probeOwnerId = `cli-daemon:${process.pid}:prepare-target-recovery:${randomUUID()}`;
+    const probeLeaseTtlMs = SESSION_HANDOFF_PREPARE_TARGET_JOB_RECOVERY_PROOF_TTL_MS;
     const leaseAttempt = await tryAcquireSessionHandoffPrepareTargetJobLease({
       activeServerDir: input.activeServerDir,
       jobId: job.jobId,
       ownerId: probeOwnerId,
-      nowMs: input.nowMs,
-      ttlMs: 250,
+      nowMs: Date.now(),
+      ttlMs: probeLeaseTtlMs,
     });
     if (!leaseAttempt.acquired) {
       return;
     }
-    await releaseSessionHandoffPrepareTargetJobLease({
+    const probeLeaseId = leaseAttempt.lease?.leaseId;
+    if (!probeLeaseId) {
+      return;
+    }
+    const probeLeaseHeartbeat = startSessionHandoffPrepareTargetJobLeaseHeartbeat({
       activeServerDir: input.activeServerDir,
       jobId: job.jobId,
       ownerId: probeOwnerId,
-    }).catch(() => undefined);
-
-    await store.update(job.jobId, (current) => {
-      const { schemaVersion: _schemaVersion, ...rest } = current;
-      const previousProgress = rest.status.progress;
-      const nextProgress = previousProgress
-        ? {
-          ...previousProgress,
-          updatedAtMs: input.nowMs,
-          current: {
-            ...(previousProgress.current ?? {}),
-            phaseDetail: 'daemon_restart_missing_runner',
-          },
-        }
-        : previousProgress;
-
-      const recoveryMessage = 'Daemon restarted while the handoff prepare-target job was in progress';
-
-      if (rest.cancelRequestedAtMs) {
-        return {
-          ...rest,
-          updatedAtMs: input.nowMs,
-          abortedAtMs: rest.abortedAtMs ?? input.nowMs,
-          status: {
-            ...rest.status,
-            status: 'aborted',
-            ...(nextProgress ? { progress: nextProgress } : {}),
-          },
-          lastErrorMessage: rest.lastErrorMessage ?? recoveryMessage,
-        };
-      }
-
-      return {
-        ...rest,
-        updatedAtMs: input.nowMs,
-        status: {
-          ...rest.status,
-          status: 'awaiting_recovery',
-          ...(nextProgress ? { progress: nextProgress } : {}),
-        },
-        lastErrorMessage: rest.lastErrorMessage ?? recoveryMessage,
-      };
+      leaseId: probeLeaseId,
+      ttlMs: probeLeaseTtlMs,
+      nowMs: () => Date.now(),
     });
+    try {
+      await store.recoverMissingRunner(job.jobId, input.nowMs, probeLeaseHeartbeat.proof);
+      const proofState = probeLeaseHeartbeat.getState();
+      if (proofState.status === 'error') {
+        throw proofState.error;
+      }
+    } finally {
+      await probeLeaseHeartbeat.stop();
+      await releaseSessionHandoffPrepareTargetJobLease({
+        activeServerDir: input.activeServerDir,
+        jobId: job.jobId,
+        ownerId: probeOwnerId,
+        leaseId: probeLeaseId,
+      }).catch(() => undefined);
+    }
   }));
 }
 
@@ -197,20 +515,181 @@ export function createSessionHandoffPrepareTargetJobStore(input: Readonly<{
   const jobsDirectory = join(input.activeServerDir, 'session-handoff', 'prepare-target-jobs');
 
   function resolveJobPath(jobId: string): string {
-    if (!/^[A-Za-z0-9._-]+$/u.test(jobId)) {
-      throw new Error(`Invalid session handoff prepare-target job id: ${jobId}`);
-    }
+    assertSessionHandoffPrepareTargetJobId(jobId);
     return join(jobsDirectory, `${jobId}.json`);
   }
 
   return {
     async write(record) {
-      await mkdir(jobsDirectory, { recursive: true });
-      const parsed = SessionHandoffPrepareTargetJobRecordSchema.parse({
-        ...record,
-        schemaVersion: SESSION_HANDOFF_PREPARE_TARGET_JOB_SCHEMA_VERSION,
+      const jobPath = resolveJobPath(record.jobId);
+      await withPrepareTargetJobMutationLock(jobPath, async () => {
+        const current = await readPrepareTargetJobFile(jobPath);
+        if (current?.schemaVersion === SESSION_HANDOFF_PREPARE_TARGET_JOB_SCHEMA_VERSION_V2) {
+          throw new Error('Legacy v1 writer cannot mutate a v2 handoff job');
+        }
+        await mkdir(jobsDirectory, { recursive: true });
+        const parsed = SessionHandoffPrepareTargetJobRecordV1Schema.parse({
+          ...record,
+          schemaVersion: SESSION_HANDOFF_PREPARE_TARGET_JOB_SCHEMA_VERSION_V1,
+        });
+        if (current) assertLegacyV1Identity(current, parsed);
+        await writeJsonAtomic(jobPath, parsed);
       });
-      await writeJsonAtomic(resolveJobPath(parsed.jobId), parsed);
+    },
+    async writePreparedV2(record) {
+      const parsed = SessionHandoffPrepareTargetJobRecordV2Schema.parse({
+        ...record,
+        schemaVersion: SESSION_HANDOFF_PREPARE_TARGET_JOB_SCHEMA_VERSION_V2,
+        recordKind: 'prepared_target',
+      });
+      assertInitialPreparedTargetJob(parsed);
+      const jobPath = resolveJobPath(parsed.jobId);
+      await withPrepareTargetJobMutationLock(jobPath, async () => {
+        if (await readPrepareTargetJobFile(jobPath)) {
+          throw new Error(`Session handoff prepare-target job already exists: ${parsed.jobId}`);
+        }
+        await mkdir(jobsDirectory, { recursive: true });
+        await writeJsonAtomic(jobPath, parsed);
+      });
+    },
+    async writeLegacyCleanupUnavailableV2(record) {
+      const parsed = SessionHandoffPrepareTargetJobRecordV2Schema.parse({
+        ...record,
+        schemaVersion: SESSION_HANDOFF_PREPARE_TARGET_JOB_SCHEMA_VERSION_V2,
+        recordKind: 'legacy_target',
+      });
+      const jobPath = resolveJobPath(parsed.jobId);
+      await withPrepareTargetJobMutationLock(jobPath, async () => {
+        const current = await readPrepareTargetJobFile(jobPath);
+        if (current?.schemaVersion === SESSION_HANDOFF_PREPARE_TARGET_JOB_SCHEMA_VERSION_V2) {
+          throw new Error('Legacy conversion cannot replace an existing v2 handoff job');
+        }
+        if (current) assertLegacyV1Identity(current, parsed);
+        await mkdir(jobsDirectory, { recursive: true });
+        await writeJsonAtomic(jobPath, parsed);
+      });
+    },
+    async writeSourceOnlyV2(record) {
+      const parsed = SessionHandoffPrepareTargetJobRecordV2Schema.parse({
+        ...record,
+        schemaVersion: SESSION_HANDOFF_PREPARE_TARGET_JOB_SCHEMA_VERSION_V2,
+        recordKind: 'source_only',
+      });
+      const jobPath = resolveJobPath(parsed.jobId);
+      await withPrepareTargetJobMutationLock(jobPath, async () => {
+        if (await readPrepareTargetJobFile(jobPath)) {
+          throw new Error(`Session handoff prepare-target job already exists: ${parsed.jobId}`);
+        }
+        await mkdir(jobsDirectory, { recursive: true });
+        await writeJsonAtomic(jobPath, parsed);
+      });
+    },
+    async upgradeReadyV1ToPreparedV2(input) {
+      const jobPath = resolveJobPath(input.jobId);
+      return await withPrepareTargetJobMutationLock(jobPath, async () => {
+        const current = await readPrepareTargetJobFile(jobPath);
+        if (!current) throw new Error(`Session handoff prepare-target job not found: ${input.jobId}`);
+        if (current.schemaVersion === SESSION_HANDOFF_PREPARE_TARGET_JOB_SCHEMA_VERSION_V2) {
+          if (current.recordKind !== 'prepared_target' || current.sessionId !== input.sessionId) {
+            throw new Error('Existing v2 handoff job does not match the requested exact session');
+          }
+          return current;
+        }
+        if (current.status.status !== 'ready_for_cutover' || !current.prepareTargetResult) {
+          throw new Error('Only a ready v1 target job with its durable prepare result can upgrade to v2');
+        }
+        const parsed = SessionHandoffPreparedTargetJobRecordV2Schema.parse({
+          ...current,
+          schemaVersion: SESSION_HANDOFF_PREPARE_TARGET_JOB_SCHEMA_VERSION_V2,
+          recordKind: 'prepared_target',
+          sessionId: input.sessionId,
+          transitionRevision: 0,
+          resume: { status: 'not_attempted' },
+          terminal: { status: 'open' },
+          targetCleanup: { status: 'not_required' },
+        });
+        await writeJsonAtomic(jobPath, parsed);
+        return parsed;
+      });
+    },
+    async transitionV2(jobId, updater) {
+      const jobPath = resolveJobPath(jobId);
+      return await withPrepareTargetJobMutationLock(jobPath, async () => {
+        const current = await readPrepareTargetJobFile(jobPath);
+        if (!current) return null;
+        if (current.schemaVersion !== SESSION_HANDOFF_PREPARE_TARGET_JOB_SCHEMA_VERSION_V2) {
+          throw new Error('V2 transition cannot mutate a legacy v1 handoff job');
+        }
+        const baseline = structuredClone(current);
+        const nextInput = updater(createFrozenUpdaterSnapshot(baseline));
+        if (nextInput === null) return baseline;
+        const next = SessionHandoffPrepareTargetJobRecordV2Schema.parse({
+          ...nextInput,
+          schemaVersion: SESSION_HANDOFF_PREPARE_TARGET_JOB_SCHEMA_VERSION_V2,
+        });
+        assertV2Transition(baseline, next);
+        await writeJsonAtomic(jobPath, next);
+        return next;
+      });
+    },
+    async recoverMissingRunner(jobId, nowMs, proof) {
+      const jobPath = resolveJobPath(jobId);
+      const persisted = await proof.runIfValid(async () => await withPrepareTargetJobMutationLock(
+        jobPath,
+        async () => {
+          const current = await readPrepareTargetJobFile(jobPath);
+          if (
+            !current
+            || (current.schemaVersion === SESSION_HANDOFF_PREPARE_TARGET_JOB_SCHEMA_VERSION_V2
+              && (current.terminal.status === 'aborted' || current.terminal.status === 'completed'))
+            || isTerminalPrepareTargetStatusCode(current.status.status)
+          ) {
+            return current;
+          }
+
+          const baseline = structuredClone(current);
+          const nextProgress = buildMissingRunnerRecoveryProgress(baseline, nowMs);
+          const recoveryMessage = 'Daemon restarted while the handoff prepare-target job was in progress';
+
+          if (baseline.schemaVersion === SESSION_HANDOFF_PREPARE_TARGET_JOB_SCHEMA_VERSION_V2) {
+            const next = SessionHandoffPrepareTargetJobRecordV2Schema.parse({
+              ...baseline,
+              transitionRevision: baseline.transitionRevision + 1,
+              updatedAtMs: nowMs,
+              status: {
+                ...baseline.status,
+                status: 'awaiting_recovery',
+                ...(nextProgress ? { progress: nextProgress } : {}),
+              },
+              lastErrorMessage: baseline.lastErrorMessage ?? recoveryMessage,
+            });
+            assertV2Transition(baseline, next);
+            await writeJsonAtomic(jobPath, next);
+            return next;
+          }
+
+          const { schemaVersion: _schemaVersion, ...legacyRecord } = baseline;
+          const next = SessionHandoffPrepareTargetJobRecordV1Schema.parse({
+            ...legacyRecord,
+            updatedAtMs: nowMs,
+            ...(legacyRecord.cancelRequestedAtMs
+              ? { abortedAtMs: legacyRecord.abortedAtMs ?? nowMs }
+              : {}),
+            status: {
+              ...legacyRecord.status,
+              status: legacyRecord.cancelRequestedAtMs ? 'aborted' : 'awaiting_recovery',
+              ...(nextProgress ? { progress: nextProgress } : {}),
+            },
+            lastErrorMessage: legacyRecord.lastErrorMessage ?? recoveryMessage,
+            schemaVersion: SESSION_HANDOFF_PREPARE_TARGET_JOB_SCHEMA_VERSION_V1,
+          });
+          assertLegacyV1Identity(baseline, next);
+          await writeJsonAtomic(jobPath, next);
+          return next;
+        },
+      ));
+      if (persisted.valid) return persisted.value;
+      return await withPrepareTargetJobMutationLock(jobPath, async () => await readPrepareTargetJobFile(jobPath));
     },
     async read(jobId) {
       return await readPrepareTargetJobFile(resolveJobPath(jobId));
@@ -244,14 +723,23 @@ export function createSessionHandoffPrepareTargetJobStore(input: Readonly<{
       return records;
     },
     async update(jobId, updater) {
-      const current = await readPrepareTargetJobFile(resolveJobPath(jobId));
-      if (!current) return null;
-      const next = SessionHandoffPrepareTargetJobRecordSchema.parse({
-        ...updater(current),
-        schemaVersion: SESSION_HANDOFF_PREPARE_TARGET_JOB_SCHEMA_VERSION,
+      const jobPath = resolveJobPath(jobId);
+      return await withPrepareTargetJobMutationLock(jobPath, async () => {
+        const current = await readPrepareTargetJobFile(jobPath);
+        if (!current) return null;
+        if (current.schemaVersion === SESSION_HANDOFF_PREPARE_TARGET_JOB_SCHEMA_VERSION_V2) {
+          throw new Error('Legacy update cannot mutate a v2 handoff job; use transitionV2');
+        }
+        const baseline = structuredClone(current);
+        const nextInput = updater(createFrozenUpdaterSnapshot(baseline));
+        const next = SessionHandoffPrepareTargetJobRecordV1Schema.parse({
+          ...nextInput,
+          schemaVersion: SESSION_HANDOFF_PREPARE_TARGET_JOB_SCHEMA_VERSION_V1,
+        });
+        assertLegacyV1Identity(baseline, next);
+        await writeJsonAtomic(jobPath, next);
+        return next;
       });
-      await writeJsonAtomic(resolveJobPath(jobId), next);
-      return next;
     },
   };
 }
